@@ -1550,9 +1550,12 @@ chimera_smb_disposition_overwrites(uint32_t disposition)
 } /* chimera_smb_disposition_overwrites */
 
 /* Decide whether this open is a persistent-handle grant whose record must be
- * persisted atomically with the open, and if so build the handle-state
- * descriptor (request->create.persist_*).  Returns true if persisting; the
- * caller then opens via chimera_vfs_open_at_hs. */
+ * persisted with the open, and if so build the handle-state descriptor
+ * (request->create.persist_*).  Returns true if persisting; the caller then
+ * opens via chimera_vfs_open_at_hs.  The record is persisted atomically by
+ * backends advertising CAP_ATOMIC_HANDLE_STATE, or by the VFS core into the
+ * default KV for backends without native KV (see
+ * chimera_vfs_can_persist_handle_state). */
 static bool
 chimera_smb_create_persist_prepare(
     struct chimera_smb_request     *request,
@@ -1575,8 +1578,8 @@ chimera_smb_create_persist_prepare(
         return false;
     }
 
-    if (!parent_handle || !parent_handle->vfs_module ||
-        !(parent_handle->vfs_module->capabilities & CHIMERA_VFS_CAP_ATOMIC_HANDLE_STATE)) {
+    if (!chimera_vfs_can_persist_handle_state(request->compound->thread->vfs_thread,
+                                              parent_handle)) {
         return false;
     }
 

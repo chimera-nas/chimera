@@ -47,10 +47,13 @@ chimera_vfs_delete_key(
     chimera_vfs_dispatch(request);
 } /* chimera_vfs_delete_key */
 
-/* Delete a key from the backend that serves `fh` (rather than the global
- * kv_module), so handle-state records persisted alongside a file are removed
- * from the same backend.  The key is copied into the request scratch so the
- * caller need not keep it alive across the async dispatch. */
+/* Delete a key associated with the backend that serves `fh`, so handle-state
+ * records persisted alongside a file are removed from the same place they were
+ * written.  If that backend has native KV the op is dispatched to it; otherwise
+ * it routes to the default KV module with the key namespaced by the source
+ * backend's fh_magic (see chimera_vfs_kv_route_fh).  The key is copied into the
+ * request scratch so the caller need not keep it alive across the async
+ * dispatch. */
 SYMBOL_EXPORT void
 chimera_vfs_delete_key_at(
     struct chimera_vfs_thread        *thread,
@@ -63,21 +66,41 @@ chimera_vfs_delete_key_at(
     void                             *private_data)
 {
     struct chimera_vfs_request *request;
+    struct chimera_vfs_kv_route route;
+    uint8_t                    *scratch;
 
-    request = chimera_vfs_request_alloc_by_hash(thread, cred, fh, fhlen,
-                                                chimera_vfs_hash(fh, fhlen));
+    chimera_vfs_kv_route_fh(thread, fh, fhlen, &route);
+
+    if (route.fallback) {
+        request = chimera_vfs_request_alloc_common(thread, NULL, route.module,
+                                                   NULL, 0,
+                                                   chimera_vfs_hash(key, key_len),
+                                                   CHIMERA_VFS_CAP_KV);
+    } else {
+        request = chimera_vfs_request_alloc_by_hash(thread, cred, fh, fhlen,
+                                                    chimera_vfs_hash(fh, fhlen));
+    }
 
     if (CHIMERA_VFS_IS_ERR(request)) {
         callback(CHIMERA_VFS_PTR_ERR(request), private_data);
         return;
     }
 
-    memcpy(request->plugin_data, key, key_len);
+    scratch = request->plugin_data;
+
+    if (route.fallback) {
+        scratch[0] = route.ns;
+        memcpy(scratch + 1, key, key_len);
+        request->delete_key.key     = scratch;
+        request->delete_key.key_len = key_len + 1;
+    } else {
+        memcpy(scratch, key, key_len);
+        request->delete_key.key     = scratch;
+        request->delete_key.key_len = key_len;
+    }
 
     request->opcode             = CHIMERA_VFS_OP_DELETE_KEY;
     request->complete           = chimera_vfs_delete_key_complete;
-    request->delete_key.key     = request->plugin_data;
-    request->delete_key.key_len = key_len;
     request->proto_callback     = callback;
     request->proto_private_data = private_data;
 

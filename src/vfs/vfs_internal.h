@@ -139,6 +139,46 @@ chimera_vfs_get_module(
 } /* chimera_vfs_get_module */
 
 /*
+ * Routing decision for an fh-routed KV operation (handle-state put on open,
+ * delete_key_at, search_keys_at).
+ *
+ *   - If the backend serving `fh` implements KV natively (CHIMERA_VFS_CAP_KV,
+ *     e.g. cairn/diskfs), the op is dispatched to that backend and the record
+ *     is stored co-located with the file (no key transformation).
+ *
+ *   - Otherwise the op is dispatched to the configured default KV module, and
+ *     keys are namespaced with a single leading byte equal to the source
+ *     backend's fh_magic.  Because every handle on a backend shares one
+ *     fh_magic, the open/delete/search paths agree on the namespace, and keys
+ *     from different backends can never collide in the shared default KV.
+ */
+struct chimera_vfs_kv_route {
+    struct chimera_vfs_module *module;   /* where the op is dispatched          */
+    int                        fallback; /* 1 = default KV w/ ns prefix; 0 = native */
+    uint8_t                    ns;       /* namespace byte (source fh_magic)    */
+};
+
+static inline void
+chimera_vfs_kv_route_fh(
+    struct chimera_vfs_thread   *thread,
+    const void                  *fh,
+    int                          fhlen,
+    struct chimera_vfs_kv_route *route)
+{
+    struct chimera_vfs_module *module = chimera_vfs_get_module(thread, fh, fhlen);
+
+    if (module && (module->capabilities & CHIMERA_VFS_CAP_KV)) {
+        route->module   = module;
+        route->fallback = 0;
+        route->ns       = 0;
+    } else {
+        route->module   = thread->vfs->kv_module;
+        route->fallback = 1;
+        route->ns       = module ? module->fh_magic : (uint8_t) CHIMERA_VFS_FH_MAGIC_ROOT;
+    }
+} /* chimera_vfs_kv_route_fh */
+
+/*
  * Common request allocation helper with capability enforcement.
  * Returns ERR_PTR on failure:
  *   - CHIMERA_VFS_ESTALE if module is NULL

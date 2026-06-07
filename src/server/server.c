@@ -271,6 +271,9 @@ chimera_server_config_init(void)
     config->num_modules = 5;
 #endif /* ifdef HAVE_IO_URING */
 
+    /* The default KV module (memkv) is auto-registered by chimera_vfs_init; it
+     * need not be listed here. */
+
     return config;
 } /* chimera_server_config_init */
 

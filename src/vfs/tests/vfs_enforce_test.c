@@ -361,7 +361,7 @@ main(
     char **argv)
 {
     struct test_ctx               ctx = { 0 };
-    struct chimera_vfs_module_cfg module_cfgs[1];
+    struct chimera_vfs_module_cfg module_cfgs[2];
     struct prometheus_metrics    *metrics;
     struct chimera_vfs_cred       owner, other;
     struct chimera_vfs_attrs      sattr;
@@ -380,11 +380,12 @@ main(
 
     memset(module_cfgs, 0, sizeof(module_cfgs));
     strncpy(module_cfgs[0].module_name, "memfs", sizeof(module_cfgs[0].module_name) - 1);
+    strncpy(module_cfgs[1].module_name, "memkv", sizeof(module_cfgs[1].module_name) - 1);
 
     ctx.evpl = evpl_create(NULL);
     assert(ctx.evpl != NULL);
 
-    ctx.vfs = chimera_vfs_init(0, 0, module_cfgs, 1, "memfs", 60, metrics);
+    ctx.vfs = chimera_vfs_init(0, 0, module_cfgs, 2, "memkv", 60, metrics);
     assert(ctx.vfs != NULL);
 
     ctx.vfs_thread = chimera_vfs_thread_init(ctx.evpl, ctx.vfs);
