@@ -1356,6 +1356,16 @@ set(SMBTORTURE_ENABLED_memfs
     # smb2.kernel-oplocks
     smb2.kernel-oplocks.kernel_oplocks8
     # smb2.lock
+    smb2.lock.auto-unlock
+    smb2.lock.errorcode
+    smb2.lock.lock
+    smb2.lock.multiple-unlock
+    smb2.lock.overlap
+    smb2.lock.range
+    smb2.lock.stacking
+    smb2.lock.valid-request
+    smb2.lock.zerobytelength
+    smb2.lock.zerobyteread
     smb2.lock.contend
     smb2.lock.context
     smb2.lock.ctdb-delrec-deadlock
@@ -1642,6 +1652,16 @@ set(SMBTORTURE_ENABLED_linux
     smb2.ioctl.sparse_set_nobuf
     smb2.ioctl.sparse_set_oversize
     # smb2.lock
+    smb2.lock.auto-unlock
+    smb2.lock.errorcode
+    smb2.lock.lock
+    smb2.lock.multiple-unlock
+    smb2.lock.overlap
+    smb2.lock.range
+    smb2.lock.stacking
+    smb2.lock.valid-request
+    smb2.lock.zerobytelength
+    smb2.lock.zerobyteread
     smb2.lock.contend
     smb2.lock.context
     smb2.lock.ctdb-delrec-deadlock
@@ -1899,6 +1919,16 @@ set(SMBTORTURE_ENABLED_io_uring
     smb2.ioctl.sparse_set_nobuf
     smb2.ioctl.sparse_set_oversize
     # smb2.lock
+    smb2.lock.auto-unlock
+    smb2.lock.errorcode
+    smb2.lock.lock
+    smb2.lock.multiple-unlock
+    smb2.lock.overlap
+    smb2.lock.range
+    smb2.lock.stacking
+    smb2.lock.valid-request
+    smb2.lock.zerobytelength
+    smb2.lock.zerobyteread
     smb2.lock.contend
     smb2.lock.context
     smb2.lock.ctdb-delrec-deadlock
@@ -2168,6 +2198,16 @@ set(SMBTORTURE_ENABLED_cairn
     # smb2.kernel-oplocks
     smb2.kernel-oplocks.kernel_oplocks8
     # smb2.lock
+    smb2.lock.auto-unlock
+    smb2.lock.errorcode
+    smb2.lock.lock
+    smb2.lock.multiple-unlock
+    smb2.lock.overlap
+    smb2.lock.range
+    smb2.lock.stacking
+    smb2.lock.valid-request
+    smb2.lock.zerobytelength
+    smb2.lock.zerobyteread
     smb2.lock.contend
     smb2.lock.context
     smb2.lock.ctdb-delrec-deadlock
@@ -2462,6 +2502,16 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     # smb2.kernel-oplocks
     smb2.kernel-oplocks.kernel_oplocks8
     # smb2.lock
+    smb2.lock.auto-unlock
+    smb2.lock.errorcode
+    smb2.lock.lock
+    smb2.lock.multiple-unlock
+    smb2.lock.overlap
+    smb2.lock.range
+    smb2.lock.stacking
+    smb2.lock.valid-request
+    smb2.lock.zerobytelength
+    smb2.lock.zerobyteread
     smb2.lock.contend
     smb2.lock.context
     smb2.lock.ctdb-delrec-deadlock
@@ -2756,6 +2806,16 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     # smb2.kernel-oplocks
     smb2.kernel-oplocks.kernel_oplocks8
     # smb2.lock
+    smb2.lock.auto-unlock
+    smb2.lock.errorcode
+    smb2.lock.lock
+    smb2.lock.multiple-unlock
+    smb2.lock.overlap
+    smb2.lock.range
+    smb2.lock.stacking
+    smb2.lock.valid-request
+    smb2.lock.zerobytelength
+    smb2.lock.zerobyteread
     smb2.lock.contend
     smb2.lock.context
     smb2.lock.ctdb-delrec-deadlock
