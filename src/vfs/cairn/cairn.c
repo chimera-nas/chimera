@@ -3556,10 +3556,10 @@ cairn_seek(
     inode = ih.inode;
 
     if (offset >= inode->size) {
+        /* No data or hole at or beyond EOF: SEEK must fail with NXIO
+         * (POSIX lseek ENXIO / RFC 7862 NFS4ERR_NXIO). */
         cairn_inode_handle_release(&ih);
-        request->seek.r_eof    = 1;
-        request->seek.r_offset = 0;
-        request->status        = CHIMERA_VFS_OK;
+        request->status = CHIMERA_VFS_ENXIO;
         request->complete(request);
         return;
     }
@@ -3625,12 +3625,11 @@ cairn_seek(
             rocksdb_iter_next(iter);
         }
 
-        /* No data found */
+        /* No data at or beyond the offset: SEEK_DATA fails with NXIO
+         * (the trailing region is an implicit hole to EOF). */
         rocksdb_iter_destroy(iter);
         cairn_inode_handle_release(&ih);
-        request->seek.r_eof    = 1;
-        request->seek.r_offset = 0;
-        request->status        = CHIMERA_VFS_OK;
+        request->status = CHIMERA_VFS_ENXIO;
         request->complete(request);
         return;
     } else {

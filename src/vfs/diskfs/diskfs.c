@@ -14690,9 +14690,8 @@ diskfs_seek_process(struct chimera_vfs_request *request)
     if (request->seek.what == 0) {
         /* SEEK_DATA: first extent whose data covers/follows offset. */
         if (!p->loop_have) {
-            request->seek.r_eof    = 1;
-            request->seek.r_offset = 0;
-            diskfs_op_ok(request, p->txn);
+            /* No data at or beyond the offset: SEEK_DATA fails with NXIO. */
+            diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENXIO);
             return;
         }
 
@@ -14785,9 +14784,9 @@ diskfs_seek_inode_cb(
     }
 
     if (offset >= inode->size) {
-        request->seek.r_eof    = 1;
-        request->seek.r_offset = 0;
-        diskfs_op_ok(request, p->txn);
+        /* No data or hole at or beyond EOF: SEEK must fail with NXIO
+         * (POSIX lseek ENXIO / RFC 7862 NFS4ERR_NXIO). */
+        diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENXIO);
         return;
     }
 
