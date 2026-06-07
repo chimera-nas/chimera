@@ -163,6 +163,7 @@ struct diskfs_request_private {
     uint64_t                    loop_left;
     uint64_t                    loop_pos;
     int                         loop_have;
+    uint64_t                    alloc_cap;   /* ALLOCATE: adaptive per-chunk cap */
 
     struct evpl_iovec           iov[66];
 
@@ -10080,10 +10081,16 @@ diskfs_map_attrs(
     }
 
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STATFS) {
-        attr->va_set_mask      |= CHIMERA_VFS_ATTR_MASK_STATFS;
-        attr->va_fs_space_total = space_map_total_capacity(shared->space_map);
-        attr->va_fs_space_used  = space_map_used_bytes(shared->space_map);
-        attr->va_fs_space_free  = attr->va_fs_space_total - attr->va_fs_space_used;
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_MASK_STATFS;
+        /* Free/used are derived from the space map's live per-AG free counts
+         * (cold path) rather than a running counter the alloc/free fast path
+         * would have to maintain. */
+        attr->va_fs_space_total = space_map_usable_capacity(shared->space_map);
+        attr->va_fs_space_free  = space_map_free_bytes(shared->space_map);
+        if (attr->va_fs_space_free > attr->va_fs_space_total) {
+            attr->va_fs_space_free = attr->va_fs_space_total;
+        }
+        attr->va_fs_space_used  = attr->va_fs_space_total - attr->va_fs_space_free;
         attr->va_fs_space_avail = attr->va_fs_space_free;
         attr->va_fs_files_total = CHIMERA_VFS_SYNTHETIC_FS_INODES;
         attr->va_fs_files_avail = CHIMERA_VFS_SYNTHETIC_FS_INODES;
@@ -14237,8 +14244,8 @@ diskfs_allocate_do_alloc(struct chimera_vfs_request *request)
     int                            rc;
 
     chunk = p->loop_left - off;
-    if (chunk > DISKFS_ALLOCATE_MAX_EXTENT) {
-        chunk = DISKFS_ALLOCATE_MAX_EXTENT;
+    if (chunk > p->alloc_cap) {
+        chunk = p->alloc_cap;
     }
 
     rc = diskfs_thread_alloc_space(thread, p->txn, (int64_t) chunk,
@@ -14248,9 +14255,22 @@ diskfs_allocate_do_alloc(struct chimera_vfs_request *request)
         return;     /* parked; resume re-drives diskfs_allocate_do_alloc */
     }
     if (rc) {
+        /* No single allocation group has `chunk` contiguous free space, but the
+         * filesystem as a whole may: a space map reservation is per-AG and
+         * all-or-nothing (and failure is a cheap in-memory check, no journal).
+         * Halve the cap and retry so a large fallocate spreads across AGs;
+         * only a request that can't place even one block is truly ENOSPC. */
+        if (chunk > SM_BLOCK_SIZE) {
+            p->alloc_cap = chunk >> 1;
+            diskfs_allocate_do_alloc(request);
+            return;
+        }
         diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOSPC);
         return;
     }
+
+    /* Success: re-probe a large chunk for the next allocation. */
+    p->alloc_cap = DISKFS_ALLOCATE_MAX_EXTENT;
 
     /* Advance before recording: diskfs_ext_put may complete inline and run
      * diskfs_allocate_next, which reads loop_off.  Record the reserved chunk
@@ -14399,6 +14419,7 @@ diskfs_allocate_inode_cb(
         p->loop_off = request->allocate.offset & ~4095ULL;
         p->loop_pos = (request->allocate.offset + request->allocate.length +
                        4095ULL) & ~4095ULL;
+        p->alloc_cap = DISKFS_ALLOCATE_MAX_EXTENT;
         diskfs_allocate_reserve_step(request);
         return;
     }

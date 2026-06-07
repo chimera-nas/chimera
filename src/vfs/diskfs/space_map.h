@@ -309,8 +309,14 @@ struct space_map {
     struct sm_device *devices;
     uint32_t          num_devices;
     uint32_t          device_rotor;
-    uint64_t          total_capacity;
-    uint64_t          used_bytes;     /* atomic accounting for statfs */
+    uint64_t          total_capacity;  /* raw sum of device sizes */
+    uint64_t          usable_capacity; /* allocatable total (sum of AG data
+                                        * ranges, metadata excluded); constant
+                                        * after create.  Free/used for statfs are
+                                        * derived on demand from the AGs' live
+                                        * free counts -- see space_map_free_bytes
+                                        * -- so the alloc/free hot path keeps no
+                                        * running counter. */
     pthread_mutex_t   lock;           /* protects rotors and journaled writes */
 
     /* Relocated remote-AG-log region on device 0 (block mode); zero if no
@@ -458,10 +464,18 @@ space_map_total_capacity(const struct space_map *sm)
 } // space_map_total_capacity
 
 static inline uint64_t
-space_map_used_bytes(const struct space_map *sm)
+space_map_usable_capacity(const struct space_map *sm)
 {
-    return __atomic_load_n(&sm->used_bytes, __ATOMIC_RELAXED);
-} // space_map_used_bytes
+    return sm->usable_capacity;
+} // space_map_usable_capacity
+
+/* Live free byte count, summed from the allocation groups (cold path -- statfs
+ * only).  Computed on demand so the alloc/free fast path maintains no counter.
+ * Space held in a thread's reservation cache (carved from an AG but not yet
+ * handed to a file) reads as not-free, so the report is conservative. */
+uint64_t
+space_map_free_bytes(
+    struct space_map *sm);
 
 static inline uint64_t
 sm_inum_make(

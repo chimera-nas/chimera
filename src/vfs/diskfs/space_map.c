@@ -400,8 +400,7 @@ space_map_create(
 
                 data_off = base;
                 if (a == 0 && dev->sig_len) {
-                    data_off        = base + SM_ALIGN_UP(dev->sig_offset + dev->sig_len);
-                    sm->used_bytes += data_off - base;
+                    data_off = base + SM_ALIGN_UP(dev->sig_offset + dev->sig_len);
                 }
                 data_end = base + span;
                 sm_ag_init(ag, d, a, base, span, log_device_id, log_offset,
@@ -422,8 +421,7 @@ space_map_create(
                     sm->remote_log_size;
                 uint64_t post_log = 3 * SM_BLOCK_SIZE;
 
-                log_offset      = base + pre_log;
-                sm->used_bytes += pre_log + post_log;
+                log_offset = base + pre_log;
 
                 data_off = log_offset + SM_AG_LOG_SIZE + post_log;
                 sm_abort_if(pre_log + SM_AG_LOG_SIZE + post_log > span,
@@ -437,10 +435,19 @@ space_map_create(
                             span, SM_AG_LOG_SIZE);
             }
 
-            sm->used_bytes += SM_AG_LOG_SIZE;
-            data_end        = base + span;
+            data_end = base + span;
             sm_ag_init(ag, d, a, base, span, log_device_id, log_offset,
                        data_off, data_end > data_off ? data_end - data_off : 0);
+        }
+    }
+
+    /* Usable (allocatable) capacity is the live free total at format time, when
+     * every AG holds its full data range and nothing is allocated yet.  Metadata
+     * regions (logs, superblock, signatures) are already excluded from each AG's
+     * data range, so they never count toward usable space. */
+    for (d = 0; d < num_devices; d++) {
+        for (a = 0; a < sm->devices[d].num_ags; a++) {
+            sm->usable_capacity += sm->devices[d].ags[a].free_bytes;
         }
     }
 
@@ -555,7 +562,6 @@ sm_pick_and_alloc(
             if (rc == 0) {
                 *r_device_id     = dev_id;
                 *r_device_offset = offset;
-                __atomic_fetch_add(&sm->used_bytes, want, __ATOMIC_RELAXED);
                 return 0;
             }
         }
@@ -781,8 +787,6 @@ space_map_free_apply(
     pthread_mutex_lock(&ag->lock);
     sm_ag_free_locked(ag, offset, aligned);
     pthread_mutex_unlock(&ag->lock);
-
-    __atomic_fetch_sub(&sm->used_bytes, aligned, __ATOMIC_RELAXED);
 } /* space_map_free_apply */
 
 /*
@@ -1180,13 +1184,36 @@ space_map_persist(
     return 0;
 } /* space_map_persist */
 
+uint64_t
+space_map_free_bytes(struct space_map *sm)
+{
+    uint64_t free = 0;
+    uint32_t d, a;
+
+    /* Cold path (statfs): sum each AG's live free count.  Space held in a
+     * thread's reservation cache (carved out of an AG but not yet handed to a
+     * file) reads as not-free here, so the report is conservative -- never an
+     * overestimate of what can still be allocated. */
+    for (d = 0; d < sm->num_devices; d++) {
+        struct sm_device *dev = &sm->devices[d];
+
+        for (a = 0; a < dev->num_ags; a++) {
+            struct sm_ag *ag = &dev->ags[a];
+
+            pthread_mutex_lock(&ag->lock);
+            free += ag->free_bytes;
+            pthread_mutex_unlock(&ag->lock);
+        }
+    }
+    return free;
+} /* space_map_free_bytes */
+
 int
 space_map_load(
     struct space_map   *sm,
     const struct sm_io *io)
 {
     uint32_t d, a;
-    uint64_t free_total = 0;
 
     for (d = 0; d < sm->num_devices; d++) {
         struct sm_device *dev = &sm->devices[d];
@@ -1227,13 +1254,10 @@ space_map_load(
             pthread_mutex_lock(&ag->lock);
             sm_ag_reconstruct(ag, buf);
             ag->log_slot = (uint32_t) best;
-            free_total  += ag->free_bytes;
             pthread_mutex_unlock(&ag->lock);
             free(buf);
         }
     }
 
-    sm->used_bytes = sm->total_capacity > free_total ?
-        sm->total_capacity - free_total : 0;
     return 0;
 } /* space_map_load */
