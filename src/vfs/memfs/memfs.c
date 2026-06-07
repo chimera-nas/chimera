@@ -4044,10 +4044,11 @@ memfs_seek(
     fork_size = stream ? stream->size : inode->size;
 
     if (offset >= fork_size) {
+        /* Neither data nor a hole exists at or beyond EOF, so SEEK must fail
+         * with NXIO (POSIX lseek ENXIO / RFC 7862 NFS4ERR_NXIO) rather than
+         * silently succeed. */
         pthread_mutex_unlock(&inode->lock);
-        request->seek.r_eof    = 1;
-        request->seek.r_offset = 0;
-        request->status        = CHIMERA_VFS_OK;
+        request->status = CHIMERA_VFS_ENXIO;
         request->complete(request);
         return;
     }
@@ -4073,11 +4074,10 @@ memfs_seek(
             bi++;
         }
 
-        /* No data found */
+        /* No data at or beyond the offset: SEEK_DATA fails with NXIO
+         * (the trailing region is an implicit hole to EOF). */
         pthread_mutex_unlock(&inode->lock);
-        request->seek.r_eof    = 1;
-        request->seek.r_offset = 0;
-        request->status        = CHIMERA_VFS_OK;
+        request->status = CHIMERA_VFS_ENXIO;
         request->complete(request);
         return;
     } else {
