@@ -3,11 +3,36 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include <string.h>
+#include <sys/stat.h>
 #include "vfs_procs.h"
 #include "vfs_internal.h"
 #include "vfs_release.h"
+#include "vfs_access.h"
+#include "vfs_acl.h"
 #include "common/misc.h"
 #include "common/macros.h"
+
+/* Canonical attr+ACL mask needed to authorize an open against a resolved file. */
+#define CHIMERA_VFS_OPEN_GATE_MASK (CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_ACL)
+
+/* Map an open's access mode + O_TRUNC to the ACE rights the caller must hold on
+ * the target file. */
+static inline uint32_t
+chimera_vfs_open_required_access(unsigned int flags)
+{
+    uint32_t required = 0;
+
+    if (!(flags & CHIMERA_VFS_OPEN_WRITE_ONLY)) {
+        required |= CHIMERA_ACE_READ_DATA;      /* O_RDONLY or O_RDWR */
+    }
+    if (!(flags & CHIMERA_VFS_OPEN_READ_ONLY)) {
+        required |= CHIMERA_ACE_WRITE_DATA;     /* O_WRONLY or O_RDWR */
+    }
+    if (flags & CHIMERA_VFS_OPEN_TRUNCATE) {
+        required |= CHIMERA_ACE_WRITE_DATA;
+    }
+    return required;
+} /* chimera_vfs_open_required_access */
 
 static void
 chimera_vfs_open_root_complete(
@@ -128,6 +153,38 @@ chimera_vfs_open_lookup_complete(
         chimera_vfs_request_free(thread, request);
         callback(error_code, NULL, NULL, priv);
         return;
+    }
+
+    /* POSIX open(2) semantics on the resolved final object: */
+    if (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
+        chimera_vfs_open_callback_t callback = request->open.callback;
+        void                       *priv     = request->open.private_data;
+        unsigned int                f        = request->open.flags;
+
+        /* O_NOFOLLOW and the final component is a symlink -> ELOOP. */
+        if ((f & CHIMERA_VFS_OPEN_NOFOLLOW) && S_ISLNK(attr->va_mode)) {
+            chimera_vfs_request_free(thread, request);
+            callback(CHIMERA_VFS_ELOOP, NULL, NULL, priv);
+            return;
+        }
+
+        /* Opening a directory for writing (or with O_TRUNC) -> EISDIR. */
+        if (S_ISDIR(attr->va_mode) &&
+            (!(f & CHIMERA_VFS_OPEN_READ_ONLY) ||
+             (f & CHIMERA_VFS_OPEN_TRUNCATE))) {
+            chimera_vfs_request_free(thread, request);
+            callback(CHIMERA_VFS_EISDIR, NULL, NULL, priv);
+            return;
+        }
+
+        /* Authorize the requested read/write access against the file. */
+        if (chimera_vfs_gate_needed(request->module->capabilities, request->cred) &&
+            chimera_vfs_gate(attr, request->cred,
+                             chimera_vfs_open_required_access(f)) != CHIMERA_VFS_OK) {
+            chimera_vfs_request_free(thread, request);
+            callback(CHIMERA_VFS_EACCES, NULL, NULL, priv);
+            return;
+        }
     }
 
     memcpy(request->open.parent_fh, attr->va_fh, attr->va_fh_len);
@@ -253,7 +310,13 @@ chimera_vfs_open(
             chimera_vfs_open_parent_lookup_complete,
             request);
     } else {
-        /* Non-create: resolve full path via lookup, then open the result */
+        /* Non-create: resolve full path via lookup, then open the result.  The
+         * mode is needed to enforce O_NOFOLLOW (ELOOP on a symlink) and EISDIR
+         * (writing a directory); O_NOFOLLOW means the final component is not
+         * followed. */
+        uint32_t lookup_flags = (flags & CHIMERA_VFS_OPEN_NOFOLLOW) ?
+            0 : CHIMERA_VFS_LOOKUP_FOLLOW;
+
         chimera_vfs_lookup(
             thread,
             cred,
@@ -261,8 +324,8 @@ chimera_vfs_open(
             fhlen,
             request->open.path,
             request->open.pathlen,
-            CHIMERA_VFS_ATTR_FH,
-            CHIMERA_VFS_LOOKUP_FOLLOW,
+            CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_OPEN_GATE_MASK,
+            lookup_flags,
             chimera_vfs_open_lookup_complete,
             request);
     }

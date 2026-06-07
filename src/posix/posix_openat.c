@@ -142,5 +142,7 @@ chimera_posix_openat(
         return -1;
     }
 
+    posix->fds[fd].oflags = (unsigned int) flags;
+
     return fd;
 } /* chimera_posix_openat */

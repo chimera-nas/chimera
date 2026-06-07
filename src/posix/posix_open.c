@@ -85,6 +85,8 @@ chimera_posix_open(
         if (fd < 0) {
             chimera_close(worker->client_thread, req.sync_open_handle);
             err = EMFILE;
+        } else {
+            posix->fds[fd].oflags = (unsigned int) flags;
         }
     }
 
@@ -93,6 +95,19 @@ chimera_posix_open(
     if (err) {
         errno = err;
         return -1;
+    }
+
+    /* O_TRUNC: truncate an existing writable file to zero length on open.
+     * The VFS open path does not yet honor CHIMERA_VFS_OPEN_TRUNCATE, so apply
+     * it here for regular files opened for writing.  Truncation failures on
+     * non-regular targets are ignored (O_TRUNC is unspecified for them). */
+    if ((flags & O_TRUNC) && (flags & O_ACCMODE) != O_RDONLY) {
+        struct stat st;
+
+        if (chimera_posix_fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
+            st.st_size != 0) {
+            (void) chimera_posix_ftruncate(fd, 0);
+        }
     }
 
     return fd;

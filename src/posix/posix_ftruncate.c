@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -47,6 +47,13 @@ chimera_posix_ftruncate(
 
     if (!entry) {
         errno = EBADF;
+        return -1;
+    }
+
+    /* POSIX: ftruncate on a descriptor not open for writing fails with EINVAL. */
+    if ((entry->oflags & O_ACCMODE) == O_RDONLY) {
+        chimera_posix_fd_release(entry, 0);
+        errno = EINVAL;
         return -1;
     }
 
