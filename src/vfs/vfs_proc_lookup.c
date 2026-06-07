@@ -308,9 +308,26 @@ chimera_vfs_lookup(
         pathlen--;
     }
 
-    if (pathlen > CHIMERA_VFS_PATH_MAX) {
+    /* POSIX: a pathname longer than {PATH_MAX} (including the terminating null,
+     * so pathlen must be < CHIMERA_VFS_PATH_MAX), or any single component longer
+     * than {NAME_MAX} (CHIMERA_VFS_NAME_MAX includes room for the null), fails
+     * with ENAMETOOLONG before any lookup is attempted. */
+    if (pathlen >= CHIMERA_VFS_PATH_MAX) {
         callback(CHIMERA_VFS_ENAMETOOLONG, NULL, private_data);
         return;
+    }
+
+    {
+        int complen = 0;
+
+        for (int i = 0; i < pathlen; i++) {
+            if (path[i] == '/') {
+                complen = 0;
+            } else if (++complen >= CHIMERA_VFS_NAME_MAX) {
+                callback(CHIMERA_VFS_ENAMETOOLONG, NULL, private_data);
+                return;
+            }
+        }
     }
 
     if (pathlen == 0) {

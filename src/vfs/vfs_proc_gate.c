@@ -156,8 +156,14 @@ chimera_vfs_gate_delete_child_getattr(
         return;
     }
 
+    /* The parent's DELETE_CHILD grant always authorizes removal.  A per-object
+     * DELETE grant on the child is an NFSv4/NT concept; under POSIX (AUTH_UNIX /
+     * AUTH_NONE) deletion is governed solely by the containing directory's
+     * write+search permission, so the child-DELETE fallback applies only to
+     * ACL-flavored (AUTH_ATTR) callers. */
     allow = ctx->dc ||
-        chimera_vfs_access_allowed(attr, ctx->cred, CHIMERA_ACE_DELETE);
+        (ctx->cred->flavor == CHIMERA_VFS_AUTH_ATTR &&
+         chimera_vfs_access_allowed(attr, ctx->cred, CHIMERA_ACE_DELETE));
 
     if (allow && ctx->sticky) {
         child_uid = (attr->va_set_mask & CHIMERA_VFS_ATTR_UID) ?

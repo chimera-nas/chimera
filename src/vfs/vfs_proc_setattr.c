@@ -4,6 +4,7 @@
 
 #include <string.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 #include "vfs_procs.h"
 #include "vfs_state.h"
 #include "vfs_internal.h"
@@ -70,6 +71,104 @@ chimera_vfs_setattr_required(
 
     return required;
 } /* chimera_vfs_setattr_required */
+
+/*
+ * Map a denied setattr to the POSIX errno.  Operations that require ownership
+ * of the file -- chmod (mode/ACL), chown/chgrp (uid/gid), and setting a
+ * timestamp to an explicit value -- fail with EPERM for a non-owner without
+ * privilege.  Operations that merely require write permission -- truncate
+ * (size) and setting a timestamp to "now" -- fail with EACCES.  When both
+ * classes are present, the ownership requirement dominates (EPERM).
+ */
+/* Is `cred` a member of group `gid` (primary or supplementary)? */
+static int
+chimera_vfs_setattr_cred_in_group(
+    const struct chimera_vfs_cred *cred,
+    uint64_t                       gid)
+{
+    if ((uint64_t) cred->gid == gid) {
+        return 1;
+    }
+    for (uint32_t i = 0; i < cred->ngids; i++) {
+        if ((uint64_t) cred->gids[i] == gid) {
+            return 1;
+        }
+    }
+    return 0;
+} /* chimera_vfs_setattr_cred_in_group */
+
+/*
+ * POSIX chown(2) eligibility for a non-privileged caller against the file's
+ * current owner/group.  Only the super-user may change the owner (uid); the
+ * group (gid) may be changed only by the file's owner and only to a group in
+ * the caller's group set.  A field left unset, or set to its current value, is
+ * not a change.  Returns CHIMERA_VFS_OK when permitted, else CHIMERA_VFS_EPERM.
+ */
+static enum chimera_vfs_error
+chimera_vfs_setattr_chown_check(
+    const struct chimera_vfs_cred  *cred,
+    const struct chimera_vfs_attrs *set_attr,
+    const struct chimera_vfs_attrs *cur)
+{
+    uint64_t m  = set_attr->va_set_mask;
+    int has_uid = (m & CHIMERA_VFS_ATTR_UID) != 0;
+    int has_gid = (m & CHIMERA_VFS_ATTR_GID) != 0;
+
+    if (cred->uid == 0) {
+        return CHIMERA_VFS_OK;
+    }
+
+    /* chown(path, -1, -1) names no owner or group and is always permitted. */
+    if (!has_uid && !has_gid) {
+        return CHIMERA_VFS_OK;
+    }
+
+    /* To perform any chown a non-privileged caller must own the file. */
+    if (!(cur->va_set_mask & CHIMERA_VFS_ATTR_UID) ||
+        (uint64_t) cred->uid != cur->va_uid) {
+        return CHIMERA_VFS_EPERM;
+    }
+
+    /* The owner may not change the owner (uid) to a different value. */
+    if (has_uid &&
+        (cur->va_set_mask & CHIMERA_VFS_ATTR_UID) &&
+        set_attr->va_uid != cur->va_uid) {
+        return CHIMERA_VFS_EPERM;
+    }
+
+    /* The owner may change the group only to one it is a member of. */
+    if (has_gid &&
+        (cur->va_set_mask & CHIMERA_VFS_ATTR_GID) &&
+        set_attr->va_gid != cur->va_gid &&
+        !chimera_vfs_setattr_cred_in_group(cred, set_attr->va_gid)) {
+        return CHIMERA_VFS_EPERM;
+    }
+
+    return CHIMERA_VFS_OK;
+} /* chimera_vfs_setattr_chown_check */
+
+static enum chimera_vfs_error
+chimera_vfs_setattr_denied_error(const struct chimera_vfs_attrs *set_attr)
+{
+    uint64_t m = set_attr->va_set_mask;
+
+    if (m & (CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_ACL |
+             CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID)) {
+        return CHIMERA_VFS_EPERM;
+    }
+
+    if ((m & CHIMERA_VFS_ATTR_ATIME) &&
+        set_attr->va_atime.tv_nsec != CHIMERA_VFS_TIME_NOW) {
+        return CHIMERA_VFS_EPERM;
+    }
+
+    if ((m & CHIMERA_VFS_ATTR_MTIME) &&
+        set_attr->va_mtime.tv_nsec != CHIMERA_VFS_TIME_NOW) {
+        return CHIMERA_VFS_EPERM;
+    }
+
+    return CHIMERA_VFS_EACCES;
+} /* chimera_vfs_setattr_denied_error */
 
 static void
 chimera_vfs_setattr_complete(struct chimera_vfs_request *request)
@@ -168,10 +267,71 @@ chimera_vfs_setattr_gate_complete(
      * owner/group restate does not demand WRITE_OWNER. */
     required = chimera_vfs_setattr_required(gate->set_attr, attr);
 
+    /* POSIX: the file's owner (and the super-user) may always update its
+     * timestamps -- to an explicit value or to "now" -- regardless of write
+     * permission.  For a setattr that changes only atime/mtime, the owner is
+     * therefore unconditionally authorized. */
+    {
+        uint64_t m     = gate->set_attr->va_set_mask;
+        int      owner = (gate->cred->uid == 0) ||
+            ((attr->va_set_mask & CHIMERA_VFS_ATTR_UID) &&
+             (uint64_t) gate->cred->uid == attr->va_uid);
+
+        if (owner && (m & (CHIMERA_VFS_ATTR_ATIME | CHIMERA_VFS_ATTR_MTIME)) &&
+            !(m & ~(CHIMERA_VFS_ATTR_ATIME | CHIMERA_VFS_ATTR_MTIME |
+                    CHIMERA_VFS_ATTR_CTIME))) {
+            required = 0;
+        }
+    }
+
     if (chimera_vfs_gate(attr, gate->cred, required) != CHIMERA_VFS_OK) {
-        gate->callback(CHIMERA_VFS_EACCES, NULL, NULL, NULL, gate->private_data);
+        gate->callback(chimera_vfs_setattr_denied_error(gate->set_attr),
+                       NULL, NULL, NULL, gate->private_data);
         free(gate);
         return;
+    }
+
+    /* POSIX chown(2) restrictions (uid change requires privilege; gid change
+     * requires ownership + group membership) apply on top of the ACL grant. */
+    if (chimera_vfs_setattr_chown_check(gate->cred, gate->set_attr, attr) != CHIMERA_VFS_OK) {
+        gate->callback(CHIMERA_VFS_EPERM, NULL, NULL, NULL, gate->private_data);
+        free(gate);
+        return;
+    }
+
+    /* A successful change of owner or group by a non-privileged caller clears
+     * the set-user-ID and set-group-ID bits of a non-directory (POSIX/Linux
+     * kill-priv: don't let a privileged binary survive an ownership change). */
+    if (gate->cred->uid != 0 &&
+        !(gate->set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
+        (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
+        (attr->va_mode & S_IFMT) != S_IFDIR &&
+        (attr->va_mode & (S_ISUID | S_ISGID))) {
+        uint64_t m            = gate->set_attr->va_set_mask;
+        int      owner_change =
+            ((m & CHIMERA_VFS_ATTR_UID) && (attr->va_set_mask & CHIMERA_VFS_ATTR_UID) &&
+             gate->set_attr->va_uid != attr->va_uid) ||
+            ((m & CHIMERA_VFS_ATTR_GID) && (attr->va_set_mask & CHIMERA_VFS_ATTR_GID) &&
+             gate->set_attr->va_gid != attr->va_gid);
+
+        if (owner_change) {
+            gate->set_attr->va_mode      = attr->va_mode & ~(uint64_t) (S_ISUID | S_ISGID);
+            gate->set_attr->va_set_mask |= CHIMERA_VFS_ATTR_MODE;
+        }
+    }
+
+    /* POSIX: when a non-privileged process whose group set does not include the
+     * file's owning group chmods a non-directory, the set-group-ID bit is
+     * cleared on success (it would otherwise let a user grant themselves the
+     * file group's identity on execution). */
+    if ((gate->set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
+        (gate->set_attr->va_mode & S_ISGID) &&
+        gate->cred->uid != 0 &&
+        (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
+        (attr->va_mode & S_IFMT) != S_IFDIR &&
+        (attr->va_set_mask & CHIMERA_VFS_ATTR_GID) &&
+        !chimera_vfs_setattr_cred_in_group(gate->cred, attr->va_gid)) {
+        gate->set_attr->va_mode &= ~(uint64_t) S_ISGID;
     }
 
     chimera_vfs_setattr_dispatch(gate->thread, gate->cred, gate->handle,

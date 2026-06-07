@@ -345,6 +345,21 @@ chimera_vfs_rename_at(
     struct chimera_vfs_module         *module;
     struct chimera_vfs_rename_at_gate *gate;
 
+    /* POSIX: renaming to/from "." or ".." is invalid (EINVAL); a final
+     * component longer than {NAME_MAX} is ENAMETOOLONG. */
+    if ((namelen == 1 && name[0] == '.') ||
+        (namelen == 2 && name[0] == '.' && name[1] == '.') ||
+        (new_namelen == 1 && new_name[0] == '.') ||
+        (new_namelen == 2 && new_name[0] == '.' && new_name[1] == '.')) {
+        callback(CHIMERA_VFS_EINVAL, NULL, NULL, NULL, NULL, private_data);
+        return;
+    }
+
+    if (namelen >= CHIMERA_VFS_NAME_MAX || new_namelen >= CHIMERA_VFS_NAME_MAX) {
+        callback(CHIMERA_VFS_ENAMETOOLONG, NULL, NULL, NULL, NULL, private_data);
+        return;
+    }
+
     module = chimera_vfs_get_module(thread, fh, fhlen);
 
     if (module && chimera_vfs_gate_needed(module->capabilities, cred)) {
