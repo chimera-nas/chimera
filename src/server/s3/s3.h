@@ -17,6 +17,13 @@ chimera_s3_remove_bucket(
     void       *s3_shared,
     const char *name);
 
+/* Configure the VFS path (relative to the server root) under which runtime
+ * CreateBucket requests materialize new bucket directories. */
+void
+chimera_s3_set_bucket_root(
+    void       *s3_shared,
+    const char *path);
+
 const struct s3_bucket *
 chimera_s3_get_bucket(
     void       *s3_shared,

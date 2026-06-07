@@ -46,6 +46,10 @@ chimera_s3_status_to_string(enum chimera_s3_status status)
             return "Malformed XML";
         case CHIMERA_S3_STATUS_NO_CONTENT:
             return "No Content";
+        case CHIMERA_S3_STATUS_BUCKET_NOT_EMPTY:
+            return "Bucket Not Empty";
+        case CHIMERA_S3_STATUS_METHOD_NOT_ALLOWED:
+            return "Method Not Allowed";
         case CHIMERA_S3_STATUS_NOT_IMPLEMENTED:
             return "Not Implemented";
         default:
@@ -131,6 +135,16 @@ chimera_s3_prepare_error_response(
             bp += sprintf(bp,
                           "  <Message>The XML you provided was not well-formed or did not validate against our published schema.</Message>\n");
             code = 400;
+            break;
+        case CHIMERA_S3_STATUS_BUCKET_NOT_EMPTY:
+            bp  += sprintf(bp, "  <Code>BucketNotEmpty</Code>\n");
+            bp  += sprintf(bp, "  <Message>The bucket you tried to delete is not empty.</Message>\n");
+            code = 409;
+            break;
+        case CHIMERA_S3_STATUS_METHOD_NOT_ALLOWED:
+            bp  += sprintf(bp, "  <Code>MethodNotAllowed</Code>\n");
+            bp  += sprintf(bp, "  <Message>The specified method is not allowed against this resource.</Message>\n");
+            code = 405;
             break;
         case CHIMERA_S3_STATUS_BAD_REQUEST:
             bp  += sprintf(bp, "  <Code>InvalidArgument</Code>\n");

@@ -557,6 +557,12 @@ main(
         chimera_server_config_set_nfs_port(server_config, int_value);
     }
 
+    json_value = json_object_get(server_params, "s3_port");
+    if (json_is_integer(json_value)) {
+        int_value = json_integer_value(json_value);
+        chimera_server_config_set_s3_port(server_config, int_value);
+    }
+
     /* NFSv4.1 server identity (EXCHANGE_ID server scope).  Set a distinct value
      * on independent servers that do not share state -- e.g. a pNFS data server
      * co-deployed with its MDS -- so v4.1 clients do not coalesce them. */
@@ -923,6 +929,33 @@ main(
             path = json_string_value(json_object_get(bucket, "path"));
             chimera_server_info("Adding S3 bucket %s -> %s", name, path);
             chimera_server_create_bucket(server, name, path);
+        }
+    }
+
+    /* The VFS path under which runtime CreateBucket requests materialize new
+     * bucket directories. Explicit "s3_bucket_root" wins; otherwise default to
+     * the first configured mount ("/<mount-name>"). Leave unset (runtime bucket
+     * creation disabled) if neither is available. */
+    {
+        const char *bucket_root = json_string_value(
+            json_object_get(config, "s3_bucket_root"));
+        char        default_root[256];
+
+        if (!bucket_root && mounts) {
+            const char *first_mount;
+            json_t     *mount_val;
+
+            json_object_foreach(mounts, first_mount, mount_val)
+            {
+                snprintf(default_root, sizeof(default_root), "/%s", first_mount);
+                bucket_root = default_root;
+                break;
+            }
+        }
+
+        if (bucket_root) {
+            chimera_server_info("S3 runtime bucket root: %s", bucket_root);
+            chimera_server_set_s3_bucket_root(server, bucket_root);
         }
     }
 

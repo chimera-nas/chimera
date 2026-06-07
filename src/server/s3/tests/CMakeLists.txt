@@ -134,6 +134,9 @@ if(BOTO3_FOUND)
     # ==================== V2 Signature Tests ====================
     # V2 tests use memfs backend to verify V2 signing works
 
+    # ceph/s3-tests S3 compatibility suite (registered separately).
+    add_subdirectory(ceph)
+
     add_s3_test_sigver(put memfs v2)
     add_s3_test_sigver(get memfs v2)
     add_s3_test_sigver(head memfs v2)
