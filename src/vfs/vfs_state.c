@@ -1826,8 +1826,17 @@ chimera_vfs_break_caching_file(
              * (a data setattr does not stale a pure read cache -- the client
              * revalidates on the resulting mtime/size change).  This is what lets
              * a same-client metadata storm stop churning: once a holder has
-             * dropped W it is no longer recalled. */
-            if (flush_only && !(cur->mode.granted & CHIMERA_VFS_LEASE_MODE_W)) {
+             * dropped W it is no longer recalled.
+             *
+             * This filter is an SMB read-cache optimization only.  An NFSv4
+             * delegation is not just a data cache: it guarantees attribute
+             * stability and that no foreign change occurs without a recall (RFC
+             * 7530 10.4), so a metadata-only setattr (e.g. a server-side chmod,
+             * pynfs DELEG20) MUST recall a read delegation held by another party.
+             * The mutating handle's own lease is already spared by skip_handle
+             * above, so this only ever recalls foreign delegations. */
+            if (flush_only && !(cur->mode.granted & CHIMERA_VFS_LEASE_MODE_W) &&
+                cur->owner.protocol != CHIMERA_VFS_LEASE_PROTO_NFSV4) {
                 continue;
             }
             if (cur->break_state == CHIMERA_VFS_BREAK_IDLE) {
