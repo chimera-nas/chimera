@@ -726,24 +726,17 @@ chimera_vfs_state_would_conflict(
                     continue;
                 }
                 if (chimera_vfs_caching_conflict(cur, probe)) {
-                    /* Breaking a holder only resolves the conflict if the holder
-                     * actually has the exclusive WRITE cache to give up.  For an SMB
-                     * caching holder that holds only read/handle caching (no W), the
-                     * conflict is the ACQUIRER wanting W while a peer caches reads --
-                     * the holder keeps R|H and it is the acquirer that must drop W.
-                     * Report DENIED so the acquirer's settle caps itself to R|H,
-                     * rather than firing a no-op break on the holder (which would
-                     * livelock: would_conflict keeps returning BREAKING).  NFSv4
-                     * delegations are recalled in full regardless, so the W gate
-                     * applies to SMB holders only. */
-                    uint8_t holder_eff = chimera_vfs_lease_effective_granted(cur);
-                    bool smb_no_w      =
-                        cur->owner.protocol == CHIMERA_VFS_LEASE_PROTO_SMB2 &&
-                        !(holder_eff & CHIMERA_VFS_LEASE_MODE_W);
-
+                    /* A conflicting caching holder that can still be recalled (has a
+                     * break callback and is not already mid-break) is broken down to
+                     * the conflict-clearing floor (chimera_vfs_break_retain_for): the
+                     * acquirer parks until it acks.  Because that floor drops exactly
+                     * the contended bits, the break genuinely resolves the conflict
+                     * (no livelock), so a W acquirer recalls a peer's read cache
+                     * rather than capping itself.  A holder with no break path -- or
+                     * one already past IDLE whose effective mode still conflicts -- is
+                     * a hard denial. */
                     if (cur->owner.break_cb &&
-                        cur->break_state == CHIMERA_VFS_BREAK_IDLE &&
-                        !smb_no_w) {
+                        cur->break_state == CHIMERA_VFS_BREAK_IDLE) {
                         has_breakable_conflict = true;
                         if (conflict_out && !*conflict_out) {
                             *conflict_out = cur;
@@ -908,24 +901,43 @@ chimera_vfs_file_state_remove_lease(
 } /* chimera_vfs_file_state_remove_lease */
 
 /* The mode a conflicting holder is allowed to RETAIN when `acquirer` forces it to
- * break.  When an SMB caching acquirer (open) contends an SMB caching holder
- * (oplock / lease), only the WRITE cache is exclusive: the holder gives up W but
- * keeps read + handle caching, regardless of the acquirer's own requested mode
- * (a second opener never grants itself W while a peer caches the file).  Every
- * other break -- NFSv4 delegation recall, a SHARE acquirer invalidating a cache
- * -- retains the acquirer's mode, the pre-existing behavior. */
+* break -- i.e. the break floor handed to begin_break.  The floor must be the
+* holder's granted mode with exactly the bits that CONFLICT with the acquirer
+* cleared (mirroring chimera_vfs_caching_conflict): only then is the floor
+* strictly below `granted`, so the break actually resolves the contention.  A
+* fixed retain (e.g. always keep R|H) livelocks -- the holder keeps the very bit
+* the acquirer needs gone, and would_conflict keeps returning BREAKING -- and a
+* floor of the acquirer's own mode never reduces a same-mode holder at all (an
+* NFSv4 W recall against a W holder would no-op and spin).
+*
+* - acquirer has W (write cache / write open): the holder's cached R and W are
+*   both stale, so it drops R|W and keeps only H/D (handle + delete caching),
+*   which survive a peer's write.
+* - acquirer has R (read cache) but not W: only the holder's exclusive W is
+*   incompatible; it drops W and keeps R|H|D.
+* - acquirer has H (handle cache) from a DIFFERENT client: handle caching is
+*   sole-across-clients, so the holder drops H.
+* Bits the acquirer does not contend (notably D) are always retained, and a
+* same-client H acquirer leaves the holder's H intact (SMB lease keys coexist). */
 static inline uint8_t
 chimera_vfs_break_retain_for(
     const struct chimera_vfs_lease *acquirer,
     const struct chimera_vfs_lease *holder)
 {
-    if (acquirer->kind == CHIMERA_VFS_LEASE_CACHING &&
-        holder->kind == CHIMERA_VFS_LEASE_CACHING &&
-        holder->owner.protocol == CHIMERA_VFS_LEASE_PROTO_SMB2) {
-        return CHIMERA_VFS_LEASE_MODE_R | CHIMERA_VFS_LEASE_MODE_H |
-               CHIMERA_VFS_LEASE_MODE_D;
+    uint8_t a    = acquirer->mode.granted;
+    uint8_t keep = holder->mode.granted;
+
+    if (a & CHIMERA_VFS_LEASE_MODE_W) {
+        keep &= ~(CHIMERA_VFS_LEASE_MODE_R | CHIMERA_VFS_LEASE_MODE_W);
     }
-    return acquirer->mode.granted;
+    if (a & CHIMERA_VFS_LEASE_MODE_R) {
+        keep &= ~CHIMERA_VFS_LEASE_MODE_W;
+    }
+    if ((a & CHIMERA_VFS_LEASE_MODE_H) &&
+        acquirer->owner.client_key != holder->owner.client_key) {
+        keep &= ~CHIMERA_VFS_LEASE_MODE_H;
+    }
+    return keep;
 } /* chimera_vfs_break_retain_for */
 
 SYMBOL_EXPORT enum chimera_vfs_lease_result
