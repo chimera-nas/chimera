@@ -397,7 +397,7 @@ test_create_rqls_v1_vs_v2(void)
         rqls_v2[i] = (uint8_t) (0xc0 + i);
     }
     put_le32(rqls_v2, 16, 0x07);
-    put_le32(rqls_v2, 20, 0x02);  /* parent_key valid */
+    put_le32(rqls_v2, 20, 0x04);  /* SMB2_LEASE_FLAG_PARENT_LEASE_KEY_SET: parent_key valid */
     for (i = 0; i < 16; i++) {
         rqls_v2[32 + i] = (uint8_t) (0xd0 + i);
     }
