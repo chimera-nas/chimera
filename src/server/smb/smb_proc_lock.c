@@ -147,21 +147,33 @@ chimera_smb_parse_lock(
     evpl_iovec_cursor_get_uint64(request_cursor, &request->lock.file_id.pid);
     evpl_iovec_cursor_get_uint64(request_cursor, &request->lock.file_id.vid);
 
-    /* Only a LockCount of 1 carries a lock element we can read; a
-     * zero-lock request (which smbtorture sends to probe rejection) has
-     * no element, so reading one would over-run the buffer.  Invalid
-     * LockCount values are reported by the handler as a normal
-     * INVALID_PARAMETER response rather than a parse failure — returning
-     * -1 here would tear the connection down instead of replying. */
-    if (request->lock.lock_count == 1) {
-        evpl_iovec_cursor_get_uint64(request_cursor, &request->lock.l_offset);
-        evpl_iovec_cursor_get_uint64(request_cursor, &request->lock.l_length);
-        evpl_iovec_cursor_get_uint32(request_cursor, &request->lock.l_flags);
-        evpl_iovec_cursor_get_uint32(request_cursor, &reserved);
-    } else {
-        request->lock.l_offset = 0;
-        request->lock.l_length = 0;
-        request->lock.l_flags  = 0;
+    /* Read the lock elements (24 bytes each: Offset, Length, Flags, Reserved).
+     * A zero-lock request (which smbtorture sends to probe rejection) carries
+     * no element; an over-long LockCount is flagged so the handler can reply
+     * INVALID_PARAMETER rather than tearing the connection down with a -1.  The
+     * first element is mirrored into l_offset/l_length/l_flags for the common
+     * single-lock path. */
+    request->lock.l_offset      = 0;
+    request->lock.l_length      = 0;
+    request->lock.l_flags       = 0;
+    request->lock.lock_too_many = false;
+
+    if (request->lock.lock_count >= 1 &&
+        request->lock.lock_count <= CHIMERA_SMB_LOCK_MAX_ELEMENTS) {
+        for (uint16_t i = 0; i < request->lock.lock_count; i++) {
+            evpl_iovec_cursor_get_uint64(request_cursor,
+                                         &request->lock.elements[i].offset);
+            evpl_iovec_cursor_get_uint64(request_cursor,
+                                         &request->lock.elements[i].length);
+            evpl_iovec_cursor_get_uint32(request_cursor,
+                                         &request->lock.elements[i].flags);
+            evpl_iovec_cursor_get_uint32(request_cursor, &reserved);
+        }
+        request->lock.l_offset = request->lock.elements[0].offset;
+        request->lock.l_length = request->lock.elements[0].length;
+        request->lock.l_flags  = request->lock.elements[0].flags;
+    } else if (request->lock.lock_count > CHIMERA_SMB_LOCK_MAX_ELEMENTS) {
+        request->lock.lock_too_many = true;
     }
 
     return 0;
@@ -203,6 +215,218 @@ chimera_smb_lock_acquire_cb(
     chimera_smb_complete_request(request, status);
 } /* chimera_smb_lock_acquire_cb */
 
+/* Records a synchronous lease-acquire outcome.  chimera_vfs_lease_acquire fires
+ * the callback inline when wait==false, so the result is readable right after
+ * the call returns. */
+static void
+chimera_smb_lock_sync_cb(
+    enum chimera_vfs_lease_result result,
+    struct chimera_vfs_lease     *granted,
+    struct chimera_vfs_lease     *conflict,
+    void                         *private_data)
+{
+    (void) granted;
+    (void) conflict;
+    *(enum chimera_vfs_lease_result *) private_data = result;
+} /* chimera_smb_lock_sync_cb */
+
+/* Take one byte-range lock for this open synchronously.  Returns the held entry
+ * (appended to open_file->lock_entries) or NULL on a conflict -- with the SMB
+ * same-handle rule applied first, then the cross-handle VFS acquire. */
+static struct chimera_smb_lock_entry *
+chimera_smb_lock_take_one(
+    struct chimera_server_smb_thread *thread,
+    struct chimera_smb_request       *request,
+    struct chimera_smb_open_file     *open_file,
+    uint64_t                          offset,
+    uint64_t                          length,
+    bool                              exclusive)
+{
+    struct chimera_vfs_state      *vfs_state = thread->vfs_thread->vfs->vfs_state;
+    struct chimera_smb_lock_entry *entry, *held;
+    enum chimera_vfs_lease_result  result = CHIMERA_VFS_LEASE_DENIED;
+
+    if (exclusive) {
+        DL_FOREACH(open_file->lock_entries, held)
+        {
+            if (smb_lock_ranges_overlap(held->lease.offset, held->lease.length,
+                                        offset, length)) {
+                return NULL;
+            }
+        }
+    }
+
+    entry = calloc(1, sizeof(*entry));
+    if (!entry) {
+        return NULL;
+    }
+    entry->file_state = chimera_vfs_state_get(vfs_state, open_file->handle->fh,
+                                              open_file->handle->fh_len,
+                                              open_file->handle->fh_hash, true);
+    if (!entry->file_state) {
+        free(entry);
+        return NULL;
+    }
+    entry->open_file          = open_file;
+    entry->lease.kind         = CHIMERA_VFS_LEASE_RANGE;
+    entry->lease.mode.granted = exclusive ? CHIMERA_VFS_LEASE_MODE_W
+                                              : CHIMERA_VFS_LEASE_MODE_R;
+    entry->lease.offset           = offset;
+    entry->lease.length           = length;
+    entry->lease.owner.protocol   = CHIMERA_VFS_LEASE_PROTO_SMB2;
+    entry->lease.owner.client_key = request->session_handle->session->session_id;
+    entry->lease.owner.owner_lo   = open_file->file_id.pid;
+    entry->lease.owner.owner_hi   = open_file->file_id.vid;
+    entry->lease.owner.cb_private = open_file;
+
+    chimera_vfs_lease_acquire(vfs_state, entry->file_state, &entry->lease,
+                              &entry->ticket, false /* no wait */,
+                              chimera_smb_lock_sync_cb, &result);
+
+    if (result != CHIMERA_VFS_LEASE_GRANTED) {
+        chimera_vfs_state_put(vfs_state, entry->file_state);
+        free(entry);
+        return NULL;
+    }
+    entry->lease_inserted = true;
+    DL_APPEND(open_file->lock_entries, entry);
+    return entry;
+} /* chimera_smb_lock_take_one */
+
+static void
+chimera_smb_lock_entry_drop(
+    struct chimera_vfs_state      *vfs_state,
+    struct chimera_smb_open_file  *open_file,
+    struct chimera_smb_lock_entry *e)
+{
+    DL_DELETE(open_file->lock_entries, e);
+    if (e->lease_inserted) {
+        chimera_vfs_lease_release(vfs_state, e->file_state, &e->lease);
+    }
+    if (e->file_state) {
+        chimera_vfs_state_put(vfs_state, e->file_state);
+    }
+    free(e);
+} /* chimera_smb_lock_entry_drop */
+
+/* Multi-element (LockCount>1) lock/unlock.  All elements share one direction,
+ * taken from element 0 (MS-SMB2 3.3.5.14): a LOCK request validates every
+ * element's flags/range up front then acquires them atomically (rolling all of
+ * them back on the first conflict); an UNLOCK request removes each named range
+ * in order and stops with RANGE_NOT_LOCKED at the first range it does not hold.
+ * All acquires are FAIL_IMMEDIATELY (synchronous) -- a blocking last element is
+ * not supported in a multi-element request. */
+static void
+chimera_smb_lock_multi(
+    struct chimera_server_smb_thread *thread,
+    struct chimera_smb_request       *request,
+    struct chimera_smb_open_file     *open_file)
+{
+    struct chimera_vfs_state *vfs_state = thread->vfs_thread->vfs->vfs_state;
+    uint16_t                  n         = request->lock.lock_count;
+    bool                      is_unlock;
+    uint16_t                  i;
+
+    is_unlock = (request->lock.elements[0].flags & SMB2_LOCKFLAG_UNLOCK) != 0;
+
+    if (is_unlock) {
+        for (i = 0; i < n; i++) {
+            uint64_t                       off = request->lock.elements[i].offset;
+            uint64_t                       len = request->lock.elements[i].length;
+            struct chimera_smb_lock_entry *match = NULL, *e;
+
+            /* Every element of an unlock request must itself be an unlock
+             * (MS-SMB2 3.3.5.14): a lock element mixed in fails the request --
+             * checked in order, so any earlier unlocks have already taken
+             * effect (smb2.lock.multiple-unlock). */
+            if (!(request->lock.elements[i].flags & SMB2_LOCKFLAG_UNLOCK)) {
+                chimera_smb_open_file_release(request, open_file);
+                chimera_smb_complete_request(request,
+                                             SMB2_STATUS_INVALID_PARAMETER);
+                return;
+            }
+
+            DL_FOREACH(open_file->lock_entries, e)
+            {
+                if (e->lease.offset == off && e->lease.length == len) {
+                    match = e;
+                    break;
+                }
+            }
+            if (!match) {
+                chimera_smb_open_file_release(request, open_file);
+                chimera_smb_complete_request(request,
+                                             SMB2_STATUS_RANGE_NOT_LOCKED);
+                return;
+            }
+            chimera_smb_lock_entry_drop(vfs_state, open_file, match);
+        }
+        chimera_smb_open_file_release(request, open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+        return;
+    }
+
+    /* LOCK request: validate every element first. */
+    for (i = 0; i < n; i++) {
+        uint32_t kind = request->lock.elements[i].flags & SMB2_LOCKFLAG_KIND_MASK;
+        uint64_t off  = request->lock.elements[i].offset;
+        uint64_t len  = request->lock.elements[i].length;
+
+        if (kind != SMB2_LOCKFLAG_SHARED_LOCK && kind != SMB2_LOCKFLAG_EXCLUSIVE) {
+            chimera_smb_open_file_release(request, open_file);
+            chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+            return;
+        }
+        if ((__uint128_t) off + len > ((__uint128_t) 1 << 64)) {
+            chimera_smb_open_file_release(request, open_file);
+            chimera_smb_complete_request(request, SMB2_STATUS_INVALID_LOCK_RANGE);
+            return;
+        }
+    }
+
+    /* The ranges within a single lock request must not overlap each other
+     * (MS-SMB2 3.3.5.14): an overlap is INVALID_PARAMETER, independent of lock
+     * type (smb2.lock.valid-request locks two shared ranges at the same offset). */
+    for (i = 0; i < n; i++) {
+        for (uint16_t j = i + 1; j < n; j++) {
+            if (smb_lock_ranges_overlap(request->lock.elements[i].offset,
+                                        request->lock.elements[i].length,
+                                        request->lock.elements[j].offset,
+                                        request->lock.elements[j].length)) {
+                chimera_smb_open_file_release(request, open_file);
+                chimera_smb_complete_request(request,
+                                             SMB2_STATUS_INVALID_PARAMETER);
+                return;
+            }
+        }
+    }
+
+    /* Acquire all; roll back every lock taken in this request on a conflict. */
+    struct chimera_smb_lock_entry *taken[CHIMERA_SMB_LOCK_MAX_ELEMENTS];
+    uint16_t                       ntaken = 0;
+
+    for (i = 0; i < n; i++) {
+        bool                           excl = (request->lock.elements[i].flags & SMB2_LOCKFLAG_EXCLUSIVE) != 0;
+        struct chimera_smb_lock_entry *e    =
+            chimera_smb_lock_take_one(thread, request, open_file,
+                                      request->lock.elements[i].offset,
+                                      request->lock.elements[i].length, excl);
+
+        if (!e) {
+            while (ntaken > 0) {
+                chimera_smb_lock_entry_drop(vfs_state, open_file, taken[--ntaken]);
+            }
+            chimera_smb_open_file_release(request, open_file);
+            chimera_smb_complete_request(request, SMB2_STATUS_LOCK_NOT_GRANTED);
+            return;
+        }
+        taken[ntaken++] = e;
+    }
+
+    chimera_smb_open_file_release(request, open_file);
+    chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+} /* chimera_smb_lock_multi */
+
 void
 chimera_smb_lock(struct chimera_smb_request *request)
 {
@@ -222,11 +446,18 @@ chimera_smb_lock(struct chimera_smb_request *request)
 
     request->lock.open_file = open_file;
 
-    /* LockCount==0 is illegal; >1 (multi-lock) is not yet supported.  Both
-    * are reported as INVALID_PARAMETER without dropping the connection. */
-    if (unlikely(request->lock.lock_count != 1)) {
+    /* LockCount==0 is illegal, and more than CHIMERA_SMB_LOCK_MAX_ELEMENTS is
+     * rejected rather than parsed; both reply INVALID_PARAMETER without dropping
+     * the connection. */
+    if (unlikely(request->lock.lock_count == 0 || request->lock.lock_too_many)) {
         chimera_smb_open_file_release(request, open_file);
         chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+        return;
+    }
+
+    /* A multi-element request is handled synchronously (all FAIL_IMMEDIATELY). */
+    if (request->lock.lock_count > 1) {
+        chimera_smb_lock_multi(thread, request, open_file);
         return;
     }
 

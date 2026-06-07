@@ -576,11 +576,20 @@ struct chimera_smb_request {
             struct chimera_smb_open_file  *open_file;
             uint16_t                       lock_count;
             uint32_t                       lock_sequence;
-            /* Single-lock parse for Stage B (LockCount==1).  Multi-lock
-             * requests fall back to STATUS_INVALID_PARAMETER. */
+            /* First lock element, kept for the common LockCount==1 path. */
             uint64_t                       l_offset;
             uint64_t                       l_length;
             uint32_t                       l_flags;
+            /* All elements of a multi-element (LockCount>1) request.  A request
+             * carrying more than CHIMERA_SMB_LOCK_MAX_ELEMENTS is rejected with
+             * INVALID_PARAMETER (lock_too_many set by the parser). */
+#define CHIMERA_SMB_LOCK_MAX_ELEMENTS 16
+            struct {
+                uint64_t offset;
+                uint64_t length;
+                uint32_t flags;
+            }                              elements[CHIMERA_SMB_LOCK_MAX_ELEMENTS];
+            bool                           lock_too_many;
             struct chimera_smb_lock_entry *entry;  /* live for the in-flight acquire */
         } lock;
 
