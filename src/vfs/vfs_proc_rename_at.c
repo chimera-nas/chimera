@@ -108,6 +108,7 @@ chimera_vfs_rename_at_recall_target(struct chimera_vfs_request *request)
                           request->rename_at.target_fh_len ?
                           chimera_vfs_hash(request->rename_at.target_fh,
                                            request->rename_at.target_fh_len) : 0,
+                          0 /* namespace recall: revoke fully */,
                           chimera_vfs_dispatch);
 } /* chimera_vfs_rename_at_recall_target */
 
@@ -134,6 +135,7 @@ chimera_vfs_rename_at_source_lookup_complete(
                               request->rename_at.source_fh_len,
                               chimera_vfs_hash(request->rename_at.source_fh,
                                                request->rename_at.source_fh_len),
+                              0 /* namespace recall: revoke fully */,
                               chimera_vfs_rename_at_recall_target);
     } else {
         /* Source not resolvable (e.g. ENOENT); the backend rename will return

@@ -116,9 +116,13 @@ chimera_vfs_setattr_dispatch(
         return;
     }
 
-    request->opcode                          = CHIMERA_VFS_OP_SETATTR;
-    request->complete                        = chimera_vfs_setattr_complete;
-    request->setattr.handle                  = handle;
+    request->opcode         = CHIMERA_VFS_OP_SETATTR;
+    request->complete       = chimera_vfs_setattr_complete;
+    request->setattr.handle = handle;
+    /* Identify the mutating handle so the caching-lease recall below skips a
+     * lease anchored to this same handle (the holder is coherent with its own
+     * setattr -- see chimera_vfs_break_caching_file). */
+    request->io_handle                       = handle;
     request->setattr.set_attr                = set_attr;
     request->setattr.r_pre_attr.va_req_mask  = pre_attr_mask;
     request->setattr.r_pre_attr.va_set_mask  = 0;
@@ -127,10 +131,25 @@ chimera_vfs_setattr_dispatch(
     request->proto_callback                  = callback;
     request->proto_private_data              = private_data;
 
-    /* A metadata change invalidates any cached attributes a delegation/oplock
-    * holder has; recall every caching lease on the target before dispatch. */
+    /* Recall flavor depends on whether this setattr changes file *data*:
+     *
+     *   - A SIZE change (truncate/extend) alters the bytes, so a holder's cached
+     *     read data is now stale: recall fully (flush_only = 0 -> break to NONE),
+     *     invalidating the read cache.  Retaining R here returns stale bytes
+     *     (fsx MAPREAD corruption).
+     *   - An attribute-only setattr (mtime/atime/DOS/ACL/owner -- no data change)
+     *     must still flush a write-caching holder's dirty pages, because the
+     *     resulting mtime bump makes other clients revalidate and re-read from
+     *     the backend; but the holder's read cache stays valid (the data did not
+     *     change), so flush_only = 1 keeps R|H.  This is what stops a single
+     *     client's metadata storm (rewinddir/fsstress Create+SetInfo+Close churn)
+     *     from recalling its own lease on every attribute set while preserving
+     *     coherence. */
+    int flush_only = (set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) ? 0 : 1;
+
     chimera_vfs_io_recall(request, request->fh, request->fh_len,
-                          request->fh_hash, chimera_vfs_dispatch);
+                          request->fh_hash, flush_only,
+                          chimera_vfs_dispatch);
 } /* chimera_vfs_setattr_dispatch */
 
 /*

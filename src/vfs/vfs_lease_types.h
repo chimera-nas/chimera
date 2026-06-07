@@ -18,6 +18,8 @@
 
 struct chimera_vfs_lease;
 struct chimera_vfs_file_state;
+struct chimera_vfs_open_handle;
+struct chimera_vfs_caching_grant;
 
 /* -------------------------------------------------------------------- */
 /* Lease vocabulary                                                     */
@@ -98,6 +100,14 @@ struct chimera_vfs_lease_owner {
     chimera_vfs_lease_is_alive_cb_t is_alive_cb;
     chimera_vfs_lease_revoked_cb_t  revoked_cb;
     void                           *cb_private;
+    /* The open handle this lease is anchored to, when the holder is a single
+     * open (SMB oplock/lease).  A metadata mutation (setattr / set-EOF) issued
+     * through this very handle must NOT recall this lease -- the holder is
+     * coherent with its own change -- so chimera_vfs_break_caching_file skips a
+     * lease whose op_handle matches the mutating request's handle.  NULL for
+     * holders not tied to a single handle (e.g. NFSv4 delegations), which are
+     * always recalled. */
+    struct chimera_vfs_open_handle *op_handle;
 };
 
 enum chimera_vfs_break_state {
@@ -109,28 +119,97 @@ enum chimera_vfs_break_state {
 
 struct chimera_vfs_lease {
     enum chimera_vfs_lease_kind kind;
-    struct chimera_vfs_lease_mode  mode;
-    uint64_t                       offset; /* RANGE only; SHARE/CACHING use 0 */
-    uint64_t                       length; /* RANGE only; 0 = to EOF */
-    struct chimera_vfs_lease_owner owner;
-    struct chimera_vfs_file_state *file;
+    struct chimera_vfs_lease_mode     mode;
+    uint64_t                          offset; /* RANGE only; SHARE/CACHING use 0 */
+    uint64_t                          length; /* RANGE only; 0 = to EOF */
+    struct chimera_vfs_lease_owner    owner;
+    struct chimera_vfs_file_state    *file;
 
     enum chimera_vfs_break_state break_state;
-    uint8_t                        break_needed_mode;
-    uint64_t                       break_deadline; /* stopwatch ticks */
+    /* The level the current outstanding break notification asked the holder to
+     * downgrade to -- ONE caching bit below its granted mode (W, then H, then R
+     * in priority order).  A lease never jumps straight to its floor: each
+     * conflicting open/write drives the holder down a single bit, and the next
+     * step is sent only after the client acks the previous one (MS-SMB2
+     * 3.3.5.9.x cascading break, e.g. RWH -> RH -> R -> NONE). */
+    uint8_t                           break_needed_mode;
+    /* The ultimate target of the in-flight cascade: the maximal mode the holder
+     * may keep given every current waiter.  NONE for a writing/truncating open
+     * or a namespace mutation; R for a read-only conflicting open; R|H for a
+     * coexisting caching lease (R and H are shared).  The cascade keeps
+     * break_state == BREAKING and re-fires one bit per ack until granted reaches
+     * this floor, at which point the break completes. */
+    uint8_t                           break_floor;
+    uint64_t                          break_deadline; /* stopwatch ticks */
 
     /* For a SHARE probe only: a caching (handle) lease held under this same
      * key is the requester's own lease (SMB2 same-client, same lease key) and
      * must NOT be broken when acquiring the share — the opens coalesce.  Set by
      * the SMB server when a lease-bearing open takes its share reservation;
      * left zero (no skip) by every other caller. */
-    uint8_t                        has_break_skip_key;
-    uint64_t                       break_skip_lo;
-    uint64_t                       break_skip_hi;
+    uint8_t                           has_break_skip_key;
+    uint64_t                          break_skip_lo;
+    uint64_t                          break_skip_hi;
+
+    /* For a CACHING lease that is owned by a VFS caching grant (the shared,
+     * owner-keyed, refcounted object that lets N opens under one owner share a
+     * single lease): back-pointer to that grant, so begin_break/ack/revoke can
+     * route through it.  NULL for RANGE/SHARE leases, the implicit lease, and
+     * any CACHING lease not (yet) managed by a grant. */
+    struct chimera_vfs_caching_grant *grant;
 
     /* Intrusive linkage on the appropriate file->{range,share,caching} list. */
-    struct chimera_vfs_lease      *prev;
-    struct chimera_vfs_lease      *next;
+    struct chimera_vfs_lease         *prev;
+    struct chimera_vfs_lease         *next;
+};
+
+/* -------------------------------------------------------------------- */
+/* Caching grant — VFS-owned shared caching lease                       */
+/* -------------------------------------------------------------------- */
+
+/*
+ * A CACHING lease (SMB oplock/lease, NFSv4 delegation) is logically ONE grant
+ * per (file, owner) shared by every open that holds that owner key.  Unlike
+ * RANGE/SHARE leases — which are genuinely per-instance and stay embedded in
+ * the protocol object — a caching grant is allocated and lifetime-managed by
+ * the VFS layer and reference-counted across the opens that share it.  This
+ * generalizes what the NFSv4 server already does by hand for delegations (one
+ * nfs_delegation per (client, FH)) so SMB and NFSv4 share one implementation.
+ *
+ * The grant WRAPS a chimera_vfs_lease: the embedded lease is what the conflict
+ * matrix links onto file->caching_leases and walks, so the matrix/break state
+ * machine are unchanged.  The grant adds owner-keyed lookup, the open refcount,
+ * and the SMB lease epoch.
+ */
+struct chimera_vfs_caching_grant {
+    struct chimera_vfs_lease          lease;      /* kind=CACHING; the matrix node */
+    struct chimera_vfs_file_state    *file;       /* owning file (back-ptr) */
+    uint32_t                          refcount;   /* # of opens referencing this grant */
+    uint32_t                          epoch;      /* SMB lease epoch (3.3.5.9.11) */
+    /* True for a legacy SMB oplock (LEVEL_II/EXCLUSIVE/BATCH), false for an SMB2
+     * RqLs lease.  A legacy batch oplock's handle is broken BEFORE the share-mode
+     * check so the holder can close and dissolve a sharing conflict; an RqLs lease
+     * keeps its handle cache on a conflicting open (only its write cache is
+     * exclusive).  The break-on-open path uses this to handle-break only legacy
+     * oplocks.  Unused by NFSv4 (its grants are delegations, never oplocks). */
+    uint8_t                           is_oplock;
+    /* True for an SMB2.1+ lease v2 (RqLs v2, carries an epoch).  A v1 lease and a
+     * legacy oplock do not version their state, so their break notifications carry
+     * epoch 0 and `epoch` is not advanced for them. */
+    uint8_t                           is_v2;
+    /* Set while this grant's lease is mid-break and the break requires a client
+     * acknowledgment (write or handle caching was stripped).  A no-ack break (only
+     * read caching dropped, or break to NONE) leaves this clear so an open does not
+     * park waiting for an ack that never comes. */
+    uint8_t                           break_ack_required;
+    struct chimera_vfs_caching_grant *grant_next; /* link on file->caching_grants */
+    /* Protocol holder list — opaque to the VFS; the protocol server threads its
+     * per-open holder objects through here so a break callback can select a LIVE
+     * holder to notify (e.g. SMB picks an open whose channel is still connected;
+     * if none is live the lease is revoked).  Manipulated by the protocol under
+     * file->lock.  NFSv4 leaves this NULL (member-set-1; cb_private points at the
+     * delegation directly). */
+    void                             *holders;
 };
 
 /* -------------------------------------------------------------------- */

@@ -140,7 +140,7 @@ chimera_smb_read(struct chimera_smb_request *request)
 
     struct chimera_vfs_lease_owner io_owner = {
         .protocol   = CHIMERA_VFS_LEASE_PROTO_SMB2,
-        .client_key = request->session_handle->session->session_id,
+        .client_key = request->session_handle->session->client_key,
         .owner_lo   = request->read.open_file->file_id.pid,
         .owner_hi   = request->read.open_file->file_id.vid,
     };

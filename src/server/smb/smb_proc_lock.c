@@ -60,10 +60,17 @@ chimera_smb_open_file_drain_locks(
         open_file->share_file_state = NULL;
     }
 
-    /* Drop the caching lease (oplock / SMB2 lease) if held. */
-    if (open_file->caching_lease_inserted) {
-        chimera_vfs_lease_release(vfs_state, open_file->caching_file_state,
-                                  &open_file->caching_lease);
+    /* Drop this open's reference on the caching grant (oplock / SMB2 lease).
+     * On the grant's last reference the embedded lease is unlinked and the grant
+     * freed; the per-file state reference (caching_file_state) is balanced
+     * separately below. */
+    if (open_file->grant) {
+        /* Unthread this open from the grant's member list before dropping its
+         * reference: once removed, the break callback will not try to notify a
+         * closing open, and on the grant's last reference the lease is freed. */
+        chimera_smb_grant_remove_member(open_file->grant, open_file);
+        chimera_vfs_caching_grant_release(vfs_state, open_file->grant, true /*pump*/);
+        open_file->grant                  = NULL;
         open_file->caching_lease_inserted = false;
     }
     if (open_file->caching_file_state) {
@@ -279,17 +286,18 @@ chimera_smb_lock(struct chimera_smb_request *request)
     entry->lease.offset           = request->lock.l_offset;
     entry->lease.length           = want_length;
     entry->lease.owner.protocol   = CHIMERA_VFS_LEASE_PROTO_SMB2;
-    entry->lease.owner.client_key = request->session_handle->session->session_id;
+    entry->lease.owner.client_key = request->session_handle->session->client_key;
     /* The owner identity is the open — different opens (even by the
      * same client) get different owner_lo/owner_hi and lock
      * independently, matching Windows handle-based lock semantics. */
     entry->lease.owner.owner_lo = open_file->file_id.pid;
     entry->lease.owner.owner_hi = open_file->file_id.vid;
-    /* Point at the owning open so the range-vs-caching conflict check can tell
-     * that a byte-range lock and the same open's caching lease (whose owner
-     * identity is the lease key, not the file id) belong together and must not
-     * break each other. */
-    entry->lease.owner.cb_private = open_file;
+    /* Point at the open's caching grant (NULL if it holds no oplock/lease) so the
+     * range-vs-caching conflict check can tell that a byte-range lock and the same
+     * open's -- or a coalesced peer's -- caching lease (whose owner identity is the
+     * lease key, not the file id) belong to one grant and must not break each
+     * other.  The grant's lease carries the same pointer in cb_private. */
+    entry->lease.owner.cb_private = open_file->grant;
 
     request->lock.entry = entry;
 
