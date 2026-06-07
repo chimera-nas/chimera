@@ -899,6 +899,11 @@ struct chimera_smb_conn {
     struct evpl_bind                  *bind;
     struct chimera_smb_conn           *prev;
     struct chimera_smb_conn           *next;
+    /* Active-connection list links (thread->active_conns).  Distinct from
+     * prev/next (the pooled free-list reuse) so an active conn can be walked by
+     * its owning thread without disturbing free-list bookkeeping. */
+    struct chimera_smb_conn           *active_prev;
+    struct chimera_smb_conn           *active_next;
     struct evpl_iovec                  rdma_iov[256];
     char                               local_addr[128];
     char                               remote_addr[128];
@@ -957,35 +962,41 @@ struct chimera_smb_durable_record {
 };
 
 struct chimera_server_smb_shared {
-    struct chimera_smb_config        config;
-    int                              rdma;
-    enum evpl_protocol_id            tcp_protocol;
-    uint8_t                          guid[SMB2_GUID_SIZE];
-    gss_name_t                       svc;
-    gss_cred_id_t                    srv_cred;
-    struct chimera_vfs              *vfs;
-    struct prometheus_metrics       *metrics;
-    struct evpl_endpoint            *endpoint;
-    struct evpl_endpoint            *endpoint_rdma;
-    struct evpl_listener            *listener;
-    struct chimera_smb_session      *sessions;
-    struct chimera_smb_session      *free_sessions;
-    pthread_mutex_t                  sessions_lock;
-    struct chimera_smb_share        *shares;
-    pthread_mutex_t                  shares_lock;
+    struct chimera_smb_config         config;
+    int                               rdma;
+    enum evpl_protocol_id             tcp_protocol;
+    uint8_t                           guid[SMB2_GUID_SIZE];
+    gss_name_t                        svc;
+    gss_cred_id_t                     srv_cred;
+    struct chimera_vfs               *vfs;
+    struct prometheus_metrics        *metrics;
+    struct evpl_endpoint             *endpoint;
+    struct evpl_endpoint             *endpoint_rdma;
+    struct evpl_listener             *listener;
+    struct chimera_smb_session       *sessions;
+    struct chimera_smb_session       *free_sessions;
+    pthread_mutex_t                   sessions_lock;
+    struct chimera_smb_share         *shares;
+    pthread_mutex_t                   shares_lock;
     /* Set when any share has encrypt_data enabled.  Used by SESSION_SETUP to
      * decide whether to derive per-session encryption keys even when the global
      * smb_encryption knob is off (a client may still tree-connect to a
      * per-share-encrypted share). */
-    int                              any_share_encrypt;
-    struct chimera_smb_tree         *free_trees;
-    pthread_mutex_t                  trees_lock;
+    int                               any_share_encrypt;
+    struct chimera_smb_tree          *free_trees;
+    pthread_mutex_t                   trees_lock;
     /* Monotonic, process-global allocator for file persistent ids.  Replaces
      * the old per-tree counter so persistent ids stay unique across tree
      * teardowns — a precondition for durable-handle reconnect lookup. */
-    _Atomic uint64_t                 next_persistent_id;
+    _Atomic uint64_t                  next_persistent_id;
     /* In-memory durable/persistent handle registry (see struct above). */
-    struct chimera_smb_durable_table durable;
+    struct chimera_smb_durable_table  durable;
+    /* Registry of all live SMB threads (chained on thread->next_thread).  Used
+     * to broadcast a lease-break *resume* doorbell to peer threads when an
+     * OPLOCK_BREAK ack settles a lease that a CREATE parked on another thread is
+     * waiting for. */
+    struct chimera_server_smb_thread *threads;
+    pthread_mutex_t                   threads_lock;
 };
 
 /* Forward decl so the inline open_file release paths can call into
@@ -1134,6 +1145,29 @@ struct chimera_server_smb_thread {
     struct evpl_doorbell                lease_break_doorbell;
     struct chimera_smb_lease_break_msg *lease_break_ready;
     pthread_mutex_t                     lease_break_lock;
+
+    /* Lease-break *resume* doorbell: when an inbound OPLOCK_BREAK ack settles a
+     * file's caching lease, CREATEs parked waiting on that break may live on a
+     * different connection owned by a different thread (the two-client lease
+     * break: A's ack arrives on A's thread, B's parked CREATE sits on B's
+     * thread).  The deferred CREATE response's iovecs are thread-local, so the
+     * ack handler cannot complete them; instead it rings every other thread's
+     * resume doorbell, and each thread re-scans its own connections' parked
+     * CREATEs and completes those whose break has now settled
+     * (chimera_vfs_state_caching_breaking() is false).  The re-check makes a
+     * parameterless broadcast safe -- only genuinely-settled creates complete. */
+    struct evpl_doorbell                lease_resume_doorbell;
+
+    /* Active (non-pooled) connections owned by this thread, threaded on
+     * conn->active_prev / conn->active_next.  Lets a thread walk every
+     * connection it owns to find parked CREATEs to resume.  Only touched on the
+     * owning thread (accept / conn_free / resume doorbell all run here), so no
+     * lock is needed. */
+    struct chimera_smb_conn            *active_conns;
+
+    /* Process-global registry link: every SMB thread is chained here under
+    * shared->threads_lock so the resume broadcast can reach every peer. */
+    struct chimera_server_smb_thread   *next_thread;
 
     /* Periodic sweep of the shared durable-handle registry for parked opens
      * whose reconnect grace window has expired.  Each thread sweeps the shared
@@ -1651,6 +1685,10 @@ chimera_smb_conn_free(
 
     // Cleanup GSSAPI context if initialized
     smb_gssapi_cleanup(&conn->gssapi_ctx);
+
+    /* Drop from the owning thread's active-connection list before returning the
+     * conn to the pool (the resume doorbell walks active_conns). */
+    DL_DELETE2(thread->active_conns, conn, active_prev, active_next);
 
     LL_PREPEND(thread->free_conns, conn);
 } /* chimera_smb_conn_free */

@@ -120,6 +120,8 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
         BVT_Compound_UnRelatedRequests
         BVT_CreateClose_CreateAndCloseDirectory
         BVT_CreateClose_CreateAndCloseFile
+        BVT_Leasing_FileLeasingV1
+        BVT_Leasing_FileLeasingV2
         BVT_MultiCredit_OneRequestWithMultiCredit
         BVT_Negotiate_Compatible_2002
         BVT_Negotiate_Compatible_Wildcard
@@ -349,6 +351,7 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
     set(WPTS_SMB2_MULTICHANNEL_ALLOWLIST
         BVT_MultipleChannel_NicRedundantOnBoth
         BVT_NetworkInterfaceInfo_QuerySuccessful
+        MultipleChannel_FileLease
         MultipleChannel_LockUnlockOnDiffChannel
         MultipleChannel_LockUnlockOnSameChannel
         MultipleChannel_MultiChannelOnSameNic
