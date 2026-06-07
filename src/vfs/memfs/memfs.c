@@ -214,6 +214,13 @@ struct memfs_shared {
     uint32_t                 block_shift;
     uint32_t                 block_mask;
     int                      noatime;     /* config: disable atime updates on read */
+    /* Optional capacity (config "size", bytes).  0 = unlimited (the default --
+     * memfs reports a synthetic, never-shrinking size).  When non-zero, memfs
+     * accounts live data blocks against this limit and returns ENOSPC when full;
+     * fs_space_used is maintained atomically at the block alloc/free choke
+     * points (so every path that allocates or frees data is covered). */
+    uint64_t                 fs_size;
+    uint64_t                 fs_space_used;
     pthread_mutex_t          lock;
 };
 
@@ -419,10 +426,29 @@ memfs_resolve_io(
     }
 } /* memfs_resolve_io */
 
+/* charge=1 accounts this block against the capacity limit (config "size") and
+ * returns NULL (ENOSPC) if it would exceed it.  charge=0 skips accounting: used
+ * when an allocation is paired with an immediate free of an existing block (an
+ * in-place overwrite / COW), which is net-zero and must not transiently
+ * overshoot the limit at exactly-full -- a write into already-allocated space
+ * has to succeed even when the device is full. */
 static inline struct memfs_block *
-memfs_block_alloc(struct memfs_thread *thread)
+memfs_block_alloc_charged(
+    struct memfs_thread *thread,
+    int                  charge)
 {
-    struct memfs_block *block;
+    struct memfs_shared *shared = thread->shared;
+    struct memfs_block  *block;
+
+    if (charge && shared->fs_size) {
+        uint64_t used = __atomic_add_fetch(&shared->fs_space_used,
+                                           shared->block_size, __ATOMIC_RELAXED);
+        if (used > shared->fs_size) {
+            __atomic_sub_fetch(&shared->fs_space_used, shared->block_size,
+                               __ATOMIC_RELAXED);
+            return NULL;
+        }
+    }
 
     block = thread->free_block;
 
@@ -432,6 +458,10 @@ memfs_block_alloc(struct memfs_thread *thread)
         block = malloc(sizeof(*block));
 
         if (!block) {
+            if (charge && shared->fs_size) {
+                __atomic_sub_fetch(&shared->fs_space_used, shared->block_size,
+                                   __ATOMIC_RELAXED);
+            }
             return NULL;
         }
 
@@ -439,12 +469,19 @@ memfs_block_alloc(struct memfs_thread *thread)
     }
 
     return block;
+} /* memfs_block_alloc_charged */
+
+static inline struct memfs_block *
+memfs_block_alloc(struct memfs_thread *thread)
+{
+    return memfs_block_alloc_charged(thread, 1);
 } /* memfs_block_alloc */
 
 static inline void
-memfs_block_free(
+memfs_block_free_charged(
     struct memfs_thread *thread,
-    struct memfs_block  *block)
+    struct memfs_block  *block,
+    int                  uncharge)
 {
     int i;
 
@@ -455,7 +492,20 @@ memfs_block_free(
     /* Clear niov to prevent stale access from iterating over freed iovecs */
     block->niov = 0;
 
+    if (uncharge && thread->shared->fs_size) {
+        __atomic_sub_fetch(&thread->shared->fs_space_used,
+                           thread->shared->block_size, __ATOMIC_RELAXED);
+    }
+
     LL_PREPEND(thread->free_block, block);
+} /* memfs_block_free_charged */
+
+static inline void
+memfs_block_free(
+    struct memfs_thread *thread,
+    struct memfs_block  *block)
+{
+    memfs_block_free_charged(thread, block, 1);
 } /* memfs_block_free */
 
 static inline struct memfs_symlink_target *
@@ -872,6 +922,14 @@ memfs_init(
          * relatime semantics. */
         shared->noatime = json_is_true(json_object_get(cfg, "noatime"));
 
+        /* Optional capacity in bytes; 0/absent means unlimited. */
+        json_t *size_cfg = json_object_get(cfg, "size");
+        if (size_cfg) {
+            chimera_memfs_abort_if(!json_is_integer(size_cfg),
+                                   "memfs size must be an integer (bytes)");
+            shared->fs_size = (uint64_t) json_integer_value(size_cfg);
+        }
+
         json_decref(cfg);
     }
 
@@ -1178,10 +1236,13 @@ memfs_map_attrs(
 
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STATFS) {
         attr->va_set_mask      |= CHIMERA_VFS_ATTR_MASK_STATFS;
-        attr->va_fs_space_avail = CHIMERA_VFS_SYNTHETIC_FS_BYTES;
-        attr->va_fs_space_free  = CHIMERA_VFS_SYNTHETIC_FS_BYTES;
-        attr->va_fs_space_total = CHIMERA_VFS_SYNTHETIC_FS_BYTES;
-        attr->va_fs_space_used  = 0;
+        attr->va_fs_space_total = shared->fs_size ? shared->fs_size :
+            CHIMERA_VFS_SYNTHETIC_FS_BYTES;
+        attr->va_fs_space_used = shared->fs_size ?
+            __atomic_load_n(&shared->fs_space_used, __ATOMIC_RELAXED) : 0;
+        attr->va_fs_space_avail = attr->va_fs_space_used < attr->va_fs_space_total ?
+            attr->va_fs_space_total - attr->va_fs_space_used : 0;
+        attr->va_fs_space_free  = attr->va_fs_space_avail;
         attr->va_fs_files_total = CHIMERA_VFS_SYNTHETIC_FS_INODES;
         attr->va_fs_files_free  = CHIMERA_VFS_SYNTHETIC_FS_INODES;
         attr->va_fs_files_avail = CHIMERA_VFS_SYNTHETIC_FS_INODES;
@@ -1552,7 +1613,8 @@ memfs_setattr(
                 uint32_t                 offset_in_block = new_size &
                     block_mask;
 
-                new_block = memfs_block_alloc(thread);
+                /* Net-zero replace of the partial last block: no charge. */
+                new_block = memfs_block_alloc_charged(thread, 0);
 
                 if (!new_block) {
                     pthread_mutex_unlock(&inode->lock);
@@ -1575,7 +1637,7 @@ memfs_setattr(
                 memset(new_block->iov[0].data + offset_in_block, 0,
                        block_size - offset_in_block);
 
-                memfs_block_free(thread, old_block);
+                memfs_block_free_charged(thread, old_block, 0);
 
                 /* Replace old block with new block */
                 fork->blocks[last_block_idx] = new_block;
@@ -1748,10 +1810,13 @@ memfs_mount(
 
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STATFS) {
         attr->va_set_mask      |= CHIMERA_VFS_ATTR_MASK_STATFS;
-        attr->va_fs_space_avail = CHIMERA_VFS_SYNTHETIC_FS_BYTES;
-        attr->va_fs_space_free  = CHIMERA_VFS_SYNTHETIC_FS_BYTES;
-        attr->va_fs_space_total = CHIMERA_VFS_SYNTHETIC_FS_BYTES;
-        attr->va_fs_space_used  = 0;
+        attr->va_fs_space_total = shared->fs_size ? shared->fs_size :
+            CHIMERA_VFS_SYNTHETIC_FS_BYTES;
+        attr->va_fs_space_used = shared->fs_size ?
+            __atomic_load_n(&shared->fs_space_used, __ATOMIC_RELAXED) : 0;
+        attr->va_fs_space_avail = attr->va_fs_space_used < attr->va_fs_space_total ?
+            attr->va_fs_space_total - attr->va_fs_space_used : 0;
+        attr->va_fs_space_free  = attr->va_fs_space_avail;
         attr->va_fs_files_total = CHIMERA_VFS_SYNTHETIC_FS_INODES;
         attr->va_fs_files_free  = CHIMERA_VFS_SYNTHETIC_FS_INODES;
         attr->va_fs_files_avail = CHIMERA_VFS_SYNTHETIC_FS_INODES;
@@ -3052,7 +3117,10 @@ memfs_write(
 
         old_block = fork->blocks ? fork->blocks[bi] : NULL;
 
-        block = memfs_block_alloc(thread);
+        /* Overwriting an existing block is net-zero (new block paired with the
+        * old block's free below), so don't charge it -- a write into already
+        * allocated space must succeed even when the device is exactly full. */
+        block = memfs_block_alloc_charged(thread, old_block ? 0 : 1);
 
         if (!block) {
             pthread_mutex_unlock(&inode->lock);
@@ -3085,7 +3153,7 @@ memfs_write(
                                        block_offset);
 
                 fork->blocks[bi] = NULL;
-                memfs_block_free(thread, old_block);
+                memfs_block_free_charged(thread, old_block, 0);
             } else {
                 memset(block->iov[0].data, 0, block_offset);
 
@@ -3093,9 +3161,9 @@ memfs_write(
                        block_size - block_offset - block_len);
             }
         } else if (old_block) {
-            /* Full block overwrite: free the old block */
+            /* Full block overwrite: free the old block (net-zero, no uncharge) */
             fork->blocks[bi] = NULL;
-            memfs_block_free(thread, old_block);
+            memfs_block_free_charged(thread, old_block, 0);
         }
 
         evpl_iovec_cursor_copy(&cursor,
@@ -3126,6 +3194,10 @@ memfs_write(
     request->complete(request);
 } /* memfs_write */
 
+
+static int memfs_grow_blocks(
+    struct memfs_inode *inode,
+    uint64_t            last_block);
 
 static void
 memfs_allocate(
@@ -3198,7 +3270,8 @@ memfs_allocate(
                     zero_end = (hole_end < block_end) ?
                         (hole_end - block_start) : block_size;
 
-                    new_block = memfs_block_alloc(thread);
+                    /* Net-zero replace of a partial boundary block: no charge. */
+                    new_block = memfs_block_alloc_charged(thread, 0);
 
                     if (!new_block) {
                         pthread_mutex_unlock(&inode->lock);
@@ -3222,7 +3295,7 @@ memfs_allocate(
                     memset(new_block->iov[0].data + zero_start, 0,
                            zero_end - zero_start);
 
-                    memfs_block_free(thread, old_block);
+                    memfs_block_free_charged(thread, old_block, 0);
                     fork->blocks[bi] = new_block;
                 }
             }
@@ -3236,8 +3309,58 @@ memfs_allocate(
             }
         }
     } else {
-        /* ALLOCATE: extend file size if needed */
+        /* ALLOCATE: reserve space for [offset, offset+length) and extend size. */
         uint64_t new_end = request->allocate.offset + request->allocate.length;
+
+        /* In capacity mode, materialize zero blocks across the range so the
+         * space is actually consumed -- and charged at the block alloc/free
+         * choke points.  This keeps the accounting honest under the operations
+         * the reservation model got wrong: a later write reuses these blocks
+         * (alloc-new + free-old nets to zero, so no double charge), and a
+         * DEALLOCATE frees them (releasing the space).  block_alloc returns
+         * NULL (ENOSPC) when the filesystem is full.  Streams keep the cheap
+         * size-only path (memfs_grow_blocks operates on the base fork). */
+        if (shared->fs_size && !stream && request->allocate.length) {
+            const uint32_t block_size  = shared->block_size;
+            const uint32_t block_shift = shared->block_shift;
+            uint64_t       first_block = request->allocate.offset >> block_shift;
+            uint64_t       last_block  = (new_end - 1) >> block_shift;
+            uint64_t       bi;
+
+            if (memfs_grow_blocks(inode, last_block) != 0) {
+                pthread_mutex_unlock(&inode->lock);
+                request->status = CHIMERA_VFS_ENOSPC;
+                request->complete(request);
+                return;
+            }
+
+            if (last_block + 1 > fork->num_blocks) {
+                fork->num_blocks = last_block + 1;
+            }
+
+            for (bi = first_block; bi <= last_block; bi++) {
+                struct memfs_block *block;
+
+                if (fork->blocks[bi]) {
+                    continue;   /* already materialized */
+                }
+
+                block = memfs_block_alloc(thread);
+
+                if (!block) {
+                    pthread_mutex_unlock(&inode->lock);
+                    request->status = CHIMERA_VFS_ENOSPC;
+                    request->complete(request);
+                    return;
+                }
+
+                block->niov = evpl_iovec_alloc(evpl, block_size, 4096,
+                                               CHIMERA_MEMFS_BLOCK_MAX_IOV,
+                                               EVPL_IOVEC_FLAG_SHARED, block->iov);
+                memset(block->iov[0].data, 0, block_size);
+                fork->blocks[bi] = block;
+            }
+        }
 
         if (new_end > *p_size) {
             *p_size = new_end;
