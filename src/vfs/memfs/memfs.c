@@ -5254,7 +5254,7 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_memfs = {
         CHIMERA_VFS_CAP_COPY_RANGE | CHIMERA_VFS_CAP_CLONE_RANGE | CHIMERA_VFS_CAP_MOVE_RANGE |
         CHIMERA_VFS_CAP_ACL_NATIVE | CHIMERA_VFS_CAP_XATTR | CHIMERA_VFS_CAP_LAYOUT |
         CHIMERA_VFS_CAP_READ_PROVIDES_BUFFERS |
-        CHIMERA_VFS_CAP_NAMED_STREAMS | CHIMERA_VFS_CAP_RPL,
+        CHIMERA_VFS_CAP_NAMED_STREAMS | CHIMERA_VFS_CAP_RPL | CHIMERA_VFS_CAP_FS_LOCK,
     .init           = memfs_init,
     .destroy        = memfs_destroy,
     .thread_init    = memfs_thread_init,
