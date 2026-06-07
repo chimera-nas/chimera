@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -98,9 +98,7 @@ chimera_posix_mkdirat(
     req.mkdir.callback     = chimera_posix_mkdirat_callback;
     req.mkdir.private_data = &comp;
 
-    req.mkdir.set_attr.va_req_mask = 0;
-    req.mkdir.set_attr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
-    req.mkdir.set_attr.va_mode     = mode;
+    chimera_posix_set_create_mode(&req.mkdir.set_attr, mode);
 
     chimera_posix_worker_enqueue(worker, &req, chimera_posix_mkdirat_exec);
 

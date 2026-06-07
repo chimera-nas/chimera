@@ -57,7 +57,7 @@ chimera_setattr_open_complete(
 
     chimera_vfs_setattr(
         request->thread->vfs_thread,
-        &request->thread->client->cred,
+        chimera_client_req_cred(request),
         oh,
         &request->setattr.set_attr,
         0,  /* pre_attr_mask */
@@ -100,7 +100,7 @@ chimera_setattr_lookup_complete(
 
     chimera_vfs_open_fh(
         request->thread->vfs_thread,
-        &request->thread->client->cred,
+        chimera_client_req_cred(request),
         request->fh,
         request->fh_len,
         open_flags,
@@ -115,7 +115,7 @@ chimera_dispatch_setattr(
 {
     chimera_vfs_lookup(
         thread->vfs_thread,
-        &thread->client->cred,
+        chimera_client_req_cred(request),
         thread->client->root_fh,
         thread->client->root_fh_len,
         request->setattr.path,
@@ -125,6 +125,26 @@ chimera_dispatch_setattr(
         chimera_setattr_lookup_complete,
         request);
 } /* chimera_dispatch_setattr */
+
+/* Variant that does NOT follow a final symlink (for lchown(2) and friends): the
+ * attributes are applied to the symlink itself, not its target. */
+static inline void
+chimera_dispatch_lsetattr(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request)
+{
+    chimera_vfs_lookup(
+        thread->vfs_thread,
+        chimera_client_req_cred(request),
+        thread->client->root_fh,
+        thread->client->root_fh_len,
+        request->setattr.path,
+        request->setattr.path_len,
+        CHIMERA_VFS_ATTR_FH,
+        0,  /* no CHIMERA_VFS_LOOKUP_FOLLOW */
+        chimera_setattr_lookup_complete,
+        request);
+} /* chimera_dispatch_lsetattr */
 
 /* Completion callback for setattr_at operations - doesn't release parent handle */
 static void
@@ -157,7 +177,7 @@ chimera_dispatch_setattr_at(
 {
     chimera_vfs_setattr(
         thread->vfs_thread,
-        &thread->client->cred,
+        chimera_client_req_cred(request),
         parent_handle,
         &request->setattr.set_attr,
         0,  /* pre_attr_mask */

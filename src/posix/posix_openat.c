@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -65,8 +65,6 @@ chimera_posix_openat(
         va_end(ap);
     }
 
-    (void) mode;
-
     chimera_posix_completion_init(&comp, &req);
 
     // Handle AT_FDCWD case
@@ -118,6 +116,12 @@ chimera_posix_openat(
     req.open.callback     = chimera_posix_openat_callback;
     req.open.private_data = &comp;
     req.open.flags        = chimera_posix_to_chimera_flags(flags);
+
+    if (flags & O_CREAT) {
+        chimera_posix_set_create_mode(&req.open.set_attr, mode);
+    } else {
+        chimera_posix_no_create_mode(&req.open.set_attr);
+    }
 
     chimera_posix_worker_enqueue(worker, &req, chimera_posix_openat_exec);
 

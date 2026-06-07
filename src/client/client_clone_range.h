@@ -33,7 +33,7 @@ chimera_dispatch_clone_range(
 {
     chimera_vfs_clone_range(
         thread->vfs_thread,
-        &thread->client->cred,
+        chimera_client_req_cred(request),
         request->clone_range.src_handle,
         request->clone_range.src_offset,
         request->clone_range.dst_handle,

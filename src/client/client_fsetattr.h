@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -34,7 +34,7 @@ chimera_dispatch_fsetattr(
 {
     chimera_vfs_setattr(
         thread->vfs_thread,
-        &thread->client->cred,
+        chimera_client_req_cred(request),
         request->fsetattr.handle,
         &request->fsetattr.set_attr,
         0,  /* pre_attr_mask */

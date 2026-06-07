@@ -30,6 +30,9 @@ chimera_mkdir(
 
     request->mkdir.name_offset = slash ? slash - path : -1;
 
+    request->mkdir.set_attr.va_req_mask = 0;
+    request->mkdir.set_attr.va_set_mask = 0;
+
     memcpy(request->mkdir.path, path, path_len);
 
     chimera_dispatch_mkdir(thread, request);
