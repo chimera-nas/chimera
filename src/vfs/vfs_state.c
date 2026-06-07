@@ -1372,7 +1372,8 @@ chimera_vfs_caching_grant_acquire(
 SYMBOL_EXPORT void
 chimera_vfs_caching_grant_release(
     struct chimera_vfs_state         *state,
-    struct chimera_vfs_caching_grant *grant)
+    struct chimera_vfs_caching_grant *grant,
+    bool                              pump)
 {
     struct chimera_vfs_file_state     *file = grant->file;
     struct chimera_vfs_caching_grant **pp;
@@ -1399,9 +1400,13 @@ chimera_vfs_caching_grant_release(
     pthread_mutex_unlock(&file->lock);
 
     if (last) {
-        /* Removing the lease may unblock a pending acquire or parked I/O. */
-        chimera_vfs_state_pump_pending(state, file);
-        chimera_vfs_state_pump_io(state, file);
+        /* Removing the lease may unblock a pending acquire or parked I/O -- but
+         * only pump when a live connection still exists to answer the woken
+         * waiter (skipped at thread shutdown; see chimera_smb_durable_drain_all). */
+        if (pump) {
+            chimera_vfs_state_pump_pending(state, file);
+            chimera_vfs_state_pump_io(state, file);
+        }
         free(grant);
     }
 } /* chimera_vfs_caching_grant_release */

@@ -232,12 +232,16 @@ chimera_vfs_caching_grant_acquire(
     struct chimera_vfs_lease            **conflict_out);
 
 /* Drop one reference to a caching grant.  On the last reference the embedded
- * lease is unlinked from the file, pending/io waiters are pumped, and the grant
- * is freed.  Caller must NOT hold file->lock. */
+ * lease is unlinked from the file and the grant is freed.  Caller must NOT hold
+ * file->lock.  When `pump` is true (the normal close path) pending/io waiters
+ * are pumped after the lease is removed so a blocked acquirer can proceed; pass
+ * false at thread shutdown, where no live connection remains to answer a pumped
+ * waiter (pumping there would reply on a dead connection). */
 void
 chimera_vfs_caching_grant_release(
     struct chimera_vfs_state         *state,
-    struct chimera_vfs_caching_grant *grant);
+    struct chimera_vfs_caching_grant *grant,
+    bool                              pump);
 
 /* True if any caching lease on the file is mid-break awaiting a client ack (a
  * holder was sent an ack-required OPLOCK_BREAK that has not yet completed),

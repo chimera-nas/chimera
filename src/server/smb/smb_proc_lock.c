@@ -69,7 +69,7 @@ chimera_smb_open_file_drain_locks(
          * reference: once removed, the break callback will not try to notify a
          * closing open, and on the grant's last reference the lease is freed. */
         chimera_smb_grant_remove_member(open_file->grant, open_file);
-        chimera_vfs_caching_grant_release(vfs_state, open_file->grant);
+        chimera_vfs_caching_grant_release(vfs_state, open_file->grant, true /*pump*/);
         open_file->grant                  = NULL;
         open_file->caching_lease_inserted = false;
     }
