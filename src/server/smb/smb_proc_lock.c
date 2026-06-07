@@ -26,6 +26,25 @@
                                    SMB2_LOCKFLAG_EXCLUSIVE   | \
                                    SMB2_LOCKFLAG_UNLOCK)
 
+/* Half-open byte-range overlap, mirroring chimera_vfs_range_overlap: length 0
+ * is a genuine zero-byte range and the exclusive end saturates at UINT64_MAX on
+ * overflow.  Used for the SMB same-handle conflict rule, which the VFS conflict
+ * matrix (POSIX: an owner never conflicts with itself) does not enforce. */
+static inline bool
+smb_lock_ranges_overlap(
+    uint64_t a_off,
+    uint64_t a_len,
+    uint64_t b_off,
+    uint64_t b_len)
+{
+    __uint128_t a_end = (a_len == UINT64_MAX)
+        ? ((__uint128_t) 1 << 64) : (__uint128_t) a_off + a_len;
+    __uint128_t b_end = (b_len == UINT64_MAX)
+        ? ((__uint128_t) 1 << 64) : (__uint128_t) b_off + b_len;
+
+    return a_off < b_end && b_off < a_end;
+} /* smb_lock_ranges_overlap */
+
 /* One held byte-range, owned by the open_file.  Released on UNLOCK or
  * at close via chimera_smb_open_file_drain_locks. */
 struct chimera_smb_lock_entry {
@@ -232,12 +251,12 @@ chimera_smb_lock(struct chimera_smb_request *request)
         return;
     }
 
-    /* A byte range whose Offset + Length wraps past 2^64 is invalid
-     * (MS-SMB2 §3.3.5.14.{1,2}): reject it with INVALID_LOCK_RANGE before
-     * touching the lock table.  Length 0 (handled below as a to-EOF lock)
-     * never wraps, so it is excluded. */
-    if (request->lock.l_length != 0 &&
-        request->lock.l_offset + request->lock.l_length < request->lock.l_offset) {
+    /* A byte range whose end strictly exceeds 2^64 is invalid (MS-SMB2
+     * §3.3.5.14.{1,2}): reject it with INVALID_LOCK_RANGE before touching the
+     * lock table.  A range that ends exactly at 2^64 (e.g. offset=2^64-1,
+     * length=1, the last byte) is valid; length 0 is a zero-byte range. */
+    if ((__uint128_t) request->lock.l_offset + request->lock.l_length >
+        ((__uint128_t) 1 << 64)) {
         chimera_smb_open_file_release(request, open_file);
         chimera_smb_complete_request(request, SMB2_STATUS_INVALID_LOCK_RANGE);
         return;
@@ -279,6 +298,30 @@ chimera_smb_lock(struct chimera_smb_request *request)
         chimera_smb_open_file_release(request, open_file);
         chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
         return;
+    }
+
+    /* SMB same-handle conflict rule (MS-SMB2 / Windows): a new EXCLUSIVE lock
+     * conflicts with any of this handle's own locks whose range it overlaps --
+     * including re-locking an identical non-empty range (smb2.lock.errorcode).
+     * A new SHARED lock never conflicts with the handle's own locks, so an
+     * exclusive range can be re-locked shared and stacks (smb2.lock.unlock).  A
+     * zero-length lock owns no bytes and so overlaps nothing, including another
+     * zero-length lock at the same offset (smb2.lock.zerobytelength).  The VFS
+     * conflict matrix skips a lock's own owner (POSIX semantics: a process never
+     * conflicts with itself and overlapping locks coalesce), so the SMB rule is
+     * enforced here before the (cross-handle) acquire. */
+    if (kind == SMB2_LOCKFLAG_EXCLUSIVE) {
+        struct chimera_smb_lock_entry *held;
+        DL_FOREACH(open_file->lock_entries, held)
+        {
+            if (smb_lock_ranges_overlap(held->lease.offset, held->lease.length,
+                                        request->lock.l_offset, want_length)) {
+                chimera_smb_open_file_release(request, open_file);
+                chimera_smb_complete_request(request,
+                                             SMB2_STATUS_LOCK_NOT_GRANTED);
+                return;
+            }
+        }
     }
 
     /* LOCK acquire. */
