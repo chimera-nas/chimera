@@ -190,6 +190,7 @@ chimera_smb_server_init(
     pthread_mutex_init(&shared->sessions_lock, NULL);
     pthread_mutex_init(&shared->shares_lock, NULL);
     pthread_mutex_init(&shared->trees_lock, NULL);
+    pthread_mutex_init(&shared->threads_lock, NULL);
 
     /* Seed the persistent-id allocator with a random, nonzero base so ids do
      * not restart from a fixed value across daemon restarts (a courtesy to the
@@ -250,6 +251,8 @@ chimera_smb_server_destroy(void *data)
     if (shared->srv_cred != GSS_C_NO_CREDENTIAL) {
         gss_release_cred(&min, &shared->srv_cred);
     }
+
+    pthread_mutex_destroy(&shared->threads_lock);
 
     free(shared);
 } /* smb_server_destroy */
@@ -1922,6 +1925,10 @@ chimera_smb_server_accept(
     evpl_bind_get_local_address(bind, conn->local_addr, sizeof(conn->local_addr));
     evpl_bind_get_remote_address(bind, conn->remote_addr, sizeof(conn->remote_addr));
 
+    /* Track this connection on its owning thread's active list so the
+     * lease-break resume doorbell can walk it for parked CREATEs. */
+    DL_APPEND2(thread->active_conns, conn, active_prev, active_next);
+
     *notify_callback   = chimera_smb_server_notify;
     *segment_callback  = chimera_smb_server_segment;
     *conn_private_data = conn;
@@ -1967,6 +1974,18 @@ chimera_smb_server_thread_init(
     chimera_smb_notify_thread_init(thread);
     chimera_smb_lease_break_thread_init(thread);
 
+    /* Resume doorbell: a peer thread settling a lease break rings this so this
+     * thread re-scans its own connections for parked CREATEs to complete. */
+    evpl_add_doorbell(evpl, &thread->lease_resume_doorbell,
+                      chimera_smb_create_resume_doorbell_callback);
+
+    /* Register in the process-global thread list so resume broadcasts reach
+     * this thread. */
+    pthread_mutex_lock(&shared->threads_lock);
+    thread->next_thread = shared->threads;
+    shared->threads     = thread;
+    pthread_mutex_unlock(&shared->threads_lock);
+
     if (shared->config.persistent_handles) {
         evpl_add_timer(evpl, &thread->durable_sweeper,
                        chimera_smb_durable_sweeper_fire,
@@ -1991,6 +2010,19 @@ chimera_smb_server_thread_destroy(void *data)
     struct chimera_smb_conn           *conn;
     struct chimera_smb_compound       *compound;
     struct chimera_smb_session_handle *session_handle;
+    struct chimera_server_smb_thread **tpp;
+
+    /* Unregister from the process-global thread list first so a peer thread's
+     * resume broadcast can no longer ring this thread's (about-to-be-removed)
+     * resume doorbell.  evpl_remove_doorbell below then runs on this thread. */
+    pthread_mutex_lock(&thread->shared->threads_lock);
+    for (tpp = &thread->shared->threads; *tpp; tpp = &(*tpp)->next_thread) {
+        if (*tpp == thread) {
+            *tpp = thread->next_thread;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&thread->shared->threads_lock);
 
     /* Release any durable/persistent handles still parked in the shared
      * registry while this thread's vfs_thread is alive.  Each parked open
@@ -2036,6 +2068,7 @@ chimera_smb_server_thread_destroy(void *data)
     }
 
     evpl_listener_detach(thread->evpl, thread->binding);
+    evpl_remove_doorbell(thread->evpl, &thread->lease_resume_doorbell);
     chimera_smb_notify_thread_destroy(thread);
     chimera_smb_lease_break_thread_destroy(thread);
 

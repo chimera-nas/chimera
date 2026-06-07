@@ -1688,27 +1688,22 @@ chimera_smb_create_open_finish(
     chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
 } /* chimera_smb_create_open_finish */
 
-/* Resume any CREATE parked on `ack_request`'s connection whose triggered lease
- * break has now settled (no caching lease on the file is mid-break).  Called from
- * the inbound OPLOCK_BREAK ack handler after the lease is acked.  The opener's
- * pending create sits on its own conn's parked_requests; in the single-channel
- * case that is the same connection the ack arrived on, so the deferred response's
- * thread-local iovecs are produced on the right thread.  A create awaiting an ack
- * that arrives on a different channel is drained by that channel's ack. */
-void
-chimera_smb_create_resume_parked(struct chimera_smb_request *ack_request)
+/* Resume the settled parked CREATEs on one connection.  Pull every parked
+ * CREATE whose triggered lease break has now settled (no caching lease on the
+ * file is mid-break) off `conn`'s parked list, then complete them on this
+ * thread.  `conn` must be owned by `thread` so the deferred response's
+ * thread-local iovecs are produced on the right thread.  The
+ * chimera_vfs_state_caching_breaking() re-check is what makes a blind sweep
+ * safe: only genuinely-settled creates complete. */
+static void
+chimera_smb_create_resume_parked_conn(
+    struct chimera_server_smb_thread *thread,
+    struct chimera_vfs_state         *vfs_state,
+    struct chimera_smb_conn          *conn)
 {
-    struct chimera_server_smb_thread *thread    = ack_request->compound->thread;
-    struct chimera_vfs_state         *vfs_state = thread->vfs_thread->vfs->vfs_state;
-    struct chimera_smb_conn          *conn      = ack_request->compound->conn;
-    struct chimera_smb_request       *req, **pp, *resume = NULL;
+    struct chimera_smb_request *req, **pp, *resume = NULL;
 
-    if (!conn) {
-        return;
-    }
-
-    /* Pull settled parked CREATEs off the conn's parked list, then complete them.
-     * Collect first (unlinking + clearing armed) so the completion path does not
+    /* Collect first (unlinking + clearing armed) so the completion path does not
      * re-walk / re-cancel the list we are iterating. */
     pp = &conn->parked_requests;
     while ((req = *pp)) {
@@ -1741,7 +1736,83 @@ chimera_smb_create_resume_parked(struct chimera_smb_request *ack_request)
          * SMB2_FLAGS_ASYNC_COMMAND matching the interim. */
         chimera_smb_complete_request(req, SMB2_STATUS_SUCCESS);
     }
+} /* chimera_smb_create_resume_parked_conn */
+
+/* Resume any CREATE parked on `ack_request`'s OWN connection whose triggered
+ * lease break has now settled.  Called from the inbound OPLOCK_BREAK ack handler
+ * after the lease is acked.  This is the single-client fast path: a client that
+ * breaks its own lease (e.g. a lease upgrade) has its pending create on the same
+ * connection the ack arrived on, so the deferred response's thread-local iovecs
+ * are produced on the right thread.  The two-client case -- where B's CREATE
+ * parked on B's connection/thread triggered the break A just acked on A's
+ * thread -- is handled by chimera_smb_create_resume_parked_broadcast, which
+ * rings every peer thread's resume doorbell so each completes its own parked
+ * CREATEs locally. */
+void
+chimera_smb_create_resume_parked(struct chimera_smb_request *ack_request)
+{
+    struct chimera_server_smb_thread *thread    = ack_request->compound->thread;
+    struct chimera_vfs_state         *vfs_state = thread->vfs_thread->vfs->vfs_state;
+    struct chimera_smb_conn          *conn      = ack_request->compound->conn;
+
+    if (conn) {
+        chimera_smb_create_resume_parked_conn(thread, vfs_state, conn);
+    }
+
+    /* Wake peer threads to resume CREATEs parked on their own connections (the
+     * two-client lease break: the opener's parked CREATE lives on a different
+     * connection/thread than the one this ack arrived on). */
+    chimera_smb_create_resume_parked_broadcast(thread);
 } /* chimera_smb_create_resume_parked */
+
+/* Resume doorbell handler: runs on its owning SMB thread.  An OPLOCK_BREAK ack
+ * settled a lease on some (possibly different) thread; re-scan every connection
+ * this thread owns and complete any parked CREATE whose break has now settled.
+ * The per-CREATE caching_breaking() re-check gates correctness, so this blind
+ * sweep only completes genuinely-settled opens; a CREATE still waiting on an
+ * unsettled break is left parked (its own deadline / a later ack resumes it). */
+SYMBOL_EXPORT void
+chimera_smb_create_resume_doorbell_callback(
+    struct evpl          *evpl,
+    struct evpl_doorbell *doorbell)
+{
+    struct chimera_server_smb_thread *thread;
+    struct chimera_vfs_state         *vfs_state;
+    struct chimera_smb_conn          *conn, *tmp;
+
+    (void) evpl;
+
+    thread = container_of(doorbell, struct chimera_server_smb_thread,
+                          lease_resume_doorbell);
+    vfs_state = thread->vfs_thread->vfs->vfs_state;
+
+    DL_FOREACH_SAFE2(thread->active_conns, conn, tmp, active_next)
+    {
+        chimera_smb_create_resume_parked_conn(thread, vfs_state, conn);
+    }
+} /* chimera_smb_create_resume_doorbell_callback */
+
+/* Ring every PEER SMB thread's resume doorbell so each re-scans its own
+ * connections for parked CREATEs the just-settled lease break unblocked.
+ * `origin` is skipped because the ack handler already swept its own connection
+ * inline; the per-CREATE caching_breaking() re-check would make a re-sweep of
+ * `origin` harmless anyway.  The deferred CREATE responses' iovecs are
+ * thread-local, so each thread must complete its own. */
+void
+chimera_smb_create_resume_parked_broadcast(struct chimera_server_smb_thread *origin)
+{
+    struct chimera_server_smb_shared *shared = origin->shared;
+    struct chimera_server_smb_thread *t;
+
+    pthread_mutex_lock(&shared->threads_lock);
+    for (t = shared->threads; t; t = t->next_thread) {
+        if (t == origin) {
+            continue;
+        }
+        evpl_ring_doorbell(&t->lease_resume_doorbell);
+    }
+    pthread_mutex_unlock(&shared->threads_lock);
+} /* chimera_smb_create_resume_parked_broadcast */
 
 /*
  * Map the CREATE DesiredAccess to canonical access-mask bits and evaluate it

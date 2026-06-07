@@ -299,10 +299,22 @@ int chimera_smb_parse_oplock_break(
 void chimera_smb_oplock_break(
     struct chimera_smb_request *request);
 
-/* Resume CREATEs parked on the ack's tree whose triggered lease break has now
- * settled.  Called from the OPLOCK_BREAK ack handler after the lease is acked. */
+/* Resume CREATEs parked whose triggered lease break has now settled.  Called
+ * from the OPLOCK_BREAK ack handler after the lease is acked: sweeps the ack's
+ * own connection, then broadcasts a resume doorbell to peer threads (a CREATE
+ * that triggered the break can be parked on another connection/thread). */
 void chimera_smb_create_resume_parked(
     struct chimera_smb_request *ack_request);
+
+/* Ring every peer SMB thread's resume doorbell so each re-scans its own
+ * connections for parked CREATEs the just-settled lease break unblocked. */
+void chimera_smb_create_resume_parked_broadcast(
+    struct chimera_server_smb_thread *origin);
+
+/* Resume doorbell handler (runs on its owning thread). */
+void chimera_smb_create_resume_doorbell_callback(
+    struct evpl          *evpl,
+    struct evpl_doorbell *doorbell);
 
 void chimera_smb_oplock_break_reply(
     struct evpl_iovec_cursor   *reply_cursor,
