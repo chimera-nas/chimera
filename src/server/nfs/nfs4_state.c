@@ -1396,7 +1396,9 @@ nfs4_range_lease_insert(
     rl->lease.mode.denied  = 0;
     rl->lease.owner        = *owner;
     rl->lease.offset       = start;
-    rl->lease.length       = (end == UINT64_MAX) ? 0 : (end - start);
+    /* The VFS range layer represents to-EOF as UINT64_MAX (length 0 is a
+     * genuine zero-byte range), matching the [start, end) sentinel here. */
+    rl->lease.length = (end == UINT64_MAX) ? UINT64_MAX : (end - start);
 
     chimera_vfs_state_try_insert(vfs_state, file_state, &rl->lease, NULL);
 
