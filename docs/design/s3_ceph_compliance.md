@@ -80,11 +80,16 @@ hard 50 s timeout, so a crash/hang only loses that one test.
 
 | Outcome  | Count | % |
 |----------|------:|----:|
-| passed   |  146  | 17% |
+| passed   |  151  | 18% |
 | failed   |  590  | 70% |
 | skipped  |   94  | 11% |
-| hung     |    8  |  1% |
+| hung     |    3  | <1% |
 | **total**| **838** | |
+
+After the crash/hang fixes below, a full run reports **no daemon crashes**, and
+the only remaining "hangs" are 3 lifecycle tests that `time.sleep(~70 s)` waiting
+for object expiration chimera doesn't implement (the daemon is idle) — a feature
+gap, not a server hang.
 
 Per feature area (pass / fail / hang / skip):
 
@@ -96,7 +101,7 @@ Per feature area (pass / fail / hang / skip):
 | versioning            |  0 |  51 | 0 | 3 |
 | object lock/retention |  3 |  41 | 0 | 0 |
 | multipart             | 11 |  23 | 0 | 1 |
-| object basics         | 14 |  16 | 3 | 0 |
+| object basics         | 17 |  16 | 0 | 0 |
 | post-object (form)    | 12 |  19 | 0 | 0 |
 | tagging               |  3 |  27 | 0 | 0 |
 | bucket basics         | 16 |  13 | 0 | 0 |
@@ -105,7 +110,7 @@ Per feature area (pass / fail / hang / skip):
 | copy                  |  8 |  11 | 0 | 0 |
 | conditional requests  |  7 |   7 | 0 | 0 |
 | CORS                  |  0 |  12 | 0 | 0 |
-| ranged get            |  2 |   5 | 2 | 0 |
+| ranged get            |  4 |   5 | 0 | 0 |
 | checksum              |  0 |   9 | 0 | 0 |
 | (other / misc)        | ~17| ~80 | 0 | ~76 |
 
@@ -115,22 +120,31 @@ lifecycle (create/upload/list/complete/abort), CopyObject, a chunk of
 conditional-request and listing edge cases, and DNS-style bucket-name
 validation. Everything that needs an unimplemented feature fails.
 
-### Daemon crashes / hangs found (robustness bugs)
+### Daemon crashes / hangs found (robustness bugs) — fixed
 
-Getting the suite to even run end-to-end surfaced several requests that abort or
-wedge the entire daemon — each is a remote-triggerable DoS:
+Getting the suite to run end-to-end surfaced several requests that aborted or
+wedged the entire daemon — each a remote-triggerable DoS. All are fixed; a full
+run now reports zero daemon crashes and zero server-side hangs.
 
-- **ETag-on-non-object assert (crashed the daemon), fixed here.** `GET`/`HEAD`
-  on a key that resolves to a directory, or to any entry whose lookup lacks
-  size/mtime, fatally asserted in `chimera_s3_compute_etag`. Now returns
-  `NoSuchKey`. (This fired from multiple call sites; all routed through the
-  hardened `chimera_s3_get_lookup_callback`.)
-- **Busy-loop hang (still open).** 8 cases hang until the client/timeout kills
-  them — the daemon spins at ~100% on one thread and never replies:
-  `test_atomic_{write,read,dual_write}_8mb` (an 8 MB object data-path hang — the
-  1 MB/4 MB variants pass), `test_ranged_request_skip_leading_bytes_response_code`
-  and `..._return_trailing_bytes_response_code` (ranged-GET edge cases), and the
-  three `lifecycle*_expiration` cases. These need a separate fix.
+- **ETag-on-non-object assert (crash).** `GET`/`HEAD` on a key that resolves to
+  a directory, or to any entry whose lookup lacks size/mtime, fatally asserted
+  in `chimera_s3_compute_etag`. Fixed: `chimera_s3_get_lookup_callback` now
+  returns `NoSuchKey` for non-regular-file / attr-incomplete lookups.
+- **Open-ended / suffix range infinite loop (hang).** A ranged GET with an
+  open-ended `bytes=N-` parsed to `length = -1`, and a suffix `bytes=-N` to
+  `offset = -1`; these sentinels were never resolved against the object size, so
+  `file_left` wrapped to a huge unsigned value and `chimera_s3_get_send` looped
+  forever issuing reads at ever-growing offsets (spinning one thread at 100%).
+  Fixed: `chimera_s3_get_lookup_callback` resolves both forms against the object
+  size and clamps to EOF once the size is known. This hit `boto3`'s
+  `download_fileobj` (≥ 8 MB switches to ranged/multipart download — hence the
+  `atomic_*_8mb` cases hung while 1/4 MB passed) and the explicit
+  `ranged_request_skip_leading_bytes` / `_return_trailing_bytes` tests — 5 cases,
+  now passing.
+
+The 3 remaining timeouts (`lifecycle*_expiration`) are **not** daemon hangs:
+the test sleeps ~70 s waiting for object expiration that needs the unimplemented
+lifecycle feature.
 
 ### Top non-crash failure reasons
 
@@ -149,7 +163,7 @@ wedge the entire daemon — each is a remote-triggerable DoS:
 
 The committed ctest (`chimera/server/s3/ceph_s3tests`) runs the
 `passing_tests.txt` allowlist against a single daemon as a regression guard.
-143 of the 146 isolated-passing cases also pass in a shared-daemon session and
+148 of the 151 isolated-passing cases also pass in a shared-daemon session and
 make up the allowlist; the other 3 (`test_object_put_authenticated`,
 `test_object_write_with_chunked_transfer_encoding`,
 `test_lifecycle_expiration_tags1`) pass only in isolation — they depend on

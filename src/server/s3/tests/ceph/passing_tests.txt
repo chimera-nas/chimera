@@ -11,11 +11,14 @@ s3tests/functional/test_s3.py::test_abort_multipart_upload_not_found
 s3tests/functional/test_s3.py::test_atomic_conditional_write_1mb
 s3tests/functional/test_s3.py::test_atomic_dual_write_1mb
 s3tests/functional/test_s3.py::test_atomic_dual_write_4mb
+s3tests/functional/test_s3.py::test_atomic_dual_write_8mb
 s3tests/functional/test_s3.py::test_atomic_multipart_upload_write
 s3tests/functional/test_s3.py::test_atomic_read_1mb
 s3tests/functional/test_s3.py::test_atomic_read_4mb
+s3tests/functional/test_s3.py::test_atomic_read_8mb
 s3tests/functional/test_s3.py::test_atomic_write_1mb
 s3tests/functional/test_s3.py::test_atomic_write_4mb
+s3tests/functional/test_s3.py::test_atomic_write_8mb
 s3tests/functional/test_s3.py::test_atomic_write_bucket_gone
 s3tests/functional/test_s3.py::test_block_public_policy_with_principal
 s3tests/functional/test_s3.py::test_bucket_acl_canned_private_to_private
@@ -141,6 +144,8 @@ s3tests/functional/test_s3.py::test_put_object_ifnonmatch_good
 s3tests/functional/test_s3.py::test_put_object_ifnonmatch_nonexisted_good
 s3tests/functional/test_s3.py::test_ranged_big_request_response_code
 s3tests/functional/test_s3.py::test_ranged_request_response_code
+s3tests/functional/test_s3.py::test_ranged_request_return_trailing_bytes_response_code
+s3tests/functional/test_s3.py::test_ranged_request_skip_leading_bytes_response_code
 s3tests/functional/test_s3.py::test_sse_kms_multipart_invalid_chunks_1
 s3tests/functional/test_s3.py::test_sse_kms_multipart_invalid_chunks_2
 s3tests/functional/test_s3.py::test_sse_kms_present
