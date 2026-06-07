@@ -48,7 +48,9 @@ chimera_nfs4_lockt_probe(
         return;
     }
 
-    vfs_length = args->length == UINT64_MAX ? 0 : args->length;
+    /* NFSv4 and the VFS range layer both use UINT64_MAX as the "to EOF"
+     * sentinel, so the wire length passes through unchanged. */
+    vfs_length = args->length;
 
     file_state = chimera_vfs_state_get(vfs_state,
                                        handle->fh, handle->fh_len,
@@ -79,9 +81,11 @@ chimera_nfs4_lockt_probe(
     if (result == CHIMERA_VFS_LEASE_GRANTED) {
         res->status = NFS4_OK;
     } else {
-        res->status          = NFS4ERR_DENIED;
-        res->denied.offset   = conflict ? conflict->offset : 0;
-        res->denied.length   = (conflict && conflict->length) ? conflict->length : UINT64_MAX;
+        res->status        = NFS4ERR_DENIED;
+        res->denied.offset = conflict ? conflict->offset : 0;
+        /* conflict->length already uses UINT64_MAX for a to-EOF holder, so it
+         * maps directly to the NFSv4 denied length. */
+        res->denied.length   = conflict ? conflict->length : UINT64_MAX;
         res->denied.locktype = (conflict && (conflict->mode.granted & CHIMERA_VFS_LEASE_MODE_W))
                                ? WRITE_LT : READ_LT;
         res->denied.owner.clientid   = 0;

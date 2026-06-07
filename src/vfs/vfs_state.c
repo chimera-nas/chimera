@@ -285,8 +285,15 @@ chimera_vfs_lease_owner_equal(
            a->owner_hi == b->owner_hi;
 } /* chimera_vfs_lease_owner_equal */
 
-/* Byte-range overlap test.  length==0 means "to EOF" (NLM/SMB
- * convention); represent EOF as UINT64_MAX for the math. */
+/* Byte-range overlap test for half-open intervals [off, off+len).
+ *
+ * length==0 is a genuine zero-byte range (SMB2 zero-length lock): [off, off)
+ * overlaps another range only when off lies strictly inside it.  "To EOF" is
+ * represented as a length whose end saturates at UINT64_MAX -- callers that
+ * mean to-EOF pass UINT64_MAX (or any length that overflows the end), and the
+ * NLM/NFSv4 boundaries translate their wire to-EOF sentinel accordingly.  The
+ * end is computed overflow-safe: a wrapping off+len saturates to UINT64_MAX
+ * rather than aliasing a small value (which would bypass conflict detection). */
 static inline bool
 chimera_vfs_range_overlap(
     uint64_t a_off,
@@ -294,8 +301,14 @@ chimera_vfs_range_overlap(
     uint64_t b_off,
     uint64_t b_len)
 {
-    uint64_t a_end = (a_len == 0) ? UINT64_MAX : a_off + a_len;
-    uint64_t b_end = (b_len == 0) ? UINT64_MAX : b_off + b_len;
+    /* Compute exclusive ends in 128-bit so a range touching the last byte of
+     * the 64-bit space (e.g. offset=2^64-1, length=1 -> end=2^64) is not aliased
+     * to a zero-length range.  UINT64_MAX as a length is the to-EOF sentinel and
+     * extends to the end of the address space. */
+    __uint128_t a_end = (a_len == UINT64_MAX)
+        ? ((__uint128_t) 1 << 64) : (__uint128_t) a_off + a_len;
+    __uint128_t b_end = (b_len == UINT64_MAX)
+        ? ((__uint128_t) 1 << 64) : (__uint128_t) b_off + b_len;
 
     return a_off < b_end && b_off < a_end;
 } /* chimera_vfs_range_overlap */

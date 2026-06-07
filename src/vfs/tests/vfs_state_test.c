@@ -274,7 +274,7 @@ test_range_to_eof(void)
     a.kind         = CHIMERA_VFS_LEASE_RANGE;
     a.mode.granted = CHIMERA_VFS_LEASE_MODE_W;
     a.offset       = 1000;
-    a.length       = 0; /* to EOF */
+    a.length       = UINT64_MAX; /* to EOF */
     init_owner(&a.owner, CHIMERA_VFS_LEASE_PROTO_NLM, 0xA, 1);
 
     r = chimera_vfs_state_try_insert(state, file, &a, &conflict);

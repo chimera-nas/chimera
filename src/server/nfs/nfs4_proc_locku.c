@@ -114,8 +114,8 @@ chimera_nfs4_locku(
         return;
     }
 
-    /* NFS uses UINT64_MAX to mean "to end of file"; vfs_state uses 0. */
-    vfs_length = args->length == UINT64_MAX ? 0 : args->length;
+    /* NFSv4 and the VFS range layer share UINT64_MAX as the to-EOF sentinel. */
+    vfs_length = args->length;
 
     /* RFC 7530 §16.12.4 / POSIX: remove the unlocked region [u_start, u_end)
      * from every interval of this lock-owner that it overlaps, splitting an
@@ -123,8 +123,9 @@ chimera_nfs4_locku(
      * region that holds no lock is a successful no-op (LOCKU always succeeds). */
     {
         uint64_t                  u_start = args->offset;
-        uint64_t                  u_end   = vfs_length ?
-            args->offset + vfs_length : UINT64_MAX;
+        uint64_t                  u_end   =
+            (args->offset + vfs_length < args->offset)
+            ? UINT64_MAX : args->offset + vfs_length;
         struct nfs4_range_lease  *hits = NULL;
         struct nfs4_range_lease **pp   = &lock_state->range_leases;
 
@@ -132,8 +133,9 @@ chimera_nfs4_locku(
         while (*pp) {
             rl = *pp;
             uint64_t e_start = rl->lease.offset;
-            uint64_t e_end   = rl->lease.length ?
-                rl->lease.offset + rl->lease.length : UINT64_MAX;
+            uint64_t e_end   =
+                (rl->lease.offset + rl->lease.length < rl->lease.offset)
+                ? UINT64_MAX : rl->lease.offset + rl->lease.length;
 
             if (e_end <= u_start || u_end <= e_start) {
                 pp = &rl->next;
@@ -147,8 +149,9 @@ chimera_nfs4_locku(
         /* Re-insert the non-unlocked remainder(s) of each detached interval. */
         while (hits) {
             uint64_t                       e_start = hits->lease.offset;
-            uint64_t                       e_end   = hits->lease.length ?
-                hits->lease.offset + hits->lease.length : UINT64_MAX;
+            uint64_t                       e_end   =
+                (hits->lease.offset + hits->lease.length < hits->lease.offset)
+                ? UINT64_MAX : hits->lease.offset + hits->lease.length;
             uint8_t                        mode   = hits->lease.mode.granted;
             struct chimera_vfs_lease_owner owner  = hits->lease.owner;
             struct chimera_vfs_file_state *fs     = hits->file_state;
@@ -172,7 +175,7 @@ chimera_nfs4_locku(
                 if (!reused) {
                     /* Right remainder [u_end, e_end): reuse this entry. */
                     match->lease.offset = u_end;
-                    match->lease.length = (e_end == UINT64_MAX) ? 0 :
+                    match->lease.length = (e_end == UINT64_MAX) ? UINT64_MAX :
                         e_end - u_end;
                     chimera_vfs_state_try_insert(vfs_state, fs, &match->lease,
                                                  NULL);
