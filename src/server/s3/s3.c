@@ -773,7 +773,7 @@ s3_server_init(
 
     shared->tcp_protocol = chimera_server_config_get_tcp_stream_protocol(config);
 
-    shared->config->port    = 5000;
+    shared->config->port    = chimera_server_config_get_s3_port(config);
     shared->config->io_size = 128 * 1024;
 
     shared->endpoint = evpl_endpoint_create("0.0.0.0", shared->config->port);

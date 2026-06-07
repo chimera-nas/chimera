@@ -288,6 +288,15 @@ chimera_server_config_get_nfs_port(
     const struct chimera_server_config *config);
 
 void
+chimera_server_config_set_s3_port(
+    struct chimera_server_config *config,
+    int                           port);
+
+int
+chimera_server_config_get_s3_port(
+    const struct chimera_server_config *config);
+
+void
 chimera_server_config_set_nfs_data_server(
     struct chimera_server_config *config,
     int                           enable);
