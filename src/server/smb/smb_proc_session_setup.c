@@ -261,6 +261,38 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
         size_t      session_key_saved_len = 0;
         int         is_anonymous          = 0;
 
+        int         is_binding = (request->session_setup.flags &
+                                  SMB2_SESSION_FLAG_BINDING) != 0;
+
+        /* SMB3 multichannel session binding (MS-SMB2 §3.3.5.5.3): account for
+         * the new channel and enforce the per-session channel limit BEFORE any
+         * per-channel key derivation below.  Doing it first keeps the rejection
+         * response signed with the established session key the client verifies
+         * it against -- the over-limit channel never derives a channel key.  The
+         * check and increment share sessions_lock so concurrent binds on
+         * different connections cannot race past the limit. */
+        if (is_binding &&
+            (session->flags & CHIMERA_SMB_SESSION_AUTHORIZED)) {
+            int over_limit = 0;
+
+            pthread_mutex_lock(&shared->sessions_lock);
+            if (session->num_channels >= SMB2_MAX_CHANNELS) {
+                over_limit = 1;
+            } else {
+                session->num_channels++;
+                session_handle->bound_channel = 1;
+            }
+            pthread_mutex_unlock(&shared->sessions_lock);
+
+            if (over_limit) {
+                chimera_smb_complete_request(request, SMB2_STATUS_INSUFFICIENT_RESOURCES);
+                evpl_iovecs_release(thread->evpl,
+                                    request->session_setup.input_iov,
+                                    request->session_setup.input_niov);
+                return;
+            }
+        }
+
         if (mech == SMB_AUTH_MECH_NTLM) {
             uint8_t session_key[SMB_NTLM_SESSION_KEY_SIZE];
 
@@ -389,6 +421,8 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
 
         if (!(session->flags & CHIMERA_SMB_SESSION_AUTHORIZED)) {
             memcpy(session->signing_key, session_handle->signing_key, sizeof(session_handle->signing_key));
+            /* The primary channel counts as the session's first channel. */
+            session->num_channels = 1;
             if (session_handle->enc_key_len > 0) {
                 memcpy(session->enc_key, session_handle->enc_key, sizeof(session->enc_key));
                 memcpy(session->dec_key, session_handle->dec_key, sizeof(session->dec_key));

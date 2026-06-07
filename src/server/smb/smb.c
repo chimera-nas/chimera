@@ -337,6 +337,21 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
             request->flags |= CHIMERA_SMB_REQUEST_FLAG_SIGN;
         }
 
+        /* SMB3 multichannel session binding (MS-SMB2 3.3.5.5.3): the client
+         * signs the binding SESSION_SETUP request with the existing session key
+         * and requires every response on that exchange -- interim, final, or
+         * error -- to be signed.  Sign with session_handle->signing_key, which
+         * holds the established session's key on the interim/error legs and the
+         * newly derived per-channel key on the final SUCCESS leg.  Without this
+         * the client rejects the bind (an unsigned response is treated as
+         * STATUS_ACCESS_DENIED). */
+        if (request->smb2_hdr.command == SMB2_SESSION_SETUP &&
+            (request->session_setup.flags & SMB2_SESSION_FLAG_BINDING) &&
+            request->session_handle &&
+            (request->session_handle->session->flags & CHIMERA_SMB_SESSION_AUTHORIZED)) {
+            request->flags |= CHIMERA_SMB_REQUEST_FLAG_SIGN;
+        }
+
         if (prev_command) {
             *prev_command = evpl_iovec_cursor_consumed(&reply_cursor) - prev_hdr;
         }

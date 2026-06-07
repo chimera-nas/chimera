@@ -1375,6 +1375,20 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.maximum_allowed.read_only
     # smb2.mkdir
     smb2.mkdir
+    # smb2.multichannel (SMB3 session binding).  interface_info advertises the
+    # server NICs, num_channels exercises channel bind + the 32-channel limit,
+    # bug_15346 is a bind regression, and oplocks.test1 checks an oplock break
+    # delivered over a bound session.  oplocks.test1 is enabled only on the
+    # non-passthrough backends: the linux/io_uring share root keeps real on-disk
+    # files between subtests, so the test's create-disposition checks see EXISTED
+    # instead of CREATED.  oplocks.test2/test3* stay disabled (they need Samba
+    # test-only FSCTLs -- force-unacked-timeout / network block -- chimera does
+    # not implement); leases.test1-4 stay disabled (general lease-grant
+    # behaviour, not multichannel binding).
+    smb2.multichannel.bugs.bug_15346
+    smb2.multichannel.generic.interface_info
+    smb2.multichannel.generic.num_channels
+    smb2.multichannel.oplocks.test1
     # smb2.notify-inotify
     smb2.notify-inotify.inotify-rename
     # smb2.notify
@@ -1660,6 +1674,19 @@ set(SMBTORTURE_ENABLED_linux
     smb2.maximum_allowed.read_only
     # smb2.mkdir
     smb2.mkdir
+    # smb2.multichannel (SMB3 session binding).  interface_info advertises the
+    # server NICs, num_channels exercises channel bind + the 32-channel limit,
+    # bug_15346 is a bind regression, and oplocks.test1 checks an oplock break
+    # delivered over a bound session.  oplocks.test1 is enabled only on the
+    # non-passthrough backends: the linux/io_uring share root keeps real on-disk
+    # files between subtests, so the test's create-disposition checks see EXISTED
+    # instead of CREATED.  oplocks.test2/test3* stay disabled (they need Samba
+    # test-only FSCTLs -- force-unacked-timeout / network block -- chimera does
+    # not implement); leases.test1-4 stay disabled (general lease-grant
+    # behaviour, not multichannel binding).
+    smb2.multichannel.bugs.bug_15346
+    smb2.multichannel.generic.interface_info
+    smb2.multichannel.generic.num_channels
     # smb2.notify-inotify
     smb2.notify-inotify.inotify-rename
     # smb2.notify
@@ -1917,6 +1944,19 @@ set(SMBTORTURE_ENABLED_io_uring
     smb2.maximum_allowed.read_only
     # smb2.mkdir
     smb2.mkdir
+    # smb2.multichannel (SMB3 session binding).  interface_info advertises the
+    # server NICs, num_channels exercises channel bind + the 32-channel limit,
+    # bug_15346 is a bind regression, and oplocks.test1 checks an oplock break
+    # delivered over a bound session.  oplocks.test1 is enabled only on the
+    # non-passthrough backends: the linux/io_uring share root keeps real on-disk
+    # files between subtests, so the test's create-disposition checks see EXISTED
+    # instead of CREATED.  oplocks.test2/test3* stay disabled (they need Samba
+    # test-only FSCTLs -- force-unacked-timeout / network block -- chimera does
+    # not implement); leases.test1-4 stay disabled (general lease-grant
+    # behaviour, not multichannel binding).
+    smb2.multichannel.bugs.bug_15346
+    smb2.multichannel.generic.interface_info
+    smb2.multichannel.generic.num_channels
     # smb2.notify-inotify
     smb2.notify-inotify.inotify-rename
     # smb2.notify
@@ -2186,6 +2226,20 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.maximum_allowed.read_only
     # smb2.mkdir
     smb2.mkdir
+    # smb2.multichannel (SMB3 session binding).  interface_info advertises the
+    # server NICs, num_channels exercises channel bind + the 32-channel limit,
+    # bug_15346 is a bind regression, and oplocks.test1 checks an oplock break
+    # delivered over a bound session.  oplocks.test1 is enabled only on the
+    # non-passthrough backends: the linux/io_uring share root keeps real on-disk
+    # files between subtests, so the test's create-disposition checks see EXISTED
+    # instead of CREATED.  oplocks.test2/test3* stay disabled (they need Samba
+    # test-only FSCTLs -- force-unacked-timeout / network block -- chimera does
+    # not implement); leases.test1-4 stay disabled (general lease-grant
+    # behaviour, not multichannel binding).
+    smb2.multichannel.bugs.bug_15346
+    smb2.multichannel.generic.interface_info
+    smb2.multichannel.generic.num_channels
+    smb2.multichannel.oplocks.test1
     # smb2.notify-inotify
     smb2.notify-inotify.inotify-rename
     # smb2.notify
@@ -2480,6 +2534,20 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.maximum_allowed.read_only
     # smb2.mkdir
     smb2.mkdir
+    # smb2.multichannel (SMB3 session binding).  interface_info advertises the
+    # server NICs, num_channels exercises channel bind + the 32-channel limit,
+    # bug_15346 is a bind regression, and oplocks.test1 checks an oplock break
+    # delivered over a bound session.  oplocks.test1 is enabled only on the
+    # non-passthrough backends: the linux/io_uring share root keeps real on-disk
+    # files between subtests, so the test's create-disposition checks see EXISTED
+    # instead of CREATED.  oplocks.test2/test3* stay disabled (they need Samba
+    # test-only FSCTLs -- force-unacked-timeout / network block -- chimera does
+    # not implement); leases.test1-4 stay disabled (general lease-grant
+    # behaviour, not multichannel binding).
+    smb2.multichannel.bugs.bug_15346
+    smb2.multichannel.generic.interface_info
+    smb2.multichannel.generic.num_channels
+    smb2.multichannel.oplocks.test1
     # smb2.notify-inotify
     smb2.notify-inotify.inotify-rename
     # smb2.notify
@@ -2774,6 +2842,20 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     smb2.maximum_allowed.read_only
     # smb2.mkdir
     smb2.mkdir
+    # smb2.multichannel (SMB3 session binding).  interface_info advertises the
+    # server NICs, num_channels exercises channel bind + the 32-channel limit,
+    # bug_15346 is a bind regression, and oplocks.test1 checks an oplock break
+    # delivered over a bound session.  oplocks.test1 is enabled only on the
+    # non-passthrough backends: the linux/io_uring share root keeps real on-disk
+    # files between subtests, so the test's create-disposition checks see EXISTED
+    # instead of CREATED.  oplocks.test2/test3* stay disabled (they need Samba
+    # test-only FSCTLs -- force-unacked-timeout / network block -- chimera does
+    # not implement); leases.test1-4 stay disabled (general lease-grant
+    # behaviour, not multichannel binding).
+    smb2.multichannel.bugs.bug_15346
+    smb2.multichannel.generic.interface_info
+    smb2.multichannel.generic.num_channels
+    smb2.multichannel.oplocks.test1
     # smb2.notify-inotify
     smb2.notify-inotify.inotify-rename
     # smb2.notify
