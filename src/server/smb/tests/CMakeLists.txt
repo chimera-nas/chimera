@@ -1372,6 +1372,15 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.maximum_allowed.read_only
     # smb2.mkdir
     smb2.mkdir
+    # smb2.multichannel (SMB3 session binding).  interface_info advertises the
+    # server NICs, num_channels exercises channel bind + the 32-channel limit,
+    # and bug_15346 is a bind regression.  oplocks.* / leases.* stay disabled:
+    # they need oplock/lease break on a conflicting open, a general server gap
+    # tracked by the mostly-disabled smb2.oplock / smb2.lease suites, not a
+    # multichannel issue.
+    smb2.multichannel.bugs.bug_15346
+    smb2.multichannel.generic.interface_info
+    smb2.multichannel.generic.num_channels
     # smb2.notify-inotify
     smb2.notify-inotify.inotify-rename
     # smb2.notify
@@ -1657,6 +1666,15 @@ set(SMBTORTURE_ENABLED_linux
     smb2.maximum_allowed.read_only
     # smb2.mkdir
     smb2.mkdir
+    # smb2.multichannel (SMB3 session binding).  interface_info advertises the
+    # server NICs, num_channels exercises channel bind + the 32-channel limit,
+    # and bug_15346 is a bind regression.  oplocks.* / leases.* stay disabled:
+    # they need oplock/lease break on a conflicting open, a general server gap
+    # tracked by the mostly-disabled smb2.oplock / smb2.lease suites, not a
+    # multichannel issue.
+    smb2.multichannel.bugs.bug_15346
+    smb2.multichannel.generic.interface_info
+    smb2.multichannel.generic.num_channels
     # smb2.notify-inotify
     smb2.notify-inotify.inotify-rename
     # smb2.notify
@@ -1914,6 +1932,15 @@ set(SMBTORTURE_ENABLED_io_uring
     smb2.maximum_allowed.read_only
     # smb2.mkdir
     smb2.mkdir
+    # smb2.multichannel (SMB3 session binding).  interface_info advertises the
+    # server NICs, num_channels exercises channel bind + the 32-channel limit,
+    # and bug_15346 is a bind regression.  oplocks.* / leases.* stay disabled:
+    # they need oplock/lease break on a conflicting open, a general server gap
+    # tracked by the mostly-disabled smb2.oplock / smb2.lease suites, not a
+    # multichannel issue.
+    smb2.multichannel.bugs.bug_15346
+    smb2.multichannel.generic.interface_info
+    smb2.multichannel.generic.num_channels
     # smb2.notify-inotify
     smb2.notify-inotify.inotify-rename
     # smb2.notify
@@ -2183,6 +2210,15 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.maximum_allowed.read_only
     # smb2.mkdir
     smb2.mkdir
+    # smb2.multichannel (SMB3 session binding).  interface_info advertises the
+    # server NICs, num_channels exercises channel bind + the 32-channel limit,
+    # and bug_15346 is a bind regression.  oplocks.* / leases.* stay disabled:
+    # they need oplock/lease break on a conflicting open, a general server gap
+    # tracked by the mostly-disabled smb2.oplock / smb2.lease suites, not a
+    # multichannel issue.
+    smb2.multichannel.bugs.bug_15346
+    smb2.multichannel.generic.interface_info
+    smb2.multichannel.generic.num_channels
     # smb2.notify-inotify
     smb2.notify-inotify.inotify-rename
     # smb2.notify
@@ -2477,6 +2513,15 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.maximum_allowed.read_only
     # smb2.mkdir
     smb2.mkdir
+    # smb2.multichannel (SMB3 session binding).  interface_info advertises the
+    # server NICs, num_channels exercises channel bind + the 32-channel limit,
+    # and bug_15346 is a bind regression.  oplocks.* / leases.* stay disabled:
+    # they need oplock/lease break on a conflicting open, a general server gap
+    # tracked by the mostly-disabled smb2.oplock / smb2.lease suites, not a
+    # multichannel issue.
+    smb2.multichannel.bugs.bug_15346
+    smb2.multichannel.generic.interface_info
+    smb2.multichannel.generic.num_channels
     # smb2.notify-inotify
     smb2.notify-inotify.inotify-rename
     # smb2.notify
@@ -2771,6 +2816,15 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     smb2.maximum_allowed.read_only
     # smb2.mkdir
     smb2.mkdir
+    # smb2.multichannel (SMB3 session binding).  interface_info advertises the
+    # server NICs, num_channels exercises channel bind + the 32-channel limit,
+    # and bug_15346 is a bind regression.  oplocks.* / leases.* stay disabled:
+    # they need oplock/lease break on a conflicting open, a general server gap
+    # tracked by the mostly-disabled smb2.oplock / smb2.lease suites, not a
+    # multichannel issue.
+    smb2.multichannel.bugs.bug_15346
+    smb2.multichannel.generic.interface_info
+    smb2.multichannel.generic.num_channels
     # smb2.notify-inotify
     smb2.notify-inotify.inotify-rename
     # smb2.notify

@@ -272,6 +272,22 @@ main(
      * pointer NULL and then dereferences it in cleanup, crashing the client. */
     chimera_server_config_set_smb_persistent_handles(config, 1);
 
+    /* SMB3 multichannel: advertise interfaces so FSCTL_QUERY_NETWORK_INTERFACE_
+     * INFO returns a non-empty list and the smb2.multichannel suites run instead
+     * of bailing ("no interface info returned").  Everything in the test netns
+     * lives on loopback (127.0.0.0/8 is all local), so the smbtorture client
+     * opens every additional channel back to 127.0.0.1 regardless of which
+     * addresses are advertised; two RSS-capable NICs mirror the WPTS setup and
+     * let num_channels exercise binding.  The capability bit itself is already
+     * advertised globally by the server. */
+    {
+        struct chimera_server_config_smb_nic nics[2] = {
+            { .address = "127.0.0.1", .speed = 10, .rdma = 0 },
+            { .address = "127.0.0.2", .speed = 10, .rdma = 0 },
+        };
+        chimera_server_config_set_smb_nic_info(config, 2, nics);
+    }
+
     /* CTest invokes this binary once per suite.  Enable named-stream (ADS)
      * support only for the stream suites, so the negative smb2.create_no_streams
      * suite still runs with the feature off on the same backend.  Also match

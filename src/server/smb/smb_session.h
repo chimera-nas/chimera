@@ -217,6 +217,10 @@ struct chimera_smb_tree {
 #define CHIMERA_SMB_SESSION_DELETED      0x2
 #define CHIMERA_SMB_SESSION_ENCRYPT_DATA 0x4
 
+/* Maximum number of channels a single session may bind, matching the
+ * Windows Server 2012R2/2016 limit asserted by smb2.multichannel.num_channels. */
+#define SMB2_MAX_CHANNELS                32
+
 struct chimera_smb_session {
     uint64_t                    session_id;
     /* Stable per-CLIENT identity used as the owner key for CACHING leases,
@@ -248,6 +252,13 @@ struct chimera_smb_session {
 
     int                         max_trees;
     uint8_t                     signing_key[16];
+
+    /* Number of channels (connections) bound to this session, including the
+     * primary.  Bounded at SMB2_MAX_CHANNELS so a client cannot bind an
+     * unlimited number of channels (MS-SMB2 §3.3.5.5.3 returns
+     * STATUS_INSUFFICIENT_RESOURCES once the server's limit is reached).
+     * Guarded by shared->sessions_lock. */
+    int                         num_channels;
 
     /* SMB3 transport encryption (set when CHIMERA_SMB_SESSION_ENCRYPT_DATA).
      * enc_key encrypts server->client responses; dec_key decrypts

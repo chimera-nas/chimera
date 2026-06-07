@@ -793,6 +793,10 @@ struct chimera_smb_session_handle {
     uint8_t                            dec_key[32];
     size_t                             enc_key_len;
     uint16_t                           cipher_id;
+    /* Set when this handle represents an additional channel bound to an
+     * existing session (a successful SMB2_SESSION_FLAG_BINDING session setup),
+     * so its teardown decrements session->num_channels. */
+    uint8_t                            bound_channel;
     struct UT_hash_handle              hh;
     struct chimera_smb_session_handle *next;
     gss_ctx_id_t                       ctx;
@@ -1257,8 +1261,9 @@ chimera_smb_session_alloc(struct chimera_server_smb_shared *shared)
     do {
         session->session_id = chimera_rand64() & 0xFFFFFFFFULL;
     } while (session->session_id == 0);
-    session->flags  = 0;
-    session->refcnt = 1;
+    session->flags        = 0;
+    session->refcnt       = 1;
+    session->num_channels = 0;
 
     pthread_mutex_unlock(&shared->sessions_lock);
 
@@ -1487,6 +1492,8 @@ chimera_smb_session_handle_alloc(struct chimera_server_smb_thread *thread)
         session_handle = calloc(1, sizeof(*session_handle));
     }
 
+    session_handle->bound_channel = 0;
+
     return session_handle;
 } /* chimera_smb_session_handle_alloc */
 
@@ -1613,6 +1620,17 @@ chimera_smb_conn_free(
             gss_delete_sec_context(&conn->gss_minor,
                                    &session_handle->ctx, NULL);
             session_handle->ctx = GSS_C_NO_CONTEXT;
+        }
+
+        /* A bound additional channel is going away; free its slot so the
+         * session can accept another channel later (MS-SMB2 §3.3.5.5.3). */
+        if (session_handle->bound_channel) {
+            pthread_mutex_lock(&thread->shared->sessions_lock);
+            if (session_handle->session->num_channels > 0) {
+                session_handle->session->num_channels--;
+            }
+            pthread_mutex_unlock(&thread->shared->sessions_lock);
+            session_handle->bound_channel = 0;
         }
 
         /* The transport for this connection has dropped: any durable handle
