@@ -1624,7 +1624,7 @@ chimera_smb_conn_free(
 
         /* A bound additional channel is going away; free its slot so the
          * session can accept another channel later (MS-SMB2 §3.3.5.5.3). */
-        if (session_handle->bound_channel) {
+        if (session_handle->bound_channel && session_handle->session) {
             pthread_mutex_lock(&thread->shared->sessions_lock);
             if (session_handle->session->num_channels > 0) {
                 session_handle->session->num_channels--;
