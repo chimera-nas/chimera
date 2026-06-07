@@ -330,6 +330,9 @@ chimera_smb_lock_multi(
     is_unlock = (request->lock.elements[0].flags & SMB2_LOCKFLAG_UNLOCK) != 0;
 
     if (is_unlock) {
+        struct chimera_smb_lock_entry *freelist = NULL;
+        uint32_t                       status   = SMB2_STATUS_SUCCESS;
+
         for (i = 0; i < n; i++) {
             uint64_t                       off = request->lock.elements[i].offset;
             uint64_t                       len = request->lock.elements[i].length;
@@ -340,10 +343,8 @@ chimera_smb_lock_multi(
              * checked in order, so any earlier unlocks have already taken
              * effect (smb2.lock.multiple-unlock). */
             if (!(request->lock.elements[i].flags & SMB2_LOCKFLAG_UNLOCK)) {
-                chimera_smb_open_file_release(request, open_file);
-                chimera_smb_complete_request(request,
-                                             SMB2_STATUS_INVALID_PARAMETER);
-                return;
+                status = SMB2_STATUS_INVALID_PARAMETER;
+                break;
             }
 
             DL_FOREACH(open_file->lock_entries, e)
@@ -354,15 +355,35 @@ chimera_smb_lock_multi(
                 }
             }
             if (!match) {
-                chimera_smb_open_file_release(request, open_file);
-                chimera_smb_complete_request(request,
-                                             SMB2_STATUS_RANGE_NOT_LOCKED);
-                return;
+                status = SMB2_STATUS_RANGE_NOT_LOCKED;
+                break;
             }
-            chimera_smb_lock_entry_drop(vfs_state, open_file, match);
+
+            /* Unlink and release the lock now (it is gone), but defer the free
+             * past the loop: the static analyzer cannot follow utlist's
+             * DL_DELETE and would otherwise treat a node freed here as still
+             * reachable from the next iteration's traversal -- the same reason
+             * chimera_smb_open_file_drain_locks frees from a detached list. */
+            DL_DELETE(open_file->lock_entries, match);
+            if (match->lease_inserted) {
+                chimera_vfs_lease_release(vfs_state, match->file_state,
+                                          &match->lease);
+            }
+            if (match->file_state) {
+                chimera_vfs_state_put(vfs_state, match->file_state);
+            }
+            match->next = freelist;
+            freelist    = match;
         }
+
+        while (freelist) {
+            struct chimera_smb_lock_entry *t = freelist->next;
+            free(freelist);
+            freelist = t;
+        }
+
         chimera_smb_open_file_release(request, open_file);
-        chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+        chimera_smb_complete_request(request, status);
         return;
     }
 
