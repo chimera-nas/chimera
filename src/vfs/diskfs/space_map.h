@@ -354,11 +354,14 @@ space_map_destroy(
 #define SM_AGAIN 1
 
 /*
- * Ensure the thread's reservation cache holds at least min_bytes of contiguous
- * space, refilling (journals + may SM_AGAIN) if short.  Hands out nothing;
- * callers use it to front-load the journaling/suspension of a metadata op
- * before a non-suspendable section (e.g. a b+tree modify) so the subsequent
- * allocs are pure cache draws.  0 = covered, -1 = ENOSPC, SM_AGAIN = parked.
+ * Ensure the cache holds at least min_bytes of contiguous space, refilling
+ * (journals + may SM_AGAIN) if short.  Hands out nothing; callers use it to
+ * front-load the journaling/suspension of a metadata op before a non-suspendable
+ * section (e.g. a b+tree modify) so the subsequent allocs are pure cache draws.
+ * `floor` is the minimum reservation to grab when refilling (the over-reserve
+ * amount that batches future small allocs); pass SM_RESERVATION_MIN for the
+ * batched behaviour or 0 for an exact reservation (no retained tail).
+ * 0 = covered, -1 = ENOSPC, SM_AGAIN = parked.
  */
 int
 space_map_reserve(
@@ -366,11 +369,13 @@ space_map_reserve(
     struct sm_thread_cache  *cache,
     const struct sm_journal *jnl,
     uint32_t                 role,
-    uint64_t                 min_bytes);
+    uint64_t                 min_bytes,
+    uint64_t                 floor);
 
 /* `role` (SM_DEV_LOCAL/SM_DEV_REMOTE) restricts the allocation to devices of
  * that class: block mode places metadata on LOCAL and data on REMOTE devices.
- * With no remote devices everything is LOCAL (today's single-pool behavior). */
+ * With no remote devices everything is LOCAL (today's single-pool behavior).
+ * `floor` is the over-reserve minimum (see space_map_reserve). */
 int
 space_map_alloc(
     struct space_map        *sm,
@@ -378,6 +383,7 @@ space_map_alloc(
     const struct sm_journal *jnl,
     uint32_t                 role,
     uint64_t                 size,
+    uint64_t                 floor,
     uint32_t                *r_device_id,
     uint64_t                *r_device_offset);
 

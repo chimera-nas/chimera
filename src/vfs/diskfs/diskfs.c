@@ -519,6 +519,13 @@ struct diskfs_inode {
     int                         mtime_dirty;
     uint64_t                    mtime_dirty_since;  /* monotonic tick of first dirty */
 
+    /* Per-open-file data-space reservation (RAM only, not persisted): a write
+     * over-reserves SM_RESERVATION_MIN and retains the tail here for this file's
+     * next write so its blocks lay out sequentially; the tail is returned to the
+     * space map when the last open handle closes (diskfs_inode_return_reservation).
+     * Mutated only under the inode write lock the data path already holds. */
+    struct sm_thread_cache      space_resv;
+
     /* This inode's 4 KiB metadata home block in the block cache; pinned
      * while the inode is dirty in a transaction.  NULL until first claimed.
      * Directory entries, extents and the symlink target all live as keyed
@@ -1065,8 +1072,8 @@ struct diskfs_thread {
     struct evpl_iovec            pad;
     int                          thread_id;
     struct slab_allocator       *allocator;
-    struct sm_thread_cache       space_cache;      /* metadata (LOCAL devices) */
-    struct sm_thread_cache       data_space_cache; /* block-mode file data (REMOTE devices) */
+    struct sm_thread_cache       space_cache;      /* metadata (LOCAL devices); file
+                                                    * data uses per-inode space_resv */
     struct diskfs_txn           *txn_free_list;
     struct diskfs_inode_waiter  *waiter_free_list;
     struct diskfs_iq_channel    *iq_channel;
@@ -3793,7 +3800,8 @@ diskfs_bt_alloc_node(
      * never journals -- hence no_suspend and the rc != 0 abort. */
     DISKFS_SM_JNL(jnl, thread, txn, diskfs_sm_no_suspend, NULL);
     rc = space_map_alloc(shared->space_map, &thread->space_cache, &jnl,
-                         SM_DEV_LOCAL, DISKFS_BLOCK_SIZE, &device_id, &device_offset);
+                         SM_DEV_LOCAL, DISKFS_BLOCK_SIZE, SM_RESERVATION_MIN,
+                         &device_id, &device_offset);
     chimera_diskfs_abort_if(rc != 0, "b+tree node allocation failed (ENOSPC)");
 
     blk = diskfs_block_claim(thread, device_id, device_offset, 1);
@@ -4572,60 +4580,6 @@ diskfs_bt_collapse_root(
     }
 } /* diskfs_bt_collapse_root */
 
-/*
- * Reclaim space owned by a deleted inode (nlink just hit 0, not open).
- *
- * The free count for one inode is bounded only by its tree size, but every
- * free must ride a single transaction's redo -- an arbitrarily large inode
- * would overflow the journal / block-I/O queue.  So we reclaim inline only the
- * BOUNDED case: an inode whose entire tree fits in the embedded root (no child
- * node blocks).  That covers small files (data extents in the root, <=~100) and
- * empty/small directories.  The inode home block is not returned to the
- * allocator yet: inode structs stay cached after unlink and generation reuse is
- * not persisted for newly allocated inodes, so reusing an inum can collide with
- * the cache and stale file handles.
- *
- * TODO(incremental-drain): a large inode (interior embedded root) still leaks
- * its child node blocks and their data extents here.  Draining those needs a
- * scheme that walks the tree across multiple bounded transactions (an orphan
- * list of deleted-but-not-fully-reclaimed inodes, drained in the background).
- * Also, a file unlinked while still open frees nothing here (deferred to close,
- * which has no write txn) -- another known leak.
- */
-static void
-diskfs_bt_free_tree(
-    struct diskfs_thread *thread,
-    struct diskfs_txn    *txn,
-    struct diskfs_inode  *inode)
-{
-    void                      *buf;
-    struct diskfs_bt_node_hdr *h;
-
-    diskfs_txn_pin_inode_block(thread, txn, inode, 0);
-    buf = inode->block->iov.data;
-    h   = diskfs_bt_hdr(buf, DISKFS_BT_ROOT_BASE);
-
-    if (h->level == 0 && S_ISREG(inode->mode)) {
-        /* Small file: data extents are recorded in the embedded root, mixed
-         * with non-space records such as xattrs. */
-        struct diskfs_bt_lslot *s = diskfs_bt_lslots(buf, DISKFS_BT_ROOT_BASE);
-        int                     i;
-
-        for (i = 0; i < h->nitems; i++) {
-            struct diskfs_extent_rec *e =
-                (struct diskfs_extent_rec *) ((char *) buf + DISKFS_BT_ROOT_BASE + s[i].off);
-
-            if (s[i].key.type != DISKFS_REC_EXTENT) {
-                continue;
-            }
-            diskfs_txn_free_space(thread, txn, e->device_id, e->device_offset,
-                                  SM_ALIGN_UP(e->length));
-        }
-    }
-
-    /* Leave the inode home block pinned + logged with the nlink=0 dinode. */
-} /* diskfs_bt_free_tree */
-
 /* Forward declarations for helpers defined later in the file. */
 static struct diskfs_txn * diskfs_txn_begin(
     struct diskfs_thread *thread,
@@ -4645,6 +4599,10 @@ static void diskfs_thread_free_space(
     uint32_t              device_id,
     uint64_t              device_offset,
     uint64_t              length);
+static void diskfs_inode_return_reservation(
+    struct diskfs_thread *thread,
+    struct diskfs_txn    *txn,
+    struct diskfs_inode  *inode);
 static int diskfs_bt_remove_async(
     struct diskfs_bt_op        *op,
     struct diskfs_thread       *thread,
@@ -4918,14 +4876,16 @@ diskfs_drain_final_cb(
 } /* diskfs_drain_final_cb */
 
 /* The durable orphan entry is removed; finish retiring the inode in the same
- * transaction and commit.  The inode home block is intentionally leaked for now;
- * see diskfs_bt_free_tree. */
+* transaction and commit.  The inode home block is intentionally leaked for now
+* (inode structs stay cached after unlink and generation reuse is not persisted,
+* so reusing an inum could collide with the cache and stale file handles). */
 static void
 diskfs_drain_after_unrecord(void *priv)
 {
     struct diskfs_drain *d = priv;
 
     diskfs_txn_pin_inode_block(d->thread, d->txn, d->inode, 0);
+    diskfs_inode_return_reservation(d->thread, d->txn, d->inode);
     diskfs_inode_free(d->thread, d->inode);
     diskfs_txn_commit(d->txn, diskfs_drain_final_cb, d);
 } /* diskfs_drain_after_unrecord */
@@ -5305,7 +5265,8 @@ diskfs_bt_run(struct diskfs_bt_op *op)
             DISKFS_SM_JNL(jnl, thread, op->txn, diskfs_bt_op_resume_cb, op);
             int rrc = space_map_reserve(thread->shared->space_map,
                                         &thread->space_cache, &jnl, SM_DEV_LOCAL,
-                                        (uint64_t) (DISKFS_BT_MAX_DEPTH + 2) * DISKFS_BLOCK_SIZE);
+                                        (uint64_t) (DISKFS_BT_MAX_DEPTH + 2) * DISKFS_BLOCK_SIZE,
+                                        SM_RESERVATION_MIN);
 
             if (rrc == SM_AGAIN) {
                 return;     /* parked; resumes back into this phase */
@@ -6326,6 +6287,12 @@ diskfs_inode_cache_recycle_locked(
             continue;                                  /* not durable yet; skip */
         }
 
+        /* An idle inode (no open handle) has already returned its data-space
+         * reservation at its last close; catch a leak before the struct goes. */
+        chimera_diskfs_abort_if(inode->space_resv.valid,
+                                "evicting inode %lu with a live space reservation",
+                                inode->inum);
+
         diskfs_inode_lru_unlink(shard, inode);
         rb_tree_remove(&shard->inodes, &inode->node);
         shard->ninodes--;
@@ -6519,7 +6486,8 @@ diskfs_inode_alloc_async(
 
     DISKFS_SM_JNL(jnl, thread, txn, diskfs_inode_alloc_resume, actx);
     rc = space_map_alloc(shared->space_map, &thread->space_cache, &jnl,
-                         SM_DEV_LOCAL, SM_BLOCK_SIZE, &device_id, &device_offset);
+                         SM_DEV_LOCAL, SM_BLOCK_SIZE, SM_RESERVATION_MIN,
+                         &device_id, &device_offset);
     if (rc == SM_AGAIN) {
         return;     /* parked; diskfs_inode_alloc_resume re-runs (owns actx) */
     }
@@ -6588,6 +6556,12 @@ diskfs_inode_free(
      * inode's b+tree blocks, which are leaked for now (no space reclaim
      * yet); the device ranges backing file extents are returned to the
      * space map by truncate/deallocate before this point. */
+
+    /* The per-open-file data reservation must already have been returned at the
+     * last close (or this retire's caller) -- catch a leak. */
+    chimera_diskfs_abort_if(inode->space_resv.valid,
+                            "inode %lu freed with a live space reservation",
+                            inode->inum);
 
     inode->gen++;
     inode->refcnt = 0;
@@ -6672,32 +6646,40 @@ diskfs_kv_entry_release(
     free(entry);
 } /* diskfs_kv_entry_release */
 
+/*
+ * Allocate file-data backing for `inode` from its own per-open-file reservation
+ * (inode->space_resv) rather than a shared per-thread cache, so a file's blocks
+ * lay out sequentially and the unused tail is returned when the file is closed
+ * (not stranded per-thread).  `floor` is the over-reserve minimum: writes pass
+ * SM_RESERVATION_MIN (reserve 1 MiB or the write, whichever is larger, and keep
+ * the rest for the next write); fallocate passes 0 (exact, no retained tail).
+ * Must be called with the inode write-locked (the data path holds it).  Returns
+ * SM_AGAIN on a journal-block miss (caller's resume re-drives), ENOSPC, or 0.
+ */
 static inline int
-diskfs_thread_alloc_space(
+diskfs_inode_alloc_space(
     struct diskfs_thread *thread,
     struct diskfs_txn *txn,
+    struct diskfs_inode *inode,
     int64_t desired_size,
+    uint64_t floor,
     uint64_t *r_device_id,
     uint64_t *r_device_offset,
     void ( *resume )(struct diskfs_thread *, void *),
     void *resume_arg)
 {
-    uint32_t                dev_id;
-    int                     rc;
-    struct space_map       *sm = thread->shared->space_map;
+    uint32_t          dev_id;
+    int               rc;
+    struct space_map *sm = thread->shared->space_map;
 
-    /* File data goes to REMOTE (pNFS data) devices when this is a block-mode
-     * filesystem, and to LOCAL devices otherwise; each class draws from its own
-     * per-thread reservation cache so a local metadata reservation and a remote
-     * data reservation never collide. */
-    int                     remote = space_map_has_remote(sm);
-    uint32_t                role   = remote ? SM_DEV_REMOTE : SM_DEV_LOCAL;
-    struct sm_thread_cache *cache  = remote ? &thread->data_space_cache :
-        &thread->space_cache;
+    /* File data goes to REMOTE (pNFS data) devices in block mode, LOCAL
+     * otherwise; metadata keeps its own per-thread reservation, so the two
+     * classes never collide. */
+    uint32_t          role = space_map_has_remote(sm) ? SM_DEV_REMOTE : SM_DEV_LOCAL;
 
     DISKFS_SM_JNL(jnl, thread, txn, resume, resume_arg);
-    rc = space_map_alloc(sm, cache, &jnl, role,
-                         (uint64_t) desired_size, &dev_id, r_device_offset);
+    rc = space_map_alloc(sm, &inode->space_resv, &jnl, role,
+                         (uint64_t) desired_size, floor, &dev_id, r_device_offset);
 
     if (rc == SM_AGAIN) {
         return SM_AGAIN;        /* parked; caller's resume re-drives */
@@ -6708,7 +6690,7 @@ diskfs_thread_alloc_space(
 
     *r_device_id = dev_id;
     return 0;
-} /* diskfs_thread_alloc_space */
+} /* diskfs_inode_alloc_space */
 
 static inline void
 diskfs_thread_free_space(
@@ -6723,6 +6705,33 @@ diskfs_thread_free_space(
      * in memory while its redo is discarded). */
     diskfs_txn_free_space(thread, txn, device_id, device_offset, length);
 } /* diskfs_thread_free_space */
+
+/*
+ * Return this file's unused data-space reservation tail to the space map when
+ * its last open handle closes (or it is otherwise torn down with a live txn).
+ * Uses the pending-free path (journaled at pre-commit, applied on commit), so it
+ * never has to suspend inside the caller, and clears the reservation so it is
+ * returned exactly once.  Must run under the inode write lock.
+ */
+static inline void
+diskfs_inode_return_reservation(
+    struct diskfs_thread *thread,
+    struct diskfs_txn    *txn,
+    struct diskfs_inode  *inode)
+{
+    struct sm_thread_cache *resv = &inode->space_resv;
+
+    if (!resv->valid || resv->length == 0) {
+        resv->valid  = 0;
+        resv->length = 0;
+        return;
+    }
+
+    diskfs_thread_free_space(thread, txn, resv->device_id, resv->offset,
+                             resv->length);
+    resv->valid  = 0;
+    resv->length = 0;
+} /* diskfs_inode_return_reservation */
 
 /* ------------------------------------------------------------------ */
 /* Transaction plumbing                                                */
@@ -9533,13 +9542,27 @@ diskfs_mtime_flush_drop_pin(
     struct diskfs_inode  *inode)
 {
     struct diskfs_inode_shard *shard = diskfs_inode_shard(thread->shared, inode->inum);
+    int                        retire;
+    uint64_t                   inum;
+    uint32_t                   gen;
 
     pthread_mutex_lock(&shard->lock);
     --inode->refcnt;
-    if (diskfs_inode_idle(inode) && !inode->on_lru) {
+    /* If this drops the last reference to an inode that was unlinked while held
+     * open (its durable orphan record already written), it is now reclaimable. */
+    retire = (inode->refcnt == 0 && inode->nlink == 0);
+    inum   = inode->inum;
+    gen    = inode->gen;
+    if (!retire && diskfs_inode_idle(inode) && !inode->on_lru) {
         diskfs_inode_lru_push_tail(shard, inode);
     }
     pthread_mutex_unlock(&shard->lock);
+
+    /* Enqueue the async drain outside the shard lock (it begins a txn and
+     * acquires inodes, taking shard locks). */
+    if (retire) {
+        diskfs_drain_enqueue(thread, inum, gen);
+    }
 } /* diskfs_mtime_flush_drop_pin */
 
 struct diskfs_mtime_flush {
@@ -9762,10 +9785,10 @@ diskfs_thread_destroy(void *private_data)
         evpl_block_close_queue(thread->evpl, thread->queue[i]);
     }
 
-    /* No txn at thread teardown; the unused reservation tail returns to the
-     * in-memory free set and is captured by the condense at clean unmount. */
+    /* No txn at thread teardown; the unused metadata reservation tail returns to
+     * the in-memory free set and is captured by the condense at clean unmount.
+     * (File-data reservations live on the inode and are returned on close.) */
     space_map_thread_cache_return(shared->space_map, NULL, &thread->space_cache);
-    space_map_thread_cache_return(shared->space_map, NULL, &thread->data_space_cache);
 
     /* Unregister the intent-log channel.  Caller must have quiesced all
      * in-flight VFS ops on this thread first. */
@@ -11204,7 +11227,13 @@ diskfs_remove_orphan_done(void *priv)
     struct diskfs_request_private *p       = request->plugin_data;
     struct diskfs_inode           *inode   = p->inode_stash[1];
 
-    diskfs_drain_enqueue(p->thread, inode->inum, inode->gen);
+    /* Reclaim now only if nothing else holds the inode open; otherwise the last
+     * close (or deferred-mtime pin drop) will enqueue the drain when refcnt
+     * reaches 0.  The durable orphan record (just written) covers a crash in the
+     * meantime. */
+    if (inode->refcnt == 0) {
+        diskfs_drain_enqueue(p->thread, inode->inum, inode->gen);
+    }
     diskfs_remove_at_finish(request);
 } /* diskfs_remove_orphan_done */
 
@@ -11259,29 +11288,20 @@ diskfs_remove_at_removed_cb(
 
     if (inode->nlink == 0) {
         --inode->refcnt;
-        if (inode->refcnt == 0) {
-            struct diskfs_bt_node_hdr *rh;
 
-            diskfs_txn_pin_inode_block(thread, p->txn, inode, 0);
-            rh = diskfs_bt_hdr(inode->block->iov.data, DISKFS_BT_ROOT_BASE);
-
-            if (rh->level == 0) {
-                /* Small inode (whole tree in the embedded root): reclaim inline. */
-                diskfs_bt_free_tree(thread, p->txn, inode);
-                diskfs_inode_free(thread, inode);
-            } else {
-                /* Large inode: record it on the durable orphan list -- atomic
-                 * with this unlink txn (the orphan inode is acquired last, a
-                 * leaf in the lock order, so no deadlock).  The continuation
-                 * enqueues it for the in-session drainer + finishes; a crash
-                 * before this txn commits leaves neither the unlink nor the
-                 * orphan record, and after it the mount scan can resume. */
-                diskfs_orphan_op_start(thread, p->txn, inode->inum, inode->gen,
-                                       0 /* insert */, diskfs_remove_orphan_done,
-                                       request);
-                return;
-            }
-        }
+        /* Record the durable orphan entry now, atomic with persisting nlink=0,
+         * regardless of whether the inode is still held open: a crash before the
+         * space is reclaimed is recovered by the next mount's orphan scan.  The
+         * actual reclaim (freeing data extents + b+tree nodes, then retiring the
+         * inode) is deferred to the async drain -- never done in this delete hot
+         * path -- and is enqueued from the continuation once the inode is
+         * unreferenced (refcnt 0): now if it is already closed, otherwise at the
+         * final close (diskfs_close_inode_cb / the deferred-mtime pin drop).  The
+         * orphan inode (inum 3) is acquired last, a leaf in the lock order. */
+        diskfs_orphan_op_start(thread, p->txn, inode->inum, inode->gen,
+                               0 /* insert */, diskfs_remove_orphan_done,
+                               request);
+        return;
     }
 
     diskfs_remove_at_finish(request);
@@ -12087,8 +12107,25 @@ diskfs_close_inode_cb(
     }
 
     --inode->refcnt;
+
+    /* Return this file's unused data-space reservation tail on close.  Done
+     * unconditionally (not just at refcnt 0, which is the delete-on-close case):
+     * a normal close drops the inode back to its idle cache reference, where it
+     * would otherwise strand the reservation until eviction.  A file held open
+     * by another handle simply re-reserves on its next write (the inode write
+     * lock, held here, serializes that against this close). */
+    diskfs_inode_return_reservation(p->thread, p->txn, inode);
+
     if (inode->refcnt == 0) {
-        diskfs_inode_free(p->thread, inode);
+        if (inode->nlink == 0) {
+            /* Delete-on-close: the file was unlinked while open (its durable
+             * orphan record was written then), and this was the last reference.
+             * Reclaim its space via the async drain, which frees the extents and
+             * retires the inode -- not inline in this close path. */
+            diskfs_drain_enqueue(p->thread, inode->inum, inode->gen);
+        } else {
+            diskfs_inode_free(p->thread, inode);
+        }
     }
 
     diskfs_op_ok(request, p->txn);
@@ -13684,10 +13721,11 @@ diskfs_write_redirect_alloc(struct chimera_vfs_request *request)
     uint64_t                       dev_id, dev_off;
     int                            rc;
 
-    rc = diskfs_thread_alloc_space(thread, p->txn,
-                                   (int64_t) p->rmw_aligned_length,
-                                   &dev_id, &dev_off,
-                                   diskfs_write_alloc_resume, request);
+    rc = diskfs_inode_alloc_space(thread, p->txn, p->inode_stash[0],
+                                  (int64_t) p->rmw_aligned_length,
+                                  SM_RESERVATION_MIN,
+                                  &dev_id, &dev_off,
+                                  diskfs_write_alloc_resume, request);
     if (rc == SM_AGAIN) {
         return;     /* parked; diskfs_write_alloc_resume re-runs */
     }
@@ -14139,7 +14177,14 @@ diskfs_dealloc_process(struct chimera_vfs_request *request)
             diskfs_dealloc_modify_advance_cb(op, op->result, request);
         }
     } else if (es < hole_start && ee > hole_end) {
-        /* Spans the hole: insert tail at hole_end first. */
+        /* Spans the hole: free the punched-out middle [hole_start, hole_end) of
+         * this extent's backing, then insert tail at hole_end.  The raw range is
+         * passed (not block-rounded): space_map_free frees only whole blocks
+         * strictly contained, so a sub-block hole edge shared with a kept piece
+         * is never freed. */
+        diskfs_thread_free_space(thread, p->txn, p->ext_iter.device_id,
+                                 p->ext_iter.device_offset + (hole_start - es),
+                                 hole_end - hole_start);
         op = diskfs_bt_op_alloc(thread);
         if (diskfs_ext_insert_async(op, thread, p->txn, p->inode_stash[0], hole_end,
                                     ee - hole_end, p->ext_iter.device_id,
@@ -14149,14 +14194,22 @@ diskfs_dealloc_process(struct chimera_vfs_request *request)
             diskfs_dealloc_spans_after_cb(op, op->result, request);
         }
     } else if (es < hole_start) {
-        /* Overlaps the hole start: remove, then reinsert the head. */
+        /* Overlaps the hole start: free the punched tail [hole_start, ee) of this
+         * extent's backing, then remove + reinsert the kept head [es, hole_start). */
+        diskfs_thread_free_space(thread, p->txn, p->ext_iter.device_id,
+                                 p->ext_iter.device_offset + (hole_start - es),
+                                 ee - hole_start);
         op = diskfs_bt_op_alloc(thread);
         if (diskfs_ext_remove_async(op, thread, p->txn, p->inode_stash[0], es,
                                     diskfs_dealloc_ostart_removed_cb, request)) {
             diskfs_dealloc_ostart_removed_cb(op, op->result, request);
         }
     } else {
-        /* Overlaps the hole end: remove, then reinsert the tail at hole_end. */
+        /* Overlaps the hole end: free the punched head [es, hole_end) of this
+         * extent's backing, then remove + reinsert the kept tail at hole_end. */
+        diskfs_thread_free_space(thread, p->txn, p->ext_iter.device_id,
+                                 p->ext_iter.device_offset,
+                                 hole_end - es);
         op = diskfs_bt_op_alloc(thread);
         if (diskfs_ext_remove_async(op, thread, p->txn, p->inode_stash[0], es,
                                     diskfs_dealloc_oend_removed_cb, request)) {
@@ -14248,9 +14301,10 @@ diskfs_allocate_do_alloc(struct chimera_vfs_request *request)
         chunk = p->alloc_cap;
     }
 
-    rc = diskfs_thread_alloc_space(thread, p->txn, (int64_t) chunk,
-                                   &dev_id, &dev_off,
-                                   diskfs_allocate_alloc_resume, request);
+    rc = diskfs_inode_alloc_space(thread, p->txn, p->inode_stash[0],
+                                  (int64_t) chunk, 0 /* exact, no retained tail */,
+                                  &dev_id, &dev_off,
+                                  diskfs_allocate_alloc_resume, request);
     if (rc == SM_AGAIN) {
         return;     /* parked; resume re-drives diskfs_allocate_do_alloc */
     }
@@ -16214,9 +16268,11 @@ diskfs_get_layout_do_alloc(
     uint64_t                       dev_id, dev_off;
     int                            rc;
 
-    rc = diskfs_thread_alloc_space(thread, p->txn, (int64_t) p->rmw_aligned_length,
-                                   &dev_id, &dev_off,
-                                   diskfs_get_layout_do_alloc, request);
+    rc = diskfs_inode_alloc_space(thread, p->txn, p->inode_stash[0],
+                                  (int64_t) p->rmw_aligned_length,
+                                  0 /* exact, no retained tail */,
+                                  &dev_id, &dev_off,
+                                  diskfs_get_layout_do_alloc, request);
     if (rc == SM_AGAIN) {
         return;     /* parked; re-driven into this function */
     }
