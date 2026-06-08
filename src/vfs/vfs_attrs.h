@@ -98,6 +98,34 @@ struct chimera_acl;
  * a value of TIME_OMIT means the backend should leave that timestamp alone. */
 #define CHIMERA_VFS_TIME_OMIT           ((1l << 30) - 4l)
 
+/*
+ * Resolve a settable timestamp against the TIME_NOW / TIME_OMIT sentinels that
+ * the SMB and NFS layers carry in a settable atime/mtime/btime/ctime field.
+ * Writes the resolved value to *out and returns 1 when the field should be
+ * stored (TIME_NOW -> the pre-sampled `now`, any concrete value -> itself), or
+ * returns 0 without touching *out when the caller asked to preserve the
+ * existing value (TIME_OMIT).  Leaving *out untouched on the 0 return lets a
+ * caller pass a pointer to the stored field directly and have TIME_OMIT be a
+ * no-op.  This is the single source of truth for that three-way decision; the
+ * native-storage backends (memfs/cairn/diskfs) all route through it.
+ */
+static inline int
+chimera_vfs_resolve_set_time(
+    const struct timespec *in,
+    const struct timespec *now,
+    struct timespec       *out)
+{
+    if (in->tv_nsec == CHIMERA_VFS_TIME_NOW) {
+        *out = *now;
+        return 1;
+    } else if (in->tv_nsec != CHIMERA_VFS_TIME_OMIT) {
+        *out = *in;
+        return 1;
+    }
+
+    return 0;
+} /* chimera_vfs_resolve_set_time */
+
 struct chimera_vfs_attrs {
     uint64_t            va_req_mask;
     uint64_t            va_set_mask;
