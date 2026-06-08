@@ -213,6 +213,41 @@ chimera_smb_ioctl(struct chimera_smb_request *request)
             chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
             break;
 
+        case SMB2_FSCTL_LMR_REQUEST_RESILIENCY:
+            /* MS-SMB2 3.3.5.15.9: grant handle resiliency on the open.  The
+             * requested Timeout (ms) is capped at a server maximum; a Timeout of
+             * 0 selects the server default.  Resiliency only applies to a
+             * disk-file open — a request against a pipe is invalid. */
+            open_file = chimera_smb_open_file_resolve(request, &request->ioctl.file_id);
+
+            if (unlikely(!open_file)) {
+                chimera_smb_complete_request(request, SMB2_STATUS_FILE_CLOSED);
+                return;
+            }
+
+            if (open_file->type != CHIMERA_SMB_OPEN_FILE_TYPE_FILE) {
+                chimera_smb_open_file_release(request, open_file);
+                chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+                return;
+            }
+
+            {
+                uint64_t timeout_ms = request->ioctl.rr_timeout_ms;
+
+                if (timeout_ms == 0) {
+                    timeout_ms = CHIMERA_SMB_RESILIENCY_DEFAULT_TIMEOUT_MS;
+                } else if (timeout_ms > CHIMERA_SMB_RESILIENCY_MAX_TIMEOUT_MS) {
+                    timeout_ms = CHIMERA_SMB_RESILIENCY_MAX_TIMEOUT_MS;
+                }
+
+                open_file->resilient            = true;
+                open_file->resilient_timeout_ms = timeout_ms;
+            }
+
+            chimera_smb_open_file_release(request, open_file);
+            chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+            break;
+
         case SMB2_FSCTL_SRV_ENUMERATE_SNAPSHOTS:
             /* MS-SMB2 3.3.5.15.1 / MS-FSCC 2.3.20: enumerate the previous
              * versions (VSS snapshots) of the open.  We don't expose
@@ -702,6 +737,18 @@ chimera_smb_parse_ioctl(
                 }
                 break;
             }
+            case SMB2_FSCTL_LMR_REQUEST_RESILIENCY:
+                /* NETWORK_RESILIENCY_REQUEST (MS-SMB2 2.2.31.3): Timeout(4) +
+                 * Reserved(4). */
+                if (request->ioctl.input_count < 8) {
+                    chimera_smb_error("LMR_REQUEST_RESILIENCY input too small (%u < 8)",
+                                      request->ioctl.input_count);
+                    request->status = SMB2_STATUS_INVALID_PARAMETER;
+                    return -1;
+                }
+                evpl_iovec_cursor_get_uint32(request_cursor, &request->ioctl.rr_timeout_ms);
+                evpl_iovec_cursor_skip(request_cursor, 4); /* Reserved */
+                break;
             default:
                 /* Other IOCTLs don't need input parsing yet */
                 chimera_smb_info("Received IOCTL request with unhandled ctl_code 0x%08x, skipping input parsing",

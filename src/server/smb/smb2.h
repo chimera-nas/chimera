@@ -1018,6 +1018,12 @@ typedef uint8_t smb2_guid[SMB2_GUID_SIZE];
 #define SMB2_FSCTL_SRV_COPYCHUNK_WRITE              0x001480F2
 #define SMB2_FSCTL_CREATE_OR_GET_OBJECT_ID          0x000900C0
 #define SMB2_FSCTL_SRV_ENUMERATE_SNAPSHOTS          0x00144064
+#define SMB2_FSCTL_LMR_REQUEST_RESILIENCY           0x001401D4
+
+/* Server policy for FSCTL_LMR_REQUEST_RESILIENCY: a Timeout of 0 selects the
+ * default; any larger request is capped at the maximum (MS-SMB2 3.3.5.15.9). */
+#define CHIMERA_SMB_RESILIENCY_DEFAULT_TIMEOUT_MS   120000U
+#define CHIMERA_SMB_RESILIENCY_MAX_TIMEOUT_MS       300000U
 
 #define SMB2_IO_REPARSE_TAG_NFS                     0x80000014
 #define SMB2_IO_REPARSE_TAG_SYMLINK                 0xA000000C
