@@ -30,6 +30,8 @@ struct test_env {
     const char                   *backend;
     int                           use_nfs;
     int                           nfsvers;
+    int                           use_smb;
+    char                          user_spec[64];
     struct chimera_vfs_cred       cred;          // Credential used to initialize the client
 };
 
@@ -48,6 +50,8 @@ client_test_init(
 
     env->use_nfs = 0;
     env->nfsvers = 0;
+    env->use_smb = 0;
+    snprintf(env->user_spec, sizeof(env->user_spec), "root");
 
     env->server_metrics = prometheus_metrics_create(NULL, NULL, 0);
 
@@ -63,7 +67,7 @@ client_test_init(
                                CHIMERA_TEST_USER_ROOT_GID,
                                0, NULL);
 
-    while ((opt = getopt(argc, argv, "b:v:U:")) != -1) {
+    while ((opt = getopt(argc, argv, "b:v:U:s")) != -1) {
         switch (opt) {
             case 'b':
                 backend = optarg;
@@ -73,7 +77,11 @@ client_test_init(
                 env->use_nfs = 1;
                 env->nfsvers = nfsvers;
                 break;
+            case 's':
+                env->use_smb = 1;
+                break;
             case 'U':
+                snprintf(env->user_spec, sizeof(env->user_spec), "%s", optarg);
                 if (!chimera_test_parse_user(optarg, &env->cred)) {
                     fprintf(stderr, "Unknown user spec '%s'. "
                             "Use: root, johndoe, myuser, or uid:gid\n", optarg);
@@ -108,7 +116,7 @@ client_test_init(
         fprintf(stderr, "to set session_dir uid/gid: %s\n", strerror(errno));
         exit(EXIT_FAILURE);
     }
-    if (env->use_nfs) {
+    if (env->use_nfs || env->use_smb) {
         server_config = chimera_server_config_init();
 
         if (strcmp(backend, "diskfs_io_uring") == 0 ||
@@ -197,11 +205,18 @@ client_test_init(
         }
 
         // Create NFSv3 server export entry
-        chimera_server_create_export(env->server, "/share", "/share");
+        if (env->use_nfs) {
+            chimera_server_create_export(env->server, "/share", "/share");
+        }
 
         chimera_server_start(env->server);
 
         chimera_test_add_server_users(env->server);
+
+        // Create the SMB share (must follow start + user setup)
+        if (env->use_smb) {
+            chimera_server_create_share(env->server, "share", "share", 0);
+        }
     } else {
         env->server = NULL;
     }
@@ -217,7 +232,18 @@ client_test_init(
         client_json_root   = json_object();
         client_json_config = json_object();
 
-        if (!env->use_nfs) {
+        /* SMB mode: register the (built-in) smb client VFS module so the client
+         * can mount "smb"; the backend is served remotely over SMB. */
+        if (env->use_smb) {
+            json_t *vfs       = json_object();
+            json_t *vfs_entry = json_object();
+            json_object_set_new(vfs_entry, "path", json_string(""));
+            json_object_set_new(vfs_entry, "config", json_string(""));
+            json_object_set_new(vfs, "smb", vfs_entry);
+            json_object_set_new(client_json_config, "vfs", vfs);
+        }
+
+        if (!env->use_nfs && !env->use_smb) {
             if (strcmp(backend, "diskfs_io_uring") == 0 ||
                 strcmp(backend, "diskfs_aio") == 0) {
                 char        diskfs_cfg[4096];
@@ -357,7 +383,21 @@ client_test_mount(
     chimera_mount_callback_t callback,
     void                    *private_data)
 {
-    if (env->use_nfs) {
+    if (env->use_smb) {
+        char        smb_opts[256];
+        const char *smbpasswd = "secret";
+
+        /* The test users registered by chimera_test_add_server_users carry the
+         * SMB passwords below; map the -U user spec to its password. */
+        if (strcmp(env->user_spec, "myuser") == 0) {
+            smbpasswd = CHIMERA_TEST_USER_MYUSER_SMBPASSWD;
+        } else {
+            smbpasswd = CHIMERA_TEST_USER_SMBPASSWD;
+        }
+
+        snprintf(smb_opts, sizeof(smb_opts), "user=%s,password=%s", env->user_spec, smbpasswd);
+        chimera_mount(env->client_thread, mount_path, "smb", "127.0.0.1:share", smb_opts, callback, private_data);
+    } else if (env->use_nfs) {
         char nfs_path[256];
         snprintf(nfs_path, sizeof(nfs_path), "127.0.0.1:/share");
         chimera_mount(env->client_thread, mount_path, "nfs", nfs_path, NULL, callback, private_data);

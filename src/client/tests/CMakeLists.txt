@@ -99,3 +99,24 @@ endif()
 generate_backend_tests(cairn CAIRN_ENABLED)
 generate_backend_tests(linux "")
 generate_backend_tests(io_uring CHIMERA_VFS_IO_URING)
+
+# SMB client tests: drive the vfs_smb client against an in-process SMB server
+# (backed by memfs) over loopback.  Limited to the file operations implemented
+# so far, and to the root user -- the memfs share root's ACL denies an
+# unprivileged user's create, so myuser variants fail server-side authorization
+# (not a client defect).  The "-s" flag selects SMB mode in client_test_common.h.
+macro(add_client_smb_test prog)
+    string(REGEX REPLACE "^test_" "" _smb_name ${prog})
+    if(CHIMERA_NETNS_TESTING)
+        add_test(NAME chimera/client/${_smb_name}_smb_memfs_root
+            COMMAND ${CMAKE_SOURCE_DIR}/scripts/netns_test_wrapper.sh
+                    ${CMAKE_CURRENT_BINARY_DIR}/${prog} -s -b memfs -U root)
+        get_target_property(_smb_test_file ${prog} TEST_FILE)
+        set_tests_properties(chimera/client/${_smb_name}_smb_memfs_root PROPERTIES
+            ENVIRONMENT "TEST_FILE=${_smb_test_file}")
+    endif()
+endmacro()
+
+foreach(prog test_stat test_fstat test_ftruncate test_remove)
+    add_client_smb_test(${prog})
+endforeach()
