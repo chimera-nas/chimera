@@ -679,6 +679,9 @@ struct chimera_smb_request {
              * FILE_OBJECTID_BUFFER, type 1): ObjectId(16) + BirthVolumeId(16)
              * + BirthObjectId(16) + DomainId(16) = 64 bytes. */
             uint8_t                         oid_buffer[64];
+            /* FSCTL_LMR_REQUEST_RESILIENCY (NETWORK_RESILIENCY_REQUEST,
+             * MS-SMB2 2.2.31.3): requested resiliency Timeout in milliseconds. */
+            uint32_t                        rr_timeout_ms;
         } ioctl;
         struct {
             uint8_t                         info_type;

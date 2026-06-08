@@ -127,6 +127,12 @@ struct chimera_smb_open_file {
     uint32_t                          lease_flags;
     uint32_t                          durable_flags;
     uint64_t                          durable_timeout_ms;
+    /* FSCTL_LMR_REQUEST_RESILIENCY (MS-SMB2 2.2.31.3 / 3.3.5.15.9): set once a
+     * client has been granted handle resiliency on this open.  resilient_timeout_ms
+     * is the (server-capped) duration the open survives a network disconnect for
+     * reclaim-by-reconnect. */
+    bool                              resilient;
+    uint64_t                          resilient_timeout_ms;
     uint8_t                           lease_key[16];
     uint8_t                           parent_lease_key[16];
     uint8_t                           create_guid[16];

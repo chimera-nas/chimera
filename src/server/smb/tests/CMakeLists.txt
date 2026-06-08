@@ -224,7 +224,9 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
     # against the current server.  Left out: *_WithDifferentDurableOwner /
     # BVT_PersistentHandles (need a second user account / scale-out config the
     # harness doesn't provide — they report Inconclusive/NotExecuted), and the
-    # Replay IoCtl/Lock cases (replay-eligibility not yet cleared on those ops).
+    # Replay Lock cases (replay-eligibility not yet cleared on that op).  The
+    # Replay IoCtl cases use FSCTL_LMR_REQUEST_RESILIENCY as their vehicle and
+    # are applicable now that the server grants request-resiliency.
     set(WPTS_SMB2_PERSISTENT_ALLOWLIST
         BVT_DurableHandleV1_Reconnect_WithBatchOplock
         BVT_DurableHandleV1_Reconnect_WithLeaseV1
@@ -252,12 +254,14 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
         DurableHandleV2_WithLeaseV2_WithoutHandleCaching
         PersistentHandle_ReOpenFromDiffClient
         Replay_NonPersistentHandle_Flush_ReplayEligibleCleared
+        Replay_NonPersistentHandle_IoCtl_ReplayEligibleCleared
         Replay_NonPersistentHandle_QueryInfo_ReplayEligibleCleared
         Replay_NonPersistentHandle_Read_ReplayEligibleCleared
         Replay_NonPersistentHandle_SetInfo_ReplayEligibleCleared
         Replay_NonPersistentHandle_Write_ReplayEligibleCleared
         Replay_PersistentHandle_ChangeNotify_ReplayEligibleCleared
         Replay_PersistentHandle_Flush_ReplayEligibleCleared
+        Replay_PersistentHandle_IoCtl_ReplayEligibleCleared
         Replay_PersistentHandle_QueryDirectory_ReplayEligibleCleared
         Replay_PersistentHandle_QueryInfo_ReplayEligibleCleared
         Replay_PersistentHandle_Read_ReplayEligibleCleared
