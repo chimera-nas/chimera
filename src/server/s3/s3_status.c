@@ -53,6 +53,10 @@ chimera_s3_status_to_string(enum chimera_s3_status status)
             return "Method Not Allowed";
         case CHIMERA_S3_STATUS_INVALID_RANGE:
             return "Requested Range Not Satisfiable";
+        case CHIMERA_S3_STATUS_INVALID_TAG:
+            return "Invalid Tag";
+        case CHIMERA_S3_STATUS_NO_SUCH_TAG_SET:
+            return "No Such Tag Set";
         case CHIMERA_S3_STATUS_NOT_IMPLEMENTED:
             return "Not Implemented";
         case CHIMERA_S3_STATUS_INVALID_ARGUMENT:
@@ -187,6 +191,18 @@ chimera_s3_prepare_error_response(
             bp  += sprintf(bp, "  <Code>InvalidRange</Code>\n");
             bp  += sprintf(bp, "  <Message>The requested range is not satisfiable</Message>\n");
             code = 416;
+            break;
+        case CHIMERA_S3_STATUS_INVALID_TAG:
+            bp += sprintf(bp, "  <Code>InvalidTag</Code>\n");
+            bp += sprintf(bp, "  <Message>The tag provided was not a valid tag. "
+                          "This error can occur if the tag did not pass input "
+                          "validation.</Message>\n");
+            code = 400;
+            break;
+        case CHIMERA_S3_STATUS_NO_SUCH_TAG_SET:
+            bp  += sprintf(bp, "  <Code>NoSuchTagSet</Code>\n");
+            bp  += sprintf(bp, "  <Message>The TagSet does not exist.</Message>\n");
+            code = 404;
             break;
         case CHIMERA_S3_STATUS_NOT_IMPLEMENTED:
             bp += sprintf(bp, "  <Code>NotImplemented</Code>\n");

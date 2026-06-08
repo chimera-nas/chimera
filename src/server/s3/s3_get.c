@@ -13,6 +13,28 @@
 #include "s3_etag.h"
 #include "s3_procs.h"
 #include "s3_metadata.h"
+#include "s3_tagging.h"
+
+/* HEAD object: metadata + tag-count headers attached, release the object handle
+ * and finish the (bodyless) response. */
+static void
+chimera_s3_head_respond(
+    struct evpl               *evpl,
+    struct chimera_s3_request *request)
+{
+    struct chimera_server_s3_thread *thread = request->thread;
+
+    if (request->file_handle) {
+        chimera_vfs_release(thread->vfs, request->file_handle);
+        request->file_handle = NULL;
+    }
+
+    request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
+
+    if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
+        s3_server_respond(evpl, request);
+    }
+} /* chimera_s3_head_respond */
 
 static void
 chimera_s3_get_finish(struct chimera_s3_request *request)
@@ -131,14 +153,13 @@ chimera_s3_get_metadata_done(
                EVPL_HTTP_REQUEST_TYPE_HEAD);
 
     if (is_head) {
-        /* HEAD: no body. Release the handle now and finish. */
-        chimera_vfs_release(thread->vfs, request->file_handle);
-        request->file_handle = NULL;
-        request->vfs_state   = CHIMERA_S3_VFS_STATE_COMPLETE;
-
-        if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
-            s3_server_respond(evpl, request);
-        }
+        /* HEAD: no body. Attach the x-amz-tagging-count header (S3 reports the
+         * object's tag count on HEAD), then release the handle and finish in
+         * chimera_s3_head_respond. */
+        chimera_s3_tagging_count_for_head(evpl, thread, request,
+                                          request->file_handle->fh,
+                                          request->file_handle->fh_len,
+                                          chimera_s3_head_respond);
         return;
     }
 
@@ -291,7 +312,8 @@ chimera_s3_get_lookup_callback(
 
     /* Open the object (for both GET and HEAD) so its stored metadata xattrs can
      * be read and re-emitted as response headers before the response is
-     * dispatched. The body is only streamed for GET. */
+     * dispatched. For HEAD the x-amz-tagging-count header is also attached once
+     * the object is open. The body is only streamed for GET. */
     chimera_vfs_open_fh(thread->vfs, &thread->shared->cred,
                         attr->va_fh,
                         attr->va_fh_len,
