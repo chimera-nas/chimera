@@ -147,6 +147,7 @@ struct chimera_s3_request {
             int                           marker_len;     /* V1 marker echo */
             int                           ctoken_len;     /* V2 continuation-token echo */
             int                           startafter_len; /* V2 start-after echo */
+            int                           fetch_owner;    /* V2 fetch-owner=true */
             int                           n_entries;
             int                           cap_entries;
             struct chimera_s3_list_entry *entries;
