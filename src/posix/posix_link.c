@@ -76,7 +76,9 @@ chimera_posix_link(
     chimera_posix_completion_destroy(&comp);
 
     if (err) {
-        errno = err;
+        /* POSIX link(2) reports a directory source as EPERM; the VFS surfaces
+         * the physical condition as EISDIR (for NFS4/SMB protocol fidelity). */
+        errno = (err == EISDIR) ? EPERM : err;
         return -1;
     }
 
