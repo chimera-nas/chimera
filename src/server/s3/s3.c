@@ -23,15 +23,50 @@
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
 
-static inline void
-chimera_s3_sterilize_path(
-    struct chimera_s3_request *request,
-    const char                *prefix,
-    int                        prefix_len)
+static inline int
+chimera_s3_hexval(int c)
 {
-    request->path     = request->list.prefix;
-    request->path_len = request->list.prefix_len;
-} /* chimera_s3_sterilize_path */
+    if (c >= '0' && c <= '9') {
+        return c - '0';
+    } else if (c >= 'a' && c <= 'f') {
+        return c - 'a' + 10;
+    } else if (c >= 'A' && c <= 'F') {
+        return c - 'A' + 10;
+    }
+    return -1;
+} /* chimera_s3_hexval */
+
+/* Percent-decode an S3 query-string value (%XX escapes only; '+' is left
+ * intact because S3, unlike form encoding, does not treat it as a space).
+ * Writes a NUL-terminated result and returns its length. */
+static inline int
+chimera_s3_pct_decode(
+    char       *dst,
+    int         dstcap,
+    const char *src,
+    int         srclen)
+{
+    int o = 0, i = 0;
+
+    while (i < srclen && o < dstcap - 1) {
+        int c = (unsigned char) src[i];
+
+        if (c == '%' && i + 2 < srclen) {
+            int hi = chimera_s3_hexval((unsigned char) src[i + 1]);
+            int lo = chimera_s3_hexval((unsigned char) src[i + 2]);
+            if (hi >= 0 && lo >= 0) {
+                dst[o++] = (char) ((hi << 4) | lo);
+                i       += 3;
+                continue;
+            }
+        }
+        dst[o++] = (char) c;
+        i++;
+    }
+
+    dst[o] = '\0';
+    return o;
+} /* chimera_s3_pct_decode */
 
 /* expect range_str in the form: bytes=1000-1599 */
 static inline int
@@ -543,10 +578,26 @@ s3_server_dispatch(
             const char *p;
             int         key_len, value_len;
             /* Staging buffers; we don't know yet whether this is a LIST or a
-             * multipart request, and they share a union. */
-            char        prefix_buf[256];
-            int         prefix_len = 0;
-            int         max_keys   = 1000;
+             * multipart request, and they share a union. LIST values are
+             * percent-decoded since clients (e.g. the AWS CLI) encode prefix,
+             * delimiter and continuation tokens in the query string. */
+            char        prefix_buf[CHIMERA_S3_KEY_MAX];
+            char        delim_buf[CHIMERA_S3_DELIM_MAX];
+            char        marker_buf[CHIMERA_S3_KEY_MAX];
+            char        ctoken_buf[CHIMERA_S3_KEY_MAX];
+            char        startafter_buf[CHIMERA_S3_KEY_MAX];
+            int         prefix_len     = 0;
+            int         delim_len      = 0;
+            int         marker_len     = 0;
+            int         ctoken_len     = 0;
+            int         startafter_len = 0;
+            int         max_keys       = 1000;
+            int         list_type      = 1;
+            int         encoding_url   = 0;
+            /* Set when the query carries a key we don't recognize as a list
+             * parameter or handled subresource: an unimplemented bucket/object
+             * subresource (acl/policy/tagging/cors/lifecycle/...). */
+            int         saw_unknown = 0;
 
             p = qmark + 1;
 
@@ -588,16 +639,40 @@ s3_server_dispatch(
                     s3_request->query_part_number = atoi(value_start);
                     s3_request->has_part_number   = 1;
                 } else if (key_len == 6 && memcmp(key_start, "prefix", 6) == 0) {
-                    if (value_len > (int) sizeof(prefix_buf) - 1) {
-                        value_len = sizeof(prefix_buf) - 1;
-                    }
-                    memcpy(prefix_buf, value_start, value_len);
-                    prefix_buf[value_len] = '\0';
-                    prefix_len            = value_len;
+                    prefix_len = chimera_s3_pct_decode(prefix_buf, sizeof(prefix_buf),
+                                                       value_start, value_len);
                 } else if (key_len == 8 && memcmp(key_start, "max-keys", 8) == 0) {
                     max_keys = atoi(value_start);
                 } else if (key_len == 10 && memcmp(key_start, "attributes", 10) == 0) {
                     s3_request->has_attributes = 1;
+                } else if (key_len == 9 && memcmp(key_start, "list-type", 9) == 0) {
+                    list_type = atoi(value_start);
+                } else if (key_len == 9 && memcmp(key_start, "delimiter", 9) == 0) {
+                    delim_len = chimera_s3_pct_decode(delim_buf, sizeof(delim_buf),
+                                                      value_start, value_len);
+                } else if (key_len == 6 && memcmp(key_start, "marker", 6) == 0) {
+                    marker_len = chimera_s3_pct_decode(marker_buf, sizeof(marker_buf),
+                                                       value_start, value_len);
+                } else if (key_len == 10 && memcmp(key_start, "key-marker", 10) == 0) {
+                    /* ListObjectVersions pagination cursor; reuse the marker. */
+                    marker_len = chimera_s3_pct_decode(marker_buf, sizeof(marker_buf),
+                                                       value_start, value_len);
+                } else if (key_len == 18 && memcmp(key_start, "continuation-token", 18) == 0) {
+                    ctoken_len = chimera_s3_pct_decode(ctoken_buf, sizeof(ctoken_buf),
+                                                       value_start, value_len);
+                } else if (key_len == 11 && memcmp(key_start, "start-after", 11) == 0) {
+                    startafter_len = chimera_s3_pct_decode(startafter_buf, sizeof(startafter_buf),
+                                                           value_start, value_len);
+                } else if (key_len == 13 && memcmp(key_start, "encoding-type", 13) == 0) {
+                    if (value_len == 3 && strncasecmp(value_start, "url", 3) == 0) {
+                        encoding_url = 1;
+                    }
+                } else if ((key_len == 11 && memcmp(key_start, "fetch-owner", 11) == 0) ||
+                           (key_len == 17 && memcmp(key_start, "version-id-marker", 17) == 0)) {
+                    /* Recognized list parameters we accept but don't act on. */
+                } else {
+                    /* Unrecognized query key: an unimplemented subresource. */
+                    saw_unknown = 1;
                 }
 
                 if (*p == '&') {
@@ -646,18 +721,35 @@ s3_server_dispatch(
                 s3_request->del.cur      = 0;
                 s3_request->del.quiet    = 0;
             } else if (qmark == s3_request->path) {
-                /* Path starts with '?': bucket-level LIST query. */
-                s3_request->is_list         = 1;
-                s3_request->list.prefix_len = prefix_len;
-                if (prefix_len > 0) {
-                    memcpy(s3_request->list.prefix, prefix_buf, prefix_len);
-                    s3_request->list.prefix[prefix_len] = '\0';
+                if (saw_unknown && !s3_request->has_versions) {
+                    /* Path is "?<subresource>" we don't implement (acl, policy,
+                     * tagging, cors, lifecycle, versioning, website, ...). These
+                     * configure features that have no meaning for a filesystem-
+                     * backed bucket shared with NFS/SMB, so we accept and ignore
+                     * them with an empty 200 rather than (a) mis-listing or (b)
+                     * routing a PUT to an object write that would create a junk
+                     * "?subresource" key visible to every protocol. vfs_state
+                     * COMPLETE short-circuits the routing below.
+                     *
+                     * NOTE: this means security-relevant configs (bucket policy,
+                     * encryption, ACL) are silently NOT enforced. */
+                    s3_request->status           = CHIMERA_S3_STATUS_OK;
+                    s3_request->file_length      = 0;
+                    s3_request->file_real_length = 0;
+                    s3_request->file_offset      = 0;
+                    s3_request->vfs_state        = CHIMERA_S3_VFS_STATE_COMPLETE;
+                    s3_request->op_bucket        = 1;
+                } else {
+                    /* Bucket-level LIST query (ListObjects V1/V2 or
+                     * ListObjectVersions). */
+                    chimera_s3_list_setup(s3_request, list_type, max_keys, encoding_url,
+                                          prefix_buf, prefix_len,
+                                          delim_buf, delim_len,
+                                          marker_buf, marker_len,
+                                          ctoken_buf, ctoken_len,
+                                          startafter_buf, startafter_len);
+                    s3_request->list.versions = s3_request->has_versions;
                 }
-                s3_request->list.max_keys = max_keys;
-                s3_request->list.versions = s3_request->has_versions;
-                chimera_s3_sterilize_path(s3_request,
-                                          s3_request->list.prefix,
-                                          s3_request->list.prefix_len);
             } else {
                 /* Path has '?' mid-string but no recognized subresource: strip
                  * the query suffix and treat as a regular object request. */
@@ -681,6 +773,12 @@ s3_server_dispatch(
 
     {
         enum evpl_http_request_type method = evpl_http_request_type(request);
+
+        /* The query parser already resolved this request (e.g. an unimplemented
+         * subresource); don't run the bucket/object routing over it. */
+        if (s3_request->vfs_state == CHIMERA_S3_VFS_STATE_COMPLETE) {
+            return;
+        }
 
         /* Service-level request (no bucket in the path): GET / == ListBuckets. */
         if (s3_request->bucket_namelen == 0) {
@@ -734,13 +832,9 @@ s3_server_dispatch(
                 return;
             } else if (method == EVPL_HTTP_REQUEST_TYPE_GET) {
                 /* GET /bucket with no object key == ListObjects (v1). */
-                s3_request->op_bucket       = 1;
-                s3_request->is_list         = 1;
-                s3_request->list.prefix_len = 0;
-                s3_request->list.prefix[0]  = '\0';
-                s3_request->list.max_keys   = 1000;
-                s3_request->list.versions   = 0;
-                chimera_s3_sterilize_path(s3_request, s3_request->list.prefix, 0);
+                s3_request->op_bucket = 1;
+                chimera_s3_list_setup(s3_request, 1, 1000, 0,
+                                      "", 0, "", 0, "", 0, "", 0, "", 0);
             }
         }
 
