@@ -176,6 +176,12 @@ s3_server_respond(
     } else if (request->status == CHIMERA_S3_STATUS_NO_CONTENT) {
         evpl_http_server_set_response_length(request->http_request, 0);
         evpl_http_server_dispatch_default(request->http_request, 204);
+    } else if (request->status == CHIMERA_S3_STATUS_NOT_MODIFIED) {
+        /* 304 Not Modified: empty body, no <Error> document. The ETag /
+         * Last-Modified headers have already been attached by the GET/HEAD
+         * handler so the client can re-validate. */
+        evpl_http_server_set_response_length(request->http_request, 0);
+        evpl_http_server_dispatch_default(request->http_request, 304);
     } else {
         evpl_iovec_alloc(evpl, 1024, 0, 1, 0, &iov);
 

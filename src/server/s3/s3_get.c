@@ -179,6 +179,52 @@ chimera_s3_get_lookup_callback(
     chimera_s3_attach_etag(request->http_request, attr);
     chimera_s3_attach_last_modified(request->http_request, attr);
 
+    /* Evaluate HTTP conditional / precondition headers against this object's
+     * ETag and last-modified time. Precedence follows RFC 7232 §6: If-Match
+     * and If-Unmodified-Since (failure -> 412 PreconditionFailed) are checked
+     * before If-None-Match and If-Modified-Since (failure -> 304 Not Modified).
+     * The ETag / Last-Modified response headers are already attached above so a
+     * 304 carries them for the client to re-validate. */
+    {
+        const char            *if_match = evpl_http_request_header(request->http_request, "If-Match");
+        const char            *if_none  = evpl_http_request_header(request->http_request, "If-None-Match");
+        const char            *if_mod   = evpl_http_request_header(request->http_request, "If-Modified-Since");
+        const char            *if_unmod = evpl_http_request_header(request->http_request, "If-Unmodified-Since");
+        enum chimera_s3_status precond  = CHIMERA_S3_STATUS_OK;
+        time_t                 when;
+
+        if (if_match) {
+            if (!chimera_s3_etag_matches(if_match, attr)) {
+                precond = CHIMERA_S3_STATUS_PRECONDITION_FAILED;
+            }
+        } else if (if_unmod && chimera_s3_parse_http_date(if_unmod, &when) == 0) {
+            if (attr->va_mtime.tv_sec > when) {
+                precond = CHIMERA_S3_STATUS_PRECONDITION_FAILED;
+            }
+        }
+
+        if (precond == CHIMERA_S3_STATUS_OK) {
+            if (if_none) {
+                if (chimera_s3_etag_matches(if_none, attr)) {
+                    precond = CHIMERA_S3_STATUS_NOT_MODIFIED;
+                }
+            } else if (if_mod && chimera_s3_parse_http_date(if_mod, &when) == 0) {
+                if (attr->va_mtime.tv_sec <= when) {
+                    precond = CHIMERA_S3_STATUS_NOT_MODIFIED;
+                }
+            }
+        }
+
+        if (precond != CHIMERA_S3_STATUS_OK) {
+            request->status    = precond;
+            request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
+            if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
+                s3_server_respond(evpl, request);
+            }
+            return;
+        }
+    }
+
     request->file_real_length = attr->va_size;
 
     /* Resolve the requested byte range now that the object size is known. The

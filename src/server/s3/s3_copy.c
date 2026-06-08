@@ -742,6 +742,52 @@ chimera_s3_copy_lookup_src_callback(
         (CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_SIZE | CHIMERA_VFS_ATTR_MTIME),
         "copy source lookup: missing attributes");
 
+    /* Evaluate the x-amz-copy-source-if-* preconditions against the SOURCE
+     * object. Any failure aborts the copy with 412 PreconditionFailed. Same
+     * precedence as a conditional GET: if-match / if-unmodified-since first,
+     * then if-none-match / if-modified-since. */
+    {
+        struct chimera_s3_request *request  = ctx->request;
+        const char                *if_match =
+            evpl_http_request_header(request->http_request, "x-amz-copy-source-if-match");
+        const char                *if_none =
+            evpl_http_request_header(request->http_request, "x-amz-copy-source-if-none-match");
+        const char                *if_mod =
+            evpl_http_request_header(request->http_request, "x-amz-copy-source-if-modified-since");
+        const char                *if_unmod =
+            evpl_http_request_header(request->http_request, "x-amz-copy-source-if-unmodified-since");
+        int                        failed = 0;
+        time_t                     when;
+
+        if (if_match) {
+            if (!chimera_s3_etag_matches(if_match, attr)) {
+                failed = 1;
+            }
+        } else if (if_unmod && chimera_s3_parse_http_date(if_unmod, &when) == 0) {
+            if (attr->va_mtime.tv_sec > when) {
+                failed = 1;
+            }
+        }
+
+        if (!failed) {
+            if (if_none) {
+                if (chimera_s3_etag_matches(if_none, attr)) {
+                    failed = 1;
+                }
+            } else if (if_mod && chimera_s3_parse_http_date(if_mod, &when) == 0) {
+                if (attr->va_mtime.tv_sec <= when) {
+                    failed = 1;
+                }
+            }
+        }
+
+        if (failed) {
+            chimera_s3_copy_finish(ctx, 0,
+                                   CHIMERA_S3_STATUS_PRECONDITION_FAILED, NULL);
+            return;
+        }
+    }
+
     ctx->src_size  = attr->va_size;
     ctx->src_mtime = attr->va_mtime;
 

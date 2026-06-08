@@ -51,6 +51,10 @@ chimera_s3_status_to_string(enum chimera_s3_status status)
             return "Bucket Not Empty";
         case CHIMERA_S3_STATUS_METHOD_NOT_ALLOWED:
             return "Method Not Allowed";
+        case CHIMERA_S3_STATUS_NOT_MODIFIED:
+            return "Not Modified";
+        case CHIMERA_S3_STATUS_PRECONDITION_FAILED:
+            return "Precondition Failed";
         case CHIMERA_S3_STATUS_NOT_IMPLEMENTED:
             return "Not Implemented";
         default:
@@ -177,6 +181,11 @@ chimera_s3_prepare_error_response(
             bp  += sprintf(bp, "  <Code>InvalidArgument</Code>\n");
             bp  += sprintf(bp, "  <Message>Invalid Argument</Message>\n");
             code = 400;
+            break;
+        case CHIMERA_S3_STATUS_PRECONDITION_FAILED:
+            bp  += sprintf(bp, "  <Code>PreconditionFailed</Code>\n");
+            bp  += sprintf(bp, "  <Message>At least one of the preconditions you specified did not hold.</Message>\n");
+            code = 412;
             break;
         case CHIMERA_S3_STATUS_NOT_IMPLEMENTED:
             bp += sprintf(bp, "  <Code>NotImplemented</Code>\n");

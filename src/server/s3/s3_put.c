@@ -11,13 +11,12 @@
 #include "s3_etag.h"
 
 static inline void
-chimera_s3_put_finish_common(
-    enum chimera_vfs_error error_code,
-    void                  *private_data)
+chimera_s3_put_respond(
+    struct chimera_s3_request *request,
+    enum chimera_vfs_error     error_code)
 {
-    struct chimera_s3_request       *request = private_data;
-    struct chimera_server_s3_thread *thread  = request->thread;
-    struct evpl                     *evpl    = thread->evpl;
+    struct chimera_server_s3_thread *thread = request->thread;
+    struct evpl                     *evpl   = thread->evpl;
 
     chimera_vfs_release(thread->vfs, request->dir_handle);
     chimera_vfs_release(thread->vfs, request->file_handle);
@@ -31,6 +30,49 @@ chimera_s3_put_finish_common(
     if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
         s3_server_respond(evpl, request);
     }
+} /* chimera_s3_put_respond */
+
+/* Final attributes of the published object: compute and attach the response
+ * ETag from them. The ETag is a hash of size + mtime + fh, so it is only
+ * stable once the body is written and the file is linked/renamed into place;
+ * attaching it any earlier returns the ETag of the empty placeholder and
+ * breaks the client's later conditional GET (If-Match) against the object. */
+static void
+chimera_s3_put_getattr_callback(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct chimera_s3_request *request = private_data;
+
+    if (!error_code &&
+        (attr->va_set_mask & (CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_SIZE |
+                              CHIMERA_VFS_ATTR_MTIME)) ==
+        (CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_SIZE | CHIMERA_VFS_ATTR_MTIME)) {
+        chimera_s3_attach_etag(request->http_request, attr);
+    }
+
+    chimera_s3_put_respond(request, error_code);
+} /* chimera_s3_put_getattr_callback */
+
+static inline void
+chimera_s3_put_finish_common(
+    enum chimera_vfs_error error_code,
+    void                  *private_data)
+{
+    struct chimera_s3_request       *request = private_data;
+    struct chimera_server_s3_thread *thread  = request->thread;
+
+    if (error_code) {
+        chimera_s3_put_respond(request, error_code);
+        return;
+    }
+
+    chimera_vfs_getattr(thread->vfs, &thread->shared->cred,
+                        request->file_handle,
+                        CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,
+                        chimera_s3_put_getattr_callback,
+                        request);
 } /* chimera_s3_put_finish_common */
 
 static void
@@ -260,7 +302,10 @@ chimera_s3_put_create_unlinked_callback(
     request->file_handle = oh;
     request->vfs_state   = CHIMERA_S3_VFS_STATE_RECV;
 
-    chimera_s3_attach_etag(request->http_request, attr);
+    /* The ETag is derived from the object's size + mtime + fh, none of which
+     * are final until the body has been written. It is computed and attached
+     * from the post-write attributes in chimera_s3_put_finish_common, not from
+     * this just-created empty file. */
 
     chimera_s3_put_recv(evpl, request);
 
@@ -290,7 +335,7 @@ chimera_s3_put_create_callback(
     request->file_handle = oh;
     request->vfs_state   = CHIMERA_S3_VFS_STATE_RECV;
 
-    chimera_s3_attach_etag(request->http_request, attr);
+    /* ETag attached post-write; see chimera_s3_put_create_unlinked_callback. */
 
     chimera_s3_put_recv(evpl, request);
 
@@ -374,15 +419,16 @@ chimera_s3_put_lookup_callback(
                         request);
 }  /* chimera_s3_put_lookup_callback */
 
-void
-chimera_s3_put(
-    struct evpl                     *evpl,
-    struct chimera_server_s3_thread *thread,
-    struct chimera_s3_request       *request)
+/* Begin the actual object write: resolve/create the parent directory, then
+ * create the (temp) destination file. Reached either directly (no conditional
+ * headers) or after the destination-precondition lookup has passed. */
+static void
+chimera_s3_put_begin(struct chimera_s3_request *request)
 {
-    const char *slash;
-    const char *dirpath = request->path;
-    int         dirpathlen;
+    struct chimera_server_s3_thread *thread = request->thread;
+    const char                      *slash;
+    const char                      *dirpath = request->path;
+    int                              dirpathlen;
 
     slash = rindex(request->path, '/');
 
@@ -418,4 +464,98 @@ chimera_s3_put(
                        CHIMERA_VFS_ATTR_FH,
                        chimera_s3_put_lookup_callback,
                        request);
+} /* chimera_s3_put_begin */
+
+/* Conditional-PUT precondition lookup of the destination key.
+ *
+ * The header semantics (RFC 7232 / S3 PutObject) evaluated against the object
+ * currently stored under the destination key:
+ *   If-None-Match: "*"      -> fail (412) if the object already exists
+ *   If-None-Match: <etag>   -> fail (412) if the existing ETag matches
+ *   If-Match:      "*"      -> fail (404) if no object exists
+ *   If-Match:      <etag>   -> fail (412) if the existing ETag does not match
+ * A missing object surfaces here as an error_code; whether that is a failure
+ * depends on which header was supplied.
+ */
+static void
+chimera_s3_put_precond_callback(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct chimera_s3_request       *request = private_data;
+    struct chimera_server_s3_thread *thread  = request->thread;
+    struct evpl                     *evpl    = thread->evpl;
+    const char                      *if_match;
+    const char                      *if_none;
+    enum chimera_s3_status           fail = CHIMERA_S3_STATUS_OK;
+
+    if_match = evpl_http_request_header(request->http_request, "If-Match");
+    if_none  = evpl_http_request_header(request->http_request, "If-None-Match");
+
+    if (error_code ||
+        (attr->va_set_mask & (CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_SIZE |
+                              CHIMERA_VFS_ATTR_MTIME)) !=
+        (CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_SIZE | CHIMERA_VFS_ATTR_MTIME)) {
+        /* Destination key does not exist (or is not a readable object). */
+        if (if_match) {
+            /* If-Match against a missing object: NoSuchKey (per S3). */
+            fail = CHIMERA_S3_STATUS_NO_SUCH_KEY;
+        }
+        /* If-None-Match (incl. "*") against a missing object: precondition
+         * holds, proceed with the create. */
+    } else {
+        /* Destination key exists; compare ETags. */
+        if (if_match && !chimera_s3_etag_matches(if_match, attr)) {
+            fail = CHIMERA_S3_STATUS_PRECONDITION_FAILED;
+        }
+        if (if_none && chimera_s3_etag_matches(if_none, attr)) {
+            fail = CHIMERA_S3_STATUS_PRECONDITION_FAILED;
+        }
+    }
+
+    if (fail != CHIMERA_S3_STATUS_OK) {
+        request->status    = fail;
+        request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
+        /* The request body must still be drained so the connection stays in
+         * sync; s3_server_notify handles that and dispatches the response once
+         * the body is received. */
+        if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
+            s3_server_respond(evpl, request);
+        }
+        return;
+    }
+
+    chimera_s3_put_begin(request);
+} /* chimera_s3_put_precond_callback */
+
+void
+chimera_s3_put(
+    struct evpl                     *evpl,
+    struct chimera_server_s3_thread *thread,
+    struct chimera_s3_request       *request)
+{
+    const char *if_match;
+    const char *if_none;
+
+    if_match = evpl_http_request_header(request->http_request, "If-Match");
+    if_none  = evpl_http_request_header(request->http_request, "If-None-Match");
+
+    if (if_match || if_none) {
+        /* Evaluate the precondition against the object currently at the key
+         * before creating anything. */
+        request->io_pending = 0;
+        chimera_vfs_lookup(thread->vfs, &thread->shared->cred,
+                           request->bucket_fh,
+                           request->bucket_fhlen,
+                           request->path,
+                           request->path_len,
+                           CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,
+                           CHIMERA_VFS_LOOKUP_FOLLOW,
+                           chimera_s3_put_precond_callback,
+                           request);
+        return;
+    }
+
+    chimera_s3_put_begin(request);
 } /* chimera_s3_put */

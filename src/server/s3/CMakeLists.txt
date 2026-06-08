@@ -5,6 +5,9 @@
 find_package(OpenSSL REQUIRED)
 
 add_library(chimera_s3 SHARED s3.c s3_get.c s3_put.c s3_copy.c s3_dump.c s3_status.c s3_delete.c s3_delete_objects.c s3_list.c s3_bucket.c s3_auth.c s3_multipart.c)
+# strptime()/timegm() (used for HTTP conditional-request date parsing) require
+# the GNU/X-Open feature set.
+target_compile_definitions(chimera_s3 PRIVATE _GNU_SOURCE)
 target_link_libraries(chimera_s3 chimera_vfs evpl_http evpl OpenSSL::Crypto)
 
 install(TARGETS chimera_s3 DESTINATION lib)
