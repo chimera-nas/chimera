@@ -594,6 +594,8 @@ s3_server_dispatch(
             int         max_keys       = 1000;
             int         list_type      = 1;
             int         encoding_url   = 0;
+            int         fetch_owner    = 0;
+            int         bad_max_keys   = 0;
             /* Set when the query carries a key we don't recognize as a list
              * parameter or handled subresource: an unimplemented bucket/object
              * subresource (acl/policy/tagging/cors/lifecycle/...). */
@@ -642,7 +644,20 @@ s3_server_dispatch(
                     prefix_len = chimera_s3_pct_decode(prefix_buf, sizeof(prefix_buf),
                                                        value_start, value_len);
                 } else if (key_len == 8 && memcmp(key_start, "max-keys", 8) == 0) {
-                    max_keys = atoi(value_start);
+                    /* max-keys must be a non-negative integer; a non-numeric or
+                     * empty value is an InvalidArgument (400), not a silent 0. */
+                    int mk_valid = (value_len > 0);
+                    for (int mi = 0; mi < value_len; mi++) {
+                        if (value_start[mi] < '0' || value_start[mi] > '9') {
+                            mk_valid = 0;
+                            break;
+                        }
+                    }
+                    if (mk_valid) {
+                        max_keys = atoi(value_start);
+                    } else {
+                        bad_max_keys = 1;
+                    }
                 } else if (key_len == 10 && memcmp(key_start, "attributes", 10) == 0) {
                     s3_request->has_attributes = 1;
                 } else if (key_len == 9 && memcmp(key_start, "list-type", 9) == 0) {
@@ -667,9 +682,12 @@ s3_server_dispatch(
                     if (value_len == 3 && strncasecmp(value_start, "url", 3) == 0) {
                         encoding_url = 1;
                     }
-                } else if ((key_len == 11 && memcmp(key_start, "fetch-owner", 11) == 0) ||
-                           (key_len == 17 && memcmp(key_start, "version-id-marker", 17) == 0)) {
-                    /* Recognized list parameters we accept but don't act on. */
+                } else if (key_len == 11 && memcmp(key_start, "fetch-owner", 11) == 0) {
+                    /* V2: emit <Owner> in each <Contents> when true. */
+                    fetch_owner = (value_len == 4 &&
+                                   strncasecmp(value_start, "true", 4) == 0);
+                } else if (key_len == 17 && memcmp(key_start, "version-id-marker", 17) == 0) {
+                    /* Recognized list parameter we accept but don't act on. */
                 } else {
                     /* Unrecognized query key: an unimplemented subresource. */
                     saw_unknown = 1;
@@ -739,6 +757,14 @@ s3_server_dispatch(
                     s3_request->file_offset      = 0;
                     s3_request->vfs_state        = CHIMERA_S3_VFS_STATE_COMPLETE;
                     s3_request->op_bucket        = 1;
+                } else if (bad_max_keys) {
+                    /* A non-numeric/empty max-keys is an InvalidArgument (400). */
+                    s3_request->status           = CHIMERA_S3_STATUS_BAD_REQUEST;
+                    s3_request->file_length      = 0;
+                    s3_request->file_real_length = 0;
+                    s3_request->file_offset      = 0;
+                    s3_request->vfs_state        = CHIMERA_S3_VFS_STATE_COMPLETE;
+                    s3_request->op_bucket        = 1;
                 } else {
                     /* Bucket-level LIST query (ListObjects V1/V2 or
                      * ListObjectVersions). */
@@ -748,7 +774,8 @@ s3_server_dispatch(
                                           marker_buf, marker_len,
                                           ctoken_buf, ctoken_len,
                                           startafter_buf, startafter_len);
-                    s3_request->list.versions = s3_request->has_versions;
+                    s3_request->list.versions    = s3_request->has_versions;
+                    s3_request->list.fetch_owner = fetch_owner;
                 }
             } else {
                 /* Path has '?' mid-string but no recognized subresource: strip

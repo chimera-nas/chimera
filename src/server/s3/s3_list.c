@@ -324,8 +324,10 @@ chimera_s3_list_setup(
     request->list.cap_entries  = 0;
     request->list.list_type    = (list_type == 2) ? 2 : 1;
     request->list.encoding_url = encoding_url;
-    /* versions is set by the dispatcher after setup; default off. */
-    request->list.versions = 0;
+    /* versions and fetch_owner are set by the dispatcher after setup;
+     * default off. */
+    request->list.versions    = 0;
+    request->list.fetch_owner = 0;
 
     if (max_keys < 0) {
         max_keys = 1000;
@@ -813,6 +815,13 @@ chimera_s3_list_find_complete(
             chimera_s3_out_append(&out, "  <ETag>%s</ETag>\n", etag);
             chimera_s3_out_append(&out, "  <Size>%lu</Size>\n", e->size);
             chimera_s3_out_append(&out, "  <StorageClass>STANDARD</StorageClass>\n");
+            if (request->list.fetch_owner) {
+                /* V2 fetch-owner=true: same canonical owner as ListBuckets/ACL. */
+                chimera_s3_out_append(&out, "  <Owner>\n");
+                chimera_s3_out_append(&out, "   <ID>chimera</ID>\n");
+                chimera_s3_out_append(&out, "   <DisplayName>chimera</DisplayName>\n");
+                chimera_s3_out_append(&out, "  </Owner>\n");
+            }
             chimera_s3_out_append(&out, " </Contents>\n");
         }
     }
