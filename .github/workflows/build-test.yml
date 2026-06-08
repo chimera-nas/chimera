@@ -420,8 +420,23 @@ jobs:
             bash -euxc '\
               cmake -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DREQUIRE_NETNS_TESTS=ON -DKVM_IMAGE_REGISTRY=${{ env.KVM_IMAGE_REGISTRY }} ${{ matrix.cmake_extra }} /workspace && \
               ninja && \
+              mkdir -p /workspace/ctest-results && \
               /workspace/scripts/cap_ctest_output.sh \
-              ctest --output-on-failure --test-output-size-failed 65536 --timeout 300 -j 32'
+              ctest --output-on-failure --test-output-size-failed 65536 --timeout 300 -j 32 \
+                --output-junit /workspace/ctest-results/results.xml'
+
+      # Per-test pass/fail (one <testcase> per CTest test, with captured output
+      # embedded) -- uploaded as an artifact and aggregated into a PR check by
+      # the publish-test-results job.  if: always() so results publish even when
+      # the test step failed (which is exactly when they are most useful).
+      - name: Upload ctest JUnit results
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: ctest-junit-${{ matrix.image_name }}-${{ matrix.arch }}-${{ matrix.build_type }}
+          path: ctest-results/results.xml
+          if-no-files-found: warn
+          retention-days: 30
 
   static-analysis:
     name: Static Analysis ${{ matrix.image_name }} ${{ matrix.platform }} ${{ matrix.build_type }}
@@ -495,3 +510,34 @@ jobs:
           path: scan-report/
           if-no-files-found: warn
           retention-days: 30
+
+  # Aggregate the per-job ctest JUnit artifacts into a single GitHub check so a
+  # PR shows which individual tests passed/failed without digging through the
+  # ~12k-line log of each matrix job.  Runs after the whole test matrix (always,
+  # so a failing run still gets a report) and never fails the build itself --
+  # the test jobs remain the source of truth for pass/fail; this is visibility.
+  publish-test-results:
+    name: Publish test results
+    needs: [test]
+    if: always()
+    runs-on: arc-amd64
+    permissions:
+      checks: write
+      pull-requests: write
+      contents: read
+    steps:
+      - name: Download ctest JUnit artifacts
+        uses: actions/download-artifact@v6
+        with:
+          pattern: ctest-junit-*
+          path: junit
+
+      - name: Publish test results to a PR check
+        uses: EnricoMi/publish-unit-test-result-action@v2
+        continue-on-error: true
+        with:
+          files: "junit/**/*.xml"
+          check_name: "CTest results"
+          comment_mode: always
+          action_fail: false
+          ignore_runs: false
