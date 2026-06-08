@@ -302,6 +302,9 @@ chimera_nfs3_unmarshall_fh(
     int     fragment_len;
 
     /* Build fh_fragment: [server_index][remote_fh_data] */
+    if (fh->data.len > CHIMERA_VFS_FH_SIZE - 1) {
+        return;
+    }
     fragment[0] = server_index;
     memcpy(fragment + 1, fh->data.data, fh->data.len);
     fragment_len = 1 + fh->data.len;
