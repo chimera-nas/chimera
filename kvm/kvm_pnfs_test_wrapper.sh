@@ -35,7 +35,11 @@ if [ "$ARCH" = "aarch64" ]; then
     QEMU_CONSOLE="ttyAMA0"
 else
     QEMU_BIN="qemu-system-x86_64"
-    QEMU_MACHINE="-machine q35,usb=off"
+    # microvm machine: skips legacy PCI/ACPI device probing for a faster boot
+    # (~0.1s/test).  pcie=on keeps a PCIe bus so the existing virtio-pci and
+    # virtio-scsi-pci devices attach unchanged; rtc/pit on so the guest kernel
+    # uses normal timers (without them it falls back to slow calibration paths).
+    QEMU_MACHINE="-M microvm,acpi=on,rtc=on,pit=on,pcie=on"
     QEMU_CONSOLE="ttyS0"
 fi
 
