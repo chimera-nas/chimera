@@ -103,6 +103,7 @@ struct chimera_s3_request {
      * several paths that can observe a request ready to send only emit it
      * once (see s3_server_respond). */
     int                              responded;
+    int                              have_content_type;
     int                              query_upload_idlen;
     int                              query_part_number;
     char                             query_upload_id[CHIMERA_S3_UPLOAD_ID_LEN + 1];

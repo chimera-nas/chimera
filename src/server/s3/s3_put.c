@@ -9,6 +9,7 @@
 #include "vfs/vfs_release.h"
 #include "s3_internal.h"
 #include "s3_etag.h"
+#include "s3_metadata.h"
 
 static void
 chimera_s3_put_getattr_callback(
@@ -280,6 +281,35 @@ chimera_s3_put_recv(
 } /* chimera_s3_put_recv */
 
 
+/*
+ * The destination file exists and its metadata xattrs (Content-Type and any
+ * x-amz-meta-*) have been written. Begin draining the request body into it.
+ */
+static void
+chimera_s3_put_metadata_done(
+    struct chimera_s3_request *request,
+    int                        error,
+    void                      *private_data)
+{
+    struct chimera_server_s3_thread *thread = request->thread;
+    struct evpl                     *evpl   = thread->evpl;
+
+    if (error) {
+        request->status    = CHIMERA_S3_STATUS_INTERNAL_ERROR;
+        request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
+        chimera_vfs_release(thread->vfs, request->file_handle);
+        request->file_handle = NULL;
+        chimera_vfs_release(thread->vfs, request->dir_handle);
+        request->dir_handle = NULL;
+        if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
+            s3_server_respond(evpl, request);
+        }
+        return;
+    }
+
+    chimera_s3_put_recv(evpl, request);
+} /* chimera_s3_put_metadata_done */
+
 static void
 chimera_s3_put_create_unlinked_callback(
     enum chimera_vfs_error          error_code,
@@ -290,7 +320,6 @@ chimera_s3_put_create_unlinked_callback(
 {
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
-    struct evpl                     *evpl    = thread->evpl;
 
     if (error_code) {
         request->status    = CHIMERA_S3_STATUS_NO_SUCH_KEY;
@@ -305,7 +334,8 @@ chimera_s3_put_create_unlinked_callback(
     /* The response ETag is attached after the body is written, from the
      * object's final attributes (see chimera_s3_put_getattr_callback). */
 
-    chimera_s3_put_recv(evpl, request);
+    chimera_s3_metadata_store_from_headers(request, oh,
+                                           chimera_s3_put_metadata_done, NULL);
 
 } /* chimera_s3_put_create_unlinked_callback */
 
@@ -321,7 +351,6 @@ chimera_s3_put_create_callback(
 {
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
-    struct evpl                     *evpl    = thread->evpl;
 
     if (error_code) {
         request->status    = CHIMERA_S3_STATUS_NO_SUCH_KEY;
@@ -336,7 +365,8 @@ chimera_s3_put_create_callback(
     /* The response ETag is attached after the body is written, from the
      * object's final attributes (see chimera_s3_put_getattr_callback). */
 
-    chimera_s3_put_recv(evpl, request);
+    chimera_s3_metadata_store_from_headers(request, oh,
+                                           chimera_s3_put_metadata_done, NULL);
 
 } /* chimera_s3_put_create_callback */
 

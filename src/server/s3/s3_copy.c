@@ -36,6 +36,7 @@
 #include "s3_internal.h"
 #include "s3_procs.h"
 #include "s3_etag.h"
+#include "s3_metadata.h"
 #include "s3.h"
 
 enum chimera_s3_copy_mode {
@@ -44,24 +45,37 @@ enum chimera_s3_copy_mode {
     CHIMERA_S3_COPY_RW,
 };
 
+/* x-amz-metadata-directive */
+enum chimera_s3_copy_meta_directive {
+    CHIMERA_S3_COPY_META_COPY,      /* inherit the source object's metadata */
+    CHIMERA_S3_COPY_META_REPLACE,   /* take metadata from this request's headers */
+};
+
 struct chimera_s3_copy_ctx {
-    struct chimera_s3_request      *request;
-    struct chimera_vfs_open_handle *src_handle;
-    enum chimera_s3_copy_mode       mode;
-    uint64_t                        src_size;
-    uint64_t                        offset;
-    int                             tmp_name_len;
-    int                             rw_niov;
-    struct timespec                 src_mtime;
-    int                             src_bucket_namelen;
-    int                             src_key_len;
-    char                            src_bucket_name[256];
-    char                            src_key[1024];
-    char                            tmp_name[64];
-    struct evpl_iovec               rw_iov[CHIMERA_S3_IOV_MAX];
+    struct chimera_s3_request          *request;
+    struct chimera_vfs_open_handle     *src_handle;
+    enum chimera_s3_copy_mode           mode;
+    enum chimera_s3_copy_meta_directive meta_directive;
+    uint64_t                            src_size;
+    uint64_t                            offset;
+    int                                 tmp_name_len;
+    int                                 rw_niov;
+    struct timespec                     src_mtime;
+    int                                 src_bucket_namelen;
+    int                                 src_key_len;
+    char                                src_bucket_name[256];
+    char                                src_key[1024];
+    char                                tmp_name[64];
+    struct evpl_iovec                   rw_iov[CHIMERA_S3_IOV_MAX];
 };
 
 static void chimera_s3_copy_step(
+    struct chimera_s3_copy_ctx *ctx);
+
+static void chimera_s3_copy_finalize(
+    struct chimera_s3_copy_ctx *ctx);
+
+static void chimera_s3_copy_apply_metadata(
     struct chimera_s3_copy_ctx *ctx);
 
 /*
@@ -277,6 +291,45 @@ chimera_s3_copy_rename_callback(
  * directory (replacing any existing object); backends that used a temp name
  * rename over the key.
  */
+/*
+ * Metadata has been applied to the destination (or there was none); publish the
+ * object. A metadata error is non-fatal — the bytes copied fine — so we proceed
+ * to finalize regardless and let the (unlikely) failure surface only if it
+ * recurs on rename/link.
+ */
+static void
+chimera_s3_copy_metadata_done(
+    struct chimera_s3_request *request,
+    int                        error,
+    void                      *private_data)
+{
+    struct chimera_s3_copy_ctx *ctx = private_data;
+
+    chimera_s3_copy_finalize(ctx);
+} /* chimera_s3_copy_metadata_done */
+
+/*
+ * The destination bytes are in place. Apply object metadata per the
+ * x-amz-metadata-directive header: COPY inherits the source object's stored
+ * metadata xattrs; REPLACE takes the metadata from this copy request's headers.
+ */
+static void
+chimera_s3_copy_apply_metadata(struct chimera_s3_copy_ctx *ctx)
+{
+    if (ctx->meta_directive == CHIMERA_S3_COPY_META_REPLACE) {
+        chimera_s3_metadata_store_from_headers(ctx->request,
+                                               ctx->request->file_handle,
+                                               chimera_s3_copy_metadata_done,
+                                               ctx);
+    } else {
+        chimera_s3_metadata_copy(ctx->request,
+                                 ctx->src_handle,
+                                 ctx->request->file_handle,
+                                 chimera_s3_copy_metadata_done,
+                                 ctx);
+    }
+} /* chimera_s3_copy_apply_metadata */
+
 static void
 chimera_s3_copy_finalize(struct chimera_s3_copy_ctx *ctx)
 {
@@ -450,7 +503,7 @@ chimera_s3_copy_step(struct chimera_s3_copy_ctx *ctx)
     remaining = ctx->src_size - ctx->offset;
 
     if (remaining == 0) {
-        chimera_s3_copy_finalize(ctx);
+        chimera_s3_copy_apply_metadata(ctx);
         return;
     }
 
@@ -516,9 +569,9 @@ chimera_s3_copy_start_transfer(struct chimera_s3_copy_ctx *ctx)
     struct chimera_vfs_module       *src_module, *dst_module;
 
     if (ctx->src_size == 0) {
-        /* Nothing to transfer; just publish the empty object. */
+        /* Nothing to transfer; still apply metadata, then publish. */
         ctx->offset = 0;
-        chimera_s3_copy_finalize(ctx);
+        chimera_s3_copy_apply_metadata(ctx);
         return;
     }
 
@@ -792,6 +845,7 @@ chimera_s3_copy(
     struct chimera_server_s3_shared *shared = thread->shared;
     struct chimera_s3_copy_ctx      *ctx;
     const char                      *copy_source;
+    const char                      *directive;
     const struct s3_bucket          *src_bucket;
     const char                      *src_path;
 
@@ -800,6 +854,15 @@ chimera_s3_copy(
 
     ctx          = calloc(1, sizeof(*ctx));
     ctx->request = request;
+
+    /* x-amz-metadata-directive defaults to COPY (inherit source metadata). */
+    directive = evpl_http_request_header(request->http_request,
+                                         "x-amz-metadata-directive");
+    if (directive && strcasecmp(directive, "REPLACE") == 0) {
+        ctx->meta_directive = CHIMERA_S3_COPY_META_REPLACE;
+    } else {
+        ctx->meta_directive = CHIMERA_S3_COPY_META_COPY;
+    }
 
     request->dir_handle  = NULL;
     request->file_handle = NULL;
