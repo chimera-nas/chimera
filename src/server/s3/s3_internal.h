@@ -75,7 +75,12 @@ struct chimera_s3_request {
     int                              has_uploads;
     int                              has_upload_id;
     int                              has_delete;
+    int                              has_versions;
     int                              has_part_number;
+    /* Set when the request targets a bucket itself (Create/Delete/Head/List
+     * bucket, ListBuckets) rather than an object; tells the body notifier to
+     * drain any request body instead of treating it as object data. */
+    int                              op_bucket;
     int                              chunked;
     int                              query_upload_idlen;
     int                              query_part_number;
@@ -113,6 +118,7 @@ struct chimera_s3_request {
             int               base_path_len;
             int               filter_len;
             int               max_keys;
+            int               versions;   /* emit ListVersionsResult, not ListBucketResult */
             char             *rp;
             struct evpl_iovec response;
             uint8_t           root_fh[CHIMERA_VFS_FH_SIZE];
@@ -182,6 +188,11 @@ struct chimera_server_s3_shared {
     struct chimera_vfs_cred            cred;
     uint32_t                           root_fh_len;
     uint8_t                            root_fh[CHIMERA_VFS_FH_SIZE];
+    /* VFS path (relative to root_fh) under which dynamically created buckets
+     * are materialized as directories. Empty if runtime bucket creation is
+     * disabled (no bucket root configured). */
+    int                                bucket_root_pathlen;
+    char                               bucket_root_path[256];
 };
 
 static inline struct chimera_s3_io *

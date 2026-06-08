@@ -213,6 +213,10 @@ s3_server_notify(
             } else if (request_type == EVPL_HTTP_REQUEST_TYPE_POST) {
                 /* CreateMultipartUpload: body is empty in practice. */
                 s3_server_drain_body(evpl, s3_request);
+            } else if (s3_request->op_bucket) {
+                /* Bucket-level request (e.g. CreateBucket's optional
+                 * CreateBucketConfiguration body): discard the body. */
+                s3_server_drain_body(evpl, s3_request);
             }
             break;
         case EVPL_HTTP_NOTIFY_RECEIVE_COMPLETE:
@@ -383,7 +387,9 @@ s3_server_dispatch(
     s3_request->has_uploads        = 0;
     s3_request->has_upload_id      = 0;
     s3_request->has_delete         = 0;
+    s3_request->has_versions       = 0;
     s3_request->has_part_number    = 0;
+    s3_request->op_bucket          = 0;
     s3_request->chunked            = 0;
     s3_request->query_upload_idlen = 0;
     s3_request->query_part_number  = 0;
@@ -540,6 +546,8 @@ s3_server_dispatch(
 
                 if (key_len == 7 && memcmp(key_start, "uploads", 7) == 0) {
                     s3_request->has_uploads = 1;
+                } else if (key_len == 8 && memcmp(key_start, "versions", 8) == 0) {
+                    s3_request->has_versions = 1;
                 } else if (key_len == 6 && memcmp(key_start, "delete", 6) == 0) {
                     s3_request->has_delete = 1;
                 } else if (key_len == 8 && memcmp(key_start, "uploadId", 8) == 0) {
@@ -619,6 +627,7 @@ s3_server_dispatch(
                     s3_request->list.prefix[prefix_len] = '\0';
                 }
                 s3_request->list.max_keys = max_keys;
+                s3_request->list.versions = s3_request->has_versions;
                 chimera_s3_sterilize_path(s3_request,
                                           s3_request->list.prefix,
                                           s3_request->list.prefix_len);
@@ -643,27 +652,84 @@ s3_server_dispatch(
     s3_request->file_cur_offset = s3_request->file_offset;
     chimera_s3_dump_request(s3_request);
 
-    bucket = s3_bucket_map_get(shared->bucket_map, s3_request->bucket_name, s3_request->bucket_namelen);
+    {
+        enum evpl_http_request_type method = evpl_http_request_type(request);
 
-    if (bucket == NULL) {
-        s3_request->status    = CHIMERA_S3_STATUS_NO_SUCH_BUCKET;
-        s3_request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
+        /* Service-level request (no bucket in the path): GET / == ListBuckets. */
+        if (s3_request->bucket_namelen == 0) {
+            s3_request->op_bucket = 1;
+            if (method == EVPL_HTTP_REQUEST_TYPE_GET) {
+                chimera_s3_list_buckets(evpl, thread, s3_request);
+            } else {
+                s3_request->status    = CHIMERA_S3_STATUS_METHOD_NOT_ALLOWED;
+                s3_request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
+            }
+            return;
+        }
+
+        /* CreateBucket: PUT /bucket with no object key. The target bucket does
+         * not exist yet, so this is handled before the bucket-map lookup. */
+        if (method == EVPL_HTTP_REQUEST_TYPE_PUT && s3_request->path_len == 0 &&
+            !s3_request->has_upload_id) {
+            s3_request->op_bucket = 1;
+            chimera_s3_create_bucket(evpl, thread, s3_request);
+            return;
+        }
+
+        bucket = s3_bucket_map_get(shared->bucket_map, s3_request->bucket_name, s3_request->bucket_namelen);
+
+        if (bucket == NULL) {
+            s3_request->status    = CHIMERA_S3_STATUS_NO_SUCH_BUCKET;
+            s3_request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
+            s3_bucket_map_release(shared->bucket_map);
+            return;
+        }
+
+        /* Bucket-level operations on an existing bucket: empty object key with
+         * no object-style subresource query. */
+        if (s3_request->path_len == 0 && !s3_request->has_uploads &&
+            !s3_request->has_delete && !s3_request->has_upload_id &&
+            !s3_request->is_list) {
+
+            if (method == EVPL_HTTP_REQUEST_TYPE_DELETE) {
+                s3_request->op_bucket = 1;
+                /* Release the read lock before dispatching: DeleteBucket's VFS
+                 * remove can complete inline and then takes the map write lock
+                 * (s3_bucket_map_remove), which would self-deadlock if we still
+                 * held the read lock on this thread. */
+                s3_bucket_map_release(shared->bucket_map);
+                chimera_s3_delete_bucket(evpl, thread, s3_request);
+                return;
+            } else if (method == EVPL_HTTP_REQUEST_TYPE_HEAD) {
+                s3_request->op_bucket = 1;
+                s3_bucket_map_release(shared->bucket_map);
+                chimera_s3_head_bucket(evpl, thread, s3_request);
+                return;
+            } else if (method == EVPL_HTTP_REQUEST_TYPE_GET) {
+                /* GET /bucket with no object key == ListObjects (v1). */
+                s3_request->op_bucket       = 1;
+                s3_request->is_list         = 1;
+                s3_request->list.prefix_len = 0;
+                s3_request->list.prefix[0]  = '\0';
+                s3_request->list.max_keys   = 1000;
+                s3_request->list.versions   = 0;
+                chimera_s3_sterilize_path(s3_request, s3_request->list.prefix, 0);
+            }
+        }
+
+        chimera_vfs_lookup(thread->vfs,
+                           &thread->shared->cred,
+                           shared->root_fh,
+                           shared->root_fh_len,
+                           bucket->path,
+                           strlen(bucket->path),
+                           CHIMERA_VFS_ATTR_FH,
+                           CHIMERA_VFS_LOOKUP_FOLLOW,
+                           chimera_s3_dispatch_callback,
+                           s3_request);
+
         s3_bucket_map_release(shared->bucket_map);
-        return;
     }
-
-    chimera_vfs_lookup(thread->vfs,
-                       &thread->shared->cred,
-                       shared->root_fh,
-                       shared->root_fh_len,
-                       bucket->path,
-                       strlen(bucket->path),
-                       CHIMERA_VFS_ATTR_FH,
-                       CHIMERA_VFS_LOOKUP_FOLLOW,
-                       chimera_s3_dispatch_callback,
-                       s3_request);
-
-    s3_bucket_map_release(shared->bucket_map);
 
 } /* s3_server_dispatch */
 
@@ -679,6 +745,23 @@ chimera_s3_add_bucket(
 
 } /* chimera_s3_add_bucket */
 
+
+SYMBOL_EXPORT void
+chimera_s3_set_bucket_root(
+    void       *s3_shared,
+    const char *path)
+{
+    struct chimera_server_s3_shared *shared = s3_shared;
+    int                              len    = strlen(path);
+
+    if (len >= (int) sizeof(shared->bucket_root_path)) {
+        len = sizeof(shared->bucket_root_path) - 1;
+    }
+
+    memcpy(shared->bucket_root_path, path, len);
+    shared->bucket_root_path[len] = '\0';
+    shared->bucket_root_pathlen   = len;
+} /* chimera_s3_set_bucket_root */
 
 SYMBOL_EXPORT int
 chimera_s3_remove_bucket(

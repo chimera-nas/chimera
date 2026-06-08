@@ -516,6 +516,11 @@ chimera_server_create_bucket(
     const char            *bucket_path);
 
 int
+chimera_server_set_s3_bucket_root(
+    struct chimera_server *server,
+    const char            *bucket_root_path);
+
+int
 chimera_server_create_share(
     struct chimera_server *server,
     const char            *share_name,

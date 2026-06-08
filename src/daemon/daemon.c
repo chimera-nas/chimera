@@ -944,6 +944,33 @@ main(
         }
     }
 
+    /* The VFS path under which runtime CreateBucket requests materialize new
+     * bucket directories. Explicit "s3_bucket_root" wins; otherwise default to
+     * the first configured mount ("/<mount-name>"). Leave unset (runtime bucket
+     * creation disabled) if neither is available. */
+    {
+        const char *bucket_root = json_string_value(
+            json_object_get(config, "s3_bucket_root"));
+        char        default_root[256];
+
+        if (!bucket_root && mounts) {
+            const char *first_mount;
+            json_t     *mount_val;
+
+            json_object_foreach(mounts, first_mount, mount_val)
+            {
+                snprintf(default_root, sizeof(default_root), "/%s", first_mount);
+                bucket_root = default_root;
+                break;
+            }
+        }
+
+        if (bucket_root) {
+            chimera_server_info("S3 runtime bucket root: %s", bucket_root);
+            chimera_server_set_s3_bucket_root(server, bucket_root);
+        }
+    }
+
     chimera_server_start(server);
 
     while (!SigInt) {
