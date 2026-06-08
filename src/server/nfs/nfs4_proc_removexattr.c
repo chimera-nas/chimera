@@ -4,6 +4,7 @@
 
 #include "nfs4_procs.h"
 #include "nfs4_status.h"
+#include "nfs4_xattr.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 
@@ -41,6 +42,9 @@ chimera_nfs4_removexattr_open_callback(
     struct nfs_request      *req  = private_data;
     struct REMOVEXATTR4args *args = &req->args_compound->argarray[req->index].opremovexattr;
     struct REMOVEXATTR4res  *res  = &req->res_compound.resarray[req->index].opremovexattr;
+    uint32_t                 namecap;
+    char                    *name;
+    int                      namelen;
 
     if (error_code != CHIMERA_VFS_OK) {
         res->rxr_status = chimera_nfs4_errno_to_nfsstat4(error_code);
@@ -50,10 +54,39 @@ chimera_nfs4_removexattr_open_callback(
 
     req->handle = handle;
 
+    /* RFC 8276 carries the name without a namespace prefix; the VFS expects a
+     * fully-qualified "user." name.  Stage the prefixed name in the response
+     * dbuf, which outlives the async VFS op. */
+    if (args->rxa_name.len == 0) {
+        res->rxr_status = NFS4ERR_INVAL;
+        chimera_vfs_release(req->thread->vfs_thread, req->handle);
+        chimera_nfs4_compound_complete(req, res->rxr_status);
+        return;
+    }
+
+    namecap = CHIMERA_NFS4_XATTR_USER_PREFIX_LEN + args->rxa_name.len;
+    name    = xdr_dbuf_alloc_space(namecap, req->encoding->dbuf);
+    if (!name) {
+        res->rxr_status = NFS4ERR_RESOURCE;
+        chimera_vfs_release(req->thread->vfs_thread, req->handle);
+        chimera_nfs4_compound_complete(req, res->rxr_status);
+        return;
+    }
+
+    namelen = chimera_nfs4_xattr_build_user(name, namecap,
+                                            args->rxa_name.data,
+                                            args->rxa_name.len);
+    if (namelen < 0) {
+        res->rxr_status = NFS4ERR_NAMETOOLONG;
+        chimera_vfs_release(req->thread->vfs_thread, req->handle);
+        chimera_nfs4_compound_complete(req, res->rxr_status);
+        return;
+    }
+
     chimera_vfs_remove_xattr(req->thread->vfs_thread, &req->cred,
                              handle,
-                             args->rxa_name.data,
-                             args->rxa_name.len,
+                             name,
+                             namelen,
                              chimera_nfs4_removexattr_complete,
                              req);
 } /* chimera_nfs4_removexattr_open_callback */
