@@ -12,6 +12,20 @@
 #include "s3_internal.h"
 #include "s3_etag.h"
 #include "s3_procs.h"
+#include "s3_tagging.h"
+
+/* HEAD object: tag-count header attached, finish the (bodyless) response. */
+static void
+chimera_s3_head_respond(
+    struct evpl               *evpl,
+    struct chimera_s3_request *request)
+{
+    request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
+
+    if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
+        s3_server_respond(evpl, request);
+    }
+} /* chimera_s3_head_respond */
 
 static void
 chimera_s3_get_finish(struct chimera_s3_request *request)
@@ -247,20 +261,25 @@ chimera_s3_get_lookup_callback(
 
     chimera_s3_abort_if(!(attr->va_set_mask & CHIMERA_VFS_ATTR_FH), "put lookup callback: no fh");
 
+    if (evpl_http_request_type(request->http_request) == EVPL_HTTP_REQUEST_TYPE_HEAD) {
+        /* HEAD object: attach the x-amz-tagging-count header (S3 reports the
+         * number of object tags on HEAD) before responding. */
+        chimera_s3_tagging_count_for_head(evpl, thread, request,
+                                          attr->va_fh, attr->va_fh_len,
+                                          chimera_s3_head_respond);
+        return;
+    }
+
     if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
         s3_server_respond(evpl, request);
     }
 
-    if (evpl_http_request_type(request->http_request) == EVPL_HTTP_REQUEST_TYPE_HEAD) {
-        request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
-    } else {
-        chimera_vfs_open_fh(thread->vfs, &thread->shared->cred,
-                            attr->va_fh,
-                            attr->va_fh_len,
-                            0,
-                            chimera_s3_get_open_callback,
-                            request);
-    }
+    chimera_vfs_open_fh(thread->vfs, &thread->shared->cred,
+                        attr->va_fh,
+                        attr->va_fh_len,
+                        0,
+                        chimera_s3_get_open_callback,
+                        request);
 }  /* chimera_s3_get_lookup_callback */
 
 void
