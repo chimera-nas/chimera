@@ -1447,7 +1447,14 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.rename.simple_modtime
     smb2.rename.simple_nodelete
     # smb2.replay
+    smb2.replay.channel-sequence
     smb2.replay.replay-commands
+    smb2.replay.replay-dhv2-lease-oplock
+    smb2.replay.replay-dhv2-lease1
+    smb2.replay.replay-dhv2-lease2
+    smb2.replay.replay-dhv2-lease3
+    smb2.replay.replay-dhv2-oplock-lease
+    smb2.replay.replay-dhv2-oplock1
     smb2.replay.replay-regular
     smb2.replay.replay5
     smb2.replay.replay7
@@ -1753,6 +1760,7 @@ set(SMBTORTURE_ENABLED_linux
     smb2.rename.simple_modtime
     smb2.rename.simple_nodelete
     # smb2.replay
+    smb2.replay.channel-sequence
     smb2.replay.replay-commands
     smb2.replay.replay5
     smb2.replay.replay7
@@ -2033,6 +2041,7 @@ set(SMBTORTURE_ENABLED_io_uring
     smb2.rename.simple_modtime
     smb2.rename.simple_nodelete
     # smb2.replay
+    smb2.replay.channel-sequence
     smb2.replay.replay-commands
     smb2.replay.replay5
     smb2.replay.replay7
@@ -2326,7 +2335,14 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.rename.simple_modtime
     smb2.rename.simple_nodelete
     # smb2.replay
+    smb2.replay.channel-sequence
     smb2.replay.replay-commands
+    smb2.replay.replay-dhv2-lease-oplock
+    smb2.replay.replay-dhv2-lease1
+    smb2.replay.replay-dhv2-lease2
+    smb2.replay.replay-dhv2-lease3
+    smb2.replay.replay-dhv2-oplock-lease
+    smb2.replay.replay-dhv2-oplock1
     smb2.replay.replay-regular
     smb2.replay.replay5
     smb2.replay.replay7
@@ -2644,7 +2660,14 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.rename.simple_modtime
     smb2.rename.simple_nodelete
     # smb2.replay
+    smb2.replay.channel-sequence
     smb2.replay.replay-commands
+    smb2.replay.replay-dhv2-lease-oplock
+    smb2.replay.replay-dhv2-lease1
+    smb2.replay.replay-dhv2-lease2
+    smb2.replay.replay-dhv2-lease3
+    smb2.replay.replay-dhv2-oplock-lease
+    smb2.replay.replay-dhv2-oplock1
     smb2.replay.replay-regular
     smb2.replay.replay5
     smb2.replay.replay7
@@ -2962,7 +2985,14 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     smb2.rename.simple_modtime
     smb2.rename.simple_nodelete
     # smb2.replay
+    smb2.replay.channel-sequence
     smb2.replay.replay-commands
+    smb2.replay.replay-dhv2-lease-oplock
+    smb2.replay.replay-dhv2-lease1
+    smb2.replay.replay-dhv2-lease2
+    smb2.replay.replay-dhv2-lease3
+    smb2.replay.replay-dhv2-oplock-lease
+    smb2.replay.replay-dhv2-oplock1
     smb2.replay.replay-regular
     smb2.replay.replay5
     smb2.replay.replay7

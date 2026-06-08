@@ -183,6 +183,15 @@ chimera_smb_ioctl(struct chimera_smb_request *request)
                 return;
             }
 
+            /* MS-SMB2 §3.3.5.2.10: IOCTL is in the channel-sequence-checked set;
+             * a stale sequence is rejected with FILE_NOT_AVAILABLE. */
+            if (chimera_smb_channel_sequence_stale(open_file,
+                                                   request->channel_sequence, 1)) {
+                chimera_smb_open_file_release(request, open_file);
+                chimera_smb_complete_request(request, SMB2_STATUS_FILE_NOT_AVAILABLE);
+                return;
+            }
+
             if (request->ioctl.max_output_response < 64) {
                 chimera_smb_open_file_release(request, open_file);
                 chimera_smb_complete_request(request, SMB2_STATUS_BUFFER_TOO_SMALL);
