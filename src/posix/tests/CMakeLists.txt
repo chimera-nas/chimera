@@ -947,6 +947,172 @@ foreach(prog test_fcntl test_lockf)
     add_posix_nfs3rdma_test_myuser(${test_name} ${prog} linux)
 endforeach()
 
+# pjdfstest POSIX conformance ports (one program per upstream .t file).
+# Each lives under pjd/<category>/NN.c and shares pjd_common.h.  Registered on
+# memfs first; widen the backend list per category as it greens.
+# ============================================================================
+set(PJD_TESTS
+    open/00
+    open/01
+    open/02
+    open/03
+    open/04
+    open/05
+    open/06
+    open/07
+    open/08
+    open/12
+    open/13
+    open/16
+    open/22
+    open/26
+    chmod/00
+    chmod/01
+    chmod/02
+    chmod/03
+    chmod/04
+    chmod/05
+    chmod/06
+    chmod/07
+    chown/00
+    chown/01
+    chown/02
+    chown/03
+    chown/04
+    chown/05
+    chown/06
+    chown/07
+    truncate/00
+    truncate/01
+    truncate/02
+    truncate/03
+    truncate/04
+    truncate/05
+    truncate/06
+    truncate/07
+    truncate/09
+    truncate/13
+    ftruncate/00
+    ftruncate/13
+    mkdir/00
+    mkdir/01
+    mkdir/02
+    mkdir/03
+    mkdir/04
+    mkdir/05
+    mkdir/06
+    mkdir/07
+    mkdir/10
+    rmdir/00
+    rmdir/01
+    rmdir/02
+    rmdir/03
+    rmdir/04
+    rmdir/05
+    rmdir/06
+    rmdir/07
+    rmdir/08
+    rmdir/11
+    rmdir/12
+    mkfifo/00
+    mkfifo/01
+    mkfifo/02
+    mkfifo/03
+    mkfifo/04
+    mkfifo/05
+    mkfifo/06
+    mkfifo/07
+    mkfifo/09
+    mknod/00
+    mknod/01
+    mknod/02
+    mknod/03
+    mknod/04
+    mknod/05
+    mknod/06
+    mknod/07
+    mknod/08
+    mknod/11
+    symlink/00
+    symlink/01
+    symlink/02
+    symlink/03
+    symlink/04
+    symlink/05
+    symlink/06
+    symlink/07
+    symlink/08
+    unlink/00
+    unlink/01
+    unlink/02
+    unlink/03
+    unlink/04
+    unlink/05
+    unlink/06
+    unlink/07
+    unlink/08
+    unlink/11
+    unlink/14
+    link/00
+    link/01
+    link/02
+    link/03
+    link/04
+    link/06
+    link/07
+    link/08
+    link/09
+    link/10
+    link/11
+    rename/00
+    rename/01
+    rename/02
+    rename/03
+    rename/04
+    rename/05
+    rename/11
+    rename/12
+    rename/13
+    rename/14
+    rename/18
+    rename/19
+    rename/20
+    rename/22
+    utimensat/00
+    utimensat/01
+    utimensat/02
+    utimensat/04
+    utimensat/08
+    utimensat/06
+    utimensat/07
+    utimensat/09
+)
+
+macro(add_pjd_testprog path)
+    string(REPLACE "/" "_" _pjd_flat ${path})
+    add_executable(posix_pjd_${_pjd_flat} pjd/${path}.c)
+    target_link_libraries(posix_pjd_${_pjd_flat} chimera_posix chimera_client chimera_server jansson)
+    set_target_properties(posix_pjd_${_pjd_flat} PROPERTIES
+        TEST_FILE "${CMAKE_CURRENT_SOURCE_DIR}/pjd/${path}.c")
+endmacro()
+
+macro(add_pjd_test path backend)
+    if(CHIMERA_NETNS_TESTING)
+        string(REPLACE "/" "_" _pjd_flat ${path})
+        add_test(NAME chimera/posix/pjd/${path}/${backend}
+            COMMAND ${NETNS_WRAPPER} ${CMAKE_CURRENT_BINARY_DIR}/posix_pjd_${_pjd_flat} -b ${backend})
+        get_target_property(_pjd_tf posix_pjd_${_pjd_flat} TEST_FILE)
+        set_tests_properties(chimera/posix/pjd/${path}/${backend} PROPERTIES
+            ENVIRONMENT "TEST_FILE=${_pjd_tf}"
+            SKIP_RETURN_CODE 77)
+    endif()
+endmacro()
+
+foreach(t ${PJD_TESTS})
+    add_pjd_testprog(${t})
+    add_pjd_test(${t} memfs)
+endforeach()
+
 # Tag every test registered above with the 'posix' label so the whole suite can
 # be run independently via `ctest -L posix`.  Collected from the directory TESTS
 # property rather than per-add_test so new tests are covered automatically.
