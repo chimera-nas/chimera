@@ -352,10 +352,15 @@ chimera_smb_parse_close(
         return -1;
     }
 
-    evpl_iovec_cursor_get_uint16(request_cursor, &request->close.flags);
-    evpl_iovec_cursor_get_uint64(request_cursor, &request->close.file_id.pid);
-    evpl_iovec_cursor_get_uint64(request_cursor, &request->close.file_id.vid);
+    int prc = 0;
+    prc |= evpl_iovec_cursor_try_get_uint16(request_cursor, &request->close.flags);
+    prc |= evpl_iovec_cursor_try_get_uint64(request_cursor, &request->close.file_id.pid);
+    prc |= evpl_iovec_cursor_try_get_uint64(request_cursor, &request->close.file_id.vid);
 
+    if (unlikely(prc)) {
+        chimera_smb_error("Received SMB2 CLOSE request truncated in fixed body");
+        return chimera_smb_parse_reject(request, SMB2_STATUS_INVALID_PARAMETER);
+    }
 
     return 0;
 } /* chimera_smb_parse_close */

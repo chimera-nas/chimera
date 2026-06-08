@@ -409,32 +409,46 @@ chimera_smb_parse_oplock_break(
     struct evpl_iovec_cursor   *request_cursor,
     struct chimera_smb_request *request)
 {
-    uint16_t reserved;
-    uint32_t reserved32;
+    /* Initialized so a short read cannot feed an uninitialized value into the
+     * lease_state computation below (which runs before the aggregate prc check). */
+    uint16_t reserved   = 0;
+    uint32_t reserved32 = 0;
+
+    int      prc = 0;
 
     if (request->request_struct_size == SMB2_OPLOCK_BREAK_ACK_LEASE_SIZE) {
         request->oplock_break.is_lease = true;
-        evpl_iovec_cursor_get_uint16(request_cursor, &reserved);
-        evpl_iovec_cursor_get_uint32(request_cursor, &request->oplock_break.lease_flags);
-        evpl_iovec_cursor_copy(request_cursor, request->oplock_break.lease_key, 16);
-        evpl_iovec_cursor_get_uint32(request_cursor, &reserved32);
+        prc                           |= evpl_iovec_cursor_try_get_uint16(request_cursor, &reserved);
+        prc                           |= evpl_iovec_cursor_try_get_uint32(request_cursor, &request->oplock_break.
+                                                                          lease_flags);
+        prc |= evpl_iovec_cursor_try_copy(request_cursor, request->oplock_break.lease_key,
+                                          16);
+        prc                              |= evpl_iovec_cursor_try_get_uint32(request_cursor, &reserved32);
         request->oplock_break.lease_state = (uint8_t) (reserved32 & 0xff);
         /* LeaseDuration (8 bytes, reserved) sits at a 4-aligned offset; the
          * aligning get_uint64 would skip to the next 8-boundary and overrun the
          * 36-byte request.  It is unused, so just advance past it. */
-        evpl_iovec_cursor_skip(request_cursor, 8);
+        prc |= evpl_iovec_cursor_try_skip(request_cursor, 8);
     } else if (request->request_struct_size == SMB2_OPLOCK_BREAK_ACK_LEGACY_SIZE) {
         request->oplock_break.is_lease = false;
-        evpl_iovec_cursor_get_uint8(request_cursor, &request->oplock_break.oplock_level);
-        evpl_iovec_cursor_get_uint8(request_cursor, (uint8_t *) &reserved);
-        evpl_iovec_cursor_get_uint32(request_cursor, &reserved32);
-        evpl_iovec_cursor_get_uint64(request_cursor, &request->oplock_break.file_id.pid);
-        evpl_iovec_cursor_get_uint64(request_cursor, &request->oplock_break.file_id.vid);
+        prc                           |= evpl_iovec_cursor_try_get_uint8(request_cursor, &request->oplock_break.
+                                                                         oplock_level);
+        prc |= evpl_iovec_cursor_try_get_uint8(request_cursor, (uint8_t *) &reserved);
+        prc |= evpl_iovec_cursor_try_get_uint32(request_cursor, &reserved32);
+        prc |= evpl_iovec_cursor_try_get_uint64(request_cursor, &request->oplock_break.file_id
+                                                .pid);
+        prc |= evpl_iovec_cursor_try_get_uint64(request_cursor, &request->oplock_break.file_id
+                                                .vid);
     } else {
         chimera_smb_error("SMB2 OPLOCK_BREAK ack with unexpected struct size %u",
                           request->request_struct_size);
         request->status = SMB2_STATUS_INVALID_PARAMETER;
         return -1;
+    }
+
+    if (unlikely(prc)) {
+        chimera_smb_error("Received SMB2 OPLOCK_BREAK ack truncated in body");
+        return chimera_smb_parse_reject(request, SMB2_STATUS_INVALID_PARAMETER);
     }
 
     return 0;

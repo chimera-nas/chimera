@@ -168,19 +168,37 @@ chimera_smb_parse_tree_connect(
         return -1;
     }
 
-    evpl_iovec_cursor_get_uint16(request_cursor, &request->tree_connect.flags);
-    evpl_iovec_cursor_get_uint16(request_cursor, &request->tree_connect.path_offset);
-    evpl_iovec_cursor_get_uint16(request_cursor, &request->tree_connect.path_length);
+    int prc = 0;
+    prc |= evpl_iovec_cursor_try_get_uint16(request_cursor, &request->tree_connect.flags);
+    prc |= evpl_iovec_cursor_try_get_uint16(request_cursor, &request->tree_connect.path_offset);
+    prc |= evpl_iovec_cursor_try_get_uint16(request_cursor, &request->tree_connect.path_length);
 
-    if (unlikely(request->tree_connect.path_length > CHIMERA_VFS_PATH_MAX)) {
-        chimera_smb_error("Received SMB2 TREE_CONNECT request with invalid path length (%u max %u)",
+    if (unlikely(prc)) {
+        chimera_smb_error("Received SMB2 TREE_CONNECT request truncated in fixed body");
+        return chimera_smb_parse_reject(request, SMB2_STATUS_INVALID_PARAMETER);
+    }
+
+    /* Bound against the UTF-16 staging buffer (path16), NOT CHIMERA_VFS_PATH_MAX:
+     * path16 holds SMB_FILENAME_MAX uint16 units, so a PathLength above its byte
+     * size would overflow this stack buffer. */
+    if (unlikely(request->tree_connect.path_length > sizeof(path16))) {
+        chimera_smb_error("Received SMB2 TREE_CONNECT request with invalid path length (%u max %zu)",
                           request->tree_connect.path_length,
-                          CHIMERA_VFS_PATH_MAX);
+                          sizeof(path16));
         request->status = SMB2_STATUS_INVALID_PARAMETER;
         return -1;
     }
 
-    evpl_iovec_cursor_copy(request_cursor, path16, request->tree_connect.path_length);
+    /* Honor the client-declared PathOffset (previously read but ignored) and
+     * pull the path with the bounds-checked reader. */
+    if (request->tree_connect.path_length > 0) {
+        if (unlikely(smb_cursor_seek_to(request_cursor, request->tree_connect.path_offset) != 0 ||
+                     evpl_iovec_cursor_try_copy(request_cursor, path16,
+                                                request->tree_connect.path_length) != 0)) {
+            chimera_smb_error("Received SMB2 TREE_CONNECT with path out of range");
+            return chimera_smb_parse_reject(request, SMB2_STATUS_INVALID_PARAMETER);
+        }
+    }
 
     name_size = chimera_smb_utf16le_to_utf8(&request->compound->thread->iconv_ctx,
                                             path16,

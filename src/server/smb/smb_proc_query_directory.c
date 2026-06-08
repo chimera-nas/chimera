@@ -429,14 +429,20 @@ chimera_smb_parse_query_directory(
         return -1;
     }
 
-    evpl_iovec_cursor_get_uint8(request_cursor, &request->query_directory.info_class);
-    evpl_iovec_cursor_get_uint8(request_cursor, &request->query_directory.flags);
-    evpl_iovec_cursor_get_uint32(request_cursor, &request->query_directory.file_index);
-    evpl_iovec_cursor_get_uint64(request_cursor, &request->query_directory.file_id.pid);
-    evpl_iovec_cursor_get_uint64(request_cursor, &request->query_directory.file_id.vid);
-    evpl_iovec_cursor_get_uint16(request_cursor, &name_offset);
-    evpl_iovec_cursor_get_uint16(request_cursor, &request->query_directory.pattern_length);
-    evpl_iovec_cursor_get_uint32(request_cursor, &request->query_directory.max_output_length);
+    int prc = 0;
+    prc |= evpl_iovec_cursor_try_get_uint8(request_cursor, &request->query_directory.info_class);
+    prc |= evpl_iovec_cursor_try_get_uint8(request_cursor, &request->query_directory.flags);
+    prc |= evpl_iovec_cursor_try_get_uint32(request_cursor, &request->query_directory.file_index);
+    prc |= evpl_iovec_cursor_try_get_uint64(request_cursor, &request->query_directory.file_id.pid);
+    prc |= evpl_iovec_cursor_try_get_uint64(request_cursor, &request->query_directory.file_id.vid);
+    prc |= evpl_iovec_cursor_try_get_uint16(request_cursor, &name_offset);
+    prc |= evpl_iovec_cursor_try_get_uint16(request_cursor, &request->query_directory.pattern_length);
+    prc |= evpl_iovec_cursor_try_get_uint32(request_cursor, &request->query_directory.max_output_length);
+
+    if (unlikely(prc)) {
+        chimera_smb_error("Received SMB2 QUERY_DIRECTORY request truncated in fixed body");
+        return chimera_smb_parse_reject(request, SMB2_STATUS_INVALID_PARAMETER);
+    }
 
     request->query_directory.output_length    = 0;
     request->query_directory.eof              = 1;
@@ -449,7 +455,16 @@ chimera_smb_parse_query_directory(
         return -1;
     }
 
-    evpl_iovec_cursor_copy(request_cursor, pattern16, request->query_directory.pattern_length);
+    /* Honor the client-declared FileName offset (previously read but ignored)
+     * and pull the pattern with the bounds-checked reader. */
+    if (request->query_directory.pattern_length > 0) {
+        if (unlikely(smb_cursor_seek_to(request_cursor, name_offset) != 0 ||
+                     evpl_iovec_cursor_try_copy(request_cursor, pattern16,
+                                                request->query_directory.pattern_length) != 0)) {
+            chimera_smb_error("Received SMB2 QUERY_DIRECTORY with search pattern out of range");
+            return chimera_smb_parse_reject(request, SMB2_STATUS_INVALID_PARAMETER);
+        }
+    }
     name_size = chimera_smb_utf16le_to_utf8(&request->compound->thread->iconv_ctx,
                                             pattern16,
                                             request->query_directory.pattern_length,

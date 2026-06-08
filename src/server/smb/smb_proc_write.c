@@ -318,20 +318,30 @@ chimera_smb_parse_write(
     uint32_t     total_length;
     int          i;
 
-    evpl_iovec_cursor_get_uint16(request_cursor, &data_offset);
-    evpl_iovec_cursor_get_uint32(request_cursor, &request->write.length);
-    evpl_iovec_cursor_get_uint64(request_cursor, &request->write.offset);
-    evpl_iovec_cursor_get_uint64(request_cursor, &request->write.file_id.pid);
-    evpl_iovec_cursor_get_uint64(request_cursor, &request->write.file_id.vid);
-    evpl_iovec_cursor_get_uint32(request_cursor, &request->write.channel);
-    evpl_iovec_cursor_get_uint32(request_cursor, &request->write.remaining);
-    evpl_iovec_cursor_get_uint16(request_cursor, &blob_offset);
-    evpl_iovec_cursor_get_uint16(request_cursor, &blob_length);
-    evpl_iovec_cursor_get_uint32(request_cursor, &request->write.flags);
+    int          prc = 0;
+
+    prc |= evpl_iovec_cursor_try_get_uint16(request_cursor, &data_offset);
+    prc |= evpl_iovec_cursor_try_get_uint32(request_cursor, &request->write.length);
+    prc |= evpl_iovec_cursor_try_get_uint64(request_cursor, &request->write.offset);
+    prc |= evpl_iovec_cursor_try_get_uint64(request_cursor, &request->write.file_id.pid);
+    prc |= evpl_iovec_cursor_try_get_uint64(request_cursor, &request->write.file_id.vid);
+    prc |= evpl_iovec_cursor_try_get_uint32(request_cursor, &request->write.channel);
+    prc |= evpl_iovec_cursor_try_get_uint32(request_cursor, &request->write.remaining);
+    prc |= evpl_iovec_cursor_try_get_uint16(request_cursor, &blob_offset);
+    prc |= evpl_iovec_cursor_try_get_uint16(request_cursor, &blob_length);
+    prc |= evpl_iovec_cursor_try_get_uint32(request_cursor, &request->write.flags);
+
+    if (unlikely(prc)) {
+        chimera_smb_error("Received SMB2 WRITE request truncated in fixed body");
+        return chimera_smb_parse_reject(request, SMB2_STATUS_INVALID_PARAMETER);
+    }
 
     if (request->write.channel == SMB2_CHANNEL_RDMA_V1) {
 
-        evpl_iovec_cursor_skip(request_cursor, blob_offset - evpl_iovec_cursor_consumed(request_cursor));
+        if (unlikely(smb_cursor_seek_to(request_cursor, blob_offset) != 0)) {
+            chimera_smb_error("Received SMB2 WRITE with RDMA channel offset out of range");
+            return chimera_smb_parse_reject(request, SMB2_STATUS_INVALID_PARAMETER);
+        }
 
         request->write.num_rdma_elements = blob_length >> 4;
 
@@ -344,10 +354,15 @@ chimera_smb_parse_write(
         total_length = 0;
 
         for (i = 0; i < request->write.num_rdma_elements; i++) {
-            evpl_iovec_cursor_get_uint64(request_cursor, &request->write.rdma_elements[i].offset);
-            evpl_iovec_cursor_get_uint32(request_cursor, &request->write.rdma_elements[i].token);
-            evpl_iovec_cursor_get_uint32(request_cursor, &request->write.rdma_elements[i].length);
+            prc          |= evpl_iovec_cursor_try_get_uint64(request_cursor, &request->write.rdma_elements[i].offset);
+            prc          |= evpl_iovec_cursor_try_get_uint32(request_cursor, &request->write.rdma_elements[i].token);
+            prc          |= evpl_iovec_cursor_try_get_uint32(request_cursor, &request->write.rdma_elements[i].length);
             total_length += request->write.rdma_elements[i].length;
+        }
+
+        if (unlikely(prc)) {
+            chimera_smb_error("Received SMB2 WRITE with RDMA descriptor list past message");
+            return chimera_smb_parse_reject(request, SMB2_STATUS_INVALID_PARAMETER);
         }
 
         if (unlikely(total_length != request->write.remaining)) {
@@ -361,6 +376,16 @@ chimera_smb_parse_write(
         request->write.niov = evpl_iovec_alloc(evpl, request->write.length, 4096, 1, 0, request->write.iov);
 
     } else {
+        /* The payload sits at the client-declared DataOffset and must fit inside
+         * this request's window; otherwise the move would pull bytes from the
+         * next compound element or off the end of the received data. */
+        if (request->write.length > 0) {
+            if (unlikely(smb_cursor_seek_to(request_cursor, data_offset) != 0 ||
+                         request->write.length > (uint32_t) evpl_iovec_cursor_remaining(request_cursor))) {
+                chimera_smb_error("Received SMB2 WRITE with data offset/length out of range");
+                return chimera_smb_parse_reject(request, SMB2_STATUS_INVALID_PARAMETER);
+            }
+        }
         request->write.niov = evpl_iovec_cursor_move(request_cursor, request->write.iov, 256, request->write.length, 1);
     }
 

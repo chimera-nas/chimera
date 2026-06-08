@@ -553,17 +553,30 @@ chimera_smb_parse_session_setup(
         return -1;
     }
 
-    evpl_iovec_cursor_get_uint8(request_cursor, &request->session_setup.flags);
-    evpl_iovec_cursor_get_uint8(request_cursor, &request->session_setup.security_mode);
-    evpl_iovec_cursor_get_uint32(request_cursor, &request->session_setup.capabilities);
-    evpl_iovec_cursor_get_uint32(request_cursor, &request->session_setup.channel);
-    evpl_iovec_cursor_get_uint16(request_cursor, &request->session_setup.blob_offset);
-    evpl_iovec_cursor_get_uint16(request_cursor, &request->session_setup.blob_length);
-    evpl_iovec_cursor_get_uint64(request_cursor, &request->session_setup.prev_session_id);
+    int prc = 0;
+    prc |= evpl_iovec_cursor_try_get_uint8(request_cursor, &request->session_setup.flags);
+    prc |= evpl_iovec_cursor_try_get_uint8(request_cursor, &request->session_setup.security_mode);
+    prc |= evpl_iovec_cursor_try_get_uint32(request_cursor, &request->session_setup.capabilities);
+    prc |= evpl_iovec_cursor_try_get_uint32(request_cursor, &request->session_setup.channel);
+    prc |= evpl_iovec_cursor_try_get_uint16(request_cursor, &request->session_setup.blob_offset);
+    prc |= evpl_iovec_cursor_try_get_uint16(request_cursor, &request->session_setup.blob_length);
+    prc |= evpl_iovec_cursor_try_get_uint64(request_cursor, &request->session_setup.prev_session_id);
 
-    evpl_iovec_cursor_skip(request_cursor,
-                           request->session_setup.blob_offset - evpl_iovec_cursor_consumed(request_cursor));
+    if (unlikely(prc)) {
+        chimera_smb_error("Received SMB2 SESSION_SETUP request truncated in fixed body");
+        return chimera_smb_parse_reject(request, SMB2_STATUS_INVALID_PARAMETER);
+    }
 
+    /* The security buffer sits at a client-declared offset and must fit within
+     * this request's window; reject a bogus offset/length rather than seeking or
+     * moving out of bounds. */
+    if (request->session_setup.blob_length > 0) {
+        if (unlikely(smb_cursor_seek_to(request_cursor, request->session_setup.blob_offset) != 0 ||
+                     request->session_setup.blob_length > (uint32_t) evpl_iovec_cursor_remaining(request_cursor))) {
+            chimera_smb_error("Received SMB2 SESSION_SETUP with security buffer out of range");
+            return chimera_smb_parse_reject(request, SMB2_STATUS_INVALID_PARAMETER);
+        }
+    }
 
     request->session_setup.input_niov = evpl_iovec_cursor_move(request_cursor,
                                                                request->session_setup.input_iov,

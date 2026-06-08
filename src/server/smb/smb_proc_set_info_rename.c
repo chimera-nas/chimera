@@ -407,16 +407,24 @@ chimera_smb_parse_rename_info(
     /* Initialize the new_parent_handle to NULL */
     rename_info->new_parent_handle = NULL;
 
-    evpl_iovec_cursor_get_uint8(cursor, &rename_info->replace_if_exist);
-    evpl_iovec_cursor_skip(cursor, 7); /* Reserved */
-    evpl_iovec_cursor_get_uint64(cursor, &root_dir);
+    int                             prc = 0;
+    prc |= evpl_iovec_cursor_try_get_uint8(cursor, &rename_info->replace_if_exist);
+    prc |= evpl_iovec_cursor_try_skip(cursor, 7); /* Reserved */
+    prc |= evpl_iovec_cursor_try_get_uint64(cursor, &root_dir);
+    prc |= evpl_iovec_cursor_try_get_uint32(cursor, &name_len);
+
+    if (unlikely(prc)) {
+        chimera_smb_error("SET_INFO RENAME_INFO request truncated in fixed body");
+        request->status = SMB2_STATUS_INFO_LENGTH_MISMATCH;
+        return -1;
+    }
+
     if (root_dir != 0) {
         // Non-zero root directory not supported
         chimera_smb_error("SET_INFO RENAME_INFO with non-zero root directory not supported");
         request->status = SMB2_STATUS_INVALID_PARAMETER;
         return -1;
     }
-    evpl_iovec_cursor_get_uint32(cursor, &name_len);
     if (name_len > sizeof(name16)) {
         chimera_smb_error("SET_INFO RENAME_INFO request: UTF-16 name too long (%u bytes)",
                           name_len);
@@ -424,7 +432,11 @@ chimera_smb_parse_rename_info(
         return -1;
     }
 
-    evpl_iovec_cursor_copy(cursor, (uint8_t *) name16, name_len);
+    if (unlikely(evpl_iovec_cursor_try_copy(cursor, (uint8_t *) name16, name_len) != 0)) {
+        chimera_smb_error("SET_INFO RENAME_INFO name runs past the input buffer");
+        request->status = SMB2_STATUS_INFO_LENGTH_MISMATCH;
+        return -1;
+    }
     /* Convert UTF-16LE name to UTF-8 */
     rename_info->new_parent_len = chimera_smb_utf16le_to_utf8(&request->compound->thread->iconv_ctx,
                                                               name16,

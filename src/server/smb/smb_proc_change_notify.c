@@ -22,11 +22,18 @@ chimera_smb_parse_change_notify(
     uint32_t completion_filter;
 
     /* StructureSize (2 bytes) already consumed by the framework */
-    evpl_iovec_cursor_get_uint16(request_cursor, &flags);
-    evpl_iovec_cursor_get_uint32(request_cursor, &output_buffer_length);
-    evpl_iovec_cursor_get_uint64(request_cursor, &file_id_pid);
-    evpl_iovec_cursor_get_uint64(request_cursor, &file_id_vid);
-    evpl_iovec_cursor_get_uint32(request_cursor, &completion_filter);
+    int      prc = 0;
+
+    prc |= evpl_iovec_cursor_try_get_uint16(request_cursor, &flags);
+    prc |= evpl_iovec_cursor_try_get_uint32(request_cursor, &output_buffer_length);
+    prc |= evpl_iovec_cursor_try_get_uint64(request_cursor, &file_id_pid);
+    prc |= evpl_iovec_cursor_try_get_uint64(request_cursor, &file_id_vid);
+    prc |= evpl_iovec_cursor_try_get_uint32(request_cursor, &completion_filter);
+
+    if (unlikely(prc)) {
+        chimera_smb_error("Received SMB2 CHANGE_NOTIFY request truncated in fixed body");
+        return chimera_smb_parse_reject(request, SMB2_STATUS_INVALID_PARAMETER);
+    }
 
     request->change_notify.flags                = flags;
     request->change_notify.output_buffer_length = output_buffer_length;

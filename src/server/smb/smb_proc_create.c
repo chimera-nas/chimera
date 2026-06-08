@@ -3747,7 +3747,12 @@ chimera_smb_parse_create_contexts(
         data_off = smb_wire_le16(buf + pos + 10);
         data_len = smb_wire_le32(buf + pos + 12);
 
-        if ((uint32_t) name_off + name_len > buf_len - pos) {
+        /* avail > 0 (loop condition) and >= 16 (header check above).  All bounds
+         * tests are written as subtractions against avail so a hostile 32-bit
+         * length/offset cannot wrap an addition past the check. */
+        uint32_t avail = buf_len - pos;
+
+        if (name_off > avail || name_len > avail - name_off) {
             chimera_smb_error("CREATE-context name out of bounds (pos=%u, name_off=%u, name_len=%u)",
                               pos, name_off, name_len);
             request->status = SMB2_STATUS_INVALID_PARAMETER;
@@ -3755,7 +3760,7 @@ chimera_smb_parse_create_contexts(
         }
 
         if (data_len > 0) {
-            if (data_off == 0 || (uint32_t) data_off + data_len > buf_len - pos) {
+            if (data_off == 0 || data_off > avail || data_len > avail - data_off) {
                 chimera_smb_error("CREATE-context data out of bounds (pos=%u, data_off=%u, data_len=%u)",
                                   pos, data_off, data_len);
                 request->status = SMB2_STATUS_INVALID_PARAMETER;
@@ -3801,7 +3806,7 @@ chimera_smb_parse_create_contexts(
             break;
         }
 
-        if (next < 16 || (next & 0x7) != 0 || pos + next > buf_len) {
+        if (next < 16 || (next & 0x7) != 0 || next > avail) {
             chimera_smb_error("CREATE-context Next field invalid (pos=%u, next=%u, buf_len=%u)",
                               pos, next, buf_len);
             request->status = SMB2_STATUS_INVALID_PARAMETER;
@@ -3867,20 +3872,26 @@ chimera_smb_parse_create(
      * aligning cursor would otherwise swallow RequestedOplockLevel as padding
      * before the uint32 ImpersonationLevel read, leaving oplock level always 0. */
     uint8_t security_flags;
-    evpl_iovec_cursor_get_uint8(request_cursor, &security_flags);
-    evpl_iovec_cursor_get_uint8(request_cursor, &request->create.requested_oplock_level);
-    evpl_iovec_cursor_get_uint32(request_cursor, &request->create.impersonation_level);
-    evpl_iovec_cursor_get_uint64(request_cursor, &request->create.flags);
-    evpl_iovec_cursor_skip(request_cursor, 8);
-    evpl_iovec_cursor_get_uint32(request_cursor, &request->create.desired_access);
-    evpl_iovec_cursor_get_uint32(request_cursor, &request->create.file_attributes);
-    evpl_iovec_cursor_get_uint32(request_cursor, &request->create.share_access);
-    evpl_iovec_cursor_get_uint32(request_cursor, &request->create.create_disposition);
-    evpl_iovec_cursor_get_uint32(request_cursor, &request->create.create_options);
-    evpl_iovec_cursor_get_uint16(request_cursor, &name_offset);
-    evpl_iovec_cursor_get_uint16(request_cursor, &request->create.name_len);
-    evpl_iovec_cursor_get_uint32(request_cursor, &blob_offset);
-    evpl_iovec_cursor_get_uint32(request_cursor, &blob_length);
+    int     prc = 0;
+    prc |= evpl_iovec_cursor_try_get_uint8(request_cursor, &security_flags);
+    prc |= evpl_iovec_cursor_try_get_uint8(request_cursor, &request->create.requested_oplock_level);
+    prc |= evpl_iovec_cursor_try_get_uint32(request_cursor, &request->create.impersonation_level);
+    prc |= evpl_iovec_cursor_try_get_uint64(request_cursor, &request->create.flags);
+    prc |= evpl_iovec_cursor_try_skip(request_cursor, 8);
+    prc |= evpl_iovec_cursor_try_get_uint32(request_cursor, &request->create.desired_access);
+    prc |= evpl_iovec_cursor_try_get_uint32(request_cursor, &request->create.file_attributes);
+    prc |= evpl_iovec_cursor_try_get_uint32(request_cursor, &request->create.share_access);
+    prc |= evpl_iovec_cursor_try_get_uint32(request_cursor, &request->create.create_disposition);
+    prc |= evpl_iovec_cursor_try_get_uint32(request_cursor, &request->create.create_options);
+    prc |= evpl_iovec_cursor_try_get_uint16(request_cursor, &name_offset);
+    prc |= evpl_iovec_cursor_try_get_uint16(request_cursor, &request->create.name_len);
+    prc |= evpl_iovec_cursor_try_get_uint32(request_cursor, &blob_offset);
+    prc |= evpl_iovec_cursor_try_get_uint32(request_cursor, &blob_length);
+
+    if (unlikely(prc)) {
+        chimera_smb_error("Received SMB2 CREATE request truncated in fixed body");
+        return chimera_smb_parse_reject(request, SMB2_STATUS_INVALID_PARAMETER);
+    }
 
     /* ImpersonationLevel is advisory and Windows servers do not validate it
      * (a durable reconnect, for one, fills it with a don't-care sentinel) — so
@@ -3893,7 +3904,10 @@ chimera_smb_parse_create(
         return -1;
     }
 
-    evpl_iovec_cursor_copy(request_cursor, name16, request->create.name_len);
+    if (unlikely(evpl_iovec_cursor_try_copy(request_cursor, name16, request->create.name_len) != 0)) {
+        chimera_smb_error("Received SMB2 CREATE request with name running past message");
+        return chimera_smb_parse_reject(request, SMB2_STATUS_INVALID_PARAMETER);
+    }
 
     name_size = chimera_smb_utf16le_to_utf8(&request->compound->thread->iconv_ctx,
                                             name16,
@@ -3962,12 +3976,18 @@ chimera_smb_parse_create(
     }
 
     if (blob_offset > 0 && blob_length > 0 && blob_length <= 1024) {
-        uint8_t  ctx_buf[1024];
-        uint32_t skip = blob_offset - evpl_iovec_cursor_consumed(request_cursor);
+        uint8_t ctx_buf[1024];
 
-        evpl_iovec_cursor_skip(request_cursor, skip);
+        /* Seek to the client-declared create-context offset (validated to be
+         * forward and within this request's window) and pull the blob with the
+         * bounds-checked reader; a malformed offset/length rejects cleanly
+         * rather than driving an out-of-bounds skip or read. */
+        if (unlikely(smb_cursor_seek_to(request_cursor, blob_offset) != 0)) {
+            chimera_smb_error("CREATE create-context offset %u out of range", blob_offset);
+            return chimera_smb_parse_reject(request, SMB2_STATUS_INVALID_PARAMETER);
+        }
 
-        if (evpl_iovec_cursor_get_blob(request_cursor, ctx_buf, blob_length) == 0) {
+        if (evpl_iovec_cursor_try_copy(request_cursor, ctx_buf, blob_length) == 0) {
             if (chimera_smb_parse_create_contexts(ctx_buf, blob_length, request) < 0) {
                 return -1;
             }

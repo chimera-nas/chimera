@@ -405,16 +405,29 @@ chimera_smb_parse_set_info(
         return -1;
     }
 
-    evpl_iovec_cursor_get_uint8(request_cursor, &request->set_info.info_type);
-    evpl_iovec_cursor_get_uint8(request_cursor, &request->set_info.info_class);
-    evpl_iovec_cursor_get_uint32(request_cursor, &request->set_info.buffer_length);
-    evpl_iovec_cursor_get_uint16(request_cursor, &request->set_info.buffer_offset);
-    evpl_iovec_cursor_get_uint32(request_cursor, &request->set_info.addl_info);
-    evpl_iovec_cursor_get_uint64(request_cursor, &request->set_info.file_id.pid);
-    evpl_iovec_cursor_get_uint64(request_cursor, &request->set_info.file_id.vid);
+    int prc = 0;
+    prc |= evpl_iovec_cursor_try_get_uint8(request_cursor, &request->set_info.info_type);
+    prc |= evpl_iovec_cursor_try_get_uint8(request_cursor, &request->set_info.info_class);
+    prc |= evpl_iovec_cursor_try_get_uint32(request_cursor, &request->set_info.buffer_length);
+    prc |= evpl_iovec_cursor_try_get_uint16(request_cursor, &request->set_info.buffer_offset);
+    prc |= evpl_iovec_cursor_try_get_uint32(request_cursor, &request->set_info.addl_info);
+    prc |= evpl_iovec_cursor_try_get_uint64(request_cursor, &request->set_info.file_id.pid);
+    prc |= evpl_iovec_cursor_try_get_uint64(request_cursor, &request->set_info.file_id.vid);
 
-    evpl_iovec_cursor_skip(request_cursor,
-                           request->set_info.buffer_offset - evpl_iovec_cursor_consumed(request_cursor));
+    if (unlikely(prc)) {
+        chimera_smb_error("Received SMB2 SET_INFO request truncated in fixed body");
+        return chimera_smb_parse_reject(request, SMB2_STATUS_INVALID_PARAMETER);
+    }
+
+    /* Seek to the client-declared input buffer and fence the cursor to exactly
+     * buffer_length bytes, so the per-info-class sub-parsers below can read only
+     * within the declared buffer (and reject cleanly if it is too short). */
+    if (unlikely(smb_cursor_seek_to(request_cursor, request->set_info.buffer_offset) != 0 ||
+                 request->set_info.buffer_length > (uint32_t) evpl_iovec_cursor_remaining(request_cursor))) {
+        chimera_smb_error("Received SMB2 SET_INFO with input buffer out of range");
+        return chimera_smb_parse_reject(request, SMB2_STATUS_INVALID_PARAMETER);
+    }
+    evpl_iovec_cursor_set_limit(request_cursor, request->set_info.buffer_length);
 
     request->set_info.attrs.smb_attr_mask = 0;
 
@@ -422,17 +435,17 @@ chimera_smb_parse_set_info(
         case SMB2_INFO_FILE:
             switch (request->set_info.info_class) {
                 case SMB2_FILE_BASIC_INFO:
-                    chimera_smb_parse_basic_info(request_cursor, &request->set_info.attrs);
+                    rc = chimera_smb_parse_basic_info(request_cursor, &request->set_info.attrs);
                     break;
                 case SMB2_FILE_DISPOSITION_INFO:
-                    chimera_smb_parse_disposition_info(request_cursor, &request->set_info.attrs);
+                    rc = chimera_smb_parse_disposition_info(request_cursor, &request->set_info.attrs);
                     break;
                 case SMB2_FILE_DISPOSITION_INFO_EX:
-                    chimera_smb_parse_disposition_info_ex(request_cursor, &request->set_info.attrs);
+                    rc = chimera_smb_parse_disposition_info_ex(request_cursor, &request->set_info.attrs);
                     break;
                 case SMB2_FILE_ENDOFFILE_INFO:
                 case SMB2_FILE_ALLOCATION_INFO:
-                    chimera_smb_parse_end_of_file_info(
+                    rc = chimera_smb_parse_end_of_file_info(
                         request_cursor,
                         &request->set_info.attrs);
                     break;
@@ -444,7 +457,7 @@ chimera_smb_parse_set_info(
                     /* EAs not supported, accept and ignore */
                     break;
                 case SMB2_FILE_POSITION_INFO:
-                    chimera_smb_parse_position_info(request_cursor, &request->set_info.attrs);
+                    rc = chimera_smb_parse_position_info(request_cursor, &request->set_info.attrs);
                     break;
 
                 default:
@@ -457,8 +470,10 @@ chimera_smb_parse_set_info(
             break;
         case SMB2_INFO_SECURITY:
             if (request->set_info.buffer_length <= sizeof(request->set_info.sec_buf)) {
-                evpl_iovec_cursor_copy(request_cursor, request->set_info.sec_buf,
-                                       request->set_info.buffer_length);
+                if (unlikely(evpl_iovec_cursor_try_copy(request_cursor, request->set_info.sec_buf,
+                                                        request->set_info.buffer_length) != 0)) {
+                    return chimera_smb_parse_reject(request, SMB2_STATUS_INFO_LENGTH_MISMATCH);
+                }
                 request->set_info.sec_buf_len = request->set_info.buffer_length;
             } else {
                 chimera_smb_error("parse_set_info: security descriptor too large (%u bytes)",
@@ -473,5 +488,13 @@ chimera_smb_parse_set_info(
             rc              = -1;
             break;
     } /* switch */
+
+    /* A sub-parser that ran off the end of the declared buffer returns -1
+     * without setting a status; answer that cleanly as a length mismatch rather
+     * than letting the dispatcher tear down the connection. */
+    if (rc != 0 && request->status == SMB2_STATUS_SUCCESS) {
+        return chimera_smb_parse_reject(request, SMB2_STATUS_INFO_LENGTH_MISMATCH);
+    }
+
     return rc;
 } /* chimera_smb_parse_set_info */

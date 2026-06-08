@@ -823,6 +823,44 @@ struct chimera_smb_compound {
     struct chimera_smb_request        *requests[CHIMERA_SMB_COMPOUND_MAX_REQUESTS];
 };
 
+/*
+ * Reject a request whose body is malformed.  Rather than tearing down the
+ * transport, mark it PARSE_FAILED with an SMB2 status; the dispatcher then
+ * completes it -- in order within the compound -- as an error reply (see
+ * CHIMERA_SMB_REQUEST_FLAG_PARSE_FAILED).  Returns 0 so the compound parse loop
+ * keeps walking the remaining (independently framed) elements.
+ */
+static inline int
+chimera_smb_parse_reject(
+    struct chimera_smb_request *request,
+    uint32_t                    status)
+{
+    request->status = status;
+    request->flags |= CHIMERA_SMB_REQUEST_FLAG_PARSE_FAILED;
+    return 0;
+} /* chimera_smb_parse_reject */
+
+/*
+ * Advance the cursor to a client-supplied absolute offset (measured, like all
+ * SMB2 *Offset fields, from the start of this request's SMB2 header, which is
+ * where the per-element cursor's `consumed` is rebased to 0).  Rejects offsets
+ * that point backward (into already-parsed bytes) or beyond the message window.
+ * Returns 0 on success, -1 if the offset is out of range.
+ */
+static inline int
+smb_cursor_seek_to(
+    struct evpl_iovec_cursor *cursor,
+    uint32_t                  target_offset)
+{
+    int consumed = evpl_iovec_cursor_consumed(cursor);
+
+    if (target_offset < (uint32_t) consumed) {
+        return -1;
+    }
+
+    return evpl_iovec_cursor_try_skip(cursor, (int) (target_offset - (uint32_t) consumed));
+} /* smb_cursor_seek_to */
+
 struct chimera_smb_session_handle {
     uint64_t                           session_id;
     struct chimera_smb_session        *session;

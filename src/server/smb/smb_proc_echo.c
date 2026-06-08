@@ -20,7 +20,10 @@ chimera_smb_parse_echo(
 
     // Echo request has only struct size (2 bytes) and reserved (2 bytes)
     // Skip the reserved field
-    evpl_iovec_cursor_skip(request_cursor, 2);
+    if (unlikely(evpl_iovec_cursor_try_skip(request_cursor, 2) != 0)) {
+        chimera_smb_error("Received SMB2 ECHO request truncated in fixed body");
+        return chimera_smb_parse_reject(request, SMB2_STATUS_INVALID_PARAMETER);
+    }
 
     return 0;
 } /* chimera_smb_parse_echo */
