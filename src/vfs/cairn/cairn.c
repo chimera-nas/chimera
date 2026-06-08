@@ -33,6 +33,7 @@ void rocksdb_flush_wal(
 #include "vfs/vfs_internal.h"
 #include "vfs/vfs_acl.h"
 #include "vfs/vfs_acl_serialize.h"
+#include "vfs/vfs_access.h"
 #include "cairn.h"
 #include "common/logging.h"
 #include "common/misc.h"
@@ -1898,6 +1899,16 @@ cairn_setattr(
 
     cairn_apply_attrs(inode, request->setattr.set_attr);
 
+    /* POSIX: a successful (f)truncate marks the last data modification time.
+     * ctime is stamped by cairn_apply_attrs; bump mtime here unless the caller
+     * supplied an explicit mtime, or is an AUTH_ATTR (SMB/Windows) caller that
+     * manages the write time itself. */
+    if ((orig_set_mask & CHIMERA_VFS_ATTR_SIZE) && S_ISREG(inode->mode) &&
+        !(orig_set_mask & CHIMERA_VFS_ATTR_MTIME) &&
+        request->cred->flavor != CHIMERA_VFS_AUTH_ATTR) {
+        clock_gettime(CLOCK_REALTIME, &inode->mtime);
+    }
+
     /* Restore the caller's mask: on an optimistic-commit conflict cairn rolls
      * back and re-dispatches this queued request, and the replay re-reads
      * orig_set_mask from this field.  If it stayed scalar-only the ACL re-put
@@ -2485,6 +2496,11 @@ cairn_remove_at(
 
     } else {
         inode->nlink--;
+        /* Removing one of several hard links changes the surviving inode's
+         * link count, which is a status change: bump its ctime. */
+        if (inode->nlink > 0) {
+            inode->ctime = now;
+        }
     }
 
     if (inode->nlink == 0) {
@@ -2760,6 +2776,34 @@ cairn_open_fh(
     cairn_queue_request(thread, request);
 } /* cairn_open_fh */
 
+/* Mode/ACL-aware access check against a cairn inode (mirror of
+ * memfs_inode_access): build the canonical attrs and consult the shared engine,
+ * loading the stored ACL when present. */
+static int
+cairn_inode_access(
+    struct cairn_thread           *thread,
+    const struct cairn_inode      *inode,
+    const struct chimera_vfs_cred *cred,
+    uint32_t                       requested)
+{
+    static __thread uint8_t  aclbuf[CAIRN_ACL_STRUCT_SCRATCH];
+    struct chimera_acl      *acl = (struct chimera_acl *) aclbuf;
+    struct chimera_vfs_attrs attr;
+
+    attr.va_set_mask = CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_UID |
+        CHIMERA_VFS_ATTR_GID;
+    attr.va_mode = inode->mode;
+    attr.va_uid  = inode->uid;
+    attr.va_gid  = inode->gid;
+
+    if (cairn_load_acl(thread, inode->inum, acl)) {
+        attr.va_set_mask |= CHIMERA_VFS_ATTR_ACL;
+        attr.va_acl       = acl;
+    }
+
+    return chimera_vfs_access_allowed(&attr, cred, requested);
+} /* cairn_inode_access */
+
 static void
 cairn_open_at(
     struct cairn_thread        *thread,
@@ -2807,6 +2851,19 @@ cairn_open_at(
         if (!(flags & CHIMERA_VFS_OPEN_CREATE)) {
             cairn_inode_handle_release(&parent_ih);
             request->status = CHIMERA_VFS_ENOENT;
+            request->complete(request);
+            return;
+        }
+
+        /* Creating a new name requires write+search permission on the parent
+         * directory.  Enforce POSIX semantics for AUTH_UNIX callers (root is
+         * exempt); SMB/ACL (AUTH_ATTR) callers are authorized by the engine. */
+        if (request->cred->flavor == CHIMERA_VFS_AUTH_UNIX &&
+            request->cred->uid != 0 &&
+            !cairn_inode_access(thread, parent_inode, request->cred,
+                                CHIMERA_ACE_APPEND_DATA | CHIMERA_ACE_EXECUTE)) {
+            cairn_inode_handle_release(&parent_ih);
+            request->status = CHIMERA_VFS_EACCES;
             request->complete(request);
             return;
         }
@@ -2879,6 +2936,16 @@ cairn_open_at(
         inode = child_ih.inode;
 
         cairn_dirent_handle_release(&dh);
+
+        /* O_NOFOLLOW: opening an existing symlink final component fails with
+         * ELOOP rather than following it. */
+        if (S_ISLNK(inode->mode) && (flags & CHIMERA_VFS_OPEN_NOFOLLOW)) {
+            cairn_inode_handle_release(&parent_ih);
+            cairn_inode_handle_release(&child_ih);
+            request->status = CHIMERA_VFS_ELOOP;
+            request->complete(request);
+            return;
+        }
     }
 
     if ((flags & CHIMERA_VFS_OPEN_DIRECTORY) && !S_ISDIR(inode->mode)) {
@@ -3961,6 +4028,45 @@ cairn_rename_at(
     }
 
     target_inode = target_ih.inode;
+
+    /* POSIX: a directory may not be renamed into itself or one of its own
+     * descendants (EINVAL).  Walk the destination parent's ancestry; if the
+     * moved directory appears, reject.  (parent_inum is read out of each handle
+     * before it is released -- the inode lives in a pinned slice.) */
+    if (S_ISDIR(target_inode->mode)) {
+        uint64_t walk        = new_parent_inode->inum;
+        uint64_t walk_parent = new_parent_inode->parent_inum;
+        int      bad         = 0;
+
+        for (int depth = 0; depth < CHIMERA_VFS_PATH_MAX; depth++) {
+            if (walk == target_inode->inum) {
+                bad = 1;
+                break;
+            }
+            if (walk_parent == walk) {
+                break;  /* reached the root (parent of root is itself) */
+            }
+            struct cairn_inode_handle anc_ih;
+            if (cairn_inode_get_inum(thread, walk_parent, &anc_ih)) {
+                break;
+            }
+            walk        = walk_parent;
+            walk_parent = anc_ih.inode->parent_inum;
+            cairn_inode_handle_release(&anc_ih);
+        }
+
+        if (bad) {
+            cairn_dirent_handle_release(&old_dh);
+            cairn_inode_handle_release(&target_ih);
+            cairn_inode_handle_release(&old_parent_ih);
+            if (have_new_parent_ih) {
+                cairn_inode_handle_release(&new_parent_ih);
+            }
+            request->status = CHIMERA_VFS_EINVAL;
+            request->complete(request);
+            return;
+        }
+    }
 
     new_dirent_key.keytype = CAIRN_KEY_DIRENT;
     new_dirent_key.inum    = new_parent_inode->inum;
