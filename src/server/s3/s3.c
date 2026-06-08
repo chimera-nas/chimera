@@ -107,6 +107,19 @@ s3_server_respond(
     char              date_ts[64];
     time_t            now = time(NULL);
 
+    /* The response headers/status are emitted exactly once. Several paths can
+     * race to call this for the same request: for synchronous VFS backends
+     * (e.g. memfs) the VFS completion callback runs inline, so both it and the
+     * HTTP RECEIVE_COMPLETE notification observe the request ready to send.
+     * Responding twice duplicates the response headers and desyncs the
+     * connection, so dispatch the status line + headers only on the first
+     * call. (GET streams its body via later WANT_DATA notifications, which is
+     * why we cannot key this off vfs_state.) */
+    if (request->responded) {
+        return;
+    }
+    request->responded = 1;
+
     strftime(date_ts, sizeof(date_ts), "%a, %d %b %Y %H:%M:%S GMT", gmtime(&now));
 
     evpl_http_request_add_header(request->http_request, "Date", date_ts);
@@ -399,6 +412,7 @@ s3_server_dispatch(
     s3_request->has_part_number    = 0;
     s3_request->op_bucket          = 0;
     s3_request->chunked            = 0;
+    s3_request->responded          = 0;
     s3_request->query_upload_idlen = 0;
     s3_request->query_part_number  = 0;
     s3_request->http_request       = request;
