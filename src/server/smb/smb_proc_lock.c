@@ -125,8 +125,8 @@ chimera_smb_parse_lock(
     struct evpl_iovec_cursor   *request_cursor,
     struct chimera_smb_request *request)
 {
-    uint16_t reserved_lock_seq_lo;
-    uint32_t reserved_lock_seq_hi;
+    uint16_t reserved_lock_seq_lo = 0;
+    uint16_t reserved_lock_seq_hi = 0;
     uint32_t reserved;
 
     if (unlikely(request->request_struct_size != SMB2_LOCK_REQUEST_SIZE)) {
@@ -137,22 +137,32 @@ chimera_smb_parse_lock(
         return -1;
     }
 
-    evpl_iovec_cursor_get_uint16(request_cursor, &request->lock.lock_count);
+    int prc = 0;
+    prc |= evpl_iovec_cursor_try_get_uint16(request_cursor, &request->lock.lock_count);
     /* LockSequenceNumber is 4 bits + LockSequenceIndex 28 bits = 32 bits.
      * We don't replay-detect by sequence in Stage B; just store. */
-    evpl_iovec_cursor_get_uint16(request_cursor, &reserved_lock_seq_lo);
-    evpl_iovec_cursor_get_uint16(request_cursor, (uint16_t *) &reserved_lock_seq_hi);
+    prc |= evpl_iovec_cursor_try_get_uint16(request_cursor, &reserved_lock_seq_lo);
+    prc |= evpl_iovec_cursor_try_get_uint16(request_cursor, &reserved_lock_seq_hi);
+    prc |= evpl_iovec_cursor_try_get_uint64(request_cursor, &request->lock.file_id.pid);
+    prc |= evpl_iovec_cursor_try_get_uint64(request_cursor, &request->lock.file_id.vid);
+
+    if (unlikely(prc)) {
+        chimera_smb_error("Received SMB2 LOCK request truncated in fixed body");
+        return chimera_smb_parse_reject(request, SMB2_STATUS_INVALID_PARAMETER);
+    }
+
+    /* Combine the LockSequence halves only once every field parsed cleanly, so a
+     * short read can never feed an uninitialized value into the shift/or. */
     request->lock.lock_sequence = ((uint32_t) reserved_lock_seq_lo) |
         (((uint32_t) reserved_lock_seq_hi) << 16);
-    evpl_iovec_cursor_get_uint64(request_cursor, &request->lock.file_id.pid);
-    evpl_iovec_cursor_get_uint64(request_cursor, &request->lock.file_id.vid);
 
     /* Read the lock elements (24 bytes each: Offset, Length, Flags, Reserved).
      * A zero-lock request (which smbtorture sends to probe rejection) carries
      * no element; an over-long LockCount is flagged so the handler can reply
      * INVALID_PARAMETER rather than tearing the connection down with a -1.  The
      * first element is mirrored into l_offset/l_length/l_flags for the common
-     * single-lock path. */
+     * single-lock path.  The elements are pulled with the bounds-checked reader
+     * so a LockCount that runs past the received bytes rejects cleanly. */
     request->lock.l_offset      = 0;
     request->lock.l_length      = 0;
     request->lock.l_flags       = 0;
@@ -161,14 +171,20 @@ chimera_smb_parse_lock(
     if (request->lock.lock_count >= 1 &&
         request->lock.lock_count <= CHIMERA_SMB_LOCK_MAX_ELEMENTS) {
         for (uint16_t i = 0; i < request->lock.lock_count; i++) {
-            evpl_iovec_cursor_get_uint64(request_cursor,
-                                         &request->lock.elements[i].offset);
-            evpl_iovec_cursor_get_uint64(request_cursor,
-                                         &request->lock.elements[i].length);
-            evpl_iovec_cursor_get_uint32(request_cursor,
-                                         &request->lock.elements[i].flags);
-            evpl_iovec_cursor_get_uint32(request_cursor, &reserved);
+            prc |= evpl_iovec_cursor_try_get_uint64(request_cursor,
+                                                    &request->lock.elements[i].offset);
+            prc |= evpl_iovec_cursor_try_get_uint64(request_cursor,
+                                                    &request->lock.elements[i].length);
+            prc |= evpl_iovec_cursor_try_get_uint32(request_cursor,
+                                                    &request->lock.elements[i].flags);
+            prc |= evpl_iovec_cursor_try_get_uint32(request_cursor, &reserved);
         }
+
+        if (unlikely(prc)) {
+            chimera_smb_error("Received SMB2 LOCK elements past message");
+            return chimera_smb_parse_reject(request, SMB2_STATUS_INVALID_PARAMETER);
+        }
+
         request->lock.l_offset = request->lock.elements[0].offset;
         request->lock.l_length = request->lock.elements[0].length;
         request->lock.l_flags  = request->lock.elements[0].flags;

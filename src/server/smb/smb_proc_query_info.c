@@ -545,15 +545,21 @@ chimera_smb_parse_query_info(
         return -1;
     }
 
-    evpl_iovec_cursor_get_uint8(request_cursor, &request->query_info.info_type);
-    evpl_iovec_cursor_get_uint8(request_cursor, &request->query_info.info_class);
-    evpl_iovec_cursor_get_uint32(request_cursor, &max_response_size);
-    evpl_iovec_cursor_get_uint16(request_cursor, &input_offset);
-    evpl_iovec_cursor_get_uint32(request_cursor, &input_size);
-    evpl_iovec_cursor_get_uint32(request_cursor, &request->query_info.addl_info);
-    evpl_iovec_cursor_get_uint32(request_cursor, &request->query_info.flags);
-    evpl_iovec_cursor_get_uint64(request_cursor, &request->query_info.file_id.pid);
-    evpl_iovec_cursor_get_uint64(request_cursor, &request->query_info.file_id.vid);
+    int prc = 0;
+    prc |= evpl_iovec_cursor_try_get_uint8(request_cursor, &request->query_info.info_type);
+    prc |= evpl_iovec_cursor_try_get_uint8(request_cursor, &request->query_info.info_class);
+    prc |= evpl_iovec_cursor_try_get_uint32(request_cursor, &max_response_size);
+    prc |= evpl_iovec_cursor_try_get_uint16(request_cursor, &input_offset);
+    prc |= evpl_iovec_cursor_try_get_uint32(request_cursor, &input_size);
+    prc |= evpl_iovec_cursor_try_get_uint32(request_cursor, &request->query_info.addl_info);
+    prc |= evpl_iovec_cursor_try_get_uint32(request_cursor, &request->query_info.flags);
+    prc |= evpl_iovec_cursor_try_get_uint64(request_cursor, &request->query_info.file_id.pid);
+    prc |= evpl_iovec_cursor_try_get_uint64(request_cursor, &request->query_info.file_id.vid);
+
+    if (unlikely(prc)) {
+        chimera_smb_error("Received SMB2 QUERY_INFO request truncated in fixed body");
+        return chimera_smb_parse_reject(request, SMB2_STATUS_INVALID_PARAMETER);
+    }
 
     return 0;
 } /* chimera_smb_parse_query_info */

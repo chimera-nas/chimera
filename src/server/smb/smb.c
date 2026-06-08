@@ -1095,7 +1095,25 @@ chimera_smb_server_handle_smb2(
             return;
         }
 
+        /* The compound request array is fixed-size; a chain that would overflow
+         * it is hostile.  Every loop iteration appends exactly one request, so
+         * checking here guards all of the requests[num_requests++] sites below. */
+        if (unlikely(compound->num_requests >= CHIMERA_SMB_COMPOUND_MAX_REQUESTS)) {
+            chimera_smb_error(
+                "SMB2 compound exceeds %d chained requests; closing connection",
+                CHIMERA_SMB_COMPOUND_MAX_REQUESTS);
+            chimera_smb_compound_free(thread, compound);
+            evpl_close(evpl, conn->bind);
+            return;
+        }
+
         evpl_iovec_cursor_reset_consumed(request_cursor);
+
+        /* Fence the cursor's checked readers to this element's bytes.  `left`
+         * still counts from this element's header start (the -= below has not
+         * run yet), so this caps reads at the end of the received compound; once
+         * NextCommand is validated we tighten it to this element's own window. */
+        evpl_iovec_cursor_set_limit(request_cursor, left);
 
         request = chimera_smb_request_alloc(thread);
 
@@ -1131,6 +1149,34 @@ chimera_smb_server_handle_smb2(
         evpl_iovec_cursor_copy(request_cursor,
                                &request->request_struct_size,
                                sizeof(request->request_struct_size));
+
+        /* Validate the compound chain link before anything trusts it -- the
+         * per-element cursor window, the signing payload length, and the skip to
+         * the next element all derive from NextCommand.  When present it must be
+         * 8-byte aligned (MS-SMB2 2.2.1.2), point past this header, and stay
+         * within the bytes actually received (`left` + the header we consumed).
+         * A bogus value is rejected cleanly and terminates the chain rather than
+         * driving an out-of-bounds skip. */
+        if (request->smb2_hdr.next_command != 0) {
+            uint32_t nc = request->smb2_hdr.next_command;
+
+            if (unlikely(nc < sizeof(request->smb2_hdr) ||
+                         (nc & 7) != 0 ||
+                         nc > (uint32_t) left + sizeof(request->smb2_hdr))) {
+                chimera_smb_error("Received SMB2 compound with invalid NextCommand %u", nc);
+                request->smb2_hdr.next_command               = 0;
+                request->status                              = SMB2_STATUS_INVALID_PARAMETER;
+                request->flags                              |= CHIMERA_SMB_REQUEST_FLAG_PARSE_FAILED;
+                compound->requests[compound->num_requests++] = request;
+                goto next_compound_request;
+            }
+
+            /* Tighten the window to exactly this element: limit becomes the
+             * absolute NextCommand offset (set_limit is relative to the current
+             * consumed position). */
+            evpl_iovec_cursor_set_limit(request_cursor,
+                                        nc - evpl_iovec_cursor_consumed(request_cursor));
+        }
 
         /* Compound related requests inherit session/tree from previous request */
         if (request->smb2_hdr.flags & SMB2_FLAGS_RELATED_OPERATIONS) {
@@ -1389,8 +1435,19 @@ chimera_smb_server_handle_smb2(
         more_requests = request->smb2_hdr.next_command != 0;
 
         if (more_requests) {
-            evpl_iovec_cursor_skip(request_cursor,
-                                   request->smb2_hdr.next_command - evpl_iovec_cursor_consumed(request_cursor));
+            /* A per-command parser may have tightened the cursor limit to fence a
+             * sub-buffer (SET_INFO / IOCTL), which would otherwise make the skip
+             * to the next compound header spuriously fail.  NextCommand was
+             * validated above (aligned, forward, within the received data), so
+             * restore the element boundary as the limit before skipping to it. */
+            evpl_iovec_cursor_set_limit(request_cursor,
+                                        request->smb2_hdr.next_command -
+                                        evpl_iovec_cursor_consumed(request_cursor));
+            if (unlikely(smb_cursor_seek_to(request_cursor, request->smb2_hdr.next_command) != 0)) {
+                chimera_smb_error("SMB2 compound NextCommand skip out of range; closing connection");
+                evpl_close(evpl, conn->bind);
+                return;
+            }
         }
 
         left -= evpl_iovec_cursor_consumed(request_cursor) - sizeof(request->smb2_hdr);

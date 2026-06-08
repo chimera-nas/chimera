@@ -462,57 +462,80 @@ chimera_smb_unmarshal_end_of_file_info(
     attr->va_set_mask |= CHIMERA_VFS_ATTR_SIZE;
 } // chimera_smb_unmarshal_end_of_file_info
 
-static inline void
+/* The parse_*_info helpers below read a client-supplied SET_INFO buffer.  They
+ * use the bounds-checked cursor readers and return -1 (without aborting) when
+ * the buffer is shorter than the information class requires, so the caller can
+ * answer STATUS_INFO_LENGTH_MISMATCH instead of crashing the server. */
+static inline int
 chimera_smb_parse_basic_info(
     struct evpl_iovec_cursor *cursor,
     struct chimera_smb_attrs *attrs)
 {
-    evpl_iovec_cursor_get_uint64(cursor, &attrs->smb_crttime);
-    evpl_iovec_cursor_get_uint64(cursor, &attrs->smb_atime);
-    evpl_iovec_cursor_get_uint64(cursor, &attrs->smb_mtime);
-    evpl_iovec_cursor_get_uint64(cursor, &attrs->smb_ctime);
-    evpl_iovec_cursor_get_uint32(cursor, &attrs->smb_attributes);
+    int rc = 0;
+
+    rc |= evpl_iovec_cursor_try_get_uint64(cursor, &attrs->smb_crttime);
+    rc |= evpl_iovec_cursor_try_get_uint64(cursor, &attrs->smb_atime);
+    rc |= evpl_iovec_cursor_try_get_uint64(cursor, &attrs->smb_mtime);
+    rc |= evpl_iovec_cursor_try_get_uint64(cursor, &attrs->smb_ctime);
+    rc |= evpl_iovec_cursor_try_get_uint32(cursor, &attrs->smb_attributes);
+
+    if (rc) {
+        return -1;
+    }
 
     attrs->smb_attr_mask |= SMB_ATTR_CRTTIME | SMB_ATTR_ATIME | SMB_ATTR_MTIME | SMB_ATTR_CTIME | SMB_ATTR_ATTRIBUTES;
+    return 0;
 } /* chimera_smb_parse_basic_info */
 
-static inline void
+static inline int
 chimera_smb_parse_disposition_info(
     struct evpl_iovec_cursor *cursor,
     struct chimera_smb_attrs *attrs)
 {
-    evpl_iovec_cursor_get_uint8(cursor, &attrs->smb_disposition);
+    if (evpl_iovec_cursor_try_get_uint8(cursor, &attrs->smb_disposition)) {
+        return -1;
+    }
     attrs->smb_attr_mask |= SMB_ATTR_DISPOSITION;
+    return 0;
 } /* chimera_smb_parse_disposition_info */
 
-static inline void
+static inline int
 chimera_smb_parse_disposition_info_ex(
     struct evpl_iovec_cursor *cursor,
     struct chimera_smb_attrs *attrs)
 {
     uint32_t flags;
 
-    evpl_iovec_cursor_get_uint32(cursor, &flags);
+    if (evpl_iovec_cursor_try_get_uint32(cursor, &flags)) {
+        return -1;
+    }
     attrs->smb_disposition = (flags & 0x01) ? 1 : 0;
     attrs->smb_attr_mask  |= SMB_ATTR_DISPOSITION;
+    return 0;
 } /* chimera_smb_parse_disposition_info_ex */
 
-static inline void
+static inline int
 chimera_smb_parse_position_info(
     struct evpl_iovec_cursor *cursor,
     struct chimera_smb_attrs *attrs)
 {
-    evpl_iovec_cursor_get_uint64(cursor, &attrs->smb_position);
+    if (evpl_iovec_cursor_try_get_uint64(cursor, &attrs->smb_position)) {
+        return -1;
+    }
     attrs->smb_attr_mask |= SMB_ATTR_POSITION;
+    return 0;
 } /* chimera_smb_parse_position_info */
 
-static inline void
+static inline int
 chimera_smb_parse_end_of_file_info(
     struct evpl_iovec_cursor *cursor,
     struct chimera_smb_attrs *attrs)
 {
-    evpl_iovec_cursor_get_uint64(cursor, &attrs->smb_size);
+    if (evpl_iovec_cursor_try_get_uint64(cursor, &attrs->smb_size)) {
+        return -1;
+    }
     attrs->smb_attr_mask |= SMB_ATTR_SIZE;
+    return 0;
 } /* chimera_smb_parse_end_of_file_info */
 
 

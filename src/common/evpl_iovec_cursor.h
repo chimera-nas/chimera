@@ -6,6 +6,7 @@
 
 #include <string.h>
 #include <stdlib.h>
+#include <limits.h>
 
 #include "evpl/evpl.h"
 
@@ -14,6 +15,12 @@ struct evpl_iovec_cursor {
     int                offset;
     int                consumed;
     int                niov;
+    /* Soft upper bound (in bytes, measured against `consumed`) on how far the
+     * checked `_try_*` readers below may advance.  INT_MAX means "unbounded",
+     * which is the behaviour every non-SMB caller relies on.  The SMB ingest
+     * path clamps this to the current message's window so a malformed request
+     * cannot read into the next compound element or off the received segment. */
+    int                limit;
 };
 
 
@@ -27,7 +34,30 @@ evpl_iovec_cursor_init(
     cursor->niov     = niov;
     cursor->consumed = 0;
     cursor->offset   = 0;
+    cursor->limit    = INT_MAX;
 } /* evpl_iovec_cursor_init */
+
+/*
+ * Clamp the checked readers to at most `length` bytes beyond the current
+ * `consumed` position.  Used by the SMB request parser to fence each compound
+ * element to its own [start,end) window.
+ */
+static inline void
+evpl_iovec_cursor_set_limit(
+    struct evpl_iovec_cursor *cursor,
+    int                       length)
+{
+    cursor->limit = cursor->consumed + length;
+} /* evpl_iovec_cursor_set_limit */
+
+/* Bytes still readable within the current limit (never negative). */
+static inline int
+evpl_iovec_cursor_remaining(struct evpl_iovec_cursor *cursor)
+{
+    int rem = cursor->limit - cursor->consumed;
+
+    return rem > 0 ? rem : 0;
+} /* evpl_iovec_cursor_remaining */
 
 
 static inline int
@@ -210,6 +240,100 @@ evpl_iovec_cursor_get_uint64(
     evpl_iovec_cursor_skip(cursor, (8 - (cursor->consumed & 7)) & 7);
     evpl_iovec_cursor_copy(cursor, value, sizeof(uint64_t));
 } /* evpl_iovec_cursor_get_uint64 */
+
+/*
+ * Checked variants of copy/skip/get_uintN for parsing untrusted (client) data.
+ *
+ * Unlike the helpers above -- which abort() the whole (threaded) process on a
+ * short read -- these return -1 when the requested bytes would exceed either the
+ * available iovec data or the active limit, so the caller can reject the request
+ * cleanly.  On failure the caller abandons the request, so any partial cursor
+ * advancement is harmless.  The limit defaults to INT_MAX, so a cursor that never
+ * calls set_limit behaves like an ordinary bounds-by-data read.
+ */
+static inline int
+evpl_iovec_cursor_try_copy(
+    struct evpl_iovec_cursor *cursor,
+    void                     *out,
+    int                       length)
+{
+    if (length < 0 || evpl_iovec_cursor_remaining(cursor) < length) {
+        return -1;
+    }
+    return evpl_iovec_cursor_get_blob(cursor, out, length);
+} /* evpl_iovec_cursor_try_copy */
+
+static inline int
+evpl_iovec_cursor_try_skip(
+    struct evpl_iovec_cursor *cursor,
+    int                       length)
+{
+    if (length < 0 || evpl_iovec_cursor_remaining(cursor) < length) {
+        return -1;
+    }
+
+    while (length && cursor->niov) {
+        int chunk = cursor->iov->length - cursor->offset;
+
+        if (length < chunk) {
+            chunk = length;
+        }
+
+        length -= chunk;
+
+        cursor->offset   += chunk;
+        cursor->consumed += chunk;
+
+        if (cursor->offset == cursor->iov->length) {
+            cursor->iov++;
+            cursor->niov--;
+            cursor->offset = 0;
+        }
+    }
+
+    return length ? -1 : 0;
+} /* evpl_iovec_cursor_try_skip */
+
+static inline int
+evpl_iovec_cursor_try_get_uint8(
+    struct evpl_iovec_cursor *cursor,
+    uint8_t                  *value)
+{
+    return evpl_iovec_cursor_try_copy(cursor, value, sizeof(uint8_t));
+} /* evpl_iovec_cursor_try_get_uint8 */
+
+static inline int
+evpl_iovec_cursor_try_get_uint16(
+    struct evpl_iovec_cursor *cursor,
+    uint16_t                 *value)
+{
+    if (evpl_iovec_cursor_try_skip(cursor, (2 - (cursor->consumed & 1)) & 1)) {
+        return -1;
+    }
+    return evpl_iovec_cursor_try_copy(cursor, value, sizeof(uint16_t));
+} /* evpl_iovec_cursor_try_get_uint16 */
+
+static inline int
+evpl_iovec_cursor_try_get_uint32(
+    struct evpl_iovec_cursor *cursor,
+    uint32_t                 *value)
+{
+    if (evpl_iovec_cursor_try_skip(cursor, (4 - (cursor->consumed & 3)) & 3)) {
+        return -1;
+    }
+    return evpl_iovec_cursor_try_copy(cursor, value, sizeof(uint32_t));
+} /* evpl_iovec_cursor_try_get_uint32 */
+
+static inline int
+evpl_iovec_cursor_try_get_uint64(
+    struct evpl_iovec_cursor *cursor,
+    uint64_t                 *value)
+{
+    if (evpl_iovec_cursor_try_skip(cursor, (8 - (cursor->consumed & 7)) & 7)) {
+        return -1;
+    }
+    return evpl_iovec_cursor_try_copy(cursor, value, sizeof(uint64_t));
+} /* evpl_iovec_cursor_try_get_uint64 */
 
 static inline void
 evpl_iovec_cursor_append_uint8(

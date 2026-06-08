@@ -69,8 +69,11 @@ chimera_smb_parse_flush(
         return -1;
     }
 
-    evpl_iovec_cursor_get_uint64(request_cursor, &request->flush.file_id.pid);
-    evpl_iovec_cursor_get_uint64(request_cursor, &request->flush.file_id.vid);
+    if (unlikely(evpl_iovec_cursor_try_get_uint64(request_cursor, &request->flush.file_id.pid) ||
+                 evpl_iovec_cursor_try_get_uint64(request_cursor, &request->flush.file_id.vid))) {
+        chimera_smb_error("Received SMB2 FLUSH request truncated in fixed body");
+        return chimera_smb_parse_reject(request, SMB2_STATUS_INVALID_PARAMETER);
+    }
 
     return 0;
 } /* chimera_smb_parse_ioctl */

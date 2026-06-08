@@ -55,6 +55,15 @@ target_include_directories(phase0_contexts_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME chimera/server/smb/phase0_contexts_test
     COMMAND ${CMAKE_CURRENT_BINARY_DIR}/phase0_contexts_test)
 
+# SMB2 request-parse hardening: checked cursor primitives, safe seek, and
+# CREATE-context bounds arithmetic against malformed/adversarial input.
+add_executable(smb_harden_test smb_harden_test.c)
+target_link_libraries(smb_harden_test chimera_server chimera_smb)
+target_include_directories(smb_harden_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
+add_test(NAME chimera/server/smb/harden_test
+    COMMAND ${CMAKE_CURRENT_BINARY_DIR}/smb_harden_test)
+
 # SMB3 transport-compression codec unit test (pure MS-XCA Plain LZ77)
 add_executable(smb_compress_test smb_compress_test.c)
 target_link_libraries(smb_compress_test chimera_server chimera_smb)
