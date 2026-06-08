@@ -179,7 +179,7 @@ ip netns exec "${NETNS_NAME}" env \
 CHIMERA_PID=$!
 
 # Wait for SMB port to be ready
-for i in $(seq 1 30); do
+for i in $(seq 1 150); do
     if ip netns exec "${NETNS_NAME}" bash -c "echo > /dev/tcp/10.0.0.1/445" 2>/dev/null; then
         break
     fi
@@ -187,7 +187,7 @@ for i in $(seq 1 30); do
         echo "chimera daemon exited prematurely"
         exit 1
     fi
-    sleep 0.1
+    sleep 0.02
 done
 
 # Build the test command to run inside the VM

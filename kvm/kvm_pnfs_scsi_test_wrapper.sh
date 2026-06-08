@@ -98,9 +98,9 @@ WWN="5000c500deadbeef"
 cleanup() {
     if [ -n "$MDS_PID" ]; then
         kill "$MDS_PID" 2>/dev/null || true
-        for i in $(seq 1 30); do
+        for i in $(seq 1 150); do
             kill -0 "$MDS_PID" 2>/dev/null || break
-            sleep 0.1
+            sleep 0.02
         done
         kill -9 "$MDS_PID" 2>/dev/null || true
         wait "$MDS_PID" 2>/dev/null || true
@@ -161,7 +161,7 @@ EOF
 
 wait_for_port() {
     local ip="$1" port="$2" pid="$3"
-    for i in $(seq 1 50); do
+    for i in $(seq 1 250); do
         if ip netns exec "${NETNS_NAME}" bash -c "echo > /dev/tcp/${ip}/${port}" 2>/dev/null; then
             return 0
         fi
@@ -169,7 +169,7 @@ wait_for_port() {
             echo "chimera daemon (pid $pid) exited prematurely" >&2
             return 1
         fi
-        sleep 0.1
+        sleep 0.02
     done
     echo "timed out waiting for ${ip}:${port}" >&2
     return 1

@@ -68,9 +68,9 @@ cleanup() {
     if [ -n "$CHIMERA_PID" ]; then
         kill "$CHIMERA_PID" 2>/dev/null || true
         # Give chimera up to 3 seconds to shut down cleanly
-        for i in $(seq 1 30); do
+        for i in $(seq 1 150); do
             kill -0 "$CHIMERA_PID" 2>/dev/null || break
-            sleep 0.1
+            sleep 0.02
         done
         # Force kill if still alive
         if kill -0 "$CHIMERA_PID" 2>/dev/null; then
@@ -191,7 +191,7 @@ ip netns exec "${NETNS_NAME}" "$CHIMERA_BINARY" -c "$CONFIG_FILE" &
 CHIMERA_PID=$!
 
 # Wait for NFS port to be ready
-for i in $(seq 1 30); do
+for i in $(seq 1 150); do
     if ip netns exec "${NETNS_NAME}" bash -c "echo > /dev/tcp/10.0.0.1/2049" 2>/dev/null; then
         break
     fi
@@ -199,7 +199,7 @@ for i in $(seq 1 30); do
         echo "chimera daemon exited prematurely"
         exit 1
     fi
-    sleep 0.1
+    sleep 0.02
 done
 
 # Build the test command to run inside the VM
