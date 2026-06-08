@@ -322,6 +322,8 @@ chimera_s3_dispatch_callback(
                 chimera_s3_list_multipart_uploads(evpl, thread, s3_request);
             } else if (s3_request->has_upload_id) {
                 chimera_s3_list_parts(evpl, thread, s3_request);
+            } else if (s3_request->has_attributes) {
+                chimera_s3_get_object_attributes(evpl, thread, s3_request);
             } else if (s3_request->is_list) {
                 chimera_s3_list(evpl, thread, s3_request);
             } else {
@@ -411,6 +413,7 @@ s3_server_dispatch(
     s3_request->has_versions       = 0;
     s3_request->has_part_number    = 0;
     s3_request->op_bucket          = 0;
+    s3_request->has_attributes     = 0;
     s3_request->chunked            = 0;
     s3_request->responded          = 0;
     s3_request->query_upload_idlen = 0;
@@ -593,6 +596,8 @@ s3_server_dispatch(
                     prefix_len            = value_len;
                 } else if (key_len == 8 && memcmp(key_start, "max-keys", 8) == 0) {
                     max_keys = atoi(value_start);
+                } else if (key_len == 10 && memcmp(key_start, "attributes", 10) == 0) {
+                    s3_request->has_attributes = 1;
                 }
 
                 if (*p == '&') {

@@ -5,11 +5,13 @@
 #include <stdio.h>
 #include <time.h>
 #include <sys/stat.h>
+#include "common/format.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 #include "s3_internal.h"
 #include "s3_etag.h"
+#include "s3_procs.h"
 
 static void
 chimera_s3_get_finish(struct chimera_s3_request *request)
@@ -279,3 +281,104 @@ chimera_s3_get(
                        chimera_s3_get_lookup_callback,
                        request);
 } /* chimera_s3_get */
+
+/*
+ * GetObjectAttributes: GET /bucket/<key>?attributes with an
+ * x-amz-object-attributes header. Returns a small XML document carrying the
+ * attributes the filesystem can supply trivially (ETag, ObjectSize, and a
+ * static StorageClass). Checksum and ObjectParts are not implemented and are
+ * intentionally omitted; clients that request only those attributes still get
+ * a well-formed 200 response.
+ */
+static void
+chimera_s3_get_object_attributes_lookup_callback(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct chimera_s3_request       *request = private_data;
+    struct chimera_server_s3_thread *thread  = request->thread;
+    struct evpl                     *evpl    = thread->evpl;
+    uint64_t                         etag[2];
+    char                             etag_hex[80];
+    char                            *bp, *body_start;
+
+    if (error_code) {
+        request->status    = CHIMERA_S3_STATUS_NO_SUCH_KEY;
+        request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
+        if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
+            s3_server_respond(evpl, request);
+        }
+        return;
+    }
+
+    /* Mirror the regular-object guard in chimera_s3_get_lookup_callback: only
+     * a regular file with the attributes the ETag is built from is an object. */
+    {
+        const uint64_t need = CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_SIZE |
+            CHIMERA_VFS_ATTR_MTIME;
+        int            is_dir = (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
+            (attr->va_mode & S_IFMT) == S_IFDIR;
+
+        if (is_dir || (attr->va_set_mask & need) != need) {
+            request->status    = CHIMERA_S3_STATUS_NO_SUCH_KEY;
+            request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
+            if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
+                s3_server_respond(evpl, request);
+            }
+            return;
+        }
+    }
+
+    /* ETag without surrounding quotes (the GetObjectAttributes API returns the
+     * raw value, unlike the HTTP ETag header). */
+    chimera_s3_compute_etag(etag, attr);
+    format_hex(etag_hex, sizeof(etag_hex), etag, sizeof(etag));
+
+    chimera_s3_attach_last_modified(request->http_request, attr);
+
+    evpl_iovec_alloc(evpl, 4096, 0, 1, 0, &request->multipart.response);
+
+    bp = body_start = evpl_iovec_data(&request->multipart.response);
+
+    bp += sprintf(bp, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+    bp += sprintf(bp, "<GetObjectAttributesOutput xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n");
+    bp += sprintf(bp, "  <ETag>%s</ETag>\n", etag_hex);
+    bp += sprintf(bp, "  <StorageClass>STANDARD</StorageClass>\n");
+    bp += sprintf(bp, "  <ObjectSize>%ld</ObjectSize>\n", (long) attr->va_size);
+    bp += sprintf(bp, "</GetObjectAttributesOutput>\n");
+
+    evpl_iovec_set_length(&request->multipart.response, bp - body_start);
+    evpl_http_request_add_datav(request->http_request,
+                                &request->multipart.response, 1);
+
+    request->file_length      = bp - body_start;
+    request->file_real_length = request->file_length;
+    request->file_offset      = 0;
+    request->is_list          = 1; /* triggers application/xml Content-Type */
+    request->status           = CHIMERA_S3_STATUS_OK;
+    request->vfs_state        = CHIMERA_S3_VFS_STATE_COMPLETE;
+
+    if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
+        s3_server_respond(evpl, request);
+    }
+} /* chimera_s3_get_object_attributes_lookup_callback */
+
+void
+chimera_s3_get_object_attributes(
+    struct evpl                     *evpl,
+    struct chimera_server_s3_thread *thread,
+    struct chimera_s3_request       *request)
+{
+    request->io_pending = 0;
+
+    chimera_vfs_lookup(thread->vfs, &thread->shared->cred,
+                       request->bucket_fh,
+                       request->bucket_fhlen,
+                       request->path,
+                       request->path_len,
+                       CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,
+                       CHIMERA_VFS_LOOKUP_FOLLOW,
+                       chimera_s3_get_object_attributes_lookup_callback,
+                       request);
+} /* chimera_s3_get_object_attributes */
