@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -41,12 +41,16 @@ chimera_posix_rename(
     int                             source_path_len;
     int                             dest_path_len;
 
+    source_path_len = chimera_posix_check_path(oldpath);
+    dest_path_len   = chimera_posix_check_path(newpath);
+    if (source_path_len < 0 || dest_path_len < 0) {
+        return -1;
+    }
+
     chimera_posix_completion_init(&comp, &req);
 
-    source_path_len = strlen(oldpath);
-    dest_path_len   = strlen(newpath);
-    source_slash    = rindex(oldpath, '/');
-    dest_slash      = rindex(newpath, '/');
+    source_slash = rindex(oldpath, '/');
+    dest_slash   = rindex(newpath, '/');
 
     req.opcode                   = CHIMERA_CLIENT_OP_RENAME;
     req.rename.callback          = chimera_posix_rename_callback;

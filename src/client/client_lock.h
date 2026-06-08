@@ -42,7 +42,7 @@ chimera_dispatch_lock(
 {
     chimera_vfs_lock(
         thread->vfs_thread,
-        &thread->client->cred,
+        chimera_client_req_cred(request),
         request->lock.handle,
         request->lock.whence,
         request->lock.offset,

@@ -37,6 +37,24 @@ void
 chimera_posix_shutdown(
     void);
 
+/* Override the effective credential used for subsequent operations on the
+ * calling thread.  Pass NULL to clear the override and fall back to the
+ * client-global credential.  The credential is copied. */
+void
+chimera_posix_set_cred(
+    const struct chimera_vfs_cred *cred);
+
+void
+chimera_posix_clear_cred(
+    void);
+
+/* Set the calling thread's file-mode creation mask (mirrors umask(2)); returns
+ * the previous mask.  Applied to mode in the create paths (open O_CREAT, mkdir,
+ * mknod, ...).  Until first set, no umask is applied. */
+mode_t
+chimera_posix_umask(
+    mode_t mask);
+
 int
 chimera_posix_mount(
     const char *mount_path,
@@ -526,6 +544,30 @@ chimera_posix_fchownat(
     uid_t       owner,
     gid_t       group,
     int         flags);
+
+// Timestamp functions
+int
+chimera_posix_utimensat(
+    int                   dirfd,
+    const char           *pathname,
+    const struct timespec times[2],
+    int                   flags);
+
+int
+chimera_posix_futimens(
+    int                   fd,
+    const struct timespec times[2]);
+
+// Configurable pathname limits (pathconf(3)/fpathconf(3))
+long
+chimera_posix_pathconf(
+    const char *path,
+    int         name);
+
+long
+chimera_posix_fpathconf(
+    int fd,
+    int name);
 
 // Truncate functions
 int

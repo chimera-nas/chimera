@@ -35,7 +35,7 @@ chimera_dispatch_rename(
 
     chimera_vfs_rename(
         thread->vfs_thread,
-        &thread->client->cred,
+        chimera_client_req_cred(request),
         thread->client->root_fh,
         thread->client->root_fh_len,
         request->rename.source_path,

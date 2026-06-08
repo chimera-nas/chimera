@@ -28,12 +28,10 @@ chimera_dispatch_open(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
-    request->open.set_attr.va_req_mask = 0;
-    request->open.set_attr.va_set_mask = 0;
-
+    /* set_attr (creation mode) is initialized by the caller. */
     chimera_vfs_open(
         thread->vfs_thread,
-        &thread->client->cred,
+        chimera_client_req_cred(request),
         thread->client->root_fh,
         thread->client->root_fh_len,
         request->open.path,
@@ -75,12 +73,10 @@ chimera_dispatch_open_at(
     struct chimera_vfs_open_handle *parent_handle,
     struct chimera_client_request  *request)
 {
-    request->open.set_attr.va_req_mask = 0;
-    request->open.set_attr.va_set_mask = 0;
-
+    /* set_attr (creation mode) is initialized by the caller. */
     chimera_vfs_open_at(
         thread->vfs_thread,
-        &thread->client->cred,
+        chimera_client_req_cred(request),
         parent_handle,
         request->open.path,
         request->open.path_len,

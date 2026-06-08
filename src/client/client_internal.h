@@ -71,6 +71,14 @@ struct chimera_client_request {
 
     int                                heap_allocated;
 
+    /* Per-request credential override.  When has_cred is set, req_cred is used
+     * for VFS authorization instead of the client-global credential.  This lets
+     * a single client issue operations on behalf of different users (e.g. the
+     * POSIX layer switching uid/gid per call).  Default (has_cred == 0) falls
+     * back to thread->client->cred, so existing callers are unaffected. */
+    int                                has_cred;
+    struct chimera_vfs_cred            req_cred;
+
     ssize_t                            sync_result;
     struct chimera_vfs_open_handle    *sync_open_handle;
     struct chimera_stat                sync_stat;
@@ -400,6 +408,17 @@ struct chimera_client_thread {
     struct chimera_vfs_thread     *vfs_thread;
     struct chimera_client_request *free_requests;
 } __attribute__((aligned(64)));
+
+/*
+ * Return the effective credential for a request: the per-request override when
+ * present, otherwise the client-global credential.  All VFS dispatch paths use
+ * this so that a per-call credential transparently overrides the default.
+ */
+static inline const struct chimera_vfs_cred *
+chimera_client_req_cred(const struct chimera_client_request *request)
+{
+    return request->has_cred ? &request->req_cred : &request->thread->client->cred;
+} /* chimera_client_req_cred */
 
 static inline struct chimera_client_request *
 chimera_client_request_alloc(struct chimera_client_thread *thread)

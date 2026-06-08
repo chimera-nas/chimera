@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -37,10 +37,14 @@ chimera_posix_rmdir(const char *path)
     const char                     *slash;
     int                             path_len;
 
+    path_len = chimera_posix_check_path(path);
+    if (path_len < 0) {
+        return -1;
+    }
+
     chimera_posix_completion_init(&comp, &req);
 
-    path_len = strlen(path);
-    slash    = rindex(path, '/');
+    slash = rindex(path, '/');
 
     req.opcode              = CHIMERA_CLIENT_OP_REMOVE;
     req.remove.callback     = chimera_posix_rmdir_callback;

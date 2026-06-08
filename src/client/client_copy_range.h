@@ -36,7 +36,7 @@ chimera_dispatch_copy_range(
 {
     chimera_vfs_copy_range(
         thread->vfs_thread,
-        &thread->client->cred,
+        chimera_client_req_cred(request),
         request->copy_range.src_handle,
         request->copy_range.src_offset,
         request->copy_range.dst_handle,
