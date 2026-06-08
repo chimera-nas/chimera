@@ -47,6 +47,10 @@ chimera_s3_status_to_string(enum chimera_s3_status status)
             return "Malformed XML";
         case CHIMERA_S3_STATUS_NO_CONTENT:
             return "No Content";
+        case CHIMERA_S3_STATUS_BUCKET_NOT_EMPTY:
+            return "Bucket Not Empty";
+        case CHIMERA_S3_STATUS_METHOD_NOT_ALLOWED:
+            return "Method Not Allowed";
         case CHIMERA_S3_STATUS_NOT_IMPLEMENTED:
             return "Not Implemented";
         default:

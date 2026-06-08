@@ -68,3 +68,27 @@ void
 chimera_s3_delete_objects_body_done(
     struct evpl               *evpl,
     struct chimera_s3_request *request);
+
+void
+chimera_s3_list_buckets(
+    struct evpl                     *evpl,
+    struct chimera_server_s3_thread *thread,
+    struct chimera_s3_request       *request);
+
+void
+chimera_s3_create_bucket(
+    struct evpl                     *evpl,
+    struct chimera_server_s3_thread *thread,
+    struct chimera_s3_request       *request);
+
+void
+chimera_s3_delete_bucket(
+    struct evpl                     *evpl,
+    struct chimera_server_s3_thread *thread,
+    struct chimera_s3_request       *request);
+
+void
+chimera_s3_head_bucket(
+    struct evpl                     *evpl,
+    struct chimera_server_s3_thread *thread,
+    struct chimera_s3_request       *request);

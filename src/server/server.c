@@ -1483,6 +1483,20 @@ chimera_server_create_bucket(
 } /* chimera_server_create_bucket */
 
 SYMBOL_EXPORT int
+chimera_server_set_s3_bucket_root(
+    struct chimera_server *server,
+    const char            *bucket_root_path)
+{
+    if (!server->s3_shared) {
+        return -1;
+    }
+
+    chimera_s3_set_bucket_root(server->s3_shared, bucket_root_path);
+
+    return 0;
+} /* chimera_server_set_s3_bucket_root */
+
+SYMBOL_EXPORT int
 chimera_server_create_share(
     struct chimera_server *server,
     const char            *share_name,

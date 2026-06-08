@@ -79,20 +79,39 @@ chimera_s3_list_find_callback(
 
     chimera_s3_etag_hex(etag, sizeof(etag), attr);
 
-    chimera_s3_list_append(&request->list.rp, " <Contents>\n");
+    /* chimera_vfs_find roots every walked path with '/' (it joins an empty
+     * prefix with "/name"); S3 object keys must NOT carry a leading slash, or
+     * clients delete/address the wrong key. Strip it from the find-relative
+     * portion before emitting. */
+    while (pathlen > 0 && path[0] == '/') {
+        path++;
+        pathlen--;
+    }
+
+    /* ListObjectVersions (?versions) wraps each object in <Version> with a
+     * synthetic "null" version id; chimera does not implement S3 versioning, so
+     * every object is its own single, latest, null version. Plain ListObjects
+     * uses <Contents>. */
+    chimera_s3_list_append(&request->list.rp,
+                           request->list.versions ? " <Version>\n" : " <Contents>\n");
 
     if (request->list.base_path_len) {
-        chimera_s3_list_append(&request->list.rp, "  <Key>/%.*s%.*s</Key>\n",
+        chimera_s3_list_append(&request->list.rp, "  <Key>%.*s/%.*s</Key>\n",
                                request->list.base_path_len, request->list.base_path,
                                pathlen, path);
     } else {
         chimera_s3_list_append(&request->list.rp, "  <Key>%.*s</Key>\n", pathlen, path);
     }
+    if (request->list.versions) {
+        chimera_s3_list_append(&request->list.rp, "  <VersionId>null</VersionId>\n");
+        chimera_s3_list_append(&request->list.rp, "  <IsLatest>true</IsLatest>\n");
+    }
     chimera_s3_list_append(&request->list.rp, "  <LastModified>%s</LastModified>\n", date);
     chimera_s3_list_append(&request->list.rp, "  <ETag>%s</ETag>\n", etag);
     chimera_s3_list_append(&request->list.rp, "  <Size>%lu</Size>\n", attr->va_size);
     chimera_s3_list_append(&request->list.rp, "  <StorageClass>STANDARD</StorageClass>\n");
-    chimera_s3_list_append(&request->list.rp, " </Contents>\n");
+    chimera_s3_list_append(&request->list.rp,
+                           request->list.versions ? " </Version>\n" : " </Contents>\n");
 
     return 0;
 } /* chimera_s3_list_find_callback */
@@ -115,15 +134,29 @@ chimera_s3_list_find_complete(
     suffix = evpl_iovec_data(&suffix_iov);
 
     chimera_s3_list_append(&prefix, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
-    chimera_s3_list_append(&prefix, "<ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n");
-    chimera_s3_list_append(&prefix, " <Name>%.*s</Name>\n", request->bucket_namelen, request->bucket_name);
-    chimera_s3_list_append(&prefix, " <Prefix>%.*s</Prefix>\n", request->list.prefix_len, request->list.prefix);
-    //chimera_s3_list_append(&prefix, " <Marker></Marker>\n");
-    chimera_s3_list_append(&prefix, " <MaxKeys>%d</MaxKeys>\n", request->list.max_keys);
-    //chimera_s3_list_append(&prefix, " <Delimiter>/</Delimiter>\n");
-    chimera_s3_list_append(&prefix, " <IsTruncated>false</IsTruncated>\n");
 
-    chimera_s3_list_append(&suffix, "</ListBucketResult>\n");
+    if (request->list.versions) {
+        chimera_s3_list_append(&prefix,
+                               "<ListVersionsResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n");
+        chimera_s3_list_append(&prefix, " <Name>%.*s</Name>\n", request->bucket_namelen, request->bucket_name);
+        chimera_s3_list_append(&prefix, " <Prefix>%.*s</Prefix>\n", request->list.prefix_len, request->list.prefix);
+        chimera_s3_list_append(&prefix, " <KeyMarker></KeyMarker>\n");
+        chimera_s3_list_append(&prefix, " <VersionIdMarker></VersionIdMarker>\n");
+        chimera_s3_list_append(&prefix, " <MaxKeys>%d</MaxKeys>\n", request->list.max_keys);
+        chimera_s3_list_append(&prefix, " <IsTruncated>false</IsTruncated>\n");
+    } else {
+        chimera_s3_list_append(&prefix,
+                               "<ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\n");
+        chimera_s3_list_append(&prefix, " <Name>%.*s</Name>\n", request->bucket_namelen, request->bucket_name);
+        chimera_s3_list_append(&prefix, " <Prefix>%.*s</Prefix>\n", request->list.prefix_len, request->list.prefix);
+        //chimera_s3_list_append(&prefix, " <Marker></Marker>\n");
+        chimera_s3_list_append(&prefix, " <MaxKeys>%d</MaxKeys>\n", request->list.max_keys);
+        //chimera_s3_list_append(&prefix, " <Delimiter>/</Delimiter>\n");
+        chimera_s3_list_append(&prefix, " <IsTruncated>false</IsTruncated>\n");
+    }
+
+    chimera_s3_list_append(&suffix, request->list.versions ?
+                           "</ListVersionsResult>\n" : "</ListBucketResult>\n");
 
     evpl_iovec_set_length(&prefix_iov, prefix - (char *) evpl_iovec_data(&prefix_iov));
     evpl_iovec_set_length(&suffix_iov, suffix - (char *) evpl_iovec_data(&suffix_iov));
