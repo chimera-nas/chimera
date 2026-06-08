@@ -423,6 +423,51 @@ chimera_smb_create_gen_open_file(
     open_file->stream_name_len = 0;
     open_file->base_fh_len     = 0;
 
+    /* MS-SMB2 3.3.5.9.16: an AppInstanceId failover replaces a prior open held
+     * under the same AppInstanceId on another connection.  It must run BEFORE the
+     * phase-1 batch break below, because the failover force-closes that prior
+     * open SILENTLY -- if the break fired first the doomed open would receive a
+     * real OPLOCK_BREAK (smb2.durable-v2-open app-instance expects break count 0).
+     * Decision > 0 force-closes the prior open and lets this CREATE proceed;
+     * decision < 0 rejects this CREATE with FILE_FORCED_CLOSED. */
+    if (type == CHIMERA_SMB_OPEN_FILE_TYPE_FILE && tree->share && oh &&
+        (request->create.ctx_present_mask & CHIMERA_SMB_CREATE_CTX_APP)) {
+        struct chimera_vfs_state      *vfs_state  = thread->vfs_thread->vfs->vfs_state;
+        struct chimera_vfs_file_state *file_state =
+            chimera_vfs_state_get(vfs_state, oh->fh, oh->fh_len, oh->fh_hash, true);
+
+        if (file_state) {
+            struct chimera_smb_open_file *match    = NULL;
+            int                           decision = 0;
+
+            pthread_mutex_lock(&file_state->lock);
+            for (struct chimera_vfs_lease *l = file_state->share_resvs;
+                 l; l = l->next) {
+                struct chimera_smb_open_file *of =
+                    (struct chimera_smb_open_file *) l->owner.cb_private;
+                int                           d = chimera_smb_app_instance_decision(request, of);
+                if (d != 0) {
+                    match    = of;
+                    decision = d;
+                    break;
+                }
+            }
+            pthread_mutex_unlock(&file_state->lock);
+
+            chimera_vfs_state_put(vfs_state, file_state);
+
+            if (decision < 0) {
+                /* Reject: leave the existing open intact. */
+                open_file->handle = NULL;
+                chimera_smb_open_file_free(thread, open_file);
+                request->create.force_close_status = SMB2_STATUS_FILE_FORCED_CLOSED;
+                return NULL;
+            } else if (decision > 0) {
+                chimera_smb_app_instance_force_close(thread, match);
+            }
+        }
+    }
+
     /* A *batch* (handle-caching) oplock breaks BEFORE the share-mode check:
      * the holder may close its deferred handle in response, after which the
      * sharing conflict disappears.  Fire that break here so it happens even
@@ -556,44 +601,9 @@ chimera_smb_create_gen_open_file(
             open_file->share_lease.has_break_skip_key = 0;
         }
 
-        /* AppInstanceId failover (MS-SMB2 3.3.5.9.7 / 3.3.5.9.16).  Processed
-         * before the share check (the spec-pure ordering): scan the file's
-         * existing SHARE reservations for an open carrying the same
-         * AppInstanceId on a different connection and apply the
-         * AppInstanceVersion rule.  This must run even when the new open would
-         * not otherwise conflict (e.g. fully-shared opens), since the rule may
-         * still mandate a force-close or a STATUS_FILE_FORCED_CLOSED reject.
-         * The matching open is collected under file->lock; the force-close /
-         * reject is then performed outside it to keep the lock ordering. */
-        if (request->create.ctx_present_mask & CHIMERA_SMB_CREATE_CTX_APP) {
-            struct chimera_smb_open_file *match    = NULL;
-            int                           decision = 0;
-
-            pthread_mutex_lock(&file_state->lock);
-            for (struct chimera_vfs_lease *l = file_state->share_resvs;
-                 l; l = l->next) {
-                struct chimera_smb_open_file *of =
-                    (struct chimera_smb_open_file *) l->owner.cb_private;
-                int                           d = chimera_smb_app_instance_decision(request, of);
-                if (d != 0) {
-                    match    = of;
-                    decision = d;
-                    break;
-                }
-            }
-            pthread_mutex_unlock(&file_state->lock);
-
-            if (decision < 0) {
-                /* Reject: leave the existing open intact. */
-                chimera_vfs_state_put(vfs_state, file_state);
-                open_file->handle = NULL;
-                chimera_smb_open_file_free(thread, open_file);
-                request->create.force_close_status = SMB2_STATUS_FILE_FORCED_CLOSED;
-                return NULL;
-            } else if (decision > 0) {
-                chimera_smb_app_instance_force_close(thread, match);
-            }
-        }
+        /* AppInstanceId failover (MS-SMB2 3.3.5.9.7 / 3.3.5.9.16) was already
+         * resolved before the phase-1 break above (so the displaced open is
+         * force-closed silently); nothing to do here. */
 
         result = chimera_vfs_state_try_insert(vfs_state, file_state,
                                               &open_file->share_lease, &conflict);

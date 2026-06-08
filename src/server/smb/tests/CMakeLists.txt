@@ -1297,6 +1297,7 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.durable-v2-delay.durable_v2_reconnect_delay
     smb2.durable-v2-delay.durable_v2_reconnect_delay_msec
     # smb2.durable-v2-open
+    smb2.durable-v2-open.app-instance
     # smb2.durable-v2-regressions
     smb2.durable-v2-regressions.durable_v2_reconnect_bug15624
     # smb2.fileid
@@ -2198,6 +2199,7 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.durable-v2-delay.durable_v2_reconnect_delay
     smb2.durable-v2-delay.durable_v2_reconnect_delay_msec
     # smb2.durable-v2-open
+    smb2.durable-v2-open.app-instance
     # smb2.durable-v2-regressions
     smb2.durable-v2-regressions.durable_v2_reconnect_bug15624
     # smb2.fileid
@@ -2523,6 +2525,7 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.durable-v2-delay.durable_v2_reconnect_delay
     smb2.durable-v2-delay.durable_v2_reconnect_delay_msec
     # smb2.durable-v2-open
+    smb2.durable-v2-open.app-instance
     # smb2.durable-v2-regressions
     smb2.durable-v2-regressions.durable_v2_reconnect_bug15624
     # smb2.fileid
@@ -2848,6 +2851,7 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     smb2.durable-v2-delay.durable_v2_reconnect_delay
     smb2.durable-v2-delay.durable_v2_reconnect_delay_msec
     # smb2.durable-v2-open
+    smb2.durable-v2-open.app-instance
     # smb2.durable-v2-regressions
     smb2.durable-v2-regressions.durable_v2_reconnect_bug15624
     # smb2.fileid
