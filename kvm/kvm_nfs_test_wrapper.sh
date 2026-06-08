@@ -33,13 +33,12 @@ BACKEND=$1; shift
 NFS_VERSION=$1; shift
 TEST_CMD_ARG="$*"
 
-# Use initrd if present alongside vmlinuz
-INITRD="$(dirname "$VMLINUZ")/initrd"
-if [ -f "$INITRD" ]; then
-    QEMU_INITRD="-initrd $INITRD"
-else
-    QEMU_INITRD=""
-fi
+# Boot with no initrd: every kernel in the KVM image matrix builds the virtio
+# block/net drivers in, so the kernel mounts the virtio root disk directly.
+# Skipping the ~63MB initrd unpack saves ~0.9s/test.  (See kvm/CMakeLists.txt:
+# the 22.04 generic kernel, which needs an initrd, was dropped from the matrix
+# in favor of its HWE kernel for exactly this reason.)
+QEMU_INITRD=""
 
 NETNS_NAME="kvm_nfs_$$_$(date +%s%N)"
 TAP_NAME="tap_$$"

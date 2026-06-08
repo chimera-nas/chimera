@@ -79,12 +79,12 @@ case "$TOPOLOGY" in
     *) echo "topology must be split or combined, got ${TOPOLOGY}" >&2; exit 1 ;;
 esac
 
-INITRD="$(dirname "$VMLINUZ")/initrd"
-if [ -f "$INITRD" ]; then
-    QEMU_INITRD="-initrd $INITRD"
-else
-    QEMU_INITRD=""
-fi
+# Boot with no initrd: every kernel in the KVM image matrix builds the virtio
+# block/net drivers in, so the kernel mounts the virtio root disk directly.
+# Skipping the ~63MB initrd unpack saves ~0.9s/test.  (See kvm/CMakeLists.txt:
+# the 22.04 generic kernel, which needs an initrd, was dropped from the matrix
+# in favor of its HWE kernel for exactly this reason.)
+QEMU_INITRD=""
 
 NETNS_NAME="kvm_pnfs_$$_$(date +%s%N)"
 TAP_NAME="tap_$$"
