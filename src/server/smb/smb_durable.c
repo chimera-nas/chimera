@@ -162,6 +162,93 @@ chimera_smb_durable_forget(
     }
 } /* chimera_smb_durable_forget */
 
+/* Fire-and-forget context for a delete-on-close unlink issued while a parked
+ * durable open is torn down.  Unlike the CLOSE path there is no request to
+ * complete, so the doc_info is copied here and freed in the final callback. */
+struct chimera_smb_durable_doc {
+    struct chimera_vfs_thread      *vfs_thread;
+    struct chimera_vfs_doc_info     doc_info;
+    struct chimera_vfs_open_handle *parent_handle;
+};
+
+static void
+chimera_smb_durable_doc_remove_cb(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *pre_attr,
+    struct chimera_vfs_attrs *post_attr,
+    void                     *private_data)
+{
+    struct chimera_smb_durable_doc *ctx = private_data;
+
+    if (error_code) {
+        chimera_smb_debug("durable delete-on-close: remove_at failed for '%.*s' (error %d)",
+                          ctx->doc_info.name_len, ctx->doc_info.name, error_code);
+    }
+    chimera_vfs_release(ctx->vfs_thread, ctx->parent_handle);
+    chimera_vfs_close(ctx->vfs_thread, ctx->doc_info.close_module,
+                      ctx->doc_info.close_private, ctx->doc_info.close_hash, NULL, NULL);
+    free(ctx);
+} /* chimera_smb_durable_doc_remove_cb */
+
+static void
+chimera_smb_durable_doc_open_parent_cb(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *oh,
+    void                           *private_data)
+{
+    struct chimera_smb_durable_doc *ctx = private_data;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_smb_debug("durable delete-on-close: open parent failed for '%.*s' (error %d)",
+                          ctx->doc_info.name_len, ctx->doc_info.name, error_code);
+        chimera_vfs_close(ctx->vfs_thread, ctx->doc_info.close_module,
+                          ctx->doc_info.close_private, ctx->doc_info.close_hash, NULL, NULL);
+        free(ctx);
+        return;
+    }
+    ctx->parent_handle = oh;
+    chimera_vfs_remove_at(ctx->vfs_thread, &ctx->doc_info.cred, oh,
+                          ctx->doc_info.name, ctx->doc_info.name_len, NULL, 0, 0, 0,
+                          chimera_smb_durable_doc_remove_cb, ctx);
+} /* chimera_smb_durable_doc_open_parent_cb */
+
+/*
+ * Release a parked durable open's VFS handle honoring delete-on-close: if the
+ * handle was delete-pending (a DELETE_ON_CLOSE durable handle whose last close
+ * is this teardown), the file is unlinked asynchronously (no request needed).
+ * Requires a live event-loop pump, so it must NOT be used on the shutdown drain.
+ */
+static void
+chimera_smb_durable_release_handle(
+    struct chimera_server_smb_thread *thread,
+    struct chimera_smb_open_file     *open_file)
+{
+    struct chimera_smb_durable_doc *ctx;
+    struct chimera_vfs_doc_info     doc_info;
+    int                             need_doc;
+
+    if (!open_file->handle) {
+        return;
+    }
+
+    need_doc          = chimera_vfs_release_doc(thread->vfs_thread, open_file->handle, &doc_info);
+    open_file->handle = NULL;
+
+    if (!need_doc || doc_info.parent_fh_len == 0) {
+        return;
+    }
+
+    ctx                = malloc(sizeof(*ctx));
+    ctx->vfs_thread    = thread->vfs_thread;
+    ctx->doc_info      = doc_info;
+    ctx->parent_handle = NULL;
+
+    chimera_vfs_open_fh(thread->vfs_thread, &ctx->doc_info.cred,
+                        ctx->doc_info.parent_fh, ctx->doc_info.parent_fh_len,
+                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
+                        chimera_smb_durable_doc_open_parent_cb, ctx);
+} /* chimera_smb_durable_release_handle */
+
 /* Purge a parked (disconnected) *durable* open by persistent id when a new,
  * conflicting open arrives: MS-SMB2 has the disconnected handle yield.  Tears
  * down its leases / share reservation / byte-range locks and VFS handle (the
@@ -196,10 +283,7 @@ chimera_smb_durable_purge_parked(
     }
 
     chimera_smb_open_file_drain_locks(thread, open_file);
-    if (open_file->handle) {
-        chimera_vfs_release(thread->vfs_thread, open_file->handle);
-        open_file->handle = NULL;
-    }
+    chimera_smb_durable_release_handle(thread, open_file);
     chimera_smb_open_file_free(thread, open_file);
     return true;
 } /* chimera_smb_durable_purge_parked */
@@ -228,6 +312,19 @@ chimera_smb_durable_park(
         }
     }
     pthread_mutex_unlock(&shared->durable.lock);
+
+    /* Mark the caching grant's lease AND the share reservation parked so the
+     * vfs_state conflict matrix treats this disconnected holder as
+     * courtesy-held: a compatible new open coexists (keep) and a write-cache
+     * holder is evicted by the caching-acquire path (purge).  The share-resv
+     * flag stops the sole-opener rule from capping a new opener's lease to R on
+     * account of a disconnected holder.  Cleared on reconnect. */
+    if (open_file->grant) {
+        open_file->grant->lease.parked = 1;
+    }
+    if (open_file->share_lease_inserted) {
+        open_file->share_lease.parked = 1;
+    }
 } /* chimera_smb_durable_park */
 
 SYMBOL_EXPORT struct chimera_smb_open_file *
@@ -361,10 +458,9 @@ chimera_smb_durable_sweep(struct chimera_server_smb_thread *thread)
                           open_file->file_id.pid, open_file->name_len, open_file->name);
 
         chimera_smb_open_file_drain_locks(thread, open_file);
-        if (open_file->handle) {
-            chimera_vfs_release(thread->vfs_thread, open_file->handle);
-            open_file->handle = NULL;
-        }
+        /* Grace-timer reap honors delete-on-close (a DELETE_ON_CLOSE durable
+         * handle whose last close is this expiry unlinks the file). */
+        chimera_smb_durable_release_handle(thread, open_file);
         chimera_smb_open_file_free(thread, open_file);
 
         free(entry);

@@ -434,7 +434,13 @@ chimera_vfs_caching_conflict(
      * under a different key -- smb2.lease.break expects two RH leases to coexist).
      * Write caching above is the only mode exclusive even within one client. */
     if ((e & CHIMERA_VFS_LEASE_MODE_H) && (p & CHIMERA_VFS_LEASE_MODE_H) &&
-        existing->owner.client_key != probe->owner.client_key) {
+        existing->owner.client_key != probe->owner.client_key &&
+        !existing->parked) {
+        /* A *parked* (disconnected durable) holder with no write cache is
+        * courtesy-held: MS-SMB2 lets a compatible new open from another client
+        * coexist with it (keep-disconnected-rh-*), so it does not conflict on
+        * the handle-cache rule.  (A parked holder that still holds W trips the
+        * W rule above and is evicted by the SMB caching-acquire path.) */
         return true;
     }
 
@@ -808,6 +814,14 @@ chimera_vfs_state_would_conflict(
                      * matching the prior behavior where stat-opens took no share
                      * reservation at all. */
                     if (cur->mode.granted == 0 && cur->mode.denied == 0) {
+                        continue;
+                    }
+                    /* A parked (disconnected durable) holder is courtesy-held: it
+                     * does not cap a new opener's lease.  If it genuinely conflicts
+                     * (a write cache) the caching-vs-caching path above already
+                     * forced a break/deny; otherwise the new open coexists with it
+                     * (keep-disconnected-rh-*). */
+                    if (cur->parked) {
                         continue;
                     }
                     if (conflict_out) {
