@@ -22,6 +22,7 @@
 #include "s3_etag.h"
 #include "s3_procs.h"
 #include "s3.h"
+#include "s3_tagging.h"
 
 static _Atomic uint64_t chimera_s3_multipart_id_counter;
 
@@ -61,6 +62,7 @@ chimera_s3_multipart_upload_free_now(struct chimera_s3_multipart_upload *upload)
 {
     free(upload->bucket_name);
     free(upload->object_key);
+    free(upload->tagging);
     pthread_mutex_destroy(&upload->lock);
     free(upload);
 } /* chimera_s3_multipart_upload_free_now */
@@ -457,7 +459,16 @@ chimera_s3_create_multipart_upload(
         request->path,
         request->path_len);
 
-    (void) upload;
+    /* Remember an x-amz-tagging header so the tags are applied to the assembled
+     * object on CompleteMultipartUpload. */
+    {
+        const char *tagging_hdr = evpl_http_request_header(
+            request->http_request, "x-amz-tagging");
+
+        if (tagging_hdr && tagging_hdr[0]) {
+            upload->tagging = strdup(tagging_hdr);
+        }
+    }
 
     evpl_iovec_alloc(evpl, 4096, 0, 1, 0, &request->multipart.response);
 
@@ -1993,6 +2004,18 @@ chimera_s3_complete_send_response(
     chimera_s3_mp_send_response(evpl, request, body_start, bp);
 } /* chimera_s3_complete_send_response */
 
+/* Deferred response after object tags were applied (store-by-path callback).
+* Part count + combined etag were stashed on the request by finish_common. */
+static void
+chimera_s3_complete_send_response_deferred(
+    struct evpl               *evpl,
+    struct chimera_s3_request *request)
+{
+    uint64_t etag[2] = { request->etag[0], request->etag[1] };
+
+    chimera_s3_complete_send_response(evpl, request, request->multipart.part_number, etag);
+} /* chimera_s3_complete_send_response_deferred */
+
 enum chimera_s3_assemble_mode {
     CHIMERA_S3_ASSEMBLE_MOVE,
     CHIMERA_S3_ASSEMBLE_COPY,
@@ -2259,6 +2282,7 @@ chimera_s3_complete_finish_common(
     struct evpl                     *evpl    = thread->evpl;
     int                              count   = ctx->part_count;
     uint64_t                         etag[2];
+    char                            *tagging = NULL;
 
     etag[0] = ctx->combined_etag[0];
     etag[1] = ctx->combined_etag[1];
@@ -2271,6 +2295,17 @@ chimera_s3_complete_finish_common(
         chimera_vfs_release(thread->vfs, request->file_handle);
         request->file_handle = NULL;
     }
+
+    /* Capture any x-amz-tagging set at CreateMultipartUpload before dropping
+     * the upload (which owns the string). */
+    if (!error_code && ctx->upload && ctx->upload->tagging) {
+        tagging = strdup(ctx->upload->tagging);
+    }
+
+    /* Stash the part count + etag for the deferred response. */
+    request->multipart.part_number = count;
+    request->etag[0]               = etag[0];
+    request->etag[1]               = etag[1];
 
     /* Drop our hold on the upload. Async part cleanup (release file handles
      * + unlink any tmp-file parts) fires when refcount hits zero. */
@@ -2295,6 +2330,29 @@ chimera_s3_complete_finish_common(
         }
         return;
     }
+
+    /* Apply the object tags (if any) before emitting the success response. The
+    * multipart.response iovec used by the response builder must not be
+    * allocated until tagging is done, so we defer it to the store callback. */
+    if (tagging) {
+        struct chimera_s3_tagging_ctx *tctx = calloc(1, sizeof(*tctx));
+
+        request->tagging = tctx;
+
+        if (chimera_s3_tagging_parse_header(tctx, tagging) == 0 &&
+            tctx->n_tags > 0) {
+            free(tagging);
+            chimera_s3_tagging_store_by_path(evpl, thread, request,
+                                             chimera_s3_complete_send_response_deferred);
+            return;
+        }
+
+        /* Empty/invalid tagging: ignore and fall through to the response. */
+        free(request->tagging);
+        request->tagging = NULL;
+    }
+
+    free(tagging);
 
     chimera_s3_complete_send_response(evpl, request, count, etag);
 } /* chimera_s3_complete_finish_common */
