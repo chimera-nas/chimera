@@ -207,7 +207,7 @@ chimera_smb_durable_doc_open_parent_cb(
         return;
     }
     ctx->parent_handle = oh;
-    chimera_vfs_remove_at(ctx->vfs_thread, &ctx->doc_info.cred, oh,
+    chimera_vfs_remove_at(ctx->vfs_thread, &ctx->doc_info.cred, NULL, oh,
                           ctx->doc_info.name, ctx->doc_info.name_len, NULL, 0, 0, 0,
                           chimera_smb_durable_doc_remove_cb, ctx);
 } /* chimera_smb_durable_doc_open_parent_cb */
@@ -243,7 +243,7 @@ chimera_smb_durable_release_handle(
     ctx->doc_info      = doc_info;
     ctx->parent_handle = NULL;
 
-    chimera_vfs_open_fh(thread->vfs_thread, &ctx->doc_info.cred,
+    chimera_vfs_open_fh(thread->vfs_thread, &ctx->doc_info.cred, NULL,
                         ctx->doc_info.parent_fh, ctx->doc_info.parent_fh_len,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
                         chimera_smb_durable_doc_open_parent_cb, ctx);

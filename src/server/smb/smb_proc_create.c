@@ -1639,7 +1639,7 @@ chimera_smb_create_open_at_callback(
             request->create.access_retry_oh = oh;
             chimera_vfs_getattr(
                 vfs_thread,
-                &request->session_handle->session->cred,
+                &request->session_handle->session->cred, NULL,
                 oh,
                 CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT |
                 CHIMERA_VFS_ATTR_ACL | CHIMERA_VFS_ATTR_BTIME,
@@ -3105,7 +3105,7 @@ chimera_smb_create_guid_replay(struct chimera_smb_request *request)
     request->compound->saved_file_id = match->file_id;
 
     chimera_vfs_getattr(thread->vfs_thread,
-                        &request->session_handle->session->cred,
+                        &request->session_handle->session->cred, NULL,
                         match->handle,
                         CHIMERA_VFS_ATTR_MASK_STAT,
                         chimera_smb_create_open_getattr_callback,

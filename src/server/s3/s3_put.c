@@ -63,7 +63,7 @@ chimera_s3_put_finish_common(
     /* Fetch the object's final attributes to build the response ETag, then
      * release the file handle and respond from the getattr callback. */
     chimera_vfs_getattr(thread->vfs,
-                        &thread->shared->cred,
+                        &thread->shared->cred, NULL,
                         request->file_handle,
                         CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_SIZE |
                         CHIMERA_VFS_ATTR_MTIME,

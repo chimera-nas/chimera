@@ -190,7 +190,7 @@ chimera_s3_create_bucket(
         return;
     }
 
-    chimera_vfs_lookup(thread->vfs, &shared->cred,
+    chimera_vfs_lookup(thread->vfs, &shared->cred, NULL,
                        shared->root_fh, shared->root_fh_len,
                        shared->bucket_root_path, shared->bucket_root_pathlen,
                        CHIMERA_VFS_ATTR_FH, CHIMERA_VFS_LOOKUP_FOLLOW,
@@ -450,7 +450,7 @@ chimera_s3_delete_bucket(
                                     request->bucket_namelen, request->bucket_name);
 
     /* Resolve the bucket directory, then walk + purge it. */
-    chimera_vfs_lookup(thread->vfs, &shared->cred,
+    chimera_vfs_lookup(thread->vfs, &shared->cred, NULL,
                        shared->root_fh, shared->root_fh_len,
                        ctx->bucket_path, ctx->bucket_path_len,
                        CHIMERA_VFS_ATTR_FH, CHIMERA_VFS_LOOKUP_FOLLOW,
