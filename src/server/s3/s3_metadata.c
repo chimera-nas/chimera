@@ -31,13 +31,15 @@ struct chimera_s3_meta_sys {
     const char *suffix;     /* xattr name after CHIMERA_S3_XATTR_PREFIX */
 };
 
+/* *INDENT-OFF* */ /* uncrustify oscillates on the aligned struct-init table */
 static const struct chimera_s3_meta_sys chimera_s3_meta_sys_headers[] = {
-    { "Content-Type",        "content-type"                    },
-    { "Content-Encoding",    "content-encoding"                },
-    { "Content-Disposition", "content-disposition"             },
-    { "Cache-Control",       "cache-control"                   },
-    { "Expires",             "expires"                         },
+    { "Content-Type",        "content-type"        },
+    { "Content-Encoding",    "content-encoding"    },
+    { "Content-Disposition", "content-disposition" },
+    { "Cache-Control",       "cache-control"        },
+    { "Expires",             "expires"             },
 };
+/* *INDENT-ON* */
 
 #define CHIMERA_S3_META_SYS_COUNT \
         (int) (sizeof(chimera_s3_meta_sys_headers) / \
