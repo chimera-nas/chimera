@@ -156,7 +156,11 @@ else()
 endif()
 
 # KVM testing detection
-find_program(DOCKER_EXECUTABLE docker)
+#
+# Guest images are pulled (not built) from chimera-nas/kvm-test-base as OCI
+# artifacts, so KVM testing needs `oras` to fetch them plus QEMU and /dev/kvm
+# to run them. Docker is no longer required at build time.
+find_program(ORAS_EXECUTABLE oras)
 
 # Find architecture-appropriate QEMU binary
 execute_process(COMMAND uname -m OUTPUT_VARIABLE HOST_ARCH OUTPUT_STRIP_TRAILING_WHITESPACE)
@@ -168,20 +172,7 @@ endif()
 
 set(KVM_TESTING_AVAILABLE FALSE)
 
-if(DOCKER_EXECUTABLE AND QEMU_EXECUTABLE)
-    execute_process(
-        COMMAND docker info
-        RESULT_VARIABLE DOCKER_INFO_RESULT
-        OUTPUT_QUIET
-        ERROR_QUIET
-    )
-    if(DOCKER_INFO_RESULT EQUAL 0)
-        set(DOCKER_FUNCTIONAL TRUE)
-    else()
-        set(DOCKER_FUNCTIONAL FALSE)
-        message(STATUS "KVM testing: docker found but not functional")
-    endif()
-
+if(ORAS_EXECUTABLE AND QEMU_EXECUTABLE)
     if(EXISTS "/dev/kvm")
         set(KVM_AVAILABLE TRUE)
     else()
@@ -189,12 +180,12 @@ if(DOCKER_EXECUTABLE AND QEMU_EXECUTABLE)
         message(STATUS "KVM testing: /dev/kvm not found")
     endif()
 
-    if(DOCKER_FUNCTIONAL AND KVM_AVAILABLE)
+    if(KVM_AVAILABLE)
         set(KVM_TESTING_AVAILABLE TRUE)
     endif()
 else()
-    if(NOT DOCKER_EXECUTABLE)
-        message(STATUS "KVM testing: docker not found")
+    if(NOT ORAS_EXECUTABLE)
+        message(STATUS "KVM testing: oras not found")
     endif()
     if(NOT QEMU_EXECUTABLE)
         message(STATUS "KVM testing: QEMU not found for ${HOST_ARCH}")

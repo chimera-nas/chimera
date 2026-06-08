@@ -474,19 +474,26 @@ jobs:
         with:
           submodules: recursive
 
+      # KVM guest images are pulled from GHCR with oras (see build-test.yml).
+      - name: Fetch oras CLI
+        run: |
+          ORAS_VERSION=1.2.0
+          curl -sSL "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_${{ matrix.arch }}.tar.gz" \
+            | tar -xz -C "${{ github.workspace }}" oras
+          chmod +x "${{ github.workspace }}/oras"
+
       - name: Configure, build, and test inside the container
         run: |
           docker run --rm --privileged \
             -e DOCKER_MIRROR=${{ env.DOCKER_MIRROR }} \
             -e APT_MIRROR=${{ env.APT_MIRROR }} \
             -v "${{ github.workspace }}:/workspace" \
+            -v "${{ github.workspace }}/oras:/usr/local/bin/oras:ro" \
             -v /build \
             -w /build \
             ${{ matrix.image_tag_prefix }}:${{ github.sha }}-${{ matrix.arch }} \
             bash -euxc '\
-              dockerd --storage-driver=vfs --registry-mirror=https://repository.mdh.quantum.com:5001 &>/dev/null &
-              sleep 2 && \
-              cmake -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DREQUIRE_NETNS_TESTS=ON -DKVM_IMAGE_CACHE_REGISTRY=${{ env.KVM_IMAGE_CACHE_REGISTRY }} ${{ matrix.cmake_extra }} /workspace && \
+              cmake -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DREQUIRE_NETNS_TESTS=ON ${{ matrix.cmake_extra }} /workspace && \
               ninja && \
               /workspace/scripts/cap_ctest_output.sh \
               ctest --output-on-failure --test-output-size-failed 65536 --timeout 300 -j 32'
