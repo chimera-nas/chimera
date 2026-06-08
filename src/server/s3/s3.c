@@ -372,12 +372,9 @@ chimera_s3_dispatch_callback(
 
             if (s3_request->has_upload_id && s3_request->has_part_number) {
                 if (copy_source) {
-                    /* UploadPartCopy (copying a byte range of an existing
-                     * object into an in-progress multipart upload) is not
-                     * implemented yet. Reject explicitly rather than treating
-                     * the (empty) body as the part contents. */
-                    s3_request->status    = CHIMERA_S3_STATUS_NOT_IMPLEMENTED;
-                    s3_request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
+                    /* UploadPartCopy: copy a byte range of an existing object
+                     * into this in-progress multipart upload as part N. */
+                    chimera_s3_upload_part_copy(evpl, thread, s3_request);
                 } else {
                     chimera_s3_upload_part(evpl, thread, s3_request);
                 }
@@ -596,10 +593,20 @@ s3_server_dispatch(
             int         encoding_url   = 0;
             int         fetch_owner    = 0;
             int         bad_max_keys   = 0;
+            /* Multipart pagination parameters (ListParts /
+             * ListMultipartUploads), captured here since the parse loop runs
+             * before the request type is classified. */
+            int         max_parts          = 1000;
+            int         part_number_marker = 0;
+            int         max_uploads        = 1000;
+            char        upload_id_marker_buf[CHIMERA_S3_UPLOAD_ID_LEN + 1];
+            int         upload_id_marker_len = 0;
             /* Set when the query carries a key we don't recognize as a list
              * parameter or handled subresource: an unimplemented bucket/object
              * subresource (acl/policy/tagging/cors/lifecycle/...). */
             int         saw_unknown = 0;
+
+            upload_id_marker_buf[0] = '\0';
 
             p = qmark + 1;
 
@@ -640,6 +647,20 @@ s3_server_dispatch(
                 } else if (key_len == 10 && memcmp(key_start, "partNumber", 10) == 0) {
                     s3_request->query_part_number = atoi(value_start);
                     s3_request->has_part_number   = 1;
+                } else if (key_len == 9 && memcmp(key_start, "max-parts", 9) == 0) {
+                    max_parts = atoi(value_start);
+                } else if (key_len == 18 && memcmp(key_start, "part-number-marker", 18) == 0) {
+                    part_number_marker = atoi(value_start);
+                } else if (key_len == 11 && memcmp(key_start, "max-uploads", 11) == 0) {
+                    max_uploads = atoi(value_start);
+                } else if (key_len == 16 && memcmp(key_start, "upload-id-marker", 16) == 0) {
+                    int copy = value_len;
+                    if (copy > CHIMERA_S3_UPLOAD_ID_LEN) {
+                        copy = CHIMERA_S3_UPLOAD_ID_LEN;
+                    }
+                    memcpy(upload_id_marker_buf, value_start, copy);
+                    upload_id_marker_buf[copy] = '\0';
+                    upload_id_marker_len       = copy;
                 } else if (key_len == 6 && memcmp(key_start, "prefix", 6) == 0) {
                     prefix_len = chimera_s3_pct_decode(prefix_buf, sizeof(prefix_buf),
                                                        value_start, value_len);
@@ -721,6 +742,25 @@ s3_server_dispatch(
                     s3_request->multipart.part_number =
                         s3_request->query_part_number;
                 }
+                /* Pagination parameters for ListParts / ListMultipartUploads.
+                 * Copy from the parse-loop staging vars into the multipart
+                 * union now that we know this is a multipart request. */
+                s3_request->multipart.max_parts =
+                    (max_parts > 0) ? max_parts : 1000;
+                s3_request->multipart.part_number_marker = part_number_marker;
+                s3_request->multipart.max_uploads        =
+                    (max_uploads > 0) ? max_uploads : 1000;
+
+                if (marker_len > (int) sizeof(s3_request->multipart.key_marker) - 1) {
+                    marker_len = sizeof(s3_request->multipart.key_marker) - 1;
+                }
+                memcpy(s3_request->multipart.key_marker, marker_buf, marker_len);
+                s3_request->multipart.key_marker[marker_len] = '\0';
+                s3_request->multipart.key_marker_len         = marker_len;
+
+                memcpy(s3_request->multipart.upload_id_marker,
+                       upload_id_marker_buf, upload_id_marker_len + 1);
+                s3_request->multipart.upload_id_marker_len = upload_id_marker_len;
             } else if (s3_request->has_delete) {
                 /* POST /bucket?delete: the keys to remove arrive in the
                  * request body, so there is no object key in the path.

@@ -171,6 +171,20 @@ struct chimera_s3_request {
             char                               *body_buf;
             int                                 body_len;
             int                                 body_cap;
+            /* ListParts / ListMultipartUploads pagination parameters,
+             * captured from the query string. */
+            int                                 max_parts;        /* ListParts max-parts (default 1000) */
+            int                                 part_number_marker; /* ListParts part-number-marker */
+            int                                 max_uploads;      /* ListMultipartUploads max-uploads (default 1000) */
+            int                                 key_marker_len;
+            int                                 upload_id_marker_len;
+            char                                key_marker[CHIMERA_S3_KEY_MAX];
+            char                                upload_id_marker[CHIMERA_S3_UPLOAD_ID_LEN + 1];
+            /* UploadPartCopy: source byte range from x-amz-copy-source-range. */
+            int                                 is_copy;        /* 1 => emit CopyPartResult */
+            int                                 has_copy_range;
+            int64_t                             copy_range_first;
+            int64_t                             copy_range_last;
             char                                upload_id[CHIMERA_S3_UPLOAD_ID_LEN + 1];
             char                                tmp_name[64];
             char                                path_buf[1024];

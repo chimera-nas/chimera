@@ -55,6 +55,8 @@ chimera_s3_status_to_string(enum chimera_s3_status status)
             return "Requested Range Not Satisfiable";
         case CHIMERA_S3_STATUS_NOT_IMPLEMENTED:
             return "Not Implemented";
+        case CHIMERA_S3_STATUS_INVALID_ARGUMENT:
+            return "Invalid Argument";
         default:
             return "Internal Error";
     } /* switch */
@@ -176,6 +178,7 @@ chimera_s3_prepare_error_response(
             code = 400;
             break;
         case CHIMERA_S3_STATUS_BAD_REQUEST:
+        case CHIMERA_S3_STATUS_INVALID_ARGUMENT:
             bp  += sprintf(bp, "  <Code>InvalidArgument</Code>\n");
             bp  += sprintf(bp, "  <Message>Invalid Argument</Message>\n");
             code = 400;

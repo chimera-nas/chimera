@@ -106,6 +106,12 @@ chimera_s3_upload_part_recv(
     struct chimera_s3_request *request);
 
 void
+chimera_s3_upload_part_copy(
+    struct evpl                     *evpl,
+    struct chimera_server_s3_thread *thread,
+    struct chimera_s3_request       *request);
+
+void
 chimera_s3_complete_multipart_upload(
     struct evpl                     *evpl,
     struct chimera_server_s3_thread *thread,
