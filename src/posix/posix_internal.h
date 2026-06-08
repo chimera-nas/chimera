@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -248,6 +248,8 @@ chimera_posix_to_chimera_flags(int flags)
         out |= CHIMERA_VFS_OPEN_READ_ONLY;
     } else if ((flags & O_ACCMODE) == O_WRONLY) {
         out |= CHIMERA_VFS_OPEN_WRITE_ONLY;
+    } else { /* O_RDWR: request both read and write access */
+        out |= CHIMERA_VFS_OPEN_READ_ONLY | CHIMERA_VFS_OPEN_WRITE_ONLY;
     }
 
     return out;

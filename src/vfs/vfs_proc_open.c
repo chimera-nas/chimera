@@ -22,11 +22,15 @@ chimera_vfs_open_required_access(unsigned int flags)
 {
     uint32_t required = 0;
 
-    if (!(flags & CHIMERA_VFS_OPEN_WRITE_ONLY)) {
-        required |= CHIMERA_ACE_READ_DATA;      /* O_RDONLY or O_RDWR */
+    /* Access intent is signalled positively: O_RDONLY -> READ_ONLY,
+     * O_WRONLY -> WRITE_ONLY, O_RDWR -> both.  A raw open with neither bit
+     * (e.g. an O_PATH-style handle open) requests no data access and is not
+     * gated here. */
+    if (flags & CHIMERA_VFS_OPEN_READ_ONLY) {
+        required |= CHIMERA_ACE_READ_DATA;
     }
-    if (!(flags & CHIMERA_VFS_OPEN_READ_ONLY)) {
-        required |= CHIMERA_ACE_WRITE_DATA;     /* O_WRONLY or O_RDWR */
+    if (flags & CHIMERA_VFS_OPEN_WRITE_ONLY) {
+        required |= CHIMERA_ACE_WRITE_DATA;
     }
     if (flags & CHIMERA_VFS_OPEN_TRUNCATE) {
         required |= CHIMERA_ACE_WRITE_DATA;
@@ -168,9 +172,12 @@ chimera_vfs_open_lookup_complete(
             return;
         }
 
-        /* Opening a directory for writing (or with O_TRUNC) -> EISDIR. */
+        /* Opening a directory for writing (or with O_TRUNC) -> EISDIR.  Write
+         * intent is signalled positively (WRITE_ONLY for O_WRONLY/O_RDWR, or
+         * TRUNCATE); a read-only or accessless handle open of a directory is
+         * allowed. */
         if (S_ISDIR(attr->va_mode) &&
-            (!(f & CHIMERA_VFS_OPEN_READ_ONLY) ||
+            ((f & CHIMERA_VFS_OPEN_WRITE_ONLY) ||
              (f & CHIMERA_VFS_OPEN_TRUNCATE))) {
             chimera_vfs_request_free(thread, request);
             callback(CHIMERA_VFS_EISDIR, NULL, NULL, priv);

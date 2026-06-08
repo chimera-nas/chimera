@@ -578,7 +578,9 @@ chimera_linux_set_open_flags(uint32_t in_flags)
     if (in_flags & CHIMERA_VFS_OPEN_PATH) {
         flags |= O_PATH;
     } else {
-        if (in_flags & (CHIMERA_VFS_OPEN_DIRECTORY | CHIMERA_VFS_OPEN_READ_ONLY)) {
+        if ((in_flags & CHIMERA_VFS_OPEN_DIRECTORY) ||
+            ((in_flags & CHIMERA_VFS_OPEN_READ_ONLY) &&
+             !(in_flags & CHIMERA_VFS_OPEN_WRITE_ONLY))) {
             flags |= O_RDONLY;
         } else {
             flags |= O_RDWR;

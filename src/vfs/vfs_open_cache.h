@@ -103,7 +103,10 @@ chimera_vfs_open_cache_shard_find(
 static inline uint8_t
 chimera_vfs_open_access_mode(unsigned int open_flags)
 {
-    return (open_flags & CHIMERA_VFS_OPEN_READ_ONLY) ?
+    /* O_RDWR sets both READ_ONLY and WRITE_ONLY; only a pure read-only open
+     * (READ_ONLY without WRITE_ONLY) maps to a read-only handle. */
+    return ((open_flags & CHIMERA_VFS_OPEN_READ_ONLY) &&
+            !(open_flags & CHIMERA_VFS_OPEN_WRITE_ONLY)) ?
            CHIMERA_VFS_ACCESS_MODE_RO : CHIMERA_VFS_ACCESS_MODE_RW;
 } // chimera_vfs_open_access_mode
 
