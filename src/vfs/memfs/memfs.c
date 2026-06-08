@@ -1699,8 +1699,11 @@ memfs_setattr(
          * (mtime) and last status change (ctime) times for update.  ctime is
          * stamped unconditionally by memfs_apply_attrs; bump mtime here unless
          * the caller supplied an explicit mtime (in which case apply_attrs
-         * applies the caller's value). */
-        if (!(attr->va_set_mask & CHIMERA_VFS_ATTR_MTIME)) {
+         * applies the caller's value).  AUTH_ATTR (SMB/Windows) callers manage
+         * the write time themselves (sticky write-time, SetInfo EndOfFile), so
+         * the implicit bump applies only to POSIX/NFS callers. */
+        if (!(attr->va_set_mask & CHIMERA_VFS_ATTR_MTIME) &&
+            request->cred->flavor != CHIMERA_VFS_AUTH_ATTR) {
             chimera_vfs_realtime(&inode->mtime);
         }
         attr->va_set_mask &= ~CHIMERA_VFS_ATTR_SIZE;
@@ -4569,10 +4572,13 @@ memfs_link_at(
     }
 
     if (unlikely(S_ISDIR(inode->mode))) {
-        /* POSIX: hard-linking a directory is not permitted (EPERM). */
+        /* Hard-linking a directory is not permitted.  The VFS reports the
+         * physical condition as EISDIR (NFS4 -> NFS4ERR_ISDIR, SMB ->
+         * STATUS_FILE_IS_A_DIRECTORY); the POSIX link() wrapper maps EISDIR to
+         * EPERM per link(2). */
         pthread_mutex_unlock(&parent_inode->lock);
         pthread_mutex_unlock(&inode->lock);
-        request->status = CHIMERA_VFS_EPERM;
+        request->status = CHIMERA_VFS_EISDIR;
         request->complete(request);
         return;
     }
