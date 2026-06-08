@@ -10,6 +10,35 @@
 #include "s3_internal.h"
 #include "s3_etag.h"
 
+static void
+chimera_s3_put_getattr_callback(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct chimera_s3_request       *request = private_data;
+    struct chimera_server_s3_thread *thread  = request->thread;
+    struct evpl                     *evpl    = thread->evpl;
+    const uint64_t                   need    = CHIMERA_VFS_ATTR_FH |
+        CHIMERA_VFS_ATTR_SIZE | CHIMERA_VFS_ATTR_MTIME;
+
+    /* Attach the object ETag computed from the *final* attributes (post-write
+     * size + mtime + fh) so the value matches what a subsequent HEAD/GET will
+     * return. Computing it earlier (e.g. at create time, when the object is
+     * still empty) yields a different hash and desyncs client ETag checks. */
+    if (!error_code && (attr->va_set_mask & need) == need) {
+        chimera_s3_attach_etag(request->http_request, attr);
+    }
+
+    chimera_vfs_release(thread->vfs, request->file_handle);
+
+    request->vfs_state = CHIMERA_S3_VFS_STATE_SEND;
+
+    if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
+        s3_server_respond(evpl, request);
+    }
+} /* chimera_s3_put_getattr_callback */
+
 static inline void
 chimera_s3_put_finish_common(
     enum chimera_vfs_error error_code,
@@ -20,17 +49,26 @@ chimera_s3_put_finish_common(
     struct evpl                     *evpl    = thread->evpl;
 
     chimera_vfs_release(thread->vfs, request->dir_handle);
-    chimera_vfs_release(thread->vfs, request->file_handle);
 
     if (error_code) {
         request->status = CHIMERA_S3_STATUS_INTERNAL_ERROR;
+        chimera_vfs_release(thread->vfs, request->file_handle);
+        request->vfs_state = CHIMERA_S3_VFS_STATE_SEND;
+        if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
+            s3_server_respond(evpl, request);
+        }
+        return;
     }
 
-    request->vfs_state = CHIMERA_S3_VFS_STATE_SEND;
-
-    if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
-        s3_server_respond(evpl, request);
-    }
+    /* Fetch the object's final attributes to build the response ETag, then
+     * release the file handle and respond from the getattr callback. */
+    chimera_vfs_getattr(thread->vfs,
+                        &thread->shared->cred,
+                        request->file_handle,
+                        CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_SIZE |
+                        CHIMERA_VFS_ATTR_MTIME,
+                        chimera_s3_put_getattr_callback,
+                        request);
 } /* chimera_s3_put_finish_common */
 
 static void
@@ -260,11 +298,12 @@ chimera_s3_put_create_unlinked_callback(
     request->file_handle = oh;
     request->vfs_state   = CHIMERA_S3_VFS_STATE_RECV;
 
-    chimera_s3_attach_etag(request->http_request, attr);
+    /* The response ETag is attached after the body is written, from the
+     * object's final attributes (see chimera_s3_put_getattr_callback). */
 
     chimera_s3_put_recv(evpl, request);
 
-} /* chimera_s3_put_create_callback */
+} /* chimera_s3_put_create_unlinked_callback */
 
 static void
 chimera_s3_put_create_callback(
@@ -290,7 +329,8 @@ chimera_s3_put_create_callback(
     request->file_handle = oh;
     request->vfs_state   = CHIMERA_S3_VFS_STATE_RECV;
 
-    chimera_s3_attach_etag(request->http_request, attr);
+    /* The response ETag is attached after the body is written, from the
+     * object's final attributes (see chimera_s3_put_getattr_callback). */
 
     chimera_s3_put_recv(evpl, request);
 
