@@ -637,37 +637,6 @@ parse_auth_header_v4(
 } /* parse_auth_header_v4 */
 
 /*
- * URL-encode a string for canonical request
- */
-static void
-url_encode(
-    const char *str,
-    char       *out,
-    int         out_max)
-{
-    const char *hex = "0123456789ABCDEF";
-    int         j   = 0;
-
-    for (int i = 0; str[i] && j < out_max - 3; i++) {
-        unsigned char c = str[i];
-        if ((c >= 'A' && c <= 'Z') ||
-            (c >= 'a' && c <= 'z') ||
-            (c >= '0' && c <= '9') ||
-            c == '-' || c == '_' || c == '.' || c == '~') {
-            out[j++] = c;
-        } else if (c == '/') {
-            /* Don't encode path separators for URI path */
-            out[j++] = c;
-        } else {
-            out[j++] = '%';
-            out[j++] = hex[(c >> 4) & 0xF];
-            out[j++] = hex[c & 0xF];
-        }
-    }
-    out[j] = '\0';
-} /* url_encode */
-
-/*
  * Compare function for qsort to sort query parameters
  */
 static int
@@ -752,7 +721,6 @@ build_canonical_request_v4(
     const char *method;
     const char *uri;
     int         uri_len;
-    char        encoded_uri[2048];
     char        payload_hash[65];
     int         offset = 0;
 
@@ -779,7 +747,23 @@ build_canonical_request_v4(
 
     offset += snprintf(canonical_request + offset, max_len - offset, "%s\n", method);
 
-    /* Canonical URI (URL-encoded path) */
+    /*
+     * Canonical URI.
+     *
+     * Per AWS SigV4, CanonicalURI is the URI-encoded request path: each path
+     * segment is RFC 3986 encoded (unreserved A-Z a-z 0-9 - _ . ~ kept
+     * literally, every other byte as %XX with UPPERCASE hex) while the '/'
+     * segment separators are left literal. For S3 the path is encoded exactly
+     * once (S3 does not double-encode the way most other services do).
+     *
+     * The client signs using that encoded path, and evpl_http_request_url()
+     * returns the request-target verbatim from the wire -- i.e. already in the
+     * exact percent-encoded form the client signed. We must therefore use it
+     * as-is. Running url_encode() over it would re-encode the '%' of each
+     * existing escape (e.g. "%20" -> "%2520"), producing a CanonicalURI that
+     * never matches the client's and rejecting every key with a space, '+',
+     * '%', or non-ASCII byte. So copy the path through unchanged.
+     */
     uri = evpl_http_request_url(request, &uri_len);
 
     /* Find query string separator */
@@ -791,16 +775,8 @@ build_canonical_request_v4(
         path_len = uri_len;
     }
 
-    /* Copy and encode just the path */
-    char        path[1024];
-    if (path_len >= (int) sizeof(path)) {
-        path_len = sizeof(path) - 1;
-    }
-    strncpy(path, uri, path_len);
-    path[path_len] = '\0';
-
-    url_encode(path, encoded_uri, sizeof(encoded_uri));
-    offset += snprintf(canonical_request + offset, max_len - offset, "%s\n", encoded_uri);
+    offset += snprintf(canonical_request + offset, max_len - offset, "%.*s\n",
+                       path_len, uri);
 
     /* Canonical Query String - must be sorted alphabetically */
     if (query) {
