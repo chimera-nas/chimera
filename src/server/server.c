@@ -61,6 +61,7 @@ struct chimera_server_config {
     int                                   async_delegation;
     int                                   async_delegation_threads;
     int                                   cache_ttl;
+    int                                   rcu_reclaim_threads;
     int                                   nfs4_session_slots;
     int                                   nfs4_delegations;
     uint32_t                              nfs4_lease_time_s;
@@ -222,6 +223,14 @@ chimera_server_config_init(void)
     config->nfs_server_scope = 42;
 
     config->cache_ttl = 60;
+
+    /* Number of liburcu call_rcu reclaim worker threads.  0 (the default) means
+     * one worker per CPU (create_all_cpu_call_rcu_data) to keep RCU reclaim up
+     * with per-request cache churn under heavy load.  On a many-core host that
+     * spawns hundreds of threads, which is wasteful for short-lived or
+     * lightly-loaded instances (memory, and process-teardown cost); set a small
+     * positive value (e.g. the CI test daemons) to cap the worker count. */
+    config->rcu_reclaim_threads = 0;
 
     /* Default NFSv4.1 fore-channel session slots (server cap on the number
      * of concurrent SEQUENCE requests a client may have outstanding per
@@ -463,6 +472,14 @@ chimera_server_config_get_cache_ttl(const struct chimera_server_config *config)
 {
     return config->cache_ttl;
 } /* chimera_server_config_get_cache_ttl */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_rcu_reclaim_threads(
+    struct chimera_server_config *config,
+    int                           threads)
+{
+    config->rcu_reclaim_threads = threads;
+} /* chimera_server_config_set_rcu_reclaim_threads */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_nfs4_session_slots(
@@ -1629,6 +1646,7 @@ chimera_server_init(
                                    config->num_modules,
                                    config->kv_module,
                                    config->cache_ttl,
+                                   config->rcu_reclaim_threads,
                                    metrics);
 
     /* Propagate the common TCP flavor so VFS client modules (e.g. nfs)

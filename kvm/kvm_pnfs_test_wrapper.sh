@@ -153,6 +153,9 @@ trap cleanup EXIT
 generate_ds_config() {
     cat > "$DS_CONFIG" << EOF
 {
+    "common": {
+        "rcu_reclaim_threads": 4
+    },
     "server": {
         "threads": 2,
         "nfs_port": ${DS_PORT},
@@ -198,6 +201,9 @@ generate_mds_config() {
 
     cat > "$MDS_CONFIG" << EOF
 {
+    "common": {
+        "rcu_reclaim_threads": 4
+    },
     "server": {
         "threads": 4,
         "external_portmap": false,
@@ -247,6 +253,9 @@ generate_combined_config() {
 
     cat > "$MDS_CONFIG" << EOF
 {
+    "common": {
+        "rcu_reclaim_threads": 4
+    },
     "server": {
         "threads": 4,
         "external_portmap": false,

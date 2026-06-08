@@ -272,3 +272,34 @@ chimera_common_metrics_file(json_t *root)
 
     return NULL;
 } /* chimera_common_metrics_file */
+
+/*
+ * Number of liburcu call_rcu reclaim worker threads, from the shared "common"
+ * section's "rcu_reclaim_threads" key.  This is a VFS-level setting (the workers
+ * reclaim retired entries from the VFS fungible caches), so it is honored
+ * identically by the server and the client.  Returns the configured value
+ * (0 == one worker per CPU, the default reclaim parallelism; a positive value
+ * caps the count) or -1 when the section or key is absent, meaning "unset" so
+ * the caller leaves its own default in place.  `root` may be NULL.
+ */
+static inline int
+chimera_common_rcu_reclaim_threads(json_t *root)
+{
+    json_t *common, *val;
+
+    if (!root) {
+        return -1;
+    }
+
+    common = json_object_get(root, "common");
+    if (!json_is_object(common)) {
+        return -1;
+    }
+
+    val = json_object_get(common, "rcu_reclaim_threads");
+    if (json_is_integer(val)) {
+        return (int) json_integer_value(val);
+    }
+
+    return -1;
+} /* chimera_common_rcu_reclaim_threads */

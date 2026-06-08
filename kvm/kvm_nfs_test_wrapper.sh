@@ -134,6 +134,9 @@ generate_config() {
 
     cat > "$CONFIG_FILE" << EOF
 {
+    "common": {
+        "rcu_reclaim_threads": 4
+    },
     "server": {
         "threads": 4,
         "delegation_threads": 4,

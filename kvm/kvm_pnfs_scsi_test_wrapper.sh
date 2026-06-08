@@ -126,6 +126,9 @@ generate_mds_config() {
 
     cat > "$MDS_CONFIG" << EOF
 {
+    "common": {
+        "rcu_reclaim_threads": 4
+    },
     "server": {
         "threads": 4,
         "external_portmap": false,

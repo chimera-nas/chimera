@@ -32,6 +32,7 @@ chimera_client_config_init(void)
     config->async_delegation         = 0;
     config->async_delegation_threads = 8;
     config->cache_ttl                = 60;
+    config->rcu_reclaim_threads      = 0; /* 0 = one call_rcu worker per CPU */
     config->max_fds                  = 1024;
 
     strncpy(config->modules[0].module_name, "root", sizeof(config->modules[0].module_name));
@@ -179,6 +180,7 @@ chimera_client_init(
                                    config->num_modules,
                                    config->kv_module,
                                    config->cache_ttl,
+                                   config->rcu_reclaim_threads,
                                    metrics);
 
     /* Propagate the common TCP flavor so VFS client modules (e.g. nfs)
@@ -310,6 +312,16 @@ chimera_client_init_json(
                                              deleg.sync_delegation_threads,
                                              deleg.async_delegation,
                                              deleg.async_delegation_threads);
+    }
+
+    /* RCU reclaim worker count is a VFS-level setting shared with the server;
+     * its canonical home is the "common" section. */
+    {
+        int rcu_threads = chimera_common_rcu_reclaim_threads(root);
+
+        if (rcu_threads >= 0) {
+            config->rcu_reclaim_threads = rcu_threads;
+        }
     }
 
     client = chimera_client_init(config, cred, metrics);
