@@ -157,6 +157,15 @@ struct chimera_vfs_lease {
     uint64_t                          break_skip_lo;
     uint64_t                          break_skip_hi;
 
+    /* Set by the SMB server when this caching lease's owning open is PARKED as a
+     * disconnected durable handle (MS-SMB2 "courtesy-held" open).  A parked
+     * holder with no write cache is treated as non-conflicting for the
+     * cross-client handle-cache rule so a compatible new open can coexist (the
+     * keep-disconnected case); a parked holder that still holds a write cache is
+     * evicted (purged) by the SMB caching-acquire path instead.  Cleared on
+     * reconnect. */
+    uint8_t                           parked;
+
     /* For a CACHING lease that is owned by a VFS caching grant (the shared,
      * owner-keyed, refcounted object that lets N opens under one owner share a
      * single lease): back-pointer to that grant, so begin_break/ack/revoke can

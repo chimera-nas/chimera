@@ -243,6 +243,53 @@ chimera_smb_create_share_park_cb(
     void                         *private_data);
 
 /*
+ * Before a conflicting open breaks a caching holder, evict any *parked*
+ * (disconnected durable) holder that still holds a write cache on this file: a
+ * doomed break would only mark its lease BREAKING (the parked handle has no
+ * connection to ack it), masking the conflict so the new open silently caps its
+ * own grant -- and the orphaned handle leaks until its grace timer.  MS-SMB2 has
+ * the disconnected handle yield to a conflicting open, so purge it instead.  A
+ * parked holder with no write cache is courtesy-held and left to coexist
+ * (keep-disconnected-rh-*).  pids are collected under file->lock, then purged
+ * after it is dropped (purge takes the registry lock and tears down VFS state).
+ */
+static void
+chimera_smb_create_purge_parked_writers(
+    struct chimera_server_smb_thread *thread,
+    const uint8_t                    *fh,
+    uint8_t                           fh_len,
+    uint64_t                          fh_hash)
+{
+    struct chimera_vfs_state      *vfs_state = thread->vfs_thread->vfs->vfs_state;
+    struct chimera_vfs_file_state *file_state;
+    struct chimera_vfs_lease      *lease;
+    uint64_t                       pids[16];
+    int                            npids = 0, i;
+
+    file_state = chimera_vfs_state_get(vfs_state, fh, fh_len, fh_hash, false);
+    if (!file_state) {
+        return;
+    }
+
+    pthread_mutex_lock(&file_state->lock);
+    for (lease = file_state->caching_leases; lease && npids < 16; lease = lease->next) {
+        if (lease->parked &&
+            (lease->mode.granted & CHIMERA_VFS_LEASE_MODE_W) &&
+            lease->grant && lease->grant->holders) {
+            pids[npids++] =
+                ((struct chimera_smb_open_file *) lease->grant->holders)->file_id.pid;
+        }
+    }
+    pthread_mutex_unlock(&file_state->lock);
+
+    chimera_vfs_state_put(vfs_state, file_state);
+
+    for (i = 0; i < npids; i++) {
+        chimera_smb_durable_purge_parked(thread, pids[i]);
+    }
+} /* chimera_smb_create_purge_parked_writers */
+
+/*
  * Single break-decision point for a conflicting open (MS-FSA open-vs-oplock
  * ordering), factored out of the two create-path call sites that previously
  * duplicated the trigger/owner computation verbatim.
@@ -314,6 +361,8 @@ chimera_smb_create_break_for_open(
     }
 
     if (phase == 1) {
+        /* Evict parked write-cache holders before the (otherwise doomed) break. */
+        chimera_smb_create_purge_parked_writers(thread, oh->fh, oh->fh_len, oh->fh_hash);
         chimera_vfs_state_break_caching_for_open(
             vfs_state, oh->fh, oh->fh_len, oh->fh_hash, &io_owner,
             CHIMERA_VFS_LEASE_MODE_H,
@@ -578,7 +627,12 @@ chimera_smb_create_gen_open_file(
             return NULL;
         }
 
-        open_file->share_lease.kind             = CHIMERA_VFS_LEASE_SHARE;
+        open_file->share_lease.kind = CHIMERA_VFS_LEASE_SHARE;
+        /* Explicitly clear the parked flag: the open_file pool is reused without
+         * zeroing, so a recycled slot could otherwise carry a stale parked=1 from
+         * a previously-disconnected durable handle and make this live opener
+         * invisible to the sole-opener / conflict rules. */
+        open_file->share_lease.parked           = 0;
         open_file->share_lease.mode.granted     = granted;
         open_file->share_lease.mode.denied      = denied;
         open_file->share_lease.owner.protocol   = CHIMERA_VFS_LEASE_PROTO_SMB2;
@@ -2715,6 +2769,13 @@ chimera_smb_durable_reconnect(struct chimera_smb_request *request)
     /* Reseed the channel-sequence baseline from the reconnecting CREATE. */
     open_file->channel_sequence       = request->channel_sequence;
     open_file->channel_sequence_valid = 1;
+    /* No longer a courtesy-held disconnected holder. */
+    if (open_file->grant) {
+        open_file->grant->lease.parked = 0;
+    }
+    if (open_file->share_lease_inserted) {
+        open_file->share_lease.parked = 0;
+    }
 
     bucket = open_file->file_id.vid & CHIMERA_SMB_OPEN_FILE_BUCKET_MASK;
     pthread_mutex_lock(&tree->open_files_lock[bucket]);
