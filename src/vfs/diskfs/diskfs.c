@@ -30,6 +30,7 @@
 #include "vfs/vfs.h"
 #include "vfs/vfs_internal.h"
 #include "vfs/vfs_acl.h"
+#include "vfs/vfs_access.h"
 #include "vfs/vfs_acl_serialize.h"
 #include "diskfs.h"
 #include "space_map.h"
@@ -5836,6 +5837,23 @@ diskfs_dir_next(
     return 0;
 } /* diskfs_dir_next */
 
+/* True if `dir` contains no entries.  "." and ".." are synthesised by readdir
+ * (not stored), so a directory with no DIRENT records is genuinely empty -- a
+ * stronger test than nlink (which only counts subdirectories). */
+static int
+diskfs_dir_is_empty(
+    struct diskfs_thread *thread,
+    struct diskfs_inode  *dir)
+{
+    char     name[DISKFS_DIRENT_REC_MAX];
+    uint64_t r_hash, r_inum;
+    uint32_t r_gen;
+    int      r_namelen;
+
+    return diskfs_dir_next(thread, dir, 0, &r_hash, &r_inum, &r_gen,
+                           name, &r_namelen) != 0;
+} /* diskfs_dir_is_empty */
+
 /*
  * Async directory-record helpers (thin wrappers over the b+tree op driver).
  * Each returns 1 if it completed synchronously (result in op->result; the
@@ -9867,6 +9885,34 @@ diskfs_acl_decode_into(
     attr->va_set_mask |= CHIMERA_VFS_ATTR_ACL;
 } /* diskfs_acl_decode_into */
 
+/* Mode/ACL-aware access check against a loaded diskfs inode (mirror of
+ * memfs/cairn): build the canonical attrs (the stored ACL, or one synthesised
+ * from the mode) and consult the shared access engine.  Uses the synchronous
+ * b+tree ACL read, valid while the inode's leaf is cached. */
+static int
+diskfs_inode_access(
+    struct diskfs_thread          *thread,
+    struct diskfs_inode           *inode,
+    const struct chimera_vfs_cred *cred,
+    uint32_t                       requested)
+{
+    struct chimera_vfs_attrs attr;
+    uint8_t                  serial[DISKFS_ACL_REC_MAX];
+    int                      len;
+
+    attr.va_set_mask = CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_UID |
+        CHIMERA_VFS_ATTR_GID;
+    attr.va_mode = inode->mode;
+    attr.va_uid  = inode->uid;
+    attr.va_gid  = inode->gid;
+
+    len = diskfs_bt_lookup_exact(thread, inode, &diskfs_acl_key,
+                                 serial, sizeof(serial));
+    diskfs_acl_decode_into(&attr, serial, len, inode->mode);
+
+    return chimera_vfs_access_allowed(&attr, cred, requested);
+} /* diskfs_inode_access */
+
 /*
  * Persist `acl` as inode's ACL record (replacing any existing one), or remove
  * the record when `acl` is NULL/empty (revert to mode-derived).  The b+tree
@@ -10234,7 +10280,22 @@ diskfs_setattr_trunc_done(struct chimera_vfs_request *request)
     struct diskfs_thread          *thread = p->thread;
     struct diskfs_inode           *inode  = p->inode_stash[0];
 
+    /* POSIX: a successful (f)truncate marks the last data modification time.
+     * Bump mtime unless the caller supplied an explicit mtime, or is an
+     * AUTH_ATTR (SMB/Windows) caller managing the write time itself. */
+    int                            bump_mtime = !(request->setattr.set_attr->va_set_mask &
+                                                  CHIMERA_VFS_ATTR_MTIME) &&
+        request->cred->flavor != CHIMERA_VFS_AUTH_ATTR;
+
     diskfs_apply_attrs(inode, request->setattr.set_attr);
+
+    if (bump_mtime) {
+        struct timespec now;
+        clock_gettime(CLOCK_REALTIME, &now);
+        inode->mtime_sec  = now.tv_sec;
+        inode->mtime_nsec = now.tv_nsec;
+    }
+
     diskfs_map_attrs(thread, &request->setattr.r_post_attr, inode);
     diskfs_op_ok(request, p->txn);
 } /* diskfs_setattr_trunc_done */
@@ -11242,6 +11303,12 @@ diskfs_remove_at_removed_cb(
         inode->nlink = 0;
     } else {
         inode->nlink--;
+        /* Removing one of several hard links changes the surviving inode's
+         * link count, which is a status change: bump its ctime. */
+        if (inode->nlink > 0) {
+            inode->ctime_sec  = now.tv_sec;
+            inode->ctime_nsec = now.tv_nsec;
+        }
     }
 
     if (inode->nlink == 0) {
@@ -11297,7 +11364,7 @@ diskfs_remove_at_child_cb(
         return;
     }
 
-    if (S_ISDIR(inode->mode) && inode->nlink > 2) {
+    if (S_ISDIR(inode->mode) && !diskfs_dir_is_empty(thread, inode)) {
         diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOTEMPTY);
         return;
     }
@@ -11792,6 +11859,14 @@ diskfs_open_at_existing_cb(
         return;
     }
 
+    /* O_NOFOLLOW: opening an existing symlink final component fails with ELOOP
+     * rather than following it. */
+    if (S_ISLNK(inode->mode) &&
+        (request->open_at.flags & CHIMERA_VFS_OPEN_NOFOLLOW)) {
+        diskfs_op_fail(request, p->txn, CHIMERA_VFS_ELOOP);
+        return;
+    }
+
     if ((request->open_at.flags & CHIMERA_VFS_OPEN_DIRECTORY) &&
         !S_ISDIR(inode->mode)) {
         diskfs_op_fail(request, p->txn,
@@ -11930,6 +12005,18 @@ diskfs_open_at_check_cb(
             diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOENT);
             return;
         }
+
+        /* Creating a new name requires write+search permission on the parent
+         * directory.  Enforce POSIX semantics for AUTH_UNIX callers (root is
+         * exempt); SMB/ACL (AUTH_ATTR) callers are authorized by the engine. */
+        if (request->cred->flavor == CHIMERA_VFS_AUTH_UNIX &&
+            request->cred->uid != 0 &&
+            !diskfs_inode_access(thread, p->inode_stash[0], request->cred,
+                                 CHIMERA_ACE_APPEND_DATA | CHIMERA_ACE_EXECUTE)) {
+            diskfs_op_fail(request, p->txn, CHIMERA_VFS_EACCES);
+            return;
+        }
+
         diskfs_inode_alloc_async(thread, p->txn, diskfs_open_at_alloc_cb, request);
         return;
     }
@@ -14917,7 +15004,8 @@ diskfs_rename_at_existing_cb(
         diskfs_op_fail(request, p->txn, err);
         return;
     }
-    if (S_ISDIR(existing_inode->mode) && existing_inode->nlink > 2) {
+    if (S_ISDIR(existing_inode->mode) &&
+        !diskfs_dir_is_empty(p->thread, existing_inode)) {
         diskfs_rename_at_unlock_parents(request);
         diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOTEMPTY);
         return;
@@ -14970,6 +15058,10 @@ diskfs_rename_at_perform_final_cb(
         np->ctime_sec  = now.tv_sec;
         np->ctime_nsec = now.tv_nsec;
     }
+
+    /* POSIX: a successful rename marks the renamed file's status-change time. */
+    child->ctime_sec  = now.tv_sec;
+    child->ctime_nsec = now.tv_nsec;
 
     diskfs_map_attrs(thread, &request->rename_at.r_fromdir_post_attr, op);
     diskfs_map_attrs(thread, &request->rename_at.r_todir_post_attr, np);
