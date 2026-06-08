@@ -19,6 +19,7 @@
 #include "vfs/vfs.h"
 #include "vfs/vfs_internal.h"
 #include "vfs/vfs_acl.h"
+#include "vfs/vfs_access.h"
 #include "memfs.h"
 #include "common/logging.h"
 #include "common/misc.h"
@@ -1074,7 +1075,34 @@ memfs_thread_destroy(void *private_data)
     free(thread);
 } /* memfs_thread_destroy */
 
-static inline void
+/*
+ * Lightweight POSIX permission check on an inode for an AUTH_UNIX caller: build
+ * a minimal attr (mode/uid/gid, plus ACL if present) and run it through the
+ * canonical access engine.  Returns non-zero if all `requested` ACE rights are
+ * granted.  Used to authorize creation in a parent directory at open/create
+ * time (the only place that knows whether a name is actually being created).
+ */
+static int
+memfs_inode_access(
+    struct memfs_inode            *inode,
+    const struct chimera_vfs_cred *cred,
+    uint32_t                       requested)
+{
+    struct chimera_vfs_attrs attr;
+
+    attr.va_set_mask = CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_UID |
+        CHIMERA_VFS_ATTR_GID;
+    attr.va_mode = inode->mode;
+    attr.va_uid  = inode->uid;
+    attr.va_gid  = inode->gid;
+    if (inode->acl) {
+        attr.va_set_mask |= CHIMERA_VFS_ATTR_ACL;
+        attr.va_acl       = inode->acl;
+    }
+    return chimera_vfs_access_allowed(&attr, cred, requested);
+} /* memfs_inode_access */
+
+static void
 memfs_map_attrs(
     struct memfs_shared      *shared,
     struct chimera_vfs_attrs *attr,
@@ -1569,7 +1597,18 @@ memfs_setattr(
      * inode's size lives on the inode, a stream's on its node), then mask the
      * SIZE bit off so memfs_apply_attrs only touches base-inode metadata. */
     if ((attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) && S_ISREG(inode->mode)) {
-        *p_size            = attr->va_size;
+        *p_size = attr->va_size;
+        /* POSIX: a successful (f)truncate marks both the last data modification
+         * (mtime) and last status change (ctime) times for update.  ctime is
+         * stamped unconditionally by memfs_apply_attrs; bump mtime here unless
+         * the caller supplied an explicit mtime (in which case apply_attrs
+         * applies the caller's value).  AUTH_ATTR (SMB/Windows) callers manage
+         * the write time themselves (sticky write-time, SetInfo EndOfFile), so
+         * the implicit bump applies only to POSIX/NFS callers. */
+        if (!(attr->va_set_mask & CHIMERA_VFS_ATTR_MTIME) &&
+            request->cred->flavor != CHIMERA_VFS_AUTH_ATTR) {
+            chimera_vfs_realtime(&inode->mtime);
+        }
         attr->va_set_mask &= ~CHIMERA_VFS_ATTR_SIZE;
         memfs_apply_attrs(inode, attr);
         attr->va_set_mask |= CHIMERA_VFS_ATTR_SIZE;
@@ -2232,6 +2271,11 @@ memfs_remove_at(
         inode->nlink = 0;
     } else {
         inode->nlink--;
+        /* Removing one of several hard links changes the surviving inode's
+         * link count, which is a status change: bump its ctime. */
+        if (inode->nlink > 0) {
+            inode->ctime = now;
+        }
     }
 
     /* Don't drop the caller's requested attrs even when the inode is
@@ -2496,6 +2540,19 @@ memfs_open_at(
             return;
         }
 
+        /* Creating a new name requires write+search permission on the parent
+         * directory.  Enforce POSIX semantics for AUTH_UNIX callers (root is
+         * exempt); SMB/ACL (AUTH_ATTR) callers are authorized by the engine. */
+        if (request->cred->flavor == CHIMERA_VFS_AUTH_UNIX &&
+            request->cred->uid != 0 &&
+            !memfs_inode_access(parent_inode, request->cred,
+                                CHIMERA_ACE_APPEND_DATA | CHIMERA_ACE_EXECUTE)) {
+            pthread_mutex_unlock(&parent_inode->lock);
+            request->status = CHIMERA_VFS_EACCES;
+            request->complete(request);
+            return;
+        }
+
         inode = memfs_inode_alloc_thread(thread);
 
         pthread_mutex_lock(&inode->lock);
@@ -2541,6 +2598,17 @@ memfs_open_at(
         if (!inode) {
             pthread_mutex_unlock(&parent_inode->lock);
             request->status = CHIMERA_VFS_ENOENT;
+            request->complete(request);
+            return;
+        }
+
+        /* O_NOFOLLOW: a creating open that resolves to an existing symlink as
+         * the final component must fail with ELOOP rather than open the link.
+         * memfs_inode_get_inum() returned the inode locked, so release both. */
+        if (S_ISLNK(inode->mode) && (flags & CHIMERA_VFS_OPEN_NOFOLLOW)) {
+            pthread_mutex_unlock(&inode->lock);
+            pthread_mutex_unlock(&parent_inode->lock);
+            request->status = CHIMERA_VFS_ELOOP;
             request->complete(request);
             return;
         }
@@ -4181,6 +4249,55 @@ memfs_rename_at(
         return;
     }
 
+    /* POSIX: a directory may not be renamed into itself or one of its own
+     * descendants (EINVAL).  Detect this before locking the child -- otherwise,
+     * when the source is the destination parent (or an ancestor of it), locking
+     * the child would re-lock an already-held inode and self-deadlock.  Walk the
+     * destination parent's ancestry; the two already-held parent inodes are read
+     * directly, any others are briefly locked. */
+    {
+        uint64_t cur_inum = new_parent_inode->inum;
+        uint64_t par_inum = new_parent_inode->dir.parent_inum;
+        uint32_t par_gen  = new_parent_inode->dir.parent_gen;
+        int      bad      = 0;
+
+        for (int depth = 0; depth < CHIMERA_VFS_PATH_MAX; depth++) {
+            if (cur_inum == old_dirent->inum) {
+                bad = 1;
+                break;
+            }
+            if (par_inum == cur_inum) {
+                break;  /* reached the root (parent of root is itself) */
+            }
+            cur_inum = par_inum;
+            if (par_inum == new_parent_inode->inum) {
+                par_inum = new_parent_inode->dir.parent_inum;
+                par_gen  = new_parent_inode->dir.parent_gen;
+            } else if (par_inum == old_parent_inode->inum) {
+                par_inum = old_parent_inode->dir.parent_inum;
+                par_gen  = old_parent_inode->dir.parent_gen;
+            } else {
+                struct memfs_inode *anc = memfs_inode_get_inum(shared, par_inum, par_gen);
+                if (!anc) {
+                    break;
+                }
+                par_inum = anc->dir.parent_inum;
+                par_gen  = anc->dir.parent_gen;
+                pthread_mutex_unlock(&anc->lock);
+            }
+        }
+
+        if (bad) {
+            pthread_mutex_unlock(&old_parent_inode->lock);
+            if (cmp != 0) {
+                pthread_mutex_unlock(&new_parent_inode->lock);
+            }
+            request->status = CHIMERA_VFS_EINVAL;
+            request->complete(request);
+            return;
+        }
+    }
+
     child_inode = memfs_inode_get_inum(shared, old_dirent->inum, old_dirent->gen);
 
     if (!child_inode) {
@@ -4281,6 +4398,9 @@ memfs_rename_at(
     new_parent_inode->mtime = now;
     new_parent_inode->ctime = now;
 
+    /* POSIX: a successful rename marks the renamed file's status-change time. */
+    child_inode->ctime = now;
+
     memfs_map_attrs(shared, &request->rename_at.r_fromdir_post_attr, old_parent_inode, request->fh);
     memfs_map_attrs(shared, &request->rename_at.r_todir_post_attr, new_parent_inode, request->rename_at.new_fh);
 
@@ -4345,6 +4465,10 @@ memfs_link_at(
     }
 
     if (unlikely(S_ISDIR(inode->mode))) {
+        /* Hard-linking a directory is not permitted.  The VFS reports the
+         * physical condition as EISDIR (NFS4 -> NFS4ERR_ISDIR, SMB ->
+         * STATUS_FILE_IS_A_DIRECTORY); the POSIX link() wrapper maps EISDIR to
+         * EPERM per link(2). */
         pthread_mutex_unlock(&parent_inode->lock);
         pthread_mutex_unlock(&inode->lock);
         request->status = CHIMERA_VFS_EISDIR;

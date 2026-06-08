@@ -124,6 +124,10 @@ struct chimera_vfs_mount_options {
  * set_attr (used for the SMB OVERWRITE / OVERWRITE_IF / SUPERSEDE
  * dispositions).  Backends that do not honor it simply open the file. */
 #define CHIMERA_VFS_OPEN_TRUNCATE       (1U << 7)
+/* Access mode: READ_ONLY for O_RDONLY, WRITE_ONLY for O_WRONLY, neither for
+ * O_RDWR.  Read access is required unless WRITE_ONLY; write access is required
+ * unless READ_ONLY.  Used by the open path to authorize the requested access. */
+#define CHIMERA_VFS_OPEN_WRITE_ONLY     (1U << 8)
 
 /* Allocate flags */
 #define CHIMERA_VFS_ALLOCATE_DEALLOCATE 0x01

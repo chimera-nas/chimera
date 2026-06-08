@@ -60,6 +60,7 @@ struct chimera_posix_fd_entry {
     int                             eof_flag;    // For FILE* feof() support
     int                             error_flag;  // For FILE* ferror() support
     int                             ungetc_char; // For FILE* ungetc() support (-1 = none)
+    unsigned int                    oflags;      // Raw open(2) flags (for O_ACCMODE checks)
 } __attribute__((aligned(64)));
 
 // CHIMERA_FILE is a pointer to an fd_entry for FILE* operations
@@ -274,8 +275,22 @@ chimera_posix_to_chimera_flags(int flags)
         out |= CHIMERA_VFS_OPEN_DIRECTORY;
     }
 
+    if (flags & O_TRUNC) {
+        out |= CHIMERA_VFS_OPEN_TRUNCATE;
+    }
+
+#ifdef O_NOFOLLOW
+    if (flags & O_NOFOLLOW) {
+        out |= CHIMERA_VFS_OPEN_NOFOLLOW;
+    }
+#endif /* ifdef O_NOFOLLOW */
+
     if ((flags & O_ACCMODE) == O_RDONLY) {
         out |= CHIMERA_VFS_OPEN_READ_ONLY;
+    } else if ((flags & O_ACCMODE) == O_WRONLY) {
+        out |= CHIMERA_VFS_OPEN_WRITE_ONLY;
+    } else { /* O_RDWR: request both read and write access */
+        out |= CHIMERA_VFS_OPEN_READ_ONLY | CHIMERA_VFS_OPEN_WRITE_ONLY;
     }
 
     return out;
@@ -354,6 +369,7 @@ chimera_posix_fd_alloc(
     entry->eof_flag      = 0;
     entry->error_flag    = 0;
     entry->ungetc_char   = -1;
+    entry->oflags        = 0;
 
     return fd;
 } // chimera_posix_fd_alloc

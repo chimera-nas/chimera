@@ -187,6 +187,16 @@ chimera_vfs_open_at_hs(
 
     chimera_vfs_abort_if(!set_attr, "no setattr provided");
 
+    /* On a creating open the trailing component is a new name; reject one longer
+     * than {NAME_MAX} with ENAMETOOLONG.  FS_PATH_OP backends receive the whole
+     * path as `name` and let the kernel enforce this. */
+    if ((flags & CHIMERA_VFS_OPEN_CREATE) &&
+        !(handle->vfs_module->capabilities & CHIMERA_VFS_CAP_FS_PATH_OP) &&
+        namelen >= CHIMERA_VFS_NAME_MAX) {
+        callback(CHIMERA_VFS_ENAMETOOLONG, NULL, NULL, NULL, NULL, NULL, private_data);
+        return;
+    }
+
     request = chimera_vfs_request_alloc_by_handle(thread, cred, handle);
 
     if (CHIMERA_VFS_IS_ERR(request)) {
