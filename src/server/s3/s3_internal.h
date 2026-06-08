@@ -35,6 +35,22 @@ enum chimera_s3_http_state {
 
 #define CHIMERA_S3_UPLOAD_ID_LEN 32
 
+/* S3 keys are limited to 1024 bytes; delimiters are normally a single
+ * character but we allow a small amount of slack. */
+#define CHIMERA_S3_KEY_MAX       1024
+#define CHIMERA_S3_DELIM_MAX     16
+
+/* A single collected listing element: either an object (is_prefix == 0) or a
+ * rolled-up CommonPrefix (is_prefix == 1). Objects carry the attributes needed
+ * to render <Contents>; the key string is heap-allocated and NUL-terminated. */
+struct chimera_s3_list_entry {
+    int             is_prefix;
+    uint64_t        size;
+    uint64_t        etag[2];
+    struct timespec mtime;
+    char           *key;
+};
+
 struct chimera_server_s3_thread;
 struct chimera_s3_multipart_table;
 struct chimera_s3_multipart_upload;
@@ -114,17 +130,28 @@ struct chimera_s3_request {
         } put;
 
         struct {
-            int               prefix_len;
-            int               base_path_len;
-            int               filter_len;
-            int               max_keys;
-            int               versions;   /* emit ListVersionsResult, not ListBucketResult */
-            char             *rp;
-            struct evpl_iovec response;
-            uint8_t           root_fh[CHIMERA_VFS_FH_SIZE];
-            char              prefix[256];
-            char              base_path[256];
-            char              filter[256];
+            int                           list_type;     /* 1 (V1) or 2 (V2) */
+            int                           max_keys;
+            int                           encoding_url;  /* encoding-type=url */
+            int                           versions;      /* emit ListVersionsResult */
+            int                           prefix_len;
+            int                           delimiter_len;
+            int                           enumdir_len;   /* prefix up to last delimiter */
+            int                           has_start;     /* skip past 'start' (exclusive) */
+            int                           start_len;
+            int                           marker_len;     /* V1 marker echo */
+            int                           ctoken_len;     /* V2 continuation-token echo */
+            int                           startafter_len; /* V2 start-after echo */
+            int                           n_entries;
+            int                           cap_entries;
+            struct chimera_s3_list_entry *entries;
+            char                          delimiter[CHIMERA_S3_DELIM_MAX];
+            char                          prefix[CHIMERA_S3_KEY_MAX];
+            char                          enumdir[CHIMERA_S3_KEY_MAX];
+            char                          start[CHIMERA_S3_KEY_MAX];
+            char                          marker[CHIMERA_S3_KEY_MAX];
+            char                          ctoken[CHIMERA_S3_KEY_MAX];
+            char                          startafter[CHIMERA_S3_KEY_MAX];
         } list;
 
         struct {
