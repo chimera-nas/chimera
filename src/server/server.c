@@ -48,6 +48,7 @@ struct chimera_server_config {
     int                                   nfs_tcp_rdma_port;
     int                                   nfs_lockmgr_port;
     int                                   nfs_port;
+    int                                   s3_port;
     int                                   nfs_data_server;
     uint64_t                              nfs_server_scope;
     int                                   external_portmap;
@@ -208,6 +209,7 @@ chimera_server_config_init(void)
     /* NFS service port (default 2049); data-server mode binds only the NFSv4
      * service so a pNFS data server can coexist with an MDS on one host. */
     config->nfs_port        = 2049;
+    config->s3_port         = 5000;
     config->nfs_data_server = 0;
 
     /* NFSv4.1 server identity (EXCHANGE_ID eir_server_scope).  Clients treat two
@@ -610,6 +612,20 @@ chimera_server_config_get_nfs_port(const struct chimera_server_config *config)
 {
     return config->nfs_port;
 } /* chimera_server_config_get_nfs_port */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_s3_port(
+    struct chimera_server_config *config,
+    int                           port)
+{
+    config->s3_port = port;
+} /* chimera_server_config_set_s3_port */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_s3_port(const struct chimera_server_config *config)
+{
+    return config->s3_port;
+} /* chimera_server_config_get_s3_port */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_nfs_data_server(

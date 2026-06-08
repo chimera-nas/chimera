@@ -557,6 +557,12 @@ main(
         chimera_server_config_set_nfs_port(server_config, int_value);
     }
 
+    json_value = json_object_get(server_params, "s3_port");
+    if (json_is_integer(json_value)) {
+        int_value = json_integer_value(json_value);
+        chimera_server_config_set_s3_port(server_config, int_value);
+    }
+
     /* NFSv4.1 server identity (EXCHANGE_ID server scope).  Set a distinct value
      * on independent servers that do not share state -- e.g. a pNFS data server
      * co-deployed with its MDS -- so v4.1 clients do not coalesce them. */
