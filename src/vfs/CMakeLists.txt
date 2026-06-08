@@ -50,6 +50,7 @@ add_subdirectory(root)
 add_subdirectory(memfs)
 add_subdirectory(linux)
 add_subdirectory(nfs)
+add_subdirectory(smb)
 
 if (CHIMERA_VFS_IO_URING)
     add_subdirectory(io_uring)
@@ -63,7 +64,7 @@ endif()
 
 target_link_libraries(chimera_vfs
     chimera_vfs_root chimera_vfs_memfs chimera_vfs_linux chimera_vfs_diskfs
-    chimera_vfs_nfs
+    chimera_vfs_nfs chimera_vfs_smb
     chimera_common prometheus-c xxhash dl urcu-qsbr)
 
 if (CHIMERA_VFS_IO_URING)
