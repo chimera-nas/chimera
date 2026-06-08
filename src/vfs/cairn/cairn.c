@@ -1770,29 +1770,17 @@ cairn_apply_attrs(
 
     if (set_mask & CHIMERA_VFS_ATTR_ATIME) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_ATIME;
-        if (attr->va_atime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
-            inode->atime = now;
-        } else if (attr->va_atime.tv_nsec != CHIMERA_VFS_TIME_OMIT) {
-            inode->atime = attr->va_atime;
-        }
+        chimera_vfs_resolve_set_time(&attr->va_atime, &now, &inode->atime);
     }
 
     if (set_mask & CHIMERA_VFS_ATTR_MTIME) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_MTIME;
-        if (attr->va_mtime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
-            inode->mtime = now;
-        } else if (attr->va_mtime.tv_nsec != CHIMERA_VFS_TIME_OMIT) {
-            inode->mtime = attr->va_mtime;
-        }
+        chimera_vfs_resolve_set_time(&attr->va_mtime, &now, &inode->mtime);
     }
 
     if (set_mask & CHIMERA_VFS_ATTR_BTIME) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_BTIME;
-        if (attr->va_btime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
-            inode->btime = now;
-        } else if (attr->va_btime.tv_nsec != CHIMERA_VFS_TIME_OMIT) {
-            inode->btime = attr->va_btime;
-        }
+        chimera_vfs_resolve_set_time(&attr->va_btime, &now, &inode->btime);
     }
 
     if (set_mask & CHIMERA_VFS_ATTR_DOS_ATTRIBUTES) {
@@ -1805,11 +1793,7 @@ cairn_apply_attrs(
      * implicit metadata change.  See memfs_apply_attrs() for the rationale. */
     if (set_mask & CHIMERA_VFS_ATTR_CTIME) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_CTIME;
-        if (attr->va_ctime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
-            inode->ctime = now;
-        } else if (attr->va_ctime.tv_nsec != CHIMERA_VFS_TIME_OMIT) {
-            inode->ctime = attr->va_ctime;
-        }
+        chimera_vfs_resolve_set_time(&attr->va_ctime, &now, &inode->ctime);
     } else {
         inode->ctime = now;
     }
