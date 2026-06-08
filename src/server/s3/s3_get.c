@@ -4,6 +4,7 @@
 
 #include <stdio.h>
 #include <time.h>
+#include <sys/stat.h>
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
@@ -154,15 +155,73 @@ chimera_s3_get_lookup_callback(
         return;
     }
 
+    /* Only regular files are S3 objects. A key can resolve to a directory
+     * (chimera stores hierarchical keys as a real directory tree) or to an
+     * entry whose lookup did not return the size/mtime/fh the object ETag is
+     * built from. Either way it is not a readable object: report NoSuchKey
+     * instead of asserting in chimera_s3_compute_etag. */
+    {
+        const uint64_t need = CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_SIZE |
+            CHIMERA_VFS_ATTR_MTIME;
+        int            is_dir = (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
+            (attr->va_mode & S_IFMT) == S_IFDIR;
+
+        if (is_dir || (attr->va_set_mask & need) != need) {
+            request->status    = CHIMERA_S3_STATUS_NO_SUCH_KEY;
+            request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
+            if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
+                s3_server_respond(evpl, request);
+            }
+            return;
+        }
+    }
+
     chimera_s3_attach_etag(request->http_request, attr);
     chimera_s3_attach_last_modified(request->http_request, attr);
 
     request->file_real_length = attr->va_size;
 
-    if (request->file_length == 0) {
+    /* Resolve the requested byte range now that the object size is known. The
+     * range was parsed before the size was available, so open-ended and suffix
+     * forms still carry sentinels:
+     *   no range          -> file_offset 0, file_length 0
+     *   bytes=N-M (closed) -> file_offset N, file_length M-N+1
+     *   bytes=N-  (open)   -> file_offset N, file_length -1
+     *   bytes=-N  (suffix) -> file_offset -1, file_length N
+     * Leaving a negative length (or offset) in place makes file_left wrap to a
+     * huge unsigned value and the read loop in chimera_s3_get_send spins
+     * forever. */
+    if (request->file_offset < 0) {
+        /* suffix: last file_length bytes */
+        int64_t n = request->file_length;
+        if (n > request->file_real_length) {
+            n = request->file_real_length;
+        }
+        request->file_offset = request->file_real_length - n;
+        request->file_length = n;
+    } else if (request->file_length < 0) {
+        /* open-ended: from file_offset to EOF */
+        request->file_length = request->file_real_length - request->file_offset;
+    } else if (request->file_length == 0) {
+        /* whole object */
+        request->file_offset = 0;
         request->file_length = request->file_real_length;
-        request->file_left   = request->file_length;
+    } else {
+        /* closed range: clamp to EOF */
+        if (request->file_offset > request->file_real_length) {
+            request->file_offset = request->file_real_length;
+        }
+        if (request->file_offset + request->file_length > request->file_real_length) {
+            request->file_length = request->file_real_length - request->file_offset;
+        }
     }
+
+    if (request->file_length < 0) {
+        request->file_length = 0;
+    }
+
+    request->file_left       = request->file_length;
+    request->file_cur_offset = request->file_offset;
 
     chimera_s3_abort_if(!(attr->va_set_mask & CHIMERA_VFS_ATTR_FH), "put lookup callback: no fh");
 
