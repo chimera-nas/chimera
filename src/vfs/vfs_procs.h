@@ -1061,24 +1061,31 @@ chimera_vfs_remove_stream(
 
 /* Explicit multi-operation transactions (CHIMERA_VFS_CAP_TRANSACTIONAL).
  *
- * begin_transaction resolves the module from (fh, fhlen).  If the module is not
- * transactional the callback fires immediately with (OK, NULL) and nothing is
- * dispatched -- the caller then runs in legacy autocommit mode (leaves
- * request->transaction NULL on each op).  Otherwise the backend returns a handle
- * the caller attaches to request->transaction on every enlisted op and passes
- * back to end_transaction.  `ts` is the wait-die priority: assign it once at the
- * first attempt (e.g. chimera_vfs_txn_alloc_ts()) and reuse the same value when
- * retrying after ETXN_CONFLICT so the transaction cannot starve. */
-void
+ * begin_transaction is a fast, local, synchronous action: it allocates the
+ * transaction handle on the calling thread and returns it immediately.  The
+ * transaction is itself the routing key -- every enlisted op (and end) is
+ * steered to the transaction's single owning thread.  `hint_fh` only steers
+ * that choice: when delegation threads are configured the owner is picked from
+ * the hint's hash (so a read/write transaction lands on the worker that owns
+ * the file), and a NULL hint spreads across workers; without delegation threads
+ * the transaction is always owned by the thread that opened it.  The module is
+ * resolved from `hint_fh`; if it is not transactional this returns NULL and the
+ * caller runs in legacy autocommit mode (leaves request->transaction NULL on
+ * each op).  Otherwise it returns a handle the caller attaches to
+ * request->transaction on every enlisted op and passes back to end_transaction;
+ * a fire-and-forget begin op is dispatched to the owning thread so the backend
+ * can set up per-transaction state before the first enlisted op arrives.  `ts`
+ * is the wait-die priority: assign it once at the first attempt (e.g.
+ * chimera_vfs_txn_alloc_ts()) and reuse the same value when retrying after
+ * ETXN_CONFLICT so the transaction cannot starve. */
+struct chimera_vfs_transaction *
 chimera_vfs_begin_transaction(
-    struct chimera_vfs_thread       *thread,
-    const struct chimera_vfs_cred   *cred,
-    const void                      *fh,
-    int                              fhlen,
-    enum chimera_vfs_txn_mode        mode,
-    uint64_t                         ts,
-    chimera_vfs_begin_txn_callback_t callback,
-    void                            *private_data);
+    struct chimera_vfs_thread     *thread,
+    const struct chimera_vfs_cred *cred,
+    const void                    *hint_fh,
+    int                            hint_fhlen,
+    enum chimera_vfs_txn_mode      mode,
+    uint64_t                       ts);
 
 /* end_transaction commits (durably for COMMIT_SYNC) or aborts the transaction.
  * A NULL txn is a no-op (the non-transactional / autocommit case).  A COMMIT_*

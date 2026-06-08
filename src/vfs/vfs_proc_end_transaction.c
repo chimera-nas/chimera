@@ -9,14 +9,20 @@
 static void
 chimera_vfs_end_transaction_complete(struct chimera_vfs_request *request)
 {
-    struct chimera_vfs_thread     *thread   = request->thread;
-    chimera_vfs_end_txn_callback_t callback = request->proto_callback;
+    struct chimera_vfs_thread      *thread   = request->thread;
+    chimera_vfs_end_txn_callback_t  callback = request->proto_callback;
+    struct chimera_vfs_transaction *txn      = request->transaction;
 
     chimera_vfs_complete(request);
 
     /* ETXN_CONFLICT here (e.g. cairn optimistic-commit validation) means the
-     * transaction was already rolled back; the caller must retry from the top. */
+     * transaction was already rolled back; the caller must retry from the top
+     * (which allocates a fresh handle), so the old handle is dead either way. */
     callback(request->status, request->proto_private_data);
+
+    /* The core owns the handle's memory (allocated locally at begin); the
+     * backend released only its own per-transaction resources at commit/abort. */
+    free(txn);
 
     chimera_vfs_request_free(thread, request);
 } /* chimera_vfs_end_transaction_complete */

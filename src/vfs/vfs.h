@@ -421,11 +421,6 @@ struct chimera_vfs_transaction {
     struct chimera_vfs_module *module;     /* core-owned */
 };
 
-typedef void (*chimera_vfs_begin_txn_callback_t)(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_transaction *txn,   /* NULL = backend is non-transactional */
-    void                           *private_data);
-
 typedef void (*chimera_vfs_end_txn_callback_t)(
     enum chimera_vfs_error error_code,     /* ETXN_CONFLICT => retry from the top */
     void                  *private_data);
@@ -1102,14 +1097,14 @@ struct chimera_vfs_request {
         } get_layout;
 
         struct {
-            enum chimera_vfs_txn_mode mode;              /* begin: requested mode */
+            /* begin carries nothing: the core stamps the handle (ts/mode/
+             * route_hash/module) at local alloc and links it via
+             * request->transaction, so the backend's fire-and-forget begin
+             * handler just initializes its in-place state.  end carries the
+             * commit/abort disposition and the caller's completion. */
             enum chimera_vfs_txn_end end_flag;           /* end: commit/abort */
-            uint64_t                         ts;         /* begin: stable wait-die priority */
-            uint64_t                         route_hash; /* begin: affinity key */
-            struct chimera_vfs_transaction  *r_txn;      /* begin: backend returns handle here */
-            chimera_vfs_begin_txn_callback_t begin_callback;
-            chimera_vfs_end_txn_callback_t   end_callback;
-            void                            *private_data;
+            chimera_vfs_end_txn_callback_t end_callback;
+            void                          *private_data;
         } transaction_op;
     };
 };
@@ -1409,9 +1404,17 @@ struct chimera_vfs_module {
      * where feasible.
      */
 
-    void (*dispatch)(
+    void     (*dispatch)(
         struct chimera_vfs_request *request,
         void                       *private_data);
+
+    /* Required when CHIMERA_VFS_CAP_TRANSACTIONAL is set: sizeof the backend's
+     * transaction object (whose first member is struct chimera_vfs_transaction).
+     * The VFS core allocates this many bytes locally at begin so the handle is
+     * available synchronously; the backend initializes it in place in its
+     * OP_BEGIN_TRANSACTION handler (running on the transaction's owning thread)
+     * and must NOT free it (the core owns the allocation). */
+    uint32_t txn_size;
 
 };
 

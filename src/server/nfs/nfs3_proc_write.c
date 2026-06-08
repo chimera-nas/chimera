@@ -205,25 +205,18 @@ chimera_nfs3_write_open_callback(
 } /* chimera_nfs3_write_open_callback */
 
 static void
-chimera_nfs3_write_began(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_transaction *txn,
-    void                           *private_data)
+chimera_nfs3_write_begin_attempt(struct nfs_request *req)
 {
-    struct nfs_request               *req    = private_data;
     struct chimera_server_nfs_thread *thread = req->thread;
     struct WRITE3args                *args   = req->args_write;
 
-    if (error_code != CHIMERA_VFS_OK) {
-        if (error_code == CHIMERA_VFS_ETXN_CONFLICT) {
-            chimera_nfs3_write_retry(req);
-        } else {
-            chimera_nfs3_write_finish_error(req, error_code, 0);
-        }
-        return;
-    }
-
-    req->txn = txn;     /* NULL for a non-transactional backend (autocommit) */
+    /* Begin is local and synchronous (NULL handle => non-transactional backend,
+     * autocommit); it cannot conflict, so go straight to the open. */
+    req->txn = chimera_vfs_begin_transaction(thread->vfs_thread, &req->cred,
+                                             args->file.data.data,
+                                             args->file.data.len,
+                                             CHIMERA_VFS_TXN_WRITE,
+                                             req->txn_ts);
 
     chimera_vfs_open_fh(thread->vfs_thread, &req->cred, req->txn,
                         args->file.data.data,
@@ -231,21 +224,6 @@ chimera_nfs3_write_began(
                         CHIMERA_VFS_OPEN_INFERRED,
                         chimera_nfs3_write_open_callback,
                         req);
-} /* chimera_nfs3_write_began */
-
-static void
-chimera_nfs3_write_begin_attempt(struct nfs_request *req)
-{
-    struct chimera_server_nfs_thread *thread = req->thread;
-    struct WRITE3args                *args   = req->args_write;
-
-    chimera_vfs_begin_transaction(thread->vfs_thread, &req->cred,
-                                  args->file.data.data,
-                                  args->file.data.len,
-                                  CHIMERA_VFS_TXN_WRITE,
-                                  req->txn_ts,
-                                  chimera_nfs3_write_began,
-                                  req);
 } /* chimera_nfs3_write_begin_attempt */
 
 void

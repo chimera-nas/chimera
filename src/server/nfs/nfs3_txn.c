@@ -106,38 +106,18 @@ chimera_nfs3_txn_finish(
 } /* chimera_nfs3_txn_finish */
 
 static void
-chimera_nfs3_txn_began(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_transaction *txn,
-    void                           *private_data)
-{
-    struct nfs_request *req = private_data;
-
-    if (error_code == CHIMERA_VFS_ETXN_CONFLICT) {
-        chimera_nfs3_txn_replay(req);
-        return;
-    }
-
-    req->txn = txn;     /* NULL for a non-transactional backend (autocommit) */
-
-    if (error_code != CHIMERA_VFS_OK) {
-        req->txn_op_status = error_code;
-        req->txn_reply(req);
-        return;
-    }
-
-    req->txn_op_status = CHIMERA_VFS_OK;
-    req->txn_start(req);
-} /* chimera_nfs3_txn_began */
-
-static void
 chimera_nfs3_txn_attempt(struct nfs_request *req)
 {
     struct chimera_server_nfs_thread *thread = req->thread;
 
-    chimera_vfs_begin_transaction(thread->vfs_thread, &req->cred,
-                                  req->txn_fh, req->txn_fhlen, req->txn_mode,
-                                  req->txn_ts, chimera_nfs3_txn_began, req);
+    /* Begin is a fast, local action that returns the handle synchronously (NULL
+     * for a non-transactional backend -> autocommit).  It cannot conflict; a
+     * conflict can only surface later at commit, replaying from here. */
+    req->txn = chimera_vfs_begin_transaction(thread->vfs_thread, &req->cred,
+                                             req->txn_fh, req->txn_fhlen,
+                                             req->txn_mode, req->txn_ts);
+    req->txn_op_status = CHIMERA_VFS_OK;
+    req->txn_start(req);
 } /* chimera_nfs3_txn_attempt */
 
 void

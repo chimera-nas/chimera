@@ -4904,6 +4904,23 @@ cairn_remove_xattr(
     cairn_queue_request(thread, request);
 } /* cairn_remove_xattr */
 
+/* Classify a rocksdb commit error string as a retriable write-conflict.
+ *
+ * The rocksdb C API does not surface the Status code from commit -- only its
+ * ToString() text via errptr -- so we must match on that text.  An
+ * OptimisticTransactionDB commit that loses a write-conflict race returns
+ * Status::Busy ("Resource busy: ...") and the pessimistic/timeout paths return
+ * Status::TryAgain / Status::TimedOut ("Operation timed out: ..." / "... Try
+ * again ..."); everything else is a hard failure.  Centralized here so the
+ * version-sensitive string set lives in exactly one place. */
+static inline int
+cairn_commit_err_is_conflict(const char *err)
+{
+    return err && (strstr(err, "Busy") || strstr(err, "busy") ||
+                   strstr(err, "TryAgain") || strstr(err, "Try again") ||
+                   strstr(err, "timed out") || strstr(err, "Timed out"));
+} /* cairn_commit_err_is_conflict */
+
 /*
  * Commit an explicit transaction once (no internal replay).  Data batch first
  * (idempotent, no conflict), then the optimistic metadata transaction.  A
@@ -4951,8 +4968,7 @@ cairn_txn_commit_once(
     if (ctxn->meta_txn) {
         rocksdb_transaction_commit(ctxn->meta_txn, &err);
         if (err) {
-            int conflict = (strstr(err, "busy") || strstr(err, "Busy") ||
-                            strstr(err, "timed out") || strstr(err, "TryAgain"));
+            int conflict = cairn_commit_err_is_conflict(err);
 
             if (!conflict) {
                 chimera_cairn_error("explicit txn meta commit: %s", err);
@@ -4981,18 +4997,14 @@ cairn_begin_transaction(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct cairn_txn *ctxn = malloc(sizeof(*ctxn));
-
     (void) thread;
     (void) shared;
     (void) private_data;
 
-    ctxn->meta_txn   = NULL;   /* both lazily created by the first enlisted op */
-    ctxn->data_batch = NULL;
-
-    /* The VFS core stamps core.ts/route_hash/mode/module in begin-complete. */
-    request->transaction_op.r_txn = &ctxn->core;
-    request->status               = CHIMERA_VFS_OK;
+    /* The core allocated and zeroed the handle (cairn_txn, txn_size below) and
+     * stamped its core header; meta_txn/data_batch are already NULL and are
+     * created lazily by the first enlisted op.  Nothing to set up here. */
+    request->status = CHIMERA_VFS_OK;
     request->complete(request);
 } /* cairn_begin_transaction */
 
@@ -5028,8 +5040,8 @@ cairn_end_transaction(
                                        CHIMERA_VFS_TXN_COMMIT_SYNC);
     }
 
-    free(ctxn);
-
+    /* The core owns and frees the handle (cairn_txn) at end-completion; here we
+     * only released the rocksdb txn/batch it held. */
     request->status = status;
     request->complete(request);
 } /* cairn_end_transaction */
@@ -5223,4 +5235,5 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_cairn = {
     .thread_init    = cairn_thread_init,
     .thread_destroy = cairn_thread_destroy,
     .dispatch       = cairn_dispatch,
+    .txn_size       = sizeof(struct cairn_txn),
 };

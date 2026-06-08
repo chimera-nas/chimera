@@ -29,74 +29,75 @@ chimera_vfs_txn_alloc_ts(struct chimera_vfs_thread *thread)
     return (hi << CHIMERA_VFS_TXN_THREAD_BITS) | thread->txn_thread_id;
 } /* chimera_vfs_txn_alloc_ts */
 
+/* Fire-and-forget completion for the backend begin op: there is no caller
+ * waiting on it (the handle was returned synchronously), so just retire the
+ * request.  Any backend setup ran in the begin handler on the owning thread,
+ * ahead of the first enlisted op by dispatch FIFO order. */
 static void
 chimera_vfs_begin_transaction_complete(struct chimera_vfs_request *request)
 {
-    struct chimera_vfs_thread       *thread   = request->thread;
-    chimera_vfs_begin_txn_callback_t callback = request->proto_callback;
-    struct chimera_vfs_transaction  *txn      = NULL;
-
-    if (request->status == CHIMERA_VFS_OK) {
-        txn = request->transaction_op.r_txn;
-
-        if (txn) {
-            /* The backend allocated its transaction object; stamp the core-owned
-             * header fields the VFS core relies on (dispatch routing + wait-die). */
-            txn->ts         = request->transaction_op.ts;
-            txn->route_hash = request->transaction_op.route_hash;
-            txn->mode       = request->transaction_op.mode;
-            txn->module     = request->module;
-        }
-    }
+    struct chimera_vfs_thread *thread = request->thread;
 
     chimera_vfs_complete(request);
-
-    callback(request->status, txn, request->proto_private_data);
-
     chimera_vfs_request_free(thread, request);
 } /* chimera_vfs_begin_transaction_complete */
 
-SYMBOL_EXPORT void
+SYMBOL_EXPORT struct chimera_vfs_transaction *
 chimera_vfs_begin_transaction(
-    struct chimera_vfs_thread       *thread,
-    const struct chimera_vfs_cred   *cred,
-    const void                      *fh,
-    int                              fhlen,
-    enum chimera_vfs_txn_mode        mode,
-    uint64_t                         ts,
-    chimera_vfs_begin_txn_callback_t callback,
-    void                            *private_data)
+    struct chimera_vfs_thread     *thread,
+    const struct chimera_vfs_cred *cred,
+    const void                    *hint_fh,
+    int                            hint_fhlen,
+    enum chimera_vfs_txn_mode      mode,
+    uint64_t                       ts)
 {
-    struct chimera_vfs_module  *module = chimera_vfs_get_module(thread, fh, fhlen);
-    struct chimera_vfs_request *request;
+    struct chimera_vfs_module      *module;
+    struct chimera_vfs_transaction *txn;
+    struct chimera_vfs_request     *request;
+    uint64_t                        route_hash;
 
-    /* No-op fast path: the module is unknown or non-transactional.  Allocate and
-     * dispatch nothing; the caller proceeds in legacy autocommit mode (it leaves
-     * request->transaction NULL on every subsequent op). */
+    /* Autocommit fast path: no hint (module unknowable) or a non-transactional
+     * module.  Return NULL; the caller leaves request->transaction NULL on every
+     * subsequent op and each one autocommits independently. */
+    module = hint_fh ? chimera_vfs_get_module(thread, hint_fh, hint_fhlen) : NULL;
+
     if (!module || !(module->capabilities & CHIMERA_VFS_CAP_TRANSACTIONAL)) {
-        callback(CHIMERA_VFS_OK, NULL, private_data);
-        return;
+        return NULL;
     }
 
-    request = chimera_vfs_request_alloc_common(thread, cred, module, fh, fhlen,
-                                               chimera_vfs_hash(fh, fhlen),
+    /* Fast, local allocation of the handle: the core owns this memory (sized by
+    * the backend's txn_size) and frees it at end; the backend initializes its
+    * portion in place in the begin handler.  Hashing the hint steers the
+    * transaction's owning thread -- the same file always lands on the same
+    * worker (read/write locality), and distinct files spread across workers. */
+    route_hash = chimera_vfs_hash(hint_fh, hint_fhlen);
+
+    txn = calloc(1, module->txn_size);
+
+    txn->ts         = ts;
+    txn->route_hash = route_hash;
+    txn->mode       = mode;
+    txn->module     = module;
+
+    /* Eager fire-and-forget begin op: lets the backend set up per-transaction
+     * state on the owning thread before the first enlisted op arrives.  It
+     * routes by txn->route_hash (request->transaction is set), so it queues
+     * ahead of every enlisted op on that one thread. */
+    request = chimera_vfs_request_alloc_common(thread, cred, module,
+                                               hint_fh, hint_fhlen, route_hash,
                                                CHIMERA_VFS_CAP_TRANSACTIONAL);
 
     if (CHIMERA_VFS_IS_ERR(request)) {
-        callback(CHIMERA_VFS_PTR_ERR(request), NULL, private_data);
-        return;
+        free(txn);
+        return NULL;
     }
 
-    request->opcode              = CHIMERA_VFS_OP_BEGIN_TRANSACTION;
-    request->complete            = chimera_vfs_begin_transaction_complete;
-    request->transaction         = NULL;       /* begin is not itself enlisted */
-    request->transaction_op.mode = mode;
-    request->transaction_op.ts   = ts;
-    /* Pin every enlisted op + the end op to the thread this begin routes to. */
-    request->transaction_op.route_hash = request->fh_hash;
-    request->transaction_op.r_txn      = NULL;
-    request->proto_callback            = callback;
-    request->proto_private_data        = private_data;
+    request->opcode             = CHIMERA_VFS_OP_BEGIN_TRANSACTION;
+    request->complete           = chimera_vfs_begin_transaction_complete;
+    request->transaction        = txn;
+    request->proto_private_data = NULL;
 
     chimera_vfs_dispatch(request);
+
+    return txn;
 } /* chimera_vfs_begin_transaction */

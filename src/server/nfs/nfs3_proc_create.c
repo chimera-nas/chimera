@@ -298,32 +298,18 @@ chimera_nfs3_create_open_at_parent_complete(
 } /* chimera_nfs3_create_open_at_parent_complete */
 
 static void
-chimera_nfs3_create_began(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_transaction *txn,
-    void                           *private_data)
+chimera_nfs3_create_begin_attempt(struct nfs_request *req)
 {
-    struct nfs_request               *req    = private_data;
     struct chimera_server_nfs_thread *thread = req->thread;
     struct CREATE3args               *args   = req->args_create;
 
-    if (error_code != CHIMERA_VFS_OK) {
-        if (error_code == CHIMERA_VFS_ETXN_CONFLICT) {
-            chimera_nfs3_create_retry(req);
-        } else {
-            struct CREATE3res res;
-            int               rc;
-            res.status = chimera_vfs_error_to_nfsstat3(error_code);
-            chimera_nfs3_set_wcc_data(&res.resfail.dir_wcc, NULL, NULL);
-            rc = thread->shared->nfs_v3.send_reply_NFSPROC3_CREATE(thread->evpl, NULL,
-                                                                   &res, req->encoding);
-            chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
-            nfs_request_free(thread, req);
-        }
-        return;
-    }
-
-    req->txn = txn;     /* NULL for a non-transactional backend (autocommit) */
+    /* Begin is local and synchronous (NULL handle => non-transactional backend,
+     * autocommit); it cannot conflict, so go straight to opening the parent. */
+    req->txn = chimera_vfs_begin_transaction(thread->vfs_thread, &req->cred,
+                                             args->where.dir.data.data,
+                                             args->where.dir.data.len,
+                                             CHIMERA_VFS_TXN_WRITE,
+                                             req->txn_ts);
 
     chimera_vfs_open_fh(thread->vfs_thread, &req->cred, req->txn,
                         args->where.dir.data.data,
@@ -331,21 +317,6 @@ chimera_nfs3_create_began(
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
                         chimera_nfs3_create_open_at_parent_complete,
                         req);
-} /* chimera_nfs3_create_began */
-
-static void
-chimera_nfs3_create_begin_attempt(struct nfs_request *req)
-{
-    struct chimera_server_nfs_thread *thread = req->thread;
-    struct CREATE3args               *args   = req->args_create;
-
-    chimera_vfs_begin_transaction(thread->vfs_thread, &req->cred,
-                                  args->where.dir.data.data,
-                                  args->where.dir.data.len,
-                                  CHIMERA_VFS_TXN_WRITE,
-                                  req->txn_ts,
-                                  chimera_nfs3_create_began,
-                                  req);
 } /* chimera_nfs3_create_begin_attempt */
 
 void

@@ -894,6 +894,11 @@ struct diskfs_txn {
      * enlisted op recovers the diskfs_txn by casting request->transaction back. */
     struct chimera_vfs_transaction core;
     enum diskfs_txn_type           type;
+    /* 1 = autocommit txn (diskfs-pooled, never a WFG victim); 0 = explicit
+     * CAP_TRANSACTIONAL txn (core-owned memory, freed by the VFS core at end).
+     * The authoritative autocommit marker -- core.ts is purely the wait-die
+     * priority (explicit txns carry ts>0, autocommit ts==0). */
+    uint8_t                        autocommit;
     struct diskfs_thread          *thread;
     struct diskfs_txn             *next;   /* per-thread free list link */
     struct diskfs_txn_slot         inodes[DISKFS_TXN_INLINE_INODES];
@@ -7397,6 +7402,34 @@ diskfs_inode_return_reservation(
 /* Transaction plumbing                                                */
 /* ------------------------------------------------------------------ */
 
+/* Initialize the diskfs-private portion of a txn (shared by the pooled
+ * autocommit path and the in-place init of a core-allocated explicit txn).
+ * Does not touch core.* -- the caller (autocommit) or the VFS core (explicit)
+ * owns the core header. */
+static inline void
+diskfs_txn_init(
+    struct diskfs_thread *thread,
+    struct diskfs_txn    *txn,
+    enum diskfs_txn_type  type,
+    int                   autocommit)
+{
+    txn->type          = type;
+    txn->autocommit    = (uint8_t) autocommit;
+    txn->thread        = thread;
+    txn->next          = NULL;
+    txn->num_inodes    = 0;
+    txn->spill         = NULL;
+    txn->blocks        = NULL;
+    txn->pending_frees = NULL;
+
+    /* WFG wait descriptor starts clear (not parked). */
+    atomic_store_explicit(&txn->wfg_seq, 0, memory_order_relaxed);
+    txn->wfg_wait_inum     = 0;
+    txn->wfg_wait_gen      = 0;
+    txn->wfg_wait_mode     = 0;
+    txn->wfg_grant_pending = 0;
+} /* diskfs_txn_init */
+
 static inline struct diskfs_txn *
 diskfs_txn_begin(
     struct diskfs_thread       *thread,
@@ -7422,24 +7455,10 @@ diskfs_txn_begin(
         txn = malloc(sizeof(*txn));
     }
 
-    /* Autocommit txn: priority 0 (ts==0).  Under WFG detection ts==0 marks a txn
-     * that is never chosen as a deadlock victim (it has no retry driver); every
-     * cycle is guaranteed to contain an explicit (ts>0) txn to abort instead. */
-    txn->core.ts       = 0;
-    txn->type          = type;
-    txn->thread        = thread;
-    txn->next          = NULL;
-    txn->num_inodes    = 0;
-    txn->spill         = NULL;
-    txn->blocks        = NULL;
-    txn->pending_frees = NULL;
-
-    /* WFG wait descriptor starts clear (not parked). */
-    atomic_store_explicit(&txn->wfg_seq, 0, memory_order_relaxed);
-    txn->wfg_wait_inum     = 0;
-    txn->wfg_wait_gen      = 0;
-    txn->wfg_wait_mode     = 0;
-    txn->wfg_grant_pending = 0;
+    /* Autocommit txn: priority 0 (never a WFG victim -- it has no retry driver,
+     * and the autocommit flag below marks it as diskfs-pooled). */
+    txn->core.ts = 0;
+    diskfs_txn_init(thread, txn, type, 1 /* autocommit */);
     return txn;
 } /* diskfs_txn_begin */
 
@@ -7447,6 +7466,13 @@ static inline void
 diskfs_txn_release(struct diskfs_txn *txn)
 {
     struct diskfs_thread *thread = txn->thread;
+
+    /* Explicit (CAP_TRANSACTIONAL) txns are core-owned: the VFS core allocated
+     * the handle locally at begin and frees it at end-completion, so diskfs must
+     * not recycle it here.  Only autocommit txns belong to the diskfs pool. */
+    if (!txn->autocommit) {
+        return;
+    }
 
     txn->next             = thread->txn_free_list;
     thread->txn_free_list = txn;
@@ -8635,9 +8661,14 @@ diskfs_iq_drain_cq(struct diskfs_iq_channel *ch)
             &entry.durable_time);
 
         /* The txn's logical inode locks were already dropped by the intent
-         * log thread (diskfs_iq_process_channel); just deliver completion. */
+         * log thread (diskfs_iq_process_channel); just deliver completion.
+         * The cb can free an explicit (core-owned) txn via end-completion, so
+         * sample autocommit-ness first and recycle only a surviving pooled txn. */
+        int entry_autocommit = entry.txn->autocommit;
         entry.cb(entry.txn, entry.status, entry.private_data);
-        diskfs_txn_release(entry.txn);
+        if (entry_autocommit) {
+            diskfs_txn_release(entry.txn);
+        }
 
         /* Last outstanding commit done -> release the poll-mode pin taken in
          * diskfs_txn_commit_finish so the worker may sleep again when idle. */
@@ -8942,10 +8973,16 @@ diskfs_txn_commit(
     struct diskfs_thread *thread = txn->thread;
 
     if (txn->type == DISKFS_TXN_READ) {
-        /* Read txns don't need durability -- complete inline. */
+        /* Read txns don't need durability -- complete inline.  Sample
+         * autocommit-ness before cb: cb can free an explicit (core-owned) txn
+         * via end-completion, while an autocommit (pooled) txn survives to be
+         * recycled here. */
+        int autocommit = txn->autocommit;
         diskfs_txn_unlock_all(txn);
         cb(txn, 0, private_data);
-        diskfs_txn_release(txn);
+        if (autocommit) {
+            diskfs_txn_release(txn);
+        }
         return;
     }
 
@@ -8956,9 +8993,12 @@ diskfs_txn_commit(
      * routing it through the intent log would write a header-only record per
      * write and defeat the deferral. */
     if (!txn->blocks && !txn->pending_frees) {
+        int autocommit = txn->autocommit;
         diskfs_txn_unlock_all(txn);
         cb(txn, 0, private_data);
-        diskfs_txn_release(txn);
+        if (autocommit) {
+            diskfs_txn_release(txn);
+        }
         return;
     }
 
@@ -17432,20 +17472,21 @@ diskfs_begin_transaction(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
+    struct diskfs_txn   *txn = (struct diskfs_txn *) request->transaction;
     enum diskfs_txn_type type;
-    struct diskfs_txn   *txn;
 
     (void) shared;
     (void) private_data;
 
-    type = (request->transaction_op.mode == CHIMERA_VFS_TXN_WRITE)
+    /* The core allocated and zeroed the handle (diskfs_txn, txn_size below) and
+     * stamped its core header; initialize the diskfs-private portion in place on
+     * this owning thread before the first enlisted op arrives. */
+    type = (txn->core.mode == CHIMERA_VFS_TXN_WRITE)
            ? DISKFS_TXN_WRITE : DISKFS_TXN_READ;
 
-    /* request->transaction is NULL on the begin op, so this allocates fresh. */
-    txn = diskfs_txn_begin(thread, type, request);
+    diskfs_txn_init(thread, txn, type, 0 /* explicit */);
 
-    request->transaction_op.r_txn = &txn->core;
-    request->status               = CHIMERA_VFS_OK;
+    request->status = CHIMERA_VFS_OK;
     request->complete(request);
 } /* diskfs_begin_transaction */
 
@@ -17612,4 +17653,5 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_diskfs = {
     .thread_init    = diskfs_thread_init,
     .thread_destroy = diskfs_thread_destroy,
     .dispatch       = diskfs_dispatch,
+    .txn_size       = sizeof(struct diskfs_txn),
 };
