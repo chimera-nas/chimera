@@ -138,6 +138,12 @@ chimera_smb_read(struct chimera_smb_request *request)
         return;
     }
 
+    /* MS-SMB2 §3.3.5.2.10: a READ is never rejected for a stale ChannelSequence,
+     * but it still advances the Open's tracked sequence (the third argument 0
+     * marks this as a non-mutating op). */
+    chimera_smb_channel_sequence_stale(request->read.open_file,
+                                       request->channel_sequence, 0);
+
     struct chimera_vfs_lease_owner io_owner = {
         .protocol   = CHIMERA_VFS_LEASE_PROTO_SMB2,
         .client_key = request->session_handle->session->client_key,

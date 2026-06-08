@@ -296,6 +296,13 @@ struct chimera_smb_request {
         struct smb1_header smb1_hdr;
         struct smb2_header smb2_hdr;
     };
+    /* MS-SMB2 §3.2.4.1.5 / §3.3.5.2.10: on a request the 4 bytes the header
+     * struct calls "status" are ChannelSequence(2)+Reserved(2); captured here
+     * (the reply emits the separate request->status field, so reading them off
+     * smb2_hdr.status never corrupts the response Status).  is_replay mirrors
+     * the SMB2_FLAGS_REPLAY_OPERATION header flag. */
+    uint16_t                           channel_sequence;
+    uint8_t                            is_replay;
     struct chimera_smb_session_handle *session_handle;
     struct chimera_smb_tree           *tree;
     struct chimera_smb_compound       *compound;
@@ -424,6 +431,12 @@ struct chimera_smb_request {
             * DesiredAccess / CreateOptions / etc. fields entirely, so the
             * getattr-reply callback must not re-run the ACL access check. */
             uint8_t                         reconnect;
+            /* Set by the DH2Q create_guid replay path (MS-SMB2 §3.3.5.9.7): this
+             * CREATE re-presents an already-completed create, so the reply must
+             * echo the ORIGINAL handle's create_action (stored on the open) and,
+             * for an oplock (non-lease) handle, the REQUESTED oplock level rather
+             * than the granted one. */
+            uint8_t                         replay;
             /* CREATE contexts the client sent (CHIMERA_SMB_CREATE_CTX_* bits).
              * Phase-0 stubs set the bit and capture a minimum set of fields needed
              * by the response emit; Phase 1/3 will populate the rest. */
@@ -1936,6 +1949,42 @@ chimera_smb_open_file_resolve(
 
     return open_file;
 } /* chimera_smb_open_file_resolve */
+
+/*
+ * MS-SMB2 §3.3.5.2.10 "Verifying the Channel Sequence Number".  Compare the
+ * request's ChannelSequence against the highest seen on this Open.  Returns true
+ * when the op must be rejected as stale (only mutating ops -- WRITE/SET_INFO/
+ * IOCTL -- reject; READ tolerates a stale sequence).  An equal-or-ahead sequence
+ * advances the Open's tracked value; a behind sequence (delta in [0x8000,0xFFFF]
+ * mod 0x10000) is stale.  The first op on a not-yet-seeded Open just seeds it
+ * (opens are normally seeded from the CREATE's sequence at grant time).
+ */
+static inline bool
+chimera_smb_channel_sequence_stale(
+    struct chimera_smb_open_file *open_file,
+    uint16_t                      req_cs,
+    int                           mutating)
+{
+    uint16_t delta;
+
+    if (!open_file->channel_sequence_valid) {
+        open_file->channel_sequence       = req_cs;
+        open_file->channel_sequence_valid = 1;
+        return false;
+    }
+
+    delta = (uint16_t) (req_cs - open_file->channel_sequence);
+
+    if (delta >= 0x8000) {
+        /* Stale (behind).  Mutating ops are rejected; reads proceed without
+         * advancing the tracked sequence. */
+        return mutating ? true : false;
+    }
+
+    /* Equal or ahead: this becomes the new high-water sequence. */
+    open_file->channel_sequence = req_cs;
+    return false;
+} /* chimera_smb_channel_sequence_stale */
 
 /*
  * Resolve the open_file that owns the caching lease registered under `lease_key`

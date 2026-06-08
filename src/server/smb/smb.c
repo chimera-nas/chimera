@@ -1090,6 +1090,12 @@ chimera_smb_server_handle_smb2(
 
         left -= sizeof(request->smb2_hdr);
 
+        /* Capture the per-request ChannelSequence (low 16 bits of the field the
+         * header struct calls "status" on a request) and the replay flag for
+         * MS-SMB2 §3.3.5.2.10 stale-write detection and create-context replay. */
+        request->channel_sequence = (uint16_t) (request->smb2_hdr.status & 0xFFFF);
+        request->is_replay        = (request->smb2_hdr.flags & SMB2_FLAGS_REPLAY_OPERATION) ? 1 : 0;
+
         signature_cursor = *request_cursor;
 
         /* We only need to validate that we are using SMB2 at this point */

@@ -114,6 +114,16 @@ struct chimera_smb_open_file {
     uint64_t                          position;
     uint32_t                          parent_fh_len;
     uint32_t                          refcnt;
+    /* MS-SMB2 §3.3.5.2.10 channel-sequence tracking.  channel_sequence holds
+     * the highest ChannelSequence observed on this Open; a mutating op
+     * (WRITE/SET_INFO/IOCTL) carrying a stale sequence -- behind by
+     * [0x8000..0xFFFF] mod 0x10000 -- is rejected with FILE_NOT_AVAILABLE.
+     * READ never rejects but advances the value.  _valid gates the first op. */
+    uint16_t                          channel_sequence;
+    uint8_t                           channel_sequence_valid;
+    /* The CREATE Action reported when this handle was first opened
+     * (CREATED/OPENED/...); replayed verbatim on a DH2Q create_guid replay. */
+    uint32_t                          create_action;
     /* Phase-0 plumbing: fields populated by later phases. Zeroed on alloc. */
     uint32_t                          ctx_present_mask;
     uint8_t                           oplock_level;

@@ -217,6 +217,17 @@ chimera_smb_write(struct chimera_smb_request *request)
         return;
     }
 
+    /* MS-SMB2 §3.3.5.2.10: a WRITE carrying a stale ChannelSequence (the client
+     * has since failed over to a higher sequence) must be rejected with
+     * FILE_NOT_AVAILABLE so a delayed retry cannot clobber newer data. */
+    if (chimera_smb_channel_sequence_stale(request->write.open_file,
+                                           request->channel_sequence, 1)) {
+        evpl_iovecs_release(evpl, request->write.iov, request->write.niov);
+        chimera_smb_open_file_release(request, request->write.open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_FILE_NOT_AVAILABLE);
+        return;
+    }
+
     /* When the open holds a caching lease, use the lease's owner identity for
      * the write so chimera_vfs_break_reads_for_write self-exempts (mode.granted
      * & MODE_W AND owner_equal): the holder is writing through its own granted

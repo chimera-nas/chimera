@@ -374,6 +374,11 @@ chimera_smb_create_gen_open_file(
     open_file->position        = 0;
     open_file->pipe_transceive = transceive;
     open_file->refcnt          = 2;
+    /* Seed MS-SMB2 §3.3.5.2.10 channel-sequence tracking from the CREATE's
+     * sequence so the first mutating op is compared against the right baseline
+     * (the open_file pool is reused without zeroing). */
+    open_file->channel_sequence       = request->channel_sequence;
+    open_file->channel_sequence_valid = 1;
     /* Identify the owning conn/tree up front so an AppInstanceId force-close can
      * locate this open from the share-lease back-reference even when no caching
      * lease (which also sets create_conn) is granted. */
@@ -2582,6 +2587,9 @@ chimera_smb_durable_reconnect(struct chimera_smb_request *request)
     open_file->create_conn = request->compound->conn;
     open_file->file_id.vid = chimera_rand64();
     open_file->refcnt      = 2;
+    /* Reseed the channel-sequence baseline from the reconnecting CREATE. */
+    open_file->channel_sequence       = request->channel_sequence;
+    open_file->channel_sequence_valid = 1;
 
     bucket = open_file->file_id.vid & CHIMERA_SMB_OPEN_FILE_BUCKET_MASK;
     pthread_mutex_lock(&tree->open_files_lock[bucket]);
@@ -2713,6 +2721,88 @@ chimera_smb_path_begins_with_dotdot(
            (len >= 3 && path[0] == '.' && path[1] == '.' && path[2] == '/');
 } /* chimera_smb_path_begins_with_dotdot */
 
+/*
+ * MS-SMB2 §3.3.5.9.7/.10: a CREATE that carries a DurableHandleRequestV2 (DH2Q)
+ * create_guid matching a still-live open from the same client is a *replay* of
+ * the original create -- the server returns the existing open instead of opening
+ * a second handle (or returning a sharing violation).  This is distinct from a
+ * DH2C/DHnC reconnect (which targets a *parked* handle by persistent id).
+ *
+ * Returns 1 if the request was handled here (replay matched, or rejected with
+ * ACCESS_DENIED on a type/key mismatch) -- the caller must return.  Returns 0 if
+ * no live open carries this create_guid, so the caller proceeds with a fresh
+ * create.
+ */
+static int
+chimera_smb_create_guid_replay(struct chimera_smb_request *request)
+{
+    struct chimera_smb_tree          *tree = request->tree;
+    struct chimera_smb_open_file     *of, *tmp, *match = NULL;
+    struct chimera_server_smb_thread *thread = request->compound->thread;
+    int                               b;
+    bool                              req_is_lease, open_is_lease;
+
+    for (b = 0; b < CHIMERA_SMB_OPEN_FILE_BUCKETS && !match; b++) {
+        pthread_mutex_lock(&tree->open_files_lock[b]);
+        HASH_ITER(hh, tree->open_files[b], of, tmp)
+        {
+            if ((of->ctx_present_mask & CHIMERA_SMB_CREATE_CTX_DH2Q) &&
+                !(of->flags & (CHIMERA_SMB_OPEN_FILE_CLOSED |
+                               CHIMERA_SMB_OPEN_FILE_PARKED)) &&
+                memcmp(of->create_guid, request->create.dh2q.create_guid, 16) == 0) {
+                of->refcnt++;   /* held for this request; getattr cb releases it */
+                match = of;
+                break;
+            }
+        }
+        pthread_mutex_unlock(&tree->open_files_lock[b]);
+    }
+
+    if (!match) {
+        return 0;
+    }
+
+    /* A replay that asks for a different handle type (oplock vs lease), or a
+     * lease with a different key than the live open holds, is rejected with
+     * ACCESS_DENIED (MS-SMB2 dhv2 oplock_lease / lease_oplock / lease3). */
+    req_is_lease  = (request->create.ctx_present_mask & CHIMERA_SMB_CREATE_CTX_RQLS) != 0;
+    open_is_lease = (match->oplock_level == SMB2_OPLOCK_LEVEL_LEASE);
+
+    if (req_is_lease != open_is_lease ||
+        (req_is_lease &&
+         memcmp(match->lease_key, request->create.rqls.key, 16) != 0)) {
+        chimera_smb_open_file_release(request, match);
+        chimera_smb_complete_request(request, SMB2_STATUS_ACCESS_DENIED);
+        return 1;
+    }
+
+    /* A coalesced lease may have been upgraded by a sibling open since this
+     * handle was first granted; report the grant's CURRENT granted mode rather
+     * than this open's possibly-stale cached copy (MS-SMB2 replay-dhv2-lease1/2,
+     * which upgrade RH->RWH then replay the original RH create). */
+    if (open_is_lease && match->grant) {
+        match->lease_state =
+            chimera_smb_vfs_to_lease_bits(match->grant->lease.mode.granted);
+    }
+
+    /* Replay: return the existing open via the reconnect reply path.  reconnect=1
+     * skips the ACL re-check; replay=1 makes the reply echo the original
+     * create_action and (for an oplock handle) the requested oplock level.  The
+     * create_disposition is left as the request's own so it is not consulted. */
+    request->create.r_open_file      = match;
+    request->create.reconnect        = 1;
+    request->create.replay           = 1;
+    request->compound->saved_file_id = match->file_id;
+
+    chimera_vfs_getattr(thread->vfs_thread,
+                        &request->session_handle->session->cred,
+                        match->handle,
+                        CHIMERA_VFS_ATTR_MASK_STAT,
+                        chimera_smb_create_open_getattr_callback,
+                        request);
+    return 1;
+} /* chimera_smb_create_guid_replay */
+
 void
 chimera_smb_create(struct chimera_smb_request *request)
 {
@@ -2818,6 +2908,7 @@ chimera_smb_create(struct chimera_smb_request *request)
      * reclaim) or chimera_smb_create_persist_prepare for a fresh grant. */
     request->create.persist_pid = 0;
     request->create.reconnect   = 0;
+    request->create.replay      = 0;
     /* Default share-conflict status; an AppInstanceId version reject overrides
      * it with STATUS_FILE_FORCED_CLOSED inside gen_open_file. */
     request->create.force_close_status = SMB2_STATUS_SHARING_VIOLATION;
@@ -2858,6 +2949,16 @@ chimera_smb_create(struct chimera_smb_request *request)
          * ignores all create fields, so it runs before the DOC access check. */
         if (is_durable_reconnect) {
             chimera_smb_durable_reconnect(request);
+            return;
+        }
+
+        /* MS-SMB2 3.3.5.9.7: a DH2Q create whose create_guid matches a live
+         * open is a replay of the original create -- return the existing handle
+         * rather than opening a second one.  Runs before the field validations
+         * below since a replay re-presents the original (already-validated)
+         * request. */
+        if ((request->create.ctx_present_mask & CHIMERA_SMB_CREATE_CTX_DH2Q) &&
+            chimera_smb_create_guid_replay(request)) {
             return;
         }
 
@@ -3057,6 +3158,17 @@ build_dh2q_response(
         return -1;
     }
 
+    /* On an oplock (non-lease) create_guid replay, a durable response is emitted
+     * only if the REQUESTED oplock could itself have been granted a durable
+     * handle (batch); a replay asking for a lesser oplock gets no durable
+     * response at all (MS-SMB2 replay-dhv2-oplock2 expects durable_open_v2=false,
+     * timeout=0, no blobs). */
+    if (request->create.replay &&
+        of->oplock_level != SMB2_OPLOCK_LEVEL_LEASE &&
+        request->create.requested_oplock_level != SMB2_OPLOCK_LEVEL_BATCH) {
+        return -1;
+    }
+
     timeout = (uint32_t) of->durable_timeout_ms;
     flags   = (of->durable_flags & CHIMERA_SMB_DURABLE_PERSISTENT) ?
         SMB2_DHANDLE_FLAG_PERSISTENT : 0;
@@ -3177,11 +3289,21 @@ chimera_smb_create_reply(
     evpl_iovec_cursor_append_uint16(reply_cursor, SMB2_CREATE_REPLY_SIZE);
 
     /* Oplock level — granted at CREATE time and stored on the open_file
-     * by the CACHING acquire above; defaults to NONE if no lease. */
-    evpl_iovec_cursor_append_uint8(reply_cursor,
-                                   request->create.r_open_file
-                                   ? request->create.r_open_file->oplock_level
-                                   : SMB2_OPLOCK_LEVEL_NONE);
+     * by the CACHING acquire above; defaults to NONE if no lease.  On a DH2Q
+     * create_guid replay of an oplock (non-lease) handle the response echoes the
+     * REQUESTED oplock level, not the granted one (MS-SMB2 replay-dhv2-oplock2);
+     * a lease handle always reports its current (shared, possibly upgraded)
+     * state, so it is exempt. */
+    uint8_t reply_oplock_level = SMB2_OPLOCK_LEVEL_NONE;
+    if (request->create.r_open_file) {
+        if (request->create.replay &&
+            request->create.r_open_file->oplock_level != SMB2_OPLOCK_LEVEL_LEASE) {
+            reply_oplock_level = request->create.requested_oplock_level;
+        } else {
+            reply_oplock_level = request->create.r_open_file->oplock_level;
+        }
+    }
+    evpl_iovec_cursor_append_uint8(reply_cursor, reply_oplock_level);
 
     /* Flags */
     evpl_iovec_cursor_append_uint8(reply_cursor, 0);
@@ -3191,6 +3313,13 @@ chimera_smb_create_reply(
      * file already existed — the VFS open reports that via handle->r_created. */
     uint32_t create_action;
     bool     created = request->create.r_created;
+
+    if (request->create.replay && request->create.r_open_file) {
+        /* A replay re-presents the original create; report the action recorded
+         * when the handle was first opened (MS-SMB2 replay-dhv2-*). */
+        create_action = request->create.r_open_file->create_action;
+        goto have_create_action;
+    }
 
     switch (request->create.create_disposition) {
         case SMB2_FILE_CREATE:
@@ -3216,6 +3345,14 @@ chimera_smb_create_reply(
             create_action = SMB2_CREATE_ACTION_OPENED;
             break;
     } /* switch */
+
+    /* Record the action on a fresh open so a later DH2Q create_guid replay can
+     * report it verbatim (a replay branches above and does not re-record). */
+    if (request->create.r_open_file) {
+        request->create.r_open_file->create_action = create_action;
+    }
+
+ have_create_action:
 
     evpl_iovec_cursor_append_uint32(reply_cursor, create_action);
 
