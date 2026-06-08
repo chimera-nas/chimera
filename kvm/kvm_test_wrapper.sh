@@ -72,7 +72,7 @@ ip netns exec "${NETNS_NAME}" "$QEMU_BIN" \
     -serial file:"$LOG_FILE" \
     -nographic \
     -no-reboot \
-    -append "root=/dev/vda rw console=${QEMU_CONSOLE} net.ifnames=0 biosdevname=0 panic=-1 test_cmd=\"${TEST_CMD}\" init=/init.sh"
+    -append "root=/dev/vda rw console=${QEMU_CONSOLE} net.ifnames=0 biosdevname=0 mitigations=off tsc=reliable panic=-1 test_cmd=\"${TEST_CMD}\" init=/init.sh"
 
 cat "$LOG_FILE"
 

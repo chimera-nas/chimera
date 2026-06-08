@@ -223,7 +223,7 @@ ip netns exec "${NETNS_NAME}" "$QEMU_BIN" \
     -serial stdio \
     -nographic \
     -no-reboot \
-    -append "root=/dev/vda rw console=${QEMU_CONSOLE} net.ifnames=0 biosdevname=0 quiet panic=-1 test_cmd=\"${TEST_CMD}\" init=/init.sh" \
+    -append "root=/dev/vda rw console=${QEMU_CONSOLE} net.ifnames=0 biosdevname=0 quiet mitigations=off tsc=reliable panic=-1 test_cmd=\"${TEST_CMD}\" init=/init.sh" \
     2>/dev/null | tee "$LOG_FILE"
 
 # Check if chimera is still alive after QEMU exits
