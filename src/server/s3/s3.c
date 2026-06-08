@@ -142,6 +142,14 @@ s3_server_respond(
         evpl_http_server_set_response_length(request->http_request, 0);
         evpl_http_server_dispatch_default(request->http_request, 204);
     } else {
+        if (request->status == CHIMERA_S3_STATUS_INVALID_RANGE) {
+            /* S3 echoes the object size on a 416 so the client can re-request a
+             * satisfiable range. */
+            snprintf(range_header, sizeof(range_header), "bytes */%ld",
+                     request->file_real_length);
+            evpl_http_request_add_header(request->http_request, "Content-Range", range_header);
+        }
+
         evpl_iovec_alloc(evpl, 1024, 0, 1, 0, &iov);
 
         error_response = (char *) evpl_iovec_data(&iov);

@@ -181,6 +181,26 @@ chimera_s3_get_lookup_callback(
 
     request->file_real_length = attr->va_size;
 
+    /* Reject an unsatisfiable range with 416 before resolving it. A range was
+     * requested iff a sentinel is present (suffix carries file_offset < 0, any
+     * explicit byte range carries file_length != 0; the no-range case is
+     * file_offset 0 / file_length 0). A closed or open-ended range whose start
+     * is at or past EOF is unsatisfiable, and any range against a zero-length
+     * object is unsatisfiable. A range that merely extends past EOF but starts
+     * within the object is clamped below and returns 206 (AWS semantics). */
+    if (request->file_offset < 0 || request->file_length != 0) {
+        if (request->file_real_length == 0 ||
+            (request->file_offset >= 0 &&
+             request->file_offset >= request->file_real_length)) {
+            request->status    = CHIMERA_S3_STATUS_INVALID_RANGE;
+            request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
+            if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
+                s3_server_respond(evpl, request);
+            }
+            return;
+        }
+    }
+
     /* Resolve the requested byte range now that the object size is known. The
      * range was parsed before the size was available, so open-ended and suffix
      * forms still carry sentinels:
