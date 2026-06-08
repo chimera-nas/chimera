@@ -221,6 +221,11 @@ chimera_vfs_mkdir_at(
 {
     struct chimera_vfs_mkdir_at_gate *gate;
 
+    if (namelen >= CHIMERA_VFS_NAME_MAX) {
+        callback(CHIMERA_VFS_ENAMETOOLONG, NULL, NULL, NULL, NULL, private_data);
+        return;
+    }
+
     if (chimera_vfs_gate_needed(handle->vfs_module->capabilities, cred)) {
         gate                 = malloc(sizeof(*gate));
         gate->thread         = thread;
@@ -235,8 +240,10 @@ chimera_vfs_mkdir_at(
         gate->callback       = callback;
         gate->private_data   = private_data;
 
+        /* Creating an entry in a directory requires both the right to add a
+         * subdirectory (APPEND_DATA) and search permission (EXECUTE) on it. */
         chimera_vfs_gate_fh(thread, cred, handle->fh, handle->fh_len,
-                            CHIMERA_ACE_APPEND_DATA,
+                            CHIMERA_ACE_APPEND_DATA | CHIMERA_ACE_EXECUTE,
                             chimera_vfs_mkdir_at_gate_complete, gate);
         return;
     }

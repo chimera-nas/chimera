@@ -218,6 +218,22 @@ chimera_vfs_remove_at(
 {
     struct chimera_vfs_remove_at_gate *gate;
 
+    if (namelen >= CHIMERA_VFS_NAME_MAX) {
+        callback(CHIMERA_VFS_ENAMETOOLONG, NULL, NULL, private_data);
+        return;
+    }
+
+    /* POSIX: a final path component of "." cannot be removed (EINVAL); ".."
+     * names the (non-empty) parent directory (ENOTEMPTY). */
+    if (namelen == 1 && name[0] == '.') {
+        callback(CHIMERA_VFS_EINVAL, NULL, NULL, private_data);
+        return;
+    }
+    if (namelen == 2 && name[0] == '.' && name[1] == '.') {
+        callback(CHIMERA_VFS_ENOTEMPTY, NULL, NULL, private_data);
+        return;
+    }
+
     if (chimera_vfs_gate_needed(handle->vfs_module->capabilities, cred)) {
         gate                 = malloc(sizeof(*gate));
         gate->thread         = thread;

@@ -181,6 +181,11 @@ chimera_vfs_link_at(
     struct chimera_vfs_module       *module;
     struct chimera_vfs_link_at_gate *gate;
 
+    if (namelen >= CHIMERA_VFS_NAME_MAX) {
+        callback(CHIMERA_VFS_ENAMETOOLONG, NULL, NULL, NULL, private_data);
+        return;
+    }
+
     module = chimera_vfs_get_module(thread, dir_fh, dir_fhlen);
 
     if (module && chimera_vfs_gate_needed(module->capabilities, cred)) {
@@ -201,7 +206,7 @@ chimera_vfs_link_at(
         gate->private_data   = private_data;
 
         chimera_vfs_gate_fh(thread, cred, dir_fh, dir_fhlen,
-                            CHIMERA_ACE_WRITE_DATA,
+                            CHIMERA_ACE_WRITE_DATA | CHIMERA_ACE_EXECUTE,
                             chimera_vfs_link_at_gate_complete, gate);
         return;
     }
