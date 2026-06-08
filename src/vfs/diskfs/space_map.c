@@ -576,7 +576,8 @@ space_map_reserve(
     struct sm_thread_cache  *cache,
     const struct sm_journal *jnl,
     uint32_t                 role,
-    uint64_t                 min_bytes)
+    uint64_t                 min_bytes,
+    uint64_t                 floor)
 {
     uint64_t need = SM_ALIGN_UP(min_bytes);
     uint64_t want;
@@ -600,7 +601,7 @@ space_map_reserve(
         }
     }
 
-    want = need > SM_RESERVATION_MIN ? need : SM_RESERVATION_MIN;
+    want = need > floor ? need : floor;
 
     /* A reservation can't cross an AG boundary, so cap at the AG size; a
      * caller needing more than SM_AG_SIZE contiguous cannot be satisfied. */
@@ -642,6 +643,7 @@ space_map_alloc(
     const struct sm_journal *jnl,
     uint32_t                 role,
     uint64_t                 size,
+    uint64_t                 floor,
     uint32_t                *r_device_id,
     uint64_t                *r_device_offset)
 {
@@ -653,7 +655,7 @@ space_map_alloc(
     /* Ensure the cache covers `need` (refilling -- journals, may SM_AGAIN),
      * then dole from it.  Callers that have front-loaded the reservation via
      * space_map_reserve hit the fast path here with no journaling. */
-    rc = space_map_reserve(sm, cache, jnl, role, need);
+    rc = space_map_reserve(sm, cache, jnl, role, need, floor);
     if (rc != 0) {
         return rc;     /* SM_AGAIN or -1 (ENOSPC) */
     }
