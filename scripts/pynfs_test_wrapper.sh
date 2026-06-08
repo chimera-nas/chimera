@@ -49,9 +49,9 @@ cleanup() {
             CHIMERA_DIED_DURING_TEST=1
         fi
         kill "$CHIMERA_PID" 2>/dev/null || true
-        for i in $(seq 1 30); do
+        for i in $(seq 1 150); do
             kill -0 "$CHIMERA_PID" 2>/dev/null || break
-            sleep 0.1
+            sleep 0.02
         done
         if kill -0 "$CHIMERA_PID" 2>/dev/null; then
             echo "=== Chimera shutdown hung, force killing ==="
@@ -144,6 +144,9 @@ generate_config() {
 
     cat > "$CONFIG_FILE" << EOF
 {
+    "common": {
+        "rcu_reclaim_threads": 4
+    },
     "server": {
         "threads": 4,
         "delegation_threads": 4,
@@ -193,7 +196,7 @@ CHIMERA_PID=$!
 # has finished its own readiness path; starting pynfs in that window produces
 # connection-refused initialization failures.
 READY=0
-for i in $(seq 1 100); do
+for i in $(seq 1 500); do
     if grep -q "Server is ready." "$CHIMERA_LOG" &&
        ip netns exec "${NETNS_NAME}" bash -c "echo > /dev/tcp/127.0.0.1/2049" 2>/dev/null &&
        { [ "$DELEG_ENABLE" != "true" ] ||
@@ -205,7 +208,7 @@ for i in $(seq 1 100); do
         echo "chimera daemon exited prematurely"
         exit 1
     fi
-    sleep 0.1
+    sleep 0.02
 done
 
 if [ "$READY" != "1" ]; then
