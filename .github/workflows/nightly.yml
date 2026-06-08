@@ -16,7 +16,9 @@ env:
   U22_IMAGE_TAG_PREFIX: repository.mdh.quantum.com:5004/cache/chimera-ubuntu22
   R9_IMAGE_TAG_PREFIX: repository.mdh.quantum.com:5004/cache/chimera-rocky9
   R10_IMAGE_TAG_PREFIX: repository.mdh.quantum.com:5004/cache/chimera-rocky10
-  KVM_IMAGE_CACHE_REGISTRY: repository.mdh.quantum.com:5004/cache
+  # Internal pull-through cache for the prebuilt KVM guest images (mirrors
+  # ghcr.io/chimera-nas/kvm-test-base). Public default lives in CMake.
+  KVM_IMAGE_REGISTRY: repository.mdh.quantum.com:5009/chimera-nas/kvm-test-base
   APT_MIRROR: http://repository.mdh.quantum.com/repository/pkgs/ubuntu
   DOCKER_MIRROR: repository.mdh.quantum.com/
 
@@ -474,19 +476,26 @@ jobs:
         with:
           submodules: recursive
 
+      # KVM guest images are pulled from GHCR with oras (see build-test.yml).
+      - name: Fetch oras CLI
+        run: |
+          ORAS_VERSION=1.2.0
+          curl -sSL "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_${{ matrix.arch }}.tar.gz" \
+            | tar -xz -C "${{ github.workspace }}" oras
+          chmod +x "${{ github.workspace }}/oras"
+
       - name: Configure, build, and test inside the container
         run: |
           docker run --rm --privileged \
             -e DOCKER_MIRROR=${{ env.DOCKER_MIRROR }} \
             -e APT_MIRROR=${{ env.APT_MIRROR }} \
             -v "${{ github.workspace }}:/workspace" \
+            -v "${{ github.workspace }}/oras:/usr/local/bin/oras:ro" \
             -v /build \
             -w /build \
             ${{ matrix.image_tag_prefix }}:${{ github.sha }}-${{ matrix.arch }} \
             bash -euxc '\
-              dockerd --storage-driver=vfs --registry-mirror=https://repository.mdh.quantum.com:5001 &>/dev/null &
-              sleep 2 && \
-              cmake -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DREQUIRE_NETNS_TESTS=ON -DKVM_IMAGE_CACHE_REGISTRY=${{ env.KVM_IMAGE_CACHE_REGISTRY }} ${{ matrix.cmake_extra }} /workspace && \
+              cmake -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DREQUIRE_NETNS_TESTS=ON -DKVM_IMAGE_REGISTRY=${{ env.KVM_IMAGE_REGISTRY }} ${{ matrix.cmake_extra }} /workspace && \
               ninja && \
               /workspace/scripts/cap_ctest_output.sh \
               ctest --output-on-failure --test-output-size-failed 65536 --timeout 300 -j 32'
