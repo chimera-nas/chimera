@@ -2086,13 +2086,18 @@ chimera_server_add_s3_cred(
     struct chimera_server *server,
     const char            *access_key,
     const char            *secret_key,
+    uint32_t               uid,
+    uint32_t               gid,
+    const char            *canon_id,
+    const char            *display_name,
     int                    pinned)
 {
     if (!server->s3_shared) {
         return -1;
     }
 
-    return chimera_s3_add_cred(server->s3_shared, access_key, secret_key, pinned);
+    return chimera_s3_add_cred(server->s3_shared, access_key, secret_key,
+                               uid, gid, canon_id, display_name, pinned);
 } /* chimera_server_add_s3_cred */
 
 SYMBOL_EXPORT void

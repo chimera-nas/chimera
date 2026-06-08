@@ -125,6 +125,19 @@ struct chimera_s3_request {
     struct chimera_s3_request       *next;
     struct chimera_vfs_attrs         set_attr;
     struct s3_chunk_decoder          chunk;
+    /* Filesystem credential this request's VFS ops run under, derived from the
+     * authenticated S3 access key (or the anonymous "nobody" identity). The
+     * unified VFS/ACL gate enforces permissions against this cred. */
+    struct chimera_vfs_cred          cred;
+    /* Canonical id + display name of the principal, echoed in ACL XML. */
+    char                             owner_id[CHIMERA_S3_CANON_ID_MAX];
+    char                             owner_display[CHIMERA_S3_DISPLAY_MAX];
+    /* Canned ACL ("x-amz-acl") parsed into a mode mask; see s3_acl.c. -1 = no
+     * x-amz-acl header present (use the backend default mode). */
+    int                              canned_acl;
+    /* Set for the ?acl subresource so the dispatcher routes to GetXxxAcl /
+     * PutXxxAcl rather than object/bucket GET/PUT. */
+    int                              is_acl;
     uint8_t                          bucket_fh[CHIMERA_VFS_FH_SIZE];
 
     union {
@@ -307,6 +320,22 @@ chimera_s3_attach_last_modified(
     strftime(buf, sizeof(buf), "%a, %d %b %Y %H:%M:%S GMT", &tm);
     evpl_http_request_add_header(request, "Last-Modified", buf);
 } /* chimera_s3_attach_last_modified */
+
+/*
+ * Map a VFS error to the S3 status that best matches it. A permission failure
+ * from the VFS/ACL gate (EACCES/EPERM) must surface as AccessDenied (HTTP 403)
+ * rather than NoSuchKey (404) so per-credential enforcement is visible to S3
+ * clients; everything else collapses to NoSuchKey for a missing target.
+ */
+static inline enum chimera_s3_status
+chimera_s3_status_from_vfs(enum chimera_vfs_error error_code)
+{
+    if (error_code == CHIMERA_VFS_EACCES ||
+        error_code == CHIMERA_VFS_EPERM) {
+        return CHIMERA_S3_STATUS_ACCESS_DENIED;
+    }
+    return CHIMERA_S3_STATUS_NO_SUCH_KEY;
+} /* chimera_s3_status_from_vfs */
 
 void
 s3_server_respond(

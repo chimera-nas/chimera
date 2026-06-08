@@ -18,10 +18,13 @@
 #include "s3_dump.h"
 #include "s3_bucket_map.h"
 #include "s3_auth.h"
+#include "s3_acl.h"
 #include "s3_multipart.h"
 #include "s3.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
+#include "vfs/vfs_access.h"
+#include "vfs/vfs_acl.h"
 
 static inline int
 chimera_s3_hexval(int c)
@@ -329,24 +332,67 @@ s3_server_notify(
     } /* switch */
 } /* chimera_metrics_notify */
 
-static void
-chimera_s3_dispatch_callback(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+/*
+ * The access this request needs on the *bucket directory* itself, expressed as
+ * a canonical ACE mask (0 = no bucket-level gate).
+ *
+ * S3 bucket and object ACLs are independent: a private bucket does NOT block
+ * reading a public object whose key you already know, but listing the bucket
+ * needs the bucket's READ grant, and writing an object needs the bucket's WRITE
+ * grant (in addition to the object's own write permission, checked separately).
+ * We mirror that here rather than imposing POSIX hierarchical traversal:
+ *   - object GET/HEAD: no bucket gate (the object's own READ is enforced in the
+ *                      object handler before any 200 is sent)
+ *   - list:            READ_DATA on the bucket
+ *   - object PUT/DELETE: EXECUTE + WRITE_DATA on the bucket (add/remove an entry)
+ */
+static uint32_t
+chimera_s3_bucket_required_access(struct chimera_s3_request *s3_request)
 {
-    struct chimera_s3_request       *s3_request = private_data;
-    struct chimera_server_s3_thread *thread     = s3_request->thread;
-    struct evpl                     *evpl       = thread->evpl;
+    switch (evpl_http_request_type(s3_request->http_request)) {
+        case EVPL_HTTP_REQUEST_TYPE_GET:
+            if (s3_request->is_list) {
+                return CHIMERA_ACE_EXECUTE | CHIMERA_ACE_READ_DATA;
+            }
+            return 0;
+        case EVPL_HTTP_REQUEST_TYPE_HEAD:
+            return 0;
+        case EVPL_HTTP_REQUEST_TYPE_PUT:
+            /* PutXxxAcl is a setattr the VFS gates by owner; PutObject mutates
+             * the bucket directory and needs the bucket's WRITE grant. */
+            if (s3_request->is_acl) {
+                return 0;
+            }
+            return CHIMERA_ACE_EXECUTE | CHIMERA_ACE_WRITE_DATA;
+        case EVPL_HTTP_REQUEST_TYPE_DELETE:
+            return CHIMERA_ACE_EXECUTE | CHIMERA_ACE_WRITE_DATA;
+        default:
+            return 0;
+    } /* switch */
+} /* chimera_s3_bucket_required_access */
 
-    if (error_code) {
-        s3_request->status    = CHIMERA_S3_STATUS_NO_SUCH_KEY;
-        s3_request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
-        return;
+static void
+chimera_s3_route_request(
+    struct evpl                     *evpl,
+    struct chimera_server_s3_thread *thread,
+    struct chimera_s3_request       *s3_request)
+{
+    /* ?acl subresource: GetXxxAcl (GET) / PutXxxAcl (PUT). Both work off
+     * bucket_fh (+ object key for object ACLs) which is now resolved. */
+    if (s3_request->is_acl) {
+        switch (evpl_http_request_type(s3_request->http_request)) {
+            case EVPL_HTTP_REQUEST_TYPE_GET:
+                chimera_s3_get_acl(evpl, thread, s3_request);
+                return;
+            case EVPL_HTTP_REQUEST_TYPE_PUT:
+                chimera_s3_put_acl(evpl, thread, s3_request);
+                return;
+            default:
+                s3_request->status    = CHIMERA_S3_STATUS_METHOD_NOT_ALLOWED;
+                s3_request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
+                return;
+        } /* switch */
     }
-
-    memcpy(s3_request->bucket_fh, attr->va_fh, attr->va_fh_len);
-    s3_request->bucket_fhlen = attr->va_fh_len;
 
     switch (evpl_http_request_type(s3_request->http_request)) {
         case EVPL_HTTP_REQUEST_TYPE_HEAD:
@@ -410,6 +456,69 @@ chimera_s3_dispatch_callback(
             break;
     } /* switch */
 
+} /* chimera_s3_route_request */
+
+/*
+ * Completion of the bucket-directory access gate. On EACCES/EPERM the request
+ * is denied (AccessDenied); otherwise the operation proceeds. For a root or
+ * AUTH_NONE cred the gate is a no-op that completes OK with no backend I/O.
+ */
+static void
+chimera_s3_bucket_gate_complete(
+    enum chimera_vfs_error status,
+    void                  *private_data)
+{
+    struct chimera_s3_request       *s3_request = private_data;
+    struct chimera_server_s3_thread *thread     = s3_request->thread;
+    struct evpl                     *evpl       = thread->evpl;
+
+    if (status != CHIMERA_VFS_OK) {
+        s3_request->status = (status == CHIMERA_VFS_EACCES ||
+                              status == CHIMERA_VFS_EPERM) ?
+            CHIMERA_S3_STATUS_ACCESS_DENIED : CHIMERA_S3_STATUS_INTERNAL_ERROR;
+        s3_request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
+        if (s3_request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
+            s3_server_respond(evpl, s3_request);
+        }
+        return;
+    }
+
+    chimera_s3_route_request(evpl, thread, s3_request);
+} /* chimera_s3_bucket_gate_complete */
+
+static void
+chimera_s3_dispatch_callback(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct chimera_s3_request       *s3_request = private_data;
+    struct chimera_server_s3_thread *thread     = s3_request->thread;
+
+    if (error_code) {
+        s3_request->status    = CHIMERA_S3_STATUS_NO_SUCH_KEY;
+        s3_request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
+        return;
+    }
+
+    memcpy(s3_request->bucket_fh, attr->va_fh, attr->va_fh_len);
+    s3_request->bucket_fhlen = attr->va_fh_len;
+
+    uint32_t required = chimera_s3_bucket_required_access(s3_request);
+
+    /* Enforce the requester's bucket-level grant (listing READ, object-write
+     * WRITE) before routing. Operations with no bucket-level requirement (e.g.
+     * reading an object whose own ACL is checked in the object handler) skip
+     * the gate. */
+    if (required == 0) {
+        chimera_s3_route_request(thread->evpl, thread, s3_request);
+        return;
+    }
+
+    chimera_vfs_gate_fh(thread->vfs, &s3_request->cred,
+                        s3_request->bucket_fh, s3_request->bucket_fhlen,
+                        required,
+                        chimera_s3_bucket_gate_complete, s3_request);
 } /* chimera_s3_dispatch_callback */
 
 static void
@@ -450,20 +559,59 @@ s3_server_dispatch(
     s3_request->responded          = 0;
     s3_request->query_upload_idlen = 0;
     s3_request->query_part_number  = 0;
+    s3_request->is_acl             = 0;
+    s3_request->canned_acl         = CHIMERA_S3_CANNED_NONE;
+    s3_request->owner_id[0]        = '\0';
+    s3_request->owner_display[0]   = '\0';
     s3_request->http_request       = request;
 
     *notify_callback = s3_server_notify;
     *notify_data     = s3_request;
 
-    /* Verify AWS authentication */
-    auth_result = chimera_s3_auth_verify(shared->cred_cache, request);
+    /* Verify AWS authentication and resolve the principal's filesystem
+     * identity. Each configured S3 access key maps to a uid/gid; the request's
+     * VFS operations run under that credential so the unified VFS/ACL gate
+     * enforces cross-user access. An unauthenticated request maps to a
+     * low-privilege anonymous identity and is still allowed to reach the VFS,
+     * so public objects are anonymously readable while private ones return
+     * AccessDenied from the permission check. */
+    {
+        struct chimera_s3_auth_identity identity;
+
+        memset(&identity, 0, sizeof(identity));
+
+        auth_result = chimera_s3_auth_verify(shared->cred_cache, request,
+                                             &identity);
+
+        if (auth_result == CHIMERA_S3_AUTH_OK) {
+            chimera_vfs_cred_init_unix(&s3_request->cred,
+                                       identity.uid, identity.gid, 0, NULL);
+            /* identity strings are NUL-terminated and the same fixed size as
+             * the request fields; copy the whole buffer. */
+            memcpy(s3_request->owner_id, identity.canon_id,
+                   sizeof(s3_request->owner_id));
+            memcpy(s3_request->owner_display, identity.display_name,
+                   sizeof(s3_request->owner_display));
+        } else if (auth_result == CHIMERA_S3_AUTH_NO_AUTH_HEADER) {
+            /* Anonymous: map to "nobody" and continue to the VFS, which gates
+             * the operation against the object/bucket mode. */
+            chimera_vfs_cred_init_unix(&s3_request->cred,
+                                       CHIMERA_VFS_ANON_UID,
+                                       CHIMERA_VFS_ANON_GID, 0, NULL);
+            strncpy(s3_request->owner_id, "anonymous",
+                    sizeof(s3_request->owner_id) - 1);
+            strncpy(s3_request->owner_display, "anonymous",
+                    sizeof(s3_request->owner_display) - 1);
+            auth_result = CHIMERA_S3_AUTH_OK;
+        }
+    }
 
     switch (auth_result) {
         case CHIMERA_S3_AUTH_OK:
             /* Authentication successful */
             break;
         case CHIMERA_S3_AUTH_NO_AUTH_HEADER:
-            /* No auth header - authentication required */
+            /* Unreachable: anonymous is remapped to OK above. */
             s3_request->status    = CHIMERA_S3_STATUS_MISSING_AUTH_HEADER;
             s3_request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
             return;
@@ -629,7 +777,9 @@ s3_server_dispatch(
                     value_len   = 0;
                 }
 
-                if (key_len == 7 && memcmp(key_start, "uploads", 7) == 0) {
+                if (key_len == 3 && memcmp(key_start, "acl", 3) == 0) {
+                    s3_request->is_acl = 1;
+                } else if (key_len == 7 && memcmp(key_start, "uploads", 7) == 0) {
                     s3_request->has_uploads = 1;
                 } else if (key_len == 8 && memcmp(key_start, "versions", 8) == 0) {
                     s3_request->has_versions = 1;
@@ -778,6 +928,12 @@ s3_server_dispatch(
                 s3_request->del.n_keys   = 0;
                 s3_request->del.cur      = 0;
                 s3_request->del.quiet    = 0;
+            } else if (s3_request->is_acl) {
+                /* GetXxxAcl / PutXxxAcl: strip the "?acl" suffix so the ACL
+                 * handlers see the bare object key (empty for a bucket ACL).
+                 * Routed to the ACL handlers below regardless of bucket vs
+                 * object level. */
+                s3_request->path_len = qmark - s3_request->path;
             } else if (qmark == s3_request->path) {
                 if (saw_unknown && !s3_request->has_versions) {
                     /* Path is "?<subresource>" we don't implement (acl, policy,
@@ -825,6 +981,10 @@ s3_server_dispatch(
         }
     }
 
+    /* Parse the canned ACL (x-amz-acl) once so PutObject, CreateBucket and the
+     * Put{Object,Bucket}Acl handlers can map it to a permission mode. */
+    s3_request->canned_acl = chimera_s3_parse_canned_acl(request);
+
     range_str = evpl_http_request_header(request, "Range");
 
     if (range_str) {
@@ -833,6 +993,11 @@ s3_server_dispatch(
         s3_request->file_offset = 0;
         s3_request->file_length = 0;
     }
+
+    /* Requests are recycled from a free list; reset file_real_length so a stale
+     * value from a prior GET on this slot can't make s3_server_respond emit 206
+     * (Partial Content) for a non-ranged reply (e.g. a PUT). */
+    s3_request->file_real_length = 0;
 
     s3_request->file_left       = s3_request->file_length;
     s3_request->file_cur_offset = s3_request->file_offset;
@@ -860,9 +1025,11 @@ s3_server_dispatch(
         }
 
         /* CreateBucket: PUT /bucket with no object key. The target bucket does
-         * not exist yet, so this is handled before the bucket-map lookup. */
+        * not exist yet, so this is handled before the bucket-map lookup.
+        * PutBucketAcl (PUT /bucket?acl) also has no object key but targets an
+        * existing bucket, so it must fall through to the ACL routing below. */
         if (method == EVPL_HTTP_REQUEST_TYPE_PUT && s3_request->path_len == 0 &&
-            !s3_request->has_upload_id) {
+            !s3_request->has_upload_id && !s3_request->is_acl) {
             s3_request->op_bucket = 1;
             chimera_s3_create_bucket(evpl, thread, s3_request);
             return;
@@ -877,11 +1044,19 @@ s3_server_dispatch(
             return;
         }
 
+        /* A bucket-level ?acl request (Get/PutBucketAcl) targets the bucket
+         * directory itself, not an object. Mark it op_bucket so any request
+         * body is drained, and let the ACL handlers run once bucket_fh is
+         * resolved by the lookup below. */
+        if (s3_request->is_acl && s3_request->path_len == 0) {
+            s3_request->op_bucket = 1;
+        }
+
         /* Bucket-level operations on an existing bucket: empty object key with
          * no object-style subresource query. */
         if (s3_request->path_len == 0 && !s3_request->has_uploads &&
             !s3_request->has_delete && !s3_request->has_upload_id &&
-            !s3_request->is_list) {
+            !s3_request->is_list && !s3_request->is_acl) {
 
             if (method == EVPL_HTTP_REQUEST_TYPE_DELETE) {
                 s3_request->op_bucket = 1;
@@ -1023,11 +1198,16 @@ chimera_s3_add_cred(
     void       *s3_shared,
     const char *access_key,
     const char *secret_key,
+    uint32_t    uid,
+    uint32_t    gid,
+    const char *canon_id,
+    const char *display_name,
     int         pinned)
 {
     struct chimera_server_s3_shared *shared = s3_shared;
 
-    return chimera_s3_cred_cache_add(shared->cred_cache, access_key, secret_key, pinned);
+    return chimera_s3_cred_cache_add(shared->cred_cache, access_key, secret_key,
+                                     uid, gid, canon_id, display_name, pinned);
 } /* chimera_s3_add_cred */
 
 static void *
