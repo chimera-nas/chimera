@@ -4,6 +4,7 @@
 
 #include "nfs4_procs.h"
 #include "nfs4_status.h"
+#include "nfs4_xattr.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 
@@ -20,7 +21,7 @@ chimera_nfs4_listxattrs_complete(
     struct nfs_request    *req = private_data;
     struct LISTXATTRS4res *res = &req->res_compound.resarray[req->index].oplistxattrs;
     const char            *p   = names;
-    uint32_t               i;
+    uint32_t               i, emitted;
     int                    rc;
 
     if (error_code != CHIMERA_VFS_OK) {
@@ -34,7 +35,20 @@ chimera_nfs4_listxattrs_complete(
 
     res->lxr_status = NFS4_OK;
 
-    rc = xdr_dbuf_alloc_array(&res->lxr_value, lxr_names, count,
+    /* The backend returns fully-qualified names from every namespace; RFC 8276
+     * scopes NFS xattrs to the user namespace.  Count the user.* names so the
+     * result array is sized to what we will actually emit. */
+    emitted = 0;
+    for (i = 0; i < count; i++) {
+        uint32_t namelen = strlen(p);
+
+        if (chimera_nfs4_xattr_is_user(p, namelen)) {
+            emitted++;
+        }
+        p += namelen + 1;
+    }
+
+    rc = xdr_dbuf_alloc_array(&res->lxr_value, lxr_names, emitted,
                               req->encoding->dbuf);
     if (rc) {
         res->lxr_status = NFS4ERR_RESOURCE;
@@ -43,14 +57,22 @@ chimera_nfs4_listxattrs_complete(
         return;
     }
 
-    /* names is a sequence of NUL-terminated names. Point each result entry
-     * directly at the staging buffer (which lives until the reply is sent). */
+    /* names is a sequence of NUL-terminated names. Strip the "user." prefix and
+     * drop non-user namespaces, pointing each result entry directly at the
+     * staging buffer (which lives until the reply is sent). */
+    p       = names;
+    emitted = 0;
     for (i = 0; i < count; i++) {
         uint32_t namelen = strlen(p);
 
-        res->lxr_value.lxr_names[i].xn_name.data = (void *) p;
-        res->lxr_value.lxr_names[i].xn_name.len  = namelen;
-        p                                       += namelen + 1;
+        if (chimera_nfs4_xattr_is_user(p, namelen)) {
+            res->lxr_value.lxr_names[emitted].xn_name.data =
+                (void *) (p + CHIMERA_NFS4_XATTR_USER_PREFIX_LEN);
+            res->lxr_value.lxr_names[emitted].xn_name.len =
+                namelen - CHIMERA_NFS4_XATTR_USER_PREFIX_LEN;
+            emitted++;
+        }
+        p += namelen + 1;
     }
 
     res->lxr_value.lxr_cookie = cookie;

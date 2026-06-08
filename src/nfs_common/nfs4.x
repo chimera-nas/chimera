@@ -1348,6 +1348,10 @@ const ACCESS4_MODIFY     = 0x00000004;
 const ACCESS4_EXTEND     = 0x00000008;
 const ACCESS4_DELETE     = 0x00000010;
 const ACCESS4_EXECUTE    = 0x00000020;
+/* RFC 8276 sec 8.4: named-attribute (xattr) access bits. */
+const ACCESS4_XAREAD     = 0x00000040;
+const ACCESS4_XAWRITE    = 0x00000080;
+const ACCESS4_XALIST     = 0x00000100;
 
 struct ACCESS4args {
         /* CURRENT_FH: object */
