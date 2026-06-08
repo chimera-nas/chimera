@@ -285,6 +285,32 @@ chimera_vfs_lease_owner_equal(
            a->owner_hi == b->owner_hi;
 } /* chimera_vfs_lease_owner_equal */
 
+/* Same-lease-key test for SMB2 caching leases, IGNORING client_key.
+ *
+ * MS-SMB2 identifies a lease by (ClientGuid, LeaseKey); chimera's owner key
+ * encodes ClientGuid in client_key and LeaseKey in owner_lo/owner_hi.  When a
+ * conflicting open or a write presents the SAME LeaseKey as an existing caching
+ * holder, the object store shares the cache rather than breaking it -- so the
+ * holder must be exempted from the break.  Windows applies this on the lease key
+ * alone (two opens with the same lease key, even from different connections with
+ * distinct ClientGuids, do not break one another: WPTS Leasing_FileLeasing*_
+ * SameLeaseKey).  This mirrors the SHARE-acquire side's has_break_skip_key,
+ * which is keyed on the lease key only (see chimera_vfs_state_would_conflict).
+ *
+ * Restricted to SMB2 caching leases on both sides: NFSv4 delegations and the
+ * internal implicit lease never share an SMB lease key, and owner_equal already
+ * covers a holder's own same-client/same-key re-open. */
+static inline bool
+chimera_vfs_lease_smb2_same_key(
+    const struct chimera_vfs_lease_owner *holder,
+    const struct chimera_vfs_lease_owner *opener)
+{
+    return holder->protocol == CHIMERA_VFS_LEASE_PROTO_SMB2 &&
+           opener->protocol == CHIMERA_VFS_LEASE_PROTO_SMB2 &&
+           holder->owner_lo == opener->owner_lo &&
+           holder->owner_hi == opener->owner_hi;
+} /* chimera_vfs_lease_smb2_same_key */
+
 /* Byte-range overlap test for half-open intervals [off, off+len).
  *
  * length==0 is a genuine zero-byte range (SMB2 zero-length lock): [off, off)
@@ -1250,6 +1276,19 @@ chimera_vfs_caching_grant_find_locked(
         if (chimera_vfs_lease_owner_equal(&g->lease.owner, owner)) {
             return g;
         }
+        /* MS-SMB2 same-lease-key: an open that presents the same LeaseKey as an
+         * existing SMB2 RqLs lease grant joins that grant (shares its cache
+         * state), even when it arrives on a different ClientGuid/connection.
+         * Windows keys the underlying oplock by lease key, so two opens with one
+         * lease key share a single lease rather than breaking one another (WPTS
+         * Leasing_FileLeasing{V1,V2}_SameLeaseKey).  Matched here so the second
+         * open is granted the existing state (e.g. RWH) and no break fires.
+         * Restricted to lease grants (!is_oplock): a legacy oplock is keyed by a
+         * per-open file id, never a shareable lease key. */
+        if (!g->is_oplock &&
+            chimera_vfs_lease_smb2_same_key(&g->lease.owner, owner)) {
+            return g;
+        }
     }
     return NULL;
 } /* chimera_vfs_caching_grant_find_locked */
@@ -2001,6 +2040,13 @@ chimera_vfs_break_reads_for_write(
         if (chimera_vfs_lease_owner_equal(&cur->owner, writer)) {
             continue;
         }
+        /* A holder sharing the writer's SMB2 lease key (even under a different
+         * ClientGuid) shares the cache and is coherent with this write: do not
+         * break it (MS-SMB2 same-lease-key; WPTS Leasing_*_SameLeaseKey writes
+         * from both clients without breaking the peer's lease). */
+        if (chimera_vfs_lease_smb2_same_key(&cur->owner, writer)) {
+            continue;
+        }
         if (n < CHIMERA_VFS_STATE_MAX_BREAK_BATCH) {
             to_break[n++] = cur;
         }
@@ -2070,6 +2116,12 @@ chimera_vfs_state_break_caching_for_open(
             continue;
         }
         if (chimera_vfs_lease_owner_equal(&cur->owner, opener)) {
+            continue;
+        }
+        /* Same SMB2 lease key (even from a different ClientGuid): the opens share
+         * one logical lease and the holder is NOT broken (MS-SMB2 same-lease-key
+         * caching; mirrors the SHARE-side has_break_skip_key). */
+        if (chimera_vfs_lease_smb2_same_key(&cur->owner, opener)) {
             continue;
         }
         /* A pure handle-trigger break (the pre-share-check pass) is a legacy SMB

@@ -122,6 +122,8 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
         BVT_CreateClose_CreateAndCloseFile
         BVT_Leasing_FileLeasingV1
         BVT_Leasing_FileLeasingV2
+        Leasing_FileLeasingV1_SameLeaseKey
+        Leasing_FileLeasingV2_SameLeaseKey
         BVT_MultiCredit_OneRequestWithMultiCredit
         BVT_Negotiate_Compatible_2002
         BVT_Negotiate_Compatible_Wildcard
