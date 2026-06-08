@@ -88,6 +88,25 @@ chimera_vfs_remove_parent_open_complete(
 
     request->remove.parent_handle = oh;
 
+    /* Path-only backends have no child fh; remove by path directly (the backend
+     * deletes by path) -- skip the child lookup that yields nothing usable. */
+    if (chimera_vfs_module_is_path_only(request->module)) {
+        request->remove.child_fh_len = 0;
+        chimera_vfs_remove_at(
+            thread,
+            request->cred,
+            oh,
+            request->remove.path + request->remove.name_offset,
+            request->remove.pathlen - request->remove.name_offset,
+            NULL,
+            0,
+            0,
+            0,
+            chimera_vfs_remove_op_complete,
+            request);
+        return;
+    }
+
     chimera_vfs_lookup_at(
         thread,
         request->cred,

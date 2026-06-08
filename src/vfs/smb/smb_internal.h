@@ -34,14 +34,22 @@
 #define CHIMERA_SMB_CLIENT_DEFAULT_DOMAIN "WORKGROUP"
 #define CHIMERA_SMB_CLIENT_MAX_SERVERS    64
 
-/* The fh_fragment layout produced by this module:
-*   [ mount_id (16) ][ server_index (1) ][ path bytes (UTF-8, relative to share) ]
-* The path is stored inline; the share root has an empty path.  This keeps the
-* client stateless about file identity (no path table), at the cost of a path
-* length bound (CHIMERA_VFS_FH_SIZE + 16 - 17). */
-#define CHIMERA_SMB_FH_PATH_OFFSET        (CHIMERA_VFS_MOUNT_ID_SIZE + 1)
-/* Bounded by the 48-byte request->fh that carries a non-root handle. */
-#define CHIMERA_SMB_FH_PATH_MAX           (CHIMERA_VFS_FH_SIZE - CHIMERA_SMB_FH_PATH_OFFSET)
+/* The SMB client is a PATH-ONLY VFS backend (no persistent file handles).  File
+ * handles come in exactly two shapes:
+ *
+ *   mount root:  [ mount_id (16) ][ server_index (1) ]                = 17 bytes
+ *   open token:  [ mount_id (16) ][ server_index (1) ][ FileId (16) ] = 33 bytes
+ *
+ * The mount root is the ONLY re-openable fh (open_fh on it CREATEs the share
+ * root).  An open-token fh is an opaque per-open identity built at open time
+ * from the SMB FileId; it is used only for open-cache keying and routing, never
+ * to re-derive a path, and open_fh of one returns ESTALE.  All metadata is
+ * addressed by full mount-relative paths carried in request->X.name. */
+#define CHIMERA_SMB_FH_SERVER_OFFSET      CHIMERA_VFS_MOUNT_ID_SIZE
+#define CHIMERA_SMB_ROOT_FH_LEN           (CHIMERA_VFS_MOUNT_ID_SIZE + 1)
+#define CHIMERA_SMB_OPEN_FH_LEN           (CHIMERA_VFS_MOUNT_ID_SIZE + 1 + 16)
+/* Longest mount-relative path the client will encode in a single SMB request. */
+#define CHIMERA_SMB_PATH_MAX              1024
 
 /* ---- little-endian wire helpers ---------------------------------------- */
 
@@ -306,27 +314,36 @@ smb_fill_attrs_from_network_open(
         CHIMERA_VFS_ATTR_CTIME | CHIMERA_VFS_ATTR_BTIME;
 } /* smb_fill_attrs_from_network_open */
 
-/* ---- file-handle path helpers ------------------------------------------ */
-
-/* Decode the share-relative UTF-8 path stored inline in a file handle. */
-static inline const char *
-chimera_smb_fh_path(
-    const uint8_t *fh,
-    int            fh_len,
-    int           *path_len)
-{
-    *path_len = fh_len - CHIMERA_SMB_FH_PATH_OFFSET;
-    if (*path_len < 0) {
-        *path_len = 0;
-    }
-    return (const char *) (fh + CHIMERA_SMB_FH_PATH_OFFSET);
-} /* chimera_smb_fh_path */
+/* ---- file-handle helpers ----------------------------------------------- */
 
 static inline int
 chimera_smb_fh_server_index(const uint8_t *fh)
 {
-    return fh[CHIMERA_VFS_MOUNT_ID_SIZE];
+    return fh[CHIMERA_SMB_FH_SERVER_OFFSET];
 } /* chimera_smb_fh_server_index */
+
+/* The mount-root fh is the only re-openable one. */
+static inline int
+chimera_smb_fh_is_root(int fh_len)
+{
+    return fh_len == CHIMERA_SMB_ROOT_FH_LEN;
+} /* chimera_smb_fh_is_root */
+
+/* Build the opaque open-token fh [mount_id][server_index][FileId] from the
+ * (root) fh that carries the mount_id + server_index.  Returns its length. */
+static inline int
+chimera_smb_encode_open_fh(
+    const uint8_t                           *root_fh,
+    const struct chimera_smb_client_file_id *file_id,
+    uint8_t                                 *out_fh)
+{
+    uint8_t fragment[1 + sizeof(*file_id)];
+
+    fragment[0] = (uint8_t) chimera_smb_fh_server_index(root_fh);
+    memcpy(fragment + 1, file_id, sizeof(*file_id));
+
+    return chimera_vfs_encode_fh_parent(root_fh, fragment, sizeof(fragment), out_fh);
+} /* chimera_smb_encode_open_fh */
 
 /* ---- transport (smb.c) ------------------------------------------------- */
 

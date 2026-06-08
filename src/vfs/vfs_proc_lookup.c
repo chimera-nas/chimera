@@ -24,6 +24,13 @@ chimera_vfs_lookup_readlink_complete(
     struct chimera_vfs_attrs *attr,
     void                     *private_data);
 
+static void
+chimera_vfs_lookup_pathonly_complete(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    struct chimera_vfs_attrs *dir_attr,
+    void                     *private_data);
+
 static inline void
 chimera_vfs_lookup_open_dispatch(
     enum chimera_vfs_error          error_code,
@@ -49,6 +56,24 @@ chimera_vfs_lookup_open_dispatch(
     /* Save parent fh for potential relative symlink resolution */
     memcpy(lp_request->lookup.parent_fh, oh->fh, oh->fh_len);
     lp_request->lookup.parent_fh_len = oh->fh_len;
+
+    /* Crossed into a path-only mount: it has no child fhs to walk, so hand the
+     * whole remaining path to it in one lookup and return the final attrs. */
+    if (chimera_vfs_module_is_path_only(oh->vfs_module)) {
+        const char *remaining = lp_request->lookup.pathc;
+
+        chimera_vfs_lookup_at(
+            thread,
+            lp_request->cred,
+            oh,
+            remaining,
+            strlen(remaining),
+            lp_request->lookup.attr_mask | CHIMERA_VFS_ATTR_MODE,
+            0,
+            chimera_vfs_lookup_pathonly_complete,
+            lp_request);
+        return;
+    }
 
     component = lp_request->lookup.pathc;
 
@@ -287,6 +312,31 @@ chimera_vfs_lookup_complete(
                             lp_request);
     }
 } /* chimera_vfs_lookup_complete */
+
+/*
+ * Path-only fast path: a path-only mount (no FH-relative ops) resolves the whole
+ * path in a single lookup_at against the mount root, with the full path as the
+ * "component".  No per-component traversal, no open_fh on intermediates.
+ */
+static void
+chimera_vfs_lookup_pathonly_complete(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    struct chimera_vfs_attrs *dir_attr,
+    void                     *private_data)
+{
+    struct chimera_vfs_request   *lp_request = private_data;
+    struct chimera_vfs_thread    *thread     = lp_request->thread;
+    chimera_vfs_lookup_callback_t callback   = lp_request->lookup.callback;
+    void                         *priv       = lp_request->lookup.private_data;
+
+    (void) dir_attr;
+
+    chimera_vfs_release(thread, lp_request->lookup.handle);
+    chimera_vfs_request_free(thread, lp_request);
+
+    callback(error_code, error_code == CHIMERA_VFS_OK ? attr : NULL, priv);
+} /* chimera_vfs_lookup_pathonly_complete */
 
 SYMBOL_EXPORT void
 chimera_vfs_lookup(

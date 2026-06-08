@@ -262,6 +262,31 @@ chimera_vfs_rename(
         memcpy(request->rename.new_parent_fh, fh, fhlen);
         request->rename.new_parent_fh_len = fhlen;
 
+        /* Path-only backends have no target fh (no silly-rename); rename by full
+         * paths directly.  The backend returns EXDEV if the two parents are on
+         * different mounts. */
+        if (chimera_vfs_module_is_path_only(request->module)) {
+            request->rename.target_fh_len = 0;
+            chimera_vfs_rename_at(
+                thread,
+                cred,
+                request->rename.old_parent_fh,
+                request->rename.old_parent_fh_len,
+                request->rename.path,
+                request->rename.pathlen,
+                request->rename.new_parent_fh,
+                request->rename.new_parent_fh_len,
+                request->rename.new_path,
+                request->rename.new_pathlen,
+                NULL,
+                0,
+                0,
+                0,
+                chimera_vfs_rename_op_complete,
+                request);
+            return;
+        }
+
         /* Lookup the target to get its FH for silly rename optimization */
         chimera_vfs_lookup(
             thread,

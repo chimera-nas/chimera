@@ -12,20 +12,20 @@
 #include "evpl/evpl.h"
 
 /*
- * File operations for the SMB2 client.  SMB has no persistent file handle; the
- * VFS file handle encodes the share-relative path inline, and every op that
- * needs server-side identity does an SMB2 CREATE (open) on that path.  Ops on an
- * already-open VFS handle reuse the SMB FileId stashed in vfs_private, which is
- * valid on any connection bound to the shared session.
+ * File operations for the SMB2 client -- a PATH-ONLY VFS backend.
+ *
+ * Metadata ops (lookup/mkdir/remove/open) address files by the full
+ * mount-relative path carried in request->X.name and do a transient SMB2 CREATE
+ * on that path.  An open file's VFS handle carries an opaque token fh
+ * [mount_id][server_index][FileId]; ops on an open handle
+ * (read/write/getattr/setattr/commit/close) recover the server + FileId from the
+ * handle's vfs_private (struct chimera_smb_client_open), never from a path.
  */
 
-/* Transient per-op state kept in request->plugin_data across a CREATE -> op ->
- * CLOSE chain. */
+/* Transient per-op state kept in request->plugin_data across a CREATE -> CLOSE
+ * chain (ops that open transiently). */
 struct chimera_smb_op_state {
     struct chimera_smb_client_file_id file_id;
-    uint8_t                           child_fh[CHIMERA_VFS_FH_SIZE];
-    int                               child_fh_len;
-    enum chimera_vfs_error status;
 };
 
 /* ---- small helpers ----------------------------------------------------- */
@@ -47,57 +47,35 @@ smb_utf16le_encode(
     return (size_t) len * 2;
 } /* smb_utf16le_encode */
 
-/* Build a share-relative child path (parent path + "\\" + name) and the child
- * file handle.  Returns the child path length, or -1 if it would not fit. */
-static int
-smb_build_child(
-    const uint8_t *parent_fh,
-    int            parent_fh_len,
-    const char    *name,
-    int            namelen,
-    char          *out_path,
-    int            out_path_max,
-    uint8_t       *out_fh,
-    int           *out_fh_len)
+/* A network-open-information block (CREATE/CLOSE/QUERY_INFO embed it). */
+struct smb_open_info {
+    uint64_t crttime, atime, mtime, ctime;
+    uint64_t alloc_size, end_of_file;
+    uint32_t file_attributes;
+};
+
+static void
+smb_parse_open_info(
+    struct evpl_iovec_cursor *body,
+    struct smb_open_info     *r)
 {
-    int         parent_len;
-    const char *parent_path = chimera_smb_fh_path(parent_fh, parent_fh_len, &parent_len);
-    int         child_len;
-    uint8_t     fragment[1 + CHIMERA_SMB_FH_PATH_MAX];
+    uint32_t reserved;
 
-    if (parent_len > 0) {
-        child_len = parent_len + 1 + namelen;
-    } else {
-        child_len = namelen;
-    }
+    evpl_iovec_cursor_get_uint64(body, &r->crttime);
+    evpl_iovec_cursor_get_uint64(body, &r->atime);
+    evpl_iovec_cursor_get_uint64(body, &r->mtime);
+    evpl_iovec_cursor_get_uint64(body, &r->ctime);
+    evpl_iovec_cursor_get_uint64(body, &r->alloc_size);
+    evpl_iovec_cursor_get_uint64(body, &r->end_of_file);
+    evpl_iovec_cursor_get_uint32(body, &r->file_attributes);
+    evpl_iovec_cursor_get_uint32(body, &reserved);
+} /* smb_parse_open_info */
 
-    if (child_len > out_path_max || child_len > CHIMERA_SMB_FH_PATH_MAX) {
-        return -1;
-    }
-
-    if (parent_len > 0) {
-        memcpy(out_path, parent_path, parent_len);
-        out_path[parent_len] = '\\';
-        memcpy(out_path + parent_len + 1, name, namelen);
-    } else {
-        memcpy(out_path, name, namelen);
-    }
-
-    fragment[0] = (uint8_t) chimera_smb_fh_server_index(parent_fh);
-    memcpy(fragment + 1, out_path, child_len);
-
-    *out_fh_len = chimera_vfs_encode_fh_parent(parent_fh, fragment, 1 + child_len, out_fh);
-
-    return child_len;
-} /* smb_build_child */
-
-/* Result of parsing a CREATE response. */
+/* CREATE response: header fields, the embedded network-open-info, then FileId. */
 struct smb_create_result {
     struct chimera_smb_client_file_id file_id;
     uint32_t                          create_action;
-    uint64_t                          crttime, atime, mtime, ctime;
-    uint64_t                          alloc_size, end_of_file;
-    uint32_t                          file_attributes;
+    struct smb_open_info              info;
 };
 
 static void
@@ -107,20 +85,12 @@ smb_parse_create_reply(
 {
     uint16_t structsize;
     uint8_t  oplock, flags;
-    uint32_t reserved;
 
     evpl_iovec_cursor_get_uint16(body, &structsize);
     evpl_iovec_cursor_get_uint8(body, &oplock);
     evpl_iovec_cursor_get_uint8(body, &flags);
     evpl_iovec_cursor_get_uint32(body, &r->create_action);
-    evpl_iovec_cursor_get_uint64(body, &r->crttime);
-    evpl_iovec_cursor_get_uint64(body, &r->atime);
-    evpl_iovec_cursor_get_uint64(body, &r->mtime);
-    evpl_iovec_cursor_get_uint64(body, &r->ctime);
-    evpl_iovec_cursor_get_uint64(body, &r->alloc_size);
-    evpl_iovec_cursor_get_uint64(body, &r->end_of_file);
-    evpl_iovec_cursor_get_uint32(body, &r->file_attributes);
-    evpl_iovec_cursor_get_uint32(body, &reserved);
+    smb_parse_open_info(body, &r->info);
     evpl_iovec_cursor_get_uint64(body, &r->file_id.pid);
     evpl_iovec_cursor_get_uint64(body, &r->file_id.vid);
 
@@ -129,34 +99,31 @@ smb_parse_create_reply(
     (void) flags;
 } /* smb_parse_create_reply */
 
+/* Map SMB attrs into a chimera_vfs_attrs.  SMB exposes no POSIX owner; report
+ * the requesting credential as the owner (correct for a caller inspecting files
+ * it created), and a caller-supplied stable inode number. */
 static void
-smb_apply_create_attrs(
+smb_apply_attrs(
     const struct chimera_vfs_request *request,
     struct chimera_vfs_attrs         *attr,
-    const struct smb_create_result   *r,
-    const char                       *path,
-    int                               path_len)
+    const struct smb_open_info       *info,
+    uint64_t                          ino)
 {
-    smb_fill_attrs_from_network_open(attr, r->crttime, r->atime, r->mtime,
-                                     r->ctime, r->alloc_size, r->end_of_file,
-                                     r->file_attributes);
+    smb_fill_attrs_from_network_open(attr, info->crttime, info->atime,
+                                     info->mtime, info->ctime, info->alloc_size,
+                                     info->end_of_file, info->file_attributes);
 
-    /* SMB CREATE does not return an inode number; synthesize a stable, nonzero
-     * one from the path so callers that key on st_ino behave. */
-    attr->va_ino       = XXH3_64bits(path, path_len) | 1;
+    attr->va_ino       = ino | 1;
     attr->va_set_mask |= CHIMERA_VFS_ATTR_INUM;
 
-    /* SMB2 exposes no POSIX owner; report the requesting credential as the
-     * owner.  This is correct for the common case of a caller inspecting files
-     * it created (the chimera SMB server creates them as the session user). */
     if (request->cred) {
         attr->va_uid       = request->cred->uid;
         attr->va_gid       = request->cred->gid;
         attr->va_set_mask |= CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID;
     }
-} /* smb_apply_create_attrs */
+} /* smb_apply_attrs */
 
-/* Send an SMB2 CREATE on `path` (share-relative, may be empty for the root). */
+/* Send an SMB2 CREATE on `path` (full mount-relative path; "" for the root). */
 static void
 smb_send_create(
     struct chimera_smb_client_conn *conn,
@@ -164,7 +131,6 @@ smb_send_create(
     const char                     *path,
     int                             path_len,
     uint32_t                        desired_access,
-    uint32_t                        file_attributes,
     uint32_t                        share_access,
     uint32_t                        disposition,
     uint32_t                        options,
@@ -173,8 +139,16 @@ smb_send_create(
     struct evpl_iovec        iov;
     struct evpl_iovec_cursor cursor;
     struct smb2_header      *hdr;
-    uint8_t                  name16[2 * CHIMERA_SMB_FH_PATH_MAX];
-    size_t                   name16_len = smb_utf16le_encode(path, path_len, name16);
+    uint8_t                  name16[2 * CHIMERA_SMB_PATH_MAX];
+    size_t                   name16_len;
+
+    if (path_len > CHIMERA_SMB_PATH_MAX) {
+        request->status = CHIMERA_VFS_ENAMETOOLONG;
+        request->complete(request);
+        return;
+    }
+
+    name16_len = smb_utf16le_encode(path, path_len, name16);
 
     chimera_smb_client_pdu_begin(conn, SMB2_CREATE, &iov, &cursor, &hdr);
 
@@ -185,7 +159,7 @@ smb_send_create(
     evpl_iovec_cursor_append_uint64(&cursor, 0);                            /* SmbCreateFlags */
     evpl_iovec_cursor_append_uint64(&cursor, 0);                            /* Reserved */
     evpl_iovec_cursor_append_uint32(&cursor, desired_access);
-    evpl_iovec_cursor_append_uint32(&cursor, file_attributes);
+    evpl_iovec_cursor_append_uint32(&cursor, 0);                            /* FileAttributes */
     evpl_iovec_cursor_append_uint32(&cursor, share_access);
     evpl_iovec_cursor_append_uint32(&cursor, disposition);
     evpl_iovec_cursor_append_uint32(&cursor, options);
@@ -221,6 +195,13 @@ smb_send_close(
 
     chimera_smb_client_pdu_finish(conn, &iov, &cursor, request, reply_cb, request);
 } /* smb_send_close */
+
+/* Recover the open state (FileId + server) from a VFS open handle. */
+static inline struct chimera_smb_client_open *
+smb_handle_open_state(struct chimera_vfs_open_handle *handle)
+{
+    return handle ? (struct chimera_smb_client_open *) handle->vfs_private : NULL;
+} /* smb_handle_open_state */
 
 /* ---- CLOSE (VFS op) ---------------------------------------------------- */
 
@@ -258,10 +239,10 @@ chimera_smb_client_close(
     smb_send_close(conn, request, &file_id, chimera_smb_close_reply);
 } /* chimera_smb_client_close */
 
-/* ---- getattr (transient open) ------------------------------------------ */
+/* ---- getattr (handle-based QUERY_INFO) --------------------------------- */
 
 static void
-chimera_smb_getattr_close_reply(
+chimera_smb_getattr_reply(
     struct chimera_smb_client_conn *conn,
     uint32_t                        status,
     const struct smb2_header       *hdr,
@@ -269,32 +250,14 @@ chimera_smb_getattr_close_reply(
     int                             body_len,
     void                           *arg)
 {
-    struct chimera_vfs_request *request = arg;
+    struct chimera_vfs_request     *request    = arg;
+    struct chimera_smb_client_open *open_state = smb_handle_open_state(request->getattr.handle);
+    struct smb_open_info            info;
+    uint16_t                        structsize, out_offset;
+    uint32_t                        out_length;
+    int                             consumed;
 
     (void) conn;
-    (void) hdr;
-    (void) body;
-    (void) body_len;
-    (void) status;
-
-    request->complete(request);
-} /* chimera_smb_getattr_close_reply */
-
-static void
-chimera_smb_getattr_create_reply(
-    struct chimera_smb_client_conn *conn,
-    uint32_t                        status,
-    const struct smb2_header       *hdr,
-    struct evpl_iovec_cursor       *body,
-    int                             body_len,
-    void                           *arg)
-{
-    struct chimera_vfs_request  *request = arg;
-    struct chimera_smb_op_state *state   = request->plugin_data;
-    struct smb_create_result     r;
-    const char                  *path;
-    int                          path_len;
-
     (void) hdr;
     (void) body_len;
 
@@ -304,35 +267,60 @@ chimera_smb_getattr_create_reply(
         return;
     }
 
-    smb_parse_create_reply(body, &r);
+    evpl_iovec_cursor_get_uint16(body, &structsize);
+    evpl_iovec_cursor_get_uint16(body, &out_offset);
+    evpl_iovec_cursor_get_uint32(body, &out_length);
 
-    path = chimera_smb_fh_path(request->fh, request->fh_len, &path_len);
-    smb_apply_create_attrs(request, &request->getattr.r_attr, &r, path, path_len);
+    consumed = evpl_iovec_cursor_consumed(body);
+    if (out_offset > consumed) {
+        evpl_iovec_cursor_skip(body, out_offset - consumed);
+    }
+
+    smb_parse_open_info(body, &info);
+
+    smb_apply_attrs(request, &request->getattr.r_attr, &info,
+                    open_state->file_id.pid);
 
     request->status = CHIMERA_VFS_OK;
-    state->file_id  = r.file_id;
-
-    smb_send_close(conn, request, &state->file_id, chimera_smb_getattr_close_reply);
-} /* chimera_smb_getattr_create_reply */
+    request->complete(request);
+} /* chimera_smb_getattr_reply */
 
 void
 chimera_smb_client_getattr(
     struct chimera_smb_client_conn *conn,
     struct chimera_vfs_request     *request)
 {
-    const char *path;
-    int         path_len;
+    struct chimera_smb_client_open *open_state = smb_handle_open_state(request->getattr.handle);
+    struct evpl_iovec               iov;
+    struct evpl_iovec_cursor        cursor;
+    struct smb2_header             *hdr;
 
-    path = chimera_smb_fh_path(request->fh, request->fh_len, &path_len);
+    if (!open_state) {
+        request->status = CHIMERA_VFS_EINVAL;
+        request->complete(request);
+        return;
+    }
 
-    smb_send_create(conn, request, path, path_len,
-                    SMB2_FILE_READ_ATTRIBUTES, 0,
-                    SMB2_FILE_SHARE_READ | SMB2_FILE_SHARE_WRITE | SMB2_FILE_SHARE_DELETE,
-                    SMB2_FILE_OPEN, 0,
-                    chimera_smb_getattr_create_reply);
+    /* SMB2 QUERY_INFO, FILE / FileNetworkOpenInformation, on the open FileId. */
+    chimera_smb_client_pdu_begin(conn, SMB2_QUERY_INFO, &iov, &cursor, &hdr);
+
+    evpl_iovec_cursor_append_uint16(&cursor, SMB2_QUERY_INFO_REQUEST_SIZE);
+    evpl_iovec_cursor_append_uint8(&cursor, SMB2_INFO_FILE);
+    evpl_iovec_cursor_append_uint8(&cursor, SMB2_FILE_NETWORK_OPEN_INFO);
+    evpl_iovec_cursor_append_uint32(&cursor, SMB2_FILE_NETWORK_OPEN_INFO_SIZE); /* OutputBufferLength */
+    evpl_iovec_cursor_append_uint16(&cursor, 0);             /* InputBufferOffset */
+    evpl_iovec_cursor_append_uint16(&cursor, 0);             /* Reserved */
+    evpl_iovec_cursor_append_uint32(&cursor, 0);             /* InputBufferLength */
+    evpl_iovec_cursor_append_uint32(&cursor, 0);             /* AdditionalInformation */
+    evpl_iovec_cursor_append_uint32(&cursor, 0);             /* Flags */
+    evpl_iovec_cursor_append_uint64(&cursor, open_state->file_id.pid);
+    evpl_iovec_cursor_append_uint64(&cursor, open_state->file_id.vid);
+
+    chimera_smb_client_pdu_finish(conn, &iov, &cursor, request,
+                                  chimera_smb_getattr_reply, request);
 } /* chimera_smb_client_getattr */
 
-/* ---- lookup_at (transient open) ---------------------------------------- */
+/* ---- lookup_at (full path, transient open) ----------------------------- */
 
 static void
 chimera_smb_lookup_close_reply(
@@ -378,13 +366,10 @@ chimera_smb_lookup_create_reply(
 
     smb_parse_create_reply(body, &r);
 
-    smb_apply_create_attrs(request, &request->lookup_at.r_attr, &r,
-                           (const char *) state->child_fh + CHIMERA_SMB_FH_PATH_OFFSET,
-                           state->child_fh_len - CHIMERA_SMB_FH_PATH_OFFSET);
-
-    request->lookup_at.r_attr.va_set_mask |= CHIMERA_VFS_ATTR_FH;
-    request->lookup_at.r_attr.va_fh_len    = state->child_fh_len;
-    memcpy(request->lookup_at.r_attr.va_fh, state->child_fh, state->child_fh_len);
+    /* Path-only: return attrs but NO child fh (va_fh stays unset). */
+    smb_apply_attrs(request, &request->lookup_at.r_attr, &r.info,
+                    XXH3_64bits(request->lookup_at.component,
+                                request->lookup_at.component_len));
 
     request->status = CHIMERA_VFS_OK;
     state->file_id  = r.file_id;
@@ -397,23 +382,9 @@ chimera_smb_client_lookup_at(
     struct chimera_smb_client_conn *conn,
     struct chimera_vfs_request     *request)
 {
-    struct chimera_smb_op_state *state = request->plugin_data;
-    char                         path[CHIMERA_SMB_FH_PATH_MAX];
-    int                          path_len;
-
-    path_len = smb_build_child(request->fh, request->fh_len,
-                               request->lookup_at.component,
-                               request->lookup_at.component_len,
-                               path, sizeof(path),
-                               state->child_fh, &state->child_fh_len);
-    if (path_len < 0) {
-        request->status = CHIMERA_VFS_ENAMETOOLONG;
-        request->complete(request);
-        return;
-    }
-
-    smb_send_create(conn, request, path, path_len,
-                    SMB2_FILE_READ_ATTRIBUTES, 0,
+    smb_send_create(conn, request,
+                    request->lookup_at.component, request->lookup_at.component_len,
+                    SMB2_FILE_READ_ATTRIBUTES,
                     SMB2_FILE_SHARE_READ | SMB2_FILE_SHARE_WRITE | SMB2_FILE_SHARE_DELETE,
                     SMB2_FILE_OPEN, 0,
                     chimera_smb_lookup_create_reply);
@@ -431,7 +402,6 @@ chimera_smb_open_at_reply(
     void                           *arg)
 {
     struct chimera_vfs_request     *request = arg;
-    struct chimera_smb_op_state    *state   = request->plugin_data;
     struct chimera_smb_client_open *open_state;
     struct smb_create_result        r;
 
@@ -449,14 +419,15 @@ chimera_smb_open_at_reply(
     open_state               = calloc(1, sizeof(*open_state));
     open_state->file_id      = r.file_id;
     open_state->server_index = (uint8_t) conn->server->index;
-    open_state->is_directory = (r.file_attributes & SMB2_FILE_ATTRIBUTE_DIRECTORY) != 0;
+    open_state->is_directory = (r.info.file_attributes & SMB2_FILE_ATTRIBUTE_DIRECTORY) != 0;
 
-    smb_apply_create_attrs(request, &request->open_at.r_attr, &r,
-                           (const char *) state->child_fh + CHIMERA_SMB_FH_PATH_OFFSET,
-                           state->child_fh_len - CHIMERA_SMB_FH_PATH_OFFSET);
+    smb_apply_attrs(request, &request->open_at.r_attr, &r.info,
+                    XXH3_64bits(request->open_at.name, request->open_at.namelen));
+
+    /* The handle's identity is the opaque open token built from the FileId. */
+    request->open_at.r_attr.va_fh_len = chimera_smb_encode_open_fh(
+        request->fh, &r.file_id, request->open_at.r_attr.va_fh);
     request->open_at.r_attr.va_set_mask |= CHIMERA_VFS_ATTR_FH;
-    request->open_at.r_attr.va_fh_len    = state->child_fh_len;
-    memcpy(request->open_at.r_attr.va_fh, state->child_fh, state->child_fh_len);
 
     request->open_at.r_vfs_private = (uint64_t) (uintptr_t) open_state;
     request->open_at.r_created     = (r.create_action == SMB2_CREATE_ACTION_CREATED);
@@ -470,21 +441,8 @@ chimera_smb_client_open_at(
     struct chimera_smb_client_conn *conn,
     struct chimera_vfs_request     *request)
 {
-    struct chimera_smb_op_state *state = request->plugin_data;
-    char                         path[CHIMERA_SMB_FH_PATH_MAX];
-    int                          path_len;
-    uint32_t                     disposition;
-    uint32_t                     desired_access;
-
-    path_len = smb_build_child(request->fh, request->fh_len,
-                               request->open_at.name, request->open_at.namelen,
-                               path, sizeof(path),
-                               state->child_fh, &state->child_fh_len);
-    if (path_len < 0) {
-        request->status = CHIMERA_VFS_ENAMETOOLONG;
-        request->complete(request);
-        return;
-    }
+    uint32_t disposition;
+    uint32_t desired_access;
 
     if (request->open_at.flags & CHIMERA_VFS_OPEN_CREATE) {
         disposition = (request->open_at.flags & CHIMERA_VFS_OPEN_EXCLUSIVE)
@@ -496,8 +454,9 @@ chimera_smb_client_open_at(
     desired_access = SMB2_FILE_READ_DATA | SMB2_FILE_WRITE_DATA |
         SMB2_FILE_READ_ATTRIBUTES | SMB2_FILE_WRITE_ATTRIBUTES | SMB2_DELETE;
 
-    smb_send_create(conn, request, path, path_len,
-                    desired_access, 0,
+    smb_send_create(conn, request,
+                    request->open_at.name, request->open_at.namelen,
+                    desired_access,
                     SMB2_FILE_SHARE_READ | SMB2_FILE_SHARE_WRITE | SMB2_FILE_SHARE_DELETE,
                     disposition, SMB2_FILE_NON_DIRECTORY_FILE,
                     chimera_smb_open_at_reply);
@@ -530,7 +489,7 @@ chimera_smb_open_fh_reply(
     open_state               = calloc(1, sizeof(*open_state));
     open_state->file_id      = r.file_id;
     open_state->server_index = (uint8_t) conn->server->index;
-    open_state->is_directory = (r.file_attributes & SMB2_FILE_ATTRIBUTE_DIRECTORY) != 0;
+    open_state->is_directory = (r.info.file_attributes & SMB2_FILE_ATTRIBUTE_DIRECTORY) != 0;
 
     request->open_fh.r_vfs_private = (uint64_t) (uintptr_t) open_state;
 
@@ -543,25 +502,29 @@ chimera_smb_client_open_fh(
     struct chimera_smb_client_conn *conn,
     struct chimera_vfs_request     *request)
 {
-    const char *path;
-    int         path_len;
-    uint32_t    options;
+    uint32_t options;
 
-    path = chimera_smb_fh_path(request->fh, request->fh_len, &path_len);
+    /* Only the mount root is re-openable by fh; an opaque open token cannot be
+     * re-derived to a path (path-only contract) -- reject with ESTALE. */
+    if (!chimera_smb_fh_is_root(request->fh_len)) {
+        request->status = CHIMERA_VFS_ESTALE;
+        request->complete(request);
+        return;
+    }
 
     options = (request->open_fh.flags & CHIMERA_VFS_OPEN_DIRECTORY)
               ? SMB2_FILE_DIRECTORY_FILE : 0;
 
-    smb_send_create(conn, request, path, path_len,
-                    SMB2_FILE_READ_DATA | SMB2_FILE_WRITE_DATA |
-                    SMB2_FILE_READ_ATTRIBUTES | SMB2_FILE_WRITE_ATTRIBUTES | SMB2_DELETE,
-                    0,
+    /* CREATE the share root (empty path). */
+    smb_send_create(conn, request, "", 0,
+                    SMB2_FILE_READ_DATA | SMB2_FILE_READ_ATTRIBUTES |
+                    SMB2_FILE_LIST_DIRECTORY,
                     SMB2_FILE_SHARE_READ | SMB2_FILE_SHARE_WRITE | SMB2_FILE_SHARE_DELETE,
                     SMB2_FILE_OPEN, options,
                     chimera_smb_open_fh_reply);
 } /* chimera_smb_client_open_fh */
 
-/* ---- mkdir_at (transient open) ----------------------------------------- */
+/* ---- mkdir_at (full path, transient open) ------------------------------ */
 
 static void
 chimera_smb_mkdir_close_reply(
@@ -607,12 +570,9 @@ chimera_smb_mkdir_create_reply(
 
     smb_parse_create_reply(body, &r);
 
-    smb_apply_create_attrs(request, &request->mkdir_at.r_attr, &r,
-                           (const char *) state->child_fh + CHIMERA_SMB_FH_PATH_OFFSET,
-                           state->child_fh_len - CHIMERA_SMB_FH_PATH_OFFSET);
-    request->mkdir_at.r_attr.va_set_mask |= CHIMERA_VFS_ATTR_FH;
-    request->mkdir_at.r_attr.va_fh_len    = state->child_fh_len;
-    memcpy(request->mkdir_at.r_attr.va_fh, state->child_fh, state->child_fh_len);
+    /* Transient open of a directory: return attrs, no persistent fh. */
+    smb_apply_attrs(request, &request->mkdir_at.r_attr, &r.info,
+                    XXH3_64bits(request->mkdir_at.name, request->mkdir_at.name_len));
 
     request->status = CHIMERA_VFS_OK;
     state->file_id  = r.file_id;
@@ -625,28 +585,15 @@ chimera_smb_client_mkdir_at(
     struct chimera_smb_client_conn *conn,
     struct chimera_vfs_request     *request)
 {
-    struct chimera_smb_op_state *state = request->plugin_data;
-    char                         path[CHIMERA_SMB_FH_PATH_MAX];
-    int                          path_len;
-
-    path_len = smb_build_child(request->fh, request->fh_len,
-                               request->mkdir_at.name, request->mkdir_at.name_len,
-                               path, sizeof(path),
-                               state->child_fh, &state->child_fh_len);
-    if (path_len < 0) {
-        request->status = CHIMERA_VFS_ENAMETOOLONG;
-        request->complete(request);
-        return;
-    }
-
-    smb_send_create(conn, request, path, path_len,
-                    SMB2_FILE_READ_ATTRIBUTES, 0,
+    smb_send_create(conn, request,
+                    request->mkdir_at.name, request->mkdir_at.name_len,
+                    SMB2_FILE_READ_ATTRIBUTES,
                     SMB2_FILE_SHARE_READ | SMB2_FILE_SHARE_WRITE | SMB2_FILE_SHARE_DELETE,
                     SMB2_FILE_CREATE, SMB2_FILE_DIRECTORY_FILE,
                     chimera_smb_mkdir_create_reply);
 } /* chimera_smb_client_mkdir_at */
 
-/* ---- remove_at (delete-on-close) --------------------------------------- */
+/* ---- remove_at (full path, delete-on-close) ---------------------------- */
 
 static void
 chimera_smb_remove_close_reply(
@@ -702,26 +649,9 @@ chimera_smb_client_remove_at(
     struct chimera_smb_client_conn *conn,
     struct chimera_vfs_request     *request)
 {
-    struct chimera_smb_op_state *state = request->plugin_data;
-    char                         path[CHIMERA_SMB_FH_PATH_MAX];
-    int                          path_len;
-    uint8_t                      child_fh[CHIMERA_VFS_FH_SIZE];
-    int                          child_fh_len;
-
-    path_len = smb_build_child(request->fh, request->fh_len,
-                               request->remove_at.name, request->remove_at.namelen,
-                               path, sizeof(path),
-                               child_fh, &child_fh_len);
-    if (path_len < 0) {
-        request->status = CHIMERA_VFS_ENAMETOOLONG;
-        request->complete(request);
-        return;
-    }
-
-    (void) state;
-
-    smb_send_create(conn, request, path, path_len,
-                    SMB2_DELETE | SMB2_FILE_READ_ATTRIBUTES, 0,
+    smb_send_create(conn, request,
+                    request->remove_at.name, request->remove_at.namelen,
+                    SMB2_DELETE | SMB2_FILE_READ_ATTRIBUTES,
                     SMB2_FILE_SHARE_READ | SMB2_FILE_SHARE_WRITE | SMB2_FILE_SHARE_DELETE,
                     SMB2_FILE_OPEN, SMB2_FILE_DELETE_ON_CLOSE,
                     chimera_smb_remove_create_reply);
@@ -754,24 +684,20 @@ chimera_smb_client_setattr(
     struct chimera_smb_client_conn *conn,
     struct chimera_vfs_request     *request)
 {
-    struct chimera_smb_client_open *open_state =
-        (struct chimera_smb_client_open *) (request->setattr.handle
-                                            ? request->setattr.handle->vfs_private : 0);
-    struct chimera_vfs_attrs       *set_attr = request->setattr.set_attr;
+    struct chimera_smb_client_open *open_state = smb_handle_open_state(request->setattr.handle);
+    struct chimera_vfs_attrs       *set_attr   = request->setattr.set_attr;
     struct evpl_iovec               iov;
     struct evpl_iovec_cursor        cursor;
     struct smb2_header             *hdr;
 
     if (!open_state) {
-        /* setattr without an open handle is not yet supported. */
         request->status = CHIMERA_VFS_ENOTSUP;
         request->complete(request);
         return;
     }
 
     if (!(set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE)) {
-        /* Only size changes (ftruncate) are wired up for now; other attribute
-         * changes succeed as a no-op. */
+        /* Only size changes (ftruncate) are wired up; others succeed as no-ops. */
         request->status = CHIMERA_VFS_OK;
         request->complete(request);
         return;
@@ -822,9 +748,7 @@ chimera_smb_client_commit(
     struct chimera_smb_client_conn *conn,
     struct chimera_vfs_request     *request)
 {
-    struct chimera_smb_client_open *open_state =
-        (struct chimera_smb_client_open *) (request->commit.handle
-                                            ? request->commit.handle->vfs_private : 0);
+    struct chimera_smb_client_open *open_state = smb_handle_open_state(request->commit.handle);
     struct evpl_iovec               iov;
     struct evpl_iovec_cursor        cursor;
     struct smb2_header             *hdr;

@@ -209,6 +209,17 @@ chimera_vfs_link(
     request->link.callback     = callback;
     request->link.private_data = private_data;
 
+    if (chimera_vfs_module_is_path_only(request->module)) {
+        /* Hardlink needs a stable source fh, which a path-only backend cannot
+        * provide; report it as unsupported without a wasted source lookup. */
+        chimera_vfs_link_callback_t cb   = request->link.callback;
+        void                       *priv = request->link.private_data;
+
+        chimera_vfs_request_free(thread, request);
+        cb(CHIMERA_VFS_ENOTSUP, NULL, priv);
+        return;
+    }
+
     if (request->module->capabilities & CHIMERA_VFS_CAP_FS_PATH_OP) {
         /* Fast path: pass full dest path directly, kernel resolves */
         request->link.new_name_offset = 0;

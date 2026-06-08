@@ -554,9 +554,11 @@ chimera_smb_client_dispatch(
 } /* chimera_smb_client_dispatch */
 
 SYMBOL_EXPORT struct chimera_vfs_module vfs_smb = {
-    .name         = "smb",
-    .fh_magic     = CHIMERA_VFS_FH_MAGIC_SMB,
-    .capabilities = CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_FS_RELATIVE_OP |
+    .name     = "smb",
+    .fh_magic = CHIMERA_VFS_FH_MAGIC_SMB,
+    /* Path-only backend: full mount-relative paths, opaque per-open handle
+     * tokens, no FH-relative ops (no CAP_FS_RELATIVE_OP). */
+    .capabilities   = CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_FS_PATH_OP |
         CHIMERA_VFS_CAP_OPEN_FILE_REQUIRED,
     .init           = chimera_smb_client_init,
     .destroy        = chimera_smb_client_destroy,
