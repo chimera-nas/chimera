@@ -81,6 +81,7 @@ struct chimera_s3_request {
      * bucket, ListBuckets) rather than an object; tells the body notifier to
      * drain any request body instead of treating it as object data. */
     int                              op_bucket;
+    int                              has_attributes;
     int                              chunked;
     int                              query_upload_idlen;
     int                              query_part_number;

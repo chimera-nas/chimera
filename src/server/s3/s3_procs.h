@@ -42,6 +42,12 @@ chimera_s3_head(
     struct chimera_s3_request       *request);
 
 void
+chimera_s3_get_object_attributes(
+    struct evpl                     *evpl,
+    struct chimera_server_s3_thread *thread,
+    struct chimera_s3_request       *request);
+
+void
 chimera_s3_delete(
     struct evpl                     *evpl,
     struct chimera_server_s3_thread *thread,
