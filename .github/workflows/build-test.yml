@@ -5,6 +5,7 @@
 name: CI
 
 on:
+  pull_request:        # PRs: lint + cheap aggregator no-ops (heavy jobs gated to merge_group)
   merge_group:         # full matrix runs only in the merge queue, not on raw PRs; don't publish
   workflow_dispatch:   # allow manual runs
 
@@ -30,6 +31,7 @@ env:
 jobs:
   build-devcontainer:
     name: Build devcontainer ${{ matrix.arch }}
+    if: ${{ github.event_name != 'pull_request' }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -74,6 +76,7 @@ jobs:
 
   build-ubuntu26:
     name: Build ubuntu26 ${{ matrix.arch }}
+    if: ${{ github.event_name != 'pull_request' }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -115,6 +118,7 @@ jobs:
 
   build-ubuntu24:
     name: Build ubuntu24 ${{ matrix.arch }}
+    if: ${{ github.event_name != 'pull_request' }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -156,6 +160,7 @@ jobs:
 
   build-ubuntu22:
     name: Build ubuntu22 ${{ matrix.arch }}
+    if: ${{ github.event_name != 'pull_request' }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -197,6 +202,7 @@ jobs:
 
   build-rocky9:
     name: Build rocky9 ${{ matrix.arch }}
+    if: ${{ github.event_name != 'pull_request' }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -237,6 +243,7 @@ jobs:
 
   build-rocky10:
     name: Build rocky10 ${{ matrix.arch }}
+    if: ${{ github.event_name != 'pull_request' }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -278,6 +285,7 @@ jobs:
   test:
     name: Test ${{ matrix.image_name }} ${{ matrix.arch }} ${{ matrix.build_type }}
     needs: [build-devcontainer, build-ubuntu26, build-ubuntu24, build-ubuntu22, build-rocky9, build-rocky10]
+    if: ${{ github.event_name != 'pull_request' }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -464,6 +472,7 @@ jobs:
   static-analysis:
     name: Analyze ${{ matrix.image_name }} ${{ matrix.arch }} ${{ matrix.build_type }}
     needs: [build-devcontainer]
+    if: ${{ github.event_name != 'pull_request' }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -542,7 +551,7 @@ jobs:
   publish-test-results:
     name: Report
     needs: [test]
-    if: always()
+    if: ${{ always() && github.event_name != 'pull_request' }}
     runs-on: arc-amd64
     permissions:
       pull-requests: write
@@ -685,6 +694,10 @@ jobs:
     steps:
       - name: Verify all build/test jobs passed
         run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "PR placeholder — the full build/test matrix runs in the merge queue (merge_group)."
+            exit 0
+          fi
           if ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}; then
             echo "One or more build/test jobs did not pass."
             exit 1
