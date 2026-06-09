@@ -443,6 +443,18 @@ chimera_linux_lookup_at(
                                        fullname);
 
     if (rc) {
+        /* A LOOKUP whose current filehandle is a symlink must report
+         * NFS4ERR_SYMLINK, not NFS4ERR_NOTDIR (RFC 7530 16.15.5).  open_fh's
+         * O_DIRECTORY probe catches this on a cache miss, but when the symlink's
+         * handle is already cached (opened for an earlier op) open_fh is skipped
+         * and we land here with parent_fd as the symlink itself -- so the name
+         * resolution returns ENOTDIR.  Distinguish a symlink parent via fstat. */
+        if (rc == CHIMERA_VFS_ENOTDIR) {
+            struct stat pst;
+            if (fstat(parent_fd, &pst) == 0 && S_ISLNK(pst.st_mode)) {
+                rc = CHIMERA_VFS_ESYMLINK;
+            }
+        }
         request->status = rc;
         request->complete(request);
         return;

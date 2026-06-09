@@ -373,6 +373,18 @@ chimera_io_uring_reap(
 
                 } else {
                     request->status = chimera_linux_errno_to_status(-cqe->res);
+                    /* LOOKUP with a symlink current filehandle must report
+                     * NFS4ERR_SYMLINK, not NFS4ERR_NOTDIR (RFC 7530 16.15.5).
+                     * The statx of a name under the symlink fails ENOTDIR when
+                     * the cached parent handle is the symlink itself; distinguish
+                     * it by stat'ing the parent.  (See the matching linux fix.) */
+                    if (request->status == CHIMERA_VFS_ENOTDIR) {
+                        struct stat pst;
+                        if (fstat((int) request->lookup_at.handle->vfs_private,
+                                  &pst) == 0 && S_ISLNK(pst.st_mode)) {
+                            request->status = CHIMERA_VFS_ESYMLINK;
+                        }
+                    }
                 }
                 break;
             case CHIMERA_VFS_OP_GETATTR:
