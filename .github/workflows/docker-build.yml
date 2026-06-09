@@ -10,7 +10,7 @@ on:
       - main          # publish from the default branch
     tags:
       - "*"           # publish when any tag is pushed
-  pull_request:        # always build for PRs but don’t publish
+  merge_group:         # build to gate the merge queue (no publish) but don’t publish
   workflow_dispatch:   # allow manual runs
 
 env:

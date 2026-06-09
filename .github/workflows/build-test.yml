@@ -5,7 +5,7 @@
 name: Build and perform build time tests
 
 on:
-  pull_request:        # always build for PRs but don't publish
+  merge_group:         # full matrix runs only in the merge queue, not on raw PRs; don't publish
   workflow_dispatch:   # allow manual runs
 
 # The full cross-OS, cross-arch test and static-analysis matrix runs nightly
@@ -408,8 +408,28 @@ jobs:
               sleep 2 && \
               cmake -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DREQUIRE_NETNS_TESTS=ON -DKVM_IMAGE_CACHE_REGISTRY=${{ env.KVM_IMAGE_CACHE_REGISTRY }} ${{ matrix.cmake_extra }} /workspace && \
               ninja && \
-              /workspace/scripts/cap_ctest_output.sh \
-              ctest --output-on-failure --test-output-size-failed 65536 --timeout 300 -j 32'
+              rm -f /workspace/flaky-rescued.log && \
+              if /workspace/scripts/cap_ctest_output.sh ctest --output-on-failure --test-output-size-failed 65536 --timeout 300 -j 32; then
+                echo "all tests passed on first attempt";
+              else
+                echo "ctest reported failures; rerunning previously-failed tests to distinguish flakes from real failures";
+                cp /build/Testing/Temporary/LastTestsFailed.log /workspace/flaky-candidates.log;
+                if /workspace/scripts/cap_ctest_output.sh ctest --rerun-failed --output-on-failure --test-output-size-failed 65536 --timeout 300 -j 32; then
+                  echo "rerun of previously-failed tests passed: treating as flaky (gated for human review)";
+                  cp /workspace/flaky-candidates.log /workspace/flaky-rescued.log;
+                else
+                  echo "rerun still failing: real failure";
+                  exit 1;
+                fi;
+              fi'
+
+      - name: Upload flaky-test marker
+        if: ${{ hashFiles('flaky-rescued.log') != '' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: flaky-marker-${{ matrix.image_name }}-${{ matrix.arch }}-${{ matrix.build_type }}
+          path: flaky-rescued.log
+          retention-days: 14
 
   static-analysis:
     name: Static Analysis ${{ matrix.image_name }} ${{ matrix.platform }} ${{ matrix.build_type }}
@@ -483,3 +503,92 @@ jobs:
           path: scan-report/
           if-no-files-found: warn
           retention-days: 30
+
+  # Gather the per-matrix flaky-test markers (uploaded only when a test failed
+  # on its first run but passed on --rerun-failed) into a single yes/no signal.
+  collect-flakes:
+    name: Collect flaky-test markers
+    needs: test
+    if: ${{ always() }}
+    runs-on: arc-amd64
+    permissions:
+      contents: read
+      issues: write
+    outputs:
+      flaky: ${{ steps.detect.outputs.flaky }}
+    steps:
+      - name: Download flaky markers
+        uses: actions/download-artifact@v6
+        continue-on-error: true
+        with:
+          path: flaky-markers
+          pattern: flaky-marker-*
+
+      - name: Detect whether any test was flaky
+        id: detect
+        run: |
+          if compgen -G "flaky-markers/flaky-marker-*/*" > /dev/null; then
+            echo "flaky=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "flaky=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Record flaky tests on the tracking issue
+        if: ${{ steps.detect.outputs.flaky == 'true' }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const dir = 'flaky-markers';
+            let details = '';
+            for (const sub of fs.readdirSync(dir)) {
+              const f = path.join(dir, sub, 'flaky-rescued.log');
+              if (fs.existsSync(f)) {
+                const matrix = sub.replace(/^flaky-marker-/, '');
+                details += `\n**${matrix}**\n\n\`\`\`\n${fs.readFileSync(f, 'utf8')}\n\`\`\`\n`;
+              }
+            }
+            const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
+            const body = `Tests below failed once but passed on \`--rerun-failed\` in a merge_group run for \`${context.sha}\`. `
+              + `The merge was gated on human approval (\`flake-gate\`); please root-cause and fix these flakes.\n\n`
+              + `Run: ${runUrl}\n${details}`;
+            const title = 'Flaky tests observed in CI';
+            const label = 'flaky-test';
+            const { owner, repo } = context.repo;
+            try {
+              await github.rest.issues.createLabel({ owner, repo, name: label, color: 'd73a4a',
+                description: 'Test that needed a CI retry to pass' });
+            } catch (e) { /* label already exists */ }
+            const open = await github.rest.issues.listForRepo({ owner, repo, state: 'open', labels: label });
+            let number;
+            if (open.data.length > 0) {
+              number = open.data[0].number;
+            } else {
+              const created = await github.rest.issues.create({ owner, repo, title, labels: [label],
+                body: 'Rolling tracker for tests that needed a CI retry to pass. Each comment below is one observation from the merge queue.' });
+              number = created.data.number;
+            }
+            await github.rest.issues.createComment({ owner, repo, issue_number: number, body });
+
+  # Human-approval choke point for the merge queue: when a flake was rescued by
+  # retry, this job routes through the 'flake-review' environment (configured
+  # with required reviewers) and PAUSES the merge_group run until a reviewer
+  # approves. When no flake occurred, the environment expression is empty and
+  # the job passes immediately. Mark this job as a required status check.
+  flake-gate:
+    name: Flake review gate
+    needs: collect-flakes
+    if: ${{ always() }}
+    runs-on: arc-amd64
+    permissions:
+      contents: read
+    environment: ${{ needs.collect-flakes.outputs.flaky == 'true' && 'flake-review' || '' }}
+    steps:
+      - name: Report gate outcome
+        run: |
+          if [ "${{ needs.collect-flakes.outputs.flaky }}" = "true" ]; then
+            echo "Flaky tests were rescued by retry and a reviewer approved this merge."
+          else
+            echo "No flaky tests detected; nothing to review."
+          fi
