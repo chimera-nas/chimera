@@ -3097,43 +3097,100 @@ set(SMBTORTURE_ENABLED_diskfs_aio
 
 # >>> SMBTORTURE_BLOCK_END
 
+set(SMBTORTURE_JUNIT_DIR ${CMAKE_BINARY_DIR}/smbtorture-junit
+    CACHE PATH "Directory for per-subtest smbtorture JUnit XML output.")
+
+# A whole suite's subtests run in ONE server+netns+smbtorture invocation instead
+# of one each.  smbtorture is a fast C client (~0.4s startup), but that per-test
+# tax (fork+exec the daemon, set up the netns, start the client) is paid ~1800
+# times across the matrix; consolidating per suite removes ~75% of those
+# invocations and the CPU they burn -- the metric that matters for the parallel
+# suite, not any single test's wall (a test that sleeps 70s costs ~no CPU and
+# just parks a slot).  The ONLY suites kept per-subtest are the timing-fragile
+# oplock / lease / durable-handle break state machines, whose pass/fail asserts
+# on real-time break delivery can flake when many of them share one in-process
+# server under load; isolating them preserves today's behavior.  Slow-but-
+# deterministic suites (notify, bench, timestamps, ...) consolidate -- their
+# waits are sleeps, not CPU.  This list is hand-curated (fragility is a property
+# of the test's break-timing assertions, not something a timing sweep detects);
+# add a suite here if a consolidated run makes it flaky.
+# >>> SMBTORTURE_ISOLATE_BEGIN
+set(SMBTORTURE_ISOLATE_SUITES
+    smb2.durable-open
+    smb2.durable-v2-delay
+    smb2.durable-v2-open
+    smb2.lease
+    smb2.oplock
+    smb2.replay
+)
+# >>> SMBTORTURE_ISOLATE_END
+
+# Group the (backend-agnostic) subtest catalog by parent suite -- the first two
+# dotted components, e.g. smb2.acls.OWNER -> smb2.acls, smb2.async_dosmode ->
+# smb2.async_dosmode.  Done once; the per-backend macro then filters by that
+# backend's allowlist.
+set(SMBTORTURE_PARENTS "")
+foreach(_sub ${SMBTORTURE_SUITES})
+    string(REGEX MATCH "^[^.]+\\.[^.]+" _p "${_sub}")
+    string(REGEX REPLACE "[^A-Za-z0-9]" "_" _pid "${_p}")
+    if(NOT "${_p}" IN_LIST SMBTORTURE_PARENTS)
+        list(APPEND SMBTORTURE_PARENTS "${_p}")
+        set(SMBTORTURE_PID_${_p} "${_pid}")
+        set(SMBTORTURE_SUBS_${_pid} "")
+    endif()
+    list(APPEND SMBTORTURE_SUBS_${_pid} "${_sub}")
+endforeach()
+
+# One consolidated ctest entry running a suite's enabled subtests in a single
+# server+netns; the harness converts smbtorture's per-subtest stream to JUnit
+# (SMBTORTURE_JUNIT_FILE) so the CI report still names individual failures.
+function(_smbtorture_add_suite backend parent pid)
+    set(name chimera/server/smb/smbtorture_${pid}_${backend})
+    add_test(NAME ${name}
+        COMMAND ${CMAKE_SOURCE_DIR}/scripts/netns_test_wrapper.sh
+                ${SMBTORTURE_CMD} -b ${backend} ${ARGN})
+    set_tests_properties(${name} PROPERTIES
+        ENVIRONMENT "${SMBTORTURE_LSAN};SMBTORTURE_JUNIT_FILE=${SMBTORTURE_JUNIT_DIR}/smbtorture_${pid}_${backend}.xml;SMBTORTURE_JUNIT_CONVERTER=${CMAKE_SOURCE_DIR}/scripts/smbtorture_to_junit.py"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 600)
+endfunction()
+
+# One per-subtest ctest entry (timing-fragile suites keep their isolation).
+function(_smbtorture_add_subtest backend subtest)
+    string(REGEX REPLACE "[^A-Za-z0-9]" "_" sid "${subtest}")
+    set(name chimera/server/smb/smbtorture_${sid}_${backend})
+    add_test(NAME ${name}
+        COMMAND ${CMAKE_SOURCE_DIR}/scripts/netns_test_wrapper.sh
+                ${SMBTORTURE_CMD} -b ${backend} ${subtest})
+    set_tests_properties(${name} PROPERTIES
+        ENVIRONMENT "${SMBTORTURE_LSAN}"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 300)
+    # The durable-open families assert on lease/oplock-break timing that gets
+    # tight under CPU contention; serialize them against each other.
+    if(subtest MATCHES "^smb2\\.durable-(v2-)?open\\.")
+        set_tests_properties(${name} PROPERTIES
+            RESOURCE_LOCK smb_durable_oplock_family)
+    endif()
+endfunction()
+
 macro(add_smbtorture_backend_tests backend)
-    foreach(SUITE ${SMBTORTURE_SUITES})
-        # Sanitize the suite name into a ctest-safe identifier: a handful of
-        # smbtorture subtests carry spaces / parens / hyphens in their name
-        # (e.g. `smb2.charset.Testing composite character (a umlaut)`), but the
-        # SUITE arg to smbtorture itself must keep them verbatim.
-        string(REGEX REPLACE "[^A-Za-z0-9]" "_" SUITE_ID ${SUITE})
-        set(TEST_NAME chimera/server/smb/smbtorture_${SUITE_ID}_${backend})
-        add_test(NAME ${TEST_NAME}
-            COMMAND ${CMAKE_SOURCE_DIR}/scripts/netns_test_wrapper.sh
-                    ${SMBTORTURE_CMD} -b ${backend} ${SUITE})
-        set_tests_properties(${TEST_NAME} PROPERTIES
-            ENVIRONMENT "${SMBTORTURE_LSAN}"
-            # smbtorture_test exits 77 when the smbtorture client is missing at
-            # runtime; report that as Skipped rather than a failure.
-            SKIP_RETURN_CODE 77
-            # Override the project-wide 30s default.  Most smbtorture
-            # subtests finish in under 10s, but a few (smb2.notify.*,
-            # smb2.maxfid, smb2.lock.cancel, ...) involve real-time
-            # waits or large file-handle counts and can stretch to 90-180s
-            # on slow ARC runners under ctest -j 8.  300s matches the
-            # tools/smbtorture/regen.sh matrix budget; anything that
-            # genuinely runs longer than that is broken, not slow.
-            TIMEOUT 300)
-        # The smb2.durable-open.* / smb2.durable-v2-open.* families are
-        # lease/oplock-break state-machine tests; their pass/fail asserts on
-        # timing that gets tight when CPU is contended on slow CI runners,
-        # so serialize them against each other via a shared ctest lock.  They
-        # still run alongside unrelated tests, just not against each other.
-        if(SUITE MATCHES "^smb2\\.durable-(v2-)?open\\.")
-            set_tests_properties(${TEST_NAME} PROPERTIES
-                RESOURCE_LOCK smb_durable_oplock_family)
-        endif()
-        if(NOT "${SUITE}" IN_LIST SMBTORTURE_ENABLED_${backend})
-            # Known-incomplete on this backend: keep it visible but don't run
-            # or fail on it.
-            set_tests_properties(${TEST_NAME} PROPERTIES DISABLED TRUE)
+    foreach(_parent ${SMBTORTURE_PARENTS})
+        set(_pid ${SMBTORTURE_PID_${_parent}})
+        set(_enabled "")
+        foreach(_sub ${SMBTORTURE_SUBS_${_pid}})
+            if("${_sub}" IN_LIST SMBTORTURE_ENABLED_${backend})
+                list(APPEND _enabled "${_sub}")
+            endif()
+        endforeach()
+        if(_enabled)
+            if("${_parent}" IN_LIST SMBTORTURE_ISOLATE_SUITES)
+                foreach(_sub ${_enabled})
+                    _smbtorture_add_subtest(${backend} "${_sub}")
+                endforeach()
+            else()
+                _smbtorture_add_suite(${backend} "${_parent}" "${_pid}" ${_enabled})
+            endif()
         endif()
     endforeach()
 endmacro()

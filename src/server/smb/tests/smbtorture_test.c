@@ -71,10 +71,27 @@ run_smbtorture(
     const char *backend,
     const char *session_dir)
 {
-    char cmd[8192];
-    int  off, i, rc;
+    int         off, i, rc;
+    const char *junit     = getenv("SMBTORTURE_JUNIT_FILE");
+    const char *converter = getenv("SMBTORTURE_JUNIT_CONVERTER");
+    char        capfile[512];
 
-    off = snprintf(cmd, sizeof(cmd),
+    /* Size the command buffer to the base options plus every test name: a
+     * consolidated suite run passes dozens, which overflowed the old fixed
+     * buffer (the truncating snprintf underflowed sizeof()-off and aborted). */
+    size_t      cap = 1024 + (session_dir ? strlen(session_dir) : 0);
+
+    for (i = 0; i < num_tests; i++) {
+        cap += strlen(tests[i]) + 4;
+    }
+    char       *cmd = malloc(cap);
+    if (!cmd) {
+        return -1;
+    }
+
+    snprintf(capfile, sizeof(capfile), "%s/smbtorture.out", session_dir);
+
+    off = snprintf(cmd, cap,
                    "smbtorture //127.0.0.1/share"
                    " -U myuser%%mypassword"
                    " --option=torture:samba3=yes"
@@ -96,20 +113,54 @@ run_smbtorture(
      * it can take a POSIX lock directly.  Only the passthrough backends
      * (linux, io_uring) expose the share root as a real local directory. */
     if (strcmp(backend, "linux") == 0 || strcmp(backend, "io_uring") == 0) {
-        off += snprintf(cmd + off, sizeof(cmd) - off,
+        off += snprintf(cmd + off, cap - off,
                         " --option=torture:localdir=%s", session_dir);
     }
 
+    /* Single-quote each test name: several carry spaces and parentheses (e.g.
+     * `smb2.charset.Testing composite character (a umlaut)`) that the shell
+     * would otherwise split or choke on.  smbtorture test names never contain a
+     * single quote. */
     for (i = 0; i < num_tests; i++) {
-        off += snprintf(cmd + off, sizeof(cmd) - off, " %s", tests[i]);
+        off += snprintf(cmd + off, cap - off, " '%s'", tests[i]);
     }
 
-    /* Capture combined output so it shows in ctest logs */
-    snprintf(cmd + off, sizeof(cmd) - off, " 2>&1");
+    /* Capture to a file (so we can emit per-subtest JUnit) with smbtorture's
+     * own exit status preserved, then echo it for the ctest log. */
+    snprintf(cmd + off, cap - off, " > %s 2>&1", capfile);
 
     fprintf(stderr, "Running: %s\n", cmd);
 
     rc = system(cmd);
+    free(cmd);
+
+    {
+        FILE *cf = fopen(capfile, "r");
+        if (cf) {
+            char   buf[4096];
+            size_t n;
+            while ((n = fread(buf, 1, sizeof(buf), cf)) > 0) {
+                fwrite(buf, 1, n, stdout);
+            }
+            fclose(cf);
+        }
+    }
+
+    /* A consolidated suite run is a single ctest entry, so convert smbtorture's
+     * per-subtest stream to a JUnit the CI report can expand (analogous to the
+     * WPTS TRX->JUnit and pynfs per-code JUnit). */
+    if (junit && converter) {
+        size_t clen = strlen(converter) + strlen(capfile) + strlen(junit) + 64;
+        char  *conv = malloc(clen);
+        if (conv) {
+            snprintf(conv, clen, "python3 %s %s %s 2>/dev/null",
+                     converter, capfile, junit);
+            if (system(conv) != 0) {
+                fprintf(stderr, "smbtorture JUnit conversion failed (non-fatal)\n");
+            }
+            free(conv);
+        }
+    }
 
     if (WIFEXITED(rc)) {
         return WEXITSTATUS(rc);
