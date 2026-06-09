@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: Unlicense
 
-name: Nightly full build and test
+name: Nightly
 
 on:
   schedule:
@@ -24,7 +24,7 @@ env:
 
 jobs:
   build-devcontainer:
-    name: Build devcontainer ${{ matrix.platform }}
+    name: Build devcontainer ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -68,7 +68,7 @@ jobs:
             DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
 
   build-ubuntu26:
-    name: Build ubuntu26 ${{ matrix.platform }}
+    name: Build ubuntu26 ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -112,7 +112,7 @@ jobs:
             DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
 
   build-ubuntu24:
-    name: Build ubuntu24 ${{ matrix.platform }}
+    name: Build ubuntu24 ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -156,7 +156,7 @@ jobs:
             DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
 
   build-ubuntu22:
-    name: Build ubuntu22 ${{ matrix.platform }}
+    name: Build ubuntu22 ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -200,7 +200,7 @@ jobs:
             DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
 
   build-rocky9:
-    name: Build rocky9 ${{ matrix.platform }}
+    name: Build rocky9 ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -243,7 +243,7 @@ jobs:
             DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
 
   build-rocky10:
-    name: Build rocky10 ${{ matrix.platform }}
+    name: Build rocky10 ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -286,7 +286,7 @@ jobs:
             DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
 
   test:
-    name: Test ${{ matrix.image_name }} ${{ matrix.platform }} ${{ matrix.build_type }}
+    name: Test ${{ matrix.image_name }} ${{ matrix.arch }} ${{ matrix.build_type }}
     needs: [build-devcontainer, build-ubuntu26, build-ubuntu24, build-ubuntu22, build-rocky9, build-rocky10]
     runs-on: ${{ matrix.runner }}
     permissions:
@@ -501,7 +501,7 @@ jobs:
               ctest --output-on-failure --test-output-size-failed 65536 --timeout 300 -j 32'
 
   static-analysis:
-    name: Static Analysis ${{ matrix.image_name }} ${{ matrix.platform }} ${{ matrix.build_type }}
+    name: Analyze ${{ matrix.image_name }} ${{ matrix.arch }} ${{ matrix.build_type }}
     needs: [build-devcontainer, build-ubuntu26, build-ubuntu24, build-ubuntu22, build-rocky9, build-rocky10]
     runs-on: ${{ matrix.runner }}
     permissions:

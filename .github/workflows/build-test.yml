@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: Unlicense
 
-name: Build and perform build time tests
+name: CI
 
 on:
   pull_request:        # always build for PRs but don't publish
@@ -29,7 +29,7 @@ env:
 
 jobs:
   build-devcontainer:
-    name: Build devcontainer ${{ matrix.platform }}
+    name: Build devcontainer ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -73,7 +73,7 @@ jobs:
             DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
 
   build-ubuntu26:
-    name: Build ubuntu26 ${{ matrix.platform }}
+    name: Build ubuntu26 ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -114,7 +114,7 @@ jobs:
             DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
 
   build-ubuntu24:
-    name: Build ubuntu24 ${{ matrix.platform }}
+    name: Build ubuntu24 ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -155,7 +155,7 @@ jobs:
             DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
 
   build-ubuntu22:
-    name: Build ubuntu22 ${{ matrix.platform }}
+    name: Build ubuntu22 ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -196,7 +196,7 @@ jobs:
             DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
 
   build-rocky9:
-    name: Build rocky9 ${{ matrix.platform }}
+    name: Build rocky9 ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -236,7 +236,7 @@ jobs:
             DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
 
   build-rocky10:
-    name: Build rocky10 ${{ matrix.platform }}
+    name: Build rocky10 ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -276,7 +276,7 @@ jobs:
             DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
 
   test:
-    name: Test ${{ matrix.image_name }} ${{ matrix.platform }} ${{ matrix.build_type }}
+    name: Test ${{ matrix.image_name }} ${{ matrix.arch }} ${{ matrix.build_type }}
     needs: [build-devcontainer, build-ubuntu26, build-ubuntu24, build-ubuntu22, build-rocky9, build-rocky10]
     runs-on: ${{ matrix.runner }}
     permissions:
@@ -442,7 +442,7 @@ jobs:
           retention-days: 30
 
   static-analysis:
-    name: Static Analysis ${{ matrix.image_name }} ${{ matrix.platform }} ${{ matrix.build_type }}
+    name: Analyze ${{ matrix.image_name }} ${{ matrix.arch }} ${{ matrix.build_type }}
     needs: [build-devcontainer]
     runs-on: ${{ matrix.runner }}
     permissions:
@@ -520,7 +520,7 @@ jobs:
   # matrix job.  Runs after the whole matrix (always, so a failing run still
   # reports) and never fails the build: the test jobs stay the source of truth.
   publish-test-results:
-    name: Publish test results
+    name: Report
     needs: [test]
     if: always()
     runs-on: arc-amd64
