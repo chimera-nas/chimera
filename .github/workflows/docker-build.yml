@@ -10,6 +10,7 @@ on:
       - main          # publish from the default branch
     tags:
       - "*"           # publish when any tag is pushed
+  pull_request:        # PRs: docker-build-complete no-op only (build-and-push gated below)
   merge_group:         # build to gate the merge queue (no publish) but don’t publish
   workflow_dispatch:   # allow manual runs
 
@@ -22,6 +23,7 @@ env:
 jobs:
   build-and-push:
     name: Build ${{ matrix.os }} ${{ matrix.platform }} ${{ matrix.build_type }}
+    if: ${{ github.event_name != 'pull_request' }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -147,6 +149,10 @@ jobs:
     steps:
       - name: Verify docker build jobs passed
         run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "PR placeholder — docker image builds run in the merge queue (merge_group)."
+            exit 0
+          fi
           if ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}; then
             echo "One or more docker build jobs did not pass."
             exit 1
