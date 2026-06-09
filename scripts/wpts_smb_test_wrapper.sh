@@ -325,6 +325,16 @@ echo "=== vstest exit code: ${VSTEST_RC} ==="
 # after the session dir is cleaned up.
 cp -f "$CHIMERA_LOG" "${RESULT_DIR}/chimera_stderr.log" 2>/dev/null || true
 
+# When the harness asks (WPTS_JUNIT_FILE, set for the consolidated runs whose
+# per-case detail CTest's --output-junit cannot see), convert vstest's TRX to a
+# per-case JUnit for the CI report -- the WPTS analogue of pynfs's --xml.
+if [ -n "${WPTS_JUNIT_FILE:-}" ] && [ -f "${RESULT_DIR}/SMB2TestResult.trx" ]; then
+    mkdir -p "$(dirname "$WPTS_JUNIT_FILE")"
+    python3 "${SCRIPT_DIR}/trx_to_junit.py" \
+        "${RESULT_DIR}/SMB2TestResult.trx" "${WPTS_JUNIT_FILE}" \
+        || echo "=== trx_to_junit conversion failed (non-fatal) ==="
+fi
+
 # A daemon that died during the run is a finding in its own right: fail the
 # test even if vstest itself reported success.
 if ! kill -0 "$CHIMERA_PID" 2>/dev/null; then
