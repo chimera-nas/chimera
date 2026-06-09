@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: Unlicense
 
-name: Build and perform build time tests
+name: CI
 
 on:
   pull_request:        # always build for PRs but don't publish
@@ -29,7 +29,7 @@ env:
 
 jobs:
   build-devcontainer:
-    name: Build devcontainer ${{ matrix.platform }}
+    name: Build devcontainer ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -73,7 +73,7 @@ jobs:
             DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
 
   build-ubuntu26:
-    name: Build ubuntu26 ${{ matrix.platform }}
+    name: Build ubuntu26 ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -114,7 +114,7 @@ jobs:
             DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
 
   build-ubuntu24:
-    name: Build ubuntu24 ${{ matrix.platform }}
+    name: Build ubuntu24 ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -155,7 +155,7 @@ jobs:
             DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
 
   build-ubuntu22:
-    name: Build ubuntu22 ${{ matrix.platform }}
+    name: Build ubuntu22 ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -196,7 +196,7 @@ jobs:
             DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
 
   build-rocky9:
-    name: Build rocky9 ${{ matrix.platform }}
+    name: Build rocky9 ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -236,7 +236,7 @@ jobs:
             DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
 
   build-rocky10:
-    name: Build rocky10 ${{ matrix.platform }}
+    name: Build rocky10 ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -276,7 +276,7 @@ jobs:
             DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
 
   test:
-    name: Test ${{ matrix.image_name }} ${{ matrix.platform }} ${{ matrix.build_type }}
+    name: Test ${{ matrix.image_name }} ${{ matrix.arch }} ${{ matrix.build_type }}
     needs: [build-devcontainer, build-ubuntu26, build-ubuntu24, build-ubuntu22, build-rocky9, build-rocky10]
     runs-on: ${{ matrix.runner }}
     permissions:
@@ -417,14 +417,32 @@ jobs:
             -v /build \
             -w /build \
             ${{ matrix.image_tag_prefix }}:${{ github.sha }}-${{ matrix.arch }} \
-            bash -euxc '\
-              cmake -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DREQUIRE_NETNS_TESTS=ON -DKVM_IMAGE_REGISTRY=${{ env.KVM_IMAGE_REGISTRY }} ${{ matrix.cmake_extra }} /workspace && \
-              ninja && \
-              /workspace/scripts/cap_ctest_output.sh \
-              ctest --output-on-failure --test-output-size-failed 65536 --timeout 300 -j 32'
+            bash -euxc '
+              cmake -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DREQUIRE_NETNS_TESTS=ON -DKVM_IMAGE_REGISTRY=${{ env.KVM_IMAGE_REGISTRY }} -DPYNFS_JUNIT_DIR=/workspace/ctest-results/pynfs-junit ${{ matrix.cmake_extra }} /workspace
+              ninja
+              mkdir -p /workspace/ctest-results
+              start=$(date +%s)
+              rc=0
+              /workspace/scripts/cap_ctest_output.sh ctest --output-on-failure --test-output-size-failed 65536 --timeout 300 -j 32 --output-junit /workspace/ctest-results/results.xml || rc=$?
+              echo "$(( $(date +%s) - start ))" > /workspace/ctest-results/duration_seconds
+              exit $rc'
+
+      # Per-test results for the PR report: ctest --output-junit (one <testcase>
+      # per CTest test) + the pynfs per-code JUnit (the combined pynfs runs are a
+      # single CTest test, so their ~500 codes only show up in their own JUnit) +
+      # the ctest wall-clock.  if: always() so results publish even when the test
+      # step failed (which is exactly when they are most useful).
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: ctest-junit-${{ matrix.image_name }}-${{ matrix.arch }}-${{ matrix.build_type }}
+          path: ctest-results/
+          if-no-files-found: warn
+          retention-days: 30
 
   static-analysis:
-    name: Static Analysis ${{ matrix.image_name }} ${{ matrix.platform }} ${{ matrix.build_type }}
+    name: Analyze ${{ matrix.image_name }} ${{ matrix.arch }} ${{ matrix.build_type }}
     needs: [build-devcontainer]
     runs-on: ${{ matrix.runner }}
     permissions:
@@ -495,3 +513,44 @@ jobs:
           path: scan-report/
           if-no-files-found: warn
           retention-days: 30
+
+  # Aggregate every test job's results into one report -- a per-run table (wall
+  # clock + summed test time + pass/fail counts) plus every failed test named --
+  # so a PR shows what broke without digging through the ~12k-line log of each
+  # matrix job.  Runs after the whole matrix (always, so a failing run still
+  # reports) and never fails the build: the test jobs stay the source of truth.
+  publish-test-results:
+    name: Report
+    needs: [test]
+    if: always()
+    runs-on: arc-amd64
+    permissions:
+      pull-requests: write
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Download test-result artifacts
+        uses: actions/download-artifact@v6
+        with:
+          pattern: ctest-junit-*
+          path: results
+
+      # Render the report into the run summary (always) and, on a PR, into a
+      # single sticky PR comment.  Pure-Python + stdlib urllib -- no external
+      # action and no `gh` CLI (the self-hosted runners have neither).
+      - name: Render and publish report
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          python3 scripts/ci_test_report.py results > report.md
+          cat report.md >> "$GITHUB_STEP_SUMMARY"
+          # The summary above is the primary output; the PR comment is
+          # best-effort (don't fail the job if the API call hiccups).
+          if [ -n "${PR_NUMBER:-}" ]; then
+            python3 scripts/ci_pr_comment.py "$GH_REPO" "$PR_NUMBER" report.md \
+              || echo "::warning::failed to post PR comment (report is in the run summary)"
+          fi
