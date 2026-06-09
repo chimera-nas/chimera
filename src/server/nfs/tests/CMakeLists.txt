@@ -64,3 +64,10 @@ target_include_directories(test_access_xattr PRIVATE
     ${NFS_COMMON_INCLUDE_DIR})
 add_dependencies(test_access_xattr chimera_nfs_common)
 add_test(NAME chimera/server/nfs/access_xattr COMMAND test_access_xattr)
+
+# Tag every test registered above with the 'nfs' label so these NFS server unit
+# tests can be run independently via `ctest -L nfs`.
+get_property(_nfs_tests DIRECTORY PROPERTY TESTS)
+if(_nfs_tests)
+    set_property(TEST ${_nfs_tests} APPEND PROPERTY LABELS nfs)
+endif()

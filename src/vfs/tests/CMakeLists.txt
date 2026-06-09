@@ -47,3 +47,10 @@ add_test(chimera/vfs/idmap_test vfs_idmap_test)
 add_executable(vfs_identity_test vfs_identity_test.c)
 target_link_libraries(vfs_identity_test chimera_vfs chimera_vfs_memfs evpl urcu-qsbr)
 add_test(chimera/vfs/identity_test vfs_identity_test)
+
+# Tag every test registered above with the 'vfs' label so the suite can be run
+# independently via `ctest -L vfs`.
+get_property(_vfs_tests DIRECTORY PROPERTY TESTS)
+if(_vfs_tests)
+    set_property(TEST ${_vfs_tests} APPEND PROPERTY LABELS vfs)
+endif()
