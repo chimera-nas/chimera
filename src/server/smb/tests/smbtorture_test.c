@@ -141,6 +141,11 @@ run_smbtorture(
             size_t n;
             while ((n = fread(buf, 1, sizeof(buf), cf)) > 0) {
                 fwrite(buf, 1, n, stdout);
+                if (n < sizeof(buf)) {
+                    /* Short read on a regular file means EOF (or error); stop so
+                     * we don't call fread() again on an exhausted stream. */
+                    break;
+                }
             }
             fclose(cf);
         }
