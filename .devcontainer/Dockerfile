@@ -21,6 +21,10 @@ ARG PYNFS_REF=b861f7b8211b4dc798b88a7e81b300fb4615189c
 # Pinned Microsoft Windows Protocol Test Suites (WPTS) FileServer release.
 ARG WPTS_VERSION=4.26.3.0
 ARG ELBENCHO_REF=96b1bf29c35e437715c0527194e69e4c96ed9922
+ARG ENABLE_S3TESTS=1
+# Pinned ceph/s3-tests commit. Bump to pull in new compliance cases; a SHA
+# (not a branch) keeps the image reproducible and busts the layer cache on bump.
+ARG S3TESTS_REF=5522d1c351f75bc00ae0f64f742f3f095f5939d9
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -113,6 +117,18 @@ RUN apt-get -y update && \
 
 RUN if [ "$ENABLE_UV" = "1" ] ; then \
     curl -LsSf https://astral.sh/uv/install.sh | sh ; \
+    fi
+
+# ceph/s3-tests: an unofficial-but-broad S3 API compatibility suite, run against
+# the chimera S3 server (src/server/s3/tests/ceph wires it into ctest). Cloned at
+# a pinned SHA with its own venv so the system python is untouched.
+ENV S3TESTS_DIR=/opt/s3-tests
+RUN if [ "$ENABLE_S3TESTS" = "1" ] ; then \
+    git clone https://github.com/ceph/s3-tests.git "$S3TESTS_DIR" && \
+    cd "$S3TESTS_DIR" && git checkout "$S3TESTS_REF" && \
+    /root/.local/bin/uv venv .venv --python 3.12 && \
+    /root/.local/bin/uv pip install --python .venv -r requirements.txt pytest-timeout -e . && \
+    chmod -R a+rx "$S3TESTS_DIR/.venv" ; \
     fi
 
 # .NET 8 + Microsoft Windows Protocol Test Suites (WPTS) FileServer suite, used
