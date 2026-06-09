@@ -592,3 +592,30 @@ jobs:
           else
             echo "No flaky tests detected; nothing to review."
           fi
+
+  # Single stable aggregate of the whole build/test matrix, so the merge
+  # queue's required-checks list is one name instead of every matrix cell
+  # (and survives matrix changes). Mark this job as a required status check.
+  ci-complete:
+    name: CI complete
+    needs:
+      - build-devcontainer
+      - build-ubuntu26
+      - build-ubuntu24
+      - build-ubuntu22
+      - build-rocky9
+      - build-rocky10
+      - test
+      - static-analysis
+    if: ${{ always() }}
+    runs-on: arc-amd64
+    permissions:
+      contents: read
+    steps:
+      - name: Verify all build/test jobs passed
+        run: |
+          if ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}; then
+            echo "One or more build/test jobs did not pass."
+            exit 1
+          fi
+          echo "All build/test jobs passed."
