@@ -104,6 +104,52 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
     get_filename_component(WPTS_BIN_DIR "${WPTS_SMB2_DLL}" DIRECTORY)
     set(CHIMERA_DAEMON $<TARGET_FILE:chimera>)
 
+    set(WPTS_JUNIT_DIR ${CMAKE_BINARY_DIR}/wpts-junit
+        CACHE PATH "Directory for per-case WPTS JUnit XML output.")
+
+    # Run a whole WPTS allowlist in ONE consolidated CTest entry -- one daemon +
+    # netns + dotnet/vstest invocation -- instead of one per case.  The ~5s fixed
+    # tax per invocation (daemon/netns/dotnet+vstest startup) dwarfs the ~0.5s of
+    # actual work per case, so consolidating collapses the suite (~90% of the
+    # wall clock, ~196 netns -> ~7).  vstest takes the whole allowlist as a single
+    # "Name=A|Name=B|..." filter, and the wrapper converts vstest's TRX to a
+    # per-case JUnit (WPTS_JUNIT_FILE) so the CI report keeps per-case visibility,
+    # exactly like the pynfs combined runs.  Trailing args are extra VAR=value
+    # environment entries (the per-config CHIMERA_SMB_* feature flags).
+    function(wpts_add_combined suffix labels allowlist_var)
+        set(filter "")
+        foreach(tc ${${allowlist_var}})
+            if(filter)
+                string(APPEND filter "|Name=${tc}")
+            else()
+                set(filter "Name=${tc}")
+            endif()
+        endforeach()
+        if(NOT filter)
+            return()
+        endif()
+
+        set(name chimera/server/smb/wpts/${suffix})
+        add_test(NAME ${name}
+            COMMAND ${CMAKE_SOURCE_DIR}/scripts/wpts_smb_test_wrapper.sh
+                    ${CHIMERA_DAEMON} memfs "${filter}")
+
+        set(env "WPTS_BIN_DIR=${WPTS_BIN_DIR}" "DOTNET=${WPTS_DOTNET}"
+                "WPTS_JUNIT_FILE=${WPTS_JUNIT_DIR}/${suffix}.xml")
+        if(ARGN)
+            list(APPEND env ${ARGN})
+        endif()
+
+        # The wrapper stages a per-config ptfconfig into the shared WPTS Bin dir,
+        # so the configs still can't run concurrently -- keep them serialized
+        # (only ~7 entries now, not ~196).
+        set_tests_properties(${name} PROPERTIES
+            LABELS "${labels}"
+            TIMEOUT 600
+            RESOURCE_LOCK wpts_smb_bin
+            ENVIRONMENT "${env}")
+    endfunction()
+
     # Allowlist: MS-SMB2 cases confirmed green across repeated runs against the
     # current SMB2 server (memfs backend). Grow this as features land. Tests
     # that only pass with an unmerged server fix (e.g. the QUERY_DIRECTORY
@@ -200,18 +246,7 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
         ValidateNegotiateInfo_Negative_SMB311
         )
 
-    foreach(tc ${WPTS_SMB2_ALLOWLIST})
-        add_test(NAME chimera/server/smb/wpts/memfs/${tc}
-            COMMAND ${CMAKE_SOURCE_DIR}/scripts/wpts_smb_test_wrapper.sh
-                    ${CHIMERA_DAEMON} memfs "Name=${tc}")
-        # The wrapper stages our ptfconfig into the shared WPTS Bin dir, so
-        # serialize WPTS tests against each other to avoid a write race.
-        set_tests_properties(chimera/server/smb/wpts/memfs/${tc} PROPERTIES
-            LABELS "smb;wpts"
-            TIMEOUT 180
-            RESOURCE_LOCK wpts_smb_bin
-            ENVIRONMENT "WPTS_BIN_DIR=${WPTS_BIN_DIR};DOTNET=${WPTS_DOTNET}")
-    endforeach()
+    wpts_add_combined(memfs "smb;wpts" WPTS_SMB2_ALLOWLIST)
 
     # SMB3 durable / persistent handle cases plus the Replay (channel-sequence)
     # suite.  These need the daemon run with smb_persistent_handles enabled (the
@@ -268,16 +303,7 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
         Replay_PersistentHandle_SetInfo_ReplayEligibleCleared
         Replay_PersistentHandle_Write_ReplayEligibleCleared)
 
-    foreach(tc ${WPTS_SMB2_PERSISTENT_ALLOWLIST})
-        add_test(NAME chimera/server/smb/wpts/memfs_persistent/${tc}
-            COMMAND ${CMAKE_SOURCE_DIR}/scripts/wpts_smb_test_wrapper.sh
-                    ${CHIMERA_DAEMON} memfs "Name=${tc}")
-        set_tests_properties(chimera/server/smb/wpts/memfs_persistent/${tc} PROPERTIES
-            LABELS "smb;wpts;persistent"
-            TIMEOUT 180
-            RESOURCE_LOCK wpts_smb_bin
-            ENVIRONMENT "WPTS_BIN_DIR=${WPTS_BIN_DIR};DOTNET=${WPTS_DOTNET};CHIMERA_SMB_PERSISTENT=1")
-    endforeach()
+    wpts_add_combined(memfs_persistent "smb;wpts;persistent" WPTS_SMB2_PERSISTENT_ALLOWLIST "CHIMERA_SMB_PERSISTENT=1")
 
     # SMB3 transport-compression cases.  These need the daemon run with
     # smb_compression enabled (the wrapper sets it from CHIMERA_SMB_COMPRESSION,
@@ -325,16 +351,7 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
         SMB2Compression_LZ77_LargeFile
         TreeMgmt_SMB311_COMPRESS_DATA)
 
-    foreach(tc ${WPTS_SMB2_COMPRESSION_ALLOWLIST})
-        add_test(NAME chimera/server/smb/wpts/memfs_compression/${tc}
-            COMMAND ${CMAKE_SOURCE_DIR}/scripts/wpts_smb_test_wrapper.sh
-                    ${CHIMERA_DAEMON} memfs "Name=${tc}")
-        set_tests_properties(chimera/server/smb/wpts/memfs_compression/${tc} PROPERTIES
-            LABELS "smb;wpts;compression"
-            TIMEOUT 180
-            RESOURCE_LOCK wpts_smb_bin
-            ENVIRONMENT "WPTS_BIN_DIR=${WPTS_BIN_DIR};DOTNET=${WPTS_DOTNET};CHIMERA_SMB_COMPRESSION=1")
-    endforeach()
+    wpts_add_combined(memfs_compression "smb;wpts;compression" WPTS_SMB2_COMPRESSION_ALLOWLIST "CHIMERA_SMB_COMPRESSION=1")
 
     # SMB3 multichannel cases.  The wrapper runs the daemon with a second NIC
     # address (so FSCTL_QUERY_NETWORK_INTERFACE_INFO advertises an alternative
@@ -371,16 +388,7 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
         NetworkInterfaceInfo_Query_ReturnsIPv4IPv6
         )
 
-    foreach(tc ${WPTS_SMB2_MULTICHANNEL_ALLOWLIST})
-        add_test(NAME chimera/server/smb/wpts/memfs_multichannel/${tc}
-            COMMAND ${CMAKE_SOURCE_DIR}/scripts/wpts_smb_test_wrapper.sh
-                    ${CHIMERA_DAEMON} memfs "Name=${tc}")
-        set_tests_properties(chimera/server/smb/wpts/memfs_multichannel/${tc} PROPERTIES
-            LABELS "smb;wpts;multichannel"
-            TIMEOUT 180
-            RESOURCE_LOCK wpts_smb_bin
-            ENVIRONMENT "WPTS_BIN_DIR=${WPTS_BIN_DIR};DOTNET=${WPTS_DOTNET};CHIMERA_SMB_MULTICHANNEL=1")
-    endforeach()
+    wpts_add_combined(memfs_multichannel "smb;wpts;multichannel" WPTS_SMB2_MULTICHANNEL_ALLOWLIST "CHIMERA_SMB_MULTICHANNEL=1")
 
     # SMB3 transport-encryption cases.  These need the daemon run with
     # smb_encryption enabled (the wrapper sets it from CHIMERA_SMB_ENCRYPTION,
@@ -404,16 +412,7 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
         Compound_Encrypt_UnrelatedRequests
         Signing_VerifySignatureWhenEncrypted)
 
-    foreach(tc ${WPTS_SMB2_ENCRYPTION_ALLOWLIST})
-        add_test(NAME chimera/server/smb/wpts/memfs_encryption/${tc}
-            COMMAND ${CMAKE_SOURCE_DIR}/scripts/wpts_smb_test_wrapper.sh
-                    ${CHIMERA_DAEMON} memfs "Name=${tc}")
-        set_tests_properties(chimera/server/smb/wpts/memfs_encryption/${tc} PROPERTIES
-            LABELS "smb;wpts;encryption"
-            TIMEOUT 180
-            RESOURCE_LOCK wpts_smb_bin
-            ENVIRONMENT "WPTS_BIN_DIR=${WPTS_BIN_DIR};DOTNET=${WPTS_DOTNET};CHIMERA_SMB_ENCRYPTION=1")
-    endforeach()
+    wpts_add_combined(memfs_encryption "smb;wpts;encryption" WPTS_SMB2_ENCRYPTION_ALLOWLIST "CHIMERA_SMB_ENCRYPTION=1")
 
     # Compression + encryption combined cases (compress-then-encrypt, MS-SMB2
     # §3.1.4.4).  The wrapper enables both smb_compression and smb_encryption so a
@@ -426,16 +425,7 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
         BVT_SMB2Compression_Chained_PatternV1_Encrypted
         Negotiate_SMB311_WithEncryptionAndCompressionContextsWithoutIntegrityContext)
 
-    foreach(tc ${WPTS_SMB2_COMPRESSION_ENCRYPTION_ALLOWLIST})
-        add_test(NAME chimera/server/smb/wpts/memfs_compression_encryption/${tc}
-            COMMAND ${CMAKE_SOURCE_DIR}/scripts/wpts_smb_test_wrapper.sh
-                    ${CHIMERA_DAEMON} memfs "Name=${tc}")
-        set_tests_properties(chimera/server/smb/wpts/memfs_compression_encryption/${tc} PROPERTIES
-            LABELS "smb;wpts;compression;encryption"
-            TIMEOUT 180
-            RESOURCE_LOCK wpts_smb_bin
-            ENVIRONMENT "WPTS_BIN_DIR=${WPTS_BIN_DIR};DOTNET=${WPTS_DOTNET};CHIMERA_SMB_COMPRESSION=1;CHIMERA_SMB_ENCRYPTION=1")
-    endforeach()
+    wpts_add_combined(memfs_compression_encryption "smb;wpts;compression;encryption" WPTS_SMB2_COMPRESSION_ENCRYPTION_ALLOWLIST "CHIMERA_SMB_COMPRESSION=1" "CHIMERA_SMB_ENCRYPTION=1")
 
     # Multichannel + encryption combined case: encryption is session-scoped, so
     # the keys derived on the first channel cover every bound channel.  The
@@ -445,16 +435,7 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
     set(WPTS_SMB2_MULTICHANNEL_ENCRYPTION_ALLOWLIST
         MultipleChannel_EncryptionOnBothChannels)
 
-    foreach(tc ${WPTS_SMB2_MULTICHANNEL_ENCRYPTION_ALLOWLIST})
-        add_test(NAME chimera/server/smb/wpts/memfs_multichannel_encryption/${tc}
-            COMMAND ${CMAKE_SOURCE_DIR}/scripts/wpts_smb_test_wrapper.sh
-                    ${CHIMERA_DAEMON} memfs "Name=${tc}")
-        set_tests_properties(chimera/server/smb/wpts/memfs_multichannel_encryption/${tc} PROPERTIES
-            LABELS "smb;wpts;multichannel;encryption"
-            TIMEOUT 180
-            RESOURCE_LOCK wpts_smb_bin
-            ENVIRONMENT "WPTS_BIN_DIR=${WPTS_BIN_DIR};DOTNET=${WPTS_DOTNET};CHIMERA_SMB_MULTICHANNEL=1;CHIMERA_SMB_ENCRYPTION=1")
-    endforeach()
+    wpts_add_combined(memfs_multichannel_encryption "smb;wpts;multichannel;encryption" WPTS_SMB2_MULTICHANNEL_ENCRYPTION_ALLOWLIST "CHIMERA_SMB_MULTICHANNEL=1" "CHIMERA_SMB_ENCRYPTION=1")
 
     message(STATUS "WPTS MS-SMB2 tests: enabled (${WPTS_BIN_DIR}, ${WPTS_DOTNET})")
 elseif(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND NOT WPTS_ARCH_SUPPORTED)
