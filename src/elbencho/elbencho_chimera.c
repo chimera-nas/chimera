@@ -613,6 +613,10 @@ elb_chimera_pread(
     }
 
     if (!zerocopy) {
+        if (sc.count > (uint32_t) nbytes) {
+            evpl_iovec_release(ctx->evpl, &iov);
+            return -EIO;
+        }
         memcpy(buf, evpl_iovec_data(&iov), sc.count);
     }
     evpl_iovec_release(ctx->evpl, &iov);
