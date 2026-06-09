@@ -278,12 +278,16 @@ function(pynfs_add_combined_suite backend minor)
 
     # Codes that cannot pass on the passthrough backends are deselected here
     # (the per-code path drops them from registration; in a shared run we use
-    # pynfs's no<CODE> token instead).  WRT18 (write) / SATT15 (setattr).
-    if("${backend}" IN_LIST PYNFS_SKIP_BACKENDS_WRT18)
-        list(APPEND excludes noWRT18)
-    endif()
-    if("${backend}" IN_LIST PYNFS_SKIP_BACKENDS_SATT15)
-        list(APPEND excludes noSATT15)
+    # pynfs's no<CODE> token instead).  WRT18 (write) / SATT15 (setattr) are
+    # NFSv4.0-only codes, so only emit their no<CODE> token in the 4.0 run -- the
+    # 4.1/4.2 testserver aborts with "Unknown code or flag" on an unknown token.
+    if("${minor}" STREQUAL "0")
+        if("${backend}" IN_LIST PYNFS_SKIP_BACKENDS_WRT18)
+            list(APPEND excludes noWRT18)
+        endif()
+        if("${backend}" IN_LIST PYNFS_SKIP_BACKENDS_SATT15)
+            list(APPEND excludes noSATT15)
+        endif()
     endif()
 
     set(name chimera/pynfs/combined_${backend}_nfs4.${minor})
