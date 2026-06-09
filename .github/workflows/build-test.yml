@@ -538,8 +538,8 @@ jobs:
           path: results
 
       # Render the report into the run summary (always) and, on a PR, into a
-      # single sticky PR comment.  Pure-Python + gh CLI -- no external action, so
-      # it works on the self-hosted runners regardless of the action mirror.
+      # single sticky PR comment.  Pure-Python + stdlib urllib -- no external
+      # action and no `gh` CLI (the self-hosted runners have neither).
       - name: Render and publish report
         env:
           GH_TOKEN: ${{ github.token }}
@@ -548,13 +548,9 @@ jobs:
         run: |
           python3 scripts/ci_test_report.py results > report.md
           cat report.md >> "$GITHUB_STEP_SUMMARY"
+          # The summary above is the primary output; the PR comment is
+          # best-effort (don't fail the job if the API call hiccups).
           if [ -n "${PR_NUMBER:-}" ]; then
-            marker='<!-- ctest-report -->'
-            id=$(gh api "repos/${GH_REPO}/issues/${PR_NUMBER}/comments" --paginate \
-                   --jq ".[] | select(.body | startswith(\"${marker}\")) | .id" | head -1)
-            if [ -n "$id" ]; then
-              gh api -X PATCH "repos/${GH_REPO}/issues/comments/${id}" -F body=@report.md
-            else
-              gh api -X POST "repos/${GH_REPO}/issues/${PR_NUMBER}/comments" -F body=@report.md
-            fi
+            python3 scripts/ci_pr_comment.py "$GH_REPO" "$PR_NUMBER" report.md \
+              || echo "::warning::failed to post PR comment (report is in the run summary)"
           fi

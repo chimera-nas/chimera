@@ -256,14 +256,26 @@ endfunction()
 function(pynfs_add_combined_suite backend minor)
     set(flags)
     set(excludes)
+    # Each isolated flag that exists in THIS minor is deselected from the
+    # combined run with a trailing no<flag>, so a code tagged with both an
+    # isolated flag and a non-isolated one (pynfs tags some delegation/callback
+    # tests, e.g. testReadDeleg/testCBSecParms, with `deleg` AND open/sequence)
+    # does not leak into the combined run -- which has delegations off -- and
+    # fail.  run_filter is last-match-wins, so the trailing no<flag> wins; the
+    # code still runs in its isolated per-code entry.  Only minor-valid flags are
+    # emitted (a 4.0-only flag like `lock` is not a valid token for the 4.1
+    # testserver, which would abort with "Unknown code or flag").
     foreach(flag ${PYNFS_FLAGS_${minor}})
         if(NOT "${flag}" IN_LIST PYNFS_ISOLATED_FLAGS)
             list(APPEND flags ${flag})
             foreach(extra IN LISTS PYNFS_EXTRA_${flag})
                 list(APPEND excludes ${extra})
             endforeach()
+        else()
+            list(APPEND excludes "no${flag}")
         endif()
     endforeach()
+
     # Codes that cannot pass on the passthrough backends are deselected here
     # (the per-code path drops them from registration; in a shared run we use
     # pynfs's no<CODE> token instead).  WRT18 (write) / SATT15 (setattr).
