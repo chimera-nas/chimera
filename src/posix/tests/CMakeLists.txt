@@ -946,3 +946,26 @@ foreach(prog test_fcntl test_lockf)
     add_posix_nfs3_test_myuser(${test_name}     ${prog} linux)
     add_posix_nfs3rdma_test_myuser(${test_name} ${prog} linux)
 endforeach()
+
+# Tag every test registered above with the 'posix' label so the whole suite can
+# be run independently via `ctest -L posix`.  Collected from the directory TESTS
+# property rather than per-add_test so new tests are covered automatically.
+#
+# Additionally tag each test with the VFS backend encoded in its name so an
+# entire backend can be run across every suite via e.g. `ctest -L linux`.  The
+# backend list is checked longest-name-first so diskfs_io_uring wins over the
+# io_uring substring; the boundary "($|_)" keeps the match to a whole token and
+# still catches a trailing "_myuser".  Tests with no backend in their name keep
+# only the suite label.
+get_property(_posix_tests DIRECTORY PROPERTY TESTS)
+if(_posix_tests)
+    set_property(TEST ${_posix_tests} APPEND PROPERTY LABELS posix)
+    foreach(_t IN LISTS _posix_tests)
+        foreach(_be diskfs_io_uring diskfs_aio io_uring memfs linux cairn)
+            if(_t MATCHES "_${_be}($|_)")
+                set_property(TEST ${_t} APPEND PROPERTY LABELS ${_be})
+                break()
+            endif()
+        endforeach()
+    endforeach()
+endif()

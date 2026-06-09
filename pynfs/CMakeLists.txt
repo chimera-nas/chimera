@@ -220,8 +220,12 @@ function(pynfs_add_code_test flag code backend minor)
         list(APPEND test_env "PYNFS_FORCE_DELEG=1")
     endif()
 
+    # Label each test along every dimension encoded in its name so the suite
+    # can be sharded independently: the whole suite (pynfs), the category/flag
+    # (pynfs_rename, pynfs_courteous, ...), the VFS backend (memfs, linux, ...),
+    # and the NFSv4 minor version (nfs4.0, nfs4.1, nfs4.2).
     set_tests_properties(${name} PROPERTIES
-        LABELS pynfs
+        LABELS "pynfs;pynfs_${flag};${backend};nfs4.${minor}"
         ENVIRONMENT "${test_env}")
 endfunction()
 
@@ -247,6 +251,6 @@ foreach(code ${PYNFS_FLEX_CODES})
     add_test(NAME ${name}
         COMMAND bash ${PNFS_WRAPPER} ${CHIMERA_BINARY} ${PYNFS_DIR} ${code})
     set_tests_properties(${name} PROPERTIES
-        LABELS pynfs
+        LABELS "pynfs;pynfs_flex;memfs;nfs4.1"
         ENVIRONMENT "PYTHONUNBUFFERED=1;PYNFS_RUNDEPS=1")
 endforeach()

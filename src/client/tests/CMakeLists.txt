@@ -99,3 +99,21 @@ endif()
 generate_backend_tests(cairn CAIRN_ENABLED)
 generate_backend_tests(linux "")
 generate_backend_tests(io_uring CHIMERA_VFS_IO_URING)
+
+# Tag every test registered above with the 'client' label so the suite can be
+# run independently via `ctest -L client`, and with the VFS backend encoded in
+# its name (longest-name-first so diskfs_io_uring beats the io_uring substring)
+# so an entire backend can be run across every suite via e.g. `ctest -L linux`.
+# Tests with no backend in their name keep only the suite label.
+get_property(_client_tests DIRECTORY PROPERTY TESTS)
+if(_client_tests)
+    set_property(TEST ${_client_tests} APPEND PROPERTY LABELS client)
+    foreach(_t IN LISTS _client_tests)
+        foreach(_be diskfs_io_uring diskfs_aio io_uring memfs linux cairn)
+            if(_t MATCHES "_${_be}($|_)")
+                set_property(TEST ${_t} APPEND PROPERTY LABELS ${_be})
+                break()
+            endif()
+        endforeach()
+    endforeach()
+endif()
