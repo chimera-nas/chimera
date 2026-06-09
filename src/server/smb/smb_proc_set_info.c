@@ -38,33 +38,6 @@ chimera_smb_set_info_callback(
     chimera_smb_complete_request(request, error_code ? SMB2_STATUS_INTERNAL_ERROR : SMB2_STATUS_SUCCESS);
 } /* chimera_smb_set_info_callback */
 
-/* Apply request->set_info.vfs_attrs to the open file, naming this SMB client as
- * the lease owner so the metadata recall spares the client's own caching leases
- * (a client's own SetInfo never invalidates its own caches -- see
- * chimera_vfs_break_caching_file).  Used by every value-setting info class. */
-static void
-chimera_smb_set_info_setattr(struct chimera_smb_request *request)
-{
-    struct chimera_smb_open_file  *of       = request->set_info.open_file;
-    struct chimera_vfs_lease_owner io_owner = {
-        .protocol   = CHIMERA_VFS_LEASE_PROTO_SMB2,
-        .client_key = request->session_handle->session->client_key,
-        .owner_lo   = of->file_id.pid,
-        .owner_hi   = of->file_id.vid,
-    };
-
-    chimera_vfs_setattr_owned(
-        request->compound->thread->vfs_thread,
-        &request->session_handle->session->cred,
-        of->handle,
-        &request->set_info.vfs_attrs,
-        0,
-        0,
-        &io_owner,
-        chimera_smb_set_info_callback,
-        request);
-} /* chimera_smb_set_info_setattr */
-
 static void
 chimera_smb_set_info_link_callback(
     enum chimera_vfs_error    error_code,
@@ -223,7 +196,15 @@ chimera_smb_set_info_allocation_getattr_callback(
         request->set_info.vfs_attrs.va_size = cur_size;
     }
 
-    chimera_smb_set_info_setattr(request);
+    chimera_vfs_setattr(
+        request->compound->thread->vfs_thread,
+        &request->session_handle->session->cred,
+        request->set_info.open_file->handle,
+        &request->set_info.vfs_attrs,
+        0,
+        0,
+        chimera_smb_set_info_callback,
+        request);
 } /* chimera_smb_set_info_allocation_getattr_callback */
 
 void
@@ -263,7 +244,15 @@ chimera_smb_set_info(struct chimera_smb_request *request)
                         request->set_info.open_file->flags |= CHIMERA_SMB_OPEN_FILE_WRITE_TIME_STICKY;
                     }
 
-                    chimera_smb_set_info_setattr(request);
+                    chimera_vfs_setattr(
+                        request->compound->thread->vfs_thread,
+                        &request->session_handle->session->cred,
+                        request->set_info.open_file->handle,
+                        &request->set_info.vfs_attrs,
+                        0,
+                        0,
+                        chimera_smb_set_info_callback,
+                        request);
                     break;
                 case SMB2_FILE_ENDOFFILE_INFO:
                     chimera_smb_unmarshal_end_of_file_info(&request->set_info.attrs, &request->set_info.vfs_attrs);
@@ -283,7 +272,15 @@ chimera_smb_set_info(struct chimera_smb_request *request)
                         request->set_info.vfs_attrs.va_set_mask     |= CHIMERA_VFS_ATTR_MTIME;
                     }
 
-                    chimera_smb_set_info_setattr(request);
+                    chimera_vfs_setattr(
+                        request->compound->thread->vfs_thread,
+                        &request->session_handle->session->cred,
+                        request->set_info.open_file->handle,
+                        &request->set_info.vfs_attrs,
+                        0,
+                        0,
+                        chimera_smb_set_info_callback,
+                        request);
                     break;
                 case SMB2_FILE_ALLOCATION_INFO:
                     /* AllocationInfo only changes the file when the requested
