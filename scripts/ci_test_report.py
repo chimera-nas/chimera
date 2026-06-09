@@ -57,25 +57,40 @@ def run_label(dirname):
     return " · ".join(parts)
 
 
+# Consolidated CTest entries run many cases in one process, so CTest sees one
+# test; each writes a per-case JUnit under <subdir>/<entry>.xml so a failure can
+# be expanded to the specific cases.  (A per-case entry that shares the prefix
+# but has no such file just falls through and is named as-is.)
+CONSOLIDATED = [
+    ("chimera/pynfs/combined_", "pynfs-junit"),
+    ("chimera/server/smb/smbtorture_", "smbtorture-junit"),
+]
+
+
+def expand_failures(run_dir, name):
+    """Failed cases of a consolidated entry, or None if not consolidated."""
+    for prefix, subdir in CONSOLIDATED:
+        if name.startswith(prefix):
+            pj = os.path.join(run_dir, subdir, name.split("/")[-1] + ".xml")
+            return [n for n, f, _ in testcases(pj) if f]
+    return None
+
+
 def collect(run_dir):
     """Return a summary dict for one run directory."""
     results_xml = os.path.join(run_dir, "results.xml")
-    pynfs_dir = os.path.join(run_dir, "pynfs-junit")
 
     passed = failed = 0
     sum_time = 0.0
-    failures = []  # list of named failures (codes, not the pynfs rollup)
+    failures = []  # list of named failures (specific cases, not the rollup)
     have_results = os.path.exists(results_xml)
 
     for name, is_fail, t in testcases(results_xml):
         sum_time += t
-        # Expand a failed combined pynfs CTest entry to its specific codes.
-        if is_fail and name.startswith("chimera/pynfs/combined_"):
-            suite = name.split("/")[-1]  # combined_<backend>_nfs4.<minor>
-            pj = os.path.join(pynfs_dir, suite + ".xml")
-            codes = [n for n, f, _ in testcases(pj) if f]
-            if codes:
-                failures.extend(f"{name}  →  {c}" for c in codes)
+        cases = expand_failures(run_dir, name) if is_fail else None
+        if cases is not None:
+            if cases:
+                failures.extend(f"{name}  →  {c}" for c in cases)
             else:
                 failures.append(name)
             failed += 1
