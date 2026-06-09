@@ -10,7 +10,7 @@ on:
       - main          # publish from the default branch
     tags:
       - "*"           # publish when any tag is pushed
-  pull_request:        # always build for PRs but don’t publish
+  merge_group:         # build to gate the merge queue (no publish) but don’t publish
   workflow_dispatch:   # allow manual runs
 
 env:
@@ -134,3 +134,21 @@ jobs:
           docker buildx imagetools create -t ${IMAGE}:latest-debug \
               ${IMAGE}:latest-debug-amd64 \
               ${IMAGE}:latest-debug-arm64
+
+  # Single stable aggregate of the docker image builds, for the merge queue's
+  # required-checks list. Mark this job as a required status check.
+  docker-build-complete:
+    name: Docker build complete
+    needs: build-and-push
+    if: ${{ always() }}
+    runs-on: arc-amd64
+    permissions:
+      contents: read
+    steps:
+      - name: Verify docker build jobs passed
+        run: |
+          if ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}; then
+            echo "One or more docker build jobs did not pass."
+            exit 1
+          fi
+          echo "All docker build jobs passed."
