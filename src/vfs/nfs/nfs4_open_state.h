@@ -10,6 +10,7 @@
 #include <string.h>
 #include "vfs/vfs.h"
 #include "nfs4_xdr.h"
+#include "nfs4_pnfs.h"
 
 /*
  * NFS4 Open State
@@ -23,19 +24,26 @@
  */
 
 struct chimera_nfs4_open_state {
-    uint8_t                 server_index;  /* NFS server index for dispatch routing */
-    struct stateid4         stateid;       /* NFS4 stateid for this open */
-    uint32_t                seqid;         /* Sequence ID for state operations */
-    uint32_t                access;        /* Share access mode */
-    atomic_int              dirty;         /* Count of uncommitted unstable writes */
-    int                     silly_renamed; /* File has been silly renamed */
-    uint8_t                 dir_fh_len;    /* Directory fh for silly remove on close */
-    uint8_t                 dir_fh[CHIMERA_VFS_FH_SIZE];
+    uint8_t                    server_index; /* NFS server index for dispatch routing */
+    struct stateid4            stateid;    /* NFS4 stateid for this open */
+    uint32_t                   seqid;      /* Sequence ID for state operations */
+    uint32_t                   access;     /* Share access mode */
+    atomic_int                 dirty;      /* Count of uncommitted unstable writes */
+    int                        silly_renamed; /* File has been silly renamed */
+    uint8_t                    dir_fh_len; /* Directory fh for silly remove on close */
+    uint8_t                    dir_fh[CHIMERA_VFS_FH_SIZE];
 
     /*
      * Credentials for silly remove on close.
      */
-    struct chimera_vfs_cred silly_remove_cred;
+    struct chimera_vfs_cred    silly_remove_cred;
+
+    /*
+     * pNFS (flex-files) per-file layout.  Zero-initialized by calloc means
+     * layout.state == CHIMERA_NFS4_LAYOUT_NONE (no layout yet); only touched
+     * when pNFS is enabled and the MDS is pNFS-capable.
+     */
+    struct chimera_nfs4_layout layout;
 };
 
 /*
@@ -50,6 +58,7 @@ chimera_nfs4_open_state_alloc(void)
     if (state) {
         atomic_init(&state->dirty, 0);
         state->seqid = 1;
+        pthread_mutex_init(&state->layout.acq_lock, NULL);
     }
 
     return state;
@@ -61,6 +70,7 @@ chimera_nfs4_open_state_alloc(void)
 static inline void
 chimera_nfs4_open_state_free(struct chimera_nfs4_open_state *state)
 {
+    pthread_mutex_destroy(&state->layout.acq_lock);
     free(state);
 } /* chimera_nfs4_open_state_free */
 

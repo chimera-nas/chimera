@@ -123,6 +123,7 @@
 #define SMB2_STATUS_EA_CORRUPT_ERROR                  0xC0000053
 #define SMB2_STATUS_FILE_LOCK_CONFLICT                0xC0000054
 #define SMB2_STATUS_LOCK_NOT_GRANTED                  0xC0000055
+#define SMB2_STATUS_INVALID_LOCK_RANGE                0xC00001A1
 #define SMB2_STATUS_DELETE_PENDING                    0xC0000056
 #define SMB2_STATUS_CTL_FILE_NOT_SUPPORTED            0xC0000057
 #define SMB2_STATUS_UNKNOWN_REVISION                  0xC0000058
@@ -543,6 +544,12 @@
 #define SMB2_STATUS_SERVER_UNAVAILABLE                0xC0000466
 #define SMB2_STATUS_FILE_NOT_AVAILABLE                0xC0000467
 
+/* STATUS_SMB_NO_PREAUTH_INTEGRITY_HASH_OVERLAP (MS-SMB2 §3.3.5.4): returned
+ * from a SMB 3.1.1 NEGOTIATE when the client's
+ * SMB2_PREAUTH_INTEGRITY_CAPABILITIES HashAlgorithms array contains no hash
+ * algorithm the server supports. */
+#define SMB2_STATUS_SMB_NO_PREAUTH_INTEGRITY_OVERLAP  0xC05D0000
+
 /* Warning codes */
 #define SMB2_STATUS_BUFFER_OVERFLOW                   0x80000005
 #define SMB2_STATUS_STOPPED_ON_SYMLINK                0x8000002D
@@ -695,6 +702,7 @@ typedef uint8_t smb2_guid[SMB2_GUID_SIZE];
 // SMB2 TREE_CONNECT response ShareFlags
 #define SMB2_SHAREFLAG_ACCESS_BASED_DIRECTORY_ENUM  0x00000800
 #define SMB2_SHAREFLAG_ENCRYPT_DATA                 0x00008000 // Per-share encryption (SMB 3.0+)
+#define SMB2_SHAREFLAG_COMPRESS_DATA                0x00100000 // Share supports compression (SMB 3.1.1+)
 
 // SMB2/3 Negotiate Capabilities
 #define SMB2_GLOBAL_CAP_DFS                         0x00000001 // Server supports DFS
@@ -704,6 +712,7 @@ typedef uint8_t smb2_guid[SMB2_GUID_SIZE];
 #define SMB2_GLOBAL_CAP_PERSISTENT_HANDLES          0x00000010 // Supports persistent handles (SMB 3.0+)
 #define SMB2_GLOBAL_CAP_DIRECTORY_LEASING           0x00000020 // Supports directory leasing (SMB 3.0+)
 #define SMB2_GLOBAL_CAP_ENCRYPTION                  0x00000040 // Supports encryption (SMB 3.0+)
+#define SMB2_GLOBAL_CAP_NOTIFICATIONS               0x00000080 // Supports server-to-client notifications (SMB 3.1.1+)
 
 // SMB2 TREE_CONNECT response share capabilities (MS-SMB2 §2.2.10)
 #define SMB2_SHARE_CAP_DFS                          0x00000008
@@ -843,6 +852,11 @@ typedef uint8_t smb2_guid[SMB2_GUID_SIZE];
 #define SMB2_LEASE_READ_CACHING                     0x01
 #define SMB2_LEASE_HANDLE_CACHING                   0x02
 #define SMB2_LEASE_WRITE_CACHING                    0x04
+
+/* LeaseFlags in the RqLs create request/response context (MS-SMB2 2.2.13.2.8/
+ * 2.2.14.2.10/11) */
+#define SMB2_LEASE_FLAG_BREAK_IN_PROGRESS           0x00000002
+#define SMB2_LEASE_FLAG_PARENT_LEASE_KEY_SET        0x00000004
 
 #define SMB2_CREATE_REQUEST_LEASE_SIZE              32
 #define SMB2_CREATE_REQUEST_LEASE_V2_SIZE           52
@@ -1004,6 +1018,12 @@ typedef uint8_t smb2_guid[SMB2_GUID_SIZE];
 #define SMB2_FSCTL_SRV_COPYCHUNK_WRITE              0x001480F2
 #define SMB2_FSCTL_CREATE_OR_GET_OBJECT_ID          0x000900C0
 #define SMB2_FSCTL_SRV_ENUMERATE_SNAPSHOTS          0x00144064
+#define SMB2_FSCTL_LMR_REQUEST_RESILIENCY           0x001401D4
+
+/* Server policy for FSCTL_LMR_REQUEST_RESILIENCY: a Timeout of 0 selects the
+ * default; any larger request is capped at the maximum (MS-SMB2 3.3.5.15.9). */
+#define CHIMERA_SMB_RESILIENCY_DEFAULT_TIMEOUT_MS   120000U
+#define CHIMERA_SMB_RESILIENCY_MAX_TIMEOUT_MS       300000U
 
 #define SMB2_IO_REPARSE_TAG_NFS                     0x80000014
 #define SMB2_IO_REPARSE_TAG_SYMLINK                 0xA000000C

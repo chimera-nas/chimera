@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -33,7 +33,7 @@ chimera_dispatch_commit(
 {
     chimera_vfs_commit(
         thread->vfs_thread,
-        &thread->client->cred,
+        chimera_client_req_cred(request),
         request->commit.handle,
         0,  /* offset - sync entire file */
         0,  /* count - sync entire file */

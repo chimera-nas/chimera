@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -40,10 +40,13 @@ chimera_posix_mknod(
     const char                     *slash;
     int                             path_len;
 
-    chimera_posix_completion_init(&comp, &req);
+    path_len = chimera_posix_check_path(path);
+    if (path_len < 0) {
+        return -1;
+    }
 
-    path_len = strlen(path);
-    slash    = rindex(path, '/');
+    chimera_posix_completion_init(&comp, &req);
+    slash = rindex(path, '/');
 
     req.opcode             = CHIMERA_CLIENT_OP_MKNOD;
     req.mknod.callback     = chimera_posix_mknod_callback;
@@ -61,7 +64,7 @@ chimera_posix_mknod(
 
     req.mknod.set_attr.va_req_mask = 0;
     req.mknod.set_attr.va_set_mask = CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_RDEV;
-    req.mknod.set_attr.va_mode     = mode;
+    req.mknod.set_attr.va_mode     = mode & ~chimera_posix_effective_umask();
     req.mknod.set_attr.va_rdev     = dev;
 
     chimera_posix_worker_enqueue(worker, &req, chimera_posix_mknod_exec);

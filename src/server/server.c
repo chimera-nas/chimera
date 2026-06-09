@@ -48,6 +48,7 @@ struct chimera_server_config {
     int                                   nfs_tcp_rdma_port;
     int                                   nfs_lockmgr_port;
     int                                   nfs_port;
+    int                                   s3_port;
     int                                   nfs_data_server;
     uint64_t                              nfs_server_scope;
     int                                   external_portmap;
@@ -60,6 +61,7 @@ struct chimera_server_config {
     int                                   async_delegation;
     int                                   async_delegation_threads;
     int                                   cache_ttl;
+    int                                   rcu_reclaim_threads;
     int                                   nfs4_session_slots;
     int                                   nfs4_delegations;
     uint32_t                              nfs4_lease_time_s;
@@ -96,6 +98,7 @@ struct chimera_server_config {
     struct chimera_server_config_pnfs_ds {
         char netid[8];
         char uaddr[64];
+        char rdma_uaddr[64];              /* optional RDMA netaddr (empty = none)   */
         char backing_path[CHIMERA_PNFS_BACKING_MAX];
         int  version;                     /* NFS version the client uses for DS I/O */
         int  minorversion;                /* NFS minor version (4.x)                */
@@ -207,6 +210,7 @@ chimera_server_config_init(void)
     /* NFS service port (default 2049); data-server mode binds only the NFSv4
      * service so a pNFS data server can coexist with an MDS on one host. */
     config->nfs_port        = 2049;
+    config->s3_port         = 5000;
     config->nfs_data_server = 0;
 
     /* NFSv4.1 server identity (EXCHANGE_ID eir_server_scope).  Clients treat two
@@ -220,10 +224,22 @@ chimera_server_config_init(void)
 
     config->cache_ttl = 60;
 
+    /* Number of liburcu call_rcu reclaim worker threads.  0 (the default) means
+     * one worker per CPU (create_all_cpu_call_rcu_data) to keep RCU reclaim up
+     * with per-request cache churn under heavy load.  On a many-core host that
+     * spawns hundreds of threads, which is wasteful for short-lived or
+     * lightly-loaded instances (memory, and process-teardown cost); set a small
+     * positive value (e.g. the CI test daemons) to cap the worker count. */
+    config->rcu_reclaim_threads = 0;
+
     /* Default NFSv4.1 fore-channel session slots (server cap on the number
      * of concurrent SEQUENCE requests a client may have outstanding per
-     * session).  Mirrors NFS4_MAX_REPLY_CACHE_SLOTS in the NFS server. */
-    config->nfs4_session_slots = 64;
+     * session).  The chimera proxy client partitions slots one block per evpl
+     * thread, so a high-thread-count client (e.g. fio numjobs) needs this many
+     * slots or surplus threads collide on a shared slot; 256 covers typical
+     * fan-out out of the box and the replay-slot table sizes to it.  Raise
+     * further for very wide clients. */
+    config->nfs4_session_slots = 256;
 
     /* NFSv4 protocol delegations (OPEN_DELEGATE_READ/WRITE) are disabled by
      * default.  When off, every OPEN returns OPEN_DELEGATE_NONE and the
@@ -265,6 +281,9 @@ chimera_server_config_init(void)
 
     config->num_modules = 5;
 #endif /* ifdef HAVE_IO_URING */
+
+    /* The default KV module (memkv) is auto-registered by chimera_vfs_init; it
+     * need not be listed here. */
 
     return config;
 } /* chimera_server_config_init */
@@ -455,6 +474,14 @@ chimera_server_config_get_cache_ttl(const struct chimera_server_config *config)
 } /* chimera_server_config_get_cache_ttl */
 
 SYMBOL_EXPORT void
+chimera_server_config_set_rcu_reclaim_threads(
+    struct chimera_server_config *config,
+    int                           threads)
+{
+    config->rcu_reclaim_threads = threads;
+} /* chimera_server_config_set_rcu_reclaim_threads */
+
+SYMBOL_EXPORT void
 chimera_server_config_set_nfs4_session_slots(
     struct chimera_server_config *config,
     int                           slots)
@@ -564,6 +591,7 @@ chimera_server_config_add_pnfs_ds(
     struct chimera_server_config *config,
     const char                   *netid,
     const char                   *uaddr,
+    const char                   *rdma_uaddr,
     const char                   *backing_path,
     int                           version,
     int                           minorversion)
@@ -580,6 +608,7 @@ chimera_server_config_add_pnfs_ds(
 
     snprintf(ds->netid, sizeof(ds->netid), "%s", netid ? netid : "tcp");
     snprintf(ds->uaddr, sizeof(ds->uaddr), "%s", uaddr ? uaddr : "");
+    snprintf(ds->rdma_uaddr, sizeof(ds->rdma_uaddr), "%s", rdma_uaddr ? rdma_uaddr : "");
     snprintf(ds->backing_path, sizeof(ds->backing_path), "%s", backing_path ? backing_path : "");
     ds->version      = version ? version : 3;
     ds->minorversion = minorversion;
@@ -600,6 +629,20 @@ chimera_server_config_get_nfs_port(const struct chimera_server_config *config)
 {
     return config->nfs_port;
 } /* chimera_server_config_get_nfs_port */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_s3_port(
+    struct chimera_server_config *config,
+    int                           port)
+{
+    config->s3_port = port;
+} /* chimera_server_config_set_s3_port */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_s3_port(const struct chimera_server_config *config)
+{
+    return config->s3_port;
+} /* chimera_server_config_get_s3_port */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_nfs_data_server(
@@ -1457,6 +1500,20 @@ chimera_server_create_bucket(
 } /* chimera_server_create_bucket */
 
 SYMBOL_EXPORT int
+chimera_server_set_s3_bucket_root(
+    struct chimera_server *server,
+    const char            *bucket_root_path)
+{
+    if (!server->s3_shared) {
+        return -1;
+    }
+
+    chimera_s3_set_bucket_root(server->s3_shared, bucket_root_path);
+
+    return 0;
+} /* chimera_server_set_s3_bucket_root */
+
+SYMBOL_EXPORT int
 chimera_server_create_share(
     struct chimera_server *server,
     const char            *share_name,
@@ -1589,6 +1646,7 @@ chimera_server_init(
                                    config->num_modules,
                                    config->kv_module,
                                    config->cache_ttl,
+                                   config->rcu_reclaim_threads,
                                    metrics);
 
     /* Propagate the common TCP flavor so VFS client modules (e.g. nfs)
@@ -1605,6 +1663,7 @@ chimera_server_init(
             chimera_vfs_pnfs_add_device(server->vfs,
                                         config->pnfs_ds[i].netid,
                                         config->pnfs_ds[i].uaddr,
+                                        config->pnfs_ds[i].rdma_uaddr,
                                         config->pnfs_ds[i].backing_path,
                                         config->pnfs_ds[i].version,
                                         config->pnfs_ds[i].minorversion);

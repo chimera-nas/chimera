@@ -147,6 +147,11 @@ chimera_server_config_get_cache_ttl(
     const struct chimera_server_config *config);
 
 void
+chimera_server_config_set_rcu_reclaim_threads(
+    struct chimera_server_config *config,
+    int                           threads);
+
+void
 chimera_server_config_set_nfs4_session_slots(
     struct chimera_server_config *config,
     int                           slots);
@@ -267,6 +272,7 @@ chimera_server_config_add_pnfs_ds(
     struct chimera_server_config *config,
     const char                   *netid,
     const char                   *uaddr,
+    const char                   *rdma_uaddr,
     const char                   *backing_path,
     int                           version,
     int                           minorversion);
@@ -285,6 +291,15 @@ chimera_server_config_set_nfs_port(
 
 int
 chimera_server_config_get_nfs_port(
+    const struct chimera_server_config *config);
+
+void
+chimera_server_config_set_s3_port(
+    struct chimera_server_config *config,
+    int                           port);
+
+int
+chimera_server_config_get_s3_port(
     const struct chimera_server_config *config);
 
 void
@@ -504,6 +519,11 @@ chimera_server_create_bucket(
     struct chimera_server *server,
     const char            *bucket_name,
     const char            *bucket_path);
+
+int
+chimera_server_set_s3_bucket_root(
+    struct chimera_server *server,
+    const char            *bucket_root_path);
 
 int
 chimera_server_create_share(

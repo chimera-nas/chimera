@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -40,9 +40,18 @@ chimera_posix_symlink(
     int                             path_len;
     int                             target_len;
 
+    path_len = chimera_posix_check_path(path);
+    if (path_len < 0) {
+        return -1;
+    }
+
+    if (strlen(target) >= CHIMERA_VFS_PATH_MAX) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
     chimera_posix_completion_init(&comp, &req);
 
-    path_len   = strlen(path);
     target_len = strlen(target);
     slash      = rindex(path, '/');
 

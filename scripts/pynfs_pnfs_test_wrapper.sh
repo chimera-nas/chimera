@@ -33,7 +33,6 @@ MDS_PID=""
 
 MDS_PORT=2049
 DS_PORT=2050
-DS_UADDR="127.0.0.1.8.2"   # RFC 5665 uaddr for 127.0.0.1:2050 (2050 = 8*256+2)
 PYNFS_TIMEOUT="${PYNFS_TIMEOUT:-60}"
 PYNFS_NFS4_LEASE_TIME="${PYNFS_NFS4_LEASE_TIME:-5}"
 PYNFS_NFS4_GRACE_TIME="${PYNFS_NFS4_GRACE_TIME:-10}"
@@ -53,7 +52,7 @@ cleanup() {
     for pid in "$MDS_PID" "$DS_PID"; do
         if [ -n "$pid" ]; then
             kill "$pid" 2>/dev/null || true
-            for i in $(seq 1 30); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
+            for i in $(seq 1 150); do kill -0 "$pid" 2>/dev/null || break; sleep 0.02; done
             kill -9 "$pid" 2>/dev/null || true
             wait "$pid" 2>/dev/null || true
         fi
@@ -67,6 +66,7 @@ trap cleanup EXIT
 
 cat > "$DS_CONFIG" << EOF
 {
+    "common": { "rcu_reclaim_threads": 4 },
     "server": { "threads": 2, "nfs_port": ${DS_PORT}, "data_server": true,
                 "nfs4_lease_time": ${PYNFS_NFS4_LEASE_TIME},
                 "nfs4_grace_time": ${PYNFS_NFS4_GRACE_TIME},
@@ -78,12 +78,13 @@ EOF
 
 cat > "$MDS_CONFIG" << EOF
 {
+    "common": { "rcu_reclaim_threads": 4 },
     "server": {
         "threads": 4, "external_portmap": false,
         "nfs4_lease_time": ${PYNFS_NFS4_LEASE_TIME},
         "nfs4_grace_time": ${PYNFS_NFS4_GRACE_TIME},
         "pnfs": { "enabled": true,
-                  "data_servers": [ { "netid": "tcp", "uaddr": "${DS_UADDR}", "backing_path": "/ds0" } ] }
+                  "data_servers": [ { "tcp": "127.0.0.1:${DS_PORT}", "backing_path": "/ds0" } ] }
     },
     "mounts": {
         "share": { "module": "memfs", "path": "/" },
@@ -101,13 +102,13 @@ EOF
 # mount + backing-root resolution complete) closes that window.
 wait_for_ready() {
     local port="$1" pid="$2" log="$3"
-    for i in $(seq 1 100); do
+    for i in $(seq 1 500); do
         if grep -q "Server is ready." "$log" 2>/dev/null &&
            ip netns exec "${NETNS_NAME}" bash -c "echo > /dev/tcp/127.0.0.1/${port}" 2>/dev/null; then
             return 0
         fi
         kill -0 "$pid" 2>/dev/null || { echo "chimera (pid $pid) exited early" >&2; return 1; }
-        sleep 0.1
+        sleep 0.02
     done
     echo "timed out waiting for 127.0.0.1:${port} to become ready" >&2; return 1
 }

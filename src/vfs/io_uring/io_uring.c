@@ -373,6 +373,18 @@ chimera_io_uring_reap(
 
                 } else {
                     request->status = chimera_linux_errno_to_status(-cqe->res);
+                    /* LOOKUP with a symlink current filehandle must report
+                     * NFS4ERR_SYMLINK, not NFS4ERR_NOTDIR (RFC 7530 16.15.5).
+                     * The statx of a name under the symlink fails ENOTDIR when
+                     * the cached parent handle is the symlink itself; distinguish
+                     * it by stat'ing the parent.  (See the matching linux fix.) */
+                    if (request->status == CHIMERA_VFS_ENOTDIR) {
+                        struct stat pst;
+                        if (fstat((int) request->lookup_at.handle->vfs_private,
+                                  &pst) == 0 && S_ISLNK(pst.st_mode)) {
+                            request->status = CHIMERA_VFS_ESYMLINK;
+                        }
+                    }
                 }
                 break;
             case CHIMERA_VFS_OP_GETATTR:
@@ -1201,7 +1213,9 @@ chimera_io_uring_open_fh(
     if (request->open_fh.flags & CHIMERA_VFS_OPEN_DIRECTORY) {
         flags |= O_DIRECTORY;
     }
-    if (request->open_fh.flags & (CHIMERA_VFS_OPEN_READ_ONLY | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY)) {
+    if ((request->open_fh.flags & (CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY)) ||
+        ((request->open_fh.flags & CHIMERA_VFS_OPEN_READ_ONLY) &&
+         !(request->open_fh.flags & CHIMERA_VFS_OPEN_WRITE_ONLY))) {
         flags |= O_RDONLY;
     } else {
         flags |= O_RDWR;
@@ -1266,6 +1280,7 @@ chimera_io_uring_open_at(
     if (request->open_at.flags & (CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY)) {
         flags |= O_RDONLY;
     } else if ((request->open_at.flags & CHIMERA_VFS_OPEN_READ_ONLY) &&
+               !(request->open_at.flags & CHIMERA_VFS_OPEN_WRITE_ONLY) &&
                !(request->open_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE)) {
         flags |= O_RDONLY;
     } else {

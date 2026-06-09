@@ -110,10 +110,20 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
     # double-completion fix for QueryDir_Reopen_OnFile) are intentionally
     # enabled in that fix's PR, not here.
     set(WPTS_SMB2_ALLOWLIST
+        AppInstanceVersion_SMB302_SMB311
+        AppInstanceVersion_SMB311_SMB302
+        BVT_AppInstanceVersion_SMB311_GreaterVersion
+        BVT_AppInstanceVersion_SMB311_LowerAppInstanceVersionHigh
+        BVT_AppInstanceVersion_SMB311_LowerAppInstanceVersionLow
+        BVT_AppInstanceVersion_SMB311_SameVersion
         BVT_Compound_RelatedRequests
         BVT_Compound_UnRelatedRequests
         BVT_CreateClose_CreateAndCloseDirectory
         BVT_CreateClose_CreateAndCloseFile
+        BVT_Leasing_FileLeasingV1
+        BVT_Leasing_FileLeasingV2
+        Leasing_FileLeasingV1_SameLeaseKey
+        Leasing_FileLeasingV2_SameLeaseKey
         BVT_MultiCredit_OneRequestWithMultiCredit
         BVT_Negotiate_Compatible_2002
         BVT_Negotiate_Compatible_Wildcard
@@ -121,6 +131,7 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
         BVT_Negotiate_SMB21
         BVT_Negotiate_SMB30
         BVT_Negotiate_SMB302
+        BVT_Negotiate_SMB311
         BVT_Negotiate_SMB311_Preauthentication
         BVT_Negotiate_SigningEnabled
         BVT_OpLockBreak
@@ -134,6 +145,9 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
         BVT_SMB2Basic_ChangeNotify_ChangeLastWrite
         BVT_SMB2Basic_ChangeNotify_ChangeSecurity
         BVT_SMB2Basic_ChangeNotify_ChangeSize
+        BVT_SMB2Basic_ChangeNotify_ChangeStreamName
+        BVT_SMB2Basic_ChangeNotify_ChangeStreamSize
+        BVT_SMB2Basic_ChangeNotify_ChangeStreamWrite
         BVT_SMB2Basic_ChangeNotify_MaxTransactSizeCheck_Smb2002
         BVT_SMB2Basic_ChangeNotify_MaxTransactSizeCheck_Smb21
         BVT_SMB2Basic_ChangeNotify_MaxTransactSizeCheck_Smb30
@@ -162,15 +176,19 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
         CreateClose_CreateAndCloseFileWithDoubleDotDir
         CreateClose_DeleteFile_DesiredAccessNotIncludeDeleteOrGenericAll
         InvalidCreateRequestStructureSize
+        Negative_AppInstanceVersion_SMB311_NoVersion
         Negotiate_SMB311_ContextID_NetName
         Negotiate_SMB311_InvalidCipher
+        Negotiate_SMB311_InvalidHashAlgorithm
         Negotiate_SMB311_IsTransportCapabilitiesSupported
         Negotiate_SMB311_SigningCapability
+        Negotiate_SMB311_WithAllContexts
         Negotiate_SMB311_WithCompressionContextWithoutIntegrityContext
         Negotiate_SMB311_WithEncryptionAndCompressionContextsWithoutIntegrityContext
         Negotiate_SMB311_WithEncryptionContextWithoutIntegrityContext
         Negotiate_SMB311_WithoutAnyContexts
         SessionMgmt_ReconnectWithDifferentDialect
+        SessionMgmt_SupportsNotificationsMismatch
         Signing_VerifyAesGmacSigning
         TreeMgmt_SMB311_CLUSTER_RECONNECT
         ValidateNegotiateInfo_Negative_InvalidCapabilities
@@ -203,17 +221,19 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
     # NonPersistentHandle variants — only become applicable once the CA / replay
     # capability is advertised, so they live here rather than in the base list.
     # Allowlist = every applicable durable/persistent/replay case confirmed green
-    # against the current server.  Left out: DurableHandleV1_Reconnect_AfterServerDisconnect
-    # (needs negotiate-after-negotiate to drop the connection — an unrelated
-    # protocol gap), *_WithDifferentDurableOwner / BVT_PersistentHandles (need a
-    # second user account / scale-out config the harness doesn't provide), and
-    # the Replay IoCtl/Lock cases (replay-eligibility not yet cleared on those ops).
+    # against the current server.  Left out: *_WithDifferentDurableOwner /
+    # BVT_PersistentHandles (need a second user account / scale-out config the
+    # harness doesn't provide — they report Inconclusive/NotExecuted), and the
+    # Replay Lock cases (replay-eligibility not yet cleared on that op).  The
+    # Replay IoCtl cases use FSCTL_LMR_REQUEST_RESILIENCY as their vehicle and
+    # are applicable now that the server grants request-resiliency.
     set(WPTS_SMB2_PERSISTENT_ALLOWLIST
         BVT_DurableHandleV1_Reconnect_WithBatchOplock
         BVT_DurableHandleV1_Reconnect_WithLeaseV1
         BVT_DurableHandleV2_Reconnect_WithBatchOplock
         BVT_DurableHandleV2_Reconnect_WithLeaseV1
         BVT_PersistentHandle_Reconnect
+        DurableHandleV1_Reconnect_AfterServerDisconnect
         DurableHandleV1_Reconnect_IncludeCreateDurableHandle
         DurableHandleV1_Reconnect_IncludeReconnectV2
         DurableHandleV1_Reconnect_IncludeRequestV2
@@ -234,12 +254,14 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
         DurableHandleV2_WithLeaseV2_WithoutHandleCaching
         PersistentHandle_ReOpenFromDiffClient
         Replay_NonPersistentHandle_Flush_ReplayEligibleCleared
+        Replay_NonPersistentHandle_IoCtl_ReplayEligibleCleared
         Replay_NonPersistentHandle_QueryInfo_ReplayEligibleCleared
         Replay_NonPersistentHandle_Read_ReplayEligibleCleared
         Replay_NonPersistentHandle_SetInfo_ReplayEligibleCleared
         Replay_NonPersistentHandle_Write_ReplayEligibleCleared
         Replay_PersistentHandle_ChangeNotify_ReplayEligibleCleared
         Replay_PersistentHandle_Flush_ReplayEligibleCleared
+        Replay_PersistentHandle_IoCtl_ReplayEligibleCleared
         Replay_PersistentHandle_QueryDirectory_ReplayEligibleCleared
         Replay_PersistentHandle_QueryInfo_ReplayEligibleCleared
         Replay_PersistentHandle_Read_ReplayEligibleCleared
@@ -300,7 +322,8 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
         SMB2Compression_InvalidCompressedPacketLength
         SMB2Compression_InvalidCompressionAlgorithm
         SMB2Compression_InvalidDecompressedProtocolId
-        SMB2Compression_LZ77_LargeFile)
+        SMB2Compression_LZ77_LargeFile
+        TreeMgmt_SMB311_COMPRESS_DATA)
 
     foreach(tc ${WPTS_SMB2_COMPRESSION_ALLOWLIST})
         add_test(NAME chimera/server/smb/wpts/memfs_compression/${tc}
@@ -334,6 +357,7 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
     set(WPTS_SMB2_MULTICHANNEL_ALLOWLIST
         BVT_MultipleChannel_NicRedundantOnBoth
         BVT_NetworkInterfaceInfo_QuerySuccessful
+        MultipleChannel_FileLease
         MultipleChannel_LockUnlockOnDiffChannel
         MultipleChannel_LockUnlockOnSameChannel
         MultipleChannel_MultiChannelOnSameNic
@@ -344,6 +368,7 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
         MultipleChannel_SecondChannelSessionSetupFailAtFirstTime
         NetworkInterfaceInfo_ChangeConnection_BindCurrentSession
         NetworkInterfaceInfo_Query_ReturnsErrorStatus
+        NetworkInterfaceInfo_Query_ReturnsIPv4IPv6
         )
 
     foreach(tc ${WPTS_SMB2_MULTICHANNEL_ALLOWLIST})
@@ -1272,6 +1297,7 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.durable-v2-delay.durable_v2_reconnect_delay
     smb2.durable-v2-delay.durable_v2_reconnect_delay_msec
     # smb2.durable-v2-open
+    smb2.durable-v2-open.app-instance
     # smb2.durable-v2-regressions
     smb2.durable-v2-regressions.durable_v2_reconnect_bug15624
     # smb2.fileid
@@ -1340,6 +1366,16 @@ set(SMBTORTURE_ENABLED_memfs
     # smb2.kernel-oplocks
     smb2.kernel-oplocks.kernel_oplocks8
     # smb2.lock
+    smb2.lock.auto-unlock
+    smb2.lock.errorcode
+    smb2.lock.lock
+    smb2.lock.multiple-unlock
+    smb2.lock.overlap
+    smb2.lock.range
+    smb2.lock.stacking
+    smb2.lock.valid-request
+    smb2.lock.zerobytelength
+    smb2.lock.zerobyteread
     smb2.lock.contend
     smb2.lock.context
     smb2.lock.ctdb-delrec-deadlock
@@ -1356,6 +1392,20 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.maximum_allowed.read_only
     # smb2.mkdir
     smb2.mkdir
+    # smb2.multichannel (SMB3 session binding).  interface_info advertises the
+    # server NICs, num_channels exercises channel bind + the 32-channel limit,
+    # bug_15346 is a bind regression, and oplocks.test1 checks an oplock break
+    # delivered over a bound session.  oplocks.test1 is enabled only on the
+    # non-passthrough backends: the linux/io_uring share root keeps real on-disk
+    # files between subtests, so the test's create-disposition checks see EXISTED
+    # instead of CREATED.  oplocks.test2/test3* stay disabled (they need Samba
+    # test-only FSCTLs -- force-unacked-timeout / network block -- chimera does
+    # not implement); leases.test1-4 stay disabled (general lease-grant
+    # behaviour, not multichannel binding).
+    smb2.multichannel.bugs.bug_15346
+    smb2.multichannel.generic.interface_info
+    smb2.multichannel.generic.num_channels
+    smb2.multichannel.oplocks.test1
     # smb2.notify-inotify
     smb2.notify-inotify.inotify-rename
     # smb2.notify
@@ -1398,7 +1448,14 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.rename.simple_modtime
     smb2.rename.simple_nodelete
     # smb2.replay
+    smb2.replay.channel-sequence
     smb2.replay.replay-commands
+    smb2.replay.replay-dhv2-lease-oplock
+    smb2.replay.replay-dhv2-lease1
+    smb2.replay.replay-dhv2-lease2
+    smb2.replay.replay-dhv2-lease3
+    smb2.replay.replay-dhv2-oplock-lease
+    smb2.replay.replay-dhv2-oplock1
     smb2.replay.replay-regular
     smb2.replay.replay5
     smb2.replay.replay7
@@ -1626,6 +1683,16 @@ set(SMBTORTURE_ENABLED_linux
     smb2.ioctl.sparse_set_nobuf
     smb2.ioctl.sparse_set_oversize
     # smb2.lock
+    smb2.lock.auto-unlock
+    smb2.lock.errorcode
+    smb2.lock.lock
+    smb2.lock.multiple-unlock
+    smb2.lock.overlap
+    smb2.lock.range
+    smb2.lock.stacking
+    smb2.lock.valid-request
+    smb2.lock.zerobytelength
+    smb2.lock.zerobyteread
     smb2.lock.contend
     smb2.lock.context
     smb2.lock.ctdb-delrec-deadlock
@@ -1641,6 +1708,19 @@ set(SMBTORTURE_ENABLED_linux
     smb2.maximum_allowed.read_only
     # smb2.mkdir
     smb2.mkdir
+    # smb2.multichannel (SMB3 session binding).  interface_info advertises the
+    # server NICs, num_channels exercises channel bind + the 32-channel limit,
+    # bug_15346 is a bind regression, and oplocks.test1 checks an oplock break
+    # delivered over a bound session.  oplocks.test1 is enabled only on the
+    # non-passthrough backends: the linux/io_uring share root keeps real on-disk
+    # files between subtests, so the test's create-disposition checks see EXISTED
+    # instead of CREATED.  oplocks.test2/test3* stay disabled (they need Samba
+    # test-only FSCTLs -- force-unacked-timeout / network block -- chimera does
+    # not implement); leases.test1-4 stay disabled (general lease-grant
+    # behaviour, not multichannel binding).
+    smb2.multichannel.bugs.bug_15346
+    smb2.multichannel.generic.interface_info
+    smb2.multichannel.generic.num_channels
     # smb2.notify-inotify
     smb2.notify-inotify.inotify-rename
     # smb2.notify
@@ -1681,6 +1761,7 @@ set(SMBTORTURE_ENABLED_linux
     smb2.rename.simple_modtime
     smb2.rename.simple_nodelete
     # smb2.replay
+    smb2.replay.channel-sequence
     smb2.replay.replay-commands
     smb2.replay.replay5
     smb2.replay.replay7
@@ -1883,6 +1964,16 @@ set(SMBTORTURE_ENABLED_io_uring
     smb2.ioctl.sparse_set_nobuf
     smb2.ioctl.sparse_set_oversize
     # smb2.lock
+    smb2.lock.auto-unlock
+    smb2.lock.errorcode
+    smb2.lock.lock
+    smb2.lock.multiple-unlock
+    smb2.lock.overlap
+    smb2.lock.range
+    smb2.lock.stacking
+    smb2.lock.valid-request
+    smb2.lock.zerobytelength
+    smb2.lock.zerobyteread
     smb2.lock.contend
     smb2.lock.context
     smb2.lock.ctdb-delrec-deadlock
@@ -1898,6 +1989,19 @@ set(SMBTORTURE_ENABLED_io_uring
     smb2.maximum_allowed.read_only
     # smb2.mkdir
     smb2.mkdir
+    # smb2.multichannel (SMB3 session binding).  interface_info advertises the
+    # server NICs, num_channels exercises channel bind + the 32-channel limit,
+    # bug_15346 is a bind regression, and oplocks.test1 checks an oplock break
+    # delivered over a bound session.  oplocks.test1 is enabled only on the
+    # non-passthrough backends: the linux/io_uring share root keeps real on-disk
+    # files between subtests, so the test's create-disposition checks see EXISTED
+    # instead of CREATED.  oplocks.test2/test3* stay disabled (they need Samba
+    # test-only FSCTLs -- force-unacked-timeout / network block -- chimera does
+    # not implement); leases.test1-4 stay disabled (general lease-grant
+    # behaviour, not multichannel binding).
+    smb2.multichannel.bugs.bug_15346
+    smb2.multichannel.generic.interface_info
+    smb2.multichannel.generic.num_channels
     # smb2.notify-inotify
     smb2.notify-inotify.inotify-rename
     # smb2.notify
@@ -1938,6 +2042,7 @@ set(SMBTORTURE_ENABLED_io_uring
     smb2.rename.simple_modtime
     smb2.rename.simple_nodelete
     # smb2.replay
+    smb2.replay.channel-sequence
     smb2.replay.replay-commands
     smb2.replay.replay5
     smb2.replay.replay7
@@ -2094,6 +2199,7 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.durable-v2-delay.durable_v2_reconnect_delay
     smb2.durable-v2-delay.durable_v2_reconnect_delay_msec
     # smb2.durable-v2-open
+    smb2.durable-v2-open.app-instance
     # smb2.durable-v2-regressions
     smb2.durable-v2-regressions.durable_v2_reconnect_bug15624
     # smb2.fileid
@@ -2152,6 +2258,16 @@ set(SMBTORTURE_ENABLED_cairn
     # smb2.kernel-oplocks
     smb2.kernel-oplocks.kernel_oplocks8
     # smb2.lock
+    smb2.lock.auto-unlock
+    smb2.lock.errorcode
+    smb2.lock.lock
+    smb2.lock.multiple-unlock
+    smb2.lock.overlap
+    smb2.lock.range
+    smb2.lock.stacking
+    smb2.lock.valid-request
+    smb2.lock.zerobytelength
+    smb2.lock.zerobyteread
     smb2.lock.contend
     smb2.lock.context
     smb2.lock.ctdb-delrec-deadlock
@@ -2167,6 +2283,20 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.maximum_allowed.read_only
     # smb2.mkdir
     smb2.mkdir
+    # smb2.multichannel (SMB3 session binding).  interface_info advertises the
+    # server NICs, num_channels exercises channel bind + the 32-channel limit,
+    # bug_15346 is a bind regression, and oplocks.test1 checks an oplock break
+    # delivered over a bound session.  oplocks.test1 is enabled only on the
+    # non-passthrough backends: the linux/io_uring share root keeps real on-disk
+    # files between subtests, so the test's create-disposition checks see EXISTED
+    # instead of CREATED.  oplocks.test2/test3* stay disabled (they need Samba
+    # test-only FSCTLs -- force-unacked-timeout / network block -- chimera does
+    # not implement); leases.test1-4 stay disabled (general lease-grant
+    # behaviour, not multichannel binding).
+    smb2.multichannel.bugs.bug_15346
+    smb2.multichannel.generic.interface_info
+    smb2.multichannel.generic.num_channels
+    smb2.multichannel.oplocks.test1
     # smb2.notify-inotify
     smb2.notify-inotify.inotify-rename
     # smb2.notify
@@ -2207,7 +2337,14 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.rename.simple_modtime
     smb2.rename.simple_nodelete
     # smb2.replay
+    smb2.replay.channel-sequence
     smb2.replay.replay-commands
+    smb2.replay.replay-dhv2-lease-oplock
+    smb2.replay.replay-dhv2-lease1
+    smb2.replay.replay-dhv2-lease2
+    smb2.replay.replay-dhv2-lease3
+    smb2.replay.replay-dhv2-oplock-lease
+    smb2.replay.replay-dhv2-oplock1
     smb2.replay.replay-regular
     smb2.replay.replay5
     smb2.replay.replay7
@@ -2388,6 +2525,7 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.durable-v2-delay.durable_v2_reconnect_delay
     smb2.durable-v2-delay.durable_v2_reconnect_delay_msec
     # smb2.durable-v2-open
+    smb2.durable-v2-open.app-instance
     # smb2.durable-v2-regressions
     smb2.durable-v2-regressions.durable_v2_reconnect_bug15624
     # smb2.fileid
@@ -2446,6 +2584,16 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     # smb2.kernel-oplocks
     smb2.kernel-oplocks.kernel_oplocks8
     # smb2.lock
+    smb2.lock.auto-unlock
+    smb2.lock.errorcode
+    smb2.lock.lock
+    smb2.lock.multiple-unlock
+    smb2.lock.overlap
+    smb2.lock.range
+    smb2.lock.stacking
+    smb2.lock.valid-request
+    smb2.lock.zerobytelength
+    smb2.lock.zerobyteread
     smb2.lock.contend
     smb2.lock.context
     smb2.lock.ctdb-delrec-deadlock
@@ -2461,6 +2609,20 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.maximum_allowed.read_only
     # smb2.mkdir
     smb2.mkdir
+    # smb2.multichannel (SMB3 session binding).  interface_info advertises the
+    # server NICs, num_channels exercises channel bind + the 32-channel limit,
+    # bug_15346 is a bind regression, and oplocks.test1 checks an oplock break
+    # delivered over a bound session.  oplocks.test1 is enabled only on the
+    # non-passthrough backends: the linux/io_uring share root keeps real on-disk
+    # files between subtests, so the test's create-disposition checks see EXISTED
+    # instead of CREATED.  oplocks.test2/test3* stay disabled (they need Samba
+    # test-only FSCTLs -- force-unacked-timeout / network block -- chimera does
+    # not implement); leases.test1-4 stay disabled (general lease-grant
+    # behaviour, not multichannel binding).
+    smb2.multichannel.bugs.bug_15346
+    smb2.multichannel.generic.interface_info
+    smb2.multichannel.generic.num_channels
+    smb2.multichannel.oplocks.test1
     # smb2.notify-inotify
     smb2.notify-inotify.inotify-rename
     # smb2.notify
@@ -2501,7 +2663,14 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.rename.simple_modtime
     smb2.rename.simple_nodelete
     # smb2.replay
+    smb2.replay.channel-sequence
     smb2.replay.replay-commands
+    smb2.replay.replay-dhv2-lease-oplock
+    smb2.replay.replay-dhv2-lease1
+    smb2.replay.replay-dhv2-lease2
+    smb2.replay.replay-dhv2-lease3
+    smb2.replay.replay-dhv2-oplock-lease
+    smb2.replay.replay-dhv2-oplock1
     smb2.replay.replay-regular
     smb2.replay.replay5
     smb2.replay.replay7
@@ -2682,6 +2851,7 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     smb2.durable-v2-delay.durable_v2_reconnect_delay
     smb2.durable-v2-delay.durable_v2_reconnect_delay_msec
     # smb2.durable-v2-open
+    smb2.durable-v2-open.app-instance
     # smb2.durable-v2-regressions
     smb2.durable-v2-regressions.durable_v2_reconnect_bug15624
     # smb2.fileid
@@ -2740,6 +2910,16 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     # smb2.kernel-oplocks
     smb2.kernel-oplocks.kernel_oplocks8
     # smb2.lock
+    smb2.lock.auto-unlock
+    smb2.lock.errorcode
+    smb2.lock.lock
+    smb2.lock.multiple-unlock
+    smb2.lock.overlap
+    smb2.lock.range
+    smb2.lock.stacking
+    smb2.lock.valid-request
+    smb2.lock.zerobytelength
+    smb2.lock.zerobyteread
     smb2.lock.contend
     smb2.lock.context
     smb2.lock.ctdb-delrec-deadlock
@@ -2755,6 +2935,20 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     smb2.maximum_allowed.read_only
     # smb2.mkdir
     smb2.mkdir
+    # smb2.multichannel (SMB3 session binding).  interface_info advertises the
+    # server NICs, num_channels exercises channel bind + the 32-channel limit,
+    # bug_15346 is a bind regression, and oplocks.test1 checks an oplock break
+    # delivered over a bound session.  oplocks.test1 is enabled only on the
+    # non-passthrough backends: the linux/io_uring share root keeps real on-disk
+    # files between subtests, so the test's create-disposition checks see EXISTED
+    # instead of CREATED.  oplocks.test2/test3* stay disabled (they need Samba
+    # test-only FSCTLs -- force-unacked-timeout / network block -- chimera does
+    # not implement); leases.test1-4 stay disabled (general lease-grant
+    # behaviour, not multichannel binding).
+    smb2.multichannel.bugs.bug_15346
+    smb2.multichannel.generic.interface_info
+    smb2.multichannel.generic.num_channels
+    smb2.multichannel.oplocks.test1
     # smb2.notify-inotify
     smb2.notify-inotify.inotify-rename
     # smb2.notify
@@ -2795,7 +2989,14 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     smb2.rename.simple_modtime
     smb2.rename.simple_nodelete
     # smb2.replay
+    smb2.replay.channel-sequence
     smb2.replay.replay-commands
+    smb2.replay.replay-dhv2-lease-oplock
+    smb2.replay.replay-dhv2-lease1
+    smb2.replay.replay-dhv2-lease2
+    smb2.replay.replay-dhv2-lease3
+    smb2.replay.replay-dhv2-oplock-lease
+    smb2.replay.replay-dhv2-oplock1
     smb2.replay.replay-regular
     smb2.replay.replay5
     smb2.replay.replay7

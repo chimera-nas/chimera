@@ -4,6 +4,7 @@
 
 #include "nfs_internal.h"
 #include "nfs4_open_state.h"
+#include "nfs4_pnfs.h"
 #include "vfs/vfs_error.h"
 
 struct chimera_nfs4_write_ctx {
@@ -108,10 +109,19 @@ chimera_nfs4_write(
         return;
     }
 
+    open_state = (struct chimera_nfs4_open_state *) request->write.handle->vfs_private;
+
+    /* pNFS overlay: if a flex-files RW layout covers this write, drive it
+    * straight to the data server (or acquire the layout first).  Returns 1 if
+    * it took the request; 0 means fall through to the MDS write below. */
+    if (open_state &&
+        chimera_nfs4_pnfs_write(thread, shared, request, private_data, server_thread, open_state)) {
+        return;
+    }
+
     ctx             = request->plugin_data;
     ctx->thread     = thread;
     ctx->server     = server;
-    open_state      = (struct chimera_nfs4_open_state *) request->write.handle->vfs_private;
     ctx->open_state = open_state;
 
     chimera_nfs4_map_fh(request->fh, request->fh_len, &fh, &fhlen);

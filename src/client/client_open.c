@@ -23,6 +23,9 @@ chimera_open(
     request->open.flags        = flags;
     request->open.path_len     = path_len;
 
+    request->open.set_attr.va_req_mask = 0;
+    request->open.set_attr.va_set_mask = 0;
+
     memcpy(request->open.path, path, path_len);
 
     chimera_dispatch_open(thread, request);

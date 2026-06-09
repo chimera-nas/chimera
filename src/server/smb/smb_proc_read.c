@@ -138,16 +138,26 @@ chimera_smb_read(struct chimera_smb_request *request)
         return;
     }
 
+    /* MS-SMB2 §3.3.5.2.10: a READ is never rejected for a stale ChannelSequence,
+     * but it still advances the Open's tracked sequence (the third argument 0
+     * marks this as a non-mutating op). */
+    chimera_smb_channel_sequence_stale(request->read.open_file,
+                                       request->channel_sequence, 0);
+
     struct chimera_vfs_lease_owner io_owner = {
         .protocol   = CHIMERA_VFS_LEASE_PROTO_SMB2,
-        .client_key = request->session_handle->session->session_id,
+        .client_key = request->session_handle->session->client_key,
         .owner_lo   = request->read.open_file->file_id.pid,
         .owner_hi   = request->read.open_file->file_id.vid,
     };
 
     /* Mandatory byte-range lock enforcement: an exclusive lock held by a
-     * different open denies reads of the locked range. */
-    if (chimera_vfs_state_range_io_conflict(
+     * different open denies reads of the locked range.  A zero-length read
+     * touches no bytes, so it can conflict with no lock and is exempt
+     * (MS-SMB2 zerobyteread); it also avoids the length==0 => to-EOF
+     * convention in the range-overlap test wrongly matching every lock. */
+    if (request->read.length != 0 &&
+        chimera_vfs_state_range_io_conflict(
             thread->vfs_thread->vfs->vfs_state,
             request->read.open_file->handle->fh,
             request->read.open_file->handle->fh_len,

@@ -126,6 +126,14 @@ chimera_smb_tree_connect_reply(
             request->tree->share->encrypt_data) {
             share_flags |= SMB2_SHAREFLAG_ENCRYPT_DATA;
         }
+        /* SMB3 transport compression is a global server capability (no per-share
+         * knob).  When it is enabled, advertise that disk shares support
+         * compressing their data so conforming clients may compress traffic on
+         * this tree (MS-SMB2 §2.2.10 SMB2_SHAREFLAG_COMPRESS_DATA). */
+        if (!request->tree_connect.is_ipc &&
+            request->compound->thread->shared->config.compression) {
+            share_flags |= SMB2_SHAREFLAG_COMPRESS_DATA;
+        }
         evpl_iovec_cursor_append_uint32(reply_cursor, share_flags);
     }
 

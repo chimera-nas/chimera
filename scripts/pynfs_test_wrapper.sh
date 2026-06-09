@@ -49,9 +49,9 @@ cleanup() {
             CHIMERA_DIED_DURING_TEST=1
         fi
         kill "$CHIMERA_PID" 2>/dev/null || true
-        for i in $(seq 1 30); do
+        for i in $(seq 1 150); do
             kill -0 "$CHIMERA_PID" 2>/dev/null || break
-            sleep 0.1
+            sleep 0.02
         done
         if kill -0 "$CHIMERA_PID" 2>/dev/null; then
             echo "=== Chimera shutdown hung, force killing ==="
@@ -144,6 +144,9 @@ generate_config() {
 
     cat > "$CONFIG_FILE" << EOF
 {
+    "common": {
+        "rcu_reclaim_threads": 4
+    },
     "server": {
         "threads": 4,
         "delegation_threads": 4,
@@ -193,7 +196,7 @@ CHIMERA_PID=$!
 # has finished its own readiness path; starting pynfs in that window produces
 # connection-refused initialization failures.
 READY=0
-for i in $(seq 1 100); do
+for i in $(seq 1 500); do
     if grep -q "Server is ready." "$CHIMERA_LOG" &&
        ip netns exec "${NETNS_NAME}" bash -c "echo > /dev/tcp/127.0.0.1/2049" 2>/dev/null &&
        { [ "$DELEG_ENABLE" != "true" ] ||
@@ -205,7 +208,7 @@ for i in $(seq 1 100); do
         echo "chimera daemon exited prematurely"
         exit 1
     fi
-    sleep 0.1
+    sleep 0.02
 done
 
 if [ "$READY" != "1" ]; then
@@ -303,24 +306,36 @@ if [ "$DELEG_ENABLE" = "true" ]; then
                        --serverhelperarg "http://127.0.0.1:${REST_PORT}")
 fi
 
+# pynfs writes per-code JUnit XML (one <testcase> per code) -- the single results
+# source, since testserver writes only ONE of --json/--xml.  When the harness
+# asks (PYNFS_JUNIT_FILE, set for the combined runs whose per-code detail CTest's
+# own --output-junit cannot see), persist it there for the CI report; otherwise a
+# throwaway in the session dir is enough for the pass/fail gate below.
+if [ -n "${PYNFS_JUNIT_FILE:-}" ]; then
+    RESULTS_XML="${PYNFS_JUNIT_FILE}"
+    mkdir -p "$(dirname "$RESULTS_XML")"
+else
+    RESULTS_XML="${SESSION_DIR}/results.xml"
+fi
+
 if [ "$NFS_MINOR_VERSION" = "0" ]; then
     TESTSERVER="${PYNFS_DIR}/nfs4.0/testserver.py"
     # shellcheck disable=SC2086
     timeout --foreground -k 5 "${PYNFS_TIMEOUT}" \
         ip netns exec "${NETNS_NAME}" python3 "${TESTSERVER}" 127.0.0.1:/share \
-        --maketree "${PYNFS_DEP_ARGS[@]}" "${SERVERHELPER_ARGS[@]}" -v --json="${RESULTS_FILE}" $FLAG_ARGS
+        --maketree "${PYNFS_DEP_ARGS[@]}" "${SERVERHELPER_ARGS[@]}" -v --xml="${RESULTS_XML}" $FLAG_ARGS
 elif [ "$NFS_MINOR_VERSION" = "1" ]; then
     TESTSERVER="${PYNFS_DIR}/nfs4.1/testserver.py"
     # shellcheck disable=SC2086
     timeout --foreground -k 5 "${PYNFS_TIMEOUT}" \
         ip netns exec "${NETNS_NAME}" python3 "${TESTSERVER}" 127.0.0.1:/share \
-        --minorversion=1 --maketree "${PYNFS_DEP_ARGS[@]}" -v --json="${RESULTS_FILE}" $FLAG_ARGS
+        --minorversion=1 --maketree "${PYNFS_DEP_ARGS[@]}" -v --xml="${RESULTS_XML}" $FLAG_ARGS
 elif [ "$NFS_MINOR_VERSION" = "2" ]; then
     TESTSERVER="${PYNFS_DIR}/nfs4.1/testserver.py"
     # shellcheck disable=SC2086
     timeout --foreground -k 5 "${PYNFS_TIMEOUT}" \
         ip netns exec "${NETNS_NAME}" python3 "${TESTSERVER}" 127.0.0.1:/share \
-        --minorversion=2 --maketree "${PYNFS_DEP_ARGS[@]}" -v --json="${RESULTS_FILE}" $FLAG_ARGS
+        --minorversion=2 --maketree "${PYNFS_DEP_ARGS[@]}" -v --xml="${RESULTS_XML}" $FLAG_ARGS
 else
     echo "Unsupported NFS minor version: $NFS_MINOR_VERSION"
     exit 1
@@ -344,15 +359,23 @@ if [ "$PYNFS_EXIT" -ne 0 ]; then
     exit "$PYNFS_EXIT"
 fi
 
-# Check JSON results for test failures
-if [ -f "$RESULTS_FILE" ]; then
-    FAILURES=$(jq '.failures' "$RESULTS_FILE" 2>/dev/null)
-    if [ "$FAILURES" != "0" ] && [ -n "$FAILURES" ]; then
-        echo "=== PyNFS reported $FAILURES test failure(s) ==="
-        exit 1
-    fi
-else
+# Gate on the JUnit <testsuite> failure/error counts.
+if [ ! -f "$RESULTS_XML" ]; then
     echo "=== PyNFS results file not found ==="
+    exit 1
+fi
+read -r FAILURES ERRORS < <(python3 - "$RESULTS_XML" <<'PY'
+import sys, xml.etree.ElementTree as ET
+try:
+    root = ET.parse(sys.argv[1]).getroot()
+    ts = root if root.tag == "testsuite" else (root.find("testsuite") or root)
+    print(ts.get("failures", "1"), ts.get("errors", "1"))
+except Exception:
+    print("1", "1")
+PY
+)
+if [ "${FAILURES:-1}" != "0" ] || [ "${ERRORS:-1}" != "0" ]; then
+    echo "=== PyNFS reported ${FAILURES} failure(s), ${ERRORS} error(s) ==="
     exit 1
 fi
 

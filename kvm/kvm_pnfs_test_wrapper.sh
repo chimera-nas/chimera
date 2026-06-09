@@ -35,7 +35,11 @@ if [ "$ARCH" = "aarch64" ]; then
     QEMU_CONSOLE="ttyAMA0"
 else
     QEMU_BIN="qemu-system-x86_64"
-    QEMU_MACHINE="-machine q35,usb=off"
+    # microvm machine: skips legacy PCI/ACPI device probing for a faster boot
+    # (~0.1s/test).  pcie=on keeps a PCIe bus so the existing virtio-pci and
+    # virtio-scsi-pci devices attach unchanged; rtc/pit on so the guest kernel
+    # uses normal timers (without them it falls back to slow calibration paths).
+    QEMU_MACHINE="-M microvm,acpi=on,rtc=on,pit=on,pcie=on"
     QEMU_CONSOLE="ttyS0"
 fi
 
@@ -79,12 +83,12 @@ case "$TOPOLOGY" in
     *) echo "topology must be split or combined, got ${TOPOLOGY}" >&2; exit 1 ;;
 esac
 
-INITRD="$(dirname "$VMLINUZ")/initrd"
-if [ -f "$INITRD" ]; then
-    QEMU_INITRD="-initrd $INITRD"
-else
-    QEMU_INITRD=""
-fi
+# Boot with no initrd: every kernel in the KVM image matrix builds the virtio
+# block/net drivers in, so the kernel mounts the virtio root disk directly.
+# Skipping the ~63MB initrd unpack saves ~0.9s/test.  (See kvm/CMakeLists.txt:
+# the 22.04 generic kernel, which needs an initrd, was dropped from the matrix
+# in favor of its HWE kernel for exactly this reason.)
+QEMU_INITRD=""
 
 NETNS_NAME="kvm_pnfs_$$_$(date +%s%N)"
 TAP_NAME="tap_$$"
@@ -116,9 +120,9 @@ cleanup() {
     for pid in "$MDS_PID" "$DS_PID"; do
         if [ -n "$pid" ]; then
             kill "$pid" 2>/dev/null || true
-            for i in $(seq 1 30); do
+            for i in $(seq 1 150); do
                 kill -0 "$pid" 2>/dev/null || break
-                sleep 0.1
+                sleep 0.02
             done
             kill -9 "$pid" 2>/dev/null || true
             wait "$pid" 2>/dev/null || true
@@ -153,6 +157,9 @@ trap cleanup EXIT
 generate_ds_config() {
     cat > "$DS_CONFIG" << EOF
 {
+    "common": {
+        "rcu_reclaim_threads": 4
+    },
     "server": {
         "threads": 2,
         "nfs_port": ${DS_PORT},
@@ -198,6 +205,9 @@ generate_mds_config() {
 
     cat > "$MDS_CONFIG" << EOF
 {
+    "common": {
+        "rcu_reclaim_threads": 4
+    },
     "server": {
         "threads": 4,
         "external_portmap": false,
@@ -205,7 +215,7 @@ generate_mds_config() {
         "pnfs": {
             "enabled": true,
             "data_servers": [
-                { "netid": "tcp", "uaddr": "${DS_IP}:${DS_PORT}", "version": "${DS_VERSION}", "backing_path": "/ds0" }
+                { "tcp": "${DS_IP}:${DS_PORT}", "version": "${DS_VERSION}", "backing_path": "/ds0" }
             ]
         }
     },
@@ -247,6 +257,9 @@ generate_combined_config() {
 
     cat > "$MDS_CONFIG" << EOF
 {
+    "common": {
+        "rcu_reclaim_threads": 4
+    },
     "server": {
         "threads": 4,
         "external_portmap": false,
@@ -254,7 +267,7 @@ generate_combined_config() {
         "pnfs": {
             "enabled": true,
             "data_servers": [
-                { "netid": "tcp", "uaddr": "${MDS_IP}:${MDS_PORT}", "version": "3", "backing_path": "/share" }
+                { "tcp": "${MDS_IP}:${MDS_PORT}", "version": "3", "backing_path": "/share" }
             ]
         }
     },
@@ -268,7 +281,7 @@ EOF
 
 wait_for_port() {
     local ip="$1" port="$2" pid="$3"
-    for i in $(seq 1 50); do
+    for i in $(seq 1 250); do
         if ip netns exec "${NETNS_NAME}" bash -c "echo > /dev/tcp/${ip}/${port}" 2>/dev/null; then
             return 0
         fi
@@ -276,7 +289,7 @@ wait_for_port() {
             echo "chimera daemon (pid $pid) exited prematurely" >&2
             return 1
         fi
-        sleep 0.1
+        sleep 0.02
     done
     echo "timed out waiting for ${ip}:${port}" >&2
     return 1
@@ -339,7 +352,7 @@ ip netns exec "${NETNS_NAME}" "$QEMU_BIN" \
     -serial stdio \
     -nographic \
     -no-reboot \
-    -append "root=/dev/vda rw console=${QEMU_CONSOLE} net.ifnames=0 biosdevname=0 quiet panic=-1 test_cmd=\"${TEST_CMD}\" init=/init.sh" \
+    -append "root=/dev/vda rw console=${QEMU_CONSOLE} net.ifnames=0 biosdevname=0 quiet mitigations=off tsc=reliable panic=-1 test_cmd=\"${TEST_CMD}\" init=/init.sh" \
     2>/dev/null | tee "$LOG_FILE"
 
 for pid in "$MDS_PID" "$DS_PID"; do

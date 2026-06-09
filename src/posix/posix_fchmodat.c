@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -71,7 +71,7 @@ chimera_posix_fchmodat_open_complete(
 
     chimera_vfs_setattr(
         request->thread->vfs_thread,
-        &request->thread->client->cred,
+        chimera_client_req_cred(request),
         oh,
         &ctx->set_attr,
         0,  /* pre_attr_mask */
@@ -94,7 +94,7 @@ chimera_posix_fchmodat_at_exec(
     /* Open the target file relative to the parent directory */
     chimera_vfs_open_at(
         thread->vfs_thread,
-        &thread->client->cred,
+        chimera_client_req_cred(request),
         request->setattr.parent_handle,
         request->setattr.path,
         request->setattr.path_len,

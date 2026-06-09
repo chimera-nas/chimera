@@ -14,8 +14,13 @@
 #include "vfs/vfs_internal.h"
 #include "vfs/vfs_fh.h"
 
-#define CHIMERA_NFS4_DEFAULT_PORT 2049
-#define CHIMERA_NFS4_RDMA_PORT    20049
+#define CHIMERA_NFS4_DEFAULT_PORT          2049
+#define CHIMERA_NFS4_RDMA_PORT             20049
+
+/* Default fore-channel slots requested at CREATE_SESSION when the `slots=`
+ * mount option is absent.  Generous so the client is not the artificial limit;
+ * the server clamps it to its own nfs4_session_slots. */
+#define CHIMERA_NFS4_DEFAULT_SESSION_SLOTS 1024
 
 struct chimera_nfs4_mount_ctx {
     struct chimera_nfs_client_server_thread *server_thread;
@@ -96,6 +101,48 @@ chimera_nfs4_mount_get_port(
 
     return default_port;
 } /* chimera_nfs4_mount_get_port */
+
+/* Get the requested fore-channel session slot count (ca_maxrequests) from the
+ * `slots=` mount option, or default_slots when absent/invalid. */
+static int
+chimera_nfs4_mount_get_session_slots(
+    const struct chimera_vfs_mount_options *options,
+    int                                     default_slots)
+{
+    int i;
+
+    for (i = 0; i < options->num_options; i++) {
+        if (strcmp(options->options[i].key, "slots") == 0) {
+            if (options->options[i].value) {
+                int slots = atoi(options->options[i].value);
+
+                if (slots > 0) {
+                    return slots;
+                }
+            }
+        }
+    }
+
+    return default_slots;
+} /* chimera_nfs4_mount_get_session_slots */
+
+/* Return 1 if the `pnfs` mount option is present (enables pNFS-MDS). */
+static int
+chimera_nfs4_mount_get_pnfs(const struct chimera_vfs_mount_options *options)
+{
+    int i;
+
+    for (i = 0; i < options->num_options; i++) {
+        if (strcmp(options->options[i].key, "pnfs") == 0) {
+            if (!options->options[i].value ||
+                strcmp(options->options[i].value, "0") != 0) {
+                return 1;
+            }
+        }
+    }
+
+    return 0;
+} /* chimera_nfs4_mount_get_pnfs */
 
 /*
  * Callback for SEQUENCE + PUTROOTFH + GETFH + GETATTR compound
@@ -545,6 +592,13 @@ chimera_nfs4_mount(
         /* Parse RDMA options */
         server->rdma_protocol = chimera_nfs4_mount_get_rdma_protocol(&request->mount.options);
         server->use_rdma      = server->rdma_protocol != 0;
+
+        /* pNFS opt-in (default off); confirmed against eir_flags at EXCHANGE_ID. */
+        server->pnfs_requested = chimera_nfs4_mount_get_pnfs(&request->mount.options);
+
+        /* Fore-channel session slots to request at CREATE_SESSION. */
+        server->requested_session_slots = chimera_nfs4_mount_get_session_slots(
+            &request->mount.options, CHIMERA_NFS4_DEFAULT_SESSION_SLOTS);
 
         /* Get port (default 2049 for TCP, 20049 for RDMA) */
         port = chimera_nfs4_mount_get_port(&request->mount.options,

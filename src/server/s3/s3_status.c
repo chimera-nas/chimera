@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include <stdio.h>
+#include <string.h>
 #include "s3_status.h"
 #include "s3_internal.h"
 
@@ -46,12 +47,51 @@ chimera_s3_status_to_string(enum chimera_s3_status status)
             return "Malformed XML";
         case CHIMERA_S3_STATUS_NO_CONTENT:
             return "No Content";
+        case CHIMERA_S3_STATUS_BUCKET_NOT_EMPTY:
+            return "Bucket Not Empty";
+        case CHIMERA_S3_STATUS_METHOD_NOT_ALLOWED:
+            return "Method Not Allowed";
         case CHIMERA_S3_STATUS_NOT_IMPLEMENTED:
             return "Not Implemented";
         default:
             return "Internal Error";
     } /* switch */
 } /* chimera_s3_status_to_string */
+
+/* XML-escape a value for safe emission inside an element. Without this a path
+ * containing '&' (e.g. a multi-parameter list query "?list-type=2&encoding-type
+ * =url") produces malformed XML that clients fail to parse, masking the real
+ * error code (NoSuchBucket then surfaces in boto3 as a bare "404"). Truncates to
+ * keep the rendered <Resource> within the caller's fixed error buffer. */
+static int
+chimera_s3_xml_escape(
+    char       *dst,
+    int         dstcap,
+    const char *src)
+{
+    int o = 0;
+    int i;
+
+    for (i = 0; src && src[i] && o < dstcap - 7; i++) {
+        char c = src[i];
+        switch (c) {
+            case '&':
+                memcpy(dst + o, "&amp;", 5); o += 5; break;
+            case '<':
+                memcpy(dst + o, "&lt;", 4); o += 4; break;
+            case '>':
+                memcpy(dst + o, "&gt;", 4); o += 4; break;
+            case '"':
+                memcpy(dst + o, "&quot;", 6); o += 6; break;
+            case '\'':
+                memcpy(dst + o, "&apos;", 6); o += 6; break;
+            default:
+                dst[o++] = c; break;
+        } /* switch */
+    }
+    dst[o] = '\0';
+    return o;
+} /* chimera_s3_xml_escape */
 
 int
 chimera_s3_prepare_error_response(
@@ -61,6 +101,7 @@ chimera_s3_prepare_error_response(
 {
     char *bp   = buffer;
     int   code = 500;
+    char  resource[600];
 
     bp += sprintf(bp, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
     bp += sprintf(bp, "<Error>\n");
@@ -151,7 +192,8 @@ chimera_s3_prepare_error_response(
             break;
     } /* switch */
 
-    bp += sprintf(bp, "  <Resource>%s</Resource>\n", request->path);
+    chimera_s3_xml_escape(resource, sizeof(resource), request->path);
+    bp += sprintf(bp, "  <Resource>%s</Resource>\n", resource);
     bp += sprintf(bp, "  <RequestId>4442587FB7D0A2F9</RequestId>\n");
     bp += sprintf(bp, "  <HostId>MyMagicHostId=</HostId>\n");
     bp += sprintf(bp, "</Error>\n");

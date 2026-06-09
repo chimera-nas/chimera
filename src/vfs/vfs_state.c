@@ -17,6 +17,11 @@
  */
 #define CHIMERA_VFS_STATE_DEFAULT_BREAK_DEADLINE_MS 30000
 
+/* Upper bound on caching leases broken / revoked in a single batched pass.  A
+ * file with more concurrent caching holders than this is pathological; any
+ * excess is handled on the next pass. */
+#define CHIMERA_VFS_STATE_MAX_BREAK_BATCH           64
+
 /*
  * Implicit I/O leases held by chimera on behalf of leaseless actors are
  * dropped once they have been idle (no in-flight I/O) for this long.  Keeps
@@ -280,8 +285,41 @@ chimera_vfs_lease_owner_equal(
            a->owner_hi == b->owner_hi;
 } /* chimera_vfs_lease_owner_equal */
 
-/* Byte-range overlap test.  length==0 means "to EOF" (NLM/SMB
- * convention); represent EOF as UINT64_MAX for the math. */
+/* Same-lease-key test for SMB2 caching leases, IGNORING client_key.
+ *
+ * MS-SMB2 identifies a lease by (ClientGuid, LeaseKey); chimera's owner key
+ * encodes ClientGuid in client_key and LeaseKey in owner_lo/owner_hi.  When a
+ * conflicting open or a write presents the SAME LeaseKey as an existing caching
+ * holder, the object store shares the cache rather than breaking it -- so the
+ * holder must be exempted from the break.  Windows applies this on the lease key
+ * alone (two opens with the same lease key, even from different connections with
+ * distinct ClientGuids, do not break one another: WPTS Leasing_FileLeasing*_
+ * SameLeaseKey).  This mirrors the SHARE-acquire side's has_break_skip_key,
+ * which is keyed on the lease key only (see chimera_vfs_state_would_conflict).
+ *
+ * Restricted to SMB2 caching leases on both sides: NFSv4 delegations and the
+ * internal implicit lease never share an SMB lease key, and owner_equal already
+ * covers a holder's own same-client/same-key re-open. */
+static inline bool
+chimera_vfs_lease_smb2_same_key(
+    const struct chimera_vfs_lease_owner *holder,
+    const struct chimera_vfs_lease_owner *opener)
+{
+    return holder->protocol == CHIMERA_VFS_LEASE_PROTO_SMB2 &&
+           opener->protocol == CHIMERA_VFS_LEASE_PROTO_SMB2 &&
+           holder->owner_lo == opener->owner_lo &&
+           holder->owner_hi == opener->owner_hi;
+} /* chimera_vfs_lease_smb2_same_key */
+
+/* Byte-range overlap test for half-open intervals [off, off+len).
+ *
+ * length==0 is a genuine zero-byte range (SMB2 zero-length lock): [off, off)
+ * overlaps another range only when off lies strictly inside it.  "To EOF" is
+ * represented as a length whose end saturates at UINT64_MAX -- callers that
+ * mean to-EOF pass UINT64_MAX (or any length that overflows the end), and the
+ * NLM/NFSv4 boundaries translate their wire to-EOF sentinel accordingly.  The
+ * end is computed overflow-safe: a wrapping off+len saturates to UINT64_MAX
+ * rather than aliasing a small value (which would bypass conflict detection). */
 static inline bool
 chimera_vfs_range_overlap(
     uint64_t a_off,
@@ -289,8 +327,14 @@ chimera_vfs_range_overlap(
     uint64_t b_off,
     uint64_t b_len)
 {
-    uint64_t a_end = (a_len == 0) ? UINT64_MAX : a_off + a_len;
-    uint64_t b_end = (b_len == 0) ? UINT64_MAX : b_off + b_len;
+    /* Compute exclusive ends in 128-bit so a range touching the last byte of
+     * the 64-bit space (e.g. offset=2^64-1, length=1 -> end=2^64) is not aliased
+     * to a zero-length range.  UINT64_MAX as a length is the to-EOF sentinel and
+     * extends to the end of the address space. */
+    __uint128_t a_end = (a_len == UINT64_MAX)
+        ? ((__uint128_t) 1 << 64) : (__uint128_t) a_off + a_len;
+    __uint128_t b_end = (b_len == UINT64_MAX)
+        ? ((__uint128_t) 1 << 64) : (__uint128_t) b_off + b_len;
 
     return a_off < b_end && b_off < a_end;
 } /* chimera_vfs_range_overlap */
@@ -347,12 +391,29 @@ chimera_vfs_share_conflict(
  * owners is a conflict.  W and H are exclusive across clients; R is
  * shareable (multiple clients can each hold an R-lease — that's how
  * SMB2 Level2 oplocks generalize). */
+/* The mode a holder effectively grants for conflict purposes.  While an SMB
+ * oplock/lease is mid-break (notification sent, awaiting the client's ack), the
+ * client is obligated to comply, so the holder is treated as already at its
+ * retained (post-break) level -- this lets a coexisting acquirer (e.g. a 2nd
+ * open settling at LEVEL_II) proceed immediately instead of blocking on the
+ * ack.  NFSv4 delegations keep their full granted mode while RECALLING, so a
+ * conflicting open waits for the DELEGRETURN (or recall-timeout revoke). */
+static inline uint8_t
+chimera_vfs_lease_effective_granted(const struct chimera_vfs_lease *l)
+{
+    if (l->break_state == CHIMERA_VFS_BREAK_BREAKING &&
+        l->owner.protocol == CHIMERA_VFS_LEASE_PROTO_SMB2) {
+        return l->break_needed_mode;
+    }
+    return l->mode.granted;
+} /* chimera_vfs_lease_effective_granted */
+
 static inline bool
 chimera_vfs_caching_conflict(
     const struct chimera_vfs_lease *existing,
     const struct chimera_vfs_lease *probe)
 {
-    uint8_t e = existing->mode.granted;
+    uint8_t e = chimera_vfs_lease_effective_granted(existing);
     uint8_t p = probe->mode.granted;
 
     /* W (write-cache) is exclusive — only one holder may have W on a
@@ -366,9 +427,14 @@ chimera_vfs_caching_conflict(
         return true;
     }
 
-    /* H (handle-cache) is exclusive across owners — only one client may
-     * cache the open handle. */
-    if ((e & CHIMERA_VFS_LEASE_MODE_H) && (p & CHIMERA_VFS_LEASE_MODE_H)) {
+    /* H (handle-cache) is exclusive only ACROSS CLIENTS — a different client
+     * caching the open handle conflicts (a batch oplock is sole-handle), but two
+     * lease keys of the SAME client may each hold handle caching (MS-SMB2 lease
+     * semantics: a client's RH lease is not broken by another RH lease of its own
+     * under a different key -- smb2.lease.break expects two RH leases to coexist).
+     * Write caching above is the only mode exclusive even within one client. */
+    if ((e & CHIMERA_VFS_LEASE_MODE_H) && (p & CHIMERA_VFS_LEASE_MODE_H) &&
+        existing->owner.client_key != probe->owner.client_key) {
         return true;
     }
 
@@ -406,6 +472,43 @@ chimera_vfs_eval_breakable(
     }
     return false;
 } /* chimera_vfs_eval_breakable */
+
+/* When a hard share-mode conflict comes from an SMB open that also holds a
+ * batch (handle-caching) oplock/lease, that holder may close in response to a
+ * break and so free the share conflict.  MS-FSA breaks such a batch oplock
+ * BEFORE the share-access check: the conflicting open parks until the holder
+ * either closes (then the open is granted) or merely acks while keeping the
+ * handle (then the share conflict stands and the open is denied).  Find that
+ * still-breakable handle-caching lease -- matched to the share holder by their
+ * common owning open (cb_private, set identically on an SMB open's share
+ * reservation and caching lease) -- so a SHARE acquire can park on its break
+ * instead of denying outright.  Returns NULL when the holder has no
+ * still-breakable handle-caching lease, i.e. a genuine hard conflict. */
+static inline struct chimera_vfs_lease *
+chimera_vfs_share_batch_escape(
+    const struct chimera_vfs_file_state *file,
+    const struct chimera_vfs_lease      *share_holder)
+{
+    struct chimera_vfs_lease *cur;
+
+    if (share_holder->owner.protocol != CHIMERA_VFS_LEASE_PROTO_SMB2 ||
+        !share_holder->owner.cb_private) {
+        return NULL;
+    }
+
+    for (cur = file->caching_leases; cur; cur = cur->next) {
+        if (cur->owner.cb_private != share_holder->owner.cb_private ||
+            !cur->owner.break_cb ||
+            !(cur->mode.granted & CHIMERA_VFS_LEASE_MODE_H)) {
+            continue;
+        }
+        if (cur->break_state == CHIMERA_VFS_BREAK_IDLE ||
+            cur->break_state == CHIMERA_VFS_BREAK_BREAKING) {
+            return cur;
+        }
+    }
+    return NULL;
+} /* chimera_vfs_share_batch_escape */
 
 /* A lease whose owning client/session is no longer considered alive (e.g. an
  * NFSv4 client past its lease in courtesy state).  Such a holder retains its
@@ -513,6 +616,14 @@ chimera_vfs_state_would_conflict(
             struct chimera_vfs_lease *idle_break    = NULL;
             struct chimera_vfs_lease *expired_break = NULL;
 
+            /* An inert (granted=0, denied=0) SHARE entry is an attribute-only
+             * open registered purely for visibility (sole-access / delete-
+             * pending / stat-open queries).  It can neither conflict with nor
+             * break any holder, so grant it with no side effects. */
+            if (probe->mode.granted == 0 && probe->mode.denied == 0) {
+                return CHIMERA_VFS_LEASE_GRANTED;
+            }
+
             for (cur = file->share_resvs; cur; cur = cur->next) {
                 if (chimera_vfs_lease_owner_equal(&cur->owner, &probe->owner)) {
                     continue;
@@ -523,13 +634,31 @@ chimera_vfs_state_would_conflict(
                 /* A breakable share holder is chimera's own implicit I/O
                  * lease: recall it so a real client open can take the file.
                  * A non-breakable holder is an ordinary client open and is a
-                 * hard share conflict. */
+                 * hard share conflict -- UNLESS it is an SMB open holding a
+                 * batch (handle-caching) oplock, in which case the holder may
+                 * close on a break and free the conflict, so park on that
+                 * break rather than denying (MS-FSA batch-before-share). */
                 if (chimera_vfs_eval_breakable(cur, &has_breakable_conflict,
                                                &idle_break, &expired_break)) {
-                    if (conflict_out) {
-                        *conflict_out = cur;
+                    struct chimera_vfs_lease *batch =
+                        chimera_vfs_share_batch_escape(file, cur);
+
+                    if (!batch) {
+                        if (conflict_out) {
+                            *conflict_out = cur;
+                        }
+                        return CHIMERA_VFS_LEASE_DENIED;
                     }
-                    return CHIMERA_VFS_LEASE_DENIED;
+
+                    has_breakable_conflict = true;
+                    if (batch->break_state == CHIMERA_VFS_BREAK_IDLE) {
+                        if (!idle_break) {
+                            idle_break = batch;
+                        }
+                    } else if (!expired_break &&
+                               chimera_vfs_break_deadline_passed(batch)) {
+                        expired_break = batch;
+                    }
                 }
             }
             /* A new SHARE acquire may also need to break a caching lease on
@@ -561,7 +690,14 @@ chimera_vfs_state_would_conflict(
                     continue;
                 }
 
-                if (cur->mode.granted & CHIMERA_VFS_LEASE_MODE_H) {
+                /* A handle-caching holder is broken by a conflicting open's share
+                 * reservation ONLY if it is a legacy SMB oplock (batch): the holder
+                 * closes its deferred handle so the open can proceed.  An SMB2 RqLs
+                 * lease shares handle caching across owners and is NOT broken by
+                 * another open -- its (exclusive) write cache is handled by the
+                 * caching-contention path instead. */
+                if ((cur->mode.granted & CHIMERA_VFS_LEASE_MODE_H) &&
+                    cur->grant && cur->grant->is_oplock) {
                     want_break_h = true;
                 }
 
@@ -629,6 +765,15 @@ chimera_vfs_state_would_conflict(
                     continue;
                 }
                 if (chimera_vfs_caching_conflict(cur, probe)) {
+                    /* A conflicting caching holder that can still be recalled (has a
+                     * break callback and is not already mid-break) is broken down to
+                     * the conflict-clearing floor (chimera_vfs_break_retain_for): the
+                     * acquirer parks until it acks.  Because that floor drops exactly
+                     * the contended bits, the break genuinely resolves the conflict
+                     * (no livelock), so a W acquirer recalls a peer's read cache
+                     * rather than capping itself.  A holder with no break path -- or
+                     * one already past IDLE whose effective mode still conflicts -- is
+                     * a hard denial. */
                     if (cur->owner.break_cb &&
                         cur->break_state == CHIMERA_VFS_BREAK_IDLE) {
                         has_breakable_conflict = true;
@@ -641,6 +786,34 @@ chimera_vfs_state_would_conflict(
                         }
                         return CHIMERA_VFS_LEASE_DENIED;
                     }
+                }
+            }
+
+            /* An SMB exclusive (W) or batch (W|H) oplock may only be granted to
+             * the SOLE opener of a file: if another client already has it open
+             * (a share reservation with a different client key), the request is
+             * capped to a shared read cache (LEVEL_II).  Signal that by denying
+             * the W/H grant -- the SMB create path retries for R-only, which
+             * coexists.  (Pure attribute-only opens take no share reservation,
+             * so they do not preclude an oplock.) */
+            if (probe->owner.protocol == CHIMERA_VFS_LEASE_PROTO_SMB2 &&
+                (probe->mode.granted & (CHIMERA_VFS_LEASE_MODE_W |
+                                        CHIMERA_VFS_LEASE_MODE_H))) {
+                for (cur = file->share_resvs; cur; cur = cur->next) {
+                    if (cur->owner.client_key == probe->owner.client_key) {
+                        continue; /* the requesting client's own open(s) */
+                    }
+                    /* An inert (0,0) attribute-only registration is not a real
+                     * data opener and does not preclude an exclusive oplock --
+                     * matching the prior behavior where stat-opens took no share
+                     * reservation at all. */
+                    if (cur->mode.granted == 0 && cur->mode.denied == 0) {
+                        continue;
+                    }
+                    if (conflict_out) {
+                        *conflict_out = cur;
+                    }
+                    return CHIMERA_VFS_LEASE_DENIED;
                 }
             }
             /* An NFSv4 delegation must not be granted when another client
@@ -766,6 +939,46 @@ chimera_vfs_file_state_remove_lease(
     lease->file = NULL;
 } /* chimera_vfs_file_state_remove_lease */
 
+/* The mode a conflicting holder is allowed to RETAIN when `acquirer` forces it to
+* break -- i.e. the break floor handed to begin_break.  The floor must be the
+* holder's granted mode with exactly the bits that CONFLICT with the acquirer
+* cleared (mirroring chimera_vfs_caching_conflict): only then is the floor
+* strictly below `granted`, so the break actually resolves the contention.  A
+* fixed retain (e.g. always keep R|H) livelocks -- the holder keeps the very bit
+* the acquirer needs gone, and would_conflict keeps returning BREAKING -- and a
+* floor of the acquirer's own mode never reduces a same-mode holder at all (an
+* NFSv4 W recall against a W holder would no-op and spin).
+*
+* - acquirer has W (write cache / write open): the holder's cached R and W are
+*   both stale, so it drops R|W and keeps only H/D (handle + delete caching),
+*   which survive a peer's write.
+* - acquirer has R (read cache) but not W: only the holder's exclusive W is
+*   incompatible; it drops W and keeps R|H|D.
+* - acquirer has H (handle cache) from a DIFFERENT client: handle caching is
+*   sole-across-clients, so the holder drops H.
+* Bits the acquirer does not contend (notably D) are always retained, and a
+* same-client H acquirer leaves the holder's H intact (SMB lease keys coexist). */
+static inline uint8_t
+chimera_vfs_break_retain_for(
+    const struct chimera_vfs_lease *acquirer,
+    const struct chimera_vfs_lease *holder)
+{
+    uint8_t a    = acquirer->mode.granted;
+    uint8_t keep = holder->mode.granted;
+
+    if (a & CHIMERA_VFS_LEASE_MODE_W) {
+        keep &= ~(CHIMERA_VFS_LEASE_MODE_R | CHIMERA_VFS_LEASE_MODE_W);
+    }
+    if (a & CHIMERA_VFS_LEASE_MODE_R) {
+        keep &= ~CHIMERA_VFS_LEASE_MODE_W;
+    }
+    if ((a & CHIMERA_VFS_LEASE_MODE_H) &&
+        acquirer->owner.client_key != holder->owner.client_key) {
+        keep &= ~CHIMERA_VFS_LEASE_MODE_H;
+    }
+    return keep;
+} /* chimera_vfs_break_retain_for */
+
 SYMBOL_EXPORT enum chimera_vfs_lease_result
 chimera_vfs_state_try_insert(
     struct chimera_vfs_state      *state,
@@ -839,7 +1052,8 @@ chimera_vfs_state_try_insert(
                     (conflict->owner.protocol == CHIMERA_VFS_LEASE_PROTO_NFSV4)
                     ? CHIMERA_VFS_NFS_DELEG_RECALL_MS : 0;
                 chimera_vfs_lease_begin_break(state, conflict,
-                                              lease->mode.granted, deadline_ms);
+                                              chimera_vfs_break_retain_for(lease, conflict),
+                                              deadline_ms);
                 began_live_break = true;
             } else {
                 /* Surfaced because its recall deadline elapsed -- the holder
@@ -1045,6 +1259,291 @@ chimera_vfs_lease_release(
     chimera_vfs_state_remove(state, file, lease);
 } /* chimera_vfs_lease_release */
 
+/* -------------------------------------------------------------------- */
+/* Caching grant — VFS-owned shared caching lease                       */
+/* -------------------------------------------------------------------- */
+
+/* Find an existing caching grant on `file` matching `owner`.  Caller holds
+ * file->lock. */
+static struct chimera_vfs_caching_grant *
+chimera_vfs_caching_grant_find_locked(
+    struct chimera_vfs_file_state        *file,
+    const struct chimera_vfs_lease_owner *owner)
+{
+    struct chimera_vfs_caching_grant *g;
+
+    for (g = file->caching_grants; g; g = g->grant_next) {
+        if (chimera_vfs_lease_owner_equal(&g->lease.owner, owner)) {
+            return g;
+        }
+        /* MS-SMB2 same-lease-key: an open that presents the same LeaseKey as an
+         * existing SMB2 RqLs lease grant joins that grant (shares its cache
+         * state), even when it arrives on a different ClientGuid/connection.
+         * Windows keys the underlying oplock by lease key, so two opens with one
+         * lease key share a single lease rather than breaking one another (WPTS
+         * Leasing_FileLeasing{V1,V2}_SameLeaseKey).  Matched here so the second
+         * open is granted the existing state (e.g. RWH) and no break fires.
+         * Restricted to lease grants (!is_oplock): a legacy oplock is keyed by a
+         * per-open file id, never a shareable lease key. */
+        if (!g->is_oplock &&
+            chimera_vfs_lease_smb2_same_key(&g->lease.owner, owner)) {
+            return g;
+        }
+    }
+    return NULL;
+} /* chimera_vfs_caching_grant_find_locked */
+
+SYMBOL_EXPORT struct chimera_vfs_caching_grant *
+chimera_vfs_caching_grant_coalesce(
+    struct chimera_vfs_file_state        *file,
+    const struct chimera_vfs_lease_owner *owner,
+    struct chimera_vfs_lease_mode         want,
+    int                                   upgrade_ok)
+{
+    struct chimera_vfs_caching_grant *grant;
+
+    pthread_mutex_lock(&file->lock);
+    grant = chimera_vfs_caching_grant_find_locked(file, owner);
+    if (grant) {
+        grant->refcount++;
+
+        /* A re-open while the lease is mid-break must NOT upgrade it: MS-SMB2
+         * 3.3.5.9.11 has the re-open succeed at the lease's CURRENT (downgrading)
+         * state and report SMB2_LEASE_FLAG_BREAK_IN_PROGRESS instead of granting
+         * back the bits being broken away (smb2.lease.breaking3).  Only an IDLE
+         * lease can be upgraded. */
+        if (upgrade_ok &&
+            grant->lease.break_state == CHIMERA_VFS_BREAK_IDLE) {
+            uint8_t cur = grant->lease.mode.granted;
+
+            /* MS-SMB2 3.3.5.9.11: a lease is upgraded to the REQUESTED state only
+             * when that state is a (strict) superset of the currently held state;
+             * a request that is not a superset (a downgrade, or a lateral move such
+             * as RH -> RW) leaves the lease unchanged.  This is not a bitwise union:
+             * RH + a request for RW stays RH, it does not become RWH. */
+            if (want.granted != cur &&
+                (want.granted & cur) == cur) {
+                struct chimera_vfs_lease  probe    = grant->lease;
+                struct chimera_vfs_lease *conflict = NULL;
+
+                /* And only if the larger mode is grantable without breaking another
+                 * owner's holder (would_conflict coalesces our own same-owner
+                 * lease).  Never break another lease for an upgrade -- keep the
+                 * current mode otherwise. */
+                probe.mode.granted = want.granted;
+                if (chimera_vfs_state_would_conflict(file, &probe, &conflict) ==
+                    CHIMERA_VFS_LEASE_GRANTED) {
+                    grant->lease.mode.granted = want.granted;
+                    grant->epoch++;
+                }
+            }
+        }
+    }
+    pthread_mutex_unlock(&file->lock);
+    return grant;
+} /* chimera_vfs_caching_grant_coalesce */
+
+SYMBOL_EXPORT void
+chimera_vfs_caching_grant_link(
+    struct chimera_vfs_file_state    *file,
+    struct chimera_vfs_caching_grant *grant)
+{
+    pthread_mutex_lock(&file->lock);
+    grant->grant_next    = file->caching_grants;
+    file->caching_grants = grant;
+    pthread_mutex_unlock(&file->lock);
+} /* chimera_vfs_caching_grant_link */
+
+SYMBOL_EXPORT enum chimera_vfs_lease_result
+chimera_vfs_caching_grant_acquire(
+    struct chimera_vfs_state             *state,
+    struct chimera_vfs_file_state        *file,
+    const struct chimera_vfs_lease_owner *owner,
+    struct chimera_vfs_lease_mode         want,
+    int                                   upgrade_ok,
+    struct chimera_vfs_caching_grant    **grant_out,
+    struct chimera_vfs_lease            **conflict_out)
+{
+    struct chimera_vfs_caching_grant *grant, *existing;
+    enum chimera_vfs_lease_result     result;
+
+    *grant_out = NULL;
+    if (conflict_out) {
+        *conflict_out = NULL;
+    }
+
+    /* Coalesce onto an existing same-owner grant. */
+    grant = chimera_vfs_caching_grant_coalesce(file, owner, want, upgrade_ok);
+    if (grant) {
+        *grant_out = grant;
+        return CHIMERA_VFS_LEASE_GRANTED;
+    }
+
+    /* No existing grant: allocate one and arbitrate against other owners. */
+    grant = calloc(1, sizeof(*grant));
+    if (!grant) {
+        return CHIMERA_VFS_LEASE_DENIED;
+    }
+    grant->lease.kind        = CHIMERA_VFS_LEASE_CACHING;
+    grant->lease.mode        = want;
+    grant->lease.owner       = *owner;
+    grant->lease.grant       = grant;
+    grant->lease.break_state = CHIMERA_VFS_BREAK_IDLE;
+    grant->file              = file;
+    grant->refcount          = 1;
+    grant->epoch             = 1;
+
+    result = chimera_vfs_state_try_insert(state, file, &grant->lease, conflict_out);
+    if (result != CHIMERA_VFS_LEASE_GRANTED) {
+        free(grant);
+        return result;
+    }
+
+    /* Link onto the per-file grant index.  Re-check under the lock that no peer
+     * created the same-owner grant while try_insert ran (would_conflict
+     * coalesces same-owner, so two concurrent first-acquires could each insert a
+     * lease for one owner -- collapse onto the one that linked first). */
+    pthread_mutex_lock(&file->lock);
+    existing = chimera_vfs_caching_grant_find_locked(file, owner);
+    if (existing) {
+        existing->refcount++;
+        chimera_vfs_file_state_remove_lease(file, &grant->lease);
+        pthread_mutex_unlock(&file->lock);
+        free(grant);
+        *grant_out = existing;
+        return CHIMERA_VFS_LEASE_GRANTED;
+    }
+    grant->grant_next    = file->caching_grants;
+    file->caching_grants = grant;
+    pthread_mutex_unlock(&file->lock);
+
+    *grant_out = grant;
+    return CHIMERA_VFS_LEASE_GRANTED;
+} /* chimera_vfs_caching_grant_acquire */
+
+SYMBOL_EXPORT void
+chimera_vfs_caching_grant_release(
+    struct chimera_vfs_state         *state,
+    struct chimera_vfs_caching_grant *grant,
+    bool                              pump)
+{
+    struct chimera_vfs_file_state     *file = grant->file;
+    struct chimera_vfs_caching_grant **pp;
+    bool                               last;
+
+    pthread_mutex_lock(&file->lock);
+
+    chimera_vfs_abort_if(grant->refcount == 0,
+                         "double release of caching grant");
+    grant->refcount--;
+    last = (grant->refcount == 0);
+
+    if (last) {
+        /* Unlink from the owner index and from the caching_leases list. */
+        for (pp = &file->caching_grants; *pp; pp = &(*pp)->grant_next) {
+            if (*pp == grant) {
+                *pp = grant->grant_next;
+                break;
+            }
+        }
+        chimera_vfs_file_state_remove_lease(file, &grant->lease);
+    }
+
+    pthread_mutex_unlock(&file->lock);
+
+    if (last) {
+        /* Removing the lease may unblock a pending acquire or parked I/O -- but
+         * only pump when a live connection still exists to answer the woken
+         * waiter (skipped at thread shutdown; see chimera_smb_durable_drain_all). */
+        if (pump) {
+            chimera_vfs_state_pump_pending(state, file);
+            chimera_vfs_state_pump_io(state, file);
+        }
+        free(grant);
+    }
+} /* chimera_vfs_caching_grant_release */
+
+SYMBOL_EXPORT void
+chimera_vfs_state_revoke_breaks(
+    struct chimera_vfs_state               *state,
+    const uint8_t                          *fh,
+    uint8_t                                 fh_len,
+    uint64_t                                fh_hash,
+    const struct chimera_vfs_caching_grant *except)
+{
+    struct chimera_vfs_file_state *file;
+    struct chimera_vfs_lease      *to_revoke[CHIMERA_VFS_STATE_MAX_BREAK_BATCH];
+    struct chimera_vfs_lease      *cur;
+    int                            n = 0;
+    int                            i;
+
+    if (!state || fh_len == 0) {
+        return;
+    }
+
+    file = chimera_vfs_state_get(state, fh, fh_len, fh_hash, false);
+    if (!file) {
+        return;
+    }
+
+    pthread_mutex_lock(&file->lock);
+    for (cur = file->caching_leases; cur; cur = cur->next) {
+        if (cur->break_state == CHIMERA_VFS_BREAK_BREAKING &&
+            cur->grant != except &&
+            n < CHIMERA_VFS_STATE_MAX_BREAK_BATCH) {
+            to_revoke[n++] = cur;
+        }
+    }
+    pthread_mutex_unlock(&file->lock);
+
+    for (i = 0; i < n; i++) {
+        chimera_vfs_lease_revoke(to_revoke[i]);
+    }
+
+    chimera_vfs_state_put(state, file);
+} /* chimera_vfs_state_revoke_breaks */
+
+SYMBOL_EXPORT bool
+chimera_vfs_state_caching_breaking(
+    struct chimera_vfs_state               *state,
+    const uint8_t                          *fh,
+    uint8_t                                 fh_len,
+    uint64_t                                fh_hash,
+    const struct chimera_vfs_caching_grant *except)
+{
+    struct chimera_vfs_file_state *file;
+    struct chimera_vfs_lease      *cur;
+    bool                           breaking = false;
+
+    if (!state || fh_len == 0) {
+        return false;
+    }
+
+    file = chimera_vfs_state_get(state, fh, fh_len, fh_hash, false);
+    if (!file) {
+        return false;
+    }
+
+    pthread_mutex_lock(&file->lock);
+    for (cur = file->caching_leases; cur; cur = cur->next) {
+        /* Only an RqLs LEASE break holds the conflicting open pending (MS-SMB2
+         * 3.3.5.9).  A legacy oplock keeps chimera's optimistic post-break
+         * behavior (the open proceeds without waiting), so exclude is_oplock
+         * grants here. */
+        if (cur->break_state == CHIMERA_VFS_BREAK_BREAKING &&
+            cur->grant && cur->grant->break_ack_required &&
+            !cur->grant->is_oplock &&
+            cur->grant != except) {
+            breaking = true;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&file->lock);
+
+    chimera_vfs_state_put(state, file);
+    return breaking;
+} /* chimera_vfs_state_caching_breaking */
+
 SYMBOL_EXPORT bool
 chimera_vfs_lease_acquire_cancel(
     struct chimera_vfs_state           *state,
@@ -1135,16 +1634,62 @@ chimera_vfs_state_range_io_conflict(
 /* Break orchestration                                                  */
 /* -------------------------------------------------------------------- */
 
+/* Compute the next single-bit break step: the holder's granted mode with the
+ * ONE highest-priority bit that is still above `floor` removed.  Priority is
+ * W (write cache, flush first) > H (handle cache) > D > R (read cache, the most
+ * shareable, dropped last).  A lease cascades one bit per ack toward its floor
+ * (RWH -> RH -> R -> NONE for floor 0), which is what the MS-SMB2 lease-break
+ * sequence the smbtorture breaking* tests assert requires.  Returns `granted`
+ * unchanged once it is already at or below the floor. */
+/* True for a lease that breaks one caching bit at a time (an SMB2 RqLs lease).
+ * A legacy SMB oplock breaks as one indivisible level, and an NFSv4 delegation
+ * is recalled whole; both jump straight to the floor instead of cascading. */
+static inline bool
+chimera_vfs_lease_cascades(const struct chimera_vfs_lease *lease)
+{
+    return lease->grant != NULL && !lease->grant->is_oplock;
+} /* chimera_vfs_lease_cascades */
+
+static inline uint8_t
+chimera_vfs_lease_break_step(
+    uint8_t granted,
+    uint8_t floor)
+{
+    uint8_t excess = granted & ~floor;
+
+    if (excess & CHIMERA_VFS_LEASE_MODE_W) {
+        return granted & ~CHIMERA_VFS_LEASE_MODE_W;
+    }
+    if (excess & CHIMERA_VFS_LEASE_MODE_H) {
+        return granted & ~CHIMERA_VFS_LEASE_MODE_H;
+    }
+    if (excess & CHIMERA_VFS_LEASE_MODE_D) {
+        return granted & ~CHIMERA_VFS_LEASE_MODE_D;
+    }
+    if (excess & CHIMERA_VFS_LEASE_MODE_R) {
+        return granted & ~CHIMERA_VFS_LEASE_MODE_R;
+    }
+    return granted;
+} /* chimera_vfs_lease_break_step */
+
+/* `floor` is the ultimate target of the break (the maximal mode the holder may
+ * keep given the conflict that triggered it) -- NOT the immediate downgrade.
+ * The first notification asks the holder to drop a single bit toward that floor;
+ * chimera_vfs_lease_ack fires the remaining steps one per ack.  When a break is
+ * already in flight, a new conflict with a lower floor only deepens the target
+ * (the in-flight step still stands and the cascade carries on to the new floor);
+ * it does not re-notify. */
 SYMBOL_EXPORT void
 chimera_vfs_lease_begin_break(
     struct chimera_vfs_state *state,
     struct chimera_vfs_lease *lease,
-    uint8_t                   needed_mode,
+    uint8_t                   floor,
     uint32_t                  deadline_ms)
 {
     struct chimera_vfs_file_state *file = lease->file;
     chimera_vfs_lease_break_cb_t   cb;
     void                          *cb_priv;
+    uint8_t                        step = 0;
     bool                           should_invoke;
 
     if (deadline_ms == 0) {
@@ -1155,12 +1700,28 @@ chimera_vfs_lease_begin_break(
         pthread_mutex_lock(&file->lock);
     }
 
-    should_invoke = (lease->break_state == CHIMERA_VFS_BREAK_IDLE) &&
-        (lease->owner.break_cb != NULL);
+    if (lease->break_state == CHIMERA_VFS_BREAK_BREAKING) {
+        /* Cascade already running: deepen the floor (a writer arriving behind a
+         * reader, an overwrite behind a plain open) so it continues lower, but
+         * leave the outstanding notification alone. */
+        lease->break_floor &= floor;
+        should_invoke       = false;
+    } else {
+        /* Only an SMB2 RqLs lease cascades one bit per ack toward the floor.  A
+         * legacy SMB oplock (one indivisible level: exclusive/batch -> II ->
+         * none) and an NFSv4 delegation (CB_RECALL returns the whole delegation)
+         * both break in a single shot, so they jump straight to the floor. */
+        step = chimera_vfs_lease_cascades(lease)
+            ? chimera_vfs_lease_break_step(lease->mode.granted, floor)
+            : floor;
+        should_invoke = (step != lease->mode.granted) &&
+            (lease->owner.break_cb != NULL);
+    }
 
     if (should_invoke) {
         lease->break_state       = CHIMERA_VFS_BREAK_BREAKING;
-        lease->break_needed_mode = needed_mode;
+        lease->break_floor       = floor;
+        lease->break_needed_mode = step;
         lease->break_deadline    = chimera_vfs_now_ticks() +
             chimera_vfs_ns_to_ticks((uint64_t) deadline_ms * 1000000ULL);
         cb      = lease->owner.break_cb;
@@ -1177,7 +1738,7 @@ chimera_vfs_lease_begin_break(
     /* Invoke the break callback outside the file lock — the protocol
      * server may need to send packets, take other locks, etc. */
     if (cb) {
-        cb(lease, needed_mode, cb_priv);
+        cb(lease, step, cb_priv);
     }
 } /* chimera_vfs_lease_begin_break */
 
@@ -1188,22 +1749,57 @@ chimera_vfs_lease_ack(
 {
     struct chimera_vfs_file_state *file    = lease->file;
     bool                           mutated = false;
+    chimera_vfs_lease_break_cb_t   cb      = NULL;
+    void                          *cb_priv = NULL;
+    uint8_t                        step    = 0;
 
     if (file) {
         pthread_mutex_lock(&file->lock);
     }
 
     if (lease->break_state == CHIMERA_VFS_BREAK_BREAKING) {
-        lease->mode        = resulting;
-        lease->break_state = CHIMERA_VFS_BREAK_ACKED;
-        mutated            = true;
+        lease->mode = resulting;
+
+        /* Cascade: the conflict that started this break may need the holder
+         * lower than the bit it just acked (a plain RW open drives RWH -> RH ->
+         * R -> NONE).  If the acked mode is still above the floor, fire the next
+         * single-bit break immediately and stay BREAKING -- the waiter parked on
+         * this break keeps waiting and a same-key re-open still sees the break in
+         * progress.  Only when the holder reaches the floor does the break
+         * finish: re-arm to IDLE if it kept any mode (a later conflict can break
+         * it again) or go inert (ACKED) at NONE until the holder closes. */
+        step = chimera_vfs_lease_cascades(lease)
+            ? chimera_vfs_lease_break_step(resulting.granted, lease->break_floor)
+            : resulting.granted;
+
+        if (step != resulting.granted && lease->owner.break_cb) {
+            uint32_t deadline_ms = (file && file->state)
+                ? file->state->default_break_deadline_ms
+                : CHIMERA_VFS_STATE_DEFAULT_BREAK_DEADLINE_MS;
+
+            lease->break_needed_mode = step;
+            lease->break_deadline    = chimera_vfs_now_ticks() +
+                chimera_vfs_ns_to_ticks((uint64_t) deadline_ms * 1000000ULL);
+            cb      = lease->owner.break_cb;
+            cb_priv = lease->owner.cb_private;
+        } else {
+            lease->break_state = resulting.granted ? CHIMERA_VFS_BREAK_IDLE
+                                                   : CHIMERA_VFS_BREAK_ACKED;
+            mutated = true;
+        }
     }
 
     if (file) {
         pthread_mutex_unlock(&file->lock);
     }
 
-    /* Acking a break may unblock pending acquires or parked I/O. */
+    /* Fire the next cascade step (outside the lock — the SMB cb sends a packet). */
+    if (cb) {
+        cb(lease, step, cb_priv);
+        return;
+    }
+
+    /* Acking the final step may unblock pending acquires or parked I/O. */
     if (mutated && file && file->state) {
         chimera_vfs_state_pump_pending(file->state, file);
         chimera_vfs_state_pump_io(file->state, file);
@@ -1250,8 +1846,10 @@ chimera_vfs_lease_revoke(struct chimera_vfs_lease *lease)
  * granted mode (the recall is in flight; caller should wait/retry). */
 static bool
 chimera_vfs_break_caching_file(
-    struct chimera_vfs_state      *state,
-    struct chimera_vfs_file_state *file)
+    struct chimera_vfs_state             *state,
+    struct chimera_vfs_file_state        *file,
+    const struct chimera_vfs_open_handle *skip_handle,
+    bool                                  flush_only)
 {
     bool had;
 
@@ -1268,6 +1866,29 @@ chimera_vfs_break_caching_file(
         pthread_mutex_lock(&file->lock);
         for (cur = file->caching_leases; cur; cur = cur->next) {
             if (cur->mode.granted == 0 || !cur->owner.break_cb) {
+                continue;
+            }
+            /* The mutation is issued through this very lease's open handle: the
+             * holder is coherent with its own change, so do not recall it. */
+            if (skip_handle && cur->owner.op_handle == skip_handle) {
+                continue;
+            }
+            /* Flush recall: only a write-caching (W) holder has dirty data to
+             * flush; a read-only / handle-only holder keeps its cache untouched
+             * (a data setattr does not stale a pure read cache -- the client
+             * revalidates on the resulting mtime/size change).  This is what lets
+             * a same-client metadata storm stop churning: once a holder has
+             * dropped W it is no longer recalled.
+             *
+             * This filter is an SMB read-cache optimization only.  An NFSv4
+             * delegation is not just a data cache: it guarantees attribute
+             * stability and that no foreign change occurs without a recall (RFC
+             * 7530 10.4), so a metadata-only setattr (e.g. a server-side chmod,
+             * pynfs DELEG20) MUST recall a read delegation held by another party.
+             * The mutating handle's own lease is already spared by skip_handle
+             * above, so this only ever recalls foreign delegations. */
+            if (flush_only && !(cur->mode.granted & CHIMERA_VFS_LEASE_MODE_W) &&
+                cur->owner.protocol != CHIMERA_VFS_LEASE_PROTO_NFSV4) {
                 continue;
             }
             if (cur->break_state == CHIMERA_VFS_BREAK_IDLE) {
@@ -1295,13 +1916,23 @@ chimera_vfs_break_caching_file(
         pthread_mutex_unlock(&file->lock);
 
         if (to_break) {
-            /* Break to NONE (needed_mode 0), not to the currently-granted
-             * mode: a namespace/metadata mutation invalidates the holder's
-             * cache entirely.  Passing the granted mode would let the SMB
-             * lease break_cb retain its read cache (LEVEL_II) and ack with a
-             * non-zero mode, so this loop would see granted != 0 forever and
-             * the caller would park permanently.  NFSv4 delegations recall
-             * fully regardless of needed_mode, so 0 is correct for them too. */
+            /* Break to NONE (needed_mode 0): the holder writes back dirty data
+             * and drops its cache entirely.  This holds for both recall flavors.
+             *
+             * A flush recall would ideally retain the holder's read cache (break
+             * only W, keep R|H) to spare a metadata-storm client a full re-lease
+             * per op.  But retaining R is only coherent if the changed region of
+             * that read cache is also invalidated, which chimera has no mechanism
+             * for today -- retaining R after a flush serves stale bytes (fsx
+             * MAPREAD corruption).  So a flush still revokes its W holders to
+             * NONE; what flush_only buys is the *filter* above -- read-only /
+             * handle-only holders, which an attribute-only setattr does not
+             * stale, are left untouched rather than needlessly recalled.  Fully
+             * decoupling the flush from the read-cache drop is a follow-up.
+             *
+             * Passing the granted mode would let the SMB break_cb retain a read
+             * cache and ack non-zero, so this loop would see granted != 0 forever
+             * and park permanently.  NFSv4 delegations recall fully regardless. */
             chimera_vfs_lease_begin_break(state, to_break, 0,
                                           CHIMERA_VFS_NFS_DELEG_METAOP_MS);
         } else if (to_revoke) {
@@ -1311,13 +1942,31 @@ chimera_vfs_break_caching_file(
         }
     }
 
-    /* Still blocked iff some caching holder retains a granted mode. */
+    /* Still blocked iff some caching holder retains an *effective* granted mode.
+     * A holder mid-break is treated by its effective level: an SMB oplock/lease
+     * that has been notified (BREAKING) is obligated to comply, so it no longer
+     * blocks -- the metadata op proceeds and the client's real ack arrives
+     * asynchronously (this matches the pre-real-break optimistic behaviour and
+     * is what chimera_vfs_lease_effective_granted() encodes).  An NFSv4
+     * delegation keeps its full mode while RECALLING, so it still blocks until
+     * the client returns it or its recall deadline elapses (revoked above). */
     pthread_mutex_lock(&file->lock);
     had = false;
     {
         struct chimera_vfs_lease *cur;
+        /* A flush recall only needs the write cache gone (W flushed); the holder
+         * may keep R|H.  So it blocks only while some holder retains an effective
+         * W -- a notified (BREAKING) SMB holder has effective == its retained
+         * R|H (no W), so the op proceeds at once and the client's flush ack
+         * arrives asynchronously (the client serialises break->writeback->reply
+         * on its own connection, so a later read by it is still coherent).  A
+         * namespace recall blocks while any effective mode remains. */
+        uint8_t                   block_mask = flush_only ? CHIMERA_VFS_LEASE_MODE_W : 0xFF;
         for (cur = file->caching_leases; cur; cur = cur->next) {
-            if (cur->mode.granted != 0) {
+            if (skip_handle && cur->owner.op_handle == skip_handle) {
+                continue;
+            }
+            if (chimera_vfs_lease_effective_granted(cur) & block_mask) {
                 had = true;
                 break;
             }
@@ -1343,7 +1992,10 @@ chimera_vfs_state_break_caching(
         return false;
     }
 
-    had = chimera_vfs_break_caching_file(state, file);
+    /* No skip handle: this whole-file recall (NFSv4 REMOVE/RENAME) breaks every
+     * caching holder, including the operating client's own delegation.  It is a
+     * namespace mutation, so revoke fully (flush_only == false). */
+    had = chimera_vfs_break_caching_file(state, file, NULL, false);
 
     chimera_vfs_state_put(state, file);
     return had;
@@ -1353,18 +2005,15 @@ chimera_vfs_state_break_caching(
 /* Break-on-write                                                       */
 /* -------------------------------------------------------------------- */
 
-/* Upper bound on caching leases broken by a single write.  A file with
- * more concurrent caching holders than this is pathological; any excess
- * is left for a subsequent write to break. */
-#define CHIMERA_VFS_STATE_MAX_BREAK_BATCH 64
-
 /* A write invalidates every read-caching (R) lease on the file: those
  * holders can no longer trust their cached data, so each must break down
- * to NONE.  The one exception is the writer's own write-caching (W) lease
- * — an exclusive/batch holder is allowed to write through its own cache
- * without breaking it.  A read-only (LEVEL_II) lease held by the writer
- * itself DOES break (a II oplock caches reads only, so writing through it
- * stales that cache) — this is the SMB2 "self break to none".
+ * to NONE.  The exception is the WRITER'S OWN lease (matched by owner key):
+ * the writing handle is coherent with its own change, so its lease is not
+ * recalled against itself -- whether that lease holds the write cache (an
+ * exclusive/batch holder writing through its own cache) or only read+handle
+ * caching (smb2.lease.complex1: a write by an RH holder breaks the OTHER
+ * client's read lease, never its own RH).  A read cache held by a DIFFERENT
+ * owner of the same client (a second lease key) is still staled and breaks.
  *
  * Breaks are dispatched via begin_break with needed_mode==0, which the
  * SMB break callback interprets as "break to NONE" (the open-conflict
@@ -1388,8 +2037,14 @@ chimera_vfs_break_reads_for_write(
         if ((cur->mode.granted & CHIMERA_VFS_LEASE_MODE_R) == 0) {
             continue;
         }
-        if ((cur->mode.granted & CHIMERA_VFS_LEASE_MODE_W) &&
-            chimera_vfs_lease_owner_equal(&cur->owner, writer)) {
+        if (chimera_vfs_lease_owner_equal(&cur->owner, writer)) {
+            continue;
+        }
+        /* A holder sharing the writer's SMB2 lease key (even under a different
+         * ClientGuid) shares the cache and is coherent with this write: do not
+         * break it (MS-SMB2 same-lease-key; WPTS Leasing_*_SameLeaseKey writes
+         * from both clients without breaking the peer's lease). */
+        if (chimera_vfs_lease_smb2_same_key(&cur->owner, writer)) {
             continue;
         }
         if (n < CHIMERA_VFS_STATE_MAX_BREAK_BATCH) {
@@ -1423,6 +2078,75 @@ chimera_vfs_state_break_on_write(
 
     chimera_vfs_state_put(state, file);
 } /* chimera_vfs_state_break_on_write */
+
+/* Break-on-open: a conflicting open by a *different* owner breaks caching
+ * holders.  `trigger_bits` selects which holders break -- only a lease whose
+ * granted mode intersects `trigger_bits` is affected -- and `retain_mode` is
+ * the mask the holder keeps (R to downgrade an exclusive/batch oplock to
+ * LEVEL_II, 0 to break all the way to NONE).  Holders the opener owns are
+ * skipped.  The break is optimistic from vfs_state's point of view (it is
+ * queued; the opener proceeds), but the SMB layer may choose to wait. */
+SYMBOL_EXPORT void
+chimera_vfs_state_break_caching_for_open(
+    struct chimera_vfs_state             *state,
+    const uint8_t                        *fh,
+    uint8_t                               fh_len,
+    uint64_t                              fh_hash,
+    const struct chimera_vfs_lease_owner *opener,
+    uint8_t                               trigger_bits,
+    uint8_t                               retain_mode)
+{
+    struct chimera_vfs_file_state *file;
+    struct chimera_vfs_lease      *cur;
+    struct chimera_vfs_lease      *to_break[CHIMERA_VFS_STATE_MAX_BREAK_BATCH];
+    int                            n = 0;
+    int                            i;
+
+    file = chimera_vfs_state_get(state, fh, fh_len, fh_hash, false);
+    if (!file) {
+        return;
+    }
+
+    pthread_mutex_lock(&file->lock);
+
+    for (cur = file->caching_leases; cur; cur = cur->next) {
+        /* Only holders that actually hold one of the trigger bits beyond what
+         * they get to retain need to break. */
+        if ((cur->mode.granted & trigger_bits & ~retain_mode) == 0) {
+            continue;
+        }
+        if (chimera_vfs_lease_owner_equal(&cur->owner, opener)) {
+            continue;
+        }
+        /* Same SMB2 lease key (even from a different ClientGuid): the opens share
+         * one logical lease and the holder is NOT broken (MS-SMB2 same-lease-key
+         * caching; mirrors the SHARE-side has_break_skip_key). */
+        if (chimera_vfs_lease_smb2_same_key(&cur->owner, opener)) {
+            continue;
+        }
+        /* A pure handle-trigger break (the pre-share-check pass) is a legacy SMB
+         * oplock behavior: a batch oplock's handle is recalled before the share
+         * decision so the holder can close.  An SMB2 RqLs LEASE keeps its handle
+         * cache on a conflicting open (only its write cache is exclusive), so do
+         * not handle-break a lease here -- its write cache is invalidated by the
+         * separate W-trigger pass / caching-contention break instead. */
+        if (trigger_bits == CHIMERA_VFS_LEASE_MODE_H &&
+            cur->grant && !cur->grant->is_oplock) {
+            continue;
+        }
+        if (n < CHIMERA_VFS_STATE_MAX_BREAK_BATCH) {
+            to_break[n++] = cur;
+        }
+    }
+
+    pthread_mutex_unlock(&file->lock);
+
+    for (i = 0; i < n; i++) {
+        chimera_vfs_lease_begin_break(state, to_break[i], retain_mode, 0);
+    }
+
+    chimera_vfs_state_put(state, file);
+} /* chimera_vfs_state_break_caching_for_open */
 
 /* -------------------------------------------------------------------- */
 /* Implicit I/O lease                                                   */
@@ -1561,7 +2285,8 @@ chimera_vfs_state_drive_breaks(
                 (conflict->owner.protocol == CHIMERA_VFS_LEASE_PROTO_NFSV4)
                 ? CHIMERA_VFS_NFS_DELEG_RECALL_MS : 0;
             chimera_vfs_lease_begin_break(state, conflict,
-                                          probe->mode.granted, deadline_ms);
+                                          chimera_vfs_break_retain_for(probe, conflict),
+                                          deadline_ms);
         } else {
             chimera_vfs_lease_revoke(conflict);
         }
@@ -1682,7 +2407,8 @@ chimera_vfs_io_try(
      * on chimera's behalf.  The periodic maintenance pass re-pumps parked
      * waiters so an unresponsive holder is revoked at its recall deadline. */
     if (request->io_recall_all) {
-        if (chimera_vfs_break_caching_file(state, file)) {
+        if (chimera_vfs_break_caching_file(state, file, request->io_handle,
+                                           request->io_recall_flush_only)) {
             pthread_mutex_lock(&file->lock);
             chimera_vfs_io_park_locked(file, request);
             request->io_lease_file = file;
@@ -1869,15 +2595,17 @@ chimera_vfs_io_recall(
     const uint8_t              *fh,
     uint8_t                     fh_len,
     uint64_t                    fh_hash,
+    int                         flush_only,
     void (                     *next )(struct chimera_vfs_request *request))
 {
     struct chimera_vfs_state      *state = request->thread->vfs->vfs_state;
     struct chimera_vfs_file_state *file;
 
-    request->io_next           = next;
-    request->io_lease_file     = NULL;
-    request->io_recall_all     = 1;
-    request->io_owns_lease_ref = 1;
+    request->io_next              = next;
+    request->io_lease_file        = NULL;
+    request->io_recall_all        = 1;
+    request->io_recall_flush_only = flush_only ? 1 : 0;
+    request->io_owns_lease_ref    = 1;
 
     /* Fast path: no per-file state means no caching lease to recall. */
     if (!state || fh_len == 0) {
@@ -1928,6 +2656,39 @@ chimera_vfs_io_lease_release(struct chimera_vfs_request *request)
         chimera_vfs_state_put(state, file);
     }
 } /* chimera_vfs_io_lease_release */
+
+/* Revoke every caching lease on `file` that has been BREAKING past its break
+ * deadline (the holder never acknowledged).  Returns true if any were revoked.
+ * Caller must NOT hold file->lock; revoke takes it internally.  Collect under the
+ * lock, then revoke (which re-locks + pumps), so the list walk is not disturbed
+ * mid-revoke. */
+static bool
+chimera_vfs_state_revoke_expired_breaks(
+    struct chimera_vfs_state      *state,
+    struct chimera_vfs_file_state *file)
+{
+    struct chimera_vfs_lease *expired[CHIMERA_VFS_STATE_MAX_BREAK_BATCH];
+    struct chimera_vfs_lease *cur;
+    int                       n = 0;
+    int                       i;
+
+    (void) state;
+
+    pthread_mutex_lock(&file->lock);
+    for (cur = file->caching_leases; cur; cur = cur->next) {
+        if (cur->break_state == CHIMERA_VFS_BREAK_BREAKING &&
+            chimera_vfs_break_deadline_passed(cur) &&
+            n < CHIMERA_VFS_STATE_MAX_BREAK_BATCH) {
+            expired[n++] = cur;
+        }
+    }
+    pthread_mutex_unlock(&file->lock);
+
+    for (i = 0; i < n; i++) {
+        chimera_vfs_lease_revoke(expired[i]);
+    }
+    return n > 0;
+} /* chimera_vfs_state_revoke_expired_breaks */
 
 SYMBOL_EXPORT void
 chimera_vfs_state_reap_idle(
@@ -1980,6 +2741,11 @@ chimera_vfs_state_reap_idle(
                 /* finish_drain pumps the wait queue itself. */
                 chimera_vfs_implicit_finish_drain(state, file);
             } else if (has_waiters) {
+                /* A parked I/O / namespace op is waiting on a caching holder to
+                 * break.  If that holder never acknowledged and its break
+                 * deadline has elapsed, forcibly revoke it (MS-SMB2 / NFSv4
+                 * recall timeout) so the waiter can proceed, then re-pump. */
+                chimera_vfs_state_revoke_expired_breaks(state, file);
                 chimera_vfs_state_pump_io(state, file);
             }
 

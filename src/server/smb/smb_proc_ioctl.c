@@ -183,6 +183,15 @@ chimera_smb_ioctl(struct chimera_smb_request *request)
                 return;
             }
 
+            /* MS-SMB2 §3.3.5.2.10: IOCTL is in the channel-sequence-checked set;
+             * a stale sequence is rejected with FILE_NOT_AVAILABLE. */
+            if (chimera_smb_channel_sequence_stale(open_file,
+                                                   request->channel_sequence, 1)) {
+                chimera_smb_open_file_release(request, open_file);
+                chimera_smb_complete_request(request, SMB2_STATUS_FILE_NOT_AVAILABLE);
+                return;
+            }
+
             if (request->ioctl.max_output_response < 64) {
                 chimera_smb_open_file_release(request, open_file);
                 chimera_smb_complete_request(request, SMB2_STATUS_BUFFER_TOO_SMALL);
@@ -207,6 +216,41 @@ chimera_smb_ioctl(struct chimera_smb_request *request)
                 memcpy(request->ioctl.oid_buffer + 32,
                        request->ioctl.oid_buffer, 16);
                 /* DomainId: zeroed (MS-FSCC: zero indicates no domain). */
+            }
+
+            chimera_smb_open_file_release(request, open_file);
+            chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+            break;
+
+        case SMB2_FSCTL_LMR_REQUEST_RESILIENCY:
+            /* MS-SMB2 3.3.5.15.9: grant handle resiliency on the open.  The
+             * requested Timeout (ms) is capped at a server maximum; a Timeout of
+             * 0 selects the server default.  Resiliency only applies to a
+             * disk-file open — a request against a pipe is invalid. */
+            open_file = chimera_smb_open_file_resolve(request, &request->ioctl.file_id);
+
+            if (unlikely(!open_file)) {
+                chimera_smb_complete_request(request, SMB2_STATUS_FILE_CLOSED);
+                return;
+            }
+
+            if (open_file->type != CHIMERA_SMB_OPEN_FILE_TYPE_FILE) {
+                chimera_smb_open_file_release(request, open_file);
+                chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+                return;
+            }
+
+            {
+                uint64_t timeout_ms = request->ioctl.rr_timeout_ms;
+
+                if (timeout_ms == 0) {
+                    timeout_ms = CHIMERA_SMB_RESILIENCY_DEFAULT_TIMEOUT_MS;
+                } else if (timeout_ms > CHIMERA_SMB_RESILIENCY_MAX_TIMEOUT_MS) {
+                    timeout_ms = CHIMERA_SMB_RESILIENCY_MAX_TIMEOUT_MS;
+                }
+
+                open_file->resilient            = true;
+                open_file->resilient_timeout_ms = timeout_ms;
             }
 
             chimera_smb_open_file_release(request, open_file);
@@ -335,18 +379,22 @@ chimera_smb_ioctl_reply(
                 evpl_iovec_cursor_append_uint32(reply_cursor, caps); /* capabilities (RSS) */
                 evpl_iovec_cursor_append_uint32(reply_cursor, 0); /* reserved */
                 evpl_iovec_cursor_append_uint64(reply_cursor, nic_info->speed); /* speed */
+                /* SOCKADDR_STORAGE.ss_family is the Windows AF_* value on the
+                 * wire (MS-DTYP / MS-SMB2 3.2.4.20.10): 2 == AF_INET,
+                 * 23 (0x17) == AF_INET6.  Linux's AF_INET6 (10) differs, so map
+                 * it explicitly. */
                 evpl_iovec_cursor_append_uint16(reply_cursor, nic_info->addr.ss_family == AF_INET ? 2 :
-                                                10);                                                                    /* AF_INET */
+                                                23);                                                                    /* Windows AF_INET / AF_INET6 */
                 evpl_iovec_cursor_append_uint16(reply_cursor, 0); /* port */
                 if (nic_info->addr.ss_family == AF_INET) {
                     evpl_iovec_cursor_append_blob(reply_cursor,
                                                   &((struct sockaddr_in *) &nic_info->addr)->sin_addr.s_addr,
-                                                  4);                                                                   /* address: 10.67.25.209 */
+                                                  4);                                                                   /* IPv4 address */
                 } else {
                     evpl_iovec_cursor_append_blob(reply_cursor,
                                                   &((struct sockaddr_in6 *) &nic_info->addr)->sin6_addr.
                                                   s6_addr,
-                                                  16);                                                                  /* address: 10.67.25.209 */
+                                                  16);                                                                  /* IPv6 address */
                 }
                 evpl_iovec_cursor_zero(reply_cursor, 120); /* ifname length */
             }
@@ -698,6 +746,18 @@ chimera_smb_parse_ioctl(
                 }
                 break;
             }
+            case SMB2_FSCTL_LMR_REQUEST_RESILIENCY:
+                /* NETWORK_RESILIENCY_REQUEST (MS-SMB2 2.2.31.3): Timeout(4) +
+                 * Reserved(4). */
+                if (request->ioctl.input_count < 8) {
+                    chimera_smb_error("LMR_REQUEST_RESILIENCY input too small (%u < 8)",
+                                      request->ioctl.input_count);
+                    request->status = SMB2_STATUS_INVALID_PARAMETER;
+                    return -1;
+                }
+                evpl_iovec_cursor_get_uint32(request_cursor, &request->ioctl.rr_timeout_ms);
+                evpl_iovec_cursor_skip(request_cursor, 4); /* Reserved */
+                break;
             default:
                 /* Other IOCTLs don't need input parsing yet */
                 chimera_smb_info("Received IOCTL request with unhandled ctl_code 0x%08x, skipping input parsing",

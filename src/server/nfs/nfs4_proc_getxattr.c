@@ -4,6 +4,7 @@
 
 #include "nfs4_procs.h"
 #include "nfs4_status.h"
+#include "nfs4_xattr.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 
@@ -37,8 +38,9 @@ chimera_nfs4_getxattr_open_callback(
     struct nfs_request   *req  = private_data;
     struct GETXATTR4args *args = &req->args_compound->argarray[req->index].opgetxattr;
     struct GETXATTR4res  *res  = &req->res_compound.resarray[req->index].opgetxattr;
-    uint32_t              avail, maxval;
-    int                   rc;
+    uint32_t              avail, maxval, namecap;
+    char                 *name;
+    int                   namelen, rc;
 
     if (error_code != CHIMERA_VFS_OK) {
         res->gxr_status = chimera_nfs4_errno_to_nfsstat4(error_code);
@@ -47,6 +49,35 @@ chimera_nfs4_getxattr_open_callback(
     }
 
     req->handle = handle;
+
+    /* RFC 8276 carries the name without a namespace prefix; the VFS expects a
+     * fully-qualified "user." name.  Stage the prefixed name in the response
+     * dbuf, which outlives the async VFS op. */
+    if (args->gxa_name.len == 0) {
+        res->gxr_status = NFS4ERR_INVAL;
+        chimera_vfs_release(req->thread->vfs_thread, req->handle);
+        chimera_nfs4_compound_complete(req, res->gxr_status);
+        return;
+    }
+
+    namecap = CHIMERA_NFS4_XATTR_USER_PREFIX_LEN + args->gxa_name.len;
+    name    = xdr_dbuf_alloc_space(namecap, req->encoding->dbuf);
+    if (!name) {
+        res->gxr_status = NFS4ERR_RESOURCE;
+        chimera_vfs_release(req->thread->vfs_thread, req->handle);
+        chimera_nfs4_compound_complete(req, res->gxr_status);
+        return;
+    }
+
+    namelen = chimera_nfs4_xattr_build_user(name, namecap,
+                                            args->gxa_name.data,
+                                            args->gxa_name.len);
+    if (namelen < 0) {
+        res->gxr_status = NFS4ERR_NAMETOOLONG;
+        chimera_vfs_release(req->thread->vfs_thread, req->handle);
+        chimera_nfs4_compound_complete(req, res->gxr_status);
+        return;
+    }
 
     /* Stage the value into the response dbuf, leaving headroom for the rest
      * of the compound reply. */
@@ -66,8 +97,8 @@ chimera_nfs4_getxattr_open_callback(
 
     chimera_vfs_get_xattr(req->thread->vfs_thread, &req->cred,
                           handle,
-                          args->gxa_name.data,
-                          args->gxa_name.len,
+                          name,
+                          namelen,
                           res->gxr_value.data,
                           maxval,
                           chimera_nfs4_getxattr_complete,

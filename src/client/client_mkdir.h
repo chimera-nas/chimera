@@ -35,12 +35,10 @@ chimera_dispatch_mkdir(
         return;
     }
 
-    request->mkdir.set_attr.va_req_mask = 0;
-    request->mkdir.set_attr.va_set_mask = 0;
-
+    /* set_attr (creation mode) is initialized by the caller. */
     chimera_vfs_mkdir(
         thread->vfs_thread,
-        &thread->client->cred,
+        chimera_client_req_cred(request),
         thread->client->root_fh,
         thread->client->root_fh_len,
         request->mkdir.path,
@@ -82,7 +80,7 @@ chimera_dispatch_mkdir_at(
 {
     chimera_vfs_mkdir_at(
         thread->vfs_thread,
-        &thread->client->cred,
+        chimera_client_req_cred(request),
         parent_handle,
         request->mkdir.path,
         request->mkdir.path_len,

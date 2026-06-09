@@ -48,6 +48,7 @@ install(TARGETS chimera_vfs DESTINATION lib)
 
 add_subdirectory(root)
 add_subdirectory(memfs)
+add_subdirectory(memkv)
 add_subdirectory(linux)
 add_subdirectory(nfs)
 
@@ -61,13 +62,29 @@ if (CAIRN_ENABLED)
     add_subdirectory(cairn)
 endif()
 
+# sqlite KV backend: built when the sqlite3 development headers are available.
+find_path(SQLITE3_INCLUDE_DIR sqlite3.h)
+find_library(SQLITE3_LIBRARY sqlite3)
+if (SQLITE3_INCLUDE_DIR AND SQLITE3_LIBRARY)
+    set(SQLITE_ENABLED TRUE)
+    message(STATUS "sqlite3 found (${SQLITE3_LIBRARY}); building chimera_vfs_sqlite")
+    add_subdirectory(sqlite)
+else ()
+    set(SQLITE_ENABLED FALSE)
+    message(STATUS "sqlite3 not found; skipping chimera_vfs_sqlite")
+endif()
+
 target_link_libraries(chimera_vfs
-    chimera_vfs_root chimera_vfs_memfs chimera_vfs_linux chimera_vfs_diskfs
+    chimera_vfs_root chimera_vfs_memfs chimera_vfs_memkv chimera_vfs_linux chimera_vfs_diskfs
     chimera_vfs_nfs
     chimera_common prometheus-c xxhash dl urcu-qsbr)
 
 if (CHIMERA_VFS_IO_URING)
     target_link_libraries(chimera_vfs chimera_vfs_io_uring)
+endif()
+
+if (SQLITE_ENABLED)
+    target_link_libraries(chimera_vfs chimera_vfs_sqlite)
 endif()
 
 if (DEMFS_ENABLED)

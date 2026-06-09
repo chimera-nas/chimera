@@ -8,7 +8,39 @@
 #include "evpl/evpl.h"
 #include "vfs/vfs.h"
 
-struct chimera_posix_client *chimera_posix_global;
+struct chimera_posix_client     *chimera_posix_global;
+
+__thread int                     chimera_posix_tls_has_cred;
+__thread struct chimera_vfs_cred chimera_posix_tls_cred;
+__thread int                     chimera_posix_tls_has_umask;
+__thread mode_t                  chimera_posix_tls_umask;
+
+SYMBOL_EXPORT void
+chimera_posix_set_cred(const struct chimera_vfs_cred *cred)
+{
+    if (cred) {
+        chimera_posix_tls_cred     = *cred;
+        chimera_posix_tls_has_cred = 1;
+    } else {
+        chimera_posix_tls_has_cred = 0;
+    }
+} /* chimera_posix_set_cred */
+
+SYMBOL_EXPORT void
+chimera_posix_clear_cred(void)
+{
+    chimera_posix_tls_has_cred = 0;
+} /* chimera_posix_clear_cred */
+
+SYMBOL_EXPORT mode_t
+chimera_posix_umask(mode_t mask)
+{
+    mode_t prev = chimera_posix_tls_has_umask ? chimera_posix_tls_umask : 0;
+
+    chimera_posix_tls_umask     = mask & 0777;
+    chimera_posix_tls_has_umask = 1;
+    return prev;
+} /* chimera_posix_umask */
 
 void *
 chimera_posix_worker_init(

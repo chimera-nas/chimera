@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -53,12 +53,14 @@ chimera_posix_open(
         va_end(ap);
     }
 
-    (void) mode;
+    path_len = chimera_posix_check_path(path);
+    if (path_len < 0) {
+        return -1;
+    }
 
     chimera_posix_completion_init(&comp, &req);
 
-    path_len = strlen(path);
-    slash    = rindex(path, '/');
+    slash = rindex(path, '/');
 
     req.opcode            = CHIMERA_CLIENT_OP_OPEN;
     req.open.callback     = chimera_posix_open_callback;
@@ -73,6 +75,12 @@ chimera_posix_open(
 
     req.open.name_offset = slash ? slash - path : -1;
 
+    if (flags & O_CREAT) {
+        chimera_posix_set_create_mode(&req.open.set_attr, mode);
+    } else {
+        chimera_posix_no_create_mode(&req.open.set_attr);
+    }
+
     memcpy(req.open.path, path, path_len);
 
     chimera_posix_worker_enqueue(worker, &req, chimera_posix_open_exec);
@@ -85,6 +93,8 @@ chimera_posix_open(
         if (fd < 0) {
             chimera_close(worker->client_thread, req.sync_open_handle);
             err = EMFILE;
+        } else {
+            posix->fds[fd].oflags = (unsigned int) flags;
         }
     }
 
@@ -93,6 +103,19 @@ chimera_posix_open(
     if (err) {
         errno = err;
         return -1;
+    }
+
+    /* O_TRUNC: truncate an existing writable file to zero length on open.
+     * The VFS open path does not yet honor CHIMERA_VFS_OPEN_TRUNCATE, so apply
+     * it here for regular files opened for writing.  Truncation failures on
+     * non-regular targets are ignored (O_TRUNC is unspecified for them). */
+    if ((flags & O_TRUNC) && (flags & O_ACCMODE) != O_RDONLY) {
+        struct stat st;
+
+        if (chimera_posix_fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
+            st.st_size != 0) {
+            (void) chimera_posix_ftruncate(fd, 0);
+        }
     }
 
     return fd;

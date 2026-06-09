@@ -63,7 +63,7 @@ chimera_vfs_open_at_hdl_callback(
 } /* chimera_vfs_open_at_hdl_callback */
 
 static void
-chimera_vfs_open_complete(struct chimera_vfs_request *request)
+chimera_vfs_open_finish(struct chimera_vfs_request *request)
 {
     struct chimera_vfs_thread      *thread = request->thread;
     uint64_t                        fh_hash;
@@ -119,6 +119,52 @@ chimera_vfs_open_complete(struct chimera_vfs_request *request)
     } else {
         chimera_vfs_open_at_hdl_callback(request, NULL);
     }
+} /* chimera_vfs_open_finish */
+
+/* Continuation after the non-atomic handle-state record has been persisted to
+ * the default KV (best-effort: a failure leaves the file open without its
+ * durable record, which only the in-memory backends ever hit). */
+static void
+chimera_vfs_open_hs_put_complete(
+    enum chimera_vfs_error error_code,
+    void                  *private_data)
+{
+    struct chimera_vfs_request *request = private_data;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_vfs_error("open_at: failed to persist handle-state to default KV: %d",
+                          error_code);
+    }
+
+    chimera_vfs_open_finish(request);
+} /* chimera_vfs_open_hs_put_complete */
+
+static void
+chimera_vfs_open_complete(struct chimera_vfs_request *request)
+{
+    struct chimera_vfs_handle_state *hs = request->open_at.handle_state;
+
+    /* Backends that persist handle-state atomically (CAP_ATOMIC_HANDLE_STATE)
+     * have already stored it as part of the open.  For backends without native
+     * KV, the VFS core persists the record to the default KV instead, keyed by
+     * the new file's fh so close/recovery find it on the same backend.  This is
+     * a separate, non-atomic put; it is only reached by in-memory backends
+     * (memfs) and passthrough, where cross-crash atomicity is moot. */
+    if (request->status == CHIMERA_VFS_OK && hs &&
+        !(request->module->capabilities & CHIMERA_VFS_CAP_ATOMIC_HANDLE_STATE) &&
+        request->thread->vfs->kv_module &&
+        (request->open_at.r_attr.va_set_mask & CHIMERA_VFS_ATTR_FH)) {
+
+        chimera_vfs_put_key_at(request->thread, request->cred,
+                               request->open_at.r_attr.va_fh,
+                               request->open_at.r_attr.va_fh_len,
+                               hs->key, hs->key_len,
+                               hs->value, hs->value_len,
+                               chimera_vfs_open_hs_put_complete, request);
+        return;
+    }
+
+    chimera_vfs_open_finish(request);
 } /* chimera_vfs_open_complete */
 
 SYMBOL_EXPORT void
@@ -140,6 +186,16 @@ chimera_vfs_open_at_hs(
     struct chimera_vfs_request *request;
 
     chimera_vfs_abort_if(!set_attr, "no setattr provided");
+
+    /* On a creating open the trailing component is a new name; reject one longer
+     * than {NAME_MAX} with ENAMETOOLONG.  FS_PATH_OP backends receive the whole
+     * path as `name` and let the kernel enforce this. */
+    if ((flags & CHIMERA_VFS_OPEN_CREATE) &&
+        !(handle->vfs_module->capabilities & CHIMERA_VFS_CAP_FS_PATH_OP) &&
+        namelen >= CHIMERA_VFS_NAME_MAX) {
+        callback(CHIMERA_VFS_ENAMETOOLONG, NULL, NULL, NULL, NULL, NULL, private_data);
+        return;
+    }
 
     request = chimera_vfs_request_alloc_by_handle(thread, cred, handle);
 

@@ -60,10 +60,18 @@ chimera_smb_write_callback(
     evpl_iovecs_release(thread->evpl, request->write.iov, request->write.niov);
 
     if (!error_code && request->write.open_file->parent_fh_len > 0) {
+        /* A write changes the file's data and length.  Beyond the generic
+         * FILE_MODIFIED class this also touches the (default or named) data
+         * stream's contents and size, so set the STREAM_WRITE/STREAM_SIZE
+         * classes too — a watcher requesting only
+         * FILE_NOTIFY_CHANGE_STREAM_{WRITE,SIZE} must still be notified
+         * (WPTS BVT_SMB2Basic_ChangeNotify_ChangeStream{Write,Size}). */
         chimera_vfs_notify_emit(thread->shared->vfs->vfs_notify,
                                 request->write.open_file->parent_fh,
                                 request->write.open_file->parent_fh_len,
-                                CHIMERA_VFS_NOTIFY_FILE_MODIFIED,
+                                CHIMERA_VFS_NOTIFY_FILE_MODIFIED |
+                                CHIMERA_VFS_NOTIFY_STREAM_WRITE |
+                                CHIMERA_VFS_NOTIFY_STREAM_SIZE,
                                 request->write.open_file->name,
                                 request->write.open_file->name_len,
                                 NULL, 0);
@@ -131,7 +139,7 @@ chimera_smb_rdma_read_callback(
 
         struct chimera_vfs_lease_owner io_owner = {
             .protocol   = CHIMERA_VFS_LEASE_PROTO_SMB2,
-            .client_key = request->session_handle->session->session_id,
+            .client_key = request->session_handle->session->client_key,
             .owner_lo   = request->write.open_file->file_id.pid,
             .owner_hi   = request->write.open_file->file_id.vid,
         };
@@ -209,6 +217,17 @@ chimera_smb_write(struct chimera_smb_request *request)
         return;
     }
 
+    /* MS-SMB2 §3.3.5.2.10: a WRITE carrying a stale ChannelSequence (the client
+     * has since failed over to a higher sequence) must be rejected with
+     * FILE_NOT_AVAILABLE so a delayed retry cannot clobber newer data. */
+    if (chimera_smb_channel_sequence_stale(request->write.open_file,
+                                           request->channel_sequence, 1)) {
+        evpl_iovecs_release(evpl, request->write.iov, request->write.niov);
+        chimera_smb_open_file_release(request, request->write.open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_FILE_NOT_AVAILABLE);
+        return;
+    }
+
     /* When the open holds a caching lease, use the lease's owner identity for
      * the write so chimera_vfs_break_reads_for_write self-exempts (mode.granted
      * & MODE_W AND owner_equal): the holder is writing through its own granted
@@ -219,10 +238,10 @@ chimera_smb_write(struct chimera_smb_request *request)
      * INVALID_NETWORK_RESPONSE on the client. */
     struct chimera_vfs_lease_owner io_owner;
     io_owner.protocol   = CHIMERA_VFS_LEASE_PROTO_SMB2;
-    io_owner.client_key = request->session_handle->session->session_id;
-    if (request->write.open_file->caching_lease_inserted) {
-        io_owner.owner_lo = request->write.open_file->caching_lease.owner.owner_lo;
-        io_owner.owner_hi = request->write.open_file->caching_lease.owner.owner_hi;
+    io_owner.client_key = request->session_handle->session->client_key;
+    if (request->write.open_file->grant) {
+        io_owner.owner_lo = request->write.open_file->grant->lease.owner.owner_lo;
+        io_owner.owner_hi = request->write.open_file->grant->lease.owner.owner_hi;
     } else {
         io_owner.owner_lo = request->write.open_file->file_id.pid;
         io_owner.owner_hi = request->write.open_file->file_id.vid;

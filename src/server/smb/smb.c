@@ -20,6 +20,7 @@
 #include "server/server.h"
 #include "evpl/evpl.h"
 #include "smb_internal.h"
+#include "smb_async_interim.h"
 #include "smb_wbclient.h"
 #include "smb_procs.h"
 #include "smb_notify.h"
@@ -189,6 +190,7 @@ chimera_smb_server_init(
     pthread_mutex_init(&shared->sessions_lock, NULL);
     pthread_mutex_init(&shared->shares_lock, NULL);
     pthread_mutex_init(&shared->trees_lock, NULL);
+    pthread_mutex_init(&shared->threads_lock, NULL);
 
     /* Seed the persistent-id allocator with a random, nonzero base so ids do
      * not restart from a fixed value across daemon restarts (a courtesy to the
@@ -249,6 +251,8 @@ chimera_smb_server_destroy(void *data)
     if (shared->srv_cred != GSS_C_NO_CREDENTIAL) {
         gss_release_cred(&min, &shared->srv_cred);
     }
+
+    pthread_mutex_destroy(&shared->threads_lock);
 
     free(shared);
 } /* smb_server_destroy */
@@ -328,6 +332,21 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
          * binds the preauth-integrity hash. */
         if (request->smb2_hdr.command == SMB2_SESSION_SETUP &&
             request->status == SMB2_STATUS_SUCCESS &&
+            request->session_handle &&
+            (request->session_handle->session->flags & CHIMERA_SMB_SESSION_AUTHORIZED)) {
+            request->flags |= CHIMERA_SMB_REQUEST_FLAG_SIGN;
+        }
+
+        /* SMB3 multichannel session binding (MS-SMB2 3.3.5.5.3): the client
+         * signs the binding SESSION_SETUP request with the existing session key
+         * and requires every response on that exchange -- interim, final, or
+         * error -- to be signed.  Sign with session_handle->signing_key, which
+         * holds the established session's key on the interim/error legs and the
+         * newly derived per-channel key on the final SUCCESS leg.  Without this
+         * the client rejects the bind (an unsigned response is treated as
+         * STATUS_ACCESS_DENIED). */
+        if (request->smb2_hdr.command == SMB2_SESSION_SETUP &&
+            (request->session_setup.flags & SMB2_SESSION_FLAG_BINDING) &&
             request->session_handle &&
             (request->session_handle->session->flags & CHIMERA_SMB_SESSION_AUTHORIZED)) {
             request->flags |= CHIMERA_SMB_REQUEST_FLAG_SIGN;
@@ -768,6 +787,14 @@ chimera_smb_complete_request(
 {
     struct chimera_smb_compound *compound = request->compound;
 
+    /* If an async-interim is pending for this request, retire it.  An interim
+     * STATUS_PENDING has already gone out (request->async_id is set), so the
+     * reply builder below will tag the final response with
+     * SMB2_FLAGS_ASYNC_COMMAND and the matching AsyncId. */
+    if (unlikely(request->async.armed)) {
+        chimera_smb_async_interim_cancel(request);
+    }
+
     request->status = status;
 
     compound->complete_requests++;
@@ -1062,6 +1089,12 @@ chimera_smb_server_handle_smb2(
         evpl_iovec_cursor_copy(request_cursor, &request->smb2_hdr, sizeof(request->smb2_hdr));
 
         left -= sizeof(request->smb2_hdr);
+
+        /* Capture the per-request ChannelSequence (low 16 bits of the field the
+         * header struct calls "status" on a request) and the replay flag for
+         * MS-SMB2 §3.3.5.2.10 stale-write detection and create-context replay. */
+        request->channel_sequence = (uint16_t) (request->smb2_hdr.status & 0xFFFF);
+        request->is_replay        = (request->smb2_hdr.flags & SMB2_FLAGS_REPLAY_OPERATION) ? 1 : 0;
 
         signature_cursor = *request_cursor;
 
@@ -1904,9 +1937,18 @@ chimera_smb_server_accept(
     memset(conn->negotiate_preauth_hash, 0, sizeof(conn->negotiate_preauth_hash));
     conn->rdma_niov   = 0;
     conn->rdma_length = 0;
+    /* Conns are pooled; clear per-connection negotiate state so the
+    * "NEGOTIATE after NEGOTIATE" guard (MS-SMB2 3.3.5.4) does not trip on
+    * a dialect inherited from a previously torn-down connection. */
+    conn->dialect = 0;
+    conn->flags   = 0;
 
     evpl_bind_get_local_address(bind, conn->local_addr, sizeof(conn->local_addr));
     evpl_bind_get_remote_address(bind, conn->remote_addr, sizeof(conn->remote_addr));
+
+    /* Track this connection on its owning thread's active list so the
+     * lease-break resume doorbell can walk it for parked CREATEs. */
+    DL_APPEND2(thread->active_conns, conn, active_prev, active_next);
 
     *notify_callback   = chimera_smb_server_notify;
     *segment_callback  = chimera_smb_server_segment;
@@ -1953,6 +1995,18 @@ chimera_smb_server_thread_init(
     chimera_smb_notify_thread_init(thread);
     chimera_smb_lease_break_thread_init(thread);
 
+    /* Resume doorbell: a peer thread settling a lease break rings this so this
+     * thread re-scans its own connections for parked CREATEs to complete. */
+    evpl_add_doorbell(evpl, &thread->lease_resume_doorbell,
+                      chimera_smb_create_resume_doorbell_callback);
+
+    /* Register in the process-global thread list so resume broadcasts reach
+     * this thread. */
+    pthread_mutex_lock(&shared->threads_lock);
+    thread->next_thread = shared->threads;
+    shared->threads     = thread;
+    pthread_mutex_unlock(&shared->threads_lock);
+
     if (shared->config.persistent_handles) {
         evpl_add_timer(evpl, &thread->durable_sweeper,
                        chimera_smb_durable_sweeper_fire,
@@ -1977,6 +2031,19 @@ chimera_smb_server_thread_destroy(void *data)
     struct chimera_smb_conn           *conn;
     struct chimera_smb_compound       *compound;
     struct chimera_smb_session_handle *session_handle;
+    struct chimera_server_smb_thread **tpp;
+
+    /* Unregister from the process-global thread list first so a peer thread's
+     * resume broadcast can no longer ring this thread's (about-to-be-removed)
+     * resume doorbell.  evpl_remove_doorbell below then runs on this thread. */
+    pthread_mutex_lock(&thread->shared->threads_lock);
+    for (tpp = &thread->shared->threads; *tpp; tpp = &(*tpp)->next_thread) {
+        if (*tpp == thread) {
+            *tpp = thread->next_thread;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&thread->shared->threads_lock);
 
     /* Release any durable/persistent handles still parked in the shared
      * registry while this thread's vfs_thread is alive.  Each parked open
@@ -2022,6 +2089,7 @@ chimera_smb_server_thread_destroy(void *data)
     }
 
     evpl_listener_detach(thread->evpl, thread->binding);
+    evpl_remove_doorbell(thread->evpl, &thread->lease_resume_doorbell);
     chimera_smb_notify_thread_destroy(thread);
     chimera_smb_lease_break_thread_destroy(thread);
 

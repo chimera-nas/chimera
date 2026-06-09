@@ -124,6 +124,10 @@ struct chimera_vfs_mount_options {
  * set_attr (used for the SMB OVERWRITE / OVERWRITE_IF / SUPERSEDE
  * dispositions).  Backends that do not honor it simply open the file. */
 #define CHIMERA_VFS_OPEN_TRUNCATE       (1U << 7)
+/* Access mode: READ_ONLY for O_RDONLY, WRITE_ONLY for O_WRONLY, neither for
+ * O_RDWR.  Read access is required unless WRITE_ONLY; write access is required
+ * unless READ_ONLY.  Used by the open path to authorize the requested access. */
+#define CHIMERA_VFS_OPEN_WRITE_ONLY     (1U << 8)
 
 /* Allocate flags */
 #define CHIMERA_VFS_ALLOCATE_DEALLOCATE 0x01
@@ -424,6 +428,15 @@ struct chimera_vfs_request {
      * mutation that must recall every caching lease on a target file (regardless
      * of owner) rather than hold an implicit lease. */
     uint8_t                            io_recall_all;
+    /* Set by chimera_vfs_io_recall() for a data-coherence recall (a setattr that
+     * touches data, e.g. SIZE/EOF) as opposed to a namespace recall (remove /
+     * rename / link).  A flush recall downgrades a write-caching (W) holder to
+     * its read+handle cache (forcing the client to flush dirty data without
+     * losing its read cache or oplock), rather than revoking the whole lease to
+     * NONE.  This decouples the load-bearing dirty-cache flush from full
+     * revocation -- the churn source for metadata-heavy single-client workloads
+     * (rewinddir/fsstress) -- while preserving coherence. */
+    uint8_t                            io_recall_flush_only;
     void                               ( *io_next )(
         struct chimera_vfs_request *request);
     struct chimera_vfs_file_state     *io_lease_file;
@@ -1058,7 +1071,11 @@ enum CHIMERA_FS_FH_MAGIC {
     CHIMERA_VFS_FH_MAGIC_CAIRN    = 4,
     CHIMERA_VFS_FH_MAGIC_DISKFS   = 5,
     CHIMERA_VFS_FH_MAGIC_NFS      = 6,
-    CHIMERA_VFS_FH_MAGIC_MAX      = 7
+    /* KV-only backends (no filesystem; never serve a file handle, but occupy a
+     * module slot so they can be selected as the default KV module). */
+    CHIMERA_VFS_FH_MAGIC_MEMKV    = 7,
+    CHIMERA_VFS_FH_MAGIC_SQLITE   = 8,
+    CHIMERA_VFS_FH_MAGIC_MAX      = 9
 
 };
 
@@ -1449,6 +1466,7 @@ chimera_vfs_init(
     int                                  num_modules,
     const char                          *kv_module_name,
     int                                  cache_ttl,
+    int                                  num_rcu_reclaim_threads,
     struct prometheus_metrics           *metrics);
 
 void

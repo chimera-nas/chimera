@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -60,6 +60,7 @@ struct chimera_posix_fd_entry {
     int                             eof_flag;    // For FILE* feof() support
     int                             error_flag;  // For FILE* ferror() support
     int                             ungetc_char; // For FILE* ungetc() support (-1 = none)
+    unsigned int                    oflags;      // Raw open(2) flags (for O_ACCMODE checks)
 } __attribute__((aligned(64)));
 
 // CHIMERA_FILE is a pointer to an fd_entry for FILE* operations
@@ -90,6 +91,33 @@ struct chimera_posix_client {
 } __attribute__((aligned(64)));
 
 extern struct chimera_posix_client *chimera_posix_global;
+
+/*
+ * Per-thread effective credential and umask overrides.
+ *
+ * The POSIX client is initialized with one client-global credential, but POSIX
+ * semantics (and conformance suites such as pjdfstest) require switching the
+ * effective uid/gid/groups per operation to exercise permission checks.  These
+ * thread-locals let a caller temporarily override the credential and umask for
+ * subsequent calls on the same thread; when unset, operations fall back to the
+ * client-global credential and apply no umask (matching prior behavior).
+ */
+extern __thread int                     chimera_posix_tls_has_cred;
+extern __thread struct chimera_vfs_cred chimera_posix_tls_cred;
+extern __thread int                     chimera_posix_tls_has_umask;
+extern __thread mode_t                  chimera_posix_tls_umask;
+
+static FORCE_INLINE const struct chimera_vfs_cred *
+chimera_posix_effective_cred(void)
+{
+    return chimera_posix_tls_has_cred ? &chimera_posix_tls_cred : NULL;
+} // chimera_posix_effective_cred
+
+static FORCE_INLINE mode_t
+chimera_posix_effective_umask(void)
+{
+    return chimera_posix_tls_has_umask ? chimera_posix_tls_umask : 0;
+} // chimera_posix_effective_umask
 
 static FORCE_INLINE struct chimera_posix_client *
 chimera_posix_get_global(void)
@@ -131,6 +159,20 @@ chimera_posix_completion_init(
     comp->done    = 0;
 
     req->heap_allocated = 0;
+
+    /* Capture the calling thread's effective credential override (if any) into
+     * the request, so the worker thread authorizes this operation as the
+     * intended user rather than the client-global credential. */
+    {
+        const struct chimera_vfs_cred *eff = chimera_posix_effective_cred();
+
+        if (eff) {
+            req->req_cred = *eff;
+            req->has_cred = 1;
+        } else {
+            req->has_cred = 0;
+        }
+    }
 } // chimera_posix_completion_init
 
 static FORCE_INLINE void
@@ -233,12 +275,65 @@ chimera_posix_to_chimera_flags(int flags)
         out |= CHIMERA_VFS_OPEN_DIRECTORY;
     }
 
+    if (flags & O_TRUNC) {
+        out |= CHIMERA_VFS_OPEN_TRUNCATE;
+    }
+
+#ifdef O_NOFOLLOW
+    if (flags & O_NOFOLLOW) {
+        out |= CHIMERA_VFS_OPEN_NOFOLLOW;
+    }
+#endif /* ifdef O_NOFOLLOW */
+
     if ((flags & O_ACCMODE) == O_RDONLY) {
         out |= CHIMERA_VFS_OPEN_READ_ONLY;
+    } else if ((flags & O_ACCMODE) == O_WRONLY) {
+        out |= CHIMERA_VFS_OPEN_WRITE_ONLY;
+    } else { /* O_RDWR: request both read and write access */
+        out |= CHIMERA_VFS_OPEN_READ_ONLY | CHIMERA_VFS_OPEN_WRITE_ONLY;
     }
 
     return out;
 } // chimera_posix_to_chimera_flags
+
+/* Initialize a create-path set_attr to request the given creation mode, with
+ * the calling thread's umask applied to the permission bits.  umask is masked
+ * to 0777, so file-type and special bits in `mode` (e.g. for mknod) survive. */
+static FORCE_INLINE void
+chimera_posix_set_create_mode(
+    struct chimera_vfs_attrs *sa,
+    mode_t                    mode)
+{
+    sa->va_req_mask = 0;
+    sa->va_set_mask = CHIMERA_VFS_ATTR_MODE;
+    sa->va_mode     = mode & ~chimera_posix_effective_umask();
+} // chimera_posix_set_create_mode
+
+/* Initialize a create-path set_attr that carries no explicit mode (backend
+ * default applies). */
+static FORCE_INLINE void
+chimera_posix_no_create_mode(struct chimera_vfs_attrs *sa)
+{
+    sa->va_req_mask = 0;
+    sa->va_set_mask = 0;
+} // chimera_posix_no_create_mode
+
+/* Validate a caller-supplied pathname length before it is copied into a fixed
+ * CHIMERA_VFS_PATH_MAX request buffer.  Returns the length on success; on a path
+ * that would not fit (>= CHIMERA_VFS_PATH_MAX including the terminating null)
+ * sets errno=ENAMETOOLONG and returns -1.  This both yields the POSIX errno and
+ * prevents a buffer overflow of the request path field. */
+static FORCE_INLINE int
+chimera_posix_check_path(const char *path)
+{
+    size_t len = strlen(path);
+
+    if (len >= CHIMERA_VFS_PATH_MAX) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    return (int) len;
+} /* chimera_posix_check_path */
 
 static FORCE_INLINE int
 chimera_posix_fd_alloc(
@@ -274,6 +369,7 @@ chimera_posix_fd_alloc(
     entry->eof_flag      = 0;
     entry->error_flag    = 0;
     entry->ungetc_char   = -1;
+    entry->oflags        = 0;
 
     return fd;
 } // chimera_posix_fd_alloc

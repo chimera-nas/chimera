@@ -27,6 +27,7 @@
 #include "vfs/vfs_pnfs.h"
 #include "vfs/vfs_mount_table.h"
 #include "vfs/memfs/memfs.h"
+#include "vfs/memkv/memkv.h"
 #include "vfs/linux/linux.h"
 
 #ifdef HAVE_IO_URING
@@ -407,6 +408,62 @@ chimera_vfs_spawn_delegation_pool(
     return pool;
 } /* chimera_vfs_spawn_delegation_pool */
 
+/*
+ * Bring up the liburcu call_rcu reclaim workers.
+ *
+ * nworkers <= 0 (or >= the CPU count) requests one worker per CPU via liburcu's
+ * create_all_cpu_call_rcu_data() -- maximum reclaim parallelism, but hundreds of
+ * threads on a many-core host.  A smaller positive nworkers creates exactly that
+ * many workers and round-robins every CPU onto them, capping thread/memory
+ * overhead (and teardown cost) for short-lived or lightly-loaded instances.
+ * Best-effort throughout: any failure leaves liburcu's single default worker in
+ * place, which is correct, just slower to reclaim.
+ */
+static void
+chimera_vfs_create_call_rcu_workers(int nworkers)
+{
+    long                   ncpu = sysconf(_SC_NPROCESSORS_CONF);
+    struct call_rcu_data **workers;
+
+    if (nworkers <= 0 || (ncpu > 0 && nworkers >= ncpu)) {
+        if (create_all_cpu_call_rcu_data(0) != 0) {
+            chimera_vfs_error("Failed to create per-CPU call_rcu workers; "
+                              "falling back to the default RCU reclaim thread");
+        }
+        return;
+    }
+
+    if (ncpu <= 0) {
+        /* Unknown CPU count -- nothing to map workers onto; keep the default. */
+        return;
+    }
+
+    workers = calloc(nworkers, sizeof(*workers));
+    if (!workers) {
+        return;
+    }
+
+    for (int i = 0; i < nworkers; i++) {
+        workers[i] = create_call_rcu_data(0, -1);
+        if (!workers[i]) {
+            chimera_vfs_error("Failed to create call_rcu worker %d/%d; "
+                              "falling back to the default RCU reclaim thread", i, nworkers);
+            /* Tear down the ones we did create and bail to the default worker. */
+            for (int j = 0; j < i; j++) {
+                call_rcu_data_free(workers[j]);
+            }
+            free(workers);
+            return;
+        }
+    }
+
+    for (long cpu = 0; cpu < ncpu; cpu++) {
+        set_cpu_call_rcu_data(cpu, workers[cpu % nworkers]);
+    }
+
+    free(workers);
+} /* chimera_vfs_create_call_rcu_workers */
+
 SYMBOL_EXPORT struct chimera_vfs *
 chimera_vfs_init(
     int                                  num_sync_delegation_threads,
@@ -415,6 +472,7 @@ chimera_vfs_init(
     int                                  num_modules,
     const char                          *kv_module_name,
     int                                  cache_ttl,
+    int                                  num_rcu_reclaim_threads,
     struct prometheus_metrics           *metrics)
 {
     struct chimera_vfs        *vfs;
@@ -426,15 +484,14 @@ chimera_vfs_init(
     /* Bring up the process-wide TSC clock before any cache/timestamp use. */
     chimera_vfs_clock_init();
 
-    /* Scale RCU reclaim across CPUs: spawn one call_rcu worker per CPU so the
-     * fungible-cache retire callbacks (attr/name/rpl) keep up with per-request
-     * churn.  Without this liburcu uses a single default worker for the whole
-     * process.  Best-effort -- on failure call_rcu falls back to that default
-     * worker. */
-    if (create_all_cpu_call_rcu_data(0) != 0) {
-        chimera_vfs_error("Failed to create per-CPU call_rcu workers; "
-                          "falling back to the default RCU reclaim thread");
-    }
+    /* Scale RCU reclaim so the fungible-cache retire callbacks (attr/name/rpl)
+     * keep up with per-request churn; without dedicated workers liburcu uses a
+     * single default worker for the whole process.  num_rcu_reclaim_threads <= 0
+     * means one worker per CPU (the default); a positive value caps the worker
+     * count, which bounds thread/memory overhead and process-teardown cost on
+     * many-core hosts (e.g. short-lived CI test daemons).  Best-effort -- on
+     * failure call_rcu falls back to the default worker. */
+    chimera_vfs_create_call_rcu_workers(num_rcu_reclaim_threads);
 
     vfs = calloc(1, sizeof(*vfs));
 
@@ -517,16 +574,39 @@ chimera_vfs_init(
         chimera_vfs_register(vfs, module, module_cfgs[i].config_data);
     }
 
-    /* Set up KV module - default to memfs if not specified */
-    effective_kv_module = (kv_module_name && kv_module_name[0] != '\0') ? kv_module_name : "memfs";
+    /* Set up the default KV module - a KV-only backend (memkv or sqlite) that
+     * backs the global KV API and stores handle-state/KV records on behalf of
+     * filesystem backends that cannot persist them natively.  Defaults to the
+     * in-memory memkv when not specified. */
+    effective_kv_module = (kv_module_name && kv_module_name[0] != '\0') ? kv_module_name : "memkv";
 
-    /* Find and validate the KV module */
+    /* Find the KV module among those already registered. */
     vfs->kv_module = NULL;
     for (int i = 0; i < CHIMERA_VFS_FH_MAGIC_MAX; i++) {
         if (vfs->modules[i] && strcmp(vfs->modules[i]->name, effective_kv_module) == 0) {
             vfs->kv_module = vfs->modules[i];
             break;
         }
+    }
+
+    /* The default KV is a VFS-core facility, not a share backend, so callers
+     * need not list it among module_cfgs.  If it wasn't explicitly registered,
+     * auto-register it from its built-in symbol (vfs_memkv / vfs_sqlite, linked
+     * into chimera_vfs). */
+    if (!vfs->kv_module) {
+        if (strcmp(effective_kv_module, "memkv") == 0) {
+            /* memkv is built into chimera_vfs; reference it directly so the
+            * symbol is always retained regardless of linker --as-needed. */
+            module = &vfs_memkv;
+        } else {
+            snprintf(modsym, sizeof(modsym), "vfs_%s", effective_kv_module);
+            module = dlsym(RTLD_DEFAULT, modsym);
+        }
+        chimera_vfs_abort_if(!module,
+                             "KV module '%s' not found (symbol vfs_%s)",
+                             effective_kv_module, effective_kv_module);
+        chimera_vfs_register(vfs, module, NULL);
+        vfs->kv_module = vfs->modules[module->fh_magic];
     }
 
     chimera_vfs_abort_if(!vfs->kv_module,
@@ -577,6 +657,24 @@ chimera_vfs_fh_is_plausible(
     return chimera_vfs_get_module(thread, fh, fhlen) != NULL;
 } /* chimera_vfs_fh_is_plausible */
 
+SYMBOL_EXPORT int
+chimera_vfs_can_persist_handle_state(
+    struct chimera_vfs_thread      *thread,
+    struct chimera_vfs_open_handle *handle)
+{
+    if (!handle || !handle->vfs_module) {
+        return 0;
+    }
+
+    /* Either the backend persists handle-state atomically with the open, or the
+     * VFS core can persist it to the default KV on the backend's behalf. */
+    if (handle->vfs_module->capabilities & CHIMERA_VFS_CAP_ATOMIC_HANDLE_STATE) {
+        return 1;
+    }
+
+    return thread->vfs->kv_module != NULL;
+} /* chimera_vfs_can_persist_handle_state */
+
 /* Capabilities of the backend module owning fh, or 0 if no mount matches.
  * Lets callers without an open handle (e.g. the NFS attribute marshaller)
  * learn a file's backend pNFS capabilities. */
@@ -590,6 +688,138 @@ chimera_vfs_module_capabilities(
 
     return module ? module->capabilities : 0;
 } /* chimera_vfs_module_capabilities */
+
+/* Upper bound on the helper threads used to tear the per-CPU call_rcu workers
+ * down in parallel (see chimera_vfs_free_all_cpu_call_rcu_data_parallel). */
+#define CHIMERA_RCU_TEARDOWN_MAX_THREADS 64
+
+struct chimera_rcu_teardown_ctx {
+    pthread_t              thread;
+    struct call_rcu_data **crdps;
+    int                    count;
+    int                    started;
+};
+
+static void *
+chimera_vfs_rcu_teardown_worker(void *arg)
+{
+    struct chimera_rcu_teardown_ctx *ctx = arg;
+
+    for (int i = 0; i < ctx->count; i++) {
+        call_rcu_data_free(ctx->crdps[i]);
+    }
+    return NULL;
+} /* chimera_vfs_rcu_teardown_worker */
+
+/*
+ * Tear down the per-CPU call_rcu workers created by create_all_cpu_call_rcu_data().
+ *
+ * liburcu's free_all_cpu_call_rcu_data() joins the workers one at a time, and
+ * each worker can take up to its ~10ms idle poll interval to notice the stop
+ * request.  On a many-core host that serial join dominates process shutdown
+ * (~4s with several hundred workers on a 384-core box), which in turn is paid
+ * on every short-lived test daemon.
+ *
+ * The joins are mutually independent, so we replicate liburcu's teardown but
+ * fan the call_rcu_data_free() calls out across a bounded thread pool.  The
+ * per-worker poll latencies then overlap instead of summing, collapsing the
+ * teardown to tens of milliseconds while keeping shutdown clean (no SIGKILL),
+ * so AddressSanitizer leak/UAF checks still run on a graceful exit.
+ */
+static void
+chimera_vfs_free_all_cpu_call_rcu_data_parallel(void)
+{
+    long                             ncpu = sysconf(_SC_NPROCESSORS_CONF);
+    struct call_rcu_data            *defaultcrdp;
+    struct call_rcu_data           **crdps;
+    struct chimera_rcu_teardown_ctx *ctx;
+    int                              n = 0, nthreads, per, idx;
+
+    if (ncpu <= 0) {
+        free_all_cpu_call_rcu_data();
+        return;
+    }
+
+    defaultcrdp = get_default_call_rcu_data();
+    crdps       = calloc(ncpu, sizeof(*crdps));
+
+    if (!crdps) {
+        free_all_cpu_call_rcu_data();
+        return;
+    }
+
+    /* Detach each per-CPU worker from the registry (cheap, no join) and collect
+     * the unique crdps to free.  Skip the shared default worker -- liburcu owns
+     * its lifetime and call_rcu_data_free() refuses to free it anyway. */
+    for (long cpu = 0; cpu < ncpu; cpu++) {
+        struct call_rcu_data *crdp = get_cpu_call_rcu_data(cpu);
+        int                   dup  = 0;
+
+        if (crdp == NULL || crdp == defaultcrdp) {
+            continue;
+        }
+
+        set_cpu_call_rcu_data(cpu, NULL);
+
+        for (int i = 0; i < n; i++) {
+            if (crdps[i] == crdp) {
+                dup = 1;
+                break;
+            }
+        }
+
+        if (!dup) {
+            crdps[n++] = crdp;
+        }
+    }
+
+    if (n == 0) {
+        free(crdps);
+        return;
+    }
+
+    /* Wait for any in-flight call_rcu() that read an old per-CPU pointer to
+     * become quiescent before freeing the workers -- mirrors the synchronize_rcu()
+     * inside liburcu's own free_all_cpu_call_rcu_data(). */
+    synchronize_rcu();
+
+    nthreads = n < CHIMERA_RCU_TEARDOWN_MAX_THREADS ? n : CHIMERA_RCU_TEARDOWN_MAX_THREADS;
+    ctx      = calloc(nthreads, sizeof(*ctx));
+
+    if (!ctx) {
+        /* Fall back to a serial free of everything we detached. */
+        for (int i = 0; i < n; i++) {
+            call_rcu_data_free(crdps[i]);
+        }
+        free(crdps);
+        return;
+    }
+
+    per = (n + nthreads - 1) / nthreads;
+    idx = 0;
+
+    for (int t = 0; t < nthreads && idx < n; t++) {
+        ctx[t].crdps = &crdps[idx];
+        ctx[t].count = (idx + per <= n) ? per : (n - idx);
+        idx         += ctx[t].count;
+
+        if (pthread_create(&ctx[t].thread, NULL, chimera_vfs_rcu_teardown_worker, &ctx[t]) == 0) {
+            ctx[t].started = 1;
+        } else {
+            /* Spawn failed -- free this chunk inline so nothing leaks. */
+            chimera_vfs_rcu_teardown_worker(&ctx[t]);
+        }
+    }
+
+    for (int t = 0; t < nthreads; t++) {
+        if (ctx[t].started) {
+            pthread_join(ctx[t].thread, NULL);
+        }
+    }
+
+    free(ctx);
+    free(crdps);
+} /* chimera_vfs_free_all_cpu_call_rcu_data_parallel */
 
 SYMBOL_EXPORT void
 chimera_vfs_destroy(struct chimera_vfs *vfs)
@@ -673,8 +903,10 @@ chimera_vfs_destroy(struct chimera_vfs *vfs)
     chimera_vfs_open_cache_destroy(vfs->vfs_open_file_cache);
 
     /* All RCU caches are destroyed above and each drained via rcu_barrier(), so
-     * no callbacks remain; tear down the per-CPU call_rcu workers. */
-    free_all_cpu_call_rcu_data();
+     * no callbacks remain; tear down the per-CPU call_rcu workers.  Use the
+     * parallel teardown -- liburcu's free_all_cpu_call_rcu_data() joins them
+     * serially, which dominates shutdown on many-core hosts. */
+    chimera_vfs_free_all_cpu_call_rcu_data_parallel();
 
     if (vfs->metrics.op_latency) {
         for (int i = 0; i < CHIMERA_VFS_OP_NUM; i++) {

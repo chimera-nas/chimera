@@ -16,7 +16,12 @@
 #include "vfs/vfs_state.h"
 
 /* Convert NLM length (UINT64_MAX == to-EOF) to POSIX length (0 == to-EOF) */
-#define NLM_TO_POSIX_LEN(l) ((l) == UINT64_MAX ? 0 : (l))
+#define NLM_TO_POSIX_LEN(l)     ((l) == UINT64_MAX ? 0 : (l))
+
+/* NLM keeps its internal byte-range length in the POSIX convention (0 == to
+ * EOF), but the VFS range layer uses UINT64_MAX for to-EOF (length 0 is a real
+ * zero-byte range).  Translate when handing a length to a VFS lease/probe. */
+#define NLM_POSIX_LEN_TO_VFS(l) ((l) == 0 ? UINT64_MAX : (l))
 
 /* Map NLM caller_name (hostname) to a vfs_state owner.client_key. */
 static inline uint64_t
@@ -158,7 +163,7 @@ chimera_nfs_nlm4_test_open_cb(
                              ? CHIMERA_VFS_LEASE_MODE_W
                              : CHIMERA_VFS_LEASE_MODE_R;
     probe.offset           = ctx->offset;
-    probe.length           = ctx->length;
+    probe.length           = NLM_POSIX_LEN_TO_VFS(ctx->length);
     probe.owner.protocol   = CHIMERA_VFS_LEASE_PROTO_NLM;
     probe.owner.client_key = nlm_owner_client_key(ctx->caller_name);
     probe.owner.owner_lo   = nlm_owner_owner_lo(ctx->oh, ctx->oh_len, ctx->svid);
@@ -176,8 +181,9 @@ chimera_nfs_nlm4_test_open_cb(
         res.test_stat.holder.oh.len   = 0;
         res.test_stat.holder.oh.data  = NULL;
         res.test_stat.holder.l_offset = conflict ? conflict->offset : 0;
-        conflict_len                  = (conflict && conflict->length)
-                                          ? conflict->length : UINT64_MAX;
+        /* conflict->length already uses UINT64_MAX for a to-EOF holder, which
+         * is exactly the NLM to-EOF sentinel. */
+        conflict_len               = conflict ? conflict->length : UINT64_MAX;
         res.test_stat.holder.l_len = conflict_len;
     }
 
@@ -359,7 +365,7 @@ chimera_nfs_nlm4_lock_open_cb(
                                     ? CHIMERA_VFS_LEASE_MODE_W
                                     : CHIMERA_VFS_LEASE_MODE_R;
     entry->lease.offset           = entry->offset;
-    entry->lease.length           = entry->length;
+    entry->lease.length           = NLM_POSIX_LEN_TO_VFS(entry->length);
     entry->lease.owner.protocol   = CHIMERA_VFS_LEASE_PROTO_NLM;
     entry->lease.owner.client_key = nlm_owner_client_key(ctx->client->hostname);
     entry->lease.owner.owner_lo   = nlm_owner_owner_lo(entry->oh, entry->oh_len,

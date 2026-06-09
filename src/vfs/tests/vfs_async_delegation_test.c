@@ -4,7 +4,7 @@
 
 /*
  * Exercises the async delegation thread pool with a non-BLOCKING backend
- * (memfs). Verifies:
+ * (memkv). Verifies:
  *   - Operations complete end-to-end when routed through the async pool.
  *   - Module dispatch runs on a delegation thread, not the caller thread.
  *   - Same hash key consistently lands on the same delegation thread.
@@ -266,7 +266,7 @@ run_phase(
     assert(metrics != NULL);
 
     memset(module_cfgs, 0, sizeof(module_cfgs));
-    strncpy(module_cfgs[0].module_name, "memfs", sizeof(module_cfgs[0].module_name) - 1);
+    strncpy(module_cfgs[0].module_name, "memkv", sizeof(module_cfgs[0].module_name) - 1);
 
     ctx.evpl = evpl_create(NULL);
     assert(ctx.evpl != NULL);
@@ -278,6 +278,7 @@ run_phase(
         1,
         "",
         60,
+        0,                  /* num_rcu_reclaim_threads: 0 = one per CPU */
         metrics);
     assert(ctx.vfs != NULL);
 

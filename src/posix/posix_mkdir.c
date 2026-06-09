@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -32,8 +32,6 @@ chimera_posix_mkdir(
     const char *path,
     mode_t      mode)
 {
-    (void) mode;
-
     struct chimera_posix_client    *posix  = chimera_posix_get_global();
     struct chimera_posix_worker    *worker = chimera_posix_choose_worker(posix);
     struct chimera_client_request   req;
@@ -41,10 +39,14 @@ chimera_posix_mkdir(
     const char                     *slash;
     int                             path_len;
 
+    path_len = chimera_posix_check_path(path);
+    if (path_len < 0) {
+        return -1;
+    }
+
     chimera_posix_completion_init(&comp, &req);
 
-    path_len = strlen(path);
-    slash    = rindex(path, '/');
+    slash = rindex(path, '/');
 
     req.opcode             = CHIMERA_CLIENT_OP_MKDIR;
     req.mkdir.callback     = chimera_posix_mkdir_callback;
@@ -57,6 +59,8 @@ chimera_posix_mkdir(
     }
 
     req.mkdir.name_offset = slash ? slash - path : -1;
+
+    chimera_posix_set_create_mode(&req.mkdir.set_attr, mode);
 
     memcpy(req.mkdir.path, path, path_len);
 

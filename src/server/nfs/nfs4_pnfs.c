@@ -87,17 +87,25 @@ pnfs_put_opaque(
 static uint32_t
 chimera_nfs4_encode_ff_device_addr(
     uint8_t    *buf,
-    const char *netid,
-    const char *uaddr,
+    const char *netid0,
+    const char *uaddr0,
+    const char *netid1,
+    const char *uaddr1,
     uint32_t    version,
     uint32_t    minorversion)
 {
-    void *p = buf;
+    void    *p         = buf;
+    uint32_t num_addrs = (netid1 && uaddr1 && uaddr1[0]) ? 2 : 1;
 
-    /* ffda_netaddrs: multipath_list4 (a netaddr4<>) with one entry. */
-    pnfs_put_u32(&p, 1);
-    pnfs_put_opaque(&p, netid, strlen(netid));
-    pnfs_put_opaque(&p, uaddr, strlen(uaddr));
+    /* ffda_netaddrs: multipath_list4 (a netaddr4<>).  A client picks any entry
+     * it can reach; the preferred transport (e.g. rdma) is listed first. */
+    pnfs_put_u32(&p, num_addrs);
+    pnfs_put_opaque(&p, netid0, strlen(netid0));
+    pnfs_put_opaque(&p, uaddr0, strlen(uaddr0));
+    if (num_addrs == 2) {
+        pnfs_put_opaque(&p, netid1, strlen(netid1));
+        pnfs_put_opaque(&p, uaddr1, strlen(uaddr1));
+    }
 
     /* ffda_versions<>: one entry advertising the configured NFS version
      * (NFSv3 or NFSv4.x), loosely coupled. */
@@ -151,11 +159,21 @@ chimera_nfs4_getdeviceinfo(
 
     if (args->gdia_layout_type == LAYOUT4_FLEX_FILES &&
         (ds = chimera_vfs_pnfs_find_device(vfs, args->gdia_device_id)) != NULL) {
-        /* Orchestrated flex: device lives in the chimera DS table. */
+        /* Orchestrated flex: device lives in the chimera DS table.  When an RDMA
+         * uaddr is configured, advertise it first (preferred) with the primary
+         * (tcp) netaddr as a fallback. */
         out_type = LAYOUT4_FLEX_FILES;
-        body_len = chimera_nfs4_encode_ff_device_addr(body, ds->netid, ds->uaddr,
-                                                      (uint32_t) ds->version,
-                                                      (uint32_t) ds->minorversion);
+        if (ds->rdma_uaddr[0]) {
+            body_len = chimera_nfs4_encode_ff_device_addr(body, "rdma", ds->rdma_uaddr,
+                                                          ds->netid, ds->uaddr,
+                                                          (uint32_t) ds->version,
+                                                          (uint32_t) ds->minorversion);
+        } else {
+            body_len = chimera_nfs4_encode_ff_device_addr(body, ds->netid, ds->uaddr,
+                                                          NULL, NULL,
+                                                          (uint32_t) ds->version,
+                                                          (uint32_t) ds->minorversion);
+        }
     } else if (nfs_pnfs_devcache_find(&thread->shared->nfs4_pnfs_devcache,
                                       args->gdia_device_id, &dev)) {
         /* Backend-sourced: device came from a get_layout response. */
@@ -184,8 +202,9 @@ chimera_nfs4_getdeviceinfo(
                 break;
             default:
                 /* Backend-sourced flex device: not driven by the data_servers
-                 * config, so advertise NFSv3 as before. */
-                body_len = chimera_nfs4_encode_ff_device_addr(body, dev.netid, dev.uaddr, 3, 0);
+                 * config, so advertise NFSv3 over a single netaddr as before. */
+                body_len = chimera_nfs4_encode_ff_device_addr(body, dev.netid, dev.uaddr,
+                                                              NULL, NULL, 3, 0);
                 break;
         } /* switch */
     } else {

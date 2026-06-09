@@ -27,7 +27,7 @@ jobs:
     - name: Install reuse tool
       run: |
         pip install --upgrade pip -i http://repository.mdh.quantum.com/repository/pypi-proxy/simple/ --trusted-host repository.mdh.quantum.com
-        pip install reuse -i http://repository.mdh.quantum.com/repository/pypi-proxy/simple/ --trusted-host repository.mdh.quantum.com
+        pip install 'reuse[charset-normalizer]' -i http://repository.mdh.quantum.com/repository/pypi-proxy/simple/ --trusted-host repository.mdh.quantum.com
         
     - name: Run REUSE lint
       run: |

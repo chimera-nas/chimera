@@ -6,42 +6,45 @@
 # above the per-configuration build dirs (e.g. build/kvm/ alongside build/Release/).
 get_filename_component(BUILD_ROOT ${CMAKE_BINARY_DIR} DIRECTORY)
 
-# Optional registry root used as cache-from/cache-to for the inner
-# Dockerfile.kvm docker buildx build. When empty, build_vm_image.sh falls
-# back to a plain `docker build` (local cache only).
-set(KVM_IMAGE_CACHE_REGISTRY "" CACHE STRING
-    "Registry root (e.g. host:port/path) for sharing the inner KVM image buildx cache. Empty disables it.")
+# Prebuilt KVM guest images are published as OCI artifacts (vmlinuz + initrd +
+# rootfs.qcow2) by the chimera-nas/kvm-test-base repo, and pulled here with
+# ORAS instead of being built locally. We depend only on the published
+# artifacts, not on that repo's source.
+#
+# NOTE: this first pass pulls directly from the public GHCR registry. Internal
+# registry caching will be layered on in a follow-up.
+set(KVM_IMAGE_REGISTRY "ghcr.io/chimera-nas/kvm-test-base" CACHE STRING
+    "OCI registry base that hosts the prebuilt KVM guest images.")
+# Pinned version of the prebuilt images to consume; bump to adopt a newer
+# kvm-test-base release.  v1.1.0 drops the 22.04 generic variant (see the
+# KVM_IMAGES note below); v1.0.0 still has all four for older checkouts.
+set(KVM_IMAGE_VERSION "v1.1.0" CACHE STRING
+    "Version tag of the KVM guest images to consume.")
 
+# Note: the 22.04 generic (non-HWE) kernel does not build the virtio block
+# driver in -- it can only mount the root disk from its initrd.  Every other
+# kernel here has virtio built in, so the wrappers boot with no initrd (saving
+# ~0.9s/test, see kvm_*_test_wrapper.sh).  Rather than special-case an initrd
+# for one image, 22.04 is covered by its HWE kernel only.
 set(KVM_IMAGES
-    "ubuntu2404|24.04|noble|linux-image-generic"
-    "ubuntu2404_hwe|24.04|noble|linux-image-generic-hwe-24.04"
-    "ubuntu2204|22.04|jammy|linux-image-generic"
-    "ubuntu2204_hwe|22.04|jammy|linux-image-generic-hwe-22.04"
+    ubuntu2404
+    ubuntu2404_hwe
+    ubuntu2204_hwe
 )
 
-foreach(image_spec ${KVM_IMAGES})
-    string(REPLACE "|" ";" image_parts "${image_spec}")
-    list(GET image_parts 0 IMAGE_NAME)
-    list(GET image_parts 1 UBUNTU_VERSION)
-    list(GET image_parts 2 UBUNTU_VERSION_CODENAME)
-    list(GET image_parts 3 KERNEL_PACKAGE)
-
+foreach(IMAGE_NAME ${KVM_IMAGES})
     set(IMAGE_DIR ${BUILD_ROOT}/kvm/${IMAGE_NAME})
 
     add_custom_command(
         OUTPUT ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/initrd ${IMAGE_DIR}/rootfs.qcow2
         COMMAND ${CMAKE_COMMAND} -E env
-                KVM_CACHE_REGISTRY=${KVM_IMAGE_CACHE_REGISTRY}
-                bash ${CMAKE_CURRENT_SOURCE_DIR}/build_vm_image.sh
+                KVM_IMAGE_REGISTRY=${KVM_IMAGE_REGISTRY}
+                KVM_IMAGE_VERSION=${KVM_IMAGE_VERSION}
+                bash ${CMAKE_CURRENT_SOURCE_DIR}/fetch_vm_image.sh
                 ${IMAGE_DIR}
-                ${CMAKE_CURRENT_SOURCE_DIR}/Dockerfile.kvm
-                ${CMAKE_SOURCE_DIR}
-                UBUNTU_VERSION=${UBUNTU_VERSION}
-                UBUNTU_VERSION_CODENAME=${UBUNTU_VERSION_CODENAME}
-                KERNEL_PACKAGE=${KERNEL_PACKAGE}
-        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/Dockerfile.kvm
-                ${CMAKE_CURRENT_SOURCE_DIR}/init.sh
-        COMMENT "Building KVM test image (${IMAGE_NAME})"
+                ${IMAGE_NAME}
+        COMMENT "Fetching KVM test image (${IMAGE_NAME}) @ ${KVM_IMAGE_VERSION}"
+        VERBATIM
     )
 
     add_custom_target(kvm_${IMAGE_NAME}_image ALL

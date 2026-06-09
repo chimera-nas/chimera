@@ -5,8 +5,9 @@
 /*
  * End-to-end check that the VFS-layer access gate actually enforces the ACL on
  * an engine-authoritative backend (memfs): the owner of a 0600 file may
- * read/write/chmod it, and a non-owner is denied (EACCES) on read, write, and
- * chmod -- the cross-protocol-agnostic enforcement the VFS gate provides.
+ * read/write/chmod it, and a non-owner is denied on read, write (EACCES) and
+ * chmod (EPERM, ownership required) -- the cross-protocol-agnostic enforcement
+ * the VFS gate provides.
  */
 
 #include <stdio.h>
@@ -361,7 +362,7 @@ main(
     char **argv)
 {
     struct test_ctx               ctx = { 0 };
-    struct chimera_vfs_module_cfg module_cfgs[1];
+    struct chimera_vfs_module_cfg module_cfgs[2];
     struct prometheus_metrics    *metrics;
     struct chimera_vfs_cred       owner, other;
     struct chimera_vfs_attrs      sattr;
@@ -380,11 +381,12 @@ main(
 
     memset(module_cfgs, 0, sizeof(module_cfgs));
     strncpy(module_cfgs[0].module_name, "memfs", sizeof(module_cfgs[0].module_name) - 1);
+    strncpy(module_cfgs[1].module_name, "memkv", sizeof(module_cfgs[1].module_name) - 1);
 
     ctx.evpl = evpl_create(NULL);
     assert(ctx.evpl != NULL);
 
-    ctx.vfs = chimera_vfs_init(0, 0, module_cfgs, 1, "memfs", 60, metrics);
+    ctx.vfs = chimera_vfs_init(0, 0, module_cfgs, 2, "memkv", 60, 0, metrics);
     assert(ctx.vfs != NULL);
 
     ctx.vfs_thread = chimera_vfs_thread_init(ctx.evpl, ctx.vfs);
@@ -442,8 +444,10 @@ main(
     assert(write_as(&ctx, &other, file_fh, file_fh_len) == CHIMERA_VFS_EACCES);
     TEST_PASS("write: owner allowed, non-owner denied (0600)");
 
-    /* chmod requires WRITE_ACL: the owner holds it implicitly, a non-owner does not. */
-    assert(chmod_as(&ctx, &other, file_fh, file_fh_len, 0640) == CHIMERA_VFS_EACCES);
+    /* chmod requires WRITE_ACL: the owner holds it implicitly, a non-owner does
+     * not.  POSIX chmod(2) by a non-owner is EPERM (ownership required), not
+     * EACCES. */
+    assert(chmod_as(&ctx, &other, file_fh, file_fh_len, 0640) == CHIMERA_VFS_EPERM);
     assert(chmod_as(&ctx, &owner, file_fh, file_fh_len, 0640) == CHIMERA_VFS_OK);
     TEST_PASS("chmod: non-owner denied, owner allowed");
 

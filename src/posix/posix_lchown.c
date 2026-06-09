@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -24,7 +24,7 @@ chimera_posix_lchown_exec(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
-    chimera_dispatch_setattr(thread, request);
+    chimera_dispatch_lsetattr(thread, request);
 } /* chimera_posix_lchown_exec */
 
 SYMBOL_EXPORT int
@@ -39,9 +39,12 @@ chimera_posix_lchown(
     struct chimera_posix_completion comp;
     int                             path_len;
 
-    chimera_posix_completion_init(&comp, &req);
+    path_len = chimera_posix_check_path(path);
+    if (path_len < 0) {
+        return -1;
+    }
 
-    path_len = strlen(path);
+    chimera_posix_completion_init(&comp, &req);
 
     req.opcode               = CHIMERA_CLIENT_OP_SETATTR;
     req.setattr.callback     = chimera_posix_lchown_callback;

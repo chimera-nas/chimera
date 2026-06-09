@@ -55,7 +55,7 @@ main(
     struct chimera_vfs           *vfs;
     struct chimera_vfs_thread    *thread;
     struct evpl                  *evpl;
-    struct chimera_vfs_module_cfg module_cfgs[1];
+    struct chimera_vfs_module_cfg module_cfgs[2];
     struct prometheus_metrics    *metrics;
     struct probe                  p;
     struct passwd                *root_pw;
@@ -68,11 +68,13 @@ main(
     memset(module_cfgs, 0, sizeof(module_cfgs));
     strncpy(module_cfgs[0].module_name, "memfs",
             sizeof(module_cfgs[0].module_name) - 1);
+    strncpy(module_cfgs[1].module_name, "memkv",
+            sizeof(module_cfgs[1].module_name) - 1);
 
     evpl = evpl_create(NULL);
     assert(evpl != NULL);
 
-    vfs = chimera_vfs_init(0, 0, module_cfgs, 1, "memfs", 60, metrics);
+    vfs = chimera_vfs_init(0, 0, module_cfgs, 2, "memkv", 60, 0, metrics);
     assert(vfs != NULL);
 
     thread = chimera_vfs_thread_init(evpl, vfs);

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -105,7 +105,9 @@ chimera_posix_linkat(
     chimera_posix_completion_destroy(&comp);
 
     if (err) {
-        errno = err;
+        /* POSIX link(2) reports a directory source as EPERM; the VFS surfaces
+         * the physical condition as EISDIR (for NFS4/SMB protocol fidelity). */
+        errno = (err == EISDIR) ? EPERM : err;
         return -1;
     }
 

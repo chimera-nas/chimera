@@ -75,6 +75,19 @@ chimera_smb_cancel(struct chimera_smb_request *request)
 
     if (match) {
         chimera_smb_notify_cancel(match);
+    } else if (async) {
+        /* Search requests pending an async-interim (e.g. a CREATE blocked on a
+         * lease break).  The underlying wait is not yet cancellable from
+         * SMB2_CANCEL -- absorb it silently; the request still completes when its
+         * break acks.  A future phase can abort the parked open here. */
+        struct chimera_smb_request *parked;
+
+        for (parked = conn->parked_requests; parked;
+             parked = parked->async.park_next) {
+            if (parked->async_id == target_id) {
+                break;
+            }
+        }
     }
 
     /* CANCEL has no response per MS-SMB2.  Use STATUS_PENDING so the

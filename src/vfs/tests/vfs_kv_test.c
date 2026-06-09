@@ -349,14 +349,66 @@ test_nonexistent_key(struct test_ctx *ctx)
     TEST_PASS("operations on nonexistent key return ENOENT");
 } /* test_nonexistent_key */
 
+/* Run the full KV test suite against a single KV-only backend. */
+static void
+run_suite(
+    const char                *kv_name,
+    const char                *kv_config,
+    struct prometheus_metrics *metrics)
+{
+    struct test_ctx               ctx = { 0 };
+    struct chimera_vfs_module_cfg module_cfgs[1];
+
+    memset(module_cfgs, 0, sizeof(module_cfgs));
+    strncpy(module_cfgs[0].module_name, kv_name, sizeof(module_cfgs[0].module_name) - 1);
+    if (kv_config) {
+        strncpy(module_cfgs[0].config_data, kv_config, sizeof(module_cfgs[0].config_data) - 1);
+    }
+
+    ctx.evpl = evpl_create(NULL);
+    assert(ctx.evpl != NULL);
+
+    /* 4 sync delegation threads so a CAP_BLOCKING backend (sqlite) is exercised
+     * through the delegation pool and completion bounce-back. */
+    ctx.vfs = chimera_vfs_init(
+        4,              /* num_sync_delegation_threads */
+        0,              /* num_async_delegation_threads */
+        module_cfgs,
+        1,              /* num_modules */
+        kv_name,        /* kv_module_name */
+        60,             /* cache_ttl */
+        0,              /* num_rcu_reclaim_threads: 0 = one per CPU */
+        metrics);
+    assert(ctx.vfs != NULL);
+
+    ctx.vfs_thread = chimera_vfs_thread_init(ctx.evpl, ctx.vfs);
+    assert(ctx.vfs_thread != NULL);
+
+    fprintf(stderr, "Running KV API tests with %s backend...\n", kv_name);
+
+    test_put_get_delete(&ctx);
+    test_update_value(&ctx);
+    test_search_keys(&ctx);
+    test_binary_keys_values(&ctx);
+    test_nonexistent_key(&ctx);
+
+    fprintf(stderr, "All KV tests passed for %s!\n", kv_name);
+
+    chimera_vfs_thread_destroy(ctx.vfs_thread);
+    chimera_vfs_destroy(ctx.vfs);
+    evpl_destroy(ctx.evpl);
+} /* run_suite */
+
 int
 main(
     int    argc,
     char **argv)
 {
-    struct test_ctx               ctx = { 0 };
-    struct chimera_vfs_module_cfg module_cfgs[2];
-    struct prometheus_metrics    *metrics;
+    struct prometheus_metrics *metrics;
+    char                       tmpl[] = "/tmp/chimera_sqlite_kv_test_XXXXXX";
+    char                      *db_dir;
+    char                       sqlite_cfg[256];
+    char                       rmcmd[320];
 
     chimera_log_init();
 
@@ -364,45 +416,30 @@ main(
     metrics = prometheus_metrics_create(NULL, NULL, 0);
     assert(metrics != NULL);
 
-    /* Initialize memfs module config */
-    memset(module_cfgs, 0, sizeof(module_cfgs));
-    strncpy(module_cfgs[0].module_name, "memfs", sizeof(module_cfgs[0].module_name) - 1);
+    /* In-memory KV-only backend. */
+    run_suite("memkv", NULL, metrics);
 
-    /* Create event loop */
-    ctx.evpl = evpl_create(NULL);
-    assert(ctx.evpl != NULL);
+#ifdef CHIMERA_KV_TEST_SQLITE
+    /* Persistent sqlite KV-only backend (WAL, single table). */
+    db_dir = mkdtemp(tmpl);
+    assert(db_dir != NULL);
+    snprintf(sqlite_cfg, sizeof(sqlite_cfg), "{\"path\":\"%s/kv.db\"}", db_dir);
 
-    /* Initialize VFS with memfs as KV module (default) */
-    ctx.vfs = chimera_vfs_init(
-        4,              /* num_sync_delegation_threads */
-        0,              /* num_async_delegation_threads */
-        module_cfgs,
-        1,              /* num_modules */
-        "",             /* kv_module_name - empty means use default (memfs) */
-        60,             /* cache_ttl */
-        metrics);
+    run_suite("sqlite", sqlite_cfg, metrics);
 
-    assert(ctx.vfs != NULL);
-
-    /* Initialize VFS thread */
-    ctx.vfs_thread = chimera_vfs_thread_init(ctx.evpl, ctx.vfs);
-    assert(ctx.vfs_thread != NULL);
-
-    fprintf(stderr, "Running KV API tests with memfs backend...\n");
-
-    /* Run tests */
-    test_put_get_delete(&ctx);
-    test_update_value(&ctx);
-    test_search_keys(&ctx);
-    test_binary_keys_values(&ctx);
-    test_nonexistent_key(&ctx);
+    snprintf(rmcmd, sizeof(rmcmd), "rm -rf %s", db_dir);
+    if (system(rmcmd) != 0) {
+        fprintf(stderr, "warning: failed to remove %s\n", db_dir);
+    }
+#else  /* ifdef CHIMERA_KV_TEST_SQLITE */
+    (void) db_dir;
+    (void) tmpl;
+    (void) sqlite_cfg;
+    (void) rmcmd;
+#endif /* ifdef CHIMERA_KV_TEST_SQLITE */
 
     fprintf(stderr, "All KV tests passed!\n");
 
-    /* Cleanup */
-    chimera_vfs_thread_destroy(ctx.vfs_thread);
-    chimera_vfs_destroy(ctx.vfs);
-    evpl_destroy(ctx.evpl);
     prometheus_metrics_destroy(metrics);
 
     return 0;

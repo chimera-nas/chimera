@@ -221,6 +221,15 @@ chimera_smb_set_info(struct chimera_smb_request *request)
         return;
     }
 
+    /* MS-SMB2 §3.3.5.2.10: SET_INFO is a mutating op; reject a stale
+     * ChannelSequence with FILE_NOT_AVAILABLE. */
+    if (chimera_smb_channel_sequence_stale(request->set_info.open_file,
+                                           request->channel_sequence, 1)) {
+        chimera_smb_open_file_release(request, request->set_info.open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_FILE_NOT_AVAILABLE);
+        return;
+    }
+
     switch (request->set_info.info_type) {
         case SMB2_INFO_FILE:
             switch (request->set_info.info_class) {
@@ -251,7 +260,8 @@ chimera_smb_set_info(struct chimera_smb_request *request)
                     /* A size change fires FILE_NOTIFY_CHANGE_SIZE (and, via the
                      * advanced LastWriteTime below, FILE_NOTIFY_CHANGE_LAST_WRITE). */
                     request->set_info.notify_mask = CHIMERA_VFS_NOTIFY_SIZE_CHANGED |
-                        CHIMERA_VFS_NOTIFY_FILE_MODIFIED;
+                        CHIMERA_VFS_NOTIFY_FILE_MODIFIED |
+                        CHIMERA_VFS_NOTIFY_STREAM_SIZE;
 
                     /* Setting EndOfFile advances the LastWriteTime (it changes
                      * the file's data extent), unless this handle has taken
@@ -280,7 +290,8 @@ chimera_smb_set_info(struct chimera_smb_request *request)
                      * ChangeTime.  Both need the current size to decide, so this
                      * is resolved in the getattr callback. */
                     request->set_info.notify_mask = CHIMERA_VFS_NOTIFY_SIZE_CHANGED |
-                        CHIMERA_VFS_NOTIFY_FILE_MODIFIED;
+                        CHIMERA_VFS_NOTIFY_FILE_MODIFIED |
+                        CHIMERA_VFS_NOTIFY_STREAM_SIZE;
                     chimera_smb_unmarshal_end_of_file_info(&request->set_info.attrs, &request->set_info.vfs_attrs);
 
                     chimera_vfs_getattr(
