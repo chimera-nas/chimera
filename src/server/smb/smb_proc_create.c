@@ -304,6 +304,7 @@ chimera_smb_create_break_for_open(
     if (request->create.ctx_present_mask & CHIMERA_SMB_CREATE_CTX_RQLS) {
         memcpy(&io_owner.owner_lo, request->create.rqls.key, 8);
         memcpy(&io_owner.owner_hi, request->create.rqls.key + 8, 8);
+        io_owner.is_lease = 1;
     }
 
     if (phase == 1) {

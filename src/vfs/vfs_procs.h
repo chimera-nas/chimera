@@ -236,6 +236,18 @@ chimera_vfs_setattr(
     void                           *private_data);
 
 void
+chimera_vfs_setattr_owned(
+    struct chimera_vfs_thread            *thread,
+    const struct chimera_vfs_cred        *cred,
+    struct chimera_vfs_open_handle       *handle,
+    struct chimera_vfs_attrs             *set_attr,
+    uint64_t                              pre_attr_mask,
+    uint64_t                              post_attr_mask,
+    const struct chimera_vfs_lease_owner *io_owner,
+    chimera_vfs_setattr_callback_t        callback,
+    void                                 *private_data);
+
+void
 chimera_vfs_readdir(
     struct chimera_vfs_thread      *thread,
     const struct chimera_vfs_cred  *cred,

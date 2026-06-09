@@ -93,6 +93,14 @@ typedef void (*chimera_vfs_lease_revoked_cb_t)(
 
 struct chimera_vfs_lease_owner {
     uint32_t                        protocol;
+    /* For an SMB2 actor: 1 if this owner carries a lease key (an RqLs open or a
+     * write/open through a lease-holding handle), 0 for a plain non-lease open.
+     * A non-lease open/write by a client never recalls that client's OWN caching
+     * leases (the client is coherent with its own handles); a SECOND lease key
+     * from the same client still does (MS-SMB2 smb2.lease.complex1 /
+     * Leasing_*_SameLeaseKey), so the two are distinguished by this flag rather
+     * than by client_key alone.  Unused (0) for NFSv4 owners. */
+    uint8_t                         is_lease;
     uint64_t                        client_key;
     uint64_t                        owner_lo;
     uint64_t                        owner_hi;

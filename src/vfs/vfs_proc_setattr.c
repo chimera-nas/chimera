@@ -197,14 +197,15 @@ chimera_vfs_setattr_complete(struct chimera_vfs_request *request)
 
 static void
 chimera_vfs_setattr_dispatch(
-    struct chimera_vfs_thread      *thread,
-    const struct chimera_vfs_cred  *cred,
-    struct chimera_vfs_open_handle *handle,
-    struct chimera_vfs_attrs       *set_attr,
-    uint64_t                        pre_attr_mask,
-    uint64_t                        post_attr_mask,
-    chimera_vfs_setattr_callback_t  callback,
-    void                           *private_data)
+    struct chimera_vfs_thread            *thread,
+    const struct chimera_vfs_cred        *cred,
+    struct chimera_vfs_open_handle       *handle,
+    struct chimera_vfs_attrs             *set_attr,
+    uint64_t                              pre_attr_mask,
+    uint64_t                              post_attr_mask,
+    const struct chimera_vfs_lease_owner *io_owner,
+    chimera_vfs_setattr_callback_t        callback,
+    void                                 *private_data)
 {
     struct chimera_vfs_request *request;
 
@@ -220,8 +221,15 @@ chimera_vfs_setattr_dispatch(
     request->setattr.handle = handle;
     /* Identify the mutating handle so the caching-lease recall below skips a
      * lease anchored to this same handle (the holder is coherent with its own
-     * setattr -- see chimera_vfs_break_caching_file). */
-    request->io_handle                       = handle;
+     * setattr -- see chimera_vfs_break_caching_file).  When the caller also
+     * provides its lease owner (the SMB session's client_key), the recall skips
+     * EVERY caching lease that client holds, not just the one on this handle --
+     * a client's own metadata mutation never invalidates its own caches. */
+    request->io_handle = handle;
+    if (io_owner) {
+        request->io_owner       = *io_owner;
+        request->io_owner_valid = 1;
+    }
     request->setattr.set_attr                = set_attr;
     request->setattr.r_pre_attr.va_req_mask  = pre_attr_mask;
     request->setattr.r_pre_attr.va_set_mask  = 0;
@@ -263,6 +271,8 @@ struct chimera_vfs_setattr_gate {
     struct chimera_vfs_attrs       *set_attr;
     uint64_t                        pre_attr_mask;
     uint64_t                        post_attr_mask;
+    struct chimera_vfs_lease_owner  io_owner;
+    uint8_t                         io_owner_valid;
     chimera_vfs_setattr_callback_t  callback;
     void                           *private_data;
 };
@@ -355,21 +365,23 @@ chimera_vfs_setattr_gate_complete(
 
     chimera_vfs_setattr_dispatch(gate->thread, gate->cred, gate->handle,
                                  gate->set_attr, gate->pre_attr_mask,
-                                 gate->post_attr_mask, gate->callback,
-                                 gate->private_data);
+                                 gate->post_attr_mask,
+                                 gate->io_owner_valid ? &gate->io_owner : NULL,
+                                 gate->callback, gate->private_data);
     free(gate);
 } /* chimera_vfs_setattr_gate_complete */
 
-SYMBOL_EXPORT void
-chimera_vfs_setattr(
-    struct chimera_vfs_thread      *thread,
-    const struct chimera_vfs_cred  *cred,
-    struct chimera_vfs_open_handle *handle,
-    struct chimera_vfs_attrs       *set_attr,
-    uint64_t                        pre_attr_mask,
-    uint64_t                        post_attr_mask,
-    chimera_vfs_setattr_callback_t  callback,
-    void                           *private_data)
+static void
+chimera_vfs_setattr_impl(
+    struct chimera_vfs_thread            *thread,
+    const struct chimera_vfs_cred        *cred,
+    struct chimera_vfs_open_handle       *handle,
+    struct chimera_vfs_attrs             *set_attr,
+    uint64_t                              pre_attr_mask,
+    uint64_t                              post_attr_mask,
+    const struct chimera_vfs_lease_owner *io_owner,
+    chimera_vfs_setattr_callback_t        callback,
+    void                                 *private_data)
 {
     struct chimera_vfs_setattr_gate *gate;
     uint32_t                         required;
@@ -393,8 +405,12 @@ chimera_vfs_setattr(
             gate->set_attr       = set_attr;
             gate->pre_attr_mask  = pre_attr_mask;
             gate->post_attr_mask = post_attr_mask;
-            gate->callback       = callback;
-            gate->private_data   = private_data;
+            gate->io_owner_valid = io_owner ? 1 : 0;
+            if (io_owner) {
+                gate->io_owner = *io_owner;
+            }
+            gate->callback     = callback;
+            gate->private_data = private_data;
 
             chimera_vfs_getattr(thread, cred, handle,
                                 CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_ACL,
@@ -404,6 +420,40 @@ chimera_vfs_setattr(
     }
 
     chimera_vfs_setattr_dispatch(thread, cred, handle, set_attr,
-                                 pre_attr_mask, post_attr_mask,
+                                 pre_attr_mask, post_attr_mask, io_owner,
                                  callback, private_data);
+} /* chimera_vfs_setattr_impl */
+
+SYMBOL_EXPORT void
+chimera_vfs_setattr(
+    struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_open_handle *handle,
+    struct chimera_vfs_attrs       *set_attr,
+    uint64_t                        pre_attr_mask,
+    uint64_t                        post_attr_mask,
+    chimera_vfs_setattr_callback_t  callback,
+    void                           *private_data)
+{
+    chimera_vfs_setattr_impl(thread, cred, handle, set_attr, pre_attr_mask,
+                             post_attr_mask, NULL, callback, private_data);
 } /* chimera_vfs_setattr */
+
+/* As chimera_vfs_setattr, but the caller names its lease owner (the SMB
+ * session's client_key) so the caching-lease recall spares that client's own
+ * caches -- a client's metadata mutation never invalidates its own leases. */
+SYMBOL_EXPORT void
+chimera_vfs_setattr_owned(
+    struct chimera_vfs_thread            *thread,
+    const struct chimera_vfs_cred        *cred,
+    struct chimera_vfs_open_handle       *handle,
+    struct chimera_vfs_attrs             *set_attr,
+    uint64_t                              pre_attr_mask,
+    uint64_t                              post_attr_mask,
+    const struct chimera_vfs_lease_owner *io_owner,
+    chimera_vfs_setattr_callback_t        callback,
+    void                                 *private_data)
+{
+    chimera_vfs_setattr_impl(thread, cred, handle, set_attr, pre_attr_mask,
+                             post_attr_mask, io_owner, callback, private_data);
+} /* chimera_vfs_setattr_owned */

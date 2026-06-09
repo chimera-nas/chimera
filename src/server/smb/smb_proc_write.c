@@ -242,9 +242,11 @@ chimera_smb_write(struct chimera_smb_request *request)
     if (request->write.open_file->grant) {
         io_owner.owner_lo = request->write.open_file->grant->lease.owner.owner_lo;
         io_owner.owner_hi = request->write.open_file->grant->lease.owner.owner_hi;
+        io_owner.is_lease = 1;
     } else {
         io_owner.owner_lo = request->write.open_file->file_id.pid;
         io_owner.owner_hi = request->write.open_file->file_id.vid;
+        io_owner.is_lease = 0;
     }
 
     /* Mandatory byte-range lock enforcement: a shared lock denies writes from

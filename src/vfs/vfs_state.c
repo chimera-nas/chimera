@@ -1849,6 +1849,7 @@ chimera_vfs_break_caching_file(
     struct chimera_vfs_state             *state,
     struct chimera_vfs_file_state        *file,
     const struct chimera_vfs_open_handle *skip_handle,
+    const struct chimera_vfs_lease_owner *mutator,
     bool                                  flush_only)
 {
     bool had;
@@ -1871,6 +1872,17 @@ chimera_vfs_break_caching_file(
             /* The mutation is issued through this very lease's open handle: the
              * holder is coherent with its own change, so do not recall it. */
             if (skip_handle && cur->owner.op_handle == skip_handle) {
+                continue;
+            }
+            /* A metadata mutation by the SAME SMB2 client never recalls that
+             * client's own caching lease: it is coherent across all its own
+             * handles (not just the mutating one) and revalidates on the
+             * resulting attr/size change.  Without this a Create+SetInfo+Close
+             * compound (a non-lease handle setting EOF on a file the client
+             * leases through another handle) storms a self-break that races the
+             * close and desyncs the client. */
+            if (mutator && cur->owner.protocol == CHIMERA_VFS_LEASE_PROTO_SMB2 &&
+                cur->owner.client_key == mutator->client_key) {
                 continue;
             }
             /* Flush recall: only a write-caching (W) holder has dirty data to
@@ -1966,6 +1978,10 @@ chimera_vfs_break_caching_file(
             if (skip_handle && cur->owner.op_handle == skip_handle) {
                 continue;
             }
+            if (mutator && cur->owner.protocol == CHIMERA_VFS_LEASE_PROTO_SMB2 &&
+                cur->owner.client_key == mutator->client_key) {
+                continue;
+            }
             if (chimera_vfs_lease_effective_granted(cur) & block_mask) {
                 had = true;
                 break;
@@ -1995,7 +2011,7 @@ chimera_vfs_state_break_caching(
     /* No skip handle: this whole-file recall (NFSv4 REMOVE/RENAME) breaks every
      * caching holder, including the operating client's own delegation.  It is a
      * namespace mutation, so revoke fully (flush_only == false). */
-    had = chimera_vfs_break_caching_file(state, file, NULL, false);
+    had = chimera_vfs_break_caching_file(state, file, NULL, NULL, false);
 
     chimera_vfs_state_put(state, file);
     return had;
@@ -2045,6 +2061,15 @@ chimera_vfs_break_reads_for_write(
          * break it (MS-SMB2 same-lease-key; WPTS Leasing_*_SameLeaseKey writes
          * from both clients without breaking the peer's lease). */
         if (chimera_vfs_lease_smb2_same_key(&cur->owner, writer)) {
+            continue;
+        }
+        /* A write by the SAME SMB2 client never stales that client's own read
+        * cache (MS-SMB2 smb2.lease.complex1: a write breaks the OTHER client's
+        * read lease, never its own).  A write through a non-lease handle has no
+        * lease key to match above, so skip same-client holders explicitly. */
+        if (!writer->is_lease &&
+            cur->owner.protocol == CHIMERA_VFS_LEASE_PROTO_SMB2 &&
+            cur->owner.client_key == writer->client_key) {
             continue;
         }
         if (n < CHIMERA_VFS_STATE_MAX_BREAK_BATCH) {
@@ -2122,6 +2147,18 @@ chimera_vfs_state_break_caching_for_open(
          * one logical lease and the holder is NOT broken (MS-SMB2 same-lease-key
          * caching; mirrors the SHARE-side has_break_skip_key). */
         if (chimera_vfs_lease_smb2_same_key(&cur->owner, opener)) {
+            continue;
+        }
+        /* A NON-lease open by the SAME SMB2 client never recalls that client's
+         * own caching lease -- the client is coherent across its own handles, so
+         * its plain (no-RqLs) opens must not break its lease (otherwise every
+         * metadata open/close compound storms a break that races the close).  A
+         * SECOND lease key from the same client DOES still break (it owns a
+         * distinct lease context), so this is gated on the opener carrying no
+         * lease key (opener->is_lease == 0). */
+        if (!opener->is_lease &&
+            cur->owner.protocol == CHIMERA_VFS_LEASE_PROTO_SMB2 &&
+            cur->owner.client_key == opener->client_key) {
             continue;
         }
         /* A pure handle-trigger break (the pre-share-check pass) is a legacy SMB
@@ -2408,6 +2445,7 @@ chimera_vfs_io_try(
      * waiters so an unresponsive holder is revoked at its recall deadline. */
     if (request->io_recall_all) {
         if (chimera_vfs_break_caching_file(state, file, request->io_handle,
+                                           request->io_owner_valid ? &request->io_owner : NULL,
                                            request->io_recall_flush_only)) {
             pthread_mutex_lock(&file->lock);
             chimera_vfs_io_park_locked(file, request);
