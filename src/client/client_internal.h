@@ -388,12 +388,19 @@ struct chimera_client_config {
     int                           async_delegation;
     int                           async_delegation_threads;
     int                           cache_ttl;
+    int                           rcu_reclaim_threads;
     int                           max_fds;
     enum chimera_tcp_flavor       tcp_flavor;
     char                          kv_module[64];
     struct chimera_vfs_module_cfg modules[CHIMERA_CLIENT_MAX_MODULES];
     int                           num_modules;
-} __attribute__((aligned(64)));
+};
+/* No __attribute__((aligned(64))) here: this is a cold, singly-allocated config
+ * blob (cache-line alignment buys nothing), and over-aligning it is unsafe given
+ * it is calloc'd -- calloc only guarantees 16-byte alignment, but with alignof
+ * 64 the optimizer is free to initialize the struct with 32-byte *aligned* AVX
+ * stores (vmovdqa), which GP-fault when the allocation lands 16- but not
+ * 32-byte aligned (Release-only; -O0 Debug uses scalar stores and survives). */
 
 struct chimera_client {
     const struct chimera_client_config *config;

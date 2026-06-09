@@ -403,6 +403,16 @@ main(
         }
     }
 
+    /* RCU reclaim worker count is also a VFS-level setting shared with the
+     * client; its canonical home is the "common" section. */
+    {
+        int rcu_threads = chimera_common_rcu_reclaim_threads(config);
+
+        if (rcu_threads >= 0) {
+            chimera_server_config_set_rcu_reclaim_threads(server_config, rcu_threads);
+        }
+    }
+
     json_value = json_object_get(server_params, "smb_persistent_handles");
     if (json_is_boolean(json_value)) {
         chimera_server_config_set_smb_persistent_handles(server_config, json_is_true(json_value));

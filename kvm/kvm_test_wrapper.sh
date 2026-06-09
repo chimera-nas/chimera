@@ -21,7 +21,11 @@ if [ "$ARCH" = "aarch64" ]; then
     QEMU_CONSOLE="ttyAMA0"
 else
     QEMU_BIN="qemu-system-x86_64"
-    QEMU_MACHINE="-machine q35,usb=off"
+    # microvm machine: skips legacy PCI/ACPI device probing for a faster boot
+    # (~0.1s/test).  pcie=on keeps a PCIe bus so the existing virtio-pci and
+    # virtio-scsi-pci devices attach unchanged; rtc/pit on so the guest kernel
+    # uses normal timers (without them it falls back to slow calibration paths).
+    QEMU_MACHINE="-M microvm,acpi=on,rtc=on,pit=on,pcie=on"
     QEMU_CONSOLE="ttyS0"
 fi
 
@@ -29,13 +33,12 @@ VMLINUZ=$1; shift
 ROOTFS=$1; shift
 TEST_CMD="$*"
 
-# Use initrd if present alongside vmlinuz
-INITRD="$(dirname "$VMLINUZ")/initrd"
-if [ -f "$INITRD" ]; then
-    QEMU_INITRD="-initrd $INITRD"
-else
-    QEMU_INITRD=""
-fi
+# Boot with no initrd: every kernel in the KVM image matrix builds the virtio
+# block/net drivers in, so the kernel mounts the virtio root disk directly.
+# Skipping the ~63MB initrd unpack saves ~0.9s/test.  (See kvm/CMakeLists.txt:
+# the 22.04 generic kernel, which needs an initrd, was dropped from the matrix
+# in favor of its HWE kernel for exactly this reason.)
+QEMU_INITRD=""
 
 NETNS_NAME="kvm_test_$$_$(date +%s%N)"
 TAP_NAME="tap_$$"
@@ -73,7 +76,7 @@ ip netns exec "${NETNS_NAME}" "$QEMU_BIN" \
     -serial file:"$LOG_FILE" \
     -nographic \
     -no-reboot \
-    -append "root=/dev/vda rw console=${QEMU_CONSOLE} net.ifnames=0 biosdevname=0 panic=-1 test_cmd=\"${TEST_CMD}\" init=/init.sh"
+    -append "root=/dev/vda rw console=${QEMU_CONSOLE} net.ifnames=0 biosdevname=0 mitigations=off tsc=reliable panic=-1 test_cmd=\"${TEST_CMD}\" init=/init.sh"
 
 cat "$LOG_FILE"
 

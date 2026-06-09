@@ -147,6 +147,11 @@ chimera_server_config_get_cache_ttl(
     const struct chimera_server_config *config);
 
 void
+chimera_server_config_set_rcu_reclaim_threads(
+    struct chimera_server_config *config,
+    int                           threads);
+
+void
 chimera_server_config_set_nfs4_session_slots(
     struct chimera_server_config *config,
     int                           slots);

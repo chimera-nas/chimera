@@ -16,14 +16,19 @@ get_filename_component(BUILD_ROOT ${CMAKE_BINARY_DIR} DIRECTORY)
 set(KVM_IMAGE_REGISTRY "ghcr.io/chimera-nas/kvm-test-base" CACHE STRING
     "OCI registry base that hosts the prebuilt KVM guest images.")
 # Pinned version of the prebuilt images to consume; bump to adopt a newer
-# kvm-test-base release.
-set(KVM_IMAGE_VERSION "v1.0.0" CACHE STRING
+# kvm-test-base release.  v1.1.0 drops the 22.04 generic variant (see the
+# KVM_IMAGES note below); v1.0.0 still has all four for older checkouts.
+set(KVM_IMAGE_VERSION "v1.1.0" CACHE STRING
     "Version tag of the KVM guest images to consume.")
 
+# Note: the 22.04 generic (non-HWE) kernel does not build the virtio block
+# driver in -- it can only mount the root disk from its initrd.  Every other
+# kernel here has virtio built in, so the wrappers boot with no initrd (saving
+# ~0.9s/test, see kvm_*_test_wrapper.sh).  Rather than special-case an initrd
+# for one image, 22.04 is covered by its HWE kernel only.
 set(KVM_IMAGES
     ubuntu2404
     ubuntu2404_hwe
-    ubuntu2204
     ubuntu2204_hwe
 )
 

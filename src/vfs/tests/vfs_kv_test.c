@@ -377,6 +377,7 @@ run_suite(
         1,              /* num_modules */
         kv_name,        /* kv_module_name */
         60,             /* cache_ttl */
+        0,              /* num_rcu_reclaim_threads: 0 = one per CPU */
         metrics);
     assert(ctx.vfs != NULL);
 
