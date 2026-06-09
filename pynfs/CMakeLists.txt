@@ -35,6 +35,30 @@ set(PYNFS_FLAGS_2 ${PYNFS_FLAGS_1} copy sparse)
 
 set(PYNFS_MINOR_VERSIONS 0 1 2)
 
+# Flags whose tests deliberately drive lease/clientid/delegation/session expiry
+# -- they sleep through a full lease period (st_*.py: getLeaseTime()-scaled
+# sleeps) and/or reclaim state across a second client.  These CANNOT be folded
+# into the combined run below: pynfs shares one client across a run, so a
+# deliberate expiry lapses that shared client and a second client's conflicting
+# op reclaims its state (correct courteous-server behaviour, but it then poisons
+# the rest of the run with NFS4ERR_EXPIRED).  Each stays broken out as one CTest
+# entry per *code* (a fresh daemon each), carrying its lease/deleg/timeout knobs.
+# Every OTHER flag has no such sleep, so all of them collapse into a single
+# combined run per (backend, minor) -- one daemon + one netns for ~500 codes.
+set(PYNFS_ISOLATED_FLAGS
+    # 4.0 expiry/lease-scaled-sleep flags (st_lock/locku/close/renew/replay/
+    # delegation + the lock family that drives a second conflicting client)
+    lock lockt locku close renew replay delegations
+    # 4.1/4.2 expiry flags (st_courtesy/delegation/exchange_id + session teardown)
+    deleg courteous destroy_session exchange_id)
+
+# Per-suite JUnit (one <testcase> per code).  ctest --output-junit only sees the
+# combined run as a single testcase, so each combined run also writes a pynfs
+# JUnit here; CI ingests these for per-code PR visibility (the broken-out
+# per-code entries need none -- ctest's own JUnit already names them per code).
+set(PYNFS_JUNIT_DIR ${CMAKE_BINARY_DIR}/pynfs-junit
+    CACHE PATH "Directory for per-suite pynfs JUnit XML output.")
+
 # Extra pynfs flag tokens for specific suites.  pynfs excludes any test tagged
 # with a "no<flag>" token, so this drops tests a suite pulls in that the server
 # does not support.  currentstateid's CSID7 is tagged pnfs (LAYOUTGET); chimera
@@ -225,14 +249,63 @@ function(pynfs_add_code_test flag code backend minor)
         ENVIRONMENT "${test_env}")
 endfunction()
 
-foreach(minor ${PYNFS_MINOR_VERSIONS})
+# One combined CTest entry per (backend, minor): every NON-isolated flag for that
+# minor in a single testserver invocation -- one daemon + one netns for ~500
+# codes, instead of one netns per code.  Positive flags first, then the
+# PYNFS_EXTRA / no<CODE> deselections (run_filter is last-match-wins).
+function(pynfs_add_combined_suite backend minor)
+    set(flags)
+    set(excludes)
     foreach(flag ${PYNFS_FLAGS_${minor}})
-        pynfs_codes_for_flag(${flag} ${minor} codes)
-        foreach(backend ${PYNFS_BACKENDS})
-            foreach(code ${codes})
-                pynfs_add_code_test(${flag} ${code} ${backend} ${minor})
+        if(NOT "${flag}" IN_LIST PYNFS_ISOLATED_FLAGS)
+            list(APPEND flags ${flag})
+            foreach(extra IN LISTS PYNFS_EXTRA_${flag})
+                list(APPEND excludes ${extra})
             endforeach()
-        endforeach()
+        endif()
+    endforeach()
+    # Codes that cannot pass on the passthrough backends are deselected here
+    # (the per-code path drops them from registration; in a shared run we use
+    # pynfs's no<CODE> token instead).  WRT18 (write) / SATT15 (setattr).
+    if("${backend}" IN_LIST PYNFS_SKIP_BACKENDS_WRT18)
+        list(APPEND excludes noWRT18)
+    endif()
+    if("${backend}" IN_LIST PYNFS_SKIP_BACKENDS_SATT15)
+        list(APPEND excludes noSATT15)
+    endif()
+
+    set(name chimera/pynfs/combined_${backend}_nfs4.${minor})
+    add_test(NAME ${name}
+        COMMAND bash ${PYNFS_WRAPPER}
+                ${CHIMERA_BINARY} ${backend} ${minor} ${PYNFS_DIR} ${flags} ${excludes})
+
+    # No deliberate-expiry flags here, so nothing lapses the shared client during
+    # the run -- but a lease comfortably above the longest non-renewing gap
+    # (readdir's RDDR8b loops ~300 READDIRs) keeps it alive, and there are no
+    # lease-scaled sleeps to bloat.  ~500 codes run through one Python client, so
+    # give a generous timeout (the wrapper's fires first, with diagnostics).
+    set_tests_properties(${name} PROPERTIES
+        LABELS pynfs
+        TIMEOUT 900
+        ENVIRONMENT
+            "PYTHONUNBUFFERED=1;PYNFS_RUNDEPS=1;PYNFS_TIMEOUT=800;PYNFS_NFS4_LEASE_TIME=90;PYNFS_JUNIT_FILE=${PYNFS_JUNIT_DIR}/combined_${backend}_nfs4.${minor}.xml")
+endfunction()
+
+foreach(minor ${PYNFS_MINOR_VERSIONS})
+    # Combined run for the safe (non-isolated) flags.
+    foreach(backend ${PYNFS_BACKENDS})
+        pynfs_add_combined_suite(${backend} ${minor})
+    endforeach()
+    # Expiry flags stay broken out, one CTest entry per code (fresh daemon each).
+    foreach(flag ${PYNFS_FLAGS_${minor}})
+        if("${flag}" IN_LIST PYNFS_ISOLATED_FLAGS)
+            pynfs_codes_for_flag(${flag} ${minor} codes)
+            foreach(backend ${PYNFS_BACKENDS})
+                foreach(code ${codes})
+                    pynfs_add_code_test(${flag} ${code} ${backend} ${minor})
+                endforeach()
+            endforeach()
+        endif()
     endforeach()
 endforeach()
 
