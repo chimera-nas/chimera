@@ -88,6 +88,9 @@ chimera_nfs4_bind_conn_to_session(
          * delegation recall that was stuck with no live backchannel (RFC 8881
          * §20.4.1; the same path CREATE_SESSION uses for DSESS9003). */
         session->nfs4_session_backchannel_conn = req->conn;
+        /* This compound runs on req->conn's owner thread; record it so
+         * cross-thread callbacks marshal their send to the new owner. */
+        session->nfs4_session_backchannel_owner = thread;
         nfs4_cb_resend_recalls_on_rebind(thread, session->client_unified, req);
     }
 
