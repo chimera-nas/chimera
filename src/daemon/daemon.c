@@ -423,6 +423,16 @@ main(
         chimera_server_config_set_smb_named_streams(server_config, json_is_true(json_value));
     }
 
+    json_value = json_object_get(server_params, "smb_leases");
+    if (json_is_boolean(json_value)) {
+        chimera_server_config_set_smb_leases(server_config, json_is_true(json_value));
+    }
+
+    json_value = json_object_get(server_params, "smb_oplocks");
+    if (json_is_boolean(json_value)) {
+        chimera_server_config_set_smb_oplocks(server_config, json_is_true(json_value));
+    }
+
     /* smb_min_dialect: lowest SMB2 dialect to advertise ("2.0.2"|"2.1"|"3.0"|
      * "3.0.2"|"3.1.1").  Defaults to 2.1; lower it to 2.0.2 only where a client
      * (e.g. a conformance suite) explicitly needs the original SMB2 dialect. */

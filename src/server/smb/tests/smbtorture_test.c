@@ -272,6 +272,14 @@ main(
      * pointer NULL and then dereferences it in cleanup, crashing the client. */
     chimera_server_config_set_smb_persistent_handles(config, 1);
 
+    /* SMB2 leases and legacy oplocks are off by default in the server; enable
+     * both here so the leasing/oplock smbtorture suites (smb2.lease*,
+     * smb2.oplock*, plus durable/multichannel cases that ride a lease) exercise
+     * the caching grant + break path.  Suites that request neither are
+     * unaffected by the grant being available. */
+    chimera_server_config_set_smb_leases(config, 1);
+    chimera_server_config_set_smb_oplocks(config, 1);
+
     /* SMB3 multichannel: advertise interfaces so FSCTL_QUERY_NETWORK_INTERFACE_
      * INFO returns a non-empty list and the smb2.multichannel suites run instead
      * of bailing ("no interface info returned").  Everything in the test netns
