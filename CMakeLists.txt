@@ -155,48 +155,76 @@ else()
     message(STATUS "CAIRN disabled")
 endif()
 
-# KVM testing detection
+# KVM testing.
 #
-# Guest images are pulled (not built) from chimera-nas/kvm-test-base as OCI
-# artifacts, so KVM testing needs `oras` to fetch them plus QEMU and /dev/kvm
-# to run them. Docker is no longer required at build time.
-find_program(ORAS_EXECUTABLE oras)
+# The KVM-based suites (cthon/xfstests/pnfs) boot a real guest kernel via
+# QEMU/KVM. Guest images are pulled (not built) from chimera-nas/kvm-test-base
+# as OCI artifacts, so running them needs `oras` to fetch the images, an
+# arch-appropriate qemu, /dev/kvm, and root.
+#
+# KVM_TESTING is tri-state:
+#   AUTO (default) - enable iff KVM is available and we are root, else skip
+#   ON             - require KVM testing; hard fail if it is not available
+#   OFF            - never register the KVM suites
+#
+# CI sets ON for the devcontainer image (where KVM must work, so a regression
+# in availability fails loudly) and OFF for the other images (which lack the
+# prerequisites and should not probe). When the flag is not supplied at all the
+# AUTO default makes normal users pick up KVM testing whenever their machine can
+# actually run it.
+set(KVM_TESTING "AUTO" CACHE STRING "KVM test suites: AUTO (enable iff available), ON (require), or OFF")
+set_property(CACHE KVM_TESTING PROPERTY STRINGS AUTO ON OFF)
+string(TOUPPER "${KVM_TESTING}" KVM_TESTING)
 
-# Find architecture-appropriate QEMU binary
-execute_process(COMMAND uname -m OUTPUT_VARIABLE HOST_ARCH OUTPUT_STRIP_TRAILING_WHITESPACE)
-if(HOST_ARCH STREQUAL "aarch64")
-    find_program(QEMU_EXECUTABLE qemu-system-aarch64)
+if(KVM_TESTING STREQUAL "OFF")
+    message(STATUS "KVM testing disabled (KVM_TESTING=OFF)")
 else()
-    find_program(QEMU_EXECUTABLE qemu-system-x86_64)
-endif()
+    # Probe the prerequisites and collect any that are missing.
+    find_program(ORAS_EXECUTABLE oras)
 
-set(KVM_TESTING_AVAILABLE FALSE)
-
-if(ORAS_EXECUTABLE AND QEMU_EXECUTABLE)
-    if(EXISTS "/dev/kvm")
-        set(KVM_AVAILABLE TRUE)
+    execute_process(COMMAND uname -m OUTPUT_VARIABLE HOST_ARCH OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(HOST_ARCH STREQUAL "aarch64")
+        find_program(QEMU_EXECUTABLE qemu-system-aarch64)
     else()
-        set(KVM_AVAILABLE FALSE)
-        message(STATUS "KVM testing: /dev/kvm not found")
+        find_program(QEMU_EXECUTABLE qemu-system-x86_64)
     endif()
 
-    if(KVM_AVAILABLE)
-        set(KVM_TESTING_AVAILABLE TRUE)
-    endif()
-else()
+    execute_process(COMMAND id -u OUTPUT_VARIABLE HOST_UID OUTPUT_STRIP_TRAILING_WHITESPACE)
+
+    set(KVM_TESTING_AVAILABLE TRUE)
+    set(KVM_UNAVAILABLE_REASON "")
+
     if(NOT ORAS_EXECUTABLE)
-        message(STATUS "KVM testing: oras not found")
+        set(KVM_TESTING_AVAILABLE FALSE)
+        string(APPEND KVM_UNAVAILABLE_REASON " oras not found;")
     endif()
-    if(NOT QEMU_EXECUTABLE)
-        message(STATUS "KVM testing: QEMU not found for ${HOST_ARCH}")
-    endif()
-endif()
 
-if(KVM_TESTING_AVAILABLE)
-    message(STATUS "KVM testing enabled")
-    add_subdirectory(kvm)
-else()
-    message(STATUS "KVM testing disabled")
+    if(NOT QEMU_EXECUTABLE)
+        set(KVM_TESTING_AVAILABLE FALSE)
+        string(APPEND KVM_UNAVAILABLE_REASON " qemu not found for ${HOST_ARCH};")
+    endif()
+
+    if(NOT EXISTS "/dev/kvm")
+        set(KVM_TESTING_AVAILABLE FALSE)
+        string(APPEND KVM_UNAVAILABLE_REASON " /dev/kvm not found;")
+    endif()
+
+    if(NOT HOST_UID EQUAL 0)
+        set(KVM_TESTING_AVAILABLE FALSE)
+        string(APPEND KVM_UNAVAILABLE_REASON " not running as root;")
+    endif()
+
+    if(KVM_TESTING_AVAILABLE)
+        message(STATUS "KVM testing enabled")
+        add_subdirectory(kvm)
+    elseif(KVM_TESTING STREQUAL "ON")
+        message(FATAL_ERROR
+            "KVM_TESTING=ON but KVM testing is not available:${KVM_UNAVAILABLE_REASON} "
+            "Provide the missing prerequisites or re-run with -DKVM_TESTING=AUTO/OFF.")
+    else()
+        message(STATUS "KVM testing disabled (KVM_TESTING=AUTO;${KVM_UNAVAILABLE_REASON}). "
+            "Pass -DKVM_TESTING=ON to make missing prerequisites fatal.")
+    endif()
 endif()
 
 # Network namespace testing detection.
