@@ -458,6 +458,10 @@ struct nfs_layout_state {
 
     UT_hash_handle           hh;        /* by fh in client->layouts_by_fh */
 
+    /* Link on an owner thread's cb_layoutrecall_queue while a CB_LAYOUTRECALL
+     * is being marshalled cross-thread (see nfs4_cb_recall_holder). */
+    struct nfs_layout_state *recall_qnext;
+
     _Atomic uint32_t         refcount;
     _Atomic uint8_t          destroyed;
 };

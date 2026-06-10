@@ -194,6 +194,9 @@ chimera_nfs4_create_session(
     if (args->csa_flags & CREATE_SESSION4_FLAG_CONN_BACK_CHAN) {
         session->nfs4_session_cb_program       = args->csa_cb_program;
         session->nfs4_session_backchannel_conn = conn;
+        /* This compound runs on conn's owner thread; record it so cross-thread
+         * callbacks (CB_RECALL / CB_LAYOUTRECALL) marshal their send here. */
+        session->nfs4_session_backchannel_owner = thread;
 
         nfs4_client_set_cb_path(&shared->nfs4_shared_clients,
                                 args->csa_clientid,

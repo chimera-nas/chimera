@@ -26,7 +26,8 @@ add_executable(test_replay_slot
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_layout_table.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_lease.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_recovery.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_callback.c)
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_callback.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_cb.c)
 target_include_directories(test_replay_slot PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/..
     ${CMAKE_SOURCE_DIR}/src

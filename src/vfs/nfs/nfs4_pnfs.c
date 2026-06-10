@@ -1302,9 +1302,22 @@ chimera_nfs4_pnfs_ds_write(
     args.offset         = request->write.offset;
     args.count          = request->write.length;
     args.stable         = request->write.sync;
-    args.data.iov       = request->write.iov;
-    args.data.niov      = request->write.niov;
-    args.data.length    = request->write.length;
+    /* The DS WRITE3 marshaller MOVES (consumes + frees) the payload iovecs into
+     * the outgoing RPC message.  Our payload is BORROWED from the NFS server
+     * layer -- request->write.iov aliases the WRITE4 args, which
+     * chimera_nfs4_write_complete releases on our completion -- so hand the
+     * marshaller CLONES (each takes its own buffer ref, dropped when the DS RPC
+     * message is released) and leave the borrowed originals intact.  Passing the
+     * originals lets the marshaller free them out from under that server-side
+     * release -> heap-use-after-free in evpl_iovecs_release. */
+    struct evpl_iovec *ds_iov = malloc((size_t) request->write.niov *
+                                       sizeof(*ds_iov));
+    for (int i = 0; i < request->write.niov; i++) {
+        evpl_iovec_clone(&ds_iov[i], &request->write.iov[i]);
+    }
+    args.data.iov    = ds_iov;
+    args.data.niov   = request->write.niov;
+    args.data.length = request->write.length;
 
     chimera_nfs_init_rpc2_cred(&rpc2_cred, request->cred,
                                request->thread->vfs->machine_name,
@@ -1313,6 +1326,9 @@ chimera_nfs4_pnfs_ds_write(
     shared->nfs_v3.send_call_NFSPROC3_WRITE(
         &shared->nfs_v3.rpc2, thread->evpl, ds_thread->nfs_conn, &rpc2_cred,
         &args, 1, 0, NULL, 0, 0, chimera_nfs4_pnfs_ds_write_callback, request);
+
+    /* The marshaller moved (and invalidated) the clones; free only the array. */
+    free(ds_iov);
     return 1;
 } /* chimera_nfs4_pnfs_ds_write */
 

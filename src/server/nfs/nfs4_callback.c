@@ -25,6 +25,7 @@
 #include "evpl/evpl_rpc2.h"
 
 #include "nfs4_callback.h"
+#include "nfs4_cb.h"
 #include "nfs4_state.h"
 #include "nfs4_session.h"
 #include "nfs4_procs.h"
@@ -1184,18 +1185,21 @@ nfs4_cb_doorbell_drain(
         (struct chimera_server_nfs_thread *) ((char *) doorbell -
                                               offsetof(struct chimera_server_nfs_thread, cb_doorbell));
     struct nfs_delegation            *queue;
+    struct nfs_layout_state          *lrq;
     struct nfs4_cb_getattr           *gq;
     struct nfs4_cb_client            *tq;
 
     (void) evpl;
 
     pthread_mutex_lock(&thread->cb_recall_lock);
-    queue                     = thread->cb_recall_queue;
-    thread->cb_recall_queue   = NULL;
-    gq                        = thread->cb_getattr_queue;
-    thread->cb_getattr_queue  = NULL;
-    tq                        = thread->cb_teardown_queue;
-    thread->cb_teardown_queue = NULL;
+    queue                         = thread->cb_recall_queue;
+    thread->cb_recall_queue       = NULL;
+    lrq                           = thread->cb_layoutrecall_queue;
+    thread->cb_layoutrecall_queue = NULL;
+    gq                            = thread->cb_getattr_queue;
+    thread->cb_getattr_queue      = NULL;
+    tq                            = thread->cb_teardown_queue;
+    thread->cb_teardown_queue     = NULL;
     pthread_mutex_unlock(&thread->cb_recall_lock);
 
     while (queue) {
@@ -1204,6 +1208,21 @@ nfs4_cb_doorbell_drain(
         deleg->recall_qnext = NULL;
         nfs4_cb_recall_send(thread, deleg);
     }
+
+    /* Layout recalls bounced here from another thread: we now own the holder's
+     * backchannel conn, so nfs4_cb_recall_holder sends inline.  Drop the ref the
+     * producer took to pin the layout across the bounce. */
+    while (lrq) {
+        struct nfs_layout_state *h = lrq;
+        lrq             = h->recall_qnext;
+        h->recall_qnext = NULL;
+        nfs4_cb_recall_holder(thread, h);
+        nfs_layout_state_put(h);
+    }
+
+    /* Deferred-op resumes bounced to this (their home) thread by a recall that
+     * completed on another thread.  Re-drives the op where its iovecs live. */
+    nfs4_cb_drain_resume_queue(thread);
 
     while (gq) {
         struct nfs4_cb_getattr *w = gq;
