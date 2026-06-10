@@ -9,7 +9,8 @@
         },
         "initializeCommand": "mkdir -p \"${localEnv:HOME}${localEnv:USERPROFILE}/.claude\"",
         "containerEnv": {
-                "CHIMERA_BUILD_DIR": "/build"
+                "CHIMERA_BUILD_DIR": "/build",
+                "CCACHE_DIR": "/build/ccache"
         },
         "customizations": {
                 "vscode": {
