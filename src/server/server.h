@@ -120,6 +120,24 @@ chimera_server_config_get_smb_compression(
     const struct chimera_server_config *config);
 
 void
+chimera_server_config_set_smb_leases(
+    struct chimera_server_config *config,
+    int                           enabled);
+
+int
+chimera_server_config_get_smb_leases(
+    const struct chimera_server_config *config);
+
+void
+chimera_server_config_set_smb_oplocks(
+    struct chimera_server_config *config,
+    int                           enabled);
+
+int
+chimera_server_config_get_smb_oplocks(
+    const struct chimera_server_config *config);
+
+void
 chimera_server_config_set_smb_notify_disabled(
     struct chimera_server_config *config,
     int                           disabled);

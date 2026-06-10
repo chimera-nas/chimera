@@ -163,6 +163,8 @@ generate_config() {
         ${multichannel_line}
         ${encryption_line}
         "smb_named_streams": true,
+        "smb_leases": true,
+        "smb_oplocks": true,
         "threads": 4,
         "delegation_threads": 4,
         "external_portmap": false

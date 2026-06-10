@@ -193,6 +193,11 @@ struct chimera_smb_config {
     /* SMB3 transport compression: 0 = off (no compression advertised),
      * 1 = enabled (offered, used when the client opts in). */
     int                            compression;
+    /* SMB2 leases (RqLs) and legacy SMB oplocks: 0 = the server grants none
+     * (clients run uncached, so no caching break can stall a conflicting open),
+     * 1 = grant on request.  Both default off; opt in via smb_leases/smb_oplocks. */
+    int                            leases;
+    int                            oplocks;
     /* When set, CHANGE_NOTIFY is disabled for the server's shares: the
      * handler returns STATUS_NOT_IMPLEMENTED immediately instead of arming
      * a watch (the "change notify = no" share behaviour Windows exposes;

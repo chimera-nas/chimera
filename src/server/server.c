@@ -79,6 +79,8 @@ struct chimera_server_config {
     int                                   smb_signing_required;
     int                                   smb_encryption;
     int                                   smb_compression;
+    int                                   smb_leases;
+    int                                   smb_oplocks;
     int                                   smb_notify_disabled;
     int                                   smb_acl_inherited_canonicalize;
     int                                   smb_num_nic_info;
@@ -179,6 +181,14 @@ chimera_server_config_init(void)
     /* SMB3 transport compression is off by default; the "smb_compression" flag
      * enables (1) advertising/using it. */
     config->smb_compression = 0;
+
+    /* SMB2 leases (RqLs) and legacy SMB oplocks are off by default: the server
+     * grants neither, so clients run uncached (every op hits the server) and no
+     * lease/oplock break can stall a conflicting open.  Opt in via the
+     * "smb_leases" / "smb_oplocks" config flags; the smbtorture and WPTS test
+     * harnesses enable them to exercise the leasing/oplock suites. */
+    config->smb_leases  = 0;
+    config->smb_oplocks = 0;
 
     /* CHANGE_NOTIFY is enabled by default; the "smb_notify_disabled" flag makes
      * the server reject CHANGE_NOTIFY with STATUS_NOT_IMPLEMENTED. */
@@ -397,6 +407,34 @@ chimera_server_config_get_smb_compression(const struct chimera_server_config *co
 {
     return config->smb_compression;
 } /* chimera_server_config_get_smb_compression */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_smb_leases(
+    struct chimera_server_config *config,
+    int                           enabled)
+{
+    config->smb_leases = enabled;
+} /* chimera_server_config_set_smb_leases */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_smb_leases(const struct chimera_server_config *config)
+{
+    return config->smb_leases;
+} /* chimera_server_config_get_smb_leases */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_smb_oplocks(
+    struct chimera_server_config *config,
+    int                           enabled)
+{
+    config->smb_oplocks = enabled;
+} /* chimera_server_config_set_smb_oplocks */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_smb_oplocks(const struct chimera_server_config *config)
+{
+    return config->smb_oplocks;
+} /* chimera_server_config_get_smb_oplocks */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_smb_notify_disabled(

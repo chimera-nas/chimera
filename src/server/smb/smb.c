@@ -151,6 +151,8 @@ chimera_smb_server_init(
     shared->config.signing_required           = chimera_server_config_get_smb_signing_required(config);
     shared->config.encryption                 = chimera_server_config_get_smb_encryption(config);
     shared->config.compression                = chimera_server_config_get_smb_compression(config);
+    shared->config.leases                     = chimera_server_config_get_smb_leases(config);
+    shared->config.oplocks                    = chimera_server_config_get_smb_oplocks(config);
     shared->config.notify_disabled            = chimera_server_config_get_smb_notify_disabled(config);
     shared->config.acl_inherited_canonicalize = chimera_server_config_get_smb_acl_inherited_canonicalize(config);
 

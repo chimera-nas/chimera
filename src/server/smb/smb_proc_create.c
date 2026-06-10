@@ -729,8 +729,15 @@ chimera_smb_create_after_share(
 
         if (request->create.ctx_present_mask & CHIMERA_SMB_CREATE_CTX_RQLS) {
             via_rqls = true;
-            req_smb  = (uint8_t) (request->create.rqls.state & 0x07);
-        } else {
+            /* SMB2 leases are opt-in (smb_leases).  When disabled, grant no
+             * caching bits: via_rqls stays set so the open still reports a lease
+             * with state NONE (the existing bare-RqLs path), but nothing is
+             * cached, so no lease break can ever stall a conflicting open. */
+            req_smb = thread->shared->config.leases
+                ? (uint8_t) (request->create.rqls.state & 0x07) : 0;
+        } else if (thread->shared->config.oplocks) {
+            /* Legacy SMB oplocks are opt-in (smb_oplocks); when disabled no
+             * oplock is granted (req_smb stays 0 -> reply OPLOCK_LEVEL_NONE). */
             switch (request->create.requested_oplock_level) {
                 case SMB2_OPLOCK_LEVEL_II:
                     req_smb = SMB2_LEASE_READ_CACHING;
