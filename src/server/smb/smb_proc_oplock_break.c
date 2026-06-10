@@ -302,6 +302,22 @@ chimera_smb_lease_break_cb(
         open_file->oplock_level = new_level;
     }
 
+    /* A break that needs no client ack (it stripped only read caching, e.g. the
+     * R->NONE tail of an RWH->RH->R->NONE cascade) will never be resolved by an
+     * inbound OPLOCK_BREAK ack, so the ack-driven resume of parked CREATEs
+     * (chimera_smb_create_resume_parked, only called from the ack handler) never
+     * fires for it.  But the lease is now at its retained level, so
+     * chimera_vfs_state_caching_breaking() returns false and any CREATE parked on
+     * this file is resumable.  Ring the resume doorbell on this thread AND every
+     * peer (the broadcast skips its origin) so each re-sweeps and completes its
+     * parked CREATEs instead of stalling to the break deadline (cthon special
+     * hang). */
+    if (!grant->break_ack_required) {
+        struct chimera_server_smb_thread *rt = open_file->create_conn->thread;
+        evpl_ring_doorbell(&rt->lease_resume_doorbell);
+        chimera_smb_create_resume_parked_broadcast(rt);
+    }
+
     /* The lease stays BREAKING (awaiting the client's real OPLOCK_BREAK ack or
      * close); the conflict matrix treats a BREAKING SMB lease as already at its
      * retained (break_needed_mode) level, so a coexisting acquirer proceeds

@@ -96,6 +96,12 @@ struct chimera_vfs_lease_owner {
     uint64_t                        client_key;
     uint64_t                        owner_lo;
     uint64_t                        owner_hi;
+    /* True when this actor holds/requests an SMB2 RqLs lease (owner_lo/hi carry
+     * the 16-byte LeaseKey).  False for a plain open (owner_lo/hi carry the
+     * file_id) and for non-SMB actors.  Lets a same-client *non-lease* open skip
+     * recalling that client's own caching lease in break_caching_for_open, while
+     * a 2nd LeaseKey from the same client still breaks (MS-SMB2 SameLeaseKey). */
+    uint8_t                         is_lease;
     chimera_vfs_lease_break_cb_t    break_cb;
     chimera_vfs_lease_is_alive_cb_t is_alive_cb;
     chimera_vfs_lease_revoked_cb_t  revoked_cb;
