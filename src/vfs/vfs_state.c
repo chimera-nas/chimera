@@ -2124,6 +2124,25 @@ chimera_vfs_state_break_caching_for_open(
         if (chimera_vfs_lease_smb2_same_key(&cur->owner, opener)) {
             continue;
         }
+        /* A *non-lease* open by the SAME client must not recall that client's own
+         * RqLs lease.  The opening client is internally coherent with its own
+         * (non-data) open, so a server-driven break here is spurious -- and the
+         * Linux SMB client cannot ack a break for a lease its new plain handle
+         * does not own, so the break goes unacked, the lease is stuck BREAKING,
+         * and every such open then stalls the full break-deadline (cthon special
+         * hang).  Coherence on an actual write is preserved by the untouched
+         * chimera_vfs_break_on_write path -- so this suppresses ONLY the open
+         * break, never the write break (the over-broad earlier suppression of the
+         * write break served stale reads and was reverted).  A *lease* opener with
+         * a different key (2nd LeaseKey, same client) still breaks here, as
+         * MS-SMB2 Leasing_*_SameLeaseKey / smb2.lease.complex1 require. */
+        if (opener->protocol == CHIMERA_VFS_LEASE_PROTO_SMB2 &&
+            cur->owner.protocol == CHIMERA_VFS_LEASE_PROTO_SMB2 &&
+            !opener->is_lease &&
+            opener->client_key == cur->owner.client_key &&
+            cur->grant && !cur->grant->is_oplock) {
+            continue;
+        }
         /* A pure handle-trigger break (the pre-share-check pass) is a legacy SMB
          * oplock behavior: a batch oplock's handle is recalled before the share
          * decision so the holder can close.  An SMB2 RqLs LEASE keeps its handle

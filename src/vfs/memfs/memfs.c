@@ -2602,10 +2602,15 @@ memfs_open_at(
             return;
         }
 
-        /* O_NOFOLLOW: a creating open that resolves to an existing symlink as
-         * the final component must fail with ELOOP rather than open the link.
+        /* A symlink as the final component under O_NOFOLLOW: a *data* open
+         * (POSIX open(O_NOFOLLOW)) must fail with ELOOP, but an O_PATH-style
+         * open (SMB FILE_OPEN_REPARSE_POINT, i.e. O_PATH|O_NOFOLLOW) wants a
+         * handle to the link itself so the caller can read its attributes /
+         * security descriptor / reparse data -- so fall through and open the
+         * symlink inode in that case (mirrors the linux backend's O_PATH retry).
          * memfs_inode_get_inum() returned the inode locked, so release both. */
-        if (S_ISLNK(inode->mode) && (flags & CHIMERA_VFS_OPEN_NOFOLLOW)) {
+        if (S_ISLNK(inode->mode) && (flags & CHIMERA_VFS_OPEN_NOFOLLOW) &&
+            !(flags & CHIMERA_VFS_OPEN_PATH)) {
             pthread_mutex_unlock(&inode->lock);
             pthread_mutex_unlock(&parent_inode->lock);
             request->status = CHIMERA_VFS_ELOOP;
