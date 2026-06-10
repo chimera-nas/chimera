@@ -18,7 +18,7 @@ RUN if [ -n "$APT_MIRROR" ]; then \
 
 RUN apt-get -y update && \
     apt-get -y --no-install-recommends upgrade && \
-    apt-get -y --no-install-recommends install gcc g++ clang-tools cmake ninja-build git flex bison \
+    apt-get -y --no-install-recommends install gcc g++ clang-tools cmake ninja-build ccache git flex bison \
     uuid-dev uthash-dev libkrb5-dev libgssapi-krb5-2 gss-ntlmssp-dev \
     librdmacm-dev libjansson-dev libxxhash-dev liburcu-dev liburing-dev libunwind-dev \
     librocksdb-dev libssl-dev openssl libnuma-dev libcurl4-openssl-dev libs3-dev libaio-dev \

@@ -27,6 +27,12 @@ env:
   KVM_IMAGE_REGISTRY: repository.mdh.quantum.com:5009/chimera-nas/kvm-test-base
   APT_MIRROR: http://repository.mdh.quantum.com/repository/pkgs/ubuntu
   DOCKER_MIRROR: repository.mdh.quantum.com/
+  # Shared compiler cache: the build step backs its local ccache with an HTTP
+  # remote (Nexus raw repo, ccache http backend) so objects persist across CI
+  # runs.  The full URL -- including the upload credentials -- is kept in the
+  # CCACHE_REMOTE_STORAGE *repository secret* (never in this public repo) and
+  # injected into the build container below.  merge_group runs receive secrets;
+  # a context without it (e.g. a fork) just builds local-only.
 
 jobs:
   build-devcontainer:
@@ -420,6 +426,8 @@ jobs:
           docker run --rm --privileged \
             -e DOCKER_MIRROR=${{ env.DOCKER_MIRROR }} \
             -e APT_MIRROR=${{ env.APT_MIRROR }} \
+            -e CCACHE_DIR=/build/ccache \
+            -e CCACHE_REMOTE_STORAGE="${{ secrets.CCACHE_REMOTE_STORAGE }}" \
             -v "${{ github.workspace }}:/workspace" \
             -v "${{ github.workspace }}/oras:/usr/local/bin/oras:ro" \
             -v /build \
@@ -428,6 +436,7 @@ jobs:
             bash -euxc '
               cmake -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DREQUIRE_NETNS_TESTS=ON -DKVM_IMAGE_REGISTRY=${{ env.KVM_IMAGE_REGISTRY }} -DPYNFS_JUNIT_DIR=/workspace/ctest-results/pynfs-junit -DSMBTORTURE_JUNIT_DIR=/workspace/ctest-results/smbtorture-junit ${{ matrix.cmake_extra }} /workspace
               ninja
+              ccache --show-stats || true
               mkdir -p /workspace/ctest-results
               rm -f /workspace/flaky-rescued.log
               start=$(date +%s)

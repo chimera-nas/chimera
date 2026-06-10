@@ -35,6 +35,23 @@ else()
     project(chimera LANGUAGES C)
 endif()
 
+# Use ccache as the compiler launcher when it is installed.  The cache location
+# is left to ccache's own CCACHE_DIR env var (not hardcoded here): the
+# devcontainer points it at the persistent /build/ccache volume so all worktrees
+# share one cache, and CI additionally sets an HTTP remote (CCACHE_REMOTE_STORAGE
+# -> the Nexus raw repo).  A plain local build with neither set falls back to
+# ccache's default (~/.cache/ccache).
+find_program(CCACHE_PROGRAM ccache)
+if(CCACHE_PROGRAM)
+    set(CMAKE_C_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
+    if(CUDA_ENABLED)
+        set(CMAKE_CUDA_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
+    endif()
+    message(STATUS "ccache enabled (${CCACHE_PROGRAM})")
+else()
+    message(STATUS "ccache not found; building without compiler cache")
+endif()
+
 set(CHIMERA_VERSION "0.1.0")
 
 execute_process(COMMAND ln -sf ${CMAKE_BINARY_DIR}/compile_commands.json ${CMAKE_SOURCE_DIR}/compile_commands.json)
