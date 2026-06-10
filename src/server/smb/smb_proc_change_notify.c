@@ -144,6 +144,25 @@ chimera_smb_change_notify(struct chimera_smb_request *request)
 
     nevents = chimera_vfs_notify_drain(state->watch, events, 16, &overflowed);
 
+    /* The watched directory may already have been removed (rmdir / delete-
+     * on-close from another handle or connection) before this CHANGE_NOTIFY
+     * was armed.  chimera_vfs_notify_emit_delete records that on the watch
+     * via the deleted flag and fires the callback, but if that callback ran
+     * before we installed state->pending (a cross-connection race —
+     * smb2.notify.rmdir3/4 send the CHANGE_NOTIFY and the rmdir without
+     * waiting for the interim reply) the wakeup is lost and the request
+     * would park forever, never completing.  Check the flag here under
+     * state->lock — atomic against the callback, exactly as the async
+     * send_response path does — and complete immediately with
+     * STATUS_DELETE_PENDING.  DELETE takes precedence over any buffered
+     * events, matching MS-SMB2 3.3.4.4 and the send_response classification. */
+    if (chimera_vfs_notify_watch_take_deleted(state->watch)) {
+        pthread_mutex_unlock(&state->lock);
+        chimera_smb_open_file_release(request, open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_DELETE_PENDING);
+        return;
+    }
+
     /* Re-filter drained events against this request's filter — the
      * watch's mask may have been broader when these were enqueued
      * (see same logic in the async send_response path).  Done under
