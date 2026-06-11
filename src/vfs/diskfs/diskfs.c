@@ -11934,10 +11934,15 @@ diskfs_open_at_existing_cb(
         return;
     }
 
-    /* O_NOFOLLOW: opening an existing symlink final component fails with ELOOP
-     * rather than following it. */
+    /* A symlink as the final component under O_NOFOLLOW: a *data* open
+     * (POSIX open(O_NOFOLLOW)) must fail with ELOOP, but an O_PATH-style open
+     * (SMB FILE_OPEN_REPARSE_POINT, i.e. O_PATH|O_NOFOLLOW) wants a handle to
+     * the link itself so the caller can read its attributes / security
+     * descriptor / reparse data -- so fall through and open the symlink inode
+     * in that case (mirrors memfs and the linux backend). */
     if (S_ISLNK(inode->mode) &&
-        (request->open_at.flags & CHIMERA_VFS_OPEN_NOFOLLOW)) {
+        (request->open_at.flags & CHIMERA_VFS_OPEN_NOFOLLOW) &&
+        !(request->open_at.flags & CHIMERA_VFS_OPEN_PATH)) {
         diskfs_op_fail(request, p->txn, CHIMERA_VFS_ELOOP);
         return;
     }
