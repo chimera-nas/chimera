@@ -119,6 +119,20 @@ if(CHIMERA_NETNS_TESTING)
     endif()
 endif()
 
+# diskfs-only space-reclaim + AG-log condensation test (statfs convergence
+# over delete churn, unlink-while-open, reclaim backlog across remount)
+add_posix_testprog(test_diskfs_reclaim)
+if(CHIMERA_NETNS_TESTING)
+    if(IO_URING_ENABLED)
+        add_posix_test(diskfs_reclaim_diskfs_io_uring test_diskfs_reclaim diskfs_io_uring)
+        set_tests_properties(chimera/posix/diskfs_reclaim_diskfs_io_uring PROPERTIES TIMEOUT 600)
+    endif()
+    if(HAVE_LIBAIO)
+        add_posix_test(diskfs_reclaim_diskfs_aio test_diskfs_reclaim diskfs_aio)
+        set_tests_properties(chimera/posix/diskfs_reclaim_diskfs_aio PROPERTIES TIMEOUT 600)
+    endif()
+endif()
+
 # ============================================================================
 # NFS3 Backend Tests
 # These tests run the POSIX tests through the Chimera NFS client,
