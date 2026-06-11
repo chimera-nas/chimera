@@ -105,6 +105,20 @@ generate_posix_backend_tests(cairn CAIRN_ENABLED)
 generate_posix_backend_tests(linux "")
 generate_posix_backend_tests(io_uring CHIMERA_VFS_IO_URING)
 
+# diskfs-only cache-eviction / cold-remount stress (not part of the
+# all-backend matrix: it shrinks the diskfs caches and remounts the devices)
+add_posix_testprog(test_diskfs_evict)
+if(CHIMERA_NETNS_TESTING)
+    if(IO_URING_ENABLED)
+        add_posix_test(diskfs_evict_diskfs_io_uring test_diskfs_evict diskfs_io_uring)
+        set_tests_properties(chimera/posix/diskfs_evict_diskfs_io_uring PROPERTIES TIMEOUT 600)
+    endif()
+    if(HAVE_LIBAIO)
+        add_posix_test(diskfs_evict_diskfs_aio test_diskfs_evict diskfs_aio)
+        set_tests_properties(chimera/posix/diskfs_evict_diskfs_aio PROPERTIES TIMEOUT 600)
+    endif()
+endif()
+
 # ============================================================================
 # NFS3 Backend Tests
 # These tests run the POSIX tests through the Chimera NFS client,

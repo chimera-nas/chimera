@@ -155,6 +155,15 @@ posix_test_is_diskfs(const char *backend)
            strcmp(backend, "diskfs_aio") == 0;
 } // posix_test_is_diskfs
 
+/* Optional diskfs-config overrides for tests that need a non-default setup.
+ * posix_test_diskfs_extra_cfg is a JSON object (text) merged into the
+ * generated diskfs config (e.g. to shrink the caches for an eviction stress);
+ * posix_test_diskfs_reuse_devices reuses the existing device images without
+ * re-initializing the filesystem (cold remount).  Set before posix_test_init
+ * / posix_test_configure_diskfs. */
+static const char *posix_test_diskfs_extra_cfg = NULL;
+static int         posix_test_diskfs_reuse_devices __attribute__ ((unused)) = 0;
+
 // Helper to configure diskfs backend
 static inline void
 posix_test_configure_diskfs(
@@ -179,6 +188,10 @@ posix_test_configure_diskfs(
         json_object_set_new(device, "path", json_string(device_path));
         json_array_append_new(devices, device);
 
+        if (posix_test_diskfs_reuse_devices) {
+            continue;
+        }
+
         int fd = open(device_path, O_CREAT | O_TRUNC | O_RDWR, 0644);
         if (fd < 0) {
             fprintf(stderr, "Failed to create device %s: %s\n", device_path, strerror(errno));
@@ -195,9 +208,24 @@ posix_test_configure_diskfs(
         close(fd);
     }
 
-    json_object_set_new(cfg, "initialize", json_true());
+    /* diskfs keys initialization on the presence of the key, so a remount
+     * must omit it entirely rather than pass false. */
+    if (!posix_test_diskfs_reuse_devices) {
+        json_object_set_new(cfg, "initialize", json_true());
+    }
     json_object_set_new(cfg, "devices", devices);
     json_object_set_new(cfg, "unsafe_async", json_true());
+    if (posix_test_diskfs_extra_cfg) {
+        json_t *extra = json_loads(posix_test_diskfs_extra_cfg, 0, NULL);
+
+        if (!extra) {
+            fprintf(stderr, "Bad posix_test_diskfs_extra_cfg JSON: %s\n",
+                    posix_test_diskfs_extra_cfg);
+            exit(EXIT_FAILURE);
+        }
+        json_object_update(cfg, extra);
+        json_decref(extra);
+    }
     json_str = json_dumps(cfg, JSON_COMPACT);
     snprintf(diskfs_cfg, diskfs_cfg_size, "%s", json_str);
     free(json_str);
