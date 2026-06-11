@@ -812,6 +812,8 @@ struct chimera_smb_compound {
     struct chimera_smb_tree           *saved_tree;
     struct chimera_server_smb_thread  *thread;
     struct chimera_smb_conn           *conn;
+    /* conn->generation at compound creation; see the conn field. */
+    uint64_t                           conn_generation;
     struct chimera_smb_compound       *next;
     struct chimera_smb_request        *requests[CHIMERA_SMB_COMPOUND_MAX_REQUESTS];
 };
@@ -903,6 +905,16 @@ struct chimera_smb_conn {
      * the same hash the client used. */
     uint8_t                            preauth_hash_presession[SMB2_PREAUTH_HASH_SIZE];
     uint32_t                           requests_completed;
+    /* Lifecycle generation for pooled conns: bumped in chimera_smb_conn_free,
+     * snapshotted into each compound at creation (conn_generation).  A
+     * compound whose VFS work completes after its connection was torn down
+     * (and possibly recycled for a NEW connection) sees a mismatch in
+     * chimera_smb_compound_reply and drops its reply instead of writing a
+     * stale response into the recycled bind -- which would corrupt the new
+     * connection's stream (observed as smbtorture failing to connect with
+     * NT_STATUS_INVALID_NETWORK_RESPONSE).  Only touched on the conn's owning
+     * thread. */
+    uint64_t                           generation;
     int                                rdma_max_send;
     int                                rdma_niov;
     int                                rdma_length;
@@ -1736,6 +1748,12 @@ chimera_smb_conn_free(
 
     // Cleanup GSSAPI context if initialized
     smb_gssapi_cleanup(&conn->gssapi_ctx);
+
+    /* Invalidate compounds still in flight for this connection: any whose VFS
+     * work completes after this point sees the generation mismatch in
+     * chimera_smb_compound_reply and drops its reply rather than sending into
+     * a freed (or recycled) bind. */
+    conn->generation++;
 
     /* Drop from the owning thread's active-connection list before returning the
      * conn to the pool (the resume doorbell walks active_conns). */

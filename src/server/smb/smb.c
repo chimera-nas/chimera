@@ -292,6 +292,18 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
     int                               i, rc, chunk_niov;
     int                               reply_hdr_len, reply_payload_length, left, chunk;
 
+    /* The connection may have been torn down (and its pooled conn/bind
+     * possibly recycled for a NEW connection) while this compound's VFS work
+     * was still in flight.  Sending now would write a stale reply into
+     * whatever connection currently owns the recycled bind, corrupting its
+     * stream from the first message (seen as a fresh smbtorture connection
+     * failing NEGOTIATE with NT_STATUS_INVALID_NETWORK_RESPONSE).  The client
+     * this reply was for is gone; drop it and just release the compound. */
+    if (unlikely(conn->generation != compound->conn_generation)) {
+        chimera_smb_compound_free(thread, compound);
+        return;
+    }
+
     smb_dump_compound_reply(compound);
 
     evpl_iovec_alloc(evpl, 8192, 8, 1, 0, &reply_iov[0]);
@@ -1044,8 +1056,9 @@ chimera_smb_server_handle_smb2(
 
     compound = chimera_smb_compound_alloc(thread);
 
-    compound->thread = thread;
-    compound->conn   = conn;
+    compound->thread          = thread;
+    compound->conn            = conn;
+    compound->conn_generation = conn->generation;
 
     compound->saved_session_id     = UINT64_MAX;
     compound->saved_tree_id        = UINT64_MAX;
@@ -1531,8 +1544,9 @@ chimera_smb_server_handle_smb1(
 
     compound = chimera_smb_compound_alloc(thread);
 
-    compound->thread = thread;
-    compound->conn   = conn;
+    compound->thread          = thread;
+    compound->conn            = conn;
+    compound->conn_generation = conn->generation;
 
     compound->saved_session_id     = UINT64_MAX;
     compound->saved_tree_id        = UINT64_MAX;
