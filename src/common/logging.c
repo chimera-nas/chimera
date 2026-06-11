@@ -132,6 +132,14 @@ SYMBOL_EXPORT int  ChimeraLogLevel    = CHIMERA_LOG_INFO;
 FILE              *ChimeraLogFile     = NULL; /* NULL => write to stdout */
 int                ChimeraLogDisabled = 0;
 pthread_mutex_t    ChimeraLogBufLock  = PTHREAD_MUTEX_INITIALIZER;
+/* Held by the flusher across its stdio write and by the atfork prepare
+ * handler: without it, fork() can land while the flusher is inside
+ * fprintf/fflush holding the C library's stream lock, and the child inherits
+ * that lock permanently taken -- its first write to the same stream (e.g.
+ * chimera_vlog's inline drain once the buffer fills with no flusher alive)
+ * deadlocks.  ChimeraLogBufLock alone cannot prevent this because the flusher
+ * deliberately prints outside it. */
+pthread_mutex_t    ChimeraLogFlushLock = PTHREAD_MUTEX_INITIALIZER;
 pthread_t          ChimeraLogThread;
 pthread_once_t     ChimeraLogOnce = PTHREAD_ONCE_INIT;
 
@@ -146,6 +154,9 @@ chimera_log_thread(void *arg)
 
         if (ChimeraLogBufPtr > ChimeraLogBuf) {
 
+            /* FlushLock before BufLock; the atfork prepare handler takes them
+             * in the same order. */
+            pthread_mutex_lock(&ChimeraLogFlushLock);
             pthread_mutex_lock(&ChimeraLogBufLock);
             tmp              = ChimeraLogBuf;
             ChimeraLogIndex  = !ChimeraLogIndex;
@@ -155,6 +166,7 @@ chimera_log_thread(void *arg)
 
             fprintf(out, "%s", tmp);
             fflush(out);
+            pthread_mutex_unlock(&ChimeraLogFlushLock);
         }
         usleep(1000);
     }
@@ -206,6 +218,10 @@ chimera_log_flush_signal(int signum)
 static void
 chimera_log_atfork_prepare(void)
 {
+    /* FlushLock first (same order as the flusher): holding it across fork()
+     * guarantees the flusher is not mid-fprintf/fflush, so the child cannot
+     * inherit the C library's stream lock in a taken state. */
+    pthread_mutex_lock(&ChimeraLogFlushLock);
     pthread_mutex_lock(&ChimeraLogBufLock);
 } /* chimera_log_atfork_prepare */
 
@@ -213,6 +229,7 @@ static void
 chimera_log_atfork_parent(void)
 {
     pthread_mutex_unlock(&ChimeraLogBufLock);
+    pthread_mutex_unlock(&ChimeraLogFlushLock);
 } /* chimera_log_atfork_parent */
 
 static void
@@ -229,6 +246,7 @@ chimera_log_atfork_child(void)
      * the parent's log thread).
      */
     pthread_mutex_init(&ChimeraLogBufLock, NULL);
+    pthread_mutex_init(&ChimeraLogFlushLock, NULL);
     ChimeraLogRun = 0;
 
     if (ChimeraLogBuf) {
