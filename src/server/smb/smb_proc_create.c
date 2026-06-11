@@ -19,34 +19,40 @@
 #include "smb_attr.h"
 #include "smb_lsarpc.h"
 
-#define SMB2_WRITE_MASK       (SMB2_FILE_WRITE_DATA | \
-                               SMB2_FILE_APPEND_DATA | \
-                               SMB2_FILE_WRITE_EA | \
-                               SMB2_FILE_WRITE_ATTRIBUTES | \
-                               SMB2_FILE_DELETE_CHILD | \
-                               SMB2_FILE_ADD_FILE | \
-                               SMB2_FILE_ADD_SUBDIRECTORY | \
-                               SMB2_DELETE | \
-                               SMB2_WRITE_DACL | \
-                               SMB2_WRITE_OWNER | \
-                               SMB2_GENERIC_WRITE | \
-                               SMB2_GENERIC_ALL)
+#define SMB2_WRITE_MASK                   (SMB2_FILE_WRITE_DATA | \
+                                           SMB2_FILE_APPEND_DATA | \
+                                           SMB2_FILE_WRITE_EA | \
+                                           SMB2_FILE_WRITE_ATTRIBUTES | \
+                                           SMB2_FILE_DELETE_CHILD | \
+                                           SMB2_FILE_ADD_FILE | \
+                                           SMB2_FILE_ADD_SUBDIRECTORY | \
+                                           SMB2_DELETE | \
+                                           SMB2_WRITE_DACL | \
+                                           SMB2_WRITE_OWNER | \
+                                           SMB2_GENERIC_WRITE | \
+                                           SMB2_GENERIC_ALL)
 
 /* Bits in DesiredAccess that imply the caller will read or write file
  * data.  Without any of these set, the open is metadata-only — common
  * for tools probing for rename/delete — and is satisfiable with an
  * O_PATH-style handle on both files and directories. */
-#define SMB2_DATA_ACCESS_MASK (SMB2_FILE_READ_DATA | \
-                               SMB2_FILE_WRITE_DATA | \
-                               SMB2_FILE_APPEND_DATA | \
-                               SMB2_FILE_READ_EA | \
-                               SMB2_FILE_WRITE_EA | \
-                               SMB2_FILE_EXECUTE | \
-                               SMB2_GENERIC_READ | \
-                               SMB2_GENERIC_WRITE | \
-                               SMB2_GENERIC_EXECUTE | \
-                               SMB2_GENERIC_ALL | \
-                               SMB2_MAXIMUM_ALLOWED)
+#define SMB2_DATA_ACCESS_MASK             (SMB2_FILE_READ_DATA | \
+                                           SMB2_FILE_WRITE_DATA | \
+                                           SMB2_FILE_APPEND_DATA | \
+                                           SMB2_FILE_READ_EA | \
+                                           SMB2_FILE_WRITE_EA | \
+                                           SMB2_FILE_EXECUTE | \
+                                           SMB2_GENERIC_READ | \
+                                           SMB2_GENERIC_WRITE | \
+                                           SMB2_GENERIC_EXECUTE | \
+                                           SMB2_GENERIC_ALL | \
+                                           SMB2_MAXIMUM_ALLOWED)
+
+/* Re-getattr budget for an ACCESS_DENIED that looks like the transient
+ * server-owned state of an object a concurrent CREATE is still constructing
+ * (see chimera_smb_create_open_at_callback).  Each retry is a full backend
+ * round trip, which dwarfs the racing creator's create-to-chown window. */
+#define CHIMERA_SMB_CREATE_ACCESS_RETRIES 8
 
 /* Map a VFS error from an open-or-create path to the SMB2 status that
  * Windows clients expect.  EISDIR/ENOTDIR are critical here: cmd.exe and
@@ -1286,6 +1292,17 @@ chimera_smb_create_granted_access(
     struct chimera_smb_request     *request,
     const struct chimera_vfs_attrs *attr);
 
+static inline int
+chimera_smb_create_access_deny_transient(
+    struct chimera_smb_request     *request,
+    const struct chimera_vfs_attrs *attr);
+
+static void
+chimera_smb_create_access_retry_callback(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data);
+
 static inline void
 chimera_smb_create_mkdir_callback(
     enum chimera_vfs_error    error_code,
@@ -1508,6 +1525,36 @@ chimera_smb_create_open_at_callback(
     if (request->create.create_disposition != SMB2_FILE_CREATE) {
         uint32_t access_status = chimera_smb_create_check_access(request, attr);
 
+        /* A CREATE that loses a same-name race can observe a half-constructed
+         * object: the passthrough backends (linux/io_uring) execute an SMB
+         * (AUTH_ATTR) create as the server identity and apply the client's
+         * ownership with a separate fchown, so the loser's open can see the
+         * object still owned by the server -- the owner fast-path misses and
+         * a mode-only evaluation denies rights the final owner holds (e.g.
+         * smbtorture smb2.create.mkdir-dup asking SEC_RIGHTS_FILE_ALL).  When
+         * a denial carries that exact signature (no explicit ACL, object owned
+         * by the server identity, caller is someone else), re-fetch the
+         * attributes and re-evaluate, a bounded number of times.  The retry
+         * mask includes ATTR_ACL, which is never attr-cache-served, so each
+         * retry reaches the backend and sees the racing creator's chown once
+         * it lands.  A genuinely server-owned object still denies after the
+         * budget, and the extra getattrs run only on an already-failing path. */
+        if (access_status == SMB2_STATUS_ACCESS_DENIED &&
+            request->create.access_retries < CHIMERA_SMB_CREATE_ACCESS_RETRIES &&
+            chimera_smb_create_access_deny_transient(request, attr)) {
+            request->create.access_retries++;
+            request->create.access_retry_oh = oh;
+            chimera_vfs_getattr(
+                vfs_thread,
+                &request->session_handle->session->cred,
+                oh,
+                CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT |
+                CHIMERA_VFS_ATTR_ACL | CHIMERA_VFS_ATTR_BTIME,
+                chimera_smb_create_access_retry_callback,
+                request);
+            return;
+        }
+
         if (access_status != SMB2_STATUS_SUCCESS) {
             chimera_vfs_release(vfs_thread, oh);
             chimera_vfs_release(vfs_thread, request->create.parent_handle);
@@ -1580,6 +1627,39 @@ chimera_smb_create_open_at_callback(
 
     chimera_smb_create_open_finish(request, open_file);
 } /* chimera_smb_create_open_at_callback */
+
+/* Completion of the access-retry getattr (see the transient-denial comment in
+ * chimera_smb_create_open_at_callback): re-enter the open completion with the
+ * fresh attributes.  The re-entry re-runs the access check -- passing once the
+ * racing creator's chown has landed, retrying while budget remains, and issuing
+ * the final denial otherwise.  The directory pre/post attrs are not consumed by
+ * the open completion path, so they are not re-supplied. */
+static void
+chimera_smb_create_access_retry_callback(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct chimera_smb_request     *request = private_data;
+    struct chimera_vfs_open_handle *oh      = request->create.access_retry_oh;
+
+    request->create.access_retry_oh = NULL;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        struct chimera_vfs_thread *vfs_thread =
+            request->compound->thread->vfs_thread;
+
+        chimera_vfs_release(vfs_thread, oh);
+        chimera_vfs_release(vfs_thread, request->create.parent_handle);
+        chimera_smb_complete_request(request,
+                                     chimera_smb_create_error_status(error_code));
+        return;
+    }
+
+    chimera_smb_create_open_at_callback(CHIMERA_VFS_OK, oh,
+                                        &request->create.set_attr, attr,
+                                        NULL, NULL, request);
+} /* chimera_smb_create_access_retry_callback */
 
 /* Break-deadline for a CREATE parked on a lease break (MS-SMB2 3.3.5.9 / the
  * oplock-break timeout): the holder never acknowledged within the deadline, so
@@ -1948,6 +2028,33 @@ chimera_smb_create_check_access(
     return (req & ~granted) == 0 ?
            SMB2_STATUS_SUCCESS : SMB2_STATUS_ACCESS_DENIED;
 } /* chimera_smb_create_check_access */
+
+/*
+ * True when an ACCESS_DENIED verdict from chimera_smb_create_check_access may
+ * be the transient state of an object a concurrent CREATE is still
+ * constructing rather than a real denial.  The passthrough backends create as
+ * the server identity and chown to the client afterwards, so the signature is:
+ * no explicit ACL, object owned by the server identity, caller is someone
+ * else.  Gates the bounded re-getattr in chimera_smb_create_open_at_callback.
+ */
+static inline int
+chimera_smb_create_access_deny_transient(
+    struct chimera_smb_request     *request,
+    const struct chimera_vfs_attrs *attr)
+{
+    const struct chimera_vfs_cred *sc   = chimera_vfs_get_server_cred();
+    const struct chimera_vfs_cred *cred =
+        &request->session_handle->session->cred;
+    int                            has_acl =
+        (attr->va_set_mask & CHIMERA_VFS_ATTR_ACL) &&
+        attr->va_acl && attr->va_acl->num_aces > 0;
+
+    return !has_acl &&
+           cred->flavor != CHIMERA_VFS_AUTH_NONE &&
+           (attr->va_set_mask & CHIMERA_VFS_ATTR_UID) &&
+           attr->va_uid == (uint64_t) sc->uid &&
+           (uint64_t) cred->uid != (uint64_t) sc->uid;
+} /* chimera_smb_create_access_deny_transient */
 
 /*
  * Resolve the access mask granted on a successful open, for the open handle's
@@ -2826,8 +2933,10 @@ chimera_smb_create(struct chimera_smb_request *request)
     /* Only the regular-file open path (open_at_callback) registers a finish
      * callback and may park on a batch-oplock break; clear it so the mkdir /
      * stream / pipe paths never inherit a stale callback and park. */
-    request->create.gen_finish_cb = NULL;
-    request->create.gen_parked    = 0;
+    request->create.gen_finish_cb   = NULL;
+    request->create.gen_parked      = 0;
+    request->create.access_retries  = 0;
+    request->create.access_retry_oh = NULL;
 
     /* Handle stream-name syntax (file:stream[:$DATA]).  When named streams are
      * disabled (config off, or the backend lacks the capability) the legacy

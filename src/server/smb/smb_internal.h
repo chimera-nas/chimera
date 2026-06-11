@@ -425,6 +425,12 @@ struct chimera_smb_request {
              * the file/dir (vs opened an existing one) — drives the OPENED vs
              * CREATED Create Action in the reply. */
             uint8_t                         r_created;
+            /* Bounded re-getattr budget for an ACCESS_DENIED that may be the
+             * transient server-owned state of an object a concurrent CREATE is
+             * still constructing (see chimera_smb_create_open_at_callback). */
+            uint8_t                         access_retries;
+            /* Open handle parked across the access-retry getattr. */
+            struct chimera_vfs_open_handle *access_retry_oh;
             /* Set by the durable-reconnect path: this CREATE is reclaiming a
             * surviving open, not opening a new one.  The access was granted at
             * the original open, and MS-SMB2 has the reconnect ignore the
