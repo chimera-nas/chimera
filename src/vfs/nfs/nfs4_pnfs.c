@@ -1553,6 +1553,14 @@ chimera_nfs4_pnfs_layoutreturn(struct chimera_vfs_request *request)
 
     (void) session;
 
+    /* Logged at the same level as LAYOUTGET/GETDEVICEINFO: the return is the
+     * other half of the layout lifecycle, and its absence from the log made a
+     * recall-expected test flake undiagnosable (the layout had been silently
+     * returned before the conflicting op, so no recall was ever needed). */
+    chimera_nfsclient_info("pNFS LAYOUTRETURN: fh_len=%u seqid=%u",
+                           layout->file_fh_len,
+                           layout->layout_stateid.seqid);
+
     chimera_nfs4_compound_call(
         cctx->thread, shared, server_thread, request,
         &args, &rpc2_cred, 0, 0, NULL, 0, 0,

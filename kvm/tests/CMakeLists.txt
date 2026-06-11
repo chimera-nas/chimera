@@ -153,14 +153,21 @@ set(PNFS_PROXY_CMD_rw "mkdir -p /mnt/test && dd if=/dev/urandom of=/tmp/orig bs=
 # proxy fences DS I/O and the truncate completes.  The "RECALL_EXPECTED" token
 # tells the wrapper to additionally assert the proxy logged a CB_LAYOUTRECALL.
 #
-# The guest holds fd 9 open on the file across the truncate.  The proxy returns
-# its layout when its upstream open handle closes (close-time LAYOUTCOMMIT +
-# LAYOUTRETURN), so without the pin the proxy may legitimately return the layout
-# in the gap between cp's CLOSE and the truncate's SETATTR -- the MDS then has
-# no holder to recall and the CB_LAYOUTRECALL assertion flakes.  The open fd
-# keeps the proxy's handle (and so its layout) alive until after the truncate,
-# making the recall deterministic.
-set(PNFS_PROXY_CMD_recall_truncate ": RECALL_EXPECTED; mkdir -p /mnt/test && dd if=/dev/urandom of=/tmp/orig bs=1M count=8 2>/dev/null && cp /tmp/orig /mnt/test/f0 && sync && exec 9</mnt/test/f0 && truncate -s 4194304 /mnt/test/f0 && exec 9<&- && (echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true) && head -c 4194304 /tmp/orig > /tmp/orig4 && cmp /tmp/orig4 /mnt/test/f0")
+# The guest holds fd 9 open READ-WRITE on the file from before cp until after
+# the truncate.  The proxy returns its layout when its upstream open handle
+# closes (close-time LAYOUTCOMMIT + LAYOUTRETURN), so if that handle goes idle
+# between cp's CLOSE and the truncate's SETATTR the close-thread sweep (~100ms
+# idle) can reap it -- the MDS then has no holder to recall and the
+# CB_LAYOUTRECALL assertion flakes.  Two requirements make the pin effective,
+# both learned from real flakes:
+#   - It must be READ-WRITE: the proxy's open-handle cache is keyed by
+#     (fh, access_mode, cred), so a read-only fd pins a separate READ-class
+#     handle while the WRITE-class handle holding the layout idles out.
+#     An O_RDWR fd shares cp's RW class and pins the layout-holding handle.
+#   - It must be opened BEFORE cp: the `sync` after cp can run >100ms, long
+#     enough for the sweep to reap an unpinned handle before a later pin
+#     lands.  (`9<>` creates f0 empty; cp then overwrites it.)
+set(PNFS_PROXY_CMD_recall_truncate ": RECALL_EXPECTED; mkdir -p /mnt/test && dd if=/dev/urandom of=/tmp/orig bs=1M count=8 2>/dev/null && exec 9<>/mnt/test/f0 && cp /tmp/orig /mnt/test/f0 && sync && truncate -s 4194304 /mnt/test/f0 && exec 9<&- && (echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true) && head -c 4194304 /tmp/orig > /tmp/orig4 && cmp /tmp/orig4 /mnt/test/f0")
 
 # xfstests programs
 set(XFSTESTS_PROGRAMS fsstress fsx dirstress nametest fstest rewinddir)
