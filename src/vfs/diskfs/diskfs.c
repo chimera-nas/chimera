@@ -5404,7 +5404,14 @@ diskfs_bt_run(struct diskfs_bt_op *op)
                                         SM_RESERVATION_MIN);
 
             if (rrc == SM_AGAIN) {
-                return;     /* parked; resumes back into this phase */
+                /* Parked on a cold journal block.  Mark the op suspended so
+                 * completion is delivered via the callback even when the rest
+                 * of the traversal never parks again: a fully-resident descent
+                 * after a reserve-only park would otherwise complete into
+                 * `done` with no caller left to read it, dropping the op (and
+                 * the request) on the floor. */
+                op->suspended = 1;
+                return;     /* resumes back into this phase */
             }
             /* ENOSPC here is left to the modify's allocation to surface; just
              * proceed to the descent. */
