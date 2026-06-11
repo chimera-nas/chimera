@@ -48,6 +48,7 @@ if(BOTO3_FOUND)
                         --chimera ${CHIMERA_DAEMON}
             )
             set_tests_properties(chimera/server/s3/boto3_${sigver}_${backend}_${testname} PROPERTIES
+                LABELS "s3"
                 ENVIRONMENT "PYTHONUNBUFFERED=1"
                 TIMEOUT 300
             )

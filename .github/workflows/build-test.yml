@@ -302,39 +302,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # devcontainer. KVM is required ON for amd64, where the suites
-          # actually run, so a regression in availability fails the build
-          # rather than silently skipping. The devcontainer ships only x86
-          # qemu (qemu-system-x86), so KVM acceleration is unavailable on
-          # arm64 -- the suites never ran there, so keep them explicitly OFF.
-          - platform: linux/amd64
-            runner: arc-amd64
-            arch: amd64
-            build_type: Release
-            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-dev
-            image_name: devcontainer
-            cmake_extra: "-DKVM_TESTING=ON"
-          - platform: linux/amd64
-            runner: arc-amd64
-            arch: amd64
-            build_type: Debug
-            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-dev
-            image_name: devcontainer
-            cmake_extra: "-DKVM_TESTING=ON"
-          - platform: linux/arm64
-            runner: arc-arm64
-            arch: arm64
-            build_type: Release
-            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-dev
-            image_name: devcontainer
-            cmake_extra: "-DKVM_TESTING=OFF"
-          - platform: linux/arm64
-            runner: arc-arm64
-            arch: arm64
-            build_type: Debug
-            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-dev
-            image_name: devcontainer
-            cmake_extra: "-DKVM_TESTING=OFF"
+          # NOTE: the devcontainer is built and tested by the dedicated
+          # build-dev / test-dev jobs below (build once, then shard the tests by
+          # category); it is no longer part of this combined build+test matrix.
           # ubuntu 26 (amd64 only on PR; arm64 runs in nightly)
           - platform: linux/amd64
             runner: arc-amd64
@@ -566,7 +536,7 @@ jobs:
   # reports) and never fails the build: the test jobs stay the source of truth.
   publish-test-results:
     name: Report
-    needs: [test]
+    needs: [test, test-dev]
     if: ${{ always() && github.event_name != 'pull_request' }}
     runs-on: arc-amd64
     permissions:
@@ -600,11 +570,196 @@ jobs:
               || echo "::warning::failed to post PR comment (report is in the run summary)"
           fi
 
+  # Devcontainer build half: build the tree once per (arch, build_type) and
+  # publish it as an artifact for the test-dev shards to consume.  KVM guest
+  # images are NOT fetched here (KVM_FETCH_IMAGES=OFF, amd64 only) -- the kvm-*
+  # test shards fetch them on demand.  KVM is x86-only in the devcontainer, so
+  # arm64 builds with KVM off.
+  build-dev:
+    name: Build devcontainer ${{ matrix.arch }} ${{ matrix.build_type }}
+    needs: [build-devcontainer]
+    if: ${{ github.event_name != 'pull_request' }}
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: amd64, runner: arc-amd64, build_type: Release, kvm_cmake: "-DKVM_TESTING=ON -DKVM_FETCH_IMAGES=OFF" }
+          - { arch: amd64, runner: arc-amd64, build_type: Debug,   kvm_cmake: "-DKVM_TESTING=ON -DKVM_FETCH_IMAGES=OFF" }
+          - { arch: arm64, runner: arc-arm64, build_type: Release, kvm_cmake: "-DKVM_TESTING=OFF" }
+          - { arch: arm64, runner: arc-arm64, build_type: Debug,   kvm_cmake: "-DKVM_TESTING=OFF" }
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      # oras is needed at configure time: KVM_TESTING=ON probes for it.
+      - name: Fetch oras CLI
+        run: |
+          ORAS_VERSION=1.2.0
+          curl -sSL "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_${{ matrix.arch }}.tar.gz" \
+            | tar -xz -C "${{ github.workspace }}" oras
+          chmod +x "${{ github.workspace }}/oras"
+
+      - name: Configure and build inside the container
+        run: |
+          docker run --rm --privileged \
+            -e DOCKER_MIRROR=${{ env.DOCKER_MIRROR }} \
+            -e APT_MIRROR=${{ env.APT_MIRROR }} \
+            -e CCACHE_DIR=/build/ccache \
+            -e CCACHE_REMOTE_STORAGE="${{ secrets.CCACHE_REMOTE_STORAGE }}" \
+            -v "${{ github.workspace }}:/workspace" \
+            -v "${{ github.workspace }}/oras:/usr/local/bin/oras:ro" \
+            -v /build \
+            -w /build \
+            ${{ env.DEV_IMAGE_TAG_PREFIX }}:${{ github.sha }}-${{ matrix.arch }} \
+            bash -euxc '
+              cmake -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DREQUIRE_NETNS_TESTS=ON -DKVM_IMAGE_REGISTRY=${{ env.KVM_IMAGE_REGISTRY }} -DPYNFS_JUNIT_DIR=/workspace/ctest-results/pynfs-junit -DSMBTORTURE_JUNIT_DIR=/workspace/ctest-results/smbtorture-junit ${{ matrix.kvm_cmake }} /workspace
+              ninja
+              ccache --show-stats || true
+              # Ship the build tree to the test shards (minus the local ccache;
+              # KVM guest images live under /kvm, outside /build, so they are
+              # already excluded).
+              tar -C /build --exclude=./ccache -czf /workspace/build-dev.tar.gz .'
+
+      - name: Upload build tree
+        uses: actions/upload-artifact@v6
+        with:
+          name: build-dev-${{ matrix.arch }}-${{ matrix.build_type }}
+          path: build-dev.tar.gz
+          retention-days: 1
+
+  # Barrier: every devcontainer build-time job (build + static analysis) must
+  # finish before any test-dev shard starts.  Default needs-success semantics
+  # mean a failed build skips this, which in turn skips all test shards.
+  build-dev-complete:
+    name: Devcontainer build complete
+    needs: [build-dev, static-analysis]
+    if: ${{ github.event_name != 'pull_request' }}
+    runs-on: arc-amd64
+    permissions:
+      contents: read
+    steps:
+      - name: Builds done
+        run: echo "All devcontainer build-time jobs passed; releasing test shards."
+
+  # Devcontainer test half: one shard per category, each consuming the build
+  # artifact.  netns categories run on both arches; the kvm-* categories run on
+  # amd64 only (the devcontainer's qemu is x86-only) and fetch guest images on
+  # demand before running.
+  test-dev:
+    name: Test devcontainer ${{ matrix.arch }} ${{ matrix.build_type }} ${{ matrix.category }}
+    needs: [build-dev-complete]
+    if: ${{ github.event_name != 'pull_request' }}
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+        build_type: [Release, Debug]
+        category: [pynfs, smbtorture, wpts, posix-client, s3, client, unit, kvm-cthon, kvm-xfsprogs, kvm-pnfs]
+        include:
+          - { arch: amd64, runner: arc-amd64 }
+          - { arch: arm64, runner: arc-arm64 }
+        exclude:
+          # KVM is x86-only in the devcontainer, so it never runs on arm64.
+          - { arch: arm64, category: kvm-cthon }
+          - { arch: arm64, category: kvm-xfsprogs }
+          - { arch: arm64, category: kvm-pnfs }
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Fetch oras CLI
+        run: |
+          ORAS_VERSION=1.2.0
+          curl -sSL "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_${{ matrix.arch }}.tar.gz" \
+            | tar -xz -C "${{ github.workspace }}" oras
+          chmod +x "${{ github.workspace }}/oras"
+
+      - name: Download build tree
+        uses: actions/download-artifact@v6
+        with:
+          name: build-dev-${{ matrix.arch }}-${{ matrix.build_type }}
+
+      - name: Unpack, fetch images if needed, and run the category
+        run: |
+          docker run --rm --privileged \
+            -e DOCKER_MIRROR=${{ env.DOCKER_MIRROR }} \
+            -e APT_MIRROR=${{ env.APT_MIRROR }} \
+            -e KVM_IMAGE_REGISTRY=${{ env.KVM_IMAGE_REGISTRY }} \
+            -e CATEGORY=${{ matrix.category }} \
+            -v "${{ github.workspace }}:/workspace" \
+            -v "${{ github.workspace }}/oras:/usr/local/bin/oras:ro" \
+            -v /build \
+            -w /build \
+            ${{ env.DEV_IMAGE_TAG_PREFIX }}:${{ github.sha }}-${{ matrix.arch }} \
+            bash -euxc '
+              tar -C /build -xzf /workspace/build-dev.tar.gz
+              NEED_KVM=
+              case "$CATEGORY" in
+                pynfs)        SEL="-L pynfs" ;;
+                smbtorture)   SEL="-L smbtorture" ;;
+                wpts)         SEL="-L wpts" ;;
+                posix-client) SEL="-L posix" ;;
+                s3)           SEL="-L s3" ;;
+                client)       SEL="-L client" ;;
+                unit)         SEL="-LE pynfs|smbtorture|wpts|posix|s3|client|kvm" ;;
+                kvm-cthon)    SEL="-L kvm -R /cthon/";    NEED_KVM=1 ;;
+                kvm-xfsprogs) SEL="-L kvm -R /xfstests/"; NEED_KVM=1 ;;
+                kvm-pnfs)     SEL="-L pnfs";              NEED_KVM=1 ;;
+              esac
+              if [ -n "$NEED_KVM" ]; then
+                ninja kvm_ubuntu2404_image kvm_ubuntu2404_hwe_image kvm_ubuntu2204_hwe_image
+              fi
+              mkdir -p /workspace/ctest-results
+              rm -f /workspace/flaky-rescued.log
+              start=$(date +%s)
+              rc=0
+              /workspace/scripts/cap_ctest_output.sh ctest $SEL --output-on-failure --test-output-size-failed 65536 --timeout 300 -j 32 --output-junit /workspace/ctest-results/results.xml || rc=$?
+              echo "$(( $(date +%s) - start ))" > /workspace/ctest-results/duration_seconds
+              if [ "$rc" -ne 0 ]; then
+                echo "ctest reported failures; rerunning previously-failed tests to distinguish flakes from real failures"
+                cp /build/Testing/Temporary/LastTestsFailed.log /workspace/flaky-candidates.log
+                if /workspace/scripts/cap_ctest_output.sh ctest --rerun-failed --output-on-failure --test-output-size-failed 65536 --timeout 300 -j 32; then
+                  echo "rerun of previously-failed tests passed: treating as flaky (gated for human review)"
+                  cp /workspace/flaky-candidates.log /workspace/flaky-rescued.log
+                  rc=0
+                else
+                  echo "rerun still failing: real failure"
+                fi
+              fi
+              exit $rc'
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: ctest-junit-devcontainer-${{ matrix.arch }}-${{ matrix.build_type }}-${{ matrix.category }}
+          path: ctest-results/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload flaky-test marker
+        if: ${{ hashFiles('flaky-rescued.log') != '' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: flaky-marker-devcontainer-${{ matrix.arch }}-${{ matrix.build_type }}-${{ matrix.category }}
+          path: flaky-rescued.log
+          retention-days: 14
+
   # Gather the per-matrix flaky-test markers (uploaded only when a test failed
   # on its first run but passed on --rerun-failed) into a single yes/no signal.
   collect-flakes:
     name: Collect flaky-test markers
-    needs: test
+    needs: [test, test-dev]
     if: ${{ always() }}
     runs-on: arc-amd64
     permissions:
@@ -702,6 +857,8 @@ jobs:
       - build-rocky9
       - build-rocky10
       - test
+      - build-dev
+      - test-dev
       - static-analysis
     if: ${{ always() }}
     runs-on: arc-amd64

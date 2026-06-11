@@ -3150,6 +3150,7 @@ function(_smbtorture_add_suite backend parent pid)
         COMMAND ${CMAKE_SOURCE_DIR}/scripts/netns_test_wrapper.sh
                 ${SMBTORTURE_CMD} -b ${backend} ${ARGN})
     set_tests_properties(${name} PROPERTIES
+        LABELS "smbtorture"
         ENVIRONMENT "${SMBTORTURE_LSAN};SMBTORTURE_JUNIT_FILE=${SMBTORTURE_JUNIT_DIR}/smbtorture_${pid}_${backend}.xml;SMBTORTURE_JUNIT_CONVERTER=${CMAKE_SOURCE_DIR}/scripts/smbtorture_to_junit.py"
         SKIP_RETURN_CODE 77
         TIMEOUT 600)
@@ -3163,6 +3164,7 @@ function(_smbtorture_add_subtest backend subtest)
         COMMAND ${CMAKE_SOURCE_DIR}/scripts/netns_test_wrapper.sh
                 ${SMBTORTURE_CMD} -b ${backend} ${subtest})
     set_tests_properties(${name} PROPERTIES
+        LABELS "smbtorture"
         ENVIRONMENT "${SMBTORTURE_LSAN}"
         SKIP_RETURN_CODE 77
         TIMEOUT 300)
