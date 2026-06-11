@@ -10,7 +10,8 @@ on:
       - main          # publish from the default branch
     tags:
       - "*"           # publish when any tag is pushed
-  pull_request:        # PRs: docker-build-complete no-op only (build-and-push gated below)
+  # No pull_request trigger: the PR-time "Docker build complete" placeholder
+  # lives in pr-checks.yml, so PRs don't show a skipped docker-build job.
   merge_group:         # build to gate the merge queue (no publish) but don’t publish
   workflow_dispatch:   # allow manual runs
 

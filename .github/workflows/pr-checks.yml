@@ -1,0 +1,44 @@
+# SPDX-FileCopyrightText: 2026 Chimera-NAS Project Contributors
+#
+# SPDX-License-Identifier: Unlicense
+
+name: PR checks
+
+# The heavy build/test matrix (build-test.yml) and docker image builds
+# (docker-build.yml) run ONLY in the merge queue (merge_group), not on pull
+# requests -- so a PR's check list isn't cluttered with a wall of skipped
+# matrix jobs.  But the branch-protection ruleset still requires the
+# "CI complete", "Flake review gate" and "Docker build complete" checks on a PR
+# before it can be added to the queue.  This workflow satisfies them with
+# instant no-op placeholders; the real checks of the same names run in the queue
+# (where the actual matrix / image builds / flake review happen).
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  ci-complete:
+    name: CI complete
+    runs-on: arc-amd64
+    steps:
+      - name: PR placeholder
+        run: echo "PR placeholder -- the full build/test matrix runs in the merge queue (merge_group)."
+
+  flake-gate:
+    name: Flake review gate
+    runs-on: arc-amd64
+    # No environment here: flaky-test review only applies to the real test run,
+    # which happens in the merge queue.  Keeping this a plain no-op means a PR
+    # never sits waiting on a manual approval just to be queued.
+    steps:
+      - name: PR placeholder
+        run: echo "PR placeholder -- flaky-test review happens in the merge queue (merge_group)."
+
+  docker-build-complete:
+    name: Docker build complete
+    runs-on: arc-amd64
+    steps:
+      - name: PR placeholder
+        run: echo "PR placeholder -- docker image builds run in the merge queue (merge_group)."
