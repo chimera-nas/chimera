@@ -26,6 +26,10 @@ client = ChimeraAdminClient(host="localhost", port=8080)
 version_info = client.get_version()
 print(f"Server version: {version_info['version']}")
 
+# Get the running configuration (chimera.json format)
+config = client.get_config()
+print(config["mounts"])
+
 # Using context manager
 with ChimeraAdminClient(host="localhost", port=8080) as client:
     print(client.get_version())
@@ -54,6 +58,9 @@ The package provides a CLI, invoked as a module:
 ```bash
 # Global connection options precede the resource and action
 python3 -m chimera_admin --host localhost --port 8080 version
+
+# Dump the running configuration (chimera.json format)
+python3 -m chimera_admin config
 
 # VFS mounts
 python3 -m chimera_admin mount list

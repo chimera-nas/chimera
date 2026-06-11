@@ -16,6 +16,26 @@
     }
   ],
   "paths": {
+    "/config": {
+      "get": {
+        "summary": "Get server configuration",
+        "description": "Returns the running server configuration as a JSON document compatible with the chimera.json file format, reconstructed from live runtime state. The \"users\" section (passwords) and the \"server\" section are omitted, and the internal \"root\" mount is excluded.",
+        "operationId": "getConfig",
+        "tags": ["Config"],
+        "responses": {
+          "200": {
+            "description": "Server configuration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Config"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/users": {
       "get": {
         "summary": "List builtin users",
@@ -727,6 +747,68 @@
           "path": {
             "type": "string",
             "description": "VFS path"
+          }
+        }
+      },
+      "Config": {
+        "type": "object",
+        "description": "Server configuration in chimera.json format. Excludes the users section (passwords) and the server section; the internal root mount is excluded from mounts.",
+        "properties": {
+          "mounts": {
+            "type": "object",
+            "description": "VFS mounts keyed by mount name (the internal root mount is excluded)",
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "module": {
+                  "type": "string",
+                  "description": "VFS module name"
+                },
+                "path": {
+                  "type": "string",
+                  "description": "Backend path"
+                }
+              }
+            }
+          },
+          "exports": {
+            "type": "object",
+            "description": "NFS exports keyed by export name",
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "description": "VFS path"
+                }
+              }
+            }
+          },
+          "shares": {
+            "type": "object",
+            "description": "SMB shares keyed by share name",
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "description": "VFS path"
+                }
+              }
+            }
+          },
+          "buckets": {
+            "type": "object",
+            "description": "S3 buckets keyed by bucket name",
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "description": "VFS path"
+                }
+              }
+            }
           }
         }
       },

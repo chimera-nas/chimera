@@ -11,6 +11,7 @@ Run as a module:
 Examples:
 
     python3 -m chimera_admin version
+    python3 -m chimera_admin config
     python3 -m chimera_admin mount list
     python3 -m chimera_admin mount create data --module linux --path /srv/data
     python3 -m chimera_admin user create alice --uid 1000 --gid 1000
@@ -156,6 +157,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("version", help="Show server version")
     p.set_defaults(func=lambda c, a: c.get_version())
 
+    p = sub.add_parser(
+        "config", help="Show server configuration (chimera.json format)")
+    p.set_defaults(func=lambda c, a: c.get_config())
+
     _add_user_commands(sub)
     _add_crud_commands(sub, "export", "NFS export")
     _add_crud_commands(sub, "share", "SMB share")
@@ -172,7 +177,9 @@ def _emit(result) -> None:
     if isinstance(result, str):
         print(result)
     else:
-        print(json.dumps(result, indent=2, sort_keys=True))
+        # Preserve the server's key ordering (e.g. config emits mounts before
+        # exports/shares/buckets) rather than alphabetizing it.
+        print(json.dumps(result, indent=2, sort_keys=False))
 
 
 def main(argv=None) -> int:

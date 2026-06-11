@@ -154,6 +154,26 @@ class TestMountsAPI:
         assert exc_info.value.status_code == 404
 
 
+class TestConfigAPI:
+    """Test the server configuration endpoint."""
+
+    def test_get_config(self, client):
+        """Test fetching the running configuration."""
+        config = client.get_config()
+        assert isinstance(config, dict)
+        # The collection sections are always present (empty when unset).
+        assert all(
+            k in config for k in ("mounts", "exports", "shares", "buckets"))
+        # The "users" and "server" sections are intentionally omitted.
+        assert "users" not in config
+        assert "server" not in config
+        # The test config defines a "testshare" memfs mount; the internal
+        # "root" mount must not be reported.
+        assert "testshare" in config["mounts"]
+        assert config["mounts"]["testshare"]["module"] == "memfs"
+        assert "root" not in config["mounts"]
+
+
 class TestHTTPS:
     """Test HTTPS API endpoints with self-signed certificate."""
 

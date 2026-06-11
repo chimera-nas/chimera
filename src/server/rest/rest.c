@@ -120,6 +120,12 @@ void chimera_rest_handle_mounts_delete(
     struct chimera_rest_thread *,
     const char *);
 
+/* External handler from rest_config.c */
+void chimera_rest_handle_config(
+    struct evpl *,
+    struct evpl_http_request *,
+    struct chimera_rest_thread *);
+
 /* External handlers from rest_swagger.c */
 void chimera_rest_handle_swagger_ui(
     struct evpl *,
@@ -453,6 +459,16 @@ chimera_rest_dispatch(
                                      "/api/docs/swagger-ui.min.css", 28)) {
         if (req_type == EVPL_HTTP_REQUEST_TYPE_GET) {
             chimera_rest_handle_swagger_css(evpl, request);
+        } else {
+            chimera_rest_handle_method_not_allowed(evpl, request);
+        }
+        return;
+    }
+
+    /* Config API: /api/v1/config */
+    if (url_len == 14 && strncmp(url, "/api/v1/config", 14) == 0) {
+        if (req_type == EVPL_HTTP_REQUEST_TYPE_GET) {
+            chimera_rest_handle_config(evpl, request, thread);
         } else {
             chimera_rest_handle_method_not_allowed(evpl, request);
         }

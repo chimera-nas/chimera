@@ -131,6 +131,13 @@ chimera_rest_handle_users_create(
         return;
     }
 
+    if (chimera_server_get_user(thread->shared->server, username)) {
+        json_decref(root);
+        chimera_rest_send_error(evpl, request, 409, "Conflict",
+                                "User with that username already exists");
+        return;
+    }
+
     password      = json_string_value(json_object_get(root, "password"));
     uid           = json_integer_value(json_object_get(root, "uid"));
     gid           = json_integer_value(json_object_get(root, "gid"));

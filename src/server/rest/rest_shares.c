@@ -114,6 +114,13 @@ chimera_rest_handle_exports_create(
         return;
     }
 
+    if (chimera_server_get_export(thread->shared->server, name)) {
+        json_decref(root);
+        chimera_rest_send_error(evpl, request, 409, "Conflict",
+                                "Export with that name already exists");
+        return;
+    }
+
     rc = chimera_server_create_export(thread->shared->server, name, path);
 
     json_decref(root);
@@ -248,6 +255,13 @@ chimera_rest_handle_shares_create(
         return;
     }
 
+    if (chimera_server_get_share(thread->shared->server, name)) {
+        json_decref(root);
+        chimera_rest_send_error(evpl, request, 409, "Conflict",
+                                "Share with that name already exists");
+        return;
+    }
+
     rc = chimera_server_create_share(thread->shared->server, name, path, 0);
 
     json_decref(root);
@@ -360,12 +374,13 @@ chimera_rest_handle_buckets_create(
     const char                 *body,
     int                         body_len)
 {
-    json_t      *root;
-    json_error_t error;
-    const char  *name;
-    const char  *path;
-    int          rc;
-    json_t      *obj;
+    json_t                 *root;
+    json_error_t            error;
+    const char             *name;
+    const char             *path;
+    const struct s3_bucket *existing;
+    int                     rc;
+    json_t                 *obj;
 
     root = json_loadb(body, body_len, 0, &error);
     if (!root) {
@@ -381,6 +396,17 @@ chimera_rest_handle_buckets_create(
         json_decref(root);
         chimera_rest_send_error(evpl, request, 400, "Bad Request",
                                 "Missing required fields: name, path");
+        return;
+    }
+
+    /* chimera_server_get_bucket holds a read lock until released, so release it
+     * unconditionally before acting on the result. */
+    existing = chimera_server_get_bucket(thread->shared->server, name);
+    chimera_server_release_bucket(thread->shared->server);
+    if (existing) {
+        json_decref(root);
+        chimera_rest_send_error(evpl, request, 409, "Conflict",
+                                "Bucket with that name already exists");
         return;
     }
 
