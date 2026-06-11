@@ -934,7 +934,6 @@ sm_ag_mark_used_locked(
     e_off = e->offset;
     e_len = e->length;
     rb_tree_remove(&ag->free_by_offset, &e->node);
-    free(e);
 
     if (offset > e_off) {
         struct sm_extent *l = sm_extent_new(e_off, offset - e_off);
@@ -946,6 +945,7 @@ sm_ag_mark_used_locked(
         rb_tree_insert(&ag->free_by_offset, offset, r);
     }
     ag->free_bytes -= length;
+    free(e);
 } /* sm_ag_mark_used_locked */
 
 /* Serialize the AG's current free set into `slot` as a condensed base (no
@@ -1022,28 +1022,11 @@ struct sm_persist_update {
     uint32_t      base_count;
 };
 
-static void
-sm_persist_batch_reset(
-    uint8_t **bufs,
-    uint32_t *count,
-    uint64_t *bytes)
-{
-    uint32_t i;
-
-    for (i = 0; i < *count; i++) {
-        free(bufs[i]);
-        bufs[i] = NULL;
-    }
-    *count = 0;
-    *bytes = 0;
-} /* sm_persist_batch_reset */
-
 static int
 sm_persist_batch_submit(
     const struct sm_io       *io,
     struct sm_io_write       *writes,
     struct sm_persist_update *updates,
-    uint8_t                 **bufs,
     uint32_t                 *count,
     uint64_t                 *bytes)
 {
@@ -1077,7 +1060,8 @@ sm_persist_batch_submit(
         }
     }
 
-    sm_persist_batch_reset(bufs, count, bytes);
+    *count = 0;
+    *bytes = 0;
     return rc;
 } /* sm_persist_batch_submit */
 
@@ -1094,14 +1078,17 @@ space_map_persist(
 {
     struct sm_io_write       writes[SM_PERSIST_BATCH_OPS];
     struct sm_persist_update updates[SM_PERSIST_BATCH_OPS];
-    uint8_t                 *scratch;
-    uint8_t                 *bufs[SM_PERSIST_BATCH_OPS] = { 0 };
-    uint32_t                 count                      = 0;
-    uint64_t                 bytes                      = 0;
+    uint8_t                 *arena;
+    uint32_t                 count = 0;
+    uint64_t                 bytes = 0;
     uint32_t                 d, a;
 
-    scratch = malloc(SM_AG_LOG_SLOT_SIZE);
-    if (!scratch) {
+    /* Slot images are condensed straight into one arena and submitted in
+     * batches.  An accepted batch holds at most SM_PERSIST_BATCH_BYTES, and
+     * one more image (at most SM_AG_LOG_SLOT_SIZE) is condensed past that
+     * mark before an over-full batch is flushed. */
+    arena = malloc(SM_PERSIST_BATCH_BYTES + SM_AG_LOG_SLOT_SIZE);
+    if (!arena) {
         return -1;
     }
 
@@ -1115,37 +1102,32 @@ space_map_persist(
             uint64_t      gen, payload, aligned, slot_off;
 
             pthread_mutex_lock(&ag->lock);
+            buf      = arena + bytes;
             slot     = 1 - ag->log_slot;
             gen      = ag->log_generation + 1;
-            payload  = sm_ag_condense_into(ag, scratch, gen);
+            payload  = sm_ag_condense_into(ag, buf, gen);
             slot_off = ag->log_offset + (uint64_t) slot * SM_AG_LOG_SLOT_SIZE;
             aligned  = (payload + SM_BLOCK_SIZE - 1) & ~((uint64_t) SM_BLOCK_SIZE - 1);
-            memset(scratch + payload, 0, aligned - payload);
+            memset(buf + payload, 0, aligned - payload);
 
             if (count == SM_PERSIST_BATCH_OPS ||
                 (bytes > 0 && bytes + aligned > SM_PERSIST_BATCH_BYTES)) {
                 pthread_mutex_unlock(&ag->lock);
-                if (sm_persist_batch_submit(io, writes, updates, bufs, &count, &bytes) != 0) {
-                    free(scratch);
+                if (sm_persist_batch_submit(io, writes, updates, &count, &bytes) != 0) {
+                    free(arena);
                     return -1;
                 }
+                /* The AG may have mutated while unlocked during the submit;
+                 * recondense it into the now-empty arena. */
                 pthread_mutex_lock(&ag->lock);
+                buf      = arena;
                 slot     = 1 - ag->log_slot;
                 gen      = ag->log_generation + 1;
-                payload  = sm_ag_condense_into(ag, scratch, gen);
+                payload  = sm_ag_condense_into(ag, buf, gen);
                 slot_off = ag->log_offset + (uint64_t) slot * SM_AG_LOG_SLOT_SIZE;
                 aligned  = (payload + SM_BLOCK_SIZE - 1) & ~((uint64_t) SM_BLOCK_SIZE - 1);
-                memset(scratch + payload, 0, aligned - payload);
+                memset(buf + payload, 0, aligned - payload);
             }
-
-            buf = malloc(aligned);
-            if (!buf) {
-                pthread_mutex_unlock(&ag->lock);
-                sm_persist_batch_reset(bufs, &count, &bytes);
-                free(scratch);
-                return -1;
-            }
-            memcpy(buf, scratch, aligned);
 
             /* The log lives on log_device_id (== d for local AGs, the local
              * metadata device for a relocated remote AG). */
@@ -1157,8 +1139,7 @@ space_map_persist(
             updates[count].slot       = slot;
             updates[count].generation = gen;
             updates[count].base_count =
-                ((struct sm_ag_log_header *) scratch)->base_count;
-            bufs[count] = buf;
+                ((struct sm_ag_log_header *) buf)->base_count;
             count++;
             bytes += aligned;
             pthread_mutex_unlock(&ag->lock);
@@ -1166,8 +1147,8 @@ space_map_persist(
     }
 
     /* Submit the final partial batch. */
-    if (sm_persist_batch_submit(io, writes, updates, bufs, &count, &bytes) != 0) {
-        free(scratch);
+    if (sm_persist_batch_submit(io, writes, updates, &count, &bytes) != 0) {
+        free(arena);
         return -1;
     }
 
@@ -1178,11 +1159,11 @@ space_map_persist(
             continue;
         }
         if (io->flush(io->user, d) != 0) {
-            free(scratch);
+            free(arena);
             return -1;
         }
     }
-    free(scratch);
+    free(arena);
     return 0;
 } /* space_map_persist */
 
