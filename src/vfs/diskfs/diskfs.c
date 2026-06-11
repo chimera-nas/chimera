@@ -1096,6 +1096,10 @@ struct diskfs_shared {
     uint64_t                   fsid;
     struct space_map          *space_map;
     struct diskfs_intent_log   intent_log;
+    /* Dedicated reclaim workers: deleted-inode burn-down (and other background
+     * maintenance) runs here, off the request workers' hot path. */
+    struct diskfs_reclaim     *reclaim;
+    uint32_t                   reclaim_threads;    /* config knob (0 = default) */
     struct diskfs_metrics      metrics;
     pthread_mutex_t            lock;
 };
@@ -5094,6 +5098,192 @@ diskfs_drain_step(struct diskfs_drain *d)
 } /* diskfs_drain_step */
 
 /* ------------------------------------------------------------------ */
+/* Reclaim worker pool: dedicated threads for background space reclaim */
+/*                                                                      */
+/* Deleted-inode burn-down (and other background maintenance) runs on   */
+/* its own small pool of evpl threads, each owning a full diskfs thread */
+/* context (block queues, b+tree ops, an intent-log channel), so the    */
+/* incremental drains never compete for the request workers' loops.     */
+/* Jobs are submitted cross-thread onto a per-worker FIFO + doorbell    */
+/* and handed to the worker's existing drain machinery.                 */
+/* ------------------------------------------------------------------ */
+
+#define DISKFS_RECLAIM_THREADS_DEFAULT 2
+
+/* Defined with the module thread hooks below. */
+static void * diskfs_thread_init(
+    struct evpl *evpl,
+    void        *private_data);
+static void diskfs_thread_destroy(
+    void *private_data);
+
+struct diskfs_reclaim_job {
+    uint64_t                   inum;
+    uint32_t                   gen;
+    struct diskfs_reclaim_job *next;
+};
+
+struct diskfs_reclaim_worker {
+    struct diskfs_shared      *shared;
+    struct diskfs_thread      *ctx;        /* this worker's diskfs thread context */
+    struct evpl_thread        *thread;
+    struct evpl_doorbell       doorbell;
+    pthread_mutex_t            lock;
+    struct diskfs_reclaim_job *head;
+    struct diskfs_reclaim_job *tail;
+    int                        ready;      /* atomic: context constructed */
+};
+
+struct diskfs_reclaim {
+    struct diskfs_reclaim_worker *workers;
+    uint32_t                      nworkers;
+    uint32_t                      rr;      /* atomic round-robin submit cursor */
+};
+
+/* Pop every queued job and hand it to this worker's drain machinery. */
+static void
+diskfs_reclaim_doorbell_cb(
+    struct evpl          *evpl,
+    struct evpl_doorbell *doorbell)
+{
+    struct diskfs_reclaim_worker *w = container_of(doorbell,
+                                                   struct diskfs_reclaim_worker,
+                                                   doorbell);
+    struct diskfs_reclaim_job    *jobs, *j;
+
+    (void) evpl;
+
+    pthread_mutex_lock(&w->lock);
+    jobs    = w->head;
+    w->head = NULL;
+    w->tail = NULL;
+    pthread_mutex_unlock(&w->lock);
+
+    while (jobs) {
+        j    = jobs;
+        jobs = j->next;
+        diskfs_drain_enqueue(w->ctx, j->inum, j->gen);
+        free(j);
+    }
+} /* diskfs_reclaim_doorbell_cb */
+
+/*
+ * Queue a deleted (nlink==0, refcnt==0) inode for background reclaim on the
+ * worker pool, round-robin.  Safe from any thread.  The durable orphan record
+ * already exists (inserted by the unlink/create txn), so a crash before the
+ * drain finishes is recovered by the next mount's orphan scan.
+ */
+static void
+diskfs_reclaim_submit(
+    struct diskfs_shared *shared,
+    uint64_t              inum,
+    uint32_t              gen)
+{
+    struct diskfs_reclaim        *r = shared->reclaim;
+    struct diskfs_reclaim_worker *w;
+    struct diskfs_reclaim_job    *j;
+    uint32_t                      idx;
+
+    idx = __atomic_fetch_add(&r->rr, 1, __ATOMIC_RELAXED) % r->nworkers;
+    w   = &r->workers[idx];
+
+    j       = malloc(sizeof(*j));
+    j->inum = inum;
+    j->gen  = gen;
+    j->next = NULL;
+
+    pthread_mutex_lock(&w->lock);
+    if (w->tail) {
+        w->tail->next = j;
+    } else {
+        w->head = j;
+    }
+    w->tail = j;
+    pthread_mutex_unlock(&w->lock);
+
+    evpl_ring_doorbell(&w->doorbell);
+} /* diskfs_reclaim_submit */
+
+static void *
+diskfs_reclaim_thread_init(
+    struct evpl *evpl,
+    void        *private_data)
+{
+    struct diskfs_reclaim_worker *w = private_data;
+
+    w->ctx = diskfs_thread_init(evpl, w->shared);
+    evpl_add_doorbell(evpl, &w->doorbell, diskfs_reclaim_doorbell_cb);
+    __atomic_store_n(&w->ready, 1, __ATOMIC_RELEASE);
+    return w;
+} /* diskfs_reclaim_thread_init */
+
+static void
+diskfs_reclaim_thread_shutdown(
+    struct evpl *evpl,
+    void        *private_data)
+{
+    struct diskfs_reclaim_worker *w = private_data;
+    struct diskfs_reclaim_job    *j;
+
+    /* Feed any still-queued jobs to the drain machinery first;
+     * diskfs_thread_destroy pumps until every drain completes, so unmount
+     * finishes the reclaim backlog rather than re-scanning it next mount. */
+    diskfs_reclaim_doorbell_cb(evpl, &w->doorbell);
+
+    evpl_remove_doorbell(evpl, &w->doorbell);
+    diskfs_thread_destroy(w->ctx);
+
+    /* Anything submitted after the doorbell drain is recovered by the next
+     * mount's orphan scan (the records are durable). */
+    while ((j = w->head)) {
+        w->head = j->next;
+        free(j);
+    }
+    pthread_mutex_destroy(&w->lock);
+} /* diskfs_reclaim_thread_shutdown */
+
+static void
+diskfs_reclaim_create(struct diskfs_shared *shared)
+{
+    struct diskfs_reclaim *r = calloc(1, sizeof(*r));
+    uint32_t               i;
+
+    r->nworkers = shared->reclaim_threads ? shared->reclaim_threads
+                                          : DISKFS_RECLAIM_THREADS_DEFAULT;
+    r->workers  = calloc(r->nworkers, sizeof(*r->workers));
+
+    for (i = 0; i < r->nworkers; i++) {
+        struct diskfs_reclaim_worker *w = &r->workers[i];
+
+        w->shared = shared;
+        pthread_mutex_init(&w->lock, NULL);
+        w->thread = evpl_thread_create(NULL, diskfs_reclaim_thread_init,
+                                       diskfs_reclaim_thread_shutdown, w);
+        while (!__atomic_load_n(&w->ready, __ATOMIC_ACQUIRE)) {
+            /* spin briefly; context construction is fast */
+        }
+    }
+    shared->reclaim = r;
+} /* diskfs_reclaim_create */
+
+static void
+diskfs_reclaim_destroy(struct diskfs_shared *shared)
+{
+    struct diskfs_reclaim *r = shared->reclaim;
+    uint32_t               i;
+
+    if (!r) {
+        return;
+    }
+    for (i = 0; i < r->nworkers; i++) {
+        evpl_thread_destroy(r->workers[i].thread);
+    }
+    free(r->workers);
+    free(r);
+    shared->reclaim = NULL;
+} /* diskfs_reclaim_destroy */
+
+/* ------------------------------------------------------------------ */
 /* Mount-time orphan recovery: re-enqueue inodes left on the durable    */
 /* orphan list by a crash mid-drain (draining is idempotent).           */
 /* ------------------------------------------------------------------ */
@@ -5205,7 +5395,7 @@ diskfs_orphan_scan(struct diskfs_thread *thread)
         /* Reload the orphaned (nlink==0) inode into cache, then enqueue it;
          * the drainer resumes its (possibly partially-drained) tree. */
         diskfs_inode_load_sync(thread, io, arr[i].inum, arr[i].gen, 1 /* allow_orphan */);
-        diskfs_drain_enqueue(thread, arr[i].inum, arr[i].gen);
+        diskfs_reclaim_submit(thread->shared, arr[i].inum, arr[i].gen);
     }
     free(arr);
     diskfs_mount_io_close(io);
@@ -8897,6 +9087,8 @@ diskfs_init(
     }
     shared->inode_cache_inodes = (uint32_t) json_integer_value(
         json_object_get(cfg, "inode_cache_inodes"));
+    shared->reclaim_threads = (uint32_t) json_integer_value(
+        json_object_get(cfg, "reclaim_threads"));
 
     json_decref(cfg);
 
@@ -9117,6 +9309,10 @@ diskfs_init(
         /* spin briefly */
     }
 
+    /* Reclaim workers last: their thread contexts register intent-log
+     * channels, so the commit thread must already be up. */
+    diskfs_reclaim_create(shared);
+
     return shared;
 } /* diskfs_init */
 
@@ -9279,6 +9475,10 @@ diskfs_destroy(void *private_data)
 {
     struct diskfs_shared *shared = private_data;
     int                   i;
+
+    /* Reclaim workers first: their shutdown finishes the queued drains, which
+     * need the inode cache and the intent-log threads still alive. */
+    diskfs_reclaim_destroy(shared);
 
     for (i = 0; i < DISKFS_INODE_CACHE_SHARDS; i++) {
         rb_tree_destroy(&shared->inode_cache->shards[i].inodes,
@@ -9534,10 +9734,10 @@ diskfs_mtime_flush_drop_pin(
     }
     pthread_mutex_unlock(&shard->lock);
 
-    /* Enqueue the async drain outside the shard lock (it begins a txn and
-     * acquires inodes, taking shard locks). */
+    /* Submit the async drain outside the shard lock (the drain begins a txn
+     * and acquires inodes, taking shard locks). */
     if (retire) {
-        diskfs_drain_enqueue(thread, inum, gen);
+        diskfs_reclaim_submit(thread->shared, inum, gen);
     }
 } /* diskfs_mtime_flush_drop_pin */
 
@@ -11415,11 +11615,11 @@ diskfs_remove_orphan_done(void *priv)
     struct diskfs_inode           *inode   = p->inode_stash[1];
 
     /* Reclaim now only if nothing else holds the inode open; otherwise the last
-     * close (or deferred-mtime pin drop) will enqueue the drain when refcnt
-     * reaches 0.  The durable orphan record (just written) covers a crash in the
-     * meantime. */
+     * close (or deferred-mtime pin drop) hands it to the reclaim workers when
+     * refcnt reaches 0.  The durable orphan record (just written) covers a
+     * crash in the meantime. */
     if (inode->refcnt == 0) {
-        diskfs_drain_enqueue(p->thread, inode->inum, inode->gen);
+        diskfs_reclaim_submit(p->thread->shared, inode->inum, inode->gen);
     }
     diskfs_remove_at_finish(request);
 } /* diskfs_remove_orphan_done */
@@ -12397,9 +12597,9 @@ diskfs_close_inode_cb(
         if (inode->nlink == 0) {
             /* Delete-on-close: the file was unlinked while open (its durable
              * orphan record was written then), and this was the last reference.
-             * Reclaim its space via the async drain, which frees the extents and
-             * retires the inode -- not inline in this close path. */
-            diskfs_drain_enqueue(p->thread, inode->inum, inode->gen);
+             * Reclaim its space on the reclaim workers, which free the extents
+             * and retire the inode -- not inline in this close path. */
+            diskfs_reclaim_submit(p->thread->shared, inode->inum, inode->gen);
         } else {
             diskfs_inode_free(p->thread, inode);
         }
