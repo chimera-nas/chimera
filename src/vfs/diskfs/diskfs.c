@@ -52,13 +52,23 @@
  * reclaim).  The orphan inode is a directory whose b+tree keys are orphan
  * inums; the drainer empties it. */
 #define DISKFS_ROOT_INUM          2
-#define DISKFS_ORPHAN_INUM        3
+/* Sharded orphan-list inodes: deleted-but-not-yet-reclaimed inodes are
+ * recorded as DISKFS_REC_ORPHAN keys spread across these (by deleted inum),
+ * so concurrent unlinks don't serialize on a single inode's write lock
+ * (inode locks are held until the txn is durable).  Created at format,
+ * permanent.  Count is baked into the on-disk bootstrap layout. */
+#define DISKFS_ORPHAN_INUM_BASE   3
+#define DISKFS_ORPHAN_SHARDS      SM_BOOTSTRAP_ORPHAN_SLOTS
 #define DISKFS_ORPHAN_GEN         1   /* permanent: created at format, never deleted */
 
+#define DISKFS_ORPHAN_SHARD_INUM(inum) \
+        (DISKFS_ORPHAN_INUM_BASE + ((inum) % DISKFS_ORPHAN_SHARDS))
+
 /* Max inodes a single transaction can hold locked at once.  rename needs
- * 4 (two parents, child, replaced target); others (e.g. readdir) touch
- * many but only 2 at a time and release as they go. */
-#define DISKFS_TXN_MAX_INODES     4
+ * 5 (two parents, child, replaced target, plus the orphan-list shard when
+ * the replace deletes the target); others (e.g. readdir) touch many but
+ * only 2 at a time and release as they go. */
+#define DISKFS_TXN_MAX_INODES     5
 
 /* Diskfs RMW writes assemble:
  *   prefix (valid + zero) + request write iovecs +
@@ -4856,8 +4866,9 @@ diskfs_orphan_op_start(
     o->done   = done;
     o->priv   = priv;
 
-    diskfs_inode_acquire(thread, txn, DISKFS_ORPHAN_INUM, DISKFS_ORPHAN_GEN,
-                         DISKFS_INODE_LOCK_WRITE, diskfs_orphan_op_acquired_cb, o);
+    diskfs_inode_acquire(thread, txn, DISKFS_ORPHAN_SHARD_INUM(inum),
+                         DISKFS_ORPHAN_GEN, DISKFS_INODE_LOCK_WRITE,
+                         diskfs_orphan_op_acquired_cb, o);
 } /* diskfs_orphan_op_start */
 
 /* ------------------------------------------------------------------ */
@@ -5015,9 +5026,9 @@ diskfs_drain_final_cb(
 } /* diskfs_drain_final_cb */
 
 /* The durable orphan entry is removed; finish retiring the inode in the same
-* transaction and commit.  The inode home block is intentionally leaked for now
-* (inode structs stay cached after unlink and generation reuse is not persisted,
-* so reusing an inum could collide with the cache and stale file handles). */
+ * transaction and commit.  The inode home block is intentionally leaked for
+ * now: generation reuse is not persisted for newly allocated inodes, so
+ * reusing an inum could resolve a stale file handle to the new file. */
 static void
 diskfs_drain_after_unrecord(void *priv)
 {
@@ -5137,7 +5148,8 @@ struct diskfs_reclaim_worker {
 struct diskfs_reclaim {
     struct diskfs_reclaim_worker *workers;
     uint32_t                      nworkers;
-    uint32_t                      rr;      /* atomic round-robin submit cursor */
+    uint32_t                      rr;       /* atomic round-robin submit cursor */
+    int                           shutdown; /* atomic: pool tearing down */
 };
 
 /* Pop every queued job and hand it to this worker's drain machinery. */
@@ -5183,6 +5195,13 @@ diskfs_reclaim_submit(
     struct diskfs_reclaim_worker *w;
     struct diskfs_reclaim_job    *j;
     uint32_t                      idx;
+
+    /* Pool tearing down (a worker's own shutdown flush can drop a last
+     * reference): skip -- the durable orphan record makes the next mount's
+     * scan pick the inode up. */
+    if (__atomic_load_n(&r->shutdown, __ATOMIC_ACQUIRE)) {
+        return;
+    }
 
     idx = __atomic_fetch_add(&r->rr, 1, __ATOMIC_RELAXED) % r->nworkers;
     w   = &r->workers[idx];
@@ -5275,6 +5294,7 @@ diskfs_reclaim_destroy(struct diskfs_shared *shared)
     if (!r) {
         return;
     }
+    __atomic_store_n(&r->shutdown, 1, __ATOMIC_RELEASE);
     for (i = 0; i < r->nworkers; i++) {
         evpl_thread_destroy(r->workers[i].thread);
     }
@@ -5282,6 +5302,112 @@ diskfs_reclaim_destroy(struct diskfs_shared *shared)
     free(r);
     shared->reclaim = NULL;
 } /* diskfs_reclaim_destroy */
+
+/* ------------------------------------------------------------------ */
+/* nlink -> 0 transition: durable orphan record + deferred reclaim     */
+/* ------------------------------------------------------------------ */
+
+struct diskfs_inode_orphaned_ctx {
+    struct diskfs_thread *thread;
+    struct diskfs_inode  *inode;
+    void                  (*done)(
+        void *priv);
+    void                 *priv;
+};
+
+static void
+diskfs_inode_orphaned_recorded_cb(void *priv)
+{
+    struct diskfs_inode_orphaned_ctx c = *(struct diskfs_inode_orphaned_ctx *) priv;
+    struct diskfs_inode_shard       *shard =
+        diskfs_inode_shard(c.thread->shared, c.inode->inum);
+    int                              reclaim;
+
+    free(priv);
+
+    /* Last reference already gone (no open handles, no deferred-mtime pin):
+     * hand the inode to the reclaim workers now.  Their drain parks on the
+     * inode's write lock, which this txn holds until it is durable, so the
+     * burn-down can't start before the orphan record (and the nlink=0 dinode)
+     * are recoverable.  Otherwise the final ref drop (close / pin release)
+     * submits it.  (A duplicate submit from a racing ref drop is benign: the
+     * second drain finds the bumped generation and skips.) */
+    pthread_mutex_lock(&shard->lock);
+    reclaim = (c.inode->refcnt == 0);
+    pthread_mutex_unlock(&shard->lock);
+
+    if (reclaim) {
+        diskfs_reclaim_submit(c.thread->shared, c.inode->inum, c.inode->gen);
+    }
+
+    c.done(c.priv);
+} /* diskfs_inode_orphaned_recorded_cb */
+
+/*
+ * Call when `inode`'s nlink just dropped to 0 inside `txn` (which holds its
+ * write lock): drop the namespace's base reference, record the inode on the
+ * durable orphan list (the record rides this txn's redo, so a crash at any
+ * later point is recovered by the next mount's orphan scan), and queue it for
+ * background reclaim once nothing references it.  `done(priv)` fires when the
+ * record is in place; the caller continues (attr mapping, commit) from there.
+ *
+ * Invariant: an inode holds a base reference iff nlink > 0, so refcnt of a
+ * deleted inode counts only open handles + transient pins, and exactly one
+ * ref-drop site observes zero.
+ */
+static void
+diskfs_inode_orphaned(
+    struct diskfs_thread *thread,
+    struct diskfs_txn    *txn,
+    struct diskfs_inode  *inode,
+    void (               *done )(void *priv),
+    void                 *priv)
+{
+    struct diskfs_inode_orphaned_ctx *c = malloc(sizeof(*c));
+    struct diskfs_inode_shard        *shard =
+        diskfs_inode_shard(thread->shared, inode->inum);
+
+    /* Shard-locked like every other ref drop, so it can't race a concurrent
+     * deferred-mtime pin release. */
+    pthread_mutex_lock(&shard->lock);
+    --inode->refcnt;
+    pthread_mutex_unlock(&shard->lock);
+
+    c->thread = thread;
+    c->inode  = inode;
+    c->done   = done;
+    c->priv   = priv;
+
+    diskfs_orphan_op_start(thread, txn, inode->inum, inode->gen, 0 /* insert */,
+                           diskfs_inode_orphaned_recorded_cb, c);
+} /* diskfs_inode_orphaned */
+
+/* A non-namespace reference (open handle, deferred-mtime pin, commit pin)
+ * was dropped; if it was the last one on a deleted inode, reclaim it.  The
+ * decrement runs under the inode's shard lock so it can't race the deferred-
+ * mtime pin release (which holds no inode lock); a live inode that became
+ * idle joins the recycle LRU as before. */
+static void
+diskfs_inode_ref_drop(
+    struct diskfs_thread *thread,
+    struct diskfs_inode  *inode)
+{
+    struct diskfs_inode_shard *shard = diskfs_inode_shard(thread->shared,
+                                                          inode->inum);
+    int reclaim;
+
+    pthread_mutex_lock(&shard->lock);
+    --inode->refcnt;
+    reclaim = (inode->refcnt == 0 && inode->nlink == 0);
+    if (diskfs_inode_idle(inode) && !inode->on_lru) {
+        diskfs_inode_lru_push_tail(shard, inode);
+    }
+    pthread_mutex_unlock(&shard->lock);
+
+    if (reclaim) {
+        diskfs_reclaim_submit(thread->shared, inode->inum, inode->gen);
+    }
+} /* diskfs_inode_ref_drop */
 
 /* ------------------------------------------------------------------ */
 /* Mount-time orphan recovery: re-enqueue inodes left on the durable    */
@@ -5375,19 +5501,23 @@ diskfs_orphan_scan(struct diskfs_thread *thread)
      * it resident, so this is a cheap cache hit. */
     diskfs_inode_load_sync(thread, io, shared->root_inum, shared->root_gen, 0);
 
-    /* Load the orphan-list inode (nlink 1) and read its tree from its home
-     * block, collecting every recorded orphan inum + gen. */
-    odir = diskfs_inode_load_sync(thread, io, DISKFS_ORPHAN_INUM, DISKFS_ORPHAN_GEN, 0);
-    if (!odir) {
-        diskfs_mount_io_close(io);
-        return;     /* not yet created (no orphans possible) */
-    }
-
-    off  = sm_inum_to_device_offset(shared->space_map, DISKFS_ORPHAN_INUM, &dev);
+    /* Load each orphan-list shard inode (nlink 1) and read its tree from its
+     * home block, collecting every recorded orphan inum + gen. */
     obuf = malloc(DISKFS_BLOCK_SIZE);
     arr  = malloc(cap * sizeof(*arr));
-    if (diskfs_mount_io_read(io, dev, obuf, DISKFS_BLOCK_SIZE, off) == 0) {
-        diskfs_orphan_scan_node(thread, io, obuf, DISKFS_BT_ROOT_BASE, &arr, &n, &cap);
+    for (i = 0; i < DISKFS_ORPHAN_SHARDS; i++) {
+        uint64_t oinum = DISKFS_ORPHAN_INUM_BASE + i;
+
+        odir = diskfs_inode_load_sync(thread, io, oinum, DISKFS_ORPHAN_GEN, 0);
+        if (!odir) {
+            continue;     /* not yet created (no orphans possible) */
+        }
+
+        off = sm_inum_to_device_offset(shared->space_map, oinum, &dev);
+        if (diskfs_mount_io_read(io, dev, obuf, DISKFS_BLOCK_SIZE, off) == 0) {
+            diskfs_orphan_scan_node(thread, io, obuf, DISKFS_BT_ROOT_BASE,
+                                    &arr, &n, &cap);
+        }
     }
     free(obuf);
 
@@ -9397,15 +9527,17 @@ diskfs_bootstrap(struct diskfs_thread *thread)
     diskfs_block_unpin(thread, inode->block, DISKFS_BLOCK_CLEAN);
     inode->block = NULL;
 
-    /* Statically-reserved orphan-list inode (inum 3): an empty directory whose
-     * b+tree keys are the inums of deleted-but-not-fully-reclaimed inodes.
-     * Created at format alongside root (persists; loaded from disk on remount);
-     * the incremental drainer scans it on mount and empties it. */
-    {
+    /* Statically-reserved orphan-list shard inodes (inums 3..): empty
+     * directories whose b+tree keys are the inums of deleted-but-not-fully-
+     * reclaimed inodes, sharded by deleted inum.  Created at format alongside
+     * root (persist; loaded from disk on remount); the reclaim workers scan
+     * them on mount and empty them. */
+    for (int s = 0; s < DISKFS_ORPHAN_SHARDS; s++) {
+        uint64_t             oinum = DISKFS_ORPHAN_INUM_BASE + s;
         uint32_t             odev;
         uint64_t             ooff = sm_inum_to_device_offset(shared->space_map,
-                                                             DISKFS_ORPHAN_INUM, &odev);
-        struct diskfs_inode *oin = diskfs_inode_struct_new(DISKFS_ORPHAN_INUM);
+                                                             oinum, &odev);
+        struct diskfs_inode *oin = diskfs_inode_struct_new(oinum);
 
         oin->size           = 4096;
         oin->space_used     = 4096;
@@ -9420,7 +9552,7 @@ diskfs_bootstrap(struct diskfs_thread *thread)
         oin->btime_sec      = now.tv_sec;
         oin->btime_nsec     = now.tv_nsec;
         oin->dos_attributes = 0;
-        oin->parent_inum    = DISKFS_ORPHAN_INUM;
+        oin->parent_inum    = oinum;
         oin->parent_gen     = oin->gen;
 
         diskfs_inode_cache_insert(shared, oin);
@@ -9717,28 +9849,9 @@ diskfs_mtime_flush_drop_pin(
     struct diskfs_thread *thread,
     struct diskfs_inode  *inode)
 {
-    struct diskfs_inode_shard *shard = diskfs_inode_shard(thread->shared, inode->inum);
-    int                        retire;
-    uint64_t                   inum;
-    uint32_t                   gen;
-
-    pthread_mutex_lock(&shard->lock);
-    --inode->refcnt;
-    /* If this drops the last reference to an inode that was unlinked while held
-     * open (its durable orphan record already written), it is now reclaimable. */
-    retire = (inode->refcnt == 0 && inode->nlink == 0);
-    inum   = inode->inum;
-    gen    = inode->gen;
-    if (!retire && diskfs_inode_idle(inode) && !inode->on_lru) {
-        diskfs_inode_lru_push_tail(shard, inode);
-    }
-    pthread_mutex_unlock(&shard->lock);
-
-    /* Submit the async drain outside the shard lock (the drain begins a txn
-     * and acquires inodes, taking shard locks). */
-    if (retire) {
-        diskfs_reclaim_submit(thread->shared, inum, gen);
-    }
+    /* May be the last reference to an inode unlinked while its deferred
+     * mtime was still queued: ref_drop hands it to the reclaim workers. */
+    diskfs_inode_ref_drop(thread, inode);
 } /* diskfs_mtime_flush_drop_pin */
 
 struct diskfs_mtime_flush {
@@ -11605,23 +11718,12 @@ diskfs_remove_at_finish(struct chimera_vfs_request *request)
     diskfs_op_ok(request, p->txn);
 } /* diskfs_remove_at_finish */
 
-/* Continuation after a large deleted inode is recorded on the durable orphan
- * list: enqueue it for the in-session drainer and finish the request. */
+/* The deleted inode is recorded on the durable orphan list (and queued for
+ * reclaim when unreferenced): finish the request. */
 static void
 diskfs_remove_orphan_done(void *priv)
 {
-    struct chimera_vfs_request    *request = priv;
-    struct diskfs_request_private *p       = request->plugin_data;
-    struct diskfs_inode           *inode   = p->inode_stash[1];
-
-    /* Reclaim now only if nothing else holds the inode open; otherwise the last
-     * close (or deferred-mtime pin drop) hands it to the reclaim workers when
-     * refcnt reaches 0.  The durable orphan record (just written) covers a
-     * crash in the meantime. */
-    if (inode->refcnt == 0) {
-        diskfs_reclaim_submit(p->thread->shared, inode->inum, inode->gen);
-    }
-    diskfs_remove_at_finish(request);
+    diskfs_remove_at_finish(priv);
 } /* diskfs_remove_orphan_done */
 
 static void
@@ -11680,20 +11782,15 @@ diskfs_remove_at_removed_cb(
     diskfs_map_attrs(thread, &request->remove_at.r_removed_attr, inode);
 
     if (inode->nlink == 0) {
-        --inode->refcnt;
-
-        /* Record the durable orphan entry now, atomic with persisting nlink=0,
-         * regardless of whether the inode is still held open: a crash before the
-         * space is reclaimed is recovered by the next mount's orphan scan.  The
-         * actual reclaim (freeing data extents + b+tree nodes, then retiring the
-         * inode) is deferred to the async drain -- never done in this delete hot
-         * path -- and is enqueued from the continuation once the inode is
-         * unreferenced (refcnt 0): now if it is already closed, otherwise at the
-         * final close (diskfs_close_inode_cb / the deferred-mtime pin drop).  The
-         * orphan inode (inum 3) is acquired last, a leaf in the lock order. */
-        diskfs_orphan_op_start(thread, p->txn, inode->inum, inode->gen,
-                               0 /* insert */, diskfs_remove_orphan_done,
-                               request);
+        /* Record the deleted inode on the durable orphan list -- atomic with
+         * this unlink txn (the orphan shard is acquired last, a leaf in the
+         * lock order, so no deadlock) -- and hand it to the reclaim workers
+         * once nothing references it.  All space reclaim (extents + b+tree
+         * burn-down) happens there, off this hot path; a crash before this
+         * txn commits leaves neither the unlink nor the orphan record, and
+         * after it the mount scan resumes the drain. */
+        diskfs_inode_orphaned(thread, p->txn, inode,
+                              diskfs_remove_orphan_done, request);
         return;
     }
 
@@ -12183,6 +12280,14 @@ diskfs_open_fh_inode_cb(
         return;
     }
 
+    /* A deleted, unreferenced inode is dead (queued for or under background
+     * reclaim); a stale handle must not resurrect it mid-burn-down.  One that
+     * still has open handles (deleted-while-open / anonymous) stays openable. */
+    if (unlikely(inode->nlink == 0 && inode->refcnt == 0)) {
+        diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOENT);
+        return;
+    }
+
     inode->refcnt++;
 
     request->open_fh.r_vfs_private = (uint64_t) inode;
@@ -12507,6 +12612,15 @@ diskfs_open_at(
 
 
 static void
+diskfs_create_unlinked_orphaned_cb(void *priv)
+{
+    struct chimera_vfs_request    *request = priv;
+    struct diskfs_request_private *p       = request->plugin_data;
+
+    diskfs_op_ok(request, p->txn);
+} /* diskfs_create_unlinked_orphaned_cb */
+
+static void
 diskfs_create_unlinked_alloc_cb(
     struct diskfs_inode *inode,
     int                  status,
@@ -12528,7 +12642,7 @@ diskfs_create_unlinked_alloc_cb(
     inode->space_used     = 0;
     inode->uid            = request->cred->uid;
     inode->gid            = request->cred->gid;
-    inode->nlink          = 0;
+    inode->nlink          = 0;     /* anonymous; orphan-recorded below */
     inode->mode           = S_IFREG | 0644;
     inode->atime_sec      = now.tv_sec;
     inode->atime_nsec     = now.tv_nsec;
@@ -12542,12 +12656,17 @@ diskfs_create_unlinked_alloc_cb(
 
     diskfs_apply_attrs(inode, request->create_unlinked.set_attr);
 
-    inode->refcnt++;
+    inode->refcnt++;     /* the open handle */
     request->create_unlinked.r_vfs_private = (uint64_t) inode;
 
     diskfs_map_attrs(thread, &request->create_unlinked.r_attr, inode);
 
-    diskfs_op_ok(request, p->txn);
+    /* Anonymous from birth (nlink==0 => no namespace base reference): record
+     * it on the durable orphan list in the creating txn, so a crash while it
+     * is open reclaims it at the next mount, and the final handle close hands
+     * it to the reclaim workers.  A later link_at removes the record. */
+    diskfs_inode_orphaned(thread, p->txn, inode,
+                          diskfs_create_unlinked_orphaned_cb, request);
 } /* diskfs_create_unlinked_alloc_cb */
 
 static void
@@ -12583,8 +12702,6 @@ diskfs_close_inode_cb(
         return;
     }
 
-    --inode->refcnt;
-
     /* Return this file's unused data-space reservation tail on close.  Done
      * unconditionally (not just at refcnt 0, which is the delete-on-close case):
      * a normal close drops the inode back to its idle cache reference, where it
@@ -12593,17 +12710,10 @@ diskfs_close_inode_cb(
      * lock, held here, serializes that against this close). */
     diskfs_inode_return_reservation(p->thread, p->txn, inode);
 
-    if (inode->refcnt == 0) {
-        if (inode->nlink == 0) {
-            /* Delete-on-close: the file was unlinked while open (its durable
-             * orphan record was written then), and this was the last reference.
-             * Reclaim its space on the reclaim workers, which free the extents
-             * and retire the inode -- not inline in this close path. */
-            diskfs_reclaim_submit(p->thread->shared, inode->inum, inode->gen);
-        } else {
-            diskfs_inode_free(p->thread, inode);
-        }
-    }
+    /* Drop the handle's reference; the last drop on a deleted inode hands it
+     * to the reclaim workers (their drain parks on the inode's write lock,
+     * which this txn holds until durable). */
+    diskfs_inode_ref_drop(p->thread, inode);
 
     diskfs_op_ok(request, p->txn);
 } /* diskfs_close_inode_cb */
@@ -15605,6 +15715,14 @@ diskfs_rename_at_perform_insert(struct chimera_vfs_request *request)
     }
 } /* diskfs_rename_at_perform_insert */
 
+/* The replaced target's orphan record is in place: continue with the new
+ * dirent insert. */
+static void
+diskfs_rename_at_replaced_orphaned_cb(void *priv)
+{
+    diskfs_rename_at_perform_insert(priv);
+} /* diskfs_rename_at_replaced_orphaned_cb */
+
 static void
 diskfs_rename_at_perform_removed_cb(
     struct diskfs_bt_op *bop,
@@ -15619,9 +15737,19 @@ diskfs_rename_at_perform_removed_cb(
     diskfs_bt_op_free(p->thread, bop);
 
     if (result == 1) {
-        existing_inode->nlink--;
         if (S_ISDIR(existing_inode->mode)) {
+            /* A replaced directory must be empty (validated above); like
+             * remove_at, the delete zeroes its self+parent link count. */
+            existing_inode->nlink = 0;
             np->nlink--;
+        } else {
+            existing_inode->nlink--;
+        }
+        if (existing_inode->nlink == 0) {
+            diskfs_inode_orphaned(p->thread, p->txn, existing_inode,
+                                  diskfs_rename_at_replaced_orphaned_cb,
+                                  request);
+            return;
         }
     }
 
@@ -15897,6 +16025,17 @@ diskfs_link_at_inserted_cb(
     diskfs_op_ok(request, p->txn);
 } /* diskfs_link_at_inserted_cb */
 
+static void diskfs_link_at_finish(
+    struct chimera_vfs_request *request);
+
+/* Linking an anonymous (created-unlinked) inode into the namespace: its
+ * orphan record is removed in the same txn; continue with the link. */
+static void
+diskfs_link_at_unorphaned_cb(void *priv)
+{
+    diskfs_link_at_finish(priv);
+} /* diskfs_link_at_unorphaned_cb */
+
 static void
 diskfs_link_at_finish(struct chimera_vfs_request *request)
 {
@@ -15907,6 +16046,19 @@ diskfs_link_at_finish(struct chimera_vfs_request *request)
     uint64_t                       hash   = request->link_at.name_hash;
     struct diskfs_bt_op           *op;
     struct timespec                now;
+
+    /* An nlink==0 source is an anonymous inode (create_unlinked) entering the
+     * namespace: it re-takes the namespace's base reference and leaves the
+     * durable orphan list before the link proceeds.  (A deleted-and-
+     * unreferenced source was already rejected at fetch time.) */
+    if (inode->nlink == 0 && !p->op_scratch) {
+        p->op_scratch = 1;     /* unorphan once; this re-enters */
+        inode->refcnt++;
+        diskfs_orphan_op_start(thread, p->txn, inode->inum, inode->gen,
+                               1 /* remove */, diskfs_link_at_unorphaned_cb,
+                               request);
+        return;
+    }
 
     clock_gettime(CLOCK_REALTIME, &now);
 
@@ -15930,6 +16082,13 @@ diskfs_link_at_finish(struct chimera_vfs_request *request)
     }
 } /* diskfs_link_at_finish */
 
+/* The replaced target's orphan record is in place: continue with the link. */
+static void
+diskfs_link_at_replaced_orphaned_cb(void *priv)
+{
+    diskfs_link_at_finish(priv);
+} /* diskfs_link_at_replaced_orphaned_cb */
+
 static void
 diskfs_link_at_existing_cb(
     struct diskfs_inode *existing_inode,
@@ -15945,6 +16104,12 @@ diskfs_link_at_existing_cb(
         existing_inode->nlink--;
         diskfs_map_attrs(p->thread, &request->link_at.r_replaced_attr,
                          existing_inode);
+        if (existing_inode->nlink == 0) {
+            diskfs_inode_orphaned(p->thread, p->txn, existing_inode,
+                                  diskfs_link_at_replaced_orphaned_cb,
+                                  request);
+            return;
+        }
     }
 
     diskfs_link_at_finish(request);
@@ -16023,6 +16188,15 @@ diskfs_link_at_inode_cb(
         return;
     }
 
+    /* A deleted, unreferenced inode is dead -- it is queued for (or already
+     * under) background reclaim, so it must not re-enter the namespace.  An
+     * nlink==0 inode with open handles is a live anonymous file
+     * (create_unlinked) and may be linked. */
+    if (unlikely(inode->nlink == 0 && inode->refcnt == 0)) {
+        diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOENT);
+        return;
+    }
+
     p->inode_stash[1] = inode;
 
     op = diskfs_bt_op_alloc(thread);
@@ -16073,8 +16247,9 @@ diskfs_link_at(
     (void) shared;
     (void) private_data;
 
-    p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+    p->thread     = thread;
+    p->txn        = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+    p->op_scratch = 0;     /* anonymous-source unorphan latch (link_at_finish) */
 
     diskfs_inode_get_fh_async(thread, p->txn,
                               request->link_at.dir_fh,
@@ -17241,7 +17416,10 @@ diskfs_commit_acquired_cb(
     pthread_mutex_lock(&shard->lock);
     if (inode->mtime_dirty) {
         diskfs_inode_mtime_unlink_locked(shard, inode);
-        --inode->refcnt;     /* drop the dirty-pin; the txn write lock holds it */
+        /* Drop the dirty-pin; the txn write lock holds the inode.  Never the
+         * final reference: the COMMIT's own open handle still holds one, so
+         * no reclaim check is needed here. */
+        --inode->refcnt;
         pthread_mutex_unlock(&shard->lock);
         diskfs_txn_pin_inode_block(thread, cp->txn, inode, 0);
     } else {
