@@ -7712,6 +7712,21 @@ diskfs_il_service_registrations(struct diskfs_intent_log *il)
 
         if (__atomic_load_n(&ch->unregister_requested, __ATOMIC_ACQUIRE)) {
             uint32_t last = il->num_channels - 1;
+
+            /* The worker frees the channel (and soon its thread struct) the
+             * moment unregister_done is set, and retired txns dereference
+             * their submitting thread -- acking with anything still in
+             * flight would be a use-after-free.  The worker guarantees
+             * quiescence (commits_inflight drained to zero) before
+             * requesting unregistration; make a violation loud instead of
+             * corrupting memory. */
+            chimera_diskfs_abort_if(
+                ch->cq_inflight != 0 ||
+                __atomic_load_n(&ch->sq.tail, __ATOMIC_ACQUIRE) !=
+                __atomic_load_n(&ch->sq.head, __ATOMIC_RELAXED),
+                "intent-log channel unregistered with work in flight "
+                "(cq_inflight=%u)", ch->cq_inflight);
+
             if (i != last) {
                 il->channels[i] = il->channels[last];
             }
@@ -9773,6 +9788,23 @@ diskfs_thread_destroy(void *private_data)
         chimera_diskfs_debug("diskfs_thread_destroy: drain complete");
     }
 
+    /* Wait for every commit this thread handed to the intent log to become
+     * durable and be reaped from the CQ.  The IL's retire path walks each
+     * txn's pinned blocks and dereferences txn->thread
+     * (diskfs_txn_unpin_blocks -> diskfs_block_unpin -> thread->shared), so
+     * tearing this thread down with a commit still in flight is a
+     * use-after-free on both the thread struct and the iq channel.  The
+     * drains above do not cover it: with unsafe_async a VFS request
+     * completes before its commit is durable, so the caller can legitimately
+     * reach thread teardown with redo writes still queued at the IL (seen as
+     * an elbencho-teardown ASan UAF in diskfs_block_unpin).
+     * commits_inflight counts every commit from submission (or SQ-full park)
+     * until its CQE is reaped, which is strictly after the IL's last touch
+     * of the txn and the channel, so zero here means quiescent. */
+    while (thread->commits_inflight > 0) {
+        evpl_continue(thread->evpl);
+    }
+
     evpl_iovec_release(thread->evpl, &thread->zero);
     evpl_iovec_release(thread->evpl, &thread->pad);
 
@@ -9799,8 +9831,12 @@ diskfs_thread_destroy(void *private_data)
         __atomic_store_n(&shared->intent_log.reg_dirty, 1, __ATOMIC_SEQ_CST);
         evpl_ring_doorbell(&shared->intent_log.wake_doorbell);
 
+        /* Pump the event loop rather than raw-spinning: should anything still
+         * be in flight on this channel despite the commits_inflight drain
+         * above, this keeps the CQ draining instead of deadlocking against a
+         * full ring. */
         while (!__atomic_load_n(&ch->unregister_done, __ATOMIC_ACQUIRE)) {
-            /* spin */
+            evpl_continue(thread->evpl);
         }
 
         evpl_remove_poll(thread->evpl, thread->cq_poll);
