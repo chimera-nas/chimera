@@ -415,11 +415,12 @@ space_map_create(
             if (d == SM_INTENT_LOG_DEVICE && a == 0) {
                 /* AG 0 of device 0 also hosts the superblock, the intent log
                  * and the relocated remote-AG-log region, all *before* this
-                 * AG's own log.  Then 3 bootstrap inode blocks after the log
-                 * (block_idx 1=AG header, 2=root inode, 3=orphan list). */
+                 * AG's own log.  Then the bootstrap inode blocks after the log
+                 * (block_idx 1=reserved, 2=root inode, 3..=orphan-list
+                 * shards). */
                 uint64_t pre_log = SM_SUPERBLOCK_SIZE + SM_INTENT_LOG_SIZE +
                     sm->remote_log_size;
-                uint64_t post_log = 3 * SM_BLOCK_SIZE;
+                uint64_t post_log = (2 + SM_BOOTSTRAP_ORPHAN_SLOTS) * SM_BLOCK_SIZE;
 
                 log_offset = base + pre_log;
 

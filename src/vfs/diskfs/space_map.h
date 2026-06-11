@@ -34,7 +34,16 @@
 #define SM_SUPERBLOCK_OFFSET 0
 #define SM_SUPERBLOCK_SIZE   4096
 #define SM_SUPERBLOCK_MAGIC  0x4D5346534B534944ULL          /* "DISKSFSM" */
-#define SM_FORMAT_VERSION    1
+#define SM_FORMAT_VERSION    2
+
+/*
+ * Bootstrap inode blocks carved after AG 0's log on device 0 at format time:
+ * block_idx 1 is reserved (inum 1 invalid by convention), 2 is the root
+ * inode, and the next SM_BOOTSTRAP_ORPHAN_SLOTS blocks (inums 3..) are the
+ * sharded orphan-list inodes (diskfs spreads deleted-inode records across
+ * them so unlinks don't serialize on one inode's write lock).
+ */
+#define SM_BOOTSTRAP_ORPHAN_SLOTS 16
 
 #define SM_RESERVATION_MIN   (1ULL << 20)                   /* 1 MiB */
 
@@ -209,6 +218,12 @@ struct sm_superblock {
     uint32_t remote_log_device;     /* device holding relocated logs (== 0) */
     uint64_t remote_log_offset;     /* region base on remote_log_device */
     uint64_t remote_log_size;       /* total region bytes */
+    /* Inode-generation floor: every generation ever issued by this filesystem
+     * is below this value, persisted with reserve-ahead so a crash can never
+     * re-issue a generation (which would let a stale file handle resolve to a
+     * reused inode block).  diskfs owns the semantics; see the gen allocator
+     * there. */
+    uint64_t gen_floor;
     /* Remainder of the 4 KiB block is implicit zero padding. */
 };
 
