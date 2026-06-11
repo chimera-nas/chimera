@@ -144,6 +144,19 @@ chimera_smb_change_notify(struct chimera_smb_request *request)
 
     nevents = chimera_vfs_notify_drain(state->watch, events, 16, &overflowed);
 
+    /* The watched object may already be gone: a cross-connection delete can
+     * win the race before this CHANGE_NOTIFY arms, in which case the watch
+     * will never fire again and parking would strand the request forever
+     * (smbtorture smb2.notify.rmdir3/rmdir4 hit exactly this and time out).
+     * Mirror the async send_response path: a deleted watch answers
+     * STATUS_DELETE_PENDING, taking precedence over any drained events. */
+    if (chimera_vfs_notify_watch_take_deleted(state->watch)) {
+        pthread_mutex_unlock(&state->lock);
+        chimera_smb_open_file_release(request, open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_DELETE_PENDING);
+        return;
+    }
+
     /* Re-filter drained events against this request's filter — the
      * watch's mask may have been broader when these were enqueued
      * (see same logic in the async send_response path).  Done under
