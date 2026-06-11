@@ -1870,6 +1870,25 @@ chimera_smb_server_notify(
             chimera_smb_info("Disconnected %s SMB connection from %s to %s, handled %lu requests",
                              conn->protocol == EVPL_DATAGRAM_RDMACM_RC ? "RDMA" : "TCP",
                              conn->remote_addr, conn->local_addr, conn->requests_completed);
+            /* Test hook: delay disconnect processing to deterministically widen
+             * the window between a client's TCP close and the server-side
+             * teardown that parks its durable handles.  A request racing into
+             * that window on another connection exercises the
+             * disconnect-vs-conflicting-open paths (close-not-park, yielded
+             * reclaim, parked-CREATE re-arbitration) that otherwise only a
+             * loaded CI machine hits.  Inert unless the environment variable is
+             * set; used by the smbtorture durable-open ctest entries. */
+            {
+                static int delay_ms = -1;
+
+                if (delay_ms < 0) {
+                    const char *d = getenv("CHIMERA_SMB_TEST_DISCONNECT_DELAY_MS");
+                    delay_ms = d ? atoi(d) : 0;
+                }
+                if (delay_ms > 0) {
+                    usleep(delay_ms * 1000);
+                }
+            }
             chimera_smb_conn_free(thread, conn);
             break;
         case EVPL_NOTIFY_RECV_MSG:

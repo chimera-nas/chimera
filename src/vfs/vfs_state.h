@@ -211,6 +211,22 @@ chimera_vfs_caching_grant_coalesce(
     struct chimera_vfs_lease_mode         want,
     int                                   upgrade_ok);
 
+/* Attempt a conflict-free in-place upgrade of `grant` to `want_granted`, for a
+ * DEFERRED open whose grant was capped by a holder that has since gone away (a
+ * CREATE parked on the ack-required break it triggered re-arbitrates here when
+ * the break resolves).  The upgrade is applied only when the grant is this
+ * deferred open's alone (refcount 1 — its capped state was never reported to
+ * the client, so no epoch bump or peer notification is owed), its lease is
+ * IDLE, `want_granted` is a strict superset of the current mode, and the larger
+ * mode is grantable without breaking any other owner's holder.  Returns the
+ * grant's resulting granted mode (upgraded or unchanged).  Caller must NOT
+ * hold file->lock. */
+uint8_t
+chimera_vfs_caching_grant_try_upgrade(
+    struct chimera_vfs_file_state    *file,
+    struct chimera_vfs_caching_grant *grant,
+    uint8_t                           want_granted);
+
 /* Link a freshly-created caching grant (whose embedded lease the caller has
  * already inserted via chimera_vfs_state_try_insert) into the per-file owner
  * index so later same-owner acquires coalesce onto it.  Caller must NOT hold

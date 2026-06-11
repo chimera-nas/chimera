@@ -242,6 +242,76 @@ chimera_smb_create_share_park_cb(
     struct chimera_vfs_lease     *conflict,
     void                         *private_data);
 
+static void
+chimera_smb_create_resume_rearbitrate(
+    struct chimera_smb_request *request);
+
+/* Durable / persistent handle grant decision (MS-SMB2 3.3.5.9.10/.11/.12): a
+ * durable handle is granted only when the open holds a batch oplock or a
+ * HANDLE-caching lease; a persistent handle on a continuous-availability share
+ * is exempt.  Reads oplock_level / lease_state off the open_file, so it can be
+ * re-run by the parked-CREATE resume path after a deferred caching upgrade
+ * makes the open durable-eligible. */
+static void
+chimera_smb_create_grant_durable(
+    struct chimera_smb_request   *request,
+    struct chimera_smb_open_file *open_file)
+{
+    struct chimera_server_smb_thread *thread = request->compound->thread;
+    struct chimera_smb_tree          *tree   = request->tree;
+    uint32_t                          ctx    = request->create.ctx_present_mask;
+    bool                              has_caching;
+
+    if (!thread->shared->config.persistent_handles) {
+        return;
+    }
+
+    has_caching = (open_file->oplock_level == SMB2_OPLOCK_LEVEL_BATCH) ||
+        (open_file->lease_state & SMB2_LEASE_HANDLE_CACHING);
+
+    if (ctx & CHIMERA_SMB_CREATE_CTX_DH2Q) {
+        bool persistent = (request->create.dh2q.flags & SMB2_DHANDLE_FLAG_PERSISTENT) &&
+            tree->share->continuous_availability;
+
+        if (has_caching || persistent) {
+            open_file->durable_flags = CHIMERA_SMB_DURABLE_V2;
+            memcpy(open_file->create_guid, request->create.dh2q.create_guid, 16);
+            if (persistent) {
+                open_file->durable_flags |= CHIMERA_SMB_DURABLE_PERSISTENT;
+            }
+            if (request->create.dh2q.timeout_ms == 0) {
+                open_file->durable_timeout_ms = CHIMERA_SMB_DURABLE_TIMEOUT_DEFAULT_MS;
+            } else if (request->create.dh2q.timeout_ms > CHIMERA_SMB_DURABLE_TIMEOUT_MAX_MS) {
+                open_file->durable_timeout_ms = CHIMERA_SMB_DURABLE_TIMEOUT_MAX_MS;
+            } else {
+                open_file->durable_timeout_ms = request->create.dh2q.timeout_ms;
+            }
+        }
+    } else if ((ctx & CHIMERA_SMB_CREATE_CTX_DHNQ) && has_caching) {
+        /* Durable v1: no timeout or create-guid on the wire. */
+        open_file->durable_flags      = CHIMERA_SMB_DURABLE_V1;
+        open_file->durable_timeout_ms = CHIMERA_SMB_DURABLE_TIMEOUT_DEFAULT_MS;
+    }
+} /* chimera_smb_create_grant_durable */
+
+/* Register a freshly durable-granted open in the shared registry so it
+ * survives a disconnect and can be reclaimed on reconnect.  Must be called
+ * without the tree bucket lock held (bucket -> registry order, smb_durable.c). */
+static void
+chimera_smb_create_register_durable(
+    struct chimera_smb_request   *request,
+    struct chimera_smb_open_file *open_file)
+{
+    if (request->create.persist_pid != 0) {
+        open_file->flags |= CHIMERA_SMB_OPEN_FILE_PERSISTED;
+    }
+    chimera_smb_durable_register(request->compound->thread->shared, open_file,
+                                 request->session_handle->session->session_id,
+                                 request->compound->conn->client_guid,
+                                 open_file->name, open_file->name_len,
+                                 request->create.persist_pid != 0);
+} /* chimera_smb_create_register_durable */
+
 /*
  * Before a conflicting open breaks a caching holder, evict any *parked*
  * (disconnected durable) holder that still holds a write cache on this file: a
@@ -1076,40 +1146,8 @@ chimera_smb_create_after_share(
      * includes HANDLE caching — otherwise a survived handle could not be safely
      * reclaimed.  oplock_level / lease_state were set by the caching-lease block
      * above. */
-    if (type == CHIMERA_SMB_OPEN_FILE_TYPE_FILE && tree->share &&
-        thread->shared->config.persistent_handles) {
-        uint32_t ctx = request->create.ctx_present_mask;
-        /* A durable handle requires a batch oplock or a HANDLE-caching lease
-         * (MS-SMB2 3.3.5.9.10/9.11).  A *persistent* handle (DH2Q + PERSISTENT
-         * on a continuous-availability share, 3.3.5.9.12) is exempt — the CA
-         * share provides the durability guarantee, so it is granted with no
-         * oplock/lease. */
-        bool     has_caching = (open_file->oplock_level == SMB2_OPLOCK_LEVEL_BATCH) ||
-            (open_file->lease_state & SMB2_LEASE_HANDLE_CACHING);
-
-        if (ctx & CHIMERA_SMB_CREATE_CTX_DH2Q) {
-            bool persistent = (request->create.dh2q.flags & SMB2_DHANDLE_FLAG_PERSISTENT) &&
-                tree->share->continuous_availability;
-
-            if (has_caching || persistent) {
-                open_file->durable_flags = CHIMERA_SMB_DURABLE_V2;
-                memcpy(open_file->create_guid, request->create.dh2q.create_guid, 16);
-                if (persistent) {
-                    open_file->durable_flags |= CHIMERA_SMB_DURABLE_PERSISTENT;
-                }
-                if (request->create.dh2q.timeout_ms == 0) {
-                    open_file->durable_timeout_ms = CHIMERA_SMB_DURABLE_TIMEOUT_DEFAULT_MS;
-                } else if (request->create.dh2q.timeout_ms > CHIMERA_SMB_DURABLE_TIMEOUT_MAX_MS) {
-                    open_file->durable_timeout_ms = CHIMERA_SMB_DURABLE_TIMEOUT_MAX_MS;
-                } else {
-                    open_file->durable_timeout_ms = request->create.dh2q.timeout_ms;
-                }
-            }
-        } else if ((ctx & CHIMERA_SMB_CREATE_CTX_DHNQ) && has_caching) {
-            /* Durable v1: no timeout or create-guid on the wire. */
-            open_file->durable_flags      = CHIMERA_SMB_DURABLE_V1;
-            open_file->durable_timeout_ms = CHIMERA_SMB_DURABLE_TIMEOUT_DEFAULT_MS;
-        }
+    if (type == CHIMERA_SMB_OPEN_FILE_TYPE_FILE && tree->share) {
+        chimera_smb_create_grant_durable(request, open_file);
     }
 
     open_file_bucket = open_file->file_id.vid & CHIMERA_SMB_OPEN_FILE_BUCKET_MASK;
@@ -1124,14 +1162,7 @@ chimera_smb_create_after_share(
      * disconnect and can be reclaimed on reconnect.  Done outside the bucket
      * lock to keep the bucket -> registry lock order (see smb_durable.c). */
     if (open_file->durable_flags) {
-        if (request->create.persist_pid != 0) {
-            open_file->flags |= CHIMERA_SMB_OPEN_FILE_PERSISTED;
-        }
-        chimera_smb_durable_register(thread->shared, open_file,
-                                     request->session_handle->session->session_id,
-                                     request->compound->conn->client_guid,
-                                     open_file->name, open_file->name_len,
-                                     request->create.persist_pid != 0);
+        chimera_smb_create_register_durable(request, open_file);
     }
 
     compound->saved_file_id = open_file->file_id;
@@ -1748,6 +1779,10 @@ chimera_smb_create_park_deadline_cb(
                                     request->create.park_fh_hash,
                                     open_file ? open_file->grant : NULL);
 
+    /* The holder never acked and has now been revoked; lift the capped
+     * lease/durable decision if nothing else conflicts. */
+    chimera_smb_create_resume_rearbitrate(request);
+
     chimera_smb_open_file_release(request, open_file);
     /* complete_request retires the async-interim (unlink from parked_requests +
      * clear armed); the fired one-shot is already out of the timer heap so its
@@ -1845,6 +1880,91 @@ chimera_smb_create_open_finish(
     chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
 } /* chimera_smb_create_open_finish */
 
+/* Re-arbitrate a parked CREATE's caching grant as its break wait resolves.
+ *
+ * The open's oplock/lease -- and the durable grant that hinges on holding
+ * batch / HANDLE caching -- were decided while the conflicting holder was
+ * still mid-break, capping them below what the client requested.  If that
+ * holder has since gone away entirely (a disconnected durable handle closed
+ * by its connection teardown, purged on conflict, or force-revoked), the
+ * deferred reply can carry the full grant -- which is what Windows returns,
+ * and what smb2.durable-open.{lease,oplock} assert when the second client's
+ * open races the first client's TCP disconnect.  A holder that instead acked
+ * its break and kept the handle still conflicts, so the upgrade probe refuses
+ * and the capped decision stands (the live-holder outcome is unchanged).
+ *
+ * Runs on the request's owning thread, immediately before the deferred
+ * completion marshals the reply from the open_file. */
+static void
+chimera_smb_create_resume_rearbitrate(struct chimera_smb_request *request)
+{
+    struct chimera_server_smb_thread *thread    = request->compound->thread;
+    struct chimera_smb_open_file     *open_file = request->create.r_open_file;
+    uint8_t                           req_smb   = 0;
+    uint8_t                           want_vfs;
+    bool                              via_rqls;
+
+    if (!open_file || !open_file->grant || !open_file->caching_file_state) {
+        return;
+    }
+
+    /* Recompute the requested caching bits exactly as the original acquire
+     * did (chimera_smb_create_after_share). */
+    via_rqls = (request->create.ctx_present_mask & CHIMERA_SMB_CREATE_CTX_RQLS) != 0;
+    if (via_rqls) {
+        req_smb = thread->shared->config.leases
+            ? (uint8_t) (request->create.rqls.state & 0x07) : 0;
+    } else if (thread->shared->config.oplocks) {
+        switch (request->create.requested_oplock_level) {
+            case SMB2_OPLOCK_LEVEL_II:
+                req_smb = SMB2_LEASE_READ_CACHING;
+                break;
+            case SMB2_OPLOCK_LEVEL_EXCLUSIVE:
+                req_smb = SMB2_LEASE_READ_CACHING |
+                    SMB2_LEASE_WRITE_CACHING;
+                break;
+            case SMB2_OPLOCK_LEVEL_BATCH:
+                req_smb = SMB2_LEASE_READ_CACHING |
+                    SMB2_LEASE_WRITE_CACHING |
+                    SMB2_LEASE_HANDLE_CACHING;
+                break;
+            default:
+                break;
+        } /* switch */
+    }
+
+    want_vfs = chimera_smb_lease_bits_to_vfs(req_smb);
+    if (want_vfs == 0) {
+        return;
+    }
+
+    if (chimera_vfs_caching_grant_try_upgrade(open_file->caching_file_state,
+                                              open_file->grant,
+                                              want_vfs) != want_vfs) {
+        /* Still capped by a surviving holder (or the grant is shared / mid-
+         * break): the original decision stands. */
+        return;
+    }
+
+    if (via_rqls) {
+        open_file->lease_state = chimera_smb_vfs_to_lease_bits(want_vfs);
+    } else {
+        open_file->oplock_level = chimera_smb_vfs_to_oplock_level(want_vfs);
+    }
+
+    /* The upgrade may have made the open durable-eligible (batch / HANDLE
+     * caching); grant and register it now so the deferred reply carries the
+     * durable context and a disconnect can park it. */
+    if (!open_file->durable_flags && open_file->handle &&
+        open_file->type == CHIMERA_SMB_OPEN_FILE_TYPE_FILE &&
+        request->tree && request->tree->share) {
+        chimera_smb_create_grant_durable(request, open_file);
+        if (open_file->durable_flags) {
+            chimera_smb_create_register_durable(request, open_file);
+        }
+    }
+} /* chimera_smb_create_resume_rearbitrate */
+
 /* Resume the settled parked CREATEs on one connection.  Pull every parked
  * CREATE whose triggered lease break has now settled (no caching lease on the
  * file is mid-break) off `conn`'s parked list, then complete them on this
@@ -1888,6 +2008,10 @@ chimera_smb_create_resume_parked_conn(
         req                  = resume;
         resume               = req->async.park_next;
         req->async.park_next = NULL;
+        /* The break this CREATE waited on has settled; if the conflicting
+         * holder vanished outright, lift the capped lease/durable decision
+         * before the deferred reply is marshaled. */
+        chimera_smb_create_resume_rearbitrate(req);
         chimera_smb_open_file_release(req, req->create.r_open_file);
         /* async_id is still set, so the final reply carries
          * SMB2_FLAGS_ASYNC_COMMAND matching the interim. */

@@ -44,6 +44,15 @@ struct chimera_smb_file_id {
  * stream handle; stream_name + base_fh identify the stream for enumeration and
  * delete-on-close (which removes only the stream, not the base file). */
 #define CHIMERA_SMB_OPEN_FILE_FLAG_STREAM          0x00000040
+/* While this open sat disconnected (parked durable), its write-caching
+ * oplock/lease was forcibly revoked to admit a conflicting open: the
+ * disconnected handle has yielded (MS-SMB2 3.3.4.6/3.3.4.7 close a
+ * disconnected open whose batch oplock / write-caching lease breaks).  Had the
+ * conflicting open found it already parked it would have been purged outright
+ * (chimera_smb_create_purge_parked_writers); when the revoke wins that race
+ * instead, this flag makes a later durable reconnect fail with
+ * OBJECT_NAME_NOT_FOUND and leaves the carcass to the grace-timer sweep. */
+#define CHIMERA_SMB_OPEN_FILE_YIELDED              0x00000080
 
 /* Bits identifying which CREATE contexts a client supplied on the open. Mirrored
  * from request->create.ctx_present_mask into the open file so later phases

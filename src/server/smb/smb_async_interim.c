@@ -181,5 +181,18 @@ chimera_smb_async_interim_drain(struct chimera_smb_conn *conn)
         request->async.park_next = NULL;
         request->async.armed     = 0;
         evpl_remove_timer(thread->evpl, &request->async.timer);
+
+        /* A parked CREATE holds an open_file reference (taken when it deferred
+        * on the lease/oplock break it triggered) that only its resume path
+        * would drop -- and with the deadline timer cancelled above, no resume
+        * will ever come.  Drop it here or the reference pins the open past
+        * its tree's teardown and the open's VFS handle leaks, wedging the
+        * VFS close-thread drain at shutdown.  Clear r_open_file so a late
+        * completion of the orphaned request cannot touch the released open. */
+        if (request->smb2_hdr.command == SMB2_CREATE &&
+            request->create.r_open_file) {
+            chimera_smb_open_file_release(request, request->create.r_open_file);
+            request->create.r_open_file = NULL;
+        }
     }
 } /* chimera_smb_async_interim_drain */

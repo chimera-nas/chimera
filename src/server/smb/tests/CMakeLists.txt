@@ -3227,6 +3227,26 @@ endmacro()
 find_program(SMBTORTURE_EXECUTABLE smbtorture)
 
 if(CHIMERA_NETNS_TESTING AND SMBTORTURE_EXECUTABLE)
+    # Deterministic regression coverage for the disconnect-vs-conflicting-open
+    # race on durable handles: CHIMERA_SMB_TEST_DISCONNECT_DELAY_MS holds the
+    # server-side disconnect teardown so the second client's CREATE always
+    # lands while the first client's durable handle is still live -- the
+    # interleaving a loaded CI runner only hits occasionally.  Exercises the
+    # close-not-park (MS-SMB2 3.3.7.1), yielded-reclaim, and parked-CREATE
+    # re-arbitration paths.
+    foreach(_sub smb2.durable-open.lease smb2.durable-open.oplock)
+        string(REGEX REPLACE "[^A-Za-z0-9]" "_" _sid "${_sub}")
+        set(_name chimera/server/smb/smbtorture_${_sid}_disconnect_race_memfs)
+        add_test(NAME ${_name}
+            COMMAND ${CMAKE_SOURCE_DIR}/scripts/netns_test_wrapper.sh
+                    ${SMBTORTURE_CMD} -b memfs ${_sub})
+        set_tests_properties(${_name} PROPERTIES
+            ENVIRONMENT "${SMBTORTURE_LSAN};CHIMERA_SMB_TEST_DISCONNECT_DELAY_MS=50"
+            SKIP_RETURN_CODE 77
+            TIMEOUT 300
+            RESOURCE_LOCK smb_durable_oplock_family)
+    endforeach()
+
     add_smbtorture_backend_tests(memfs)
     add_smbtorture_backend_tests(linux)
     add_smbtorture_backend_tests(diskfs_io_uring)
