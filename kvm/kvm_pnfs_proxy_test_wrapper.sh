@@ -207,10 +207,20 @@ generate_proxy_config() {
 EOF
 }
 
-wait_for_port() {
-    local ns="$1" ip="$2" port="$3" pid="$4"
-    for i in $(seq 1 250); do
-        if ip netns exec "${ns}" bash -c "echo > /dev/tcp/${ip}/${port}" 2>/dev/null; then
+# Wait until a chimera daemon is genuinely ready: both its log says so and the
+# NFS port accepts.  The port alone is not enough: the daemon logs through an
+# asynchronous flusher thread, so a line emitted before the port came up (e.g.
+# "backing root resolved", "pnfs_mds=1") can land in the log file tens of
+# milliseconds later under CI load -- a single grep right after the port check
+# races and flakes.  The log is strictly ordered, and "Server is ready." is
+# emitted after every boot-time mount and the pNFS backing-root resolution
+# complete, so once it is greppable every earlier line is too, making the hard
+# confirmations below race-free.  (Mirrors scripts/pynfs_pnfs_test_wrapper.sh.)
+wait_for_ready() {
+    local ns="$1" ip="$2" port="$3" pid="$4" log="$5"
+    for i in $(seq 1 500); do
+        if grep -q "Server is ready." "$log" 2>/dev/null &&
+           ip netns exec "${ns}" bash -c "echo > /dev/tcp/${ip}/${port}" 2>/dev/null; then
             return 0
         fi
         if ! kill -0 "$pid" 2>/dev/null; then
@@ -219,7 +229,7 @@ wait_for_port() {
         fi
         sleep 0.02
     done
-    echo "timed out waiting for ${ip}:${port}" >&2
+    echo "timed out waiting for ${ip}:${port} to become ready" >&2
     return 1
 }
 
@@ -249,14 +259,14 @@ ip netns exec "${FE_NS}" ip link set "${TAP_NAME}" up
 generate_ds_config
 ip netns exec "${BE_NS}" "$CHIMERA_BINARY" -c "$DS_CONFIG" > "$DS_LOG" 2>&1 &
 DS_PID=$!
-wait_for_port "${BE_NS}" "$BE_IP" "$DS_PORT" "$DS_PID" || exit 1
+wait_for_ready "${BE_NS}" "$BE_IP" "$DS_PORT" "$DS_PID" "$DS_LOG" || exit 1
 echo "=== pNFS data server up on ${BE_IP}:${DS_PORT} (be) ==="
 
 # 2. Metadata server (nfs-mounts the DS at boot).
 generate_mds_config
 ip netns exec "${BE_NS}" "$CHIMERA_BINARY" -c "$MDS_CONFIG" > "$MDS_LOG" 2>&1 &
 MDS_PID=$!
-wait_for_port "${BE_NS}" "$BE_IP" "$MDS_PORT" "$MDS_PID" || exit 1
+wait_for_ready "${BE_NS}" "$BE_IP" "$MDS_PORT" "$MDS_PID" "$MDS_LOG" || exit 1
 echo "=== pNFS metadata server up on ${BE_IP}:${MDS_PORT} (be) ==="
 grep -q "backing root resolved" "$MDS_LOG" || {
     echo "MDS did not resolve its data-server backing root:" >&2
@@ -268,7 +278,7 @@ grep -q "backing root resolved" "$MDS_LOG" || {
 generate_proxy_config
 ip netns exec "${FE_NS}" "$CHIMERA_BINARY" -c "$PROXY_CONFIG" > "$PROXY_LOG" 2>&1 &
 PROXY_PID=$!
-wait_for_port "${FE_NS}" "$PROXY_IP" "$PROXY_PORT" "$PROXY_PID" || exit 1
+wait_for_ready "${FE_NS}" "$PROXY_IP" "$PROXY_PORT" "$PROXY_PID" "$PROXY_LOG" || exit 1
 echo "=== pNFS proxy up on ${PROXY_IP}:${PROXY_PORT} (fe) ==="
 grep -q "pnfs_mds=1" "$PROXY_LOG" || {
     echo "Proxy did not negotiate pNFS-MDS with the metadata server:" >&2
@@ -316,10 +326,25 @@ if [ "${EXIT_CODE:-1}" != "0" ]; then
     exit "${EXIT_CODE:-1}"
 fi
 
+# The events asserted below all happened before the guest workload completed
+# (the MDS even defers the truncate until the recall is handled), but the
+# proxy's async log flusher can trail the event by tens of milliseconds under
+# CI load -- poll briefly instead of grepping once.
+grep_with_wait() {
+    local pattern="$1" log="$2"
+    for i in $(seq 1 100); do
+        if grep -qE "$pattern" "$log" 2>/dev/null; then
+            return 0
+        fi
+        sleep 0.02
+    done
+    return 1
+}
+
 # Workload succeeded in the guest; now assert the data really traversed pNFS:
 # the proxy opens a connection to the data server (10.0.1.1:DS_PORT) only to
 # service a layout.  Its absence means the proxy silently fell back to MDS I/O.
-if ! grep -qE "Connected.* to ${BE_IP}:${DS_PORT}" "$PROXY_LOG"; then
+if ! grep_with_wait "Connected.* to ${BE_IP}:${DS_PORT}" "$PROXY_LOG"; then
     echo "=== pNFS NOT exercised: proxy never connected to the data server ===" >&2
     grep -iE "layoutget|getdeviceinfo|pnfs|Connected" "$PROXY_LOG" | tail -15 >&2
     exit 1
@@ -329,7 +354,7 @@ echo "=== verified: proxy drove direct data-server I/O via a flex-files layout =
 # The DS device advertises BOTH an rdma and a tcp netaddr (see the MDS config).
 # The proxy mounts the MDS over TCP, so it must select the tcp netaddr for the
 # DS (had it wrongly picked rdma it would have tried RDMA to a non-RDMA port).
-if ! grep -q "GETDEVICEINFO ok: netid=tcp" "$PROXY_LOG"; then
+if ! grep_with_wait "GETDEVICEINFO ok: netid=tcp" "$PROXY_LOG"; then
     echo "=== wrong DS transport selected from a multi-netaddr device ===" >&2
     grep -iE "getdeviceinfo|registered DS" "$PROXY_LOG" | tail -10 >&2
     exit 1
@@ -338,7 +363,7 @@ echo "=== verified: proxy selected the tcp netaddr from an rdma+tcp device ==="
 
 # For recall workloads, assert the proxy actually received + handled the recall.
 if echo "$TEST_CMD_ARG" | grep -q "RECALL_EXPECTED"; then
-    if ! grep -q "CB_LAYOUTRECALL" "$PROXY_LOG"; then
+    if ! grep_with_wait "CB_LAYOUTRECALL" "$PROXY_LOG"; then
         echo "=== recall NOT delivered: proxy logged no CB_LAYOUTRECALL ===" >&2
         grep -iE "layoutrecall|back-channel|fenced" "$PROXY_LOG" | tail -15 >&2
         exit 1
