@@ -1110,8 +1110,20 @@ struct diskfs_shared {
      * maintenance) runs here, off the request workers' hot path. */
     struct diskfs_reclaim     *reclaim;
     uint32_t                   reclaim_threads;    /* config knob (0 = default) */
-    struct diskfs_metrics      metrics;
-    pthread_mutex_t            lock;
+    /* Inode-generation epoch: every generation is drawn from this global
+     * monotonic counter; gen_floor is the durably-persisted bound
+     * (reserve-ahead) that no issued generation may reach.  A reused inode
+     * block therefore always gets a generation greater than any file handle
+     * this filesystem ever issued, so a stale handle can never resolve to
+     * the new file.  gen_wait parks allocations that catch up to the floor
+     * while an extension write is in flight (effectively never). */
+    uint64_t                    gen_next;            /* atomic */
+    uint64_t                    gen_floor;           /* atomic; durable bound */
+    int                         gen_extend_inflight; /* atomic */
+    pthread_mutex_t             gen_lock;            /* guards gen_wait */
+    struct diskfs_block_waiter *gen_wait;
+    struct diskfs_metrics       metrics;
+    pthread_mutex_t             lock;
 };
 
 struct diskfs_thread {
@@ -2423,6 +2435,10 @@ static void diskfs_acl_serial_install(
     struct diskfs_inode *inode,
     const uint8_t       *serial,
     int                  len);
+
+/* Defined with the inode-cache helpers; frees a struct + record mirrors. */
+static inline void diskfs_inode_struct_free(
+    struct diskfs_inode *inode);
 
 static struct diskfs_inode *
 diskfs_inode_load_sync(
@@ -5020,23 +5036,51 @@ diskfs_drain_final_cb(
     int                status,
     void              *priv)
 {
+    struct diskfs_drain       *d      = priv;
+    struct diskfs_shared      *shared = d->thread->shared;
+    struct diskfs_inode_shard *shard  = diskfs_inode_shard(shared, d->inum);
+    struct diskfs_inode       *inode;
+
     (void) txn;
     (void) status;
-    diskfs_drain_complete(priv);
+
+    /* The retire txn is durable and its locks are released; drop the dead
+     * struct from the cache so it neither accumulates nor lingers to collide
+     * with a reallocation of the inum.  Straggling lookups by the old (or
+     * any) generation fault from disk and get ENOENT from the tombstone /
+     * inum check there. */
+    pthread_mutex_lock(&shard->lock);
+    rb_tree_query_exact(&shard->inodes, d->inum, inum, inode);
+    if (inode && inode->nlink == 0 && inode->refcnt == 0 &&
+        !inode->writer && !inode->readers && !inode->wait_head) {
+        diskfs_inode_lru_unlink(shard, inode);
+        rb_tree_remove(&shard->inodes, &inode->node);
+        shard->ninodes--;
+        diskfs_inode_struct_free(inode);
+    }
+    pthread_mutex_unlock(&shard->lock);
+
+    diskfs_drain_complete(d);
 } /* diskfs_drain_final_cb */
 
 /* The durable orphan entry is removed; finish retiring the inode in the same
- * transaction and commit.  The inode home block is intentionally leaked for
- * now: generation reuse is not persisted for newly allocated inodes, so
- * reusing an inum could resolve a stale file handle to the new file. */
+ * transaction and commit: the dinode is logged one last time (gen bumped,
+ * nlink 0 -- a tombstone for any straggling pre-reuse fault) and the 4 KiB
+ * home block itself is returned to the space map.  Generation reuse is safe:
+ * generations are drawn from the global epoch counter, so whatever this inum
+ * becomes next carries a generation no file handle has ever seen. */
 static void
 diskfs_drain_after_unrecord(void *priv)
 {
     struct diskfs_drain *d = priv;
+    uint32_t             dev;
+    uint64_t             off = sm_inum_to_device_offset(d->thread->shared->space_map,
+                                                        d->inum, &dev);
 
     diskfs_txn_pin_inode_block(d->thread, d->txn, d->inode, 0);
     diskfs_inode_return_reservation(d->thread, d->txn, d->inode);
     diskfs_inode_free(d->thread, d->inode);
+    diskfs_txn_free_space(d->thread, d->txn, dev, off, DISKFS_BLOCK_SIZE);
     diskfs_txn_commit(d->txn, diskfs_drain_final_cb, d);
 } /* diskfs_drain_after_unrecord */
 
@@ -5302,6 +5346,142 @@ diskfs_reclaim_destroy(struct diskfs_shared *shared)
     free(r);
     shared->reclaim = NULL;
 } /* diskfs_reclaim_destroy */
+
+/* ------------------------------------------------------------------ */
+/* Inode-generation epoch                                              */
+/* ------------------------------------------------------------------ */
+
+/* Reserve-ahead window persisted into the superblock's gen_floor: a crash
+ * restarts the counter at the last durable floor, which is always at or
+ * above every generation actually issued. */
+#define DISKFS_GEN_RESERVE (1u << 20)
+#define DISKFS_GEN_FIRST   2   /* 0 invalid; 1 = format-created inodes */
+
+struct diskfs_gen_extend {
+    struct diskfs_thread *thread;
+    struct evpl_iovec     iov;
+    uint64_t              new_floor;
+};
+
+static void
+diskfs_gen_extend_complete(
+    struct evpl *evpl,
+    int          status,
+    void        *private_data)
+{
+    struct diskfs_gen_extend   *ge     = private_data;
+    struct diskfs_thread       *thread = ge->thread;
+    struct diskfs_shared       *shared = thread->shared;
+    struct diskfs_block_waiter *waiters, *w;
+
+    chimera_diskfs_abort_if(status != 0,
+                            "generation-floor superblock write failed: %d",
+                            status);
+
+    __atomic_store_n(&shared->gen_floor, ge->new_floor, __ATOMIC_RELEASE);
+    __atomic_store_n(&shared->gen_extend_inflight, 0, __ATOMIC_RELEASE);
+
+    evpl_iovec_release(evpl, &ge->iov);
+    free(ge);
+
+    /* Resume any allocations that caught up to the old floor. */
+    pthread_mutex_lock(&shared->gen_lock);
+    waiters          = shared->gen_wait;
+    shared->gen_wait = NULL;
+    pthread_mutex_unlock(&shared->gen_lock);
+
+    while (waiters) {
+        w       = waiters;
+        waiters = w->next;
+        diskfs_block_waiter_dispatch(thread, w);
+    }
+} /* diskfs_gen_extend_complete */
+
+/* Persist a new generation floor (current counter + reserve).  The write
+ * always carries FUA regardless of unsafe_async: re-issuing a generation
+ * after a crash would let stale file handles resolve to reused inodes. */
+static void
+diskfs_gen_extend(struct diskfs_thread *thread)
+{
+    struct diskfs_shared     *shared = thread->shared;
+    struct diskfs_gen_extend *ge;
+    int                       expect = 0;
+
+    if (!__atomic_compare_exchange_n(&shared->gen_extend_inflight, &expect, 1,
+                                     0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        return;     /* one extension in flight at a time */
+    }
+
+    ge            = malloc(sizeof(*ge));
+    ge->thread    = thread;
+    ge->new_floor = __atomic_load_n(&shared->gen_next, __ATOMIC_RELAXED) +
+        DISKFS_GEN_RESERVE;
+
+    evpl_iovec_alloc(thread->evpl, SM_SUPERBLOCK_SIZE, SM_SUPERBLOCK_SIZE, 1,
+                     0, &ge->iov);
+    space_map_fill_superblock(shared->space_map, ge->iov.data, shared->fsid,
+                              0 /* dirty */, shared->root_inum,
+                              shared->root_gen, 0, ge->new_floor);
+
+    evpl_block_write(thread->evpl, thread->queue[0], &ge->iov, 1,
+                     SM_SUPERBLOCK_OFFSET, 1 /* sync */,
+                     diskfs_gen_extend_complete, ge);
+} /* diskfs_gen_extend */
+
+/*
+ * Draw the next inode generation.  Returns 0 with *r_gen set, or SM_AGAIN
+ * after parking resume(thread, arg) for the (effectively never taken) case
+ * where the counter caught up to the durable floor before an extension
+ * landed.  The extension is kicked at half-reserve so allocations normally
+ * never block on it.
+ */
+static int
+diskfs_gen_alloc(
+    struct diskfs_thread *thread,
+    uint32_t             *r_gen,
+    void ( *resume )(struct diskfs_thread *, void *),
+    void                 *arg)
+{
+    struct diskfs_shared *shared = thread->shared;
+    uint64_t              g      = __atomic_fetch_add(&shared->gen_next, 1,
+                                                      __ATOMIC_RELAXED);
+    uint64_t              floor;
+
+    chimera_diskfs_abort_if(g >= UINT32_MAX,
+                            "inode generation space exhausted");
+
+    floor = __atomic_load_n(&shared->gen_floor, __ATOMIC_ACQUIRE);
+
+    if (g + DISKFS_GEN_RESERVE / 2 >= floor) {
+        diskfs_gen_extend(thread);
+        if (g >= floor) {
+            /* The slot is past the durable bound: park until the extension
+             * lands (the drawn value is simply wasted; the retry draws a
+             * fresh one). */
+            struct diskfs_block_waiter *w = diskfs_block_waiter_alloc(thread);
+
+            w->thread = thread;
+            w->resume = resume;
+            w->arg    = arg;
+
+            pthread_mutex_lock(&shared->gen_lock);
+            /* The extension may have landed while we took the lock. */
+            if (__atomic_load_n(&shared->gen_floor, __ATOMIC_ACQUIRE) > g) {
+                pthread_mutex_unlock(&shared->gen_lock);
+                diskfs_block_waiter_free(thread, w);
+                *r_gen = (uint32_t) g;
+                return 0;
+            }
+            w->next          = shared->gen_wait;
+            shared->gen_wait = w;
+            pthread_mutex_unlock(&shared->gen_lock);
+            return SM_AGAIN;
+        }
+    }
+
+    *r_gen = (uint32_t) g;
+    return 0;
+} /* diskfs_gen_alloc */
 
 /* ------------------------------------------------------------------ */
 /* nlink -> 0 transition: durable orphan record + deferred reclaim     */
@@ -6475,8 +6655,29 @@ diskfs_inode_cache_insert(
     struct diskfs_inode  *inode)
 {
     struct diskfs_inode_shard *shard = diskfs_inode_shard(shared, inode->inum);
+    struct diskfs_inode       *stale;
 
     pthread_mutex_lock(&shard->lock);
+
+    /* A reallocated inum can collide with the previous life's retired struct
+     * (kept cached through its background drain).  By the time the space map
+     * re-issued the home block, the drain fully retired it -- dead, unlocked,
+     * unreferenced -- so it can be replaced; any straggling lookup by the old
+     * generation gets ENOENT from the new struct's gen check. */
+    rb_tree_query_exact(&shard->inodes, inode->inum, inum, stale);
+    if (stale) {
+        chimera_diskfs_abort_if(stale->nlink != 0 || stale->refcnt != 0 ||
+                                stale->writer || stale->readers ||
+                                stale->wait_head,
+                                "inum %lu reallocated while previous life "
+                                "is still live", inode->inum);
+        diskfs_inode_lru_unlink(shard, stale);
+        diskfs_inode_mtime_unlink_locked(shard, stale);
+        rb_tree_remove(&shard->inodes, &stale->node);
+        shard->ninodes--;
+        diskfs_inode_struct_free(stale);
+    }
+
     diskfs_inode_cache_recycle_locked(shared, shard);
     rb_tree_insert(&shard->inodes, inum, inode);
     shard->ninodes++;
@@ -6735,6 +6936,7 @@ diskfs_inode_alloc_async(
     struct diskfs_inode_alloc_ctx *actx;
     uint32_t                       device_id;
     uint64_t                       device_offset, inum;
+    uint32_t                       gen;
     int                            rc;
 
     /* The reservation refill journals and may park on a cold log block; carry
@@ -6744,6 +6946,13 @@ diskfs_inode_alloc_async(
     actx->txn          = txn;
     actx->cb           = cb;
     actx->private_data = private_data;
+
+    /* Draw the generation before the space draw so a (rare) park on the
+     * generation floor can re-drive without having allocated a block. */
+    if (diskfs_gen_alloc(thread, &gen, diskfs_inode_alloc_resume,
+                         actx) == SM_AGAIN) {
+        return;     /* parked; diskfs_inode_alloc_resume re-runs (owns actx) */
+    }
 
     DISKFS_SM_JNL(jnl, thread, txn, diskfs_inode_alloc_resume, actx);
     rc = space_map_alloc(shared->space_map, &thread->space_cache, &jnl,
@@ -6760,6 +6969,7 @@ diskfs_inode_alloc_async(
 
     inum  = sm_inum_from_device_offset(shared->space_map, device_id, device_offset);
     inode = diskfs_inode_struct_new(inum);
+    inode->gen = gen;
 
     /* New dirty inode: write-locked by this (write) txn from birth. */
     inode->writer = 1;
@@ -9224,6 +9434,7 @@ diskfs_init(
 
 
     pthread_mutex_init(&shared->lock, NULL);
+    pthread_mutex_init(&shared->gen_lock, NULL);
     diskfs_metrics_init(shared, metrics);
 
     /* Decide mkfs vs clean-mount vs crash-recovery from the superblock, just as
@@ -9312,6 +9523,14 @@ diskfs_init(
 
         shared->mounted = (mode != 0);
 
+        /* Seed the generation epoch: a remount continues from the durable
+         * floor (>= every generation ever issued); a fresh format starts
+         * above the format-created inodes' generation (1).  The dirty
+         * superblock write below persists the extended floor. */
+        shared->gen_next  = (mode != 0 && sb.gen_floor > DISKFS_GEN_FIRST)
+            ? sb.gen_floor : DISKFS_GEN_FIRST;
+        shared->gen_floor = shared->gen_next + DISKFS_GEN_RESERVE;
+
         if (mode != 0) {
             uint8_t              fsid_buf[CHIMERA_VFS_FSID_SIZE] = { 0 };
             uint64_t             rinum                           = sb.root_inum ? sb.root_inum : 2;
@@ -9368,7 +9587,8 @@ diskfs_init(
                                         shared->fsid, 0,
                                         mode != 0 ? shared->root_inum : 0,
                                         mode != 0 ? shared->root_gen : 0,
-                                        mode != 0 ? sb.log_seq : 0);
+                                        mode != 0 ? sb.log_seq : 0,
+                                        shared->gen_floor);
         chimera_diskfs_abort_if(rc != 0, "Failed to write superblock");
 
         /* mkfs: write an initial condensed AG-log base so each slot has a valid
@@ -9652,10 +9872,14 @@ diskfs_destroy(void *private_data)
         if (space_map_persist(shared->space_map, &smio) != 0) {
             chimera_diskfs_error("space-map persist at unmount failed");
         } else if (shared->root_fhlen != 0) {
+            /* Clean unmount: persist the exact next generation (no reserve
+             * needed -- nothing was issued past gen_next). */
             int rc = space_map_write_superblock(shared->space_map, &smio,
                                                 shared->fsid, SM_SB_CLEAN,
                                                 shared->root_inum, shared->root_gen,
-                                                shared->intent_log.log_seq);
+                                                shared->intent_log.log_seq,
+                                                __atomic_load_n(&shared->gen_next,
+                                                                __ATOMIC_ACQUIRE));
             if (rc != 0) {
                 chimera_diskfs_error("clean-superblock write at unmount failed");
             }

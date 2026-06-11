@@ -440,6 +440,23 @@ space_map_thread_cache_return(
     struct sm_thread_cache  *cache);
 
 /*
+ * Format a complete superblock image (including CRC) into buf, which must be
+ * SM_SUPERBLOCK_SIZE bytes.  Used by space_map_write_superblock and by the
+ * runtime generation-floor extension, which writes the block through a live
+ * worker's block queue instead of the mount-time bridge.
+ */
+void
+space_map_fill_superblock(
+    struct space_map *sm,
+    void             *buf,
+    uint64_t          fsid,
+    uint64_t          flags,
+    uint64_t          root_inum,
+    uint32_t          root_gen,
+    uint64_t          log_seq,
+    uint64_t          gen_floor);
+
+/*
  * Write a stub superblock to offset 0 of device 0 through the mount-time
  * I/O bridge (async evpl_block, pumped to completion + flushed).  Done at
  * format/unmount time before worker threads exist.
@@ -452,7 +469,8 @@ space_map_write_superblock(
     uint64_t            flags,
     uint64_t            root_inum,
     uint32_t            root_gen,
-    uint64_t            log_seq);
+    uint64_t            log_seq,
+    uint64_t            gen_floor);
 
 /* Read + validate the superblock from device 0; 0 on success (fills *out),
  * -1 if absent/corrupt/wrong-version (caller should mkfs). */
