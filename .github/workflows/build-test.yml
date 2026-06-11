@@ -5,8 +5,11 @@
 name: CI
 
 on:
-  pull_request:        # PRs: lint + cheap aggregator no-ops (heavy jobs gated to merge_group)
-  merge_group:         # full matrix runs only in the merge queue, not on raw PRs; don't publish
+  # The full build/test matrix runs ONLY in the merge queue, never on raw PRs
+  # (PR-time required-check placeholders live in pr-checks.yml).  The job-level
+  # `if: github.event_name != 'pull_request'` guards below are now redundant but
+  # left in place as a harmless backstop.
+  merge_group:
   workflow_dispatch:   # allow manual runs
 
 # The full cross-OS, cross-arch test and static-analysis matrix runs nightly
