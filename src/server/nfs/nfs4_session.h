@@ -6,6 +6,7 @@
 
 #include <stdatomic.h>
 #include <stdbool.h>
+#include <time.h>
 #include <uthash.h>
 
 #include "nfs4_xdr.h"
@@ -56,10 +57,28 @@ struct nfs4_replay_slot {
     _Atomic uint64_t state_word;       /* (seqid << NFS4_SLOT_SEQID_SHIFT) | state */
     uint32_t         cached_len;       /* bytes in cached_buf (CACHED only) */
     void            *cached_buf;       /* RPC reply (header+body); malloc'd */
+    /* Diagnostics for a wedged compound: when the slot entered IN_PROGRESS
+     * and when a stuck-slot report was last logged for it.  Written only by
+     * the CAS winner / the retry path observing it, both monotonic-seconds;
+     * plain (non-atomic) is fine for a rate-limited log. */
+    time_t           in_progress_since;
+    time_t           last_stuck_report;
 };
 
 #define NFS4_SLOT_STATE_MASK  0x3u
 #define NFS4_SLOT_SEQID_SHIFT 2
+
+/* Coarse monotonic seconds for the slot-stuck diagnostics; off every hot
+ * comparison except the IN_PROGRESS transitions and the already-failing
+ * retry path. */
+static inline time_t
+nfs4_slot_now(void)
+{
+    struct timespec ts;
+
+    clock_gettime(CLOCK_MONOTONIC_COARSE, &ts);
+    return ts.tv_sec;
+} /* nfs4_slot_now */
 
 static inline uint64_t
 nfs4_slot_word(
