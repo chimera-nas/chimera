@@ -23,6 +23,7 @@
 
 #include "common/macros.h"
 #include "common/logging.h"
+#include "common/pthread_util.h"
 #include "common/snprintf.h"
 
 #define SECS_PER_HOUR (60 * 60)
@@ -158,9 +159,17 @@ chimera_log_thread(void *arg)
         usleep(1000);
     }
 
+    /* Clear the pointers under the lock so a straggling chimera_vlog()
+     * after the flush sees NULL and bails instead of writing into freed
+     * memory. */
+    pthread_mutex_lock(&ChimeraLogBufLock);
     for (i = 0; i < 2; ++i) {
         free(ChimeraLogBuffers[i]);
+        ChimeraLogBuffers[i] = NULL;
     }
+    ChimeraLogBuf    = NULL;
+    ChimeraLogBufPtr = NULL;
+    pthread_mutex_unlock(&ChimeraLogBufLock);
 
     if (ChimeraLogFile) {
         fclose(ChimeraLogFile);
@@ -216,10 +225,16 @@ chimera_log_atfork_child(void)
      * safe in both cases.  Also clear ChimeraLogRun so the inherited atexit
      * handler does not attempt to pthread_join() the parent's (now-invalid)
      * thread handle.  Any log data buffered by the parent at fork time is
-     * discarded in the child.
+     * discarded in the child (the parent's own copy still gets flushed by
+     * the parent's log thread).
      */
     pthread_mutex_init(&ChimeraLogBufLock, NULL);
     ChimeraLogRun = 0;
+
+    if (ChimeraLogBuf) {
+        ChimeraLogBufPtr = ChimeraLogBuf;
+        ChimeraLogBuf[0] = '\0';
+    }
 } /* chimera_log_atfork_child */
 
 static void
@@ -252,7 +267,19 @@ chimera_log_thread_init(void)
 
     pthread_atfork(chimera_log_atfork_prepare, chimera_log_atfork_parent,
                    chimera_log_atfork_child);
-    pthread_create(&ChimeraLogThread, NULL, chimera_log_thread, NULL);
+
+    int rc = chimera_pthread_create(&ChimeraLogThread, NULL,
+                                    chimera_log_thread, NULL);
+
+    if (rc != 0) {
+        /* Without a flusher thread nothing ever drains the log buffer, so
+         * later log calls would stall once it fills.  Report directly to
+         * stderr (the logging system is the thing that failed) and abort. */
+        fprintf(stderr, "chimera_log_init: pthread_create failed: %s\n",
+                strerror(rc));
+        abort();
+    }
+
     atexit(chimera_log_thread_exit);
 
 } /* chimera_log_thread_init */
@@ -302,7 +329,25 @@ chimera_vlog(
 
     pthread_mutex_lock(&ChimeraLogBufLock);
 
+    if (!ChimeraLogBuf) {
+        /* Buffers already torn down by chimera_log_flush(). */
+        pthread_mutex_unlock(&ChimeraLogBufLock);
+        return;
+    }
+
     while ((ChimeraLogBufPtr + 4096) > (ChimeraLogBuf + CHIMERA_LOG_BUF_SIZE)) {
+        if (!ChimeraLogRun) {
+            /* No flusher thread is alive to drain the buffer (e.g. in a
+             * fork()ed child, where the parent's log thread does not
+             * survive), so waiting would spin forever: drain it inline. */
+            FILE *out = ChimeraLogFile ? ChimeraLogFile : stdout;
+
+            fprintf(out, "%s", ChimeraLogBuf);
+            fflush(out);
+            ChimeraLogBufPtr = ChimeraLogBuf;
+            ChimeraLogBuf[0] = '\0';
+            break;
+        }
         pthread_mutex_unlock(&ChimeraLogBufLock);
         usleep(1);
         pthread_mutex_lock(&ChimeraLogBufLock);

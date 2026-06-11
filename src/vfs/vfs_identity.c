@@ -26,6 +26,7 @@
 #include "vfs_user_cache.h"
 #include "vfs_identity.h"
 #include "common/macros.h"
+#include "common/pthread_util.h"
 
 struct chimera_vfs_identity_handler_entry {
     chimera_vfs_identity_handler               handler;
@@ -313,8 +314,14 @@ chimera_vfs_identity_create(
                                      NULL);
 
     for (i = 0; i < num_workers; i++) {
-        pthread_create(&identity->workers[i], NULL,
-                       chimera_vfs_identity_worker, identity);
+        int rc = chimera_pthread_create(&identity->workers[i], NULL,
+                                        chimera_vfs_identity_worker, identity);
+
+        /* A missing worker would leave queued identity jobs that nothing
+         * services and destroy() joining a garbage pthread_t. */
+        chimera_vfs_abort_if(rc,
+                             "chimera_vfs_identity_create: pthread_create failed: %s",
+                             strerror(rc));
     }
 
     return identity;
