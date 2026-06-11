@@ -32,6 +32,13 @@ set(KVM_IMAGES
     ubuntu2204_hwe
 )
 
+# When ON (default) the guest images are fetched as part of the default build
+# target (ALL), so a plain `ninja` yields a ready-to-test tree.  CI's split
+# build job sets this OFF so the build does not pull ~5GB of images it will not
+# ship in its artifact; the test jobs then fetch on demand with
+# `ninja kvm_<image>_image`.
+option(KVM_FETCH_IMAGES "Fetch KVM guest images as part of the default build" ON)
+
 foreach(IMAGE_NAME ${KVM_IMAGES})
     set(IMAGE_DIR ${BUILD_ROOT}/kvm/${IMAGE_NAME})
 
@@ -47,9 +54,15 @@ foreach(IMAGE_NAME ${KVM_IMAGES})
         VERBATIM
     )
 
-    add_custom_target(kvm_${IMAGE_NAME}_image ALL
-        DEPENDS ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/initrd ${IMAGE_DIR}/rootfs.qcow2
-    )
+    if(KVM_FETCH_IMAGES)
+        add_custom_target(kvm_${IMAGE_NAME}_image ALL
+            DEPENDS ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/initrd ${IMAGE_DIR}/rootfs.qcow2
+        )
+    else()
+        add_custom_target(kvm_${IMAGE_NAME}_image
+            DEPENDS ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/initrd ${IMAGE_DIR}/rootfs.qcow2
+        )
+    endif()
 endforeach()
 
 add_subdirectory(tests)
