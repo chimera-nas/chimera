@@ -1030,6 +1030,12 @@ struct diskfs_intent_log {
     struct diskfs_iq_channel        *pending_head;
     struct evpl_block_queue         *log_queue;       /* redo writes -> intent-log device */
     uint64_t                         log_seq;         /* next redo seq (commit only) */
+    /* Records placed in the log and not yet trimmed past (atomic; incremented
+     * by the commit thread at placement, decremented by the push thread when
+     * the trim point passes the record).  Zero means the log is logically
+     * empty even when log_head != log_tail -- see the stale-trim-point reset
+     * in diskfs_iq_process_channel. */
+    uint64_t                         live_records;
     struct diskfs_retire_slot       *retire;          /* [DISKFS_RETIRE_RING_SIZE] */
     uint64_t                         retire_head;     /* next slot to retire (in order) */
     uint64_t                         retire_tail;     /* next submission index */
@@ -6875,6 +6881,8 @@ diskfs_il_place(
     }
     offset = head;
     __atomic_store_n(&il->log_head, head + reclen, __ATOMIC_RELEASE);
+    /* The record now occupies log space until the trim point passes it. */
+    __atomic_add_fetch(&il->live_records, 1, __ATOMIC_RELEASE);
     return offset;
 } /* diskfs_il_place */
 
@@ -7146,6 +7154,11 @@ diskfs_push_trim(struct diskfs_intent_log *il)
         if (rec->inflight_refs == 0) {
             diskfs_il_free_record(il, rec);
         }
+        /* The trim point is past this record: its log space is reclaimable
+         * (home writes read the in-memory image, never the on-disk log).
+         * Release-ordered after the log_tail stores above so the commit
+         * thread's acquire-load of a zero count also sees the final tail. */
+        __atomic_sub_fetch(&il->live_records, 1, __ATOMIC_RELEASE);
         advanced = 1;
     }
 
@@ -7568,9 +7581,21 @@ diskfs_iq_process_channel(struct diskfs_iq_channel *ch)
         }
 
         /* Back off if the log lacks room for this record; the tail-pusher
-         * rings the wake doorbell once it frees space. */
+         * rings the wake doorbell once it frees space.  One exception needs
+         * handling here: when the push FIFO and handoff ring drain, the trim
+         * point freezes wherever it stood (diskfs_push_trim has no next
+         * record to advance it to), so after enough wraps log_head can run
+         * up against a stale log_tail and the log looks permanently full
+         * while holding no records at all -- a commit deadlock, since only
+         * new trims would move the tail.  Zero live records is the truth:
+         * the log is logically empty, and the push thread will not store
+         * log_tail again until this thread hands off a new record, so it is
+         * safe to declare the log empty here.  */
         if (!diskfs_il_fits(il, diskfs_il_txn_reclen(slot->txn))) {
-            break;
+            if (__atomic_load_n(&il->live_records, __ATOMIC_ACQUIRE) != 0) {
+                break;
+            }
+            __atomic_store_n(&il->log_tail, il->log_head, __ATOMIC_RELEASE);
         }
 
         entry = *slot;
@@ -7936,6 +7961,7 @@ diskfs_intent_log_thread_init(
     il->evpl                        = evpl;
     il->log_head                    = SM_INTENT_LOG_OFFSET;
     il->log_tail                    = SM_INTENT_LOG_OFFSET;
+    il->live_records                = 0;
     il->log_seq                     = 0;
     il->redo_inflight               = 0;
     il->redo_inflight_high_water    = 0;
