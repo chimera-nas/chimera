@@ -152,7 +152,15 @@ set(PNFS_PROXY_CMD_rw "mkdir -p /mnt/test && dd if=/dev/urandom of=/tmp/orig bs=
 # to the MDS, which recalls the layout from the proxy over its back channel; the
 # proxy fences DS I/O and the truncate completes.  The "RECALL_EXPECTED" token
 # tells the wrapper to additionally assert the proxy logged a CB_LAYOUTRECALL.
-set(PNFS_PROXY_CMD_recall_truncate ": RECALL_EXPECTED; mkdir -p /mnt/test && dd if=/dev/urandom of=/tmp/orig bs=1M count=8 2>/dev/null && cp /tmp/orig /mnt/test/f0 && sync && truncate -s 4194304 /mnt/test/f0 && (echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true) && head -c 4194304 /tmp/orig > /tmp/orig4 && cmp /tmp/orig4 /mnt/test/f0")
+#
+# The guest holds fd 9 open on the file across the truncate.  The proxy returns
+# its layout when its upstream open handle closes (close-time LAYOUTCOMMIT +
+# LAYOUTRETURN), so without the pin the proxy may legitimately return the layout
+# in the gap between cp's CLOSE and the truncate's SETATTR -- the MDS then has
+# no holder to recall and the CB_LAYOUTRECALL assertion flakes.  The open fd
+# keeps the proxy's handle (and so its layout) alive until after the truncate,
+# making the recall deterministic.
+set(PNFS_PROXY_CMD_recall_truncate ": RECALL_EXPECTED; mkdir -p /mnt/test && dd if=/dev/urandom of=/tmp/orig bs=1M count=8 2>/dev/null && cp /tmp/orig /mnt/test/f0 && sync && exec 9</mnt/test/f0 && truncate -s 4194304 /mnt/test/f0 && exec 9<&- && (echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true) && head -c 4194304 /tmp/orig > /tmp/orig4 && cmp /tmp/orig4 /mnt/test/f0")
 
 # xfstests programs
 set(XFSTESTS_PROGRAMS fsstress fsx dirstress nametest fstest rewinddir)
