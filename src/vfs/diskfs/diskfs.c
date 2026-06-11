@@ -9800,9 +9800,21 @@ diskfs_thread_destroy(void *private_data)
      * an elbencho-teardown ASan UAF in diskfs_block_unpin).
      * commits_inflight counts every commit from submission (or SQ-full park)
      * until its CQE is reaped, which is strictly after the IL's last touch
-     * of the txn and the channel, so zero here means quiescent. */
+     * of the txn and the channel, so zero here means quiescent.
+     *
+     * Drain the CQ directly rather than pumping the event loop: the IL posts
+     * commit CQEs WITHOUT ringing the cq_doorbell (it relies on the pinned
+     * worker reaping via the per-iteration poll), and evpl_continue stops
+     * running polls once its poll-iteration budget expires without activity
+     * and parks in the OS wait -- with no doorbell ever coming, that is a
+     * deadlock (seen as mass diskfs test timeouts in CI, where loaded
+     * runners reach teardown with a commit still in flight).  drain_cq also
+     * resubmits commits parked on the SQ-full FIFO, so parked entries make
+     * progress too. */
     while (thread->commits_inflight > 0) {
-        evpl_continue(thread->evpl);
+        if (diskfs_iq_drain_cq(thread->iq_channel) == 0) {
+            usleep(100);
+        }
     }
 
     evpl_iovec_release(thread->evpl, &thread->zero);
@@ -9831,12 +9843,12 @@ diskfs_thread_destroy(void *private_data)
         __atomic_store_n(&shared->intent_log.reg_dirty, 1, __ATOMIC_SEQ_CST);
         evpl_ring_doorbell(&shared->intent_log.wake_doorbell);
 
-        /* Pump the event loop rather than raw-spinning: should anything still
-         * be in flight on this channel despite the commits_inflight drain
-         * above, this keeps the CQ draining instead of deadlocking against a
-         * full ring. */
+        /* Spin (not evpl_continue: with nothing left in flight there is no
+         * event to wake the loop, and the IL acks via a plain store with no
+         * doorbell).  The commits_inflight drain above guarantees the channel
+         * is quiescent, so the IL acks on its next registration sweep. */
         while (!__atomic_load_n(&ch->unregister_done, __ATOMIC_ACQUIRE)) {
-            evpl_continue(thread->evpl);
+            usleep(100);
         }
 
         evpl_remove_poll(thread->evpl, thread->cq_poll);
