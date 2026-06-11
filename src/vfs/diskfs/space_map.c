@@ -31,6 +31,24 @@
 #define SM_PERSIST_BATCH_OPS   128U
 #define SM_PERSIST_BATCH_BYTES (16ULL << 20)
 
+/* Test knob: trigger runtime AG-log condensation after this many deltas
+ * instead of at the slot's byte high-water (0 = disabled).  Read lazily so a
+ * test can set the variable before mount. */
+static uint32_t
+sm_condense_test_deltas_get(void)
+{
+    static int      init;
+    static uint32_t val;
+
+    if (!init) {
+        const char *e = getenv("DISKFS_AG_CONDENSE_DELTAS");
+
+        val  = e ? (uint32_t) strtoul(e, NULL, 10) : 0;
+        init = 1;
+    }
+    return val;
+} /* sm_condense_test_deltas_get */
+
 /*
  * Append one allocation/free delta to the AG's active log slot, journaled
  * through the current transaction (via jnl) so it rides the main redo log and
@@ -40,9 +58,10 @@
  * 4 KiB-aligned, 128-per-block units (no block-spanning); the delta count
  * lives in the slot header (block 0).
  *
- * Runtime condensation (recycling a full delta region into a fresh base) is
- * not yet implemented; the 4 MiB region holds ~128K deltas per AG between
- * clean unmounts, which re-condense.  Overflow aborts (TODO).
+ * When the active slot's delta region hits its high-water mark, journaling
+ * parks and a background condensation rewrites the inactive slot with a
+ * fresh base and flips (space_map_condense_prepare/commit); clean unmounts
+ * also re-condense every AG.
  */
 /*
  * The two AG-log blocks an upcoming delta touches, claimed (and pinned into the
@@ -80,6 +99,12 @@ sm_ag_journal_claim(
         return 0;
     }
 
+    /* Already condensing: park behind it. */
+    if (ag->condensing) {
+        jnl->ag_park(jnl->user, ag->device_id, ag->ag_index);
+        return SM_AGAIN;
+    }
+
     slot_base  = ag->log_offset + (uint64_t) ag->log_slot * SM_AG_LOG_SLOT_SIZE;
     region_off = (sizeof(struct sm_ag_log_header) +
                   (uint64_t) ag->log_base_count * sizeof(struct sm_ag_log_ext) +
@@ -87,8 +112,25 @@ sm_ag_journal_claim(
     slot->idx = ag->log_delta_count;
 
     delta_byte = region_off + (uint64_t) slot->idx * sizeof(struct sm_ag_log_delta);
+
+    /* High-water: hand the slot to a background condensation (writes the
+     * current free set as a fresh base into the inactive slot and flips) and
+     * park this operation behind it.  The margin below the hard limit
+     * absorbs nothing -- claims park immediately -- it is simply headroom so
+     * the abort is unreachable short of a condensation bug.  The test knob
+     * (DISKFS_AG_CONDENSE_DELTAS) triggers after a small fixed delta count
+     * so tests can exercise the condensation path without journaling ~100K
+     * deltas per AG. */
+    if (delta_byte + SM_AG_LOG_CONDENSE_MARGIN > SM_AG_LOG_SLOT_SIZE ||
+        (sm_condense_test_deltas_get() && slot->idx >= sm_condense_test_deltas_get())) {
+        ag->condensing = 1;
+        jnl->ag_condense(jnl->user, ag->device_id, ag->ag_index);
+        jnl->ag_park(jnl->user, ag->device_id, ag->ag_index);
+        return SM_AGAIN;
+    }
+
     sm_abort_if(delta_byte + sizeof(struct sm_ag_log_delta) > SM_AG_LOG_SLOT_SIZE,
-                "AG %u/%u delta region full (%u deltas) -- condensation TODO",
+                "AG %u/%u delta region full (%u deltas) despite condensation",
                 ag->device_id, ag->ag_index, slot->idx);
 
     blk_off        = slot_base + (delta_byte & ~((uint64_t) SM_BLOCK_SIZE - 1));
@@ -191,6 +233,7 @@ sm_ag_init(
     ag->log_generation  = 0;
     ag->log_base_count  = 0;
     ag->log_delta_count = 0;
+    ag->condensing      = 0;
 
     pthread_mutex_init(&ag->lock, NULL);
     rb_tree_init(&ag->free_by_offset);
@@ -966,6 +1009,78 @@ sm_ag_mark_used_locked(
     ag->free_bytes -= length;
     free(e);
 } /* sm_ag_mark_used_locked */
+
+static uint64_t sm_ag_condense_into(
+    struct sm_ag *ag,
+    uint8_t      *slot,
+    uint64_t      generation);
+
+/*
+ * Runtime condensation, phase 1: snapshot the AG's free set as a condensed
+ * base image (header at buf[0]) for the INACTIVE slot.  Called by the
+ * background condenser once jnl->ag_condense fired; all journaling into this
+ * AG is parked, so the set is mutated only by free-applies of durable
+ * transactions, and any snapshot is crash-safe: allocations are reflected
+ * eagerly (a lost one merely leaks) and frees only once durable (so the base
+ * never frees a block a committed file still references).  One bounded,
+ * self-healing crash window exists: a FREE delta journaled into the old slot
+ * whose txn becomes durable after the flip lives only in the dead slot, so a
+ * crash before the next condensation/clean unmount leaks that range (the
+ * next snapshot re-captures it from memory).  buf must hold
+ * SM_AG_LOG_SLOT_SIZE bytes.
+ *
+ * The caller must write the image to *r_slot_offset with the HEADER BLOCK
+ * (first 4 KiB) LAST and FUA: the inactive slot stays invalid (stale, lower
+ * generation) until the header lands, so a crash at any point leaves the old
+ * slot authoritative.  Then call space_map_condense_commit.
+ */
+int
+space_map_condense_prepare(
+    struct space_map *sm,
+    uint32_t          device_id,
+    uint32_t          ag_index,
+    void             *buf,
+    uint64_t         *r_slot_offset,
+    uint64_t         *r_payload)
+{
+    struct sm_ag *ag = &sm->devices[device_id].ags[ag_index];
+    uint64_t      payload;
+
+    pthread_mutex_lock(&ag->lock);
+    sm_abort_if(!ag->condensing, "condense_prepare on a non-condensing AG");
+
+    payload = sm_ag_condense_into(ag, (uint8_t *) buf, ag->log_generation + 1);
+
+    *r_slot_offset = ag->log_offset +
+        (uint64_t) (1 - ag->log_slot) * SM_AG_LOG_SLOT_SIZE;
+    *r_payload = payload;
+    pthread_mutex_unlock(&ag->lock);
+    return 0;
+} /* space_map_condense_prepare */
+
+/*
+ * Runtime condensation, phase 2: the new base image is durable in the
+ * inactive slot (header written last) -- flip to it and clear the gate.  The
+ * caller then re-drives every operation it parked for this AG.
+ */
+void
+space_map_condense_commit(
+    struct space_map *sm,
+    uint32_t          device_id,
+    uint32_t          ag_index,
+    uint32_t          base_count)
+{
+    struct sm_ag *ag = &sm->devices[device_id].ags[ag_index];
+
+    pthread_mutex_lock(&ag->lock);
+    sm_abort_if(!ag->condensing, "condense_commit on a non-condensing AG");
+    ag->log_slot        = 1 - ag->log_slot;
+    ag->log_generation += 1;
+    ag->log_base_count  = base_count;
+    ag->log_delta_count = 0;
+    ag->condensing      = 0;
+    pthread_mutex_unlock(&ag->lock);
+} /* space_map_condense_commit */
 
 /* Serialize the AG's current free set into `slot` as a condensed base (no
  * deltas) at `generation`.  Caller holds ag->lock.  Returns bytes written. */
