@@ -2030,10 +2030,24 @@ chimera_vfs_break_caching_file(
          * namespace recall blocks while any effective mode remains. */
         uint8_t                   block_mask = flush_only ? CHIMERA_VFS_LEASE_MODE_W : 0xFF;
         for (cur = file->caching_leases; cur; cur = cur->next) {
+            uint8_t mask = block_mask;
+
             if (skip_handle && cur->owner.op_handle == skip_handle) {
                 continue;
             }
-            if (chimera_vfs_lease_effective_granted(cur) & block_mask) {
+            /* The W-only flush mask is an SMB read-cache optimization, exactly
+             * like the recall-selection filter above.  An NFSv4 delegation
+             * guarantees attribute stability (RFC 7530 §10.4): a metadata-only
+             * mutation that recalled it must also WAIT for it to be returned
+             * (or revoked at the recall deadline), not just for write caches
+             * to flush.  Without this, a server-side chmod against a foreign
+             * read delegation completes before the client has even seen the
+             * CB_RECALL, and pynfs DELEG20 -- which checks for the recall the
+             * instant the chmod returns -- flakes under load. */
+            if (cur->owner.protocol == CHIMERA_VFS_LEASE_PROTO_NFSV4) {
+                mask = 0xFF;
+            }
+            if (chimera_vfs_lease_effective_granted(cur) & mask) {
                 had = true;
                 break;
             }
