@@ -111,6 +111,23 @@ class ChimeraAdminClient:
         """
         return self._request("GET", "/api/openapi.json")
 
+    def get_config(self) -> dict:
+        """Get the running server configuration.
+
+        Returns a JSON document compatible with the chimera.json file
+        format, reconstructed from live runtime state. The "users" and
+        "server" sections are intentionally omitted, and the internal
+        "root" mount is excluded.
+
+        Returns:
+            Dictionary with "mounts", "exports", "shares", and "buckets"
+            sections (each a mapping of resource name to its definition).
+
+        Raises:
+            ChimeraAdminError: If the request fails
+        """
+        return self._request("GET", "/api/v1/config")
+
     # Users API
 
     def list_users(self) -> list:

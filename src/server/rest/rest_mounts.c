@@ -30,6 +30,12 @@ mount_to_json_callback(
     struct mount_list_ctx *ctx = data;
     json_t                *obj;
 
+    /* The "root" pseudo-mount is a Chimera-internal entry that is not meant to
+     * be managed by clients, so omit it from the listing. */
+    if (strcmp(module_name, "root") == 0) {
+        return 0;
+    }
+
     obj = json_object();
     json_object_set_new(obj, "name", json_string(mount_path));
     json_object_set_new(obj, "module", json_string(module_name));
@@ -69,6 +75,12 @@ mount_get_callback(
     void       *data)
 {
     struct mount_get_ctx *ctx = data;
+
+    /* The "root" pseudo-mount is a Chimera-internal entry and must not be
+     * retrievable through the REST API. */
+    if (strcmp(module_name, "root") == 0) {
+        return 0;
+    }
 
     if (strcmp(mount_path, ctx->name) != 0) {
         return 0;
@@ -122,6 +134,28 @@ chimera_rest_handle_mounts_get(
  * HTTP reply is dispatched from the completion callback.
  */
 
+struct mount_exists_ctx {
+    const char *name;
+    int         found;
+};
+
+static int
+mount_exists_callback(
+    const char *mount_path,
+    const char *module_name,
+    const char *module_path,
+    void       *data)
+{
+    struct mount_exists_ctx *ctx = data;
+
+    if (strcmp(mount_path, ctx->name) == 0) {
+        ctx->found = 1;
+        return 1;
+    }
+
+    return 0;
+} /* mount_exists_callback */
+
 struct mount_create_ctx {
     struct evpl              *evpl;
     struct evpl_http_request *request;
@@ -165,7 +199,9 @@ chimera_rest_handle_mounts_create(
     const char              *module;
     const char              *path;
     const char              *options;
+    const char              *normalized;
     struct mount_create_ctx *ctx;
+    struct mount_exists_ctx  exists_ctx;
 
     root = json_loadb(body, body_len, 0, &error);
     if (!root) {
@@ -183,6 +219,26 @@ chimera_rest_handle_mounts_create(
         json_decref(root);
         chimera_rest_send_error(evpl, request, 400, "Bad Request",
                                 "Missing required fields: name, module, path");
+        return;
+    }
+
+    /* Mount paths are registered with leading slashes stripped, so normalize
+     * the requested name the same way before checking for an existing mount. */
+    normalized = name;
+    while (*normalized == '/') {
+        normalized++;
+    }
+
+    exists_ctx.name  = normalized;
+    exists_ctx.found = 0;
+
+    chimera_server_iterate_mounts(thread->shared->server,
+                                  mount_exists_callback, &exists_ctx);
+
+    if (exists_ctx.found) {
+        json_decref(root);
+        chimera_rest_send_error(evpl, request, 409, "Conflict",
+                                "Mount with that name already exists");
         return;
     }
 
