@@ -1082,34 +1082,34 @@ struct diskfs_intent_log {
 };
 
 struct diskfs_shared {
-    struct diskfs_device      *devices;
-    char                     **device_paths;     /* for unmount-time persistence */
-    int                        num_devices;
-    struct diskfs_inode_cache *inode_cache;
-    struct diskfs_block_cache *block_cache;
-    struct diskfs_kv_shard    *kv_shards;
-    int                        num_kv_shards;
-    int                        num_active_threads;
-    uint8_t                    root_fh[CHIMERA_VFS_FH_SIZE];
-    uint32_t                   root_fhlen;
-    int                        orphans_scanned;    /* mount-time orphan recovery done */
-    uint64_t                   root_inum;          /* for the clean-unmount superblock */
-    uint32_t                   root_gen;
-    int                        unsafe_async;       /* config opt-in: submit block writes without FUA/sync (no crash safety) */
-    int                        noatime;            /* config opt-in: never update atime on read (default: relatime) */
-    uint64_t                   mtime_defer_us;     /* coalesce non-FILE_SYNC in-place mtime updates: flush each dirty inode at most once per this many us (0 = disabled, log every write); default 1s */
-    int                        mounted;            /* 1 = remounted existing FS (enables inode read-back) */
-    uint32_t                   block_cache_blocks; /* total resident block-buffer cap (0 = default) */
-    uint32_t                   inode_cache_inodes; /* total resident inode cap (0 = default) */
-    int                        block_layout;       /* config opt-in: advertise pNFS block layouts */
-    int                        scsi_layout;        /* config opt-in: advertise pNFS SCSI layouts  */
-    uint64_t                   fsid;
-    struct space_map          *space_map;
-    struct diskfs_intent_log   intent_log;
+    struct diskfs_device       *devices;
+    char                      **device_paths;    /* for unmount-time persistence */
+    int                         num_devices;
+    struct diskfs_inode_cache  *inode_cache;
+    struct diskfs_block_cache  *block_cache;
+    struct diskfs_kv_shard     *kv_shards;
+    int                         num_kv_shards;
+    int                         num_active_threads;
+    uint8_t                     root_fh[CHIMERA_VFS_FH_SIZE];
+    uint32_t                    root_fhlen;
+    int                         orphans_scanned;   /* mount-time orphan recovery done */
+    uint64_t                    root_inum;         /* for the clean-unmount superblock */
+    uint32_t                    root_gen;
+    int                         unsafe_async;      /* config opt-in: submit block writes without FUA/sync (no crash safety) */
+    int                         noatime;           /* config opt-in: never update atime on read (default: relatime) */
+    uint64_t                    mtime_defer_us;    /* coalesce non-FILE_SYNC in-place mtime updates: flush each dirty inode at most once per this many us (0 = disabled, log every write); default 1s */
+    int                         mounted;           /* 1 = remounted existing FS (enables inode read-back) */
+    uint32_t                    block_cache_blocks; /* total resident block-buffer cap (0 = default) */
+    uint32_t                    inode_cache_inodes; /* total resident inode cap (0 = default) */
+    int                         block_layout;      /* config opt-in: advertise pNFS block layouts */
+    int                         scsi_layout;       /* config opt-in: advertise pNFS SCSI layouts  */
+    uint64_t                    fsid;
+    struct space_map           *space_map;
+    struct diskfs_intent_log    intent_log;
     /* Dedicated reclaim workers: deleted-inode burn-down (and other background
      * maintenance) runs here, off the request workers' hot path. */
-    struct diskfs_reclaim     *reclaim;
-    uint32_t                   reclaim_threads;    /* config knob (0 = default) */
+    struct diskfs_reclaim      *reclaim;
+    uint32_t                    reclaim_threads;   /* config knob (0 = default) */
     /* Inode-generation epoch: every generation is drawn from this global
      * monotonic counter; gen_floor is the durably-persisted bound
      * (reserve-ahead) that no issued generation may reach.  A reused inode
@@ -1122,6 +1122,9 @@ struct diskfs_shared {
     int                         gen_extend_inflight; /* atomic */
     pthread_mutex_t             gen_lock;            /* guards gen_wait */
     struct diskfs_block_waiter *gen_wait;
+    /* Per-(device, AG) park lists for journaling operations stalled behind a
+     * runtime AG-log condensation; drained when the condense commits. */
+    struct diskfs_ag_wait     **agw;                 /* [device][ag] */
     struct diskfs_metrics       metrics;
     pthread_mutex_t             lock;
 };
@@ -2976,9 +2979,25 @@ diskfs_sm_claim_block(
     return blk->iov.data;
 } /* diskfs_sm_claim_block */
 
-#define DISKFS_SM_JNL(name, thr, t, res, a)                                  \
-        struct diskfs_sm_jnl name ## _ctx = { (thr), (t), (res), (a) };      \
-        struct sm_journal    name         = { diskfs_sm_claim_block, &name ## _ctx }
+/* AG-log condensation bridge (defined with the reclaim pool): schedule the
+ * background condense, and park journaling continuations behind it. */
+static void diskfs_sm_ag_condense(
+    void    *user,
+    uint32_t device_id,
+    uint32_t ag_index);
+static void diskfs_sm_ag_park(
+    void    *user,
+    uint32_t device_id,
+    uint32_t ag_index);
+
+#define DISKFS_SM_JNL(name, thr, t, res, a)                                   \
+        struct diskfs_sm_jnl name ## _ctx = { (thr), (t), (res), (a) };       \
+        struct sm_journal    name         = {                                 \
+            .claim_block = diskfs_sm_claim_block,                             \
+            .ag_condense = diskfs_sm_ag_condense,                             \
+            .ag_park     = diskfs_sm_ag_park,                                 \
+            .user        = &name ## _ctx                                      \
+        }
 
 /* A journaling context for a site that has guaranteed its log blocks are
  * resident (e.g. a pre-reserved b+tree modify): a claim must never park, so a
@@ -5172,10 +5191,24 @@ static void * diskfs_thread_init(
 static void diskfs_thread_destroy(
     void *private_data);
 
+enum diskfs_reclaim_job_type {
+    DISKFS_RECLAIM_JOB_DRAIN = 0,   /* burn down a deleted inode */
+    DISKFS_RECLAIM_JOB_CONDENSE,    /* condense an AG's allocation log */
+};
+
 struct diskfs_reclaim_job {
-    uint64_t                   inum;
-    uint32_t                   gen;
+    enum diskfs_reclaim_job_type type;
+    uint64_t                   inum;         /* DRAIN */
+    uint32_t                   gen;          /* DRAIN */
+    uint32_t                   device_id;    /* CONDENSE */
+    uint32_t                   ag_index;     /* CONDENSE */
     struct diskfs_reclaim_job *next;
+};
+
+/* Journaling continuations parked behind one AG's condensation. */
+struct diskfs_ag_wait {
+    pthread_mutex_t             lock;
+    struct diskfs_block_waiter *head;
 };
 
 struct diskfs_reclaim_worker {
@@ -5186,6 +5219,7 @@ struct diskfs_reclaim_worker {
     pthread_mutex_t            lock;
     struct diskfs_reclaim_job *head;
     struct diskfs_reclaim_job *tail;
+    int                        condenses;  /* condense jobs in flight here */
     int                        ready;      /* atomic: context constructed */
 };
 
@@ -5195,6 +5229,11 @@ struct diskfs_reclaim {
     uint32_t                      rr;       /* atomic round-robin submit cursor */
     int                           shutdown; /* atomic: pool tearing down */
 };
+
+static void diskfs_condense_start(
+    struct diskfs_reclaim_worker *w,
+    uint32_t                      device_id,
+    uint32_t                      ag_index);
 
 /* Pop every queued job and hand it to this worker's drain machinery. */
 static void
@@ -5218,7 +5257,11 @@ diskfs_reclaim_doorbell_cb(
     while (jobs) {
         j    = jobs;
         jobs = j->next;
-        diskfs_drain_enqueue(w->ctx, j->inum, j->gen);
+        if (j->type == DISKFS_RECLAIM_JOB_CONDENSE) {
+            diskfs_condense_start(w, j->device_id, j->ag_index);
+        } else {
+            diskfs_drain_enqueue(w->ctx, j->inum, j->gen);
+        }
         free(j);
     }
 } /* diskfs_reclaim_doorbell_cb */
@@ -5230,30 +5273,25 @@ diskfs_reclaim_doorbell_cb(
  * drain finishes is recovered by the next mount's orphan scan.
  */
 static void
-diskfs_reclaim_submit(
-    struct diskfs_shared *shared,
-    uint64_t              inum,
-    uint32_t              gen)
+diskfs_reclaim_submit_job(
+    struct diskfs_shared      *shared,
+    struct diskfs_reclaim_job *j)
 {
     struct diskfs_reclaim        *r = shared->reclaim;
     struct diskfs_reclaim_worker *w;
-    struct diskfs_reclaim_job    *j;
     uint32_t                      idx;
 
     /* Pool tearing down (a worker's own shutdown flush can drop a last
-     * reference): skip -- the durable orphan record makes the next mount's
-     * scan pick the inode up. */
+    * reference): skip -- the durable orphan record makes the next mount's
+    * scan pick the inode up.  (Condense jobs cannot arrive here during
+    * teardown: every journaling request completed before it began.) */
     if (__atomic_load_n(&r->shutdown, __ATOMIC_ACQUIRE)) {
+        free(j);
         return;
     }
 
     idx = __atomic_fetch_add(&r->rr, 1, __ATOMIC_RELAXED) % r->nworkers;
     w   = &r->workers[idx];
-
-    j       = malloc(sizeof(*j));
-    j->inum = inum;
-    j->gen  = gen;
-    j->next = NULL;
 
     pthread_mutex_lock(&w->lock);
     if (w->tail) {
@@ -5265,6 +5303,20 @@ diskfs_reclaim_submit(
     pthread_mutex_unlock(&w->lock);
 
     evpl_ring_doorbell(&w->doorbell);
+} /* diskfs_reclaim_submit_job */
+
+static void
+diskfs_reclaim_submit(
+    struct diskfs_shared *shared,
+    uint64_t              inum,
+    uint32_t              gen)
+{
+    struct diskfs_reclaim_job *j = calloc(1, sizeof(*j));
+
+    j->type = DISKFS_RECLAIM_JOB_DRAIN;
+    j->inum = inum;
+    j->gen  = gen;
+    diskfs_reclaim_submit_job(shared, j);
 } /* diskfs_reclaim_submit */
 
 static void *
@@ -5293,6 +5345,12 @@ diskfs_reclaim_thread_shutdown(
      * finishes the reclaim backlog rather than re-scanning it next mount. */
     diskfs_reclaim_doorbell_cb(evpl, &w->doorbell);
 
+    /* Finish in-flight AG-log condensations (their parked journaling ops
+     * belong to requests that cannot complete until the flip). */
+    while (w->condenses > 0) {
+        evpl_continue(evpl);
+    }
+
     evpl_remove_doorbell(evpl, &w->doorbell);
     diskfs_thread_destroy(w->ctx);
 
@@ -5313,7 +5371,7 @@ diskfs_reclaim_create(struct diskfs_shared *shared)
 
     r->nworkers = shared->reclaim_threads ? shared->reclaim_threads
                                           : DISKFS_RECLAIM_THREADS_DEFAULT;
-    r->workers  = calloc(r->nworkers, sizeof(*r->workers));
+    r->workers = calloc(r->nworkers, sizeof(*r->workers));
 
     for (i = 0; i < r->nworkers; i++) {
         struct diskfs_reclaim_worker *w = &r->workers[i];
@@ -5346,6 +5404,176 @@ diskfs_reclaim_destroy(struct diskfs_shared *shared)
     free(r);
     shared->reclaim = NULL;
 } /* diskfs_reclaim_destroy */
+
+/* ------------------------------------------------------------------ */
+/* AG-log runtime condensation                                         */
+/*                                                                      */
+/* When an AG's active log slot nears full, the space map parks every   */
+/* journaling operation for that AG (diskfs_sm_ag_park) and schedules a */
+/* condense job here (diskfs_sm_ag_condense).  The job snapshots the    */
+/* AG's free set into the inactive slot -- body blocks first, header    */
+/* block last, all FUA, so a crash at any point leaves the old slot     */
+/* authoritative -- commits the flip, and re-drives the parked ops into */
+/* the fresh slot.                                                      */
+/* ------------------------------------------------------------------ */
+
+struct diskfs_condense {
+    struct diskfs_reclaim_worker *worker;
+    uint32_t                      device_id;
+    uint32_t                      ag_index;
+    struct evpl_iovec             hdr;       /* slot block 0 */
+    struct evpl_iovec             body;      /* remaining payload blocks */
+    uint64_t                      slot_off;
+    uint64_t                      body_len;
+    uint8_t                      *scratch;   /* SM_AG_LOG_SLOT_SIZE image */
+};
+
+static void
+diskfs_condense_finish(
+    struct evpl *evpl,
+    int          status,
+    void        *private_data)
+{
+    struct diskfs_condense       *c      = private_data;
+    struct diskfs_reclaim_worker *w      = c->worker;
+    struct diskfs_shared         *shared = w->shared;
+    struct diskfs_ag_wait        *agw    = &shared->agw[c->device_id][c->ag_index];
+    struct diskfs_block_waiter   *waiters, *wt;
+    uint32_t                      base_count;
+
+    chimera_diskfs_abort_if(status != 0,
+                            "AG-log condense header write failed: %d", status);
+
+    base_count = ((struct sm_ag_log_header *) c->scratch)->base_count;
+    space_map_condense_commit(shared->space_map, c->device_id, c->ag_index,
+                              base_count);
+
+    chimera_diskfs_info("AG %u/%u log condensed (%u free extents)",
+                        c->device_id, c->ag_index, base_count);
+
+    /* Re-drive everything parked behind the condensation. */
+    pthread_mutex_lock(&agw->lock);
+    waiters   = agw->head;
+    agw->head = NULL;
+    pthread_mutex_unlock(&agw->lock);
+
+    while (waiters) {
+        wt      = waiters;
+        waiters = wt->next;
+        diskfs_block_waiter_dispatch(w->ctx, wt);
+    }
+
+    evpl_iovec_release(evpl, &c->hdr);
+    if (c->body_len) {
+        evpl_iovec_release(evpl, &c->body);
+    }
+    free(c->scratch);
+    w->condenses--;
+    free(c);
+} /* diskfs_condense_finish */
+
+/* Body blocks durable: write the header block (slot becomes valid). */
+static void
+diskfs_condense_body_done(
+    struct evpl *evpl,
+    int          status,
+    void        *private_data)
+{
+    struct diskfs_condense       *c = private_data;
+    struct diskfs_reclaim_worker *w = c->worker;
+
+    chimera_diskfs_abort_if(status != 0,
+                            "AG-log condense body write failed: %d", status);
+
+    memcpy(c->hdr.data, c->scratch, DISKFS_BLOCK_SIZE);
+    evpl_block_write(evpl, w->ctx->queue[c->device_id], &c->hdr, 1,
+                     c->slot_off, 1 /* FUA */, diskfs_condense_finish, c);
+} /* diskfs_condense_body_done */
+
+static void
+diskfs_condense_try(struct diskfs_condense *c)
+{
+    struct diskfs_reclaim_worker *w      = c->worker;
+    struct diskfs_shared         *shared = w->shared;
+    struct evpl                  *evpl   = w->ctx->evpl;
+    uint64_t                      payload, aligned;
+
+    space_map_condense_prepare(shared->space_map, c->device_id,
+                               c->ag_index, c->scratch,
+                               &c->slot_off, &payload);
+
+    aligned = (payload + DISKFS_BLOCK_SIZE - 1) & ~((uint64_t) DISKFS_BLOCK_SIZE - 1);
+    memset(c->scratch + payload, 0, aligned - payload);
+    c->body_len = aligned - DISKFS_BLOCK_SIZE;
+
+    /* Header block (written last) makes the slot valid; everything after it
+     * goes first. */
+    evpl_iovec_alloc(evpl, DISKFS_BLOCK_SIZE, DISKFS_BLOCK_SIZE, 1, 0, &c->hdr);
+
+    if (c->body_len) {
+        evpl_iovec_alloc(evpl, c->body_len, DISKFS_BLOCK_SIZE, 1, 0, &c->body);
+        memcpy(c->body.data, c->scratch + DISKFS_BLOCK_SIZE, c->body_len);
+        evpl_block_write(evpl, w->ctx->queue[c->device_id], &c->body, 1,
+                         c->slot_off + DISKFS_BLOCK_SIZE, 1 /* FUA */,
+                         diskfs_condense_body_done, c);
+    } else {
+        diskfs_condense_body_done(evpl, 0, c);
+    }
+} /* diskfs_condense_try */
+
+static void
+diskfs_condense_start(
+    struct diskfs_reclaim_worker *w,
+    uint32_t                      device_id,
+    uint32_t                      ag_index)
+{
+    struct diskfs_condense *c = calloc(1, sizeof(*c));
+
+    c->worker    = w;
+    c->device_id = device_id;
+    c->ag_index  = ag_index;
+    c->scratch   = malloc(SM_AG_LOG_SLOT_SIZE);
+    w->condenses++;
+
+    diskfs_condense_try(c);
+} /* diskfs_condense_start */
+
+/* sm_journal bridge (called under the AG lock; see space_map.h). */
+static void
+diskfs_sm_ag_condense(
+    void    *user,
+    uint32_t device_id,
+    uint32_t ag_index)
+{
+    struct diskfs_sm_jnl      *c = user;
+    struct diskfs_reclaim_job *j = calloc(1, sizeof(*j));
+
+    j->type      = DISKFS_RECLAIM_JOB_CONDENSE;
+    j->device_id = device_id;
+    j->ag_index  = ag_index;
+    diskfs_reclaim_submit_job(c->thread->shared, j);
+} /* diskfs_sm_ag_condense */
+
+static void
+diskfs_sm_ag_park(
+    void    *user,
+    uint32_t device_id,
+    uint32_t ag_index)
+{
+    struct diskfs_sm_jnl       *c      = user;
+    struct diskfs_shared       *shared = c->thread->shared;
+    struct diskfs_ag_wait      *agw    = &shared->agw[device_id][ag_index];
+    struct diskfs_block_waiter *w      = diskfs_block_waiter_alloc(c->thread);
+
+    w->thread = c->thread;
+    w->resume = c->resume;
+    w->arg    = c->resume_arg;
+
+    pthread_mutex_lock(&agw->lock);
+    w->next   = agw->head;
+    agw->head = w;
+    pthread_mutex_unlock(&agw->lock);
+} /* diskfs_sm_ag_park */
 
 /* ------------------------------------------------------------------ */
 /* Inode-generation epoch                                              */
@@ -5398,8 +5626,8 @@ diskfs_gen_extend_complete(
 } /* diskfs_gen_extend_complete */
 
 /* Persist a new generation floor (current counter + reserve).  The write
- * always carries FUA regardless of unsafe_async: re-issuing a generation
- * after a crash would let stale file handles resolve to reused inodes. */
+* always carries FUA regardless of unsafe_async: re-issuing a generation
+* after a crash would let stale file handles resolve to reused inodes. */
 static void
 diskfs_gen_extend(struct diskfs_thread *thread)
 {
@@ -5438,9 +5666,9 @@ diskfs_gen_extend(struct diskfs_thread *thread)
 static int
 diskfs_gen_alloc(
     struct diskfs_thread *thread,
-    uint32_t             *r_gen,
+    uint32_t *r_gen,
     void ( *resume )(struct diskfs_thread *, void *),
-    void                 *arg)
+    void *arg)
 {
     struct diskfs_shared *shared = thread->shared;
     uint64_t              g      = __atomic_fetch_add(&shared->gen_next, 1,
@@ -5498,7 +5726,7 @@ struct diskfs_inode_orphaned_ctx {
 static void
 diskfs_inode_orphaned_recorded_cb(void *priv)
 {
-    struct diskfs_inode_orphaned_ctx c = *(struct diskfs_inode_orphaned_ctx *) priv;
+    struct diskfs_inode_orphaned_ctx c     = *(struct diskfs_inode_orphaned_ctx *) priv;
     struct diskfs_inode_shard       *shard =
         diskfs_inode_shard(c.thread->shared, c.inode->inum);
     int                              reclaim;
@@ -5543,7 +5771,7 @@ diskfs_inode_orphaned(
     void (               *done )(void *priv),
     void                 *priv)
 {
-    struct diskfs_inode_orphaned_ctx *c = malloc(sizeof(*c));
+    struct diskfs_inode_orphaned_ctx *c     = malloc(sizeof(*c));
     struct diskfs_inode_shard        *shard =
         diskfs_inode_shard(thread->shared, inode->inum);
 
@@ -5574,7 +5802,7 @@ diskfs_inode_ref_drop(
 {
     struct diskfs_inode_shard *shard = diskfs_inode_shard(thread->shared,
                                                           inode->inum);
-    int reclaim;
+    int                        reclaim;
 
     pthread_mutex_lock(&shard->lock);
     --inode->refcnt;
@@ -6948,7 +7176,7 @@ diskfs_inode_alloc_async(
     actx->private_data = private_data;
 
     /* Draw the generation before the space draw so a (rare) park on the
-     * generation floor can re-drive without having allocated a block. */
+    * generation floor can re-drive without having allocated a block. */
     if (diskfs_gen_alloc(thread, &gen, diskfs_inode_alloc_resume,
                          actx) == SM_AGAIN) {
         return;     /* parked; diskfs_inode_alloc_resume re-runs (owns actx) */
@@ -6967,8 +7195,8 @@ diskfs_inode_alloc_async(
         return;
     }
 
-    inum  = sm_inum_from_device_offset(shared->space_map, device_id, device_offset);
-    inode = diskfs_inode_struct_new(inum);
+    inum       = sm_inum_from_device_offset(shared->space_map, device_id, device_offset);
+    inode      = diskfs_inode_struct_new(inum);
     inode->gen = gen;
 
     /* New dirty inode: write-locked by this (write) txn from birth. */
@@ -9542,7 +9770,7 @@ diskfs_init(
          * floor (>= every generation ever issued); a fresh format starts
          * above the format-created inodes' generation (1).  The dirty
          * superblock write below persists the extended floor. */
-        shared->gen_next  = (mode != 0 && sb.gen_floor > DISKFS_GEN_FIRST)
+        shared->gen_next = (mode != 0 && sb.gen_floor > DISKFS_GEN_FIRST)
             ? sb.gen_floor : DISKFS_GEN_FIRST;
         shared->gen_floor = shared->gen_next + DISKFS_GEN_RESERVE;
 
@@ -9672,6 +9900,18 @@ diskfs_init(
                                                         &shared->intent_log);
     while (!__atomic_load_n(&shared->intent_log.push_ready, __ATOMIC_ACQUIRE)) {
         /* spin briefly */
+    }
+
+    /* Per-(device, AG) park lists for journaling stalled behind an AG-log
+     * condensation. */
+    shared->agw = calloc(shared->num_devices, sizeof(*shared->agw));
+    for (int d = 0; d < shared->num_devices; d++) {
+        uint32_t nags = shared->space_map->devices[d].num_ags;
+
+        shared->agw[d] = calloc(nags, sizeof(**shared->agw));
+        for (uint32_t a = 0; a < nags; a++) {
+            pthread_mutex_init(&shared->agw[d][a].lock, NULL);
+        }
     }
 
     /* Reclaim workers last: their thread contexts register intent-log
@@ -9909,6 +10149,18 @@ diskfs_destroy(void *private_data)
     }
 
     diskfs_block_cache_destroy(shared);
+
+    if (shared->agw) {
+        for (i = 0; i < shared->num_devices; i++) {
+            uint32_t nags = shared->space_map->devices[i].num_ags;
+
+            for (uint32_t a = 0; a < nags; a++) {
+                pthread_mutex_destroy(&shared->agw[i][a].lock);
+            }
+            free(shared->agw[i]);
+        }
+        free(shared->agw);
+    }
 
     space_map_destroy(shared->space_map);
 
@@ -15978,7 +16230,7 @@ diskfs_rename_at_perform_removed_cb(
     if (result == 1) {
         if (S_ISDIR(existing_inode->mode)) {
             /* A replaced directory must be empty (validated above); like
-             * remove_at, the delete zeroes its self+parent link count. */
+            * remove_at, the delete zeroes its self+parent link count. */
             existing_inode->nlink = 0;
             np->nlink--;
         } else {

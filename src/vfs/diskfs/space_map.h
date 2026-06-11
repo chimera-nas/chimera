@@ -23,18 +23,18 @@
  * intent log will replace; this is where on-disk durability hooks in.
  */
 
-#define SM_BLOCK_SHIFT       12
-#define SM_BLOCK_SIZE        (1ULL << SM_BLOCK_SHIFT)
-#define SM_BLOCK_MASK        (SM_BLOCK_SIZE - 1)
+#define SM_BLOCK_SHIFT            12
+#define SM_BLOCK_SIZE             (1ULL << SM_BLOCK_SHIFT)
+#define SM_BLOCK_MASK             (SM_BLOCK_SIZE - 1)
 
-#define SM_AG_SIZE_LOG2      30                             /* 1 GiB */
-#define SM_AG_SIZE           (1ULL << SM_AG_SIZE_LOG2)
-#define SM_AG_OFFSET_MASK    (SM_AG_SIZE - 1)
+#define SM_AG_SIZE_LOG2           30                        /* 1 GiB */
+#define SM_AG_SIZE                (1ULL << SM_AG_SIZE_LOG2)
+#define SM_AG_OFFSET_MASK         (SM_AG_SIZE - 1)
 
-#define SM_SUPERBLOCK_OFFSET 0
-#define SM_SUPERBLOCK_SIZE   4096
-#define SM_SUPERBLOCK_MAGIC  0x4D5346534B534944ULL          /* "DISKSFSM" */
-#define SM_FORMAT_VERSION    2
+#define SM_SUPERBLOCK_OFFSET      0
+#define SM_SUPERBLOCK_SIZE        4096
+#define SM_SUPERBLOCK_MAGIC       0x4D5346534B534944ULL     /* "DISKSFSM" */
+#define SM_FORMAT_VERSION         2
 
 /*
  * Bootstrap inode blocks carved after AG 0's log on device 0 at format time:
@@ -45,7 +45,7 @@
  */
 #define SM_BOOTSTRAP_ORPHAN_SLOTS 16
 
-#define SM_RESERVATION_MIN   (1ULL << 20)                   /* 1 MiB */
+#define SM_RESERVATION_MIN        (1ULL << 20)              /* 1 MiB */
 
 #define SM_ALIGN_UP(x) (((x) + SM_BLOCK_MASK) & ~SM_BLOCK_MASK)
 
@@ -62,16 +62,16 @@
  * 0 we reserve block_idx == 1 at format time so the very first allocation
  * lands at block_idx == 2 (= inum 2 = the root inode).
  */
-#define SM_INUM_INDEX_BITS   32
-#define SM_INUM_AG_BITS      24
-#define SM_INUM_DISK_BITS    8
+#define SM_INUM_INDEX_BITS        32
+#define SM_INUM_AG_BITS           24
+#define SM_INUM_DISK_BITS         8
 
-#define SM_INUM_INDEX_MASK   ((1ULL << SM_INUM_INDEX_BITS) - 1)
-#define SM_INUM_AG_MASK      ((1ULL << SM_INUM_AG_BITS)    - 1)
-#define SM_INUM_DISK_MASK    ((1ULL << SM_INUM_DISK_BITS)  - 1)
+#define SM_INUM_INDEX_MASK        ((1ULL << SM_INUM_INDEX_BITS) - 1)
+#define SM_INUM_AG_MASK           ((1ULL << SM_INUM_AG_BITS)    - 1)
+#define SM_INUM_DISK_MASK         ((1ULL << SM_INUM_DISK_BITS)  - 1)
 
-#define SM_INUM_AG_SHIFT     SM_INUM_INDEX_BITS
-#define SM_INUM_DISK_SHIFT   (SM_INUM_INDEX_BITS + SM_INUM_AG_BITS)
+#define SM_INUM_AG_SHIFT          SM_INUM_INDEX_BITS
+#define SM_INUM_DISK_SHIFT        (SM_INUM_INDEX_BITS + SM_INUM_AG_BITS)
 
 /*
  * Each AG carves a fixed prefix off the front of its data range for its
@@ -80,9 +80,14 @@
  * fragmentation of a 1 GiB AG with 4 KiB blocks (~2 MiB per snapshot) with
  * comfortable headroom.
  */
-#define SM_AG_LOG_SLOT_SIZE  (4ULL << 20)  /* 4 MiB */
-#define SM_AG_LOG_SLOT_COUNT 2
-#define SM_AG_LOG_SIZE       (SM_AG_LOG_SLOT_SIZE * SM_AG_LOG_SLOT_COUNT)
+#define SM_AG_LOG_SLOT_SIZE       (4ULL << 20) /* 4 MiB */
+#define SM_AG_LOG_SLOT_COUNT      2
+#define SM_AG_LOG_SIZE            (SM_AG_LOG_SLOT_SIZE * SM_AG_LOG_SLOT_COUNT)
+
+/* Free headroom (bytes) left in a slot's delta region when runtime
+ * condensation is triggered; new journaling parks behind the condense, so
+ * this is margin against the hard-full abort, not a budget that fills. */
+#define SM_AG_LOG_CONDENSE_MARGIN (64ULL << 10)
 
 /*
  * On-disk per-AG allocation log.  Each slot begins with this header, followed
@@ -96,10 +101,10 @@
  * no separate checksum -- a torn condensation simply leaves the older slot
  * live.
  */
-#define SM_AG_LOG_MAGIC      0x474F4C47414B5344ULL     /* "DSKAGLOG" */
+#define SM_AG_LOG_MAGIC           0x474F4C47414B5344ULL /* "DSKAGLOG" */
 
-#define SM_AG_LOG_OP_ALLOC   0u /* [offset,len) was handed out: remove from free */
-#define SM_AG_LOG_OP_FREE    1u /* [offset,len) was returned:   add to free */
+#define SM_AG_LOG_OP_ALLOC        0u /* [offset,len) was handed out: remove from free */
+#define SM_AG_LOG_OP_FREE         1u /* [offset,len) was returned:   add to free */
 
 struct sm_ag_log_header {
     uint64_t magic;
@@ -138,6 +143,20 @@ struct sm_journal {
         uint32_t device_id,
         uint64_t device_offset,
         int      is_new);
+    /* The AG's active log slot hit its high-water mark: schedule a runtime
+     * condensation (background; see space_map_condense_prepare/commit).
+     * Called once per condensation cycle, under the AG lock. */
+    void  (*ag_condense)(
+        void    *user,
+        uint32_t device_id,
+        uint32_t ag_index);
+    /* The AG is condensing: park the current operation's continuation; it is
+     * re-driven when the condensation commits.  Called under the AG lock
+     * (park on a caller-side list; do not call back into the space map). */
+    void  (*ag_park)(
+        void    *user,
+        uint32_t device_id,
+        uint32_t ag_index);
     void *user;
 };
 
@@ -305,6 +324,11 @@ struct sm_ag {
     uint64_t        log_generation;  /* generation of the active slot */
     uint32_t        log_base_count;  /* condensed base extents in the active slot */
     uint32_t        log_delta_count; /* deltas appended since the last condense */
+
+    /* Runtime condensation gate (protected by lock): while set, every
+     * journaling operation parks (jnl->ag_park) until the background
+     * condense commits the inactive slot and flips. */
+    int             condensing;
 };
 
 struct sm_device {
@@ -471,6 +495,27 @@ space_map_write_superblock(
     uint32_t            root_gen,
     uint64_t            log_seq,
     uint64_t            gen_floor);
+
+/* Runtime AG-log condensation (see the implementation for the full
+ * protocol): prepare snapshots the free set as a new base image for the
+ * inactive slot; after the caller writes the image (header block last, FUA),
+ * commit flips the slot and re-opens journaling.  base_count comes from the
+ * image header. */
+int
+space_map_condense_prepare(
+    struct space_map *sm,
+    uint32_t          device_id,
+    uint32_t          ag_index,
+    void             *buf,
+    uint64_t         *r_slot_offset,
+    uint64_t         *r_payload);
+
+void
+space_map_condense_commit(
+    struct space_map *sm,
+    uint32_t          device_id,
+    uint32_t          ag_index,
+    uint32_t          base_count);
 
 /* Read + validate the superblock from device 0; 0 on success (fills *out),
  * -1 if absent/corrupt/wrong-version (caller should mkfs). */
