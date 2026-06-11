@@ -11,12 +11,91 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <errno.h>
+#include <signal.h>
+#include <dirent.h>
+#include <execinfo.h>
 #include <jansson.h>
 #include "posix/posix.h"
 #include "server/server.h"
 #include "common/logging.h"
 #include "common/test_users.h"
 #include "prometheus-c.h"
+
+/*
+ * Self-dumping watchdog for the forked child of a cross-process test.
+ *
+ * The lock-family tests (lockf, fcntl, cthon tlock) fork a child that runs
+ * its own chimera_posix init/mount/open.  A rare, so-far-unreproduced CI
+ * flake strands that child before it signals the parent, and the test dies
+ * as a silent 300s ctest Timeout with no stack -- four tests have hit it
+ * (lockf_linux, lockf_io_uring, fcntl_io_uring, cthon_lock_tlock_linux).
+ *
+ * Arm SIGALRM in the child well below the ctest timeout.  On fire, dump
+ * every thread's kernel sleep location (procfs wchan -- localizes a hang to
+ * its blocking syscall even for threads this handler cannot backtrace) plus
+ * the signaled thread's userspace backtrace, then abort().  The SIGABRT
+ * unblocks the parent's waitpid, so the test fails fast WITH diagnostics
+ * instead of timing out silently.  The handler knowingly calls
+ * async-signal-unsafe functions: the process is wedged and about to abort,
+ * so a lost dump costs nothing over the status quo.
+ */
+static void
+posix_test_child_watchdog_fire(int sig)
+{
+    void *frames[64];
+    int   nframes;
+    DIR  *taskdir;
+
+    (void) sig;
+
+    dprintf(STDERR_FILENO,
+            "child-watchdog: pid %d stuck; dumping thread states\n",
+            (int) getpid());
+
+    taskdir = opendir("/proc/self/task");
+    if (taskdir) {
+        struct dirent *de;
+
+        while ((de = readdir(taskdir)) != NULL) {
+            char    path[280], wchan[128];
+            int     wfd;
+            ssize_t m = 0;
+
+            if (de->d_name[0] == '.') {
+                continue;
+            }
+            snprintf(path, sizeof(path), "/proc/self/task/%s/wchan",
+                     de->d_name);
+            wfd = open(path, O_RDONLY);
+            if (wfd >= 0) {
+                m = read(wfd, wchan, sizeof(wchan) - 1);
+                close(wfd);
+            }
+            wchan[m > 0 ? m : 0] = '\0';
+            dprintf(STDERR_FILENO, "child-watchdog: tid %s wchan %s\n",
+                    de->d_name, wchan);
+        }
+        closedir(taskdir);
+    }
+
+    dprintf(STDERR_FILENO, "child-watchdog: signaled thread backtrace:\n");
+    nframes = backtrace(frames, 64);
+    backtrace_symbols_fd(frames, nframes, STDERR_FILENO);
+
+    signal(SIGABRT, SIG_DFL);
+    abort();
+} /* posix_test_child_watchdog_fire */
+
+static inline void
+posix_test_child_watchdog(unsigned int seconds)
+{
+    struct sigaction sa;
+
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = posix_test_child_watchdog_fire;
+    sigaction(SIGALRM, &sa, NULL);
+    alarm(seconds);
+} /* posix_test_child_watchdog */
 
 struct posix_test_env {
     struct chimera_posix_client *posix;

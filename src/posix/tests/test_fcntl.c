@@ -58,6 +58,10 @@ child_main(
     close(p2c[1]);
     close(c2p[0]);
 
+    /* Fail fast with a stack if this child wedges (the recurring lock-family
+     * post-fork hang); fires well before the 300s ctest timeout. */
+    posix_test_child_watchdog(240);
+
     fprintf(stderr, "child: Testing chimera_posix_fcntl()...\n");
     env->posix = chimera_posix_init_json(posix_json_path, cred, env->metrics);
 
@@ -66,6 +70,8 @@ child_main(
         return 1;
     }
 
+    fprintf(stderr, "child: init done\n");
+
     /* Wait for parent to create + lock the file. optional start NFS server */
     recv_sig(p2c[0]);
 
@@ -73,6 +79,8 @@ child_main(
         fprintf(stderr, "child: mount failed: %s\n", strerror(errno));
         return 1;
     }
+
+    fprintf(stderr, "child: mount done\n");
 
     fd = chimera_posix_open(TEST_FILE, O_RDWR, 0);
 

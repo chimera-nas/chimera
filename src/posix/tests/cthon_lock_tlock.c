@@ -622,6 +622,9 @@ main(
     if ((childpid = fork()) == 0) {
         who = CHILD;
         signal(SIGINT, childsig);
+        /* Fail fast with a stack if this child wedges (the recurring
+         * lock-family post-fork hang); fires well before the ctest timeout. */
+        posix_test_child_watchdog(240);
     } else {
         who = PARENT;
         signal(SIGINT, parentsig);
