@@ -8657,13 +8657,28 @@ diskfs_txn_commit_finish(
      * and the inode locks are still held -- so the redo record captures this
      * txn's committed image, immune to a later COW, and the intent-log thread
      * never has to touch the live block->iov.  The refs are moved into the
-     * record by diskfs_il_write_redo. */
+     * record by diskfs_il_write_redo.
+     *
+     * Each clone runs under the block's shard lock: a shared block (an
+     * AG-log block pinned dirty by several journaling txns) goes LOGGED as
+     * soon as the FIRST txn's record is durable, at which point a concurrent
+     * claim COW-forks it -- replacing block->iov under that same lock --
+     * while a later txn is still snapshotting.  The COW copies the buffer,
+     * so whichever side of the swap the clone sees carries this txn's
+     * bytes. */
     {
         struct diskfs_txn_block *tb;
         uint64_t                 blocks = 0;
 
         for (tb = txn->blocks; tb; tb = tb->next) {
+            struct diskfs_block_shard *bshard =
+                diskfs_block_shard(thread->shared->block_cache,
+                                   tb->block->device_id,
+                                   tb->block->device_offset);
+
+            pthread_mutex_lock(&bshard->lock);
             evpl_iovec_clone(&tb->snap, &tb->block->iov);
+            pthread_mutex_unlock(&bshard->lock);
             blocks++;
         }
         diskfs_metric_counter_inc(thread->metrics.txn[0]);
