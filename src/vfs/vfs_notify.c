@@ -658,6 +658,22 @@ chimera_vfs_notify_watch_create(
     bucket  = &notify->buckets[bi];
 
     pthread_mutex_lock(&bucket->lock);
+    /* If this object was removed in the brief window before this watch was
+     * created (emit_delete ran first and found no watch to flag), inherit
+     * that deletion now so the first drain reports STATUS_DELETE_PENDING
+     * rather than parking forever.  The watch is not yet linked, so setting
+     * deleted without watch->lock is safe — no other thread can see it. */
+    for (int t = 0; t < CHIMERA_VFS_NOTIFY_TOMBSTONE_COUNT; t++) {
+        struct chimera_vfs_notify_tombstone *ts = &bucket->tombstones[t];
+
+        if (ts->stamp &&
+            ts->fh_len == dir_fh_len &&
+            memcmp(ts->fh, dir_fh, dir_fh_len) == 0 &&
+            chimera_vfs_elapsed_ns(ts->stamp) < CHIMERA_VFS_NOTIFY_TOMBSTONE_NS) {
+            watch->deleted = 1;
+            break;
+        }
+    }
     watch->next     = bucket->watches;
     bucket->watches = watch;
     pthread_mutex_unlock(&bucket->lock);
@@ -1223,6 +1239,23 @@ chimera_vfs_notify_emit_delete(
                 watch->callback(watch, watch->private_data);
             }
         }
+    }
+
+    /* Record a tombstone for this FH unconditionally — even when no watch
+     * currently matches.  A CHANGE_NOTIFY racing this delete may arm its
+     * watch a moment from now (the deleting client need not wait for the
+     * watcher's interim reply); watch_create consults these tombstones so
+     * that late-armed watch is born already-deleted instead of parking on
+     * an object that will never emit another event. */
+    {
+        struct chimera_vfs_notify_tombstone *ts =
+            &bucket->tombstones[bucket->tombstone_next];
+
+        memcpy(ts->fh, fh, fh_len);
+        ts->fh_len             = fh_len;
+        ts->stamp              = chimera_vfs_now_ticks();
+        bucket->tombstone_next =
+            (bucket->tombstone_next + 1) % CHIMERA_VFS_NOTIFY_TOMBSTONE_COUNT;
     }
 
     pthread_mutex_unlock(&bucket->lock);

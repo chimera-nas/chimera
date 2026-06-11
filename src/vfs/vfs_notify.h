@@ -80,10 +80,29 @@ struct chimera_vfs_notify_watch {
     struct chimera_vfs_notify_watch *subtree_next;
 };
 
+/* Tombstone of a just-removed object's FH.  Recorded by emit_delete so a
+ * CHANGE_NOTIFY whose watch is armed *after* the delete already fired — a
+ * cross-connection race where the deleting client does not wait for the
+ * watcher's interim reply (smb2.notify.rmdir3/4) — still learns the object
+ * is gone instead of parking on a watch that will never see another event.
+ * Bounded ring per bucket; entries are honoured only within
+ * CHIMERA_VFS_NOTIFY_TOMBSTONE_NS of the deletion so a later FH reuse cannot
+ * spuriously report DELETE_PENDING. */
+#define CHIMERA_VFS_NOTIFY_TOMBSTONE_COUNT 16
+#define CHIMERA_VFS_NOTIFY_TOMBSTONE_NS    2000000000ULL /* 2 seconds */
+
+struct chimera_vfs_notify_tombstone {
+    uint8_t  fh[CHIMERA_VFS_FH_SIZE];
+    uint16_t fh_len;
+    uint64_t stamp;             /* chimera_vfs_now_ticks() at deletion; 0 = empty */
+};
+
 /* Bucket in the sharded exact-watch hash table */
 struct chimera_vfs_notify_bucket {
-    struct chimera_vfs_notify_watch *watches;
-    pthread_mutex_t                  lock;
+    struct chimera_vfs_notify_watch    *watches;
+    struct chimera_vfs_notify_tombstone tombstones[CHIMERA_VFS_NOTIFY_TOMBSTONE_COUNT];
+    int                                 tombstone_next; /* ring write index */
+    pthread_mutex_t                     lock;
 };
 
 /* Per-mount subtree watch registry */
