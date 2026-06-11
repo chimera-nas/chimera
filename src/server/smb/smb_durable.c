@@ -362,6 +362,14 @@ chimera_smb_durable_claim(
         /* The handle is still live on another (multi-)channel — a second
          * reconnect cannot steal it. */
         *status = SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
+    } else if (entry->open_file &&
+               (entry->open_file->flags & CHIMERA_SMB_OPEN_FILE_YIELDED)) {
+        /* While disconnected, this open's write-caching oplock/lease was
+         * forcibly revoked to admit a conflicting open — it yielded (MS-SMB2
+         * 3.3.4.6/3.3.4.7 close a disconnected open whose batch oplock /
+         * write-caching lease breaks), so the reconnect must not find it.
+         * The grace-timer sweep reaps the carcass. */
+        *status = SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
     } else if (create_guid && memcmp(entry->create_guid, create_guid, 16) != 0) {
         *status = SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
     } else if ((had_lease || entry->persistent) && client_guid &&

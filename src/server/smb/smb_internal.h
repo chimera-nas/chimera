@@ -1058,6 +1058,14 @@ chimera_smb_open_file_drain_locks(
     struct chimera_server_smb_thread *thread,
     struct chimera_smb_open_file     *open_file);
 
+/* Ring every peer SMB thread's lease-resume doorbell so each re-sweeps its
+ * connections for parked CREATEs an event on this thread unblocked (defined in
+ * smb_proc_create.c; also declared in smb_procs.h, which this header cannot
+ * include). */
+void
+chimera_smb_create_resume_parked_broadcast(
+    struct chimera_server_smb_thread *origin);
+
 /* Durable/persistent handle registry (smb_durable.c). */
 void
 chimera_smb_durable_table_init(
@@ -1458,6 +1466,26 @@ chimera_smb_durable_open_preservable(const struct chimera_smb_open_file *open_fi
     return true;
 } /* chimera_smb_durable_open_preservable */
 
+/* MS-SMB2 3.3.7.1 (connection loss): only an open whose oplock/lease is Held
+ * survives as a disconnected durable handle.  One mid-break can never deliver
+ * the ack its breaker is waiting on (the connection is gone), so preserving it
+ * would wedge the conflicting CREATE behind the full break deadline and leave
+ * a reclaimable handle that should have yielded -- close it instead.  An
+ * already-revoked grant likewise holds nothing worth preserving.
+ *
+ * break_state is read without the grant's file lock: the teardown path holds
+ * the tree bucket lock here and the bucket -> vfs_state order forbids nesting
+ * the other way around, so a break that begins concurrently may be missed.
+ * That race is benign: the break callback then finds no live member
+ * (create_conn was cleared under this bucket lock first), revokes the lease,
+ * and marks the open YIELDED, which a later reconnect refuses. */
+static inline bool
+chimera_smb_durable_open_break_in_flight(const struct chimera_smb_open_file *open_file)
+{
+    return open_file->grant &&
+           open_file->grant->lease.break_state != CHIMERA_VFS_BREAK_IDLE;
+} /* chimera_smb_durable_open_break_in_flight */
+
 /* Park every durable/persistent open held by `session` for reconnect, leaving
  * the rest of the session in place.  Used when a PreviousSessionId reconnect
  * closes this session out from under its still-live connection (MS-SMB2
@@ -1490,7 +1518,11 @@ chimera_smb_session_park_durables(
             {
                 if (!open_file->durable_flags ||
                     (open_file->flags & CHIMERA_SMB_OPEN_FILE_PARKED) ||
-                    !chimera_smb_durable_open_preservable(open_file)) {
+                    !chimera_smb_durable_open_preservable(open_file) ||
+                    /* Mid-break opens are not preserved (MS-SMB2 3.3.7.1);
+                     * leave them in the tree for the old connection's own
+                     * teardown to close on its thread. */
+                    chimera_smb_durable_open_break_in_flight(open_file)) {
                     continue;
                 }
                 HASH_DELETE(hh, tree->open_files[b], open_file);
@@ -1805,6 +1837,7 @@ chimera_smb_tree_free(
     struct chimera_smb_open_file    *open_file, *tmp;
     struct chimera_smb_notify_state *gc_states = NULL;
     struct chimera_smb_notify_state *nstate;
+    bool                             closed_breaking = false;
     int                              i;
 
     for (i = 0; i < CHIMERA_SMB_OPEN_FILE_BUCKETS; i++) {
@@ -1833,12 +1866,27 @@ chimera_smb_tree_free(
              * returns OBJECT_NAME_NOT_FOUND. */
             if (open_file->durable_flags && preserve_durable &&
                 chimera_smb_durable_open_preservable(open_file)) {
-                open_file->flags      |= CHIMERA_SMB_OPEN_FILE_PARKED;
+                /* Clear create_conn BEFORE deciding park-vs-close: a break
+                 * that begins after this point finds no live member, revokes
+                 * the lease and marks the open YIELDED (so a reconnect is
+                 * refused); one that began before is seen by the
+                 * break_in_flight check below and the open is closed instead
+                 * of parked (MS-SMB2 3.3.7.1) -- between them, an unackable
+                 * break can no longer wedge a conflicting CREATE behind the
+                 * full break deadline. */
                 open_file->create_conn = NULL;
-                /* park acquires the registry lock under this bucket lock —
-                 * the bucket -> registry order is observed everywhere. */
-                chimera_smb_durable_park(shared, open_file);
-                continue;
+                if (!chimera_smb_durable_open_break_in_flight(open_file)) {
+                    open_file->flags |= CHIMERA_SMB_OPEN_FILE_PARKED;
+                    /* park acquires the registry lock under this bucket lock —
+                     * the bucket -> registry order is observed everywhere. */
+                    chimera_smb_durable_park(shared, open_file);
+                    continue;
+                }
+                /* Mid-break at disconnect: fall through to the normal close,
+                 * which releases the grant (resolving the break) and forgets
+                 * the registry entry.  Wake the parked-CREATE sweeps once the
+                 * bucket walk finishes. */
+                closed_breaking = true;
             }
 
             /* Detach any CHANGE_NOTIFY watch/parked request from this open and
@@ -1897,6 +1945,15 @@ chimera_smb_tree_free(
         nstate    = gc_states;
         gc_states = nstate->gc_next;
         chimera_smb_notify_close(shared->vfs->vfs_notify, nstate);
+    }
+
+    /* Closing a mid-break durable open above resolved its (unackable) break;
+     * CREATEs parked on that break wait for a doorbell, not the VFS pump, so
+     * wake this thread's sweep and every peer's (the conflicting CREATE
+     * usually lives on another connection's thread). */
+    if (closed_breaking) {
+        evpl_ring_doorbell(&thread->lease_resume_doorbell);
+        chimera_smb_create_resume_parked_broadcast(thread);
     }
 
     pthread_mutex_lock(&shared->trees_lock);

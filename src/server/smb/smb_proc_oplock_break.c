@@ -191,6 +191,25 @@ chimera_smb_lease_break_cb(
             break;
         }
     }
+    if (!open_file && (lease->mode.granted & CHIMERA_VFS_LEASE_MODE_W)) {
+        /* Breaking a WRITE-caching holder none of whose opens can be notified:
+         * the disconnected durable handle yields to the conflicting acquirer
+         * (MS-SMB2 3.3.4.6/3.3.4.7 close a disconnected open whose batch
+         * oplock / write-caching lease breaks).  The purge-on-conflict path
+         * (chimera_smb_create_purge_parked_writers) evicts such a holder when
+         * it is already parked; when this break races the disconnect teardown
+         * instead, mark the members yielded so a durable reconnect is refused
+         * (the grace-timer sweep reaps the carcass).  A holder with no write
+         * cache (a parked RH lease) is courtesy-held: its lease is still
+         * revoked below, but the handle stays reclaimable
+         * (keep-disconnected-rh-*). */
+        struct chimera_smb_open_file *member;
+
+        for (member = grant->holders; member;
+             member = member->grant_member_next) {
+            member->flags |= CHIMERA_SMB_OPEN_FILE_YIELDED;
+        }
+    }
     pthread_mutex_unlock(&file->lock);
 
     /* No live member can notify the client; the pragmatic recovery is to forcibly

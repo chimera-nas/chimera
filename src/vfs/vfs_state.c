@@ -1357,6 +1357,56 @@ chimera_vfs_caching_grant_coalesce(
     return grant;
 } /* chimera_vfs_caching_grant_coalesce */
 
+SYMBOL_EXPORT uint8_t
+chimera_vfs_caching_grant_try_upgrade(
+    struct chimera_vfs_file_state    *file,
+    struct chimera_vfs_caching_grant *grant,
+    uint8_t                           want_granted)
+{
+    uint8_t granted;
+
+    pthread_mutex_lock(&file->lock);
+
+    granted = grant->lease.mode.granted;
+
+    /* Same admission rules as the coalesce-path upgrade -- IDLE lease, strict
+     * superset, grantable without breaking another owner -- plus two stricter
+     * gates befitting a rescue path:
+     *
+     *   - refcount 1: the capped mode was never reported to the client (the
+     *     open is still deferred), so a sole-member upgrade owes no epoch bump
+     *     or notification.  A shared grant's state HAS been reported to
+     *     coalesced peers, so it is left as is.
+     *
+     *   - sole caching lease on the file: the cap is lifted only when the
+     *     holder that imposed it is GONE (closed by its disconnect teardown,
+     *     purged, or revoked-and-released), not merely downgraded.  The
+     *     conflict matrix scores a surviving mid-cascade holder at its
+     *     retained mode, which would let a deferred RWH request leapfrog a
+     *     live holder that acked down to RH and legitimately keeps it
+     *     (smb2.lease.v2_complex2 expects the deferred open to settle at RH). */
+    if (grant->refcount == 1 &&
+        grant->lease.break_state == CHIMERA_VFS_BREAK_IDLE &&
+        want_granted != granted &&
+        (want_granted & granted) == granted &&
+        file->caching_leases == &grant->lease &&
+        grant->lease.next == NULL) {
+        struct chimera_vfs_lease  probe    = grant->lease;
+        struct chimera_vfs_lease *conflict = NULL;
+
+        probe.mode.granted = want_granted;
+        if (chimera_vfs_state_would_conflict(file, &probe, &conflict) ==
+            CHIMERA_VFS_LEASE_GRANTED) {
+            grant->lease.mode.granted = want_granted;
+            granted                   = want_granted;
+        }
+    }
+
+    pthread_mutex_unlock(&file->lock);
+
+    return granted;
+} /* chimera_vfs_caching_grant_try_upgrade */
+
 SYMBOL_EXPORT void
 chimera_vfs_caching_grant_link(
     struct chimera_vfs_file_state    *file,
@@ -1540,13 +1590,16 @@ chimera_vfs_state_caching_breaking(
 
     pthread_mutex_lock(&file->lock);
     for (cur = file->caching_leases; cur; cur = cur->next) {
-        /* Only an RqLs LEASE break holds the conflicting open pending (MS-SMB2
-         * 3.3.5.9).  A legacy oplock keeps chimera's optimistic post-break
-         * behavior (the open proceeds without waiting), so exclude is_oplock
-         * grants here. */
+        /* An ack-required break -- an RqLs LEASE break (MS-SMB2 3.3.5.9) or a
+         * legacy batch/exclusive oplock break (3.3.4.6) -- holds the
+         * conflicting open pending until the holder acks, closes, or the
+         * break deadline revokes it.  Holding the oplock case too is what
+         * lets a CREATE that races the holder's disconnect re-arbitrate its
+         * capped grant when the teardown resolves the break, instead of
+         * baking LEVEL_II/no-durable into a reply that left too early
+         * (smb2.durable-open.oplock vs a mid-teardown holder). */
         if (cur->break_state == CHIMERA_VFS_BREAK_BREAKING &&
             cur->grant && cur->grant->break_ack_required &&
-            !cur->grant->is_oplock &&
             cur->grant != except) {
             breaking = true;
             break;
