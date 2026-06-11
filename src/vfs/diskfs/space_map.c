@@ -835,20 +835,20 @@ space_map_thread_cache_return(
     return 0;
 } /* space_map_thread_cache_return */
 
-int
-space_map_write_superblock(
-    struct space_map   *sm,
-    const struct sm_io *io,
-    uint64_t            fsid,
-    uint64_t            flags,
-    uint64_t            root_inum,
-    uint32_t            root_gen,
-    uint64_t            log_seq)
+void
+space_map_fill_superblock(
+    struct space_map *sm,
+    void             *buf,
+    uint64_t          fsid,
+    uint64_t          flags,
+    uint64_t          root_inum,
+    uint32_t          root_gen,
+    uint64_t          log_seq,
+    uint64_t          gen_floor)
 {
-    uint8_t               buf[SM_SUPERBLOCK_SIZE];
     struct sm_superblock *sb = (struct sm_superblock *) buf;
 
-    memset(buf, 0, sizeof(buf));
+    memset(buf, 0, SM_SUPERBLOCK_SIZE);
 
     sb->magic              = SM_SUPERBLOCK_MAGIC;
     sb->version            = SM_FORMAT_VERSION;
@@ -868,8 +868,26 @@ space_map_write_superblock(
     sb->remote_log_device  = SM_INTENT_LOG_DEVICE;
     sb->remote_log_offset  = sm->remote_log_offset;
     sb->remote_log_size    = sm->remote_log_size;
+    sb->gen_floor          = gen_floor;
     sb->crc32              = 0;
-    sb->crc32              = sm_crc32(buf, sizeof(buf));
+    sb->crc32              = sm_crc32(buf, SM_SUPERBLOCK_SIZE);
+} /* space_map_fill_superblock */
+
+int
+space_map_write_superblock(
+    struct space_map   *sm,
+    const struct sm_io *io,
+    uint64_t            fsid,
+    uint64_t            flags,
+    uint64_t            root_inum,
+    uint32_t            root_gen,
+    uint64_t            log_seq,
+    uint64_t            gen_floor)
+{
+    uint8_t buf[SM_SUPERBLOCK_SIZE];
+
+    space_map_fill_superblock(sm, buf, fsid, flags, root_inum, root_gen,
+                              log_seq, gen_floor);
 
     if (io->write(io->user, 0, buf, sizeof(buf), SM_SUPERBLOCK_OFFSET) != 0) {
         return -1;
