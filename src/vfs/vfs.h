@@ -1445,6 +1445,8 @@ struct chimera_vfs_thread {
      * pump runs on whatever thread released/broke a lease, but a request's
      * dispatch+reply must run on the thread that owns its connection iovecs). */
     struct chimera_vfs_request          *pending_io_resume;
+    /* Monotonic seconds of the last watchdog stuck-request report. */
+    time_t                               watchdog_last_report;
     struct evpl_doorbell                 doorbell;
     pthread_mutex_t                      lock;
     uint64_t                             anon_fh_key;

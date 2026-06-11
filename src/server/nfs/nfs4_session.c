@@ -1329,9 +1329,11 @@ nfs4_replay_slot_acquire(
                     memory_order_acq_rel, memory_order_acquire)) {
                 continue;  /* lost the race; re-read and re-evaluate */
             }
-            req->replay_slot    = slot;
-            req->replay_slot_id = slotid;
-            req->replay_action  = NFS4_REPLAY_ACTION_NEW;
+            req->replay_slot        = slot;
+            req->replay_slot_id     = slotid;
+            req->replay_action      = NFS4_REPLAY_ACTION_NEW;
+            slot->in_progress_since = nfs4_slot_now();
+            slot->last_stuck_report = 0;
             if (cachethis) {
                 nfs4_replay_arm_capture(req);
             }
@@ -1356,9 +1358,11 @@ nfs4_replay_slot_acquire(
                     atomic_fetch_sub_explicit(&session->replay_bytes_in_use,
                                               freed_bytes, memory_order_relaxed);
                 }
-                req->replay_slot    = slot;
-                req->replay_slot_id = slotid;
-                req->replay_action  = NFS4_REPLAY_ACTION_NEW;
+                req->replay_slot        = slot;
+                req->replay_slot_id     = slotid;
+                req->replay_action      = NFS4_REPLAY_ACTION_NEW;
+                slot->in_progress_since = nfs4_slot_now();
+                slot->last_stuck_report = 0;
                 if (cachethis) {
                     nfs4_replay_arm_capture(req);
                 }
@@ -1384,6 +1388,27 @@ nfs4_replay_slot_acquire(
              * produce a reply yet.  Both paths return errors. */
             if (seqid == cseq) {
                 status = NFS4ERR_RETRY_UNCACHED_REP;
+                /* A retry landing on a slot that has been IN_PROGRESS for many
+                 * seconds means the original compound is wedged server-side;
+                 * the client will retry RETRY_UNCACHED_REP silently forever
+                 * (observed as fsstress writeback hanging in CI with 14k
+                 * errored WRITE RPCs and nothing in the server log).  Make the
+                 * wedge visible, rate-limited per slot. */
+                {
+                    time_t now = nfs4_slot_now();
+
+                    if (slot->in_progress_since &&
+                        now - slot->in_progress_since >= 5 &&
+                        now - slot->last_stuck_report >= 10) {
+                        slot->last_stuck_report = now;
+                        chimera_nfs_error(
+                            "nfs4 session slot %u seqid %u stuck IN_PROGRESS "
+                            "for %ld sec; replying RETRY_UNCACHED_REP "
+                            "(original compound has not completed)",
+                            slotid, seqid,
+                            (long) (now - slot->in_progress_since));
+                    }
+                }
             } else {
                 status = NFS4ERR_SEQ_MISORDERED;
             }

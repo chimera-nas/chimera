@@ -977,7 +977,24 @@ chimera_vfs_watchdog(struct chimera_vfs_thread *thread)
     elapsed = prometheus_stopwatch_elapsed_ns(&request->start_time);
 
     if (elapsed > 10000000000UL) {
-        chimera_vfs_debug("oldest request has been active for %lu ns", elapsed);
+        /* A request alive this long is wedged, and at the default (info) log
+         * level a debug-only report is invisible -- a CI hang then yields no
+         * server-side evidence at all (a stuck WRITE wedged an NFS4.1 session
+         * slot for 290s with an empty log).  Identify the request at error
+         * level; rate-limit to one report per thread per ~30s so a long wedge
+         * does not flood. */
+        struct timespec ts;
+
+        clock_gettime(CLOCK_MONOTONIC_COARSE, &ts);
+
+        if (ts.tv_sec - thread->watchdog_last_report >= 30) {
+            thread->watchdog_last_report = ts.tv_sec;
+            chimera_vfs_error(
+                "request %p op %s active for %lu sec (oldest on this thread)",
+                (void *) request,
+                chimera_vfs_op_name(request->opcode),
+                elapsed / 1000000000UL);
+        }
         chimera_vfs_dump_request(request);
     }
 
