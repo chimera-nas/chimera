@@ -279,10 +279,20 @@ generate_combined_config() {
 EOF
 }
 
-wait_for_port() {
-    local ip="$1" port="$2" pid="$3"
-    for i in $(seq 1 250); do
-        if ip netns exec "${NETNS_NAME}" bash -c "echo > /dev/tcp/${ip}/${port}" 2>/dev/null; then
+# Wait until a chimera daemon is genuinely ready: both its log says so and the
+# NFS port accepts.  The port alone is not enough: the daemon logs through an
+# asynchronous flusher thread, so a line emitted before the port came up (e.g.
+# "backing root resolved") can land in the log file tens of milliseconds later
+# under CI load -- a single grep right after the port check races and flakes.
+# The log is strictly ordered, and "Server is ready." is emitted after every
+# boot-time mount and the pNFS backing-root resolution complete, so once it is
+# greppable every earlier line is too, making the hard confirmations below
+# race-free.  (Mirrors scripts/pynfs_pnfs_test_wrapper.sh.)
+wait_for_ready() {
+    local ip="$1" port="$2" pid="$3" log="$4"
+    for i in $(seq 1 500); do
+        if grep -q "Server is ready." "$log" 2>/dev/null &&
+           ip netns exec "${NETNS_NAME}" bash -c "echo > /dev/tcp/${ip}/${port}" 2>/dev/null; then
             return 0
         fi
         if ! kill -0 "$pid" 2>/dev/null; then
@@ -291,7 +301,7 @@ wait_for_port() {
         fi
         sleep 0.02
     done
-    echo "timed out waiting for ${ip}:${port}" >&2
+    echo "timed out waiting for ${ip}:${port} to become ready" >&2
     return 1
 }
 
@@ -317,7 +327,7 @@ if [ "$TOPOLOGY" = "split" ]; then
     generate_ds_config
     ip netns exec "${NETNS_NAME}" "$CHIMERA_BINARY" -c "$DS_CONFIG" > "$DS_LOG" 2>&1 &
     DS_PID=$!
-    wait_for_port "$DS_IP" "$DS_PORT" "$DS_PID" || exit 1
+    wait_for_ready "$DS_IP" "$DS_PORT" "$DS_PID" "$DS_LOG" || exit 1
     echo "=== pNFS data server up on ${DS_IP}:${DS_PORT} ==="
 
     # 2. Start the metadata server; it nfs-mounts the data server at boot.
@@ -328,7 +338,7 @@ else
 fi
 ip netns exec "${NETNS_NAME}" "$CHIMERA_BINARY" -c "$MDS_CONFIG" > "$MDS_LOG" 2>&1 &
 MDS_PID=$!
-wait_for_port "$MDS_IP" "$MDS_PORT" "$MDS_PID" || exit 1
+wait_for_ready "$MDS_IP" "$MDS_PORT" "$MDS_PID" "$MDS_LOG" || exit 1
 echo "=== pNFS metadata server up on ${MDS_IP}:${MDS_PORT} ==="
 grep -q "backing root resolved" "$MDS_LOG" || {
     echo "MDS did not resolve its data-server backing root:" >&2
