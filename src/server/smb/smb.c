@@ -1940,8 +1940,9 @@ chimera_smb_server_accept(
     /* Conns are pooled; clear per-connection negotiate state so the
     * "NEGOTIATE after NEGOTIATE" guard (MS-SMB2 3.3.5.4) does not trip on
     * a dialect inherited from a previously torn-down connection. */
-    conn->dialect = 0;
-    conn->flags   = 0;
+    conn->dialect            = 0;
+    conn->flags              = 0;
+    conn->requests_completed = 0;
 
     evpl_bind_get_local_address(bind, conn->local_addr, sizeof(conn->local_addr));
     evpl_bind_get_remote_address(bind, conn->remote_addr, sizeof(conn->remote_addr));
