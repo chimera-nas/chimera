@@ -20,7 +20,12 @@
 #include "posix_test_common.h"
 
 #define EVICT_NDIRS  8
-#define EVICT_NFILES 40000
+/* Eviction pressure comes from the file-to-cache ratio (the harness pins
+ * inode_cache_inodes to 2048, so this is ~10x oversubscribed), not the
+ * absolute count.  Sized so loaded CI shards finish well inside the test
+ * timeout: at 40000 files the ASan run took ~500 s of the 600 s budget on
+ * busy runners and occasionally timed out. */
+#define EVICT_NFILES 20000
 
 static void
 evict_path(
