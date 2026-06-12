@@ -5,6 +5,24 @@
 #pragma once
 
 #include "nfs_common.h"
+#include "vfs/vfs.h"
+
+/* Bound on how many times an NFS3 op replays its transaction after a wait-die /
+ * optimistic conflict before giving up. */
+#define CHIMERA_NFS3_TXN_MAX_RETRIES 8
+
+/* Shared NFS3 one-op-per-transaction driver (nfs3_txn.c).  See that file. */
+void chimera_nfs3_txn_run(
+    struct nfs_request       *req,
+    const void               *fh,
+    int                       fhlen,
+    enum chimera_vfs_txn_mode mode,
+    void (                   *start )(struct nfs_request *req),
+    void (                   *reply )(struct nfs_request *req));
+
+void chimera_nfs3_txn_finish(
+    struct nfs_request    *req,
+    enum chimera_vfs_error status);
 
 void chimera_nfs3_null(
     struct evpl               *evpl,

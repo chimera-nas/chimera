@@ -58,7 +58,7 @@ chimera_readlink_open_complete(
 
     chimera_vfs_readlink(
         request->thread->vfs_thread,
-        chimera_client_req_cred(request),
+        chimera_client_req_cred(request), NULL,
         oh,
         request->readlink.target,
         request->readlink.target_maxlength,
@@ -91,7 +91,7 @@ chimera_readlink_lookup_complete(
 
     chimera_vfs_open_fh(
         request->thread->vfs_thread,
-        chimera_client_req_cred(request),
+        chimera_client_req_cred(request), NULL,
         request->fh,
         request->fh_len,
         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED,
@@ -108,7 +108,7 @@ chimera_dispatch_readlink(
     /* Do not follow the final symlink - we want to read its target */
     chimera_vfs_lookup(
         thread->vfs_thread,
-        chimera_client_req_cred(request),
+        chimera_client_req_cred(request), NULL,
         thread->client->root_fh,
         thread->client->root_fh_len,
         request->readlink.path,

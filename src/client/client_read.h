@@ -36,7 +36,7 @@ chimera_dispatch_read(
     struct chimera_client_request *request)
 {
     chimera_vfs_read(thread->vfs_thread,
-                     chimera_client_req_cred(request),
+                     chimera_client_req_cred(request), NULL,
                      request->read.handle,
                      request->read.offset,
                      request->read.length,

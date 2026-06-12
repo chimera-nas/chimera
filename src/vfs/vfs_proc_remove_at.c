@@ -115,6 +115,7 @@ static void
 chimera_vfs_remove_at_dispatch(
     struct chimera_vfs_thread       *thread,
     const struct chimera_vfs_cred   *cred,
+    struct chimera_vfs_transaction  *txn,
     struct chimera_vfs_open_handle  *handle,
     const char                      *name,
     int                              namelen,
@@ -133,6 +134,8 @@ chimera_vfs_remove_at_dispatch(
         callback(CHIMERA_VFS_PTR_ERR(request), NULL, NULL, private_data);
         return;
     }
+
+    request->transaction = txn;
 
     request->opcode                                = CHIMERA_VFS_OP_REMOVE_AT;
     request->complete                              = chimera_vfs_remove_at_complete;
@@ -170,6 +173,7 @@ chimera_vfs_remove_at_dispatch(
 struct chimera_vfs_remove_at_gate {
     struct chimera_vfs_thread       *thread;
     const struct chimera_vfs_cred   *cred;
+    struct chimera_vfs_transaction  *txn;
     struct chimera_vfs_open_handle  *handle;
     const char                      *name;
     int                              namelen;
@@ -194,7 +198,7 @@ chimera_vfs_remove_at_gate_complete(
         return;
     }
 
-    chimera_vfs_remove_at_dispatch(gate->thread, gate->cred, gate->handle,
+    chimera_vfs_remove_at_dispatch(gate->thread, gate->cred, gate->txn, gate->handle,
                                    gate->name, gate->namelen, gate->child_fh,
                                    gate->child_fh_len, gate->pre_attr_mask,
                                    gate->post_attr_mask, gate->callback,
@@ -206,6 +210,7 @@ SYMBOL_EXPORT void
 chimera_vfs_remove_at(
     struct chimera_vfs_thread       *thread,
     const struct chimera_vfs_cred   *cred,
+    struct chimera_vfs_transaction  *txn,
     struct chimera_vfs_open_handle  *handle,
     const char                      *name,
     int                              namelen,
@@ -238,6 +243,7 @@ chimera_vfs_remove_at(
         gate                 = malloc(sizeof(*gate));
         gate->thread         = thread;
         gate->cred           = cred;
+        gate->txn            = txn;
         gate->handle         = handle;
         gate->name           = name;
         gate->namelen        = namelen;
@@ -263,7 +269,7 @@ chimera_vfs_remove_at(
         return;
     }
 
-    chimera_vfs_remove_at_dispatch(thread, cred, handle, name, namelen,
+    chimera_vfs_remove_at_dispatch(thread, cred, txn, handle, name, namelen,
                                    child_fh, child_fh_len, pre_attr_mask,
                                    post_attr_mask, callback, private_data);
 } /* chimera_vfs_remove_at */

@@ -57,7 +57,7 @@ chimera_setattr_open_complete(
 
     chimera_vfs_setattr(
         request->thread->vfs_thread,
-        chimera_client_req_cred(request),
+        chimera_client_req_cred(request), NULL,
         oh,
         &request->setattr.set_attr,
         0,  /* pre_attr_mask */
@@ -100,7 +100,7 @@ chimera_setattr_lookup_complete(
 
     chimera_vfs_open_fh(
         request->thread->vfs_thread,
-        chimera_client_req_cred(request),
+        chimera_client_req_cred(request), NULL,
         request->fh,
         request->fh_len,
         open_flags,
@@ -115,7 +115,7 @@ chimera_dispatch_setattr(
 {
     chimera_vfs_lookup(
         thread->vfs_thread,
-        chimera_client_req_cred(request),
+        chimera_client_req_cred(request), NULL,
         thread->client->root_fh,
         thread->client->root_fh_len,
         request->setattr.path,
@@ -135,7 +135,7 @@ chimera_dispatch_lsetattr(
 {
     chimera_vfs_lookup(
         thread->vfs_thread,
-        chimera_client_req_cred(request),
+        chimera_client_req_cred(request), NULL,
         thread->client->root_fh,
         thread->client->root_fh_len,
         request->setattr.path,
@@ -177,7 +177,7 @@ chimera_dispatch_setattr_at(
 {
     chimera_vfs_setattr(
         thread->vfs_thread,
-        chimera_client_req_cred(request),
+        chimera_client_req_cred(request), NULL,
         parent_handle,
         &request->setattr.set_attr,
         0,  /* pre_attr_mask */

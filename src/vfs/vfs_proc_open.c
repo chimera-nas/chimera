@@ -97,7 +97,7 @@ chimera_vfs_open_parent_open_complete(
 
     chimera_vfs_open_at(
         thread,
-        request->cred,
+        request->cred, NULL,
         oh,
         request->open.path + request->open.name_offset,
         request->open.pathlen - request->open.name_offset,
@@ -133,7 +133,7 @@ chimera_vfs_open_parent_lookup_complete(
 
     chimera_vfs_open_fh(
         thread,
-        request->cred,
+        request->cred, NULL,
         request->open.parent_fh,
         request->open.parent_fh_len,
         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
@@ -199,7 +199,7 @@ chimera_vfs_open_lookup_complete(
 
     chimera_vfs_open_fh(
         thread,
-        request->cred,
+        request->cred, NULL,
         request->open.parent_fh,
         request->open.parent_fh_len,
         request->open.flags,
@@ -243,7 +243,7 @@ chimera_vfs_open(
 
         chimera_vfs_open_fh(
             thread,
-            cred,
+            cred, NULL,
             fh,
             fhlen,
             flags,
@@ -287,7 +287,7 @@ chimera_vfs_open(
 
         chimera_vfs_open_fh(
             thread,
-            cred,
+            cred, NULL,
             request->open.parent_fh,
             request->open.parent_fh_len,
             CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
@@ -307,7 +307,7 @@ chimera_vfs_open(
 
         chimera_vfs_lookup(
             thread,
-            cred,
+            cred, NULL,
             fh,
             fhlen,
             request->open.path,
@@ -326,7 +326,7 @@ chimera_vfs_open(
 
         chimera_vfs_lookup(
             thread,
-            cred,
+            cred, NULL,
             fh,
             fhlen,
             request->open.path,

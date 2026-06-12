@@ -66,6 +66,7 @@ SYMBOL_EXPORT void
 chimera_vfs_open_fh_hs(
     struct chimera_vfs_thread       *thread,
     const struct chimera_vfs_cred   *cred,
+    struct chimera_vfs_transaction  *txn,
     const void                      *fh,
     int                              fhlen,
     unsigned int                     flags,
@@ -110,6 +111,8 @@ chimera_vfs_open_fh_hs(
             return;
         }
 
+        request->transaction = txn;
+
         request->opcode               = CHIMERA_VFS_OP_OPEN_FH;
         request->complete             = chimera_vfs_open_fh_complete;
         request->open_fh.flags        = flags;
@@ -152,13 +155,14 @@ chimera_vfs_open_fh_hs(
 
 SYMBOL_EXPORT void
 chimera_vfs_open_fh(
-    struct chimera_vfs_thread     *thread,
-    const struct chimera_vfs_cred *cred,
-    const void                    *fh,
-    int                            fhlen,
-    unsigned int                   flags,
-    chimera_vfs_open_fh_callback_t callback,
-    void                          *private_data)
+    struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_transaction *txn,
+    const void                     *fh,
+    int                             fhlen,
+    unsigned int                    flags,
+    chimera_vfs_open_fh_callback_t  callback,
+    void                           *private_data)
 {
-    chimera_vfs_open_fh_hs(thread, cred, fh, fhlen, flags, NULL, callback, private_data);
+    chimera_vfs_open_fh_hs(thread, cred, txn, fh, fhlen, flags, NULL, callback, private_data);
 } /* chimera_vfs_open_fh */

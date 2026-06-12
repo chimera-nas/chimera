@@ -4,6 +4,7 @@
 
 #define _GNU_SOURCE
 #include <stdint.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -55,10 +56,12 @@
 #define DISKFS_ORPHAN_INUM        3
 #define DISKFS_ORPHAN_GEN         1   /* permanent: created at format, never deleted */
 
-/* Max inodes a single transaction can hold locked at once.  rename needs
- * 4 (two parents, child, replaced target); others (e.g. readdir) touch
- * many but only 2 at a time and release as they go. */
-#define DISKFS_TXN_MAX_INODES     4
+/* Inodes a transaction holds locked inline before spilling to a heap list.
+ * Sized for the largest single op (rename: two parents, child, replaced
+ * target = 4), which stays allocation-free.  An explicit multi-op transaction
+ * may lock arbitrarily many inodes; beyond this it spills to malloc'd slots
+ * (struct diskfs_txn_spill) so there is no hard cap. */
+#define DISKFS_TXN_INLINE_INODES  4
 
 /* Diskfs RMW writes assemble:
  *   prefix (valid + zero) + request write iovecs +
@@ -150,6 +153,9 @@ struct diskfs_request_private {
     int                         rd_looping;
     int                         rd_advance;
     int                         rd_done;
+    /* Non-OK if the walk failed (e.g. ETXN_CONFLICT on a child lock); the loop
+     * fails the op on unwind instead of completing it inline. */
+    enum chimera_vfs_error      rd_fail_status;
 
     /* Scratch buffer for handlers that parse a looked-up b+tree record
      * (e.g. a dirent's inum/gen) in their async continuation.  Sized to hold
@@ -475,6 +481,21 @@ struct diskfs_inode_waiter {
     struct diskfs_inode_waiter *next;
 };
 
+/*
+ * WFG (wait-for-graph) deadlock detection: one record per (txn, inode) lock
+ * currently granted, threaded on the inode's holder list.  Pooled per-shard and
+ * created/destroyed under the owning shard lock at grant/release, so a holder's
+ * `txn` is always alive while the list is walked under that shard lock (a txn is
+ * not freed until diskfs_txn_unlock_all removes all of its holder records).  The
+ * detector reads `txn->core.ts` (id + victim priority) and the txn's wait
+ * descriptor (below) to chase wait edges.
+ */
+struct diskfs_inode_holder {
+    struct diskfs_txn          *txn;
+    enum diskfs_inode_lock_mode mode;
+    struct diskfs_inode_holder *next;
+};
+
 struct diskfs_inode {
     uint64_t                    inum;
     uint32_t                    gen;
@@ -502,6 +523,10 @@ struct diskfs_inode {
     struct rb_node              node;
     int                         readers;     /* shared-lock holders */
     int                         writer;      /* 0/1 exclusive holder */
+    /* WFG: identities of the txns currently holding this inode (one record per
+    * grant, list length == readers + writer).  Maintained under the shard lock
+    * at grant/release; walked by the deadlock detector to chase wait edges. */
+    struct diskfs_inode_holder *holders;
     struct diskfs_inode_waiter *wait_head;
     struct diskfs_inode_waiter *wait_tail;
 
@@ -539,11 +564,15 @@ struct diskfs_inode {
 };
 
 struct diskfs_inode_shard {
-    pthread_mutex_t      lock;
-    struct rb_tree       inodes;       /* keyed by inum */
-    struct diskfs_inode *lru_head, *lru_tail; /* idle (recycle) candidates, LRU-first */
-    uint32_t             ninodes;      /* resident inodes in this shard */
-    struct diskfs_inode *mdirty_head, *mdirty_tail; /* deferred-mtime queue (FIFO) */
+    pthread_mutex_t             lock;
+    struct rb_tree              inodes; /* keyed by inum */
+    struct diskfs_inode        *lru_head, *lru_tail; /* idle (recycle) candidates, LRU-first */
+    uint32_t                    ninodes; /* resident inodes in this shard */
+    struct diskfs_inode        *mdirty_head, *mdirty_tail; /* deferred-mtime queue (FIFO) */
+    /* WFG holder-record pool, recycled under `lock` (alloc at grant, free at
+     * release -- both already hold this shard lock, so no extra serialization
+     * and no steady-state malloc). */
+    struct diskfs_inode_holder *holder_free_list;
 };
 
 struct diskfs_inode_cache {
@@ -828,6 +857,16 @@ struct diskfs_txn_slot {
     enum diskfs_inode_lock_mode mode;
 };
 
+/* Overflow slot for a transaction that locks more than DISKFS_TXN_INLINE_INODES
+ * inodes (only an explicit multi-op transaction reaches this).  Heap-allocated
+ * and freed when the lock is released; libc malloc/free is thread-safe, so the
+ * intent-log thread may free these during a write-txn commit. */
+struct diskfs_txn_spill {
+    struct diskfs_inode     *inode;
+    enum diskfs_inode_lock_mode mode;
+    struct diskfs_txn_spill *next;
+};
+
 /* Commit completion callback.  Will be invoked exactly once per successful
  * commit, with status 0 on success or a CHIMERA_VFS_* code on failure.
  * Today commits never fail, but the signature is async-shaped so a future
@@ -851,20 +890,43 @@ struct diskfs_txn_free {
 };
 
 struct diskfs_txn {
-    enum diskfs_txn_type     type;
-    struct diskfs_thread    *thread;
-    struct diskfs_txn       *next;         /* per-thread free list link */
-    struct diskfs_txn_slot   inodes[DISKFS_TXN_MAX_INODES];
-    int                      num_inodes;
-    struct diskfs_txn_block *blocks;       /* dirty blocks pinned by this txn */
-    struct diskfs_txn_free  *pending_frees; /* ranges freed, applied on commit */
+    /* MUST be first: an explicit transaction handle is &txn->core, and an
+     * enlisted op recovers the diskfs_txn by casting request->transaction back. */
+    struct chimera_vfs_transaction core;
+    enum diskfs_txn_type           type;
+    /* 1 = autocommit txn (diskfs-pooled, never a WFG victim); 0 = explicit
+     * CAP_TRANSACTIONAL txn (core-owned memory, freed by the VFS core at end).
+     * The authoritative autocommit marker -- core.ts is purely the wait-die
+     * priority (explicit txns carry ts>0, autocommit ts==0). */
+    uint8_t                        autocommit;
+    struct diskfs_thread          *thread;
+    struct diskfs_txn             *next;   /* per-thread free list link */
+    struct diskfs_txn_slot         inodes[DISKFS_TXN_INLINE_INODES];
+    int                            num_inodes;   /* count in the inline array (0..INLINE) */
+    struct diskfs_txn_spill       *spill;        /* overflow list, NULL on the common path */
+    struct diskfs_txn_block       *blocks; /* dirty blocks pinned by this txn */
+    struct diskfs_txn_free        *pending_frees; /* ranges freed, applied on commit */
+
+    /* WFG wait descriptor: the inode (if any) this txn is currently parked on,
+     * published as a seqlock so a deadlock detector on another thread can read it
+     * without taking this txn's parking-shard lock.  Writes happen on causally
+     * ordered paths (park under the parking shard lock; grant_pending under the
+     * same shard lock at release; clear on this worker at grant finalize), so
+     * there is only ever one writer; the seqlock just gives readers a torn-read
+     * free snapshot.  grant_pending==1 marks "granted but not yet finalized" so
+     * the detector prunes the (now dead) wait edge. */
+    _Atomic uint32_t               wfg_seq;       /* even = stable, odd = mid-write */
+    uint64_t                       wfg_wait_inum; /* 0 = not waiting */
+    uint32_t                       wfg_wait_gen;
+    uint8_t                        wfg_wait_mode;
+    uint8_t                        wfg_grant_pending;
 
     /* When the IL submission queue is full, the commit parks on its worker's
      * commit-wait FIFO (carrying its completion cb) instead of spinning the
      * event loop; the CQ doorbell resumes it once SQ space frees. */
-    diskfs_txn_commit_cb_t   commit_cb;
-    void                    *commit_private;
-    struct diskfs_txn       *commit_wait_next;
+    diskfs_txn_commit_cb_t         commit_cb;
+    void                          *commit_private;
+    struct diskfs_txn             *commit_wait_next;
 };
 
 /*
@@ -1819,18 +1881,27 @@ diskfs_block_waiter_free(
     thread->block_waiter_free_list = w;
 } /* diskfs_block_waiter_free */
 
-/* Record a held inode in the transaction's fixed slot array. */
+/* Record a held inode in the transaction.  Uses the inline array until it is
+ * full, then spills to a heap-allocated slot (no hard cap on inodes per txn). */
 static inline void
 diskfs_txn_add_slot(
     struct diskfs_txn          *txn,
     struct diskfs_inode        *inode,
     enum diskfs_inode_lock_mode mode)
 {
-    chimera_diskfs_abort_if(txn->num_inodes >= DISKFS_TXN_MAX_INODES,
-                            "diskfs txn inode slots exhausted");
-    txn->inodes[txn->num_inodes].inode = inode;
-    txn->inodes[txn->num_inodes].mode  = mode;
-    txn->num_inodes++;
+    if (likely(txn->num_inodes < DISKFS_TXN_INLINE_INODES)) {
+        txn->inodes[txn->num_inodes].inode = inode;
+        txn->inodes[txn->num_inodes].mode  = mode;
+        txn->num_inodes++;
+        return;
+    }
+
+    struct diskfs_txn_spill *s = malloc(sizeof(*s));
+
+    s->inode   = inode;
+    s->mode    = mode;
+    s->next    = txn->spill;
+    txn->spill = s;
 } /* diskfs_txn_add_slot */
 
 /* Inode LRU (recycle candidates).  All require the owning shard lock. */
@@ -1957,12 +2028,154 @@ diskfs_inode_lock_compatible(
     return inode->writer == 0;
 } /* diskfs_inode_lock_compatible */
 
-/* Caller must hold the inode's shard lock. */
+/* Two lock modes conflict unless both are READ. */
+static inline int
+diskfs_lock_modes_conflict(
+    enum diskfs_inode_lock_mode a,
+    enum diskfs_inode_lock_mode b)
+{
+    return a == DISKFS_INODE_LOCK_WRITE || b == DISKFS_INODE_LOCK_WRITE;
+} /* diskfs_lock_modes_conflict */
+
+/* --- WFG wait-descriptor seqlock (see struct diskfs_txn) -------------------- */
+
+/* Publish/clear this txn's wait edge.  Single-writer by construction (park and
+ * grant_pending are under the parking inode's shard lock; the finalize clear is
+ * on this txn's own worker, ordered after the grant); the seqlock only protects
+ * cross-thread readers from torn reads. */
 static inline void
-diskfs_inode_lock_grant(
+diskfs_wfg_set_wait(
+    struct diskfs_txn          *txn,
+    uint64_t                    inum,
+    uint32_t                    gen,
+    enum diskfs_inode_lock_mode mode,
+    int                         grant_pending)
+{
+    uint32_t s = atomic_load_explicit(&txn->wfg_seq, memory_order_relaxed);
+
+    atomic_store_explicit(&txn->wfg_seq, s + 1, memory_order_relaxed); /* odd */
+    atomic_thread_fence(memory_order_release);
+    txn->wfg_wait_inum     = inum;
+    txn->wfg_wait_gen      = gen;
+    txn->wfg_wait_mode     = (uint8_t) mode;
+    txn->wfg_grant_pending = (uint8_t) grant_pending;
+    atomic_store_explicit(&txn->wfg_seq, s + 2, memory_order_release); /* even */
+} /* diskfs_wfg_set_wait */
+
+static inline void
+diskfs_wfg_clear_wait(struct diskfs_txn *txn)
+{
+    diskfs_wfg_set_wait(txn, 0, 0, DISKFS_INODE_LOCK_READ, 0);
+} /* diskfs_wfg_clear_wait */
+
+/* Lock-free read of a holder txn's wait descriptor.  Returns 1 and fills the
+ * out params if the txn is parked on an inode with no pending grant (a live wait
+ * edge); returns 0 if it is not waiting or is being granted (a leaf). */
+static inline int
+diskfs_wfg_read_wait(
+    struct diskfs_txn           *txn,
+    uint64_t                    *r_inum,
+    uint32_t                    *r_gen,
+    enum diskfs_inode_lock_mode *r_mode)
+{
+    for ( ;;) {
+        uint32_t s1 = atomic_load_explicit(&txn->wfg_seq, memory_order_acquire);
+
+        if (s1 & 1) {
+            continue;                           /* writer mid-update */
+        }
+
+        uint64_t inum = txn->wfg_wait_inum;
+        uint32_t gen  = txn->wfg_wait_gen;
+        uint8_t  mode = txn->wfg_wait_mode;
+        uint8_t  gp   = txn->wfg_grant_pending;
+
+        atomic_thread_fence(memory_order_acquire);
+        if (atomic_load_explicit(&txn->wfg_seq, memory_order_relaxed) != s1) {
+            continue;                           /* torn; retry */
+        }
+
+        if (inum == 0 || gp) {
+            return 0;                           /* leaf: not waiting / being granted */
+        }
+        *r_inum = inum;
+        *r_gen  = gen;
+        *r_mode = (enum diskfs_inode_lock_mode) mode;
+        return 1;
+    }
+} /* diskfs_wfg_read_wait */
+
+/* --- WFG per-inode holder list (pooled per shard, under the shard lock) ----- */
+
+static inline struct diskfs_inode_holder *
+diskfs_holder_alloc(struct diskfs_inode_shard *shard)
+{
+    struct diskfs_inode_holder *h = shard->holder_free_list;
+
+    if (h) {
+        shard->holder_free_list = h->next;
+    } else {
+        h = malloc(sizeof(*h));
+    }
+    return h;
+} /* diskfs_holder_alloc */
+
+static inline void
+diskfs_holder_free(
+    struct diskfs_inode_shard  *shard,
+    struct diskfs_inode_holder *h)
+{
+    h->next                 = shard->holder_free_list;
+    shard->holder_free_list = h;
+} /* diskfs_holder_free */
+
+/* Caller holds the inode's shard lock.  Records `txn` as a holder of `inode`. */
+static inline void
+diskfs_inode_holder_add(
+    struct diskfs_inode_shard  *shard,
     struct diskfs_inode        *inode,
+    struct diskfs_txn          *txn,
     enum diskfs_inode_lock_mode mode)
 {
+    struct diskfs_inode_holder *h = diskfs_holder_alloc(shard);
+
+    h->txn         = txn;
+    h->mode        = mode;
+    h->next        = inode->holders;
+    inode->holders = h;
+} /* diskfs_inode_holder_add */
+
+/* Caller holds the inode's shard lock.  Removes one holder record for `txn`. */
+static inline void
+diskfs_inode_holder_remove(
+    struct diskfs_inode_shard *shard,
+    struct diskfs_inode       *inode,
+    struct diskfs_txn         *txn)
+{
+    struct diskfs_inode_holder **pp = &inode->holders;
+
+    while (*pp) {
+        if ((*pp)->txn == txn) {
+            struct diskfs_inode_holder *h = *pp;
+            *pp = h->next;
+            diskfs_holder_free(shard, h);
+            return;
+        }
+        pp = &(*pp)->next;
+    }
+} /* diskfs_inode_holder_remove */
+
+/* Caller must hold the inode's shard lock.  Grants the lock and records the
+ * holder identity for WFG detection. */
+static inline void
+diskfs_inode_lock_grant(
+    struct diskfs_inode_shard  *shard,
+    struct diskfs_inode        *inode,
+    enum diskfs_inode_lock_mode mode,
+    struct diskfs_txn          *txn)
+{
+    diskfs_inode_holder_add(shard, inode, txn, mode);
+
     if (mode == DISKFS_INODE_LOCK_WRITE) {
         inode->writer = 1;
     } else {
@@ -2000,6 +2213,7 @@ diskfs_dispatch_grant(struct diskfs_inode_waiter *w)
 static void
 diskfs_inode_release_one(
     struct diskfs_thread       *thread,
+    struct diskfs_txn          *txn,
     struct diskfs_inode        *inode,
     enum diskfs_inode_lock_mode mode)
 {
@@ -2014,6 +2228,7 @@ diskfs_inode_release_one(
     } else {
         inode->readers--;
     }
+    diskfs_inode_holder_remove(shard, inode, txn);
 
     while (inode->wait_head) {
         w = inode->wait_head;
@@ -2039,7 +2254,12 @@ diskfs_inode_release_one(
         if (!inode->wait_head) {
             inode->wait_tail = NULL;
         }
-        diskfs_inode_lock_grant(inode, w->mode);
+        /* Grant under the shard lock: the waiter becomes a holder *now* (so the
+         * WFG detector sees it as a holder, never "neither parked nor holding"),
+         * and we publish grant_pending so the detector prunes its now-dead wait
+         * edge until its own worker finalizes (clears the descriptor). */
+        diskfs_inode_lock_grant(shard, inode, w->mode, w->txn);
+        diskfs_wfg_set_wait(w->txn, inode->inum, w->gen, w->mode, 1);
         w->status = CHIMERA_VFS_OK;
         w->next   = granted;
         granted   = w;
@@ -2075,7 +2295,8 @@ diskfs_txn_unlock_inode(
     struct diskfs_txn   *txn,
     struct diskfs_inode *inode)
 {
-    int i;
+    struct diskfs_txn_spill **pp;
+    int                       i;
 
     for (i = 0; i < txn->num_inodes; i++) {
         if (txn->inodes[i].inode == inode) {
@@ -2083,7 +2304,19 @@ diskfs_txn_unlock_inode(
 
             txn->inodes[i] = txn->inodes[txn->num_inodes - 1];
             txn->num_inodes--;
-            diskfs_inode_release_one(txn->thread, inode, mode);
+            diskfs_inode_release_one(txn->thread, txn, inode, mode);
+            return;
+        }
+    }
+
+    for (pp = &txn->spill; *pp; pp = &(*pp)->next) {
+        if ((*pp)->inode == inode) {
+            struct diskfs_txn_spill    *s    = *pp;
+            enum diskfs_inode_lock_mode mode = s->mode;
+
+            *pp = s->next;
+            free(s);
+            diskfs_inode_release_one(txn->thread, txn, inode, mode);
             return;
         }
     }
@@ -2097,13 +2330,21 @@ diskfs_txn_unlock_inode(
 static inline void
 diskfs_txn_unlock_all(struct diskfs_txn *txn)
 {
-    int i;
+    struct diskfs_txn_spill *s;
+    int                      i;
 
     for (i = 0; i < txn->num_inodes; i++) {
-        diskfs_inode_release_one(txn->thread, txn->inodes[i].inode,
+        diskfs_inode_release_one(txn->thread, txn, txn->inodes[i].inode,
                                  txn->inodes[i].mode);
     }
     txn->num_inodes = 0;
+
+    while (txn->spill) {
+        s          = txn->spill;
+        txn->spill = s->next;
+        diskfs_inode_release_one(txn->thread, txn, s->inode, s->mode);
+        free(s);
+    }
 } /* diskfs_txn_unlock_all */
 
 /*
@@ -2139,6 +2380,385 @@ static void diskfs_pin_cont_resume(
     struct diskfs_thread *thread,
     void                 *arg);
 
+/* ===========================================================================
+ * WFG (wait-for-graph) deadlock detection.
+ *
+ * When an acquire finds an inode lock incompatible, instead of wait-die (which
+ * false-aborts on mere contention), we walk the wait-for graph to see whether
+ * parking would close a genuine cycle.  Only a real cycle aborts, and the victim
+ * is the highest-ts (youngest) *explicit* transaction in the cycle (autocommit
+ * ops -- ts==0 -- are never aborted; they cannot retry, and every cycle is
+ * guaranteed to contain an explicit txn since only explicit txns acquire out of
+ * canonical order).  The graph is sharded: the walk takes one inode-shard lock
+ * at a time (never nested), reads each holder's wait edge via its seqlock-
+ * published descriptor, and recurses by inum only -- no global lock.
+ * =========================================================================== */
+
+/* Real wait chains are a handful of txns deep; these are generous safety caps.
+ * Exceeding either is treated as a (conservative) cycle that aborts the
+ * requester -- safe and retriable, never a missed deadlock. */
+#define DISKFS_WFG_MAX_VISITED 256
+#define DISKFS_WFG_MAX_DEPTH   64
+
+struct diskfs_wfg_visited {
+    uint64_t inum;
+    enum diskfs_inode_lock_mode mode;
+};
+
+struct diskfs_wfg_ctx {
+    struct diskfs_thread     *thread;
+    struct diskfs_txn        *requester;     /* R: the txn trying to acquire */
+    int                       nvisited;
+    int                       overflow;      /* exceeded a bound -> abort R */
+    /* victim = highest-ts explicit member found across all closing paths */
+    uint64_t                  vic_ts;
+    uint64_t                  vic_inum;       /* inode the victim is parked on */
+    /* running max-ts explicit member on the current recursion path */
+    uint64_t                  path_ts;
+    uint64_t                  path_inum;
+    struct diskfs_wfg_visited visited[DISKFS_WFG_MAX_VISITED];
+};
+
+/* Does `txn` hold `inum` in a mode conflicting with `mode`?  Reads the txn's own
+ * slot set; only ever called on the requester from its own worker thread. */
+static int
+diskfs_txn_holds_conflicting(
+    struct diskfs_txn          *txn,
+    uint64_t                    inum,
+    enum diskfs_inode_lock_mode mode)
+{
+    struct diskfs_txn_spill *s;
+    int                      i;
+
+    for (i = 0; i < txn->num_inodes; i++) {
+        if (txn->inodes[i].inode->inum == inum) {
+            return diskfs_lock_modes_conflict(txn->inodes[i].mode, mode);
+        }
+    }
+    for (s = txn->spill; s; s = s->next) {
+        if (s->inode->inum == inum) {
+            return diskfs_lock_modes_conflict(s->mode, mode);
+        }
+    }
+    return 0;
+} /* diskfs_txn_holds_conflicting */
+
+static int
+diskfs_wfg_seen(
+    struct diskfs_wfg_ctx      *ctx,
+    uint64_t                    inum,
+    enum diskfs_inode_lock_mode mode)
+{
+    int i;
+
+    for (i = 0; i < ctx->nvisited; i++) {
+        if (ctx->visited[i].inum == inum && ctx->visited[i].mode == mode) {
+            return 1;
+        }
+    }
+    if (ctx->nvisited < DISKFS_WFG_MAX_VISITED) {
+        ctx->visited[ctx->nvisited].inum = inum;
+        ctx->visited[ctx->nvisited].mode = mode;
+        ctx->nvisited++;
+    } else {
+        ctx->overflow = 1;
+    }
+    return 0;
+} /* diskfs_wfg_seen */
+
+/* One wait edge snapshotted under a shard lock: a conflicting holder H of the
+ * inode being expanded, plus where H is itself parked. */
+struct diskfs_wfg_edge {
+    uint64_t ts;                           /* H's core.ts (0 = autocommit) */
+    uint64_t w_inum;                       /* inode H is parked on */
+    uint32_t w_gen;
+    enum diskfs_inode_lock_mode w_mode;    /* mode H wants there */
+};
+
+/* Consider a member {ts, parked_inum} (a txn on the closing cycle) for victim. */
+static inline void
+diskfs_wfg_consider_victim(
+    struct diskfs_wfg_ctx *ctx,
+    uint64_t               ts,
+    uint64_t               parked_inum)
+{
+    if (ts > ctx->vic_ts) {       /* explicit (ts>0) and higher than current */
+        ctx->vic_ts   = ts;
+        ctx->vic_inum = parked_inum;
+    }
+} /* diskfs_wfg_consider_victim */
+
+/* Expand inode (inum,gen) wanted in `mode`: returns 1 if a cycle that closes on
+ * the requester R is reachable.  Holds no shard lock across recursion. */
+static int
+diskfs_wfg_dfs(
+    struct diskfs_wfg_ctx      *ctx,
+    uint64_t                    inum,
+    uint32_t                    gen,
+    enum diskfs_inode_lock_mode mode,
+    int                         depth)
+{
+    struct diskfs_thread       *thread = ctx->thread;
+    struct diskfs_inode_shard  *shard;
+    struct diskfs_inode        *inode;
+    struct diskfs_inode_holder *h;
+    struct diskfs_wfg_edge     *edges;
+    int                         nedges = 0, cap, found = 0, i;
+
+    if (depth > DISKFS_WFG_MAX_DEPTH) {
+        ctx->overflow = 1;
+        return 1;                 /* conservative: treat as a cycle, abort R */
+    }
+    if (diskfs_wfg_seen(ctx, inum, mode)) {
+        return 0;
+    }
+    if (ctx->overflow) {
+        return 1;
+    }
+
+    shard = diskfs_inode_shard(thread->shared, inum);
+    pthread_mutex_lock(&shard->lock);
+    rb_tree_query_exact(&shard->inodes, inum, inum, inode);
+    if (!inode || inode->gen != gen) {
+        pthread_mutex_unlock(&shard->lock);
+        return 0;                 /* recycled / stale -> dead edge */
+    }
+
+    cap   = inode->readers + (inode->writer ? 1 : 0) + 1;
+    edges = malloc(cap * sizeof(*edges));
+
+    for (h = inode->holders; h; h = h->next) {
+        struct diskfs_wfg_edge     *e;
+        uint64_t                    w_inum;
+        uint32_t                    w_gen;
+        enum diskfs_inode_lock_mode w_mode;
+
+        if (!diskfs_lock_modes_conflict(h->mode, mode)) {
+            continue;
+        }
+        if (h->txn == ctx->requester) {
+            continue;             /* the requester itself (deeper levels) */
+        }
+        if (!diskfs_wfg_read_wait(h->txn, &w_inum, &w_gen, &w_mode)) {
+            continue;             /* H not waiting / being granted -> leaf */
+        }
+        if (nedges < cap) {
+            e         = &edges[nedges++];
+            e->ts     = h->txn->core.ts;
+            e->w_inum = w_inum;
+            e->w_gen  = w_gen;
+            e->w_mode = w_mode;
+        }
+    }
+    pthread_mutex_unlock(&shard->lock);
+
+    for (i = 0; i < nedges; i++) {
+        struct diskfs_wfg_edge *e = &edges[i];
+
+        if (diskfs_txn_holds_conflicting(ctx->requester, e->w_inum, e->w_mode)) {
+            /* H waits on an inode R holds -> cycle closes.  Members are R, the
+             * ancestors on the current path, and H itself. */
+            found = 1;
+            diskfs_wfg_consider_victim(ctx, ctx->path_ts, ctx->path_inum);
+            diskfs_wfg_consider_victim(ctx, e->ts, e->w_inum);
+            diskfs_wfg_consider_victim(ctx, ctx->requester->core.ts, 0);
+            continue;
+        }
+
+        /* Recurse, tracking H on the path for victim selection. */
+        uint64_t saved_ts   = ctx->path_ts;
+        uint64_t saved_inum = ctx->path_inum;
+        if (e->ts > ctx->path_ts) {
+            ctx->path_ts   = e->ts;
+            ctx->path_inum = e->w_inum;
+        }
+        if (diskfs_wfg_dfs(ctx, e->w_inum, e->w_gen, e->w_mode, depth + 1)) {
+            found = 1;
+        }
+        ctx->path_ts   = saved_ts;
+        ctx->path_inum = saved_inum;
+    }
+
+    free(edges);
+    return found;
+} /* diskfs_wfg_dfs */
+
+/* Detect whether requester R parking on (inum,gen) in `mode` would close a
+ * cycle.  Returns 1 and fills *vic_ts / *vic_inum (the victim's ts and the inode
+ * it is parked on; *vic_inum==0 means the victim is R itself). */
+static int
+diskfs_wfg_detect(
+    struct diskfs_thread       *thread,
+    struct diskfs_txn          *txn,
+    uint64_t                    inum,
+    uint32_t                    gen,
+    enum diskfs_inode_lock_mode mode,
+    uint64_t                   *vic_ts,
+    uint64_t                   *vic_inum)
+{
+    struct diskfs_wfg_ctx ctx;
+    int                   cycle;
+
+    ctx.thread    = thread;
+    ctx.requester = txn;
+    ctx.nvisited  = 0;
+    ctx.overflow  = 0;
+    ctx.vic_ts    = 0;
+    ctx.vic_inum  = 0;
+    ctx.path_ts   = 0;
+    ctx.path_inum = 0;
+
+    cycle = diskfs_wfg_dfs(&ctx, inum, gen, mode, 0);
+
+    if (cycle) {
+        if (ctx.overflow || ctx.vic_ts == 0) {
+            /* No explicit victim identified (shouldn't happen for a real cycle)
+             * or a bound was exceeded -> abort the requester, which is safe and
+             * retriable when R is explicit. */
+            *vic_ts   = txn->core.ts;
+            *vic_inum = 0;
+        } else if (ctx.vic_ts == txn->core.ts) {
+            *vic_ts   = txn->core.ts;
+            *vic_inum = 0;        /* victim is R */
+        } else {
+            *vic_ts   = ctx.vic_ts;
+            *vic_inum = ctx.vic_inum;
+        }
+    }
+
+    return cycle;
+} /* diskfs_wfg_detect */
+
+/* Abort a parked victim transaction: remove its waiter from the inode it is
+ * parked on, clear its wait edge, and dispatch its continuation with
+ * ETXN_CONFLICT.  Idempotent (a no-op if the waiter is already gone). */
+static void
+diskfs_wfg_abort_victim(
+    struct diskfs_thread *thread,
+    uint64_t              vic_ts,
+    uint64_t              vic_inum)
+{
+    struct diskfs_inode_shard  *shard = diskfs_inode_shard(thread->shared, vic_inum);
+    struct diskfs_inode        *inode;
+    struct diskfs_inode_waiter *w, *prev = NULL, *victim = NULL;
+
+    pthread_mutex_lock(&shard->lock);
+    rb_tree_query_exact(&shard->inodes, vic_inum, inum, inode);
+    if (inode) {
+        for (w = inode->wait_head; w; prev = w, w = w->next) {
+            if (w->txn->core.ts == vic_ts) {
+                if (prev) {
+                    prev->next = w->next;
+                } else {
+                    inode->wait_head = w->next;
+                }
+                if (inode->wait_tail == w) {
+                    inode->wait_tail = prev;
+                }
+                victim = w;
+                break;
+            }
+        }
+        if (victim) {
+            diskfs_wfg_clear_wait(victim->txn);   /* edge dead before we release */
+        }
+    }
+    pthread_mutex_unlock(&shard->lock);
+
+    if (victim) {
+        victim->status = CHIMERA_VFS_ETXN_CONFLICT;
+        diskfs_dispatch_grant(victim);
+    }
+} /* diskfs_wfg_abort_victim */
+
+/*
+ * Contended acquire: the inode lock was incompatible.  Run deadlock detection;
+ * on a cycle abort the victim (the requester inline, or a parked txn remotely)
+ * and retry; otherwise park a waiter.  Runs on the requester's own worker.
+ */
+static void
+diskfs_inode_acquire_contended(
+    struct diskfs_thread       *thread,
+    struct diskfs_txn          *txn,
+    uint64_t                    inum,
+    uint32_t                    gen,
+    enum diskfs_inode_lock_mode mode,
+    diskfs_inode_cb_t           cb,
+    void                       *private_data)
+{
+    struct diskfs_inode_shard  *shard = diskfs_inode_shard(thread->shared, inum);
+    struct diskfs_inode        *inode;
+    struct diskfs_inode_waiter *w;
+
+    for ( ;;) {
+        uint64_t vic_ts = 0, vic_inum = 0;
+        int      cycle = diskfs_wfg_detect(thread, txn, inum, gen, mode,
+                                           &vic_ts, &vic_inum);
+
+        if (cycle) {
+            if (vic_inum == 0) {
+                /* Victim is the requester. */
+                cb(NULL, CHIMERA_VFS_ETXN_CONFLICT, private_data);
+                return;
+            }
+            /* Abort a parked victim; its wait edge is cleared synchronously, so
+             * the retry below sees no cycle and parks (the victim's locks free
+             * asynchronously as its op unwinds, then grant us). */
+            diskfs_wfg_abort_victim(thread, vic_ts, vic_inum);
+        }
+
+        pthread_mutex_lock(&shard->lock);
+        rb_tree_query_exact(&shard->inodes, inum, inum, inode);
+        if (!inode || inode->gen != gen) {
+            pthread_mutex_unlock(&shard->lock);
+            cb(NULL, CHIMERA_VFS_ENOENT, private_data);
+            return;
+        }
+
+        if (diskfs_inode_lock_compatible(inode, mode)) {
+            diskfs_inode_lock_grant(shard, inode, mode, txn);
+            diskfs_inode_lru_unlink(shard, inode);
+            pthread_mutex_unlock(&shard->lock);
+            diskfs_txn_add_slot(txn, inode, mode);
+            if (mode == DISKFS_INODE_LOCK_WRITE) {
+                diskfs_inode_finish_write_pin(thread, txn, inode, cb, private_data);
+            } else {
+                cb(inode, CHIMERA_VFS_OK, private_data);
+            }
+            return;
+        }
+
+        if (cycle) {
+            /* We aborted a victim but the lock is still held (async unwind):
+             * re-detect (the victim's edge is gone, so this converges to park). */
+            pthread_mutex_unlock(&shard->lock);
+            continue;
+        }
+
+        /* No cycle: park a waiter and publish our wait edge. */
+        w               = diskfs_waiter_alloc(thread);
+        w->txn          = txn;
+        w->mode         = mode;
+        w->gen          = gen;
+        w->cb           = cb;
+        w->private_data = private_data;
+        w->inode        = inode;
+        w->status       = CHIMERA_VFS_OK;
+        w->next         = NULL;
+
+        if (inode->wait_tail) {
+            inode->wait_tail->next = w;
+        } else {
+            inode->wait_head = w;
+        }
+        inode->wait_tail = w;
+
+        diskfs_wfg_set_wait(txn, inum, gen, mode, 0);
+        pthread_mutex_unlock(&shard->lock);
+        return;
+    }
+} /* diskfs_inode_acquire_contended */
+
 /*
  * Grant (or enqueue a waiter for) `inode` with the shard lock already held, and
  * release the lock before returning.  Shared by diskfs_inode_acquire (after the
@@ -2158,11 +2778,9 @@ diskfs_inode_grant_locked(
     diskfs_inode_cb_t           cb,
     void                       *private_data)
 {
-    struct diskfs_inode_waiter *w;
-
     if (diskfs_inode_lock_compatible(inode, mode)) {
         diskfs_metric_inode_cache(thread, DISKFS_METRIC_INODE_CACHE_HIT);
-        diskfs_inode_lock_grant(inode, mode);
+        diskfs_inode_lock_grant(shard, inode, mode, txn);
         diskfs_inode_lru_unlink(shard, inode);     /* busy now, not a candidate */
         pthread_mutex_unlock(&shard->lock);
         diskfs_txn_add_slot(txn, inode, mode);
@@ -2176,25 +2794,13 @@ diskfs_inode_grant_locked(
         return;
     }
 
-    w = diskfs_waiter_alloc(thread);
+    /* Incompatible.  Drop the shard lock and resolve via the WFG contended path
+     * (deadlock detection, then either abort a victim, park, or — if the abort
+     * frees the lock — retry). */
     diskfs_metric_inode_cache(thread, DISKFS_METRIC_INODE_CACHE_WAIT);
-    w->txn          = txn;
-    w->mode         = mode;
-    w->gen          = gen;
-    w->cb           = cb;
-    w->private_data = private_data;
-    w->inode        = inode;
-    w->status       = CHIMERA_VFS_OK;
-    w->next         = NULL;
-
-    if (inode->wait_tail) {
-        inode->wait_tail->next = w;
-    } else {
-        inode->wait_head = w;
-    }
-    inode->wait_tail = w;
-
     pthread_mutex_unlock(&shard->lock);
+    diskfs_inode_acquire_contended(thread, txn, inode->inum, gen, mode, cb,
+                                   private_data);
 } /* diskfs_inode_grant_locked */
 
 static void
@@ -2209,6 +2815,7 @@ diskfs_inode_acquire(
 {
     struct diskfs_inode_shard *shard;
     struct diskfs_inode       *inode;
+    struct diskfs_txn_spill   *s;
     int                        i;
 
     for (i = 0; i < txn->num_inodes; i++) {
@@ -2218,6 +2825,17 @@ diskfs_inode_acquire(
                 cb(NULL, CHIMERA_VFS_ENOENT, private_data);
             } else {
                 cb(inode, CHIMERA_VFS_OK, private_data);
+            }
+            return;
+        }
+    }
+
+    for (s = txn->spill; s; s = s->next) {
+        if (s->inode->inum == inum) {
+            if (unlikely(s->inode->gen != gen)) {
+                cb(NULL, CHIMERA_VFS_ENOENT, private_data);
+            } else {
+                cb(s->inode, CHIMERA_VFS_OK, private_data);
             }
             return;
         }
@@ -2274,12 +2892,19 @@ diskfs_inode_acquire_pinned(
     void                       *private_data)
 {
     struct diskfs_inode_shard *shard;
+    struct diskfs_txn_spill   *s;
     int                        i;
 
     /* Already locked in this txn: reuse the held grant (matches the txn-slot
      * fast path in diskfs_inode_acquire). */
     for (i = 0; i < txn->num_inodes; i++) {
         if (txn->inodes[i].inode == inode) {
+            cb(inode, CHIMERA_VFS_OK, private_data);
+            return;
+        }
+    }
+    for (s = txn->spill; s; s = s->next) {
+        if (s->inode == inode) {
             cb(inode, CHIMERA_VFS_OK, private_data);
             return;
         }
@@ -3567,11 +4192,17 @@ diskfs_inode_flush(struct diskfs_inode *inode)
 static void
 diskfs_txn_flush_inodes(struct diskfs_txn *txn)
 {
-    int i;
+    struct diskfs_txn_spill *s;
+    int                      i;
 
     for (i = 0; i < txn->num_inodes; i++) {
         if (txn->inodes[i].mode == DISKFS_INODE_LOCK_WRITE) {
             diskfs_inode_flush(txn->inodes[i].inode);
+        }
+    }
+    for (s = txn->spill; s; s = s->next) {
+        if (s->mode == DISKFS_INODE_LOCK_WRITE) {
+            diskfs_inode_flush(s->inode);
         }
     }
 } /* diskfs_txn_flush_inodes */
@@ -3591,11 +4222,17 @@ diskfs_txn_unpin_blocks(
     struct diskfs_thread    *thread = txn->thread;
     struct diskfs_txn_block *tb     = txn->blocks;
     struct diskfs_txn_block *n;
+    struct diskfs_txn_spill *s;
     int                      i;
 
     for (i = 0; i < txn->num_inodes; i++) {
         if (txn->inodes[i].mode == DISKFS_INODE_LOCK_WRITE) {
             txn->inodes[i].inode->block = NULL;
+        }
+    }
+    for (s = txn->spill; s; s = s->next) {
+        if (s->mode == DISKFS_INODE_LOCK_WRITE) {
+            s->inode->block = NULL;
         }
     }
 
@@ -4583,8 +5220,9 @@ diskfs_bt_collapse_root(
 
 /* Forward declarations for helpers defined later in the file. */
 static struct diskfs_txn * diskfs_txn_begin(
-    struct diskfs_thread *thread,
-    enum diskfs_txn_type  type);
+    struct diskfs_thread       *thread,
+    enum diskfs_txn_type        type,
+    struct chimera_vfs_request *request);
 static inline void diskfs_txn_abort(
     struct diskfs_txn *txn);
 static inline void diskfs_txn_commit(
@@ -4847,7 +5485,7 @@ diskfs_drain_acquired_cb(
 static void
 diskfs_drain_begin(struct diskfs_drain *d)
 {
-    d->txn = diskfs_txn_begin(d->thread, DISKFS_TXN_WRITE);
+    d->txn = diskfs_txn_begin(d->thread, DISKFS_TXN_WRITE, NULL);
     diskfs_inode_acquire(d->thread, d->txn, d->inum, d->gen,
                          DISKFS_INODE_LOCK_WRITE, diskfs_drain_acquired_cb, d);
 } /* diskfs_drain_begin */
@@ -6518,8 +7156,17 @@ diskfs_inode_alloc_async(
     inum  = sm_inum_from_device_offset(shared->space_map, device_id, device_offset);
     inode = diskfs_inode_struct_new(inum);
 
-    /* New dirty inode: write-locked by this (write) txn from birth. */
+    /* New dirty inode: write-locked by this (write) txn from birth.  Not yet
+     * published in the cache, so the holder record can be linked directly (a
+     * fresh malloc; it returns to the shard pool when released). */
     inode->writer = 1;
+    {
+        struct diskfs_inode_holder *h = malloc(sizeof(*h));
+        h->txn         = txn;
+        h->mode        = DISKFS_INODE_LOCK_WRITE;
+        h->next        = NULL;
+        inode->holders = h;
+    }
 
     diskfs_inode_cache_insert(shared, inode);
     diskfs_metric_inode_cache(thread, DISKFS_METRIC_INODE_CACHE_INSERT);
@@ -6755,12 +7402,52 @@ diskfs_inode_return_reservation(
 /* Transaction plumbing                                                */
 /* ------------------------------------------------------------------ */
 
+/* Initialize the diskfs-private portion of a txn (shared by the pooled
+ * autocommit path and the in-place init of a core-allocated explicit txn).
+ * Does not touch core.* -- the caller (autocommit) or the VFS core (explicit)
+ * owns the core header. */
+static inline void
+diskfs_txn_init(
+    struct diskfs_thread *thread,
+    struct diskfs_txn    *txn,
+    enum diskfs_txn_type  type,
+    int                   autocommit)
+{
+    txn->type          = type;
+    txn->autocommit    = (uint8_t) autocommit;
+    txn->thread        = thread;
+    txn->next          = NULL;
+    txn->num_inodes    = 0;
+    txn->spill         = NULL;
+    txn->blocks        = NULL;
+    txn->pending_frees = NULL;
+
+    /* WFG wait descriptor starts clear (not parked). */
+    atomic_store_explicit(&txn->wfg_seq, 0, memory_order_relaxed);
+    txn->wfg_wait_inum     = 0;
+    txn->wfg_wait_gen      = 0;
+    txn->wfg_wait_mode     = 0;
+    txn->wfg_grant_pending = 0;
+} /* diskfs_txn_init */
+
 static inline struct diskfs_txn *
 diskfs_txn_begin(
-    struct diskfs_thread *thread,
-    enum diskfs_txn_type  type)
+    struct diskfs_thread       *thread,
+    enum diskfs_txn_type        type,
+    struct chimera_vfs_request *request)
 {
-    struct diskfs_txn *txn = thread->txn_free_list;
+    struct diskfs_txn *txn;
+
+    /* Enlisted in an explicit transaction (CHIMERA_VFS_CAP_TRANSACTIONAL): reuse
+     * it so every op shares one txn and one commit.  Its locks/blocks persist
+     * across ops until EndTransaction; the op's requested `type` is ignored (the
+     * explicit txn's mode, set at BeginTransaction, governs the lock mode).
+     * `request` is NULL for internal non-op callers (mtime flusher, drain). */
+    if (request && request->transaction) {
+        return (struct diskfs_txn *) request->transaction;
+    }
+
+    txn = thread->txn_free_list;
 
     if (txn) {
         thread->txn_free_list = txn->next;
@@ -6768,12 +7455,10 @@ diskfs_txn_begin(
         txn = malloc(sizeof(*txn));
     }
 
-    txn->type          = type;
-    txn->thread        = thread;
-    txn->next          = NULL;
-    txn->num_inodes    = 0;
-    txn->blocks        = NULL;
-    txn->pending_frees = NULL;
+    /* Autocommit txn: priority 0 (never a WFG victim -- it has no retry driver,
+     * and the autocommit flag below marks it as diskfs-pooled). */
+    txn->core.ts = 0;
+    diskfs_txn_init(thread, txn, type, 1 /* autocommit */);
     return txn;
 } /* diskfs_txn_begin */
 
@@ -6781,6 +7466,13 @@ static inline void
 diskfs_txn_release(struct diskfs_txn *txn)
 {
     struct diskfs_thread *thread = txn->thread;
+
+    /* Explicit (CAP_TRANSACTIONAL) txns are core-owned: the VFS core allocated
+     * the handle locally at begin and frees it at end-completion, so diskfs must
+     * not recycle it here.  Only autocommit txns belong to the diskfs pool. */
+    if (!txn->autocommit) {
+        return;
+    }
 
     txn->next             = thread->txn_free_list;
     thread->txn_free_list = txn;
@@ -6831,10 +7523,18 @@ diskfs_op_fail(
     int                         status)
 {
     request->status = status;
-    if (txn) {
+    if (request->transaction) {
+        /* Enlisted in an explicit transaction: don't abort here -- the txn (and
+         * its locks/blocks) stays intact and is resolved at EndTransaction.  A
+         * status of ETXN_CONFLICT (wait-die die) propagates up to drive a retry;
+         * a logical error just stops this op's protocol chain. */
+        request->complete(request);
+    } else if (txn) {
         diskfs_txn_abort(txn);
+        request->complete(request);
+    } else {
+        request->complete(request);
     }
-    request->complete(request);
 } /* diskfs_op_fail */
 
 static inline void
@@ -6843,7 +7543,11 @@ diskfs_op_ok(
     struct diskfs_txn          *txn)
 {
     request->status = CHIMERA_VFS_OK;
-    if (txn) {
+    if (request->transaction) {
+        /* Enlisted: defer the commit (and its single intent-log FUA) to
+         * EndTransaction so the whole transaction commits once. */
+        request->complete(request);
+    } else if (txn) {
         diskfs_txn_commit(txn, diskfs_txn_request_complete_cb, request);
     } else {
         request->complete(request);
@@ -7957,9 +8661,14 @@ diskfs_iq_drain_cq(struct diskfs_iq_channel *ch)
             &entry.durable_time);
 
         /* The txn's logical inode locks were already dropped by the intent
-         * log thread (diskfs_iq_process_channel); just deliver completion. */
+         * log thread (diskfs_iq_process_channel); just deliver completion.
+         * The cb can free an explicit (core-owned) txn via end-completion, so
+         * sample autocommit-ness first and recycle only a surviving pooled txn. */
+        int entry_autocommit = entry.txn->autocommit;
         entry.cb(entry.txn, entry.status, entry.private_data);
-        diskfs_txn_release(entry.txn);
+        if (entry_autocommit) {
+            diskfs_txn_release(entry.txn);
+        }
 
         /* Last outstanding commit done -> release the poll-mode pin taken in
          * diskfs_txn_commit_finish so the worker may sleep again when idle. */
@@ -8264,10 +8973,16 @@ diskfs_txn_commit(
     struct diskfs_thread *thread = txn->thread;
 
     if (txn->type == DISKFS_TXN_READ) {
-        /* Read txns don't need durability -- complete inline. */
+        /* Read txns don't need durability -- complete inline.  Sample
+         * autocommit-ness before cb: cb can free an explicit (core-owned) txn
+         * via end-completion, while an autocommit (pooled) txn survives to be
+         * recycled here. */
+        int autocommit = txn->autocommit;
         diskfs_txn_unlock_all(txn);
         cb(txn, 0, private_data);
-        diskfs_txn_release(txn);
+        if (autocommit) {
+            diskfs_txn_release(txn);
+        }
         return;
     }
 
@@ -8278,9 +8993,12 @@ diskfs_txn_commit(
      * routing it through the intent log would write a header-only record per
      * write and defeat the deferral. */
     if (!txn->blocks && !txn->pending_frees) {
+        int autocommit = txn->autocommit;
         diskfs_txn_unlock_all(txn);
         cb(txn, 0, private_data);
-        diskfs_txn_release(txn);
+        if (autocommit) {
+            diskfs_txn_release(txn);
+        }
         return;
     }
 
@@ -9322,9 +10040,16 @@ diskfs_inode_cache_release(
     struct rb_node *node,
     void           *private_data)
 {
-    struct diskfs_inode *inode = container_of(node, struct diskfs_inode, node);
+    struct diskfs_inode        *inode = container_of(node, struct diskfs_inode, node);
+    struct diskfs_inode_holder *h;
 
     (void) private_data;
+
+    /* Free any still-attached WFG holder records (a lock held at shutdown). */
+    while ((h = inode->holders)) {
+        inode->holders = h->next;
+        free(h);
+    }
 
     /* All inode contents live in b+tree blocks freed via the block cache;
      * we only own and must free the inode struct itself (heap-allocated). */
@@ -9338,8 +10063,15 @@ diskfs_destroy(void *private_data)
     int                   i;
 
     for (i = 0; i < DISKFS_INODE_CACHE_SHARDS; i++) {
+        struct diskfs_inode_holder *h;
+
         rb_tree_destroy(&shared->inode_cache->shards[i].inodes,
                         diskfs_inode_cache_release, NULL);
+        /* Drain the per-shard WFG holder-record pool. */
+        while ((h = shared->inode_cache->shards[i].holder_free_list)) {
+            shared->inode_cache->shards[i].holder_free_list = h->next;
+            free(h);
+        }
         pthread_mutex_destroy(&shared->inode_cache->shards[i].lock);
     }
 
@@ -9456,6 +10188,12 @@ diskfs_grant_doorbell_cb(
         private_data = w->private_data;
         inode        = w->inode;
         status       = w->status;
+
+        /* The txn's continuation runs here on its own worker: it is no longer
+         * parked, so finalize its WFG wait edge (the grant path set it to
+         * grant_pending; a stale/conflict grant leaves it set).  Clearing here
+         * also closes the grant window once we install the holder slot. */
+        diskfs_wfg_clear_wait(w->txn);
 
         if (status == CHIMERA_VFS_OK) {
             struct diskfs_txn          *wtxn  = w->txn;
@@ -9670,7 +10408,7 @@ diskfs_mtime_flush_kick(struct diskfs_thread *thread)
     f                      = malloc(sizeof(*f));
     f->thread              = thread;
     f->inode               = inode;
-    f->txn                 = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+    f->txn                 = diskfs_txn_begin(thread, DISKFS_TXN_WRITE, NULL);
     diskfs_inode_acquire_pinned(thread, f->txn, inode, DISKFS_INODE_LOCK_WRITE,
                                 diskfs_mtime_flush_acquired_cb, f);
 } /* diskfs_mtime_flush_kick */
@@ -10329,7 +11067,7 @@ diskfs_getattr(
     (void) private_data;
 
     p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ);
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ, request);
 
     diskfs_inode_get_fh_async(thread, p->txn,
                               request->fh, request->fh_len,
@@ -10678,7 +11416,7 @@ diskfs_setattr(
     (void) private_data;
 
     p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE, request);
 
     diskfs_inode_get_fh_async(thread, p->txn,
                               request->fh, request->fh_len,
@@ -10803,7 +11541,7 @@ diskfs_mount(
         diskfs_orphan_scan(thread);
     }
     p->thread     = thread;
-    p->txn        = diskfs_txn_begin(thread, DISKFS_TXN_READ);
+    p->txn        = diskfs_txn_begin(thread, DISKFS_TXN_READ, request);
     p->op_scratch = 0;
 
     /* Resolve the mount path asynchronously starting from the root inode. */
@@ -10825,7 +11563,7 @@ diskfs_umount(
     (void) private_data;
 
     p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ);
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ, request);
     diskfs_op_ok(request, p->txn);
 } /* diskfs_umount */
 
@@ -10939,7 +11677,7 @@ diskfs_lookup_at(
     (void) private_data;
 
     p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ);
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ, request);
 
     diskfs_inode_get_fh_async(thread, p->txn,
                               request->fh, request->fh_len,
@@ -11124,7 +11862,7 @@ diskfs_mkdir_at(
     (void) private_data;
 
     p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE, request);
 
     diskfs_inode_get_fh_async(thread, p->txn,
                               request->fh, request->fh_len,
@@ -11299,7 +12037,7 @@ diskfs_mknod_at(
     (void) private_data;
 
     p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE, request);
 
     diskfs_inode_get_fh_async(thread, p->txn,
                               request->fh, request->fh_len,
@@ -11514,7 +12252,7 @@ diskfs_remove_at(
     (void) private_data;
 
     p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE, request);
 
     diskfs_inode_get_fh_async(thread, p->txn,
                               request->fh, request->fh_len,
@@ -11570,6 +12308,26 @@ diskfs_readdir_complete(struct chimera_vfs_request *request)
     diskfs_readdir_finish(request);
 } /* diskfs_readdir_complete */
 
+/* Fail the readdir (e.g. a wait-die conflict on a child lock).  Deferred through
+ * the iteration loop exactly like diskfs_readdir_complete, so it never frees the
+ * request out from under an active synchronous walk. */
+static void
+diskfs_readdir_fail_op(
+    struct chimera_vfs_request *request,
+    enum chimera_vfs_error      status)
+{
+    struct diskfs_request_private *p = request->plugin_data;
+
+    p->rd_fail_status = status;
+
+    if (p->rd_looping) {
+        p->rd_done = 1;
+        return;
+    }
+
+    diskfs_op_fail(request, p->txn, status);
+} /* diskfs_readdir_fail_op */
+
 static void
 diskfs_readdir_iter_inode_cb(
     struct diskfs_inode *dirent_inode,
@@ -11582,8 +12340,17 @@ diskfs_readdir_iter_inode_cb(
     struct chimera_vfs_attrs       attr;
     int                            rc;
 
+    if (status == CHIMERA_VFS_ETXN_CONFLICT) {
+        /* A wait-die abort on the child lock is NOT a stale dirent: skipping it
+         * would silently drop the entry.  Fail the op (deferred through the
+         * iteration loop) so the enlisting transaction aborts and replays the
+         * whole readdir. */
+        diskfs_readdir_fail_op(request, status);
+        return;
+    }
+
     if (status != CHIMERA_VFS_OK) {
-        /* Stale dirent — skip to the next. */
+        /* Stale dirent (the inode was freed/replaced) — skip to the next. */
         p->rd_from_hash = p->rd_hash + 1;
         diskfs_readdir_iter_step(request);
         return;
@@ -11677,7 +12444,11 @@ diskfs_readdir_iter_step(struct chimera_vfs_request *request)
     p->rd_looping = 0;
 
     if (p->rd_done) {
-        diskfs_readdir_finish(request);
+        if (p->rd_fail_status != CHIMERA_VFS_OK) {
+            diskfs_op_fail(request, p->txn, p->rd_fail_status);
+        } else {
+            diskfs_readdir_finish(request);
+        }
     }
 } /* diskfs_readdir_iter_step */
 
@@ -11826,11 +12597,12 @@ diskfs_readdir(
     (void) shared;
     (void) private_data;
 
-    p->thread     = thread;
-    p->txn        = diskfs_txn_begin(thread, DISKFS_TXN_READ);
-    p->rd_looping = 0;
-    p->rd_advance = 0;
-    p->rd_done    = 0;
+    p->thread         = thread;
+    p->txn            = diskfs_txn_begin(thread, DISKFS_TXN_READ, request);
+    p->rd_looping     = 0;
+    p->rd_advance     = 0;
+    p->rd_done        = 0;
+    p->rd_fail_status = CHIMERA_VFS_OK;
 
     diskfs_inode_get_fh_async(thread, p->txn,
                               request->fh, request->fh_len,
@@ -11879,7 +12651,7 @@ diskfs_open_fh(
     (void) private_data;
 
     p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE, request);
 
     diskfs_inode_get_fh_async(thread, p->txn,
                               request->fh, request->fh_len,
@@ -12153,7 +12925,7 @@ diskfs_open_at(
     (void) private_data;
 
     p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE, request);
 
     diskfs_inode_get_fh_async(thread, p->txn,
                               request->fh, request->fh_len,
@@ -12218,7 +12990,7 @@ diskfs_create_unlinked(
     (void) private_data;
 
     p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE, request);
 
     diskfs_inode_alloc_async(thread, p->txn,
                              diskfs_create_unlinked_alloc_cb, request);
@@ -12277,7 +13049,7 @@ diskfs_close(
     (void) private_data;
 
     p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE, request);
 
     /* The inode pointer came in via vfs_private (set at open); re-acquire
      * it by (inum,gen) so its write lock is tracked in the cache like any
@@ -12661,7 +13433,12 @@ diskfs_read_inode_cb(
         diskfs_txn_pin_inode_block(thread, diskfs_private->txn, inode, 0);
         inode->atime_sec  = now.tv_sec;
         inode->atime_nsec = now.tv_nsec;
-    } else if (!thread->shared->noatime) {
+    } else if (!thread->shared->noatime && !request->transaction) {
+        /* Autocommit reads only: the relatime atime bump aborts this read txn
+         * and re-runs under a fresh WRITE txn.  We must not do that to a caller-
+         * owned explicit transaction (diskfs_txn_begin would just hand back the
+         * same enlisted txn, recursing forever) -- skip the best-effort atime
+         * bump for enlisted reads instead. */
         struct timespec atime = { inode->atime_sec, inode->atime_nsec };
         struct timespec mtime = { inode->mtime_sec, inode->mtime_nsec };
         struct timespec ctime = { inode->ctime_sec, inode->ctime_nsec };
@@ -12675,7 +13452,7 @@ diskfs_read_inode_cb(
                 (struct diskfs_inode *) request->read.handle->vfs_private : NULL;
 
             diskfs_txn_abort(diskfs_private->txn);
-            diskfs_private->txn = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+            diskfs_private->txn = diskfs_txn_begin(thread, DISKFS_TXN_WRITE, request);
 
             if (pinned) {
                 diskfs_inode_acquire_pinned(thread, diskfs_private->txn, pinned,
@@ -12748,7 +13525,7 @@ diskfs_read(
     p->niov       = 0;
     p->thread     = thread;
     p->io_reading = 1;     /* cleared in diskfs_read_finish when the walk ends */
-    p->txn        = diskfs_txn_begin(thread, DISKFS_TXN_READ);
+    p->txn        = diskfs_txn_begin(thread, DISKFS_TXN_READ, request);
 
     /* Warm-handle fast path: diskfs advertises CAP_OPEN_FILE_REQUIRED, so a read
      * is preceded by a real open that pinned the inode and stashed it in
@@ -14052,7 +14829,7 @@ diskfs_write(
     p->need_prefix_read    = 0;
     p->need_suffix_read    = 0;
     p->inplace_written     = 0;
-    p->txn                 = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+    p->txn                 = diskfs_txn_begin(thread, DISKFS_TXN_WRITE, request);
 
     /* Warm-handle fast path (see diskfs_read): reuse the inode pinned at open
     * via handle->vfs_private, skipping the by-fh resolve.  The WRITE-mode grant
@@ -14626,7 +15403,7 @@ diskfs_allocate(
     (void) private_data;
 
     p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE, request);
 
     diskfs_inode_get_fh_async(thread, p->txn,
                               request->fh, request->fh_len,
@@ -14806,7 +15583,7 @@ diskfs_seek(
     (void) private_data;
 
     p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ);
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ, request);
 
     diskfs_inode_get_fh_async(thread, p->txn,
                               request->fh, request->fh_len,
@@ -14985,7 +15762,7 @@ diskfs_symlink_at(
         return;
     }
 
-    p->txn = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+    p->txn = diskfs_txn_begin(thread, DISKFS_TXN_WRITE, request);
 
     diskfs_inode_get_fh_async(thread, p->txn,
                               request->fh, request->fh_len,
@@ -15056,7 +15833,7 @@ diskfs_readlink(
     (void) private_data;
 
     p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ);
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ, request);
 
     diskfs_inode_get_fh_async(thread, p->txn,
                               request->fh, request->fh_len,
@@ -15481,7 +16258,7 @@ diskfs_rename_at(
     (void) private_data;
 
     p->thread         = thread;
-    p->txn            = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+    p->txn            = diskfs_txn_begin(thread, DISKFS_TXN_WRITE, request);
     p->inode_stash[0] = NULL;
     p->inode_stash[1] = NULL;
     p->inode_stash[2] = NULL;
@@ -15696,7 +16473,7 @@ diskfs_link_at(
     (void) private_data;
 
     p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE, request);
 
     diskfs_inode_get_fh_async(thread, p->txn,
                               request->link_at.dir_fh,
@@ -15721,7 +16498,7 @@ diskfs_put_key(
     (void) private_data;
 
     p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE, request);
 
     hash      = chimera_vfs_hash(request->put_key.key, request->put_key.key_len);
     shard_idx = hash % shared->num_kv_shards;
@@ -15766,7 +16543,7 @@ diskfs_get_key(
     (void) private_data;
 
     p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ);
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ, request);
 
     hash      = chimera_vfs_hash(request->get_key.key, request->get_key.key_len);
     shard_idx = hash % shared->num_kv_shards;
@@ -15806,7 +16583,7 @@ diskfs_delete_key(
     (void) private_data;
 
     p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE, request);
 
     hash      = chimera_vfs_hash(request->delete_key.key, request->delete_key.key_len);
     shard_idx = hash % shared->num_kv_shards;
@@ -15878,7 +16655,7 @@ diskfs_search_keys(
     (void) private_data;
 
     p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ);
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ, request);
 
     for (i = 0; i < shared->num_kv_shards; i++) {
         shard = &shared->kv_shards[i];
@@ -15985,7 +16762,7 @@ diskfs_get_xattr(
     (void) private_data;
 
     p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ);
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ, request);
 
     diskfs_inode_get_fh_async(thread, p->txn,
                               request->fh, request->fh_len,
@@ -16081,7 +16858,7 @@ diskfs_set_xattr(
     (void) private_data;
 
     p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE, request);
 
     diskfs_inode_get_fh_async(thread, p->txn,
                               request->fh, request->fh_len,
@@ -16157,7 +16934,7 @@ diskfs_list_xattrs(
     (void) private_data;
 
     p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ);
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ, request);
 
     diskfs_inode_get_fh_async(thread, p->txn,
                               request->fh, request->fh_len,
@@ -16223,7 +17000,7 @@ diskfs_remove_xattr(
     (void) private_data;
 
     p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE, request);
 
     diskfs_inode_get_fh_async(thread, p->txn,
                               request->fh, request->fh_len,
@@ -16598,7 +17375,7 @@ diskfs_get_layout(
 
     rw        = request->get_layout.iomode == DISKFS_LAYOUTIOMODE_RW;
     p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, rw ? DISKFS_TXN_WRITE : DISKFS_TXN_READ);
+    p->txn    = diskfs_txn_begin(thread, rw ? DISKFS_TXN_WRITE : DISKFS_TXN_READ, request);
 
     diskfs_inode_get_fh_async(thread, p->txn, request->fh, request->fh_len,
                               diskfs_get_layout_inode_cb, request);
@@ -16662,15 +17439,75 @@ diskfs_commit(
         (struct diskfs_inode *) request->commit.handle->vfs_private : NULL;
 
     if (!warm || shared->mtime_defer_us == 0) {
-        cp->txn = diskfs_txn_begin(thread, DISKFS_TXN_READ);
+        cp->txn = diskfs_txn_begin(thread, DISKFS_TXN_READ, request);
         diskfs_op_ok(request, cp->txn);
         return;
     }
 
-    cp->txn = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+    cp->txn = diskfs_txn_begin(thread, DISKFS_TXN_WRITE, request);
     diskfs_inode_acquire_pinned(thread, cp->txn, warm, DISKFS_INODE_LOCK_WRITE,
                                 diskfs_commit_acquired_cb, request);
 } /* diskfs_commit */
+
+/*
+ * Explicit-transaction lifecycle (CHIMERA_VFS_CAP_TRANSACTIONAL).  Begin
+ * allocates a fresh txn and returns &txn->core as the opaque handle; the VFS
+ * core stamps the wait-die priority + routing key in its begin-complete handler
+ * before any enlisted op runs.  Every enlisted op recovers the txn from
+ * request->transaction (see diskfs_txn_begin) and holds its locks/blocks until
+ * End commits (one intent-log FUA for the whole txn) or aborts.
+ */
+static void
+diskfs_begin_transaction(
+    struct diskfs_thread       *thread,
+    struct diskfs_shared       *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    struct diskfs_txn   *txn = (struct diskfs_txn *) request->transaction;
+    enum diskfs_txn_type type;
+
+    (void) shared;
+    (void) private_data;
+
+    /* The core allocated and zeroed the handle (diskfs_txn, txn_size below) and
+     * stamped its core header; initialize the diskfs-private portion in place on
+     * this owning thread before the first enlisted op arrives. */
+    type = (txn->core.mode == CHIMERA_VFS_TXN_WRITE)
+           ? DISKFS_TXN_WRITE : DISKFS_TXN_READ;
+
+    diskfs_txn_init(thread, txn, type, 0 /* explicit */);
+
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* diskfs_begin_transaction */
+
+static void
+diskfs_end_transaction(
+    struct diskfs_thread       *thread,
+    struct diskfs_shared       *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    struct diskfs_txn *txn = (struct diskfs_txn *) request->transaction;
+
+    (void) thread;
+    (void) shared;
+    (void) private_data;
+
+    if (request->transaction_op.end_flag == CHIMERA_VFS_TXN_ABORT) {
+        diskfs_txn_abort(txn);
+        request->status = CHIMERA_VFS_OK;
+        request->complete(request);
+        return;
+    }
+
+    /* COMMIT_ASYNC and COMMIT_SYNC both commit durably in v1 -- being more
+     * durable than UNSTABLE requires is always NFS-correct; skipping the redo
+     * FUA for COMMIT_ASYNC is a follow-up optimization. */
+    request->status = CHIMERA_VFS_OK;
+    diskfs_txn_commit(txn, diskfs_txn_request_complete_cb, request);
+} /* diskfs_end_transaction */
 
 static void
 diskfs_dispatch(
@@ -16778,6 +17615,12 @@ diskfs_dispatch(
         case CHIMERA_VFS_OP_GET_LAYOUT:
             diskfs_get_layout(thread, shared, request, private_data);
             break;
+        case CHIMERA_VFS_OP_BEGIN_TRANSACTION:
+            diskfs_begin_transaction(thread, shared, request, private_data);
+            break;
+        case CHIMERA_VFS_OP_END_TRANSACTION:
+            diskfs_end_transaction(thread, shared, request, private_data);
+            break;
         default:
             chimera_diskfs_error("diskfs_dispatch: unknown operation %d",
                                  request->opcode);
@@ -16792,6 +17635,7 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_diskfs = {
     .fh_magic     = CHIMERA_VFS_FH_MAGIC_DISKFS,
     .capabilities = CHIMERA_VFS_CAP_CREATE_UNLINKED | CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_KV |
         CHIMERA_VFS_CAP_FS_RELATIVE_OP | CHIMERA_VFS_CAP_XATTR | CHIMERA_VFS_CAP_LAYOUT |
+        CHIMERA_VFS_CAP_TRANSACTIONAL |
         /* Require a real open so every file op carries a pinned inode in
          * handle->vfs_private (diskfs_open_fh_inode_cb), which read/write reuse
          * to skip per-I/O inode resolution. */
@@ -16801,4 +17645,5 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_diskfs = {
     .thread_init    = diskfs_thread_init,
     .thread_destroy = diskfs_thread_destroy,
     .dispatch       = diskfs_dispatch,
+    .txn_size       = sizeof(struct diskfs_txn),
 };

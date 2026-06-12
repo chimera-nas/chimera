@@ -50,7 +50,7 @@ chimera_vfs_link_dest_parent_lookup_complete(
 
     chimera_vfs_link_at(
         thread,
-        request->cred,
+        request->cred, NULL,
         request->link.source_fh,
         request->link.source_fh_len,
         request->link.dest_parent_fh,
@@ -89,7 +89,7 @@ chimera_vfs_link_source_lookup_fast_complete(
     /* Dest parent FH and full path already set up; skip dest lookup */
     chimera_vfs_link_at(
         thread,
-        request->cred,
+        request->cred, NULL,
         request->link.source_fh,
         request->link.source_fh_len,
         request->link.dest_parent_fh,
@@ -127,7 +127,7 @@ chimera_vfs_link_source_lookup_complete(
 
     chimera_vfs_lookup(
         thread,
-        request->cred,
+        request->cred, NULL,
         request->fh,
         request->fh_len,
         request->link.new_path,
@@ -219,7 +219,7 @@ chimera_vfs_link(
         /* Still need to resolve source path to get source FH */
         chimera_vfs_lookup(
             thread,
-            cred,
+            cred, NULL,
             fh,
             fhlen,
             request->link.path,
@@ -245,7 +245,7 @@ chimera_vfs_link(
         /* Resolve source (full path) to get source FH */
         chimera_vfs_lookup(
             thread,
-            cred,
+            cred, NULL,
             fh,
             fhlen,
             request->link.path,

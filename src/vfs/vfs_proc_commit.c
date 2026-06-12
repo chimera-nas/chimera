@@ -34,6 +34,7 @@ SYMBOL_EXPORT void
 chimera_vfs_commit(
     struct chimera_vfs_thread      *thread,
     const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_transaction *txn,
     struct chimera_vfs_open_handle *handle,
     uint64_t                        offset,
     uint64_t                        count,
@@ -50,6 +51,8 @@ chimera_vfs_commit(
         callback(CHIMERA_VFS_PTR_ERR(request), NULL, NULL, private_data);
         return;
     }
+
+    request->transaction = txn;
 
     request->opcode                         = CHIMERA_VFS_OP_COMMIT;
     request->complete                       = chimera_vfs_commit_complete;

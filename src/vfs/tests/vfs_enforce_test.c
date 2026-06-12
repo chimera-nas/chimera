@@ -219,7 +219,7 @@ mkdir_as(
     sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
     sattr.va_mode     = 0755;
 
-    chimera_vfs_mkdir_at(ctx->vfs_thread, cred, dir, name, strlen(name),
+    chimera_vfs_mkdir_at(ctx->vfs_thread, cred, NULL, dir, name, strlen(name),
                          &sattr, CHIMERA_VFS_ATTR_FH, 0, 0, mkdir_cb, ctx);
     wait_done(ctx);
     return ctx->status;
@@ -239,7 +239,7 @@ create_as(
     sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
     sattr.va_mode     = 0644;
 
-    chimera_vfs_open_at(ctx->vfs_thread, cred, dir, name, strlen(name),
+    chimera_vfs_open_at(ctx->vfs_thread, cred, NULL, dir, name, strlen(name),
                         CHIMERA_VFS_OPEN_CREATE, &sattr, CHIMERA_VFS_ATTR_FH,
                         0, 0, openat_cb, ctx);
     wait_done(ctx);
@@ -257,7 +257,7 @@ lookup_as(
     struct chimera_vfs_open_handle *dir,
     const char                     *name)
 {
-    chimera_vfs_lookup_at(ctx->vfs_thread, cred, dir, name, strlen(name),
+    chimera_vfs_lookup_at(ctx->vfs_thread, cred, NULL, dir, name, strlen(name),
                           CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT, 0,
                           lookupat_cb, ctx);
     wait_done(ctx);
@@ -274,7 +274,7 @@ remove_as(
     const uint8_t                  *child_fh,
     uint32_t                        child_fh_len)
 {
-    chimera_vfs_remove_at(ctx->vfs_thread, cred, dir, name, strlen(name),
+    chimera_vfs_remove_at(ctx->vfs_thread, cred, NULL, dir, name, strlen(name),
                           child_fh, child_fh_len, 0, 0, remove_cb, ctx);
     wait_done(ctx);
     return ctx->status;
@@ -290,12 +290,12 @@ read_as(
 {
     enum chimera_vfs_error st;
 
-    chimera_vfs_open_fh(ctx->vfs_thread, cred, fh, fh_len,
+    chimera_vfs_open_fh(ctx->vfs_thread, cred, NULL, fh, fh_len,
                         CHIMERA_VFS_OPEN_INFERRED, openfh_cb, ctx);
     wait_done(ctx);
     assert(ctx->status == CHIMERA_VFS_OK);
 
-    chimera_vfs_read(ctx->vfs_thread, cred, ctx->handle, 0, 0, NULL, 0, 0,
+    chimera_vfs_read(ctx->vfs_thread, cred, NULL, ctx->handle, 0, 0, NULL, 0, 0,
                      read_cb, ctx);
     wait_done(ctx);
     st = ctx->status;
@@ -313,12 +313,12 @@ write_as(
 {
     enum chimera_vfs_error st;
 
-    chimera_vfs_open_fh(ctx->vfs_thread, cred, fh, fh_len,
+    chimera_vfs_open_fh(ctx->vfs_thread, cred, NULL, fh, fh_len,
                         CHIMERA_VFS_OPEN_INFERRED, openfh_cb, ctx);
     wait_done(ctx);
     assert(ctx->status == CHIMERA_VFS_OK);
 
-    chimera_vfs_write(ctx->vfs_thread, cred, ctx->handle, 0, 0, 0, 0, 0,
+    chimera_vfs_write(ctx->vfs_thread, cred, NULL, ctx->handle, 0, 0, 0, 0, 0,
                       NULL, 0, write_cb, ctx);
     wait_done(ctx);
     st = ctx->status;
@@ -338,7 +338,7 @@ chmod_as(
     struct chimera_vfs_attrs sattr;
     enum chimera_vfs_error   st;
 
-    chimera_vfs_open_fh(ctx->vfs_thread, cred, fh, fh_len,
+    chimera_vfs_open_fh(ctx->vfs_thread, cred, NULL, fh, fh_len,
                         CHIMERA_VFS_OPEN_INFERRED, openfh_cb, ctx);
     wait_done(ctx);
     assert(ctx->status == CHIMERA_VFS_OK);
@@ -347,7 +347,7 @@ chmod_as(
     sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
     sattr.va_mode     = mode;
 
-    chimera_vfs_setattr(ctx->vfs_thread, cred, ctx->handle, &sattr, 0, 0,
+    chimera_vfs_setattr(ctx->vfs_thread, cred, NULL, ctx->handle, &sattr, 0, 0,
                         setattr_cb, ctx);
     wait_done(ctx);
     st = ctx->status;
@@ -400,7 +400,7 @@ main(
 
     chimera_vfs_get_root_fh(root_fh, &root_fh_len);
 
-    chimera_vfs_lookup(ctx.vfs_thread, &owner, root_fh, root_fh_len, "test", 4,
+    chimera_vfs_lookup(ctx.vfs_thread, &owner, NULL, root_fh, root_fh_len, "test", 4,
                        CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT, 0,
                        lookup_cb, &ctx);
     wait_done(&ctx);
@@ -409,7 +409,7 @@ main(
     root_fh_len = ctx.fh_len;
 
     /* Open the root directory (as owner) and create a 0600 file owned by 1000. */
-    chimera_vfs_open_fh(ctx.vfs_thread, &owner, root_fh, root_fh_len,
+    chimera_vfs_open_fh(ctx.vfs_thread, &owner, NULL, root_fh, root_fh_len,
                         CHIMERA_VFS_OPEN_INFERRED, openfh_cb, &ctx);
     wait_done(&ctx);
     assert(ctx.status == CHIMERA_VFS_OK);
@@ -423,7 +423,7 @@ main(
         sattr.va_uid      = 1000;
         sattr.va_gid      = 1000;
 
-        chimera_vfs_open_at(ctx.vfs_thread, &owner, root_handle, "f", 1,
+        chimera_vfs_open_at(ctx.vfs_thread, &owner, NULL, root_handle, "f", 1,
                             CHIMERA_VFS_OPEN_CREATE, &sattr, CHIMERA_VFS_ATTR_FH,
                             0, 0, openat_cb, &ctx);
         wait_done(&ctx);
@@ -464,7 +464,7 @@ main(
         uint8_t                         kid_fh[CHIMERA_VFS_FH_SIZE];
         uint32_t                        kid_fh_len;
 
-        chimera_vfs_open_fh(ctx.vfs_thread, &owner, root_fh, root_fh_len,
+        chimera_vfs_open_fh(ctx.vfs_thread, &owner, NULL, root_fh, root_fh_len,
                             CHIMERA_VFS_OPEN_INFERRED, openfh_cb, &ctx);
         wait_done(&ctx);
         assert(ctx.status == CHIMERA_VFS_OK);
@@ -473,7 +473,7 @@ main(
         memset(&dattr, 0, sizeof(dattr));
         dattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
         dattr.va_mode     = 0700;
-        chimera_vfs_mkdir_at(ctx.vfs_thread, &owner, root_handle, "d", 1, &dattr,
+        chimera_vfs_mkdir_at(ctx.vfs_thread, &owner, NULL, root_handle, "d", 1, &dattr,
                              CHIMERA_VFS_ATTR_FH, 0, 0, mkdir_cb, &ctx);
         wait_done(&ctx);
         assert(ctx.status == CHIMERA_VFS_OK);
@@ -481,7 +481,7 @@ main(
         dir_fh_len = ctx.fh_len;
         chimera_vfs_release(ctx.vfs_thread, root_handle);
 
-        chimera_vfs_open_fh(ctx.vfs_thread, &owner, dir_fh, dir_fh_len,
+        chimera_vfs_open_fh(ctx.vfs_thread, &owner, NULL, dir_fh, dir_fh_len,
                             CHIMERA_VFS_OPEN_INFERRED, openfh_cb, &ctx);
         wait_done(&ctx);
         assert(ctx.status == CHIMERA_VFS_OK);

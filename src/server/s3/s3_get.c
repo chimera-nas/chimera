@@ -93,7 +93,7 @@ chimera_s3_get_send(
     request->io_pending++;
 
     chimera_vfs_read(request->thread->vfs,
-                     &request->thread->shared->cred,
+                     &request->thread->shared->cred, NULL,
                      request->file_handle,
                      request->file_cur_offset,
                      left,
@@ -254,7 +254,7 @@ chimera_s3_get_lookup_callback(
     if (evpl_http_request_type(request->http_request) == EVPL_HTTP_REQUEST_TYPE_HEAD) {
         request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
     } else {
-        chimera_vfs_open_fh(thread->vfs, &thread->shared->cred,
+        chimera_vfs_open_fh(thread->vfs, &thread->shared->cred, NULL,
                             attr->va_fh,
                             attr->va_fh_len,
                             0,
@@ -271,7 +271,7 @@ chimera_s3_get(
 {
     request->io_pending = 0;
 
-    chimera_vfs_lookup(thread->vfs, &thread->shared->cred,
+    chimera_vfs_lookup(thread->vfs, &thread->shared->cred, NULL,
                        request->bucket_fh,
                        request->bucket_fhlen,
                        request->path,
@@ -372,7 +372,7 @@ chimera_s3_get_object_attributes(
 {
     request->io_pending = 0;
 
-    chimera_vfs_lookup(thread->vfs, &thread->shared->cred,
+    chimera_vfs_lookup(thread->vfs, &thread->shared->cred, NULL,
                        request->bucket_fh,
                        request->bucket_fhlen,
                        request->path,

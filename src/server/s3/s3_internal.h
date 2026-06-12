@@ -81,6 +81,17 @@ struct chimera_s3_request {
     enum chimera_s3_status           status;
     enum chimera_s3_vfs_state        vfs_state;
     enum chimera_s3_http_state       http_state;
+    /* Explicit-transaction bookkeeping (CHIMERA_VFS_CAP_TRANSACTIONAL).  The
+     * metadata phase of a request -- GET's path lookup, PUT's directory create +
+     * unlinked-file create -- runs under one transaction committed before any
+     * HTTP output or request-body consumption, so a wait-die / optimistic
+     * conflict can safely replay it.  The streaming data phase that follows is
+     * autocommit (it cannot be replayed once bytes are on the wire or consumed).
+     * txn is NULL for a non-transactional backend. */
+    struct chimera_vfs_transaction  *txn;
+    uint64_t                         txn_ts;
+    int                              txn_attempt;
+    struct chimera_vfs_attrs         txn_attr;     /* lookup result, kept across EndTransaction */
     const char                      *bucket_name;
     int                              bucket_namelen;
     int                              bucket_fhlen;

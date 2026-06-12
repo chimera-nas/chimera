@@ -67,20 +67,21 @@ chimera_vfs_link_at_complete(struct chimera_vfs_request *request)
 
 static void
 chimera_vfs_link_at_dispatch(
-    struct chimera_vfs_thread     *thread,
-    const struct chimera_vfs_cred *cred,
-    const void                    *fh,
-    int                            fhlen,
-    const void                    *dir_fh,
-    int                            dir_fhlen,
-    const char                    *name,
-    int                            namelen,
-    unsigned int                   replace,
-    uint64_t                       attr_mask,
-    uint64_t                       pre_attr_mask,
-    uint64_t                       post_attr_mask,
-    chimera_vfs_link_at_callback_t callback,
-    void                          *private_data)
+    struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_transaction *txn,
+    const void                     *fh,
+    int                             fhlen,
+    const void                     *dir_fh,
+    int                             dir_fhlen,
+    const char                     *name,
+    int                             namelen,
+    unsigned int                    replace,
+    uint64_t                        attr_mask,
+    uint64_t                        pre_attr_mask,
+    uint64_t                        post_attr_mask,
+    chimera_vfs_link_at_callback_t  callback,
+    void                           *private_data)
 {
     struct chimera_vfs_request *request;
 
@@ -90,6 +91,8 @@ chimera_vfs_link_at_dispatch(
         callback(CHIMERA_VFS_PTR_ERR(request), NULL, NULL, NULL, private_data);
         return;
     }
+
+    request->transaction = txn;
 
     request->opcode                              = CHIMERA_VFS_OP_LINK_AT;
     request->complete                            = chimera_vfs_link_at_complete;
@@ -124,20 +127,21 @@ chimera_vfs_link_at_dispatch(
  * directory requires ADD_FILE on that directory.
  */
 struct chimera_vfs_link_at_gate {
-    struct chimera_vfs_thread     *thread;
-    const struct chimera_vfs_cred *cred;
-    const void                    *fh;
-    int                            fhlen;
-    const void                    *dir_fh;
-    int                            dir_fhlen;
-    const char                    *name;
-    int                            namelen;
-    unsigned int                   replace;
-    uint64_t                       attr_mask;
-    uint64_t                       pre_attr_mask;
-    uint64_t                       post_attr_mask;
-    chimera_vfs_link_at_callback_t callback;
-    void                          *private_data;
+    struct chimera_vfs_thread      *thread;
+    const struct chimera_vfs_cred  *cred;
+    struct chimera_vfs_transaction *txn;
+    const void                     *fh;
+    int                             fhlen;
+    const void                     *dir_fh;
+    int                             dir_fhlen;
+    const char                     *name;
+    int                             namelen;
+    unsigned int                    replace;
+    uint64_t                        attr_mask;
+    uint64_t                        pre_attr_mask;
+    uint64_t                        post_attr_mask;
+    chimera_vfs_link_at_callback_t  callback;
+    void                           *private_data;
 };
 
 static void
@@ -153,7 +157,7 @@ chimera_vfs_link_at_gate_complete(
         return;
     }
 
-    chimera_vfs_link_at_dispatch(gate->thread, gate->cred, gate->fh, gate->fhlen,
+    chimera_vfs_link_at_dispatch(gate->thread, gate->cred, gate->txn, gate->fh, gate->fhlen,
                                  gate->dir_fh, gate->dir_fhlen, gate->name,
                                  gate->namelen, gate->replace, gate->attr_mask,
                                  gate->pre_attr_mask, gate->post_attr_mask,
@@ -163,20 +167,21 @@ chimera_vfs_link_at_gate_complete(
 
 SYMBOL_EXPORT void
 chimera_vfs_link_at(
-    struct chimera_vfs_thread     *thread,
-    const struct chimera_vfs_cred *cred,
-    const void                    *fh,
-    int                            fhlen,
-    const void                    *dir_fh,
-    int                            dir_fhlen,
-    const char                    *name,
-    int                            namelen,
-    unsigned int                   replace,
-    uint64_t                       attr_mask,
-    uint64_t                       pre_attr_mask,
-    uint64_t                       post_attr_mask,
-    chimera_vfs_link_at_callback_t callback,
-    void                          *private_data)
+    struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_transaction *txn,
+    const void                     *fh,
+    int                             fhlen,
+    const void                     *dir_fh,
+    int                             dir_fhlen,
+    const char                     *name,
+    int                             namelen,
+    unsigned int                    replace,
+    uint64_t                        attr_mask,
+    uint64_t                        pre_attr_mask,
+    uint64_t                        post_attr_mask,
+    chimera_vfs_link_at_callback_t  callback,
+    void                           *private_data)
 {
     struct chimera_vfs_module       *module;
     struct chimera_vfs_link_at_gate *gate;
@@ -192,6 +197,7 @@ chimera_vfs_link_at(
         gate                 = malloc(sizeof(*gate));
         gate->thread         = thread;
         gate->cred           = cred;
+        gate->txn            = txn;
         gate->fh             = fh;
         gate->fhlen          = fhlen;
         gate->dir_fh         = dir_fh;
@@ -211,7 +217,7 @@ chimera_vfs_link_at(
         return;
     }
 
-    chimera_vfs_link_at_dispatch(thread, cred, fh, fhlen, dir_fh, dir_fhlen,
+    chimera_vfs_link_at_dispatch(thread, cred, txn, fh, fhlen, dir_fh, dir_fhlen,
                                  name, namelen, replace, attr_mask,
                                  pre_attr_mask, post_attr_mask, callback,
                                  private_data);

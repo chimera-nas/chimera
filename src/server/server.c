@@ -1250,7 +1250,7 @@ chimera_mkpath_descend_cb(
 static void
 chimera_mkpath_open_child(struct chimera_mkpath_ctx *ctx)
 {
-    chimera_vfs_open_fh(ctx->thread, chimera_vfs_get_server_cred(),
+    chimera_vfs_open_fh(ctx->thread, chimera_vfs_get_server_cred(), NULL,
                         ctx->child_fh, ctx->child_fh_len,
                         CHIMERA_VFS_OPEN_DIRECTORY | CHIMERA_VFS_OPEN_PATH,
                         chimera_mkpath_descend_cb, ctx);
@@ -1306,7 +1306,7 @@ chimera_mkpath_lookup_cb(
         ctx->set_attr.va_uid  = 0;
         ctx->set_attr.va_gid  = 0;
 
-        chimera_vfs_mkdir_at(ctx->thread, chimera_vfs_get_server_cred(), ctx->oh,
+        chimera_vfs_mkdir_at(ctx->thread, chimera_vfs_get_server_cred(), NULL, ctx->oh,
                              ctx->comp, ctx->complen, &ctx->set_attr,
                              CHIMERA_VFS_ATTR_FH, 0, 0,
                              chimera_mkpath_mkdir_cb, ctx);
@@ -1345,7 +1345,7 @@ chimera_mkpath_next(struct chimera_mkpath_ctx *ctx)
     memcpy(ctx->comp, ctx->path + start, ctx->complen);
     ctx->comp[ctx->complen] = '\0';
 
-    chimera_vfs_lookup_at(ctx->thread, chimera_vfs_get_server_cred(), ctx->oh,
+    chimera_vfs_lookup_at(ctx->thread, chimera_vfs_get_server_cred(), NULL, ctx->oh,
                           ctx->comp, ctx->complen, CHIMERA_VFS_ATTR_FH, 0,
                           chimera_mkpath_lookup_cb, ctx);
 } /* chimera_mkpath_next */
@@ -1390,7 +1390,7 @@ chimera_mkpath_mounted_cb(
         return;
     }
 
-    chimera_vfs_open_fh(thread, chimera_vfs_get_server_cred(),
+    chimera_vfs_open_fh(thread, chimera_vfs_get_server_cred(), NULL,
                         m->root_fh, m->root_fh_len,
                         CHIMERA_VFS_OPEN_DIRECTORY | CHIMERA_VFS_OPEN_PATH,
                         chimera_mkpath_root_open_cb, ctx);

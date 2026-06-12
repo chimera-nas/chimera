@@ -68,7 +68,7 @@ chimera_nfs4_secinfo_open_callback(
 
     req->handle = handle;
 
-    chimera_vfs_lookup_at(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_lookup_at(req->thread->vfs_thread, &req->cred, NULL,
                           handle,
                           args->name.data,
                           args->name.len,
@@ -104,7 +104,7 @@ chimera_nfs4_secinfo(
 
     /* Opening the current FH as a directory yields NFS4ERR_NOTDIR when it is
      * not one; the subsequent lookup yields NFS4ERR_NOENT for a missing name. */
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+    chimera_vfs_open_fh(thread->vfs_thread, &req->cred, NULL,
                         req->fh,
                         req->fhlen,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,

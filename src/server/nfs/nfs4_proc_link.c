@@ -66,7 +66,7 @@ chimera_nfs4_link_open_callback(
 
     chimera_vfs_link_at(
         thread->vfs_thread,
-        &req->cred,
+        &req->cred, NULL,
         req->saved_fh,
         req->saved_fhlen,
         req->fh,
@@ -110,7 +110,7 @@ chimera_nfs4_link(
      * delegation) is now enforced centrally by chimera_vfs_link_at(), which
      * recalls any caching lease on the SAVEFH source before linking. */
     chimera_vfs_open_fh(thread->vfs_thread,
-                        &req->cred,
+                        &req->cred, NULL,
                         req->fh,
                         req->fhlen,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
