@@ -324,6 +324,24 @@ chimera_smb_query_directory(struct chimera_smb_request *request)
     struct chimera_server_smb_thread *thread = request->compound->thread;
     struct evpl                      *evpl   = thread->evpl;
 
+    /* Validate the client-supplied information class up front.  The readdir
+     * entry marshaller only understands the classes below; anything else
+     * (e.g. smbtorture smb2.scan.find probing all 255 values) must be
+     * answered with STATUS_INVALID_INFO_CLASS, not crash the server when the
+     * first entry is emitted. */
+    switch (request->query_directory.info_class) {
+        case SMB2_FILE_DIRECTORY_INFORMATION:
+        case SMB2_FILE_FULL_DIRECTORY_INFORMATION:
+        case SMB2_FILE_BOTH_DIRECTORY_INFORMATION:
+        case SMB2_FILE_NAMES_INFORMATION:
+        case SMB2_FILE_ID_BOTH_DIRECTORY_INFORMATION:
+        case SMB2_FILE_ID_FULL_DIRECTORY_INFORMATION:
+            break;
+        default:
+            chimera_smb_complete_request(request, SMB2_STATUS_INVALID_INFO_CLASS);
+            return;
+    } /* switch */
+
     request->query_directory.open_file = chimera_smb_open_file_resolve(request, &request->query_directory.file_id);
 
     if (unlikely(!request->query_directory.open_file)) {

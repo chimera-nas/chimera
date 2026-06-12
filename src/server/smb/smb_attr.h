@@ -337,6 +337,15 @@ chimera_smb_marshal_attribute_tag_info(
 
     chimera_smb_marshal_basic_attrs(attr, smb_attr);
 
+    /* marshal_basic_attrs only sets a reparse tag for special files; a
+     * regular file or directory is simply not a reparse point, so report
+     * ReparseTag 0 (MS-FSCC 2.4.6) rather than leaving the attribute unset
+     * and tripping the required-attribute assert at append time. */
+    if (!(smb_attr->smb_attr_mask & SMB_ATTR_REPARSE_TAG)) {
+        smb_attr->smb_reparse_tag = 0;
+        smb_attr->smb_attr_mask  |= SMB_ATTR_REPARSE_TAG;
+    }
+
     /* Clear the timestamp masks since we're not including them */
     smb_attr->smb_attr_mask &= ~(SMB_ATTR_CRTTIME | SMB_ATTR_ATIME |
                                  SMB_ATTR_MTIME | SMB_ATTR_CTIME);
