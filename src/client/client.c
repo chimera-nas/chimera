@@ -32,7 +32,7 @@ chimera_client_config_init(void)
     config->async_delegation         = 0;
     config->async_delegation_threads = 8;
     config->cache_ttl                = 60;
-    config->rcu_reclaim_threads      = 0; /* 0 = one call_rcu worker per CPU */
+    config->rcu_reclaim_threads      = 4; /* 4 = cap RCU reclaim workers to avoid thread exhaustion on many-core hosts */
     config->max_fds                  = 1024;
 
     strncpy(config->modules[0].module_name, "root", sizeof(config->modules[0].module_name));
