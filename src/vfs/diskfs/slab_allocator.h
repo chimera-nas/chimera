@@ -106,7 +106,7 @@ slab_allocator_alloc_new_chunk(
     return ptr;
 } /* slab_allocator_alloc_new_chunk */
 
-void *
+static void *
 slab_allocator_alloc(
     struct slab_allocator *allocator,
     uint64_t               size)
