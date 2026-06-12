@@ -42,8 +42,12 @@ chimera_nfs3_symlink_callback(
                               dir_wcc);
 
     if (res->resok.obj.handle_follows) {
-        chimera_nfs3_unmarshall_fh(&res->resok.obj.handle, ctx->server->index, request->fh, &request->symlink_at.r_attr)
-        ;
+        if (chimera_nfs3_unmarshall_fh(&res->resok.obj.handle, ctx->server->index, request->fh,
+                                       &request->symlink_at.r_attr) != 0) {
+            request->status = CHIMERA_VFS_EOVERFLOW;
+            request->complete(request);
+            return;
+        }
     }
 
     if (res->resok.obj_attributes.attributes_follow) {
