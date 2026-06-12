@@ -1570,6 +1570,9 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.rw.rw1
     smb2.rw.rw2
     # smb2.scan
+    smb2.scan.find
+    smb2.scan.getinfo
+    smb2.scan.scan
     smb2.scan.setinfo
     # smb2.secleak
     smb2.secleak
@@ -1912,6 +1915,9 @@ set(SMBTORTURE_ENABLED_linux
     smb2.rw.invalid
     smb2.rw.rw1
     smb2.rw.rw2
+    # smb2.scan
+    smb2.scan.find
+    smb2.scan.scan
     # smb2.secleak
     smb2.secleak
     # smb2.session-id
@@ -2582,6 +2588,9 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.rw.rw1
     smb2.rw.rw2
     # smb2.scan
+    smb2.scan.find
+    smb2.scan.getinfo
+    smb2.scan.scan
     smb2.scan.setinfo
     # smb2.secleak
     smb2.secleak
@@ -2957,6 +2966,9 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.rw.rw1
     smb2.rw.rw2
     # smb2.scan
+    smb2.scan.find
+    smb2.scan.getinfo
+    smb2.scan.scan
     smb2.scan.setinfo
     # smb2.secleak
     smb2.secleak
