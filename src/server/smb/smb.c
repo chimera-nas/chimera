@@ -339,28 +339,24 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
             request->flags |= CHIMERA_SMB_REQUEST_FLAG_SIGN;
         }
 
-        /* The final SESSION_SETUP response that establishes an authenticated
-         * session MUST be signed once a signing key exists, even when signing
-         * is only enabled (not required). SMB 3.x clients verify this response
-         * to confirm the server holds the session key; for SMB 3.1.1 it also
-         * binds the preauth-integrity hash. */
+        /* Every SESSION_SETUP response that involves an AUTHORIZED session is
+         * signed once a signing key exists, even when signing is only enabled
+         * (not required):
+         *   - the final response that establishes the session — SMB 3.x
+         *     clients verify it to confirm the server holds the session key,
+         *     and for 3.1.1 it binds the preauth-integrity hash;
+         *   - every leg of a channel bind (MS-SMB2 3.3.5.5.3): the client
+         *     signs the binding request with the existing session key and
+         *     requires interim, error and final responses signed —
+         *     session_handle->signing_key holds the session key on
+         *     interim/error legs and the newly derived per-channel key on the
+         *     final SUCCESS leg (an unsigned response is treated as
+         *     STATUS_ACCESS_DENIED);
+         *   - every leg of a re-authentication on a live session, which the
+         *     client likewise verifies with the unchanged session key.
+         * An initial authentication's interim legs are excluded because the
+         * session is only authorized once its final leg succeeds. */
         if (request->smb2_hdr.command == SMB2_SESSION_SETUP &&
-            request->status == SMB2_STATUS_SUCCESS &&
-            request->session_handle &&
-            (request->session_handle->session->flags & CHIMERA_SMB_SESSION_AUTHORIZED)) {
-            request->flags |= CHIMERA_SMB_REQUEST_FLAG_SIGN;
-        }
-
-        /* SMB3 multichannel session binding (MS-SMB2 3.3.5.5.3): the client
-         * signs the binding SESSION_SETUP request with the existing session key
-         * and requires every response on that exchange -- interim, final, or
-         * error -- to be signed.  Sign with session_handle->signing_key, which
-         * holds the established session's key on the interim/error legs and the
-         * newly derived per-channel key on the final SUCCESS leg.  Without this
-         * the client rejects the bind (an unsigned response is treated as
-         * STATUS_ACCESS_DENIED). */
-        if (request->smb2_hdr.command == SMB2_SESSION_SETUP &&
-            (request->session_setup.flags & SMB2_SESSION_FLAG_BINDING) &&
             request->session_handle &&
             (request->session_handle->session->flags & CHIMERA_SMB_SESSION_AUTHORIZED)) {
             request->flags |= CHIMERA_SMB_REQUEST_FLAG_SIGN;
@@ -523,6 +519,16 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
     if (compound->num_requests > 0 &&
         (compound->requests[0]->smb2_hdr.command == SMB2_NEGOTIATE ||
          compound->requests[0]->smb2_hdr.command == SMB2_SESSION_SETUP)) {
+
+        /* Track whether a multi-leg SESSION_SETUP exchange is in flight: the
+         * next SESSION_SETUP that arrives with this clear starts a NEW
+         * authentication exchange and restarts the preauth-integrity hash from
+         * the post-NEGOTIATE baseline (see the request-fold path).  Only an
+         * interim MORE_PROCESSING_REQUIRED leg leaves the exchange open. */
+        if (compound->requests[0]->smb2_hdr.command == SMB2_SESSION_SETUP) {
+            conn->session_setup_in_progress =
+                (compound->requests[0]->status == SMB2_STATUS_MORE_PROCESSING_REQUIRED);
+        }
 
         /* A SESSION_SETUP that completes with a hard error contributes nothing
          * to the preauth-integrity hash: the client folds a SESSION_SETUP
@@ -1193,7 +1199,20 @@ chimera_smb_server_handle_smb2(
                     request->session_handle = session_handle;
                 } else {
 
-                    session = chimera_smb_session_lookup(thread->shared, request->smb2_hdr.session_id);
+                    /* Only a SESSION_SETUP (a channel bind, or a re-auth /
+                     * reconnect probe the handler answers per MS-SMB2) may
+                     * adopt a session from the GLOBAL table onto this
+                     * connection: the attached handle carries the session's
+                     * signing key so the exchange's responses can be signed
+                     * (Samba bug 14512).  Any other command referencing a
+                     * session with no channel on this connection is answered
+                     * USER_SESSION_DELETED without taking a session reference
+                     * — a parasitic reference here would keep a dying
+                     * session's opens alive after its real channels are gone
+                     * (smb2.session.bind2). */
+                    session = request->smb2_hdr.command == SMB2_SESSION_SETUP ?
+                        chimera_smb_session_lookup(thread->shared, request->smb2_hdr.session_id) :
+                        NULL;
 
                     if (session) {
                         session_handle = chimera_smb_session_handle_alloc(thread);
@@ -1246,6 +1265,23 @@ chimera_smb_server_handle_smb2(
         if (unlikely(request->session_handle &&
                      (request->session_handle->session->flags &
                       CHIMERA_SMB_SESSION_DELETED))) {
+            request->session_handle                      = NULL;
+            request->status                              = SMB2_STATUS_USER_SESSION_DELETED;
+            request->flags                              |= CHIMERA_SMB_REQUEST_FLAG_PARSE_FAILED;
+            compound->requests[compound->num_requests++] = request;
+            goto next_compound_request;
+        }
+
+        /* A session that exists globally but has no channel on THIS connection
+         * (the handle was attached by the global-session lookup above, e.g.
+         * for a channel bind in progress or one that failed) may only be
+         * referenced by SESSION_SETUP.  Any other command through such a
+         * handle is answered STATUS_USER_SESSION_DELETED without touching the
+         * session (MS-SMB2 3.3.5.2.9; Samba bug 14512 / smbtorture
+         * smb2.session.bind_invalid_auth's "unlink on invalid channel"). */
+        if (unlikely(request->session_handle &&
+                     !request->session_handle->is_channel &&
+                     request->smb2_hdr.command != SMB2_SESSION_SETUP)) {
             request->session_handle                      = NULL;
             request->status                              = SMB2_STATUS_USER_SESSION_DELETED;
             request->flags                              |= CHIMERA_SMB_REQUEST_FLAG_PARSE_FAILED;
@@ -1465,19 +1501,24 @@ chimera_smb_server_handle_smb2(
      * handler derives the signing key over a hash that includes this request.
      * Maintained unconditionally for these commands; only consumed at 3.1.1.
      *
-     * A SESSION_SETUP whose header SessionId is 0 starts a brand-new
-     * authentication (the first leg of a new session, including a re-auth
-     * after LOGOFF on the same connection).  Per MS-SMB2 3.3.5.5.3 that
-     * session's preauth hash restarts from the post-NEGOTIATE baseline, not
-     * from whatever earlier sessions accumulated -- otherwise the signing key
-     * is derived over the wrong hash and the client rejects the session. */
+     * A SESSION_SETUP that is not a continuation leg of an in-flight exchange
+     * starts a brand-new authentication: the first leg of a new session
+     * (header SessionId 0, including a re-auth after LOGOFF on the same
+     * connection), and equally the first leg of a channel bind or of a
+     * re-authentication, which carry the EXISTING session's id.  Per MS-SMB2
+     * 3.3.5.5.3 that exchange's preauth hash restarts from the post-NEGOTIATE
+     * baseline, not from whatever earlier exchanges accumulated -- otherwise
+     * the signing key is derived over the wrong hash and the client rejects
+     * the session (a bound channel's signing key would chain over the
+     * connection's previous session setups, which the client never folds). */
     if (compound->num_requests > 0 &&
         (compound->requests[0]->smb2_hdr.command == SMB2_NEGOTIATE ||
          compound->requests[0]->smb2_hdr.command == SMB2_SESSION_SETUP)) {
         uint8_t *msg = malloc(length);
         if (msg) {
             if (compound->requests[0]->smb2_hdr.command == SMB2_SESSION_SETUP &&
-                compound->requests[0]->smb2_hdr.session_id == 0) {
+                (compound->requests[0]->smb2_hdr.session_id == 0 ||
+                 !conn->session_setup_in_progress)) {
                 memcpy(conn->preauth_hash, conn->negotiate_preauth_hash,
                        sizeof(conn->preauth_hash));
             }
@@ -2027,8 +2068,9 @@ chimera_smb_server_accept(
     /* SMB 3.1.1 preauth-integrity hash starts at zero for each connection. */
     memset(conn->preauth_hash, 0, sizeof(conn->preauth_hash));
     memset(conn->negotiate_preauth_hash, 0, sizeof(conn->negotiate_preauth_hash));
-    conn->rdma_niov   = 0;
-    conn->rdma_length = 0;
+    conn->session_setup_in_progress = 0;
+    conn->rdma_niov                 = 0;
+    conn->rdma_length               = 0;
     /* Conns are pooled; clear per-connection negotiate state so the
     * "NEGOTIATE after NEGOTIATE" guard (MS-SMB2 3.3.5.4) does not trip on
     * a dialect inherited from a previously torn-down connection. */

@@ -268,6 +268,20 @@ struct chimera_smb_session {
      * authorized the session.  A later binding SESSION_SETUP on a connection
      * whose SupportsNotifications differs is rejected (3.1.1 only). */
     uint8_t                     supports_notifications;
+    /* Signing algorithm (SMB2_SIGNING_*) negotiated on the connection the
+     * session was established on.  A SESSION_SETUP response the client
+     * verifies against Session.SigningKey (binding interim/error legs and
+     * other non-final session-setup responses) must be signed with the
+     * SESSION's dialect+algorithm, not the receiving connection's: the
+     * client's session signing-key object carries the algorithm of the
+     * establishing connection (smbtorture smb2.session.bind_negative_smb3to2*,
+     * Samba bug 14512). */
+    uint16_t                    sign_alg;
+    /* Cipher (SMB2_ENCRYPTION_*) negotiated on the establishing connection,
+     * recorded whether or not encryption is active.  A binding connection
+     * whose negotiated cipher differs is rejected with
+     * STATUS_INVALID_PARAMETER (MS-SMB2 3.3.5.5). */
+    uint16_t                    conn_cipher_id;
     struct UT_hash_handle       hh;
     struct chimera_smb_session *prev;
     struct chimera_smb_session *next;

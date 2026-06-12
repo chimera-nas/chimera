@@ -154,6 +154,20 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
 
         if (!(request->smb2_hdr.flags & SMB2_FLAGS_SIGNED)) {
             reject = 1;
+        } else if ((bind_session->flags & CHIMERA_SMB_SESSION_AUTHORIZED) &&
+                   bind_session->dialect != conn->dialect) {
+            /* MS-SMB2 3.3.5.5: the binding connection's dialect MUST equal the
+             * dialect of the connection the session was established on
+             * (smb2.session.bind_negative_smb3to3* binds a 3.0.2 session from
+             * a 3.1.1 connection and expects STATUS_INVALID_PARAMETER). */
+            reject = 1;
+        } else if ((bind_session->flags & CHIMERA_SMB_SESSION_AUTHORIZED) &&
+                   conn->negotiated.cipher_id != bind_session->conn_cipher_id) {
+            /* MS-SMB2 3.3.5.5: likewise the negotiated cipher must match the
+             * establishing connection's (smb2.session.bind_negative_
+             * smb3encGtoC* negotiates AES-128-GCM on the first connection and
+             * AES-128-CCM on the binding one). */
+            reject = 1;
         } else if (conn->dialect == SMB2_DIALECT_3_1_1 &&
                    bind_session->supports_notifications !=
                    conn->supports_notifications) {
@@ -167,6 +181,35 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
             return;
         }
     }
+
+    /* A non-binding SESSION_SETUP that names an established session which has
+     * no channel on THIS connection is invalid: re-authentication is only
+     * possible over a connection the session is bound to.  The session itself
+     * is left untouched and the request answered STATUS_USER_SESSION_DELETED
+     * (MS-SMB2 3.3.5.5; Samba bug 14512 — the response is signed with the
+     * session's key by the reply path since the handle remains attached). */
+    if (!(request->session_setup.flags & SMB2_SESSION_FLAG_BINDING) &&
+        request->session_handle &&
+        (request->session_handle->session->flags & CHIMERA_SMB_SESSION_AUTHORIZED) &&
+        !request->session_handle->is_channel) {
+        chimera_smb_complete_request(request, SMB2_STATUS_USER_SESSION_DELETED);
+        evpl_iovecs_release(thread->evpl, request->session_setup.input_iov,
+                            request->session_setup.input_niov);
+        return;
+    }
+
+    int is_binding = (request->session_setup.flags &
+                      SMB2_SESSION_FLAG_BINDING) != 0;
+
+    /* Re-authentication: a non-binding SESSION_SETUP over an established
+     * channel of a live session (MS-SMB2 3.3.5.5.2).  The session, its open
+     * handles and trees, and crucially its keys are all preserved — the server
+     * MUST NOT change Session.SessionKey or the signing/encryption keys on
+     * re-authentication; only the security context is refreshed. */
+    int is_reauth = !is_binding &&
+        request->session_handle &&
+        (request->session_handle->session->flags & CHIMERA_SMB_SESSION_AUTHORIZED) &&
+        request->session_handle->is_channel;
 
     // Detect authentication mechanism
     mech = smb_auth_detect_mechanism(input, input_len);
@@ -200,6 +243,26 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
             bad_token = 1;
             break;
     } /* switch */
+
+    /* A structurally malformed authentication token (e.g. an NTLMv2_RESPONSE
+     * whose client-challenge AvPairs cannot be parsed) is reported as
+     * SMB_NTLM_STATUS_BAD_TOKEN and answered STATUS_INVALID_PARAMETER, not
+     * STATUS_LOGON_FAILURE (Samba bug 14932). */
+    if (rc == SMB_NTLM_STATUS_BAD_TOKEN) {
+        rc        = -1;
+        bad_token = 1;
+    }
+
+    /* Anonymous NTLM authentication is accepted only as a re-authentication of
+     * an established session (smb2.session.reauth2-5 re-authenticate a user
+     * session as anonymous and back; the session keeps its keys and open
+     * handles while the security context switches).  An initial anonymous
+     * session or an anonymous channel bind is refused. */
+    if (rc == 0 && mech == SMB_AUTH_MECH_NTLM &&
+        conn->ntlm_ctx.is_anonymous && !is_reauth) {
+        chimera_smb_error("Anonymous authentication rejected (only re-authentication of an established session)");
+        rc = -1;
+    }
 
     /* Allocate the session (and its SessionId) on the first leg, whether the
      * exchange completes now or needs another round trip. The server MUST
@@ -259,10 +322,8 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
          * encrypted. */
         uint8_t     session_key_saved[32];
         size_t      session_key_saved_len = 0;
-        int         is_anonymous          = 0;
-
-        int         is_binding = (request->session_setup.flags &
-                                  SMB2_SESSION_FLAG_BINDING) != 0;
+        int         is_anonymous          = (mech == SMB_AUTH_MECH_NTLM &&
+                                             conn->ntlm_ctx.is_anonymous);
 
         /* SMB3 multichannel session binding (MS-SMB2 §3.3.5.5.3): account for
          * the new channel and enforce the per-session channel limit BEFORE any
@@ -274,6 +335,21 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
         if (is_binding &&
             (session->flags & CHIMERA_SMB_SESSION_AUTHORIZED)) {
             int over_limit = 0;
+
+            /* MS-SMB2 3.3.5.5.3: the binding user MUST be the user the session
+            * was established by; a successful authentication as a DIFFERENT
+            * principal is rejected with STATUS_ACCESS_DENIED and the session
+            * (and its channels) survive (smb2.session.bind_different_user). */
+            if (mech == SMB_AUTH_MECH_NTLM &&
+                smb_ntlm_get_uid(&conn->ntlm_ctx) != session->cred.uid) {
+                chimera_smb_error("Channel bind rejected: user mismatch (uid %u != session uid %u)",
+                                  smb_ntlm_get_uid(&conn->ntlm_ctx), session->cred.uid);
+                chimera_smb_complete_request(request, SMB2_STATUS_ACCESS_DENIED);
+                evpl_iovecs_release(thread->evpl,
+                                    request->session_setup.input_iov,
+                                    request->session_setup.input_niov);
+                return;
+            }
 
             pthread_mutex_lock(&shared->sessions_lock);
             if (session->num_channels >= SMB2_MAX_CHANNELS) {
@@ -296,7 +372,13 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
         if (mech == SMB_AUTH_MECH_NTLM) {
             uint8_t session_key[SMB_NTLM_SESSION_KEY_SIZE];
 
-            if (smb_ntlm_get_session_key(&conn->ntlm_ctx, session_key, sizeof(session_key)) == 0) {
+            /* Re-authentication MUST NOT change the session's keys (MS-SMB2
+             * 3.3.5.5.2): the client keeps signing with the original session
+             * key, so skip key derivation entirely on a re-auth leg.  A
+             * channel bind derives this CHANNEL's signing key from the new
+             * exchange's session key and this connection's preauth hash. */
+            if (!is_reauth &&
+                smb_ntlm_get_session_key(&conn->ntlm_ctx, session_key, sizeof(session_key)) == 0) {
                 chimera_smb_derive_signing_key(conn->dialect,
                                                session_handle->signing_key,
                                                session_key,
@@ -331,7 +413,8 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
         } else if (mech == SMB_AUTH_MECH_KERBEROS) {
             uint8_t session_key[SMB_GSSAPI_SESSION_KEY_SIZE];
 
-            if (smb_gssapi_get_session_key(&conn->gssapi_ctx, session_key, sizeof(session_key)) == 0) {
+            if (!is_reauth &&
+                smb_gssapi_get_session_key(&conn->gssapi_ctx, session_key, sizeof(session_key)) == 0) {
                 chimera_smb_derive_signing_key(conn->dialect,
                                                session_handle->signing_key,
                                                session_key,
@@ -403,7 +486,7 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
             conn->negotiated.cipher_id != 0 &&
             conn->dialect >= SMB2_DIALECT_3_0 &&
             session_key_saved_len > 0 &&
-            !is_anonymous) {
+            !is_anonymous && !is_reauth && !is_binding) {
             size_t klen = 0;
 
             if (chimera_smb_derive_encryption_keys(
@@ -423,6 +506,13 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
             memcpy(session->signing_key, session_handle->signing_key, sizeof(session_handle->signing_key));
             /* The primary channel counts as the session's first channel. */
             session->num_channels = 1;
+            /* Record the establishing connection's signing algorithm and
+             * negotiated cipher: SESSION_SETUP responses verified against
+             * Session.SigningKey must be signed with this algorithm even when
+             * they go out on a binding connection that negotiated another, and
+             * a binding connection's cipher must match this one. */
+            session->sign_alg       = conn->negotiated.signing_alg;
+            session->conn_cipher_id = conn->negotiated.cipher_id;
             if (session_handle->enc_key_len > 0) {
                 memcpy(session->enc_key, session_handle->enc_key, sizeof(session->enc_key));
                 memcpy(session->dec_key, session_handle->dec_key, sizeof(session->dec_key));
@@ -436,13 +526,19 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
             chimera_smb_session_authorize(shared, session);
         }
 
+        /* This connection now legitimately owns a channel of the session:
+         * the establishing/binding/re-authenticated SESSION_SETUP succeeded. */
+        session_handle->is_channel = 1;
+
         /* If the client named a previous session (reconnect on a fresh
          * transport), close it now that this one is established.  MS-SMB2
          * 3.3.5.5.1: when the previous session was negotiated at a different
          * dialect than this connection, the reconnect is rejected -- close the
          * just-created session and fail with STATUS_USER_SESSION_DELETED
-         * (smb2.session ReconnectWithDifferentDialect). */
-        if (request->session_setup.prev_session_id &&
+         * (smb2.session ReconnectWithDifferentDialect).  PreviousSessionId is
+         * ignored on a binding SESSION_SETUP (MS-SMB2 3.3.5.5.3). */
+        if (!is_binding &&
+            request->session_setup.prev_session_id &&
             chimera_smb_session_invalidate_previous(thread, shared,
                                                     request->session_setup.prev_session_id,
                                                     session, conn->dialect)) {
@@ -471,9 +567,6 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
          * existing session down — the established channel(s) survive.  Only a
          * failed initial auth (never-authorized session) or a failed non-binding
          * REAUTH invalidates the session. */
-        int is_binding = (request->session_setup.flags &
-                          SMB2_SESSION_FLAG_BINDING) != 0;
-
         if (request->session_handle &&
             !((request->session_handle->session->flags &
                CHIMERA_SMB_SESSION_AUTHORIZED) && is_binding)) {
@@ -493,8 +586,27 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
              *     (smb2.notify.invalid-reauth) and makes the SessionId
              *     invalid for subsequent requests.  A failed auth holds no
              *     preservable durable opens, so nothing to preserve. */
+            struct chimera_smb_session *failed_session = request->session_handle->session;
+
+            /* A failed REAUTH invalidates the whole session, not just this
+             * connection's handle: remove it from the global table and mark it
+             * DELETED so requests arriving on OTHER channels (and later
+             * global lookups) are answered USER_SESSION_DELETED while the
+             * session lingers until every referencing connection drops
+             * (smb2.session.bind_invalid_auth re-auths a bound session with
+             * invalid credentials and expects both channels dead).  Clearing
+             * AUTHORIZED keeps the refcnt-driven release below from HASH_DELing
+             * a second time. */
+            pthread_mutex_lock(&shared->sessions_lock);
+            if (failed_session->flags & CHIMERA_SMB_SESSION_AUTHORIZED) {
+                failed_session->flags |= CHIMERA_SMB_SESSION_DELETED;
+                failed_session->flags &= ~CHIMERA_SMB_SESSION_AUTHORIZED;
+                HASH_DEL(shared->sessions, failed_session);
+            }
+            pthread_mutex_unlock(&shared->sessions_lock);
+
             HASH_DEL(conn->session_handles, request->session_handle);
-            chimera_smb_session_release(thread, shared, request->session_handle->session, false);
+            chimera_smb_session_release(thread, shared, failed_session, false);
             chimera_smb_session_handle_free(thread, request->session_handle);
             request->session_handle   = NULL;
             conn->last_session_handle = NULL;
