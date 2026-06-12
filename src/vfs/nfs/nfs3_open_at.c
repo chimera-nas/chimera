@@ -51,7 +51,12 @@ chimera_nfs3_open_at_lookup_callback(
         chimera_nfs3_unmarshall_attrs(&res->resok.dir_attributes.attributes, &request->open_at.r_dir_post_attr);
     }
 
-    chimera_nfs3_unmarshall_fh(&res->resok.object, ctx->server->index, request->fh, &request->open_at.r_attr);
+    if (chimera_nfs3_unmarshall_fh(&res->resok.object, ctx->server->index, request->fh, &request->open_at.r_attr) != 0)
+    {
+        request->status = CHIMERA_VFS_EOVERFLOW;
+        request->complete(request);
+        return;
+    }
 
     /* Allocate open state for dirty tracking and silly rename support.
      * Skip for inferred opens (use synthetic handles which don't call close).
@@ -109,7 +114,12 @@ chimera_nfs3_open_at_create_callback(
         chimera_nfs3_unmarshall_attrs(&res->resok.obj_attributes.attributes, &request->open_at.r_attr);
     }
 
-    chimera_nfs3_unmarshall_fh(&res->resok.obj.handle, ctx->server->index, request->fh, &request->open_at.r_attr);
+    if (chimera_nfs3_unmarshall_fh(&res->resok.obj.handle, ctx->server->index, request->fh, &request->open_at.r_attr) !=
+        0) {
+        request->status = CHIMERA_VFS_EOVERFLOW;
+        request->complete(request);
+        return;
+    }
 
     chimera_nfs3_get_wcc_data(&request->open_at.r_dir_pre_attr, &request->open_at.r_dir_post_attr, &res->resok.dir_wcc);
 

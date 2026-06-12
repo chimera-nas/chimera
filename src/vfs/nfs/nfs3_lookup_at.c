@@ -38,7 +38,12 @@ chimera_nfs3_lookup_callback(
         return;
     }
 
-    chimera_nfs3_unmarshall_fh(&res->resok.object, ctx->server->index, request->fh, &request->lookup_at.r_attr);
+    if (chimera_nfs3_unmarshall_fh(&res->resok.object, ctx->server->index, request->fh, &request->lookup_at.r_attr) != 0
+        ) {
+        request->status = CHIMERA_VFS_EOVERFLOW;
+        request->complete(request);
+        return;
+    }
 
     if (res->resok.obj_attributes.attributes_follow) {
         chimera_nfs3_unmarshall_attrs(&res->resok.obj_attributes.attributes, &request->lookup_at.r_attr);

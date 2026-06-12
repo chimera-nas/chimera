@@ -58,7 +58,11 @@ chimera_nfs3_readdir_callback(
         attrs.va_set_mask = 0;
 
         if (entry->name_handle.handle_follows) {
-            chimera_nfs3_unmarshall_fh(&entry->name_handle.handle, ctx->server->index, request->fh, &attrs);
+            /* An entry whose upstream handle is too large to re-encode is
+             * emitted without a handle (ATTR_FH left unset) rather than
+             * aborting the whole listing -- the same as an entry the server
+             * sent with handle_follows == false. */
+            (void) chimera_nfs3_unmarshall_fh(&entry->name_handle.handle, ctx->server->index, request->fh, &attrs);
         }
 
         if (entry->name_attributes.attributes_follow) {

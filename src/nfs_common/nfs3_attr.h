@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -291,7 +291,25 @@ chimera_nfs3_unmarshall_attrs(
     attr->va_set_mask |= CHIMERA_NFS3_ATTR_MASK | CHIMERA_VFS_ATTR_FSID | CHIMERA_VFS_ATTR_ATOMIC;
 } /* chimera_nfs3_unmarshall_attrs */
 
-static inline void
+/*
+ * Re-encode an upstream NFSv3 file handle into a chimera proxy handle:
+ * [server_index][remote_fh_data] prefixed with the parent's mount id.
+ *
+ * fh->data is server-supplied (this is the NFS *client* module parsing a
+ * backend server's reply) and bounded only by the wire frame, NOT by the
+ * NFS3_FHSIZE the schema declares -- the generated XDR decoder does not enforce
+ * the `<NFS3_FHSIZE>` bound.  The local `fragment` buffer holds the 1-byte
+ * server index plus the handle data, so the handle must be small enough that
+ * 1 + fh->data.len fits in CHIMERA_VFS_FH_SIZE (which also keeps the subsequent
+ * encode into the larger attr->va_fh in bounds).  An oversized handle -- a
+ * malformed/malicious server, or simply a backend whose handles are larger than
+ * chimera can represent -- is rejected rather than overflowing the stack buffer.
+ *
+ * Returns 0 on success (ATTR_FH set), -1 if the handle does not fit (ATTR_FH
+ * left unset; the caller fails the operation with EOVERFLOW, or omits the
+ * handle for an optional readdir entry).
+ */
+static inline int
 chimera_nfs3_unmarshall_fh(
     const struct nfs_fh3     *fh,
     int                       server_index,
@@ -301,6 +319,11 @@ chimera_nfs3_unmarshall_fh(
     uint8_t fragment[CHIMERA_VFS_FH_SIZE];
     int     fragment_len;
 
+    /* 1 (server_index) + data must fit the fragment buffer. */
+    if (fh->data.len > CHIMERA_VFS_FH_SIZE - 1) {
+        return -1;
+    }
+
     /* Build fh_fragment: [server_index][remote_fh_data] */
     fragment[0] = server_index;
     memcpy(fragment + 1, fh->data.data, fh->data.len);
@@ -308,6 +331,7 @@ chimera_nfs3_unmarshall_fh(
 
     attr->va_set_mask |= CHIMERA_VFS_ATTR_FH;
     attr->va_fh_len    = chimera_vfs_encode_fh_parent(parent_fh, fragment, fragment_len, attr->va_fh);
+    return 0;
 } /* chimera_nfs3_unmarshall_fh */
 
 
