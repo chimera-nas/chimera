@@ -3,7 +3,14 @@
 #
 # SPDX-License-Identifier: Unlicense
 
-# Usage: wpts_smb_test_wrapper.sh <chimera_binary> <backend> <test_filter>
+# Usage: wpts_smb_test_wrapper.sh <chimera_binary> <backend> <test_list>
+#
+#   <test_list>  comma-separated vstest test-name list (passed to `--Tests`).
+#                A whole config-group's allowlist is run in ONE vstest
+#                invocation against a single chimera server -- the per-case
+#                .NET host + daemon bringup dominated, so batching is ~10x
+#                faster.  (`--Tests` scales past the `--TestCaseFilter` OR-chain
+#                grammar limit that trips on long `Name=A|Name=B|...` filters.)
 #
 # Runs Microsoft's Windows Protocol Test Suites (WPTS) File Server / MS-SMB2
 # server test suite against a standalone chimera SMB server. Unlike the KVM
@@ -15,7 +22,7 @@
 # 2. Creates a network namespace with the SUT IP (10.0.0.1)
 # 3. Starts the chimera daemon in the netns (SMB on 10.0.0.1:445)
 # 4. Stages our pinned .ptfconfig files into the WPTS Bin dir
-# 5. Runs `dotnet vstest` with the requested TestCategory filter
+# 5. Runs `dotnet vstest --Tests:<list>` to execute the requested test names
 # 6. Captures the TRX result + vstest exit code and cleans up
 #
 # Required environment:
@@ -303,7 +310,17 @@ mkdir -p "$RESULT_DIR"
 
 FILTER_ARGS=()
 if [ -n "${TEST_FILTER}" ]; then
-    FILTER_ARGS=(--TestCaseFilter:"${TEST_FILTER}")
+    # TEST_FILTER is a comma-separated test-name list (a whole config-group's
+    # allowlist).  Build an exact-match --TestCaseFilter ("Name=A|Name=B|...") so
+    # we run EXACTLY the curated allowlist: vstest --Tests does *substring*
+    # matching and would pull in non-allowlisted name variants.
+    _wpts_filter=""
+    IFS=',' read -ra _wpts_names <<< "${TEST_FILTER}"
+    for _wpts_name in "${_wpts_names[@]}"; do
+        [ -n "${_wpts_filter}" ] && _wpts_filter="${_wpts_filter}|"
+        _wpts_filter="${_wpts_filter}Name=${_wpts_name}"
+    done
+    FILTER_ARGS=(--TestCaseFilter:"${_wpts_filter}")
 fi
 
 # Run the suite from inside the netns so it can reach the SUT IP.
