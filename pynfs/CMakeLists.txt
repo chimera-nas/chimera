@@ -114,14 +114,20 @@ set(PYNFS_LEASE_OVERRIDE_deleg DELEG8)
 # PYNFS_LEASE_OVERRIDE_SECONDS_<flag> overrides the shared default above.
 #
 # The flake is load-correlated -- a heavy ctest -j run is exactly when the 1000
-# client setup is slowest, pushing total runtime toward the 60s default wrapper
-# timeout (pynfs_test_wrapper.sh) just as the longer sleeps already cost more.
-# Raise the courteous wrapper timeout (PYNFS_TIMEOUT_<flag>, plumbed below) to
-# absorb that variance; 90s leaves ample headroom (COUR1's lease*2 = 40s sleep
-# plus even a badly inflated setup) while still flagging a genuine hang.
+# client setup is slowest, pushing total runtime toward the wrapper timeout just
+# as the longer sleeps already cost more.  COUR7's budget is:
+#   setup (1000 clients) + sleep(lease+10 = 30s) + conflicting open
+# The 90s ceiling that appeared sufficient when the fix was written (with ~8-10s
+# setup observed then) proved too tight after the devcontainer test job was split
+# into per-category shards: all pynfs tests now run concurrently in one shard,
+# and the heavier intra-shard parallelism pushes the setup past 60s under CI
+# load, hitting the 90s wall.  The whole family fails in lockstep -- the
+# classic all-backends-at-once load-induced timeout signature.  Raise to 180s,
+# matching the headroom already given to the other load-sensitive pynfs suites
+# (delegations, destroy_session, readdir).
 set(PYNFS_LEASE_OVERRIDE_courteous COUR1 COUR2 COUR3 COUR4 COUR5 COUR6 COUR7)
 set(PYNFS_LEASE_OVERRIDE_SECONDS_courteous 20)
-set(PYNFS_TIMEOUT_courteous 90)
+set(PYNFS_TIMEOUT_courteous 180)
 
 # Per-code delegation-enable override.  The wrapper enables NFSv4 protocol
 # delegations only for the deleg/delegations suites, so the other suites
