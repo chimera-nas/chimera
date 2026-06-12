@@ -17,6 +17,16 @@ on:
 #   - all OS images built for amd64 (devcontainer also for arm64)
 #   - tests on all OS images amd64; arm64 only on devcontainer
 #   - static analysis only on devcontainer
+#
+# The run is three phases, fanned out as wide as possible within each, and
+# the job display names follow the phase ("Build X" = container image,
+# "Compile X" = the source tree, "Test X" / "Analyze X" = phase 3) so the CI
+# details view reads unambiguously:
+#   1. Build    container images       (build-devcontainer, build-<os>)
+#   2. Compile  the source tree        (build-dev, build-os), build trees
+#               pushed to the local Nexus scratch repo
+#   3. Test     tests + static analysis (test, test-dev, static-analysis),
+#               all in parallel behind the Compiles-complete barrier
 
 env:
   DEV_IMAGE_TAG_PREFIX: repository.mdh.quantum.com:5004/cache/chimera-dev
@@ -297,8 +307,14 @@ jobs:
           build-args: |
             DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
 
-  test:
-    name: Test ${{ matrix.image_name }} ${{ matrix.arch }} ${{ matrix.build_type }}
+  # Distro build half (phase 2): compile the tree once per (image, build_type)
+  # and publish it to the local Nexus scratch repo for the matching `test` job
+  # to consume -- the same build/test split the devcontainer uses (build-dev /
+  # test-dev below).  Phase 3 (all test jobs + static analysis, in parallel)
+  # starts only once every phase-2 compile has finished (the build-complete
+  # barrier).
+  build-os:
+    name: Compile ${{ matrix.image_name }} ${{ matrix.arch }} ${{ matrix.build_type }}
     needs: [build-devcontainer, build-ubuntu26, build-ubuntu24, build-ubuntu22, build-rocky9, build-rocky10]
     if: ${{ github.event_name != 'pull_request' }}
     runs-on: ${{ matrix.runner }}
@@ -310,7 +326,7 @@ jobs:
         include:
           # NOTE: the devcontainer is built and tested by the dedicated
           # build-dev / test-dev jobs below (build once, then shard the tests by
-          # category); it is no longer part of this combined build+test matrix.
+          # category); it is no longer part of this distro matrix.
           # ubuntu 26 (amd64 only on PR; arm64 runs in nightly)
           - platform: linux/amd64
             runner: arc-amd64
@@ -404,7 +420,7 @@ jobs:
             | tar -xz -C "${{ github.workspace }}" oras
           chmod +x "${{ github.workspace }}/oras"
 
-      - name: Configure, build, and test inside the container
+      - name: Configure and build inside the container
         run: |
           docker run --rm --privileged \
             -e DOCKER_MIRROR=${{ env.DOCKER_MIRROR }} \
@@ -420,6 +436,69 @@ jobs:
               cmake -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DREQUIRE_NETNS_TESTS=ON -DKVM_IMAGE_REGISTRY=${{ env.KVM_IMAGE_REGISTRY }} -DPYNFS_JUNIT_DIR=/workspace/ctest-results/pynfs-junit -DSMBTORTURE_JUNIT_DIR=/workspace/ctest-results/smbtorture-junit ${{ matrix.cmake_extra }} /workspace
               ninja
               ccache --show-stats || true
+              tar -C /build --exclude=./ccache -czf /workspace/build-os.tar.gz .'
+
+      - name: Upload build tree to Nexus scratch
+        env:
+          NEXUS_USER: ${{ secrets.NEXUS_SCRATCH_USER }}
+          NEXUS_PASSWORD: ${{ secrets.NEXUS_SCRATCH_PASSWORD }}
+        run: |
+          curl -sfS --retry 5 --retry-all-errors --retry-delay 5 \
+            -u "${NEXUS_USER}:${NEXUS_PASSWORD}" \
+            -T build-os.tar.gz \
+            "${{ env.NEXUS_SCRATCH_URL }}/chimera/build-${{ matrix.image_name }}-${{ github.run_id }}-${{ matrix.arch }}-${{ matrix.build_type }}.tar.gz"
+
+  # Distro test half (phase 3): pull the build tree from Nexus scratch and run
+  # this image's full ctest suite.  Gated on the build-complete barrier, so all
+  # test jobs (distro + devcontainer shards) and static analysis start together
+  # once every compile has finished.
+  test:
+    name: Test ${{ matrix.image_name }} ${{ matrix.arch }} ${{ matrix.build_type }}
+    needs: [build-complete]
+    if: ${{ github.event_name != 'pull_request' }}
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64]
+        build_type: [Release, Debug]
+        image_name: [ubuntu26, ubuntu24, ubuntu22, rocky9, rocky10]
+        include:
+          - { arch: amd64, runner: arc-amd64 }
+          - { image_name: ubuntu26, image_tag_prefix: "repository.mdh.quantum.com:5004/cache/chimera-ubuntu26" }
+          - { image_name: ubuntu24, image_tag_prefix: "repository.mdh.quantum.com:5004/cache/chimera-ubuntu24" }
+          - { image_name: ubuntu22, image_tag_prefix: "repository.mdh.quantum.com:5004/cache/chimera-ubuntu22" }
+          - { image_name: rocky9,   image_tag_prefix: "repository.mdh.quantum.com:5004/cache/chimera-rocky9" }
+          - { image_name: rocky10,  image_tag_prefix: "repository.mdh.quantum.com:5004/cache/chimera-rocky10" }
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Download build tree from Nexus scratch
+        env:
+          NEXUS_USER: ${{ secrets.NEXUS_SCRATCH_USER }}
+          NEXUS_PASSWORD: ${{ secrets.NEXUS_SCRATCH_PASSWORD }}
+        run: |
+          curl -sfS --retry 5 --retry-all-errors --retry-delay 5 \
+            -u "${NEXUS_USER}:${NEXUS_PASSWORD}" \
+            -o build-os.tar.gz \
+            "${{ env.NEXUS_SCRATCH_URL }}/chimera/build-${{ matrix.image_name }}-${{ github.run_id }}-${{ matrix.arch }}-${{ matrix.build_type }}.tar.gz"
+
+      - name: Unpack and test inside the container
+        run: |
+          docker run --rm --privileged \
+            -e DOCKER_MIRROR=${{ env.DOCKER_MIRROR }} \
+            -e APT_MIRROR=${{ env.APT_MIRROR }} \
+            -v "${{ github.workspace }}:/workspace" \
+            -v /build \
+            -w /build \
+            ${{ matrix.image_tag_prefix }}:${{ github.sha }}-${{ matrix.arch }} \
+            bash -euxc '
+              tar -C /build -xzf /workspace/build-os.tar.gz
               mkdir -p /workspace/ctest-results
               rm -f /workspace/flaky-rescued.log
               start=$(date +%s)
@@ -461,9 +540,15 @@ jobs:
           path: flaky-rescued.log
           retention-days: 14
 
+  # Phase 3 alongside the test jobs: scan-build does its own instrumented
+  # compile (it cannot reuse the Nexus build tree), but it is gated on the
+  # build-complete barrier so the analysis fleet spins up together with the
+  # tests instead of competing with the phase-2 compiles -- and so a
+  # scan-build finding never blocks tests from starting (it still gates
+  # ci-complete).
   static-analysis:
     name: Analyze ${{ matrix.image_name }} ${{ matrix.arch }} ${{ matrix.build_type }}
-    needs: [build-devcontainer]
+    needs: [build-complete]
     if: ${{ github.event_name != 'pull_request' }}
     runs-on: ${{ matrix.runner }}
     permissions:
@@ -582,7 +667,7 @@ jobs:
   # test shards fetch them on demand.  KVM is x86-only in the devcontainer, so
   # arm64 builds with KVM off.
   build-dev:
-    name: Build devcontainer ${{ matrix.arch }} ${{ matrix.build_type }}
+    name: Compile devcontainer ${{ matrix.arch }} ${{ matrix.build_type }}
     needs: [build-devcontainer]
     if: ${{ github.event_name != 'pull_request' }}
     runs-on: ${{ matrix.runner }}
@@ -649,19 +734,20 @@ jobs:
             -T build-dev.tar.gz \
             "${{ env.NEXUS_SCRATCH_URL }}/chimera/build-dev-${{ github.run_id }}-${{ matrix.arch }}-${{ matrix.build_type }}.tar.gz"
 
-  # Barrier: every devcontainer build-time job (build + static analysis) must
-  # finish before any test-dev shard starts.  Default needs-success semantics
-  # mean a failed build skips this, which in turn skips all test shards.
-  build-dev-complete:
-    name: Devcontainer build complete
-    needs: [build-dev, static-analysis]
+  # Phase-2 -> phase-3 barrier: every compile (devcontainer + distro) must
+  # finish before any test job or the static analysis starts.  Default
+  # needs-success semantics mean a failed build skips this, which in turn
+  # skips phase 3 entirely.
+  build-complete:
+    name: Compiles complete
+    needs: [build-dev, build-os]
     if: ${{ github.event_name != 'pull_request' }}
     runs-on: arc-amd64
     permissions:
       contents: read
     steps:
       - name: Builds done
-        run: echo "All devcontainer build-time jobs passed; releasing test shards."
+        run: echo "All compile jobs passed; releasing test + analysis jobs."
 
   # Devcontainer test half: one shard per category, each consuming the build
   # artifact.  netns categories run on both arches; the kvm-* categories run on
@@ -669,7 +755,7 @@ jobs:
   # demand before running.
   test-dev:
     name: Test devcontainer ${{ matrix.arch }} ${{ matrix.build_type }} ${{ matrix.category }}
-    needs: [build-dev-complete]
+    needs: [build-complete]
     if: ${{ github.event_name != 'pull_request' }}
     runs-on: ${{ matrix.runner }}
     permissions:
@@ -688,6 +774,9 @@ jobs:
           - { arch: arm64, category: kvm-cthon }
           - { arch: arm64, category: kvm-xfsprogs }
           - { arch: arm64, category: kvm-pnfs }
+          # WPTS (Microsoft Protocol Test Suite) is not supported on arm64 —
+          # the shard would only skip every test, so don't run it at all.
+          - { arch: arm64, category: wpts }
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -878,6 +967,7 @@ jobs:
       - build-ubuntu22
       - build-rocky9
       - build-rocky10
+      - build-os
       - test
       - build-dev
       - test-dev
