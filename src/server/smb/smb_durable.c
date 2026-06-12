@@ -338,13 +338,15 @@ chimera_smb_durable_claim(
     bool                              has_lease_ctx,
     const uint8_t                    *lease_key,
     bool                             *r_cold,
+    bool                             *r_retry,
     uint32_t                         *status)
 {
     struct chimera_smb_durable_entry *entry;
     struct chimera_smb_open_file     *open_file = NULL;
     bool                              had_lease;
 
-    *r_cold = false;
+    *r_cold  = false;
+    *r_retry = false;
 
     pthread_mutex_lock(&shared->durable.lock);
 
@@ -359,9 +361,17 @@ chimera_smb_durable_claim(
     if (!entry) {
         *status = SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
     } else if (!entry->parked) {
-        /* The handle is still live on another (multi-)channel — a second
-         * reconnect cannot steal it. */
-        *status = SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
+        /* The handle is flagged live -- either genuinely still open on another
+         * channel (a second reconnect must not steal it), OR its previous
+         * connection has dropped but that disconnect has not been processed yet
+         * (a cross-connection race: the reconnect's CREATE reached this thread
+         * before the old connection's teardown parked the handle).  We cannot
+         * tell the two apart here, so ask the caller to retry briefly: once the
+         * disconnect is processed the entry becomes parked and the retry
+         * reclaims it; a genuinely-live handle never parks and the retry budget
+         * lapses into OBJECT_NAME_NOT_FOUND. */
+        *r_retry = true;
+        *status  = SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
     } else if (entry->open_file &&
                (entry->open_file->flags & CHIMERA_SMB_OPEN_FILE_YIELDED)) {
         /* While disconnected, this open's write-caching oplock/lease was

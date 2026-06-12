@@ -2810,43 +2810,39 @@ chimera_smb_revalidate_tree(
 
 } /* chimera_smb_revalidate_tree */
 
-/* Durable-handle reconnect (DH2C / DHnC).  Reclaims a parked open that
- * survived its previous connection and re-homes it into the reconnecting
- * tree, then replies as a normal OPEN of the surviving file. */
-static void
-chimera_smb_durable_reconnect(struct chimera_smb_request *request)
+/* A durable reconnect can reach this server thread before the previous
+ * connection's disconnect has been processed (the two connections live on
+ * independent event loops, so there is no ordering between the new CREATE and
+ * the old TCP teardown).  In that window the surviving open is still flagged
+ * live and the claim is refused -- spuriously, because the legitimate owner IS
+ * reconnecting.  So a refused-because-not-parked claim is retried on a short
+ * timer until the disconnect is processed (the handle parks and the retry
+ * reclaims it) or this budget elapses (a genuinely-live handle never parks).
+ * ~3s comfortably covers the teardown latency even on a loaded ASan runner,
+ * while bounding the wait for the rare genuinely-conflicting reconnect. */
+#define CHIMERA_SMB_DURABLE_RECONNECT_INTERVAL_US 20000  /* 20 ms */
+#define CHIMERA_SMB_DURABLE_RECONNECT_MAX_RETRIES 150    /* ~3 s total */
+
+/* One durable-reclaim attempt.  Returns true if the request has been completed
+ * or handed off (cold reopen / success reply / terminal failure); false if the
+ * handle is still racing its previous connection's disconnect and the caller
+ * should retry. */
+static bool
+chimera_smb_durable_reconnect_attempt(struct chimera_smb_request *request)
 {
     struct chimera_server_smb_thread *thread = request->compound->thread;
     struct chimera_server_smb_shared *shared = thread->shared;
     struct chimera_smb_tree          *tree   = request->tree;
     struct chimera_smb_open_file     *open_file;
     const uint8_t                    *create_guid = NULL;
+    const uint8_t                    *lease_key   = NULL;
     uint64_t                          persistent_id;
-    uint32_t                          status    = SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
-    uint32_t                          ctx       = request->create.ctx_present_mask;
-    const uint8_t                    *lease_key = NULL;
+    uint32_t                          status = SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
+    uint32_t                          ctx    = request->create.ctx_present_mask;
     bool                              has_lease_ctx;
-    bool                              cold = false;
+    bool                              cold  = false;
+    bool                              retry = false;
     int                               bucket;
-
-    /* Reject malformed reconnect-context combinations:
-     *   - DH2C (3.3.5.9.12) must stand alone: combining it with ANY other
-     *     durable context (DHnQ, DH2Q, or DHnC) is INVALID_PARAMETER.
-     *   - DHnC (3.3.5.9.7) may carry a v1 durable *request* (DHnQ) -- the request
-     *     is simply ignored -- but combining it with a v2 context (DH2Q or DH2C)
-     *     is INVALID_PARAMETER.
-     * So a lone DHnC, a lone DH2C, or DHnC+DHnQ are all valid reconnects. */
-    if ((ctx & CHIMERA_SMB_CREATE_CTX_DH2C) &&
-        (ctx & (CHIMERA_SMB_CREATE_CTX_DHNQ | CHIMERA_SMB_CREATE_CTX_DH2Q |
-                CHIMERA_SMB_CREATE_CTX_DHNC))) {
-        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
-        return;
-    }
-    if ((ctx & CHIMERA_SMB_CREATE_CTX_DHNC) &&
-        (ctx & (CHIMERA_SMB_CREATE_CTX_DH2Q | CHIMERA_SMB_CREATE_CTX_DH2C))) {
-        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
-        return;
-    }
 
     if (ctx & CHIMERA_SMB_CREATE_CTX_DH2C) {
         persistent_id = request->create.dh2c.persistent;
@@ -2864,7 +2860,7 @@ chimera_smb_durable_reconnect(struct chimera_smb_request *request)
                                           request->compound->conn->client_guid,
                                           request->create.name, request->create.name_len,
                                           has_lease_ctx, lease_key,
-                                          &cold, &status);
+                                          &cold, &retry, &status);
 
     if (cold) {
         /* Recovered-after-restart persistent handle: there is no live open to
@@ -2874,12 +2870,15 @@ chimera_smb_durable_reconnect(struct chimera_smb_request *request)
          * backend record is refreshed atomically. */
         request->create.persist_pid = persistent_id;
         chimera_smb_create_process(request);
-        return;
+        return true;
     }
 
     if (!open_file) {
+        if (retry) {
+            return false;
+        }
         chimera_smb_complete_request(request, status);
-        return;
+        return true;
     }
 
     /* Re-home the surviving open into the reconnecting tree.  The persistent
@@ -2919,6 +2918,75 @@ chimera_smb_durable_reconnect(struct chimera_smb_request *request)
                         CHIMERA_VFS_ATTR_MASK_STAT,
                         chimera_smb_create_open_getattr_callback,
                         request);
+    return true;
+} /* chimera_smb_durable_reconnect_attempt */
+
+/* Retry timer for a reclaim that raced its previous connection's disconnect.
+ * Re-attempts; on continued racing it re-arms until the budget lapses, then
+ * answers OBJECT_NAME_NOT_FOUND.  Runs on the reconnecting request's own
+ * thread (the timer is armed on that thread's evpl). */
+static void
+chimera_smb_durable_reconnect_retry_cb(
+    struct evpl       *evpl,
+    struct evpl_timer *timer)
+{
+    struct chimera_smb_request *request = (struct chimera_smb_request *)
+        ((char *) timer - offsetof(struct chimera_smb_request, async.timer));
+
+    if (chimera_smb_durable_reconnect_attempt(request)) {
+        return;
+    }
+
+    if (--request->create.reconnect_retries == 0) {
+        chimera_smb_complete_request(request, SMB2_STATUS_OBJECT_NAME_NOT_FOUND);
+        return;
+    }
+
+    evpl_add_oneshot_timer(evpl, &request->async.timer,
+                           chimera_smb_durable_reconnect_retry_cb,
+                           CHIMERA_SMB_DURABLE_RECONNECT_INTERVAL_US);
+} /* chimera_smb_durable_reconnect_retry_cb */
+
+/* Durable-handle reconnect (DH2C / DHnC).  Reclaims a parked open that
+ * survived its previous connection and re-homes it into the reconnecting
+ * tree, then replies as a normal OPEN of the surviving file. */
+static void
+chimera_smb_durable_reconnect(struct chimera_smb_request *request)
+{
+    struct chimera_server_smb_thread *thread = request->compound->thread;
+    uint32_t                          ctx    = request->create.ctx_present_mask;
+
+    /* Reject malformed reconnect-context combinations:
+     *   - DH2C (3.3.5.9.12) must stand alone: combining it with ANY other
+     *     durable context (DHnQ, DH2Q, or DHnC) is INVALID_PARAMETER.
+     *   - DHnC (3.3.5.9.7) may carry a v1 durable *request* (DHnQ) -- the request
+     *     is simply ignored -- but combining it with a v2 context (DH2Q or DH2C)
+     *     is INVALID_PARAMETER.
+     * So a lone DHnC, a lone DH2C, or DHnC+DHnQ are all valid reconnects. */
+    if ((ctx & CHIMERA_SMB_CREATE_CTX_DH2C) &&
+        (ctx & (CHIMERA_SMB_CREATE_CTX_DHNQ | CHIMERA_SMB_CREATE_CTX_DH2Q |
+                CHIMERA_SMB_CREATE_CTX_DHNC))) {
+        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+        return;
+    }
+    if ((ctx & CHIMERA_SMB_CREATE_CTX_DHNC) &&
+        (ctx & (CHIMERA_SMB_CREATE_CTX_DH2Q | CHIMERA_SMB_CREATE_CTX_DH2C))) {
+        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+        return;
+    }
+
+    if (chimera_smb_durable_reconnect_attempt(request)) {
+        return;
+    }
+
+    /* The handle is racing its previous connection's disconnect: tell the
+     * client the create is pending (so it does not time out or cancel), then
+     * retry on a short timer until the disconnect is processed. */
+    request->create.reconnect_retries = CHIMERA_SMB_DURABLE_RECONNECT_MAX_RETRIES;
+    chimera_smb_async_interim_begin(request);
+    evpl_add_oneshot_timer(thread->evpl, &request->async.timer,
+                           chimera_smb_durable_reconnect_retry_cb,
+                           CHIMERA_SMB_DURABLE_RECONNECT_INTERVAL_US);
 } /* chimera_smb_durable_reconnect */
 
 /* Parse an SMB stream-name suffix out of the final path component
