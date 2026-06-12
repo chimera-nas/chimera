@@ -30,6 +30,12 @@ env:
   KVM_IMAGE_REGISTRY: repository.mdh.quantum.com:5009/chimera-nas/kvm-test-base
   APT_MIRROR: http://repository.mdh.quantum.com/repository/pkgs/ubuntu
   DOCKER_MIRROR: repository.mdh.quantum.com/
+  # Local Nexus raw repository for transient intra-run artifacts (the build
+  # tree handed from build-dev to the test-dev shards).  Keeps that traffic
+  # inside the self-hosted runner infra instead of GitHub's Azure-blob artifact
+  # storage; objects age out server-side, so jobs never delete.  Credentials
+  # come from the NEXUS_SCRATCH_USER / NEXUS_SCRATCH_PASSWORD secrets.
+  NEXUS_SCRATCH_URL: http://repository.mdh.quantum.com/repository/scratch
   # Shared compiler cache: the build step backs its local ccache with an HTTP
   # remote (Nexus raw repo, ccache http backend) so objects persist across CI
   # runs.  The full URL -- including the upload credentials -- is kept in the
@@ -571,7 +577,7 @@ jobs:
           fi
 
   # Devcontainer build half: build the tree once per (arch, build_type) and
-  # publish it as an artifact for the test-dev shards to consume.  KVM guest
+  # publish it to the local Nexus scratch repo for the test-dev shards.  KVM guest
   # images are NOT fetched here (KVM_FETCH_IMAGES=OFF, amd64 only) -- the kvm-*
   # test shards fetch them on demand.  KVM is x86-only in the devcontainer, so
   # arm64 builds with KVM off.
@@ -625,12 +631,23 @@ jobs:
               # already excluded).
               tar -C /build --exclude=./ccache -czf /workspace/build-dev.tar.gz .'
 
-      - name: Upload build tree
-        uses: actions/upload-artifact@v6
-        with:
-          name: build-dev-${{ matrix.arch }}-${{ matrix.build_type }}
-          path: build-dev.tar.gz
-          retention-days: 1
+      # The build tree stays inside the self-hosted runner infra: push it to the
+      # local Nexus scratch repository rather than GitHub's artifact storage
+      # (whose Azure-blob upload leaves the network and has produced transient
+      # DNS failures that evict merge-queue runs).  run_id alone names the
+      # object -- unique per run, and shared across job re-run attempts so a
+      # re-run test shard still finds the original build (matching the old
+      # download-artifact semantics).  scratch ages objects out automatically,
+      # so nothing is deleted here.
+      - name: Upload build tree to Nexus scratch
+        env:
+          NEXUS_USER: ${{ secrets.NEXUS_SCRATCH_USER }}
+          NEXUS_PASSWORD: ${{ secrets.NEXUS_SCRATCH_PASSWORD }}
+        run: |
+          curl -sfS --retry 5 --retry-all-errors --retry-delay 5 \
+            -u "${NEXUS_USER}:${NEXUS_PASSWORD}" \
+            -T build-dev.tar.gz \
+            "${{ env.NEXUS_SCRATCH_URL }}/chimera/build-dev-${{ github.run_id }}-${{ matrix.arch }}-${{ matrix.build_type }}.tar.gz"
 
   # Barrier: every devcontainer build-time job (build + static analysis) must
   # finish before any test-dev shard starts.  Default needs-success semantics
@@ -684,10 +701,15 @@ jobs:
             | tar -xz -C "${{ github.workspace }}" oras
           chmod +x "${{ github.workspace }}/oras"
 
-      - name: Download build tree
-        uses: actions/download-artifact@v6
-        with:
-          name: build-dev-${{ matrix.arch }}-${{ matrix.build_type }}
+      - name: Download build tree from Nexus scratch
+        env:
+          NEXUS_USER: ${{ secrets.NEXUS_SCRATCH_USER }}
+          NEXUS_PASSWORD: ${{ secrets.NEXUS_SCRATCH_PASSWORD }}
+        run: |
+          curl -sfS --retry 5 --retry-all-errors --retry-delay 5 \
+            -u "${NEXUS_USER}:${NEXUS_PASSWORD}" \
+            -o build-dev.tar.gz \
+            "${{ env.NEXUS_SCRATCH_URL }}/chimera/build-dev-${{ github.run_id }}-${{ matrix.arch }}-${{ matrix.build_type }}.tar.gz"
 
       - name: Unpack, fetch images if needed, and run the category
         run: |
