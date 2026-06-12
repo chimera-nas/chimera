@@ -946,6 +946,7 @@ test_durable_register_park_claim(void)
     uint8_t                           lkey[16];
     uint32_t                          status;
     bool                              cold;
+    bool                              retry;
     int                               i;
 
     chimera_smb_durable_table_init(&shared->durable);
@@ -965,7 +966,8 @@ test_durable_register_park_claim(void)
     chimera_smb_durable_register(shared, &of, 42, cguid, "foo.txt", 7, false);
 
     /* Before park: live, not reclaimable. */
-    claimed = chimera_smb_durable_claim(shared, 0xABCDEF, guid, cguid, "foo.txt", 7, false, NULL, &cold, &status);
+    claimed = chimera_smb_durable_claim(shared, 0xABCDEF, guid, cguid, "foo.txt", 7, false, NULL, &cold, &retry, &status
+                                        );
     if (claimed != NULL || status != SMB2_STATUS_OBJECT_NAME_NOT_FOUND) {
         TEST_FAIL("durable: live (unparked) handle is not reclaimable");
     } else {
@@ -976,7 +978,8 @@ test_durable_register_park_claim(void)
 
     /* Wrong create-guid is rejected. */
     guid[0] = 0xFF;
-    claimed = chimera_smb_durable_claim(shared, 0xABCDEF, guid, cguid, "foo.txt", 7, false, NULL, &cold, &status);
+    claimed = chimera_smb_durable_claim(shared, 0xABCDEF, guid, cguid, "foo.txt", 7, false, NULL, &cold, &retry, &status
+                                        );
     guid[0] = 0x10;
     if (claimed != NULL || status != SMB2_STATUS_OBJECT_NAME_NOT_FOUND) {
         TEST_FAIL("durable: create-guid mismatch rejected");
@@ -987,7 +990,8 @@ test_durable_register_park_claim(void)
     /* An oplock-only (no-lease) durable handle is not bound to the ClientGuid:
      * a reconnect from a different ClientGuid reclaims it (MS-SMB2 3.3.5.9.7
      * binds the GUID check to leased opens).  of.oplock_level is 0 here. */
-    claimed = chimera_smb_durable_claim(shared, 0xABCDEF, guid, other, "foo.txt", 7, false, NULL, &cold, &status);
+    claimed = chimera_smb_durable_claim(shared, 0xABCDEF, guid, other, "foo.txt", 7, false, NULL, &cold, &retry, &status
+                                        );
     if (claimed == &of && status == SMB2_STATUS_SUCCESS) {
         TEST_PASS("durable: oplock reconnect ignores client-guid");
     } else {
@@ -1000,7 +1004,8 @@ test_durable_register_park_claim(void)
     /* A *leased* handle IS bound to the ClientGuid: a mismatch is rejected. */
     of.oplock_level = SMB2_OPLOCK_LEVEL_LEASE;
     memcpy(of.lease_key, lkey, 16);
-    claimed = chimera_smb_durable_claim(shared, 0xABCDEF, guid, other, "foo.txt", 7, true, lkey, &cold, &status);
+    claimed = chimera_smb_durable_claim(shared, 0xABCDEF, guid, other, "foo.txt", 7, true, lkey, &cold, &retry, &status)
+    ;
     if (claimed != NULL || status != SMB2_STATUS_OBJECT_NAME_NOT_FOUND) {
         TEST_FAIL("durable: leased reconnect rejects client-guid mismatch");
     } else {
@@ -1008,7 +1013,8 @@ test_durable_register_park_claim(void)
     }
 
     /* Matching reconnect (correct ClientGuid + lease key) reclaims the open. */
-    claimed = chimera_smb_durable_claim(shared, 0xABCDEF, guid, cguid, "foo.txt", 7, true, lkey, &cold, &status);
+    claimed = chimera_smb_durable_claim(shared, 0xABCDEF, guid, cguid, "foo.txt", 7, true, lkey, &cold, &retry, &status)
+    ;
     if (claimed == &of && status == SMB2_STATUS_SUCCESS) {
         TEST_PASS("durable: matching reconnect reclaims the open");
     } else {
@@ -1017,7 +1023,8 @@ test_durable_register_park_claim(void)
     of.oplock_level = 0;
 
     /* A second reconnect must fail — the handle is now live again. */
-    claimed = chimera_smb_durable_claim(shared, 0xABCDEF, guid, cguid, "foo.txt", 7, false, NULL, &cold, &status);
+    claimed = chimera_smb_durable_claim(shared, 0xABCDEF, guid, cguid, "foo.txt", 7, false, NULL, &cold, &retry, &status
+                                        );
     if (claimed != NULL || status != SMB2_STATUS_OBJECT_NAME_NOT_FOUND) {
         TEST_FAIL("durable: double-reconnect rejected");
     } else {
@@ -1027,7 +1034,8 @@ test_durable_register_park_claim(void)
     /* After forget, the persistent id is unknown. */
     chimera_smb_durable_forget(shared, 0xABCDEF);
     chimera_smb_durable_park(shared, &of);  /* no entry -> no-op */
-    claimed = chimera_smb_durable_claim(shared, 0xABCDEF, guid, cguid, "foo.txt", 7, false, NULL, &cold, &status);
+    claimed = chimera_smb_durable_claim(shared, 0xABCDEF, guid, cguid, "foo.txt", 7, false, NULL, &cold, &retry, &status
+                                        );
     if (claimed != NULL || status != SMB2_STATUS_OBJECT_NAME_NOT_FOUND) {
         TEST_FAIL("durable: forgotten handle not found");
     } else {
@@ -1039,7 +1047,7 @@ test_durable_register_park_claim(void)
     of.durable_flags = CHIMERA_SMB_DURABLE_V1;
     chimera_smb_durable_register(shared, &of, 7, cguid, "bar", 3, false);
     chimera_smb_durable_park(shared, &of);
-    claimed = chimera_smb_durable_claim(shared, 0x999, NULL, cguid, "bar", 3, false, NULL, &cold, &status);
+    claimed = chimera_smb_durable_claim(shared, 0x999, NULL, cguid, "bar", 3, false, NULL, &cold, &retry, &status);
     if (claimed == &of && status == SMB2_STATUS_SUCCESS) {
         TEST_PASS("durable: v1 (no-guid) reconnect reclaims the open");
     } else {
@@ -1116,6 +1124,7 @@ test_durable_cold_recover_claim(void)
     uint8_t                           other[16];
     uint32_t                          status;
     bool                              cold;
+    bool                              retry;
     int                               i;
 
     chimera_smb_durable_table_init(&shared->durable);
@@ -1144,14 +1153,14 @@ test_durable_cold_recover_claim(void)
 
     /* Claim of a cold entry returns NULL + SUCCESS + cold=true (caller must
      * re-open the file) and consumes the entry. */
-    claimed = chimera_smb_durable_claim(shared, 0x5000, guid, cguid, "abc", 3, false, NULL, &cold, &status);
+    claimed = chimera_smb_durable_claim(shared, 0x5000, guid, cguid, "abc", 3, false, NULL, &cold, &retry, &status);
     if (claimed == NULL && cold && status == SMB2_STATUS_SUCCESS) {
         TEST_PASS("durable cold: reclaim signals cold re-open");
     } else {
         TEST_FAIL("durable cold: reclaim signals cold re-open");
     }
 
-    claimed = chimera_smb_durable_claim(shared, 0x5000, guid, cguid, "abc", 3, false, NULL, &cold, &status);
+    claimed = chimera_smb_durable_claim(shared, 0x5000, guid, cguid, "abc", 3, false, NULL, &cold, &retry, &status);
     if (claimed == NULL && !cold && status == SMB2_STATUS_OBJECT_NAME_NOT_FOUND) {
         TEST_PASS("durable cold: entry consumed after reclaim");
     } else {
@@ -1161,7 +1170,7 @@ test_durable_cold_recover_claim(void)
     /* Wrong client reclaiming a cold entry is denied. */
     rec.persistent_id = 0x5001;
     chimera_smb_durable_recover_entry(shared, &rec);
-    claimed = chimera_smb_durable_claim(shared, 0x5001, guid, other, "abc", 3, false, NULL, &cold, &status);
+    claimed = chimera_smb_durable_claim(shared, 0x5001, guid, other, "abc", 3, false, NULL, &cold, &retry, &status);
     if (claimed == NULL && !cold && status == SMB2_STATUS_OBJECT_NAME_NOT_FOUND) {
         TEST_PASS("durable cold: wrong client -> OBJECT_NAME_NOT_FOUND");
     } else {

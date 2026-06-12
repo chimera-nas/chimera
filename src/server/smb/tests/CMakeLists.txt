@@ -3545,14 +3545,17 @@ endmacro()
 find_program(SMBTORTURE_EXECUTABLE smbtorture)
 
 if(CHIMERA_NETNS_TESTING AND SMBTORTURE_EXECUTABLE)
-    # Deterministic regression coverage for the disconnect-vs-conflicting-open
-    # race on durable handles: CHIMERA_SMB_TEST_DISCONNECT_DELAY_MS holds the
-    # server-side disconnect teardown so the second client's CREATE always
-    # lands while the first client's durable handle is still live -- the
-    # interleaving a loaded CI runner only hits occasionally.  Exercises the
-    # close-not-park (MS-SMB2 3.3.7.1), yielded-reclaim, and parked-CREATE
-    # re-arbitration paths.
-    foreach(_sub smb2.durable-open.lease smb2.durable-open.oplock)
+    # Deterministic regression coverage for the disconnect-vs-reconnect races
+    # on durable handles: CHIMERA_SMB_TEST_DISCONNECT_DELAY_MS holds the
+    # server-side disconnect teardown so the reconnecting client's CREATE always
+    # lands while the first connection's handle teardown is still in flight --
+    # the interleaving a loaded CI runner only hits occasionally.  Exercises:
+    #   - .lease / .oplock: a conflicting open vs the disconnect (close-not-park
+    #     MS-SMB2 3.3.7.1, yielded-reclaim, parked-CREATE re-arbitration).
+    #   - .reopen2b: the same client's durable reconnect racing the teardown
+    #     parking (eager park-on-disconnect; otherwise OBJECT_NAME_NOT_FOUND).
+    foreach(_sub smb2.durable-open.lease smb2.durable-open.oplock
+                 smb2.durable-v2-open.reopen2b)
         string(REGEX REPLACE "[^A-Za-z0-9]" "_" _sid "${_sub}")
         set(_name chimera/server/smb/smbtorture_${_sid}_disconnect_race_memfs)
         add_test(NAME ${_name}

@@ -538,6 +538,12 @@ struct chimera_smb_request {
             uint8_t                            park_fh[CHIMERA_VFS_FH_SIZE];
             uint8_t                            park_fh_len;
             uint64_t                           park_fh_hash;
+            /* Durable-reconnect retry: a reclaim that finds its handle still
+             * flagged live (the previous connection's disconnect has not yet
+             * been processed -- a cross-connection race) re-arms a short timer
+             * and re-attempts the claim until the handle is parked or this
+             * many attempts elapse. */
+            uint16_t                           reconnect_retries;
         } create;
 
         struct  {
@@ -1156,6 +1162,7 @@ chimera_smb_durable_claim(
     bool                              has_lease_ctx,
     const uint8_t                    *lease_key,
     bool                             *r_cold,
+    bool                             *r_retry,
     uint32_t                         *status);
 void
 chimera_smb_durable_sweep(
