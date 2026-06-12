@@ -2351,6 +2351,10 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.compound.related6
     smb2.compound.related9
     smb2.compound.unrelated1
+    # smb2.compound_async
+    smb2.compound_async.create_lease_break_async
+    smb2.compound_async.rename_last
+    smb2.compound_async.rename_middle
     # smb2.compound_find
     smb2.compound_find.compound_find_close
     smb2.compound_find.compound_find_related
@@ -2444,6 +2448,7 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.durable-v2-open.reopen2b
     smb2.durable-v2-open.reopen2c
     smb2.durable-v2-open.stat-and-lease
+    smb2.durable-v2-open.statRH-and-lease
     smb2.durable-v2-open.two-different-lease
     smb2.durable-v2-open.two-same-lease
     # smb2.durable-v2-regressions
@@ -2503,7 +2508,25 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.ioctl.sparse_set_nobuf
     smb2.ioctl.sparse_set_oversize
     # smb2.kernel-oplocks
+    smb2.kernel-oplocks.kernel_oplocks1
+    smb2.kernel-oplocks.kernel_oplocks3
     smb2.kernel-oplocks.kernel_oplocks8
+    # smb2.lease
+    smb2.lease.duplicate_create
+    smb2.lease.duplicate_open
+    smb2.lease.multibreak
+    smb2.lease.rename_wait
+    smb2.lease.statopen2
+    smb2.lease.statopen3
+    smb2.lease.upgrade
+    smb2.lease.upgrade2
+    smb2.lease.upgrade3
+    smb2.lease.v1_bug15148
+    smb2.lease.v2_bug15148
+    smb2.lease.v2_complex2
+    smb2.lease.v2_epoch1
+    smb2.lease.v2_flags_breaking
+    smb2.lease.v2_flags_parentkey
     # smb2.lock
     smb2.lock.auto-unlock
     smb2.lock.contend
@@ -2559,6 +2582,31 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.notify.tdis1
     # smb2.openattr
     smb2.openattr
+    # smb2.oplock
+    smb2.oplock.batch10
+    smb2.oplock.batch11
+    smb2.oplock.batch12
+    smb2.oplock.batch13
+    smb2.oplock.batch14
+    smb2.oplock.batch15
+    smb2.oplock.batch16
+    smb2.oplock.batch2
+    smb2.oplock.batch21
+    smb2.oplock.batch23
+    smb2.oplock.batch24
+    smb2.oplock.batch25
+    smb2.oplock.batch4
+    smb2.oplock.batch5
+    smb2.oplock.batch8
+    smb2.oplock.brl2
+    smb2.oplock.exclusive1
+    smb2.oplock.exclusive2
+    smb2.oplock.exclusive3
+    smb2.oplock.exclusive4
+    smb2.oplock.exclusive5
+    smb2.oplock.exclusive9
+    smb2.oplock.levelii501
+    smb2.oplock.levelii502
     # smb2.read
     smb2.read.access
     smb2.read.bug14607
@@ -2640,6 +2688,7 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.session.expire2e
     smb2.session.expire2s
     smb2.session.expire_disconnect
+    smb2.session.reauth6
     smb2.session.signing-aes-128-cmac
     smb2.session.signing-aes-128-gmac
     smb2.session.signing-hmac-sha-256
@@ -2725,6 +2774,10 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.compound.related6
     smb2.compound.related9
     smb2.compound.unrelated1
+    # smb2.compound_async
+    smb2.compound_async.create_lease_break_async
+    smb2.compound_async.rename_last
+    smb2.compound_async.rename_middle
     # smb2.compound_find
     smb2.compound_find.compound_find_close
     smb2.compound_find.compound_find_related
@@ -2822,6 +2875,7 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.durable-v2-open.reopen2b
     smb2.durable-v2-open.reopen2c
     smb2.durable-v2-open.stat-and-lease
+    smb2.durable-v2-open.statRH-and-lease
     smb2.durable-v2-open.two-different-lease
     smb2.durable-v2-open.two-same-lease
     # smb2.durable-v2-regressions
@@ -2881,7 +2935,25 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.ioctl.sparse_set_nobuf
     smb2.ioctl.sparse_set_oversize
     # smb2.kernel-oplocks
+    smb2.kernel-oplocks.kernel_oplocks1
+    smb2.kernel-oplocks.kernel_oplocks3
     smb2.kernel-oplocks.kernel_oplocks8
+    # smb2.lease
+    smb2.lease.duplicate_create
+    smb2.lease.duplicate_open
+    smb2.lease.multibreak
+    smb2.lease.rename_wait
+    smb2.lease.statopen2
+    smb2.lease.statopen3
+    smb2.lease.upgrade
+    smb2.lease.upgrade2
+    smb2.lease.upgrade3
+    smb2.lease.v1_bug15148
+    smb2.lease.v2_bug15148
+    smb2.lease.v2_complex2
+    smb2.lease.v2_epoch1
+    smb2.lease.v2_flags_breaking
+    smb2.lease.v2_flags_parentkey
     # smb2.lock
     smb2.lock.auto-unlock
     smb2.lock.contend
@@ -2937,6 +3009,31 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.notify.tdis1
     # smb2.openattr
     smb2.openattr
+    # smb2.oplock
+    smb2.oplock.batch10
+    smb2.oplock.batch11
+    smb2.oplock.batch12
+    smb2.oplock.batch13
+    smb2.oplock.batch14
+    smb2.oplock.batch15
+    smb2.oplock.batch16
+    smb2.oplock.batch2
+    smb2.oplock.batch21
+    smb2.oplock.batch23
+    smb2.oplock.batch24
+    smb2.oplock.batch25
+    smb2.oplock.batch4
+    smb2.oplock.batch5
+    smb2.oplock.batch8
+    smb2.oplock.brl2
+    smb2.oplock.exclusive1
+    smb2.oplock.exclusive2
+    smb2.oplock.exclusive3
+    smb2.oplock.exclusive4
+    smb2.oplock.exclusive5
+    smb2.oplock.exclusive9
+    smb2.oplock.levelii501
+    smb2.oplock.levelii502
     # smb2.read
     smb2.read.access
     smb2.read.bug14607
@@ -3020,6 +3117,7 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.session.expire2s
     smb2.session.expire_disconnect
     smb2.session.ntlmssp_bug14932
+    smb2.session.reauth6
     smb2.session.signing-aes-128-cmac
     smb2.session.signing-aes-128-gmac
     smb2.session.signing-hmac-sha-256
@@ -3105,6 +3203,10 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     smb2.compound.related6
     smb2.compound.related9
     smb2.compound.unrelated1
+    # smb2.compound_async
+    smb2.compound_async.create_lease_break_async
+    smb2.compound_async.rename_last
+    smb2.compound_async.rename_middle
     # smb2.compound_find
     smb2.compound_find.compound_find_close
     smb2.compound_find.compound_find_related
@@ -3199,6 +3301,7 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     smb2.durable-v2-open.reopen2b
     smb2.durable-v2-open.reopen2c
     smb2.durable-v2-open.stat-and-lease
+    smb2.durable-v2-open.statRH-and-lease
     smb2.durable-v2-open.two-different-lease
     smb2.durable-v2-open.two-same-lease
     # smb2.durable-v2-regressions
@@ -3258,7 +3361,25 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     smb2.ioctl.sparse_set_nobuf
     smb2.ioctl.sparse_set_oversize
     # smb2.kernel-oplocks
+    smb2.kernel-oplocks.kernel_oplocks1
+    smb2.kernel-oplocks.kernel_oplocks3
     smb2.kernel-oplocks.kernel_oplocks8
+    # smb2.lease
+    smb2.lease.duplicate_create
+    smb2.lease.duplicate_open
+    smb2.lease.multibreak
+    smb2.lease.rename_wait
+    smb2.lease.statopen2
+    smb2.lease.statopen3
+    smb2.lease.upgrade
+    smb2.lease.upgrade2
+    smb2.lease.upgrade3
+    smb2.lease.v1_bug15148
+    smb2.lease.v2_bug15148
+    smb2.lease.v2_complex2
+    smb2.lease.v2_epoch1
+    smb2.lease.v2_flags_breaking
+    smb2.lease.v2_flags_parentkey
     # smb2.lock
     smb2.lock.auto-unlock
     smb2.lock.contend
@@ -3312,6 +3433,31 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     smb2.notify.tdis1
     # smb2.openattr
     smb2.openattr
+    # smb2.oplock
+    smb2.oplock.batch10
+    smb2.oplock.batch11
+    smb2.oplock.batch12
+    smb2.oplock.batch13
+    smb2.oplock.batch14
+    smb2.oplock.batch15
+    smb2.oplock.batch16
+    smb2.oplock.batch2
+    smb2.oplock.batch21
+    smb2.oplock.batch23
+    smb2.oplock.batch24
+    smb2.oplock.batch25
+    smb2.oplock.batch4
+    smb2.oplock.batch5
+    smb2.oplock.batch8
+    smb2.oplock.brl2
+    smb2.oplock.exclusive1
+    smb2.oplock.exclusive2
+    smb2.oplock.exclusive3
+    smb2.oplock.exclusive4
+    smb2.oplock.exclusive5
+    smb2.oplock.exclusive9
+    smb2.oplock.levelii501
+    smb2.oplock.levelii502
     # smb2.read
     smb2.read.access
     smb2.read.bug14607
@@ -3393,6 +3539,7 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     smb2.session.expire2e
     smb2.session.expire2s
     smb2.session.expire_disconnect
+    smb2.session.reauth6
     smb2.session.signing-aes-128-cmac
     smb2.session.signing-aes-128-gmac
     smb2.session.signing-hmac-sha-256
