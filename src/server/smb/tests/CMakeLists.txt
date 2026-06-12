@@ -213,9 +213,9 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
     # single chimera server, rather than one ctest (one daemon + .NET host
     # bringup) per case -- the bringup dominated, so batching is ~10x faster.
     # vstest --Tests takes a comma-separated name list (CMake lists are
-    # ';'-separated, so swap the separator).  The group ctests still share the
-    # WPTS Bin dir for ptfconfig staging, so RESOURCE_LOCK serializes them
-    # against each other.
+    # ';'-separated, so swap the separator).  The wrapper stages a per-session
+    # shadow of the WPTS Bin dir (symlink farm + private ptfconfig copies), so
+    # the group ctests share no mutable state and may run concurrently.
     string(REPLACE ";" "," _wpts_tests "${WPTS_SMB2_ALLOWLIST}")
     add_test(NAME chimera/server/smb/wpts/memfs
         COMMAND ${CMAKE_SOURCE_DIR}/scripts/wpts_smb_test_wrapper.sh
@@ -223,7 +223,6 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
     set_tests_properties(chimera/server/smb/wpts/memfs PROPERTIES
         LABELS "smb;wpts"
         TIMEOUT 900
-        RESOURCE_LOCK wpts_smb_bin
         ENVIRONMENT "WPTS_BIN_DIR=${WPTS_BIN_DIR};DOTNET=${WPTS_DOTNET}")
 
     # SMB3 durable / persistent handle cases plus the Replay (channel-sequence)
@@ -288,7 +287,6 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
     set_tests_properties(chimera/server/smb/wpts/memfs_persistent PROPERTIES
         LABELS "smb;wpts;persistent"
         TIMEOUT 900
-        RESOURCE_LOCK wpts_smb_bin
         ENVIRONMENT "WPTS_BIN_DIR=${WPTS_BIN_DIR};DOTNET=${WPTS_DOTNET};CHIMERA_SMB_PERSISTENT=1")
 
     # SMB3 transport-compression cases.  These need the daemon run with
@@ -344,7 +342,6 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
     set_tests_properties(chimera/server/smb/wpts/memfs_compression PROPERTIES
         LABELS "smb;wpts;compression"
         TIMEOUT 900
-        RESOURCE_LOCK wpts_smb_bin
         ENVIRONMENT "WPTS_BIN_DIR=${WPTS_BIN_DIR};DOTNET=${WPTS_DOTNET};CHIMERA_SMB_COMPRESSION=1")
 
     # SMB3 multichannel cases.  The wrapper runs the daemon with a second NIC
@@ -389,7 +386,6 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
     set_tests_properties(chimera/server/smb/wpts/memfs_multichannel PROPERTIES
         LABELS "smb;wpts;multichannel"
         TIMEOUT 900
-        RESOURCE_LOCK wpts_smb_bin
         ENVIRONMENT "WPTS_BIN_DIR=${WPTS_BIN_DIR};DOTNET=${WPTS_DOTNET};CHIMERA_SMB_MULTICHANNEL=1")
 
     # SMB3 transport-encryption cases.  These need the daemon run with
@@ -421,7 +417,6 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
     set_tests_properties(chimera/server/smb/wpts/memfs_encryption PROPERTIES
         LABELS "smb;wpts;encryption"
         TIMEOUT 900
-        RESOURCE_LOCK wpts_smb_bin
         ENVIRONMENT "WPTS_BIN_DIR=${WPTS_BIN_DIR};DOTNET=${WPTS_DOTNET};CHIMERA_SMB_ENCRYPTION=1")
 
     # Compression + encryption combined cases (compress-then-encrypt, MS-SMB2
@@ -442,7 +437,6 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
     set_tests_properties(chimera/server/smb/wpts/memfs_compression_encryption PROPERTIES
         LABELS "smb;wpts;compression;encryption"
         TIMEOUT 900
-        RESOURCE_LOCK wpts_smb_bin
         ENVIRONMENT "WPTS_BIN_DIR=${WPTS_BIN_DIR};DOTNET=${WPTS_DOTNET};CHIMERA_SMB_COMPRESSION=1;CHIMERA_SMB_ENCRYPTION=1")
 
     # Multichannel + encryption combined case: encryption is session-scoped, so
@@ -460,7 +454,6 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
     set_tests_properties(chimera/server/smb/wpts/memfs_multichannel_encryption PROPERTIES
         LABELS "smb;wpts;multichannel;encryption"
         TIMEOUT 900
-        RESOURCE_LOCK wpts_smb_bin
         ENVIRONMENT "WPTS_BIN_DIR=${WPTS_BIN_DIR};DOTNET=${WPTS_DOTNET};CHIMERA_SMB_MULTICHANNEL=1;CHIMERA_SMB_ENCRYPTION=1")
 
     message(STATUS "WPTS MS-SMB2 tests: enabled (${WPTS_BIN_DIR}, ${WPTS_DOTNET})")
