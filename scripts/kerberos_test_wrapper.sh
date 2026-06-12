@@ -207,16 +207,35 @@ start_kdc() {
         KRB5_CONFIG="${KRB_DIR}/etc/krb5.conf" \
         KRB5_KDC_PROFILE="${KRB_DIR}/etc/kdc.conf" \
         krb5kdc -n -P "${KRB_DIR}/kdc.pid" &
+    local kdc_launcher=$!
 
-    # Wait for KDC to be ready
-    sleep 1
+    # Wait for the KDC to be ready, polling once a second for up to a minute
+    # instead of a single fixed sleep: under heavy CI load (the full suite at
+    # -j 32) krb5kdc can take well over a second to initialize and write its
+    # pid file, which used to fail this check spuriously.  Give up early only
+    # if the launcher has actually exited (a genuine startup failure, not just
+    # slowness); otherwise wait the full minute before declaring failure.
+    local kdc_pid=""
+    local waited
+    for waited in $(seq 1 60); do
+        if [ -f "${KRB_DIR}/kdc.pid" ]; then
+            kdc_pid=$(cat "${KRB_DIR}/kdc.pid" 2>/dev/null)
+            if [ -n "${kdc_pid}" ] && kill -0 "${kdc_pid}" 2>/dev/null; then
+                log "KDC started (PID: ${kdc_pid}) after ${waited}s"
+                return 0
+            fi
+        fi
+        # The backgrounded krb5kdc exited without becoming ready -> it failed
+        # to start; no point waiting out the rest of the minute.
+        if ! kill -0 "${kdc_launcher}" 2>/dev/null; then
+            log "ERROR: KDC process exited before becoming ready"
+            return 1
+        fi
+        sleep 1
+    done
 
-    if [ -f "${KRB_DIR}/kdc.pid" ] && kill -0 "$(cat "${KRB_DIR}/kdc.pid")" 2>/dev/null; then
-        log "KDC started (PID: $(cat "${KRB_DIR}/kdc.pid"))"
-    else
-        log "ERROR: KDC failed to start"
-        return 1
-    fi
+    log "ERROR: KDC failed to become ready within 60s"
+    return 1
 }
 
 obtain_ticket() {
