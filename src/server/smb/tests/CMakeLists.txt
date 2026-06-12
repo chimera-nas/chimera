@@ -1232,8 +1232,15 @@ set(SMBTORTURE_ENABLED_memfs
     # smb2.async_dosmode
     smb2.async_dosmode
     # smb2.bench
+    smb2.bench.echo
+    smb2.bench.path-contention-shared
+    smb2.bench.read
+    smb2.bench.session-setup
     # smb2.change_notify_disabled
     smb2.change_notify_disabled.notfiy_disabled
+    # smb2.charset
+    "smb2.charset.Testing composite character (a umlaut)"
+    "smb2.charset.Testing naked diacritical (umlaut)"
     # smb2.check-sharemode
     smb2.check-sharemode
     # smb2.compound
@@ -1249,6 +1256,10 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.compound.related6
     smb2.compound.related9
     smb2.compound.unrelated1
+    # smb2.compound_async
+    smb2.compound_async.create_lease_break_async
+    smb2.compound_async.rename_last
+    smb2.compound_async.rename_middle
     # smb2.compound_find
     smb2.compound_find.compound_find_close
     smb2.compound_find.compound_find_related
@@ -1275,6 +1286,7 @@ set(SMBTORTURE_ENABLED_memfs
     # smb2.delete-on-close-perms
     smb2.delete-on-close-perms.BUG14427
     smb2.delete-on-close-perms.CREATE
+    "smb2.delete-on-close-perms.CREATE Existing"
     smb2.delete-on-close-perms.CREATE_IF
     smb2.delete-on-close-perms.FIND_and_set_DOC
     smb2.delete-on-close-perms.OVERWRITE_IF
@@ -1291,18 +1303,63 @@ set(SMBTORTURE_ENABLED_memfs
     # smb2.durable-open-disconnect
     smb2.durable-open-disconnect.open-oplock-disconnect
     # smb2.durable-open
+    smb2.durable-open.delete_on_close2
+    smb2.durable-open.file-position
     smb2.durable-open.lease
-    smb2.durable-open.oplock
+    smb2.durable-open.lock-lease
+    smb2.durable-open.lock-noW-lease
+    smb2.durable-open.lock-oplock
+    smb2.durable-open.open-lease
+    smb2.durable-open.open-oplock
     smb2.durable-open.open2-oplock
+    smb2.durable-open.oplock
+    smb2.durable-open.read-only
+    smb2.durable-open.reopen1
+    smb2.durable-open.reopen1a
+    smb2.durable-open.reopen1a-lease
+    smb2.durable-open.reopen2
+    smb2.durable-open.reopen2-lease
+    smb2.durable-open.reopen2-lease-v2
+    smb2.durable-open.reopen2a
+    smb2.durable-open.reopen3
+    smb2.durable-open.reopen4
+    smb2.durable-open.reopen5
+    smb2.durable-open.reopen6
+    smb2.durable-open.stat-open
     # smb2.durable-v2-delay
     smb2.durable-v2-delay.durable_v2_reconnect_delay
     smb2.durable-v2-delay.durable_v2_reconnect_delay_msec
     # smb2.durable-v2-open
     smb2.durable-v2-open.app-instance
+    smb2.durable-v2-open.create-blob
+    smb2.durable-v2-open.durable-v2-setinfo
     smb2.durable-v2-open.keep-disconnected-rh-with-rh-open
     smb2.durable-v2-open.keep-disconnected-rh-with-rwh-open
+    smb2.durable-v2-open.keep-disconnected-rh-with-stat-open
+    smb2.durable-v2-open.keep-disconnected-rwh-with-stat-open
+    smb2.durable-v2-open.lock-lease
+    smb2.durable-v2-open.lock-noW-lease
+    smb2.durable-v2-open.lock-oplock
+    smb2.durable-v2-open.open-lease
+    smb2.durable-v2-open.open-oplock
+    smb2.durable-v2-open.persistent-open-lease
+    smb2.durable-v2-open.persistent-open-oplock
+    smb2.durable-v2-open.purge-disconnected-rh-with-share-none-open
     smb2.durable-v2-open.purge-disconnected-rwh-with-rh-open
     smb2.durable-v2-open.purge-disconnected-rwh-with-rwh-open
+    smb2.durable-v2-open.reconnect-twice
+    smb2.durable-v2-open.reopen1
+    smb2.durable-v2-open.reopen1a
+    smb2.durable-v2-open.reopen1a-lease
+    smb2.durable-v2-open.reopen2
+    smb2.durable-v2-open.reopen2-lease
+    smb2.durable-v2-open.reopen2-lease-v2
+    smb2.durable-v2-open.reopen2b
+    smb2.durable-v2-open.reopen2c
+    smb2.durable-v2-open.stat-and-lease
+    smb2.durable-v2-open.statRH-and-lease
+    smb2.durable-v2-open.two-different-lease
+    smb2.durable-v2-open.two-same-lease
     # smb2.durable-v2-regressions
     smb2.durable-v2-regressions.durable_v2_reconnect_bug15624
     # smb2.fileid
@@ -1347,6 +1404,7 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.ioctl.dup_extents_src_is_dest
     smb2.ioctl.dup_extents_src_is_dest_overlap
     smb2.ioctl.dup_extents_src_lock
+    smb2.ioctl.network_interface_info
     smb2.ioctl.req_resume_key
     smb2.ioctl.req_two_resume_keys
     smb2.ioctl.shadow_copy
@@ -1369,27 +1427,46 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.ioctl.sparse_set_nobuf
     smb2.ioctl.sparse_set_oversize
     # smb2.kernel-oplocks
+    smb2.kernel-oplocks.kernel_oplocks1
+    smb2.kernel-oplocks.kernel_oplocks3
     smb2.kernel-oplocks.kernel_oplocks8
+    # smb2.lease
+    smb2.lease.duplicate_create
+    smb2.lease.duplicate_open
+    smb2.lease.multibreak
+    smb2.lease.rename_wait
+    smb2.lease.statopen
+    smb2.lease.statopen2
+    smb2.lease.statopen3
+    smb2.lease.upgrade
+    smb2.lease.upgrade2
+    smb2.lease.upgrade3
+    smb2.lease.v1_bug15148
+    smb2.lease.v2_bug15148
+    smb2.lease.v2_complex2
+    smb2.lease.v2_epoch1
+    smb2.lease.v2_flags_breaking
+    smb2.lease.v2_flags_parentkey
     # smb2.lock
     smb2.lock.auto-unlock
-    smb2.lock.errorcode
-    smb2.lock.lock
-    smb2.lock.multiple-unlock
-    smb2.lock.overlap
-    smb2.lock.range
-    smb2.lock.stacking
-    smb2.lock.valid-request
-    smb2.lock.zerobytelength
-    smb2.lock.zerobyteread
     smb2.lock.contend
     smb2.lock.context
     smb2.lock.ctdb-delrec-deadlock
+    smb2.lock.errorcode
+    smb2.lock.lock
+    smb2.lock.multiple-unlock
     smb2.lock.open-brlock-deadlock
+    smb2.lock.overlap
+    smb2.lock.range
     smb2.lock.rw-exclusive
     smb2.lock.rw-none
     smb2.lock.rw-shared
+    smb2.lock.stacking
     smb2.lock.truncate
     smb2.lock.unlock
+    smb2.lock.valid-request
+    smb2.lock.zerobytelength
+    smb2.lock.zerobyteread
     # smb2.maxfid
     smb2.maxfid
     # smb2.maximum_allowed
@@ -1397,16 +1474,7 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.maximum_allowed.read_only
     # smb2.mkdir
     smb2.mkdir
-    # smb2.multichannel (SMB3 session binding).  interface_info advertises the
-    # server NICs, num_channels exercises channel bind + the 32-channel limit,
-    # bug_15346 is a bind regression, and oplocks.test1 checks an oplock break
-    # delivered over a bound session.  oplocks.test1 is enabled only on the
-    # non-passthrough backends: the linux/io_uring share root keeps real on-disk
-    # files between subtests, so the test's create-disposition checks see EXISTED
-    # instead of CREATED.  oplocks.test2/test3* stay disabled (they need Samba
-    # test-only FSCTLs -- force-unacked-timeout / network block -- chimera does
-    # not implement); leases.test1-4 stay disabled (general lease-grant
-    # behaviour, not multichannel binding).
+    # smb2.multichannel
     smb2.multichannel.bugs.bug_15346
     smb2.multichannel.generic.interface_info
     smb2.multichannel.generic.num_channels
@@ -1436,6 +1504,29 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.openattr
     # smb2.oplock
     smb2.oplock.batch10
+    smb2.oplock.batch11
+    smb2.oplock.batch12
+    smb2.oplock.batch13
+    smb2.oplock.batch14
+    smb2.oplock.batch15
+    smb2.oplock.batch16
+    smb2.oplock.batch2
+    smb2.oplock.batch21
+    smb2.oplock.batch23
+    smb2.oplock.batch24
+    smb2.oplock.batch25
+    smb2.oplock.batch4
+    smb2.oplock.batch5
+    smb2.oplock.batch8
+    smb2.oplock.brl2
+    smb2.oplock.exclusive1
+    smb2.oplock.exclusive2
+    smb2.oplock.exclusive3
+    smb2.oplock.exclusive4
+    smb2.oplock.exclusive5
+    smb2.oplock.exclusive9
+    smb2.oplock.levelii501
+    smb2.oplock.levelii502
     # smb2.read
     smb2.read.access
     smb2.read.bug14607
@@ -1517,6 +1608,8 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.session.expire2e
     smb2.session.expire2s
     smb2.session.expire_disconnect
+    smb2.session.reauth6
+    smb2.session.reconnect2
     smb2.session.signing-aes-128-cmac
     smb2.session.signing-aes-128-gmac
     smb2.session.signing-hmac-sha-256
@@ -1567,8 +1660,15 @@ set(SMBTORTURE_ENABLED_memfs
 
 set(SMBTORTURE_ENABLED_linux
     # smb2.bench
+    smb2.bench.echo
+    smb2.bench.path-contention-shared
+    smb2.bench.read
+    smb2.bench.session-setup
     # smb2.change_notify_disabled
     smb2.change_notify_disabled.notfiy_disabled
+    # smb2.charset
+    "smb2.charset.Testing composite character (a umlaut)"
+    "smb2.charset.Testing naked diacritical (umlaut)"
     # smb2.check-sharemode
     smb2.check-sharemode
     # smb2.compound
@@ -1584,6 +1684,10 @@ set(SMBTORTURE_ENABLED_linux
     smb2.compound.related6
     smb2.compound.related9
     smb2.compound.unrelated1
+    # smb2.compound_async
+    smb2.compound_async.create_lease_break_async
+    smb2.compound_async.rename_last
+    smb2.compound_async.rename_middle
     # smb2.compound_find
     smb2.compound_find.compound_find_close
     smb2.compound_find.compound_find_related
@@ -1607,6 +1711,7 @@ set(SMBTORTURE_ENABLED_linux
     smb2.credits.skipped_mid
     # smb2.delete-on-close-perms
     smb2.delete-on-close-perms.CREATE
+    "smb2.delete-on-close-perms.CREATE Existing"
     smb2.delete-on-close-perms.CREATE_IF
     smb2.delete-on-close-perms.FIND_and_set_DOC
     smb2.delete-on-close-perms.OVERWRITE_IF
@@ -1620,10 +1725,12 @@ set(SMBTORTURE_ENABLED_linux
     smb2.dir.fixed
     smb2.dir.sorted
     # smb2.durable-open
+    smb2.durable-open.reopen6
     # smb2.durable-v2-delay
     smb2.durable-v2-delay.durable_v2_reconnect_delay
     smb2.durable-v2-delay.durable_v2_reconnect_delay_msec
     # smb2.durable-v2-open
+    smb2.durable-v2-open.reconnect-twice
     # smb2.durable-v2-regressions
     smb2.durable-v2-regressions.durable_v2_reconnect_bug15624
     # smb2.fileid
@@ -1666,6 +1773,7 @@ set(SMBTORTURE_ENABLED_linux
     smb2.ioctl.dup_extents_src_is_dest
     smb2.ioctl.dup_extents_src_is_dest_overlap
     smb2.ioctl.dup_extents_src_lock
+    smb2.ioctl.network_interface_info
     smb2.ioctl.req_resume_key
     smb2.ioctl.req_two_resume_keys
     smb2.ioctl.shadow_copy
@@ -1687,42 +1795,39 @@ set(SMBTORTURE_ENABLED_linux
     smb2.ioctl.sparse_qar_truncated
     smb2.ioctl.sparse_set_nobuf
     smb2.ioctl.sparse_set_oversize
+    # smb2.kernel-oplocks
+    smb2.kernel-oplocks.kernel_oplocks1
+    smb2.kernel-oplocks.kernel_oplocks3
+    # smb2.lease
+    smb2.lease.statopen2
+    smb2.lease.statopen3
     # smb2.lock
     smb2.lock.auto-unlock
-    smb2.lock.errorcode
-    smb2.lock.lock
-    smb2.lock.multiple-unlock
-    smb2.lock.overlap
-    smb2.lock.range
-    smb2.lock.stacking
-    smb2.lock.valid-request
-    smb2.lock.zerobytelength
-    smb2.lock.zerobyteread
     smb2.lock.contend
     smb2.lock.context
     smb2.lock.ctdb-delrec-deadlock
+    smb2.lock.errorcode
+    smb2.lock.lock
+    smb2.lock.multiple-unlock
     smb2.lock.open-brlock-deadlock
+    smb2.lock.overlap
+    smb2.lock.range
     smb2.lock.rw-exclusive
     smb2.lock.rw-none
     smb2.lock.rw-shared
+    smb2.lock.stacking
     smb2.lock.truncate
     smb2.lock.unlock
+    smb2.lock.valid-request
+    smb2.lock.zerobytelength
+    smb2.lock.zerobyteread
     # smb2.maxfid
     smb2.maxfid
     # smb2.maximum_allowed
     smb2.maximum_allowed.read_only
     # smb2.mkdir
     smb2.mkdir
-    # smb2.multichannel (SMB3 session binding).  interface_info advertises the
-    # server NICs, num_channels exercises channel bind + the 32-channel limit,
-    # bug_15346 is a bind regression, and oplocks.test1 checks an oplock break
-    # delivered over a bound session.  oplocks.test1 is enabled only on the
-    # non-passthrough backends: the linux/io_uring share root keeps real on-disk
-    # files between subtests, so the test's create-disposition checks see EXISTED
-    # instead of CREATED.  oplocks.test2/test3* stay disabled (they need Samba
-    # test-only FSCTLs -- force-unacked-timeout / network block -- chimera does
-    # not implement); leases.test1-4 stay disabled (general lease-grant
-    # behaviour, not multichannel binding).
+    # smb2.multichannel
     smb2.multichannel.bugs.bug_15346
     smb2.multichannel.generic.interface_info
     smb2.multichannel.generic.num_channels
@@ -1749,6 +1854,29 @@ set(SMBTORTURE_ENABLED_linux
     smb2.notify.tdis1
     # smb2.oplock
     smb2.oplock.batch10
+    smb2.oplock.batch11
+    smb2.oplock.batch12
+    smb2.oplock.batch13
+    smb2.oplock.batch14
+    smb2.oplock.batch15
+    smb2.oplock.batch16
+    smb2.oplock.batch2
+    smb2.oplock.batch21
+    smb2.oplock.batch23
+    smb2.oplock.batch24
+    smb2.oplock.batch25
+    smb2.oplock.batch4
+    smb2.oplock.batch5
+    smb2.oplock.batch8
+    smb2.oplock.brl2
+    smb2.oplock.exclusive1
+    smb2.oplock.exclusive2
+    smb2.oplock.exclusive3
+    smb2.oplock.exclusive4
+    smb2.oplock.exclusive5
+    smb2.oplock.exclusive9
+    smb2.oplock.levelii501
+    smb2.oplock.levelii502
     # smb2.read
     smb2.read.access
     smb2.read.bug14607
@@ -1847,8 +1975,15 @@ set(SMBTORTURE_ENABLED_linux
 
 set(SMBTORTURE_ENABLED_io_uring
     # smb2.bench
+    smb2.bench.echo
+    smb2.bench.path-contention-shared
+    smb2.bench.read
+    smb2.bench.session-setup
     # smb2.change_notify_disabled
     smb2.change_notify_disabled.notfiy_disabled
+    # smb2.charset
+    "smb2.charset.Testing composite character (a umlaut)"
+    "smb2.charset.Testing naked diacritical (umlaut)"
     # smb2.check-sharemode
     smb2.check-sharemode
     # smb2.compound
@@ -1864,6 +1999,10 @@ set(SMBTORTURE_ENABLED_io_uring
     smb2.compound.related6
     smb2.compound.related9
     smb2.compound.unrelated1
+    # smb2.compound_async
+    smb2.compound_async.create_lease_break_async
+    smb2.compound_async.rename_last
+    smb2.compound_async.rename_middle
     # smb2.compound_find
     smb2.compound_find.compound_find_close
     smb2.compound_find.compound_find_related
@@ -1887,6 +2026,7 @@ set(SMBTORTURE_ENABLED_io_uring
     smb2.credits.skipped_mid
     # smb2.delete-on-close-perms
     smb2.delete-on-close-perms.CREATE
+    "smb2.delete-on-close-perms.CREATE Existing"
     smb2.delete-on-close-perms.CREATE_IF
     smb2.delete-on-close-perms.FIND_and_set_DOC
     smb2.delete-on-close-perms.OVERWRITE_IF
@@ -1901,10 +2041,12 @@ set(SMBTORTURE_ENABLED_io_uring
     smb2.dir.many
     smb2.dir.sorted
     # smb2.durable-open
+    smb2.durable-open.reopen6
     # smb2.durable-v2-delay
     smb2.durable-v2-delay.durable_v2_reconnect_delay
     smb2.durable-v2-delay.durable_v2_reconnect_delay_msec
     # smb2.durable-v2-open
+    smb2.durable-v2-open.reconnect-twice
     # smb2.durable-v2-regressions
     smb2.durable-v2-regressions.durable_v2_reconnect_bug15624
     # smb2.fileid
@@ -1947,6 +2089,7 @@ set(SMBTORTURE_ENABLED_io_uring
     smb2.ioctl.dup_extents_src_is_dest
     smb2.ioctl.dup_extents_src_is_dest_overlap
     smb2.ioctl.dup_extents_src_lock
+    smb2.ioctl.network_interface_info
     smb2.ioctl.req_resume_key
     smb2.ioctl.req_two_resume_keys
     smb2.ioctl.shadow_copy
@@ -1968,42 +2111,39 @@ set(SMBTORTURE_ENABLED_io_uring
     smb2.ioctl.sparse_qar_truncated
     smb2.ioctl.sparse_set_nobuf
     smb2.ioctl.sparse_set_oversize
+    # smb2.kernel-oplocks
+    smb2.kernel-oplocks.kernel_oplocks1
+    smb2.kernel-oplocks.kernel_oplocks3
+    # smb2.lease
+    smb2.lease.statopen2
+    smb2.lease.statopen3
     # smb2.lock
     smb2.lock.auto-unlock
-    smb2.lock.errorcode
-    smb2.lock.lock
-    smb2.lock.multiple-unlock
-    smb2.lock.overlap
-    smb2.lock.range
-    smb2.lock.stacking
-    smb2.lock.valid-request
-    smb2.lock.zerobytelength
-    smb2.lock.zerobyteread
     smb2.lock.contend
     smb2.lock.context
     smb2.lock.ctdb-delrec-deadlock
+    smb2.lock.errorcode
+    smb2.lock.lock
+    smb2.lock.multiple-unlock
     smb2.lock.open-brlock-deadlock
+    smb2.lock.overlap
+    smb2.lock.range
     smb2.lock.rw-exclusive
     smb2.lock.rw-none
     smb2.lock.rw-shared
+    smb2.lock.stacking
     smb2.lock.truncate
     smb2.lock.unlock
+    smb2.lock.valid-request
+    smb2.lock.zerobytelength
+    smb2.lock.zerobyteread
     # smb2.maxfid
     smb2.maxfid
     # smb2.maximum_allowed
     smb2.maximum_allowed.read_only
     # smb2.mkdir
     smb2.mkdir
-    # smb2.multichannel (SMB3 session binding).  interface_info advertises the
-    # server NICs, num_channels exercises channel bind + the 32-channel limit,
-    # bug_15346 is a bind regression, and oplocks.test1 checks an oplock break
-    # delivered over a bound session.  oplocks.test1 is enabled only on the
-    # non-passthrough backends: the linux/io_uring share root keeps real on-disk
-    # files between subtests, so the test's create-disposition checks see EXISTED
-    # instead of CREATED.  oplocks.test2/test3* stay disabled (they need Samba
-    # test-only FSCTLs -- force-unacked-timeout / network block -- chimera does
-    # not implement); leases.test1-4 stay disabled (general lease-grant
-    # behaviour, not multichannel binding).
+    # smb2.multichannel
     smb2.multichannel.bugs.bug_15346
     smb2.multichannel.generic.interface_info
     smb2.multichannel.generic.num_channels
@@ -2030,6 +2170,28 @@ set(SMBTORTURE_ENABLED_io_uring
     smb2.notify.tdis1
     # smb2.oplock
     smb2.oplock.batch10
+    smb2.oplock.batch11
+    smb2.oplock.batch12
+    smb2.oplock.batch13
+    smb2.oplock.batch14
+    smb2.oplock.batch15
+    smb2.oplock.batch16
+    smb2.oplock.batch2
+    smb2.oplock.batch21
+    smb2.oplock.batch23
+    smb2.oplock.batch24
+    smb2.oplock.batch25
+    smb2.oplock.batch4
+    smb2.oplock.batch5
+    smb2.oplock.batch8
+    smb2.oplock.brl2
+    smb2.oplock.exclusive1
+    smb2.oplock.exclusive2
+    smb2.oplock.exclusive3
+    smb2.oplock.exclusive4
+    smb2.oplock.exclusive5
+    smb2.oplock.levelii501
+    smb2.oplock.levelii502
     # smb2.read
     smb2.read.access
     smb2.read.bug14607
@@ -2145,8 +2307,15 @@ set(SMBTORTURE_ENABLED_cairn
     # smb2.async_dosmode
     smb2.async_dosmode
     # smb2.bench
+    smb2.bench.echo
+    smb2.bench.path-contention-shared
+    smb2.bench.read
+    smb2.bench.session-setup
     # smb2.change_notify_disabled
     smb2.change_notify_disabled.notfiy_disabled
+    # smb2.charset
+    "smb2.charset.Testing composite character (a umlaut)"
+    "smb2.charset.Testing naked diacritical (umlaut)"
     # smb2.check-sharemode
     smb2.check-sharemode
     # smb2.compound
@@ -2186,6 +2355,7 @@ set(SMBTORTURE_ENABLED_cairn
     # smb2.delete-on-close-perms
     smb2.delete-on-close-perms.BUG14427
     smb2.delete-on-close-perms.CREATE
+    "smb2.delete-on-close-perms.CREATE Existing"
     smb2.delete-on-close-perms.CREATE_IF
     smb2.delete-on-close-perms.FIND_and_set_DOC
     smb2.delete-on-close-perms.OVERWRITE_IF
@@ -2200,18 +2370,62 @@ set(SMBTORTURE_ENABLED_cairn
     # smb2.durable-open-disconnect
     smb2.durable-open-disconnect.open-oplock-disconnect
     # smb2.durable-open
+    smb2.durable-open.delete_on_close2
+    smb2.durable-open.file-position
     smb2.durable-open.lease
-    smb2.durable-open.oplock
+    smb2.durable-open.lock-lease
+    smb2.durable-open.lock-noW-lease
+    smb2.durable-open.lock-oplock
+    smb2.durable-open.open-lease
+    smb2.durable-open.open-oplock
     smb2.durable-open.open2-oplock
+    smb2.durable-open.oplock
+    smb2.durable-open.read-only
+    smb2.durable-open.reopen1
+    smb2.durable-open.reopen1a
+    smb2.durable-open.reopen1a-lease
+    smb2.durable-open.reopen2
+    smb2.durable-open.reopen2-lease
+    smb2.durable-open.reopen2-lease-v2
+    smb2.durable-open.reopen2a
+    smb2.durable-open.reopen3
+    smb2.durable-open.reopen4
+    smb2.durable-open.reopen5
+    smb2.durable-open.reopen6
+    smb2.durable-open.stat-open
     # smb2.durable-v2-delay
     smb2.durable-v2-delay.durable_v2_reconnect_delay
     smb2.durable-v2-delay.durable_v2_reconnect_delay_msec
     # smb2.durable-v2-open
     smb2.durable-v2-open.app-instance
+    smb2.durable-v2-open.create-blob
+    smb2.durable-v2-open.durable-v2-setinfo
     smb2.durable-v2-open.keep-disconnected-rh-with-rh-open
     smb2.durable-v2-open.keep-disconnected-rh-with-rwh-open
+    smb2.durable-v2-open.keep-disconnected-rh-with-stat-open
+    smb2.durable-v2-open.keep-disconnected-rwh-with-stat-open
+    smb2.durable-v2-open.lock-lease
+    smb2.durable-v2-open.lock-noW-lease
+    smb2.durable-v2-open.lock-oplock
+    smb2.durable-v2-open.open-lease
+    smb2.durable-v2-open.open-oplock
+    smb2.durable-v2-open.persistent-open-lease
+    smb2.durable-v2-open.persistent-open-oplock
+    smb2.durable-v2-open.purge-disconnected-rh-with-share-none-open
     smb2.durable-v2-open.purge-disconnected-rwh-with-rh-open
     smb2.durable-v2-open.purge-disconnected-rwh-with-rwh-open
+    smb2.durable-v2-open.reconnect-twice
+    smb2.durable-v2-open.reopen1
+    smb2.durable-v2-open.reopen1a
+    smb2.durable-v2-open.reopen1a-lease
+    smb2.durable-v2-open.reopen2
+    smb2.durable-v2-open.reopen2-lease
+    smb2.durable-v2-open.reopen2-lease-v2
+    smb2.durable-v2-open.reopen2b
+    smb2.durable-v2-open.reopen2c
+    smb2.durable-v2-open.stat-and-lease
+    smb2.durable-v2-open.two-different-lease
+    smb2.durable-v2-open.two-same-lease
     # smb2.durable-v2-regressions
     smb2.durable-v2-regressions.durable_v2_reconnect_bug15624
     # smb2.fileid
@@ -2246,6 +2460,7 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.ioctl.dup_extents_src_is_dest
     smb2.ioctl.dup_extents_src_is_dest_overlap
     smb2.ioctl.dup_extents_src_lock
+    smb2.ioctl.network_interface_info
     smb2.ioctl.req_resume_key
     smb2.ioctl.req_two_resume_keys
     smb2.ioctl.shadow_copy
@@ -2271,40 +2486,32 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.kernel-oplocks.kernel_oplocks8
     # smb2.lock
     smb2.lock.auto-unlock
-    smb2.lock.errorcode
-    smb2.lock.lock
-    smb2.lock.multiple-unlock
-    smb2.lock.overlap
-    smb2.lock.range
-    smb2.lock.stacking
-    smb2.lock.valid-request
-    smb2.lock.zerobytelength
-    smb2.lock.zerobyteread
     smb2.lock.contend
     smb2.lock.context
     smb2.lock.ctdb-delrec-deadlock
+    smb2.lock.errorcode
+    smb2.lock.lock
+    smb2.lock.multiple-unlock
     smb2.lock.open-brlock-deadlock
+    smb2.lock.overlap
+    smb2.lock.range
     smb2.lock.rw-exclusive
     smb2.lock.rw-none
     smb2.lock.rw-shared
+    smb2.lock.stacking
     smb2.lock.truncate
     smb2.lock.unlock
+    smb2.lock.valid-request
+    smb2.lock.zerobytelength
+    smb2.lock.zerobyteread
     # smb2.maxfid
+    smb2.maxfid
     # smb2.maximum_allowed
     smb2.maximum_allowed.maximum_allowed
     smb2.maximum_allowed.read_only
     # smb2.mkdir
     smb2.mkdir
-    # smb2.multichannel (SMB3 session binding).  interface_info advertises the
-    # server NICs, num_channels exercises channel bind + the 32-channel limit,
-    # bug_15346 is a bind regression, and oplocks.test1 checks an oplock break
-    # delivered over a bound session.  oplocks.test1 is enabled only on the
-    # non-passthrough backends: the linux/io_uring share root keeps real on-disk
-    # files between subtests, so the test's create-disposition checks see EXISTED
-    # instead of CREATED.  oplocks.test2/test3* stay disabled (they need Samba
-    # test-only FSCTLs -- force-unacked-timeout / network block -- chimera does
-    # not implement); leases.test1-4 stay disabled (general lease-grant
-    # behaviour, not multichannel binding).
+    # smb2.multichannel
     smb2.multichannel.bugs.bug_15346
     smb2.multichannel.generic.interface_info
     smb2.multichannel.generic.num_channels
@@ -2474,8 +2681,15 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     # smb2.async_dosmode
     smb2.async_dosmode
     # smb2.bench
+    smb2.bench.echo
+    smb2.bench.path-contention-shared
+    smb2.bench.read
+    smb2.bench.session-setup
     # smb2.change_notify_disabled
     smb2.change_notify_disabled.notfiy_disabled
+    # smb2.charset
+    "smb2.charset.Testing composite character (a umlaut)"
+    "smb2.charset.Testing naked diacritical (umlaut)"
     # smb2.check-sharemode
     smb2.check-sharemode
     # smb2.compound
@@ -2517,6 +2731,7 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     # smb2.delete-on-close-perms
     smb2.delete-on-close-perms.BUG14427
     smb2.delete-on-close-perms.CREATE
+    "smb2.delete-on-close-perms.CREATE Existing"
     smb2.delete-on-close-perms.CREATE_IF
     smb2.delete-on-close-perms.FIND_and_set_DOC
     smb2.delete-on-close-perms.OVERWRITE_IF
@@ -2533,15 +2748,59 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     # smb2.durable-open-disconnect
     smb2.durable-open-disconnect.open-oplock-disconnect
     # smb2.durable-open
+    smb2.durable-open.delete_on_close2
+    smb2.durable-open.file-position
+    smb2.durable-open.lock-lease
+    smb2.durable-open.lock-noW-lease
+    smb2.durable-open.lock-oplock
+    smb2.durable-open.open-lease
+    smb2.durable-open.open-oplock
+    smb2.durable-open.read-only
+    smb2.durable-open.reopen1
+    smb2.durable-open.reopen1a
+    smb2.durable-open.reopen1a-lease
+    smb2.durable-open.reopen2
+    smb2.durable-open.reopen2-lease
+    smb2.durable-open.reopen2-lease-v2
+    smb2.durable-open.reopen2a
+    smb2.durable-open.reopen3
+    smb2.durable-open.reopen4
+    smb2.durable-open.reopen5
+    smb2.durable-open.reopen6
+    smb2.durable-open.stat-open
     # smb2.durable-v2-delay
     smb2.durable-v2-delay.durable_v2_reconnect_delay
     smb2.durable-v2-delay.durable_v2_reconnect_delay_msec
     # smb2.durable-v2-open
     smb2.durable-v2-open.app-instance
+    smb2.durable-v2-open.create-blob
+    smb2.durable-v2-open.durable-v2-setinfo
     smb2.durable-v2-open.keep-disconnected-rh-with-rh-open
     smb2.durable-v2-open.keep-disconnected-rh-with-rwh-open
+    smb2.durable-v2-open.keep-disconnected-rh-with-stat-open
+    smb2.durable-v2-open.keep-disconnected-rwh-with-stat-open
+    smb2.durable-v2-open.lock-lease
+    smb2.durable-v2-open.lock-noW-lease
+    smb2.durable-v2-open.lock-oplock
+    smb2.durable-v2-open.open-lease
+    smb2.durable-v2-open.open-oplock
+    smb2.durable-v2-open.persistent-open-lease
+    smb2.durable-v2-open.persistent-open-oplock
+    smb2.durable-v2-open.purge-disconnected-rh-with-share-none-open
     smb2.durable-v2-open.purge-disconnected-rwh-with-rh-open
     smb2.durable-v2-open.purge-disconnected-rwh-with-rwh-open
+    smb2.durable-v2-open.reconnect-twice
+    smb2.durable-v2-open.reopen1
+    smb2.durable-v2-open.reopen1a
+    smb2.durable-v2-open.reopen1a-lease
+    smb2.durable-v2-open.reopen2
+    smb2.durable-v2-open.reopen2-lease
+    smb2.durable-v2-open.reopen2-lease-v2
+    smb2.durable-v2-open.reopen2b
+    smb2.durable-v2-open.reopen2c
+    smb2.durable-v2-open.stat-and-lease
+    smb2.durable-v2-open.two-different-lease
+    smb2.durable-v2-open.two-same-lease
     # smb2.durable-v2-regressions
     smb2.durable-v2-regressions.durable_v2_reconnect_bug15624
     # smb2.fileid
@@ -2576,6 +2835,7 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.ioctl.dup_extents_src_is_dest
     smb2.ioctl.dup_extents_src_is_dest_overlap
     smb2.ioctl.dup_extents_src_lock
+    smb2.ioctl.network_interface_info
     smb2.ioctl.req_resume_key
     smb2.ioctl.req_two_resume_keys
     smb2.ioctl.shadow_copy
@@ -2601,40 +2861,32 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.kernel-oplocks.kernel_oplocks8
     # smb2.lock
     smb2.lock.auto-unlock
-    smb2.lock.errorcode
-    smb2.lock.lock
-    smb2.lock.multiple-unlock
-    smb2.lock.overlap
-    smb2.lock.range
-    smb2.lock.stacking
-    smb2.lock.valid-request
-    smb2.lock.zerobytelength
-    smb2.lock.zerobyteread
     smb2.lock.contend
     smb2.lock.context
     smb2.lock.ctdb-delrec-deadlock
+    smb2.lock.errorcode
+    smb2.lock.lock
+    smb2.lock.multiple-unlock
     smb2.lock.open-brlock-deadlock
+    smb2.lock.overlap
+    smb2.lock.range
     smb2.lock.rw-exclusive
     smb2.lock.rw-none
     smb2.lock.rw-shared
+    smb2.lock.stacking
     smb2.lock.truncate
     smb2.lock.unlock
+    smb2.lock.valid-request
+    smb2.lock.zerobytelength
+    smb2.lock.zerobyteread
     # smb2.maxfid
+    smb2.maxfid
     # smb2.maximum_allowed
     smb2.maximum_allowed.maximum_allowed
     smb2.maximum_allowed.read_only
     # smb2.mkdir
     smb2.mkdir
-    # smb2.multichannel (SMB3 session binding).  interface_info advertises the
-    # server NICs, num_channels exercises channel bind + the 32-channel limit,
-    # bug_15346 is a bind regression, and oplocks.test1 checks an oplock break
-    # delivered over a bound session.  oplocks.test1 is enabled only on the
-    # non-passthrough backends: the linux/io_uring share root keeps real on-disk
-    # files between subtests, so the test's create-disposition checks see EXISTED
-    # instead of CREATED.  oplocks.test2/test3* stay disabled (they need Samba
-    # test-only FSCTLs -- force-unacked-timeout / network block -- chimera does
-    # not implement); leases.test1-4 stay disabled (general lease-grant
-    # behaviour, not multichannel binding).
+    # smb2.multichannel
     smb2.multichannel.bugs.bug_15346
     smb2.multichannel.generic.interface_info
     smb2.multichannel.generic.num_channels
@@ -2804,8 +3056,15 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     # smb2.async_dosmode
     smb2.async_dosmode
     # smb2.bench
+    smb2.bench.echo
+    smb2.bench.path-contention-shared
+    smb2.bench.read
+    smb2.bench.session-setup
     # smb2.change_notify_disabled
     smb2.change_notify_disabled.notfiy_disabled
+    # smb2.charset
+    "smb2.charset.Testing composite character (a umlaut)"
+    "smb2.charset.Testing naked diacritical (umlaut)"
     # smb2.check-sharemode
     smb2.check-sharemode
     # smb2.compound
@@ -2847,6 +3106,7 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     # smb2.delete-on-close-perms
     smb2.delete-on-close-perms.BUG14427
     smb2.delete-on-close-perms.CREATE
+    "smb2.delete-on-close-perms.CREATE Existing"
     smb2.delete-on-close-perms.CREATE_IF
     smb2.delete-on-close-perms.FIND_and_set_DOC
     smb2.delete-on-close-perms.OVERWRITE_IF
@@ -2863,15 +3123,59 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     # smb2.durable-open-disconnect
     smb2.durable-open-disconnect.open-oplock-disconnect
     # smb2.durable-open
+    smb2.durable-open.delete_on_close2
+    smb2.durable-open.file-position
+    smb2.durable-open.lock-lease
+    smb2.durable-open.lock-noW-lease
+    smb2.durable-open.lock-oplock
+    smb2.durable-open.open-lease
+    smb2.durable-open.open-oplock
+    smb2.durable-open.read-only
+    smb2.durable-open.reopen1
+    smb2.durable-open.reopen1a
+    smb2.durable-open.reopen1a-lease
+    smb2.durable-open.reopen2
+    smb2.durable-open.reopen2-lease
+    smb2.durable-open.reopen2-lease-v2
+    smb2.durable-open.reopen2a
+    smb2.durable-open.reopen3
+    smb2.durable-open.reopen4
+    smb2.durable-open.reopen5
+    smb2.durable-open.reopen6
+    smb2.durable-open.stat-open
     # smb2.durable-v2-delay
     smb2.durable-v2-delay.durable_v2_reconnect_delay
     smb2.durable-v2-delay.durable_v2_reconnect_delay_msec
     # smb2.durable-v2-open
     smb2.durable-v2-open.app-instance
+    smb2.durable-v2-open.create-blob
+    smb2.durable-v2-open.durable-v2-setinfo
     smb2.durable-v2-open.keep-disconnected-rh-with-rh-open
     smb2.durable-v2-open.keep-disconnected-rh-with-rwh-open
+    smb2.durable-v2-open.keep-disconnected-rh-with-stat-open
+    smb2.durable-v2-open.keep-disconnected-rwh-with-stat-open
+    smb2.durable-v2-open.lock-lease
+    smb2.durable-v2-open.lock-noW-lease
+    smb2.durable-v2-open.lock-oplock
+    smb2.durable-v2-open.open-lease
+    smb2.durable-v2-open.open-oplock
+    smb2.durable-v2-open.persistent-open-lease
+    smb2.durable-v2-open.persistent-open-oplock
+    smb2.durable-v2-open.purge-disconnected-rh-with-share-none-open
     smb2.durable-v2-open.purge-disconnected-rwh-with-rh-open
     smb2.durable-v2-open.purge-disconnected-rwh-with-rwh-open
+    smb2.durable-v2-open.reconnect-twice
+    smb2.durable-v2-open.reopen1
+    smb2.durable-v2-open.reopen1a
+    smb2.durable-v2-open.reopen1a-lease
+    smb2.durable-v2-open.reopen2
+    smb2.durable-v2-open.reopen2-lease
+    smb2.durable-v2-open.reopen2-lease-v2
+    smb2.durable-v2-open.reopen2b
+    smb2.durable-v2-open.reopen2c
+    smb2.durable-v2-open.stat-and-lease
+    smb2.durable-v2-open.two-different-lease
+    smb2.durable-v2-open.two-same-lease
     # smb2.durable-v2-regressions
     smb2.durable-v2-regressions.durable_v2_reconnect_bug15624
     # smb2.fileid
@@ -2906,6 +3210,7 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     smb2.ioctl.dup_extents_src_is_dest
     smb2.ioctl.dup_extents_src_is_dest_overlap
     smb2.ioctl.dup_extents_src_lock
+    smb2.ioctl.network_interface_info
     smb2.ioctl.req_resume_key
     smb2.ioctl.req_two_resume_keys
     smb2.ioctl.shadow_copy
@@ -2931,40 +3236,30 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     smb2.kernel-oplocks.kernel_oplocks8
     # smb2.lock
     smb2.lock.auto-unlock
-    smb2.lock.errorcode
-    smb2.lock.lock
-    smb2.lock.multiple-unlock
-    smb2.lock.overlap
-    smb2.lock.range
-    smb2.lock.stacking
-    smb2.lock.valid-request
-    smb2.lock.zerobytelength
-    smb2.lock.zerobyteread
     smb2.lock.contend
     smb2.lock.context
     smb2.lock.ctdb-delrec-deadlock
+    smb2.lock.errorcode
+    smb2.lock.lock
+    smb2.lock.multiple-unlock
     smb2.lock.open-brlock-deadlock
+    smb2.lock.overlap
+    smb2.lock.range
     smb2.lock.rw-exclusive
     smb2.lock.rw-none
     smb2.lock.rw-shared
+    smb2.lock.stacking
     smb2.lock.truncate
     smb2.lock.unlock
-    # smb2.maxfid
+    smb2.lock.valid-request
+    smb2.lock.zerobytelength
+    smb2.lock.zerobyteread
     # smb2.maximum_allowed
     smb2.maximum_allowed.maximum_allowed
     smb2.maximum_allowed.read_only
     # smb2.mkdir
     smb2.mkdir
-    # smb2.multichannel (SMB3 session binding).  interface_info advertises the
-    # server NICs, num_channels exercises channel bind + the 32-channel limit,
-    # bug_15346 is a bind regression, and oplocks.test1 checks an oplock break
-    # delivered over a bound session.  oplocks.test1 is enabled only on the
-    # non-passthrough backends: the linux/io_uring share root keeps real on-disk
-    # files between subtests, so the test's create-disposition checks see EXISTED
-    # instead of CREATED.  oplocks.test2/test3* stay disabled (they need Samba
-    # test-only FSCTLs -- force-unacked-timeout / network block -- chimera does
-    # not implement); leases.test1-4 stay disabled (general lease-grant
-    # behaviour, not multichannel binding).
+    # smb2.multichannel
     smb2.multichannel.bugs.bug_15346
     smb2.multichannel.generic.interface_info
     smb2.multichannel.generic.num_channels
