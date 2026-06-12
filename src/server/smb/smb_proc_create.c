@@ -51,8 +51,11 @@
 /* Re-getattr budget for an ACCESS_DENIED that looks like the transient
  * server-owned state of an object a concurrent CREATE is still constructing
  * (see chimera_smb_create_open_at_callback).  Each retry is a full backend
- * round trip, which dwarfs the racing creator's create-to-chown window. */
-#define CHIMERA_SMB_CREATE_ACCESS_RETRIES 8
+ * round trip, which dwarfs the racing creator's create-to-chown window.
+ * 32 retries to accommodate slow arm64 Debug / io_uring builds where the
+ * ASan + async overhead can extend the racing creator's chown window well
+ * past 8 round trips. */
+#define CHIMERA_SMB_CREATE_ACCESS_RETRIES 32
 
 /* Map a VFS error from an open-or-create path to the SMB2 status that
  * Windows clients expect.  EISDIR/ENOTDIR are critical here: cmd.exe and
