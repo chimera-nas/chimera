@@ -844,10 +844,6 @@ chimera_smb_create_after_share(
         bool                           via_rqls = false;
         struct chimera_vfs_lease      *conflict = NULL;
         enum chimera_vfs_lease_result  result;
-        bool                           durable_request =
-            thread->shared->config.persistent_handles &&
-            (request->create.ctx_present_mask &
-             (CHIMERA_SMB_CREATE_CTX_DHNQ | CHIMERA_SMB_CREATE_CTX_DH2Q)) != 0;
 
         /* Phase 2 of the conflicting-open oplock break.  Phase 1 (the batch /
          * handle-caching break that must precede the share-mode check) already
@@ -923,26 +919,6 @@ chimera_smb_create_after_share(
             request->create.create_disposition == SMB2_FILE_OVERWRITE_IF ||
             request->create.create_disposition == SMB2_FILE_SUPERSEDE;
 
-        /* Only advertise a read-caching oplock on backends that can serve a
-         * server-side copy (FSCTL_SRV_COPYCHUNK -> chimera_vfs_copy_range).
-         * Under a read cache the client offloads copy_file_range to the
-         * server; if the backend can't do server-side copy the client falls
-         * back to a cache-mediated copy that reads stale data (fsx READ BAD
-         * DATA on diskfs/cairn).  Where copy_range is unavailable we leave the
-         * file uncached (write-through), which is correct.
-         *
-         * Durable-aware opens are the exception: MS-SMB2 3.3.5.9 requires a
-         * durable grant to be paired with a batch oplock or HANDLE-caching
-         * lease, and durable-aware clients (WPTS, smbtorture durable suites)
-         * verify that response context on the initial CREATE.  Without a
-         * caching grant the durable request is silently dropped and the suite
-         * fails before it even disconnects.  Durable-aware Windows clients do
-         * not stream copy_file_range through a durable handle, so opting in
-         * for those opens does not re-introduce the fsx hazard. */
-        bool backend_copy_safe =
-            (oh->vfs_module->capabilities & CHIMERA_VFS_CAP_COPY_RANGE) != 0 ||
-            durable_request;
-
         /* An explicitly requested SMB2 lease (RqLs) is acquired even for an
          * attribute-only ("stat") open: a handle/read-caching lease is about the
          * handle, not data access, and such an open is still eligible for a
@@ -956,9 +932,15 @@ chimera_smb_create_after_share(
          * requests no caching bits -- so a re-open under an existing lease key joins
          * (and never downgrades) the shared lease (MS-SMB2 3.3.5.9.8: a lease is not
          * reduced by a subsequent open).  A *fresh* grant is created only when the
-         * open warrants caching (real bits, on a copy-safe backend). */
+         * open warrants caching (real bits).  The grant is backend-independent:
+         * coherence does not rely on the backend serving FSCTL_SRV_COPYCHUNK
+         * (CAP_COPY_RANGE).  A client whose COPYCHUNK is answered NOT_SUPPORTED
+         * falls back to plain READ/WRITE, and those paths (like every other
+         * conflicting open / lock / delete) break conflicting caching holders
+         * via vfs_state before touching data, so the old "uncached unless
+         * copy-capable" rule from the pre-break era is no longer needed. */
         bool want_fresh_caching =
-            (req_vfs != 0 && (caching_touches_data || via_rqls) && backend_copy_safe);
+            (req_vfs != 0 && (caching_touches_data || via_rqls));
 
         if (via_rqls || want_fresh_caching) {
             file_state = chimera_vfs_state_get(vfs_state,
