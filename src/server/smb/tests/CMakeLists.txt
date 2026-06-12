@@ -2759,11 +2759,14 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     # smb2.durable-open
     smb2.durable-open.delete_on_close2
     smb2.durable-open.file-position
+    smb2.durable-open.lease
     smb2.durable-open.lock-lease
     smb2.durable-open.lock-noW-lease
     smb2.durable-open.lock-oplock
     smb2.durable-open.open-lease
     smb2.durable-open.open-oplock
+    smb2.durable-open.open2-oplock
+    smb2.durable-open.oplock
     smb2.durable-open.read-only
     smb2.durable-open.reopen1
     smb2.durable-open.reopen1a

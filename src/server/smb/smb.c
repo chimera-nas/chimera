@@ -1337,10 +1337,22 @@ chimera_smb_server_handle_smb2(
                      (request->smb2_hdr.command != SMB2_NEGOTIATE &&
                       request->smb2_hdr.command != SMB2_SESSION_SETUP &&
                       request->smb2_hdr.command != SMB2_ECHO))) {
-            chimera_smb_error("Received SMB2 message with invalid command and no session");
-            chimera_smb_complete_request(request, SMB2_STATUS_NO_SUCH_LOGON_SESSION);
-            chimera_smb_request_free(thread, request);
-            return;
+            /* A session-requiring command whose header carries SessionId 0 --
+             * e.g. smbtorture's sessionless FSCTL_SMBTORTURE transport-block
+             * IOCTL (smb2.replay.dhv2-pending3*, smb2.oplock.batch22b,
+             * smb2.multichannel.*).  Per MS-SMB2 3.3.5.2.9 this is answered
+             * with USER_SESSION_DELETED.  Defer the failure exactly like the
+             * invalid-session-id case above: the request was not yet added to
+             * the compound, so completing it inline would advance
+             * complete_requests against a compound that does not contain it
+             * (tripping the compound_advance accounting abort) and, mid-chain,
+             * would complete requests out of order. */
+            chimera_smb_error("Received session-requiring SMB2 command %u with no session",
+                              request->smb2_hdr.command);
+            request->status                              = SMB2_STATUS_USER_SESSION_DELETED;
+            request->flags                              |= CHIMERA_SMB_REQUEST_FLAG_PARSE_FAILED;
+            compound->requests[compound->num_requests++] = request;
+            goto next_compound_request;
         }
 
         if (request->session_handle &&
