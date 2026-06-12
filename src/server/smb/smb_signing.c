@@ -455,16 +455,17 @@ chimera_smb_request_gmac_aes_128(
  * SMB 3.1.1 negotiated signing algorithm (GMAC / CMAC / HMAC-SHA256) for 3.1.1.
  */
 static int
-chimera_smb_compute_signature(
+chimera_smb_compute_signature_alg(
     struct chimera_smb_signing_ctx *ctx,
-    struct chimera_smb_conn        *conn,
+    uint16_t                        dialect,
+    uint16_t                        signing_alg,
     struct smb2_header             *hdr,
     struct evpl_iovec_cursor       *cursor,
     int                             length,
     const uint8_t                  *key,
     uint8_t                        *out_sig16)
 {
-    switch (conn->dialect) {
+    switch (dialect) {
         case SMB2_DIALECT_2_0_2:
         case SMB2_DIALECT_2_1:
             return chimera_smb_request_hmac_sha256(ctx, hdr, cursor, length, key, 16, out_sig16);
@@ -472,7 +473,7 @@ chimera_smb_compute_signature(
         case SMB2_DIALECT_3_0_2:
             return chimera_smb_request_cmac_aes_128_cbc(ctx, hdr, cursor, length, key, 16, out_sig16);
         case SMB2_DIALECT_3_1_1:
-            switch (conn->negotiated.signing_alg) {
+            switch (signing_alg) {
                 case SMB2_SIGNING_AES_GMAC:
                     return chimera_smb_request_gmac_aes_128(ctx, hdr, cursor, length, key, 16, out_sig16);
                 case SMB2_SIGNING_HMAC_SHA256:
@@ -483,6 +484,21 @@ chimera_smb_compute_signature(
         default:
             return -1;
     } /* switch */
+} /* chimera_smb_compute_signature_alg */
+
+static int
+chimera_smb_compute_signature(
+    struct chimera_smb_signing_ctx *ctx,
+    struct chimera_smb_conn        *conn,
+    struct smb2_header             *hdr,
+    struct evpl_iovec_cursor       *cursor,
+    int                             length,
+    const uint8_t                  *key,
+    uint8_t                        *out_sig16)
+{
+    return chimera_smb_compute_signature_alg(ctx, conn->dialect,
+                                             conn->negotiated.signing_alg,
+                                             hdr, cursor, length, key, out_sig16);
 } /* chimera_smb_compute_signature */
 
 int
@@ -596,10 +612,34 @@ chimera_smb_sign_compound(
              * mishandles channel/session setup and can crash it). */
             hdr->flags |= SMB2_FLAGS_SIGNED;
 
-            rc = chimera_smb_compute_signature(ctx, conn, hdr, &cursor,
-                                               payload_length,
-                                               session_handle->signing_key,
-                                               signature);
+            /* A SESSION_SETUP response other than a final SUCCESS (interim
+             * MORE_PROCESSING legs and errors such as a rejected channel bind)
+             * is verified by the client against its Session.SigningKey object,
+             * which carries the dialect/algorithm of the connection the
+             * session was ESTABLISHED on — not this connection's.  Sign those
+             * with the session's algorithm (Samba bug 14512; smbtorture
+             * smb2.session.bind_negative_smb3to2* receives the bind rejection
+             * on a 2.10 connection but verifies it with the 3.x session's
+             * AES-CMAC).  A final SUCCESS response is verified with the
+             * just-derived per-channel key, whose client-side object uses this
+             * connection's algorithm. */
+            if (request->smb2_hdr.command == SMB2_SESSION_SETUP &&
+                request->status != SMB2_STATUS_SUCCESS &&
+                session_handle->session &&
+                (session_handle->session->flags & CHIMERA_SMB_SESSION_AUTHORIZED)) {
+                rc = chimera_smb_compute_signature_alg(ctx,
+                                                       session_handle->session->dialect,
+                                                       session_handle->session->sign_alg,
+                                                       hdr, &cursor,
+                                                       payload_length,
+                                                       session_handle->signing_key,
+                                                       signature);
+            } else {
+                rc = chimera_smb_compute_signature(ctx, conn, hdr, &cursor,
+                                                   payload_length,
+                                                   session_handle->signing_key,
+                                                   signature);
+            }
 
             if (unlikely(rc != 0)) {
                 chimera_smb_error("Failed to calculate signature for dialect %x", conn->dialect);

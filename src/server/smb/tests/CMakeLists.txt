@@ -1578,7 +1578,10 @@ set(SMBTORTURE_ENABLED_memfs
     # smb2.session-require-signing
     smb2.session-require-signing.bug15397
     # smb2.session
+    smb2.session.bind1
+    smb2.session.bind2
     smb2.session.bind_different_user
+    smb2.session.bind_invalid_auth
     smb2.session.bind_negative_smb3signC30toGd
     smb2.session.bind_negative_smb3signC30toGs
     smb2.session.bind_negative_smb3signCtoGd
@@ -1607,6 +1610,10 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.session.bind_negative_smb3sneGtoHs
     smb2.session.bind_negative_smb3sneHtoGd
     smb2.session.bind_negative_smb3sneHtoGs
+    smb2.session.bind_negative_smb3to2d
+    smb2.session.bind_negative_smb3to2s
+    smb2.session.bind_negative_smb3to3d
+    smb2.session.bind_negative_smb3to3s
     smb2.session.encryption-aes-128-ccm
     smb2.session.encryption-aes-128-gcm
     smb2.session.encryption-aes-256-ccm
@@ -1617,6 +1624,10 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.session.expire2e
     smb2.session.expire2s
     smb2.session.expire_disconnect
+    smb2.session.ntlmssp_bug14932
+    smb2.session.reauth1
+    smb2.session.reauth2
+    smb2.session.reauth3
     smb2.session.reauth6
     smb2.session.reconnect2
     smb2.session.signing-aes-128-cmac
@@ -2968,6 +2979,7 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     # smb2.session-require-signing
     smb2.session-require-signing.bug15397
     # smb2.session
+    smb2.session.bind2
     smb2.session.bind_different_user
     smb2.session.bind_negative_smb3signC30toGd
     smb2.session.bind_negative_smb3signC30toGs
@@ -3007,6 +3019,7 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.session.expire2e
     smb2.session.expire2s
     smb2.session.expire_disconnect
+    smb2.session.ntlmssp_bug14932
     smb2.session.signing-aes-128-cmac
     smb2.session.signing-aes-128-gmac
     smb2.session.signing-hmac-sha-256

@@ -873,6 +873,15 @@ struct chimera_smb_session_handle {
      * existing session (a successful SMB2_SESSION_FLAG_BINDING session setup),
      * so its teardown decrements session->num_channels. */
     uint8_t                            bound_channel;
+    /* Set when this connection legitimately owns a channel of the session:
+     * either the session was established (or re-authenticated) on this
+     * connection, or a SMB2_SESSION_FLAG_BINDING session setup completed here.
+     * A handle attached by the dispatcher's global-session lookup (so a
+     * binding SESSION_SETUP can be resolved and its responses signed with the
+     * session key) starts at 0; any non-SESSION_SETUP request arriving through
+     * such a handle is answered STATUS_USER_SESSION_DELETED (MS-SMB2
+     * 3.3.5.2.9, Samba bug 14512). */
+    uint8_t                            is_channel;
     struct UT_hash_handle              hh;
     struct chimera_smb_session_handle *next;
     gss_ctx_id_t                       ctx;
@@ -947,6 +956,14 @@ struct chimera_smb_conn {
      * to this snapshot so the next, successful leg derives its signing key over
      * the same hash the client used. */
     uint8_t                            preauth_hash_presession[SMB2_PREAUTH_HASH_SIZE];
+    /* Set while a multi-leg SESSION_SETUP exchange is in flight on this
+     * connection (the previous SESSION_SETUP response was
+     * STATUS_MORE_PROCESSING_REQUIRED).  A SESSION_SETUP arriving with this
+     * clear starts a NEW authentication exchange, so its preauth-integrity
+     * hash restarts from the post-NEGOTIATE baseline even when the header
+     * carries a non-zero SessionId — a channel-binding or re-authentication
+     * first leg does (MS-SMB2 3.3.5.5.3). */
+    uint8_t                            session_setup_in_progress;
     uint32_t                           requests_completed;
     /* Lifecycle generation for pooled conns: bumped in chimera_smb_conn_free,
      * snapshotted into each compound at creation (conn_generation).  A
@@ -1645,6 +1662,7 @@ chimera_smb_session_handle_alloc(struct chimera_server_smb_thread *thread)
     }
 
     session_handle->bound_channel = 0;
+    session_handle->is_channel    = 0;
 
     return session_handle;
 } /* chimera_smb_session_handle_alloc */

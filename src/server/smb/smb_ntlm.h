@@ -12,6 +12,11 @@
 #define SMB_NTLM_HASH_SIZE                         16
 #define SMB_NTLM_SID_MAX_LEN                       80
 
+/* smb_ntlm_process() result for a structurally malformed authentication token
+ * (e.g. an NTLMv2_RESPONSE whose AvPairs cannot be parsed): the SMB layer
+ * answers STATUS_INVALID_PARAMETER instead of STATUS_LOGON_FAILURE. */
+#define SMB_NTLM_STATUS_BAD_TOKEN                  (-2)
+
 // NTLM message types
 #define NTLM_NEGOTIATE_MESSAGE                     0x00000001
 #define NTLM_CHALLENGE_MESSAGE                     0x00000002
@@ -44,6 +49,7 @@ struct smb_ntlm_ctx {
     uint32_t negotiate_flags;
     int      have_challenge;
     int      authenticated;
+    int      is_anonymous;       // AUTHENTICATE was an anonymous (null-session) logon
     int      is_winbind_user;    // True if authenticated via winbind (AD user)
     char     username[256];
     char     domain[256];

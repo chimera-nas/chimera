@@ -699,6 +699,51 @@ validate_local_user(
 } /* validate_local_user */
 
 // Validate AUTHENTICATE message
+/* Validate the structure of an NTLMv2 response: 16-byte NTProofStr followed by
+ * an NTLMv2_CLIENT_CHALLENGE — RespType(1)=1, HiRespType(1)=1, Reserved1(2),
+ * Reserved2(4), TimeStamp(8), ChallengeFromClient(8), Reserved3(4), then an
+ * AvPair list that must terminate with MsvAvEOL (id 0, len 0) inside the
+ * buffer.  Trailing bytes after MsvAvEOL (clients commonly pad 4 zero bytes)
+ * are tolerated.  Returns 0 when well-formed, -1 otherwise. */
+static int
+validate_ntlmv2_response_format(
+    const uint8_t *nt_response,
+    size_t         nt_response_len)
+{
+    const uint8_t *temp;
+    size_t         temp_len, off;
+
+    if (nt_response_len < 16 + 28 + 4) {
+        return -1;
+    }
+
+    temp     = nt_response + 16;
+    temp_len = nt_response_len - 16;
+
+    if (temp[0] != 1 || temp[1] != 1) {
+        return -1;
+    }
+
+    off = 28; /* start of AvPairs */
+
+    while (off + 4 <= temp_len) {
+        uint16_t av_id  = temp[off] | (temp[off + 1] << 8);
+        uint16_t av_len = temp[off + 2] | (temp[off + 3] << 8);
+
+        if (av_id == 0 && av_len == 0) {
+            return 0; /* MsvAvEOL */
+        }
+
+        if (off + 4 + (size_t) av_len > temp_len) {
+            return -1;
+        }
+
+        off += 4 + av_len;
+    }
+
+    return -1;
+} /* validate_ntlmv2_response_format */
+
 static int
 validate_authenticate(
     struct smb_ntlm_ctx                  *ctx,
@@ -758,7 +803,7 @@ validate_authenticate(
     memcpy(&nt_response_len, buf + 20, 2);
     memcpy(&nt_response_offset, buf + 24, 4);
 
-    if (nt_response_len < 24 || nt_response_offset + nt_response_len > buf_len) {
+    if (nt_response_offset + nt_response_len > buf_len) {
         smb_ntlm_error("NTLM: Invalid NT response field");
         goto cleanup;
     }
@@ -784,6 +829,44 @@ validate_authenticate(
             enc_session_key     = buf + eskey_offset;
             enc_session_key_len = eskey_len;
         }
+    }
+
+    /* Anonymous (null-session) AUTHENTICATE (MS-NLMP 3.2.5.1.2): the
+    * NTLMSSP_NEGOTIATE_ANONYMOUS flag is set and the NtChallengeResponse is
+    * empty (the LmChallengeResponse is a single zero byte or empty).  No
+    * password proof to validate and no usable session key; the SMB layer
+    * decides whether an anonymous logon is acceptable in context. */
+    if ((negotiate_flags & NTLMSSP_NEGOTIATE_ANONYMOUS) && nt_response_len == 0) {
+        ctx->username[0] = '\0';
+        ctx->domain[0]   = '\0';
+        ctx->sid[0]      = '\0';
+        ctx->uid         = 65534;
+        ctx->gid         = 65534;
+        ctx->ngids       = 0;
+        memset(ctx->session_key, 0, sizeof(ctx->session_key));
+        ctx->authenticated = 1;
+        ctx->is_anonymous  = 1;
+        smb_ntlm_info("NTLM: Anonymous logon");
+        result = 0;
+        goto cleanup;
+    }
+
+    if (nt_response_len < 24) {
+        smb_ntlm_error("NTLM: Invalid NT response field");
+        goto cleanup;
+    }
+
+    /* An NTLMv2 response (anything longer than the 24-byte NTLMv1 proof) must
+     * be structurally valid: NTProofStr(16) followed by an NTLMv2_CLIENT_
+     * CHALLENGE whose RespType/HiRespType are 1 and whose AvPair list
+     * terminates with MsvAvEOL inside the buffer (MS-NLMP 2.2.2.7/2.2.2.8).
+     * A malformed blob is a protocol error answered with
+     * STATUS_INVALID_PARAMETER, not a failed logon (Samba bug 14932). */
+    if (nt_response_len > 24 &&
+        validate_ntlmv2_response_format(nt_response, nt_response_len) < 0) {
+        smb_ntlm_error("NTLM: Malformed NTLMv2 response");
+        result = SMB_NTLM_STATUS_BAD_TOKEN;
+        goto cleanup;
     }
 
     // First, try to look up user in local VFS cache
@@ -896,6 +979,10 @@ smb_ntlm_process(
     switch (msg_type) {
         case NTLM_NEGOTIATE_MESSAGE:
             smb_ntlm_debug("NTLM: Processing NEGOTIATE message");
+            /* A NEGOTIATE starts a fresh handshake; clear any state a previous
+             * exchange on this connection left behind (a re-authentication
+             * reuses the connection's context after a completed logon). */
+            smb_ntlm_ctx_init(ctx);
             if (generate_challenge(ctx, &ntlm_output, &ntlm_output_len) < 0) {
                 return -1;
             }
@@ -921,7 +1008,7 @@ smb_ntlm_process(
             }
             rc = validate_authenticate(ctx, vfs, auth_config, ntlm_input, ntlm_input_len);
             if (rc < 0) {
-                return -1;
+                return rc;
             }
 
             // Generate SPNEGO accept-complete response if input was wrapped
