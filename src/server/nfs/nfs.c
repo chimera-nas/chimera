@@ -285,6 +285,13 @@ nfs_server_init(
     nfs_state_table_init(&shared->nfs4_state_table);
     nfs_layout_table_init(&shared->nfs4_layout_table);
     nfs4_v40_drc_init(&shared->v40_drc);
+    nfs3_drc_init(&shared->nfs3_drc);
+    /* The NFSv3 duplicate-request cache wraps the NFS_V3 call dispatcher; only
+     * install the wrapper when enabled so a disabled server keeps the direct
+     * (zero-overhead) path. */
+    if (chimera_server_config_get_nfs3_drc(config)) {
+        nfs3_drc_install(shared);
+    }
     pthread_mutex_init(&shared->nfs4_pnfs_devcache.lock, NULL);
     shared->nfs4_pnfs_devcache.count = 0;
 
@@ -569,6 +576,7 @@ nfs_server_destroy(void *data)
 
     nlm_state_destroy(&shared->nlm_state);
     nfs4_v40_drc_destroy(&shared->v40_drc);
+    nfs3_drc_destroy(&shared->nfs3_drc);
 
     free(shared);
 } /* nfs_server_destroy */

@@ -47,6 +47,8 @@ add_executable(test_nfs_persist
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_lease.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_recovery.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_drc.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs3_drc.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs_drc_reply.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_callback.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_cb.c)
 target_include_directories(test_nfs_persist PRIVATE

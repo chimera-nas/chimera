@@ -38,11 +38,16 @@ enum chimera_kv_record_type {
     CHIMERA_KV_TYPE_NFS4_EPOCH    = 0x02, /* singleton server boot-epoch marker */
     CHIMERA_KV_TYPE_NFS4_SESSION  = 0x03, /* session metadata (nfs4_drc only)   */
     CHIMERA_KV_TYPE_NFS4_REPLY    = 0x04, /* reply-cache slot entry (nfs4_drc)  */
-    /* 0x05 .. 0xFE reserved for future global record types */
+    CHIMERA_KV_TYPE_NFS3_REPLY    = 0x05, /* NFSv3 DRC reply entry (nfs3_drc)   */
+    /* 0x06 .. 0xFE reserved for future global record types */
 };
 
+/* Longest normalized client address string an NFSv3 DRC key embeds (IPv6
+ * literal, no port -- comfortably inside INET6_ADDRSTRLEN). */
+#define CHIMERA_KV_NFS3_ADDR_MAX 48u
+
 /* Largest key any NFS record type produces: header + a full client owner. */
-#define CHIMERA_KV_NFS_KEY_MAX (CHIMERA_KV_HDR_LEN + NFS4_OPAQUE_LIMIT)
+#define CHIMERA_KV_NFS_KEY_MAX   (CHIMERA_KV_HDR_LEN + NFS4_OPAQUE_LIMIT)
 
 /* ----------------------------------------------------------------------- *
 *  Little-endian value (de)serialization helpers                          *
@@ -167,3 +172,31 @@ nfs_kv_reply_key(
 #define CHIMERA_KV_REPLY_KEY_LEN \
         (CHIMERA_KV_HDR_LEN + NFS4_SESSIONID_SIZE + 4 + 4)
 #define CHIMERA_KV_SESSION_KEY_LEN (CHIMERA_KV_HDR_LEN + NFS4_SESSIONID_SIZE)
+
+/* NFSv3 DRC key = header + addr_len(1) + client addr bytes + proc(LE32) +
+ * xid(LE32) + checksum(LE64).  The client address is the request's source IP
+ * with the ephemeral port stripped, so it stays stable across the reconnect a
+ * retransmit rides in on.  proc + xid + checksum disambiguate a reused xid:
+ * a hit means the same client re-presenting an identical call. */
+static inline uint32_t
+nfs_kv_nfs3_reply_key(
+    uint8_t       *buf,
+    const uint8_t *addr,
+    uint8_t        addr_len,
+    uint32_t       proc,
+    uint32_t       xid,
+    uint64_t       cksum)
+{
+    uint32_t p = nfs_kv_hdr(buf, CHIMERA_KV_TYPE_NFS3_REPLY);
+
+    buf[p++] = addr_len;
+    memcpy(buf + p, addr, addr_len);
+    p += addr_len;
+    nfs_kv_put_le32(buf, &p, proc);
+    nfs_kv_put_le32(buf, &p, xid);
+    nfs_kv_put_le64(buf, &p, cksum);
+    return p;
+} /* nfs_kv_nfs3_reply_key */
+
+#define CHIMERA_KV_NFS3_REPLY_KEY_MAX \
+        (CHIMERA_KV_HDR_LEN + 1 + CHIMERA_KV_NFS3_ADDR_MAX + 4 + 4 + 8)
