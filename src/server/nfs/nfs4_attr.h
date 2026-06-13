@@ -205,9 +205,20 @@ chimera_nfs4_mask2attr(
 {
     int max_word_used = 0;
 
-    memset(rsp_mask, 0, sizeof(uint32_t) * num_req_mask);
+    /*
+     * num_req_mask is the client-supplied request bitmap length and is
+     * unbounded (the XDR decoder does not cap it).  This routine only ever
+     * reports attributes that live in bitmap words 0 and 1, and every caller
+     * allocates a 4-word response buffer, so clear exactly the two words we may
+     * write rather than sizing the memset by num_req_mask -- the latter is a
+     * heap overflow of rsp_mask (e.g. SETATTR with num_attrmask=100 would zero
+     * 400 bytes into a 16-byte allocation).  Likewise, only index req_mask
+     * within its declared length: reads of word 1 require num_req_mask >= 2.
+     */
+    rsp_mask[0] = 0;
+    rsp_mask[1] = 0;
 
-    if (num_req_mask >= 1 &&
+    if (num_req_mask >= 2 &&
         (req_mask[1] & (1 << (FATTR4_MODE - 32))) &&
         (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE)) {
         rsp_mask[1]  |= (1 << (FATTR4_MODE - 32));
