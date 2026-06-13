@@ -388,9 +388,8 @@ nfs4_drc_forget_session(
     memcpy(ctx->sessionid, sessionid, NFS4_SESSIONID_SIZE);
     slen = nfs_kv_reply_key(ctx->start, sessionid, 0, 0);
 
-    /* No end key + flags 0 (cairn's end bound is length-sensitive); the search
-     * returns key-ordered results and the callback stops once the sessionid in
-     * the key no longer matches. */
+    /* No end key + flags 0: the search returns key-ordered results and the
+     * callback stops once the sessionid in the key no longer matches. */
     chimera_vfs_search_keys(vfs_thread, ctx->start, slen,
                             NULL, 0, 0,
                             nfs4_drc_forget_scan_cb,
@@ -622,8 +621,8 @@ nfs4_drc_session_complete(
     (void) error_code;
 
     /* Sessions (and their clients) are in place; now repopulate slot caches.
-     * No end key + flags 0 -- ordered results, callback stops when the 3-byte
-     * type header changes. */
+     * No end key + flags 0 -- key-ordered results, callback stops when the
+     * 3-byte type header changes. */
     nfs_kv_type_prefix(ctx->start, CHIMERA_KV_TYPE_NFS4_REPLY);
     chimera_vfs_search_keys(ctx->thread->vfs_thread,
                             ctx->start, CHIMERA_KV_HDR_LEN,
@@ -645,8 +644,8 @@ nfs4_drc_reload(
     ctx->done_arg = done_arg;
 
     /* Reconstruct sessions + clients first, then their reply slots.  No end
-     * key + flags 0 -- ordered results, callback stops when the 3-byte type
-     * header changes. */
+     * key + flags 0 -- key-ordered results, callback stops when the 3-byte
+     * type header changes. */
     nfs_kv_type_prefix(ctx->start, CHIMERA_KV_TYPE_NFS4_SESSION);
     chimera_vfs_search_keys(thread->vfs_thread,
                             ctx->start, CHIMERA_KV_HDR_LEN,

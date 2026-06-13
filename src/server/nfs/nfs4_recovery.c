@@ -468,13 +468,11 @@ nfs_recovery_epoch_cb(
                         ectx->value, ectx->value_len,
                         nfs_recovery_kv_done, ectx);
 
-    /* Scan from the recovery-record band start with NO end key (and flags 0):
-     * cairn's end bound is length-sensitive (it treats any stored key longer
-     * than the end key as past the range), so a short type-prefix end key would
-     * exclude our variable-length keys.  Instead we rely on the KV search's
-     * guaranteed key-ordered results and stop in nfs_recovery_scan_cb when the
-     * 3-byte type header no longer matches -- the same pattern SMB durable
-     * recovery uses. */
+    /* Scan from the recovery-record band start with no end key (flags 0): the
+     * KV search returns key-ordered results on every backend, so we stop in
+     * nfs_recovery_scan_cb when the 3-byte type header changes -- the same
+     * open-ended pattern SMB durable recovery uses.  (A bounded [type, type+1)
+     * END_EXCLUSIVE scan would work equally well.) */
     nfs_kv_type_prefix(ctx->start, CHIMERA_KV_TYPE_NFS4_RECOVERY);
     chimera_vfs_search_keys(ctx->thread->vfs_thread,
                             ctx->start, CHIMERA_KV_HDR_LEN,
