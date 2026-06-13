@@ -319,7 +319,8 @@ memkv_key_in_range(
     const void *start_key,
     uint32_t    start_key_len,
     const void *end_key,
-    uint32_t    end_key_len)
+    uint32_t    end_key_len,
+    uint32_t    flags)
 {
     int cmp;
 
@@ -339,10 +340,41 @@ memkv_key_in_range(
         if (cmp > 0 || (cmp == 0 && key_len > end_key_len)) {
             return 0; /* key > end_key */
         }
+        if ((flags & CHIMERA_VFS_SEARCH_KEYS_END_EXCLUSIVE) &&
+            cmp == 0 && key_len == end_key_len) {
+            return 0; /* key == end_key, end is exclusive */
+        }
     }
 
-    return 1; /* key is in range [start_key, end_key] */
+    return 1; /* key is in range */
 } /* memkv_key_in_range */
+
+/* One matched key/value, copied out from under the shard lock so the search
+ * can sort across shards and invoke the callback without holding any lock (the
+ * callback is caller-supplied and may re-enter the backend). */
+struct memkv_search_item {
+    void    *key;
+    uint32_t key_len;
+    void    *value;
+    uint32_t value_len;
+};
+
+static int
+memkv_search_item_cmp(
+    const void *a,
+    const void *b)
+{
+    const struct memkv_search_item *ia  = a;
+    const struct memkv_search_item *ib  = b;
+    uint32_t                        min = ia->key_len < ib->key_len ? ia->key_len : ib->key_len;
+    int                             cmp = memcmp(ia->key, ib->key, min);
+
+    if (cmp) {
+        return cmp;
+    }
+    /* Shorter key (a byte-prefix of the other) sorts first. */
+    return (ia->key_len > ib->key_len) - (ia->key_len < ib->key_len);
+} /* memkv_search_item_cmp */
 
 static void
 memkv_search_keys(
@@ -350,15 +382,20 @@ memkv_search_keys(
     struct memkv_shared        *shared,
     struct chimera_vfs_request *request)
 {
-    int                                i, rc;
+    int                                i;
+    size_t                             n = 0, cap = 0, k;
     struct memkv_shard                *shard;
     struct memkv_entry                *entry;
+    struct memkv_search_item          *items = NULL, *grown;
     chimera_vfs_search_keys_callback_t callback = request->search_keys.callback;
+    enum chimera_vfs_error             status   = CHIMERA_VFS_OK;
 
     (void) thread;
 
-    /* Iterate over all shards (entries are hash-ordered, not key-ordered, so a
-     * full scan with an in-range filter is required). */
+    /* Entries are stored hash-ordered (sharded by hash), so collect every
+     * in-range match across all shards, then sort by key to return results in
+     * the backend's natural (lexicographic) key order.  Keys and values are
+     * copied so the callback runs without any shard lock held. */
     for (i = 0; i < shared->num_shards; i++) {
         shard = &shared->shards[i];
 
@@ -372,20 +409,40 @@ memkv_search_keys(
                                    request->search_keys.start_key,
                                    request->search_keys.start_key_len,
                                    request->search_keys.end_key,
-                                   request->search_keys.end_key_len)) {
-                rc = callback(entry->key,
-                              entry->key_len,
-                              entry->value,
-                              entry->value_len,
-                              request->proto_private_data);
+                                   request->search_keys.end_key_len,
+                                   request->search_keys.flags)) {
+                struct memkv_search_item *item;
 
-                if (rc) {
-                    /* Caller wants to abort search */
-                    pthread_mutex_unlock(&shard->lock);
-                    request->status = CHIMERA_VFS_OK;
-                    request->complete(request);
-                    return;
+                if (n == cap) {
+                    cap   = cap ? cap * 2 : 16;
+                    grown = realloc(items, cap * sizeof(*items));
+                    if (!grown) {
+                        pthread_mutex_unlock(&shard->lock);
+                        status = CHIMERA_VFS_EIO;
+                        goto out;
+                    }
+                    items = grown;
                 }
+
+                item            = &items[n];
+                item->key_len   = entry->key_len;
+                item->value_len = entry->value_len;
+                item->key       = malloc(entry->key_len);
+                item->value     = entry->value_len ? malloc(entry->value_len) : NULL;
+
+                if (!item->key || (entry->value_len && !item->value)) {
+                    free(item->key);
+                    free(item->value);
+                    pthread_mutex_unlock(&shard->lock);
+                    status = CHIMERA_VFS_EIO;
+                    goto out;
+                }
+
+                memcpy(item->key, entry->key, entry->key_len);
+                if (entry->value_len) {
+                    memcpy(item->value, entry->value, entry->value_len);
+                }
+                n++;
             }
 
             entry = rb_tree_next(&shard->entries, entry);
@@ -394,7 +451,26 @@ memkv_search_keys(
         pthread_mutex_unlock(&shard->lock);
     }
 
-    request->status = CHIMERA_VFS_OK;
+    if (n > 1) {
+        qsort(items, n, sizeof(*items), memkv_search_item_cmp);
+    }
+
+    for (k = 0; k < n; k++) {
+        if (callback(items[k].key, items[k].key_len,
+                     items[k].value, items[k].value_len,
+                     request->proto_private_data)) {
+            break; /* caller aborted the search */
+        }
+    }
+
+ out:
+    for (k = 0; k < n; k++) {
+        free(items[k].key);
+        free(items[k].value);
+    }
+    free(items);
+
+    request->status = status;
     request->complete(request);
 } /* memkv_search_keys */
 

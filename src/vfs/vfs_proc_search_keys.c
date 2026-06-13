@@ -27,6 +27,7 @@ chimera_vfs_search_keys(
     uint32_t                           start_key_len,
     const void                        *end_key,
     uint32_t                           end_key_len,
+    uint32_t                           flags,
     chimera_vfs_search_keys_callback_t callback,
     chimera_vfs_search_keys_complete_t complete,
     void                              *private_data)
@@ -46,6 +47,7 @@ chimera_vfs_search_keys(
     request->search_keys.start_key_len = start_key_len;
     request->search_keys.end_key       = end_key;
     request->search_keys.end_key_len   = end_key_len;
+    request->search_keys.flags         = flags;
     request->search_keys.callback      = callback;
     request->proto_callback            = complete;
     request->proto_private_data        = private_data;
@@ -107,6 +109,7 @@ chimera_vfs_search_keys_at(
     uint32_t                           start_key_len,
     const void                        *end_key,
     uint32_t                           end_key_len,
+    uint32_t                           flags,
     chimera_vfs_search_keys_callback_t callback,
     chimera_vfs_search_keys_complete_t complete,
     void                              *private_data)
@@ -164,10 +167,14 @@ chimera_vfs_search_keys_at(
             memcpy(p + 1, end_key, end_key_len);
             request->search_keys.end_key     = p;
             request->search_keys.end_key_len = end_key_len + 1;
+            request->search_keys.flags       = flags;
         } else {
             p[0]                             = (uint8_t) (route.ns + 1);
             request->search_keys.end_key     = p;
             request->search_keys.end_key_len = 1;
+            /* ns+1 is a strict namespace boundary: exclude it so a key that
+             * happens to equal the single boundary byte never leaks out. */
+            request->search_keys.flags = CHIMERA_VFS_SEARCH_KEYS_END_EXCLUSIVE;
         }
 
         request->search_keys.callback = chimera_vfs_kv_ns_search_cb;
@@ -186,6 +193,7 @@ chimera_vfs_search_keys_at(
         request->search_keys.start_key_len = start_key_len;
         request->search_keys.end_key       = end_key_len ? scratch + start_key_len : NULL;
         request->search_keys.end_key_len   = end_key_len;
+        request->search_keys.flags         = flags;
         request->search_keys.callback      = callback;
         request->proto_callback            = complete;
         request->proto_private_data        = private_data;

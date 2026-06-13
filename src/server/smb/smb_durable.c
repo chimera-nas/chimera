@@ -730,7 +730,7 @@ chimera_smb_durable_recover_share(
     chimera_vfs_search_keys_at(thread->vfs_thread, NULL, fh, fh_len,
                                CHIMERA_SMB_DURABLE_KEY_PREFIX,
                                CHIMERA_SMB_DURABLE_KEY_PREFIX_LEN,
-                               NULL, 0,
+                               NULL, 0, 0,
                                chimera_smb_durable_recover_cb,
                                chimera_smb_durable_recover_complete,
                                ctx);

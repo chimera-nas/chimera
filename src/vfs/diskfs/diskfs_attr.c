@@ -116,7 +116,8 @@ diskfs_kv_key_in_range(
     const void *start_key,
     uint32_t    start_key_len,
     const void *end_key,
-    uint32_t    end_key_len);
+    uint32_t    end_key_len,
+    uint32_t    flags);
 
 static inline int
 diskfs_xattr_rec_matches(
@@ -1295,7 +1296,8 @@ diskfs_kv_key_in_range(
     const void *start_key,
     uint32_t    start_key_len,
     const void *end_key,
-    uint32_t    end_key_len)
+    uint32_t    end_key_len,
+    uint32_t    flags)
 {
     int cmp;
 
@@ -1315,11 +1317,41 @@ diskfs_kv_key_in_range(
         if (cmp > 0 || (cmp == 0 && key_len > end_key_len)) {
             return 0; /* key > end_key */
         }
+        if ((flags & CHIMERA_VFS_SEARCH_KEYS_END_EXCLUSIVE) &&
+            cmp == 0 && key_len == end_key_len) {
+            return 0; /* key == end_key, end is exclusive */
+        }
     }
 
-    return 1; /* key is in range [start_key, end_key] */
+    return 1; /* key is in range */
 } /* diskfs_kv_key_in_range */
 
+
+/* One matched key/value, copied out from under the shard lock so the search
+ * can sort across shards and invoke the callback without holding any lock. */
+struct diskfs_search_item {
+    void    *key;
+    uint32_t key_len;
+    void    *value;
+    uint32_t value_len;
+};
+
+static int
+diskfs_search_item_cmp(
+    const void *a,
+    const void *b)
+{
+    const struct diskfs_search_item *ia  = a;
+    const struct diskfs_search_item *ib  = b;
+    uint32_t                         min = ia->key_len < ib->key_len ? ia->key_len : ib->key_len;
+    int                              cmp = memcmp(ia->key, ib->key, min);
+
+    if (cmp) {
+        return cmp;
+    }
+    /* Shorter key (a byte-prefix of the other) sorts first. */
+    return (ia->key_len > ib->key_len) - (ia->key_len < ib->key_len);
+} /* diskfs_search_item_cmp */
 
 void
 diskfs_search_keys(
@@ -1329,9 +1361,11 @@ diskfs_search_keys(
     void                       *private_data)
 {
     struct diskfs_request_private     *p = request->plugin_data;
-    int                                i, rc;
+    int                                i;
+    size_t                             n = 0, cap = 0, k;
     struct diskfs_kv_shard            *shard;
     struct diskfs_kv_entry            *entry;
+    struct diskfs_search_item         *items = NULL, *grown;
     chimera_vfs_search_keys_callback_t callback = request->search_keys.callback;
 
     (void) private_data;
@@ -1339,6 +1373,10 @@ diskfs_search_keys(
     p->thread = thread;
     p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ);
 
+    /* Entries are stored hash-ordered (sharded by hash), so collect every
+     * in-range match across all shards, then sort by key to return results in
+     * the backend's natural (lexicographic) key order.  Keys and values are
+     * copied so the callback runs without any shard lock held. */
     for (i = 0; i < shared->num_kv_shards; i++) {
         shard = &shared->kv_shards[i];
 
@@ -1352,16 +1390,38 @@ diskfs_search_keys(
                                        request->search_keys.start_key,
                                        request->search_keys.start_key_len,
                                        request->search_keys.end_key,
-                                       request->search_keys.end_key_len)) {
-                rc = callback(entry->key, entry->key_len,
-                              entry->value, entry->value_len,
-                              request->proto_private_data);
+                                       request->search_keys.end_key_len,
+                                       request->search_keys.flags)) {
+                struct diskfs_search_item *item;
 
-                if (rc) {
-                    pthread_mutex_unlock(&shard->lock);
-                    diskfs_op_ok(request, p->txn);
-                    return;
+                if (n == cap) {
+                    cap   = cap ? cap * 2 : 16;
+                    grown = realloc(items, cap * sizeof(*items));
+                    if (!grown) {
+                        pthread_mutex_unlock(&shard->lock);
+                        goto enomem;
+                    }
+                    items = grown;
                 }
+
+                item            = &items[n];
+                item->key_len   = entry->key_len;
+                item->value_len = entry->value_len;
+                item->key       = malloc(entry->key_len);
+                item->value     = entry->value_len ? malloc(entry->value_len) : NULL;
+
+                if (!item->key || (entry->value_len && !item->value)) {
+                    free(item->key);
+                    free(item->value);
+                    pthread_mutex_unlock(&shard->lock);
+                    goto enomem;
+                }
+
+                memcpy(item->key, entry->key, entry->key_len);
+                if (entry->value_len) {
+                    memcpy(item->value, entry->value, entry->value_len);
+                }
+                n++;
             }
 
             entry = rb_tree_next(&shard->entries, entry);
@@ -1370,7 +1430,35 @@ diskfs_search_keys(
         pthread_mutex_unlock(&shard->lock);
     }
 
+    if (n > 1) {
+        qsort(items, n, sizeof(*items), diskfs_search_item_cmp);
+    }
+
+    for (k = 0; k < n; k++) {
+        if (callback(items[k].key, items[k].key_len,
+                     items[k].value, items[k].value_len,
+                     request->proto_private_data)) {
+            break; /* caller aborted the search */
+        }
+    }
+
+    for (k = 0; k < n; k++) {
+        free(items[k].key);
+        free(items[k].value);
+    }
+    free(items);
+
     diskfs_op_ok(request, p->txn);
+    return;
+
+ enomem:
+    for (k = 0; k < n; k++) {
+        free(items[k].key);
+        free(items[k].value);
+    }
+    free(items);
+
+    diskfs_op_fail(request, p->txn, CHIMERA_VFS_EIO);
 } /* diskfs_search_keys */
 
 

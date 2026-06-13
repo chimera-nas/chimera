@@ -735,6 +735,7 @@ chimera_vfs_search_keys(
     uint32_t                           start_key_len,
     const void                        *end_key,
     uint32_t                           end_key_len,
+    uint32_t                           flags,
     chimera_vfs_search_keys_callback_t callback,
     chimera_vfs_search_keys_complete_t complete,
     void                              *private_data);
@@ -749,6 +750,7 @@ chimera_vfs_search_keys_at(
     uint32_t                           start_key_len,
     const void                        *end_key,
     uint32_t                           end_key_len,
+    uint32_t                           flags,
     chimera_vfs_search_keys_callback_t callback,
     chimera_vfs_search_keys_complete_t complete,
     void                              *private_data);
