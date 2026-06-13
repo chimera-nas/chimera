@@ -7,6 +7,8 @@
 struct chimera_nfs4_mkdir_ctx {
     struct chimera_nfs_thread        *thread;
     struct chimera_nfs_client_server *server;
+    uint32_t                          attr_mask[2];
+    uint8_t                           attr_vals[128];
 };
 
 static void
@@ -151,14 +153,22 @@ chimera_nfs4_mkdir_at(
     argarray[1].opputfh.object.len  = fhlen;
 
     /* Op 2: CREATE - create the directory */
-    argarray[2].argop                               = OP_CREATE;
-    argarray[2].opcreate.objtype.type               = NF4DIR;
-    argarray[2].opcreate.objname.data               = (uint8_t *) request->mkdir_at.name;
-    argarray[2].opcreate.objname.len                = request->mkdir_at.name_len;
-    argarray[2].opcreate.createattrs.num_attrmask   = 0;
-    argarray[2].opcreate.createattrs.attrmask       = NULL;
-    argarray[2].opcreate.createattrs.attr_vals.len  = 0;
-    argarray[2].opcreate.createattrs.attr_vals.data = NULL;
+    argarray[2].argop                 = OP_CREATE;
+    argarray[2].opcreate.objtype.type = NF4DIR;
+    argarray[2].opcreate.objname.data = (uint8_t *) request->mkdir_at.name;
+    argarray[2].opcreate.objname.len  = request->mkdir_at.name_len;
+
+    {
+        int attr_len     = 0;
+        int num_attrmask = chimera_nfs4_marshall_createattrs(request->mkdir_at.set_attr,
+                                                             ctx->attr_mask,
+                                                             ctx->attr_vals,
+                                                             &attr_len);
+        argarray[2].opcreate.createattrs.num_attrmask   = num_attrmask;
+        argarray[2].opcreate.createattrs.attrmask       = num_attrmask ? ctx->attr_mask : NULL;
+        argarray[2].opcreate.createattrs.attr_vals.len  = attr_len;
+        argarray[2].opcreate.createattrs.attr_vals.data = attr_len ? ctx->attr_vals : NULL;
+    }
 
     /* Op 3: GETFH - get file handle for created directory */
     argarray[3].argop = OP_GETFH;

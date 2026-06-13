@@ -9,6 +9,8 @@
 struct chimera_nfs4_open_at_ctx {
     struct chimera_nfs_thread        *thread;
     struct chimera_nfs_client_server *server;
+    uint32_t                          attr_mask[2];
+    uint8_t                           attr_vals[128];
 };
 
 static void
@@ -205,11 +207,25 @@ chimera_nfs4_open_at(
             open_args->openhow.how.mode = UNCHECKED4;
         }
 
-        /* Set create attributes */
-        open_args->openhow.how.createattrs.num_attrmask   = 0;
-        open_args->openhow.how.createattrs.attrmask       = NULL;
-        open_args->openhow.how.createattrs.attr_vals.len  = 0;
-        open_args->openhow.how.createattrs.attr_vals.data = NULL;
+        /* Set create attributes (mode/uid/gid) from the requested set_attr.
+         * For EXCLUSIVE4_1/EXCLUSIVE the verifier path is not used here; we
+         * pass the mode through GUARDED4/UNCHECKED4 createattrs. */
+        if (request->open_at.set_attr) {
+            int attr_len     = 0;
+            int num_attrmask = chimera_nfs4_marshall_createattrs(request->open_at.set_attr,
+                                                                 ctx->attr_mask,
+                                                                 ctx->attr_vals,
+                                                                 &attr_len);
+            open_args->openhow.how.createattrs.num_attrmask   = num_attrmask;
+            open_args->openhow.how.createattrs.attrmask       = num_attrmask ? ctx->attr_mask : NULL;
+            open_args->openhow.how.createattrs.attr_vals.len  = attr_len;
+            open_args->openhow.how.createattrs.attr_vals.data = attr_len ? ctx->attr_vals : NULL;
+        } else {
+            open_args->openhow.how.createattrs.num_attrmask   = 0;
+            open_args->openhow.how.createattrs.attrmask       = NULL;
+            open_args->openhow.how.createattrs.attr_vals.len  = 0;
+            open_args->openhow.how.createattrs.attr_vals.data = NULL;
+        }
     } else {
         open_args->openhow.opentype = OPEN4_NOCREATE;
     }
