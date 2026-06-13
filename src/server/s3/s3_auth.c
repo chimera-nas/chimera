@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 #include <ctype.h>
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
@@ -222,6 +223,51 @@ parse_auth_header_v2(
  * Note: If x-amz-date is present, Date should be empty and x-amz-date
  * goes in CanonicalizedAmzHeaders
  */
+/*
+ * Bounded append into a fixed-size signing buffer.
+ *
+ * This replaces the unchecked `offset += snprintf(buf + offset, max - offset,
+ * ...)` idiom.  That idiom overflows the buffer as soon as `offset` reaches
+ * `max`: snprintf returns the length it *would* have written, so one oversized
+ * field (a long attacker-controlled header value, URI, or query string) pushes
+ * `offset` past `max`; the next call then passes a negative `int` `max - offset`
+ * that converts to a huge `size_t`, with `buf + offset` already past the end of
+ * the buffer -- an unbounded out-of-bounds write.
+ *
+ * Returns 0 on success and advances *offset; returns -1 if the formatted text
+ * does not fit.  Truncation is treated as failure by the callers, which is
+ * correct: a request whose canonical form overflows the buffer cannot match a
+ * legitimate signature anyway, so it is rejected rather than mis-signed.
+ */
+static int
+sts_appendf(
+    char       *buf,
+    int         max_len,
+    int        *offset,
+    const char *fmt,
+    ...)
+{
+    va_list ap;
+    int     avail, n;
+
+    if (*offset < 0 || *offset >= max_len) {
+        return -1;
+    }
+
+    avail = max_len - *offset;
+
+    va_start(ap, fmt);
+    n = vsnprintf(buf + *offset, avail, fmt, ap);
+    va_end(ap);
+
+    if (n < 0 || n >= avail) {
+        return -1;
+    }
+
+    *offset += n;
+    return 0;
+} /* sts_appendf */
+
 static int
 build_string_to_sign_v2(
     struct evpl_http_request *request,
@@ -259,27 +305,37 @@ build_string_to_sign_v2(
             return -1;
     } /* switch */
 
-    offset += snprintf(string_to_sign + offset, max_len - offset, "%s\n", method);
+    if (sts_appendf(string_to_sign, max_len, &offset, "%s\n", method)) {
+        return -1;
+    }
 
     /* Content-MD5 (empty if not present) */
     content_md5 = evpl_http_request_header(request, "Content-MD5");
-    offset     += snprintf(string_to_sign + offset, max_len - offset, "%s\n",
-                           content_md5 ? content_md5 : "");
+    if (sts_appendf(string_to_sign, max_len, &offset, "%s\n",
+                    content_md5 ? content_md5 : "")) {
+        return -1;
+    }
 
     /* Content-Type (empty if not present) */
     content_type = evpl_http_request_header(request, "Content-Type");
-    offset      += snprintf(string_to_sign + offset, max_len - offset, "%s\n",
-                            content_type ? content_type : "");
+    if (sts_appendf(string_to_sign, max_len, &offset, "%s\n",
+                    content_type ? content_type : "")) {
+        return -1;
+    }
 
     /* Date - if x-amz-date is present, Date should be empty */
     amz_date = evpl_http_request_header(request, "x-amz-date");
     if (amz_date) {
         /* x-amz-date is present, Date line should be empty */
-        offset += snprintf(string_to_sign + offset, max_len - offset, "\n");
+        if (sts_appendf(string_to_sign, max_len, &offset, "\n")) {
+            return -1;
+        }
     } else {
-        date    = evpl_http_request_header(request, "Date");
-        offset += snprintf(string_to_sign + offset, max_len - offset, "%s\n",
-                           date ? date : "");
+        date = evpl_http_request_header(request, "Date");
+        if (sts_appendf(string_to_sign, max_len, &offset, "%s\n",
+                        date ? date : "")) {
+            return -1;
+        }
     }
 
     /*
@@ -302,9 +358,10 @@ build_string_to_sign_v2(
         }
 
         for (int i = 0; i < amz.count; i++) {
-            offset += snprintf(string_to_sign + offset, max_len - offset,
-                               "%s:%s\n",
-                               amz.entries[i].name, amz.entries[i].value);
+            if (sts_appendf(string_to_sign, max_len, &offset, "%s:%s\n",
+                            amz.entries[i].name, amz.entries[i].value)) {
+                return -1;
+            }
         }
     }
 
@@ -355,7 +412,9 @@ build_string_to_sign_v2(
             if (host_end > host) {
                 /* Virtual-hosted style: prepend bucket name */
                 int bucket_len = host_end - host - 1;                 /* -1 for the trailing dot */
-                offset += snprintf(string_to_sign + offset, max_len - offset, "/");
+                if (sts_appendf(string_to_sign, max_len, &offset, "/")) {
+                    return -1;
+                }
                 if (bucket_len > 0) {
                     int copy_len = bucket_len;
                     if (offset + copy_len < max_len) {
@@ -368,7 +427,9 @@ build_string_to_sign_v2(
         } else if (dot) {
             /* No port, check for bucket.s3.amazonaws.com style */
             int bucket_len = dot - host;
-            offset += snprintf(string_to_sign + offset, max_len - offset, "/");
+            if (sts_appendf(string_to_sign, max_len, &offset, "/")) {
+                return -1;
+            }
             if (bucket_len > 0 && offset + bucket_len < max_len) {
                 memcpy(string_to_sign + offset, host, bucket_len);
                 offset          += bucket_len;
@@ -389,8 +450,8 @@ build_string_to_sign_v2(
                 path_start_ptr++;
                 copy_len--;
             }
-            /* Add a single slash separator */
-            if (offset < max_len) {
+            /* Add a single slash separator (leave room for the NUL) */
+            if (offset < max_len - 1) {
                 string_to_sign[offset++] = '/';
             }
         }
@@ -421,7 +482,7 @@ build_string_to_sign_v2(
             }
         }
 
-        if (needs_trailing_slash && offset < max_len) {
+        if (needs_trailing_slash && offset < max_len - 1) {
             string_to_sign[offset++] = '/';
         }
     }
@@ -431,7 +492,7 @@ build_string_to_sign_v2(
     chimera_s3_debug("V2 String to sign:\n%s", string_to_sign);
 
     return offset;
-} /* build_string_to_sign_v2 */ /* build_string_to_sign_v2 */ /* build_string_to_sign_v2 */
+} /* build_string_to_sign_v2 */
 
 /*
  * Verify AWS Signature V2
@@ -745,7 +806,9 @@ build_canonical_request_v4(
             return -1;
     } /* switch */
 
-    offset += snprintf(canonical_request + offset, max_len - offset, "%s\n", method);
+    if (sts_appendf(canonical_request, max_len, &offset, "%s\n", method)) {
+        return -1;
+    }
 
     /*
      * Canonical URI.
@@ -775,17 +838,23 @@ build_canonical_request_v4(
         path_len = uri_len;
     }
 
-    offset += snprintf(canonical_request + offset, max_len - offset, "%.*s\n",
-                       path_len, uri);
+    if (sts_appendf(canonical_request, max_len, &offset, "%.*s\n",
+                    path_len, uri)) {
+        return -1;
+    }
 
     /* Canonical Query String - must be sorted alphabetically */
     if (query) {
         char sorted_query[4096];
         int  query_str_len = uri_len - (query + 1 - uri);
         canonicalize_query_string(query + 1, query_str_len, sorted_query, sizeof(sorted_query));
-        offset += snprintf(canonical_request + offset, max_len - offset, "%s\n", sorted_query);
+        if (sts_appendf(canonical_request, max_len, &offset, "%s\n", sorted_query)) {
+            return -1;
+        }
     } else {
-        offset += snprintf(canonical_request + offset, max_len - offset, "\n");
+        if (sts_appendf(canonical_request, max_len, &offset, "\n")) {
+            return -1;
+        }
     }
 
     /* Canonical Headers */
@@ -813,21 +882,29 @@ build_canonical_request_v4(
             while (*header_value == ' ') {
                 header_value++;
             }
-            offset += snprintf(canonical_request + offset, max_len - offset,
-                               "%s:%s\n", header_lower, header_value);
+            if (sts_appendf(canonical_request, max_len, &offset,
+                            "%s:%s\n", header_lower, header_value)) {
+                return -1;
+            }
         } else {
-            offset += snprintf(canonical_request + offset, max_len - offset,
-                               "%s:\n", header_lower);
+            if (sts_appendf(canonical_request, max_len, &offset,
+                            "%s:\n", header_lower)) {
+                return -1;
+            }
         }
 
         header_name = strtok_r(NULL, ";", &saveptr);
     }
 
     /* Empty line after headers */
-    offset += snprintf(canonical_request + offset, max_len - offset, "\n");
+    if (sts_appendf(canonical_request, max_len, &offset, "\n")) {
+        return -1;
+    }
 
     /* Signed Headers */
-    offset += snprintf(canonical_request + offset, max_len - offset, "%s\n", signed_headers);
+    if (sts_appendf(canonical_request, max_len, &offset, "%s\n", signed_headers)) {
+        return -1;
+    }
 
     /* Hashed Payload.
      *
@@ -846,7 +923,9 @@ build_canonical_request_v4(
         sha256_hex((const unsigned char *) "", 0, payload_hash);
     }
 
-    offset += snprintf(canonical_request + offset, max_len - offset, "%s", payload_hash);
+    if (sts_appendf(canonical_request, max_len, &offset, "%s", payload_hash)) {
+        return -1;
+    }
 
     return offset;
 } /* build_canonical_request_v4 */
