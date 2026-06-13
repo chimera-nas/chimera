@@ -12,6 +12,7 @@
 #include "s3_internal.h"
 #include "s3_etag.h"
 #include "s3_procs.h"
+#include "s3_metadata.h"
 
 static void
 chimera_s3_get_finish(struct chimera_s3_request *request)
@@ -111,6 +112,47 @@ chimera_s3_get_send(
 
 } /* chimera_s3_get_send */
 
+/*
+ * Metadata xattrs have been read and their response headers attached. Dispatch
+ * the response now (if the request body has been fully received). For HEAD the
+ * request is complete; for GET the body is streamed once libevpl asks for data.
+ */
+static void
+chimera_s3_get_metadata_done(
+    struct chimera_s3_request *request,
+    int                        error,
+    void                      *private_data)
+{
+    struct chimera_server_s3_thread *thread = request->thread;
+    struct evpl                     *evpl   = thread->evpl;
+    int                              is_head;
+
+    is_head = (evpl_http_request_type(request->http_request) ==
+               EVPL_HTTP_REQUEST_TYPE_HEAD);
+
+    if (is_head) {
+        /* HEAD: no body. Release the handle now and finish. */
+        chimera_vfs_release(thread->vfs, request->file_handle);
+        request->file_handle = NULL;
+        request->vfs_state   = CHIMERA_S3_VFS_STATE_COMPLETE;
+
+        if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
+            s3_server_respond(evpl, request);
+        }
+        return;
+    }
+
+    request->vfs_state = CHIMERA_S3_VFS_STATE_SEND;
+
+    if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
+        s3_server_respond(evpl, request);
+    }
+
+    if (request->http_state == CHIMERA_S3_HTTP_STATE_SEND) {
+        chimera_s3_get_send(evpl, request);
+    }
+} /* chimera_s3_get_metadata_done */
+
 static void
 chimera_s3_get_open_callback(
     enum chimera_vfs_error          error_code,
@@ -125,18 +167,18 @@ chimera_s3_get_open_callback(
         request->status    = CHIMERA_S3_STATUS_NO_SUCH_KEY;
         request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
         chimera_vfs_release(thread->vfs, request->dir_handle);
+        if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
+            s3_server_respond(evpl, request);
+        }
         return;
     }
 
     request->file_handle = oh;
 
-    request->vfs_state = CHIMERA_S3_VFS_STATE_SEND;
+    chimera_s3_metadata_attach_headers(request, oh,
+                                       chimera_s3_get_metadata_done, NULL);
 
-    if (request->http_state == CHIMERA_S3_HTTP_STATE_SEND) {
-        chimera_s3_get_send(evpl, request);
-    }
-
-} /* chimera_s3_put_create_callback */
+} /* chimera_s3_get_open_callback */
 
 static void
 chimera_s3_get_lookup_callback(
@@ -247,20 +289,15 @@ chimera_s3_get_lookup_callback(
 
     chimera_s3_abort_if(!(attr->va_set_mask & CHIMERA_VFS_ATTR_FH), "put lookup callback: no fh");
 
-    if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
-        s3_server_respond(evpl, request);
-    }
-
-    if (evpl_http_request_type(request->http_request) == EVPL_HTTP_REQUEST_TYPE_HEAD) {
-        request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
-    } else {
-        chimera_vfs_open_fh(thread->vfs, &thread->shared->cred,
-                            attr->va_fh,
-                            attr->va_fh_len,
-                            0,
-                            chimera_s3_get_open_callback,
-                            request);
-    }
+    /* Open the object (for both GET and HEAD) so its stored metadata xattrs can
+     * be read and re-emitted as response headers before the response is
+     * dispatched. The body is only streamed for GET. */
+    chimera_vfs_open_fh(thread->vfs, &thread->shared->cred,
+                        attr->va_fh,
+                        attr->va_fh_len,
+                        0,
+                        chimera_s3_get_open_callback,
+                        request);
 }  /* chimera_s3_get_lookup_callback */
 
 void

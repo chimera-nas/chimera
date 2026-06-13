@@ -163,7 +163,9 @@ s3_server_respond(
 
     if (request->is_list) {
         evpl_http_request_add_header(request->http_request, "Content-Type", "application/xml");
-    } else {
+    } else if (!request->have_content_type) {
+        /* GET/HEAD attaches the object's stored Content-Type (if any) before
+         * dispatch; only fall back to the generic type when none was stored. */
         evpl_http_request_add_header(request->http_request, "Content-Type", "application/octet-stream");
     }
     evpl_http_request_add_header(request->http_request, "Accept-Ranges", "bytes");
@@ -448,6 +450,7 @@ s3_server_dispatch(
     s3_request->has_attributes     = 0;
     s3_request->chunked            = 0;
     s3_request->responded          = 0;
+    s3_request->have_content_type  = 0;
     s3_request->query_upload_idlen = 0;
     s3_request->query_part_number  = 0;
     s3_request->http_request       = request;
