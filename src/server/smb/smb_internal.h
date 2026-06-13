@@ -719,6 +719,11 @@ struct chimera_smb_request {
             uint32_t                        addl_info;
             uint32_t                        flags;
             uint32_t                        output_length;
+            /* Client-supplied OutputBufferLength (max bytes the client will
+             * accept) and the info level's fixed minimum size, used to answer
+             * INFO_LENGTH_MISMATCH / BUFFER_OVERFLOW before marshalling. */
+            uint32_t                        max_response_size;
+            uint32_t                        min_length;
             struct chimera_smb_file_id      file_id;
             struct chimera_smb_attrs        r_attrs;
             struct chimera_smb_fs_attrs     r_fs_attrs;

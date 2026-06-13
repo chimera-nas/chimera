@@ -55,6 +55,7 @@ chimera_smb_query_info_getattr_callback(
             break;
         case SMB2_INFO_FILESYSTEM:
             switch (request->query_info.info_class) {
+                case SMB2_FILE_FS_SIZE_INFO:
                 case SMB2_FILE_FS_FULL_SIZE_INFO:
                     chimera_smb_marshal_fs_full_size_info(attr, &request->query_info.r_fs_attrs);
                     break;
@@ -260,6 +261,12 @@ chimera_smb_query_info(struct chimera_smb_request *request)
         return;
     }
 
+    /* min_length is the info level's fixed minimum size: a request whose
+     * OutputBufferLength is smaller than this must fail INFO_LENGTH_MISMATCH
+     * (MS-SMB2 3.3.5.20.1 / smb2.getinfo.q*_buffercheck).  For fixed-size
+     * levels it equals output_length; variable-size levels override it below. */
+    request->query_info.min_length = 0;
+
     switch (request->query_info.info_type) {
         case SMB2_INFO_FILE:
             /* Calculate the output buffer length based on the info class */
@@ -288,6 +295,16 @@ chimera_smb_query_info(struct chimera_smb_request *request)
                     /* CurrentByteOffset is per-handle state; no backend attrs. */
                     request->query_info.output_length = SMB2_FILE_POSITION_INFO_SIZE;
                     break;
+                case SMB2_FILE_MODE_INFO:
+                    /* FileModeInformation (MS-FSCC 2.4.26): a single Mode DWORD
+                    * of open-mode flags; per-handle state, no backend attrs. */
+                    request->query_info.output_length = SMB2_FILE_MODE_INFO_SIZE;
+                    break;
+                case SMB2_FILE_ALIGNMENT_INFO:
+                    /* FileAlignmentInformation (MS-FSCC 2.4.3): a single
+                     * AlignmentRequirement DWORD; no backend attrs. */
+                    request->query_info.output_length = SMB2_FILE_ALIGNMENT_INFO_SIZE;
+                    break;
                 case SMB2_FILE_COMPRESSION_INFO:
                     request->query_info.output_length = SMB2_FILE_COMPRESSION_INFO_SIZE;
                     getattr_mask                      = CHIMERA_VFS_ATTR_MASK_STAT;
@@ -303,14 +320,18 @@ chimera_smb_query_info(struct chimera_smb_request *request)
                 case SMB2_FILE_ALL_INFO:
                     request->query_info.output_length = SMB2_FILE_ALL_INFO_FIXED_SIZE + request->query_info.open_file->
                         name_len + 4;
-                    getattr_mask = CHIMERA_VFS_ATTR_MASK_STAT;
+                    /* The fixed portion ends after the FileNameLength field; a
+                     * shorter buffer is INFO_LENGTH_MISMATCH (smbtorture uses
+                     * fixed=104 here). */
+                    request->query_info.min_length = SMB2_FILE_ALL_INFO_FIXED_SIZE + 4;
+                    getattr_mask                   = CHIMERA_VFS_ATTR_MASK_STAT;
                     break;
                 case SMB2_FILE_NORMALIZED_NAME_INFO:
-                    /* MS-FSCC 2.4.30: FILE_NAME_INFORMATION layout
-                    * (FileNameLength + FileName, the name in UTF-16LE).  The
-                    * normalized name is the open's path, which we already
-                    * hold (as UTF-8) — no backend attrs needed. */
+                    /* MS-FSCC 2.4.30 FILE_NAME_INFORMATION layout (FileNameLength
+                     * + FileName in UTF-16LE).  The normalized name is the open's
+                     * path, which we already hold (as UTF-8) — no backend attrs. */
                     request->query_info.output_length = 4 + request->query_info.open_file->name_len * 2;
+                    request->query_info.min_length    = 4;
                     break;
                 case SMB2_FILE_FULL_EA_INFO:
                     request->query_info.output_length = 8;
@@ -328,10 +349,14 @@ chimera_smb_query_info(struct chimera_smb_request *request)
         case SMB2_INFO_FILESYSTEM:
             switch (request->query_info.info_class) {
                 case SMB2_FILE_FS_VOLUME_INFO:
-                    request->query_info.output_length = 22;
+                    /* 18-byte fixed header + 6-byte VolumeLabel ("fs\0" in
+                     * UTF-16LE).  smbtorture.qfs_buffercheck hardcodes fixed=24
+                     * for this level, so the total must be >= 24. */
+                    request->query_info.output_length = 24;
                     break;
                 case SMB2_FILE_FS_SIZE_INFO:
                     request->query_info.output_length = 24;
+                    getattr_mask                      = CHIMERA_VFS_ATTR_MASK_STATFS;
                     break;
                 case SMB2_FILE_FS_DEVICE_INFO:
                     request->query_info.output_length = 8;
@@ -339,9 +364,25 @@ chimera_smb_query_info(struct chimera_smb_request *request)
                 case SMB2_FILE_FS_ATTRIBUTE_INFO:
                     request->query_info.output_length = 16;
                     break;
+                case SMB2_FILE_FS_CONTROL_INFO:
+                    /* FileFsControlInformation (MS-FSCC 2.5.2): quota control.
+                     * We do not enforce quotas; report "no quota tracking"
+                     * (all-zero thresholds, no control flags) like a volume with
+                     * quotas disabled. */
+                    request->query_info.output_length = SMB2_FILE_FS_CONTROL_INFO_SIZE;
+                    break;
                 case SMB2_FILE_FS_FULL_SIZE_INFO:
                     request->query_info.output_length = 32;
                     getattr_mask                      = CHIMERA_VFS_ATTR_MASK_STATFS;
+                    break;
+                case SMB2_FILE_FS_OBJECTID_INFO:
+                    /* FileFsObjectIdInformation (MS-FSCC 2.5.6): a volume object
+                    * id.  We have no persistent volume GUID; report all-zero. */
+                    request->query_info.output_length = SMB2_FILE_FS_OBJECTID_INFO_SIZE;
+                    break;
+                case SMB2_FILE_FS_SECTOR_SIZE_INFO:
+                    /* FileFsSectorSizeInformation (MS-FSCC 2.5.7). */
+                    request->query_info.output_length = SMB2_FILE_FS_SECTOR_SIZE_INFO_SIZE;
                     break;
                 default:
                     status = SMB2_STATUS_NOT_IMPLEMENTED;
@@ -355,6 +396,26 @@ chimera_smb_query_info(struct chimera_smb_request *request)
             status = SMB2_STATUS_NOT_IMPLEMENTED;
             break;
     } /* switch */
+
+    /* Buffer-length validation (MS-SMB2 3.3.5.20).  Only for levels we accept;
+     * NOT_IMPLEMENTED levels keep their status. */
+    if (status == SMB2_STATUS_SUCCESS) {
+        if (request->query_info.min_length == 0) {
+            request->query_info.min_length = request->query_info.output_length;
+        }
+        if (request->query_info.max_response_size < request->query_info.min_length) {
+            status = SMB2_STATUS_INFO_LENGTH_MISMATCH;
+        } else if (request->query_info.max_response_size < request->query_info.output_length) {
+            status                            = SMB2_STATUS_BUFFER_OVERFLOW;
+            request->query_info.output_length = request->query_info.max_response_size;
+        }
+    }
+
+    if (status != SMB2_STATUS_SUCCESS) {
+        chimera_smb_open_file_release(request, request->query_info.open_file);
+        chimera_smb_complete_request(request, status);
+        return;
+    }
 
     if (getattr_mask) {
         /* Get the file attributes */
@@ -424,6 +485,19 @@ chimera_smb_query_info_reply(
                         reply_cursor,
                         request->query_info.open_file->position);
                     break;
+                case SMB2_FILE_MODE_INFO:
+                    /* FileModeInformation (MS-FSCC 2.4.26): the Mode flags the
+                     * file was opened with (WRITE_THROUGH / SEQUENTIAL_ONLY /
+                     * NO_INTERMEDIATE_BUFFERING / DELETE_ON_CLOSE...).  We do not
+                     * track these per-open yet; report 0 (no special modes),
+                     * which is what Windows returns for a plain open. */
+                    evpl_iovec_cursor_append_uint32(reply_cursor, 0);
+                    break;
+                case SMB2_FILE_ALIGNMENT_INFO:
+                    /* FileAlignmentInformation: FILE_BYTE_ALIGNMENT (0) — no
+                     * alignment requirement for buffered I/O. */
+                    evpl_iovec_cursor_append_uint32(reply_cursor, 0);
+                    break;
                 case SMB2_FILE_NORMALIZED_NAME_INFO:
                 {
                     /* FILE_NAME_INFORMATION: FileNameLength (UTF-16LE bytes)
@@ -442,6 +516,7 @@ chimera_smb_query_info_reply(
                 case SMB2_FILE_ALL_INFO:
                     chimera_smb_append_all_info(reply_cursor, request->query_info.open_file, &request->query_info.
                                                 r_attrs);
+                    break;
                 case SMB2_FILE_FULL_EA_INFO:
                     evpl_iovec_cursor_append_uint32(reply_cursor, 0);
                     evpl_iovec_cursor_append_uint32(reply_cursor, 0);
@@ -465,16 +540,20 @@ chimera_smb_query_info_reply(
                 case SMB2_FILE_FS_VOLUME_INFO:
                     evpl_iovec_cursor_append_uint64(reply_cursor, 0); /* Create time */
                     evpl_iovec_cursor_append_uint32(reply_cursor, 0x12345678); /* Serial number */
-                    evpl_iovec_cursor_append_uint32(reply_cursor, 4); /* Label length */
-                    evpl_iovec_cursor_append_uint8(reply_cursor, 0);
-                    evpl_iovec_cursor_append_uint8(reply_cursor, 0);
+                    evpl_iovec_cursor_append_uint32(reply_cursor, 6); /* Label length (bytes) */
+                    evpl_iovec_cursor_append_uint8(reply_cursor, 0); /* SupportsObjects */
+                    evpl_iovec_cursor_append_uint8(reply_cursor, 0); /* Reserved */
+                    /* VolumeLabel "fs\0" in UTF-16LE = 6 bytes (18-byte fixed
+                     * header + 6 => 24-byte total). */
                     chimera_smb_utf8_to_utf16le(
                         &request->compound->thread->iconv_ctx,
                         "fs",
                         2,
                         namebuf,
                         8);
-                    evpl_iovec_cursor_append_blob_unaligned(reply_cursor, namebuf, 4);
+                    namebuf[2] = 0;
+                    evpl_iovec_cursor_append_blob_unaligned(reply_cursor, namebuf, 6);
+                    break;
                 case SMB2_FILE_FS_SIZE_INFO:
                     evpl_iovec_cursor_append_uint64(reply_cursor, request->query_info.r_fs_attrs.
                                                     smb_total_allocation_units);
@@ -516,6 +595,33 @@ chimera_smb_query_info_reply(
                                                     smb_sectors_per_allocation_unit);
                     evpl_iovec_cursor_append_uint32(reply_cursor, request->query_info.r_fs_attrs.smb_bytes_per_sector);
                     break;
+                case SMB2_FILE_FS_CONTROL_INFO:
+                    /* MS-FSCC 2.5.2 FileFsControlInformation.  No quota tracking:
+                     * NO_QUOTAS state with all thresholds/limits = -1 (no limit)
+                     * and no control flags. */
+                    evpl_iovec_cursor_append_uint64(reply_cursor, 0); /* FreeSpaceStartFiltering */
+                    evpl_iovec_cursor_append_uint64(reply_cursor, 0); /* FreeSpaceThreshold */
+                    evpl_iovec_cursor_append_uint64(reply_cursor, 0); /* FreeSpaceStopFiltering */
+                    evpl_iovec_cursor_append_uint64(reply_cursor, UINT64_MAX); /* DefaultQuotaThreshold */
+                    evpl_iovec_cursor_append_uint64(reply_cursor, UINT64_MAX); /* DefaultQuotaLimit */
+                    evpl_iovec_cursor_append_uint32(reply_cursor, 0); /* FileSystemControlFlags */
+                    evpl_iovec_cursor_append_uint32(reply_cursor, 0); /* Padding */
+                    break;
+                case SMB2_FILE_FS_OBJECTID_INFO:
+                    /* MS-FSCC 2.5.6 FileFsObjectIdInformation: 16-byte ObjectId +
+                    * 48-byte ExtendedInfo.  We have no persistent volume GUID. */
+                    evpl_iovec_cursor_zero(reply_cursor, SMB2_FILE_FS_OBJECTID_INFO_SIZE);
+                    break;
+                case SMB2_FILE_FS_SECTOR_SIZE_INFO:
+                    /* MS-FSCC 2.5.7 FileFsSectorSizeInformation. */
+                    evpl_iovec_cursor_append_uint32(reply_cursor, 512); /* LogicalBytesPerSector */
+                    evpl_iovec_cursor_append_uint32(reply_cursor, 512); /* PhysicalBytesPerSectorForAtomicity */
+                    evpl_iovec_cursor_append_uint32(reply_cursor, 512); /* PhysicalBytesPerSectorForPerformance */
+                    evpl_iovec_cursor_append_uint32(reply_cursor, 512); /* FSEffPhysicalBytesPerSectorForAtomicity */
+                    evpl_iovec_cursor_append_uint32(reply_cursor, 0); /* Flags */
+                    evpl_iovec_cursor_append_uint32(reply_cursor, 0); /* ByteOffsetForSectorAlignment */
+                    evpl_iovec_cursor_append_uint32(reply_cursor, 0); /* ByteOffsetForPartitionAlignment */
+                    break;
                 default:
                     chimera_smb_abort("%s: unsupported filesystem information class: %d",
                                       __FUNCTION__, request->query_info.info_class);
@@ -534,8 +640,8 @@ chimera_smb_parse_query_info(
     struct evpl_iovec_cursor   *request_cursor,
     struct chimera_smb_request *request)
 {
-    uint32_t max_response_size, input_size;
-    uint16_t input_offset;
+    uint32_t max_response_size = 0, input_size = 0;
+    uint16_t input_offset = 0;
 
     if (unlikely(request->request_struct_size != SMB2_QUERY_INFO_REQUEST_SIZE)) {
         chimera_smb_error("Received SMB2 QUERY_INFO request with invalid struct size (%u expected %u)",
@@ -546,15 +652,22 @@ chimera_smb_parse_query_info(
     }
 
     int prc = 0;
-    prc |= evpl_iovec_cursor_try_get_uint8(request_cursor, &request->query_info.info_type);
-    prc |= evpl_iovec_cursor_try_get_uint8(request_cursor, &request->query_info.info_class);
-    prc |= evpl_iovec_cursor_try_get_uint32(request_cursor, &max_response_size);
-    prc |= evpl_iovec_cursor_try_get_uint16(request_cursor, &input_offset);
-    prc |= evpl_iovec_cursor_try_get_uint32(request_cursor, &input_size);
-    prc |= evpl_iovec_cursor_try_get_uint32(request_cursor, &request->query_info.addl_info);
-    prc |= evpl_iovec_cursor_try_get_uint32(request_cursor, &request->query_info.flags);
-    prc |= evpl_iovec_cursor_try_get_uint64(request_cursor, &request->query_info.file_id.pid);
-    prc |= evpl_iovec_cursor_try_get_uint64(request_cursor, &request->query_info.file_id.vid);
+    prc |= evpl_iovec_cursor_try_get_uint8(request_cursor, &request->query_info.
+                                           info_type);
+    prc |= evpl_iovec_cursor_try_get_uint8(request_cursor, &request->query_info.
+                                           info_class);
+    prc                                  |= evpl_iovec_cursor_try_get_uint32(request_cursor, &max_response_size);
+    request->query_info.max_response_size = max_response_size;
+    prc                                  |= evpl_iovec_cursor_try_get_uint16(request_cursor, &input_offset);
+    prc                                  |= evpl_iovec_cursor_try_get_uint32(request_cursor, &input_size);
+    prc                                  |= evpl_iovec_cursor_try_get_uint32(request_cursor, &request->query_info.
+                                                                             addl_info);
+    prc |= evpl_iovec_cursor_try_get_uint32(request_cursor, &request->query_info.flags)
+    ;
+    prc |= evpl_iovec_cursor_try_get_uint64(request_cursor, &request->query_info.
+                                            file_id.pid);
+    prc |= evpl_iovec_cursor_try_get_uint64(request_cursor, &request->query_info.
+                                            file_id.vid);
 
     if (unlikely(prc)) {
         chimera_smb_error("Received SMB2 QUERY_INFO request truncated in fixed body");

@@ -692,7 +692,9 @@ chimera_smb_append_all_info(
     chimera_smb_append_internal_info(cursor, attrs);
     chimera_smb_append_ea_info(cursor, attrs);
 
-    evpl_iovec_cursor_append_uint32(cursor, attrs->smb_access_flags);
+    /* FileAccessInformation: the access mask actually granted on this handle
+     * (smb2.getinfo.granted reads this from FileAllInformation). */
+    evpl_iovec_cursor_append_uint32(cursor, open_file->granted_access);
     evpl_iovec_cursor_append_uint64(cursor, open_file->position);
 
     /* Mode */
