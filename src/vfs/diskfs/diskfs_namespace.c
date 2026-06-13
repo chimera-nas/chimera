@@ -390,6 +390,20 @@ diskfs_rename_at_child_cb(
     void                *private_data);
 
 static void
+diskfs_rename_at_check_descendant_step(
+    struct chimera_vfs_request *request);
+
+static void
+diskfs_rename_at_descendant_cb(
+    struct diskfs_inode *anc,
+    int                  status,
+    void                *private_data);
+
+static void
+diskfs_rename_at_dest_lookup(
+    struct chimera_vfs_request *request);
+
+static void
 diskfs_rename_at_source_cb(
     struct diskfs_bt_op *bop,
     int                  result,
@@ -2676,9 +2690,7 @@ diskfs_rename_at_child_cb(
 {
     struct chimera_vfs_request    *request = private_data;
     struct diskfs_request_private *p       = request->plugin_data;
-    struct diskfs_thread          *thread  = p->thread;
     struct diskfs_inode           *np      = p->inode_stash[1];
-    struct diskfs_bt_op           *bop;
 
     if (unlikely(status != CHIMERA_VFS_OK)) {
         diskfs_rename_at_unlock_parents(request);
@@ -2688,13 +2700,129 @@ diskfs_rename_at_child_cb(
 
     p->inode_stash[2] = child;
 
+    /* POSIX: a directory may not be renamed into itself or one of its own
+     * descendants (EINVAL).  This must be detected before mutating the
+     * namespace; otherwise the directory would be spliced under itself and the
+     * subtree orphaned.  Only a directory source can be an ancestor of the
+     * destination, so the walk is skipped for non-directories.  Walk the
+     * destination parent's ancestry up to the root, comparing each ancestor
+     * against the source child. */
+    if (S_ISDIR(child->mode)) {
+        p->anc_inum  = np->inum;
+        p->anc_gen   = np->gen;
+        p->anc_depth = 0;
+        diskfs_rename_at_check_descendant_step(request);
+        return;
+    }
+
+    diskfs_rename_at_dest_lookup(request);
+} /* diskfs_rename_at_child_cb */
+
+
+/* Look up the destination name in the (already-locked) destination parent and
+ * decide replace vs hardlink-shortcut.  Reached once the descendant check (if
+ * any) has cleared. */
+static void
+diskfs_rename_at_dest_lookup(struct chimera_vfs_request *request)
+{
+    struct diskfs_request_private *p      = request->plugin_data;
+    struct diskfs_thread          *thread = p->thread;
+    struct diskfs_inode           *np     = p->inode_stash[1];
+    struct diskfs_bt_op           *bop;
+
     bop = diskfs_bt_op_alloc(thread);
     if (diskfs_dir_lookup_async(bop, thread, np, request->rename_at.new_name_hash,
                                 p->rec_scratch, sizeof(p->rec_scratch),
                                 diskfs_rename_at_dest_cb, request)) {
         diskfs_rename_at_dest_cb(bop, bop->result, request);
     }
-} /* diskfs_rename_at_child_cb */
+} /* diskfs_rename_at_dest_lookup */
+
+
+/*
+ * One step of the destination-parent ancestry walk for the rename(2)
+ * descendant check.  p->anc_inum/anc_gen is the ancestor currently under
+ * examination.  If it is the source directory, the rename would make the
+ * directory its own descendant -> EINVAL.  Otherwise acquire it, read its
+ * parent link, release it (unless it is one of the two already-held parents),
+ * and recurse on the parent until the root (a self-parent) is reached.
+ *
+ * Acquiring with READ (not the txn's WRITE mode) and holding at most one
+ * transient ancestor at a time keeps the walk within the txn's inode-slot
+ * budget and avoids escalating locks on the path.  The two held parents are
+ * returned by the txn fast-path without re-locking, so this never
+ * self-deadlocks on them.
+ */
+static void
+diskfs_rename_at_check_descendant_step(struct chimera_vfs_request *request)
+{
+    struct diskfs_request_private *p      = request->plugin_data;
+    struct diskfs_thread          *thread = p->thread;
+    struct diskfs_inode           *child  = p->inode_stash[2];
+
+    /* The destination parent (or an ancestor of it) is the source directory
+     * itself: renaming into it would splice the subtree under itself. */
+    if (p->anc_inum == child->inum && p->anc_gen == child->gen) {
+        diskfs_rename_at_unlock_parents(request);
+        diskfs_op_fail(request, p->txn, CHIMERA_VFS_EINVAL);
+        return;
+    }
+
+    if (unlikely(p->anc_depth++ >= CHIMERA_VFS_PATH_MAX)) {
+        /* Defensive: a corrupt parent cycle would otherwise loop forever. */
+        diskfs_rename_at_unlock_parents(request);
+        diskfs_op_fail(request, p->txn, CHIMERA_VFS_ELOOP);
+        return;
+    }
+
+    diskfs_inode_acquire(thread, p->txn, p->anc_inum, p->anc_gen,
+                         DISKFS_INODE_LOCK_READ,
+                         diskfs_rename_at_descendant_cb, request);
+} /* diskfs_rename_at_check_descendant_step */
+
+
+static void
+diskfs_rename_at_descendant_cb(
+    struct diskfs_inode *anc,
+    int                  status,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+    struct diskfs_inode           *op      = p->inode_stash[0];
+    struct diskfs_inode           *np      = p->inode_stash[1];
+    uint64_t                       par_inum;
+    uint32_t                       par_gen;
+    int                            is_root;
+
+    if (unlikely(status != CHIMERA_VFS_OK)) {
+        /* The ancestor vanished mid-walk (concurrent removal): treat as a clean
+         * path -- the rename's own dirent lookups will surface any real error. */
+        diskfs_rename_at_dest_lookup(request);
+        return;
+    }
+
+    par_inum = anc->parent_inum;
+    par_gen  = anc->parent_gen;
+    is_root  = (anc->parent_inum == anc->inum && anc->parent_gen == anc->gen);
+
+    /* Release the ancestor unless it is one of the two parents the rename holds
+     * for the duration (those were returned by the txn fast-path, not relocked,
+     * so they must not be dropped here). */
+    if (anc != op && anc != np) {
+        diskfs_txn_unlock_inode(p->txn, anc);
+    }
+
+    if (is_root) {
+        /* Reached the filesystem root without crossing the source: safe. */
+        diskfs_rename_at_dest_lookup(request);
+        return;
+    }
+
+    p->anc_inum = par_inum;
+    p->anc_gen  = par_gen;
+    diskfs_rename_at_check_descendant_step(request);
+} /* diskfs_rename_at_descendant_cb */
 
 
 /* The source-name lookup completed; capture old inum/gen and fetch the

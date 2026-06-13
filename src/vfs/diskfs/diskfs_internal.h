@@ -210,6 +210,11 @@ struct diskfs_request_private {
     uint64_t                    rd_hash;
     uint64_t                    rd_inum;
     uint32_t                    rd_gen;
+    /* rename(2) descendant-loop check: cursor inum/gen of the destination
+     * parent's ancestor currently being examined, and the walk depth. */
+    uint64_t                    anc_inum;
+    uint32_t                    anc_gen;
+    int                         anc_depth;
     int                         rd_namelen;
     char                        rd_name[256];
     /* readdir trampoline state: when the b+tree and child inodes are all
