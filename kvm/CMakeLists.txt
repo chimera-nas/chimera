@@ -16,9 +16,10 @@ get_filename_component(BUILD_ROOT ${CMAKE_BINARY_DIR} DIRECTORY)
 set(KVM_IMAGE_REGISTRY "ghcr.io/chimera-nas/kvm-test-base" CACHE STRING
     "OCI registry base that hosts the prebuilt KVM guest images.")
 # Pinned version of the prebuilt images to consume; bump to adopt a newer
-# kvm-test-base release.  v1.1.0 drops the 22.04 generic variant (see the
-# KVM_IMAGES note below); v1.0.0 still has all four for older checkouts.
-set(KVM_IMAGE_VERSION "v1.1.0" CACHE STRING
+# kvm-test-base release.  v1.2.0 adds the Linux nfstest suite (used by the
+# nfstest tests in tests/CMakeLists.txt); v1.1.0 dropped the 22.04 generic
+# variant; v1.0.0 still has all four for older checkouts.
+set(KVM_IMAGE_VERSION "v1.2.0" CACHE STRING
     "Version tag of the KVM guest images to consume.")
 
 # Note: the 22.04 generic (non-HWE) kernel does not build the virtio block
