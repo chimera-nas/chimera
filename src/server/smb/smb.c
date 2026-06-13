@@ -400,7 +400,15 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
 
         memset(reply_hdr->signature, 0, sizeof(reply_hdr->signature));
 
-        if (chimera_smb_is_error_status(request->status)) {
+        /* An over-limit FSCTL_SRV_COPYCHUNK is rejected with
+         * STATUS_INVALID_PARAMETER, but the reply is still a full IOCTL Response
+         * whose 12-byte output buffer carries a SRV_COPYCHUNK_RESPONSE
+         * advertising the server limits, so the client resubmits within them
+         * (MS-SMB2 2.2.32.1 / 3.3.5.15.6).  All other errors get the generic
+         * SMB2 ERROR Response. */
+        if (chimera_smb_is_error_status(request->status) &&
+            !(request->smb2_hdr.command == SMB2_IOCTL &&
+              request->ioctl.cc_limit_response)) {
             evpl_iovec_cursor_append_uint16(&reply_cursor, SMB2_ERROR_REPLY_SIZE);
             evpl_iovec_cursor_append_uint16(&reply_cursor, 0);
             evpl_iovec_cursor_append_uint16(&reply_cursor, 0);
@@ -476,9 +484,18 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
          * response's header is aligned. NEGOTIATE and SESSION_SETUP are never
          * compounded and feed the SMB 3.1.1 preauth-integrity hash, which the
          * client computes over the message *as received* (no trailing pad):
-         * emit them in canonical form so our hash matches the client's. */
+         * emit them in canonical form so our hash matches the client's.
+         *
+         * The over-limit FSCTL_SRV_COPYCHUNK error response is also emitted
+         * unpadded: smbtorture's smb2_ioctl_is_failure() only parses the
+         * SRV_COPYCHUNK_RESPONSE on a STATUS_INVALID_PARAMETER reply when the
+         * dynamic data size is exactly sizeof(srv_copychunk_rsp) (12 bytes), so
+         * trailing alignment padding would hide the limit body.  Such a reply is
+         * never compounded after. */
         if (request->smb2_hdr.command != SMB2_NEGOTIATE &&
-            request->smb2_hdr.command != SMB2_SESSION_SETUP) {
+            request->smb2_hdr.command != SMB2_SESSION_SETUP &&
+            !(request->smb2_hdr.command == SMB2_IOCTL &&
+              request->ioctl.cc_limit_response)) {
             evpl_iovec_cursor_zero(&reply_cursor, (8 - (evpl_iovec_cursor_consumed(&reply_cursor) & 7)) & 7);
         }
 
