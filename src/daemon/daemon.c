@@ -10,6 +10,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <jansson.h>
+#include <xxhash.h>
 #include <openssl/pem.h>
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
@@ -855,14 +856,41 @@ main(
         {
             const char *access_key = json_string_value(json_object_get(key_entry, "access_key"));
             const char *secret_key = json_string_value(json_object_get(key_entry, "secret_key"));
+            const char *user_id    = json_string_value(json_object_get(key_entry, "user_id"));
+            const char *display    = json_string_value(json_object_get(key_entry, "display_name"));
+            json_t     *juid       = json_object_get(key_entry, "uid");
+            json_t     *jgid       = json_object_get(key_entry, "gid");
+            uint32_t    uid, gid;
 
             if (!access_key || !secret_key) {
                 chimera_server_error("S3 access key entry missing access_key or secret_key, skipping");
                 continue;
             }
 
-            chimera_server_info("Adding S3 access key %s", access_key);
-            chimera_server_add_s3_cred(server, access_key, secret_key, 1);
+            /* Map this S3 access key to a filesystem identity. Honor explicit
+             * "uid"/"gid" from config; otherwise derive a stable, non-root uid
+             * from the access key so distinct principals get distinct uids and
+             * the VFS/ACL gate can enforce cross-user access. The non-zero,
+             * high-range default keeps mapped users out of any privileged range
+             * and avoids colliding with the anonymous "nobody" id. */
+            if (juid && json_is_integer(juid)) {
+                uid = (uint32_t) json_integer_value(juid);
+            } else {
+                uint64_t h = XXH3_64bits(access_key, strlen(access_key));
+                uid = 100000 + (uint32_t) (h % 100000);
+            }
+
+            if (jgid && json_is_integer(jgid)) {
+                gid = (uint32_t) json_integer_value(jgid);
+            } else {
+                gid = uid;
+            }
+
+            chimera_server_info("Adding S3 access key %s (uid=%u gid=%u id=%s)",
+                                access_key, uid, gid,
+                                user_id ? user_id : access_key);
+            chimera_server_add_s3_cred(server, access_key, secret_key,
+                                       uid, gid, user_id, display, 1);
         }
     }
 

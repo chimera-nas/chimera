@@ -4,11 +4,13 @@
 
 #include <stdio.h>
 #include <time.h>
+#include <sys/stat.h>
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 #include "s3_internal.h"
 #include "s3_etag.h"
+#include "s3_acl.h"
 
 static void
 chimera_s3_put_getattr_callback(
@@ -102,7 +104,7 @@ chimera_s3_put_rename(struct chimera_s3_request *request)
     if (request->put.tmp_name_len) {
         chimera_vfs_rename_at(
             thread->vfs,
-            &thread->shared->cred,
+            &request->cred,
             request->dir_handle->fh,
             request->dir_handle->fh_len,
             request->put.tmp_name,
@@ -120,7 +122,7 @@ chimera_s3_put_rename(struct chimera_s3_request *request)
     } else {
         chimera_vfs_link_at(
             thread->vfs,
-            &thread->shared->cred,
+            &request->cred,
             request->file_handle->fh,
             request->file_handle->fh_len,
             request->dir_handle->fh,
@@ -257,7 +259,7 @@ chimera_s3_put_recv(
 
     request->io_pending++;
 
-    chimera_vfs_write(request->thread->vfs, &thread->shared->cred,
+    chimera_vfs_write(request->thread->vfs, &request->cred,
                       request->file_handle,
                       request->file_cur_offset,
                       avail,
@@ -289,7 +291,7 @@ chimera_s3_put_create_unlinked_callback(
     struct evpl                     *evpl    = thread->evpl;
 
     if (error_code) {
-        request->status    = CHIMERA_S3_STATUS_NO_SUCH_KEY;
+        request->status    = chimera_s3_status_from_vfs(error_code);
         request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
         chimera_vfs_release(thread->vfs, request->dir_handle);
         return;
@@ -320,7 +322,7 @@ chimera_s3_put_create_callback(
     struct evpl                     *evpl    = thread->evpl;
 
     if (error_code) {
-        request->status    = CHIMERA_S3_STATUS_NO_SUCH_KEY;
+        request->status    = chimera_s3_status_from_vfs(error_code);
         request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
         chimera_vfs_release(thread->vfs, request->dir_handle);
         return;
@@ -347,7 +349,7 @@ chimera_s3_put_open_dir_callback(
     struct chimera_vfs_module       *module;
 
     if (error_code) {
-        request->status    = CHIMERA_S3_STATUS_NO_SUCH_KEY;
+        request->status    = chimera_s3_status_from_vfs(error_code);
         request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
         return;
     }
@@ -357,13 +359,23 @@ chimera_s3_put_open_dir_callback(
     request->set_attr.va_req_mask = 0;
     request->set_attr.va_set_mask = 0;
 
+    /* Set the new object's mode from the canned ACL (x-amz-acl). S3 objects are
+     * private by default, so with no x-amz-acl header we apply the "private"
+     * mapping (0600) rather than the backend default; this makes a default
+     * object owner-only, matching S3 semantics and the access-matrix tests. */
+    request->set_attr.va_set_mask |= CHIMERA_VFS_ATTR_MODE;
+    request->set_attr.va_mode      =
+        chimera_s3_canned_acl_to_mode(
+            request->canned_acl == CHIMERA_S3_CANNED_NONE ?
+            CHIMERA_S3_CANNED_PRIVATE : request->canned_acl, 0);
+
     module = chimera_vfs_get_module(thread->vfs, oh->fh, oh->fh_len);
 
     if (module->capabilities & CHIMERA_VFS_CAP_CREATE_UNLINKED) {
 
         request->put.tmp_name_len = 0;
 
-        chimera_vfs_create_unlinked(thread->vfs, &thread->shared->cred,
+        chimera_vfs_create_unlinked(thread->vfs, &request->cred,
                                     oh->fh,
                                     oh->fh_len,
                                     &request->set_attr,
@@ -374,7 +386,7 @@ chimera_s3_put_open_dir_callback(
         request->put.tmp_name_len = snprintf(request->put.tmp_name, sizeof(request->put.tmp_name),
                                              "._chimera_%lx%lx%lx", (uint64_t) request,
                                              request->start_time.tv_sec, request->start_time.tv_nsec);
-        chimera_vfs_open_at(thread->vfs, &thread->shared->cred,
+        chimera_vfs_open_at(thread->vfs, &request->cred,
                             oh,
                             request->put.tmp_name,
                             request->put.tmp_name_len,
@@ -399,14 +411,14 @@ chimera_s3_put_lookup_callback(
     struct chimera_server_s3_thread *thread  = request->thread;
 
     if (error_code) {
-        request->status    = CHIMERA_S3_STATUS_NO_SUCH_KEY;
+        request->status    = chimera_s3_status_from_vfs(error_code);
         request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
         return;
     }
 
     chimera_s3_abort_if(!(attr->va_set_mask & CHIMERA_VFS_ATTR_FH), "put lookup callback: no fh");
 
-    chimera_vfs_open_fh(thread->vfs, &thread->shared->cred,
+    chimera_vfs_open_fh(thread->vfs, &request->cred,
                         attr->va_fh,
                         attr->va_fh_len,
                         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
@@ -414,9 +426,9 @@ chimera_s3_put_lookup_callback(
                         request);
 }  /* chimera_s3_put_lookup_callback */
 
-void
-chimera_s3_put(
-    struct evpl                     *evpl,
+/* Resolve the directory components of the object key and begin the create. */
+static void
+chimera_s3_put_begin_create(
     struct chimera_server_s3_thread *thread,
     struct chimera_s3_request       *request)
 {
@@ -449,7 +461,7 @@ chimera_s3_put(
 
     request->io_pending = 0;
 
-    chimera_vfs_create(thread->vfs, &thread->shared->cred,
+    chimera_vfs_create(thread->vfs, &request->cred,
                        request->bucket_fh,
                        request->bucket_fhlen,
                        dirpath,
@@ -458,4 +470,18 @@ chimera_s3_put(
                        CHIMERA_VFS_ATTR_FH,
                        chimera_s3_put_lookup_callback,
                        request);
+} /* chimera_s3_put_begin_create */
+
+void
+chimera_s3_put(
+    struct evpl                     *evpl,
+    struct chimera_server_s3_thread *thread,
+    struct chimera_s3_request       *request)
+{
+    /* Authorization to write an object (create or overwrite) is governed by the
+     * WRITE grant on the *bucket*, which the dispatcher's bucket gate already
+     * enforced under the request credential. S3 lets a principal with bucket
+     * write overwrite an object regardless of that object's own ACL, so there
+     * is no additional per-object write check here. */
+    chimera_s3_put_begin_create(thread, request);
 } /* chimera_s3_put */

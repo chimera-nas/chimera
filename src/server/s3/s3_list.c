@@ -641,6 +641,26 @@ chimera_s3_list_find_complete(
     const char                      *next = NULL;
     uint64_t                         total;
 
+    /* A permission failure walking the bucket directory (the requester lacks
+     * read/execute on it) must surface as AccessDenied rather than an empty
+     * listing, so per-credential enforcement is visible to the client. */
+    if (error_code == CHIMERA_VFS_EACCES || error_code == CHIMERA_VFS_EPERM) {
+        for (i = 0; i < n; i++) {
+            free(ents[i].key);
+        }
+        free(ents);
+        request->list.entries     = NULL;
+        request->list.n_entries   = 0;
+        request->list.cap_entries = 0;
+
+        request->status    = CHIMERA_S3_STATUS_ACCESS_DENIED;
+        request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
+        if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
+            s3_server_respond(evpl, request);
+        }
+        return;
+    }
+
     /* S3 returns keys in lexicographic order; the VFS walk does not. */
     if (n > 0) {
         qsort(ents, n, sizeof(*ents), chimera_s3_list_cmp);
@@ -881,7 +901,7 @@ chimera_s3_list(
     struct chimera_server_s3_thread *thread,
     struct chimera_s3_request       *request)
 {
-    chimera_vfs_find(thread->vfs, &thread->shared->cred,
+    chimera_vfs_find(thread->vfs, &request->cred,
                      request->bucket_fh,
                      request->bucket_fhlen,
                      CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,

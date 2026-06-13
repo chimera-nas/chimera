@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <stdint.h>
+
 struct s3_bucket;
 
 void
@@ -56,6 +58,10 @@ chimera_s3_add_cred(
     void       *s3_shared,
     const char *access_key,
     const char *secret_key,
+    uint32_t    uid,
+    uint32_t    gid,
+    const char *canon_id,
+    const char *display_name,
     int         pinned);
 
 extern struct chimera_server_protocol s3_protocol;

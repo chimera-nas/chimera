@@ -9,6 +9,8 @@
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
+#include "vfs/vfs_access.h"
+#include "vfs/vfs_acl.h"
 #include "s3_internal.h"
 #include "s3_etag.h"
 #include "s3_procs.h"
@@ -93,7 +95,7 @@ chimera_s3_get_send(
     request->io_pending++;
 
     chimera_vfs_read(request->thread->vfs,
-                     &request->thread->shared->cred,
+                     &request->cred,
                      request->file_handle,
                      request->file_cur_offset,
                      left,
@@ -122,7 +124,7 @@ chimera_s3_get_open_callback(
     struct evpl                     *evpl    = thread->evpl;
 
     if (error_code) {
-        request->status    = CHIMERA_S3_STATUS_NO_SUCH_KEY;
+        request->status    = chimera_s3_status_from_vfs(error_code);
         request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
         chimera_vfs_release(thread->vfs, request->dir_handle);
         return;
@@ -149,7 +151,7 @@ chimera_s3_get_lookup_callback(
     struct evpl                     *evpl    = thread->evpl;
 
     if (error_code) {
-        request->status    = CHIMERA_S3_STATUS_NO_SUCH_KEY;
+        request->status    = chimera_s3_status_from_vfs(error_code);
         request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
         if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
             s3_server_respond(evpl, request);
@@ -176,6 +178,20 @@ chimera_s3_get_lookup_callback(
             }
             return;
         }
+    }
+
+    /* Enforce the object's own read permission here, before committing a 200
+     * response. The data read in chimera_s3_get_send is gated too, but that
+     * happens after the status line is sent, so a private object would
+     * otherwise reply 200 with a truncated body instead of AccessDenied. */
+    if (!chimera_vfs_access_allowed(attr, &request->cred,
+                                    CHIMERA_ACE_READ_DATA)) {
+        request->status    = CHIMERA_S3_STATUS_ACCESS_DENIED;
+        request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
+        if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
+            s3_server_respond(evpl, request);
+        }
+        return;
     }
 
     chimera_s3_attach_etag(request->http_request, attr);
@@ -254,7 +270,7 @@ chimera_s3_get_lookup_callback(
     if (evpl_http_request_type(request->http_request) == EVPL_HTTP_REQUEST_TYPE_HEAD) {
         request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
     } else {
-        chimera_vfs_open_fh(thread->vfs, &thread->shared->cred,
+        chimera_vfs_open_fh(thread->vfs, &request->cred,
                             attr->va_fh,
                             attr->va_fh_len,
                             0,
@@ -271,6 +287,11 @@ chimera_s3_get(
 {
     request->io_pending = 0;
 
+    /* Resolve the object key as the server (so a private bucket does not block
+     * traversal to an object whose own ACL permits the read -- S3 bucket and
+     * object ACLs are independent). The object's own READ permission is then
+     * enforced against the request credential in the lookup callback before any
+     * response is committed. */
     chimera_vfs_lookup(thread->vfs, &thread->shared->cred,
                        request->bucket_fh,
                        request->bucket_fhlen,

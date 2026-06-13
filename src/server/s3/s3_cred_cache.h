@@ -13,15 +13,25 @@
 
 #define CHIMERA_S3_ACCESS_KEY_MAX 128
 #define CHIMERA_S3_SECRET_KEY_MAX 256
+#define CHIMERA_S3_CANON_ID_MAX   128
+#define CHIMERA_S3_DISPLAY_MAX    128
 
 struct chimera_s3_cred {
     int                     access_key_len;
     struct timespec         expiration;
     int                     pinned;
+    /* Filesystem identity this S3 access key maps to. The S3 server runs the
+     * request's VFS operations under this uid/gid so the unified VFS/ACL
+     * permission model enforces cross-user access (see s3_acl.c). */
+    uint32_t                uid;
+    uint32_t                gid;
     struct rcu_head         rcu;
     struct chimera_s3_cred *next;
     char                    access_key[CHIMERA_S3_ACCESS_KEY_MAX];
     char                    secret_key[CHIMERA_S3_SECRET_KEY_MAX];
+    /* S3 canonical user id and display name echoed back in ACL XML. */
+    char                    canon_id[CHIMERA_S3_CANON_ID_MAX];
+    char                    display_name[CHIMERA_S3_DISPLAY_MAX];
 };
 
 struct chimera_s3_cred_cache_bucket {
@@ -197,6 +207,10 @@ chimera_s3_cred_cache_add(
     struct chimera_s3_cred_cache *cache,
     const char                   *access_key,
     const char                   *secret_key,
+    uint32_t                      uid,
+    uint32_t                      gid,
+    const char                   *canon_id,
+    const char                   *display_name,
     int                           pinned)
 {
     struct chimera_s3_cred *cred, *existing;
@@ -212,7 +226,15 @@ chimera_s3_cred_cache_add(
     strncpy(cred->access_key, access_key, sizeof(cred->access_key) - 1);
     strncpy(cred->secret_key, secret_key, sizeof(cred->secret_key) - 1);
     cred->access_key_len = access_key_len;
-    cred->pinned         = pinned;
+    cred->uid            = uid;
+    cred->gid            = gid;
+    strncpy(cred->canon_id,
+            (canon_id && canon_id[0]) ? canon_id : access_key,
+            sizeof(cred->canon_id) - 1);
+    strncpy(cred->display_name,
+            (display_name && display_name[0]) ? display_name : access_key,
+            sizeof(cred->display_name) - 1);
+    cred->pinned = pinned;
 
     if (!pinned) {
         clock_gettime(CLOCK_REALTIME, &now);

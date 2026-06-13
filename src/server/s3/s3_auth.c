@@ -436,11 +436,34 @@ build_string_to_sign_v2(
 /*
  * Verify AWS Signature V2
  */
+/*
+ * Copy the resolved principal's filesystem identity and canonical id/display
+ * name out of the credential cache entry while the RCU read lock is held, so
+ * the caller can use them after the lock is dropped.
+ */
+static void
+chimera_s3_fill_identity(
+    struct chimera_s3_auth_identity *identity,
+    const struct chimera_s3_cred    *cred)
+{
+    if (!identity) {
+        return;
+    }
+    identity->uid = cred->uid;
+    identity->gid = cred->gid;
+    strncpy(identity->canon_id, cred->canon_id, sizeof(identity->canon_id) - 1);
+    identity->canon_id[sizeof(identity->canon_id) - 1] = '\0';
+    strncpy(identity->display_name, cred->display_name,
+            sizeof(identity->display_name) - 1);
+    identity->display_name[sizeof(identity->display_name) - 1] = '\0';
+} /* chimera_s3_fill_identity */
+
 static enum chimera_s3_auth_result
 verify_signature_v2(
-    struct chimera_s3_cred_cache *cred_cache,
-    struct evpl_http_request     *request,
-    const char                   *auth_header)
+    struct chimera_s3_cred_cache    *cred_cache,
+    struct evpl_http_request        *request,
+    const char                      *auth_header,
+    struct chimera_s3_auth_identity *identity)
 {
     char access_key[128];
     char signature[128];
@@ -495,6 +518,8 @@ verify_signature_v2(
     /* Compute HMAC-SHA1 */
     hmac_sha1((unsigned char *) cred->secret_key, strlen(cred->secret_key),
               (unsigned char *) string_to_sign, sts_len, sig_bytes);
+
+    chimera_s3_fill_identity(identity, cred);
 
     rcu_read_unlock();
 
@@ -886,9 +911,10 @@ derive_signing_key_v4(
  */
 static enum chimera_s3_auth_result
 verify_signature_v4(
-    struct chimera_s3_cred_cache *cred_cache,
-    struct evpl_http_request     *request,
-    const char                   *auth_header)
+    struct chimera_s3_cred_cache    *cred_cache,
+    struct evpl_http_request        *request,
+    const char                      *auth_header,
+    struct chimera_s3_auth_identity *identity)
 {
     const char *amz_date;
     const struct chimera_s3_cred *cred;
@@ -966,6 +992,8 @@ verify_signature_v4(
     /* Derive signing key */
     derive_signing_key_v4(cred->secret_key, date_stamp, region, service, signing_key);
 
+    chimera_s3_fill_identity(identity, cred);
+
     rcu_read_unlock();
 
     /* Calculate expected signature */
@@ -990,8 +1018,9 @@ verify_signature_v4(
 
 enum chimera_s3_auth_result
 chimera_s3_auth_verify(
-    struct chimera_s3_cred_cache *cred_cache,
-    struct evpl_http_request     *request)
+    struct chimera_s3_cred_cache    *cred_cache,
+    struct evpl_http_request        *request,
+    struct chimera_s3_auth_identity *identity)
 {
     const char *auth_header;
 
@@ -1006,10 +1035,10 @@ chimera_s3_auth_verify(
     /* Detect signature version and verify */
     if (strncmp(auth_header, "AWS4-HMAC-SHA256 ", 17) == 0) {
         /* AWS Signature Version 4 */
-        return verify_signature_v4(cred_cache, request, auth_header);
+        return verify_signature_v4(cred_cache, request, auth_header, identity);
     } else if (strncmp(auth_header, "AWS ", 4) == 0) {
         /* AWS Signature Version 2 */
-        return verify_signature_v2(cred_cache, request, auth_header);
+        return verify_signature_v2(cred_cache, request, auth_header, identity);
     } else {
         chimera_s3_debug("Unsupported auth type");
         return CHIMERA_S3_AUTH_INVALID_AUTH_HEADER;
