@@ -183,11 +183,20 @@ chimera_smb_marshal_standard_attrs(
     const struct chimera_vfs_attrs *attr,
     struct chimera_smb_attrs       *smb_attr)
 {
-    /* File size */
-    smb_attr->smb_alloc_size = attr->va_space_used;
+    /* File size.  A directory carries no data stream, so Windows reports both
+     * EndOfFile and AllocationSize as 0 for it -- in the CREATE response, the
+     * FileAllInformation/FileStandardInformation query, and directory listings
+     * alike (smb2.create.open expects out.size == 0 for a freshly-created dir).
+     * Backends store a non-zero internal directory size (e.g. memfs 4096), so
+     * normalize it here at the SMB boundary. */
+    if ((attr->va_mode & S_IFMT) == S_IFDIR) {
+        smb_attr->smb_alloc_size = 0;
+        smb_attr->smb_size       = 0;
+    } else {
+        smb_attr->smb_alloc_size = attr->va_space_used;
+        smb_attr->smb_size       = attr->va_size;
+    }
     smb_attr->smb_attr_mask |= SMB_ATTR_ALLOC_SIZE;
-
-    smb_attr->smb_size       = attr->va_size;
     smb_attr->smb_attr_mask |= SMB_ATTR_SIZE;
 
     /* Number of links */
@@ -221,8 +230,9 @@ chimera_smb_marshal_compression_attrs(
     const struct chimera_vfs_attrs *attr,
     struct chimera_smb_attrs       *smb_attr)
 {
-    /* File size for the compression info */
-    smb_attr->smb_size       = attr->va_size;
+    /* File size for the compression info (0 for a directory, as above). */
+    smb_attr->smb_size = ((attr->va_mode & S_IFMT) == S_IFDIR) ?
+        0 : attr->va_size;
     smb_attr->smb_attr_mask |= SMB_ATTR_SIZE;
 
     /* Compression (not tracked in VFS) */
