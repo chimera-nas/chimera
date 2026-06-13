@@ -60,7 +60,7 @@ make_session(
     uint64_t             clientid;
     struct nfs4_session *session;
 
-    nfs4_client_table_init(table);
+    nfs4_client_table_init(table, 1);
 
     clientid = nfs4_client_register(table, owner, (int) sizeof(owner) - 1,
                                     0xdeadbeefULL, 40, NULL, NULL);
@@ -395,7 +395,7 @@ test_implicit_session_no_slots(void)
     bool                     is_replay;
     nfsstat4                 status;
 
-    nfs4_client_table_init(&table);
+    nfs4_client_table_init(&table, 1);
     clientid = nfs4_client_register(&table, owner, (int) sizeof(owner) - 1,
                                     0xfeedfaceULL, 40, NULL, NULL);
 

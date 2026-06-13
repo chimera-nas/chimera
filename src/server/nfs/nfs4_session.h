@@ -245,16 +245,27 @@ struct nfs4_client_table {
     struct nfs4_client  *nfs4_ct_clients_by_owner;
     struct nfs4_client  *nfs4_ct_clients_by_id;
     struct nfs4_session *nfs4_ct_sessions;
+    /* Low 48 bits of the next clientid; the high 16 are this instance's node_id
+     * (see nfs4_make_clientid) so peers sharing one store never collide. */
     uint64_t             nfs4_ct_next_client_id;
+    uint16_t             nfs4_ct_node_id;
     /* Monotonic source for SETCLIENTID setclientid_confirm verifiers; every
      * value handed out is unique for the life of the table. */
     uint64_t             nfs4_ct_next_confirm;
     pthread_mutex_t      nfs4_ct_lock;
 };
 
+/* A clientid carries the minting instance's node_id in its high 16 bits and a
+ * per-instance counter in the low 48, so two instances over one backing store
+ * never hand out the same value (and `clientid >> 48` is the owning node). */
+#define NFS4_CLIENTID_COUNTER_MASK 0xFFFFFFFFFFFFULL
+#define nfs4_make_clientid(node_id, counter) \
+        (((uint64_t) (node_id) << 48) | ((counter)&NFS4_CLIENTID_COUNTER_MASK))
+
 void
 nfs4_client_table_init(
-    struct nfs4_client_table *table);
+    struct nfs4_client_table *table,
+    uint16_t                  node_id);
 
 void
 nfs4_client_table_free(

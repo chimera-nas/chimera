@@ -6,6 +6,7 @@
 #include "nfs4_session.h"
 #include "nfs4_state.h"
 #include "nfs4_callback.h"
+#include "nfs4_drc.h"
 #include "evpl/evpl_rpc2.h"
 
 /*
@@ -47,8 +48,13 @@ chimera_nfs4_bind_conn_to_session(
     session = nfs4_session_lookup(&thread->shared->nfs4_shared_clients,
                                   args->bctsa_sessid);
     if (!session) {
-        res->bctsr_status = NFS4ERR_BADSESSION;
-        chimera_nfs4_compound_complete(req, NFS4ERR_BADSESSION);
+        /* Lazily reconstruct a failed-over client's session from the shared KV
+         * store (NFS4ERR_DELAY = retry shortly); see nfs4_proc_sequence.c. */
+        nfsstat4 hs = (nfs4_drc_session_hydrate(thread, args->bctsa_sessid) ==
+                       NFS4_DRC_HYDRATE_INFLIGHT) ? NFS4ERR_DELAY
+                                                  : NFS4ERR_BADSESSION;
+        res->bctsr_status = hs;
+        chimera_nfs4_compound_complete(req, hs);
         return;
     }
 

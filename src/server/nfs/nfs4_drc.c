@@ -325,7 +325,7 @@ nfs4_drc_forget_scan_cb(
     (void) value_len;
 
     /* Stop once we leave this session's reply entries (keys are ordered:
-     * header(3) + sessionid(16) + slot + seqid). */
+     * hdr(3) + sessionid(16) + slot + seqid). */
     if (key_len < CHIMERA_KV_HDR_LEN + NFS4_SESSIONID_SIZE ||
         memcmp((const uint8_t *) key + CHIMERA_KV_HDR_LEN,
                ctx->sessionid, NFS4_SESSIONID_SIZE) != 0) {
@@ -455,9 +455,16 @@ nfs4_drc_ensure_client(
     HASH_ADD(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
              nfs4_client_id, sizeof(client->nfs4_client_id), client);
 
-    /* Keep the id allocator ahead of every restored clientid. */
-    if (table->nfs4_ct_next_client_id <= client_id) {
-        table->nfs4_ct_next_client_id = client_id + 1;
+    /* Keep the id allocator ahead of every restored clientid.  The low 48 bits
+     * are the per-instance counter (the high 16 are this node's node_id), and
+     * next_client_id holds just that counter -- so compare/advance on the low
+     * bits, not the whole 64-bit value. */
+    {
+        uint64_t counter = client_id & NFS4_CLIENTID_COUNTER_MASK;
+
+        if (table->nfs4_ct_next_client_id <= counter) {
+            table->nfs4_ct_next_client_id = counter + 1;
+        }
     }
 
     pthread_mutex_unlock(&table->nfs4_ct_lock);
@@ -517,139 +524,227 @@ nfs4_drc_repopulate_slot(
                           memory_order_release);
 } /* nfs4_drc_repopulate_slot */
 
-struct nfs4_drc_reload_ctx {
+/* ------------------------------------------------------------------ *
+ *  lazy per-session hydrate                                          *
+ * ------------------------------------------------------------------ *
+ *
+ * A 4.1 session's metadata + reply slots are keyed by its (globally unique)
+ * sessionid, with no node_id, so they survive a client failing over to a
+ * different node.  Rather than bulk-reload every session at boot (which would
+ * reconstruct sessions that may never reconnect, and is wrong when the session
+ * belongs to a still-live peer), each node reconstructs a session lazily, the
+ * first time a client presents an unknown sessionid here (SEQUENCE /
+ * BIND_CONN_TO_SESSION).  The caller holds the client off with NFS4ERR_DELAY
+ * until the async KV scan settles, then the retry finds the live session.
+ *
+ * The hydra set deduplicates concurrent first-contacts on the same sessionid
+ * (so two threads never double-reconstruct) and negatively caches a genuinely
+ * unknown sessionid (so a bad id is not rescanned on every retry).
+ */
+
+enum {
+    NFS4_DRC_HYDRA_INFLIGHT = 0, /* KV scan in progress -> reply DELAY        */
+    NFS4_DRC_HYDRA_DONE     = 1, /* scan settled; if still not live -> ABSENT */
+};
+
+struct nfs4_drc_hydra {
+    uint8_t        sessionid[NFS4_SESSIONID_SIZE];
+    uint8_t        state;
+    UT_hash_handle hh;
+};
+
+void
+nfs4_drc_hydra_init(struct chimera_server_nfs_shared *shared)
+{
+    pthread_mutex_init(&shared->nfs4_drc_hydra_lock, NULL);
+    shared->nfs4_drc_hydra = NULL;
+} /* nfs4_drc_hydra_init */
+
+void
+nfs4_drc_hydra_destroy(struct chimera_server_nfs_shared *shared)
+{
+#ifndef __clang_analyzer__ /* HASH_ITER trips the analyzer's alias checker */
+    struct nfs4_drc_hydra *h, *tmp;
+
+    HASH_ITER(hh, shared->nfs4_drc_hydra, h, tmp)
+    {
+        HASH_DEL(shared->nfs4_drc_hydra, h);
+        free(h);
+    }
+#endif /* ifndef __clang_analyzer__ */
+    pthread_mutex_destroy(&shared->nfs4_drc_hydra_lock);
+} /* nfs4_drc_hydra_destroy */
+
+struct nfs4_drc_hydrate_ctx {
     struct chimera_server_nfs_thread *thread;
-    nfs4_drc_reload_done_t            done;
-    void                             *done_arg;
-    uint8_t                           start[CHIMERA_KV_HDR_LEN];
+    uint8_t                           sessionid[NFS4_SESSIONID_SIZE];
+    uint8_t                           sstart[CHIMERA_KV_SESSION_KEY_LEN];
+    uint8_t                           rstart[CHIMERA_KV_REPLY_KEY_LEN];
+    bool                              found;
+    uint32_t                          nreplies;
 };
 
 static int
-nfs4_drc_session_scan_cb(
+nfs4_drc_hydrate_session_cb(
     const void *key,
     uint32_t    key_len,
     const void *value,
     uint32_t    value_len,
     void       *private_data)
 {
-    struct nfs4_drc_reload_ctx       *ctx    = private_data;
+    struct nfs4_drc_hydrate_ctx      *ctx    = private_data;
     struct chimera_server_nfs_thread *thread = ctx->thread;
     struct nfs4_client_table         *table  = &thread->shared->nfs4_shared_clients;
-    const uint8_t                    *sessionid;
     struct nfs4_drc_session_record    rec;
 
-    if (key_len < CHIMERA_KV_HDR_LEN + NFS4_SESSIONID_SIZE ||
-        memcmp(key, ctx->start, CHIMERA_KV_HDR_LEN) != 0) {
-        return 1;  /* left the session band */
+    if (key_len < CHIMERA_KV_SESSION_PREFIX_LEN ||
+        memcmp((const uint8_t *) key + CHIMERA_KV_HDR_LEN, ctx->sessionid,
+               NFS4_SESSIONID_SIZE) != 0) {
+        return 1;  /* past this session's metadata record */
     }
     if (nfs4_drc_session_deserialize(value, value_len, &rec) != 0) {
         return 0;  /* skip a corrupt record */
     }
 
-    sessionid = (const uint8_t *) key + CHIMERA_KV_HDR_LEN;
-
-    nfs4_drc_reconstruct_session(table, sessionid, &rec,
+    nfs4_drc_reconstruct_session(table, ctx->sessionid, &rec,
                                  thread->shared->nfs4_recovery.current_boot_id);
-
+    ctx->found = true;
     return 0;
-} /* nfs4_drc_session_scan_cb */
+} /* nfs4_drc_hydrate_session_cb */
 
 static int
-nfs4_drc_reply_scan_cb(
+nfs4_drc_hydrate_reply_cb(
     const void *key,
     uint32_t    key_len,
     const void *value,
     uint32_t    value_len,
     void       *private_data)
 {
-    struct nfs4_drc_reload_ctx       *ctx    = private_data;
+    struct nfs4_drc_hydrate_ctx      *ctx    = private_data;
     struct chimera_server_nfs_thread *thread = ctx->thread;
     const uint8_t                    *k      = key;
-    const uint8_t                    *sessionid;
     const uint8_t                    *cached_data;
     struct nfs4_session              *session;
     uint32_t                          slotid, seqid, cached_len;
 
     if (key_len < CHIMERA_KV_REPLY_KEY_LEN ||
-        memcmp(key, ctx->start, CHIMERA_KV_HDR_LEN) != 0) {
-        return 1;  /* left the reply band */
+        memcmp(k + CHIMERA_KV_HDR_LEN, ctx->sessionid,
+               NFS4_SESSIONID_SIZE) != 0) {
+        return 1;  /* past this session's reply band */
     }
     if (nfs4_drc_reply_parse(value, value_len, &seqid, &cached_data,
                              &cached_len) != 0) {
         return 0;
     }
 
-    sessionid = k + CHIMERA_KV_HDR_LEN;
-    slotid    = nfs_kv_le32(k + CHIMERA_KV_HDR_LEN + NFS4_SESSIONID_SIZE);
+    slotid = nfs_kv_le32(k + CHIMERA_KV_HDR_LEN + NFS4_SESSIONID_SIZE);
 
-    session = nfs4_session_lookup(&thread->shared->nfs4_shared_clients, sessionid);
+    session = nfs4_session_lookup(&thread->shared->nfs4_shared_clients,
+                                  ctx->sessionid);
     if (!session) {
-        /* Orphan (its session was destroyed before the restart): drop it. */
-        nfs4_drc_delete_reply(thread->vfs_thread, sessionid, slotid, seqid);
+        /* Orphan (no session record reconstructed): drop it. */
+        nfs4_drc_delete_reply(thread->vfs_thread, ctx->sessionid, slotid, seqid);
         return 0;
     }
 
     nfs4_drc_repopulate_slot(session, slotid, seqid, cached_data, cached_len);
+    ctx->nreplies++;
 
     nfs4_session_put(session);
     return 0;
-} /* nfs4_drc_reply_scan_cb */
+} /* nfs4_drc_hydrate_reply_cb */
 
 static void
-nfs4_drc_reply_complete(
+nfs4_drc_hydrate_reply_complete(
     enum chimera_vfs_error error_code,
     void                  *private_data)
 {
-    struct nfs4_drc_reload_ctx *ctx = private_data;
+    struct nfs4_drc_hydrate_ctx      *ctx    = private_data;
+    struct chimera_server_nfs_shared *shared = ctx->thread->shared;
+    struct nfs4_drc_hydra            *h;
 
     (void) error_code;
 
-    /* Reconstruction (sessions + clients + slot caches) is now complete. */
-    if (ctx->done) {
-        ctx->done(ctx->done_arg);
+    /* Reconstruction settled: flip the hydra entry to DONE so a retry that
+     * still cannot find the session in memory resolves to ABSENT (not a
+     * perpetual DELAY) and a bad sessionid is not rescanned. */
+    pthread_mutex_lock(&shared->nfs4_drc_hydra_lock);
+    HASH_FIND(hh, shared->nfs4_drc_hydra, ctx->sessionid, NFS4_SESSIONID_SIZE, h);
+    if (h) {
+        h->state = NFS4_DRC_HYDRA_DONE;
+    }
+    pthread_mutex_unlock(&shared->nfs4_drc_hydra_lock);
+
+    if (ctx->found) {
+        chimera_nfs_info("NFS4.1 DRC: hydrated session + %u reply record(s) "
+                         "for a returning client", ctx->nreplies);
     }
     free(ctx);
-} /* nfs4_drc_reply_complete */
+} /* nfs4_drc_hydrate_reply_complete */
 
 static void
-nfs4_drc_session_complete(
+nfs4_drc_hydrate_session_complete(
     enum chimera_vfs_error error_code,
     void                  *private_data)
 {
-    struct nfs4_drc_reload_ctx *ctx = private_data;
+    struct nfs4_drc_hydrate_ctx *ctx = private_data;
 
     (void) error_code;
 
-    /* Sessions (and their clients) are in place; now repopulate slot caches.
-     * No end key + flags 0 -- key-ordered results, callback stops when the
-     * 3-byte type header changes. */
-    nfs_kv_type_prefix(ctx->start, CHIMERA_KV_TYPE_NFS4_REPLY);
+    /* Session (and its client) are in place; now repopulate its reply slots.
+     * The [hdr] + sessionid prefix selects exactly this session's reply band;
+     * the callback stops once a key leaves it. */
+    nfs_kv_reply_key(ctx->rstart, ctx->sessionid, 0, 0);
     chimera_vfs_search_keys(ctx->thread->vfs_thread,
-                            ctx->start, CHIMERA_KV_HDR_LEN,
+                            ctx->rstart, CHIMERA_KV_REPLY_KEY_LEN,
                             NULL, 0, 0,
-                            nfs4_drc_reply_scan_cb,
-                            nfs4_drc_reply_complete, ctx);
-} /* nfs4_drc_session_complete */
+                            nfs4_drc_hydrate_reply_cb,
+                            nfs4_drc_hydrate_reply_complete, ctx);
+} /* nfs4_drc_hydrate_session_complete */
 
-void
-nfs4_drc_reload(
+enum nfs4_drc_hydrate_result
+nfs4_drc_session_hydrate(
     struct chimera_server_nfs_thread *thread,
-    nfs4_drc_reload_done_t            done,
-    void                             *done_arg)
+    const uint8_t                    *sessionid)
 {
-    struct nfs4_drc_reload_ctx *ctx = malloc(sizeof(*ctx));
+    struct chimera_server_nfs_shared *shared = thread->shared;
+    struct nfs_recovery              *rec    = &shared->nfs4_recovery;
+    struct nfs4_drc_hydra            *h;
+    struct nfs4_drc_hydrate_ctx      *ctx;
 
-    ctx->thread   = thread;
-    ctx->done     = done;
-    ctx->done_arg = done_arg;
+    /* Nothing is persisted unless the 4.1 reply cache is on and the backend is
+     * durable -- an unknown session is then simply unknown. */
+    if (!rec->nfs4_drc || rec->persistence_disabled) {
+        return NFS4_DRC_HYDRATE_ABSENT;
+    }
 
-    /* Reconstruct sessions + clients first, then their reply slots.  No end
-     * key + flags 0 -- key-ordered results, callback stops when the 3-byte
-     * type header changes. */
-    nfs_kv_type_prefix(ctx->start, CHIMERA_KV_TYPE_NFS4_SESSION);
+    pthread_mutex_lock(&shared->nfs4_drc_hydra_lock);
+    HASH_FIND(hh, shared->nfs4_drc_hydra, sessionid, NFS4_SESSIONID_SIZE, h);
+    if (h) {
+        enum nfs4_drc_hydrate_result r =
+            (h->state == NFS4_DRC_HYDRA_DONE) ? NFS4_DRC_HYDRATE_ABSENT
+                                              : NFS4_DRC_HYDRATE_INFLIGHT;
+        pthread_mutex_unlock(&shared->nfs4_drc_hydra_lock);
+        return r;
+    }
+    h = calloc(1, sizeof(*h));
+    memcpy(h->sessionid, sessionid, NFS4_SESSIONID_SIZE);
+    h->state = NFS4_DRC_HYDRA_INFLIGHT;
+    HASH_ADD(hh, shared->nfs4_drc_hydra, sessionid, NFS4_SESSIONID_SIZE, h);
+    pthread_mutex_unlock(&shared->nfs4_drc_hydra_lock);
+
+    /* First contact for this sessionid: scan its band out of the KV store.
+     * Phase 1 reconstructs the session (+ client); phase 2 repopulates its
+     * reply slots; then the hydra entry flips to DONE. */
+    ctx         = calloc(1, sizeof(*ctx));
+    ctx->thread = thread;
+    memcpy(ctx->sessionid, sessionid, NFS4_SESSIONID_SIZE);
+    nfs_kv_session_key(ctx->sstart, sessionid);
+
     chimera_vfs_search_keys(thread->vfs_thread,
-                            ctx->start, CHIMERA_KV_HDR_LEN,
+                            ctx->sstart, CHIMERA_KV_SESSION_KEY_LEN,
                             NULL, 0, 0,
-                            nfs4_drc_session_scan_cb,
-                            nfs4_drc_session_complete, ctx);
-} /* nfs4_drc_reload */
+                            nfs4_drc_hydrate_session_cb,
+                            nfs4_drc_hydrate_session_complete, ctx);
+    return NFS4_DRC_HYDRATE_INFLIGHT;
+} /* nfs4_drc_session_hydrate */

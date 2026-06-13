@@ -18,6 +18,9 @@
 #include "nfs_internal.h"
 #include "nfs4_session.h"
 #include "nfs4_lease.h"
+#include "nfs4_v40_drc.h"
+#include "nfs4_drc.h"
+#include "nfs_kv_keys.h"
 #include "nfs4_callback.h"
 #include "nfs_nlm.h"
 #include "nfs_nsm.h"
@@ -32,49 +35,6 @@
 #define NFS_PROGIDX_V4         3
 #define NFS_PROGIDX_V4_CB      4
 #define NFS_PROGIDX_MAX        5
-
-static void
-nfs4_v40_drc_init(struct nfs4_v40_drc *drc)
-{
-    pthread_mutex_init(&drc->lock, NULL);
-} /* nfs4_v40_drc_init */
-
-static void
-nfs4_v40_drc_destroy(struct nfs4_v40_drc *drc)
-{
-    pthread_mutex_lock(&drc->lock);
-    for (uint32_t i = 0; i < NFS4_V40_DRC_SLOTS; i++) {
-        struct nfs4_v40_drc_entry *entry = &drc->entries[i];
-
-        free(entry->buf);
-        entry->buf   = NULL;
-        entry->len   = 0;
-        entry->valid = 0;
-    }
-    drc->bytes = 0;
-    pthread_mutex_unlock(&drc->lock);
-    pthread_mutex_destroy(&drc->lock);
-} /* nfs4_v40_drc_destroy */
-
-static void
-nfs4_v40_drc_remove_conn(
-    struct nfs4_v40_drc   *drc,
-    struct evpl_rpc2_conn *conn)
-{
-    pthread_mutex_lock(&drc->lock);
-    for (uint32_t i = 0; i < NFS4_V40_DRC_SLOTS; i++) {
-        struct nfs4_v40_drc_entry *entry = &drc->entries[i];
-
-        if (entry->valid && entry->conn == conn) {
-            drc->bytes -= entry->len;
-            free(entry->buf);
-            entry->buf   = NULL;
-            entry->len   = 0;
-            entry->valid = 0;
-        }
-    }
-    pthread_mutex_unlock(&drc->lock);
-} /* nfs4_v40_drc_remove_conn */
 
 static void
 chimera_nfs_init_metrics(
@@ -149,6 +109,29 @@ nfs_server_init(
     }
 
     shared->vfs = vfs;
+
+    /* Resolve this instance's node_id: explicit server.nfs4_node_id wins; else
+     * derive a stable id from the machine name (hostname + /etc/machine-id),
+     * folded into 1..0xFFFE.  This namespaces every persisted KV record plus the
+     * clientid and stateid epoch, so N instances sharing one backing store never
+     * collide and each reloads only its own state. */
+    {
+        int cfg_node = chimera_server_config_get_nfs4_node_id(config);
+
+        if (cfg_node > 0 && cfg_node < 0xFFFF) {
+            shared->node_id = (uint16_t) cfg_node;
+        } else {
+            uint32_t h = 2166136261u; /* FNV-1a/32 over the machine name */
+
+            for (int i = 0; i < vfs->machine_name_len; i++) {
+                h ^= (uint8_t) vfs->machine_name[i];
+                h *= 16777619u;
+            }
+            shared->node_id = (uint16_t) ((h % 0xFFFEu) + 1u);
+        }
+        chimera_nfs_info("NFSv4 server node_id=%u (%s)", shared->node_id,
+                         (cfg_node > 0) ? "configured" : "derived from machine name");
+    }
 
     shared->nfs_verifier = now.tv_sec * 1000000000ULL + now.tv_nsec;
 
@@ -294,17 +277,22 @@ nfs_server_init(
     shared->nsm_v1.recv_call_SM_SIMU_CRASH = chimera_nfs_sm_simu_crash;
     shared->nsm_v1.recv_call_SM_NOTIFY     = chimera_nfs_sm_notify;
 
-    nfs4_client_table_init(&shared->nfs4_shared_clients);
-    nfs_state_table_init(&shared->nfs4_state_table);
+    nfs4_client_table_init(&shared->nfs4_shared_clients, shared->node_id);
+    nfs_state_table_init(&shared->nfs4_state_table, shared->node_id);
     nfs_layout_table_init(&shared->nfs4_layout_table);
-    nfs4_v40_drc_init(&shared->v40_drc);
-    nfs3_drc_init(&shared->nfs3_drc);
+    nfs3_drc_init(&shared->nfs3_drc, CHIMERA_KV_TYPE_NFS3_REPLY);
+    nfs3_drc_init(&shared->v40_drc, CHIMERA_KV_TYPE_NFS4_V40_REPLY);
+    nfs4_drc_hydra_init(shared);
     /* The NFSv3 duplicate-request cache wraps the NFS_V3 call dispatcher; only
      * install the wrapper when enabled so a disabled server keeps the direct
      * (zero-overhead) path. */
     if (chimera_server_config_get_nfs3_drc(config)) {
         nfs3_drc_install(shared);
     }
+    /* The NFSv4.0 reply cache is always installed (its in-memory cache fixes
+     * replay across a client's reconnect regardless of persistence); KV
+     * persistence is gated by nfs4_drc inside the install. */
+    nfs4_v40_drc_install(shared, chimera_server_config_get_nfs4_drc(config));
     pthread_mutex_init(&shared->nfs4_pnfs_devcache.lock, NULL);
     shared->nfs4_pnfs_devcache.count = 0;
 
@@ -322,6 +310,7 @@ nfs_server_init(
      * the kickoff forces the window open while the scan is in flight. */
     nfs_recovery_load(&shared->nfs4_recovery,
                       shared->vfs,
+                      shared->node_id,
                       shared->nfs_grace_time_s,
                       chimera_server_config_get_nfs4_drc(config));
     nfs_recovery_begin_grace(&shared->nfs4_recovery,
@@ -626,8 +615,9 @@ nfs_server_destroy(void *data)
         shared->nsm_state.notify_thread = NULL;
     }
     nsm_state_destroy(&shared->nsm_state);
-    nfs4_v40_drc_destroy(&shared->v40_drc);
+    nfs3_drc_destroy(&shared->v40_drc);
     nfs3_drc_destroy(&shared->nfs3_drc);
+    nfs4_drc_hydra_destroy(shared);
 
     free(shared);
 } /* nfs_server_destroy */
@@ -657,8 +647,6 @@ chimera_nfs_server_notify(
             evpl_rpc2_conn_get_local_address(conn, local_addr, sizeof(local_addr));
             evpl_rpc2_conn_get_remote_address(conn, remote_addr, sizeof(remote_addr));
             chimera_nfs_debug("Client disconnected from %s to %s", remote_addr, local_addr);
-
-            nfs4_v40_drc_remove_conn(&shared->v40_drc, conn);
 
             priv = evpl_rpc2_conn_get_private_data(conn);
             if (!priv) {

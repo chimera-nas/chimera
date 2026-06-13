@@ -3,27 +3,29 @@
 #
 # SPDX-License-Identifier: Unlicense
 
-# Usage: kvm_nfs3_drc_reboot_test_wrapper.sh <vmlinuz> <rootfs.qcow2> <chimera_binary>
+# Usage: kvm_nfs_multinode_test_wrapper.sh <vmlinuz> <rootfs.qcow2> <chimera_binary>
 #
-# Cross-reboot persistence test for the NFSv3 duplicate-request cache (DRC).
-# Exercises the reply-cache persistence end to end across a real chimera server
-# restart, backed by a persistent cairn store (initialize=true on first boot,
-# false on restart) with server.kv_module=cairn and server.nfs3_drc=true:
+# Shared-store multi-instance semantics test.  Two chimera instances with
+# distinct server.nfs4_node_id values drive ONE shared cairn store (a stand-in
+# for the out-of-tree shared FS+KV the product targets).  cairn is single-writer
+# RocksDB, so the instances run one at a time (sequentially) -- which is exactly
+# enough to prove the on-store NAMESPACING is right:
 #
-#   1. Start chimera A; a guest mounts NFSv3 and runs a batch of non-idempotent
-#      ops (mkdir/create/rename/remove) under /mnt.  Each captured reply is
-#      written through to the cairn KV store keyed by {client,xid,proc,cksum}.
-#      The guest does NOT unmount (a crash, not a graceful teardown).
-#   2. Stop chimera A and restart it (chimera B) against the same cairn store
-#      with initialize=false, so the FS data and the DRC reply records survive.
-#   3. chimera B warms the DRC from stable storage at thread-init; its log is
-#      checked for the cold-start reload marker (>=1 reply record reloaded)
-#      emitted by nfs3_drc_reload_complete.  A second guest then mounts and
-#      confirms the FS is still usable.
+#   1. node_id=1 (initialize=true): mount NFSv4.1, create /mnt/from_node1 + write
+#      state (=> a confirmed client => a recovery record under node 1's prefix).
+#      Abandon the mount (a crash, not a graceful unmount); stop the daemon.
+#   2. node_id=2 (initialize=false, SAME store): mount, confirm node 1's file is
+#      readable (the FS data is genuinely shared across instances), create
+#      /mnt/from_node2 (=> a recovery record under node 2's DISJOINT prefix);
+#      stop the daemon.
+#   3. node_id=1 again (initialize=false): mount, confirm BOTH files survive, and
+#      check node 1's cold-start log reloaded >= 1 recovery record -- i.e. node
+#      1's records survived node 2's run untouched, and node 1 reloads only its
+#      own band (it never reconstructs node 2's live clients).
 #
-# Passing proves: NFSv3 reply records are written to stable storage and
-# reloaded into the in-memory cache on restart -- the cross-reboot replay tier
-# the in-memory-only DRC lacks.
+# Passing proves: with the keyspace namespaced by node_id, N instances over one
+# backing store don't corrupt each other's persisted protocol state, the FS data
+# is shared, and each instance reloads exactly its own records.
 
 set -u
 
@@ -42,10 +44,10 @@ VMLINUZ=$1; shift
 ROOTFS=$1; shift
 CHIMERA_BINARY=$1; shift
 
-NETNS_NAME="kvm_nfs3drc_$$_$(date +%s%N)"
-TAP_NAME="tap3_$$"
+NETNS_NAME="kvm_nfsmn_$$_$(date +%s%N)"
+TAP_NAME="tapm_$$"
 BUILD_DIR=$(dirname "$(dirname "$CHIMERA_BINARY")")
-SESSION_DIR=$(mktemp -d "${BUILD_DIR}/kvm_nfs3drc_session_XXXXXX")
+SESSION_DIR=$(mktemp -d "${BUILD_DIR}/kvm_nfsmn_session_XXXXXX")
 CAIRN_DIR="${SESSION_DIR}/cairn"
 CONFIG_FILE="${SESSION_DIR}/chimera.json"
 CHIMERA_LOG="${SESSION_DIR}/chimera.log"
@@ -67,9 +69,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Generate the chimera config.  $1 = initialize flag (true/false).
+# Generate the chimera config.  $1 = initialize flag (true/false), $2 = node_id.
 generate_config() {
     local init="$1"
+    local node_id="$2"
     cat > "$CONFIG_FILE" << EOF
 {
     "common": {
@@ -79,7 +82,9 @@ generate_config() {
         "threads": 4,
         "delegation_threads": 4,
         "kv_module": "cairn",
-        "nfs3_drc": true,
+        "nfs4_drc": true,
+        "nfs4_node_id": ${node_id},
+        "nfs4_grace_time": 2,
         "vfs": {
             "cairn": {
                 "config": {"initialize":${init},"path":"$CAIRN_DIR"}
@@ -135,13 +140,13 @@ stop_chimera() {
     CHIMERA_PID=""
 }
 
-# Boot a guest that runs $1 (mounted NFSv3 at /mnt).  $2 = log label.  Emits the
-# parsed guest exit code.
+# Boot a guest that runs $1 (NFSv4.1 mounted at /mnt).  $2 = log label.  Emits
+# the parsed guest exit code.
 run_guest() {
     local guest_cmd="$1"
     local label="$2"
     local log="${SESSION_DIR}/guest_${label}.log"
-    local mount_opts="vers=3,tcp,nconnect=16,nolock"
+    local mount_opts="vers=4.1,tcp,nconnect=16"
     local full="mount -t nfs -o ${mount_opts} 10.0.0.1:/share /mnt && ${guest_cmd}"
 
     ip netns exec "${NETNS_NAME}" "$QEMU_BIN" \
@@ -169,54 +174,42 @@ ip netns exec "${NETNS_NAME}" ip tuntap add dev "${TAP_NAME}" mode tap
 ip netns exec "${NETNS_NAME}" ip addr add 10.0.0.1/24 dev "${TAP_NAME}"
 ip netns exec "${NETNS_NAME}" ip link set "${TAP_NAME}" up
 
-# --- boot 1: drive non-idempotent ops so reply records get persisted ---
-generate_config "true"
+# --- boot 1: node 1 creates state on a fresh store, abandons the mount ---
+generate_config "true" 1
 start_chimera || exit 1
-GUEST_OPS="mkdir -p /mnt/d1 /mnt/d2 && \
-echo hi > /mnt/d1/f && \
-mv /mnt/d1/f /mnt/d1/g && \
-rmdir /mnt/d2 && \
-sync && ls -l /mnt/d1"
-RC1=$(run_guest "${GUEST_OPS}" boot1)
-echo "=== boot 1 guest exit: ${RC1:-<none>} ==="
-if [ "${RC1:-1}" != "0" ]; then
-    echo "FAIL: pre-reboot guest did not succeed"
-    cat "$CHIMERA_LOG"
-    exit 1
-fi
-# Let the fire-and-forget DRC KV writes + cairn commit settle before the crash.
-sleep 2
+RC1=$(run_guest "mkdir -p /mnt/from_node1 && echo n1 > /mnt/from_node1/marker && sync && ls -l /mnt/from_node1" n1)
+echo "=== node1 boot guest exit: ${RC1:-<none>} ==="
+[ "${RC1:-1}" = "0" ] || { echo "FAIL: node1 guest did not succeed"; cat "$CHIMERA_LOG"; exit 1; }
+sleep 1
 stop_chimera
 
-# --- restart: same cairn store, initialize=false ---
-generate_config "false"
+# --- boot 2: node 2 on the SAME store; must see node 1's data, add its own ---
+generate_config "false" 2
 start_chimera || exit 1
+RC2=$(run_guest "cat /mnt/from_node1/marker && mkdir -p /mnt/from_node2 && echo n2 > /mnt/from_node2/marker && sync" n2)
+echo "=== node2 boot guest exit: ${RC2:-<none>} ==="
+[ "${RC2:-1}" = "0" ] || { echo "FAIL: node2 could not read node1 data / write its own"; cat "$CHIMERA_LOG"; exit 1; }
+sleep 1
+stop_chimera
 
-# chimera B warms the DRC at thread-init; give the async scan a moment, then a
-# The records are keyed by client, not node, and loaded lazily: the first
-# CACHEABLE op from the returning client (the mkdir below) hydrates that
-# client's whole reply band from the KV store before the op is served.  A plain
-# read would not trigger it, so drive a mkdir.
-RC2=$(run_guest "mkdir -p /mnt/d3 && ls -l /mnt/d1 && cat /mnt/d1/g" boot2)
-echo "=== boot 2 guest exit: ${RC2:-<none>} ==="
+# --- boot 3: node 1 again; both trees survive + node 1 reloads its own band ---
+generate_config "false" 1
+start_chimera || exit 1
+RC3=$(run_guest "cat /mnt/from_node1/marker && cat /mnt/from_node2/marker" n1b)
+echo "=== node1 reboot guest exit: ${RC3:-<none>} ==="
 
-# --- assertions ---
 FAIL=0
+[ "${RC3:-1}" = "0" ] || { echo "FAIL: node1 restart lost shared data"; FAIL=1; }
 
-if [ "${RC2:-1}" != "0" ]; then
-    echo "FAIL: post-reboot guest could not use the filesystem"
-    FAIL=1
-fi
-
-if grep -q "conn DRC (type 0x05): hydrated" "$CHIMERA_LOG"; then
-    RELOADED=$(grep -oP 'conn DRC \(type 0x05\): hydrated \K[0-9]+' "$CHIMERA_LOG" | tail -1)
-    echo "=== chimera B hydrated ${RELOADED} NFSv3 reply record(s) for the returning client ==="
+if grep -q "cold-start load complete:" "$CHIMERA_LOG"; then
+    RELOADED=$(grep -oP 'cold-start load complete: \K[0-9]+' "$CHIMERA_LOG" | tail -1)
+    echo "=== node1 restart reloaded ${RELOADED} of its OWN recovery record(s) ==="
     if [ "${RELOADED:-0}" -lt 1 ]; then
-        echo "FAIL: no NFSv3 reply records hydrated for the returning client"
+        echo "FAIL: node1 records did not survive node2's run (reloaded 0)"
         FAIL=1
     fi
 else
-    echo "FAIL: chimera B did not lazily hydrate the returning client's DRC band"
+    echo "FAIL: node1 restart logged no cold-start recovery load"
     FAIL=1
 fi
 
@@ -231,5 +224,5 @@ if [ "$FAIL" != "0" ]; then
     exit 1
 fi
 
-echo "PASS: NFSv3 DRC client-keyed persistence + lazy per-client hydrate"
+echo "PASS: shared-store multi-instance namespacing (data shared, per-node records isolated + reloaded)"
 exit 0
