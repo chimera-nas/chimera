@@ -1133,17 +1133,23 @@ macro(add_pjd_test path backend)
         set_tests_properties(chimera/posix/pjd/${path}/${backend} PROPERTIES
             ENVIRONMENT "TEST_FILE=${_pjd_tf}"
             SKIP_RETURN_CODE 77)
+        # Track pjd tests so they can be labelled as their own CI shard
+        # (LABELS pjdfstest) and kept out of the broader 'posix' label.
+        list(APPEND _pjd_test_names chimera/posix/pjd/${path}/${backend})
     endif()
 endmacro()
 
+set(_pjd_test_names "")
 foreach(t ${PJD_TESTS})
     add_pjd_testprog(${t})
     add_pjd_test(${t} memfs)
 endforeach()
 
-# Tag every test registered above with the 'posix' label so the whole suite can
-# be run independently via `ctest -L posix`.  Collected from the directory TESTS
-# property rather than per-add_test so new tests are covered automatically.
+# Tag the non-pjd tests with the 'posix' label so that suite can be run
+# independently via `ctest -L posix`.  The pjdfstest ports are tagged separately
+# with 'pjdfstest' so they run as their own CI shard (alongside pynfs, s3, etc.)
+# instead of riding along in the broad posix-client shard.  Both are collected
+# from the directory TESTS property so new tests are covered automatically.
 #
 # Additionally tag each test with the VFS backend encoded in its name so an
 # entire backend can be run across every suite via e.g. `ctest -L linux`.  The
@@ -1153,8 +1159,12 @@ endforeach()
 # only the suite label.
 get_property(_posix_tests DIRECTORY PROPERTY TESTS)
 if(_posix_tests)
-    set_property(TEST ${_posix_tests} APPEND PROPERTY LABELS posix)
     foreach(_t IN LISTS _posix_tests)
+        if(_t IN_LIST _pjd_test_names)
+            set_property(TEST ${_t} APPEND PROPERTY LABELS pjdfstest)
+        else()
+            set_property(TEST ${_t} APPEND PROPERTY LABELS posix)
+        endif()
         foreach(_be diskfs_io_uring diskfs_aio io_uring memfs linux cairn)
             if(_t MATCHES "_${_be}($|_)")
                 set_property(TEST ${_t} APPEND PROPERTY LABELS ${_be})
