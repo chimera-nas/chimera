@@ -157,6 +157,26 @@ struct chimera_smb_client_open {
     uint8_t                           is_directory;
 };
 
+/* A network-open-information block (CREATE/CLOSE/QUERY_INFO embed it). */
+struct smb_open_info {
+    uint64_t crttime, atime, mtime, ctime;
+    uint64_t alloc_size, end_of_file;
+    uint32_t file_attributes;
+};
+
+/* Parsed SMB2 CREATE response: FileId + create action + embedded attrs. */
+struct smb_create_result {
+    struct chimera_smb_client_file_id file_id;
+    uint32_t                          create_action;
+    struct smb_open_info              info;
+};
+
+/* Transient per-op state kept in request->plugin_data across a CREATE -> ... ->
+ * CLOSE chain (ops that open a path transiently: lookup/mkdir/remove/rename). */
+struct chimera_smb_op_state {
+    struct chimera_smb_client_file_id file_id;
+};
+
 /* The continuation invoked when the reply for a specific message_id arrives.
 * `body` is positioned at the SMB2 body (consumed == sizeof(smb2_header)). */
 typedef void (*chimera_smb_client_reply_cb)(
@@ -439,6 +459,72 @@ void chimera_smb_client_read(
 void chimera_smb_client_write(
     struct chimera_smb_client_conn *conn,
     struct chimera_vfs_request     *request);
+void chimera_smb_client_read(
+    struct chimera_smb_client_conn *conn,
+    struct chimera_vfs_request     *request);
+void chimera_smb_client_write(
+    struct chimera_smb_client_conn *conn,
+    struct chimera_vfs_request     *request);
 void chimera_smb_client_readdir(
     struct chimera_smb_client_conn *conn,
     struct chimera_vfs_request     *request);
+void chimera_smb_client_rename_at(
+    struct chimera_smb_client_conn *conn,
+    struct chimera_vfs_request     *request);
+void chimera_smb_client_symlink_at(
+    struct chimera_smb_client_conn *conn,
+    struct chimera_vfs_request     *request);
+void chimera_smb_client_mknod_at(
+    struct chimera_smb_client_conn *conn,
+    struct chimera_vfs_request     *request);
+
+/* ---- shared op helpers (smb_ops.c) ------------------------------------- */
+
+/* Encode a mount-relative path as UTF-16LE (with '/'->'\\'); returns byte len. */
+size_t smb_utf16le_encode(
+    const char *s,
+    int         len,
+    uint8_t    *out);
+
+/* Parse a FileNetworkOpenInformation block from `body` at the cursor. */
+void smb_parse_open_info(
+    struct evpl_iovec_cursor *body,
+    struct smb_open_info     *r);
+
+/* Parse an SMB2 CREATE response body (after the SMB2 header). */
+void smb_parse_create_reply(
+    struct evpl_iovec_cursor *body,
+    struct smb_create_result *r);
+
+/* Fill `attr` from SMB attrs; stamps cred as owner + a stable inode number. */
+void smb_apply_attrs(
+    const struct chimera_vfs_request *request,
+    struct chimera_vfs_attrs         *attr,
+    const struct smb_open_info       *info,
+    uint64_t                          ino);
+
+/* Send an SMB2 CREATE on `path` (full mount-relative path; "" for the root). */
+void smb_send_create(
+    struct chimera_smb_client_conn *conn,
+    struct chimera_vfs_request     *request,
+    const char                     *path,
+    int                             path_len,
+    uint32_t                        desired_access,
+    uint32_t                        share_access,
+    uint32_t                        disposition,
+    uint32_t                        options,
+    chimera_smb_client_reply_cb     reply_cb);
+
+/* Send an SMB2 CLOSE for `file_id`. */
+void smb_send_close(
+    struct chimera_smb_client_conn          *conn,
+    struct chimera_vfs_request              *request,
+    const struct chimera_smb_client_file_id *file_id,
+    chimera_smb_client_reply_cb              reply_cb);
+
+/* Recover the per-open state (FileId + server) from a VFS open handle. */
+static inline struct chimera_smb_client_open *
+smb_handle_open_state(struct chimera_vfs_open_handle *handle)
+{
+    return handle ? (struct chimera_smb_client_open *) handle->vfs_private : NULL;
+} /* smb_handle_open_state */

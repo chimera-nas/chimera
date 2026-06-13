@@ -22,15 +22,13 @@
  * handle's vfs_private (struct chimera_smb_client_open), never from a path.
  */
 
-/* Transient per-op state kept in request->plugin_data across a CREATE -> CLOSE
- * chain (ops that open transiently). */
-struct chimera_smb_op_state {
-    struct chimera_smb_client_file_id file_id;
-};
+/* Shared op helpers (smb_send_create/close, parse, attrs, op-state struct, the
+ * network-open-info / create-result structs, and smb_handle_open_state) are
+ * declared in smb_internal.h so smb_io.c and smb_namespace.c can reuse them. */
 
 /* ---- small helpers ----------------------------------------------------- */
 
-static size_t
+size_t
 smb_utf16le_encode(
     const char *s,
     int         len,
@@ -47,14 +45,7 @@ smb_utf16le_encode(
     return (size_t) len * 2;
 } /* smb_utf16le_encode */
 
-/* A network-open-information block (CREATE/CLOSE/QUERY_INFO embed it). */
-struct smb_open_info {
-    uint64_t crttime, atime, mtime, ctime;
-    uint64_t alloc_size, end_of_file;
-    uint32_t file_attributes;
-};
-
-static void
+void
 smb_parse_open_info(
     struct evpl_iovec_cursor *body,
     struct smb_open_info     *r)
@@ -71,14 +62,7 @@ smb_parse_open_info(
     evpl_iovec_cursor_get_uint32(body, &reserved);
 } /* smb_parse_open_info */
 
-/* CREATE response: header fields, the embedded network-open-info, then FileId. */
-struct smb_create_result {
-    struct chimera_smb_client_file_id file_id;
-    uint32_t                          create_action;
-    struct smb_open_info              info;
-};
-
-static void
+void
 smb_parse_create_reply(
     struct evpl_iovec_cursor *body,
     struct smb_create_result *r)
@@ -102,7 +86,7 @@ smb_parse_create_reply(
 /* Map SMB attrs into a chimera_vfs_attrs.  SMB exposes no POSIX owner; report
  * the requesting credential as the owner (correct for a caller inspecting files
  * it created), and a caller-supplied stable inode number. */
-static void
+void
 smb_apply_attrs(
     const struct chimera_vfs_request *request,
     struct chimera_vfs_attrs         *attr,
@@ -124,7 +108,7 @@ smb_apply_attrs(
 } /* smb_apply_attrs */
 
 /* Send an SMB2 CREATE on `path` (full mount-relative path; "" for the root). */
-static void
+void
 smb_send_create(
     struct chimera_smb_client_conn *conn,
     struct chimera_vfs_request     *request,
@@ -174,7 +158,7 @@ smb_send_create(
     chimera_smb_client_pdu_finish(conn, &iov, &cursor, request, reply_cb, request);
 } /* smb_send_create */
 
-static void
+void
 smb_send_close(
     struct chimera_smb_client_conn          *conn,
     struct chimera_vfs_request              *request,
@@ -195,13 +179,6 @@ smb_send_close(
 
     chimera_smb_client_pdu_finish(conn, &iov, &cursor, request, reply_cb, request);
 } /* smb_send_close */
-
-/* Recover the open state (FileId + server) from a VFS open handle. */
-static inline struct chimera_smb_client_open *
-smb_handle_open_state(struct chimera_vfs_open_handle *handle)
-{
-    return handle ? (struct chimera_smb_client_open *) handle->vfs_private : NULL;
-} /* smb_handle_open_state */
 
 /* ---- CLOSE (VFS op) ---------------------------------------------------- */
 
@@ -771,34 +748,5 @@ chimera_smb_client_commit(
                                   chimera_smb_commit_reply, request);
 } /* chimera_smb_client_commit */
 
-/* ---- read / write / readdir (not yet implemented) ---------------------- */
-
-void
-chimera_smb_client_read(
-    struct chimera_smb_client_conn *conn,
-    struct chimera_vfs_request     *request)
-{
-    (void) conn;
-    request->status = CHIMERA_VFS_ENOTSUP;
-    request->complete(request);
-} /* chimera_smb_client_read */
-
-void
-chimera_smb_client_write(
-    struct chimera_smb_client_conn *conn,
-    struct chimera_vfs_request     *request)
-{
-    (void) conn;
-    request->status = CHIMERA_VFS_ENOTSUP;
-    request->complete(request);
-} /* chimera_smb_client_write */
-
-void
-chimera_smb_client_readdir(
-    struct chimera_smb_client_conn *conn,
-    struct chimera_vfs_request     *request)
-{
-    (void) conn;
-    request->status = CHIMERA_VFS_ENOTSUP;
-    request->complete(request);
-} /* chimera_smb_client_readdir */
+/* read / write / readdir live in smb_io.c; rename/symlink/mknod in
+ * smb_namespace.c -- they reuse the shared helpers declared in smb_internal.h. */
