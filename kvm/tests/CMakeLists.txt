@@ -179,6 +179,30 @@ set(XFSTESTS_CMD_nametest  "mkdir -p /mnt/test && cd /mnt/test && /opt/xfstests/
 set(XFSTESTS_CMD_fstest    "mkdir -p /mnt/test && /opt/xfstests/src/fstest -p /mnt/test -n 1 -f 2 -l 5 -s 65536")
 set(XFSTESTS_CMD_rewinddir "mkdir -p /mnt/test && /opt/xfstests/src/rewinddir-test /mnt/test")
 
+# Linux Test Project (LTP) scenario groups, run against the server-mounted share.
+# Matrix entries are "<group>|<space-separated NFS versions>"; <group> names a
+# runtest file shipped in the guest's /opt/ltp/runtest (>= kvm-test-base v1.3.0).
+# The filesystem-focused groups run on all four NFS versions; the large
+# general-purpose "syscalls" group runs on v3 + v4.2 only and on memfs + diskfs
+# backends only (see the registration loop) to bound CI wall-clock (expand
+# later).  Each group has a companion /opt/ltp-skip/<group>.skip allowlist baked
+# into the image listing the cases that fail/break for reasons intrinsic to NFS
+# (no local block device, local-fs-only semantics, syscalls the protocol cannot
+# express), so any remaining failure is a genuine server regression.
+set(LTP_MATRIX
+    "fs|3 4.0 4.1 4.2"
+    "dio|3 4.0 4.1 4.2"
+    "fcntl-locktests|3 4.0 4.1 4.2"
+    "fs_perms_simple|3 4.0 4.1 4.2"
+    "syscalls|3 4.2"
+)
+
+# The guest's /opt/ltp-run.sh drives the group through kirk (the LTP runner) with
+# its skip file and turns the JSON report into a pass/fail exit code -- kirk's own
+# exit status ignores test failures, so the verdict is its stats.failed/broken.
+# The "<grp>" token is substituted per matrix entry below.
+set(LTP_CMD_TEMPLATE "/opt/ltp-run.sh <grp>")
+
 foreach(image_spec ${KVM_IMAGES})
     string(REPLACE "|" ";" image_parts "${image_spec}")
     list(GET image_parts 0 IMAGE_NAME)
@@ -238,6 +262,51 @@ foreach(image_spec ${KVM_IMAGES})
                             "${XFSTESTS_CMD_${prog}}")
                 set_tests_properties(chimera/kvm/${IMAGE_NAME}/xfstests/${prog}_cairn_nfs${nfsver}
                     PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2)
+            endforeach()
+        endforeach()
+    endif()
+
+    # Linux Test Project (LTP) -- ubuntu2404 only (LTP is the heaviest suite; one
+    # image keeps CI wall-clock in check).  Reuses the plain NFS wrapper: LTP runs
+    # against the pre-mounted share at /mnt exactly like cthon/xfstests, so it
+    # needs no dedicated wrapper.  Runs on every backend (incl. cairn); the heavy
+    # syscalls group is restricted to fewer NFS versions via the matrix above.
+    if(IMAGE_NAME STREQUAL "ubuntu2404")
+        set(LTP_BACKENDS ${KVM_BACKENDS})
+        if(CAIRN_ENABLED)
+            list(APPEND LTP_BACKENDS cairn)
+        endif()
+        foreach(entry ${LTP_MATRIX})
+            string(REPLACE "|" ";" parts "${entry}")
+            list(GET parts 0 grp)
+            list(GET parts 1 vers_str)
+            string(REPLACE " " ";" vers "${vers_str}")
+            string(REPLACE "<grp>" "${grp}" ltp_cmd "${LTP_CMD_TEMPLATE}")
+            # The fs-focused groups are quick; the syscalls group runs ~1500 test
+            # binaries serially, so give it a much larger budget.  The per-test
+            # TIMEOUT property overrides ctest's global --timeout.
+            set(ltp_timeout 1200)
+            if(grp STREQUAL "syscalls")
+                set(ltp_timeout 3600)
+            endif()
+            foreach(nfsver ${vers})
+                foreach(backend ${LTP_BACKENDS})
+                    # syscalls is the heaviest group -- restrict it to memfs + the
+                    # diskfs backends (a representative in-memory + on-disk pair)
+                    # rather than every backend, to keep CI wall-clock in check.
+                    if(grp STREQUAL "syscalls" AND
+                       NOT (backend STREQUAL "memfs" OR backend MATCHES "diskfs"))
+                        continue()
+                    endif()
+                    add_test(NAME chimera/kvm/${IMAGE_NAME}/ltp/${grp}_${backend}_nfs${nfsver}
+                        COMMAND bash ${NFS_WRAPPER}
+                                ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
+                                ${CHIMERA_BINARY} ${backend} ${nfsver}
+                                "${ltp_cmd}")
+                    set_tests_properties(chimera/kvm/${IMAGE_NAME}/ltp/${grp}_${backend}_nfs${nfsver}
+                        PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2
+                                   TIMEOUT ${ltp_timeout})
+                endforeach()
             endforeach()
         endforeach()
     endif()
