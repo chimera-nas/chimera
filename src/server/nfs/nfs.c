@@ -98,7 +98,7 @@ nfs_server_init(
 {
     struct chimera_server_nfs_shared *shared;
     struct timespec                   now;
-    struct evpl_rpc2_program         *programs[3];
+    struct evpl_rpc2_program         *programs[4];
     int                               nfs_rdma;
     const char                       *nfs_rdma_hostname;
     int                               nfs_rdma_port;
@@ -156,6 +156,7 @@ nfs_server_init(
     NFS_V4_init(&shared->nfs_v4);
     NFS_V4_CB_init(&shared->nfs_v4_cb);
     NLM_V4_init(&shared->nlm_v4);
+    NFSACL_V3_init(&shared->nfsacl_v3);
 
     shared->metrics      = metrics;
     shared->op_histogram = prometheus_metrics_create_histogram_time(metrics, "chimera_nfs_op_latency_nanoseconds",
@@ -222,6 +223,7 @@ nfs_server_init(
     chimera_nfs_init_metrics(shared, &shared->nfs_v4.rpc2);
     chimera_nfs_init_metrics(shared, &shared->nfs_v4_cb.rpc2);
     chimera_nfs_init_metrics(shared, &shared->nlm_v4.rpc2);
+    chimera_nfs_init_metrics(shared, &shared->nfsacl_v3.rpc2);
 
     shared->mount_v3.recv_call_MOUNTPROC3_NULL    = chimera_nfs_mount_null;
     shared->mount_v3.recv_call_MOUNTPROC3_MNT     = chimera_nfs_mount_mnt;
@@ -252,6 +254,10 @@ nfs_server_init(
     shared->nfs_v3.recv_call_NFSPROC3_FSINFO      = chimera_nfs3_fsinfo;
     shared->nfs_v3.recv_call_NFSPROC3_PATHCONF    = chimera_nfs3_pathconf;
     shared->nfs_v3.recv_call_NFSPROC3_COMMIT      = chimera_nfs3_commit;
+
+    shared->nfsacl_v3.recv_call_NFSACLPROC3_NULL   = chimera_nfs3_acl_null;
+    shared->nfsacl_v3.recv_call_NFSACLPROC3_GETACL = chimera_nfs3_getacl;
+    shared->nfsacl_v3.recv_call_NFSACLPROC3_SETACL = chimera_nfs3_setacl;
 
     shared->nfs_v4.recv_call_NFSPROC4_NULL     = chimera_nfs4_null;
     shared->nfs_v4.recv_call_NFSPROC4_COMPOUND = chimera_nfs4_compound;
@@ -358,8 +364,10 @@ nfs_server_init(
     programs[0] = &shared->nfs_v3.rpc2;
     programs[1] = &shared->nfs_v4.rpc2;
     programs[2] = &shared->nfs_v4_cb.rpc2;
+    /* NFSACL (prog 100227) is multiplexed onto the same endpoint as NFS. */
+    programs[3] = &shared->nfsacl_v3.rpc2;
 
-    shared->nfs_server = evpl_rpc2_server_init(programs, 3);
+    shared->nfs_server = evpl_rpc2_server_init(programs, 4);
 
     if (!data_server) {
         chimera_nfs_debug("Initializing NFS lock manager server on port %d", nfs_lockmgr_port);
@@ -547,6 +555,7 @@ nfs_server_destroy(void *data)
     free(shared->nfs_v4.rpc2.metrics);
     free(shared->nfs_v4_cb.rpc2.metrics);
     free(shared->nlm_v4.rpc2.metrics);
+    free(shared->nfsacl_v3.rpc2.metrics);
 
     while (shared->exports) {
         export = shared->exports;

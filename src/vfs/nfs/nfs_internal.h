@@ -13,6 +13,7 @@
 #include <utlist.h>
 #include "vfs/vfs.h"
 #include "vfs/vfs_pnfs.h"
+#include "vfs/vfs_acl.h"
 #include "evpl/evpl.h"
 #include "portmap_xdr.h"
 #include "nfs_mount_xdr.h"
@@ -23,6 +24,7 @@
 #include "vfs/vfs_fh.h"
 #include "evpl/evpl_rpc2.h"
 #include "nlm4_xdr.h"
+#include "nfsacl_xdr.h"
 
 /* Byte order conversion macros */
 static inline uint32_t
@@ -201,6 +203,12 @@ struct chimera_nfs_client_server {
     uint16_t                            nfs_port;
     uint16_t                            nlm_port;
 
+    /* NFSACL (prog 100227) capability for this upstream.  0 = not yet probed
+     * (optimistically try); 1 = confirmed unsupported (fall back to deriving
+     * ACLs from mode).  Multiplexed on the NFS connection, so no separate port
+     * or portmap lookup is needed. */
+    int                                 nfsacl_unsupported;
+
     struct chimera_vfs_request         *pending_mounts;
 
     char                                hostname[256];
@@ -295,6 +303,7 @@ struct chimera_nfs_shared {
     struct NFS_V4                       nfs_v4;
     struct NFS_V4_CB                    nfs_v4_cb;
     struct NLM_V4                       nlm_v4;
+    struct NFSACL_V3                    nfsacl_v3;
 
     /* Back-channel control thread (nfs4_cb.c).  A single dedicated evpl thread
      * owns a persistent connection per server (server->cb_conn) on which it runs
@@ -799,6 +808,35 @@ void chimera_nfs4_cb_establish_session(
 void chimera_nfs4_mount_resume_after_session(
     struct chimera_nfs_client_server_thread *server_thread,
     struct chimera_vfs_request              *request);
+
+/*
+ * NFSACL (prog 100227) client helpers.  ACL fetch/store is multiplexed onto the
+ * existing nfs_conn.  The getattr fast path stashes the dispatch context in
+ * request->plugin_data so its completion callback can chain a GETACL when the
+ * caller asked for the ACL attribute; the SETATTR path chains a SETACL.  Bounds
+ * the translated canonical ACL to a sane size for a proxied POSIX ACL.
+ */
+#define CHIMERA_NFS3_CLIENT_ACL_MAX 256
+
+struct chimera_nfs3_acl_ctx {
+    struct chimera_nfs_thread               *thread;
+    struct chimera_nfs_shared               *shared;
+    struct chimera_nfs_client_server_thread *server_thread;
+    /* Storage for the translated canonical ACL (header + flexible aces[]). */
+    uint8_t                                  acl_buf[sizeof(struct chimera_acl) +
+                                                     CHIMERA_NFS3_CLIENT_ACL_MAX *
+                                                     sizeof(struct chimera_ace)];
+};
+
+/* Chain a GETACL after a successful GETATTR (ctx in request->plugin_data).
+ * Always completes the request (translating, or falling back to mode). */
+void chimera_nfs3_acl_fetch(
+    struct chimera_vfs_request *request);
+
+/* Chain a SETACL after a successful SETATTR when the caller set ATTR_ACL
+ * (ctx in request->plugin_data).  Always completes the request. */
+void chimera_nfs3_acl_store(
+    struct chimera_vfs_request *request);
 
 void chimera_nfs3_dispatch(
     struct chimera_nfs_thread *,

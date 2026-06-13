@@ -30,6 +30,15 @@ chimera_nfs3_getattr_callback(
 
     chimera_nfs3_unmarshall_attrs(&res->resok.obj_attributes, &request->getattr.r_attr);
 
+    /* If the caller wants the ACL attribute, chain an NFSACL GETACL (multiplexed
+     * on the same connection) before completing.  chimera_nfs3_acl_fetch always
+     * completes the request, falling back to a mode-derived ACL when the upstream
+     * does not speak NFSACL; without it vfs_nfs would silently drop ATTR_ACL. */
+    if (request->getattr.r_attr.va_req_mask & CHIMERA_VFS_ATTR_ACL) {
+        chimera_nfs3_acl_fetch(request);
+        return;
+    }
+
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
 } /* chimera_nfs3_getattr_callback */
@@ -52,6 +61,16 @@ chimera_nfs3_getattr(
         request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
+    }
+
+    /* Stash the dispatch context so the completion callback can chain a GETACL
+     * (see chimera_nfs3_acl_fetch) if the caller requested the ACL attribute. */
+    if (request->getattr.r_attr.va_req_mask & CHIMERA_VFS_ATTR_ACL) {
+        struct chimera_nfs3_acl_ctx *ctx = request->plugin_data;
+
+        ctx->thread        = thread;
+        ctx->shared        = shared;
+        ctx->server_thread = server_thread;
     }
 
     chimera_nfs3_map_fh(request->fh, request->fh_len, &fh, &fhlen);

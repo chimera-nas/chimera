@@ -33,6 +33,14 @@ chimera_nfs3_setattr_callback(
 
     chimera_nfs3_get_wcc_data(&request->setattr.r_pre_attr, &request->setattr.r_post_attr, &res->resok.obj_wcc);
 
+    /* The base SETATTR carried mode/owner/size/times only (sattr3 has no ACL
+     * field).  If the caller also set an ACL, chain an NFSACL SETACL on the same
+     * connection; chimera_nfs3_acl_store always completes the request. */
+    if (request->setattr.set_attr->va_set_mask & CHIMERA_VFS_ATTR_ACL) {
+        chimera_nfs3_acl_store(request);
+        return;
+    }
+
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
 } /* chimera_nfs3_setattr_callback */
@@ -55,6 +63,16 @@ chimera_nfs3_setattr(
         request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
+    }
+
+    /* Stash the dispatch context so the completion callback can chain a SETACL
+     * (see chimera_nfs3_acl_store) when the caller set the ACL attribute. */
+    if (request->setattr.set_attr->va_set_mask & CHIMERA_VFS_ATTR_ACL) {
+        struct chimera_nfs3_acl_ctx *ctx = request->plugin_data;
+
+        ctx->thread        = thread;
+        ctx->shared        = shared;
+        ctx->server_thread = server_thread;
     }
 
     chimera_nfs3_map_fh(request->fh, request->fh_len, &fh, &fhlen);

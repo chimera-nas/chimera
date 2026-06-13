@@ -13,6 +13,7 @@
 #include "nfs3_xdr.h"
 #include "nfs4_xdr.h"
 #include "nlm4_xdr.h"
+#include "nfsacl_xdr.h"
 #include "nfs4_session.h"
 #include "nfs4_state.h"
 #include "nfs4_layout_table.h"
@@ -153,6 +154,8 @@ struct nfs_request {
         struct READLINK3args    *args_readlink;
         struct MKNOD3args       *args_mknod;
         struct WRITE4args       *args_write4;
+        struct GETACL3args      *args_getacl;
+        struct SETACL3args      *args_setacl;
     };
     struct COMPOUND4args *args_compound;
     union {
@@ -240,6 +243,7 @@ struct chimera_server_nfs_shared {
     struct NFS_V4                       nfs_v4;
     struct NFS_V4_CB                    nfs_v4_cb;
     struct NLM_V4                       nlm_v4;
+    struct NFSACL_V3                    nfsacl_v3;
     struct nlm_state                    nlm_state;
 
     struct chimera_nfs_export          *exports;

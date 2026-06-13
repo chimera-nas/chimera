@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -185,5 +185,29 @@ void chimera_nfs3_secinfo_no_name(
     struct evpl               *evpl,
     struct evpl_rpc2_conn     *conn,
     struct evpl_rpc2_cred     *cred,
+    struct evpl_rpc2_encoding *encoding,
+    void                      *private_data);
+
+/* NFSACL sideband protocol (RPC program 100227, version 3). */
+void chimera_nfs3_acl_null(
+    struct evpl               *evpl,
+    struct evpl_rpc2_conn     *conn,
+    struct evpl_rpc2_cred     *cred,
+    struct evpl_rpc2_encoding *encoding,
+    void                      *private_data);
+
+void chimera_nfs3_getacl(
+    struct evpl               *evpl,
+    struct evpl_rpc2_conn     *conn,
+    struct evpl_rpc2_cred     *cred,
+    struct GETACL3args        *args,
+    struct evpl_rpc2_encoding *encoding,
+    void                      *private_data);
+
+void chimera_nfs3_setacl(
+    struct evpl               *evpl,
+    struct evpl_rpc2_conn     *conn,
+    struct evpl_rpc2_cred     *cred,
+    struct SETACL3args        *args,
     struct evpl_rpc2_encoding *encoding,
     void                      *private_data);
