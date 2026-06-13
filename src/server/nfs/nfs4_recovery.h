@@ -68,6 +68,7 @@ struct nfs_recovery {
     bool                        in_grace;
     /* Persistence wiring (see nfs4_recovery.c). */
     struct chimera_vfs         *vfs;                 /* for the cold-start load */
+    uint16_t                    node_id;             /* scopes our records in a shared store */
     uint32_t                    grace_time_s;        /* captured for deferred begin */
     bool                        persistence_disabled;/* kv_module is non-persistent */
     bool                        nfs4_drc;            /* reply-cache persistence on   */
@@ -86,6 +87,7 @@ int
 nfs_recovery_load(
     struct nfs_recovery *rec,
     struct chimera_vfs  *vfs,
+    uint16_t             node_id,
     uint32_t             grace_time_s,
     bool                 nfs4_drc);
 

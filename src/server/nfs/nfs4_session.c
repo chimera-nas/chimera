@@ -76,12 +76,15 @@ replay_field_retry_uncached(struct nfs4_replay_metrics *rm)
 } /* replay_field_retry_uncached */
 
 void
-nfs4_client_table_init(struct nfs4_client_table *table)
+nfs4_client_table_init(
+    struct nfs4_client_table *table,
+    uint16_t                  node_id)
 {
     table->nfs4_ct_clients_by_owner = NULL;
     table->nfs4_ct_clients_by_id    = NULL;
     table->nfs4_ct_sessions         = NULL;
     table->nfs4_ct_next_client_id   = 1;
+    table->nfs4_ct_node_id          = node_id;
     table->nfs4_ct_next_confirm     = 1;
 
     pthread_mutex_init(&table->nfs4_ct_lock, NULL);
@@ -148,7 +151,8 @@ nfs4_client_register(
     } else {
         client = calloc(1, sizeof(*client));
 
-        client->nfs4_client_id = table->nfs4_ct_next_client_id++;
+        client->nfs4_client_id = nfs4_make_clientid(table->nfs4_ct_node_id,
+                                                    table->nfs4_ct_next_client_id++);
 
         memcpy(client->nfs4_client_owner, owner, owner_len);
         client->nfs4_client_owner_len = owner_len;
@@ -229,7 +233,8 @@ nfs4_client_new_locked(
 {
     struct nfs4_client *c = calloc(1, sizeof(*c));
 
-    c->nfs4_client_id            = table->nfs4_ct_next_client_id++;
+    c->nfs4_client_id = nfs4_make_clientid(table->nfs4_ct_node_id,
+                                           table->nfs4_ct_next_client_id++);
     c->nfs4_client_owner_len     = owner_len;
     c->nfs4_client_verifier      = verifier;
     c->nfs4_client_refcnt        = 1;
@@ -1372,6 +1377,7 @@ nfs4_replay_slot_acquire(
                      * one entry per slot (the in-memory invariant). */
                     if (session->nfs4_session_persist && req->thread) {
                         nfs4_drc_delete_reply(req->thread->vfs_thread,
+                                              req->thread->shared->node_id,
                                               session->nfs4_session_id,
                                               slotid, cseq);
                     }
@@ -1494,7 +1500,8 @@ nfs4_replay_slot_finalize(struct nfs_request *req)
          * nfs4_session_persist is only set when nfs4_drc is enabled. */
         if (new_state == NFS4_SLOT_CACHED && session->nfs4_session_persist &&
             req->thread) {
-            nfs4_drc_persist_reply(req->thread->vfs_thread, session,
+            nfs4_drc_persist_reply(req->thread->vfs_thread,
+                                   req->thread->shared->node_id, session,
                                    req->replay_slot_id, fseqid,
                                    slot->cached_buf, slot->cached_len);
         }

@@ -17,6 +17,7 @@
 #include "nfs4_state.h"
 #include "nfs4_layout_table.h"
 #include "nfs4_recovery.h"
+#include "nfs3_drc.h"
 #include "nfs_nlm_state.h"
 
 struct chimera_server_nfs_thread;
@@ -263,6 +264,13 @@ struct chimera_server_nfs_shared {
 
     uint64_t                            nfs_verifier;
 
+    /* Stable identity of this server instance among any peers sharing the same
+     * backing KV store.  Namespaces every persisted record + the clientid /
+     * stateid epoch so N instances over one store never collide and each
+     * reloads only its own state.  From server.nfs4_node_id, else derived from
+     * the machine name (see nfs_server_init).  Range 1..0xFFFE. */
+    uint16_t                            node_id;
+
     /* Lease management (Phase 3).  Set from defaults at init; future
      * config knobs would override these in nfs_server_init. */
     uint32_t                            nfs_lease_time_s;
@@ -279,6 +287,7 @@ struct chimera_server_nfs_shared {
     struct prometheus_metrics          *metrics;
     struct nfs4_replay_metrics          replay_metrics;
     struct nfs4_v40_drc                 v40_drc;
+    struct nfs3_drc                     nfs3_drc;
 };
 
 /* Forward decl for the per-thread lease sweeper (defined in nfs4_lease.h). */

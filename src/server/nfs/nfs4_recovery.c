@@ -138,6 +138,7 @@ int
 nfs_recovery_load(
     struct nfs_recovery *rec,
     struct chimera_vfs  *vfs,
+    uint16_t             node_id,
     uint32_t             grace_time_s,
     bool                 nfs4_drc)
 {
@@ -150,6 +151,7 @@ nfs_recovery_load(
     rec->grace_end_ns    = 0;
     rec->in_grace        = false;
     rec->vfs             = vfs;
+    rec->node_id         = node_id;
     rec->grace_time_s    = grace_time_s;
     rec->nfs4_drc        = nfs4_drc;
     atomic_store(&rec->load_state, NFS_REC_LOAD_IDLE);
@@ -275,8 +277,8 @@ nfs_recovery_persist(
     }
 
     ctx          = malloc(sizeof(*ctx));
-    ctx->key_len = nfs_kv_recovery_key(ctx->key, client->owner_string,
-                                       client->owner_len);
+    ctx->key_len = nfs_kv_recovery_key(ctx->key, rec->node_id,
+                                       client->owner_string, client->owner_len);
     ctx->value_len = nfs_recovery_serialize(ctx->value, sizeof(ctx->value),
                                             client);
     if (ctx->value_len == 0) {
@@ -317,7 +319,7 @@ nfs_recovery_forget(
     }
 
     ctx          = malloc(sizeof(*ctx));
-    ctx->key_len = nfs_kv_recovery_key(ctx->key, owner, owner_len);
+    ctx->key_len = nfs_kv_recovery_key(ctx->key, rec->node_id, owner, owner_len);
     chimera_vfs_delete_key(vfs_thread, ctx->key, ctx->key_len,
                            nfs_recovery_kv_done, ctx);
 } /* nfs_recovery_forget */
@@ -331,8 +333,8 @@ struct nfs_recovery_load_ctx {
     struct nfs_recovery              *rec;
     /* The async KV layer does NOT copy keys, so every key handed to it must
      * outlive the call -- these live in this heap ctx, not on the stack. */
-    uint8_t                           ekey[CHIMERA_KV_HDR_LEN + 1];
-    uint8_t                           start[CHIMERA_KV_HDR_LEN];
+    uint8_t                           ekey[CHIMERA_KV_PREFIX_LEN];
+    uint8_t                           start[CHIMERA_KV_PREFIX_LEN];
 };
 
 static void
@@ -375,9 +377,10 @@ nfs_recovery_scan_cb(
     struct nfs_recovery          *rec = ctx->rec;
     struct nfs_recovery_record   *r, *existing;
 
-    /* Keys are returned in order; stop once we leave the recovery type band. */
-    if (key_len < CHIMERA_KV_HDR_LEN ||
-        memcmp(key, ctx->start, CHIMERA_KV_HDR_LEN) != 0) {
+    /* Keys are returned in order; stop once we leave THIS node's recovery band
+     * (the 5-byte [type,node] prefix). */
+    if (key_len < CHIMERA_KV_PREFIX_LEN ||
+        memcmp(key, ctx->start, CHIMERA_KV_PREFIX_LEN) != 0) {
         return 1;
     }
 
@@ -460,7 +463,7 @@ nfs_recovery_epoch_cb(
 
     /* Write the new epoch so the next restart bumps again (fire-and-forget). */
     ectx            = malloc(sizeof(*ectx));
-    ekey_len        = nfs_kv_epoch_key(ectx->key);
+    ekey_len        = nfs_kv_epoch_key(ectx->key, rec->node_id);
     ectx->key_len   = ekey_len;
     ectx->value_len = nfs_recovery_epoch_serialize(ectx->value,
                                                    rec->current_boot_id);
@@ -468,14 +471,14 @@ nfs_recovery_epoch_cb(
                         ectx->value, ectx->value_len,
                         nfs_recovery_kv_done, ectx);
 
-    /* Scan from the recovery-record band start with no end key (flags 0): the
+    /* Scan from this node's recovery band start with no end key (flags 0): the
      * KV search returns key-ordered results on every backend, so we stop in
-     * nfs_recovery_scan_cb when the 3-byte type header changes -- the same
-     * open-ended pattern SMB durable recovery uses.  (A bounded [type, type+1)
-     * END_EXCLUSIVE scan would work equally well.) */
-    nfs_kv_type_prefix(ctx->start, CHIMERA_KV_TYPE_NFS4_RECOVERY);
+     * nfs_recovery_scan_cb when the 5-byte [type,node] prefix changes.  The
+     * node_id in the prefix is what keeps a node from reloading a live peer's
+     * clients out of a shared store. */
+    nfs_kv_node_prefix(ctx->start, CHIMERA_KV_TYPE_NFS4_RECOVERY, rec->node_id);
     chimera_vfs_search_keys(ctx->thread->vfs_thread,
-                            ctx->start, CHIMERA_KV_HDR_LEN,
+                            ctx->start, CHIMERA_KV_PREFIX_LEN,
                             NULL, 0, 0,
                             nfs_recovery_scan_cb,
                             nfs_recovery_scan_complete,
@@ -512,7 +515,7 @@ nfs_recovery_kickoff(struct chimera_server_nfs_thread *thread)
      * The key lives in the heap ctx -- the async KV layer keeps the pointer and
      * the delegation thread reads it after this function returns. */
     {
-        uint32_t ekey_len = nfs_kv_epoch_key(ctx->ekey);
+        uint32_t ekey_len = nfs_kv_epoch_key(ctx->ekey, rec->node_id);
 
         chimera_vfs_get_key(thread->vfs_thread, ctx->ekey, ekey_len,
                             nfs_recovery_epoch_cb, ctx);

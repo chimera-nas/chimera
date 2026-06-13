@@ -588,7 +588,8 @@ nfs_open_state_check_principal(
  */
 
 SYMBOL_EXPORT void nfs_state_table_init(
-    struct nfs_state_table *table);
+    struct nfs_state_table *table,
+    uint16_t                node_id);
 SYMBOL_EXPORT void nfs_state_table_free(
     struct nfs_state_table    *table,
     struct chimera_vfs_thread *vfs_thread);
