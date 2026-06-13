@@ -45,6 +45,78 @@ chimera_nfs_hton64(uint64_t value)
 #endif // if __BYTE_ORDER == __LITTLE_ENDIAN
 } /* chimera_nfs_hton64 */
 
+/*
+ * Marshall a chimera_vfs_attrs set into an NFSv4 fattr4 (used for the
+ * createattrs of CREATE/OPEN-create).  Attributes must be encoded in
+ * ascending order by attribute number: MODE (33), OWNER (36),
+ * OWNER_GROUP (37).  The caller supplies attr_mask[2] and an attr_vals
+ * scratch buffer (>= 128 bytes is sufficient for these fields).  Returns
+ * the number of attrmask words to send (0, 1 or 2) and writes the encoded
+ * length to *attr_len_out.
+ */
+static inline int
+chimera_nfs4_marshall_createattrs(
+    const struct chimera_vfs_attrs *set_attr,
+    uint32_t                       *attr_mask,
+    uint8_t                        *attr_vals,
+    int                            *attr_len_out)
+{
+    uint8_t *attr_ptr = attr_vals;
+    int      attr_len = 0;
+    char     id_str[32];
+    int      id_len;
+
+    attr_mask[0] = 0;
+    attr_mask[1] = 0;
+
+    if (set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
+        attr_mask[1]          |= (1 << (FATTR4_MODE - 32));
+        *(uint32_t *) attr_ptr = chimera_nfs_hton32(set_attr->va_mode & 07777);
+        attr_ptr              += sizeof(uint32_t);
+        attr_len              += sizeof(uint32_t);
+    }
+
+    if (set_attr->va_set_mask & CHIMERA_VFS_ATTR_UID) {
+        attr_mask[1]          |= (1 << (FATTR4_OWNER - 32));
+        id_len                 = snprintf(id_str, sizeof(id_str), "%lu", (unsigned long) set_attr->va_uid);
+        *(uint32_t *) attr_ptr = chimera_nfs_hton32(id_len);
+        attr_ptr              += sizeof(uint32_t);
+        attr_len              += sizeof(uint32_t);
+        memcpy(attr_ptr, id_str, id_len);
+        attr_ptr += id_len;
+        attr_len += id_len;
+        while (attr_len % 4) {
+            *attr_ptr++ = 0;
+            attr_len++;
+        }
+    }
+
+    if (set_attr->va_set_mask & CHIMERA_VFS_ATTR_GID) {
+        attr_mask[1]          |= (1 << (FATTR4_OWNER_GROUP - 32));
+        id_len                 = snprintf(id_str, sizeof(id_str), "%lu", (unsigned long) set_attr->va_gid);
+        *(uint32_t *) attr_ptr = chimera_nfs_hton32(id_len);
+        attr_ptr              += sizeof(uint32_t);
+        attr_len              += sizeof(uint32_t);
+        memcpy(attr_ptr, id_str, id_len);
+        attr_ptr += id_len;
+        attr_len += id_len;
+        while (attr_len % 4) {
+            *attr_ptr++ = 0;
+            attr_len++;
+        }
+    }
+
+    *attr_len_out = attr_len;
+
+    if (attr_mask[1]) {
+        return 2;
+    } else if (attr_mask[0]) {
+        return 1;
+    } else {
+        return 0;
+    }
+} /* chimera_nfs4_marshall_createattrs */
+
 #define chimera_nfsclient_debug(...) chimera_debug("nfsclient", \
                                                    __FILE__, \
                                                    __LINE__, \
