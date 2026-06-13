@@ -80,27 +80,20 @@ chimera_vfs_gate_fh_open(
                         chimera_vfs_gate_fh_getattr, ctx);
 } /* chimera_vfs_gate_fh_open */
 
-SYMBOL_EXPORT void
-chimera_vfs_gate_fh(
+static void
+chimera_vfs_gate_fh_impl(
     struct chimera_vfs_thread     *thread,
     const struct chimera_vfs_cred *cred,
     const void                    *fh,
     int                            fhlen,
     uint32_t                       required,
+    int                            needed,
     chimera_vfs_gate_callback_t    callback,
     void                          *private_data)
 {
-    struct chimera_vfs_module      *module;
     struct chimera_vfs_gate_fh_ctx *ctx;
 
-    module = chimera_vfs_get_module(thread, fh, fhlen);
-
-    if (!module) {
-        callback(CHIMERA_VFS_ESTALE, private_data);
-        return;
-    }
-
-    if (!chimera_vfs_gate_needed(module->capabilities, cred)) {
+    if (!needed) {
         callback(CHIMERA_VFS_OK, private_data);
         return;
     }
@@ -116,7 +109,52 @@ chimera_vfs_gate_fh(
     chimera_vfs_open_fh(thread, cred, fh, fhlen,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
                         chimera_vfs_gate_fh_open, ctx);
+} /* chimera_vfs_gate_fh_impl */
+
+SYMBOL_EXPORT void
+chimera_vfs_gate_fh(
+    struct chimera_vfs_thread     *thread,
+    const struct chimera_vfs_cred *cred,
+    const void                    *fh,
+    int                            fhlen,
+    uint32_t                       required,
+    chimera_vfs_gate_callback_t    callback,
+    void                          *private_data)
+{
+    struct chimera_vfs_module *module;
+
+    module = chimera_vfs_get_module(thread, fh, fhlen);
+
+    if (!module) {
+        callback(CHIMERA_VFS_ESTALE, private_data);
+        return;
+    }
+
+    chimera_vfs_gate_fh_impl(thread, cred, fh, fhlen, required,
+                             chimera_vfs_gate_needed(module->capabilities, cred),
+                             callback, private_data);
 } /* chimera_vfs_gate_fh */
+
+/*
+ * Variant of chimera_vfs_gate_fh() that enforces DAC the kernel cannot see on a
+ * handle-based passthrough backend (path-prefix search, link/rename
+ * destination-directory write); it ignores CHIMERA_VFS_CAP_DELEGATES_DAC.  See
+ * chimera_vfs_gate_needed_dac().
+ */
+SYMBOL_EXPORT void
+chimera_vfs_gate_fh_dac(
+    struct chimera_vfs_thread     *thread,
+    const struct chimera_vfs_cred *cred,
+    const void                    *fh,
+    int                            fhlen,
+    uint32_t                       required,
+    chimera_vfs_gate_callback_t    callback,
+    void                          *private_data)
+{
+    chimera_vfs_gate_fh_impl(thread, cred, fh, fhlen, required,
+                             chimera_vfs_gate_needed_dac(cred),
+                             callback, private_data);
+} /* chimera_vfs_gate_fh_dac */
 
 /* ----------------------------------------------------------------------------
  * chimera_vfs_gate_delete: delete_allowed across parent dir + child.

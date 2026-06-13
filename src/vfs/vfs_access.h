@@ -59,6 +59,17 @@ int chimera_vfs_gate_needed(
     const struct chimera_vfs_cred *cred);
 
 /*
+ * Like chimera_vfs_gate_needed() but for DAC that the kernel cannot enforce on
+ * a handle-based passthrough backend: it ignores CHIMERA_VFS_CAP_DELEGATES_DAC
+ * and returns 1 for any non-root UNIX credential.  Used for path-prefix search
+ * (EXECUTE) during lookup and for link/rename destination-directory WRITE,
+ * which a passthrough backend resolves via open_by_handle_at and therefore
+ * never traverses under the kernel's DAC.  Root and AUTH_NONE remain exempt.
+ */
+int chimera_vfs_gate_needed_dac(
+    const struct chimera_vfs_cred *cred);
+
+/*
  * The enforcement decision itself: CHIMERA_VFS_OK if every bit in `required`
  * (canonical CHIMERA_ACE_* mask) is granted to `cred` on the object described
  * by `attr` (which must carry mode/uid/gid and, for a natively-stored ACL, the
@@ -95,6 +106,18 @@ typedef void (*chimera_vfs_gate_callback_t)(
 
 /* Require `required` (CHIMERA_ACE_* mask) on the object named by `fh`. */
 void chimera_vfs_gate_fh(
+    struct chimera_vfs_thread     *thread,
+    const struct chimera_vfs_cred *cred,
+    const void                    *fh,
+    int                            fhlen,
+    uint32_t                       required,
+    chimera_vfs_gate_callback_t    callback,
+    void                          *private_data);
+
+/* As chimera_vfs_gate_fh(), but enforced even for DELEGATES_DAC (passthrough)
+ * backends -- for DAC the kernel cannot see on handle-based lookups (path-prefix
+ * search, link/rename destination-directory write). */
+void chimera_vfs_gate_fh_dac(
     struct chimera_vfs_thread     *thread,
     const struct chimera_vfs_cred *cred,
     const void                    *fh,

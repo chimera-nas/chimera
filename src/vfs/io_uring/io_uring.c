@@ -1300,7 +1300,17 @@ chimera_io_uring_open_at(
     }
 
     if (request->open_at.flags & CHIMERA_VFS_OPEN_NOFOLLOW) {
-        flags = O_PATH | O_NOFOLLOW;
+        if (request->open_at.flags & CHIMERA_VFS_OPEN_PATH) {
+            /* Caller wants a handle on the symlink itself (e.g. SMB reparse):
+             * O_PATH|O_NOFOLLOW opens the link rather than following it. */
+            flags = O_PATH | O_NOFOLLOW;
+        } else {
+            /* A regular open with O_NOFOLLOW on a symlink target must fail
+             * ELOOP (pjd open/16); openat() returns that directly, so just add
+             * O_NOFOLLOW to the real open flags instead of degrading to O_PATH
+             * (which would succeed by opening the link). */
+            flags |= O_NOFOLLOW;
+        }
     }
 
     if (request->open_at.flags & CHIMERA_VFS_OPEN_EXCLUSIVE) {
@@ -1438,8 +1448,11 @@ chimera_io_uring_mknod_at(
     }
 
     if (request->mknod_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_RDEV) {
-        dev = makedev(request->mknod_at.set_attr->va_rdev >> 32,
-                      request->mknod_at.set_attr->va_rdev & 0xFFFFFFFF);
+        /* va_rdev is an opaque dev_t round-tripped verbatim by the engine
+         * backends and by getattr here (st_rdev), so pass it straight to
+         * mknodat -- re-encoding it through makedev() corrupted the major/minor
+         * (pjd mknod/11). */
+        dev = (dev_t) request->mknod_at.set_attr->va_rdev;
     }
 
     chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_IO_URING,

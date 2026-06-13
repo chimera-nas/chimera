@@ -840,8 +840,11 @@ chimera_linux_mknod_at(
     }
 
     if (request->mknod_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_RDEV) {
-        dev = makedev(request->mknod_at.set_attr->va_rdev >> 32,
-                      request->mknod_at.set_attr->va_rdev & 0xFFFFFFFF);
+        /* va_rdev is an opaque dev_t round-tripped verbatim by the engine
+         * backends (memfs/cairn/diskfs) and by getattr here (st_rdev), so pass
+         * it straight to mknodat -- re-encoding it through makedev() corrupted
+         * the major/minor (pjd mknod/11). */
+        dev = (dev_t) request->mknod_at.set_attr->va_rdev;
     }
 
     chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,

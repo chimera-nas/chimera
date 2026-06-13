@@ -64,6 +64,29 @@ chimera_vfs_gate_needed(
     return 1;
 } /* chimera_vfs_gate_needed */
 
+SYMBOL_EXPORT int
+chimera_vfs_gate_needed_dac(const struct chimera_vfs_cred *cred)
+{
+    /* Like chimera_vfs_gate_needed() but enforced even for DELEGATES_DAC
+     * (passthrough) backends.  Those resolve every path component by file
+     * handle (open_by_handle_at), which deliberately bypasses the kernel's
+     * directory-traversal DAC: the kernel only ever checks the *leaf* under the
+     * impersonated fsuid, never the intermediate prefix.  Search (EXECUTE) on a
+     * path-prefix directory and WRITE on a link/rename destination directory
+     * therefore have to be evaluated by the shared engine against the real
+     * on-disk attributes (which passthrough getattr returns faithfully).  Root
+     * and AUTH_NONE remain exempt. */
+    if (cred->flavor == CHIMERA_VFS_AUTH_NONE) {
+        return 0;
+    }
+
+    if (cred->uid == 0) {
+        return 0;
+    }
+
+    return 1;
+} /* chimera_vfs_gate_needed_dac */
+
 SYMBOL_EXPORT enum chimera_vfs_error
 chimera_vfs_gate(
     const struct chimera_vfs_attrs *attr,
