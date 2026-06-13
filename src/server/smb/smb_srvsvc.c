@@ -15,12 +15,25 @@ static const dce_if_uuid_t SRV_INTERFACE = {
     .if_vers_minor = 0,
 };
 
-#define SRV_OP_NETSHAREENUMALL 15
+#define SRV_OP_NETSHAREENUMALL     15
+#define SRV_OP_NETSHAREGETINFO     16
+#define SRV_OP_NETSRVGETINFO       21
 
-#define SRV_STYPE_DISKTREE     0x00000000
-#define SRV_STYPE_IPC_HIDDEN   0x80000003
+#define SRV_STYPE_DISKTREE         0x00000000
+#define SRV_STYPE_IPC_HIDDEN       0x80000003
 
-#define SRV_RPC_STUB_MAX       (65535 - (int) (sizeof(dce_common_t) + sizeof(dce_co_response_t)))
+/* MS-DTYP / lmerr.h: returned in the WERROR status when an operation cannot be
+ * satisfied. */
+#define SRV_WERR_OK                0x00000000
+#define SRV_WERR_UNKNOWN_LEVEL     0x0000007C
+#define SRV_WERR_NETNAME_NOT_FOUND 0x00000906
+
+/* MS-SRVS SV_PLATFORM_ID_NT and a plausible NT-class server type bitmask
+ * (workstation + server + Unix). rpcclient just echoes these fields. */
+#define SRV_PLATFORM_ID_NT         500
+#define SRV_TYPE_DEFAULT           0x00001003
+
+#define SRV_RPC_STUB_MAX           (65535 - (int) (sizeof(dce_common_t) + sizeof(dce_co_response_t)))
 
 static char *
 chimera_smb_srvsvc_dbuf_strdup(
@@ -82,6 +95,80 @@ chimera_smb_srvsvc_impl(
             o->total_entries  = i;
             o->resume_handle  = 0;
             o->status         = 0;   /* WERR_OK */
+            break;
+        }
+        case SRV_OP_NETSHAREGETINFO: {
+            const struct srvsvc_NetShareGetInfo_in *in_g = in;
+            struct srvsvc_NetShareGetInfo_out      *o    = out;
+            struct srvsvc_NetShareInfo1            *info;
+            struct chimera_smb_share               *cur;
+            const char                             *netname = in_g->netname;
+            int                                     found   = 0;
+
+            /* Echo the requested level as the union switch value regardless of
+             * outcome so the client decodes the arm it expects. */
+            o->info.level = in_g->level;
+            o->info.info1 = NULL;
+
+            if (in_g->level != 1) {
+                o->status = SRV_WERR_UNKNOWN_LEVEL;
+                break;
+            }
+
+            info = ndr_dbuf_alloc(dbuf, sizeof(*info));
+
+            if (netname && strcasecmp(netname, "IPC$") == 0) {
+                info->name    = chimera_smb_srvsvc_dbuf_strdup(dbuf, "IPC$");
+                info->type    = SRV_STYPE_IPC_HIDDEN;
+                info->comment = "Remote IPC";
+                found         = 1;
+            } else if (netname) {
+                pthread_mutex_lock(&shared->shares_lock);
+                LL_FOREACH(shared->shares, cur)
+                {
+                    if (strcasecmp(cur->name, netname) == 0) {
+                        info->name    = chimera_smb_srvsvc_dbuf_strdup(dbuf, cur->name);
+                        info->type    = SRV_STYPE_DISKTREE;
+                        info->comment = "";
+                        found         = 1;
+                        break;
+                    }
+                }
+                pthread_mutex_unlock(&shared->shares_lock);
+            }
+
+            if (found) {
+                o->info.info1 = info;
+                o->status     = SRV_WERR_OK;
+            } else {
+                o->status = SRV_WERR_NETNAME_NOT_FOUND;
+            }
+            break;
+        }
+        case SRV_OP_NETSRVGETINFO: {
+            const struct srvsvc_NetSrvGetInfo_in *in_s = in;
+            struct srvsvc_NetSrvGetInfo_out      *o    = out;
+            struct srvsvc_NetSrvInfo101          *info;
+
+            o->info.level   = in_s->level;
+            o->info.info101 = NULL;
+
+            if (in_s->level != 101) {
+                o->status = SRV_WERR_UNKNOWN_LEVEL;
+                break;
+            }
+
+            info = ndr_dbuf_alloc(dbuf, sizeof(*info));
+
+            info->platform_id   = SRV_PLATFORM_ID_NT;
+            info->name          = chimera_smb_srvsvc_dbuf_strdup(dbuf, shared->config.identity);
+            info->version_major = 6;
+            info->version_minor = 1;
+            info->type          = SRV_TYPE_DEFAULT;
+            info->comment       = "Chimera NAS";
+
+            o->info.info101 = info;
+            o->status       = SRV_WERR_OK;
             break;
         }
         default:

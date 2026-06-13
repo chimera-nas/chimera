@@ -152,6 +152,14 @@ interface lsarpc {
         [in]      uint16              level,
         [in, out] uint32              count);
 
+    /* opnum 46 -- LsarQueryInformationPolicy2.  Identical signature and arms to
+     * QueryInfoPolicy (opnum 7); Windows clients call this variant first and
+     * fall back to opnum 7 only on a fault. */
+    [opnum(46)] uint32 lsa_QueryInfoPolicy2(
+        [in]  policy_handle         *handle,
+        [in]  uint16                 level,
+        [out] lsa_PolicyInformation **info);
+
     /* opnum 44 -- LsarOpenPolicy2.  ObjectAttributes (an LSAPR_OBJECT_ATTRIBUTES
      * the server ignores) is intentionally not modelled; the input is consumed
      * best-effort and does not affect the response. */
