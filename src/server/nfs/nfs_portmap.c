@@ -32,9 +32,11 @@ static struct portmap_service portmap_services[num_portmap_services_MAX] = {
     { 100003, 4, 6, 2049  },
     /* Mount - program 100005 */
     { 100005, 3, 6, 20048 },
+    /* NFSACL sideband - program 100227 (multiplexed on the NFS port) */
+    { 100227, 3, 6, 2049  },
 };
 
-static int                    num_portmap_services = 6;
+static int                    num_portmap_services = 7;
 
 /*
  * Convert local address from "ip:port" format to universal address format.

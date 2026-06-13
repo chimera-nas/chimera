@@ -11,6 +11,8 @@ add_library(chimera_vfs_nfs SHARED
     nfs3_close.c
     nfs3_commit.c
     nfs3_getattr.c
+    nfs3_getacl.c
+    nfs3_setacl.c
     nfs3_mount.c
     nfs3_umount.c
     nfs3_link_at.c

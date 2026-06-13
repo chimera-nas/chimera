@@ -108,6 +108,7 @@ chimera_nfs_init(
      * by the control connection (nfs4_cb.c). */
     shared->nfs_v4_cb.recv_call_CB_COMPOUND = chimera_nfs4_cb_compound;
     NLM_V4_init(&shared->nlm_v4);
+    NFSACL_V3_init(&shared->nfsacl_v3);
 
     return shared;
 } /* chimera_nfs_init */
