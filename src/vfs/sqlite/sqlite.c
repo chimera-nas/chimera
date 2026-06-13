@@ -282,6 +282,7 @@ sqlite_search_keys(
     uint32_t                           start_len = request->search_keys.start_key_len;
     const void                        *end       = request->search_keys.end_key;
     uint32_t                           end_len   = request->search_keys.end_key_len;
+    uint32_t                           flags     = request->search_keys.flags;
     sqlite3_stmt                      *stmt      = NULL;
     const char                        *sql;
     int                                bind_idx = 1;
@@ -289,15 +290,28 @@ sqlite_search_keys(
 
     /* BLOB comparison in sqlite is bytewise (memcmp with the shorter blob
      * ordering first), matching the range semantics used by the other KV
-     * backends.  Both bounds are inclusive. */
-    if (start_len && end_len) {
-        sql = "SELECT key,value FROM kv WHERE key>=? AND key<=? ORDER BY key";
-    } else if (start_len) {
-        sql = "SELECT key,value FROM kv WHERE key>=? ORDER BY key";
-    } else if (end_len) {
-        sql = "SELECT key,value FROM kv WHERE key<=? ORDER BY key";
+     * backends.  The start bound is inclusive; the end bound is inclusive
+     * unless END_EXCLUSIVE is set. */
+    if (flags & CHIMERA_VFS_SEARCH_KEYS_END_EXCLUSIVE) {
+        if (start_len && end_len) {
+            sql = "SELECT key,value FROM kv WHERE key>=? AND key<? ORDER BY key";
+        } else if (start_len) {
+            sql = "SELECT key,value FROM kv WHERE key>=? ORDER BY key";
+        } else if (end_len) {
+            sql = "SELECT key,value FROM kv WHERE key<? ORDER BY key";
+        } else {
+            sql = "SELECT key,value FROM kv ORDER BY key";
+        }
     } else {
-        sql = "SELECT key,value FROM kv ORDER BY key";
+        if (start_len && end_len) {
+            sql = "SELECT key,value FROM kv WHERE key>=? AND key<=? ORDER BY key";
+        } else if (start_len) {
+            sql = "SELECT key,value FROM kv WHERE key>=? ORDER BY key";
+        } else if (end_len) {
+            sql = "SELECT key,value FROM kv WHERE key<=? ORDER BY key";
+        } else {
+            sql = "SELECT key,value FROM kv ORDER BY key";
+        }
     }
 
     rc = sqlite3_prepare_v2(thread->db, sql, -1, &stmt, NULL);

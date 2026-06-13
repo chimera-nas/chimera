@@ -19,10 +19,12 @@
 
 struct test_ctx {
     int                        done;
-    enum chimera_vfs_error status;
+    enum chimera_vfs_error     status;
     const void                *value;
     uint32_t                   value_len;
     int                        search_count;
+    char                       search_keys[16][64];
+    uint32_t                   search_key_lens[16];
     struct chimera_vfs        *vfs;
     struct chimera_vfs_thread *vfs_thread;
     struct evpl               *evpl;
@@ -75,6 +77,10 @@ search_keys_callback(
 {
     struct test_ctx *ctx = private_data;
 
+    if (ctx->search_count < 16 && key_len < sizeof(ctx->search_keys[0])) {
+        memcpy(ctx->search_keys[ctx->search_count], key, key_len);
+        ctx->search_key_lens[ctx->search_count] = key_len;
+    }
     ctx->search_count++;
     return 0; /* continue searching */
 } /* search_keys_callback */
@@ -242,7 +248,7 @@ test_search_keys(struct test_ctx *ctx)
         assert(ctx->status == CHIMERA_VFS_OK);
     }
 
-    /* Search for all keys in range */
+    /* Search the whole range; results must come back in sorted key order. */
     ctx->search_count = 0;
     chimera_vfs_search_keys(
         ctx->vfs_thread,
@@ -250,6 +256,7 @@ test_search_keys(struct test_ctx *ctx)
         strlen("search_aaa"),
         "search_zzz",
         strlen("search_zzz"),
+        0,
         search_keys_callback,
         search_keys_complete,
         ctx);
@@ -257,6 +264,47 @@ test_search_keys(struct test_ctx *ctx)
     wait_for_completion(ctx);
     assert(ctx->status == CHIMERA_VFS_OK);
     assert(ctx->search_count == num_keys);
+
+    for (int i = 0; i < num_keys; i++) {
+        assert(ctx->search_key_lens[i] == strlen(keys[i]));
+        assert(memcmp(ctx->search_keys[i], keys[i], ctx->search_key_lens[i]) == 0);
+    }
+
+    /* Inclusive end: a range ending exactly on "search_ccc" returns it. */
+    ctx->search_count = 0;
+    chimera_vfs_search_keys(
+        ctx->vfs_thread,
+        "search_aaa",
+        strlen("search_aaa"),
+        "search_ccc",
+        strlen("search_ccc"),
+        0,
+        search_keys_callback,
+        search_keys_complete,
+        ctx);
+
+    wait_for_completion(ctx);
+    assert(ctx->status == CHIMERA_VFS_OK);
+    assert(ctx->search_count == 3); /* aaa, bbb, ccc */
+
+    /* Exclusive end: the same range drops the key equal to the end bound. */
+    ctx->search_count = 0;
+    chimera_vfs_search_keys(
+        ctx->vfs_thread,
+        "search_aaa",
+        strlen("search_aaa"),
+        "search_ccc",
+        strlen("search_ccc"),
+        CHIMERA_VFS_SEARCH_KEYS_END_EXCLUSIVE,
+        search_keys_callback,
+        search_keys_complete,
+        ctx);
+
+    wait_for_completion(ctx);
+    assert(ctx->status == CHIMERA_VFS_OK);
+    assert(ctx->search_count == 2); /* aaa, bbb */
+    assert(ctx->search_key_lens[1] == strlen("search_bbb"));
+    assert(memcmp(ctx->search_keys[1], "search_bbb", strlen("search_bbb")) == 0);
 
     /* Cleanup */
     for (int i = 0; i < num_keys; i++) {

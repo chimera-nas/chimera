@@ -146,6 +146,7 @@ search_for_single_key(
         strlen(key),
         end_key,
         strlen(end_key),
+        0,
         search_keys_callback,
         search_keys_complete,
         ctx);

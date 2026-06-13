@@ -327,6 +327,15 @@ typedef void (*chimera_vfs_delete_key_callback_t)(
     enum chimera_vfs_error error_code,
     void                  *private_data);
 
+/* Flags for chimera_vfs_search_keys / chimera_vfs_search_keys_at.
+ *
+ * By default the range searched is [start_key, end_key] (both bounds
+ * inclusive).  END_EXCLUSIVE makes the end bound exclusive, i.e. the range
+ * becomes [start_key, end_key); a key byte-equal to end_key is not returned.
+ * The flag has no effect when no end key is supplied (the range is then
+ * open-ended). */
+#define CHIMERA_VFS_SEARCH_KEYS_END_EXCLUSIVE 0x00000001U
+
 /* Returns non-zero to abort the search */
 typedef int (*chimera_vfs_search_keys_callback_t)(
     const void *key,
@@ -877,6 +886,7 @@ struct chimera_vfs_request {
             uint32_t                           start_key_len;
             const void                        *end_key;
             uint32_t                           end_key_len;
+            uint32_t                           flags;
             chimera_vfs_search_keys_callback_t callback;
         } search_keys;
 

@@ -4451,6 +4451,7 @@ cairn_search_keys(
     size_t                             key_len, value_len;
     int                                rc;
     chimera_vfs_search_keys_callback_t callback = request->search_keys.callback;
+    uint32_t                           flags    = request->search_keys.flags;
 
     if (request->search_keys.start_key_len > CAIRN_KV_KEY_MAX ||
         request->search_keys.end_key_len > CAIRN_KV_KEY_MAX) {
@@ -4488,11 +4489,20 @@ cairn_search_keys(
             break;
         }
 
-        /* Check if key is past end key (if end key specified) */
+        /* Check if key is past end key (if end key specified).  With
+         * END_EXCLUSIVE, a key byte-equal to end_kv_key is itself past the
+         * range and stops the scan. */
         if (request->search_keys.end_key_len > 0) {
-            if (key_len > end_kv_key_len ||
-                (key_len == end_kv_key_len &&
-                 memcmp(key, end_kv_key, end_kv_key_len) > 0)) {
+            int past = 0;
+
+            if (key_len > end_kv_key_len) {
+                past = 1;
+            } else if (key_len == end_kv_key_len) {
+                int c = memcmp(key, end_kv_key, end_kv_key_len);
+                past = (flags & CHIMERA_VFS_SEARCH_KEYS_END_EXCLUSIVE) ? (c >= 0) : (c > 0);
+            }
+
+            if (past) {
                 break;
             }
         }
