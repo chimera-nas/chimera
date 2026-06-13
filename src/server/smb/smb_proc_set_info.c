@@ -235,6 +235,20 @@ chimera_smb_set_info(struct chimera_smb_request *request)
             switch (request->set_info.info_class) {
                 case SMB2_FILE_BASIC_INFO:
 
+                    /* FILE_ATTRIBUTE_TEMPORARY is meaningful only for a data
+                     * stream; a directory has none, so setting it on a directory
+                     * is STATUS_INVALID_PARAMETER (MS-FSCC 2.6 / smb2.create
+                     * dosattr_tmp_dir). */
+                    if ((request->set_info.open_file->flags &
+                         CHIMERA_SMB_OPEN_FILE_FLAG_DIRECTORY) &&
+                        (request->set_info.attrs.smb_attributes &
+                         SMB2_FILE_ATTRIBUTE_TEMPORARY)) {
+                        chimera_smb_open_file_release(request, request->set_info.open_file);
+                        chimera_smb_complete_request(request,
+                                                     SMB2_STATUS_INVALID_PARAMETER);
+                        break;
+                    }
+
                     chimera_smb_unmarshal_basic_info(&request->set_info.attrs, &request->set_info.vfs_attrs);
 
                     /* An explicit (non-sentinel) write-time set hands control of

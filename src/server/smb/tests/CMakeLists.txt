@@ -1282,9 +1282,12 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.create.brlocked
     smb2.create.delete
     smb2.create.dir-alloc-size
+    smb2.create.dosattr_tmp_dir
+    smb2.create.impersonation
     smb2.create.leading-slash
     smb2.create.mkdir-dup
     smb2.create.multi
+    smb2.create.open
     smb2.create.path-length
     # smb2.create_no_streams
     smb2.create_no_streams.no_stream
@@ -1722,6 +1725,8 @@ set(SMBTORTURE_ENABLED_linux
     smb2.create.brlocked
     smb2.create.delete
     smb2.create.dir-alloc-size
+    smb2.create.dosattr_tmp_dir
+    smb2.create.impersonation
     smb2.create.leading-slash
     smb2.create.mkdir-dup
     smb2.create.multi
@@ -2040,6 +2045,8 @@ set(SMBTORTURE_ENABLED_io_uring
     smb2.create.brlocked
     smb2.create.delete
     smb2.create.dir-alloc-size
+    smb2.create.dosattr_tmp_dir
+    smb2.create.impersonation
     smb2.create.leading-slash
     smb2.create.mkdir-dup
     smb2.create.multi
@@ -2368,9 +2375,12 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.create.brlocked
     smb2.create.delete
     smb2.create.dir-alloc-size
+    smb2.create.dosattr_tmp_dir
+    smb2.create.impersonation
     smb2.create.leading-slash
     smb2.create.mkdir-dup
     smb2.create.multi
+    smb2.create.open
     smb2.create.path-length
     # smb2.create_no_streams
     smb2.create_no_streams.no_stream
@@ -2747,9 +2757,12 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.create.brlocked
     smb2.create.delete
     smb2.create.dir-alloc-size
+    smb2.create.dosattr_tmp_dir
+    smb2.create.impersonation
     smb2.create.leading-slash
     smb2.create.mkdir-dup
     smb2.create.multi
+    smb2.create.open
     smb2.create.path-length
     # smb2.create_no_streams
     smb2.create_no_streams.no_stream
@@ -3130,9 +3143,12 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     smb2.create.brlocked
     smb2.create.delete
     smb2.create.dir-alloc-size
+    smb2.create.dosattr_tmp_dir
+    smb2.create.impersonation
     smb2.create.leading-slash
     smb2.create.mkdir-dup
     smb2.create.multi
+    smb2.create.open
     smb2.create.path-length
     # smb2.create_no_streams
     smb2.create_no_streams.no_stream

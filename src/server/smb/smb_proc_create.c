@@ -3345,6 +3345,38 @@ chimera_smb_create(struct chimera_smb_request *request)
             return;
         }
 
+        /* MS-SMB2 2.2.13 / MS-FSA CreateOptions validation (smb2.create.gentest).
+        * An undefined high CreateOptions bit is STATUS_INVALID_PARAMETER; a
+        * defined-but-unsupported one (TREE_CONNECTION / OPEN_BY_FILE_ID /
+        * RESERVE_OPFILTER) is STATUS_NOT_SUPPORTED.  INVALID takes precedence. */
+        if (request->create.create_options & SMB2_CREATE_OPTIONS_INVALID_MASK) {
+            chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+            return;
+        }
+        if (request->create.create_options & SMB2_CREATE_OPTIONS_UNSUPPORTED_MASK) {
+            chimera_smb_complete_request(request, SMB2_STATUS_NOT_SUPPORTED);
+            return;
+        }
+
+        /* MS-FSCC 2.6 FileAttributes validation (smb2.create.gentest).  Any bit
+        * outside the settable/valid set -- e.g. FILE_ATTRIBUTE_VOLUME (0x08) or
+        * FILE_ATTRIBUTE_DEVICE (0x40) -- is rejected with INVALID_PARAMETER. */
+        if (request->create.file_attributes & ~SMB2_CREATE_FILE_ATTR_VALID_MASK) {
+            chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+            return;
+        }
+
+        /* MS-SMB2 2.2.13: ImpersonationLevel must be one of the four defined
+         * SECURITY_IMPERSONATION_LEVEL values (0..3); anything else is
+         * STATUS_BAD_IMPERSONATION_LEVEL (smb2.create.impersonation).  A durable
+         * reconnect carries a don't-care sentinel and was already dispatched
+         * above, so this only applies to a fresh open. */
+        if (request->create.impersonation_level > SMB2_IMPERSONATION_DELEGATE) {
+            chimera_smb_complete_request(request,
+                                         SMB2_STATUS_BAD_IMPERSONATION_LEVEL);
+            return;
+        }
+
         /* MS-SMB2 3.3.5.9: if FILE_DELETE_ON_CLOSE is set in CreateOptions,
          * the create must also request DELETE access (DELETE, GENERIC_ALL, or
          * MAXIMUM_ALLOWED, which resolves to a superset). Otherwise fail with
@@ -4149,9 +4181,10 @@ chimera_smb_parse_create(
         return chimera_smb_parse_reject(request, SMB2_STATUS_INVALID_PARAMETER);
     }
 
-    /* ImpersonationLevel is advisory and Windows servers do not validate it
-     * (a durable reconnect, for one, fills it with a don't-care sentinel) — so
-     * accept any value rather than returning STATUS_BAD_IMPERSONATION_LEVEL. */
+    /* ImpersonationLevel is range-validated (0..3 -> else
+     * STATUS_BAD_IMPERSONATION_LEVEL) in the dispatcher chimera_smb_create, after
+     * the durable-reconnect short-circuit (a reconnect carries a don't-care
+     * sentinel and must not be validated). */
 
     if (request->create.name_len >= SMB_FILENAME_MAX) {
         chimera_smb_error("Create request: UTF-16 name too long (%u bytes)",
