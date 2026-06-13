@@ -24,6 +24,7 @@
 #include "nfs4_session.h"
 #include "nfs4_recovery.h"
 #include "nfs4_drc.h"
+#include "nfs3_drc.h"
 #include "nfs4_state.h"
 #include "nfs_kv_keys.h"
 
@@ -327,6 +328,229 @@ test_cross_reboot_replay(void)
     printf("ok: cross_reboot_replay\n");
 } /* test_cross_reboot_replay */
 
+/* ------------------------------------------------------------------ *
+*  NFSv3 DRC                                                          *
+* ------------------------------------------------------------------ */
+
+/* Build the keybuf the dispatch path would for a given client/xid/proc/body. */
+static struct nfs3_drc_keybuf
+nfs3_make_key(
+    const char*addr,
+    uint32_t   proc,
+    uint32_t   xid,
+    const void*body,
+    uint32_t   body_len)
+{
+    struct nfs3_drc_keybuf k;
+
+    memset(&k,0,sizeof(k));
+    k.addr_len = (uint8_t) strlen(addr);
+    memcpy(k.addr,addr,k.addr_len);
+    k.proc  = proc;
+    k.xid   = xid;
+    k.cksum = nfs3_drc_checksum(body,body_len);
+    return k;
+} /* nfs3_make_key */
+
+static void
+test_nfs3_key_encoding(void)
+{
+    struct nfs3_drc_keybuf k = nfs3_make_key("10.1.2.3",9,0x11223344,
+                                             "abc",3);
+    uint8_t                buf[CHIMERA_KV_NFS3_REPLY_KEY_MAX];
+    uint32_t               klen,p;
+
+    klen = nfs_kv_nfs3_reply_key(buf,k.addr,k.addr_len,k.proc,k.xid,
+                                 k.cksum);
+
+    /* header */
+    CHECK(buf[0] == CHIMERA_KV_MAGIC);
+    CHECK(buf[1] == CHIMERA_KV_VERSION);
+    CHECK(buf[2] == CHIMERA_KV_TYPE_NFS3_REPLY);
+    /* addr_len + addr */
+    p = CHIMERA_KV_HDR_LEN;
+    CHECK(buf[p] == k.addr_len);
+    p++;
+    CHECK(memcmp(buf + p,"10.1.2.3",8) == 0);
+    p += k.addr_len;
+    /* proc, xid (LE32), cksum (LE64) */
+    CHECK(nfs_kv_le32(buf + p) == 9); p          += 4;
+    CHECK(nfs_kv_le32(buf + p) == 0x11223344); p += 4;
+    CHECK(nfs_kv_le64(buf + p) == k.cksum); p    += 8;
+    CHECK(klen == p);
+    CHECK(klen <= CHIMERA_KV_NFS3_REPLY_KEY_MAX);
+
+    printf("ok: nfs3_key_encoding\n");
+} /* test_nfs3_key_encoding */
+
+static void
+test_nfs3_checksum_and_cacheable(void)
+{
+    /* Deterministic + sensitive to content. */
+    CHECK(nfs3_drc_checksum("hello",5) == nfs3_drc_checksum("hello",5));
+    CHECK(nfs3_drc_checksum("hello",5) != nfs3_drc_checksum("hellp",5));
+    CHECK(nfs3_drc_checksum("hello",5) != nfs3_drc_checksum("hell",4));
+
+    /* Non-idempotent ops are cached; idempotent ones bypass. */
+    CHECK(nfs3_drc_proc_cacheable(9));   /* MKDIR   */
+    CHECK(nfs3_drc_proc_cacheable(8));   /* CREATE  */
+    CHECK(nfs3_drc_proc_cacheable(12));  /* REMOVE  */
+    CHECK(nfs3_drc_proc_cacheable(14));  /* RENAME  */
+    CHECK(nfs3_drc_proc_cacheable(2));   /* SETATTR */
+    CHECK(!nfs3_drc_proc_cacheable(0));  /* NULL    */
+    CHECK(!nfs3_drc_proc_cacheable(1));  /* GETATTR */
+    CHECK(!nfs3_drc_proc_cacheable(6));  /* READ    */
+    CHECK(!nfs3_drc_proc_cacheable(7));  /* WRITE   */
+    CHECK(!nfs3_drc_proc_cacheable(21)); /* COMMIT  */
+
+    printf("ok: nfs3_checksum_and_cacheable\n");
+} /* test_nfs3_checksum_and_cacheable */
+
+static void
+test_nfs3_value_roundtrip(void)
+{
+    const uint8_t body[] = { 0xDE,0xAD,0xBE,0xEF,0x01,0x02 };
+    uint8_t       buf[NFS3_DRC_VALUE_HDR_LEN + sizeof(body)];
+    uint64_t      ts_in = 0x0123456789ABCDEFull,ts_out;
+    const uint8_t*out_body;
+    uint32_t      n,out_len;
+
+    n = nfs3_drc_value_serialize(buf,sizeof(buf),ts_in,body,sizeof(body));
+    CHECK(n == sizeof(buf));
+
+    CHECK(nfs3_drc_value_parse(buf,n,&ts_out,&out_body,&out_len) == 0);
+    CHECK(ts_out == ts_in);
+    CHECK(out_len == sizeof(body));
+    CHECK(memcmp(out_body,body,sizeof(body)) == 0);
+
+    /* A truncated / wrong-magic buffer is rejected, not trusted. */
+    CHECK(nfs3_drc_value_parse(buf,NFS3_DRC_VALUE_HDR_LEN - 1,&ts_out,
+                               &out_body,&out_len) != 0);
+    buf[0] ^= 0xFF;
+    CHECK(nfs3_drc_value_parse(buf,n,&ts_out,&out_body,&out_len) != 0);
+
+    printf("ok: nfs3_value_roundtrip\n");
+} /* test_nfs3_value_roundtrip */
+
+static void
+test_nfs3_cache_lookup(void)
+{
+    struct nfs3_drc        drc;
+    struct nfs3_drc_keybuf k1 = nfs3_make_key("192.168.0.9",9,7001,
+                                              "mkdir-args-A",12);
+    struct nfs3_drc_keybuf k2 = nfs3_make_key("192.168.0.9",9,7002,
+                                              "mkdir-args-B",12);
+    const uint8_t          reply[] = "REPLY-BYTES-FOR-K1";
+    uint8_t               *out;
+    uint32_t               out_len;
+
+    nfs3_drc_init(&drc);
+
+    /* Miss on an empty cache. */
+    CHECK(nfs3_drc_cache_lookup(&drc,&k1,&out,&out_len) == 0);
+
+    nfs3_drc_cache_insert(&drc,&k1,reply,sizeof(reply),1);
+
+    /* Hit returns the exact bytes. */
+    CHECK(nfs3_drc_cache_lookup(&drc,&k1,&out,&out_len) == 1);
+    CHECK(out_len == sizeof(reply));
+    CHECK(memcmp(out,reply,sizeof(reply)) == 0);
+    free(out);
+
+    /* A different xid (same client/proc) is a distinct identity -> miss. */
+    CHECK(nfs3_drc_cache_lookup(&drc,&k2,&out,&out_len) == 0);
+
+    /* Re-insert under the same key replaces last-writer-wins. */
+    nfs3_drc_cache_insert(&drc,&k1,"NEW",3,2);
+    CHECK(nfs3_drc_cache_lookup(&drc,&k1,&out,&out_len) == 1);
+    CHECK(out_len == 3 && memcmp(out,"NEW",3) == 0);
+    free(out);
+
+    nfs3_drc_destroy(&drc);
+    printf("ok: nfs3_cache_lookup\n");
+} /* test_nfs3_cache_lookup */
+
+/*
+ * The decisive NFSv3 check: persist a reply exactly as the capture path does
+ * (KV key + value bytes), "reboot" into a fresh cache, parse those bytes back
+ * the way the cold-start scan does, and confirm the retransmit's identity hits
+ * and replays the original reply.
+ */
+static void
+test_nfs3_cross_reboot(void)
+{
+    const char            *addr = "172.16.5.20";
+    const uint32_t         proc = 9 /* MKDIR */,xid = 0xCAFEBABE;
+    const uint8_t          args[]   = "dirfh+name+attrs";
+    const uint8_t          reply[]  = "cached MKDIR3res success body";
+    struct nfs3_drc_keybuf k_before = nfs3_make_key(addr,proc,xid,
+                                                    args,sizeof(args));
+
+    /* --- before reboot: serialize the KV key + value --- */
+    uint8_t                kvkey[CHIMERA_KV_NFS3_REPLY_KEY_MAX];
+    uint32_t               kvkey_len = nfs_kv_nfs3_reply_key(kvkey,k_before.addr,
+                                                             k_before.addr_len,k_before.proc,
+                                                             k_before.xid,k_before.cksum);
+    uint8_t                kvval[NFS3_DRC_VALUE_HDR_LEN + sizeof(reply)];
+    uint32_t               kvval_len = nfs3_drc_value_serialize(kvval,sizeof(kvval),
+                                                                0xABCDull,reply,
+                                                                sizeof(reply));
+
+    CHECK(kvval_len == sizeof(kvval));
+
+    /* --- reboot: a fresh, empty cache --- */
+    struct nfs3_drc        drc;
+
+    nfs3_drc_init(&drc);
+
+    /* --- reload: parse the persisted key back into a keybuf (mirrors
+     * nfs3_drc_reload_scan_cb), parse the value, and insert. --- */
+    struct nfs3_drc_keybuf k_after;
+    const uint8_t         *body;
+    uint64_t               ts;
+    uint32_t               body_len,p;
+    uint8_t                addr_len;
+
+    CHECK(memcmp(kvkey,(uint8_t[]) { CHIMERA_KV_MAGIC,CHIMERA_KV_VERSION,
+                                     CHIMERA_KV_TYPE_NFS3_REPLY },3) == 0);
+    addr_len = kvkey[CHIMERA_KV_HDR_LEN];
+    p        = CHIMERA_KV_HDR_LEN + 1;
+    CHECK(addr_len <= NFS3_DRC_ADDR_MAX);
+    CHECK(p + addr_len + 16 <= kvkey_len);
+
+    memset(&k_after,0,sizeof(k_after));
+    memcpy(k_after.addr,kvkey + p,addr_len);
+    k_after.addr_len = addr_len;
+    p               += addr_len;
+    k_after.proc     = nfs_kv_le32(kvkey + p); p += 4;
+    k_after.xid      = nfs_kv_le32(kvkey + p); p += 4;
+    k_after.cksum    = nfs_kv_le64(kvkey + p);
+
+    CHECK(nfs3_drc_value_parse(kvval,kvval_len,&ts,&body,&body_len) == 0);
+    nfs3_drc_cache_insert(&drc,&k_after,body,body_len,ts);
+
+    /* --- retransmit after reboot: the client re-presents an identical call.
+     * The independently-recomputed key must hit and return the cached reply. */
+    struct nfs3_drc_keybuf k_retransmit = nfs3_make_key(addr,proc,xid,
+                                                        args,sizeof(args));
+    uint8_t               *out;
+    uint32_t               out_len;
+
+    CHECK(nfs3_drc_cache_lookup(&drc,&k_retransmit,&out,&out_len) == 1);
+    CHECK(out_len == sizeof(reply));
+    CHECK(memcmp(out,reply,sizeof(reply)) == 0);
+    free(out);
+
+    /* A retransmit whose body differs (xid reuse for a new call) must NOT hit
+     * the stale entry -- the checksum disambiguates it. */
+    struct nfs3_drc_keybuf k_other = nfs3_make_key(addr,proc,xid,
+                                                   "different-args",14);
+    CHECK(nfs3_drc_cache_lookup(&drc,&k_other,&out,&out_len) == 0);
+
+    nfs3_drc_destroy(&drc);
+    printf("ok: nfs3_cross_reboot\n");
+} /* test_nfs3_cross_reboot */
+
 int
 main(void)
 {
@@ -340,6 +564,12 @@ main(void)
     test_session_record_roundtrip();
     test_reply_record_roundtrip();
     test_cross_reboot_replay();
+
+    test_nfs3_key_encoding();
+    test_nfs3_checksum_and_cacheable();
+    test_nfs3_value_roundtrip();
+    test_nfs3_cache_lookup();
+    test_nfs3_cross_reboot();
 
     printf("PASS: all nfs persistence tests\n");
     return 0;
