@@ -1630,6 +1630,18 @@ chimera_server_thread_shutdown(
 
     chimera_rest_thread_destroy(thread->rest_thread);
 
+    /* Protocol thread_destroy can issue fresh VFS operations (e.g. the SMB
+     * durable/persistent handle drain releases parked opens, NFS releases
+     * state).  For a CAP_BLOCKING backend like cairn those are posted to a
+     * shared delegation thread and completed asynchronously back to *this*
+     * vfs_thread's doorbell.  Drain again so every such late request lands
+     * before we free the vfs_thread below -- otherwise the delegation thread
+     * rings (and writes to) an already-closed doorbell and dereferences the
+     * freed thread, aborting the server.  The delegation pool is still alive
+     * here; it is not torn down until chimera_vfs_destroy, after every protocol
+     * thread has joined. */
+    chimera_vfs_thread_drain(thread->vfs_thread);
+
     evpl_remove_timer(evpl, &thread->watchdog);
     chimera_vfs_thread_destroy(thread->vfs_thread);
     free(thread);
