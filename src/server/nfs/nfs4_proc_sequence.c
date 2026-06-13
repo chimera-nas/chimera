@@ -5,6 +5,7 @@
 #include "nfs4_procs.h"
 #include "nfs4_session.h"
 #include "nfs4_state.h"
+#include "nfs4_drc.h"
 
 void
 chimera_nfs4_sequence(
@@ -24,8 +25,16 @@ chimera_nfs4_sequence(
         args->sa_sessionid);
 
     if (!session) {
-        res->sr_status = NFS4ERR_BADSESSION;
-        chimera_nfs4_compound_complete(req, NFS4ERR_BADSESSION);
+        /* The client may have failed over from another node: its session
+         * record can live in the shared KV store.  Reconstruct it lazily,
+         * holding the client off with NFS4ERR_DELAY until the (idempotent)
+         * scan settles -- the retry then finds the live session.  A sessionid
+         * that is genuinely unknown resolves to NFS4ERR_BADSESSION. */
+        nfsstat4 hs = (nfs4_drc_session_hydrate(thread, args->sa_sessionid) ==
+                       NFS4_DRC_HYDRATE_INFLIGHT) ? NFS4ERR_DELAY
+                                                  : NFS4ERR_BADSESSION;
+        res->sr_status = hs;
+        chimera_nfs4_compound_complete(req, hs);
         return;
     }
 

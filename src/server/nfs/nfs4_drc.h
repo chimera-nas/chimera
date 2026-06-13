@@ -10,6 +10,7 @@
 
 struct chimera_vfs_thread;
 struct chimera_server_nfs_thread;
+struct chimera_server_nfs_shared;
 struct nfs4_session;
 struct nfs4_client_principal;
 
@@ -19,14 +20,15 @@ struct nfs4_client_principal;
  * Write path (hot, write-only): when a persistent session caches a reply,
  * nfs4_drc_persist_reply write-throughs {sessionid,slot,seqid -> bytes} to the
  * KV store; nfs4_drc_delete_reply drops the prior seqid on slot advance.  A
- * session-metadata record (nfs4_drc_persist_session) lets the cold-start
- * reload rebuild the session -- with its original sessionid -- and its owning
- * client, so a post-restart retransmit resolves and replays.  None of these
- * read the KV store.
+ * session-metadata record (nfs4_drc_persist_session) lets a node rebuild the
+ * session -- with its original sessionid -- and its owning client, so a
+ * retransmit resolves and replays.  None of these read the KV store.
  *
- * Read path (cold start only): nfs4_drc_reload scans the session + reply bands
- * and repopulates the in-memory tables.  Driven from the recovery cold-start
- * load once the client identity set is in place.
+ * The session + reply records are keyed by the (globally unique) sessionid, not
+ * by node, so they follow a client across a failover.  Read path (lazy):
+ * nfs4_drc_session_hydrate reconstructs one session's records on demand, the
+ * first time a client presents an unknown sessionid to whatever node it
+ * reconnects to (see nfs4_proc_sequence / nfs4_proc_bind_conn_to_session).
  */
 
 /* Write-through one cached reply (fire-and-forget; copies the bytes). */
@@ -47,9 +49,9 @@ nfs4_drc_delete_reply(
     uint32_t                   slotid,
     uint32_t                   seqid);
 
-/* Persist a session's metadata so it can be reconstructed at cold start.
- * Reads owner/verifier/clientid from session->client_unified; principal and
- * channel attrs come from the CREATE_SESSION that established it. */
+/* Persist a session's metadata so it can be reconstructed on demand.  Reads
+ * owner/verifier/clientid from session->client_unified; principal and channel
+ * attrs come from the CREATE_SESSION that established it. */
 void
 nfs4_drc_persist_session(
     struct chimera_vfs_thread          *vfs_thread,
@@ -64,18 +66,36 @@ nfs4_drc_forget_session(
     struct chimera_vfs_thread *vfs_thread,
     const uint8_t             *sessionid);
 
-/* Cold-start reload: reconstruct persistent sessions (+ their owning client
- * records) and repopulate slot reply caches from the KV store.  `done` is
- * invoked (with `done_arg`) once the whole reload has completed, so the caller
- * can flip recovery to READY only after reconstruction is in place. */
-typedef void (*nfs4_drc_reload_done_t)(
-    void *arg);
-
+/* The shared dedup/negative-cache table for in-flight session hydrates. */
 void
-nfs4_drc_reload(
+nfs4_drc_hydra_init(
+    struct chimera_server_nfs_shared *shared);
+void
+nfs4_drc_hydra_destroy(
+    struct chimera_server_nfs_shared *shared);
+
+/* Lazy per-session hydrate.  When a client presents a sessionid this node has
+ * no in-memory record of, reconstruct that session (+ owning client + reply
+ * slots) from the shared KV store -- the failover path where a client lands on
+ * a node that never minted its session.
+ *
+ *   NFS4_DRC_HYDRATE_INFLIGHT  the KV scan was kicked off (or is already
+ *                              running); the caller should reply NFS4ERR_DELAY,
+ *                              and the client's retry will find the live session
+ *   NFS4_DRC_HYDRATE_ABSENT    no such session is persisted; the caller should
+ *                              reply NFS4ERR_BADSESSION
+ *
+ * Idempotent + deduplicated across concurrent callers; a genuinely unknown
+ * sessionid is negatively cached so it is not rescanned on every retry. */
+enum nfs4_drc_hydrate_result {
+    NFS4_DRC_HYDRATE_INFLIGHT = 0,
+    NFS4_DRC_HYDRATE_ABSENT   = 1,
+};
+
+enum nfs4_drc_hydrate_result
+nfs4_drc_session_hydrate(
     struct chimera_server_nfs_thread *thread,
-    nfs4_drc_reload_done_t            done,
-    void                             *done_arg);
+    const uint8_t                    *sessionid);
 
 /* ----------------------------------------------------------------------- *
 *  Session-record (de)serialization.  Exposed for unit tests; the wire     *

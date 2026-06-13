@@ -5,7 +5,7 @@
 
 # Usage: kvm_nfs3_drc_reboot_test_wrapper.sh <vmlinuz> <rootfs.qcow2> <chimera_binary>
 #
-# Cross-reboot persistence test for the NFSv3 duplicate-request cache (DRC).
+# Cross-reboot persistence test for the NFSv4.0 duplicate-request cache (DRC).
 # Exercises the reply-cache persistence end to end across a real chimera server
 # restart, backed by a persistent cairn store (initialize=true on first boot,
 # false on restart) with server.kv_module=cairn and server.nfs3_drc=true:
@@ -21,7 +21,7 @@
 #      emitted by nfs3_drc_reload_complete.  A second guest then mounts and
 #      confirms the FS is still usable.
 #
-# Passing proves: NFSv3 reply records are written to stable storage and
+# Passing proves: NFSv4.0 reply records are written to stable storage and
 # reloaded into the in-memory cache on restart -- the cross-reboot replay tier
 # the in-memory-only DRC lacks.
 
@@ -42,10 +42,10 @@ VMLINUZ=$1; shift
 ROOTFS=$1; shift
 CHIMERA_BINARY=$1; shift
 
-NETNS_NAME="kvm_nfs3drc_$$_$(date +%s%N)"
-TAP_NAME="tap3_$$"
+NETNS_NAME="kvm_nfs40drc_$$_$(date +%s%N)"
+TAP_NAME="tap40_$$"
 BUILD_DIR=$(dirname "$(dirname "$CHIMERA_BINARY")")
-SESSION_DIR=$(mktemp -d "${BUILD_DIR}/kvm_nfs3drc_session_XXXXXX")
+SESSION_DIR=$(mktemp -d "${BUILD_DIR}/kvm_nfs40drc_session_XXXXXX")
 CAIRN_DIR="${SESSION_DIR}/cairn"
 CONFIG_FILE="${SESSION_DIR}/chimera.json"
 CHIMERA_LOG="${SESSION_DIR}/chimera.log"
@@ -79,7 +79,7 @@ generate_config() {
         "threads": 4,
         "delegation_threads": 4,
         "kv_module": "cairn",
-        "nfs3_drc": true,
+        "nfs4_drc": true,
         "vfs": {
             "cairn": {
                 "config": {"initialize":${init},"path":"$CAIRN_DIR"}
@@ -141,7 +141,7 @@ run_guest() {
     local guest_cmd="$1"
     local label="$2"
     local log="${SESSION_DIR}/guest_${label}.log"
-    local mount_opts="vers=3,tcp,nconnect=16,nolock"
+    local mount_opts="vers=4.0,tcp,nconnect=16"
     local full="mount -t nfs -o ${mount_opts} 10.0.0.1:/share /mnt && ${guest_cmd}"
 
     ip netns exec "${NETNS_NAME}" "$QEMU_BIN" \
@@ -208,11 +208,11 @@ if [ "${RC2:-1}" != "0" ]; then
     FAIL=1
 fi
 
-if grep -q "conn DRC (type 0x05): hydrated" "$CHIMERA_LOG"; then
-    RELOADED=$(grep -oP 'conn DRC \(type 0x05\): hydrated \K[0-9]+' "$CHIMERA_LOG" | tail -1)
-    echo "=== chimera B hydrated ${RELOADED} NFSv3 reply record(s) for the returning client ==="
+if grep -q "conn DRC (type 0x08): hydrated" "$CHIMERA_LOG"; then
+    RELOADED=$(grep -oP 'conn DRC \(type 0x08\): hydrated \K[0-9]+' "$CHIMERA_LOG" | tail -1)
+    echo "=== chimera B hydrated ${RELOADED} NFSv4.0 reply record(s) for the returning client ==="
     if [ "${RELOADED:-0}" -lt 1 ]; then
-        echo "FAIL: no NFSv3 reply records hydrated for the returning client"
+        echo "FAIL: no NFSv4.0 reply records hydrated for the returning client"
         FAIL=1
     fi
 else
@@ -231,5 +231,5 @@ if [ "$FAIL" != "0" ]; then
     exit 1
 fi
 
-echo "PASS: NFSv3 DRC client-keyed persistence + lazy per-client hydrate"
+echo "PASS: NFSv4.0 DRC client-keyed persistence + lazy per-client hydrate"
 exit 0
