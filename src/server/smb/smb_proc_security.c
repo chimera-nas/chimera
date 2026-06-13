@@ -954,6 +954,14 @@ chimera_smb_query_emit_sd(
         return;
     }
 
+    /* MS-SMB2 3.3.5.20.3: if the security descriptor does not fit in the
+     * client-supplied OutputBufferLength, fail with STATUS_BUFFER_TOO_SMALL
+     * (smb2.getinfo.qsec_buffercheck). */
+    if (request->query_info.max_response_size < (uint32_t) sd_len) {
+        chimera_smb_complete_request(request, SMB2_STATUS_BUFFER_TOO_SMALL);
+        return;
+    }
+
     request->query_info.sec_buf_len = (uint32_t) sd_len;
     chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
 } /* chimera_smb_query_emit_sd */

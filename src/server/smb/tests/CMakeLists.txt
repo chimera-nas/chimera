@@ -1377,6 +1377,12 @@ set(SMBTORTURE_ENABLED_memfs
     # smb2.fileid
     smb2.fileid.unique
     smb2.fileid.unique-dir
+    # smb2.getinfo
+    smb2.getinfo.fsinfo
+    smb2.getinfo.granted
+    smb2.getinfo.qfile_buffercheck
+    smb2.getinfo.qfs_buffercheck
+    smb2.getinfo.qsec_buffercheck
     # smb2.ioctl-on-stream
     smb2.ioctl-on-stream
     # smb2.ioctl
@@ -1766,6 +1772,12 @@ set(SMBTORTURE_ENABLED_linux
     # smb2.fileid
     smb2.fileid.unique
     smb2.fileid.unique-dir
+    # smb2.getinfo
+    smb2.getinfo.fsinfo
+    smb2.getinfo.granted
+    smb2.getinfo.qfile_buffercheck
+    smb2.getinfo.qfs_buffercheck
+    smb2.getinfo.qsec_buffercheck
     # smb2.ioctl
     smb2.ioctl.bug14607
     smb2.ioctl.bug14788.VALIDATE_NEGOTIATE
@@ -2087,6 +2099,12 @@ set(SMBTORTURE_ENABLED_io_uring
     # smb2.fileid
     smb2.fileid.unique
     smb2.fileid.unique-dir
+    # smb2.getinfo
+    smb2.getinfo.fsinfo
+    smb2.getinfo.granted
+    smb2.getinfo.qfile_buffercheck
+    smb2.getinfo.qfs_buffercheck
+    smb2.getinfo.qsec_buffercheck
     # smb2.ioctl
     smb2.ioctl.bug14607
     smb2.ioctl.bug14788.VALIDATE_NEGOTIATE
@@ -2474,6 +2492,12 @@ set(SMBTORTURE_ENABLED_cairn
     # smb2.fileid
     smb2.fileid.unique
     smb2.fileid.unique-dir
+    # smb2.getinfo
+    smb2.getinfo.fsinfo
+    smb2.getinfo.granted
+    smb2.getinfo.qfile_buffercheck
+    smb2.getinfo.qfs_buffercheck
+    smb2.getinfo.qsec_buffercheck
     # smb2.ioctl
     smb2.ioctl.bug14607
     smb2.ioctl.bug14788.VALIDATE_NEGOTIATE
@@ -2907,6 +2931,12 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     # smb2.fileid
     smb2.fileid.unique
     smb2.fileid.unique-dir
+    # smb2.getinfo
+    smb2.getinfo.fsinfo
+    smb2.getinfo.granted
+    smb2.getinfo.qfile_buffercheck
+    smb2.getinfo.qfs_buffercheck
+    smb2.getinfo.qsec_buffercheck
     # smb2.ioctl
     smb2.ioctl.bug14607
     smb2.ioctl.bug14788.VALIDATE_NEGOTIATE
@@ -3339,6 +3369,12 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     # smb2.fileid
     smb2.fileid.unique
     smb2.fileid.unique-dir
+    # smb2.getinfo
+    smb2.getinfo.fsinfo
+    smb2.getinfo.granted
+    smb2.getinfo.qfile_buffercheck
+    smb2.getinfo.qfs_buffercheck
+    smb2.getinfo.qsec_buffercheck
     # smb2.ioctl
     smb2.ioctl.bug14607
     smb2.ioctl.bug14788.VALIDATE_NEGOTIATE
