@@ -1179,6 +1179,22 @@ chimera_smb_durable_claim(
     bool                             *r_cold,
     bool                             *r_retry,
     uint32_t                         *status);
+
+/* Classification of a DH2Q create_guid replay against the durable registry. */
+enum chimera_smb_guid_replay_result {
+    CHIMERA_SMB_GUID_REPLAY_NONE = 0,  /* no match -- proceed with a fresh create */
+    CHIMERA_SMB_GUID_REPLAY_RECLAIM,   /* parked open reclaimed -> *r_open_file */
+    CHIMERA_SMB_GUID_REPLAY_DUPLICATE, /* live open on another conn -> DUPLICATE_OBJECTID */
+};
+
+enum chimera_smb_guid_replay_result
+chimera_smb_durable_claim_by_guid(
+    struct chimera_server_smb_shared *shared,
+    const uint8_t                    *create_guid,
+    const uint8_t                    *client_guid,
+    const struct chimera_smb_conn    *req_conn,
+    int                               is_replay,
+    struct chimera_smb_open_file    **r_open_file);
 void
 chimera_smb_durable_sweep(
     struct chimera_server_smb_thread *thread);
@@ -2105,6 +2121,13 @@ chimera_smb_open_file_resolve(
     if (likely(open_file)) {
         if (likely(!(open_file->flags & CHIMERA_SMB_OPEN_FILE_CLOSED))) {
             open_file->refcnt++;
+            /* A non-replay request operating on a durable open ends its
+             * replay-eligibility window (MS-SMB2 3.3.5.9.10): a later replayed
+             * create that matches this handle is then treated as a normal open
+             * (smb2.replay.replay-twice-durable). */
+            if (!request->is_replay) {
+                open_file->flags &= ~CHIMERA_SMB_OPEN_FILE_REPLAY_ELIGIBLE;
+            }
         } else {
             open_file = NULL;
         }
