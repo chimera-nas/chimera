@@ -26,10 +26,28 @@
  * resolves that FileId within the same session to find the source handle.
  */
 
-/* MS-SMB2 server-side copy limits (2.2.32.1). */
-#define CHIMERA_SMB_CC_MAX_CHUNKS    16
+/* MS-SMB2 server-side copy limits (2.2.32.1):
+ *   MaxChunkCount  = 256
+ *   MaxChunkSize   = 1 MiB
+ *   TotalSizeLimit = 16 MiB
+ * A request that exceeds any of these is answered with STATUS_INVALID_PARAMETER
+ * and a SRV_COPYCHUNK_RESPONSE whose ChunksWritten / ChunkBytesWritten /
+ * TotalBytesWritten advertise these maxima so the client resubmits within them
+ * (MS-SMB2 3.3.5.15.6). */
+#define CHIMERA_SMB_CC_MAX_CHUNKS    256
 #define CHIMERA_SMB_CC_MAX_CHUNK_LEN (1024 * 1024)
 #define CHIMERA_SMB_CC_MAX_TOTAL_LEN (16 * 1024 * 1024)
+
+/* Fail a COPYCHUNK with STATUS_INVALID_PARAMETER while attaching the limit
+ * SRV_COPYCHUNK_RESPONSE body (see above). */
+static void
+chimera_smb_copychunk_limit_fail(struct chimera_smb_request *request)
+{
+    request->ioctl.cc_chunks_written = CHIMERA_SMB_CC_MAX_CHUNKS;
+    request->ioctl.cc_total_written  = CHIMERA_SMB_CC_MAX_TOTAL_LEN;
+    request->ioctl.cc_limit_response = 1;
+    chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+} /* chimera_smb_copychunk_limit_fail */
 
 static void chimera_smb_copychunk_next(
     struct chimera_smb_request *request);
@@ -98,6 +116,18 @@ chimera_smb_copychunk_cb(
     chimera_smb_copychunk_next(request);
 } /* chimera_smb_copychunk_cb */
 
+/* Emit the SRV_COPYCHUNK_RESPONSE body (reporting progress so far) alongside an
+ * error status.  Used for both the over-limit STATUS_INVALID_PARAMETER and the
+ * past-EOF STATUS_INVALID_VIEW_SIZE replies (MS-SMB2 3.3.5.15.6). */
+static void
+chimera_smb_copychunk_error_with_body(
+    struct chimera_smb_request *request,
+    uint32_t                    status)
+{
+    request->ioctl.cc_limit_response = 1;
+    chimera_smb_copychunk_done(request, status);
+} /* chimera_smb_copychunk_error_with_body */
+
 /* Issue the next pending chunk, or finish if all are done. */
 static void
 chimera_smb_copychunk_next(struct chimera_smb_request *request)
@@ -107,6 +137,15 @@ chimera_smb_copychunk_next(struct chimera_smb_request *request)
 
     if (i >= request->ioctl.cc_chunk_count) {
         chimera_smb_copychunk_done(request, SMB2_STATUS_SUCCESS);
+        return;
+    }
+
+    /* A chunk whose source range extends past EOF is rejected with
+     * STATUS_INVALID_VIEW_SIZE; any earlier chunks have already been copied, so
+     * the response body reports that partial progress. */
+    if (request->ioctl.cc_chunks[i].src_offset +
+        request->ioctl.cc_chunks[i].length > request->ioctl.cc_src_size) {
+        chimera_smb_copychunk_error_with_body(request, SMB2_STATUS_INVALID_VIEW_SIZE);
         return;
     }
 
@@ -124,6 +163,29 @@ chimera_smb_copychunk_next(struct chimera_smb_request *request)
         request);
 } /* chimera_smb_copychunk_next */
 
+/* Source size resolved: kick off the per-chunk copy (each chunk's read range is
+ * validated against EOF in chimera_smb_copychunk_next). */
+static void
+chimera_smb_copychunk_src_getattr_cb(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct chimera_smb_request *request = private_data;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_smb_copychunk_done(request, SMB2_STATUS_INVALID_PARAMETER);
+        return;
+    }
+
+    request->ioctl.cc_src_size = (attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE)
+                                 ? attr->va_size : 0;
+
+    /* Per-chunk EOF validation happens in chimera_smb_copychunk_next so any
+     * earlier chunks are copied before a past-EOF chunk fails. */
+    chimera_smb_copychunk_next(request);
+} /* chimera_smb_copychunk_src_getattr_cb */
+
 void
 chimera_smb_ioctl_copychunk(struct chimera_smb_request *request)
 {
@@ -136,24 +198,39 @@ chimera_smb_ioctl_copychunk(struct chimera_smb_request *request)
     request->ioctl.cc_chunk_idx      = 0;
     request->ioctl.cc_chunks_written = 0;
     request->ioctl.cc_total_written  = 0;
+    request->ioctl.cc_limit_response = 0;
 
-    if (request->ioctl.cc_chunk_count == 0 ||
-        request->ioctl.cc_chunk_count > CHIMERA_SMB_CC_MAX_CHUNKS) {
+    if (request->ioctl.cc_chunk_count == 0) {
         chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+        return;
+    }
+
+    /* The client must offer room for the 12-byte SRV_COPYCHUNK_RESPONSE
+     * (MS-SMB2 3.3.5.15.6): too small a MaxOutputResponse is INVALID_PARAMETER. */
+    if (request->ioctl.max_output_response < 12) {
+        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+        return;
+    }
+
+    /* Over-limit requests (too many chunks, an oversize chunk, or an oversize
+     * aggregate) must report the server limits so the client resubmits within
+     * them (MS-SMB2 2.2.32.1 / 3.3.5.15.6). */
+    if (request->ioctl.cc_chunk_count > CHIMERA_SMB_CC_MAX_CHUNKS) {
+        chimera_smb_copychunk_limit_fail(request);
         return;
     }
 
     for (i = 0; i < request->ioctl.cc_chunk_count; i++) {
         if (request->ioctl.cc_chunks[i].length == 0 ||
             request->ioctl.cc_chunks[i].length > CHIMERA_SMB_CC_MAX_CHUNK_LEN) {
-            chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+            chimera_smb_copychunk_limit_fail(request);
             return;
         }
         total += request->ioctl.cc_chunks[i].length;
     }
 
     if (total > CHIMERA_SMB_CC_MAX_TOTAL_LEN) {
-        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+        chimera_smb_copychunk_limit_fail(request);
         return;
     }
 
@@ -174,8 +251,37 @@ chimera_smb_ioctl_copychunk(struct chimera_smb_request *request)
         return;
     }
 
+    /* Access enforcement (MS-SMB2 3.3.5.15.6):
+     *   - the source open must permit reading (FILE_READ_DATA or FILE_EXECUTE);
+     *   - the destination open must permit writing (FILE_WRITE_DATA or
+     *     FILE_APPEND_DATA);
+     *   - FSCTL_SRV_COPYCHUNK additionally requires read access on the
+     *     destination (FILE_READ_DATA), whereas FSCTL_SRV_COPYCHUNK_WRITE does
+     *     not.
+     * A shortfall is rejected with STATUS_ACCESS_DENIED. */
+    uint32_t dst_required = SMB2_FILE_WRITE_DATA | SMB2_FILE_APPEND_DATA;
+
+    if (!(src_open_file->granted_access &
+          (SMB2_FILE_READ_DATA | SMB2_FILE_EXECUTE)) ||
+        !(dst_open_file->granted_access & dst_required) ||
+        (request->ioctl.ctl_code == SMB2_FSCTL_SRV_COPYCHUNK &&
+         !(dst_open_file->granted_access & SMB2_FILE_READ_DATA))) {
+        chimera_smb_open_file_release(request, src_open_file);
+        chimera_smb_open_file_release(request, dst_open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_ACCESS_DENIED);
+        return;
+    }
+
     request->ioctl.cc_dst_open_file = dst_open_file;
     request->ioctl.cc_src_open_file = src_open_file;
 
-    chimera_smb_copychunk_next(request);
+    /* Fetch the source size first so a chunk reading past EOF can be rejected
+     * with STATUS_INVALID_VIEW_SIZE before any data is copied. */
+    chimera_vfs_getattr(
+        request->compound->thread->vfs_thread,
+        &request->session_handle->session->cred,
+        src_open_file->handle,
+        CHIMERA_VFS_ATTR_MASK_STAT,
+        chimera_smb_copychunk_src_getattr_cb,
+        request);
 } /* chimera_smb_ioctl_copychunk */

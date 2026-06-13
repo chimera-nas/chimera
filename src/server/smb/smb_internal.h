@@ -699,7 +699,17 @@ struct chimera_smb_request {
             uint32_t                        cc_chunk_idx;
             uint32_t                        cc_chunks_written;
             uint64_t                        cc_total_written;
-#define CHIMERA_SMB_COPYCHUNK_MAX 16
+            /* Source file size, fetched before copying so an out-of-range chunk
+             * (src_offset + length beyond EOF) can be rejected with
+             * STATUS_INVALID_VIEW_SIZE (MS-SMB2 3.3.5.15.6). */
+            uint64_t                        cc_src_size;
+            /* When set, the COPYCHUNK error reply (STATUS_INVALID_PARAMETER on a
+             * limit violation or STATUS_INVALID_VIEW_SIZE past EOF, MS-SMB2
+             * 2.2.32.1/3.3.5.15.6) is still emitted as a full IOCTL Response
+             * whose 12-byte output buffer carries a SRV_COPYCHUNK_RESPONSE
+             * (progress/limits) so the client can react and resubmit. */
+            uint8_t                         cc_limit_response;
+#define CHIMERA_SMB_COPYCHUNK_MAX 256
             struct {
                 uint64_t src_offset;
                 uint64_t dst_offset;

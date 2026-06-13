@@ -336,6 +336,7 @@ chimera_smb_ioctl_reply(
     } /* switch */
 
     evpl_iovec_cursor_append_uint16(reply_cursor, SMB2_IOCTL_REPLY_SIZE);
+    evpl_iovec_cursor_append_uint16(reply_cursor, 0); /* Reserved (MS-SMB2 2.2.32) */
     evpl_iovec_cursor_append_uint32(reply_cursor, request->ioctl.ctl_code);
     evpl_iovec_cursor_append_uint64(reply_cursor, 0xffffffffffffffffULL); /* file_id.pid */
     evpl_iovec_cursor_append_uint64(reply_cursor, 0xffffffffffffffffULL); /* file_id.vid */
@@ -477,6 +478,10 @@ chimera_smb_parse_ioctl(
 
     /* SET_SPARSE with no input buffer means SetSparse = TRUE. */
     request->ioctl.sp_set_sparse = 1;
+
+    /* Default: no COPYCHUNK limit body on the error reply (set only when an
+     * over-limit COPYCHUNK is rejected). */
+    request->ioctl.cc_limit_response = 0;
 
     /* Parse IOCTL-specific input data if present */
     if (request->ioctl.input_count > 0) {

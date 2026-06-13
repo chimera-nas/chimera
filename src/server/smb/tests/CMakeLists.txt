@@ -1408,15 +1408,21 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.ioctl.compress_set_file_attr
     smb2.ioctl.copy_chunk_across_shares2
     smb2.ioctl.copy_chunk_append
+    smb2.ioctl.copy_chunk_bad_access
     smb2.ioctl.copy_chunk_bad_key
     smb2.ioctl.copy_chunk_bug15644
+    smb2.ioctl.copy_chunk_limits
+    smb2.ioctl.copy_chunk_max_output_sz
     smb2.ioctl.copy_chunk_multi
     smb2.ioctl.copy_chunk_overwrite
     smb2.ioctl.copy_chunk_simple
     smb2.ioctl.copy_chunk_sparse_dest
+    smb2.ioctl.copy_chunk_src_exceed
+    smb2.ioctl.copy_chunk_src_exceed_multi
     smb2.ioctl.copy_chunk_src_is_dest
     smb2.ioctl.copy_chunk_tiny
     smb2.ioctl.copy_chunk_write_access
+    smb2.ioctl.copy_chunk_zero_length
     smb2.ioctl.dup_extents_bad_handle
     smb2.ioctl.dup_extents_compressed_dest
     smb2.ioctl.dup_extents_compressed_src
@@ -1802,15 +1808,21 @@ set(SMBTORTURE_ENABLED_linux
     smb2.ioctl.compress_set_file_attr
     smb2.ioctl.copy_chunk_across_shares2
     smb2.ioctl.copy_chunk_append
+    smb2.ioctl.copy_chunk_bad_access
     smb2.ioctl.copy_chunk_bad_key
     smb2.ioctl.copy_chunk_bug15644
+    smb2.ioctl.copy_chunk_limits
+    smb2.ioctl.copy_chunk_max_output_sz
     smb2.ioctl.copy_chunk_multi
     smb2.ioctl.copy_chunk_overwrite
     smb2.ioctl.copy_chunk_simple
     smb2.ioctl.copy_chunk_sparse_dest
+    smb2.ioctl.copy_chunk_src_exceed
+    smb2.ioctl.copy_chunk_src_exceed_multi
     smb2.ioctl.copy_chunk_src_is_dest
     smb2.ioctl.copy_chunk_tiny
     smb2.ioctl.copy_chunk_write_access
+    smb2.ioctl.copy_chunk_zero_length
     smb2.ioctl.dup_extents_bad_handle
     smb2.ioctl.dup_extents_compressed_dest
     smb2.ioctl.dup_extents_compressed_src
@@ -2129,15 +2141,21 @@ set(SMBTORTURE_ENABLED_io_uring
     smb2.ioctl.compress_set_file_attr
     smb2.ioctl.copy_chunk_across_shares2
     smb2.ioctl.copy_chunk_append
+    smb2.ioctl.copy_chunk_bad_access
     smb2.ioctl.copy_chunk_bad_key
     smb2.ioctl.copy_chunk_bug15644
+    smb2.ioctl.copy_chunk_limits
+    smb2.ioctl.copy_chunk_max_output_sz
     smb2.ioctl.copy_chunk_multi
     smb2.ioctl.copy_chunk_overwrite
     smb2.ioctl.copy_chunk_simple
     smb2.ioctl.copy_chunk_sparse_dest
+    smb2.ioctl.copy_chunk_src_exceed
+    smb2.ioctl.copy_chunk_src_exceed_multi
     smb2.ioctl.copy_chunk_src_is_dest
     smb2.ioctl.copy_chunk_tiny
     smb2.ioctl.copy_chunk_write_access
+    smb2.ioctl.copy_chunk_zero_length
     smb2.ioctl.dup_extents_bad_handle
     smb2.ioctl.dup_extents_compressed_dest
     smb2.ioctl.dup_extents_compressed_src
@@ -2521,8 +2539,23 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.ioctl.compress_query_file_attr
     smb2.ioctl.compress_set_file_attr
     smb2.ioctl.copy_chunk_across_shares2
+    smb2.ioctl.copy_chunk_append
+    smb2.ioctl.copy_chunk_bad_access
     smb2.ioctl.copy_chunk_bad_key
     smb2.ioctl.copy_chunk_bug15644
+    smb2.ioctl.copy_chunk_limits
+    smb2.ioctl.copy_chunk_max_output_sz
+    smb2.ioctl.copy_chunk_multi
+    smb2.ioctl.copy_chunk_overwrite
+    smb2.ioctl.copy_chunk_simple
+    smb2.ioctl.copy_chunk_sparse_dest
+    smb2.ioctl.copy_chunk_src_exceed
+    smb2.ioctl.copy_chunk_src_exceed_multi
+    smb2.ioctl.copy_chunk_src_is_dest
+    smb2.ioctl.copy_chunk_src_is_dest_overlap
+    smb2.ioctl.copy_chunk_tiny
+    smb2.ioctl.copy_chunk_write_access
+    smb2.ioctl.copy_chunk_zero_length
     smb2.ioctl.dup_extents_bad_handle
     smb2.ioctl.dup_extents_compressed_dest
     smb2.ioctl.dup_extents_compressed_src
@@ -2969,8 +3002,23 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.ioctl.compress_query_file_attr
     smb2.ioctl.compress_set_file_attr
     smb2.ioctl.copy_chunk_across_shares2
+    smb2.ioctl.copy_chunk_append
+    smb2.ioctl.copy_chunk_bad_access
     smb2.ioctl.copy_chunk_bad_key
     smb2.ioctl.copy_chunk_bug15644
+    smb2.ioctl.copy_chunk_limits
+    smb2.ioctl.copy_chunk_max_output_sz
+    smb2.ioctl.copy_chunk_multi
+    smb2.ioctl.copy_chunk_overwrite
+    smb2.ioctl.copy_chunk_simple
+    smb2.ioctl.copy_chunk_sparse_dest
+    smb2.ioctl.copy_chunk_src_exceed
+    smb2.ioctl.copy_chunk_src_exceed_multi
+    smb2.ioctl.copy_chunk_src_is_dest
+    smb2.ioctl.copy_chunk_src_is_dest_overlap
+    smb2.ioctl.copy_chunk_tiny
+    smb2.ioctl.copy_chunk_write_access
+    smb2.ioctl.copy_chunk_zero_length
     smb2.ioctl.dup_extents_bad_handle
     smb2.ioctl.dup_extents_compressed_dest
     smb2.ioctl.dup_extents_compressed_src
@@ -3407,8 +3455,23 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     smb2.ioctl.compress_query_file_attr
     smb2.ioctl.compress_set_file_attr
     smb2.ioctl.copy_chunk_across_shares2
+    smb2.ioctl.copy_chunk_append
+    smb2.ioctl.copy_chunk_bad_access
     smb2.ioctl.copy_chunk_bad_key
     smb2.ioctl.copy_chunk_bug15644
+    smb2.ioctl.copy_chunk_limits
+    smb2.ioctl.copy_chunk_max_output_sz
+    smb2.ioctl.copy_chunk_multi
+    smb2.ioctl.copy_chunk_overwrite
+    smb2.ioctl.copy_chunk_simple
+    smb2.ioctl.copy_chunk_sparse_dest
+    smb2.ioctl.copy_chunk_src_exceed
+    smb2.ioctl.copy_chunk_src_exceed_multi
+    smb2.ioctl.copy_chunk_src_is_dest
+    smb2.ioctl.copy_chunk_src_is_dest_overlap
+    smb2.ioctl.copy_chunk_tiny
+    smb2.ioctl.copy_chunk_write_access
+    smb2.ioctl.copy_chunk_zero_length
     smb2.ioctl.dup_extents_bad_handle
     smb2.ioctl.dup_extents_compressed_dest
     smb2.ioctl.dup_extents_compressed_src
