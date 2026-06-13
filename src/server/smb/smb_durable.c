@@ -431,6 +431,97 @@ chimera_smb_durable_claim(
     return open_file;
 } /* chimera_smb_durable_claim */
 
+/*
+ * DH2Q create_guid replay lookup (MS-SMB2 3.3.5.9.10).
+ *
+ * A CREATE that carries a DurableHandleRequestV2 (DH2Q) plus the
+ * SMB2_FLAGS_REPLAY_OPERATION header flag is a replay of the original durable
+ * create whose reply the client lost.  The durable identity is the create_guid
+ * (unlike a DH2C/DHnC reconnect, which is keyed by persistent id), so we scan
+ * the (small) registry for a matching entry and classify the outcome:
+ *
+ *   CHIMERA_SMB_GUID_REPLAY_RECLAIM  - a *parked* (disconnected) durable open of
+ *       the same client matches: warm-reclaim it (clear parked) and return the
+ *       surviving open via *r_open_file for the caller to re-home, reporting the
+ *       ORIGINAL create_action.  (durable-reconnect-replay1, replay-twice-durable)
+ *
+ *   CHIMERA_SMB_GUID_REPLAY_DUPLICATE - a *live* durable open with this
+ *       create_guid exists on a DIFFERENT connection of the same client: the
+ *       replay collides with the still-open original and is rejected with
+ *       STATUS_DUPLICATE_OBJECTID.  (durable-reconnect-replay2)
+ *
+ *   CHIMERA_SMB_GUID_REPLAY_NONE     - no registry entry carries this guid (or
+ *       the only live match is the requesting connection's own open, handled by
+ *       the live open_files scan): the caller proceeds with a fresh create.
+ */
+SYMBOL_EXPORT enum chimera_smb_guid_replay_result
+chimera_smb_durable_claim_by_guid(
+    struct chimera_server_smb_shared *shared,
+    const uint8_t                    *create_guid,
+    const uint8_t                    *client_guid,
+    const struct chimera_smb_conn    *req_conn,
+    int                               is_replay,
+    struct chimera_smb_open_file    **r_open_file)
+{
+    struct chimera_smb_durable_entry   *entry, *tmp;
+    enum chimera_smb_guid_replay_result result = CHIMERA_SMB_GUID_REPLAY_NONE;
+
+    *r_open_file = NULL;
+
+    pthread_mutex_lock(&shared->durable.lock);
+
+    HASH_ITER(hh, shared->durable.by_pid, entry, tmp)
+    {
+        if (entry->cold || !entry->open_file) {
+            continue;
+        }
+        if (memcmp(entry->create_guid, create_guid, 16) != 0) {
+            continue;
+        }
+        if (client_guid &&
+            memcmp(entry->client_guid, client_guid, 16) != 0) {
+            continue;
+        }
+
+        if (entry->parked) {
+            if (entry->open_file->flags & CHIMERA_SMB_OPEN_FILE_YIELDED) {
+                /* The disconnected open's caching state was revoked to admit a
+                 * conflicting open; it is no longer reclaimable. */
+                continue;
+            }
+            if (!is_replay) {
+                /* A non-replay create whose create_guid matches a still-durable
+                 * (parked) open of this client collides with it. */
+                result = CHIMERA_SMB_GUID_REPLAY_DUPLICATE;
+                break;
+            }
+            entry->parked = false;
+            *r_open_file  = entry->open_file;
+            result        = CHIMERA_SMB_GUID_REPLAY_RECLAIM;
+            break;
+        }
+
+        /* Live durable open with this create_guid (the caller's live open_files
+         * scan already returned any replay-eligible same-tree open).
+         *   - A different connection's open: any create here collides
+         *     (DUPLICATE_OBJECTID): durable-reconnect-replay2.
+         *   - This connection's own open reached here only because it is NOT
+         *     replay-eligible (a non-replay op has used it) or the create is not
+         *     a replay.  A non-replay create collides (DUPLICATE_OBJECTID,
+         *     replay6 @5310); an ineligible replay is "ignored" and falls
+         *     through to a fresh open (replay-twice-durable, replay6 @5288). */
+        if (entry->open_file->create_conn != req_conn || !is_replay) {
+            result = CHIMERA_SMB_GUID_REPLAY_DUPLICATE;
+            break;
+        }
+        /* else: ineligible replay on our own live open -> NONE (fresh open). */
+    }
+
+    pthread_mutex_unlock(&shared->durable.lock);
+
+    return result;
+} /* chimera_smb_durable_claim_by_guid */
+
 void
 chimera_smb_durable_sweep(struct chimera_server_smb_thread *thread)
 {

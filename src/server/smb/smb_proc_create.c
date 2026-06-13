@@ -276,9 +276,19 @@ chimera_smb_create_grant_durable(
         bool persistent = (request->create.dh2q.flags & SMB2_DHANDLE_FLAG_PERSISTENT) &&
             tree->share->continuous_availability;
 
+        /* Record the DH2Q create_guid and mark the open replay-eligible even
+         * when no durable handle is granted (e.g. the request took no
+         * batch/HANDLE-caching lease).  The replay machinery (MS-SMB2 3.3.5.9.10)
+         * keys on the create_guid the client supplied and on IsReplayEligible,
+         * not on whether a durable grant was made -- so a replayed create can be
+         * matched against a still-pending or still-eligible non-durable open
+         * (smb2.replay.dhv2-pending*-vs-* with a NONE oplock).  Eligibility is
+         * cleared by the first non-replay op on the handle. */
+        memcpy(open_file->create_guid, request->create.dh2q.create_guid, 16);
+        open_file->flags |= CHIMERA_SMB_OPEN_FILE_REPLAY_ELIGIBLE;
+
         if (has_caching || persistent) {
             open_file->durable_flags = CHIMERA_SMB_DURABLE_V2;
-            memcpy(open_file->create_guid, request->create.dh2q.create_guid, 16);
             if (persistent) {
                 open_file->durable_flags |= CHIMERA_SMB_DURABLE_PERSISTENT;
             }
@@ -1768,6 +1778,10 @@ chimera_smb_create_park_deadline_cb(
      * lease/durable decision if nothing else conflicts. */
     chimera_smb_create_resume_rearbitrate(request);
 
+    if (open_file) {
+        open_file->flags &= ~CHIMERA_SMB_OPEN_FILE_CREATE_PENDING;
+    }
+
     chimera_smb_open_file_release(request, open_file);
     /* complete_request retires the async-interim (unlink from parked_requests +
      * clear armed); the fired one-shot is already out of the timer heap so its
@@ -1849,6 +1863,15 @@ chimera_smb_create_open_finish(
             memcpy(request->create.park_fh, oh->fh, oh->fh_len);
             request->create.park_fh_len  = oh->fh_len;
             request->create.park_fh_hash = oh->fh_hash;
+            /* The CREATE is now pending on a break ack; mark the handle so a
+             * concurrent replayed DH2Q create with this create_guid is answered
+             * FILE_NOT_AVAILABLE instead of parking too (MS-SMB2 3.3.5.9.10,
+             * smb2.replay.dhv2-pending*).  Keyed on the DH2Q create_guid the
+             * client supplied -- recorded on the open even without a durable
+             * grant (so the NONE-oplock pending variants match too). */
+            if (request->create.ctx_present_mask & CHIMERA_SMB_CREATE_CTX_DH2Q) {
+                open_file->flags |= CHIMERA_SMB_OPEN_FILE_CREATE_PENDING;
+            }
             chimera_smb_async_interim_begin(request);
             /* Arm a deadline: if the holder never acks the break, fire at the
              * break timeout to revoke it and complete this open anyway (MS-SMB2
@@ -1997,6 +2020,10 @@ chimera_smb_create_resume_parked_conn(
          * holder vanished outright, lift the capped lease/durable decision
          * before the deferred reply is marshaled. */
         chimera_smb_create_resume_rearbitrate(req);
+        if (req->create.r_open_file) {
+            req->create.r_open_file->flags &=
+                ~CHIMERA_SMB_OPEN_FILE_CREATE_PENDING;
+        }
         chimera_smb_open_file_release(req, req->create.r_open_file);
         /* async_id is still set, so the final reply carries
          * SMB2_FLAGS_ASYNC_COMMAND matching the interim. */
@@ -2808,6 +2835,65 @@ chimera_smb_revalidate_tree(
 #define CHIMERA_SMB_DURABLE_RECONNECT_INTERVAL_US 20000  /* 20 ms */
 #define CHIMERA_SMB_DURABLE_RECONNECT_MAX_RETRIES 150    /* ~3 s total */
 
+/* Re-home a reclaimed (formerly parked) durable open into the reconnecting
+ * tree and emit the open reply via the create getattr callback.  Shared by the
+ * DH2C/DHnC reconnect path and the DH2Q create_guid replay-reclaim path.  When
+ * replay != 0 the reply echoes the ORIGINAL create_action (CREATED) instead of
+ * OPENED -- the replay re-presents the create that established the handle. */
+static void
+chimera_smb_durable_rehome(
+    struct chimera_smb_request   *request,
+    struct chimera_smb_open_file *open_file,
+    int                           replay)
+{
+    struct chimera_server_smb_thread *thread = request->compound->thread;
+    struct chimera_smb_tree          *tree   = request->tree;
+    int                               bucket;
+
+    /* The persistent id is unchanged; the volatile id is reissued (spec
+     * permits this).  The registry reference becomes the new tree reference; we
+     * add one more for this in-flight request, which the getattr callback
+     * releases below. */
+    open_file->flags &= ~CHIMERA_SMB_OPEN_FILE_PARKED;
+    /* A reclaimed durable open becomes replay-eligible again (MS-SMB2
+     * 3.3.5.9.10): a replayed create matching it reports the original
+     * create_action until the next non-replay op uses the handle. */
+    open_file->flags      |= CHIMERA_SMB_OPEN_FILE_REPLAY_ELIGIBLE;
+    open_file->create_conn = request->compound->conn;
+    open_file->file_id.vid = chimera_rand64();
+    open_file->refcnt      = 2;
+    /* Reseed the channel-sequence baseline from the reconnecting CREATE. */
+    open_file->channel_sequence       = request->channel_sequence;
+    open_file->channel_sequence_valid = 1;
+    /* No longer a courtesy-held disconnected holder. */
+    if (open_file->grant) {
+        open_file->grant->lease.parked = 0;
+    }
+    if (open_file->share_lease_inserted) {
+        open_file->share_lease.parked = 0;
+    }
+
+    bucket = open_file->file_id.vid & CHIMERA_SMB_OPEN_FILE_BUCKET_MASK;
+    pthread_mutex_lock(&tree->open_files_lock[bucket]);
+    HASH_ADD(hh, tree->open_files[bucket], file_id, sizeof(open_file->file_id), open_file);
+    pthread_mutex_unlock(&tree->open_files_lock[bucket]);
+
+    request->create.r_open_file        = open_file;
+    request->create.create_disposition = SMB2_FILE_OPEN; /* reply default OPENED */
+    request->create.reconnect          = 1; /* skip ACL re-check on the reply path */
+    request->create.replay             = replay; /* echo original create_action */
+    request->compound->saved_file_id   = open_file->file_id;
+
+    /* Refresh the network-open-info from the surviving handle, then reply.
+     * Reuses the normal create getattr callback (releases the request ref). */
+    chimera_vfs_getattr(thread->vfs_thread,
+                        &request->session_handle->session->cred,
+                        open_file->handle,
+                        CHIMERA_VFS_ATTR_MASK_STAT,
+                        chimera_smb_create_open_getattr_callback,
+                        request);
+} /* chimera_smb_durable_rehome */
+
 /* One durable-reclaim attempt.  Returns true if the request has been completed
  * or handed off (cold reopen / success reply / terminal failure); false if the
  * handle is still racing its previous connection's disconnect and the caller
@@ -2817,7 +2903,6 @@ chimera_smb_durable_reconnect_attempt(struct chimera_smb_request *request)
 {
     struct chimera_server_smb_thread *thread = request->compound->thread;
     struct chimera_server_smb_shared *shared = thread->shared;
-    struct chimera_smb_tree          *tree   = request->tree;
     struct chimera_smb_open_file     *open_file;
     const uint8_t                    *create_guid = NULL;
     const uint8_t                    *lease_key   = NULL;
@@ -2827,7 +2912,6 @@ chimera_smb_durable_reconnect_attempt(struct chimera_smb_request *request)
     bool                              has_lease_ctx;
     bool                              cold  = false;
     bool                              retry = false;
-    int                               bucket;
 
     if (ctx & CHIMERA_SMB_CREATE_CTX_DH2C) {
         persistent_id = request->create.dh2c.persistent;
@@ -2866,43 +2950,11 @@ chimera_smb_durable_reconnect_attempt(struct chimera_smb_request *request)
         return true;
     }
 
-    /* Re-home the surviving open into the reconnecting tree.  The persistent
-     * id is unchanged; the volatile id is reissued (spec permits this).  The
-     * registry reference becomes the new tree reference; we add one more for
-     * this in-flight request, which the getattr callback releases below. */
-    open_file->flags      &= ~CHIMERA_SMB_OPEN_FILE_PARKED;
-    open_file->create_conn = request->compound->conn;
-    open_file->file_id.vid = chimera_rand64();
-    open_file->refcnt      = 2;
-    /* Reseed the channel-sequence baseline from the reconnecting CREATE. */
-    open_file->channel_sequence       = request->channel_sequence;
-    open_file->channel_sequence_valid = 1;
-    /* No longer a courtesy-held disconnected holder. */
-    if (open_file->grant) {
-        open_file->grant->lease.parked = 0;
-    }
-    if (open_file->share_lease_inserted) {
-        open_file->share_lease.parked = 0;
-    }
-
-    bucket = open_file->file_id.vid & CHIMERA_SMB_OPEN_FILE_BUCKET_MASK;
-    pthread_mutex_lock(&tree->open_files_lock[bucket]);
-    HASH_ADD(hh, tree->open_files[bucket], file_id, sizeof(open_file->file_id), open_file);
-    pthread_mutex_unlock(&tree->open_files_lock[bucket]);
-
-    request->create.r_open_file        = open_file;
-    request->create.create_disposition = SMB2_FILE_OPEN; /* reply emits OPENED */
-    request->create.reconnect          = 1; /* skip ACL re-check on the reply path */
-    request->compound->saved_file_id   = open_file->file_id;
-
-    /* Refresh the network-open-info from the surviving handle, then reply.
-     * Reuses the normal create getattr callback (releases the request ref). */
-    chimera_vfs_getattr(thread->vfs_thread,
-                        &request->session_handle->session->cred,
-                        open_file->handle,
-                        CHIMERA_VFS_ATTR_MASK_STAT,
-                        chimera_smb_create_open_getattr_callback,
-                        request);
+    /* Re-home the surviving open into the reconnecting tree.  A pure DH2C/DHnC
+     * reconnect reports OPENED; if the reconnect ALSO carries the replay flag
+     * (the client lost the original create's reply), report the original
+     * create_action instead. */
+    chimera_smb_durable_rehome(request, open_file, request->is_replay);
     return true;
 } /* chimera_smb_durable_reconnect_attempt */
 
@@ -3104,14 +3156,38 @@ chimera_smb_create_guid_replay(struct chimera_smb_request *request)
     struct chimera_server_smb_thread *thread = request->compound->thread;
     int                               b;
     bool                              req_is_lease, open_is_lease;
+    bool                              pending_match = false;
 
-    for (b = 0; b < CHIMERA_SMB_OPEN_FILE_BUCKETS && !match; b++) {
+    for (b = 0; b < CHIMERA_SMB_OPEN_FILE_BUCKETS && !match && !pending_match; b++) {
         pthread_mutex_lock(&tree->open_files_lock[b]);
         HASH_ITER(hh, tree->open_files[b], of, tmp)
         {
+            /* A replayed durable create whose create_guid matches an open whose
+             * own CREATE is still pending on a break ack must be answered
+             * FILE_NOT_AVAILABLE (MS-SMB2 3.3.5.9.10): the original create has
+             * not completed, so we neither return its (not-yet-final) handle nor
+             * park a second time.  The pending open's ctx_present_mask is not yet
+             * populated (set on reply), so match on the durable create_guid that
+             * grant_durable already stored.  smb2.replay.dhv2-pending*. */
+            if (request->is_replay &&
+                (of->flags & CHIMERA_SMB_OPEN_FILE_CREATE_PENDING) &&
+                memcmp(of->create_guid, request->create.dh2q.create_guid, 16) == 0) {
+                pending_match = true;
+                break;
+            }
+
             if ((of->ctx_present_mask & CHIMERA_SMB_CREATE_CTX_DH2Q) &&
                 !(of->flags & (CHIMERA_SMB_OPEN_FILE_CLOSED |
                                CHIMERA_SMB_OPEN_FILE_PARKED)) &&
+                /* Only a replayed create returns the existing live open, and only
+                 * while it remains replay-eligible.  A non-replay create with a
+                 * matching create_guid, or a replay after a non-replay op cleared
+                 * eligibility, is NOT returned here (MS-SMB2 3.3.5.9.10): it falls
+                 * to the registry classification below (DUPLICATE_OBJECTID for a
+                 * non-replay collision, or a fresh open for an ineligible replay).
+                 * smb2.replay.replay-twice-durable, replay6. */
+                request->is_replay &&
+                (of->flags & CHIMERA_SMB_OPEN_FILE_REPLAY_ELIGIBLE) &&
                 memcmp(of->create_guid, request->create.dh2q.create_guid, 16) == 0) {
                 of->refcnt++;   /* held for this request; getattr cb releases it */
                 match = of;
@@ -3121,7 +3197,43 @@ chimera_smb_create_guid_replay(struct chimera_smb_request *request)
         pthread_mutex_unlock(&tree->open_files_lock[b]);
     }
 
+    if (pending_match) {
+        chimera_smb_complete_request(request, SMB2_STATUS_FILE_NOT_AVAILABLE);
+        return 1;
+    }
+
     if (!match) {
+        /* No live open in this tree returned the existing handle.  Consult the
+         * durable registry to classify the create_guid against ALL of this
+         * client's durable opens (parked or live on any connection), per
+         * MS-SMB2 3.3.5.9.10.  This covers: a replay reclaiming a parked open
+         * (durable-reconnect-replay1, replay-twice-durable); a collision with a
+         * still-live durable open -> DUPLICATE_OBJECTID (durable-reconnect-replay2,
+         * replay6); and an ineligible replay that falls through to a fresh open
+         * (replay-twice-durable, replay6). */
+        if (request->compound->thread->shared->config.persistent_handles) {
+            struct chimera_smb_open_file       *parked = NULL;
+            enum chimera_smb_guid_replay_result gr     =
+                chimera_smb_durable_claim_by_guid(
+                    request->compound->thread->shared,
+                    request->create.dh2q.create_guid,
+                    request->compound->conn->client_guid,
+                    request->compound->conn,
+                    request->is_replay,
+                    &parked);
+
+            switch (gr) {
+                case CHIMERA_SMB_GUID_REPLAY_RECLAIM:
+                    chimera_smb_durable_rehome(request, parked, /* replay */ 1);
+                    return 1;
+                case CHIMERA_SMB_GUID_REPLAY_DUPLICATE:
+                    chimera_smb_complete_request(request,
+                                                 SMB2_STATUS_DUPLICATE_OBJECTID);
+                    return 1;
+                case CHIMERA_SMB_GUID_REPLAY_NONE:
+                    break;
+            } /* switch */
+        }
         return 0;
     }
 

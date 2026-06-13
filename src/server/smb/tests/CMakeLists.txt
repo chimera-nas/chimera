@@ -1572,6 +1572,15 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.rename.simple_nodelete
     # smb2.replay
     smb2.replay.channel-sequence
+    smb2.replay.dhv2-pending1l-vs-lease-sane
+    smb2.replay.dhv2-pending1l-vs-oplock-sane
+    smb2.replay.dhv2-pending1n-vs-lease-sane
+    smb2.replay.dhv2-pending1n-vs-oplock-sane
+    smb2.replay.dhv2-pending1o-vs-lease-sane
+    smb2.replay.dhv2-pending1o-vs-oplock-sane
+    smb2.replay.durable-reconnect-replay1
+    smb2.replay.durable-reconnect-replay2
+    smb2.replay.durable-reconnect-replay3
     smb2.replay.replay-commands
     smb2.replay.replay-dhv2-lease-oplock
     smb2.replay.replay-dhv2-lease1
@@ -1580,7 +1589,9 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.replay.replay-dhv2-oplock-lease
     smb2.replay.replay-dhv2-oplock1
     smb2.replay.replay-regular
+    smb2.replay.replay-twice-durable
     smb2.replay.replay5
+    smb2.replay.replay6
     smb2.replay.replay7
     # smb2.rw
     smb2.rw.append
@@ -3124,6 +3135,15 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.rename.simple_nodelete
     # smb2.replay
     smb2.replay.channel-sequence
+    smb2.replay.dhv2-pending1l-vs-lease-sane
+    smb2.replay.dhv2-pending1l-vs-oplock-sane
+    smb2.replay.dhv2-pending1n-vs-lease-sane
+    smb2.replay.dhv2-pending1n-vs-oplock-sane
+    smb2.replay.dhv2-pending1o-vs-lease-sane
+    smb2.replay.dhv2-pending1o-vs-oplock-sane
+    smb2.replay.durable-reconnect-replay1
+    smb2.replay.durable-reconnect-replay2
+    smb2.replay.durable-reconnect-replay3
     smb2.replay.replay-commands
     smb2.replay.replay-dhv2-lease-oplock
     smb2.replay.replay-dhv2-lease1
@@ -3132,7 +3152,9 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.replay.replay-dhv2-oplock-lease
     smb2.replay.replay-dhv2-oplock1
     smb2.replay.replay-regular
+    smb2.replay.replay-twice-durable
     smb2.replay.replay5
+    smb2.replay.replay6
     smb2.replay.replay7
     # smb2.rw
     smb2.rw.append

@@ -53,6 +53,21 @@ struct chimera_smb_file_id {
  * instead, this flag makes a later durable reconnect fail with
  * OBJECT_NAME_NOT_FOUND and leaves the carcass to the grace-timer sweep. */
 #define CHIMERA_SMB_OPEN_FILE_YIELDED              0x00000080
+/* This durable open is still eligible to be returned by a DH2Q create_guid
+ * replay (MS-SMB2 3.3.5.9.10 Open.IsReplayEligible).  Set when the durable open
+ * is granted or reclaimed; cleared the first time a non-replay request operates
+ * on the handle.  Once cleared, a replayed create that matches the live open is
+ * "ignored" and handled as a normal open (reports EXISTED, not the original
+ * CREATED): smb2.replay.replay-twice-durable. */
+#define CHIMERA_SMB_OPEN_FILE_REPLAY_ELIGIBLE      0x00000100
+/* This open's CREATE is still in flight: it parked waiting for a conflicting
+ * holder to acknowledge a lease/oplock break (MS-SMB2 3.3.5.9 pending open).
+ * The handle is already in the tree (so its durable create_guid is visible) but
+ * the open has not completed.  A replayed durable create whose create_guid
+ * matches a still-pending open must be answered STATUS_FILE_NOT_AVAILABLE
+ * rather than parking a second time and timing out (MS-SMB2 3.3.5.9.10):
+ * smb2.replay.dhv2-pending*. Cleared on resume / break-deadline. */
+#define CHIMERA_SMB_OPEN_FILE_CREATE_PENDING       0x00000200
 
 /* Bits identifying which CREATE contexts a client supplied on the open. Mirrored
  * from request->create.ctx_present_mask into the open file so later phases
