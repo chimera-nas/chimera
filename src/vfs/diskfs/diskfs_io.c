@@ -3357,7 +3357,11 @@ diskfs_seek_process(struct chimera_vfs_request *request)
         if (!p->loop_have) {
             request->seek.r_offset = (p->loop_pos < inode->size) ?
                 p->loop_pos : inode->size;
-            request->seek.r_eof = 0;
+            /* The implicit hole at EOF is reached only once the returned offset
+             * meets the logical size; RFC 7862 §11.4.4 wants sr_eof TRUE there
+             * (the Linux client surfaces it to lseek).  A gap that starts before
+             * the size is a real hole short of EOF. */
+            request->seek.r_eof = (request->seek.r_offset >= inode->size);
             diskfs_op_ok(request, p->txn);
             return;
         }
