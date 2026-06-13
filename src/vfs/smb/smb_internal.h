@@ -293,13 +293,34 @@ chimera_smb_status_to_errno(uint32_t status)
     switch (status) {
         case SMB2_STATUS_SUCCESS:
             return CHIMERA_VFS_OK;
-        case SMB2_STATUS_ACCESS_DENIED:
-        case SMB2_STATUS_LOGON_FAILURE:
-            return CHIMERA_VFS_EACCES;
+        case SMB2_STATUS_END_OF_FILE:
+            return CHIMERA_VFS_OK;          /* short read at EOF, handled by caller */
+
+        /* ---- not found ---- */
         case SMB2_STATUS_OBJECT_NAME_NOT_FOUND:
         case SMB2_STATUS_OBJECT_PATH_NOT_FOUND:
+        case SMB2_STATUS_NO_SUCH_FILE:
+        case SMB2_STATUS_NOT_FOUND:
         case SMB2_STATUS_BAD_NETWORK_NAME:
+        case SMB2_STATUS_BAD_NETWORK_PATH:
+        case SMB2_STATUS_DELETE_PENDING:    /* name is going away -> treat as gone */
             return CHIMERA_VFS_ENOENT;
+
+        /* ---- permission / access ---- */
+        case SMB2_STATUS_ACCESS_DENIED:
+        case SMB2_STATUS_NETWORK_ACCESS_DENIED:
+        case SMB2_STATUS_LOGON_FAILURE:
+        case SMB2_STATUS_ACCOUNT_DISABLED:
+        case SMB2_STATUS_ACCOUNT_LOCKED_OUT:
+        case SMB2_STATUS_WRONG_PASSWORD:
+            return CHIMERA_VFS_EACCES;
+        case SMB2_STATUS_PRIVILEGE_NOT_HELD:
+        case SMB2_STATUS_CANNOT_DELETE:
+            return CHIMERA_VFS_EPERM;
+        case SMB2_STATUS_MEDIA_WRITE_PROTECTED:
+            return CHIMERA_VFS_EROFS;
+
+        /* ---- existence / type ---- */
         case SMB2_STATUS_OBJECT_NAME_COLLISION:
             return CHIMERA_VFS_EEXIST;
         case SMB2_STATUS_NOT_A_DIRECTORY:
@@ -308,12 +329,68 @@ chimera_smb_status_to_errno(uint32_t status)
             return CHIMERA_VFS_EISDIR;
         case SMB2_STATUS_DIRECTORY_NOT_EMPTY:
             return CHIMERA_VFS_ENOTEMPTY;
+        case SMB2_STATUS_NOT_SAME_DEVICE:
+            return CHIMERA_VFS_EXDEV;
+        case SMB2_STATUS_TOO_MANY_LINKS:
+            return CHIMERA_VFS_EMLINK;
+        case SMB2_STATUS_STOPPED_ON_SYMLINK:
+            return CHIMERA_VFS_ELOOP;
+        case SMB2_STATUS_NOT_A_REPARSE_POINT:
+            return CHIMERA_VFS_EINVAL;      /* readlink of a non-symlink */
+
+        /* ---- arguments ---- */
         case SMB2_STATUS_INVALID_PARAMETER:
+        case SMB2_STATUS_INVALID_INFO_CLASS:
+        case SMB2_STATUS_INFO_LENGTH_MISMATCH:
+        case SMB2_STATUS_INVALID_DEVICE_REQUEST:
             return CHIMERA_VFS_EINVAL;
-        case SMB2_STATUS_NOT_SUPPORTED:
+        case SMB2_STATUS_NAME_TOO_LONG:
+            return CHIMERA_VFS_ENAMETOOLONG;
+        case SMB2_STATUS_BUFFER_TOO_SMALL:
+        case SMB2_STATUS_BUFFER_OVERFLOW:
+            return CHIMERA_VFS_ERANGE;
+
+        /* ---- space / quota ---- */
+        case SMB2_STATUS_DISK_FULL:
+        case SMB2_STATUS_ALLOTTED_SPACE_EXCEEDED:
+            return CHIMERA_VFS_ENOSPC;
+        case SMB2_STATUS_QUOTA_EXCEEDED:
+            return CHIMERA_VFS_EDQUOT;
+
+        /* ---- sharing / locking (transient) ---- */
+        case SMB2_STATUS_SHARING_VIOLATION:
+        case SMB2_STATUS_FILE_LOCK_CONFLICT:
+        case SMB2_STATUS_LOCK_NOT_GRANTED:
+            return CHIMERA_VFS_EAGAIN;
+
+        /* ---- handle / file ---- */
+        case SMB2_STATUS_INVALID_HANDLE:
+        case SMB2_STATUS_SMB_BAD_FID:
+        case SMB2_STATUS_FILE_CLOSED:
+            return CHIMERA_VFS_EBADF;
+        case SMB2_STATUS_TOO_MANY_OPENED_FILES:
+            return CHIMERA_VFS_EMFILE;
+
+        /* ---- EA / xattr ---- */
+        case SMB2_STATUS_EAS_NOT_SUPPORTED:
             return CHIMERA_VFS_ENOTSUP;
-        case SMB2_STATUS_END_OF_FILE:
-            return CHIMERA_VFS_OK; /* short read at EOF, handled by caller */
+        case SMB2_STATUS_NO_EAS_ON_FILE:
+        case SMB2_STATUS_NONEXISTENT_EA_ENTRY:
+            return CHIMERA_VFS_ENODATA;
+
+        /* ---- unsupported ---- */
+        case SMB2_STATUS_NOT_SUPPORTED:
+        case SMB2_STATUS_NOT_IMPLEMENTED:
+            return CHIMERA_VFS_ENOTSUP;
+
+        /* ---- session / connection gone -> stale (handles must be reopened) ---- */
+        case SMB2_STATUS_NETWORK_NAME_DELETED:
+        case SMB2_STATUS_USER_SESSION_DELETED:
+        case SMB2_STATUS_CONNECTION_DISCONNECTED:
+        case SMB2_STATUS_CONNECTION_RESET:
+        case SMB2_STATUS_VIRTUAL_CIRCUIT_CLOSED:
+            return CHIMERA_VFS_ESTALE;
+
         default:
             return CHIMERA_VFS_EIO;
     } /* switch */
