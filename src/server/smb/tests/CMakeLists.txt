@@ -1254,6 +1254,9 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.check-sharemode
     # smb2.compound
     smb2.compound.create-write-close
+    smb2.compound.interim1
+    smb2.compound.interim2
+    smb2.compound.interim3
     smb2.compound.invalid1
     smb2.compound.invalid2
     smb2.compound.invalid3
@@ -1261,12 +1264,18 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.compound.related1
     smb2.compound.related2
     smb2.compound.related3
+    smb2.compound.related4
     smb2.compound.related5
     smb2.compound.related6
+    smb2.compound.related7
+    smb2.compound.related8
     smb2.compound.related9
     smb2.compound.unrelated1
     # smb2.compound_async
     smb2.compound_async.create_lease_break_async
+    smb2.compound_async.flush_close
+    smb2.compound_async.flush_flush
+    smb2.compound_async.getinfo_middle
     smb2.compound_async.rename_last
     smb2.compound_async.rename_middle
     # smb2.compound_find
@@ -2784,6 +2793,9 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.check-sharemode
     # smb2.compound
     smb2.compound.create-write-close
+    smb2.compound.interim1
+    smb2.compound.interim2
+    smb2.compound.interim3
     smb2.compound.invalid1
     smb2.compound.invalid2
     smb2.compound.invalid3
@@ -2791,12 +2803,18 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.compound.related1
     smb2.compound.related2
     smb2.compound.related3
+    smb2.compound.related4
     smb2.compound.related5
     smb2.compound.related6
+    smb2.compound.related7
+    smb2.compound.related8
     smb2.compound.related9
     smb2.compound.unrelated1
     # smb2.compound_async
     smb2.compound_async.create_lease_break_async
+    smb2.compound_async.flush_close
+    smb2.compound_async.flush_flush
+    smb2.compound_async.getinfo_middle
     smb2.compound_async.rename_last
     smb2.compound_async.rename_middle
     # smb2.compound_find
