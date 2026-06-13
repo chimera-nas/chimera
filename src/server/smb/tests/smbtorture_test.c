@@ -185,6 +185,7 @@ main(
     const char                   *backend   = "memfs";
     const char                  **tests     = NULL;
     int                           num_tests = 0;
+    int                           serve     = 0;
     int                           rc;
     int                           i;
 
@@ -192,6 +193,12 @@ main(
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-b") == 0 && i + 1 < argc) {
             backend = argv[++i];
+        } else if (strcmp(argv[i], "-s") == 0) {
+            /* Serve mode: start the server and block instead of running
+             * smbtorture, so an external client (rpcclient, impacket, ...) can
+             * be pointed at //127.0.0.1/share for manual protocol testing.
+             * Terminate with a signal. */
+            serve = 1;
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             print_usage(argv[0]);
             return 0;
@@ -203,7 +210,7 @@ main(
         }
     }
 
-    if (num_tests == 0) {
+    if (num_tests == 0 && !serve) {
         fprintf(stderr, "ERROR: No smbtorture tests specified\n\n");
         print_usage(argv[0]);
         return EXIT_FAILURE;
@@ -222,7 +229,7 @@ main(
     /* Check if smbtorture is available.  Exit 77 (the CTest SKIP_RETURN_CODE
      * used by these tests) so environments without the smbtorture client
      * report Skipped rather than a hard failure. */
-    if (system("which smbtorture >/dev/null 2>&1") != 0) {
+    if (!serve && system("which smbtorture >/dev/null 2>&1") != 0) {
         fprintf(stderr, "\nsmbtorture not found in PATH; skipping.\n");
         fprintf(stderr, "Install with: apt-get install samba-testsuite\n");
         return 77;
@@ -476,6 +483,14 @@ main(
 
     /* Give server a moment to be ready */
     usleep(100000);
+
+    if (serve) {
+        fprintf(stderr, "SERVE_READY //127.0.0.1/share (user myuser/mypassword)\n");
+        fflush(stderr);
+        pause();   /* block until signalled */
+        test_cleanup(&env, 1);
+        return 0;
+    }
 
     /* smb2.zero-data-ioctl (test_ioctl_zero_data) opens
      * --option=torture:filename with NTCREATEX_DISP_OPEN, so the file MUST

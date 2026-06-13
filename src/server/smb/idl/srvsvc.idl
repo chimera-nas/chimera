@@ -1,0 +1,31 @@
+/*
+ * SPDX-FileCopyrightText: 2026 Chimera-NAS Project Contributors
+ * SPDX-License-Identifier: LGPL-2.1-only
+ *
+ * SRVSVC (MS-SRVS) interface, compiled by ndrzcc.  NetShareEnumAll backs
+ * Windows Explorer share browsing.
+ */
+
+[ uuid(4b324fc8-1670-01d3-1278-5a47bf6ee188), version(3.0) ]
+interface srvsvc {
+    typedef struct {
+        [string] wchar_t *name;
+        uint32            type;
+        [string] wchar_t *comment;
+    } srvsvc_NetShareInfo1;
+    typedef struct {
+        uint32                                 count;
+        [size_is(count)] srvsvc_NetShareInfo1 *array;
+    } srvsvc_NetShareCtr1;
+    typedef struct {
+        uint32               level;
+        uint32               ctr;
+        srvsvc_NetShareCtr1 *ctr1;
+    } srvsvc_NetShareInfoCtr;
+    [opnum(15)] uint32 srvsvc_NetShareEnumAll(
+        [in, unique, string] wchar_t            *server_unc,
+        [in, out] srvsvc_NetShareInfoCtr        *info_ctr,
+        [in] uint32                              max_buffer,
+        [out] uint32                             total_entries,
+        [in, out, unique] uint32                *resume_handle);
+}
