@@ -5,6 +5,8 @@
 #include "nfs4_procs.h"
 #include "nfs4_session.h"
 #include "nfs4_callback.h"
+#include "nfs4_drc.h"
+#include "nfs4_recovery.h"
 #include "server/server.h"
 
 /* Flag bits a client may set in csa_flags (RFC 8881 §18.36.3). */
@@ -45,6 +47,16 @@ chimera_nfs4_create_session(
         return;
     }
 
+    /* Hold off until the persistent cold-start reconstruction has finished, so
+     * a reclaimed session/client is restored before the client re-creates one
+     * (NFS4ERR_DELAY = retry shortly). */
+    if (chimera_server_config_get_nfs4_drc(shared->config) &&
+        nfs_recovery_loading(&shared->nfs4_recovery)) {
+        res->csr_status = NFS4ERR_DELAY;
+        chimera_nfs4_compound_complete(req, res->csr_status);
+        return;
+    }
+
     /* Undefined csa_flags bits are rejected. */
     if (args->csa_flags & ~NFS4_CS_VALID_FLAGS) {
         res->csr_status = NFS4ERR_INVAL;
@@ -73,6 +85,14 @@ chimera_nfs4_create_session(
 
     if (args->csa_flags & CREATE_SESSION4_FLAG_CONN_BACK_CHAN) {
         flags |= CREATE_SESSION4_FLAG_CONN_BACK_CHAN;
+    }
+
+    /* RFC 8881 §18.36.3: echo CREATE_SESSION4_FLAG_PERSIST only if the server
+     * will honor it.  We do when nfs4_drc is enabled (the per-slot reply cache
+     * is written through to the KV store and reloaded across a restart). */
+    if ((args->csa_flags & CREATE_SESSION4_FLAG_PERSIST) &&
+        chimera_server_config_get_nfs4_drc(shared->config)) {
+        flags |= CREATE_SESSION4_FLAG_PERSIST;
     }
 
     /* RFC 8881 §18.36.4 sequencing + reply cache. */
@@ -155,7 +175,8 @@ chimera_nfs4_create_session(
         replay_max_slots,
         replay_maxresp_cached,
         &clamped_fore,
-        &args->csa_back_chan_attrs);
+        &args->csa_back_chan_attrs,
+        NULL);
 
     if (!session) {
         res->csr_status = NFS4ERR_STALE_CLIENTID;
@@ -182,7 +203,16 @@ chimera_nfs4_create_session(
     }
 
     nfs4_session_bind_conn(conn, session);
-    req->session = session;
+    req->session                  = session;
+    session->nfs4_session_persist = (flags & CREATE_SESSION4_FLAG_PERSIST) != 0;
+
+    /* Persist this session's metadata so a restart can reconstruct it with the
+     * same sessionid (and its owning client), letting a persistent client's
+     * retransmits replay from the reloaded reply cache. */
+    if (session->nfs4_session_persist) {
+        nfs4_drc_persist_session(thread->vfs_thread, session, &principal,
+                                 args->csa_cb_program, flags);
+    }
 
     /* RFC 8881 §18.36: when the client asks to use this connection as the
      * backchannel, record it together with the callback program number so the

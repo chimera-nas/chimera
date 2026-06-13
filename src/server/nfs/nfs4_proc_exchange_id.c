@@ -190,6 +190,16 @@ chimera_nfs4_exchange_id(
 
     clock_gettime(CLOCK_REALTIME, &now);
 
+    /* While the persistent cold-start reconstruction is still in flight, hold
+    * the client off so it cannot create a fresh record that races the
+    * reconstructed one for the same owner (NFS4ERR_DELAY = retry shortly). */
+    if (chimera_server_config_get_nfs4_drc(thread->shared->config) &&
+        nfs_recovery_loading(&thread->shared->nfs4_recovery)) {
+        res->eir_status = NFS4ERR_DELAY;
+        chimera_nfs4_compound_complete(req, res->eir_status);
+        return;
+    }
+
     /* RFC 8881 §18.35.3: when used outside a session (no preceding SEQUENCE),
      * EXCHANGE_ID must be the sole operation in its COMPOUND.  Inside a
      * session it may appear as an ordinary operation. */
@@ -269,7 +279,8 @@ chimera_nfs4_exchange_id(
         }
         pthread_mutex_unlock(&thread->shared->nfs4_shared_clients.nfs4_ct_lock);
         if (uc) {
-            nfs_recovery_persist(&thread->shared->nfs4_recovery, uc);
+            nfs_recovery_persist(thread->vfs_thread,
+                                 &thread->shared->nfs4_recovery, uc);
         }
     }
 

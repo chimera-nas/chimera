@@ -295,12 +295,15 @@ nfs_server_init(
     shared->nfs_grace_time_s    = chimera_server_config_get_nfs4_grace_time(config);
     shared->nfs_courtesy_time_s = chimera_server_config_get_nfs4_courtesy_time(config);
 
-    /* Phase 5: server-reboot recovery / grace window.  Persistence is
-     * stubbed in this phase -- nfs_recovery_load loads zero records, so
-     * nfs_recovery_begin_grace short-circuits to in_grace=false. */
+    /* Server-reboot recovery / grace window.  Records the VFS + grace time for
+     * the deferred cold-start load; the async KV scan that populates the
+     * to_reclaim set runs on the first NFSv4 compound (nfs_recovery_kickoff).
+     * begin_grace short-circuits to in_grace=false here (to_reclaim is empty);
+     * the kickoff forces the window open while the scan is in flight. */
     nfs_recovery_load(&shared->nfs4_recovery,
-                      chimera_server_config_get_state_dir(config),
-                      NULL);
+                      shared->vfs,
+                      shared->nfs_grace_time_s,
+                      chimera_server_config_get_nfs4_drc(config));
     nfs_recovery_begin_grace(&shared->nfs4_recovery,
                              shared->nfs_grace_time_s);
 

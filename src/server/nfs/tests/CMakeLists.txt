@@ -26,6 +26,7 @@ add_executable(test_replay_slot
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_layout_table.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_lease.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_recovery.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_drc.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_callback.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_cb.c)
 target_include_directories(test_replay_slot PRIVATE
@@ -34,6 +35,26 @@ target_include_directories(test_replay_slot PRIVATE
     ${NFS_COMMON_INCLUDE_DIR})
 target_link_libraries(test_replay_slot chimera_vfs chimera_common evpl evpl_rpc2 pthread uuid urcu-qsbr urcu-common)
 add_test(NAME chimera/server/nfs/replay_slot COMMAND test_replay_slot)
+
+# Cross-reboot persistence: record (de)serialization + cold-start session/slot
+# reconstruction.  Compiles the production source straight in (the persist /
+# reconstruct helpers are not SYMBOL_EXPORT'd), simulating a reboot in-process.
+add_executable(test_nfs_persist
+    test_nfs_persist.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_session.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_state.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_layout_table.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_lease.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_recovery.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_drc.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_callback.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_cb.c)
+target_include_directories(test_nfs_persist PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${CMAKE_SOURCE_DIR}/src
+    ${NFS_COMMON_INCLUDE_DIR})
+target_link_libraries(test_nfs_persist chimera_vfs chimera_common evpl evpl_rpc2 pthread uuid urcu-qsbr urcu-common)
+add_test(NAME chimera/server/nfs/nfs_persist COMMAND test_nfs_persist)
 
 add_executable(test_protocol_advertise test_protocol_advertise.c)
 target_include_directories(test_protocol_advertise PRIVATE

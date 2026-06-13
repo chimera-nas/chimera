@@ -4,6 +4,7 @@
 
 set(CHIMERA_BINARY ${CMAKE_BINARY_DIR}/src/daemon/chimera)
 set(NFS_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_nfs_test_wrapper.sh)
+set(NFS_REBOOT_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_nfs_reboot_test_wrapper.sh)
 set(SMB_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_smb_test_wrapper.sh)
 set(PNFS_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_pnfs_test_wrapper.sh)
 set(PNFS_BLOCK_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_pnfs_block_test_wrapper.sh)
@@ -183,6 +184,18 @@ foreach(image_spec ${KVM_IMAGES})
     string(REPLACE "|" ";" image_parts "${image_spec}")
     list(GET image_parts 0 IMAGE_NAME)
     set(IMAGE_DIR ${BUILD_ROOT}/kvm/${IMAGE_NAME})
+
+    # NFS cross-reboot persistence test (cairn-backed, NFSv4.1): create state,
+    # restart chimera against the same persistent store, verify the data and
+    # the recovery records survived.  Needs cairn (the persistent KV backend).
+    if(CAIRN_ENABLED)
+        add_test(NAME chimera/kvm/${IMAGE_NAME}/reboot/recovery_cairn_nfs4.1
+            COMMAND bash ${NFS_REBOOT_WRAPPER}
+                    ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
+                    ${CHIMERA_BINARY} 4.1)
+        set_tests_properties(chimera/kvm/${IMAGE_NAME}/reboot/recovery_cairn_nfs4.1
+            PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2)
+    endif()
 
     # NFS cthon04 tests
     foreach(nfsver ${NFS_VERSIONS})

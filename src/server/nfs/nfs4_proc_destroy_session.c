@@ -4,6 +4,8 @@
 
 #include "nfs4_procs.h"
 #include "nfs4_session.h"
+#include "nfs4_drc.h"
+#include "server/server.h"
 #include "evpl/evpl_rpc2.h"
 
 void
@@ -52,6 +54,12 @@ chimera_nfs4_destroy_session(
     nfs4_session_put(session);
 
     nfs4_destroy_session(&shared->nfs4_shared_clients, args->dsa_sessionid);
+
+    /* Drop this session's persisted metadata + reply entries so a restart does
+     * not resurrect a session the client explicitly tore down. */
+    if (chimera_server_config_get_nfs4_drc(shared->config)) {
+        nfs4_drc_forget_session(thread->vfs_thread, args->dsa_sessionid);
+    }
 
     res->dsr_status = NFS4_OK;
 

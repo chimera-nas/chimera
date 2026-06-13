@@ -61,7 +61,7 @@ chimera_nfs4_setclientid_confirm(
                                             args->clientid);
     if (!session) {
         session = nfs4_create_session(&shared->nfs4_shared_clients,
-                                      args->clientid, 1, 0, 0, NULL, NULL);
+                                      args->clientid, 1, 0, 0, NULL, NULL, NULL);
     }
 
     if (session) {
@@ -73,7 +73,8 @@ chimera_nfs4_setclientid_confirm(
 
         if (uc) {
             uc->confirmed = 1;
-            nfs_recovery_persist(&thread->shared->nfs4_recovery, uc);
+            nfs_recovery_persist(thread->vfs_thread,
+                                 &thread->shared->nfs4_recovery, uc);
 
             /* If the client re-registered a new callback address while holding
              * delegations (RFC 7530 §16.33), its stale channel was torn down in
