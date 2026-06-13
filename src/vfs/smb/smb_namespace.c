@@ -338,6 +338,154 @@ chimera_smb_client_symlink_at(
                     chimera_smb_symlink_create_reply);
 } /* chimera_smb_client_symlink_at */
 
+/* ---- readlink (FSCTL_GET_REPARSE_POINT) -------------------------------- */
+
+/*
+ * readlink operates on an open handle.  The client genericization opens the
+ * target with CHIMERA_VFS_OPEN_NOFOLLOW, which the SMB open_at maps to
+ * FILE_OPEN_REPARSE_POINT, so the handle's FileId refers to the symlink itself.
+ * We then issue FSCTL_GET_REPARSE_POINT and decode the NFS LNK reparse buffer
+ * the server returns (mirrors chimera_smb_get_reparse_readlink_cb).
+ */
+
+static void
+chimera_smb_readlink_reply(
+    struct chimera_smb_client_conn *conn,
+    uint32_t                        status,
+    const struct smb2_header       *hdr,
+    struct evpl_iovec_cursor       *body,
+    int                             body_len,
+    void                           *arg)
+{
+    struct chimera_vfs_request *request = arg;
+    uint16_t                    structsize, reparse_data_len, rsvd16;
+    uint32_t                    ctlcode, input_offset, input_count;
+    uint32_t                    output_offset, output_count, flags, rsvd32;
+    uint32_t                    reparse_tag;
+    uint64_t                    fid_pid, fid_vid, inode_type;
+    int                         consumed, target16_len, i, out;
+    char                       *out_buf = request->readlink.r_target;
+    uint32_t                    maxlen  = request->readlink.target_maxlength;
+    uint8_t                     target16[2 * CHIMERA_SMB_PATH_MAX];
+
+    (void) hdr;
+    (void) body_len;
+
+    if (status != SMB2_STATUS_SUCCESS) {
+        request->status = chimera_smb_status_to_errno(status);
+        request->complete(request);
+        return;
+    }
+
+    /* IOCTL response (the chimera server's field order: StructureSize then
+     * CtlCode directly, no leading Reserved -- matches the request convention). */
+    evpl_iovec_cursor_get_uint16(body, &structsize);
+    evpl_iovec_cursor_get_uint32(body, &ctlcode);
+    evpl_iovec_cursor_get_uint64(body, &fid_pid);
+    evpl_iovec_cursor_get_uint64(body, &fid_vid);
+    evpl_iovec_cursor_get_uint32(body, &input_offset);
+    evpl_iovec_cursor_get_uint32(body, &input_count);
+    evpl_iovec_cursor_get_uint32(body, &output_offset);
+    evpl_iovec_cursor_get_uint32(body, &output_count);
+    evpl_iovec_cursor_get_uint32(body, &flags);
+    evpl_iovec_cursor_get_uint32(body, &rsvd32);
+
+    (void) structsize;
+    (void) ctlcode;
+    (void) fid_pid;
+    (void) fid_vid;
+    (void) input_offset;
+    (void) input_count;
+    (void) flags;
+    (void) rsvd32;
+
+    /* OutputOffset is header-relative, as is the cursor's consumed count. */
+    consumed = evpl_iovec_cursor_consumed(body);
+    if ((int) output_offset > consumed) {
+        evpl_iovec_cursor_skip(body, (int) output_offset - consumed);
+    }
+
+    /* REPARSE_DATA_BUFFER: ReparseTag(4) + ReparseDataLength(2) + Reserved(2) +
+     * InodeType(8) + UTF-16LE target. */
+    if (output_count < 16) {
+        request->status = CHIMERA_VFS_EINVAL;
+        request->complete(request);
+        return;
+    }
+
+    evpl_iovec_cursor_get_uint32(body, &reparse_tag);
+    evpl_iovec_cursor_get_uint16(body, &reparse_data_len);
+    evpl_iovec_cursor_get_uint16(body, &rsvd16);
+    evpl_iovec_cursor_get_uint64(body, &inode_type);
+
+    (void) rsvd16;
+
+    /* readlink of a non-symlink is EINVAL (POSIX). */
+    if (reparse_tag != SMB2_IO_REPARSE_TAG_NFS ||
+        inode_type != SMB2_NFS_SPECFILE_LNK || reparse_data_len < 8) {
+        request->status = CHIMERA_VFS_EINVAL;
+        request->complete(request);
+        return;
+    }
+
+    target16_len = reparse_data_len - 8;     /* UTF-16LE target bytes */
+    if (target16_len > (int) sizeof(target16)) {
+        target16_len = sizeof(target16);
+    }
+    evpl_iovec_cursor_get_blob(body, target16, target16_len);
+
+    /* Decode UTF-16LE (ASCII subset) into r_target, flipping '\\' back to '/'
+     * (symmetric with smb_utf16le_encode). */
+    out = 0;
+    for (i = 0; i + 1 < target16_len && (uint32_t) out < maxlen; i += 2) {
+        char c = (char) target16[i];
+        out_buf[out++] = (c == '\\') ? '/' : c;
+    }
+
+    request->readlink.r_target_length = out;
+    request->status                   = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* chimera_smb_readlink_reply */
+
+void
+chimera_smb_client_readlink(
+    struct chimera_smb_client_conn *conn,
+    struct chimera_vfs_request     *request)
+{
+    struct chimera_smb_client_open *open_state = smb_handle_open_state(request->readlink.handle);
+    struct evpl_iovec               iov;
+    struct evpl_iovec_cursor        cursor;
+    struct smb2_header             *hdr;
+    int                             input_offset;
+
+    if (!open_state) {
+        request->status = CHIMERA_VFS_EINVAL;
+        request->complete(request);
+        return;
+    }
+
+    chimera_smb_client_pdu_begin(conn, SMB2_IOCTL, &iov, &cursor, &hdr);
+
+    /* No input buffer; the server reads InputCount(0) bytes at InputOffset. */
+    input_offset = sizeof(struct smb2_header) + 54;
+
+    evpl_iovec_cursor_append_uint16(&cursor, SMB2_IOCTL_REQUEST_SIZE);
+    evpl_iovec_cursor_append_uint32(&cursor, SMB2_FSCTL_GET_REPARSE_POINT);
+    evpl_iovec_cursor_append_uint64(&cursor, open_state->file_id.pid);
+    evpl_iovec_cursor_append_uint64(&cursor, open_state->file_id.vid);
+    evpl_iovec_cursor_append_uint32(&cursor, (uint32_t) input_offset);       /* InputOffset */
+    evpl_iovec_cursor_append_uint32(&cursor, 0);                             /* InputCount */
+    evpl_iovec_cursor_append_uint32(&cursor, 0);                             /* MaxInputResponse */
+    evpl_iovec_cursor_append_uint32(&cursor, 0);                             /* OutputOffset */
+    evpl_iovec_cursor_append_uint32(&cursor, 0);                             /* OutputCount */
+    evpl_iovec_cursor_append_uint32(&cursor, 16 + 2 * CHIMERA_SMB_PATH_MAX); /* MaxOutputResponse */
+    evpl_iovec_cursor_append_uint32(&cursor, SMB2_0_IOCTL_IS_FSCTL);         /* Flags */
+    evpl_iovec_cursor_append_uint32(&cursor, 0);                             /* Reserved2 */
+
+    chimera_smb_client_pdu_finish(conn, &iov, &cursor, request,
+                                  chimera_smb_readlink_reply, request);
+} /* chimera_smb_client_readlink */
+
 /* ---- mknod_at ---------------------------------------------------------- */
 
 void

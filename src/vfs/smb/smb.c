@@ -950,6 +950,10 @@ chimera_smb_client_dispatch(
             server_index = chimera_smb_fh_server_index(request->fh);
             start        = chimera_smb_client_mknod_at;
             break;
+        case CHIMERA_VFS_OP_READLINK:
+            server_index = chimera_smb_fh_server_index(request->fh);
+            start        = chimera_smb_client_readlink;
+            break;
         default:
             request->status = CHIMERA_VFS_ENOTSUP;
             request->complete(request);

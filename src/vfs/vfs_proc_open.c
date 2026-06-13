@@ -275,10 +275,18 @@ chimera_vfs_open(
     request->open.path         = request->plugin_data;
     request->open.pathlen      = pathlen;
     request->open.flags        = flags;
-    request->open.set_attr     = set_attr;
     request->open.attr_mask    = attr_mask;
     request->open.callback     = callback;
     request->open.private_data = private_data;
+
+    /* A non-create open may pass no set_attr, but open_at (the path-op / deep
+     * path-only dispatch) requires a non-NULL one; hand it a zeroed stand-in. */
+    if (set_attr) {
+        request->open.set_attr = set_attr;
+    } else {
+        request->open.scratch_set_attr.va_set_mask = 0;
+        request->open.set_attr                     = &request->open.scratch_set_attr;
+    }
 
     if (request->module->capabilities & CHIMERA_VFS_CAP_FS_PATH_OP) {
         request->open.name_offset = 0;

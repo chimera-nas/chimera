@@ -118,6 +118,7 @@ macro(add_client_smb_test prog)
     endif()
 endmacro()
 
-foreach(prog test_stat test_fstat test_ftruncate test_remove test_rename test_io)
+foreach(prog test_stat test_fstat test_ftruncate test_remove test_rename test_io
+        test_symlink test_readlink)
     add_client_smb_test(${prog})
 endforeach()

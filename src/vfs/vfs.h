@@ -484,6 +484,10 @@ struct chimera_vfs_request {
             void                           *private_data;
             uint8_t                         parent_fh[CHIMERA_VFS_FH_SIZE];
             int                             parent_fh_len;
+            /* Zeroed stand-in handed to open_at when the caller passes no
+             * set_attr (a non-create open) -- open_at requires a non-NULL
+             * set_attr that the backend only consults when creating. */
+            struct chimera_vfs_attrs        scratch_set_attr;
         } open;
 
         struct {
