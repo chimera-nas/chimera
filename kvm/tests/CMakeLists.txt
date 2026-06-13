@@ -4,6 +4,7 @@
 
 set(CHIMERA_BINARY ${CMAKE_BINARY_DIR}/src/daemon/chimera)
 set(NFS_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_nfs_test_wrapper.sh)
+set(NFSTEST_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_nfstest_test_wrapper.sh)
 set(SMB_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_smb_test_wrapper.sh)
 set(PNFS_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_pnfs_test_wrapper.sh)
 set(PNFS_BLOCK_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_pnfs_block_test_wrapper.sh)
@@ -238,6 +239,53 @@ foreach(image_spec ${KVM_IMAGES})
                             "${XFSTESTS_CMD_${prog}}")
                 set_tests_properties(chimera/kvm/${IMAGE_NAME}/xfstests/${prog}_cairn_nfs${nfsver}
                     PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2)
+            endforeach()
+        endforeach()
+    endif()
+
+    # ----- Linux nfstest single-host suite (ubuntu2404 only) -----
+    # nfstest is a client-side conformance suite: it mounts the share itself (so
+    # this uses a dedicated no-pre-mount wrapper) and verifies on-the-wire
+    # behaviour with its own tcpdump-driven RPC dissector.  The nfstest tree and
+    # its in-guest deps (python3, tcpdump, a default route) ship in the
+    # kvm-test-base image (>= v1.2.0).  Matrix entries are "program|<space-
+    # separated NFS versions>"; nfstest_sparse / nfstest_ssc are left
+    # unregistered for now (an empty-trace harness artifact, and a server-side
+    # COPY gap, respectively).
+    if(IMAGE_NAME STREQUAL "ubuntu2404")
+        set(NFSTEST_MATRIX
+            "nfstest_posix|3 4.0 4.1 4.2"
+            "nfstest_interop|4.0"
+            "nfstest_alloc|4.2"
+        )
+        set(NFSTEST_BACKENDS ${KVM_BACKENDS})
+        if(CAIRN_ENABLED)
+            list(APPEND NFSTEST_BACKENDS cairn)
+        endif()
+        foreach(entry ${NFSTEST_MATRIX})
+            string(REPLACE "|" ";" parts "${entry}")
+            list(GET parts 0 prog)
+            list(GET parts 1 vers_str)
+            string(REPLACE " " ";" vers "${vers_str}")
+            foreach(nfsver ${vers})
+                foreach(backend ${NFSTEST_BACKENDS})
+                    # nfstest_alloc fills the device to exercise ENOSPC, which
+                    # needs a bounded filesystem: memfs provides one via its
+                    # "size" config and diskfs via small backing devices (both
+                    # set by the wrapper).  The passthrough (linux/io_uring) and
+                    # cairn backends are unbounded host directories, so run alloc
+                    # on memfs + diskfs only.
+                    if(prog STREQUAL "nfstest_alloc" AND
+                       NOT (backend STREQUAL "memfs" OR backend MATCHES "diskfs"))
+                        continue()
+                    endif()
+                    add_test(NAME chimera/kvm/${IMAGE_NAME}/nfstest/${prog}_${backend}_nfs${nfsver}
+                        COMMAND bash ${NFSTEST_WRAPPER}
+                                ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
+                                ${CHIMERA_BINARY} ${backend} ${nfsver} ${prog})
+                    set_tests_properties(chimera/kvm/${IMAGE_NAME}/nfstest/${prog}_${backend}_nfs${nfsver}
+                        PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2)
+                endforeach()
             endforeach()
         endforeach()
     endif()
