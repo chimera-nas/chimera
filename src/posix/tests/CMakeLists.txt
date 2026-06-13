@@ -1154,6 +1154,10 @@ foreach(t ${PJD_TESTS})
     if(HAVE_LIBAIO)
         add_pjd_test(${t} diskfs_aio)
     endif()
+    add_pjd_test(${t} linux)
+    if(CHIMERA_VFS_IO_URING)
+        add_pjd_test(${t} io_uring)
+    endif()
 endforeach()
 
 # Tag the non-pjd tests with the 'posix' label so that suite can be run

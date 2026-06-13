@@ -1300,7 +1300,17 @@ chimera_io_uring_open_at(
     }
 
     if (request->open_at.flags & CHIMERA_VFS_OPEN_NOFOLLOW) {
-        flags = O_PATH | O_NOFOLLOW;
+        if (request->open_at.flags & CHIMERA_VFS_OPEN_PATH) {
+            /* Caller wants a handle on the symlink itself (e.g. SMB reparse):
+             * O_PATH|O_NOFOLLOW opens the link rather than following it. */
+            flags = O_PATH | O_NOFOLLOW;
+        } else {
+            /* A regular open with O_NOFOLLOW on a symlink target must fail
+             * ELOOP (pjd open/16); openat() returns that directly, so just add
+             * O_NOFOLLOW to the real open flags instead of degrading to O_PATH
+             * (which would succeed by opening the link). */
+            flags |= O_NOFOLLOW;
+        }
     }
 
     if (request->open_at.flags & CHIMERA_VFS_OPEN_EXCLUSIVE) {
@@ -1438,6 +1448,9 @@ chimera_io_uring_mknod_at(
     }
 
     if (request->mknod_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_RDEV) {
+        /* va_rdev is the canonical VFS encoding (major << 32 | minor), as
+         * produced by the NFS server from CREATE specdata and by statx getattr
+         * here.  Convert it back to a host dev_t for mknodat(). */
         dev = makedev(request->mknod_at.set_attr->va_rdev >> 32,
                       request->mknod_at.set_attr->va_rdev & 0xFFFFFFFF);
     }

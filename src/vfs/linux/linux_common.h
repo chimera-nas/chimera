@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <sys/sysmacros.h>
+
 #include "common/varint.h"
 #include "vfs/vfs_fh.h"
 
@@ -123,13 +125,15 @@ chimera_linux_stat_to_attr(
 
     attr->va_set_mask |= CHIMERA_VFS_ATTR_MASK_STAT;
 
-    attr->va_dev        = st->st_dev;
-    attr->va_ino        = st->st_ino;
-    attr->va_mode       = st->st_mode;
-    attr->va_nlink      = st->st_nlink;
-    attr->va_uid        = st->st_uid;
-    attr->va_gid        = st->st_gid;
-    attr->va_rdev       = st->st_rdev;
+    attr->va_dev   = st->st_dev;
+    attr->va_ino   = st->st_ino;
+    attr->va_mode  = st->st_mode;
+    attr->va_nlink = st->st_nlink;
+    attr->va_uid   = st->st_uid;
+    attr->va_gid   = st->st_gid;
+    /* Canonical VFS rdev encoding (major << 32 | minor), matching the statx
+     * path and the NFS server; the stat fallback must agree. */
+    attr->va_rdev       = ((uint64_t) major(st->st_rdev) << 32) | minor(st->st_rdev);
     attr->va_size       = st->st_size;
     attr->va_space_used = st->st_blocks * 512;
     attr->va_atime      = st->st_atim;

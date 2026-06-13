@@ -208,7 +208,12 @@ chimera_vfs_lookup_at(
 {
     struct chimera_vfs_lookup_at_gate *gate;
 
-    if (chimera_vfs_gate_needed(handle->vfs_module->capabilities, cred)) {
+    /* Path-prefix search (EXECUTE) is enforced by the engine even for
+     * DELEGATES_DAC (passthrough) backends when the caller is a POSIX (AUTH_UNIX)
+     * client: they resolve each component by file handle (open_by_handle_at),
+     * which bypasses the kernel's directory-search DAC, so the prefix would
+     * otherwise never be checked.  SMB keeps its own model (see gate_needed_dac). */
+    if (chimera_vfs_gate_needed_dac(handle->vfs_module->capabilities, cred)) {
         gate                = malloc(sizeof(*gate));
         gate->thread        = thread;
         gate->cred          = cred;
@@ -220,9 +225,9 @@ chimera_vfs_lookup_at(
         gate->callback      = callback;
         gate->private_data  = private_data;
 
-        chimera_vfs_gate_fh(thread, cred, handle->fh, handle->fh_len,
-                            CHIMERA_ACE_EXECUTE,
-                            chimera_vfs_lookup_at_gate_complete, gate);
+        chimera_vfs_gate_fh_dac(thread, cred, handle->fh, handle->fh_len,
+                                CHIMERA_ACE_EXECUTE,
+                                chimera_vfs_lookup_at_gate_complete, gate);
         return;
     }
 
