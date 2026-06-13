@@ -4,10 +4,65 @@
 
 #pragma once
 
+#include <stdint.h>
+#include <stddef.h>
+
 struct evpl;
 struct evpl_iovec;
 struct evpl_iovec_cursor;
 struct chimera_smb_encrypt_ctx;
+struct chimera_smb_conn;
+struct chimera_smb_request;
+struct chimera_smb_session;
+
+/*
+ * Snapshot of the signing/encryption state a request needs to finalize a
+ * STANDALONE async response (an interim STATUS_PENDING, or a change-notify
+ * delivery) on the wire after the originating request/compound is gone.
+ *
+ * Encryption supersedes signing (MS-SMB2 §3.1.4.3): on a session that encrypts,
+ * EVERY response -- including async interims -- must be wrapped in a TRANSFORM
+ * header (§3.3.4.1.4), not signed.  When the session only signs, the standalone
+ * message is signed in place instead.
+ */
+struct chimera_smb_secure_send {
+    uint8_t                     encrypt;        /* wrap in a TRANSFORM header */
+    uint8_t                     sign;           /* sign in place (when !encrypt) */
+    uint16_t                    cipher_id;
+    size_t                      enc_key_len;
+    uint64_t                    session_id;
+    uint8_t                     enc_key[32];
+    uint8_t                     signing_key[16];
+    /* Owns the strictly-monotonic per-session AEAD nonce counter.  The session
+     * outlives every parked request on its connection (teardown drains parked
+     * requests without sending), so this pointer is valid at send time. */
+    struct chimera_smb_session *enc_session;
+};
+
+/*
+ * Capture `request`'s signing/encryption state into `snap` so a later
+ * standalone async response can be secured the same way the synchronous reply
+ * path would have secured it.
+ */
+void
+chimera_smb_secure_send_snapshot(
+    struct chimera_smb_request     *request,
+    struct chimera_smb_secure_send *snap);
+
+/*
+ * Finalize and send a standalone SMB2 message built outside the compound reply
+ * path.  `iov` holds [4-byte NetBIOS framing][SMB2 message] plaintext and is
+ * consumed (sent with TAKE_REF, or released on error).  smb2_len is the SMB2
+ * message length (excluding the NetBIOS framing); iov.length must be at least
+ * 4 + smb2_len.  Encrypts (per `snap->encrypt`) or signs (per `snap->sign`)
+ * before sending; on an encryption failure the connection is closed.
+ */
+void
+chimera_smb_secure_send(
+    struct chimera_smb_conn              *conn,
+    struct evpl_iovec                    *iov,
+    int                                   smb2_len,
+    const struct chimera_smb_secure_send *snap);
 
 /*
  * SMB3 transport encryption (MS-SMB2 §3.1.4.3 / §3.3.4.1.4).  Mirrors the

@@ -413,7 +413,33 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
         BVT_TreeMgmt_SMB311_Disconnect_NoSignedNoEncryptedTreeConnect
         Compound_Encrypt_RelatedRequests
         Compound_Encrypt_UnrelatedRequests
-        Signing_VerifySignatureWhenEncrypted)
+        Signing_VerifySignatureWhenEncrypted
+        # Interim STATUS_PENDING emitters (oplock/lease break, change notify).
+        # On an encrypting session the async interim and the change-notify
+        # delivery must themselves be wrapped in a TRANSFORM header (MS-SMB2
+        # §3.3.4.1.4); these failed with "the packet should be encrypted" until
+        # the standalone async send paths learned to encrypt.
+        BVT_OpLockBreak
+        BVT_Leasing_FileLeasingV1
+        BVT_Leasing_FileLeasingV2
+        Leasing_FileLeasingV1_SameLeaseKey
+        Leasing_FileLeasingV2_SameLeaseKey
+        BVT_SMB2Basic_CancelRegisteredChangeNotify
+        BVT_SMB2Basic_ChangeNotify_ChangeAttributes
+        BVT_SMB2Basic_ChangeNotify_ChangeCreation
+        BVT_SMB2Basic_ChangeNotify_ChangeDirName
+        BVT_SMB2Basic_ChangeNotify_ChangeEa
+        BVT_SMB2Basic_ChangeNotify_ChangeFileName
+        BVT_SMB2Basic_ChangeNotify_ChangeLastAccess
+        BVT_SMB2Basic_ChangeNotify_ChangeLastWrite
+        BVT_SMB2Basic_ChangeNotify_ChangeSecurity
+        BVT_SMB2Basic_ChangeNotify_ChangeSize
+        BVT_SMB2Basic_ChangeNotify_ChangeStreamName
+        BVT_SMB2Basic_ChangeNotify_ChangeStreamSize
+        BVT_SMB2Basic_ChangeNotify_ChangeStreamWrite
+        BVT_SMB2Basic_ChangeNotify_ServerReceiveSmb2Close
+        BVT_SMB2Basic_ChangeNotify_NonDirectoryFile
+        BVT_SMB2Basic_ChangeNotify_NoFileListDirectoryInGrantedAccess)
 
     string(REPLACE ";" "," _wpts_tests "${WPTS_SMB2_ENCRYPTION_ALLOWLIST}")
     add_test(NAME chimera/server/smb/wpts/memfs_encryption

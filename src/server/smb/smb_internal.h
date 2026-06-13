@@ -19,6 +19,7 @@
 #include "common/macros.h"
 #include "common/misc.h"
 #include "smb2.h"
+#include "smb_encrypt.h"
 #include "smb1.h"
 #include "smb_attr.h"
 #include "smb_session.h"
@@ -320,15 +321,15 @@ struct chimera_smb_request {
      * window.  The timer field is reserved for a future block deadline driver
      * (begin does not arm it today; cancel/drain remove it as a safe no-op). */
     struct {
-        struct evpl_timer           timer;
-        struct chimera_smb_request *park_next;
-        uint8_t                     signing_key[16];
-        uint64_t                    session_id;
-        uint16_t                    dialect;
-        uint16_t                    credit_charge;
-        uint16_t                    credit_request;
-        uint8_t                     signed_session;
-        uint8_t                     armed;
+        struct evpl_timer              timer;
+        struct chimera_smb_request    *park_next;
+        /* Signing/encryption snapshot so the interim (and the eventual final
+         * response) can be secured after the originating request is parked. */
+        struct chimera_smb_secure_send secure;
+        uint64_t                       session_id;
+        uint16_t                       credit_charge;
+        uint16_t                       credit_request;
+        uint8_t                        armed;
     } async;
 
     union {

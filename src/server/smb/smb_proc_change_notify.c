@@ -290,17 +290,12 @@ chimera_smb_change_notify(struct chimera_smb_request *request)
     nr->completion_filter    = request->change_notify.completion_filter;
     nr->watch_tree           = request->change_notify.watch_tree;
 
-    /* Capture signing state so the deferred async responses can be
-     * signed.  An unsigned async reply on a signed session is rejected
-     * by Windows clients with SEC_E_INCOMPLETE_MESSAGE, breaking the
-     * watcher. */
-    if ((request->smb2_hdr.flags & SMB2_FLAGS_SIGNED) &&
-        request->session_handle) {
-        nr->signed_session = 1;
-        memcpy(nr->signing_key, request->session_handle->signing_key, 16);
-    } else {
-        nr->signed_session = 0;
-    }
+    /* Capture signing/encryption state so the deferred async responses can be
+     * secured.  An unsigned async reply on a signed session is rejected by
+     * Windows clients with SEC_E_INCOMPLETE_MESSAGE, and on an encrypting
+     * session every response must be wrapped in a TRANSFORM header -- either
+     * way breaks the watcher if we send it in the clear. */
+    chimera_smb_secure_send_snapshot(request, &nr->secure);
 
     state->pending = nr;
     pthread_mutex_unlock(&state->lock);

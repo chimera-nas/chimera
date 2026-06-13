@@ -7,6 +7,7 @@
 #include <stdint.h>
 #include <pthread.h>
 #include "vfs/vfs_notify.h"
+#include "smb_encrypt.h"
 
 struct chimera_smb_request;
 struct chimera_smb_conn;
@@ -45,10 +46,10 @@ struct chimera_smb_notify_request {
     uint32_t                           completion_filter;
     uint16_t                           flags;
     int                                watch_tree;
-    /* Signing state captured at park time so async responses can be
-    * properly signed even after the originating request is gone. */
-    int                                signed_session;
-    uint8_t                            signing_key[16];
+    /* Signing/encryption state captured at park time so async responses can be
+     * properly secured (signed, or wrapped in a TRANSFORM header on an
+     * encrypting session) even after the originating request is gone. */
+    struct chimera_smb_secure_send     secure;
     /* Set under state->lock when callback has queued this nr to
      * thread->notify_ready.  Cleared by send_response or by close
      * when reaping the request from the ready queue. */
