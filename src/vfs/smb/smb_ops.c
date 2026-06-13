@@ -10,6 +10,7 @@
 #include "smb_internal.h"
 #include "vfs/vfs_attrs.h"
 #include "evpl/evpl.h"
+#include "common/misc.h"
 
 /*
  * File operations for the SMB2 client -- a PATH-ONLY VFS backend.
@@ -107,6 +108,80 @@ smb_apply_attrs(
     }
 } /* smb_apply_attrs */
 
+/* Send an SMB2 CREATE on `path`, optionally carrying `ctx` create contexts (a
+ * pre-built, already-chained context blob) after the name. */
+void
+smb_send_create_ex(
+    struct chimera_smb_client_conn *conn,
+    struct chimera_vfs_request     *request,
+    const char                     *path,
+    int                             path_len,
+    uint32_t                        desired_access,
+    uint32_t                        share_access,
+    uint32_t                        disposition,
+    uint32_t                        options,
+    const uint8_t                  *ctx,
+    uint32_t                        ctx_len,
+    chimera_smb_client_reply_cb     reply_cb)
+{
+    struct evpl_iovec        iov;
+    struct evpl_iovec_cursor cursor;
+    struct smb2_header      *hdr;
+    uint8_t                  name16[2 * CHIMERA_SMB_PATH_MAX];
+    size_t                   name16_len;
+    uint32_t                 name_end, ctx_off = 0, pad = 0;
+
+    if (path_len > CHIMERA_SMB_PATH_MAX) {
+        request->status = CHIMERA_VFS_ENAMETOOLONG;
+        request->complete(request);
+        return;
+    }
+
+    name16_len = smb_utf16le_encode(path, path_len, name16);
+
+    /* Offsets are relative to the SMB2 header start: NameOffset = header(64) +
+     * fixed body(56).  Create contexts (if any) follow the name, 8-byte aligned. */
+    if (ctx_len > 0) {
+        name_end = sizeof(struct smb2_header) + 56 + (uint32_t) name16_len;
+        ctx_off  = (name_end + 7) & ~7u;
+        pad      = ctx_off - name_end;
+    }
+
+    chimera_smb_client_pdu_begin(conn, SMB2_CREATE, &iov, &cursor, &hdr);
+
+    evpl_iovec_cursor_append_uint16(&cursor, SMB2_CREATE_REQUEST_SIZE);
+    evpl_iovec_cursor_append_uint8(&cursor, 0);                             /* SecurityFlags */
+    evpl_iovec_cursor_append_uint8(&cursor, ctx_len ? SMB2_OPLOCK_LEVEL_LEASE : 0); /* RequestedOplockLevel */
+    evpl_iovec_cursor_append_uint32(&cursor, SMB2_IMPERSONATION_IMPERSONATION);
+    evpl_iovec_cursor_append_uint64(&cursor, 0);                            /* SmbCreateFlags */
+    evpl_iovec_cursor_append_uint64(&cursor, 0);                            /* Reserved */
+    evpl_iovec_cursor_append_uint32(&cursor, desired_access);
+    evpl_iovec_cursor_append_uint32(&cursor, 0);                            /* FileAttributes */
+    evpl_iovec_cursor_append_uint32(&cursor, share_access);
+    evpl_iovec_cursor_append_uint32(&cursor, disposition);
+    evpl_iovec_cursor_append_uint32(&cursor, options);
+    evpl_iovec_cursor_append_uint16(&cursor, sizeof(struct smb2_header) + 56); /* NameOffset */
+    evpl_iovec_cursor_append_uint16(&cursor, (uint16_t) name16_len);        /* NameLength */
+    evpl_iovec_cursor_append_uint32(&cursor, ctx_off);                      /* CreateContextsOffset */
+    evpl_iovec_cursor_append_uint32(&cursor, ctx_len);                      /* CreateContextsLength */
+    if (name16_len > 0) {
+        evpl_iovec_cursor_append_blob(&cursor, name16, name16_len);
+    }
+
+    if (ctx_len > 0) {
+        /* Unaligned: append_blob would re-align the cursor and shift these past
+         * the CreateContextsOffset we declared above (the name already left the
+         * cursor at name_end). */
+        static uint8_t zero[8] = { 0 };
+        if (pad > 0) {
+            evpl_iovec_cursor_append_blob_unaligned(&cursor, zero, pad);
+        }
+        evpl_iovec_cursor_append_blob_unaligned(&cursor, (uint8_t *) ctx, ctx_len);
+    }
+
+    chimera_smb_client_pdu_finish(conn, &iov, &cursor, request, reply_cb, request);
+} /* smb_send_create_ex */
+
 /* Send an SMB2 CREATE on `path` (full mount-relative path; "" for the root). */
 void
 smb_send_create(
@@ -120,43 +195,33 @@ smb_send_create(
     uint32_t                        options,
     chimera_smb_client_reply_cb     reply_cb)
 {
-    struct evpl_iovec        iov;
-    struct evpl_iovec_cursor cursor;
-    struct smb2_header      *hdr;
-    uint8_t                  name16[2 * CHIMERA_SMB_PATH_MAX];
-    size_t                   name16_len;
-
-    if (path_len > CHIMERA_SMB_PATH_MAX) {
-        request->status = CHIMERA_VFS_ENAMETOOLONG;
-        request->complete(request);
-        return;
-    }
-
-    name16_len = smb_utf16le_encode(path, path_len, name16);
-
-    chimera_smb_client_pdu_begin(conn, SMB2_CREATE, &iov, &cursor, &hdr);
-
-    evpl_iovec_cursor_append_uint16(&cursor, SMB2_CREATE_REQUEST_SIZE);
-    evpl_iovec_cursor_append_uint8(&cursor, 0);                             /* SecurityFlags */
-    evpl_iovec_cursor_append_uint8(&cursor, 0);                             /* RequestedOplockLevel */
-    evpl_iovec_cursor_append_uint32(&cursor, SMB2_IMPERSONATION_IMPERSONATION);
-    evpl_iovec_cursor_append_uint64(&cursor, 0);                            /* SmbCreateFlags */
-    evpl_iovec_cursor_append_uint64(&cursor, 0);                            /* Reserved */
-    evpl_iovec_cursor_append_uint32(&cursor, desired_access);
-    evpl_iovec_cursor_append_uint32(&cursor, 0);                            /* FileAttributes */
-    evpl_iovec_cursor_append_uint32(&cursor, share_access);
-    evpl_iovec_cursor_append_uint32(&cursor, disposition);
-    evpl_iovec_cursor_append_uint32(&cursor, options);
-    evpl_iovec_cursor_append_uint16(&cursor, sizeof(struct smb2_header) + 56); /* NameOffset */
-    evpl_iovec_cursor_append_uint16(&cursor, (uint16_t) name16_len);        /* NameLength */
-    evpl_iovec_cursor_append_uint32(&cursor, 0);                            /* CreateContextsOffset */
-    evpl_iovec_cursor_append_uint32(&cursor, 0);                            /* CreateContextsLength */
-    if (name16_len > 0) {
-        evpl_iovec_cursor_append_blob(&cursor, name16, name16_len);
-    }
-
-    chimera_smb_client_pdu_finish(conn, &iov, &cursor, request, reply_cb, request);
+    smb_send_create_ex(conn, request, path, path_len, desired_access,
+                       share_access, disposition, options, NULL, 0, reply_cb);
 } /* smb_send_create */
+
+/* Build an RqLs (lease request v1) create context into `buf` (>= 56 bytes);
+ * returns its length.  Header(16) + name "RqLs"(4) + pad(4) + data(32). */
+uint32_t
+smb_build_lease_ctx(
+    uint8_t       *buf,
+    const uint8_t *lease_key,
+    uint32_t       lease_state)
+{
+    memset(buf, 0, CHIMERA_SMB_LEASE_CTX_SIZE);
+
+    /* Context header. */
+    smb_wire_set_le16(buf + 4, 16);      /* NameOffset (from context start) */
+    smb_wire_set_le16(buf + 6, 4);       /* NameLength */
+    smb_wire_set_le16(buf + 10, 24);     /* DataOffset */
+    smb_wire_set_le32(buf + 12, 32);     /* DataLength (RqLs v1) */
+    memcpy(buf + 16, "RqLs", 4);
+
+    /* RqLs v1 data: LeaseKey(16), LeaseState(4), LeaseFlags(4), Duration(8). */
+    memcpy(buf + 24, lease_key, 16);
+    smb_wire_set_le32(buf + 40, lease_state);
+
+    return CHIMERA_SMB_LEASE_CTX_SIZE;
+} /* smb_build_lease_ctx */
 
 void
 smb_send_close(
@@ -517,9 +582,13 @@ chimera_smb_client_open_at(
     struct chimera_smb_client_conn *conn,
     struct chimera_vfs_request     *request)
 {
-    uint32_t disposition;
-    uint32_t desired_access;
-    uint32_t options = SMB2_FILE_NON_DIRECTORY_FILE;
+    uint32_t       disposition;
+    uint32_t       desired_access;
+    uint32_t       options = SMB2_FILE_NON_DIRECTORY_FILE;
+    uint8_t        lease_ctx[CHIMERA_SMB_LEASE_CTX_SIZE];
+    uint8_t        lease_key[16];
+    const uint8_t *ctx     = NULL;
+    uint32_t       ctx_len = 0;
 
     if (request->open_at.flags & CHIMERA_VFS_OPEN_CREATE) {
         disposition = (request->open_at.flags & CHIMERA_VFS_OPEN_EXCLUSIVE)
@@ -539,12 +608,26 @@ chimera_smb_client_open_at(
     desired_access = SMB2_FILE_READ_DATA | SMB2_FILE_WRITE_DATA |
         SMB2_FILE_READ_ATTRIBUTES | SMB2_FILE_WRITE_ATTRIBUTES | SMB2_DELETE;
 
-    smb_send_create(conn, request,
-                    request->open_at.name, request->open_at.namelen,
-                    desired_access,
-                    SMB2_FILE_SHARE_READ | SMB2_FILE_SHARE_WRITE | SMB2_FILE_SHARE_DELETE,
-                    disposition, options,
-                    chimera_smb_open_at_reply);
+    /* Request a read+handle-caching lease on file opens.  HANDLE caching is the
+     * prerequisite the server requires before it will grant a durable handle
+     * (the next increment), and the client acks any later break.  Directory
+     * opens skip it. */
+    if (!(request->open_at.flags & CHIMERA_VFS_OPEN_DIRECTORY)) {
+        uint64_t *k = (uint64_t *) lease_key;
+
+        k[0]    = chimera_rand64();
+        k[1]    = chimera_rand64();
+        ctx_len = smb_build_lease_ctx(lease_ctx, lease_key,
+                                      SMB2_LEASE_READ_CACHING | SMB2_LEASE_HANDLE_CACHING);
+        ctx = lease_ctx;
+    }
+
+    smb_send_create_ex(conn, request,
+                       request->open_at.name, request->open_at.namelen,
+                       desired_access,
+                       SMB2_FILE_SHARE_READ | SMB2_FILE_SHARE_WRITE | SMB2_FILE_SHARE_DELETE,
+                       disposition, options, ctx, ctx_len,
+                       chimera_smb_open_at_reply);
 } /* chimera_smb_client_open_at */
 
 static void

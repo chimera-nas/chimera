@@ -663,6 +663,29 @@ void smb_send_create(
     uint32_t                        options,
     chimera_smb_client_reply_cb     reply_cb);
 
+/* Same, but carrying a pre-built create-context blob after the name. */
+void smb_send_create_ex(
+    struct chimera_smb_client_conn *conn,
+    struct chimera_vfs_request     *request,
+    const char                     *path,
+    int                             path_len,
+    uint32_t                        desired_access,
+    uint32_t                        share_access,
+    uint32_t                        disposition,
+    uint32_t                        options,
+    const uint8_t                  *ctx,
+    uint32_t                        ctx_len,
+    chimera_smb_client_reply_cb     reply_cb);
+
+/* An RqLs (lease request v1) create context is 56 bytes: header(16) + "RqLs"(4)
+ * + pad(4) + data(32). */
+#define CHIMERA_SMB_LEASE_CTX_SIZE 56
+
+uint32_t smb_build_lease_ctx(
+    uint8_t       *buf,
+    const uint8_t *lease_key,
+    uint32_t       lease_state);
+
 /* Send an SMB2 CLOSE for `file_id`. */
 void smb_send_close(
     struct chimera_smb_client_conn          *conn,

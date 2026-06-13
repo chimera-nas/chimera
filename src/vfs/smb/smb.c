@@ -484,35 +484,22 @@ chimera_smb_client_pdu_begin(
     *hdr = h;
 } /* chimera_smb_client_pdu_begin */
 
-void
-chimera_smb_client_pdu_finish(
+/* Sign (if the session has signing on), frame with the NetBIOS length, and send
+ * a finished SMB2 PDU.  Shared by pdu_finish and server-initiated replies (the
+ * OPLOCK_BREAK ack) that send without registering a pending reply. */
+static void
+chimera_smb_client_sign_frame_send(
     struct chimera_smb_client_conn *conn,
     struct evpl_iovec              *iov,
-    struct evpl_iovec_cursor       *cursor,
-    struct chimera_vfs_request     *request,
-    chimera_smb_client_reply_cb     reply_cb,
-    void                           *reply_arg)
+    int                             smb2_len)
 {
-    struct smb_client_netbios_header  *netbios = evpl_iovec_data(iov);
-    struct smb2_header                *hdr     = (struct smb2_header *) (netbios + 1);
-    struct chimera_smb_client_pending *pending;
-    int                                smb2_len = evpl_iovec_cursor_consumed(cursor);
-    int                                total    = smb2_len + (int) sizeof(*netbios);
-
-    pending             = calloc(1, sizeof(*pending));
-    pending->message_id = hdr->message_id;
-    pending->cb         = reply_cb;
-    pending->arg        = reply_arg;
-    pending->request    = request;
-    pending->next       = conn->pending;
-    conn->pending       = pending;
+    struct smb_client_netbios_header *netbios = evpl_iovec_data(iov);
+    struct smb2_header               *hdr     = (struct smb2_header *) (netbios + 1);
+    int                               total   = smb2_len + (int) sizeof(*netbios);
 
     /* Sign the outgoing PDU once a signing key exists for the session (3.x with
      * signing on).  NEGOTIATE and SESSION_SETUP are never signed: they run
-     * before the key is derived (the server derives it while processing the
-     * final SESSION_SETUP and signs only its reply).  The signing key is
-     * per-session and lives on the shared server struct, so per-thread
-     * connections sign with it too.  The 2.x unsigned path leaves signing_active
+     * before the key is derived.  The 2.x unsigned path leaves signing_active
      * clear and skips this entirely. */
     if (conn->server->signing_active &&
         hdr->command != SMB2_NEGOTIATE &&
@@ -530,7 +517,85 @@ chimera_smb_client_pdu_finish(
     evpl_iovec_set_length(iov, total);
 
     evpl_sendv(conn->evpl, conn->bind, iov, 1, total, EVPL_SEND_FLAG_TAKE_REF);
+} /* chimera_smb_client_sign_frame_send */
+
+void
+chimera_smb_client_pdu_finish(
+    struct chimera_smb_client_conn *conn,
+    struct evpl_iovec              *iov,
+    struct evpl_iovec_cursor       *cursor,
+    struct chimera_vfs_request     *request,
+    chimera_smb_client_reply_cb     reply_cb,
+    void                           *reply_arg)
+{
+    struct smb_client_netbios_header  *netbios = evpl_iovec_data(iov);
+    struct smb2_header                *hdr     = (struct smb2_header *) (netbios + 1);
+    struct chimera_smb_client_pending *pending;
+    int                                smb2_len = evpl_iovec_cursor_consumed(cursor);
+
+    pending             = calloc(1, sizeof(*pending));
+    pending->message_id = hdr->message_id;
+    pending->cb         = reply_cb;
+    pending->arg        = reply_arg;
+    pending->request    = request;
+    pending->next       = conn->pending;
+    conn->pending       = pending;
+
+    chimera_smb_client_sign_frame_send(conn, iov, smb2_len);
 } /* chimera_smb_client_pdu_finish */
+
+/* Server-initiated SMB2 OPLOCK_BREAK (lease-break notification): acknowledge it
+ * so the server can complete the conflicting open.  The client holds no client-
+ * side cache yet, so it simply concedes to the server's proposed NewLeaseState.
+ * (When the break does not require an ack, nothing is sent.) */
+static void
+chimera_smb_client_handle_oplock_break(
+    struct chimera_smb_client_conn *conn,
+    struct evpl_iovec_cursor       *body)
+{
+    struct evpl_iovec        iov;
+    struct evpl_iovec_cursor cursor;
+    struct smb2_header      *hdr;
+    uint16_t                 struct_size, new_epoch;
+    uint32_t                 flags, current_state, new_state;
+    uint8_t                  lease_key[16];
+    /* MS-SMB2 2.2.23.2 Flags bit (not exported in a shared header). */
+    const uint32_t           ACK_REQUIRED = 0x01;
+
+    evpl_iovec_cursor_get_uint16(body, &struct_size);
+
+    /* Only lease-variant breaks are expected (the client requests leases, not
+     * legacy oplocks); ignore anything else. */
+    if (struct_size != SMB2_OPLOCK_BREAK_NOTIFY_LEASE_SIZE) {
+        return;
+    }
+
+    evpl_iovec_cursor_get_uint16(body, &new_epoch);
+    evpl_iovec_cursor_get_uint32(body, &flags);
+    evpl_iovec_cursor_copy(body, lease_key, 16);
+    evpl_iovec_cursor_get_uint32(body, &current_state);
+    evpl_iovec_cursor_get_uint32(body, &new_state);
+
+    (void) new_epoch;
+    (void) current_state;
+
+    if (!(flags & ACK_REQUIRED)) {
+        return;
+    }
+
+    /* Lease-break ACK (MS-SMB2 2.2.24.2): StructureSize(36), Reserved(2),
+     * Flags(4), LeaseKey(16), LeaseState(4), LeaseDuration(8). */
+    chimera_smb_client_pdu_begin(conn, SMB2_OPLOCK_BREAK, &iov, &cursor, &hdr);
+
+    evpl_iovec_cursor_append_uint16(&cursor, SMB2_OPLOCK_BREAK_ACK_LEASE_SIZE);
+    evpl_iovec_cursor_append_uint16(&cursor, 0);             /* Reserved */
+    evpl_iovec_cursor_append_uint32(&cursor, 0);             /* Flags */
+    evpl_iovec_cursor_append_blob(&cursor, lease_key, 16);
+    evpl_iovec_cursor_append_uint32(&cursor, new_state);     /* concede to NewLeaseState */
+    evpl_iovec_cursor_append_uint64(&cursor, 0);             /* LeaseDuration */
+
+    chimera_smb_client_sign_frame_send(conn, &iov, evpl_iovec_cursor_consumed(&cursor));
+} /* chimera_smb_client_handle_oplock_break */
 
 static struct chimera_smb_client_pending *
 chimera_smb_client_pending_take(
@@ -616,6 +681,13 @@ chimera_smb_client_handle_recv(
             chimera_smb_client_conn_fail(conn, CHIMERA_VFS_EIO);
             return;
         }
+    }
+
+    /* A server-initiated OPLOCK_BREAK (lease break) is not a reply to any
+     * request -- handle it directly rather than matching a pending message_id. */
+    if (hdr.command == SMB2_OPLOCK_BREAK) {
+        chimera_smb_client_handle_oplock_break(conn, &cursor);
+        return;
     }
 
     pending = chimera_smb_client_pending_take(conn, hdr.message_id);
