@@ -102,8 +102,8 @@ hard 50 s timeout, so a crash/hang only loses that one test.
 
 | Outcome  | Count | % |
 |----------|------:|----:|
-| passed   |  201  | 24% |
-| failed   |  540  | 64% |
+| passed   |  217  | 24% |
+| failed   |  524  | 64% |
 | skipped  |   94  | 11% |
 | hung     |    3  | <1% |
 | **total**| **838** | |

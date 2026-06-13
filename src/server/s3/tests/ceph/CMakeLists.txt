@@ -25,6 +25,7 @@ if(CHIMERA_NETNS_TESTING AND EXISTS "${S3TESTS_DIR}/.venv")
     )
     set_tests_properties(chimera/server/s3/ceph_s3tests PROPERTIES
         ENVIRONMENT "PYTHONUNBUFFERED=1;S3TESTS_DIR=${S3TESTS_DIR}"
+        LABELS "ceph-s3"
         TIMEOUT 600
         SKIP_RETURN_CODE 77
     )
