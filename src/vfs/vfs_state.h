@@ -237,6 +237,15 @@ chimera_vfs_caching_grant_link(
     struct chimera_vfs_file_state    *file,
     struct chimera_vfs_caching_grant *grant);
 
+/* Cap a fresh lease's requested mode to the largest subset grantable WITHOUT
+ * breaking another owner (MS-SMB2 3.3.5.9: granting a lease never recalls
+ * another lease).  Steps the candidate mode down W then H toward the R floor
+ * until it would be granted.  Caller must NOT hold file->lock. */
+uint8_t
+chimera_vfs_caching_grant_cap_mode(
+    struct chimera_vfs_file_state  *file,
+    const struct chimera_vfs_lease *lease);
+
 enum chimera_vfs_lease_result
 chimera_vfs_caching_grant_acquire(
     struct chimera_vfs_state             *state,
