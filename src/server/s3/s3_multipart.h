@@ -32,6 +32,9 @@ struct chimera_s3_multipart_upload {
     int                                 object_keylen;
     char                               *bucket_name;
     char                               *object_key;
+    /* Raw x-amz-tagging header from CreateMultipartUpload (URL-encoded
+     * k=v&...), applied as object tag xattrs on CompleteMultipartUpload. */
+    char                               *tagging;
     struct timespec                     created;
     pthread_mutex_t                     lock;
     int                                 refcount;
