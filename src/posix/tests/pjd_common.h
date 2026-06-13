@@ -1,6 +1,12 @@
+// SPDX-FileCopyrightText: 2006-2012 Pawel Jakub Dawidek <pawel@dawidek.net>
 // SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
-// SPDX-License-Identifier: LGPL-2.1-only
+// SPDX-License-Identifier: BSD-2-Clause
+//
+// Derived from the pjdfstest POSIX filesystem test suite
+// (https://github.com/pjd/pjdfstest) by Pawel Jakub Dawidek.  This harness is a
+// C analog of pjdfstest's tests/misc.sh, run against the Chimera POSIX client,
+// and is distributed under pjdfstest's original 2-clause BSD license.
 
 /*
  * pjd_common.h - C harness for the pjdfstest POSIX conformance suite ported to
