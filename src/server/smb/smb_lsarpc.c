@@ -30,6 +30,7 @@ static const dce_if_uuid_t LSA_INTERFACE = {
 #define LSA_SID_NAME_UNKNOWN       8
 #define LSA_OP_OPENPOLICY2         44
 #define LSA_OP_GETUSERNAME         45
+#define LSA_OP_QUERYINFOPOLICY2    46
 
 /* Bytes of DCE/RPC framing (common + response header) the framing layer writes
 * before the stub, so the generated marshaller's buffer cap stays in bounds. */
@@ -200,9 +201,13 @@ chimera_smb_lsarpc_impl(
             o->status         = 0;
             break;
         }
-        case LSA_OP_QUERYINFOPOLICY: {
-            struct lsa_QueryInfoPolicy_out      *o  = out;
+        case LSA_OP_QUERYINFOPOLICY:
+        case LSA_OP_QUERYINFOPOLICY2: {
+            /* QueryInfoPolicy (7) and QueryInfoPolicy2 (46) share an identical
+            * request/response shape; the generated _in/_out structs are
+            * layout-identical, so the level and info/status fields line up. */
             const struct lsa_QueryInfoPolicy_in *qi = in;
+            struct lsa_QueryInfoPolicy_out      *o  = out;
             /* Levels 3 (PrimaryDomain) and 5 (AccountDomain) both return the
              * server's workgroup name and machine SID. */
             static const char                   *domain = "WORKGROUP";
