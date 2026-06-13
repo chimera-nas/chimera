@@ -765,7 +765,7 @@ jobs:
       matrix:
         arch: [amd64, arm64]
         build_type: [Release, Debug]
-        category: [pynfs, smbtorture, wpts, posix-client, pjdfstest, s3, ceph-s3, client, unit, kvm-cthon, kvm-xfsprogs, kvm-pnfs, kvm-nfstest]
+        category: [pynfs, smbtorture, wpts, posix-client, pjdfstest, s3, ceph-s3, client, unit, kvm-cthon, kvm-xfsprogs, kvm-pnfs, kvm-nfstest, kvm-ltp]
         include:
           - { arch: amd64, runner: arc-amd64 }
           - { arch: arm64, runner: arc-arm64 }
@@ -775,6 +775,7 @@ jobs:
           - { arch: arm64, category: kvm-xfsprogs }
           - { arch: arm64, category: kvm-pnfs }
           - { arch: arm64, category: kvm-nfstest }
+          - { arch: arm64, category: kvm-ltp }
           # WPTS (Microsoft Protocol Test Suite) is not supported on arm64 —
           # the shard would only skip every test, so don't run it at all.
           - { arch: arm64, category: wpts }
@@ -830,6 +831,7 @@ jobs:
                 kvm-xfsprogs) SEL="-L kvm -R /xfstests/"; NEED_KVM=1 ;;
                 kvm-pnfs)     SEL="-L pnfs";              NEED_KVM=1 ;;
                 kvm-nfstest)  SEL="-L kvm -R /nfstest/";  NEED_KVM=1 ;;
+                kvm-ltp)      SEL="-L kvm -R /ltp/";      NEED_KVM=1 ;;
               esac
               if [ -n "$NEED_KVM" ]; then
                 ninja kvm_ubuntu2404_image kvm_ubuntu2404_hwe_image kvm_ubuntu2204_hwe_image

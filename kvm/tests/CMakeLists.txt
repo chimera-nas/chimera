@@ -184,6 +184,34 @@ set(XFSTESTS_CMD_nametest  "mkdir -p /mnt/test && cd /mnt/test && /opt/xfstests/
 set(XFSTESTS_CMD_fstest    "mkdir -p /mnt/test && /opt/xfstests/src/fstest -p /mnt/test -n 1 -f 2 -l 5 -s 65536")
 set(XFSTESTS_CMD_rewinddir "mkdir -p /mnt/test && /opt/xfstests/src/rewinddir-test /mnt/test")
 
+# Linux Test Project (LTP) scenario groups, run against the server-mounted share.
+# Matrix entries are "<group>|<space-separated NFS versions>"; <group> names a
+# runtest file shipped in the guest's /opt/ltp/runtest (>= kvm-test-base v1.5.0).
+# Each group has a companion /opt/ltp-skip/<group>.skip allowlist baked into the
+# image listing the cases that fail/break for reasons intrinsic to NFS, so any
+# remaining failure is a genuine server regression.
+#
+# Pared to the LTP coverage our other suites do NOT provide (an audit found the
+# bulk of LTP's fs/syscalls coverage duplicates pjdfstest, xfstests and cthon, or
+# isn't filesystem-related at all):
+#   dio             -- O_DIRECT / uncached I/O (our xfstests fsx runs buffered)
+#   fcntl-locktests -- POSIX byte-range locking via the real kernel client
+#   chimera_nfs42   -- NFSv4.2-only server ops (fallocate -> ALLOCATE/DEALLOCATE,
+#                      copy_file_range -> COPY/CLONE, statx); a curated runtest
+#                      generated in the guest image
+# All are fast, so they run on every backend in both Debug and Release.
+set(LTP_MATRIX
+    "dio|3 4.2"
+    "fcntl-locktests|3 4.0 4.1 4.2"
+    "chimera_nfs42|4.2"
+)
+
+# The guest's /opt/ltp-run.sh drives the group through kirk (the LTP runner) with
+# its skip file and turns the JSON report into a pass/fail exit code -- kirk's own
+# exit status ignores test failures, so the verdict is its stats.failed/broken.
+# The "<grp>" token is substituted per matrix entry below.
+set(LTP_CMD_TEMPLATE "/opt/ltp-run.sh <grp>")
+
 foreach(image_spec ${KVM_IMAGES})
     string(REPLACE "|" ";" image_parts "${image_spec}")
     list(GET image_parts 0 IMAGE_NAME)
@@ -377,6 +405,43 @@ foreach(image_spec ${KVM_IMAGES})
                         set_tests_properties(chimera/kvm/${IMAGE_NAME}/nfstest/${prog}_${backend}_nfs${nfsver}
                             PROPERTIES TIMEOUT 900)
                     endif()
+                endforeach()
+            endforeach()
+        endforeach()
+    endif()
+
+    # Linux Test Project (LTP) -- ubuntu2404 only.  Reuses the plain NFS wrapper:
+    # LTP runs against the pre-mounted share at /mnt exactly like cthon/xfstests,
+    # so it needs no dedicated wrapper.  See LTP_MATRIX above for the pared-down
+    # group selection (the non-duplicative slice).
+    if(IMAGE_NAME STREQUAL "ubuntu2404")
+        set(LTP_BACKENDS ${KVM_BACKENDS})
+        if(CAIRN_ENABLED)
+            list(APPEND LTP_BACKENDS cairn)
+        endif()
+        foreach(entry ${LTP_MATRIX})
+            string(REPLACE "|" ";" parts "${entry}")
+            list(GET parts 0 grp)
+            list(GET parts 1 vers_str)
+            string(REPLACE " " ";" vers "${vers_str}")
+            string(REPLACE "<grp>" "${grp}" ltp_cmd "${LTP_CMD_TEMPLATE}")
+            foreach(nfsver ${vers})
+                foreach(backend ${LTP_BACKENDS})
+                    # chimera_nfs42 exercises NFSv4.2 server allocation/copy ops;
+                    # run it on memfs + the diskfs backends (chimera's own
+                    # allocation paths) rather than the passthrough/cairn backends.
+                    if(grp STREQUAL "chimera_nfs42" AND
+                       NOT (backend STREQUAL "memfs" OR backend MATCHES "diskfs"))
+                        continue()
+                    endif()
+                    add_test(NAME chimera/kvm/${IMAGE_NAME}/ltp/${grp}_${backend}_nfs${nfsver}
+                        COMMAND bash ${NFS_WRAPPER}
+                                ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
+                                ${CHIMERA_BINARY} ${backend} ${nfsver}
+                                "${ltp_cmd}")
+                    set_tests_properties(chimera/kvm/${IMAGE_NAME}/ltp/${grp}_${backend}_nfs${nfsver}
+                        PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2
+                                   TIMEOUT 600)
                 endforeach()
             endforeach()
         endforeach()
