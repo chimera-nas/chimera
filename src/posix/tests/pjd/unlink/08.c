@@ -1,6 +1,13 @@
+// SPDX-FileCopyrightText: 2006-2012 Pawel Jakub Dawidek <pawel@dawidek.net>
 // SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
-// SPDX-License-Identifier: LGPL-2.1-only
+// SPDX-License-Identifier: BSD-2-Clause
+//
+// Derived from the pjdfstest POSIX filesystem test suite
+// (https://github.com/pjd/pjdfstest) by Pawel Jakub Dawidek.  These are C
+// reimplementations of the upstream shell test cases, run against the Chimera
+// POSIX client, and are distributed under pjdfstest's original 2-clause BSD
+// license.
 
 /* Ported from pjdfstest tests/unlink/08.t: unlink of a directory.  POSIX permits
  * EPERM; Linux returns EISDIR; some systems allow it (0).  Accept any. */
