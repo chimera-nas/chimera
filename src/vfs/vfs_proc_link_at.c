@@ -188,7 +188,13 @@ chimera_vfs_link_at(
 
     module = chimera_vfs_get_module(thread, dir_fh, dir_fhlen);
 
-    if (module && chimera_vfs_gate_needed(module->capabilities, cred)) {
+    /* WRITE+EXECUTE on the destination directory is enforced by the engine even
+     * for DELEGATES_DAC (passthrough) backends when the caller is a POSIX
+     * (AUTH_UNIX) client: a hard link is created by file handle (linkat with
+     * AT_EMPTY_PATH / open_by_handle_at), so the kernel never traverses the
+     * destination directory and never checks its write permission for the caller
+     * (pjd link/07).  SMB keeps its own model (see gate_needed_dac). */
+    if (module && chimera_vfs_gate_needed_dac(module->capabilities, cred)) {
         gate                 = malloc(sizeof(*gate));
         gate->thread         = thread;
         gate->cred           = cred;
@@ -205,9 +211,9 @@ chimera_vfs_link_at(
         gate->callback       = callback;
         gate->private_data   = private_data;
 
-        chimera_vfs_gate_fh(thread, cred, dir_fh, dir_fhlen,
-                            CHIMERA_ACE_WRITE_DATA | CHIMERA_ACE_EXECUTE,
-                            chimera_vfs_link_at_gate_complete, gate);
+        chimera_vfs_gate_fh_dac(thread, cred, dir_fh, dir_fhlen,
+                                CHIMERA_ACE_WRITE_DATA | CHIMERA_ACE_EXECUTE,
+                                chimera_vfs_link_at_gate_complete, gate);
         return;
     }
 

@@ -64,6 +64,38 @@ chimera_vfs_gate_needed(
     return 1;
 } /* chimera_vfs_gate_needed */
 
+SYMBOL_EXPORT int
+chimera_vfs_gate_needed_dac(
+    uint64_t                       module_capabilities,
+    const struct chimera_vfs_cred *cred)
+{
+    /* Whether the engine must evaluate path-prefix search (EXECUTE) on lookup,
+     * and WRITE on a link/rename destination directory.  This is identical to
+     * chimera_vfs_gate_needed() for every case EXCEPT one: a DELEGATES_DAC
+     * (passthrough) backend with an AUTH_UNIX (POSIX-semantics) caller.
+     *
+     * Passthrough resolves every component by file handle (open_by_handle_at),
+     * which bypasses the kernel's directory-traversal DAC -- the kernel only
+     * checks the *leaf* under the impersonated fsuid, never the prefix -- so for
+     * a POSIX caller the engine has to enforce the prefix itself against the
+     * real on-disk attributes (which passthrough getattr returns faithfully).
+     *
+     * Everything else is unchanged from gate_needed(): root and AUTH_NONE are
+     * exempt; engine backends enforce as before; and SMB (AUTH_ATTR) is never
+     * subjected to POSIX prefix DAC on a passthrough backend because it carries
+     * its own NT security-descriptor model and authorizes in the protocol
+     * layer (the kernel still enforces the leaf under the mapped fsuid). */
+    if (chimera_vfs_gate_needed(module_capabilities, cred)) {
+        return 1;
+    }
+
+    if (cred->flavor != CHIMERA_VFS_AUTH_UNIX || cred->uid == 0) {
+        return 0;
+    }
+
+    return (module_capabilities & CHIMERA_VFS_CAP_DELEGATES_DAC) ? 1 : 0;
+} /* chimera_vfs_gate_needed_dac */
+
 SYMBOL_EXPORT enum chimera_vfs_error
 chimera_vfs_gate(
     const struct chimera_vfs_attrs *attr,

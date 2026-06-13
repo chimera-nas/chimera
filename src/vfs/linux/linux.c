@@ -840,6 +840,9 @@ chimera_linux_mknod_at(
     }
 
     if (request->mknod_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_RDEV) {
+        /* va_rdev is the canonical VFS encoding (major << 32 | minor), as
+         * produced by the NFS server from CREATE specdata and by statx getattr
+         * here.  Convert it back to a host dev_t for mknodat(). */
         dev = makedev(request->mknod_at.set_attr->va_rdev >> 32,
                       request->mknod_at.set_attr->va_rdev & 0xFFFFFFFF);
     }

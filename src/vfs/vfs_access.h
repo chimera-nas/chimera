@@ -59,6 +59,19 @@ int chimera_vfs_gate_needed(
     const struct chimera_vfs_cred *cred);
 
 /*
+ * Like chimera_vfs_gate_needed(), plus one extra case: a handle-based
+ * passthrough backend (CHIMERA_VFS_CAP_DELEGATES_DAC) with an AUTH_UNIX caller.
+ * Such a backend resolves path components via open_by_handle_at, which bypasses
+ * the kernel's directory-traversal DAC, so the engine must enforce path-prefix
+ * search (EXECUTE) on lookup and link/rename destination-directory WRITE itself.
+ * SMB (AUTH_ATTR) is not subjected to POSIX prefix DAC (it owns its own model);
+ * root and AUTH_NONE remain exempt; engine backends behave as gate_needed().
+ */
+int chimera_vfs_gate_needed_dac(
+    uint64_t                       module_capabilities,
+    const struct chimera_vfs_cred *cred);
+
+/*
  * The enforcement decision itself: CHIMERA_VFS_OK if every bit in `required`
  * (canonical CHIMERA_ACE_* mask) is granted to `cred` on the object described
  * by `attr` (which must carry mode/uid/gid and, for a natively-stored ACL, the
@@ -95,6 +108,18 @@ typedef void (*chimera_vfs_gate_callback_t)(
 
 /* Require `required` (CHIMERA_ACE_* mask) on the object named by `fh`. */
 void chimera_vfs_gate_fh(
+    struct chimera_vfs_thread     *thread,
+    const struct chimera_vfs_cred *cred,
+    const void                    *fh,
+    int                            fhlen,
+    uint32_t                       required,
+    chimera_vfs_gate_callback_t    callback,
+    void                          *private_data);
+
+/* As chimera_vfs_gate_fh(), but enforced even for DELEGATES_DAC (passthrough)
+ * backends -- for DAC the kernel cannot see on handle-based lookups (path-prefix
+ * search, link/rename destination-directory write). */
+void chimera_vfs_gate_fh_dac(
     struct chimera_vfs_thread     *thread,
     const struct chimera_vfs_cred *cred,
     const void                    *fh,
