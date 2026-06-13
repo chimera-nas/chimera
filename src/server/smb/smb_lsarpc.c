@@ -417,7 +417,9 @@ chimera_smb_lsarpc_ndr_dispatch(
 
     ndr_cursor_init(&c, evpl_iovec_cursor_data(cursor),
                     cursor->iov->length - cursor->offset);
-    ndr_dbuf_init(&dbuf, 1024);
+    /* Starting capacity hint only; the arena grows by linking new blocks so the
+     * held in/out pointers stay valid across later allocations. */
+    ndr_dbuf_init(&dbuf, 4096);
 
     in  = ndr_dbuf_alloc(&dbuf, op->in_size);
     out = ndr_dbuf_alloc(&dbuf, op->out_size);

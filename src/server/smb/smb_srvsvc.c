@@ -111,9 +111,9 @@ chimera_smb_srvsvc_handler(
 
     ndr_cursor_init(&c, evpl_iovec_cursor_data(cursor),
                     cursor->iov->length - cursor->offset);
-    /* Sized to the max single-fragment response so the arena never reallocates
-     * out from under the held in/out pointers. */
-    ndr_dbuf_init(&dbuf, 65536);
+    /* The arena grows by linking new blocks, so the held in/out pointers stay
+     * valid across later allocations; this is only a starting capacity hint. */
+    ndr_dbuf_init(&dbuf, 4096);
 
     in  = ndr_dbuf_alloc(&dbuf, op->in_size);
     out = ndr_dbuf_alloc(&dbuf, op->out_size);
