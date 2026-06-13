@@ -1139,10 +1139,15 @@ macro(add_pjd_test path backend)
     endif()
 endmacro()
 
+# Backends the pjd suite is green on are registered here.  memfs and cairn pass
+# 134/134; diskfs/passthrough/NFS are widened by follow-up PRs as they green.
 set(_pjd_test_names "")
 foreach(t ${PJD_TESTS})
     add_pjd_testprog(${t})
     add_pjd_test(${t} memfs)
+    if(CAIRN_ENABLED)
+        add_pjd_test(${t} cairn)
+    endif()
 endforeach()
 
 # Tag the non-pjd tests with the 'posix' label so that suite can be run
