@@ -3688,7 +3688,11 @@ cairn_seek(
             request->seek.r_offset = inode->size;
         }
 
-        request->seek.r_eof = 0;
+        /* The match is the implicit hole at EOF only once the returned offset
+         * reaches the logical size; RFC 7862 §11.4.4 requires sr_eof TRUE there
+         * (surfaced by the Linux client to lseek).  A gap that begins before
+         * the size is a real hole short of EOF, so flag eof on size reached. */
+        request->seek.r_eof = (request->seek.r_offset >= inode->size);
         rocksdb_iter_destroy(iter);
         cairn_inode_handle_release(&ih);
         request->status = CHIMERA_VFS_OK;

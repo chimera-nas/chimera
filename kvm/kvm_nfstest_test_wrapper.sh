@@ -231,6 +231,19 @@ if [ "$NFSTEST_PROGRAM" = "nfstest_alloc" ]; then
     NFSTEST_EXTRA=" --runtest ^perf01"
 fi
 
+# nfstest_sparse verifies SEEK on the wire by bracketing each individual lseek
+# with a fresh tcpdump capture that holds only a handful of packets.  tcpdump's
+# pcap dump file is fully (stdio) buffered by default, so a tiny capture never
+# fills the buffer: when nfstest stops the trace the unflushed header+packets
+# are lost and the test aborts with "Packet trace file is empty".  Run tcpdump
+# packet-buffered (-U) so every packet -- and the pcap header -- is written to
+# disk as it is captured, surviving the stop regardless of the kill signal.
+# Also shrink the capture buffer (192 MiB -> 4 MiB; faster to allocate/attach in
+# the microvm) and give a flush delay before the trace is stopped.
+if [ "$NFSTEST_PROGRAM" = "nfstest_sparse" ]; then
+    NFSTEST_EXTRA=" --tcpdump '/usr/bin/tcpdump -U' --tbsize 4k --trcdelay 3"
+fi
+
 # nfstest runs as root inside the guest, mounts the share itself, and finds its
 # package tree via PYTHONPATH (no install step needed beyond the cloned tree).
 TEST_CMD="mkdir -p /mnt/t && PYTHONPATH=/opt/nfstest /opt/nfstest/test/${NFSTEST_PROGRAM} \

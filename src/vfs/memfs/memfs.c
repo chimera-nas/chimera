@@ -4217,7 +4217,13 @@ memfs_seek(
             request->seek.r_offset = fork_size;
         }
 
-        request->seek.r_eof = 0;
+        /* No explicit hole block found before EOF: the match is the implicit
+         * hole at the end of the file, so the search has reached EOF.  RFC 7862
+         * §11.4.4 requires sr_eof TRUE here (the Linux client surfaces it to
+         * lseek).  A trailing unallocated region that begins before the logical
+         * size is a real hole short of EOF, so only flag eof once the returned
+         * offset reaches fork_size. */
+        request->seek.r_eof = (request->seek.r_offset >= fork_size);
         pthread_mutex_unlock(&inode->lock);
         request->status = CHIMERA_VFS_OK;
         request->complete(request);
