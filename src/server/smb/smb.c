@@ -887,6 +887,29 @@ chimera_smb_compound_advance(struct chimera_smb_compound *compound)
             chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
             return;
         }
+
+        /* MS-SMB2 3.3.5.2.7.2: a related request inherits the FileId of the
+         * preceding request (FileId 0xFFFF.../0xFFFF...).  When that preceding
+         * request was a CREATE that failed, no Open was established, so the
+         * inherited handle is unavailable.  In that case the server fails the
+         * related request with the *preceding request's* error status rather
+         * than the generic STATUS_FILE_CLOSED an unresolved handle would yield
+         * (Windows/Samba: related4/related7 inherit ACCESS_DENIED, related8
+         * inherits OBJECT_NAME_NOT_FOUND).  Detect "no Open established" via the
+         * saved FileId still being UINT64_MAX: a successful CREATE anywhere in
+         * the chain populates it, so a later failing op (e.g. a read-only
+         * handle's WRITE in related6) leaves the handle resolvable and does NOT
+         * poison the rest of the chain. */
+        if (unlikely(compound->complete_requests > 0 &&
+                     compound->saved_file_id.pid == UINT64_MAX)) {
+            struct chimera_smb_request *prev =
+                compound->requests[compound->complete_requests - 1];
+
+            if (chimera_smb_is_error_status(prev->status)) {
+                chimera_smb_complete_request(request, prev->status);
+                return;
+            }
+        }
     } else {
         /* An unrelated request breaks the related chain: clear the saved
          * context so a following related request cannot inherit stale session,

@@ -2072,20 +2072,18 @@ chimera_smb_open_file_resolve(
      * related compound (MS-SMB2 3.3.5.2.7.2).  For an unrelated request it is
      * just an invalid handle and must resolve to FILE_CLOSED, not the prior
      * request's file. */
-    if (unlikely(file_id->pid == UINT64_MAX)) {
+    if (unlikely(file_id->pid == UINT64_MAX || file_id->vid == UINT64_MAX)) {
         if (!(request->smb2_hdr.flags & SMB2_FLAGS_RELATED_OPERATIONS) ||
-            request->compound->saved_file_id.pid == UINT64_MAX) {
-            return NULL;
-        }
-        file_id->pid = request->compound->saved_file_id.pid;
-    }
-
-    if (unlikely(file_id->vid == UINT64_MAX)) {
-        if (!(request->smb2_hdr.flags & SMB2_FLAGS_RELATED_OPERATIONS) ||
+            request->compound->saved_file_id.pid == UINT64_MAX ||
             request->compound->saved_file_id.vid == UINT64_MAX) {
             return NULL;
         }
-        file_id->vid = request->compound->saved_file_id.vid;
+        /* A related request inherits the WHOLE saved FileId, not field-by-field:
+         * Windows/Samba ignore the per-field bytes once the request is related
+         * (some clients leave one half as a literal 0, e.g. the placeholder
+         * { UINT64_MAX, 0 } compound_async.getinfo_middle sends), so a literal
+         * value in the other half must not be HASH_FINDed as-is. */
+        *file_id = request->compound->saved_file_id;
     }
 
     open_file_bucket = file_id->vid & CHIMERA_SMB_OPEN_FILE_BUCKET_MASK;
@@ -2103,6 +2101,17 @@ chimera_smb_open_file_resolve(
     }
 
     pthread_mutex_unlock(&tree->open_files_lock[open_file_bucket]);
+
+    /* Record the FileId this op resolved so a subsequent compound-related
+     * request can inherit it (FileId 0xFFFF.../0xFFFF...).  Only CREATE used to
+     * seed saved_file_id, which left a related op chained behind a non-CREATE
+     * lead (e.g. FLUSH+related CLOSE, or GETINFO in the middle of a chain)
+     * unable to find the handle and failing FILE_CLOSED
+     * (compound_async.flush_close / flush_flush / getinfo_middle).  Any op that
+     * successfully resolved a concrete handle is a valid inheritance source. */
+    if (likely(open_file)) {
+        request->compound->saved_file_id = *file_id;
+    }
 
     return open_file;
 } /* chimera_smb_open_file_resolve */
@@ -2364,20 +2373,14 @@ chimera_smb_open_file_close(
     /* Only a related compound request inherits the previous request's FileId
      * from a UINT64_MAX placeholder; for an unrelated request it is an invalid
      * handle and must report FILE_CLOSED (MS-SMB2 3.3.5.2.7.2). */
-    if (unlikely(file_id->pid == UINT64_MAX)) {
+    if (unlikely(file_id->pid == UINT64_MAX || file_id->vid == UINT64_MAX)) {
         if (!(request->smb2_hdr.flags & SMB2_FLAGS_RELATED_OPERATIONS) ||
-            request->compound->saved_file_id.pid == UINT64_MAX) {
-            return NULL;
-        }
-        file_id->pid = request->compound->saved_file_id.pid;
-    }
-
-    if (unlikely(file_id->vid == UINT64_MAX)) {
-        if (!(request->smb2_hdr.flags & SMB2_FLAGS_RELATED_OPERATIONS) ||
+            request->compound->saved_file_id.pid == UINT64_MAX ||
             request->compound->saved_file_id.vid == UINT64_MAX) {
             return NULL;
         }
-        file_id->vid = request->compound->saved_file_id.vid;
+        /* Inherit the whole saved FileId (see chimera_smb_open_file_resolve). */
+        *file_id = request->compound->saved_file_id;
     }
 
     open_file_bucket = file_id->vid & CHIMERA_SMB_OPEN_FILE_BUCKET_MASK;

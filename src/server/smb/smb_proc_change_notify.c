@@ -234,23 +234,29 @@ chimera_smb_change_notify(struct chimera_smb_request *request)
 
     /* No events — about to park the request.
      *
-     * Reject parking when this CHANGE_NOTIFY is inside a multi-command
-     * compound.  Async completion would force the compound reply
-     * builder to skip this slot (status STATUS_PENDING is dropped from
-     * the compound), and clients that match compound slots positionally
-     * may misparse the remaining replies.  Windows itself appears to
-     * cope (it matches by message_id), but the safe + portable answer
-     * is "don't allow it" — Windows never compounds CHANGE_NOTIFY with
-     * anything else in practice anyway.  The client can retry the
-     * CHANGE_NOTIFY as a standalone request.
+     * A CHANGE_NOTIFY that would go asynchronous inside a multi-command
+     * compound is governed by MS-SMB2 <159>/<162> (the Win7 compound
+     * behaviour the smb2.compound.interim* tests pin):
      *
-     * Synchronous completion (events were already pending) is fine —
-     * that slot's reply lands in the compound normally and we never
-     * reach this check. */
-    if (request->compound->num_requests > 1) {
+     *   - If it is NOT the last request in the compound, the server fails
+     *     it with STATUS_INTERNAL_ERROR (the other, synchronous, requests
+     *     in the compound still succeed) -- interim2.
+     *
+     *   - If it IS the last request, the server is allowed to split it off
+     *     and let it go async: the interim STATUS_PENDING is sent as a
+     *     standalone async message (just as for a non-compounded notify)
+     *     and this slot is dropped from the compound reply.  The parked
+     *     request can then be cancelled (interim1) or completed later
+     *     (interim3).
+     *
+     * Synchronous completion (events were already pending) is fine for any
+     * position -- that slot's reply lands in the compound normally and we
+     * never reach this check. */
+    if (request->compound->num_requests > 1 &&
+        request != request->compound->requests[request->compound->num_requests - 1]) {
         pthread_mutex_unlock(&state->lock);
         chimera_smb_open_file_release(request, open_file);
-        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+        chimera_smb_complete_request(request, SMB2_STATUS_INTERNAL_ERROR);
         return;
     }
 
