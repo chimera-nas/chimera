@@ -1042,6 +1042,21 @@ chimera_smb_create_after_share(
                          * must find a live member or it revokes the fresh lease. */
                         chimera_smb_grant_add_member(grant, open_file);
 
+                        /* MS-SMB2 3.3.5.9: granting a lease never breaks another
+                         * lease.  A fresh RqLs lease whose requested mode collides
+                         * with another key's holder (e.g. RHW behind a peer's R)
+                         * must CAP ITSELF to the grantable subset (-> RH) rather
+                         * than recall the peer; otherwise try_insert would fire a
+                         * spurious break (smb2.lease.break's "no break + no change"
+                         * re-open check, nobreakself).  Legacy oplocks keep the
+                         * break-the-peer behavior (exclusive/batch arbitration), so
+                         * cap only the lease path. */
+                        if (via_rqls) {
+                            grant->lease.mode.granted =
+                                chimera_vfs_caching_grant_cap_mode(file_state,
+                                                                   &grant->lease);
+                        }
+
                         result = chimera_vfs_state_try_insert(vfs_state, file_state,
                                                               &grant->lease, &conflict);
                         while (result != CHIMERA_VFS_LEASE_GRANTED &&
@@ -1320,6 +1335,22 @@ chimera_smb_create_mkdir_open_callback(
     if (error_code != CHIMERA_VFS_OK) {
         chimera_smb_create_release_parent(request);
         chimera_smb_complete_request(request, SMB2_STATUS_OBJECT_NAME_NOT_FOUND);
+        return;
+    }
+
+    /* A lease key is bound to exactly one file per client (MS-SMB2 3.3.5.9.8).
+     * The file-create path enforces this in chimera_smb_create_open_finish, but
+     * the directory (mkdir) path completes here without passing through it, so a
+     * client opening a directory under a lease key already held on another file
+     * would slip past the check (smb2.lease.request opens fname2 as a directory
+     * under LEASE1 and expects STATUS_INVALID_PARAMETER). */
+    if ((request->create.ctx_present_mask & CHIMERA_SMB_CREATE_CTX_RQLS) &&
+        chimera_smb_session_lease_key_conflict(request->session_handle->session,
+                                               request->create.rqls.key,
+                                               oh->fh, oh->fh_len)) {
+        chimera_smb_create_release_handle(vfs_thread, oh);
+        chimera_smb_create_release_parent(request);
+        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
         return;
     }
 

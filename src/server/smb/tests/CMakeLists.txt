@@ -1530,9 +1530,12 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.kernel-oplocks.kernel_oplocks3
     smb2.kernel-oplocks.kernel_oplocks8
     # smb2.lease
+    smb2.lease.break
+    smb2.lease.complex1
     smb2.lease.duplicate_create
     smb2.lease.duplicate_open
     smb2.lease.multibreak
+    smb2.lease.nobreakself
     smb2.lease.rename_wait
     smb2.lease.statopen
     smb2.lease.statopen2
@@ -3137,9 +3140,12 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.kernel-oplocks.kernel_oplocks3
     smb2.kernel-oplocks.kernel_oplocks8
     # smb2.lease
+    smb2.lease.break
+    smb2.lease.complex1
     smb2.lease.duplicate_create
     smb2.lease.duplicate_open
     smb2.lease.multibreak
+    smb2.lease.nobreakself
     smb2.lease.rename_wait
     smb2.lease.statopen2
     smb2.lease.statopen3
