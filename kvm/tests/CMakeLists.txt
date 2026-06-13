@@ -249,14 +249,14 @@ foreach(image_spec ${KVM_IMAGES})
     # behaviour with its own tcpdump-driven RPC dissector.  The nfstest tree and
     # its in-guest deps (python3, tcpdump, a default route) ship in the
     # kvm-test-base image (>= v1.2.0).  Matrix entries are "program|<space-
-    # separated NFS versions>"; nfstest_sparse / nfstest_ssc are left
-    # unregistered for now (an empty-trace harness artifact, and a server-side
-    # COPY gap, respectively).
+    # separated NFS versions>"; nfstest_ssc is left unregistered for now (a
+    # server-side COPY gap).
     if(IMAGE_NAME STREQUAL "ubuntu2404")
         set(NFSTEST_MATRIX
             "nfstest_posix|3 4.0 4.1 4.2"
             "nfstest_interop|4.0"
             "nfstest_alloc|4.2"
+            "nfstest_sparse|4.2"
         )
         set(NFSTEST_BACKENDS ${KVM_BACKENDS})
         if(CAIRN_ENABLED)
