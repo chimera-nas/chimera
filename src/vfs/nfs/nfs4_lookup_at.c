@@ -212,10 +212,14 @@ chimera_nfs4_lookup_at(
         args.num_argarray = 5;
     }
 
-    /* GETATTR for the resolved object */
+    /* GETATTR for the resolved object.  OWNER/OWNER_GROUP are required so the
+     * client-side open access gate (chimera_vfs_open_lookup_complete) can
+     * evaluate ownership; without them the gate sees uid/gid 0 and mis-decides
+     * owner/group access (pjdfstest open/06). */
     argarray[getattr_idx].argop = OP_GETATTR;
     attr_request[0]             = (1 << FATTR4_TYPE) | (1 << FATTR4_SIZE) | (1 << FATTR4_FILEID);
     attr_request[1]             = (1 << (FATTR4_MODE - 32)) | (1 << (FATTR4_NUMLINKS - 32)) |
+        (1 << (FATTR4_OWNER - 32)) | (1 << (FATTR4_OWNER_GROUP - 32)) |
         (1 << (FATTR4_TIME_ACCESS - 32)) | (1 << (FATTR4_TIME_MODIFY - 32));
     argarray[getattr_idx].opgetattr.attr_request     = attr_request;
     argarray[getattr_idx].opgetattr.num_attr_request = 2;
