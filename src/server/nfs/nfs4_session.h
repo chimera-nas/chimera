@@ -234,6 +234,10 @@ struct nfs4_session {
      * Callbacks must be sent from this thread -- evpl sends are not cross-thread
      * safe -- so cross-thread recalls marshal to it (nfs4_cb_recall_holder). */
     struct chimera_server_nfs_thread *nfs4_session_backchannel_owner;
+    /* CREATE_SESSION4_FLAG_PERSIST was advertised for this session (server
+     * nfs4_drc on AND client requested it): the per-slot reply cache is
+     * written through to the KV store so retransmits replay across a restart. */
+    bool                              nfs4_session_persist;
     struct UT_hash_handle             nfs4_session_hh;
 };
 
@@ -431,7 +435,8 @@ nfs4_create_session(
     uint32_t                     replay_max_slots,
     uint32_t                     replay_maxresp_cached,
     const struct channel_attrs4 *fore_attrs,
-    const struct channel_attrs4 *back_attrs);
+    const struct channel_attrs4 *back_attrs,
+    const uint8_t               *restore_sessionid);
 
 /* SEQUENCE replay slot state machine.  See plan in
  * /root/.claude/plans/lets-plan-out-the-steady-steele.md for the full

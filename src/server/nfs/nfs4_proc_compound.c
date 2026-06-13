@@ -4,6 +4,7 @@
 
 #include "nfs4_procs.h"
 #include "nfs4_session.h"
+#include "nfs4_recovery.h"
 #include "evpl/evpl.h"
 #include "evpl/evpl_rpc2.h"
 #include "evpl/evpl_rpc2_program.h"
@@ -621,6 +622,11 @@ chimera_nfs4_compound(
     struct chimera_server_nfs_thread *thread = private_data;
     struct nfs_request               *req;
     int                               rc;
+
+    /* First NFSv4 compound on a worker thread (which owns a live vfs_thread)
+     * drives the deferred cold-start recovery load.  Run-once and cheap after
+     * the first call (atomic fast-path inside). */
+    nfs_recovery_kickoff(thread);
 
     req = nfs_request_alloc(thread, conn, encoding);
 

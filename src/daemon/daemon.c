@@ -505,6 +505,11 @@ main(
         chimera_server_config_set_nfs4_delegations(server_config, json_is_true(json_value));
     }
 
+    json_value = json_object_get(server_params, "nfs4_drc");
+    if (json_is_boolean(json_value)) {
+        chimera_server_config_set_nfs4_drc(server_config, json_is_true(json_value));
+    }
+
     json_value = json_object_get(server_params, "nfs4_lease_time");
     if (json_is_integer(json_value)) {
         int_value = json_integer_value(json_value);
