@@ -96,17 +96,11 @@ chimera_smb_async_interim_send(struct chimera_smb_request *request)
     nb       = __builtin_bswap32((uint32_t) smb2_len);
     memcpy(buf, &nb, 4);
 
-    if (request->async.signed_session) {
-        chimera_smb_sign_message(conn->thread->signing_ctx,
-                                 request->async.dialect,
-                                 conn->negotiated.signing_alg,
-                                 request->async.signing_key,
-                                 buf + 4,
-                                 smb2_len);
-    }
-
+    /* Sign or, on an encrypting session, wrap in a TRANSFORM header -- an
+     * interim STATUS_PENDING is a response like any other and must be secured
+     * the same way (MS-SMB2 §3.3.4.1.4).  This consumes iov. */
     iov.length = CHIMERA_SMB_ASYNC_INTERIM_LEN;
-    evpl_sendv(evpl, conn->bind, &iov, 1, iov.length, EVPL_SEND_FLAG_TAKE_REF);
+    chimera_smb_secure_send(conn, &iov, smb2_len, &request->async.secure);
 } /* chimera_smb_async_interim_send */
 
 void
@@ -123,21 +117,13 @@ chimera_smb_async_interim_begin(struct chimera_smb_request *request)
     request->async.armed          = 1;
     request->async.credit_charge  = request->smb2_hdr.credit_charge;
     request->async.credit_request = request->smb2_hdr.credit_request_response;
-    request->async.dialect        = conn->dialect;
     request->async.session_id     = request->smb2_hdr.session_id;
 
-    /* Sign the interim iff the original request was signed (same rule as the
-     * change-notify path); an unsigned async reply on a signed session is
-     * rejected by Windows clients. */
-    if ((request->smb2_hdr.flags & SMB2_FLAGS_SIGNED) &&
-        request->session_handle) {
-        request->async.signed_session = 1;
-        memcpy(request->async.signing_key,
-               request->session_handle->signing_key,
-               sizeof(request->async.signing_key));
-    } else {
-        request->async.signed_session = 0;
-    }
+    /* Snapshot signing/encryption state so both the interim and the eventual
+     * final response are secured the way the synchronous path would secure
+     * them (sign if signed; wrap in a TRANSFORM header if the session
+     * encrypts). */
+    chimera_smb_secure_send_snapshot(request, &request->async.secure);
 
     /* AsyncId = the original MessageId (Samba's convention; the client
      * correlates and cancels by it). */

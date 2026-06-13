@@ -335,18 +335,11 @@ chimera_smb_notify_send_interim(struct chimera_smb_notify_request *nr)
     smb2_len = (int) (p - buf - 4);
     chimera_smb_notify_set_netbios_len(buf, smb2_len);
 
-    if (nr->signed_session) {
-        chimera_smb_sign_message(nr->thread->signing_ctx,
-                                 nr->conn->dialect,
-                                 nr->conn->negotiated.signing_alg,
-                                 nr->signing_key,
-                                 buf + 4,
-                                 smb2_len);
-    }
-
+    /* Sign, or wrap in a TRANSFORM header on an encrypting session (the interim
+     * is a response and must be secured the same way -- MS-SMB2 §3.3.4.1.4).
+     * Consumes iov. */
     iov.length = (int) (p - buf);
-    evpl_sendv(nr->thread->evpl, nr->conn->bind, &iov, 1, iov.length,
-               EVPL_SEND_FLAG_TAKE_REF);
+    chimera_smb_secure_send(nr->conn, &iov, smb2_len, &nr->secure);
 } /* chimera_smb_notify_send_interim */
 
 /* ----------------------------------------------------------------
@@ -639,18 +632,11 @@ chimera_smb_notify_do_send_response(
 
     chimera_smb_notify_set_netbios_len(buf, smb2_len);
 
-    if (nr->signed_session) {
-        chimera_smb_sign_message(nr->thread->signing_ctx,
-                                 nr->conn->dialect,
-                                 nr->conn->negotiated.signing_alg,
-                                 nr->signing_key,
-                                 buf + 4,
-                                 smb2_len);
-    }
-
+    /* Sign, or wrap in a TRANSFORM header on an encrypting session (every
+     * change-notify delivery is a response and must be secured -- MS-SMB2
+     * §3.3.4.1.4).  Consumes iov. */
     iov.length = (int) (p - buf);
-    evpl_sendv(nr->thread->evpl, nr->conn->bind, &iov, 1, iov.length,
-               EVPL_SEND_FLAG_TAKE_REF);
+    chimera_smb_secure_send(nr->conn, &iov, smb2_len, &nr->secure);
 
     chimera_smb_notify_unlink(nr);
     chimera_smb_notify_request_free(nr);
@@ -771,18 +757,10 @@ chimera_smb_notify_cancel(struct chimera_smb_notify_request *nr)
     smb2_len = (int) (p - buf - 4);
     chimera_smb_notify_set_netbios_len(buf, smb2_len);
 
-    if (nr->signed_session) {
-        chimera_smb_sign_message(nr->thread->signing_ctx,
-                                 nr->conn->dialect,
-                                 nr->conn->negotiated.signing_alg,
-                                 nr->signing_key,
-                                 buf + 4,
-                                 smb2_len);
-    }
-
+    /* Sign, or wrap in a TRANSFORM header on an encrypting session.  Consumes
+     * iov. */
     iov.length = (int) (p - buf);
-    evpl_sendv(nr->thread->evpl, nr->conn->bind, &iov, 1, iov.length,
-               EVPL_SEND_FLAG_TAKE_REF);
+    chimera_smb_secure_send(nr->conn, &iov, smb2_len, &nr->secure);
 
     chimera_smb_notify_request_free(nr);
 } /* chimera_smb_notify_cancel */
