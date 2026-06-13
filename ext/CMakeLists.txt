@@ -8,6 +8,10 @@ add_subdirectory(libevpl)
 
 set(XDRZCC ${XDRZCC} PARENT_SCOPE)
 
+add_subdirectory(ndrzcc)
+
+set(NDRZCC ${NDRZCC} PARENT_SCOPE)
+
 remove_definitions(-fvisibility=hidden)
 
 remove_definitions(-Wall)
