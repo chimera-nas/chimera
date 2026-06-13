@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 # SPDX-License-Identifier: LGPL-2.1-only
 #
-# Curated allowlist of ceph/s3-tests cases that currently PASS against chimera.
-# Generated from a per-test-isolated full-suite run; see
-# docs/design/s3_ceph_compliance.md. Regenerate when compliance improves.
+# Curated allowlist of ceph/s3-tests cases that pass against chimera on a
+# single shared daemon. Regenerate (and re-validate) as compliance improves;
+# see docs/design/s3_ceph_compliance.md.
 #
 s3tests/functional/test_s3.py::test_100_continue_error_retry
 s3tests/functional/test_s3.py::test_abort_multipart_upload
@@ -43,6 +43,7 @@ s3tests/functional/test_s3.py::test_bucket_list_delimiter_dot
 s3tests/functional/test_s3.py::test_bucket_list_delimiter_empty
 s3tests/functional/test_s3.py::test_bucket_list_delimiter_none
 s3tests/functional/test_s3.py::test_bucket_list_delimiter_not_exist
+s3tests/functional/test_s3.py::test_bucket_list_delimiter_percentage
 s3tests/functional/test_s3.py::test_bucket_list_delimiter_prefix
 s3tests/functional/test_s3.py::test_bucket_list_delimiter_prefix_ends_with_delimiter
 s3tests/functional/test_s3.py::test_bucket_list_delimiter_prefix_underscore
@@ -56,6 +57,7 @@ s3tests/functional/test_s3.py::test_bucket_list_marker_empty
 s3tests/functional/test_s3.py::test_bucket_list_marker_none
 s3tests/functional/test_s3.py::test_bucket_list_marker_not_in_list
 s3tests/functional/test_s3.py::test_bucket_list_marker_unreadable
+s3tests/functional/test_s3.py::test_bucket_list_maxkeys_invalid
 s3tests/functional/test_s3.py::test_bucket_list_maxkeys_none
 s3tests/functional/test_s3.py::test_bucket_list_maxkeys_one
 s3tests/functional/test_s3.py::test_bucket_list_maxkeys_zero
@@ -76,12 +78,14 @@ s3tests/functional/test_s3.py::test_bucket_listv2_delimiter_dot
 s3tests/functional/test_s3.py::test_bucket_listv2_delimiter_empty
 s3tests/functional/test_s3.py::test_bucket_listv2_delimiter_none
 s3tests/functional/test_s3.py::test_bucket_listv2_delimiter_not_exist
+s3tests/functional/test_s3.py::test_bucket_listv2_delimiter_percentage
 s3tests/functional/test_s3.py::test_bucket_listv2_delimiter_prefix
 s3tests/functional/test_s3.py::test_bucket_listv2_delimiter_prefix_ends_with_delimiter
 s3tests/functional/test_s3.py::test_bucket_listv2_delimiter_prefix_underscore
 s3tests/functional/test_s3.py::test_bucket_listv2_delimiter_unreadable
 s3tests/functional/test_s3.py::test_bucket_listv2_fetchowner_defaultempty
 s3tests/functional/test_s3.py::test_bucket_listv2_fetchowner_empty
+s3tests/functional/test_s3.py::test_bucket_listv2_fetchowner_notempty
 s3tests/functional/test_s3.py::test_bucket_listv2_many
 s3tests/functional/test_s3.py::test_bucket_listv2_maxkeys_none
 s3tests/functional/test_s3.py::test_bucket_listv2_maxkeys_one
@@ -122,10 +126,14 @@ s3tests/functional/test_s3.py::test_copy_enc[unencrypted-unencrypted-STANDARD-ST
 s3tests/functional/test_s3.py::test_copy_enc[unencrypted-unencrypted-STANDARD-STANDARD-8388608]
 s3tests/functional/test_s3.py::test_copy_object_ifmatch_good
 s3tests/functional/test_s3.py::test_copy_object_ifnonematch_failed
+s3tests/functional/test_s3.py::test_copy_part_enc[sse-c-unencrypted-STANDARD-STANDARD-8388608]
+s3tests/functional/test_s3.py::test_copy_part_enc[sse-kms-unencrypted-STANDARD-STANDARD-8388608]
+s3tests/functional/test_s3.py::test_copy_part_enc[unencrypted-unencrypted-STANDARD-STANDARD-8388608]
 s3tests/functional/test_s3.py::test_encrypted_transfer_13b
 s3tests/functional/test_s3.py::test_encrypted_transfer_1b
 s3tests/functional/test_s3.py::test_encrypted_transfer_1kb
 s3tests/functional/test_s3.py::test_encrypted_transfer_1MB
+s3tests/functional/test_s3.py::test_get_object_attributes
 s3tests/functional/test_s3.py::test_get_object_ifmatch_good
 s3tests/functional/test_s3.py::test_get_object_ifmodifiedsince_good
 s3tests/functional/test_s3.py::test_get_object_ifnonematch_failed
@@ -145,6 +153,11 @@ s3tests/functional/test_s3.py::test_multi_object_delete
 s3tests/functional/test_s3.py::test_multi_object_delete_key_limit
 s3tests/functional/test_s3.py::test_multi_objectv2_delete
 s3tests/functional/test_s3.py::test_multi_objectv2_delete_key_limit
+s3tests/functional/test_s3.py::test_multipart_copy_improper_range
+s3tests/functional/test_s3.py::test_multipart_copy_invalid_range
+s3tests/functional/test_s3.py::test_multipart_copy_multiple_sizes
+s3tests/functional/test_s3.py::test_multipart_copy_small
+s3tests/functional/test_s3.py::test_multipart_copy_without_range
 s3tests/functional/test_s3.py::test_multipart_upload_complete_without_create
 s3tests/functional/test_s3.py::test_multipart_upload_contents
 s3tests/functional/test_s3.py::test_multipart_upload_empty
@@ -193,6 +206,8 @@ s3tests/functional/test_s3.py::test_put_object_ifmatch_overwrite_existed_good
 s3tests/functional/test_s3.py::test_put_object_ifnonmatch_good
 s3tests/functional/test_s3.py::test_put_object_ifnonmatch_nonexisted_good
 s3tests/functional/test_s3.py::test_ranged_big_request_response_code
+s3tests/functional/test_s3.py::test_ranged_request_empty_object
+s3tests/functional/test_s3.py::test_ranged_request_invalid_range
 s3tests/functional/test_s3.py::test_ranged_request_response_code
 s3tests/functional/test_s3.py::test_ranged_request_return_trailing_bytes_response_code
 s3tests/functional/test_s3.py::test_ranged_request_skip_leading_bytes_response_code
@@ -203,3 +218,4 @@ s3tests/functional/test_s3.py::test_sse_kms_transfer_13b
 s3tests/functional/test_s3.py::test_sse_kms_transfer_1b
 s3tests/functional/test_s3.py::test_sse_kms_transfer_1kb
 s3tests/functional/test_s3.py::test_sse_kms_transfer_1MB
+s3tests/functional/test_s3.py::test_upload_part_copy_percent_encoded_key

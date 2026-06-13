@@ -765,7 +765,7 @@ jobs:
       matrix:
         arch: [amd64, arm64]
         build_type: [Release, Debug]
-        category: [pynfs, smbtorture, wpts, posix-client, pjdfstest, s3, client, unit, kvm-cthon, kvm-xfsprogs, kvm-pnfs]
+        category: [pynfs, smbtorture, wpts, posix-client, pjdfstest, s3, ceph-s3, client, unit, kvm-cthon, kvm-xfsprogs, kvm-pnfs]
         include:
           - { arch: amd64, runner: arc-amd64 }
           - { arch: arm64, runner: arc-arm64 }
@@ -821,7 +821,8 @@ jobs:
                 wpts)         SEL="-L wpts" ;;
                 posix-client) SEL="-L posix" ;;
                 pjdfstest)    SEL="-L pjdfstest" ;;
-                s3)           SEL="-L s3" ;;
+                s3)           SEL="-L s3 -LE ceph-s3" ;;
+                ceph-s3)      SEL="-L ceph-s3" ;;
                 client)       SEL="-L client" ;;
                 unit)         SEL="-LE pynfs|smbtorture|wpts|posix|pjdfstest|s3|client|kvm" ;;
                 kvm-cthon)    SEL="-L kvm -R /cthon/";    NEED_KVM=1 ;;
