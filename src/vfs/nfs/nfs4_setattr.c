@@ -175,6 +175,60 @@ chimera_nfs4_setattr(
         }
     }
 
+    /* Encode TIME_ACCESS_SET if requested - FATTR4_TIME_ACCESS_SET = 47.
+     * The settime4 union is a time_how4 discriminator followed (only for
+     * SET_TO_CLIENT_TIME4) by an nfstime4 (int64 seconds, uint32 nseconds).
+     * The TIME_OMIT sentinel means "leave this timestamp alone" so we drop
+     * the attribute entirely; TIME_NOW maps to SET_TO_SERVER_TIME4. */
+    if ((set_attr->va_set_mask & CHIMERA_VFS_ATTR_ATIME) &&
+        set_attr->va_atime.tv_nsec != CHIMERA_VFS_TIME_OMIT) {
+        ctx->attr_mask[1] |= (1 << (FATTR4_TIME_ACCESS_SET - 32));
+
+        if (set_attr->va_atime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
+            *(uint32_t *) attr_ptr = chimera_nfs_hton32(SET_TO_SERVER_TIME4);
+            attr_ptr              += sizeof(uint32_t);
+            attr_len              += sizeof(uint32_t);
+        } else {
+            *(uint32_t *) attr_ptr = chimera_nfs_hton32(SET_TO_CLIENT_TIME4);
+            attr_ptr              += sizeof(uint32_t);
+            attr_len              += sizeof(uint32_t);
+            *(uint64_t *) attr_ptr = chimera_nfs_hton64(set_attr->va_atime.tv_sec);
+            attr_ptr              += sizeof(uint64_t);
+            attr_len              += sizeof(uint64_t);
+            *(uint32_t *) attr_ptr = chimera_nfs_hton32(set_attr->va_atime.tv_nsec);
+            attr_ptr              += sizeof(uint32_t);
+            attr_len              += sizeof(uint32_t);
+        }
+    }
+
+    /* Encode TIME_MODIFY_SET if requested - FATTR4_TIME_MODIFY_SET = 53. */
+    if ((set_attr->va_set_mask & CHIMERA_VFS_ATTR_MTIME) &&
+        set_attr->va_mtime.tv_nsec != CHIMERA_VFS_TIME_OMIT) {
+        ctx->attr_mask[1] |= (1 << (FATTR4_TIME_MODIFY_SET - 32));
+
+        if (set_attr->va_mtime.tv_nsec == CHIMERA_VFS_TIME_NOW) {
+            *(uint32_t *) attr_ptr = chimera_nfs_hton32(SET_TO_SERVER_TIME4);
+            attr_ptr              += sizeof(uint32_t);
+            attr_len              += sizeof(uint32_t);
+        } else {
+            *(uint32_t *) attr_ptr = chimera_nfs_hton32(SET_TO_CLIENT_TIME4);
+            attr_ptr              += sizeof(uint32_t);
+            attr_len              += sizeof(uint32_t);
+            *(uint64_t *) attr_ptr = chimera_nfs_hton64(set_attr->va_mtime.tv_sec);
+            attr_ptr              += sizeof(uint64_t);
+            attr_len              += sizeof(uint64_t);
+            *(uint32_t *) attr_ptr = chimera_nfs_hton32(set_attr->va_mtime.tv_nsec);
+            attr_ptr              += sizeof(uint32_t);
+            attr_len              += sizeof(uint32_t);
+        }
+    }
+
+    /* attr_ptr is advanced past the final attribute for symmetry with the
+     * blocks above (so another attribute can be appended safely); only attr_len
+     * is consulted below.  Reference it so the trailing advance isn't flagged as
+     * a dead store. */
+    (void) attr_ptr;
+
     /* Build compound: SEQUENCE + PUTFH + SETATTR */
     memset(&args, 0, sizeof(args));
     args.tag.len      = 0;
