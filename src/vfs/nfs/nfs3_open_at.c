@@ -114,6 +114,20 @@ chimera_nfs3_open_at_create_callback(
         chimera_nfs3_unmarshall_attrs(&res->resok.obj_attributes.attributes, &request->open_at.r_attr);
     }
 
+    /* NFS3 CREATE (UNCHECKED) returns an existing object rather than creating
+     * one; if that object is a symlink and the caller asked for O_NOFOLLOW
+     * (a data open, not O_PATH), POSIX open(2) must fail with ELOOP.  NFS3 has
+     * no atomic open and the server's CREATE does not see the open flags, so
+     * the client enforces this here (mirrors the memfs open_at path). */
+    if ((request->open_at.flags & CHIMERA_VFS_OPEN_NOFOLLOW) &&
+        !(request->open_at.flags & CHIMERA_VFS_OPEN_PATH) &&
+        (request->open_at.r_attr.va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
+        S_ISLNK(request->open_at.r_attr.va_mode)) {
+        request->status = CHIMERA_VFS_ELOOP;
+        request->complete(request);
+        return;
+    }
+
     if (chimera_nfs3_unmarshall_fh(&res->resok.obj.handle, ctx->server->index, request->fh, &request->open_at.r_attr) !=
         0) {
         request->status = CHIMERA_VFS_EOVERFLOW;

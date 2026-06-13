@@ -232,9 +232,12 @@ chimera_nfs3_rename_at(
         return;
     }
 
-    /* Mark the state as silly renamed so close will remove the silly file */
-    rc = chimera_nfs3_open_state_mark_silly(state, request->rename_at.new_fh, request->rename_at.new_fhlen, request->
-                                            cred);
+    /* Mark the state as silly renamed so close will remove the silly file.
+     * The silly name is derived from the clobbered target's FH (see below), so
+     * store that as the file fh for the close-time silly remove. */
+    rc = chimera_nfs3_open_state_mark_silly(state, request->rename_at.new_fh, request->rename_at.new_fhlen,
+                                            request->rename_at.target_fh, request->rename_at.target_fh_len,
+                                            request->cred);
 
     /* Release the handle ref - we're done with it */
     chimera_vfs_open_cache_release(request->thread, cache, handle, 0);

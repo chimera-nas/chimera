@@ -234,7 +234,10 @@ chimera_nfs3_remove_at(
         return;
     }
 
-    rc = chimera_nfs3_open_state_mark_silly(state, request->fh, request->fh_len, request->cred);
+    rc = chimera_nfs3_open_state_mark_silly(state, request->fh, request->fh_len,
+                                            request->remove_at.child_fh,
+                                            request->remove_at.child_fh_len,
+                                            request->cred);
 
     /* Release the handle ref - we're done with it */
     chimera_vfs_open_cache_release(request->thread, cache, handle, 0);

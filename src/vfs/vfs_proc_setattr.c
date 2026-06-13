@@ -303,19 +303,40 @@ chimera_vfs_setattr_gate_complete(
         }
     }
 
-    if (chimera_vfs_gate(attr, gate->cred, required) != CHIMERA_VFS_OK) {
+    /* WRITE_OWNER (the chown/chgrp right) is authorized separately below; gate
+     * the remaining rights (chmod/ACL/size/timestamp) here. */
+    if (chimera_vfs_gate(attr, gate->cred, required & ~CHIMERA_ACE_WRITE_OWNER) != CHIMERA_VFS_OK) {
         gate->callback(chimera_vfs_setattr_denied_error(gate->set_attr),
                        NULL, NULL, NULL, gate->private_data);
         free(gate);
         return;
     }
 
-    /* POSIX chown(2) restrictions (uid change requires privilege; gid change
-     * requires ownership + group membership) apply on top of the ACL grant. */
-    if (chimera_vfs_setattr_chown_check(gate->cred, gate->set_attr, attr) != CHIMERA_VFS_OK) {
-        gate->callback(CHIMERA_VFS_EPERM, NULL, NULL, NULL, gate->private_data);
-        free(gate);
-        return;
+    /* Authorize an owner/group change.  The POSIX chown(2) rules
+     * (chimera_vfs_setattr_chown_check: only root changes uid; the owner may
+     * chgrp to a group it belongs to) are always required.  On top of that the
+     * caller must hold the chown right: either it is the file's owner (a POSIX
+     * owner may chgrp its own object -- on a mode-only object this is the only
+     * signal, since Windows withholds the owner's implicit WRITE_OWNER) or an
+     * explicit WRITE_OWNER ACE grants it.  This keeps the synthesised-ACL and
+     * mode-only (e.g. NFSv3) representations consistent: an owner's POSIX-legal
+     * chgrp is permitted in both, while a uid change still demands privilege. */
+    if (gate->set_attr->va_set_mask & (CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID)) {
+        int is_owner = (attr->va_set_mask & CHIMERA_VFS_ATTR_UID) &&
+            (uint64_t) gate->cred->uid == attr->va_uid;
+
+        /* POSIX chown(2) rules are always required when a uid/gid is named
+         * (even a no-op restate by a non-owner is EPERM).  An actual change
+         * (required & WRITE_OWNER) additionally needs the chown right: the
+         * caller is the owner, is root, or an explicit WRITE_OWNER ACE grants
+         * it.  A no-op restate carries no WRITE_OWNER requirement. */
+        if (chimera_vfs_setattr_chown_check(gate->cred, gate->set_attr, attr) != CHIMERA_VFS_OK ||
+            ((required & CHIMERA_ACE_WRITE_OWNER) && !is_owner && gate->cred->uid != 0 &&
+             chimera_vfs_gate(attr, gate->cred, CHIMERA_ACE_WRITE_OWNER) != CHIMERA_VFS_OK)) {
+            gate->callback(CHIMERA_VFS_EPERM, NULL, NULL, NULL, gate->private_data);
+            free(gate);
+            return;
+        }
     }
 
     /* A successful change of owner or group by a non-privileged caller clears

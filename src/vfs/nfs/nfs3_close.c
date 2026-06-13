@@ -15,6 +15,8 @@ struct chimera_nfs3_close_ctx {
     int                        silly_renamed;
     uint8_t                    dir_fh[CHIMERA_VFS_FH_SIZE]; /* Copied from open state before release */
     int                        dir_fh_len;
+    uint8_t                    file_fh[CHIMERA_VFS_FH_SIZE]; /* File fh -> silly name */
+    int                        file_fh_len;
     struct chimera_vfs_cred    silly_remove_cred; /* Cred from REMOVE that triggered silly rename */
 };
 
@@ -68,8 +70,11 @@ chimera_nfs3_close_do_silly_remove(
         return;
     }
 
-    /* Construct silly name from file handle */
-    silly_name_len = chimera_nfs3_silly_name_from_fh(request->fh, request->fh_len,
+    /* Construct silly name from the file handle captured at silly-rename time.
+     * The close request itself carries no FH (vfs_private only), so the silly
+     * name must come from the open state's stored file fh -- the same fh the
+     * rename's destination name was derived from. */
+    silly_name_len = chimera_nfs3_silly_name_from_fh(ctx->file_fh, ctx->file_fh_len,
                                                      silly_name, sizeof(silly_name));
 
     chimera_nfs3_map_fh(ctx->dir_fh, ctx->dir_fh_len, &fh, &fhlen);
@@ -192,6 +197,8 @@ chimera_nfs3_close(
     if (ctx->silly_renamed) {
         ctx->dir_fh_len = open_state->dir_fh_len;
         memcpy(ctx->dir_fh, open_state->dir_fh, open_state->dir_fh_len);
+        ctx->file_fh_len = open_state->file_fh_len;
+        memcpy(ctx->file_fh, open_state->file_fh, open_state->file_fh_len);
         ctx->silly_remove_cred = open_state->silly_remove_cred;
     }
 

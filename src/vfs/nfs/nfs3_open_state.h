@@ -27,6 +27,8 @@ struct chimera_nfs3_open_state {
     int                     silly_renamed; /* File has been silly renamed */
     uint8_t                 dir_fh_len; /* Directory fh for silly remove on close */
     uint8_t                 dir_fh[CHIMERA_VFS_FH_SIZE];
+    uint8_t                 file_fh_len; /* File fh -> silly name for remove on close */
+    uint8_t                 file_fh[CHIMERA_VFS_FH_SIZE];
 
     /*
      * Credentials for silly remove on close.
@@ -156,6 +158,8 @@ chimera_nfs3_open_state_mark_silly(
     struct chimera_nfs3_open_state *state,
     const uint8_t                  *dir_fh,
     int                             dir_fh_len,
+    const uint8_t                  *file_fh,
+    int                             file_fh_len,
     const struct chimera_vfs_cred  *cred)
 {
     if (state->silly_renamed) {
@@ -165,6 +169,8 @@ chimera_nfs3_open_state_mark_silly(
     state->silly_renamed = 1;
     state->dir_fh_len    = dir_fh_len;
     memcpy(state->dir_fh, dir_fh, dir_fh_len);
+    state->file_fh_len = file_fh_len;
+    memcpy(state->file_fh, file_fh, file_fh_len);
 
     /* Store credentials for silly remove on close */
     if (cred) {
