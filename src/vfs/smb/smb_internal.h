@@ -150,6 +150,12 @@ struct chimera_smb_client_server {
     uint32_t              tree_id;
     int                   session_ready;
 
+    /* Server-advertised maxima from NEGOTIATE; reads/writes are chunked to these
+     * (0 until captured -- callers fall back to the safe per-PDU defaults). */
+    uint32_t              max_transact;
+    uint32_t              max_read;
+    uint32_t              max_write;
+
     /* Signing state, derived once at SESSION_SETUP on the mount connection and
     * shared by every per-thread connection to this server (the signing key is
     * per-SESSION).  signing_active is set only when the negotiated dialect is

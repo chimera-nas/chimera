@@ -21,34 +21,98 @@
  * sibling WRITE/QUERY_DIRECTORY sizes are exposed by smb2.h, but the READ
  * request size is only defined as a reply size there, so define it locally. */
 #ifndef SMB2_READ_REQUEST_SIZE
-#define SMB2_READ_REQUEST_SIZE 49
+#define SMB2_READ_REQUEST_SIZE      49
 #endif /* ifndef SMB2_READ_REQUEST_SIZE */
+
+/* SMB2 READ/WRITE are chunked to the server-negotiated maxima (and bounded so a
+ * WRITE always fits one send PDU).  Per-transfer progress lives in plugin_data. */
+#define CHIMERA_SMB_WRITE_CHUNK_MAX 65280u      /* leaves room for the 64 KiB PDU */
+#define CHIMERA_SMB_READ_CHUNK_MAX  (1u << 20)  /* bound a single READ response   */
+
+struct smb_io_chunk {
+    uint64_t base_offset;   /* file offset of transfer byte 0                 */
+    uint32_t total;         /* total bytes to transfer                        */
+    uint32_t done;          /* bytes transferred so far                       */
+    uint32_t chunk_max;     /* per-request cap                                */
+    uint32_t last_req;      /* bytes asked for in the in-flight request       */
+};
+
+static inline uint32_t
+smb_write_chunk_cap(const struct chimera_smb_client_server *server)
+{
+    uint32_t cap = CHIMERA_SMB_WRITE_CHUNK_MAX;
+
+    if (server->max_write && server->max_write < cap) {
+        cap = server->max_write;
+    }
+    return cap;
+} /* smb_write_chunk_cap */
+
+static inline uint32_t
+smb_read_chunk_cap(const struct chimera_smb_client_server *server)
+{
+    uint32_t cap = CHIMERA_SMB_READ_CHUNK_MAX;
+
+    if (server->max_read && server->max_read < cap) {
+        cap = server->max_read;
+    }
+    return cap;
+} /* smb_read_chunk_cap */
 
 /* ---- read (SMB2 READ) -------------------------------------------------- */
 
-/* Scatter a contiguous run of `length` bytes from the reply `body` cursor into
- * the VFS-core-provided read iovecs, starting at iovec byte offset 0. */
+/* Scatter `length` bytes from the reply `body` cursor into the VFS-core read
+ * iovecs, starting at byte offset `skip` into the iovec array. */
 static void
 smb_scatter_into_iovecs(
     struct evpl_iovec_cursor *body,
     struct evpl_iovec        *iov,
     int                       niov,
+    uint32_t                  skip,
     uint32_t                  length)
 {
     int      i;
     uint32_t left = length;
 
     for (i = 0; i < niov && left > 0; i++) {
-        uint32_t chunk = iov[i].length;
+        uint32_t avail = iov[i].length;
+        uint32_t off;
+        uint32_t chunk;
 
+        if (skip >= avail) {
+            skip -= avail;
+            continue;
+        }
+        off  = skip;
+        skip = 0;
+
+        chunk = avail - off;
         if (chunk > left) {
             chunk = left;
         }
 
-        evpl_iovec_cursor_get_blob(body, iov[i].data, chunk);
+        evpl_iovec_cursor_get_blob(body, (char *) iov[i].data + off, chunk);
         left -= chunk;
     }
 } /* smb_scatter_into_iovecs */
+
+static void chimera_smb_read_send_chunk(
+    struct chimera_smb_client_conn *conn,
+    struct chimera_vfs_request     *request);
+
+static void
+chimera_smb_read_finish(struct chimera_vfs_request *request)
+{
+    struct smb_io_chunk *st     = (struct smb_io_chunk *) request->plugin_data;
+    uint32_t             prefix = request->read.aligned_prefix;
+    uint32_t             avail  = (st->done > prefix) ? (st->done - prefix) : 0;
+    uint32_t             want   = request->read.length;
+
+    request->read.r_length = (avail < want) ? avail : want;
+    request->read.r_eof    = (request->read.r_length < want) ? 1 : 0;
+    request->status        = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* chimera_smb_read_finish */
 
 static void
 chimera_smb_read_reply(
@@ -60,19 +124,16 @@ chimera_smb_read_reply(
     void                           *arg)
 {
     struct chimera_vfs_request *request = arg;
+    struct smb_io_chunk        *st      = (struct smb_io_chunk *) request->plugin_data;
     uint16_t                    structsize;
     uint8_t                     data_offset, reserved;
     uint32_t                    data_length, data_remaining, reserved2;
     int                         consumed;
-    uint32_t                    prefix = request->read.aligned_prefix;
-    uint32_t                    avail, want;
 
-    (void) conn;
     (void) hdr;
     (void) body_len;
 
-    /* STATUS_END_OF_FILE maps to OK but signals a zero-length short read; treat
-     * any non-OK status as a hard error. */
+    /* STATUS_END_OF_FILE maps to OK but signals a zero-length short read. */
     request->status = chimera_smb_status_to_errno(status);
 
     if (request->status != CHIMERA_VFS_OK) {
@@ -81,15 +142,12 @@ chimera_smb_read_reply(
     }
 
     if (status == SMB2_STATUS_END_OF_FILE) {
-        request->read.r_length = 0;
-        request->read.r_eof    = 1;
-        request->complete(request);
+        chimera_smb_read_finish(request);
         return;
     }
 
     /* MS-SMB2 2.2.20 READ response: StructureSize(2), DataOffset(1),
-     * Reserved(1), DataLength(4), DataRemaining(4), Reserved2(4), Buffer.
-     * DataOffset is relative to the SMB2 header start. */
+     * Reserved(1), DataLength(4), DataRemaining(4), Reserved2(4), Buffer. */
     evpl_iovec_cursor_get_uint16(body, &structsize);
     evpl_iovec_cursor_get_uint8(body, &data_offset);
     evpl_iovec_cursor_get_uint8(body, &reserved);
@@ -102,76 +160,53 @@ chimera_smb_read_reply(
     (void) data_remaining;
     (void) reserved2;
 
-    /* Advance to the payload (DataOffset is header-relative; the cursor's
-     * consumed count is also header-relative -- see chimera_smb_getattr_reply). */
+    /* DataOffset is header-relative, as is the cursor's consumed count. */
     consumed = evpl_iovec_cursor_consumed(body);
     if ((int) data_offset > consumed) {
         evpl_iovec_cursor_skip(body, (int) data_offset - consumed);
     }
 
-    /* We issued the READ for the 4 KiB-aligned range; the VFS core pre-allocated
-     * aligned iovecs and expects the aligned data landed at iovec byte 0.  Copy
-     * exactly what the server returned (data_length bytes from aligned_offset). */
     if (data_length > 0) {
         smb_scatter_into_iovecs(body, request->read.iov,
-                                request->read.buffers_provided, data_length);
+                                request->read.buffers_provided,
+                                st->done, data_length);
+        st->done += data_length;
     }
 
-    /* r_length is the count of the bytes the *client* asked for that exist.  The
-     * server returned data_length bytes starting at the aligned offset; the
-     * first `prefix` of those are the leading pad the core will trim.  EOF when
-     * the server returned fewer than the aligned range we requested implies the
-     * client's requested tail was short. */
-    avail = (data_length > prefix) ? (data_length - prefix) : 0;
-    want  = request->read.length;
+    /* A short read (fewer bytes than asked) is EOF; otherwise keep going until
+     * the whole aligned range is read. */
+    if (data_length < st->last_req || st->done >= st->total) {
+        chimera_smb_read_finish(request);
+        return;
+    }
 
-    request->read.r_length = (avail < want) ? avail : want;
-    request->read.r_eof    = (request->read.r_length < want) ? 1 : 0;
-
-    request->complete(request);
+    chimera_smb_read_send_chunk(conn, request);
 } /* chimera_smb_read_reply */
 
-void
-chimera_smb_client_read(
+static void
+chimera_smb_read_send_chunk(
     struct chimera_smb_client_conn *conn,
     struct chimera_vfs_request     *request)
 {
     struct chimera_smb_client_open *open_state = smb_handle_open_state(request->read.handle);
+    struct smb_io_chunk            *st         = (struct smb_io_chunk *) request->plugin_data;
     struct evpl_iovec               iov;
     struct evpl_iovec_cursor        cursor;
     struct smb2_header             *hdr;
-    uint64_t                        aligned_offset;
-    uint32_t                        aligned_length;
+    uint32_t                        len = st->total - st->done;
 
-    if (!open_state) {
-        request->status = CHIMERA_VFS_EINVAL;
-        request->complete(request);
-        return;
+    if (len > st->chunk_max) {
+        len = st->chunk_max;
     }
-
-    /* The VFS core (no CAP_READ_PROVIDES_BUFFERS) pre-allocated read.iov padded
-     * to a 4 KiB boundary on both sides and recorded aligned_prefix.  Read the
-     * whole aligned range so the data lands at iovec byte 0, exactly where the
-     * core's finalize step expects it (it trims the prefix + trailing pad). */
-    aligned_offset = request->read.offset - request->read.aligned_prefix;
-    aligned_length = (uint32_t) (((request->read.offset + request->read.length + 4095ULL) & ~4095ULL)
-                                 - aligned_offset);
-
-    if (request->read.length == 0) {
-        request->read.r_length = 0;
-        request->read.r_eof    = 0;
-        request->status        = CHIMERA_VFS_OK;
-        request->complete(request);
-        return;
-    }
+    st->last_req = len;
 
     chimera_smb_client_pdu_begin(conn, SMB2_READ, &iov, &cursor, &hdr);
 
     evpl_iovec_cursor_append_uint16(&cursor, SMB2_READ_REQUEST_SIZE);
     evpl_iovec_cursor_append_uint8(&cursor, 0);              /* Padding */
     evpl_iovec_cursor_append_uint8(&cursor, 0);              /* Flags */
-    evpl_iovec_cursor_append_uint32(&cursor, aligned_length); /* Length */
-    evpl_iovec_cursor_append_uint64(&cursor, aligned_offset); /* Offset */
+    evpl_iovec_cursor_append_uint32(&cursor, len);           /* Length */
+    evpl_iovec_cursor_append_uint64(&cursor, st->base_offset + st->done);
     evpl_iovec_cursor_append_uint64(&cursor, open_state->file_id.pid);
     evpl_iovec_cursor_append_uint64(&cursor, open_state->file_id.vid);
     evpl_iovec_cursor_append_uint32(&cursor, 0);             /* MinimumCount */
@@ -183,9 +218,84 @@ chimera_smb_client_read(
 
     chimera_smb_client_pdu_finish(conn, &iov, &cursor, request,
                                   chimera_smb_read_reply, request);
+} /* chimera_smb_read_send_chunk */
+
+void
+chimera_smb_client_read(
+    struct chimera_smb_client_conn *conn,
+    struct chimera_vfs_request     *request)
+{
+    struct chimera_smb_client_open *open_state = smb_handle_open_state(request->read.handle);
+    struct smb_io_chunk            *st         = (struct smb_io_chunk *) request->plugin_data;
+    uint64_t                        aligned_offset;
+
+    if (!open_state) {
+        request->status = CHIMERA_VFS_EINVAL;
+        request->complete(request);
+        return;
+    }
+
+    if (request->read.length == 0) {
+        request->read.r_length = 0;
+        request->read.r_eof    = 0;
+        request->status        = CHIMERA_VFS_OK;
+        request->complete(request);
+        return;
+    }
+
+    /* The VFS core (no CAP_READ_PROVIDES_BUFFERS) pre-allocated read.iov padded
+     * to a 4 KiB boundary on both sides; read the whole aligned range so the
+     * data lands at iovec byte 0, where the core's finalize step expects it. */
+    aligned_offset  = request->read.offset - request->read.aligned_prefix;
+    st->base_offset = aligned_offset;
+    st->total       = (uint32_t) (((request->read.offset + request->read.length + 4095ULL) & ~4095ULL)
+                                  - aligned_offset);
+    st->done      = 0;
+    st->chunk_max = smb_read_chunk_cap(conn->server);
+
+    chimera_smb_read_send_chunk(conn, request);
 } /* chimera_smb_client_read */
 
 /* ---- write (SMB2 WRITE) ------------------------------------------------ */
+
+/* Append [skip, skip+length) bytes from the caller's write iovecs to `cursor`. */
+static void
+smb_gather_from_iovecs(
+    struct evpl_iovec_cursor *cursor,
+    const struct evpl_iovec  *iov,
+    int                       niov,
+    uint32_t                  skip,
+    uint32_t                  length)
+{
+    int      i;
+    uint32_t left = length;
+
+    for (i = 0; i < niov && left > 0; i++) {
+        uint32_t avail = iov[i].length;
+        uint32_t off;
+        uint32_t chunk;
+
+        if (skip >= avail) {
+            skip -= avail;
+            continue;
+        }
+        off  = skip;
+        skip = 0;
+
+        chunk = avail - off;
+        if (chunk > left) {
+            chunk = left;
+        }
+
+        evpl_iovec_cursor_append_blob_unaligned(cursor,
+                                                (char *) iov[i].data + off, chunk);
+        left -= chunk;
+    }
+} /* smb_gather_from_iovecs */
+
+static void chimera_smb_write_send_chunk(
+    struct chimera_smb_client_conn *conn,
+    struct chimera_vfs_request     *request);
 
 static void
 chimera_smb_write_reply(
@@ -197,10 +307,10 @@ chimera_smb_write_reply(
     void                           *arg)
 {
     struct chimera_vfs_request *request = arg;
+    struct smb_io_chunk        *st      = (struct smb_io_chunk *) request->plugin_data;
     uint16_t                    structsize, channel_offset, channel_length;
     uint32_t                    count, remaining;
 
-    (void) conn;
     (void) hdr;
     (void) body_len;
 
@@ -225,44 +335,46 @@ chimera_smb_write_reply(
     (void) channel_offset;
     (void) channel_length;
 
-    request->write.r_length = count;
-    /* The server FLUSHes when SMB2_WRITEFLAG_WRITE_THROUGH is set (which we send
-     * for a sync write), so report the data as durable in that case. */
-    request->write.r_sync = request->write.sync ? 1 : 0;
+    st->done += count;
 
-    request->complete(request);
-} /* chimera_smb_write_reply */
-
-void
-chimera_smb_client_write(
-    struct chimera_smb_client_conn *conn,
-    struct chimera_vfs_request     *request)
-{
-    struct chimera_smb_client_open *open_state = smb_handle_open_state(request->write.handle);
-    struct evpl_iovec               iov;
-    struct evpl_iovec_cursor        cursor;
-    struct smb2_header             *hdr;
-    uint32_t                        flags;
-    int                             i;
-
-    if (!open_state) {
-        request->status = CHIMERA_VFS_EINVAL;
+    /* A short write (server accepted fewer bytes than asked) ends the transfer;
+     * otherwise continue until the whole buffer is written. */
+    if (count < st->last_req || st->done >= st->total) {
+        request->write.r_length = st->done;
+        request->write.r_sync   = request->write.sync ? 1 : 0;
         request->complete(request);
         return;
     }
 
-    flags = request->write.sync ? SMB2_WRITEFLAG_WRITE_THROUGH : 0;
+    chimera_smb_write_send_chunk(conn, request);
+} /* chimera_smb_write_reply */
 
-    /* MS-SMB2 2.2.21 WRITE request: StructureSize(2), DataOffset(2),
-     * Length(4), Offset(8), FileId(16), Channel(4), RemainingBytes(4),
-     * WriteChannelInfoOffset(2), WriteChannelInfoLength(2), Flags(4), Buffer.
-     * The fixed part is 48 bytes -> the data begins at header(64) + 48 = 112. */
+static void
+chimera_smb_write_send_chunk(
+    struct chimera_smb_client_conn *conn,
+    struct chimera_vfs_request     *request)
+{
+    struct chimera_smb_client_open *open_state = smb_handle_open_state(request->write.handle);
+    struct smb_io_chunk            *st         = (struct smb_io_chunk *) request->plugin_data;
+    struct evpl_iovec               iov;
+    struct evpl_iovec_cursor        cursor;
+    struct smb2_header             *hdr;
+    uint32_t                        flags = request->write.sync ? SMB2_WRITEFLAG_WRITE_THROUGH : 0;
+    uint32_t                        len   = st->total - st->done;
+
+    if (len > st->chunk_max) {
+        len = st->chunk_max;
+    }
+    st->last_req = len;
+
+    /* MS-SMB2 2.2.21 WRITE request: fixed part is 48 bytes -> data begins at
+     * header(64) + 48 = 112. */
     chimera_smb_client_pdu_begin(conn, SMB2_WRITE, &iov, &cursor, &hdr);
 
     evpl_iovec_cursor_append_uint16(&cursor, SMB2_WRITE_REQUEST_SIZE);
     evpl_iovec_cursor_append_uint16(&cursor, sizeof(struct smb2_header) + 48); /* DataOffset */
-    evpl_iovec_cursor_append_uint32(&cursor, request->write.length);
-    evpl_iovec_cursor_append_uint64(&cursor, request->write.offset);
+    evpl_iovec_cursor_append_uint32(&cursor, len);
+    evpl_iovec_cursor_append_uint64(&cursor, request->write.offset + st->done);
     evpl_iovec_cursor_append_uint64(&cursor, open_state->file_id.pid);
     evpl_iovec_cursor_append_uint64(&cursor, open_state->file_id.vid);
     evpl_iovec_cursor_append_uint32(&cursor, 0);             /* Channel */
@@ -271,17 +383,41 @@ chimera_smb_client_write(
     evpl_iovec_cursor_append_uint16(&cursor, 0);             /* WriteChannelInfoLength */
     evpl_iovec_cursor_append_uint32(&cursor, flags);
 
-    /* Append the caller's payload bytes immediately after the fixed body (at
-     * DataOffset).  append_blob would 4-byte align; the body is already at
-     * consumed == 48 (a 4-byte boundary), so append the raw bytes. */
-    for (i = 0; i < request->write.niov; i++) {
-        evpl_iovec_cursor_append_blob_unaligned(&cursor,
-                                                request->write.iov[i].data,
-                                                request->write.iov[i].length);
-    }
+    smb_gather_from_iovecs(&cursor, request->write.iov, request->write.niov,
+                           st->done, len);
 
     chimera_smb_client_pdu_finish(conn, &iov, &cursor, request,
                                   chimera_smb_write_reply, request);
+} /* chimera_smb_write_send_chunk */
+
+void
+chimera_smb_client_write(
+    struct chimera_smb_client_conn *conn,
+    struct chimera_vfs_request     *request)
+{
+    struct chimera_smb_client_open *open_state = smb_handle_open_state(request->write.handle);
+    struct smb_io_chunk            *st         = (struct smb_io_chunk *) request->plugin_data;
+
+    if (!open_state) {
+        request->status = CHIMERA_VFS_EINVAL;
+        request->complete(request);
+        return;
+    }
+
+    if (request->write.length == 0) {
+        request->write.r_length = 0;
+        request->write.r_sync   = request->write.sync ? 1 : 0;
+        request->status         = CHIMERA_VFS_OK;
+        request->complete(request);
+        return;
+    }
+
+    st->base_offset = request->write.offset;
+    st->total       = request->write.length;
+    st->done        = 0;
+    st->chunk_max   = smb_write_chunk_cap(conn->server);
+
+    chimera_smb_write_send_chunk(conn, request);
 } /* chimera_smb_client_write */
 
 /* ---- readdir (SMB2 QUERY_DIRECTORY) ------------------------------------ */

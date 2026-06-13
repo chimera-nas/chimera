@@ -468,7 +468,10 @@ chimera_smb_client_negotiate_reply(
     evpl_iovec_cursor_get_uint16(body, &dialect);
     evpl_iovec_cursor_get_uint16(body, &ctx_count);
     evpl_iovec_cursor_skip(body, 16);            /* ServerGuid */
-    evpl_iovec_cursor_skip(body, 4 + 4 + 4 + 4); /* Capabilities + MaxTransact/Read/Write */
+    evpl_iovec_cursor_skip(body, 4);             /* Capabilities */
+    evpl_iovec_cursor_get_uint32(body, &conn->server->max_transact);
+    evpl_iovec_cursor_get_uint32(body, &conn->server->max_read);
+    evpl_iovec_cursor_get_uint32(body, &conn->server->max_write);
     evpl_iovec_cursor_skip(body, 8 + 8);         /* SystemTime + ServerStartTime */
     evpl_iovec_cursor_skip(body, 2 + 2);         /* SecurityBufferOffset + Length */
     evpl_iovec_cursor_get_uint32(body, &ctx_off);

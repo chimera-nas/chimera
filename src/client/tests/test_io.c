@@ -9,6 +9,7 @@
  */
 
 #include <string.h>
+#include <stdlib.h>
 #include "client_test_common.h"
 
 struct simple_ctx {
@@ -18,6 +19,8 @@ struct simple_ctx {
     struct evpl                    *evpl;
     uint32_t                        rlen;
     char                            rbuf[4096];
+    char                           *rdyn;     /* large-IO landing buffer (optional) */
+    uint32_t                        rdyn_max;
 };
 
 static void
@@ -79,6 +82,8 @@ read_cb(
     void                         *private_data)
 {
     struct simple_ctx *ctx = private_data;
+    char              *dst = ctx->rdyn ? ctx->rdyn : ctx->rbuf;
+    uint32_t           cap = ctx->rdyn ? ctx->rdyn_max : (uint32_t) sizeof(ctx->rbuf);
     uint32_t           off = 0;
     int                i;
 
@@ -89,10 +94,10 @@ read_cb(
         if (status == CHIMERA_VFS_OK) {
             uint32_t len = iov[i].length;
 
-            if (off + len > sizeof(ctx->rbuf)) {
-                len = sizeof(ctx->rbuf) - off;
+            if (off + len > cap) {
+                len = cap - off;
             }
-            memcpy(ctx->rbuf + off, iov[i].data, len);
+            memcpy(dst + off, iov[i].data, len);
             off += len;
         }
         evpl_iovec_release(ctx->evpl, &iov[i]);
@@ -212,6 +217,54 @@ main(
     fprintf(stderr, "deep-path write/read round-trip verified (%u bytes)\n", plen);
 
     chimera_close(env.client_thread, fh);
+
+    /* Large IO: exercise read/write chunking (well above the 64 KiB write PDU
+     * and not a chunk multiple, so the last chunk is partial). */
+    {
+        uint32_t big = 300000;
+        char    *src = malloc(big);
+        char    *dst = malloc(big);
+        uint32_t k;
+
+        for (k = 0; k < big; k++) {
+            src[k] = (char) ((k * 2654435761u) >> 24);
+        }
+
+        RUN(c);
+        chimera_open(env.client_thread, "/test/a/b/big", 13, CHIMERA_VFS_OPEN_CREATE,
+                     open_cb, &c);
+        WAIT(env, c);
+        if (c.status != 0 || !c.handle) {
+            fprintf(stderr, "create big file failed: %d\n", c.status);
+            client_test_fail(&env);
+        }
+        fh = c.handle;
+
+        RUN(c);
+        chimera_write(env.client_thread, fh, 0, big, src, write_cb, &c);
+        WAIT(env, c);
+        if (c.status != 0) {
+            fprintf(stderr, "big write failed: %d\n", c.status);
+            client_test_fail(&env);
+        }
+
+        RUN(c);
+        c.rdyn     = dst;
+        c.rdyn_max = big;
+        chimera_read(env.client_thread, fh, 0, big, read_cb, &c);
+        WAIT(env, c);
+        c.rdyn = NULL;
+        if (c.status != 0 || c.rlen != big || memcmp(dst, src, big) != 0) {
+            fprintf(stderr, "big read-back mismatch: status %d len %u/%u\n",
+                    c.status, c.rlen, big);
+            client_test_fail(&env);
+        }
+        fprintf(stderr, "large-IO chunked write/read round-trip verified (%u bytes)\n", big);
+
+        chimera_close(env.client_thread, fh);
+        free(src);
+        free(dst);
+    }
 
     /* readdir /test/a should list "b". */
     RUN(c);
