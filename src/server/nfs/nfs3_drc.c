@@ -307,6 +307,7 @@ nfs3_drc_kv_done(
 static void
 nfs3_drc_kv_put(
     struct chimera_vfs_thread    *vfs_thread,
+    uint16_t                      node_id,
     const struct nfs3_drc_keybuf *key,
     const void                   *body,
     uint32_t                      body_len,
@@ -314,8 +315,9 @@ nfs3_drc_kv_put(
 {
     struct nfs3_drc_kv_ctx *ctx = malloc(sizeof(*ctx));
 
-    ctx->key_len = nfs_kv_nfs3_reply_key(ctx->key, key->addr, key->addr_len,
-                                         key->proc, key->xid, key->cksum);
+    ctx->key_len = nfs_kv_nfs3_reply_key(ctx->key, node_id, key->addr,
+                                         key->addr_len, key->proc, key->xid,
+                                         key->cksum);
     ctx->value     = malloc(NFS3_DRC_VALUE_HDR_LEN + body_len);
     ctx->value_len = nfs3_drc_value_serialize(ctx->value,
                                               NFS3_DRC_VALUE_HDR_LEN + body_len,
@@ -328,14 +330,16 @@ nfs3_drc_kv_put(
 static void
 nfs3_drc_kv_delete(
     struct chimera_vfs_thread    *vfs_thread,
+    uint16_t                      node_id,
     const struct nfs3_drc_keybuf *key)
 {
     struct nfs3_drc_kv_ctx *ctx = malloc(sizeof(*ctx));
 
     ctx->value     = NULL;
     ctx->value_len = 0;
-    ctx->key_len   = nfs_kv_nfs3_reply_key(ctx->key, key->addr, key->addr_len,
-                                           key->proc, key->xid, key->cksum);
+    ctx->key_len   = nfs_kv_nfs3_reply_key(ctx->key, node_id, key->addr,
+                                           key->addr_len, key->proc, key->xid,
+                                           key->cksum);
 
     chimera_vfs_delete_key(vfs_thread, ctx->key, ctx->key_len,
                            nfs3_drc_kv_done, ctx);
@@ -384,9 +388,10 @@ nfs3_drc_capture_reply(
     pthread_mutex_unlock(&drc->lock);
 
     if (!drc->persistence_disabled) {
-        nfs3_drc_kv_put(thread->vfs_thread, &ctx->key, buf, total_length, ts);
+        nfs3_drc_kv_put(thread->vfs_thread, drc->node_id, &ctx->key, buf,
+                        total_length, ts);
         for (i = 0; i < nev; i++) {
-            nfs3_drc_kv_delete(thread->vfs_thread, &evicted[i]);
+            nfs3_drc_kv_delete(thread->vfs_thread, drc->node_id, &evicted[i]);
         }
     }
 
@@ -400,7 +405,7 @@ nfs3_drc_capture_reply(
 struct nfs3_drc_reload_ctx {
     struct chimera_server_nfs_thread *thread;
     uint32_t                          loaded;
-    uint8_t                           start[CHIMERA_KV_HDR_LEN];
+    uint8_t                           start[CHIMERA_KV_PREFIX_LEN];
 };
 
 static int
@@ -421,13 +426,13 @@ nfs3_drc_reload_scan_cb(
     uint32_t                          p, body_len;
     uint8_t                           addr_len;
 
-    if (key_len < CHIMERA_KV_HDR_LEN + 1 ||
-        memcmp(k, ctx->start, CHIMERA_KV_HDR_LEN) != 0) {
-        return 1;  /* left the NFSv3 reply band */
+    if (key_len < CHIMERA_KV_PREFIX_LEN + 1 ||
+        memcmp(k, ctx->start, CHIMERA_KV_PREFIX_LEN) != 0) {
+        return 1;  /* left this node's NFSv3 reply band */
     }
 
-    addr_len = k[CHIMERA_KV_HDR_LEN];
-    p        = CHIMERA_KV_HDR_LEN + 1;
+    addr_len = k[CHIMERA_KV_PREFIX_LEN];
+    p        = CHIMERA_KV_PREFIX_LEN + 1;
     if (addr_len > NFS3_DRC_ADDR_MAX || p + addr_len + 16 > key_len) {
         return 0;  /* skip a malformed key */
     }
@@ -475,12 +480,13 @@ nfs3_drc_reload(struct chimera_server_nfs_thread *thread)
 
     ctx->thread = thread;
     ctx->loaded = 0;
-    nfs_kv_type_prefix(ctx->start, CHIMERA_KV_TYPE_NFS3_REPLY);
+    nfs_kv_node_prefix(ctx->start, CHIMERA_KV_TYPE_NFS3_REPLY,
+                       thread->shared->nfs3_drc.node_id);
 
     /* No end key + flags 0: key-ordered results, the callback stops when the
-     * 3-byte type header changes. */
+     * 5-byte [type,node] prefix changes. */
     chimera_vfs_search_keys(thread->vfs_thread,
-                            ctx->start, CHIMERA_KV_HDR_LEN,
+                            ctx->start, CHIMERA_KV_PREFIX_LEN,
                             NULL, 0, 0,
                             nfs3_drc_reload_scan_cb,
                             nfs3_drc_reload_complete, ctx);
@@ -609,6 +615,7 @@ nfs3_drc_install(struct chimera_server_nfs_shared *shared)
     const char      *kvname = (shared->vfs && shared->vfs->kv_module) ?
         shared->vfs->kv_module->name : "";
 
+    drc->node_id              = shared->node_id;
     drc->persistence_disabled = (strcmp(kvname, "memkv") == 0);
 
     if (drc->persistence_disabled) {

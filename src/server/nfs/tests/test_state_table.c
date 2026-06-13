@@ -78,7 +78,7 @@ test_slot_lifecycle(void)
     uint32_t               first_slot, first_gen;
     int                    rc;
 
-    nfs_state_table_init(&table);
+    nfs_state_table_init(&table, 1);
 
     /* Allocate a slot.  Generation must start at 1 (every (re)use bumps). */
     rc = nfs_state_table_alloc(&table, NFS4_SLOT_TYPE_OPEN,
@@ -142,7 +142,7 @@ test_owner_state_lifecycle(void)
     uint8_t                fh[4]          = { 0xCA, 0xFE, 0xBA, 0xBE };
     uint8_t                owner_bytes[8] = "owner-A";
 
-    nfs_state_table_init(&table);
+    nfs_state_table_init(&table, 1);
     client = nfs_client_alloc(42, "client-A", 8, 0xABCD, /*minor*/ 0);
 
     owner = nfs_open_owner_find_or_create(client, owner_bytes,
@@ -260,7 +260,7 @@ test_share_mode_conflict(void)
     uint8_t                fh[4] = { 0xDE, 0xAD, 0xBE, 0xEF };
     nfsstat4               status;
 
-    nfs_state_table_init(&table);
+    nfs_state_table_init(&table, 1);
     client = nfs_client_alloc(99, "share-cli", 9, 0xFFFF, 1);
 
     owner_a = nfs_open_owner_find_or_create(client, "owner-A", 7, &created);

@@ -6,6 +6,7 @@ set(CHIMERA_BINARY ${CMAKE_BINARY_DIR}/src/daemon/chimera)
 set(NFS_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_nfs_test_wrapper.sh)
 set(NFS_REBOOT_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_nfs_reboot_test_wrapper.sh)
 set(NFS3_DRC_REBOOT_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_nfs3_drc_reboot_test_wrapper.sh)
+set(NFS_MULTINODE_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_nfs_multinode_test_wrapper.sh)
 set(SMB_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_smb_test_wrapper.sh)
 set(PNFS_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_pnfs_test_wrapper.sh)
 set(PNFS_BLOCK_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_pnfs_block_test_wrapper.sh)
@@ -204,6 +205,15 @@ foreach(image_spec ${KVM_IMAGES})
                     ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
                     ${CHIMERA_BINARY})
         set_tests_properties(chimera/kvm/${IMAGE_NAME}/reboot/drc_cairn_nfs3
+            PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2)
+
+        # Shared-store multi-instance namespacing: two node_ids drive one cairn
+        # store sequentially; data is shared, per-node records stay isolated.
+        add_test(NAME chimera/kvm/${IMAGE_NAME}/reboot/multinode_cairn
+            COMMAND bash ${NFS_MULTINODE_WRAPPER}
+                    ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
+                    ${CHIMERA_BINARY})
+        set_tests_properties(chimera/kvm/${IMAGE_NAME}/reboot/multinode_cairn
             PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2)
     endif()
 

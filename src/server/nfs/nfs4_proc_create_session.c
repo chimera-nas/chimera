@@ -210,7 +210,8 @@ chimera_nfs4_create_session(
      * same sessionid (and its owning client), letting a persistent client's
      * retransmits replay from the reloaded reply cache. */
     if (session->nfs4_session_persist) {
-        nfs4_drc_persist_session(thread->vfs_thread, session, &principal,
+        nfs4_drc_persist_session(thread->vfs_thread, thread->shared->node_id,
+                                 session, &principal,
                                  args->csa_cb_program, flags);
     }
 

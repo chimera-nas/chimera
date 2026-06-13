@@ -105,18 +105,25 @@ shard_push_free_locked(
 } /* shard_push_free_locked */
 
 void
-nfs_state_table_init(struct nfs_state_table *table)
+nfs_state_table_init(
+    struct nfs_state_table *table,
+    uint16_t                node_id)
 {
     for (int i = 0; i < NFS_STATE_NUM_SHARDS; i++) {
         shard_init(&table->shards[i]);
     }
 
-    /* Per-instance epoch stamped into every stateid (see nfs4_stateid.h).
-     * Boot time makes it differ across restarts so stateids from a previous
-     * instance are recognised as stale.  Force the high bit set so it can
-     * never collide with the special all-zero/all-ones stateids or the small
-     * "old epoch" values pynfs's makeStaleId() uses. */
-    table->epoch = (uint32_t) time(NULL) | 0x80000000u;
+    /* Per-instance epoch stamped into every stateid (see nfs4_stateid.h):
+     *   bits 31..16 : node_id  -- attributes the stateid to its minting
+     *                 instance, so peers sharing one backing store never mint
+     *                 colliding epochs and a foreign stateid is recognisable.
+     *   bits 15..1  : low 15 bits of boot time -- differs across this node's
+     *                 restarts, so a previous instance's stateids read as stale.
+     *   bit  0      : 1 -- with node_id >= 1 this keeps the epoch away from the
+     *                 special all-zero/all-ones stateids and pynfs's small
+     *                 "old epoch" probe values (replacing the old 0x80000000). */
+    table->epoch = ((uint32_t) node_id << 16) |
+        (((uint32_t) time(NULL) & 0x7FFFu) << 1) | 1u;
 } /* nfs_state_table_init */
 
 void

@@ -66,6 +66,7 @@ struct chimera_server_config {
     int                                   nfs4_delegations;
     int                                   nfs4_drc;
     int                                   nfs3_drc;
+    int                                   nfs4_node_id;
     uint32_t                              nfs4_lease_time_s;
     uint32_t                              nfs4_grace_time_s;
     uint32_t                              nfs4_courtesy_time_s;
@@ -272,7 +273,10 @@ chimera_server_config_init(void)
      * so a retransmit after a server restart replays the cached reply instead
      * of re-executing.  There is no session and no on-wire advertisement -- the
      * cache is transparent to the client. */
-    config->nfs3_drc             = 0;
+    config->nfs3_drc = 0;
+    /* 0 = auto-derive a stable node_id from the machine name; operators sharing
+     * one KV store across instances should set distinct values explicitly. */
+    config->nfs4_node_id         = 0;
     config->nfs4_lease_time_s    = NFS4_LEASE_TIME_DEFAULT_S;
     config->nfs4_grace_time_s    = NFS4_GRACE_TIME_DEFAULT_S;
     config->nfs4_courtesy_time_s = NFS4_COURTESY_TIME_DEFAULT_S;
@@ -619,6 +623,20 @@ chimera_server_config_get_nfs4_grace_time(const struct chimera_server_config *co
 {
     return config->nfs4_grace_time_s;
 } /* chimera_server_config_get_nfs4_grace_time */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_nfs4_node_id(
+    struct chimera_server_config *config,
+    int                           node_id)
+{
+    config->nfs4_node_id = node_id;
+} /* chimera_server_config_set_nfs4_node_id */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_nfs4_node_id(const struct chimera_server_config *config)
+{
+    return config->nfs4_node_id;
+} /* chimera_server_config_get_nfs4_node_id */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_nfs4_courtesy_time(

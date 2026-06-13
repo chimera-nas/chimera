@@ -224,6 +224,15 @@ chimera_server_config_get_nfs4_grace_time(
     const struct chimera_server_config *config);
 
 void
+chimera_server_config_set_nfs4_node_id(
+    struct chimera_server_config *config,
+    int                           node_id);
+
+int
+chimera_server_config_get_nfs4_node_id(
+    const struct chimera_server_config *config);
+
+void
 chimera_server_config_set_nfs4_courtesy_time(
     struct chimera_server_config *config,
     uint32_t                      seconds);

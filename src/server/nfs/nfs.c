@@ -146,6 +146,29 @@ nfs_server_init(
 
     shared->vfs = vfs;
 
+    /* Resolve this instance's node_id: explicit server.nfs4_node_id wins; else
+     * derive a stable id from the machine name (hostname + /etc/machine-id),
+     * folded into 1..0xFFFE.  This namespaces every persisted KV record plus the
+     * clientid and stateid epoch, so N instances sharing one backing store never
+     * collide and each reloads only its own state. */
+    {
+        int cfg_node = chimera_server_config_get_nfs4_node_id(config);
+
+        if (cfg_node > 0 && cfg_node < 0xFFFF) {
+            shared->node_id = (uint16_t) cfg_node;
+        } else {
+            uint32_t h = 2166136261u; /* FNV-1a/32 over the machine name */
+
+            for (int i = 0; i < vfs->machine_name_len; i++) {
+                h ^= (uint8_t) vfs->machine_name[i];
+                h *= 16777619u;
+            }
+            shared->node_id = (uint16_t) ((h % 0xFFFEu) + 1u);
+        }
+        chimera_nfs_info("NFSv4 server node_id=%u (%s)", shared->node_id,
+                         (cfg_node > 0) ? "configured" : "derived from machine name");
+    }
+
     shared->nfs_verifier = now.tv_sec * 1000000000ULL + now.tv_nsec;
 
     chimera_nfs_abort_if(sizeof(shared->nfs_verifier) != NFS3_WRITEVERFSIZE,
@@ -281,8 +304,8 @@ nfs_server_init(
     shared->nlm_v4.recv_call_NLMPROC4_NM_LOCK     = chimera_nfs_nlm4_nm_lock;
     shared->nlm_v4.recv_call_NLMPROC4_FREE_ALL    = chimera_nfs_nlm4_free_all;
 
-    nfs4_client_table_init(&shared->nfs4_shared_clients);
-    nfs_state_table_init(&shared->nfs4_state_table);
+    nfs4_client_table_init(&shared->nfs4_shared_clients, shared->node_id);
+    nfs_state_table_init(&shared->nfs4_state_table, shared->node_id);
     nfs_layout_table_init(&shared->nfs4_layout_table);
     nfs4_v40_drc_init(&shared->v40_drc);
     nfs3_drc_init(&shared->nfs3_drc);
@@ -309,6 +332,7 @@ nfs_server_init(
      * the kickoff forces the window open while the scan is in flight. */
     nfs_recovery_load(&shared->nfs4_recovery,
                       shared->vfs,
+                      shared->node_id,
                       shared->nfs_grace_time_s,
                       chimera_server_config_get_nfs4_drc(config));
     nfs_recovery_begin_grace(&shared->nfs4_recovery,

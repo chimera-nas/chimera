@@ -531,6 +531,14 @@ main(
         }
     }
 
+    json_value = json_object_get(server_params, "nfs4_node_id");
+    if (json_is_integer(json_value)) {
+        int_value = json_integer_value(json_value);
+        if (int_value > 0 && int_value < 0xFFFF) {
+            chimera_server_config_set_nfs4_node_id(server_config, int_value);
+        }
+    }
+
     json_value = json_object_get(server_params, "nfs4_courtesy_time");
     if (json_is_integer(json_value)) {
         int_value = json_integer_value(json_value);

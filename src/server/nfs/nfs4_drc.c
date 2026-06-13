@@ -98,6 +98,7 @@ nfs4_drc_reply_parse(
 void
 nfs4_drc_persist_reply(
     struct chimera_vfs_thread *vfs_thread,
+    uint16_t                   node_id,
     struct nfs4_session       *session,
     uint32_t                   slotid,
     uint32_t                   seqid,
@@ -111,7 +112,7 @@ nfs4_drc_persist_reply(
     }
 
     ctx          = malloc(sizeof(*ctx));
-    ctx->key_len = nfs_kv_reply_key(ctx->key, session->nfs4_session_id,
+    ctx->key_len = nfs_kv_reply_key(ctx->key, node_id, session->nfs4_session_id,
                                     slotid, seqid);
 
     ctx->value     = malloc(NFS4_DRC_REPLY_HDR_LEN + len);
@@ -126,6 +127,7 @@ nfs4_drc_persist_reply(
 void
 nfs4_drc_delete_reply(
     struct chimera_vfs_thread *vfs_thread,
+    uint16_t                   node_id,
     const uint8_t             *sessionid,
     uint32_t                   slotid,
     uint32_t                   seqid)
@@ -134,7 +136,7 @@ nfs4_drc_delete_reply(
 
     ctx->value     = NULL;
     ctx->value_len = 0;
-    ctx->key_len   = nfs_kv_reply_key(ctx->key, sessionid, slotid, seqid);
+    ctx->key_len   = nfs_kv_reply_key(ctx->key, node_id, sessionid, slotid, seqid);
 
     chimera_vfs_delete_key(vfs_thread, ctx->key, ctx->key_len,
                            nfs4_drc_kv_done, ctx);
@@ -252,6 +254,7 @@ nfs4_drc_session_deserialize(
 void
 nfs4_drc_persist_session(
     struct chimera_vfs_thread          *vfs_thread,
+    uint16_t                            node_id,
     struct nfs4_session                *session,
     const struct nfs4_client_principal *principal,
     uint32_t                            cb_program,
@@ -288,7 +291,7 @@ nfs4_drc_persist_session(
     memcpy(rec.owner, uc->owner_string, uc->owner_len);
 
     ctx            = malloc(sizeof(*ctx));
-    ctx->key_len   = nfs_kv_session_key(ctx->key, session->nfs4_session_id);
+    ctx->key_len   = nfs_kv_session_key(ctx->key, node_id, session->nfs4_session_id);
     ctx->value     = malloc(NFS4_DRC_SESSION_HDR_LEN + rec.mach_len + rec.owner_len);
     ctx->value_len = nfs4_drc_session_serialize(
         ctx->value, NFS4_DRC_SESSION_HDR_LEN + rec.mach_len + rec.owner_len, &rec);
@@ -325,9 +328,9 @@ nfs4_drc_forget_scan_cb(
     (void) value_len;
 
     /* Stop once we leave this session's reply entries (keys are ordered:
-     * header(3) + sessionid(16) + slot + seqid). */
-    if (key_len < CHIMERA_KV_HDR_LEN + NFS4_SESSIONID_SIZE ||
-        memcmp((const uint8_t *) key + CHIMERA_KV_HDR_LEN,
+     * prefix(5) + sessionid(16) + slot + seqid). */
+    if (key_len < CHIMERA_KV_PREFIX_LEN + NFS4_SESSIONID_SIZE ||
+        memcmp((const uint8_t *) key + CHIMERA_KV_PREFIX_LEN,
                ctx->sessionid, NFS4_SESSIONID_SIZE) != 0) {
         return 1;
     }
@@ -368,6 +371,7 @@ nfs4_drc_forget_complete(
 void
 nfs4_drc_forget_session(
     struct chimera_vfs_thread *vfs_thread,
+    uint16_t                   node_id,
     const uint8_t             *sessionid)
 {
     struct nfs4_drc_forget_ctx *ctx;
@@ -378,7 +382,7 @@ nfs4_drc_forget_session(
     sctx            = malloc(sizeof(*sctx));
     sctx->value     = NULL;
     sctx->value_len = 0;
-    sctx->key_len   = nfs_kv_session_key(sctx->key, sessionid);
+    sctx->key_len   = nfs_kv_session_key(sctx->key, node_id, sessionid);
     chimera_vfs_delete_key(vfs_thread, sctx->key, sctx->key_len,
                            nfs4_drc_kv_done, sctx);
 
@@ -386,7 +390,7 @@ nfs4_drc_forget_session(
     ctx             = calloc(1, sizeof(*ctx));
     ctx->vfs_thread = vfs_thread;
     memcpy(ctx->sessionid, sessionid, NFS4_SESSIONID_SIZE);
-    slen = nfs_kv_reply_key(ctx->start, sessionid, 0, 0);
+    slen = nfs_kv_reply_key(ctx->start, node_id, sessionid, 0, 0);
 
     /* No end key + flags 0: the search returns key-ordered results and the
      * callback stops once the sessionid in the key no longer matches. */
@@ -455,9 +459,16 @@ nfs4_drc_ensure_client(
     HASH_ADD(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
              nfs4_client_id, sizeof(client->nfs4_client_id), client);
 
-    /* Keep the id allocator ahead of every restored clientid. */
-    if (table->nfs4_ct_next_client_id <= client_id) {
-        table->nfs4_ct_next_client_id = client_id + 1;
+    /* Keep the id allocator ahead of every restored clientid.  The low 48 bits
+     * are the per-instance counter (the high 16 are this node's node_id), and
+     * next_client_id holds just that counter -- so compare/advance on the low
+     * bits, not the whole 64-bit value. */
+    {
+        uint64_t counter = client_id & NFS4_CLIENTID_COUNTER_MASK;
+
+        if (table->nfs4_ct_next_client_id <= counter) {
+            table->nfs4_ct_next_client_id = counter + 1;
+        }
     }
 
     pthread_mutex_unlock(&table->nfs4_ct_lock);
@@ -521,7 +532,7 @@ struct nfs4_drc_reload_ctx {
     struct chimera_server_nfs_thread *thread;
     nfs4_drc_reload_done_t            done;
     void                             *done_arg;
-    uint8_t                           start[CHIMERA_KV_HDR_LEN];
+    uint8_t                           start[CHIMERA_KV_PREFIX_LEN];
 };
 
 static int
@@ -538,15 +549,15 @@ nfs4_drc_session_scan_cb(
     const uint8_t                    *sessionid;
     struct nfs4_drc_session_record    rec;
 
-    if (key_len < CHIMERA_KV_HDR_LEN + NFS4_SESSIONID_SIZE ||
-        memcmp(key, ctx->start, CHIMERA_KV_HDR_LEN) != 0) {
-        return 1;  /* left the session band */
+    if (key_len < CHIMERA_KV_PREFIX_LEN + NFS4_SESSIONID_SIZE ||
+        memcmp(key, ctx->start, CHIMERA_KV_PREFIX_LEN) != 0) {
+        return 1;  /* left this node's session band */
     }
     if (nfs4_drc_session_deserialize(value, value_len, &rec) != 0) {
         return 0;  /* skip a corrupt record */
     }
 
-    sessionid = (const uint8_t *) key + CHIMERA_KV_HDR_LEN;
+    sessionid = (const uint8_t *) key + CHIMERA_KV_PREFIX_LEN;
 
     nfs4_drc_reconstruct_session(table, sessionid, &rec,
                                  thread->shared->nfs4_recovery.current_boot_id);
@@ -571,21 +582,22 @@ nfs4_drc_reply_scan_cb(
     uint32_t                          slotid, seqid, cached_len;
 
     if (key_len < CHIMERA_KV_REPLY_KEY_LEN ||
-        memcmp(key, ctx->start, CHIMERA_KV_HDR_LEN) != 0) {
-        return 1;  /* left the reply band */
+        memcmp(key, ctx->start, CHIMERA_KV_PREFIX_LEN) != 0) {
+        return 1;  /* left this node's reply band */
     }
     if (nfs4_drc_reply_parse(value, value_len, &seqid, &cached_data,
                              &cached_len) != 0) {
         return 0;
     }
 
-    sessionid = k + CHIMERA_KV_HDR_LEN;
-    slotid    = nfs_kv_le32(k + CHIMERA_KV_HDR_LEN + NFS4_SESSIONID_SIZE);
+    sessionid = k + CHIMERA_KV_PREFIX_LEN;
+    slotid    = nfs_kv_le32(k + CHIMERA_KV_PREFIX_LEN + NFS4_SESSIONID_SIZE);
 
     session = nfs4_session_lookup(&thread->shared->nfs4_shared_clients, sessionid);
     if (!session) {
         /* Orphan (its session was destroyed before the restart): drop it. */
-        nfs4_drc_delete_reply(thread->vfs_thread, sessionid, slotid, seqid);
+        nfs4_drc_delete_reply(thread->vfs_thread, thread->shared->node_id,
+                              sessionid, slotid, seqid);
         return 0;
     }
 
@@ -622,10 +634,11 @@ nfs4_drc_session_complete(
 
     /* Sessions (and their clients) are in place; now repopulate slot caches.
      * No end key + flags 0 -- key-ordered results, callback stops when the
-     * 3-byte type header changes. */
-    nfs_kv_type_prefix(ctx->start, CHIMERA_KV_TYPE_NFS4_REPLY);
+     * 5-byte [type,node] prefix changes. */
+    nfs_kv_node_prefix(ctx->start, CHIMERA_KV_TYPE_NFS4_REPLY,
+                       ctx->thread->shared->node_id);
     chimera_vfs_search_keys(ctx->thread->vfs_thread,
-                            ctx->start, CHIMERA_KV_HDR_LEN,
+                            ctx->start, CHIMERA_KV_PREFIX_LEN,
                             NULL, 0, 0,
                             nfs4_drc_reply_scan_cb,
                             nfs4_drc_reply_complete, ctx);
@@ -643,12 +656,13 @@ nfs4_drc_reload(
     ctx->done     = done;
     ctx->done_arg = done_arg;
 
-    /* Reconstruct sessions + clients first, then their reply slots.  No end
-     * key + flags 0 -- key-ordered results, callback stops when the 3-byte
-     * type header changes. */
-    nfs_kv_type_prefix(ctx->start, CHIMERA_KV_TYPE_NFS4_SESSION);
+    /* Reconstruct THIS node's sessions + clients first, then their reply slots.
+     * No end key + flags 0 -- key-ordered results, callback stops when the
+     * 5-byte [type,node] prefix changes. */
+    nfs_kv_node_prefix(ctx->start, CHIMERA_KV_TYPE_NFS4_SESSION,
+                       thread->shared->node_id);
     chimera_vfs_search_keys(thread->vfs_thread,
-                            ctx->start, CHIMERA_KV_HDR_LEN,
+                            ctx->start, CHIMERA_KV_PREFIX_LEN,
                             NULL, 0, 0,
                             nfs4_drc_session_scan_cb,
                             nfs4_drc_session_complete, ctx);

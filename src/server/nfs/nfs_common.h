@@ -264,6 +264,13 @@ struct chimera_server_nfs_shared {
 
     uint64_t                            nfs_verifier;
 
+    /* Stable identity of this server instance among any peers sharing the same
+     * backing KV store.  Namespaces every persisted record + the clientid /
+     * stateid epoch so N instances over one store never collide and each
+     * reloads only its own state.  From server.nfs4_node_id, else derived from
+     * the machine name (see nfs_server_init).  Range 1..0xFFFE. */
+    uint16_t                            node_id;
+
     /* Lease management (Phase 3).  Set from defaults at init; future
      * config knobs would override these in nfs_server_init. */
     uint32_t                            nfs_lease_time_s;

@@ -58,7 +58,8 @@ chimera_nfs4_destroy_session(
     /* Drop this session's persisted metadata + reply entries so a restart does
      * not resurrect a session the client explicitly tore down. */
     if (chimera_server_config_get_nfs4_drc(shared->config)) {
-        nfs4_drc_forget_session(thread->vfs_thread, args->dsa_sessionid);
+        nfs4_drc_forget_session(thread->vfs_thread, shared->node_id,
+                                args->dsa_sessionid);
     }
 
     res->dsr_status = NFS4_OK;

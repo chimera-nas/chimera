@@ -79,6 +79,7 @@ struct nfs3_drc {
     pthread_mutex_t        lock;
     struct nfs3_drc_entry *table;            /* uthash, FIFO eviction order */
     uint64_t               bytes;
+    uint16_t               node_id;          /* scopes our entries in a shared store */
     int                    persistence_disabled;
     _Atomic int            load_state;
     /* The generated NFS_V3 dispatcher we wrap; NULL until installed. */

@@ -50,41 +50,51 @@ chimera_nfs4_open_resume_after_probe(struct nfs_request*req)
 static void
 test_key_encoding(void)
 {
-    uint8_t  sid[NFS4_SESSIONID_SIZE];
-    uint8_t  rkey[CHIMERA_KV_REPLY_KEY_LEN];
-    uint8_t  skey[CHIMERA_KV_SESSION_KEY_LEN];
-    uint8_t  ekey[CHIMERA_KV_HDR_LEN + 1];
-    uint8_t  ckey[CHIMERA_KV_NFS_KEY_MAX];
-    uint32_t klen;
+    const uint16_t node = 0x0102; /* distinct high/low bytes to check BE order */
+    uint8_t        sid[NFS4_SESSIONID_SIZE];
+    uint8_t        rkey[CHIMERA_KV_REPLY_KEY_LEN];
+    uint8_t        skey[CHIMERA_KV_SESSION_KEY_LEN];
+    uint8_t        ekey[CHIMERA_KV_PREFIX_LEN];
+    uint8_t        ckey[CHIMERA_KV_NFS_KEY_MAX];
+    uint8_t        pfx[CHIMERA_KV_PREFIX_LEN];
+    uint32_t       klen;
 
     memset(sid, 0xAB, sizeof(sid));
 
-    /* Every key starts with the chimera magic + version, disjoint from SMB's
-     * ASCII "smbdh" band (byte 0 = 0xC4). */
-    klen = nfs_kv_reply_key(rkey, sid, 7, 9);
+    /* Every key starts with magic + version + type + node_id (big-endian),
+     * disjoint from SMB's ASCII "smbdh" band (byte 0 = 0xC4). */
+    klen = nfs_kv_reply_key(rkey, node, sid, 7, 9);
     CHECK(klen == CHIMERA_KV_REPLY_KEY_LEN);
     CHECK(rkey[0] == CHIMERA_KV_MAGIC && rkey[1] == CHIMERA_KV_VERSION);
     CHECK(rkey[2] == CHIMERA_KV_TYPE_NFS4_REPLY);
-    CHECK(memcmp(rkey + CHIMERA_KV_HDR_LEN, sid, NFS4_SESSIONID_SIZE) == 0);
+    CHECK(rkey[3] == 0x01 && rkey[4] == 0x02); /* node_id 0x0102, big-endian */
+    CHECK(memcmp(rkey + CHIMERA_KV_PREFIX_LEN, sid, NFS4_SESSIONID_SIZE) == 0);
     /* slotid + seqid encoded little-endian after the sessionid. */
-    CHECK(nfs_kv_le32(rkey + CHIMERA_KV_HDR_LEN + NFS4_SESSIONID_SIZE) == 7);
-    CHECK(nfs_kv_le32(rkey + CHIMERA_KV_HDR_LEN + NFS4_SESSIONID_SIZE + 4) == 9);
+    CHECK(nfs_kv_le32(rkey + CHIMERA_KV_PREFIX_LEN + NFS4_SESSIONID_SIZE) == 7);
+    CHECK(nfs_kv_le32(rkey + CHIMERA_KV_PREFIX_LEN + NFS4_SESSIONID_SIZE + 4) == 9);
 
-    klen = nfs_kv_session_key(skey, sid);
+    klen = nfs_kv_session_key(skey, node, sid);
     CHECK(klen == CHIMERA_KV_SESSION_KEY_LEN);
     CHECK(skey[2] == CHIMERA_KV_TYPE_NFS4_SESSION);
 
-    klen = nfs_kv_epoch_key(ekey);
-    CHECK(klen == CHIMERA_KV_HDR_LEN + 1);
+    klen = nfs_kv_epoch_key(ekey, node);
+    CHECK(klen == CHIMERA_KV_PREFIX_LEN);
     CHECK(ekey[2] == CHIMERA_KV_TYPE_NFS4_EPOCH);
 
-    klen = nfs_kv_recovery_key(ckey, (const uint8_t *) "owner", 5);
-    CHECK(klen == CHIMERA_KV_HDR_LEN + 5);
+    klen = nfs_kv_recovery_key(ckey, node, (const uint8_t *) "owner", 5);
+    CHECK(klen == CHIMERA_KV_PREFIX_LEN + 5);
     CHECK(ckey[2] == CHIMERA_KV_TYPE_NFS4_RECOVERY);
-    CHECK(memcmp(ckey + CHIMERA_KV_HDR_LEN, "owner", 5) == 0);
+    CHECK(memcmp(ckey + CHIMERA_KV_PREFIX_LEN, "owner", 5) == 0);
 
-    /* Type bytes are ordered recovery < epoch < session < reply, so a
-    * [type, type+1) search range isolates exactly one record kind. */
+    /* The 5-byte node prefix is exactly the head of a key of that type/node, so
+     * a prefix scan selects one record type owned by one instance. */
+    nfs_kv_node_prefix(pfx, CHIMERA_KV_TYPE_NFS4_RECOVERY, node);
+    CHECK(memcmp(pfx, ckey, CHIMERA_KV_PREFIX_LEN) == 0);
+    /* A different node yields a different prefix (and so a disjoint band). */
+    nfs_kv_node_prefix(pfx, CHIMERA_KV_TYPE_NFS4_RECOVERY, node + 1);
+    CHECK(memcmp(pfx, ckey, CHIMERA_KV_PREFIX_LEN) != 0);
+
+    /* Type bytes are ordered recovery < epoch < session < reply. */
     CHECK(CHIMERA_KV_TYPE_NFS4_RECOVERY < CHIMERA_KV_TYPE_NFS4_EPOCH);
     CHECK(CHIMERA_KV_TYPE_NFS4_EPOCH < CHIMERA_KV_TYPE_NFS4_SESSION);
     CHECK(CHIMERA_KV_TYPE_NFS4_SESSION < CHIMERA_KV_TYPE_NFS4_REPLY);
@@ -258,7 +268,7 @@ test_cross_reboot_replay(void)
     uint64_t                       clientid;
 
     /* --- instance A: a live persistent session with one cached reply --- */
-    nfs4_client_table_init(&table_a);
+    nfs4_client_table_init(&table_a,1);
     clientid = nfs4_client_register(&table_a,owner,(int) sizeof(owner) - 1,
                                     0x1234ULL,40,NULL,NULL);
     session = nfs4_create_session(&table_a,clientid,0,8,4096,
@@ -291,7 +301,7 @@ test_cross_reboot_replay(void)
     nfs4_client_table_free(&table_a);
 
     /* --- instance B: cold-start reconstruction from the persisted bytes --- */
-    nfs4_client_table_init(&table_b);
+    nfs4_client_table_init(&table_b,1);
 
     CHECK(nfs4_drc_session_deserialize(sbuf,slen,&srec) == 0);
     nfs4_drc_reconstruct_session(&table_b,sessionid,&srec,0x9999ULL);
@@ -360,15 +370,16 @@ test_nfs3_key_encoding(void)
     uint8_t                buf[CHIMERA_KV_NFS3_REPLY_KEY_MAX];
     uint32_t               klen,p;
 
-    klen = nfs_kv_nfs3_reply_key(buf,k.addr,k.addr_len,k.proc,k.xid,
+    klen = nfs_kv_nfs3_reply_key(buf,0x0102,k.addr,k.addr_len,k.proc,k.xid,
                                  k.cksum);
 
-    /* header */
+    /* header + node_id (big-endian) */
     CHECK(buf[0] == CHIMERA_KV_MAGIC);
     CHECK(buf[1] == CHIMERA_KV_VERSION);
     CHECK(buf[2] == CHIMERA_KV_TYPE_NFS3_REPLY);
+    CHECK(buf[3] == 0x01 && buf[4] == 0x02);
     /* addr_len + addr */
-    p = CHIMERA_KV_HDR_LEN;
+    p = CHIMERA_KV_PREFIX_LEN;
     CHECK(buf[p] == k.addr_len);
     p++;
     CHECK(memcmp(buf + p,"10.1.2.3",8) == 0);
@@ -488,7 +499,8 @@ test_nfs3_cross_reboot(void)
 
     /* --- before reboot: serialize the KV key + value --- */
     uint8_t                kvkey[CHIMERA_KV_NFS3_REPLY_KEY_MAX];
-    uint32_t               kvkey_len = nfs_kv_nfs3_reply_key(kvkey,k_before.addr,
+    uint32_t               kvkey_len = nfs_kv_nfs3_reply_key(kvkey,0x0102,
+                                                             k_before.addr,
                                                              k_before.addr_len,k_before.proc,
                                                              k_before.xid,k_before.cksum);
     uint8_t                kvval[NFS3_DRC_VALUE_HDR_LEN + sizeof(reply)];
@@ -512,9 +524,10 @@ test_nfs3_cross_reboot(void)
     uint8_t                addr_len;
 
     CHECK(memcmp(kvkey,(uint8_t[]) { CHIMERA_KV_MAGIC,CHIMERA_KV_VERSION,
-                                     CHIMERA_KV_TYPE_NFS3_REPLY },3) == 0);
-    addr_len = kvkey[CHIMERA_KV_HDR_LEN];
-    p        = CHIMERA_KV_HDR_LEN + 1;
+                                     CHIMERA_KV_TYPE_NFS3_REPLY,0x01,0x02 },
+                 CHIMERA_KV_PREFIX_LEN) == 0);
+    addr_len = kvkey[CHIMERA_KV_PREFIX_LEN];
+    p        = CHIMERA_KV_PREFIX_LEN + 1;
     CHECK(addr_len <= NFS3_DRC_ADDR_MAX);
     CHECK(p + addr_len + 16 <= kvkey_len);
 
@@ -551,6 +564,78 @@ test_nfs3_cross_reboot(void)
     printf("ok: nfs3_cross_reboot\n");
 } /* test_nfs3_cross_reboot */
 
+/* ------------------------------------------------------------------ *
+*  Multi-node namespacing (N instances over one shared backing store) *
+* ------------------------------------------------------------------ */
+
+/* clientid carries the minting node in its high 16 bits and a per-instance
+ * counter in the low 48, and the stateid epoch carries the node in its high 16
+ * bits -- so two instances over one store never hand out colliding values. */
+static void
+test_node_scoped_identifiers(void)
+{
+    struct nfs_state_table ta,tb;
+
+    /* clientid pack/unpack: node recoverable, counter preserved, no aliasing. */
+    CHECK((nfs4_make_clientid(7,42) >> 48) == 7);
+    CHECK((nfs4_make_clientid(7,42) & NFS4_CLIENTID_COUNTER_MASK) == 42);
+    /* Same counter on two different nodes -> two different clientids. */
+    CHECK(nfs4_make_clientid(7,42) != nfs4_make_clientid(8,42));
+    /* A node's whole 48-bit counter space stays within its own band. */
+    CHECK((nfs4_make_clientid(7,NFS4_CLIENTID_COUNTER_MASK) >> 48) == 7);
+
+    /* stateid epoch: node in the high 16 bits, low bit set, and two nodes that
+     * init in the same second still get distinct epochs. */
+    nfs_state_table_init(&ta,7);
+    nfs_state_table_init(&tb,8);
+    CHECK((ta.epoch >> 16) == 7);
+    CHECK((tb.epoch >> 16) == 8);
+    CHECK((ta.epoch & 1u) == 1u);
+    CHECK(ta.epoch != tb.epoch);
+    nfs_state_table_free(&ta,NULL);
+    nfs_state_table_free(&tb,NULL);
+
+    printf("ok: node_scoped_identifiers\n");
+} /* test_node_scoped_identifiers */
+
+/* The decisive sharing property: with the same owner/sessionid persisted by two
+ * nodes, the records land under disjoint keys and each node's 5-byte scan prefix
+ * matches only its own -- so a cold-start reload never loads a live peer's
+ * records out of the shared store. */
+static void
+test_two_node_key_isolation(void)
+{
+    const uint16_t a = 11,b = 22;
+    uint8_t        sid[NFS4_SESSIONID_SIZE];
+    uint8_t        ka[CHIMERA_KV_NFS_KEY_MAX],kb[CHIMERA_KV_NFS_KEY_MAX];
+    uint8_t        sa[CHIMERA_KV_SESSION_KEY_LEN],sb[CHIMERA_KV_SESSION_KEY_LEN];
+    uint8_t        pa[CHIMERA_KV_PREFIX_LEN];
+    uint32_t       la,lb;
+
+    memset(sid,0x5A,sizeof(sid));
+
+    /* Identical owner, two nodes -> distinct recovery keys (both coexist). */
+    la = nfs_kv_recovery_key(ka,a,(const uint8_t*) "same-owner",10);
+    lb = nfs_kv_recovery_key(kb,b,(const uint8_t*) "same-owner",10);
+    CHECK(la == lb);
+    CHECK(memcmp(ka,kb,la) != 0);
+
+    /* Node A's recovery scan prefix matches A's key, not B's. */
+    nfs_kv_node_prefix(pa,CHIMERA_KV_TYPE_NFS4_RECOVERY,a);
+    CHECK(memcmp(pa,ka,CHIMERA_KV_PREFIX_LEN) == 0);
+    CHECK(memcmp(pa,kb,CHIMERA_KV_PREFIX_LEN) != 0);
+
+    /* Same for an identical sessionid persisted by both nodes. */
+    nfs_kv_session_key(sa,a,sid);
+    nfs_kv_session_key(sb,b,sid);
+    CHECK(memcmp(sa,sb,CHIMERA_KV_SESSION_KEY_LEN) != 0);
+    nfs_kv_node_prefix(pa,CHIMERA_KV_TYPE_NFS4_SESSION,a);
+    CHECK(memcmp(pa,sa,CHIMERA_KV_PREFIX_LEN) == 0);
+    CHECK(memcmp(pa,sb,CHIMERA_KV_PREFIX_LEN) != 0);
+
+    printf("ok: two_node_key_isolation\n");
+} /* test_two_node_key_isolation */
+
 int
 main(void)
 {
@@ -570,6 +655,9 @@ main(void)
     test_nfs3_value_roundtrip();
     test_nfs3_cache_lookup();
     test_nfs3_cross_reboot();
+
+    test_node_scoped_identifiers();
+    test_two_node_key_isolation();
 
     printf("PASS: all nfs persistence tests\n");
     return 0;

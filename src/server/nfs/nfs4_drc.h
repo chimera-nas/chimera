@@ -33,6 +33,7 @@ struct nfs4_client_principal;
 void
 nfs4_drc_persist_reply(
     struct chimera_vfs_thread *vfs_thread,
+    uint16_t                   node_id,
     struct nfs4_session       *session,
     uint32_t                   slotid,
     uint32_t                   seqid,
@@ -43,16 +44,19 @@ nfs4_drc_persist_reply(
 void
 nfs4_drc_delete_reply(
     struct chimera_vfs_thread *vfs_thread,
+    uint16_t                   node_id,
     const uint8_t             *sessionid,
     uint32_t                   slotid,
     uint32_t                   seqid);
 
 /* Persist a session's metadata so it can be reconstructed at cold start.
  * Reads owner/verifier/clientid from session->client_unified; principal and
- * channel attrs come from the CREATE_SESSION that established it. */
+ * channel attrs come from the CREATE_SESSION that established it.  node_id
+ * scopes the record to this server instance in a shared store. */
 void
 nfs4_drc_persist_session(
     struct chimera_vfs_thread          *vfs_thread,
+    uint16_t                            node_id,
     struct nfs4_session                *session,
     const struct nfs4_client_principal *principal,
     uint32_t                            cb_program,
@@ -62,6 +66,7 @@ nfs4_drc_persist_session(
 void
 nfs4_drc_forget_session(
     struct chimera_vfs_thread *vfs_thread,
+    uint16_t                   node_id,
     const uint8_t             *sessionid);
 
 /* Cold-start reload: reconstruct persistent sessions (+ their owning client
