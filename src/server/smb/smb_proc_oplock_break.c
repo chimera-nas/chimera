@@ -349,16 +349,28 @@ chimera_smb_lease_break_cb(
     }
 
     /* A break that needs no client ack (it stripped only read caching, e.g. the
-     * R->NONE tail of an RWH->RH->R->NONE cascade) will never be resolved by an
-     * inbound OPLOCK_BREAK ack, so the ack-driven resume of parked CREATEs
-     * (chimera_smb_create_resume_parked, only called from the ack handler) never
-     * fires for it.  But the lease is now at its retained level, so
-     * chimera_vfs_state_caching_breaking() returns false and any CREATE parked on
-     * this file is resumable.  Ring the resume doorbell on this thread AND every
-     * peer (the broadcast skips its origin) so each re-sweeps and completes its
-     * parked CREATEs instead of stalling to the break deadline (cthon special
-     * hang).  Use the snapshotted conn_thread — same reason as above. */
+     * R->NONE tail of an RWH->RH->R->NONE cascade, or a same-key reader broken
+     * by a peer's write) will never be resolved by an inbound OPLOCK_BREAK ack.
+     * Settle the lease NOW to its retained mode so it leaves the BREAKING state:
+     *   - it must return to IDLE at its new level so a *later* conflicting op can
+     *     break it again (smb2.lease.nobreakself writes twice through one handle,
+     *     each expecting a fresh break of the other lease; begin_break is a no-op
+     *     on a lease still stuck BREAKING), and
+     *   - a same-key re-open must NOT report SMB2_LEASE_FLAG_BREAK_IN_PROGRESS
+     *     once the (un-acked) downgrade has settled (smb2.lease.break's third
+     *     open checks lease_flags == 0).
+     * chimera_vfs_lease_ack with the retained mode is the canonical settle: it
+     * re-arms a surviving lease to IDLE (or goes inert ACKED at NONE) and pumps
+     * any acquirer parked on the break.  An ack-required break instead waits for
+     * the client's real OPLOCK_BREAK ack (handled in chimera_smb_oplock_break). */
     if (!grant->break_ack_required) {
+        struct chimera_vfs_lease_mode settled = {
+            .granted = new_vfs,
+            .denied  = 0,
+        };
+
+        chimera_vfs_lease_ack(lease, settled);
+
         evpl_ring_doorbell(&conn_thread->lease_resume_doorbell);
         chimera_smb_create_resume_parked_broadcast(conn_thread);
     }
