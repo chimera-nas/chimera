@@ -17,6 +17,7 @@
 #include "nfs4_state.h"
 #include "nfs4_layout_table.h"
 #include "nfs4_recovery.h"
+#include "nfs3_drc.h"
 #include "nfs_nlm_state.h"
 
 struct chimera_server_nfs_thread;
@@ -279,6 +280,7 @@ struct chimera_server_nfs_shared {
     struct prometheus_metrics          *metrics;
     struct nfs4_replay_metrics          replay_metrics;
     struct nfs4_v40_drc                 v40_drc;
+    struct nfs3_drc                     nfs3_drc;
 };
 
 /* Forward decl for the per-thread lease sweeper (defined in nfs4_lease.h). */
