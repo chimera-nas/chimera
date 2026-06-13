@@ -1148,6 +1148,12 @@ foreach(t ${PJD_TESTS})
     if(CAIRN_ENABLED)
         add_pjd_test(${t} cairn)
     endif()
+    if(IO_URING_ENABLED)
+        add_pjd_test(${t} diskfs_io_uring)
+    endif()
+    if(HAVE_LIBAIO)
+        add_pjd_test(${t} diskfs_aio)
+    endif()
 endforeach()
 
 # Tag the non-pjd tests with the 'posix' label so that suite can be run
