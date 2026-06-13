@@ -36,7 +36,22 @@ chimera_nfs4_open_at_callback(
     }
 
     if (res->status != NFS4_OK) {
-        request->status = chimera_nfs4_status_to_errno(res->status);
+        /* OPEN of a symlink as the final component: the server rejects it with
+         * NFS4ERR_SYMLINK (there is no atomic O_NOFOLLOW on the wire, so the
+         * server cannot distinguish a data open of the link from a follow).
+         * When the caller asked for a *data* open with O_NOFOLLOW (not an
+         * O_PATH-style open of the link itself), POSIX open(2) must report ELOOP
+         * rather than the default EINVAL mapping (pjdfstest open/16).  This
+         * mirrors the NFS3 client open path.  A failing OPEN sets the whole
+         * COMPOUND's status to the op's error, so this must be handled here
+         * (before the generic mapping) rather than at the per-op check below. */
+        if (res->status == NFS4ERR_SYMLINK &&
+            (request->open_at.flags & CHIMERA_VFS_OPEN_NOFOLLOW) &&
+            !(request->open_at.flags & CHIMERA_VFS_OPEN_PATH)) {
+            request->status = CHIMERA_VFS_ELOOP;
+        } else {
+            request->status = chimera_nfs4_status_to_errno(res->status);
+        }
         request->complete(request);
         return;
     }
