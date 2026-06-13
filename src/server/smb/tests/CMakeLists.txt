@@ -506,6 +506,46 @@ target_include_directories(smbtorture_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 set(SMBTORTURE_LSAN "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/suppressions.txt")
 set(SMBTORTURE_CMD ${CMAKE_CURRENT_BINARY_DIR}/smbtorture_test)
 
+# --- LSARPC named-pipe RPC validation -------------------------------------
+#
+# Independent-client smoke test: drive Samba's rpcclient against the chimera
+# LSARPC pipe (in serve mode) and assert an implemented op decodes.  This is the
+# green gate for the DCE/RPC bind + FSCTL transceive + NDR marshalling path.
+add_test(NAME chimera/server/smb/rpcclient_lsa
+    COMMAND ${CMAKE_SOURCE_DIR}/scripts/netns_test_wrapper.sh
+            ${CMAKE_SOURCE_DIR}/scripts/smb_rpcclient_test.sh ${SMBTORTURE_CMD} memfs)
+set_tests_properties(chimera/server/smb/rpcclient_lsa PROPERTIES
+    ENVIRONMENT "${SMBTORTURE_LSAN}"
+    SKIP_RETURN_CODE 77
+    LABELS "smb"
+    TIMEOUT 120)
+
+# smbtorture DCE/RPC conformance suites for LSARPC.  Wired here but DISABLED:
+# each exercises a domain feature beyond a standalone file server's scope --
+# rpc.handles.lsarpc asserts DCE/RPC context-handle association tracking
+# (cross-connection RPC_SS_CONTEXT_MISMATCH), and rpc.lsalookup bails with
+# "no trusts" because it looks names up in trusted domains.  The actual LSARPC
+# functionality (bind, OpenPolicy/2, Close, QueryInfoPolicy, EnumTrustDom,
+# GetUserName) is validated by rpcclient_lsa above.  Drop DISABLED on a suite
+# once the server grows the feature it needs.
+set(SMBTORTURE_RPC_SUITES
+    rpc.handles.lsarpc
+    rpc.lsalookup)
+
+foreach(SUITE ${SMBTORTURE_RPC_SUITES})
+    string(REGEX REPLACE "[^A-Za-z0-9]" "_" SUITE_ID ${SUITE})
+    set(TEST_NAME chimera/server/smb/smbtorture_${SUITE_ID}_memfs)
+    add_test(NAME ${TEST_NAME}
+        COMMAND ${CMAKE_SOURCE_DIR}/scripts/netns_test_wrapper.sh
+                ${SMBTORTURE_CMD} -b memfs ${SUITE})
+    set_tests_properties(${TEST_NAME} PROPERTIES
+        ENVIRONMENT "${SMBTORTURE_LSAN}"
+        SKIP_RETURN_CODE 77
+        LABELS "smbtorture_rpc"
+        DISABLED TRUE
+        TIMEOUT 300)
+endforeach()
+
 
 # smbtorture SMB2 conformance — exploded matrix
 #

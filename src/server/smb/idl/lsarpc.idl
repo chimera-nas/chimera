@@ -1,0 +1,170 @@
+/*
+ * SPDX-FileCopyrightText: 2026 Chimera-NAS Project Contributors
+ * SPDX-License-Identifier: LGPL-2.1-only
+ *
+ * LSARPC (MS-LSAD / MS-LSAT) interface, compiled by ndrzcc.
+ *
+ * Migration in progress: operations declared here are marshalled by generated
+ * code; opnums not yet declared fall back to the legacy hand-rolled handler in
+ * smb_lsarpc.c.  See task "Phase 1: migrate SMB LSARPC onto ndrzcc".
+ */
+
+[ uuid(12345778-1234-abcd-ef00-0123456789ab), version(0.0) ]
+interface lsarpc {
+
+    /* 20-byte LSA context handle: 4-byte attributes + 16-byte GUID. */
+    typedef struct {
+        uint32 handle_type;
+        uint8  uuid[16];
+    } policy_handle;
+
+    /* RPC_UNICODE_STRING (MS-DTYP 2.3.10): byte counts + conformant-varying
+     * UTF-16 buffer. */
+    typedef struct {
+        uint16            length;
+        uint16            size;
+        [string, nonul] wchar_t *buffer;
+    } rpc_unicode_string;
+
+    /* lsa_PolicyInformation modelled as a struct: the non-encapsulated union's
+     * discriminant (the info level) followed by the arm.  For levels 3
+     * (PrimaryDomain) and 5 (AccountDomain) the arm is a domain name + SID.
+     * info_class is a uint32 so the 4-aligned arm needs no explicit pad -- the
+     * low 16 bits carry the level, the high 16 are the union's alignment pad,
+     * matching the wire's [level:u16][pad:u16] discriminant. */
+    typedef struct {
+        uint32             info_class;
+        rpc_unicode_string name;
+        dom_sid           *sid;
+    } lsa_PolicyInformation;
+
+    /* opnum 0 -- LsarClose */
+    [opnum(0)] uint32 lsa_Close(
+        [in, out] policy_handle *handle);
+
+    /* opnum 6 -- LsarOpenPolicy.  Inputs (system_name, object_attributes,
+     * access_mask) are ignored; we return a fixed opaque policy handle. */
+    [opnum(6)] uint32 lsa_OpenPolicy(
+        [out] policy_handle *handle);
+
+    /* opnum 7 -- LsarQueryInformationPolicy.  Levels 3/5 share the
+     * lsa_DomainInfo arm; the info union is modelled as a unique pointer to
+     * that arm. */
+    [opnum(7)] uint32 lsa_QueryInfoPolicy(
+        [in]  policy_handle         *handle,
+        [in]  uint16                 level,
+        [out] lsa_PolicyInformation **info);
+
+    typedef struct {
+        rpc_unicode_string name;
+        dom_sid           *sid;
+    } lsa_TrustInformation;
+
+    /* lsa_DomainList: count + pointer to a conformant array of trust entries. */
+    typedef struct {
+        uint32                                count;
+        [size_is(count)] lsa_TrustInformation *domains;
+    } lsa_DomainList;
+
+    /* opnum 13 -- LsarEnumerateTrustedDomains.  A standalone server has no
+     * trusts, so this returns an empty list with STATUS_NO_MORE_ENTRIES. */
+    [opnum(13)] uint32 lsa_EnumTrustDom(
+        [in]      policy_handle  *handle,
+        [in, out] uint32          resume_handle,
+        [out]     lsa_DomainList *domains,
+        [in]      uint32          max_size);
+
+    /* ---- LookupSids (MS-LSAT) structures ---- */
+
+    /* A referenced domain: its name and SID, indexed by translated entries. */
+    typedef struct {
+        rpc_unicode_string name;
+        dom_sid           *sid;
+    } lsa_DomainInfo;
+
+    typedef struct {
+        uint32                            count;
+        [size_is(count)] lsa_DomainInfo  *domains;
+        uint32                            max_size;
+    } lsa_RefDomainList;
+
+    typedef struct {
+        uint32             sid_type;   /* lsa_SidType (1=User, 2=Group, 8=Unknown) */
+        rpc_unicode_string name;
+        uint32             sid_index;  /* index into the referenced-domain list */
+    } lsa_TranslatedName;
+
+    typedef struct {
+        uint32                               count;
+        [size_is(count)] lsa_TranslatedName *names;
+    } lsa_TransNameArray;
+
+    typedef struct {
+        dom_sid *sid;
+    } lsa_SidPtr;
+
+    typedef struct {
+        uint32                       num_sids;
+        [size_is(num_sids)] lsa_SidPtr *sids;
+    } lsa_SidArray;
+
+    /* ---- LookupNames (MS-LSAT) structures ---- */
+
+    typedef struct {
+        uint32 sid_type;   /* lsa_SidType */
+        uint32 rid;        /* relative id within the referenced domain */
+        uint32 sid_index;  /* index into the referenced-domain list */
+    } lsa_TranslatedSid;
+
+    typedef struct {
+        uint32                              count;
+        [size_is(count)] lsa_TranslatedSid *sids;
+    } lsa_TransSidArray;
+
+    /* opnum 14 -- LsarLookupNames: translate names to SIDs. */
+    [opnum(14)] uint32 lsa_LookupNames(
+        [in]      policy_handle             *handle,
+        [in]      uint32                      num_names,
+        [in, size_is(num_names)] rpc_unicode_string *names,
+        [out]     lsa_RefDomainList         **domains,
+        [in, out] lsa_TransSidArray          *sids,
+        [in]      uint16                      level,
+        [in, out] uint32                      count);
+
+    /* A pointer to an lsa_String, used for GetUserName's authority_name whose
+     * inner [unique] pointer carries its own referent id. */
+    typedef struct {
+        rpc_unicode_string *string;
+    } lsa_StringWrap;
+
+    /* opnum 45 -- LsarGetUserName.  Returns the authenticated account name and
+     * its authority; SystemName [in] is ignored. */
+    [opnum(45)] uint32 lsa_GetUserName(
+        [out] rpc_unicode_string **account_name,
+        [out] lsa_StringWrap      **authority_name);
+
+    /* opnum 15 -- LsarLookupSids: translate SIDs to names. */
+    [opnum(15)] uint32 lsa_LookupSids(
+        [in]      policy_handle      *handle,
+        [in]      lsa_SidArray       *sids,
+        [out]     lsa_RefDomainList **domains,
+        [in, out] lsa_TransNameArray *names,
+        [in]      uint16              level,
+        [in, out] uint32              count);
+
+    /* opnum 46 -- LsarQueryInformationPolicy2.  Identical signature and arms to
+     * QueryInfoPolicy (opnum 7); Windows clients call this variant first and
+     * fall back to opnum 7 only on a fault. */
+    [opnum(46)] uint32 lsa_QueryInfoPolicy2(
+        [in]  policy_handle         *handle,
+        [in]  uint16                 level,
+        [out] lsa_PolicyInformation **info);
+
+    /* opnum 44 -- LsarOpenPolicy2.  ObjectAttributes (an LSAPR_OBJECT_ATTRIBUTES
+     * the server ignores) is intentionally not modelled; the input is consumed
+     * best-effort and does not affect the response. */
+    [opnum(44)] uint32 lsa_OpenPolicy2(
+        [in, unique, string] wchar_t       *system_name,
+        [in]                 uint32         access_mask,
+        [out]                policy_handle *handle);
+}
