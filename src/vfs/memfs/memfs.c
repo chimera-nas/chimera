@@ -138,10 +138,14 @@ struct memfs_named_stream {
 /* Per-open descriptor for a named-stream handle.  A stream open stores
  * `(uintptr_t)desc | 1` in the open handle's vfs_private; the low tag bit
  * distinguishes it from a plain inode pointer (heap pointers are >= 8-aligned).
- * `stream == NULL` denotes the default/unnamed fork. */
+ * `stream == NULL` denotes the default/unnamed fork.  `open_next` threads every
+ * live descriptor on its base inode's `stream_opens` list so an orphaned open
+ * (one the protocol layer abandons without a close) is reclaimed when the inode
+ * is torn down rather than leaked. */
 struct memfs_stream_open {
     struct memfs_inode        *inode;
     struct memfs_named_stream *stream;
+    struct memfs_stream_open  *open_next;
 };
 
 /* Opaque per-file pNFS layout state (CHIMERA_VFS_ATTR_PNFS_LAYOUT).  memfs
@@ -179,6 +183,20 @@ struct memfs_inode {
      * reused so a stale stream file handle resolves to nothing). */
     struct memfs_named_stream *streams;
     uint32_t                   next_stream_id;
+
+    /* Streams that have been unlinked from `streams` (via remove_stream or a
+     * stream delete-on-close) while a handle still holds them open: an unlinked
+     * stream survives until its last close frees it.  They are tracked here so
+     * that if the base inode is torn down before that final close ever arrives
+     * (e.g. a protocol-layer open is abandoned without a matching close), their
+     * fork blocks / iovec references and the node itself are still reclaimed
+     * rather than leaked -- they are no longer reachable from `streams`. */
+    struct memfs_named_stream *dead_streams;
+
+    /* Live per-open stream descriptors (struct memfs_stream_open) threaded by
+     * open_next.  An entry is removed on its close; any still present when the
+     * inode is torn down belongs to an abandoned open and is freed there. */
+    struct memfs_stream_open  *stream_opens;
 
     pthread_mutex_t            lock;
 
@@ -622,6 +640,8 @@ memfs_inode_alloc(
     inode->xattrs         = NULL;
     inode->remote         = NULL;
     inode->streams        = NULL;
+    inode->dead_streams   = NULL;
+    inode->stream_opens   = NULL;
     inode->next_stream_id = 0;
 
     return inode;
@@ -739,11 +759,27 @@ memfs_stream_node_free(
     free(stream);
 } /* memfs_stream_node_free */
 
-/* Unlink and (where possible) free every named stream attached to an inode,
- * used when the base file is freed or superseded.  A stream with open handles
- * is unlinked but not freed; its last close releases it.  When called from
- * memfs_inode_free the inode's refcnt is already zero, so no stream can have an
- * open handle and every node is freed here. */
+/* Detach an unlinked stream from inode->dead_streams (where remove_stream parks
+ * a still-open, unlinked stream).  No-op if it is not parked there. */
+static inline void
+memfs_dead_stream_detach(
+    struct memfs_inode        *inode,
+    struct memfs_named_stream *stream)
+{
+    struct memfs_named_stream **pp;
+
+    for (pp = &inode->dead_streams; *pp; pp = &(*pp)->next) {
+        if (*pp == stream) {
+            *pp = stream->next;
+            return;
+        }
+    }
+} /* memfs_dead_stream_detach */
+
+/* Unlink every named stream from a still-live inode (SUPERSEDE/OVERWRITE drops
+* NTFS streams).  A stream with no open handle is freed; one still held open is
+* unlinked and parked on dead_streams so its last close frees it -- and so it is
+* still reclaimed if the inode is later torn down before that close arrives. */
 static void
 memfs_streams_free_all(
     struct memfs_thread *thread,
@@ -757,9 +793,50 @@ memfs_streams_free_all(
         stream->linked = 0;
         if (stream->refcnt == 0) {
             memfs_stream_node_free(thread, stream);
+        } else {
+            stream->next        = inode->dead_streams;
+            inode->dead_streams = stream;
         }
     }
 } /* memfs_streams_free_all */
+
+/* Unconditionally free every named stream of an inode that is being torn down
+ * (its last reference is gone, or the whole filesystem is being destroyed):
+ * both the live (linked) streams and any unlinked-but-still-referenced ones
+ * parked on dead_streams.  Once the base inode is gone an orphaned stream open
+ * (one abandoned by the protocol layer without a matching close) can never be
+ * cleanly closed, so its node, fork blocks and evpl_iovec references must be
+ * reclaimed here rather than leaked. */
+static void
+memfs_streams_destroy_all(
+    struct memfs_thread *thread,
+    struct memfs_inode  *inode)
+{
+    struct memfs_named_stream *stream;
+    struct memfs_stream_open  *so;
+
+    while (inode->streams) {
+        stream         = inode->streams;
+        inode->streams = stream->next;
+        stream->linked = 0;
+        memfs_stream_node_free(thread, stream);
+    }
+
+    while (inode->dead_streams) {
+        stream              = inode->dead_streams;
+        inode->dead_streams = stream->next;
+        memfs_stream_node_free(thread, stream);
+    }
+
+    /* Per-open descriptors of any abandoned (never-closed) stream opens: the
+     * stream nodes they referenced are freed above, so the close that would
+     * normally free these will never come -- reclaim them here. */
+    while (inode->stream_opens) {
+        so                  = inode->stream_opens;
+        inode->stream_opens = so->open_next;
+        free(so);
+    }
+} /* memfs_streams_destroy_all */
 
 static void
 memfs_inode_free(
@@ -793,9 +870,12 @@ memfs_inode_free(
     /* Extended attributes hang off every inode type. */
     memfs_xattr_free_all(inode);
 
-    /* Named streams cascade with the base file. */
-    if (inode->streams) {
-        memfs_streams_free_all(thread, inode);
+    /* Named streams cascade with the base file -- including any unlinked-but-
+     * still-open ones parked on dead_streams, and the per-open descriptors of
+     * any stream opens that were abandoned without a close; none can ever be
+     * cleanly closed once their base inode is gone. */
+    if (inode->streams || inode->dead_streams || inode->stream_opens) {
+        memfs_streams_destroy_all(thread, inode);
     }
 
     if (inode->remote) {
@@ -1041,29 +1121,46 @@ memfs_destroy(void *private_data)
 
                     /* Named-stream forks are freed the same way as the main
                      * fork (direct release, not via the per-thread freelist,
-                     * which is gone by destroy time). */
-                    while (inode->streams) {
-                        struct memfs_named_stream *stream = inode->streams;
-                        unsigned int               sbi;
+                     * which is gone by destroy time).  Both the live streams and
+                     * any unlinked-but-still-open ones parked on dead_streams are
+                     * reclaimed -- the latter belong to protocol-layer opens that
+                     * were never closed and would otherwise leak their node, fork
+                     * blocks and iovec references. */
+                    for (int slist = 0; slist < 2; slist++) {
+                        struct memfs_named_stream **head =
+                            slist == 0 ? &inode->streams : &inode->dead_streams;
 
-                        inode->streams = stream->next;
+                        while (*head) {
+                            struct memfs_named_stream *stream = *head;
+                            unsigned int               sbi;
 
-                        for (sbi = 0; sbi < stream->fork.num_blocks; sbi++) {
-                            if (stream->fork.blocks[sbi]) {
-                                for (iovi = 0;
-                                     iovi < stream->fork.blocks[sbi]->niov;
-                                     iovi++) {
-                                    evpl_iovec_release(NULL,
-                                                       &stream->fork.blocks[sbi]->iov[iovi]);
+                            *head = stream->next;
+
+                            for (sbi = 0; sbi < stream->fork.num_blocks; sbi++) {
+                                if (stream->fork.blocks[sbi]) {
+                                    for (iovi = 0;
+                                         iovi < stream->fork.blocks[sbi]->niov;
+                                         iovi++) {
+                                        evpl_iovec_release(NULL,
+                                                           &stream->fork.blocks[sbi]->iov[iovi]);
+                                    }
+                                    free(stream->fork.blocks[sbi]);
                                 }
-                                free(stream->fork.blocks[sbi]);
                             }
+                            if (stream->fork.blocks) {
+                                free(stream->fork.blocks);
+                            }
+                            free(stream->name);
+                            free(stream);
                         }
-                        if (stream->fork.blocks) {
-                            free(stream->fork.blocks);
-                        }
-                        free(stream->name);
-                        free(stream);
+                    }
+
+                    /* Per-open descriptors of abandoned (never-closed) stream
+                     * opens whose stream nodes were just freed above. */
+                    while (inode->stream_opens) {
+                        struct memfs_stream_open *so = inode->stream_opens;
+                        inode->stream_opens = so->open_next;
+                        free(so);
                     }
 
                     /* Stubs are always regular files; free the remote
@@ -2796,6 +2893,20 @@ memfs_close(
 
     pthread_mutex_lock(&inode->lock);
 
+    /* Unhook this descriptor from the inode's live-open list before any cascade
+     * below (inode_free) walks it, so its memory is freed exactly once -- here,
+     * after the lock is dropped. */
+    if (stream_op) {
+        struct memfs_stream_open **opp;
+
+        for (opp = &inode->stream_opens; *opp; opp = &(*opp)->open_next) {
+            if (*opp == stream_op) {
+                *opp = stream_op->open_next;
+                break;
+            }
+        }
+    }
+
     /* Release the stream node first.  An unlinked stream (removed by
      * remove_stream while still open) is no longer in inode->streams, so the
      * inode_free cascade below would miss it -- free it here on its last
@@ -2804,6 +2915,7 @@ memfs_close(
         stream->refcnt--;
     }
     if (stream && stream->refcnt == 0 && !stream->linked) {
+        memfs_dead_stream_detach(inode, stream);
         memfs_stream_node_free(thread, stream);
     }
 
@@ -4974,9 +5086,11 @@ memfs_open_stream(
     stream->refcnt++;
     inode->refcnt++;
 
-    so         = malloc(sizeof(*so));
-    so->inode  = inode;
-    so->stream = stream;
+    so                  = malloc(sizeof(*so));
+    so->inode           = inode;
+    so->stream          = stream;
+    so->open_next       = inode->stream_opens;
+    inode->stream_opens = so;
 
     request->open_stream.r_vfs_private = (uint64_t) (uintptr_t) so | 1ULL;
 
@@ -5099,12 +5213,17 @@ memfs_remove_stream(
     }
 
     /* Unlink from the inode's stream list.  If no handle holds it open, free it
-     * now; otherwise it survives (unlinked) until its last close. */
+     * now; otherwise it survives (unlinked) until its last close -- park it on
+     * dead_streams so it is still reclaimed if the inode is torn down before
+     * that close arrives. */
     *pprev         = stream->next;
     stream->linked = 0;
 
     if (stream->refcnt == 0) {
         memfs_stream_node_free(thread, stream);
+    } else {
+        stream->next        = inode->dead_streams;
+        inode->dead_streams = stream;
     }
 
     inode->ctime = now;
