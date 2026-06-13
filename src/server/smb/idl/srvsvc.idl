@@ -28,4 +28,41 @@ interface srvsvc {
         [in] uint32                              max_buffer,
         [out] uint32                             total_entries,
         [in, out, unique] uint32                *resume_handle);
+
+    /* ---- NetShareGetInfo (MS-SRVS 3.1.4.10) ----
+     * The [out] InfoStruct is a non-encapsulated union switched on the [in]
+     * level; modelled as a struct whose leading uint32 is the union switch
+     * value followed by the (unique-pointer) arm.  Only level 1 is filled. */
+    typedef struct {
+        uint32                level;     /* union switch value (echoes the requested level) */
+        srvsvc_NetShareInfo1 *info1;
+    } srvsvc_NetShareGetInfoCtr;
+
+    [opnum(16)] uint32 srvsvc_NetShareGetInfo(
+        [in, unique, string] wchar_t            *server_unc,
+        [in, string]         wchar_t            *netname,
+        [in]  uint32                             level,
+        [out] srvsvc_NetShareGetInfoCtr         *info);
+
+    /* ---- NetServerGetInfo (MS-SRVS 3.1.4.17) ----
+     * SERVER_INFO_101 carried through the same union-as-struct shape; only
+     * level 101 is filled. */
+    typedef struct {
+        uint32            platform_id;
+        [string] wchar_t *name;
+        uint32            version_major;
+        uint32            version_minor;
+        uint32            type;
+        [string] wchar_t *comment;
+    } srvsvc_NetSrvInfo101;
+
+    typedef struct {
+        uint32                level;     /* union switch value (echoes the requested level) */
+        srvsvc_NetSrvInfo101 *info101;
+    } srvsvc_NetSrvInfoCtr;
+
+    [opnum(21)] uint32 srvsvc_NetSrvGetInfo(
+        [in, unique, string] wchar_t            *server_unc,
+        [in]  uint32                             level,
+        [out] srvsvc_NetSrvInfoCtr              *info);
 }

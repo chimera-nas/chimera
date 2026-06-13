@@ -94,4 +94,22 @@ else
     echo "FAIL: unexpected NetShareEnumAll response"; rc=1
 fi
 
+echo "=== rpcclient netsharegetinfo share 1 (SRVSVC NetShareGetInfo, opnum 16) ==="
+OUT="$(timeout 20 $RPCCLIENT -U 'myuser%mypassword' 127.0.0.1 -c 'netsharegetinfo share 1' 2>&1)"
+echo "$OUT"
+if echo "$OUT" | grep -qi "netname: *share"; then
+    echo "PASS: SRVSVC NetShareGetInfo returned the share's level-1 info"
+else
+    echo "FAIL: unexpected NetShareGetInfo response"; rc=1
+fi
+
+echo "=== rpcclient srvinfo (SRVSVC NetSrvGetInfo level 101, opnum 21) ==="
+OUT="$(timeout 20 $RPCCLIENT -U 'myuser%mypassword' 127.0.0.1 -c 'srvinfo' 2>&1)"
+echo "$OUT"
+if echo "$OUT" | grep -qi "platform_id" && echo "$OUT" | grep -qi "chimera"; then
+    echo "PASS: SRVSVC NetSrvGetInfo returned the server's level-101 info"
+else
+    echo "FAIL: unexpected NetSrvGetInfo response"; rc=1
+fi
+
 exit $rc
