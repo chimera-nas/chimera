@@ -123,7 +123,19 @@ chimera_vfs_get_module(
     struct chimera_vfs_mount  *mount;
     struct chimera_vfs_module *module;
 
-    if (fhlen < CHIMERA_VFS_MOUNT_ID_SIZE) {
+    /*
+     * Reject implausible handle lengths before they reach any sink.  The lower
+     * bound guarantees a mount-id prefix to route on; the upper bound is the
+     * security-critical half: a valid chimera handle never exceeds
+     * CHIMERA_VFS_FH_SIZE, but the NFS3/NFS4 XDR decoders do not enforce the
+     * wire `opaque<>` bound (see nfs3_attr.h), so an oversized handle would
+     * otherwise be memcpy'd into the fixed CHIMERA_VFS_FH_SIZE handle buffers
+     * (e.g. vfs_proc_open_fh.c, vfs_open_cache.h, vfs_state.c) and overflow
+     * them.  This gate is the common chokepoint every fh-routed op funnels
+     * through, so bounding here protects all of them; callers already treat a
+     * NULL module as ESTALE/BADHANDLE.
+     */
+    if (fhlen < CHIMERA_VFS_MOUNT_ID_SIZE || fhlen > CHIMERA_VFS_FH_SIZE) {
         return NULL;
     }
 
