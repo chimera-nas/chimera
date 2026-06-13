@@ -218,6 +218,99 @@ chimera_smb_client_close(
 
 /* ---- getattr (handle-based QUERY_INFO) --------------------------------- */
 
+#define CHIMERA_SMB_STATFS_ATTRS \
+        (CHIMERA_VFS_ATTR_SPACE_TOTAL | CHIMERA_VFS_ATTR_SPACE_FREE | \
+         CHIMERA_VFS_ATTR_SPACE_AVAIL)
+
+/* statfs is funnelled through getattr (the client opens a handle and requests
+ * the SPACE_* attrs); answer it with QUERY_INFO FILESYSTEM /
+ * FileFsFullSizeInformation instead of the per-file network-open info. */
+static void
+chimera_smb_statfs_reply(
+    struct chimera_smb_client_conn *conn,
+    uint32_t                        status,
+    const struct smb2_header       *hdr,
+    struct evpl_iovec_cursor       *body,
+    int                             body_len,
+    void                           *arg)
+{
+    struct chimera_vfs_request *request = arg;
+    uint16_t                    structsize, out_offset;
+    uint32_t                    out_length, sectors_per_unit, bytes_per_sector;
+    uint64_t                    total_units, caller_avail_units, actual_avail_units;
+    uint64_t                    bytes_per_unit;
+    int                         consumed;
+
+    (void) hdr;
+    (void) body_len;
+
+    if (status != SMB2_STATUS_SUCCESS) {
+        request->status = chimera_smb_status_to_errno(status);
+        request->complete(request);
+        return;
+    }
+
+    evpl_iovec_cursor_get_uint16(body, &structsize);
+    evpl_iovec_cursor_get_uint16(body, &out_offset);
+    evpl_iovec_cursor_get_uint32(body, &out_length);
+
+    consumed = evpl_iovec_cursor_consumed(body);
+    if (out_offset > consumed) {
+        evpl_iovec_cursor_skip(body, out_offset - consumed);
+    }
+
+    /* FileFsFullSizeInformation (MS-FSCC 2.5.4): TotalAllocationUnits(8),
+     * CallerAvailableAllocationUnits(8), ActualAvailableAllocationUnits(8),
+     * SectorsPerAllocationUnit(4), BytesPerSector(4). */
+    evpl_iovec_cursor_get_uint64(body, &total_units);
+    evpl_iovec_cursor_get_uint64(body, &caller_avail_units);
+    evpl_iovec_cursor_get_uint64(body, &actual_avail_units);
+    evpl_iovec_cursor_get_uint32(body, &sectors_per_unit);
+    evpl_iovec_cursor_get_uint32(body, &bytes_per_sector);
+
+    (void) structsize;
+    (void) out_length;
+
+    bytes_per_unit = (uint64_t) sectors_per_unit * bytes_per_sector;
+
+    request->getattr.r_attr.va_fs_space_total = total_units * bytes_per_unit;
+    request->getattr.r_attr.va_fs_space_avail = caller_avail_units * bytes_per_unit;
+    request->getattr.r_attr.va_fs_space_free  = actual_avail_units * bytes_per_unit;
+    request->getattr.r_attr.va_set_mask      |= CHIMERA_SMB_STATFS_ATTRS;
+
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* chimera_smb_statfs_reply */
+
+static void
+chimera_smb_client_statfs(
+    struct chimera_smb_client_conn *conn,
+    struct chimera_vfs_request     *request,
+    struct chimera_smb_client_open *open_state)
+{
+    struct evpl_iovec        iov;
+    struct evpl_iovec_cursor cursor;
+    struct smb2_header      *hdr;
+
+    /* QUERY_INFO, FILESYSTEM / FileFsFullSizeInformation, on the open FileId. */
+    chimera_smb_client_pdu_begin(conn, SMB2_QUERY_INFO, &iov, &cursor, &hdr);
+
+    evpl_iovec_cursor_append_uint16(&cursor, SMB2_QUERY_INFO_REQUEST_SIZE);
+    evpl_iovec_cursor_append_uint8(&cursor, SMB2_INFO_FILESYSTEM);
+    evpl_iovec_cursor_append_uint8(&cursor, SMB2_FILE_FS_FULL_SIZE_INFO);
+    evpl_iovec_cursor_append_uint32(&cursor, 32);            /* OutputBufferLength */
+    evpl_iovec_cursor_append_uint16(&cursor, 0);             /* InputBufferOffset */
+    evpl_iovec_cursor_append_uint16(&cursor, 0);             /* Reserved */
+    evpl_iovec_cursor_append_uint32(&cursor, 0);             /* InputBufferLength */
+    evpl_iovec_cursor_append_uint32(&cursor, 0);             /* AdditionalInformation */
+    evpl_iovec_cursor_append_uint32(&cursor, 0);             /* Flags */
+    evpl_iovec_cursor_append_uint64(&cursor, open_state->file_id.pid);
+    evpl_iovec_cursor_append_uint64(&cursor, open_state->file_id.vid);
+
+    chimera_smb_client_pdu_finish(conn, &iov, &cursor, request,
+                                  chimera_smb_statfs_reply, request);
+} /* chimera_smb_client_statfs */
+
 static void
 chimera_smb_getattr_reply(
     struct chimera_smb_client_conn *conn,
@@ -275,6 +368,12 @@ chimera_smb_client_getattr(
     if (!open_state) {
         request->status = CHIMERA_VFS_EINVAL;
         request->complete(request);
+        return;
+    }
+
+    /* A statfs request (SPACE_* attrs) goes to the filesystem-info query. */
+    if (request->getattr.r_attr.va_req_mask & CHIMERA_SMB_STATFS_ATTRS) {
+        chimera_smb_client_statfs(conn, request, open_state);
         return;
     }
 
@@ -645,6 +744,11 @@ chimera_smb_client_remove_at(
 
 /* ---- setattr (SET_INFO on the open handle) ----------------------------- */
 
+#define CHIMERA_SMB_SETATTR_TIMES \
+        (CHIMERA_VFS_ATTR_ATIME | CHIMERA_VFS_ATTR_MTIME | \
+         CHIMERA_VFS_ATTR_CTIME | CHIMERA_VFS_ATTR_BTIME)
+
+/* Final SET_INFO reply (size-only, times-only, or the times leg of size+times). */
 static void
 chimera_smb_setattr_reply(
     struct chimera_smb_client_conn *conn,
@@ -665,6 +769,83 @@ chimera_smb_setattr_reply(
     request->complete(request);
 } /* chimera_smb_setattr_reply */
 
+/* SET_INFO FileBasicInformation: set the requested timestamps (a zero FILETIME
+ * means "leave unchanged"; FileAttributes 0 likewise). */
+static void
+chimera_smb_setattr_send_basic(
+    struct chimera_smb_client_conn *conn,
+    struct chimera_vfs_request     *request)
+{
+    struct chimera_smb_client_open *open_state = smb_handle_open_state(request->setattr.handle);
+    struct chimera_vfs_attrs       *set_attr   = request->setattr.set_attr;
+    struct evpl_iovec               iov;
+    struct evpl_iovec_cursor        cursor;
+    struct smb2_header             *hdr;
+    uint64_t                        crttime, atime, mtime, ctime;
+
+    crttime = (set_attr->va_set_mask & CHIMERA_VFS_ATTR_BTIME) ?
+        smb_timespec_to_filetime(&set_attr->va_btime) : 0;
+    atime = (set_attr->va_set_mask & CHIMERA_VFS_ATTR_ATIME) ?
+        smb_timespec_to_filetime(&set_attr->va_atime) : 0;
+    mtime = (set_attr->va_set_mask & CHIMERA_VFS_ATTR_MTIME) ?
+        smb_timespec_to_filetime(&set_attr->va_mtime) : 0;
+    ctime = (set_attr->va_set_mask & CHIMERA_VFS_ATTR_CTIME) ?
+        smb_timespec_to_filetime(&set_attr->va_ctime) : 0;
+
+    chimera_smb_client_pdu_begin(conn, SMB2_SET_INFO, &iov, &cursor, &hdr);
+
+    evpl_iovec_cursor_append_uint16(&cursor, SMB2_SET_INFO_REQUEST_SIZE);
+    evpl_iovec_cursor_append_uint8(&cursor, SMB2_INFO_FILE);
+    evpl_iovec_cursor_append_uint8(&cursor, SMB2_FILE_BASIC_INFO);
+    evpl_iovec_cursor_append_uint32(&cursor, 40);                            /* BufferLength */
+    evpl_iovec_cursor_append_uint16(&cursor, sizeof(struct smb2_header) + 32); /* BufferOffset */
+    evpl_iovec_cursor_append_uint16(&cursor, 0);                             /* Reserved */
+    evpl_iovec_cursor_append_uint32(&cursor, 0);                             /* AdditionalInformation */
+    evpl_iovec_cursor_append_uint64(&cursor, open_state->file_id.pid);
+    evpl_iovec_cursor_append_uint64(&cursor, open_state->file_id.vid);
+    /* FILE_BASIC_INFORMATION: Creation/LastAccess/LastWrite/ChangeTime + attrs. */
+    evpl_iovec_cursor_append_uint64(&cursor, crttime);
+    evpl_iovec_cursor_append_uint64(&cursor, atime);
+    evpl_iovec_cursor_append_uint64(&cursor, mtime);
+    evpl_iovec_cursor_append_uint64(&cursor, ctime);
+    evpl_iovec_cursor_append_uint32(&cursor, 0);                             /* FileAttributes (no change) */
+    evpl_iovec_cursor_append_uint32(&cursor, 0);                             /* Reserved */
+
+    chimera_smb_client_pdu_finish(conn, &iov, &cursor, request,
+                                  chimera_smb_setattr_reply, request);
+} /* chimera_smb_setattr_send_basic */
+
+/* After the size leg: chain the times leg if any timestamps were also set. */
+static void
+chimera_smb_setattr_size_reply(
+    struct chimera_smb_client_conn *conn,
+    uint32_t                        status,
+    const struct smb2_header       *hdr,
+    struct evpl_iovec_cursor       *body,
+    int                             body_len,
+    void                           *arg)
+{
+    struct chimera_vfs_request *request = arg;
+
+    (void) hdr;
+    (void) body;
+    (void) body_len;
+
+    if (status != SMB2_STATUS_SUCCESS) {
+        request->status = chimera_smb_status_to_errno(status);
+        request->complete(request);
+        return;
+    }
+
+    if (request->setattr.set_attr->va_set_mask & CHIMERA_SMB_SETATTR_TIMES) {
+        chimera_smb_setattr_send_basic(conn, request);
+        return;
+    }
+
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* chimera_smb_setattr_size_reply */
+
 void
 chimera_smb_client_setattr(
     struct chimera_smb_client_conn *conn,
@@ -682,29 +863,37 @@ chimera_smb_client_setattr(
         return;
     }
 
-    if (!(set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE)) {
-        /* Only size changes (ftruncate) are wired up; others succeed as no-ops. */
-        request->status = CHIMERA_VFS_OK;
-        request->complete(request);
+    /* SMB can set size (FileEndOfFileInformation) and timestamps (FileBasic-
+     * Information).  POSIX mode/owner have no SMB2 equivalent against this
+     * server, so those bits are accepted but not applied. */
+    if (set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) {
+        /* Set size first, then chain the times leg from its reply. */
+        chimera_smb_client_pdu_begin(conn, SMB2_SET_INFO, &iov, &cursor, &hdr);
+
+        evpl_iovec_cursor_append_uint16(&cursor, SMB2_SET_INFO_REQUEST_SIZE);
+        evpl_iovec_cursor_append_uint8(&cursor, SMB2_INFO_FILE);
+        evpl_iovec_cursor_append_uint8(&cursor, SMB2_FILE_ENDOFFILE_INFO);
+        evpl_iovec_cursor_append_uint32(&cursor, 8);                             /* BufferLength */
+        evpl_iovec_cursor_append_uint16(&cursor, sizeof(struct smb2_header) + 32); /* BufferOffset */
+        evpl_iovec_cursor_append_uint16(&cursor, 0);                             /* Reserved */
+        evpl_iovec_cursor_append_uint32(&cursor, 0);                             /* AdditionalInformation */
+        evpl_iovec_cursor_append_uint64(&cursor, open_state->file_id.pid);
+        evpl_iovec_cursor_append_uint64(&cursor, open_state->file_id.vid);
+        evpl_iovec_cursor_append_uint64(&cursor, set_attr->va_size);
+
+        chimera_smb_client_pdu_finish(conn, &iov, &cursor, request,
+                                      chimera_smb_setattr_size_reply, request);
         return;
     }
 
-    /* SET_INFO, FileEndOfFileInformation (8-byte EOF). */
-    chimera_smb_client_pdu_begin(conn, SMB2_SET_INFO, &iov, &cursor, &hdr);
+    if (set_attr->va_set_mask & CHIMERA_SMB_SETATTR_TIMES) {
+        chimera_smb_setattr_send_basic(conn, request);
+        return;
+    }
 
-    evpl_iovec_cursor_append_uint16(&cursor, SMB2_SET_INFO_REQUEST_SIZE);
-    evpl_iovec_cursor_append_uint8(&cursor, SMB2_INFO_FILE);
-    evpl_iovec_cursor_append_uint8(&cursor, SMB2_FILE_ENDOFFILE_INFO);
-    evpl_iovec_cursor_append_uint32(&cursor, 8);                             /* BufferLength */
-    evpl_iovec_cursor_append_uint16(&cursor, sizeof(struct smb2_header) + 32); /* BufferOffset */
-    evpl_iovec_cursor_append_uint16(&cursor, 0);                             /* Reserved */
-    evpl_iovec_cursor_append_uint32(&cursor, 0);                             /* AdditionalInformation */
-    evpl_iovec_cursor_append_uint64(&cursor, open_state->file_id.pid);
-    evpl_iovec_cursor_append_uint64(&cursor, open_state->file_id.vid);
-    evpl_iovec_cursor_append_uint64(&cursor, set_attr->va_size);
-
-    chimera_smb_client_pdu_finish(conn, &iov, &cursor, request,
-                                  chimera_smb_setattr_reply, request);
+    /* Nothing SMB can apply (e.g. mode/owner only) -- accept as a no-op. */
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
 } /* chimera_smb_client_setattr */
 
 /* ---- commit (FLUSH) ---------------------------------------------------- */

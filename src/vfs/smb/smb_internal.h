@@ -321,6 +321,19 @@ chimera_smb_status_to_errno(uint32_t status)
 
 /* ---- attribute mapping ------------------------------------------------- */
 
+/* POSIX timespec -> Windows FILETIME (100ns ticks since 1601-01-01).  A zero
+ * timespec maps to 0, which SET_INFO FileBasicInformation reads as "don't
+ * change", matching the convention the client uses for unset time fields. */
+static inline uint64_t
+smb_timespec_to_filetime(const struct timespec *ts)
+{
+    if (ts->tv_sec == 0 && ts->tv_nsec == 0) {
+        return 0;
+    }
+    return (uint64_t) ts->tv_sec * 10000000ULL +
+           (uint64_t) ts->tv_nsec / 100 + 116444736000000000ULL;
+} /* smb_timespec_to_filetime */
+
 /* Windows FILETIME (100ns ticks since 1601-01-01) -> POSIX timespec. */
 static inline void
 smb_filetime_to_timespec(
