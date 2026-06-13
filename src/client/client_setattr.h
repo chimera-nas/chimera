@@ -9,6 +9,7 @@
 static void chimera_setattr_open_complete(
     enum chimera_vfs_error          error_code,
     struct chimera_vfs_open_handle *oh,
+    struct chimera_vfs_attrs       *attr,
     void                           *private_data);
 
 static void
@@ -39,9 +40,12 @@ static void
 chimera_setattr_open_complete(
     enum chimera_vfs_error          error_code,
     struct chimera_vfs_open_handle *oh,
+    struct chimera_vfs_attrs       *attr,
     void                           *private_data)
 {
     struct chimera_client_request *request = private_data;
+
+    (void) attr;
 
     if (error_code != CHIMERA_VFS_OK) {
         struct chimera_client_thread *thread       = request->thread;
@@ -66,27 +70,18 @@ chimera_setattr_open_complete(
         request);
 } /* chimera_setattr_open_complete */
 
-static void
-chimera_setattr_lookup_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
+/*
+ * setattr resolves the path through chimera_vfs_open, which internally picks
+ * the path-op (path-only backends, e.g. SMB) or FH-relative (memfs/nfs)
+ * strategy.  This avoids relying on a re-openable child fh from lookup, which
+ * path-only mounts do not return.
+ */
+static inline void
+chimera_dispatch_setattr(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request)
 {
-    struct chimera_client_request *request = private_data;
-    unsigned int                   open_flags;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        struct chimera_client_thread *thread       = request->thread;
-        chimera_setattr_callback_t    callback     = request->setattr.callback;
-        void                         *callback_arg = request->setattr.private_data;
-
-        chimera_client_request_free(thread, request);
-        callback(thread, error_code, callback_arg);
-        return;
-    }
-
-    memcpy(request->fh, attr->va_fh, attr->va_fh_len);
-    request->fh_len = attr->va_fh_len;
+    unsigned int open_flags;
 
     /*
      * Use a real file handle instead of OPEN_PATH when setting size, because
@@ -98,31 +93,17 @@ chimera_setattr_lookup_complete(
         open_flags = CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED;
     }
 
-    chimera_vfs_open_fh(
-        request->thread->vfs_thread,
-        &request->thread->client->cred,
-        request->fh,
-        request->fh_len,
-        open_flags,
-        chimera_setattr_open_complete,
-        request);
-} /* chimera_setattr_lookup_complete */
-
-static inline void
-chimera_dispatch_setattr(
-    struct chimera_client_thread  *thread,
-    struct chimera_client_request *request)
-{
-    chimera_vfs_lookup(
+    chimera_vfs_open(
         thread->vfs_thread,
         &thread->client->cred,
         thread->client->root_fh,
         thread->client->root_fh_len,
         request->setattr.path,
         request->setattr.path_len,
-        CHIMERA_VFS_ATTR_FH,
-        CHIMERA_VFS_LOOKUP_FOLLOW,
-        chimera_setattr_lookup_complete,
+        open_flags,
+        NULL, /* set_attr */
+        0,    /* attr_mask */
+        chimera_setattr_open_complete,
         request);
 } /* chimera_dispatch_setattr */
 

@@ -23,8 +23,8 @@
  */
 
 /* Shared op helpers (smb_send_create/close, parse, attrs, op-state struct, the
- * network-open-info / create-result structs, and smb_handle_open_state) are
- * declared in smb_internal.h so smb_io.c and smb_namespace.c can reuse them. */
+* network-open-info / create-result structs, and smb_handle_open_state) are
+* declared in smb_internal.h so smb_io.c and smb_namespace.c can reuse them. */
 
 /* ---- small helpers ----------------------------------------------------- */
 
@@ -420,12 +420,21 @@ chimera_smb_client_open_at(
 {
     uint32_t disposition;
     uint32_t desired_access;
+    uint32_t options = SMB2_FILE_NON_DIRECTORY_FILE;
 
     if (request->open_at.flags & CHIMERA_VFS_OPEN_CREATE) {
         disposition = (request->open_at.flags & CHIMERA_VFS_OPEN_EXCLUSIVE)
                       ? SMB2_FILE_CREATE : SMB2_FILE_OPEN_IF;
     } else {
         disposition = SMB2_FILE_OPEN;
+    }
+
+    /*
+     * NOFOLLOW: open the symlink (reparse point) itself rather than following
+     * it to its target, so callers like readlink see the link node.
+     */
+    if (request->open_at.flags & CHIMERA_VFS_OPEN_NOFOLLOW) {
+        options |= SMB2_FILE_OPEN_REPARSE_POINT;
     }
 
     desired_access = SMB2_FILE_READ_DATA | SMB2_FILE_WRITE_DATA |
@@ -435,7 +444,7 @@ chimera_smb_client_open_at(
                     request->open_at.name, request->open_at.namelen,
                     desired_access,
                     SMB2_FILE_SHARE_READ | SMB2_FILE_SHARE_WRITE | SMB2_FILE_SHARE_DELETE,
-                    disposition, SMB2_FILE_NON_DIRECTORY_FILE,
+                    disposition, options,
                     chimera_smb_open_at_reply);
 } /* chimera_smb_client_open_at */
 

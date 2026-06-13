@@ -28,11 +28,20 @@
 #define chimera_smbclient_abort_if(cond, ...) \
         chimera_abort_if(cond, "smbclient", __FILE__, __LINE__, __VA_ARGS__)
 
-/* SMB2 default port and dialect for this client. */
-#define CHIMERA_SMB_CLIENT_PORT           445
-#define CHIMERA_SMB_CLIENT_DIALECT        SMB2_DIALECT_2_1
-#define CHIMERA_SMB_CLIENT_DEFAULT_DOMAIN "WORKGROUP"
-#define CHIMERA_SMB_CLIENT_MAX_SERVERS    64
+/* SMB2 default port for this client. */
+#define CHIMERA_SMB_CLIENT_PORT             445
+#define CHIMERA_SMB_CLIENT_DEFAULT_DOMAIN   "WORKGROUP"
+#define CHIMERA_SMB_CLIENT_MAX_SERVERS      64
+
+/* Dialects advertised in NEGOTIATE, ascending.  The chimera server selects the
+ * highest dialect the client offers, so this list determines what we end up
+ * speaking (2.1 unsigned through 3.1.1 with preauth-integrity + signing). */
+#define CHIMERA_SMB_CLIENT_DIALECTS \
+        { SMB2_DIALECT_2_1, SMB2_DIALECT_3_0, SMB2_DIALECT_3_0_2, SMB2_DIALECT_3_1_1 }
+#define CHIMERA_SMB_CLIENT_NUM_DIALECTS     4
+
+/* Client GUID is fixed-zero (single-instance); 3.1.1 preauth salt length. */
+#define CHIMERA_SMB_CLIENT_PREAUTH_SALT_LEN 32
 
 /* The SMB client is a PATH-ONLY VFS backend (no persistent file handles).  File
  * handles come in exactly two shapes:
@@ -45,11 +54,11 @@
  * from the SMB FileId; it is used only for open-cache keying and routing, never
  * to re-derive a path, and open_fh of one returns ESTALE.  All metadata is
  * addressed by full mount-relative paths carried in request->X.name. */
-#define CHIMERA_SMB_FH_SERVER_OFFSET      CHIMERA_VFS_MOUNT_ID_SIZE
-#define CHIMERA_SMB_ROOT_FH_LEN           (CHIMERA_VFS_MOUNT_ID_SIZE + 1)
-#define CHIMERA_SMB_OPEN_FH_LEN           (CHIMERA_VFS_MOUNT_ID_SIZE + 1 + 16)
+#define CHIMERA_SMB_FH_SERVER_OFFSET        CHIMERA_VFS_MOUNT_ID_SIZE
+#define CHIMERA_SMB_ROOT_FH_LEN             (CHIMERA_VFS_MOUNT_ID_SIZE + 1)
+#define CHIMERA_SMB_OPEN_FH_LEN             (CHIMERA_VFS_MOUNT_ID_SIZE + 1 + 16)
 /* Longest mount-relative path the client will encode in a single SMB request. */
-#define CHIMERA_SMB_PATH_MAX              1024
+#define CHIMERA_SMB_PATH_MAX                1024
 
 /* ---- little-endian wire helpers ---------------------------------------- */
 
@@ -140,6 +149,17 @@ struct chimera_smb_client_server {
     uint64_t              session_id;
     uint32_t              tree_id;
     int                   session_ready;
+
+    /* Signing state, derived once at SESSION_SETUP on the mount connection and
+    * shared by every per-thread connection to this server (the signing key is
+    * per-SESSION).  signing_active is set only when the negotiated dialect is
+    * 3.x AND a signing key has been derived; the unsigned 2.x path leaves it 0.
+    *
+    *   signing_alg: for 3.1.1, the SMB2_SIGNING_* algorithm the server selected
+    *   (GMAC/CMAC/HMAC-SHA256); unused for 3.0/3.0.2 (always AES-128-CMAC). */
+    int                   signing_active;
+    uint16_t              signing_alg;
+    uint8_t               signing_key[16];
 };
 
 struct chimera_smb_client_shared {
@@ -172,7 +192,7 @@ struct smb_create_result {
 };
 
 /* Transient per-op state kept in request->plugin_data across a CREATE -> ... ->
- * CLOSE chain (ops that open a path transiently: lookup/mkdir/remove/rename). */
+* CLOSE chain (ops that open a path transiently: lookup/mkdir/remove/rename). */
 struct chimera_smb_op_state {
     struct chimera_smb_client_file_id file_id;
 };
@@ -223,7 +243,7 @@ struct chimera_smb_client_conn {
     struct evpl_bind                   *bind;
     struct chimera_smb_client_server   *server;
 
-    enum chimera_smb_client_conn_state state;
+    enum chimera_smb_client_conn_state  state;
     int                                 closing;   /* evpl_close already issued  */
 
     uint64_t                            next_message_id;
@@ -240,6 +260,15 @@ struct chimera_smb_client_conn {
      * the shared session (the MOUNT connection). */
     struct smb_ntlm_client              ntlm;
     struct chimera_vfs_request         *mount_request;
+
+    /* 3.1.1 preauth-integrity hash, maintained ONLY on the mount connection
+     * while it runs NEGOTIATE -> SESSION_SETUP.  Folded over the raw SMB2
+     * messages (header+body, no NetBIOS framing, no trailing pad), mirroring the
+     * server's conn->preauth_hash.  Carries the dialect/signing_alg the mount
+     * conn negotiated until they are committed to the shared server struct. */
+    uint8_t                             preauth_hash[SMB2_PREAUTH_HASH_SIZE];
+    uint16_t                            negotiated_dialect;
+    uint16_t                            negotiated_signing_alg;
 };
 
 struct chimera_smb_client_thread {
@@ -385,6 +414,26 @@ void chimera_smb_client_pdu_finish(
 struct evpl_bind * chimera_smb_client_connect(
     struct chimera_smb_client_conn *conn,
     struct evpl_endpoint           *endpoint);
+
+/* ---- SMB3 signing / preauth (smb.c) ------------------------------------ */
+
+/* Extend an SMB 3.1.1 preauth-integrity hash in place: hash = SHA512(hash||msg).
+ * `msg` is a raw SMB2 message (header+body), `msg_len` its byte length. */
+void chimera_smb_client_preauth_extend(
+    uint8_t    *hash,
+    const void *msg,
+    uint32_t    msg_len);
+
+/* Derive the per-session 16-byte signing key from the NTLM session key via the
+ * SMB3 SP800-108 KDF.  `dialect` selects the label/context (and, for 3.1.1, the
+ * preauth_hash binding); returns 0 on success.  Mirrors the server's
+ * chimera_smb_derive_signing_key. */
+int chimera_smb_client_derive_signing_key(
+    uint16_t       dialect,
+    const uint8_t *session_key,
+    size_t         session_key_len,
+    const uint8_t *preauth_hash,
+    uint8_t       *out_key16);
 
 /* Transition a connection to READY and run any deferred ops (called from the
  * mount handshake or a secondary connection's NEGOTIATE completion). */
