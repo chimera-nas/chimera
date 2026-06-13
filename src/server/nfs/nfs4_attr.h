@@ -425,6 +425,7 @@ chimera_nfs4_marshall_attrs(
                                             (1UL << (FATTR4_NUMLINKS - 32)) |
                                             (1UL << (FATTR4_OWNER - 32)) |
                                             (1UL << (FATTR4_OWNER_GROUP - 32)) |
+                                            (1UL << (FATTR4_RAWDEV - 32)) |
                                             (1UL << (FATTR4_SPACE_USED - 32)) |
                                             (1UL << (FATTR4_TIME_ACCESS - 32)) |
                                             (1UL << (FATTR4_TIME_ACCESS_SET - 32)) |
@@ -727,6 +728,19 @@ chimera_nfs4_marshall_attrs(
             *num_rsp_mask = 2;
 
             chimera_nfs4_attr_append_utf8str_from_uint64(&attrs, attr->va_gid);
+        }
+
+        if ((req_mask[1] & (1 << (FATTR4_RAWDEV - 32))) &&
+            (attr->va_set_mask & CHIMERA_VFS_ATTR_RDEV)) {
+            rsp_mask[1]  |= (1 << (FATTR4_RAWDEV - 32));
+            *num_rsp_mask = 2;
+
+            /* specdata4: specdata1 = major, specdata2 = minor.  The canonical
+             * VFS rdev packing is (major << 32) | minor. */
+            chimera_nfs4_attr_append_uint32(&attrs,
+                                            (uint32_t) (attr->va_rdev >> 32));
+            chimera_nfs4_attr_append_uint32(&attrs,
+                                            (uint32_t) (attr->va_rdev & 0xFFFFFFFF));
         }
 
         if ((req_mask[1] & (1 <<  (FATTR4_SPACE_AVAIL - 32))) &&
@@ -1159,6 +1173,7 @@ chimera_nfs4_validate_createattrs(
         (1 << (FATTR4_NUMLINKS - 32)) |
         (1 << (FATTR4_OWNER - 32)) |
         (1 << (FATTR4_OWNER_GROUP - 32)) |
+        (1 << (FATTR4_RAWDEV - 32)) |
         (1 << (FATTR4_SPACE_AVAIL - 32)) |
         (1 << (FATTR4_SPACE_FREE - 32)) |
         (1 << (FATTR4_SPACE_TOTAL - 32)) |
