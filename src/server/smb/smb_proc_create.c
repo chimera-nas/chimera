@@ -3228,12 +3228,35 @@ chimera_smb_create(struct chimera_smb_request *request)
             return;
         }
 
+        /* A wildcard/invalid character in the BASE file name of a stream path
+         * is rejected with OBJECT_NAME_INVALID (smb2.streams.names "stream*").
+         * Wildcards are permitted in the stream name itself ("?Stream*"), so
+         * this only screens the base component, not the stream suffix. */
+        for (uint16_t bi = 0; bi < base_len; bi++) {
+            char bc = request->create.name[bi];
+            if (bc == '*' || bc == '?' || bc == '<' || bc == '>' ||
+                bc == '|' || bc == '"') {
+                chimera_smb_complete_request(request,
+                                             SMB2_STATUS_OBJECT_NAME_INVALID);
+                return;
+            }
+        }
+
         /* Trim the final component to the base file; the stream (if any) is
          * opened after the base file via chimera_vfs_open_stream. */
         request->create.name_len       = base_len;
         request->create.name[base_len] = '\0';
 
         if (has_stream) {
+            /* A named stream is never a directory; a CREATE that names a stream
+             * and also requests FILE_DIRECTORY_FILE is invalid
+             * (smb2.streams.dir expects NOT_A_DIRECTORY). */
+            if (request->create.create_options & SMB2_FILE_DIRECTORY_FILE) {
+                chimera_smb_complete_request(request,
+                                             SMB2_STATUS_NOT_A_DIRECTORY);
+                return;
+            }
+
             request->create.has_stream      = 1;
             request->create.stream_name_len = sname_len;
             memcpy(request->create.stream_name, sname, sname_len);
@@ -4183,7 +4206,24 @@ chimera_smb_parse_create(
         return -1;
     }
 
-    slash = rindex(request->create.parent_path, '\\');
+    /* Split the final path component off at the last backslash.  A named-stream
+     * suffix (everything from the first ':' onward) is part of the final
+     * component and may itself contain backslashes (e.g. an invalid stream name
+     * "Stream\"); those must not be treated as path separators, or the parent
+     * lookup would fail with OBJECT_PATH_NOT_FOUND instead of the stream-name
+     * validation returning OBJECT_NAME_INVALID (smb2.streams.names2).  So limit
+     * the backslash search to the base portion before the first ':'. */
+    {
+        char *colon = memchr(request->create.parent_path, ':',
+                             request->create.parent_path_len);
+        if (colon) {
+            *colon = '\0';
+            slash  = rindex(request->create.parent_path, '\\');
+            *colon = ':';
+        } else {
+            slash = rindex(request->create.parent_path, '\\');
+        }
+    }
 
     if (slash) {
         *slash                          = '\0';

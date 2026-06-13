@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <pthread.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -296,9 +297,12 @@ memfs_stream_find_by_name(
 {
     struct memfs_named_stream *stream;
 
+    /* Named-stream lookup is case-insensitive, matching Windows semantics even
+     * on a volume that reports FILE_CASE_SENSITIVE_SEARCH (smb2.streams.names3
+     * opens "StreamName" via "streamname"/"STREAMNAME"). */
     for (stream = inode->streams; stream; stream = stream->next) {
         if (stream->name_len == name_len &&
-            memcmp(stream->name, name, name_len) == 0) {
+            strncasecmp(stream->name, name, name_len) == 0) {
             return stream;
         }
     }
