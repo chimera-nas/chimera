@@ -1531,6 +1531,11 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.kernel-oplocks.kernel_oplocks8
     # smb2.lease
     smb2.lease.break
+    smb2.lease.breaking1
+    smb2.lease.breaking2
+    smb2.lease.breaking3
+    smb2.lease.breaking5
+    smb2.lease.breaking6
     smb2.lease.complex1
     smb2.lease.duplicate_create
     smb2.lease.duplicate_open
@@ -1540,13 +1545,17 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.lease.statopen
     smb2.lease.statopen2
     smb2.lease.statopen3
+    smb2.lease.statopen4
     smb2.lease.upgrade
     smb2.lease.upgrade2
     smb2.lease.upgrade3
     smb2.lease.v1_bug15148
     smb2.lease.v2_bug15148
+    smb2.lease.v2_complex1
     smb2.lease.v2_complex2
     smb2.lease.v2_epoch1
+    smb2.lease.v2_epoch2
+    smb2.lease.v2_epoch3
     smb2.lease.v2_flags_breaking
     smb2.lease.v2_flags_parentkey
     # smb2.lock
@@ -3141,6 +3150,11 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.kernel-oplocks.kernel_oplocks8
     # smb2.lease
     smb2.lease.break
+    smb2.lease.breaking1
+    smb2.lease.breaking2
+    smb2.lease.breaking3
+    smb2.lease.breaking5
+    smb2.lease.breaking6
     smb2.lease.complex1
     smb2.lease.duplicate_create
     smb2.lease.duplicate_open
@@ -3149,13 +3163,17 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.lease.rename_wait
     smb2.lease.statopen2
     smb2.lease.statopen3
+    smb2.lease.statopen4
     smb2.lease.upgrade
     smb2.lease.upgrade2
     smb2.lease.upgrade3
     smb2.lease.v1_bug15148
     smb2.lease.v2_bug15148
+    smb2.lease.v2_complex1
     smb2.lease.v2_complex2
     smb2.lease.v2_epoch1
+    smb2.lease.v2_epoch2
+    smb2.lease.v2_epoch3
     smb2.lease.v2_flags_breaking
     smb2.lease.v2_flags_parentkey
     # smb2.lock
