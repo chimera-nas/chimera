@@ -305,8 +305,15 @@ chimera_vfs_lease_smb2_same_key(
     const struct chimera_vfs_lease_owner *holder,
     const struct chimera_vfs_lease_owner *opener)
 {
+    /* Both sides must carry a real RqLs LeaseKey (is_lease).  A legacy oplock's
+     * owner_lo/hi is its file_id, not a shared lease key: two oplocks that
+     * happen to share a file_id are simply the same owner (already handled by
+     * owner_equal), and a LEVEL_II oplock holder writing must still break its
+     * own read cache (smb2.oplock.batch6) -- so a legacy oplock never qualifies
+     * for the same-lease-key coherence exemption. */
     return holder->protocol == CHIMERA_VFS_LEASE_PROTO_SMB2 &&
            opener->protocol == CHIMERA_VFS_LEASE_PROTO_SMB2 &&
+           holder->is_lease && opener->is_lease &&
            holder->owner_lo == opener->owner_lo &&
            holder->owner_hi == opener->owner_hi;
 } /* chimera_vfs_lease_smb2_same_key */
@@ -2328,7 +2335,19 @@ chimera_vfs_break_reads_for_write(
             continue;
         }
         if (chimera_vfs_lease_owner_equal(&cur->owner, writer)) {
-            continue;
+            /* The writer's own holder is normally coherent with its own write
+             * and is not broken (smb2.lease.nobreakself / complex1).  The lone
+             * exception is a legacy LEVEL_II oplock (is_oplock, read-cache only,
+             * no W): a LEVEL_II oplock confers no write coherence, so a write --
+             * even by the holder itself -- invalidates the shared read cache and
+             * must break the writer's own LEVEL_II to NONE (smb2.oplock.batch6:
+             * a write by one LEVEL_II holder breaks BOTH LEVEL_II oplocks,
+             * including the writer's).  An exclusive / batch oplock holds W and
+             * is coherent, so it self-exempts like a lease. */
+            if (!(cur->grant && cur->grant->is_oplock) ||
+                (cur->mode.granted & CHIMERA_VFS_LEASE_MODE_W)) {
+                continue;
+            }
         }
         /* A holder sharing the writer's SMB2 lease key (even under a different
          * ClientGuid) shares the cache and is coherent with this write: do not
