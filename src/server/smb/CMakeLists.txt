@@ -8,7 +8,7 @@ add_library(chimera_smb SHARED
     smb_proc_set_info.c smb_proc_tree_disconnect.c smb_proc_logoff.c
     smb_proc_write.c smb_proc_read.c smb_proc_query_info.c
     smb_proc_query_directory.c smb_proc_ioctl.c smb_proc_flush.c smb_proc_echo.c
-    smb_lsarpc.c smb_srvsvc.c smb_samr.c smb_signing.c smb_encrypt.c smb_compress.c smb_proc_set_info_rename.c smb_proc_security.c
+    smb_lsarpc.c smb_srvsvc.c smb_samr.c smb_wkssvc.c smb_signing.c smb_encrypt.c smb_compress.c smb_proc_set_info_rename.c smb_proc_security.c
     smb_proc_reparse.c smb_proc_change_notify.c smb_proc_cancel.c
     smb_proc_sparse.c smb_proc_copychunk.c
     smb_proc_lock.c smb_proc_oplock_break.c
@@ -22,7 +22,7 @@ set(NDR_IDL_DIR ${CMAKE_CURRENT_SOURCE_DIR}/idl)
 set(NDR_GEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/idl)
 file(MAKE_DIRECTORY ${NDR_GEN_DIR})
 
-foreach(iface lsarpc srvsvc samr)
+foreach(iface lsarpc srvsvc samr wkssvc)
     add_custom_command(
         OUTPUT  ${NDR_GEN_DIR}/${iface}_ndr.c ${NDR_GEN_DIR}/${iface}_ndr.h
         COMMAND ${NDRZCC} ${NDR_IDL_DIR}/${iface}.idl
