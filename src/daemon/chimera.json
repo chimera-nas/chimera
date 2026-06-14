@@ -4,7 +4,13 @@
 	"sync_delegation": true,
 	"sync_delegation_threads": 1,
 	"async_delegation": false,
-	"async_delegation_threads": 8
+	"async_delegation_threads": 8,
+	"tracing": {
+	    "enabled": false,
+	    "sqlite_path": "/tmp/chimera-traces.db",
+	    "grpc_endpoint": "127.0.0.1:4317",
+	    "sample_rate": 0.001
+	}
     },
     "server": {
 	"threads": 16

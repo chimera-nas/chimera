@@ -10,6 +10,7 @@
 #include "nfs_fh_wrap.h"
 #include "evpl/evpl_rpc2.h"
 #include "portmap_xdr.h"
+#include "vfs/vfs.h"
 #include "vfs/vfs_cred.h"
 #include "nfs_gss.h"
 #include "nfs_mount_xdr.h"
@@ -74,6 +75,7 @@ struct nfs_nfs4_readdir_cursor {
 struct nfs_request {
     struct chimera_server_nfs_thread *thread;
     struct nfs4_session              *session;
+    struct otel_span                  otel;
     struct chimera_vfs_cred           cred;
     /* The caller's credential as mapped from the RPC auth, before any export
      * squash.  req->cred is recomputed from this each time a file handle is
@@ -441,6 +443,12 @@ nfs_request_alloc(
     req->replay_slot_id = 0;
     req->replay_action  = NFS4_REPLAY_ACTION_NONE;
 
+    /* Root span for this NFS request (a single NFSv3 op, or a whole NFSv4
+     * COMPOUND).  Parent the VFS ops it issues under it; propagation in
+     * chimera_vfs_complete keeps the linkage across the request's async ops. */
+    otel_span_start(&req->otel, "nfs", OTEL_SPAN_SERVER);
+    thread->vfs_thread->otel_parent = &req->otel;
+
     thread->active_requests++;
 
     return req;
@@ -451,6 +459,11 @@ nfs_request_free(
     struct chimera_server_nfs_thread *thread,
     struct nfs_request               *req)
 {
+    /* End the request span and drop the trace parent so a later VFS op cannot
+     * attach to this (now recycled) request's span. */
+    otel_span_end(&req->otel);
+    thread->vfs_thread->otel_parent = NULL;
+
     thread->active_requests--;
     LL_PREPEND(thread->free_requests, req);
 } /* nfs_request_free */
