@@ -47,6 +47,7 @@ struct chimera_server_config {
     int                                   nfs_rdma_port;
     int                                   nfs_tcp_rdma_port;
     int                                   nfs_lockmgr_port;
+    int                                   nfs_nsm_port;
     int                                   nfs_port;
     int                                   s3_port;
     int                                   nfs_data_server;
@@ -292,6 +293,7 @@ chimera_server_config_init(void)
     strncpy(config->nfs_rdma_hostname, "0.0.0.0", sizeof(config->nfs_rdma_hostname));
     config->nfs_rdma_port    = 20049;
     config->nfs_lockmgr_port = 32803;
+    config->nfs_nsm_port     = 32765;
 
     snprintf(config->state_dir, sizeof(config->state_dir), "%s", CHIMERA_STATE_DIR);
 
@@ -855,6 +857,20 @@ chimera_server_config_get_nfs_lockmgr_port(const struct chimera_server_config *c
 {
     return config->nfs_lockmgr_port;
 } /* chimera_server_config_get_nfs_lockmgr_port */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_nfs_nsm_port(
+    struct chimera_server_config *config,
+    int                           port)
+{
+    config->nfs_nsm_port = port;
+} /* chimera_server_config_set_nfs_nsm_port */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_nfs_nsm_port(const struct chimera_server_config *config)
+{
+    return config->nfs_nsm_port;
+} /* chimera_server_config_get_nfs_nsm_port */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_state_dir(

@@ -23,6 +23,10 @@ set(NLM4_XDR_X ${CMAKE_CURRENT_SOURCE_DIR}/nlm4.x)
 set(NLM4_XDR_C ${CMAKE_CURRENT_BINARY_DIR}/nlm4_xdr.c)
 set(NLM4_XDR_H ${CMAKE_CURRENT_BINARY_DIR}/nlm4_xdr.h)
 
+set(SM_INTER_XDR_X ${CMAKE_CURRENT_SOURCE_DIR}/sm_inter.x)
+set(SM_INTER_XDR_C ${CMAKE_CURRENT_BINARY_DIR}/sm_inter_xdr.c)
+set(SM_INTER_XDR_H ${CMAKE_CURRENT_BINARY_DIR}/sm_inter_xdr.h)
+
 add_custom_command(
     OUTPUT ${NFS3_XDR_C} ${NFS3_XDR_H}
     COMMAND ${XDRZCC} -r ${NFS3_XDR_X} ${NFS3_XDR_C} ${NFS3_XDR_H}
@@ -58,13 +62,20 @@ add_custom_command(
     COMMENT "Compiling ${NLM4_XDR_X}"
 )
 
+add_custom_command(
+    OUTPUT ${SM_INTER_XDR_C} ${SM_INTER_XDR_H}
+    COMMAND ${XDRZCC} -r ${SM_INTER_XDR_X} ${SM_INTER_XDR_C} ${SM_INTER_XDR_H}
+    DEPENDS ${SM_INTER_XDR_X} ${XDRZCC}
+    COMMENT "Compiling ${SM_INTER_XDR_X}"
+)
+
 set(NFS_COMMON_INCLUDE_DIR ${CMAKE_CURRENT_BINARY_DIR} PARENT_SCOPE)
 
 include_directories(${CMAKE_CURRENT_BINARY_DIR})
 
 # Suppress warnings for the generated source files
 set_source_files_properties(
-    ${NFS3_XDR_C} ${NFS4_XDR_C} ${NFS_MOUNT_XDR_C} ${PORTMAP_XDR_C} ${NLM4_XDR_C} PROPERTIES COMPILE_OPTIONS "-Wno-unused;-Wno-switch;-Wno-format-truncation"
+    ${NFS3_XDR_C} ${NFS4_XDR_C} ${NFS_MOUNT_XDR_C} ${PORTMAP_XDR_C} ${NLM4_XDR_C} ${SM_INTER_XDR_C} PROPERTIES COMPILE_OPTIONS "-Wno-unused;-Wno-switch;-Wno-format-truncation"
 )
 
 add_definitions(-fvisibility=default)
@@ -76,7 +87,8 @@ add_library(chimera_nfs_common  SHARED
             ${NFS4_XDR_C} ${NFS4_XDR_H}
             ${NFS_MOUNT_XDR_C} ${NFS_MOUNT_XDR_H}
             ${PORTMAP_XDR_C} ${PORTMAP_XDR_H}
-            ${NLM4_XDR_C} ${NLM4_XDR_H})
+            ${NLM4_XDR_C} ${NLM4_XDR_H}
+            ${SM_INTER_XDR_C} ${SM_INTER_XDR_H})
 
 target_link_libraries(chimera_nfs_common chimera_common evpl evpl_rpc2)
 

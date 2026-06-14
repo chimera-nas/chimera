@@ -20,7 +20,7 @@ struct portmap_service {
     uint32_t port;    /* Port number */
 };
 
-#define num_portmap_services_MAX 8
+#define num_portmap_services_MAX 10
 
 static struct portmap_service portmap_services[num_portmap_services_MAX] = {
     /* Portmap/rpcbind - program 100000 */
@@ -187,6 +187,19 @@ portmap_set_nlm_port(uint32_t port)
     }
     portmap_services[num_portmap_services++] = (struct portmap_service) { 100021, 4, 6, port };
 } /* portmap_set_nlm_port */
+
+void
+portmap_set_nsm_port(uint32_t port)
+{
+    if (port == 0) {
+        return;
+    }
+    if (num_portmap_services >= num_portmap_services_MAX) {
+        chimera_nfs_error("portmap_set_nsm_port: no room in portmap_services table");
+        return;
+    }
+    portmap_services[num_portmap_services++] = (struct portmap_service) { 100024, 1, 6, port };
+} /* portmap_set_nsm_port */
 
 void
 chimera_portmap_null_v2(

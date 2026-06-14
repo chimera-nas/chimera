@@ -411,6 +411,15 @@ chimera_server_config_get_nfs_lockmgr_port(
     const struct chimera_server_config *config);
 
 void
+chimera_server_config_set_nfs_nsm_port(
+    struct chimera_server_config *config,
+    int                           port);
+
+int
+chimera_server_config_get_nfs_nsm_port(
+    const struct chimera_server_config *config);
+
+void
 chimera_server_config_set_state_dir(
     struct chimera_server_config *config,
     const char                   *dir);

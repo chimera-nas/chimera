@@ -191,7 +191,9 @@ unregister_service(
 } /* unregister_service */
 
 void
-register_nfs_rpc_services(int lockmgr_port)
+register_nfs_rpc_services(
+    int lockmgr_port,
+    int nsm_port)
 {
     struct portmap_reg_ctx ctx;
 
@@ -206,6 +208,10 @@ register_nfs_rpc_services(int lockmgr_port)
 
     if (lockmgr_port > 0) {
         register_service(&ctx, NFS_NLM_PROGRAM, 4, lockmgr_port, "NLM v4 over TCP");
+    }
+
+    if (nsm_port > 0) {
+        register_service(&ctx, NFS_NSM_PROGRAM, 1, nsm_port, "NSM/statd v1 over TCP");
     }
 
     /* Wait for all registrations to complete */
@@ -223,7 +229,9 @@ register_nfs_rpc_services(int lockmgr_port)
 } /* register_nfs_rpc_services */
 
 void
-unregister_nfs_rpc_services(int lockmgr_port)
+unregister_nfs_rpc_services(
+    int lockmgr_port,
+    int nsm_port)
 {
     struct portmap_reg_ctx ctx;
 
@@ -238,6 +246,10 @@ unregister_nfs_rpc_services(int lockmgr_port)
 
     if (lockmgr_port > 0) {
         unregister_service(&ctx, NFS_NLM_PROGRAM, 4, "NLM v4 over TCP");
+    }
+
+    if (nsm_port > 0) {
+        unregister_service(&ctx, NFS_NSM_PROGRAM, 1, "NSM/statd v1 over TCP");
     }
 
     /* Wait for all unregistrations to complete */

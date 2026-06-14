@@ -128,6 +128,28 @@ nlm_state_in_grace(struct nlm_state *state)
 } /* nlm_state_in_grace */
 
 /*
+ * Open the post-restart grace window: only reclaim locks are accepted until it
+ * lazily expires (nlm_state_in_grace) NLM_GRACE_PERIOD_SECS from now.  Called
+ * from single-threaded server init, or otherwise with state->mutex held.
+ */
+static inline void
+nlm_state_begin_grace(struct nlm_state *state)
+{
+    state->in_grace  = 1;
+    state->grace_end = time(NULL) + NLM_GRACE_PERIOD_SECS;
+} /* nlm_state_begin_grace */
+
+/*
+ * Close the grace window early (nothing left to reclaim).  Called from
+ * single-threaded server init, or otherwise with state->mutex held.
+ */
+static inline void
+nlm_state_end_grace(struct nlm_state *state)
+{
+    state->in_grace = 0;
+} /* nlm_state_end_grace */
+
+/*
  * Allocate and zero a new lock entry.
  */
 static inline struct nlm_lock_entry *
