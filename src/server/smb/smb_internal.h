@@ -977,6 +977,8 @@ struct chimera_smb_session_handle {
 
 struct chimera_smb_notify_request;
 
+#define CHIMERA_SMB_RPC_MAX_HANDLES                 16
+
 struct chimera_smb_conn {
     OM_uint32                          gss_major;
     OM_uint32                          gss_minor;
@@ -988,6 +990,15 @@ struct chimera_smb_conn {
     uint8_t                           *ntlm_output;
     size_t                             ntlm_output_len;
     unsigned int                       flags;
+    /* DCE/RPC context (policy) handles currently open on this connection: each
+     * 16-byte slot holds an issued handle's id, an all-zero slot is free.  An op
+     * presented a handle not in this set -- issued on another connection,
+     * already closed, or never issued -- faults with
+     * nca_s_fault_context_mismatch.  Scoping the set to the connection is what
+     * makes a cross-connection use and a double-close fail (MS-LSAD,
+     * smbtorture rpc.handles).  16 slots is far more than the one or two policy
+     * handles a client holds at once. */
+    uint8_t                            rpc_handles[CHIMERA_SMB_RPC_MAX_HANDLES][16];
     /* Set under the owning thread's lease_break_lock while conn_free drains
      * this connection's queued lease-break notifications, so a break_cb racing
      * on another thread does not enqueue a send for a connection whose bind is
@@ -1855,6 +1866,10 @@ chimera_smb_conn_alloc(struct chimera_server_smb_thread *thread)
     } else {
         conn = calloc(1, sizeof(*conn));
     }
+
+    /* No RPC context handles open yet; clear the set since the connection pool
+    * does not zero on reuse (a stale slot would validate a foreign handle). */
+    memset(conn->rpc_handles, 0, sizeof(conn->rpc_handles));
 
     return conn;
 } /* chimera_smb_conn_alloc */
