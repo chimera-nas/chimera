@@ -995,7 +995,11 @@ chimera_smb_create_after_share(
                 owner.op_handle = oh;
                 if (via_rqls) {
                     /* RqLs: owner identity is the lease key, so same-key opens by
-                     * one client coalesce (the Samba locking.tdb rule). */
+                     * one client coalesce (the Samba locking.tdb rule).  Mark the
+                     * grant owner as a lease so the same-lease-key write/open
+                     * coherence exemption (chimera_vfs_lease_smb2_same_key)
+                     * applies to it but never to a legacy oplock. */
+                    owner.is_lease = 1;
                     memcpy(&owner.owner_lo, request->create.rqls.key, 8);
                     memcpy(&owner.owner_hi, request->create.rqls.key + 8, 8);
                     /* Mirror the lease_key onto the open_file for the break
