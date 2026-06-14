@@ -1387,6 +1387,28 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.dir.fixed
     smb2.dir.many
     smb2.dir.sorted
+    # smb2.dirlease (SMB3 directory leases).  Three subtests stay disabled:
+    # overwrite and unlink_different_{set,initial}_and_close.  All three need a
+    # FILE-LEVEL (last-close) delete-on-close, but chimera removes a delete-on-
+    # close file at the closing handle's release (per-handle / POSIX unlink-while-
+    # open).  A file-level scheme is what unlink_different asserts, but it makes
+    # smb2_deltree loop whenever a handle is leaked (these tests close a 2nd-tree
+    # handle on the wrong tree), so the two semantics conflict; left as follow-up.
+    smb2.dirlease.leases
+    smb2.dirlease.oplocks
+    smb2.dirlease.v2_request
+    smb2.dirlease.rename_dst_parent
+    smb2.dirlease.seteof
+    smb2.dirlease.setdos
+    smb2.dirlease.setbtime
+    smb2.dirlease.setmtime
+    smb2.dirlease.setctime
+    smb2.dirlease.setatime
+    smb2.dirlease.v2_request_parent
+    smb2.dirlease.rename
+    smb2.dirlease.hardlink
+    smb2.dirlease.unlink_same_set_and_close
+    smb2.dirlease.unlink_same_initial_and_close
     # smb2.durable-open-disconnect
     smb2.durable-open-disconnect.open-oplock-disconnect
     # smb2.durable-open

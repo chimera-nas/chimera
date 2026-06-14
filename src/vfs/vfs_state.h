@@ -498,6 +498,29 @@ chimera_vfs_state_break_on_write(
     uint64_t                              fh_hash,
     const struct chimera_vfs_lease_owner *writer);
 
+/* Break every SMB3 directory lease on the directory identified by (fh, fh_hash)
+* because the directory's contents changed (a child created / removed / renamed,
+* or a child's attributes changed).  A directory-lease content break is a single
+* RH -> "" downgrade to NONE (MS-SMB2): it strips handle caching too, so it is
+* ack-required and the lease stays BREAKING until the client acks (the normal
+* lease-break-ack path).  The client re-establishes its directory cache by
+* re-requesting the lease afterwards.
+*
+* `has_skip` + (`skip_lo`, `skip_hi`) name a lease owner key (an SMB LeaseKey)
+* to spare: the client that caused the change supplied a ParentLeaseKey naming a
+* directory lease whose cached view is coherent with the change, so it must not
+* be broken (MS-SMB2 directory-lease ParentLeaseKey self-exemption).  A leaseless
+* mutator (NFS/S3) passes has_skip == false and breaks every directory lease. */
+void
+chimera_vfs_state_dir_lease_break(
+    struct chimera_vfs_state *state,
+    const uint8_t            *fh,
+    uint8_t                   fh_len,
+    uint64_t                  fh_hash,
+    uint64_t                  skip_lo,
+    uint64_t                  skip_hi,
+    bool                      has_skip);
+
 /* Break-on-open: break caching leases held by a *different* owner on
  * (fh, fh_hash) when a conflicting open arrives.  `trigger_bits` selects which
  * holders break (only those whose granted mode holds a trigger bit they don't

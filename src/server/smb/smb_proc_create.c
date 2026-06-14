@@ -840,14 +840,26 @@ chimera_smb_create_after_share(
     int                               name_len      = open_file->name_len;
     uint64_t                          open_file_bucket;
 
+    /* A directory open is eligible for an SMB3 directory lease when the feature
+     * is enabled and the client requested it via an RqLs v2 context (directory
+     * leases are SMB 3.0+ / lease-v2 only — never a legacy oplock, which is what
+     * the dirlease.oplocks test asserts is refused).  A directory lease grants
+     * R/H only (W is masked off below) and is broken on a directory content
+     * change (chimera_vfs_state_dir_lease_break via the notify chokepoint). */
+    int                               is_directory = (open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_DIRECTORY) != 0;
+    int                               dir_lease_ok = is_directory && oh &&
+        thread->shared->config.directory_leases &&
+        (request->create.ctx_present_mask & CHIMERA_SMB_CREATE_CTX_RQLS) &&
+        request->create.rqls.is_v2;
+
     /* Acquire a CACHING lease (SMB2 lease via RqLs, or legacy oplock
      * via requested_oplock_level).  This is opportunistic — failure to
      * grant just means the open succeeds with no lease.  Conflicts are
      * resolved by vfs_state's conflict matrix; without break_cb wired
      * (next task in Stage D), conflicting other-client leases force
      * DENIED here, so we silently end up with no lease. */
-    if (type == CHIMERA_SMB_OPEN_FILE_TYPE_FILE && oh &&
-        !(open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_DIRECTORY)) {
+    if ((type == CHIMERA_SMB_OPEN_FILE_TYPE_FILE && oh && !is_directory) ||
+        dir_lease_ok) {
         struct chimera_vfs_state      *vfs_state = thread->vfs_thread->vfs->vfs_state;
         struct chimera_vfs_file_state *file_state;
         uint8_t                        req_smb  = 0;
@@ -916,6 +928,13 @@ chimera_smb_create_after_share(
          *     force a flush before it reads (smb_proc_copychunk.c) — fixes the
          *     old fsx READ BAD DATA. */
         req_vfs = chimera_smb_lease_bits_to_vfs(req_smb);
+
+        /* A directory lease never carries write caching: only read (cached
+         * enumeration) and handle (deferred close) caching apply to a directory
+         * (MS-SMB2 — requesting RHW on a directory grants RH). */
+        if (is_directory) {
+            req_vfs &= ~CHIMERA_VFS_LEASE_MODE_W;
+        }
 
         /* Oplocks are about data caching: an attribute-only open (no
          * read/write/execute data access) neither acquires nor breaks an
@@ -1030,8 +1049,14 @@ chimera_smb_create_after_share(
                         grant->epoch =
                             (via_rqls && request->create.rqls.is_v2)
                             ? request->create.rqls.epoch + 1 : 1;
+                        /* A directory lease is marked on both the grant and the
+                         * embedded lease: the conflict matrix relaxes cross-client
+                         * handle exclusivity for is_dir leases, and the lease does
+                         * not cascade (a directory break is a single shot). */
+                        grant->is_dir                 = is_directory;
                         grant->lease.grant            = grant;
                         grant->lease.kind             = CHIMERA_VFS_LEASE_CACHING;
+                        grant->lease.is_dir           = is_directory;
                         grant->lease.mode             = want;
                         grant->lease.owner            = owner;
                         grant->lease.owner.cb_private = grant;
@@ -1294,10 +1319,46 @@ chimera_smb_create_share_park_cb(
     (void) lease;
     (void) conflict;
 
+    /* The vfs share-acquire ticket may resolve on ANY thread (whichever closed
+     * the holder or acked the break).  The CREATE response's iovecs are
+     * thread-local, so stash the result and bounce to the parked open's owning
+     * thread, where chimera_smb_create_share_resume_doorbell completes it.  An
+     * already-on-thread resolution still goes through the doorbell (one extra
+     * hop); correctness over a fast path. */
+    request->create.gen_resume_result = result;
+
+    pthread_mutex_lock(&thread->lease_break_lock);
+    request->async.park_next  = thread->share_resume_head;
+    thread->share_resume_head = request;
+    pthread_mutex_unlock(&thread->lease_break_lock);
+
+    evpl_ring_doorbell(&thread->lease_resume_doorbell);
+
+    (void) vfs_thread;
+    (void) vfs_state;
+    (void) open_file;
+    (void) file_state;
+} /* chimera_smb_create_share_park_cb */
+
+/* Finish a share-park CREATE on its OWN thread (driven by the resume doorbell).
+ * GRANTED: the holder closed and freed the conflict -> hold the share and finish
+ * the open.  DENIED: the holder kept its handle (acked a dir-lease/oplock break
+ * without closing) -> SHARING_VIOLATION. */
+static void
+chimera_smb_create_share_park_finish(
+    struct chimera_smb_request   *request,
+    enum chimera_vfs_lease_result result)
+{
+    struct chimera_server_smb_thread *thread     = request->compound->thread;
+    struct chimera_vfs_thread        *vfs_thread = thread->vfs_thread;
+    struct chimera_vfs_state         *vfs_state  = vfs_thread->vfs->vfs_state;
+    struct chimera_smb_open_file     *open_file  = request->create.gen_parked_open;
+    struct chimera_vfs_file_state    *file_state = request->create.gen_parked_fs;
+
     request->create.gen_parked = 0;
 
     if (result == CHIMERA_VFS_LEASE_GRANTED) {
-        /* The batch holder closed; the share reservation is now held. */
+        /* The holder closed; the share reservation is now held. */
         chimera_smb_create_finish_share_grant(open_file, file_state,
                                               request->create.gen_held_granted);
         chimera_smb_create_after_share(request, open_file);
@@ -1305,8 +1366,8 @@ chimera_smb_create_share_park_cb(
         return;
     }
 
-    /* DENIED: the holder acked its oplock but kept the handle open, so the
-     * share conflict stands. */
+    /* DENIED: the holder acked its oplock / dir-lease break but kept the handle
+     * open, so the share conflict stands. */
     chimera_vfs_state_put(vfs_state, file_state);
     if (open_file->handle) {
         chimera_vfs_release(vfs_thread, open_file->handle);
@@ -1315,7 +1376,7 @@ chimera_smb_create_share_park_cb(
     chimera_smb_open_file_free(thread, open_file);
     chimera_smb_create_release_parent(request);
     chimera_smb_complete_request(request, SMB2_STATUS_SHARING_VIOLATION);
-} /* chimera_smb_create_share_park_cb */
+} /* chimera_smb_create_share_park_finish */
 
 static inline uint32_t
 chimera_smb_create_granted_access(
@@ -1720,9 +1781,14 @@ chimera_smb_create_open_at_callback(
         chimera_vfs_access_check(attr, &request->session_handle->session->cred,
                                  CHIMERA_ACE_MASK_ALL);
     chimera_smb_marshal_attrs(attr, &request->create.r_attrs);
-    /* The park-on-batch-break activation (gen_finish_cb) is wired in the
-     * follow-up that adds the cross-thread resume bounce; until then the open
-     * resolves synchronously (a batch-share conflict yields SHARING_VIOLATION). */
+    /* Activate the park-on-conflict-break path: if gen_open_file parks on a
+     * handle-caching break (a batch oplock, or an SMB3 directory lease whose
+     * HANDLE must be relinquished for a conflicting open), the share-park resume
+     * (chimera_smb_create_share_park_cb) finishes the open via this callback once
+     * the holder closes (GRANTED) or denies with SHARING_VIOLATION if it keeps
+     * the handle.  Without it a conflict resolves synchronously to
+     * SHARING_VIOLATION and never waits for the holder to close. */
+    request->create.gen_finish_cb = chimera_smb_create_open_finish;
 
     open_file = chimera_smb_create_gen_open_file_normal(request,
                                                         request->create.parent_handle->fh,
@@ -1787,6 +1853,9 @@ chimera_smb_create_access_retry_callback(
  * its already-acquired lease.  Runs on the open's own conn thread (the timer is
  * armed on that thread's evpl).  An ack that resumes the open first removes this
  * timer. */
+static void chimera_smb_create_finish_deferred_dir_break(
+    struct chimera_smb_request *request);
+
 static void
 chimera_smb_create_park_deadline_cb(
     struct evpl       *evpl,
@@ -1814,6 +1883,11 @@ chimera_smb_create_park_deadline_cb(
         open_file->flags &= ~CHIMERA_SMB_OPEN_FILE_CREATE_PENDING;
     }
 
+    /* The open succeeds even though the file break timed out; still emit the
+     * deferred parent dir-lease content break (the directory's contents did
+     * change). */
+    chimera_smb_create_finish_deferred_dir_break(request);
+
     chimera_smb_open_file_release(request, open_file);
     /* complete_request retires the async-interim (unlink from parked_requests +
      * clear armed); the fired one-shot is already out of the timer heap so its
@@ -1825,15 +1899,63 @@ chimera_smb_create_park_deadline_cb(
  * parent-directory create notification, release the parent handle, and complete
  * the request.  Invoked on a synchronous grant from open_at_callback and on a
  * parked grant from chimera_smb_create_share_park_cb. */
+/* Emit a parent directory-lease content break that was deferred while the open
+ * parked on a FILE caching break (overwrite), then release the parent handle that
+ * was held alive across the park.  Sequencing the dir break after the file break
+ * is acked is what dirlease.overwrite requires (break -> ack -> break); emitting
+ * it up-front would deliver both breaks before the first ack and the skip_ack
+ * test would lose the second to its inter-ack reset. */
+static void
+chimera_smb_create_finish_deferred_dir_break(struct chimera_smb_request *request)
+{
+    struct chimera_server_smb_thread *thread = request->compound->thread;
+
+    if (!request->create.dir_break_pending) {
+        return;
+    }
+
+    request->create.dir_break_pending = 0;
+
+    if (request->create.parent_handle) {
+        chimera_vfs_notify_emit_lease(thread->shared->vfs->vfs_notify,
+                                      request->create.parent_handle->fh,
+                                      request->create.parent_handle->fh_len,
+                                      request->create.dir_break_action,
+                                      request->create.name,
+                                      request->create.name_len,
+                                      NULL, 0,
+                                      request->create.dir_break_skip_lo,
+                                      request->create.dir_break_skip_hi,
+                                      request->create.dir_break_has_skip);
+        chimera_smb_create_release_parent(request);
+    }
+} /* chimera_smb_create_finish_deferred_dir_break */
+
 static void
 chimera_smb_create_open_finish(
     struct chimera_smb_request   *request,
     struct chimera_smb_open_file *open_file)
 {
-    request->create.r_open_file = open_file;
+    struct chimera_server_smb_thread *thread    = request->compound->thread;
+    struct chimera_vfs_state         *vfs_state =
+        thread->vfs_thread->vfs->vfs_state;
+    bool                              will_park = false;
+
+    request->create.r_open_file       = open_file;
+    request->create.dir_break_pending = 0;
 
     open_file->granted_access = request->create.r_granted_access;
     open_file->maximal_access = request->create.r_maximal_access;
+
+    /* Decide up front whether this open must park on a FILE caching break still
+     * in flight (a conflicting/overwriting open whose ack-required break has not
+     * settled).  Computed here so a content break can be DEFERRED past the park. */
+    if (open_file->handle) {
+        struct chimera_vfs_open_handle *oh = open_file->handle;
+        will_park = chimera_vfs_state_caching_breaking(vfs_state, oh->fh,
+                                                       oh->fh_len, oh->fh_hash,
+                                                       open_file->grant);
+    }
 
     /* Emit notification on parent directory for any disposition that can
      * create a new file.  OPEN never creates; CREATE always creates;
@@ -1850,10 +1972,10 @@ chimera_smb_create_open_finish(
      * receive the event. */
     if (request->create.create_disposition == SMB2_FILE_CREATE        ||
         request->create.create_disposition == SMB2_FILE_OPEN_IF       ||
+        request->create.create_disposition == SMB2_FILE_OVERWRITE     ||
         request->create.create_disposition == SMB2_FILE_OVERWRITE_IF  ||
         request->create.create_disposition == SMB2_FILE_SUPERSEDE) {
-        struct chimera_server_smb_thread *thread = request->compound->thread;
-        uint32_t                          action = request->create.r_is_directory ?
+        uint32_t action = request->create.r_is_directory ?
             CHIMERA_VFS_NOTIFY_DIR_ADDED : CHIMERA_VFS_NOTIFY_FILE_ADDED;
 
         /* Creating/opening a (regular) file's data fork introduces its
@@ -1865,16 +1987,64 @@ chimera_smb_create_open_finish(
             action |= CHIMERA_VFS_NOTIFY_STREAM_NAME;
         }
 
-        chimera_vfs_notify_emit(thread->shared->vfs->vfs_notify,
-                                request->create.parent_handle->fh,
-                                request->create.parent_handle->fh_len,
-                                action,
-                                request->create.name,
-                                request->create.name_len,
-                                NULL, 0);
+        /* A directory read lease must break only when the directory's contents
+         * actually changed — i.e. the file was newly created, or its data was
+         * replaced (OVERWRITE/SUPERSEDE truncate an existing file).  A
+         * create-capable disposition that merely OPENED an existing file
+         * (OPEN_IF on an existing name) changes nothing in the directory, so it
+         * delivers the (conservative) CHANGE_NOTIFY event WITHOUT breaking the
+         * lease — otherwise re-opening a file would spuriously recall the parent
+         * directory lease (smbtorture dirlease.rename re-opens before renaming). */
+        bool content_changed = request->create.r_created ||
+            request->create.create_disposition == SMB2_FILE_OVERWRITE ||
+            request->create.create_disposition == SMB2_FILE_OVERWRITE_IF ||
+            request->create.create_disposition == SMB2_FILE_SUPERSEDE;
+
+        if (content_changed) {
+            /* Self-exempt the directory lease whose ParentLeaseKey this create
+            * supplied: the client creating the file holds (or is updating) that
+            * directory's cached view and must not have its own lease broken
+            * (MS-SMB2 dirlease ParentLeaseKey; dirlease.v2_request_parent). */
+            uint64_t skip_lo, skip_hi;
+            bool     has_skip = chimera_smb_parent_lease_skip(
+                open_file->parent_lease_key, &skip_lo, &skip_hi);
+
+            if (will_park) {
+                /* This open is about to park on a FILE caching break; defer the
+                 * parent dir-lease content break to the resume so it is sequenced
+                 * AFTER that file break is acked (dirlease.overwrite).  Keep the
+                 * parent handle alive for the deferred emit. */
+                request->create.dir_break_pending  = 1;
+                request->create.dir_break_action   = action;
+                request->create.dir_break_skip_lo  = skip_lo;
+                request->create.dir_break_skip_hi  = skip_hi;
+                request->create.dir_break_has_skip = has_skip;
+            } else {
+                chimera_vfs_notify_emit_lease(thread->shared->vfs->vfs_notify,
+                                              request->create.parent_handle->fh,
+                                              request->create.parent_handle->fh_len,
+                                              action,
+                                              request->create.name,
+                                              request->create.name_len,
+                                              NULL, 0,
+                                              skip_lo, skip_hi, has_skip);
+            }
+        } else {
+            chimera_vfs_notify_emit_nobreak(thread->shared->vfs->vfs_notify,
+                                            request->create.parent_handle->fh,
+                                            request->create.parent_handle->fh_len,
+                                            action,
+                                            request->create.name,
+                                            request->create.name_len,
+                                            NULL, 0);
+        }
     }
 
-    chimera_smb_create_release_parent(request);
+    /* Release the parent now unless a deferred dir break still needs it (it is
+     * released by chimera_smb_create_finish_deferred_dir_break on resume). */
+    if (!request->create.dir_break_pending) {
+        chimera_smb_create_release_parent(request);
+    }
 
     /* MS-SMB2 3.3.5.9 pending-open: if this open triggered an ack-required lease
      * break on another holder, hold the SUCCESS response until the holder
@@ -1884,36 +2054,30 @@ chimera_smb_create_open_finish(
      * lands on conn->parked_requests, and an inbound OPLOCK_BREAK ack that settles
      * the file's caching leases resumes it (chimera_smb_create_resume_parked).
      * The open_file ref is held across the wait and dropped on resume. */
-    if (open_file->handle) {
-        struct chimera_server_smb_thread *thread    = request->compound->thread;
-        struct chimera_vfs_state         *vfs_state =
-            thread->vfs_thread->vfs->vfs_state;
-        struct chimera_vfs_open_handle   *oh = open_file->handle;
+    if (will_park) {
+        struct chimera_vfs_open_handle *oh = open_file->handle;
 
-        if (chimera_vfs_state_caching_breaking(vfs_state, oh->fh, oh->fh_len,
-                                               oh->fh_hash, open_file->grant)) {
-            memcpy(request->create.park_fh, oh->fh, oh->fh_len);
-            request->create.park_fh_len  = oh->fh_len;
-            request->create.park_fh_hash = oh->fh_hash;
-            /* The CREATE is now pending on a break ack; mark the handle so a
-             * concurrent replayed DH2Q create with this create_guid is answered
-             * FILE_NOT_AVAILABLE instead of parking too (MS-SMB2 3.3.5.9.10,
-             * smb2.replay.dhv2-pending*).  Keyed on the DH2Q create_guid the
-             * client supplied -- recorded on the open even without a durable
-             * grant (so the NONE-oplock pending variants match too). */
-            if (request->create.ctx_present_mask & CHIMERA_SMB_CREATE_CTX_DH2Q) {
-                open_file->flags |= CHIMERA_SMB_OPEN_FILE_CREATE_PENDING;
-            }
-            chimera_smb_async_interim_begin(request);
-            /* Arm a deadline: if the holder never acks the break, fire at the
-             * break timeout to revoke it and complete this open anyway (MS-SMB2
-             * break-timeout).  Cancelled when an ack resumes the open first. */
-            evpl_add_oneshot_timer(thread->evpl, &request->async.timer,
-                                   chimera_smb_create_park_deadline_cb,
-                                   (uint64_t) vfs_state->default_break_deadline_ms
-                                   * 1000);
-            return;
+        memcpy(request->create.park_fh, oh->fh, oh->fh_len);
+        request->create.park_fh_len  = oh->fh_len;
+        request->create.park_fh_hash = oh->fh_hash;
+        /* The CREATE is now pending on a break ack; mark the handle so a
+         * concurrent replayed DH2Q create with this create_guid is answered
+         * FILE_NOT_AVAILABLE instead of parking too (MS-SMB2 3.3.5.9.10,
+         * smb2.replay.dhv2-pending*).  Keyed on the DH2Q create_guid the
+         * client supplied -- recorded on the open even without a durable
+         * grant (so the NONE-oplock pending variants match too). */
+        if (request->create.ctx_present_mask & CHIMERA_SMB_CREATE_CTX_DH2Q) {
+            open_file->flags |= CHIMERA_SMB_OPEN_FILE_CREATE_PENDING;
         }
+        chimera_smb_async_interim_begin(request);
+        /* Arm a deadline: if the holder never acks the break, fire at the
+         * break timeout to revoke it and complete this open anyway (MS-SMB2
+         * break-timeout).  Cancelled when an ack resumes the open first. */
+        evpl_add_oneshot_timer(thread->evpl, &request->async.timer,
+                               chimera_smb_create_park_deadline_cb,
+                               (uint64_t) vfs_state->default_break_deadline_ms
+                               * 1000);
+        return;
     }
 
     chimera_smb_open_file_release(request, open_file);
@@ -2056,6 +2220,9 @@ chimera_smb_create_resume_parked_conn(
             req->create.r_open_file->flags &=
                 ~CHIMERA_SMB_OPEN_FILE_CREATE_PENDING;
         }
+        /* The file break this open parked on is now acked; emit the deferred
+         * parent dir-lease content break (sequenced after that ack). */
+        chimera_smb_create_finish_deferred_dir_break(req);
         chimera_smb_open_file_release(req, req->create.r_open_file);
         /* async_id is still set, so the final reply carries
          * SMB2_FLAGS_ASYNC_COMMAND matching the interim. */
@@ -2114,6 +2281,27 @@ chimera_smb_create_resume_doorbell_callback(
     DL_FOREACH_SAFE2(thread->active_conns, conn, tmp, active_next)
     {
         chimera_smb_create_resume_parked_conn(thread, vfs_state, conn);
+    }
+
+    /* Drain CREATEs whose share-park ticket resolved on another thread and were
+     * bounced here (chimera_smb_create_share_park_cb) to finish on their owning
+     * thread with the stashed GRANTED/DENIED result. */
+    for ( ; ;) {
+        struct chimera_smb_request *req;
+
+        pthread_mutex_lock(&thread->lease_break_lock);
+        req = thread->share_resume_head;
+        if (req) {
+            thread->share_resume_head = req->async.park_next;
+        }
+        pthread_mutex_unlock(&thread->lease_break_lock);
+
+        if (!req) {
+            break;
+        }
+
+        req->async.park_next = NULL;
+        chimera_smb_create_share_park_finish(req, req->create.gen_resume_result);
     }
 } /* chimera_smb_create_resume_doorbell_callback */
 
@@ -3693,11 +3881,24 @@ build_rqls_response(
     out[18] = 0;
     out[19] = 0;
     /* LeaseFlags (4) — BREAK_IN_PROGRESS when this open joined a lease whose
-     * break is still outstanding; otherwise 0. */
-    out[20] = of->lease_flags & 0xff;
-    out[21] = (of->lease_flags >> 8) & 0xff;
-    out[22] = (of->lease_flags >> 16) & 0xff;
-    out[23] = (of->lease_flags >> 24) & 0xff;
+     * break is still outstanding; PARENT_LEASE_KEY_SET (and the echoed
+     * ParentLeaseKey below) when the v2 open supplied a parent directory lease
+     * key (MS-SMB2 2.2.14.2.11; dirlease.v2_request_parent checks this flag). */
+    uint32_t lease_flags = of->lease_flags;
+
+    if (v2) {
+        uint64_t plk_lo, plk_hi;
+
+        memcpy(&plk_lo, of->parent_lease_key, 8);
+        memcpy(&plk_hi, of->parent_lease_key + 8, 8);
+        if (plk_lo | plk_hi) {
+            lease_flags |= SMB2_LEASE_FLAG_PARENT_LEASE_KEY_SET;
+        }
+    }
+    out[20] = lease_flags & 0xff;
+    out[21] = (lease_flags >> 8) & 0xff;
+    out[22] = (lease_flags >> 16) & 0xff;
+    out[23] = (lease_flags >> 24) & 0xff;
     /* LeaseDuration (8) — reserved. */
     memset(out + 24, 0, 8);
     if (v2) {
@@ -3920,6 +4121,16 @@ chimera_smb_create_reply(
     }
 
  have_create_action:
+
+    /* A directory has no data stream: the CREATE response must report EndOfFile
+     * and AllocationSize as 0 regardless of the backend's on-disk directory size
+     * (memfs reports a block size).  Keyed on the DIRECTORY attribute so it holds
+     * for an OPEN of an existing directory as well as a fresh mkdir (MS-SMB2
+     * 3.3.5.9 SMB2_CREATE response; smbtorture dirlease.v2_request CHECK_CREATED). */
+    if (request->create.r_attrs.smb_attributes & SMB2_FILE_ATTRIBUTE_DIRECTORY) {
+        request->create.r_attrs.smb_size       = 0;
+        request->create.r_attrs.smb_alloc_size = 0;
+    }
 
     evpl_iovec_cursor_append_uint32(reply_cursor, create_action);
 

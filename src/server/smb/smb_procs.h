@@ -289,6 +289,11 @@ void chimera_smb_lease_break_cb(
 void chimera_smb_lease_break_thread_init(
     struct chimera_server_smb_thread *thread);
 
+/* Send all lease-break notifications queued for this thread's connections.
+ * Called from the request reply path so op-triggered breaks follow the reply. */
+void chimera_smb_lease_break_flush(
+    struct chimera_server_smb_thread *thread);
+
 void chimera_smb_lease_break_thread_destroy(
     struct chimera_server_smb_thread *thread);
 

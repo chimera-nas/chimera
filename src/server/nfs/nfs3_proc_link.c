@@ -68,6 +68,8 @@ chimera_nfs3_link(
                         CHIMERA_NFS3_ATTR_MASK,
                         CHIMERA_NFS3_ATTR_WCC_MASK | CHIMERA_VFS_ATTR_ATOMIC,
                         CHIMERA_NFS3_ATTR_MASK,
+                        NULL,
+                        NULL,
                         chimera_nfs3_link_complete,
                         req);
 } /* chimera_nfs3_link */

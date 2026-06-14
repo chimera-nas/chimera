@@ -115,6 +115,8 @@ chimera_s3_put_rename(struct chimera_s3_request *request)
             0,
             0,
             0,
+            NULL,
+            NULL,
             chimera_s3_put_rename_callback,
             request);
     } else {
@@ -131,6 +133,8 @@ chimera_s3_put_rename(struct chimera_s3_request *request)
             CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,
             0,
             0,
+            NULL,
+            NULL,
             chimera_s3_put_link_callback,
             request);
     }

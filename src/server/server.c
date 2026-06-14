@@ -76,6 +76,7 @@ struct chimera_server_config {
     int                                   smb_num_dialects;
     uint32_t                              smb_dialects[16];
     int                                   smb_persistent_handles;
+    int                                   smb_directory_leases;
     int                                   smb_named_streams;
     int                                   smb_signing_required;
     int                                   smb_encryption;
@@ -164,6 +165,12 @@ chimera_server_config_init(void)
     /* SMB3 durable/persistent handles are off by default; they are an
      * opt-in feature gated by the "smb_persistent_handles" config flag. */
     config->smb_persistent_handles = 0;
+
+    /* SMB3 directory leases are off by default; they are an opt-in feature
+     * gated by the "smb_directory_leases" config flag.  When enabled the server
+     * advertises SMB2_GLOBAL_CAP_DIRECTORY_LEASING and grants R/H leases on
+     * directory opens (SMB 3.0+, RqLs v2 only). */
+    config->smb_directory_leases = 0;
 
     /* Named streams (SMB ADS) are off by default; opt-in via the
      * "smb_named_streams" config flag and only honored on backends that
@@ -360,6 +367,20 @@ chimera_server_config_get_smb_persistent_handles(const struct chimera_server_con
 {
     return config->smb_persistent_handles;
 } /* chimera_server_config_get_smb_persistent_handles */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_smb_directory_leases(
+    struct chimera_server_config *config,
+    int                           enable)
+{
+    config->smb_directory_leases = enable;
+} /* chimera_server_config_set_smb_directory_leases */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_smb_directory_leases(const struct chimera_server_config *config)
+{
+    return config->smb_directory_leases;
+} /* chimera_server_config_get_smb_directory_leases */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_smb_named_streams(

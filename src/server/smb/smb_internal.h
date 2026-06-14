@@ -110,6 +110,27 @@ chimera_smb_lease_bits_to_vfs(uint8_t smb_bits)
     return v;
 } /* chimera_smb_lease_bits_to_vfs */
 
+/* Translate an open's stored ParentLeaseKey into the (lo, hi) owner-key pair the
+ * VFS directory-lease break uses for self-exemption.  Returns true (a key is
+ * present, so the matching directory lease must be spared) when the key is
+ * non-zero; a zeroed key (the open carried no v2 ParentLeaseKey) yields false so
+ * the break applies to every directory lease.  An all-zero lease key is not used
+ * as a real key by any client, so testing non-zero is an unambiguous "was set". */
+static inline bool
+chimera_smb_parent_lease_skip(
+    const uint8_t *parent_lease_key,
+    uint64_t      *skip_lo,
+    uint64_t      *skip_hi)
+{
+    uint64_t lo, hi;
+
+    memcpy(&lo, parent_lease_key, 8);
+    memcpy(&hi, parent_lease_key + 8, 8);
+    *skip_lo = lo;
+    *skip_hi = hi;
+    return (lo | hi) != 0;
+} /* chimera_smb_parent_lease_skip */
+
 /* Collapse a granted RWH mask to the closest legacy oplock level (used when an
  * open did not request an RqLs lease).  Legacy oplocks have no separate W/H, so
  * RWH -> BATCH, RW (no H) -> EXCLUSIVE, R-only -> LEVEL_II, none -> NONE. */
@@ -183,6 +204,10 @@ struct chimera_smb_config {
     int                            num_nic_info;
     int                            soft_fail_bad_req;
     int                            persistent_handles;
+    /* SMB3 directory leases: when set the server advertises
+     * SMB2_GLOBAL_CAP_DIRECTORY_LEASING and grants R/H leases on directory
+     * opens (SMB 3.0+, RqLs v2 only).  Off by default. */
+    int                            directory_leases;
     int                            named_streams;
     /* When set, the server advertises signing as mandatory
      * (SMB2_SIGNING_REQUIRED) in NEGOTIATE and FSCTL_VALIDATE_NEGOTIATE_INFO,
@@ -527,6 +552,12 @@ struct chimera_smb_request {
             struct chimera_vfs_pending_acquire gen_ticket;
             uint8_t                            gen_held_granted;
             uint8_t                            gen_parked;
+            /* GRANTED/DENIED result stashed by chimera_smb_create_share_park_cb
+             * when the share-park ticket resolves on another thread, so the
+             * owning thread's resume doorbell can finish the open with it.  The
+             * queue link reuses async.park_next (a gen_parked CREATE is not on
+             * conn->parked_requests). */
+            enum chimera_vfs_lease_result      gen_resume_result;
             uint8_t                            r_is_directory;
             uint32_t                           r_granted_access;
             uint32_t                           r_maximal_access;
@@ -545,6 +576,17 @@ struct chimera_smb_request {
              * and re-attempts the claim until the handle is parked or this
              * many attempts elapse. */
             uint16_t                           reconnect_retries;
+            /* Deferred parent directory-lease content break: when a conflicting
+             * open parks on a FILE caching break (overwrite), its parent
+             * dir-lease content break must be SEQUENCED after the file break is
+             * acked — so it is emitted on resume, not before the park (MS-SMB2;
+             * smbtorture dirlease.overwrite expects break-then-ack-then-break).
+             * The parent_handle is kept alive across the park for the emit. */
+            uint8_t                            dir_break_pending;
+            uint8_t                            dir_break_has_skip;
+            uint32_t                           dir_break_action;
+            uint64_t                           dir_break_skip_lo;
+            uint64_t                           dir_break_skip_hi;
         } create;
 
         struct  {
@@ -765,34 +807,44 @@ struct chimera_smb_request {
         } query_info;
 
         struct {
-            uint8_t                         info_type;
-            uint8_t                         info_class;
-            uint32_t                        buffer_length;
-            uint16_t                        buffer_offset;
-            uint32_t                        addl_info;
-            uint32_t                        flags;
-            struct chimera_smb_open_file   *open_file;
-            struct chimera_vfs_open_handle *parent_handle;
-            struct chimera_smb_file_id      file_id;
-            struct chimera_smb_attrs        attrs;
-            struct chimera_vfs_attrs        vfs_attrs;
+            uint8_t                            info_type;
+            uint8_t                            info_class;
+            uint32_t                           buffer_length;
+            uint16_t                           buffer_offset;
+            uint32_t                           addl_info;
+            uint32_t                           flags;
+            struct chimera_smb_open_file      *open_file;
+            struct chimera_vfs_open_handle    *parent_handle;
+            struct chimera_smb_file_id         file_id;
+            struct chimera_smb_attrs           attrs;
+            struct chimera_vfs_attrs           vfs_attrs;
             /* VFS notify event(s) the set_info callback fires on the parent on
              * success.  0 => default to ATTRS_CHANGED; EndOfFile/Allocation set
              * SIZE_CHANGED|FILE_MODIFIED so a FILE_NOTIFY_CHANGE_SIZE watch
              * fires (smb2.change_notify ChangeSize). */
-            uint32_t                        notify_mask;
+            uint32_t                           notify_mask;
             /* Rename information */
-            struct chimera_smb_rename_info  rename_info;
+            struct chimera_smb_rename_info     rename_info;
+            /* Destination-parent directory-lease conflict park (rename into a
+             * leased directory): a transient SHARE probe (denied=D) on the dst
+             * parent triggers the dir-lease HANDLE break (RH->R) via the share
+             * conflict path and parks the rename until the holder closes
+             * (GRANTED -> rename proceeds) or keeps its handle
+             * (DENIED -> SHARING_VIOLATION).  dirlease.rename_dst_parent. */
+            struct chimera_vfs_lease           dp_probe;
+            struct chimera_vfs_file_state     *dp_file_state;
+            struct chimera_vfs_pending_acquire dp_ticket;
+            uint8_t                            dp_probe_active;
             /* Security descriptor buffer for SMB2_INFO_SECURITY */
-            uint8_t                         sec_buf[2048];
-            uint32_t                        sec_buf_len;
+            uint8_t                            sec_buf[2048];
+            uint32_t                           sec_buf_len;
             /* Outstanding async identity resolves before the SD is decoded for
              * the final time (fan-out join guard). */
-            int                             sd_pending;
+            int                                sd_pending;
             /* Backing storage for the canonical ACL decoded from the incoming
              * security descriptor; vfs_attrs.va_acl points here. */
-            uint8_t                         acl_storage[sizeof(struct chimera_acl) +
-                                                        64 * sizeof(struct chimera_ace)];
+            uint8_t                            acl_storage[sizeof(struct chimera_acl) +
+                                                           64 * sizeof(struct chimera_ace)];
         } set_info;
 
         struct {
@@ -941,6 +993,14 @@ struct chimera_smb_conn {
      * on another thread does not enqueue a send for a connection whose bind is
      * being torn down.  Reset on reuse in chimera_smb_conn_alloc. */
     uint8_t                            lease_break_tearing_down;
+    /* Count of compounds in flight on THIS connection (guarded by the owning
+    * thread's lease_break_lock).  A dir-lease break whose holder connection is
+    * mid-compound is a self-break: the same connection's reply must precede the
+    * break notification, so it is deferred and flushed at that reply.  A break
+    * whose holder connection is idle (in_compound == 0) is a cross-connection
+    * break — fired immediately, since a conflicting open may PARK on its ack and
+    * the holder will never otherwise reply to trigger a flush (deadlock). */
+    int                                in_compound;
     enum evpl_protocol_id              protocol;
     uint16_t                           dialect;
     uint16_t                           smbvers;
@@ -1299,6 +1359,12 @@ struct chimera_server_smb_thread {
     struct evpl_doorbell                lease_break_doorbell;
     struct chimera_smb_lease_break_msg *lease_break_ready;
     pthread_mutex_t                     lease_break_lock;
+    /* Count of compounds this thread is currently processing (dispatch ..
+     * reply).  A break_cb that queues a notification while this is non-zero
+     * skips the doorbell: the in-flight request's reply path flushes the queue
+     * right after its reply, so the reply reaches the client before the break
+     * (MS-SMB2 ordering for op-triggered breaks).  Guarded by lease_break_lock. */
+    uint32_t                            active_compounds;
 
     /* Lease-break *resume* doorbell: when an inbound OPLOCK_BREAK ack settles a
      * file's caching lease, CREATEs parked waiting on that break may live on a
@@ -1311,6 +1377,15 @@ struct chimera_server_smb_thread {
      * (chimera_vfs_state_caching_breaking() is false).  The re-check makes a
      * parameterless broadcast safe -- only genuinely-settled creates complete. */
     struct evpl_doorbell                lease_resume_doorbell;
+
+    /* Cross-thread queue of CREATEs parked on a share/handle-lease conflict
+     * (chimera_smb_create_share_park_cb) whose vfs ticket resolved on ANOTHER
+     * thread.  The deferred CREATE response's iovecs are thread-local, so the
+     * resolving thread enqueues the request here (with the GRANTED/DENIED result
+     * stashed on it) and rings this thread's lease_resume_doorbell; the handler
+     * drains the queue and completes each on this, its owning, thread.  Guarded
+     * by lease_break_lock. */
+    struct chimera_smb_request         *share_resume_head;
 
     /* Active (non-pooled) connections owned by this thread, threaded on
      * conn->active_prev / conn->active_next.  Lets a thread walk every
@@ -1722,6 +1797,7 @@ chimera_smb_conn_alloc(struct chimera_server_smb_thread *thread)
     if (conn) {
         LL_DELETE(thread->free_conns, conn);
         conn->lease_break_tearing_down = 0;
+        conn->in_compound              = 0;
     } else {
         conn = calloc(1, sizeof(*conn));
     }

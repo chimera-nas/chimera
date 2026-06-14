@@ -414,6 +414,7 @@ chimera_vfs_remove_at(
     int                              child_fh_len,
     uint64_t                         pre_attr_mask,
     uint64_t                         post_attr_mask,
+    const uint8_t                   *parent_lease_skip,
     chimera_vfs_remove_at_callback_t callback,
     void                            *private_data);
 
@@ -635,6 +636,8 @@ chimera_vfs_rename_at(
     int                              target_fh_len,
     uint64_t                         pre_attr_mask,
     uint64_t                         post_attr_mask,
+    const uint8_t                   *parent_lease_skip,
+    struct chimera_vfs_open_handle  *op_handle,
     chimera_vfs_rename_at_callback_t callback,
     void                            *private_data);
 
@@ -647,20 +650,22 @@ typedef void (*chimera_vfs_link_at_callback_t)(
 
 void
 chimera_vfs_link_at(
-    struct chimera_vfs_thread     *thread,
-    const struct chimera_vfs_cred *cred,
-    const void                    *fh,
-    int                            fhlen,
-    const void                    *dir_fh,
-    int                            dir_fhlen,
-    const char                    *name,
-    int                            namelen,
-    unsigned int                   replace,
-    uint64_t                       attr_mask,
-    uint64_t                       pre_attr_mask,
-    uint64_t                       post_attr_mask,
-    chimera_vfs_link_at_callback_t callback,
-    void                          *private_data);
+    struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
+    const void                     *fh,
+    int                             fhlen,
+    const void                     *dir_fh,
+    int                             dir_fhlen,
+    const char                     *name,
+    int                             namelen,
+    unsigned int                    replace,
+    uint64_t                        attr_mask,
+    uint64_t                        pre_attr_mask,
+    uint64_t                        post_attr_mask,
+    const uint8_t                  *parent_lease_skip,
+    struct chimera_vfs_open_handle *op_handle,
+    chimera_vfs_link_at_callback_t  callback,
+    void                           *private_data);
 
 /* Key-Value Operations */
 

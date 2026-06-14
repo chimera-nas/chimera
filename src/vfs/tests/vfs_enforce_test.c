@@ -275,7 +275,7 @@ remove_as(
     uint32_t                        child_fh_len)
 {
     chimera_vfs_remove_at(ctx->vfs_thread, cred, dir, name, strlen(name),
-                          child_fh, child_fh_len, 0, 0, remove_cb, ctx);
+                          child_fh, child_fh_len, 0, 0, NULL, remove_cb, ctx);
     wait_done(ctx);
     return ctx->status;
 } /* remove_as */

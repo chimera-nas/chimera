@@ -51,13 +51,21 @@ chimera_vfs_remove_at_complete(struct chimera_vfs_request *request)
         request->remove_at.r_removed_attr.va_set_mask &=
             ~CHIMERA_VFS_ATTR_MASK_STAT;
 
-        chimera_vfs_notify_emit(thread->vfs->vfs_notify,
-                                request->remove_at.handle->fh,
-                                request->remove_at.handle->fh_len,
-                                action,
-                                request->remove_at.name,
-                                request->remove_at.namelen,
-                                NULL, 0);
+        uint64_t skip_lo = 0, skip_hi = 0;
+
+        if (request->remove_at.parent_lease_skip_valid) {
+            memcpy(&skip_lo, request->remove_at.parent_lease_skip, 8);
+            memcpy(&skip_hi, request->remove_at.parent_lease_skip + 8, 8);
+        }
+        chimera_vfs_notify_emit_lease(thread->vfs->vfs_notify,
+                                      request->remove_at.handle->fh,
+                                      request->remove_at.handle->fh_len,
+                                      action,
+                                      request->remove_at.name,
+                                      request->remove_at.namelen,
+                                      NULL, 0,
+                                      skip_lo, skip_hi,
+                                      request->remove_at.parent_lease_skip_valid);
 
         /* Signal any CHANGE_NOTIFY armed on a handle to the object that was
          * just removed (its own FH, distinct from the parent emit above) so
@@ -122,6 +130,7 @@ chimera_vfs_remove_at_dispatch(
     int                              child_fh_len,
     uint64_t                         pre_attr_mask,
     uint64_t                         post_attr_mask,
+    const uint8_t                   *parent_lease_skip,
     chimera_vfs_remove_at_callback_t callback,
     void                            *private_data)
 {
@@ -134,14 +143,20 @@ chimera_vfs_remove_at_dispatch(
         return;
     }
 
-    request->opcode                                = CHIMERA_VFS_OP_REMOVE_AT;
-    request->complete                              = chimera_vfs_remove_at_complete;
-    request->remove_at.handle                      = handle;
-    request->remove_at.name                        = name;
-    request->remove_at.namelen                     = namelen;
-    request->remove_at.name_hash                   = chimera_vfs_hash(name, namelen);
-    request->remove_at.child_fh                    = child_fh;
-    request->remove_at.child_fh_len                = child_fh_len;
+    request->opcode                 = CHIMERA_VFS_OP_REMOVE_AT;
+    request->complete               = chimera_vfs_remove_at_complete;
+    request->remove_at.handle       = handle;
+    request->remove_at.name         = name;
+    request->remove_at.namelen      = namelen;
+    request->remove_at.name_hash    = chimera_vfs_hash(name, namelen);
+    request->remove_at.child_fh     = child_fh;
+    request->remove_at.child_fh_len = child_fh_len;
+    if (parent_lease_skip) {
+        memcpy(request->remove_at.parent_lease_skip, parent_lease_skip, 16);
+        request->remove_at.parent_lease_skip_valid = 1;
+    } else {
+        request->remove_at.parent_lease_skip_valid = 0;
+    }
     request->remove_at.r_dir_pre_attr.va_req_mask  = pre_attr_mask;
     request->remove_at.r_dir_pre_attr.va_set_mask  = 0;
     request->remove_at.r_dir_post_attr.va_req_mask = post_attr_mask | CHIMERA_VFS_ATTR_MASK_CACHEABLE;
@@ -177,6 +192,8 @@ struct chimera_vfs_remove_at_gate {
     int                              child_fh_len;
     uint64_t                         pre_attr_mask;
     uint64_t                         post_attr_mask;
+    uint8_t                          parent_lease_skip[16];
+    uint8_t                          parent_lease_skip_valid;
     chimera_vfs_remove_at_callback_t callback;
     void                            *private_data;
 };
@@ -197,7 +214,10 @@ chimera_vfs_remove_at_gate_complete(
     chimera_vfs_remove_at_dispatch(gate->thread, gate->cred, gate->handle,
                                    gate->name, gate->namelen, gate->child_fh,
                                    gate->child_fh_len, gate->pre_attr_mask,
-                                   gate->post_attr_mask, gate->callback,
+                                   gate->post_attr_mask,
+                                   gate->parent_lease_skip_valid ?
+                                   gate->parent_lease_skip : NULL,
+                                   gate->callback,
                                    gate->private_data);
     free(gate);
 } /* chimera_vfs_remove_at_gate_complete */
@@ -213,6 +233,7 @@ chimera_vfs_remove_at(
     int                              child_fh_len,
     uint64_t                         pre_attr_mask,
     uint64_t                         post_attr_mask,
+    const uint8_t                   *parent_lease_skip,
     chimera_vfs_remove_at_callback_t callback,
     void                            *private_data)
 {
@@ -245,8 +266,14 @@ chimera_vfs_remove_at(
         gate->child_fh_len   = child_fh_len;
         gate->pre_attr_mask  = pre_attr_mask;
         gate->post_attr_mask = post_attr_mask;
-        gate->callback       = callback;
-        gate->private_data   = private_data;
+        if (parent_lease_skip) {
+            memcpy(gate->parent_lease_skip, parent_lease_skip, 16);
+            gate->parent_lease_skip_valid = 1;
+        } else {
+            gate->parent_lease_skip_valid = 0;
+        }
+        gate->callback     = callback;
+        gate->private_data = private_data;
 
         if (child_fh && child_fh_len > 0) {
             chimera_vfs_gate_delete(thread, cred, handle->fh, handle->fh_len,
@@ -265,5 +292,6 @@ chimera_vfs_remove_at(
 
     chimera_vfs_remove_at_dispatch(thread, cred, handle, name, namelen,
                                    child_fh, child_fh_len, pre_attr_mask,
-                                   post_attr_mask, callback, private_data);
+                                   post_attr_mask, parent_lease_skip,
+                                   callback, private_data);
 } /* chimera_vfs_remove_at */

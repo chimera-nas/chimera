@@ -94,7 +94,7 @@ nfs4_remove_ds_root_opened(
     chimera_vfs_remove_at(ctx->req->thread->vfs_thread, &ctx->req->cred,
                           ctx->ds_root_handle,
                           ctx->backing_name, strlen(ctx->backing_name),
-                          NULL, 0, 0, 0,
+                          NULL, 0, 0, 0, NULL,
                           nfs4_remove_ds_backing_complete, ctx);
 } /* nfs4_remove_ds_root_opened */
 
@@ -140,7 +140,7 @@ nfs4_remove_mds(struct nfs4_remove_ctx *ctx)
     chimera_vfs_remove_at(req->thread->vfs_thread, &req->cred,
                           ctx->parent_handle,
                           args->target.data, args->target.len,
-                          NULL, 0, 0, 0,
+                          NULL, 0, 0, 0, NULL,
                           nfs4_remove_mds_complete, ctx);
 } /* nfs4_remove_mds */
 

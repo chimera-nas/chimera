@@ -103,6 +103,7 @@ chimera_remove_at_lookup_complete(
         request->remove.child_fh_len,
         0,
         0,
+        NULL,
         chimera_remove_dispatch_at_complete,
         request);
 } /* chimera_remove_at_lookup_complete */

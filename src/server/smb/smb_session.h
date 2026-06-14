@@ -68,6 +68,12 @@ struct chimera_smb_file_id {
  * rather than parking a second time and timing out (MS-SMB2 3.3.5.9.10):
  * smb2.replay.dhv2-pending*. Cleared on resume / break-deadline. */
 #define CHIMERA_SMB_OPEN_FILE_CREATE_PENDING       0x00000200
+/* The file's data was modified through this open (a write occurred).  A write
+ * does NOT immediately break the parent directory lease -- the file's size/mtime
+ * become visible in the directory only at close -- so the parent dir-lease
+ * content break is deferred to this open's close (MS-SMB2; dirlease.v2_request
+ * "write ... only the close ... break the directory lease"). */
+#define CHIMERA_SMB_OPEN_FILE_FLAG_MODIFIED        0x00000400
 
 /* Bits identifying which CREATE contexts a client supplied on the open. Mirrored
  * from request->create.ctx_present_mask into the open file so later phases

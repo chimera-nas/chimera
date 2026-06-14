@@ -319,6 +319,7 @@ chimera_s3_part_destroy_open_dir_callback(
         0,
         0,
         0,
+        NULL,
         chimera_s3_part_destroy_remove_callback,
         ctx);
 } /* chimera_s3_part_destroy_open_dir_callback */
@@ -2343,6 +2344,8 @@ chimera_s3_complete_finalize(struct chimera_s3_complete_ctx *ctx)
             0,
             0,
             0,
+            NULL,
+            NULL,
             chimera_s3_complete_rename_callback,
             ctx);
     } else {
@@ -2359,6 +2362,8 @@ chimera_s3_complete_finalize(struct chimera_s3_complete_ctx *ctx)
             CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,
             0,
             0,
+            NULL,
+            NULL,
             chimera_s3_complete_link_callback,
             ctx);
     }

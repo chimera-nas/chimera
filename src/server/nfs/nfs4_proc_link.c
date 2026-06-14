@@ -77,6 +77,8 @@ chimera_nfs4_link_open_callback(
         0,
         CHIMERA_VFS_ATTR_MTIME,
         CHIMERA_VFS_ATTR_MTIME,
+        NULL,
+        NULL,
         chimera_nfs4_link_complete,
         req);
 

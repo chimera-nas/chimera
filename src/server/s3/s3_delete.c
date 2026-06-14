@@ -60,6 +60,7 @@ chimera_s3_delete_open_callback(
                           0,
                           0,
                           0,
+                          NULL,
                           chimera_s3_delete_remove_callback,
                           request);
 
