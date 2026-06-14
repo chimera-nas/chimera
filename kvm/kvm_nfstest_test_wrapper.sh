@@ -223,25 +223,30 @@ if [ "$NFSTEST_PROGRAM" = "nfstest_interop" ]; then
     esac
 fi
 
+# Capture tuning applied to every nfstest program.  nfstest brackets short
+# operations with a fresh tcpdump per trace window; its default capture buffer
+# is 192 MiB (--tbsize 192k -> tcpdump -B 196608) and the pcap dump file is
+# fully (stdio) buffered.  Both bite in the microvm:
+#   - a fresh 192 MiB-buffered tcpdump per window starves the guest -- the
+#     nfstest_alloc shard OOM-kills tcpdump repeatedly -- so shrink it to 4 MiB
+#     (a capture is a handful of packets; the on-disk trace size is unaffected).
+#   - the stdio buffer never fills for a tiny capture, so stopping the trace can
+#     drop the unflushed header+packets ("Packet trace file is empty").  Run
+#     tcpdump packet-buffered (-U) so every packet -- and the pcap header -- is
+#     written to disk as captured, surviving the stop regardless of kill signal.
+NFSTEST_EXTRA=" --tcpdump '/usr/bin/tcpdump -U' --tbsize 4k"
+
 # Skip the perf01 group of nfstest_alloc: it is a performance benchmark
 # (ALLOCATE must beat zero-init by some margin), environment-sensitive and not a
 # correctness gate.
-NFSTEST_EXTRA=""
 if [ "$NFSTEST_PROGRAM" = "nfstest_alloc" ]; then
-    NFSTEST_EXTRA=" --runtest ^perf01"
+    NFSTEST_EXTRA="${NFSTEST_EXTRA} --runtest ^perf01"
 fi
 
-# nfstest_sparse verifies SEEK on the wire by bracketing each individual lseek
-# with a fresh tcpdump capture that holds only a handful of packets.  tcpdump's
-# pcap dump file is fully (stdio) buffered by default, so a tiny capture never
-# fills the buffer: when nfstest stops the trace the unflushed header+packets
-# are lost and the test aborts with "Packet trace file is empty".  Run tcpdump
-# packet-buffered (-U) so every packet -- and the pcap header -- is written to
-# disk as it is captured, surviving the stop regardless of the kill signal.
-# Also shrink the capture buffer (192 MiB -> 4 MiB; faster to allocate/attach in
-# the microvm) and give a flush delay before the trace is stopped.
+# nfstest_sparse's per-lseek trace windows are the tightest (one SEEK each), so
+# give tcpdump extra time to flush before the trace is stopped.
 if [ "$NFSTEST_PROGRAM" = "nfstest_sparse" ]; then
-    NFSTEST_EXTRA=" --tcpdump '/usr/bin/tcpdump -U' --tbsize 4k --trcdelay 3"
+    NFSTEST_EXTRA="${NFSTEST_EXTRA} --trcdelay 3"
 fi
 
 # nfstest runs as root inside the guest, mounts the share itself, and finds its
