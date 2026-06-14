@@ -12,7 +12,7 @@ on:
 jobs:
   syntax-check:
     name: Check code formatting with uncrustify
-    runs-on: arc-amd64
+    runs-on: arc-small
     
     steps:
       - name: Checkout repository

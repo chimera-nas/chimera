@@ -629,7 +629,7 @@ jobs:
     name: Report
     needs: [test, test-dev]
     if: ${{ always() && github.event_name != 'pull_request' }}
-    runs-on: arc-amd64
+    runs-on: arc-small
     permissions:
       pull-requests: write
       contents: read
@@ -742,7 +742,7 @@ jobs:
     name: Compiles complete
     needs: [build-dev, build-os]
     if: ${{ github.event_name != 'pull_request' }}
-    runs-on: arc-amd64
+    runs-on: arc-small
     permissions:
       contents: read
     steps:
@@ -874,7 +874,7 @@ jobs:
     name: Collect flaky-test markers
     needs: [test, test-dev]
     if: ${{ always() }}
-    runs-on: arc-amd64
+    runs-on: arc-small
     permissions:
       contents: read
       issues: write
@@ -944,7 +944,7 @@ jobs:
     name: Flake review gate
     needs: collect-flakes
     if: ${{ always() }}
-    runs-on: arc-amd64
+    runs-on: arc-small
     permissions:
       contents: read
     environment: ${{ needs.collect-flakes.outputs.flaky == 'true' && 'flake-review' || '' }}
@@ -975,7 +975,7 @@ jobs:
       - test-dev
       - static-analysis
     if: ${{ always() }}
-    runs-on: arc-amd64
+    runs-on: arc-small
     permissions:
       contents: read
     steps:
