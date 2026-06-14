@@ -185,6 +185,19 @@ chimera_smb_lease_break_cb(
     uint8_t                           lease_key[16];
     uint64_t                          file_id_pid, file_id_vid;
 
+    /* Everything the post-lock notification/resume path needs is snapshotted
+     * into these locals while file->lock is held.  After the lock is dropped the
+     * grant may be freed and the open_file recycled by a concurrent close (the
+     * closing path unlinks the member and releases the grant under file->lock,
+     * then recycles the open under the tree bucket lock), so neither object may
+     * be dereferenced again below. */
+    bool                              is_lease_break     = false;
+    uint8_t                           current_smb        = 0;
+    uint8_t                           new_smb            = 0;
+    uint8_t                           new_oplock_level   = 0;
+    uint16_t                          new_epoch          = 0;
+    bool                              break_ack_required = false;
+
     /* Select a live member under the grant's file->lock (the holder list is
      * mutated by add/remove-member under the same lock).  A member is live when
      * its create_conn is still set and it has not been closed.
@@ -218,6 +231,68 @@ chimera_smb_lease_break_cb(
         memcpy(lease_key, open_file->lease_key, 16);
         file_id_pid = open_file->file_id.pid;
         file_id_vid = open_file->file_id.vid;
+
+        /* needed_mode is the *retained* mask the holder may keep, intersected
+         * with what it currently holds:
+         *   - A conflicting OPEN passes R: the holder keeps a shared read cache
+         *     and gives up write/handle caching -- it downgrades to LEVEL_II.
+         *   - A WRITE invalidation (and a namespace recall) passes 0: the cache
+         *     is stale / the name is going away, so it breaks all the way to NONE.
+         *   - A FLUSH recall (data setattr) passes R|H: the holder writes back its
+         *     dirty data but keeps its read + handle cache (no full re-lease).
+         * Intersecting with granted means a holder that does not hold a retained
+         * bit simply loses it (e.g. an exclusive W-only oplock flushed with R|H
+         * keeps only R).
+         *
+         * All grant/open_file bookkeeping below runs *under file->lock*: once the
+         * lock is dropped a concurrent close can unlink this member, release (and
+         * free) the grant, and recycle the open_file, so the epoch bump, the
+         * lease/oplock state writes, and the break_ack_required flag would race a
+         * use-after-free if performed after the unlock.  The doorbell send is the
+         * only thing deferred past the lock, and it uses the snapshotted locals. */
+        new_vfs = lease->mode.granted & needed_mode;
+
+        if (oplock_level == SMB2_OPLOCK_LEVEL_LEASE) {
+            /* SMB2 lease (RqLs) — §2.2.23.2 lease-variant notification. */
+            is_lease_break = true;
+            current_smb    = chimera_smb_vfs_to_lease_bits(lease->mode.granted);
+            new_smb        = chimera_smb_vfs_to_lease_bits(new_vfs);
+
+            /* The lease epoch lives on the GRANT so all coalesced opens share one
+             * monotonic counter (MS-SMB2 3.3.5.9.11): bump it once per break.
+             * Only a v2 lease versions its state; a v1 lease breaks with epoch 0. */
+            if (grant->is_v2) {
+                grant->epoch++;
+            }
+            open_file->lease_epoch = grant->is_v2 ? grant->epoch : 0;
+            open_file->lease_state = new_smb;
+            new_epoch              = open_file->lease_epoch;
+
+            /* The client must acknowledge only when the break strips write or
+             * handle caching; dropping read caching alone needs no ack.  Record
+             * this on the grant so an open that triggered the break knows whether
+             * to park waiting for an ack (chimera_vfs_state_caching_breaking). */
+            break_ack_required = ((current_smb & ~new_smb) &
+                                  (SMB2_LEASE_WRITE_CACHING |
+                                   SMB2_LEASE_HANDLE_CACHING)) != 0;
+            grant->break_ack_required = break_ack_required;
+        } else {
+            /* Legacy oplock — §2.2.23.1 notification keyed by FileId.  Break to
+             * LEVEL_II when a read cache survives, otherwise to NONE. */
+            new_oplock_level = (new_vfs & CHIMERA_VFS_LEASE_MODE_R)
+                               ? SMB2_OPLOCK_LEVEL_II
+                               : SMB2_OPLOCK_LEVEL_NONE;
+
+            /* Breaking an exclusive/batch oplock expects the client to
+             * acknowledge; breaking a LEVEL_II oplock (to NONE) does not -- a
+             * client ack for that is a protocol error (see the ack handler). */
+            break_ack_required =
+                (oplock_level == SMB2_OPLOCK_LEVEL_EXCLUSIVE ||
+                 oplock_level == SMB2_OPLOCK_LEVEL_BATCH);
+            open_file->oplock_break_ack_required = break_ack_required;
+            grant->break_ack_required            = break_ack_required;
+            open_file->oplock_level              = new_oplock_level;
+        }
     }
     if (!open_file && (lease->mode.granted & CHIMERA_VFS_LEASE_MODE_W)) {
         /* Breaking a WRITE-caching holder none of whose opens can be notified:
@@ -248,104 +323,41 @@ chimera_smb_lease_break_cb(
         return;
     }
 
-    /* needed_mode is the *retained* mask the holder may keep, intersected with
-     * what it currently holds:
-     *   - A conflicting OPEN passes R: the holder keeps a shared read cache and
-     *     gives up write/handle caching -- it downgrades to LEVEL_II.
-     *   - A WRITE invalidation (and a namespace recall) passes 0: the cache is
-     *     stale / the name is going away, so it breaks all the way to NONE.
-     *   - A FLUSH recall (data setattr) passes R|H: the holder writes back its
-     *     dirty data but keeps its read + handle cache (no full re-lease).
-     * Intersecting with granted means a holder that does not hold a retained bit
-     * simply loses it (e.g. an exclusive W-only oplock flushed with R|H keeps
-     * only R). */
-    new_vfs = lease->mode.granted & needed_mode;
+    /* From here on the grant and open_file may already have been freed/recycled
+     * by a concurrent close: only the snapshotted locals are used.
+     *
+     * break_cb may run on the breaker's thread, but the OPLOCK_BREAK notification
+     * must be sent on the holder connection's owning thread because evpl iovec
+     * pools and binds are thread-local.  Use the snapshotted conn (captured under
+     * file->lock above) — do NOT re-read open_file->create_conn here, which
+     * conn_free may have cleared to NULL (or recycled) by this point. */
+    {
+        struct chimera_smb_lease_break_msg *msg;
 
-    if (oplock_level == SMB2_OPLOCK_LEVEL_LEASE) {
-        /* SMB2 lease (RqLs) — §2.2.23.2 lease-variant notification. */
-        uint8_t current_smb = chimera_smb_vfs_to_lease_bits(lease->mode.granted);
-        uint8_t new_smb     = chimera_smb_vfs_to_lease_bits(new_vfs);
-
-        /* The lease epoch lives on the GRANT so all coalesced opens share one
-         * monotonic counter (MS-SMB2 3.3.5.9.11): bump it once per break.  Only a
-         * v2 lease versions its state; a v1 lease breaks with epoch 0. */
-        if (grant->is_v2) {
-            grant->epoch++;
-        }
-        open_file->lease_epoch = grant->is_v2 ? grant->epoch : 0;
-        open_file->lease_state = new_smb;
-
-        /* The client must acknowledge only when the break strips write or handle
-         * caching; dropping read caching alone needs no ack.  Record this on the
-         * grant so an open that triggered the break knows whether to park waiting
-         * for an ack (chimera_vfs_state_caching_breaking). */
-        bool ack_req = ((current_smb & ~new_smb) &
-                        (SMB2_LEASE_WRITE_CACHING |
-                         SMB2_LEASE_HANDLE_CACHING)) != 0;
-        grant->break_ack_required = ack_req;
-
-        /* break_cb may run on the breaker's thread, but the OPLOCK_BREAK
-         * notification must be sent on the holder connection's owning thread
-         * because evpl iovec pools and binds are thread-local.  Use the
-         * snapshotted conn (captured under file->lock above) — do NOT re-read
-         * open_file->create_conn here, which conn_free may have cleared to NULL
-         * by this point. */
-        {
-            struct chimera_smb_lease_break_msg *msg;
-
-            pthread_mutex_lock(&conn_thread->lease_break_lock);
-            if (!conn->lease_break_tearing_down) {
-                msg           = calloc(1, sizeof(*msg));
-                msg->conn     = conn;
+        pthread_mutex_lock(&conn_thread->lease_break_lock);
+        if (!conn->lease_break_tearing_down) {
+            msg       = calloc(1, sizeof(*msg));
+            msg->conn = conn;
+            if (is_lease_break) {
                 msg->is_lease = true;
                 memcpy(msg->lease_key, lease_key, 16);
-                msg->current_state             = current_smb;
-                msg->new_state                 = new_smb;
-                msg->ack_required              = ack_req;
-                msg->new_epoch                 = open_file->lease_epoch;
-                msg->next                      = conn_thread->lease_break_ready;
-                conn_thread->lease_break_ready = msg;
-                pthread_mutex_unlock(&conn_thread->lease_break_lock);
-                evpl_ring_doorbell(&conn_thread->lease_break_doorbell);
+                msg->current_state = current_smb;
+                msg->new_state     = new_smb;
+                msg->ack_required  = break_ack_required;
+                msg->new_epoch     = new_epoch;
             } else {
-                pthread_mutex_unlock(&conn_thread->lease_break_lock);
+                msg->is_lease         = false;
+                msg->file_id_pid      = file_id_pid;
+                msg->file_id_vid      = file_id_vid;
+                msg->new_oplock_level = new_oplock_level;
             }
+            msg->next                      = conn_thread->lease_break_ready;
+            conn_thread->lease_break_ready = msg;
+            pthread_mutex_unlock(&conn_thread->lease_break_lock);
+            evpl_ring_doorbell(&conn_thread->lease_break_doorbell);
+        } else {
+            pthread_mutex_unlock(&conn_thread->lease_break_lock);
         }
-    } else {
-        /* Legacy oplock — §2.2.23.1 notification keyed by FileId.  Break
-         * to LEVEL_II when a read cache survives, otherwise to NONE. */
-        uint8_t new_level = (new_vfs & CHIMERA_VFS_LEASE_MODE_R)
-                            ? SMB2_OPLOCK_LEVEL_II
-                            : SMB2_OPLOCK_LEVEL_NONE;
-
-        /* Breaking an exclusive/batch oplock expects the client to
-         * acknowledge; breaking a LEVEL_II oplock (to NONE) does not -- a
-         * client ack for that is a protocol error (see the ack handler). */
-        open_file->oplock_break_ack_required =
-            (oplock_level == SMB2_OPLOCK_LEVEL_EXCLUSIVE ||
-             oplock_level == SMB2_OPLOCK_LEVEL_BATCH);
-        grant->break_ack_required = open_file->oplock_break_ack_required;
-
-        {
-            struct chimera_smb_lease_break_msg *msg;
-
-            pthread_mutex_lock(&conn_thread->lease_break_lock);
-            if (!conn->lease_break_tearing_down) {
-                msg                            = calloc(1, sizeof(*msg));
-                msg->conn                      = conn;
-                msg->is_lease                  = false;
-                msg->file_id_pid               = file_id_pid;
-                msg->file_id_vid               = file_id_vid;
-                msg->new_oplock_level          = new_level;
-                msg->next                      = conn_thread->lease_break_ready;
-                conn_thread->lease_break_ready = msg;
-                pthread_mutex_unlock(&conn_thread->lease_break_lock);
-                evpl_ring_doorbell(&conn_thread->lease_break_doorbell);
-            } else {
-                pthread_mutex_unlock(&conn_thread->lease_break_lock);
-            }
-        }
-        open_file->oplock_level = new_level;
     }
 
     /* A break that needs no client ack (it stripped only read caching, e.g. the
@@ -357,8 +369,9 @@ chimera_smb_lease_break_cb(
      * this file is resumable.  Ring the resume doorbell on this thread AND every
      * peer (the broadcast skips its origin) so each re-sweeps and completes its
      * parked CREATEs instead of stalling to the break deadline (cthon special
-     * hang).  Use the snapshotted conn_thread — same reason as above. */
-    if (!grant->break_ack_required) {
+     * hang).  Use the snapshotted conn_thread and break_ack_required — same reason
+     * as above (the grant may be gone). */
+    if (!break_ack_required) {
         evpl_ring_doorbell(&conn_thread->lease_resume_doorbell);
         chimera_smb_create_resume_parked_broadcast(conn_thread);
     }
