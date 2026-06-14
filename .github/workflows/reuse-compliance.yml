@@ -11,7 +11,7 @@ on:
 
 jobs:
   reuse-lint:
-    runs-on: arc-amd64
+    runs-on: arc-small
     
     steps:
     - name: Checkout repository

@@ -144,7 +144,7 @@ jobs:
     name: Docker build complete
     needs: build-and-push
     if: ${{ always() }}
-    runs-on: arc-amd64
+    runs-on: arc-small
     permissions:
       contents: read
     steps:

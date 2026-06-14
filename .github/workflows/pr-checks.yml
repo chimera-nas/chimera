@@ -21,14 +21,14 @@ permissions:
 jobs:
   ci-complete:
     name: CI complete
-    runs-on: arc-amd64
+    runs-on: arc-small
     steps:
       - name: PR placeholder
         run: echo "PR placeholder -- the full build/test matrix runs in the merge queue (merge_group)."
 
   flake-gate:
     name: Flake review gate
-    runs-on: arc-amd64
+    runs-on: arc-small
     # No environment here: flaky-test review only applies to the real test run,
     # which happens in the merge queue.  Keeping this a plain no-op means a PR
     # never sits waiting on a manual approval just to be queued.
@@ -38,7 +38,7 @@ jobs:
 
   docker-build-complete:
     name: Docker build complete
-    runs-on: arc-amd64
+    runs-on: arc-small
     steps:
       - name: PR placeholder
         run: echo "PR placeholder -- docker image builds run in the merge queue (merge_group)."
