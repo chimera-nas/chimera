@@ -175,6 +175,35 @@ chimera_smb_server_init(
 
     *(XXH128_hash_t *) shared->guid = XXH3_128bits(shared->config.identity, strlen(shared->config.identity));
 
+    /* Derive the server's account-domain (machine) SID S-1-5-21-X-Y-Z once, from
+     * a stable per-host identity (/etc/machine-id, else hostname), so the SIDs
+     * the LSARPC/SAMR services hand out are unique per server and survive a
+     * restart -- a precondition for any stored NT-form ACL to stay valid.  This
+     * replaces the former fixed S-1-5-21-1111-2222-3333. */
+    {
+        char          hostid[256] = { 0 };
+        FILE         *fp          = fopen("/etc/machine-id", "r");
+        XXH128_hash_t h;
+
+        if (fp) {
+            if (!fgets(hostid, sizeof(hostid), fp)) {
+                hostid[0] = '\0';
+            }
+            fclose(fp);
+        }
+        if (hostid[0] == '\0' && gethostname(hostid, sizeof(hostid)) != 0) {
+            hostid[0] = '\0';
+        }
+        if (hostid[0] == '\0') {
+            snprintf(hostid, sizeof(hostid), "chimera-%lx", (unsigned long) gethostid());
+        }
+
+        h                             = XXH3_128bits(hostid, strlen(hostid));
+        shared->machine_domain_sub[0] = (uint32_t) h.low64 | 1;   /* never zero */
+        shared->machine_domain_sub[1] = (uint32_t) (h.low64 >> 32);
+        shared->machine_domain_sub[2] = (uint32_t) h.high64;
+    }
+
     shared->svc      = GSS_C_NO_NAME;
     shared->srv_cred = GSS_C_NO_CREDENTIAL;
 

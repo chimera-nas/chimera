@@ -1279,6 +1279,10 @@ struct chimera_server_smb_shared {
     int                               rdma;
     enum evpl_protocol_id             tcp_protocol;
     uint8_t                           guid[SMB2_GUID_SIZE];
+    /* Account-domain (machine) SID sub-authorities: S-1-5-21-X-Y-Z, derived once
+     * at startup from a stable per-host id (see chimera_smb_server_init).  The
+     * LSARPC/SAMR services issue domain-relative SIDs under this. */
+    uint32_t                          machine_domain_sub[3];
     gss_name_t                        svc;
     gss_cred_id_t                     srv_cred;
     struct chimera_vfs               *vfs;
