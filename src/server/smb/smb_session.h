@@ -128,6 +128,13 @@ struct chimera_smb_open_file {
     enum chimera_smb_open_file_type   type;
     enum chimera_smb_pipe_magic       pipe_magic;
     chimera_smb_pipe_transceive_t     pipe_transceive;
+    /* DCE/RPC-over-named-pipe (ncacn_np) transport via SMB2 WRITE/READ: a WRITE
+     * runs the request PDU through pipe_transceive and stashes the response PDU
+     * here for one or more following READs to drain.  NULL when no response is
+     * pending.  (The IOCTL FSCTL_PIPE_TRANSCEIVE transport does not use this.) */
+    uint8_t                          *rpc_resp;
+    uint32_t                          rpc_resp_len;
+    uint32_t                          rpc_resp_off;
     struct UT_hash_handle             hh;
     struct chimera_smb_file_id        file_id;
     struct chimera_vfs_open_handle   *handle;

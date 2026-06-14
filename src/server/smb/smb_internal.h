@@ -1464,6 +1464,14 @@ chimera_smb_open_file_free(
     struct chimera_server_smb_thread *thread,
     struct chimera_smb_open_file     *open_file)
 {
+    /* Release any undrained ncacn_np pipe response and reset the stash so a
+     * reused open_file (the free list does not zero) starts clean. */
+    if (open_file->rpc_resp) {
+        free(open_file->rpc_resp);
+        open_file->rpc_resp = NULL;
+    }
+    open_file->rpc_resp_len = 0;
+    open_file->rpc_resp_off = 0;
     LL_PREPEND(thread->free_open_files, open_file);
 } /* chimera_smb_open_file_free */
 
