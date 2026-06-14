@@ -301,11 +301,14 @@ set_tests_properties(chimera/server/smb/rpcclient_lsa PROPERTIES
 #   rpc.lsa.lookupnames : name->SID via LookupNames / LookupNames2 / LookupNames3
 #                        (opnums 14/58/68), including well-known names and the
 #                        NULL-name and policy-handle cases.
+#   rpc.wkssvc...NetWkstaGetInfo : workstation info levels 100/101/102/502,
+#                        exercising a multi-arm [switch_is] union.
 set(SMBTORTURE_RPC_SUITES_ENABLED
     rpc.lsa.lookupsids
     rpc.lsa.lookupnames
     rpc.handles.lsarpc
-    "rpc.srvsvc.srvsvc (admin access).NetShareEnumAll")
+    "rpc.srvsvc.srvsvc (admin access).NetShareEnumAll"
+    rpc.wkssvc.wkssvc.NetWkstaGetInfo)
 
 foreach(SUITE ${SMBTORTURE_RPC_SUITES_ENABLED})
     string(REGEX REPLACE "[^A-Za-z0-9]" "_" SUITE_ID ${SUITE})
