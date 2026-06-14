@@ -301,9 +301,20 @@ macro(add_fsx_test backend)
             COMMAND ${NETNS_WRAPPER} ${FSX_WRAPPER} -b ${backend} -N ${FSX_NUM_OPS} -l ${FSX_MAX_LEN} -q
             WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
         )
+        # fsx does 10000 randomized ops over RocksDB/diskfs-backed VFS under
+        # ASan.  The slowest variants (cairn, diskfs_io_uring) run ~10-15s on an
+        # idle host but all four cairn variants are scheduled together as the
+        # longest tests in the posix-client shard, which CI runs heavily
+        # oversubscribed (`-j 32` on shared, ephemeral ARC pods).  Under that
+        # contention their wall time scales ~5-8x (measured 14s -> 85-104s at
+        # j64 locally) with no underlying data error -- they complete A-OK, just
+        # slowly.  A flat 300s timeout left too little headroom, so the whole
+        # cairn fsx cluster intermittently tripped the timeout and was rescued
+        # on rerun (issue #733).  Give them the same generous budget as the
+        # other heavy posix tests (diskfs_evict/reclaim use 600-900).
         set_tests_properties(chimera/posix/fsx_${backend} PROPERTIES
             ENVIRONMENT "BUILD_DIR=${CMAKE_BINARY_DIR}"
-            TIMEOUT 300
+            TIMEOUT 600
         )
     endif()
 endmacro()
