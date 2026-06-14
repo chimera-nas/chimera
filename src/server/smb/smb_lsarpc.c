@@ -254,13 +254,24 @@ chimera_smb_lsarpc_impl(
 
                 names[i].sid_index = 0xffffffff;
                 names[i].sid_type  = LSA_SID_NAME_UNKNOWN;
-                chimera_smb_set_ustr(&names[i].name, "");
 
                 if (!sid) {
+                    chimera_smb_set_ustr(&names[i].name, "");
                     continue;
                 }
 
                 chimera_smb_sid_to_string(sid, sidstr, sizeof(sidstr));
+
+                /* Default for an unmapped SID: echo it back in string form as
+                 * the name (MS-LSAT returns untranslated SIDs as their string
+                 * form, type Unknown).  Copy into the arena -- set_ustr stores
+                 * the pointer and sidstr is loop-local. */
+                {
+                    size_t sl = strlen(sidstr) + 1;
+                    char  *ns = ndr_dbuf_alloc(dbuf, sl);
+                    memcpy(ns, sidstr, sl);
+                    chimera_smb_set_ustr(&names[i].name, ns);
+                }
 
                 u = chimera_vfs_user_cache_lookup_by_sid(cache, sidstr);
                 if (!u) {
