@@ -1629,6 +1629,7 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.notify.rmdir2
     smb2.notify.rmdir3
     smb2.notify.rmdir4
+    smb2.notify.session-reconnect
     smb2.notify.tcon
     smb2.notify.tcp
     smb2.notify.tdis
@@ -2023,6 +2024,7 @@ set(SMBTORTURE_ENABLED_linux
     smb2.notify.rmdir2
     smb2.notify.rmdir3
     smb2.notify.rmdir4
+    smb2.notify.session-reconnect
     smb2.notify.tcon
     smb2.notify.tcp
     smb2.notify.tdis
@@ -2356,6 +2358,7 @@ set(SMBTORTURE_ENABLED_io_uring
     smb2.notify.rmdir2
     smb2.notify.rmdir3
     smb2.notify.rmdir4
+    smb2.notify.session-reconnect
     smb2.notify.tcon
     smb2.notify.tcp
     smb2.notify.tdis
@@ -2772,6 +2775,7 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.notify.rmdir2
     smb2.notify.rmdir3
     smb2.notify.rmdir4
+    smb2.notify.session-reconnect
     smb2.notify.tcon
     smb2.notify.tcp
     smb2.notify.tdis
@@ -3247,6 +3251,7 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.notify.rmdir2
     smb2.notify.rmdir3
     smb2.notify.rmdir4
+    smb2.notify.session-reconnect
     smb2.notify.tcon
     smb2.notify.tcp
     smb2.notify.tdis
@@ -3709,6 +3714,7 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     smb2.notify.rmdir2
     smb2.notify.rmdir3
     smb2.notify.rmdir4
+    smb2.notify.session-reconnect
     smb2.notify.tcon
     smb2.notify.tcp
     smb2.notify.tdis
