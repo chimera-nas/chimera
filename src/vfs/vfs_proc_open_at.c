@@ -21,15 +21,19 @@ chimera_vfs_open_at_hdl_callback(
     chimera_vfs_open_at_callback_t callback = request->proto_callback;
 
     if (request->status == CHIMERA_VFS_OK) {
-        chimera_vfs_name_cache_insert(thread, cache,
-                                      request->open_at.handle->fh_hash,
-                                      request->open_at.handle->fh,
-                                      request->open_at.handle->fh_len,
-                                      request->open_at.name_hash,
-                                      request->open_at.name,
-                                      request->open_at.namelen,
-                                      request->open_at.r_attr.va_fh,
-                                      request->open_at.r_attr.va_fh_len);
+        /* A path-only open returns an opaque per-open token, not a stable child
+         * fh; caching name->token would hand out a dead token, so skip it. */
+        if (!chimera_vfs_module_is_path_only(request->module)) {
+            chimera_vfs_name_cache_insert(thread, cache,
+                                          request->open_at.handle->fh_hash,
+                                          request->open_at.handle->fh,
+                                          request->open_at.handle->fh_len,
+                                          request->open_at.name_hash,
+                                          request->open_at.name,
+                                          request->open_at.namelen,
+                                          request->open_at.r_attr.va_fh,
+                                          request->open_at.r_attr.va_fh_len);
+        }
 
         chimera_vfs_attr_cache_insert(thread, thread->vfs->vfs_attr_cache,
                                       request->open_at.handle->fh_hash,

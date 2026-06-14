@@ -150,6 +150,19 @@ chimera_vfs_get_module(
     return module;
 } /* chimera_vfs_get_module */
 
+/* True when the mount that owns `fh` is served by a path-only module (no
+ * persistent file handles -- see chimera_vfs_module_is_path_only). */
+static inline int
+chimera_vfs_fh_is_path_only(
+    struct chimera_vfs_thread *thread,
+    const void                *fh,
+    int                        fhlen)
+{
+    struct chimera_vfs_module *module = chimera_vfs_get_module(thread, fh, fhlen);
+
+    return module && chimera_vfs_module_is_path_only(module);
+} /* chimera_vfs_fh_is_path_only */
+
 /*
  * Routing decision for an fh-routed KV operation (handle-state put on open,
  * delete_key_at, search_keys_at).

@@ -361,6 +361,76 @@ chimera_vfs_open_cache_dup(
 
 } /* chimera_vfs_open_cache_dup */
 
+/* --- Evict by file handle --- */
+
+/*
+ * Evict the cached open handle for (fh, fhlen), closing it.  Intended for a
+ * backend that learns out-of-band that a cached handle must be relinquished --
+ * e.g. an SMB lease break, where the server is reclaiming a handle the client
+ * still caches and it must be closed so a conflicting operation can proceed.
+ *
+ * An idle handle (no current holders) is removed and closed immediately,
+ * mirroring the pending-close eviction in insert()/defer_close().  A handle
+ * still in use is detached: current holders keep working, but it is removed from
+ * the cache (never handed out again) and closes when the last holder releases.
+ *
+ * Shard-agnostic (scans every shard for the fh) so it does not depend on how the
+ * handle's fh_hash was derived; a file handle maps to a single cached handle, so
+ * the scan stops at the first match.  Called off the hot path (on a break), so
+ * the full scan is acceptable.
+ */
+static inline void
+chimera_vfs_open_cache_evict(
+    struct chimera_vfs_thread *thread,
+    struct vfs_open_cache     *cache,
+    const void                *fh,
+    uint32_t                   fhlen)
+{
+    uint32_t s;
+
+    for (s = 0; s <= cache->shard_mask; s++) {
+        struct vfs_open_cache_shard    *shard = &cache->shards[s];
+        struct chimera_vfs_open_handle *handle;
+
+        pthread_mutex_lock(&shard->lock);
+
+        for (handle = shard->handles; handle; handle = handle->bucket_next) {
+            if (handle->fh_len == fhlen && memcmp(handle->fh, fh, fhlen) == 0) {
+                break;
+            }
+        }
+
+        if (!handle) {
+            pthread_mutex_unlock(&shard->lock);
+            continue;
+        }
+
+        if (handle->opencnt == 0) {
+            /* Idle: remove from both lists and close (outside the lock). */
+            struct chimera_vfs_module *close_module  = handle->vfs_module;
+            uint64_t                   close_private = handle->vfs_private;
+            uint64_t                   close_hash    = handle->fh_hash;
+
+            DL_DELETE(shard->pending_close, handle);
+            chimera_vfs_open_cache_shard_remove(shard, handle);
+            shard->open_handles--;
+            chimera_vfs_open_cache_free(shard, handle);
+
+            pthread_mutex_unlock(&shard->lock);
+            chimera_vfs_close(thread, close_module, close_private,
+                              close_hash, NULL, NULL);
+        } else {
+            /* In use: detach now, close on the final release. */
+            chimera_vfs_open_cache_shard_remove(shard, handle);
+            shard->open_handles--;
+            handle->flags |= CHIMERA_VFS_OPEN_HANDLE_DETACHED;
+            pthread_mutex_unlock(&shard->lock);
+        }
+
+        return;   /* an fh maps to a single cached handle */
+    }
+} /* chimera_vfs_open_cache_evict */
+
 /* --- Close callback for eviction --- */
 
 static void

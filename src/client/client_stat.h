@@ -28,106 +28,35 @@ chimera_attrs_to_stat(
     st->st_ctim = attrs->va_ctime;
 } /* chimera_attrs_to_stat */
 
-static void chimera_stat_open_complete(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data);
-
-static void
-chimera_stat_getattr_complete(
-    enum chimera_vfs_error    error_code,
-    struct chimera_vfs_attrs *attr,
-    void                     *private_data)
-{
-    struct chimera_client_request  *request        = private_data;
-    struct chimera_client_thread   *thread         = request->thread;
-    struct chimera_vfs_open_handle *handle         = request->stat.handle;
-    chimera_stat_callback_t         callback       = request->stat.callback;
-    void                           *callback_arg   = request->stat.private_data;
-    int                             heap_allocated = request->heap_allocated;
-    struct chimera_stat             st;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        if (heap_allocated) {
-            chimera_client_request_free(thread, request);
-        }
-        chimera_vfs_release(thread->vfs_thread, handle);
-        callback(thread, error_code, NULL, callback_arg);
-        return;
-    }
-
-    chimera_attrs_to_stat(attr, &st);
-
-    if (heap_allocated) {
-        chimera_client_request_free(thread, request);
-    }
-
-    chimera_vfs_release(thread->vfs_thread, handle);
-
-    callback(thread, CHIMERA_VFS_OK, &st, callback_arg);
-
-} /* chimera_stat_getattr_complete */
-
-static void
-chimera_stat_open_complete(
-    enum chimera_vfs_error          error_code,
-    struct chimera_vfs_open_handle *oh,
-    void                           *private_data)
-{
-    struct chimera_client_request *request = private_data;
-
-    if (error_code != CHIMERA_VFS_OK) {
-        struct chimera_client_thread *thread       = request->thread;
-        chimera_stat_callback_t       callback     = request->stat.callback;
-        void                         *callback_arg = request->stat.private_data;
-
-        chimera_client_request_free(thread, request);
-        callback(thread, error_code, NULL, callback_arg);
-        return;
-    }
-
-    request->stat.handle = oh;
-
-    chimera_vfs_getattr(
-        request->thread->vfs_thread,
-        chimera_client_req_cred(request),
-        oh,
-        CHIMERA_VFS_ATTR_MASK_STAT,
-        chimera_stat_getattr_complete,
-        request);
-
-} /* chimera_stat_open_complete */
-
+/*
+ * stat resolves the path with a single lookup that returns the full stat
+ * attributes directly -- no separate open + getattr.  This works for every
+ * backend (the VFS lookup returns whatever attrs are requested) and is required
+ * for path-only mounts, where lookup returns no re-openable child fh.
+ */
 static void
 chimera_stat_lookup_complete(
     enum chimera_vfs_error    error_code,
     struct chimera_vfs_attrs *attr,
     void                     *private_data)
 {
-    struct chimera_client_request *request = private_data;
+    struct chimera_client_request *request      = private_data;
+    struct chimera_client_thread  *thread       = request->thread;
+    chimera_stat_callback_t        callback     = request->stat.callback;
+    void                          *callback_arg = request->stat.private_data;
+    struct chimera_stat            st;
 
     if (error_code != CHIMERA_VFS_OK) {
-        struct chimera_client_thread *thread       = request->thread;
-        chimera_stat_callback_t       callback     = request->stat.callback;
-        void                         *callback_arg = request->stat.private_data;
-
         chimera_client_request_free(thread, request);
         callback(thread, error_code, NULL, callback_arg);
         return;
     }
 
-    memcpy(request->fh, attr->va_fh, attr->va_fh_len);
-    request->fh_len = attr->va_fh_len;
+    chimera_attrs_to_stat(attr, &st);
 
-    chimera_vfs_open_fh(
-        request->thread->vfs_thread,
-        chimera_client_req_cred(request),
-        request->fh,
-        request->fh_len,
-        CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED,
-        chimera_stat_open_complete,
-        request);
+    chimera_client_request_free(thread, request);
 
+    callback(thread, CHIMERA_VFS_OK, &st, callback_arg);
 } /* chimera_stat_lookup_complete */
 
 static inline void
@@ -142,7 +71,7 @@ chimera_dispatch_stat(
         thread->client->root_fh_len,
         request->stat.path,
         request->stat.path_len,
-        CHIMERA_VFS_ATTR_FH,
+        CHIMERA_VFS_ATTR_MASK_STAT,
         request->stat.flags,
         chimera_stat_lookup_complete,
         request);
