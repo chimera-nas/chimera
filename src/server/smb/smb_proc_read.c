@@ -4,6 +4,7 @@
 
 #include "common/evpl_iovec_cursor.h"
 #include "smb_internal.h"
+#include "smb_async_interim.h"
 #include "smb_procs.h"
 #include "smb_session.h"
 #include "vfs/vfs.h"
@@ -94,6 +95,12 @@ chimera_smb_read_callback(
  * prior SMB2 WRITE stashed via chimera_smb_pipe_write.  Serves up to the
  * requested length, advancing an offset so a client may read the response in
  * several chunks; the stash is freed once fully drained.
+ *
+ * A read with no buffered response is a blocking message-mode pipe read: it does
+ * not complete now.  Such reads are made async (STATUS_PENDING) up to a
+ * per-connection ceiling; past it they fail with INSUFFICIENT_RESOURCES.  This
+ * is the contract smb2.credits.*_ipc_max_async_credits asserts (and a parked
+ * read stays parked until the client cancels it or the connection tears down).
  */
 static void
 chimera_smb_pipe_read(struct chimera_smb_request *request)
@@ -107,10 +114,23 @@ chimera_smb_pipe_read(struct chimera_smb_request *request)
     n     = request->read.length < avail ? request->read.length : avail;
 
     if (n == 0) {
-        request->read.niov     = 0;
-        request->read.r_length = 0;
+        struct chimera_smb_conn          *conn   = request->compound->conn;
+        struct chimera_server_smb_shared *shared = thread->shared;
+
+        /* The fid stays open; once parked the request needs nothing from the
+         * open until it is cancelled, so drop our handle reference now. */
         chimera_smb_open_file_release(request, open_file);
-        chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+
+        if (conn->async_outstanding >=
+            (uint32_t) shared->config.smb2_max_async_credits - 1) {
+            chimera_smb_complete_request(request,
+                                         SMB2_STATUS_INSUFFICIENT_RESOURCES);
+            return;
+        }
+
+        conn->async_outstanding++;
+        request->async.pipe_read = 1;
+        chimera_smb_async_interim_begin(request);
         return;
     }
 
