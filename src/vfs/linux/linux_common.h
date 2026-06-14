@@ -139,6 +139,15 @@ chimera_linux_stat_to_attr(
     attr->va_atime      = st->st_atim;
     attr->va_mtime      = st->st_mtim;
     attr->va_ctime      = st->st_ctim;
+
+    /* FSID is part of the statfs set but is also an ordinary per-file
+     * attribute (NFSv3 post-op attrs carry it).  Satisfy it cheaply from the
+     * device id here so an FSID-carrying stat request does not have to make a
+     * cold fstatvfs() call on the hot path. */
+    if (attr->va_req_mask & CHIMERA_VFS_ATTR_FSID) {
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_FSID;
+        attr->va_fsid      = st->st_dev;
+    }
 } /* linux_stat_to_chimera_attr */
 
 static inline void
@@ -164,6 +173,14 @@ chimera_linux_statx_to_attr(
     attr->va_mtime.tv_nsec = stx->stx_mtime.tv_nsec;
     attr->va_ctime.tv_sec  = stx->stx_ctime.tv_sec;
     attr->va_ctime.tv_nsec = stx->stx_ctime.tv_nsec;
+
+    /* See chimera_linux_stat_to_attr: satisfy FSID cheaply from the device id
+     * so an FSID-carrying stat request avoids a cold fstatvfs() on the hot
+     * path. */
+    if (attr->va_req_mask & CHIMERA_VFS_ATTR_FSID) {
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_FSID;
+        attr->va_fsid      = attr->va_dev;
+    }
 } /* io_uring_stat_to_chimera_attr */
 
 static inline void
@@ -172,7 +189,12 @@ chimera_linux_statvfs_to_attr(
     struct statvfs           *stvfs)
 {
 
-    attr->va_set_mask      |= CHIMERA_VFS_ATTR_MASK_STATFS;
+    /* FSID is intentionally NOT taken from statvfs f_fsid here: it is sourced
+     * consistently from the device id in the stat path (see
+     * chimera_linux_stat_to_attr), so that the FSID reported on the hot,
+     * stat-only path matches the FSID reported alongside a full statfs.  This
+     * helper claims only the statfs *value* bits. */
+    attr->va_set_mask      |= CHIMERA_VFS_ATTR_MASK_STATFS_VALUES;
     attr->va_fs_space_total = stvfs->f_blocks * stvfs->f_bsize;
     attr->va_fs_space_free  = stvfs->f_bavail * stvfs->f_bsize;
     attr->va_fs_space_avail = attr->va_fs_space_free;
@@ -181,7 +203,6 @@ chimera_linux_statvfs_to_attr(
     attr->va_fs_files_avail = stvfs->f_ffree;
     attr->va_fs_files_free  = stvfs->f_ffree;
     attr->va_fs_files_total = stvfs->f_files;
-    attr->va_fsid           = stvfs->f_fsid;
 } /* linux_statvfs_to_chimera_attr */
 
 static int
@@ -365,7 +386,7 @@ chimera_linux_map_attrs(
     struct stat    st;
     struct statvfs stvfs;
 
-    if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STAT) {
+    if (attr->va_req_mask & (CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_FSID)) {
 
         rc = fstat(fd, &st);
 
@@ -376,7 +397,7 @@ chimera_linux_map_attrs(
         chimera_linux_stat_to_attr(attr, &st);
     }
 
-    if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STATFS) {
+    if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STATFS_VALUES) {
         rc = fstatvfs(fd, &stvfs);
 
         if (rc == 0) {
@@ -398,11 +419,11 @@ chimera_linux_map_attrs_statx(
 
     attr->va_set_mask = 0;
 
-    if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STAT) {
+    if (attr->va_req_mask & (CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_FSID)) {
         chimera_linux_statx_to_attr(attr, stx);
     }
 
-    if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STATFS) {
+    if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STATFS_VALUES) {
         rc = fstatvfs(fd, &stvfs);
 
         if (rc == 0) {
@@ -428,7 +449,7 @@ chimera_linux_map_child_attrs(
 
     attr->va_set_mask = 0;
 
-    if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STAT) {
+    if (attr->va_req_mask & (CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_FSID)) {
 
         rc = fstatat(dirfd, name, &st, AT_SYMLINK_NOFOLLOW);
 
@@ -451,7 +472,7 @@ chimera_linux_map_child_attrs(
         attr->va_set_mask |= CHIMERA_VFS_ATTR_FH;
     }
 
-    if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STATFS) {
+    if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STATFS_VALUES) {
         rc = fstatvfs(dirfd, &stvfs);
 
         if (rc == 0) {
@@ -476,7 +497,7 @@ chimera_linux_map_child_attrs_statx(
 
     (void) fh_magic; /* No longer used, kept for API compatibility */
 
-    if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STAT) {
+    if (attr->va_req_mask & (CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_FSID)) {
 
         chimera_linux_statx_to_attr(attr, stx);
     }
@@ -493,7 +514,7 @@ chimera_linux_map_child_attrs_statx(
         attr->va_set_mask |= CHIMERA_VFS_ATTR_FH;
     }
 
-    if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STATFS) {
+    if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STATFS_VALUES) {
         rc = fstatvfs(dirfd, &stvfs);
 
         if (rc == 0) {

@@ -489,7 +489,7 @@ chimera_vfs_copy_attr(
         dest->va_ctime      = src->va_ctime;
     }
 
-    if (src->va_req_mask & CHIMERA_VFS_ATTR_MASK_STATFS) {
+    if (src->va_req_mask & CHIMERA_VFS_ATTR_MASK_STATFS_VALUES) {
         dest->va_fs_space_avail = src->va_fs_space_avail;
         dest->va_fs_space_free  = src->va_fs_space_free;
         dest->va_fs_space_total = src->va_fs_space_total;

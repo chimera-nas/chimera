@@ -4354,7 +4354,7 @@ diskfs_map_attrs(
                                inode->mode);
     }
 
-    if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STATFS) {
+    if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STATFS_VALUES) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_MASK_STATFS;
         /* Free/used are derived from the space map's live per-AG free counts
          * (cold path) rather than a running counter the alloc/free fast path
