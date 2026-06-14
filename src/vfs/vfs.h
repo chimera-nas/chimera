@@ -515,6 +515,10 @@ struct chimera_vfs_request {
             void                           *private_data;
             uint8_t                         parent_fh[CHIMERA_VFS_FH_SIZE];
             int                             parent_fh_len;
+            /* Zeroed stand-in handed to open_at when the caller passes no
+             * set_attr (a non-create open) -- open_at requires a non-NULL
+             * set_attr that the backend only consults when creating. */
+            struct chimera_vfs_attrs        scratch_set_attr;
         } open;
 
         struct {
@@ -1110,7 +1114,8 @@ enum CHIMERA_FS_FH_MAGIC {
      * module slot so they can be selected as the default KV module). */
     CHIMERA_VFS_FH_MAGIC_MEMKV    = 7,
     CHIMERA_VFS_FH_MAGIC_SQLITE   = 8,
-    CHIMERA_VFS_FH_MAGIC_MAX      = 9
+    CHIMERA_VFS_FH_MAGIC_SMB      = 9,
+    CHIMERA_VFS_FH_MAGIC_MAX      = 10
 
 };
 
@@ -1171,6 +1176,16 @@ enum CHIMERA_FS_FH_MAGIC {
  * Path-based operations take a full path relative to the mount point.
  * If a module does not support path ops, the VFS core will resolve
  * path components one at a time using FH-relative operations.
+ *
+ * A module that sets CAP_FS_PATH_OP and does NOT set CAP_FS_RELATIVE_OP is
+ * "path-only" (see chimera_vfs_module_is_path_only): it has no persistent file
+ * handles.  Metadata ops are dispatched as a single path-relative op against the
+ * mount root; an open file's handle carries an OPAQUE per-open token (not a
+ * path, not re-openable via open_fh -- only the mount-root fh is re-openable),
+ * and read/write/getattr/setattr/commit/readdir/close operate through the open
+ * handle's vfs_private.  This mirrors the Linux cifs client.  A path-only mount
+ * therefore cannot be re-exported by a handle-based consumer (the NFS server):
+ * open_fh of a child token returns ESTALE.
  */
 #define CHIMERA_VFS_CAP_FS_PATH_OP          (1U << 7)
 
@@ -1379,6 +1394,15 @@ struct chimera_vfs_module {
 
 /* mount->attrs.flags bits */
 #define CHIMERA_VFS_MOUNT_ATTR_READONLY (1ULL << 0)
+
+/* A module is "path-only" when it supports path-relative ops but has no
+ * persistent file handles (no FH-relative ops).  See CAP_FS_PATH_OP. */
+static inline int
+chimera_vfs_module_is_path_only(const struct chimera_vfs_module *module)
+{
+    return (module->capabilities & CHIMERA_VFS_CAP_FS_PATH_OP) &&
+           !(module->capabilities & CHIMERA_VFS_CAP_FS_RELATIVE_OP);
+} /* chimera_vfs_module_is_path_only */
 
 struct chimera_vfs_mount_attrs {
     uint64_t flags;
