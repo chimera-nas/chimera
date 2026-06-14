@@ -1919,6 +1919,23 @@ chimera_vfs_lease_begin_break_ex(
         lease->break_needed_mode = step;
         lease->break_deadline    = chimera_vfs_now_ticks() +
             chimera_vfs_ns_to_ticks((uint64_t) deadline_ms * 1000000ULL);
+        /* Publish break_ack_required ATOMICALLY with break_state, under file->lock.
+         * A break needs a client acknowledgment when it strips write or handle
+         * caching (the holder must flush / close its deferred handle); a break that
+         * drops only read caching (or goes to NONE) is acked by no client.  The SMB
+         * break callback recomputes the same value, but it runs OUTSIDE this lock,
+         * so a racing reader (chimera_vfs_state_caching_breaking, which decides
+         * whether a conflicting CREATE parks-and-rearbitrates its capped grant) could
+         * observe break_state==BREAKING with a stale break_ack_required and skip the
+         * park -- baking a LEVEL_II / no-durable reply that should have upgraded to
+         * BATCH once the break settled (smb2.durable-open.oplock vs a holder whose
+         * connection is mid-teardown; an arm64 reordering of the two stores).  Set it
+         * here so the pair is always consistent to a file->lock holder. */
+        if (lease->grant) {
+            lease->grant->break_ack_required =
+                ((lease->mode.granted & ~step) &
+                 (CHIMERA_VFS_LEASE_MODE_W | CHIMERA_VFS_LEASE_MODE_H)) != 0;
+        }
         cb      = lease->owner.break_cb;
         cb_priv = lease->owner.cb_private;
     } else {
