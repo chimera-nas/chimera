@@ -1599,6 +1599,7 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.lease.upgrade2
     smb2.lease.upgrade3
     smb2.lease.v1_bug15148
+    smb2.lease.v2_breaking3
     smb2.lease.v2_bug15148
     smb2.lease.v2_complex1
     smb2.lease.v2_complex2
@@ -3226,6 +3227,7 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.lease.upgrade2
     smb2.lease.upgrade3
     smb2.lease.v1_bug15148
+    smb2.lease.v2_breaking3
     smb2.lease.v2_bug15148
     smb2.lease.v2_complex1
     smb2.lease.v2_complex2

@@ -1938,6 +1938,21 @@ chimera_vfs_lease_begin_break_ex(
         }
         cb      = lease->owner.break_cb;
         cb_priv = lease->owner.cb_private;
+
+        /* MS-SMB2 2.2.23.2 / 3.3.4.7: a lease-break is ONE logical event that
+         * advances the epoch by exactly one and reports the NEW epoch in the
+         * notification.  Bump the (v2-only) epoch HERE, where a genuinely new
+         * break begins (IDLE/ACKED -> BREAKING) -- NOT in the protocol break
+         * callback, which is also re-invoked once per cascade step out of
+         * chimera_vfs_lease_ack (RWH -> RH -> R -> NONE).  A single conflicting
+         * open's whole cascade is one event and must keep one epoch across all
+         * its notifications (smb2.lease.v2_breaking3); two distinct conflicting
+         * opens are two events and advance the epoch twice (break_twice).  The
+         * callback snapshots grant->epoch, so bumping it once here yields the
+         * correct value for every notification of this break. */
+        if (lease->grant && lease->grant->is_v2) {
+            lease->grant->epoch++;
+        }
     } else {
         cb      = NULL;
         cb_priv = NULL;

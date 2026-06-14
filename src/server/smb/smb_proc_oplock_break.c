@@ -283,11 +283,13 @@ chimera_smb_lease_break_cb(
         uint8_t new_smb     = chimera_smb_vfs_to_lease_bits(new_vfs);
 
         /* The lease epoch lives on the GRANT so all coalesced opens share one
-         * monotonic counter (MS-SMB2 3.3.5.9.11): bump it once per break.  Only a
-         * v2 lease versions its state; a v1 lease breaks with epoch 0. */
-        if (grant->is_v2) {
-            grant->epoch++;
-        }
+         * monotonic counter (MS-SMB2 3.3.5.9.11).  It is advanced once per break
+         * EVENT by the VFS layer (chimera_vfs_lease_begin_break_ex, on the
+         * IDLE/ACKED -> BREAKING transition) so a multi-notification cascade
+         * (RWH -> RH -> R -> NONE driven by a single conflicting open) keeps one
+         * epoch across all of its steps -- this cb is re-invoked once per step.
+         * Here we only SNAPSHOT the already-advanced epoch.  Only a v2 lease
+         * versions its state; a v1 lease breaks with epoch 0. */
         open_file->lease_epoch = grant->is_v2 ? grant->epoch : 0;
         open_file->lease_state = new_smb;
 
