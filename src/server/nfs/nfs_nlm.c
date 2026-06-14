@@ -11,9 +11,37 @@
 #include "nfs_internal.h"
 #include "nfs_nlm.h"
 #include "nfs_nlm_state.h"
+#include "nfs_nsm.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 #include "vfs/vfs_state.h"
+
+/* Peer IP of an NLM connection with the ephemeral port stripped, written as a
+ * C-string into out (size bytes).  Handles both "ipv4:port" and "[ipv6]:port".
+ * Used to record where a lock-holder's statd can be reached (NSM monitor). */
+static void
+nlm_conn_peer_addr(
+    struct evpl_rpc2_conn *conn,
+    char                  *out,
+    int                    size)
+{
+    char  *p;
+    size_t n;
+
+    evpl_rpc2_conn_get_remote_address(conn, out, size);
+
+    if (out[0] == '[') {
+        p = strchr(out, ']');
+        n = p ? (size_t) (p - (out + 1)) : strlen(out);
+        memmove(out, out + 1, n);
+        out[n] = '\0';
+    } else {
+        p = strrchr(out, ':');
+        if (p) {
+            *p = '\0';
+        }
+    }
+} /* nlm_conn_peer_addr */
 
 /* Convert NLM length (UINT64_MAX == to-EOF) to POSIX length (0 == to-EOF) */
 #define NLM_TO_POSIX_LEN(l)     ((l) == UINT64_MAX ? 0 : (l))
@@ -251,6 +279,15 @@ chimera_nfs_nlm4_lock_acquire_cb(
         entry->lease_inserted = true;
         pthread_mutex_unlock(&shared->nlm_state.mutex);
         res.stat = NLM4_GRANTED;
+
+        /* Monitor the lock holder so we can SM_NOTIFY it to reclaim if we
+        * reboot.  NM_LOCK is explicitly non-monitored, so it opts out. */
+        if (!ctx->nm_lock) {
+            char addr[80];
+
+            nlm_conn_peer_addr(ctx->conn, addr, sizeof(addr));
+            nsm_monitor(thread, ctx->client->hostname, addr);
+        }
     } else {
         /* DENIED or wait=false-with-BREAKING: drop the entry. */
         pthread_mutex_lock(&shared->nlm_state.mutex);
@@ -1306,6 +1343,8 @@ chimera_nfs_nlm4_free_all(
     /* Remove on-disk state outside the mutex to avoid blocking I/O under lock */
     if (client) {
         nlm_state_remove_client_file(&shared->nlm_state, safe_hostname);
+        /* All of this client's locks are gone; stop monitoring it for reboot. */
+        nsm_unmonitor(thread, safe_hostname);
     }
 
     rc = shared->nlm_v4.send_reply_NLMPROC4_FREE_ALL(evpl, NULL, encoding);

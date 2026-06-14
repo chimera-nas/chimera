@@ -39,7 +39,9 @@ enum chimera_kv_record_type {
     CHIMERA_KV_TYPE_NFS4_SESSION  = 0x03, /* session metadata (nfs4_drc only)   */
     CHIMERA_KV_TYPE_NFS4_REPLY    = 0x04, /* reply-cache slot entry (nfs4_drc)  */
     CHIMERA_KV_TYPE_NFS3_REPLY    = 0x05, /* NFSv3 DRC reply entry (nfs3_drc)   */
-    /* 0x06 .. 0xFE reserved for future global record types */
+    CHIMERA_KV_TYPE_NSM_STATE     = 0x06, /* singleton NSM/statd state number   */
+    CHIMERA_KV_TYPE_NSM_MONITOR   = 0x07, /* per-host NSM monitor (nfs_nsm)     */
+    /* 0x08 .. 0xFE reserved for future global record types */
 };
 
 /* Longest normalized client address string an NFSv3 DRC key embeds (IPv6
@@ -200,3 +202,32 @@ nfs_kv_nfs3_reply_key(
 
 #define CHIMERA_KV_NFS3_REPLY_KEY_MAX \
         (CHIMERA_KV_HDR_LEN + 1 + CHIMERA_KV_NFS3_ADDR_MAX + 4 + 4 + 8)
+
+/* NSM singleton state-number key = header + a fixed 0x00 sub-id (mirrors the
+ * NFSv4 epoch key).  Value = magic(LE32) + version(LE32) + state(LE32). */
+static inline uint32_t
+nfs_kv_nsm_state_key(uint8_t *buf)
+{
+    uint32_t p = nfs_kv_hdr(buf, CHIMERA_KV_TYPE_NSM_STATE);
+
+    buf[p] = 0x00;
+    return p + 1;
+} /* nfs_kv_nsm_state_key */
+
+#define CHIMERA_KV_NSM_STATE_KEY_LEN (CHIMERA_KV_HDR_LEN + 1)
+
+/* NSM monitor key = header + host name bytes (the NLM caller_name / mon_name,
+ * the same stable identity a peer's statd presents in SM_NOTIFY).  Value =
+ * magic(LE32) + flags(LE32) + addr_len(1) + addr[addr_len] (the peer IP, no
+ * port -- how we reach its statd on our reboot). */
+static inline uint32_t
+nfs_kv_nsm_monitor_key(
+    uint8_t       *buf,
+    const uint8_t *host,
+    uint32_t       host_len)
+{
+    uint32_t p = nfs_kv_hdr(buf, CHIMERA_KV_TYPE_NSM_MONITOR);
+
+    memcpy(buf + p, host, host_len);
+    return p + host_len;
+} /* nfs_kv_nsm_monitor_key */

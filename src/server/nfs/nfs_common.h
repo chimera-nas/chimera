@@ -19,6 +19,8 @@
 #include "nfs4_recovery.h"
 #include "nfs3_drc.h"
 #include "nfs_nlm_state.h"
+#include "nfs_nsm_state.h"
+#include "sm_inter_xdr.h"
 
 struct chimera_server_nfs_thread;
 
@@ -242,6 +244,8 @@ struct chimera_server_nfs_shared {
     struct NFS_V4_CB                    nfs_v4_cb;
     struct NLM_V4                       nlm_v4;
     struct nlm_state                    nlm_state;
+    struct SM_INTER_V1                  nsm_v1;
+    struct nsm_state                    nsm_state;
 
     struct chimera_nfs_export          *exports;
     pthread_mutex_t                     exports_lock;
@@ -255,12 +259,14 @@ struct chimera_server_nfs_shared {
     struct evpl_endpoint               *portmap_endpoint;
     struct evpl_endpoint               *nfs_rdma_endpoint;
     struct evpl_endpoint               *nlm_endpoint;
+    struct evpl_endpoint               *nsm_endpoint;
 
     struct evpl_rpc2_server            *portmap_server;
     struct evpl_rpc2_server            *mount_server;
     struct evpl_rpc2_server            *nfs_server;
     struct evpl_rpc2_server            *nfs_rdma_server;
     struct evpl_rpc2_server            *nlm_server;
+    struct evpl_rpc2_server            *nsm_server;
 
     uint64_t                            nfs_verifier;
 

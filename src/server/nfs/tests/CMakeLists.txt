@@ -58,6 +58,19 @@ target_include_directories(test_nfs_persist PRIVATE
 target_link_libraries(test_nfs_persist chimera_vfs chimera_common evpl evpl_rpc2 pthread uuid urcu-qsbr urcu-common)
 add_test(NAME chimera/server/nfs/nfs_persist COMMAND test_nfs_persist)
 
+# NSM/statd persistence: KV key/value formats, odd-state bump, monitor table.
+# Compiles nfs_nsm_state.c straight in (its helpers are not SYMBOL_EXPORT'd).
+add_executable(test_nsm_persist
+    test_nsm_persist.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs_nsm_state.c)
+target_include_directories(test_nsm_persist PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${CMAKE_SOURCE_DIR}/src
+    ${NFS_COMMON_INCLUDE_DIR})
+target_link_libraries(test_nsm_persist chimera_vfs chimera_common evpl evpl_rpc2 pthread uuid urcu-qsbr urcu-common)
+add_dependencies(test_nsm_persist chimera_nfs_common)
+add_test(NAME chimera/server/nfs/nsm_persist COMMAND test_nsm_persist)
+
 add_executable(test_protocol_advertise test_protocol_advertise.c)
 target_include_directories(test_protocol_advertise PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/..

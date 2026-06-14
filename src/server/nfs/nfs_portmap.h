@@ -11,6 +11,9 @@
 void portmap_set_nlm_port(
     uint32_t port);
 
+void portmap_set_nsm_port(
+    uint32_t port);
+
 void chimera_portmap_null_v2(
     struct evpl               *evpl,
     struct evpl_rpc2_conn     *conn,

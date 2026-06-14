@@ -10,9 +10,12 @@
 #define NFS_RPC_PROGRAM   100003
 #define NFS_MOUNT_PROGRAM 100005
 #define NFS_NLM_PROGRAM   100021
+#define NFS_NSM_PROGRAM   100024
 
 void register_nfs_rpc_services(
-    int lockmgr_port);
+    int lockmgr_port,
+    int nsm_port);
 
 void unregister_nfs_rpc_services(
-    int lockmgr_port);
+    int lockmgr_port,
+    int nsm_port);
