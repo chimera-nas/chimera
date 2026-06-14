@@ -53,6 +53,12 @@ struct chimera_smb_notify_request {
      * thread->notify_ready.  Cleared by send_response or by close
      * when reaping the request from the ready queue. */
     int                                on_ready_queue;
+    /* When set, the doorbell handler completes this request with
+     * STATUS_NOTIFY_CLEANUP (MS-SMB2 3.3.4.4) instead of the normal
+     * event-delivery path.  Used to flush a parked CHANGE_NOTIFY whose
+     * session is being closed by a PreviousSessionId reconnect, where the
+     * cleanup must be marshaled to the request's owning thread. */
+    int                                cleanup;
     struct chimera_smb_notify_request *next;          /* parked list linkage */
     struct chimera_smb_notify_request *prev;          /* parked list linkage */
     struct chimera_smb_notify_request *ready_next;    /* doorbell ready queue */
@@ -148,6 +154,19 @@ void
 chimera_smb_notify_complete_cleanup(
     struct chimera_smb_notify_request *nr,
     struct chimera_smb_notify_state   *state);
+
+/*
+ * Marshal a NOTIFY_CLEANUP completion of the open's parked CHANGE_NOTIFY to
+ * the request's owning SMB thread.  Used when a session is closed out from
+ * under its still-live connection (a PreviousSessionId reconnect, MS-SMB2
+ * 3.3.5.5.3): the parked request must be completed with STATUS_NOTIFY_CLEANUP,
+ * but the response has to be built/sent on the connection's own thread.
+ * Returns 1 if a parked request was queued for cleanup, 0 otherwise.  Safe to
+ * call from another thread.
+ */
+int
+chimera_smb_notify_queue_cleanup(
+    struct chimera_smb_open_file *open_file);
 
 /*
  * Clean up notify state for an open file being closed.

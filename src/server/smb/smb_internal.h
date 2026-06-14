@@ -1599,6 +1599,46 @@ chimera_smb_session_park_durables(
     pthread_mutex_unlock(&session->lock);
 } /* chimera_smb_session_park_durables */
 
+/* Complete every parked CHANGE_NOTIFY held by `session`'s opens with
+ * STATUS_NOTIFY_CLEANUP.  Used when a PreviousSessionId reconnect closes this
+ * session out from under its still-live connection (MS-SMB2 3.3.5.5.3): the
+ * session's opens are not torn down here (that happens on the old connection's
+ * own thread when it finally drops), so the ordinary teardown path that would
+ * complete their notifies (chimera_smb_tree_free) never runs.  Without this a
+ * watcher parked on a non-durable directory open of the old session blocks
+ * forever (smb2.notify.session-reconnect).  The completion is marshaled to each
+ * request's owning thread via the notify doorbell, so it is safe to run from
+ * the new connection's thread even when the old connection lives elsewhere. */
+static inline void
+chimera_smb_session_flush_notifies(struct chimera_smb_session *session)
+{
+    int i, b;
+
+    pthread_mutex_lock(&session->lock);
+
+    for (i = 0; i < session->max_trees; i++) {
+        struct chimera_smb_tree      *tree = session->trees[i];
+        struct chimera_smb_open_file *open_file, *tmp;
+
+        if (!tree) {
+            continue;
+        }
+
+        for (b = 0; b < CHIMERA_SMB_OPEN_FILE_BUCKETS; b++) {
+            pthread_mutex_lock(&tree->open_files_lock[b]);
+            HASH_ITER(hh, tree->open_files[b], open_file, tmp)
+            {
+                if (open_file->notify_state) {
+                    chimera_smb_notify_queue_cleanup(open_file);
+                }
+            }
+            pthread_mutex_unlock(&tree->open_files_lock[b]);
+        }
+    }
+
+    pthread_mutex_unlock(&session->lock);
+} /* chimera_smb_session_flush_notifies */
+
 /* MS-SMB2 3.3.5.5.3: a SESSION_SETUP carrying a non-zero PreviousSessionId asks
  * the server to close that earlier session of the same user once the new one is
  * established (a client reconnecting on a fresh transport, e.g. for durable-
@@ -1651,6 +1691,12 @@ chimera_smb_session_invalidate_previous(
 
     if (prev) {
         chimera_smb_session_park_durables(shared, prev);
+        /* Complete any CHANGE_NOTIFY parked on a non-durable open of the prior
+         * session with STATUS_NOTIFY_CLEANUP: those opens are not torn down by
+         * the release below (the old connection still references the session),
+         * so the normal teardown that flushes their notifies never runs and a
+         * watcher would otherwise hang (smb2.notify.session-reconnect). */
+        chimera_smb_session_flush_notifies(prev);
         chimera_smb_session_release(thread, shared, prev, true);
     }
     return 0;

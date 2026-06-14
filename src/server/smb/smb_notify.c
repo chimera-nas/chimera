@@ -392,6 +392,51 @@ chimera_smb_notify_callback(
 } /* chimera_smb_notify_callback */
 
 /* ----------------------------------------------------------------
+ * Queue the open's parked CHANGE_NOTIFY for a NOTIFY_CLEANUP completion
+ * on its owning thread.  Mirrors the callback's enqueue (state->lock outer,
+ * notify_ready_lock inner) so close/cancel observe a consistent
+ * (state->pending, on_ready_queue) pair, and rings the owning thread's
+ * doorbell.  The doorbell handler honors nr->cleanup and completes the
+ * request with STATUS_NOTIFY_CLEANUP rather than the event-delivery path.
+ * ---------------------------------------------------------------- */
+int
+chimera_smb_notify_queue_cleanup(struct chimera_smb_open_file *open_file)
+{
+    struct chimera_smb_notify_state   *state = open_file->notify_state;
+    struct chimera_smb_notify_request *nr;
+    struct chimera_server_smb_thread  *thread;
+    int                                wake = 0;
+
+    if (!state) {
+        return 0;
+    }
+
+    pthread_mutex_lock(&state->lock);
+
+    nr = state->pending;
+    if (nr && !nr->on_ready_queue) {
+        thread             = nr->thread;
+        nr->cleanup        = 1;
+        nr->on_ready_queue = 1;
+
+        pthread_mutex_lock(&thread->notify_ready_lock);
+        nr->ready_next       = thread->notify_ready;
+        thread->notify_ready = nr;
+        pthread_mutex_unlock(&thread->notify_ready_lock);
+
+        wake = 1;
+    }
+
+    pthread_mutex_unlock(&state->lock);
+
+    if (wake) {
+        evpl_ring_doorbell(&thread->notify_doorbell);
+    }
+
+    return wake;
+} /* chimera_smb_notify_queue_cleanup */
+
+/* ----------------------------------------------------------------
  * Build and send an async CHANGE_NOTIFY response with events.
  * Must be called on the SMB thread that owns the connection.
  *
@@ -906,7 +951,17 @@ chimera_smb_notify_doorbell_callback(
     for (nr = ready; nr; nr = next) {
         next           = nr->ready_next;
         nr->ready_next = NULL;
-        chimera_smb_notify_send_response(nr);
+        if (nr->cleanup) {
+            /* Session closed under a still-live connection (PreviousSessionId
+             * reconnect): complete with STATUS_NOTIFY_CLEANUP.  The watch
+             * state stays attached to the open (the open is torn down later
+             * by its own connection); pass it explicitly. */
+            nr->on_ready_queue = 0;
+            chimera_smb_notify_complete_cleanup(nr,
+                                                nr->open_file ? nr->open_file->notify_state : NULL);
+        } else {
+            chimera_smb_notify_send_response(nr);
+        }
     }
 } /* chimera_smb_notify_doorbell_callback */
 
