@@ -46,9 +46,10 @@ static const dce_if_uuid_t LSA_INTERFACE = {
  * handler returned (a fixed opaque policy handle, STATUS_SUCCESS); inputs are
  * not consulted, matching prior behaviour.
  */
-/* Fill a zero-initialised SID with the server's fixed machine SID
- * S-1-5-21-1111-2222-3333.  The caller provides storage from the dbuf arena,
- * which ndr_dbuf_alloc has already zeroed. */
+/* Fill a SID with the server's fixed machine SID S-1-5-21-1111-2222-3333.  The
+ * caller must provide zeroed storage (a dbuf allocation, or a `= { 0 }`
+ * initialiser) so the unset identifier-authority and sub-authority bytes are
+ * defined. */
 static void
 chimera_smb_lsarpc_machine_sid(struct ndr_sid *sid)
 {
@@ -531,7 +532,7 @@ chimera_smb_lsarpc_impl(
                 if (!name || name[0] == '\0') {
                     /* An empty/NULL name resolves to the server's own primary
                      * (account) domain (MS-LSAT): its machine SID, type Domain. */
-                    struct ndr_sid m;
+                    struct ndr_sid m = { 0 };
                     chimera_smb_lsarpc_machine_sid(&m);
                     chimera_smb_sid_to_string(&m, sidstr, sizeof(sidstr));
                     type     = LSA_SID_NAME_DOMAIN;
