@@ -664,6 +664,25 @@ struct chimera_smb_request {
             }                              elements[CHIMERA_SMB_LOCK_MAX_ELEMENTS];
             bool                           lock_too_many;
             struct chimera_smb_lock_entry *entry;  /* live for the in-flight acquire */
+            /* Blocking-lock (MS-SMB2 3.3.5.14) park state.  Set once a contended
+             * LOCK without FAIL_IMMEDIATELY emits its STATUS_PENDING interim and
+             * parks on the VFS pending-acquire queue.  The grant callback may fire
+             * on ANOTHER thread (whoever released the conflicting range); it stashes
+             * resume_status and enqueues the request on its owning thread's
+             * lock_resume_head via lock_resume_next, then rings the resume doorbell.
+             * The owning thread drains the queue, retires the interim, and completes
+             * with resume_status.  parked stays set from interim until completion so
+             * the close / teardown abort path can find and cancel it. */
+            uint8_t                        parked;
+            uint32_t                       resume_status;
+            struct chimera_smb_request    *lock_resume_next;
+            /* MS-SMB2 3.3.5.14 LockSequence replay bucket for this single-element
+             * request: 1..64 when replay detection is active for the open and the
+             * client supplied a valid bucket, else 0 (no caching).  Captured at
+             * handler entry; the status of a non-replayed op is written back into
+             * open_file->lock_seq_* under this bucket at completion. */
+            uint8_t                        seq_bucket;
+            uint8_t                        seq_index;
         } lock;
 
         struct {
@@ -1204,6 +1223,18 @@ chimera_smb_open_file_drain_locks(
     struct chimera_server_smb_thread *thread,
     struct chimera_smb_open_file     *open_file);
 
+/* Forward decls (defined in smb_proc_lock.c; also in smb_procs.h, which this
+ * header cannot include) so the inline tree-teardown path can abort and complete
+ * a blocking byte-range LOCK parked on an open being torn down. */
+struct chimera_smb_request *
+chimera_smb_lock_abort_parked(
+    struct chimera_server_smb_thread *thread,
+    struct chimera_smb_open_file     *open_file);
+void
+chimera_smb_lock_park_finish(
+    struct chimera_smb_request *request,
+    uint32_t                    status);
+
 /* Ring every peer SMB thread's lease-resume doorbell so each re-sweeps its
  * connections for parked CREATEs an event on this thread unblocked (defined in
  * smb_proc_create.c; also declared in smb_procs.h, which this header cannot
@@ -1395,6 +1426,15 @@ struct chimera_server_smb_thread {
      * drains the queue and completes each on this, its owning, thread.  Guarded
      * by lease_break_lock. */
     struct chimera_smb_request         *share_resume_head;
+
+    /* Cross-thread queue of blocking byte-range LOCKs (MS-SMB2 3.3.5.14) parked
+     * on a conflicting range whose VFS acquire ticket was GRANTED on ANOTHER
+     * thread (whichever released the conflicting lock).  The deferred LOCK
+     * response's iovecs are thread-local, so the granting thread enqueues the
+     * request here and rings this thread's lease_resume_doorbell; the handler
+     * drains the queue and completes each blocking lock on its owning thread.
+     * Guarded by lease_break_lock; link reuses request->async.park_next. */
+    struct chimera_smb_request         *lock_resume_head;
 
     /* Active (non-pooled) connections owned by this thread, threaded on
      * conn->active_prev / conn->active_next.  Lets a thread walk every
@@ -2071,6 +2111,8 @@ chimera_smb_tree_free(
     struct chimera_smb_open_file    *open_file, *tmp;
     struct chimera_smb_notify_state *gc_states = NULL;
     struct chimera_smb_notify_state *nstate;
+    struct chimera_smb_request      *lock_aborts = NULL;
+    struct chimera_smb_request      *labort;
     bool                             closed_breaking = false;
     int                              i;
 
@@ -2082,6 +2124,21 @@ chimera_smb_tree_free(
         {
             chimera_smb_abort_if(open_file->refcnt == 0, "open file refcnt is 0 at tree destruction");
             HASH_DELETE(hh, tree->open_files[i], open_file);
+
+            /* Detach any blocking byte-range LOCK parked on this open (MS-SMB2
+             * smb2.lock.cancel-tdis / cancel-logoff) BEFORE the durable-preserve
+             * decision: a blocking lock cannot survive a disconnect/teardown, so
+             * abort it even when the handle itself is preserved durable.  Defer
+             * its completion until the bucket lock is dropped — finishing it
+             * releases the open_file reference it holds, which re-takes this same
+             * bucket lock.  The parked request keeps refcnt > 0, so the open is not
+             * freed in this loop; the deferred completion below drops that ref.
+             * Aborts are chained on lock.lock_resume_next (the abort cleared it). */
+            labort = chimera_smb_lock_abort_parked(thread, open_file);
+            if (labort) {
+                labort->lock.lock_resume_next = lock_aborts;
+                lock_aborts                   = labort;
+            }
 
             /* A durable/persistent open survives the teardown of its session
              * (connection loss or a graceful LOGOFF, MS-SMB2 3.3.5.6): keep the
@@ -2179,6 +2236,17 @@ chimera_smb_tree_free(
         nstate    = gc_states;
         gc_states = nstate->gc_next;
         chimera_smb_notify_close(shared->vfs->vfs_notify, nstate);
+    }
+
+    /* Complete the blocking LOCKs aborted above with RANGE_NOT_LOCKED, now that
+     * no bucket lock is held (the completion drops the open_file reference, which
+     * re-takes the bucket lock and frees the open). */
+    while (lock_aborts) {
+        labort      = lock_aborts;
+        lock_aborts = labort->lock.lock_resume_next;
+
+        labort->lock.lock_resume_next = NULL;
+        chimera_smb_lock_park_finish(labort, labort->lock.resume_status);
     }
 
     /* Closing a mid-break durable open above resolved its (unackable) break;

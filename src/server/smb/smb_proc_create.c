@@ -2303,6 +2303,27 @@ chimera_smb_create_resume_doorbell_callback(
         req->async.park_next = NULL;
         chimera_smb_create_share_park_finish(req, req->create.gen_resume_result);
     }
+
+    /* Drain blocking byte-range LOCKs whose VFS acquire ticket resolved on
+     * another thread (chimera_smb_lock_acquire_cb) and were bounced here to
+     * complete on their owning thread with the stashed grant status. */
+    for ( ; ;) {
+        struct chimera_smb_request *req;
+
+        pthread_mutex_lock(&thread->lease_break_lock);
+        req = thread->lock_resume_head;
+        if (req) {
+            thread->lock_resume_head = req->lock.lock_resume_next;
+        }
+        pthread_mutex_unlock(&thread->lease_break_lock);
+
+        if (!req) {
+            break;
+        }
+
+        req->lock.lock_resume_next = NULL;
+        chimera_smb_lock_park_finish(req, req->lock.resume_status);
+    }
 } /* chimera_smb_create_resume_doorbell_callback */
 
 /* Ring every PEER SMB thread's resume doorbell so each re-scans its own

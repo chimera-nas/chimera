@@ -8,6 +8,7 @@
 #include "smb_session.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
+#include "vfs/vfs_state.h"
 
 /*
  * Server-side copy: FSCTL_SRV_REQUEST_RESUME_KEY + FSCTL_SRV_COPYCHUNK.
@@ -128,12 +129,33 @@ chimera_smb_copychunk_error_with_body(
     chimera_smb_copychunk_done(request, status);
 } /* chimera_smb_copychunk_error_with_body */
 
+/* Build the byte-range-lock owner identity for an open exactly as the WRITE/READ
+ * paths do, so a copy-chunk's own locks don't conflict with its I/O. */
+static inline void
+chimera_smb_copychunk_io_owner(
+    struct chimera_smb_request     *request,
+    struct chimera_smb_open_file   *open_file,
+    struct chimera_vfs_lease_owner *owner)
+{
+    owner->protocol   = CHIMERA_VFS_LEASE_PROTO_SMB2;
+    owner->client_key = request->session_handle->session->client_key;
+    if (open_file->grant) {
+        owner->owner_lo = open_file->grant->lease.owner.owner_lo;
+        owner->owner_hi = open_file->grant->lease.owner.owner_hi;
+    } else {
+        owner->owner_lo = open_file->file_id.pid;
+        owner->owner_hi = open_file->file_id.vid;
+    }
+} /* chimera_smb_copychunk_io_owner */
+
 /* Issue the next pending chunk, or finish if all are done. */
 static void
 chimera_smb_copychunk_next(struct chimera_smb_request *request)
 {
-    struct chimera_vfs_thread *vfs_thread = request->compound->thread->vfs_thread;
-    uint32_t                   i          = request->ioctl.cc_chunk_idx;
+    struct chimera_vfs_thread     *vfs_thread = request->compound->thread->vfs_thread;
+    struct chimera_vfs_state      *vfs_state  = vfs_thread->vfs->vfs_state;
+    uint32_t                       i          = request->ioctl.cc_chunk_idx;
+    struct chimera_vfs_lease_owner io_owner;
 
     if (i >= request->ioctl.cc_chunk_count) {
         chimera_smb_copychunk_done(request, SMB2_STATUS_SUCCESS);
@@ -146,6 +168,42 @@ chimera_smb_copychunk_next(struct chimera_smb_request *request)
     if (request->ioctl.cc_chunks[i].src_offset +
         request->ioctl.cc_chunks[i].length > request->ioctl.cc_src_size) {
         chimera_smb_copychunk_error_with_body(request, SMB2_STATUS_INVALID_VIEW_SIZE);
+        return;
+    }
+
+    /* MS-SMB2 server-side copy on Windows Server 2012+ moves chunks via regular
+     * read/write, so byte-range locks are enforced: a chunk whose source range is
+     * read-blocked by another owner's lock, or whose destination range is
+     * write-blocked, fails the whole COPYCHUNK with FILE_LOCK_CONFLICT
+     * (smb2.ioctl.copy_chunk_src_lock / copy_chunk_dest_lock).  The response body
+     * reports zero chunks written. */
+    chimera_smb_copychunk_io_owner(request, request->ioctl.cc_src_open_file,
+                                   &io_owner);
+    if (chimera_vfs_state_range_io_conflict(
+            vfs_state,
+            request->ioctl.cc_src_open_file->handle->fh,
+            request->ioctl.cc_src_open_file->handle->fh_len,
+            request->ioctl.cc_src_open_file->handle->fh_hash,
+            request->ioctl.cc_chunks[i].src_offset,
+            request->ioctl.cc_chunks[i].length,
+            false /* read */, &io_owner)) {
+        chimera_smb_copychunk_error_with_body(request,
+                                              SMB2_STATUS_FILE_LOCK_CONFLICT);
+        return;
+    }
+
+    chimera_smb_copychunk_io_owner(request, request->ioctl.cc_dst_open_file,
+                                   &io_owner);
+    if (chimera_vfs_state_range_io_conflict(
+            vfs_state,
+            request->ioctl.cc_dst_open_file->handle->fh,
+            request->ioctl.cc_dst_open_file->handle->fh_len,
+            request->ioctl.cc_dst_open_file->handle->fh_hash,
+            request->ioctl.cc_chunks[i].dst_offset,
+            request->ioctl.cc_chunks[i].length,
+            true /* write */, &io_owner)) {
+        chimera_smb_copychunk_error_with_body(request,
+                                              SMB2_STATUS_FILE_LOCK_CONFLICT);
         return;
     }
 

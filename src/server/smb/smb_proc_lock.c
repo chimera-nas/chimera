@@ -8,6 +8,8 @@
 #include "smb_internal.h"
 #include "smb_procs.h"
 #include "smb_session.h"
+#include "smb_async_interim.h"
+#include "smb2.h"
 #include "common/misc.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
@@ -15,6 +17,13 @@
 
 #define SMB2_LOCK_REQUEST_SIZE    48   /* fixed; LockCount==1 in this build */
 #define SMB2_LOCK_REPLY_SIZE      4
+
+/* Sentinel stored in request->lock.resume_status before a (possibly blocking)
+ * single-element acquire: chimera_smb_lock_acquire_cb overwrites it with the
+ * real status if it fires synchronously, so a value still equal to this after
+ * chimera_vfs_lease_acquire returns means the acquire parked on the VFS pending
+ * queue and the callback will fire later. */
+#define CHIMERA_SMB_LOCK_PENDING  0xFFFFFFFFu
 
 /* Per MS-SMB2 §2.2.26.1 */
 #define SMB2_LOCKFLAG_SHARED_LOCK 0x00000001
@@ -25,6 +34,59 @@
 #define SMB2_LOCKFLAG_KIND_MASK   (SMB2_LOCKFLAG_SHARED_LOCK | \
                                    SMB2_LOCKFLAG_EXCLUSIVE   | \
                                    SMB2_LOCKFLAG_UNLOCK)
+
+/* MS-SMB2 3.3.5.14 LockSequence replay detection.  The 32-bit LockSequence is a
+ * 4-bit LockSequenceNumber (the "bucket", valid 1..64) in bits [4..7] and a 4-bit
+ * LockSequenceIndex in bits [0..3]; the rest is reserved.  Replay verification is
+ * performed only for a durable / persistent / resilient handle, or on an SMB 3.x
+ * connection that negotiated multichannel (per the spec and Note <314>). */
+static inline uint8_t
+chimera_smb_lock_seq_bucket(uint32_t lock_sequence)
+{
+    return (uint8_t) ((lock_sequence >> 4) & 0xFF);
+} /* chimera_smb_lock_seq_bucket */
+
+static inline uint8_t
+chimera_smb_lock_seq_index(uint32_t lock_sequence)
+{
+    return (uint8_t) (lock_sequence & 0x0F);
+} /* chimera_smb_lock_seq_index */
+
+/* True when this open performs LockSequence replay verification (MS-SMB2
+ * 3.3.5.14): a durable, persistent, or resilient handle, or any handle on an
+ * SMB 3.x connection that negotiated SMB2_GLOBAL_CAP_MULTI_CHANNEL. */
+static inline bool
+chimera_smb_lock_replay_active(
+    struct chimera_smb_request   *request,
+    struct chimera_smb_open_file *open_file)
+{
+    struct chimera_smb_conn *conn = request->compound->conn;
+
+    if (open_file->durable_flags || open_file->resilient ||
+        (open_file->flags & CHIMERA_SMB_OPEN_FILE_PERSISTED)) {
+        return true;
+    }
+    return conn && conn->dialect >= 0x300 &&
+           (conn->capabilities & SMB2_GLOBAL_CAP_MULTI_CHANNEL);
+} /* chimera_smb_lock_replay_active */
+
+/* Record the outcome `status` of a non-replayed single-element lock op in the
+ * open's per-bucket replay cache.  No-op when the request carried no valid
+ * bucket (replay inactive, or bucket 0 / >64). */
+static inline void
+chimera_smb_lock_seq_record(
+    struct chimera_smb_request   *request,
+    struct chimera_smb_open_file *open_file,
+    uint32_t                      status)
+{
+    uint8_t b = request->lock.seq_bucket;
+
+    if (b >= 1 && b <= 64) {
+        open_file->lock_seq_valid[b - 1]  = 1;
+        open_file->lock_seq_index[b - 1]  = request->lock.seq_index;
+        open_file->lock_seq_status[b - 1] = status;
+    }
+} /* chimera_smb_lock_seq_record */
 
 /* Half-open byte-range overlap, mirroring chimera_vfs_range_overlap: length 0
  * is a genuine zero-byte range and the exclusive end saturates at UINT64_MAX on
@@ -195,6 +257,142 @@ chimera_smb_parse_lock(
     return 0;
 } /* chimera_smb_parse_lock */
 
+/* Map a finished single-element acquire to its SMB2 status and either install or
+ * tear down the lock entry.  Caller owns completing the request afterwards. */
+static uint32_t
+chimera_smb_lock_settle_entry(
+    struct chimera_vfs_state      *vfs_state,
+    struct chimera_smb_request    *request,
+    struct chimera_smb_open_file  *open_file,
+    struct chimera_smb_lock_entry *entry,
+    enum chimera_vfs_lease_result  result)
+{
+    if (result == CHIMERA_VFS_LEASE_GRANTED) {
+        entry->lease_inserted = true;
+        DL_APPEND(open_file->lock_entries, entry);
+        return SMB2_STATUS_SUCCESS;
+    }
+
+    /* Tear the entry down.  Normally the lease was never inserted (a
+     * FAIL_IMMEDIATELY denial or an unbreakable-caching conflict), but a parked
+     * lock that was GRANTED by the VFS and then aborted in the same instant the
+     * grant landed (handle close / teardown racing the conflict release) reaches
+     * here with lease_inserted set — release the inserted lease so it is not
+     * leaked into the VFS range table. */
+    if (entry->lease_inserted) {
+        chimera_vfs_lease_release(vfs_state, entry->file_state, &entry->lease);
+    }
+    chimera_vfs_state_put(vfs_state, entry->file_state);
+    free(entry);
+    request->lock.entry = NULL;
+    /* MS-SMB2 §3.3.5.14 maps a lock denied by an existing range to
+     * STATUS_LOCK_NOT_GRANTED (or _RANGE for SMB2 v.s. SMB1 spec
+     * variants).  Use _NOT_GRANTED — accepted by Windows clients.  A waiting
+     * lock never lands here DENIED (it parks); only a FAIL_IMMEDIATELY acquire
+     * or an unbreakable-caching conflict does. */
+    return SMB2_STATUS_LOCK_NOT_GRANTED;
+} /* chimera_smb_lock_settle_entry */
+
+/* Complete a parked blocking lock on its OWNING thread (driven by the resume
+ * doorbell, the close/teardown abort path, or an SMB2 CANCEL).  `status` is the
+ * stashed grant result, SMB2_STATUS_CANCELLED, or SMB2_STATUS_RANGE_NOT_LOCKED.
+ * Unlinks the open's parked-lock reference, installs or tears down the entry,
+ * and drops the open_file reference the park held. */
+SYMBOL_EXPORT void
+chimera_smb_lock_park_finish(
+    struct chimera_smb_request *request,
+    uint32_t                    status)
+{
+    struct chimera_server_smb_thread *thread    = request->compound->thread;
+    struct chimera_vfs_state         *vfs_state = thread->vfs_thread->vfs->vfs_state;
+    struct chimera_smb_lock_entry    *entry     = request->lock.entry;
+    struct chimera_smb_open_file     *open_file = request->lock.open_file;
+
+    /* open_file is always valid here: a park stores it on request->lock.open_file
+     * and holds a reference that is dropped only by this function, and every
+     * caller (resume doorbell, close/teardown abort, SMB2 CANCEL) reaches a
+     * parked request via that same open_file. */
+    request->lock.parked = 0;
+    if (open_file->parked_lock_req == request) {
+        open_file->parked_lock_req = NULL;
+    }
+
+    if (entry) {
+        entry->pending_req = NULL;
+        if (status == SMB2_STATUS_SUCCESS) {
+            status = chimera_smb_lock_settle_entry(vfs_state, request, open_file,
+                                                   entry, CHIMERA_VFS_LEASE_GRANTED);
+        } else {
+            /* Aborted/cancelled before grant: tear the entry down. */
+            chimera_smb_lock_settle_entry(vfs_state, request, open_file,
+                                          entry, CHIMERA_VFS_LEASE_DENIED);
+        }
+    }
+
+    /* Cache a granted blocking-lock outcome for LockSequence replay (an aborted /
+     * cancelled lock is not a real outcome and is not recorded). */
+    if (status == SMB2_STATUS_SUCCESS) {
+        chimera_smb_lock_seq_record(request, open_file, status);
+    }
+
+    chimera_smb_open_file_release(request, open_file);
+    chimera_smb_complete_request(request, status);
+} /* chimera_smb_lock_park_finish */
+
+SYMBOL_EXPORT struct chimera_smb_request *
+chimera_smb_lock_abort_parked(
+    struct chimera_server_smb_thread *thread,
+    struct chimera_smb_open_file     *open_file)
+{
+    struct chimera_vfs_state      *vfs_state = thread->vfs_thread->vfs->vfs_state;
+    struct chimera_smb_request    *request   = open_file->parked_lock_req;
+    struct chimera_smb_lock_entry *entry;
+
+    if (!request) {
+        return NULL;
+    }
+
+    open_file->parked_lock_req = NULL;
+    entry                      = request->lock.entry;
+
+    /* Try to pull the ticket off the VFS pending-acquire queue.  If it dequeues,
+     * the grant callback will never fire and we own the request outright.  If it
+     * does NOT dequeue, the grant raced in: the callback already fired (on this
+     * or another thread), stashed SUCCESS, and queued the request on this
+     * thread's lock_resume_head.  Both this abort and the resume drain run on the
+     * owning thread, so unlink it from lock_resume_head here and abort it rather
+     * than letting the drain complete it (the open is being torn down). */
+    if (entry && !chimera_vfs_lease_acquire_cancel(vfs_state, &entry->ticket)) {
+        struct chimera_smb_request **pp = &thread->lock_resume_head;
+
+        pthread_mutex_lock(&thread->lease_break_lock);
+        while (*pp) {
+            if (*pp == request) {
+                *pp = request->lock.lock_resume_next;
+                request->lock.lock_resume_next = NULL;
+                break;
+            }
+            pp = &(*pp)->lock.lock_resume_next;
+        }
+        pthread_mutex_unlock(&thread->lease_break_lock);
+
+        /* The ticket did not dequeue because the grant already landed: the VFS
+         * range lease IS inserted in the table even though the SMB-side
+         * lease_inserted flag (set only by the GRANTED settle path) is still
+         * clear.  Mark it so chimera_smb_lock_park_finish's teardown releases the
+         * inserted lease instead of leaking it. */
+        if (entry && request->lock.resume_status == SMB2_STATUS_SUCCESS) {
+            entry->lease_inserted = true;
+        }
+    }
+
+    /* Closing a handle whose blocking lock is still pending completes that lock
+     * with RANGE_NOT_LOCKED (MS-SMB2 / smb2.lock.cancel "cancel by close"; the
+     * tree-disconnect and logoff variants accept RANGE_NOT_LOCKED too). */
+    request->lock.resume_status = SMB2_STATUS_RANGE_NOT_LOCKED;
+    return request;
+} /* chimera_smb_lock_abort_parked */
+
 static void
 chimera_smb_lock_acquire_cb(
     enum chimera_vfs_lease_result result,
@@ -202,33 +400,39 @@ chimera_smb_lock_acquire_cb(
     struct chimera_vfs_lease     *conflict,
     void                         *private_data)
 {
-    struct chimera_smb_lock_entry *entry     = private_data;
-    struct chimera_smb_request    *request   = entry->pending_req;
-    struct chimera_smb_open_file  *open_file = entry->open_file;
-    struct chimera_vfs_state      *vfs_state = request->compound->thread->vfs_thread->vfs->vfs_state;
-    uint32_t                       status;
+    struct chimera_smb_lock_entry    *entry   = private_data;
+    struct chimera_smb_request       *request = entry->pending_req;
+    struct chimera_server_smb_thread *thread  = request->compound->thread;
+    uint32_t                          status;
 
     (void) granted;
     (void) conflict;
 
-    entry->pending_req = NULL;
+    status = (result == CHIMERA_VFS_LEASE_GRANTED)
+        ? SMB2_STATUS_SUCCESS : SMB2_STATUS_LOCK_NOT_GRANTED;
 
-    if (result == CHIMERA_VFS_LEASE_GRANTED) {
-        entry->lease_inserted = true;
-        DL_APPEND(open_file->lock_entries, entry);
-        status = SMB2_STATUS_SUCCESS;
-    } else {
-        chimera_vfs_state_put(vfs_state, entry->file_state);
-        free(entry);
-        request->lock.entry = NULL;
-        /* MS-SMB2 §3.3.5.14 maps a lock denied by an existing range to
-         * STATUS_LOCK_NOT_GRANTED (or _RANGE for SMB2 v.s. SMB1 spec
-         * variants).  Use _NOT_GRANTED — accepted by Windows clients. */
-        status = SMB2_STATUS_LOCK_NOT_GRANTED;
+    if (!request->lock.parked) {
+        /* Synchronous outcome: the acquire has not returned yet.  Stash the
+         * status and let chimera_smb_lock act on it inline (no interim was
+         * emitted), so the common grant/deny path stays a single thread hop. */
+        request->lock.resume_status = status;
+        return;
     }
 
-    chimera_smb_open_file_release(request, open_file);
-    chimera_smb_complete_request(request, status);
+    /* Deferred grant: this lock had parked (interim already sent) and the
+     * conflicting range was just released.  The release — and therefore this
+     * callback — can run on ANY thread (whichever owner unlocked); the LOCK
+     * response's iovecs are thread-local, so stash the result and bounce to the
+     * request's owning thread, which drains lock_resume_head off its resume
+     * doorbell and completes the lock there. */
+    request->lock.resume_status = status;
+
+    pthread_mutex_lock(&thread->lease_break_lock);
+    request->lock.lock_resume_next = thread->lock_resume_head;
+    thread->lock_resume_head       = request;
+    pthread_mutex_unlock(&thread->lease_break_lock);
+
+    evpl_ring_doorbell(&thread->lease_resume_doorbell);
 } /* chimera_smb_lock_acquire_cb */
 
 /* Records a synchronous lease-acquire outcome.  chimera_vfs_lease_acquire fires
@@ -507,6 +711,28 @@ chimera_smb_lock(struct chimera_smb_request *request)
         return;
     }
 
+    /* MS-SMB2 3.3.5.14 LockSequence replay detection (single-element path).
+     * Capture the bucket for an open that performs replay verification, and if it
+     * is a replay of the last op recorded under that bucket (same index), return
+     * the cached status without re-applying the lock — making a retransmit after a
+     * lost reply idempotent. */
+    request->lock.seq_bucket = 0;
+    request->lock.seq_index  = chimera_smb_lock_seq_index(request->lock.lock_sequence);
+    if (chimera_smb_lock_replay_active(request, open_file)) {
+        uint8_t b = chimera_smb_lock_seq_bucket(request->lock.lock_sequence);
+
+        if (b >= 1 && b <= 64) {
+            request->lock.seq_bucket = b;
+            if (open_file->lock_seq_valid[b - 1] &&
+                open_file->lock_seq_index[b - 1] == request->lock.seq_index) {
+                uint32_t cached = open_file->lock_seq_status[b - 1];
+                chimera_smb_open_file_release(request, open_file);
+                chimera_smb_complete_request(request, cached);
+                return;
+            }
+        }
+    }
+
     kind = request->lock.l_flags & SMB2_LOCKFLAG_KIND_MASK;
     if (kind != SMB2_LOCKFLAG_SHARED_LOCK &&
         kind != SMB2_LOCKFLAG_EXCLUSIVE &&
@@ -557,6 +783,8 @@ chimera_smb_lock(struct chimera_smb_request *request)
         }
 
         if (!match) {
+            chimera_smb_lock_seq_record(request, open_file,
+                                        SMB2_STATUS_RANGE_NOT_LOCKED);
             chimera_smb_open_file_release(request, open_file);
             /* No matching range — Windows returns RANGE_NOT_LOCKED. */
             chimera_smb_complete_request(request, SMB2_STATUS_RANGE_NOT_LOCKED);
@@ -572,6 +800,7 @@ chimera_smb_lock(struct chimera_smb_request *request)
         }
         free(match);
 
+        chimera_smb_lock_seq_record(request, open_file, SMB2_STATUS_SUCCESS);
         chimera_smb_open_file_release(request, open_file);
         chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
         return;
@@ -593,6 +822,8 @@ chimera_smb_lock(struct chimera_smb_request *request)
         {
             if (smb_lock_ranges_overlap(held->lease.offset, held->lease.length,
                                         request->lock.l_offset, want_length)) {
+                chimera_smb_lock_seq_record(request, open_file,
+                                            SMB2_STATUS_LOCK_NOT_GRANTED);
                 chimera_smb_open_file_release(request, open_file);
                 chimera_smb_complete_request(request,
                                              SMB2_STATUS_LOCK_NOT_GRANTED);
@@ -642,13 +873,62 @@ chimera_smb_lock(struct chimera_smb_request *request)
      * other.  The grant's lease carries the same pointer in cb_private. */
     entry->lease.owner.cb_private = open_file->grant;
 
-    request->lock.entry = entry;
+    request->lock.entry         = entry;
+    request->lock.resume_status = CHIMERA_SMB_LOCK_PENDING;
 
     wait = !(request->lock.l_flags & SMB2_LOCKFLAG_FAIL_IMM);
+
+    /* A waiting acquire may queue in the VFS and have its grant callback fire
+     * later on ANOTHER thread (whoever releases the conflict).  Arm `parked`
+     * BEFORE the call so the callback always takes the cross-thread bounce path,
+     * even if a concurrent release fires it the instant the ticket queues — this
+     * closes the window where the callback would otherwise mistake a deferred
+     * grant for a synchronous one.  A FAIL_IMMEDIATELY acquire never queues, so
+     * its callback always fires inline; leave it on the synchronous path. */
+    request->lock.parked = wait ? 1 : 0;
 
     chimera_vfs_lease_acquire(vfs_state, entry->file_state,
                               &entry->lease, &entry->ticket, wait,
                               chimera_smb_lock_acquire_cb, entry);
+
+    if (request->lock.parked && request->lock.resume_status == CHIMERA_SMB_LOCK_PENDING) {
+        /* The acquire genuinely queued (a conflicting range held by another
+         * owner, or a breakable caching lease being recalled) and its callback
+         * has not fired.  This is an SMB2 blocking lock (MS-SMB2 3.3.5.14): emit
+         * the STATUS_PENDING interim and record the park on the open so close /
+         * tree-disconnect / logoff / connection teardown can abort it.  On grant
+         * the callback bounces to this thread's resume doorbell; an SMB2 CANCEL
+         * or an abort completes it with CANCELLED / RANGE_NOT_LOCKED. */
+        open_file->parked_lock_req = request;
+        chimera_smb_async_interim_begin(request);
+        return;
+    }
+
+    if (request->lock.parked) {
+        /* Waiting acquire that resolved (granted or unbreakable-caching denial)
+         * before/at return: the callback already stashed the result and queued
+         * the request on this thread's lock_resume_head + rang the doorbell.  No
+         * interim is needed (no real wait occurred); the doorbell drain completes
+         * it.  request->lock.parked stays 1 until the drain. */
+        return;
+    }
+
+    /* FAIL_IMMEDIATELY: a synchronous grant or denial.  Install or tear down the
+     * entry and complete inline.  Clear pending_req BEFORE settle — a DENIED
+     * settle frees the entry, so touching it afterwards would be a UAF. */
+    {
+        uint32_t status;
+
+        entry->pending_req = NULL;
+        status             = chimera_smb_lock_settle_entry(
+            vfs_state, request, open_file, entry,
+            request->lock.resume_status == SMB2_STATUS_SUCCESS
+            ? CHIMERA_VFS_LEASE_GRANTED : CHIMERA_VFS_LEASE_DENIED);
+
+        chimera_smb_lock_seq_record(request, open_file, status);
+        chimera_smb_open_file_release(request, open_file);
+        chimera_smb_complete_request(request, status);
+    }
 } /* chimera_smb_lock */
 
 void

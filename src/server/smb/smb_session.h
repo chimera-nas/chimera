@@ -197,6 +197,25 @@ struct chimera_smb_open_file {
     /* Byte-range locks (SMB2_LOCK) held against this open.  Allocated
      * and linked on each granted lock op; freed on UNLOCK or on close. */
     struct chimera_smb_lock_entry    *lock_entries;
+    /* A blocking byte-range LOCK (MS-SMB2 3.3.5.14) parked on this open waiting
+     * for a conflicting range to release.  NULL when no lock is pending.  The
+     * parked request holds an open_file reference, so the open is not freed while
+     * a lock waits; close / tree-disconnect / logoff / connection teardown abort
+     * the parked lock (cancel the VFS ticket, complete RANGE_NOT_LOCKED) so the
+     * reference is dropped and the open can be reclaimed. */
+    struct chimera_smb_request       *parked_lock_req;
+    /* MS-SMB2 3.3.5.14 LockSequence replay cache.  A LOCK/UNLOCK carries a
+     * 4-bit LockSequenceNumber (bucket, 1..64 valid) + 4-bit LockSequenceIndex.
+     * For a durable / persistent / resilient / multichannel handle the server
+     * caches, per bucket, the index of the last lock op and its status; a
+     * re-send carrying the same bucket+index is a replay and returns the cached
+     * status without re-applying (so a lost-reply retransmit is idempotent).
+     * lock_seq_valid[b] is 0 until bucket b (1..64) has been used; the slot then
+     * holds the last index and status.  Index 0 is a legal index, so a separate
+     * valid flag is required.  Bucket 0 / >64 are never cached. */
+    uint8_t                           lock_seq_valid[64];
+    uint8_t                           lock_seq_index[64];
+    uint32_t                          lock_seq_status[64];
     /* SHARE lease (whole-file deny mode reservation) held by this open
      * once CREATE succeeds.  Released at close. */
     struct chimera_vfs_lease          share_lease;

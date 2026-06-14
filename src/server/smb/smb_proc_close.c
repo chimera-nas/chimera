@@ -291,6 +291,20 @@ chimera_smb_close(struct chimera_smb_request *request)
         return;
     }
 
+    /* A blocking byte-range LOCK still parked on this handle is aborted by the
+     * close and completed with RANGE_NOT_LOCKED (MS-SMB2; smb2.lock.cancel
+     * "cancel by close").  The open is already unhashed + marked CLOSED above, so
+     * the parked request's deferred grant can no longer land; finishing it here
+     * drops the open_file reference it held. */
+    {
+        struct chimera_smb_request *parked =
+            chimera_smb_lock_abort_parked(thread, request->close.open_file);
+
+        if (parked) {
+            chimera_smb_lock_park_finish(parked, parked->lock.resume_status);
+        }
+    }
+
     /* Clean up any notify watches on this open file */
     if (request->close.open_file->notify_state) {
         chimera_smb_notify_close(thread->shared->vfs->vfs_notify,
