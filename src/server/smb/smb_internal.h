@@ -963,6 +963,15 @@ struct chimera_smb_session_handle {
 
 #define CHIMERA_SMB_CONN_FLAG_SIGNING_REQUIRED      0x01
 #define CHIMERA_SMB_CONN_FLAG_SMB_DIRECT_NEGOTIATED 0x02
+/* A non-anonymous (real user/guest) session has been established on this
+ * connection, lifting it out of the MS-SMB2 "constrained connection" state.
+ * Until then the connection has only ever carried null (anonymous) sessions and
+ * MUST reject SMB3-encrypted traffic by resetting (smb2.session.anon-
+ * encryption1): a null session holds no key, so an encrypted request on an
+ * exclusively-anonymous connection is invalid.  Once a real session exists, an
+ * (otherwise unenforced) encrypted request on a null session is decrypted with
+ * the null session's zero-derived key like any other (anon-encryption2). */
+#define CHIMERA_SMB_CONN_FLAG_AUTHENTICATED         0x04
 
 /* Bits identifying which negotiate contexts the client sent (and that we
  * accepted on the wire). Phase 0 records this so unit tests can assert

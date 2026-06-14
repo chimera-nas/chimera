@@ -1744,6 +1744,11 @@ set(SMBTORTURE_ENABLED_memfs
     # smb2.session-require-signing
     smb2.session-require-signing.bug15397
     # smb2.session
+    smb2.session.anon-encryption1
+    smb2.session.anon-encryption2
+    smb2.session.anon-encryption3
+    smb2.session.anon-signing1
+    smb2.session.anon-signing2
     smb2.session.bind1
     smb2.session.bind2
     smb2.session.bind_different_user
@@ -3366,6 +3371,11 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     # smb2.session-require-signing
     smb2.session-require-signing.bug15397
     # smb2.session
+    smb2.session.anon-encryption1
+    smb2.session.anon-encryption2
+    smb2.session.anon-encryption3
+    smb2.session.anon-signing1
+    smb2.session.anon-signing2
     smb2.session.bind2
     smb2.session.bind_different_user
     smb2.session.bind_negative_smb3signC30toGd
@@ -3924,6 +3934,15 @@ set(SMBTORTURE_ISOLATE_SUITES
     smb2.lease
     smb2.oplock
     smb2.replay
+    # smb2.session needs per-subtest isolation: the anon-encryption* cases make
+    # the test driver enable SMB3 transport encryption for the whole daemon, and
+    # a globally-encrypt-all daemon changes the behaviour other session subtests
+    # depend on (e.g. reconnect2 / bind_invalid_auth encrypt their traffic, then
+    # an encrypted request on a session torn down out from under the connection
+    # is handled differently than the unencrypted form they assert).  Running
+    # each session subtest in its own daemon keeps the encryption knob scoped to
+    # the cases that actually opt into it.
+    smb2.session
 )
 # >>> SMBTORTURE_ISOLATE_END
 
