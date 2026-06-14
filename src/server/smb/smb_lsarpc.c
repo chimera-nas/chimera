@@ -48,20 +48,22 @@ static const dce_if_uuid_t LSA_INTERFACE = {
  * handler returned (a fixed opaque policy handle, STATUS_SUCCESS); inputs are
  * not consulted, matching prior behaviour.
  */
-/* Fill a SID with the server's fixed machine SID S-1-5-21-1111-2222-3333.  The
- * caller must provide zeroed storage (a dbuf allocation, or a `= { 0 }`
- * initialiser) so the unset identifier-authority and sub-authority bytes are
- * defined. */
+/* Fill a SID with the server's account-domain (machine) SID S-1-5-21-X-Y-Z,
+ * whose sub-authorities are derived once at startup from a stable per-host id
+ * (shared->machine_domain_sub).  The caller must provide zeroed storage (a dbuf
+ * allocation, or a `= { 0 }` initialiser) so the unset bytes are defined. */
 static void
-chimera_smb_lsarpc_machine_sid(struct ndr_sid *sid)
+chimera_smb_lsarpc_machine_sid(
+    struct ndr_sid                         *sid,
+    const struct chimera_server_smb_shared *shared)
 {
     sid->revision                = 1;
     sid->sub_authority_count     = 4;
     sid->identifier_authority[5] = 5; /* NT authority (big-endian) */
     sid->sub_authority[0]        = 21;
-    sid->sub_authority[1]        = 1111;
-    sid->sub_authority[2]        = 2222;
-    sid->sub_authority[3]        = 3333;
+    sid->sub_authority[1]        = shared->machine_domain_sub[0];
+    sid->sub_authority[2]        = shared->machine_domain_sub[1];
+    sid->sub_authority[3]        = shared->machine_domain_sub[2];
 } /* chimera_smb_lsarpc_machine_sid */
 
 /* Binary RPC_SID <-> "S-1-..." string, bridging the NDR SID to the string form
@@ -229,14 +231,15 @@ static void chimera_smb_set_ustr(
 
 static int
 chimera_smb_lsarpc_resolve_name(
-    const char                    *name,
-    struct chimera_vfs_user_cache *cache,
-    struct ndr_dbuf               *dbuf,
-    struct lsa_DomainInfo         *domains,
-    uint32_t                      *ndom,
-    struct ndr_sid                *full,
-    uint32_t                      *type,
-    uint32_t                      *rid)
+    const char                             *name,
+    struct chimera_vfs_user_cache          *cache,
+    struct ndr_dbuf                        *dbuf,
+    const struct chimera_server_smb_shared *shared,
+    struct lsa_DomainInfo                  *domains,
+    uint32_t                               *ndom,
+    struct ndr_sid                         *full,
+    uint32_t                               *type,
+    uint32_t                               *rid)
 {
     char           sidstr[CHIMERA_IDMAP_SID_MAX];
     uint32_t       t = LSA_SID_NAME_UNKNOWN;
@@ -247,7 +250,7 @@ chimera_smb_lsarpc_resolve_name(
     if (!name || name[0] == '\0') {
         /* Empty/NULL name -> the server's own primary (account) domain. */
         struct ndr_sid m = { 0 };
-        chimera_smb_lsarpc_machine_sid(&m);
+        chimera_smb_lsarpc_machine_sid(&m, shared);
         chimera_smb_sid_to_string(&m, sidstr, sizeof(sidstr));
         t        = LSA_SID_NAME_DOMAIN;
         resolved = 1;
@@ -402,12 +405,13 @@ chimera_smb_lsarpc_handle_close(
  */
 static int
 chimera_smb_lsarpc_impl(
-    int                      opnum,
-    const void              *in,
-    void                    *out,
-    struct ndr_dbuf         *dbuf,
-    struct chimera_vfs      *vfs,
-    struct chimera_smb_conn *conn)
+    int                                     opnum,
+    const void                             *in,
+    void                                   *out,
+    struct ndr_dbuf                        *dbuf,
+    struct chimera_vfs                     *vfs,
+    struct chimera_smb_conn                *conn,
+    const struct chimera_server_smb_shared *shared)
 {
     (void) in;
     (void) vfs;
@@ -471,7 +475,7 @@ chimera_smb_lsarpc_impl(
             pi->name.length = (uint16_t) (strlen(domain) * 2);
             pi->name.size   = (uint16_t) (strlen(domain) * 2);
             pi->name.buffer = (char *) domain;
-            chimera_smb_lsarpc_machine_sid(sid);
+            chimera_smb_lsarpc_machine_sid(sid, shared);
             pi->sid   = sid;
             o->info   = pi;
             o->status = 0;
@@ -614,7 +618,7 @@ chimera_smb_lsarpc_impl(
                 sids[i].sid_index = 0xffffffff;
 
                 didx = chimera_smb_lsarpc_resolve_name(li->names[i].buffer, cache,
-                                                       dbuf, domains, &ndom,
+                                                       dbuf, shared, domains, &ndom,
                                                        &full, &type, &rid);
                 if (didx < 0) {
                     continue;
@@ -666,7 +670,7 @@ chimera_smb_lsarpc_impl(
                 sids[i].flags     = 0;
 
                 didx = chimera_smb_lsarpc_resolve_name(li->names[i].buffer, cache,
-                                                       dbuf, domains, &ndom,
+                                                       dbuf, shared, domains, &ndom,
                                                        &full, &type, &rid);
                 if (didx < 0) {
                     continue;
@@ -719,7 +723,7 @@ chimera_smb_lsarpc_impl(
                 sids[i].flags     = 0;
 
                 didx = chimera_smb_lsarpc_resolve_name(li->names[i].buffer, cache,
-                                                       dbuf, domains, &ndom,
+                                                       dbuf, shared, domains, &ndom,
                                                        &full, &type, &rid);
                 if (didx < 0) {
                     continue;
@@ -778,13 +782,14 @@ chimera_smb_lsarpc_ndr_dispatch(
     void                       *output,
     struct chimera_smb_request *request)
 {
-    struct ndr_cursor        c;
-    struct ndr_writer        w;
-    struct ndr_dbuf          dbuf;
-    struct chimera_vfs      *vfs  = request->compound->thread->shared->vfs;
-    struct chimera_smb_conn *conn = request->compound->conn;
-    void                    *in, *out;
-    int                      n;
+    struct ndr_cursor                 c;
+    struct ndr_writer                 w;
+    struct ndr_dbuf                   dbuf;
+    struct chimera_server_smb_shared *shared = request->compound->thread->shared;
+    struct chimera_vfs               *vfs    = shared->vfs;
+    struct chimera_smb_conn          *conn   = request->compound->conn;
+    void                             *in, *out;
+    int                               n;
 
     ndr_cursor_init(&c, evpl_iovec_cursor_data(cursor),
                     cursor->iov->length - cursor->offset);
@@ -796,7 +801,7 @@ chimera_smb_lsarpc_ndr_dispatch(
     out = ndr_dbuf_alloc(&dbuf, op->out_size);
 
     op->pull_in(&c, in, &dbuf);
-    n = chimera_smb_lsarpc_impl(op->opnum, in, out, &dbuf, vfs, conn);
+    n = chimera_smb_lsarpc_impl(op->opnum, in, out, &dbuf, vfs, conn, shared);
 
     /* A context-handle fault skips marshalling: dce_rpc emits a fault PDU from
      * the negative return. */
