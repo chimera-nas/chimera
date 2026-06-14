@@ -236,6 +236,22 @@ chimera_smb_lease_break_cb(
         for (member = grant->holders; member;
              member = member->grant_member_next) {
             member->flags |= CHIMERA_SMB_OPEN_FILE_YIELDED;
+            /* Courtesy-hold the yielding holder's share reservation too, in the
+             * same file->lock section that revokes its lease (below).  The
+             * holder's connection is already gone but its disconnect teardown
+             * has not yet removed its share reservation; without this a racing
+             * batch/durable opener of the same file would see a surviving
+             * sole-opener and be capped to LEVEL_II with no durable handle, even
+             * though the holder has yielded (smb2.durable-open.oplock: io2 races
+             * io1's TCP disconnect).  The parked flag makes the conflict matrix's
+             * sole-opener check skip this reservation, so the new open takes the
+             * full BATCH + durable grant -- matching the already-parked-holder
+             * outcome of chimera_smb_create_purge_parked_writers.  The teardown
+             * later removes the reservation outright; setting parked early is
+             * idempotent with the park it would otherwise do. */
+            if (member->share_lease_inserted) {
+                member->share_lease.parked = 1;
+            }
         }
     }
     pthread_mutex_unlock(&file->lock);
