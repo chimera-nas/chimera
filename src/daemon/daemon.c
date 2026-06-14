@@ -23,6 +23,7 @@
 #include "server/server_internal.h"
 #include "common/logging.h"
 #include "common/common_config.h"
+#include "common/chimera_tracing.h"
 #include "metrics/metrics.h"
 #include "daemon.h"
 
@@ -328,6 +329,11 @@ main(
     chimera_apply_common_config(config, evpl_global_config);
 
     evpl_init(evpl_global_config);
+
+    /* Bring up OpenTelemetry span tracing if common.tracing.enabled (off by
+    * default).  Must run after evpl_init (the gRPC exporter spins up an evpl
+    * thread) and before the server's core threads start producing spans. */
+    chimera_tracing_init(config);
 
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
@@ -1028,6 +1034,10 @@ main(
     chimera_server_info("Shutting down server (signal=%d)...", SigInt);
 
     chimera_server_destroy(server);
+
+    /* Flush and close tracing exporters after the server's threads have drained
+     * and unregistered (chimera_server_destroy joined them). */
+    chimera_tracing_destroy();
 
     /* Optionally persist a final metrics scrape (common.metrics_file) before
      * tearing down the registry, so short-lived runs keep their metrics. */

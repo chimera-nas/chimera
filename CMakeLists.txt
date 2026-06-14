@@ -297,6 +297,30 @@ add_subdirectory(ext)
 
 include_directories(ext/libevpl/include)
 
+# OpenTelemetry tracing (oteltracing-c, built under libevpl/ext).  The public
+# header is always available (it is header-only no-op when the library is not
+# built).  When the library targets exist (protobuf-c present), wire chimera up
+# to use it; otherwise compile every translation unit with OTEL_TRACING=0 so all
+# embedded spans and span calls strip to nothing with no link dependency.
+include_directories(ext/libevpl/ext/oteltracing-c)
+if(TARGET oteltracing-c)
+    message(STATUS "oteltracing-c found - chimera tracing enabled")
+    add_compile_definitions(CHIMERA_HAVE_OTEL=1)
+    set(CHIMERA_OTEL_LIBS oteltracing-c)
+    if(TARGET oteltracing-sqlite)
+        add_compile_definitions(CHIMERA_HAVE_OTEL_SQLITE=1)
+        list(APPEND CHIMERA_OTEL_LIBS oteltracing-sqlite)
+    endif()
+    if(TARGET evpl_otel)
+        add_compile_definitions(CHIMERA_HAVE_OTEL_GRPC=1)
+        list(APPEND CHIMERA_OTEL_LIBS evpl_otel)
+    endif()
+else()
+    message(STATUS "oteltracing-c not built - chimera tracing disabled")
+    add_compile_definitions(OTEL_TRACING=0)
+    set(CHIMERA_OTEL_LIBS "")
+endif()
+
 # Find libwbclient (optional - for AD/Winbind integration)
 find_package(PkgConfig QUIET)
 if(PKG_CONFIG_FOUND)

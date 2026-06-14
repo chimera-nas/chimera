@@ -28,6 +28,7 @@
 #include "vfs/vfs_cred.h"
 #include "vfs/vfs_release.h"
 #include "common/macros.h"
+#include "common/chimera_tracing.h"
 #include "server/server.h"
 #include "smb/smb2.h"
 #include "rest/rest.h"
@@ -1216,6 +1217,10 @@ chimera_server_thread_init(
 
     thread->vfs_thread = chimera_vfs_thread_init(evpl, server->vfs);
 
+    /* This core thread produces spans (starts/ends them); register it with the
+     * tracer (no-op unless tracing is active). */
+    chimera_tracing_thread_register();
+
     for (int i = 0; i < server->num_protocols; i++) {
         thread->protocol_private[i] = server->protocols[i]->thread_init(evpl,
                                                                         thread->vfs_thread,
@@ -1762,6 +1767,11 @@ chimera_server_thread_shutdown(
     chimera_vfs_thread_drain(thread->vfs_thread);
 
     evpl_remove_timer(evpl, &thread->watchdog);
+
+    /* Unregister from the tracer (drains this thread's remaining spans) before
+     * tearing down its VFS thread. */
+    chimera_tracing_thread_unregister();
+
     chimera_vfs_thread_destroy(thread->vfs_thread);
     free(thread);
 } /* chimera_server_thread_shutdown */
