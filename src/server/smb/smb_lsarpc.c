@@ -16,25 +16,29 @@ static const dce_if_uuid_t LSA_INTERFACE = {
     .if_vers_minor = 0,
 };
 
-#define LSA_OP_CLOSE               0
-#define LSA_OP_OPENPOLICY          6
-#define LSA_OP_QUERYINFOPOLICY     7
-#define LSA_OP_ENUMTRUSTDOM        13
-#define LSA_OP_LOOKUPNAMES         14
-#define LSA_OP_LOOKUPSIDS          15
+#define LSA_OP_CLOSE                      0
+#define LSA_OP_OPENPOLICY                 6
+#define LSA_OP_QUERYINFOPOLICY            7
+#define LSA_OP_ENUMTRUSTDOM               13
+#define LSA_OP_LOOKUPNAMES                14
+#define LSA_OP_LOOKUPSIDS                 15
 
-#define LSA_STATUS_NO_MORE_ENTRIES 0x8000001A
-#define LSA_STATUS_SOME_NOT_MAPPED 0x00000107
-#define LSA_STATUS_NONE_MAPPED     0xC0000073
-#define LSA_SID_NAME_USER          1
-#define LSA_SID_NAME_UNKNOWN       8
-#define LSA_OP_OPENPOLICY2         44
-#define LSA_OP_GETUSERNAME         45
-#define LSA_OP_QUERYINFOPOLICY2    46
+#define LSA_STATUS_NO_MORE_ENTRIES        0x8000001A
+#define LSA_STATUS_SOME_NOT_MAPPED        0x00000107
+#define LSA_STATUS_NONE_MAPPED            0xC0000073
+#define LSA_STATUS_INSUFFICIENT_RESOURCES 0xC000009A
+#define LSA_SID_NAME_USER                 1
+#define LSA_SID_NAME_DOMAIN               3
+#define LSA_SID_NAME_ALIAS                4
+#define LSA_SID_NAME_WKN_GROUP            5
+#define LSA_SID_NAME_UNKNOWN              8
+#define LSA_OP_OPENPOLICY2                44
+#define LSA_OP_GETUSERNAME                45
+#define LSA_OP_QUERYINFOPOLICY2           46
 
 /* Bytes of DCE/RPC framing (common + response header) the framing layer writes
 * before the stub, so the generated marshaller's buffer cap stays in bounds. */
-#define LSA_RPC_STUB_MAX           (65535 - (int) (sizeof(dce_common_t) + sizeof(dce_co_response_t)))
+#define LSA_RPC_STUB_MAX                  (65535 - (int) (sizeof(dce_common_t) + sizeof(dce_co_response_t)))
 
 /*
  * Business logic for the ndrzcc-generated operations: fill the generated _out
@@ -142,8 +146,63 @@ chimera_smb_domain_name(const struct ndr_sid *domsid)
             return "Unix Group";
         }
     }
+    /* Well-known authorities (MS-DTYP 2.4.2.4). */
+    if (domsid->identifier_authority[5] == 1) {
+        return "";                 /* World authority (Everyone) */
+    }
+    if (domsid->identifier_authority[5] == 5) {
+        if (domsid->sub_authority_count >= 1 && domsid->sub_authority[0] == 32) {
+            return "BUILTIN";
+        }
+        return "NT AUTHORITY";     /* S-1-5-* well-knowns */
+    }
     return "WORKGROUP";
 } /* chimera_smb_domain_name */
+
+/* Well-known names the ACL editor / smbtorture LookupNames resolves on a
+ * standalone server (MS-DTYP 2.4.2.4 / MS-LSAT).  Matched case-insensitively in
+ * both the bare and DOMAIN\name forms. */
+struct chimera_smb_wellknown_name {
+    const char *name;
+    const char *sid;
+    uint32_t    type;
+};
+
+static const struct chimera_smb_wellknown_name chimera_smb_wellknown_names[] = {
+    { "Everyone",                          "S-1-1-0",                             LSA_SID_NAME_WKN_GROUP      },
+    { "SYSTEM",                            "S-1-5-18",                            LSA_SID_NAME_WKN_GROUP      },
+    { "NT AUTHORITY\\SYSTEM",              "S-1-5-18",                            LSA_SID_NAME_WKN_GROUP      },
+    { "NT AUTHORITY\\ANONYMOUS LOGON",     "S-1-5-7",                             LSA_SID_NAME_WKN_GROUP      },
+    { "NT AUTHORITY\\Authenticated Users", "S-1-5-11",                            LSA_SID_NAME_WKN_GROUP      },
+    { "BUILTIN\\Administrators",           "S-1-5-32-544",                        LSA_SID_NAME_ALIAS          },
+    { "BUILTIN\\Users",                    "S-1-5-32-545",                        LSA_SID_NAME_ALIAS          },
+    { "BUILTIN",                           "S-1-5-32",                            LSA_SID_NAME_DOMAIN         },
+    { "BUILTIN\\",                         "S-1-5-32",                            LSA_SID_NAME_DOMAIN         },
+};
+
+/* Resolve a name to a SID string + lsa_SidType; returns 1 if well-known. */
+static int
+chimera_smb_lookup_wellknown_name(
+    const char *name,
+    char       *sidbuf,
+    size_t      buflen,
+    uint32_t   *type)
+{
+    unsigned int i;
+
+    if (!name) {
+        return 0;
+    }
+    for (i = 0; i < sizeof(chimera_smb_wellknown_names) /
+         sizeof(chimera_smb_wellknown_names[0]); i++) {
+        if (strcasecmp(name, chimera_smb_wellknown_names[i].name) == 0) {
+            snprintf(sidbuf, buflen, "%s", chimera_smb_wellknown_names[i].sid);
+            *type = chimera_smb_wellknown_names[i].type;
+            return 1;
+        }
+    }
+    return 0;
+} /* chimera_smb_lookup_wellknown_name */
 
 /* Point an rpc_unicode_string (lsa_String) at a UTF-8 string; byte counts are
  * length==size==chars*2 (the buffer body is emitted no-NUL by ndr_push_wstring,
@@ -158,13 +217,99 @@ chimera_smb_set_ustr(
     s->buffer = (char *) utf8;
 } /* chimera_smb_set_ustr */
 
-static void
+/* A 16-byte handle id occupies a slot when any byte is non-zero. */
+static int
+chimera_smb_handle_id_set(const uint8_t uuid[16])
+{
+    for (int i = 0; i < 16; i++) {
+        if (uuid[i]) {
+            return 1;
+        }
+    }
+    return 0;
+} /* chimera_smb_handle_id_set */
+
+/* Issue a policy handle into a free slot of this connection's open-handle set.
+ * Returns 0 with h filled, or -1 if the set is full. */
+static int
+chimera_smb_lsarpc_handle_open(
+    struct chimera_smb_conn *conn,
+    struct policy_handle    *h)
+{
+    for (int i = 0; i < CHIMERA_SMB_RPC_MAX_HANDLES; i++) {
+        uint64_t a, b;
+
+        if (chimera_smb_handle_id_set(conn->rpc_handles[i])) {
+            continue;
+        }
+        a = chimera_rand64();
+        b = chimera_rand64();
+        memcpy(conn->rpc_handles[i], &a, 8);
+        memcpy(conn->rpc_handles[i] + 8, &b, 8);
+        conn->rpc_handles[i][0] |= 1;   /* never all-zero, so the slot reads busy */
+
+        h->handle_type = 0;
+        memcpy(h->uuid, conn->rpc_handles[i], 16);
+        return 0;
+    }
+    return -1;
+} /* chimera_smb_lsarpc_handle_open */
+
+/* Slot index of a handle open on this connection, or -1 (foreign, closed, or
+ * zeroed -- the cases that must fault with nca_s_fault_context_mismatch). */
+static int
+chimera_smb_lsarpc_handle_slot(
+    struct chimera_smb_conn    *conn,
+    const struct policy_handle *h)
+{
+    if (!chimera_smb_handle_id_set(h->uuid)) {
+        return -1;
+    }
+    for (int i = 0; i < CHIMERA_SMB_RPC_MAX_HANDLES; i++) {
+        if (memcmp(conn->rpc_handles[i], h->uuid, 16) == 0) {
+            return i;
+        }
+    }
+    return -1;
+} /* chimera_smb_lsarpc_handle_slot */
+
+static int
+chimera_smb_lsarpc_handle_valid(
+    struct chimera_smb_conn    *conn,
+    const struct policy_handle *h)
+{
+    return chimera_smb_lsarpc_handle_slot(conn, h) >= 0;
+} /* chimera_smb_lsarpc_handle_valid */
+
+/* Close (free) a handle's slot.  Returns 1 if it was open, 0 otherwise. */
+static int
+chimera_smb_lsarpc_handle_close(
+    struct chimera_smb_conn    *conn,
+    const struct policy_handle *h)
+{
+    int slot = chimera_smb_lsarpc_handle_slot(conn, h);
+
+    if (slot < 0) {
+        return 0;
+    }
+    memset(conn->rpc_handles[slot], 0, 16);
+    return 1;
+} /* chimera_smb_lsarpc_handle_close */
+
+/*
+ * Business logic for the generated operations.  Returns 0 on success (the _out
+ * struct is filled for marshalling) or DCE_RC_FAULT_CONTEXT_MISMATCH when an op
+ * is presented a handle this connection did not issue -- the dispatcher then
+ * emits a DCE/RPC fault instead of a response.
+ */
+static int
 chimera_smb_lsarpc_impl(
-    int                 opnum,
-    const void         *in,
-    void               *out,
-    struct ndr_dbuf    *dbuf,
-    struct chimera_vfs *vfs)
+    int                      opnum,
+    const void              *in,
+    void                    *out,
+    struct ndr_dbuf         *dbuf,
+    struct chimera_vfs      *vfs,
+    struct chimera_smb_conn *conn)
 {
     (void) in;
     (void) vfs;
@@ -172,16 +317,22 @@ chimera_smb_lsarpc_impl(
     switch (opnum) {
         case LSA_OP_OPENPOLICY2: {
             struct lsa_OpenPolicy2_out *o = out;
-            o->handle.handle_type = 0;
-            memset(o->handle.uuid, 0xaa, sizeof(o->handle.uuid));
-            o->status = 0;
+            if (chimera_smb_lsarpc_handle_open(conn, &o->handle) != 0) {
+                memset(&o->handle, 0, sizeof(o->handle));
+                o->status = LSA_STATUS_INSUFFICIENT_RESOURCES;
+            } else {
+                o->status = 0;
+            }
             break;
         }
         case LSA_OP_OPENPOLICY: {
             struct lsa_OpenPolicy_out *o = out;
-            o->handle.handle_type = 0;
-            memset(o->handle.uuid, 0xaa, sizeof(o->handle.uuid));
-            o->status = 0;
+            if (chimera_smb_lsarpc_handle_open(conn, &o->handle) != 0) {
+                memset(&o->handle, 0, sizeof(o->handle));
+                o->status = LSA_STATUS_INSUFFICIENT_RESOURCES;
+            } else {
+                o->status = 0;
+            }
             break;
         }
         case LSA_OP_GETUSERNAME: {
@@ -208,6 +359,10 @@ chimera_smb_lsarpc_impl(
             * layout-identical, so the level and info/status fields line up. */
             const struct lsa_QueryInfoPolicy_in *qi = in;
             struct lsa_QueryInfoPolicy_out      *o  = out;
+
+            if (!chimera_smb_lsarpc_handle_valid(conn, &qi->handle)) {
+                return DCE_RC_FAULT_CONTEXT_MISMATCH;
+            }
             /* Levels 3 (PrimaryDomain) and 5 (AccountDomain) both return the
              * server's workgroup name and machine SID. */
             static const char                   *domain = "WORKGROUP";
@@ -225,7 +380,12 @@ chimera_smb_lsarpc_impl(
             break;
         }
         case LSA_OP_ENUMTRUSTDOM: {
-            struct lsa_EnumTrustDom_out *o = out;
+            const struct lsa_EnumTrustDom_in *li = in;
+            struct lsa_EnumTrustDom_out      *o  = out;
+
+            if (!chimera_smb_lsarpc_handle_valid(conn, &li->handle)) {
+                return DCE_RC_FAULT_CONTEXT_MISMATCH;
+            }
             /* No trusted domains on a standalone server. */
             o->resume_handle   = 0;
             o->domains.count   = 0;
@@ -242,6 +402,10 @@ chimera_smb_lsarpc_impl(
             struct lsa_TranslatedName      *names;
             struct lsa_DomainInfo          *domains;
             struct lsa_RefDomainList       *rdl;
+
+            if (!chimera_smb_lsarpc_handle_valid(conn, &li->handle)) {
+                return DCE_RC_FAULT_CONTEXT_MISMATCH;
+            }
 
             names   = ndr_dbuf_alloc(dbuf, (n ? n : 1) * sizeof(*names));
             domains = ndr_dbuf_alloc(dbuf, (n ? n : 1) * sizeof(*domains));
@@ -334,58 +498,92 @@ chimera_smb_lsarpc_impl(
             struct lsa_DomainInfo           *domains;
             struct lsa_RefDomainList        *rdl;
 
+            if (!chimera_smb_lsarpc_handle_valid(conn, &li->handle)) {
+                return DCE_RC_FAULT_CONTEXT_MISMATCH;
+            }
+
             sids    = ndr_dbuf_alloc(dbuf, (nn ? nn : 1) * sizeof(*sids));
             domains = ndr_dbuf_alloc(dbuf, (nn ? nn : 1) * sizeof(*domains));
             rdl     = ndr_dbuf_alloc(dbuf, sizeof(*rdl));
 
             for (i = 0; i < nn; i++) {
-                const char                    *name = li->names[i].buffer;
-                const struct chimera_vfs_user *u;
+                const char    *name = li->names[i].buffer;
+                char           sidstr[CHIMERA_IDMAP_SID_MAX];
+                uint32_t       type = LSA_SID_NAME_UNKNOWN;
+                int            resolved;
+                struct ndr_sid full, dom;
+                int            didx = -1;
+                uint32_t       d, rid;
 
                 sids[i].sid_type  = LSA_SID_NAME_UNKNOWN;
                 sids[i].rid       = 0;
                 sids[i].sid_index = 0xffffffff;
 
-                u = name ? chimera_vfs_user_cache_lookup_by_name(cache, name) : NULL;
-                if (u) {
-                    char           sidstr[CHIMERA_IDMAP_SID_MAX];
-                    struct ndr_sid full, dom;
-                    int            didx = -1;
-                    uint32_t       d, rid;
+                if (!name || name[0] == '\0') {
+                    /* An empty/NULL name resolves to the server's own primary
+                     * (account) domain (MS-LSAT): its machine SID, type Domain. */
+                    struct ndr_sid m;
+                    chimera_smb_lsarpc_machine_sid(&m);
+                    chimera_smb_sid_to_string(&m, sidstr, sizeof(sidstr));
+                    type     = LSA_SID_NAME_DOMAIN;
+                    resolved = 1;
+                } else {
+                    /* Well-known names (Everyone, SYSTEM, BUILTIN\*, ...) first,
+                     * then the local-account idmap (a unix user -> S-1-22-1-<uid>
+                     * or its configured SID). */
+                    resolved = chimera_smb_lookup_wellknown_name(name, sidstr,
+                                                                 sizeof(sidstr), &type);
+                    if (!resolved) {
+                        const struct chimera_vfs_user *u =
+                            chimera_vfs_user_cache_lookup_by_name(cache, name);
+                        if (u) {
+                            if (u->sid[0]) {
+                                snprintf(sidstr, sizeof(sidstr), "%s", u->sid);
+                            } else {
+                                snprintf(sidstr, sizeof(sidstr), "S-1-22-1-%u", u->uid);
+                            }
+                            type     = LSA_SID_NAME_USER;
+                            resolved = 1;
+                        }
+                    }
+                }
 
-                    if (u->sid[0]) {
-                        snprintf(sidstr, sizeof(sidstr), "%s", u->sid);
-                    } else {
-                        snprintf(sidstr, sizeof(sidstr), "S-1-22-1-%u", u->uid);
-                    }
-                    if (chimera_smb_string_to_sid(sidstr, &full) != 0 ||
-                        full.sub_authority_count == 0) {
-                        continue;
-                    }
+                if (!resolved ||
+                    chimera_smb_string_to_sid(sidstr, &full) != 0 ||
+                    full.sub_authority_count == 0) {
+                    continue;
+                }
+
+                if (type == LSA_SID_NAME_DOMAIN) {
+                    /* A domain name resolves to the domain SID itself, with no
+                     * RID (0xffffffff) referencing the whole domain. */
+                    dom = full;
+                    rid = 0xffffffff;
+                } else {
                     rid = full.sub_authority[full.sub_authority_count - 1];
                     dom = full;            /* domain SID = SID minus the RID */
                     dom.sub_authority_count--;
-
-                    for (d = 0; d < ndom; d++) {
-                        if (chimera_smb_sid_equal(domains[d].sid, &dom)) {
-                            didx = (int) d;
-                            break;
-                        }
-                    }
-                    if (didx < 0) {
-                        struct ndr_sid *ds = ndr_dbuf_alloc(dbuf, sizeof(*ds));
-                        *ds               = dom;
-                        domains[ndom].sid = ds;
-                        chimera_smb_set_ustr(&domains[ndom].name,
-                                             chimera_smb_domain_name(&dom));
-                        didx = (int) ndom++;
-                    }
-
-                    sids[i].sid_type  = LSA_SID_NAME_USER;
-                    sids[i].rid       = rid;
-                    sids[i].sid_index = (uint32_t) didx;
-                    mapped++;
                 }
+
+                for (d = 0; d < ndom; d++) {
+                    if (chimera_smb_sid_equal(domains[d].sid, &dom)) {
+                        didx = (int) d;
+                        break;
+                    }
+                }
+                if (didx < 0) {
+                    struct ndr_sid *ds = ndr_dbuf_alloc(dbuf, sizeof(*ds));
+                    *ds               = dom;
+                    domains[ndom].sid = ds;
+                    chimera_smb_set_ustr(&domains[ndom].name,
+                                         chimera_smb_domain_name(&dom));
+                    didx = (int) ndom++;
+                }
+
+                sids[i].sid_type  = type;
+                sids[i].rid       = rid;
+                sids[i].sid_index = (uint32_t) didx;
+                mapped++;
             }
 
             rdl->count    = ndom;
@@ -401,15 +599,24 @@ chimera_smb_lsarpc_impl(
             break;
         }
         case LSA_OP_CLOSE: {
-            struct lsa_Close_out *o = out;
+            const struct lsa_Close_in *li = in;
+            struct lsa_Close_out      *o  = out;
+
+            if (!chimera_smb_lsarpc_handle_close(conn, &li->handle)) {
+                return DCE_RC_FAULT_CONTEXT_MISMATCH;
+            }
+            /* Per MS-LSAD a successful Close returns a zeroed handle; closing an
+             * already-closed (or foreign) handle faults above. */
             o->handle.handle_type = 0;
-            memset(o->handle.uuid, 0xaa, sizeof(o->handle.uuid));
+            memset(o->handle.uuid, 0, sizeof(o->handle.uuid));
             o->status = 0;
             break;
         }
         default:
             break;
     } /* switch */
+
+    return 0;
 } /* chimera_smb_lsarpc_impl */
 
 /*
@@ -424,12 +631,13 @@ chimera_smb_lsarpc_ndr_dispatch(
     void                       *output,
     struct chimera_smb_request *request)
 {
-    struct ndr_cursor   c;
-    struct ndr_writer   w;
-    struct ndr_dbuf     dbuf;
-    struct chimera_vfs *vfs = request->compound->thread->shared->vfs;
-    void               *in, *out;
-    int                 n;
+    struct ndr_cursor        c;
+    struct ndr_writer        w;
+    struct ndr_dbuf          dbuf;
+    struct chimera_vfs      *vfs  = request->compound->thread->shared->vfs;
+    struct chimera_smb_conn *conn = request->compound->conn;
+    void                    *in, *out;
+    int                      n;
 
     ndr_cursor_init(&c, evpl_iovec_cursor_data(cursor),
                     cursor->iov->length - cursor->offset);
@@ -441,7 +649,14 @@ chimera_smb_lsarpc_ndr_dispatch(
     out = ndr_dbuf_alloc(&dbuf, op->out_size);
 
     op->pull_in(&c, in, &dbuf);
-    chimera_smb_lsarpc_impl(op->opnum, in, out, &dbuf, vfs);
+    n = chimera_smb_lsarpc_impl(op->opnum, in, out, &dbuf, vfs, conn);
+
+    /* A context-handle fault skips marshalling: dce_rpc emits a fault PDU from
+     * the negative return. */
+    if (n < 0) {
+        ndr_dbuf_destroy(&dbuf);
+        return n;
+    }
 
     ndr_writer_init(&w, output, LSA_RPC_STUB_MAX);
     n = op->push_out(&w, out);
