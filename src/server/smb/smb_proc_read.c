@@ -89,6 +89,48 @@ chimera_smb_read_callback(
     chimera_smb_complete_request(private_data, SMB2_STATUS_SUCCESS);
 } /* chimera_smb_read_callback */
 
+/*
+ * DCE/RPC over a named pipe (ncacn_np), SMB2 READ leg: drain the response PDU a
+ * prior SMB2 WRITE stashed via chimera_smb_pipe_write.  Serves up to the
+ * requested length, advancing an offset so a client may read the response in
+ * several chunks; the stash is freed once fully drained.
+ */
+static void
+chimera_smb_pipe_read(struct chimera_smb_request *request)
+{
+    struct chimera_server_smb_thread *thread    = request->compound->thread;
+    struct evpl                      *evpl      = thread->evpl;
+    struct chimera_smb_open_file     *open_file = request->read.open_file;
+    uint32_t                          avail, n;
+
+    avail = open_file->rpc_resp_len - open_file->rpc_resp_off;
+    n     = request->read.length < avail ? request->read.length : avail;
+
+    if (n == 0) {
+        request->read.niov     = 0;
+        request->read.r_length = 0;
+        chimera_smb_open_file_release(request, open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+        return;
+    }
+
+    request->read.niov = evpl_iovec_alloc(evpl, n, 8, 1, 0, request->read.iov);
+    memcpy(request->read.iov[0].data,
+           open_file->rpc_resp + open_file->rpc_resp_off, n);
+    request->read.r_length   = n;
+    open_file->rpc_resp_off += n;
+
+    if (open_file->rpc_resp_off >= open_file->rpc_resp_len) {
+        free(open_file->rpc_resp);
+        open_file->rpc_resp     = NULL;
+        open_file->rpc_resp_len = 0;
+        open_file->rpc_resp_off = 0;
+    }
+
+    chimera_smb_open_file_release(request, open_file);
+    chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+} /* chimera_smb_pipe_read */
+
 void
 chimera_smb_read(struct chimera_smb_request *request)
 {
@@ -98,6 +140,13 @@ chimera_smb_read(struct chimera_smb_request *request)
 
     if (unlikely(!request->read.open_file)) {
         chimera_smb_complete_request(request, SMB2_STATUS_FILE_CLOSED);
+        return;
+    }
+
+    /* Named-pipe FIDs carry no VFS handle; serve RPC reads from the stashed
+     * ncacn_np response before any handle-backed file logic. */
+    if (request->read.open_file->type == CHIMERA_SMB_OPEN_FILE_TYPE_PIPE) {
+        chimera_smb_pipe_read(request);
         return;
     }
 

@@ -3475,6 +3475,15 @@ chimera_smb_create(struct chimera_smb_request *request)
         request->create.r_attrs.smb_attributes = 0x80;
         request->create.r_attrs.smb_attr_mask  = SMB_ATTR_MASK_NETWORK_OPEN;
 
+        /* Drop the create-time reference (gen_open_file sets refcnt=2: one for
+         * the tree's open_files hash, one held by the originating request).  The
+         * file path drops it in chimera_smb_create_finish; the pipe path
+         * completes inline, so release it here.  Without this the open stays at
+         * refcnt 1 after the single decrement in the disconnect/tree teardown
+         * sweep and is never freed -- a leak per pipe open that smbtorture's RPC
+         * suites (which disconnect without an explicit CLOSE) expose. */
+        chimera_smb_open_file_release(request, open_file);
+
         chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
 
     } else {

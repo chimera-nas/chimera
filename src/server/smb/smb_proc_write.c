@@ -164,6 +164,54 @@ chimera_smb_rdma_read_callback(
 
 
 
+/*
+ * DCE/RPC over a named pipe (ncacn_np), SMB2 WRITE leg: feed the written request
+ * PDU through the pipe's transceive handler and stash the response for the
+ * client's following SMB2 READ(s) to drain.  This is the WRITE/READ transport
+ * Windows and smbtorture use, distinct from the single-shot
+ * FSCTL_PIPE_TRANSCEIVE IOCTL transport.  A request PDU is assumed to arrive in
+ * one WRITE (true for the small LSARPC/SRVSVC calls in scope).
+ */
+static void
+chimera_smb_pipe_write(struct chimera_smb_request *request)
+{
+    struct chimera_server_smb_thread *thread    = request->compound->thread;
+    struct evpl                      *evpl      = thread->evpl;
+    struct chimera_smb_open_file     *open_file = request->write.open_file;
+    struct evpl_iovec                 output_iov;
+    int                               status;
+
+    evpl_iovec_alloc(evpl, 65535, 8, 1, 0, &output_iov);
+
+    status = open_file->pipe_transceive(request, request->write.iov,
+                                        request->write.niov, &output_iov);
+
+    evpl_iovecs_release(evpl, request->write.iov, request->write.niov);
+
+    if (unlikely(status != 0)) {
+        evpl_iovec_release(evpl, &output_iov);
+        chimera_smb_open_file_release(request, open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_INTERNAL_ERROR);
+        return;
+    }
+
+    /* Replace any still-undrained prior response, then copy the new PDU into a
+     * stable heap buffer (the evpl iovec is thread-local and released now). */
+    if (open_file->rpc_resp) {
+        free(open_file->rpc_resp);
+    }
+    open_file->rpc_resp_len = output_iov.length;
+    open_file->rpc_resp_off = 0;
+    open_file->rpc_resp     = malloc(output_iov.length ? output_iov.length : 1);
+    memcpy(open_file->rpc_resp, output_iov.data, output_iov.length);
+
+    evpl_iovec_release(evpl, &output_iov);
+    chimera_smb_open_file_release(request, open_file);
+
+    /* chimera_smb_write_reply reports request->write.length bytes accepted. */
+    chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+} /* chimera_smb_pipe_write */
+
 void
 chimera_smb_write(struct chimera_smb_request *request)
 {
@@ -181,6 +229,13 @@ chimera_smb_write(struct chimera_smb_request *request)
          * chimera_smb_write_callback is being skipped. */
         evpl_iovecs_release(evpl, request->write.iov, request->write.niov);
         chimera_smb_complete_request(request, SMB2_STATUS_FILE_CLOSED);
+        return;
+    }
+
+    /* Named-pipe FIDs carry no VFS handle; route RPC writes to the ncacn_np
+     * transport before any handle-backed file logic. */
+    if (request->write.open_file->type == CHIMERA_SMB_OPEN_FILE_TYPE_PIPE) {
+        chimera_smb_pipe_write(request);
         return;
     }
 
