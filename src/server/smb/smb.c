@@ -156,6 +156,7 @@ chimera_smb_server_init(
     shared->config.oplocks                    = chimera_server_config_get_smb_oplocks(config);
     shared->config.notify_disabled            = chimera_server_config_get_smb_notify_disabled(config);
     shared->config.acl_inherited_canonicalize = chimera_server_config_get_smb_acl_inherited_canonicalize(config);
+    shared->config.smb2_max_async_credits     = chimera_server_config_get_smb2_max_async_credits(config);
 
     if (shared->config.persistent_handles) {
         chimera_smb_info("SMB3 durable/persistent handles enabled (in-memory state)");
@@ -393,16 +394,23 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
 
         prev_command = &reply_hdr->next_command;
 
-        reply_hdr->protocol_id[0]          = 0xFE;
-        reply_hdr->protocol_id[1]          = 0x53;
-        reply_hdr->protocol_id[2]          = 0x4D;
-        reply_hdr->protocol_id[3]          = 0x42;
-        reply_hdr->struct_size             = 64;
-        reply_hdr->credit_charge           = request->smb2_hdr.credit_charge;
-        reply_hdr->status                  = request->status;
-        reply_hdr->command                 = request->smb2_hdr.command;
-        reply_hdr->credit_request_response = request->smb2_hdr.credit_request_response ?
-            request->smb2_hdr.credit_request_response : 1;
+        reply_hdr->protocol_id[0] = 0xFE;
+        reply_hdr->protocol_id[1] = 0x53;
+        reply_hdr->protocol_id[2] = 0x4D;
+        reply_hdr->protocol_id[3] = 0x42;
+        reply_hdr->struct_size    = 64;
+        reply_hdr->credit_charge  = request->smb2_hdr.credit_charge;
+        reply_hdr->status         = request->status;
+        reply_hdr->command        = request->smb2_hdr.command;
+        /* Grant credits, capping the client's balance so a flood of
+         * ever-larger CreditRequests cannot overflow its window.  An async
+         * request's CreditCharge was already debited when its interim was sent
+         * (async_id is set), so don't debit it again here. */
+        reply_hdr->credit_request_response = chimera_smb_grant_credits(
+            conn,
+            request->async_id ? 0 :
+            (request->smb2_hdr.credit_charge ? request->smb2_hdr.credit_charge : 1),
+            request->smb2_hdr.credit_request_response);
         reply_hdr->flags        = request->smb2_hdr.flags | SMB2_FLAGS_SERVER_TO_REDIR;
         reply_hdr->next_command = 0;
         reply_hdr->message_id   = request->smb2_hdr.message_id;
@@ -2240,6 +2248,8 @@ chimera_smb_server_accept(
     conn->dialect            = 0;
     conn->flags              = 0;
     conn->requests_completed = 0;
+    conn->async_outstanding  = 0;
+    conn->credits_balance    = 0;
 
     evpl_bind_get_local_address(bind, conn->local_addr, sizeof(conn->local_addr));
     evpl_bind_get_remote_address(bind, conn->remote_addr, sizeof(conn->remote_addr));

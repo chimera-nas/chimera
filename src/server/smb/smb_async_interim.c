@@ -72,17 +72,22 @@ chimera_smb_async_interim_send(struct chimera_smb_request *request)
     memset(buf, 0, CHIMERA_SMB_ASYNC_INTERIM_LEN);
 
     /* NetBIOS framing length filled in below. */
-    hdr                          = (struct smb2_header *) (buf + 4);
-    hdr->protocol_id[0]          = 0xFE;
-    hdr->protocol_id[1]          = 'S';
-    hdr->protocol_id[2]          = 'M';
-    hdr->protocol_id[3]          = 'B';
-    hdr->struct_size             = 64;
-    hdr->credit_charge           = request->async.credit_charge;
-    hdr->status                  = SMB2_STATUS_PENDING;
-    hdr->command                 = request->smb2_hdr.command;
-    hdr->credit_request_response = request->async.credit_request
-        ? request->async.credit_request : 1;
+    hdr                 = (struct smb2_header *) (buf + 4);
+    hdr->protocol_id[0] = 0xFE;
+    hdr->protocol_id[1] = 'S';
+    hdr->protocol_id[2] = 'M';
+    hdr->protocol_id[3] = 'B';
+    hdr->struct_size    = 64;
+    hdr->credit_charge  = request->async.credit_charge;
+    hdr->status         = SMB2_STATUS_PENDING;
+    hdr->command        = request->smb2_hdr.command;
+    /* Grant credits (capped), debiting this request's CreditCharge once here;
+     * the eventual final response passes consume=0 so the charge is not counted
+     * twice (see chimera_smb_grant_credits / chimera_smb_compound_reply). */
+    hdr->credit_request_response = chimera_smb_grant_credits(
+        conn,
+        request->async.credit_charge ? request->async.credit_charge : 1,
+        request->async.credit_request);
     hdr->flags          = SMB2_FLAGS_SERVER_TO_REDIR | SMB2_FLAGS_ASYNC_COMMAND;
     hdr->message_id     = request->smb2_hdr.message_id;
     hdr->async.async_id = request->async_id;
@@ -181,4 +186,8 @@ chimera_smb_async_interim_drain(struct chimera_smb_conn *conn)
             request->create.r_open_file = NULL;
         }
     }
+
+    /* All parked requests are gone, including any blocking named-pipe READs that
+     * counted against the async ceiling. */
+    conn->async_outstanding = 0;
 } /* chimera_smb_async_interim_drain */

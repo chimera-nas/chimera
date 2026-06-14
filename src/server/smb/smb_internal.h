@@ -233,6 +233,12 @@ struct chimera_smb_config {
      * SET_SECURITY; see chimera_server_config_set_smb_acl_inherited_canonicalize
      * for semantics.  Default 1 (canonical). */
     int                            acl_inherited_canonicalize;
+    /* Per-connection ceiling on simultaneously outstanding async (STATUS_PENDING)
+     * operations.  A blocking named-pipe READ that cannot be served now is made
+     * async until the connection holds (smb2_max_async_credits - 1) of them;
+     * beyond that it is rejected with STATUS_INSUFFICIENT_RESOURCES (the contract
+     * smb2.credits.*_ipc_max_async_credits asserts).  Default 512. */
+    int                            smb2_max_async_credits;
     uint32_t                       capabilities;
     uint32_t                       dialects[16];
     struct chimera_smb_nic_info    nic_info[16];
@@ -355,6 +361,10 @@ struct chimera_smb_request {
         uint16_t                       credit_charge;
         uint16_t                       credit_request;
         uint8_t                        armed;
+        /* Set when this parked request is a blocking named-pipe READ counted
+         * against conn->async_outstanding, so SMB2_CANCEL and teardown drain
+         * decrement that counter when the request leaves the parked list. */
+        uint8_t                        pipe_read;
     } async;
 
     union {
@@ -1112,6 +1122,17 @@ struct chimera_smb_conn {
      * SMB2_CANCEL walks this list by AsyncId; conn_free drains it before tearing
      * down the bind. */
     struct chimera_smb_request        *parked_requests;
+    /* Count of currently-parked async named-pipe READs on this connection.
+     * Capped at (config.smb2_max_async_credits - 1); reaching the cap makes
+     * further blocking pipe reads fail with STATUS_INSUFFICIENT_RESOURCES.
+     * Incremented when a pipe read parks, decremented when it is cancelled or
+     * drained at teardown. */
+    uint32_t                           async_outstanding;
+    /* Server-side estimate of the client's current SMB2 credit balance (granted
+     * minus charged), used to cap how many credits a response grants so a client
+     * that keeps requesting more (e.g. the smb2.credits async flood) cannot
+     * overflow its 16-bit credit window.  See chimera_smb_grant_credits. */
+    uint32_t                           credits_balance;
     struct chimera_server_smb_thread  *thread;
     struct evpl_bind                  *bind;
     struct chimera_smb_conn           *prev;
@@ -1125,6 +1146,47 @@ struct chimera_smb_conn {
     char                               local_addr[128];
     char                               remote_addr[128];
 };
+
+/* Ceiling on the credit balance the server will let a single connection
+ * accumulate.  A response grants the credits the client asked for, but never so
+ * many that the client's balance would exceed this -- otherwise a client that
+ * keeps requesting more (smb2.credits async flood requests 1,2,3,...) would
+ * overflow its 16-bit credit window and fault the connection.  Matches Samba's
+ * default `smb2 max credits`; the credits.c tests require >= 8192 grantable. */
+#define CHIMERA_SMB_MAX_CREDITS 8192
+
+/*
+ * Compute the SMB2 CreditResponse for one response and update the connection's
+ * running estimate of the client's credit balance.
+ *
+ * `consume` is the number of credits the client spent sending the request (its
+ * effective CreditCharge), debited once per request -- callers pass 0 for the
+ * final response of an async request whose interim already accounted the charge.
+ * The grant is the client's CreditRequest, clamped so the balance stays at or
+ * below CHIMERA_SMB_MAX_CREDITS, and never zero while the client holds none (so
+ * the window cannot collapse).  Single-threaded on the conn's SMB thread.
+ */
+static inline uint16_t
+chimera_smb_grant_credits(
+    struct chimera_smb_conn *conn,
+    uint32_t                 consume,
+    uint16_t                 credit_request)
+{
+    uint32_t want = credit_request ? credit_request : 1;
+    uint32_t bal  = conn->credits_balance;
+    uint32_t room, grant;
+
+    bal   = bal > consume ? bal - consume : 0;
+    room  = bal < CHIMERA_SMB_MAX_CREDITS ? CHIMERA_SMB_MAX_CREDITS - bal : 0;
+    grant = want < room ? want : room;
+
+    if (grant == 0 && bal == 0) {
+        grant = 1;
+    }
+
+    conn->credits_balance = bal + grant;
+    return (uint16_t) grant;
+} /* chimera_smb_grant_credits */
 
 /* Default and ceiling for a durable handle's reconnect grace window.  A v2
  * client may request a timeout; we honor it up to the ceiling, falling back to
@@ -1540,6 +1602,7 @@ chimera_smb_request_alloc(struct chimera_server_smb_thread *thread)
     request->async_id        = 0;
     request->tree            = NULL;
     request->async.armed     = 0;
+    request->async.pipe_read = 0;
     request->async.park_next = NULL;
 
     return request;

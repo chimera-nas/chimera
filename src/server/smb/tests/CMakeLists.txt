@@ -1101,6 +1101,10 @@ set(SMBTORTURE_ENABLED_memfs
     # smb2.create_no_streams
     smb2.create_no_streams.no_stream
     # smb2.credits
+    smb2.credits.1conn_ipc_max_async_credits
+    smb2.credits.2conn_ipc_max_async_credits
+    smb2.credits.ipc_max_data_zero
+    smb2.credits.multichannel_ipc_max_async_credits
     smb2.credits.session_setup_credits_granted
     smb2.credits.single_req_credits_granted
     smb2.credits.skipped_mid
@@ -1640,6 +1644,10 @@ set(SMBTORTURE_ENABLED_linux
     # smb2.create_no_streams
     smb2.create_no_streams.no_stream
     # smb2.credits
+    smb2.credits.1conn_ipc_max_async_credits
+    smb2.credits.2conn_ipc_max_async_credits
+    smb2.credits.ipc_max_data_zero
+    smb2.credits.multichannel_ipc_max_async_credits
     smb2.credits.session_setup_credits_granted
     smb2.credits.single_req_credits_granted
     smb2.credits.skipped_mid
@@ -2018,6 +2026,10 @@ set(SMBTORTURE_ENABLED_io_uring
     # smb2.create_no_streams
     smb2.create_no_streams.no_stream
     # smb2.credits
+    smb2.credits.1conn_ipc_max_async_credits
+    smb2.credits.2conn_ipc_max_async_credits
+    smb2.credits.ipc_max_data_zero
+    smb2.credits.multichannel_ipc_max_async_credits
     smb2.credits.session_setup_credits_granted
     smb2.credits.single_req_credits_granted
     smb2.credits.skipped_mid
@@ -2417,6 +2429,10 @@ set(SMBTORTURE_ENABLED_cairn
     # smb2.create_no_streams
     smb2.create_no_streams.no_stream
     # smb2.credits
+    smb2.credits.1conn_ipc_max_async_credits
+    smb2.credits.2conn_ipc_max_async_credits
+    smb2.credits.ipc_max_data_zero
+    smb2.credits.multichannel_ipc_max_async_credits
     smb2.credits.session_setup_credits_granted
     smb2.credits.single_req_credits_granted
     smb2.credits.skipped_mid
@@ -2959,6 +2975,10 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     # smb2.create_no_streams
     smb2.create_no_streams.no_stream
     # smb2.credits
+    smb2.credits.1conn_ipc_max_async_credits
+    smb2.credits.2conn_ipc_max_async_credits
+    smb2.credits.ipc_max_data_zero
+    smb2.credits.multichannel_ipc_max_async_credits
     smb2.credits.session_setup_credits_granted
     smb2.credits.single_req_credits_granted
     smb2.credits.skipped_mid
@@ -3502,6 +3522,10 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     # smb2.create_no_streams
     smb2.create_no_streams.no_stream
     # smb2.credits
+    smb2.credits.1conn_ipc_max_async_credits
+    smb2.credits.2conn_ipc_max_async_credits
+    smb2.credits.ipc_max_data_zero
+    smb2.credits.multichannel_ipc_max_async_credits
     smb2.credits.session_setup_credits_granted
     smb2.credits.single_req_credits_granted
     smb2.credits.skipped_mid
