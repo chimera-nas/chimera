@@ -647,6 +647,22 @@ space_map_reserve(
 
     want = need > floor ? need : floor;
 
+    /* Speculative over-reservation (want > need) batches future small writes by
+     * carving out a tail the caller keeps.  That tail is correct accounting --
+     * statfs counts it as used -- but on a near-full device it lets a single
+     * file privately corner the last free blocks: subsequent writes draw the
+     * cached tail on the fast path *without* re-checking the allocator, so they
+     * succeed even when the device truly has no free space (no ENOSPC).  Only
+     * speculate when the filesystem can comfortably afford it -- enough free
+     * that this reservation leaves at least another `want` behind.  Otherwise
+     * reserve exactly `need`, so every block a write consumes is drawn (and
+     * checked) against the live free pool and ENOSPC surfaces correctly.  This
+     * runs on the (already heavyweight, journaling) refill path, not the cache
+     * fast path, so the free-bytes scan is off the hot path. */
+    if (want > need && space_map_free_bytes(sm) < 2 * want) {
+        want = need;
+    }
+
     /* A reservation can't cross an AG boundary, so cap at the AG size; a
      * caller needing more than SM_AG_SIZE contiguous cannot be satisfied. */
     if (want > SM_AG_SIZE) {
