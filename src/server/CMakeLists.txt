@@ -9,7 +9,7 @@
 add_compile_definitions(_LGPL_SOURCE)
 
 add_library(chimera_server SHARED server.c)
-target_link_libraries(chimera_server chimera_nfs chimera_s3 chimera_smb chimera_rest chimera_vfs evpl unwind)
+target_link_libraries(chimera_server chimera_nfs chimera_s3 chimera_smb chimera_rest chimera_vfs chimera_common evpl unwind ${CHIMERA_OTEL_LIBS})
 
 install(TARGETS chimera_server DESTINATION lib)
 

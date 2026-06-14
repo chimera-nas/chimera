@@ -10,6 +10,7 @@
 #include "vfs_dump.h"
 #include "vfs.h"
 #include "vfs_internal.h"
+#include "common/macros.h"
 #include "common/format.h"
 #include "vfs_open_cache.h"
 #include "common/snprintf.h"
@@ -55,6 +56,42 @@ chimera_vfs_op_name(unsigned int opcode)
     } /* switch */
 
 } /* chimera_vfs_op_name */
+
+SYMBOL_EXPORT void
+chimera_vfs_trace_complete(struct chimera_vfs_request *request)
+{
+#if CHIMERA_HAVE_OTEL
+    struct otel_span *s = &request->otel;
+
+    s->name = chimera_vfs_op_name(request->opcode);
+
+    otel_span_attr_u64(s, "vfs.fh_hash", request->fh_hash);
+    otel_span_attr_i64(s, "vfs.status", request->status);
+
+    switch (request->opcode) {
+        case CHIMERA_VFS_OP_READ:
+            otel_span_attr_u64(s, "vfs.offset", request->read.offset);
+            otel_span_attr_u64(s, "vfs.length", request->read.length);
+            otel_span_attr_u64(s, "vfs.bytes", request->read.r_length);
+            break;
+        case CHIMERA_VFS_OP_WRITE:
+            otel_span_attr_u64(s, "vfs.offset", request->write.offset);
+            otel_span_attr_u64(s, "vfs.length", request->write.length);
+            otel_span_attr_u64(s, "vfs.bytes", request->write.r_length);
+            break;
+        default:
+            break;
+    } /* switch */
+
+    if (request->status != CHIMERA_VFS_OK) {
+        otel_span_set_status(s, OTEL_STATUS_ERROR, NULL);
+    }
+
+    otel_span_end(s);
+#else  /* !CHIMERA_HAVE_OTEL */
+    (void) request;
+#endif /* CHIMERA_HAVE_OTEL */
+} /* chimera_vfs_trace_complete */
 
 void
 __chimera_vfs_dump_request(struct chimera_vfs_request *req)
