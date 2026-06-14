@@ -111,6 +111,7 @@ enum chimera_smb_open_file_type {
 enum chimera_smb_pipe_magic {
     CHIMERA_SMB_OPEN_FILE_LSA_RPC,
     CHIMERA_SMB_OPEN_FILE_SRV_RPC,
+    CHIMERA_SMB_OPEN_FILE_SAMR_RPC,
 };
 
 struct chimera_smb_request;
