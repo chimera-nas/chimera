@@ -1526,6 +1526,7 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.ioctl.copy_chunk_bad_access
     smb2.ioctl.copy_chunk_bad_key
     smb2.ioctl.copy_chunk_bug15644
+    smb2.ioctl.copy_chunk_dest_lock
     smb2.ioctl.copy_chunk_limits
     smb2.ioctl.copy_chunk_max_output_sz
     smb2.ioctl.copy_chunk_multi
@@ -1535,6 +1536,7 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.ioctl.copy_chunk_src_exceed
     smb2.ioctl.copy_chunk_src_exceed_multi
     smb2.ioctl.copy_chunk_src_is_dest
+    smb2.ioctl.copy_chunk_src_lock
     smb2.ioctl.copy_chunk_tiny
     smb2.ioctl.copy_chunk_write_access
     smb2.ioctl.copy_chunk_zero_length
@@ -1608,7 +1610,11 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.lease.v2_flags_breaking
     smb2.lease.v2_flags_parentkey
     # smb2.lock
+    smb2.lock.async
     smb2.lock.auto-unlock
+    smb2.lock.cancel
+    smb2.lock.cancel-logoff
+    smb2.lock.cancel-tdis
     smb2.lock.contend
     smb2.lock.context
     smb2.lock.ctdb-delrec-deadlock
@@ -1618,6 +1624,9 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.lock.open-brlock-deadlock
     smb2.lock.overlap
     smb2.lock.range
+    smb2.lock.replay_broken_windows
+    smb2.lock.replay_smb3_specification_durable
+    smb2.lock.replay_smb3_specification_multi
     smb2.lock.rw-exclusive
     smb2.lock.rw-none
     smb2.lock.rw-shared
@@ -3148,6 +3157,7 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.ioctl.copy_chunk_bad_access
     smb2.ioctl.copy_chunk_bad_key
     smb2.ioctl.copy_chunk_bug15644
+    smb2.ioctl.copy_chunk_dest_lock
     smb2.ioctl.copy_chunk_limits
     smb2.ioctl.copy_chunk_max_output_sz
     smb2.ioctl.copy_chunk_multi
@@ -3158,6 +3168,7 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.ioctl.copy_chunk_src_exceed_multi
     smb2.ioctl.copy_chunk_src_is_dest
     smb2.ioctl.copy_chunk_src_is_dest_overlap
+    smb2.ioctl.copy_chunk_src_lock
     smb2.ioctl.copy_chunk_tiny
     smb2.ioctl.copy_chunk_write_access
     smb2.ioctl.copy_chunk_zero_length
@@ -3230,7 +3241,11 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.lease.v2_flags_breaking
     smb2.lease.v2_flags_parentkey
     # smb2.lock
+    smb2.lock.async
     smb2.lock.auto-unlock
+    smb2.lock.cancel
+    smb2.lock.cancel-logoff
+    smb2.lock.cancel-tdis
     smb2.lock.contend
     smb2.lock.context
     smb2.lock.ctdb-delrec-deadlock
@@ -3240,6 +3255,9 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.lock.open-brlock-deadlock
     smb2.lock.overlap
     smb2.lock.range
+    smb2.lock.replay_broken_windows
+    smb2.lock.replay_smb3_specification_durable
+    smb2.lock.replay_smb3_specification_multi
     smb2.lock.rw-exclusive
     smb2.lock.rw-none
     smb2.lock.rw-shared

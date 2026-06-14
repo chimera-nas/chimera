@@ -1232,6 +1232,19 @@ chimera_vfs_state_pump_pending(
             continue;
         }
 
+        /* A waiting RANGE-lease ticket still hard-DENIED by another conflicting
+         * range stays parked: the lock that unblocked this pump only freed part
+         * of the contended region (or a different range), so keep blocking until
+         * the specific conflict clears (SMB2 blocking lock; never bounce DENIED
+         * back to a waiter). */
+        if (result == CHIMERA_VFS_LEASE_DENIED && t->wait &&
+            t->lease->kind == CHIMERA_VFS_LEASE_RANGE) {
+            pthread_mutex_lock(&file->lock);
+            chimera_vfs_pending_enqueue_locked(file, t);
+            pthread_mutex_unlock(&file->lock);
+            continue;
+        }
+
         t->cb(result,
               result == CHIMERA_VFS_LEASE_GRANTED ? t->lease : NULL,
               conflict,
@@ -1278,6 +1291,7 @@ chimera_vfs_lease_acquire(
     ticket->private_data = private_data;
     ticket->file         = file;
     ticket->queued       = false;
+    ticket->wait         = wait;
     ticket->prev         = NULL;
     ticket->next         = NULL;
 
@@ -1286,6 +1300,22 @@ chimera_vfs_lease_acquire(
     if (result == CHIMERA_VFS_LEASE_BREAKING && wait) {
         /* Conflict is breakable and caller said to wait.  Queue the
          * ticket; it will fire when the break completes (via pump). */
+        pthread_mutex_lock(&file->lock);
+        chimera_vfs_pending_enqueue_locked(file, ticket);
+        pthread_mutex_unlock(&file->lock);
+        return;
+    }
+
+    /* A RANGE lease (byte-range lock) that is hard-DENIED by another owner's
+     * conflicting lock, when the caller asked to wait, is an SMB2 blocking lock
+     * (MS-SMB2 3.3.5.14): queue it rather than bouncing DENIED.  The ticket fires
+     * GRANTED when the conflicting range is released (chimera_vfs_state_remove ->
+     * pump_pending re-runs try_insert), or the caller cancels it
+     * (chimera_vfs_lease_acquire_cancel) on CANCEL / handle close / teardown.
+     * Restricted to RANGE leases: SHARE/CACHING DENIED is a genuine hard failure
+     * the protocol layer must surface immediately. */
+    if (result == CHIMERA_VFS_LEASE_DENIED && wait &&
+        lease->kind == CHIMERA_VFS_LEASE_RANGE) {
         pthread_mutex_lock(&file->lock);
         chimera_vfs_pending_enqueue_locked(file, ticket);
         pthread_mutex_unlock(&file->lock);
