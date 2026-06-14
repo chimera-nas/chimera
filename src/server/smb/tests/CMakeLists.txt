@@ -520,19 +520,46 @@ set_tests_properties(chimera/server/smb/rpcclient_lsa PROPERTIES
     LABELS "smb"
     TIMEOUT 120)
 
-# smbtorture DCE/RPC conformance suites for LSARPC.  Wired here but DISABLED:
-# each exercises a domain feature beyond a standalone file server's scope --
-# rpc.handles.lsarpc asserts DCE/RPC context-handle association tracking
-# (cross-connection RPC_SS_CONTEXT_MISMATCH), and rpc.lsalookup bails with
-# "no trusts" because it looks names up in trusted domains.  The actual LSARPC
-# functionality (bind, OpenPolicy/2, Close, QueryInfoPolicy, EnumTrustDom,
-# GetUserName) is validated by rpcclient_lsa above.  Drop DISABLED on a suite
-# once the server grows the feature it needs.
-set(SMBTORTURE_RPC_SUITES
+# smbtorture DCE/RPC conformance suites that pass against the standalone
+# file-server stack -- enabled as real gates (run against the in-process server
+# over the named-pipe transport, no domain controller required).
+#   rpc.lsa.lookupsids : LookupSids of a SID set; untranslated SIDs come back in
+#                        string form (MS-LSAT), local unix-user SIDs resolve via
+#                        the idmap.
+#   rpc.srvsvc...NetShareEnumAll : the level-1 share enumeration that backs
+#                        Explorer browsing, exercised over the SMB2 WRITE/READ
+#                        ncacn_np transport (named subtest; pinned Samba image).
+set(SMBTORTURE_RPC_SUITES_ENABLED
+    rpc.lsa.lookupsids
+    "rpc.srvsvc.srvsvc (admin access).NetShareEnumAll")
+
+foreach(SUITE ${SMBTORTURE_RPC_SUITES_ENABLED})
+    string(REGEX REPLACE "[^A-Za-z0-9]" "_" SUITE_ID ${SUITE})
+    set(TEST_NAME chimera/server/smb/smbtorture_${SUITE_ID}_memfs)
+    add_test(NAME ${TEST_NAME}
+        COMMAND ${CMAKE_SOURCE_DIR}/scripts/netns_test_wrapper.sh
+                ${SMBTORTURE_CMD} -b memfs ${SUITE})
+    set_tests_properties(${TEST_NAME} PROPERTIES
+        ENVIRONMENT "${SMBTORTURE_LSAN}"
+        SKIP_RETURN_CODE 77
+        LABELS "smbtorture_rpc"
+        TIMEOUT 300)
+endforeach()
+
+# smbtorture DCE/RPC conformance suites wired but DISABLED: each needs a server
+# feature we don't have yet (but that is in NAS scope -- drop DISABLED once the
+# feature lands).
+#   rpc.lsa.lookupnames : needs well-known name resolution (Everyone, SYSTEM,
+#                         BUILTIN\Administrators, ...) AND a Close that returns
+#                         RPC_SS_CONTEXT_MISMATCH (real context-handle tracking).
+#   rpc.handles.lsarpc  : DCE/RPC context-handle association across connections.
+#   rpc.lsalookup       : looks names up in trusted domains ("no trusts").
+set(SMBTORTURE_RPC_SUITES_DISABLED
+    rpc.lsa.lookupnames
     rpc.handles.lsarpc
     rpc.lsalookup)
 
-foreach(SUITE ${SMBTORTURE_RPC_SUITES})
+foreach(SUITE ${SMBTORTURE_RPC_SUITES_DISABLED})
     string(REGEX REPLACE "[^A-Za-z0-9]" "_" SUITE_ID ${SUITE})
     set(TEST_NAME chimera/server/smb/smbtorture_${SUITE_ID}_memfs)
     add_test(NAME ${TEST_NAME}
