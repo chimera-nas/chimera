@@ -19,6 +19,7 @@
 #include "smb_attr.h"
 #include "smb_lsarpc.h"
 #include "smb_srvsvc.h"
+#include "smb_samr.h"
 
 #define SMB2_WRITE_MASK                            (SMB2_FILE_WRITE_DATA | \
                                                     SMB2_FILE_APPEND_DATA | \
@@ -3776,6 +3777,9 @@ chimera_smb_create(struct chimera_smb_request *request)
         } else if (strcasecmp(request->create.name, "srvsvc") == 0) {
             pipe_magic = CHIMERA_SMB_OPEN_FILE_SRV_RPC;
             transceive = chimera_smb_srvsvc_transceive;
+        } else if (strcasecmp(request->create.name, "samr") == 0) {
+            pipe_magic = CHIMERA_SMB_OPEN_FILE_SAMR_RPC;
+            transceive = chimera_smb_samr_transceive;
         } else {
             chimera_smb_complete_request(request, SMB2_STATUS_OBJECT_NAME_NOT_FOUND);
             return;
