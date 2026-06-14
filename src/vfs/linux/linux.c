@@ -1263,20 +1263,30 @@ chimera_linux_seek(
     result = lseek(fd, request->seek.offset, whence);
 
     if (result < 0) {
-        if (errno == ENXIO) {
-            request->seek.r_eof    = 1;
-            request->seek.r_offset = 0;
-            request->status        = CHIMERA_VFS_OK;
-        } else {
-            request->status = chimera_linux_errno_to_status(errno);
-        }
+        /* No matching data/hole at or after the offset (the offset is at or
+         * past EOF, or SEEK_DATA found no more data): host lseek sets ENXIO,
+         * which must propagate as NFS4ERR_NXIO / POSIX ENXIO -- not a silent
+         * success. */
+        request->status = (errno == ENXIO) ? CHIMERA_VFS_ENXIO
+                          : chimera_linux_errno_to_status(errno);
         request->complete(request);
         return;
     }
 
-    request->seek.r_eof    = 0;
     request->seek.r_offset = result;
-    request->status        = CHIMERA_VFS_OK;
+    request->seek.r_eof    = 0;
+
+    /* A SEEK_HOLE that lands at the logical size is the implicit hole at EOF;
+     * RFC 7862 §11.4.4 requires sr_eof TRUE there.  SEEK_DATA always lands
+     * before EOF, so its eof stays false. */
+    if (whence == SEEK_HOLE) {
+        struct stat st;
+        if (fstat(fd, &st) == 0 && (uint64_t) result >= (uint64_t) st.st_size) {
+            request->seek.r_eof = 1;
+        }
+    }
+
+    request->status = CHIMERA_VFS_OK;
     request->complete(request);
 
 } /* chimera_linux_seek */
