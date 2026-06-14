@@ -262,6 +262,15 @@ chimera_smb_lock_take_one(
     struct chimera_smb_lock_entry *entry, *held;
     enum chimera_vfs_lease_result  result = CHIMERA_VFS_LEASE_DENIED;
 
+    /* The only caller (chimera_smb_lock_multi) is reached from chimera_smb_lock
+     * after open_file has been resolved and null-checked, so open_file is an
+     * invariant here.  Make it explicit for the static analyzer (which cannot
+     * carry the upstream check across the two call boundaries): a missing open
+     * fails the acquire, which the caller maps to STATUS_LOCK_NOT_GRANTED. */
+    if (unlikely(!open_file)) {
+        return NULL;
+    }
+
     if (exclusive) {
         DL_FOREACH(open_file->lock_entries, held)
         {
