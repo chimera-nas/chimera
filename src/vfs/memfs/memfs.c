@@ -1335,7 +1335,7 @@ memfs_map_attrs(
         memcpy(attr->va_pnfs, inode->remote->data, inode->remote->len);
     }
 
-    if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STATFS) {
+    if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STATFS_VALUES) {
         attr->va_set_mask      |= CHIMERA_VFS_ATTR_MASK_STATFS;
         attr->va_fs_space_total = shared->fs_size ? shared->fs_size :
             CHIMERA_VFS_SYNTHETIC_FS_BYTES;
@@ -1347,6 +1347,7 @@ memfs_map_attrs(
         attr->va_fs_files_total = CHIMERA_VFS_SYNTHETIC_FS_INODES;
         attr->va_fs_files_free  = CHIMERA_VFS_SYNTHETIC_FS_INODES;
         attr->va_fs_files_avail = CHIMERA_VFS_SYNTHETIC_FS_INODES;
+        attr->va_fsid           = shared->fsid;
     }
 
 } /* memfs_map_attrs */
@@ -1893,7 +1894,12 @@ memfs_mount(
         attr->va_btime     = inode->btime;
     }
 
-    if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STATFS) {
+    if (attr->va_req_mask & CHIMERA_VFS_ATTR_FSID) {
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_FSID;
+        attr->va_fsid      = shared->fsid;
+    }
+
+    if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STATFS_VALUES) {
         attr->va_set_mask      |= CHIMERA_VFS_ATTR_MASK_STATFS;
         attr->va_fs_space_total = shared->fs_size ? shared->fs_size :
             CHIMERA_VFS_SYNTHETIC_FS_BYTES;

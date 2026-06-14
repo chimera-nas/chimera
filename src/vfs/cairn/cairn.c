@@ -1724,7 +1724,7 @@ cairn_map_attrs(
         attr->va_fsid      = shared->fsid;
     }
 
-    if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STATFS) {
+    if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STATFS_VALUES) {
         attr->va_set_mask      |= CHIMERA_VFS_ATTR_MASK_STATFS;
         attr->va_fs_space_avail = CHIMERA_VFS_SYNTHETIC_FS_BYTES;
         attr->va_fs_space_free  = CHIMERA_VFS_SYNTHETIC_FS_BYTES;
@@ -1733,6 +1733,7 @@ cairn_map_attrs(
         attr->va_fs_files_total = CHIMERA_VFS_SYNTHETIC_FS_INODES;
         attr->va_fs_files_free  = CHIMERA_VFS_SYNTHETIC_FS_INODES;
         attr->va_fs_files_avail = CHIMERA_VFS_SYNTHETIC_FS_INODES;
+        attr->va_fsid           = shared->fsid;
     }
 } /* cairn_map_attrs */
 
