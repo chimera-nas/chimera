@@ -169,15 +169,24 @@ struct chimera_smb_wellknown_name {
 };
 
 static const struct chimera_smb_wellknown_name chimera_smb_wellknown_names[] = {
-    { "Everyone",                          "S-1-1-0",                             LSA_SID_NAME_WKN_GROUP      },
-    { "SYSTEM",                            "S-1-5-18",                            LSA_SID_NAME_WKN_GROUP      },
-    { "NT AUTHORITY\\SYSTEM",              "S-1-5-18",                            LSA_SID_NAME_WKN_GROUP      },
-    { "NT AUTHORITY\\ANONYMOUS LOGON",     "S-1-5-7",                             LSA_SID_NAME_WKN_GROUP      },
-    { "NT AUTHORITY\\Authenticated Users", "S-1-5-11",                            LSA_SID_NAME_WKN_GROUP      },
-    { "BUILTIN\\Administrators",           "S-1-5-32-544",                        LSA_SID_NAME_ALIAS          },
-    { "BUILTIN\\Users",                    "S-1-5-32-545",                        LSA_SID_NAME_ALIAS          },
-    { "BUILTIN",                           "S-1-5-32",                            LSA_SID_NAME_DOMAIN         },
-    { "BUILTIN\\",                         "S-1-5-32",                            LSA_SID_NAME_DOMAIN         },
+    { "Everyone",                          "S-1-1-0",                             LSA_SID_NAME_WKN_GROUP
+    },
+    { "SYSTEM",                            "S-1-5-18",                            LSA_SID_NAME_WKN_GROUP
+    },
+    { "NT AUTHORITY\\SYSTEM",              "S-1-5-18",                            LSA_SID_NAME_WKN_GROUP
+    },
+    { "NT AUTHORITY\\ANONYMOUS LOGON",     "S-1-5-7",                             LSA_SID_NAME_WKN_GROUP
+    },
+    { "NT AUTHORITY\\Authenticated Users", "S-1-5-11",                            LSA_SID_NAME_WKN_GROUP
+    },
+    { "BUILTIN\\Administrators",           "S-1-5-32-544",                        LSA_SID_NAME_ALIAS
+    },
+    { "BUILTIN\\Users",                    "S-1-5-32-545",                        LSA_SID_NAME_ALIAS
+    },
+    { "BUILTIN",                           "S-1-5-32",                            LSA_SID_NAME_DOMAIN
+    },
+    { "BUILTIN\\",                         "S-1-5-32",                            LSA_SID_NAME_DOMAIN
+    },
 };
 
 /* Resolve a name to a SID string + lsa_SidType; returns 1 if well-known. */
