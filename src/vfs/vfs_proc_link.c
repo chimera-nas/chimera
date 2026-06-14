@@ -61,6 +61,8 @@ chimera_vfs_link_dest_parent_lookup_complete(
         request->link.attr_mask,
         0,
         0,
+        NULL,
+        NULL,
         chimera_vfs_link_op_complete,
         request);
 } /* chimera_vfs_link_dest_parent_lookup_complete */
@@ -100,6 +102,8 @@ chimera_vfs_link_source_lookup_fast_complete(
         request->link.attr_mask,
         0,
         0,
+        NULL,
+        NULL,
         chimera_vfs_link_op_complete,
         request);
 } /* chimera_vfs_link_source_lookup_fast_complete */

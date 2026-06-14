@@ -802,6 +802,11 @@ struct chimera_vfs_request {
             uint64_t                        name_hash;
             const uint8_t                  *child_fh;     /* Optional: child FH if known */
             int                             child_fh_len; /* 0 if child_fh not provided */
+            /* SMB3 directory-lease self-exemption (see link_at): spare the dir
+             * lease named by the deleting open's ParentLeaseKey from the
+             * FILE_REMOVED break on the parent.  NULL caller = break all. */
+            uint8_t                         parent_lease_skip[16];
+            uint8_t                         parent_lease_skip_valid;
             struct chimera_vfs_attrs        r_dir_pre_attr;
             struct chimera_vfs_attrs        r_dir_post_attr;
             struct chimera_vfs_attrs        r_removed_attr;
@@ -842,6 +847,11 @@ struct chimera_vfs_request {
             int                      target_fh_len; /* 0 if target_fh not provided */
             uint8_t                  source_fh[CHIMERA_VFS_FH_SIZE]; /* resolved source FH, for delegation recall */
             int                      source_fh_len; /* 0 if source FH could not be resolved */
+            /* SMB3 directory-lease self-exemption (see link_at): spare the dir
+             * lease named by the operating open's ParentLeaseKey from the RENAMED
+             * break on the source/dest parent.  NULL caller = no skip. */
+            uint8_t                  parent_lease_skip[16];
+            uint8_t                  parent_lease_skip_valid;
             struct chimera_vfs_attrs r_fromdir_pre_attr;
             struct chimera_vfs_attrs r_fromdir_post_attr;
             struct chimera_vfs_attrs r_todir_pre_attr;
@@ -856,6 +866,12 @@ struct chimera_vfs_request {
             int                      namelen;
             unsigned int             replace;
             uint64_t                 name_hash;
+            /* SMB3 directory-lease self-exemption: when this link/rename is
+             * issued through a handle that supplied a ParentLeaseKey, that
+             * directory lease must not be broken by the FILE_ADDED emit on the
+             * parent.  Copied from the caller (NULL = no skip, break all). */
+            uint8_t                  parent_lease_skip[16];
+            uint8_t                  parent_lease_skip_valid;
             struct chimera_vfs_attrs r_attr;
             struct chimera_vfs_attrs r_replaced_attr;
             struct chimera_vfs_attrs r_dir_pre_attr;

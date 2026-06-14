@@ -64,6 +64,7 @@ chimera_nfs3_rmdir_open_callback(
                               0,
                               CHIMERA_NFS3_ATTR_WCC_MASK,
                               CHIMERA_NFS3_ATTR_MASK,
+                              NULL,
                               chimera_nfs3_rmdir_complete,
                               req);
     } else {

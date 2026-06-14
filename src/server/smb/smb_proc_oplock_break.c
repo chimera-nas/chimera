@@ -292,6 +292,7 @@ chimera_smb_lease_break_cb(
          * by this point. */
         {
             struct chimera_smb_lease_break_msg *msg;
+            bool                                ring = false;
 
             pthread_mutex_lock(&conn_thread->lease_break_lock);
             if (!conn->lease_break_tearing_down) {
@@ -305,10 +306,23 @@ chimera_smb_lease_break_cb(
                 msg->new_epoch                 = open_file->lease_epoch;
                 msg->next                      = conn_thread->lease_break_ready;
                 conn_thread->lease_break_ready = msg;
-                pthread_mutex_unlock(&conn_thread->lease_break_lock);
+                /* Defer ONLY a directory-lease break whose holder connection is
+                 * itself mid-compound (a self-break: the same connection both
+                 * triggered the op and holds the lease).  That op replies without
+                 * waiting for the ack, so we let its reply path flush the break
+                 * right after the reply (reply-before-break — MS-SMB2 dir-lease
+                 * ordering; smbtorture rename/unlink).  Fire immediately when the
+                 * holder connection is idle (in_compound == 0): the break was
+                 * triggered by a DIFFERENT connection whose op may PARK on this
+                 * ack (overwrite / v2_request / rename_dst_parent), and the idle
+                 * holder will never produce a reply to trigger the flush — so a
+                 * deferral here would deadlock.  File leases / legacy oplocks
+                 * always doorbell immediately for the same parking reason. */
+                ring = !lease->is_dir || conn->in_compound == 0;
+            }
+            pthread_mutex_unlock(&conn_thread->lease_break_lock);
+            if (ring) {
                 evpl_ring_doorbell(&conn_thread->lease_break_doorbell);
-            } else {
-                pthread_mutex_unlock(&conn_thread->lease_break_lock);
             }
         }
     } else {
@@ -340,6 +354,8 @@ chimera_smb_lease_break_cb(
                 msg->next                      = conn_thread->lease_break_ready;
                 conn_thread->lease_break_ready = msg;
                 pthread_mutex_unlock(&conn_thread->lease_break_lock);
+                /* Legacy oplocks are never directory leases and may be waited on
+                 * by a parking open, so always wake the thread immediately. */
                 evpl_ring_doorbell(&conn_thread->lease_break_doorbell);
             } else {
                 pthread_mutex_unlock(&conn_thread->lease_break_lock);
@@ -387,27 +403,31 @@ chimera_smb_lease_break_cb(
     (void) new_vfs;
 } /* chimera_smb_lease_break_cb */
 
-/* Doorbell handler: runs on a connection-owning SMB thread and sends the
- * lease-break notifications that break_cbs (possibly on other threads) queued
- * for connections owned by this thread.  Runs on the same thread as conn_free,
- * so a connection in the drained list is guaranteed live here. */
+/* Detach and send every queued lease-break notification for `thread`.  Runs on
+ * the thread that owns the target connections (the doorbell handler or, for
+ * op-triggered breaks, the request's own reply path), so a connection in the
+ * list is guaranteed live here (conn_free drains under the same lock). */
 SYMBOL_EXPORT void
-chimera_smb_lease_break_doorbell_callback(
-    struct evpl          *evpl,
-    struct evpl_doorbell *doorbell)
+chimera_smb_lease_break_flush(struct chimera_server_smb_thread *thread)
 {
-    struct chimera_server_smb_thread   *thread;
-    struct chimera_smb_lease_break_msg *list, *msg;
-
-    (void) evpl;
-
-    thread = container_of(doorbell, struct chimera_server_smb_thread,
-                          lease_break_doorbell);
+    struct chimera_smb_lease_break_msg *list, *msg, *fifo = NULL;
 
     pthread_mutex_lock(&thread->lease_break_lock);
     list                      = thread->lease_break_ready;
     thread->lease_break_ready = NULL;
     pthread_mutex_unlock(&thread->lease_break_lock);
+
+    /* The queue is built by prepending (LIFO).  Reverse it so notifications are
+     * sent in the order they were triggered (FIFO) — a cross-directory rename
+     * breaks the source parent before the destination parent, and the client
+     * expects that order (smbtorture dirlease.rename otherdir cases). */
+    while (list) {
+        msg       = list;
+        list      = list->next;
+        msg->next = fifo;
+        fifo      = msg;
+    }
+    list = fifo;
 
     while (list) {
         msg  = list;
@@ -424,6 +444,28 @@ chimera_smb_lease_break_doorbell_callback(
         }
         free(msg);
     }
+} /* chimera_smb_lease_break_flush */
+
+/* Doorbell handler: runs on a connection-owning SMB thread and sends the
+ * lease-break notifications that break_cbs (possibly on other threads) queued
+ * for connections owned by this thread.  Used for breaks NOT tied to an
+ * in-flight request on the holder's thread (cross-connection mutations, the
+ * idle reaper); a break triggered by a request on the holder's own thread is
+ * instead flushed after that request's reply (chimera_smb_compound_reply) so
+ * the reply reaches the client before the break (MS-SMB2 ordering). */
+SYMBOL_EXPORT void
+chimera_smb_lease_break_doorbell_callback(
+    struct evpl          *evpl,
+    struct evpl_doorbell *doorbell)
+{
+    struct chimera_server_smb_thread *thread;
+
+    (void) evpl;
+
+    thread = container_of(doorbell, struct chimera_server_smb_thread,
+                          lease_break_doorbell);
+
+    chimera_smb_lease_break_flush(thread);
 } /* chimera_smb_lease_break_doorbell_callback */
 
 void

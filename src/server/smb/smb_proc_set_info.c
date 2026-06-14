@@ -24,13 +24,22 @@ chimera_smb_set_info_callback(
         uint32_t                          mask   = request->set_info.notify_mask ?
             request->set_info.notify_mask : CHIMERA_VFS_NOTIFY_ATTRS_CHANGED;
 
-        chimera_vfs_notify_emit(thread->shared->vfs->vfs_notify,
-                                request->set_info.open_file->parent_fh,
-                                request->set_info.open_file->parent_fh_len,
-                                mask,
-                                request->set_info.open_file->name,
-                                request->set_info.open_file->name_len,
-                                NULL, 0);
+        /* Self-exempt the parent directory lease named by the operating open's
+         * ParentLeaseKey: a setinfo issued through a handle that supplied the
+         * correct parent key must not break that directory's lease (MS-SMB2
+         * dirlease; dirlease.set{eof,dos,*time} cases 1.1/2.1). */
+        uint64_t                          skip_lo, skip_hi;
+        bool                              has_skip = chimera_smb_parent_lease_skip(
+            request->set_info.open_file->parent_lease_key, &skip_lo, &skip_hi);
+
+        chimera_vfs_notify_emit_lease(thread->shared->vfs->vfs_notify,
+                                      request->set_info.open_file->parent_fh,
+                                      request->set_info.open_file->parent_fh_len,
+                                      mask,
+                                      request->set_info.open_file->name,
+                                      request->set_info.open_file->name_len,
+                                      NULL, 0,
+                                      skip_lo, skip_hi, has_skip);
     }
 
     chimera_smb_open_file_release(request, request->set_info.open_file);
@@ -99,6 +108,11 @@ chimera_smb_set_info_link_open_dir_callback(
         0,
         0,
         0,
+        /* SMB rename via link: self-exempt the directory lease named by the
+         * operating open's ParentLeaseKey (dirlease.rename correct-parent case). */
+        open_file->parent_lease_key,
+        /* ...and self-exempt the linker's own file lease from the source recall. */
+        open_file->handle,
         chimera_smb_set_info_link_callback,
         request);
 } /* chimera_smb_set_info_link_open_dir_callback */

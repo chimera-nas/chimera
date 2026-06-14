@@ -71,6 +71,8 @@ chimera_nfs3_rename(
                           0,
                           CHIMERA_NFS3_ATTR_WCC_MASK | CHIMERA_VFS_ATTR_ATOMIC,
                           CHIMERA_NFS3_ATTR_MASK,
+                          NULL,
+                          NULL,
                           chimera_nfs3_rename_complete,
                           req);
 } /* chimera_nfs3_rename */

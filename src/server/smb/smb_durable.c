@@ -209,6 +209,7 @@ chimera_smb_durable_doc_open_parent_cb(
     ctx->parent_handle = oh;
     chimera_vfs_remove_at(ctx->vfs_thread, &ctx->doc_info.cred, oh,
                           ctx->doc_info.name, ctx->doc_info.name_len, NULL, 0, 0, 0,
+                          NULL, /* parent_lease_skip */
                           chimera_smb_durable_doc_remove_cb, ctx);
 } /* chimera_smb_durable_doc_open_parent_cb */
 

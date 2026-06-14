@@ -237,6 +237,40 @@ chimera_vfs_notify_emit(
     const char                *old_name,
     uint16_t                   old_name_len);
 
+/* Like chimera_vfs_notify_emit, but the caller (the SMB layer) supplies a
+ * ParentLeaseKey naming an SMB3 directory lease to spare from the
+ * directory-lease break this fires: the mutating client's cached directory view
+ * is coherent with the change it just made (MS-SMB2 dirlease self-exemption).
+ * `has_skip` == false is exactly chimera_vfs_notify_emit (break every lease). */
+void
+chimera_vfs_notify_emit_lease(
+    struct chimera_vfs_notify *notify,
+    const uint8_t             *dir_fh,
+    uint16_t                   dir_fh_len,
+    uint32_t                   action,
+    const char                *name,
+    uint16_t                   name_len,
+    const char                *old_name,
+    uint16_t                   old_name_len,
+    uint64_t                   skip_lo,
+    uint64_t                   skip_hi,
+    bool                       has_skip);
+
+/* Deliver a CHANGE_NOTIFY event but do NOT break SMB3 directory leases.  For
+ * the SMB create path when a create-capable disposition only opened an existing
+ * file — change-notify fires (conservatively) but the directory's contents did
+ * not change, so a directory read lease must not be recalled. */
+void
+chimera_vfs_notify_emit_nobreak(
+    struct chimera_vfs_notify *notify,
+    const uint8_t             *dir_fh,
+    uint16_t                   dir_fh_len,
+    uint32_t                   action,
+    const char                *name,
+    uint16_t                   name_len,
+    const char                *old_name,
+    uint16_t                   old_name_len);
+
 /*
  * Signal that the object identified by `fh` was itself removed.  Marks every
  * exact watch on that FH deleted and fires its callback, so a pending

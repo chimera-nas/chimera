@@ -65,16 +65,24 @@ chimera_smb_write_callback(
          * stream's contents and size, so set the STREAM_WRITE/STREAM_SIZE
          * classes too — a watcher requesting only
          * FILE_NOTIFY_CHANGE_STREAM_{WRITE,SIZE} must still be notified
-         * (WPTS BVT_SMB2Basic_ChangeNotify_ChangeStream{Write,Size}). */
-        chimera_vfs_notify_emit(thread->shared->vfs->vfs_notify,
-                                request->write.open_file->parent_fh,
-                                request->write.open_file->parent_fh_len,
-                                CHIMERA_VFS_NOTIFY_FILE_MODIFIED |
-                                CHIMERA_VFS_NOTIFY_STREAM_WRITE |
-                                CHIMERA_VFS_NOTIFY_STREAM_SIZE,
-                                request->write.open_file->name,
-                                request->write.open_file->name_len,
-                                NULL, 0);
+         * (WPTS BVT_SMB2Basic_ChangeNotify_ChangeStream{Write,Size}).
+         *
+         * Deliver the change-notify event WITHOUT breaking the parent directory
+         * lease: a write's effect on the file's directory-visible metadata
+         * (size/mtime) is not observable until the handle closes, so the
+         * dir-lease content break is deferred to close (the open is flagged
+         * MODIFIED for chimera_smb_close to emit it).  MS-SMB2;
+         * dirlease.v2_request. */
+        chimera_vfs_notify_emit_nobreak(thread->shared->vfs->vfs_notify,
+                                        request->write.open_file->parent_fh,
+                                        request->write.open_file->parent_fh_len,
+                                        CHIMERA_VFS_NOTIFY_FILE_MODIFIED |
+                                        CHIMERA_VFS_NOTIFY_STREAM_WRITE |
+                                        CHIMERA_VFS_NOTIFY_STREAM_SIZE,
+                                        request->write.open_file->name,
+                                        request->write.open_file->name_len,
+                                        NULL, 0);
+        request->write.open_file->flags |= CHIMERA_SMB_OPEN_FILE_FLAG_MODIFIED;
     }
 
     /* A handle that explicitly set its write time has "taken control" of it:

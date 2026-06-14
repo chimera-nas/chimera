@@ -131,6 +131,11 @@ chimera_smb_negotiate(struct chimera_smb_request *request)
     if (dialect >= 0x300 && shared->config.persistent_handles) {
         conn->capabilities |= SMB2_GLOBAL_CAP_PERSISTENT_HANDLES;
     }
+    /* Directory leasing is an SMB 3.0+ capability (MS-SMB2 §3.3.5.4); the
+     * server only grants R/H leases on directory opens when this is advertised. */
+    if (dialect >= 0x300 && shared->config.directory_leases) {
+        conn->capabilities |= SMB2_GLOBAL_CAP_DIRECTORY_LEASING;
+    }
     /* Encryption is advertised via SMB2_GLOBAL_CAP_ENCRYPTION for 3.0/3.0.2;
      * for 3.1.1 it is negotiated through the encryption-capabilities context
      * instead and the capability bit MUST NOT be set (MS-SMB2 §3.3.5.4). */

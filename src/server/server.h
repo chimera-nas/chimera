@@ -84,6 +84,15 @@ chimera_server_config_get_smb_persistent_handles(
     const struct chimera_server_config *config);
 
 void
+chimera_server_config_set_smb_directory_leases(
+    struct chimera_server_config *config,
+    int                           enable);
+
+int
+chimera_server_config_get_smb_directory_leases(
+    const struct chimera_server_config *config);
+
+void
 chimera_server_config_set_smb_named_streams(
     struct chimera_server_config *config,
     int                           enable);

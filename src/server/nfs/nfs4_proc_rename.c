@@ -63,6 +63,8 @@ chimera_nfs4_rename_do(struct nfs_request *req)
         0,
         CHIMERA_VFS_ATTR_MTIME,
         CHIMERA_VFS_ATTR_MTIME,
+        NULL,
+        NULL,
         chimera_nfs4_rename_complete,
         req);
 } /* chimera_nfs4_rename_do */

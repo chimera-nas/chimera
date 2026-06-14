@@ -165,6 +165,14 @@ struct chimera_vfs_lease {
      * evicted (purged) by the SMB caching-acquire path instead.  Cleared on
      * reconnect. */
     uint8_t                           parked;
+    /* Set on a CACHING lease that is an SMB3 directory lease (R/H only, never
+     * W).  Two directory leases held by different clients on the same directory
+     * coexist — handle caching is NOT single-holder-exclusive across clients for
+     * directories the way it is for a file batch oplock — so the conflict matrix
+     * relaxes the cross-client H rule when both sides are directory leases.  A
+     * directory lease's read caching is broken out-of-band on a content change
+     * (chimera_vfs_dir_lease_break_read), not by the open-conflict matrix. */
+    uint8_t                           is_dir;
 
     /* For a CACHING lease that is owned by a VFS caching grant (the shared,
      * owner-keyed, refcounted object that lets N opens under one owner share a
@@ -217,6 +225,10 @@ struct chimera_vfs_caching_grant {
      * read caching dropped, or break to NONE) leaves this clear so an open does not
      * park waiting for an ack that never comes. */
     uint8_t                           break_ack_required;
+    /* True for an SMB3 directory lease (R/H only).  Mirrors lease.is_dir; kept on
+     * the grant so the SMB layer and break paths can recognise a directory lease
+     * without reaching through the embedded lease. */
+    uint8_t                           is_dir;
     struct chimera_vfs_caching_grant *grant_next; /* link on file->caching_grants */
     /* Protocol holder list — opaque to the VFS; the protocol server threads its
      * per-open holder objects through here so a break callback can select a LIVE

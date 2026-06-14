@@ -64,6 +64,7 @@ chimera_vfs_remove_child_lookup_complete(
         request->remove.child_fh_len,
         0,
         0,
+        NULL,
         chimera_vfs_remove_op_complete,
         request);
 } /* chimera_vfs_remove_child_lookup_complete */

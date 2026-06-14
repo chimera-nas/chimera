@@ -24,39 +24,51 @@ chimera_vfs_rename_at_complete(struct chimera_vfs_request *request)
             memcmp(request->fh, request->rename_at.new_fh,
                    request->fh_len) != 0;
 
+        /* SMB3 directory-lease self-exemption: spare the directory lease named
+         * by the operating open's ParentLeaseKey (set by the SMB rename path)
+         * from the RENAMED break.  For a same-dir rename this spares the one
+         * dir; for a cross-dir rename it spares whichever parent's lease the key
+         * matches (the source, since the open lived there), naturally breaking
+         * the other.  NULL caller (NFS/S3) breaks every directory lease. */
+        uint64_t skip_lo = 0, skip_hi = 0;
+        bool     has_skip = request->rename_at.parent_lease_skip_valid;
+
+        if (has_skip) {
+            memcpy(&skip_lo, request->rename_at.parent_lease_skip, 8);
+            memcpy(&skip_hi, request->rename_at.parent_lease_skip + 8, 8);
+        }
+
         if (!cross_dir) {
             /* Intra-directory rename: a single RENAMED event on the
-             * directory carrying both old and new names.  The SMB
-             * serializer expands this to FILE_ACTION_RENAMED_OLD_NAME
-             * followed by FILE_ACTION_RENAMED_NEW_NAME per MS-FSCC. */
-            chimera_vfs_notify_emit(thread->vfs->vfs_notify,
-                                    request->fh,
-                                    request->fh_len,
-                                    CHIMERA_VFS_NOTIFY_RENAMED,
-                                    request->rename_at.new_name,
-                                    request->rename_at.new_namelen,
-                                    request->rename_at.name,
-                                    request->rename_at.namelen);
+             * directory carrying both old and new names. */
+            chimera_vfs_notify_emit_lease(thread->vfs->vfs_notify,
+                                          request->fh,
+                                          request->fh_len,
+                                          CHIMERA_VFS_NOTIFY_RENAMED,
+                                          request->rename_at.new_name,
+                                          request->rename_at.new_namelen,
+                                          request->rename_at.name,
+                                          request->rename_at.namelen,
+                                          skip_lo, skip_hi, has_skip);
         } else {
-            /* Cross-directory rename: source dir sees the OLD name
-             * only (RENAMED_OLD_NAME record), destination sees the
-             * NEW name only (RENAMED_NEW_NAME record).  Matches
-             * Windows behavior and avoids reporting a name on the
-             * source dir that exists in a different directory. */
-            chimera_vfs_notify_emit(thread->vfs->vfs_notify,
-                                    request->fh,
-                                    request->fh_len,
-                                    CHIMERA_VFS_NOTIFY_RENAMED,
-                                    NULL, 0,
-                                    request->rename_at.name,
-                                    request->rename_at.namelen);
-            chimera_vfs_notify_emit(thread->vfs->vfs_notify,
-                                    request->rename_at.new_fh,
-                                    request->rename_at.new_fhlen,
-                                    CHIMERA_VFS_NOTIFY_RENAMED,
-                                    request->rename_at.new_name,
-                                    request->rename_at.new_namelen,
-                                    NULL, 0);
+            /* Cross-directory rename: source dir sees the OLD name only,
+             * destination sees the NEW name only. */
+            chimera_vfs_notify_emit_lease(thread->vfs->vfs_notify,
+                                          request->fh,
+                                          request->fh_len,
+                                          CHIMERA_VFS_NOTIFY_RENAMED,
+                                          NULL, 0,
+                                          request->rename_at.name,
+                                          request->rename_at.namelen,
+                                          skip_lo, skip_hi, has_skip);
+            chimera_vfs_notify_emit_lease(thread->vfs->vfs_notify,
+                                          request->rename_at.new_fh,
+                                          request->rename_at.new_fhlen,
+                                          CHIMERA_VFS_NOTIFY_RENAMED,
+                                          request->rename_at.new_name,
+                                          request->rename_at.new_namelen,
+                                          NULL, 0,
+                                          skip_lo, skip_hi, has_skip);
         }
 
         /* Remove cache entries for both old and new paths.
@@ -161,6 +173,8 @@ chimera_vfs_rename_at_dispatch(
     int                              target_fh_len,
     uint64_t                         pre_attr_mask,
     uint64_t                         post_attr_mask,
+    const uint8_t                   *parent_lease_skip,
+    struct chimera_vfs_open_handle  *op_handle,
     chimera_vfs_rename_at_callback_t callback,
     void                            *private_data)
 {
@@ -197,6 +211,18 @@ chimera_vfs_rename_at_dispatch(
     request->proto_callback                            = callback;
     request->proto_private_data                        = private_data;
     request->rename_at.source_fh_len                   = 0;
+    if (parent_lease_skip) {
+        memcpy(request->rename_at.parent_lease_skip, parent_lease_skip, 16);
+        request->rename_at.parent_lease_skip_valid = 1;
+    } else {
+        request->rename_at.parent_lease_skip_valid = 0;
+    }
+    /* Self-exempt the operating handle's own caching lease from the source-file
+     * recall below: the renamer is coherent with its own rename, so renaming a
+     * file it holds a lease on must not break that lease (the inode is unchanged;
+     * MS-SMB2 / dirlease.rename).  A NULL caller (NFS/S3) recalls every holder,
+     * preserving the RFC 7530 namespace-recall behaviour. */
+    request->io_handle = op_handle;
 
     /* Recall delegations before the directory change: first on the source file
      * being moved (its ctime/linkage changes invalidate cached state), then on
@@ -242,6 +268,9 @@ struct chimera_vfs_rename_at_gate {
     int                              target_fh_len;
     uint64_t                         pre_attr_mask;
     uint64_t                         post_attr_mask;
+    uint8_t                          parent_lease_skip[16];
+    uint8_t                          parent_lease_skip_valid;
+    struct chimera_vfs_open_handle  *op_handle;
     chimera_vfs_rename_at_callback_t callback;
     void                            *private_data;
 };
@@ -264,6 +293,9 @@ chimera_vfs_rename_at_gate_dispatch(struct chimera_vfs_rename_at_gate *gate)
                                    gate->new_name, gate->new_namelen,
                                    gate->target_fh, gate->target_fh_len,
                                    gate->pre_attr_mask, gate->post_attr_mask,
+                                   gate->parent_lease_skip_valid ?
+                                   gate->parent_lease_skip : NULL,
+                                   gate->op_handle,
                                    gate->callback, gate->private_data);
     free(gate);
 } /* chimera_vfs_rename_at_gate_dispatch */
@@ -341,6 +373,8 @@ chimera_vfs_rename_at(
     int                              target_fh_len,
     uint64_t                         pre_attr_mask,
     uint64_t                         post_attr_mask,
+    const uint8_t                   *parent_lease_skip,
+    struct chimera_vfs_open_handle  *op_handle,
     chimera_vfs_rename_at_callback_t callback,
     void                            *private_data)
 {
@@ -380,8 +414,15 @@ chimera_vfs_rename_at(
         gate->target_fh_len  = target_fh_len;
         gate->pre_attr_mask  = pre_attr_mask;
         gate->post_attr_mask = post_attr_mask;
-        gate->callback       = callback;
-        gate->private_data   = private_data;
+        if (parent_lease_skip) {
+            memcpy(gate->parent_lease_skip, parent_lease_skip, 16);
+            gate->parent_lease_skip_valid = 1;
+        } else {
+            gate->parent_lease_skip_valid = 0;
+        }
+        gate->op_handle    = op_handle;
+        gate->callback     = callback;
+        gate->private_data = private_data;
 
         chimera_vfs_gate_fh(thread, cred, fh, fhlen, CHIMERA_ACE_DELETE_CHILD,
                             chimera_vfs_rename_at_gate_src, gate);
@@ -391,5 +432,6 @@ chimera_vfs_rename_at(
     chimera_vfs_rename_at_dispatch(thread, cred, fh, fhlen, name, namelen,
                                    new_fh, new_fhlen, new_name, new_namelen,
                                    target_fh, target_fh_len, pre_attr_mask,
-                                   post_attr_mask, callback, private_data);
+                                   post_attr_mask, parent_lease_skip,
+                                   op_handle, callback, private_data);
 } /* chimera_vfs_rename_at */

@@ -147,6 +147,7 @@ chimera_smb_server_init(
 
     shared->config.soft_fail_bad_req          = chimera_server_config_get_soft_fail_bad_req(config);
     shared->config.persistent_handles         = chimera_server_config_get_smb_persistent_handles(config);
+    shared->config.directory_leases           = chimera_server_config_get_smb_directory_leases(config);
     shared->config.named_streams              = chimera_server_config_get_smb_named_streams(config);
     shared->config.signing_required           = chimera_server_config_get_smb_signing_required(config);
     shared->config.encryption                 = chimera_server_config_get_smb_encryption(config);
@@ -158,6 +159,10 @@ chimera_smb_server_init(
 
     if (shared->config.persistent_handles) {
         chimera_smb_info("SMB3 durable/persistent handles enabled (in-memory state)");
+    }
+
+    if (shared->config.directory_leases) {
+        chimera_smb_info("SMB3 directory leases enabled");
     }
 
     if (shared->config.named_streams) {
@@ -822,6 +827,24 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
         evpl_sendv(evpl, conn->bind, reply_iov, reply_niov, reply_payload_length + reply_hdr_len,
                    EVPL_SEND_FLAG_TAKE_REF);
     }
+
+    /* This compound's reply has now been queued on the connection.  Drop the
+     * in-flight count and flush any dir-lease break notifications that were
+     * queued while processing it: they go out AFTER the reply above (same bind,
+     * so TCP delivers reply-then-break), which is the order the client needs to
+     * defer its break ack correctly (MS-SMB2; smbtorture dirlease rename/unlink).
+     * Cross-connection / reaper breaks (queued with no in-flight compound) were
+     * sent via the doorbell instead and are unaffected. */
+    pthread_mutex_lock(&thread->lease_break_lock);
+    if (thread->active_compounds > 0) {
+        thread->active_compounds--;
+    }
+    if (conn->in_compound > 0) {
+        conn->in_compound--;
+    }
+    pthread_mutex_unlock(&thread->lease_break_lock);
+
+    chimera_smb_lease_break_flush(thread);
 
     chimera_smb_compound_free(thread, compound);
 } /* chimera_smb_compound_reply */
@@ -1595,6 +1618,17 @@ chimera_smb_server_handle_smb2(
         }
     }
 
+    /* Mark a compound in flight on this thread (and connection) so a dir-lease
+     * break triggered while processing it skips the doorbell and is instead
+     * flushed after this compound's reply (chimera_smb_compound_reply) —
+     * reply-before-break.  The per-connection count distinguishes a self-break
+     * (holder conn mid-compound -> defer) from a cross-connection break (holder
+     * conn idle -> fire now, else a parking conflicting open deadlocks). */
+    pthread_mutex_lock(&thread->lease_break_lock);
+    thread->active_compounds++;
+    compound->conn->in_compound++;
+    pthread_mutex_unlock(&thread->lease_break_lock);
+
     chimera_smb_compound_advance(compound);
 
 } /* chimera_smb_server_handle_compound */
@@ -1753,6 +1787,12 @@ chimera_smb_server_handle_smb1(
     compound->requests[compound->num_requests++] = request;
 
     smb_dump_compound_request(compound);
+
+    /* Balance the decrement in chimera_smb_compound_reply (see the SMB2 path). */
+    pthread_mutex_lock(&thread->lease_break_lock);
+    thread->active_compounds++;
+    compound->conn->in_compound++;
+    pthread_mutex_unlock(&thread->lease_break_lock);
 
     chimera_smb_compound_advance(compound);
 

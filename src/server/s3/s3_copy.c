@@ -299,6 +299,8 @@ chimera_s3_copy_finalize(struct chimera_s3_copy_ctx *ctx)
             0,
             0,
             0,
+            NULL,
+            NULL,
             chimera_s3_copy_rename_callback,
             ctx);
     } else {
@@ -315,6 +317,8 @@ chimera_s3_copy_finalize(struct chimera_s3_copy_ctx *ctx)
             CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,
             0,
             0,
+            NULL,
+            NULL,
             chimera_s3_copy_link_callback,
             ctx);
     }

@@ -66,6 +66,8 @@ chimera_vfs_rename_target_lookup_complete(
         request->rename.target_fh_len,
         0,
         0,
+        NULL,
+        NULL,
         chimera_vfs_rename_op_complete,
         request);
 } /* chimera_vfs_rename_target_lookup_complete */
@@ -143,6 +145,8 @@ chimera_vfs_rename_fast_target_lookup_complete(
         request->rename.target_fh_len,
         0,
         0,
+        NULL,
+        NULL,
         chimera_vfs_rename_op_complete,
         request);
 } /* chimera_vfs_rename_fast_target_lookup_complete */

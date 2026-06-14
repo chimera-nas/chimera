@@ -354,6 +354,11 @@ main(
     chimera_server_config_set_smb_leases(config, 1);
     chimera_server_config_set_smb_oplocks(config, 1);
 
+    /* Advertise SMB2_GLOBAL_CAP_DIRECTORY_LEASING and grant R/H directory leases
+     * so the smb2.dirlease suite (which skips outright when the capability is not
+     * negotiated) actually runs. */
+    chimera_server_config_set_smb_directory_leases(config, 1);
+
     /* SMB3 multichannel: advertise interfaces so FSCTL_QUERY_NETWORK_INTERFACE_
      * INFO returns a non-empty list and the smb2.multichannel suites run instead
      * of bailing ("no interface info returned").  Everything in the test netns
