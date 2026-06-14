@@ -35,6 +35,8 @@ static const dce_if_uuid_t LSA_INTERFACE = {
 #define LSA_OP_OPENPOLICY2                44
 #define LSA_OP_GETUSERNAME                45
 #define LSA_OP_QUERYINFOPOLICY2           46
+#define LSA_OP_LOOKUPNAMES2               58
+#define LSA_OP_LOOKUPNAMES3               68
 
 /* Bytes of DCE/RPC framing (common + response header) the framing layer writes
 * before the stub, so the generated marshaller's buffer cap stays in bounds. */
@@ -213,6 +215,92 @@ chimera_smb_lookup_wellknown_name(
     }
     return 0;
 } /* chimera_smb_lookup_wellknown_name */
+
+/*
+ * Resolve one LookupNames target shared by LookupNames / LookupNames2 /
+ * LookupNames3.  Fills *full (the complete account SID), *type (lsa_SidType)
+ * and *rid (the relative id, or 0xffffffff for a domain), and ensures the
+ * name's domain is present in the referenced-domain list (via domains[] and
+ * *ndom).  Returns the domain index, or -1 if the name does not resolve.
+ */
+static void chimera_smb_set_ustr(
+    struct rpc_unicode_string *s,
+    const char                *utf8);
+
+static int
+chimera_smb_lsarpc_resolve_name(
+    const char                    *name,
+    struct chimera_vfs_user_cache *cache,
+    struct ndr_dbuf               *dbuf,
+    struct lsa_DomainInfo         *domains,
+    uint32_t                      *ndom,
+    struct ndr_sid                *full,
+    uint32_t                      *type,
+    uint32_t                      *rid)
+{
+    char           sidstr[CHIMERA_IDMAP_SID_MAX];
+    uint32_t       t = LSA_SID_NAME_UNKNOWN;
+    int            resolved, didx = -1;
+    struct ndr_sid dom;
+    uint32_t       d;
+
+    if (!name || name[0] == '\0') {
+        /* Empty/NULL name -> the server's own primary (account) domain. */
+        struct ndr_sid m = { 0 };
+        chimera_smb_lsarpc_machine_sid(&m);
+        chimera_smb_sid_to_string(&m, sidstr, sizeof(sidstr));
+        t        = LSA_SID_NAME_DOMAIN;
+        resolved = 1;
+    } else {
+        resolved = chimera_smb_lookup_wellknown_name(name, sidstr,
+                                                     sizeof(sidstr), &t);
+        if (!resolved) {
+            const struct chimera_vfs_user *u =
+                chimera_vfs_user_cache_lookup_by_name(cache, name);
+            if (u) {
+                if (u->sid[0]) {
+                    snprintf(sidstr, sizeof(sidstr), "%s", u->sid);
+                } else {
+                    snprintf(sidstr, sizeof(sidstr), "S-1-22-1-%u", u->uid);
+                }
+                t        = LSA_SID_NAME_USER;
+                resolved = 1;
+            }
+        }
+    }
+
+    if (!resolved ||
+        chimera_smb_string_to_sid(sidstr, full) != 0 ||
+        full->sub_authority_count == 0) {
+        return -1;
+    }
+
+    if (t == LSA_SID_NAME_DOMAIN) {
+        dom  = *full;            /* the SID is the domain; no RID */
+        *rid = 0xffffffff;
+    } else {
+        *rid = full->sub_authority[full->sub_authority_count - 1];
+        dom  = *full;            /* domain SID = SID minus the RID */
+        dom.sub_authority_count--;
+    }
+
+    for (d = 0; d < *ndom; d++) {
+        if (chimera_smb_sid_equal(domains[d].sid, &dom)) {
+            didx = (int) d;
+            break;
+        }
+    }
+    if (didx < 0) {
+        struct ndr_sid *ds = ndr_dbuf_alloc(dbuf, sizeof(*ds));
+        *ds                = dom;
+        domains[*ndom].sid = ds;
+        chimera_smb_set_ustr(&domains[*ndom].name, chimera_smb_domain_name(&dom));
+        didx = (int) (*ndom)++;
+    }
+
+    *type = t;
+    return didx;
+} /* chimera_smb_lsarpc_resolve_name */
 
 /* Point an rpc_unicode_string (lsa_String) at a UTF-8 string; byte counts are
  * length==size==chars*2 (the buffer body is emitted no-NUL by ndr_push_wstring,
@@ -517,81 +605,130 @@ chimera_smb_lsarpc_impl(
             rdl     = ndr_dbuf_alloc(dbuf, sizeof(*rdl));
 
             for (i = 0; i < nn; i++) {
-                const char    *name = li->names[i].buffer;
-                char           sidstr[CHIMERA_IDMAP_SID_MAX];
-                uint32_t       type = LSA_SID_NAME_UNKNOWN;
-                int            resolved;
-                struct ndr_sid full, dom;
-                int            didx = -1;
-                uint32_t       d, rid;
+                struct ndr_sid full;
+                uint32_t       type, rid;
+                int            didx;
 
                 sids[i].sid_type  = LSA_SID_NAME_UNKNOWN;
                 sids[i].rid       = 0;
                 sids[i].sid_index = 0xffffffff;
 
-                if (!name || name[0] == '\0') {
-                    /* An empty/NULL name resolves to the server's own primary
-                     * (account) domain (MS-LSAT): its machine SID, type Domain. */
-                    struct ndr_sid m = { 0 };
-                    chimera_smb_lsarpc_machine_sid(&m);
-                    chimera_smb_sid_to_string(&m, sidstr, sizeof(sidstr));
-                    type     = LSA_SID_NAME_DOMAIN;
-                    resolved = 1;
-                } else {
-                    /* Well-known names (Everyone, SYSTEM, BUILTIN\*, ...) first,
-                     * then the local-account idmap (a unix user -> S-1-22-1-<uid>
-                     * or its configured SID). */
-                    resolved = chimera_smb_lookup_wellknown_name(name, sidstr,
-                                                                 sizeof(sidstr), &type);
-                    if (!resolved) {
-                        const struct chimera_vfs_user *u =
-                            chimera_vfs_user_cache_lookup_by_name(cache, name);
-                        if (u) {
-                            if (u->sid[0]) {
-                                snprintf(sidstr, sizeof(sidstr), "%s", u->sid);
-                            } else {
-                                snprintf(sidstr, sizeof(sidstr), "S-1-22-1-%u", u->uid);
-                            }
-                            type     = LSA_SID_NAME_USER;
-                            resolved = 1;
-                        }
-                    }
-                }
-
-                if (!resolved ||
-                    chimera_smb_string_to_sid(sidstr, &full) != 0 ||
-                    full.sub_authority_count == 0) {
+                didx = chimera_smb_lsarpc_resolve_name(li->names[i].buffer, cache,
+                                                       dbuf, domains, &ndom,
+                                                       &full, &type, &rid);
+                if (didx < 0) {
                     continue;
                 }
-
-                if (type == LSA_SID_NAME_DOMAIN) {
-                    /* A domain name resolves to the domain SID itself, with no
-                     * RID (0xffffffff) referencing the whole domain. */
-                    dom = full;
-                    rid = 0xffffffff;
-                } else {
-                    rid = full.sub_authority[full.sub_authority_count - 1];
-                    dom = full;            /* domain SID = SID minus the RID */
-                    dom.sub_authority_count--;
-                }
-
-                for (d = 0; d < ndom; d++) {
-                    if (chimera_smb_sid_equal(domains[d].sid, &dom)) {
-                        didx = (int) d;
-                        break;
-                    }
-                }
-                if (didx < 0) {
-                    struct ndr_sid *ds = ndr_dbuf_alloc(dbuf, sizeof(*ds));
-                    *ds               = dom;
-                    domains[ndom].sid = ds;
-                    chimera_smb_set_ustr(&domains[ndom].name,
-                                         chimera_smb_domain_name(&dom));
-                    didx = (int) ndom++;
-                }
-
                 sids[i].sid_type  = type;
                 sids[i].rid       = rid;
+                sids[i].sid_index = (uint32_t) didx;
+                mapped++;
+            }
+
+            rdl->count    = ndom;
+            rdl->domains  = ndom ? domains : NULL;
+            rdl->max_size = ndom;
+            o->domains    = rdl;
+            o->sids.count = nn;
+            o->sids.sids  = nn ? sids : NULL;
+            o->count      = mapped;
+            o->status     = (nn == 0 || mapped == nn) ? 0
+                            : (mapped == 0) ? LSA_STATUS_NONE_MAPPED
+                            : LSA_STATUS_SOME_NOT_MAPPED;
+            break;
+        }
+        case LSA_OP_LOOKUPNAMES2: {
+            const struct lsa_LookupNames2_in *li    = in;
+            struct lsa_LookupNames2_out      *o     = out;
+            struct chimera_vfs_user_cache    *cache = vfs->vfs_user_cache;
+            uint32_t                          nn    = li->num_names;
+            uint32_t                          ndom  = 0, mapped = 0, i;
+            struct lsa_TranslatedSidEx       *sids;
+            struct lsa_DomainInfo            *domains;
+            struct lsa_RefDomainList         *rdl;
+
+            if (!chimera_smb_lsarpc_handle_valid(conn, &li->handle)) {
+                return DCE_RC_FAULT_CONTEXT_MISMATCH;
+            }
+
+            sids    = ndr_dbuf_alloc(dbuf, (nn ? nn : 1) * sizeof(*sids));
+            domains = ndr_dbuf_alloc(dbuf, (nn ? nn : 1) * sizeof(*domains));
+            rdl     = ndr_dbuf_alloc(dbuf, sizeof(*rdl));
+
+            for (i = 0; i < nn; i++) {
+                struct ndr_sid full;
+                uint32_t       type, rid;
+                int            didx;
+
+                sids[i].sid_type  = LSA_SID_NAME_UNKNOWN;
+                sids[i].rid       = 0;
+                sids[i].sid_index = 0xffffffff;
+                sids[i].flags     = 0;
+
+                didx = chimera_smb_lsarpc_resolve_name(li->names[i].buffer, cache,
+                                                       dbuf, domains, &ndom,
+                                                       &full, &type, &rid);
+                if (didx < 0) {
+                    continue;
+                }
+                sids[i].sid_type  = type;
+                sids[i].rid       = rid;
+                sids[i].sid_index = (uint32_t) didx;
+                mapped++;
+            }
+
+            rdl->count    = ndom;
+            rdl->domains  = ndom ? domains : NULL;
+            rdl->max_size = ndom;
+            o->domains    = rdl;
+            o->sids.count = nn;
+            o->sids.sids  = nn ? sids : NULL;
+            o->count      = mapped;
+            o->status     = (nn == 0 || mapped == nn) ? 0
+                            : (mapped == 0) ? LSA_STATUS_NONE_MAPPED
+                            : LSA_STATUS_SOME_NOT_MAPPED;
+            break;
+        }
+        case LSA_OP_LOOKUPNAMES3: {
+            const struct lsa_LookupNames3_in *li    = in;
+            struct lsa_LookupNames3_out      *o     = out;
+            struct chimera_vfs_user_cache    *cache = vfs->vfs_user_cache;
+            uint32_t                          nn    = li->num_names;
+            uint32_t                          ndom  = 0, mapped = 0, i;
+            struct lsa_TranslatedSidEx2      *sids;
+            struct lsa_DomainInfo            *domains;
+            struct lsa_RefDomainList         *rdl;
+
+            if (!chimera_smb_lsarpc_handle_valid(conn, &li->handle)) {
+                return DCE_RC_FAULT_CONTEXT_MISMATCH;
+            }
+
+            sids    = ndr_dbuf_alloc(dbuf, (nn ? nn : 1) * sizeof(*sids));
+            domains = ndr_dbuf_alloc(dbuf, (nn ? nn : 1) * sizeof(*domains));
+            rdl     = ndr_dbuf_alloc(dbuf, sizeof(*rdl));
+
+            for (i = 0; i < nn; i++) {
+                struct ndr_sid  full;
+                struct ndr_sid *fs;
+                uint32_t        type, rid;
+                int             didx;
+
+                sids[i].sid_type  = LSA_SID_NAME_UNKNOWN;
+                sids[i].sid       = NULL;
+                sids[i].sid_index = 0xffffffff;
+                sids[i].flags     = 0;
+
+                didx = chimera_smb_lsarpc_resolve_name(li->names[i].buffer, cache,
+                                                       dbuf, domains, &ndom,
+                                                       &full, &type, &rid);
+                if (didx < 0) {
+                    continue;
+                }
+                /* v3 carries the full account SID per entry rather than a RID. */
+                fs                = ndr_dbuf_alloc(dbuf, sizeof(*fs));
+                *fs               = full;
+                sids[i].sid_type  = type;
+                sids[i].sid       = fs;
                 sids[i].sid_index = (uint32_t) didx;
                 mapped++;
             }
