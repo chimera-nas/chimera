@@ -298,8 +298,12 @@ set_tests_properties(chimera/server/smb/rpcclient_lsa PROPERTIES
 #   rpc.handles.lsarpc : DCE/RPC context (policy) handle association -- a handle
 #                        opened on one connection, used on another, must fault
 #                        with CONTEXT_MISMATCH, and a closed handle must too.
+#   rpc.lsa.lookupnames : name->SID via LookupNames / LookupNames2 / LookupNames3
+#                        (opnums 14/58/68), including well-known names and the
+#                        NULL-name and policy-handle cases.
 set(SMBTORTURE_RPC_SUITES_ENABLED
     rpc.lsa.lookupsids
+    rpc.lsa.lookupnames
     rpc.handles.lsarpc
     "rpc.srvsvc.srvsvc (admin access).NetShareEnumAll")
 
@@ -319,13 +323,8 @@ endforeach()
 # smbtorture DCE/RPC conformance suites wired but DISABLED: each needs a server
 # feature we don't have yet (but that is in NAS scope -- drop DISABLED once the
 # feature lands).
-#   rpc.lsa.lookupnames : well-known names (Everyone, SYSTEM, BUILTIN\*, ...) and
-#                         the NULL-name/handle cases now resolve via LookupNames
-#                         (opnum 14); the suite additionally probes LookupNames2
-#                         (58) and LookupNames3 (68), still unimplemented.
 #   rpc.lsalookup       : looks names up in trusted domains ("no trusts").
 set(SMBTORTURE_RPC_SUITES_DISABLED
-    rpc.lsa.lookupnames
     rpc.lsalookup)
 
 foreach(SUITE ${SMBTORTURE_RPC_SUITES_DISABLED})
