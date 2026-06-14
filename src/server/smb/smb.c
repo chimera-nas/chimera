@@ -339,8 +339,15 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
             continue;
         }
 
+        /* A null (anonymous) session is never signed even when the connection
+         * negotiated signing-required: it has no verifiable key, so MS-SMB2
+         * 3.3.5.5.3 has the server advertise SMB2_SESSION_FLAG_IS_NULL and the
+         * client drops the signing requirement for it.  Signing its responses
+         * with the zero-derived key would be rejected by a client that forced a
+         * different key (smb2.session.anon-signing2). */
         if ((conn->flags & CHIMERA_SMB_CONN_FLAG_SIGNING_REQUIRED) &&
-            request->session_handle) {
+            request->session_handle &&
+            !(request->session_handle->session->flags & CHIMERA_SMB_SESSION_NULL)) {
             request->flags |= CHIMERA_SMB_REQUEST_FLAG_SIGN;
         }
 
@@ -363,7 +370,14 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
          * session is only authorized once its final leg succeeds. */
         if (request->smb2_hdr.command == SMB2_SESSION_SETUP &&
             request->session_handle &&
-            (request->session_handle->session->flags & CHIMERA_SMB_SESSION_AUTHORIZED)) {
+            (request->session_handle->session->flags & CHIMERA_SMB_SESSION_AUTHORIZED) &&
+            !(request->session_handle->session->flags & CHIMERA_SMB_SESSION_NULL)) {
+            /* A null (anonymous) session has no verifiable key, so its
+             * SESSION_SETUP response is left unsigned (MS-SMB2 3.3.5.5.3): the
+             * client treats SMB2_SESSION_FLAG_IS_NULL as unauthenticated and
+             * does not expect a signature.  Signing it with the zero-derived
+             * key would make a client that forced a different key reject the
+             * response (smb2.session.anon-signing2). */
             request->flags |= CHIMERA_SMB_REQUEST_FLAG_SIGN;
         }
 
@@ -1409,6 +1423,30 @@ chimera_smb_server_handle_smb2(
                                               payload_length);
 
             if (unlikely(rc != 0)) {
+                /* A bad signature on a null (anonymous) session is answered
+                 * STATUS_ACCESS_DENIED rather than fatally tearing the
+                 * connection down: the client signed with a key that does not
+                 * match the null session's zero-derived key (it has no shared
+                 * secret), which MS-SMB2 3.3.5.2.4 treats as an authorization
+                 * failure, not a malformed-frame protocol violation
+                 * (smb2.session.anon-signing2 signs a TREE_CONNECT with a wrong
+                 * key on a null session and expects ACCESS_DENIED with the
+                 * connection still up).  The reply is left unsigned (the null
+                 * session shares no verifiable key): clear the SIGN flag set
+                 * just above.  Compound related operations inherit the lead's
+                 * protection, so only an unrelated signed lead is handled here;
+                 * a bad signature on any real session stays fatal. */
+                if (!(request->smb2_hdr.flags & SMB2_FLAGS_RELATED_OPERATIONS) &&
+                    request->session_handle &&
+                    (request->session_handle->session->flags &
+                     CHIMERA_SMB_SESSION_NULL)) {
+                    request->flags                              &= ~CHIMERA_SMB_REQUEST_FLAG_SIGN;
+                    request->status                              = SMB2_STATUS_ACCESS_DENIED;
+                    request->flags                              |= CHIMERA_SMB_REQUEST_FLAG_PARSE_FAILED;
+                    compound->requests[compound->num_requests++] = request;
+                    goto next_compound_request;
+                }
+
                 chimera_smb_error("Received SMB2 message with invalid signature");
                 chimera_smb_request_free(thread, request);
                 evpl_close(evpl, conn->bind);
@@ -1420,6 +1458,9 @@ chimera_smb_server_handle_smb2(
                    request->smb2_hdr.command != SMB2_NEGOTIATE &&
                    request->smb2_hdr.command != SMB2_SESSION_SETUP &&
                    request->smb2_hdr.command != SMB2_ECHO &&
+                   !(request->session_handle && request->session_handle->session &&
+                     (request->session_handle->session->flags &
+                      CHIMERA_SMB_SESSION_NULL)) &&
                    ((conn->flags & CHIMERA_SMB_CONN_FLAG_SIGNING_REQUIRED) ||
                     (request->session_handle && request->session_handle->session &&
                      (request->session_handle->session->flags &
@@ -1432,7 +1473,12 @@ chimera_smb_server_handle_smb2(
              * protocol violation; tear the connection down.  SESSION_SETUP is
              * exempt (its signing key is only derived while processing it), as
              * are NEGOTIATE and ECHO; compound related operations inherit the
-             * lead request's protection so only the unrelated lead is checked. */
+             * lead request's protection so only the unrelated lead is checked.
+             * A null (anonymous) session is exempt entirely: it has no key, so
+             * MS-SMB2 3.3.5.5.3 never enforces signing or encryption on it even
+             * when the connection negotiated signing-required (the client drops
+             * the requirement for the IS_NULL session — smb2.session.anon-
+             * signing2's second TREE_CONNECT is deliberately unsigned). */
             chimera_smb_error("Unsigned, unencrypted request (cmd %u) on a protected connection; disconnecting",
                               request->smb2_hdr.command);
             chimera_smb_request_free(thread, request);
@@ -1903,6 +1949,22 @@ chimera_smb_server_handle_transform(
         if (session) {
             chimera_smb_session_release(thread, thread->shared, session, true);
         }
+        evpl_close(evpl, conn->bind);
+        return;
+    }
+
+    /* MS-SMB2 constrained connection (smb2.session.anon-encryption1): a
+     * connection that has only ever carried null (anonymous) sessions rejects
+     * encrypted traffic by resetting -- a null session has no real key, so
+     * encrypting to it is not meaningful.  Once a real (non-anonymous) session
+     * has been established on the connection it is no longer constrained, and an
+     * encrypted request on a null session is decrypted normally with its
+     * zero-derived key (anon-encryption2).  A wrong key fails the AEAD tag below
+     * and resets either way (anon-encryption3). */
+    if ((session->flags & CHIMERA_SMB_SESSION_NULL) &&
+        !(conn->flags & CHIMERA_SMB_CONN_FLAG_AUTHENTICATED)) {
+        chimera_smb_error("Encrypted SMB2 message on constrained (anonymous-only) connection; resetting");
+        chimera_smb_session_release(thread, thread->shared, session, true);
         evpl_close(evpl, conn->bind);
         return;
     }

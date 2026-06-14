@@ -514,12 +514,14 @@ main(
         }
     }
 
-    /* The bind_negative_smb3enc* cases connect with encryption REQUIRED on the
-     * client credentials, so the server must actually support SMB3 transport
-     * encryption for the connection to come up at all.  Enable it only for
-     * those cases — every other suite runs with the default (off). */
+    /* The bind_negative_smb3enc* and anon-encryption* cases connect with
+     * encryption REQUIRED on the (user) client credentials, so the server must
+     * actually support SMB3 transport encryption for the connection to come up
+     * at all.  Enable it only for those cases — every other suite runs with the
+     * default (off). */
     for (i = 0; i < num_tests; i++) {
-        if (strstr(tests[i], "bind_negative_smb3enc") != NULL) {
+        if (strstr(tests[i], "bind_negative_smb3enc") != NULL ||
+            strstr(tests[i], "anon-encryption") != NULL) {
             chimera_server_config_set_smb_encryption(config, 1);
             break;
         }

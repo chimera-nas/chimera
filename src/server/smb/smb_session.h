@@ -270,6 +270,13 @@ struct chimera_smb_tree {
  * requests arriving on that connection are answered STATUS_USER_SESSION_DELETED. */
 #define CHIMERA_SMB_SESSION_DELETED      0x2
 #define CHIMERA_SMB_SESSION_ENCRYPT_DATA 0x4
+/* A null (anonymous) session established by an anonymous NTLMSSP AUTHENTICATE
+ * (MS-SMB2 3.3.5.5.3 / MS-NLMP 3.2.5.1.2).  It has NO session key, so it is
+ * never signed or encrypted: the server derives no signing/encryption keys for
+ * it, advertises SMB2_SESSION_FLAG_IS_NULL in the SESSION_SETUP response, and
+ * answers any signed request on it STATUS_ACCESS_DENIED (without verifying a
+ * key it does not have, and without tearing the connection down). */
+#define CHIMERA_SMB_SESSION_NULL         0x8
 
 /* Maximum number of channels a single session may bind, matching the
  * Windows Server 2012R2/2016 limit asserted by smb2.multichannel.num_channels. */
