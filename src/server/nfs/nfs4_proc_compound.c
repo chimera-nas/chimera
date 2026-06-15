@@ -435,6 +435,8 @@ chimera_nfs4_compound(
 
     req = nfs_request_alloc(thread, conn, encoding);
 
+    otel_span_set_name(&req->otel, "nfs4.COMPOUND");
+
     chimera_nfs_map_cred_req(req, cred);
     req->export_id = 0;
 
