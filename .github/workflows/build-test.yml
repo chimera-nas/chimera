@@ -433,7 +433,7 @@ jobs:
             -w /build \
             ${{ matrix.image_tag_prefix }}:${{ github.sha }}-${{ matrix.arch }} \
             bash -euxc '
-              cmake -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DREQUIRE_NETNS_TESTS=ON -DKVM_IMAGE_REGISTRY=${{ env.KVM_IMAGE_REGISTRY }} -DPYNFS_JUNIT_DIR=/workspace/ctest-results/pynfs-junit -DSMBTORTURE_JUNIT_DIR=/workspace/ctest-results/smbtorture-junit ${{ matrix.cmake_extra }} /workspace
+              cmake -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DREQUIRE_NETNS_TESTS=ON -DKVM_IMAGE_REGISTRY=${{ env.KVM_IMAGE_REGISTRY }} -DPYNFS_JUNIT_DIR=/workspace/ctest-results/pynfs-junit -DSMBTORTURE_JUNIT_DIR=/workspace/ctest-results/smbtorture-junit -DWPTS_JUNIT_DIR=/workspace/ctest-results/wpts-junit ${{ matrix.cmake_extra }} /workspace
               ninja
               ccache --show-stats || true
               tar -C /build --exclude=./ccache -czf /workspace/build-os.tar.gz .'
@@ -708,7 +708,7 @@ jobs:
             -w /build \
             ${{ env.DEV_IMAGE_TAG_PREFIX }}:${{ github.sha }}-${{ matrix.arch }} \
             bash -euxc '
-              cmake -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DREQUIRE_NETNS_TESTS=ON -DKVM_IMAGE_REGISTRY=${{ env.KVM_IMAGE_REGISTRY }} -DPYNFS_JUNIT_DIR=/workspace/ctest-results/pynfs-junit -DSMBTORTURE_JUNIT_DIR=/workspace/ctest-results/smbtorture-junit ${{ matrix.kvm_cmake }} /workspace
+              cmake -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DREQUIRE_NETNS_TESTS=ON -DKVM_IMAGE_REGISTRY=${{ env.KVM_IMAGE_REGISTRY }} -DPYNFS_JUNIT_DIR=/workspace/ctest-results/pynfs-junit -DSMBTORTURE_JUNIT_DIR=/workspace/ctest-results/smbtorture-junit -DWPTS_JUNIT_DIR=/workspace/ctest-results/wpts-junit ${{ matrix.kvm_cmake }} /workspace
               ninja
               ccache --show-stats || true
               # Ship the build tree to the test shards (minus the local ccache;
