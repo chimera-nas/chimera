@@ -1818,6 +1818,14 @@ chimera_smb_session_release(
 static inline bool
 chimera_smb_durable_open_preservable(const struct chimera_smb_open_file *open_file)
 {
+    /* A resilient handle (FSCTL_LMR_REQUEST_RESILIENCY) preserves its byte-range
+     * locks across the disconnect for the resiliency timeout regardless of its
+     * caching state (MS-SMB2 3.3.5.15.9), so it is always preservable -- unlike a
+     * plain durable open, which yields its locks if it has no write-caching
+     * oplock/lease to defend them. */
+    if (open_file->resilient) {
+        return true;
+    }
     if (open_file->lock_entries) {
         bool write_caching =
             (open_file->oplock_level == SMB2_OPLOCK_LEVEL_BATCH) ||
@@ -1880,7 +1888,7 @@ chimera_smb_session_park_durables(
             pthread_mutex_lock(&tree->open_files_lock[b]);
             HASH_ITER(hh, tree->open_files[b], open_file, tmp)
             {
-                if (!open_file->durable_flags ||
+                if ((!open_file->durable_flags && !open_file->resilient) ||
                     (open_file->flags & CHIMERA_SMB_OPEN_FILE_PARKED) ||
                     !chimera_smb_durable_open_preservable(open_file) ||
                     /* Mid-break opens are not preserved (MS-SMB2 3.3.7.1);
@@ -2307,7 +2315,7 @@ chimera_smb_tree_free(
              * the normal close path, which also forgets the registry entry --
              * a later durable reconnect with the stale FileId then correctly
              * returns OBJECT_NAME_NOT_FOUND. */
-            if (open_file->durable_flags && preserve_durable &&
+            if ((open_file->durable_flags || open_file->resilient) && preserve_durable &&
                 chimera_smb_durable_open_preservable(open_file)) {
                 /* Clear create_conn BEFORE deciding park-vs-close: a break
                  * that begins after this point finds no live member, revokes
@@ -2363,7 +2371,7 @@ chimera_smb_tree_free(
                  * tree/session teardown: drop its registry entry so a later
                  * reconnect with the stale FileId is not matched against a
                  * freed open_file. */
-                if (open_file->durable_flags) {
+                if (open_file->durable_flags || open_file->resilient) {
                     chimera_smb_durable_forget(shared, open_file->file_id.pid);
                 }
                 chimera_smb_open_file_drain_locks(thread, open_file);
@@ -2693,7 +2701,7 @@ chimera_smb_open_file_release(
     if (open_file->refcnt == 0) {
         /* Final teardown of a live durable open (e.g. an explicit CLOSE):
          * drop its registry entry before the object is recycled. */
-        if (open_file->durable_flags) {
+        if (open_file->durable_flags || open_file->resilient) {
             chimera_smb_durable_forget(request->compound->thread->shared,
                                        open_file->file_id.pid);
         }
@@ -2734,7 +2742,7 @@ chimera_smb_open_file_release_nr(
     open_file->refcnt--;
 
     if (open_file->refcnt == 0) {
-        if (open_file->durable_flags) {
+        if (open_file->durable_flags || open_file->resilient) {
             chimera_smb_durable_forget(thread->shared, open_file->file_id.pid);
         }
         chimera_smb_open_file_drain_locks(thread, open_file);

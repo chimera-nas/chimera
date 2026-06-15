@@ -249,6 +249,20 @@ chimera_smb_ioctl(struct chimera_smb_request *request)
                     timeout_ms = CHIMERA_SMB_RESILIENCY_MAX_TIMEOUT_MS;
                 }
 
+                /* Register the open in the durable registry (as a non-persistent
+                 * entry) on the first resiliency grant so a disconnect parks it
+                 * and a reconnect can reclaim it -- a resilient handle survives a
+                 * network drop for its timeout (MS-SMB2 3.3.5.15.9) using the same
+                 * machinery durable handles use.  A durable open is already
+                 * registered; an already-resilient open must not register twice. */
+                if (!open_file->durable_flags && !open_file->resilient) {
+                    chimera_smb_durable_register(
+                        request->compound->thread->shared, open_file,
+                        request->session_handle->session->session_id,
+                        request->compound->conn->client_guid,
+                        open_file->name, open_file->name_len, false);
+                }
+
                 open_file->resilient            = true;
                 open_file->resilient_timeout_ms = timeout_ms;
             }
