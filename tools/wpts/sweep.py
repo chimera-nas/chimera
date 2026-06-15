@@ -51,7 +51,8 @@ WRAPPER = os.path.join(REPO, "scripts/wpts_smb_test_wrapper.sh")
 TRX_NS = "{http://microsoft.com/schemas/VisualStudio/TeamTest/2010}"
 
 CONFIGS = ["base", "persistent", "compression", "multichannel",
-           "encryption", "compression_encryption", "multichannel_encryption"]
+           "encryption", "compression_encryption", "multichannel_encryption",
+           "dirlease", "dirlease_persistent", "dirlease_appinstance"]
 
 # config -> CHIMERA_SMB_* env that the wrapper reads (drives daemon config +
 # ptfconfig capability flips).  base sets nothing.
@@ -65,6 +66,12 @@ CONFIG_ENV = {
                                 "CHIMERA_SMB_ENCRYPTION": "1"},
     "multichannel_encryption": {"CHIMERA_SMB_MULTICHANNEL": "1",
                                 "CHIMERA_SMB_ENCRYPTION": "1"},
+    "dirlease":                {"CHIMERA_SMB_DIRLEASE": "1"},
+    "dirlease_persistent":     {"CHIMERA_SMB_DIRLEASE": "1",
+                                "CHIMERA_SMB_PERSISTENT": "1"},
+    "dirlease_appinstance":    {"CHIMERA_SMB_DIRLEASE": "1",
+                                "CHIMERA_SMB_PERSISTENT": "1",
+                                "CHIMERA_SMB_MULTICHANNEL": "1"},
 }
 
 STATUSES = {"green", "xfail", "skip"}

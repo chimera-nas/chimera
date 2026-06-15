@@ -133,7 +133,8 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
         CACHE PATH "Directory for per-case WPTS JUnit XML output.")
 
     set(_wpts_configs base persistent compression multichannel
-        encryption compression_encryption multichannel_encryption)
+        encryption compression_encryption multichannel_encryption
+        dirlease dirlease_persistent dirlease_appinstance)
     foreach(_c ${_wpts_configs})
         set(WPTS_GREEN_${_c} "")
     endforeach()
@@ -166,6 +167,14 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
     set(_wpts_envfrag_encryption              ";CHIMERA_SMB_ENCRYPTION=1")
     set(_wpts_envfrag_compression_encryption  ";CHIMERA_SMB_COMPRESSION=1;CHIMERA_SMB_ENCRYPTION=1")
     set(_wpts_envfrag_multichannel_encryption ";CHIMERA_SMB_MULTICHANNEL=1;CHIMERA_SMB_ENCRYPTION=1")
+    # Directory-leasing configs.  CHIMERA_SMB_DIRLEASE=1 turns on
+    # smb_directory_leases + advertises IsDirectoryLeasingSupported.  Two cases
+    # need it combined with other features: the Replay change-notify/query-dir
+    # pair needs persistent handles, and the AppInstanceId failover case also
+    # needs multichannel (a second client NIC).
+    set(_wpts_envfrag_dirlease                ";CHIMERA_SMB_DIRLEASE=1")
+    set(_wpts_envfrag_dirlease_persistent     ";CHIMERA_SMB_DIRLEASE=1;CHIMERA_SMB_PERSISTENT=1")
+    set(_wpts_envfrag_dirlease_appinstance    ";CHIMERA_SMB_DIRLEASE=1;CHIMERA_SMB_PERSISTENT=1;CHIMERA_SMB_MULTICHANNEL=1")
     set(_wpts_lbl_base                    "")
     set(_wpts_lbl_persistent              ";persistent")
     set(_wpts_lbl_compression             ";compression")
@@ -173,6 +182,9 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
     set(_wpts_lbl_encryption              ";encryption")
     set(_wpts_lbl_compression_encryption  ";compression;encryption")
     set(_wpts_lbl_multichannel_encryption ";multichannel;encryption")
+    set(_wpts_lbl_dirlease                ";dirlease")
+    set(_wpts_lbl_dirlease_persistent     ";dirlease;persistent")
+    set(_wpts_lbl_dirlease_appinstance    ";dirlease;persistent;multichannel")
     set(_wpts_suf_base                    "")
     set(_wpts_suf_persistent              "_persistent")
     set(_wpts_suf_compression             "_compression")
@@ -180,6 +192,9 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
     set(_wpts_suf_encryption              "_encryption")
     set(_wpts_suf_compression_encryption  "_compression_encryption")
     set(_wpts_suf_multichannel_encryption "_multichannel_encryption")
+    set(_wpts_suf_dirlease                "_dirlease")
+    set(_wpts_suf_dirlease_persistent     "_dirlease_persistent")
+    set(_wpts_suf_dirlease_appinstance    "_dirlease_appinstance")
 
     foreach(_cfg ${_wpts_configs})
         if(NOT WPTS_GREEN_${_cfg})
@@ -195,65 +210,6 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
             TIMEOUT 900
             ENVIRONMENT "WPTS_BIN_DIR=${WPTS_BIN_DIR};DOTNET=${WPTS_DOTNET}${_wpts_envfrag_${_cfg}};WPTS_JUNIT_FILE=${WPTS_JUNIT_DIR}/memfs${_wpts_suf_${_cfg}}.xml;WPTS_JUNIT_CONVERTER=${CMAKE_SOURCE_DIR}/scripts/trx_to_junit.py")
     endforeach()
-
-    # SMB3 directory-leasing cases.  The wrapper runs the daemon with
-    # smb_directory_leases enabled (CHIMERA_SMB_DIRLEASE=1, which also advertises
-    # IsDirectoryLeasingSupported in the ptfconfig so the cases become
-    # applicable).  Allowlist = every DirectoryLeasing case confirmed green: lease
-    # grant (R/RH/RW->R/RWH->RH), the content-change R-break (child add/modify/
-    # delete/rename), the conflict-open H-break, pre-3.0 refusal, and lease-break
-    # lease-break-ack lease-state validation.  Left out:
-    # LeaseBreakOnMultiClients (needs multi-holder H-break fan-out across
-    # sequential break/ack); BreakHandleCachingByParentRenamed (needs dir-rename
-    # denial while a descendant handle is open); Negative_InvalidLeaseKey /
-    # Negative_InvalidClientGuid (need a per-client lease table to validate the
-    # ack key without a tree-scoped open — the per-tree open lookup also matches
-    # a settled FILE lease, so rejecting an unknown key there regresses
-    # smb2.lease.v2_complex2) — all deeper follow-ups.
-    # (AppInstanceId_DirectoryLeasing_NoLeaseInReOpen needs persistent handles +
-    # multichannel advertised too, so it lives in the combined group below.)
-    set(WPTS_SMB2_DIRLEASE_ALLOWLIST
-        BVT_DirectoryLeasing_ReadWriteHandleCaching
-        DirectoryLeasing_BreakHandleCachingByConflictOpen
-        DirectoryLeasing_BreakReadCachingByChildAdded
-        DirectoryLeasing_BreakReadCachingByChildDeleted
-        DirectoryLeasing_BreakReadCachingByChildModified
-        DirectoryLeasing_BreakReadCachingByChildRenamed
-        DirectoryLeasing_Negative_InvalidLeaseStateInLeaseBreakAck
-        DirectoryLeasing_Negative_SMB2002
-        DirectoryLeasing_Negative_SMB21
-        DirectoryLeasing_ReadCaching
-        DirectoryLeasing_ReadHandleCaching
-        DirectoryLeasing_ReadWriteCaching
-        DirectoryLeasing_RWGrantedAsR
-        DirectoryLeasing_RWHGrantedAsRH)
-
-    string(REPLACE ";" "," _wpts_tests "${WPTS_SMB2_DIRLEASE_ALLOWLIST}")
-    add_test(NAME chimera/server/smb/wpts/memfs_dirlease
-        COMMAND ${CMAKE_SOURCE_DIR}/scripts/wpts_smb_test_wrapper.sh
-                ${CHIMERA_DAEMON} memfs "${_wpts_tests}")
-    set_tests_properties(chimera/server/smb/wpts/memfs_dirlease PROPERTIES
-        LABELS "smb;wpts;dirlease"
-        TIMEOUT 900
-        ENVIRONMENT "WPTS_BIN_DIR=${WPTS_BIN_DIR};DOTNET=${WPTS_DOTNET};CHIMERA_SMB_DIRLEASE=1")
-
-    # AppInstanceId_DirectoryLeasing_NoLeaseInReOpen exercises a client failover:
-    # a new client reopens with the same AppInstanceId (forcing the prior open
-    # closed) and must observe NO carried-over directory lease.  The case asserts
-    # GLOBAL_CAP_PERSISTENT_HANDLES and needs a second client NIC for the
-    # failover, so it only becomes applicable with directory leases AND persistent
-    # handles AND multichannel all advertised — hence its own combined group.
-    set(WPTS_SMB2_DIRLEASE_APPINSTANCE_ALLOWLIST
-        AppInstanceId_DirectoryLeasing_NoLeaseInReOpen)
-
-    string(REPLACE ";" "," _wpts_tests "${WPTS_SMB2_DIRLEASE_APPINSTANCE_ALLOWLIST}")
-    add_test(NAME chimera/server/smb/wpts/memfs_dirlease_appinstance
-        COMMAND ${CMAKE_SOURCE_DIR}/scripts/wpts_smb_test_wrapper.sh
-                ${CHIMERA_DAEMON} memfs "${_wpts_tests}")
-    set_tests_properties(chimera/server/smb/wpts/memfs_dirlease_appinstance PROPERTIES
-        LABELS "smb;wpts;dirlease;persistent;multichannel"
-        TIMEOUT 900
-        ENVIRONMENT "WPTS_BIN_DIR=${WPTS_BIN_DIR};DOTNET=${WPTS_DOTNET};CHIMERA_SMB_DIRLEASE=1;CHIMERA_SMB_PERSISTENT=1;CHIMERA_SMB_MULTICHANNEL=1")
 
     message(STATUS "WPTS MS-SMB2 tests: enabled (${WPTS_BIN_DIR}, ${WPTS_DOTNET})")
 elseif(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND NOT WPTS_ARCH_SUPPORTED)
