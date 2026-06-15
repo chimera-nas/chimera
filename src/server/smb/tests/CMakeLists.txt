@@ -113,381 +113,88 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
     get_filename_component(WPTS_BIN_DIR "${WPTS_SMB2_DLL}" DIRECTORY)
     set(CHIMERA_DAEMON $<TARGET_FILE:chimera>)
 
-    # Allowlist: MS-SMB2 cases confirmed green across repeated runs against the
-    # current SMB2 server (memfs backend). Grow this as features land. Tests
-    # that only pass with an unmerged server fix (e.g. the QUERY_DIRECTORY
-    # double-completion fix for QueryDir_Reopen_OnFile) are intentionally
-    # enabled in that fix's PR, not here.
-    set(WPTS_SMB2_ALLOWLIST
-        AppInstanceVersion_SMB302_SMB311
-        AppInstanceVersion_SMB311_SMB302
-        BVT_AppInstanceVersion_SMB311_GreaterVersion
-        BVT_AppInstanceVersion_SMB311_LowerAppInstanceVersionHigh
-        BVT_AppInstanceVersion_SMB311_LowerAppInstanceVersionLow
-        BVT_AppInstanceVersion_SMB311_SameVersion
-        BVT_Compound_RelatedRequests
-        BVT_Compound_UnRelatedRequests
-        BVT_CreateClose_CreateAndCloseDirectory
-        BVT_CreateClose_CreateAndCloseFile
-        BVT_Leasing_FileLeasingV1
-        BVT_Leasing_FileLeasingV2
-        Leasing_FileLeasingV1_SameLeaseKey
-        Leasing_FileLeasingV2_SameLeaseKey
-        BVT_MultiCredit_OneRequestWithMultiCredit
-        BVT_Negotiate_Compatible_2002
-        BVT_Negotiate_Compatible_Wildcard
-        BVT_Negotiate_SMB2002
-        BVT_Negotiate_SMB21
-        BVT_Negotiate_SMB30
-        BVT_Negotiate_SMB302
-        BVT_Negotiate_SMB311
-        BVT_Negotiate_SMB311_Preauthentication
-        BVT_Negotiate_SigningEnabled
-        BVT_OpLockBreak
-        BVT_SMB2Basic_CancelRegisteredChangeNotify
-        BVT_SMB2Basic_ChangeNotify_ChangeAttributes
-        BVT_SMB2Basic_ChangeNotify_ChangeCreation
-        BVT_SMB2Basic_ChangeNotify_ChangeDirName
-        BVT_SMB2Basic_ChangeNotify_ChangeEa
-        BVT_SMB2Basic_ChangeNotify_ChangeFileName
-        BVT_SMB2Basic_ChangeNotify_ChangeLastAccess
-        BVT_SMB2Basic_ChangeNotify_ChangeLastWrite
-        BVT_SMB2Basic_ChangeNotify_ChangeSecurity
-        BVT_SMB2Basic_ChangeNotify_ChangeSize
-        BVT_SMB2Basic_ChangeNotify_ChangeStreamName
-        BVT_SMB2Basic_ChangeNotify_ChangeStreamSize
-        BVT_SMB2Basic_ChangeNotify_ChangeStreamWrite
-        BVT_SMB2Basic_ChangeNotify_MaxTransactSizeCheck_Smb2002
-        BVT_SMB2Basic_ChangeNotify_MaxTransactSizeCheck_Smb21
-        BVT_SMB2Basic_ChangeNotify_MaxTransactSizeCheck_Smb30
-        BVT_SMB2Basic_ChangeNotify_MaxTransactSizeCheck_Smb302
-        BVT_SMB2Basic_ChangeNotify_MaxTransactSizeCheck_Smb311
-        BVT_SMB2Basic_ChangeNotify_NoFileListDirectoryInGrantedAccess
-        BVT_SMB2Basic_ChangeNotify_NonDirectoryFile
-        BVT_SMB2Basic_ChangeNotify_ServerReceiveSmb2Close
-        BVT_SMB2Basic_LockAndUnLock
-        BVT_SMB2Basic_QueryAndSet_FileInfo
-        BVT_SMB2Basic_QueryDir_Reopen_OnDir
-        BVT_SMB2Basic_QueryDir_Reopen_OnEmptyDir_NoFilesReturned
-        BVT_SMB2Basic_QueryDir_Reopen_OnFile
-        BVT_SMB2Basic_Query_FileAllInformation
-        BVT_SMB2Basic_Query_FileNormalizedNameInformation_DataFile
-        BVT_SMB2Basic_Query_FileNormalizedNameInformation_DirectoryFile
-        BVT_SessionMgmt_NewSession
-        BVT_SessionMgmt_Reauthentication
-        BVT_SessionMgmt_ReconnectSessionSetup
-        BVT_Signing
-        BVT_TreeMgmt_TreeConnectAndDisconnect
-        BVT_ValidateNegotiateInfo
-        CreateClose_CreateAndCloseDirWithDotDir
-        CreateClose_CreateAndCloseDirWithDoubleDotDir
-        CreateClose_CreateAndCloseFileWithDotDir
-        CreateClose_CreateAndCloseFileWithDoubleDotDir
-        CreateClose_DeleteFile_DesiredAccessNotIncludeDeleteOrGenericAll
-        InvalidCreateRequestStructureSize
-        Negative_AppInstanceVersion_SMB311_NoVersion
-        Negotiate_SMB311_ContextID_NetName
-        Negotiate_SMB311_InvalidCipher
-        Negotiate_SMB311_InvalidHashAlgorithm
-        Negotiate_SMB311_IsTransportCapabilitiesSupported
-        Negotiate_SMB311_SigningCapability
-        Negotiate_SMB311_WithAllContexts
-        Negotiate_SMB311_WithCompressionContextWithoutIntegrityContext
-        Negotiate_SMB311_WithEncryptionAndCompressionContextsWithoutIntegrityContext
-        Negotiate_SMB311_WithEncryptionContextWithoutIntegrityContext
-        Negotiate_SMB311_WithoutAnyContexts
-        SessionMgmt_ReconnectWithDifferentDialect
-        SessionMgmt_SupportsNotificationsMismatch
-        Signing_VerifyAesGmacSigning
-        TreeMgmt_SMB311_CLUSTER_RECONNECT
-        ValidateNegotiateInfo_Negative_InvalidCapabilities
-        ValidateNegotiateInfo_Negative_InvalidDialects_CommonDialectNotExpected
-        ValidateNegotiateInfo_Negative_InvalidDialects_NoCommonDialect
-        ValidateNegotiateInfo_Negative_InvalidGuid
-        ValidateNegotiateInfo_Negative_InvalidMaxOutputResponse
-        ValidateNegotiateInfo_Negative_InvalidSecurityMode
-        ValidateNegotiateInfo_Negative_SMB311
-        )
-
-    # Run each config-group's whole allowlist in ONE vstest invocation against a
-    # single chimera server, rather than one ctest (one daemon + .NET host
-    # bringup) per case -- the bringup dominated, so batching is ~10x faster.
-    # vstest --Tests takes a comma-separated name list (CMake lists are
-    # ';'-separated, so swap the separator).  The wrapper stages a per-session
-    # shadow of the WPTS Bin dir (symlink farm + private ptfconfig copies), so
-    # the group ctests share no mutable state and may run concurrently.
-    string(REPLACE ";" "," _wpts_tests "${WPTS_SMB2_ALLOWLIST}")
-    add_test(NAME chimera/server/smb/wpts/memfs
-        COMMAND ${CMAKE_SOURCE_DIR}/scripts/wpts_smb_test_wrapper.sh
-                ${CHIMERA_DAEMON} memfs "${_wpts_tests}")
-    set_tests_properties(chimera/server/smb/wpts/memfs PROPERTIES
-        LABELS "smb;wpts"
-        TIMEOUT 900
-        ENVIRONMENT "WPTS_BIN_DIR=${WPTS_BIN_DIR};DOTNET=${WPTS_DOTNET}")
-
-    # SMB3 durable / persistent handle cases plus the Replay (channel-sequence)
-    # suite.  These need the daemon run with smb_persistent_handles enabled (the
-    # wrapper sets it from CHIMERA_SMB_PERSISTENT, which also flips the
-    # persistent-handle / CA-share ptfconfig capabilities and marks FileShare as
-    # the CA share).  The Replay_*_ReplayEligibleCleared cases — including the
-    # NonPersistentHandle variants — only become applicable once the CA / replay
-    # capability is advertised, so they live here rather than in the base list.
-    # Allowlist = every applicable durable/persistent/replay case confirmed green
-    # against the current server.  Left out: *_WithDifferentDurableOwner /
-    # BVT_PersistentHandles (need a second user account / scale-out config the
-    # harness doesn't provide — they report Inconclusive/NotExecuted), and the
-    # Replay Lock cases (replay-eligibility not yet cleared on that op).  The
-    # Replay IoCtl cases use FSCTL_LMR_REQUEST_RESILIENCY as their vehicle and
-    # are applicable now that the server grants request-resiliency.
-    set(WPTS_SMB2_PERSISTENT_ALLOWLIST
-        BVT_DurableHandleV1_Reconnect_WithBatchOplock
-        BVT_DurableHandleV1_Reconnect_WithLeaseV1
-        BVT_DurableHandleV2_Reconnect_WithBatchOplock
-        BVT_DurableHandleV2_Reconnect_WithLeaseV1
-        BVT_PersistentHandle_Reconnect
-        DurableHandleV1_Reconnect_AfterServerDisconnect
-        DurableHandleV1_Reconnect_IncludeCreateDurableHandle
-        DurableHandleV1_Reconnect_IncludeReconnectV2
-        DurableHandleV1_Reconnect_IncludeRequestV2
-        DurableHandleV1_Reconnect_LeaseIsNull
-        DurableHandleV1_Reconnect_SessionIsNotNull
-        DurableHandleV1_Reconnect_WithDifferentClientGuid
-        DurableHandleV1_Reconnect_WithDifferentLeaseKey
-        DurableHandleV1_Reconnect_WithLeaseV1_WithDifferentFileName
-        DurableHandleV1_Reconnect_WithoutDurableHandle
-        DurableHandleV1_Reconnect_WithoutFileIdPersistent
-        DurableHandleV1_Reconnect_WithoutLogoffOrDisconnect_WithoutPreviousSessionIdSet
-        DurableHandleV1_Reconnect_WithoutRequestLease
-        DurableHandleV1_WithLeaseV1_WithoutHandleCaching
-        DurableHandleV2_NoPersistenceGrantedOnNonCAShare
-        DurableHandleV2_Reconnect_WithLeaseV1_WithDifferentFileName
-        DurableHandleV2_Reconnect_WithoutPersistence
-        DurableHandleV2_WithLeaseV1AndV2_WithDifferentLeaseKey
-        DurableHandleV2_WithLeaseV2_WithoutHandleCaching
-        PersistentHandle_ReOpenFromDiffClient
-        Replay_NonPersistentHandle_Flush_ReplayEligibleCleared
-        Replay_NonPersistentHandle_IoCtl_ReplayEligibleCleared
-        Replay_NonPersistentHandle_QueryInfo_ReplayEligibleCleared
-        Replay_NonPersistentHandle_Read_ReplayEligibleCleared
-        Replay_NonPersistentHandle_SetInfo_ReplayEligibleCleared
-        Replay_NonPersistentHandle_Write_ReplayEligibleCleared
-        Replay_PersistentHandle_ChangeNotify_ReplayEligibleCleared
-        Replay_PersistentHandle_Flush_ReplayEligibleCleared
-        Replay_PersistentHandle_IoCtl_ReplayEligibleCleared
-        Replay_PersistentHandle_QueryDirectory_ReplayEligibleCleared
-        Replay_PersistentHandle_QueryInfo_ReplayEligibleCleared
-        Replay_PersistentHandle_Read_ReplayEligibleCleared
-        Replay_PersistentHandle_SetInfo_ReplayEligibleCleared
-        Replay_PersistentHandle_Write_ReplayEligibleCleared)
-
-    string(REPLACE ";" "," _wpts_tests "${WPTS_SMB2_PERSISTENT_ALLOWLIST}")
-    add_test(NAME chimera/server/smb/wpts/memfs_persistent
-        COMMAND ${CMAKE_SOURCE_DIR}/scripts/wpts_smb_test_wrapper.sh
-                ${CHIMERA_DAEMON} memfs "${_wpts_tests}")
-    set_tests_properties(chimera/server/smb/wpts/memfs_persistent PROPERTIES
-        LABELS "smb;wpts;persistent"
-        TIMEOUT 900
-        ENVIRONMENT "WPTS_BIN_DIR=${WPTS_BIN_DIR};DOTNET=${WPTS_DOTNET};CHIMERA_SMB_PERSISTENT=1")
-
-    # SMB3 transport-compression cases.  These need the daemon run with
-    # smb_compression enabled (the wrapper sets it from CHIMERA_SMB_COMPRESSION,
-    # which also advertises the supported algorithms + a compressed share in the
-    # ptfconfig).  Allowlist = every applicable compression case confirmed green
-    # against the current server (LZ77, LZNT1, LZ77+Huffman and chained Pattern_V1,
-    # in both directions and the large-file variants).  Left out: the *_Encrypted
-    # variants (they need the encryption harness too and live in the
-    # compression+encryption allowlist below) and ChainedCompressionNotSupported
-    # (inapplicable — the SUT supports chaining).
-    set(WPTS_SMB2_COMPRESSION_ALLOWLIST
-        BVT_Negotiate_SMB311_CompressionEnabled
-        BVT_Negotiate_SMB311_Compression_IsChainedCompressionSupported
-        BVT_SMB2Compression_Chained_PatternV1
-        BVT_SMB2Compression_LZ77
-        BVT_SMB2Compression_LZ77Huffman
-        BVT_SMB2Compression_LZNT1
-        BVT_SMB2Compression_Unchained
-        BVT_SMB2Compression_Unchained_LargeFile
-        Negotiate_SMB311_Compression_CompressionAlgorithmEmpty
-        Negotiate_SMB311_Compression_CompressionAlgorithmNotSupported
-        Negotiate_SMB311_Compression_CompressionContextInvalidDataLength
-        Negotiate_SMB311_Compression_FlagChainedNotSet
-        Negotiate_SMB311_Compression_InvalidSmbDialect
-        Negotiate_SMB311_WithCompressionContextWithoutIntegrityContext
-        Negotiate_SMB311_WithEncryptionAndCompressionContextsWithoutIntegrityContext
-        SMB2Compression_Chained_InvalidCompressionAlgorithmInCompressionPayloadHeader
-        SMB2Compression_Chained_InvalidLengthInCompressionPayloadHeader
-        SMB2Compression_Chained_PatternV1_CompressedWriteRequest_PatternV1AtEnd
-        SMB2Compression_Chained_PatternV1_CompressedWriteRequest_PatternV1AtEnd_LargeFile
-        SMB2Compression_Chained_PatternV1_CompressedWriteRequest_PatternV1AtFront
-        SMB2Compression_Chained_PatternV1_CompressedWriteRequest_PatternV1AtFrontAndEnd
-        SMB2Compression_Chained_PatternV1_CompressedWriteRequest_PatternV1AtFrontAndEnd_LargeFile
-        SMB2Compression_Chained_PatternV1_CompressedWriteRequest_PatternV1AtFront_LargeFile
-        SMB2Compression_Chained_PatternV1_CompressibleReadResponse
-        SMB2Compression_Chained_PatternV1_CompressibleReadResponse_LargeFile
-        SMB2Compression_Chained_PatternV1_IncompressibleReadResponse
-        SMB2Compression_Chained_PatternV1_InvalidCompressionPatternPayloadV1Repetitions
-        SMB2Compression_Chained_PatternV1_LargeFile
-        SMB2Compression_CompressedWriteRequest
-        SMB2Compression_CompressedWriteRequest_LargeFile
-        SMB2Compression_CompressibleReadResponse
-        SMB2Compression_CompressibleReadResponse_LargeFile
-        SMB2Compression_IncompressibleReadResponse
-        SMB2Compression_InvalidCompressedPacketLength
-        SMB2Compression_InvalidCompressionAlgorithm
-        SMB2Compression_InvalidDecompressedProtocolId
-        SMB2Compression_LZ77_LargeFile
-        SMB2Compression_LZ77Huffman_LargeFile
-        SMB2Compression_LZNT1_LargeFile
-        TreeMgmt_SMB311_COMPRESS_DATA)
-
-    string(REPLACE ";" "," _wpts_tests "${WPTS_SMB2_COMPRESSION_ALLOWLIST}")
-    add_test(NAME chimera/server/smb/wpts/memfs_compression
-        COMMAND ${CMAKE_SOURCE_DIR}/scripts/wpts_smb_test_wrapper.sh
-                ${CHIMERA_DAEMON} memfs "${_wpts_tests}")
-    set_tests_properties(chimera/server/smb/wpts/memfs_compression PROPERTIES
-        LABELS "smb;wpts;compression"
-        TIMEOUT 900
-        ENVIRONMENT "WPTS_BIN_DIR=${WPTS_BIN_DIR};DOTNET=${WPTS_DOTNET};CHIMERA_SMB_COMPRESSION=1")
-
-    # SMB3 multichannel cases.  The wrapper runs the daemon with a second NIC
-    # address (so FSCTL_QUERY_NETWORK_INTERFACE_INFO advertises an alternative
-    # server address) and flips the multichannel ptfconfig capabilities when
-    # CHIMERA_SMB_MULTICHANNEL=1.  Allowlist = the MultipleChannel cases confirmed
-    # green against the current server: the NIC-redundancy bind matrix, the
-    # 2.x-dialect bind rejection (STATUS_REQUEST_NOT_ACCEPTED), cross-channel
-    # byte-range locking, and the 3.1.1 second-channel preauth-integrity case.
+    # ------------------------------------------------------------------
+    # Feature-aware case map -- single source of truth.
     #
-    # Left out (each a distinct unimplemented feature, not a multichannel gap):
-    #   - MultipleChannel_FileLease needs write/handle-caching lease break
-    #     delivery; chimera deliberately grants only read-caching leases
-    #     (write-through) to avoid the cthon/fsx client-cache corruption hazards
-    #     documented in chimera_smb_create.
-    #   - MultipleChannel_EncryptionOnBothChannels and the two
-    #     MultipleChannel_Negative_Encryption* cases need the multichannel and
-    #     encryption harnesses combined (a second NIC AND smb_encryption on the
-    #     same run); the two ptfconfig fixtures are wired independently today, so
-    #     these are reported Inconclusive (skipped).
-    set(WPTS_SMB2_MULTICHANNEL_ALLOWLIST
-        BVT_MultipleChannel_NicRedundantOnBoth
-        BVT_NetworkInterfaceInfo_QuerySuccessful
-        MultipleChannel_FileLease
-        MultipleChannel_LockUnlockOnDiffChannel
-        MultipleChannel_LockUnlockOnSameChannel
-        MultipleChannel_MultiChannelOnSameNic
-        MultipleChannel_Negative_SMB2002
-        MultipleChannel_Negative_SMB21
-        MultipleChannel_NicRedundantOnClient
-        MultipleChannel_NicRedundantOnServer
-        MultipleChannel_SecondChannelSessionSetupFailAtFirstTime
-        NetworkInterfaceInfo_ChangeConnection_BindCurrentSession
-        NetworkInterfaceInfo_Query_ReturnsErrorStatus
-        NetworkInterfaceInfo_Query_ReturnsIPv4IPv6
-        )
+    # wpts/wpts_cases.csv maps every MS-SMB2 case to the config whose features
+    # it needs (home_config) and a status: green (CI-gating), xfail (applicable
+    # but currently failing -- a tracked defect, NOT gated here), or skip
+    # (never-applicable today).  enc_path=1 (home=base only) marks a
+    # feature-agnostic case that ALSO runs under encryption (the curated
+    # transport-sensitive subset).  Edit the CSV, not these lists; the sweep
+    # tool tools/wpts/sweep.py runs the full applicable (green+xfail) set and
+    # surfaces the xfail defects + promotion candidates.
+    #
+    # CI gates ONLY on status=green.  Each config's green list runs in ONE
+    # consolidated vstest invocation (per-case daemon + .NET-host bringup
+    # dominated, so batching is ~10x faster).
+    # ------------------------------------------------------------------
+    set(WPTS_JUNIT_DIR ${CMAKE_BINARY_DIR}/wpts-junit
+        CACHE PATH "Directory for per-case WPTS JUnit XML output.")
 
-    string(REPLACE ";" "," _wpts_tests "${WPTS_SMB2_MULTICHANNEL_ALLOWLIST}")
-    add_test(NAME chimera/server/smb/wpts/memfs_multichannel
-        COMMAND ${CMAKE_SOURCE_DIR}/scripts/wpts_smb_test_wrapper.sh
-                ${CHIMERA_DAEMON} memfs "${_wpts_tests}")
-    set_tests_properties(chimera/server/smb/wpts/memfs_multichannel PROPERTIES
-        LABELS "smb;wpts;multichannel"
-        TIMEOUT 900
-        ENVIRONMENT "WPTS_BIN_DIR=${WPTS_BIN_DIR};DOTNET=${WPTS_DOTNET};CHIMERA_SMB_MULTICHANNEL=1")
+    set(_wpts_configs base persistent compression multichannel
+        encryption compression_encryption multichannel_encryption)
+    foreach(_c ${_wpts_configs})
+        set(WPTS_GREEN_${_c} "")
+    endforeach()
 
-    # SMB3 transport-encryption cases.  These need the daemon run with
-    # smb_encryption enabled (the wrapper sets it from CHIMERA_SMB_ENCRYPTION,
-    # which also flags the SMBEncrypted share for per-share encryption and flips
-    # the encryption ptfconfig capabilities: IsEncryptionSupported,
-    # IsGlobalEncryptDataEnabled, EncryptedFileShare and the cipher list).
-    set(WPTS_SMB2_ENCRYPTION_ALLOWLIST
-        BVT_Encryption_GlobalEncryptionEnabled
-        BVT_Encryption_PerShareEncryptionEnabled
-        BVT_Encryption_SMB311
-        BVT_Encryption_SMB311_CCM
-        BVT_Encryption_SMB311_GCM
-        BVT_Encryption_SMB311_AES_256_CCM
-        BVT_Encryption_SMB311_AES_256_GCM
-        BVT_Negotiate_SMB311_Preauthentication_Encryption_CCM
-        BVT_Negotiate_SMB311_Preauthentication_Encryption_GCM
-        BVT_Negotiate_SMB311_Preauthentication_Encryption_AES_256_CCM
-        BVT_Negotiate_SMB311_Preauthentication_Encryption_AES_256_GCM
-        BVT_TreeMgmt_SMB311_Disconnect_NoSignedNoEncryptedTreeConnect
-        Compound_Encrypt_RelatedRequests
-        Compound_Encrypt_UnrelatedRequests
-        Signing_VerifySignatureWhenEncrypted
-        # Interim STATUS_PENDING emitters (oplock/lease break, change notify).
-        # On an encrypting session the async interim and the change-notify
-        # delivery must themselves be wrapped in a TRANSFORM header (MS-SMB2
-        # §3.3.4.1.4); these failed with "the packet should be encrypted" until
-        # the standalone async send paths learned to encrypt.
-        BVT_OpLockBreak
-        BVT_Leasing_FileLeasingV1
-        BVT_Leasing_FileLeasingV2
-        Leasing_FileLeasingV1_SameLeaseKey
-        Leasing_FileLeasingV2_SameLeaseKey
-        BVT_SMB2Basic_CancelRegisteredChangeNotify
-        BVT_SMB2Basic_ChangeNotify_ChangeAttributes
-        BVT_SMB2Basic_ChangeNotify_ChangeCreation
-        BVT_SMB2Basic_ChangeNotify_ChangeDirName
-        BVT_SMB2Basic_ChangeNotify_ChangeEa
-        BVT_SMB2Basic_ChangeNotify_ChangeFileName
-        BVT_SMB2Basic_ChangeNotify_ChangeLastAccess
-        BVT_SMB2Basic_ChangeNotify_ChangeLastWrite
-        BVT_SMB2Basic_ChangeNotify_ChangeSecurity
-        BVT_SMB2Basic_ChangeNotify_ChangeSize
-        BVT_SMB2Basic_ChangeNotify_ChangeStreamName
-        BVT_SMB2Basic_ChangeNotify_ChangeStreamSize
-        BVT_SMB2Basic_ChangeNotify_ChangeStreamWrite
-        BVT_SMB2Basic_ChangeNotify_ServerReceiveSmb2Close
-        BVT_SMB2Basic_ChangeNotify_NonDirectoryFile
-        BVT_SMB2Basic_ChangeNotify_NoFileListDirectoryInGrantedAccess)
+    file(STRINGS ${CMAKE_CURRENT_SOURCE_DIR}/wpts/wpts_cases.csv _wpts_rows)
+    foreach(_row ${_wpts_rows})
+        if(_row MATCHES "^case,")            # CSV header
+            continue()
+        endif()
+        string(REPLACE "," ";" _f "${_row}")
+        list(GET _f 0 _case)
+        list(GET _f 1 _home)
+        list(GET _f 2 _status)
+        list(GET _f 3 _encpath)
+        if(NOT _status STREQUAL "green")      # CI gates only on green
+            continue()
+        endif()
+        list(APPEND WPTS_GREEN_${_home} "${_case}")
+        if(_encpath STREQUAL "1" AND _home STREQUAL "base")
+            list(APPEND WPTS_GREEN_encryption "${_case}")  # agnostic enc-path coverage
+        endif()
+    endforeach()
 
-    string(REPLACE ";" "," _wpts_tests "${WPTS_SMB2_ENCRYPTION_ALLOWLIST}")
-    add_test(NAME chimera/server/smb/wpts/memfs_encryption
-        COMMAND ${CMAKE_SOURCE_DIR}/scripts/wpts_smb_test_wrapper.sh
-                ${CHIMERA_DAEMON} memfs "${_wpts_tests}")
-    set_tests_properties(chimera/server/smb/wpts/memfs_encryption PROPERTIES
-        LABELS "smb;wpts;encryption"
-        TIMEOUT 900
-        ENVIRONMENT "WPTS_BIN_DIR=${WPTS_BIN_DIR};DOTNET=${WPTS_DOTNET};CHIMERA_SMB_ENCRYPTION=1")
+    # Per-config CHIMERA_SMB_* env fragment (drives daemon config + ptfconfig
+    # capability flips), ctest label suffix, and ctest-name suffix.  base = none.
+    set(_wpts_envfrag_base                    "")
+    set(_wpts_envfrag_persistent              ";CHIMERA_SMB_PERSISTENT=1")
+    set(_wpts_envfrag_compression             ";CHIMERA_SMB_COMPRESSION=1")
+    set(_wpts_envfrag_multichannel            ";CHIMERA_SMB_MULTICHANNEL=1")
+    set(_wpts_envfrag_encryption              ";CHIMERA_SMB_ENCRYPTION=1")
+    set(_wpts_envfrag_compression_encryption  ";CHIMERA_SMB_COMPRESSION=1;CHIMERA_SMB_ENCRYPTION=1")
+    set(_wpts_envfrag_multichannel_encryption ";CHIMERA_SMB_MULTICHANNEL=1;CHIMERA_SMB_ENCRYPTION=1")
+    set(_wpts_lbl_base                    "")
+    set(_wpts_lbl_persistent              ";persistent")
+    set(_wpts_lbl_compression             ";compression")
+    set(_wpts_lbl_multichannel            ";multichannel")
+    set(_wpts_lbl_encryption              ";encryption")
+    set(_wpts_lbl_compression_encryption  ";compression;encryption")
+    set(_wpts_lbl_multichannel_encryption ";multichannel;encryption")
+    set(_wpts_suf_base                    "")
+    set(_wpts_suf_persistent              "_persistent")
+    set(_wpts_suf_compression             "_compression")
+    set(_wpts_suf_multichannel            "_multichannel")
+    set(_wpts_suf_encryption              "_encryption")
+    set(_wpts_suf_compression_encryption  "_compression_encryption")
+    set(_wpts_suf_multichannel_encryption "_multichannel_encryption")
 
-    # Compression + encryption combined cases (compress-then-encrypt, MS-SMB2
-    # §3.1.4.4).  The wrapper enables both smb_compression and smb_encryption so a
-    # compressed WRITE arrives encrypted (decrypt-then-decompress) and a
-    # compressed READ response is produced (compress-then-encrypt).  Only the
-    # implemented codecs are listed; LZ77+Huffman / LZNT1 encrypted variants skip
-    # for the same reason their plaintext variants do.
-    set(WPTS_SMB2_COMPRESSION_ENCRYPTION_ALLOWLIST
-        BVT_SMB2Compression_LZ77_Encrypted
-        BVT_SMB2Compression_LZ77Huffman_Encrypted
-        BVT_SMB2Compression_LZNT1_Encrypted
-        BVT_SMB2Compression_Chained_PatternV1_Encrypted
-        Negotiate_SMB311_WithEncryptionAndCompressionContextsWithoutIntegrityContext)
-
-    string(REPLACE ";" "," _wpts_tests "${WPTS_SMB2_COMPRESSION_ENCRYPTION_ALLOWLIST}")
-    add_test(NAME chimera/server/smb/wpts/memfs_compression_encryption
-        COMMAND ${CMAKE_SOURCE_DIR}/scripts/wpts_smb_test_wrapper.sh
-                ${CHIMERA_DAEMON} memfs "${_wpts_tests}")
-    set_tests_properties(chimera/server/smb/wpts/memfs_compression_encryption PROPERTIES
-        LABELS "smb;wpts;compression;encryption"
-        TIMEOUT 900
-        ENVIRONMENT "WPTS_BIN_DIR=${WPTS_BIN_DIR};DOTNET=${WPTS_DOTNET};CHIMERA_SMB_COMPRESSION=1;CHIMERA_SMB_ENCRYPTION=1")
-
-    # Multichannel + encryption combined case: encryption is session-scoped, so
-    # the keys derived on the first channel cover every bound channel.  The
-    # MultipleChannel_Negative_Encryption* cases are intentionally not listed:
-    # they are inconclusive when IsGlobalEncryptDataEnabled is true (they exercise
-    # an encryption-supported-but-not-global mode chimera does not offer).
-    set(WPTS_SMB2_MULTICHANNEL_ENCRYPTION_ALLOWLIST
-        MultipleChannel_EncryptionOnBothChannels)
-
-    string(REPLACE ";" "," _wpts_tests "${WPTS_SMB2_MULTICHANNEL_ENCRYPTION_ALLOWLIST}")
-    add_test(NAME chimera/server/smb/wpts/memfs_multichannel_encryption
-        COMMAND ${CMAKE_SOURCE_DIR}/scripts/wpts_smb_test_wrapper.sh
-                ${CHIMERA_DAEMON} memfs "${_wpts_tests}")
-    set_tests_properties(chimera/server/smb/wpts/memfs_multichannel_encryption PROPERTIES
-        LABELS "smb;wpts;multichannel;encryption"
-        TIMEOUT 900
-        ENVIRONMENT "WPTS_BIN_DIR=${WPTS_BIN_DIR};DOTNET=${WPTS_DOTNET};CHIMERA_SMB_MULTICHANNEL=1;CHIMERA_SMB_ENCRYPTION=1")
+    foreach(_cfg ${_wpts_configs})
+        if(NOT WPTS_GREEN_${_cfg})
+            continue()                        # no green cases for this config
+        endif()
+        string(REPLACE ";" "," _tests "${WPTS_GREEN_${_cfg}}")
+        set(_name chimera/server/smb/wpts/memfs${_wpts_suf_${_cfg}})
+        add_test(NAME ${_name}
+            COMMAND ${CMAKE_SOURCE_DIR}/scripts/wpts_smb_test_wrapper.sh
+                    ${CHIMERA_DAEMON} memfs "${_tests}")
+        set_tests_properties(${_name} PROPERTIES
+            LABELS "smb;wpts${_wpts_lbl_${_cfg}}"
+            TIMEOUT 900
+            ENVIRONMENT "WPTS_BIN_DIR=${WPTS_BIN_DIR};DOTNET=${WPTS_DOTNET}${_wpts_envfrag_${_cfg}};WPTS_JUNIT_FILE=${WPTS_JUNIT_DIR}/memfs${_wpts_suf_${_cfg}}.xml;WPTS_JUNIT_CONVERTER=${CMAKE_SOURCE_DIR}/scripts/trx_to_junit.py")
+    endforeach()
 
     message(STATUS "WPTS MS-SMB2 tests: enabled (${WPTS_BIN_DIR}, ${WPTS_DOTNET})")
 elseif(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND NOT WPTS_ARCH_SUPPORTED)

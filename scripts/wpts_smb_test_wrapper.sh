@@ -381,6 +381,15 @@ VSTEST_RC=$?
 
 echo "=== vstest exit code: ${VSTEST_RC} ==="
 
+# Per-case JUnit for the CI report: a consolidated entry is one CTest test, so
+# convert the TRX into a per-case JUnit (the smbtorture-style hook) when the
+# caller asks.  Non-fatal -- a conversion failure must not fail the run.
+if [ -n "${WPTS_JUNIT_FILE:-}" ] && [ -n "${WPTS_JUNIT_CONVERTER:-}" ]; then
+    python3 "${WPTS_JUNIT_CONVERTER}" "${RESULT_DIR}/SMB2TestResult.trx" \
+        "${WPTS_JUNIT_FILE}" 2>/dev/null \
+        || echo "WPTS JUnit conversion failed (non-fatal)"
+fi
+
 # Persist the daemon log alongside the TRX so a crash/abort is recoverable
 # after the session dir is cleaned up.
 cp -f "$CHIMERA_LOG" "${RESULT_DIR}/chimera_stderr.log" 2>/dev/null || true

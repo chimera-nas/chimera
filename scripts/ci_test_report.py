@@ -64,6 +64,7 @@ def run_label(dirname):
 CONSOLIDATED = [
     ("chimera/pynfs/combined_", "pynfs-junit"),
     ("chimera/server/smb/smbtorture_", "smbtorture-junit"),
+    ("chimera/server/smb/wpts/", "wpts-junit"),
 ]
 
 
