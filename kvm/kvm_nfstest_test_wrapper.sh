@@ -214,6 +214,13 @@ case "$NFS_VERSION" in
     *)   NFSTEST_VERSION="$NFS_VERSION" ;;
 esac
 
+# nfstest_dio rejects a mount whose rsize/wsize is smaller than 3x its own
+# I/O size, so the default rsize=4096,wsize=4096 aborts it; give dio a large
+# transfer size instead.
+if [ "$NFSTEST_PROGRAM" = "nfstest_dio" ]; then
+    NFSTEST_MTOPTS="hard,rsize=1048576,wsize=1048576"
+fi
+
 # nfstest_interop drives its own mounts at several NFS versions (including v3),
 # so force nolock for it regardless of the top-level version.
 if [ "$NFSTEST_PROGRAM" = "nfstest_interop" ]; then
@@ -259,9 +266,11 @@ TEST_CMD="mkdir -p /mnt/t && PYTHONPATH=/opt/nfstest /opt/nfstest/test/${NFSTEST
 # analyses the whole packet trace in memory and its fill/dealloc subtests
 # generate large traces.
 QEMU_MEM="1G"
-if [ "$NFSTEST_PROGRAM" = "nfstest_alloc" ]; then
-    QEMU_MEM="8G"
-fi
+case "$NFSTEST_PROGRAM" in
+    # nfstest_alloc analyses the whole packet trace in memory; nfstest_dio drives
+    # 1 MiB direct-I/O transfers whose traces and buffers blow past 1 GiB.
+    nfstest_alloc | nfstest_dio) QEMU_MEM="8G" ;;
+esac
 
 # Boot QEMU inside the netns; the guest's /init.sh runs test_cmd (no pre-mount).
 ip netns exec "${NETNS_NAME}" "$QEMU_BIN" \

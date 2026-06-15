@@ -272,14 +272,19 @@ foreach(image_spec ${KVM_IMAGES})
     # behaviour with its own tcpdump-driven RPC dissector.  The nfstest tree and
     # its in-guest deps (python3, tcpdump, a default route) ship in the
     # kvm-test-base image (>= v1.2.0).  Matrix entries are "program|<space-
-    # separated NFS versions>"; nfstest_ssc is left unregistered for now (a
-    # server-side COPY gap).
+    # separated NFS versions>".  nfstest_lock is NFSv4-only here (NFSv3 byte-range
+    # locking is NLM, which needs rpc.statd the guest does not run -- the other
+    # suites mount nolock for v3 for the same reason).  Not yet registered:
+    # nfstest_ssc (server-side COPY gap), nfstest_cache (needs a second client
+    # host), nfstest_delegation (real delegation/lock gaps) and nfstest_pnfs.
     if(IMAGE_NAME STREQUAL "ubuntu2404")
         set(NFSTEST_MATRIX
             "nfstest_posix|3 4.0 4.1 4.2"
             "nfstest_interop|4.0"
             "nfstest_alloc|4.2"
             "nfstest_sparse|4.2"
+            "nfstest_lock|4.1"
+            "nfstest_dio|4.2"
         )
         set(NFSTEST_BACKENDS ${KVM_BACKENDS})
         if(CAIRN_ENABLED)
@@ -331,6 +336,14 @@ foreach(image_spec ${KVM_IMAGES})
                                 ${CHIMERA_BINARY} ${backend} ${nfsver} ${prog})
                     set_tests_properties(chimera/kvm/${IMAGE_NAME}/nfstest/${prog}_${backend}_nfs${nfsver}
                         PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2)
+                    # nfstest_lock (5296 subtests, ~6.5 min) and nfstest_dio
+                    # (1 MiB direct-I/O transfers, ~5.5 min) run well past the
+                    # CI-wide `ctest --timeout 300`; give them a per-test timeout
+                    # that overrides it so they are not killed mid-run.
+                    if(prog STREQUAL "nfstest_lock" OR prog STREQUAL "nfstest_dio")
+                        set_tests_properties(chimera/kvm/${IMAGE_NAME}/nfstest/${prog}_${backend}_nfs${nfsver}
+                            PROPERTIES TIMEOUT 900)
+                    endif()
                 endforeach()
             endforeach()
         endforeach()
