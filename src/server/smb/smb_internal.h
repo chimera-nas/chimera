@@ -472,6 +472,14 @@ struct chimera_smb_request {
             uint8_t                         access_retries;
             /* Open handle parked across the access-retry getattr. */
             struct chimera_vfs_open_handle *access_retry_oh;
+            /* Bounded retry budget + parked handle for a share conflict against a
+             * durable holder whose owning connection is mid-disconnect: the
+             * holder will yield once its disconnect parks it, so re-attempt the
+             * open completion on a short timer until it does (or the budget
+             * lapses into a real SHARING_VIOLATION).  See
+             * chimera_smb_create_open_at_callback. */
+            uint16_t                        share_conflict_retries;
+            struct chimera_vfs_open_handle *share_conflict_oh;
             /* Set by the durable-reconnect path: this CREATE is reclaiming a
             * surviving open, not opening a new one.  The access was granted at
             * the original open, and MS-SMB2 has the reconnect ignore the
@@ -562,6 +570,12 @@ struct chimera_smb_request {
             struct chimera_vfs_pending_acquire gen_ticket;
             uint8_t                            gen_held_granted;
             uint8_t                            gen_parked;
+            /* Set by chimera_smb_create_gen_open_file_normal when the share
+             * conflict it could not resolve is against a durable holder whose
+             * owning connection is mid-disconnect (it will park+yield shortly).
+             * Tells the open-completion path to retry on a short timer instead of
+             * failing SHARING_VIOLATION.  Cleared per create attempt. */
+            uint8_t                            gen_share_retry;
             /* GRANTED/DENIED result stashed by chimera_smb_create_share_park_cb
              * when the share-park ticket resolves on another thread, so the
              * owning thread's resume doorbell can finish the open with it.  The
@@ -1031,6 +1045,15 @@ struct chimera_smb_conn {
      * on another thread does not enqueue a send for a connection whose bind is
      * being torn down.  Reset on reuse in chimera_smb_conn_alloc. */
     uint8_t                            lease_break_tearing_down;
+    /* Set at the very start of disconnect processing (EVPL_NOTIFY_DISCONNECTED),
+     * BEFORE the heavyweight session/tree teardown that parks this connection's
+     * durable handles.  A conflicting CREATE racing into that window on another
+     * connection (the disconnect-vs-conflicting-open race: the durable holder's
+     * share reservation is still live because its disconnect has not yet parked
+     * it) reads this through the durable registry to tell "this durable's owner
+     * is gone, it will yield -- retry briefly" from "a genuinely-live durable
+     * holder -- real SHARING_VIOLATION".  Cleared on reuse in conn_alloc. */
+    uint8_t                            disconnecting;
     /* Count of compounds in flight on THIS connection (guarded by the owning
     * thread's lease_break_lock).  A dir-lease break whose holder connection is
     * mid-compound is a self-break: the same connection's reply must precede the
@@ -1375,6 +1398,16 @@ chimera_smb_durable_drain_all(
 bool
 chimera_smb_durable_purge_parked(
     struct chimera_server_smb_thread *thread,
+    uint64_t                          persistent_id);
+
+/* True iff a non-persistent durable open with this persistent id exists, is not
+ * yet parked, and its owning connection has begun disconnecting (create_conn
+ * cleared or flagged disconnecting) -- i.e. a conflicting CREATE should retry
+ * briefly for the disconnect to park+yield it rather than deny SHARING_VIOLATION.
+ * False for a genuinely-live durable holder (real conflict) or unknown id. */
+bool
+chimera_smb_durable_conn_disconnecting(
+    struct chimera_server_smb_shared *shared,
     uint64_t                          persistent_id);
 
 /* Scan a share's backend (routed via `fh`) for persisted handle records and
@@ -1963,6 +1996,7 @@ chimera_smb_conn_alloc(struct chimera_server_smb_thread *thread)
     if (conn) {
         LL_DELETE(thread->free_conns, conn);
         conn->lease_break_tearing_down = 0;
+        conn->disconnecting            = 0;
         conn->in_compound              = 0;
     } else {
         conn = calloc(1, sizeof(*conn));

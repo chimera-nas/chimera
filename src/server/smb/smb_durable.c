@@ -289,6 +289,41 @@ chimera_smb_durable_purge_parked(
     return true;
 } /* chimera_smb_durable_purge_parked */
 
+/* A conflicting CREATE found a still-live (not-yet-parked) durable open by its
+ * persistent id and could not purge it.  Decide whether that holder is merely
+ * racing its own disconnect -- its owning connection has begun teardown but has
+ * not parked the handle yet (the open2-lease / disconnect-vs-conflicting-open
+ * window) -- in which case the conflicting CREATE should retry briefly rather
+ * than deny: MS-SMB2 has the disconnected non-persistent handle yield, and a
+ * short retry lets the park complete so the purge then succeeds.
+ *
+ * Returns true iff a matching non-persistent, non-cold, NOT-yet-parked durable
+ * entry exists whose owning open has lost its connection (create_conn == NULL,
+ * i.e. conn_free already cleared it) OR whose connection is flagged
+ * disconnecting (the teardown is queued but has not run).  A genuinely-live
+ * durable holder on an active connection returns false, so its conflict stands
+ * as a real SHARING_VIOLATION without any retry delay.  Persistent handles do
+ * not yield, so they are excluded. */
+SYMBOL_EXPORT bool
+chimera_smb_durable_conn_disconnecting(
+    struct chimera_server_smb_shared *shared,
+    uint64_t                          persistent_id)
+{
+    struct chimera_smb_durable_entry *entry;
+    bool                              disconnecting = false;
+
+    pthread_mutex_lock(&shared->durable.lock);
+    HASH_FIND(hh, shared->durable.by_pid, &persistent_id, sizeof(persistent_id), entry);
+    if (entry && !entry->parked && !entry->persistent && !entry->cold &&
+        entry->open_file) {
+        struct chimera_smb_conn *cc = entry->open_file->create_conn;
+        disconnecting = (cc == NULL) || cc->disconnecting;
+    }
+    pthread_mutex_unlock(&shared->durable.lock);
+
+    return disconnecting;
+} /* chimera_smb_durable_conn_disconnecting */
+
 SYMBOL_EXPORT void
 chimera_smb_durable_park(
     struct chimera_server_smb_shared *shared,
