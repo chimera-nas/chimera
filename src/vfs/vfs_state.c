@@ -567,6 +567,23 @@ chimera_vfs_lease_holder_reclaimable(
            !holder->owner.is_alive_cb(holder, holder->owner.cb_private);
 } /* chimera_vfs_lease_holder_reclaimable */
 
+/* True when `cur` is a pure read (LEVEL_II / read-only) caching lease that a
+ * byte-range lock taken through its own handle must still break to NONE.  A
+ * shared read oplock/lease cannot coexist with a byte-range lock on its stream
+ * (MS-FSA 2.1.5.18), so the range-vs-caching same-owner self-skip does not apply
+ * to it.  A write- or handle-caching holder (batch / exclusive) is exempt: the
+ * owning handle keeps that cache while locking its own file.  Only a breakable,
+ * not-yet-breaking holder qualifies -- one already mid-break needs no re-break. */
+static inline bool
+chimera_vfs_range_breaks_own_read_cache(const struct chimera_vfs_lease *cur)
+{
+    return (cur->mode.granted & CHIMERA_VFS_LEASE_MODE_R) &&
+           !(cur->mode.granted & (CHIMERA_VFS_LEASE_MODE_W |
+                                  CHIMERA_VFS_LEASE_MODE_H)) &&
+           cur->owner.break_cb &&
+           cur->break_state == CHIMERA_VFS_BREAK_IDLE;
+} /* chimera_vfs_range_breaks_own_read_cache */
+
 SYMBOL_EXPORT enum chimera_vfs_lease_result
 chimera_vfs_state_would_conflict(
     const struct chimera_vfs_file_state *file,
@@ -600,16 +617,24 @@ chimera_vfs_state_would_conflict(
              * cache).  This is the "I/O breaks caching" rule applied
              * conservatively to range locks too. */
             for (cur = file->caching_leases; cur; cur = cur->next) {
-                if (chimera_vfs_lease_owner_equal(&cur->owner, &probe->owner)) {
-                    continue;
-                }
-                /* A byte-range lock and a caching lease held by the SAME open do
-                 * not break each other: an SMB open's caching lease is keyed by
-                 * its lease key while its range locks are keyed by the file id,
-                 * so owner_equal does not catch them, but cb_private points at
-                 * the common owning open on both. */
-                if (probe->owner.cb_private &&
-                    cur->owner.cb_private == probe->owner.cb_private) {
+                /* A byte-range lock and a caching lease held by the SAME open
+                 * normally do not break each other (owner_equal, or -- for a
+                 * lease keyed by its lease key rather than the file id -- the
+                 * shared cb_private back-pointer to the common owning open/grant).
+                 *
+                 * The one exception is a pure read (LEVEL_II / read-only) cache:
+                 * a shared oplock cannot coexist with ANY byte-range lock on its
+                 * stream, even one taken through its own handle, so acquiring a
+                 * range lock breaks that read cache to NONE (MS-FSA 2.1.5.18;
+                 * smbtorture smb2.oplock.brl1/brl3, where a 2nd open has already
+                 * downgraded the holder's batch oplock to LEVEL_II).  A write- or
+                 * handle-caching oplock/lease (batch / exclusive) held by the same
+                 * open is still kept -- the handle may lock its own file without
+                 * losing its write cache (smb2.oplock.brl2). */
+                if ((chimera_vfs_lease_owner_equal(&cur->owner, &probe->owner) ||
+                     (probe->owner.cb_private &&
+                      cur->owner.cb_private == probe->owner.cb_private)) &&
+                    !chimera_vfs_range_breaks_own_read_cache(cur)) {
                     continue;
                 }
                 /* A read range lock conflicts with a W cache on another
@@ -1128,6 +1153,25 @@ chimera_vfs_state_try_insert(
         }
 
         if (began_live_break) {
+            /* A RANGE-lock acquirer alone takes the synchronous re-probe: a
+             * no-ack read cache (a LEVEL_II oplock / read lease) breaks to NONE
+             * inside begin_break, so a FAIL_IMMEDIATELY byte-range lock that broke
+             * the same handle's LEVEL_II oplock must still be granted rather than
+             * parked on a break with nothing left to wait for (smb2.oplock.brl1/
+             * brl3).  A *caching* acquirer does NOT take this shortcut: granting a
+             * W cache while a peer's read-cache break is merely initiated (not yet
+             * acked) would open a stale-read window, so it stays BREAKING and waits
+             * for the ack as before (chimera/vfs/state_test "W-vs-R break").  An
+             * ack-required break also leaves the holder conflicting, so the range
+             * path likewise falls through and waits. */
+            if (lease->kind == CHIMERA_VFS_LEASE_RANGE) {
+                pthread_mutex_lock(&file->lock);
+                result = chimera_vfs_state_would_conflict(file, lease, &conflict);
+                pthread_mutex_unlock(&file->lock);
+                if (result == CHIMERA_VFS_LEASE_GRANTED) {
+                    continue;
+                }
+            }
             /* A live holder is mid-break; the caller waits for its ack. */
             return CHIMERA_VFS_LEASE_BREAKING;
         }
