@@ -331,9 +331,19 @@ s3_server_notify(
 
             s3_request->elapsed = chimera_get_elapsed_ns(&s3_request->end_time, &s3_request->start_time);
 
-            /* Annotate and end the S3 span (numeric attrs only -- request memory
-             * is freed below, before the span is drained). */
+            /* Annotate and end the S3 span.  Strings are copied into the span's
+             * arena here, so they are safe even though the request is freed
+             * below before the span is drained. */
             otel_span_attr_i64(&s3_request->otel, "s3.status", s3_request->status);
+            if (s3_request->bucket_name && s3_request->bucket_namelen > 0) {
+                otel_span_attr_strn(&s3_request->otel, "s3.bucket",
+                                    s3_request->bucket_name,
+                                    s3_request->bucket_namelen);
+            }
+            if (s3_request->path && s3_request->path_len > 0) {
+                otel_span_attr_strn(&s3_request->otel, "s3.key",
+                                    s3_request->path, s3_request->path_len);
+            }
             if (s3_request->file_length > 0) {
                 otel_span_attr_u64(&s3_request->otel, "s3.offset",
                                    (uint64_t) s3_request->file_offset);

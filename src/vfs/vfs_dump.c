@@ -79,6 +79,22 @@ chimera_vfs_trace_complete(struct chimera_vfs_request *request)
             otel_span_attr_u64(s, "vfs.length", request->write.length);
             otel_span_attr_u64(s, "vfs.bytes", request->write.r_length);
             break;
+        case CHIMERA_VFS_OP_LOOKUP_AT:
+            otel_span_attr_strn(s, "vfs.name", request->lookup_at.component,
+                                request->lookup_at.component_len);
+            break;
+        case CHIMERA_VFS_OP_OPEN_AT:
+            otel_span_attr_strn(s, "vfs.name", request->open_at.name,
+                                request->open_at.namelen);
+            break;
+        case CHIMERA_VFS_OP_MKDIR_AT:
+            otel_span_attr_strn(s, "vfs.name", request->mkdir_at.name,
+                                request->mkdir_at.name_len);
+            break;
+        case CHIMERA_VFS_OP_REMOVE_AT:
+            otel_span_attr_strn(s, "vfs.name", request->remove_at.name,
+                                request->remove_at.namelen);
+            break;
         default:
             break;
     } /* switch */
