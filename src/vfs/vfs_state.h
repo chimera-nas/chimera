@@ -246,6 +246,23 @@ chimera_vfs_caching_grant_cap_mode(
     struct chimera_vfs_file_state  *file,
     const struct chimera_vfs_lease *lease);
 
+/* True if `client_key` already holds an SMB2 RqLs handle-caching (H) lease on
+* `file`.  Used by the SMB create path to deny a legacy oplock request (-> NONE)
+* when the same client already holds an H lease, without recalling its own
+* lease.  A lease without H does not preclude a coexisting level-II oplock. */
+bool
+chimera_vfs_client_holds_handle_lease(
+    struct chimera_vfs_file_state *file,
+    uint64_t                       client_key);
+
+/* True if `client_key` holds ANY live SMB2 RqLs caching lease on `file`.  Used
+ * by the SMB create path to cap a same-client legacy oplock request to level-II
+ * so it coexists with the client's R/RW lease without recalling it. */
+bool
+chimera_vfs_client_holds_caching_lease(
+    struct chimera_vfs_file_state *file,
+    uint64_t                       client_key);
+
 enum chimera_vfs_lease_result
 chimera_vfs_caching_grant_acquire(
     struct chimera_vfs_state             *state,
@@ -475,6 +492,19 @@ chimera_vfs_io_recall(
     int                         flush_only,
     void (                     *next )(struct chimera_vfs_request *request));
 
+/* Single-step namespace recall: break each OTHER caching holder on (fh, fh_hash)
+ * exactly once down to `retain` (sparing request->io_handle) and PARK until the
+ * holder's break is ACKed, then invoke next(request).  Used by the SMB delete-
+ * on-close path (smb2.lease.unlink): one RH->R break per peer, reply after ack. */
+void
+chimera_vfs_io_recall_single(
+    struct chimera_vfs_request *request,
+    const uint8_t              *fh,
+    uint8_t                     fh_len,
+    uint64_t                    fh_hash,
+    uint8_t                     retain,
+    void (                     *next )(struct chimera_vfs_request *request));
+
 /* Drop every implicit lease that has been idle (no in-flight I/O) for at
  * least `idle_ms` milliseconds.  Driven by a periodic reaper. */
 void
@@ -539,4 +569,17 @@ chimera_vfs_state_break_caching_for_open(
     uint64_t                              fh_hash,
     const struct chimera_vfs_lease_owner *opener,
     uint8_t                               trigger_bits,
+    uint8_t                               retain_mode);
+
+/* Break-on-namespace-change: an unlink / delete-on-close / rename of an OPEN
+ * file recalls every OTHER holder's HANDLE cache down to retain_mode (R), strips
+ * an RqLs lease's H (a real mutation, unlike a mere conflicting open), and skips
+ * the requesting client's own lease (matched by opener). */
+void
+chimera_vfs_state_break_caching_for_namespace(
+    struct chimera_vfs_state             *state,
+    const uint8_t                        *fh,
+    uint8_t                               fh_len,
+    uint64_t                              fh_hash,
+    const struct chimera_vfs_lease_owner *opener,
     uint8_t                               retain_mode);

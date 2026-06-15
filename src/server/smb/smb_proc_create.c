@@ -751,6 +751,14 @@ chimera_smb_create_gen_open_file(
          * lease so a hard share conflict against a batch-oplock holder parks on the
          * batch break rather than denying (chimera_vfs_share_batch_escape). */
         open_file->share_lease.owner.cb_private = open_file;
+        /* Mark whether this open is backed by an SMB2 RqLs lease.  The lease
+         * H-cap (chimera_vfs_state_would_conflict, CACHING/SHARE path) lets two
+         * RqLs-lease opens share handle caching but caps a new lease's H behind a
+         * non-lease open (a legacy oplock or a plain open, which owns the handle
+         * exclusively).  A lease-backed share reservation is reliably visible even
+         * before the (later-linked) caching grant, so the cap can key off it. */
+        open_file->share_lease.owner.is_lease =
+            (request->create.ctx_present_mask & CHIMERA_SMB_CREATE_CTX_RQLS) ? 1 : 0;
 
         /* If this open also requests a lease, a handle-caching lease already
          * held under the same key is its own (a second open under one lease
@@ -1054,6 +1062,30 @@ chimera_smb_create_after_share(
                 want.granted = req_vfs;
                 want.denied  = 0;
 
+                /* A legacy oplock and an SMB2 RqLs lease held by the SAME client on
+                * the SAME file interact per MS-SMB2 3.3.5.9 (smb2.lease.oplock
+                * loop 1), and a legacy oplock request must NEVER recall the
+                * requesting client's own lease:
+                *   - the client holds an H (handle) lease (RH / RHW): the oplock
+                *     is granted NONE (handle caching already owns the handle);
+                *   - the client holds a non-H lease (R / RW): the oplock is capped
+                *     to level-II (R), which coexists with the lease's read cache.
+                * Either way we step the legacy oplock's requested mode DOWN here so
+                * its try_insert never fires a self-break against the client's lease
+                * (the exclusive/batch W bit would otherwise recall the R lease). */
+                if (!via_rqls && want_fresh_caching) {
+                    if (chimera_vfs_client_holds_handle_lease(
+                            file_state, owner.client_key)) {
+                        want_fresh_caching = false;
+                    } else if (chimera_vfs_client_holds_caching_lease(
+                                   file_state, owner.client_key)) {
+                        /* Cap the oplock to a level-II read cache so it coexists
+                         * with the client's own R/RW lease without breaking it. */
+                        req_vfs     &= CHIMERA_VFS_LEASE_MODE_R;
+                        want.granted = req_vfs;
+                    }
+                }
+
                 /* First coalesce onto an existing same-owner grant: refcount + a
                  * conflict-free in-place upgrade, never a downgrade.  This is what a
                  * lease re-open does -- including one requesting fewer/no bits, which
@@ -1214,6 +1246,18 @@ chimera_smb_create_after_share(
                                         parent_fh, parent_fh_len,
                                         name, name_len,
                                         &request->session_handle->session->cred);
+
+        /* An open created with FILE_DELETE_ON_CLOSE is a pending namespace
+         * mutation: recall every OTHER holder's HANDLE cache (RqLs RH -> R) so a
+         * peer that cached the open handle re-validates against the impending
+         * removal (smb2.lease.unlink: open + delete-on-close + close).  The
+         * operating open's own lease is spared.  (The deferred removal itself runs
+         * at last-close through chimera_vfs_remove_at, whose io_recall parks until
+         * the break drains; firing the recall here makes the break visible as soon
+         * as the delete intent is registered.) */
+        if (type == CHIMERA_SMB_OPEN_FILE_TYPE_FILE) {
+            chimera_smb_break_caching_for_namespace(request, open_file);
+        }
     }
 
     /* Durable / persistent handle grant.  MS-SMB2 3.3.5.9: a durable handle is
