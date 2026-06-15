@@ -338,10 +338,17 @@ chimera_smb_durable_park(
     pthread_mutex_lock(&shared->durable.lock);
     HASH_FIND(hh, shared->durable.by_pid, &pid, sizeof(pid), entry);
     if (entry) {
+        /* A resilient open is held for its resiliency timeout; a durable open
+         * for its durable timeout.  When an open is both, keep it for the
+         * longer of the two. */
+        uint64_t timeout_ms = open_file->durable_timeout_ms;
+        if (open_file->resilient && open_file->resilient_timeout_ms > timeout_ms) {
+            timeout_ms = open_file->resilient_timeout_ms;
+        }
         entry->parked            = true;
         entry->deadline          = now;
-        entry->deadline.tv_sec  += open_file->durable_timeout_ms / 1000;
-        entry->deadline.tv_nsec += (open_file->durable_timeout_ms % 1000) * 1000000L;
+        entry->deadline.tv_sec  += timeout_ms / 1000;
+        entry->deadline.tv_nsec += (timeout_ms % 1000) * 1000000L;
         if (entry->deadline.tv_nsec >= 1000000000L) {
             entry->deadline.tv_sec  += 1;
             entry->deadline.tv_nsec -= 1000000000L;

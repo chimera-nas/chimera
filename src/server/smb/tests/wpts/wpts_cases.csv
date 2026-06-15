@@ -65,10 +65,10 @@ BVT_PersistentHandles,base,skip,0,env
 BVT_Replay_ReplayCreate,multichannel,xfail,0,
 BVT_Replay_WriteWithInvalidChannelSequence,multichannel,xfail,0,
 BVT_Resiliency,base,skip,0,env
-BVT_ResilientHandle_LockSequence,persistent,xfail,0,
+BVT_ResilientHandle_LockSequence,persistent,green,0,
 BVT_ResilientHandle_LockSequence_Lease,persistent,xfail,0,
-BVT_ResilientHandle_Reconnect,persistent,xfail,0,
-BVT_ResilientHandle_Reconnect_Lease,persistent,xfail,0,
+BVT_ResilientHandle_Reconnect,persistent,green,0,
+BVT_ResilientHandle_Reconnect_Lease,persistent,green,0,
 BVT_SMB2Basic_CancelRegisteredChangeNotify,base,green,1,
 BVT_SMB2Basic_ChangeNotify_ChangeAttributes,base,green,1,
 BVT_SMB2Basic_ChangeNotify_ChangeCreation,base,green,1,
