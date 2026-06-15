@@ -8,6 +8,7 @@
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 #include "nfs3_dump.h"
+#include "nfs3_trace.h"
 
 static void
 chimera_nfs3_readlink_complete(
@@ -105,6 +106,7 @@ chimera_nfs3_readlink(
     chimera_nfs_map_cred_req(req, cred);
 
     nfs3_dump_readlink(req, args);
+    nfs3_trace_readlink(req, args);
     res = &req->res_readlink;
 
     res->resok.data.len = 4096;

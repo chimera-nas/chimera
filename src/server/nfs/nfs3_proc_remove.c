@@ -9,6 +9,7 @@
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 #include "nfs3_dump.h"
+#include "nfs3_trace.h"
 
 /* True when a cross-protocol caching holder (NFSv4 delegation, SMB lease, or
  * SMB oplock) could exist on the shared store.  An NFSv3 REMOVE/RMDIR of an
@@ -162,6 +163,7 @@ chimera_nfs3_remove(
     chimera_nfs_map_cred_req(req, cred);
 
     nfs3_dump_remove(req, args);
+    nfs3_trace_remove(req, args);
 
     req->args_remove = args;
 

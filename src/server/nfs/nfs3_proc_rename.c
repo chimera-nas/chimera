@@ -8,6 +8,7 @@
 #include "server/server.h"
 #include "vfs/vfs_procs.h"
 #include "nfs3_dump.h"
+#include "nfs3_trace.h"
 
 /* See chimera_nfs3_remove.c: when a caching protocol is enabled, an NFSv3
  * RENAME that overwrites an existing destination must recall any delegation/
@@ -19,6 +20,7 @@ chimera_nfs3_recall_needed(struct chimera_server_nfs_thread *thread)
            chimera_server_config_get_smb_leases(thread->shared->config) ||
            chimera_server_config_get_smb_oplocks(thread->shared->config);
 } /* chimera_nfs3_recall_needed */
+
 
 static void
 chimera_nfs3_rename_complete(
@@ -132,6 +134,7 @@ chimera_nfs3_rename(
     chimera_nfs_map_cred_req(req, cred);
 
     nfs3_dump_rename(req, args);
+    nfs3_trace_rename(req, args);
 
     /* Decode both directory handles: the source sets the request export (and
      * squash); the destination is authenticated into req->saved_fh.  Both must

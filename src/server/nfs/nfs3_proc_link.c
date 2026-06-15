@@ -7,6 +7,7 @@
 #include "nfs_common/nfs3_attr.h"
 #include "vfs/vfs_procs.h"
 #include "nfs3_dump.h"
+#include "nfs3_trace.h"
 static void
 chimera_nfs3_link_complete(
     enum chimera_vfs_error    error_code,
@@ -59,6 +60,7 @@ chimera_nfs3_link(
     chimera_nfs_map_cred_req(req, cred);
 
     nfs3_dump_link(req, args);
+    nfs3_trace_link(req, args);
 
     /* Decode the existing-file handle (sets the request export + squash) and
      * the target-directory handle (authenticated into req->saved_fh).  The
