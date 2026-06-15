@@ -845,10 +845,20 @@ chimera_vfs_destroy(struct chimera_vfs *vfs)
         vfs->identity = NULL;
     }
 
-    /* Destroy delegation threads before the close thread so that any
-     * in-flight delegated close operations finish and their completion
-     * doorbell rings execute before the close thread's vfs_thread
-     * (and its doorbell) is freed. */
+    /* Stop the close thread before the delegation threads.  The shutdown-drain
+     * handshake above (signaled only when num_pending == 0) already guarantees
+     * every close the close thread dispatched to a delegation thread has
+     * completed and rung back, so no in-flight delegated close remains.  But the
+     * close thread's event loop is still running after that handshake -- its
+     * periodic timer sweep and idle-lease reaper can issue *new* closes, which
+     * for a CHIMERA_VFS_CAP_BLOCKING backend (cairn, diskfs) route through a
+     * delegation thread and ring its doorbell.  If the delegation threads (and
+     * their doorbells) were torn down first, such a late close would ring a
+     * closed doorbell fd -> EBADF fatal abort (a use-after-close of the
+     * doorbell's eventfd).  Quiescing the close thread first closes that window;
+     * its own doorbell/timer-driven completions need no delegation thread. */
+    evpl_thread_destroy(vfs->close_thread.evpl_thread);
+
     for (i = 0; i < vfs->num_sync_delegation_threads; i++) {
         evpl_thread_destroy(vfs->sync_delegation_threads[i].evpl_thread);
     }
@@ -858,8 +868,6 @@ chimera_vfs_destroy(struct chimera_vfs *vfs)
         evpl_thread_destroy(vfs->async_delegation_threads[i].evpl_thread);
     }
     free(vfs->async_delegation_threads);
-
-    evpl_thread_destroy(vfs->close_thread.evpl_thread);
 
     chimera_vfs_mount_table_destroy(vfs->mount_table);
 
