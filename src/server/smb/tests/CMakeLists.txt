@@ -1324,6 +1324,9 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.lease.complex1
     smb2.lease.duplicate_create
     smb2.lease.duplicate_open
+    smb2.lease.initial_delete_disconnect
+    smb2.lease.initial_delete_logoff
+    smb2.lease.initial_delete_tdis
     smb2.lease.multibreak
     smb2.lease.nobreakself
     smb2.lease.oplock
@@ -3192,6 +3195,9 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.lease.complex1
     smb2.lease.duplicate_create
     smb2.lease.duplicate_open
+    smb2.lease.initial_delete_disconnect
+    smb2.lease.initial_delete_logoff
+    smb2.lease.initial_delete_tdis
     smb2.lease.multibreak
     smb2.lease.nobreakself
     smb2.lease.oplock
