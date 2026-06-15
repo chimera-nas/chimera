@@ -368,7 +368,22 @@ fi
 # Suppress the .NET first-run experience (telemetry notice + dev-cert
 # generation): it pollutes output and writes to HOME, which may be unset or
 # read-only under ctest/CI.
-ip netns exec "${NETNS_NAME}" env \
+#
+# Run under `setsid` so this vstest gets its own POSIX session id. The .NET
+# runtime backs named mutexes with shared-memory files under a hardcoded
+# /tmp/.dotnet/shm/session<SID>/ directory (the path is NOT relocatable via
+# TMPDIR/HOME -- see dotnet/runtime#49822), scoped by the *session* id. Under
+# `ctest -j N` every wrapper invocation is a child of the same ctest session,
+# so concurrent cold-start vstests collide on the one shared
+# session<SID>/NuGet-Migrations mutex; the loser of the first-run NuGet
+# migration race aborts in ~2s with
+#   System.IO.IOException: ... : 'NuGet-Migrations'
+# before any test body runs, and passes on --rerun-failed. Giving each vstest
+# its own session id (SID == its own pid) gives it a private shm directory, so
+# the mutex can no longer be shared or raced. `setsid -w` keeps us blocking on
+# the child and propagates its exit code.
+setsid -w \
+    ip netns exec "${NETNS_NAME}" env \
     DOTNET_CLI_TELEMETRY_OPTOUT=1 \
     DOTNET_NOLOGO=1 \
     DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1 \
