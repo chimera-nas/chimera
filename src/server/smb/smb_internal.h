@@ -1974,6 +1974,14 @@ chimera_smb_conn_free(
         if (!s) {
             continue;
         }
+
+        /* Walk the session's trees under session->lock, matching
+         * chimera_smb_session_park_durables / _flush_notifies: a concurrent
+         * chimera_smb_tree_disconnect on another channel clears s->trees[i] and
+         * frees the tree under session->lock, so reading the slot and taking
+         * tree->open_files_lock without it can touch a freed/recycled tree.  The
+         * lock order session->lock -> open_files_lock matches those iterators. */
+        pthread_mutex_lock(&s->lock);
         for (i = 0; i < s->max_trees; i++) {
             struct chimera_smb_tree      *t = s->trees[i];
             struct chimera_smb_open_file *of;
@@ -1994,6 +2002,7 @@ chimera_smb_conn_free(
                 pthread_mutex_unlock(&t->open_files_lock[b]);
             }
         }
+        pthread_mutex_unlock(&s->lock);
     }
 
     HASH_ITER(hh, conn->session_handles, session_handle, tmp)
