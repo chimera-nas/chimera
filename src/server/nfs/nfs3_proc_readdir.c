@@ -9,6 +9,7 @@
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 #include "nfs3_dump.h"
+#include "nfs3_trace.h"
 
 static int
 chimera_nfs3_readdir_callback(
@@ -153,6 +154,7 @@ chimera_nfs3_readdir(
     chimera_nfs_map_cred_req(req, cred);
 
     nfs3_dump_readdir(req, args);
+    nfs3_trace_readdir(req, args);
 
     req->args_readdir = args;
 

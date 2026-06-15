@@ -8,6 +8,7 @@
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 #include "nfs3_dump.h"
+#include "nfs3_trace.h"
 
 static void
 chimera_nfs3_getattr_complete(
@@ -85,6 +86,7 @@ chimera_nfs3_getattr(
     chimera_nfs_map_cred_req(req, cred);
 
     nfs3_dump_getattr(req, args);
+    nfs3_trace_getattr(req, args);
 
     req->args_getattr = args;
 
