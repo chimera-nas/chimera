@@ -2148,6 +2148,14 @@ chimera_smb_server_notify(
             chimera_smb_info("Disconnected %s SMB connection from %s to %s, handled %lu requests",
                              conn->protocol == EVPL_DATAGRAM_RDMACM_RC ? "RDMA" : "TCP",
                              conn->remote_addr, conn->local_addr, conn->requests_completed);
+            /* Flag the connection disconnecting up front, before the (possibly
+             * delayed) teardown that parks its durable handles.  A conflicting
+             * CREATE racing in on another connection consults this through the
+             * durable registry: a still-live durable holder whose owning conn is
+             * flagged disconnecting is about to yield, so the CREATE retries
+             * briefly instead of returning SHARING_VIOLATION against a reservation
+             * that has not been parked yet (durable-open.open2-lease). */
+            conn->disconnecting = 1;
             /* Test hook: delay disconnect processing to deterministically widen
              * the window between a client's TCP close and the server-side
              * teardown that parks its durable handles.  A request racing into

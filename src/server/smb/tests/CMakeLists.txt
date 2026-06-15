@@ -4206,7 +4206,13 @@ if(CHIMERA_NETNS_TESTING AND SMBTORTURE_EXECUTABLE)
     #     MS-SMB2 3.3.7.1, yielded-reclaim, parked-CREATE re-arbitration).
     #   - .reopen2b: the same client's durable reconnect racing the teardown
     #     parking (eager park-on-disconnect; otherwise OBJECT_NAME_NOT_FOUND).
+    #   - .open2-lease: a conflicting open vs a disconnected RH-lease durable
+    #     holder whose share reservation has not parked/yielded yet -- a pure
+    #     SHARE conflict (no breakable handle-cache to park on) that retries
+    #     until the disconnect yields it (otherwise SHARING_VIOLATION).
+    #     open2-oplock exercises the same window through the batch-break path.
     foreach(_sub smb2.durable-open.lease smb2.durable-open.oplock
+                 smb2.durable-open.open2-lease smb2.durable-open.open2-oplock
                  smb2.durable-v2-open.reopen2b)
         string(REGEX REPLACE "[^A-Za-z0-9]" "_" _sid "${_sub}")
         set(_name chimera/server/smb/smbtorture_${_sid}_disconnect_race_memfs)
