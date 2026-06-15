@@ -562,7 +562,16 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
     * SMB2 message is contiguous in reply_iov[0] after the transport header. */
     if (compound->num_requests > 0 &&
         (compound->requests[0]->smb2_hdr.command == SMB2_NEGOTIATE ||
-         compound->requests[0]->smb2_hdr.command == SMB2_SESSION_SETUP)) {
+         compound->requests[0]->smb2_hdr.command == SMB2_SESSION_SETUP) &&
+        /* The SMB1 multi-protocol NEGOTIATE is answered with an SMB2 NEGOTIATE
+         * response carrying the 0x02ff wildcard ("send a real SMB2 NEGOTIATE
+         * next").  That is not a dialect selection and the client does NOT fold
+         * it into Connection.PreauthIntegrityHashValue (MS-SMB2 3.3.5.3.1) — the
+         * preauth hash starts from the subsequent real SMB2 NEGOTIATE.  Folding
+         * it here would diverge from the client and corrupt the 3.1.1 signing
+         * key (every signed request after SESSION_SETUP then fails). */
+        !(compound->requests[0]->smb2_hdr.command == SMB2_NEGOTIATE &&
+          compound->requests[0]->negotiate.r_dialect == 0x02ff)) {
 
         /* Track whether a multi-leg SESSION_SETUP exchange is in flight: the
          * next SESSION_SETUP that arrives with this clear starts a NEW

@@ -7,7 +7,14 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+/* Per-component filename limit (MS-FSA ComponentMaxLength, 255 chars). */
 #define SMB_FILENAME_MAX                              255
+
+/* Full-pathname buffer limit. An SMB2 CREATE/rename name is the whole path
+ * relative to the share root (which may span many components), so it must not
+ * be bounded by the per-component limit. Matches the VFS path ceiling
+ * (CHIMERA_VFS_PATH_MAX / Linux PATH_MAX). */
+#define SMB_PATH_MAX                                  4096
 
 
 #define SMB2_DIALECT_2_0_2                            0x0202

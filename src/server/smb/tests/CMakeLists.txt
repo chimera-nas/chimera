@@ -196,6 +196,47 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
             ENVIRONMENT "WPTS_BIN_DIR=${WPTS_BIN_DIR};DOTNET=${WPTS_DOTNET}${_wpts_envfrag_${_cfg}};WPTS_JUNIT_FILE=${WPTS_JUNIT_DIR}/memfs${_wpts_suf_${_cfg}}.xml;WPTS_JUNIT_CONVERTER=${CMAKE_SOURCE_DIR}/scripts/trx_to_junit.py")
     endforeach()
 
+    # SMB3 directory-leasing cases.  The wrapper runs the daemon with
+    # smb_directory_leases enabled (CHIMERA_SMB_DIRLEASE=1, which also advertises
+    # IsDirectoryLeasingSupported in the ptfconfig so the cases become
+    # applicable).  Allowlist = every DirectoryLeasing case confirmed green: lease
+    # grant (R/RH/RW->R/RWH->RH), the content-change R-break (child add/modify/
+    # delete/rename), the conflict-open H-break, pre-3.0 refusal, and lease-break
+    # lease-break-ack lease-state validation.  Left out:
+    # LeaseBreakOnMultiClients (needs multi-holder H-break fan-out across
+    # sequential break/ack); BreakHandleCachingByParentRenamed (needs dir-rename
+    # denial while a descendant handle is open); Negative_InvalidLeaseKey /
+    # Negative_InvalidClientGuid (need a per-client lease table to validate the
+    # ack key without a tree-scoped open — the per-tree open lookup also matches
+    # a settled FILE lease, so rejecting an unknown key there regresses
+    # smb2.lease.v2_complex2) — all deeper follow-ups; and
+    # AppInstanceId_DirectoryLeasing_NoLeaseInReOpen (NotExecuted — needs
+    # app-instance-id directory support).
+    set(WPTS_SMB2_DIRLEASE_ALLOWLIST
+        BVT_DirectoryLeasing_ReadWriteHandleCaching
+        DirectoryLeasing_BreakHandleCachingByConflictOpen
+        DirectoryLeasing_BreakReadCachingByChildAdded
+        DirectoryLeasing_BreakReadCachingByChildDeleted
+        DirectoryLeasing_BreakReadCachingByChildModified
+        DirectoryLeasing_BreakReadCachingByChildRenamed
+        DirectoryLeasing_Negative_InvalidLeaseStateInLeaseBreakAck
+        DirectoryLeasing_Negative_SMB2002
+        DirectoryLeasing_Negative_SMB21
+        DirectoryLeasing_ReadCaching
+        DirectoryLeasing_ReadHandleCaching
+        DirectoryLeasing_ReadWriteCaching
+        DirectoryLeasing_RWGrantedAsR
+        DirectoryLeasing_RWHGrantedAsRH)
+
+    string(REPLACE ";" "," _wpts_tests "${WPTS_SMB2_DIRLEASE_ALLOWLIST}")
+    add_test(NAME chimera/server/smb/wpts/memfs_dirlease
+        COMMAND ${CMAKE_SOURCE_DIR}/scripts/wpts_smb_test_wrapper.sh
+                ${CHIMERA_DAEMON} memfs "${_wpts_tests}")
+    set_tests_properties(chimera/server/smb/wpts/memfs_dirlease PROPERTIES
+        LABELS "smb;wpts;dirlease"
+        TIMEOUT 900
+        ENVIRONMENT "WPTS_BIN_DIR=${WPTS_BIN_DIR};DOTNET=${WPTS_DOTNET};CHIMERA_SMB_DIRLEASE=1")
+
     message(STATUS "WPTS MS-SMB2 tests: enabled (${WPTS_BIN_DIR}, ${WPTS_DOTNET})")
 elseif(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND NOT WPTS_ARCH_SUPPORTED)
     message(STATUS "WPTS MS-SMB2 tests: disabled "

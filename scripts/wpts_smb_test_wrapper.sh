@@ -165,6 +165,14 @@ generate_config() {
         encryption_line='"smb_encryption": "enabled",'
     fi
 
+    # Enable SMB3 directory leases when requested (the DirectoryLeasing WPTS
+    # cases need the feature on; default off keeps the rest of the suite on the
+    # baseline path where directory opens take no lease).
+    local dirlease_line=""
+    if [ "${CHIMERA_SMB_DIRLEASE:-0}" = "1" ]; then
+        dirlease_line='"smb_directory_leases": true,'
+    fi
+
     cat > "$CONFIG_FILE" << EOF
 {
     "server": {
@@ -172,6 +180,7 @@ generate_config() {
         ${compression_line}
         ${multichannel_line}
         ${encryption_line}
+        ${dirlease_line}
         "smb_named_streams": true,
         "smb_leases": true,
         "smb_oplocks": true,
@@ -344,6 +353,16 @@ if [ "${CHIMERA_SMB_ENCRYPTION:-0}" = "1" ]; then
         -e 's#<Property name="IsEncryptionSupported" value="false"/>#<Property name="IsEncryptionSupported" value="true"/>#' \
         -e 's#<Property name="IsGlobalEncryptDataEnabled" value="false"/>#<Property name="IsGlobalEncryptDataEnabled" value="true"/>#' \
         -e 's#<Property name="EncryptedFileShare" value=""/>#<Property name="EncryptedFileShare" value="SMBEncrypted"/>#' \
+        "$staged"
+fi
+
+# When directory leases are enabled, advertise the capability to the driver so
+# the DirectoryLeasing cases become applicable (otherwise they are
+# Inconclusive/skipped).
+if [ "${CHIMERA_SMB_DIRLEASE:-0}" = "1" ]; then
+    staged="${WPTS_STAGE_DIR}/CommonTestSuite.deployment.ptfconfig"
+    sed -i \
+        -e 's#<Property name="IsDirectoryLeasingSupported" value="false"/>#<Property name="IsDirectoryLeasingSupported" value="true"/>#' \
         "$staged"
 fi
 

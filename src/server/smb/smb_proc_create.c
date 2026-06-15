@@ -847,8 +847,13 @@ chimera_smb_create_after_share(
      * R/H only (W is masked off below) and is broken on a directory content
      * change (chimera_vfs_state_dir_lease_break via the notify chokepoint). */
     int                               is_directory = (open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_DIRECTORY) != 0;
+    /* Directory leasing is an SMB 3.0+ feature (MS-SMB2 3.3.5.9.11): the lease-v2
+     * context that carries it is only valid on a 3.x dialect. A v2 RqLs sent over
+     * SMB 2.0.2 / 2.1 must be ignored so the open returns OPLOCK_LEVEL_NONE
+     * (dirlease.Negative_SMB2002 / _SMB21). */
     int                               dir_lease_ok = is_directory && oh &&
         thread->shared->config.directory_leases &&
+        request->compound->conn->dialect >= SMB2_DIALECT_3_0 &&
         (request->create.ctx_present_mask & CHIMERA_SMB_CREATE_CTX_RQLS) &&
         request->create.rqls.is_v2;
 
@@ -4531,7 +4536,7 @@ chimera_smb_parse_create(
 {
     uint16_t name_offset;
     uint32_t blob_offset, blob_length;
-    uint16_t name16[SMB_FILENAME_MAX];
+    uint16_t name16[SMB_PATH_MAX];
     int      name_size;
     char    *slash;
 
@@ -4583,7 +4588,10 @@ chimera_smb_parse_create(
      * the durable-reconnect short-circuit (a reconnect carries a don't-care
      * sentinel and must not be validated). */
 
-    if (request->create.name_len >= SMB_FILENAME_MAX) {
+    /* NameLength is the whole path (relative to the share root), so it is
+     * bounded by the full-path limit, not the per-component one. name16 holds
+     * SMB_PATH_MAX UTF-16 code units (2*SMB_PATH_MAX bytes). */
+    if (request->create.name_len > 2 * SMB_PATH_MAX) {
         chimera_smb_error("Create request: UTF-16 name too long (%u bytes)",
                           request->create.name_len);
         request->status = SMB2_STATUS_NAME_TOO_LONG;

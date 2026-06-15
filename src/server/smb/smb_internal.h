@@ -537,7 +537,7 @@ struct chimera_smb_request {
             struct chimera_vfs_handle_state    persist_hs;
             uint8_t                            persist_key[CHIMERA_SMB_DURABLE_KEY_LEN];
             uint8_t                            persist_value[CHIMERA_SMB_DURABLE_VALUE_MAX];
-            char                               parent_path[SMB_FILENAME_MAX];
+            char                               parent_path[SMB_PATH_MAX];
             char                              *name;
             /* Named-stream (ADS) suffix parsed off the final path component.
              * has_stream is set when the create targets "file:stream[:$DATA]";
