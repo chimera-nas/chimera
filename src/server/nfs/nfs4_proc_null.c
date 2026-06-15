@@ -1,9 +1,10 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "nfs4_procs.h"
 #include "nfs4_dump.h"
+#include "nfs4_trace.h"
 void
 chimera_nfs4_null(
     struct evpl               *evpl,

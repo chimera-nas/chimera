@@ -8,6 +8,7 @@
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 #include "nfs3_dump.h"
+#include "nfs3_trace.h"
 
 static void
 chimera_nfs3_remove_complete(
@@ -92,6 +93,7 @@ chimera_nfs3_remove(
     chimera_nfs_map_cred(&req->cred, cred);
 
     nfs3_dump_remove(req, args);
+    nfs3_trace_remove(req, args);
 
     req->args_remove = args;
 

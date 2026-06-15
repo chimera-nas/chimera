@@ -25,6 +25,7 @@
 #include "smb_procs.h"
 #include "smb_notify.h"
 #include "smb_dump.h"
+#include "smb_trace.h"
 #include "smb_signing.h"
 #include "smb_encrypt.h"
 #include "smb_compress.h"
@@ -1686,6 +1687,7 @@ chimera_smb_server_handle_smb2(
     }
 
     smb_dump_compound_request(compound);
+    smb_trace_compound_request(compound);
 
     /* SMB 3.1.1 preauth integrity: fold the raw NEGOTIATE / SESSION_SETUP
      * request into the running hash before dispatch, so the SESSION_SETUP
@@ -1894,6 +1896,7 @@ chimera_smb_server_handle_smb1(
     compound->requests[compound->num_requests++] = request;
 
     smb_dump_compound_request(compound);
+    smb_trace_compound_request(compound);
 
     /* Balance the decrement in chimera_smb_compound_reply (see the SMB2 path). */
     pthread_mutex_lock(&thread->lease_break_lock);

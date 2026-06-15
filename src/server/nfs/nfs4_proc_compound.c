@@ -10,6 +10,7 @@
 #include "evpl/evpl_rpc2_program.h"
 #include "evpl/evpl_bind.h"
 #include "nfs4_dump.h"
+#include "nfs4_trace.h"
 #include "nfs4_op_matrix.h"
 #include "nfs_drc_reply.h"
 
@@ -394,8 +395,6 @@ chimera_nfs4_compound(
 
     req = nfs_request_alloc(thread, conn, encoding);
 
-    otel_span_set_name(&req->otel, "nfs4.COMPOUND");
-
     chimera_nfs_map_cred(&req->cred, cred);
 
     /* Capture the RPC principal for EXCHANGE_ID record-matching. */
@@ -415,6 +414,7 @@ chimera_nfs4_compound(
     }
 
     nfs4_dump_compound(req, args);
+    nfs4_trace_compound(req, args);
 
     /* The conn caches its bound nfs4_session in private_data.  The conn
      * holds a refcount on it (set up by nfs4_session_bind_conn) so the

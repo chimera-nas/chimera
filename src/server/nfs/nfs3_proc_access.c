@@ -10,6 +10,7 @@
 #include "vfs/vfs_acl.h"
 #include "vfs/vfs_access.h"
 #include "nfs3_dump.h"
+#include "nfs3_trace.h"
 
 /* Map the meaningful ACCESS3_* request bits to the canonical ACE mask. */
 static uint32_t
@@ -142,6 +143,7 @@ chimera_nfs3_access(
     chimera_nfs_map_cred(&req->cred, cred);
 
     nfs3_dump_access(req, args);
+    nfs3_trace_access(req, args);
 
     req->args_access = args;
 

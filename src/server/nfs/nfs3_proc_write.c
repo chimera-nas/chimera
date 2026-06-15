@@ -10,6 +10,7 @@
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 #include "nfs3_dump.h"
+#include "nfs3_trace.h"
 
 static void
 chimera_nfs3_write_complete(
@@ -121,6 +122,7 @@ chimera_nfs3_write(
     chimera_nfs_map_cred(&req->cred, cred);
 
     nfs3_dump_write(req, args);
+    nfs3_trace_write(req, args);
 
     req->args_write = args;
 

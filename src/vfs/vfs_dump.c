@@ -63,9 +63,12 @@ chimera_vfs_trace_complete(struct chimera_vfs_request *request)
 #if CHIMERA_HAVE_OTEL
     struct otel_span *s = &request->otel;
 
-    s->name = chimera_vfs_op_name(request->opcode);
+    char              fhhex[2 * CHIMERA_VFS_FH_SIZE + 1];
 
-    otel_span_attr_u64(s, "vfs.fh_hash", request->fh_hash);
+    otel_span_set_name(s, chimera_vfs_op_name(request->opcode));
+
+    format_hex(fhhex, sizeof(fhhex), request->fh, request->fh_len);
+    otel_span_attr_str(s, "vfs.fh", fhhex);
     otel_span_attr_i64(s, "vfs.status", request->status);
 
     switch (request->opcode) {
