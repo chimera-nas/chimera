@@ -60,6 +60,15 @@ struct chimera_smb_notify_request {
      * session is being closed by a PreviousSessionId reconnect, where the
      * cleanup must be marshaled to the request's owning thread. */
     int                                cleanup;
+    /* Set when this parked notify was counted against conn->async_outstanding
+     * (MS-SMB2 3.3.5.2.9 outstanding-async cap).  Guards the decrement in
+     * chimera_smb_notify_unlink so the slot is freed exactly once however the
+     * request un-parks (event delivery, NOTIFY_CLEANUP, CANCEL, teardown). */
+    int                                async_counted;
+    /* Set once the interim STATUS_PENDING has debited this request's
+     * CreditCharge via chimera_smb_grant_credits, so the eventual final
+     * response passes consume=0 and the charge is not counted twice. */
+    int                                credits_charged;
     struct chimera_smb_notify_request *next;          /* parked list linkage */
     struct chimera_smb_notify_request *prev;          /* parked list linkage */
     struct chimera_smb_notify_request *ready_next;    /* doorbell ready queue */
