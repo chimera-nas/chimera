@@ -209,9 +209,9 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
     # Negative_InvalidClientGuid (need a per-client lease table to validate the
     # ack key without a tree-scoped open — the per-tree open lookup also matches
     # a settled FILE lease, so rejecting an unknown key there regresses
-    # smb2.lease.v2_complex2) — all deeper follow-ups; and
-    # AppInstanceId_DirectoryLeasing_NoLeaseInReOpen (NotExecuted — needs
-    # app-instance-id directory support).
+    # smb2.lease.v2_complex2) — all deeper follow-ups.
+    # (AppInstanceId_DirectoryLeasing_NoLeaseInReOpen needs persistent handles +
+    # multichannel advertised too, so it lives in the combined group below.)
     set(WPTS_SMB2_DIRLEASE_ALLOWLIST
         BVT_DirectoryLeasing_ReadWriteHandleCaching
         DirectoryLeasing_BreakHandleCachingByConflictOpen
@@ -236,6 +236,24 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
         LABELS "smb;wpts;dirlease"
         TIMEOUT 900
         ENVIRONMENT "WPTS_BIN_DIR=${WPTS_BIN_DIR};DOTNET=${WPTS_DOTNET};CHIMERA_SMB_DIRLEASE=1")
+
+    # AppInstanceId_DirectoryLeasing_NoLeaseInReOpen exercises a client failover:
+    # a new client reopens with the same AppInstanceId (forcing the prior open
+    # closed) and must observe NO carried-over directory lease.  The case asserts
+    # GLOBAL_CAP_PERSISTENT_HANDLES and needs a second client NIC for the
+    # failover, so it only becomes applicable with directory leases AND persistent
+    # handles AND multichannel all advertised — hence its own combined group.
+    set(WPTS_SMB2_DIRLEASE_APPINSTANCE_ALLOWLIST
+        AppInstanceId_DirectoryLeasing_NoLeaseInReOpen)
+
+    string(REPLACE ";" "," _wpts_tests "${WPTS_SMB2_DIRLEASE_APPINSTANCE_ALLOWLIST}")
+    add_test(NAME chimera/server/smb/wpts/memfs_dirlease_appinstance
+        COMMAND ${CMAKE_SOURCE_DIR}/scripts/wpts_smb_test_wrapper.sh
+                ${CHIMERA_DAEMON} memfs "${_wpts_tests}")
+    set_tests_properties(chimera/server/smb/wpts/memfs_dirlease_appinstance PROPERTIES
+        LABELS "smb;wpts;dirlease;persistent;multichannel"
+        TIMEOUT 900
+        ENVIRONMENT "WPTS_BIN_DIR=${WPTS_BIN_DIR};DOTNET=${WPTS_DOTNET};CHIMERA_SMB_DIRLEASE=1;CHIMERA_SMB_PERSISTENT=1;CHIMERA_SMB_MULTICHANNEL=1")
 
     message(STATUS "WPTS MS-SMB2 tests: enabled (${WPTS_BIN_DIR}, ${WPTS_DOTNET})")
 elseif(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND NOT WPTS_ARCH_SUPPORTED)
