@@ -527,15 +527,30 @@ chimera_vfs_share_batch_escape(
         }
 
         /* Match the breakable handle-caching lease to the conflicting share
-        * holder.  A legacy file oplock shares its owning open with the share
-        * reservation (cb_private set identically).  A directory lease's grant
-        * is keyed by lease key (cb_private = grant, not the open), so match it
-        * to the share holder by client instead: a conflicting open of a leased
-        * directory breaks the dir lease's HANDLE (RH->R); the holder may close
-        * to free the share conflict, else it stands (SHARING_VIOLATION). */
+         * holder.  Three cases, none of which compare cb_private directly: a
+         * legacy oplock's caching-lease cb_private is its grant (smb create
+         * grant->lease.owner.cb_private = grant) while the share reservation's
+         * cb_private is the open_file, so they never match -- but for a legacy
+         * (non-dir) file oplock the open IS the owner, so the caching lease's
+         * (client_key, owner_lo, owner_hi) == the share holder's open file id
+         * (file_id.pid/vid set identically on both). A directory lease's grant
+         * is keyed by lease key, so match it to the share holder by client
+         * instead: a conflicting open of a leased directory breaks the dir
+         * lease's HANDLE (RH->R); the holder may close to free the share
+         * conflict, else it stands (SHARING_VIOLATION). Guard the legacy-oplock
+         * arm with is_oplock so RqLs file leases and dir-lease semantics are
+         * untouched. */
+        bool legacy_oplock_match =
+            cur->grant && cur->grant->is_oplock && !cur->grant->is_dir &&
+            cur->owner.client_key == share_holder->owner.client_key &&
+            cur->owner.owner_lo == share_holder->owner.owner_lo &&
+            cur->owner.owner_hi == share_holder->owner.owner_hi;
+        bool dir_lease_match =
+            cur->grant && cur->grant->is_dir &&
+            cur->owner.client_key == share_holder->owner.client_key;
+
         if (cur->owner.cb_private != share_holder->owner.cb_private &&
-            !(cur->grant && cur->grant->is_dir &&
-              cur->owner.client_key == share_holder->owner.client_key)) {
+            !legacy_oplock_match && !dir_lease_match) {
             continue;
         }
 

@@ -1458,6 +1458,7 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.oplock.batch15
     smb2.oplock.batch16
     smb2.oplock.batch2
+    smb2.oplock.batch3
     smb2.oplock.batch21
     smb2.oplock.batch23
     smb2.oplock.batch24
@@ -1465,6 +1466,7 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.oplock.batch4
     smb2.oplock.batch5
     smb2.oplock.batch6
+    smb2.oplock.batch7
     smb2.oplock.batch8
     smb2.oplock.brl2
     smb2.oplock.exclusive1
@@ -3324,6 +3326,7 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.oplock.batch15
     smb2.oplock.batch16
     smb2.oplock.batch2
+    smb2.oplock.batch3
     smb2.oplock.batch21
     smb2.oplock.batch23
     smb2.oplock.batch24
@@ -3331,6 +3334,7 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.oplock.batch4
     smb2.oplock.batch5
     smb2.oplock.batch6
+    smb2.oplock.batch7
     smb2.oplock.batch8
     smb2.oplock.brl2
     smb2.oplock.exclusive1
