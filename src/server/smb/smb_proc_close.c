@@ -169,6 +169,140 @@ chimera_smb_close_doc_open_parent_callback(
         request);
 } /* chimera_smb_close_doc_open_parent_callback */
 
+/*
+ * Request-less delete-on-close unlink for the abrupt-teardown path
+ * (connection disconnect / session logoff / tree disconnect).
+ *
+ * The clean-CLOSE DOC path above threads parent_handle, doc_info and the
+ * VFS-module close state through the live chimera_smb_request.  Teardown frees
+ * open files with no request in hand, so this self-contained context carries a
+ * heap-owned copy of the doc_info returned by chimera_vfs_release_doc and runs
+ * the same open-parent -> remove_at -> close-backend sequence as a
+ * fire-and-forget operation on the SMB thread's VFS thread.
+ *
+ * Only invoked for opens teardown is genuinely DISCARDING: a preserved
+ * (courtesy-held / parked) durable handle never reaches release_doc in the
+ * teardown path, so its file is never deleted on disconnect.
+ */
+struct chimera_smb_teardown_doc_ctx {
+    struct chimera_vfs_thread      *vfs_thread;
+    struct chimera_vfs_doc_info     doc_info;
+    struct chimera_vfs_open_handle *parent_handle;
+};
+
+static void
+chimera_smb_teardown_doc_close_backend(struct chimera_smb_teardown_doc_ctx *ctx)
+{
+    chimera_vfs_close(ctx->vfs_thread,
+                      ctx->doc_info.close_module,
+                      ctx->doc_info.close_private,
+                      ctx->doc_info.close_hash,
+                      NULL,
+                      NULL);
+    free(ctx);
+} /* chimera_smb_teardown_doc_close_backend */
+
+static void
+chimera_smb_teardown_doc_remove_callback(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *pre_attr,
+    struct chimera_vfs_attrs *post_attr,
+    void                     *private_data)
+{
+    struct chimera_smb_teardown_doc_ctx *ctx = private_data;
+
+    (void) pre_attr;
+    (void) post_attr;
+
+    if (error_code) {
+        chimera_smb_debug("teardown delete-on-close: remove_at failed for "
+                          "'%.*s' (error %d)",
+                          ctx->doc_info.name_len,
+                          ctx->doc_info.name,
+                          error_code);
+    }
+
+    chimera_vfs_release(ctx->vfs_thread, ctx->parent_handle);
+    chimera_smb_teardown_doc_close_backend(ctx);
+} /* chimera_smb_teardown_doc_remove_callback */
+
+static void
+chimera_smb_teardown_doc_open_parent_callback(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *oh,
+    void                           *private_data)
+{
+    struct chimera_smb_teardown_doc_ctx *ctx = private_data;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        /* Cannot open parent — skip the unlink but still close the backend
+         * handle that release_doc detached from the cache. */
+        chimera_smb_debug("teardown delete-on-close: failed to open parent dir "
+                          "for '%.*s' (error %d)",
+                          ctx->doc_info.name_len,
+                          ctx->doc_info.name,
+                          error_code);
+        chimera_smb_teardown_doc_close_backend(ctx);
+        return;
+    }
+
+    ctx->parent_handle = oh;
+
+    /* No lease self-exemption here: teardown is dropping every handle this
+     * connection/session/tree owned, so all directory leases break.  The child
+     * FH is intentionally not supplied (no cross-client file-lease recall): the
+     * delete-on-close lease-recall semantics are owned by the parallel
+     * smb-lease-crossclient-rh work, and the clean-CLOSE DOC path likewise does
+     * not recall here. */
+    chimera_vfs_remove_at(
+        ctx->vfs_thread,
+        &ctx->doc_info.cred,
+        oh,
+        ctx->doc_info.name,
+        ctx->doc_info.name_len,
+        NULL,
+        0,
+        0,
+        0,
+        NULL,
+        chimera_smb_teardown_doc_remove_callback,
+        ctx);
+} /* chimera_smb_teardown_doc_open_parent_callback */
+
+void
+chimera_smb_teardown_doc_unlink(
+    struct chimera_server_smb_thread  *thread,
+    const struct chimera_vfs_doc_info *doc_info)
+{
+    struct chimera_smb_teardown_doc_ctx *ctx;
+
+    if (doc_info->parent_fh_len == 0) {
+        /* No parent fh recorded — cannot unlink, just close the backend
+         * handle that release_doc detached from the cache. */
+        chimera_vfs_close(thread->vfs_thread,
+                          doc_info->close_module,
+                          doc_info->close_private,
+                          doc_info->close_hash,
+                          NULL,
+                          NULL);
+        return;
+    }
+
+    ctx                = calloc(1, sizeof(*ctx));
+    ctx->vfs_thread    = thread->vfs_thread;
+    ctx->doc_info      = *doc_info;
+    ctx->parent_handle = NULL;
+
+    chimera_vfs_open_fh(
+        ctx->vfs_thread,
+        &ctx->doc_info.cred,
+        ctx->doc_info.parent_fh,
+        ctx->doc_info.parent_fh_len,
+        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
+        chimera_smb_teardown_doc_open_parent_callback,
+        ctx);
+} /* chimera_smb_teardown_doc_unlink */
+
 /* Completion of a stream delete-on-close remove_stream. */
 static void
 chimera_smb_close_stream_remove_callback(

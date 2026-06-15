@@ -1339,6 +1339,19 @@ void
 chimera_smb_create_resume_parked_broadcast(
     struct chimera_server_smb_thread *origin);
 
+/* Fire a request-less, fire-and-forget delete-on-close unlink during teardown
+ * (defined in smb_proc_close.c).  The teardown handle-release paths free open
+ * files without a live chimera_smb_request, so the clean-CLOSE DOC machinery
+ * (which threads everything through the request) cannot be reused directly.
+ * This drives the same open-parent -> remove_at -> close-backend sequence off a
+ * self-contained, heap-owned copy of the doc_info returned by
+ * chimera_vfs_release_doc.  Used only for opens teardown is genuinely
+ * discarding (never a preserved/parked durable handle). */
+void
+chimera_smb_teardown_doc_unlink(
+    struct chimera_server_smb_thread  *thread,
+    const struct chimera_vfs_doc_info *doc_info);
+
 /* Durable/persistent handle registry (smb_durable.c). */
 void
 chimera_smb_durable_table_init(
@@ -2337,7 +2350,23 @@ chimera_smb_tree_free(
                 }
                 chimera_smb_open_file_drain_locks(thread, open_file);
                 if (open_file->handle) {
-                    chimera_vfs_release(thread->vfs_thread, open_file->handle);
+                    /* Abrupt teardown (disconnect / LOGOFF / TREE_DISCONNECT)
+                     * of an open this teardown is genuinely DISCARDING: route
+                     * the VFS handle release through the delete-on-close-aware
+                     * path so a DOC-armed file is actually unlinked on the last
+                     * reference, exactly as a clean multi-handle CLOSE does
+                     * (smb2.lease.initial_delete_*).  A preserved/parked durable
+                     * handle never reaches here — it was parked via `continue`
+                     * above with its VFS handle kept intact — so its file is
+                     * never deleted on disconnect.  release_doc behaves like an
+                     * ordinary release (returns 0) when no DOC is armed. */
+                    struct chimera_vfs_doc_info doc_info;
+
+                    if (chimera_vfs_release_doc(thread->vfs_thread,
+                                                open_file->handle,
+                                                &doc_info)) {
+                        chimera_smb_teardown_doc_unlink(thread, &doc_info);
+                    }
                 }
                 chimera_smb_open_file_free(thread, open_file);
             }
