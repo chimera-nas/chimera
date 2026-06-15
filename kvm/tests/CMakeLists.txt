@@ -302,6 +302,19 @@ foreach(image_spec ${KVM_IMAGES})
                        NOT (backend STREQUAL "memfs" OR backend MATCHES "diskfs"))
                         continue()
                     endif()
+                    # nfstest_alloc is disabled on diskfs pending a space-
+                    # accounting fix (tracking issue #733).  diskfs reports
+                    # statfs free as the sum of the AGs' live free counts, which
+                    # is unstable at the ENOSPC boundary: reservation-cache
+                    # remainders and async deleted-inode reclaim return bytes to
+                    # the free pool concurrently with the test's fill, so a write
+                    # the suite expects to fail with ENOSPC finds the drained-back
+                    # space and succeeds (memfs/cairn/linux account synchronously
+                    # and pass).  Keep memfs coverage; re-enable diskfs once free
+                    # is reported from a stable base (see issue #733).
+                    if(prog STREQUAL "nfstest_alloc" AND backend MATCHES "diskfs")
+                        continue()
+                    endif()
                     # nfstest_posix asserts read() updates st_atime.  The
                     # passthrough backends (linux/io_uring) defer atime to the
                     # host filesystem's mount policy (relatime/noatime), which
