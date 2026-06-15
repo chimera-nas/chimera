@@ -49,9 +49,9 @@ static const dce_if_uuid_t LSA_INTERFACE = {
  * not consulted, matching prior behaviour.
  */
 /* Fill a SID with the server's account-domain (machine) SID S-1-5-21-X-Y-Z,
- * whose sub-authorities are derived once at startup from a stable per-host id
- * (shared->machine_domain_sub).  The caller must provide zeroed storage (a dbuf
- * allocation, or a `= { 0 }` initialiser) so the unset bytes are defined. */
+* whose sub-authorities are derived once at startup from a stable per-host id
+* (shared->machine_domain_sub).  The caller must provide zeroed storage (a dbuf
+* allocation, or a `= { 0 }` initialiser) so the unset bytes are defined. */
 static void
 chimera_smb_lsarpc_machine_sid(
     struct ndr_sid                         *sid,
