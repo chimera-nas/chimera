@@ -462,8 +462,13 @@ foreach(image_spec ${KVM_IMAGES})
                         ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
                         ${CHIMERA_BINARY} cairn
                         "${SMB_CTHON_CMD_${category}}")
+            # cairn's lock-key contention can push the SMB cthon run past the CI
+            # default `ctest --timeout 300` under parallel load, so it flakes
+            # (fails once, passes on rerun -- tracker #733).  Give it headroom
+            # like the other contention-bound suites (cf. fsx, #805); a test
+            # TIMEOUT property overrides the command-line default.
             set_tests_properties(chimera/kvm/${IMAGE_NAME}/smb/cthon/${category}_cairn
-                PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2)
+                PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2 TIMEOUT 600)
         endforeach()
     endif()
 
@@ -487,8 +492,11 @@ foreach(image_spec ${KVM_IMAGES})
                         ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
                         ${CHIMERA_BINARY} cairn
                         "${XFSTESTS_CMD_${prog}}")
+            # Same cairn lock-key contention as the SMB cthon cairn block above:
+            # under load these can exceed the 300s CI default (e.g. the recurring
+            # rewinddir_cairn timeout, #733).  Give them matching headroom.
             set_tests_properties(chimera/kvm/${IMAGE_NAME}/smb/xfstests/${prog}_cairn
-                PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2)
+                PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2 TIMEOUT 600)
         endforeach()
     endif()
 
