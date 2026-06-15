@@ -318,8 +318,12 @@ chimera_smb_query_info(struct chimera_smb_request *request)
                     getattr_mask                      = CHIMERA_VFS_ATTR_MASK_STAT;
                     break;
                 case SMB2_FILE_ALL_INFO:
+                    /* FileAllInformation (MS-FSCC 2.4.2): the trailing
+                     * FileNameInformation carries the share-relative path as
+                     * UTF-16LE, so the variable portion is full_path_len*2 bytes
+                     * (no trailing pad). */
                     request->query_info.output_length = SMB2_FILE_ALL_INFO_FIXED_SIZE + request->query_info.open_file->
-                        name_len + 4;
+                        full_path_len * 2;
                     /* The fixed portion ends after the FileNameLength field; a
                      * shorter buffer is INFO_LENGTH_MISMATCH (smbtorture uses
                      * fixed=104 here). */
@@ -329,8 +333,9 @@ chimera_smb_query_info(struct chimera_smb_request *request)
                 case SMB2_FILE_NORMALIZED_NAME_INFO:
                     /* MS-FSCC 2.4.30 FILE_NAME_INFORMATION layout (FileNameLength
                      * + FileName in UTF-16LE).  The normalized name is the open's
-                     * path, which we already hold (as UTF-8) — no backend attrs. */
-                    request->query_info.output_length = 4 + request->query_info.open_file->name_len * 2;
+                     * share-relative path, which we already hold (as UTF-8) — no
+                     * backend attrs. */
+                    request->query_info.output_length = 4 + request->query_info.open_file->full_path_len * 2;
                     request->query_info.min_length    = 4;
                     break;
                 case SMB2_FILE_FULL_EA_INFO:
@@ -501,20 +506,21 @@ chimera_smb_query_info_reply(
                 case SMB2_FILE_NORMALIZED_NAME_INFO:
                 {
                     /* FILE_NAME_INFORMATION: FileNameLength (UTF-16LE bytes)
-                     * followed by the name converted to UTF-16LE. */
+                     * followed by the share-relative path converted to UTF-16LE. */
                     struct chimera_smb_open_file *of = request->query_info.open_file;
                     uint16_t                     *nb;
 
-                    evpl_iovec_cursor_append_uint32(reply_cursor, of->name_len * 2);
+                    evpl_iovec_cursor_append_uint32(reply_cursor, of->full_path_len * 2);
                     nb = evpl_iovec_cursor_data(reply_cursor);
                     chimera_smb_utf8_to_utf16le(&request->compound->thread->iconv_ctx,
-                                                of->name, of->name_len,
-                                                nb, SMB_FILENAME_MAX * 2);
-                    evpl_iovec_cursor_skip(reply_cursor, of->name_len * 2);
+                                                of->full_path, of->full_path_len,
+                                                nb, SMB_PATH_MAX * 2);
+                    evpl_iovec_cursor_skip(reply_cursor, of->full_path_len * 2);
                     break;
                 }
                 case SMB2_FILE_ALL_INFO:
-                    chimera_smb_append_all_info(reply_cursor, request->query_info.open_file, &request->query_info.
+                    chimera_smb_append_all_info(&request->compound->thread->iconv_ctx,
+                                                reply_cursor, request->query_info.open_file, &request->query_info.
                                                 r_attrs);
                     break;
                 case SMB2_FILE_FULL_EA_INFO:

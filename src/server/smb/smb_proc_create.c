@@ -578,6 +578,36 @@ chimera_smb_create_gen_open_file(
     open_file->name_len = name_len;
     memcpy(open_file->name, name, open_file->name_len);
 
+    /* Build the canonical full path (relative to the share root, backslash
+     * separated, no leading separator) reported in FileAllInformation /
+     * FileNameInformation.  request->create.parent_path holds the parent
+     * portion forward-slash converted; reassemble it with the leaf using
+     * backslashes.  Bounded by SMB_PATH_MAX (the on-wire path limit). */
+    {
+        uint32_t parent_len = request->create.parent_path_len;
+        uint32_t total;
+
+        if (parent_len + 1 + name_len > SMB_PATH_MAX - 1) {
+            /* Defensive clamp: the wire path is already bounded to SMB_PATH_MAX,
+             * so this cannot legitimately overflow, but never write past the
+             * buffer if a future caller passes a longer composite. */
+            parent_len = 0;
+        }
+
+        if (parent_len > 0) {
+            memcpy(open_file->full_path, request->create.parent_path, parent_len);
+            chimera_smb_slash_forward_to_back(open_file->full_path, parent_len);
+            open_file->full_path[parent_len] = '\\';
+            memcpy(open_file->full_path + parent_len + 1, name, name_len);
+            total = parent_len + 1 + name_len;
+        } else {
+            memcpy(open_file->full_path, name, name_len);
+            total = name_len;
+        }
+        open_file->full_path[total] = '\0';
+        open_file->full_path_len    = total;
+    }
+
     /* Stream identity is set by the named-stream create path; default to none. */
     open_file->stream_name_len = 0;
     open_file->base_fh_len     = 0;

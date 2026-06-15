@@ -248,6 +248,13 @@ struct chimera_smb_open_file {
     struct chimera_smb_tree          *tree;
     uint8_t                           parent_fh[CHIMERA_VFS_FH_SIZE];
     char                              name[SMB_FILENAME_MAX];
+    /* Full path of this open relative to the share root, backslash-separated
+     * with no leading separator (e.g. "dir\\sub\\file.txt").  `name` above is
+     * only the final component (paired with parent_fh for VFS ops); this is the
+     * canonical name reported in FileAllInformation / FileNameInformation
+     * (MS-FSCC 2.1.7 / 2.4.2) and FileNormalizedNameInformation. */
+    char                              full_path[SMB_PATH_MAX];
+    uint32_t                          full_path_len;
     uint16_t                          pattern[SMB_FILENAME_MAX];
     /* Named-stream (ADS) identity, valid when CHIMERA_SMB_OPEN_FILE_FLAG_STREAM
      * is set.  base_fh is the file the stream hangs off (open_file->handle's fh
