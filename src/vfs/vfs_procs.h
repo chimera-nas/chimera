@@ -208,6 +208,23 @@ typedef void (*chimera_vfs_getattr_callback_t)(
     struct chimera_vfs_attrs *attr,
     void                     *private_data);
 
+/* Recall every OTHER caching lease on the file backing `handle` (the operating
+ * open's own lease is spared) and PARK until the recall drains, then invoke
+ * `callback`.  A namespace-mutation recall (breaks a peer's handle cache) with no
+ * backend op -- used by the SMB delete-on-close path so the peer's lease break is
+ * acked before the SetInfo reply is sent (smb2.lease.unlink). */
+typedef void (*chimera_vfs_recall_callback_t)(
+    enum chimera_vfs_error error_code,
+    void                  *private_data);
+
+void
+chimera_vfs_recall_handle_lease(
+    struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_open_handle *handle,
+    chimera_vfs_recall_callback_t   callback,
+    void                           *private_data);
+
 void
 chimera_vfs_getattr(
     struct chimera_vfs_thread      *thread,

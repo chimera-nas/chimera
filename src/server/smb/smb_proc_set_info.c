@@ -221,6 +221,25 @@ chimera_smb_set_info_allocation_getattr_callback(
         request);
 } /* chimera_smb_set_info_allocation_getattr_callback */
 
+/* Completion for the delete-on-close caching-lease recall: the recall has
+ * drained (every OTHER holder's handle lease was broken and acknowledged), so the
+ * peer's break is now visible to the client.  Reply to the SetInfo.  Replying
+ * only after the recall drains is what makes the break deterministically precede
+ * the reply (the client checks lease_break_info.count synchronously right after
+ * smb2_setinfo_file -- smb2.lease.unlink). */
+static void
+chimera_smb_set_info_doc_recall_callback(
+    enum chimera_vfs_error error_code,
+    void                  *private_data)
+{
+    struct chimera_smb_request *request = private_data;
+
+    (void) error_code;
+
+    chimera_smb_open_file_release(request, request->set_info.open_file);
+    chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+} /* chimera_smb_set_info_doc_recall_callback */
+
 void
 chimera_smb_set_info(struct chimera_smb_request *request)
 {
@@ -350,6 +369,22 @@ chimera_smb_set_info(struct chimera_smb_request *request)
                                 request->set_info.open_file->name,
                                 request->set_info.open_file->name_len,
                                 &request->session_handle->session->cred);
+
+                            /* Setting delete-on-close on an open file is a pending
+                             * namespace mutation: recall every OTHER holder's HANDLE
+                             * cache so a peer that cached the open handle re-
+                             * validates against the impending removal (MS-SMB2;
+                             * smb2.lease.unlink).  The operating client's own lease
+                             * is spared.  This PARKS until the recall drains (the
+                             * peer's break is acked), then replies -- so the break
+                             * deterministically precedes the SetInfo reply. */
+                            chimera_vfs_recall_handle_lease(
+                                request->compound->thread->vfs_thread,
+                                &request->session_handle->session->cred,
+                                request->set_info.open_file->handle,
+                                chimera_smb_set_info_doc_recall_callback,
+                                request);
+                            break;
                         }
                     } else {
                         request->set_info.open_file->flags &=

@@ -1367,11 +1367,13 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.lease.duplicate_open
     smb2.lease.multibreak
     smb2.lease.nobreakself
+    smb2.lease.oplock
     smb2.lease.rename_wait
     smb2.lease.statopen
     smb2.lease.statopen2
     smb2.lease.statopen3
     smb2.lease.statopen4
+    smb2.lease.unlink
     smb2.lease.upgrade
     smb2.lease.upgrade2
     smb2.lease.upgrade3
@@ -3233,11 +3235,13 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.lease.duplicate_open
     smb2.lease.multibreak
     smb2.lease.nobreakself
+    smb2.lease.oplock
     smb2.lease.rename_wait
     smb2.lease.statopen
     smb2.lease.statopen2
     smb2.lease.statopen3
     smb2.lease.statopen4
+    smb2.lease.unlink
     smb2.lease.upgrade
     smb2.lease.upgrade2
     smb2.lease.upgrade3

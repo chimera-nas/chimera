@@ -304,6 +304,15 @@ void chimera_smb_lease_break_cb(
     uint8_t                   needed_mode,
     void                     *private_data);
 
+/* Recall every OTHER holder's HANDLE cache on the file backing `open_file`
+ * because of a pending namespace mutation (delete-on-close / unlink / rename):
+ * an RqLs lease's RH is broken to R, and the operating client's own lease is
+ * spared.  Called from the set-info delete-on-close and the close-time remove
+ * paths (smb2.lease.unlink). */
+void chimera_smb_break_caching_for_namespace(
+    struct chimera_smb_request   *request,
+    struct chimera_smb_open_file *open_file);
+
 void chimera_smb_lease_break_thread_init(
     struct chimera_server_smb_thread *thread);
 

@@ -233,6 +233,8 @@ chimera_vfs_request_alloc_common(
     request->io_owner_valid       = 0;
     request->io_recall_all        = 0;
     request->io_recall_flush_only = 0;
+    request->io_recall_single     = 0;
+    request->io_recall_retain     = 0;
     request->io_next              = NULL;
     request->io_lease_file        = NULL;
     request->io_handle            = NULL;

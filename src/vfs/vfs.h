@@ -446,6 +446,12 @@ struct chimera_vfs_request {
      * revocation -- the churn source for metadata-heavy single-client workloads
      * (rewinddir/fsstress) -- while preserving coherence. */
     uint8_t                            io_recall_flush_only;
+    /* Single-step namespace recall (smb2.lease.unlink delete-on-close): break
+     * each OTHER holder exactly ONCE to io_recall_retain (R) -- not a cascade to
+     * NONE -- and park until those breaks are acked.  io_recall_retain is the
+     * floor handed to begin_break for this flavor. */
+    uint8_t                            io_recall_single;
+    uint8_t                            io_recall_retain;
     void                               ( *io_next )(
         struct chimera_vfs_request *request);
     struct chimera_vfs_file_state     *io_lease_file;
