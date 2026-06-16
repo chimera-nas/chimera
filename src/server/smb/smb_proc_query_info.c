@@ -318,12 +318,15 @@ chimera_smb_query_info(struct chimera_smb_request *request)
                     getattr_mask                      = CHIMERA_VFS_ATTR_MASK_STAT;
                     break;
                 case SMB2_FILE_ALL_INFO:
-                    /* FileAllInformation (MS-FSCC 2.4.2): the trailing
-                     * FileNameInformation carries the share-relative path as
-                     * UTF-16LE, so the variable portion is full_path_len*2 bytes
-                     * (no trailing pad). */
-                    request->query_info.output_length = SMB2_FILE_ALL_INFO_FIXED_SIZE + request->query_info.open_file->
-                        full_path_len * 2;
+                    /* FileAllInformation (MS-FSCC 2.4.2): the fixed 100 bytes
+                     * (FileNameLength field included) followed by the
+                     * share-relative path as UTF-16LE (full_path_len*2).  The
+                     * share root has an empty path; Windows reports its name as
+                     * "\" (2 bytes) so the reply clears the Linux cifs client's
+                     * 101-byte FILE_ALL_INFO minimum (see chimera_smb_append_all_info). */
+                    request->query_info.output_length = SMB2_FILE_ALL_INFO_FIXED_SIZE +
+                        (request->query_info.open_file->full_path_len
+                         ? request->query_info.open_file->full_path_len * 2 : 2);
                     /* The fixed portion ends after the FileNameLength field; a
                      * shorter buffer is INFO_LENGTH_MISMATCH (smbtorture uses
                      * fixed=104 here). */

@@ -722,12 +722,25 @@ chimera_smb_append_all_info(
     {
         uint16_t *nb;
 
-        evpl_iovec_cursor_append_uint32(cursor, open_file->full_path_len * 2);
-        nb = evpl_iovec_cursor_data(cursor);
-        chimera_smb_utf8_to_utf16le(iconv_ctx,
-                                    open_file->full_path, open_file->full_path_len,
-                                    nb, SMB_PATH_MAX * 2);
-        evpl_iovec_cursor_skip(cursor, open_file->full_path_len * 2);
+        if (open_file->full_path_len == 0) {
+            /* Share root: Windows reports the FileAllInformation name as "\"
+             * (a single backslash).  An empty name yields a 100-byte reply,
+             * one byte below the Linux cifs client's 101-byte FILE_ALL_INFO
+             * struct minimum, so the mount fails ("buffer length 100 smaller
+             * than minimum size 101").  Note FileNormalizedNameInformation
+             * keeps the empty root name (smb2.getinfo.normalized requires it). */
+            evpl_iovec_cursor_append_uint32(cursor, 2);
+            nb    = evpl_iovec_cursor_data(cursor);
+            nb[0] = (uint16_t) '\\';
+            evpl_iovec_cursor_skip(cursor, 2);
+        } else {
+            evpl_iovec_cursor_append_uint32(cursor, open_file->full_path_len * 2);
+            nb = evpl_iovec_cursor_data(cursor);
+            chimera_smb_utf8_to_utf16le(iconv_ctx,
+                                        open_file->full_path, open_file->full_path_len,
+                                        nb, SMB_PATH_MAX * 2);
+            evpl_iovec_cursor_skip(cursor, open_file->full_path_len * 2);
+        }
     }
 
 } /* chimera_smb_append_all_info */
