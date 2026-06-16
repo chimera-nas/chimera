@@ -65,9 +65,17 @@
  * The window is just the time for the peer connection's disconnect callback to
  * be scheduled and park the handle, so a short interval with a bounded budget
  * (~3 s, matching the durable-reconnect retry) covers a loaded CI runner without
- * delaying a genuinely-live conflict (that path never sets gen_share_retry). */
+ * delaying a genuinely-live conflict.  The budget depends on how the conflict was
+ * classified (enum chimera_smb_durable_yield): a CONFIRMED disconnect (or an
+ * already-parked holder) gets the full ~3 s; a SPECULATIVE conflict (a durable
+ * holder whose FIN may not have been read yet, so the disconnect is not yet
+ * observable) gets only a short budget sufficient to cover the FIN-read latency --
+ * once the FIN is read a re-probe upgrades it to CONFIRMED and the full budget
+ * applies, while a genuinely-live durable holder lapses the short budget into the
+ * same immediate SHARING_VIOLATION. */
 #define CHIMERA_SMB_CREATE_SHARE_RETRY_INTERVAL_US 20000  /* 20 ms */
 #define CHIMERA_SMB_CREATE_SHARE_RETRY_MAX         150    /* ~3 s total */
+#define CHIMERA_SMB_CREATE_SHARE_SPEC_RETRY_MAX    25     /* ~0.5 s total */
 
 /* Map a VFS error from an open-or-create path to the SMB2 status that
  * Windows clients expect.  EISDIR/ENOTDIR are critical here: cmd.exe and
@@ -794,16 +802,16 @@ chimera_smb_create_gen_open_file(
 
             if (!chimera_smb_durable_purge_parked(thread, conflict_pid)) {
                 /* The durable holder is not parked yet.  If its owning connection
-                 * has begun disconnecting, the park (and the MS-SMB2 yield) is
-                 * imminent but has not landed -- this is the
-                 * disconnect-vs-conflicting-open race (open2-lease).  Flag the
-                 * open to retry on a short timer rather than deny; a genuinely
-                 * live durable holder is not disconnecting, so its conflict
-                 * stands immediately as a real SHARING_VIOLATION. */
-                if (chimera_smb_durable_conn_disconnecting(thread->shared,
-                                                           conflict_pid)) {
-                    request->create.gen_share_retry = 1;
-                }
+                * is on its way out, the park (and the MS-SMB2 yield) is imminent
+                * but has not landed -- this is the disconnect-vs-conflicting-open
+                * race (open2-lease).  Flag the open to retry on a timer rather
+                * than deny: CONFIRMED (disconnect observed, or already parked)
+                * gets the full budget; SPECULATIVE (a durable holder whose FIN may
+                * not be read yet) gets a short budget.  Only a persistent or
+                * unknown holder is NONE, standing as a real SHARING_VIOLATION. */
+                request->create.gen_share_retry =
+                    chimera_smb_durable_conn_disconnecting(thread->shared,
+                                                           conflict_pid);
                 break;
             }
             conflict = NULL;
@@ -1846,12 +1854,22 @@ chimera_smb_create_open_at_callback(
         /* Share conflict against a durable holder whose owning connection is
          * mid-disconnect: it will park + yield once that disconnect runs, so
          * re-attempt the open completion on a short timer (holding oh + parent)
-         * rather than failing.  The budget lapses into the original
-         * SHARING_VIOLATION if the holder never yields (e.g. it was actually a
-         * persistent handle or genuinely live -- gen_share_retry would not be
-         * set in that case). */
-        if (request->create.gen_share_retry &&
-            request->create.share_conflict_retries < CHIMERA_SMB_CREATE_SHARE_RETRY_MAX) {
+         * rather than failing.  gen_share_retry was set by
+         * chimera_smb_create_gen_open_file_normal on this attempt and reflects the
+         * latest classification: CONFIRMED (disconnect observed, or already parked)
+         * gets the full budget; SPECULATIVE (a durable holder whose disconnect is
+         * not yet observable) gets the short budget -- if its FIN is read on a
+         * later probe the classification flips to CONFIRMED and the full budget
+         * then applies.  The budget lapses into the original SHARING_VIOLATION if
+         * the holder never yields (persistent or genuinely live -- gen_share_retry
+         * would be NONE in that case). */
+        uint16_t share_budget =
+            (request->create.gen_share_retry == CHIMERA_SMB_DURABLE_YIELD_CONFIRMED)
+            ? CHIMERA_SMB_CREATE_SHARE_RETRY_MAX
+            : CHIMERA_SMB_CREATE_SHARE_SPEC_RETRY_MAX;
+
+        if (request->create.gen_share_retry != CHIMERA_SMB_DURABLE_YIELD_NONE &&
+            request->create.share_conflict_retries < share_budget) {
             request->create.share_conflict_retries++;
             request->create.share_conflict_oh = oh;
             evpl_add_oneshot_timer(request->compound->thread->evpl,

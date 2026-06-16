@@ -571,10 +571,12 @@ struct chimera_smb_request {
             uint8_t                            gen_held_granted;
             uint8_t                            gen_parked;
             /* Set by chimera_smb_create_gen_open_file_normal when the share
-             * conflict it could not resolve is against a durable holder whose
-             * owning connection is mid-disconnect (it will park+yield shortly).
-             * Tells the open-completion path to retry on a short timer instead of
-             * failing SHARING_VIOLATION.  Cleared per create attempt. */
+             * conflict it could not resolve is against a durable holder that will
+             * park+yield shortly: an enum chimera_smb_durable_yield value telling
+             * the open-completion path whether to retry on a timer instead of
+             * failing SHARING_VIOLATION, and on which budget (CONFIRMED = full,
+             * SPECULATIVE = short).  Re-evaluated (cleared first) per create
+             * attempt. */
             uint8_t                            gen_share_retry;
             /* GRANTED/DENIED result stashed by chimera_smb_create_share_park_cb
              * when the share-park ticket resolves on another thread, so the
@@ -1415,12 +1417,37 @@ chimera_smb_durable_purge_parked(
     struct chimera_server_smb_thread *thread,
     uint64_t                          persistent_id);
 
-/* True iff a non-persistent durable open with this persistent id exists, is not
- * yet parked, and its owning connection has begun disconnecting (create_conn
- * cleared or flagged disconnecting) -- i.e. a conflicting CREATE should retry
- * briefly for the disconnect to park+yield it rather than deny SHARING_VIOLATION.
- * False for a genuinely-live durable holder (real conflict) or unknown id. */
-bool
+/* How a conflicting CREATE should treat a share conflict against a not-yet-parked
+ * non-persistent durable holder it could not purge.  See
+ * chimera_smb_durable_conn_disconnecting. */
+enum chimera_smb_durable_yield {
+    /* Genuinely-live holder on a fully-connected conn (or persistent/unknown):
+     * the conflict is real, deny SHARING_VIOLATION immediately, no retry. */
+    CHIMERA_SMB_DURABLE_YIELD_NONE        = 0,
+    /* The holder's disconnect has been observed (create_conn cleared, conn
+     * flagged disconnecting, bind already closing, or the entry already parked --
+     * a purge that lost the park race by an instant): the park + MS-SMB2 yield is
+     * imminent or done -- retry on the full (~3 s) budget for it to be reaped. */
+    CHIMERA_SMB_DURABLE_YIELD_CONFIRMED   = 1,
+    /* No disconnect signal yet, but the holder is a non-persistent durable open
+     * (which MS-SMB2 requires to yield once its owner disconnects).  The conflict
+     * can only resolve two ways: the holder is disconnecting (its FIN just has not
+     * been read yet -- a later probe flips to CONFIRMED once it is) or it is
+     * genuinely live and staying.  Retry on a SHORT budget that covers the
+     * FIN-read latency; a genuinely-live holder simply lapses that short budget
+     * into the same SHARING_VIOLATION it would have returned immediately. */
+    CHIMERA_SMB_DURABLE_YIELD_SPECULATIVE = 2,
+};
+
+/* Classify a share conflict against a non-persistent durable open with this
+* persistent id that a conflicting CREATE could not purge.  Returns
+* CHIMERA_SMB_DURABLE_YIELD_NONE for a persistent handle or unknown id;
+* _CONFIRMED once the holder's disconnect has been observed (the pre-notify
+* window via its bind already closing, or later stages: conn flagged
+* disconnecting, create_conn cleared, or the entry already parked); _SPECULATIVE
+* when no disconnect signal is visible yet but the holder is a non-persistent
+* durable open (and so must yield if its owner is in fact disconnecting). */
+enum chimera_smb_durable_yield
 chimera_smb_durable_conn_disconnecting(
     struct chimera_server_smb_shared *shared,
     uint64_t                          persistent_id);

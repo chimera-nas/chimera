@@ -290,38 +290,77 @@ chimera_smb_durable_purge_parked(
 } /* chimera_smb_durable_purge_parked */
 
 /* A conflicting CREATE found a still-live (not-yet-parked) durable open by its
- * persistent id and could not purge it.  Decide whether that holder is merely
- * racing its own disconnect -- its owning connection has begun teardown but has
- * not parked the handle yet (the open2-lease / disconnect-vs-conflicting-open
- * window) -- in which case the conflicting CREATE should retry briefly rather
+ * persistent id and could not purge it.  Decide whether that holder is racing its
+ * own disconnect and will yield (so the conflicting CREATE should retry rather
  * than deny: MS-SMB2 has the disconnected non-persistent handle yield, and a
- * short retry lets the park complete so the purge then succeeds.
+ * short retry lets the park complete so the purge then succeeds), and if so how
+ * confidently -- see enum chimera_smb_durable_yield.
  *
- * Returns true iff a matching non-persistent, non-cold, NOT-yet-parked durable
- * entry exists whose owning open has lost its connection (create_conn == NULL,
- * i.e. conn_free already cleared it) OR whose connection is flagged
- * disconnecting (the teardown is queued but has not run).  A genuinely-live
- * durable holder on an active connection returns false, so its conflict stands
- * as a real SHARING_VIOLATION without any retry delay.  Persistent handles do
- * not yield, so they are excluded. */
-SYMBOL_EXPORT bool
+ * Only non-persistent, non-cold entries with a live open_file are candidates;
+ * persistent handles do not yield and are excluded (NONE), as is an unknown id.
+ * #839 covered only the post-disconnect stages (create_conn cleared / conn flagged
+ * disconnecting); CONFIRMED here also covers the pre-notify bind-already-closing
+ * stage AND the just-parked stage (purge_parked lost the park race by an instant),
+ * and SPECULATIVE adds the even-earlier FIN-not-yet-read window: any candidate
+ * durable holder with no disconnect signal yet gets a SHORT speculative retry,
+ * because it must yield if its owner is in fact disconnecting, and merely incurs a
+ * brief bounded delay before the same SHARING_VIOLATION if it is genuinely live. */
+SYMBOL_EXPORT enum chimera_smb_durable_yield
 chimera_smb_durable_conn_disconnecting(
     struct chimera_server_smb_shared *shared,
     uint64_t                          persistent_id)
 {
     struct chimera_smb_durable_entry *entry;
-    bool                              disconnecting = false;
+    enum chimera_smb_durable_yield    yield = CHIMERA_SMB_DURABLE_YIELD_NONE;
 
     pthread_mutex_lock(&shared->durable.lock);
     HASH_FIND(hh, shared->durable.by_pid, &persistent_id, sizeof(persistent_id), entry);
-    if (entry && !entry->parked && !entry->persistent && !entry->cold &&
-        entry->open_file) {
+    if (entry && !entry->persistent && !entry->cold && entry->open_file) {
         struct chimera_smb_conn *cc = entry->open_file->create_conn;
-        disconnecting = (cc == NULL) || cc->disconnecting;
+
+        /* The holder yields once its disconnect parks it.  Four observable stages
+         * of that disconnect, earliest first:
+         *
+         *   1. PRE-NOTIFY: the peer's TCP close (read-side FIN) has been seen by
+         *      libevpl, which has scheduled (deferred) the teardown -- but the
+         *      server has not yet run EVPL_NOTIFY_DISCONNECTED for this conn at
+         *      all, so create_conn is still set and disconnecting is still 0.
+         *      The bind is already closing, detected via evpl_bind_is_closing().
+         *   2. NOTIFY started: EVPL_NOTIFY_DISCONNECTED has run far enough to set
+         *      conn->disconnecting, but the teardown has not parked the handle.
+         *   3. conn_free done: create_conn has been cleared (cc == NULL).
+         *   4. PARKED: the teardown has already parked the handle (entry->parked).
+         *      A conflicting CREATE's chimera_smb_durable_purge_parked races the
+         *      park: if it probed an instant before parked flipped to 1 it returns
+         *      false, then re-checks here and finds the now-parked entry -- a sure
+         *      yield, the very next retry's purge_parked will reap it.
+         *
+         * Any of the four is a CONFIRMED disconnect: the holder is on its way out
+         * and will release its share reservation, so retry on the full budget. */
+        if (entry->parked || (cc == NULL) || cc->disconnecting ||
+            (cc->bind && evpl_bind_is_closing(cc->bind))) {
+            yield = CHIMERA_SMB_DURABLE_YIELD_CONFIRMED;
+        } else {
+            /* No disconnect signal yet, but this is the even earlier window the
+             * pre-notify retry alone still misses: the conflicting CREATE was
+             * processed before the server's event loop has even read the holder's
+             * already-sent FIN, so none of the three signals above are set yet.
+             * The holder is a non-persistent durable open, which MS-SMB2 requires
+             * to yield once its owner disconnects -- so this conflict can resolve
+             * in exactly two ways: the holder is disconnecting (and within a couple
+             * of ticks its FIN is read, a subsequent probe flips to CONFIRMED, and
+             * it parks + yields), or it is genuinely live and staying (the conflict
+             * is real).  Retry SPECULATIVELY on a SHORT budget: it covers the
+             * FIN-read latency for the disconnecting case, and merely adds a brief
+             * bounded delay before the same SHARING_VIOLATION for the genuinely-live
+             * case -- never a wrong answer, and the live path is the much rarer one
+             * (a second open against a still-connected durable handle). */
+            yield = CHIMERA_SMB_DURABLE_YIELD_SPECULATIVE;
+        }
     }
     pthread_mutex_unlock(&shared->durable.lock);
 
-    return disconnecting;
+    return yield;
 } /* chimera_smb_durable_conn_disconnecting */
 
 SYMBOL_EXPORT void
