@@ -701,7 +701,29 @@ chimera_linux_open_at(
         return;
     }
 
-    fd = openat(parent_fd, fullname, flags, mode);
+    /* Detect whether this open created the file (vs opened an existing one) so
+     * the SMB server can report the correct create_action (FILE_CREATED vs
+     * FILE_OPENED / OVERWRITTEN / SUPERSEDED).  openat() does not report this,
+     * so for a non-exclusive create probe with O_EXCL first: success means we
+     * created the file, EEXIST means it already existed and we re-open without
+     * O_EXCL (the original flags still carry O_TRUNC for OVERWRITE_IF/SUPERSEDE). */
+    int created = 0;
+
+    if ((flags & O_CREAT) && !(flags & O_EXCL)) {
+        fd = openat(parent_fd, fullname, flags | O_EXCL, mode);
+        if (fd >= 0) {
+            created = 1;
+        } else if (errno == EEXIST) {
+            fd = openat(parent_fd, fullname, flags, mode);
+        }
+    } else {
+        fd = openat(parent_fd, fullname, flags, mode);
+        /* A successful exclusive create (FILE_CREATE -> O_CREAT|O_EXCL) is a
+         * freshly created file. */
+        if (fd >= 0 && (flags & O_CREAT)) {
+            created = 1;
+        }
+    }
 
     if (fd < 0 && errno == ELOOP &&
         (request->open_at.flags & CHIMERA_VFS_OPEN_NOFOLLOW) &&
@@ -743,6 +765,7 @@ chimera_linux_open_at(
     }
 
     request->open_at.r_vfs_private = fd;
+    request->open_at.r_created     = created;
 
     chimera_linux_map_child_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
                                   request,
