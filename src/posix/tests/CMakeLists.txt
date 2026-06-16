@@ -1004,6 +1004,7 @@ set(PJD_TESTS
     open/13
     open/16
     open/22
+    open/23
     open/26
     chmod/00
     chmod/01
