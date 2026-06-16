@@ -2508,9 +2508,14 @@ diskfs_rename_at_perform_final_cb(
 
     clock_gettime(CLOCK_REALTIME, &now);
 
-    if (S_ISDIR(child->mode)) {
+    if (S_ISDIR(child->mode) && np != op) {
+        /* Cross-directory move of a directory: shift the subdirectory backlink
+         * from the source parent to the destination parent, and re-home the
+         * moved directory's ".." (diskfs derives ".." from parent_inum). */
         op->nlink--;
         np->nlink++;
+        child->parent_inum = np->inum;
+        child->parent_gen  = np->gen;
     }
 
     op->mtime_sec  = now.tv_sec;

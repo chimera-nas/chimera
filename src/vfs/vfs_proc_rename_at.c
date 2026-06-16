@@ -7,6 +7,7 @@
 #include "vfs_state.h"
 #include "vfs_internal.h"
 #include "vfs_name_cache.h"
+#include "vfs_attr_cache.h"
 #include "vfs_notify.h"
 #include "vfs_access.h"
 #include "vfs_acl.h"
@@ -17,6 +18,7 @@ chimera_vfs_rename_at_complete(struct chimera_vfs_request *request)
 {
     struct chimera_vfs_thread       *thread     = request->thread;
     struct chimera_vfs_name_cache   *name_cache = thread->vfs->vfs_name_cache;
+    struct chimera_vfs_attr_cache   *attr_cache = thread->vfs->vfs_attr_cache;
     chimera_vfs_rename_at_callback_t callback   = request->proto_callback;
 
     if (request->status == CHIMERA_VFS_OK) {
@@ -93,6 +95,44 @@ chimera_vfs_rename_at_complete(struct chimera_vfs_request *request)
                                       request->rename_at.new_name_hash,
                                       request->rename_at.new_name,
                                       request->rename_at.new_namelen);
+
+        /* A rename mutates both parent directories' attributes (mtime/ctime,
+         * and on a cross-directory directory move their link counts).  Refresh
+         * the attr cache with the post-rename attributes the backend reported,
+         * or a subsequent getattr/stat would serve a stale nlink/timestamp.
+         * For a same-directory rename both FHs are identical and the second
+         * insert simply re-inserts the same fresh entry. */
+        chimera_vfs_attr_cache_insert(thread, attr_cache,
+                                      request->fh_hash,
+                                      request->fh,
+                                      request->fh_len,
+                                      &request->rename_at.r_fromdir_post_attr);
+
+        chimera_vfs_attr_cache_insert(thread, attr_cache,
+                                      request->rename_at.new_fh_hash,
+                                      request->rename_at.new_fh,
+                                      request->rename_at.new_fhlen,
+                                      &request->rename_at.r_todir_post_attr);
+
+        /* A cross-directory move of a directory re-homes its ".." entry to the
+         * new parent.  The name cache keys ".." under the moved directory's own
+         * FH (unchanged by the rename), so a ".." lookup cached before the move
+         * would still resolve to the old parent.  Drop that entry; the backend
+         * resolves ".." authoritatively from the moved directory on the next
+         * lookup.  source_fh is the moved object's FH resolved during the
+         * delegation-recall pre-step. */
+        if (cross_dir && request->rename_at.source_fh_len > 0) {
+            static const char dotdot[2] = { '.', '.' };
+
+            chimera_vfs_name_cache_remove(name_cache,
+                                          chimera_vfs_hash(request->rename_at.source_fh,
+                                                           request->rename_at.source_fh_len),
+                                          request->rename_at.source_fh,
+                                          request->rename_at.source_fh_len,
+                                          chimera_vfs_hash(dotdot, 2),
+                                          dotdot,
+                                          2);
+        }
     }
 
     chimera_vfs_complete(request);
@@ -202,11 +242,11 @@ chimera_vfs_rename_at_dispatch(
     request->rename_at.target_fh_len                   = target_fh_len;
     request->rename_at.r_fromdir_pre_attr.va_req_mask  = pre_attr_mask;
     request->rename_at.r_fromdir_pre_attr.va_set_mask  = 0;
-    request->rename_at.r_fromdir_post_attr.va_req_mask = post_attr_mask;
+    request->rename_at.r_fromdir_post_attr.va_req_mask = post_attr_mask | CHIMERA_VFS_ATTR_MASK_CACHEABLE;
     request->rename_at.r_fromdir_post_attr.va_set_mask = 0;
     request->rename_at.r_todir_pre_attr.va_req_mask    = pre_attr_mask;
     request->rename_at.r_todir_pre_attr.va_set_mask    = 0;
-    request->rename_at.r_todir_post_attr.va_req_mask   = post_attr_mask;
+    request->rename_at.r_todir_post_attr.va_req_mask   = post_attr_mask | CHIMERA_VFS_ATTR_MASK_CACHEABLE;
     request->rename_at.r_todir_post_attr.va_set_mask   = 0;
     request->proto_callback                            = callback;
     request->proto_private_data                        = private_data;
