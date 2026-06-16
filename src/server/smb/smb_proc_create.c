@@ -852,10 +852,19 @@ chimera_smb_create_gen_open_file(
                                                            conflict_pid);
                 break;
             }
+            /* Drop the pin try_insert holds on this conflict before re-probing:
+             * we are done dereferencing it, and the next try_insert returns a
+             * freshly-pinned conflict. */
+            chimera_vfs_state_conflict_unref(vfs_state, conflict);
             conflict = NULL;
             result   = chimera_vfs_state_try_insert(vfs_state, file_state,
                                                     &open_file->share_lease, &conflict);
         }
+
+        /* Release the pin on whatever conflict the purge loop ended on (the
+         * pointer is no longer dereferenced past this point). */
+        chimera_vfs_state_conflict_unref(vfs_state, conflict);
+        conflict = NULL;
 
         if (result == CHIMERA_VFS_LEASE_BREAKING &&
             request->create.gen_finish_cb) {
@@ -1202,9 +1211,15 @@ chimera_smb_create_after_share(
                             } else if (result != CHIMERA_VFS_LEASE_BREAKING) {
                                 break;
                             }
-                            result = chimera_vfs_state_try_insert(
+                            /* Drop the previous probe's conflict pin before the next
+                             * try_insert overwrites it (this path never derefs it). */
+                            chimera_vfs_state_conflict_unref(vfs_state, conflict);
+                            conflict = NULL;
+                            result   = chimera_vfs_state_try_insert(
                                 vfs_state, file_state, &grant->lease, &conflict);
                         }
+                        chimera_vfs_state_conflict_unref(vfs_state, conflict);
+                        conflict = NULL;
 
                         if (result == CHIMERA_VFS_LEASE_GRANTED) {
                             /* Link into the owner index so later same-key opens

@@ -1206,6 +1206,19 @@ chimera_vfs_state_try_insert(
     * which may turn a conflict into a grant without the caller waiting. */
     for ( ; ;) {
         bool began_live_break = false;
+        /* When the conflict handed back in *conflict_out is a CACHING grant, we
+         * hold one reference on it across this whole call so it cannot be freed
+         * out from under (a) begin_break's break cb, which dereferences it after
+         * dropping file->lock, and (b) the synchronous caller, which inspects
+         * *conflict_out before its callback returns.  For a CACHING lease the
+         * lease is embedded in its grant, so a close of this holder racing on
+         * another thread would otherwise drop the grant's last reference and free
+         * it (this very `conflict`) mid-deref — the use-after-free that
+         * chimera_smb_lease_break_cb / the SMB create durable-purge loop hit under
+         * load.  The reference is dropped by the caller via
+         * chimera_vfs_state_conflict_unref (no-op for non-grant conflicts), and
+         * by us on the re-probe / revoke / GRANTED paths that supersede it. */
+        struct chimera_vfs_caching_grant *out_pin = NULL;
 
         conflict = NULL;
 
@@ -1220,6 +1233,14 @@ chimera_vfs_state_try_insert(
             }
             return CHIMERA_VFS_LEASE_GRANTED;
         }
+
+        /* Pin the conflict we are about to expose (in *conflict_out), under the
+         * same lock that frees it. */
+        if (conflict && conflict->kind == CHIMERA_VFS_LEASE_CACHING &&
+            conflict->grant) {
+            out_pin = conflict->grant;
+            out_pin->refcount++;
+        }
         pthread_mutex_unlock(&file->lock);
 
         if (conflict_out) {
@@ -1230,10 +1251,15 @@ chimera_vfs_state_try_insert(
             /* A hard conflict against a holder whose owning client has lapsed
              * (courtesy state) is reclaimable: revoke it and re-probe.  Its
              * lease lingers REVOKED until the protocol layer removes it, but
-             * would_conflict skips REVOKED leases, so this terminates. */
+             * would_conflict skips REVOKED leases, so this terminates.  (A DENIED
+             * conflict is a SHARE/RANGE lease — not a grant — so out_pin is NULL
+             * here; the assignment is defensive.) */
             if (conflict &&
                 chimera_vfs_lease_holder_reclaimable(conflict, lease)) {
                 chimera_vfs_lease_revoke(conflict);
+                if (out_pin) {
+                    chimera_vfs_caching_grant_release(state, out_pin, true);
+                }
                 continue;
             }
             return CHIMERA_VFS_LEASE_DENIED;
@@ -1250,6 +1276,20 @@ chimera_vfs_state_try_insert(
         bool revoked_any = false;
 
         while (conflict) {
+            /* Each re-probed conflict (every iteration after the first) is pinned
+             * for the duration of its begin_break cb, then dropped.  The FIRST
+             * conflict is the one in *conflict_out and is held by out_pin instead,
+             * so it survives for the returning caller. */
+            struct chimera_vfs_caching_grant *iter_pin = NULL;
+
+            if (conflict->kind == CHIMERA_VFS_LEASE_CACHING && conflict->grant &&
+                conflict->grant != out_pin) {
+                pthread_mutex_lock(&file->lock);
+                conflict->grant->refcount++;
+                iter_pin = conflict->grant;
+                pthread_mutex_unlock(&file->lock);
+            }
+
             if (chimera_vfs_lease_holder_reclaimable(conflict, lease)) {
                 chimera_vfs_lease_revoke(conflict);
                 revoked_any = true;
@@ -1272,6 +1312,7 @@ chimera_vfs_state_try_insert(
                     conflict->grant && conflict->grant->is_dir) {
                     floor = conflict->mode.granted & ~CHIMERA_VFS_LEASE_MODE_H;
                 }
+
                 chimera_vfs_lease_begin_break(state, conflict, floor,
                                               deadline_ms);
                 began_live_break = true;
@@ -1282,6 +1323,13 @@ chimera_vfs_state_try_insert(
                 chimera_vfs_lease_revoke(conflict);
                 revoked_any = true;
             }
+
+            if (iter_pin) {
+                /* pump=false: still mid-arbitration; we re-probe immediately and
+                 * pumping here would re-enter the state machine. */
+                chimera_vfs_caching_grant_release(state, iter_pin, false);
+            }
+
             conflict = NULL;
             pthread_mutex_lock(&file->lock);
             if (chimera_vfs_state_would_conflict(file, lease, &conflict) !=
@@ -1308,11 +1356,32 @@ chimera_vfs_state_try_insert(
                 result = chimera_vfs_state_would_conflict(file, lease, &conflict);
                 pthread_mutex_unlock(&file->lock);
                 if (result == CHIMERA_VFS_LEASE_GRANTED) {
+                    /* The break already cleared the conflict; this re-probe
+                     * supersedes *conflict_out, so drop the pin we took on it
+                     * before looping to grant on the next pass (otherwise the
+                     * grant refcount leaks past this continue). */
+                    if (out_pin) {
+                        chimera_vfs_caching_grant_release(state, out_pin, true);
+                        out_pin = NULL;
+                        if (conflict_out) {
+                            *conflict_out = NULL;
+                        }
+                    }
                     continue;
                 }
             }
-            /* A live holder is mid-break; the caller waits for its ack. */
+            /* A live holder is mid-break; the caller waits for its ack.  The
+             * out_pin (if any) is transferred to the caller, who releases it via
+             * chimera_vfs_state_conflict_unref after inspecting *conflict_out. */
             return CHIMERA_VFS_LEASE_BREAKING;
+        }
+
+        if (out_pin) {
+            chimera_vfs_caching_grant_release(state, out_pin, true);
+            out_pin = NULL;
+            if (conflict_out) {
+                *conflict_out = NULL;
+            }
         }
 
         if (revoked_any) {
@@ -1326,6 +1395,24 @@ chimera_vfs_state_try_insert(
         return CHIMERA_VFS_LEASE_BREAKING;
     }
 } /* chimera_vfs_state_try_insert */
+
+/* Drop the reference chimera_vfs_state_try_insert() takes on a conflicting
+ * CACHING grant it returns in *conflict_out, keeping the grant alive while the
+ * caller inspects it (MS-SMB2 durable-purge resolution, lock-DENIED reporting).
+ * A no-op for non-grant conflicts (delegations, byte-range, share reservations)
+ * and for a NULL conflict, so every caller that receives a conflict may call it
+ * unconditionally once done with the pointer.  Must run after the caller's last
+ * dereference of `conflict`. */
+SYMBOL_EXPORT void
+chimera_vfs_state_conflict_unref(
+    struct chimera_vfs_state *state,
+    struct chimera_vfs_lease *conflict)
+{
+    if (conflict && conflict->kind == CHIMERA_VFS_LEASE_CACHING &&
+        conflict->grant) {
+        chimera_vfs_caching_grant_release(state, conflict->grant, true);
+    }
+} /* chimera_vfs_state_conflict_unref */
 
 /* -------------------------------------------------------------------- */
 /* Pending-acquire queue                                                */
@@ -1416,6 +1503,7 @@ chimera_vfs_state_pump_pending(
             /* Re-queue and wait for the next ack/revoke.  begin_break
              * has already been invoked on the conflicting holder by
              * try_insert. */
+            chimera_vfs_state_conflict_unref(state, conflict);
             pthread_mutex_lock(&file->lock);
             chimera_vfs_pending_enqueue_locked(file, t);
             pthread_mutex_unlock(&file->lock);
@@ -1429,6 +1517,7 @@ chimera_vfs_state_pump_pending(
          * back to a waiter). */
         if (result == CHIMERA_VFS_LEASE_DENIED && t->wait &&
             t->lease->kind == CHIMERA_VFS_LEASE_RANGE) {
+            chimera_vfs_state_conflict_unref(state, conflict);
             pthread_mutex_lock(&file->lock);
             chimera_vfs_pending_enqueue_locked(file, t);
             pthread_mutex_unlock(&file->lock);
@@ -1439,6 +1528,10 @@ chimera_vfs_state_pump_pending(
               result == CHIMERA_VFS_LEASE_GRANTED ? t->lease : NULL,
               conflict,
               t->private_data);
+
+        /* Done exposing `conflict`; drop the try_insert pin (no-op unless it is a
+         * caching grant). */
+        chimera_vfs_state_conflict_unref(state, conflict);
     }
 } /* chimera_vfs_state_pump_pending */
 
@@ -1490,6 +1583,7 @@ chimera_vfs_lease_acquire(
     if (result == CHIMERA_VFS_LEASE_BREAKING && wait) {
         /* Conflict is breakable and caller said to wait.  Queue the
          * ticket; it will fire when the break completes (via pump). */
+        chimera_vfs_state_conflict_unref(state, conflict);
         pthread_mutex_lock(&file->lock);
         chimera_vfs_pending_enqueue_locked(file, ticket);
         pthread_mutex_unlock(&file->lock);
@@ -1506,6 +1600,7 @@ chimera_vfs_lease_acquire(
      * the protocol layer must surface immediately. */
     if (result == CHIMERA_VFS_LEASE_DENIED && wait &&
         lease->kind == CHIMERA_VFS_LEASE_RANGE) {
+        chimera_vfs_state_conflict_unref(state, conflict);
         pthread_mutex_lock(&file->lock);
         chimera_vfs_pending_enqueue_locked(file, ticket);
         pthread_mutex_unlock(&file->lock);
@@ -1517,6 +1612,10 @@ chimera_vfs_lease_acquire(
        result == CHIMERA_VFS_LEASE_GRANTED ? lease : NULL,
        conflict,
        private_data);
+
+    /* Done exposing `conflict` to the cb; drop the try_insert pin (no-op unless
+     * it is a caching grant). */
+    chimera_vfs_state_conflict_unref(state, conflict);
 } /* chimera_vfs_lease_acquire */
 
 SYMBOL_EXPORT void

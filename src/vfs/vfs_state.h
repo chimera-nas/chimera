@@ -167,6 +167,16 @@ chimera_vfs_state_try_insert(
     struct chimera_vfs_lease      *lease,
     struct chimera_vfs_lease     **conflict_out);
 
+/* Release the reference chimera_vfs_state_try_insert() (and the async
+ * chimera_vfs_lease_acquire() built on it) holds on a conflicting CACHING grant
+ * returned in *conflict_out, so the grant cannot be freed by a racing close
+ * while the caller inspects the conflict.  A no-op for non-grant / NULL
+ * conflicts; call it exactly once, after the last dereference of `conflict`. */
+void
+chimera_vfs_state_conflict_unref(
+    struct chimera_vfs_state *state,
+    struct chimera_vfs_lease *conflict);
+
 /* Remove a previously-inserted lease.  Caller must NOT hold file->lock. */
 void
 chimera_vfs_state_remove(
