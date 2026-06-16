@@ -3289,6 +3289,11 @@ memfs_write(
     inode->mtime = now;
     inode->ctime = now;
 
+    /* POSIX kill-priv: a non-privileged write to a regular file clears the
+     * set-user-ID bit and the set-group-ID bit (when group-executable).  Named
+     * streams share the parent inode's mode, so this applies on either path. */
+    inode->mode = chimera_vfs_killpriv_mode(request->cred, inode->mode);
+
     memfs_map_attrs_fork(shared, &request->write.r_post_attr, inode, stream, request->fh);
 
     pthread_mutex_unlock(&inode->lock);
