@@ -433,7 +433,18 @@ chimera_io_uring_reap(
                                                 AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW | AT_STATX_SYNC_AS_STAT,
                                                 CHIMERA_IO_URING_STATX_MASK, stx);
                         } else {
-                            io_uring_prep_statx(sqe, parent_fd, name, AT_STATX_SYNC_AS_STAT,
+                            /* Stat the child by name with AT_SYMLINK_NOFOLLOW so a
+                             * symlink leaf reports its own S_IFLNK attrs even though
+                             * the openat() above followed it to the target.  An
+                             * OPEN_INFERRED open by name (e.g. the NFS server opening
+                             * an OPEN target directly) must surface the symlink to the
+                             * server -- which maps !S_ISREG to NFS4ERR_SYMLINK -> ELOOP
+                             * -- rather than silently following it.  The linux backend
+                             * does the same via fstatat(..., AT_SYMLINK_NOFOLLOW).
+                             * For a regular file or an already-resolved leaf this flag
+                             * is a no-op. */
+                            io_uring_prep_statx(sqe, parent_fd, name,
+                                                AT_SYMLINK_NOFOLLOW | AT_STATX_SYNC_AS_STAT,
                                                 CHIMERA_IO_URING_STATX_MASK, stx);
                         }
 
