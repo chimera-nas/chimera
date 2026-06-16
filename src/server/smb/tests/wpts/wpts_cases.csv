@@ -17,12 +17,12 @@ BVT_AppInstanceVersion_SMB311_LowerAppInstanceVersionLow,base,green,0,
 BVT_AppInstanceVersion_SMB311_SameVersion,base,green,0,
 BVT_Compound_RelatedRequests,base,green,0,
 BVT_Compound_UnRelatedRequests,base,green,0,
-BVT_CopyOffload,base,skip,0,copy-offload
+BVT_CopyOffload,base,green,0,
 BVT_CreateClose_CreateAndCloseDirectory,base,green,0,
 BVT_CreateClose_CreateAndCloseFile,base,green,0,
 BVT_DirectoryLeasing_LeaseBreakOnMultiClients,dirlease,xfail,0,
 BVT_DirectoryLeasing_ReadWriteHandleCaching,dirlease,green,0,
-BVT_DuplicateExtentsToFile,base,skip,0,copy-offload
+BVT_DuplicateExtentsToFile,base,green,0,
 BVT_DurableHandleV1_Reconnect_WithBatchOplock,persistent,green,0,
 BVT_DurableHandleV1_Reconnect_WithLeaseV1,persistent,green,0,
 BVT_DurableHandleV2_Reconnect_WithBatchOplock,persistent,green,0,
@@ -57,7 +57,7 @@ BVT_Negotiate_SMB311_Preauthentication_Encryption_GCM,encryption,green,0,
 BVT_Negotiate_SMB311_RdmaTransformCapabilities_IsSupported,base,skip,0,rdma
 BVT_Negotiate_SigningEnabled,base,green,0,
 BVT_NetworkInterfaceInfo_QuerySuccessful,multichannel,green,0,
-BVT_OffloadReadWrite,base,skip,0,copy-offload
+BVT_OffloadReadWrite,base,green,0,
 BVT_OpLockBreak,base,green,1,
 BVT_OpLockBreak_Lease,base,skip,0,oplock-lease
 BVT_PersistentHandle_Reconnect,persistent,green,0,
@@ -122,7 +122,7 @@ BVT_TreeMgmt_TreeConnectAndDisconnect,base,green,0,
 BVT_ValidateNegotiateInfo,base,green,0,
 Compound_Encrypt_RelatedRequests,encryption,green,0,
 Compound_Encrypt_UnrelatedRequests,encryption,green,0,
-CopyOffload_CopyContentWithinSameFile,base,skip,0,copy-offload
+CopyOffload_CopyContentWithinSameFile,base,green,0,
 CreateClose_CreateAndCloseDirWithDotDir,base,green,0,
 CreateClose_CreateAndCloseDirWithDoubleDotDir,base,green,0,
 CreateClose_CreateAndCloseFileWithDotDir,base,green,0,

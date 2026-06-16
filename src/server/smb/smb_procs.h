@@ -243,6 +243,15 @@ void chimera_smb_ioctl_request_resume_key(
 void chimera_smb_ioctl_copychunk(
     struct chimera_smb_request *request);
 
+void chimera_smb_ioctl_duplicate_extents(
+    struct chimera_smb_request *request);
+
+void chimera_smb_ioctl_offload_read(
+    struct chimera_smb_request *request);
+
+void chimera_smb_ioctl_offload_write(
+    struct chimera_smb_request *request);
+
 int chimera_smb_parse_change_notify(
     struct evpl_iovec_cursor   *request_cursor,
     struct chimera_smb_request *request);

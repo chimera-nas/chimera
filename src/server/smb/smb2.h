@@ -1041,6 +1041,22 @@ typedef uint8_t smb2_guid[SMB2_GUID_SIZE];
 #define SMB2_FSCTL_CREATE_OR_GET_OBJECT_ID          0x000900C0
 #define SMB2_FSCTL_SRV_ENUMERATE_SNAPSHOTS          0x00144064
 #define SMB2_FSCTL_LMR_REQUEST_RESILIENCY           0x001401D4
+#define SMB2_FSCTL_DUPLICATE_EXTENTS_TO_FILE        0x00098344
+#define SMB2_FSCTL_OFFLOAD_READ                     0x00094264
+#define SMB2_FSCTL_OFFLOAD_WRITE                    0x00098268
+
+/* ODX offload-token sizing (MS-FSCC 2.3.79.1 STORAGE_OFFLOAD_TOKEN):
+ * TokenType(4) + Reserved(2) + TokenIdLength(2) + TokenId(504) = 512 bytes.
+ * We mint a vendor token whose TokenId carries the source identity (see
+ * smb_proc_copyoffload.c).  The OFFLOAD_READ/WRITE output buffers are the
+ * fixed-size structs around it. */
+#define SMB2_OFFLOAD_TOKEN_SIZE                     512
+#define SMB2_OFFLOAD_TOKEN_ID_SIZE                  504
+#define SMB2_FSCTL_OFFLOAD_READ_OUTPUT_SIZE         (16 + SMB2_OFFLOAD_TOKEN_SIZE) /* Size(4)+Flags(4)+TransferLength(8)+Token */
+#define SMB2_FSCTL_OFFLOAD_WRITE_OUTPUT_SIZE        16                             /* Size(4)+Flags(4)+LengthWritten(8) */
+/* Vendor token type for our self-describing token (not a Windows-defined value;
+ * the client treats the token as opaque). */
+#define SMB2_OFFLOAD_TOKEN_TYPE_CHIMERA             0x43484d31U                    /* "CHM1" */
 
 /* Server policy for FSCTL_LMR_REQUEST_RESILIENCY: a Timeout of 0 selects the
  * default; any larger request is capped at the maximum (MS-SMB2 3.3.5.15.9). */
