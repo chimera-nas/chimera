@@ -4628,9 +4628,15 @@ memfs_rename_at(
 
     rb_tree_remove(&old_parent_inode->dir.dirents, &old_dirent->node);
 
-    if (S_ISDIR(child_inode->mode)) {
+    if (S_ISDIR(child_inode->mode) && cmp != 0) {
+        /* Cross-directory move of a directory: the source parent loses its
+         * subdirectory backlink and the destination parent gains one.  Also
+         * re-home the moved directory's ".." so it resolves to its new parent
+         * (memfs derives ".." from these stored fields, not a real dirent). */
         old_parent_inode->nlink--;
         new_parent_inode->nlink++;
+        child_inode->dir.parent_inum = new_parent_inode->inum;
+        child_inode->dir.parent_gen  = new_parent_inode->gen;
     }
 
     old_parent_inode->mtime = now;
