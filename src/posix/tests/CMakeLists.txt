@@ -1014,6 +1014,7 @@ set(PJD_TESTS
     chmod/05
     chmod/06
     chmod/07
+    chmod/12
     chown/00
     chown/01
     chown/02

@@ -3445,6 +3445,10 @@ cairn_write(
     inode->mtime       = now;
     inode->ctime       = now;
 
+    /* POSIX kill-priv: a non-privileged write to a regular file clears the
+     * set-user-ID bit and the set-group-ID bit (when group-executable). */
+    inode->mode = chimera_vfs_killpriv_mode(request->cred, inode->mode);
+
     cairn_map_attrs(shared, &request->write.r_post_attr, inode);
 
     cairn_put_inode(thread, inode);

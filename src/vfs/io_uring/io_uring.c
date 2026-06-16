@@ -286,6 +286,17 @@ chimera_io_uring_set_open_attrs(
         }
     }
 
+    /* Apply the exact requested mode.  io_uring_prep_openat() applies the mode
+     * argument through the process umask (and does not reliably carry the
+     * set-user-ID/set-group-ID bits), so a freshly created file may be missing
+     * bits the client asked for; the client has already applied the caller's
+     * own umask, so the backend must honor the mode verbatim. */
+    if (set_mask & CHIMERA_VFS_ATTR_MODE) {
+        if (fchmod(fd, attr->va_mode & 07777) < 0) {
+            return errno;
+        }
+    }
+
     if (set_mask & CHIMERA_VFS_ATTR_SIZE) {
         if (ftruncate(fd, attr->va_size) < 0) {
             return errno;
@@ -591,6 +602,28 @@ chimera_io_uring_reap(
                 if (cqe->res >= 0) {
                     request->status         = CHIMERA_VFS_OK;
                     request->write.r_length = cqe->res;
+
+                    /* POSIX kill-priv: a non-privileged write to a regular file
+                     * clears the set-user-ID bit and the set-group-ID bit (when
+                     * group-executable).  The server runs with CAP_FSETID, so
+                     * the host kernel does not do this for us; apply it against
+                     * the caller's credential.  Only a non-root UNIX writer can
+                     * trigger the clear, so skip the stat/chmod otherwise. */
+                    if (request->cred &&
+                        request->cred->flavor == CHIMERA_VFS_AUTH_UNIX &&
+                        request->cred->uid != 0) {
+                        int         wfd = (int) request->write.handle->vfs_private;
+                        struct stat wst;
+
+                        if (fstat(wfd, &wst) == 0) {
+                            uint32_t new_mode = chimera_vfs_killpriv_mode(
+                                request->cred, wst.st_mode);
+
+                            if (new_mode != (uint32_t) wst.st_mode) {
+                                (void) fchmod(wfd, new_mode & 07777);
+                            }
+                        }
+                    }
                 } else {
                     request->status         = chimera_linux_errno_to_status(-cqe->res);
                     request->write.r_length = 0;
@@ -1356,8 +1389,14 @@ chimera_io_uring_open_at(
     sqe = chimera_io_uring_get_sqe(thread, request, 0, 0);
 
     if (request->open_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
-        mode                                    = request->open_at.set_attr->va_mode;
-        request->open_at.set_attr->va_set_mask &= ~CHIMERA_VFS_ATTR_MODE;
+        mode = request->open_at.set_attr->va_mode;
+        /* For a create, leave ATTR_MODE set so set_open_attrs() fchmod()s the
+         * exact mode (openat's mode argument is filtered by the process umask).
+         * For a non-creating open there is nothing to fix up, so clear it to
+         * avoid touching the mode of an existing file. */
+        if (!(flags & O_CREAT)) {
+            request->open_at.set_attr->va_set_mask &= ~CHIMERA_VFS_ATTR_MODE;
+        }
     } else {
         mode = 0600;
     }

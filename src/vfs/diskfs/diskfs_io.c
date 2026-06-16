@@ -1841,6 +1841,14 @@ diskfs_write_finish_map(struct chimera_vfs_request *request)
     inode->ctime_sec  = now.tv_sec;
     inode->ctime_nsec = now.tv_nsec;
 
+    /* POSIX kill-priv: a non-privileged write to a regular file clears the
+     * set-user-ID bit and the set-group-ID bit (when group-executable).  When
+     * the mode actually changes, the inode block must be journaled (the
+     * deferred mtime-only path below would drop it from the txn). */
+    uint32_t new_mode = chimera_vfs_killpriv_mode(request->cred, inode->mode);
+    int      killpriv = (new_mode != inode->mode);
+    inode->mode = new_mode;
+
     diskfs_map_attrs(thread, &request->write.r_post_attr, inode);
 
     request->write.r_length = request->write.length;
@@ -1859,6 +1867,7 @@ diskfs_write_finish_map(struct chimera_vfs_request *request)
      */
     deferrable = diskfs_private->inplace_written &&
         !size_grew &&
+        !killpriv &&
         request->write.sync != CHIMERA_VFS_WRITE_FILESYNC &&
         shared->mtime_defer_us > 0;
 

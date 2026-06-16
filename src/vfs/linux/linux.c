@@ -668,7 +668,8 @@ chimera_linux_open_at(
 {
     int      parent_fd, fd, flags, rc;
     uint32_t mode;
-    char    *scratch = (char *) request->plugin_data;
+    int      have_mode = 0;
+    char    *scratch   = (char *) request->plugin_data;
 
     TERM_STR(fullname, request->open_at.name, request->open_at.namelen, scratch);
 
@@ -676,6 +677,7 @@ chimera_linux_open_at(
 
     if (request->open_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
         mode                                    = request->open_at.set_attr->va_mode;
+        have_mode                               = 1;
         request->open_at.set_attr->va_set_mask &= ~CHIMERA_VFS_ATTR_MODE;
         /* The explicit mode -- applied atomically by the openat() below -- is
          * authoritative on this mode-only backend.  An SMB create SD commonly
@@ -718,6 +720,20 @@ chimera_linux_open_at(
     }
 
     rc = chimera_linux_set_attrs(fd, "", request->open_at.set_attr);
+
+    /* openat() applies the requested mode through the process umask, so a
+     * freshly created file may be missing bits the client asked for (the
+     * client has already applied the caller's own umask, so the backend must
+     * honor the mode verbatim).  When an explicit mode was requested on a
+     * create, fchmod() it to the exact value -- this also restores the
+     * set-user-ID/set-group-ID bits, which openat()'s mode argument does not
+     * reliably carry. */
+    if (rc >= 0 && have_mode && (flags & O_CREAT)) {
+        if (fchmod(fd, mode & 07777) < 0) {
+            rc = -errno;
+        }
+    }
+
     chimera_restore_privilege(request->cred);
 
     if (rc < 0) {
@@ -1105,6 +1121,22 @@ chimera_linux_write(
     request->write.r_length = len;
 
     chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX, &request->write.r_post_attr, fd);
+
+    /* POSIX kill-priv: a non-privileged write to a regular file clears the
+     * set-user-ID bit and the set-group-ID bit (when group-executable).  The
+     * server runs with CAP_FSETID, so the host kernel does NOT do this for us
+     * (the write is issued under the server identity, not the caller's), so we
+     * apply it explicitly against the caller's credential. */
+    if (request->write.r_post_attr.va_set_mask & CHIMERA_VFS_ATTR_MODE) {
+        uint32_t new_mode = chimera_vfs_killpriv_mode(request->cred,
+                                                      request->write.r_post_attr.va_mode);
+
+        if (new_mode != request->write.r_post_attr.va_mode) {
+            if (fchmod(fd, new_mode & 07777) == 0) {
+                request->write.r_post_attr.va_mode = new_mode;
+            }
+        }
+    }
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
