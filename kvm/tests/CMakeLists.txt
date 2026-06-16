@@ -293,9 +293,10 @@ foreach(image_spec ${KVM_IMAGES})
     # kvm-test-base image (>= v1.2.0).  Matrix entries are "program|<space-
     # separated NFS versions>".  nfstest_lock is NFSv4-only here (NFSv3 byte-range
     # locking is NLM, which needs rpc.statd the guest does not run -- the other
-    # suites mount nolock for v3 for the same reason).  Not yet registered:
-    # nfstest_ssc (server-side COPY gap), nfstest_cache (needs a second client
-    # host), nfstest_delegation (real delegation/lock gaps) and nfstest_pnfs.
+    # suites mount nolock for v3 for the same reason); nfstest_xattr is
+    # NFSv4.2-only (RFC 8276).  Not yet registered: nfstest_ssc (server-side COPY
+    # gap), nfstest_cache (needs a second client host), nfstest_delegation (real
+    # delegation/lock gaps) and nfstest_pnfs.
     if(IMAGE_NAME STREQUAL "ubuntu2404")
         set(NFSTEST_MATRIX
             "nfstest_posix|3 4.0 4.1 4.2"
@@ -304,6 +305,7 @@ foreach(image_spec ${KVM_IMAGES})
             "nfstest_sparse|4.2"
             "nfstest_lock|4.1"
             "nfstest_dio|4.2"
+            "nfstest_xattr|4.2"
         )
         set(NFSTEST_BACKENDS ${KVM_BACKENDS})
         if(CAIRN_ENABLED)

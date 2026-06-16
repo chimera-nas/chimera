@@ -80,6 +80,19 @@ chimera_nfs4_xattr_supported(
     const void                *fh,
     int                        fhlen)
 {
+    /*
+     * The NFSv4 pseudo-root ("CHIMERA NFS4 ROOT FH", see nfs4_procs.h) is a
+     * synthetic gateway to the exported filesystems and has no backing VFS
+     * module, so chimera_vfs_module_capabilities() reports nothing for it.
+     * RFC 8276 clients probe FATTR4_XATTR_SUPPORT on the PUTROOTFH handle, so
+     * report TRUE there to reflect that the server implements xattrs (its real
+     * backends do); returning FALSE on the very root the client first sees
+     * would wrongly signal that the whole export tree lacks xattr support.
+     */
+    if (fhlen == 21 && memcmp(fh, "CHIMERA NFS4 ROOT FH", 21) == 0) {
+        return 1;
+    }
+
     return (chimera_vfs_module_capabilities(vfs_thread, fh, fhlen) &
             CHIMERA_VFS_CAP_XATTR) ? 1 : 0;
 } /* chimera_nfs4_xattr_supported */

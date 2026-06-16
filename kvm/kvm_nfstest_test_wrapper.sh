@@ -250,6 +250,18 @@ if [ "$NFSTEST_PROGRAM" = "nfstest_alloc" ]; then
     NFSTEST_EXTRA="${NFSTEST_EXTRA} --runtest ^perf01"
 fi
 
+# nfstest_xattr's delegation tests (the d* group: dgetxattr/dsetxattr/
+# dremovexattr/dlistxattr) take a read delegation on a *second* client and
+# assert a CB_RECALL fires when the first client mutates an xattr.  That needs a
+# second NFS client host (which this single-guest harness has not got) plus
+# protocol delegations; without them nfstest dereferences a missing recall
+# packet and aborts.  Skip those groups; the base + negative (n*) xattr tests
+# still run.  (--runtest negation is a single leading '^' on a comma list of
+# names; group names are expanded to their member tests.)
+if [ "$NFSTEST_PROGRAM" = "nfstest_xattr" ]; then
+    NFSTEST_EXTRA="${NFSTEST_EXTRA} --runtest ^dgetxattr,dsetxattr,dremovexattr,dlistxattr"
+fi
+
 # nfstest_sparse's per-lseek trace windows are the tightest (one SEEK each), so
 # give tcpdump extra time to flush before the trace is stopped.
 if [ "$NFSTEST_PROGRAM" = "nfstest_sparse" ]; then
