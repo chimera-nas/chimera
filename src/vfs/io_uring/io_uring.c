@@ -712,6 +712,17 @@ chimera_io_uring_thread_init(
     thread->evpl             = evpl;
     thread->readdir_verifier = shared->readdir_verifier;
 
+    /* Neutralise the process umask for create paths.  mkdirat/openat/mknodat
+     * apply the calling task's umask to the requested mode, but the mode handed
+     * to a VFS backend is already the final intended permission (the protocol /
+     * POSIX-client layer has applied any client umask), so a second masking in
+     * the kernel would silently drop e.g. group/other write from a 0777 mkdir.
+     * The linux backend avoids this by re-chmod'ing to the exact mode after the
+     * create; io_uring's create SQEs cannot, so clear the umask instead.  umask
+     * is process-wide; clearing it from each server worker is idempotent and
+     * harmless (chimera never wants a kernel umask). */
+    umask(0);
+
     // Set up single issuer mode
     params.flags  = IORING_SETUP_SINGLE_ISSUER;
     params.flags |= IORING_SETUP_COOP_TASKRUN;

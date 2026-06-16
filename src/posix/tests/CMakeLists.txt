@@ -1117,6 +1117,7 @@ set(PJD_TESTS
     rename/18
     rename/19
     rename/20
+    rename/21
     rename/22
     utimensat/00
     utimensat/01
