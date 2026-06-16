@@ -1121,6 +1121,7 @@ set(PJD_TESTS
     utimensat/01
     utimensat/02
     utimensat/04
+    utimensat/05
     utimensat/08
     utimensat/06
     utimensat/07
