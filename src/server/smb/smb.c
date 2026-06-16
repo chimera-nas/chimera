@@ -2192,6 +2192,31 @@ chimera_smb_server_notify(
             chimera_smb_info("Disconnected %s SMB connection from %s to %s, handled %lu requests",
                              conn->protocol == EVPL_DATAGRAM_RDMACM_RC ? "RDMA" : "TCP",
                              conn->remote_addr, conn->local_addr, conn->requests_completed);
+            /* Test hook: delay the START of disconnect processing -- BEFORE the
+             * connection is flagged disconnecting -- to deterministically model
+             * the PRE-NOTIFY race window.  In this window the server has not yet
+             * run the disconnect callback for the durable holder's (already
+             * TCP-closed) connection at all, so the holder still looks fully live
+             * (create_conn != NULL, disconnecting == 0) while a conflicting CREATE
+             * races in on another connection.  This is distinct from
+             * CHIMERA_SMB_TEST_DISCONNECT_DELAY_MS below, which delays the teardown
+             * AFTER disconnecting is set (the post-notify window).  The conflicting
+             * CREATE can still tell the holder is on its way out because its bind
+             * has already observed the peer FIN (evpl_bind_is_closing()).  Inert
+             * unless the environment variable is set; used by the smbtorture
+             * durable-open prenotify ctest entry. */
+            {
+                static int prenotify_delay_ms = -1;
+
+                if (prenotify_delay_ms < 0) {
+                    const char *d = getenv(
+                        "CHIMERA_SMB_TEST_DISCONNECT_NOTIFY_DELAY_MS");
+                    prenotify_delay_ms = d ? atoi(d) : 0;
+                }
+                if (prenotify_delay_ms > 0) {
+                    usleep(prenotify_delay_ms * 1000);
+                }
+            }
             /* Flag the connection disconnecting up front, before the (possibly
              * delayed) teardown that parks its durable handles.  A conflicting
              * CREATE racing in on another connection consults this through the

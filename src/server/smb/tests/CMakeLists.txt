@@ -4184,6 +4184,28 @@ if(CHIMERA_NETNS_TESTING AND SMBTORTURE_EXECUTABLE)
             RESOURCE_LOCK smb_durable_oplock_family)
     endforeach()
 
+    # PRE-NOTIFY race coverage: CHIMERA_SMB_TEST_DISCONNECT_NOTIFY_DELAY_MS holds
+    # the START of the disconnect callback -- BEFORE conn->disconnecting is set --
+    # so a conflicting CREATE lands while the durable holder still looks fully live
+    # (create_conn != NULL, disconnecting == 0) and only its bind reveals the peer
+    # FIN (evpl_bind_is_closing()).  This is the window CHIMERA_SMB_TEST_DISCONNECT
+    # _DELAY_MS (which delays teardown only AFTER disconnecting is set) cannot
+    # model, and the one that defeated #839 in CI.  open2-lease is the canonical
+    # case: a disconnected non-persistent RH-lease durable holder must yield to a
+    # second client's open.
+    foreach(_sub smb2.durable-open.open2-lease smb2.durable-open.open2-oplock)
+        string(REGEX REPLACE "[^A-Za-z0-9]" "_" _sid "${_sub}")
+        set(_name chimera/server/smb/smbtorture_${_sid}_prenotify_race_memfs)
+        add_test(NAME ${_name}
+            COMMAND ${CMAKE_SOURCE_DIR}/scripts/netns_test_wrapper.sh
+                    ${SMBTORTURE_CMD} -b memfs ${_sub})
+        set_tests_properties(${_name} PROPERTIES
+            ENVIRONMENT "${SMBTORTURE_LSAN};CHIMERA_SMB_TEST_DISCONNECT_NOTIFY_DELAY_MS=50"
+            SKIP_RETURN_CODE 77
+            TIMEOUT 300
+            RESOURCE_LOCK smb_durable_oplock_family)
+    endforeach()
+
     add_smbtorture_backend_tests(memfs)
     add_smbtorture_backend_tests(linux)
     add_smbtorture_backend_tests(diskfs_io_uring)
