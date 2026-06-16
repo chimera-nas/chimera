@@ -65,5 +65,6 @@ chimera_smb_logoff_reply(
     struct chimera_smb_request *request)
 {
     evpl_iovec_cursor_append_uint16(reply_cursor, SMB2_LOGOFF_REPLY_SIZE);
+    evpl_iovec_cursor_append_uint16(reply_cursor, 0); /* Reserved */
 } /* chimera_smb_logoff_reply */
 
