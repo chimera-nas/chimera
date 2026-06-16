@@ -360,6 +360,19 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
 
     evpl_iovec_cursor_reset_consumed(&reply_cursor);
 
+    /* Index of the last response that will actually be emitted: trailing
+     * alignment padding is only needed BETWEEN compounded responses (it aligns
+     * the next response's header); the final response goes out at its natural
+     * length.  A padded tail can confuse a client -- samba's client identifies a
+     * COPYCHUNK error-with-data reply by its exact 12-byte output size. */
+    int last_emitted = -1;
+
+    for (i = 0; i < compound->num_requests; i++) {
+        if (compound->requests[i]->status != SMB2_STATUS_PENDING) {
+            last_emitted = i;
+        }
+    }
+
     for (i = 0; i < compound->num_requests; i++) {
         request = compound->requests[i];
 
@@ -537,7 +550,8 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
         preauth_fold_len = evpl_iovec_cursor_consumed(&reply_cursor);
 
         /* Pad each response to an 8-byte boundary so the next compounded
-         * response's header is aligned. NEGOTIATE and SESSION_SETUP are never
+         * response's header is aligned -- but not the final emitted response,
+         * which ends at its natural length. NEGOTIATE and SESSION_SETUP are never
          * compounded and feed the SMB 3.1.1 preauth-integrity hash, which the
          * client computes over the message *as received* (no trailing pad):
          * emit them in canonical form so our hash matches the client's.
@@ -548,7 +562,8 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
          * dynamic data size is exactly sizeof(srv_copychunk_rsp) (12 bytes), so
          * trailing alignment padding would hide the limit body.  Such a reply is
          * never compounded after. */
-        if (request->smb2_hdr.command != SMB2_NEGOTIATE &&
+        if (i != last_emitted &&
+            request->smb2_hdr.command != SMB2_NEGOTIATE &&
             request->smb2_hdr.command != SMB2_SESSION_SETUP &&
             !(request->smb2_hdr.command == SMB2_IOCTL &&
               request->ioctl.cc_limit_response)) {

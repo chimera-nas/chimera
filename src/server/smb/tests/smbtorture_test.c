@@ -76,6 +76,13 @@ run_smbtorture(
     const char *converter = getenv("SMBTORTURE_JUNIT_CONVERTER");
     char        capfile[512];
 
+    /* Advertise server-side-copy resume-key support only for the memfs backend,
+     * the one against which the smb2.ioctl.copy_chunk family is verified.  With
+     * resume_key_support=no smbtorture self-skips the whole copy_chunk family, so
+     * memfs needs "yes" to actually exercise the COPYCHUNK conformance path; the
+     * other backends stay "no" until their copy_range coverage is validated. */
+    const char *resume_key = (strcmp(backend, "memfs") == 0) ? "yes" : "no";
+
     /* Size the command buffer to the base options plus every test name: a
      * consolidated suite run passes dozens, which overflowed the old fixed
      * buffer (the truncating snprintf underflowed sizeof()-off and aborted). */
@@ -95,7 +102,7 @@ run_smbtorture(
                    "smbtorture //127.0.0.1/share"
                    " -U myuser%%mypassword"
                    " --option=torture:samba3=yes"
-                   " --option=torture:resume_key_support=no"
+                   " --option=torture:resume_key_support=%s"
                    /* Provide the parameters that several suites abort
                     * without, so the real protocol logic runs instead of
                     * a "missing option" bail-out:
@@ -118,7 +125,8 @@ run_smbtorture(
                     * randomized input deterministic, so a suite that passes
                     * once passes always. */
                    " --seed=4242"
-                   " --fullname");
+                   " --fullname",
+                   resume_key);
 
     /* samba3misc's localposixlock test needs the share's on-disk path so
      * it can take a POSIX lock directly.  Only the passthrough backends

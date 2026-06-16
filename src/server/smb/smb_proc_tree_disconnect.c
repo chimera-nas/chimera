@@ -46,6 +46,7 @@ chimera_smb_tree_disconnect_reply(
 {
 
     evpl_iovec_cursor_append_uint16(reply_cursor, SMB2_TREE_DISCONNECT_REPLY_SIZE);
+    evpl_iovec_cursor_append_uint16(reply_cursor, 0); /* Reserved */
 
 } /* chimera_smb_tree_disconnect_reply */
 
