@@ -780,6 +780,18 @@ pjd_settle(void)
     nanosleep(&ts, NULL);
 } /* pjd_settle */
 
+/* True when running against an NFSv3 backend (nfs3_*).  NFSv3 has no
+ * server-side open-file state, so the client emulates open-unlink with
+ * silly-rename (.nfsXXXX): an open-but-unlinked file keeps link count 1 and
+ * lingers in its directory until close.  Tests that assert local-filesystem
+ * open-unlink semantics (nlink drops to 0 immediately) use this to relax those
+ * specific checks, since silly-rename is the correct NFSv3 behavior. */
+static inline int
+pjd_backend_is_nfs3(void)
+{
+    return pjd_env.backend && strncmp(pjd_env.backend, "nfs3", 4) == 0;
+} /* pjd_backend_is_nfs3 */
+
 /* atime/mtime seconds via lstat (no-follow); -1 on error. */
 static inline long
 pjd_lstat_atime(const char *name)
