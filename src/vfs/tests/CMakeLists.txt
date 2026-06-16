@@ -44,6 +44,10 @@ add_executable(vfs_enforce_test vfs_enforce_test.c)
 target_link_libraries(vfs_enforce_test chimera_vfs chimera_vfs_memfs evpl)
 add_test(chimera/vfs/enforce_test vfs_enforce_test)
 
+add_executable(vfs_clone_range_test vfs_clone_range_test.c)
+target_link_libraries(vfs_clone_range_test chimera_vfs chimera_vfs_memfs evpl)
+add_test(chimera/vfs/clone_range_test vfs_clone_range_test)
+
 add_executable(vfs_idmap_test vfs_idmap_test.c)
 target_link_libraries(vfs_idmap_test chimera_vfs)
 add_test(chimera/vfs/idmap_test vfs_idmap_test)

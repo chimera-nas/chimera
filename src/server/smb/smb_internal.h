@@ -810,6 +810,33 @@ struct chimera_smb_request {
             /* FSCTL_LMR_REQUEST_RESILIENCY (NETWORK_RESILIENCY_REQUEST,
              * MS-SMB2 2.2.31.3): requested resiliency Timeout in milliseconds. */
             uint32_t                        rr_timeout_ms;
+            /* FSCTL_DUPLICATE_EXTENTS_TO_FILE (DUPLICATE_EXTENTS_DATA, MS-FSCC
+             * 2.3.8 / MS-SMB2 2.2.31.1.1): SourceFileID(16) is an SMB2 FileId,
+             * SourceFileOffset(8), TargetFileOffset(8), ByteCount(8). */
+            struct chimera_smb_file_id      de_src_file_id;
+            uint64_t                        de_src_offset;
+            uint64_t                        de_dst_offset;
+            uint64_t                        de_length;
+            struct chimera_smb_open_file   *de_src_open_file;
+            struct chimera_smb_open_file   *de_dst_open_file;
+            /* Set once the zero-copy clone has fallen back to copy_range, so the
+             * completion callback doesn't loop the fallback again. */
+            uint8_t                         de_copy_fallback;
+            /* FSCTL_OFFLOAD_READ / FSCTL_OFFLOAD_WRITE (ODX, MS-FSCC 2.3.79-82).
+             * The 512-byte STORAGE_OFFLOAD_TOKEN is self-describing: it encodes
+             * the source open's FileId, the OFFLOAD_READ base offset, and the
+             * valid transfer length, so OFFLOAD_WRITE resolves the source the
+             * same way COPYCHUNK resolves a resume key (no server-side token
+             * table needed). */
+            uint64_t                        od_file_offset;
+            uint64_t                        od_copy_length;
+            uint64_t                        od_transfer_offset;
+            uint64_t                        od_transfer_length;
+            struct chimera_smb_file_id      od_src_file_id;
+            struct chimera_smb_open_file   *od_src_open_file;
+            struct chimera_smb_open_file   *od_dst_open_file;
+            uint8_t                         od_copy_fallback;
+            uint8_t                         od_token[512];
         } ioctl;
         struct {
             uint8_t                         info_type;
