@@ -1150,6 +1150,23 @@ macro(add_pjd_test path backend)
     endif()
 endmacro()
 
+# As add_pjd_test, but for NFS backends (nfs3_memfs / nfs4_memfs): each test
+# starts a Chimera NFS server + client in-process, so it needs a longer timeout
+# than the in-process VFS backends.
+macro(add_pjd_nfs_test path backend)
+    if(CHIMERA_NETNS_TESTING)
+        string(REPLACE "/" "_" _pjd_flat ${path})
+        add_test(NAME chimera/posix/pjd/${path}/${backend}
+            COMMAND ${NETNS_WRAPPER} ${CMAKE_CURRENT_BINARY_DIR}/posix_pjd_${_pjd_flat} -b ${backend})
+        get_target_property(_pjd_tf posix_pjd_${_pjd_flat} TEST_FILE)
+        set_tests_properties(chimera/posix/pjd/${path}/${backend} PROPERTIES
+            ENVIRONMENT "TEST_FILE=${_pjd_tf}"
+            SKIP_RETURN_CODE 77
+            TIMEOUT 120)
+        list(APPEND _pjd_test_names chimera/posix/pjd/${path}/${backend})
+    endif()
+endmacro()
+
 # Backends the pjd suite is green on are registered here.  memfs and cairn pass
 # 134/134; diskfs/passthrough/NFS are widened by follow-up PRs as they green.
 set(_pjd_test_names "")
@@ -1169,6 +1186,9 @@ foreach(t ${PJD_TESTS})
     if(CHIMERA_VFS_IO_URING)
         add_pjd_test(${t} io_uring)
     endif()
+    # NFS backends (Chimera NFS server + client over loopback, memfs export).
+    add_pjd_nfs_test(${t} nfs3_memfs)
+    add_pjd_nfs_test(${t} nfs4_memfs)
 endforeach()
 
 # Tag the non-pjd tests with the 'posix' label so that suite can be run

@@ -28,6 +28,10 @@ chimera_nfs4_open_at_callback(
     struct nfs_resop4               *getattr_res;
     xdr_opaque                      *remote_fh;
     struct chimera_nfs4_open_state  *state;
+    int                              path_open;
+
+    path_open = (request->open_at.flags & CHIMERA_VFS_OPEN_PATH) &&
+        !(request->open_at.flags & CHIMERA_VFS_OPEN_CREATE);
 
     if (unlikely(status)) {
         request->status = CHIMERA_VFS_EFAULT;
@@ -70,14 +74,20 @@ chimera_nfs4_open_at_callback(
         return;
     }
 
-    /* Check OPEN result */
+    /* Check OPEN / LOOKUP result */
     if (res->num_resarray < 3) {
         request->status = CHIMERA_VFS_EIO;
         request->complete(request);
         return;
     }
     open_res = &res->resarray[2];
-    if (open_res->opopen.status != NFS4_OK) {
+    if (path_open) {
+        if (open_res->oplookup.status != NFS4_OK) {
+            request->status = chimera_nfs4_status_to_errno(open_res->oplookup.status);
+            request->complete(request);
+            return;
+        }
+    } else if (open_res->opopen.status != NFS4_OK) {
         request->status = chimera_nfs4_status_to_errno(open_res->opopen.status);
         request->complete(request);
         return;
@@ -110,9 +120,10 @@ chimera_nfs4_open_at_callback(
         }
     }
 
-    /* Allocate and store open state with stateid
-     * Skip for inferred opens (use synthetic handles which don't call close). */
-    if (!(request->open_at.flags & CHIMERA_VFS_OPEN_INFERRED)) {
+    /* Allocate and store open state with stateid.  Skip for inferred opens
+     * (synthetic handles which don't call close) and for path opens (resolved
+     * via LOOKUP, so there is no OPEN stateid). */
+    if (!(request->open_at.flags & CHIMERA_VFS_OPEN_INFERRED) && !path_open) {
         state = chimera_nfs4_open_state_alloc();
 
         if (!state) {
@@ -153,8 +164,16 @@ chimera_nfs4_open_at(
     int                                      fhlen;
     struct chimera_nfs4_open_at_ctx         *ctx;
     struct OPEN4args                        *open_args;
+    int                                      path_open;
 
     ctx = request->plugin_data;
+
+    /* A metadata/path open (OPEN_PATH without O_CREAT) must not issue OP_OPEN:
+     * NFSv4 OPEN only works on regular files (EISDIR on a directory, EINVAL on
+     * a fifo/socket/device), but a path handle is needed for setattr/utimensat
+     * on any file type.  Resolve the leaf with OP_LOOKUP instead. */
+    path_open = (request->open_at.flags & CHIMERA_VFS_OPEN_PATH) &&
+        !(request->open_at.flags & CHIMERA_VFS_OPEN_CREATE);
 
     if (!server_thread) {
         request->status = CHIMERA_VFS_ESTALE;
@@ -190,6 +209,14 @@ chimera_nfs4_open_at(
     argarray[1].argop               = OP_PUTFH;
     argarray[1].opputfh.object.data = fh;
     argarray[1].opputfh.object.len  = fhlen;
+
+    /* Op 2: LOOKUP for a path open, OPEN otherwise. */
+    if (path_open) {
+        argarray[2].argop                 = OP_LOOKUP;
+        argarray[2].oplookup.objname.data = (void *) request->open_at.name;
+        argarray[2].oplookup.objname.len  = request->open_at.namelen;
+        goto emit_getfh;
+    }
 
     /* Op 2: OPEN - open/create the file */
     argarray[2].argop = OP_OPEN;
@@ -250,7 +277,9 @@ chimera_nfs4_open_at(
     open_args->claim.file.data = (void *) request->open_at.name;
     open_args->claim.file.len  = request->open_at.namelen;
 
-    /* Op 3: GETFH - get file handle for opened file */
+ emit_getfh:
+
+    /* Op 3: GETFH - get file handle for the opened/looked-up object */
     argarray[3].argop = OP_GETFH;
 
     /* Op 4: GETATTR - get attributes for opened file */
