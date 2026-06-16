@@ -614,6 +614,75 @@ test_range_breaks_caching(void)
     chimera_vfs_state_destroy(state);
 } /* test_range_breaks_caching */
 
+/* Test 11b: an NFSv4 client that holds a caching (delegation) lease may take a
+ * byte-range lock on the same file under a DIFFERENT lock-owner without
+ * conflicting with -- or recalling -- its own delegation (RFC 8881 §10.2: a
+ * delegation is per-client).  A range lock from a DIFFERENT NFSv4 client must
+ * still break the delegation. ------------------------------------------------ */
+static void
+test_nfs4_lock_vs_own_delegation(void)
+{
+    struct chimera_vfs_state      *state;
+    struct chimera_vfs_file_state *file;
+    struct chimera_vfs_lease       deleg, self_lock, other_lock;
+    enum chimera_vfs_lease_result  r;
+    struct chimera_vfs_lease      *conflict;
+    struct break_recorder          rec = { 0 };
+
+    fprintf(stderr, "\ntest_nfs4_lock_vs_own_delegation\n");
+
+    state = chimera_vfs_state_init();
+    file  = get_file(state, 1);
+
+    /* Client 0xA holds a WRITE delegation (caching W-lease).  A delegation is
+    * keyed by the file-handle hash, so its owner_lo differs from any lock. */
+    memset(&deleg, 0, sizeof(deleg));
+    deleg.kind         = CHIMERA_VFS_LEASE_CACHING;
+    deleg.mode.granted = CHIMERA_VFS_LEASE_MODE_W;
+    init_owner(&deleg.owner, CHIMERA_VFS_LEASE_PROTO_NFSV4, 0xA, 0xF11E);
+    deleg.owner.break_cb   = recording_break_cb;
+    deleg.owner.cb_private = &rec;
+
+    r = chimera_vfs_state_try_insert(state, file, &deleg, &conflict);
+    CHECK(r == CHIMERA_VFS_LEASE_GRANTED, "write delegation granted");
+
+    /* The SAME client takes a write byte-range lock under a different
+     * lock-owner -- granted outright, and the delegation is NOT recalled. */
+    memset(&self_lock, 0, sizeof(self_lock));
+    self_lock.kind         = CHIMERA_VFS_LEASE_RANGE;
+    self_lock.mode.granted = CHIMERA_VFS_LEASE_MODE_W;
+    self_lock.offset       = 0;
+    self_lock.length       = 100;
+    init_owner(&self_lock.owner, CHIMERA_VFS_LEASE_PROTO_NFSV4, 0xA, 0x10C0);
+
+    r = chimera_vfs_state_try_insert(state, file, &self_lock, &conflict);
+    CHECK(r == CHIMERA_VFS_LEASE_GRANTED,
+          "same-client lock on own delegated file granted");
+    CHECK(rec.fired == 0, "own delegation not recalled by the client's lock");
+
+    /* Drop the client's own range lock so the next probe is evaluated purely
+     * against the delegation (otherwise range-vs-range would deny it first). */
+    chimera_vfs_state_remove(state, file, &self_lock);
+
+    /* A DIFFERENT client's lock still breaks the delegation. */
+    memset(&other_lock, 0, sizeof(other_lock));
+    other_lock.kind         = CHIMERA_VFS_LEASE_RANGE;
+    other_lock.mode.granted = CHIMERA_VFS_LEASE_MODE_W;
+    other_lock.offset       = 0;
+    other_lock.length       = 100;
+    init_owner(&other_lock.owner, CHIMERA_VFS_LEASE_PROTO_NFSV4, 0xB, 0x20C0);
+
+    r = chimera_vfs_state_try_insert(state, file, &other_lock, &conflict);
+    CHECK(r == CHIMERA_VFS_LEASE_BREAKING,
+          "other-client lock breaks the delegation");
+    CHECK(rec.fired == 1, "delegation recalled for the other client");
+    CHECK(conflict == &deleg, "conflict reports the delegation holder");
+
+    chimera_vfs_state_remove(state, file, &deleg);
+    chimera_vfs_state_put(state, file);
+    chimera_vfs_state_destroy(state);
+} /* test_nfs4_lock_vs_own_delegation */
+
 /* Acquire-callback recorder for the async-API tests. */
 struct acquire_recorder {
     int                       fired;
@@ -993,6 +1062,7 @@ main(
     test_smb_lease_key_coalesces();
     test_caching_break_revoke();
     test_range_breaks_caching();
+    test_nfs4_lock_vs_own_delegation();
     test_async_acquire_immediate();
     test_async_acquire_wait_then_ack();
     test_async_acquire_cancel();
