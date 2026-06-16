@@ -702,6 +702,22 @@ chimera_vfs_state_would_conflict(
              * cache).  This is the "I/O breaks caching" rule applied
              * conservatively to range locks too. */
             for (cur = file->caching_leases; cur; cur = cur->next) {
+                /* NFSv4: a delegation is granted per-client (RFC 8881 §10.2),
+                 * so a byte-range lock the client takes on its own delegated
+                 * file -- under any lock-owner, read or write delegation -- does
+                 * not conflict with that delegation and must NOT recall it.  The
+                 * owner_equal / cb_private checks below miss this because a
+                 * delegation lease is keyed by the file-handle hash while a lock
+                 * lease is keyed by its lock-owner, so match on the client
+                 * directly.  (The SMB "read cache breaks on any range lock" rule
+                 * does not apply to NFSv4 delegations, so it is intentionally not
+                 * consulted here.)  Cross-client locks still fall through and
+                 * recall the holder's delegation below. */
+                if (cur->owner.protocol == CHIMERA_VFS_LEASE_PROTO_NFSV4 &&
+                    probe->owner.protocol == CHIMERA_VFS_LEASE_PROTO_NFSV4 &&
+                    cur->owner.client_key == probe->owner.client_key) {
+                    continue;
+                }
                 /* A byte-range lock and a caching lease held by the SAME open
                  * normally do not break each other (owner_equal, or -- for a
                  * lease keyed by its lease key rather than the file id -- the
