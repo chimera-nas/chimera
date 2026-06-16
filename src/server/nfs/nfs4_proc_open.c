@@ -81,6 +81,9 @@ chimera_nfs4_open_acquire_share(
 
     result = chimera_vfs_state_try_insert(vfs_state, file_state,
                                           &state->share_lease, &conflict);
+    /* This path does not dereference `conflict`; drop the pin try_insert may hold
+     * on it (no-op for a non-grant conflict). */
+    chimera_vfs_state_conflict_unref(vfs_state, conflict);
     if (result == CHIMERA_VFS_LEASE_BREAKING) {
         /* The conflict is a breakable holder -- an NFSv4 delegation being
          * recalled (try_insert already kicked the break).  Tell the client to
@@ -248,6 +251,9 @@ chimera_nfs4_open_grant_delegation(
 
     result = chimera_vfs_state_try_insert(vfs_state, file_state,
                                           &deleg->lease, &conflict);
+    /* This path does not dereference `conflict`; drop the pin try_insert may hold
+     * on it (no-op for a non-grant conflict). */
+    chimera_vfs_state_conflict_unref(vfs_state, conflict);
     if (result != CHIMERA_VFS_LEASE_GRANTED) {
         /* Contention (another open / lease): just decline to delegate. */
         chimera_vfs_state_put(vfs_state, file_state);
