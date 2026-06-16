@@ -383,26 +383,44 @@ if [ -n "${TEST_FILTER}" ]; then
     FILTER_ARGS=(--TestCaseFilter:"${_wpts_filter}")
 fi
 
+# Pre-seed the NuGet first-run "migration" marker so vstest never runs it.
+#
+# On its first startup NuGet performs a one-time migration; to make it run only
+# once across processes it grabs a *global named mutex* "NuGet-Migrations". The
+# .NET runtime backs a named mutex with a shared-memory file under the hardcoded
+# /tmp/.dotnet/shm/session<SID>/ directory (NOT relocatable via TMPDIR/HOME --
+# dotnet/runtime#49822). Under `ctest -j N` many wrapper invocations cold-start
+# vstest at once and race on creating/acquiring that mutex; the loser aborts in
+# ~2s with
+#   System.IO.IOException: The system cannot open the device or file specified.
+#                          : 'NuGet-Migrations'
+# before any test body runs, and passes on --rerun-failed (tracker #733).
+#
+# The migration -- and therefore the mutex -- is taken ONLY when its completion
+# marker is absent. The marker is a single empty file at
+#   $HOME/.local/share/NuGet/Migrations/1
+# (strace-confirmed). Once present, NuGet skips the migration entirely and never
+# touches the NuGet-Migrations mutex -- so no mutex means no race, regardless of
+# where the runtime decides to put the mutex's shm.
+#
+# Because we deliberately point HOME at the fresh per-session SESSION_DIR (to
+# keep each run's NuGet/.NET state isolated), that marker is missing on EVERY
+# run -- which is exactly why every run cold-starts the migration and races.
+# The previous fix (#837) gave each vstest its own POSIX session id via
+# `setsid` so it got a private shm dir; that did not work, because the migration
+# still runs on every cold HOME and the NuGet-Migrations mutex is not actually
+# scoped by the POSIX session id `setsid` changes. Seeding the marker removes
+# the migration step itself, so the mutex is never created and the race cannot
+# happen -- independent of where the shm lives.
+NUGET_MIGRATIONS_DIR="${SESSION_DIR}/.local/share/NuGet/Migrations"
+mkdir -p "${NUGET_MIGRATIONS_DIR}"
+: > "${NUGET_MIGRATIONS_DIR}/1"
+
 # Run the suite from inside the netns so it can reach the SUT IP.
 # Suppress the .NET first-run experience (telemetry notice + dev-cert
 # generation): it pollutes output and writes to HOME, which may be unset or
 # read-only under ctest/CI.
-#
-# Run under `setsid` so this vstest gets its own POSIX session id. The .NET
-# runtime backs named mutexes with shared-memory files under a hardcoded
-# /tmp/.dotnet/shm/session<SID>/ directory (the path is NOT relocatable via
-# TMPDIR/HOME -- see dotnet/runtime#49822), scoped by the *session* id. Under
-# `ctest -j N` every wrapper invocation is a child of the same ctest session,
-# so concurrent cold-start vstests collide on the one shared
-# session<SID>/NuGet-Migrations mutex; the loser of the first-run NuGet
-# migration race aborts in ~2s with
-#   System.IO.IOException: ... : 'NuGet-Migrations'
-# before any test body runs, and passes on --rerun-failed. Giving each vstest
-# its own session id (SID == its own pid) gives it a private shm directory, so
-# the mutex can no longer be shared or raced. `setsid -w` keeps us blocking on
-# the child and propagates its exit code.
-setsid -w \
-    ip netns exec "${NETNS_NAME}" env \
+ip netns exec "${NETNS_NAME}" env \
     DOTNET_CLI_TELEMETRY_OPTOUT=1 \
     DOTNET_NOLOGO=1 \
     DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1 \
