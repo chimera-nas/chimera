@@ -368,7 +368,10 @@ struct chimera_vfs_request_handle {
     uint8_t slot;
 };
 
-#define CHIMERA_VFS_REQUEST_MAX_HANDLES 3
+/* Max chained sub-operations (SQE slots) a single request may have outstanding.
+ * The io_uring open_at uses four: the O_EXCL create-probe, the EEXIST re-open,
+ * and the child + parent statx. */
+#define CHIMERA_VFS_REQUEST_MAX_HANDLES 4
 
 /* One enumerated named stream, packed back-to-back in the list_streams reply
  * buffer.  `name_len` bytes of (un-terminated) stream name follow this header;

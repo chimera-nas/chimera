@@ -343,13 +343,75 @@ chimera_io_uring_set_open_attrs(
     return 0;
 } /* chimera_io_uring_set_open_attrs */
 
+/* Finish a successful open_at: record the fd and whether the open created the
+ * file (for the SMB create_action), apply the create-time attributes, and chain
+ * the child/parent statx that populate the returned attributes.  Shared by the
+ * initial open and the EEXIST re-open of the create-probe. */
+static void
+chimera_io_uring_open_at_finish(
+    struct chimera_io_uring_thread *thread,
+    struct chimera_vfs_request     *request,
+    int                             fd,
+    int                             created)
+{
+    struct io_uring_sqe *sqe;
+    struct statx        *dir_stx, *stx;
+    const char          *name;
+    int                  parent_fd, rc;
+
+    request->status                = CHIMERA_VFS_OK;
+    request->open_at.r_vfs_private = fd;
+    request->open_at.r_created     = created;
+
+    dir_stx = (struct statx *) request->plugin_data;
+    stx     = (struct statx *) (dir_stx + 1);
+    name    = (char *) (stx + 1);
+
+    parent_fd = request->open_at.handle->vfs_private;
+
+    rc = chimera_io_uring_set_open_attrs(fd, request->open_at.set_attr);
+    if (rc != 0) {
+        request->status = chimera_linux_errno_to_status(rc);
+        return;
+    }
+
+    sqe = chimera_io_uring_get_sqe(thread, request, 1, 0);
+
+    if (request->open_at.flags & CHIMERA_VFS_OPEN_NOFOLLOW) {
+        io_uring_prep_statx(sqe, fd, "",
+                            AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW | AT_STATX_SYNC_AS_STAT,
+                            CHIMERA_IO_URING_STATX_MASK, stx);
+    } else {
+        /* Stat the child by name with AT_SYMLINK_NOFOLLOW so a symlink leaf
+         * reports its own S_IFLNK attrs even though the openat() above followed
+         * it to the target.  An OPEN_INFERRED open by name (e.g. the NFS server
+         * opening an OPEN target directly) must surface the symlink to the
+         * server -- which maps !S_ISREG to NFS4ERR_SYMLINK -> ELOOP -- rather
+         * than silently following it.  The linux backend does the same via
+         * fstatat(..., AT_SYMLINK_NOFOLLOW).  For a regular file or an
+         * already-resolved leaf this flag is a no-op. */
+        io_uring_prep_statx(sqe, parent_fd, name,
+                            AT_SYMLINK_NOFOLLOW | AT_STATX_SYNC_AS_STAT,
+                            CHIMERA_IO_URING_STATX_MASK, stx);
+    }
+
+    sqe = chimera_io_uring_get_sqe(thread, request, 2, 0);
+
+    io_uring_prep_statx(sqe, parent_fd, "", AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT,
+                        CHIMERA_IO_URING_STATX_MASK, dir_stx);
+
+    evpl_defer(thread->evpl, &thread->deferral);
+} /* chimera_io_uring_open_at_finish */
+
+static int chimera_io_uring_open_at_flags(
+    struct chimera_vfs_request *request);
+
 static void
 chimera_io_uring_reap(
     struct evpl                    *evpl,
     struct chimera_io_uring_thread *thread)
 {
     struct io_uring_cqe               *cqe;
-    int                                rc;
     int                                parent_fd;
     struct chimera_vfs_request        *request;
     struct chimera_vfs_request_handle *handle;
@@ -410,51 +472,51 @@ chimera_io_uring_reap(
                 break;
             case CHIMERA_VFS_OP_OPEN_AT:
                 if (handle->slot == 0) {
-                    if (cqe->res >= 0) {
-                        request->status                = CHIMERA_VFS_OK;
-                        request->open_at.r_vfs_private = cqe->res;
-                        dir_stx                        = (struct statx *) request->plugin_data;
-                        stx                            = (struct statx *) (dir_stx + 1);
-                        name                           = (char *) (stx + 1);
+                    int nonexcl_create =
+                        (request->open_at.flags & CHIMERA_VFS_OPEN_CREATE) &&
+                        !(request->open_at.flags & CHIMERA_VFS_OPEN_EXCLUSIVE);
 
+                    if (nonexcl_create && cqe->res == -EEXIST) {
+                        /* The O_EXCL create-probe found an existing file: re-open
+                         * it without O_EXCL (the base flags still carry O_TRUNC
+                         * for OVERWRITE_IF/SUPERSEDE).  r_created stays 0. */
+                        int         rflags = chimera_io_uring_open_at_flags(request);
+                        uint32_t    rmode;
+                        int         rpers;
+                        const char *rname;
+
+                        dir_stx   = (struct statx *) request->plugin_data;
+                        stx       = (struct statx *) (dir_stx + 1);
+                        rname     = (char *) (stx + 1);
                         parent_fd = request->open_at.handle->vfs_private;
 
-                        rc = chimera_io_uring_set_open_attrs(
-                            cqe->res, request->open_at.set_attr);
-                        if (rc != 0) {
-                            request->status = chimera_linux_errno_to_status(rc);
-                            break;
+                        rmode = (request->open_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE)
+                                ? request->open_at.set_attr->va_mode : 0600;
+
+                        rpers = chimera_io_uring_get_personality(thread, request->cred);
+
+                        sqe = chimera_io_uring_get_sqe(thread, request, 3, 0);
+                        io_uring_prep_openat(sqe, parent_fd, rname, rflags, rmode);
+                        if (rpers > 0) {
+                            sqe->personality = rpers;
                         }
-
-                        sqe = chimera_io_uring_get_sqe(thread, request, 1, 0);
-
-                        if (request->open_at.flags & CHIMERA_VFS_OPEN_NOFOLLOW) {
-                            io_uring_prep_statx(sqe, cqe->res, "",
-                                                AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW | AT_STATX_SYNC_AS_STAT,
-                                                CHIMERA_IO_URING_STATX_MASK, stx);
-                        } else {
-                            /* Stat the child by name with AT_SYMLINK_NOFOLLOW so a
-                             * symlink leaf reports its own S_IFLNK attrs even though
-                             * the openat() above followed it to the target.  An
-                             * OPEN_INFERRED open by name (e.g. the NFS server opening
-                             * an OPEN target directly) must surface the symlink to the
-                             * server -- which maps !S_ISREG to NFS4ERR_SYMLINK -> ELOOP
-                             * -- rather than silently following it.  The linux backend
-                             * does the same via fstatat(..., AT_SYMLINK_NOFOLLOW).
-                             * For a regular file or an already-resolved leaf this flag
-                             * is a no-op. */
-                            io_uring_prep_statx(sqe, parent_fd, name,
-                                                AT_SYMLINK_NOFOLLOW | AT_STATX_SYNC_AS_STAT,
-                                                CHIMERA_IO_URING_STATX_MASK, stx);
-                        }
-
-                        sqe = chimera_io_uring_get_sqe(thread, request, 2, 0);
-
-                        io_uring_prep_statx(sqe, parent_fd, "", AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT,
-                                            CHIMERA_IO_URING_STATX_MASK, dir_stx);
 
                         evpl_defer(thread->evpl, &thread->deferral);
 
+                    } else if (cqe->res >= 0) {
+                        /* A successful open with O_CREAT set created the file:
+                         * for a non-exclusive create the O_EXCL probe succeeded,
+                         * for an exclusive create the create itself succeeded. */
+                        chimera_io_uring_open_at_finish(
+                            thread, request, cqe->res,
+                            (request->open_at.flags & CHIMERA_VFS_OPEN_CREATE) ? 1 : 0);
+                    } else {
+                        request->status = chimera_linux_errno_to_status(-cqe->res);
+                    }
+                } else if (handle->slot == 3) {
+                    /* The non-exclusive-create re-open of an existing file. */
+                    if (cqe->res >= 0) {
+                        chimera_io_uring_open_at_finish(thread, request, cqe->res, 0);
                     } else {
                         request->status = chimera_linux_errno_to_status(-cqe->res);
                     }
@@ -1312,25 +1374,13 @@ chimera_io_uring_open_fh(
     request->complete(request);
 } /* io_uring_open */
 
-static void
-chimera_io_uring_open_at(
-    struct chimera_vfs_request *request,
-    void                       *private_data)
+/* Translate the VFS open flags into openat(2) flags.  Pure (no side effects):
+ * the open_at submission and its EEXIST re-open both rely on it producing the
+ * same result, so the re-open need not stash any state. */
+static int
+chimera_io_uring_open_at_flags(struct chimera_vfs_request *request)
 {
-    struct chimera_io_uring_thread *thread = private_data;
-    int                             parent_fd;
-    int                             flags, rc, personality;
-    uint32_t                        mode;
-    char                           *scratch = (char *) request->plugin_data;
-    struct io_uring_sqe            *sqe;
-
-    scratch += 2 * sizeof(struct statx);
-
-    TERM_STR(fullname, request->open_at.name, request->open_at.namelen, scratch);
-
-    parent_fd = request->open_at.handle->vfs_private;
-
-    flags = 0;
+    int flags = 0;
 
     if (request->open_at.flags & (CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY)) {
         flags |= O_RDONLY;
@@ -1369,6 +1419,38 @@ chimera_io_uring_open_at(
     }
 
     if (request->open_at.flags & CHIMERA_VFS_OPEN_EXCLUSIVE) {
+        flags |= O_EXCL;
+    }
+
+    return flags;
+} /* chimera_io_uring_open_at_flags */
+
+static void
+chimera_io_uring_open_at(
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    struct chimera_io_uring_thread *thread = private_data;
+    int                             parent_fd;
+    int                             flags, rc, personality;
+    uint32_t                        mode;
+    char                           *scratch = (char *) request->plugin_data;
+    struct io_uring_sqe            *sqe;
+
+    scratch += 2 * sizeof(struct statx);
+
+    TERM_STR(fullname, request->open_at.name, request->open_at.namelen, scratch);
+
+    parent_fd = request->open_at.handle->vfs_private;
+
+    flags = chimera_io_uring_open_at_flags(request);
+
+    /* For a non-exclusive create, probe with O_EXCL so we can tell whether this
+     * open creates the file (FILE_CREATED) or finds an existing one: on EEXIST
+     * the completion re-opens without O_EXCL.  This lets the SMB server report
+     * the correct create_action -- without it every passthrough create looks
+     * like FILE_OPENED.  Exclusive creates already carry O_EXCL. */
+    if ((flags & O_CREAT) && !(flags & O_EXCL)) {
         flags |= O_EXCL;
     }
 
