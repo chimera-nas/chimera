@@ -1191,9 +1191,30 @@ foreach(t ${PJD_TESTS})
     if(CHIMERA_VFS_IO_URING)
         add_pjd_test(${t} io_uring)
     endif()
-    # NFS backends (Chimera NFS server + client over loopback, memfs export).
+    # NFS backends (Chimera NFS server + client over loopback).  Run pjdfstest
+    # over the NFS server against every VFS backend (gated like the direct-backend
+    # registrations above), not just memfs, to exercise the server<->backend open
+    # path on each store.
     add_pjd_nfs_test(${t} nfs3_memfs)
     add_pjd_nfs_test(${t} nfs4_memfs)
+    if(CAIRN_ENABLED)
+        add_pjd_nfs_test(${t} nfs3_cairn)
+        add_pjd_nfs_test(${t} nfs4_cairn)
+    endif()
+    if(IO_URING_ENABLED)
+        add_pjd_nfs_test(${t} nfs3_diskfs_io_uring)
+        add_pjd_nfs_test(${t} nfs4_diskfs_io_uring)
+    endif()
+    if(HAVE_LIBAIO)
+        add_pjd_nfs_test(${t} nfs3_diskfs_aio)
+        add_pjd_nfs_test(${t} nfs4_diskfs_aio)
+    endif()
+    add_pjd_nfs_test(${t} nfs3_linux)
+    add_pjd_nfs_test(${t} nfs4_linux)
+    if(CHIMERA_VFS_IO_URING)
+        add_pjd_nfs_test(${t} nfs3_io_uring)
+        add_pjd_nfs_test(${t} nfs4_io_uring)
+    endif()
 endforeach()
 
 # Tag the non-pjd tests with the 'posix' label so that suite can be run
