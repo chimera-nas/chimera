@@ -250,6 +250,23 @@ if [ "$NFSTEST_PROGRAM" = "nfstest_alloc" ]; then
     NFSTEST_EXTRA="${NFSTEST_EXTRA} --runtest ^perf01"
 fi
 
+# nfstest_ssc: chimera implements NFSv4.2 COPY (intra-server), and every COPY
+# mechanic the suite checks -- handles, stateids, offsets, byte count, sync
+# reply, committed level, and that the copied data is correct -- passes.  But
+# each *data-copying* test then asserts "READs should not be sent to the server
+# after the COPY", i.e. that the client serves the post-copy verify read from
+# cache.  The Linux client's copy_file_range unconditionally invalidates the
+# destination page cache (nfs42_copy_dest_done -> truncate_pagecache_range), so
+# that read always goes to the wire -- against any server, knfsd included.  That
+# assertion tests client behaviour, not the server, so restrict the suite to the
+# subset that does not make it: the COPY error/edge cases (bad opens, offsets at
+# or beyond EOF) plus the zero-byte copy, which still exercise the COPY op path
+# and its error handling.  Inter-server tests need a second server and are
+# excluded by selecting only the intra cases.
+if [ "$NFSTEST_PROGRAM" = "nfstest_ssc" ]; then
+    NFSTEST_EXTRA="${NFSTEST_EXTRA} --runtest intra06,intra09,intra10,intra11,intra13"
+fi
+
 # nfstest_xattr's delegation tests (the d* group: dgetxattr/dsetxattr/
 # dremovexattr/dlistxattr) take a read delegation on a *second* client and
 # assert a CB_RECALL fires when the first client mutates an xattr.  That needs a
