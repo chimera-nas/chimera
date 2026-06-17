@@ -30,14 +30,18 @@
  * as a silent 300s ctest Timeout with no stack -- four tests have hit it
  * (lockf_linux, lockf_io_uring, fcntl_io_uring, cthon_lock_tlock_linux).
  *
- * Arm SIGALRM in the child well below the ctest timeout.  On fire, dump
- * every thread's kernel sleep location (procfs wchan -- localizes a hang to
- * its blocking syscall even for threads this handler cannot backtrace) plus
- * the signaled thread's userspace backtrace, then abort().  The SIGABRT
- * unblocks the parent's waitpid, so the test fails fast WITH diagnostics
- * instead of timing out silently.  The handler knowingly calls
- * async-signal-unsafe functions: the process is wedged and about to abort,
- * so a lost dump costs nothing over the status quo.
+ * Arm SIGALRM in the child well below the ctest timeout (overridable via
+ * CHIMERA_TEST_WATCHDOG_SECONDS for local repro).  On fire, dump every
+ * thread's kernel sleep location (procfs wchan -- localizes a hang to its
+ * blocking syscall even for threads this handler cannot backtrace), the
+ * signaled thread's userspace backtrace, AND a full all-thread userspace
+ * stack via gstack (the wchan + single-thread stack cannot name the
+ * userspace lock or its holder -- the decisive datum for a post-fork
+ * lock-family wedge), then abort().  The SIGABRT unblocks the parent's
+ * waitpid, so the test fails fast WITH diagnostics instead of timing out
+ * silently.  The handler knowingly calls async-signal-unsafe functions: the
+ * process is wedged and about to abort, so a lost dump costs nothing over
+ * the status quo.
  */
 static void
 posix_test_child_watchdog_fire(int sig)
@@ -82,6 +86,28 @@ posix_test_child_watchdog_fire(int sig)
     nframes = backtrace(frames, 64);
     backtrace_symbols_fd(frames, nframes, STDERR_FILENO);
 
+    {
+        /* Full all-thread userspace backtrace via gstack: backtrace() above
+         * only walks the signaled thread, and the procfs wchan list localizes
+         * each thread's blocking syscall but not the userspace lock owner -- so
+         * for a post-fork lock-family wedge (a worker parked on a mutex held by
+         * a thread that no longer exists) only an all-thread userspace stack
+         * identifies the offending lock and its holder.  Best-effort: gstack
+         * (gdb) may be unavailable, in which case the wchan dump above stands. */
+        char cmd[160];
+
+        snprintf(cmd, sizeof(cmd),
+                 "command -v gstack >/dev/null 2>&1 && gstack %d 1>&2",
+                 (int) getpid());
+        dprintf(STDERR_FILENO, "child-watchdog: gstack all threads:\n");
+        /* Best-effort: the watchdog is already aborting, so a failed dump is
+         * harmless.  A plain (void) cast does not silence glibc's
+         * warn_unused_result on system(), so consume the result explicitly. */
+        if (system(cmd) != 0) {
+            /* nothing actionable */
+        }
+    }
+
     signal(SIGABRT, SIG_DFL);
     abort();
 } /* posix_test_child_watchdog_fire */
@@ -90,6 +116,15 @@ static inline void
 posix_test_child_watchdog(unsigned int seconds)
 {
     struct sigaction sa;
+
+    const char      *ovr = getenv("CHIMERA_TEST_WATCHDOG_SECONDS");
+
+    if (ovr && *ovr) {
+        unsigned int s = (unsigned int) strtoul(ovr, NULL, 10);
+        if (s > 0) {
+            seconds = s;
+        }
+    }
 
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = posix_test_child_watchdog_fire;
