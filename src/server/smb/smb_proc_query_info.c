@@ -269,6 +269,31 @@ chimera_smb_query_info(struct chimera_smb_request *request)
 
     switch (request->query_info.info_type) {
         case SMB2_INFO_FILE:
+            /* The attribute-bearing FILE info classes require the handle to
+             * hold FILE_READ_ATTRIBUTES (MS-FSA 2.1.5.11): a handle opened with
+             * only FILE_READ_DATA cannot query FileBasicInformation and friends
+             * -> STATUS_ACCESS_DENIED (smb2.streams.attributes1).  Classes that
+             * carry no file attributes (standard sizes, internal id, EA size,
+             * position, mode, alignment, access, name) are not gated. */
+            switch (request->query_info.info_class) {
+                case SMB2_FILE_BASIC_INFO:
+                case SMB2_FILE_NETWORK_OPEN_INFO:
+                case SMB2_FILE_ATTRIBUTE_TAG_INFO:
+                case SMB2_FILE_COMPRESSION_INFO:
+                case SMB2_FILE_ALL_INFO:
+                    if (!(request->query_info.open_file->granted_access &
+                          SMB2_FILE_READ_ATTRIBUTES)) {
+                        status = SMB2_STATUS_ACCESS_DENIED;
+                    }
+                    break;
+                default:
+                    break;
+            } /* switch */
+
+            if (status != SMB2_STATUS_SUCCESS) {
+                break;
+            }
+
             /* Calculate the output buffer length based on the info class */
             switch (request->query_info.info_class) {
                 case SMB2_FILE_BASIC_INFO:
