@@ -587,43 +587,52 @@ chimera_smb_oplock_break(struct chimera_smb_request *request)
         open_file = chimera_smb_open_file_resolve_by_lease_key(
             request, request->oplock_break.lease_key);
 
-        if (open_file) {
-            if (open_file->grant) {
-                struct chimera_vfs_lease *lease    = &open_file->grant->lease;
-                uint8_t                   kept_vfs = chimera_smb_lease_bits_to_vfs(
-                    request->oplock_break.lease_state);
-
-                /* MS-SMB2 3.3.5.22.2: an ack is valid only while a break is
-                 * outstanding.  A duplicate ack (the lease already settled) is
-                 * STATUS_UNSUCCESSFUL. */
-                if (lease->break_state != CHIMERA_VFS_BREAK_BREAKING) {
-                    chimera_smb_open_file_release(request, open_file);
-                    chimera_smb_complete_request(request, SMB2_STATUS_UNSUCCESSFUL);
-                    return;
-                }
-
-                /* The acknowledged state may only DROP bits the break asked the
-                * holder to give up -- it must be a subset of the retained mask
-                * (break_needed_mode).  An ack that tries to keep a bit being
-                * broken (e.g. acking RWH to a W->RH break) is rejected with
-                * STATUS_REQUEST_NOT_ACCEPTED and the lease is left BREAKING. */
-                if (kept_vfs & ~lease->break_needed_mode) {
-                    chimera_smb_open_file_release(request, open_file);
-                    chimera_smb_complete_request(request,
-                                                 SMB2_STATUS_REQUEST_NOT_ACCEPTED);
-                    return;
-                }
-
-                struct chimera_vfs_lease_mode kept = {
-                    .granted = kept_vfs,
-                    .denied  = 0,
-                };
-
-                chimera_vfs_lease_ack(lease, kept);
-            }
-            open_file->lease_state = request->oplock_break.lease_state;
-            chimera_smb_open_file_release(request, open_file);
+        if (!open_file) {
+            /* MS-SMB2 3.3.5.22.2: no open on this session's tree holds the
+             * acknowledged LeaseKey.  This covers a forged/unknown LeaseKey and
+             * an ack sent by a different client (a distinct ClientGuid opens its
+             * own tree, which does not contain the lease holder) -- both are
+             * rejected with STATUS_OBJECT_NAME_NOT_FOUND rather than silently
+             * succeeding (dirlease Negative_Invalid{LeaseKey,ClientGuid}). */
+            chimera_smb_complete_request(request, SMB2_STATUS_OBJECT_NAME_NOT_FOUND);
+            return;
         }
+
+        if (open_file->grant) {
+            struct chimera_vfs_lease *lease    = &open_file->grant->lease;
+            uint8_t                   kept_vfs = chimera_smb_lease_bits_to_vfs(
+                request->oplock_break.lease_state);
+
+            /* MS-SMB2 3.3.5.22.2: an ack is valid only while a break is
+             * outstanding.  A duplicate ack (the lease already settled) is
+             * STATUS_UNSUCCESSFUL. */
+            if (lease->break_state != CHIMERA_VFS_BREAK_BREAKING) {
+                chimera_smb_open_file_release(request, open_file);
+                chimera_smb_complete_request(request, SMB2_STATUS_UNSUCCESSFUL);
+                return;
+            }
+
+            /* The acknowledged state may only DROP bits the break asked the
+            * holder to give up -- it must be a subset of the retained mask
+            * (break_needed_mode).  An ack that tries to keep a bit being
+            * broken (e.g. acking RWH to a W->RH break) is rejected with
+            * STATUS_REQUEST_NOT_ACCEPTED and the lease is left BREAKING. */
+            if (kept_vfs & ~lease->break_needed_mode) {
+                chimera_smb_open_file_release(request, open_file);
+                chimera_smb_complete_request(request,
+                                             SMB2_STATUS_REQUEST_NOT_ACCEPTED);
+                return;
+            }
+
+            struct chimera_vfs_lease_mode kept = {
+                .granted = kept_vfs,
+                .denied  = 0,
+            };
+
+            chimera_vfs_lease_ack(lease, kept);
+        }
+        open_file->lease_state = request->oplock_break.lease_state;
+        chimera_smb_open_file_release(request, open_file);
 
         /* The ack settled the lease; resume any CREATE that parked waiting for
          * this break to complete (MS-SMB2 pending-open). */
