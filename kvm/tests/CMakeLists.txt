@@ -7,6 +7,7 @@ set(NFS_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_nfs_test_wrapper.sh)
 set(NFS_REBOOT_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_nfs_reboot_test_wrapper.sh)
 set(NFS3_DRC_REBOOT_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_nfs3_drc_reboot_test_wrapper.sh)
 set(NFSTEST_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_nfstest_test_wrapper.sh)
+set(NFSTEST_2CLIENT_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_nfstest_2client_test_wrapper.sh)
 set(NFS40_DRC_REBOOT_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_nfs40_drc_reboot_test_wrapper.sh)
 set(NFS_MULTINODE_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_nfs_multinode_test_wrapper.sh)
 set(SMB_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_smb_test_wrapper.sh)
@@ -413,6 +414,22 @@ foreach(image_spec ${KVM_IMAGES})
                 endforeach()
             endforeach()
         endforeach()
+
+        # nfstest_delegation needs a *second*, distinct NFS client (its own
+        # network namespace = its own clientid to the server).  The 2-client
+        # wrapper boots a second guest and drives it over ssh (the v1.7.0 image
+        # bakes sshd + a key for exactly this), so the suite's cross-client
+        # recall/conflict tests run for real.  memfs + NFSv4.1 only for now (the
+        # backend/version validated end-to-end); a small residual cluster is
+        # excluded inside the wrapper (see its NFSTEST_RUNTEST).  The two guests
+        # plus the server make this a ~15-20 min run, well past the CI-wide
+        # `ctest --timeout 300`, so give it a per-test timeout that overrides it.
+        add_test(NAME chimera/kvm/${IMAGE_NAME}/nfstest/nfstest_delegation_memfs_nfs4.1
+            COMMAND bash ${NFSTEST_2CLIENT_WRAPPER}
+                    ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
+                    ${CHIMERA_BINARY} memfs 4.1 nfstest_delegation)
+        set_tests_properties(chimera/kvm/${IMAGE_NAME}/nfstest/nfstest_delegation_memfs_nfs4.1
+            PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 4 TIMEOUT 1800)
     endif()
 
     # Linux Test Project (LTP) -- ubuntu2404 only.  Reuses the plain NFS wrapper:
