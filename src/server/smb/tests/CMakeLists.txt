@@ -1384,7 +1384,10 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.multichannel.bugs.bug_15346
     smb2.multichannel.generic.interface_info
     smb2.multichannel.generic.num_channels
+    smb2.multichannel.leases.test1
+    smb2.multichannel.leases.test3
     smb2.multichannel.oplocks.test1
+    smb2.multichannel.oplocks.test2
     # smb2.notify-inotify
     smb2.notify-inotify.inotify-rename
     # smb2.notify
@@ -1470,6 +1473,12 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.replay.dhv2-pending1n-vs-oplock-sane
     smb2.replay.dhv2-pending1o-vs-lease-sane
     smb2.replay.dhv2-pending1o-vs-oplock-sane
+    smb2.replay.dhv2-pending3l-vs-lease-sane
+    smb2.replay.dhv2-pending3l-vs-oplock-sane
+    smb2.replay.dhv2-pending3n-vs-lease-sane
+    smb2.replay.dhv2-pending3n-vs-oplock-sane
+    smb2.replay.dhv2-pending3o-vs-lease-sane
+    smb2.replay.dhv2-pending3o-vs-oplock-sane
     smb2.replay.durable-reconnect-replay1
     smb2.replay.durable-reconnect-replay2
     smb2.replay.durable-reconnect-replay3
@@ -1480,6 +1489,8 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.replay.replay-dhv2-lease3
     smb2.replay.replay-dhv2-oplock-lease
     smb2.replay.replay-dhv2-oplock1
+    smb2.replay.replay-dhv2-oplock2
+    smb2.replay.replay-dhv2-oplock3
     smb2.replay.replay-regular
     smb2.replay.replay-twice-durable
     smb2.replay.replay3
@@ -1930,6 +1941,7 @@ set(SMBTORTURE_ENABLED_linux
     smb2.multichannel.leases.test1
     smb2.multichannel.leases.test3
     smb2.multichannel.oplocks.test1
+    smb2.multichannel.oplocks.test2
     # smb2.notify-inotify
     smb2.notify-inotify.inotify-rename
     # smb2.notify
@@ -2013,6 +2025,12 @@ set(SMBTORTURE_ENABLED_linux
     smb2.replay.dhv2-pending1n-vs-oplock-sane
     smb2.replay.dhv2-pending1o-vs-lease-sane
     smb2.replay.dhv2-pending1o-vs-oplock-sane
+    smb2.replay.dhv2-pending3l-vs-lease-sane
+    smb2.replay.dhv2-pending3l-vs-oplock-sane
+    smb2.replay.dhv2-pending3n-vs-lease-sane
+    smb2.replay.dhv2-pending3n-vs-oplock-sane
+    smb2.replay.dhv2-pending3o-vs-lease-sane
+    smb2.replay.dhv2-pending3o-vs-oplock-sane
     smb2.replay.durable-reconnect-replay1
     smb2.replay.durable-reconnect-replay2
     smb2.replay.durable-reconnect-replay3
@@ -2445,6 +2463,7 @@ set(SMBTORTURE_ENABLED_io_uring
     smb2.multichannel.leases.test1
     smb2.multichannel.leases.test3
     smb2.multichannel.oplocks.test1
+    smb2.multichannel.oplocks.test2
     # smb2.notify-inotify
     smb2.notify-inotify.inotify-rename
     # smb2.notify
@@ -2528,6 +2547,12 @@ set(SMBTORTURE_ENABLED_io_uring
     smb2.replay.dhv2-pending1n-vs-oplock-sane
     smb2.replay.dhv2-pending1o-vs-lease-sane
     smb2.replay.dhv2-pending1o-vs-oplock-sane
+    smb2.replay.dhv2-pending3l-vs-lease-sane
+    smb2.replay.dhv2-pending3l-vs-oplock-sane
+    smb2.replay.dhv2-pending3n-vs-lease-sane
+    smb2.replay.dhv2-pending3n-vs-oplock-sane
+    smb2.replay.dhv2-pending3o-vs-lease-sane
+    smb2.replay.dhv2-pending3o-vs-oplock-sane
     smb2.replay.durable-reconnect-replay1
     smb2.replay.durable-reconnect-replay2
     smb2.replay.durable-reconnect-replay3
@@ -2914,13 +2939,18 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.lease.complex1
     smb2.lease.duplicate_create
     smb2.lease.duplicate_open
+    smb2.lease.initial_delete_disconnect
+    smb2.lease.initial_delete_logoff
+    smb2.lease.initial_delete_tdis
     smb2.lease.multibreak
     smb2.lease.nobreakself
+    smb2.lease.oplock
     smb2.lease.rename_wait
     smb2.lease.statopen
     smb2.lease.statopen2
     smb2.lease.statopen3
     smb2.lease.statopen4
+    smb2.lease.unlink
     smb2.lease.upgrade
     smb2.lease.upgrade2
     smb2.lease.upgrade3
@@ -2972,7 +3002,10 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.multichannel.bugs.bug_15346
     smb2.multichannel.generic.interface_info
     smb2.multichannel.generic.num_channels
+    smb2.multichannel.leases.test1
+    smb2.multichannel.leases.test3
     smb2.multichannel.oplocks.test1
+    smb2.multichannel.oplocks.test2
     # smb2.notify-inotify
     smb2.notify-inotify.inotify-rename
     # smb2.notify
@@ -3006,16 +3039,22 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.oplock.batch14
     smb2.oplock.batch15
     smb2.oplock.batch16
+    smb2.oplock.batch19
     smb2.oplock.batch2
+    smb2.oplock.batch20
     smb2.oplock.batch21
     smb2.oplock.batch23
     smb2.oplock.batch24
     smb2.oplock.batch25
+    smb2.oplock.batch3
     smb2.oplock.batch4
     smb2.oplock.batch5
     smb2.oplock.batch6
+    smb2.oplock.batch7
     smb2.oplock.batch8
+    smb2.oplock.brl1
     smb2.oplock.brl2
+    smb2.oplock.brl3
     smb2.oplock.exclusive1
     smb2.oplock.exclusive2
     smb2.oplock.exclusive3
@@ -3052,6 +3091,12 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.replay.dhv2-pending1n-vs-oplock-sane
     smb2.replay.dhv2-pending1o-vs-lease-sane
     smb2.replay.dhv2-pending1o-vs-oplock-sane
+    smb2.replay.dhv2-pending3l-vs-lease-sane
+    smb2.replay.dhv2-pending3l-vs-oplock-sane
+    smb2.replay.dhv2-pending3n-vs-lease-sane
+    smb2.replay.dhv2-pending3n-vs-oplock-sane
+    smb2.replay.dhv2-pending3o-vs-lease-sane
+    smb2.replay.dhv2-pending3o-vs-oplock-sane
     smb2.replay.durable-reconnect-replay1
     smb2.replay.durable-reconnect-replay2
     smb2.replay.durable-reconnect-replay3
@@ -3062,6 +3107,8 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.replay.replay-dhv2-lease3
     smb2.replay.replay-dhv2-oplock-lease
     smb2.replay.replay-dhv2-oplock1
+    smb2.replay.replay-dhv2-oplock2
+    smb2.replay.replay-dhv2-oplock3
     smb2.replay.replay-regular
     smb2.replay.replay-twice-durable
     smb2.replay.replay3
@@ -3527,7 +3574,10 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.multichannel.bugs.bug_15346
     smb2.multichannel.generic.interface_info
     smb2.multichannel.generic.num_channels
+    smb2.multichannel.leases.test1
+    smb2.multichannel.leases.test3
     smb2.multichannel.oplocks.test1
+    smb2.multichannel.oplocks.test2
     # smb2.notify-inotify
     smb2.notify-inotify.inotify-rename
     # smb2.notify
@@ -3613,6 +3663,12 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.replay.dhv2-pending1n-vs-oplock-sane
     smb2.replay.dhv2-pending1o-vs-lease-sane
     smb2.replay.dhv2-pending1o-vs-oplock-sane
+    smb2.replay.dhv2-pending3l-vs-lease-sane
+    smb2.replay.dhv2-pending3l-vs-oplock-sane
+    smb2.replay.dhv2-pending3n-vs-lease-sane
+    smb2.replay.dhv2-pending3n-vs-oplock-sane
+    smb2.replay.dhv2-pending3o-vs-lease-sane
+    smb2.replay.dhv2-pending3o-vs-oplock-sane
     smb2.replay.durable-reconnect-replay1
     smb2.replay.durable-reconnect-replay2
     smb2.replay.durable-reconnect-replay3
@@ -3623,6 +3679,8 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.replay.replay-dhv2-lease3
     smb2.replay.replay-dhv2-oplock-lease
     smb2.replay.replay-dhv2-oplock1
+    smb2.replay.replay-dhv2-oplock2
+    smb2.replay.replay-dhv2-oplock3
     smb2.replay.replay-regular
     smb2.replay.replay-twice-durable
     smb2.replay.replay3
@@ -4022,13 +4080,18 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     smb2.lease.complex1
     smb2.lease.duplicate_create
     smb2.lease.duplicate_open
+    smb2.lease.initial_delete_disconnect
+    smb2.lease.initial_delete_logoff
+    smb2.lease.initial_delete_tdis
     smb2.lease.multibreak
     smb2.lease.nobreakself
+    smb2.lease.oplock
     smb2.lease.rename_wait
     smb2.lease.statopen
     smb2.lease.statopen2
     smb2.lease.statopen3
     smb2.lease.statopen4
+    smb2.lease.unlink
     smb2.lease.upgrade
     smb2.lease.upgrade2
     smb2.lease.upgrade3
@@ -4080,7 +4143,10 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     smb2.multichannel.bugs.bug_15346
     smb2.multichannel.generic.interface_info
     smb2.multichannel.generic.num_channels
+    smb2.multichannel.leases.test1
+    smb2.multichannel.leases.test3
     smb2.multichannel.oplocks.test1
+    smb2.multichannel.oplocks.test2
     # smb2.notify-inotify
     smb2.notify-inotify.inotify-rename
     # smb2.notify
@@ -4114,16 +4180,22 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     smb2.oplock.batch14
     smb2.oplock.batch15
     smb2.oplock.batch16
+    smb2.oplock.batch19
     smb2.oplock.batch2
+    smb2.oplock.batch20
     smb2.oplock.batch21
     smb2.oplock.batch23
     smb2.oplock.batch24
     smb2.oplock.batch25
+    smb2.oplock.batch3
     smb2.oplock.batch4
     smb2.oplock.batch5
     smb2.oplock.batch6
+    smb2.oplock.batch7
     smb2.oplock.batch8
+    smb2.oplock.brl1
     smb2.oplock.brl2
+    smb2.oplock.brl3
     smb2.oplock.exclusive1
     smb2.oplock.exclusive2
     smb2.oplock.exclusive3
@@ -4160,6 +4232,12 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     smb2.replay.dhv2-pending1n-vs-oplock-sane
     smb2.replay.dhv2-pending1o-vs-lease-sane
     smb2.replay.dhv2-pending1o-vs-oplock-sane
+    smb2.replay.dhv2-pending3l-vs-lease-sane
+    smb2.replay.dhv2-pending3l-vs-oplock-sane
+    smb2.replay.dhv2-pending3n-vs-lease-sane
+    smb2.replay.dhv2-pending3n-vs-oplock-sane
+    smb2.replay.dhv2-pending3o-vs-lease-sane
+    smb2.replay.dhv2-pending3o-vs-oplock-sane
     smb2.replay.durable-reconnect-replay1
     smb2.replay.durable-reconnect-replay2
     smb2.replay.durable-reconnect-replay3
@@ -4170,6 +4248,8 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     smb2.replay.replay-dhv2-lease3
     smb2.replay.replay-dhv2-oplock-lease
     smb2.replay.replay-dhv2-oplock1
+    smb2.replay.replay-dhv2-oplock2
+    smb2.replay.replay-dhv2-oplock3
     smb2.replay.replay-regular
     smb2.replay.replay-twice-durable
     smb2.replay.replay3
