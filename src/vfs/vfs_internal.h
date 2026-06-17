@@ -388,11 +388,10 @@ chimera_vfs_complete(struct chimera_vfs_request *request)
                                          &request->start_time);
     }
 
-    /* Annotate (op name, attrs, status) and end the trace span.  The recording
-     * test is an inline flag check, so unsampled ops pay nothing here. */
-    if (otel_span_recording(&request->otel)) {
-        chimera_vfs_trace_complete(request);
-    }
+    /* Annotate (op name, attrs, status) and end the trace span.  The macro's
+     * recording test is an inline flag check (unsampled ops pay nothing), and
+     * the whole call compiles out when tracing is disabled. */
+    chimera_vfs_trace_complete(request);
 
     /* Re-publish this op's trace parent so the proto completion callback that
      * runs next (on this thread) issues any chained sibling VFS op under the same

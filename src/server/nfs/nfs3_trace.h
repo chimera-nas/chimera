@@ -15,6 +15,8 @@
 
 #include "nfs_common.h"
 
+#if CHIMERA_HAVE_OTEL
+
 void _nfs3_trace_null(
     struct nfs_request *req);
 void _nfs3_trace_getattr(
@@ -83,6 +85,12 @@ void _nfs3_trace_commit(
 
 #define nfs3_trace_(req, fn, ...) \
         do { if (otel_span_recording(&(req)->otel)) { fn(req, ## __VA_ARGS__); } } while (0)
+
+#else  /* !CHIMERA_HAVE_OTEL : tracing compiled out -- calls vanish entirely */
+
+#define nfs3_trace_(req, fn, ...)         do { } while (0)
+
+#endif /* CHIMERA_HAVE_OTEL */
 
 #define nfs3_trace_null(req)              nfs3_trace_(req, _nfs3_trace_null)
 #define nfs3_trace_getattr(req, args)     nfs3_trace_(req, _nfs3_trace_getattr, args)

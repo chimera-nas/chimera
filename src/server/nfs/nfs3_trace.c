@@ -10,6 +10,9 @@
  */
 
 #include "nfs3_trace.h"
+
+#if CHIMERA_HAVE_OTEL
+
 #include "common/format.h"
 
 /* NFSv3 file handles are at most NFS3_FHSIZE (64) bytes on the wire. */
@@ -247,3 +250,5 @@ _nfs3_trace_commit(
     otel_span_attr_u64(&req->otel, "nfs.offset", args->offset);
     otel_span_attr_u64(&req->otel, "nfs.count", args->count);
 } /* _nfs3_trace_commit */
+
+#endif /* CHIMERA_HAVE_OTEL */

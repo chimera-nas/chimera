@@ -6,10 +6,13 @@
  * NFSv4 span tracing (see nfs4_trace.h).  Runs only for a recording span.
  */
 
+#include "nfs4_trace.h"
+
+#if CHIMERA_HAVE_OTEL
+
 #include <string.h>
 #include <stdio.h>
 
-#include "nfs4_trace.h"
 #include "common/format.h"
 
 static const char *
@@ -170,3 +173,5 @@ _nfs4_trace_compound(
     }
     otel_span_attr_strn(&req->otel, "nfs4.ops", ops, (size_t) off);
 } /* _nfs4_trace_compound */
+
+#endif /* CHIMERA_HAVE_OTEL */
