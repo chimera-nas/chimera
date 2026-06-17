@@ -108,6 +108,8 @@ _smb_trace_op_begin(
                 otel_span_attr_strn(s, "smb.name",
                                     request->create.name, request->create.name_len);
             }
+            otel_span_attr_u64(s, "smb.desired_access", request->create.desired_access);
+            otel_span_attr_u64(s, "smb.disposition", request->create.create_disposition);
             break;
         case SMB2_READ:
             otel_span_attr_u64(s, "smb.offset", request->read.offset);
@@ -121,6 +123,33 @@ _smb_trace_op_begin(
             break;
         case SMB2_CLOSE:
             smb_trace_file_id(s, &request->close.file_id);
+            break;
+        case SMB2_FLUSH:
+            smb_trace_file_id(s, &request->flush.file_id);
+            break;
+        case SMB2_LOCK:
+            smb_trace_file_id(s, &request->lock.file_id);
+            break;
+        case SMB2_IOCTL:
+            otel_span_attr_u64(s, "smb.ctl_code", request->ioctl.ctl_code);
+            smb_trace_file_id(s, &request->ioctl.file_id);
+            break;
+        case SMB2_QUERY_INFO:
+            otel_span_attr_u64(s, "smb.info_type", request->query_info.info_type);
+            otel_span_attr_u64(s, "smb.info_class", request->query_info.info_class);
+            smb_trace_file_id(s, &request->query_info.file_id);
+            break;
+        case SMB2_SET_INFO:
+            otel_span_attr_u64(s, "smb.info_type", request->set_info.info_type);
+            otel_span_attr_u64(s, "smb.info_class", request->set_info.info_class);
+            smb_trace_file_id(s, &request->set_info.file_id);
+            break;
+        case SMB2_QUERY_DIRECTORY:
+            if (request->query_directory.pattern_length > 0) {
+                otel_span_attr_strn(s, "smb.pattern", request->query_directory.pattern,
+                                    request->query_directory.pattern_length);
+            }
+            smb_trace_file_id(s, &request->query_directory.file_id);
             break;
         default:
             break;
