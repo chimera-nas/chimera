@@ -354,6 +354,67 @@ chimera_smb_close_stream_open_callback(
         request);
 } /* chimera_smb_close_stream_open_callback */
 
+/* Completion of the deferred base-file removal performed when the last named
+ * stream keeping a delete-pending base alive is closed (smb2.streams.delete). */
+static void
+chimera_smb_close_stream_base_remove_callback(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *pre_attr,
+    struct chimera_vfs_attrs *post_attr,
+    void                     *private_data)
+{
+    struct chimera_smb_request *request    = private_data;
+    struct chimera_vfs_thread  *vfs_thread = request->compound->thread->vfs_thread;
+
+    (void) pre_attr;
+    (void) post_attr;
+
+    if (error_code) {
+        chimera_smb_debug("stream delete-pending: base remove_at failed (error %d)",
+                          error_code);
+    }
+
+    chimera_vfs_release(vfs_thread, request->close.parent_handle);
+    request->close.parent_handle = NULL;
+    chimera_smb_open_file_release(request, request->close.open_file);
+    chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+} /* chimera_smb_close_stream_base_remove_callback */
+
+/* The base file's parent directory is open; remove the (delete-pending) base
+ * file now that its last named-stream holder has closed. */
+static void
+chimera_smb_close_stream_base_parent_callback(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *oh,
+    void                           *private_data)
+{
+    struct chimera_smb_request   *request    = private_data;
+    struct chimera_vfs_thread    *vfs_thread = request->compound->thread->vfs_thread;
+    struct chimera_smb_open_file *open_file  = request->close.open_file;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_smb_open_file_release(request, open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+        return;
+    }
+
+    request->close.parent_handle = oh;
+
+    chimera_vfs_remove_at(
+        vfs_thread,
+        &request->session_handle->session->cred,
+        oh,
+        open_file->name,
+        open_file->name_len,
+        NULL,
+        0,
+        0,
+        0,
+        NULL,
+        chimera_smb_close_stream_base_remove_callback,
+        request);
+} /* chimera_smb_close_stream_base_parent_callback */
+
 /*
  * Release the VFS handle and check for delete-on-close.
  *
@@ -400,6 +461,47 @@ chimera_smb_close_release(struct chimera_smb_request *request)
             CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
             chimera_smb_close_stream_open_callback,
             request);
+        return;
+    }
+
+    /* Last close of a named stream that kept a delete-pending base file alive:
+     * perform the deferred base removal now (smb2.streams.delete).  Excludes
+     * this open's own base reservation when checking for other holders, so the
+     * removal fires only on the final stream close. */
+    if ((open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_STREAM) &&
+        open_file->base_share_file_state &&
+        chimera_vfs_state_is_delete_pending(open_file->base_share_file_state) &&
+        !chimera_vfs_state_has_other_share_holder(open_file->base_share_file_state,
+                                                  &open_file->base_share_lease) &&
+        open_file->parent_fh_len > 0) {
+        chimera_vfs_open_fh(
+            vfs_thread,
+            &request->session_handle->session->cred,
+            open_file->parent_fh,
+            open_file->parent_fh_len,
+            CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
+            chimera_smb_close_stream_base_parent_callback,
+            request);
+        return;
+    }
+
+    /* Delete-on-close on a base file that a named stream still holds open: defer
+     * the unlink and mark the file delete-pending, so name opens of the base or
+     * its streams are answered STATUS_DELETE_PENDING while the stream keeps the
+     * file alive (smb2.streams.delete).  The stream's last close performs the
+     * deferred removal above.  Only the backend handle detached by release_doc
+     * is closed here. */
+    if (need_doc && open_file->share_file_state &&
+        chimera_vfs_state_stream_holders(open_file->share_file_state) > 0) {
+        chimera_vfs_state_set_delete_pending(open_file->share_file_state);
+        chimera_vfs_close(vfs_thread,
+                          request->close.doc_info.close_module,
+                          request->close.doc_info.close_private,
+                          request->close.doc_info.close_hash,
+                          NULL,
+                          NULL);
+        chimera_smb_open_file_release(request, open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
         return;
     }
 

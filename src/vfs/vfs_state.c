@@ -265,6 +265,103 @@ chimera_vfs_file_state_release(struct chimera_vfs_file_state *file)
     }
 } /* chimera_vfs_file_state_release */
 
+/* Does this file have a SHARE reservation other than `exclude` (and other than
+ * chimera's own implicit I/O lease)?  Used by the SMB delete-on-close path to
+ * decide whether a base file deletion must defer because a named stream still
+ * holds the file open (smb2.streams.delete). */
+SYMBOL_EXPORT bool
+chimera_vfs_state_has_other_share_holder(
+    struct chimera_vfs_file_state  *file,
+    const struct chimera_vfs_lease *exclude)
+{
+    struct chimera_vfs_lease *cur;
+    bool                      found = false;
+
+    if (!file) {
+        return false;
+    }
+
+    pthread_mutex_lock(&file->lock);
+    for (cur = file->share_resvs; cur; cur = cur->next) {
+        if (cur == exclude) {
+            continue;
+        }
+        if (file->implicit_active && cur == &file->implicit_lease) {
+            continue;
+        }
+        found = true;
+        break;
+    }
+    pthread_mutex_unlock(&file->lock);
+
+    return found;
+} /* chimera_vfs_state_has_other_share_holder */
+
+/* Set/get the delete-pending flag on a file's state (SMB delete-on-close that
+ * is deferred because another holder -- e.g. an open named stream -- keeps the
+ * file alive; a subsequent name open is answered STATUS_DELETE_PENDING). */
+SYMBOL_EXPORT void
+chimera_vfs_state_set_delete_pending(struct chimera_vfs_file_state *file)
+{
+    if (file) {
+        pthread_mutex_lock(&file->lock);
+        file->delete_pending = 1;
+        pthread_mutex_unlock(&file->lock);
+    }
+} /* chimera_vfs_state_set_delete_pending */
+
+SYMBOL_EXPORT bool
+chimera_vfs_state_is_delete_pending(struct chimera_vfs_file_state *file)
+{
+    bool pending;
+
+    if (!file) {
+        return false;
+    }
+    pthread_mutex_lock(&file->lock);
+    pending = file->delete_pending;
+    pthread_mutex_unlock(&file->lock);
+    return pending;
+} /* chimera_vfs_state_is_delete_pending */
+
+/* Track the number of named-stream opens holding a file-level DELETE
+ * reservation on a base file (smb2.streams.delete deferral decision). */
+SYMBOL_EXPORT void
+chimera_vfs_state_stream_holder_inc(struct chimera_vfs_file_state *file)
+{
+    if (file) {
+        pthread_mutex_lock(&file->lock);
+        file->stream_holders++;
+        pthread_mutex_unlock(&file->lock);
+    }
+} /* chimera_vfs_state_stream_holder_inc */
+
+SYMBOL_EXPORT void
+chimera_vfs_state_stream_holder_dec(struct chimera_vfs_file_state *file)
+{
+    if (file) {
+        pthread_mutex_lock(&file->lock);
+        if (file->stream_holders > 0) {
+            file->stream_holders--;
+        }
+        pthread_mutex_unlock(&file->lock);
+    }
+} /* chimera_vfs_state_stream_holder_dec */
+
+SYMBOL_EXPORT uint32_t
+chimera_vfs_state_stream_holders(struct chimera_vfs_file_state *file)
+{
+    uint32_t n;
+
+    if (!file) {
+        return 0;
+    }
+    pthread_mutex_lock(&file->lock);
+    n = file->stream_holders;
+    pthread_mutex_unlock(&file->lock);
+    return n;
+} /* chimera_vfs_state_stream_holders */
+
 /* -------------------------------------------------------------------- */
 /* Conflict matrix                                                      */
 /* -------------------------------------------------------------------- */

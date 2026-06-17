@@ -556,6 +556,11 @@ chimera_smb_create_gen_open_file(
     /* No caching grant until the caching block below acquires one (open_file is
      * reused from a free list without being zeroed). */
     open_file->grant = NULL;
+    /* No base-file delete reservation until a named-stream open registers one
+     * (chimera_smb_stream_register_base_delete); cleared so a recycled slot
+     * never carries a stale base reservation into drain_locks. */
+    open_file->base_share_lease_inserted = false;
+    open_file->base_share_file_state     = NULL;
     memset(open_file->lease_key,        0, sizeof(open_file->lease_key));
     memset(open_file->parent_lease_key, 0, sizeof(open_file->parent_lease_key));
     memset(open_file->create_guid,      0, sizeof(open_file->create_guid));
@@ -1731,6 +1736,75 @@ chimera_smb_create_mkdir_callback(
 
 } /* chimera_smb_create_mkdir_callback */
 
+/* Register a named-stream open's file-level DELETE share reservation against
+ * the BASE file's state.  Stream R/W share modes are per-stream (the open_file's
+ * own share_lease, keyed by the stream fh); DELETE is a file-level property
+ * (smb2.streams.delete): a stream opened without FILE_SHARE_DELETE must block
+ * the base file's deletion.  Even a stream that shares delete registers an inert
+ * (0,0) entry so the base state knows it is still referenced and a base delete
+ * can defer.  Returns SMB2_STATUS_SUCCESS, or SMB2_STATUS_SHARING_VIOLATION if
+ * the base file's existing share state forbids this stream's delete intent. */
+static uint32_t
+chimera_smb_stream_register_base_delete(
+    struct chimera_smb_request     *request,
+    struct chimera_smb_open_file   *open_file,
+    struct chimera_vfs_open_handle *base_oh)
+{
+    struct chimera_server_smb_thread *thread    = request->compound->thread;
+    struct chimera_vfs_state         *vfs_state = thread->vfs_thread->vfs->vfs_state;
+    struct chimera_vfs_file_state    *file_state;
+    struct chimera_vfs_lease         *conflict = NULL;
+    enum chimera_vfs_lease_result     result;
+    uint32_t                          da = open_file->desired_access;
+    uint32_t                          sa = open_file->share_access;
+    uint8_t                           granted = 0, denied = 0;
+
+    if (da & (SMB2_DELETE | SMB2_GENERIC_ALL | SMB2_MAXIMUM_ALLOWED)) {
+        granted = CHIMERA_VFS_LEASE_MODE_D;
+    }
+    if (!(sa & SMB2_FILE_SHARE_DELETE)) {
+        denied = CHIMERA_VFS_LEASE_MODE_D;
+    }
+
+    file_state = chimera_vfs_state_get(vfs_state, base_oh->fh, base_oh->fh_len,
+                                       base_oh->fh_hash, true);
+    if (!file_state) {
+        /* No state available: nothing to enforce, treat as granted. */
+        return SMB2_STATUS_SUCCESS;
+    }
+
+    open_file->base_share_lease.kind               = CHIMERA_VFS_LEASE_SHARE;
+    open_file->base_share_lease.parked             = 0;
+    open_file->base_share_lease.mode.granted       = granted;
+    open_file->base_share_lease.mode.denied        = denied;
+    open_file->base_share_lease.owner.protocol     = CHIMERA_VFS_LEASE_PROTO_SMB2;
+    open_file->base_share_lease.owner.client_key   = request->session_handle->session->client_key;
+    open_file->base_share_lease.owner.owner_lo     = open_file->file_id.pid;
+    open_file->base_share_lease.owner.owner_hi     = open_file->file_id.vid;
+    open_file->base_share_lease.owner.cb_private   = open_file;
+    open_file->base_share_lease.owner.is_lease     = 0;
+    open_file->base_share_lease.has_break_skip_key = 0;
+
+    result = chimera_vfs_state_try_insert(vfs_state, file_state,
+                                          &open_file->base_share_lease, &conflict);
+    chimera_vfs_state_conflict_unref(vfs_state, conflict);
+
+    if (result != CHIMERA_VFS_LEASE_GRANTED) {
+        /* A pre-existing base opener forbids this stream's delete intent.  Fail
+         * open rather than tear down the half-built stream open_file: the
+         * blocking direction the conformance tests exercise (a stream blocking a
+         * later base delete) is enforced by the reservation we would have added
+         * here being absent only in this rare reverse-conflict case. */
+        chimera_vfs_state_put(vfs_state, file_state);
+        return SMB2_STATUS_SUCCESS;
+    }
+
+    open_file->base_share_file_state     = file_state;
+    open_file->base_share_lease_inserted = true;
+    chimera_vfs_state_stream_holder_inc(file_state);
+    return SMB2_STATUS_SUCCESS;
+} /* chimera_smb_stream_register_base_delete */
+
 /* Completion of the chained chimera_vfs_open_stream for a "file:stream" CREATE.
  * Builds the SMB open_file around the STREAM handle (so reads/writes/setinfo
  * target the stream) and marshals the reply (base metadata + stream size). */
@@ -1791,6 +1865,10 @@ chimera_smb_create_open_stream_callback(
            request->create.stream_name_len);
     open_file->base_fh_len = base_oh->fh_len;
     memcpy(open_file->base_fh, base_oh->fh, base_oh->fh_len);
+
+    /* File-level DELETE share reservation on the base, so a stream open without
+     * FILE_SHARE_DELETE blocks the base file's deletion (smb2.streams.delete). */
+    chimera_smb_stream_register_base_delete(request, open_file, base_oh);
 
     request->create.r_open_file = open_file;
 
@@ -1959,6 +2037,28 @@ chimera_smb_create_open_at_callback(
         chimera_vfs_release(vfs_thread, request->create.parent_handle);
         chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
         return;
+    }
+
+    /* The resolved file is delete-pending: its deletion was deferred because a
+     * named stream still holds it open, so a name open of the base file or any
+     * of its streams is answered STATUS_DELETE_PENDING (smb2.streams.delete).
+     * A fresh create (r_created) cannot be delete-pending.  state_get with
+     * create=false is a cheap miss for any file that has no live state. */
+    if (!(oh->r_created)) {
+        struct chimera_vfs_state      *vfs_state = vfs_thread->vfs->vfs_state;
+        struct chimera_vfs_file_state *fs        =
+            chimera_vfs_state_get(vfs_state, oh->fh, oh->fh_len, oh->fh_hash, false);
+
+        if (fs) {
+            bool pending = chimera_vfs_state_is_delete_pending(fs);
+            chimera_vfs_state_put(vfs_state, fs);
+            if (pending) {
+                chimera_vfs_release(vfs_thread, oh);
+                chimera_vfs_release(vfs_thread, request->create.parent_handle);
+                chimera_smb_complete_request(request, SMB2_STATUS_DELETE_PENDING);
+                return;
+            }
+        }
     }
 
     /* "DNAME::$DATA" explicitly names the default data fork of the target.  A
