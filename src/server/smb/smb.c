@@ -977,12 +977,21 @@ chimera_smb_compound_advance(struct chimera_smb_compound *compound)
                          "compound_advance: complete_requests = %u num_requests = %u", compound->complete_requests,
                          compound->num_requests);
 
+    /* Close out the previous request's span; advance re-enters here once per
+     * completed request (via chimera_smb_complete_request), so this ends each
+     * request's span exactly once. */
+    smb_trace_op_end(compound);
+
     if (compound->complete_requests >= compound->num_requests) {
         chimera_smb_compound_reply(compound);
         return;
     }
 
     request = compound->requests[compound->complete_requests];
+
+    /* Open a span for this request (child of the aggregate span) and re-point
+     * the VFS parent at it so the request's VFS work nests under it. */
+    smb_trace_op_begin(compound, request);
 
     if (request->smb2_hdr.flags & SMB2_FLAGS_RELATED_OPERATIONS) {
         /* A related request inherits the session and tree from the preceding

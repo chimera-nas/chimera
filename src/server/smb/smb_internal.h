@@ -967,7 +967,9 @@ struct chimera_smb_compound {
     /* conn->generation at compound creation; see the conn field. */
     uint64_t                           conn_generation;
     struct chimera_smb_compound       *next;
-    struct otel_span                   otel;
+    struct otel_span                   otel;        /* compound (aggregate) span */
+    struct otel_span                   op_otel;     /* current request span, child of otel */
+    int                                op_span_active;
     struct chimera_smb_request        *requests[CHIMERA_SMB_COMPOUND_MAX_REQUESTS];
 };
 
