@@ -473,6 +473,16 @@ chimera_vfs_rename_at(
         return;
     }
 
+    /* POSIX rename(2): the source and destination must be on the same file
+     * system.  A file handle's first CHIMERA_VFS_MOUNT_ID_SIZE bytes are its
+     * mount id; differing source- and destination-directory mount ids mean the
+     * rename would span mounts -> EXDEV (pjd rename/15). */
+    if (fhlen >= CHIMERA_VFS_MOUNT_ID_SIZE && new_fhlen >= CHIMERA_VFS_MOUNT_ID_SIZE &&
+        memcmp(fh, new_fh, CHIMERA_VFS_MOUNT_ID_SIZE) != 0) {
+        callback(CHIMERA_VFS_EXDEV, NULL, NULL, NULL, NULL, private_data);
+        return;
+    }
+
     module = chimera_vfs_get_module(thread, fh, fhlen);
 
     if (module && chimera_vfs_gate_needed(module->capabilities, cred)) {

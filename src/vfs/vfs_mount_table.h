@@ -411,7 +411,14 @@ chimera_vfs_mount_table_lookup_root_fh_by_name(
     for (i = 0; i < table->num_buckets && rc != 0; i++) {
         entry = rcu_dereference(table->buckets[i]);
         while (entry) {
-            if (strncmp(entry->mount->path, name, namelen) == 0) {
+            /* The mount path must equal the looked-up component exactly.  A bare
+             * strncmp(path, name, namelen) is a prefix test, so it would match
+             * mount "test2" when resolving component "test" (and the winner
+             * depends on bucket order -- nondeterministic) -- e.g. /test/x would
+             * land in the /test2 mount.  Require equal lengths so each component
+             * resolves to its own mount. */
+            if ((int) strlen(entry->mount->path) == namelen &&
+                strncmp(entry->mount->path, name, namelen) == 0) {
                 memcpy(r_root_fh, entry->mount->root_fh, entry->mount->root_fh_len);
                 *r_root_fh_len = entry->mount->root_fh_len;
                 rc             = 0;

@@ -133,6 +133,27 @@ if(CHIMERA_NETNS_TESTING)
     endif()
 endif()
 
+# Cross-mount EXDEV test: link/rename across two VFS mounts must fail EXDEV.  It
+# mounts a second memfs instance alongside the primary backend, so the primary
+# must be a different module from memfs (two memfs mounts share one fsid, i.e.
+# the same filesystem).  Runs on the local non-memfs backends only.
+add_posix_testprog(test_exdev)
+if(CHIMERA_NETNS_TESTING)
+    if(CAIRN_ENABLED)
+        add_posix_test(exdev_cairn test_exdev cairn)
+    endif()
+    if(IO_URING_ENABLED)
+        add_posix_test(exdev_diskfs_io_uring test_exdev diskfs_io_uring)
+    endif()
+    if(HAVE_LIBAIO)
+        add_posix_test(exdev_diskfs_aio test_exdev diskfs_aio)
+    endif()
+    add_posix_test(exdev_linux test_exdev linux)
+    if(CHIMERA_VFS_IO_URING)
+        add_posix_test(exdev_io_uring test_exdev io_uring)
+    endif()
+endif()
+
 # ============================================================================
 # NFS3 Backend Tests
 # These tests run the POSIX tests through the Chimera NFS client,

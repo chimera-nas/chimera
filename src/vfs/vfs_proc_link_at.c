@@ -230,6 +230,16 @@ chimera_vfs_link_at(
         return;
     }
 
+    /* POSIX link(2): a hard link cannot span file systems.  A file handle's
+     * first CHIMERA_VFS_MOUNT_ID_SIZE bytes are its mount id, so the source file
+     * and the destination directory live on different mounts when those differ
+     * -> EXDEV (pjd link/14). */
+    if (fhlen >= CHIMERA_VFS_MOUNT_ID_SIZE && dir_fhlen >= CHIMERA_VFS_MOUNT_ID_SIZE &&
+        memcmp(fh, dir_fh, CHIMERA_VFS_MOUNT_ID_SIZE) != 0) {
+        callback(CHIMERA_VFS_EXDEV, NULL, NULL, NULL, private_data);
+        return;
+    }
+
     module = chimera_vfs_get_module(thread, dir_fh, dir_fhlen);
 
     /* WRITE+EXECUTE on the destination directory is enforced by the engine even
