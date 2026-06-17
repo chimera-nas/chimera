@@ -57,10 +57,10 @@ chimera_vfs_op_name(unsigned int opcode)
 
 } /* chimera_vfs_op_name */
 
-SYMBOL_EXPORT void
-chimera_vfs_trace_complete(struct chimera_vfs_request *request)
-{
 #if CHIMERA_HAVE_OTEL
+SYMBOL_EXPORT void
+_chimera_vfs_trace_complete(struct chimera_vfs_request *request)
+{
     struct otel_span *s = &request->otel;
 
     char              fhhex[2 * CHIMERA_VFS_FH_SIZE + 1];
@@ -107,10 +107,8 @@ chimera_vfs_trace_complete(struct chimera_vfs_request *request)
     }
 
     otel_span_end(s);
-#else  /* !CHIMERA_HAVE_OTEL */
-    (void) request;
+} /* _chimera_vfs_trace_complete */
 #endif /* CHIMERA_HAVE_OTEL */
-} /* chimera_vfs_trace_complete */
 
 void
 __chimera_vfs_dump_request(struct chimera_vfs_request *req)

@@ -16,6 +16,8 @@
 #include "nfs_common.h"
 #include "nfs4_xdr.h"
 
+#if CHIMERA_HAVE_OTEL
+
 void _nfs4_trace_null(
     struct nfs_request *req);
 void _nfs4_trace_compound(
@@ -40,3 +42,12 @@ void _nfs4_trace_op_begin(
 #define nfs4_trace_op_end(req) \
         do { if ((req)->op_span_active) { \
                  otel_span_end(&(req)->op_otel); (req)->op_span_active = 0; } } while (0)
+
+#else  /* !CHIMERA_HAVE_OTEL : tracing compiled out -- calls vanish entirely */
+
+#define nfs4_trace_null(req)            do { } while (0)
+#define nfs4_trace_compound(req, args)  do { } while (0)
+#define nfs4_trace_op_begin(req, argop) do { } while (0)
+#define nfs4_trace_op_end(req)          do { } while (0)
+
+#endif /* CHIMERA_HAVE_OTEL */
