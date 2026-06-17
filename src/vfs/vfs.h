@@ -1377,6 +1377,9 @@ struct chimera_vfs_module {
 
 };
 
+/* mount->attrs.flags bits */
+#define CHIMERA_VFS_MOUNT_ATTR_READONLY (1ULL << 0)
+
 struct chimera_vfs_mount_attrs {
     uint64_t flags;
 };

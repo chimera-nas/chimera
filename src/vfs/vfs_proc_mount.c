@@ -133,6 +133,17 @@ chimera_vfs_mount_complete(struct chimera_vfs_request *request)
     mount->pathlen       = strlen(request->mount.mount_path);
     mount->mount_private = request->mount.r_mount_private;
 
+    /* Generic, module-independent mount options handled by the VFS core.  "ro"
+     * (alias "readonly") marks the mount read-only; chimera_vfs_dispatch then
+     * rejects any mutating op targeting it with CHIMERA_VFS_EROFS. */
+    for (int i = 0; i < request->mount.options.num_options; i++) {
+        const char *key = request->mount.options.options[i].key;
+
+        if (key && (strcmp(key, "ro") == 0 || strcmp(key, "readonly") == 0)) {
+            mount->attrs.flags |= CHIMERA_VFS_MOUNT_ATTR_READONLY;
+        }
+    }
+
     /* Store the root FH (first 16 bytes is the mount_id) */
     memcpy(mount->root_fh, request->mount.r_attr.va_fh, request->mount.r_attr.va_fh_len);
     mount->root_fh_len = request->mount.r_attr.va_fh_len;

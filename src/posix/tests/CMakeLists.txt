@@ -238,6 +238,38 @@ generate_posix_nfs4_backend_tests(linux "")
 generate_posix_nfs4_backend_tests(io_uring CHIMERA_VFS_IO_URING)
 
 # ============================================================================
+# Read-only mount (EROFS) test
+# Stands up a second, read-only export of the same backend and asserts that
+# mutating operations fail with EROFS while reads still work.  Registered
+# explicitly (not via POSIX_TEST_PROGRAMS) because it requires the dual
+# read-write / read-only export the standard harness does not create, and is
+# only meaningful over an NFS backend.
+# ============================================================================
+add_posix_testprog(test_erofs)
+
+macro(add_posix_erofs_test nfs_prefix nfs_backend)
+    if(CHIMERA_NETNS_TESTING)
+        add_test(NAME chimera/posix/erofs_${nfs_prefix}_${nfs_backend}
+            COMMAND ${NETNS_WRAPPER} ${CMAKE_CURRENT_BINARY_DIR}/posix_test_erofs -b ${nfs_prefix}_${nfs_backend}
+        )
+        get_target_property(test_file posix_test_erofs TEST_FILE)
+        set_tests_properties(chimera/posix/erofs_${nfs_prefix}_${nfs_backend} PROPERTIES
+            ENVIRONMENT "TEST_FILE=${test_file}"
+            TIMEOUT 60
+        )
+    endif()
+endmacro()
+
+# Registered for nfs3_memfs only.  The test exercises the protocol-agnostic VFS
+# read-only gate; NFS3 over memfs makes that gate observable cleanly.  It is not
+# registered for NFS4 (the NFS4 client's mount/RECLAIM_COMPLETE path crashes when
+# a second export of the same backend is present in the server -- a pre-existing
+# client-side issue unrelated to the read-only enforcement) nor for backends
+# whose mount_id derivation for a subdirectory mount does not differ from the
+# parent mount (so the read-only sub-mount cannot be distinguished).
+add_posix_erofs_test(nfs3 memfs)
+
+# ============================================================================
 # NFS3 over TCP-RDMA Backend Tests
 # These tests run the POSIX tests through the Chimera NFS client using TCP-RDMA,
 # connecting to a Chimera NFS server in the same process.
