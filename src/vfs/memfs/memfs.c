@@ -5224,21 +5224,25 @@ memfs_list_streams(
     }
 
     /* Default unnamed data fork ("::$DATA"), reported first with an empty name
-     * so the SMB layer can format it as the default stream. */
-    rec = sizeof(entry);
-    if (offset + rec > max) {
-        pthread_mutex_unlock(&inode->lock);
-        request->status = CHIMERA_VFS_ERANGE;
-        request->complete(request);
-        return;
+     * so the SMB layer can format it as the default stream.  Only regular files
+     * have a data fork -- a directory reports no streams (smb2.streams.dir
+     * expects an empty stream list on a directory). */
+    if (S_ISREG(inode->mode)) {
+        rec = sizeof(entry);
+        if (offset + rec > max) {
+            pthread_mutex_unlock(&inode->lock);
+            request->status = CHIMERA_VFS_ERANGE;
+            request->complete(request);
+            return;
+        }
+        entry.size     = inode->size;
+        entry.alloc    = inode->space_used;
+        entry.name_len = 0;
+        memcpy(buf + offset, &entry, sizeof(entry));
+        offset += rec;
+        offset  = (offset + 7) & ~7u;
+        count++;
     }
-    entry.size     = inode->size;
-    entry.alloc    = inode->space_used;
-    entry.name_len = 0;
-    memcpy(buf + offset, &entry, sizeof(entry));
-    offset += rec;
-    offset  = (offset + 7) & ~7u;
-    count++;
 
     for (stream = inode->streams; stream; stream = stream->next) {
         rec = sizeof(entry) + stream->name_len;

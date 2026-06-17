@@ -553,6 +553,11 @@ struct chimera_smb_request {
              * trimmed to the base file.  base_oh is the base file's open handle
              * held across the chained chimera_vfs_open_stream. */
             uint8_t                            has_stream;
+            /* Set when the final component is the explicit default data fork
+             * "file::$DATA" (has_stream stays 0; the base file is opened).  A
+             * directory has no data fork, so the open path rejects this form on
+             * a directory target (smb2.streams.dir). */
+            uint8_t                            explicit_data_fork;
             uint16_t                           stream_name_len;
             char                               stream_name[SMB_FILENAME_MAX];
             struct chimera_vfs_open_handle    *base_oh;
