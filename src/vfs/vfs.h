@@ -170,6 +170,11 @@ struct chimera_vfs_thread_metrics {
 #define CHIMERA_VFS_OPEN_HANDLE_PENDING   0x2
 #define CHIMERA_VFS_OPEN_HANDLE_FILE_ID   0x4
 #define CHIMERA_VFS_OPEN_HANDLE_DETACHED  0x8
+/* A named-stream (ADS) handle.  Its file handle is distinct from the base
+ * file's, but its metadata (mode/owner/timestamps/DOS attributes) is the base
+ * inode's and mutates out-of-band relative to the stream fh, so the per-fh attr
+ * cache must not serve or store attributes for it (chimera_vfs_getattr). */
+#define CHIMERA_VFS_OPEN_HANDLE_STREAM    0x10
 
 #define CHIMERA_VFS_ACCESS_MODE_RW        0
 #define CHIMERA_VFS_ACCESS_MODE_RO        1

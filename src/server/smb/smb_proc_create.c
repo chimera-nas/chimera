@@ -1856,7 +1856,11 @@ chimera_smb_create_open_stream_chain(
         request->create.stream_name,
         request->create.stream_name_len,
         sflags,
-        NULL,
+        /* The create's FileAttributes (e.g. HIDDEN|ARCHIVE) live on the base
+         * file, shared by all its streams.  Stamp them when the stream open
+         * creates or overwrites the stream so a stream create reflects the
+         * requested attributes on the base (smb2.streams.attributes2). */
+        &request->create.set_attr,
         CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_BTIME | CHIMERA_VFS_ATTR_ACL,
         chimera_smb_create_open_stream_callback,
         request);
