@@ -469,6 +469,9 @@ main(
         /* unsafe_async: this test does not exercise crash recovery, so skip FUA/sync
          * on writes to run lighter. */
         json_object_set_new(cfg, "unsafe_async", json_true());
+        /* Small intent log to fit the 1 GiB test devices (the production-default
+         * 1 GiB log would not fit the AG-0 metadata reservation). */
+        json_object_set_new(cfg, "intent_log_size", json_integer(64 * 1024 * 1024));
         /* smb2.maxfid keeps 65520 file handles open across ~256 inode-cache
          * shards; the inode home blocks stay pinned by the open handles and
          * concurrent close traffic also pins LOGGED blocks (held until tail

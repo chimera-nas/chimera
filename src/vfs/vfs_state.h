@@ -41,7 +41,7 @@ struct chimera_vfs_request;
 /* Per-file state                                                       */
 /* -------------------------------------------------------------------- */
 
-#define CHIMERA_VFS_STATE_NUM_BUCKETS 64
+#define CHIMERA_VFS_STATE_NUM_BUCKETS 16384
 
 struct chimera_vfs_file_state {
     uint8_t                             fh[CHIMERA_VFS_FH_SIZE];

@@ -129,6 +129,8 @@ diskfs_dispatch_grant(struct diskfs_inode_waiter *w)
 {
     struct diskfs_thread *worker = w->txn->thread;
 
+    w->dispatched_ns = diskfs_diag_now_ns();
+
     pthread_mutex_lock(&worker->grant_lock);
     w->next = NULL;
     if (worker->grant_tail) {
@@ -137,6 +139,7 @@ diskfs_dispatch_grant(struct diskfs_inode_waiter *w)
         worker->grant_head = w;
     }
     worker->grant_tail = w;
+    __atomic_store_n(&worker->grant_pending, 1, __ATOMIC_RELEASE);
     pthread_mutex_unlock(&worker->grant_lock);
 
     evpl_ring_doorbell(&worker->grant_doorbell);
@@ -176,6 +179,7 @@ diskfs_inode_release_one(
             if (!inode->wait_head) {
                 inode->wait_tail = NULL;
             }
+            inode->wait_count--;
             w->status = CHIMERA_VFS_ENOENT;
             w->next   = granted;
             granted   = w;
@@ -190,6 +194,7 @@ diskfs_inode_release_one(
         if (!inode->wait_head) {
             inode->wait_tail = NULL;
         }
+        inode->wait_count--;
         diskfs_inode_lock_grant(inode, w->mode);
         w->status = CHIMERA_VFS_OK;
         w->next   = granted;
@@ -262,6 +267,8 @@ diskfs_inode_grant_locked(
     w->cb           = cb;
     w->private_data = private_data;
     w->inode        = inode;
+    w->queued_ns    = diskfs_diag_now_ns();
+    w->queue_depth  = inode->wait_count + 1;
     w->status       = CHIMERA_VFS_OK;
     w->next         = NULL;
 
@@ -271,6 +278,20 @@ diskfs_inode_grant_locked(
         inode->wait_head = w;
     }
     inode->wait_tail = w;
+    inode->wait_count++;
+    if (inode->wait_count > inode->wait_high_water) {
+        inode->wait_high_water = inode->wait_count;
+        if (inode->wait_high_water == 64 ||
+            inode->wait_high_water == 256 ||
+            inode->wait_high_water == 1024 ||
+            (inode->wait_high_water > 1024 &&
+             (inode->wait_high_water % 1024) == 0)) {
+            chimera_diskfs_error(
+                "inode wait highwater inum=%llu depth=%u readers=%d writer=%d mode=%d",
+                (unsigned long long) inode->inum, inode->wait_high_water,
+                inode->readers, inode->writer, mode);
+        }
+    }
 
     pthread_mutex_unlock(&shard->lock);
 } /* diskfs_inode_grant_locked */
@@ -615,22 +636,21 @@ diskfs_gen_alloc(
  * the releasing thread; here we record the slot (on this, the txn's own
  * thread) and resume the parked continuation.
  */
-void
-diskfs_grant_doorbell_cb(
-    struct evpl          *evpl,
-    struct evpl_doorbell *doorbell)
+static int
+diskfs_grant_drain(struct diskfs_thread *thread)
 {
-    struct diskfs_thread       *thread = container_of(doorbell,
-                                                      struct diskfs_thread,
-                                                      grant_doorbell);
     struct diskfs_inode_waiter *list, *w;
+    int                         drained = 0;
 
-    (void) evpl;
+    if (!__atomic_load_n(&thread->grant_pending, __ATOMIC_ACQUIRE)) {
+        return 0;
+    }
 
     pthread_mutex_lock(&thread->grant_lock);
     list               = thread->grant_head;
     thread->grant_head = NULL;
     thread->grant_tail = NULL;
+    __atomic_store_n(&thread->grant_pending, 0, __ATOMIC_RELEASE);
     pthread_mutex_unlock(&thread->grant_lock);
 
     while (list) {
@@ -641,6 +661,7 @@ diskfs_grant_doorbell_cb(
 
         w    = list;
         list = w->next;
+        drained++;
 
         cb           = w->cb;
         private_data = w->private_data;
@@ -648,6 +669,24 @@ diskfs_grant_doorbell_cb(
         status       = w->status;
 
         if (status == CHIMERA_VFS_OK) {
+            uint64_t wait_ns = diskfs_diag_now_ns() - w->queued_ns;
+
+            if (wait_ns > 1000000000ULL) {
+                uint64_t grant_ns = w->dispatched_ns ?
+                    w->dispatched_ns - w->queued_ns : 0;
+                uint64_t callback_ns = w->dispatched_ns ?
+                    wait_ns - grant_ns : 0;
+
+                chimera_diskfs_error(
+                    "inode waiter callback after %llu sec inum=%llu mode=%d queued_depth=%u grant_wait_ms=%llu callback_wait_ms=%llu",
+                    (unsigned long long) (wait_ns / 1000000000ULL),
+                    inode ? (unsigned long long) inode->inum : 0ULL,
+                    w->mode,
+                    w->queue_depth,
+                    (unsigned long long) (grant_ns / 1000000ULL),
+                    (unsigned long long) (callback_ns / 1000000ULL));
+            }
+
             struct diskfs_txn          *wtxn  = w->txn;
             enum diskfs_inode_lock_mode wmode = w->mode;
 
@@ -666,7 +705,33 @@ diskfs_grant_doorbell_cb(
             cb(NULL, status, private_data);
         }
     }
+    return drained;
+} /* diskfs_grant_drain */
+
+
+void
+diskfs_grant_doorbell_cb(
+    struct evpl          *evpl,
+    struct evpl_doorbell *doorbell)
+{
+    struct diskfs_thread *thread = container_of(doorbell,
+                                                struct diskfs_thread,
+                                                grant_doorbell);
+
+    (void) evpl;
+    diskfs_grant_drain(thread);
 } /* diskfs_grant_doorbell_cb */
+
+
+void
+diskfs_grant_poll(
+    struct evpl *evpl,
+    void        *private_data)
+{
+    if (diskfs_grant_drain(private_data)) {
+        evpl_activity(evpl);
+    }
+} /* diskfs_grant_poll */
 
 
 /* ================================================================== */

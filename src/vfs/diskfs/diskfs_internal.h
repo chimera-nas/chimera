@@ -147,6 +147,15 @@
                                                 __LINE__, \
                                                 __VA_ARGS__)
 
+static inline uint64_t
+diskfs_diag_now_ns(void)
+{
+    struct timespec ts;
+
+    clock_gettime(CLOCK_MONOTONIC_COARSE, &ts);
+    return (uint64_t) ts.tv_sec * 1000000000ULL + (uint64_t) ts.tv_nsec;
+} /* diskfs_diag_now_ns */
+
 #define chimera_diskfs_fatal(...) chimera_fatal("diskfs", \
                                                 __FILE__, \
                                                 __LINE__, \
@@ -514,6 +523,9 @@ struct diskfs_inode_waiter {
     diskfs_inode_cb_t           cb;
     void                       *private_data;
     struct diskfs_inode        *inode;
+    uint64_t                    queued_ns;
+    uint64_t                    dispatched_ns;
+    uint32_t                    queue_depth;
     struct diskfs_inode_waiter *next;
 };
 
@@ -547,6 +559,8 @@ struct diskfs_inode {
     int                         writer;      /* 0/1 exclusive holder */
     struct diskfs_inode_waiter *wait_head;
     struct diskfs_inode_waiter *wait_tail;
+    uint32_t                    wait_count;
+    uint32_t                    wait_high_water;
 
     /* Eviction: an idle inode (refcnt==1, unlocked) sits on its shard's LRU
      * as a recycle candidate.  All under the shard lock. */
@@ -641,6 +655,24 @@ enum diskfs_block_state {
 struct diskfs_bt_op;
 
 struct diskfs_block_waiter;
+struct diskfs_block_shard;
+
+
+/*
+ * Backing storage for a cached metadata block.  These buffers are allocated
+ * once from EVPL during diskfs startup so the memory remains registered for
+ * block I/O, but lifetime is owned by diskfs.  Cache blocks and intent-log
+ * redo records hold diskfs refs; EVPL refs are released only when the cache is
+ * destroyed.  This prevents 4 KiB metadata blocks from repeatedly mixing with
+ * unrelated EVPL shared allocations.
+ */
+struct diskfs_block_buf {
+    struct evpl_iovec          iov;
+    uint32_t                   refs;
+    int                        on_free;
+    struct diskfs_block_shard *shard;
+    struct diskfs_block_buf   *next;
+};
 
 
 /*
@@ -657,14 +689,16 @@ struct diskfs_block_waiter;
 struct diskfs_block {
     uint32_t                    device_id;
     uint64_t                    device_offset; /* block-aligned; key with device_id */
-    struct evpl_iovec           iov;           /* SHARED DISKFS_BLOCK_SIZE buffer; .data may
-                                                * be NULL on a never-yet-used pool slot */
+    struct diskfs_block_buf    *buf;           /* diskfs-owned backing buffer */
+    struct evpl_iovec           iov;           /* alias of buf->iov for existing I/O paths */
     int                         pin_count;     /* >0 => pinned, not reclaimable */
     enum diskfs_block_state state;
     uint64_t                    seq;           /* update order for tail-push */
     struct diskfs_block        *hash_next;     /* bucket chain */
     struct diskfs_block        *lru_prev, *lru_next; /* shard LRU (CLEAN + unpinned) */
+    struct diskfs_block        *clean_next;    /* atomic clean-return queue */
     int                         on_lru;        /* 1 iff linked on the shard LRU */
+    int                         clean_queued;  /* 1 iff queued on shard clean queue */
 
     /* Continuations blocked on a LOADING block, woken when the read I/O
      * completes.  Each waiter names its owning worker, so a completion that
@@ -676,22 +710,33 @@ struct diskfs_block {
 
 
 struct diskfs_block_shard {
-    pthread_mutex_t       lock;
-    struct diskfs_block **buckets;     /* [DISKFS_BLOCK_CACHE_BUCKETS_PER_SHARD] */
+    pthread_mutex_t          lock;
+    struct diskfs_block    **buckets;  /* [DISKFS_BLOCK_CACHE_BUCKETS_PER_SHARD] */
 
     /* Pre-allocated fixed pool of block structs (all protected by lock); the
      * structs are never individually freed.  Each struct's buffer is a SHARED
      * evpl iovec allocated lazily on first use and reused across recyclings
      * (released only at teardown).  The LRU holds only CLEAN, unpinned buffers
      * (recycle candidates), ordered least-recently-used first. */
-    struct diskfs_block  *pool;                 /* [nblocks] */
-    struct diskfs_block  *lru_head, *lru_tail;  /* lru_head = next to recycle */
-    uint32_t              nblocks;              /* block structs owned by this shard */
+    struct diskfs_block     *pool;              /* [nblocks] */
+    struct diskfs_block     *lru_head, *lru_tail; /* lru_head = next to recycle */
+    uint32_t                 nblocks;           /* block structs owned by this shard */
+
+    struct diskfs_block_buf *buffers;           /* [nbuffers] */
+    struct diskfs_block_buf *free_buffers;
+    struct diskfs_block_buf *returned_buffers;   /* atomic stack, drained under lock */
+    struct diskfs_block     *clean_head;
+    struct diskfs_block     *clean_tail;
+    uint32_t                 nbuffers;
+    uint32_t                 nfree_buffers;
 };
 
 
 struct diskfs_block_cache {
     uint32_t                  shard_cap;   /* max resident buffers per shard */
+    uint32_t                  buffer_extra_per_shard;
+    int                       buffers_ready;
+    pthread_mutex_t           prealloc_lock;
     struct diskfs_block_shard shards[DISKFS_BLOCK_CACHE_SHARDS];
 };
 
@@ -705,11 +750,12 @@ struct diskfs_block_cache {
  * default is 2x the journal (comfortable per-shard headroom over the variance),
  * and a configured size is floored at 1.5x.
  */
-#define DISKFS_INTENT_LOG_BLOCKS          (SM_INTENT_LOG_SIZE / SM_BLOCK_SIZE)
+#define DISKFS_INTENT_LOG_BLOCKS(sz)          ((sz) / SM_BLOCK_SIZE)
 
-#define DISKFS_BLOCK_CACHE_DEFAULT_BLOCKS (2 * DISKFS_INTENT_LOG_BLOCKS)
+#define DISKFS_BLOCK_CACHE_DEFAULT_BLOCKS(sz) (2 * DISKFS_INTENT_LOG_BLOCKS(sz))
 
-#define DISKFS_BLOCK_CACHE_MIN_BLOCKS     (DISKFS_INTENT_LOG_BLOCKS + DISKFS_INTENT_LOG_BLOCKS / 2)
+#define DISKFS_BLOCK_CACHE_MIN_BLOCKS(sz)     (DISKFS_INTENT_LOG_BLOCKS(sz) + \
+                                               DISKFS_INTENT_LOG_BLOCKS(sz) / 2)
 
 
 /*
@@ -721,13 +767,13 @@ struct diskfs_block_cache {
  * records in the inode's single b+tree; the root node is embedded in the
  * inode block, and deeper nodes occupy their own 4 KiB blocks.
  */
-#define DISKFS_INODE_AREA                 256
+#define DISKFS_INODE_AREA   256
 
-#define DISKFS_BT_ROOT_BASE               DISKFS_INODE_AREA
+#define DISKFS_BT_ROOT_BASE DISKFS_INODE_AREA
 
-#define DISKFS_BT_ROOT_CAP                (DISKFS_BLOCK_SIZE - DISKFS_INODE_AREA) /* 3840 */
+#define DISKFS_BT_ROOT_CAP  (DISKFS_BLOCK_SIZE - DISKFS_INODE_AREA)    /* 3840 */
 
-#define DISKFS_BT_NODE_CAP                DISKFS_BLOCK_SIZE            /* 4096 */
+#define DISKFS_BT_NODE_CAP  DISKFS_BLOCK_SIZE                          /* 4096 */
 
 
 struct diskfs_dinode {
@@ -901,6 +947,8 @@ struct diskfs_redo_block_header {
     uint32_t device_id;
     uint32_t pad;
     uint64_t device_offset;
+    uint64_t block_csum_lo;
+    uint64_t block_csum_hi;
 };
 
 
@@ -919,6 +967,9 @@ struct diskfs_txn_block {
      * the live block->iov and the record captures this txn's committed image
      * even if a later writer COWs the cache block. */
     struct evpl_iovec        snap;
+    struct diskfs_block_buf *snap_buf;
+    uint64_t                 snap_csum_lo;
+    uint64_t                 snap_csum_hi;
     struct diskfs_txn_block *next;
 };
 
@@ -1032,23 +1083,25 @@ struct diskfs_iq_channel {
  * that re-dirties the live cache block.
  */
 struct diskfs_il_record {
-    uint64_t                 seq;
-    uint64_t                 offset;     /* byte offset in the intent-log region */
-    uint64_t                 reclen;
-    uint32_t                 num_blocks;
-    uint32_t                 niov;       /* 1 + num_blocks */
+    uint64_t                  seq;
+    uint64_t                  offset;    /* byte offset in the intent-log region */
+    uint64_t                  reclen;
+    uint32_t                  num_blocks;
+    uint32_t                  niov;      /* 1 + num_blocks */
     /* Scatter-gather image of the on-log record: iovs[0] is the 4 KiB-aligned
     * header region (redo_header + per-block headers); iovs[1..num_blocks] are
     * zero-copy refs (clones) of the cache blocks' buffers.  The same refs are
     * handed to the tail-pusher, so a block image is copied only when a writer
     * must fork a still-referenced block (COW), never on the log/push path. */
-    struct evpl_iovec       *iovs;
-    struct diskfs_il_record *next;
+    struct evpl_iovec        *iovs;
+    struct diskfs_block_buf **block_bufs;
+    struct diskfs_block     **blocks;
+    struct diskfs_il_record  *next;
     /* Push-thread lifetime: a record is freed only after it is logically
      * retired (trimmed from the log) AND no in-flight home write still reads
      * its iovs (inflight_refs == 0). */
-    int                      inflight_refs;
-    int                      retired;
+    int                       inflight_refs;
+    int                       retired;
 };
 
 
@@ -1150,6 +1203,7 @@ struct diskfs_intent_log {
     uint32_t                         handoff_tail;    /* atomic: commit producer */
     uint64_t                         log_head;        /* atomic: commit-written (next free byte) */
     uint64_t                         log_tail;        /* atomic: push-written (trim point) */
+    uint64_t                         intent_log_size; /* active log size (from space_map / superblock) */
     int                              sync;            /* FUA/sync flag (0 in unsafe_async) */
 
     /* ---------- metrics ---------- */
@@ -1178,6 +1232,7 @@ struct diskfs_shared {
     int                         noatime;           /* config opt-in: never update atime on read (default: relatime) */
     uint64_t                    mtime_defer_us;    /* coalesce non-FILE_SYNC in-place mtime updates: flush each dirty inode at most once per this many us (0 = disabled, log every write); default 1s */
     int                         mounted;           /* 1 = remounted existing FS (enables inode read-back) */
+    uint64_t                    intent_log_size;   /* config knob (0 -> default at parse); persisted in the superblock */
     uint32_t                    block_cache_blocks; /* total resident block-buffer cap (0 = default) */
     uint32_t                    inode_cache_inodes; /* total resident inode cap (0 = default) */
     int                         block_layout;      /* config opt-in: advertise pNFS block layouts */
@@ -1223,6 +1278,8 @@ struct diskfs_thread {
     struct diskfs_inode_waiter  *waiter_free_list;
     struct diskfs_iq_channel    *iq_channel;
     struct evpl_poll            *cq_poll;          /* drains this worker's IL completion queue every loop iteration */
+    struct evpl_poll            *grant_poll;       /* drains cross-thread inode grants while poll-pinned */
+    struct evpl_poll            *resume_poll;      /* drains block/B-tree resume queue while poll-pinned */
     uint32_t                     commits_inflight; /* commits handed to the IL not yet completed; pins poll mode while > 0 */
     int                          pending_io;
 
@@ -1240,6 +1297,7 @@ struct diskfs_thread {
     struct diskfs_inode_waiter  *grant_head;
     struct diskfs_inode_waiter  *grant_tail;
     struct evpl_doorbell         grant_doorbell;
+    int                          grant_pending;
 
     /* Cross-thread continuation resumption: when a block this worker has
      * waiters on finishes loading (possibly on another worker that issued the
@@ -1250,6 +1308,7 @@ struct diskfs_thread {
     struct diskfs_block_waiter  *resume_tail;
     struct evpl_doorbell         resume_doorbell;
     struct evpl_deferral         resume_deferral;
+    int                          resume_pending;
     struct diskfs_bt_op         *bt_op_free_list;
     struct diskfs_block_waiter  *block_waiter_free_list;
 
@@ -1706,10 +1765,16 @@ struct diskfs_inode_alloc_ctx {
 /* ------------------------------------------------------------------ */
 
 /* Completion context for an in-flight redo-record write. */
-struct diskfs_redo_ctx {
-    struct diskfs_intent_log *il;
+struct diskfs_redo_entry {
     struct diskfs_iq_channel *ch;
     struct diskfs_iq_entry    entry;
+};
+
+
+struct diskfs_redo_ctx {
+    struct diskfs_intent_log *il;
+    struct diskfs_redo_entry *entries; /* one CQE/completion per grouped txn */
+    uint32_t                  num_entries;
     struct diskfs_il_record  *rec;     /* owns the record image (iovs) */
     int                       segments; /* outstanding journal writes (see below) */
     uint64_t                  retire_idx; /* slot in the commit retirement ring */
@@ -1939,6 +2004,11 @@ diskfs_block_cache_create(
     struct diskfs_shared *shared);
 
 void
+diskfs_block_cache_prealloc(
+    struct diskfs_shared *shared,
+    struct evpl          *evpl);
+
+void
 diskfs_block_cache_destroy(
     struct diskfs_shared *shared);
 
@@ -1948,6 +2018,10 @@ diskfs_block_claim(
     uint32_t              device_id,
     uint64_t              device_offset,
     int                   is_new);
+
+void
+diskfs_block_buf_release(
+    struct diskfs_block_buf *buf);
 
 void *
 diskfs_sm_claim_block(
@@ -2000,6 +2074,11 @@ diskfs_bt_resume_doorbell_cb(
 
 void
 diskfs_bt_resume_deferral_cb(
+    struct evpl *evpl,
+    void        *private_data);
+
+void
+diskfs_bt_resume_poll(
     struct evpl *evpl,
     void        *private_data);
 
@@ -2402,6 +2481,11 @@ void
 diskfs_grant_doorbell_cb(
     struct evpl          *evpl,
     struct evpl_doorbell *doorbell);
+
+void
+diskfs_grant_poll(
+    struct evpl *evpl,
+    void        *private_data);
 
 int
 diskfs_mtime_any_dirty(
@@ -3161,7 +3245,7 @@ diskfs_il_used_bytes(struct diskfs_intent_log *il)
     if (head >= tail) {
         return head - tail;
     }
-    return SM_INTENT_LOG_SIZE - (tail - head);
+    return il->intent_log_size - (tail - head);
 } /* diskfs_il_used_bytes */
 
 
@@ -3448,6 +3532,21 @@ diskfs_inode_idle(const struct diskfs_inode *inode)
 } /* diskfs_inode_idle */
 
 
+static inline void
+diskfs_inode_ref_get(
+    struct diskfs_thread *thread,
+    struct diskfs_inode  *inode)
+{
+    struct diskfs_inode_shard *shard = diskfs_inode_shard(thread->shared,
+                                                          inode->inum);
+
+    pthread_mutex_lock(&shard->lock);
+    inode->refcnt++;
+    diskfs_inode_lru_unlink(shard, inode);
+    pthread_mutex_unlock(&shard->lock);
+} /* diskfs_inode_ref_get */
+
+
 /*
  * Caller holds the inode's shard lock.  Queue a freshly-dirtied inode on the
  * shard's deferred-mtime list, taking a refcnt pin so it stays resident until
@@ -3680,10 +3779,56 @@ diskfs_txn_add_block(
 {
     struct diskfs_txn_block *tb = malloc(sizeof(*tb));
 
-    tb->block   = block;
-    tb->next    = txn->blocks;
-    txn->blocks = tb;
+    tb->block        = block;
+    tb->snap_buf     = NULL;
+    tb->snap_csum_lo = 0;
+    tb->snap_csum_hi = 0;
+    tb->next         = txn->blocks;
+    txn->blocks      = tb;
 } /* diskfs_txn_add_block */
+
+
+static inline void
+diskfs_block_buf_ref_locked(struct diskfs_block_buf *buf)
+{
+    chimera_diskfs_abort_if(buf->on_free,
+                            "referencing free diskfs block buffer");
+    __atomic_add_fetch(&buf->refs, 1, __ATOMIC_ACQ_REL);
+} /* diskfs_block_buf_ref_locked */
+
+
+static inline void
+diskfs_block_buf_release_locked(
+    struct diskfs_block_shard *shard,
+    struct diskfs_block_buf   *buf)
+{
+    chimera_diskfs_abort_if(buf->refs == 0,
+                            "diskfs block buffer ref underflow");
+    if (--buf->refs == 0) {
+        chimera_diskfs_abort_if(buf->on_free,
+                                "diskfs block buffer already free");
+        buf->on_free        = 1;
+        buf->next           = shard->free_buffers;
+        shard->free_buffers = buf;
+        shard->nfree_buffers++;
+    }
+} /* diskfs_block_buf_release_locked */
+
+
+static inline struct diskfs_block_buf *
+diskfs_block_buf_alloc_locked(struct diskfs_block_shard *shard)
+{
+    struct diskfs_block_buf *buf = shard->free_buffers;
+
+    chimera_diskfs_abort_if(!buf,
+                            "diskfs block buffer pool exhausted during COW");
+    shard->free_buffers = buf->next;
+    shard->nfree_buffers--;
+    buf->next = NULL;
+    __atomic_store_n(&buf->on_free, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&buf->refs, 1, __ATOMIC_RELEASE);
+    return buf;
+} /* diskfs_block_buf_alloc_locked */
 
 
 static inline struct diskfs_bt_op *
@@ -4071,8 +4216,9 @@ diskfs_inode_alloc_space(
     uint32_t          role = space_map_has_remote(sm) ? SM_DEV_REMOTE : SM_DEV_LOCAL;
 
     DISKFS_SM_JNL(jnl, thread, txn, resume, resume_arg);
-    rc = space_map_alloc(sm, &inode->space_resv, &jnl, role,
-                         (uint64_t) desired_size, floor, &dev_id, r_device_offset);
+    rc = space_map_alloc_volatile_reservation(sm, &inode->space_resv, &jnl,
+                                              role, (uint64_t) desired_size,
+                                              floor, &dev_id, r_device_offset);
 
     if (rc == SM_AGAIN) {
         return SM_AGAIN;        /* parked; caller's resume re-drives */
@@ -4122,10 +4268,9 @@ diskfs_inode_return_reservation(
         return;
     }
 
-    diskfs_thread_free_space(thread, txn, resv->device_id, resv->offset,
-                             resv->length);
-    resv->valid  = 0;
-    resv->length = 0;
+    (void) thread;
+    (void) txn;
+    space_map_thread_cache_discard_volatile(thread->shared->space_map, resv);
 } /* diskfs_inode_return_reservation */
 
 

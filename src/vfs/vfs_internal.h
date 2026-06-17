@@ -263,6 +263,12 @@ chimera_vfs_request_alloc_common(
 
     prometheus_stopwatch_start(&request->start_time);
 
+    request->wait_reason   = NULL;
+    request->wait_since_ns = 0;
+    request->wait_arg0     = 0;
+    request->wait_arg1     = 0;
+    request->wait_arg2     = 0;
+
     thread->num_active_requests++;
     DL_APPEND2(thread->active_requests, request, active_prev, active_next);
 

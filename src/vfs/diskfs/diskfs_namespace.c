@@ -682,8 +682,18 @@ diskfs_lookup_at(
     (void) shared;
     (void) private_data;
 
+    uint64_t                       inum;
+    uint32_t                       gen;
+
     p->thread = thread;
     p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ);
+
+    diskfs_fh_to_inum(&inum, &gen, request->fh, request->fh_len);
+    request->wait_reason   = "diskfs_open_fh_inode_lock";
+    request->wait_since_ns = diskfs_diag_now_ns();
+    request->wait_arg0     = inum;
+    request->wait_arg1     = gen;
+    request->wait_arg2     = 0;
 
     diskfs_inode_get_fh_async(thread, p->txn,
                               request->fh, request->fh_len,
@@ -1644,6 +1654,8 @@ diskfs_open_fh_inode_cb(
     struct chimera_vfs_request    *request = private_data;
     struct diskfs_request_private *p       = request->plugin_data;
 
+    request->wait_reason = NULL;
+
     if (unlikely(status != CHIMERA_VFS_OK)) {
         diskfs_op_fail(request, p->txn, status);
         return;
@@ -1666,7 +1678,7 @@ diskfs_open_fh_inode_cb(
         return;
     }
 
-    inode->refcnt++;
+    diskfs_inode_ref_get(p->thread, inode);
 
     request->open_fh.r_vfs_private = (uint64_t) inode;
     diskfs_op_ok(request, p->txn);
@@ -1686,7 +1698,7 @@ diskfs_open_fh(
     (void) private_data;
 
     p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ);
 
     diskfs_inode_get_fh_async(thread, p->txn,
                               request->fh, request->fh_len,
@@ -1709,7 +1721,7 @@ diskfs_open_at_finish(
      * cached handle matched by a diskfs_close, so always pin the inode and stash
      * the real pointer in vfs_private.  read/write reuse it (and close releases
      * the pin); there is no throwaway/synthetic open_at for this backend. */
-    inode->refcnt++;
+    diskfs_inode_ref_get(thread, inode);
     request->open_at.r_vfs_private = (uint64_t) inode;
 
     diskfs_map_attrs(thread, &request->open_at.r_dir_post_attr, parent);
@@ -2121,20 +2133,20 @@ diskfs_close(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct diskfs_request_private *p     = request->plugin_data;
-    struct diskfs_inode           *inode = (struct diskfs_inode *) request->close.vfs_private;
+    struct diskfs_inode *inode = (struct diskfs_inode *) request->close.vfs_private;
 
     (void) shared;
     (void) private_data;
 
-    p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+    /* Backend close is not a durable operation: open counts are in-memory,
+     * and nlink==0 crash safety is recorded by the unlink/create-unlinked txn
+     * that put the inode on the orphan list.  File-data reservation tails are
+     * volatile, so dropping them only updates the live allocator view. */
+    diskfs_inode_return_reservation(thread, NULL, inode);
+    diskfs_inode_ref_drop(thread, inode);
 
-    /* The inode pointer came in via vfs_private (set at open); re-acquire
-     * it by (inum,gen) so its write lock is tracked in the cache like any
-     * other op. */
-    diskfs_inode_get_inum_async(thread, p->txn, inode->inum, inode->gen,
-                                diskfs_close_inode_cb, request);
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
 } /* diskfs_close */
 
 

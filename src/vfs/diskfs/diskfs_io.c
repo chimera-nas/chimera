@@ -57,6 +57,25 @@ static void
 diskfs_inode_load_recs_done(
     struct diskfs_inode_load_ctx *lc);
 
+static inline int
+diskfs_write_data_sync(
+    struct diskfs_shared       *shared,
+    struct chimera_vfs_request *request)
+{
+    (void) request;
+    return !shared->unsafe_async;
+} /* diskfs_write_data_sync */
+
+static inline uint32_t
+diskfs_write_reported_sync(
+    struct diskfs_shared       *shared,
+    struct chimera_vfs_request *request)
+{
+    (void) shared;
+    (void) request;
+    return CHIMERA_VFS_WRITE_FILESYNC;
+} /* diskfs_write_reported_sync */
+
 static void
 diskfs_inode_load_recs_pnfs_cb(
     struct diskfs_bt_op *op,
@@ -1572,7 +1591,7 @@ diskfs_write_phase2(
                          request->write.iov,
                          request->write.niov,
                          diskfs_private->rmw_device_offset,
-                         !shared->unsafe_async,
+                         diskfs_write_data_sync(shared, request),
                          diskfs_io_callback,
                          request);
         return;
@@ -1700,7 +1719,7 @@ diskfs_write_phase2(
                          chunk_iov,
                          chunk_niov,
                          diskfs_private->rmw_device_offset + offset,
-                         !shared->unsafe_async,
+                         diskfs_write_data_sync(shared, request),
                          diskfs_io_callback,
                          request);
 
@@ -1881,7 +1900,7 @@ diskfs_write_finish_map(struct chimera_vfs_request *request)
 
         diskfs_txn_drop_inode_block(thread, diskfs_private->txn, inode);
         diskfs_metric_mtime(thread, DISKFS_METRIC_MTIME_DEFERRED);
-        request->write.r_sync = CHIMERA_VFS_WRITE_DATASYNC;
+        request->write.r_sync = diskfs_write_reported_sync(shared, request);
     } else {
         /* Record which gate stopped the deferral (in expression order). */
         if (!diskfs_private->inplace_written) {
@@ -1891,7 +1910,7 @@ diskfs_write_finish_map(struct chimera_vfs_request *request)
         } else if (request->write.sync == CHIMERA_VFS_WRITE_FILESYNC) {
             diskfs_metric_mtime(thread, DISKFS_METRIC_MTIME_SKIP_FILESYNC);
         }
-        request->write.r_sync = CHIMERA_VFS_WRITE_FILESYNC;
+        request->write.r_sync = diskfs_write_reported_sync(shared, request);
     }
 
     /* Do NOT release the inode lock here.  The dirty b+tree/inode blocks are
@@ -2427,7 +2446,7 @@ diskfs_write_inode_cb(
         diskfs_map_attrs(thread, &request->write.r_post_attr, inode);
 
         request->write.r_length = 0;
-        request->write.r_sync   = CHIMERA_VFS_WRITE_FILESYNC;
+        request->write.r_sync   = diskfs_write_reported_sync(thread->shared, request);
         diskfs_op_ok(request, p->txn);
         return;
     }

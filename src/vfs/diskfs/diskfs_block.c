@@ -22,8 +22,16 @@ diskfs_block_recycle(
     struct diskfs_thread      *thread,
     struct diskfs_block_shard *shard);
 
+static void
+diskfs_block_drain_returned_locked(
+    struct diskfs_block_shard *shard);
+
+static void
+diskfs_block_drain_clean_locked(
+    struct diskfs_block_shard *shard);
+
 static inline void
-diskfs_block_ensure_iov(
+diskfs_block_assert_iov(
     struct diskfs_thread *thread,
     struct diskfs_block  *blk);
 
@@ -81,6 +89,46 @@ diskfs_block_lru_unlink(
 } /* diskfs_block_lru_unlink */
 
 
+static void
+diskfs_block_drain_returned_locked(struct diskfs_block_shard *shard)
+{
+    struct diskfs_block_buf *buf;
+
+    buf = __atomic_exchange_n(&shard->returned_buffers, NULL, __ATOMIC_ACQUIRE);
+    while (buf) {
+        struct diskfs_block_buf *next = buf->next;
+
+        chimera_diskfs_abort_if(!buf->on_free,
+                                "returned diskfs block buffer is not marked free");
+        buf->next           = shard->free_buffers;
+        shard->free_buffers = buf;
+        shard->nfree_buffers++;
+        buf = next;
+    }
+} /* diskfs_block_drain_returned_locked */
+
+
+static void
+diskfs_block_drain_clean_locked(struct diskfs_block_shard *shard)
+{
+    struct diskfs_block *blk;
+
+    blk = __atomic_exchange_n(&shard->clean_head, NULL, __ATOMIC_ACQUIRE);
+    while (blk) {
+        struct diskfs_block *next = blk->clean_next;
+
+        blk->clean_next = NULL;
+        __atomic_store_n(&blk->clean_queued, 0, __ATOMIC_RELEASE);
+
+        if (__atomic_load_n(&blk->state, __ATOMIC_ACQUIRE) == DISKFS_BLOCK_CLEAN &&
+            __atomic_load_n(&blk->pin_count, __ATOMIC_ACQUIRE) == 0 && !blk->on_lru) {
+            diskfs_block_lru_push_tail(shard, blk);
+        }
+        blk = next;
+    }
+} /* diskfs_block_drain_clean_locked */
+
+
 /*
  * Recycle the least-recently-used CLEAN, unpinned buffer for reuse at a new
  * key.  Caller holds the shard lock.  Returns a buffer with pin_count 0,
@@ -101,9 +149,13 @@ diskfs_block_recycle(
     struct diskfs_thread      *thread,
     struct diskfs_block_shard *shard)
 {
-    struct diskfs_block *blk = shard->lru_head;
+    struct diskfs_block *blk;
     struct diskfs_block *cur, *prev;
     uint32_t             ob;
+
+    diskfs_block_drain_returned_locked(shard);
+    diskfs_block_drain_clean_locked(shard);
+    blk = shard->lru_head;
 
     chimera_diskfs_abort_if(!blk,
                             "block cache shard exhausted: every buffer pinned "
@@ -142,8 +194,10 @@ diskfs_block_unpin(
                                                           blk->device_id, blk->device_offset);
 
     pthread_mutex_lock(&shard->lock);
-    blk->state = new_state;
-    if (--blk->pin_count == 0 && blk->state == DISKFS_BLOCK_CLEAN && !blk->on_lru) {
+    diskfs_block_drain_clean_locked(shard);
+    __atomic_store_n(&blk->state, new_state, __ATOMIC_RELEASE);
+    if (__atomic_sub_fetch(&blk->pin_count, 1, __ATOMIC_ACQ_REL) == 0 &&
+        __atomic_load_n(&blk->state, __ATOMIC_ACQUIRE) == DISKFS_BLOCK_CLEAN && !blk->on_lru) {
         diskfs_block_lru_push_tail(shard, blk);
     }
     pthread_mutex_unlock(&shard->lock);
@@ -160,7 +214,9 @@ diskfs_block_release(
                                                           blk->device_id, blk->device_offset);
 
     pthread_mutex_lock(&shard->lock);
-    if (--blk->pin_count == 0 && blk->state == DISKFS_BLOCK_CLEAN && !blk->on_lru) {
+    diskfs_block_drain_clean_locked(shard);
+    if (__atomic_sub_fetch(&blk->pin_count, 1, __ATOMIC_ACQ_REL) == 0 &&
+        __atomic_load_n(&blk->state, __ATOMIC_ACQUIRE) == DISKFS_BLOCK_CLEAN && !blk->on_lru) {
         diskfs_block_lru_push_tail(shard, blk);
     }
     pthread_mutex_unlock(&shard->lock);
@@ -170,23 +226,30 @@ diskfs_block_release(
 void
 diskfs_block_cache_create(struct diskfs_shared *shared)
 {
-    struct diskfs_block_cache *cache = calloc(1, sizeof(*cache));
-    uint32_t                   total = shared->block_cache_blocks ?
-        shared->block_cache_blocks : DISKFS_BLOCK_CACHE_DEFAULT_BLOCKS;
+    struct diskfs_block_cache *cache   = calloc(1, sizeof(*cache));
+    uint64_t                   il_size = shared->intent_log_size;
+    uint32_t                   min     = (uint32_t) DISKFS_BLOCK_CACHE_MIN_BLOCKS(il_size);
+    uint32_t                   total   = shared->block_cache_blocks ?
+        shared->block_cache_blocks : (uint32_t) DISKFS_BLOCK_CACHE_DEFAULT_BLOCKS(il_size);
     int                        i;
     uint32_t                   j;
+    uint32_t                   extra;
 
     /* The pool never grows or blocks, so it must clear the maximum pinnable
      * set; floor an under-sized configuration rather than risk the recycle
      * abort under load. */
-    if (total < DISKFS_BLOCK_CACHE_MIN_BLOCKS) {
-        total = DISKFS_BLOCK_CACHE_MIN_BLOCKS;
+    if (total < min) {
+        total = min;
     }
 
     cache->shard_cap = total / DISKFS_BLOCK_CACHE_SHARDS;
     if (cache->shard_cap == 0) {
         cache->shard_cap = 1;
     }
+
+    extra                         = cache->shard_cap;
+    cache->buffer_extra_per_shard = extra;
+    pthread_mutex_init(&cache->prealloc_lock, NULL);
 
     for (i = 0; i < DISKFS_BLOCK_CACHE_SHARDS; i++) {
         struct diskfs_block_shard *shard = &cache->shards[i];
@@ -212,6 +275,57 @@ diskfs_block_cache_create(struct diskfs_shared *shared)
 
 
 void
+diskfs_block_cache_prealloc(
+    struct diskfs_shared *shared,
+    struct evpl          *evpl)
+{
+    struct diskfs_block_cache *cache = shared->block_cache;
+    uint32_t                   i, j;
+
+    pthread_mutex_lock(&cache->prealloc_lock);
+    if (cache->buffers_ready) {
+        pthread_mutex_unlock(&cache->prealloc_lock);
+        return;
+    }
+
+    for (i = 0; i < DISKFS_BLOCK_CACHE_SHARDS; i++) {
+        struct diskfs_block_shard *shard = &cache->shards[i];
+        uint32_t                   total = shard->nblocks + cache->buffer_extra_per_shard;
+
+        shard->buffers  = calloc(total, sizeof(*shard->buffers));
+        shard->nbuffers = total;
+
+        for (j = 0; j < total; j++) {
+            struct diskfs_block_buf *buf = &shard->buffers[j];
+            int                      niov;
+
+            niov = evpl_iovec_alloc(evpl, DISKFS_BLOCK_SIZE, DISKFS_BLOCK_SIZE, 1,
+                                    EVPL_IOVEC_FLAG_SHARED, &buf->iov);
+            chimera_diskfs_abort_if(niov != 1,
+                                    "diskfs block buffer did not fit in one iovec (%d)",
+                                    niov);
+            buf->shard          = shard;
+            buf->on_free        = 1;
+            buf->next           = shard->free_buffers;
+            shard->free_buffers = buf;
+            shard->nfree_buffers++;
+        }
+
+        for (j = 0; j < shard->nblocks; j++) {
+            struct diskfs_block     *blk = &shard->pool[j];
+            struct diskfs_block_buf *buf = diskfs_block_buf_alloc_locked(shard);
+
+            blk->buf = buf;
+            blk->iov = buf->iov;
+        }
+    }
+
+    cache->buffers_ready = 1;
+    pthread_mutex_unlock(&cache->prealloc_lock);
+} /* diskfs_block_cache_prealloc */
+
+
+void
 diskfs_block_cache_destroy(struct diskfs_shared *shared)
 {
     struct diskfs_block_cache *cache = shared->block_cache;
@@ -228,18 +342,42 @@ diskfs_block_cache_destroy(struct diskfs_shared *shared)
         /* Release each block's buffer (NULL evpl -> straight to the global
          * allocator, which is correct at teardown); the structs are one pool
          * array.  At a clean unmount every block is CLEAN (refcount 1). */
-        for (j = 0; j < shard->nblocks; j++) {
-            if (shard->pool[j].iov.data) {
-                evpl_iovec_release(NULL, &shard->pool[j].iov);
-            }
+        for (j = 0; j < shard->nbuffers; j++) {
+            evpl_iovec_release(NULL, &shard->buffers[j].iov);
         }
+        free(shard->buffers);
         free(shard->pool);
         free(shard->buckets);
         pthread_mutex_destroy(&shard->lock);
     }
+    pthread_mutex_destroy(&cache->prealloc_lock);
     free(cache);
     shared->block_cache = NULL;
 } /* diskfs_block_cache_destroy */
+
+
+void
+diskfs_block_buf_release(struct diskfs_block_buf *buf)
+{
+    struct diskfs_block_shard *shard;
+    struct diskfs_block_buf   *head;
+
+    chimera_diskfs_abort_if(__atomic_load_n(&buf->refs, __ATOMIC_ACQUIRE) == 0,
+                            "diskfs block buffer ref underflow");
+    if (__atomic_sub_fetch(&buf->refs, 1, __ATOMIC_ACQ_REL) != 0) {
+        return;
+    }
+
+    shard = buf->shard;
+    chimera_diskfs_abort_if(__atomic_exchange_n(&buf->on_free, 1, __ATOMIC_ACQ_REL),
+                            "diskfs block buffer already free");
+
+    do {
+        head      = __atomic_load_n(&shard->returned_buffers, __ATOMIC_ACQUIRE);
+        buf->next = head;
+    } while (!__atomic_compare_exchange_n(&shard->returned_buffers, &head, buf,
+                                          0, __ATOMIC_RELEASE, __ATOMIC_ACQUIRE));
+} /* diskfs_block_buf_release */
 
 
 /*
@@ -250,15 +388,14 @@ diskfs_block_cache_destroy(struct diskfs_shared *shared)
  * -- so an allocation happens only on a never-yet-used pool slot (and on COW).
  */
 static inline void
-diskfs_block_ensure_iov(
+diskfs_block_assert_iov(
     struct diskfs_thread *thread,
     struct diskfs_block  *blk)
 {
-    if (!blk->iov.data) {
-        evpl_iovec_alloc(thread->evpl, DISKFS_BLOCK_SIZE, DISKFS_BLOCK_SIZE, 1,
-                         EVPL_IOVEC_FLAG_SHARED, &blk->iov);
-    }
-} /* diskfs_block_ensure_iov */
+    (void) thread;
+    chimera_diskfs_abort_if(!blk->buf || !blk->iov.data,
+                            "diskfs block used before buffer preallocation");
+} /* diskfs_block_assert_iov */
 
 
 /*
@@ -286,17 +423,19 @@ diskfs_block_claim(
 
     pthread_mutex_lock(&shard->lock);
 
+    diskfs_block_drain_returned_locked(shard);
+    diskfs_block_drain_clean_locked(shard);
     blk = diskfs_block_lookup_locked(shard, bucket, device_id, device_offset);
     if (!blk) {
         diskfs_metric_block_cache(thread, DISKFS_METRIC_BLOCK_CACHE_MISS);
         blk                = diskfs_block_recycle(thread, shard);
         blk->device_id     = device_id;
         blk->device_offset = device_offset;
-        blk->state         = DISKFS_BLOCK_CLEAN;
-        blk->seq           = 0;
-        blk->wait_head     = NULL;
-        blk->wait_tail     = NULL;
-        diskfs_block_ensure_iov(thread, blk);
+        __atomic_store_n(&blk->state, DISKFS_BLOCK_CLEAN, __ATOMIC_RELEASE);
+        __atomic_store_n(&blk->seq, 0, __ATOMIC_RELEASE);
+        blk->wait_head = NULL;
+        blk->wait_tail = NULL;
+        diskfs_block_assert_iov(thread, blk);
         if (is_new) {
             diskfs_metric_block_cache(thread, DISKFS_METRIC_BLOCK_CACHE_NEW);
         }
@@ -318,26 +457,26 @@ diskfs_block_claim(
     } else if (blk->on_lru) {
         diskfs_metric_block_cache(thread, DISKFS_METRIC_BLOCK_CACHE_HIT);
         diskfs_block_lru_unlink(shard, blk);
-    } else if (blk->state == DISKFS_BLOCK_LOGGED) {
+    } else if (__atomic_load_n(&blk->state, __ATOMIC_ACQUIRE) == DISKFS_BLOCK_LOGGED) {
         /* COW: this buffer is still referenced by an un-pushed redo record (and
          * the tail-pusher will write it home), so it must stay immutable.  Fork
          * a private writable copy; the old buffer rides the record to its home
          * and is freed when the pusher releases it.  Done under the shard lock
          * so it serializes against the pusher's LOGGED->CLEAN transition. */
-        struct evpl_iovec nv;
+        struct diskfs_block_buf *old = blk->buf;
+        struct diskfs_block_buf *new = diskfs_block_buf_alloc_locked(shard);
 
-        evpl_iovec_alloc(thread->evpl, DISKFS_BLOCK_SIZE, DISKFS_BLOCK_SIZE, 1,
-                         EVPL_IOVEC_FLAG_SHARED, &nv);
-        memcpy(nv.data, blk->iov.data, DISKFS_BLOCK_SIZE);
-        evpl_iovec_release(thread->evpl, &blk->iov);
-        evpl_iovec_move(&blk->iov, &nv);
-        blk->state = DISKFS_BLOCK_CLEAN;
+        memcpy(new->iov.data, old->iov.data, DISKFS_BLOCK_SIZE);
+        blk->buf = new;
+        blk->iov = new->iov;
+        diskfs_block_buf_release_locked(shard, old);
+        __atomic_store_n(&blk->state, DISKFS_BLOCK_CLEAN, __ATOMIC_RELEASE);
         diskfs_metric_block_cache(thread, DISKFS_METRIC_BLOCK_CACHE_COW);
     } else {
         diskfs_metric_block_cache(thread, DISKFS_METRIC_BLOCK_CACHE_HIT);
     }
 
-    blk->pin_count++;
+    __atomic_add_fetch(&blk->pin_count, 1, __ATOMIC_ACQ_REL);
     pthread_mutex_unlock(&shard->lock);
 
     return blk;
@@ -509,6 +648,7 @@ diskfs_block_waiter_dispatch(
         worker->resume_head = w;
     }
     worker->resume_tail = w;
+    __atomic_store_n(&worker->resume_pending, 1, __ATOMIC_RELEASE);
     pthread_mutex_unlock(&worker->resume_lock);
 
     if (worker == waker) {
@@ -537,10 +677,15 @@ diskfs_bt_resume_drain(struct diskfs_thread *thread)
 {
     struct diskfs_block_waiter *list, *w;
 
+    if (!__atomic_load_n(&thread->resume_pending, __ATOMIC_ACQUIRE)) {
+        return;
+    }
+
     pthread_mutex_lock(&thread->resume_lock);
     list                = thread->resume_head;
     thread->resume_head = NULL;
     thread->resume_tail = NULL;
+    __atomic_store_n(&thread->resume_pending, 0, __ATOMIC_RELEASE);
     pthread_mutex_unlock(&thread->resume_lock);
 
     while (list) {
@@ -581,6 +726,19 @@ diskfs_bt_resume_deferral_cb(
     diskfs_bt_resume_drain(private_data);
 } /* diskfs_bt_resume_deferral_cb */
 
+void
+diskfs_bt_resume_poll(
+    struct evpl *evpl,
+    void        *private_data)
+{
+    struct diskfs_thread *thread = private_data;
+
+    if (__atomic_load_n(&thread->resume_pending, __ATOMIC_ACQUIRE)) {
+        diskfs_bt_resume_drain(thread);
+        evpl_activity(evpl);
+    }
+} /* diskfs_bt_resume_poll */
+
 
 /* Block read completion: data landed directly in blk->iov; mark CLEAN, wake. */
 static void
@@ -601,7 +759,7 @@ diskfs_block_load_complete(
                             blk->device_offset, status);
 
     pthread_mutex_lock(&shard->lock);
-    blk->state     = DISKFS_BLOCK_CLEAN;
+    __atomic_store_n(&blk->state, DISKFS_BLOCK_CLEAN, __ATOMIC_RELEASE);
     waiters        = blk->wait_head;
     blk->wait_head = NULL;
     blk->wait_tail = NULL;
@@ -638,7 +796,7 @@ diskfs_bt_op_pin(
     if (blk->on_lru) {
         diskfs_block_lru_unlink(shard, blk);
     }
-    blk->pin_count++;
+    __atomic_add_fetch(&blk->pin_count, 1, __ATOMIC_ACQ_REL);
     chimera_diskfs_abort_if(op->npins >= (int) (sizeof(op->pins) / sizeof(op->pins[0])),
                             "b+tree op pin list overflow");
     op->pins[op->npins++] = blk;
@@ -670,10 +828,10 @@ diskfs_bt_block_get(
 
     if (!blk) {
         diskfs_metric_block_cache(thread, DISKFS_METRIC_BLOCK_CACHE_MISS);
-        blk                    = diskfs_block_recycle(thread, shard);
-        blk->device_id         = device_id;
-        blk->device_offset     = device_offset;
-        blk->state             = DISKFS_BLOCK_LOADING;
+        blk                = diskfs_block_recycle(thread, shard);
+        blk->device_id     = device_id;
+        blk->device_offset = device_offset;
+        __atomic_store_n(&blk->state, DISKFS_BLOCK_LOADING, __ATOMIC_RELEASE);
         blk->seq               = 0;
         blk->wait_head         = NULL;
         blk->wait_tail         = NULL;
@@ -704,7 +862,7 @@ diskfs_bt_block_get(
     pthread_mutex_unlock(&shard->lock);
 
     if (issue) {
-        diskfs_block_ensure_iov(thread, blk);
+        diskfs_block_assert_iov(thread, blk);
         ld         = malloc(sizeof(*ld));
         ld->blk    = blk;
         ld->thread = thread;
@@ -751,9 +909,11 @@ diskfs_block_claim_async(
 
     pthread_mutex_lock(&shard->lock);
 
+    diskfs_block_drain_returned_locked(shard);
+    diskfs_block_drain_clean_locked(shard);
     blk = diskfs_block_lookup_locked(shard, bucket, device_id, device_offset);
 
-    if (blk && blk->state == DISKFS_BLOCK_LOADING) {
+    if (blk && __atomic_load_n(&blk->state, __ATOMIC_ACQUIRE) == DISKFS_BLOCK_LOADING) {
         /* A read is already in flight: park and resume when it lands. */
         diskfs_metric_block_cache(thread, DISKFS_METRIC_BLOCK_CACHE_WAIT);
         w         = diskfs_block_waiter_alloc(thread);
@@ -775,24 +935,24 @@ diskfs_block_claim_async(
         blk                = diskfs_block_recycle(thread, shard);
         blk->device_id     = device_id;
         blk->device_offset = device_offset;
-        blk->seq           = 0;
-        blk->wait_head     = NULL;
-        blk->wait_tail     = NULL;
+        __atomic_store_n(&blk->seq, 0, __ATOMIC_RELEASE);
+        blk->wait_head = NULL;
+        blk->wait_tail = NULL;
 
         if (is_new) {
             diskfs_metric_block_cache(thread, DISKFS_METRIC_BLOCK_CACHE_NEW);
-            blk->state = DISKFS_BLOCK_CLEAN;
-            diskfs_block_ensure_iov(thread, blk);
+            __atomic_store_n(&blk->state, DISKFS_BLOCK_CLEAN, __ATOMIC_RELEASE);
+            diskfs_block_assert_iov(thread, blk);
             memset(blk->iov.data, 0, DISKFS_BLOCK_SIZE);
             blk->hash_next         = shard->buckets[bucket];
             shard->buckets[bucket] = blk;
-            blk->pin_count++;
+            __atomic_add_fetch(&blk->pin_count, 1, __ATOMIC_ACQ_REL);
             pthread_mutex_unlock(&shard->lock);
             return blk;
         }
 
         /* Miss: publish a LOADING block, park, and issue the async read. */
-        blk->state             = DISKFS_BLOCK_LOADING;
+        __atomic_store_n(&blk->state, DISKFS_BLOCK_LOADING, __ATOMIC_RELEASE);
         blk->hash_next         = shard->buckets[bucket];
         shard->buckets[bucket] = blk;
         w                      = diskfs_block_waiter_alloc(thread);
@@ -805,16 +965,16 @@ diskfs_block_claim_async(
     } else if (blk->on_lru) {
         diskfs_metric_block_cache(thread, DISKFS_METRIC_BLOCK_CACHE_HIT);
         diskfs_block_lru_unlink(shard, blk);
-    } else if (blk->state == DISKFS_BLOCK_LOGGED) {
+    } else if (__atomic_load_n(&blk->state, __ATOMIC_ACQUIRE) == DISKFS_BLOCK_LOGGED) {
         /* COW (see diskfs_block_claim): fork a private writable copy. */
-        struct evpl_iovec nv;
+        struct diskfs_block_buf *old = blk->buf;
+        struct diskfs_block_buf *new = diskfs_block_buf_alloc_locked(shard);
 
-        evpl_iovec_alloc(thread->evpl, DISKFS_BLOCK_SIZE, DISKFS_BLOCK_SIZE, 1,
-                         EVPL_IOVEC_FLAG_SHARED, &nv);
-        memcpy(nv.data, blk->iov.data, DISKFS_BLOCK_SIZE);
-        evpl_iovec_release(thread->evpl, &blk->iov);
-        evpl_iovec_move(&blk->iov, &nv);
-        blk->state = DISKFS_BLOCK_CLEAN;
+        memcpy(new->iov.data, old->iov.data, DISKFS_BLOCK_SIZE);
+        blk->buf = new;
+        blk->iov = new->iov;
+        diskfs_block_buf_release_locked(shard, old);
+        __atomic_store_n(&blk->state, DISKFS_BLOCK_CLEAN, __ATOMIC_RELEASE);
         diskfs_metric_block_cache(thread, DISKFS_METRIC_BLOCK_CACHE_COW);
     } else {
         diskfs_metric_block_cache(thread, DISKFS_METRIC_BLOCK_CACHE_HIT);
@@ -822,7 +982,7 @@ diskfs_block_claim_async(
 
     if (issue) {
         pthread_mutex_unlock(&shard->lock);
-        diskfs_block_ensure_iov(thread, blk);
+        diskfs_block_assert_iov(thread, blk);
         ld         = malloc(sizeof(*ld));
         ld->blk    = blk;
         ld->thread = thread;
@@ -836,7 +996,7 @@ diskfs_block_claim_async(
         return NULL;
     }
 
-    blk->pin_count++;
+    __atomic_add_fetch(&blk->pin_count, 1, __ATOMIC_ACQ_REL);
     pthread_mutex_unlock(&shard->lock);
     return blk;
 } /* diskfs_block_claim_async */
