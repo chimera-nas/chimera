@@ -135,7 +135,8 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
     set(_wpts_configs base persistent compression multichannel
         multichannel_persistent
         encryption compression_encryption multichannel_encryption
-        dirlease dirlease_persistent dirlease_appinstance)
+        dirlease dirlease_persistent dirlease_appinstance
+        symlink)
     foreach(_c ${_wpts_configs})
         set(WPTS_GREEN_${_c} "")
     endforeach()
@@ -177,6 +178,9 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
     set(_wpts_envfrag_dirlease                ";CHIMERA_SMB_DIRLEASE=1")
     set(_wpts_envfrag_dirlease_persistent     ";CHIMERA_SMB_DIRLEASE=1;CHIMERA_SMB_PERSISTENT=1")
     set(_wpts_envfrag_dirlease_appinstance    ";CHIMERA_SMB_DIRLEASE=1;CHIMERA_SMB_PERSISTENT=1;CHIMERA_SMB_MULTICHANNEL=1")
+    # Symlink config: seeds reparse-point fixtures + advertises their paths so
+    # the CreateClose symbolic-link cases become applicable.
+    set(_wpts_envfrag_symlink                 ";CHIMERA_SMB_SYMLINK=1")
     set(_wpts_lbl_base                    "")
     set(_wpts_lbl_persistent              ";persistent")
     set(_wpts_lbl_compression             ";compression")
@@ -188,6 +192,7 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
     set(_wpts_lbl_dirlease                ";dirlease")
     set(_wpts_lbl_dirlease_persistent     ";dirlease;persistent")
     set(_wpts_lbl_dirlease_appinstance    ";dirlease;persistent;multichannel")
+    set(_wpts_lbl_symlink                 ";symlink")
     set(_wpts_suf_base                    "")
     set(_wpts_suf_persistent              "_persistent")
     set(_wpts_suf_compression             "_compression")
@@ -199,6 +204,7 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
     set(_wpts_suf_dirlease                "_dirlease")
     set(_wpts_suf_dirlease_persistent     "_dirlease_persistent")
     set(_wpts_suf_dirlease_appinstance    "_dirlease_appinstance")
+    set(_wpts_suf_symlink                 "_symlink")
 
     foreach(_cfg ${_wpts_configs})
         if(NOT WPTS_GREEN_${_cfg})

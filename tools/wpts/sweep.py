@@ -53,7 +53,8 @@ TRX_NS = "{http://microsoft.com/schemas/VisualStudio/TeamTest/2010}"
 CONFIGS = ["base", "persistent", "compression", "multichannel",
            "multichannel_persistent",
            "encryption", "compression_encryption", "multichannel_encryption",
-           "dirlease", "dirlease_persistent", "dirlease_appinstance"]
+           "dirlease", "dirlease_persistent", "dirlease_appinstance",
+           "symlink"]
 
 # config -> CHIMERA_SMB_* env that the wrapper reads (drives daemon config +
 # ptfconfig capability flips).  base sets nothing.
@@ -75,6 +76,7 @@ CONFIG_ENV = {
     "dirlease_appinstance":    {"CHIMERA_SMB_DIRLEASE": "1",
                                 "CHIMERA_SMB_PERSISTENT": "1",
                                 "CHIMERA_SMB_MULTICHANNEL": "1"},
+    "symlink":                 {"CHIMERA_SMB_SYMLINK": "1"},
 }
 
 STATUSES = {"green", "xfail", "skip"}

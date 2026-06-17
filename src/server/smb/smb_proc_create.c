@@ -96,6 +96,7 @@ chimera_smb_create_error_status(enum chimera_vfs_error error_code)
         case CHIMERA_VFS_EDQUOT:       return SMB2_STATUS_DISK_FULL;
         case CHIMERA_VFS_ENAMETOOLONG: return SMB2_STATUS_NAME_TOO_LONG;
         case CHIMERA_VFS_EROFS:        return SMB2_STATUS_MEDIA_WRITE_PROTECTED;
+        case CHIMERA_VFS_ELOOP:        return SMB2_STATUS_STOPPED_ON_SYMLINK;
         default:                       return SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
     } /* switch */
 } /* chimera_smb_create_error_status */
@@ -1619,6 +1620,29 @@ chimera_smb_create_share_retry_cb(
     struct evpl       *evpl,
     struct evpl_timer *timer);
 
+/* A directory-create collided with an existing entry: if that entry is a
+ * symbolic link, SMB stops on it (STATUS_STOPPED_ON_SYMLINK) rather than
+ * reporting a name collision (MS-SMB2 3.3.5.9).  Only reached on the already-
+ * failing EEXIST path, so the extra lookup never burdens a successful mkdir. */
+static inline void
+chimera_smb_create_collision_symlink_cb(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    struct chimera_vfs_attrs *dir_attr,
+    void                     *private_data)
+{
+    struct chimera_smb_request *request = private_data;
+    uint32_t                    status  = SMB2_STATUS_OBJECT_NAME_COLLISION;
+
+    if (error_code == CHIMERA_VFS_OK && attr &&
+        (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) && S_ISLNK(attr->va_mode)) {
+        status = SMB2_STATUS_STOPPED_ON_SYMLINK;
+    }
+
+    chimera_smb_create_release_parent(request);
+    chimera_smb_complete_request(request, status);
+} /* chimera_smb_create_collision_symlink_cb */
+
 static inline void
 chimera_smb_create_mkdir_callback(
     enum chimera_vfs_error    error_code,
@@ -1635,16 +1659,23 @@ chimera_smb_create_mkdir_callback(
     struct chimera_vfs_thread        *vfs_thread = thread->vfs_thread;
 
     if (error_code != CHIMERA_VFS_OK) {
+        unsigned int reopen_flags = CHIMERA_VFS_OPEN_DIRECTORY;
+
+        if (!(request->create.create_options & SMB2_FILE_OPEN_REPARSE_POINT)) {
+            reopen_flags |= CHIMERA_VFS_OPEN_STOP_SYMLINK;
+        }
+
         if (error_code == CHIMERA_VFS_EEXIST &&
             request->create.create_disposition == SMB2_FILE_OPEN_IF) {
-            /* Directory already exists — fall through to open it */
+            /* Directory already exists — fall through to open it (stopping if
+             * the existing entry is a symbolic link). */
             chimera_vfs_open_at(
                 vfs_thread,
                 &request->session_handle->session->cred,
                 request->create.parent_handle,
                 request->create.name,
                 request->create.name_len,
-                CHIMERA_VFS_OPEN_DIRECTORY,
+                reopen_flags,
                 &request->create.set_attr,
                 CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT |
                 CHIMERA_VFS_ATTR_ACL | CHIMERA_VFS_ATTR_BTIME,
@@ -1654,6 +1685,25 @@ chimera_smb_create_mkdir_callback(
                 request);
             return;
         }
+
+        /* A FILE_CREATE collision may actually be a symbolic link — SMB stops
+         * on it rather than reporting a name collision.  Probe the colliding
+         * entry's mode (only on this already-failing path). */
+        if (error_code == CHIMERA_VFS_EEXIST &&
+            !(request->create.create_options & SMB2_FILE_OPEN_REPARSE_POINT)) {
+            chimera_vfs_lookup_at(
+                vfs_thread,
+                &request->session_handle->session->cred,
+                request->create.parent_handle,
+                request->create.name,
+                request->create.name_len,
+                CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MODE,
+                0,
+                chimera_smb_create_collision_symlink_cb,
+                request);
+            return;
+        }
+
         chimera_smb_create_release_parent(request);
         chimera_smb_complete_request(request, error_code == CHIMERA_VFS_EEXIST ?
                                      SMB2_STATUS_OBJECT_NAME_COLLISION :
@@ -1829,6 +1879,19 @@ chimera_smb_create_open_at_callback(
     if (error_code != CHIMERA_VFS_OK) {
         chimera_smb_create_release_parent(request);
         chimera_smb_complete_request(request, chimera_smb_create_error_status(error_code));
+        return;
+    }
+
+    /* The opened leaf is itself a symbolic link.  Unless the caller asked to
+     * open the reparse point directly (FILE_OPEN_REPARSE_POINT), SMB does not
+     * follow it on the server: return STATUS_STOPPED_ON_SYMLINK so the client
+     * resolves the link and retries (MS-SMB2 2.2.2.2.1).  memfs returns the link
+     * inode's attributes for a non-NOFOLLOW open of a final-component symlink. */
+    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) && S_ISLNK(attr->va_mode) &&
+        !(request->create.create_options & SMB2_FILE_OPEN_REPARSE_POINT)) {
+        chimera_vfs_release(vfs_thread, oh);
+        chimera_vfs_release(vfs_thread, request->create.parent_handle);
+        chimera_smb_complete_request(request, SMB2_STATUS_STOPPED_ON_SYMLINK);
         return;
     }
 
@@ -2960,6 +3023,15 @@ chimera_smb_create_issue_open(struct chimera_smb_request *request)
         flags |= CHIMERA_VFS_OPEN_NOFOLLOW;
     }
 
+    /* Unless the caller explicitly opens the reparse point, stop if the leaf is
+     * a symbolic link: the backend returns ELOOP (-> STATUS_STOPPED_ON_SYMLINK)
+     * before colliding/opening/truncating it, so a FILE_CREATE on a symlink leaf
+     * stops at the link instead of reporting OBJECT_NAME_COLLISION (MS-SMB2
+     * 3.3.5.9). */
+    if (!(request->create.create_options & SMB2_FILE_OPEN_REPARSE_POINT)) {
+        flags |= CHIMERA_VFS_OPEN_STOP_SYMLINK;
+    }
+
     if (request->create.has_stream) {
         /* For a named-stream open the disposition applies to the STREAM, not
          * the base file.  Open the base file, creating it if the disposition
@@ -3174,6 +3246,16 @@ chimera_smb_create_lookup_parent_callback(
         return;
     }
 
+    /* The create path traverses a symbolic link: SMB never silently follows a
+     * reparse point on the server, it returns STATUS_STOPPED_ON_SYMLINK so the
+     * client resolves the link and retries (MS-SMB2 2.2.2.2.1).  The parent-path
+     * lookup is issued without LOOKUP_FOLLOW, so a symlink as the final component
+     * of the parent path resolves to the link itself here. */
+    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) && S_ISLNK(attr->va_mode)) {
+        chimera_smb_complete_request(request, SMB2_STATUS_STOPPED_ON_SYMLINK);
+        return;
+    }
+
     chimera_vfs_open_fh(
         vfs_thread,
         &request->session_handle->session->cred,
@@ -3198,8 +3280,8 @@ chimera_smb_create_process(struct chimera_smb_request *request)
             tree->fh_len,
             request->create.parent_path,
             request->create.parent_path_len,
-            CHIMERA_VFS_ATTR_FH,
-            CHIMERA_VFS_LOOKUP_FOLLOW,
+            CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MODE,
+            0,
             chimera_smb_create_lookup_parent_callback,
             request);
     } else if (request->create.name_len) {

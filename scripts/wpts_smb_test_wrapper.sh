@@ -227,6 +227,16 @@ if [ "${CHIMERA_SMB_MULTICHANNEL:-0}" = "1" ]; then
 fi
 ip netns exec "${NETNS_NAME}" ip link set "${DUMMY_IF}" up
 
+# When the symlink config is active, tell the daemon to seed the symbolic-link
+# fixtures (a directory holding an in-path link + a dangling root-level link) on
+# this run's backend module -- no SMB client can create a reparse-point symlink
+# on an empty share, so the daemon seeds them at startup.  The daemon inherits
+# this through `ip netns exec env` below; the matching ptfconfig paths are set
+# in the staging section.
+if [ "${CHIMERA_SMB_SYMLINK:-0}" = "1" ]; then
+    export CHIMERA_SMB_SEED_SYMLINKS="$BACKEND"
+fi
+
 # Start the chimera daemon inside the netns
 ip netns exec "${NETNS_NAME}" env \
     ASAN_OPTIONS="detect_leaks=0:handle_abort=2:print_cmdline=1" \
@@ -363,6 +373,19 @@ if [ "${CHIMERA_SMB_DIRLEASE:-0}" = "1" ]; then
     staged="${WPTS_STAGE_DIR}/CommonTestSuite.deployment.ptfconfig"
     sed -i \
         -e 's#<Property name="IsDirectoryLeasingSupported" value="false"/>#<Property name="IsDirectoryLeasingSupported" value="true"/>#' \
+        "$staged"
+fi
+
+# When the symlink config is active, point the driver at the seeded fixtures so
+# the CreateClose symlink cases become applicable: Symboliclink is the dangling
+# root-level link, SymboliclinkInSubFolder is the link living inside a directory
+# (so it is reached both as a path component and as the leaf).  The daemon
+# created these at startup (CHIMERA_SMB_SEED_SYMLINKS above).
+if [ "${CHIMERA_SMB_SYMLINK:-0}" = "1" ]; then
+    staged="${WPTS_STAGE_DIR}/MS-SMB2_ServerTestSuite.deployment.ptfconfig"
+    sed -i \
+        -e 's#<Property name="Symboliclink" value=""/>#<Property name="Symboliclink" value="badlink"/>#' \
+        -e 's#<Property name="SymboliclinkInSubFolder" value=""/>#<Property name="SymboliclinkInSubFolder" value="SymlinkTest\\link"/>#' \
         "$staged"
 fi
 

@@ -970,6 +970,21 @@ main(
         }
     }
 
+    /* Test-harness aid: seed the symbolic-link fixtures the WPTS MS-SMB2
+     * CreateClose symlink cases expect to pre-exist on the share.  Enabled only
+     * when CHIMERA_SMB_SEED_SYMLINKS names the backend module (e.g. "memfs"),
+     * since no SMB client can create a reparse-point symlink on an empty share. */
+    const char *seed_module = getenv("CHIMERA_SMB_SEED_SYMLINKS");
+
+    if (seed_module && seed_module[0]) {
+        if (chimera_server_seed_symlinks(server, seed_module) != 0) {
+            chimera_server_error("Failed to seed symlink fixtures on module %s",
+                                 seed_module);
+        } else {
+            chimera_server_info("Seeded symlink fixtures on module %s", seed_module);
+        }
+    }
+
     exports = json_object_get(config, "exports");
 
     if (exports) {

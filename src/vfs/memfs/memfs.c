@@ -2752,17 +2752,34 @@ memfs_open_at(
         parent_inode->mtime        = now;
         parent_inode->ctime        = now;
         request->open_at.r_created = 1;
-    } else if (flags & CHIMERA_VFS_OPEN_EXCLUSIVE) {
-        pthread_mutex_unlock(&parent_inode->lock);
-        request->status = CHIMERA_VFS_EEXIST;
-        request->complete(request);
-        return;
     } else {
         inode = memfs_inode_get_inum(shared, dirent->inum, dirent->gen);
 
         if (!inode) {
             pthread_mutex_unlock(&parent_inode->lock);
             request->status = CHIMERA_VFS_ENOENT;
+            request->complete(request);
+            return;
+        }
+
+        /* SMB stop-on-symlink: an existing symbolic link as the final component
+         * when the caller did not ask to open the reparse point.  Return ELOOP
+         * *before* the O_EXCL collision / truncate / open below, so the SMB
+         * create path answers STATUS_STOPPED_ON_SYMLINK regardless of the create
+         * disposition (MS-SMB2 3.3.5.9; FILE_CREATE on a symlink leaf stops at
+         * the link rather than colliding). */
+        if (S_ISLNK(inode->mode) && (flags & CHIMERA_VFS_OPEN_STOP_SYMLINK)) {
+            pthread_mutex_unlock(&inode->lock);
+            pthread_mutex_unlock(&parent_inode->lock);
+            request->status = CHIMERA_VFS_ELOOP;
+            request->complete(request);
+            return;
+        }
+
+        if (flags & CHIMERA_VFS_OPEN_EXCLUSIVE) {
+            pthread_mutex_unlock(&inode->lock);
+            pthread_mutex_unlock(&parent_inode->lock);
+            request->status = CHIMERA_VFS_EEXIST;
             request->complete(request);
             return;
         }
