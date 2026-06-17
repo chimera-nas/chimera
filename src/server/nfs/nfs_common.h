@@ -75,7 +75,9 @@ struct nfs_nfs4_readdir_cursor {
 struct nfs_request {
     struct chimera_server_nfs_thread *thread;
     struct nfs4_session              *session;
-    struct otel_span                  otel;
+    struct otel_span                  otel;        /* compound (aggregate) span */
+    struct otel_span                  op_otel;     /* current op span, child of otel */
+    uint8_t                           op_span_active;
     struct chimera_vfs_cred           cred;
     /* The caller's credential as mapped from the RPC auth, before any export
      * squash.  req->cred is recomputed from this each time a file handle is

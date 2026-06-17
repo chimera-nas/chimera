@@ -39,36 +39,32 @@ smb_trace_command_name(uint32_t command)
     } /* switch */
 } /* smb_trace_command_name */
 
-/* Encode an SMB FileId (persistent + volatile, 16 bytes) as hex. */
+/* Encode an SMB FileId (persistent + volatile, 16 bytes) as hex onto a span. */
 static void
 smb_trace_file_id(
-    struct chimera_smb_compound      *compound,
+    struct otel_span                 *s,
     const struct chimera_smb_file_id *file_id)
 {
     char hex[2 * sizeof(*file_id) + 1];
 
     format_hex(hex, sizeof(hex), file_id, (int) sizeof(*file_id));
-    otel_span_attr_str(&compound->otel, "smb.file_id", hex);
+    otel_span_attr_str(s, "smb.file_id", hex);
 } /* smb_trace_file_id */
 
 void
 _smb_trace_compound_request(struct chimera_smb_compound *compound)
 {
-    struct chimera_smb_request *r0;
-    char                        name[48];
-    char                        ops[256];
-    int                         off = 0;
-    int                         i;
+    char ops[256];
+    int  off = 0;
+    int  i;
 
     if (compound->num_requests == 0) {
         return;
     }
 
-    r0 = compound->requests[0];
-
-    snprintf(name, sizeof(name), "smb2.%s",
-             smb_trace_command_name(r0->smb2_hdr.command));
-    otel_span_set_name(&compound->otel, name);
+    /* Aggregate span for the whole compound PDU; the individual requests are
+     * its child spans (see _smb_trace_op_begin). */
+    otel_span_set_name(&compound->otel, "smb2.COMPOUND");
     otel_span_attr_u64(&compound->otel, "smb.numreq",
                        (uint64_t) compound->num_requests);
 
@@ -85,29 +81,48 @@ _smb_trace_compound_request(struct chimera_smb_compound *compound)
         off = (int) sizeof(ops) - 1;
     }
     otel_span_attr_strn(&compound->otel, "smb.ops", ops, (size_t) off);
+} /* _smb_trace_compound_request */
 
-    /* Per-command attributes for the leading request. */
-    switch (r0->smb2_hdr.command) {
+/* Begin a span for one request inside the compound, as a child of the aggregate
+ * span.  Names it "smb2.<Command>", attaches the command's key attributes, and
+ * re-points the VFS parent at this span so the request's VFS work nests under it
+ * rather than the whole compound. */
+void
+_smb_trace_op_begin(
+    struct chimera_smb_compound *compound,
+    struct chimera_smb_request  *request)
+{
+    struct otel_span *s = &compound->op_otel;
+    char              name[48];
+
+    snprintf(name, sizeof(name), "smb2.%s",
+             smb_trace_command_name(request->smb2_hdr.command));
+    otel_span_start_child(s, name, OTEL_SPAN_INTERNAL, &compound->otel);
+
+    switch (request->smb2_hdr.command) {
         case SMB2_CREATE:
-            if (r0->create.name && r0->create.name_len > 0) {
-                otel_span_attr_strn(&compound->otel, "smb.name",
-                                    r0->create.name, r0->create.name_len);
+            if (request->create.name && request->create.name_len > 0) {
+                otel_span_attr_strn(s, "smb.name",
+                                    request->create.name, request->create.name_len);
             }
             break;
         case SMB2_READ:
-            otel_span_attr_u64(&compound->otel, "smb.offset", r0->read.offset);
-            otel_span_attr_u64(&compound->otel, "smb.length", r0->read.length);
-            smb_trace_file_id(compound, &r0->read.file_id);
+            otel_span_attr_u64(s, "smb.offset", request->read.offset);
+            otel_span_attr_u64(s, "smb.length", request->read.length);
+            smb_trace_file_id(s, &request->read.file_id);
             break;
         case SMB2_WRITE:
-            otel_span_attr_u64(&compound->otel, "smb.offset", r0->write.offset);
-            otel_span_attr_u64(&compound->otel, "smb.length", r0->write.length);
-            smb_trace_file_id(compound, &r0->write.file_id);
+            otel_span_attr_u64(s, "smb.offset", request->write.offset);
+            otel_span_attr_u64(s, "smb.length", request->write.length);
+            smb_trace_file_id(s, &request->write.file_id);
             break;
         case SMB2_CLOSE:
-            smb_trace_file_id(compound, &r0->close.file_id);
+            smb_trace_file_id(s, &request->close.file_id);
             break;
         default:
             break;
     } /* switch */
-} /* _smb_trace_compound_request */
+
+    compound->thread->vfs_thread->otel_parent = s;
+    compound->op_span_active                  = 1;
+} /* _smb_trace_op_begin */
