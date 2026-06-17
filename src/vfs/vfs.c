@@ -281,6 +281,15 @@ chimera_vfs_close_thread_init(
     close_thread->evpl       = evpl;
     close_thread->vfs_thread = chimera_vfs_thread_init(evpl, close_thread->vfs);
 
+    /* The close thread doubles as the lease service thread: all CAP_LEASE
+     * backend ops and recall-driven breaks are issued from here.  Its
+     * vfs_thread->doorbell runs chimera_vfs_process_completion, which drains the
+     * backend-lease work queue. */
+    if (close_thread->vfs->vfs_state) {
+        chimera_vfs_state_set_service_thread(close_thread->vfs->vfs_state,
+                                             close_thread->vfs_thread);
+    }
+
     evpl_add_doorbell(evpl, &close_thread->doorbell,
                       chimera_vfs_close_thread_wake_shutdown);
 
@@ -936,16 +945,25 @@ chimera_vfs_process_completion(
     struct evpl          *evpl,
     struct evpl_doorbell *doorbell)
 {
-    struct chimera_vfs_thread  *thread = container_of(doorbell, struct chimera_vfs_thread, doorbell);
-    struct chimera_vfs_request *complete_requests, *unblocked_requests, *io_resume_requests, *request;
+    struct chimera_vfs_thread     *thread = container_of(doorbell, struct chimera_vfs_thread, doorbell);
+    struct chimera_vfs_request    *complete_requests, *unblocked_requests, *io_resume_requests, *request;
+    struct chimera_vfs_file_state *lease_work;
 
     pthread_mutex_lock(&thread->lock);
     complete_requests                 = thread->pending_complete_requests;
     unblocked_requests                = thread->unblocked_requests;
     io_resume_requests                = thread->pending_io_resume;
+    lease_work                        = thread->pending_lease_work;
     thread->pending_complete_requests = NULL;
     thread->unblocked_requests        = NULL;
     thread->pending_io_resume         = NULL;
+    thread->pending_lease_work        = NULL;
+    /* Clear the queued flag under the lock so a poster racing this drain
+     * re-queues the file (and rings the doorbell again) rather than losing the
+     * wakeup; the link itself is now privately owned by this drain. */
+    for (struct chimera_vfs_file_state *f = lease_work; f; f = f->bl_work_next) {
+        f->bl_work_queued = 0;
+    }
     pthread_mutex_unlock(&thread->lock);
 
     while (complete_requests) {
@@ -966,6 +984,22 @@ chimera_vfs_process_completion(
         DL_DELETE(io_resume_requests, request);
         chimera_vfs_state_io_resume(request);
     }
+
+    /* Run backend-lease state-machine steps marshaled to this (the service)
+     * thread.  Each file carries a reference taken at post time; drop it after
+     * running the step. */
+    while (lease_work) {
+        struct chimera_vfs_file_state *file = lease_work;
+
+        lease_work         = file->bl_work_next;
+        file->bl_work_next = NULL;
+        chimera_vfs_backend_lease_run(thread->vfs->vfs_state, file);
+        chimera_vfs_state_put(thread->vfs->vfs_state, file);
+    }
+
+    /* Issue queued KV-fallback lease persistence (put/delete) for non-CAP_LEASE
+     * backends; runs on the service thread that the jobs were posted to. */
+    chimera_vfs_lease_kv_drain(thread);
 
     /* Deliver any identity-resolver jobs that completed for this thread. */
     chimera_vfs_identity_thread_complete(thread);

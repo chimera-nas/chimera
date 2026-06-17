@@ -777,6 +777,42 @@ chimera_vfs_search_keys_at(
     chimera_vfs_search_keys_complete_t complete,
     void                              *private_data);
 
+/* CAP_LEASE: acquire or escalate a file-granularity lease from the
+ * authoritative backend that serves `fh`.  `mode` is the requested RWH triple;
+ * the callback reports GRANTED (with the granted mode + opaque token) or DENIED.
+ * Used by the VFS lease layer (vfs_state.c) to project a held lease down into a
+ * CAP_LEASE backend.  Routed by FH; ENOTSUP if the backend is not CAP_LEASE. */
+void
+chimera_vfs_lease_acquire_backend(
+    struct chimera_vfs_thread             *thread,
+    const struct chimera_vfs_cred         *cred,
+    const void                            *fh,
+    int                                    fhlen,
+    uint8_t                                kind,
+    struct chimera_vfs_lease_mode          mode,
+    uint64_t                               offset,
+    uint64_t                               length,
+    uint32_t                               protocol,
+    uint64_t                               owner_lo,
+    uint64_t                               owner_hi,
+    chimera_vfs_lease_backend_acquire_cb_t callback,
+    void                                  *private_data);
+
+/* CAP_LEASE: release (mode.granted == 0) or downgrade a backend lease taken by
+ * a prior chimera_vfs_lease_acquire_backend, identified by `token`. */
+void
+chimera_vfs_lease_release_backend(
+    struct chimera_vfs_thread             *thread,
+    const struct chimera_vfs_cred         *cred,
+    const void                            *fh,
+    int                                    fhlen,
+    uint64_t                               token,
+    struct chimera_vfs_lease_mode          mode,
+    uint64_t                               offset,
+    uint64_t                               length,
+    chimera_vfs_lease_backend_release_cb_t callback,
+    void                                  *private_data);
+
 typedef void (*chimera_vfs_allocate_callback_t)(
     enum chimera_vfs_error    error_code,
     struct chimera_vfs_attrs *pre_attr,

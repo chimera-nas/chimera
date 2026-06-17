@@ -36,6 +36,10 @@ add_executable(vfs_state_test vfs_state_test.c)
 target_link_libraries(vfs_state_test chimera_vfs)
 add_test(chimera/vfs/state_test vfs_state_test)
 
+add_executable(vfs_lease_persist_test vfs_lease_persist_test.c)
+target_link_libraries(vfs_lease_persist_test chimera_vfs chimera_vfs_memkv evpl)
+add_test(chimera/vfs/lease_persist_test vfs_lease_persist_test)
+
 add_executable(vfs_acl_test vfs_acl_test.c)
 target_link_libraries(vfs_acl_test chimera_vfs)
 add_test(chimera/vfs/acl_test vfs_acl_test)

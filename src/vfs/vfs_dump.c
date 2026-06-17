@@ -51,6 +51,8 @@ chimera_vfs_op_name(unsigned int opcode)
         case CHIMERA_VFS_OP_OPEN_STREAM: return "OpenStream";
         case CHIMERA_VFS_OP_LIST_STREAMS: return "ListStreams";
         case CHIMERA_VFS_OP_REMOVE_STREAM: return "RemoveStream";
+        case CHIMERA_VFS_OP_LEASE_ACQUIRE: return "LeaseAcquire";
+        case CHIMERA_VFS_OP_LEASE_RELEASE: return "LeaseRelease";
         default: return "Unknown";
     } /* switch */
 

@@ -252,6 +252,7 @@ chimera_vfs_request_alloc_common(
     request->io_lease_file        = NULL;
     request->io_handle            = NULL;
     request->io_owns_lease_ref    = 0;
+    request->io_backend_denied    = 0;
 
     if (fh && fhlen > 0) {
         memcpy(request->fh, fh, fhlen);

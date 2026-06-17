@@ -8,6 +8,8 @@
 
 #include "vfs_state.h"
 #include "vfs_internal.h"
+#include "vfs/vfs_procs.h"
+#include "vfs/vfs_lease_kv_keys.h"
 #include "common/macros.h"
 
 /*
@@ -75,6 +77,57 @@ chimera_vfs_break_deadline_passed(const struct chimera_vfs_lease *lease)
     return chimera_vfs_now_ticks() >= lease->break_deadline;
 } /* chimera_vfs_break_deadline_passed */
 
+/* When a backend recall is draining a file, re-check after a local holder drops
+ * whether it has drained to the retained mode so the backend release can issue.
+ * Defined with the backend-lease machinery at the end of this file; forward-
+ * declared here because the lease-release/drain paths above call it. */
+static void
+chimera_vfs_bl_recall_maybe_release(
+    struct chimera_vfs_state      *state,
+    struct chimera_vfs_file_state *file);
+
+/* Non-blocking backend-lease escalation for caching leases (oplocks /
+ * delegations); forward-declared here because the caching-grant paths above the
+ * backend-lease machinery call it. */
+static void
+chimera_vfs_backend_lease_escalate(
+    struct chimera_vfs_state      *state,
+    struct chimera_vfs_file_state *file,
+    uint8_t                        want);
+
+/* KV-fallback persistence of a durable protocol lease (RANGE/SHARE/CACHING) for
+ * a non-CAP_LEASE backend: persist (is_delete=0) on grant, remove (is_delete=1)
+ * on release.  No-op for CAP_LEASE backends and for the ephemeral implicit
+ * lease.  Forward-declared here because the lease grant/release paths above the
+ * backend-lease machinery call it. */
+static void
+chimera_vfs_lease_kv_record(
+    struct chimera_vfs_state       *state,
+    struct chimera_vfs_file_state  *file,
+    const struct chimera_vfs_lease *lease,
+    int                             is_delete);
+
+/* Backend-lease gate result + the gate/post entry points, forward-declared at
+ * the top because both the async protocol-lease acquire path and the
+ * pending-acquire pump (above the backend-lease machinery) project through them. */
+enum chimera_vfs_bl_gate {
+    CHIMERA_VFS_BL_GATE_OK   = 0, /* held lease already covers the want; proceed */
+    CHIMERA_VFS_BL_GATE_WAIT = 1, /* parked on bl_wait; a backend op will settle it */
+};
+
+static enum chimera_vfs_bl_gate
+chimera_vfs_backend_lease_gate_locked(
+    struct chimera_vfs_state           *state,
+    struct chimera_vfs_file_state      *file,
+    uint8_t                             want,
+    struct chimera_vfs_pending_acquire *ticket,
+    bool                               *out_need_post);
+
+static void
+chimera_vfs_backend_lease_post(
+    struct chimera_vfs_state      *state,
+    struct chimera_vfs_file_state *file);
+
 /* -------------------------------------------------------------------- */
 /* Lifecycle                                                            */
 /* -------------------------------------------------------------------- */
@@ -97,9 +150,18 @@ chimera_vfs_state_init(void)
 
     state->default_break_deadline_ms = CHIMERA_VFS_STATE_DEFAULT_BREAK_DEADLINE_MS;
     state->implicit_idle_ms          = CHIMERA_VFS_STATE_DEFAULT_IMPLICIT_IDLE_MS;
+    state->service_thread            = NULL;
 
     return state;
 } /* chimera_vfs_state_init */
+
+SYMBOL_EXPORT void
+chimera_vfs_state_set_service_thread(
+    struct chimera_vfs_state  *state,
+    struct chimera_vfs_thread *thread)
+{
+    state->service_thread = thread;
+} /* chimera_vfs_state_set_service_thread */
 
 SYMBOL_EXPORT void
 chimera_vfs_state_destroy(struct chimera_vfs_state *state)
@@ -1621,6 +1683,13 @@ chimera_vfs_state_pump_pending(
             continue;
         }
 
+        if (result == CHIMERA_VFS_LEASE_GRANTED) {
+            /* Project the now-granted lease's mode onto the backend lease
+             * (non-blocking) before confirming to the caller. */
+            chimera_vfs_backend_lease_escalate(state, file, t->lease->mode.granted);
+            chimera_vfs_lease_kv_record(state, file, t->lease, 0);
+        }
+
         t->cb(result,
               result == CHIMERA_VFS_LEASE_GRANTED ? t->lease : NULL,
               conflict,
@@ -1638,11 +1707,13 @@ chimera_vfs_state_remove(
     struct chimera_vfs_file_state *file,
     struct chimera_vfs_lease      *lease)
 {
-    (void) state;
-
     pthread_mutex_lock(&file->lock);
     chimera_vfs_file_state_remove_lease(file, lease);
     pthread_mutex_unlock(&file->lock);
+
+    /* Drop the KV-fallback persistence record for this lease (no-op for
+     * CAP_LEASE backends and the implicit lease). */
+    chimera_vfs_lease_kv_record(state, file, lease, 1);
 
     /* Removing a lease may unblock a pending acquire or a parked I/O. */
     chimera_vfs_state_pump_pending(state, file);
@@ -1702,6 +1773,18 @@ chimera_vfs_lease_acquire(
         chimera_vfs_pending_enqueue_locked(file, ticket);
         pthread_mutex_unlock(&file->lock);
         return;
+    }
+
+    if (result == CHIMERA_VFS_LEASE_GRANTED) {
+        /* Project the granted lease's mode onto the node's backend lease (non-
+         * blocking; coherence via the recall path).  The cb still fires
+         * synchronously on the caller's thread, preserving the wait==false
+         * contract and avoiding a cross-thread reply.  No-op for non-CAP_LEASE
+         * backends. */
+        chimera_vfs_backend_lease_escalate(state, file, lease->mode.granted);
+        /* Non-CAP_LEASE backends instead persist the lease to KV for crash
+         * recovery (no-op for CAP_LEASE backends and the implicit lease). */
+        chimera_vfs_lease_kv_record(state, file, lease, 0);
     }
 
     /* Synchronous outcome (GRANTED, DENIED, or wait==false BREAKING). */
@@ -1946,6 +2029,13 @@ chimera_vfs_caching_grant_link(
     grant->grant_next    = file->caching_grants;
     file->caching_grants = grant;
     pthread_mutex_unlock(&file->lock);
+
+    /* Project the caching lease's mode onto the node's backend lease (non-
+     * blocking; coherence is upheld by the recall path).  No-op for non-
+     * CAP_LEASE backends, which instead persist the lease to KV. */
+    chimera_vfs_backend_lease_escalate(file->state, file,
+                                       grant->lease.mode.granted);
+    chimera_vfs_lease_kv_record(file->state, file, &grant->lease, 0);
 } /* chimera_vfs_caching_grant_link */
 
 SYMBOL_EXPORT enum chimera_vfs_lease_result
@@ -1970,6 +2060,9 @@ chimera_vfs_caching_grant_acquire(
     grant = chimera_vfs_caching_grant_coalesce(file, owner, want, upgrade_ok);
     if (grant) {
         *grant_out = grant;
+        chimera_vfs_backend_lease_escalate(state, file,
+                                           grant->lease.mode.granted);
+        chimera_vfs_lease_kv_record(state, file, &grant->lease, 0);
         return CHIMERA_VFS_LEASE_GRANTED;
     }
 
@@ -2012,6 +2105,8 @@ chimera_vfs_caching_grant_acquire(
     pthread_mutex_unlock(&file->lock);
 
     *grant_out = grant;
+    chimera_vfs_backend_lease_escalate(state, file, grant->lease.mode.granted);
+    chimera_vfs_lease_kv_record(state, file, &grant->lease, 0);
     return CHIMERA_VFS_LEASE_GRANTED;
 } /* chimera_vfs_caching_grant_acquire */
 
@@ -2046,12 +2141,19 @@ chimera_vfs_caching_grant_release(
     pthread_mutex_unlock(&file->lock);
 
     if (last) {
+        /* Drop the KV-fallback persistence record (no-op for CAP_LEASE
+         * backends).  Done before free(grant) -- it reads the lease fields. */
+        chimera_vfs_lease_kv_record(state, file, &grant->lease, 1);
+
         /* Removing the lease may unblock a pending acquire or parked I/O -- but
          * only pump when a live connection still exists to answer the woken
          * waiter (skipped at thread shutdown; see chimera_smb_durable_drain_all). */
         if (pump) {
             chimera_vfs_state_pump_pending(state, file);
             chimera_vfs_state_pump_io(state, file);
+            /* A backend recall draining this file may have been waiting on this
+             * caching lease; re-check whether the backend release can issue. */
+            chimera_vfs_bl_recall_maybe_release(state, file);
         }
         free(grant);
     }
@@ -3249,6 +3351,9 @@ chimera_vfs_implicit_finish_drain(
     if (removed) {
         chimera_vfs_state_pump_pending(state, file);
         chimera_vfs_state_pump_io(state, file);
+        /* If a backend recall is draining this file, the implicit lease was the
+         * (or a) holder it was waiting on; re-check for release readiness. */
+        chimera_vfs_bl_recall_maybe_release(state, file);
         /* Drop the reference the lease itself held (taken at activation). */
         chimera_vfs_state_put(state, file);
     }
@@ -3395,6 +3500,19 @@ chimera_vfs_io_try(
     bool                          was_active;
     bool                          activated = false;
 
+    /* Resumed after a CAP_LEASE backend DENIED the escalation we waited on:
+     * fail the I/O rather than re-attempting the (still-conflicting) acquire. */
+    if (request->io_backend_denied) {
+        request->io_backend_denied = 0;
+        request->io_lease_file     = NULL;
+        if (request->io_owns_lease_ref) {
+            chimera_vfs_state_put(state, file);
+        }
+        request->status = CHIMERA_VFS_EACCES;
+        request->complete(request);
+        return;
+    }
+
     /* Namespace/metadata mutation: recall every caching lease on the target
      * file (regardless of owner — RFC 7530 §10.4.5 requires recalling even
      * the operating client's own delegation), then proceed.  No lease is held
@@ -3464,6 +3582,31 @@ chimera_vfs_io_try(
     result = chimera_vfs_state_would_conflict(file, &probe, &conflict);
 
     if (result == CHIMERA_VFS_LEASE_GRANTED) {
+        bool                     need_post = false;
+        enum chimera_vfs_bl_gate gate;
+
+        /* The implicit lease is granted by THIS node's conflict matrix; before
+         * committing it, ensure we hold a CAP_LEASE backend lease covering
+         * `target` (no-op for non-CAP_LEASE backends).  On a needed escalation
+         * the request parks on bl_wait and the backend acquire is driven on the
+         * service thread; its completion resumes (or, on DENY, fails) us.  An
+         * I/O waiter ticket carries no cb (private_data is the request). */
+        request->io_lease_ticket.lease        = NULL;
+        request->io_lease_ticket.cb           = NULL;
+        request->io_lease_ticket.private_data = request;
+        gate                                  = chimera_vfs_backend_lease_gate_locked(state, file, target,
+                                                                                      &request->io_lease_ticket,
+                                                                                      &need_post);
+
+        if (gate == CHIMERA_VFS_BL_GATE_WAIT) {
+            request->io_lease_file = file;
+            pthread_mutex_unlock(&file->lock);
+            if (need_post) {
+                chimera_vfs_backend_lease_post(state, file);
+            }
+            return;
+        }
+
         if (!was_active) {
             file->implicit_lease             = probe;
             file->implicit_lease.break_state = CHIMERA_VFS_BREAK_IDLE;
@@ -3760,8 +3903,11 @@ chimera_vfs_state_reap_idle(
              file = file->bucket_next) {
             /* Candidates: files holding an implicit lease (reapable when idle)
              * or with parked I/O waiters (re-pumped so an unresponsive holder
-             * is revoked at its recall deadline and the waiter makes progress). */
-            if (file->implicit_active || file->io_wait_head) {
+             * is revoked at its recall deadline and the waiter makes progress),
+             * or holding a backend lease (released to the authoritative backend
+             * once idle with no local holders). */
+            if (file->implicit_active || file->io_wait_head ||
+                file->bl_state != CHIMERA_VFS_BL_NONE) {
                 file->refcount++;
                 cand[n++] = file;
             }
@@ -3797,8 +3943,713 @@ chimera_vfs_state_reap_idle(
                 chimera_vfs_state_pump_io(state, file);
             }
 
+            /* Idle release of a held backend lease: once no local holder needs
+             * it (no caching/share/range lease, implicit lease dropped above)
+             * and it has gone idle, hand it back to the authoritative backend.
+             * The release is issued on the service thread (this thread). */
+            {
+                bool bl_release;
+
+                pthread_mutex_lock(&file->lock);
+                bl_release = file->bl_state == CHIMERA_VFS_BL_HELD &&
+                    file->range_locks == NULL && file->share_resvs == NULL &&
+                    file->caching_leases == NULL && file->bl_wait_head == NULL &&
+                    chimera_vfs_elapsed_ms(file->bl_last_used, now) >= idle_ms;
+                if (bl_release) {
+                    file->bl_state         = CHIMERA_VFS_BL_RELEASING;
+                    file->bl_recall_target = 0;
+                }
+                pthread_mutex_unlock(&file->lock);
+
+                if (bl_release) {
+                    chimera_vfs_backend_lease_post(state, file);
+                }
+            }
+
             chimera_vfs_state_put(state, file);
         }
     }
 #undef CHIMERA_VFS_STATE_REAP_BATCH
 } /* chimera_vfs_state_reap_idle */
+
+/* ==================================================================== */
+/* Backend-projected lease (CAP_LEASE)                                  */
+/*                                                                      */
+/* For files whose backend advertises CHIMERA_VFS_CAP_LEASE the VFS core */
+/* holds ONE file-granularity lease from the authoritative backend whose */
+/* mode is the union of every local holder's mode.  It is acquired       */
+/* lazily on the first escalating local acquire and retained until idle- */
+/* reaped or recalled, so the read/write hot path never round-trips.     */
+/* All backend ops are issued on the lease service thread (see           */
+/* chimera_vfs_backend_lease_post / _run).                               */
+/* ==================================================================== */
+
+/* Take an extra reference on an already-live file_state (bucket-locked, like
+ * chimera_vfs_state_get's hit path).  The caller must already hold a reference
+ * so `file` cannot be concurrently torn down. */
+static void
+chimera_vfs_state_ref(
+    struct chimera_vfs_state      *state,
+    struct chimera_vfs_file_state *file)
+{
+    struct chimera_vfs_state_bucket *bucket =
+        chimera_vfs_state_bucket_for(state, file->fh_hash);
+
+    pthread_mutex_lock(&bucket->lock);
+    file->refcount++;
+    pthread_mutex_unlock(&bucket->lock);
+} /* chimera_vfs_state_ref */
+
+/* True if the file's backend advertises CHIMERA_VFS_CAP_LEASE (and is thus the
+ * authoritative lease arbiter we must project into).  Inert (false) until the
+ * service thread exists. */
+static bool
+chimera_vfs_backend_is_cap_lease(
+    struct chimera_vfs_state      *state,
+    struct chimera_vfs_file_state *file)
+{
+    struct chimera_vfs_module *module;
+
+    if (!state->service_thread) {
+        return false;
+    }
+
+    module = chimera_vfs_get_module(state->service_thread, file->fh, file->fh_len);
+
+    return module && (module->capabilities & CHIMERA_VFS_CAP_LEASE);
+} /* chimera_vfs_backend_is_cap_lease */
+
+/* Park `request` on the backend-lease wait queue.  Caller holds file->lock.
+ * Reuses the request's embedded io ticket (a request waits on exactly one
+ * queue at a time). */
+static void
+chimera_vfs_bl_park_ticket_locked(
+    struct chimera_vfs_file_state      *file,
+    struct chimera_vfs_pending_acquire *ticket)
+{
+    ticket->file   = file;
+    ticket->queued = true;
+    ticket->next   = NULL;
+    ticket->prev   = file->bl_wait_tail;
+
+    if (file->bl_wait_tail) {
+        file->bl_wait_tail->next = ticket;
+    } else {
+        file->bl_wait_head = ticket;
+    }
+    file->bl_wait_tail = ticket;
+} /* chimera_vfs_bl_park_ticket_locked */
+
+/* The RWH mode a parked I/O request needs (the implicit-lease direction). */
+static uint8_t
+chimera_vfs_bl_io_need(const struct chimera_vfs_request *request)
+{
+    return (request->opcode == CHIMERA_VFS_OP_WRITE)
+           ? CHIMERA_VFS_LEASE_MODE_W : CHIMERA_VFS_LEASE_MODE_R;
+} /* chimera_vfs_bl_io_need */
+
+/* Resume every I/O request parked on bl_wait after the backend lease settled to
+ * `granted_mode`.  Each is resumed on its owning thread via io_resume_post; one
+ * needing more than granted_mode is marked io_backend_denied so io_try fails it
+ * on re-entry.  (Only the implicit I/O path parks here; protocol-lease acquires
+ * project non-blockingly and fire their cb synchronously on the caller's
+ * thread.)  Runs on the service thread (outside file->lock). */
+static void
+chimera_vfs_bl_pump(
+    struct chimera_vfs_state      *state,
+    struct chimera_vfs_file_state *file,
+    uint8_t                        granted_mode)
+{
+    struct chimera_vfs_pending_acquire *head, *t, *next;
+
+    (void) state;
+
+    pthread_mutex_lock(&file->lock);
+    head               = file->bl_wait_head;
+    file->bl_wait_head = NULL;
+    file->bl_wait_tail = NULL;
+    for (t = head; t; t = t->next) {
+        t->queued = false;
+    }
+    pthread_mutex_unlock(&file->lock);
+
+    for (t = head; t; t = next) {
+        struct chimera_vfs_request *request = t->private_data;
+
+        next    = t->next;
+        t->prev = NULL;
+        t->next = NULL;
+
+        if (chimera_vfs_bl_io_need(request) & ~granted_mode) {
+            request->io_backend_denied = 1;
+        }
+        chimera_vfs_io_resume_post(request);
+    }
+} /* chimera_vfs_bl_pump */
+
+/* Core escalate-or-reuse transition, evaluated under file->lock.  Returns true
+ * when the held backend lease already covers `want` (the hot path: no
+ * round-trip); false when an acquire is now needed or already in flight.
+ * *out_need_post is set true only when the CALLER must, after dropping
+ * file->lock, drive a fresh backend acquire via chimera_vfs_backend_lease_post
+ * (i.e. this call started a new acquire rather than joining one in flight). */
+static bool
+chimera_vfs_bl_ensure_locked(
+    struct chimera_vfs_state      *state,
+    struct chimera_vfs_file_state *file,
+    uint8_t                        want,
+    bool                          *out_need_post)
+{
+    *out_need_post = false;
+
+    switch (file->bl_state) {
+        case CHIMERA_VFS_BL_HELD:
+            if ((want & ~file->bl_held_mode) == 0) {
+                file->bl_last_used = chimera_vfs_now_ticks();
+                return true;
+            }
+            file->bl_target_mode = (uint8_t) (file->bl_held_mode | want);
+            file->bl_state       = CHIMERA_VFS_BL_ACQUIRING;
+            *out_need_post       = true;
+            return false;
+
+        case CHIMERA_VFS_BL_NONE:
+            if (!chimera_vfs_backend_is_cap_lease(state, file)) {
+                /* No authoritative backend: the in-memory matrix is the sole
+                 * arbiter (KV-fallback persistence is fire-and-forget and does
+                 * not gate the grant). */
+                return true;
+            }
+            file->bl_target_mode = want;
+            file->bl_state       = CHIMERA_VFS_BL_ACQUIRING;
+            *out_need_post       = true;
+            return false;
+
+        case CHIMERA_VFS_BL_ACQUIRING:
+        case CHIMERA_VFS_BL_RECALLING:
+        case CHIMERA_VFS_BL_RELEASING:
+            /* An op is already in flight; fold our want into its target.  No new
+             * post (one in-flight backend op per file). */
+            file->bl_target_mode |= want;
+            return false;
+    } /* switch */
+
+    return true;
+} /* chimera_vfs_bl_ensure_locked */
+
+/* Blocking gate: ensure the backend lease covers `want`, parking `ticket` on
+ * bl_wait when a round-trip is needed.  Caller holds file->lock. */
+static enum chimera_vfs_bl_gate
+chimera_vfs_backend_lease_gate_locked(
+    struct chimera_vfs_state           *state,
+    struct chimera_vfs_file_state      *file,
+    uint8_t                             want,
+    struct chimera_vfs_pending_acquire *ticket,
+    bool                               *out_need_post)
+{
+    if (chimera_vfs_bl_ensure_locked(state, file, want, out_need_post)) {
+        return CHIMERA_VFS_BL_GATE_OK;
+    }
+
+    chimera_vfs_bl_park_ticket_locked(file, ticket);
+    return CHIMERA_VFS_BL_GATE_WAIT;
+} /* chimera_vfs_backend_lease_gate_locked */
+
+/* Non-blocking escalation: ensure the node's backend lease covers `want`,
+ * driving a background acquire if needed, WITHOUT parking the caller.  Used for
+ * caching leases (SMB oplocks/leases, NFSv4 delegations): the grant proceeds
+ * immediately and cross-node coherence is upheld by the recall upcall (and by
+ * the holder's own I/O, which escalates through the blocking io gate).  Caller
+ * must NOT hold file->lock. */
+static void
+chimera_vfs_backend_lease_escalate(
+    struct chimera_vfs_state      *state,
+    struct chimera_vfs_file_state *file,
+    uint8_t                        want)
+{
+    bool need_post;
+
+    if (want == 0) {
+        return;
+    }
+
+    pthread_mutex_lock(&file->lock);
+    chimera_vfs_bl_ensure_locked(state, file, want, &need_post);
+    pthread_mutex_unlock(&file->lock);
+
+    if (need_post) {
+        chimera_vfs_backend_lease_post(state, file);
+    }
+} /* chimera_vfs_backend_lease_escalate */
+
+/* Marshal `file` onto the service thread to run its backend-lease state
+ * machine.  Takes its own work reference (dropped by the service-thread drain
+ * after chimera_vfs_backend_lease_run); idempotent via bl_work_queued. */
+static void
+chimera_vfs_backend_lease_post(
+    struct chimera_vfs_state      *state,
+    struct chimera_vfs_file_state *file)
+{
+    struct chimera_vfs_thread *svc = state->service_thread;
+    bool                       already;
+
+    if (!svc) {
+        return;
+    }
+
+    chimera_vfs_state_ref(state, file);
+
+    pthread_mutex_lock(&svc->lock);
+    already = file->bl_work_queued;
+    if (!already) {
+        file->bl_work_queued    = 1;
+        file->bl_work_next      = svc->pending_lease_work;
+        svc->pending_lease_work = file;
+    }
+    pthread_mutex_unlock(&svc->lock);
+
+    if (already) {
+        chimera_vfs_state_put(state, file);
+    } else {
+        evpl_ring_doorbell(&svc->doorbell);
+    }
+} /* chimera_vfs_backend_lease_post */
+
+/* Completion of an OP_LEASE_ACQUIRE issued by chimera_vfs_backend_lease_run.
+ * Runs on the service thread.  `private_data` is the file (holding an in-flight
+ * reference taken by run()). */
+static void
+chimera_vfs_backend_lease_acquire_done(
+    enum chimera_vfs_error        error_code,
+    enum chimera_vfs_lease_result result,
+    struct chimera_vfs_lease_mode granted,
+    uint64_t                      token,
+    void                         *private_data)
+{
+    struct chimera_vfs_file_state *file  = private_data;
+    struct chimera_vfs_state      *state = file->state;
+    uint8_t                        granted_mode;
+    bool                           take_ref = false;
+    bool                           reissue  = false;
+
+    pthread_mutex_lock(&file->lock);
+
+    if (error_code != CHIMERA_VFS_OK || result != CHIMERA_VFS_LEASE_GRANTED ||
+        granted.granted == 0) {
+        /* Backend refused the requested (escalated) mode.  Keep any lease we
+         * already held; waiters needing the refused bits are denied. */
+        file->bl_state = file->bl_held_mode ? CHIMERA_VFS_BL_HELD
+                                                   : CHIMERA_VFS_BL_NONE;
+        file->bl_target_mode = file->bl_held_mode;
+        granted_mode         = file->bl_held_mode;
+    } else {
+        file->bl_held_mode = granted.granted;
+        file->bl_token     = token;
+        file->bl_last_used = chimera_vfs_now_ticks();
+        take_ref           = !file->bl_ref_held;
+
+        if (file->bl_target_mode & ~file->bl_held_mode) {
+            /* A larger want arrived while this acquire was in flight; re-issue
+             * for the grown target before releasing waiters. */
+            file->bl_state = CHIMERA_VFS_BL_ACQUIRING;
+            reissue        = true;
+        } else {
+            file->bl_state = CHIMERA_VFS_BL_HELD;
+        }
+        granted_mode = file->bl_held_mode;
+    }
+
+    pthread_mutex_unlock(&file->lock);
+
+    if (take_ref) {
+        /* The held lease keeps the file alive even with no local holders. */
+        chimera_vfs_state_ref(state, file);
+        file->bl_ref_held = 1;
+    }
+
+    if (reissue) {
+        chimera_vfs_backend_lease_post(state, file);
+    } else {
+        chimera_vfs_bl_pump(state, file, granted_mode);
+    }
+
+    /* Drop the in-flight reference taken by run(). */
+    chimera_vfs_state_put(state, file);
+} /* chimera_vfs_backend_lease_acquire_done */
+
+/* Completion of an OP_LEASE_RELEASE (full release or downgrade) issued by
+ * chimera_vfs_backend_lease_run.  Runs on the service thread. */
+static void
+chimera_vfs_backend_lease_release_done(
+    enum chimera_vfs_error error_code,
+    void                  *private_data)
+{
+    struct chimera_vfs_file_state *file  = private_data;
+    struct chimera_vfs_state      *state = file->state;
+    uint8_t                        retain;
+    bool                           drop_ref = false;
+
+    (void) error_code; /* best-effort: local state advances regardless */
+
+    pthread_mutex_lock(&file->lock);
+
+    retain = file->bl_recall_target;
+    if (retain) {
+        /* Downgrade: keep the retained mode. */
+        file->bl_held_mode = retain;
+        file->bl_state     = CHIMERA_VFS_BL_HELD;
+    } else {
+        file->bl_held_mode = 0;
+        file->bl_token     = 0;
+        file->bl_state     = CHIMERA_VFS_BL_NONE;
+        drop_ref           = file->bl_ref_held;
+        file->bl_ref_held  = 0;
+    }
+    file->bl_recall_target = 0;
+
+    pthread_mutex_unlock(&file->lock);
+
+    /* Resume anything that parked during the release: a waiter sees NONE/HELD
+     * and re-drives an acquire if it still needs more than we now hold. */
+    chimera_vfs_bl_pump(state, file, file->bl_held_mode);
+
+    if (drop_ref) {
+        chimera_vfs_state_put(state, file);
+    }
+
+    /* Drop the in-flight reference taken by run(). */
+    chimera_vfs_state_put(state, file);
+} /* chimera_vfs_backend_lease_release_done */
+
+/* During a recall (bl_state == RECALLING), once every local holder has drained
+ * to the retained mode, transition to RELEASING and post the release/downgrade
+ * to the backend.  Called from the service thread whenever a local holder may
+ * have just dropped (implicit drain finished, a caching grant released).
+ * `retain_mode == 0` (full recall) requires all three lease lists empty; a
+ * non-zero retain is handled by fully draining and re-holding `retain` at the
+ * backend (a future optimization can downgrade in place without a full break). */
+static void
+chimera_vfs_bl_recall_maybe_release(
+    struct chimera_vfs_state      *state,
+    struct chimera_vfs_file_state *file)
+{
+    bool release_now = false;
+
+    pthread_mutex_lock(&file->lock);
+    if (file->bl_state == CHIMERA_VFS_BL_RECALLING &&
+        file->caching_leases == NULL &&
+        file->share_resvs == NULL &&
+        file->range_locks == NULL) {
+        file->bl_state = CHIMERA_VFS_BL_RELEASING;
+        release_now    = true;
+    }
+    pthread_mutex_unlock(&file->lock);
+
+    if (release_now) {
+        chimera_vfs_backend_lease_post(state, file);
+    }
+} /* chimera_vfs_bl_recall_maybe_release */
+
+SYMBOL_EXPORT void
+chimera_vfs_lease_backend_recall(
+    struct chimera_vfs *vfs,
+    const uint8_t      *fh,
+    uint8_t             fh_len,
+    uint64_t            fh_hash,
+    uint64_t            token,
+    uint8_t             retain_mode)
+{
+    struct chimera_vfs_state      *state = vfs->vfs_state;
+    struct chimera_vfs_file_state *file;
+    bool                           accept = false;
+
+    if (!state) {
+        return;
+    }
+
+    file = chimera_vfs_state_get(state, fh, fh_len, fh_hash, false);
+    if (!file) {
+        /* We hold no state for this file -> nothing to recall (stale). */
+        return;
+    }
+
+    pthread_mutex_lock(&file->lock);
+    /* Accept only a recall that matches the lease we currently hold; a token
+     * mismatch or a non-HELD state means the recall is stale (we already
+     * released, or an acquire/release is mid-flight and will reconcile). */
+    if (file->bl_state == CHIMERA_VFS_BL_HELD && file->bl_token == token) {
+        file->bl_state         = CHIMERA_VFS_BL_RECALLING;
+        file->bl_recall_target = retain_mode;
+        accept                 = true;
+    }
+    pthread_mutex_unlock(&file->lock);
+
+    if (accept) {
+        chimera_vfs_backend_lease_post(state, file);
+    }
+
+    chimera_vfs_state_put(state, file);
+} /* chimera_vfs_lease_backend_recall */
+
+/* Run one step of `file`'s backend-lease state machine on the service thread:
+ * issue the OP_LEASE_ACQUIRE / OP_LEASE_RELEASE dictated by bl_state.  Drained
+ * from chimera_vfs_process_completion() for every posted file. */
+SYMBOL_EXPORT void
+chimera_vfs_backend_lease_run(
+    struct chimera_vfs_state      *state,
+    struct chimera_vfs_file_state *file)
+{
+    struct chimera_vfs_thread           *svc = state->service_thread;
+    struct chimera_vfs_lease_mode        mode;
+    uint8_t                              target;
+    uint64_t                             token;
+    enum chimera_vfs_backend_lease_state st;
+
+    if (!svc) {
+        return;
+    }
+
+    pthread_mutex_lock(&file->lock);
+    st     = file->bl_state;
+    target = file->bl_target_mode;
+    token  = file->bl_token;
+    pthread_mutex_unlock(&file->lock);
+
+    if (st == CHIMERA_VFS_BL_ACQUIRING) {
+        mode.granted = target;
+        mode.denied  = 0;
+        /* In-flight reference for the completion. */
+        chimera_vfs_state_ref(state, file);
+        chimera_vfs_lease_acquire_backend(svc, NULL, file->fh, file->fh_len,
+                                          CHIMERA_VFS_LEASE_SHARE, mode, 0, 0,
+                                          CHIMERA_VFS_LEASE_PROTO_INTERNAL,
+                                          file->fh_hash, 0,
+                                          chimera_vfs_backend_lease_acquire_done,
+                                          file);
+    } else if (st == CHIMERA_VFS_BL_RELEASING) {
+        mode.granted = file->bl_recall_target;
+        mode.denied  = 0;
+        chimera_vfs_state_ref(state, file);
+        chimera_vfs_lease_release_backend(svc, NULL, file->fh, file->fh_len,
+                                          token, mode, 0, 0,
+                                          chimera_vfs_backend_lease_release_done,
+                                          file);
+    } else if (st == CHIMERA_VFS_BL_RECALLING) {
+        bool drain_now = false;
+
+        /* Recall every caching lease (delegations / oplocks) the local clients
+         * hold under this backend lease... */
+        chimera_vfs_state_break_caching(state, file->fh, file->fh_len,
+                                        file->fh_hash);
+
+        /* ...and drain chimera's own implicit lease, mirroring the conflicting-
+         * holder recall path (chimera_vfs_implicit_break_cb). */
+        pthread_mutex_lock(&file->lock);
+        if (file->implicit_active && !file->implicit_draining) {
+            file->implicit_draining = 1;
+            drain_now               = (file->implicit_inflight == 0);
+        }
+        pthread_mutex_unlock(&file->lock);
+
+        if (drain_now) {
+            /* finish_drain removes the implicit lease and calls maybe_release. */
+            chimera_vfs_implicit_finish_drain(state, file);
+        }
+
+        /* In case every local holder was already gone (or only caching leases
+         * that released synchronously), check for completion now; otherwise the
+         * drain-completion hooks (finish_drain / grant_release) will. */
+        chimera_vfs_bl_recall_maybe_release(state, file);
+    }
+    /* NONE / HELD: nothing to issue here. */
+} /* chimera_vfs_backend_lease_run */
+
+/* ==================================================================== */
+/* KV-fallback lease persistence (non-CAP_LEASE backends)               */
+/*                                                                      */
+/* Backends that do not advertise CHIMERA_VFS_CAP_LEASE cannot arbitrate */
+/* leases authoritatively, so the core instead persists each durable     */
+/* protocol lease (RANGE/SHARE/CACHING) to a KV store -- the backend's    */
+/* own KV when it has CAP_KV, else the default KV namespaced by fh_magic  */
+/* -- so leases survive a crash and can be reclaimed at restart.  This is */
+/* fire-and-forget and NOT coherent across nodes.  The KV op is issued on */
+/* the lease service thread (chimera_vfs_{put,delete}_key_at need a       */
+/* thread, and serializing on one thread keeps the request pools sane).   */
+/* ==================================================================== */
+
+struct chimera_vfs_lease_kv_job {
+    struct chimera_vfs_lease_kv_job *next;
+    uint8_t                          fh[CHIMERA_VFS_FH_SIZE];
+    uint8_t                          fh_len;
+    uint8_t                          is_delete;
+    uint32_t                         key_len;
+    uint32_t                         value_len;
+    uint8_t                          key[CHIMERA_VFS_LEASE_KV_KEY_MAX];
+    uint8_t                          value[CHIMERA_VFS_LEASE_KV_VALUE_MAX];
+};
+
+static void
+chimera_vfs_lease_kv_put_done(
+    enum chimera_vfs_error error_code,
+    void                  *private_data)
+{
+    (void) private_data;
+    /* Fire-and-forget: a failed persist only weakens crash recovery. */
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_vfs_error("lease KV persist failed: %d", error_code);
+    }
+} /* chimera_vfs_lease_kv_put_done */
+
+static void
+chimera_vfs_lease_kv_record(
+    struct chimera_vfs_state       *state,
+    struct chimera_vfs_file_state  *file,
+    const struct chimera_vfs_lease *lease,
+    int                             is_delete)
+{
+    struct chimera_vfs_thread       *svc = state->service_thread;
+    struct chimera_vfs_lease_kv_job *job;
+
+    if (!svc) {
+        return;
+    }
+
+    /* CAP_LEASE backends project their leases authoritatively; the implicit I/O
+     * lease is ephemeral (idle-reaped) and never persisted. */
+    if (lease->owner.protocol == CHIMERA_VFS_LEASE_PROTO_INTERNAL) {
+        return;
+    }
+    if (chimera_vfs_backend_is_cap_lease(state, file)) {
+        return;
+    }
+
+    job = calloc(1, sizeof(*job));
+    if (!job) {
+        return;
+    }
+
+    memcpy(job->fh, file->fh, file->fh_len);
+    job->fh_len    = file->fh_len;
+    job->is_delete = is_delete ? 1 : 0;
+    job->key_len   = chimera_vfs_lease_kv_key(job->key, file->fh, file->fh_len,
+                                              lease);
+    if (!is_delete) {
+        job->value_len = chimera_vfs_lease_kv_value(job->value, file->fh,
+                                                    file->fh_len, lease);
+    }
+
+    pthread_mutex_lock(&svc->lock);
+    job->next             = svc->pending_lease_kv;
+    svc->pending_lease_kv = job;
+    pthread_mutex_unlock(&svc->lock);
+
+    evpl_ring_doorbell(&svc->doorbell);
+} /* chimera_vfs_lease_kv_record */
+
+SYMBOL_EXPORT void
+chimera_vfs_lease_kv_drain(struct chimera_vfs_thread *thread)
+{
+    struct chimera_vfs_lease_kv_job *list, *job, *next;
+
+    pthread_mutex_lock(&thread->lock);
+    list                     = thread->pending_lease_kv;
+    thread->pending_lease_kv = NULL;
+    pthread_mutex_unlock(&thread->lock);
+
+    for (job = list; job; job = next) {
+        next = job->next;
+
+        /* put_key_at / delete_key_at copy the key (and value) into the request
+         * scratch, so the job can be freed as soon as the call returns. */
+        if (job->is_delete) {
+            chimera_vfs_delete_key_at(thread, NULL, job->fh, job->fh_len,
+                                      job->key, job->key_len,
+                                      chimera_vfs_lease_kv_put_done, NULL);
+        } else {
+            chimera_vfs_put_key_at(thread, NULL, job->fh, job->fh_len,
+                                   job->key, job->key_len,
+                                   job->value, job->value_len,
+                                   chimera_vfs_lease_kv_put_done, NULL);
+        }
+        free(job);
+    }
+} /* chimera_vfs_lease_kv_drain */
+
+/* Recovery scan ------------------------------------------------------- */
+
+struct chimera_vfs_lease_recover_ctx {
+    chimera_vfs_lease_recovered_cb_t cb;
+    void                             ( *complete )(
+        enum chimera_vfs_error,
+        void *);
+    void                            *private_data;
+    uint8_t                          prefix[CHIMERA_VFS_LEASE_KV_HDR_LEN];
+};
+
+static int
+chimera_vfs_lease_recover_scan_cb(
+    const void *key,
+    uint32_t    key_len,
+    const void *value,
+    uint32_t    value_len,
+    void       *private_data)
+{
+    struct chimera_vfs_lease_recover_ctx *ctx = private_data;
+    struct chimera_vfs_lease              lease;
+    uint8_t                               fh[CHIMERA_VFS_FH_SIZE];
+    uint8_t                               fh_len = 0;
+
+    /* Stop once the scan walks past the lease band. */
+    if (key_len < CHIMERA_VFS_LEASE_KV_HDR_LEN ||
+        memcmp(key, ctx->prefix, CHIMERA_VFS_LEASE_KV_HDR_LEN) != 0) {
+        return 1;
+    }
+
+    if (chimera_vfs_lease_kv_parse(value, value_len, &lease, fh, &fh_len) != 0) {
+        return 0; /* skip a malformed record, keep scanning */
+    }
+
+    if (ctx->cb) {
+        return ctx->cb(&lease, fh, fh_len, ctx->private_data);
+    }
+    return 0;
+} /* chimera_vfs_lease_recover_scan_cb */
+
+static void
+chimera_vfs_lease_recover_complete(
+    enum chimera_vfs_error error_code,
+    void                  *private_data)
+{
+    struct chimera_vfs_lease_recover_ctx *ctx = private_data;
+
+    if (ctx->complete) {
+        ctx->complete(error_code, ctx->private_data);
+    }
+    free(ctx);
+} /* chimera_vfs_lease_recover_complete */
+
+SYMBOL_EXPORT void
+chimera_vfs_lease_recover_mount(
+    struct chimera_vfs_thread *thread,
+    const uint8_t *fh,
+    uint8_t fh_len,
+    chimera_vfs_lease_recovered_cb_t cb,
+    void ( *complete )(enum chimera_vfs_error error_code, void *private_data),
+    void *private_data)
+{
+    struct chimera_vfs_lease_recover_ctx *ctx;
+
+    ctx = calloc(1, sizeof(*ctx));
+
+    ctx->cb           = cb;
+    ctx->complete     = complete;
+    ctx->private_data = private_data;
+    chimera_vfs_lease_kv_prefix(ctx->prefix);
+
+    chimera_vfs_search_keys_at(thread, NULL, fh, fh_len,
+                               ctx->prefix, CHIMERA_VFS_LEASE_KV_HDR_LEN,
+                               NULL, 0, 0,
+                               chimera_vfs_lease_recover_scan_cb,
+                               chimera_vfs_lease_recover_complete,
+                               ctx);
+} /* chimera_vfs_lease_recover_mount */

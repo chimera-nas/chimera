@@ -124,6 +124,10 @@ diskfs_dispatch(
         case CHIMERA_VFS_OP_GET_LAYOUT:
             diskfs_get_layout(thread, shared, request, private_data);
             break;
+        /* diskfs does not advertise CHIMERA_VFS_CAP_LEASE: it is single-node, so
+         * the VFS core persists its leases to diskfs's own KV (durable, via the
+         * txn layer) through the KV-fallback path rather than projecting them as
+         * an authoritative backend.  OP_LEASE_* therefore never reaches here. */
         default:
             chimera_diskfs_error("diskfs_dispatch: unknown operation %d",
                                  request->opcode);
