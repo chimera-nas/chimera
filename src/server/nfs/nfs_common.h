@@ -102,6 +102,11 @@ struct nfs_request {
      * NFS4_SLOT_TYPE_OPEN / NFS4_SLOT_TYPE_LOCK. */
     void                             *nfs_state_ref;
     uint8_t                           nfs_state_type;
+    /* Set when a READ/WRITE authorized by a delegation stateid is served via an
+     * on-the-fly open: the on-the-fly I/O must carry the delegation holder's
+     * own lease owner so the VFS I/O path does not treat the client's own I/O
+     * as a foreign actor and recall the client's own delegation. */
+    bool                              io_owner_from_deleg;
     /* In-flight vfs_state byte-range lease for an async NFSv4 LOCK.
      * Allocated at lock dispatch, linked onto the lock_state on grant,
      * freed on denial.  See nfs4_proc_lock.c. */

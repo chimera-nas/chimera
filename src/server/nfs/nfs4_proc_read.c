@@ -72,6 +72,33 @@ chimera_nfs4_read_open_callback(
     iov = xdr_dbuf_alloc_space(sizeof(*iov) * 256, req->encoding->dbuf);
     chimera_nfs_abort_if(iov == NULL, "Failed to allocate space");
 
+    if (req->io_owner_from_deleg) {
+        /* A delegation-authorized read: present the delegation holder's own
+        * lease owner (same protocol/client/fh as the CACHING lease created at
+        * OPEN) so the VFS I/O path recognises the reader as the delegation
+        * holder and does not recall the client's own delegation.  Other
+        * (anonymous-stateid / pNFS-DS) on-the-fly reads keep the implicit
+        * lease so they still recall *other* clients' conflicting leases. */
+        struct chimera_vfs_lease_owner io_owner = {
+            .protocol   = CHIMERA_VFS_LEASE_PROTO_NFSV4,
+            .client_key = req->session->client_unified->client_id,
+            .owner_lo   = handle->fh_hash,
+            .owner_hi   = 0,
+        };
+
+        chimera_vfs_read_owned(req->thread->vfs_thread, &req->cred,
+                               handle,
+                               args->offset,
+                               args->count,
+                               iov,
+                               256,
+                               0,
+                               &io_owner,
+                               chimera_nfs4_read_complete,
+                               req);
+        return;
+    }
+
     chimera_vfs_read(req->thread->vfs_thread, &req->cred,
                      handle,
                      args->offset,
@@ -161,8 +188,9 @@ chimera_nfs4_read(
     uint32_t                        current_seqid;
     nfsstat4                        status;
 
-    req->nfs_state_ref = NULL;
-    req->handle        = NULL;
+    req->nfs_state_ref       = NULL;
+    req->handle              = NULL;
+    req->io_owner_from_deleg = false;
 
     /*
      * NFS4.1 current-stateid substitution (RFC 8881 §16.2.3.1.2).
@@ -236,6 +264,11 @@ chimera_nfs4_read(
             chimera_nfs4_compound_complete(req, res->status);
             return;
         }
+        /* This read is authorized by the client's own delegation: carry the
+         * holder's lease owner on the on-the-fly read so it does not recall the
+         * client's own delegation. */
+        req->io_owner_from_deleg = (req->session &&
+                                    req->session->client_unified);
         chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
                             req->fh,
                             req->fhlen,
