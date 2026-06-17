@@ -113,6 +113,15 @@ run_smbtorture(
                    " --option=torture:offset=0"
                    " --option=torture:beyond_final_zero=4096"
                    " --option=torture:acl_xattr_name=user.NTACL"
+                   /* Block a client transport with iptables (the default method
+                    * is an FSCTL_SMBTORTURE control op only Samba implements).
+                    * Tests that need to simulate an unresponsive transport
+                    * (smb2.replay.dhv2-pending3*, multichannel, some oplock/lease)
+                    * drop the connection's packets in their own private netns;
+                    * every test runs in a fresh netns the wrapper deletes on
+                    * exit, so the rules cannot leak between tests.  The default
+                    * iptables_command (/usr/sbin/iptables) is correct here. */
+                   " --option=torture:use_iptables=yes"
                    " --option='client smb3 signing algorithms=aes-128-cmac'"
                    /* Fixed randomizer seed: several suites derive inputs from
                     * rand() with boundary hazards -- smb2.replay.channel-
