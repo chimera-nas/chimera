@@ -224,6 +224,14 @@ chimera_vfs_attr_cache_insert(
     struct chimera_vfs_attr_cache_shard  *shard;
     struct chimera_vfs_attr_cache_entry **slot, **slot_end, **slot_best;
 
+    /* Strict-coherence mode (cache_ttl == 0): do not cache attributes at all,
+     * so every getattr hits the backend and a peer's mutation is never masked
+     * by a stale local entry.  The fallback coherence lever for files not
+     * covered by a lease-coupled invalidation (see chimera_vfs_invalidate_fh). */
+    if (cache->ttl == 0) {
+        return;
+    }
+
     shard = &cache->shards[fh_hash & cache->num_shards_mask];
 
     slot = &shard->entries[(fh_hash & cache->num_slots_mask) << cache->num_entries_bits];
@@ -288,6 +296,56 @@ chimera_vfs_attr_cache_insert(
     }
 
 } /* chimera_vfs_attr_cache_insert */
+
+/*
+ * Drop the cached attributes for a file handle, if present.  Called when this
+ * node learns the file changed underneath it -- principally from the cross-node
+ * lease-recall upcall (a peer mutated the file), so the next getattr re-reads
+ * the authoritative attrs from the (coherent) backend instead of returning a
+ * stale size/mtime.  Mirrors the insert slot walk; a no-op on a miss.
+ */
+static inline void
+chimera_vfs_attr_cache_invalidate(
+    struct chimera_vfs_attr_cache *cache,
+    uint64_t                       fh_hash,
+    const void                    *fh,
+    int                            fh_len)
+{
+    struct chimera_vfs_attr_cache_entry  *entry, *removed = NULL;
+    struct chimera_vfs_attr_cache_shard  *shard;
+    struct chimera_vfs_attr_cache_entry **slot, **slot_end;
+
+    shard = &cache->shards[fh_hash & cache->num_shards_mask];
+
+    slot = &shard->entries[(fh_hash & cache->num_slots_mask) << cache->num_entries_bits];
+
+    slot_end = slot + cache->num_entries;
+
+    urcu_qsbr_read_lock();
+
+    pthread_mutex_lock(&shard->entry_lock);
+
+    while (slot < slot_end) {
+        entry = *slot;
+
+        if (entry && entry->key == fh_hash &&
+            chimera_memequal(entry->attr.va_fh, entry->attr.va_fh_len, fh, fh_len)) {
+            removed = entry;
+            rcu_assign_pointer(*slot, NULL);
+            break;
+        }
+
+        slot++;
+    }
+
+    pthread_mutex_unlock(&shard->entry_lock);
+
+    urcu_qsbr_read_unlock();
+
+    if (removed) {
+        call_rcu(&removed->rnode.rcu, chimera_rcu_pool_retire);
+    }
+} /* chimera_vfs_attr_cache_invalidate */
 
 /*
  * Do two attr sets carry the same change-significant fields?  ctime is the

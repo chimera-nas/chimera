@@ -520,6 +520,99 @@ nfs_recovery_kickoff(struct chimera_server_nfs_thread *thread)
 } /* nfs_recovery_kickoff */
 
 /* ------------------------------------------------------------------ *
+*  cluster grace re-open (WS-A / WS-D)                               *
+* ------------------------------------------------------------------ */
+
+static void
+nfs_recovery_reopen_complete(
+    enum chimera_vfs_error error_code,
+    void                  *private_data)
+{
+    struct nfs_recovery_load_ctx *ctx = private_data;
+    struct nfs_recovery          *rec = ctx->rec;
+
+    (void) error_code;
+
+    /* Re-stamp the window to cover the full grace duration from the moment the
+     * reclaim set is complete, then flip back to READY so per-client reclaim
+     * eligibility (nfs_recovery_open_check) is enforced again.  If the rescan
+     * found nothing reclaimable, drop straight out of grace. */
+    pthread_mutex_lock(&rec->lock);
+    if (rec->to_reclaim) {
+        rec->in_grace     = true;
+        rec->grace_end_ns = nfs_lease_now_ns() +
+            (uint64_t) rec->grace_time_s * 1000000000ULL;
+    } else {
+        rec->in_grace     = false;
+        rec->grace_end_ns = 0;
+    }
+    pthread_mutex_unlock(&rec->lock);
+
+    atomic_store_explicit(&rec->load_state, NFS_REC_LOAD_READY,
+                          memory_order_release);
+
+    chimera_nfs_info(
+        "cluster grace re-opened: %u client(s) reclaimable, window %us",
+        rec->pending_reclaim, rec->grace_time_s);
+
+    free(ctx);
+} /* nfs_recovery_reopen_complete */
+
+/*
+ * Re-open the NFSv4 grace window on a peer eviction (WS-D signal) and re-scan
+ * the SHARED recovery records into to_reclaim.  A long-running survivor only
+ * loaded the confirmed-client set at its own cold start; clients confirmed on
+ * the now-dead peer since then are in the shared KV but not yet in this node's
+ * to_reclaim, so they must be picked up before their failover reclaim arrives.
+ *
+ * The window is opened immediately and load_state is dropped to RUNNING for the
+ * duration of the rescan -- reusing the cold-load semantics so that, while the
+ * set is being rebuilt, reclaims are accepted without per-client eligibility
+ * checks (open_check treats not-READY as in-grace) and EXCHANGE_ID/
+ * CREATE_SESSION hold off with NFS4ERR_DELAY.  reopen_complete restores READY.
+ *
+ * No-op when persistence is disabled (memkv): no shared backend means no
+ * cross-node failover to absorb.  Grace ends on timeout or reclaim drain via
+ * the existing nfs_recovery_sweep_once; cluster grace relies on the timeout
+ * since the exact failover set is not known in advance.
+ *
+ * NOTE: this re-opens grace on the node that received the eviction signal.  For
+ * the whole surviving set to enter grace, the orchestrator should signal every
+ * survivor (a KV-watch fan-out is a future refinement).
+ */
+void
+nfs_recovery_cluster_grace_reopen(
+    struct nfs_recovery       *rec,
+    struct chimera_vfs_thread *vfs_thread)
+{
+    struct nfs_recovery_load_ctx *ctx;
+
+    if (rec->persistence_disabled) {
+        return;
+    }
+
+    /* Relax eligibility + force in-grace while the reclaim set is rebuilt. */
+    atomic_store_explicit(&rec->load_state, NFS_REC_LOAD_RUNNING,
+                          memory_order_release);
+
+    pthread_mutex_lock(&rec->lock);
+    rec->in_grace     = true;
+    rec->grace_end_ns = nfs_lease_now_ns() +
+        (uint64_t) rec->grace_time_s * 1000000000ULL;
+    pthread_mutex_unlock(&rec->lock);
+
+    ctx         = malloc(sizeof(*ctx));
+    ctx->thread = NULL;  /* reopen does not reconstruct the DRC */
+    ctx->rec    = rec;
+    nfs_kv_type_prefix(ctx->start, CHIMERA_KV_TYPE_NFS4_RECOVERY);
+
+    chimera_vfs_search_keys(vfs_thread, ctx->start, CHIMERA_KV_HDR_LEN,
+                            NULL, 0, 0,
+                            nfs_recovery_scan_cb, nfs_recovery_reopen_complete,
+                            ctx);
+} /* nfs_recovery_cluster_grace_reopen */
+
+/* ------------------------------------------------------------------ *
 *  OPEN gate + reclaim bookkeeping                                   *
 * ------------------------------------------------------------------ */
 
@@ -542,8 +635,6 @@ nfs_recovery_open_check(
     bool in_grace;
     int  ls;
 
-    (void) client;  /* not gated per-client yet; future use. */
-
     ls = atomic_load_explicit(&rec->load_state, memory_order_acquire);
 
     pthread_mutex_lock(&rec->lock);
@@ -562,6 +653,36 @@ nfs_recovery_open_check(
     if (!in_grace && is_reclaim) {
         return NFS4ERR_NO_GRACE;
     }
+
+    /* Validating reclaim: a CLAIM_PREVIOUS is only legitimate from a client the
+     * server has a confirmed recovery record for (single-node: persisted before
+     * the reboot; cluster: persisted to the shared KV by whichever node the
+     * client was on).  Once the record set is fully loaded, reject a reclaim
+     * from a client not in to_reclaim with NFS4ERR_NO_GRACE so a never-confirmed
+     * (or already-forgotten) client cannot mint fresh state via the reclaim
+     * path -- the previous code accepted any reclaim while in grace.  The check
+     * is skipped while the load is still in flight (ls != READY, handled above
+     * by forcing in_grace) and when the caller could not resolve the client
+     * (4.0 paths before SETCLIENTID confirm), preserving prior behavior there.
+     *
+     * NOTE: this validates reclaim *eligibility* (the client held confirmed
+     * state), not that the client previously held THIS specific file/lock --
+     * per-object validation consumes the lease-persist branch's persisted
+     * open/lock records and is layered on when those are available. */
+    if (in_grace && is_reclaim && client &&
+        ls == NFS_REC_LOAD_READY) {
+        struct nfs_recovery_record *r;
+
+        pthread_mutex_lock(&rec->lock);
+        HASH_FIND(hh, rec->to_reclaim, client->owner_string,
+                  client->owner_len, r);
+        pthread_mutex_unlock(&rec->lock);
+
+        if (!r) {
+            return NFS4ERR_NO_GRACE;
+        }
+    }
+
     return NFS4_OK;
 } /* nfs_recovery_open_check */
 

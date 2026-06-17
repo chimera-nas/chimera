@@ -235,6 +235,12 @@ chimera_vfs_name_cache_insert(
     uint64_t                              key = fh_hash ^ name_hash;
     uint64_t                              now = chimera_vfs_now_ticks();
 
+    /* Strict-coherence mode (cache_ttl == 0): do not cache name->fh mappings,
+     * so a peer's rename/unlink is never masked by a stale local entry. */
+    if (cache->ttl == 0) {
+        return;
+    }
+
     shard = &cache->shards[key & cache->num_shards_mask];
 
     slot = &shard->entries[(key & cache->num_slots_mask) << cache->num_entries_bits];
@@ -383,3 +389,47 @@ chimera_vfs_name_cache_remove(
     }
 
 } /* chimera_vfs_name_cache_remove */
+
+/*
+ * Drop every name-cache entry that references `fh` as either the parent
+ * directory or the resolved child, when this node learns the file changed
+ * underneath it (cross-node lease recall).  A directory mutation on a peer
+ * (create/remove/rename of a child) invalidates the parent==fh entries; a
+ * file's rename/unlink on a peer invalidates the child==fh entries.
+ *
+ * The cache is not indexed by child fh nor by a bare parent fh (the key folds
+ * in the name), so this walks all slots.  The table is small and bounded and
+ * recalls are infrequent (they fire only on cross-node contention), so the
+ * O(table) sweep is acceptable.
+ */
+static inline void
+chimera_vfs_name_cache_invalidate_fh(
+    struct chimera_vfs_name_cache *cache,
+    const void                    *fh,
+    int                            fh_len)
+{
+    uint32_t s;
+
+    for (s = 0; s < cache->num_shards; s++) {
+        struct chimera_vfs_name_cache_shard *shard = &cache->shards[s];
+        uint64_t                             total = cache->num_slots * cache->num_entries;
+        uint64_t                             i;
+
+        urcu_qsbr_read_lock();
+        pthread_mutex_lock(&shard->entry_lock);
+
+        for (i = 0; i < total; i++) {
+            struct chimera_vfs_name_cache_entry *entry = shard->entries[i];
+
+            if (entry &&
+                (chimera_memequal(entry->parent_fh, entry->parent_fh_len, fh, fh_len) ||
+                 chimera_memequal(entry->child_fh, entry->child_fh_len, fh, fh_len))) {
+                rcu_assign_pointer(shard->entries[i], NULL);
+                call_rcu(&entry->rnode.rcu, chimera_rcu_pool_retire);
+            }
+        }
+
+        pthread_mutex_unlock(&shard->entry_lock);
+        urcu_qsbr_read_unlock();
+    }
+} /* chimera_vfs_name_cache_invalidate_fh */

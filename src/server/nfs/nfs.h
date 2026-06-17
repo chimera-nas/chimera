@@ -22,6 +22,24 @@ void chimera_nfs_add_export(
     const char *name,
     const char *path);
 
+struct chimera_vfs_thread;
+
+/**
+ * @brief Re-open NFSv4 + NLM grace on a peer eviction (cluster failover).
+ *
+ * Re-scans the shared recovery records into the reclaim set and opens the grace
+ * window so this survivor can absorb clients failing over from the evicted node
+ * while refusing conflicting new (non-reclaim) locks until reclaim drains.
+ * No-op for NFSv4 when the KV backend is non-persistent.
+ *
+ * @param nfs_shared Pointer to the NFS shared context.
+ * @param vfs_thread VFS thread for the shared-KV rescan.
+ */
+void
+chimera_nfs_cluster_grace_reopen(
+    void                      *nfs_shared,
+    struct chimera_vfs_thread *vfs_thread);
+
 
 /**
  * @brief Removes an NFS export from the shared context.

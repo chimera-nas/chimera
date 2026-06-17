@@ -199,10 +199,16 @@ chimera_smb_server_init(
     pthread_mutex_init(&shared->trees_lock, NULL);
     pthread_mutex_init(&shared->threads_lock, NULL);
 
+    shared->node_id = chimera_server_config_get_node_id(config);
+
     /* Seed the persistent-id allocator with a random, nonzero base so ids do
      * not restart from a fixed value across daemon restarts (a courtesy to the
-     * future on-disk persistence layer; 0 is reserved for "no file id"). */
-    atomic_init(&shared->next_persistent_id, (chimera_rand64() | 1));
+     * future on-disk persistence layer; 0 is reserved for "no file id").  The
+     * counter occupies only the low 56 bits — the high byte is reserved for the
+     * node_id stamped in by chimera_smb_alloc_persistent_id — so mask the seed
+     * to 56 bits to keep the node byte clean. */
+    atomic_init(&shared->next_persistent_id,
+                ((chimera_rand64() & CHIMERA_SMB_PID_COUNTER_MASK) | 1));
 
     chimera_smb_durable_table_init(&shared->durable);
 
@@ -2362,6 +2368,41 @@ chimera_smb_add_share(
     pthread_mutex_unlock(&shared->shares_lock);
 
 } /* chimera_smb_add_share */
+
+SYMBOL_EXPORT void
+chimera_smb_set_cluster(
+    void *smb_shared,
+    struct chimera_cluster *cluster,
+    int ( *node_evicted )(const struct chimera_cluster *, int))
+{
+    struct chimera_server_smb_shared *shared = smb_shared;
+
+    shared->cluster      = cluster;
+    shared->node_evicted = node_evicted;
+} /* chimera_smb_set_cluster */
+
+SYMBOL_EXPORT void
+chimera_smb_cluster_on_evict(void *smb_shared)
+{
+    struct chimera_server_smb_shared *shared = smb_shared;
+    struct chimera_smb_share         *share;
+
+    /* A peer was evicted.  Re-arm the per-share durable recovery scan for every
+     * continuous-availability share so the NEXT tree-connect re-scans the
+     * shared backend -- the node-filtered recover scan now adopts the evicted
+     * node's persisted handles (including any minted after this node's first
+     * scan), making them reclaimable here.  The failover client must
+     * tree-connect before reconnecting its handle, so the rescan runs on that
+     * client's own SMB thread (no cross-thread scan from here). */
+    pthread_mutex_lock(&shared->shares_lock);
+    LL_FOREACH(shared->shares, share)
+    {
+        if (share->continuous_availability) {
+            share->durable_recovered = false;
+        }
+    }
+    pthread_mutex_unlock(&shared->shares_lock);
+} /* chimera_smb_cluster_on_evict */
 
 SYMBOL_EXPORT int
 chimera_smb_share_set_access_based_enum(

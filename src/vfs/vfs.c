@@ -648,6 +648,35 @@ chimera_vfs_set_tcp_flavor(
     vfs->tcp_flavor = flavor;
 } /* chimera_vfs_set_tcp_flavor */
 
+/*
+ * Drop this node's cached state for a file handle when the file has changed
+ * underneath us (cross-node coherence, WS-E).  The intended caller is the
+ * backend lease-recall upcall: when a CAP_LEASE backend recalls/breaks a lease
+ * on a file because a peer node mutated it, the survivor must discard its
+ * stale attr/name cache for that fh so the next lookup/getattr re-reads the
+ * authoritative state from the coherent backend.
+ *
+ * Drops the attribute cache entry and any name-cache entries referencing the
+ * fh (as parent or child).  The open-handle cache is intentionally left alone:
+ * an open handle's validity is re-checked by the backend on the next I/O (a
+ * peer unlink surfaces as a STALE/NOENT there), and a live, refcounted handle
+ * must not be torn out from under in-flight operations.
+ *
+ * Until a CAP_LEASE backend is wired (lease-persist branch), files not under a
+ * lease rely on the cache TTL (set cache_ttl = 0 for strict no-cache).
+ */
+SYMBOL_EXPORT void
+chimera_vfs_invalidate_fh(
+    struct chimera_vfs *vfs,
+    const void         *fh,
+    int                 fh_len)
+{
+    uint64_t fh_hash = chimera_vfs_hash(fh, fh_len);
+
+    chimera_vfs_attr_cache_invalidate(vfs->vfs_attr_cache, fh_hash, fh, fh_len);
+    chimera_vfs_name_cache_invalidate_fh(vfs->vfs_name_cache, fh, fh_len);
+} /* chimera_vfs_invalidate_fh */
+
 SYMBOL_EXPORT int
 chimera_vfs_fh_is_plausible(
     struct chimera_vfs_thread *thread,

@@ -366,6 +366,15 @@ chimera_server_config_get_nfs_server_scope(
     const struct chimera_server_config *config);
 
 void
+chimera_server_config_set_node_id(
+    struct chimera_server_config *config,
+    int                           node_id);
+
+int
+chimera_server_config_get_node_id(
+    const struct chimera_server_config *config);
+
+void
 chimera_server_config_set_nfs_rdma_hostname(
     struct chimera_server_config *config,
     const char                   *hostname);
@@ -605,6 +614,31 @@ chimera_server_start(
 void
 chimera_server_destroy(
     struct chimera_server *server);
+
+/* Cluster eviction control plane (see cluster.h).  These wrap the server's
+ * eviction registry so callers (e.g. the REST control endpoint) need only the
+ * opaque chimera_server handle plus a vfs_thread for the shared-KV write. */
+int
+chimera_server_cluster_evict(
+    struct chimera_server     *server,
+    struct chimera_vfs_thread *vfs_thread,
+    int                        node_id);
+
+int
+chimera_server_cluster_rejoin(
+    struct chimera_server     *server,
+    struct chimera_vfs_thread *vfs_thread,
+    int                        node_id);
+
+int
+chimera_server_cluster_local_node_id(
+    struct chimera_server *server);
+
+int
+chimera_server_cluster_evicted_list(
+    struct chimera_server *server,
+    uint8_t               *out,
+    int                    cap);
 
 int
 chimera_server_add_user(

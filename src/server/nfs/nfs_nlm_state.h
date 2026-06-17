@@ -298,6 +298,16 @@ nlm_state_init(
     struct nlm_state *state,
     const char       *state_dir);
 
+/*
+ * (Re)open the NLM grace window for `secs` seconds.  Used on a peer eviction
+ * (cluster failover) so a survivor refuses new (non-reclaim) locks while
+ * failed-over NLM clients re-establish their locks via NSM/statd notification.
+ */
+void
+nlm_state_begin_grace(
+    struct nlm_state *state,
+    int               secs);
+
 void
 nlm_state_destroy(
     struct nlm_state *state);

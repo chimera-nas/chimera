@@ -110,6 +110,19 @@ nlm_state_init(
 } /* nlm_state_init */
 
 void
+nlm_state_begin_grace(
+    struct nlm_state *state,
+    int               secs)
+{
+    pthread_mutex_lock(&state->mutex);
+    state->in_grace  = 1;
+    state->grace_end = time(NULL) + secs;
+    pthread_mutex_unlock(&state->mutex);
+
+    chimera_nfs_info("NLM grace (re)opened for %d seconds", secs);
+} /* nlm_state_begin_grace */
+
+void
 nlm_state_destroy(struct nlm_state *state)
 {
     struct nlm_client     *client, *tmp_client;

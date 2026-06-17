@@ -551,6 +551,63 @@ test_nfs3_cross_reboot(void)
     printf("ok: nfs3_cross_reboot\n");
 } /* test_nfs3_cross_reboot */
 
+/* ------------------------------------------------------------------ *
+*  Grace gate: validating CLAIM_PREVIOUS eligibility (WS-A)          *
+* ------------------------------------------------------------------ */
+
+static void
+test_recovery_open_check(void)
+{
+    struct nfs_recovery        rec;
+    struct nfs_recovery_record rrec;
+    struct nfs_client          known;
+    struct nfs_client          unknown;
+
+    memset(&rec,0,sizeof(rec));
+    pthread_mutex_init(&rec.lock,NULL);
+    rec.persistence_disabled = false;
+    atomic_store(&rec.load_state,NFS_REC_LOAD_READY);
+
+    /* One confirmed client recorded for reclaim ("known"). */
+    memset(&rrec,0,sizeof(rrec));
+    memcpy(rrec.owner_string,"client-known",12);
+    rrec.owner_len = 12;
+    rrec.reclaimed = false;
+    HASH_ADD_KEYPTR(hh,rec.to_reclaim,rrec.owner_string,rrec.owner_len,&rrec);
+    rec.pending_reclaim = 1;
+    rec.in_grace        = true;
+
+    memset(&known,0,sizeof(known));
+    memcpy(known.owner_string,"client-known",12);
+    known.owner_len = 12;
+
+    memset(&unknown,0,sizeof(unknown));
+    memcpy(unknown.owner_string,"client-other",12);
+    unknown.owner_len = 12;
+
+    /* Non-reclaim OPEN during grace is refused. */
+    CHECK(nfs_recovery_open_check(&rec,&known,false) == NFS4ERR_GRACE);
+
+    /* Reclaim from a confirmed client is allowed. */
+    CHECK(nfs_recovery_open_check(&rec,&known,true) == NFS4_OK);
+
+    /* Reclaim from a client with no recovery record is rejected (the gap this
+    * change closes -- previously any reclaim was accepted while in grace). */
+    CHECK(nfs_recovery_open_check(&rec,&unknown,true) == NFS4ERR_NO_GRACE);
+
+    /* A NULL client (pre-confirm 4.0 path) is not gated per-client. */
+    CHECK(nfs_recovery_open_check(&rec,NULL,true) == NFS4_OK);
+
+    /* Once grace ends, a reclaim gets NO_GRACE and a normal OPEN proceeds. */
+    rec.in_grace = false;
+    CHECK(nfs_recovery_open_check(&rec,&known,true) == NFS4ERR_NO_GRACE);
+    CHECK(nfs_recovery_open_check(&rec,&known,false) == NFS4_OK);
+
+    HASH_CLEAR(hh,rec.to_reclaim);
+    pthread_mutex_destroy(&rec.lock);
+    printf("ok: recovery_open_check\n");
+} /* test_recovery_open_check */
+
 int
 main(void)
 {
@@ -564,6 +621,7 @@ main(void)
     test_session_record_roundtrip();
     test_reply_record_roundtrip();
     test_cross_reboot_replay();
+    test_recovery_open_check();
 
     test_nfs3_key_encoding();
     test_nfs3_checksum_and_cacheable();

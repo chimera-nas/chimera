@@ -126,6 +126,22 @@ void chimera_rest_handle_config(
     struct evpl_http_request *,
     struct chimera_rest_thread *);
 
+/* External handlers from rest_cluster.c */
+void chimera_rest_handle_cluster_list(
+    struct evpl *,
+    struct evpl_http_request *,
+    struct chimera_rest_thread *);
+void chimera_rest_handle_cluster_evict(
+    struct evpl *,
+    struct evpl_http_request *,
+    struct chimera_rest_thread *,
+    const char *);
+void chimera_rest_handle_cluster_rejoin(
+    struct evpl *,
+    struct evpl_http_request *,
+    struct chimera_rest_thread *,
+    const char *);
+
 /* External handlers from rest_swagger.c */
 void chimera_rest_handle_swagger_ui(
     struct evpl *,
@@ -469,6 +485,32 @@ chimera_rest_dispatch(
     if (url_len == 14 && strncmp(url, "/api/v1/config", 14) == 0) {
         if (req_type == EVPL_HTTP_REQUEST_TYPE_GET) {
             chimera_rest_handle_config(evpl, request, thread);
+        } else {
+            chimera_rest_handle_method_not_allowed(evpl, request);
+        }
+        return;
+    }
+
+    /* Cluster API: /api/v1/cluster (eviction control plane) */
+    if (url_len == 15 && strncmp(url, "/api/v1/cluster", 15) == 0) {
+        if (req_type == EVPL_HTTP_REQUEST_TYPE_GET) {
+            chimera_rest_handle_cluster_list(evpl, request, thread);
+        } else {
+            chimera_rest_handle_method_not_allowed(evpl, request);
+        }
+        return;
+    }
+
+    if (chimera_rest_url_starts_with(url, url_len, "/api/v1/cluster/evict/", 22)) {
+        chimera_rest_extract_path_param(url, url_len, 22, param, sizeof(param));
+        if (param[0] != '\0') {
+            if (req_type == EVPL_HTTP_REQUEST_TYPE_POST) {
+                chimera_rest_handle_cluster_evict(evpl, request, thread, param);
+            } else if (req_type == EVPL_HTTP_REQUEST_TYPE_DELETE) {
+                chimera_rest_handle_cluster_rejoin(evpl, request, thread, param);
+            } else {
+                chimera_rest_handle_method_not_allowed(evpl, request);
+            }
         } else {
             chimera_rest_handle_method_not_allowed(evpl, request);
         }

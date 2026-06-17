@@ -607,6 +607,34 @@ main(
                                                    (uint64_t) json_integer_value(json_value));
     }
 
+    /* Cluster node identity.  0 (default) = single-node/unclustered.  In a
+     * VIP + shared-backend cluster, assign each node a distinct value in
+     * 1..255 so shared-keyspace records (e.g. SMB persistent ids) never
+     * collide across nodes and an evicted node's state can be attributed. */
+    json_value = json_object_get(server_params, "node_id");
+    if (json_is_integer(json_value)) {
+        int node_id = (int) json_integer_value(json_value);
+        if (node_id < 0 || node_id > 255) {
+            chimera_server_abort("config: node_id %d out of range (must be 0..255)", node_id);
+        }
+        chimera_server_config_set_node_id(server_config, node_id);
+    }
+
+    /* Attribute/name cache TTL in seconds (default 60).  Set to 0 for strict
+     * coherence -- attrs and name->fh mappings are not cached, so a peer's
+     * mutation in a shared-backend cluster is never masked by a stale local
+     * entry (at the cost of every metadata op hitting the backend).  The
+     * lease-coupled invalidation path (chimera_vfs_invalidate_fh) is the
+     * lower-overhead mechanism for files covered by a backend lease. */
+    json_value = json_object_get(server_params, "cache_ttl");
+    if (json_is_integer(json_value)) {
+        int ttl = (int) json_integer_value(json_value);
+        if (ttl < 0) {
+            chimera_server_abort("config: cache_ttl %d must be >= 0", ttl);
+        }
+        chimera_server_config_set_cache_ttl(server_config, ttl);
+    }
+
     /* Data-server mode: bind only the NFSv4 service (no portmap/mount/NLM) so
      * a pNFS data server can run alongside an MDS on the same host. */
     json_value = json_object_get(server_params, "data_server");

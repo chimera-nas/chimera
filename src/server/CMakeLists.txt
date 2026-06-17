@@ -8,7 +8,7 @@
 # the unprefixed QSBR API, is set project-wide in the top-level CMakeLists.txt.)
 add_compile_definitions(_LGPL_SOURCE)
 
-add_library(chimera_server SHARED server.c)
+add_library(chimera_server SHARED server.c cluster.c)
 target_link_libraries(chimera_server chimera_nfs chimera_s3 chimera_smb chimera_rest chimera_vfs evpl unwind)
 
 install(TARGETS chimera_server DESTINATION lib)

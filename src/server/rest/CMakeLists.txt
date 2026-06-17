@@ -11,6 +11,7 @@ add_library(chimera_rest SHARED
     rest_shares.c
     rest_mounts.c
     rest_config.c
+    rest_cluster.c
     rest_swagger.c
     rest_debug.c
 )

@@ -1509,6 +1509,15 @@ chimera_vfs_set_tcp_flavor(
     struct chimera_vfs     *vfs,
     enum chimera_tcp_flavor flavor);
 
+/* Invalidate this node's cached attr/name state for a file handle that changed
+ * underneath it (cross-node coherence).  Intended caller: the CAP_LEASE backend
+ * lease-recall upcall.  See chimera_vfs_invalidate_fh in vfs.c. */
+void
+chimera_vfs_invalidate_fh(
+    struct chimera_vfs *vfs,
+    const void         *fh,
+    int                 fh_len);
+
 /* Get the root pseudo-filesystem's file handle */
 void
 chimera_vfs_get_root_fh(

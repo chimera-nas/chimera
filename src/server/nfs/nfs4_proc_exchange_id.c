@@ -177,7 +177,18 @@ chimera_nfs4_exchange_id(
      * that do not share state -- e.g. a pNFS data server co-deployed with its
      * MDS -- must therefore differ in both, or the client coalesces them and
      * misroutes the data path.  The "nfs_server_scope" knob sets both (default
-     * 42, preserving prior behavior). */
+     * 42, preserving prior behavior).
+     *
+     * Clustering (VIP + shared coherent backend, reconnect-anywhere): every
+     * node DELIBERATELY advertises the SAME scope/owner so the client sees one
+     * logical server and a reconnect to any node is transparent.  This is safe
+     * here precisely because the nodes share state via the backend; do NOT fold
+     * node_id into the scope.  Failover is reclaim-based: a client that lands on
+     * a node lacking its (per-process) clientid/stateid gets STALE_CLIENTID /
+     * STALE_STATEID and re-establishes + reclaims during the cluster grace
+     * window.  Under a single VIP the client only ever sees one address, so
+     * identical owner/scope does not trigger multipath trunking discovery across
+     * nodes -- the trunking caveat above applies to distinct addresses. */
     uint64_t                       server_scope = chimera_server_config_get_nfs_server_scope(
         thread->shared->config);
     uint64_t                       owner_major = server_scope;

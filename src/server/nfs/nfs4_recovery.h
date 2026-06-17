@@ -133,6 +133,17 @@ void
 nfs_recovery_end_grace(
     struct nfs_recovery *rec);
 
+/*
+ * Re-open the grace window on a peer eviction (cluster failover) and re-scan
+ * the shared recovery records into to_reclaim so clients confirmed on the dead
+ * peer become reclaim-eligible here.  No-op under non-persistent KV.  See the
+ * implementation for the load_state / eligibility handling during the rescan.
+ */
+void
+nfs_recovery_cluster_grace_reopen(
+    struct nfs_recovery       *rec,
+    struct chimera_vfs_thread *vfs_thread);
+
 bool
 nfs_recovery_in_grace(
     struct nfs_recovery *rec);

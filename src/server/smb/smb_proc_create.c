@@ -1227,7 +1227,7 @@ chimera_smb_create_gen_open_file_normal(
      * written atomically with the open; adopt it here. */
     uint64_t                      pid = request->create.persist_pid ?
         request->create.persist_pid :
-        atomic_fetch_add(&request->compound->thread->shared->next_persistent_id, 1);
+        chimera_smb_alloc_persistent_id(request->compound->thread->shared);
 
     open_file = chimera_smb_create_gen_open_file(request,
                                                  CHIMERA_SMB_OPEN_FILE_TYPE_FILE,
@@ -2655,7 +2655,7 @@ chimera_smb_create_persist_prepare(
     }
 
     if (request->create.persist_pid == 0) {
-        request->create.persist_pid = atomic_fetch_add(&shared->next_persistent_id, 1);
+        request->create.persist_pid = chimera_smb_alloc_persistent_id(shared);
     }
     pid = request->create.persist_pid;
 

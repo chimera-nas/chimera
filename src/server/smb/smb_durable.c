@@ -65,6 +65,15 @@ chimera_smb_durable_table_destroy(struct chimera_smb_durable_table *table)
     pthread_mutex_destroy(&table->lock);
 } /* chimera_smb_durable_table_destroy */
 
+SYMBOL_EXPORT uint64_t
+chimera_smb_alloc_persistent_id(struct chimera_server_smb_shared *shared)
+{
+    uint64_t counter = atomic_fetch_add(&shared->next_persistent_id, 1) &
+        CHIMERA_SMB_PID_COUNTER_MASK;
+
+    return counter | ((uint64_t) (uint8_t) shared->node_id << CHIMERA_SMB_PID_NODE_SHIFT);
+} /* chimera_smb_alloc_persistent_id */
+
 SYMBOL_EXPORT void
 chimera_smb_durable_register(
     struct chimera_server_smb_shared *shared,
@@ -135,10 +144,18 @@ chimera_smb_durable_recover_entry(
     }
     HASH_ADD(hh, shared->durable.by_pid, persistent_id, sizeof(entry->persistent_id), entry);
 
-    /* Keep the id allocator ahead of every recovered persistent id so a fresh
-     * open can never collide with a not-yet-reclaimed one. */
-    if (atomic_load(&shared->next_persistent_id) <= pid) {
-        atomic_store(&shared->next_persistent_id, pid + 1);
+    /* Keep the id allocator ahead of every recovered persistent id minted by
+     * THIS node so a fresh open can never collide with a not-yet-reclaimed one.
+     * A record minted by another node carries that node's id in its high bits
+     * and lives in a different counter range — re-seeding from it would drag
+     * our counter into the peer's range and produce colliding ids.  Compare in
+     * counter space (the low 56 bits); next_persistent_id holds the bare
+     * counter, pid holds the node-tagged value. */
+    if (CHIMERA_SMB_PID_NODE(pid) == (uint8_t) shared->node_id) {
+        uint64_t counter = pid & CHIMERA_SMB_PID_COUNTER_MASK;
+        if (atomic_load(&shared->next_persistent_id) <= counter) {
+            atomic_store(&shared->next_persistent_id, counter + 1);
+        }
     }
     pthread_mutex_unlock(&shared->durable.lock);
 } /* chimera_smb_durable_recover_entry */
@@ -789,7 +806,23 @@ chimera_smb_durable_recover_cb(
     }
 
     if (chimera_smb_durable_deserialize(value, value_len, &record) == 0) {
-        chimera_smb_durable_recover_entry(ctx->shared, &record);
+        struct chimera_server_smb_shared *shared = ctx->shared;
+        int                               owner  =
+            CHIMERA_SMB_PID_NODE(record.persistent_id);
+
+        /* Cross-node adoption gate.  Adopt a persisted handle as a cold,
+         * reclaimable entry ONLY when it was minted by THIS node (restart
+         * recovery of our own prior instance) or by a peer that has been
+         * EVICTED (failover -- the dead node's handles are now ours to hand
+         * back).  A live peer's handle is left untouched so a client cannot
+         * reconnect here and steal a handle the peer still holds warm.  When
+         * unclustered (node_id 0) every record carries owner 0 == node_id, so
+         * single-node restart recovery is unchanged. */
+        if (owner == shared->node_id ||
+            (shared->cluster && shared->node_evicted &&
+             shared->node_evicted(shared->cluster, owner))) {
+            chimera_smb_durable_recover_entry(shared, &record);
+        }
     }
 
     return 0;

@@ -17,6 +17,7 @@
 #include "evpl/evpl.h"
 #include "server_internal.h"
 #include "protocol.h"
+#include "cluster.h"
 #include "nfs/nfs.h"
 #include "nfs/nfs4_lease.h"
 #include "s3/s3.h"
@@ -50,6 +51,7 @@ struct chimera_server_config {
     int                                   nfs_port;
     int                                   s3_port;
     int                                   nfs_data_server;
+    int                                   node_id;
     uint64_t                              nfs_server_scope;
     int                                   external_portmap;
     char                                  portmap_hostname[256];
@@ -120,6 +122,7 @@ struct chimera_server {
     void                               *smb_shared;
     void                               *nfs_shared;
     struct chimera_rest_server         *rest;
+    struct chimera_cluster             *cluster;
     int                                 num_protocols;
     int                                 threads_online;
     pthread_mutex_t                     lock;
@@ -240,6 +243,16 @@ chimera_server_config_init(void)
      * Default preserves the historical value; override per instance via
      * "nfs_server_scope". */
     config->nfs_server_scope = 42;
+
+    /* Cluster node identity.  0 (the default) means single-node / unclustered:
+     * persistent-handle keys and on-disk state are byte-identical to a
+     * non-clustered build and no cross-node behavior is engaged.  In a
+     * VIP + shared-backend cluster every node MUST be assigned a distinct
+     * value in 1..255 ("node_id"); it is folded into globally-shared keys
+     * (e.g. the high bits of SMB persistent ids) so two nodes never collide
+     * in the shared keyspace, and stamped on persisted state so a reaper can
+     * attribute and release the records held by an evicted node. */
+    config->node_id = 0;
 
     config->cache_ttl = 60;
 
@@ -777,6 +790,20 @@ chimera_server_config_get_nfs_server_scope(const struct chimera_server_config *c
 } /* chimera_server_config_get_nfs_server_scope */
 
 SYMBOL_EXPORT void
+chimera_server_config_set_node_id(
+    struct chimera_server_config *config,
+    int                           node_id)
+{
+    config->node_id = node_id;
+} /* chimera_server_config_set_node_id */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_node_id(const struct chimera_server_config *config)
+{
+    return config->node_id;
+} /* chimera_server_config_get_node_id */
+
+SYMBOL_EXPORT void
 chimera_server_config_set_nfs_rdma_hostname(
     struct chimera_server_config *config,
     const char                   *hostname)
@@ -1172,6 +1199,10 @@ chimera_server_thread_init(
     }
 
     thread->rest_thread = chimera_rest_thread_init(evpl, server->rest, thread->vfs_thread);
+
+    /* Load the persisted cluster eviction set once, from the first thread to
+     * come online (it now has a vfs_thread for the shared KV).  Idempotent. */
+    chimera_cluster_load(server->cluster, thread->vfs_thread);
 
     pthread_mutex_lock(&server->lock);
     if (++server->threads_online == server->config->core_threads) {
@@ -1713,6 +1744,134 @@ chimera_server_thread_shutdown(
     free(thread);
 } /* chimera_server_thread_shutdown */
 
+/* Fold (acc || data) into a new 64-bit accumulator; order-sensitive so the
+ * resulting digest depends on both the values and the order they are fed. */
+static uint64_t
+chimera_digest_mix(
+    uint64_t    acc,
+    const void *data,
+    size_t      len)
+{
+    uint8_t buf[8 + sizeof(((struct chimera_vfs_module_cfg *) 0)->config_data)];
+
+    if (len > sizeof(buf) - 8) {
+        len = sizeof(buf) - 8;
+    }
+    memcpy(buf, &acc, sizeof(acc));
+    memcpy(buf + sizeof(acc), data, len);
+    return XXH3_64bits(buf, sizeof(acc) + len);
+} /* chimera_digest_mix */
+
+/* Cluster identity digest.  In a VIP + shared-backend cluster every node must
+ * present the SAME logical-server identity and resolve the SAME file handles
+ * and access decisions, or reconnect-anywhere silently breaks.  Most of that is
+ * governed by config that must be byte-identical across nodes (server scope,
+ * the module set + their fsid/path config, the cache TTL, the anon ids), with
+ * node_id the one value that must DIFFER.  This logs each determinism-critical
+ * field plus a single combined digest over the must-match fields so an operator
+ * (or a test harness) can confirm at a glance that two nodes agree on identity
+ * (digests equal) while remaining distinct nodes (node_id differs).
+ *
+ * This is observability, not enforcement: a node cannot see a peer's config, so
+ * it logs rather than fails.  Backends that derive fsid from a shared persistent
+ * superblock (cairn, diskfs) are consistent by construction; memfs needs its
+ * "fsid" config knob set identically across nodes; the nfs-proxy and
+ * linux/io_uring passthrough backends are NOT guaranteed cross-node-stable
+ * (mount-order server index / host-assigned f_fsid) and are unsuitable as the
+ * coherent cluster backend. */
+static void
+chimera_server_log_cluster_digest(const struct chimera_server_config *config)
+{
+    uint64_t d = 0;
+    int      i;
+
+    d = chimera_digest_mix(d, &config->nfs_server_scope, sizeof(config->nfs_server_scope));
+    d = chimera_digest_mix(d, &config->cache_ttl, sizeof(config->cache_ttl));
+    d = chimera_digest_mix(d, &config->anonuid, sizeof(config->anonuid));
+    d = chimera_digest_mix(d, &config->anongid, sizeof(config->anongid));
+    d = chimera_digest_mix(d, &config->num_modules, sizeof(config->num_modules));
+
+    for (i = 0; i < config->num_modules; i++) {
+        /* +1 to fold the NUL terminator as a field separator. */
+        d = chimera_digest_mix(d, config->modules[i].module_name,
+                               strlen(config->modules[i].module_name) + 1);
+        d = chimera_digest_mix(d, config->modules[i].module_path,
+                               strlen(config->modules[i].module_path) + 1);
+        d = chimera_digest_mix(d, config->modules[i].config_data,
+                               strlen(config->modules[i].config_data) + 1);
+    }
+
+    chimera_server_info(
+        "Cluster identity: node_id=%d server_scope=%llu cache_ttl=%ds anon=%u:%u modules=%d digest=%016llx",
+        config->node_id,
+        (unsigned long long) config->nfs_server_scope,
+        config->cache_ttl,
+        config->anonuid,
+        config->anongid,
+        config->num_modules,
+        (unsigned long long) d);
+
+    if (config->node_id == 0) {
+        chimera_server_info(
+            "Cluster identity: node_id=0 (single-node/unclustered) -- assign a distinct node_id (1..255) per node for a shared-backend cluster");
+    } else {
+        chimera_server_info(
+            "Cluster identity: peers must share digest=%016llx (identical config) but each carry a distinct node_id",
+            (unsigned long long) d);
+    }
+} /* chimera_server_log_cluster_digest */
+
+SYMBOL_EXPORT int
+chimera_server_cluster_evict(
+    struct chimera_server     *server,
+    struct chimera_vfs_thread *vfs_thread,
+    int                        node_id)
+{
+    int rc = chimera_cluster_evict(server->cluster, vfs_thread, node_id);
+
+    /* A peer died: re-open NFSv4 + NLM grace on this survivor so it can absorb
+     * the evicted node's failover clients (reclaim) while refusing conflicting
+     * new locks until reclaim drains.  Only on a clustered node (node_id != 0);
+     * a single-node deployment has no failover to absorb.  (The orchestrator
+     * should signal every survivor; cluster-wide grace fan-out is future work.) */
+    if (rc == 0 && chimera_cluster_local_node_id(server->cluster) != 0) {
+        if (server->nfs_shared) {
+            chimera_nfs_cluster_grace_reopen(server->nfs_shared, vfs_thread);
+        }
+        /* Re-arm SMB durable recovery so the evicted node's persisted handles
+         * are adopted (and become reclaimable) on the next tree-connect. */
+        if (server->smb_shared) {
+            chimera_smb_cluster_on_evict(server->smb_shared);
+        }
+    }
+
+    return rc;
+} /* chimera_server_cluster_evict */
+
+SYMBOL_EXPORT int
+chimera_server_cluster_rejoin(
+    struct chimera_server     *server,
+    struct chimera_vfs_thread *vfs_thread,
+    int                        node_id)
+{
+    return chimera_cluster_rejoin(server->cluster, vfs_thread, node_id);
+} /* chimera_server_cluster_rejoin */
+
+SYMBOL_EXPORT int
+chimera_server_cluster_local_node_id(struct chimera_server *server)
+{
+    return chimera_cluster_local_node_id(server->cluster);
+} /* chimera_server_cluster_local_node_id */
+
+SYMBOL_EXPORT int
+chimera_server_cluster_evicted_list(
+    struct chimera_server *server,
+    uint8_t               *out,
+    int                    cap)
+{
+    return chimera_cluster_evicted_list(server->cluster, out, cap);
+} /* chimera_server_cluster_evicted_list */
+
 SYMBOL_EXPORT struct chimera_server *
 chimera_server_init(
     const struct chimera_server_config *config,
@@ -1754,6 +1913,10 @@ chimera_server_init(
 
     pthread_mutex_init(&server->lock, NULL);
     pthread_cond_init(&server->all_threads_online, NULL);
+
+    chimera_server_log_cluster_digest(config);
+
+    server->cluster = chimera_cluster_init(config->node_id);
 
     chimera_server_info("Initializing VFS...");
     server->vfs = chimera_vfs_init(config->sync_delegation ? config->sync_delegation_threads : 0,
@@ -1805,6 +1968,12 @@ chimera_server_init(
     if (!config->nfs_data_server) {
         server->smb_shared = server->protocol_private[1];
         server->s3_shared  = server->protocol_private[2];
+
+        /* Hand the SMB layer the cluster eviction registry so its durable
+         * recovery scan only adopts an evicted (dead) peer's persisted handles
+         * for cross-node reclaim, never a live peer's. */
+        chimera_smb_set_cluster(server->smb_shared, server->cluster,
+                                chimera_cluster_node_is_evicted);
     }
 
     chimera_server_info("Initializing REST API...");
@@ -1862,6 +2031,8 @@ chimera_server_destroy(struct chimera_server *server)
     chimera_vfs_destroy(server->vfs);
 
     chimera_rest_destroy(server->rest);
+
+    chimera_cluster_destroy(server->cluster);
 
     free((void *) server->config);
     free(server);

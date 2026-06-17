@@ -311,6 +311,16 @@ chimera_smb_set_info_rename_process(
 #define CHIMERA_SMB_DURABLE_KEY_PREFIX     "smbdh"
 #define CHIMERA_SMB_DURABLE_KEY_PREFIX_LEN 5
 #define CHIMERA_SMB_DURABLE_KEY_LEN        (CHIMERA_SMB_DURABLE_KEY_PREFIX_LEN + 8)
+
+/* Persistent-id layout for cluster-wide uniqueness: the high 8 bits carry the
+ * minting node's node_id, the low 56 bits are a per-node monotonic counter.
+ * The durable KV key is still prefix + le64(persistent_id) (format unchanged),
+ * so the keyspace stays globally addressable by the full id the client echoes
+ * back on reconnect; two nodes simply never mint the same id.  For node_id 0
+ * (single-node default) the high byte is 0, so behavior is unchanged. */
+#define CHIMERA_SMB_PID_NODE_SHIFT         56
+#define CHIMERA_SMB_PID_COUNTER_MASK       0x00FFFFFFFFFFFFFFULL
+#define CHIMERA_SMB_PID_NODE(pid) ((int) (((uint64_t) (pid)) >> CHIMERA_SMB_PID_NODE_SHIFT))
 #define CHIMERA_SMB_DURABLE_RECORD_MAGIC   0x31484453  /* 'SDH1' LE */
 /* Fixed header bytes before the variable-length name in a serialized record:
  * magic(4) pid(8) create_guid(16) client_guid(16) session(8) durable_flags(4)
@@ -1174,9 +1184,29 @@ struct chimera_server_smb_shared {
     int                               any_share_encrypt;
     struct chimera_smb_tree          *free_trees;
     pthread_mutex_t                   trees_lock;
-    /* Monotonic, process-global allocator for file persistent ids.  Replaces
-     * the old per-tree counter so persistent ids stay unique across tree
-     * teardowns — a precondition for durable-handle reconnect lookup. */
+    /* Cluster node identity (0 == single-node/unclustered, 1..255 == cluster
+     * member).  Copied from chimera_server_config at init.  Folded into the
+     * high 8 bits of every persistent id this node mints (see
+     * CHIMERA_SMB_PID_* below) so two nodes sharing a backend never collide in
+     * the "smbdh" keyspace, and so the owning node of any durable handle is
+     * recoverable from its persistent id alone (used by cross-node reclaim and
+     * the evicted-node reaper). */
+    int                               node_id;
+    /* Cluster eviction registry + query fn (owned by chimera_server; set
+     * post-init via chimera_smb_set_cluster).  Consulted by the durable
+     * recovery scan to decide which peer nodes' persisted handles this node may
+     * adopt for cross-node reclaim -- only an evicted (dead) peer's, never a
+     * live one's.  Injected as a fn pointer so this lib does not link-depend on
+     * the higher-layer cluster module. */
+    struct chimera_cluster           *cluster;
+    int                               (*node_evicted)(
+        const struct chimera_cluster *,
+        int);
+    /* Monotonic, process-global allocator for file persistent ids.  Holds the
+     * low-56-bit counter only; chimera_smb_alloc_persistent_id() OR's the node
+     * byte in at allocation.  Replaces the old per-tree counter so persistent
+     * ids stay unique across tree teardowns — a precondition for durable-handle
+     * reconnect lookup. */
     _Atomic uint64_t                  next_persistent_id;
     /* In-memory durable/persistent handle registry (see struct above). */
     struct chimera_smb_durable_table  durable;
@@ -1289,6 +1319,14 @@ void
 chimera_smb_durable_recover_entry(
     struct chimera_server_smb_shared        *shared,
     const struct chimera_smb_durable_record *record);
+
+/* Allocate the next persistent id: a per-node monotonic counter in the low 56
+ * bits with this node's node_id folded into the high 8 bits (see
+ * CHIMERA_SMB_PID_* above).  The minting node of any id is recoverable as
+ * CHIMERA_SMB_PID_NODE(pid). */
+uint64_t
+chimera_smb_alloc_persistent_id(
+    struct chimera_server_smb_shared *shared);
 
 /* Build the backend KV key for a persistent id into buf (>= CHIMERA_SMB_DURABLE_KEY_LEN). */
 uint32_t

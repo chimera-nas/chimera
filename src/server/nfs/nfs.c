@@ -758,6 +758,20 @@ chimera_nfs_add_export(
 
 } /* chimera_nfs_add_export */
 
+SYMBOL_EXPORT void
+chimera_nfs_cluster_grace_reopen(
+    void                      *nfs_shared,
+    struct chimera_vfs_thread *vfs_thread)
+{
+    struct chimera_server_nfs_shared *shared = nfs_shared;
+
+    /* A peer was evicted: re-open NFSv4 grace + re-scan the shared reclaim set,
+     * and re-open NLM grace, so this survivor can absorb failover clients while
+     * refusing conflicting new (non-reclaim) state until they reclaim. */
+    nfs_recovery_cluster_grace_reopen(&shared->nfs4_recovery, vfs_thread);
+    nlm_state_begin_grace(&shared->nlm_state, NLM_GRACE_PERIOD_SECS);
+} /* chimera_nfs_cluster_grace_reopen */
+
 
 SYMBOL_EXPORT int
 chimera_nfs_remove_export(

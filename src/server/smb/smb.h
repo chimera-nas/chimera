@@ -8,6 +8,7 @@
 #include "vfs/vfs.h"
 #include "prometheus-c.h"
 struct chimera_smb_share;
+struct chimera_cluster;
 
 void
 chimera_smb_add_share(
@@ -15,6 +16,21 @@ chimera_smb_add_share(
     const char *name,
     const char *path,
     int         continuous_availability);
+
+/* Attach the cluster eviction registry + its query fn (post-init, from
+ * chimera_server) so the durable recovery scan can tell an evicted peer's
+ * handles (adoptable) from a live peer's (must not be stolen). */
+void
+chimera_smb_set_cluster(
+    void *smb_shared,
+    struct chimera_cluster *cluster,
+    int ( *node_evicted )(const struct chimera_cluster *, int));
+
+/* React to a peer eviction: re-arm the per-share durable recovery scan so the
+ * next tree-connect re-adopts the evicted node's persisted handles. */
+void
+chimera_smb_cluster_on_evict(
+    void *smb_shared);
 
 /* Enable access-based directory enumeration on a named share. */
 int
