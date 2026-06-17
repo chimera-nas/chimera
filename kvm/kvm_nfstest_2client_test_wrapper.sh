@@ -80,7 +80,15 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# ----- chimera config (delegations on: the cross-client suites need recalls) --
+# ----- chimera config --------------------------------------------------------
+# Delegations default on (nfstest_delegation needs recalls), but OFF for
+# nfstest_cache: that suite verifies the *client's* actimeo attribute/data cache
+# timeouts, and a read delegation legitimately bypasses actimeo (the client
+# caches under the delegation until recalled, not for acreg*/acdir* seconds), so
+# delegations make its timing assertions meaningless even on a correct server.
+# KVM_NFS4_DELEGATIONS overrides (manual debugging).
+deleg_default=true
+[ "$NFSTEST_PROGRAM" = "nfstest_cache" ] && deleg_default=false
 generate_config() {
     local mount_path="/"
     local vfs_section=""
@@ -117,7 +125,7 @@ generate_config() {
     "server": {
         "threads": 4,
         "delegation_threads": 4,
-        "nfs4_delegations": true,
+        "nfs4_delegations": ${KVM_NFS4_DELEGATIONS:-$deleg_default},
         $vfs_section
         "external_portmap": false
     },
@@ -200,6 +208,16 @@ case "$NFS_VERSION" in
 esac
 NFSTEST_MTOPTS="hard,rsize=4096,wsize=4096"
 
+# The published image's Docker->qcow2 conversion can leave /root/.ssh with an
+# owner/mode that ssh rejects ("Bad owner or permissions on /root/.ssh/config"),
+# which silently breaks key auth to the second client (and thus nfstest's rexec
+# RemoteServer).  Re-assert the perms at boot on each guest -- ssh requires the
+# config/key owned by the user and not group/world-accessible, and sshd needs
+# the same on authorized_keys.  No double quotes: this is embedded in the
+# kernel-cmdline test_cmd="..." which the guest parses by stripping at the
+# first quote.
+SSHFIX='mkdir -p /run/sshd; chown root:root /run/sshd; chmod 0755 /run/sshd; chown root:root /root; chmod 700 /root; chown -R root:root /root/.ssh /etc/ssh 2>/dev/null; chmod 700 /root/.ssh 2>/dev/null; chmod 600 /root/.ssh/id_ed25519 /root/.ssh/authorized_keys /root/.ssh/config 2>/dev/null; chmod 600 /etc/ssh/ssh_host_ed25519_key /etc/ssh/ssh_host_rsa_key /etc/ssh/ssh_host_ecdsa_key 2>/dev/null; /usr/sbin/sshd'
+
 # ----- guest B (secondary client): idle with sshd up -------------------------
 ip netns exec "${NETNS_NAME}" "$QEMU_BIN" \
     -enable-kvm -smp 2 -m 1G -cpu host \
@@ -208,7 +226,7 @@ ip netns exec "${NETNS_NAME}" "$QEMU_BIN" \
     -netdev tap,id=net0,ifname="${TAP_B}",script=no,downscript=no \
     -device virtio-net-pci,netdev=net0,mac=52:54:00:00:00:03,romfile="" \
     -serial stdio -nographic -no-reboot \
-    -append "root=/dev/vda rw console=${QEMU_CONSOLE} net.ifnames=0 biosdevname=0 quiet mitigations=off tsc=reliable panic=-1 guest_ip=10.0.0.3 start_sshd=1 test_cmd=\"sleep 1800\" init=/init.sh" \
+    -append "root=/dev/vda rw console=${QEMU_CONSOLE} net.ifnames=0 biosdevname=0 quiet mitigations=off tsc=reliable panic=-1 guest_ip=10.0.0.3 start_sshd=1 test_cmd=\"${SSHFIX}; sleep 1800\" init=/init.sh" \
     > "$LOG_B" 2>&1 &
 QEMU_B_PID=$!
 
@@ -217,7 +235,13 @@ NFSTEST_EXTRA=""
 # Default per-program runtest filter (an nfstest "^"-prefixed exclusion list).
 # KVM_NFSTEST_RUNTEST, if set, overrides this (used for manual debugging).
 NFSTEST_RUNTEST=""
+# The second client passed to --client.  Most programs (e.g. nfstest_cache)
+# take a bare host and derive its NFS version from the global --nfsversion.
+# nfstest_delegation has its own --client parser that accepts the named
+# "host:key=value" form, which is overridden below.
+CLIENT_SPEC="10.0.0.3"
 if [ "$NFSTEST_PROGRAM" = "nfstest_delegation" ]; then
+    CLIENT_SPEC="10.0.0.3:nfsversion=${NFSTEST_VERSION}"
     # nfstest_delegation's own captures are short per-op windows; -U flushes each
     # packet to the trace file immediately so the tiny per-op traces aren't lost
     # (see the single-client wrapper). Keep the default capture buffer (--tbsize
@@ -240,14 +264,19 @@ if [ "$NFSTEST_PROGRAM" = "nfstest_delegation" ]; then
     NFSTEST_RUNTEST="^basic05,recall01,recall03,recall13"
 fi
 [ -n "${KVM_NFSTEST_RUNTEST:-}" ] && NFSTEST_RUNTEST="$KVM_NFSTEST_RUNTEST"
+# Extra args appended verbatim (manual debugging / tuning, e.g. cache margins).
+NFSTEST_EXTRA="${NFSTEST_EXTRA}${KVM_NFSTEST_EXTRA:+ ${KVM_NFSTEST_EXTRA}}"
 
 NFSTEST_CMD="PYTHONPATH=/opt/nfstest /opt/nfstest/test/${NFSTEST_PROGRAM} \
 --server 10.0.0.1 --export /share --nfsversion ${NFSTEST_VERSION} \
 --mtpoint /mnt/t --mtopts ${NFSTEST_MTOPTS} --datadir nfstest_data \
---client 10.0.0.3:nfsversion=${NFSTEST_VERSION}${NFSTEST_EXTRA}${NFSTEST_RUNTEST:+ --runtest ${NFSTEST_RUNTEST}}"
+--client ${CLIENT_SPEC}${NFSTEST_EXTRA}${NFSTEST_RUNTEST:+ --runtest ${NFSTEST_RUNTEST}}"
 
 # Wait (in-guest) for B's sshd to accept, then run the suite.
-TEST_CMD="mkdir -p /mnt/t && for i in \$(seq 1 120); do ssh -o ConnectTimeout=2 10.0.0.3 true 2>/dev/null && break; sleep 1; done && ${NFSTEST_CMD}"
+# KVM_DIAG_CMD overrides the nfstest invocation with an arbitrary diagnostic
+# command run on guest A after B's sshd is up (manual harness debugging).
+RUN_CMD="${KVM_DIAG_CMD:-${NFSTEST_CMD}}"
+TEST_CMD="${SSHFIX}; mkdir -p /mnt/t && for i in \$(seq 1 120); do ssh -o ConnectTimeout=2 10.0.0.3 true 2>/dev/null && break; sleep 1; done && ${RUN_CMD}"
 
 ip netns exec "${NETNS_NAME}" "$QEMU_BIN" \
     -enable-kvm -smp 4 -m 2G -cpu host \
