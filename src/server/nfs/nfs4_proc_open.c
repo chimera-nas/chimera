@@ -1108,6 +1108,17 @@ chimera_nfs4_open_parent_complete(
             break;
         case CLAIM_PREVIOUS:
         case CLAIM_FH:
+        case CLAIM_DELEG_CUR_FH:
+            /* CLAIM_DELEG_CUR_FH (RFC 8881 §18.16): the client is converting an
+             * open it held under a delegation into concrete open state on the
+             * server, identifying the file by the current filehandle (the
+             * minorversion-1 analogue of CLAIM_DELEGATE_CUR, which carries a
+             * name).  This is exactly an open-by-FH; the delegation-grant gate
+             * already declines to hand out a *new* delegation for this claim, so
+             * the client receives an ordinary open stateid it can then return
+             * the delegation against.  A client issues this in response to a
+             * CB_RECALL, so failing it (NFS4ERR_NOTSUPP) stalls the recall and
+             * prevents a clean DELEGRETURN. */
             chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
                                 req->fh,
                                 req->fhlen,
