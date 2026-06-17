@@ -223,6 +223,15 @@ struct chimera_smb_open_file {
     struct chimera_vfs_lease          share_lease;
     struct chimera_vfs_file_state    *share_file_state;
     bool                              share_lease_inserted;
+    /* For a named-stream open only: a second reservation on the BASE file's
+     * state carrying just the DELETE dimension.  Stream R/W share modes are
+     * per-stream (share_lease, on the stream fh), but DELETE is a file-level
+     * property: a stream opened without FILE_SHARE_DELETE must block the base
+     * file's deletion, and a base delete with a stream open held must defer
+     * (smb2.streams.delete).  Released at close in drain_locks. */
+    struct chimera_vfs_lease          base_share_lease;
+    struct chimera_vfs_file_state    *base_share_file_state;
+    bool                              base_share_lease_inserted;
     /* CACHING lease (SMB2 lease / oplock) held by this open.  The lease is now a
      * VFS-owned, owner-keyed, refcounted grant (chimera_vfs_caching_grant) that
      * may be shared by several opens under one lease key; this open holds one

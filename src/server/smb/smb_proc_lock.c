@@ -141,6 +141,19 @@ chimera_smb_open_file_drain_locks(
         open_file->share_file_state = NULL;
     }
 
+    /* A named stream's file-level DELETE reservation on the base file's state
+     * (smb2.streams.delete). */
+    if (open_file->base_share_lease_inserted) {
+        chimera_vfs_lease_release(vfs_state, open_file->base_share_file_state,
+                                  &open_file->base_share_lease);
+        chimera_vfs_state_stream_holder_dec(open_file->base_share_file_state);
+        open_file->base_share_lease_inserted = false;
+    }
+    if (open_file->base_share_file_state) {
+        chimera_vfs_state_put(vfs_state, open_file->base_share_file_state);
+        open_file->base_share_file_state = NULL;
+    }
+
     /* Drop this open's reference on the caching grant (oplock / SMB2 lease).
      * On the grant's last reference the embedded lease is unlinked and the grant
      * freed; the per-file state reference (caching_file_state) is balanced

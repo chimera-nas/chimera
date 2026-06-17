@@ -85,10 +85,15 @@ struct chimera_vfs_file_state {
      * pending queue without changing public-API signatures. */
     struct chimera_vfs_state           *state;
 
-    /* Phase-3 (SMB delete-pending): set while an open holds delete-on-close on
-     * this file so a subsequent open can be answered with STATUS_DELETE_PENDING
-     * without a break.  Tracked here (additive; no consumer enforces it yet). */
+    /* SMB delete-pending: set when this file's deletion was deferred because a
+     * named stream still holds it open; a subsequent name open of the base or a
+     * stream is answered STATUS_DELETE_PENDING (smb2.streams.delete). */
     uint8_t                             delete_pending;
+    /* Count of named-stream opens holding a file-level DELETE reservation on
+     * this (base) file.  A base delete-on-close defers only while > 0; the last
+     * stream close performs the deferred removal.  Distinguishes a cross-fh
+     * stream holder from an ordinary same-file open in the deferral decision. */
+    uint32_t                            stream_holders;
 
     uint32_t                            refcount;
     struct chimera_vfs_file_state      *bucket_next;
@@ -138,6 +143,34 @@ chimera_vfs_state_get(
 void
 chimera_vfs_state_put(
     struct chimera_vfs_state      *state,
+    struct chimera_vfs_file_state *file);
+
+/* SMB delete-on-close deferral helpers (smb2.streams.delete): a base file
+ * deletion must defer while a named stream still holds the file, and a name
+ * open of a delete-pending file is answered STATUS_DELETE_PENDING. */
+bool
+chimera_vfs_state_has_other_share_holder(
+    struct chimera_vfs_file_state  *file,
+    const struct chimera_vfs_lease *exclude);
+
+void
+chimera_vfs_state_set_delete_pending(
+    struct chimera_vfs_file_state *file);
+
+bool
+chimera_vfs_state_is_delete_pending(
+    struct chimera_vfs_file_state *file);
+
+void
+chimera_vfs_state_stream_holder_inc(
+    struct chimera_vfs_file_state *file);
+
+void
+chimera_vfs_state_stream_holder_dec(
+    struct chimera_vfs_file_state *file);
+
+uint32_t
+chimera_vfs_state_stream_holders(
     struct chimera_vfs_file_state *file);
 
 /* -------------------------------------------------------------------- */
