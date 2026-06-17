@@ -378,6 +378,22 @@ struct chimera_client_request {
             chimera_clone_range_callback_t  callback;
             void                           *private_data;
         } clone_range;
+
+        /* GETACL: resolve `path`, open an O_PATH handle, getattr CHIMERA_VFS_
+         * ATTR_ACL, and copy the returned ACL into the caller-owned `acl_buf`
+         * (capacity `acl_bufsize` bytes).  r_acl_aces is set to the object's ACE
+         * count even when the buffer is too small (so the caller can size a
+         * retry); CHIMERA_VFS_ERANGE is returned in that case. */
+        struct {
+            struct chimera_vfs_open_handle *handle;
+            chimera_setattr_callback_t      callback;
+            void                           *private_data;
+            int                             path_len;
+            struct chimera_acl             *acl_buf;
+            size_t                          acl_bufsize;
+            uint16_t                        r_acl_aces;
+            char                            path[CHIMERA_VFS_PATH_MAX];
+        } getacl;
     };
 } __attribute__((aligned(64)));
 

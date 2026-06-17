@@ -2840,13 +2840,17 @@ cairn_open_at(
             return;
         }
 
-        /* Creating a new name requires write+search permission on the parent
-         * directory.  Enforce POSIX semantics for AUTH_UNIX callers (root is
-         * exempt); SMB/ACL (AUTH_ATTR) callers are authorized by the engine. */
+        /* Creating a new file requires add-file (WRITE_DATA) + search (EXECUTE)
+         * permission on the parent directory.  On the NFSv4/Windows ACL model
+         * WRITE_DATA == ADD_FILE and APPEND_DATA == ADD_SUBDIRECTORY, so a plain
+         * file create is gated by WRITE_DATA (mkdir is gated by APPEND_DATA in
+         * the VFS-core mkdir_at path).  Enforce POSIX semantics for AUTH_UNIX
+         * callers (root is exempt); SMB/ACL (AUTH_ATTR) callers are authorized
+         * by the engine. */
         if (request->cred->flavor == CHIMERA_VFS_AUTH_UNIX &&
             request->cred->uid != 0 &&
             !cairn_inode_access(thread, parent_inode, request->cred,
-                                CHIMERA_ACE_APPEND_DATA | CHIMERA_ACE_EXECUTE)) {
+                                CHIMERA_ACE_WRITE_DATA | CHIMERA_ACE_EXECUTE)) {
             cairn_inode_handle_release(&parent_ih);
             request->status = CHIMERA_VFS_EACCES;
             request->complete(request);

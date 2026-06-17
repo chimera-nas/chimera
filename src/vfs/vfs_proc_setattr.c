@@ -147,6 +147,40 @@ chimera_vfs_setattr_chown_check(
     return CHIMERA_VFS_OK;
 } /* chimera_vfs_setattr_chown_check */
 
+/*
+ * NFSv4 ACL_WRITE_OWNER eligibility for a non-owner who has been granted the
+ * WRITE_OWNER right by an explicit ACE.  Unlike POSIX chown(2) (which lets only
+ * the super-user change the uid), WRITE_OWNER lets the holder "take" the object:
+ * but, following the BSD/Solaris NFSv4 implementations, only to its own identity
+ * -- the new uid must equal the caller's uid, and the new gid must be a group
+ * the caller is a member of.  A field left unset, or restated to its current
+ * value, is not a change.  Returns CHIMERA_VFS_OK when permitted, else EPERM.
+ */
+static enum chimera_vfs_error
+chimera_vfs_setattr_write_owner_check(
+    const struct chimera_vfs_cred  *cred,
+    const struct chimera_vfs_attrs *set_attr,
+    const struct chimera_vfs_attrs *cur)
+{
+    uint64_t m = set_attr->va_set_mask;
+
+    if ((m & CHIMERA_VFS_ATTR_UID) &&
+        !(cur && (cur->va_set_mask & CHIMERA_VFS_ATTR_UID) &&
+          cur->va_uid == set_attr->va_uid) &&
+        set_attr->va_uid != (uint64_t) cred->uid) {
+        return CHIMERA_VFS_EPERM;
+    }
+
+    if ((m & CHIMERA_VFS_ATTR_GID) &&
+        !(cur && (cur->va_set_mask & CHIMERA_VFS_ATTR_GID) &&
+          cur->va_gid == set_attr->va_gid) &&
+        !chimera_vfs_setattr_cred_in_group(cred, set_attr->va_gid)) {
+        return CHIMERA_VFS_EPERM;
+    }
+
+    return CHIMERA_VFS_OK;
+} /* chimera_vfs_setattr_write_owner_check */
+
 static enum chimera_vfs_error
 chimera_vfs_setattr_denied_error(const struct chimera_vfs_attrs *set_attr)
 {
@@ -325,17 +359,37 @@ chimera_vfs_setattr_gate_complete(
         int is_owner = (attr->va_set_mask & CHIMERA_VFS_ATTR_UID) &&
             (uint64_t) gate->cred->uid == attr->va_uid;
 
-        /* POSIX chown(2) rules are always required when a uid/gid is named
-         * (even a no-op restate by a non-owner is EPERM).  An actual change
-         * (required & WRITE_OWNER) additionally needs the chown right: the
-         * caller is the owner, is root, or an explicit WRITE_OWNER ACE grants
-         * it.  A no-op restate carries no WRITE_OWNER requirement. */
-        if (chimera_vfs_setattr_chown_check(gate->cred, gate->set_attr, attr) != CHIMERA_VFS_OK ||
-            ((required & CHIMERA_ACE_WRITE_OWNER) && !is_owner && gate->cred->uid != 0 &&
-             chimera_vfs_gate(attr, gate->cred, CHIMERA_ACE_WRITE_OWNER) != CHIMERA_VFS_OK)) {
-            gate->callback(CHIMERA_VFS_EPERM, NULL, NULL, NULL, gate->private_data);
-            free(gate);
-            return;
+        /* A non-owner who is not root, but who holds the NFSv4 WRITE_OWNER right
+         * via an explicit ACE, is authorized under WRITE_OWNER semantics
+         * (chimera_vfs_setattr_write_owner_check: take ownership to one's own
+         * uid / a group one belongs to) rather than the POSIX chown(2) rules
+         * (which would reject any non-owner change).  This is what lets a
+         * WRITE_OWNER-granted user chgrp a file they do not own.  The owner and
+         * root keep the POSIX rules (the owner may chgrp to a group it belongs
+         * to; only root may change uid). */
+        int has_write_owner = !is_owner && gate->cred->uid != 0 &&
+            (required & CHIMERA_ACE_WRITE_OWNER) &&
+            chimera_vfs_gate(attr, gate->cred, CHIMERA_ACE_WRITE_OWNER) == CHIMERA_VFS_OK;
+
+        if (has_write_owner) {
+            if (chimera_vfs_setattr_write_owner_check(gate->cred, gate->set_attr, attr) != CHIMERA_VFS_OK) {
+                gate->callback(CHIMERA_VFS_EPERM, NULL, NULL, NULL, gate->private_data);
+                free(gate);
+                return;
+            }
+        } else {
+            /* POSIX chown(2) rules are always required when a uid/gid is named
+             * (even a no-op restate by a non-owner is EPERM).  An actual change
+             * (required & WRITE_OWNER) additionally needs the chown right: the
+             * caller is the owner, is root, or an explicit WRITE_OWNER ACE
+             * grants it.  A no-op restate carries no WRITE_OWNER requirement. */
+            if (chimera_vfs_setattr_chown_check(gate->cred, gate->set_attr, attr) != CHIMERA_VFS_OK ||
+                ((required & CHIMERA_ACE_WRITE_OWNER) && !is_owner && gate->cred->uid != 0 &&
+                 chimera_vfs_gate(attr, gate->cred, CHIMERA_ACE_WRITE_OWNER) != CHIMERA_VFS_OK)) {
+                gate->callback(CHIMERA_VFS_EPERM, NULL, NULL, NULL, gate->private_data);
+                free(gate);
+                return;
+            }
         }
     }
 

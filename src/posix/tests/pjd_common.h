@@ -34,6 +34,7 @@
 #include <limits.h>
 #include <sys/sysmacros.h>
 #include "posix_test_common.h"
+#include "vfs/vfs_acl.h"
 
 /* ---- lifecycle / global state ------------------------------------------- */
 
@@ -946,3 +947,126 @@ pjd_remove_file(
     }
     return pjd_unlink(name);
 } /* pjd_remove_file */
+
+/* ---- NFSv4 ACL helpers (granular/ ports) -------------------------------- */
+/*
+ * These wrap the Chimera-specific chimera_posix_{get,set}acl client API to give
+ * the granular/ ports the same ergonomics pjdfstest's prependacl / readacl /
+ * setacl operations have on FreeBSD:ZFS.  An ACL is built on the harness stack
+ * as a fixed-capacity buffer (PJD_ACL_MAX entries is plenty for these tests).
+ */
+
+#define PJD_ACL_MAX 32
+
+/* A stack-resident ACL of up to PJD_ACL_MAX ACEs.  Use pjd_acl_hdr() to treat
+ * it as a struct chimera_acl. */
+struct pjd_acl_buf {
+    struct chimera_acl acl;
+    struct chimera_ace _aces[PJD_ACL_MAX];
+};
+
+static inline struct chimera_acl *
+pjd_acl_hdr(struct pjd_acl_buf *b)
+{
+    return &b->acl;
+} /* pjd_acl_hdr */
+
+/* Build a single ACE.  `type` is CHIMERA_ACE_ALLOWED / CHIMERA_ACE_DENIED;
+ * `who_type` is a chimera_principal_type; `id` is the uid/gid when who_type is
+ * USER/GROUP; `special` is a chimera_special_who when who_type is SPECIAL. */
+static inline struct chimera_ace
+pjd_ace(
+    uint16_t type,
+    uint8_t  who_type,
+    uint32_t id,
+    uint8_t  special,
+    uint32_t mask)
+{
+    struct chimera_ace ace;
+
+    memset(&ace, 0, sizeof(ace));
+    ace.type        = type;
+    ace.flags       = 0;
+    ace.access_mask = mask;
+    ace.who.type    = who_type;
+    ace.who.special = special;
+    ace.who.id      = id;
+    return ace;
+} /* pjd_ace */
+
+/* Convenience: a named-user ACE (the most common case in the granular tests). */
+static inline struct chimera_ace
+pjd_ace_user(
+    uint16_t type,
+    uint32_t uid,
+    uint32_t mask)
+{
+    return pjd_ace(type, CHIMERA_PRINCIPAL_USER, uid, 0, mask);
+} /* pjd_ace_user */
+
+/* Convenience: an EVERYONE@ special-who ACE. */
+static inline struct chimera_ace
+pjd_ace_everyone(
+    uint16_t type,
+    uint32_t mask)
+{
+    return pjd_ace(type, CHIMERA_PRINCIPAL_SPECIAL, 0, CHIMERA_WHO_EVERYONE, mask);
+} /* pjd_ace_everyone */
+
+static inline int
+pjd_setacl(
+    const char               *name,
+    const struct chimera_acl *acl)
+{
+    char p[PJD_PATHBUF];
+
+    return chimera_posix_setacl(pjd_resolve(name, p, sizeof(p)), acl);
+} /* pjd_setacl */
+
+/* Read the ACL of `name` into `out`.  Returns the ACE count, or -1 on error. */
+static inline int
+pjd_getacl(
+    const char         *name,
+    struct pjd_acl_buf *out)
+{
+    char p[PJD_PATHBUF];
+
+    return chimera_posix_getacl(pjd_resolve(name, p, sizeof(p)),
+                                pjd_acl_hdr(out), sizeof(*out));
+} /* pjd_getacl */
+
+/*
+ * Prepend `ace` at index 0 of `name`'s current ACL and write it back -- exactly
+ * what pjdfstest's prependacl does.  Returns 0 on success, -1 on error (errno
+ * set by the failing get/set).  The new ACE precedes all existing ACEs, so a
+ * DENY prepended ahead of an inherited/implicit ALLOW takes effect first (RFC
+ * 7530 ordered evaluation).
+ */
+static inline int
+pjd_prependacl(
+    const char               *name,
+    const struct chimera_ace *ace)
+{
+    struct pjd_acl_buf cur;
+    struct pjd_acl_buf nw;
+    int                n, i;
+
+    n = pjd_getacl(name, &cur);
+    if (n < 0) {
+        return -1;
+    }
+
+    if (n + 1 > PJD_ACL_MAX) {
+        errno = E2BIG;
+        return -1;
+    }
+
+    nw.acl.num_aces   = (uint16_t) (n + 1);
+    nw.acl.ctrl_flags = cur.acl.ctrl_flags;
+    nw._aces[0]       = *ace;
+    for (i = 0; i < n; i++) {
+        nw._aces[i + 1] = cur.acl.aces[i];
+    }
+
+    return pjd_setacl(name, pjd_acl_hdr(&nw));
+} /* pjd_prependacl */
