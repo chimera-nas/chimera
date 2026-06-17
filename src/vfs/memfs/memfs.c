@@ -337,6 +337,34 @@ memfs_stream_find_by_name(
     return NULL;
 } /* memfs_stream_find_by_name */
 
+/* Case-insensitive directory scan, used as a fallback when an exact (case-
+ * sensitive hash) lookup misses for an SMB/Windows (AUTH_ATTR) caller.  Windows
+ * opens are case-insensitive even on a volume that reports
+ * FILE_CASE_SENSITIVE_SEARCH (smb2.streams.names3 opens the file via its
+ * upper/lower-cased path).  O(n) in the directory size, so it is reached only
+ * on a miss; NFS/POSIX (AUTH_UNIX) callers keep strict case-sensitive semantics
+ * and never run it.  Caller holds the directory inode lock. */
+static inline struct memfs_dirent *
+memfs_dirent_find_ci(
+    struct memfs_inode *dir,
+    const char         *name,
+    uint32_t            name_len)
+{
+    struct memfs_dirent *dirent;
+
+    rb_tree_first(&dir->dir.dirents, dirent);
+
+    while (dirent) {
+        if (dirent->name_len == name_len &&
+            strncasecmp(dirent->name, name, name_len) == 0) {
+            return dirent;
+        }
+        dirent = rb_tree_next(&dir->dir.dirents, dirent);
+    }
+
+    return NULL;
+} /* memfs_dirent_find_ci */
+
 static inline struct memfs_named_stream *
 memfs_stream_find_by_id(
     struct memfs_inode *inode,
@@ -2109,6 +2137,12 @@ memfs_lookup_at(
 
     rb_tree_query_exact(&inode->dir.dirents, hash, hash, dirent);
 
+    /* Windows opens are case-insensitive: fall back to a case-insensitive scan
+     * for an SMB (AUTH_ATTR) caller when the exact match misses (names3). */
+    if (!dirent && request->cred->flavor == CHIMERA_VFS_AUTH_ATTR) {
+        dirent = memfs_dirent_find_ci(inode, name, namelen);
+    }
+
     if (!dirent) {
         pthread_mutex_unlock(&inode->lock);
         request->status = CHIMERA_VFS_ENOENT;
@@ -2696,6 +2730,15 @@ memfs_open_at(
     memfs_map_attrs(shared, &request->open_at.r_dir_pre_attr, parent_inode, request->fh);
 
     rb_tree_query_exact(&parent_inode->dir.dirents, hash, hash, dirent);
+
+    /* Windows opens are case-insensitive: an SMB (AUTH_ATTR) caller that misses
+     * the exact match falls back to a case-insensitive scan, so an existing
+     * file is opened (or collides on FILE_CREATE) regardless of the requested
+     * case (names3).  A genuine miss still creates the requested-case name. */
+    if (!dirent && request->cred->flavor == CHIMERA_VFS_AUTH_ATTR) {
+        dirent = memfs_dirent_find_ci(parent_inode, request->open_at.name,
+                                      request->open_at.namelen);
+    }
 
     if (!dirent) {
         if (!(flags & CHIMERA_VFS_OPEN_CREATE)) {
