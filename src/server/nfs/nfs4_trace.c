@@ -127,6 +127,43 @@ _nfs4_trace_op_begin(
             otel_span_attr_u64(s, "nfs.offset", argop->opwrite.offset);
             otel_span_attr_u64(s, "nfs.count", argop->opwrite.data.length);
             break;
+        case OP_COMMIT:
+            otel_span_attr_u64(s, "nfs.offset", argop->opcommit.offset);
+            otel_span_attr_u64(s, "nfs.count", argop->opcommit.count);
+            break;
+        case OP_LOOKUP:
+            otel_span_attr_strn(s, "nfs.name", argop->oplookup.objname.data,
+                                argop->oplookup.objname.len);
+            break;
+        case OP_CREATE:
+            otel_span_attr_strn(s, "nfs.name", argop->opcreate.objname.data,
+                                argop->opcreate.objname.len);
+            break;
+        case OP_REMOVE:
+            otel_span_attr_strn(s, "nfs.name", argop->opremove.target.data,
+                                argop->opremove.target.len);
+            break;
+        case OP_LINK:
+            otel_span_attr_strn(s, "nfs.name", argop->oplink.newname.data,
+                                argop->oplink.newname.len);
+            break;
+        case OP_RENAME:
+            otel_span_attr_strn(s, "nfs.name", argop->oprename.oldname.data,
+                                argop->oprename.oldname.len);
+            otel_span_attr_strn(s, "nfs.new_name", argop->oprename.newname.data,
+                                argop->oprename.newname.len);
+            break;
+        case OP_SECINFO:
+            otel_span_attr_strn(s, "nfs.name", argop->opsecinfo.name.data,
+                                argop->opsecinfo.name.len);
+            break;
+        case OP_OPEN:
+            /* The filename is only carried for CLAIM_NULL / CLAIM_FH opens. */
+            if (argop->opopen.claim.file.len > 0) {
+                otel_span_attr_strn(s, "nfs.name", argop->opopen.claim.file.data,
+                                    argop->opopen.claim.file.len);
+            }
+            break;
         default:
             break;
     } /* switch */
