@@ -1597,6 +1597,7 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.streams.io
     smb2.streams.names
     smb2.streams.names2
+    smb2.streams.names3
     smb2.streams.rename
     smb2.streams.rename2
     smb2.streams.sharemodes
