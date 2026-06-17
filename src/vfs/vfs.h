@@ -128,6 +128,14 @@ struct chimera_vfs_mount_options {
  * O_RDWR.  Read access is required unless WRITE_ONLY; write access is required
  * unless READ_ONLY.  Used by the open path to authorize the requested access. */
 #define CHIMERA_VFS_OPEN_WRITE_ONLY     (1U << 8)
+/* Stop if the final path component is an existing symbolic link: the backend
+ * returns CHIMERA_VFS_ELOOP instead of opening, colliding with (O_EXCL), or
+ * truncating it -- the check precedes the existence/EXCLUSIVE test.  Set by the
+ * SMB create path so a non-FILE_OPEN_REPARSE_POINT open of a symlink leaf yields
+ * STATUS_STOPPED_ON_SYMLINK regardless of the create disposition (MS-SMB2
+ * 3.3.5.9).  POSIX/NFS callers leave it clear and keep their existing
+ * symlink-leaf semantics. */
+#define CHIMERA_VFS_OPEN_STOP_SYMLINK   (1U << 9)
 
 /* Allocate flags */
 #define CHIMERA_VFS_ALLOCATE_DEALLOCATE 0x01

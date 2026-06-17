@@ -128,9 +128,9 @@ CreateClose_CreateAndCloseDirWithDoubleDotDir,base,green,0,
 CreateClose_CreateAndCloseFileWithDotDir,base,green,0,
 CreateClose_CreateAndCloseFileWithDoubleDotDir,base,green,0,
 CreateClose_DeleteFile_DesiredAccessNotIncludeDeleteOrGenericAll,base,green,0,
-CreateClose_InvalidSymbolicLink,base,skip,0,env-symlink
-CreateClose_SymbolicLinkAtLast,base,skip,0,env-symlink
-CreateClose_SymbolicLinkInMiddle,base,skip,0,env-symlink
+CreateClose_InvalidSymbolicLink,symlink,green,0,
+CreateClose_SymbolicLinkAtLast,symlink,green,0,
+CreateClose_SymbolicLinkInMiddle,symlink,green,0,
 DirectoryLeasing_BreakHandleCachingByConflictOpen,dirlease,green,0,
 DirectoryLeasing_BreakHandleCachingByParentRenamed,dirlease,xfail,0,
 DirectoryLeasing_BreakReadCachingByChildAdded,dirlease,green,0,

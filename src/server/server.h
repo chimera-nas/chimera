@@ -564,6 +564,16 @@ chimera_server_mkpath(
     const char            *module_path,
     uint32_t               mode);
 
+/* Seed the symbolic-link fixtures the WPTS MS-SMB2 CreateClose symlink cases
+ * expect to pre-exist on a memfs-backed share (a directory holding an in-path
+ * link, plus a dangling root-level link).  A test-harness aid -- the server
+ * never resolves these links (it returns STATUS_STOPPED_ON_SYMLINK).  Returns
+ * 0 on success, -1 otherwise. */
+int
+chimera_server_seed_symlinks(
+    struct chimera_server *server,
+    const char            *module_name);
+
 int
 chimera_server_unmount(
     struct chimera_server *server,
