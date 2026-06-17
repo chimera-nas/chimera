@@ -83,7 +83,7 @@
       <Property name="SutSupportedEncryptionAlgorithms" value="ENCRYPTION_AES128_CCM;ENCRYPTION_AES128_GCM;ENCRYPTION_AES256_CCM;ENCRYPTION_AES256_GCM"/>
       <Property name="SupportedCompressionAlgorithms" value=""/>
 
-      <Property name="UnsupportedIoCtlCodes" value="FSCTL_FILE_LEVEL_TRIM"/>
+      <Property name="UnsupportedIoCtlCodes" value=""/>
       <Property name="UnsupportedCreateContexts" value=""/>
       <Property name="MaxResiliencyTimeout" value="300000"/>
     </Group>

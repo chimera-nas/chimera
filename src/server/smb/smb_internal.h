@@ -837,6 +837,14 @@ struct chimera_smb_request {
             struct chimera_smb_open_file   *od_dst_open_file;
             uint8_t                         od_copy_fallback;
             uint8_t                         od_token[512];
+            /* FSCTL_FILE_LEVEL_TRIM (MS-FSCC 2.3.75): Key must be 0; we
+             * acknowledge the (advisory) trim of NumRanges ranges. */
+            uint32_t                        tr_key;
+            uint32_t                        tr_num_ranges;
+            /* FSCTL_GET/SET_INTEGRITY_INFORMATION (MS-FSCC 2.3.54/2.3.55): the
+             * checksum algorithm + flags carried in/out of the request. */
+            uint16_t                        ii_algo;
+            uint32_t                        ii_flags;
         } ioctl;
         struct {
             uint8_t                         info_type;

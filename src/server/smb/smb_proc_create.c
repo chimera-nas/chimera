@@ -558,6 +558,8 @@ chimera_smb_create_gen_open_file(
     memset(open_file->lease_key,        0, sizeof(open_file->lease_key));
     memset(open_file->parent_lease_key, 0, sizeof(open_file->parent_lease_key));
     memset(open_file->create_guid,      0, sizeof(open_file->create_guid));
+    open_file->integrity_algo  = 0;
+    open_file->integrity_flags = 0;
 
     /* Record the AppInstanceId/AppInstanceVersion this open carried so a later
      * CREATE on a different connection can match it and apply the version-gated
