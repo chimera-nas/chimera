@@ -2397,6 +2397,42 @@ chimera_vfs_lease_revoke(struct chimera_vfs_lease *lease)
     }
 } /* chimera_vfs_lease_revoke */
 
+/* ------------------------------------------------------------------------- *
+ * Pin a CACHING lease's grant across an unlocked begin_break.
+ *
+ * A CACHING lease is embedded in its refcounted chimera_vfs_caching_grant
+ * (grant->lease).  The break paths select breakable leases into a `to_break`
+ * set under file->lock, drop the lock, then call begin_break[_ex] on each --
+ * whose break callback dereferences grant fields (break_ack_required, epoch).
+ * A concurrent connection teardown can drop the grant's last open reference and
+ * free() it -- lease included -- in that unlocked window, a cross-thread UAF
+ * (same class as #859/#880).
+ *
+ * The fix: while still holding file->lock at collection time, take an extra
+ * reference on the grant so it cannot be freed under us; release it (with a
+ * pump) once begin_break has returned.  The pin MUST be taken under the lock at
+ * selection -- once the lock is dropped the grant may already be gone, so we
+ * cannot re-find and pin it afterward (that races the free and risks ABA).
+ *
+ * chimera_vfs_lease_pin_grant() is called with file->lock HELD and returns the
+ * pinned grant (refcount bumped) or NULL for a non-CACHING / grant-less lease
+ * (RANGE/SHARE/implicit -- nothing to pin, those leases are not freed in this
+ * window).  Release the returned grant after begin_break via
+ * chimera_vfs_caching_grant_release(state, grant, true).
+ */
+static inline struct chimera_vfs_caching_grant *
+chimera_vfs_lease_pin_grant(struct chimera_vfs_lease *lease)
+{
+    struct chimera_vfs_caching_grant *grant = NULL;
+
+    if (lease->kind == CHIMERA_VFS_LEASE_CACHING && lease->grant) {
+        grant = lease->grant;
+        grant->refcount++;
+    }
+
+    return grant;
+} /* chimera_vfs_lease_pin_grant */
+
 /* Recall every caching lease on `file`, regardless of owner.  Caller holds a
  * reference on `file`.  Returns true if any caching holder still retains a
  * granted mode (the recall is in flight; caller should wait/retry). */
@@ -2415,9 +2451,10 @@ chimera_vfs_break_caching_file(
      * neither is re-selected; the loop terminates once only not-yet-expired
      * BREAKING holders remain. */
     for ( ; ; ) {
-        struct chimera_vfs_lease *cur;
-        struct chimera_vfs_lease *to_break  = NULL;
-        struct chimera_vfs_lease *to_revoke = NULL;
+        struct chimera_vfs_lease         *cur;
+        struct chimera_vfs_lease         *to_break  = NULL;
+        struct chimera_vfs_lease         *to_revoke = NULL;
+        struct chimera_vfs_caching_grant *break_pin = NULL;
 
         pthread_mutex_lock(&file->lock);
         for (cur = file->caching_leases; cur; cur = cur->next) {
@@ -2469,6 +2506,11 @@ chimera_vfs_break_caching_file(
                 break;
             }
         }
+        /* Pin the selected lease's grant under the lock so a concurrent teardown
+         * cannot free it across the unlocked begin_break below. */
+        if (to_break) {
+            break_pin = chimera_vfs_lease_pin_grant(to_break);
+        }
         pthread_mutex_unlock(&file->lock);
 
         if (to_break) {
@@ -2500,6 +2542,9 @@ chimera_vfs_break_caching_file(
              * and regress rename_last.) */
             chimera_vfs_lease_begin_break(state, to_break, 0,
                                           CHIMERA_VFS_NFS_DELEG_METAOP_MS);
+            if (break_pin) {
+                chimera_vfs_caching_grant_release(state, break_pin, true);
+            }
         } else if (to_revoke) {
             chimera_vfs_lease_revoke(to_revoke);
         } else {
@@ -2574,9 +2619,10 @@ chimera_vfs_break_caching_single(
     bool had = false;
 
     for ( ; ; ) {
-        struct chimera_vfs_lease *cur;
-        struct chimera_vfs_lease *to_break  = NULL;
-        struct chimera_vfs_lease *to_revoke = NULL;
+        struct chimera_vfs_lease         *cur;
+        struct chimera_vfs_lease         *to_break  = NULL;
+        struct chimera_vfs_lease         *to_revoke = NULL;
+        struct chimera_vfs_caching_grant *break_pin = NULL;
 
         pthread_mutex_lock(&file->lock);
         for (cur = file->caching_leases; cur; cur = cur->next) {
@@ -2600,11 +2646,19 @@ chimera_vfs_break_caching_single(
                 break;
             }
         }
+        /* Pin the selected lease's grant under the lock so a concurrent teardown
+         * cannot free it across the unlocked begin_break below. */
+        if (to_break) {
+            break_pin = chimera_vfs_lease_pin_grant(to_break);
+        }
         pthread_mutex_unlock(&file->lock);
 
         if (to_break) {
             chimera_vfs_lease_begin_break(state, to_break, retain,
                                           CHIMERA_VFS_NFS_DELEG_METAOP_MS);
+            if (break_pin) {
+                chimera_vfs_caching_grant_release(state, break_pin, true);
+            }
         } else if (to_revoke) {
             chimera_vfs_lease_revoke(to_revoke);
         } else {
@@ -2687,7 +2741,7 @@ chimera_vfs_break_reads_for_write(
 {
     struct chimera_vfs_lease         *cur;
     struct chimera_vfs_lease         *to_break[CHIMERA_VFS_STATE_MAX_BREAK_BATCH];
-    struct chimera_vfs_caching_grant *pin[CHIMERA_VFS_STATE_MAX_BREAK_BATCH];
+    struct chimera_vfs_caching_grant *break_pin[CHIMERA_VFS_STATE_MAX_BREAK_BATCH];
     int                               n = 0;
     int                               i;
 
@@ -2720,25 +2774,14 @@ chimera_vfs_break_reads_for_write(
             continue;
         }
         if (n < CHIMERA_VFS_STATE_MAX_BREAK_BATCH) {
-            /* Pin the grant of every lease we are about to break, under the same
-             * file->lock that chimera_vfs_caching_grant_release() takes before it
-             * frees the grant.  For a CACHING lease the lease is embedded in its
-             * grant (grant->lease), so a close of the holder racing on another
-             * thread (drain_locks -> caching_grant_release) would otherwise drop
-             * the grant's last reference and free it -- and the lease with it --
-             * between us dropping file->lock and begin_break_ex's break cb
-             * dereferencing it (chimera_smb_lease_break_cb reads
-             * grant->break_ack_required after the lock is dropped).  That is the
-             * load-dependent heap-use-after-free behind the flaky
-             * smb2.oplock.levelii501 (#733).  This is the same embedded-lease
-             * lifetime hazard that chimera_vfs_state_try_insert pins against;
-             * break_reads_for_write needs the identical guard. */
-            pin[n] = NULL;
-            if (cur->kind == CHIMERA_VFS_LEASE_CACHING && cur->grant) {
-                cur->grant->refcount++;
-                pin[n] = cur->grant;
-            }
-            to_break[n++] = cur;
+            /* Pin each selected lease's grant under the lock so a concurrent
+             * teardown cannot free it across the unlocked begin_break below
+             * (the embedded-lease-in-grant UAF -- see chimera_vfs_lease_pin_grant
+             * and chimera_vfs_state_try_insert; this is the flaky
+             * smb2.oplock.levelii501, #733). */
+            break_pin[n] = chimera_vfs_lease_pin_grant(cur);
+            to_break[n]  = cur;
+            n++;
         }
     }
 
@@ -2750,12 +2793,10 @@ chimera_vfs_break_reads_for_write(
          * notification rather than cascading RH->R->NONE (smb2.lease.complex1
          * expects exactly one break; nobreakself). */
         chimera_vfs_lease_begin_break_ex(state, to_break[i], 0, 0, true);
-
         /* Drop the pin once the break cb has run.  pump=true: a final release may
-         * unblock an acquirer/IO parked on this grant (the breaker is no longer
-         * mid-arbitration here, unlike the try_insert re-probe loop). */
-        if (pin[i]) {
-            chimera_vfs_caching_grant_release(state, pin[i], true);
+         * unblock an acquirer/IO parked on this grant. */
+        if (break_pin[i]) {
+            chimera_vfs_caching_grant_release(state, break_pin[i], true);
         }
     }
 } /* chimera_vfs_break_reads_for_write */
@@ -2794,11 +2835,12 @@ chimera_vfs_state_dir_lease_break(
     uint64_t                  skip_hi,
     bool                      has_skip)
 {
-    struct chimera_vfs_file_state *file;
-    struct chimera_vfs_lease      *cur;
-    struct chimera_vfs_lease      *to_break[CHIMERA_VFS_STATE_MAX_BREAK_BATCH];
-    int                            n = 0;
-    int                            i;
+    struct chimera_vfs_file_state    *file;
+    struct chimera_vfs_lease         *cur;
+    struct chimera_vfs_lease         *to_break[CHIMERA_VFS_STATE_MAX_BREAK_BATCH];
+    struct chimera_vfs_caching_grant *break_pin[CHIMERA_VFS_STATE_MAX_BREAK_BATCH];
+    int                               n = 0;
+    int                               i;
 
     /* Fast path: no per-file state means no directory lease to break. */
     file = chimera_vfs_state_get(state, fh, fh_len, fh_hash, false);
@@ -2831,7 +2873,11 @@ chimera_vfs_state_dir_lease_break(
             continue;
         }
         if (n < CHIMERA_VFS_STATE_MAX_BREAK_BATCH) {
-            to_break[n++] = cur;
+            /* Pin each selected lease's grant under the lock so a concurrent
+             * teardown cannot free it across the unlocked begin_break below. */
+            break_pin[n] = chimera_vfs_lease_pin_grant(cur);
+            to_break[n]  = cur;
+            n++;
         }
     }
     pthread_mutex_unlock(&file->lock);
@@ -2843,6 +2889,9 @@ chimera_vfs_state_dir_lease_break(
      * chimera_vfs_lease_ack — the same path a file lease break uses. */
     for (i = 0; i < n; i++) {
         chimera_vfs_lease_begin_break(state, to_break[i], 0, 0);
+        if (break_pin[i]) {
+            chimera_vfs_caching_grant_release(state, break_pin[i], true);
+        }
     }
 
     chimera_vfs_state_put(state, file);
@@ -2865,11 +2914,12 @@ chimera_vfs_state_break_caching_for_open(
     uint8_t                               trigger_bits,
     uint8_t                               retain_mode)
 {
-    struct chimera_vfs_file_state *file;
-    struct chimera_vfs_lease      *cur;
-    struct chimera_vfs_lease      *to_break[CHIMERA_VFS_STATE_MAX_BREAK_BATCH];
-    int                            n = 0;
-    int                            i;
+    struct chimera_vfs_file_state    *file;
+    struct chimera_vfs_lease         *cur;
+    struct chimera_vfs_lease         *to_break[CHIMERA_VFS_STATE_MAX_BREAK_BATCH];
+    struct chimera_vfs_caching_grant *break_pin[CHIMERA_VFS_STATE_MAX_BREAK_BATCH];
+    int                               n = 0;
+    int                               i;
 
     file = chimera_vfs_state_get(state, fh, fh_len, fh_hash, false);
     if (!file) {
@@ -2908,7 +2958,11 @@ chimera_vfs_state_break_caching_for_open(
             continue;
         }
         if (n < CHIMERA_VFS_STATE_MAX_BREAK_BATCH) {
-            to_break[n++] = cur;
+            /* Pin each selected lease's grant under the lock so a concurrent
+             * teardown cannot free it across the unlocked begin_break below. */
+            break_pin[n] = chimera_vfs_lease_pin_grant(cur);
+            to_break[n]  = cur;
+            n++;
         }
     }
 
@@ -2916,6 +2970,9 @@ chimera_vfs_state_break_caching_for_open(
 
     for (i = 0; i < n; i++) {
         chimera_vfs_lease_begin_break(state, to_break[i], retain_mode, 0);
+        if (break_pin[i]) {
+            chimera_vfs_caching_grant_release(state, break_pin[i], true);
+        }
     }
 
     chimera_vfs_state_put(state, file);
@@ -2941,11 +2998,12 @@ chimera_vfs_state_break_caching_for_namespace(
     const struct chimera_vfs_lease_owner *opener,
     uint8_t                               retain_mode)
 {
-    struct chimera_vfs_file_state *file;
-    struct chimera_vfs_lease      *cur;
-    struct chimera_vfs_lease      *to_break[CHIMERA_VFS_STATE_MAX_BREAK_BATCH];
-    int                            n = 0;
-    int                            i;
+    struct chimera_vfs_file_state    *file;
+    struct chimera_vfs_lease         *cur;
+    struct chimera_vfs_lease         *to_break[CHIMERA_VFS_STATE_MAX_BREAK_BATCH];
+    struct chimera_vfs_caching_grant *break_pin[CHIMERA_VFS_STATE_MAX_BREAK_BATCH];
+    int                               n = 0;
+    int                               i;
 
     file = chimera_vfs_state_get(state, fh, fh_len, fh_hash, false);
     if (!file) {
@@ -2967,7 +3025,11 @@ chimera_vfs_state_break_caching_for_namespace(
             continue;
         }
         if (n < CHIMERA_VFS_STATE_MAX_BREAK_BATCH) {
-            to_break[n++] = cur;
+            /* Pin each selected lease's grant under the lock so a concurrent
+             * teardown cannot free it across the unlocked begin_break below. */
+            break_pin[n] = chimera_vfs_lease_pin_grant(cur);
+            to_break[n]  = cur;
+            n++;
         }
     }
 
@@ -2975,6 +3037,9 @@ chimera_vfs_state_break_caching_for_namespace(
 
     for (i = 0; i < n; i++) {
         chimera_vfs_lease_begin_break(state, to_break[i], retain_mode, 0);
+        if (break_pin[i]) {
+            chimera_vfs_caching_grant_release(state, break_pin[i], true);
+        }
     }
 
     chimera_vfs_state_put(state, file);
