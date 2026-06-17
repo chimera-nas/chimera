@@ -20,8 +20,12 @@
       <Property name="WaitTimeoutInMilliseconds" value="8000"/>
       <Property name="SutAlternativeIPAddress" value=""/>
 
-      <!-- Optional features chimera does not implement: leave blank to skip -->
-      <Property name="FileShareSupportingIntegrityInfo" value=""/>
+      <!-- Optional features chimera does not implement: leave blank to skip.
+           NumberOfPreviousVersions stays blank: BVT_EnumerateSnapShots requires
+           the server to expose real VSS snapshots (its SnapShots split asserts
+           NumberOfSnapShotsReturned+2 parts, unsatisfiable with an empty list). -->
+      <!-- Integrity (ReFS checksum) FSCTLs round-trip per open. -->
+      <Property name="FileShareSupportingIntegrityInfo" value="SMBBasic"/>
       <Property name="Symboliclink" value=""/>
       <Property name="SymboliclinkInSubFolder" value=""/>
       <Property name="NumberOfPreviousVersions" value=""/>

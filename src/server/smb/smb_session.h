@@ -263,6 +263,11 @@ struct chimera_smb_open_file {
     char                              stream_name[SMB_FILENAME_MAX];
     uint16_t                          base_fh_len;
     uint8_t                           base_fh[CHIMERA_VFS_FH_SIZE];
+    /* FSCTL_GET/SET_INTEGRITY_INFORMATION (MS-FSCC 2.3.54/2.3.55): the data
+     * integrity (ReFS checksum) attributes round-trip per open.  memfs has no
+     * real integrity streams, so we just remember what was set. */
+    uint16_t                          integrity_algo;
+    uint32_t                          integrity_flags;
 };
 
 #define CHIMERA_SMB_OPEN_FILE_BUCKETS     256

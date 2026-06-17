@@ -1044,6 +1044,9 @@ typedef uint8_t smb2_guid[SMB2_GUID_SIZE];
 #define SMB2_FSCTL_DUPLICATE_EXTENTS_TO_FILE        0x00098344
 #define SMB2_FSCTL_OFFLOAD_READ                     0x00094264
 #define SMB2_FSCTL_OFFLOAD_WRITE                    0x00098268
+#define SMB2_FSCTL_FILE_LEVEL_TRIM                  0x00098208
+#define SMB2_FSCTL_GET_INTEGRITY_INFORMATION        0x0009027C
+#define SMB2_FSCTL_SET_INTEGRITY_INFORMATION        0x0009C280
 
 /* ODX offload-token sizing (MS-FSCC 2.3.79.1 STORAGE_OFFLOAD_TOKEN):
  * TokenType(4) + Reserved(2) + TokenIdLength(2) + TokenId(504) = 512 bytes.
