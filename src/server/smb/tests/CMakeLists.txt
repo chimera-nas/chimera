@@ -1595,8 +1595,10 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.sharemode.bug14375
     smb2.sharemode.sharemode-access
     # smb2.streams
+    smb2.streams.attributes1
     smb2.streams.basefile-rename-with-open-stream
     smb2.streams.create-disposition
+    smb2.streams.dir
     smb2.streams.io
     smb2.streams.names
     smb2.streams.names2

@@ -1957,6 +1957,22 @@ chimera_smb_create_open_at_callback(
         return;
     }
 
+    /* "DNAME::$DATA" explicitly names the default data fork of the target.  A
+     * directory has no data fork, so reject it now that the open has revealed
+     * the target is a directory: NOT_A_DIRECTORY when the caller also requested
+     * FILE_DIRECTORY_FILE, FILE_IS_A_DIRECTORY otherwise (smb2.streams.dir).
+     * This fires only for the explicit "::$DATA" form on a directory, a path
+     * that otherwise opens the directory as a plain file. */
+    if (request->create.explicit_data_fork && S_ISDIR(attr->va_mode)) {
+        chimera_smb_create_release_handle(vfs_thread, oh);
+        chimera_smb_create_release_parent(request);
+        chimera_smb_complete_request(request,
+                                     (request->create.create_options & SMB2_FILE_DIRECTORY_FILE)
+                                     ? SMB2_STATUS_NOT_A_DIRECTORY
+                                     : SMB2_STATUS_FILE_IS_A_DIRECTORY);
+        return;
+    }
+
     /* Named-stream open: the base file is now open; open the stream on it and
      * build the SMB open_file around the stream handle. */
     if (request->create.has_stream) {
@@ -3586,13 +3602,15 @@ chimera_smb_parse_stream_name(
     uint16_t    *r_base_len,
     const char **r_stream,
     uint16_t    *r_stream_len,
-    uint8_t     *r_has_stream)
+    uint8_t     *r_has_stream,
+    uint8_t     *r_explicit_data_fork)
 {
     const char *colon = memchr(name, ':', name_len);
     const char *rest, *type, *colon2;
     uint16_t    base_len, rest_len, stream_len;
 
-    *r_has_stream = 0;
+    *r_has_stream         = 0;
+    *r_explicit_data_fork = 0;
 
     if (!colon) {
         *r_base_len = name_len;
@@ -3625,11 +3643,14 @@ chimera_smb_parse_stream_name(
 
     if (stream_len == 0) {
         /* "file::$DATA" is the default data fork (open the base file); a bare
-         * trailing "file:" with neither name nor type is malformed. */
+         * trailing "file:" with neither name nor type is malformed.  Flag the
+         * explicit default-data-fork form so the open path can reject it on a
+         * directory (a directory has no data fork -- smb2.streams.dir). */
         if (!colon2) {
             return SMB2_STATUS_OBJECT_NAME_INVALID;
         }
-        *r_base_len = base_len;
+        *r_base_len           = base_len;
+        *r_explicit_data_fork = 1;
         return SMB2_STATUS_SUCCESS;
     }
 
@@ -3831,8 +3852,9 @@ chimera_smb_create(struct chimera_smb_request *request)
     enum chimera_smb_pipe_magic   pipe_magic;
     chimera_smb_pipe_transceive_t transceive;
 
-    request->create.has_stream = 0;
-    request->create.base_oh    = NULL;
+    request->create.has_stream         = 0;
+    request->create.explicit_data_fork = 0;
+    request->create.base_oh            = NULL;
     /* Only the regular-file open path (open_at_callback) registers a finish
      * callback and may park on a batch-oplock break; clear it so the mkdir /
      * stream / pipe paths never inherit a stale callback and park. */
@@ -3857,18 +3879,23 @@ chimera_smb_create(struct chimera_smb_request *request)
             return;
         }
 
-        const char *sname      = NULL;
-        uint16_t    base_len   = request->create.name_len;
-        uint16_t    sname_len  = 0;
-        uint8_t     has_stream = 0;
-        uint32_t    pstatus    = chimera_smb_parse_stream_name(
+        const char *sname              = NULL;
+        uint16_t    base_len           = request->create.name_len;
+        uint16_t    sname_len          = 0;
+        uint8_t     has_stream         = 0;
+        uint8_t     explicit_data_fork = 0;
+        uint32_t    pstatus            = chimera_smb_parse_stream_name(
             request->create.name, request->create.name_len,
-            &base_len, &sname, &sname_len, &has_stream);
+            &base_len, &sname, &sname_len, &has_stream, &explicit_data_fork);
 
         if (pstatus != SMB2_STATUS_SUCCESS) {
             chimera_smb_complete_request(request, pstatus);
             return;
         }
+
+        /* "DNAME::$DATA" names the default data fork explicitly; remember it so
+         * the open-completion path can reject it on a directory target. */
+        request->create.explicit_data_fork = explicit_data_fork;
 
         /* A wildcard/invalid character in the BASE file name of a stream path
          * is rejected with OBJECT_NAME_INVALID (smb2.streams.names "stream*").
