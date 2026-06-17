@@ -250,6 +250,16 @@ chimera_vfs_request_alloc_common(
 
     prometheus_stopwatch_start(&request->start_time);
 
+    /* Start this op's trace span as a child of the protocol span that issued it
+     * (thread->otel_parent, set synchronously just before this call).  Capture
+     * the parent pointer for sibling propagation (see chimera_vfs_complete), then
+     * consume thread->otel_parent so a follow-up op that forgot to set one drops
+     * its span rather than misattributing it.  ~free when not recording. */
+    request->otel_parent = thread->otel_parent;
+    otel_span_start_child(&request->otel, NULL, OTEL_SPAN_INTERNAL,
+                          request->otel_parent);
+    thread->otel_parent = NULL;
+
     thread->num_active_requests++;
     DL_APPEND2(thread->active_requests, request, active_prev, active_next);
 
@@ -377,6 +387,16 @@ chimera_vfs_complete(struct chimera_vfs_request *request)
         prometheus_time_histogram_sample(thread->metrics.op_latency_series[request->opcode],
                                          &request->start_time);
     }
+
+    /* Annotate (op name, attrs, status) and end the trace span.  The macro's
+     * recording test is an inline flag check (unsampled ops pay nothing), and
+     * the whole call compiles out when tracing is disabled. */
+    chimera_vfs_trace_complete(request);
+
+    /* Re-publish this op's trace parent so the proto completion callback that
+     * runs next (on this thread) issues any chained sibling VFS op under the same
+     * protocol span.  Consumed (cleared) at that op's alloc. */
+    thread->otel_parent = request->otel_parent;
 
     chimera_vfs_dump_reply(request);
 } /* chimera_vfs_complete */

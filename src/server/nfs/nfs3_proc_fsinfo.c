@@ -8,6 +8,7 @@
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 #include "nfs3_dump.h"
+#include "nfs3_trace.h"
 
 static void
 chimera_nfs3_fsinfo_complete(
@@ -99,6 +100,7 @@ chimera_nfs3_fsinfo(
     chimera_nfs_map_cred(&req->cred, cred);
 
     nfs3_dump_fsinfo(req, args);
+    nfs3_trace_fsinfo(req, args);
 
     req->args_fsinfo = args;
 

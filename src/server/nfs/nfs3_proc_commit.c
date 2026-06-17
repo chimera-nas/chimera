@@ -10,6 +10,7 @@
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 #include "nfs3_dump.h"
+#include "nfs3_trace.h"
 static void
 chimera_nfs3_commit_complete(
     enum chimera_vfs_error    error_code,
@@ -95,6 +96,7 @@ chimera_nfs3_commit(
     chimera_nfs_map_cred(&req->cred, cred);
 
     nfs3_dump_commit(req, args);
+    nfs3_trace_commit(req, args);
 
     req->args_commit = args;
 

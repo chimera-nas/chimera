@@ -10,6 +10,7 @@
 #include "evpl/evpl_rpc2_program.h"
 #include "evpl/evpl_bind.h"
 #include "nfs4_dump.h"
+#include "nfs4_trace.h"
 #include "nfs4_op_matrix.h"
 #include "nfs_drc_reply.h"
 
@@ -53,6 +54,12 @@ chimera_nfs4_compound_process(
     int                               rc;
 
  again:
+
+    /* Close out the previous operation's span (if any).  Every continuation --
+     * the synchronous goto-again below and the async re-entry from
+     * compound_complete -- lands here with req->index already advanced, so this
+     * ends each op's span exactly once. */
+    nfs4_trace_op_end(req);
 
     /* SEQUENCE replay short-circuit: the SEQUENCE op detected a
      * retransmit on a CACHED slot.  Resend the cached COMPOUND body through
@@ -115,6 +122,11 @@ chimera_nfs4_compound_process(
     resop = &req->res_compound.resarray[req->index];
 
     resop->resop = argop->argop;
+
+    /* Open a span for this operation (child of the compound span) and re-point
+     * the VFS parent at it so the op's VFS work nests under the op, not the
+     * whole compound. */
+    nfs4_trace_op_begin(req, argop);
 
     thread->active = 1;
 
@@ -413,6 +425,7 @@ chimera_nfs4_compound(
     }
 
     nfs4_dump_compound(req, args);
+    nfs4_trace_compound(req, args);
 
     /* The conn caches its bound nfs4_session in private_data.  The conn
      * holds a refcount on it (set up by nfs4_session_bind_conn) so the

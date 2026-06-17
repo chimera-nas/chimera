@@ -9,6 +9,7 @@
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 #include "nfs3_dump.h"
+#include "nfs3_trace.h"
 static void
 chimera_nfs3_lookup_complete(
     enum chimera_vfs_error    error_code,
@@ -104,6 +105,7 @@ chimera_nfs3_lookup(
     chimera_nfs_map_cred(&req->cred, cred);
 
     nfs3_dump_lookup(req, args);
+    nfs3_trace_lookup(req, args);
 
     req->args_lookup = args;
 

@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: LGPL-2.1-only
 
 add_library(chimera_smb SHARED
-    smb.c smb_proc_negotiate.c smb_proc_session_setup.c smb_dump.c
+    smb.c smb_proc_negotiate.c smb_proc_session_setup.c smb_dump.c smb_trace.c
     smb_proc_tree_connect.c smb_proc_create.c smb_proc_close.c
     smb_proc_set_info.c smb_proc_tree_disconnect.c smb_proc_logoff.c
     smb_proc_write.c smb_proc_read.c smb_proc_query_info.c

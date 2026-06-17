@@ -7,6 +7,7 @@
 #include "nfs_common/nfs3_attr.h"
 #include "vfs/vfs_release.h"
 #include "nfs3_dump.h"
+#include "nfs3_trace.h"
 #include "vfs/vfs_procs.h"
 
 static void
@@ -92,6 +93,7 @@ chimera_nfs3_rmdir(
     chimera_nfs_map_cred(&req->cred, cred);
 
     nfs3_dump_rmdir(req, args);
+    nfs3_trace_rmdir(req, args);
 
     req->args_rmdir = args;
 

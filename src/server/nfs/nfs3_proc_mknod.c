@@ -11,6 +11,7 @@
 #include "vfs/vfs.h"
 #include "vfs/vfs_release.h"
 #include "nfs3_dump.h"
+#include "nfs3_trace.h"
 
 static void
 chimera_nfs3_mknod_complete(
@@ -143,6 +144,7 @@ chimera_nfs3_mknod(
     chimera_nfs_map_cred(&req->cred, cred);
 
     nfs3_dump_mknod(req, args);
+    nfs3_trace_mknod(req, args);
 
     req->args_mknod = args;
 

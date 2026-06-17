@@ -8,6 +8,7 @@
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 #include "nfs3_dump.h"
+#include "nfs3_trace.h"
 static void
 chimera_nfs3_fsstat_complete(
     enum chimera_vfs_error    error_code,
@@ -95,6 +96,7 @@ chimera_nfs3_fsstat(
     chimera_nfs_map_cred(&req->cred, cred);
 
     nfs3_dump_fsstat(req, args);
+    nfs3_trace_fsstat(req, args);
 
     req->args_fsstat = args;
 

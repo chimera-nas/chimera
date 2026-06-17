@@ -303,3 +303,74 @@ chimera_common_rcu_reclaim_threads(json_t *root)
 
     return -1;
 } /* chimera_common_rcu_reclaim_threads */
+
+/*
+ * OpenTelemetry span tracing settings, parsed from the nested "tracing" object
+ * in the shared top-level "common" section.  Tracing is OFF by default.  Exactly
+ * one export destination is used: when grpc_endpoint is set spans go to an OTLP
+ * collector over gRPC, otherwise when sqlite_path is set they go to a local
+ * SQLite store (queryable with the otel-trace CLI).  sample_rate is the head
+ * sampling probability in [0,1], defaulting to 0.001 (0.1%).
+ *
+ *   "common": { "tracing": { "enabled": true,
+ *                            "sqlite_path": "/tmp/chimera-traces.db",
+ *                            "grpc_endpoint": "127.0.0.1:4317",
+ *                            "sample_rate": 0.001 } }
+ *
+ * String pointers are owned by `root` and valid only until json_decref(root).
+ */
+struct chimera_common_tracing {
+    int         enabled;        /* default 0 */
+    const char *sqlite_path;    /* default NULL */
+    const char *grpc_endpoint;  /* default NULL ("host:port") */
+    double      sample_rate;    /* default 0.001 */
+};
+
+static inline void
+chimera_common_tracing_config(
+    json_t                        *root,
+    struct chimera_common_tracing *out)
+{
+    json_t *common, *tracing, *val;
+
+    out->enabled       = 0;
+    out->sqlite_path   = NULL;
+    out->grpc_endpoint = NULL;
+    out->sample_rate   = 0.001;
+
+    if (!root) {
+        return;
+    }
+
+    common = json_object_get(root, "common");
+    if (!json_is_object(common)) {
+        return;
+    }
+
+    tracing = json_object_get(common, "tracing");
+    if (!json_is_object(tracing)) {
+        return;
+    }
+
+    val = json_object_get(tracing, "enabled");
+    if (json_is_boolean(val)) {
+        out->enabled = json_is_true(val);
+    }
+
+    val = json_object_get(tracing, "sqlite_path");
+    if (json_is_string(val)) {
+        out->sqlite_path = json_string_value(val);
+    }
+
+    val = json_object_get(tracing, "grpc_endpoint");
+    if (json_is_string(val)) {
+        out->grpc_endpoint = json_string_value(val);
+    }
+
+    val = json_object_get(tracing, "sample_rate");
+    if (json_is_real(val)) {
+        out->sample_rate = json_real_value(val);
+    } else if (json_is_integer(val)) {
+        out->sample_rate = (double) json_integer_value(val);
+    }
+} /* chimera_common_tracing_config */

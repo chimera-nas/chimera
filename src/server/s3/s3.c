@@ -104,6 +104,19 @@ chimera_s3_parse_range(
     return 0;
 } /* chimera_s3_parse_range */
 
+static const char *
+chimera_s3_op_name(enum evpl_http_request_type t)
+{
+    switch (t) {
+        case EVPL_HTTP_REQUEST_TYPE_GET:    return "s3.GET";
+        case EVPL_HTTP_REQUEST_TYPE_HEAD:   return "s3.HEAD";
+        case EVPL_HTTP_REQUEST_TYPE_POST:   return "s3.POST";
+        case EVPL_HTTP_REQUEST_TYPE_PUT:    return "s3.PUT";
+        case EVPL_HTTP_REQUEST_TYPE_DELETE: return "s3.DELETE";
+        default:                            return "s3.request";
+    } /* switch */
+} /* chimera_s3_op_name */
+
 static inline struct chimera_s3_request *
 chimera_s3_request_alloc(struct chimera_server_s3_thread *thread)
 {
@@ -318,6 +331,31 @@ s3_server_notify(
 
             s3_request->elapsed = chimera_get_elapsed_ns(&s3_request->end_time, &s3_request->start_time);
 
+            /* Annotate and end the S3 span.  Strings are copied into the span's
+             * arena here, so they are safe even though the request is freed
+             * below before the span is drained. */
+            otel_span_attr_i64(&s3_request->otel, "s3.status", s3_request->status);
+            if (s3_request->bucket_name && s3_request->bucket_namelen > 0) {
+                otel_span_attr_strn(&s3_request->otel, "s3.bucket",
+                                    s3_request->bucket_name,
+                                    s3_request->bucket_namelen);
+            }
+            if (s3_request->path && s3_request->path_len > 0) {
+                otel_span_attr_strn(&s3_request->otel, "s3.key",
+                                    s3_request->path, s3_request->path_len);
+            }
+            if (s3_request->file_length > 0) {
+                otel_span_attr_u64(&s3_request->otel, "s3.offset",
+                                   (uint64_t) s3_request->file_offset);
+                otel_span_attr_u64(&s3_request->otel, "s3.length",
+                                   (uint64_t) s3_request->file_length);
+            }
+            if (s3_request->status != CHIMERA_S3_STATUS_OK) {
+                otel_span_set_status(&s3_request->otel, OTEL_STATUS_ERROR, NULL);
+            }
+            otel_span_end(&s3_request->otel);
+            thread->vfs->otel_parent = NULL;
+
             chimera_s3_dump_response(s3_request);
 
             chimera_s3_request_free(thread, s3_request);
@@ -433,6 +471,11 @@ s3_server_dispatch(
     s3_request = chimera_s3_request_alloc(thread);
 
     clock_gettime(CLOCK_MONOTONIC, &s3_request->start_time);
+
+    /* Root span for this S3 operation; VFS ops it issues become children. */
+    otel_span_start(&s3_request->otel,
+                    chimera_s3_op_name(evpl_http_request_type(request)),
+                    OTEL_SPAN_SERVER);
 
     s3_request->status             = CHIMERA_S3_STATUS_OK;
     s3_request->vfs_state          = CHIMERA_S3_VFS_STATE_INIT;
@@ -904,6 +947,10 @@ s3_server_dispatch(
                                       "", 0, "", 0, "", 0, "", 0, "", 0);
             }
         }
+
+        /* Parent the bucket lookup (and, via propagation, every VFS op this
+         * request issues) under the S3 span. */
+        thread->vfs->otel_parent = &s3_request->otel;
 
         chimera_vfs_lookup(thread->vfs,
                            &thread->shared->cred,

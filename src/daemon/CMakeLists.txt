@@ -1,10 +1,10 @@
-# SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+# SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 #
 # SPDX-License-Identifier: LGPL-2.1-only
 
 add_executable(chimera daemon.c)
 
-target_link_libraries(chimera chimera_server chimera_metrics jansson)
+target_link_libraries(chimera chimera_server chimera_common chimera_metrics jansson ${CHIMERA_OTEL_LIBS})
 
 install(TARGETS chimera DESTINATION sbin)
 install(FILES chimera.json DESTINATION etc)

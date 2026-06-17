@@ -16,6 +16,7 @@
 #include "prometheus-c.h"
 #include "vfs_clock.h"
 #include "common/tcp_flavor.h"
+#include "oteltracing.h"
 
 #define CHIMERA_VFS_PATH_MAX 4096
 #define CHIMERA_VFS_NAME_MAX 256
@@ -403,6 +404,17 @@ struct chimera_vfs_request {
     chimera_vfs_complete_callback_t    complete_delegate;
     struct prometheus_stopwatch        start_time;
     uint64_t                           elapsed_ns;
+
+    /* OpenTelemetry span for this VFS op.  Started in chimera_vfs_request_alloc_
+     * common() as a child of thread->otel_parent (the protocol op that issued
+     * it), annotated + ended in chimera_vfs_complete().  Zero-cost when tracing
+     * is disabled; never recorded unless a sampled protocol parent was set. */
+    struct otel_span                   otel;
+    /* The trace parent captured at alloc.  chimera_vfs_complete() re-publishes it
+     * as thread->otel_parent right before the proto completion callback runs, so a
+     * chained sibling VFS op issued from that callback inherits the same protocol
+     * parent without the protocol having to set it again. */
+    struct otel_span                  *otel_parent;
 
     /* Points to one page of memory that the plugin may use as desired */
     void                              *plugin_data;
@@ -1485,6 +1497,12 @@ struct chimera_vfs_thread {
     struct evpl_doorbell                 doorbell;
     pthread_mutex_t                      lock;
     uint64_t                             anon_fh_key;
+
+    /* Trace parent for the next VFS op allocated on this thread: the protocol
+     * span that is issuing it.  Set by the protocol immediately before each
+     * chimera_vfs_* call and consumed (cleared) synchronously at request alloc,
+     * so a forgotten set drops the child span rather than misattributing it. */
+    struct otel_span                    *otel_parent;
 
     struct chimera_vfs_thread_metrics    metrics;
 };

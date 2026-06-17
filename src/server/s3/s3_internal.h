@@ -121,6 +121,7 @@ struct chimera_s3_request {
     struct chimera_vfs_open_handle  *file_handle;
     struct timespec                  start_time;
     struct timespec                  end_time;
+    struct otel_span                 otel;
     struct chimera_s3_request       *prev;
     struct chimera_s3_request       *next;
     struct chimera_vfs_attrs         set_attr;

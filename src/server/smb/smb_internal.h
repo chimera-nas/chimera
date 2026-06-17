@@ -28,6 +28,7 @@
 #include "smb_gssapi.h"
 #include "smb_sharemode.h"
 #include "smb_notify.h"
+#include "vfs/vfs.h"
 #include "vfs/vfs_acl.h"
 #include "vfs/vfs_idmap.h"
 #include "vfs/vfs_release.h"
@@ -966,6 +967,9 @@ struct chimera_smb_compound {
     /* conn->generation at compound creation; see the conn field. */
     uint64_t                           conn_generation;
     struct chimera_smb_compound       *next;
+    struct otel_span                   otel;        /* compound (aggregate) span */
+    struct otel_span                   op_otel;     /* current request span, child of otel */
+    int                                op_span_active;
     struct chimera_smb_request        *requests[CHIMERA_SMB_COMPOUND_MAX_REQUESTS];
 };
 
@@ -2492,6 +2496,11 @@ chimera_smb_compound_alloc(struct chimera_server_smb_thread *thread)
         compound = calloc(1, sizeof(*compound));
     }
 
+    /* Root span for this SMB2 compound; parent the VFS ops its requests issue
+     * (propagation in chimera_vfs_complete keeps the linkage across async ops). */
+    otel_span_start(&compound->otel, "smb2", OTEL_SPAN_SERVER);
+    thread->vfs_thread->otel_parent = &compound->otel;
+
     return compound;
 } /* chimera_smb_compound_alloc */
 
@@ -2500,6 +2509,9 @@ chimera_smb_compound_free(
     struct chimera_server_smb_thread *thread,
     struct chimera_smb_compound      *compound)
 {
+    otel_span_end(&compound->otel);
+    thread->vfs_thread->otel_parent = NULL;
+
     for (int i = 0; i < compound->num_requests; i++) {
         chimera_smb_request_free(thread, compound->requests[i]);
     }
