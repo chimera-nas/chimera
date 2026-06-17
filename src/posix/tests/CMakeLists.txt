@@ -281,14 +281,25 @@ macro(add_posix_erofs_test nfs_prefix nfs_backend)
     endif()
 endmacro()
 
-# Registered for nfs3_memfs only.  The test exercises the protocol-agnostic VFS
-# read-only gate; NFS3 over memfs makes that gate observable cleanly.  It is not
-# registered for NFS4 (the NFS4 client's mount/RECLAIM_COMPLETE path crashes when
-# a second export of the same backend is present in the server -- a pre-existing
-# client-side issue unrelated to the read-only enforcement) nor for backends
-# whose mount_id derivation for a subdirectory mount does not differ from the
-# parent mount (so the read-only sub-mount cannot be distinguished).
+# The test exercises the protocol-agnostic VFS read-only gate by mounting a
+# writable export and then a read-only sub-export of the same backend (in
+# sequence).  Registered over BOTH NFS3 and NFS4 for memfs.
+#
+# It is intentionally memfs-only.  The VFS read-only gate keys on the mount_id
+# (the first bytes of the mount's root_fh).  memfs encodes a distinct root_fh
+# for the read-only subdirectory mount, so the "ro" flag attaches only to that
+# mount.  cairn / diskfs / linux / io_uring derive a root_fh for a subdirectory
+# mount whose mount_id does not reliably differ from the parent root mount, so
+# the "ro" flag bleeds onto the writable mount (fixture creation then fails with
+# EROFS) -- making the sub-mount indistinguishable.  Giving those backends a
+# distinct sub-mount identity is a separate VFS change.
+#
+# The NFS4 registration also exercises (and depends on) the client mount/session
+# lifecycle fix for a sequential remount of the same server: each mount now
+# opens its own connection, and the NFSv4.1 session outlives an individual mount
+# instead of being torn down and recreated under the live per-thread slot tables.
 add_posix_erofs_test(nfs3 memfs)
+add_posix_erofs_test(nfs4 memfs)
 
 # ============================================================================
 # NFS3 over TCP-RDMA Backend Tests
