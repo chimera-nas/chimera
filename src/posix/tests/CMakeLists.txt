@@ -1111,6 +1111,8 @@ set(PJD_TESTS
     rename/03
     rename/04
     rename/05
+    rename/09
+    rename/10
     rename/11
     rename/12
     rename/13
