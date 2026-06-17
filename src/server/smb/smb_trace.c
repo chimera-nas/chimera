@@ -6,10 +6,13 @@
  * SMB2 span tracing (see smb_trace.h).  Runs only for a recording span.
  */
 
+#include "smb_trace.h"
+
+#if CHIMERA_HAVE_OTEL
+
 #include <stdio.h>
 #include <string.h>
 
-#include "smb_trace.h"
 #include "common/format.h"
 
 static const char *
@@ -126,3 +129,5 @@ _smb_trace_op_begin(
     compound->thread->vfs_thread->otel_parent = s;
     compound->op_span_active                  = 1;
 } /* _smb_trace_op_begin */
+
+#endif /* CHIMERA_HAVE_OTEL */

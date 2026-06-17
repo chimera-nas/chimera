@@ -16,6 +16,8 @@
 
 #include "smb_internal.h"
 
+#if CHIMERA_HAVE_OTEL
+
 void _smb_trace_compound_request(
     struct chimera_smb_compound *compound);
 void _smb_trace_op_begin(
@@ -38,3 +40,11 @@ void _smb_trace_op_begin(
         do { if ((compound)->op_span_active) { \
                  otel_span_end(&(compound)->op_otel); \
                  (compound)->op_span_active = 0; } } while (0)
+
+#else  /* !CHIMERA_HAVE_OTEL : tracing compiled out -- calls vanish entirely */
+
+#define smb_trace_compound_request(compound)  do { } while (0)
+#define smb_trace_op_begin(compound, request) do { } while (0)
+#define smb_trace_op_end(compound)            do { } while (0)
+
+#endif /* CHIMERA_HAVE_OTEL */
