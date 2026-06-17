@@ -73,11 +73,10 @@ chimera_vfs_open_fh_hs(
     chimera_vfs_open_fh_callback_t   callback,
     void                            *private_data)
 {
-    struct chimera_vfs_module      *module;
-    struct chimera_vfs_request     *request;
-    struct chimera_vfs_open_handle *handle;
-    struct vfs_open_cache          *cache;
-    uint64_t                        fh_hash;
+    struct chimera_vfs_module  *module;
+    struct chimera_vfs_request *request;
+    struct vfs_open_cache      *cache;
+    uint64_t                    fh_hash;
 
     if (flags & CHIMERA_VFS_OPEN_PATH) {
         cache = thread->vfs->vfs_open_path_cache;
@@ -132,20 +131,37 @@ chimera_vfs_open_fh_hs(
 
     } else {
 
-        /* This is an inferred open from the likes of NFS3
-         * where caller does not need to hold a reference count
-         * and our module does not need open handles, so
-         * we can synthesize a handle and return it immediately */
+        /* Inferred open on a backend that does not require a real open handle.
+         * Keep a cached handle anyway so per-handle state (notably VFS lease
+         * mediation) is attached once per cache lifetime instead of once per
+         * NFSv3-style stateless operation.  The handle has no backend open, so
+         * cache eviction/release must skip chimera_vfs_close().
+         */
+        request = chimera_vfs_request_alloc_by_hash(thread, cred, fh, fhlen, fh_hash);
 
-        handle = chimera_vfs_synth_handle_alloc(thread);
+        if (CHIMERA_VFS_IS_ERR(request)) {
+            callback(CHIMERA_VFS_PTR_ERR(request), NULL, private_data);
+            return;
+        }
 
-        memcpy(handle->fh, fh, fhlen);
-        handle->vfs_module  = module;
-        handle->fh_len      = fhlen;
-        handle->fh_hash     = fh_hash;
-        handle->vfs_private = 0;
+        request->opcode             = CHIMERA_VFS_OP_OPEN_FH;
+        request->open_fh.flags      = flags;
+        request->proto_callback     = callback;
+        request->proto_private_data = private_data;
 
-        callback(CHIMERA_VFS_OK, handle, private_data);
+        chimera_vfs_open_cache_acquire(
+            thread,
+            cache,
+            module,
+            request,
+            fh,
+            fhlen,
+            fh_hash,
+            CHIMERA_VFS_OPEN_CACHE_NO_BACKEND_OPEN,
+            request->open_fh.flags,
+            0,
+            chimera_vfs_open_fh_hdl_callback);
+
         return;
     }
 } /* chimera_vfs_open_fh_hs */

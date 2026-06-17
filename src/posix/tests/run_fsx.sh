@@ -113,7 +113,7 @@ generate_config() {
             modules_section="\"modules\": {
         \"diskfs\": {
             \"path\": \"/build/test/diskfs\",
-            \"config\": {\"initialize\":true,\"devices\":[$DEVICES_JSON],\"unsafe_async\":true}
+            \"config\": {\"initialize\":true,\"devices\":[$DEVICES_JSON],\"unsafe_async\":true,\"intent_log_size\":67108864}
         }
     },"
             BACKEND="diskfs"

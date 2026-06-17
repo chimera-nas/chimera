@@ -8,6 +8,7 @@ option(IO_URING_ENABLED "Enable io_uring support" ON)
 option(CAIRN_ENABLED "Enable cairn support" ON)
 option(CHIMERA_VFS_IO_URING "Enable chimera VFS io_uring backend" ON)
 option(REQUIRE_NETNS_TESTS "Fail configure if network namespace tests cannot be enabled" OFF)
+option(EVPL_IOVEC_PROFILE "Enable libevpl retained-iovec stack profiling" OFF)
 
 if (EXISTS "/usr/local/cuda")
     set(CUDA_ENABLED true)
@@ -91,6 +92,11 @@ endif()
 
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
     add_definitions(-O3)
+endif()
+
+if(EVPL_IOVEC_PROFILE)
+    message(STATUS "Enabling libevpl retained-iovec stack profiling")
+    add_definitions(-DEVPL_IOVEC_PROFILE=1)
 endif()
 
 # Keep frame pointers in every build type so that perf and other

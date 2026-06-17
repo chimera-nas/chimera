@@ -113,7 +113,7 @@ class ChimeraServer:
             config["server"]["vfs"] = {
                 "diskfs": {
                     "path": None,
-                    "config": {"initialize": True, "devices": devices, "unsafe_async": True}
+                    "config": {"initialize": True, "devices": devices, "unsafe_async": True, "intent_log_size": 67108864}
                 }
             }
             config["mounts"]["share"] = {

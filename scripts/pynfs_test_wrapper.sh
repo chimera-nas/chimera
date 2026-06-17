@@ -131,7 +131,7 @@ generate_config() {
             BACKEND="diskfs"
             vfs_section="\"vfs\": {
                 \"diskfs\": {
-                    \"config\": {\"initialize\":true,\"devices\":[$devices_json],\"unsafe_async\":true}
+                    \"config\": {\"initialize\":true,\"devices\":[$devices_json],\"unsafe_async\":true,\"intent_log_size\":67108864}
                 }
             },"
             ;;

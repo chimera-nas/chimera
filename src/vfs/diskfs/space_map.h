@@ -27,7 +27,7 @@
 #define SM_BLOCK_SIZE             (1ULL << SM_BLOCK_SHIFT)
 #define SM_BLOCK_MASK             (SM_BLOCK_SIZE - 1)
 
-#define SM_AG_SIZE_LOG2           30                        /* 1 GiB */
+#define SM_AG_SIZE_LOG2           31                        /* 2 GiB */
 #define SM_AG_SIZE                (1ULL << SM_AG_SIZE_LOG2)
 #define SM_AG_OFFSET_MASK         (SM_AG_SIZE - 1)
 
@@ -204,12 +204,19 @@ struct sm_io {
  * the superblock; its exact location is also recorded in the superblock
  * so future format versions can move it.  Carved out of AG 0 of device 0.
  */
-#define SM_INTENT_LOG_DEVICE 0
-#define SM_INTENT_LOG_OFFSET SM_SUPERBLOCK_SIZE
-#define SM_INTENT_LOG_SIZE   (64ULL << 20) /* 64 MiB */
+#define SM_INTENT_LOG_DEVICE       0
+#define SM_INTENT_LOG_OFFSET       SM_SUPERBLOCK_SIZE
+
+/* The intent-log size is a runtime tunable (diskfs config "intent_log_size",
+ * persisted in the superblock and carried on struct space_map / the IL).  A
+ * larger log lets more redo records pipeline before the ring laps, which helps
+ * write throughput on big devices; small test devices need a small log so the
+ * AG 0 metadata reservation fits.  These are the default and the floor. */
+#define SM_INTENT_LOG_SIZE_DEFAULT (1ULL << 30)  /* 1 GiB */
+#define SM_INTENT_LOG_SIZE_MIN     (4ULL << 20)  /* 4 MiB */
 
 /* superblock flags */
-#define SM_SB_CLEAN          0x1ULL        /* set at clean unmount, cleared at mount */
+#define SM_SB_CLEAN                0x1ULL  /* set at clean unmount, cleared at mount */
 
 struct sm_superblock {
     uint64_t magic;
@@ -364,6 +371,10 @@ struct space_map {
     uint32_t          num_remote_devices;
     uint64_t          remote_log_offset;
     uint64_t          remote_log_size;
+
+    /* Active intent-log size: the configured value at mkfs, or the value the
+     * superblock recorded on a remount.  Drives the AG 0 metadata layout. */
+    uint64_t          intent_log_size;
 };
 
 struct sm_thread_cache {
@@ -376,7 +387,8 @@ struct sm_thread_cache {
 struct space_map *
 space_map_create(
     const struct sm_device_cfg *cfg,
-    uint32_t                    num_devices);
+    uint32_t                    num_devices,
+    uint64_t                    intent_log_size);
 
 void
 space_map_destroy(
@@ -426,6 +438,20 @@ space_map_alloc(
     uint32_t                *r_device_id,
     uint64_t                *r_device_offset);
 
+/* File-data allocation path: the reservation tail is live only in memory.
+ * Exact consumed ranges are journaled before being returned to the caller; the
+ * unused tail can be discarded without a durable FREE. */
+int
+space_map_alloc_volatile_reservation(
+    struct space_map        *sm,
+    struct sm_thread_cache  *cache,
+    const struct sm_journal *jnl,
+    uint32_t                 role,
+    uint64_t                 size,
+    uint64_t                 floor,
+    uint32_t                *r_device_id,
+    uint64_t                *r_device_offset);
+
 static inline int
 space_map_has_remote(const struct space_map *sm)
 {
@@ -462,6 +488,11 @@ space_map_thread_cache_return(
     struct space_map        *sm,
     const struct sm_journal *jnl,
     struct sm_thread_cache  *cache);
+
+void
+space_map_thread_cache_discard_volatile(
+    struct space_map       *sm,
+    struct sm_thread_cache *cache);
 
 /*
  * Format a complete superblock image (including CRC) into buf, which must be

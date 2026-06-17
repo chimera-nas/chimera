@@ -166,18 +166,19 @@ struct chimera_vfs_thread_metrics {
     struct prometheus_histogram_instance **op_latency_series;
 };
 
-#define CHIMERA_VFS_OPEN_HANDLE_EXCLUSIVE 0x1
-#define CHIMERA_VFS_OPEN_HANDLE_PENDING   0x2
-#define CHIMERA_VFS_OPEN_HANDLE_FILE_ID   0x4
-#define CHIMERA_VFS_OPEN_HANDLE_DETACHED  0x8
+#define CHIMERA_VFS_OPEN_HANDLE_EXCLUSIVE       0x1
+#define CHIMERA_VFS_OPEN_HANDLE_PENDING         0x2
+#define CHIMERA_VFS_OPEN_HANDLE_FILE_ID         0x4
+#define CHIMERA_VFS_OPEN_HANDLE_DETACHED        0x8
 /* A named-stream (ADS) handle.  Its file handle is distinct from the base
  * file's, but its metadata (mode/owner/timestamps/DOS attributes) is the base
  * inode's and mutates out-of-band relative to the stream fh, so the per-fh attr
  * cache must not serve or store attributes for it (chimera_vfs_getattr). */
-#define CHIMERA_VFS_OPEN_HANDLE_STREAM    0x10
+#define CHIMERA_VFS_OPEN_HANDLE_STREAM          0x10
+#define CHIMERA_VFS_OPEN_HANDLE_NO_BACKEND_OPEN 0x20
 
-#define CHIMERA_VFS_ACCESS_MODE_RW        0
-#define CHIMERA_VFS_ACCESS_MODE_RO        1
+#define CHIMERA_VFS_ACCESS_MODE_RW              0
+#define CHIMERA_VFS_ACCESS_MODE_RO              1
 
 struct chimera_vfs_open_handle {
     struct chimera_vfs_module      *vfs_module;
@@ -416,6 +417,13 @@ struct chimera_vfs_request {
     chimera_vfs_complete_callback_t    complete_delegate;
     struct prometheus_stopwatch        start_time;
     uint64_t                           elapsed_ns;
+
+    /* Temporary diagnostics: where a long-lived request is parked. */
+    const char                        *wait_reason;
+    uint64_t                           wait_since_ns;
+    uint64_t                           wait_arg0;
+    uint64_t                           wait_arg1;
+    uint64_t                           wait_arg2;
 
     /* Points to one page of memory that the plugin may use as desired */
     void                              *plugin_data;

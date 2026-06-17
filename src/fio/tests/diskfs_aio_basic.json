@@ -12,7 +12,8 @@
                         "path": "${FIO_TEST_BINARY}/diskfs_aio_device_0.img"
                     }
                 ],
-                "unsafe_async": true
+                "unsafe_async": true,
+                "intent_log_size": 67108864
             }
         }
     ],

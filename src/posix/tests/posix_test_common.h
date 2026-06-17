@@ -231,6 +231,10 @@ posix_test_configure_diskfs(
     }
     json_object_set_new(cfg, "devices", devices);
     json_object_set_new(cfg, "unsafe_async", json_true());
+    /* Small intent log: these are 1 GiB test devices, so the production-default
+     * 1 GiB log would not fit the AG-0 metadata reservation (and would eagerly
+     * preallocate a multi-GiB block cache). */
+    json_object_set_new(cfg, "intent_log_size", json_integer(64 * 1024 * 1024));
     if (posix_test_diskfs_extra_cfg) {
         json_t *extra = json_loads(posix_test_diskfs_extra_cfg, 0, NULL);
 

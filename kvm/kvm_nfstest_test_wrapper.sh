@@ -109,8 +109,9 @@ generate_config() {
             fi
             # nfstest_alloc fills the device to exercise ENOSPC, so give it a
             # small bounded backing (a local device's capacity is its file size);
-            # other tools get the usual 10x1 GiB.  Keep each device >= 1 AG
-            # (1 GiB metadata needs >64 MiB) -- 128 MiB works.
+            # other tools get the usual 10x1 GiB.  Device 0 must hold the AG 0
+            # metadata reservation: intent_log_size (64 MiB below) + the per-AG
+            # log (8 MiB) + bootstrap -- so 128 MiB leaves room to fill.
             local dev_count=10
             local dev_bytes="1G"
             if [ "$NFSTEST_PROGRAM" = "nfstest_alloc" ]; then
@@ -130,7 +131,7 @@ generate_config() {
             BACKEND="diskfs"
             vfs_section="\"vfs\": {
                 \"diskfs\": {
-                    \"config\": {\"initialize\":true,\"devices\":[$devices_json],\"unsafe_async\":true}
+                    \"config\": {\"initialize\":true,\"devices\":[$devices_json],\"unsafe_async\":true,\"intent_log_size\":67108864}
                 }
             },"
             ;;
