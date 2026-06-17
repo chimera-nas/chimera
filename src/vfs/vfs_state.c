@@ -2685,10 +2685,11 @@ chimera_vfs_break_reads_for_write(
     struct chimera_vfs_file_state        *file,
     const struct chimera_vfs_lease_owner *writer)
 {
-    struct chimera_vfs_lease *cur;
-    struct chimera_vfs_lease *to_break[CHIMERA_VFS_STATE_MAX_BREAK_BATCH];
-    int                       n = 0;
-    int                       i;
+    struct chimera_vfs_lease         *cur;
+    struct chimera_vfs_lease         *to_break[CHIMERA_VFS_STATE_MAX_BREAK_BATCH];
+    struct chimera_vfs_caching_grant *pin[CHIMERA_VFS_STATE_MAX_BREAK_BATCH];
+    int                               n = 0;
+    int                               i;
 
     pthread_mutex_lock(&file->lock);
 
@@ -2719,6 +2720,24 @@ chimera_vfs_break_reads_for_write(
             continue;
         }
         if (n < CHIMERA_VFS_STATE_MAX_BREAK_BATCH) {
+            /* Pin the grant of every lease we are about to break, under the same
+             * file->lock that chimera_vfs_caching_grant_release() takes before it
+             * frees the grant.  For a CACHING lease the lease is embedded in its
+             * grant (grant->lease), so a close of the holder racing on another
+             * thread (drain_locks -> caching_grant_release) would otherwise drop
+             * the grant's last reference and free it -- and the lease with it --
+             * between us dropping file->lock and begin_break_ex's break cb
+             * dereferencing it (chimera_smb_lease_break_cb reads
+             * grant->break_ack_required after the lock is dropped).  That is the
+             * load-dependent heap-use-after-free behind the flaky
+             * smb2.oplock.levelii501 (#733).  This is the same embedded-lease
+             * lifetime hazard that chimera_vfs_state_try_insert pins against;
+             * break_reads_for_write needs the identical guard. */
+            pin[n] = NULL;
+            if (cur->kind == CHIMERA_VFS_LEASE_CACHING && cur->grant) {
+                cur->grant->refcount++;
+                pin[n] = cur->grant;
+            }
             to_break[n++] = cur;
         }
     }
@@ -2731,6 +2750,13 @@ chimera_vfs_break_reads_for_write(
          * notification rather than cascading RH->R->NONE (smb2.lease.complex1
          * expects exactly one break; nobreakself). */
         chimera_vfs_lease_begin_break_ex(state, to_break[i], 0, 0, true);
+
+        /* Drop the pin once the break cb has run.  pump=true: a final release may
+         * unblock an acquirer/IO parked on this grant (the breaker is no longer
+         * mid-arbitration here, unlike the try_insert re-probe loop). */
+        if (pin[i]) {
+            chimera_vfs_caching_grant_release(state, pin[i], true);
+        }
     }
 } /* chimera_vfs_break_reads_for_write */
 
