@@ -51,6 +51,7 @@ WRAPPER = os.path.join(REPO, "scripts/wpts_smb_test_wrapper.sh")
 TRX_NS = "{http://microsoft.com/schemas/VisualStudio/TeamTest/2010}"
 
 CONFIGS = ["base", "persistent", "compression", "multichannel",
+           "multichannel_persistent",
            "encryption", "compression_encryption", "multichannel_encryption",
            "dirlease", "dirlease_persistent", "dirlease_appinstance"]
 
@@ -61,6 +62,8 @@ CONFIG_ENV = {
     "persistent":              {"CHIMERA_SMB_PERSISTENT": "1"},
     "compression":             {"CHIMERA_SMB_COMPRESSION": "1"},
     "multichannel":            {"CHIMERA_SMB_MULTICHANNEL": "1"},
+    "multichannel_persistent": {"CHIMERA_SMB_MULTICHANNEL": "1",
+                                "CHIMERA_SMB_PERSISTENT": "1"},
     "encryption":              {"CHIMERA_SMB_ENCRYPTION": "1"},
     "compression_encryption":  {"CHIMERA_SMB_COMPRESSION": "1",
                                 "CHIMERA_SMB_ENCRYPTION": "1"},

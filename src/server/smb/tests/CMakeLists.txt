@@ -133,6 +133,7 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
         CACHE PATH "Directory for per-case WPTS JUnit XML output.")
 
     set(_wpts_configs base persistent compression multichannel
+        multichannel_persistent
         encryption compression_encryption multichannel_encryption
         dirlease dirlease_persistent dirlease_appinstance)
     foreach(_c ${_wpts_configs})
@@ -164,6 +165,7 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
     set(_wpts_envfrag_persistent              ";CHIMERA_SMB_PERSISTENT=1")
     set(_wpts_envfrag_compression             ";CHIMERA_SMB_COMPRESSION=1")
     set(_wpts_envfrag_multichannel            ";CHIMERA_SMB_MULTICHANNEL=1")
+    set(_wpts_envfrag_multichannel_persistent ";CHIMERA_SMB_MULTICHANNEL=1;CHIMERA_SMB_PERSISTENT=1")
     set(_wpts_envfrag_encryption              ";CHIMERA_SMB_ENCRYPTION=1")
     set(_wpts_envfrag_compression_encryption  ";CHIMERA_SMB_COMPRESSION=1;CHIMERA_SMB_ENCRYPTION=1")
     set(_wpts_envfrag_multichannel_encryption ";CHIMERA_SMB_MULTICHANNEL=1;CHIMERA_SMB_ENCRYPTION=1")
@@ -179,6 +181,7 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
     set(_wpts_lbl_persistent              ";persistent")
     set(_wpts_lbl_compression             ";compression")
     set(_wpts_lbl_multichannel            ";multichannel")
+    set(_wpts_lbl_multichannel_persistent ";multichannel;persistent")
     set(_wpts_lbl_encryption              ";encryption")
     set(_wpts_lbl_compression_encryption  ";compression;encryption")
     set(_wpts_lbl_multichannel_encryption ";multichannel;encryption")
@@ -189,6 +192,7 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
     set(_wpts_suf_persistent              "_persistent")
     set(_wpts_suf_compression             "_compression")
     set(_wpts_suf_multichannel            "_multichannel")
+    set(_wpts_suf_multichannel_persistent "_multichannel_persistent")
     set(_wpts_suf_encryption              "_encryption")
     set(_wpts_suf_compression_encryption  "_compression_encryption")
     set(_wpts_suf_multichannel_encryption "_multichannel_encryption")
