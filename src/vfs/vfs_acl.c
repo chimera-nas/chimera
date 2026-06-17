@@ -254,9 +254,14 @@ chimera_acl_access_check(
     }
 
     /* Derive DELETE_CHILD from the directory's effective write+execute (see the
-     * note above); applies to mode-synthesised and explicit ACLs alike. */
+     * note above); applies to mode-synthesised and explicit ACLs alike.  An
+     * explicit DENY of DELETE_CHILD must win, though: a directory may grant
+     * WRITE_DATA (add entries) while still vetoing removal via a
+     * DELETE_CHILD::deny ACE, so do not re-synthesise a right that was
+     * explicitly denied. */
     if (is_dir && (granted & CHIMERA_ACE_WRITE_DATA) &&
-        (granted & CHIMERA_ACE_EXECUTE)) {
+        (granted & CHIMERA_ACE_EXECUTE) &&
+        !(denied & CHIMERA_ACE_DELETE_CHILD)) {
         granted |= CHIMERA_ACE_DELETE_CHILD;
     }
 

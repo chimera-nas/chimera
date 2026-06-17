@@ -1187,6 +1187,21 @@ set(PJD_TESTS
     utimensat/09
 )
 
+# NFSv4 granular-ACL permission ports (pjdfstest tests/granular/).  These set
+# native NFSv4 ACLs via the Chimera-specific chimera_posix_{get,set}acl client
+# API and verify the VFS access engine enforces the granular ACE rights
+# (WRITE_DATA/APPEND_DATA, DELETE/DELETE_CHILD, WRITE_OWNER, ...).  They are only
+# meaningful on backends that store and return the canonical ACL (va_acl), so
+# they are registered separately below -- NOT on the NFS backends (the NFS client
+# cannot set FATTR4_ACL) nor passthrough linux/io_uring (POSIX-mode, not NFSv4
+# ACLs).
+set(PJD_GRANULAR_TESTS
+    granular/00
+    granular/03
+    granular/04
+    granular/05
+)
+
 macro(add_pjd_testprog path)
     string(REPLACE "/" "_" _pjd_flat ${path})
     add_executable(posix_pjd_${_pjd_flat} pjd/${path}.c)
@@ -1269,6 +1284,22 @@ foreach(t ${PJD_TESTS})
     if(CHIMERA_VFS_IO_URING)
         add_pjd_nfs_test(${t} nfs3_io_uring)
         add_pjd_nfs_test(${t} nfs4_io_uring)
+    endif()
+endforeach()
+
+# Granular-ACL ports: only on engine backends that store the canonical NFSv4 ACL
+# (memfs definitely; cairn and diskfs store/return va_acl as well).
+foreach(t ${PJD_GRANULAR_TESTS})
+    add_pjd_testprog(${t})
+    add_pjd_test(${t} memfs)
+    if(CAIRN_ENABLED)
+        add_pjd_test(${t} cairn)
+    endif()
+    if(IO_URING_ENABLED)
+        add_pjd_test(${t} diskfs_io_uring)
+    endif()
+    if(HAVE_LIBAIO)
+        add_pjd_test(${t} diskfs_aio)
     endif()
 endforeach()
 
