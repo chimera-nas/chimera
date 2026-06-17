@@ -5178,6 +5178,16 @@ memfs_open_stream(
         inode->ctime       = now;
     }
 
+    /* Named streams share the base file's metadata (mode/owner/timestamps and
+     * DOS attributes).  When a stream open creates or overwrites the stream,
+     * apply the caller's requested attributes (e.g. the create's
+     * FileAttributes -> ARCHIVE/HIDDEN) to the base inode, mirroring how a
+     * regular create stamps them (smb2.streams.attributes2). */
+    if (request->open_stream.set_attr &&
+        (request->open_stream.r_created || (flags & CHIMERA_VFS_OPEN_TRUNCATE))) {
+        memfs_apply_attrs(inode, request->open_stream.set_attr);
+    }
+
     /* A stream open pins both the stream node and the base inode. */
     stream->refcnt++;
     inode->refcnt++;
