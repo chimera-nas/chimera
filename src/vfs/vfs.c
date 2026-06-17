@@ -997,9 +997,13 @@ chimera_vfs_process_completion(
         chimera_vfs_state_put(thread->vfs->vfs_state, file);
     }
 
-    /* Issue queued KV-fallback lease persistence (put/delete) for non-CAP_LEASE
-     * backends; runs on the service thread that the jobs were posted to. */
+    /* Issue queued KV-fallback lease persistence (put/delete) + CAP_LEASE
+     * backend lock releases for jobs posted to the service thread. */
     chimera_vfs_lease_kv_drain(thread);
+
+    /* Run protocol-lease (RANGE/SHARE) re-grants the break pump marshaled to
+     * this (the owning) thread: authoritative backend projection + callback. */
+    chimera_vfs_proto_lease_project_drain(thread);
 
     /* Deliver any identity-resolver jobs that completed for this thread. */
     chimera_vfs_identity_thread_complete(thread);

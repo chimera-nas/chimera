@@ -162,6 +162,13 @@ struct chimera_vfs_state {
      * one thread.  NULL until the close thread is initialized (and on builds
      * with no backend that advertises CAP_LEASE it simply stays unused). */
     struct chimera_vfs_thread      *service_thread;
+    /* Stable per-VFS-instance (per-node) identity used as the owner key when
+     * projecting protocol byte-range locks / share reservations to an
+     * authoritative CAP_LEASE backend (CHIMERA_VFS_LEASE_PROTO_NODE).  Distinct
+     * across nodes so the backend arbitrates cross-node conflicts while a
+     * node's own locks share one key and never self-conflict.  A real
+     * distributed deployment would configure this; here it is per-instance. */
+    uint64_t                        node_id;
 };
 
 /* -------------------------------------------------------------------- */
@@ -200,6 +207,13 @@ chimera_vfs_backend_lease_run(
  * the service thread. */
 void
 chimera_vfs_lease_kv_drain(
+    struct chimera_vfs_thread *thread);
+
+/* Drain protocol-lease (RANGE/SHARE) re-grants marshaled to this thread by the
+ * break pump, running their authoritative backend projection + callback here
+ * (the lease's owning thread).  Called from chimera_vfs_process_completion(). */
+void
+chimera_vfs_proto_lease_project_drain(
     struct chimera_vfs_thread *thread);
 
 /* Per-record callback for chimera_vfs_lease_recover_mount(): invoked once per
@@ -477,22 +491,27 @@ chimera_vfs_state_revoke_breaks(
  * lifetime must extend until the callback fires.
  *
  * Outcomes:
- *   GRANTED  - lease was inserted; cb(GRANTED, lease, NULL, priv) fires
- *              synchronously inside this call.  Ownership of `lease`
- *              transfers to vfs_state until chimera_vfs_lease_release().
- *   DENIED   - lease conflicts with a non-breakable holder.  If wait
- *              is false, cb(DENIED, NULL, conflict, priv) fires
- *              synchronously.  If wait is true, the same DENIED result
- *              still fires synchronously — only breakable conflicts
- *              cause queueing.
- *   BREAKING - lease conflicts with a breakable holder.  If wait is
- *              true, the ticket is queued on the file's pending list;
- *              cb will fire asynchronously once the break completes
- *              (either GRANTED or DENIED at retry time).  If wait is
- *              false, cb(BREAKING, NULL, conflict, priv) fires
- *              synchronously and the caller is expected to retry. */
+ *   GRANTED  - lease was inserted locally; it is then projected to the backend
+ *              before the cb fires.  On a non-CAP_LEASE backend the projection
+ *              is a fire-and-forget KV persist and cb(GRANTED) fires (effectively
+ *              synchronously).  On a CAP_LEASE backend the lock is acquired
+ *              range-faithfully and AUTHORITATIVELY from the backend first: cb
+ *              fires GRANTED only once the backend confirms, or DENIED (with the
+ *              local lease rolled back) if the backend refuses -- so cross-node
+ *              byte-range / share mutual exclusion is enforced.  Ownership of
+ *              `lease` transfers to vfs_state until chimera_vfs_lease_release().
+ *   DENIED   - lease conflicts with a non-breakable LOCAL holder; cb(DENIED)
+ *              fires synchronously.
+ *   BREAKING - lease conflicts with a breakable holder.  If wait is true the
+ *              ticket is queued; cb fires asynchronously once the break
+ *              completes (then projected as for GRANTED).  If wait is false,
+ *              cb(BREAKING) fires synchronously and the caller retries.
+ *
+ * `thread` is the caller's (connection) thread; the backend projection and the
+ * cb are issued on it so the result reply is thread-correct. */
 void
 chimera_vfs_lease_acquire(
+    struct chimera_vfs_thread          *thread,
     struct chimera_vfs_state           *state,
     struct chimera_vfs_file_state      *file,
     struct chimera_vfs_lease           *lease,

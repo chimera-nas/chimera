@@ -167,6 +167,23 @@ struct memfs_remote {
     uint8_t  data[CHIMERA_VFS_PNFS_LAYOUT_MAX];
 };
 
+/* A per-instance protocol lock projected to memfs (the authoritative CAP_LEASE
+ * backend) by the VFS core: a RANGE byte-range lock or a SHARE reservation,
+ * identified by owner and (for RANGE) byte range.  Tracked per inode so memfs
+ * can enforce overlap conflicts between different owners (cross-node mutual
+ * exclusion). */
+struct memfs_range_lock {
+    uint64_t                 token;
+    uint32_t                 protocol;
+    uint64_t                 owner_lo;
+    uint64_t                 owner_hi;
+    uint8_t                  kind;   /* enum chimera_vfs_lease_kind */
+    uint8_t                  mode;   /* granted RWH bits */
+    uint64_t                 offset;
+    uint64_t                 length; /* 0 = to EOF */
+    struct memfs_range_lock *next;
+};
+
 struct memfs_inode {
     uint64_t                   inum;
     uint32_t                   gen;
@@ -214,6 +231,12 @@ struct memfs_inode {
     uint64_t                   lease_token;
     uint8_t                    lease_mode;
     uint8_t                    lease_recalled; /* recall-test: fired once already */
+    /* Per-instance, range-faithful protocol locks (RANGE byte-range locks /
+     * SHARE reservations) projected by the VFS core from real clients, keyed by
+     * owner.  memfs arbitrates overlap conflicts between DIFFERENT owners so
+     * cross-node mutual exclusion is enforced (the whole-file lease_token above
+     * is the node's own I/O-coherence lease and does not participate). */
+    struct memfs_range_lock   *range_locks;
 
     pthread_mutex_t            lock;
 
@@ -940,6 +963,14 @@ memfs_inode_free(
     if (inode->remote) {
         free(inode->remote);
         inode->remote = NULL;
+    }
+
+    /* Free any projected protocol locks still tracked (the VFS normally releases
+     * them first; this reclaims an inode torn down with locks outstanding). */
+    while (inode->range_locks) {
+        struct memfs_range_lock *rl = inode->range_locks;
+        inode->range_locks = rl->next;
+        free(rl);
     }
 
     /* Increment generation so stale file handles return ESTALE */
@@ -5556,6 +5587,43 @@ memfs_lease_recall_timer(
  * by the "lease_deny" knob (masks bits out of the grant); the recall path is
  * driven by the "lease_recall" knob (schedules a one-shot recall after the
  * first grant, exercising Phase 3 under a real I/O workload). */
+/* Last byte+1 of a [offset,length) lock; length 0 means to EOF. */
+static inline uint64_t
+memfs_lock_end(
+    uint64_t off,
+    uint64_t len)
+{
+    if (len == 0) {
+        return UINT64_MAX;
+    }
+    return off > UINT64_MAX - len ? UINT64_MAX : off + len;
+} /* memfs_lock_end */
+
+/* True if a request from `protocol/olo/ohi` over [off,len) with `mode` conflicts
+ * with the existing range lock `a` -- a different owner whose range overlaps and
+ * where either side wants write (advisory exclusion: W excludes, shared R
+ * coexists). */
+static inline int
+memfs_range_conflict(
+    const struct memfs_range_lock *a,
+    uint32_t                       protocol,
+    uint64_t                       olo,
+    uint64_t                       ohi,
+    uint64_t                       off,
+    uint64_t                       len,
+    uint8_t                        mode)
+{
+    if (a->protocol == protocol && a->owner_lo == olo && a->owner_hi == ohi) {
+        return 0; /* same owner never self-conflicts */
+    }
+    if (!(a->offset < memfs_lock_end(off, len) &&
+          off < memfs_lock_end(a->offset, a->length))) {
+        return 0; /* disjoint ranges */
+    }
+    return (a->mode & CHIMERA_VFS_LEASE_MODE_W) ||
+           (mode & CHIMERA_VFS_LEASE_MODE_W);
+} /* memfs_range_conflict */
+
 static void
 memfs_lease_acquire(
     struct memfs_thread        *thread,
@@ -5564,6 +5632,9 @@ memfs_lease_acquire(
     void                       *private_data)
 {
     struct memfs_inode *inode;
+    uint32_t            protocol        = request->lease_acquire.protocol;
+    uint64_t            olo             = request->lease_acquire.owner_lo;
+    uint64_t            ohi             = request->lease_acquire.owner_hi;
     uint8_t             want            = request->lease_acquire.mode.granted;
     uint8_t             granted         = want & ~shared->lease_deny_mode;
     uint64_t            token           = 0;
@@ -5574,7 +5645,9 @@ memfs_lease_acquire(
     __atomic_add_fetch(&shared->lease_acquire_count, 1, __ATOMIC_RELAXED);
 
     inode = memfs_inode_get_fh(shared, request->fh, request->fh_len);
-    if (inode) {
+    if (inode && protocol == CHIMERA_VFS_LEASE_PROTO_INTERNAL) {
+        /* The node's whole-file I/O-coherence lease (implicit lease / CACHING).
+         * Always grantable here (single node); tracked for the recall knob. */
         if (granted) {
             token = __atomic_add_fetch(&shared->lease_token_next, 1,
                                        __ATOMIC_RELAXED);
@@ -5584,6 +5657,44 @@ memfs_lease_acquire(
                 inode->lease_recalled = 1;
                 schedule_recall       = 1;
             }
+        }
+        pthread_mutex_unlock(&inode->lock);
+    } else if (inode) {
+        /* A real client's range-faithful protocol lock: arbitrate overlap
+        * conflicts against OTHER owners (cross-node mutual exclusion). */
+        struct memfs_range_lock *rl;
+        int                      conflict = 0;
+
+        if (granted) {
+            for (rl = inode->range_locks; rl; rl = rl->next) {
+                if (memfs_range_conflict(rl, protocol, olo, ohi,
+                                         request->lease_acquire.offset,
+                                         request->lease_acquire.length,
+                                         granted)) {
+                    conflict = 1;
+                    break;
+                }
+            }
+        }
+
+        if (granted && !conflict) {
+            rl    = calloc(1, sizeof(*rl));
+            token = __atomic_add_fetch(&shared->lease_token_next, 1,
+                                       __ATOMIC_RELAXED);
+            rl->token          = token;
+            rl->protocol       = protocol;
+            rl->owner_lo       = olo;
+            rl->owner_hi       = ohi;
+            rl->kind           = request->lease_acquire.kind;
+            rl->mode           = granted;
+            rl->offset         = request->lease_acquire.offset;
+            rl->length         = request->lease_acquire.length;
+            rl->next           = inode->range_locks;
+            inode->range_locks = rl;
+        } else {
+            /* Conflict (or fully denied by the knob): refuse the lock. */
+            granted = 0;
+            token   = 0;
         }
         pthread_mutex_unlock(&inode->lock);
     }
@@ -5624,9 +5735,23 @@ memfs_lease_release(
     inode = memfs_inode_get_fh(shared, request->fh, request->fh_len);
     if (inode) {
         if (inode->lease_token == request->lease_release.token) {
+            /* The whole-file I/O-coherence lease. */
             inode->lease_mode = request->lease_release.mode.granted;
             if (inode->lease_mode == 0) {
                 inode->lease_token = 0;
+            }
+        } else {
+            /* A per-instance range lock: unlink by token. */
+            struct memfs_range_lock **pp = &inode->range_locks;
+
+            while (*pp) {
+                if ((*pp)->token == request->lease_release.token) {
+                    struct memfs_range_lock *rl = *pp;
+                    *pp = rl->next;
+                    free(rl);
+                    break;
+                }
+                pp = &(*pp)->next;
             }
         }
         pthread_mutex_unlock(&inode->lock);

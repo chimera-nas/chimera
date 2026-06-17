@@ -522,7 +522,7 @@ chimera_nfs4_lock(
         /* wait=false: NFSv4 LOCK returns DENIED on conflict (matching the
          * prior backend behavior).  A cross-protocol breakable conflict
          * still kicks off the break inside try_insert. */
-        chimera_vfs_lease_acquire(vfs_state, file_state,
+        chimera_vfs_lease_acquire(req->thread->vfs_thread, vfs_state, file_state,
                                   &rl->lease, &rl->ticket, false,
                                   chimera_nfs4_lock_complete, req);
     }

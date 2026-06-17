@@ -1611,6 +1611,11 @@ struct chimera_vfs_thread {
      * Fire-and-forget; only the service thread is posted to.  Defined in
      * vfs_state.c. */
     struct chimera_vfs_lease_kv_job     *pending_lease_kv;
+    /* Protocol-lease (RANGE/SHARE) re-grants marshaled here from the break pump
+     * (which may run on another thread) so their authoritative backend
+     * projection + callback run on this, the lease's owning thread.  Linked via
+     * pending_acquire->next. */
+    struct chimera_vfs_pending_acquire  *pending_lease_proj;
     /* Monotonic seconds of the last watchdog stuck-request report. */
     time_t                               watchdog_last_report;
     struct evpl_doorbell                 doorbell;

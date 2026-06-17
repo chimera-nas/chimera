@@ -163,8 +163,8 @@ main(
     lease.owner.client_key = 0xABCD;
     lease.owner.owner_lo   = 0x1234;
 
-    chimera_vfs_lease_acquire(ctx.vfs->vfs_state, file, &lease, &ticket, false,
-                              acquire_cb, &acq_done);
+    chimera_vfs_lease_acquire(ctx.vfs_thread, ctx.vfs->vfs_state, file, &lease,
+                              &ticket, false, acquire_cb, &acq_done);
     CHECK(acq_done == 1, "lease acquired (granted synchronously)");
 
     /* The persist is marshaled to the (separate) lease service thread; the

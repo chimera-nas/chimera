@@ -412,7 +412,7 @@ chimera_nfs_nlm4_lock_open_cb(
      * non-blocking LOCK returns DENIED on any conflict.  Note: even with
      * wait=true, same-protocol byte-range overlap returns DENIED
      * synchronously — BREAKING only applies to caching leases. */
-    chimera_vfs_lease_acquire(vfs_state, entry->file_state,
+    chimera_vfs_lease_acquire(thread->vfs_thread, vfs_state, entry->file_state,
                               &entry->lease, &entry->ticket, ctx->block,
                               chimera_nfs_nlm4_lock_acquire_cb, ctx);
 } /* chimera_nfs_nlm4_lock_open_cb */
