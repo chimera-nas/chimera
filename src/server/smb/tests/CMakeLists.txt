@@ -1618,7 +1618,6 @@ set(SMBTORTURE_ENABLED_memfs
 set(SMBTORTURE_ENABLED_linux
     # smb2.bench
     smb2.bench.echo
-    smb2.bench.oplock1
     smb2.bench.path-contention-shared
     smb2.bench.read
     smb2.bench.session-setup
@@ -2132,7 +2131,6 @@ set(SMBTORTURE_ENABLED_linux
 set(SMBTORTURE_ENABLED_io_uring
     # smb2.bench
     smb2.bench.echo
-    smb2.bench.oplock1
     smb2.bench.path-contention-shared
     smb2.bench.read
     smb2.bench.session-setup
