@@ -71,6 +71,10 @@ chimera_nfs_fh_wrap(
 {
     int len;
 
+    /* Always define the output length, including on the error path, so callers
+     * (which treat wrapping as infallible) never see an uninitialized value. */
+    *outlen = 0;
+
     if (vfs_len < 0 || vfs_len > CHIMERA_VFS_FH_SIZE) {
         return CHIMERA_NFS_FH_BADHANDLE;
     }
