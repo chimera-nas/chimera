@@ -55,6 +55,7 @@ enum chimera_client_request_opcode {
     CHIMERA_CLIENT_OP_LOCK,
     CHIMERA_CLIENT_OP_COPY_RANGE,
     CHIMERA_CLIENT_OP_CLONE_RANGE,
+    CHIMERA_CLIENT_OP_ALLOCATE,
 };
 
 struct chimera_client_request;
@@ -327,6 +328,15 @@ struct chimera_client_request {
             chimera_commit_callback_t       callback;
             void                           *private_data;
         } commit;
+
+        struct {
+            struct chimera_vfs_open_handle *handle;
+            uint64_t                        offset;
+            uint64_t                        length;
+            uint32_t                        flags;
+            chimera_commit_callback_t       callback;
+            void                           *private_data;
+        } allocate;
 
         struct {
             struct chimera_vfs_open_handle *handle;

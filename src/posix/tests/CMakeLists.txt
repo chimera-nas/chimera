@@ -1314,6 +1314,31 @@ foreach(t ${PJD_GRANULAR_TESTS})
     endif()
 endforeach()
 
+# posix_fallocate: the VFS ALLOCATE op is implemented by every local backend
+# (memfs/cairn/diskfs/linux/io_uring) but not the NFS client backend (NFSv4.2
+# ALLOCATE is not plumbed through vfs_nfs), so register it on the local backends
+# only -- the same six combos as the direct-backend pjd matrix, minus NFS.
+set(PJD_LOCAL_TESTS
+    posix_fallocate/00
+)
+foreach(t ${PJD_LOCAL_TESTS})
+    add_pjd_testprog(${t})
+    add_pjd_test(${t} memfs)
+    if(CAIRN_ENABLED)
+        add_pjd_test(${t} cairn)
+    endif()
+    if(IO_URING_ENABLED)
+        add_pjd_test(${t} diskfs_io_uring)
+    endif()
+    if(HAVE_LIBAIO)
+        add_pjd_test(${t} diskfs_aio)
+    endif()
+    add_pjd_test(${t} linux)
+    if(CHIMERA_VFS_IO_URING)
+        add_pjd_test(${t} io_uring)
+    endif()
+endforeach()
+
 # Tag the non-pjd tests with the 'posix' label so that suite can be run
 # independently via `ctest -L posix`.  The pjdfstest ports are tagged separately
 # with 'pjdfstest' so they run as their own CI shard (alongside pynfs, s3, etc.)

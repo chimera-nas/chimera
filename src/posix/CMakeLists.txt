@@ -66,6 +66,7 @@ add_library(chimera_posix SHARED
             posix_pathconf.c
             posix_truncate.c
             posix_ftruncate.c
+            posix_fallocate.c
             posix_fcntl.c
             posix_lockf.c
             posix_fsync.c
