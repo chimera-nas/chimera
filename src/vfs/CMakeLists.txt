@@ -33,6 +33,7 @@ add_library(chimera_vfs SHARED vfs.c vfs_lsan.c vfs_cred.c vfs_sdk_utils.c
             vfs_proc_delete_key.c vfs_proc_search_keys.c
             vfs_proc_allocate.c vfs_proc_seek.c vfs_proc_lock.c
             vfs_proc_copy_range.c vfs_proc_clone_range.c vfs_proc_move_range.c
+            vfs_proc_read_plus.c vfs_proc_write_same.c
             vfs_proc_getparent.c vfs_notify.c vfs_dump.c
             vfs_claim.c vfs_claim_break.c vfs_claim_io.c vfs_claim_backend.c
             vfs_proc_lease_acquire.c vfs_proc_lease_release.c

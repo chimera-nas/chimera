@@ -113,7 +113,9 @@ struct chimera_vfs_mount_options {
 #define CHIMERA_VFS_OP_RMFS                     41
 #define CHIMERA_VFS_OP_LEASE_ACQUIRE            42
 #define CHIMERA_VFS_OP_LEASE_RELEASE            43
-#define CHIMERA_VFS_OP_NUM                      44
+#define CHIMERA_VFS_OP_READ_PLUS                44
+#define CHIMERA_VFS_OP_WRITE_SAME               45
+#define CHIMERA_VFS_OP_NUM                      46
 
 #define CHIMERA_VFS_OPEN_CREATE                 (1U << 0)
 #define CHIMERA_VFS_OPEN_PATH                   (1U << 1)
@@ -1142,6 +1144,41 @@ struct chimera_vfs_request {
             struct chimera_vfs_attrs        r_dst_pre_attr;
             struct chimera_vfs_attrs        r_dst_post_attr;
         } move_range;
+
+        /* READ_PLUS: classify the leading byte-run at `offset` as DATA or HOLE
+         * from the backend's block/extent map, in one round trip.  The backend
+         * sets r_is_data (1 = DATA run, 0 = HOLE run), r_length (the run length
+         * to the next boundary or EOF, clamped to the requested `length`), and
+         * r_eof (the segment reaches end-of-file).  The data bytes themselves are
+         * fetched by the caller via a normal read, so this op never moves data
+         * and avoids the read path's buffer/thread-ownership machinery. */
+        struct {
+            struct chimera_vfs_open_handle *handle;
+            uint64_t                        offset;
+            uint64_t                        length;
+            uint32_t                        r_is_data;
+            uint64_t                        r_length;
+            uint32_t                        r_eof;
+        } read_plus;
+
+        /* WRITE_SAME: write `block_count` blocks of `block_size` bytes from
+         * `offset`, each block zero-filled then `pattern` (pattern_len bytes)
+         * placed at reloff_pattern.  Per-block-number stamping is not requested
+         * (the NFS layer rejects it).  r_count = total bytes written. */
+        struct {
+            struct chimera_vfs_open_handle *handle;
+            uint64_t                        offset;
+            uint32_t                        block_size;
+            uint64_t                        block_count;
+            uint32_t                        reloff_pattern;
+            const void                     *pattern;
+            uint32_t                        pattern_len;
+            uint32_t                        sync;
+            uint64_t                        r_count;
+            uint32_t                        r_sync;
+            struct chimera_vfs_attrs        r_pre_attr;
+            struct chimera_vfs_attrs        r_post_attr;
+        } write_same;
 
         struct {
             struct chimera_vfs_open_handle *handle;
