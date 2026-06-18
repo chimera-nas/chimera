@@ -2105,7 +2105,13 @@ diskfs_close_inode_cb(
     struct diskfs_request_private *p       = request->plugin_data;
 
     if (unlikely(status != CHIMERA_VFS_OK)) {
-        diskfs_op_fail(request, p->txn, status);
+        /* The pinned inode could not be locked (only ENOENT, on a gen mismatch
+         * after a free/reuse race -- the reservation went with the old inode).
+         * Drop our handle ref and finish; there is nothing to return. */
+        diskfs_txn_abort(p->txn);
+        diskfs_inode_ref_drop(p->thread, inode);
+        request->status = CHIMERA_VFS_OK;
+        request->complete(request);
         return;
     }
 
@@ -2114,15 +2120,27 @@ diskfs_close_inode_cb(
      * a normal close drops the inode back to its idle cache reference, where it
      * would otherwise strand the reservation until eviction.  A file held open
      * by another handle simply re-reserves on its next write (the inode write
-     * lock, held here, serializes that against this close). */
+     * lock, held here, serializes that against this close).
+     *
+     * The write lock is essential: the reservation tail (inode->space_resv) is
+     * a lock-free cache mutated only under the inode write lock by the data
+     * path.  Returning it here without the lock raced a concurrent write that
+     * was actively allocating from it (e.g. an in-flight WRITE on another
+     * nconnect connection), double-freeing a block the write had just handed to
+     * a file extent -- a fatal space-map double-free (#733). */
     diskfs_inode_return_reservation(p->thread, p->txn, inode);
 
-    /* Drop the handle's reference; the last drop on a deleted inode hands it
-     * to the reclaim workers (their drain parks on the inode's write lock,
-     * which this txn holds until durable). */
+    /* Drop the handle's reference under the lock, then release it (no durable
+     * record: the reservation discard is purely an in-memory allocator
+     * update).  The last ref drop on a deleted inode hands it to the reclaim
+     * workers, whose drain re-acquires the write lock this txn is about to
+     * release. */
     diskfs_inode_ref_drop(p->thread, inode);
 
-    diskfs_op_ok(request, p->txn);
+    diskfs_txn_abort(p->txn);
+
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
 } /* diskfs_close_inode_cb */
 
 
@@ -2133,20 +2151,25 @@ diskfs_close(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct diskfs_inode *inode = (struct diskfs_inode *) request->close.vfs_private;
+    struct diskfs_inode           *inode = (struct diskfs_inode *) request->close.vfs_private;
+    struct diskfs_request_private *p     = request->plugin_data;
 
     (void) shared;
     (void) private_data;
 
-    /* Backend close is not a durable operation: open counts are in-memory,
-     * and nlink==0 crash safety is recorded by the unlink/create-unlinked txn
-     * that put the inode on the orphan list.  File-data reservation tails are
-     * volatile, so dropping them only updates the live allocator view. */
-    diskfs_inode_return_reservation(thread, NULL, inode);
-    diskfs_inode_ref_drop(thread, inode);
+    /* Backend close is not a durable operation: open counts are in-memory, and
+     * nlink==0 crash safety is recorded by the unlink/create-unlinked txn that
+     * put the inode on the orphan list.  File-data reservation tails are
+     * volatile, so dropping them only updates the live allocator view -- but
+     * that drop must still happen under the inode write lock to serialize
+     * against concurrent writes mutating the same reservation (see the cb).
+     * The handle pinned the inode (refcnt), so it is resident; acquire its
+     * lock by the pinned pointer (no fh/cache lookup) and finish in the cb. */
+    p->thread = thread;
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
 
-    request->status = CHIMERA_VFS_OK;
-    request->complete(request);
+    diskfs_inode_acquire_pinned(thread, p->txn, inode, DISKFS_INODE_LOCK_WRITE,
+                                diskfs_close_inode_cb, request);
 } /* diskfs_close */
 
 
