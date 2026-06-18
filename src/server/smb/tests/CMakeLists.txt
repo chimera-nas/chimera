@@ -1423,6 +1423,7 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.notify.tcp
     smb2.notify.tdis
     smb2.notify.tdis1
+    smb2.notify.valid-req
     # smb2.openattr
     smb2.openattr
     # smb2.oplock
@@ -3046,6 +3047,7 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.notify.tcp
     smb2.notify.tdis
     smb2.notify.tdis1
+    smb2.notify.valid-req
     # smb2.openattr
     smb2.openattr
     # smb2.oplock
@@ -3618,6 +3620,7 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.notify.tcp
     smb2.notify.tdis
     smb2.notify.tdis1
+    smb2.notify.valid-req
     # smb2.openattr
     smb2.openattr
     # smb2.oplock
@@ -4187,6 +4190,7 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     smb2.notify.tcp
     smb2.notify.tdis
     smb2.notify.tdis1
+    smb2.notify.valid-req
     # smb2.openattr
     smb2.openattr
     # smb2.oplock

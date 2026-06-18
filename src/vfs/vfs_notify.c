@@ -97,6 +97,12 @@ chimera_vfs_notify_watch_overflow(struct chimera_vfs_notify_watch *watch)
     pthread_mutex_unlock(&watch->lock);
 } /* chimera_vfs_notify_watch_overflow */
 
+SYMBOL_EXPORT void
+chimera_vfs_notify_mark_overflow(struct chimera_vfs_notify_watch *watch)
+{
+    chimera_vfs_notify_watch_overflow(watch);
+} /* chimera_vfs_notify_mark_overflow */
+
 /*
  * Look up or create a mount_entry for a given mount_id.
  * Caller must hold notify->mount_entries_lock.
