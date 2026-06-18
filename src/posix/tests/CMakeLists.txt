@@ -1315,27 +1315,33 @@ foreach(t ${PJD_GRANULAR_TESTS})
 endforeach()
 
 # posix_fallocate: the VFS ALLOCATE op is implemented by every local backend
-# (memfs/cairn/diskfs/linux/io_uring) but not the NFS client backend (NFSv4.2
-# ALLOCATE is not plumbed through vfs_nfs), so register it on the local backends
-# only -- the same six combos as the direct-backend pjd matrix, minus NFS.
+# (memfs/cairn/diskfs/linux/io_uring) and, over NFSv4.2, by the NFS client
+# backend (vfs_nfs sends OP_ALLOCATE).  Register it on all local backends and
+# all NFSv4 backends, but NOT NFSv3 (no ALLOCATE in the protocol).
 set(PJD_LOCAL_TESTS
     posix_fallocate/00
 )
 foreach(t ${PJD_LOCAL_TESTS})
     add_pjd_testprog(${t})
     add_pjd_test(${t} memfs)
+    add_pjd_nfs_test(${t} nfs4_memfs)
     if(CAIRN_ENABLED)
         add_pjd_test(${t} cairn)
+        add_pjd_nfs_test(${t} nfs4_cairn)
     endif()
     if(IO_URING_ENABLED)
         add_pjd_test(${t} diskfs_io_uring)
+        add_pjd_nfs_test(${t} nfs4_diskfs_io_uring)
     endif()
     if(HAVE_LIBAIO)
         add_pjd_test(${t} diskfs_aio)
+        add_pjd_nfs_test(${t} nfs4_diskfs_aio)
     endif()
     add_pjd_test(${t} linux)
+    add_pjd_nfs_test(${t} nfs4_linux)
     if(CHIMERA_VFS_IO_URING)
         add_pjd_test(${t} io_uring)
+        add_pjd_nfs_test(${t} nfs4_io_uring)
     endif()
 endforeach()
 
