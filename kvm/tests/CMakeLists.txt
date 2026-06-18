@@ -328,8 +328,9 @@ foreach(image_spec ${KVM_IMAGES})
     # data-copy tests also assert the client serves the post-copy verify read
     # from cache, which the Linux client never does (copy_file_range invalidates
     # the destination page cache), so only the COPY error/edge cases are run.
-    # Not yet registered: nfstest_cache (needs a second client host),
-    # nfstest_delegation (real delegation/lock gaps) and nfstest_pnfs.
+    # nfstest_cache and nfstest_delegation are registered below (they need a
+    # second client host -- see the 2-client wrapper).  Not yet registered:
+    # nfstest_pnfs.
     if(IMAGE_NAME STREQUAL "ubuntu2404")
         set(NFSTEST_MATRIX
             "nfstest_posix|3 4.0 4.1 4.2"
@@ -429,6 +430,20 @@ foreach(image_spec ${KVM_IMAGES})
                     ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
                     ${CHIMERA_BINARY} memfs 4.1 nfstest_delegation)
         set_tests_properties(chimera/kvm/${IMAGE_NAME}/nfstest/nfstest_delegation_memfs_nfs4.1
+            PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 4 TIMEOUT 1800)
+
+        # nfstest_cache also needs the second client (it issues conflicting
+        # writes from the other host to invalidate the primary's actimeo
+        # attribute/data caches), so it reuses the 2-client wrapper.  The wrapper
+        # turns delegations off for this suite (a read delegation legitimately
+        # bypasses actimeo) and runs the regular-file cache subset; the
+        # directory-cache cases are excluded there (Linux client revalidation
+        # policy, not a server defect -- see the wrapper).  memfs + NFSv4.1.
+        add_test(NAME chimera/kvm/${IMAGE_NAME}/nfstest/nfstest_cache_memfs_nfs4.1
+            COMMAND bash ${NFSTEST_2CLIENT_WRAPPER}
+                    ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
+                    ${CHIMERA_BINARY} memfs 4.1 nfstest_cache)
+        set_tests_properties(chimera/kvm/${IMAGE_NAME}/nfstest/nfstest_cache_memfs_nfs4.1
             PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 4 TIMEOUT 1800)
     endif()
 
