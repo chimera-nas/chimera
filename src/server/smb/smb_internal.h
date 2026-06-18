@@ -824,6 +824,11 @@ struct chimera_smb_request {
             uint64_t                        de_length;
             struct chimera_smb_open_file   *de_src_open_file;
             struct chimera_smb_open_file   *de_dst_open_file;
+            /* Destination file size, fetched before the source so the dest
+             * range can be validated against EOF (dup_extents must not extend
+             * the destination). */
+            uint64_t                        de_dst_size;
+            uint8_t                         de_dst_sparse;
             /* Set once the zero-copy clone has fallen back to copy_range, so the
              * completion callback doesn't loop the fallback again. */
             uint8_t                         de_copy_fallback;

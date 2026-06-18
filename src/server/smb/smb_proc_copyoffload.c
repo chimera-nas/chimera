@@ -177,6 +177,16 @@ chimera_smb_duplicate_extents_getattr_cb(
 
     src_size = (attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) ? attr->va_size : 0;
 
+    /* Block-cloning a sparse source into a non-sparse destination is not
+     * supported (MS-FSCC 2.3.8): the sparse-ness must match.  A sparse source
+     * with a sparse destination (or two dense files) clones fine
+     * (smb2.ioctl.dup_extents_sparse_src vs sparse_dest/sparse_both). */
+    if ((attr->va_dos_attributes & SMB2_FILE_ATTRIBUTE_SPARSE_FILE) &&
+        !request->ioctl.de_dst_sparse) {
+        chimera_smb_duplicate_extents_done(request, SMB2_STATUS_NOT_SUPPORTED);
+        return;
+    }
+
     /* The source range must lie within the source file (MS-FSCC 2.3.8): a range
      * past EOF cannot be duplicated. */
     if (request->ioctl.de_src_offset + request->ioctl.de_length > src_size) {
@@ -197,6 +207,40 @@ chimera_smb_duplicate_extents_getattr_cb(
         request);
 } /* chimera_smb_duplicate_extents_getattr_cb */
 
+/* Destination attributes fetched first: the destination range must already lie
+ * within the destination file (a dup must not extend it).  On success, fetch
+ * the source attributes and proceed to the clone. */
+static void
+chimera_smb_duplicate_extents_dst_getattr_cb(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct chimera_smb_request *request = private_data;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_smb_duplicate_extents_done(request, SMB2_STATUS_INVALID_PARAMETER);
+        return;
+    }
+
+    request->ioctl.de_dst_size   = (attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) ? attr->va_size : 0;
+    request->ioctl.de_dst_sparse =
+        (attr->va_dos_attributes & SMB2_FILE_ATTRIBUTE_SPARSE_FILE) ? 1 : 0;
+
+    if (request->ioctl.de_dst_offset + request->ioctl.de_length > request->ioctl.de_dst_size) {
+        chimera_smb_duplicate_extents_done(request, SMB2_STATUS_NOT_SUPPORTED);
+        return;
+    }
+
+    chimera_vfs_getattr(
+        request->compound->thread->vfs_thread,
+        &request->session_handle->session->cred,
+        request->ioctl.de_src_open_file->handle,
+        CHIMERA_VFS_ATTR_MASK_STAT,
+        chimera_smb_duplicate_extents_getattr_cb,
+        request);
+} /* chimera_smb_duplicate_extents_dst_getattr_cb */
+
 void
 chimera_smb_ioctl_duplicate_extents(struct chimera_smb_request *request)
 {
@@ -213,11 +257,13 @@ chimera_smb_ioctl_duplicate_extents(struct chimera_smb_request *request)
         return;
     }
 
-    /* The source is named by the SMB2 FileId carried in the request. */
+    /* The source is named by the SMB2 FileId carried in the request.  A FileId
+     * that resolves to no open is an invalid handle (smb2.ioctl.
+     * dup_extents_bad_handle expects STATUS_INVALID_HANDLE, not a name error). */
     src_open_file = chimera_smb_open_file_resolve(request, &request->ioctl.de_src_file_id);
     if (unlikely(!src_open_file)) {
         chimera_smb_open_file_release(request, dst_open_file);
-        chimera_smb_complete_request(request, SMB2_STATUS_OBJECT_NAME_NOT_FOUND);
+        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_HANDLE);
         return;
     }
 
@@ -238,13 +284,25 @@ chimera_smb_ioctl_duplicate_extents(struct chimera_smb_request *request)
         return;
     }
 
-    /* Validate the source range against EOF before issuing the clone. */
+    /* Overlapping source and destination ranges in the SAME file are not
+     * supported (MS-FSCC 2.3.8; smb2.ioctl.dup_extents_src_is_dest_overlap). */
+    if (chimera_memequal(src_open_file->handle->fh, src_open_file->handle->fh_len,
+                         dst_open_file->handle->fh, dst_open_file->handle->fh_len) &&
+        request->ioctl.de_src_offset < request->ioctl.de_dst_offset + request->ioctl.de_length &&
+        request->ioctl.de_dst_offset < request->ioctl.de_src_offset + request->ioctl.de_length) {
+        chimera_smb_duplicate_extents_done(request, SMB2_STATUS_NOT_SUPPORTED);
+        return;
+    }
+
+    /* Validate the destination range against the destination's EOF first (a
+     * dup must not extend the destination -- dup_extents_len_beyond_dest), then
+     * the source range. */
     chimera_vfs_getattr(
         request->compound->thread->vfs_thread,
         &request->session_handle->session->cred,
-        src_open_file->handle,
+        dst_open_file->handle,
         CHIMERA_VFS_ATTR_MASK_STAT,
-        chimera_smb_duplicate_extents_getattr_cb,
+        chimera_smb_duplicate_extents_dst_getattr_cb,
         request);
 } /* chimera_smb_ioctl_duplicate_extents */
 

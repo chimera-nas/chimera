@@ -62,6 +62,14 @@ chimera_smb_set_sparse_getattr_cb(
         return;
     }
 
+    /* The sparse attribute applies only to data streams: FSCTL_SET_SPARSE on a
+     * directory is STATUS_INVALID_PARAMETER (smb2.ioctl.sparse_dir_flag). */
+    if (S_ISDIR(attr->va_mode)) {
+        chimera_smb_open_file_release(request, request->ioctl.sp_open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+        return;
+    }
+
     /* Read-modify-write so the SPARSE toggle preserves the settable DOS bits
      * (READONLY/HIDDEN/SYSTEM/ARCHIVE). */
     dos = attr->va_dos_attributes & ~SMB2_FILE_ATTRIBUTE_SPARSE_FILE;
@@ -95,6 +103,17 @@ chimera_smb_ioctl_set_sparse(struct chimera_smb_request *request)
 
     if (unlikely(!open_file)) {
         chimera_smb_complete_request(request, SMB2_STATUS_FILE_CLOSED);
+        return;
+    }
+
+    /* FSCTL_SET_SPARSE modifies a file attribute, so the handle must hold write
+     * access (FILE_WRITE_DATA or FILE_WRITE_ATTRIBUTES); a handle opened with
+     * only FILE_WRITE_EA is denied (smb2.ioctl.sparse_perms). */
+    if (!(open_file->granted_access &
+          (SMB2_FILE_WRITE_DATA | SMB2_FILE_APPEND_DATA |
+           SMB2_FILE_WRITE_ATTRIBUTES))) {
+        chimera_smb_open_file_release(request, open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_ACCESS_DENIED);
         return;
     }
 
@@ -145,6 +164,15 @@ chimera_smb_ioctl_set_zero_data(struct chimera_smb_request *request)
         return;
     }
 
+    /* Zeroing data writes the file, so the handle must hold write access
+     * (smb2.ioctl.sparse_perms). */
+    if (!(open_file->granted_access &
+          (SMB2_FILE_WRITE_DATA | SMB2_FILE_APPEND_DATA))) {
+        chimera_smb_open_file_release(request, open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_ACCESS_DENIED);
+        return;
+    }
+
     request->ioctl.sp_open_file = open_file;
 
     length = request->ioctl.sp_zero_beyond - request->ioctl.sp_zero_offset;
@@ -186,6 +214,36 @@ chimera_smb_qar_done(
     chimera_smb_complete_request(request, status);
 } /* chimera_smb_qar_done */
 
+/* Finalize a completed allocated-range scan against the caller's output buffer
+ * (MS-FSCC 2.3.20.2): with allocated ranges present but no room for even one
+ * 16-byte FILE_ALLOCATED_RANGE_BUFFER -> STATUS_BUFFER_TOO_SMALL; with room for
+ * some but not all -> emit those that fit and STATUS_BUFFER_OVERFLOW; otherwise
+ * STATUS_SUCCESS.  An empty result is always SUCCESS even with a zero buffer. */
+static void
+chimera_smb_qar_finalize(struct chimera_smb_request *request)
+{
+    uint32_t maxout    = request->ioctl.max_output_response;
+    uint32_t max_range = maxout / 16;
+
+    if (request->ioctl.sp_qar_count == 0) {
+        chimera_smb_qar_done(request, SMB2_STATUS_SUCCESS);
+        return;
+    }
+
+    if (max_range == 0) {
+        chimera_smb_qar_done(request, SMB2_STATUS_BUFFER_TOO_SMALL);
+        return;
+    }
+
+    if (request->ioctl.sp_qar_count > max_range) {
+        request->ioctl.sp_qar_count = max_range;
+        chimera_smb_qar_done(request, SMB2_STATUS_BUFFER_OVERFLOW);
+        return;
+    }
+
+    chimera_smb_qar_done(request, SMB2_STATUS_SUCCESS);
+} /* chimera_smb_qar_finalize */
+
 static void
 chimera_smb_qar_seek_hole_cb(
     enum chimera_vfs_error error_code,
@@ -203,9 +261,12 @@ chimera_smb_qar_seek_hole_cb(
 
     hole = sr_offset;
 
-    /* Guard against a non-advancing hole (e.g. EOF report); terminate the
-     * scan by treating the remainder of the queried range as a hole. */
-    if (sr_eof || hole <= request->ioctl.sp_qar_data_start) {
+    /* The hole offset bounds the data extent.  On EOF it is the file's data
+     * end (memfs/the backend clamps SEEK_HOLE to the logical size), so the
+     * extent is reported up to the actual size, not block-rounded or extended
+     * to the queried end (smb2.ioctl.sparse_qar expects the byte-accurate len).
+     * Guard only against a genuinely non-advancing hole (would loop forever). */
+    if (hole <= request->ioctl.sp_qar_data_start) {
         hole = request->ioctl.sp_qar_end;
     }
 
@@ -221,9 +282,12 @@ chimera_smb_qar_seek_hole_cb(
 
     request->ioctl.sp_qar_cursor = hole;
 
-    if (request->ioctl.sp_qar_count >= CHIMERA_SMB_QAR_MAX ||
+    /* Terminate on EOF (no data beyond), a full range buffer, or having
+     * covered the queried range. */
+    if (sr_eof ||
+        request->ioctl.sp_qar_count >= CHIMERA_SMB_QAR_MAX ||
         request->ioctl.sp_qar_cursor >= request->ioctl.sp_qar_end) {
-        chimera_smb_qar_done(request, SMB2_STATUS_SUCCESS);
+        chimera_smb_qar_finalize(request);
         return;
     }
 
@@ -240,6 +304,16 @@ chimera_smb_qar_seek_data_cb(
     struct chimera_smb_request *request    = private_data;
     struct chimera_vfs_thread  *vfs_thread = request->compound->thread->vfs_thread;
 
+    /* SEEK_DATA reports ENXIO when there is no data at or beyond the cursor
+     * (POSIX lseek): the remainder of the file is an implicit hole, so the
+     * allocated-range scan is complete with whatever ranges were collected so
+     * far.  This is the common case for a zero-length or fully-sparse file
+     * (smb2.ioctl.sparse_qar). */
+    if (error_code == CHIMERA_VFS_ENXIO) {
+        chimera_smb_qar_finalize(request);
+        return;
+    }
+
     if (error_code != CHIMERA_VFS_OK) {
         chimera_smb_qar_done(request, chimera_smb_sparse_status(error_code));
         return;
@@ -247,7 +321,7 @@ chimera_smb_qar_seek_data_cb(
 
     /* No more data before EOF, or data starts beyond the queried range. */
     if (sr_eof || sr_offset >= request->ioctl.sp_qar_end) {
-        chimera_smb_qar_done(request, SMB2_STATUS_SUCCESS);
+        chimera_smb_qar_finalize(request);
         return;
     }
 
@@ -291,21 +365,32 @@ chimera_smb_ioctl_query_allocated_ranges(struct chimera_smb_request *request)
         return;
     }
 
+    /* Querying allocated ranges reads file layout, so the handle must hold read
+     * access (FILE_READ_DATA); a write-only handle is denied
+     * (smb2.ioctl.sparse_perms). */
+    if (!(open_file->granted_access & (SMB2_FILE_READ_DATA | SMB2_FILE_EXECUTE))) {
+        chimera_smb_open_file_release(request, open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_ACCESS_DENIED);
+        return;
+    }
+
     request->ioctl.sp_open_file = open_file;
     request->ioctl.sp_qar_count = 0;
 
-    /* Compute the (overflow-safe) exclusive end of the queried range. */
+    /* FileOffset + Length must not overflow (MS-FSCC 2.3.20.1): a wrapping
+     * range is STATUS_INVALID_PARAMETER (smb2.ioctl.sparse_qar_overflow). */
     if (request->ioctl.sp_qar_length > UINT64_MAX - request->ioctl.sp_qar_offset) {
-        end = UINT64_MAX;
-    } else {
-        end = request->ioctl.sp_qar_offset + request->ioctl.sp_qar_length;
+        chimera_smb_open_file_release(request, open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+        return;
     }
+    end = request->ioctl.sp_qar_offset + request->ioctl.sp_qar_length;
 
     request->ioctl.sp_qar_end    = end;
     request->ioctl.sp_qar_cursor = request->ioctl.sp_qar_offset;
 
     if (request->ioctl.sp_qar_offset >= end) {
-        chimera_smb_qar_done(request, SMB2_STATUS_SUCCESS);
+        chimera_smb_qar_finalize(request);
         return;
     }
 
