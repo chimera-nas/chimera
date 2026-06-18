@@ -85,18 +85,25 @@ run_smbtorture(
 
     /* SMB3 signing-algorithm offer.  The smb2.session.signing-* and
      * session.encryption-* subtests skip unless the server negotiated signing
-     * >= AES-128-GMAC (they exercise per-algorithm negotiation), so offer GMAC
-     * (preferred) for those.  Every other suite -- including the
-     * bind_negative_smb3sign* cases, which need a signing-mismatch bind
-     * rejection chimera does not yet implement -- stays on AES-128-CMAC so it
-     * keeps its current behaviour rather than un-skipping into a failure.
-     * smb2.session is force-isolated (one daemon per subtest) so this scopes
-     * per-test. */
+     * >= AES-128-GMAC, so offer GMAC (preferred) for those.
+     *
+     * The bind_negative_smb3sign / smb3sne family exercises session-bind
+     * signing-algorithm mismatches.  chimera currently implements only the
+     * non-GMAC-session-bound-from-a-GMAC-connection direction (the *toG cases
+     * -- CtoG/HtoG/C30toG/sneCtoG/sneHtoG -- which MS-SMB2 3.3.5.5 rejects with
+     * STATUS_NOT_SUPPORTED), so offer GMAC only for those (every *toG name
+     * carries the "toG" substring; none of the unimplemented reverse "Gto*"
+     * REQUEST_OUT_OF_SEQUENCE or CMAC<->HMAC cross-bind cases do).  The
+     * remainder keep AES-128-CMAC and so stay skipped rather than un-skipping
+     * into a failure; implementing them is a follow-up.  smb2.session is
+     * force-isolated (one daemon per subtest) so this scopes per-test. */
     const char *sign_algos = "aes-128-cmac";
 
     for (i = 0; i < num_tests; i++) {
         if (strstr(tests[i], "session.signing") != NULL ||
-            strstr(tests[i], "session.encryption") != NULL) {
+            strstr(tests[i], "session.encryption") != NULL ||
+            (strstr(tests[i], "bind_negative_smb3s") != NULL &&
+             strstr(tests[i], "toG") != NULL)) {
             sign_algos = "aes-128-gmac, aes-128-cmac, hmac-sha256";
             break;
         }
@@ -569,6 +576,8 @@ main(
      * that asserts unencrypted behaviour such as reconnect2. */
     for (i = 0; i < num_tests; i++) {
         if (strstr(tests[i], "bind_negative_smb3enc") != NULL ||
+            (strstr(tests[i], "bind_negative_smb3s") != NULL &&
+             strstr(tests[i], "toG") != NULL) ||
             strstr(tests[i], "session.encryption") != NULL ||
             strstr(tests[i], "anon-encryption") != NULL) {
             chimera_server_config_set_smb_encryption(config, 1);
