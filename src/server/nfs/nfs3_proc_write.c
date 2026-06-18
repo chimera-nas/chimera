@@ -115,10 +115,13 @@ chimera_nfs3_write(
     void                      *private_data)
 {
     struct chimera_server_nfs_thread *thread = private_data;
+    struct chimera_server_nfs_shared *shared = thread->shared;
     struct nfs_request               *req;
+    struct WRITE3res                  res;
+    int                               rc;
 
     req = nfs_request_alloc(thread, conn, encoding);
-    chimera_nfs_map_cred(&req->cred, cred);
+    chimera_nfs_map_cred_req(req, cred);
 
     nfs3_dump_write(req, args);
 
@@ -132,9 +135,25 @@ chimera_nfs3_write(
      */
     evpl_rpc2_encoding_take_read_chunk(req->encoding, NULL, NULL);
 
+    if (chimera_nfs_fh_decode(req, args->file.data.data, args->file.data.len,
+                              req->fh, &req->fhlen) != CHIMERA_NFS_FH_OK) {
+        memset(&res, 0, sizeof(res));
+        res.status = NFS3ERR_BADHANDLE;
+        chimera_nfs3_set_wcc_data(&res.resfail.file_wcc, NULL, NULL);
+        rc = shared->nfs_v3.send_reply_NFSPROC3_WRITE(evpl, NULL, &res, req->encoding);
+        chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
+
+        /* Iovecs were already taken from the message above, so release them
+         * here since the VFS will never be invoked.
+         */
+        evpl_iovecs_release(evpl, args->data.iov, args->data.niov);
+        nfs_request_free(thread, req);
+        return;
+    }
+
     chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
-                        args->file.data.data,
-                        args->file.data.len,
+                        req->fh,
+                        req->fhlen,
                         CHIMERA_VFS_OPEN_INFERRED,
                         chimera_nfs3_write_open_callback,
                         req);

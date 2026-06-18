@@ -22,6 +22,15 @@ chimera_nfs4_restorefh(
     memcpy(req->fh, req->saved_fh, req->saved_fhlen);
     req->fhlen = req->saved_fhlen;
 
+    /* Restoring the saved handle also restores its export and re-derives the
+     * squash from the original credential (the saved export may differ from the
+     * current one). */
+    req->export_id = req->saved_export_id;
+    req->cred      = req->orig_cred;
+    chimera_nfs_squash_cred(&req->cred,
+                            chimera_nfs_get_export_by_id(req->thread->shared,
+                                                         req->export_id));
+
     res->status = NFS4_OK;
 
     chimera_nfs4_compound_complete(req, NFS4_OK);

@@ -22,7 +22,8 @@ chimera_nfs4_savefh(
     res->status = NFS4_OK;
 
     memcpy(req->saved_fh, req->fh, req->fhlen);
-    req->saved_fhlen = req->fhlen;
+    req->saved_fhlen     = req->fhlen;
+    req->saved_export_id = req->export_id;
 
     chimera_nfs4_compound_complete(req, NFS4_OK);
 } /* chimera_nfs4_savefh */

@@ -50,21 +50,42 @@ chimera_nfs3_rename(
     void                      *private_data)
 {
     struct chimera_server_nfs_thread *thread = private_data;
+    struct chimera_server_nfs_shared *shared = thread->shared;
     struct nfs_request               *req;
+    struct RENAME3res                 res;
+    uint8_t                           todir_fh[CHIMERA_VFS_FH_SIZE];
+    int                               todir_fhlen;
+    uint16_t                          todir_export_id;
+    int                               rc;
 
     req = nfs_request_alloc(thread, conn, encoding);
-    chimera_nfs_map_cred(&req->cred, cred);
+    chimera_nfs_map_cred_req(req, cred);
 
     nfs3_dump_rename(req, args);
 
+    /* Decode both directory handles: the source sets the request export (and
+     * squash); the destination is authenticated into a local buffer. */
+    if (chimera_nfs_fh_decode(req, args->from.dir.data.data, args->from.dir.data.len,
+                              req->fh, &req->fhlen) != CHIMERA_NFS_FH_OK ||
+        chimera_nfs_fh_unwrap(args->to.dir.data.data, args->to.dir.data.len,
+                              &todir_export_id, todir_fh, &todir_fhlen,
+                              shared->fh_key, shared->fh_sign) != CHIMERA_NFS_FH_OK) {
+        memset(&res, 0, sizeof(res));
+        res.status = NFS3ERR_BADHANDLE;
+        rc         = shared->nfs_v3.send_reply_NFSPROC3_RENAME(evpl, NULL, &res, req->encoding);
+        chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
+        nfs_request_free(thread, req);
+        return;
+    }
+
     chimera_vfs_rename_at(thread->vfs_thread,
                           &req->cred,
-                          args->from.dir.data.data,
-                          args->from.dir.data.len,
+                          req->fh,
+                          req->fhlen,
                           args->from.name.str,
                           args->from.name.len,
-                          args->to.dir.data.data,
-                          args->to.dir.data.len,
+                          todir_fh,
+                          todir_fhlen,
                           args->to.name.str,
                           args->to.name.len,
                           NULL,

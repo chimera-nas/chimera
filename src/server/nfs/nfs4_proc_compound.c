@@ -532,7 +532,8 @@ chimera_nfs4_compound(
 
     req = nfs_request_alloc(thread, conn, encoding);
 
-    chimera_nfs_map_cred(&req->cred, cred);
+    chimera_nfs_map_cred_req(req, cred);
+    req->export_id = 0;
 
     /* Capture the RPC principal for EXCHANGE_ID record-matching. */
     if (cred && cred->flavor == EVPL_RPC2_AUTH_SYS) {

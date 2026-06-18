@@ -98,7 +98,10 @@ chimera_nfs4_getattr_finish(
                                                              req->fh, req->fhlen),
                                 chimera_server_config_get_nfs4_delegations(
                                     req->thread->shared->config),
-                                req->thread->shared->nfs_lease_time_s);
+                                req->thread->shared->nfs_lease_time_s,
+                                req->export_id,
+                                req->thread->shared->fh_key,
+                                req->thread->shared->fh_sign);
 
     if (req->handle) {
         chimera_vfs_release(req->thread->vfs_thread, req->handle);

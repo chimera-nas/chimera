@@ -9,6 +9,18 @@ extern struct chimera_server_protocol nfs_protocol;
 
 struct chimera_nfs_export;
 
+/*
+ * Per-export access-control option constants (see struct chimera_nfs_export).
+ * Declared here so the daemon JSON config parser can translate user-supplied
+ * option strings into these values.
+ */
+#define CHIMERA_NFS_EXPORT_OPT_RO 0x00000001u
+#define CHIMERA_NFS_EXPORT_OPT_RW 0x00000002u
+
+#define CHIMERA_NFS_SQUASH_NONE   0u   /* no_root_squash: credentials pass through */
+#define CHIMERA_NFS_SQUASH_ROOT   1u   /* root_squash (default): uid 0 -> anon      */
+#define CHIMERA_NFS_SQUASH_ALL    2u   /* all_squash: every caller -> anon          */
+
 
 /**
  * @brief Adds a new NFS export to the shared context.
@@ -55,14 +67,16 @@ chimera_nfs_export_count(
  * @param path          The export path to resolve (not necessarily null-terminated).
  * @param path_len      Length of the export path.
  * @param out_full_path Output pointer to receive the allocated full path string. The caller is responsible for freeing this string.
+ * @param out_export    Optional output (may be NULL) receiving the matched export.
  * @return 0 on success, non-zero if the export was not found or an error occurred.
  */
 int
 chimera_nfs_find_export_path(
-    void       *nfs_shared,
-    const char *path,
-    uint32_t    path_len,
-    char      **out_full_path);
+    void                             *nfs_shared,
+    const char                       *path,
+    uint32_t                          path_len,
+    char                            **out_full_path,
+    const struct chimera_nfs_export **out_export);
 
 
 /**
@@ -123,4 +137,59 @@ chimera_nfs_export_get_name(
  */
 const char *
 chimera_nfs_export_get_path(
+    const struct chimera_nfs_export *export);
+
+/**
+ * @brief Sets per-export access options (RO/RW, squash, anon uid/gid).
+ *
+ * @param nfs_shared Pointer to the NFS shared context.
+ * @param name       Name of the export.
+ * @param options    CHIMERA_NFS_EXPORT_OPT_* bitmask.
+ * @param squash     CHIMERA_NFS_SQUASH_* policy.
+ * @param anonuid    Anonymous uid squashed callers are mapped to.
+ * @param anongid    Anonymous gid squashed callers are mapped to.
+ * @return 0 on success, -1 if no export with that name exists.
+ */
+int
+chimera_nfs_export_set_options(
+    void       *nfs_shared,
+    const char *name,
+    uint32_t    options,
+    uint32_t    squash,
+    uint32_t    anonuid,
+    uint32_t    anongid);
+
+/**
+ * @brief Retrieves an NFS export by its stable id (as embedded in file handles).
+ *
+ * @param nfs_shared Pointer to the NFS shared context.
+ * @param id         Export id (1-based; 0 is invalid).
+ * @return Pointer to the export if found, NULL otherwise.
+ */
+const struct chimera_nfs_export *
+chimera_nfs_get_export_by_id(
+    void    *nfs_shared,
+    uint16_t id);
+
+/**
+ * @brief Per-export option accessors.
+ */
+uint16_t
+chimera_nfs_export_get_id(
+    const struct chimera_nfs_export *export);
+
+uint32_t
+chimera_nfs_export_get_options(
+    const struct chimera_nfs_export *export);
+
+uint32_t
+chimera_nfs_export_get_squash(
+    const struct chimera_nfs_export *export);
+
+uint32_t
+chimera_nfs_export_get_anonuid(
+    const struct chimera_nfs_export *export);
+
+uint32_t
+chimera_nfs_export_get_anongid(
     const struct chimera_nfs_export *export);

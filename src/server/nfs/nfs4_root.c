@@ -67,6 +67,9 @@ struct nfs4_root_readdir_lookup_ctx {
     struct entry4       *entry;
     struct READDIR4args *args;
     uint32_t             lease_time_s;
+    uint16_t             export_id;
+    const uint8_t       *fh_key;
+    int                  fh_sign;
 };
 
 static void
@@ -114,7 +117,9 @@ nfs4_root_lookup(
      * to find the mount point file handle.
      */
 
-    rc = chimera_nfs_find_export_path(shared, args->objname.data, args->objname.len, &full_path);
+    const struct chimera_nfs_export *export = NULL;
+
+    rc = chimera_nfs_find_export_path(shared, args->objname.data, args->objname.len, &full_path, &export);
     if (rc) {
         // Export not found, return error
         chimera_nfs_error("lookup for unknown export '%.*s'",
@@ -123,6 +128,11 @@ nfs4_root_lookup(
         chimera_nfs4_compound_complete(req, NFS4ERR_NOENT);
         return;
     }
+
+    /* Entering an export from the pseudo-fs: adopt its id (so the handle minted
+     * for the client carries it) and apply its squash policy. */
+    chimera_nfs_set_export(req, export);
+
     req->handle = NULL; // Ensure handle is NULL so that the lookup callback does not attempt to release it
     chimera_vfs_get_root_fh(root_fh, &root_fh_len);
     chimera_vfs_lookup(nfs_thread->vfs_thread,
@@ -166,7 +176,10 @@ nfs4_root_readdir_lookup_callback(
                                 0, /* pNFS not advertised on the pseudo-fs root */
                                 0, /* pseudo-fs root has no xattr-capable backend */
                                 0,
-                                ctx->lease_time_s);
+                                ctx->lease_time_s,
+                                ctx->export_id,
+                                ctx->fh_key,
+                                ctx->fh_sign);
 } /* nfs4_root_readdir_lookup_callback */
 
 struct nfs4_root_readdir_itr_ctx {
@@ -256,6 +269,9 @@ nfs4_root_readdir_itr_cb(
     lookup_ctx.args         = args;
     lookup_ctx.error_code   = CHIMERA_VFS_OK;
     lookup_ctx.lease_time_s = req->thread->shared->nfs_lease_time_s;
+    lookup_ctx.export_id    = export->id;
+    lookup_ctx.fh_key       = req->thread->shared->fh_key;
+    lookup_ctx.fh_sign      = req->thread->shared->fh_sign;
     chimera_vfs_lookup(ctx->vfs_thread,
                        &req->cred,
                        ctx->root_fh,

@@ -89,6 +89,8 @@ struct chimera_server_config {
     int                                   smb_num_nic_info;
     uint32_t                              anonuid;
     uint32_t                              anongid;
+    int                                   nfs_fh_sign;       /* sign wire file handles (default on) */
+    char                                  nfs_fh_key[33];    /* optional 32-hex-char (128-bit) signing key */
     enum chimera_tcp_flavor               tcp_flavor;
     char                                  nfs_rdma_hostname[256];
     char                                  kv_module[64];
@@ -221,6 +223,11 @@ chimera_server_config_init(void)
 
     config->anonuid = 65534;
     config->anongid = 65534;
+
+    /* Sign NFS wire file handles by default (unforgeable handles); the key is
+     * generated/persisted at NFS init unless nfs_fh_key is configured. */
+    config->nfs_fh_sign   = 1;
+    config->nfs_fh_key[0] = '\0';
 
     /* pNFS layouts are disabled by default. */
     config->pnfs_enabled = 0;
@@ -1104,6 +1111,34 @@ chimera_server_config_get_anongid(const struct chimera_server_config *config)
 } /* chimera_server_config_get_anongid */
 
 SYMBOL_EXPORT void
+chimera_server_config_set_nfs_fh_sign(
+    struct chimera_server_config *config,
+    int                           enable)
+{
+    config->nfs_fh_sign = enable;
+} /* chimera_server_config_set_nfs_fh_sign */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_nfs_fh_sign(const struct chimera_server_config *config)
+{
+    return config->nfs_fh_sign;
+} /* chimera_server_config_get_nfs_fh_sign */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_nfs_fh_key(
+    struct chimera_server_config *config,
+    const char                   *hexkey)
+{
+    snprintf(config->nfs_fh_key, sizeof(config->nfs_fh_key), "%s", hexkey);
+} /* chimera_server_config_set_nfs_fh_key */
+
+SYMBOL_EXPORT const char *
+chimera_server_config_get_nfs_fh_key(const struct chimera_server_config *config)
+{
+    return config->nfs_fh_key;
+} /* chimera_server_config_get_nfs_fh_key */
+
+SYMBOL_EXPORT void
 chimera_server_config_set_soft_fail_bad_req(
     struct chimera_server_config *config,
     int                           enable)
@@ -1674,6 +1709,23 @@ chimera_server_create_export(
 
     return 0;
 } /* chimera_server_create_export */
+
+SYMBOL_EXPORT int
+chimera_server_export_set_options(
+    struct chimera_server *server,
+    const char            *name,
+    uint32_t               options,
+    uint32_t               squash,
+    uint32_t               anonuid,
+    uint32_t               anongid)
+{
+    if (!server->nfs_shared) {
+        return -1;
+    }
+
+    return chimera_nfs_export_set_options(server->nfs_shared, name, options,
+                                          squash, anonuid, anongid);
+} /* chimera_server_export_set_options */
 
 static void
 chimera_server_thread_shutdown(

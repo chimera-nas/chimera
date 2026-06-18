@@ -6,6 +6,8 @@
 
 #include <utlist.h>
 
+#include "nfs.h"
+#include "nfs_fh_wrap.h"
 #include "evpl/evpl_rpc2.h"
 #include "portmap_xdr.h"
 #include "vfs/vfs_cred.h"
@@ -70,6 +72,11 @@ struct nfs_request {
     struct chimera_server_nfs_thread *thread;
     struct nfs4_session              *session;
     struct chimera_vfs_cred           cred;
+    /* The caller's credential as mapped from the RPC auth, before any export
+     * squash.  req->cred is recomputed from this each time a file handle is
+     * decoded, so squashing is not applied cumulatively when an NFSv4 compound
+     * switches between exports with different policies. */
+    struct chimera_vfs_cred           orig_cred;
     /* RPC principal of the caller, captured at compound entry for EXCHANGE_ID
      * client-record matching (RFC 8881 §18.35.4).  machinename points into the
      * request message buffer, valid for the lifetime of the request. */
@@ -82,6 +89,13 @@ struct nfs_request {
     int                               fhlen;
     uint8_t                           saved_fh[NFS4_FHSIZE];
     int                               saved_fhlen;
+    /* Export the current/saved file handle belongs to, recovered from the
+     * wire handle on receive (and inherited by child handles minted in the
+     * reply).  Drives per-request squash attribution and is re-stamped into
+     * every wire handle this request emits.  0 = none (e.g. the NFSv4 pseudo
+     * root). */
+    uint16_t                          export_id;
+    uint16_t                          saved_export_id;
     struct chimera_vfs_open_handle   *handle;
     int                               index;
     uint8_t                           minorversion;     /* COMPOUND4args.minorversion */
@@ -170,9 +184,34 @@ struct nfs_request {
 
 };
 
+/*
+ * Per-export access-control options.
+ *
+ * options : RO/RW access mode (CHIMERA_NFS_EXPORT_OPT_*).
+ * squash  : credential squashing policy (CHIMERA_NFS_SQUASH_*).  Default is
+ *           SQUASH_NONE (no squashing), preserving chimera's historical
+ *           pass-through behavior; root_squash / all_squash are opt-in.
+ * anonuid/anongid : identity that squashed callers are mapped to.
+ * id      : stable 16-bit identifier embedded into every wire file handle minted
+ *           for this export, so each request can be re-attributed to its export
+ *           (and thus its squash policy) without trusting client-supplied paths.
+ *
+ * Per-client (IP/network) access control is tracked separately (issue #69).
+ *
+ * The CHIMERA_NFS_EXPORT_OPT_* / CHIMERA_NFS_SQUASH_* option constants are
+ * declared in the public nfs.h (included below) so the daemon config parser can
+ * reach them.
+ */
+#define CHIMERA_NFS_MAX_EXPORTS 4096
+
 struct chimera_nfs_export {
     char                       name[CHIMERA_VFS_NAME_MAX];
     char                       path[CHIMERA_VFS_PATH_MAX];
+    uint16_t                   id;
+    uint32_t                   options;
+    uint32_t                   squash;
+    uint32_t                   anonuid;
+    uint32_t                   anongid;
     struct chimera_nfs_export *prev;
     struct chimera_nfs_export *next;
 };
@@ -246,6 +285,20 @@ struct chimera_server_nfs_shared {
     struct chimera_nfs_export          *exports;
     pthread_mutex_t                     exports_lock;
     int                                 num_exports;
+    /* Direct id -> export index for O(1) per-request attribution.  Slot 0 is
+     * unused (id 0 is reserved as "invalid"); ids are assigned sequentially
+     * starting at 1.  Reads on the request hot path are lockless (entries are
+     * stable once published; removal is a rare REST operation guarded by
+     * exports_lock). */
+    uint16_t                            next_export_id;
+    struct chimera_nfs_export          *exports_by_id[CHIMERA_NFS_MAX_EXPORTS];
+
+    /* File-handle signing.  fh_sign gates the SipHash MAC appended to every
+     * wire file handle (default on); fh_key is the 128-bit server secret used
+     * for that MAC, generated once and persisted under state_dir so handles
+     * survive a restart (a config-supplied key overrides). */
+    int                                 fh_sign;
+    uint8_t                             fh_key[16];
 
     struct chimera_nfs_mount_entry     *mount_entries;
     pthread_mutex_t                     mount_entries_lock;
@@ -405,3 +458,125 @@ chimera_nfs_map_cred(
                                         CHIMERA_VFS_ANON_GID);
     }
 } /* chimera_nfs_map_cred */
+
+/*
+ * Map the RPC credential into a request and snapshot it as the pre-squash
+ * original.  Use this from every proc/compound entry instead of calling
+ * chimera_nfs_map_cred directly so that file-handle decoding can recompute the
+ * effective (squashed) credential from a stable baseline.
+ */
+static inline void
+chimera_nfs_map_cred_req(
+    struct nfs_request          *req,
+    const struct evpl_rpc2_cred *rpc_cred)
+{
+    chimera_nfs_map_cred(&req->cred, rpc_cred);
+    req->orig_cred = req->cred;
+} /* chimera_nfs_map_cred_req */
+
+/*
+ * Squash a credential according to an export's policy.
+ *
+ *   SQUASH_ALL  : every caller is mapped to the export's anon identity.
+ *   SQUASH_ROOT : a UNIX uid 0 is mapped to anon; everyone else passes through.
+ *   SQUASH_NONE : credentials pass through unchanged.
+ *
+ * chimera_vfs_cred_init_anonymous() also clears the supplementary groups, which
+ * is the required behavior for a squashed caller.
+ */
+static inline void
+chimera_nfs_squash_cred(
+    struct chimera_vfs_cred *cred,
+    const struct chimera_nfs_export *export)
+{
+    if (!export) {
+        return;
+    }
+
+    switch (export->squash) {
+        case CHIMERA_NFS_SQUASH_ALL:
+            chimera_vfs_cred_init_anonymous(cred, export->anonuid, export->anongid);
+            break;
+        case CHIMERA_NFS_SQUASH_ROOT:
+            if (cred->flavor == CHIMERA_VFS_AUTH_UNIX && cred->uid == 0) {
+                chimera_vfs_cred_init_anonymous(cred, export->anonuid, export->anongid);
+            }
+            break;
+        case CHIMERA_NFS_SQUASH_NONE:
+        default:
+            break;
+    } /* switch */
+} /* chimera_nfs_squash_cred */
+
+/*
+ * Decode an incoming wire file handle: authenticate it, recover the inner VFS
+ * handle into vfs_fh/vfs_len and the owning export id into req->export_id, and
+ * apply that export's squash policy to req->cred.
+ *
+ * Returns CHIMERA_NFS_FH_OK on success or CHIMERA_NFS_FH_BADHANDLE if the
+ * handle is malformed or fails authentication.  A well-formed handle naming an
+ * unknown export still succeeds (export_id is set, squash is a no-op); the VFS
+ * layer rejects the inner handle with a stale error in that case.
+ */
+static inline int
+chimera_nfs_fh_decode(
+    struct nfs_request *req,
+    const void         *wire,
+    int                 wirelen,
+    uint8_t            *vfs_fh,
+    int                *vfs_len)
+{
+    struct chimera_server_nfs_shared *shared = req->thread->shared;
+    const struct chimera_nfs_export *export;
+    int                               rc;
+
+    rc = chimera_nfs_fh_unwrap(wire, wirelen, &req->export_id, vfs_fh, vfs_len,
+                               shared->fh_key, shared->fh_sign);
+
+    if (rc != CHIMERA_NFS_FH_OK) {
+        return rc;
+    }
+
+    /* Recompute the effective credential from the pre-squash original so that
+     * switching exports within a compound applies the new export's policy
+     * rather than stacking on a previous squash. */
+    export    = chimera_nfs_get_export_by_id(shared, req->export_id);
+    req->cred = req->orig_cred;
+    chimera_nfs_squash_cred(&req->cred, export);
+
+    return CHIMERA_NFS_FH_OK;
+} /* chimera_nfs_fh_decode */
+
+/*
+ * Set the request's current export (when known directly, e.g. resolved by name
+ * at the NFSv4 pseudo-fs or NFSv3 MOUNT) and apply its squash policy.  Child
+ * handles minted in the reply inherit this export id.
+ */
+static inline void
+chimera_nfs_set_export(
+    struct nfs_request *req,
+    const struct chimera_nfs_export *export)
+{
+    req->export_id = export ? export->id : 0;
+    req->cred      = req->orig_cred;
+    chimera_nfs_squash_cred(&req->cred, export);
+} /* chimera_nfs_set_export */
+
+/*
+ * Encode a VFS file handle for the wire, stamping it with the request's current
+ * export id (inherited by child handles minted in a reply) and signing it if
+ * enabled.  out must hold at least CHIMERA_NFS_FH_MAX bytes.
+ */
+static inline void
+chimera_nfs_fh_encode(
+    struct nfs_request *req,
+    const uint8_t      *vfs_fh,
+    int                 vfs_len,
+    uint8_t            *out,
+    int                *outlen)
+{
+    struct chimera_server_nfs_shared *shared = req->thread->shared;
+
+    chimera_nfs_fh_wrap(out, outlen, req->export_id, vfs_fh, vfs_len,
+                        shared->fh_key, shared->fh_sign);
+} /* chimera_nfs_fh_encode */

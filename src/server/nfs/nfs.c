@@ -4,6 +4,12 @@
 
 #include <pthread.h>
 #include <utlist.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <string.h>
+#include <errno.h>
+#include <sys/stat.h>
+#include <sys/random.h>
 
 #include "nfs.h"
 #include "server/protocol.h"
@@ -90,6 +96,81 @@ chimera_nfs_init_metrics(
     }
 } /* chimera_nfs_init_metrics */
 
+/*
+ * Initialize the file-handle signing key.
+ *
+ * Honors the nfs_fh_sign config flag and resolves the 128-bit key in priority
+ * order: an explicit 32-hex-char config key (for multi-node deployments that
+ * must mint interchangeable handles), then a key persisted under state_dir
+ * (so handles survive a restart), otherwise a freshly generated key that is
+ * persisted for next time.  Signing degrades to off if no key can be obtained.
+ */
+static void
+nfs_fh_key_init(
+    struct chimera_server_nfs_shared   *shared,
+    const struct chimera_server_config *config)
+{
+    const char *hexkey    = chimera_server_config_get_nfs_fh_key(config);
+    const char *state_dir = chimera_server_config_get_state_dir(config);
+    char        path[512];
+    int         fd, i;
+
+    shared->fh_sign = chimera_server_config_get_nfs_fh_sign(config);
+
+    if (!shared->fh_sign) {
+        return;
+    }
+
+    if (hexkey && strlen(hexkey) == 32) {
+        for (i = 0; i < 16; i++) {
+            unsigned int byte;
+            if (sscanf(hexkey + i * 2, "%2x", &byte) != 1) {
+                chimera_nfs_error("Invalid nfs_fh_key hex; disabling FH signing");
+                shared->fh_sign = 0;
+                return;
+            }
+            shared->fh_key[i] = (uint8_t) byte;
+        }
+        chimera_nfs_info("NFS file-handle signing key sourced from config");
+        return;
+    }
+
+    snprintf(path, sizeof(path), "%s/nfs_fh.key", state_dir);
+
+    fd = open(path, O_RDONLY);
+    if (fd >= 0) {
+        ssize_t n = read(fd, shared->fh_key, sizeof(shared->fh_key));
+        close(fd);
+        if (n == (ssize_t) sizeof(shared->fh_key)) {
+            chimera_nfs_info("Loaded NFS file-handle signing key from %s", path);
+            return;
+        }
+        chimera_nfs_error("Short read of FH key %s; regenerating", path);
+    }
+
+    if (getrandom(shared->fh_key, sizeof(shared->fh_key), 0) !=
+        (ssize_t) sizeof(shared->fh_key)) {
+        chimera_nfs_error("getrandom failed for FH key; disabling FH signing");
+        shared->fh_sign = 0;
+        return;
+    }
+
+    fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd >= 0) {
+        if (write(fd, shared->fh_key, sizeof(shared->fh_key)) !=
+            (ssize_t) sizeof(shared->fh_key)) {
+            chimera_nfs_error("Failed to persist FH key to %s; handles will not "
+                              "survive restart", path);
+        }
+        close(fd);
+        chimera_nfs_info("Generated and persisted NFS file-handle signing key at %s",
+                         path);
+    } else {
+        chimera_nfs_error("Could not persist FH key to %s (%s); handles will not "
+                          "survive restart", path, strerror(errno));
+    }
+} /* nfs_fh_key_init */
+
 static void *
 nfs_server_init(
     const struct chimera_server_config *config,
@@ -128,6 +209,8 @@ nfs_server_init(
     shared = calloc(1, sizeof(*shared));
 
     shared->config = config;
+
+    nfs_fh_key_init(shared, config);
 
     shared->portmap_hostname[0] = '\0';
     if (portmap_hostname) {
@@ -751,12 +834,84 @@ chimera_nfs_add_export(
     snprintf(export->name, sizeof(export->name), "%s", name);
     snprintf(export->path, sizeof(export->path), "%s", path);
 
+    /* Defaults: read-write, no squashing (preserving historical behavior where
+     * a client's credentials pass through unchanged); anon = configured global
+     * anonuid/anongid (65534 by default).  root_squash / all_squash are opt-in
+     * per export via chimera_nfs_export_set_options(). */
+    export->options = CHIMERA_NFS_EXPORT_OPT_RW;
+    export->squash  = CHIMERA_NFS_SQUASH_NONE;
+    export->anonuid = shared->config ?
+        chimera_server_config_get_anonuid(shared->config) : CHIMERA_VFS_ANON_UID;
+    export->anongid = shared->config ?
+        chimera_server_config_get_anongid(shared->config) : CHIMERA_VFS_ANON_GID;
+
     pthread_mutex_lock(&shared->exports_lock);
+
+    /* Assign a stable, non-zero id and publish into the direct index used for
+     * per-request attribution.  Ids start at 1 (slot 0 reserved as invalid). */
+    if (shared->next_export_id == 0) {
+        shared->next_export_id = 1;
+    }
+    if (shared->next_export_id < CHIMERA_NFS_MAX_EXPORTS) {
+        export->id                        = shared->next_export_id++;
+        shared->exports_by_id[export->id] = export;
+    } else {
+        chimera_nfs_error("Export id space exhausted (max %d); export '%s' will "
+                          "not be addressable by file handle",
+                          CHIMERA_NFS_MAX_EXPORTS, name);
+        export->id = 0;
+    }
+
     LL_PREPEND(shared->exports, export);
     shared->num_exports++;
     pthread_mutex_unlock(&shared->exports_lock);
 
 } /* chimera_nfs_add_export */
+
+SYMBOL_EXPORT int
+chimera_nfs_export_set_options(
+    void       *nfs_shared,
+    const char *name,
+    uint32_t    options,
+    uint32_t    squash,
+    uint32_t    anonuid,
+    uint32_t    anongid)
+{
+    struct chimera_server_nfs_shared *shared = nfs_shared;
+    struct chimera_nfs_export        *export;
+    int                               found = 0;
+
+    pthread_mutex_lock(&shared->exports_lock);
+    LL_FOREACH(shared->exports, export)
+    {
+        if (strcmp(export->name, name) == 0) {
+            export->options = options;
+            export->squash  = squash;
+            export->anonuid = anonuid;
+            export->anongid = anongid;
+            found           = 1;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&shared->exports_lock);
+
+    return found ? 0 : -1;
+} /* chimera_nfs_export_set_options */
+
+SYMBOL_EXPORT const struct chimera_nfs_export *
+chimera_nfs_get_export_by_id(
+    void    *nfs_shared,
+    uint16_t id)
+{
+    struct chimera_server_nfs_shared *shared = nfs_shared;
+
+    if (id == 0 || id >= CHIMERA_NFS_MAX_EXPORTS) {
+        return NULL;
+    }
+
+    /* Lockless read; see exports_by_id commentary in struct definition. */
+    return shared->exports_by_id[id];
+} /* chimera_nfs_get_export_by_id */
 
 
 SYMBOL_EXPORT int
@@ -772,6 +927,9 @@ chimera_nfs_remove_export(
     LL_FOREACH(shared->exports, export)
     {
         if (strcmp(export->name, name) == 0) {
+            if (export->id != 0 && export->id < CHIMERA_NFS_MAX_EXPORTS) {
+                shared->exports_by_id[export->id] = NULL;
+            }
             LL_DELETE(shared->exports, export);
             shared->num_exports--;
             chimera_nfs_abort_if(shared->num_exports < 0, "num_exports went negative");
@@ -800,10 +958,11 @@ chimera_nfs_export_count(void *nfs_shared)
 
 SYMBOL_EXPORT int
 chimera_nfs_find_export_path(
-    void       *nfs_shared,
-    const char *path,
-    uint32_t    path_len,
-    char      **out_full_path)
+    void                             *nfs_shared,
+    const char                       *path,
+    uint32_t                          path_len,
+    char                            **out_full_path,
+    const struct chimera_nfs_export **out_export)
 {
     struct chimera_server_nfs_shared *shared = nfs_shared;
     struct chimera_nfs_export        *export = NULL, *cur_export;
@@ -861,8 +1020,15 @@ chimera_nfs_find_export_path(
     pthread_mutex_unlock(&shared->exports_lock);
     if (!export) {
         *out_full_path = NULL;
+        if (out_export) {
+            *out_export = NULL;
+        }
         chimera_nfs_info("No export found matching path '%.*s'", path_len, path);
         return 1; // Export not found
+    }
+
+    if (out_export) {
+        *out_export = export;
     }
 
     // Construct full path: export->path + suffix (suffix may not be null-terminated)
@@ -950,6 +1116,36 @@ chimera_nfs_export_get_path(const struct chimera_nfs_export *export)
 {
     return export->path;
 } /* chimera_nfs_export_get_path */
+
+SYMBOL_EXPORT uint16_t
+chimera_nfs_export_get_id(const struct chimera_nfs_export *export)
+{
+    return export->id;
+} /* chimera_nfs_export_get_id */
+
+SYMBOL_EXPORT uint32_t
+chimera_nfs_export_get_options(const struct chimera_nfs_export *export)
+{
+    return export->options;
+} /* chimera_nfs_export_get_options */
+
+SYMBOL_EXPORT uint32_t
+chimera_nfs_export_get_squash(const struct chimera_nfs_export *export)
+{
+    return export->squash;
+} /* chimera_nfs_export_get_squash */
+
+SYMBOL_EXPORT uint32_t
+chimera_nfs_export_get_anonuid(const struct chimera_nfs_export *export)
+{
+    return export->anonuid;
+} /* chimera_nfs_export_get_anonuid */
+
+SYMBOL_EXPORT uint32_t
+chimera_nfs_export_get_anongid(const struct chimera_nfs_export *export)
+{
+    return export->anongid;
+} /* chimera_nfs_export_get_anongid */
 
 SYMBOL_EXPORT struct chimera_server_protocol nfs_protocol = {
     .init           = nfs_server_init,

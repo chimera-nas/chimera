@@ -13,6 +13,10 @@ chimera_nfs4_getfh(
 {
     struct GETFH4res *res = &resop->opgetfh;
     int               rc;
+    uint8_t           wire[CHIMERA_NFS_FH_MAX];
+    int               wirelen;
+    const uint8_t    *out;
+    int               outlen;
 
     if (req->fhlen == 0) {
         res->status = NFS4ERR_NOFILEHANDLE;
@@ -20,9 +24,21 @@ chimera_nfs4_getfh(
         return;
     }
 
+    /* The pseudo-root handle is exempt from wrapping and returned verbatim so
+     * a subsequent PUTFH recognizes it.  Every real handle is wrapped with its
+     * export id (and signed) before going on the wire. */
+    if (fh_is_nfs4_root(req->fh, req->fhlen)) {
+        out    = req->fh;
+        outlen = req->fhlen;
+    } else {
+        chimera_nfs_fh_encode(req, req->fh, req->fhlen, wire, &wirelen);
+        out    = wire;
+        outlen = wirelen;
+    }
+
     rc = xdr_dbuf_opaque_copy(&res->resok4.object,
-                              req->fh,
-                              req->fhlen,
+                              out,
+                              outlen,
                               req->encoding->dbuf);
 
     if (rc) {
