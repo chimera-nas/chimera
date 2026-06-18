@@ -58,6 +58,9 @@ chimera_nfs4_dispatch(
         case CHIMERA_VFS_OP_COMMIT:
             chimera_nfs4_commit(thread, shared, request, private_data);
             break;
+        case CHIMERA_VFS_OP_ALLOCATE:
+            chimera_nfs4_allocate(thread, shared, request, private_data);
+            break;
         case CHIMERA_VFS_OP_SYMLINK_AT:
             chimera_nfs4_symlink_at(thread, shared, request, private_data);
             break;
