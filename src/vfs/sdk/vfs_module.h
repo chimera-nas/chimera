@@ -254,6 +254,19 @@ struct chimera_vfs_handle_state {
  * is no partial mode. */
 #define CHIMERA_VFS_CAP_LEASE                 (1U << 26)
 
+/* If set, the module can natively answer a sparse READ_PLUS (RFC 7862 15.10):
+ * given an offset it classifies the leading byte-run as DATA or HOLE from its
+ * own block/extent map and, for DATA, returns the bytes in one round trip
+ * (chimera_vfs_read_plus).  Modules that leave this unset cause the VFS layer to
+ * return ENOTSUP and the NFS server to report NFS4ERR_NOTSUPP, so the client
+ * falls back to plain READ. */
+#define CHIMERA_VFS_CAP_READ_PLUS             (1U << 27)
+
+/* If set, the module can natively expand an NFSv4.2 WRITE_SAME (RFC 7862 15.13)
+* Application Data Block -- writing a repeated pattern across a run of blocks --
+* via chimera_vfs_write_same.  Modules that leave this unset surface ENOTSUP. */
+#define CHIMERA_VFS_CAP_WRITE_SAME            (1U << 28)
+
 struct chimera_vfs_module {
     /* Required
      * Set to CHIMERA_VFS_SDK_VERSION.  Checked at registration so a module
