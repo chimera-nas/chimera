@@ -277,6 +277,12 @@ struct diskfs_request_private {
     /* Carried across the async prefix/suffix lookups + trim walk. */
     int                         need_prefix_read;
     int                         need_suffix_read;
+    /* Redirect-write edge reconstruction (diskfs_write_recon_*): which edge
+     * block is being rebuilt (0 = prefix, 1 = suffix) and whether its extent
+     * walk is still running, so a read completion that drains the in-flight
+     * reads to zero does not advance past a walk that has more reads to issue. */
+    int                         recon_edge;
+    int                         recon_walking;
     /* Set when the write hit a single already-WRITTEN extent fully covering the
      * range (in-place overwrite, extent map untouched): the only inode change
      * is the mtime/ctime bump, so a non-FILE_SYNC write can defer it. */
