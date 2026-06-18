@@ -1320,6 +1320,7 @@ endforeach()
 # all NFSv4 backends, but NOT NFSv3 (no ALLOCATE in the protocol).
 set(PJD_LOCAL_TESTS
     posix_fallocate/00
+    sparse/00
 )
 foreach(t ${PJD_LOCAL_TESTS})
     add_pjd_testprog(${t})
