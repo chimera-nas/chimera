@@ -83,15 +83,34 @@ run_smbtorture(
      * other backends stay "no" until their copy_range coverage is validated. */
     const char *resume_key = (strcmp(backend, "memfs") == 0) ? "yes" : "no";
 
+    /* SMB3 signing-algorithm offer.  The smb2.session.signing-* and
+     * session.encryption-* subtests skip unless the server negotiated signing
+     * >= AES-128-GMAC (they exercise per-algorithm negotiation), so offer GMAC
+     * (preferred) for those.  Every other suite -- including the
+     * bind_negative_smb3sign* cases, which need a signing-mismatch bind
+     * rejection chimera does not yet implement -- stays on AES-128-CMAC so it
+     * keeps its current behaviour rather than un-skipping into a failure.
+     * smb2.session is force-isolated (one daemon per subtest) so this scopes
+     * per-test. */
+    const char *sign_algos = "aes-128-cmac";
+
+    for (i = 0; i < num_tests; i++) {
+        if (strstr(tests[i], "session.signing") != NULL ||
+            strstr(tests[i], "session.encryption") != NULL) {
+            sign_algos = "aes-128-gmac, aes-128-cmac, hmac-sha256";
+            break;
+        }
+    }
+
     /* Size the command buffer to the base options plus every test name: a
      * consolidated suite run passes dozens, which overflowed the old fixed
      * buffer (the truncating snprintf underflowed sizeof()-off and aborted). */
-    size_t      cap = 1024 + (session_dir ? strlen(session_dir) : 0);
+    size_t cap = 1024 + (session_dir ? strlen(session_dir) : 0);
 
     for (i = 0; i < num_tests; i++) {
         cap += strlen(tests[i]) + 4;
     }
-    char       *cmd = malloc(cap);
+    char  *cmd = malloc(cap);
     if (!cmd) {
         return -1;
     }
@@ -122,7 +141,10 @@ run_smbtorture(
                     * exit, so the rules cannot leak between tests.  The default
                     * iptables_command (/usr/sbin/iptables) is correct here. */
                    " --option=torture:use_iptables=yes"
-                   " --option='client smb3 signing algorithms=aes-128-cmac'"
+                   /* SMB3 signing algorithms the client offers (see sign_algos
+                    * above): GMAC-first only for the signing/encryption subtests
+                    * that require it, CMAC otherwise. */
+                   " --option='client smb3 signing algorithms=%s'"
                    /* Fixed randomizer seed: several suites derive inputs from
                     * rand() with boundary hazards -- smb2.replay.channel-
                     * sequence's csn_rand_low/high table entries can draw
@@ -135,7 +157,7 @@ run_smbtorture(
                     * once passes always. */
                    " --seed=4242"
                    " --fullname",
-                   resume_key);
+                   resume_key, sign_algos);
 
     /* samba3misc's localposixlock test needs the share's on-disk path so
      * it can take a POSIX lock directly.  Only the passthrough backends
@@ -534,13 +556,16 @@ main(
         }
     }
 
-    /* The bind_negative_smb3enc* and anon-encryption* cases connect with
-     * encryption REQUIRED on the (user) client credentials, so the server must
-     * actually support SMB3 transport encryption for the connection to come up
-     * at all.  Enable it only for those cases — every other suite runs with the
-     * default (off). */
+    /* The session.encryption, bind_negative_smb3enc and anon-encryption cases
+     * connect with encryption REQUIRED on the client credentials, so the server
+     * must actually support SMB3 transport encryption for the connection to come
+     * up at all.  Enable it only for those cases; every other suite runs with
+     * the default (off).  smb2.session is force-isolated (one daemon per
+     * subtest, SMBTORTURE_ISOLATE_SUITES) so this never bleeds into a subtest
+     * that asserts unencrypted behaviour such as reconnect2. */
     for (i = 0; i < num_tests; i++) {
         if (strstr(tests[i], "bind_negative_smb3enc") != NULL ||
+            strstr(tests[i], "session.encryption") != NULL ||
             strstr(tests[i], "anon-encryption") != NULL) {
             chimera_server_config_set_smb_encryption(config, 1);
             break;
