@@ -36,7 +36,7 @@ chimera_vfs_encode_fh_mount(
     int         fh_fragment_len,
     void       *out_fh)
 {
-    uint8_t       concat_buf[CHIMERA_VFS_FSID_SIZE + 48];
+    uint8_t       concat_buf[CHIMERA_VFS_FSID_SIZE + CHIMERA_VFS_FH_SIZE];
     XXH128_hash_t hash;
     uint8_t      *fh = out_fh;
 

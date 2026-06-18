@@ -53,8 +53,6 @@ chimera_nfs3_rename(
     struct chimera_server_nfs_shared *shared = thread->shared;
     struct nfs_request               *req;
     struct RENAME3res                 res;
-    uint8_t                           todir_fh[CHIMERA_VFS_FH_SIZE];
-    int                               todir_fhlen;
     uint16_t                          todir_export_id;
     int                               rc;
 
@@ -64,11 +62,13 @@ chimera_nfs3_rename(
     nfs3_dump_rename(req, args);
 
     /* Decode both directory handles: the source sets the request export (and
-     * squash); the destination is authenticated into a local buffer. */
+     * squash); the destination is authenticated into req->saved_fh.  The
+     * destination handle must outlive this (async) call, so it goes in the
+     * request rather than on the stack (saved_fh is unused by NFSv3). */
     if (chimera_nfs_fh_decode(req, args->from.dir.data.data, args->from.dir.data.len,
                               req->fh, &req->fhlen) != CHIMERA_NFS_FH_OK ||
         chimera_nfs_fh_unwrap(args->to.dir.data.data, args->to.dir.data.len,
-                              &todir_export_id, todir_fh, &todir_fhlen,
+                              &todir_export_id, req->saved_fh, &req->saved_fhlen,
                               shared->fh_key, shared->fh_sign) != CHIMERA_NFS_FH_OK) {
         memset(&res, 0, sizeof(res));
         res.status = NFS3ERR_BADHANDLE;
@@ -84,8 +84,8 @@ chimera_nfs3_rename(
                           req->fhlen,
                           args->from.name.str,
                           args->from.name.len,
-                          todir_fh,
-                          todir_fhlen,
+                          req->saved_fh,
+                          req->saved_fhlen,
                           args->to.name.str,
                           args->to.name.len,
                           NULL,

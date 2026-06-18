@@ -8,7 +8,16 @@
 
 struct chimera_acl;
 
-#define CHIMERA_VFS_FH_SIZE                 48
+/*
+ * Maximum chimera VFS file-handle length.  Backends produce much smaller
+ * handles (mount_id + a short fragment, typically ~28-36 bytes), but the NFS
+ * client/proxy (vfs_nfs) nests a remote server's handle inside its own handle,
+ * and the NFS server wraps handles with an export id + signing MAC, so the cap
+ * is set above the worst-case nested+wrapped size rather than the bare backend
+ * size.  Kept at/below NFS3_FHSIZE (64) so a backend handle still fits an
+ * NFSv3 wire handle once wrapped.
+ */
+#define CHIMERA_VFS_FH_SIZE                 64
 
 #define CHIMERA_VFS_ATTR_DEV                (1UL << 0)
 #define CHIMERA_VFS_ATTR_INUM               (1UL << 1)
