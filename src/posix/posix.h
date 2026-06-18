@@ -599,6 +599,13 @@ chimera_posix_ftruncate(
     int   fd,
     off_t length);
 
+// Preallocate space for a file (posix_fallocate(3))
+int
+chimera_posix_fallocate(
+    int   fd,
+    off_t offset,
+    off_t len);
+
 // File locking
 int
 chimera_posix_fcntl(
