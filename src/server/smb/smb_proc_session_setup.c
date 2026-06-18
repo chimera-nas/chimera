@@ -75,6 +75,29 @@ process_kerberos_auth(
     return rc;
 } // process_kerberos_auth
 
+/* The signing algorithm a connection effectively uses, derived from its dialect
+ * and (for 3.1.1) its negotiated SMB2_SIGNING_* value.  Only 3.1.1 negotiates a
+ * signing algorithm; 2.x is fixed at HMAC-SHA256 and 3.0/3.0.2 at AES-128-CMAC
+ * (MS-SMB2 §3.1.4.1 / §3.3.5.4), and for those dialects negotiated.signing_alg
+ * is left at its 0 default rather than the true algorithm.  Used to compare a
+ * binding connection against the connection the session was established on. */
+static inline uint16_t
+chimera_smb_effective_signing_alg(
+    uint16_t dialect,
+    uint16_t signing_alg)
+{
+    switch (dialect) {
+        case SMB2_DIALECT_2_0_2:
+        case SMB2_DIALECT_2_1:
+            return SMB2_SIGNING_HMAC_SHA256;
+        case SMB2_DIALECT_3_0:
+        case SMB2_DIALECT_3_0_2:
+            return SMB2_SIGNING_AES_CMAC;
+        default: /* 3.1.1: the negotiated algorithm is authoritative. */
+            return signing_alg;
+    } /* switch */
+} /* chimera_smb_effective_signing_alg */
+
 void
 chimera_smb_session_setup(struct chimera_smb_request *request)
 {
@@ -149,33 +172,58 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
         conn->dialect >= SMB2_DIALECT_3_0 &&
         request->smb2_hdr.session_id != 0 &&
         request->session_handle) {
-        struct chimera_smb_session *bind_session = request->session_handle->session;
-        int                         reject       = 0;
+        struct chimera_smb_session *bind_session  = request->session_handle->session;
+        uint32_t                    reject_status = 0;
+        uint16_t                    bind_sign_alg =
+            chimera_smb_effective_signing_alg(conn->dialect,
+                                              conn->negotiated.signing_alg);
+        uint16_t                    sess_sign_alg =
+            chimera_smb_effective_signing_alg(bind_session->dialect,
+                                              bind_session->sign_alg);
 
         if (!(request->smb2_hdr.flags & SMB2_FLAGS_SIGNED)) {
-            reject = 1;
+            reject_status = SMB2_STATUS_INVALID_PARAMETER;
+        } else if ((bind_session->flags & CHIMERA_SMB_SESSION_AUTHORIZED) &&
+                   bind_sign_alg == SMB2_SIGNING_AES_GMAC &&
+                   sess_sign_alg != SMB2_SIGNING_AES_GMAC) {
+            /* MS-SMB2 3.3.5.5: AES-128-GMAC ties the per-message signing key to
+             * the connection's GMAC nonce derivation, so a connection that
+             * negotiated GMAC cannot bind to a session whose establishing
+             * connection used a different (non-GMAC) signing algorithm.  This is
+             * rejected with STATUS_NOT_SUPPORTED -- a DIFFERENT status from the
+             * cipher/dialect/unsigned cases (which return INVALID_PARAMETER).
+             * Checked before the dialect mismatch because a 3.0.2-established
+             * session bound from a 3.1.1/GMAC connection (smb2.session.
+             * bind_negative_smb3signC30toG*) differs in both dialect and signing
+             * algorithm yet must report NOT_SUPPORTED.  smb2.session.bind_
+             * negative_smb3sign{CtoG,HtoG,C30toG} and smb3sne{CtoG,HtoG}
+             * exercise this; the reverse (a non-GMAC connection binding a
+             * GMAC-established session, GtoX) fails earlier in signature
+             * verification, and a CMAC/HMAC mismatch (CtoH or HtoC) is
+             * permitted (bind succeeds). */
+            reject_status = SMB2_STATUS_NOT_SUPPORTED;
         } else if ((bind_session->flags & CHIMERA_SMB_SESSION_AUTHORIZED) &&
                    bind_session->dialect != conn->dialect) {
             /* MS-SMB2 3.3.5.5: the binding connection's dialect MUST equal the
              * dialect of the connection the session was established on
              * (smb2.session.bind_negative_smb3to3* binds a 3.0.2 session from
              * a 3.1.1 connection and expects STATUS_INVALID_PARAMETER). */
-            reject = 1;
+            reject_status = SMB2_STATUS_INVALID_PARAMETER;
         } else if ((bind_session->flags & CHIMERA_SMB_SESSION_AUTHORIZED) &&
                    conn->negotiated.cipher_id != bind_session->conn_cipher_id) {
             /* MS-SMB2 3.3.5.5: likewise the negotiated cipher must match the
              * establishing connection's (smb2.session.bind_negative_
              * smb3encGtoC* negotiates AES-128-GCM on the first connection and
              * AES-128-CCM on the binding one). */
-            reject = 1;
+            reject_status = SMB2_STATUS_INVALID_PARAMETER;
         } else if (conn->dialect == SMB2_DIALECT_3_1_1 &&
                    bind_session->supports_notifications !=
                    conn->supports_notifications) {
-            reject = 1;
+            reject_status = SMB2_STATUS_INVALID_PARAMETER;
         }
 
-        if (reject) {
-            chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+        if (reject_status) {
+            chimera_smb_complete_request(request, reject_status);
             evpl_iovecs_release(thread->evpl, request->session_setup.input_iov,
                                 request->session_setup.input_niov);
             return;
