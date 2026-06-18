@@ -606,6 +606,14 @@ chimera_posix_fallocate(
     off_t offset,
     off_t len);
 
+// fallocate(2) with a mode (0 = allocate; PUNCH_HOLE|KEEP_SIZE = deallocate)
+int
+chimera_posix_fallocate_mode(
+    int   fd,
+    int   mode,
+    off_t offset,
+    off_t len);
+
 // File locking
 int
 chimera_posix_fcntl(

@@ -1150,6 +1150,11 @@ void chimera_nfs4_allocate(
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
+void chimera_nfs4_seek(
+    struct chimera_nfs_thread *,
+    struct chimera_nfs_shared *,
+    struct chimera_vfs_request *,
+    void *);
 void chimera_nfs4_symlink_at(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,

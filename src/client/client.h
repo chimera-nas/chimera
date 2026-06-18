@@ -466,6 +466,15 @@ chimera_commit(
     chimera_commit_callback_t       callback,
     void                           *private_data);
 
+/* Find the next data or hole at/after an offset (lseek SEEK_DATA/SEEK_HOLE).
+ * `what` is 0 for SEEK_DATA, 1 for SEEK_HOLE. */
+typedef void (*chimera_seek_callback_t)(
+    struct chimera_client_thread *client,
+    enum chimera_vfs_error        status,
+    int                           eof,
+    uint64_t                      offset,
+    void                         *private_data);
+
 typedef void (*chimera_lock_callback_t)(
     struct chimera_client_thread *client,
     enum chimera_vfs_error        status,
