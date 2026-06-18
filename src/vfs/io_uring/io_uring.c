@@ -522,26 +522,34 @@ chimera_io_uring_reap(
                     }
                 } else if (handle->slot == 1) {
                     if (cqe->res == 0) {
+                        int fhrc;
+
                         dir_stx = (struct statx *) request->plugin_data;
                         stx     = (struct statx *) (dir_stx + 1);
-                        name    = (char *) (stx + 1);
 
-                        if (request->open_at.flags & CHIMERA_VFS_OPEN_NOFOLLOW) {
-                            chimera_linux_map_child_attrs_statx(CHIMERA_VFS_FH_MAGIC_IO_URING,
-                                                                request,
-                                                                &request->open_at.r_attr,
-                                                                request->open_at.r_vfs_private,
-                                                                "",
-                                                                stx);
-                        } else {
-                            parent_fd = request->open_at.handle->vfs_private;
+                        /* Resolve the returned fh from the open fd itself
+                         * (AT_EMPTY_PATH) rather than by name under parent_fd.
+                         * The child statx executes in the kernel when the SQE
+                         * runs, but the fh lookup (name_to_handle_at) runs
+                         * synchronously here, much later under load -- a
+                         * concurrent unlink/rename of the name in that window
+                         * makes a by-name lookup fail (ENOENT) while statx had
+                         * succeeded, which would leave r_attr without ATTR_FH
+                         * yet status == OK and trip the "no fh returned" abort
+                         * in vfs_proc_open_at.  The fd we hold open pins the
+                         * inode, so resolving via the fd cannot race the name.
+                         * The symlink-leaf attrs still come from the by-name
+                         * statx in stx; only the fh source changes. */
+                        fhrc = chimera_linux_map_child_attrs_statx(
+                            CHIMERA_VFS_FH_MAGIC_IO_URING,
+                            request,
+                            &request->open_at.r_attr,
+                            request->open_at.r_vfs_private,
+                            "",
+                            stx);
 
-                            chimera_linux_map_child_attrs_statx(CHIMERA_VFS_FH_MAGIC_IO_URING,
-                                                                request,
-                                                                &request->open_at.r_attr,
-                                                                parent_fd,
-                                                                name,
-                                                                stx);
+                        if (fhrc != CHIMERA_VFS_OK) {
+                            request->status = fhrc;
                         }
                     } else {
                         request->status = chimera_linux_errno_to_status(-cqe->res);
