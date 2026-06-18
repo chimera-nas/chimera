@@ -51,7 +51,7 @@ WRAPPER = os.path.join(REPO, "scripts/wpts_smb_test_wrapper.sh")
 TRX_NS = "{http://microsoft.com/schemas/VisualStudio/TeamTest/2010}"
 
 CONFIGS = ["base", "persistent", "compression", "multichannel",
-           "multichannel_persistent",
+           "multichannel_persistent", "multichannel_persistent_encryption",
            "encryption", "compression_encryption", "multichannel_encryption",
            "dirlease", "dirlease_persistent", "dirlease_appinstance",
            "symlink"]
@@ -65,6 +65,13 @@ CONFIG_ENV = {
     "multichannel":            {"CHIMERA_SMB_MULTICHANNEL": "1"},
     "multichannel_persistent": {"CHIMERA_SMB_MULTICHANNEL": "1",
                                 "CHIMERA_SMB_PERSISTENT": "1"},
+    # Per-share encryption (not global encrypt-all): the encrypted share rejects
+    # unencrypted access while the session stays cleartext, which the
+    # AppInstanceId encryption cases require (the negatives only run when
+    # IsGlobalEncryptDataEnabled is false).
+    "multichannel_persistent_encryption": {"CHIMERA_SMB_MULTICHANNEL": "1",
+                                           "CHIMERA_SMB_PERSISTENT": "1",
+                                           "CHIMERA_SMB_PERSHARE_ENCRYPTION": "1"},
     "encryption":              {"CHIMERA_SMB_ENCRYPTION": "1"},
     "compression_encryption":  {"CHIMERA_SMB_COMPRESSION": "1",
                                 "CHIMERA_SMB_ENCRYPTION": "1"},

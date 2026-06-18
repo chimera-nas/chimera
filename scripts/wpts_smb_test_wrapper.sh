@@ -116,11 +116,29 @@ generate_config() {
         if [ "${CHIMERA_SMB_PERSISTENT:-0}" = "1" ] && [ "$share" = "FileShare" ]; then
             share_ca=', "continuous_availability": true'
         fi
+        # When persistent + (any) encryption are both on, the encrypted share
+        # must ALSO be continuous-availability: the AppInstanceId_Encryption
+        # failover cases open a persistent/DurableV2 handle on EncryptedFileShare
+        # (= SMBEncrypted) and reclaim it across a failover, which a CA share
+        # grants.  CA and encrypt_data are independent share flags, so the share
+        # is both.
+        if [ "${CHIMERA_SMB_PERSISTENT:-0}" = "1" ] && \
+           { [ "${CHIMERA_SMB_ENCRYPTION:-0}" = "1" ] || \
+             [ "${CHIMERA_SMB_PERSHARE_ENCRYPTION:-0}" = "1" ]; } && \
+           [ "$share" = "SMBEncrypted" ]; then
+            share_ca=', "continuous_availability": true'
+        fi
         # SMBEncrypted is the designated per-share-encrypted share (matches
         # EncryptedFileShare in the ptfconfig); flag it so TREE_CONNECT
         # advertises SMB2_SHAREFLAG_ENCRYPT_DATA and its traffic is encrypted.
+        # Set under global encryption (whole-session) OR per-share-only
+        # encryption (CHIMERA_SMB_PERSHARE_ENCRYPTION: the share requires
+        # encryption while the session stays cleartext, so unencrypted access to
+        # it is rejected -- exercises the AppInstanceId encryption negatives).
         local share_enc=""
-        if [ "${CHIMERA_SMB_ENCRYPTION:-0}" = "1" ] && [ "$share" = "SMBEncrypted" ]; then
+        if { [ "${CHIMERA_SMB_ENCRYPTION:-0}" = "1" ] || \
+             [ "${CHIMERA_SMB_PERSHARE_ENCRYPTION:-0}" = "1" ]; } && \
+           [ "$share" = "SMBEncrypted" ]; then
             share_enc=', "encrypt_data": true'
         fi
         shares="${shares}${sep}\"${share}\": {\"path\": \"/${share}\"${share_ca}${share_enc}}"
@@ -362,6 +380,23 @@ if [ "${CHIMERA_SMB_ENCRYPTION:-0}" = "1" ]; then
     sed -i \
         -e 's#<Property name="IsEncryptionSupported" value="false"/>#<Property name="IsEncryptionSupported" value="true"/>#' \
         -e 's#<Property name="IsGlobalEncryptDataEnabled" value="false"/>#<Property name="IsGlobalEncryptDataEnabled" value="true"/>#' \
+        -e 's#<Property name="EncryptedFileShare" value=""/>#<Property name="EncryptedFileShare" value="SMBEncrypted"/>#' \
+        "$staged"
+fi
+
+# Per-share-only encryption (CHIMERA_SMB_PERSHARE_ENCRYPTION): the SMBEncrypted
+# share requires encryption while global encrypt-data stays OFF, so the server
+# advertises encryption support and rejects unencrypted access to the encrypted
+# share -- but unencrypted sessions to other shares are allowed.  This is what
+# the AppInstanceId encryption cases need: the positive operates encrypted on
+# the encrypted share, and the negatives (which call CheckServerEncrypt, only
+# applicable when IsGlobalEncryptDataEnabled is FALSE) verify that an
+# unencrypted open of the encrypted share is denied.  Declare support and the
+# encrypted share, but leave IsGlobalEncryptDataEnabled false.
+if [ "${CHIMERA_SMB_PERSHARE_ENCRYPTION:-0}" = "1" ]; then
+    staged="${WPTS_STAGE_DIR}/CommonTestSuite.deployment.ptfconfig"
+    sed -i \
+        -e 's#<Property name="IsEncryptionSupported" value="false"/>#<Property name="IsEncryptionSupported" value="true"/>#' \
         -e 's#<Property name="EncryptedFileShare" value=""/>#<Property name="EncryptedFileShare" value="SMBEncrypted"/>#' \
         "$staged"
 fi
