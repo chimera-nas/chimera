@@ -606,7 +606,9 @@ chimera_smb_query_info_reply(
                                                     SMB2_FS_ATTR_CASE_SENSITIVE_SEARCH |
                                                     SMB2_FS_ATTR_CASE_PRESERVED_NAMES |
                                                     SMB2_FS_ATTR_UNICODE_ON_DISK |
-                                                    SMB2_FS_ATTR_SUPPORTS_REPARSE_POINTS);
+                                                    SMB2_FS_ATTR_SUPPORTS_SPARSE_FILES |
+                                                    SMB2_FS_ATTR_SUPPORTS_REPARSE_POINTS |
+                                                    SMB2_FS_ATTR_SUPPORTS_BLOCK_REFCOUNTING);
                     evpl_iovec_cursor_append_uint32(reply_cursor, 255);
                     evpl_iovec_cursor_append_uint32(reply_cursor, 4);
 

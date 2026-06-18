@@ -1143,7 +1143,9 @@ typedef uint8_t smb2_guid[SMB2_GUID_SIZE];
 #define SMB2_FS_ATTR_CASE_SENSITIVE_SEARCH          0x00000001
 #define SMB2_FS_ATTR_CASE_PRESERVED_NAMES           0x00000002
 #define SMB2_FS_ATTR_UNICODE_ON_DISK                0x00000004
+#define SMB2_FS_ATTR_SUPPORTS_SPARSE_FILES          0x00000040
 #define SMB2_FS_ATTR_SUPPORTS_REPARSE_POINTS        0x00000080
+#define SMB2_FS_ATTR_SUPPORTS_BLOCK_REFCOUNTING     0x08000000
 
 /*
  * FileAllInformation includes all the following structures:
