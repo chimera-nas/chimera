@@ -141,6 +141,10 @@ run_smbtorture(
                     * exit, so the rules cannot leak between tests.  The default
                     * iptables_command (/usr/sbin/iptables) is correct here. */
                    " --option=torture:use_iptables=yes"
+                   /* smb2.lock.open-brlock-deadlock self-skips without the
+                    * deadlock timeout it uses to bound the blocking-lock wait;
+                    * the option is specific to that test. */
+                   " --option=torture:open_brlock_deadlock_timemout=2"
                    /* SMB3 signing algorithms the client offers (see sign_algos
                     * above): GMAC-first only for the signing/encryption subtests
                     * that require it, CMAC otherwise. */
