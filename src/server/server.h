@@ -550,6 +550,24 @@ uint32_t
 chimera_server_config_get_anongid(
     const struct chimera_server_config *config);
 
+void
+chimera_server_config_set_nfs_fh_sign(
+    struct chimera_server_config *config,
+    int                           enable);
+
+int
+chimera_server_config_get_nfs_fh_sign(
+    const struct chimera_server_config *config);
+
+void
+chimera_server_config_set_nfs_fh_key(
+    struct chimera_server_config *config,
+    const char                   *hexkey);
+
+const char *
+chimera_server_config_get_nfs_fh_key(
+    const struct chimera_server_config *config);
+
 static void
 chimera_server_thread_wake(
     struct evpl       *evpl,
@@ -638,6 +656,15 @@ chimera_server_create_export(
     struct chimera_server *server,
     const char            *share_name,
     const char            *share_path);
+
+int
+chimera_server_export_set_options(
+    struct chimera_server *server,
+    const char            *name,
+    uint32_t               options,
+    uint32_t               squash,
+    uint32_t               anonuid,
+    uint32_t               anongid);
 
 struct chimera_server *
 chimera_server_init(

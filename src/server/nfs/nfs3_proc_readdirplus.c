@@ -40,11 +40,16 @@ chimera_nfs3_readdirplus_callback(
     chimera_nfs3_set_post_op_attr(&entry->name_attributes, attrs);
 
     if (attrs->va_set_mask & CHIMERA_VFS_ATTR_FH) {
+        uint8_t wire[CHIMERA_NFS_FH_MAX];
+        int     wirelen;
+
+        /* Entries share the directory's export; wrap each child handle. */
+        chimera_nfs_fh_encode(req, attrs->va_fh, attrs->va_fh_len, wire, &wirelen);
         entry->name_handle.handle_follows = 1;
 
         rc = xdr_dbuf_opaque_copy(&entry->name_handle.handle.data,
-                                  attrs->va_fh,
-                                  attrs->va_fh_len,
+                                  wire,
+                                  wirelen,
                                   req->encoding->dbuf);
         chimera_nfs_abort_if(rc, "Failed to copy opaque");
 
@@ -169,7 +174,7 @@ chimera_nfs3_readdirplus(
     struct nfs_nfs3_readdirplus_cursor *cursor;
 
     req = nfs_request_alloc(thread, conn, encoding);
-    chimera_nfs_map_cred(&req->cred, cred);
+    chimera_nfs_map_cred_req(req, cred);
 
     nfs3_dump_readdirplus(req, args);
 
@@ -186,9 +191,20 @@ chimera_nfs3_readdirplus(
     cursor->entries  = NULL;
     cursor->last     = NULL;
 
+    if (chimera_nfs_fh_decode(req, args->dir.data.data, args->dir.data.len,
+                              req->fh, &req->fhlen) != CHIMERA_NFS_FH_OK) {
+        int rc;
+        memset(res, 0, sizeof(*res));
+        res->status = NFS3ERR_BADHANDLE;
+        rc          = thread->shared->nfs_v3.send_reply_NFSPROC3_READDIRPLUS(evpl, NULL, res, req->encoding);
+        chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
+        nfs_request_free(thread, req);
+        return;
+    }
+
     chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
-                        args->dir.data.data,
-                        args->dir.data.len,
+                        req->fh,
+                        req->fhlen,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
                         chimera_nfs3_readdirplus_open_callback,
                         req);

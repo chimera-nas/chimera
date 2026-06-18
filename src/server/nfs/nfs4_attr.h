@@ -16,6 +16,7 @@
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_pnfs.h"
 #include "nfs4_lease.h"
+#include "nfs_fh_wrap.h"
 
 /* RFC 8275 OPEN-arguments attribute and its enumerations.  Not present in our
  * generated nfs4.x (which stops at FATTR4_SEC_LABEL), so define what we need to
@@ -389,7 +390,10 @@ chimera_nfs4_marshall_attrs(
     uint32_t                        pnfs_layout_type,
     int                             xattr_supported,
     int                             nfs4_delegations,
-    uint32_t                        lease_time_s)
+    uint32_t                        lease_time_s,
+    uint16_t                        export_id,
+    const uint8_t                  *fh_key,
+    int                             fh_sign)
 {
     /* pnfs_layout_type is the single layouttype4 this file's backend supports
      * (LAYOUT4_FLEX_FILES 0x4 or LAYOUT4_BLOCK_VOLUME 0x3), or 0 when pNFS is
@@ -653,15 +657,34 @@ chimera_nfs4_marshall_attrs(
 
         if (req_mask[0] & (1 << FATTR4_FILEHANDLE) &&
             (attr->va_set_mask & CHIMERA_VFS_ATTR_FH)) {
+            const uint8_t *fhp;
+            int            fhl;
+            uint8_t        wire[CHIMERA_NFS_FH_MAX];
+            int            wirelen;
+
+            /* Wrap the FILEHANDLE attribute with its export id (and sign it)
+             * exactly as GETFH would, so a handle a client harvests from
+             * GETATTR/READDIR round-trips through PUTFH.  export_id 0 means a
+             * pseudo-fs / unattributed handle, emitted verbatim. */
+            if (export_id == 0) {
+                fhp = attr->va_fh;
+                fhl = attr->va_fh_len;
+            } else {
+                chimera_nfs_fh_wrap(wire, &wirelen, export_id, attr->va_fh,
+                                    attr->va_fh_len, fh_key, fh_sign);
+                fhp = wire;
+                fhl = wirelen;
+            }
+
             rsp_mask[0]  |= (1 << FATTR4_FILEHANDLE);
             *num_rsp_mask = 1;
 
-            chimera_nfs4_attr_append_uint32(&attrs, attr->va_fh_len);
-            memcpy(attrs, attr->va_fh, attr->va_fh_len);
-            attrs += attr->va_fh_len;
+            chimera_nfs4_attr_append_uint32(&attrs, fhl);
+            memcpy(attrs, fhp, fhl);
+            attrs += fhl;
 
-            if (attr->va_fh_len & 0x3) {
-                uint32_t pad = 4 - (attr->va_fh_len & 0x3);
+            if (fhl & 0x3) {
+                uint32_t pad = 4 - (fhl & 0x3);
                 memset(attrs, 0, pad);
                 attrs += pad;
             }

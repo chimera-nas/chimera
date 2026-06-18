@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <jansson.h>
 
 #include "evpl/evpl.h"
@@ -21,6 +22,32 @@ struct export_list_ctx {
     json_t *array;
 };
 
+/* Populate the per-export access options (mode, squash, anon ids) into obj. */
+static void
+export_options_to_json(
+    const struct chimera_nfs_export *export,
+    json_t                          *obj)
+{
+    json_object_set_new(obj, "options",
+                        json_string(chimera_nfs_export_get_options(export) &
+                                    CHIMERA_NFS_EXPORT_OPT_RO ? "ro" : "rw"));
+    switch (chimera_nfs_export_get_squash(export)) {
+        case CHIMERA_NFS_SQUASH_ALL:
+            json_object_set_new(obj, "squash", json_string("all"));
+            break;
+        case CHIMERA_NFS_SQUASH_NONE:
+            json_object_set_new(obj, "squash", json_string("none"));
+            break;
+        default:
+            json_object_set_new(obj, "squash", json_string("root"));
+            break;
+    } /* switch */
+    json_object_set_new(obj, "anonuid",
+                        json_integer(chimera_nfs_export_get_anonuid(export)));
+    json_object_set_new(obj, "anongid",
+                        json_integer(chimera_nfs_export_get_anongid(export)));
+} /* export_options_to_json */
+
 static int
 export_to_json_callback(
     const struct chimera_nfs_export *export,
@@ -34,6 +61,7 @@ export_to_json_callback(
                         json_string(chimera_nfs_export_get_name(export)));
     json_object_set_new(obj, "path",
                         json_string(chimera_nfs_export_get_path(export)));
+    export_options_to_json(export, obj);
 
     json_array_append_new(ctx->array, obj);
 
@@ -78,6 +106,7 @@ chimera_rest_handle_exports_get(
                         json_string(chimera_nfs_export_get_name(export)));
     json_object_set_new(obj, "path",
                         json_string(chimera_nfs_export_get_path(export)));
+    export_options_to_json(export, obj);
 
     chimera_rest_send_json(evpl, request, 200, obj);
 } /* chimera_rest_handle_exports_get */
@@ -123,13 +152,59 @@ chimera_rest_handle_exports_create(
 
     rc = chimera_server_create_export(thread->shared->server, name, path);
 
-    json_decref(root);
-
     if (rc != 0) {
+        json_decref(root);
         chimera_rest_send_error(evpl, request, 500, "Internal Server Error",
                                 "Failed to create export");
         return;
     }
+
+    /* Apply optional access options.  create_export seeded secure defaults
+     * (root_squash, rw, configured anon); seed from those and override only the
+     * fields present in the request body. */
+    {
+        const struct chimera_nfs_export *created =
+            chimera_server_get_export(thread->shared->server, name);
+        const char                      *opt_s     = json_string_value(json_object_get(root, "options"));
+        const char                      *squash_s  = json_string_value(json_object_get(root, "squash"));
+        json_t                          *anonuid_j = json_object_get(root, "anonuid");
+        json_t                          *anongid_j = json_object_get(root, "anongid");
+        uint32_t                         options   = chimera_nfs_export_get_options(created);
+        uint32_t                         squash    = chimera_nfs_export_get_squash(created);
+        uint32_t                         anonuid   = chimera_nfs_export_get_anonuid(created);
+        uint32_t                         anongid   = chimera_nfs_export_get_anongid(created);
+
+        if (opt_s) {
+            if (strcasecmp(opt_s, "ro") == 0) {
+                options = CHIMERA_NFS_EXPORT_OPT_RO;
+            } else if (strcasecmp(opt_s, "rw") == 0) {
+                options = CHIMERA_NFS_EXPORT_OPT_RW;
+            }
+        }
+        if (squash_s) {
+            if (strcasecmp(squash_s, "none") == 0 ||
+                strcasecmp(squash_s, "no_root_squash") == 0) {
+                squash = CHIMERA_NFS_SQUASH_NONE;
+            } else if (strcasecmp(squash_s, "all") == 0 ||
+                       strcasecmp(squash_s, "all_squash") == 0) {
+                squash = CHIMERA_NFS_SQUASH_ALL;
+            } else if (strcasecmp(squash_s, "root") == 0 ||
+                       strcasecmp(squash_s, "root_squash") == 0) {
+                squash = CHIMERA_NFS_SQUASH_ROOT;
+            }
+        }
+        if (anonuid_j) {
+            anonuid = (uint32_t) json_integer_value(anonuid_j);
+        }
+        if (anongid_j) {
+            anongid = (uint32_t) json_integer_value(anongid_j);
+        }
+
+        chimera_server_export_set_options(thread->shared->server, name, options,
+                                          squash, anonuid, anongid);
+    }
+
+    json_decref(root);
 
     obj = json_object();
     json_object_set_new(obj, "message", json_string("Export created"));

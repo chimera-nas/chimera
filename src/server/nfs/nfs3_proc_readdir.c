@@ -144,7 +144,7 @@ chimera_nfs3_readdir(
     struct nfs_nfs3_readdir_cursor   *cursor;
 
     req = nfs_request_alloc(thread, conn, encoding);
-    chimera_nfs_map_cred(&req->cred, cred);
+    chimera_nfs_map_cred_req(req, cred);
 
     nfs3_dump_readdir(req, args);
 
@@ -159,9 +159,20 @@ chimera_nfs3_readdir(
 
     res->resok.reply.entries = NULL;
 
+    if (chimera_nfs_fh_decode(req, args->dir.data.data, args->dir.data.len,
+                              req->fh, &req->fhlen) != CHIMERA_NFS_FH_OK) {
+        int rc;
+        memset(res, 0, sizeof(*res));
+        res->status = NFS3ERR_BADHANDLE;
+        rc          = thread->shared->nfs_v3.send_reply_NFSPROC3_READDIR(evpl, NULL, res, req->encoding);
+        chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
+        nfs_request_free(thread, req);
+        return;
+    }
+
     chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
-                        args->dir.data.data,
-                        args->dir.data.len,
+                        req->fh,
+                        req->fhlen,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
                         chimera_nfs3_readdir_open_callback,
                         req);

@@ -17,7 +17,9 @@ chimera_nfs4_putrootfh(
     uint32_t              fhlen;
 
     nfs4_root_get_fh(req->fh, &fhlen);
-    req->fhlen = fhlen;
+    req->fhlen     = fhlen;
+    req->export_id = 0;          /* pseudo root: no export, no squash */
+    req->cred      = req->orig_cred;
 
     res->status = NFS4_OK;
 

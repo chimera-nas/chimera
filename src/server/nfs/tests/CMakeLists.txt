@@ -102,6 +102,18 @@ target_include_directories(test_access_xattr PRIVATE
 add_dependencies(test_access_xattr chimera_nfs_common)
 add_test(NAME chimera/server/nfs/access_xattr COMMAND test_access_xattr)
 
+# Unit test for the secure wire file-handle wrapping (nfs_fh_wrap.h) and the
+# per-export credential squashing (nfs_common.h).  Header-logic only, but it
+# pulls in nfs_common.h which needs the generated nfs4_xdr.h, so depend on
+# chimera_nfs_common.
+add_executable(test_fh_security test_fh_security.c)
+target_include_directories(test_fh_security PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${CMAKE_SOURCE_DIR}/src
+    ${NFS_COMMON_INCLUDE_DIR})
+add_dependencies(test_fh_security chimera_nfs_common)
+add_test(NAME chimera/server/nfs/fh_security COMMAND test_fh_security)
+
 # Tag every test registered above with the 'nfs' label so these NFS server unit
 # tests can be run independently via `ctest -L nfs`.
 get_property(_nfs_tests DIRECTORY PROPERTY TESTS)

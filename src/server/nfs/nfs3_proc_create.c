@@ -32,10 +32,14 @@ chimera_nfs3_create_reply(
 
     if (res.status == NFS3_OK) {
         if (attr->va_set_mask & CHIMERA_VFS_ATTR_FH) {
+            uint8_t wire[CHIMERA_NFS_FH_MAX];
+            int     wirelen;
+
+            chimera_nfs_fh_encode(req, handle->fh, handle->fh_len, wire, &wirelen);
             res.resok.obj.handle_follows = 1;
             rc                           = xdr_dbuf_opaque_copy(&res.resok.obj.handle.data,
-                                                                handle->fh,
-                                                                handle->fh_len,
+                                                                wire,
+                                                                wirelen,
                                                                 req->encoding->dbuf);
             chimera_nfs_abort_if(rc, "Failed to copy opaque");
         } else {
@@ -197,18 +201,31 @@ chimera_nfs3_create(
     void                      *private_data)
 {
     struct chimera_server_nfs_thread *thread = private_data;
+    struct chimera_server_nfs_shared *shared = thread->shared;
     struct nfs_request               *req;
+    struct CREATE3res                 res;
+    int                               rc;
 
     req = nfs_request_alloc(thread, conn, encoding);
-    chimera_nfs_map_cred(&req->cred, cred);
+    chimera_nfs_map_cred_req(req, cred);
 
     nfs3_dump_create(req, args);
 
     req->args_create = args;
 
+    if (chimera_nfs_fh_decode(req, args->where.dir.data.data, args->where.dir.data.len,
+                              req->fh, &req->fhlen) != CHIMERA_NFS_FH_OK) {
+        memset(&res, 0, sizeof(res));
+        res.status = NFS3ERR_BADHANDLE;
+        rc         = shared->nfs_v3.send_reply_NFSPROC3_CREATE(evpl, NULL, &res, req->encoding);
+        chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
+        nfs_request_free(thread, req);
+        return;
+    }
+
     chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
-                        args->where.dir.data.data,
-                        args->where.dir.data.len,
+                        req->fh,
+                        req->fhlen,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
                         chimera_nfs3_create_open_at_parent_complete,
                         req);

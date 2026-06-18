@@ -717,6 +717,19 @@ main(
         chimera_server_config_set_state_dir(server_config, json_string_value(json_value));
     }
 
+    /* nfs_fh_sign: sign wire file handles (default true).  nfs_fh_key: optional
+     * 32-hex-char (128-bit) signing key, required when multiple nodes must mint
+     * interchangeable handles. */
+    json_value = json_object_get(server_params, "nfs_fh_sign");
+    if (json_value) {
+        chimera_server_config_set_nfs_fh_sign(server_config,
+                                              json_is_true(json_value) ? 1 : 0);
+    }
+    json_value = json_object_get(server_params, "nfs_fh_key");
+    if (json_is_string(json_value)) {
+        chimera_server_config_set_nfs_fh_key(server_config, json_string_value(json_value));
+    }
+
     json_t *rest_http_port_value = json_object_get(server_params, "rest_http_port");
     if (rest_http_port_value && json_is_integer(rest_http_port_value)) {
         int rest_http_port = json_integer_value(rest_http_port_value);
@@ -998,9 +1011,74 @@ main(
     if (exports) {
         json_object_foreach(exports, name, export)
         {
+            json_t     *opt_j     = json_object_get(export, "options");
+            json_t     *squash_j  = json_object_get(export, "squash");
+            json_t     *rsq_j     = json_object_get(export, "root_squash");
+            json_t     *norsq_j   = json_object_get(export, "no_root_squash");
+            json_t     *allsq_j   = json_object_get(export, "all_squash");
+            json_t     *anonuid_j = json_object_get(export, "anonuid");
+            json_t     *anongid_j = json_object_get(export, "anongid");
+            const char *opt_s     = json_string_value(opt_j);
+            const char *squash_s  = json_string_value(squash_j);
+            uint32_t    options   = CHIMERA_NFS_EXPORT_OPT_RW;
+            uint32_t    squash    = CHIMERA_NFS_SQUASH_NONE;
+            uint32_t    anonuid   = chimera_server_config_get_anonuid(server_config);
+            uint32_t    anongid   = chimera_server_config_get_anongid(server_config);
+
             path = json_string_value(json_object_get(export, "path"));
-            chimera_server_info("Adding NFS export %s -> %s", name, path);
+
+            /* Access mode: "ro" | "rw" (default rw). */
+            if (opt_s) {
+                if (strcasecmp(opt_s, "ro") == 0) {
+                    options = CHIMERA_NFS_EXPORT_OPT_RO;
+                } else if (strcasecmp(opt_s, "rw") == 0) {
+                    options = CHIMERA_NFS_EXPORT_OPT_RW;
+                } else {
+                    chimera_server_error("Invalid export '%s' options value '%s' "
+                                         "(expected ro/rw)", name, opt_s);
+                }
+            }
+
+            /* Squash policy.  Default is no squashing.  An explicit "squash"
+             * string takes precedence; otherwise the all_squash / root_squash /
+             * no_root_squash booleans act as aliases. */
+            if (squash_s) {
+                if (strcasecmp(squash_s, "none") == 0 ||
+                    strcasecmp(squash_s, "no_root_squash") == 0) {
+                    squash = CHIMERA_NFS_SQUASH_NONE;
+                } else if (strcasecmp(squash_s, "root") == 0 ||
+                           strcasecmp(squash_s, "root_squash") == 0) {
+                    squash = CHIMERA_NFS_SQUASH_ROOT;
+                } else if (strcasecmp(squash_s, "all") == 0 ||
+                           strcasecmp(squash_s, "all_squash") == 0) {
+                    squash = CHIMERA_NFS_SQUASH_ALL;
+                } else {
+                    chimera_server_error("Invalid export '%s' squash value '%s' "
+                                         "(expected none/root/all)", name, squash_s);
+                }
+            } else if (allsq_j && json_is_true(allsq_j)) {
+                squash = CHIMERA_NFS_SQUASH_ALL;
+            } else if (rsq_j && json_is_true(rsq_j)) {
+                squash = CHIMERA_NFS_SQUASH_ROOT;
+            } else if (norsq_j && json_is_true(norsq_j)) {
+                squash = CHIMERA_NFS_SQUASH_NONE;
+            }
+
+            if (anonuid_j) {
+                anonuid = (uint32_t) json_integer_value(anonuid_j);
+            }
+            if (anongid_j) {
+                anongid = (uint32_t) json_integer_value(anongid_j);
+            }
+
+            chimera_server_info("Adding NFS export %s -> %s (%s, %s)", name, path,
+                                options & CHIMERA_NFS_EXPORT_OPT_RO ? "ro" : "rw",
+                                squash == CHIMERA_NFS_SQUASH_ALL ? "all_squash" :
+                                squash == CHIMERA_NFS_SQUASH_NONE ? "no_root_squash" :
+                                "root_squash");
             chimera_server_create_export(server, name, path);
+            chimera_server_export_set_options(server, name, options, squash,
+                                              anonuid, anongid);
         }
     }
 
