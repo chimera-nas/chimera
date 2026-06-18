@@ -76,7 +76,8 @@ add_library(chimera_posix SHARED
             posix_fdopen.c
             posix_statfs.c
             posix_copy_file_range.c
-            posix_clone_file_range.c)
+            posix_clone_file_range.c
+            posix_write_same.c)
 
 target_link_libraries(chimera_posix chimera_client evpl pthread)
 

@@ -623,6 +623,22 @@ diskfs_setattr_trunc_removed_cb(
 } /* diskfs_setattr_trunc_removed_cb */
 
 
+/* Remove the (about-to-be-trimmed-or-dropped) extent's slot; the continuation
+ * reinserts the surviving head for the trim case, or advances. */
+static void
+diskfs_setattr_trunc_remove_slot(struct chimera_vfs_request *request)
+{
+    struct diskfs_request_private *p      = request->plugin_data;
+    struct diskfs_thread          *thread = p->thread;
+    struct diskfs_bt_op           *op     = diskfs_bt_op_alloc(thread);
+    struct diskfs_bt_key           key    = diskfs_extent_key(p->ext_iter.file_offset);
+
+    if (diskfs_bt_remove_async(op, thread, p->txn, p->inode_stash[0], &key,
+                               diskfs_setattr_trunc_removed_cb, request)) {
+        diskfs_setattr_trunc_removed_cb(op, op->result, request);
+    }
+} /* diskfs_setattr_trunc_remove_slot */
+
 static void
 diskfs_setattr_trunc_process(struct chimera_vfs_request *request)
 {
@@ -630,7 +646,6 @@ diskfs_setattr_trunc_process(struct chimera_vfs_request *request)
     struct diskfs_thread          *thread   = p->thread;
     uint64_t                       new_size = p->loop_off;
     uint64_t                       extent_start, extent_end;
-    struct diskfs_bt_op           *op;
 
     if (!p->loop_have) {
         diskfs_setattr_trunc_done(request);
@@ -641,34 +656,29 @@ diskfs_setattr_trunc_process(struct chimera_vfs_request *request)
     extent_end   = extent_start + p->ext_iter.length;
 
     if (extent_start >= new_size) {
-        diskfs_thread_free_space(thread, p->txn, p->ext_iter.device_id,
-                                 p->ext_iter.device_offset,
-                                 SM_ALIGN_UP(p->ext_iter.length));
+        /* Full remove: release the backing (decrement if reflink-shared, freeing
+         * only at the last owner), then drop the slot. */
+        diskfs_ext_release(request, &p->ext_iter, diskfs_setattr_trunc_remove_slot);
+        return;
     } else if (extent_end > new_size) {
         uint64_t old_aligned = SM_ALIGN_UP(p->ext_iter.length);
         uint64_t new_logical = new_size - extent_start;
         uint64_t new_aligned = SM_ALIGN_UP(new_logical);
 
-        if (old_aligned > new_aligned) {
+        /* A shared extent keeps its tail blocks (other owners reference the full
+         * device range; the refcount frees them at the last owner).  Only a
+         * private extent frees the trimmed tail here. */
+        if (!(p->ext_iter.flags & DISKFS_EXT_SHARED) && old_aligned > new_aligned) {
             diskfs_thread_free_space(thread, p->txn, p->ext_iter.device_id,
                                      p->ext_iter.device_offset + new_aligned,
                                      old_aligned - new_aligned);
         }
+        diskfs_setattr_trunc_remove_slot(request);
+        return;
     } else {
         /* Extent entirely within new size: nothing to do, just advance. */
         diskfs_setattr_trunc_advance(request);
         return;
-    }
-
-    /* Both the full-remove and trim cases start by removing the slot. */
-    op = diskfs_bt_op_alloc(thread);
-    {
-        struct diskfs_bt_key key = diskfs_extent_key(extent_start);
-
-        if (diskfs_bt_remove_async(op, thread, p->txn, p->inode_stash[0], &key,
-                                   diskfs_setattr_trunc_removed_cb, request)) {
-            diskfs_setattr_trunc_removed_cb(op, op->result, request);
-        }
     }
 } /* diskfs_setattr_trunc_process */
 
@@ -890,6 +900,7 @@ diskfs_setattr_inode_cb(
     diskfs_apply_attrs(inode, request->setattr.set_attr);
 
     p->inode_stash[0] = inode;
+    p->inode_stash[2] = NULL;   /* refcount inode (acquired lazily on shared free) */
 
     /* Persist the opaque pNFS layout blob as this inode's single PNFS record,
      * replacing any previous one (the insert aborts on a duplicate key).  The

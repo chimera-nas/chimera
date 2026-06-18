@@ -7,6 +7,7 @@ add_library(chimera_vfs_diskfs SHARED
     diskfs_attr.c
     diskfs_block.c
     diskfs_btree.c
+    diskfs_clone.c
     diskfs_inode.c
     diskfs_io.c
     diskfs_log.c

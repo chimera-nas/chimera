@@ -264,6 +264,29 @@ chimera_copy_range(
     chimera_copy_range_callback_t   callback,
     void                           *private_data);
 
+typedef void (*chimera_write_same_callback_t)(
+    struct chimera_client_thread *thread,
+    enum chimera_vfs_error        status,
+    uint64_t                      bytes_written,
+    void                         *private_data);
+
+/* NFSv4.2 WRITE_SAME: write `block_count` blocks of `block_size` bytes from
+ * `offset`, each zero-filled with `pattern` placed at `reloff_pattern`.
+ * Requires CHIMERA_VFS_CAP_WRITE_SAME on the backend; ENOTSUP otherwise.
+ */
+void
+chimera_write_same(
+    struct chimera_client_thread   *thread,
+    struct chimera_vfs_open_handle *handle,
+    uint64_t                        offset,
+    uint32_t                        block_size,
+    uint64_t                        block_count,
+    const void                     *pattern,
+    uint32_t                        pattern_len,
+    uint32_t                        reloff_pattern,
+    chimera_write_same_callback_t   callback,
+    void                           *private_data);
+
 typedef void (*chimera_clone_range_callback_t)(
     struct chimera_client_thread *thread,
     enum chimera_vfs_error        status,

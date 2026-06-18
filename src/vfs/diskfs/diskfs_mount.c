@@ -1471,6 +1471,48 @@ diskfs_bootstrap(struct diskfs_thread *thread)
         oin->block = NULL;
     }
 
+    /* Statically-reserved extent-refcount inodes (inums after the orphan
+     * shards): empty b+trees holding DISKFS_REC_REFCOUNT records that count how
+     * many inodes share a reflinked (CLONE) device range.  Created at format
+     * alongside root; persist and load from disk on remount. */
+    for (int s = 0; s < DISKFS_REFCOUNT_SHARDS; s++) {
+        uint64_t             rinum = DISKFS_REFCOUNT_INUM_BASE + s;
+        uint32_t             rdev;
+        uint64_t             roff = sm_inum_to_device_offset(shared->space_map,
+                                                             rinum, &rdev);
+        struct diskfs_inode *rin = diskfs_inode_struct_new(rinum);
+
+        rin->size           = 4096;
+        rin->space_used     = 4096;
+        rin->nlink          = 1;
+        rin->mode           = S_IFREG | 0600;
+        rin->atime_sec      = now.tv_sec;
+        rin->atime_nsec     = now.tv_nsec;
+        rin->mtime_sec      = now.tv_sec;
+        rin->mtime_nsec     = now.tv_nsec;
+        rin->ctime_sec      = now.tv_sec;
+        rin->ctime_nsec     = now.tv_nsec;
+        rin->btime_sec      = now.tv_sec;
+        rin->btime_nsec     = now.tv_nsec;
+        rin->dos_attributes = 0;
+        rin->parent_inum    = rinum;
+        rin->parent_gen     = rin->gen;
+
+        diskfs_inode_cache_insert(shared, rin);
+
+        rin->block = diskfs_block_claim(thread, rdev, roff, 1);
+        diskfs_bt_node_init(rin->block->iov.data, DISKFS_BT_ROOT_BASE,
+                            DISKFS_BT_ROOT_CAP, 0);
+        diskfs_inode_flush(rin);
+        rc = diskfs_mount_io_write(mio, rdev, rin->block->iov.data,
+                                   DISKFS_BLOCK_SIZE, roff);
+        chimera_diskfs_abort_if(rc != 0, "bootstrap refcount write failed");
+        diskfs_mount_io_flush(mio, rdev);
+        rin->block->state = DISKFS_BLOCK_CLEAN;
+        diskfs_block_unpin(thread, rin->block, DISKFS_BLOCK_CLEAN);
+        rin->block = NULL;
+    }
+
     /* Create 16-byte fsid buffer for root FH encoding (8-byte fsid + 8 bytes padding) */
     {
         uint8_t fsid_buf[CHIMERA_VFS_FSID_SIZE] = { 0 };
