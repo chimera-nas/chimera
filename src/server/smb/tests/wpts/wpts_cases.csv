@@ -177,8 +177,8 @@ MultipleChannel_FileLease,multichannel,green,0,
 MultipleChannel_LockUnlockOnDiffChannel,multichannel,green,0,
 MultipleChannel_LockUnlockOnSameChannel,multichannel,green,0,
 MultipleChannel_MultiChannelOnSameNic,multichannel,green,0,
-MultipleChannel_Negative_EncryptionOnAlternativeChannel,base,skip,0,env-2nic
-MultipleChannel_Negative_EncryptionOnMainChannel,base,skip,0,env-2nic
+MultipleChannel_Negative_EncryptionOnAlternativeChannel,multichannel_persistent_encryption,green,0,
+MultipleChannel_Negative_EncryptionOnMainChannel,multichannel_persistent_encryption,green,0,
 MultipleChannel_Negative_SMB2002,multichannel,green,0,
 MultipleChannel_Negative_SMB21,multichannel,green,0,
 MultipleChannel_NicRedundantOnClient,multichannel,green,0,
