@@ -276,7 +276,12 @@ NFSTEST_CMD="PYTHONPATH=/opt/nfstest /opt/nfstest/test/${NFSTEST_PROGRAM} \
 # KVM_DIAG_CMD overrides the nfstest invocation with an arbitrary diagnostic
 # command run on guest A after B's sshd is up (manual harness debugging).
 RUN_CMD="${KVM_DIAG_CMD:-${NFSTEST_CMD}}"
-TEST_CMD="${SSHFIX}; mkdir -p /mnt/t && for i in \$(seq 1 120); do ssh -o ConnectTimeout=2 10.0.0.3 true 2>/dev/null && break; sleep 1; done && ${RUN_CMD}"
+# Fail fast and loudly if the second client is unusable, rather than letting
+# nfstest emit hundreds of cryptic create_rexec tracebacks (an image without an
+# ssh client, or an unreachable/never-booted B, otherwise wastes the full 120s
+# wait and then fails inside the suite).  No double-quotes here: the kernel
+# cmdline parser truncates test_cmd at the first one.
+TEST_CMD="${SSHFIX}; mkdir -p /mnt/t; command -v ssh >/dev/null 2>&1 || { echo CHIMERA_KVM_FATAL: ssh client missing on guest image, cannot run 2-client test; exit 1; }; ok=0; for i in \$(seq 1 120); do ssh -o ConnectTimeout=2 10.0.0.3 true 2>/dev/null && { ok=1; break; }; sleep 1; done; [ \$ok = 1 ] || { echo CHIMERA_KVM_FATAL: second client 10.0.0.3 unreachable after 120s; exit 1; }; ${RUN_CMD}"
 
 ip netns exec "${NETNS_NAME}" "$QEMU_BIN" \
     -enable-kvm -smp 4 -m 2G -cpu host \
