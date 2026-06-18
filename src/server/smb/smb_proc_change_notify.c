@@ -188,6 +188,8 @@ chimera_smb_change_notify(struct chimera_smb_request *request)
         nevents = j;
     }
 
+    nevents = chimera_smb_notify_coalesce_events(events, nevents);
+
     if (nevents > 0 || overflowed) {
         pthread_mutex_unlock(&state->lock);
 
@@ -214,6 +216,15 @@ chimera_smb_change_notify(struct chimera_smb_request *request)
             if (consumed < nevents) {
                 overflowed = 1;
                 nevents    = 0;
+
+                /* Events dropped for not fitting the client's non-zero
+                 * OutputBufferLength: make the next CHANGE_NOTIFY on this
+                 * handle report overflow too, until the client rescans
+                 * (smb2.notify.valid-req).  Buffer == 0 is a poll and does
+                 * not stick. */
+                if (request->change_notify.output_buffer_length > 0) {
+                    chimera_vfs_notify_mark_overflow(state->watch);
+                }
             }
         }
 

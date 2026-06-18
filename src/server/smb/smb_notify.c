@@ -218,6 +218,50 @@ chimera_smb_notify_write_record(
     return aligned;
 } /* chimera_smb_notify_write_record */
 
+/* The FILE_ACTION_* a non-rename event serializes to.  Shared by the
+ * serializer and the coalescer so they agree on a record's identity. */
+static uint32_t
+chimera_smb_notify_file_action(uint32_t a)
+{
+    if (a & (CHIMERA_VFS_NOTIFY_FILE_ADDED | CHIMERA_VFS_NOTIFY_DIR_ADDED)) {
+        return FILE_ACTION_ADDED;
+    } else if (a & (CHIMERA_VFS_NOTIFY_FILE_REMOVED | CHIMERA_VFS_NOTIFY_DIR_REMOVED)) {
+        return FILE_ACTION_REMOVED;
+    }
+    return FILE_ACTION_MODIFIED;
+} /* chimera_smb_notify_file_action */
+
+int
+chimera_smb_notify_coalesce_events(
+    struct chimera_vfs_notify_event *events,
+    int                              nevents)
+{
+    int i, j = 0;
+
+    for (i = 0; i < nevents; i++) {
+        /* Rename events carry a distinct OLD/NEW pair and are never merged. */
+        if (j > 0 &&
+            !(events[i].action & CHIMERA_VFS_NOTIFY_RENAMED) &&
+            !(events[j - 1].action & CHIMERA_VFS_NOTIFY_RENAMED) &&
+            chimera_smb_notify_file_action(events[i].action) ==
+            chimera_smb_notify_file_action(events[j - 1].action) &&
+            events[i].name_len == events[j - 1].name_len &&
+            memcmp(events[i].name, events[j - 1].name, events[i].name_len) == 0) {
+            /* Same record as the previous kept event — fold the class bits in
+            * (harmless; matching already happened) and drop the duplicate. */
+            events[j - 1].action |= events[i].action;
+            continue;
+        }
+
+        if (i != j) {
+            events[j] = events[i];
+        }
+        j++;
+    }
+
+    return j;
+} /* chimera_smb_notify_coalesce_events */
+
 /* ----------------------------------------------------------------
  * Serialize VFS notify events into FILE_NOTIFY_INFORMATION records.
  * RENAMED events produce two records (OLD_NAME + NEW_NAME).
@@ -296,13 +340,7 @@ chimera_smb_notify_serialize_events(
              * smbtorture smb2.notify.mask, which requires ACTION_MODIFIED for
              * a write under every filter bit).  So the stream bits only widen
              * which watchers are notified; they do not change the action. */
-            if (ev->action & (CHIMERA_VFS_NOTIFY_FILE_ADDED | CHIMERA_VFS_NOTIFY_DIR_ADDED)) {
-                action = FILE_ACTION_ADDED;
-            } else if (ev->action & (CHIMERA_VFS_NOTIFY_FILE_REMOVED | CHIMERA_VFS_NOTIFY_DIR_REMOVED)) {
-                action = FILE_ACTION_REMOVED;
-            } else {
-                action = FILE_ACTION_MODIFIED;
-            }
+            action = chimera_smb_notify_file_action(ev->action);
 
             if (prev_entry) {
                 *(uint32_t *) prev_entry = (uint32_t) (p - prev_entry);
@@ -548,6 +586,8 @@ chimera_smb_notify_do_send_response(
         nevents = j;
     }
 
+    nevents = chimera_smb_notify_coalesce_events(events, nevents);
+
     if (nevents == 0 && !overflowed && !cleanup && !deleted) {
         /* All drained events were filtered out — treat as a spurious
          * wakeup.  Leave state->pending == nr so the next matching
@@ -657,6 +697,16 @@ chimera_smb_notify_do_send_response(
         if (consumed < nevents) {
             overflowed      = 1;
             notify_data_len = 0;
+
+            /* The drained events were discarded because they did not fit the
+            * client's OutputBufferLength.  A client that asked for a non-zero
+            * buffer and still could not be served has lost events, so the
+            * next CHANGE_NOTIFY on this handle must also report overflow until
+            * the client rescans (smb2.notify.valid-req).  OutputBufferLength
+            * == 0 is a deliberate "poll without data" and does not stick. */
+            if (nr->output_buffer_length > 0) {
+                chimera_vfs_notify_mark_overflow(state->watch);
+            }
         }
         p = data_start + notify_data_len;
 

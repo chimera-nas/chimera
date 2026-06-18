@@ -209,6 +209,19 @@ chimera_smb_notify_serialize_events(
     int                             *events_consumed);
 
 /*
+ * Collapse runs of adjacent events that serialize to the same
+ * FILE_NOTIFY_INFORMATION record (same FILE_ACTION + same name).  A single
+ * client-visible operation can drive several VFS events (e.g. a create stamps
+ * the data fork then its size/attributes), and Windows reports one record per
+ * (action,name) transition.  Applied after the per-request filter so the count
+ * the client sees matches.  Returns the new event count.
+ */
+int
+chimera_smb_notify_coalesce_events(
+    struct chimera_vfs_notify_event *events,
+    int                              nevents);
+
+/*
  * Map an SMB2 CHANGE_NOTIFY CompletionFilter (Windows-style bits) to
  * the chimera VFS event mask.  Exposed so the async response builder
  * can re-filter ring contents against the *current request's* filter
