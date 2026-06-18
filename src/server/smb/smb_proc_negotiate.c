@@ -952,10 +952,12 @@ chimera_smb_select_negotiated_algorithms(
         }
     } else if (conn->dialect >= SMB2_DIALECT_3_0 &&
                conn->dialect < SMB2_DIALECT_3_1_1 &&
-               conn->thread->shared->config.encryption) {
+               (conn->thread->shared->config.encryption ||
+                conn->thread->shared->any_share_encrypt)) {
         /* SMB 3.0/3.0.2 has no encryption-capabilities context; the only cipher
          * is AES-128-CCM (MS-SMB2 §3.1.4.3).  Set it so SESSION_SETUP can derive
-         * keys when encryption is enabled. */
+         * keys when encryption is enabled globally OR a per-share-encrypted tree
+         * may be reached on this connection. */
         conn->negotiated.cipher_id = SMB2_ENCRYPTION_AES_128_CCM;
     }
 

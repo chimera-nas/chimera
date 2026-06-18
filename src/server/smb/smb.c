@@ -1073,6 +1073,27 @@ chimera_smb_compound_advance(struct chimera_smb_compound *compound)
         return;
     }
 
+    /* Per-share transport encryption (MS-SMB2 3.3.5.2.11): a share that requires
+     * encryption (SMB2_SHAREFLAG_ENCRYPT_DATA) rejects any request that did not
+     * arrive encrypted with STATUS_ACCESS_DENIED.  The TREE_CONNECT that
+     * discovers the requirement has no resolved tree yet (request->tree is NULL)
+     * and is exempt, so the client learns the share is encrypted from the reply
+     * and retries its file operations encrypted; every later op on the tree
+     * (CREATE, TREE_DISCONNECT, ...) must be encrypted.  A session marked
+     * globally encrypt-all (Session.EncryptData) is handled earlier -- an
+     * unsigned, unencrypted request on it is a protocol violation that already
+     * tore the connection down -- so this is the per-share-only path where the
+     * session is otherwise cleartext. */
+    if (unlikely(request->tree && request->tree->share &&
+                 request->tree->share->encrypt_data &&
+                 !compound->received_encrypted)) {
+        if (request->smb2_hdr.command == SMB2_WRITE) {
+            evpl_iovecs_release(compound->thread->evpl, request->write.iov, request->write.niov);
+        }
+        chimera_smb_complete_request(request, SMB2_STATUS_ACCESS_DENIED);
+        return;
+    }
+
     switch (request->smb2_hdr.command) {
         case SMB2_NEGOTIATE:
             chimera_smb_negotiate(request);
