@@ -3973,7 +3973,8 @@ main(
                 /* unsafe_async: tests below do not exercise crash recovery, so skip
                  * FUA/sync on writes to run lighter. */
                 snprintf(diskfs_cfg + off, sizeof(diskfs_cfg) - off,
-                         "],\"initialize\":true,\"unsafe_async\":true}");
+                         "],\"initialize\":true,\"unsafe_async\":true,"
+                         "\"intent_log_size\":67108864}");
 
                 chimera_server_config_add_module(chimera_server_config, "diskfs", NULL, diskfs_cfg);
             } else if (strcmp(chimera_nfs_backend, "cairn") == 0) {

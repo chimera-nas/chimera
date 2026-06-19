@@ -55,6 +55,8 @@ enum chimera_client_request_opcode {
     CHIMERA_CLIENT_OP_LOCK,
     CHIMERA_CLIENT_OP_COPY_RANGE,
     CHIMERA_CLIENT_OP_CLONE_RANGE,
+    CHIMERA_CLIENT_OP_ALLOCATE,
+    CHIMERA_CLIENT_OP_SEEK,
 };
 
 struct chimera_client_request;
@@ -330,6 +332,23 @@ struct chimera_client_request {
 
         struct {
             struct chimera_vfs_open_handle *handle;
+            uint64_t                        offset;
+            uint64_t                        length;
+            uint32_t                        flags;
+            chimera_commit_callback_t       callback;
+            void                           *private_data;
+        } allocate;
+
+        struct {
+            struct chimera_vfs_open_handle *handle;
+            uint64_t                        offset;
+            uint32_t                        what;   /* 0 = SEEK_DATA, 1 = SEEK_HOLE */
+            chimera_seek_callback_t         callback;
+            void                           *private_data;
+        } seek;
+
+        struct {
+            struct chimera_vfs_open_handle *handle;
             chimera_statfs_callback_t       callback;
             void                           *private_data;
             int                             path_len;
@@ -378,6 +397,22 @@ struct chimera_client_request {
             chimera_clone_range_callback_t  callback;
             void                           *private_data;
         } clone_range;
+
+        /* GETACL: resolve `path`, open an O_PATH handle, getattr CHIMERA_VFS_
+         * ATTR_ACL, and copy the returned ACL into the caller-owned `acl_buf`
+         * (capacity `acl_bufsize` bytes).  r_acl_aces is set to the object's ACE
+         * count even when the buffer is too small (so the caller can size a
+         * retry); CHIMERA_VFS_ERANGE is returned in that case. */
+        struct {
+            struct chimera_vfs_open_handle *handle;
+            chimera_setattr_callback_t      callback;
+            void                           *private_data;
+            int                             path_len;
+            struct chimera_acl             *acl_buf;
+            size_t                          acl_bufsize;
+            uint16_t                        r_acl_aces;
+            char                            path[CHIMERA_VFS_PATH_MAX];
+        } getacl;
     };
 } __attribute__((aligned(64)));
 

@@ -44,6 +44,10 @@ add_executable(vfs_enforce_test vfs_enforce_test.c)
 target_link_libraries(vfs_enforce_test chimera_vfs chimera_vfs_memfs evpl)
 add_test(chimera/vfs/enforce_test vfs_enforce_test)
 
+add_executable(vfs_clone_range_test vfs_clone_range_test.c)
+target_link_libraries(vfs_clone_range_test chimera_vfs chimera_vfs_memfs evpl)
+add_test(chimera/vfs/clone_range_test vfs_clone_range_test)
+
 add_executable(vfs_idmap_test vfs_idmap_test.c)
 target_link_libraries(vfs_idmap_test chimera_vfs)
 add_test(chimera/vfs/idmap_test vfs_idmap_test)
@@ -55,6 +59,29 @@ add_test(chimera/vfs/identity_test vfs_identity_test)
 add_executable(vfs_statfs_mask_test vfs_statfs_mask_test.c)
 target_link_libraries(vfs_statfs_mask_test chimera_vfs chimera_vfs_memfs chimera_vfs_memkv evpl urcu-qsbr)
 add_test(chimera/vfs/statfs_mask_test vfs_statfs_mask_test)
+
+# zero_range reproducer / regression: VFS zero_range (DEALLOCATE+ALLOCATE) data
+# integrity, parameterized by backend.  memfs/linux confirm the invariant holds
+# (and that the model checker is sound); the diskfs cases reproduce the bug.
+add_executable(vfs_zerorange_test vfs_zerorange_test.c)
+target_link_libraries(vfs_zerorange_test chimera_vfs chimera_vfs_memfs
+    chimera_vfs_linux chimera_vfs_diskfs chimera_vfs_memkv evpl urcu-qsbr)
+# Engine-managed backends only: deterministic and host-fs-independent.  memfs
+# and cairn confirm the invariant holds; the diskfs cases reproduce the bug.
+# The linux / io_uring passthrough backends are also valid CLI args for manual
+# runs (their libs are linked), but they are not registered as tests -- their
+# fallocate behavior is the host kernel's and is unreliable under the
+# container / CI filesystems.
+add_test(NAME chimera/vfs/zerorange_memfs COMMAND vfs_zerorange_test memfs)
+add_test(NAME chimera/vfs/zerorange_diskfs_aio COMMAND vfs_zerorange_test diskfs_aio)
+if(CHIMERA_VFS_IO_URING)
+    target_link_libraries(vfs_zerorange_test chimera_vfs_io_uring)
+    add_test(NAME chimera/vfs/zerorange_diskfs_io_uring COMMAND vfs_zerorange_test diskfs_io_uring)
+endif()
+if(CAIRN_ENABLED)
+    target_link_libraries(vfs_zerorange_test chimera_vfs_cairn)
+    add_test(NAME chimera/vfs/zerorange_cairn COMMAND vfs_zerorange_test cairn)
+endif()
 
 # Tag every test registered above with the 'vfs' label so the suite can be run
 # independently via `ctest -L vfs`.

@@ -269,6 +269,31 @@ chimera_smb_query_info(struct chimera_smb_request *request)
 
     switch (request->query_info.info_type) {
         case SMB2_INFO_FILE:
+            /* The attribute-bearing FILE info classes require the handle to
+             * hold FILE_READ_ATTRIBUTES (MS-FSA 2.1.5.11): a handle opened with
+             * only FILE_READ_DATA cannot query FileBasicInformation and friends
+             * -> STATUS_ACCESS_DENIED (smb2.streams.attributes1).  Classes that
+             * carry no file attributes (standard sizes, internal id, EA size,
+             * position, mode, alignment, access, name) are not gated. */
+            switch (request->query_info.info_class) {
+                case SMB2_FILE_BASIC_INFO:
+                case SMB2_FILE_NETWORK_OPEN_INFO:
+                case SMB2_FILE_ATTRIBUTE_TAG_INFO:
+                case SMB2_FILE_COMPRESSION_INFO:
+                case SMB2_FILE_ALL_INFO:
+                    if (!(request->query_info.open_file->granted_access &
+                          SMB2_FILE_READ_ATTRIBUTES)) {
+                        status = SMB2_STATUS_ACCESS_DENIED;
+                    }
+                    break;
+                default:
+                    break;
+            } /* switch */
+
+            if (status != SMB2_STATUS_SUCCESS) {
+                break;
+            }
+
             /* Calculate the output buffer length based on the info class */
             switch (request->query_info.info_class) {
                 case SMB2_FILE_BASIC_INFO:
@@ -318,8 +343,15 @@ chimera_smb_query_info(struct chimera_smb_request *request)
                     getattr_mask                      = CHIMERA_VFS_ATTR_MASK_STAT;
                     break;
                 case SMB2_FILE_ALL_INFO:
-                    request->query_info.output_length = SMB2_FILE_ALL_INFO_FIXED_SIZE + request->query_info.open_file->
-                        name_len + 4;
+                    /* FileAllInformation (MS-FSCC 2.4.2): the fixed 100 bytes
+                     * (FileNameLength field included) followed by the
+                     * share-relative path as UTF-16LE (full_path_len*2).  The
+                     * share root has an empty path; Windows reports its name as
+                     * "\" (2 bytes) so the reply clears the Linux cifs client's
+                     * 101-byte FILE_ALL_INFO minimum (see chimera_smb_append_all_info). */
+                    request->query_info.output_length = SMB2_FILE_ALL_INFO_FIXED_SIZE +
+                        (request->query_info.open_file->full_path_len
+                         ? request->query_info.open_file->full_path_len * 2 : 2);
                     /* The fixed portion ends after the FileNameLength field; a
                      * shorter buffer is INFO_LENGTH_MISMATCH (smbtorture uses
                      * fixed=104 here). */
@@ -329,8 +361,9 @@ chimera_smb_query_info(struct chimera_smb_request *request)
                 case SMB2_FILE_NORMALIZED_NAME_INFO:
                     /* MS-FSCC 2.4.30 FILE_NAME_INFORMATION layout (FileNameLength
                      * + FileName in UTF-16LE).  The normalized name is the open's
-                     * path, which we already hold (as UTF-8) — no backend attrs. */
-                    request->query_info.output_length = 4 + request->query_info.open_file->name_len * 2;
+                     * share-relative path, which we already hold (as UTF-8) — no
+                     * backend attrs. */
+                    request->query_info.output_length = 4 + request->query_info.open_file->full_path_len * 2;
                     request->query_info.min_length    = 4;
                     break;
                 case SMB2_FILE_FULL_EA_INFO:
@@ -501,20 +534,21 @@ chimera_smb_query_info_reply(
                 case SMB2_FILE_NORMALIZED_NAME_INFO:
                 {
                     /* FILE_NAME_INFORMATION: FileNameLength (UTF-16LE bytes)
-                     * followed by the name converted to UTF-16LE. */
+                     * followed by the share-relative path converted to UTF-16LE. */
                     struct chimera_smb_open_file *of = request->query_info.open_file;
                     uint16_t                     *nb;
 
-                    evpl_iovec_cursor_append_uint32(reply_cursor, of->name_len * 2);
+                    evpl_iovec_cursor_append_uint32(reply_cursor, of->full_path_len * 2);
                     nb = evpl_iovec_cursor_data(reply_cursor);
                     chimera_smb_utf8_to_utf16le(&request->compound->thread->iconv_ctx,
-                                                of->name, of->name_len,
-                                                nb, SMB_FILENAME_MAX * 2);
-                    evpl_iovec_cursor_skip(reply_cursor, of->name_len * 2);
+                                                of->full_path, of->full_path_len,
+                                                nb, SMB_PATH_MAX * 2);
+                    evpl_iovec_cursor_skip(reply_cursor, of->full_path_len * 2);
                     break;
                 }
                 case SMB2_FILE_ALL_INFO:
-                    chimera_smb_append_all_info(reply_cursor, request->query_info.open_file, &request->query_info.
+                    chimera_smb_append_all_info(&request->compound->thread->iconv_ctx,
+                                                reply_cursor, request->query_info.open_file, &request->query_info.
                                                 r_attrs);
                     break;
                 case SMB2_FILE_FULL_EA_INFO:
@@ -572,7 +606,9 @@ chimera_smb_query_info_reply(
                                                     SMB2_FS_ATTR_CASE_SENSITIVE_SEARCH |
                                                     SMB2_FS_ATTR_CASE_PRESERVED_NAMES |
                                                     SMB2_FS_ATTR_UNICODE_ON_DISK |
-                                                    SMB2_FS_ATTR_SUPPORTS_REPARSE_POINTS);
+                                                    SMB2_FS_ATTR_SUPPORTS_SPARSE_FILES |
+                                                    SMB2_FS_ATTR_SUPPORTS_REPARSE_POINTS |
+                                                    SMB2_FS_ATTR_SUPPORTS_BLOCK_REFCOUNTING);
                     evpl_iovec_cursor_append_uint32(reply_cursor, 255);
                     evpl_iovec_cursor_append_uint32(reply_cursor, 4);
 

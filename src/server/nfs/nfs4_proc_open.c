@@ -81,6 +81,9 @@ chimera_nfs4_open_acquire_share(
 
     result = chimera_vfs_state_try_insert(vfs_state, file_state,
                                           &state->share_lease, &conflict);
+    /* This path does not dereference `conflict`; drop the pin try_insert may hold
+     * on it (no-op for a non-grant conflict). */
+    chimera_vfs_state_conflict_unref(vfs_state, conflict);
     if (result == CHIMERA_VFS_LEASE_BREAKING) {
         /* The conflict is a breakable holder -- an NFSv4 delegation being
          * recalled (try_insert already kicked the break).  Tell the client to
@@ -248,6 +251,9 @@ chimera_nfs4_open_grant_delegation(
 
     result = chimera_vfs_state_try_insert(vfs_state, file_state,
                                           &deleg->lease, &conflict);
+    /* This path does not dereference `conflict`; drop the pin try_insert may hold
+     * on it (no-op for a non-grant conflict). */
+    chimera_vfs_state_conflict_unref(vfs_state, conflict);
     if (result != CHIMERA_VFS_LEASE_GRANTED) {
         /* Contention (another open / lease): just decline to delegate. */
         chimera_vfs_state_put(vfs_state, file_state);
@@ -297,6 +303,7 @@ chimera_nfs4_open_install_state(
     struct nfs_request             *req,
     struct chimera_vfs_open_handle *handle,
     const struct chimera_vfs_attrs *attr,
+    bool                            file_created,
     struct stateid4                *out_stateid,
     uint32_t                       *out_rflags)
 {
@@ -320,8 +327,11 @@ chimera_nfs4_open_install_state(
     /* Enforce the object's ACL against the requested share access before the
      * share-reservation check, so a permission failure surfaces as
      * NFS4ERR_ACCESS (not NFS4ERR_SHARE_DENIED).  `attr` is NULL on a reopen by
-     * filehandle (CLAIM_FH), where access was already established. */
-    if (attr) {
+     * filehandle (CLAIM_FH), where access was already established.  A create
+     * that actually made the file grants the creator the requested access
+     * regardless of the mode it was created with (POSIX/RFC: the access check
+     * is bypassed for the creating open), so skip it when file_created. */
+    if (attr && !file_created) {
         uint32_t required = 0;
 
         if (args->share_access & OPEN4_SHARE_ACCESS_READ) {
@@ -530,6 +540,7 @@ chimera_nfs4_open_exclusive_verify(
         req->fhlen = handle->fh_len;
 
         status = chimera_nfs4_open_install_state(req, handle, attr,
+                                                 handle->r_created,
                                                  &res->resok4.stateid,
                                                  &install_rflags);
         if (status != NFS4_OK) {
@@ -622,6 +633,7 @@ chimera_nfs4_open_at_complete(
         req->fhlen = handle->fh_len;
 
         status = chimera_nfs4_open_install_state(req, handle, attr,
+                                                 handle->r_created,
                                                  &res->resok4.stateid,
                                                  &install_rflags);
         if (status != NFS4_OK) {
@@ -806,7 +818,7 @@ chimera_nfs4_open_claim_fh_complete(
         uint32_t install_rflags = 0;
         lock_caps = handle->vfs_module->capabilities;
 
-        status = chimera_nfs4_open_install_state(req, handle, NULL,
+        status = chimera_nfs4_open_install_state(req, handle, NULL, false,
                                                  &res->resok4.stateid,
                                                  &install_rflags);
         if (status != NFS4_OK) {
@@ -1102,6 +1114,17 @@ chimera_nfs4_open_parent_complete(
             break;
         case CLAIM_PREVIOUS:
         case CLAIM_FH:
+        case CLAIM_DELEG_CUR_FH:
+            /* CLAIM_DELEG_CUR_FH (RFC 8881 §18.16): the client is converting an
+             * open it held under a delegation into concrete open state on the
+             * server, identifying the file by the current filehandle (the
+             * minorversion-1 analogue of CLAIM_DELEGATE_CUR, which carries a
+             * name).  This is exactly an open-by-FH; the delegation-grant gate
+             * already declines to hand out a *new* delegation for this claim, so
+             * the client receives an ordinary open stateid it can then return
+             * the delegation against.  A client issues this in response to a
+             * CB_RECALL, so failing it (NFS4ERR_NOTSUPP) stalls the recall and
+             * prevents a clean DELEGRETURN. */
             chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
                                 req->fh,
                                 req->fhlen,

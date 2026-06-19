@@ -11,6 +11,7 @@
 #include "common/evpl_iovec_cursor.h"
 
 #include "smb_session.h"
+#include "smb_string.h"
 
 /* Bitmask for tracking which attributes are populated */
 #define SMB_ATTR_SIZE               (1ULL << 0)
@@ -693,6 +694,7 @@ chimera_smb_append_null_network_open_info_null(struct evpl_iovec_cursor *cursor)
 /* Append for FileAllInformation using the other append functions */
 static inline void
 chimera_smb_append_all_info(
+    struct chimera_smb_iconv_ctx   *iconv_ctx,
     struct evpl_iovec_cursor       *cursor,
     struct chimera_smb_open_file   *open_file,
     const struct chimera_smb_attrs *attrs)
@@ -713,11 +715,32 @@ chimera_smb_append_all_info(
     /* Alignemnt */
     evpl_iovec_cursor_append_uint32(cursor, 4095);
 
-    /* Name Info */
-    evpl_iovec_cursor_append_uint32(cursor, open_file->name_len);
+    /* Name Info: FileNameInformation (MS-FSCC 2.1.7).  FileNameLength is the
+     * length in bytes of the UTF-16LE name, followed by the name itself —
+     * the path relative to the share root (backslash separated, no leading
+     * separator), converted to UTF-16LE. */
+    {
+        uint16_t *nb;
 
-    evpl_iovec_cursor_append_blob(cursor, open_file->name, open_file->name_len);
-
-    evpl_iovec_cursor_append_uint32(cursor, 0); /* padding */
+        if (open_file->full_path_len == 0) {
+            /* Share root: Windows reports the FileAllInformation name as "\"
+             * (a single backslash).  An empty name yields a 100-byte reply,
+             * one byte below the Linux cifs client's 101-byte FILE_ALL_INFO
+             * struct minimum, so the mount fails ("buffer length 100 smaller
+             * than minimum size 101").  Note FileNormalizedNameInformation
+             * keeps the empty root name (smb2.getinfo.normalized requires it). */
+            evpl_iovec_cursor_append_uint32(cursor, 2);
+            nb    = evpl_iovec_cursor_data(cursor);
+            nb[0] = (uint16_t) '\\';
+            evpl_iovec_cursor_skip(cursor, 2);
+        } else {
+            evpl_iovec_cursor_append_uint32(cursor, open_file->full_path_len * 2);
+            nb = evpl_iovec_cursor_data(cursor);
+            chimera_smb_utf8_to_utf16le(iconv_ctx,
+                                        open_file->full_path, open_file->full_path_len,
+                                        nb, SMB_PATH_MAX * 2);
+            evpl_iovec_cursor_skip(cursor, open_file->full_path_len * 2);
+        }
+    }
 
 } /* chimera_smb_append_all_info */

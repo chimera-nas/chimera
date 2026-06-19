@@ -69,19 +69,28 @@ struct nfs3_drc_entry {
     UT_hash_handle         hh;
 };
 
-enum nfs3_drc_load_state {
-    NFS3_DRC_LOAD_IDLE = 0,
-    NFS3_DRC_LOAD_RUNNING,
-    NFS3_DRC_LOAD_READY,
+/* One per client address this instance has hydrated from the KV store (loaded
+ * that client's whole reply band on first contact).  Once an address is here,
+ * an in-memory miss for it is DEFINITIVE -- no per-op KV read.  Keyed by the
+ * zero-padded addr + addr_len. */
+struct nfs3_drc_hydra {
+    uint8_t        addr[NFS3_DRC_ADDR_MAX];
+    uint8_t        addr_len;
+    uint8_t        pad[3];
+    UT_hash_handle hh;
 };
 
+/* One connectionless duplicate-request cache.  NFSv3 and NFSv4.0 each get an
+ * instance; they share all the machinery below and differ only in kv_type (the
+ * KV band) and their protocol-specific dispatch wrapper. */
 struct nfs3_drc {
     pthread_mutex_t        lock;
     struct nfs3_drc_entry *table;            /* uthash, FIFO eviction order */
+    struct nfs3_drc_hydra *hydrated;         /* uthash: addrs hydrated from KV  */
     uint64_t               bytes;
+    uint8_t                kv_type;          /* CHIMERA_KV_TYPE_NFS{3,4_V40}_REPLY */
     int                    persistence_disabled;
-    _Atomic int            load_state;
-    /* The generated NFS_V3 dispatcher we wrap; NULL until installed. */
+    /* The generated dispatcher we wrap; NULL until installed. */
     int                    (*orig_dispatch)(
         struct evpl               *evpl,
         struct evpl_rpc2_conn     *conn,
@@ -101,21 +110,51 @@ void
 nfs3_drc_install(
     struct chimera_server_nfs_shared *shared);
 
-/* One-shot cold-start reload of persisted reply records into the in-memory
- * cache.  Idempotent; no-op when the cache is disabled or the backend is
- * non-persistent.  Call from per-thread init (a live vfs_thread is required). */
-void
-nfs3_drc_reload_kickoff(
-    struct chimera_server_nfs_thread *thread);
-
-/* Initialize / tear down the in-memory cache. */
+/* Initialize / tear down the in-memory cache.  kv_type picks the KV band. */
 void
 nfs3_drc_init(
-    struct nfs3_drc *drc);
+    struct nfs3_drc *drc,
+    uint8_t          kv_type);
 
 void
 nfs3_drc_destroy(
     struct nfs3_drc *drc);
+
+/* ----------------------------------------------------------------------- *
+*  Shared connectionless-DRC core, used by the NFSv3 and NFSv4.0 adapters. *
+* ----------------------------------------------------------------------- */
+
+/* Serve one cacheable request through `drc`: replay from cache, or (when this
+ * client's band is not yet hydrated) load it from the KV store first, then
+ * replay-or-execute.  The caller has already built `key` (proc + xid +
+ * checksum + client address) and decided the op is cacheable.  Returns the
+ * dispatch result (0 = handled, possibly after an async hydrate). */
+int
+nfs3_drc_serve(
+    struct nfs3_drc              *drc,
+    const struct nfs3_drc_keybuf *key,
+    struct evpl                  *evpl,
+    struct evpl_rpc2_conn        *conn,
+    struct evpl_rpc2_encoding    *encoding,
+    uint32_t                      proc,
+    void                         *program_data,
+    struct evpl_rpc2_cred        *cred,
+    xdr_iovec                    *iov,
+    int                           niov,
+    int                           length,
+    void                         *private_data);
+
+/* 64-bit FNV-1a over a request's iovecs -- the key's checksum field. */
+uint64_t
+nfs3_drc_checksum_iov(
+    const xdr_iovec *iov,
+    int              niov);
+
+/* Source IP with the ephemeral port stripped; writes addr, returns its len. */
+uint8_t
+nfs3_drc_client_addr(
+    struct evpl_rpc2_conn *conn,
+    uint8_t               *out);
 
 /* ----------------------------------------------------------------------- *
 *  Exposed for unit tests (test_nfs_persist).                             *

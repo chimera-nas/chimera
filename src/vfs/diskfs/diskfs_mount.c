@@ -708,8 +708,10 @@ diskfs_recover_log(
     struct diskfs_recover_rec *recs;
     uint32_t                   nrec = 0, cap = 4096, i;
 
-    log = malloc(SM_INTENT_LOG_SIZE);
-    if (diskfs_mount_io_read(io, SM_INTENT_LOG_DEVICE, log, SM_INTENT_LOG_SIZE,
+    uint64_t                   intent_log_size = shared->intent_log_size;
+
+    log = malloc(intent_log_size);
+    if (diskfs_mount_io_read(io, SM_INTENT_LOG_DEVICE, log, intent_log_size,
                              SM_INTENT_LOG_OFFSET) != 0) {
         free(log);
         return -1;
@@ -717,7 +719,7 @@ diskfs_recover_log(
 
     recs = malloc(cap * sizeof(*recs));
 
-    for (o = 0; o + sizeof(struct diskfs_redo_header) <= SM_INTENT_LOG_SIZE;
+    for (o = 0; o + sizeof(struct diskfs_redo_header) <= intent_log_size;
          o += DISKFS_BLOCK_SIZE) {
         struct diskfs_redo_header *hdr = (struct diskfs_redo_header *) (log + o);
         uint64_t                   lo, hi;
@@ -728,18 +730,41 @@ diskfs_recover_log(
         }
         if (hdr->reclen < sizeof(*hdr) ||
             (hdr->reclen & (DISKFS_BLOCK_SIZE - 1)) ||
-            o + hdr->reclen > SM_INTENT_LOG_SIZE) {
+            hdr->reclen != diskfs_il_hdr_len(hdr->num_blocks) + (uint64_t) hdr->num_blocks * DISKFS_BLOCK_SIZE ||
+            o + hdr->reclen > intent_log_size) {
             continue;
         }
         lo           = hdr->csum_lo;
         hi           = hdr->csum_hi;
         hdr->csum_lo = 0;
         hdr->csum_hi = 0;
-        h            = XXH3_128bits(log + o, hdr->reclen);
+        h            = XXH3_128bits(log + o, diskfs_il_hdr_len(hdr->num_blocks));
         hdr->csum_lo = lo;
         hdr->csum_hi = hi;
         if (h.low64 != lo || h.high64 != hi) {
             continue;
+        }
+        {
+            char    *bhp  = log + o + sizeof(*hdr);
+            char    *data = log + o + diskfs_il_hdr_len(hdr->num_blocks);
+            uint32_t b;
+            int      ok = 1;
+
+            for (b = 0; b < hdr->num_blocks; b++) {
+                struct diskfs_redo_block_header *bh =
+                    (struct diskfs_redo_block_header *) (bhp + (size_t) b * sizeof(*bh));
+                char                            *img   = data + (size_t) b * DISKFS_BLOCK_SIZE;
+                XXH128_hash_t                    bhash = XXH3_128bits(img, DISKFS_BLOCK_SIZE);
+
+                if (bhash.low64 != bh->block_csum_lo ||
+                    bhash.high64 != bh->block_csum_hi) {
+                    ok = 0;
+                    break;
+                }
+            }
+            if (!ok) {
+                continue;
+            }
         }
 
         if (nrec == cap) {
@@ -996,6 +1021,22 @@ diskfs_init(
     shared->block_cache_blocks = (uint32_t) json_integer_value(
         json_object_get(cfg, "block_cache_blocks"));
 
+    /* Intent-log size (bytes).  Larger pipelines more redo records before the
+     * ring laps (throughput on big devices); small test devices need a small
+     * log so the AG 0 metadata reservation fits.  A remount overrides this with
+     * the value the superblock recorded at format time. */
+    {
+        json_t *ils = json_object_get(cfg, "intent_log_size");
+
+        shared->intent_log_size = ils ? (uint64_t) json_integer_value(ils) :
+            SM_INTENT_LOG_SIZE_DEFAULT;
+        if (shared->intent_log_size < SM_INTENT_LOG_SIZE_MIN) {
+            shared->intent_log_size = SM_INTENT_LOG_SIZE_MIN;
+        }
+        shared->intent_log_size = (shared->intent_log_size + SM_BLOCK_MASK) &
+            ~(uint64_t) SM_BLOCK_MASK;
+    }
+
     chimera_diskfs_abort_if(shared->block_layout && shared->scsi_layout,
                             "block_layout and scsi_layout are mutually exclusive");
 
@@ -1058,6 +1099,15 @@ diskfs_init(
                 "diskfs superblock missing or invalid; specify initialize to format");
         }
 
+        /* On a remount the intent-log size is whatever was formatted, not the
+         * configured value -- the on-disk layout is fixed by it. */
+        if (mode != 0) {
+            chimera_diskfs_abort_if(
+                sb.intent_log_size == 0 || (sb.intent_log_size & SM_BLOCK_MASK),
+                "superblock intent_log_size %lu is invalid", sb.intent_log_size);
+            shared->intent_log_size = sb.intent_log_size;
+        }
+
         dev_cfg = calloc(shared->num_devices, sizeof(*dev_cfg));
         for (i = 0; i < shared->num_devices; i++) {
             struct diskfs_device *dv = &shared->devices[i];
@@ -1071,7 +1121,8 @@ diskfs_init(
                 memcpy(dev_cfg[i].sig, dv->sig, dv->sig_len);
             }
         }
-        shared->space_map = space_map_create(dev_cfg, shared->num_devices);
+        shared->space_map = space_map_create(dev_cfg, shared->num_devices,
+                                             shared->intent_log_size);
         free(dev_cfg);
 
         /* On a persistent remount the relocated-log map is recomputed from the
@@ -1542,17 +1593,11 @@ diskfs_thread_init(
 
     thread->allocator = slab_allocator_create(4096, 1024 * 1024 * 1024);
 
+    diskfs_block_cache_prealloc(shared, evpl);
+
     evpl_iovec_alloc(evpl, 4096, 4096, 1, 0, &thread->zero);
     memset(thread->zero.data, 0, 4096);  // Zero buffer must contain zeros!
     evpl_iovec_alloc(evpl, 4096, 4096, 1, 0, &thread->pad);
-
-    thread->queue = calloc(shared->num_devices, sizeof(*thread->queue));
-
-    for (int i = 0; i < shared->num_devices; i++) {
-        /* Remote (pNFS data) devices have no local handle: leave queue NULL. */
-        thread->queue[i] = shared->devices[i].bdev ?
-            evpl_block_open_queue(evpl, shared->devices[i].bdev) : NULL;
-    }
 
     thread->shared = shared;
     thread->evpl   = evpl;
@@ -1569,11 +1614,23 @@ diskfs_thread_init(
     thread->cq_poll = evpl_add_poll(evpl, NULL, NULL, diskfs_iq_cq_poll,
                                     thread->iq_channel);
 
-    /* Inode lock-grant delivery queue + doorbell. */
+    /* Inode lock-grant delivery queue + doorbell.  Register its poll before
+     * the block-device queue polls so granted inode waiters are resumed before
+     * the worker spends a loop iteration polling every VFIO queue. */
     pthread_mutex_init(&thread->grant_lock, NULL);
     thread->grant_head = NULL;
     thread->grant_tail = NULL;
+    __atomic_store_n(&thread->grant_pending, 0, __ATOMIC_RELAXED);
     evpl_add_doorbell(evpl, &thread->grant_doorbell, diskfs_grant_doorbell_cb);
+    thread->grant_poll = evpl_add_poll(evpl, NULL, NULL, diskfs_grant_poll, thread);
+
+    thread->queue = calloc(shared->num_devices, sizeof(*thread->queue));
+
+    for (int i = 0; i < shared->num_devices; i++) {
+        /* Remote (pNFS data) devices have no local handle: leave queue NULL. */
+        thread->queue[i] = shared->devices[i].bdev ?
+            evpl_block_open_queue(evpl, shared->devices[i].bdev) : NULL;
+    }
 
     /* B+tree op resume queue: doorbell (cross-thread) + deferral (same-thread). */
     pthread_mutex_init(&thread->resume_lock, NULL);
@@ -1581,8 +1638,11 @@ diskfs_thread_init(
     thread->resume_tail            = NULL;
     thread->bt_op_free_list        = NULL;
     thread->block_waiter_free_list = NULL;
+    __atomic_store_n(&thread->resume_pending, 0, __ATOMIC_RELAXED);
     evpl_add_doorbell(evpl, &thread->resume_doorbell, diskfs_bt_resume_doorbell_cb);
     evpl_deferral_init(&thread->resume_deferral, diskfs_bt_resume_deferral_cb, thread);
+    thread->resume_poll = evpl_add_poll(evpl, NULL, NULL, diskfs_bt_resume_poll,
+                                        thread);
 
     pthread_mutex_lock(&shared->lock);
     thread->thread_id = shared->num_active_threads++;
@@ -1721,9 +1781,15 @@ diskfs_thread_destroy(void *private_data)
         thread->iq_channel = NULL;
     }
 
+    if (thread->grant_poll) {
+        evpl_remove_poll(thread->evpl, thread->grant_poll);
+    }
     evpl_remove_doorbell(thread->evpl, &thread->grant_doorbell);
     pthread_mutex_destroy(&thread->grant_lock);
 
+    if (thread->resume_poll) {
+        evpl_remove_poll(thread->evpl, thread->resume_poll);
+    }
     evpl_remove_doorbell(thread->evpl, &thread->resume_doorbell);
     pthread_mutex_destroy(&thread->resume_lock);
 

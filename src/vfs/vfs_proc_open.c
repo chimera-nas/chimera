@@ -9,6 +9,7 @@
 #include "vfs_release.h"
 #include "vfs_access.h"
 #include "vfs_acl.h"
+#include "vfs_mount_table.h"
 #include "common/misc.h"
 #include "common/macros.h"
 
@@ -37,6 +38,70 @@ chimera_vfs_open_required_access(unsigned int flags)
     }
     return required;
 } /* chimera_vfs_open_required_access */
+
+/*
+ * Path-only deep-path rebasing.
+ *
+ * Operations arrive against the GLOBAL vfs-root fh with a full path (e.g.
+ * "share/a/b/file").  When that path resolves into a path-only mount, the
+ * intermediate directories (share/a/b) have NO re-openable file handles, so the
+ * usual "resolve immediate parent dir + dispatch _at on the leaf" scheme breaks
+ * for anything deeper than a single level.
+ *
+ * This helper detects that case: if `path` (already slash-stripped, relative to
+ * the global vfs root) falls under a path-only mount, it copies out that mount's
+ * re-openable root fh and returns the byte offset of the in-mount remainder
+ * within `path`.  The caller then opens the mount root as a directory handle and
+ * dispatches the _at op with the entire in-mount sub-path as the name; the
+ * path-only backend resolves the whole sub-path in one operation.
+ *
+ * Returns the in-mount offset (>= 0) on a path-only match, or -1 otherwise (in
+ * which case the caller keeps its existing FH-relative behavior unchanged).
+ */
+static int
+chimera_vfs_pathonly_rebase(
+    struct chimera_vfs_thread *thread,
+    const char                *path,
+    int                        pathlen,
+    uint8_t                   *r_root_fh,
+    int                       *r_root_fh_len)
+{
+    struct chimera_vfs_mount_table       *table = thread->vfs->mount_table;
+    struct chimera_vfs_mount_table_entry *entry;
+    uint32_t                              i;
+    int                                   offset = -1;
+
+    urcu_qsbr_read_lock();
+
+    for (i = 0; i < table->num_buckets && offset < 0; i++) {
+        entry = rcu_dereference(table->buckets[i]);
+        while (entry) {
+            struct chimera_vfs_mount *mount = entry->mount;
+
+            if (mount->pathlen <= (uint32_t) pathlen &&
+                memcmp(mount->path, path, mount->pathlen) == 0 &&
+                (mount->pathlen == (uint32_t) pathlen ||
+                 path[mount->pathlen] == '/') &&
+                chimera_vfs_module_is_path_only(mount->module)) {
+
+                memcpy(r_root_fh, mount->root_fh, mount->root_fh_len);
+                *r_root_fh_len = mount->root_fh_len;
+
+                offset = mount->pathlen;
+                /* Skip the separating slash to land on the in-mount remainder. */
+                while (offset < pathlen && path[offset] == '/') {
+                    offset++;
+                }
+                break;
+            }
+            entry = rcu_dereference(entry->next);
+        }
+    }
+
+    urcu_qsbr_read_unlock();
+
+    return offset;
+} /* chimera_vfs_pathonly_rebase */
 
 static void
 chimera_vfs_open_root_complete(
@@ -165,8 +230,12 @@ chimera_vfs_open_lookup_complete(
         void                       *priv     = request->open.private_data;
         unsigned int                f        = request->open.flags;
 
-        /* O_NOFOLLOW and the final component is a symlink -> ELOOP. */
-        if ((f & CHIMERA_VFS_OPEN_NOFOLLOW) && S_ISLNK(attr->va_mode)) {
+        /* O_NOFOLLOW and the final component is a symlink -> ELOOP, EXCEPT for an
+         * O_PATH-style open (CHIMERA_VFS_OPEN_PATH): open(O_PATH | O_NOFOLLOW) on
+         * a symlink returns a handle to the link itself, which is how lstat /
+         * readlink / lchown operate on the link rather than its target. */
+        if ((f & CHIMERA_VFS_OPEN_NOFOLLOW) && !(f & CHIMERA_VFS_OPEN_PATH) &&
+            S_ISLNK(attr->va_mode)) {
             chimera_vfs_request_free(thread, request);
             callback(CHIMERA_VFS_ELOOP, NULL, NULL, priv);
             return;
@@ -274,10 +343,18 @@ chimera_vfs_open(
     request->open.path         = request->plugin_data;
     request->open.pathlen      = pathlen;
     request->open.flags        = flags;
-    request->open.set_attr     = set_attr;
     request->open.attr_mask    = attr_mask;
     request->open.callback     = callback;
     request->open.private_data = private_data;
+
+    /* A non-create open may pass no set_attr, but open_at (the path-op / deep
+     * path-only dispatch) requires a non-NULL one; hand it a zeroed stand-in. */
+    if (set_attr) {
+        request->open.set_attr = set_attr;
+    } else {
+        request->open.scratch_set_attr.va_set_mask = 0;
+        request->open.set_attr                     = &request->open.scratch_set_attr;
+    }
 
     if (request->module->capabilities & CHIMERA_VFS_CAP_FS_PATH_OP) {
         request->open.name_offset = 0;
@@ -293,7 +370,33 @@ chimera_vfs_open(
             CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
             chimera_vfs_open_parent_open_complete,
             request);
-    } else if (flags & CHIMERA_VFS_OPEN_CREATE) {
+        return;
+    }
+
+    /* Deep path crossing into a path-only mount: rebase onto the mount root and
+     * dispatch open_at with the whole in-mount sub-path as the name. */
+    {
+        int rebase = chimera_vfs_pathonly_rebase(thread, request->open.path,
+                                                 request->open.pathlen,
+                                                 request->open.parent_fh,
+                                                 &request->open.parent_fh_len);
+
+        if (rebase >= 0 && rebase < request->open.pathlen) {
+            request->open.name_offset = rebase;
+
+            chimera_vfs_open_fh(
+                thread,
+                cred,
+                request->open.parent_fh,
+                request->open.parent_fh_len,
+                CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
+                chimera_vfs_open_parent_open_complete,
+                request);
+            return;
+        }
+    }
+
+    if (flags & CHIMERA_VFS_OPEN_CREATE) {
         /* Create needs parent handle + name for open_at */
         slash = strrchr(request->open.path, '/');
 

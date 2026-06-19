@@ -123,7 +123,19 @@ chimera_vfs_get_module(
     struct chimera_vfs_mount  *mount;
     struct chimera_vfs_module *module;
 
-    if (fhlen < CHIMERA_VFS_MOUNT_ID_SIZE) {
+    /*
+     * Reject implausible handle lengths before they reach any sink.  The lower
+     * bound guarantees a mount-id prefix to route on; the upper bound is the
+     * security-critical half: a valid chimera handle never exceeds
+     * CHIMERA_VFS_FH_SIZE, but the NFS3/NFS4 XDR decoders do not enforce the
+     * wire `opaque<>` bound (see nfs3_attr.h), so an oversized handle would
+     * otherwise be memcpy'd into the fixed CHIMERA_VFS_FH_SIZE handle buffers
+     * (e.g. vfs_proc_open_fh.c, vfs_open_cache.h, vfs_state.c) and overflow
+     * them.  This gate is the common chokepoint every fh-routed op funnels
+     * through, so bounding here protects all of them; callers already treat a
+     * NULL module as ESTALE/BADHANDLE.
+     */
+    if (fhlen < CHIMERA_VFS_MOUNT_ID_SIZE || fhlen > CHIMERA_VFS_FH_SIZE) {
         return NULL;
     }
 
@@ -137,6 +149,19 @@ chimera_vfs_get_module(
 
     return module;
 } /* chimera_vfs_get_module */
+
+/* True when the mount that owns `fh` is served by a path-only module (no
+ * persistent file handles -- see chimera_vfs_module_is_path_only). */
+static inline int
+chimera_vfs_fh_is_path_only(
+    struct chimera_vfs_thread *thread,
+    const void                *fh,
+    int                        fhlen)
+{
+    struct chimera_vfs_module *module = chimera_vfs_get_module(thread, fh, fhlen);
+
+    return module && chimera_vfs_module_is_path_only(module);
+} /* chimera_vfs_fh_is_path_only */
 
 /*
  * Routing decision for an fh-routed KV operation (handle-state put on open,
@@ -221,6 +246,8 @@ chimera_vfs_request_alloc_common(
     request->io_owner_valid       = 0;
     request->io_recall_all        = 0;
     request->io_recall_flush_only = 0;
+    request->io_recall_single     = 0;
+    request->io_recall_retain     = 0;
     request->io_next              = NULL;
     request->io_lease_file        = NULL;
     request->io_handle            = NULL;
@@ -235,6 +262,12 @@ chimera_vfs_request_alloc_common(
     request->active_next = NULL;
 
     prometheus_stopwatch_start(&request->start_time);
+
+    request->wait_reason   = NULL;
+    request->wait_since_ns = 0;
+    request->wait_arg0     = 0;
+    request->wait_arg1     = 0;
+    request->wait_arg2     = 0;
 
     thread->num_active_requests++;
     DL_APPEND2(thread->active_requests, request, active_prev, active_next);
@@ -430,6 +463,78 @@ chimera_vfs_post_to_delegation(
     evpl_ring_doorbell(&delegation_thread->doorbell);
 } /* chimera_vfs_post_to_delegation */
 
+/* Returns 1 if the request would mutate the filesystem and so must be rejected
+ * on a read-only mount, 0 otherwise.  For OPEN_AT / OPEN_FH / OPEN_STREAM the
+ * decision is flag-dependent: a pure read-only open is permitted, but an open
+ * that requests create, write or truncate is a mutation.  Every op not listed
+ * here (READ, READLINK, GETATTR, LOOKUP, READDIR, ACCESS, COMMIT, SEEK, LOCK,
+ * GET_XATTR, LIST_XATTRS, LIST_STREAMS, GET_LAYOUT, GETPARENT, the KV reads,
+ * etc.) is treated as non-mutating and dispatched normally. */
+static inline int
+chimera_vfs_op_is_mutating(const struct chimera_vfs_request *request)
+{
+    switch (request->opcode) {
+        case CHIMERA_VFS_OP_WRITE:
+        case CHIMERA_VFS_OP_REMOVE_AT:
+        case CHIMERA_VFS_OP_MKDIR_AT:
+        case CHIMERA_VFS_OP_SYMLINK_AT:
+        case CHIMERA_VFS_OP_RENAME_AT:
+        case CHIMERA_VFS_OP_SETATTR:
+        case CHIMERA_VFS_OP_LINK_AT:
+        case CHIMERA_VFS_OP_CREATE_UNLINKED:
+        case CHIMERA_VFS_OP_MKNOD_AT:
+        case CHIMERA_VFS_OP_ALLOCATE:
+        case CHIMERA_VFS_OP_SET_XATTR:
+        case CHIMERA_VFS_OP_REMOVE_XATTR:
+        case CHIMERA_VFS_OP_REMOVE_STREAM:
+        case CHIMERA_VFS_OP_COPY_RANGE:
+        case CHIMERA_VFS_OP_CLONE_RANGE:
+        case CHIMERA_VFS_OP_MOVE_RANGE:
+        case CHIMERA_VFS_OP_PUT_KEY:
+        case CHIMERA_VFS_OP_DELETE_KEY:
+            return 1;
+        case CHIMERA_VFS_OP_OPEN_AT:
+            return !!(request->open_at.flags &
+                      (CHIMERA_VFS_OPEN_CREATE |
+                       CHIMERA_VFS_OPEN_WRITE_ONLY |
+                       CHIMERA_VFS_OPEN_TRUNCATE));
+        case CHIMERA_VFS_OP_OPEN_FH:
+            return !!(request->open_fh.flags &
+                      (CHIMERA_VFS_OPEN_CREATE |
+                       CHIMERA_VFS_OPEN_WRITE_ONLY |
+                       CHIMERA_VFS_OPEN_TRUNCATE));
+        case CHIMERA_VFS_OP_OPEN_STREAM:
+            return !!(request->open_stream.flags &
+                      (CHIMERA_VFS_OPEN_CREATE |
+                       CHIMERA_VFS_OPEN_WRITE_ONLY |
+                       CHIMERA_VFS_OPEN_TRUNCATE));
+        default:
+            return 0;
+    } /* switch */
+} /* chimera_vfs_op_is_mutating */
+
+/* Returns 1 if the request targets a read-only mount, 0 otherwise (including
+ * when the mount cannot be resolved -- such requests fall through to normal
+ * dispatch which surfaces ESTALE).  The relevant fh for every mutating op is in
+ * request->fh (the handle/parent/target fh); its first CHIMERA_VFS_MOUNT_ID_SIZE
+ * bytes are the mount_id. */
+static inline int
+chimera_vfs_mount_is_readonly(const struct chimera_vfs_request *request)
+{
+    struct chimera_vfs_mount_attrs attrs;
+
+    if (request->fh_len < CHIMERA_VFS_MOUNT_ID_SIZE) {
+        return 0;
+    }
+
+    if (chimera_vfs_mount_table_lookup_attrs(request->thread->vfs->mount_table,
+                                             request->fh, &attrs) != 0) {
+        return 0;
+    }
+
+    return !!(attrs.flags & CHIMERA_VFS_MOUNT_ATTR_READONLY);
+} /* chimera_vfs_mount_is_readonly */
+
 static inline void
 chimera_vfs_dispatch(struct chimera_vfs_request *request)
 {
@@ -443,6 +548,15 @@ chimera_vfs_dispatch(struct chimera_vfs_request *request)
 
     if (!module || !thread->module_private[module->fh_magic]) {
         request->status = CHIMERA_VFS_ESTALE;
+        request->complete(request);
+        return;
+    }
+
+    /* Read-only mount enforcement: reject mutating ops with EROFS before they
+     * reach the backend (or a delegation thread). */
+    if (chimera_vfs_op_is_mutating(request) &&
+        chimera_vfs_mount_is_readonly(request)) {
+        request->status = CHIMERA_VFS_EROFS;
         request->complete(request);
         return;
     }

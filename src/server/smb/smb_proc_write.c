@@ -300,11 +300,17 @@ chimera_smb_write(struct chimera_smb_request *request)
      * OPLOCK_BREAK notification with the WRITE response and surfaces as
      * INVALID_NETWORK_RESPONSE on the client. */
     struct chimera_vfs_lease_owner io_owner;
+    memset(&io_owner, 0, sizeof(io_owner));
     io_owner.protocol   = CHIMERA_VFS_LEASE_PROTO_SMB2;
     io_owner.client_key = request->session_handle->session->client_key;
     if (request->write.open_file->grant) {
+        /* Carry the grant's own identity -- including is_lease -- so the
+         * write self-exempts only against a genuine RqLs lease key.  A legacy
+         * LEVEL_II oplock (is_lease==0) is NOT same-key-exempt and breaks its
+         * own read cache on write (smb2.oplock.batch6). */
         io_owner.owner_lo = request->write.open_file->grant->lease.owner.owner_lo;
         io_owner.owner_hi = request->write.open_file->grant->lease.owner.owner_hi;
+        io_owner.is_lease = request->write.open_file->grant->lease.owner.is_lease;
     } else {
         io_owner.owner_lo = request->write.open_file->file_id.pid;
         io_owner.owner_hi = request->write.open_file->file_id.vid;

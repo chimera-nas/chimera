@@ -116,11 +116,29 @@ generate_config() {
         if [ "${CHIMERA_SMB_PERSISTENT:-0}" = "1" ] && [ "$share" = "FileShare" ]; then
             share_ca=', "continuous_availability": true'
         fi
+        # When persistent + (any) encryption are both on, the encrypted share
+        # must ALSO be continuous-availability: the AppInstanceId_Encryption
+        # failover cases open a persistent/DurableV2 handle on EncryptedFileShare
+        # (= SMBEncrypted) and reclaim it across a failover, which a CA share
+        # grants.  CA and encrypt_data are independent share flags, so the share
+        # is both.
+        if [ "${CHIMERA_SMB_PERSISTENT:-0}" = "1" ] && \
+           { [ "${CHIMERA_SMB_ENCRYPTION:-0}" = "1" ] || \
+             [ "${CHIMERA_SMB_PERSHARE_ENCRYPTION:-0}" = "1" ]; } && \
+           [ "$share" = "SMBEncrypted" ]; then
+            share_ca=', "continuous_availability": true'
+        fi
         # SMBEncrypted is the designated per-share-encrypted share (matches
         # EncryptedFileShare in the ptfconfig); flag it so TREE_CONNECT
         # advertises SMB2_SHAREFLAG_ENCRYPT_DATA and its traffic is encrypted.
+        # Set under global encryption (whole-session) OR per-share-only
+        # encryption (CHIMERA_SMB_PERSHARE_ENCRYPTION: the share requires
+        # encryption while the session stays cleartext, so unencrypted access to
+        # it is rejected -- exercises the AppInstanceId encryption negatives).
         local share_enc=""
-        if [ "${CHIMERA_SMB_ENCRYPTION:-0}" = "1" ] && [ "$share" = "SMBEncrypted" ]; then
+        if { [ "${CHIMERA_SMB_ENCRYPTION:-0}" = "1" ] || \
+             [ "${CHIMERA_SMB_PERSHARE_ENCRYPTION:-0}" = "1" ]; } && \
+           [ "$share" = "SMBEncrypted" ]; then
             share_enc=', "encrypt_data": true'
         fi
         shares="${shares}${sep}\"${share}\": {\"path\": \"/${share}\"${share_ca}${share_enc}}"
@@ -165,6 +183,14 @@ generate_config() {
         encryption_line='"smb_encryption": "enabled",'
     fi
 
+    # Enable SMB3 directory leases when requested (the DirectoryLeasing WPTS
+    # cases need the feature on; default off keeps the rest of the suite on the
+    # baseline path where directory opens take no lease).
+    local dirlease_line=""
+    if [ "${CHIMERA_SMB_DIRLEASE:-0}" = "1" ]; then
+        dirlease_line='"smb_directory_leases": true,'
+    fi
+
     cat > "$CONFIG_FILE" << EOF
 {
     "server": {
@@ -172,6 +198,7 @@ generate_config() {
         ${compression_line}
         ${multichannel_line}
         ${encryption_line}
+        ${dirlease_line}
         "smb_named_streams": true,
         "smb_leases": true,
         "smb_oplocks": true,
@@ -217,6 +244,16 @@ if [ "${CHIMERA_SMB_MULTICHANNEL:-0}" = "1" ]; then
     ip netns exec "${NETNS_NAME}" ip -6 addr add "${SUT_IPV6}/64" dev "${DUMMY_IF}"
 fi
 ip netns exec "${NETNS_NAME}" ip link set "${DUMMY_IF}" up
+
+# When the symlink config is active, tell the daemon to seed the symbolic-link
+# fixtures (a directory holding an in-path link + a dangling root-level link) on
+# this run's backend module -- no SMB client can create a reparse-point symlink
+# on an empty share, so the daemon seeds them at startup.  The daemon inherits
+# this through `ip netns exec env` below; the matching ptfconfig paths are set
+# in the staging section.
+if [ "${CHIMERA_SMB_SYMLINK:-0}" = "1" ]; then
+    export CHIMERA_SMB_SEED_SYMLINKS="$BACKEND"
+fi
 
 # Start the chimera daemon inside the netns
 ip netns exec "${NETNS_NAME}" env \
@@ -347,6 +384,46 @@ if [ "${CHIMERA_SMB_ENCRYPTION:-0}" = "1" ]; then
         "$staged"
 fi
 
+# Per-share-only encryption (CHIMERA_SMB_PERSHARE_ENCRYPTION): the SMBEncrypted
+# share requires encryption while global encrypt-data stays OFF, so the server
+# advertises encryption support and rejects unencrypted access to the encrypted
+# share -- but unencrypted sessions to other shares are allowed.  This is what
+# the AppInstanceId encryption cases need: the positive operates encrypted on
+# the encrypted share, and the negatives (which call CheckServerEncrypt, only
+# applicable when IsGlobalEncryptDataEnabled is FALSE) verify that an
+# unencrypted open of the encrypted share is denied.  Declare support and the
+# encrypted share, but leave IsGlobalEncryptDataEnabled false.
+if [ "${CHIMERA_SMB_PERSHARE_ENCRYPTION:-0}" = "1" ]; then
+    staged="${WPTS_STAGE_DIR}/CommonTestSuite.deployment.ptfconfig"
+    sed -i \
+        -e 's#<Property name="IsEncryptionSupported" value="false"/>#<Property name="IsEncryptionSupported" value="true"/>#' \
+        -e 's#<Property name="EncryptedFileShare" value=""/>#<Property name="EncryptedFileShare" value="SMBEncrypted"/>#' \
+        "$staged"
+fi
+
+# When directory leases are enabled, advertise the capability to the driver so
+# the DirectoryLeasing cases become applicable (otherwise they are
+# Inconclusive/skipped).
+if [ "${CHIMERA_SMB_DIRLEASE:-0}" = "1" ]; then
+    staged="${WPTS_STAGE_DIR}/CommonTestSuite.deployment.ptfconfig"
+    sed -i \
+        -e 's#<Property name="IsDirectoryLeasingSupported" value="false"/>#<Property name="IsDirectoryLeasingSupported" value="true"/>#' \
+        "$staged"
+fi
+
+# When the symlink config is active, point the driver at the seeded fixtures so
+# the CreateClose symlink cases become applicable: Symboliclink is the dangling
+# root-level link, SymboliclinkInSubFolder is the link living inside a directory
+# (so it is reached both as a path component and as the leaf).  The daemon
+# created these at startup (CHIMERA_SMB_SEED_SYMLINKS above).
+if [ "${CHIMERA_SMB_SYMLINK:-0}" = "1" ]; then
+    staged="${WPTS_STAGE_DIR}/MS-SMB2_ServerTestSuite.deployment.ptfconfig"
+    sed -i \
+        -e 's#<Property name="Symboliclink" value=""/>#<Property name="Symboliclink" value="badlink"/>#' \
+        -e 's#<Property name="SymboliclinkInSubFolder" value=""/>#<Property name="SymboliclinkInSubFolder" value="SymlinkTest\\link"/>#' \
+        "$staged"
+fi
+
 mkdir -p "$RESULT_DIR"
 
 FILTER_ARGS=()
@@ -364,6 +441,39 @@ if [ -n "${TEST_FILTER}" ]; then
     FILTER_ARGS=(--TestCaseFilter:"${_wpts_filter}")
 fi
 
+# Pre-seed the NuGet first-run "migration" marker so vstest never runs it.
+#
+# On its first startup NuGet performs a one-time migration; to make it run only
+# once across processes it grabs a *global named mutex* "NuGet-Migrations". The
+# .NET runtime backs a named mutex with a shared-memory file under the hardcoded
+# /tmp/.dotnet/shm/session<SID>/ directory (NOT relocatable via TMPDIR/HOME --
+# dotnet/runtime#49822). Under `ctest -j N` many wrapper invocations cold-start
+# vstest at once and race on creating/acquiring that mutex; the loser aborts in
+# ~2s with
+#   System.IO.IOException: The system cannot open the device or file specified.
+#                          : 'NuGet-Migrations'
+# before any test body runs, and passes on --rerun-failed (tracker #733).
+#
+# The migration -- and therefore the mutex -- is taken ONLY when its completion
+# marker is absent. The marker is a single empty file at
+#   $HOME/.local/share/NuGet/Migrations/1
+# (strace-confirmed). Once present, NuGet skips the migration entirely and never
+# touches the NuGet-Migrations mutex -- so no mutex means no race, regardless of
+# where the runtime decides to put the mutex's shm.
+#
+# Because we deliberately point HOME at the fresh per-session SESSION_DIR (to
+# keep each run's NuGet/.NET state isolated), that marker is missing on EVERY
+# run -- which is exactly why every run cold-starts the migration and races.
+# The previous fix (#837) gave each vstest its own POSIX session id via
+# `setsid` so it got a private shm dir; that did not work, because the migration
+# still runs on every cold HOME and the NuGet-Migrations mutex is not actually
+# scoped by the POSIX session id `setsid` changes. Seeding the marker removes
+# the migration step itself, so the mutex is never created and the race cannot
+# happen -- independent of where the shm lives.
+NUGET_MIGRATIONS_DIR="${SESSION_DIR}/.local/share/NuGet/Migrations"
+mkdir -p "${NUGET_MIGRATIONS_DIR}"
+: > "${NUGET_MIGRATIONS_DIR}/1"
+
 # Run the suite from inside the netns so it can reach the SUT IP.
 # Suppress the .NET first-run experience (telemetry notice + dev-cert
 # generation): it pollutes output and writes to HOME, which may be unset or
@@ -380,6 +490,15 @@ ip netns exec "${NETNS_NAME}" env \
 VSTEST_RC=$?
 
 echo "=== vstest exit code: ${VSTEST_RC} ==="
+
+# Per-case JUnit for the CI report: a consolidated entry is one CTest test, so
+# convert the TRX into a per-case JUnit (the smbtorture-style hook) when the
+# caller asks.  Non-fatal -- a conversion failure must not fail the run.
+if [ -n "${WPTS_JUNIT_FILE:-}" ] && [ -n "${WPTS_JUNIT_CONVERTER:-}" ]; then
+    python3 "${WPTS_JUNIT_CONVERTER}" "${RESULT_DIR}/SMB2TestResult.trx" \
+        "${WPTS_JUNIT_FILE}" 2>/dev/null \
+        || echo "WPTS JUnit conversion failed (non-fatal)"
+fi
 
 # Persist the daemon log alongside the TRX so a crash/abort is recoverable
 # after the session dir is cleaned up.

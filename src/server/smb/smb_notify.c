@@ -85,20 +85,35 @@ chimera_smb_notify_build_header(
     hdr = (struct smb2_header *) buf;
     memset(hdr, 0, sizeof(*hdr));
 
-    hdr->protocol_id[0]          = 0xFE;
-    hdr->protocol_id[1]          = 'S';
-    hdr->protocol_id[2]          = 'M';
-    hdr->protocol_id[3]          = 'B';
-    hdr->struct_size             = 64;
-    hdr->credit_charge           = nr->credit_charge;
-    hdr->status                  = status;
-    hdr->command                 = SMB2_CHANGE_NOTIFY;
-    hdr->credit_request_response = nr->credit_request ? nr->credit_request : 1;
-    hdr->flags                   = SMB2_FLAGS_SERVER_TO_REDIR | SMB2_FLAGS_ASYNC_COMMAND;
-    hdr->next_command            = 0;
-    hdr->message_id              = nr->message_id;
-    hdr->async.async_id          = nr->async_id;
-    hdr->session_id              = nr->session_id;
+    hdr->protocol_id[0] = 0xFE;
+    hdr->protocol_id[1] = 'S';
+    hdr->protocol_id[2] = 'M';
+    hdr->protocol_id[3] = 'B';
+    hdr->struct_size    = 64;
+    hdr->credit_charge  = nr->credit_charge;
+    hdr->status         = status;
+    hdr->command        = SMB2_CHANGE_NOTIFY;
+    /* Grant credits (capped), debiting this request's CreditCharge exactly once
+     * across the interim + final async responses so a client that keeps asking
+     * for more cannot overflow its 16-bit credit window (the fault the
+     * smb2.credits async flood otherwise hits).  The first response to be built
+     * (the interim) consumes the charge; later ones pass 0.  Mirrors the read
+     * path's interim/final handling -- see chimera_smb_grant_credits. */
+    {
+        uint32_t consume = 0;
+
+        if (!nr->credits_charged) {
+            nr->credits_charged = 1;
+            consume             = nr->credit_charge ? nr->credit_charge : 1;
+        }
+        hdr->credit_request_response = chimera_smb_grant_credits(
+            nr->conn, consume, nr->credit_request);
+    }
+    hdr->flags          = SMB2_FLAGS_SERVER_TO_REDIR | SMB2_FLAGS_ASYNC_COMMAND;
+    hdr->next_command   = 0;
+    hdr->message_id     = nr->message_id;
+    hdr->async.async_id = nr->async_id;
+    hdr->session_id     = nr->session_id;
 
     return buf + sizeof(struct smb2_header);
 } /* chimera_smb_notify_build_header */
@@ -114,7 +129,14 @@ chimera_smb_notify_set_netbios_len(
     memcpy(buf, &nb, 4);
 } /* chimera_smb_notify_set_netbios_len */
 
-/* Unlink a parked notify request from the connection's list */
+/* Unlink a parked notify request from the connection's list.
+ *
+ * This is the single chokepoint every un-park/terminal path funnels through
+ * (event delivery, NOTIFY_CLEANUP, SMB2_CANCEL, drop-on-teardown), so it also
+ * releases the request's async-credit slot.  The async_counted guard makes the
+ * conn->async_outstanding decrement happen exactly once: a leaked count would
+ * permanently shrink the connection's async ceiling, a double-decrement would
+ * underflow the unsigned counter and effectively remove the cap. */
 static void
 chimera_smb_notify_unlink(struct chimera_smb_notify_request *nr)
 {
@@ -130,6 +152,13 @@ chimera_smb_notify_unlink(struct chimera_smb_notify_request *nr)
 
     nr->next = NULL;
     nr->prev = NULL;
+
+    if (nr->async_counted) {
+        nr->async_counted = 0;
+        if (nr->conn && nr->conn->async_outstanding) {
+            nr->conn->async_outstanding--;
+        }
+    }
 } /* chimera_smb_notify_unlink */
 
 /* ----------------------------------------------------------------
@@ -188,6 +217,50 @@ chimera_smb_notify_write_record(
 
     return aligned;
 } /* chimera_smb_notify_write_record */
+
+/* The FILE_ACTION_* a non-rename event serializes to.  Shared by the
+ * serializer and the coalescer so they agree on a record's identity. */
+static uint32_t
+chimera_smb_notify_file_action(uint32_t a)
+{
+    if (a & (CHIMERA_VFS_NOTIFY_FILE_ADDED | CHIMERA_VFS_NOTIFY_DIR_ADDED)) {
+        return FILE_ACTION_ADDED;
+    } else if (a & (CHIMERA_VFS_NOTIFY_FILE_REMOVED | CHIMERA_VFS_NOTIFY_DIR_REMOVED)) {
+        return FILE_ACTION_REMOVED;
+    }
+    return FILE_ACTION_MODIFIED;
+} /* chimera_smb_notify_file_action */
+
+int
+chimera_smb_notify_coalesce_events(
+    struct chimera_vfs_notify_event *events,
+    int                              nevents)
+{
+    int i, j = 0;
+
+    for (i = 0; i < nevents; i++) {
+        /* Rename events carry a distinct OLD/NEW pair and are never merged. */
+        if (j > 0 &&
+            !(events[i].action & CHIMERA_VFS_NOTIFY_RENAMED) &&
+            !(events[j - 1].action & CHIMERA_VFS_NOTIFY_RENAMED) &&
+            chimera_smb_notify_file_action(events[i].action) ==
+            chimera_smb_notify_file_action(events[j - 1].action) &&
+            events[i].name_len == events[j - 1].name_len &&
+            memcmp(events[i].name, events[j - 1].name, events[i].name_len) == 0) {
+            /* Same record as the previous kept event — fold the class bits in
+            * (harmless; matching already happened) and drop the duplicate. */
+            events[j - 1].action |= events[i].action;
+            continue;
+        }
+
+        if (i != j) {
+            events[j] = events[i];
+        }
+        j++;
+    }
+
+    return j;
+} /* chimera_smb_notify_coalesce_events */
 
 /* ----------------------------------------------------------------
  * Serialize VFS notify events into FILE_NOTIFY_INFORMATION records.
@@ -267,13 +340,7 @@ chimera_smb_notify_serialize_events(
              * smbtorture smb2.notify.mask, which requires ACTION_MODIFIED for
              * a write under every filter bit).  So the stream bits only widen
              * which watchers are notified; they do not change the action. */
-            if (ev->action & (CHIMERA_VFS_NOTIFY_FILE_ADDED | CHIMERA_VFS_NOTIFY_DIR_ADDED)) {
-                action = FILE_ACTION_ADDED;
-            } else if (ev->action & (CHIMERA_VFS_NOTIFY_FILE_REMOVED | CHIMERA_VFS_NOTIFY_DIR_REMOVED)) {
-                action = FILE_ACTION_REMOVED;
-            } else {
-                action = FILE_ACTION_MODIFIED;
-            }
+            action = chimera_smb_notify_file_action(ev->action);
 
             if (prev_entry) {
                 *(uint32_t *) prev_entry = (uint32_t) (p - prev_entry);
@@ -519,6 +586,8 @@ chimera_smb_notify_do_send_response(
         nevents = j;
     }
 
+    nevents = chimera_smb_notify_coalesce_events(events, nevents);
+
     if (nevents == 0 && !overflowed && !cleanup && !deleted) {
         /* All drained events were filtered out — treat as a spurious
          * wakeup.  Leave state->pending == nr so the next matching
@@ -628,6 +697,16 @@ chimera_smb_notify_do_send_response(
         if (consumed < nevents) {
             overflowed      = 1;
             notify_data_len = 0;
+
+            /* The drained events were discarded because they did not fit the
+            * client's OutputBufferLength.  A client that asked for a non-zero
+            * buffer and still could not be served has lost events, so the
+            * next CHANGE_NOTIFY on this handle must also report overflow until
+            * the client rescans (smb2.notify.valid-req).  OutputBufferLength
+            * == 0 is a deliberate "poll without data" and does not stick. */
+            if (nr->output_buffer_length > 0) {
+                chimera_vfs_notify_mark_overflow(state->watch);
+            }
         }
         p = data_start + notify_data_len;
 

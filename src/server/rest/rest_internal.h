@@ -25,7 +25,14 @@ struct chimera_rest_server {
     struct evpl_listener  *https_listener;
     struct chimera_server *server;
     int                    debug_fsops;
+    int                    auth_enabled;
+    unsigned char          jwt_secret[32];
+    int                    winbind_enabled;
+    char                   winbind_domain[256];
 };
+
+struct evpl;
+struct evpl_http_request;
 
 struct chimera_rest_thread {
     struct evpl                *evpl;
@@ -70,3 +77,18 @@ chimera_rest_send_error(
     int                       status,
     const char               *error,
     const char               *message);
+
+/**
+ * Dispatch a pre-serialized JSON string as the response body.
+ *
+ * @param evpl      Event loop for this thread
+ * @param request   HTTP request being responded to
+ * @param status    HTTP status code to dispatch
+ * @param json_body NUL-terminated JSON string to send as the body
+ */
+void
+chimera_rest_send_json_response(
+    struct evpl              *evpl,
+    struct evpl_http_request *request,
+    int                       status,
+    const char               *json_body);

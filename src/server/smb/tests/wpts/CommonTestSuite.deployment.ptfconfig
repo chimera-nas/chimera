@@ -83,9 +83,24 @@
       <Property name="SutSupportedEncryptionAlgorithms" value="ENCRYPTION_AES128_CCM;ENCRYPTION_AES128_GCM;ENCRYPTION_AES256_CCM;ENCRYPTION_AES256_GCM"/>
       <Property name="SupportedCompressionAlgorithms" value=""/>
 
-      <Property name="UnsupportedIoCtlCodes" value="FSCTL_OFFLOAD_READ;FSCTL_OFFLOAD_WRITE;FSCTL_FILE_LEVEL_TRIM"/>
+      <Property name="UnsupportedIoCtlCodes" value=""/>
       <Property name="UnsupportedCreateContexts" value=""/>
       <Property name="MaxResiliencyTimeout" value="300000"/>
+    </Group>
+
+    <!-- Copy-offload: the server implements FSCTL_OFFLOAD_READ/WRITE (ODX) and
+         FSCTL_DUPLICATE_EXTENTS_TO_FILE. The MS_FSA_Clarification cases gate on
+         these properties, which SMB2TestConfig reads from the "HVRS" group;
+         VolumnClusterSize must equal the allocation unit the server advertises
+         (8 sectors * 512 = 4096, see smb_attr.h). -->
+    <Group name="HVRS">
+      <Property name="IsOffLoadImplemented" value="true"/>
+      <Property name="IsSetZeroDataImplemented" value="true"/>
+      <Property name="VolumnClusterSize" value="4096"/>
+      <!-- UNC path the MS_FSA_Clarification cases open a verification handle on;
+           SMB2TestConfig.ParseSharePath splits it into ShareServerName + ShareName,
+           so it must be \\<SUT_IP>\<basic share>. -->
+      <Property name="SharePath" value="\\10.0.0.1\SMBBasic"/>
     </Group>
   </Properties>
 </TestSite>

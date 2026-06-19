@@ -165,6 +165,15 @@ chimera_server_config_get_smb_acl_inherited_canonicalize(
     const struct chimera_server_config *config);
 
 void
+chimera_server_config_set_smb2_max_async_credits(
+    struct chimera_server_config *config,
+    int                           value);
+
+int
+chimera_server_config_get_smb2_max_async_credits(
+    const struct chimera_server_config *config);
+
+void
 chimera_server_config_set_cache_ttl(
     struct chimera_server_config *config,
     int                           ttl);
@@ -230,6 +239,15 @@ chimera_server_config_set_nfs4_grace_time(
 
 uint32_t
 chimera_server_config_get_nfs4_grace_time(
+    const struct chimera_server_config *config);
+
+void
+chimera_server_config_set_nfs4_node_id(
+    struct chimera_server_config *config,
+    int                           node_id);
+
+int
+chimera_server_config_get_nfs4_node_id(
     const struct chimera_server_config *config);
 
 void
@@ -402,6 +420,15 @@ chimera_server_config_get_nfs_lockmgr_port(
     const struct chimera_server_config *config);
 
 void
+chimera_server_config_set_nfs_nsm_port(
+    struct chimera_server_config *config,
+    int                           port);
+
+int
+chimera_server_config_get_nfs_nsm_port(
+    const struct chimera_server_config *config);
+
+void
 chimera_server_config_set_state_dir(
     struct chimera_server_config *config,
     const char                   *dir);
@@ -447,6 +474,15 @@ chimera_server_config_set_rest_debug_fsops(
 
 int
 chimera_server_config_get_rest_debug_fsops(
+    const struct chimera_server_config *config);
+
+void
+chimera_server_config_set_rest_auth_enabled(
+    struct chimera_server_config *config,
+    int                           enable);
+
+int
+chimera_server_config_get_rest_auth_enabled(
     const struct chimera_server_config *config);
 
 void
@@ -554,6 +590,16 @@ chimera_server_mkpath(
     const char            *module_name,
     const char            *module_path,
     uint32_t               mode);
+
+/* Seed the symbolic-link fixtures the WPTS MS-SMB2 CreateClose symlink cases
+ * expect to pre-exist on a memfs-backed share (a directory holding an in-path
+ * link, plus a dangling root-level link).  A test-harness aid -- the server
+ * never resolves these links (it returns STATUS_STOPPED_ON_SYMLINK).  Returns
+ * 0 on success, -1 otherwise. */
+int
+chimera_server_seed_symlinks(
+    struct chimera_server *server,
+    const char            *module_name);
 
 int
 chimera_server_unmount(

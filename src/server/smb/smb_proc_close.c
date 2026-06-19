@@ -14,6 +14,39 @@
 static void chimera_smb_close_release(
     struct chimera_smb_request *request);
 
+void
+chimera_smb_break_caching_for_namespace(
+    struct chimera_smb_request   *request,
+    struct chimera_smb_open_file *open_file)
+{
+    struct chimera_vfs_thread      *vfs_thread =
+        request->compound->thread->vfs_thread;
+    struct chimera_vfs_state       *vfs_state = vfs_thread->vfs->vfs_state;
+    struct chimera_vfs_open_handle *oh        = open_file->handle;
+    struct chimera_vfs_lease_owner  owner     = {
+        .protocol   = CHIMERA_VFS_LEASE_PROTO_SMB2,
+        .client_key = request->session_handle->session->client_key,
+        .owner_lo   = open_file->file_id.pid,
+        .owner_hi   = open_file->file_id.vid,
+    };
+
+    if (!oh) {
+        return;
+    }
+
+    /* An RqLs open is owned by its lease key, not its file_id: identify the
+    * operating open by the key so its OWN lease is spared by the recall. */
+    if (open_file->oplock_level == SMB2_OPLOCK_LEVEL_LEASE) {
+        memcpy(&owner.owner_lo, open_file->lease_key, 8);
+        memcpy(&owner.owner_hi, open_file->lease_key + 8, 8);
+        owner.is_lease = 1;
+    }
+
+    chimera_vfs_state_break_caching_for_namespace(
+        vfs_state, oh->fh, oh->fh_len, oh->fh_hash, &owner,
+        CHIMERA_VFS_LEASE_MODE_R);
+} /* chimera_smb_break_caching_for_namespace */
+
 /* Fire-and-forget completion for the persistent-handle record delete. */
 static void
 chimera_smb_close_durable_delete_callback(
@@ -136,6 +169,140 @@ chimera_smb_close_doc_open_parent_callback(
         request);
 } /* chimera_smb_close_doc_open_parent_callback */
 
+/*
+ * Request-less delete-on-close unlink for the abrupt-teardown path
+ * (connection disconnect / session logoff / tree disconnect).
+ *
+ * The clean-CLOSE DOC path above threads parent_handle, doc_info and the
+ * VFS-module close state through the live chimera_smb_request.  Teardown frees
+ * open files with no request in hand, so this self-contained context carries a
+ * heap-owned copy of the doc_info returned by chimera_vfs_release_doc and runs
+ * the same open-parent -> remove_at -> close-backend sequence as a
+ * fire-and-forget operation on the SMB thread's VFS thread.
+ *
+ * Only invoked for opens teardown is genuinely DISCARDING: a preserved
+ * (courtesy-held / parked) durable handle never reaches release_doc in the
+ * teardown path, so its file is never deleted on disconnect.
+ */
+struct chimera_smb_teardown_doc_ctx {
+    struct chimera_vfs_thread      *vfs_thread;
+    struct chimera_vfs_doc_info     doc_info;
+    struct chimera_vfs_open_handle *parent_handle;
+};
+
+static void
+chimera_smb_teardown_doc_close_backend(struct chimera_smb_teardown_doc_ctx *ctx)
+{
+    chimera_vfs_close(ctx->vfs_thread,
+                      ctx->doc_info.close_module,
+                      ctx->doc_info.close_private,
+                      ctx->doc_info.close_hash,
+                      NULL,
+                      NULL);
+    free(ctx);
+} /* chimera_smb_teardown_doc_close_backend */
+
+static void
+chimera_smb_teardown_doc_remove_callback(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *pre_attr,
+    struct chimera_vfs_attrs *post_attr,
+    void                     *private_data)
+{
+    struct chimera_smb_teardown_doc_ctx *ctx = private_data;
+
+    (void) pre_attr;
+    (void) post_attr;
+
+    if (error_code) {
+        chimera_smb_debug("teardown delete-on-close: remove_at failed for "
+                          "'%.*s' (error %d)",
+                          ctx->doc_info.name_len,
+                          ctx->doc_info.name,
+                          error_code);
+    }
+
+    chimera_vfs_release(ctx->vfs_thread, ctx->parent_handle);
+    chimera_smb_teardown_doc_close_backend(ctx);
+} /* chimera_smb_teardown_doc_remove_callback */
+
+static void
+chimera_smb_teardown_doc_open_parent_callback(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *oh,
+    void                           *private_data)
+{
+    struct chimera_smb_teardown_doc_ctx *ctx = private_data;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        /* Cannot open parent — skip the unlink but still close the backend
+         * handle that release_doc detached from the cache. */
+        chimera_smb_debug("teardown delete-on-close: failed to open parent dir "
+                          "for '%.*s' (error %d)",
+                          ctx->doc_info.name_len,
+                          ctx->doc_info.name,
+                          error_code);
+        chimera_smb_teardown_doc_close_backend(ctx);
+        return;
+    }
+
+    ctx->parent_handle = oh;
+
+    /* No lease self-exemption here: teardown is dropping every handle this
+     * connection/session/tree owned, so all directory leases break.  The child
+     * FH is intentionally not supplied (no cross-client file-lease recall): the
+     * delete-on-close lease-recall semantics are owned by the parallel
+     * smb-lease-crossclient-rh work, and the clean-CLOSE DOC path likewise does
+     * not recall here. */
+    chimera_vfs_remove_at(
+        ctx->vfs_thread,
+        &ctx->doc_info.cred,
+        oh,
+        ctx->doc_info.name,
+        ctx->doc_info.name_len,
+        NULL,
+        0,
+        0,
+        0,
+        NULL,
+        chimera_smb_teardown_doc_remove_callback,
+        ctx);
+} /* chimera_smb_teardown_doc_open_parent_callback */
+
+void
+chimera_smb_teardown_doc_unlink(
+    struct chimera_server_smb_thread  *thread,
+    const struct chimera_vfs_doc_info *doc_info)
+{
+    struct chimera_smb_teardown_doc_ctx *ctx;
+
+    if (doc_info->parent_fh_len == 0) {
+        /* No parent fh recorded — cannot unlink, just close the backend
+         * handle that release_doc detached from the cache. */
+        chimera_vfs_close(thread->vfs_thread,
+                          doc_info->close_module,
+                          doc_info->close_private,
+                          doc_info->close_hash,
+                          NULL,
+                          NULL);
+        return;
+    }
+
+    ctx                = calloc(1, sizeof(*ctx));
+    ctx->vfs_thread    = thread->vfs_thread;
+    ctx->doc_info      = *doc_info;
+    ctx->parent_handle = NULL;
+
+    chimera_vfs_open_fh(
+        ctx->vfs_thread,
+        &ctx->doc_info.cred,
+        ctx->doc_info.parent_fh,
+        ctx->doc_info.parent_fh_len,
+        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
+        chimera_smb_teardown_doc_open_parent_callback,
+        ctx);
+} /* chimera_smb_teardown_doc_unlink */
+
 /* Completion of a stream delete-on-close remove_stream. */
 static void
 chimera_smb_close_stream_remove_callback(
@@ -187,6 +354,67 @@ chimera_smb_close_stream_open_callback(
         request);
 } /* chimera_smb_close_stream_open_callback */
 
+/* Completion of the deferred base-file removal performed when the last named
+ * stream keeping a delete-pending base alive is closed (smb2.streams.delete). */
+static void
+chimera_smb_close_stream_base_remove_callback(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *pre_attr,
+    struct chimera_vfs_attrs *post_attr,
+    void                     *private_data)
+{
+    struct chimera_smb_request *request    = private_data;
+    struct chimera_vfs_thread  *vfs_thread = request->compound->thread->vfs_thread;
+
+    (void) pre_attr;
+    (void) post_attr;
+
+    if (error_code) {
+        chimera_smb_debug("stream delete-pending: base remove_at failed (error %d)",
+                          error_code);
+    }
+
+    chimera_vfs_release(vfs_thread, request->close.parent_handle);
+    request->close.parent_handle = NULL;
+    chimera_smb_open_file_release(request, request->close.open_file);
+    chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+} /* chimera_smb_close_stream_base_remove_callback */
+
+/* The base file's parent directory is open; remove the (delete-pending) base
+ * file now that its last named-stream holder has closed. */
+static void
+chimera_smb_close_stream_base_parent_callback(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *oh,
+    void                           *private_data)
+{
+    struct chimera_smb_request   *request    = private_data;
+    struct chimera_vfs_thread    *vfs_thread = request->compound->thread->vfs_thread;
+    struct chimera_smb_open_file *open_file  = request->close.open_file;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_smb_open_file_release(request, open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+        return;
+    }
+
+    request->close.parent_handle = oh;
+
+    chimera_vfs_remove_at(
+        vfs_thread,
+        &request->session_handle->session->cred,
+        oh,
+        open_file->name,
+        open_file->name_len,
+        NULL,
+        0,
+        0,
+        0,
+        NULL,
+        chimera_smb_close_stream_base_remove_callback,
+        request);
+} /* chimera_smb_close_stream_base_parent_callback */
+
 /*
  * Release the VFS handle and check for delete-on-close.
  *
@@ -233,6 +461,47 @@ chimera_smb_close_release(struct chimera_smb_request *request)
             CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
             chimera_smb_close_stream_open_callback,
             request);
+        return;
+    }
+
+    /* Last close of a named stream that kept a delete-pending base file alive:
+     * perform the deferred base removal now (smb2.streams.delete).  Excludes
+     * this open's own base reservation when checking for other holders, so the
+     * removal fires only on the final stream close. */
+    if ((open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_STREAM) &&
+        open_file->base_share_file_state &&
+        chimera_vfs_state_is_delete_pending(open_file->base_share_file_state) &&
+        !chimera_vfs_state_has_other_share_holder(open_file->base_share_file_state,
+                                                  &open_file->base_share_lease) &&
+        open_file->parent_fh_len > 0) {
+        chimera_vfs_open_fh(
+            vfs_thread,
+            &request->session_handle->session->cred,
+            open_file->parent_fh,
+            open_file->parent_fh_len,
+            CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
+            chimera_smb_close_stream_base_parent_callback,
+            request);
+        return;
+    }
+
+    /* Delete-on-close on a base file that a named stream still holds open: defer
+     * the unlink and mark the file delete-pending, so name opens of the base or
+     * its streams are answered STATUS_DELETE_PENDING while the stream keeps the
+     * file alive (smb2.streams.delete).  The stream's last close performs the
+     * deferred removal above.  Only the backend handle detached by release_doc
+     * is closed here. */
+    if (need_doc && open_file->share_file_state &&
+        chimera_vfs_state_stream_holders(open_file->share_file_state) > 0) {
+        chimera_vfs_state_set_delete_pending(open_file->share_file_state);
+        chimera_vfs_close(vfs_thread,
+                          request->close.doc_info.close_module,
+                          request->close.doc_info.close_private,
+                          request->close.doc_info.close_hash,
+                          NULL,
+                          NULL);
+        chimera_smb_open_file_release(request, open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
         return;
     }
 
@@ -289,6 +558,20 @@ chimera_smb_close(struct chimera_smb_request *request)
     if (unlikely(!request->close.open_file)) {
         chimera_smb_complete_request(request, SMB2_STATUS_FILE_CLOSED);
         return;
+    }
+
+    /* A blocking byte-range LOCK still parked on this handle is aborted by the
+     * close and completed with RANGE_NOT_LOCKED (MS-SMB2; smb2.lock.cancel
+     * "cancel by close").  The open is already unhashed + marked CLOSED above, so
+     * the parked request's deferred grant can no longer land; finishing it here
+     * drops the open_file reference it held. */
+    {
+        struct chimera_smb_request *parked =
+            chimera_smb_lock_abort_parked(thread, request->close.open_file);
+
+        if (parked) {
+            chimera_smb_lock_park_finish(parked, parked->lock.resume_status);
+        }
     }
 
     /* Clean up any notify watches on this open file */

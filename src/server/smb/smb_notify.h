@@ -60,6 +60,15 @@ struct chimera_smb_notify_request {
      * session is being closed by a PreviousSessionId reconnect, where the
      * cleanup must be marshaled to the request's owning thread. */
     int                                cleanup;
+    /* Set when this parked notify was counted against conn->async_outstanding
+     * (MS-SMB2 3.3.5.2.9 outstanding-async cap).  Guards the decrement in
+     * chimera_smb_notify_unlink so the slot is freed exactly once however the
+     * request un-parks (event delivery, NOTIFY_CLEANUP, CANCEL, teardown). */
+    int                                async_counted;
+    /* Set once the interim STATUS_PENDING has debited this request's
+     * CreditCharge via chimera_smb_grant_credits, so the eventual final
+     * response passes consume=0 and the charge is not counted twice. */
+    int                                credits_charged;
     struct chimera_smb_notify_request *next;          /* parked list linkage */
     struct chimera_smb_notify_request *prev;          /* parked list linkage */
     struct chimera_smb_notify_request *ready_next;    /* doorbell ready queue */
@@ -198,6 +207,19 @@ chimera_smb_notify_serialize_events(
     uint8_t                         *out,
     int                              out_size,
     int                             *events_consumed);
+
+/*
+ * Collapse runs of adjacent events that serialize to the same
+ * FILE_NOTIFY_INFORMATION record (same FILE_ACTION + same name).  A single
+ * client-visible operation can drive several VFS events (e.g. a create stamps
+ * the data fork then its size/attributes), and Windows reports one record per
+ * (action,name) transition.  Applied after the per-request filter so the count
+ * the client sees matches.  Returns the new event count.
+ */
+int
+chimera_smb_notify_coalesce_events(
+    struct chimera_vfs_notify_event *events,
+    int                              nevents);
 
 /*
  * Map an SMB2 CHANGE_NOTIFY CompletionFilter (Windows-style bits) to

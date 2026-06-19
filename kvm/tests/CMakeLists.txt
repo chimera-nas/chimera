@@ -7,6 +7,9 @@ set(NFS_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_nfs_test_wrapper.sh)
 set(NFS_REBOOT_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_nfs_reboot_test_wrapper.sh)
 set(NFS3_DRC_REBOOT_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_nfs3_drc_reboot_test_wrapper.sh)
 set(NFSTEST_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_nfstest_test_wrapper.sh)
+set(NFSTEST_2CLIENT_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_nfstest_2client_test_wrapper.sh)
+set(NFS40_DRC_REBOOT_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_nfs40_drc_reboot_test_wrapper.sh)
+set(NFS_MULTINODE_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_nfs_multinode_test_wrapper.sh)
 set(SMB_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_smb_test_wrapper.sh)
 set(PNFS_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_pnfs_test_wrapper.sh)
 set(PNFS_BLOCK_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_pnfs_block_test_wrapper.sh)
@@ -182,6 +185,34 @@ set(XFSTESTS_CMD_nametest  "mkdir -p /mnt/test && cd /mnt/test && /opt/xfstests/
 set(XFSTESTS_CMD_fstest    "mkdir -p /mnt/test && /opt/xfstests/src/fstest -p /mnt/test -n 1 -f 2 -l 5 -s 65536")
 set(XFSTESTS_CMD_rewinddir "mkdir -p /mnt/test && /opt/xfstests/src/rewinddir-test /mnt/test")
 
+# Linux Test Project (LTP) scenario groups, run against the server-mounted share.
+# Matrix entries are "<group>|<space-separated NFS versions>"; <group> names a
+# runtest file shipped in the guest's /opt/ltp/runtest (>= kvm-test-base v1.5.0).
+# Each group has a companion /opt/ltp-skip/<group>.skip allowlist baked into the
+# image listing the cases that fail/break for reasons intrinsic to NFS, so any
+# remaining failure is a genuine server regression.
+#
+# Pared to the LTP coverage our other suites do NOT provide (an audit found the
+# bulk of LTP's fs/syscalls coverage duplicates pjdfstest, xfstests and cthon, or
+# isn't filesystem-related at all):
+#   dio             -- O_DIRECT / uncached I/O (our xfstests fsx runs buffered)
+#   fcntl-locktests -- POSIX byte-range locking via the real kernel client
+#   chimera_nfs42   -- NFSv4.2-only server ops (fallocate -> ALLOCATE/DEALLOCATE,
+#                      copy_file_range -> COPY/CLONE, statx); a curated runtest
+#                      generated in the guest image
+# All are fast, so they run on every backend in both Debug and Release.
+set(LTP_MATRIX
+    "dio|3 4.2"
+    "fcntl-locktests|3 4.0 4.1 4.2"
+    "chimera_nfs42|4.2"
+)
+
+# The guest's /opt/ltp-run.sh drives the group through kirk (the LTP runner) with
+# its skip file and turns the JSON report into a pass/fail exit code -- kirk's own
+# exit status ignores test failures, so the verdict is its stats.failed/broken.
+# The "<grp>" token is substituted per matrix entry below.
+set(LTP_CMD_TEMPLATE "/opt/ltp-run.sh <grp>")
+
 foreach(image_spec ${KVM_IMAGES})
     string(REPLACE "|" ";" image_parts "${image_spec}")
     list(GET image_parts 0 IMAGE_NAME)
@@ -205,6 +236,23 @@ foreach(image_spec ${KVM_IMAGES})
                     ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
                     ${CHIMERA_BINARY})
         set_tests_properties(chimera/kvm/${IMAGE_NAME}/reboot/drc_cairn_nfs3
+            PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2)
+
+        # Same, for the NFSv4.0 reply cache (shared connectionless DRC, type 0x06).
+        add_test(NAME chimera/kvm/${IMAGE_NAME}/reboot/drc_cairn_nfs40
+            COMMAND bash ${NFS40_DRC_REBOOT_WRAPPER}
+                    ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
+                    ${CHIMERA_BINARY})
+        set_tests_properties(chimera/kvm/${IMAGE_NAME}/reboot/drc_cairn_nfs40
+            PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2)
+
+        # Shared-store multi-instance namespacing: two node_ids drive one cairn
+        # store sequentially; data is shared, per-node records stay isolated.
+        add_test(NAME chimera/kvm/${IMAGE_NAME}/reboot/multinode_cairn
+            COMMAND bash ${NFS_MULTINODE_WRAPPER}
+                    ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
+                    ${CHIMERA_BINARY})
+        set_tests_properties(chimera/kvm/${IMAGE_NAME}/reboot/multinode_cairn
             PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2)
     endif()
 
@@ -272,14 +320,27 @@ foreach(image_spec ${KVM_IMAGES})
     # behaviour with its own tcpdump-driven RPC dissector.  The nfstest tree and
     # its in-guest deps (python3, tcpdump, a default route) ship in the
     # kvm-test-base image (>= v1.2.0).  Matrix entries are "program|<space-
-    # separated NFS versions>"; nfstest_ssc is left unregistered for now (a
-    # server-side COPY gap).
+    # separated NFS versions>".  nfstest_lock is NFSv4-only here (NFSv3 byte-range
+    # locking is NLM, which needs rpc.statd the guest does not run -- the other
+    # suites mount nolock for v3 for the same reason); nfstest_xattr and
+    # nfstest_ssc are NFSv4.2-only (RFC 8276 / server-side COPY).  nfstest_ssc
+    # runs a subset (see the wrapper): chimera's COPY is correct, but the suite's
+    # data-copy tests also assert the client serves the post-copy verify read
+    # from cache, which the Linux client never does (copy_file_range invalidates
+    # the destination page cache), so only the COPY error/edge cases are run.
+    # nfstest_cache and nfstest_delegation are registered below (they need a
+    # second client host -- see the 2-client wrapper).  Not yet registered:
+    # nfstest_pnfs.
     if(IMAGE_NAME STREQUAL "ubuntu2404")
         set(NFSTEST_MATRIX
             "nfstest_posix|3 4.0 4.1 4.2"
             "nfstest_interop|4.0"
             "nfstest_alloc|4.2"
             "nfstest_sparse|4.2"
+            "nfstest_lock|4.1"
+            "nfstest_dio|4.2"
+            "nfstest_xattr|4.2"
+            "nfstest_ssc|4.2"
         )
         set(NFSTEST_BACKENDS ${KVM_BACKENDS})
         if(CAIRN_ENABLED)
@@ -325,12 +386,99 @@ foreach(image_spec ${KVM_IMAGES})
                        (backend STREQUAL "linux" OR backend STREQUAL "io_uring"))
                         continue()
                     endif()
+                    # nfstest_xattr checks that a SETXATTR bumps the object's
+                    # change attribute (cinfo before != after).  The passthrough
+                    # backends derive that from the host file's ctime, whose
+                    # Linux granularity is coarse (~1-4 ms): a back-to-back
+                    # pre-stat/fsetxattr/post-stat often lands in the same tick,
+                    # so before == after and the check flakes.  The native
+                    # backends use a monotonic per-inode change counter and are
+                    # stable.  Run xattr on the native backends only.
+                    if(prog STREQUAL "nfstest_xattr" AND
+                       (backend STREQUAL "linux" OR backend STREQUAL "io_uring"))
+                        continue()
+                    endif()
                     add_test(NAME chimera/kvm/${IMAGE_NAME}/nfstest/${prog}_${backend}_nfs${nfsver}
                         COMMAND bash ${NFSTEST_WRAPPER}
                                 ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
                                 ${CHIMERA_BINARY} ${backend} ${nfsver} ${prog})
                     set_tests_properties(chimera/kvm/${IMAGE_NAME}/nfstest/${prog}_${backend}_nfs${nfsver}
                         PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2)
+                    # nfstest_lock (5296 subtests, ~6.5 min) and nfstest_dio
+                    # (1 MiB direct-I/O transfers, ~5.5 min) run well past the
+                    # CI-wide `ctest --timeout 300`; give them a per-test timeout
+                    # that overrides it so they are not killed mid-run.
+                    if(prog STREQUAL "nfstest_lock" OR prog STREQUAL "nfstest_dio")
+                        set_tests_properties(chimera/kvm/${IMAGE_NAME}/nfstest/${prog}_${backend}_nfs${nfsver}
+                            PROPERTIES TIMEOUT 900)
+                    endif()
+                endforeach()
+            endforeach()
+        endforeach()
+
+        # nfstest_delegation needs a *second*, distinct NFS client (its own
+        # network namespace = its own clientid to the server).  The 2-client
+        # wrapper boots a second guest and drives it over ssh (the v1.7.0 image
+        # bakes sshd + a key for exactly this), so the suite's cross-client
+        # recall/conflict tests run for real.  memfs + NFSv4.1 only for now (the
+        # backend/version validated end-to-end); a small residual cluster is
+        # excluded inside the wrapper (see its NFSTEST_RUNTEST).  The two guests
+        # plus the server make this a ~15-20 min run, well past the CI-wide
+        # `ctest --timeout 300`, so give it a per-test timeout that overrides it.
+        add_test(NAME chimera/kvm/${IMAGE_NAME}/nfstest/nfstest_delegation_memfs_nfs4.1
+            COMMAND bash ${NFSTEST_2CLIENT_WRAPPER}
+                    ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
+                    ${CHIMERA_BINARY} memfs 4.1 nfstest_delegation)
+        set_tests_properties(chimera/kvm/${IMAGE_NAME}/nfstest/nfstest_delegation_memfs_nfs4.1
+            PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 4 TIMEOUT 1800)
+
+        # nfstest_cache also needs the second client (it issues conflicting
+        # writes from the other host to invalidate the primary's actimeo
+        # attribute/data caches), so it reuses the 2-client wrapper.  The wrapper
+        # turns delegations off for this suite (a read delegation legitimately
+        # bypasses actimeo) and runs the regular-file cache subset; the
+        # directory-cache cases are excluded there (Linux client revalidation
+        # policy, not a server defect -- see the wrapper).  memfs + NFSv4.1.
+        add_test(NAME chimera/kvm/${IMAGE_NAME}/nfstest/nfstest_cache_memfs_nfs4.1
+            COMMAND bash ${NFSTEST_2CLIENT_WRAPPER}
+                    ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
+                    ${CHIMERA_BINARY} memfs 4.1 nfstest_cache)
+        set_tests_properties(chimera/kvm/${IMAGE_NAME}/nfstest/nfstest_cache_memfs_nfs4.1
+            PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 4 TIMEOUT 1800)
+    endif()
+
+    # Linux Test Project (LTP) -- ubuntu2404 only.  Reuses the plain NFS wrapper:
+    # LTP runs against the pre-mounted share at /mnt exactly like cthon/xfstests,
+    # so it needs no dedicated wrapper.  See LTP_MATRIX above for the pared-down
+    # group selection (the non-duplicative slice).
+    if(IMAGE_NAME STREQUAL "ubuntu2404")
+        set(LTP_BACKENDS ${KVM_BACKENDS})
+        if(CAIRN_ENABLED)
+            list(APPEND LTP_BACKENDS cairn)
+        endif()
+        foreach(entry ${LTP_MATRIX})
+            string(REPLACE "|" ";" parts "${entry}")
+            list(GET parts 0 grp)
+            list(GET parts 1 vers_str)
+            string(REPLACE " " ";" vers "${vers_str}")
+            string(REPLACE "<grp>" "${grp}" ltp_cmd "${LTP_CMD_TEMPLATE}")
+            foreach(nfsver ${vers})
+                foreach(backend ${LTP_BACKENDS})
+                    # chimera_nfs42 exercises NFSv4.2 server allocation/copy ops;
+                    # run it on memfs + the diskfs backends (chimera's own
+                    # allocation paths) rather than the passthrough/cairn backends.
+                    if(grp STREQUAL "chimera_nfs42" AND
+                       NOT (backend STREQUAL "memfs" OR backend MATCHES "diskfs"))
+                        continue()
+                    endif()
+                    add_test(NAME chimera/kvm/${IMAGE_NAME}/ltp/${grp}_${backend}_nfs${nfsver}
+                        COMMAND bash ${NFS_WRAPPER}
+                                ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
+                                ${CHIMERA_BINARY} ${backend} ${nfsver}
+                                "${ltp_cmd}")
+                    set_tests_properties(chimera/kvm/${IMAGE_NAME}/ltp/${grp}_${backend}_nfs${nfsver}
+                        PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2
+                                   TIMEOUT 600)
                 endforeach()
             endforeach()
         endforeach()
@@ -462,8 +610,13 @@ foreach(image_spec ${KVM_IMAGES})
                         ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
                         ${CHIMERA_BINARY} cairn
                         "${SMB_CTHON_CMD_${category}}")
+            # cairn's lock-key contention can push the SMB cthon run past the CI
+            # default `ctest --timeout 300` under parallel load, so it flakes
+            # (fails once, passes on rerun -- tracker #733).  Give it headroom
+            # like the other contention-bound suites (cf. fsx, #805); a test
+            # TIMEOUT property overrides the command-line default.
             set_tests_properties(chimera/kvm/${IMAGE_NAME}/smb/cthon/${category}_cairn
-                PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2)
+                PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2 TIMEOUT 600)
         endforeach()
     endif()
 
@@ -487,8 +640,11 @@ foreach(image_spec ${KVM_IMAGES})
                         ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
                         ${CHIMERA_BINARY} cairn
                         "${XFSTESTS_CMD_${prog}}")
+            # Same cairn lock-key contention as the SMB cthon cairn block above:
+            # under load these can exceed the 300s CI default (e.g. the recurring
+            # rewinddir_cairn timeout, #733).  Give them matching headroom.
             set_tests_properties(chimera/kvm/${IMAGE_NAME}/smb/xfstests/${prog}_cairn
-                PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2)
+                PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2 TIMEOUT 600)
         endforeach()
     endif()
 

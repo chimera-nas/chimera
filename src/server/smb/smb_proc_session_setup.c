@@ -75,6 +75,29 @@ process_kerberos_auth(
     return rc;
 } // process_kerberos_auth
 
+/* The signing algorithm a connection effectively uses, derived from its dialect
+ * and (for 3.1.1) its negotiated SMB2_SIGNING_* value.  Only 3.1.1 negotiates a
+ * signing algorithm; 2.x is fixed at HMAC-SHA256 and 3.0/3.0.2 at AES-128-CMAC
+ * (MS-SMB2 §3.1.4.1 / §3.3.5.4), and for those dialects negotiated.signing_alg
+ * is left at its 0 default rather than the true algorithm.  Used to compare a
+ * binding connection against the connection the session was established on. */
+static inline uint16_t
+chimera_smb_effective_signing_alg(
+    uint16_t dialect,
+    uint16_t signing_alg)
+{
+    switch (dialect) {
+        case SMB2_DIALECT_2_0_2:
+        case SMB2_DIALECT_2_1:
+            return SMB2_SIGNING_HMAC_SHA256;
+        case SMB2_DIALECT_3_0:
+        case SMB2_DIALECT_3_0_2:
+            return SMB2_SIGNING_AES_CMAC;
+        default: /* 3.1.1: the negotiated algorithm is authoritative. */
+            return signing_alg;
+    } /* switch */
+} /* chimera_smb_effective_signing_alg */
+
 void
 chimera_smb_session_setup(struct chimera_smb_request *request)
 {
@@ -149,33 +172,58 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
         conn->dialect >= SMB2_DIALECT_3_0 &&
         request->smb2_hdr.session_id != 0 &&
         request->session_handle) {
-        struct chimera_smb_session *bind_session = request->session_handle->session;
-        int                         reject       = 0;
+        struct chimera_smb_session *bind_session  = request->session_handle->session;
+        uint32_t                    reject_status = 0;
+        uint16_t                    bind_sign_alg =
+            chimera_smb_effective_signing_alg(conn->dialect,
+                                              conn->negotiated.signing_alg);
+        uint16_t                    sess_sign_alg =
+            chimera_smb_effective_signing_alg(bind_session->dialect,
+                                              bind_session->sign_alg);
 
         if (!(request->smb2_hdr.flags & SMB2_FLAGS_SIGNED)) {
-            reject = 1;
+            reject_status = SMB2_STATUS_INVALID_PARAMETER;
+        } else if ((bind_session->flags & CHIMERA_SMB_SESSION_AUTHORIZED) &&
+                   bind_sign_alg == SMB2_SIGNING_AES_GMAC &&
+                   sess_sign_alg != SMB2_SIGNING_AES_GMAC) {
+            /* MS-SMB2 3.3.5.5: AES-128-GMAC ties the per-message signing key to
+             * the connection's GMAC nonce derivation, so a connection that
+             * negotiated GMAC cannot bind to a session whose establishing
+             * connection used a different (non-GMAC) signing algorithm.  This is
+             * rejected with STATUS_NOT_SUPPORTED -- a DIFFERENT status from the
+             * cipher/dialect/unsigned cases (which return INVALID_PARAMETER).
+             * Checked before the dialect mismatch because a 3.0.2-established
+             * session bound from a 3.1.1/GMAC connection (smb2.session.
+             * bind_negative_smb3signC30toG*) differs in both dialect and signing
+             * algorithm yet must report NOT_SUPPORTED.  smb2.session.bind_
+             * negative_smb3sign{CtoG,HtoG,C30toG} and smb3sne{CtoG,HtoG}
+             * exercise this; the reverse (a non-GMAC connection binding a
+             * GMAC-established session, GtoX) fails earlier in signature
+             * verification, and a CMAC/HMAC mismatch (CtoH or HtoC) is
+             * permitted (bind succeeds). */
+            reject_status = SMB2_STATUS_NOT_SUPPORTED;
         } else if ((bind_session->flags & CHIMERA_SMB_SESSION_AUTHORIZED) &&
                    bind_session->dialect != conn->dialect) {
             /* MS-SMB2 3.3.5.5: the binding connection's dialect MUST equal the
              * dialect of the connection the session was established on
              * (smb2.session.bind_negative_smb3to3* binds a 3.0.2 session from
              * a 3.1.1 connection and expects STATUS_INVALID_PARAMETER). */
-            reject = 1;
+            reject_status = SMB2_STATUS_INVALID_PARAMETER;
         } else if ((bind_session->flags & CHIMERA_SMB_SESSION_AUTHORIZED) &&
                    conn->negotiated.cipher_id != bind_session->conn_cipher_id) {
             /* MS-SMB2 3.3.5.5: likewise the negotiated cipher must match the
              * establishing connection's (smb2.session.bind_negative_
              * smb3encGtoC* negotiates AES-128-GCM on the first connection and
              * AES-128-CCM on the binding one). */
-            reject = 1;
+            reject_status = SMB2_STATUS_INVALID_PARAMETER;
         } else if (conn->dialect == SMB2_DIALECT_3_1_1 &&
                    bind_session->supports_notifications !=
                    conn->supports_notifications) {
-            reject = 1;
+            reject_status = SMB2_STATUS_INVALID_PARAMETER;
         }
 
-        if (reject) {
-            chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+        if (reject_status) {
+            chimera_smb_complete_request(request, reject_status);
             evpl_iovecs_release(thread->evpl, request->session_setup.input_iov,
                                 request->session_setup.input_niov);
             return;
@@ -253,14 +301,19 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
         bad_token = 1;
     }
 
-    /* Anonymous NTLM authentication is accepted only as a re-authentication of
-     * an established session (smb2.session.reauth2-5 re-authenticate a user
-     * session as anonymous and back; the session keeps its keys and open
-     * handles while the security context switches).  An initial anonymous
-     * session or an anonymous channel bind is refused. */
+    /* Anonymous (null-session) NTLM authentication (MS-SMB2 3.3.5.5.3 /
+     * MS-NLMP 3.2.5.1.2).  An anonymous AUTHENTICATE carries no password proof
+     * and yields no session key; the server establishes a NULL session mapped
+     * to the nobody identity (see ctx->is_anonymous in smb_ntlm.c).  Such a
+     * session is never signed or encrypted.
+     *
+     * Accepted as an initial session and as a re-authentication of an
+     * established session (smb2.session.reauth2-5 switch a user session to
+     * anonymous and back, keeping its keys/handles).  An anonymous CHANNEL BIND
+     * is still refused: a null session has no key to bind a new channel with. */
     if (rc == 0 && mech == SMB_AUTH_MECH_NTLM &&
-        conn->ntlm_ctx.is_anonymous && !is_reauth) {
-        chimera_smb_error("Anonymous authentication rejected (only re-authentication of an established session)");
+        conn->ntlm_ctx.is_anonymous && is_binding) {
+        chimera_smb_error("Anonymous channel bind rejected (a null session has no key)");
         rc = -1;
     }
 
@@ -472,8 +525,7 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
         chimera_vfs_cred_init_attr(&session->cred, uid, gid, ngids, gids);
 
         /* SMB3 transport encryption: derive per-session keys from the raw
-         * session key.  Skipped for anonymous/guest (null) sessions, which have
-         * no usable key and are never encrypted (MS-SMB2 §3.3.5.5.3).
+         * session key.
          *
          * Keys are derived whenever encryption is possible at all -- either the
          * global smb_encryption knob OR any per-share encrypt_data share --
@@ -481,12 +533,19 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
          * when global encryption is off.  The global knob alone decides whether
          * the whole session is marked encrypt-all (CHIMERA_SMB_SESSION_ENCRYPT_
          * DATA); per-share encryption leaves the flag clear and encrypts per
-         * tree (see the reply path in smb.c). */
+         * tree (see the reply path in smb.c).
+         *
+         * A null (anonymous) session derives keys from its all-zero session key
+         * too: a client may still (per smbtorture's anonymous_encryption) wrap a
+         * request in a TRANSFORM, and the server must be able to decrypt it with
+         * the same zero-derived key.  A null session is NEVER marked encrypt-all
+         * though -- it has no secret to protect (MS-SMB2 §3.3.5.5.3) -- so the
+         * server neither requires nor advertises encryption on it. */
         if ((shared->config.encryption || shared->any_share_encrypt) &&
             conn->negotiated.cipher_id != 0 &&
             conn->dialect >= SMB2_DIALECT_3_0 &&
             session_key_saved_len > 0 &&
-            !is_anonymous && !is_reauth && !is_binding) {
+            !is_reauth && !is_binding) {
             size_t klen = 0;
 
             if (chimera_smb_derive_encryption_keys(
@@ -496,9 +555,26 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
                     session_handle->enc_key, session_handle->dec_key, &klen) == 0) {
                 session_handle->enc_key_len = klen;
                 session_handle->cipher_id   = conn->negotiated.cipher_id;
-                if (shared->config.encryption) {
+                if (shared->config.encryption && !is_anonymous) {
                     session->flags |= CHIMERA_SMB_SESSION_ENCRYPT_DATA;
                 }
+            }
+        }
+
+        /* Track whether the established/current security context is anonymous.
+         * A null session has no key, so it is never signed or encrypted and its
+         * SESSION_SETUP response carries SMB2_SESSION_FLAG_IS_NULL.  Re-auth can
+         * flip a session between a real user and anonymous (reauth5), so the
+         * flag follows the current context on every non-binding leg. */
+        if (!is_binding) {
+            if (is_anonymous) {
+                session->flags |= CHIMERA_SMB_SESSION_NULL;
+            } else {
+                session->flags &= ~CHIMERA_SMB_SESSION_NULL;
+                /* A real (non-anonymous) session lifts the connection out of the
+                 * MS-SMB2 constrained-connection state, permitting encrypted
+                 * traffic on its other (including null) sessions thereafter. */
+                conn->flags |= CHIMERA_SMB_CONN_FLAG_AUTHENTICATED;
             }
         }
 
@@ -629,10 +705,17 @@ chimera_smb_session_setup_reply(
     uint16_t                 session_flags          = 0;
 
     /* SessionFlags (MS-SMB2 §2.2.6): advertise per-session encryption so the
-     * client encrypts subsequent requests on this session. */
-    if (request->session_handle &&
-        (request->session_handle->session->flags & CHIMERA_SMB_SESSION_ENCRYPT_DATA)) {
-        session_flags |= SMB2_SESSION_FLAG_ENCRYPT_DATA;
+     * client encrypts subsequent requests on this session.  A null (anonymous)
+     * session instead carries SMB2_SESSION_FLAG_IS_NULL: it has no key, so the
+     * client treats it as unauthenticated (no signing/encryption expected). */
+    if (request->session_handle) {
+        uint32_t sflags = request->session_handle->session->flags;
+
+        if (sflags & CHIMERA_SMB_SESSION_NULL) {
+            session_flags |= SMB2_SESSION_FLAG_IS_NULL;
+        } else if (sflags & CHIMERA_SMB_SESSION_ENCRYPT_DATA) {
+            session_flags |= SMB2_SESSION_FLAG_ENCRYPT_DATA;
+        }
     }
 
     evpl_iovec_cursor_append_uint16(reply_cursor, SMB2_SESSION_SETUP_REPLY_SIZE);

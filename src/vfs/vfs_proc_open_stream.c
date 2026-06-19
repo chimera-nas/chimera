@@ -16,6 +16,10 @@ chimera_vfs_open_stream_hdl_callback(
 
     if (handle) {
         handle->r_created = request->open_stream.r_created;
+        /* Tag the handle so the attr cache is bypassed for it: a stream shares
+         * the base inode's metadata, which changes out-of-band relative to the
+         * stream fh (smb2.streams.attributes2). */
+        handle->flags |= CHIMERA_VFS_OPEN_HANDLE_STREAM;
     }
 
     chimera_vfs_complete(request);

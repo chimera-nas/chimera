@@ -30,14 +30,18 @@
  * as a silent 300s ctest Timeout with no stack -- four tests have hit it
  * (lockf_linux, lockf_io_uring, fcntl_io_uring, cthon_lock_tlock_linux).
  *
- * Arm SIGALRM in the child well below the ctest timeout.  On fire, dump
- * every thread's kernel sleep location (procfs wchan -- localizes a hang to
- * its blocking syscall even for threads this handler cannot backtrace) plus
- * the signaled thread's userspace backtrace, then abort().  The SIGABRT
- * unblocks the parent's waitpid, so the test fails fast WITH diagnostics
- * instead of timing out silently.  The handler knowingly calls
- * async-signal-unsafe functions: the process is wedged and about to abort,
- * so a lost dump costs nothing over the status quo.
+ * Arm SIGALRM in the child well below the ctest timeout (overridable via
+ * CHIMERA_TEST_WATCHDOG_SECONDS for local repro).  On fire, dump every
+ * thread's kernel sleep location (procfs wchan -- localizes a hang to its
+ * blocking syscall even for threads this handler cannot backtrace), the
+ * signaled thread's userspace backtrace, AND a full all-thread userspace
+ * stack via gstack (the wchan + single-thread stack cannot name the
+ * userspace lock or its holder -- the decisive datum for a post-fork
+ * lock-family wedge), then abort().  The SIGABRT unblocks the parent's
+ * waitpid, so the test fails fast WITH diagnostics instead of timing out
+ * silently.  The handler knowingly calls async-signal-unsafe functions: the
+ * process is wedged and about to abort, so a lost dump costs nothing over
+ * the status quo.
  */
 static void
 posix_test_child_watchdog_fire(int sig)
@@ -82,6 +86,28 @@ posix_test_child_watchdog_fire(int sig)
     nframes = backtrace(frames, 64);
     backtrace_symbols_fd(frames, nframes, STDERR_FILENO);
 
+    {
+        /* Full all-thread userspace backtrace via gstack: backtrace() above
+         * only walks the signaled thread, and the procfs wchan list localizes
+         * each thread's blocking syscall but not the userspace lock owner -- so
+         * for a post-fork lock-family wedge (a worker parked on a mutex held by
+         * a thread that no longer exists) only an all-thread userspace stack
+         * identifies the offending lock and its holder.  Best-effort: gstack
+         * (gdb) may be unavailable, in which case the wchan dump above stands. */
+        char cmd[160];
+
+        snprintf(cmd, sizeof(cmd),
+                 "command -v gstack >/dev/null 2>&1 && gstack %d 1>&2",
+                 (int) getpid());
+        dprintf(STDERR_FILENO, "child-watchdog: gstack all threads:\n");
+        /* Best-effort: the watchdog is already aborting, so a failed dump is
+         * harmless.  A plain (void) cast does not silence glibc's
+         * warn_unused_result on system(), so consume the result explicitly. */
+        if (system(cmd) != 0) {
+            /* nothing actionable */
+        }
+    }
+
     signal(SIGABRT, SIG_DFL);
     abort();
 } /* posix_test_child_watchdog_fire */
@@ -90,6 +116,15 @@ static inline void
 posix_test_child_watchdog(unsigned int seconds)
 {
     struct sigaction sa;
+
+    const char      *ovr = getenv("CHIMERA_TEST_WATCHDOG_SECONDS");
+
+    if (ovr && *ovr) {
+        unsigned int s = (unsigned int) strtoul(ovr, NULL, 10);
+        if (s > 0) {
+            seconds = s;
+        }
+    }
 
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = posix_test_child_watchdog_fire;
@@ -164,6 +199,22 @@ posix_test_is_diskfs(const char *backend)
 static const char *posix_test_diskfs_extra_cfg = NULL;
 static int         posix_test_diskfs_reuse_devices __attribute__ ((unused)) = 0;
 
+/* When non-zero (set before posix_test_init), posix_test_start_nfs_server also
+ * mounts the SAME NFS backend a second time, read-only, under a subdirectory
+ * and exposes it via a second export "/share_ro".  The read-write export
+ * "/share" mounts the backend root, so a file created under "/share/ro/<name>"
+ * is the same inode the read-only mount exposes as "/<name>".  This lets an
+ * EROFS test create fixtures through the writable export and assert that every
+ * mutation through the read-only export fails with EROFS.  The read-only mount
+ * carries a distinct mount_id (its root_fh is encoded from the subdirectory
+ * inode rather than copied from the root mount), which is what the VFS
+ * read-only gate keys on. */
+static int posix_test_ro_export __attribute__ ((unused)) = 0;
+
+/* Name of the subdirectory (relative to the backend root) that the read-only
+ * export is mounted at; the read-write export sees it as "/share/ro". */
+#define POSIX_TEST_RO_SUBDIR "ro"
+
 // Helper to configure diskfs backend
 static inline void
 posix_test_configure_diskfs(
@@ -215,6 +266,10 @@ posix_test_configure_diskfs(
     }
     json_object_set_new(cfg, "devices", devices);
     json_object_set_new(cfg, "unsafe_async", json_true());
+    /* Small intent log: these are 1 GiB test devices, so the production-default
+     * 1 GiB log would not fit the AG-0 metadata reservation (and would eagerly
+     * preallocate a multi-GiB block cache). */
+    json_object_set_new(cfg, "intent_log_size", json_integer(64 * 1024 * 1024));
     if (posix_test_diskfs_extra_cfg) {
         json_t *extra = json_loads(posix_test_diskfs_extra_cfg, 0, NULL);
 
@@ -281,22 +336,67 @@ posix_test_start_nfs_server(struct posix_test_env *env)
 
     env->server = chimera_server_init(server_config, env->metrics);
 
-    if (strcmp(nfs_backend_name, "linux") == 0) {
-        chimera_server_mount(env->server, "share", "linux", env->session_dir, NULL);
-    } else if (strcmp(nfs_backend_name, "io_uring") == 0) {
-        chimera_server_mount(env->server, "share", "io_uring", env->session_dir, NULL);
-    } else if (strcmp(nfs_backend_name, "memfs") == 0) {
-        chimera_server_mount(env->server, "share", "memfs", "/", NULL);
+    /* Backend module name + root module path used for the writable "/share"
+     * mount (passthrough backends root at the host session dir). */
+    const char *share_module      = nfs_backend_name;
+    const char *share_module_path = "/";
+
+    if (strcmp(nfs_backend_name, "linux") == 0 ||
+        strcmp(nfs_backend_name, "io_uring") == 0) {
+        share_module_path = env->session_dir;
     } else if (posix_test_is_diskfs(nfs_backend_name)) {
-        chimera_server_mount(env->server, "share", "diskfs", "/", NULL);
-    } else if (strcmp(nfs_backend_name, "cairn") == 0) {
-        chimera_server_mount(env->server, "share", "cairn", "/", NULL);
-    } else {
+        share_module = "diskfs";
+    } else if (strcmp(nfs_backend_name, "memfs") != 0 &&
+               strcmp(nfs_backend_name, "cairn") != 0) {
         fprintf(stderr, "Unknown NFS backend: %s\n", nfs_backend_name);
         exit(EXIT_FAILURE);
     }
 
+    /* For the read-only test, create the subdirectory the read-only mount will
+     * be rooted at BEFORE any other mount exists (chimera_server_mkpath does a
+     * transient mount of the backend root, which would otherwise collide in the
+     * mount table with the writable "/share" mount of the same backend). */
+    char ro_module_path[400] = { 0 };
+
+    if (posix_test_ro_export) {
+        if (strcmp(nfs_backend_name, "linux") == 0 ||
+            strcmp(nfs_backend_name, "io_uring") == 0) {
+            snprintf(ro_module_path, sizeof(ro_module_path), "%s/%s",
+                     env->session_dir, POSIX_TEST_RO_SUBDIR);
+        } else {
+            snprintf(ro_module_path, sizeof(ro_module_path), "/%s",
+                     POSIX_TEST_RO_SUBDIR);
+        }
+
+        if (chimera_server_mkpath(env->server, share_module, ro_module_path,
+                                  0777) != 0) {
+            fprintf(stderr, "Failed to create read-only subdir %s in %s\n",
+                    ro_module_path, share_module);
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    chimera_server_mount(env->server, "share", share_module, share_module_path,
+                         NULL);
+
     chimera_server_create_export(env->server, "/share", "/share");
+
+    if (posix_test_ro_export) {
+        /* Second, read-only mount of the same backend rooted at the subdir.
+         * Its root_fh is encoded from the subdir inode, giving it a distinct
+         * mount_id that the VFS read-only gate keys on, even though it exposes
+         * the same inodes as "/share/ro". */
+        /* The mount/export name must not be a string prefix of "share" nor
+         * have "share" as its prefix: the pseudo-root mount lookup matches by
+         * strncmp prefix, so "share_ro" would collide with "share". */
+        if (chimera_server_mount(env->server, "roshare", share_module,
+                                 ro_module_path, "ro") != 0) {
+            fprintf(stderr, "Failed to mount read-only export\n");
+            exit(EXIT_FAILURE);
+        }
+
+        chimera_server_create_export(env->server, "/roshare", "/roshare");
+    }
 
     chimera_server_start(env->server);
 

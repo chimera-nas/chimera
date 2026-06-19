@@ -152,6 +152,8 @@ client_test_init(
             json_object_set_new(cfg, "initialize", json_true());
             json_object_set_new(cfg, "devices", devices);
             json_object_set_new(cfg, "unsafe_async", json_true());
+            /* Small intent log to fit the 1 GiB test devices (see space_map). */
+            json_object_set_new(cfg, "intent_log_size", json_integer(64 * 1024 * 1024));
             json_str = json_dumps(cfg, JSON_COMPACT);
             snprintf(diskfs_cfg, sizeof(diskfs_cfg), "%s", json_str);
             free(json_str);
@@ -259,6 +261,8 @@ client_test_init(
                 json_object_set_new(cfg, "initialize", json_true());
                 json_object_set_new(cfg, "devices", devices);
                 json_object_set_new(cfg, "unsafe_async", json_true());
+                /* Small intent log to fit the 1 GiB test devices (see space_map). */
+                json_object_set_new(cfg, "intent_log_size", json_integer(64 * 1024 * 1024));
                 json_str = json_dumps(cfg, JSON_COMPACT);
                 snprintf(diskfs_cfg, sizeof(diskfs_cfg), "%s", json_str);
                 free(json_str);

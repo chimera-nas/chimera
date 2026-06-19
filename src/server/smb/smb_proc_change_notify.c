@@ -188,6 +188,8 @@ chimera_smb_change_notify(struct chimera_smb_request *request)
         nevents = j;
     }
 
+    nevents = chimera_smb_notify_coalesce_events(events, nevents);
+
     if (nevents > 0 || overflowed) {
         pthread_mutex_unlock(&state->lock);
 
@@ -214,6 +216,15 @@ chimera_smb_change_notify(struct chimera_smb_request *request)
             if (consumed < nevents) {
                 overflowed = 1;
                 nevents    = 0;
+
+                /* Events dropped for not fitting the client's non-zero
+                 * OutputBufferLength: make the next CHANGE_NOTIFY on this
+                 * handle report overflow too, until the client rescans
+                 * (smb2.notify.valid-req).  Buffer == 0 is a poll and does
+                 * not stick. */
+                if (request->change_notify.output_buffer_length > 0) {
+                    chimera_vfs_notify_mark_overflow(state->watch);
+                }
             }
         }
 
@@ -261,7 +272,26 @@ chimera_smb_change_notify(struct chimera_smb_request *request)
     }
 
     /* We need to send an interim STATUS_PENDING response and
-     * keep the request alive until events arrive. */
+     * keep the request alive until events arrive.
+     *
+     * MS-SMB2 3.3.5.2.9 caps the simultaneously-outstanding async operations a
+     * connection may hold.  Reuse the per-connection counter and ceiling that
+     * 9c5c7c41 wired into the blocking named-pipe READ path: if parking this
+     * notify would reach the ceiling, reject it with INSUFFICIENT_RESOURCES
+     * instead (the contract smb2.credits.*_notify_max_async_credits asserts). */
+    {
+        struct chimera_smb_conn          *conn   = request->compound->conn;
+        struct chimera_server_smb_shared *shared = thread->shared;
+
+        if (conn->async_outstanding >=
+            (uint32_t) shared->config.smb2_max_async_credits - 1) {
+            pthread_mutex_unlock(&state->lock);
+            chimera_smb_open_file_release(request, open_file);
+            chimera_smb_complete_request(request,
+                                         SMB2_STATUS_INSUFFICIENT_RESOURCES);
+            return;
+        }
+    }
 
     nr = chimera_smb_notify_request_alloc();
 
@@ -309,6 +339,12 @@ chimera_smb_change_notify(struct chimera_smb_request *request)
         nr->next->prev = nr;
     }
     request->compound->conn->parked_notifies = nr;
+
+    /* Count this parked notify against the connection's async-operation
+     * ceiling.  chimera_smb_notify_unlink (the single un-park chokepoint)
+     * decrements it once, guarded by nr->async_counted. */
+    nr->async_counted = 1;
+    request->compound->conn->async_outstanding++;
 
     /* Send the interim STATUS_PENDING response directly as a standalone
      * message with proper NetBIOS framing and async header layout.

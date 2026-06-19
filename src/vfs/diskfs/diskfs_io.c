@@ -57,6 +57,25 @@ static void
 diskfs_inode_load_recs_done(
     struct diskfs_inode_load_ctx *lc);
 
+static inline int
+diskfs_write_data_sync(
+    struct diskfs_shared       *shared,
+    struct chimera_vfs_request *request)
+{
+    (void) request;
+    return !shared->unsafe_async;
+} /* diskfs_write_data_sync */
+
+static inline uint32_t
+diskfs_write_reported_sync(
+    struct diskfs_shared       *shared,
+    struct chimera_vfs_request *request)
+{
+    (void) shared;
+    (void) request;
+    return CHIMERA_VFS_WRITE_FILESYNC;
+} /* diskfs_write_reported_sync */
+
 static void
 diskfs_inode_load_recs_pnfs_cb(
     struct diskfs_bt_op *op,
@@ -247,24 +266,32 @@ diskfs_write_trim_start(
     struct chimera_vfs_request *request);
 
 static void
-diskfs_write_suffix_cb(
+diskfs_write_recon_edge(
+    struct chimera_vfs_request *request);
+
+static void
+diskfs_write_recon_next(
+    struct chimera_vfs_request *request);
+
+static void
+diskfs_write_recon_process(
+    struct chimera_vfs_request *request);
+
+static void
+diskfs_write_recon_advance(
+    struct chimera_vfs_request *request);
+
+static void
+diskfs_write_recon_walk_cb(
     struct diskfs_bt_op *op,
     int                  result,
     void                *private_data);
 
 static void
-diskfs_write_suffix_lookup(
-    struct chimera_vfs_request *request);
-
-static void
-diskfs_write_prefix_cb(
-    struct diskfs_bt_op *op,
-    int                  result,
-    void                *private_data);
-
-static void
-diskfs_write_prefix_lookup(
-    struct chimera_vfs_request *request);
+diskfs_write_recon_read_cb(
+    struct evpl *evpl,
+    int          status,
+    void        *private_data);
 
 static void
 diskfs_write_inode_cb(
@@ -1572,7 +1599,7 @@ diskfs_write_phase2(
                          request->write.iov,
                          request->write.niov,
                          diskfs_private->rmw_device_offset,
-                         !shared->unsafe_async,
+                         diskfs_write_data_sync(shared, request),
                          diskfs_io_callback,
                          request);
         return;
@@ -1700,7 +1727,7 @@ diskfs_write_phase2(
                          chunk_iov,
                          chunk_niov,
                          diskfs_private->rmw_device_offset + offset,
-                         !shared->unsafe_async,
+                         diskfs_write_data_sync(shared, request),
                          diskfs_io_callback,
                          request);
 
@@ -1841,6 +1868,14 @@ diskfs_write_finish_map(struct chimera_vfs_request *request)
     inode->ctime_sec  = now.tv_sec;
     inode->ctime_nsec = now.tv_nsec;
 
+    /* POSIX kill-priv: a non-privileged write to a regular file clears the
+     * set-user-ID bit and the set-group-ID bit (when group-executable).  When
+     * the mode actually changes, the inode block must be journaled (the
+     * deferred mtime-only path below would drop it from the txn). */
+    uint32_t new_mode = chimera_vfs_killpriv_mode(request->cred, inode->mode);
+    int      killpriv = (new_mode != inode->mode);
+    inode->mode = new_mode;
+
     diskfs_map_attrs(thread, &request->write.r_post_attr, inode);
 
     request->write.r_length = request->write.length;
@@ -1859,6 +1894,7 @@ diskfs_write_finish_map(struct chimera_vfs_request *request)
      */
     deferrable = diskfs_private->inplace_written &&
         !size_grew &&
+        !killpriv &&
         request->write.sync != CHIMERA_VFS_WRITE_FILESYNC &&
         shared->mtime_defer_us > 0;
 
@@ -1872,7 +1908,7 @@ diskfs_write_finish_map(struct chimera_vfs_request *request)
 
         diskfs_txn_drop_inode_block(thread, diskfs_private->txn, inode);
         diskfs_metric_mtime(thread, DISKFS_METRIC_MTIME_DEFERRED);
-        request->write.r_sync = CHIMERA_VFS_WRITE_DATASYNC;
+        request->write.r_sync = diskfs_write_reported_sync(shared, request);
     } else {
         /* Record which gate stopped the deferral (in expression order). */
         if (!diskfs_private->inplace_written) {
@@ -1882,7 +1918,7 @@ diskfs_write_finish_map(struct chimera_vfs_request *request)
         } else if (request->write.sync == CHIMERA_VFS_WRITE_FILESYNC) {
             diskfs_metric_mtime(thread, DISKFS_METRIC_MTIME_SKIP_FILESYNC);
         }
-        request->write.r_sync = CHIMERA_VFS_WRITE_FILESYNC;
+        request->write.r_sync = diskfs_write_reported_sync(shared, request);
     }
 
     /* Do NOT release the inode lock here.  The dirty b+tree/inode blocks are
@@ -2249,127 +2285,330 @@ diskfs_write_trim_start(struct chimera_vfs_request *request)
 } /* diskfs_write_trim_start */
 
 
+/*
+ * Redirect-write edge reconstruction.
+ *
+ * The redirect path (hole / partial / multi-extent write) replaces the
+ * block-aligned region [aligned_start, aligned_end) with a single freshly
+ * allocated extent.  The two sub-block remainders the write data does not
+ * cover -- the prefix [aligned_start, write_start) in the first block and the
+ * suffix [write_end, aligned_end) in the last block -- must carry over the
+ * file's current contents so the redirect does not disturb bytes outside the
+ * written range.
+ *
+ * An edge block can be fragmented at sub-block boundaries: a DEALLOCATE trims
+ * an extent to a raw byte offset, leaving a written piece adjacent to an
+ * unwritten piece or a hole inside one block.  A single floor() lookup cannot
+ * reconstruct that -- the old code read one extent and zero-filled the rest,
+ * dropping any data past that extent's end.  Instead, rebuild each
+ * edge block exactly as a read would: walk every extent the block overlaps into
+ * a zero-initialized 4 KiB block buffer (written -> device read, unwritten /
+ * hole -> left zero).  diskfs_write_phase2 then slices the prefix and suffix
+ * bytes it needs out of rmw_prefix_iov / rmw_suffix_iov.  The walk runs before
+ * the trim, while the old extents and their backing are still intact.
+ */
 static void
-diskfs_write_suffix_cb(
-    struct diskfs_bt_op *op,
-    int                  result,
-    void                *private_data)
-{
-    struct chimera_vfs_request    *request   = private_data;
-    struct diskfs_request_private *p         = request->plugin_data;
-    int                            have      = diskfs_ext_from_op(op, result, &p->ext_iter);
-    uint64_t                       write_end = request->write.offset + request->write.length;
-    uint64_t                       aend      = p->rmw_aligned_start + p->rmw_aligned_length;
-
-    diskfs_bt_op_free(p->thread, op);
-
-    if (have && p->ext_iter.file_offset <= write_end &&
-        write_end < p->ext_iter.file_offset + p->ext_iter.length) {
-        uint64_t ee = p->ext_iter.file_offset + p->ext_iter.length;
-
-        if (ee >= aend) {
-            p->rmw_suffix_valid = p->rmw_suffix_len;
-        } else if (ee > write_end) {
-            p->rmw_suffix_valid = ee - write_end;
-        } else {
-            p->rmw_suffix_valid = 0;
-        }
-
-        /* Read the block-aligned device offset that physically holds write_end.
-         * The extent maps file write_end to device_offset + (write_end -
-         * file_offset); rounding that down to a block gives a 4 KiB-aligned
-         * read (required by O_DIRECT/libaio) whose write_end byte sits at
-         * index (write_end & 4095) -- so no separate adjust is needed even
-         * when the extent starts mid-block (e.g. a punch-created extent whose
-         * file_offset/device_offset are unaligned but congruent mod 4096). */
-        p->need_suffix_read     = 1;
-        p->suffix_device_id     = p->ext_iter.device_id;
-        p->suffix_device_offset = (p->ext_iter.device_offset +
-                                   (write_end - p->ext_iter.file_offset)) & ~4095ULL;
-        p->rmw_suffix_adjust = 0;
-    }
-
-    diskfs_write_trim_start(request);
-} /* diskfs_write_suffix_cb */
-
-
-static void
-diskfs_write_suffix_lookup(struct chimera_vfs_request *request)
-{
-    struct diskfs_request_private *p         = request->plugin_data;
-    struct diskfs_thread          *thread    = p->thread;
-    uint64_t                       write_end = request->write.offset + request->write.length;
-    struct diskfs_bt_op           *op;
-
-    if (p->rmw_suffix_len == 0) {
-        diskfs_write_trim_start(request);
-        return;
-    }
-
-    op = diskfs_bt_op_alloc(thread);
-    if (diskfs_ext_floor_async(op, thread, p->inode_stash[0], write_end, p->rec_scratch,
-                               sizeof(p->rec_scratch), diskfs_write_suffix_cb, request)) {
-        diskfs_write_suffix_cb(op, op->result, request);
-    }
-} /* diskfs_write_suffix_lookup */
-
-
-static void
-diskfs_write_prefix_cb(
+diskfs_write_recon_walk_cb(
     struct diskfs_bt_op *op,
     int                  result,
     void                *private_data)
 {
     struct chimera_vfs_request    *request = private_data;
     struct diskfs_request_private *p       = request->plugin_data;
-    int                            have    = diskfs_ext_from_op(op, result, &p->ext_iter);
-    uint64_t                       astart  = p->rmw_aligned_start;
 
+    p->loop_have = diskfs_ext_from_op(op, result, &p->ext_iter);
     diskfs_bt_op_free(p->thread, op);
-
-    if (have && p->ext_iter.file_offset <= astart &&
-        astart < p->ext_iter.file_offset + p->ext_iter.length) {
-        uint64_t ee = p->ext_iter.file_offset + p->ext_iter.length;
-
-        if (ee >= astart + p->rmw_prefix_len) {
-            p->rmw_prefix_valid = p->rmw_prefix_len;
-        } else if (ee > astart) {
-            p->rmw_prefix_valid = ee - astart;
-        } else {
-            p->rmw_prefix_valid = 0;
-        }
-
-        if (p->rmw_prefix_valid > 0) {
-            p->need_prefix_read     = 1;
-            p->prefix_device_id     = p->ext_iter.device_id;
-            p->prefix_device_offset = p->ext_iter.device_offset +
-                (astart - p->ext_iter.file_offset);
-        }
-    }
-
-    diskfs_write_suffix_lookup(request);
-} /* diskfs_write_prefix_cb */
+    diskfs_write_recon_process(request);
+} /* diskfs_write_recon_walk_cb */
 
 
 static void
-diskfs_write_prefix_lookup(struct chimera_vfs_request *request)
+diskfs_write_recon_advance(struct chimera_vfs_request *request)
 {
     struct diskfs_request_private *p      = request->plugin_data;
     struct diskfs_thread          *thread = p->thread;
-    struct diskfs_bt_op           *op;
+    struct diskfs_bt_op           *op     = diskfs_bt_op_alloc(thread);
 
-    if (p->rmw_prefix_len == 0) {
-        diskfs_write_suffix_lookup(request);
+    if (diskfs_ext_next_async(op, thread, p->inode_stash[0], p->ext_iter.file_offset,
+                              p->rec_scratch, sizeof(p->rec_scratch),
+                              diskfs_write_recon_walk_cb, request)) {
+        diskfs_write_recon_walk_cb(op, op->result, request);
+    }
+} /* diskfs_write_recon_advance */
+
+
+static void
+diskfs_write_recon_read_cb(
+    struct evpl *evpl,
+    int          status,
+    void        *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+    struct diskfs_thread          *thread  = p->thread;
+
+    (void) evpl;
+
+    if (status && p->status == 0) {
+        p->status = status;
+    }
+
+    p->pending--;
+    diskfs_pending_io_add(thread, -1);
+    diskfs_io_resume_waiters(thread);
+
+    /* Advance only once the walk has issued all its reads and they are done. */
+    if (p->pending == 0 && !p->recon_walking) {
+        diskfs_write_recon_next(request);
+    }
+} /* diskfs_write_recon_read_cb */
+
+
+static void
+diskfs_write_recon_process(struct chimera_vfs_request *request)
+{
+    struct diskfs_request_private *p           = request->plugin_data;
+    struct diskfs_thread          *thread      = p->thread;
+    struct diskfs_shared          *shared      = thread->shared;
+    struct evpl                   *evpl        = thread->evpl;
+    struct diskfs_extent          *extent      = &p->ext_iter;
+    uint64_t                       read_offset = p->loop_off;
+    uint64_t                       read_left   = p->loop_left;
+    uint64_t                       block_end   = p->loop_pos;
+    uint64_t                       extent_end, overlap_start, overlap_length, chunk;
+    uint32_t                       chunk_niov;
+    struct evpl_iovec             *chunk_iov;
+
+    if (!(read_left && p->loop_have && extent->file_offset < block_end)) {
+        /* Walk done for this edge block.  Trailing bytes (no extent) stay zero
+         * because the block buffer was zero-initialized. */
+        p->recon_walking = 0;
+        if (p->pending == 0) {
+            diskfs_write_recon_next(request);
+        }
         return;
     }
 
-    op = diskfs_bt_op_alloc(thread);
-    if (diskfs_ext_floor_async(op, thread, p->inode_stash[0], p->rmw_aligned_start,
-                               p->rec_scratch, sizeof(p->rec_scratch),
-                               diskfs_write_prefix_cb, request)) {
-        diskfs_write_prefix_cb(op, op->result, request);
+    /* Bound in-flight data I/O; park (state is fully in p) and resume the walk
+     * from a completion if the queue is at the cap. */
+    if (diskfs_io_gate(thread, request, diskfs_write_recon_process)) {
+        return;
     }
-} /* diskfs_write_prefix_lookup */
+
+    if (read_offset < extent->file_offset) {
+        chunk = extent->file_offset - read_offset;
+        if (chunk > read_left) {
+            chunk = read_left;
+        }
+        evpl_iovec_cursor_zero(&p->rd_cursor, chunk);
+        read_offset += chunk;
+        read_left   -= chunk;
+    }
+
+    extent_end     = extent->file_offset + extent->length;
+    overlap_start  = read_offset - extent->file_offset;
+    overlap_length = extent_end - read_offset;
+    if (overlap_length > read_left) {
+        overlap_length = read_left;
+    }
+
+    if (extent->flags & DISKFS_EXT_UNWRITTEN) {
+        /* Reserved but never written: reads back as zeros, no device I/O. */
+        evpl_iovec_cursor_zero(&p->rd_cursor, overlap_length);
+        read_offset   += overlap_length;
+        read_left     -= overlap_length;
+        overlap_length = 0;
+    }
+
+    while (overlap_length) {
+        uint64_t dev_offset;
+        uint32_t dev_pad, total;
+        int      pad_niov = 0;
+
+        if (overlap_length > shared->devices[extent->device_id].max_request_size) {
+            chunk = shared->devices[extent->device_id].max_request_size;
+        } else {
+            chunk = overlap_length;
+        }
+
+        chunk_iov  = &p->iov[p->niov];
+        dev_offset = extent->device_offset + overlap_start;
+        dev_pad    = (uint32_t) (dev_offset & 4095ULL);
+
+        if (dev_pad) {
+            evpl_iovec_clone_segment(&chunk_iov[0], &thread->pad, 0, dev_pad);
+            pad_niov    = 1;
+            dev_offset -= dev_pad;
+        }
+
+        chunk_niov = evpl_iovec_cursor_move(&p->rd_cursor, &chunk_iov[pad_niov],
+                                            32, chunk, 1);
+        chunk_niov += pad_niov;
+
+        total = dev_pad + chunk;
+        if (total & 4095) {
+            evpl_iovec_clone_segment(&chunk_iov[chunk_niov], &thread->pad, 0,
+                                     4096 - (total & 4095));
+            chunk_niov++;
+        }
+
+        p->niov += chunk_niov;
+        p->pending++;
+        diskfs_pending_io_add(thread, 1);
+
+        diskfs_metric_block_io(thread, DISKFS_METRIC_IO_READ,
+                               DISKFS_METRIC_IO_RMW, chunk);
+        diskfs_metric_block_io_device(thread, extent->device_id,
+                                      DISKFS_METRIC_IO_READ,
+                                      DISKFS_METRIC_IO_RMW, chunk);
+        evpl_block_read(evpl, thread->queue[extent->device_id], chunk_iov,
+                        chunk_niov, dev_offset, diskfs_write_recon_read_cb, request);
+
+        overlap_length -= chunk;
+        overlap_start  += chunk;
+        read_offset    += chunk;
+        read_left      -= chunk;
+    }
+
+    p->loop_off  = read_offset;
+    p->loop_left = read_left;
+
+    diskfs_write_recon_advance(request);
+} /* diskfs_write_recon_process */
+
+
+static void
+diskfs_write_recon_first_cb(
+    struct diskfs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request     = private_data;
+    struct diskfs_request_private *p           = request->plugin_data;
+    struct diskfs_thread          *thread      = p->thread;
+    uint64_t                       block_start = p->loop_off;
+    int                            have        = diskfs_ext_from_op(op, result, &p->ext_iter);
+
+    diskfs_bt_op_free(thread, op);
+
+    if (have && p->ext_iter.file_offset + p->ext_iter.length <= block_start) {
+        /* Floor extent ends at/before the block: start at the next extent. */
+        diskfs_write_recon_advance(request);
+        return;
+    }
+    if (!have) {
+        /* No extent at/before the block start; find the first one after it. */
+        op = diskfs_bt_op_alloc(thread);
+        if (diskfs_ext_ceil_async(op, thread, p->inode_stash[0], block_start,
+                                  p->rec_scratch, sizeof(p->rec_scratch),
+                                  diskfs_write_recon_walk_cb, request)) {
+            diskfs_write_recon_walk_cb(op, op->result, request);
+        }
+        return;
+    }
+
+    p->loop_have = 1;
+    diskfs_write_recon_process(request);
+} /* diskfs_write_recon_first_cb */
+
+
+/* Begin rebuilding the current edge block (p->recon_edge: 0 = prefix first
+ * block, 1 = suffix last block). */
+static void
+diskfs_write_recon_edge(struct chimera_vfs_request *request)
+{
+    struct diskfs_request_private *p      = request->plugin_data;
+    struct diskfs_thread          *thread = p->thread;
+    struct evpl                   *evpl   = thread->evpl;
+    uint64_t                       aend   = p->rmw_aligned_start + p->rmw_aligned_length;
+    struct evpl_iovec             *buf;
+    uint64_t                       block_start;
+    struct diskfs_bt_op           *op;
+
+    if (p->recon_edge == 0) {
+        if (p->rmw_prefix_len == 0) {
+            p->recon_edge = 1;
+            diskfs_write_recon_edge(request);
+            return;
+        }
+        buf                 = &p->rmw_prefix_iov;
+        block_start         = p->rmw_aligned_start;
+        p->rmw_prefix_valid = p->rmw_prefix_len;
+    } else {
+        if (p->rmw_suffix_len == 0) {
+            diskfs_write_trim_start(request);
+            return;
+        }
+        buf                  = &p->rmw_suffix_iov;
+        block_start          = aend - 4096;
+        p->rmw_suffix_valid  = p->rmw_suffix_len;
+        p->rmw_suffix_adjust = 0;
+    }
+
+    if (evpl_iovec_alloc(evpl, 4096, 4096, 1, 0, buf) <= 0) {
+        /* The other edge's buffer (the prefix, when this is the suffix) is
+         * already allocated; release it so the failure path leaks nothing. */
+        if (p->rmw_prefix_iov.data) {
+            evpl_iovec_release(evpl, &p->rmw_prefix_iov);
+            p->rmw_prefix_iov.data = NULL;
+        }
+        diskfs_op_fail(request, p->txn, CHIMERA_VFS_EIO);
+        return;
+    }
+    memset(buf->data, 0, 4096);
+
+    evpl_iovec_cursor_init(&p->rd_cursor, buf, 1);
+    p->loop_off      = block_start;
+    p->loop_left     = 4096;
+    p->loop_pos      = block_start + 4096;
+    p->loop_have     = 0;
+    p->recon_walking = 1;
+
+    op = diskfs_bt_op_alloc(thread);
+    if (diskfs_ext_floor_async(op, thread, p->inode_stash[0], block_start,
+                               p->rec_scratch, sizeof(p->rec_scratch),
+                               diskfs_write_recon_first_cb, request)) {
+        diskfs_write_recon_first_cb(op, op->result, request);
+    }
+} /* diskfs_write_recon_edge */
+
+
+/* An edge block is fully rebuilt (walk done, all reads complete): release the
+ * device-read iovec refs and move on (prefix -> suffix -> trim). */
+static void
+diskfs_write_recon_next(struct chimera_vfs_request *request)
+{
+    struct diskfs_request_private *p      = request->plugin_data;
+    struct diskfs_thread          *thread = p->thread;
+
+    /* Release the per-chunk device-read iovec refs (slices of the edge buffer);
+     * the buffer's own ref stays in rmw_prefix_iov / rmw_suffix_iov until
+     * phase2 consumes it. */
+    if (p->niov) {
+        evpl_iovecs_release(thread->evpl, p->iov, p->niov);
+        p->niov = 0;
+    }
+
+    if (p->status) {
+        if (p->rmw_prefix_iov.data) {
+            evpl_iovec_release(thread->evpl, &p->rmw_prefix_iov);
+            p->rmw_prefix_iov.data = NULL;
+        }
+        if (p->rmw_suffix_iov.data) {
+            evpl_iovec_release(thread->evpl, &p->rmw_suffix_iov);
+            p->rmw_suffix_iov.data = NULL;
+        }
+        diskfs_op_fail(request, p->txn, p->status);
+        return;
+    }
+
+    if (p->recon_edge == 0) {
+        p->recon_edge = 1;
+        diskfs_write_recon_edge(request);
+    } else {
+        diskfs_write_trim_start(request);
+    }
+} /* diskfs_write_recon_next */
 
 
 /*
@@ -2418,7 +2657,7 @@ diskfs_write_inode_cb(
         diskfs_map_attrs(thread, &request->write.r_post_attr, inode);
 
         request->write.r_length = 0;
-        request->write.r_sync   = CHIMERA_VFS_WRITE_FILESYNC;
+        request->write.r_sync   = diskfs_write_reported_sync(thread->shared, request);
         diskfs_op_ok(request, p->txn);
         return;
     }
@@ -2530,7 +2769,10 @@ diskfs_write_redirect_alloc(struct chimera_vfs_request *request)
     p->rmw_device_id     = dev_id;
     p->rmw_device_offset = dev_off;
 
-    diskfs_write_prefix_lookup(request);
+    /* Rebuild the prefix/suffix edge blocks (fragmentation-aware) before the
+     * trim frees the old backing, then continue into diskfs_write_trim_start. */
+    p->recon_edge = 0;
+    diskfs_write_recon_edge(request);
 } /* diskfs_write_redirect_alloc */
 
 

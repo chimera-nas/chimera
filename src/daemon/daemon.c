@@ -499,6 +499,11 @@ main(
         chimera_server_config_set_smb_acl_inherited_canonicalize(server_config, json_is_true(json_value));
     }
 
+    json_value = json_object_get(server_params, "smb2_max_async_credits");
+    if (json_is_integer(json_value)) {
+        chimera_server_config_set_smb2_max_async_credits(server_config, json_integer_value(json_value));
+    }
+
     json_value = json_object_get(server_params, "nfs4_session_slots");
     if (json_is_integer(json_value)) {
         int_value = json_integer_value(json_value);
@@ -533,6 +538,14 @@ main(
         int_value = json_integer_value(json_value);
         if (int_value > 0) {
             chimera_server_config_set_nfs4_grace_time(server_config, (uint32_t) int_value);
+        }
+    }
+
+    json_value = json_object_get(server_params, "nfs4_node_id");
+    if (json_is_integer(json_value)) {
+        int_value = json_integer_value(json_value);
+        if (int_value > 0 && int_value < 0xFFFF) {
+            chimera_server_config_set_nfs4_node_id(server_config, int_value);
         }
     }
 
@@ -729,6 +742,14 @@ main(
     json_t *rest_debug_fsops_value = json_object_get(server_params, "rest_debug_fsops");
     if (json_is_true(rest_debug_fsops_value)) {
         chimera_server_config_set_rest_debug_fsops(server_config, 1);
+    }
+
+    /* REST API authentication is enabled by default; it can be turned off
+     * explicitly with "rest_auth_enabled": false. */
+    json_t *rest_auth_enabled_value = json_object_get(server_params, "rest_auth_enabled");
+    if (rest_auth_enabled_value && json_is_boolean(rest_auth_enabled_value)) {
+        chimera_server_config_set_rest_auth_enabled(server_config,
+                                                    json_is_true(rest_auth_enabled_value) ? 1 : 0);
     }
 
     if (rest_https_port != 0) {
@@ -967,6 +988,21 @@ main(
             if (json_is_true(enc)) {
                 chimera_server_share_set_encrypt_data(server, name);
             }
+        }
+    }
+
+    /* Test-harness aid: seed the symbolic-link fixtures the WPTS MS-SMB2
+     * CreateClose symlink cases expect to pre-exist on the share.  Enabled only
+     * when CHIMERA_SMB_SEED_SYMLINKS names the backend module (e.g. "memfs"),
+     * since no SMB client can create a reparse-point symlink on an empty share. */
+    const char *seed_module = getenv("CHIMERA_SMB_SEED_SYMLINKS");
+
+    if (seed_module && seed_module[0]) {
+        if (chimera_server_seed_symlinks(server, seed_module) != 0) {
+            chimera_server_error("Failed to seed symlink fixtures on module %s",
+                                 seed_module);
+        } else {
+            chimera_server_info("Seeded symlink fixtures on module %s", seed_module);
         }
     }
 

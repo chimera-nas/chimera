@@ -167,4 +167,57 @@ interface lsarpc {
         [in, unique, string] wchar_t       *system_name,
         [in]                 uint32         access_mask,
         [out]                policy_handle *handle);
+
+    /* ---- LookupNames2 / LookupNames3 (MS-LSAT EX / EX2 forms) ----
+     * Both add lookup_options + client_revision in-params; modern clients call
+     * v3 (full SIDs) first, then v2, then v1. */
+
+    /* LSAPR_TRANSLATED_SID_EX: v1's TranslatedSid plus a Flags word. */
+    typedef struct {
+        uint32 sid_type;   /* lsa_SidType (Use) */
+        uint32 rid;        /* relative id within the referenced domain */
+        uint32 sid_index;  /* index into the referenced-domain list */
+        uint32 flags;
+    } lsa_TranslatedSidEx;
+
+    typedef struct {
+        uint32                                count;
+        [size_is(count)] lsa_TranslatedSidEx *sids;
+    } lsa_TransSidArrayEx;
+
+    [opnum(58)] uint32 lsa_LookupNames2(
+        [in]      policy_handle             *handle,
+        [in]      uint32                      num_names,
+        [in, size_is(num_names)] rpc_unicode_string *names,
+        [out]     lsa_RefDomainList         **domains,
+        [in, out] lsa_TransSidArrayEx        *sids,
+        [in]      uint16                      level,
+        [in, out] uint32                      count,
+        [in]      uint32                      lookup_options,
+        [in]      uint32                      client_revision);
+
+    /* LSAPR_TRANSLATED_SID_EX2: carries the full account SID per entry instead
+     * of a relative id. */
+    typedef struct {
+        uint32   sid_type;
+        dom_sid *sid;
+        uint32   sid_index;
+        uint32   flags;
+    } lsa_TranslatedSidEx2;
+
+    typedef struct {
+        uint32                                 count;
+        [size_is(count)] lsa_TranslatedSidEx2 *sids;
+    } lsa_TransSidArrayEx2;
+
+    [opnum(68)] uint32 lsa_LookupNames3(
+        [in]      policy_handle             *handle,
+        [in]      uint32                      num_names,
+        [in, size_is(num_names)] rpc_unicode_string *names,
+        [out]     lsa_RefDomainList         **domains,
+        [in, out] lsa_TransSidArrayEx2       *sids,
+        [in]      uint16                      level,
+        [in, out] uint32                      count,
+        [in]      uint32                      lookup_options,
+        [in]      uint32                      client_revision);
 }

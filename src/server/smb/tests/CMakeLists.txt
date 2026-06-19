@@ -113,381 +113,116 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
     get_filename_component(WPTS_BIN_DIR "${WPTS_SMB2_DLL}" DIRECTORY)
     set(CHIMERA_DAEMON $<TARGET_FILE:chimera>)
 
-    # Allowlist: MS-SMB2 cases confirmed green across repeated runs against the
-    # current SMB2 server (memfs backend). Grow this as features land. Tests
-    # that only pass with an unmerged server fix (e.g. the QUERY_DIRECTORY
-    # double-completion fix for QueryDir_Reopen_OnFile) are intentionally
-    # enabled in that fix's PR, not here.
-    set(WPTS_SMB2_ALLOWLIST
-        AppInstanceVersion_SMB302_SMB311
-        AppInstanceVersion_SMB311_SMB302
-        BVT_AppInstanceVersion_SMB311_GreaterVersion
-        BVT_AppInstanceVersion_SMB311_LowerAppInstanceVersionHigh
-        BVT_AppInstanceVersion_SMB311_LowerAppInstanceVersionLow
-        BVT_AppInstanceVersion_SMB311_SameVersion
-        BVT_Compound_RelatedRequests
-        BVT_Compound_UnRelatedRequests
-        BVT_CreateClose_CreateAndCloseDirectory
-        BVT_CreateClose_CreateAndCloseFile
-        BVT_Leasing_FileLeasingV1
-        BVT_Leasing_FileLeasingV2
-        Leasing_FileLeasingV1_SameLeaseKey
-        Leasing_FileLeasingV2_SameLeaseKey
-        BVT_MultiCredit_OneRequestWithMultiCredit
-        BVT_Negotiate_Compatible_2002
-        BVT_Negotiate_Compatible_Wildcard
-        BVT_Negotiate_SMB2002
-        BVT_Negotiate_SMB21
-        BVT_Negotiate_SMB30
-        BVT_Negotiate_SMB302
-        BVT_Negotiate_SMB311
-        BVT_Negotiate_SMB311_Preauthentication
-        BVT_Negotiate_SigningEnabled
-        BVT_OpLockBreak
-        BVT_SMB2Basic_CancelRegisteredChangeNotify
-        BVT_SMB2Basic_ChangeNotify_ChangeAttributes
-        BVT_SMB2Basic_ChangeNotify_ChangeCreation
-        BVT_SMB2Basic_ChangeNotify_ChangeDirName
-        BVT_SMB2Basic_ChangeNotify_ChangeEa
-        BVT_SMB2Basic_ChangeNotify_ChangeFileName
-        BVT_SMB2Basic_ChangeNotify_ChangeLastAccess
-        BVT_SMB2Basic_ChangeNotify_ChangeLastWrite
-        BVT_SMB2Basic_ChangeNotify_ChangeSecurity
-        BVT_SMB2Basic_ChangeNotify_ChangeSize
-        BVT_SMB2Basic_ChangeNotify_ChangeStreamName
-        BVT_SMB2Basic_ChangeNotify_ChangeStreamSize
-        BVT_SMB2Basic_ChangeNotify_ChangeStreamWrite
-        BVT_SMB2Basic_ChangeNotify_MaxTransactSizeCheck_Smb2002
-        BVT_SMB2Basic_ChangeNotify_MaxTransactSizeCheck_Smb21
-        BVT_SMB2Basic_ChangeNotify_MaxTransactSizeCheck_Smb30
-        BVT_SMB2Basic_ChangeNotify_MaxTransactSizeCheck_Smb302
-        BVT_SMB2Basic_ChangeNotify_MaxTransactSizeCheck_Smb311
-        BVT_SMB2Basic_ChangeNotify_NoFileListDirectoryInGrantedAccess
-        BVT_SMB2Basic_ChangeNotify_NonDirectoryFile
-        BVT_SMB2Basic_ChangeNotify_ServerReceiveSmb2Close
-        BVT_SMB2Basic_LockAndUnLock
-        BVT_SMB2Basic_QueryAndSet_FileInfo
-        BVT_SMB2Basic_QueryDir_Reopen_OnDir
-        BVT_SMB2Basic_QueryDir_Reopen_OnEmptyDir_NoFilesReturned
-        BVT_SMB2Basic_QueryDir_Reopen_OnFile
-        BVT_SMB2Basic_Query_FileAllInformation
-        BVT_SMB2Basic_Query_FileNormalizedNameInformation_DataFile
-        BVT_SMB2Basic_Query_FileNormalizedNameInformation_DirectoryFile
-        BVT_SessionMgmt_NewSession
-        BVT_SessionMgmt_Reauthentication
-        BVT_SessionMgmt_ReconnectSessionSetup
-        BVT_Signing
-        BVT_TreeMgmt_TreeConnectAndDisconnect
-        BVT_ValidateNegotiateInfo
-        CreateClose_CreateAndCloseDirWithDotDir
-        CreateClose_CreateAndCloseDirWithDoubleDotDir
-        CreateClose_CreateAndCloseFileWithDotDir
-        CreateClose_CreateAndCloseFileWithDoubleDotDir
-        CreateClose_DeleteFile_DesiredAccessNotIncludeDeleteOrGenericAll
-        InvalidCreateRequestStructureSize
-        Negative_AppInstanceVersion_SMB311_NoVersion
-        Negotiate_SMB311_ContextID_NetName
-        Negotiate_SMB311_InvalidCipher
-        Negotiate_SMB311_InvalidHashAlgorithm
-        Negotiate_SMB311_IsTransportCapabilitiesSupported
-        Negotiate_SMB311_SigningCapability
-        Negotiate_SMB311_WithAllContexts
-        Negotiate_SMB311_WithCompressionContextWithoutIntegrityContext
-        Negotiate_SMB311_WithEncryptionAndCompressionContextsWithoutIntegrityContext
-        Negotiate_SMB311_WithEncryptionContextWithoutIntegrityContext
-        Negotiate_SMB311_WithoutAnyContexts
-        SessionMgmt_ReconnectWithDifferentDialect
-        SessionMgmt_SupportsNotificationsMismatch
-        Signing_VerifyAesGmacSigning
-        TreeMgmt_SMB311_CLUSTER_RECONNECT
-        ValidateNegotiateInfo_Negative_InvalidCapabilities
-        ValidateNegotiateInfo_Negative_InvalidDialects_CommonDialectNotExpected
-        ValidateNegotiateInfo_Negative_InvalidDialects_NoCommonDialect
-        ValidateNegotiateInfo_Negative_InvalidGuid
-        ValidateNegotiateInfo_Negative_InvalidMaxOutputResponse
-        ValidateNegotiateInfo_Negative_InvalidSecurityMode
-        ValidateNegotiateInfo_Negative_SMB311
-        )
-
-    # Run each config-group's whole allowlist in ONE vstest invocation against a
-    # single chimera server, rather than one ctest (one daemon + .NET host
-    # bringup) per case -- the bringup dominated, so batching is ~10x faster.
-    # vstest --Tests takes a comma-separated name list (CMake lists are
-    # ';'-separated, so swap the separator).  The wrapper stages a per-session
-    # shadow of the WPTS Bin dir (symlink farm + private ptfconfig copies), so
-    # the group ctests share no mutable state and may run concurrently.
-    string(REPLACE ";" "," _wpts_tests "${WPTS_SMB2_ALLOWLIST}")
-    add_test(NAME chimera/server/smb/wpts/memfs
-        COMMAND ${CMAKE_SOURCE_DIR}/scripts/wpts_smb_test_wrapper.sh
-                ${CHIMERA_DAEMON} memfs "${_wpts_tests}")
-    set_tests_properties(chimera/server/smb/wpts/memfs PROPERTIES
-        LABELS "smb;wpts"
-        TIMEOUT 900
-        ENVIRONMENT "WPTS_BIN_DIR=${WPTS_BIN_DIR};DOTNET=${WPTS_DOTNET}")
-
-    # SMB3 durable / persistent handle cases plus the Replay (channel-sequence)
-    # suite.  These need the daemon run with smb_persistent_handles enabled (the
-    # wrapper sets it from CHIMERA_SMB_PERSISTENT, which also flips the
-    # persistent-handle / CA-share ptfconfig capabilities and marks FileShare as
-    # the CA share).  The Replay_*_ReplayEligibleCleared cases — including the
-    # NonPersistentHandle variants — only become applicable once the CA / replay
-    # capability is advertised, so they live here rather than in the base list.
-    # Allowlist = every applicable durable/persistent/replay case confirmed green
-    # against the current server.  Left out: *_WithDifferentDurableOwner /
-    # BVT_PersistentHandles (need a second user account / scale-out config the
-    # harness doesn't provide — they report Inconclusive/NotExecuted), and the
-    # Replay Lock cases (replay-eligibility not yet cleared on that op).  The
-    # Replay IoCtl cases use FSCTL_LMR_REQUEST_RESILIENCY as their vehicle and
-    # are applicable now that the server grants request-resiliency.
-    set(WPTS_SMB2_PERSISTENT_ALLOWLIST
-        BVT_DurableHandleV1_Reconnect_WithBatchOplock
-        BVT_DurableHandleV1_Reconnect_WithLeaseV1
-        BVT_DurableHandleV2_Reconnect_WithBatchOplock
-        BVT_DurableHandleV2_Reconnect_WithLeaseV1
-        BVT_PersistentHandle_Reconnect
-        DurableHandleV1_Reconnect_AfterServerDisconnect
-        DurableHandleV1_Reconnect_IncludeCreateDurableHandle
-        DurableHandleV1_Reconnect_IncludeReconnectV2
-        DurableHandleV1_Reconnect_IncludeRequestV2
-        DurableHandleV1_Reconnect_LeaseIsNull
-        DurableHandleV1_Reconnect_SessionIsNotNull
-        DurableHandleV1_Reconnect_WithDifferentClientGuid
-        DurableHandleV1_Reconnect_WithDifferentLeaseKey
-        DurableHandleV1_Reconnect_WithLeaseV1_WithDifferentFileName
-        DurableHandleV1_Reconnect_WithoutDurableHandle
-        DurableHandleV1_Reconnect_WithoutFileIdPersistent
-        DurableHandleV1_Reconnect_WithoutLogoffOrDisconnect_WithoutPreviousSessionIdSet
-        DurableHandleV1_Reconnect_WithoutRequestLease
-        DurableHandleV1_WithLeaseV1_WithoutHandleCaching
-        DurableHandleV2_NoPersistenceGrantedOnNonCAShare
-        DurableHandleV2_Reconnect_WithLeaseV1_WithDifferentFileName
-        DurableHandleV2_Reconnect_WithoutPersistence
-        DurableHandleV2_WithLeaseV1AndV2_WithDifferentLeaseKey
-        DurableHandleV2_WithLeaseV2_WithoutHandleCaching
-        PersistentHandle_ReOpenFromDiffClient
-        Replay_NonPersistentHandle_Flush_ReplayEligibleCleared
-        Replay_NonPersistentHandle_IoCtl_ReplayEligibleCleared
-        Replay_NonPersistentHandle_QueryInfo_ReplayEligibleCleared
-        Replay_NonPersistentHandle_Read_ReplayEligibleCleared
-        Replay_NonPersistentHandle_SetInfo_ReplayEligibleCleared
-        Replay_NonPersistentHandle_Write_ReplayEligibleCleared
-        Replay_PersistentHandle_ChangeNotify_ReplayEligibleCleared
-        Replay_PersistentHandle_Flush_ReplayEligibleCleared
-        Replay_PersistentHandle_IoCtl_ReplayEligibleCleared
-        Replay_PersistentHandle_QueryDirectory_ReplayEligibleCleared
-        Replay_PersistentHandle_QueryInfo_ReplayEligibleCleared
-        Replay_PersistentHandle_Read_ReplayEligibleCleared
-        Replay_PersistentHandle_SetInfo_ReplayEligibleCleared
-        Replay_PersistentHandle_Write_ReplayEligibleCleared)
-
-    string(REPLACE ";" "," _wpts_tests "${WPTS_SMB2_PERSISTENT_ALLOWLIST}")
-    add_test(NAME chimera/server/smb/wpts/memfs_persistent
-        COMMAND ${CMAKE_SOURCE_DIR}/scripts/wpts_smb_test_wrapper.sh
-                ${CHIMERA_DAEMON} memfs "${_wpts_tests}")
-    set_tests_properties(chimera/server/smb/wpts/memfs_persistent PROPERTIES
-        LABELS "smb;wpts;persistent"
-        TIMEOUT 900
-        ENVIRONMENT "WPTS_BIN_DIR=${WPTS_BIN_DIR};DOTNET=${WPTS_DOTNET};CHIMERA_SMB_PERSISTENT=1")
-
-    # SMB3 transport-compression cases.  These need the daemon run with
-    # smb_compression enabled (the wrapper sets it from CHIMERA_SMB_COMPRESSION,
-    # which also advertises the supported algorithms + a compressed share in the
-    # ptfconfig).  Allowlist = every applicable compression case confirmed green
-    # against the current server (LZ77, LZNT1, LZ77+Huffman and chained Pattern_V1,
-    # in both directions and the large-file variants).  Left out: the *_Encrypted
-    # variants (they need the encryption harness too and live in the
-    # compression+encryption allowlist below) and ChainedCompressionNotSupported
-    # (inapplicable — the SUT supports chaining).
-    set(WPTS_SMB2_COMPRESSION_ALLOWLIST
-        BVT_Negotiate_SMB311_CompressionEnabled
-        BVT_Negotiate_SMB311_Compression_IsChainedCompressionSupported
-        BVT_SMB2Compression_Chained_PatternV1
-        BVT_SMB2Compression_LZ77
-        BVT_SMB2Compression_LZ77Huffman
-        BVT_SMB2Compression_LZNT1
-        BVT_SMB2Compression_Unchained
-        BVT_SMB2Compression_Unchained_LargeFile
-        Negotiate_SMB311_Compression_CompressionAlgorithmEmpty
-        Negotiate_SMB311_Compression_CompressionAlgorithmNotSupported
-        Negotiate_SMB311_Compression_CompressionContextInvalidDataLength
-        Negotiate_SMB311_Compression_FlagChainedNotSet
-        Negotiate_SMB311_Compression_InvalidSmbDialect
-        Negotiate_SMB311_WithCompressionContextWithoutIntegrityContext
-        Negotiate_SMB311_WithEncryptionAndCompressionContextsWithoutIntegrityContext
-        SMB2Compression_Chained_InvalidCompressionAlgorithmInCompressionPayloadHeader
-        SMB2Compression_Chained_InvalidLengthInCompressionPayloadHeader
-        SMB2Compression_Chained_PatternV1_CompressedWriteRequest_PatternV1AtEnd
-        SMB2Compression_Chained_PatternV1_CompressedWriteRequest_PatternV1AtEnd_LargeFile
-        SMB2Compression_Chained_PatternV1_CompressedWriteRequest_PatternV1AtFront
-        SMB2Compression_Chained_PatternV1_CompressedWriteRequest_PatternV1AtFrontAndEnd
-        SMB2Compression_Chained_PatternV1_CompressedWriteRequest_PatternV1AtFrontAndEnd_LargeFile
-        SMB2Compression_Chained_PatternV1_CompressedWriteRequest_PatternV1AtFront_LargeFile
-        SMB2Compression_Chained_PatternV1_CompressibleReadResponse
-        SMB2Compression_Chained_PatternV1_CompressibleReadResponse_LargeFile
-        SMB2Compression_Chained_PatternV1_IncompressibleReadResponse
-        SMB2Compression_Chained_PatternV1_InvalidCompressionPatternPayloadV1Repetitions
-        SMB2Compression_Chained_PatternV1_LargeFile
-        SMB2Compression_CompressedWriteRequest
-        SMB2Compression_CompressedWriteRequest_LargeFile
-        SMB2Compression_CompressibleReadResponse
-        SMB2Compression_CompressibleReadResponse_LargeFile
-        SMB2Compression_IncompressibleReadResponse
-        SMB2Compression_InvalidCompressedPacketLength
-        SMB2Compression_InvalidCompressionAlgorithm
-        SMB2Compression_InvalidDecompressedProtocolId
-        SMB2Compression_LZ77_LargeFile
-        SMB2Compression_LZ77Huffman_LargeFile
-        SMB2Compression_LZNT1_LargeFile
-        TreeMgmt_SMB311_COMPRESS_DATA)
-
-    string(REPLACE ";" "," _wpts_tests "${WPTS_SMB2_COMPRESSION_ALLOWLIST}")
-    add_test(NAME chimera/server/smb/wpts/memfs_compression
-        COMMAND ${CMAKE_SOURCE_DIR}/scripts/wpts_smb_test_wrapper.sh
-                ${CHIMERA_DAEMON} memfs "${_wpts_tests}")
-    set_tests_properties(chimera/server/smb/wpts/memfs_compression PROPERTIES
-        LABELS "smb;wpts;compression"
-        TIMEOUT 900
-        ENVIRONMENT "WPTS_BIN_DIR=${WPTS_BIN_DIR};DOTNET=${WPTS_DOTNET};CHIMERA_SMB_COMPRESSION=1")
-
-    # SMB3 multichannel cases.  The wrapper runs the daemon with a second NIC
-    # address (so FSCTL_QUERY_NETWORK_INTERFACE_INFO advertises an alternative
-    # server address) and flips the multichannel ptfconfig capabilities when
-    # CHIMERA_SMB_MULTICHANNEL=1.  Allowlist = the MultipleChannel cases confirmed
-    # green against the current server: the NIC-redundancy bind matrix, the
-    # 2.x-dialect bind rejection (STATUS_REQUEST_NOT_ACCEPTED), cross-channel
-    # byte-range locking, and the 3.1.1 second-channel preauth-integrity case.
+    # ------------------------------------------------------------------
+    # Feature-aware case map -- single source of truth.
     #
-    # Left out (each a distinct unimplemented feature, not a multichannel gap):
-    #   - MultipleChannel_FileLease needs write/handle-caching lease break
-    #     delivery; chimera deliberately grants only read-caching leases
-    #     (write-through) to avoid the cthon/fsx client-cache corruption hazards
-    #     documented in chimera_smb_create.
-    #   - MultipleChannel_EncryptionOnBothChannels and the two
-    #     MultipleChannel_Negative_Encryption* cases need the multichannel and
-    #     encryption harnesses combined (a second NIC AND smb_encryption on the
-    #     same run); the two ptfconfig fixtures are wired independently today, so
-    #     these are reported Inconclusive (skipped).
-    set(WPTS_SMB2_MULTICHANNEL_ALLOWLIST
-        BVT_MultipleChannel_NicRedundantOnBoth
-        BVT_NetworkInterfaceInfo_QuerySuccessful
-        MultipleChannel_FileLease
-        MultipleChannel_LockUnlockOnDiffChannel
-        MultipleChannel_LockUnlockOnSameChannel
-        MultipleChannel_MultiChannelOnSameNic
-        MultipleChannel_Negative_SMB2002
-        MultipleChannel_Negative_SMB21
-        MultipleChannel_NicRedundantOnClient
-        MultipleChannel_NicRedundantOnServer
-        MultipleChannel_SecondChannelSessionSetupFailAtFirstTime
-        NetworkInterfaceInfo_ChangeConnection_BindCurrentSession
-        NetworkInterfaceInfo_Query_ReturnsErrorStatus
-        NetworkInterfaceInfo_Query_ReturnsIPv4IPv6
-        )
+    # wpts/wpts_cases.csv maps every MS-SMB2 case to the config whose features
+    # it needs (home_config) and a status: green (CI-gating), xfail (applicable
+    # but currently failing -- a tracked defect, NOT gated here), or skip
+    # (never-applicable today).  enc_path=1 (home=base only) marks a
+    # feature-agnostic case that ALSO runs under encryption (the curated
+    # transport-sensitive subset).  Edit the CSV, not these lists; the sweep
+    # tool tools/wpts/sweep.py runs the full applicable (green+xfail) set and
+    # surfaces the xfail defects + promotion candidates.
+    #
+    # CI gates ONLY on status=green.  Each config's green list runs in ONE
+    # consolidated vstest invocation (per-case daemon + .NET-host bringup
+    # dominated, so batching is ~10x faster).
+    # ------------------------------------------------------------------
+    set(WPTS_JUNIT_DIR ${CMAKE_BINARY_DIR}/wpts-junit
+        CACHE PATH "Directory for per-case WPTS JUnit XML output.")
 
-    string(REPLACE ";" "," _wpts_tests "${WPTS_SMB2_MULTICHANNEL_ALLOWLIST}")
-    add_test(NAME chimera/server/smb/wpts/memfs_multichannel
-        COMMAND ${CMAKE_SOURCE_DIR}/scripts/wpts_smb_test_wrapper.sh
-                ${CHIMERA_DAEMON} memfs "${_wpts_tests}")
-    set_tests_properties(chimera/server/smb/wpts/memfs_multichannel PROPERTIES
-        LABELS "smb;wpts;multichannel"
-        TIMEOUT 900
-        ENVIRONMENT "WPTS_BIN_DIR=${WPTS_BIN_DIR};DOTNET=${WPTS_DOTNET};CHIMERA_SMB_MULTICHANNEL=1")
+    set(_wpts_configs base persistent compression multichannel
+        multichannel_persistent multichannel_persistent_encryption
+        encryption compression_encryption multichannel_encryption
+        dirlease dirlease_persistent dirlease_appinstance
+        symlink)
+    foreach(_c ${_wpts_configs})
+        set(WPTS_GREEN_${_c} "")
+    endforeach()
 
-    # SMB3 transport-encryption cases.  These need the daemon run with
-    # smb_encryption enabled (the wrapper sets it from CHIMERA_SMB_ENCRYPTION,
-    # which also flags the SMBEncrypted share for per-share encryption and flips
-    # the encryption ptfconfig capabilities: IsEncryptionSupported,
-    # IsGlobalEncryptDataEnabled, EncryptedFileShare and the cipher list).
-    set(WPTS_SMB2_ENCRYPTION_ALLOWLIST
-        BVT_Encryption_GlobalEncryptionEnabled
-        BVT_Encryption_PerShareEncryptionEnabled
-        BVT_Encryption_SMB311
-        BVT_Encryption_SMB311_CCM
-        BVT_Encryption_SMB311_GCM
-        BVT_Encryption_SMB311_AES_256_CCM
-        BVT_Encryption_SMB311_AES_256_GCM
-        BVT_Negotiate_SMB311_Preauthentication_Encryption_CCM
-        BVT_Negotiate_SMB311_Preauthentication_Encryption_GCM
-        BVT_Negotiate_SMB311_Preauthentication_Encryption_AES_256_CCM
-        BVT_Negotiate_SMB311_Preauthentication_Encryption_AES_256_GCM
-        BVT_TreeMgmt_SMB311_Disconnect_NoSignedNoEncryptedTreeConnect
-        Compound_Encrypt_RelatedRequests
-        Compound_Encrypt_UnrelatedRequests
-        Signing_VerifySignatureWhenEncrypted
-        # Interim STATUS_PENDING emitters (oplock/lease break, change notify).
-        # On an encrypting session the async interim and the change-notify
-        # delivery must themselves be wrapped in a TRANSFORM header (MS-SMB2
-        # §3.3.4.1.4); these failed with "the packet should be encrypted" until
-        # the standalone async send paths learned to encrypt.
-        BVT_OpLockBreak
-        BVT_Leasing_FileLeasingV1
-        BVT_Leasing_FileLeasingV2
-        Leasing_FileLeasingV1_SameLeaseKey
-        Leasing_FileLeasingV2_SameLeaseKey
-        BVT_SMB2Basic_CancelRegisteredChangeNotify
-        BVT_SMB2Basic_ChangeNotify_ChangeAttributes
-        BVT_SMB2Basic_ChangeNotify_ChangeCreation
-        BVT_SMB2Basic_ChangeNotify_ChangeDirName
-        BVT_SMB2Basic_ChangeNotify_ChangeEa
-        BVT_SMB2Basic_ChangeNotify_ChangeFileName
-        BVT_SMB2Basic_ChangeNotify_ChangeLastAccess
-        BVT_SMB2Basic_ChangeNotify_ChangeLastWrite
-        BVT_SMB2Basic_ChangeNotify_ChangeSecurity
-        BVT_SMB2Basic_ChangeNotify_ChangeSize
-        BVT_SMB2Basic_ChangeNotify_ChangeStreamName
-        BVT_SMB2Basic_ChangeNotify_ChangeStreamSize
-        BVT_SMB2Basic_ChangeNotify_ChangeStreamWrite
-        BVT_SMB2Basic_ChangeNotify_ServerReceiveSmb2Close
-        BVT_SMB2Basic_ChangeNotify_NonDirectoryFile
-        BVT_SMB2Basic_ChangeNotify_NoFileListDirectoryInGrantedAccess)
+    file(STRINGS ${CMAKE_CURRENT_SOURCE_DIR}/wpts/wpts_cases.csv _wpts_rows)
+    foreach(_row ${_wpts_rows})
+        if(_row MATCHES "^case,")            # CSV header
+            continue()
+        endif()
+        string(REPLACE "," ";" _f "${_row}")
+        list(GET _f 0 _case)
+        list(GET _f 1 _home)
+        list(GET _f 2 _status)
+        list(GET _f 3 _encpath)
+        if(NOT _status STREQUAL "green")      # CI gates only on green
+            continue()
+        endif()
+        list(APPEND WPTS_GREEN_${_home} "${_case}")
+        if(_encpath STREQUAL "1" AND _home STREQUAL "base")
+            list(APPEND WPTS_GREEN_encryption "${_case}")  # agnostic enc-path coverage
+        endif()
+    endforeach()
 
-    string(REPLACE ";" "," _wpts_tests "${WPTS_SMB2_ENCRYPTION_ALLOWLIST}")
-    add_test(NAME chimera/server/smb/wpts/memfs_encryption
-        COMMAND ${CMAKE_SOURCE_DIR}/scripts/wpts_smb_test_wrapper.sh
-                ${CHIMERA_DAEMON} memfs "${_wpts_tests}")
-    set_tests_properties(chimera/server/smb/wpts/memfs_encryption PROPERTIES
-        LABELS "smb;wpts;encryption"
-        TIMEOUT 900
-        ENVIRONMENT "WPTS_BIN_DIR=${WPTS_BIN_DIR};DOTNET=${WPTS_DOTNET};CHIMERA_SMB_ENCRYPTION=1")
+    # Per-config CHIMERA_SMB_* env fragment (drives daemon config + ptfconfig
+    # capability flips), ctest label suffix, and ctest-name suffix.  base = none.
+    set(_wpts_envfrag_base                    "")
+    set(_wpts_envfrag_persistent              ";CHIMERA_SMB_PERSISTENT=1")
+    set(_wpts_envfrag_compression             ";CHIMERA_SMB_COMPRESSION=1")
+    set(_wpts_envfrag_multichannel            ";CHIMERA_SMB_MULTICHANNEL=1")
+    set(_wpts_envfrag_multichannel_persistent ";CHIMERA_SMB_MULTICHANNEL=1;CHIMERA_SMB_PERSISTENT=1")
+    set(_wpts_envfrag_multichannel_persistent_encryption ";CHIMERA_SMB_MULTICHANNEL=1;CHIMERA_SMB_PERSISTENT=1;CHIMERA_SMB_PERSHARE_ENCRYPTION=1")
+    set(_wpts_envfrag_encryption              ";CHIMERA_SMB_ENCRYPTION=1")
+    set(_wpts_envfrag_compression_encryption  ";CHIMERA_SMB_COMPRESSION=1;CHIMERA_SMB_ENCRYPTION=1")
+    set(_wpts_envfrag_multichannel_encryption ";CHIMERA_SMB_MULTICHANNEL=1;CHIMERA_SMB_ENCRYPTION=1")
+    # Directory-leasing configs.  CHIMERA_SMB_DIRLEASE=1 turns on
+    # smb_directory_leases + advertises IsDirectoryLeasingSupported.  Two cases
+    # need it combined with other features: the Replay change-notify/query-dir
+    # pair needs persistent handles, and the AppInstanceId failover case also
+    # needs multichannel (a second client NIC).
+    set(_wpts_envfrag_dirlease                ";CHIMERA_SMB_DIRLEASE=1")
+    set(_wpts_envfrag_dirlease_persistent     ";CHIMERA_SMB_DIRLEASE=1;CHIMERA_SMB_PERSISTENT=1")
+    set(_wpts_envfrag_dirlease_appinstance    ";CHIMERA_SMB_DIRLEASE=1;CHIMERA_SMB_PERSISTENT=1;CHIMERA_SMB_MULTICHANNEL=1")
+    # Symlink config: seeds reparse-point fixtures + advertises their paths so
+    # the CreateClose symbolic-link cases become applicable.
+    set(_wpts_envfrag_symlink                 ";CHIMERA_SMB_SYMLINK=1")
+    set(_wpts_lbl_base                    "")
+    set(_wpts_lbl_persistent              ";persistent")
+    set(_wpts_lbl_compression             ";compression")
+    set(_wpts_lbl_multichannel            ";multichannel")
+    set(_wpts_lbl_multichannel_persistent ";multichannel;persistent")
+    set(_wpts_lbl_multichannel_persistent_encryption ";multichannel;persistent;encryption")
+    set(_wpts_lbl_encryption              ";encryption")
+    set(_wpts_lbl_compression_encryption  ";compression;encryption")
+    set(_wpts_lbl_multichannel_encryption ";multichannel;encryption")
+    set(_wpts_lbl_dirlease                ";dirlease")
+    set(_wpts_lbl_dirlease_persistent     ";dirlease;persistent")
+    set(_wpts_lbl_dirlease_appinstance    ";dirlease;persistent;multichannel")
+    set(_wpts_lbl_symlink                 ";symlink")
+    set(_wpts_suf_base                    "")
+    set(_wpts_suf_persistent              "_persistent")
+    set(_wpts_suf_compression             "_compression")
+    set(_wpts_suf_multichannel            "_multichannel")
+    set(_wpts_suf_multichannel_persistent "_multichannel_persistent")
+    set(_wpts_suf_multichannel_persistent_encryption "_multichannel_persistent_encryption")
+    set(_wpts_suf_encryption              "_encryption")
+    set(_wpts_suf_compression_encryption  "_compression_encryption")
+    set(_wpts_suf_multichannel_encryption "_multichannel_encryption")
+    set(_wpts_suf_dirlease                "_dirlease")
+    set(_wpts_suf_dirlease_persistent     "_dirlease_persistent")
+    set(_wpts_suf_dirlease_appinstance    "_dirlease_appinstance")
+    set(_wpts_suf_symlink                 "_symlink")
 
-    # Compression + encryption combined cases (compress-then-encrypt, MS-SMB2
-    # §3.1.4.4).  The wrapper enables both smb_compression and smb_encryption so a
-    # compressed WRITE arrives encrypted (decrypt-then-decompress) and a
-    # compressed READ response is produced (compress-then-encrypt).  Only the
-    # implemented codecs are listed; LZ77+Huffman / LZNT1 encrypted variants skip
-    # for the same reason their plaintext variants do.
-    set(WPTS_SMB2_COMPRESSION_ENCRYPTION_ALLOWLIST
-        BVT_SMB2Compression_LZ77_Encrypted
-        BVT_SMB2Compression_LZ77Huffman_Encrypted
-        BVT_SMB2Compression_LZNT1_Encrypted
-        BVT_SMB2Compression_Chained_PatternV1_Encrypted
-        Negotiate_SMB311_WithEncryptionAndCompressionContextsWithoutIntegrityContext)
-
-    string(REPLACE ";" "," _wpts_tests "${WPTS_SMB2_COMPRESSION_ENCRYPTION_ALLOWLIST}")
-    add_test(NAME chimera/server/smb/wpts/memfs_compression_encryption
-        COMMAND ${CMAKE_SOURCE_DIR}/scripts/wpts_smb_test_wrapper.sh
-                ${CHIMERA_DAEMON} memfs "${_wpts_tests}")
-    set_tests_properties(chimera/server/smb/wpts/memfs_compression_encryption PROPERTIES
-        LABELS "smb;wpts;compression;encryption"
-        TIMEOUT 900
-        ENVIRONMENT "WPTS_BIN_DIR=${WPTS_BIN_DIR};DOTNET=${WPTS_DOTNET};CHIMERA_SMB_COMPRESSION=1;CHIMERA_SMB_ENCRYPTION=1")
-
-    # Multichannel + encryption combined case: encryption is session-scoped, so
-    # the keys derived on the first channel cover every bound channel.  The
-    # MultipleChannel_Negative_Encryption* cases are intentionally not listed:
-    # they are inconclusive when IsGlobalEncryptDataEnabled is true (they exercise
-    # an encryption-supported-but-not-global mode chimera does not offer).
-    set(WPTS_SMB2_MULTICHANNEL_ENCRYPTION_ALLOWLIST
-        MultipleChannel_EncryptionOnBothChannels)
-
-    string(REPLACE ";" "," _wpts_tests "${WPTS_SMB2_MULTICHANNEL_ENCRYPTION_ALLOWLIST}")
-    add_test(NAME chimera/server/smb/wpts/memfs_multichannel_encryption
-        COMMAND ${CMAKE_SOURCE_DIR}/scripts/wpts_smb_test_wrapper.sh
-                ${CHIMERA_DAEMON} memfs "${_wpts_tests}")
-    set_tests_properties(chimera/server/smb/wpts/memfs_multichannel_encryption PROPERTIES
-        LABELS "smb;wpts;multichannel;encryption"
-        TIMEOUT 900
-        ENVIRONMENT "WPTS_BIN_DIR=${WPTS_BIN_DIR};DOTNET=${WPTS_DOTNET};CHIMERA_SMB_MULTICHANNEL=1;CHIMERA_SMB_ENCRYPTION=1")
+    foreach(_cfg ${_wpts_configs})
+        if(NOT WPTS_GREEN_${_cfg})
+            continue()                        # no green cases for this config
+        endif()
+        string(REPLACE ";" "," _tests "${WPTS_GREEN_${_cfg}}")
+        set(_name chimera/server/smb/wpts/memfs${_wpts_suf_${_cfg}})
+        add_test(NAME ${_name}
+            COMMAND ${CMAKE_SOURCE_DIR}/scripts/wpts_smb_test_wrapper.sh
+                    ${CHIMERA_DAEMON} memfs "${_tests}")
+        set_tests_properties(${_name} PROPERTIES
+            LABELS "smb;wpts${_wpts_lbl_${_cfg}}"
+            TIMEOUT 900
+            ENVIRONMENT "WPTS_BIN_DIR=${WPTS_BIN_DIR};DOTNET=${WPTS_DOTNET}${_wpts_envfrag_${_cfg}};WPTS_JUNIT_FILE=${WPTS_JUNIT_DIR}/memfs${_wpts_suf_${_cfg}}.xml;WPTS_JUNIT_CONVERTER=${CMAKE_SOURCE_DIR}/scripts/trx_to_junit.py")
+    endforeach()
 
     message(STATUS "WPTS MS-SMB2 tests: enabled (${WPTS_BIN_DIR}, ${WPTS_DOTNET})")
 elseif(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND NOT WPTS_ARCH_SUPPORTED)
@@ -529,9 +264,20 @@ set_tests_properties(chimera/server/smb/rpcclient_lsa PROPERTIES
 #   rpc.srvsvc...NetShareEnumAll : the level-1 share enumeration that backs
 #                        Explorer browsing, exercised over the SMB2 WRITE/READ
 #                        ncacn_np transport (named subtest; pinned Samba image).
+#   rpc.handles.lsarpc : DCE/RPC context (policy) handle association -- a handle
+#                        opened on one connection, used on another, must fault
+#                        with CONTEXT_MISMATCH, and a closed handle must too.
+#   rpc.lsa.lookupnames : name->SID via LookupNames / LookupNames2 / LookupNames3
+#                        (opnums 14/58/68), including well-known names and the
+#                        NULL-name and policy-handle cases.
+#   rpc.wkssvc...NetWkstaGetInfo : workstation info levels 100/101/102/502,
+#                        exercising a multi-arm [switch_is] union.
 set(SMBTORTURE_RPC_SUITES_ENABLED
     rpc.lsa.lookupsids
-    "rpc.srvsvc.srvsvc (admin access).NetShareEnumAll")
+    rpc.lsa.lookupnames
+    rpc.handles.lsarpc
+    "rpc.srvsvc.srvsvc (admin access).NetShareEnumAll"
+    rpc.wkssvc.wkssvc.NetWkstaGetInfo)
 
 foreach(SUITE ${SMBTORTURE_RPC_SUITES_ENABLED})
     string(REGEX REPLACE "[^A-Za-z0-9]" "_" SUITE_ID ${SUITE})
@@ -549,14 +295,8 @@ endforeach()
 # smbtorture DCE/RPC conformance suites wired but DISABLED: each needs a server
 # feature we don't have yet (but that is in NAS scope -- drop DISABLED once the
 # feature lands).
-#   rpc.lsa.lookupnames : needs well-known name resolution (Everyone, SYSTEM,
-#                         BUILTIN\Administrators, ...) AND a Close that returns
-#                         RPC_SS_CONTEXT_MISMATCH (real context-handle tracking).
-#   rpc.handles.lsarpc  : DCE/RPC context-handle association across connections.
 #   rpc.lsalookup       : looks names up in trusted domains ("no trusts").
 set(SMBTORTURE_RPC_SUITES_DISABLED
-    rpc.lsa.lookupnames
-    rpc.handles.lsarpc
     rpc.lsalookup)
 
 foreach(SUITE ${SMBTORTURE_RPC_SUITES_DISABLED})
@@ -1394,6 +1134,13 @@ set(SMBTORTURE_ENABLED_memfs
     # smb2.create_no_streams
     smb2.create_no_streams.no_stream
     # smb2.credits
+    smb2.credits.1conn_ipc_max_async_credits
+    smb2.credits.1conn_notify_max_async_credits
+    smb2.credits.2conn_ipc_max_async_credits
+    smb2.credits.2conn_notify_max_async_credits
+    smb2.credits.ipc_max_data_zero
+    smb2.credits.multichannel_ipc_max_async_credits
+    smb2.credits.multichannel_max_async_credits
     smb2.credits.session_setup_credits_granted
     smb2.credits.single_req_credits_granted
     smb2.credits.skipped_mid
@@ -1414,28 +1161,23 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.dir.fixed
     smb2.dir.many
     smb2.dir.sorted
-    # smb2.dirlease (SMB3 directory leases).  Three subtests stay disabled:
-    # overwrite and unlink_different_{set,initial}_and_close.  All three need a
-    # FILE-LEVEL (last-close) delete-on-close, but chimera removes a delete-on-
-    # close file at the closing handle's release (per-handle / POSIX unlink-while-
-    # open).  A file-level scheme is what unlink_different asserts, but it makes
-    # smb2_deltree loop whenever a handle is leaked (these tests close a 2nd-tree
-    # handle on the wrong tree), so the two semantics conflict; left as follow-up.
+    # smb2.dirlease
+    smb2.dirlease.hardlink
     smb2.dirlease.leases
     smb2.dirlease.oplocks
-    smb2.dirlease.v2_request
-    smb2.dirlease.rename_dst_parent
-    smb2.dirlease.seteof
-    smb2.dirlease.setdos
-    smb2.dirlease.setbtime
-    smb2.dirlease.setmtime
-    smb2.dirlease.setctime
-    smb2.dirlease.setatime
-    smb2.dirlease.v2_request_parent
+    smb2.dirlease.overwrite
     smb2.dirlease.rename
-    smb2.dirlease.hardlink
-    smb2.dirlease.unlink_same_set_and_close
+    smb2.dirlease.rename_dst_parent
+    smb2.dirlease.setatime
+    smb2.dirlease.setbtime
+    smb2.dirlease.setctime
+    smb2.dirlease.setdos
+    smb2.dirlease.seteof
+    smb2.dirlease.setmtime
     smb2.dirlease.unlink_same_initial_and_close
+    smb2.dirlease.unlink_same_set_and_close
+    smb2.dirlease.v2_request
+    smb2.dirlease.v2_request_parent
     # smb2.durable-open-disconnect
     smb2.durable-open-disconnect.open-oplock-disconnect
     # smb2.durable-open
@@ -1447,6 +1189,7 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.durable-open.lock-oplock
     smb2.durable-open.open-lease
     smb2.durable-open.open-oplock
+    smb2.durable-open.open2-lease
     smb2.durable-open.open2-oplock
     smb2.durable-open.oplock
     smb2.durable-open.read-only
@@ -1526,6 +1269,7 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.ioctl.copy_chunk_bad_access
     smb2.ioctl.copy_chunk_bad_key
     smb2.ioctl.copy_chunk_bug15644
+    smb2.ioctl.copy_chunk_dest_lock
     smb2.ioctl.copy_chunk_limits
     smb2.ioctl.copy_chunk_max_output_sz
     smb2.ioctl.copy_chunk_multi
@@ -1535,6 +1279,7 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.ioctl.copy_chunk_src_exceed
     smb2.ioctl.copy_chunk_src_exceed_multi
     smb2.ioctl.copy_chunk_src_is_dest
+    smb2.ioctl.copy_chunk_src_lock
     smb2.ioctl.copy_chunk_tiny
     smb2.ioctl.copy_chunk_write_access
     smb2.ioctl.copy_chunk_zero_length
@@ -1574,6 +1319,7 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.ioctl.sparse_qar_truncated
     smb2.ioctl.sparse_set_nobuf
     smb2.ioctl.sparse_set_oversize
+    smb2.ioctl.trim_simple
     # smb2.kernel-oplocks
     smb2.kernel-oplocks.kernel_oplocks1
     smb2.kernel-oplocks.kernel_oplocks3
@@ -1588,17 +1334,23 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.lease.complex1
     smb2.lease.duplicate_create
     smb2.lease.duplicate_open
+    smb2.lease.initial_delete_disconnect
+    smb2.lease.initial_delete_logoff
+    smb2.lease.initial_delete_tdis
     smb2.lease.multibreak
     smb2.lease.nobreakself
+    smb2.lease.oplock
     smb2.lease.rename_wait
     smb2.lease.statopen
     smb2.lease.statopen2
     smb2.lease.statopen3
     smb2.lease.statopen4
+    smb2.lease.unlink
     smb2.lease.upgrade
     smb2.lease.upgrade2
     smb2.lease.upgrade3
     smb2.lease.v1_bug15148
+    smb2.lease.v2_breaking3
     smb2.lease.v2_bug15148
     smb2.lease.v2_complex1
     smb2.lease.v2_complex2
@@ -1608,7 +1360,11 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.lease.v2_flags_breaking
     smb2.lease.v2_flags_parentkey
     # smb2.lock
+    smb2.lock.async
     smb2.lock.auto-unlock
+    smb2.lock.cancel
+    smb2.lock.cancel-logoff
+    smb2.lock.cancel-tdis
     smb2.lock.contend
     smb2.lock.context
     smb2.lock.ctdb-delrec-deadlock
@@ -1618,6 +1374,9 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.lock.open-brlock-deadlock
     smb2.lock.overlap
     smb2.lock.range
+    smb2.lock.replay_broken_windows
+    smb2.lock.replay_smb3_specification_durable
+    smb2.lock.replay_smb3_specification_multi
     smb2.lock.rw-exclusive
     smb2.lock.rw-none
     smb2.lock.rw-shared
@@ -1638,7 +1397,10 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.multichannel.bugs.bug_15346
     smb2.multichannel.generic.interface_info
     smb2.multichannel.generic.num_channels
+    smb2.multichannel.leases.test1
+    smb2.multichannel.leases.test3
     smb2.multichannel.oplocks.test1
+    smb2.multichannel.oplocks.test2
     # smb2.notify-inotify
     smb2.notify-inotify.inotify-rename
     # smb2.notify
@@ -1661,9 +1423,11 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.notify.tcp
     smb2.notify.tdis
     smb2.notify.tdis1
+    smb2.notify.valid-req
     # smb2.openattr
     smb2.openattr
     # smb2.oplock
+    smb2.oplock.batch1
     smb2.oplock.batch10
     smb2.oplock.batch11
     smb2.oplock.batch12
@@ -1671,21 +1435,30 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.oplock.batch14
     smb2.oplock.batch15
     smb2.oplock.batch16
+    smb2.oplock.batch19
     smb2.oplock.batch2
+    smb2.oplock.batch20
     smb2.oplock.batch21
     smb2.oplock.batch23
     smb2.oplock.batch24
     smb2.oplock.batch25
+    smb2.oplock.batch3
     smb2.oplock.batch4
     smb2.oplock.batch5
+    smb2.oplock.batch6
+    smb2.oplock.batch7
     smb2.oplock.batch8
+    smb2.oplock.brl1
     smb2.oplock.brl2
+    smb2.oplock.brl3
     smb2.oplock.exclusive1
     smb2.oplock.exclusive2
     smb2.oplock.exclusive3
     smb2.oplock.exclusive4
     smb2.oplock.exclusive5
+    smb2.oplock.exclusive6
     smb2.oplock.exclusive9
+    smb2.oplock.levelii500
     smb2.oplock.levelii501
     smb2.oplock.levelii502
     # smb2.read
@@ -1697,9 +1470,11 @@ set(SMBTORTURE_ENABLED_memfs
     # smb2.rename
     smb2.rename.close-full-information
     smb2.rename.msword
+    smb2.rename.no_share_delete_but_delete_access
     smb2.rename.no_sharing
     smb2.rename.rename-open
     smb2.rename.rename_dir_bench
+    smb2.rename.share_delete_and_delete_access
     smb2.rename.share_delete_no_delete_access
     smb2.rename.simple
     smb2.rename.simple_modtime
@@ -1712,6 +1487,12 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.replay.dhv2-pending1n-vs-oplock-sane
     smb2.replay.dhv2-pending1o-vs-lease-sane
     smb2.replay.dhv2-pending1o-vs-oplock-sane
+    smb2.replay.dhv2-pending3l-vs-lease-sane
+    smb2.replay.dhv2-pending3l-vs-oplock-sane
+    smb2.replay.dhv2-pending3n-vs-lease-sane
+    smb2.replay.dhv2-pending3n-vs-oplock-sane
+    smb2.replay.dhv2-pending3o-vs-lease-sane
+    smb2.replay.dhv2-pending3o-vs-oplock-sane
     smb2.replay.durable-reconnect-replay1
     smb2.replay.durable-reconnect-replay2
     smb2.replay.durable-reconnect-replay3
@@ -1722,8 +1503,12 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.replay.replay-dhv2-lease3
     smb2.replay.replay-dhv2-oplock-lease
     smb2.replay.replay-dhv2-oplock1
+    smb2.replay.replay-dhv2-oplock2
+    smb2.replay.replay-dhv2-oplock3
     smb2.replay.replay-regular
     smb2.replay.replay-twice-durable
+    smb2.replay.replay3
+    smb2.replay.replay4
     smb2.replay.replay5
     smb2.replay.replay6
     smb2.replay.replay7
@@ -1744,10 +1529,17 @@ set(SMBTORTURE_ENABLED_memfs
     # smb2.session-require-signing
     smb2.session-require-signing.bug15397
     # smb2.session
+    smb2.session.anon-encryption1
+    smb2.session.anon-encryption2
+    smb2.session.anon-encryption3
+    smb2.session.anon-signing1
+    smb2.session.anon-signing2
     smb2.session.bind1
     smb2.session.bind2
     smb2.session.bind_different_user
     smb2.session.bind_invalid_auth
+    smb2.session.bind_negative_smb3encGtoCd
+    smb2.session.bind_negative_smb3encGtoCs
     smb2.session.bind_negative_smb3signC30toGd
     smb2.session.bind_negative_smb3signC30toGs
     smb2.session.bind_negative_smb3signCtoGd
@@ -1807,12 +1599,18 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.sharemode.bug14375
     smb2.sharemode.sharemode-access
     # smb2.streams
+    smb2.streams.attributes1
+    smb2.streams.attributes2
     smb2.streams.basefile-rename-with-open-stream
     smb2.streams.create-disposition
+    smb2.streams.delete
+    smb2.streams.dir
     smb2.streams.io
     smb2.streams.names
     smb2.streams.names2
+    smb2.streams.names3
     smb2.streams.rename
+    smb2.streams.rename2
     smb2.streams.sharemodes
     smb2.streams.zero-byte
     # smb2.tcon
@@ -1862,6 +1660,9 @@ set(SMBTORTURE_ENABLED_linux
     smb2.check-sharemode
     # smb2.compound
     smb2.compound.create-write-close
+    smb2.compound.interim1
+    smb2.compound.interim2
+    smb2.compound.interim3
     smb2.compound.invalid1
     smb2.compound.invalid2
     smb2.compound.invalid3
@@ -1871,12 +1672,17 @@ set(SMBTORTURE_ENABLED_linux
     smb2.compound.related3
     smb2.compound.related5
     smb2.compound.related6
+    smb2.compound.related8
     smb2.compound.related9
     smb2.compound.unrelated1
     # smb2.compound_async
     smb2.compound_async.create_lease_break_async
+    smb2.compound_async.flush_close
+    smb2.compound_async.flush_flush
+    smb2.compound_async.getinfo_middle
     smb2.compound_async.rename_last
     smb2.compound_async.rename_middle
+    smb2.compound_async.rename_non_compound_no_async
     # smb2.compound_find
     smb2.compound_find.compound_find_close
     smb2.compound_find.compound_find_related
@@ -1897,6 +1703,13 @@ set(SMBTORTURE_ENABLED_linux
     # smb2.create_no_streams
     smb2.create_no_streams.no_stream
     # smb2.credits
+    smb2.credits.1conn_ipc_max_async_credits
+    smb2.credits.1conn_notify_max_async_credits
+    smb2.credits.2conn_ipc_max_async_credits
+    smb2.credits.2conn_notify_max_async_credits
+    smb2.credits.ipc_max_data_zero
+    smb2.credits.multichannel_ipc_max_async_credits
+    smb2.credits.multichannel_max_async_credits
     smb2.credits.session_setup_credits_granted
     smb2.credits.single_req_credits_granted
     smb2.credits.skipped_mid
@@ -1915,13 +1728,81 @@ set(SMBTORTURE_ENABLED_linux
     smb2.dir.find
     smb2.dir.fixed
     smb2.dir.sorted
+    # smb2.dirlease
+    smb2.dirlease.hardlink
+    smb2.dirlease.leases
+    smb2.dirlease.oplocks
+    smb2.dirlease.overwrite
+    smb2.dirlease.rename
+    smb2.dirlease.setatime
+    smb2.dirlease.setbtime
+    smb2.dirlease.setctime
+    smb2.dirlease.setdos
+    smb2.dirlease.seteof
+    smb2.dirlease.setmtime
+    smb2.dirlease.unlink_same_initial_and_close
+    smb2.dirlease.unlink_same_set_and_close
+    smb2.dirlease.v2_request
+    smb2.dirlease.v2_request_parent
+    # smb2.durable-open-disconnect
+    smb2.durable-open-disconnect.open-oplock-disconnect
     # smb2.durable-open
+    smb2.durable-open.delete_on_close2
+    smb2.durable-open.file-position
+    smb2.durable-open.lease
+    smb2.durable-open.lock-lease
+    smb2.durable-open.lock-noW-lease
+    smb2.durable-open.lock-oplock
+    smb2.durable-open.open-lease
+    smb2.durable-open.open-oplock
+    smb2.durable-open.open2-oplock
+    smb2.durable-open.oplock
+    smb2.durable-open.reopen1
+    smb2.durable-open.reopen1a
+    smb2.durable-open.reopen1a-lease
+    smb2.durable-open.reopen2
+    smb2.durable-open.reopen2-lease
+    smb2.durable-open.reopen2-lease-v2
+    smb2.durable-open.reopen2a
+    smb2.durable-open.reopen3
+    smb2.durable-open.reopen4
+    smb2.durable-open.reopen5
     smb2.durable-open.reopen6
+    smb2.durable-open.stat-open
     # smb2.durable-v2-delay
     smb2.durable-v2-delay.durable_v2_reconnect_delay
     smb2.durable-v2-delay.durable_v2_reconnect_delay_msec
     # smb2.durable-v2-open
+    smb2.durable-v2-open.app-instance
+    smb2.durable-v2-open.create-blob
+    smb2.durable-v2-open.durable-v2-setinfo
+    smb2.durable-v2-open.keep-disconnected-rh-with-rh-open
+    smb2.durable-v2-open.keep-disconnected-rh-with-rwh-open
+    smb2.durable-v2-open.keep-disconnected-rh-with-stat-open
+    smb2.durable-v2-open.keep-disconnected-rwh-with-stat-open
+    smb2.durable-v2-open.lock-lease
+    smb2.durable-v2-open.lock-noW-lease
+    smb2.durable-v2-open.lock-oplock
+    smb2.durable-v2-open.open-lease
+    smb2.durable-v2-open.open-oplock
+    smb2.durable-v2-open.persistent-open-lease
+    smb2.durable-v2-open.persistent-open-oplock
+    smb2.durable-v2-open.purge-disconnected-rh-with-share-none-open
+    smb2.durable-v2-open.purge-disconnected-rwh-with-rh-open
+    smb2.durable-v2-open.purge-disconnected-rwh-with-rwh-open
     smb2.durable-v2-open.reconnect-twice
+    smb2.durable-v2-open.reopen1
+    smb2.durable-v2-open.reopen1a
+    smb2.durable-v2-open.reopen1a-lease
+    smb2.durable-v2-open.reopen2
+    smb2.durable-v2-open.reopen2-lease
+    smb2.durable-v2-open.reopen2-lease-v2
+    smb2.durable-v2-open.reopen2b
+    smb2.durable-v2-open.reopen2c
+    smb2.durable-v2-open.stat-and-lease
+    smb2.durable-v2-open.statRH-and-lease
+    smb2.durable-v2-open.two-different-lease
+    smb2.durable-v2-open.two-same-lease
     # smb2.durable-v2-regressions
     smb2.durable-v2-regressions.durable_v2_reconnect_bug15624
     # smb2.fileid
@@ -1950,6 +1831,7 @@ set(SMBTORTURE_ENABLED_linux
     smb2.ioctl.copy_chunk_bad_access
     smb2.ioctl.copy_chunk_bad_key
     smb2.ioctl.copy_chunk_bug15644
+    smb2.ioctl.copy_chunk_dest_lock
     smb2.ioctl.copy_chunk_limits
     smb2.ioctl.copy_chunk_max_output_sz
     smb2.ioctl.copy_chunk_multi
@@ -1959,6 +1841,7 @@ set(SMBTORTURE_ENABLED_linux
     smb2.ioctl.copy_chunk_src_exceed
     smb2.ioctl.copy_chunk_src_exceed_multi
     smb2.ioctl.copy_chunk_src_is_dest
+    smb2.ioctl.copy_chunk_src_lock
     smb2.ioctl.copy_chunk_tiny
     smb2.ioctl.copy_chunk_write_access
     smb2.ioctl.copy_chunk_zero_length
@@ -1972,7 +1855,6 @@ set(SMBTORTURE_ENABLED_linux
     smb2.ioctl.dup_extents_simple
     smb2.ioctl.dup_extents_sparse_both
     smb2.ioctl.dup_extents_sparse_dest
-    smb2.ioctl.dup_extents_sparse_src
     smb2.ioctl.dup_extents_src_is_dest
     smb2.ioctl.dup_extents_src_is_dest_overlap
     smb2.ioctl.dup_extents_src_lock
@@ -1984,28 +1866,61 @@ set(SMBTORTURE_ENABLED_linux
     smb2.ioctl.sparse_copy_chunk
     smb2.ioctl.sparse_dir_flag
     smb2.ioctl.sparse_file_attr
-    smb2.ioctl.sparse_file_flag
     smb2.ioctl.sparse_hole_dealloc
     smb2.ioctl.sparse_lock
     smb2.ioctl.sparse_perms
     smb2.ioctl.sparse_punch
     smb2.ioctl.sparse_punch_invalid
-    smb2.ioctl.sparse_qar
     smb2.ioctl.sparse_qar_malformed
     smb2.ioctl.sparse_qar_multi
     smb2.ioctl.sparse_qar_ob1
     smb2.ioctl.sparse_qar_overflow
     smb2.ioctl.sparse_qar_truncated
-    smb2.ioctl.sparse_set_nobuf
-    smb2.ioctl.sparse_set_oversize
+    smb2.ioctl.trim_simple
     # smb2.kernel-oplocks
     smb2.kernel-oplocks.kernel_oplocks1
     smb2.kernel-oplocks.kernel_oplocks3
     # smb2.lease
+    smb2.lease.break
+    smb2.lease.breaking1
+    smb2.lease.breaking2
+    smb2.lease.breaking3
+    smb2.lease.breaking5
+    smb2.lease.breaking6
+    smb2.lease.complex1
+    smb2.lease.duplicate_create
+    smb2.lease.duplicate_open
+    smb2.lease.initial_delete_disconnect
+    smb2.lease.initial_delete_logoff
+    smb2.lease.initial_delete_tdis
+    smb2.lease.multibreak
+    smb2.lease.nobreakself
+    smb2.lease.oplock
+    smb2.lease.rename_wait
+    smb2.lease.statopen
     smb2.lease.statopen2
     smb2.lease.statopen3
+    smb2.lease.statopen4
+    smb2.lease.unlink
+    smb2.lease.upgrade
+    smb2.lease.upgrade2
+    smb2.lease.upgrade3
+    smb2.lease.v1_bug15148
+    smb2.lease.v2_breaking3
+    smb2.lease.v2_bug15148
+    smb2.lease.v2_complex1
+    smb2.lease.v2_complex2
+    smb2.lease.v2_epoch1
+    smb2.lease.v2_epoch2
+    smb2.lease.v2_epoch3
+    smb2.lease.v2_flags_breaking
+    smb2.lease.v2_flags_parentkey
     # smb2.lock
+    smb2.lock.async
     smb2.lock.auto-unlock
+    smb2.lock.cancel
+    smb2.lock.cancel-logoff
+    smb2.lock.cancel-tdis
     smb2.lock.contend
     smb2.lock.context
     smb2.lock.ctdb-delrec-deadlock
@@ -2015,6 +1930,9 @@ set(SMBTORTURE_ENABLED_linux
     smb2.lock.open-brlock-deadlock
     smb2.lock.overlap
     smb2.lock.range
+    smb2.lock.replay_broken_windows
+    smb2.lock.replay_smb3_specification_durable
+    smb2.lock.replay_smb3_specification_multi
     smb2.lock.rw-exclusive
     smb2.lock.rw-none
     smb2.lock.rw-shared
@@ -2034,6 +1952,10 @@ set(SMBTORTURE_ENABLED_linux
     smb2.multichannel.bugs.bug_15346
     smb2.multichannel.generic.interface_info
     smb2.multichannel.generic.num_channels
+    smb2.multichannel.leases.test1
+    smb2.multichannel.leases.test3
+    smb2.multichannel.oplocks.test1
+    smb2.multichannel.oplocks.test2
     # smb2.notify-inotify
     smb2.notify-inotify.inotify-rename
     # smb2.notify
@@ -2057,6 +1979,7 @@ set(SMBTORTURE_ENABLED_linux
     smb2.notify.tdis
     smb2.notify.tdis1
     # smb2.oplock
+    smb2.oplock.batch1
     smb2.oplock.batch10
     smb2.oplock.batch11
     smb2.oplock.batch12
@@ -2064,21 +1987,30 @@ set(SMBTORTURE_ENABLED_linux
     smb2.oplock.batch14
     smb2.oplock.batch15
     smb2.oplock.batch16
+    smb2.oplock.batch19
     smb2.oplock.batch2
+    smb2.oplock.batch20
     smb2.oplock.batch21
     smb2.oplock.batch23
     smb2.oplock.batch24
     smb2.oplock.batch25
+    smb2.oplock.batch3
     smb2.oplock.batch4
     smb2.oplock.batch5
+    smb2.oplock.batch6
+    smb2.oplock.batch7
     smb2.oplock.batch8
+    smb2.oplock.brl1
     smb2.oplock.brl2
+    smb2.oplock.brl3
     smb2.oplock.exclusive1
     smb2.oplock.exclusive2
     smb2.oplock.exclusive3
     smb2.oplock.exclusive4
     smb2.oplock.exclusive5
+    smb2.oplock.exclusive6
     smb2.oplock.exclusive9
+    smb2.oplock.levelii500
     smb2.oplock.levelii501
     smb2.oplock.levelii502
     # smb2.read
@@ -2090,17 +2022,44 @@ set(SMBTORTURE_ENABLED_linux
     # smb2.rename
     smb2.rename.close-full-information
     smb2.rename.msword
+    smb2.rename.no_share_delete_but_delete_access
     smb2.rename.no_sharing
     smb2.rename.rename-open
     smb2.rename.rename_dir_bench
+    smb2.rename.share_delete_and_delete_access
     smb2.rename.share_delete_no_delete_access
     smb2.rename.simple
     smb2.rename.simple_modtime
     smb2.rename.simple_nodelete
     # smb2.replay
     smb2.replay.channel-sequence
+    smb2.replay.dhv2-pending1l-vs-lease-sane
+    smb2.replay.dhv2-pending1l-vs-oplock-sane
+    smb2.replay.dhv2-pending1n-vs-lease-sane
+    smb2.replay.dhv2-pending1n-vs-oplock-sane
+    smb2.replay.dhv2-pending1o-vs-lease-sane
+    smb2.replay.dhv2-pending1o-vs-oplock-sane
+    smb2.replay.dhv2-pending3l-vs-lease-sane
+    smb2.replay.dhv2-pending3l-vs-oplock-sane
+    smb2.replay.dhv2-pending3n-vs-lease-sane
+    smb2.replay.dhv2-pending3n-vs-oplock-sane
+    smb2.replay.dhv2-pending3o-vs-lease-sane
+    smb2.replay.dhv2-pending3o-vs-oplock-sane
+    smb2.replay.durable-reconnect-replay1
+    smb2.replay.durable-reconnect-replay2
+    smb2.replay.durable-reconnect-replay3
     smb2.replay.replay-commands
+    smb2.replay.replay-dhv2-lease3
+    smb2.replay.replay-dhv2-oplock-lease
+    smb2.replay.replay-dhv2-oplock1
+    smb2.replay.replay-dhv2-oplock2
+    smb2.replay.replay-dhv2-oplock3
+    smb2.replay.replay-regular
+    smb2.replay.replay-twice-durable
+    smb2.replay.replay3
+    smb2.replay.replay4
     smb2.replay.replay5
+    smb2.replay.replay6
     smb2.replay.replay7
     # smb2.rw
     smb2.rw.append
@@ -2117,7 +2076,17 @@ set(SMBTORTURE_ENABLED_linux
     # smb2.session-require-signing
     smb2.session-require-signing.bug15397
     # smb2.session
+    smb2.session.anon-encryption1
+    smb2.session.anon-encryption2
+    smb2.session.anon-encryption3
+    smb2.session.anon-signing1
+    smb2.session.anon-signing2
+    smb2.session.bind1
+    smb2.session.bind2
     smb2.session.bind_different_user
+    smb2.session.bind_invalid_auth
+    smb2.session.bind_negative_smb3encGtoCd
+    smb2.session.bind_negative_smb3encGtoCs
     smb2.session.bind_negative_smb3signC30toGd
     smb2.session.bind_negative_smb3signC30toGs
     smb2.session.bind_negative_smb3signCtoGd
@@ -2146,6 +2115,10 @@ set(SMBTORTURE_ENABLED_linux
     smb2.session.bind_negative_smb3sneGtoHs
     smb2.session.bind_negative_smb3sneHtoGd
     smb2.session.bind_negative_smb3sneHtoGs
+    smb2.session.bind_negative_smb3to2d
+    smb2.session.bind_negative_smb3to2s
+    smb2.session.bind_negative_smb3to3d
+    smb2.session.bind_negative_smb3to3s
     smb2.session.encryption-aes-128-ccm
     smb2.session.encryption-aes-128-gcm
     smb2.session.encryption-aes-256-ccm
@@ -2156,6 +2129,13 @@ set(SMBTORTURE_ENABLED_linux
     smb2.session.expire2e
     smb2.session.expire2s
     smb2.session.expire_disconnect
+    smb2.session.ntlmssp_bug14932
+    smb2.session.reauth1
+    smb2.session.reauth2
+    smb2.session.reauth3
+    smb2.session.reauth4
+    smb2.session.reauth6
+    smb2.session.reconnect2
     smb2.session.signing-aes-128-cmac
     smb2.session.signing-aes-128-gmac
     smb2.session.signing-hmac-sha-256
@@ -2195,6 +2175,9 @@ set(SMBTORTURE_ENABLED_io_uring
     smb2.check-sharemode
     # smb2.compound
     smb2.compound.create-write-close
+    smb2.compound.interim1
+    smb2.compound.interim2
+    smb2.compound.interim3
     smb2.compound.invalid1
     smb2.compound.invalid2
     smb2.compound.invalid3
@@ -2204,12 +2187,17 @@ set(SMBTORTURE_ENABLED_io_uring
     smb2.compound.related3
     smb2.compound.related5
     smb2.compound.related6
+    smb2.compound.related8
     smb2.compound.related9
     smb2.compound.unrelated1
     # smb2.compound_async
     smb2.compound_async.create_lease_break_async
+    smb2.compound_async.flush_close
+    smb2.compound_async.flush_flush
+    smb2.compound_async.getinfo_middle
     smb2.compound_async.rename_last
     smb2.compound_async.rename_middle
+    smb2.compound_async.rename_non_compound_no_async
     # smb2.compound_find
     smb2.compound_find.compound_find_close
     smb2.compound_find.compound_find_related
@@ -2230,6 +2218,13 @@ set(SMBTORTURE_ENABLED_io_uring
     # smb2.create_no_streams
     smb2.create_no_streams.no_stream
     # smb2.credits
+    smb2.credits.1conn_ipc_max_async_credits
+    smb2.credits.1conn_notify_max_async_credits
+    smb2.credits.2conn_ipc_max_async_credits
+    smb2.credits.2conn_notify_max_async_credits
+    smb2.credits.ipc_max_data_zero
+    smb2.credits.multichannel_ipc_max_async_credits
+    smb2.credits.multichannel_max_async_credits
     smb2.credits.session_setup_credits_granted
     smb2.credits.single_req_credits_granted
     smb2.credits.skipped_mid
@@ -2249,13 +2244,82 @@ set(SMBTORTURE_ENABLED_io_uring
     smb2.dir.fixed
     smb2.dir.many
     smb2.dir.sorted
+    # smb2.dirlease
+    smb2.dirlease.hardlink
+    smb2.dirlease.leases
+    smb2.dirlease.oplocks
+    smb2.dirlease.overwrite
+    smb2.dirlease.rename
+    smb2.dirlease.setatime
+    smb2.dirlease.setbtime
+    smb2.dirlease.setctime
+    smb2.dirlease.setdos
+    smb2.dirlease.seteof
+    smb2.dirlease.setmtime
+    smb2.dirlease.unlink_same_initial_and_close
+    smb2.dirlease.unlink_same_set_and_close
+    smb2.dirlease.v2_request
+    smb2.dirlease.v2_request_parent
+    # smb2.durable-open-disconnect
+    smb2.durable-open-disconnect.open-oplock-disconnect
     # smb2.durable-open
+    smb2.durable-open.delete_on_close2
+    smb2.durable-open.file-position
+    smb2.durable-open.lease
+    smb2.durable-open.lock-lease
+    smb2.durable-open.lock-noW-lease
+    smb2.durable-open.lock-oplock
+    smb2.durable-open.open-lease
+    smb2.durable-open.open-oplock
+    smb2.durable-open.open2-lease
+    smb2.durable-open.open2-oplock
+    smb2.durable-open.oplock
+    smb2.durable-open.reopen1
+    smb2.durable-open.reopen1a
+    smb2.durable-open.reopen1a-lease
+    smb2.durable-open.reopen2
+    smb2.durable-open.reopen2-lease
+    smb2.durable-open.reopen2-lease-v2
+    smb2.durable-open.reopen2a
+    smb2.durable-open.reopen3
+    smb2.durable-open.reopen4
+    smb2.durable-open.reopen5
     smb2.durable-open.reopen6
+    smb2.durable-open.stat-open
     # smb2.durable-v2-delay
     smb2.durable-v2-delay.durable_v2_reconnect_delay
     smb2.durable-v2-delay.durable_v2_reconnect_delay_msec
     # smb2.durable-v2-open
+    smb2.durable-v2-open.app-instance
+    smb2.durable-v2-open.create-blob
+    smb2.durable-v2-open.durable-v2-setinfo
+    smb2.durable-v2-open.keep-disconnected-rh-with-rh-open
+    smb2.durable-v2-open.keep-disconnected-rh-with-rwh-open
+    smb2.durable-v2-open.keep-disconnected-rh-with-stat-open
+    smb2.durable-v2-open.keep-disconnected-rwh-with-stat-open
+    smb2.durable-v2-open.lock-lease
+    smb2.durable-v2-open.lock-noW-lease
+    smb2.durable-v2-open.lock-oplock
+    smb2.durable-v2-open.open-lease
+    smb2.durable-v2-open.open-oplock
+    smb2.durable-v2-open.persistent-open-lease
+    smb2.durable-v2-open.persistent-open-oplock
+    smb2.durable-v2-open.purge-disconnected-rh-with-share-none-open
+    smb2.durable-v2-open.purge-disconnected-rwh-with-rh-open
+    smb2.durable-v2-open.purge-disconnected-rwh-with-rwh-open
     smb2.durable-v2-open.reconnect-twice
+    smb2.durable-v2-open.reopen1
+    smb2.durable-v2-open.reopen1a
+    smb2.durable-v2-open.reopen1a-lease
+    smb2.durable-v2-open.reopen2
+    smb2.durable-v2-open.reopen2-lease
+    smb2.durable-v2-open.reopen2-lease-v2
+    smb2.durable-v2-open.reopen2b
+    smb2.durable-v2-open.reopen2c
+    smb2.durable-v2-open.stat-and-lease
+    smb2.durable-v2-open.statRH-and-lease
+    smb2.durable-v2-open.two-different-lease
+    smb2.durable-v2-open.two-same-lease
     # smb2.durable-v2-regressions
     smb2.durable-v2-regressions.durable_v2_reconnect_bug15624
     # smb2.fileid
@@ -2284,6 +2348,7 @@ set(SMBTORTURE_ENABLED_io_uring
     smb2.ioctl.copy_chunk_bad_access
     smb2.ioctl.copy_chunk_bad_key
     smb2.ioctl.copy_chunk_bug15644
+    smb2.ioctl.copy_chunk_dest_lock
     smb2.ioctl.copy_chunk_limits
     smb2.ioctl.copy_chunk_max_output_sz
     smb2.ioctl.copy_chunk_multi
@@ -2293,6 +2358,7 @@ set(SMBTORTURE_ENABLED_io_uring
     smb2.ioctl.copy_chunk_src_exceed
     smb2.ioctl.copy_chunk_src_exceed_multi
     smb2.ioctl.copy_chunk_src_is_dest
+    smb2.ioctl.copy_chunk_src_lock
     smb2.ioctl.copy_chunk_tiny
     smb2.ioctl.copy_chunk_write_access
     smb2.ioctl.copy_chunk_zero_length
@@ -2306,7 +2372,6 @@ set(SMBTORTURE_ENABLED_io_uring
     smb2.ioctl.dup_extents_simple
     smb2.ioctl.dup_extents_sparse_both
     smb2.ioctl.dup_extents_sparse_dest
-    smb2.ioctl.dup_extents_sparse_src
     smb2.ioctl.dup_extents_src_is_dest
     smb2.ioctl.dup_extents_src_is_dest_overlap
     smb2.ioctl.dup_extents_src_lock
@@ -2318,28 +2383,61 @@ set(SMBTORTURE_ENABLED_io_uring
     smb2.ioctl.sparse_copy_chunk
     smb2.ioctl.sparse_dir_flag
     smb2.ioctl.sparse_file_attr
-    smb2.ioctl.sparse_file_flag
     smb2.ioctl.sparse_hole_dealloc
     smb2.ioctl.sparse_lock
     smb2.ioctl.sparse_perms
     smb2.ioctl.sparse_punch
     smb2.ioctl.sparse_punch_invalid
-    smb2.ioctl.sparse_qar
     smb2.ioctl.sparse_qar_malformed
     smb2.ioctl.sparse_qar_multi
     smb2.ioctl.sparse_qar_ob1
     smb2.ioctl.sparse_qar_overflow
     smb2.ioctl.sparse_qar_truncated
-    smb2.ioctl.sparse_set_nobuf
-    smb2.ioctl.sparse_set_oversize
+    smb2.ioctl.trim_simple
     # smb2.kernel-oplocks
     smb2.kernel-oplocks.kernel_oplocks1
     smb2.kernel-oplocks.kernel_oplocks3
     # smb2.lease
+    smb2.lease.break
+    smb2.lease.breaking1
+    smb2.lease.breaking2
+    smb2.lease.breaking3
+    smb2.lease.breaking5
+    smb2.lease.breaking6
+    smb2.lease.complex1
+    smb2.lease.duplicate_create
+    smb2.lease.duplicate_open
+    smb2.lease.initial_delete_disconnect
+    smb2.lease.initial_delete_logoff
+    smb2.lease.initial_delete_tdis
+    smb2.lease.multibreak
+    smb2.lease.nobreakself
+    smb2.lease.oplock
+    smb2.lease.rename_wait
+    smb2.lease.statopen
     smb2.lease.statopen2
     smb2.lease.statopen3
+    smb2.lease.statopen4
+    smb2.lease.unlink
+    smb2.lease.upgrade
+    smb2.lease.upgrade2
+    smb2.lease.upgrade3
+    smb2.lease.v1_bug15148
+    smb2.lease.v2_breaking3
+    smb2.lease.v2_bug15148
+    smb2.lease.v2_complex1
+    smb2.lease.v2_complex2
+    smb2.lease.v2_epoch1
+    smb2.lease.v2_epoch2
+    smb2.lease.v2_epoch3
+    smb2.lease.v2_flags_breaking
+    smb2.lease.v2_flags_parentkey
     # smb2.lock
+    smb2.lock.async
     smb2.lock.auto-unlock
+    smb2.lock.cancel
+    smb2.lock.cancel-logoff
+    smb2.lock.cancel-tdis
     smb2.lock.contend
     smb2.lock.context
     smb2.lock.ctdb-delrec-deadlock
@@ -2349,6 +2447,9 @@ set(SMBTORTURE_ENABLED_io_uring
     smb2.lock.open-brlock-deadlock
     smb2.lock.overlap
     smb2.lock.range
+    smb2.lock.replay_broken_windows
+    smb2.lock.replay_smb3_specification_durable
+    smb2.lock.replay_smb3_specification_multi
     smb2.lock.rw-exclusive
     smb2.lock.rw-none
     smb2.lock.rw-shared
@@ -2368,6 +2469,10 @@ set(SMBTORTURE_ENABLED_io_uring
     smb2.multichannel.bugs.bug_15346
     smb2.multichannel.generic.interface_info
     smb2.multichannel.generic.num_channels
+    smb2.multichannel.leases.test1
+    smb2.multichannel.leases.test3
+    smb2.multichannel.oplocks.test1
+    smb2.multichannel.oplocks.test2
     # smb2.notify-inotify
     smb2.notify-inotify.inotify-rename
     # smb2.notify
@@ -2391,6 +2496,7 @@ set(SMBTORTURE_ENABLED_io_uring
     smb2.notify.tdis
     smb2.notify.tdis1
     # smb2.oplock
+    smb2.oplock.batch1
     smb2.oplock.batch10
     smb2.oplock.batch11
     smb2.oplock.batch12
@@ -2398,20 +2504,30 @@ set(SMBTORTURE_ENABLED_io_uring
     smb2.oplock.batch14
     smb2.oplock.batch15
     smb2.oplock.batch16
+    smb2.oplock.batch19
     smb2.oplock.batch2
+    smb2.oplock.batch20
     smb2.oplock.batch21
     smb2.oplock.batch23
     smb2.oplock.batch24
     smb2.oplock.batch25
+    smb2.oplock.batch3
     smb2.oplock.batch4
     smb2.oplock.batch5
+    smb2.oplock.batch6
+    smb2.oplock.batch7
     smb2.oplock.batch8
+    smb2.oplock.brl1
     smb2.oplock.brl2
+    smb2.oplock.brl3
     smb2.oplock.exclusive1
     smb2.oplock.exclusive2
     smb2.oplock.exclusive3
     smb2.oplock.exclusive4
     smb2.oplock.exclusive5
+    smb2.oplock.exclusive6
+    smb2.oplock.exclusive9
+    smb2.oplock.levelii500
     smb2.oplock.levelii501
     smb2.oplock.levelii502
     # smb2.read
@@ -2423,23 +2539,53 @@ set(SMBTORTURE_ENABLED_io_uring
     # smb2.rename
     smb2.rename.close-full-information
     smb2.rename.msword
+    smb2.rename.no_share_delete_but_delete_access
     smb2.rename.no_sharing
     smb2.rename.rename-open
     smb2.rename.rename_dir_bench
+    smb2.rename.share_delete_and_delete_access
     smb2.rename.share_delete_no_delete_access
     smb2.rename.simple
     smb2.rename.simple_modtime
     smb2.rename.simple_nodelete
     # smb2.replay
     smb2.replay.channel-sequence
+    smb2.replay.dhv2-pending1l-vs-lease-sane
+    smb2.replay.dhv2-pending1l-vs-oplock-sane
+    smb2.replay.dhv2-pending1n-vs-lease-sane
+    smb2.replay.dhv2-pending1n-vs-oplock-sane
+    smb2.replay.dhv2-pending1o-vs-lease-sane
+    smb2.replay.dhv2-pending1o-vs-oplock-sane
+    smb2.replay.dhv2-pending3l-vs-lease-sane
+    smb2.replay.dhv2-pending3l-vs-oplock-sane
+    smb2.replay.dhv2-pending3n-vs-lease-sane
+    smb2.replay.dhv2-pending3n-vs-oplock-sane
+    smb2.replay.dhv2-pending3o-vs-lease-sane
+    smb2.replay.dhv2-pending3o-vs-oplock-sane
+    smb2.replay.durable-reconnect-replay1
+    smb2.replay.durable-reconnect-replay2
+    smb2.replay.durable-reconnect-replay3
     smb2.replay.replay-commands
+    smb2.replay.replay-dhv2-lease3
+    smb2.replay.replay-dhv2-oplock-lease
+    smb2.replay.replay-dhv2-oplock1
+    smb2.replay.replay-dhv2-oplock2
+    smb2.replay.replay-dhv2-oplock3
+    smb2.replay.replay-regular
+    smb2.replay.replay-twice-durable
+    smb2.replay.replay3
+    smb2.replay.replay4
     smb2.replay.replay5
+    smb2.replay.replay6
     smb2.replay.replay7
     # smb2.rw
     smb2.rw.append
     smb2.rw.invalid
     smb2.rw.rw1
     smb2.rw.rw2
+    # smb2.scan
+    smb2.scan.find
+    smb2.scan.scan
     # smb2.secleak
     smb2.secleak
     # smb2.session-id
@@ -2447,7 +2593,17 @@ set(SMBTORTURE_ENABLED_io_uring
     # smb2.session-require-signing
     smb2.session-require-signing.bug15397
     # smb2.session
+    smb2.session.anon-encryption1
+    smb2.session.anon-encryption2
+    smb2.session.anon-encryption3
+    smb2.session.anon-signing1
+    smb2.session.anon-signing2
+    smb2.session.bind1
+    smb2.session.bind2
     smb2.session.bind_different_user
+    smb2.session.bind_invalid_auth
+    smb2.session.bind_negative_smb3encGtoCd
+    smb2.session.bind_negative_smb3encGtoCs
     smb2.session.bind_negative_smb3signC30toGd
     smb2.session.bind_negative_smb3signC30toGs
     smb2.session.bind_negative_smb3signCtoGd
@@ -2476,6 +2632,10 @@ set(SMBTORTURE_ENABLED_io_uring
     smb2.session.bind_negative_smb3sneGtoHs
     smb2.session.bind_negative_smb3sneHtoGd
     smb2.session.bind_negative_smb3sneHtoGs
+    smb2.session.bind_negative_smb3to2d
+    smb2.session.bind_negative_smb3to2s
+    smb2.session.bind_negative_smb3to3d
+    smb2.session.bind_negative_smb3to3s
     smb2.session.encryption-aes-128-ccm
     smb2.session.encryption-aes-128-gcm
     smb2.session.encryption-aes-256-ccm
@@ -2486,6 +2646,13 @@ set(SMBTORTURE_ENABLED_io_uring
     smb2.session.expire2e
     smb2.session.expire2s
     smb2.session.expire_disconnect
+    smb2.session.ntlmssp_bug14932
+    smb2.session.reauth1
+    smb2.session.reauth2
+    smb2.session.reauth3
+    smb2.session.reauth4
+    smb2.session.reauth6
+    smb2.session.reconnect2
     smb2.session.signing-aes-128-cmac
     smb2.session.signing-aes-128-gmac
     smb2.session.signing-hmac-sha-256
@@ -2542,6 +2709,9 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.check-sharemode
     # smb2.compound
     smb2.compound.create-write-close
+    smb2.compound.interim1
+    smb2.compound.interim2
+    smb2.compound.interim3
     smb2.compound.invalid1
     smb2.compound.invalid2
     smb2.compound.invalid3
@@ -2549,12 +2719,18 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.compound.related1
     smb2.compound.related2
     smb2.compound.related3
+    smb2.compound.related4
     smb2.compound.related5
     smb2.compound.related6
+    smb2.compound.related7
+    smb2.compound.related8
     smb2.compound.related9
     smb2.compound.unrelated1
     # smb2.compound_async
     smb2.compound_async.create_lease_break_async
+    smb2.compound_async.flush_close
+    smb2.compound_async.flush_flush
+    smb2.compound_async.getinfo_middle
     smb2.compound_async.rename_last
     smb2.compound_async.rename_middle
     # smb2.compound_find
@@ -2578,6 +2754,10 @@ set(SMBTORTURE_ENABLED_cairn
     # smb2.create_no_streams
     smb2.create_no_streams.no_stream
     # smb2.credits
+    smb2.credits.1conn_ipc_max_async_credits
+    smb2.credits.2conn_ipc_max_async_credits
+    smb2.credits.ipc_max_data_zero
+    smb2.credits.multichannel_ipc_max_async_credits
     smb2.credits.session_setup_credits_granted
     smb2.credits.single_req_credits_granted
     smb2.credits.skipped_mid
@@ -2596,6 +2776,23 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.dir.file-index
     smb2.dir.find
     smb2.dir.sorted
+    # smb2.dirlease
+    smb2.dirlease.hardlink
+    smb2.dirlease.leases
+    smb2.dirlease.oplocks
+    smb2.dirlease.overwrite
+    smb2.dirlease.rename
+    smb2.dirlease.rename_dst_parent
+    smb2.dirlease.setatime
+    smb2.dirlease.setbtime
+    smb2.dirlease.setctime
+    smb2.dirlease.setdos
+    smb2.dirlease.seteof
+    smb2.dirlease.setmtime
+    smb2.dirlease.unlink_same_initial_and_close
+    smb2.dirlease.unlink_same_set_and_close
+    smb2.dirlease.v2_request
+    smb2.dirlease.v2_request_parent
     # smb2.durable-open-disconnect
     smb2.durable-open-disconnect.open-oplock-disconnect
     # smb2.durable-open
@@ -2607,6 +2804,7 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.durable-open.lock-oplock
     smb2.durable-open.open-lease
     smb2.durable-open.open-oplock
+    smb2.durable-open.open2-lease
     smb2.durable-open.open2-oplock
     smb2.durable-open.oplock
     smb2.durable-open.read-only
@@ -2684,6 +2882,7 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.ioctl.copy_chunk_bad_access
     smb2.ioctl.copy_chunk_bad_key
     smb2.ioctl.copy_chunk_bug15644
+    smb2.ioctl.copy_chunk_dest_lock
     smb2.ioctl.copy_chunk_limits
     smb2.ioctl.copy_chunk_max_output_sz
     smb2.ioctl.copy_chunk_multi
@@ -2694,6 +2893,7 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.ioctl.copy_chunk_src_exceed_multi
     smb2.ioctl.copy_chunk_src_is_dest
     smb2.ioctl.copy_chunk_src_is_dest_overlap
+    smb2.ioctl.copy_chunk_src_lock
     smb2.ioctl.copy_chunk_tiny
     smb2.ioctl.copy_chunk_write_access
     smb2.ioctl.copy_chunk_zero_length
@@ -2733,28 +2933,52 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.ioctl.sparse_qar_truncated
     smb2.ioctl.sparse_set_nobuf
     smb2.ioctl.sparse_set_oversize
+    smb2.ioctl.trim_simple
     # smb2.kernel-oplocks
     smb2.kernel-oplocks.kernel_oplocks1
     smb2.kernel-oplocks.kernel_oplocks3
     smb2.kernel-oplocks.kernel_oplocks8
     # smb2.lease
+    smb2.lease.break
+    smb2.lease.breaking1
+    smb2.lease.breaking2
+    smb2.lease.breaking3
+    smb2.lease.breaking5
+    smb2.lease.breaking6
+    smb2.lease.complex1
     smb2.lease.duplicate_create
     smb2.lease.duplicate_open
+    smb2.lease.initial_delete_disconnect
+    smb2.lease.initial_delete_logoff
+    smb2.lease.initial_delete_tdis
     smb2.lease.multibreak
+    smb2.lease.nobreakself
+    smb2.lease.oplock
     smb2.lease.rename_wait
+    smb2.lease.statopen
     smb2.lease.statopen2
     smb2.lease.statopen3
+    smb2.lease.statopen4
+    smb2.lease.unlink
     smb2.lease.upgrade
     smb2.lease.upgrade2
     smb2.lease.upgrade3
     smb2.lease.v1_bug15148
+    smb2.lease.v2_breaking3
     smb2.lease.v2_bug15148
+    smb2.lease.v2_complex1
     smb2.lease.v2_complex2
     smb2.lease.v2_epoch1
+    smb2.lease.v2_epoch2
+    smb2.lease.v2_epoch3
     smb2.lease.v2_flags_breaking
     smb2.lease.v2_flags_parentkey
     # smb2.lock
+    smb2.lock.async
     smb2.lock.auto-unlock
+    smb2.lock.cancel
+    smb2.lock.cancel-logoff
+    smb2.lock.cancel-tdis
     smb2.lock.contend
     smb2.lock.context
     smb2.lock.ctdb-delrec-deadlock
@@ -2764,6 +2988,9 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.lock.open-brlock-deadlock
     smb2.lock.overlap
     smb2.lock.range
+    smb2.lock.replay_broken_windows
+    smb2.lock.replay_smb3_specification_durable
+    smb2.lock.replay_smb3_specification_multi
     smb2.lock.rw-exclusive
     smb2.lock.rw-none
     smb2.lock.rw-shared
@@ -2784,7 +3011,10 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.multichannel.bugs.bug_15346
     smb2.multichannel.generic.interface_info
     smb2.multichannel.generic.num_channels
+    smb2.multichannel.leases.test1
+    smb2.multichannel.leases.test3
     smb2.multichannel.oplocks.test1
+    smb2.multichannel.oplocks.test2
     # smb2.notify-inotify
     smb2.notify-inotify.inotify-rename
     # smb2.notify
@@ -2807,9 +3037,11 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.notify.tcp
     smb2.notify.tdis
     smb2.notify.tdis1
+    smb2.notify.valid-req
     # smb2.openattr
     smb2.openattr
     # smb2.oplock
+    smb2.oplock.batch1
     smb2.oplock.batch10
     smb2.oplock.batch11
     smb2.oplock.batch12
@@ -2817,21 +3049,30 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.oplock.batch14
     smb2.oplock.batch15
     smb2.oplock.batch16
+    smb2.oplock.batch19
     smb2.oplock.batch2
+    smb2.oplock.batch20
     smb2.oplock.batch21
     smb2.oplock.batch23
     smb2.oplock.batch24
     smb2.oplock.batch25
+    smb2.oplock.batch3
     smb2.oplock.batch4
     smb2.oplock.batch5
+    smb2.oplock.batch6
+    smb2.oplock.batch7
     smb2.oplock.batch8
+    smb2.oplock.brl1
     smb2.oplock.brl2
+    smb2.oplock.brl3
     smb2.oplock.exclusive1
     smb2.oplock.exclusive2
     smb2.oplock.exclusive3
     smb2.oplock.exclusive4
     smb2.oplock.exclusive5
+    smb2.oplock.exclusive6
     smb2.oplock.exclusive9
+    smb2.oplock.levelii500
     smb2.oplock.levelii501
     smb2.oplock.levelii502
     # smb2.read
@@ -2843,15 +3084,32 @@ set(SMBTORTURE_ENABLED_cairn
     # smb2.rename
     smb2.rename.close-full-information
     smb2.rename.msword
+    smb2.rename.no_share_delete_but_delete_access
     smb2.rename.no_sharing
     smb2.rename.rename-open
     smb2.rename.rename_dir_bench
+    smb2.rename.share_delete_and_delete_access
     smb2.rename.share_delete_no_delete_access
     smb2.rename.simple
     smb2.rename.simple_modtime
     smb2.rename.simple_nodelete
     # smb2.replay
     smb2.replay.channel-sequence
+    smb2.replay.dhv2-pending1l-vs-lease-sane
+    smb2.replay.dhv2-pending1l-vs-oplock-sane
+    smb2.replay.dhv2-pending1n-vs-lease-sane
+    smb2.replay.dhv2-pending1n-vs-oplock-sane
+    smb2.replay.dhv2-pending1o-vs-lease-sane
+    smb2.replay.dhv2-pending1o-vs-oplock-sane
+    smb2.replay.dhv2-pending3l-vs-lease-sane
+    smb2.replay.dhv2-pending3l-vs-oplock-sane
+    smb2.replay.dhv2-pending3n-vs-lease-sane
+    smb2.replay.dhv2-pending3n-vs-oplock-sane
+    smb2.replay.dhv2-pending3o-vs-lease-sane
+    smb2.replay.dhv2-pending3o-vs-oplock-sane
+    smb2.replay.durable-reconnect-replay1
+    smb2.replay.durable-reconnect-replay2
+    smb2.replay.durable-reconnect-replay3
     smb2.replay.replay-commands
     smb2.replay.replay-dhv2-lease-oplock
     smb2.replay.replay-dhv2-lease1
@@ -2859,8 +3117,14 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.replay.replay-dhv2-lease3
     smb2.replay.replay-dhv2-oplock-lease
     smb2.replay.replay-dhv2-oplock1
+    smb2.replay.replay-dhv2-oplock2
+    smb2.replay.replay-dhv2-oplock3
     smb2.replay.replay-regular
+    smb2.replay.replay-twice-durable
+    smb2.replay.replay3
+    smb2.replay.replay4
     smb2.replay.replay5
+    smb2.replay.replay6
     smb2.replay.replay7
     # smb2.rw
     smb2.rw.append
@@ -2879,7 +3143,17 @@ set(SMBTORTURE_ENABLED_cairn
     # smb2.session-require-signing
     smb2.session-require-signing.bug15397
     # smb2.session
+    smb2.session.anon-encryption1
+    smb2.session.anon-encryption2
+    smb2.session.anon-encryption3
+    smb2.session.anon-signing1
+    smb2.session.anon-signing2
+    smb2.session.bind1
+    smb2.session.bind2
     smb2.session.bind_different_user
+    smb2.session.bind_invalid_auth
+    smb2.session.bind_negative_smb3encGtoCd
+    smb2.session.bind_negative_smb3encGtoCs
     smb2.session.bind_negative_smb3signC30toGd
     smb2.session.bind_negative_smb3signC30toGs
     smb2.session.bind_negative_smb3signCtoGd
@@ -2908,6 +3182,10 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.session.bind_negative_smb3sneGtoHs
     smb2.session.bind_negative_smb3sneHtoGd
     smb2.session.bind_negative_smb3sneHtoGs
+    smb2.session.bind_negative_smb3to2d
+    smb2.session.bind_negative_smb3to2s
+    smb2.session.bind_negative_smb3to3d
+    smb2.session.bind_negative_smb3to3s
     smb2.session.encryption-aes-128-ccm
     smb2.session.encryption-aes-128-gcm
     smb2.session.encryption-aes-256-ccm
@@ -2918,7 +3196,12 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.session.expire2e
     smb2.session.expire2s
     smb2.session.expire_disconnect
+    smb2.session.ntlmssp_bug14932
+    smb2.session.reauth1
+    smb2.session.reauth2
+    smb2.session.reauth3
     smb2.session.reauth6
+    smb2.session.reconnect2
     smb2.session.signing-aes-128-cmac
     smb2.session.signing-aes-128-gmac
     smb2.session.signing-hmac-sha-256
@@ -3040,6 +3323,13 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     # smb2.create_no_streams
     smb2.create_no_streams.no_stream
     # smb2.credits
+    smb2.credits.1conn_ipc_max_async_credits
+    smb2.credits.1conn_notify_max_async_credits
+    smb2.credits.2conn_ipc_max_async_credits
+    smb2.credits.2conn_notify_max_async_credits
+    smb2.credits.ipc_max_data_zero
+    smb2.credits.multichannel_ipc_max_async_credits
+    smb2.credits.multichannel_max_async_credits
     smb2.credits.session_setup_credits_granted
     smb2.credits.single_req_credits_granted
     smb2.credits.skipped_mid
@@ -3060,6 +3350,23 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.dir.fixed
     smb2.dir.many
     smb2.dir.sorted
+    # smb2.dirlease
+    smb2.dirlease.hardlink
+    smb2.dirlease.leases
+    smb2.dirlease.oplocks
+    smb2.dirlease.overwrite
+    smb2.dirlease.rename
+    smb2.dirlease.rename_dst_parent
+    smb2.dirlease.setatime
+    smb2.dirlease.setbtime
+    smb2.dirlease.setctime
+    smb2.dirlease.setdos
+    smb2.dirlease.seteof
+    smb2.dirlease.setmtime
+    smb2.dirlease.unlink_same_initial_and_close
+    smb2.dirlease.unlink_same_set_and_close
+    smb2.dirlease.v2_request
+    smb2.dirlease.v2_request_parent
     # smb2.durable-open-disconnect
     smb2.durable-open-disconnect.open-oplock-disconnect
     # smb2.durable-open
@@ -3148,6 +3455,7 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.ioctl.copy_chunk_bad_access
     smb2.ioctl.copy_chunk_bad_key
     smb2.ioctl.copy_chunk_bug15644
+    smb2.ioctl.copy_chunk_dest_lock
     smb2.ioctl.copy_chunk_limits
     smb2.ioctl.copy_chunk_max_output_sz
     smb2.ioctl.copy_chunk_multi
@@ -3158,6 +3466,7 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.ioctl.copy_chunk_src_exceed_multi
     smb2.ioctl.copy_chunk_src_is_dest
     smb2.ioctl.copy_chunk_src_is_dest_overlap
+    smb2.ioctl.copy_chunk_src_lock
     smb2.ioctl.copy_chunk_tiny
     smb2.ioctl.copy_chunk_write_access
     smb2.ioctl.copy_chunk_zero_length
@@ -3197,6 +3506,7 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.ioctl.sparse_qar_truncated
     smb2.ioctl.sparse_set_nobuf
     smb2.ioctl.sparse_set_oversize
+    smb2.ioctl.trim_simple
     # smb2.kernel-oplocks
     smb2.kernel-oplocks.kernel_oplocks1
     smb2.kernel-oplocks.kernel_oplocks3
@@ -3211,16 +3521,23 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.lease.complex1
     smb2.lease.duplicate_create
     smb2.lease.duplicate_open
+    smb2.lease.initial_delete_disconnect
+    smb2.lease.initial_delete_logoff
+    smb2.lease.initial_delete_tdis
     smb2.lease.multibreak
     smb2.lease.nobreakself
+    smb2.lease.oplock
     smb2.lease.rename_wait
+    smb2.lease.statopen
     smb2.lease.statopen2
     smb2.lease.statopen3
     smb2.lease.statopen4
+    smb2.lease.unlink
     smb2.lease.upgrade
     smb2.lease.upgrade2
     smb2.lease.upgrade3
     smb2.lease.v1_bug15148
+    smb2.lease.v2_breaking3
     smb2.lease.v2_bug15148
     smb2.lease.v2_complex1
     smb2.lease.v2_complex2
@@ -3230,7 +3547,11 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.lease.v2_flags_breaking
     smb2.lease.v2_flags_parentkey
     # smb2.lock
+    smb2.lock.async
     smb2.lock.auto-unlock
+    smb2.lock.cancel
+    smb2.lock.cancel-logoff
+    smb2.lock.cancel-tdis
     smb2.lock.contend
     smb2.lock.context
     smb2.lock.ctdb-delrec-deadlock
@@ -3240,6 +3561,9 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.lock.open-brlock-deadlock
     smb2.lock.overlap
     smb2.lock.range
+    smb2.lock.replay_broken_windows
+    smb2.lock.replay_smb3_specification_durable
+    smb2.lock.replay_smb3_specification_multi
     smb2.lock.rw-exclusive
     smb2.lock.rw-none
     smb2.lock.rw-shared
@@ -3260,7 +3584,10 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.multichannel.bugs.bug_15346
     smb2.multichannel.generic.interface_info
     smb2.multichannel.generic.num_channels
+    smb2.multichannel.leases.test1
+    smb2.multichannel.leases.test3
     smb2.multichannel.oplocks.test1
+    smb2.multichannel.oplocks.test2
     # smb2.notify-inotify
     smb2.notify-inotify.inotify-rename
     # smb2.notify
@@ -3283,9 +3610,11 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.notify.tcp
     smb2.notify.tdis
     smb2.notify.tdis1
+    smb2.notify.valid-req
     # smb2.openattr
     smb2.openattr
     # smb2.oplock
+    smb2.oplock.batch1
     smb2.oplock.batch10
     smb2.oplock.batch11
     smb2.oplock.batch12
@@ -3293,21 +3622,30 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.oplock.batch14
     smb2.oplock.batch15
     smb2.oplock.batch16
+    smb2.oplock.batch19
     smb2.oplock.batch2
+    smb2.oplock.batch20
     smb2.oplock.batch21
     smb2.oplock.batch23
     smb2.oplock.batch24
     smb2.oplock.batch25
+    smb2.oplock.batch3
     smb2.oplock.batch4
     smb2.oplock.batch5
+    smb2.oplock.batch6
+    smb2.oplock.batch7
     smb2.oplock.batch8
+    smb2.oplock.brl1
     smb2.oplock.brl2
+    smb2.oplock.brl3
     smb2.oplock.exclusive1
     smb2.oplock.exclusive2
     smb2.oplock.exclusive3
     smb2.oplock.exclusive4
     smb2.oplock.exclusive5
+    smb2.oplock.exclusive6
     smb2.oplock.exclusive9
+    smb2.oplock.levelii500
     smb2.oplock.levelii501
     smb2.oplock.levelii502
     # smb2.read
@@ -3319,9 +3657,11 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     # smb2.rename
     smb2.rename.close-full-information
     smb2.rename.msword
+    smb2.rename.no_share_delete_but_delete_access
     smb2.rename.no_sharing
     smb2.rename.rename-open
     smb2.rename.rename_dir_bench
+    smb2.rename.share_delete_and_delete_access
     smb2.rename.share_delete_no_delete_access
     smb2.rename.simple
     smb2.rename.simple_modtime
@@ -3334,6 +3674,12 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.replay.dhv2-pending1n-vs-oplock-sane
     smb2.replay.dhv2-pending1o-vs-lease-sane
     smb2.replay.dhv2-pending1o-vs-oplock-sane
+    smb2.replay.dhv2-pending3l-vs-lease-sane
+    smb2.replay.dhv2-pending3l-vs-oplock-sane
+    smb2.replay.dhv2-pending3n-vs-lease-sane
+    smb2.replay.dhv2-pending3n-vs-oplock-sane
+    smb2.replay.dhv2-pending3o-vs-lease-sane
+    smb2.replay.dhv2-pending3o-vs-oplock-sane
     smb2.replay.durable-reconnect-replay1
     smb2.replay.durable-reconnect-replay2
     smb2.replay.durable-reconnect-replay3
@@ -3344,8 +3690,12 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.replay.replay-dhv2-lease3
     smb2.replay.replay-dhv2-oplock-lease
     smb2.replay.replay-dhv2-oplock1
+    smb2.replay.replay-dhv2-oplock2
+    smb2.replay.replay-dhv2-oplock3
     smb2.replay.replay-regular
     smb2.replay.replay-twice-durable
+    smb2.replay.replay3
+    smb2.replay.replay4
     smb2.replay.replay5
     smb2.replay.replay6
     smb2.replay.replay7
@@ -3366,8 +3716,17 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     # smb2.session-require-signing
     smb2.session-require-signing.bug15397
     # smb2.session
+    smb2.session.anon-encryption1
+    smb2.session.anon-encryption2
+    smb2.session.anon-encryption3
+    smb2.session.anon-signing1
+    smb2.session.anon-signing2
+    smb2.session.bind1
     smb2.session.bind2
     smb2.session.bind_different_user
+    smb2.session.bind_invalid_auth
+    smb2.session.bind_negative_smb3encGtoCd
+    smb2.session.bind_negative_smb3encGtoCs
     smb2.session.bind_negative_smb3signC30toGd
     smb2.session.bind_negative_smb3signC30toGs
     smb2.session.bind_negative_smb3signCtoGd
@@ -3396,6 +3755,10 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.session.bind_negative_smb3sneGtoHs
     smb2.session.bind_negative_smb3sneHtoGd
     smb2.session.bind_negative_smb3sneHtoGs
+    smb2.session.bind_negative_smb3to2d
+    smb2.session.bind_negative_smb3to2s
+    smb2.session.bind_negative_smb3to3d
+    smb2.session.bind_negative_smb3to3s
     smb2.session.encryption-aes-128-ccm
     smb2.session.encryption-aes-128-gcm
     smb2.session.encryption-aes-256-ccm
@@ -3407,7 +3770,11 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.session.expire2s
     smb2.session.expire_disconnect
     smb2.session.ntlmssp_bug14932
+    smb2.session.reauth1
+    smb2.session.reauth2
+    smb2.session.reauth3
     smb2.session.reauth6
+    smb2.session.reconnect2
     smb2.session.signing-aes-128-cmac
     smb2.session.signing-aes-128-gmac
     smb2.session.signing-hmac-sha-256
@@ -3482,6 +3849,9 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     smb2.check-sharemode
     # smb2.compound
     smb2.compound.create-write-close
+    smb2.compound.interim1
+    smb2.compound.interim2
+    smb2.compound.interim3
     smb2.compound.invalid1
     smb2.compound.invalid2
     smb2.compound.invalid3
@@ -3489,12 +3859,18 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     smb2.compound.related1
     smb2.compound.related2
     smb2.compound.related3
+    smb2.compound.related4
     smb2.compound.related5
     smb2.compound.related6
+    smb2.compound.related7
+    smb2.compound.related8
     smb2.compound.related9
     smb2.compound.unrelated1
     # smb2.compound_async
     smb2.compound_async.create_lease_break_async
+    smb2.compound_async.flush_close
+    smb2.compound_async.flush_flush
+    smb2.compound_async.getinfo_middle
     smb2.compound_async.rename_last
     smb2.compound_async.rename_middle
     # smb2.compound_find
@@ -3520,6 +3896,10 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     # smb2.create_no_streams
     smb2.create_no_streams.no_stream
     # smb2.credits
+    smb2.credits.1conn_ipc_max_async_credits
+    smb2.credits.2conn_ipc_max_async_credits
+    smb2.credits.ipc_max_data_zero
+    smb2.credits.multichannel_ipc_max_async_credits
     smb2.credits.session_setup_credits_granted
     smb2.credits.single_req_credits_granted
     smb2.credits.skipped_mid
@@ -3540,16 +3920,36 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     smb2.dir.fixed
     smb2.dir.many
     smb2.dir.sorted
+    # smb2.dirlease
+    smb2.dirlease.hardlink
+    smb2.dirlease.leases
+    smb2.dirlease.oplocks
+    smb2.dirlease.overwrite
+    smb2.dirlease.rename
+    smb2.dirlease.rename_dst_parent
+    smb2.dirlease.setatime
+    smb2.dirlease.setbtime
+    smb2.dirlease.setctime
+    smb2.dirlease.setdos
+    smb2.dirlease.seteof
+    smb2.dirlease.setmtime
+    smb2.dirlease.unlink_same_initial_and_close
+    smb2.dirlease.unlink_same_set_and_close
+    smb2.dirlease.v2_request
+    smb2.dirlease.v2_request_parent
     # smb2.durable-open-disconnect
     smb2.durable-open-disconnect.open-oplock-disconnect
     # smb2.durable-open
     smb2.durable-open.delete_on_close2
     smb2.durable-open.file-position
+    smb2.durable-open.lease
     smb2.durable-open.lock-lease
     smb2.durable-open.lock-noW-lease
     smb2.durable-open.lock-oplock
     smb2.durable-open.open-lease
     smb2.durable-open.open-oplock
+    smb2.durable-open.open2-oplock
+    smb2.durable-open.oplock
     smb2.durable-open.read-only
     smb2.durable-open.reopen1
     smb2.durable-open.reopen1a
@@ -3625,6 +4025,7 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     smb2.ioctl.copy_chunk_bad_access
     smb2.ioctl.copy_chunk_bad_key
     smb2.ioctl.copy_chunk_bug15644
+    smb2.ioctl.copy_chunk_dest_lock
     smb2.ioctl.copy_chunk_limits
     smb2.ioctl.copy_chunk_max_output_sz
     smb2.ioctl.copy_chunk_multi
@@ -3635,6 +4036,7 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     smb2.ioctl.copy_chunk_src_exceed_multi
     smb2.ioctl.copy_chunk_src_is_dest
     smb2.ioctl.copy_chunk_src_is_dest_overlap
+    smb2.ioctl.copy_chunk_src_lock
     smb2.ioctl.copy_chunk_tiny
     smb2.ioctl.copy_chunk_write_access
     smb2.ioctl.copy_chunk_zero_length
@@ -3674,28 +4076,52 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     smb2.ioctl.sparse_qar_truncated
     smb2.ioctl.sparse_set_nobuf
     smb2.ioctl.sparse_set_oversize
+    smb2.ioctl.trim_simple
     # smb2.kernel-oplocks
     smb2.kernel-oplocks.kernel_oplocks1
     smb2.kernel-oplocks.kernel_oplocks3
     smb2.kernel-oplocks.kernel_oplocks8
     # smb2.lease
+    smb2.lease.break
+    smb2.lease.breaking1
+    smb2.lease.breaking2
+    smb2.lease.breaking3
+    smb2.lease.breaking5
+    smb2.lease.breaking6
+    smb2.lease.complex1
     smb2.lease.duplicate_create
     smb2.lease.duplicate_open
+    smb2.lease.initial_delete_disconnect
+    smb2.lease.initial_delete_logoff
+    smb2.lease.initial_delete_tdis
     smb2.lease.multibreak
+    smb2.lease.nobreakself
+    smb2.lease.oplock
     smb2.lease.rename_wait
+    smb2.lease.statopen
     smb2.lease.statopen2
     smb2.lease.statopen3
+    smb2.lease.statopen4
+    smb2.lease.unlink
     smb2.lease.upgrade
     smb2.lease.upgrade2
     smb2.lease.upgrade3
     smb2.lease.v1_bug15148
+    smb2.lease.v2_breaking3
     smb2.lease.v2_bug15148
+    smb2.lease.v2_complex1
     smb2.lease.v2_complex2
     smb2.lease.v2_epoch1
+    smb2.lease.v2_epoch2
+    smb2.lease.v2_epoch3
     smb2.lease.v2_flags_breaking
     smb2.lease.v2_flags_parentkey
     # smb2.lock
+    smb2.lock.async
     smb2.lock.auto-unlock
+    smb2.lock.cancel
+    smb2.lock.cancel-logoff
+    smb2.lock.cancel-tdis
     smb2.lock.contend
     smb2.lock.context
     smb2.lock.ctdb-delrec-deadlock
@@ -3705,6 +4131,9 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     smb2.lock.open-brlock-deadlock
     smb2.lock.overlap
     smb2.lock.range
+    smb2.lock.replay_broken_windows
+    smb2.lock.replay_smb3_specification_durable
+    smb2.lock.replay_smb3_specification_multi
     smb2.lock.rw-exclusive
     smb2.lock.rw-none
     smb2.lock.rw-shared
@@ -3714,6 +4143,8 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     smb2.lock.valid-request
     smb2.lock.zerobytelength
     smb2.lock.zerobyteread
+    # smb2.maxfid
+    smb2.maxfid
     # smb2.maximum_allowed
     smb2.maximum_allowed.maximum_allowed
     smb2.maximum_allowed.read_only
@@ -3723,7 +4154,10 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     smb2.multichannel.bugs.bug_15346
     smb2.multichannel.generic.interface_info
     smb2.multichannel.generic.num_channels
+    smb2.multichannel.leases.test1
+    smb2.multichannel.leases.test3
     smb2.multichannel.oplocks.test1
+    smb2.multichannel.oplocks.test2
     # smb2.notify-inotify
     smb2.notify-inotify.inotify-rename
     # smb2.notify
@@ -3746,9 +4180,11 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     smb2.notify.tcp
     smb2.notify.tdis
     smb2.notify.tdis1
+    smb2.notify.valid-req
     # smb2.openattr
     smb2.openattr
     # smb2.oplock
+    smb2.oplock.batch1
     smb2.oplock.batch10
     smb2.oplock.batch11
     smb2.oplock.batch12
@@ -3756,21 +4192,30 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     smb2.oplock.batch14
     smb2.oplock.batch15
     smb2.oplock.batch16
+    smb2.oplock.batch19
     smb2.oplock.batch2
+    smb2.oplock.batch20
     smb2.oplock.batch21
     smb2.oplock.batch23
     smb2.oplock.batch24
     smb2.oplock.batch25
+    smb2.oplock.batch3
     smb2.oplock.batch4
     smb2.oplock.batch5
+    smb2.oplock.batch6
+    smb2.oplock.batch7
     smb2.oplock.batch8
+    smb2.oplock.brl1
     smb2.oplock.brl2
+    smb2.oplock.brl3
     smb2.oplock.exclusive1
     smb2.oplock.exclusive2
     smb2.oplock.exclusive3
     smb2.oplock.exclusive4
     smb2.oplock.exclusive5
+    smb2.oplock.exclusive6
     smb2.oplock.exclusive9
+    smb2.oplock.levelii500
     smb2.oplock.levelii501
     smb2.oplock.levelii502
     # smb2.read
@@ -3782,15 +4227,32 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     # smb2.rename
     smb2.rename.close-full-information
     smb2.rename.msword
+    smb2.rename.no_share_delete_but_delete_access
     smb2.rename.no_sharing
     smb2.rename.rename-open
     smb2.rename.rename_dir_bench
+    smb2.rename.share_delete_and_delete_access
     smb2.rename.share_delete_no_delete_access
     smb2.rename.simple
     smb2.rename.simple_modtime
     smb2.rename.simple_nodelete
     # smb2.replay
     smb2.replay.channel-sequence
+    smb2.replay.dhv2-pending1l-vs-lease-sane
+    smb2.replay.dhv2-pending1l-vs-oplock-sane
+    smb2.replay.dhv2-pending1n-vs-lease-sane
+    smb2.replay.dhv2-pending1n-vs-oplock-sane
+    smb2.replay.dhv2-pending1o-vs-lease-sane
+    smb2.replay.dhv2-pending1o-vs-oplock-sane
+    smb2.replay.dhv2-pending3l-vs-lease-sane
+    smb2.replay.dhv2-pending3l-vs-oplock-sane
+    smb2.replay.dhv2-pending3n-vs-lease-sane
+    smb2.replay.dhv2-pending3n-vs-oplock-sane
+    smb2.replay.dhv2-pending3o-vs-lease-sane
+    smb2.replay.dhv2-pending3o-vs-oplock-sane
+    smb2.replay.durable-reconnect-replay1
+    smb2.replay.durable-reconnect-replay2
+    smb2.replay.durable-reconnect-replay3
     smb2.replay.replay-commands
     smb2.replay.replay-dhv2-lease-oplock
     smb2.replay.replay-dhv2-lease1
@@ -3798,8 +4260,14 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     smb2.replay.replay-dhv2-lease3
     smb2.replay.replay-dhv2-oplock-lease
     smb2.replay.replay-dhv2-oplock1
+    smb2.replay.replay-dhv2-oplock2
+    smb2.replay.replay-dhv2-oplock3
     smb2.replay.replay-regular
+    smb2.replay.replay-twice-durable
+    smb2.replay.replay3
+    smb2.replay.replay4
     smb2.replay.replay5
+    smb2.replay.replay6
     smb2.replay.replay7
     # smb2.rw
     smb2.rw.append
@@ -3807,6 +4275,9 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     smb2.rw.rw1
     smb2.rw.rw2
     # smb2.scan
+    smb2.scan.find
+    smb2.scan.getinfo
+    smb2.scan.scan
     smb2.scan.setinfo
     # smb2.secleak
     smb2.secleak
@@ -3815,7 +4286,17 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     # smb2.session-require-signing
     smb2.session-require-signing.bug15397
     # smb2.session
+    smb2.session.anon-encryption1
+    smb2.session.anon-encryption2
+    smb2.session.anon-encryption3
+    smb2.session.anon-signing1
+    smb2.session.anon-signing2
+    smb2.session.bind1
+    smb2.session.bind2
     smb2.session.bind_different_user
+    smb2.session.bind_invalid_auth
+    smb2.session.bind_negative_smb3encGtoCd
+    smb2.session.bind_negative_smb3encGtoCs
     smb2.session.bind_negative_smb3signC30toGd
     smb2.session.bind_negative_smb3signC30toGs
     smb2.session.bind_negative_smb3signCtoGd
@@ -3844,6 +4325,10 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     smb2.session.bind_negative_smb3sneGtoHs
     smb2.session.bind_negative_smb3sneHtoGd
     smb2.session.bind_negative_smb3sneHtoGs
+    smb2.session.bind_negative_smb3to2d
+    smb2.session.bind_negative_smb3to2s
+    smb2.session.bind_negative_smb3to3d
+    smb2.session.bind_negative_smb3to3s
     smb2.session.encryption-aes-128-ccm
     smb2.session.encryption-aes-128-gcm
     smb2.session.encryption-aes-256-ccm
@@ -3854,7 +4339,12 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     smb2.session.expire2e
     smb2.session.expire2s
     smb2.session.expire_disconnect
+    smb2.session.ntlmssp_bug14932
+    smb2.session.reauth1
+    smb2.session.reauth2
+    smb2.session.reauth3
     smb2.session.reauth6
+    smb2.session.reconnect2
     smb2.session.signing-aes-128-cmac
     smb2.session.signing-aes-128-gmac
     smb2.session.signing-hmac-sha-256
@@ -3924,8 +4414,68 @@ set(SMBTORTURE_ISOLATE_SUITES
     smb2.lease
     smb2.oplock
     smb2.replay
+    # smb2.session needs per-subtest isolation: the anon-encryption* cases make
+    # the test driver enable SMB3 transport encryption for the whole daemon, and
+    # a globally-encrypt-all daemon changes the behaviour other session subtests
+    # depend on (e.g. reconnect2 / bind_invalid_auth encrypt their traffic, then
+    # an encrypted request on a session torn down out from under the connection
+    # is handled differently than the unencrypted form they assert).  Running
+    # each session subtest in its own daemon keeps the encryption knob scoped to
+    # the cases that actually opt into it.
+    smb2.session
 )
 # >>> SMBTORTURE_ISOLATE_END
+
+# Subtests excluded from every backend's run, regardless of the generated
+# allowlists above.  Use this for tests that flake for reasons we understand
+# but have not yet fixed, so the merge queue is not gated on them.  Hand-curated
+# (survives tools/smbtorture/regen.sh, which only rewrites the SUITES/ENABLED
+# blocks); each entry should cite why and where the fix is tracked.
+#
+#   smb2.compound_async.rename_last -- asserts the compound CREATE reply is still
+#     undelivered immediately after the client's lease-break ack (compound.c
+#     :3239).  chimera is correct (it holds the parked rename the full break
+#     window and completes it only on the ack) and already emits the ack reply
+#     ~1 event-loop turn ahead of the rename reply, but real servers get a larger
+#     gap for free from storage latency; our zero-latency in-memory completion
+#     collapses it to ~tens of microseconds, so under CI CPU saturation the
+#     smbtorture client drains both replies in one loop pass and the assertion
+#     trips.  It is a client-side timing assumption, not a protocol guarantee
+#     (Samba's own fix forced a synchronous rename rather than ordering the
+#     replies).  Disabled pending a decision on the principled mitigation
+#     (see #733).  rename_middle shares the family but asserts before the ack
+#     and has not been observed flaking, so it stays enabled.
+#
+#   The smb2.ioctl.sparse_*/dup_extents_* subtests below run now that chimera
+#   advertises FILE_SUPPORTS_SPARSE_FILES / FILE_SUPPORTS_BLOCK_REFCOUNTING, but
+#   each exercises a sparse/clone edge case chimera does not yet implement
+#   correctly on any backend.  Tracked for follow-up in
+#   project_smb_ioctl_sparse (the passing majority of the family is enabled):
+#     smb2.ioctl.sparse_punch / sparse_hole_dealloc -- FSCTL_SET_ZERO_DATA must
+#       deallocate so a subsequent QUERY_ALLOCATED_RANGES reports the hole; a
+#       partial-block punch currently leaves the block allocated-but-zeroed.
+#     smb2.ioctl.sparse_lock -- SET_ZERO_DATA over a byte-range-locked region
+#       must fail STATUS_FILE_LOCK_CONFLICT; needs a range-lock conflict probe.
+#     smb2.ioctl.sparse_perms -- a residual SET_SPARSE/zero-data access-check
+#       case still permits an under-privileged handle.
+#     smb2.ioctl.sparse_qar_malformed -- a malformed QAR input buffer must be
+#       rejected STATUS_INVALID_PARAMETER (input validation).
+#     smb2.ioctl.sparse_qar_truncated -- a too-small output buffer must emit the
+#       ranges that fit and STATUS_BUFFER_OVERFLOW; the partial-emit path is
+#       incomplete.
+#     smb2.ioctl.dup_extents_sparse_dest -- cloning into a sparse destination
+#       that was pre-extended via SetEndOfFile is wrongly rejected by the
+#       destination-EOF guard.
+set(SMBTORTURE_DISABLED_SUBTESTS
+    smb2.compound_async.rename_last
+    smb2.ioctl.dup_extents_sparse_dest
+    smb2.ioctl.sparse_hole_dealloc
+    smb2.ioctl.sparse_lock
+    smb2.ioctl.sparse_perms
+    smb2.ioctl.sparse_punch
+    smb2.ioctl.sparse_qar_malformed
+    smb2.ioctl.sparse_qar_truncated
+)
 
 # Group the (backend-agnostic) subtest catalog by parent suite -- the first two
 # dotted components, e.g. smb2.acls.OWNER -> smb2.acls, smb2.async_dosmode ->
@@ -3983,6 +4533,9 @@ macro(add_smbtorture_backend_tests backend)
         set(_pid ${SMBTORTURE_PID_${_parent}})
         set(_enabled "")
         foreach(_sub ${SMBTORTURE_SUBS_${_pid}})
+            if("${_sub}" IN_LIST SMBTORTURE_DISABLED_SUBTESTS)
+                continue()
+            endif()
             if("${_sub}" IN_LIST SMBTORTURE_ENABLED_${backend})
                 list(APPEND _enabled "${_sub}")
             endif()
@@ -4016,7 +4569,13 @@ if(CHIMERA_NETNS_TESTING AND SMBTORTURE_EXECUTABLE)
     #     MS-SMB2 3.3.7.1, yielded-reclaim, parked-CREATE re-arbitration).
     #   - .reopen2b: the same client's durable reconnect racing the teardown
     #     parking (eager park-on-disconnect; otherwise OBJECT_NAME_NOT_FOUND).
+    #   - .open2-lease: a conflicting open vs a disconnected RH-lease durable
+    #     holder whose share reservation has not parked/yielded yet -- a pure
+    #     SHARE conflict (no breakable handle-cache to park on) that retries
+    #     until the disconnect yields it (otherwise SHARING_VIOLATION).
+    #     open2-oplock exercises the same window through the batch-break path.
     foreach(_sub smb2.durable-open.lease smb2.durable-open.oplock
+                 smb2.durable-open.open2-lease smb2.durable-open.open2-oplock
                  smb2.durable-v2-open.reopen2b)
         string(REGEX REPLACE "[^A-Za-z0-9]" "_" _sid "${_sub}")
         set(_name chimera/server/smb/smbtorture_${_sid}_disconnect_race_memfs)
@@ -4025,6 +4584,28 @@ if(CHIMERA_NETNS_TESTING AND SMBTORTURE_EXECUTABLE)
                     ${SMBTORTURE_CMD} -b memfs ${_sub})
         set_tests_properties(${_name} PROPERTIES
             ENVIRONMENT "${SMBTORTURE_LSAN};CHIMERA_SMB_TEST_DISCONNECT_DELAY_MS=50"
+            SKIP_RETURN_CODE 77
+            TIMEOUT 300
+            RESOURCE_LOCK smb_durable_oplock_family)
+    endforeach()
+
+    # PRE-NOTIFY race coverage: CHIMERA_SMB_TEST_DISCONNECT_NOTIFY_DELAY_MS holds
+    # the START of the disconnect callback -- BEFORE conn->disconnecting is set --
+    # so a conflicting CREATE lands while the durable holder still looks fully live
+    # (create_conn != NULL, disconnecting == 0) and only its bind reveals the peer
+    # FIN (evpl_bind_is_closing()).  This is the window CHIMERA_SMB_TEST_DISCONNECT
+    # _DELAY_MS (which delays teardown only AFTER disconnecting is set) cannot
+    # model, and the one that defeated #839 in CI.  open2-lease is the canonical
+    # case: a disconnected non-persistent RH-lease durable holder must yield to a
+    # second client's open.
+    foreach(_sub smb2.durable-open.open2-lease smb2.durable-open.open2-oplock)
+        string(REGEX REPLACE "[^A-Za-z0-9]" "_" _sid "${_sub}")
+        set(_name chimera/server/smb/smbtorture_${_sid}_prenotify_race_memfs)
+        add_test(NAME ${_name}
+            COMMAND ${CMAKE_SOURCE_DIR}/scripts/netns_test_wrapper.sh
+                    ${SMBTORTURE_CMD} -b memfs ${_sub})
+        set_tests_properties(${_name} PROPERTIES
+            ENVIRONMENT "${SMBTORTURE_LSAN};CHIMERA_SMB_TEST_DISCONNECT_NOTIFY_DELAY_MS=50"
             SKIP_RETURN_CODE 77
             TIMEOUT 300
             RESOURCE_LOCK smb_durable_oplock_family)

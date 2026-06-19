@@ -38,6 +38,15 @@
 #define CHIMERA_MEMFS_BLOCK_SIZE_MAX     (1024 * 1024)
 #define CHIMERA_MEMFS_BLOCK_SIZE_DEFAULT (64 * 1024)
 
+/* clone_range honours alignment to this granularity regardless of the (larger)
+ * internal storage block size: a clone range that fully covers an internal
+ * block is shared copy-on-write (zero-copy), while partial edges are realised
+ * by read-modify-write.  4 KiB matches the allocation unit the SMB server
+ * advertises (smb_attr.h), so SMB clients cloning at cluster granularity (e.g.
+ * FSCTL_DUPLICATE_EXTENTS_TO_FILE, ODX OFFLOAD_WRITE) land on a clean boundary.
+ * Always a power-of-two divisor of every supported block size (>= 4 KiB). */
+#define CHIMERA_MEMFS_CLONE_ALIGN        (4 * 1024)
+
 #define CHIMERA_MEMFS_INODE_LIST_SHIFT   8
 #define CHIMERA_MEMFS_INODE_NUM_LISTS    (1 << CHIMERA_MEMFS_INODE_LIST_SHIFT)
 #define CHIMERA_MEMFS_INODE_LIST_MASK    (CHIMERA_MEMFS_INODE_NUM_LISTS - 1)
@@ -327,6 +336,34 @@ memfs_stream_find_by_name(
 
     return NULL;
 } /* memfs_stream_find_by_name */
+
+/* Case-insensitive directory scan, used as a fallback when an exact (case-
+ * sensitive hash) lookup misses for an SMB/Windows (AUTH_ATTR) caller.  Windows
+ * opens are case-insensitive even on a volume that reports
+ * FILE_CASE_SENSITIVE_SEARCH (smb2.streams.names3 opens the file via its
+ * upper/lower-cased path).  O(n) in the directory size, so it is reached only
+ * on a miss; NFS/POSIX (AUTH_UNIX) callers keep strict case-sensitive semantics
+ * and never run it.  Caller holds the directory inode lock. */
+static inline struct memfs_dirent *
+memfs_dirent_find_ci(
+    struct memfs_inode *dir,
+    const char         *name,
+    uint32_t            name_len)
+{
+    struct memfs_dirent *dirent;
+
+    rb_tree_first(&dir->dir.dirents, dirent);
+
+    while (dirent) {
+        if (dirent->name_len == name_len &&
+            strncasecmp(dirent->name, name, name_len) == 0) {
+            return dirent;
+        }
+        dirent = rb_tree_next(&dir->dir.dirents, dirent);
+    }
+
+    return NULL;
+} /* memfs_dirent_find_ci */
 
 static inline struct memfs_named_stream *
 memfs_stream_find_by_id(
@@ -2100,6 +2137,12 @@ memfs_lookup_at(
 
     rb_tree_query_exact(&inode->dir.dirents, hash, hash, dirent);
 
+    /* Windows opens are case-insensitive: fall back to a case-insensitive scan
+     * for an SMB (AUTH_ATTR) caller when the exact match misses (names3). */
+    if (!dirent && request->cred->flavor == CHIMERA_VFS_AUTH_ATTR) {
+        dirent = memfs_dirent_find_ci(inode, name, namelen);
+    }
+
     if (!dirent) {
         pthread_mutex_unlock(&inode->lock);
         request->status = CHIMERA_VFS_ENOENT;
@@ -2688,6 +2731,15 @@ memfs_open_at(
 
     rb_tree_query_exact(&parent_inode->dir.dirents, hash, hash, dirent);
 
+    /* Windows opens are case-insensitive: an SMB (AUTH_ATTR) caller that misses
+     * the exact match falls back to a case-insensitive scan, so an existing
+     * file is opened (or collides on FILE_CREATE) regardless of the requested
+     * case (names3).  A genuine miss still creates the requested-case name. */
+    if (!dirent && request->cred->flavor == CHIMERA_VFS_AUTH_ATTR) {
+        dirent = memfs_dirent_find_ci(parent_inode, request->open_at.name,
+                                      request->open_at.namelen);
+    }
+
     if (!dirent) {
         if (!(flags & CHIMERA_VFS_OPEN_CREATE)) {
             pthread_mutex_unlock(&parent_inode->lock);
@@ -2696,13 +2748,17 @@ memfs_open_at(
             return;
         }
 
-        /* Creating a new name requires write+search permission on the parent
-         * directory.  Enforce POSIX semantics for AUTH_UNIX callers (root is
-         * exempt); SMB/ACL (AUTH_ATTR) callers are authorized by the engine. */
+        /* Creating a new file requires add-file (WRITE_DATA) + search (EXECUTE)
+         * permission on the parent directory.  On the NFSv4/Windows ACL model
+         * WRITE_DATA == ADD_FILE and APPEND_DATA == ADD_SUBDIRECTORY, so a plain
+         * file create is gated by WRITE_DATA (mkdir, which adds a subdirectory,
+         * is gated by APPEND_DATA in the VFS-core mkdir_at path).  Enforce POSIX
+         * semantics for AUTH_UNIX callers (root is exempt); SMB/ACL (AUTH_ATTR)
+         * callers are authorized by the engine. */
         if (request->cred->flavor == CHIMERA_VFS_AUTH_UNIX &&
             request->cred->uid != 0 &&
             !memfs_inode_access(parent_inode, request->cred,
-                                CHIMERA_ACE_APPEND_DATA | CHIMERA_ACE_EXECUTE)) {
+                                CHIMERA_ACE_WRITE_DATA | CHIMERA_ACE_EXECUTE)) {
             pthread_mutex_unlock(&parent_inode->lock);
             request->status = CHIMERA_VFS_EACCES;
             request->complete(request);
@@ -2743,17 +2799,34 @@ memfs_open_at(
         parent_inode->mtime        = now;
         parent_inode->ctime        = now;
         request->open_at.r_created = 1;
-    } else if (flags & CHIMERA_VFS_OPEN_EXCLUSIVE) {
-        pthread_mutex_unlock(&parent_inode->lock);
-        request->status = CHIMERA_VFS_EEXIST;
-        request->complete(request);
-        return;
     } else {
         inode = memfs_inode_get_inum(shared, dirent->inum, dirent->gen);
 
         if (!inode) {
             pthread_mutex_unlock(&parent_inode->lock);
             request->status = CHIMERA_VFS_ENOENT;
+            request->complete(request);
+            return;
+        }
+
+        /* SMB stop-on-symlink: an existing symbolic link as the final component
+         * when the caller did not ask to open the reparse point.  Return ELOOP
+         * *before* the O_EXCL collision / truncate / open below, so the SMB
+         * create path answers STATUS_STOPPED_ON_SYMLINK regardless of the create
+         * disposition (MS-SMB2 3.3.5.9; FILE_CREATE on a symlink leaf stops at
+         * the link rather than colliding). */
+        if (S_ISLNK(inode->mode) && (flags & CHIMERA_VFS_OPEN_STOP_SYMLINK)) {
+            pthread_mutex_unlock(&inode->lock);
+            pthread_mutex_unlock(&parent_inode->lock);
+            request->status = CHIMERA_VFS_ELOOP;
+            request->complete(request);
+            return;
+        }
+
+        if (flags & CHIMERA_VFS_OPEN_EXCLUSIVE) {
+            pthread_mutex_unlock(&inode->lock);
+            pthread_mutex_unlock(&parent_inode->lock);
+            request->status = CHIMERA_VFS_EEXIST;
             request->complete(request);
             return;
         }
@@ -3288,6 +3361,11 @@ memfs_write(
 
     inode->mtime = now;
     inode->ctime = now;
+
+    /* POSIX kill-priv: a non-privileged write to a regular file clears the
+     * set-user-ID bit and the set-group-ID bit (when group-executable).  Named
+     * streams share the parent inode's mode, so this applies on either path. */
+    inode->mode = chimera_vfs_killpriv_mode(request->cred, inode->mode);
 
     memfs_map_attrs_fork(shared, &request->write.r_post_attr, inode, stream, request->fh);
 
@@ -3954,12 +4032,16 @@ memfs_clone_range(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
+    struct evpl        *evpl        = thread->evpl;
+    const uint32_t      block_size  = shared->block_size;
     const uint32_t      block_shift = shared->block_shift;
     const uint32_t      block_mask  = shared->block_mask;
     struct memfs_inode *src_inode, *dst_inode;
+    struct memfs_block *old_block, *new_block;
     uint64_t            src_offset, dst_offset, length;
     uint64_t            first_block, last_block, bi;
-    uint64_t            src_first_block, n_blocks;
+    uint32_t            block_offset, left, block_len;
+    uint64_t            copied = 0;
     struct timespec     now;
 
     if (request->clone_range.src_handle->vfs_module !=
@@ -3973,12 +4055,13 @@ memfs_clone_range(
     dst_offset = request->clone_range.dst_offset;
     length     = request->clone_range.length;
 
-    /* Block-aligned only: matches memfs_move_range and POSIX FICLONERANGE
-     * semantics on filesystems with reflink support. Sub-block edges would
-     * require copy-on-write and defeat the zero-copy benefit. */
-    if ((src_offset & block_mask) ||
-        (dst_offset & block_mask) ||
-        (length & block_mask)) {
+    /* Honour clone-granularity (4 KiB) alignment rather than the larger internal
+     * block size: whole internal blocks are shared copy-on-write below, partial
+     * edges fall back to read-modify-write.  Sub-cluster offsets/lengths are
+     * still rejected, matching POSIX FICLONERANGE block-alignment semantics. */
+    if ((src_offset & (CHIMERA_MEMFS_CLONE_ALIGN - 1)) ||
+        (dst_offset & (CHIMERA_MEMFS_CLONE_ALIGN - 1)) ||
+        (length & (CHIMERA_MEMFS_CLONE_ALIGN - 1))) {
         request->status = CHIMERA_VFS_EINVAL;
         request->complete(request);
         return;
@@ -4032,10 +4115,10 @@ memfs_clone_range(
     memfs_map_attrs(shared, &request->clone_range.r_pre_attr, dst_inode,
                     request->clone_range.dst_handle->fh);
 
-    first_block     = dst_offset >> block_shift;
-    last_block      = (dst_offset + length - 1) >> block_shift;
-    src_first_block = src_offset >> block_shift;
-    n_blocks        = length >> block_shift;
+    first_block  = dst_offset >> block_shift;
+    block_offset = dst_offset & block_mask;
+    last_block   = (dst_offset + length - 1) >> block_shift;
+    left         = length;
 
     if (memfs_grow_blocks(dst_inode, last_block) != 0) {
         if (src_inode != dst_inode) {
@@ -4051,11 +4134,16 @@ memfs_clone_range(
         dst_inode->file.num_blocks = last_block + 1;
     }
 
-    for (bi = 0; bi < n_blocks; bi++) {
-        uint64_t            si = src_first_block + bi;
-        uint64_t            di = first_block + bi;
+    for (bi = first_block; bi <= last_block; bi++) {
+        uint64_t            cur_src_off = src_offset + copied;
+        uint64_t            si          = cur_src_off >> block_shift;
         struct memfs_block *src_block;
-        struct memfs_block *new_block;
+        int                 whole_block;
+
+        block_len = block_size - block_offset;
+        if (left < block_len) {
+            block_len = left;
+        }
 
         if (src_inode->file.blocks && si < src_inode->file.num_blocks) {
             src_block = src_inode->file.blocks[si];
@@ -4063,21 +4151,31 @@ memfs_clone_range(
             src_block = NULL;
         }
 
-        /* Free anything currently at the destination slot before overwriting */
-        if (dst_inode->file.blocks[di]) {
-            memfs_block_free(thread, dst_inode->file.blocks[di]);
-            dst_inode->file.blocks[di] = NULL;
-        }
+        old_block = dst_inode->file.blocks[bi];
 
-        if (!src_block) {
-            /* Source is a hole - leave destination NULL (reads as zeros) */
+        /* A full-block hole in the source stays sparse at the destination
+         * (reads as zeros) -- preserves sparseness across the clone. */
+        if (!src_block && block_offset == 0 && block_len == block_size) {
+            if (old_block) {
+                memfs_block_free(thread, old_block);
+                dst_inode->file.blocks[bi] = NULL;
+            }
+            copied      += block_len;
+            left        -= block_len;
+            block_offset = 0;
             continue;
         }
 
-        /* Share underlying buffer via iovec refcount; the new memfs_block
-         * has its own iovec descriptors that hold refs into the same
-         * buffers as the source block. Subsequent writes on either side
-         * COW naturally because memfs_write always allocates a new block. */
+        /* Zero-copy fast path: the clone range fully covers this internal
+         * block, the source position is block-aligned, and the source block is
+         * fully backed (not a trailing partial block or a hole).  Share the
+         * source iovecs copy-on-write -- writes on either side allocate a fresh
+         * block, so the sharing is invisible. */
+        whole_block = (block_offset == 0 && block_len == block_size &&
+                       (cur_src_off & block_mask) == 0 &&
+                       cur_src_off + block_size <= src_inode->size &&
+                       src_block != NULL);
+
         new_block = memfs_block_alloc(thread);
 
         if (!new_block) {
@@ -4090,15 +4188,59 @@ memfs_clone_range(
             return;
         }
 
-        new_block->niov = src_block->niov;
-        for (int j = 0; j < src_block->niov; j++) {
-            evpl_iovec_clone_segment(&new_block->iov[j],
-                                     &src_block->iov[j],
-                                     0,
-                                     src_block->iov[j].length);
+        if (whole_block) {
+            new_block->niov = src_block->niov;
+            for (int j = 0; j < src_block->niov; j++) {
+                evpl_iovec_clone_segment(&new_block->iov[j],
+                                         &src_block->iov[j],
+                                         0,
+                                         src_block->iov[j].length);
+            }
+        } else {
+            /* Partial / misaligned edge: read-modify-write.  Allocate backing,
+             * preserve the destination bytes outside [block_offset, +block_len),
+             * then copy the covered range from the source (memfs_copy_from_inode
+             * zero-fills past the source's EOF, matching hole semantics). */
+            new_block->niov = evpl_iovec_alloc(evpl, block_size, 4096,
+                                               CHIMERA_MEMFS_BLOCK_MAX_IOV,
+                                               EVPL_IOVEC_FLAG_SHARED,
+                                               new_block->iov);
+
+            if (block_offset || block_len < block_size) {
+                if (old_block) {
+                    if (block_offset) {
+                        memcpy(new_block->iov[0].data,
+                               old_block->iov[0].data, block_offset);
+                    }
+                    uint32_t tail_off = block_offset + block_len;
+                    if (tail_off < block_size) {
+                        memcpy((uint8_t *) new_block->iov[0].data + tail_off,
+                               (uint8_t *) old_block->iov[0].data + tail_off,
+                               block_size - tail_off);
+                    }
+                } else {
+                    memset(new_block->iov[0].data, 0, block_offset);
+                    uint32_t tail_off = block_offset + block_len;
+                    if (tail_off < block_size) {
+                        memset((uint8_t *) new_block->iov[0].data + tail_off, 0,
+                               block_size - tail_off);
+                    }
+                }
+            }
+
+            memfs_copy_from_inode(shared, src_inode, cur_src_off,
+                                  (uint8_t *) new_block->iov[0].data + block_offset,
+                                  block_len);
         }
 
-        dst_inode->file.blocks[di] = new_block;
+        if (old_block) {
+            memfs_block_free(thread, old_block);
+        }
+        dst_inode->file.blocks[bi] = new_block;
+
+        copied      += block_len;
+        left        -= block_len;
+        block_offset = 0;
     }
 
     if (dst_inode->size < dst_offset + length) {
@@ -4628,9 +4770,15 @@ memfs_rename_at(
 
     rb_tree_remove(&old_parent_inode->dir.dirents, &old_dirent->node);
 
-    if (S_ISDIR(child_inode->mode)) {
+    if (S_ISDIR(child_inode->mode) && cmp != 0) {
+        /* Cross-directory move of a directory: the source parent loses its
+         * subdirectory backlink and the destination parent gains one.  Also
+         * re-home the moved directory's ".." so it resolves to its new parent
+         * (memfs derives ".." from these stored fields, not a real dirent). */
         old_parent_inode->nlink--;
         new_parent_inode->nlink++;
+        child_inode->dir.parent_inum = new_parent_inode->inum;
+        child_inode->dir.parent_gen  = new_parent_inode->gen;
     }
 
     old_parent_inode->mtime = now;
@@ -5094,6 +5242,16 @@ memfs_open_stream(
         inode->ctime       = now;
     }
 
+    /* Named streams share the base file's metadata (mode/owner/timestamps and
+     * DOS attributes).  When a stream open creates or overwrites the stream,
+     * apply the caller's requested attributes (e.g. the create's
+     * FileAttributes -> ARCHIVE/HIDDEN) to the base inode, mirroring how a
+     * regular create stamps them (smb2.streams.attributes2). */
+    if (request->open_stream.set_attr &&
+        (request->open_stream.r_created || (flags & CHIMERA_VFS_OPEN_TRUNCATE))) {
+        memfs_apply_attrs(inode, request->open_stream.set_attr);
+    }
+
     /* A stream open pins both the stream node and the base inode. */
     stream->refcnt++;
     inode->refcnt++;
@@ -5140,21 +5298,25 @@ memfs_list_streams(
     }
 
     /* Default unnamed data fork ("::$DATA"), reported first with an empty name
-     * so the SMB layer can format it as the default stream. */
-    rec = sizeof(entry);
-    if (offset + rec > max) {
-        pthread_mutex_unlock(&inode->lock);
-        request->status = CHIMERA_VFS_ERANGE;
-        request->complete(request);
-        return;
+     * so the SMB layer can format it as the default stream.  Only regular files
+     * have a data fork -- a directory reports no streams (smb2.streams.dir
+     * expects an empty stream list on a directory). */
+    if (S_ISREG(inode->mode)) {
+        rec = sizeof(entry);
+        if (offset + rec > max) {
+            pthread_mutex_unlock(&inode->lock);
+            request->status = CHIMERA_VFS_ERANGE;
+            request->complete(request);
+            return;
+        }
+        entry.size     = inode->size;
+        entry.alloc    = inode->space_used;
+        entry.name_len = 0;
+        memcpy(buf + offset, &entry, sizeof(entry));
+        offset += rec;
+        offset  = (offset + 7) & ~7u;
+        count++;
     }
-    entry.size     = inode->size;
-    entry.alloc    = inode->space_used;
-    entry.name_len = 0;
-    memcpy(buf + offset, &entry, sizeof(entry));
-    offset += rec;
-    offset  = (offset + 7) & ~7u;
-    count++;
 
     for (stream = inode->streams; stream; stream = stream->next) {
         rec = sizeof(entry) + stream->name_len;

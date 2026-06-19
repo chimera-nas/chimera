@@ -76,12 +76,15 @@ replay_field_retry_uncached(struct nfs4_replay_metrics *rm)
 } /* replay_field_retry_uncached */
 
 void
-nfs4_client_table_init(struct nfs4_client_table *table)
+nfs4_client_table_init(
+    struct nfs4_client_table *table,
+    uint16_t                  node_id)
 {
     table->nfs4_ct_clients_by_owner = NULL;
     table->nfs4_ct_clients_by_id    = NULL;
     table->nfs4_ct_sessions         = NULL;
     table->nfs4_ct_next_client_id   = 1;
+    table->nfs4_ct_node_id          = node_id;
     table->nfs4_ct_next_confirm     = 1;
 
     pthread_mutex_init(&table->nfs4_ct_lock, NULL);
@@ -148,7 +151,8 @@ nfs4_client_register(
     } else {
         client = calloc(1, sizeof(*client));
 
-        client->nfs4_client_id = table->nfs4_ct_next_client_id++;
+        client->nfs4_client_id = nfs4_make_clientid(table->nfs4_ct_node_id,
+                                                    table->nfs4_ct_next_client_id++);
 
         memcpy(client->nfs4_client_owner, owner, owner_len);
         client->nfs4_client_owner_len = owner_len;
@@ -229,7 +233,8 @@ nfs4_client_new_locked(
 {
     struct nfs4_client *c = calloc(1, sizeof(*c));
 
-    c->nfs4_client_id            = table->nfs4_ct_next_client_id++;
+    c->nfs4_client_id = nfs4_make_clientid(table->nfs4_ct_node_id,
+                                           table->nfs4_ct_next_client_id++);
     c->nfs4_client_owner_len     = owner_len;
     c->nfs4_client_verifier      = verifier;
     c->nfs4_client_refcnt        = 1;
@@ -937,9 +942,9 @@ nfs4_create_session(
         atomic_init(&session->refcount, 2);
         atomic_init(&session->destroyed, false);
 
-        /* Cold-start reload reconstructs a session with its original id so a
+        /* Lazy hydrate reconstructs a session with its original id so a
          * persistent client's retransmit on the old sessionid still resolves
-         * (see nfs4_drc_reload); the live path mints a fresh one. */
+         * (see nfs4_drc_session_hydrate); the live path mints a fresh one. */
         if (restore_sessionid) {
             memcpy(session->nfs4_session_id, restore_sessionid,
                    NFS4_SESSIONID_SIZE);
@@ -1490,8 +1495,9 @@ nfs4_replay_slot_finalize(struct nfs_request *req)
         /* Write-through the cached reply to the KV store for a persistent
          * session.  Write-only on the hot path: a copy of the bytes is handed
          * to an async put; the in-memory slot stays authoritative for
-         * retransmit detection.  Cold start reloads these (nfs4_drc_reload).
-         * nfs4_session_persist is only set when nfs4_drc is enabled. */
+         * retransmit detection.  A returning client's hydrate reloads these
+         * (nfs4_drc_session_hydrate).  nfs4_session_persist is only set when
+         * nfs4_drc is enabled. */
         if (new_state == NFS4_SLOT_CACHED && session->nfs4_session_persist &&
             req->thread) {
             nfs4_drc_persist_reply(req->thread->vfs_thread, session,

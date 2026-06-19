@@ -156,6 +156,7 @@ chimera_smb_server_init(
     shared->config.oplocks                    = chimera_server_config_get_smb_oplocks(config);
     shared->config.notify_disabled            = chimera_server_config_get_smb_notify_disabled(config);
     shared->config.acl_inherited_canonicalize = chimera_server_config_get_smb_acl_inherited_canonicalize(config);
+    shared->config.smb2_max_async_credits     = chimera_server_config_get_smb2_max_async_credits(config);
 
     if (shared->config.persistent_handles) {
         chimera_smb_info("SMB3 durable/persistent handles enabled (in-memory state)");
@@ -173,6 +174,35 @@ chimera_smb_server_init(
     shared->metrics = metrics;
 
     *(XXH128_hash_t *) shared->guid = XXH3_128bits(shared->config.identity, strlen(shared->config.identity));
+
+    /* Derive the server's account-domain (machine) SID S-1-5-21-X-Y-Z once, from
+     * a stable per-host identity (/etc/machine-id, else hostname), so the SIDs
+     * the LSARPC/SAMR services hand out are unique per server and survive a
+     * restart -- a precondition for any stored NT-form ACL to stay valid.  This
+     * replaces the former fixed S-1-5-21-1111-2222-3333. */
+    {
+        char          hostid[256] = { 0 };
+        FILE         *fp          = fopen("/etc/machine-id", "r");
+        XXH128_hash_t h;
+
+        if (fp) {
+            if (!fgets(hostid, sizeof(hostid), fp)) {
+                hostid[0] = '\0';
+            }
+            fclose(fp);
+        }
+        if (hostid[0] == '\0' && gethostname(hostid, sizeof(hostid)) != 0) {
+            hostid[0] = '\0';
+        }
+        if (hostid[0] == '\0') {
+            snprintf(hostid, sizeof(hostid), "chimera-%lx", (unsigned long) gethostid());
+        }
+
+        h                             = XXH3_128bits(hostid, strlen(hostid));
+        shared->machine_domain_sub[0] = (uint32_t) h.low64 | 1;   /* never zero */
+        shared->machine_domain_sub[1] = (uint32_t) (h.low64 >> 32);
+        shared->machine_domain_sub[2] = (uint32_t) h.high64;
+    }
 
     shared->svc      = GSS_C_NO_NAME;
     shared->srv_cred = GSS_C_NO_CREDENTIAL;
@@ -330,6 +360,19 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
 
     evpl_iovec_cursor_reset_consumed(&reply_cursor);
 
+    /* Index of the last response that will actually be emitted: trailing
+     * alignment padding is only needed BETWEEN compounded responses (it aligns
+     * the next response's header); the final response goes out at its natural
+     * length.  A padded tail can confuse a client -- samba's client identifies a
+     * COPYCHUNK error-with-data reply by its exact 12-byte output size. */
+    int last_emitted = -1;
+
+    for (i = 0; i < compound->num_requests; i++) {
+        if (compound->requests[i]->status != SMB2_STATUS_PENDING) {
+            last_emitted = i;
+        }
+    }
+
     for (i = 0; i < compound->num_requests; i++) {
         request = compound->requests[i];
 
@@ -339,8 +382,15 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
             continue;
         }
 
+        /* A null (anonymous) session is never signed even when the connection
+         * negotiated signing-required: it has no verifiable key, so MS-SMB2
+         * 3.3.5.5.3 has the server advertise SMB2_SESSION_FLAG_IS_NULL and the
+         * client drops the signing requirement for it.  Signing its responses
+         * with the zero-derived key would be rejected by a client that forced a
+         * different key (smb2.session.anon-signing2). */
         if ((conn->flags & CHIMERA_SMB_CONN_FLAG_SIGNING_REQUIRED) &&
-            request->session_handle) {
+            request->session_handle &&
+            !(request->session_handle->session->flags & CHIMERA_SMB_SESSION_NULL)) {
             request->flags |= CHIMERA_SMB_REQUEST_FLAG_SIGN;
         }
 
@@ -363,7 +413,14 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
          * session is only authorized once its final leg succeeds. */
         if (request->smb2_hdr.command == SMB2_SESSION_SETUP &&
             request->session_handle &&
-            (request->session_handle->session->flags & CHIMERA_SMB_SESSION_AUTHORIZED)) {
+            (request->session_handle->session->flags & CHIMERA_SMB_SESSION_AUTHORIZED) &&
+            !(request->session_handle->session->flags & CHIMERA_SMB_SESSION_NULL)) {
+            /* A null (anonymous) session has no verifiable key, so its
+             * SESSION_SETUP response is left unsigned (MS-SMB2 3.3.5.5.3): the
+             * client treats SMB2_SESSION_FLAG_IS_NULL as unauthenticated and
+             * does not expect a signature.  Signing it with the zero-derived
+             * key would make a client that forced a different key reject the
+             * response (smb2.session.anon-signing2). */
             request->flags |= CHIMERA_SMB_REQUEST_FLAG_SIGN;
         }
 
@@ -379,16 +436,23 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
 
         prev_command = &reply_hdr->next_command;
 
-        reply_hdr->protocol_id[0]          = 0xFE;
-        reply_hdr->protocol_id[1]          = 0x53;
-        reply_hdr->protocol_id[2]          = 0x4D;
-        reply_hdr->protocol_id[3]          = 0x42;
-        reply_hdr->struct_size             = 64;
-        reply_hdr->credit_charge           = request->smb2_hdr.credit_charge;
-        reply_hdr->status                  = request->status;
-        reply_hdr->command                 = request->smb2_hdr.command;
-        reply_hdr->credit_request_response = request->smb2_hdr.credit_request_response ?
-            request->smb2_hdr.credit_request_response : 1;
+        reply_hdr->protocol_id[0] = 0xFE;
+        reply_hdr->protocol_id[1] = 0x53;
+        reply_hdr->protocol_id[2] = 0x4D;
+        reply_hdr->protocol_id[3] = 0x42;
+        reply_hdr->struct_size    = 64;
+        reply_hdr->credit_charge  = request->smb2_hdr.credit_charge;
+        reply_hdr->status         = request->status;
+        reply_hdr->command        = request->smb2_hdr.command;
+        /* Grant credits, capping the client's balance so a flood of
+         * ever-larger CreditRequests cannot overflow its window.  An async
+         * request's CreditCharge was already debited when its interim was sent
+         * (async_id is set), so don't debit it again here. */
+        reply_hdr->credit_request_response = chimera_smb_grant_credits(
+            conn,
+            request->async_id ? 0 :
+            (request->smb2_hdr.credit_charge ? request->smb2_hdr.credit_charge : 1),
+            request->smb2_hdr.credit_request_response);
         reply_hdr->flags        = request->smb2_hdr.flags | SMB2_FLAGS_SERVER_TO_REDIR;
         reply_hdr->next_command = 0;
         reply_hdr->message_id   = request->smb2_hdr.message_id;
@@ -486,7 +550,8 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
         preauth_fold_len = evpl_iovec_cursor_consumed(&reply_cursor);
 
         /* Pad each response to an 8-byte boundary so the next compounded
-         * response's header is aligned. NEGOTIATE and SESSION_SETUP are never
+         * response's header is aligned -- but not the final emitted response,
+         * which ends at its natural length. NEGOTIATE and SESSION_SETUP are never
          * compounded and feed the SMB 3.1.1 preauth-integrity hash, which the
          * client computes over the message *as received* (no trailing pad):
          * emit them in canonical form so our hash matches the client's.
@@ -497,7 +562,8 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
          * dynamic data size is exactly sizeof(srv_copychunk_rsp) (12 bytes), so
          * trailing alignment padding would hide the limit body.  Such a reply is
          * never compounded after. */
-        if (request->smb2_hdr.command != SMB2_NEGOTIATE &&
+        if (i != last_emitted &&
+            request->smb2_hdr.command != SMB2_NEGOTIATE &&
             request->smb2_hdr.command != SMB2_SESSION_SETUP &&
             !(request->smb2_hdr.command == SMB2_IOCTL &&
               request->ioctl.cc_limit_response)) {
@@ -540,7 +606,16 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
     * SMB2 message is contiguous in reply_iov[0] after the transport header. */
     if (compound->num_requests > 0 &&
         (compound->requests[0]->smb2_hdr.command == SMB2_NEGOTIATE ||
-         compound->requests[0]->smb2_hdr.command == SMB2_SESSION_SETUP)) {
+         compound->requests[0]->smb2_hdr.command == SMB2_SESSION_SETUP) &&
+        /* The SMB1 multi-protocol NEGOTIATE is answered with an SMB2 NEGOTIATE
+         * response carrying the 0x02ff wildcard ("send a real SMB2 NEGOTIATE
+         * next").  That is not a dialect selection and the client does NOT fold
+         * it into Connection.PreauthIntegrityHashValue (MS-SMB2 3.3.5.3.1) — the
+         * preauth hash starts from the subsequent real SMB2 NEGOTIATE.  Folding
+         * it here would diverge from the client and corrupt the 3.1.1 signing
+         * key (every signed request after SESSION_SETUP then fails). */
+        !(compound->requests[0]->smb2_hdr.command == SMB2_NEGOTIATE &&
+          compound->requests[0]->negotiate.r_dialect == 0x02ff)) {
 
         /* Track whether a multi-leg SESSION_SETUP exchange is in flight: the
          * next SESSION_SETUP that arrives with this clear starts a NEW
@@ -998,6 +1073,27 @@ chimera_smb_compound_advance(struct chimera_smb_compound *compound)
         return;
     }
 
+    /* Per-share transport encryption (MS-SMB2 3.3.5.2.11): a share that requires
+     * encryption (SMB2_SHAREFLAG_ENCRYPT_DATA) rejects any request that did not
+     * arrive encrypted with STATUS_ACCESS_DENIED.  The TREE_CONNECT that
+     * discovers the requirement has no resolved tree yet (request->tree is NULL)
+     * and is exempt, so the client learns the share is encrypted from the reply
+     * and retries its file operations encrypted; every later op on the tree
+     * (CREATE, TREE_DISCONNECT, ...) must be encrypted.  A session marked
+     * globally encrypt-all (Session.EncryptData) is handled earlier -- an
+     * unsigned, unencrypted request on it is a protocol violation that already
+     * tore the connection down -- so this is the per-share-only path where the
+     * session is otherwise cleartext. */
+    if (unlikely(request->tree && request->tree->share &&
+                 request->tree->share->encrypt_data &&
+                 !compound->received_encrypted)) {
+        if (request->smb2_hdr.command == SMB2_WRITE) {
+            evpl_iovecs_release(compound->thread->evpl, request->write.iov, request->write.niov);
+        }
+        chimera_smb_complete_request(request, SMB2_STATUS_ACCESS_DENIED);
+        return;
+    }
+
     switch (request->smb2_hdr.command) {
         case SMB2_NEGOTIATE:
             chimera_smb_negotiate(request);
@@ -1409,6 +1505,30 @@ chimera_smb_server_handle_smb2(
                                               payload_length);
 
             if (unlikely(rc != 0)) {
+                /* A bad signature on a null (anonymous) session is answered
+                 * STATUS_ACCESS_DENIED rather than fatally tearing the
+                 * connection down: the client signed with a key that does not
+                 * match the null session's zero-derived key (it has no shared
+                 * secret), which MS-SMB2 3.3.5.2.4 treats as an authorization
+                 * failure, not a malformed-frame protocol violation
+                 * (smb2.session.anon-signing2 signs a TREE_CONNECT with a wrong
+                 * key on a null session and expects ACCESS_DENIED with the
+                 * connection still up).  The reply is left unsigned (the null
+                 * session shares no verifiable key): clear the SIGN flag set
+                 * just above.  Compound related operations inherit the lead's
+                 * protection, so only an unrelated signed lead is handled here;
+                 * a bad signature on any real session stays fatal. */
+                if (!(request->smb2_hdr.flags & SMB2_FLAGS_RELATED_OPERATIONS) &&
+                    request->session_handle &&
+                    (request->session_handle->session->flags &
+                     CHIMERA_SMB_SESSION_NULL)) {
+                    request->flags                              &= ~CHIMERA_SMB_REQUEST_FLAG_SIGN;
+                    request->status                              = SMB2_STATUS_ACCESS_DENIED;
+                    request->flags                              |= CHIMERA_SMB_REQUEST_FLAG_PARSE_FAILED;
+                    compound->requests[compound->num_requests++] = request;
+                    goto next_compound_request;
+                }
+
                 chimera_smb_error("Received SMB2 message with invalid signature");
                 chimera_smb_request_free(thread, request);
                 evpl_close(evpl, conn->bind);
@@ -1420,6 +1540,9 @@ chimera_smb_server_handle_smb2(
                    request->smb2_hdr.command != SMB2_NEGOTIATE &&
                    request->smb2_hdr.command != SMB2_SESSION_SETUP &&
                    request->smb2_hdr.command != SMB2_ECHO &&
+                   !(request->session_handle && request->session_handle->session &&
+                     (request->session_handle->session->flags &
+                      CHIMERA_SMB_SESSION_NULL)) &&
                    ((conn->flags & CHIMERA_SMB_CONN_FLAG_SIGNING_REQUIRED) ||
                     (request->session_handle && request->session_handle->session &&
                      (request->session_handle->session->flags &
@@ -1432,7 +1555,12 @@ chimera_smb_server_handle_smb2(
              * protocol violation; tear the connection down.  SESSION_SETUP is
              * exempt (its signing key is only derived while processing it), as
              * are NEGOTIATE and ECHO; compound related operations inherit the
-             * lead request's protection so only the unrelated lead is checked. */
+             * lead request's protection so only the unrelated lead is checked.
+             * A null (anonymous) session is exempt entirely: it has no key, so
+             * MS-SMB2 3.3.5.5.3 never enforces signing or encryption on it even
+             * when the connection negotiated signing-required (the client drops
+             * the requirement for the IS_NULL session — smb2.session.anon-
+             * signing2's second TREE_CONNECT is deliberately unsigned). */
             chimera_smb_error("Unsigned, unencrypted request (cmd %u) on a protected connection; disconnecting",
                               request->smb2_hdr.command);
             chimera_smb_request_free(thread, request);
@@ -1907,6 +2035,22 @@ chimera_smb_server_handle_transform(
         return;
     }
 
+    /* MS-SMB2 constrained connection (smb2.session.anon-encryption1): a
+     * connection that has only ever carried null (anonymous) sessions rejects
+     * encrypted traffic by resetting -- a null session has no real key, so
+     * encrypting to it is not meaningful.  Once a real (non-anonymous) session
+     * has been established on the connection it is no longer constrained, and an
+     * encrypted request on a null session is decrypted normally with its
+     * zero-derived key (anon-encryption2).  A wrong key fails the AEAD tag below
+     * and resets either way (anon-encryption3). */
+    if ((session->flags & CHIMERA_SMB_SESSION_NULL) &&
+        !(conn->flags & CHIMERA_SMB_CONN_FLAG_AUTHENTICATED)) {
+        chimera_smb_error("Encrypted SMB2 message on constrained (anonymous-only) connection; resetting");
+        chimera_smb_session_release(thread, thread->shared, session, true);
+        evpl_close(evpl, conn->bind);
+        return;
+    }
+
     rc = chimera_smb_decrypt_message(thread->encrypt_ctx, evpl,
                                      session->cipher_id, session->dec_key,
                                      session->enc_key_len, request_cursor, length,
@@ -2069,6 +2213,39 @@ chimera_smb_server_notify(
             chimera_smb_info("Disconnected %s SMB connection from %s to %s, handled %lu requests",
                              conn->protocol == EVPL_DATAGRAM_RDMACM_RC ? "RDMA" : "TCP",
                              conn->remote_addr, conn->local_addr, conn->requests_completed);
+            /* Test hook: delay the START of disconnect processing -- BEFORE the
+             * connection is flagged disconnecting -- to deterministically model
+             * the PRE-NOTIFY race window.  In this window the server has not yet
+             * run the disconnect callback for the durable holder's (already
+             * TCP-closed) connection at all, so the holder still looks fully live
+             * (create_conn != NULL, disconnecting == 0) while a conflicting CREATE
+             * races in on another connection.  This is distinct from
+             * CHIMERA_SMB_TEST_DISCONNECT_DELAY_MS below, which delays the teardown
+             * AFTER disconnecting is set (the post-notify window).  The conflicting
+             * CREATE can still tell the holder is on its way out because its bind
+             * has already observed the peer FIN (evpl_bind_is_closing()).  Inert
+             * unless the environment variable is set; used by the smbtorture
+             * durable-open prenotify ctest entry. */
+            {
+                static int prenotify_delay_ms = -1;
+
+                if (prenotify_delay_ms < 0) {
+                    const char *d = getenv(
+                        "CHIMERA_SMB_TEST_DISCONNECT_NOTIFY_DELAY_MS");
+                    prenotify_delay_ms = d ? atoi(d) : 0;
+                }
+                if (prenotify_delay_ms > 0) {
+                    usleep(prenotify_delay_ms * 1000);
+                }
+            }
+            /* Flag the connection disconnecting up front, before the (possibly
+             * delayed) teardown that parks its durable handles.  A conflicting
+             * CREATE racing in on another connection consults this through the
+             * durable registry: a still-live durable holder whose owning conn is
+             * flagged disconnecting is about to yield, so the CREATE retries
+             * briefly instead of returning SHARING_VIOLATION against a reservation
+             * that has not been parked yet (durable-open.open2-lease). */
+            conn->disconnecting = 1;
             /* Test hook: delay disconnect processing to deterministically widen
              * the window between a client's TCP close and the server-side
              * teardown that parks its durable handles.  A request racing into
@@ -2178,6 +2355,8 @@ chimera_smb_server_accept(
     conn->dialect            = 0;
     conn->flags              = 0;
     conn->requests_completed = 0;
+    conn->async_outstanding  = 0;
+    conn->credits_balance    = 0;
 
     evpl_bind_get_local_address(bind, conn->local_addr, sizeof(conn->local_addr));
     evpl_bind_get_remote_address(bind, conn->remote_addr, sizeof(conn->remote_addr));

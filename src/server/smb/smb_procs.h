@@ -243,6 +243,15 @@ void chimera_smb_ioctl_request_resume_key(
 void chimera_smb_ioctl_copychunk(
     struct chimera_smb_request *request);
 
+void chimera_smb_ioctl_duplicate_extents(
+    struct chimera_smb_request *request);
+
+void chimera_smb_ioctl_offload_read(
+    struct chimera_smb_request *request);
+
+void chimera_smb_ioctl_offload_write(
+    struct chimera_smb_request *request);
+
 int chimera_smb_parse_change_notify(
     struct evpl_iovec_cursor   *request_cursor,
     struct chimera_smb_request *request);
@@ -272,6 +281,24 @@ void chimera_smb_lock_reply(
     struct evpl_iovec_cursor   *reply_cursor,
     struct chimera_smb_request *request);
 
+/* Complete a parked blocking byte-range LOCK on its owning thread with `status`
+ * (the stashed grant result, SMB2_STATUS_CANCELLED, or
+ * SMB2_STATUS_RANGE_NOT_LOCKED).  Cancels the VFS ticket bookkeeping, installs or
+ * tears down the entry, drops the open_file reference the park held, and replies. */
+void chimera_smb_lock_park_finish(
+    struct chimera_smb_request *request,
+    uint32_t                    status);
+
+/* Abort a blocking LOCK parked on `open_file` (handle close, tree disconnect,
+ * logoff, or connection teardown): cancel its VFS acquire and complete it with
+ * SMB2_STATUS_RANGE_NOT_LOCKED.  No-op when no lock is parked.  Must run on the
+ * open's owning thread.  Returns the aborted request (whose open_file reference
+ * the caller's completion drops), or NULL. */
+struct chimera_smb_request *
+chimera_smb_lock_abort_parked(
+    struct chimera_server_smb_thread *thread,
+    struct chimera_smb_open_file     *open_file);
+
 /* Drain (release + free) every byte-range lock entry held by `open_file`.
  * Called at close before the underlying VFS handle is released. */
 void chimera_smb_open_file_drain_locks(
@@ -285,6 +312,15 @@ void chimera_smb_lease_break_cb(
     struct chimera_vfs_lease *lease,
     uint8_t                   needed_mode,
     void                     *private_data);
+
+/* Recall every OTHER holder's HANDLE cache on the file backing `open_file`
+ * because of a pending namespace mutation (delete-on-close / unlink / rename):
+ * an RqLs lease's RH is broken to R, and the operating client's own lease is
+ * spared.  Called from the set-info delete-on-close and the close-time remove
+ * paths (smb2.lease.unlink). */
+void chimera_smb_break_caching_for_namespace(
+    struct chimera_smb_request   *request,
+    struct chimera_smb_open_file *open_file);
 
 void chimera_smb_lease_break_thread_init(
     struct chimera_server_smb_thread *thread);

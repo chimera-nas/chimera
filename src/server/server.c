@@ -47,6 +47,7 @@ struct chimera_server_config {
     int                                   nfs_rdma_port;
     int                                   nfs_tcp_rdma_port;
     int                                   nfs_lockmgr_port;
+    int                                   nfs_nsm_port;
     int                                   nfs_port;
     int                                   s3_port;
     int                                   nfs_data_server;
@@ -66,6 +67,7 @@ struct chimera_server_config {
     int                                   nfs4_delegations;
     int                                   nfs4_drc;
     int                                   nfs3_drc;
+    int                                   nfs4_node_id;
     uint32_t                              nfs4_lease_time_s;
     uint32_t                              nfs4_grace_time_s;
     uint32_t                              nfs4_courtesy_time_s;
@@ -74,6 +76,7 @@ struct chimera_server_config {
     int                                   rest_http_port;
     int                                   rest_https_port;
     int                                   rest_debug_fsops;
+    int                                   rest_auth_enabled;
     int                                   smb_num_dialects;
     uint32_t                              smb_dialects[16];
     int                                   smb_persistent_handles;
@@ -86,6 +89,7 @@ struct chimera_server_config {
     int                                   smb_oplocks;
     int                                   smb_notify_disabled;
     int                                   smb_acl_inherited_canonicalize;
+    int                                   smb2_max_async_credits;
     int                                   smb_num_nic_info;
     uint32_t                              anonuid;
     uint32_t                              anongid;
@@ -154,6 +158,7 @@ chimera_server_config_init(void)
     config->portmap_hostname[0]      = '\0';
     config->soft_fail_bad_req        = 0;
     config->rest_debug_fsops         = 0;
+    config->rest_auth_enabled        = 1;
     config->tcp_flavor               = CHIMERA_TCP_FLAVOR_PLAIN;
 
     config->smb_num_dialects = 5;
@@ -213,6 +218,10 @@ chimera_server_config_init(void)
      * verbatim (Samba's "= no" mode that the smb2.acls_non_canonical suite
      * exercises). */
     config->smb_acl_inherited_canonicalize = 1;
+
+    /* Per-connection ceiling on outstanding async (STATUS_PENDING) operations.
+     * 512 matches the value smb2.credits.*_ipc_max_async_credits asserts. */
+    config->smb2_max_async_credits = 512;
 
     // SMB auth config defaults - local NTLM only
     config->smb_auth.winbind_enabled    = 0;
@@ -286,7 +295,10 @@ chimera_server_config_init(void)
      * so a retransmit after a server restart replays the cached reply instead
      * of re-executing.  There is no session and no on-wire advertisement -- the
      * cache is transparent to the client. */
-    config->nfs3_drc             = 0;
+    config->nfs3_drc = 0;
+    /* 0 = auto-derive a stable node_id from the machine name; operators sharing
+     * one KV store across instances should set distinct values explicitly. */
+    config->nfs4_node_id         = 0;
     config->nfs4_lease_time_s    = NFS4_LEASE_TIME_DEFAULT_S;
     config->nfs4_grace_time_s    = NFS4_GRACE_TIME_DEFAULT_S;
     config->nfs4_courtesy_time_s = NFS4_COURTESY_TIME_DEFAULT_S;
@@ -294,6 +306,7 @@ chimera_server_config_init(void)
     strncpy(config->nfs_rdma_hostname, "0.0.0.0", sizeof(config->nfs_rdma_hostname));
     config->nfs_rdma_port    = 20049;
     config->nfs_lockmgr_port = 32803;
+    config->nfs_nsm_port     = 32765;
 
     snprintf(config->state_dir, sizeof(config->state_dir), "%s", CHIMERA_STATE_DIR);
 
@@ -510,6 +523,20 @@ chimera_server_config_get_smb_acl_inherited_canonicalize(const struct chimera_se
 } /* chimera_server_config_get_smb_acl_inherited_canonicalize */
 
 SYMBOL_EXPORT void
+chimera_server_config_set_smb2_max_async_credits(
+    struct chimera_server_config *config,
+    int                           value)
+{
+    config->smb2_max_async_credits = value;
+} /* chimera_server_config_set_smb2_max_async_credits */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_smb2_max_async_credits(const struct chimera_server_config *config)
+{
+    return config->smb2_max_async_credits;
+} /* chimera_server_config_get_smb2_max_async_credits */
+
+SYMBOL_EXPORT void
 chimera_server_config_set_max_open_files(
     struct chimera_server_config *config,
     int                           open_files)
@@ -647,6 +674,20 @@ chimera_server_config_get_nfs4_grace_time(const struct chimera_server_config *co
 {
     return config->nfs4_grace_time_s;
 } /* chimera_server_config_get_nfs4_grace_time */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_nfs4_node_id(
+    struct chimera_server_config *config,
+    int                           node_id)
+{
+    config->nfs4_node_id = node_id;
+} /* chimera_server_config_set_nfs4_node_id */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_nfs4_node_id(const struct chimera_server_config *config)
+{
+    return config->nfs4_node_id;
+} /* chimera_server_config_get_nfs4_node_id */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_nfs4_courtesy_time(
@@ -845,6 +886,20 @@ chimera_server_config_get_nfs_lockmgr_port(const struct chimera_server_config *c
 } /* chimera_server_config_get_nfs_lockmgr_port */
 
 SYMBOL_EXPORT void
+chimera_server_config_set_nfs_nsm_port(
+    struct chimera_server_config *config,
+    int                           port)
+{
+    config->nfs_nsm_port = port;
+} /* chimera_server_config_set_nfs_nsm_port */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_nfs_nsm_port(const struct chimera_server_config *config)
+{
+    return config->nfs_nsm_port;
+} /* chimera_server_config_get_nfs_nsm_port */
+
+SYMBOL_EXPORT void
 chimera_server_config_set_state_dir(
     struct chimera_server_config *config,
     const char                   *dir)
@@ -971,6 +1026,20 @@ chimera_server_config_get_rest_debug_fsops(const struct chimera_server_config *c
 {
     return config->rest_debug_fsops;
 } /* chimera_server_config_get_rest_debug_fsops */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_rest_auth_enabled(
+    struct chimera_server_config *config,
+    int                           enable)
+{
+    config->rest_auth_enabled = enable;
+} /* chimera_server_config_set_rest_auth_enabled */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_rest_auth_enabled(const struct chimera_server_config *config)
+{
+    return config->rest_auth_enabled;
+} /* chimera_server_config_get_rest_auth_enabled */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_rest_https_port(
@@ -1535,6 +1604,243 @@ chimera_server_mkpath(
 
     return ctx.status == CHIMERA_VFS_OK ? 0 : -1;
 } /* chimera_server_mkpath */
+
+/* ---- test-only symbolic-link seeding -------------------------------------
+ * The WPTS MS-SMB2 CreateClose symlink cases expect a small set of symbolic
+ * links to already exist on the share:
+ *   <root>/SymlinkTest          (a directory)
+ *   <root>/SymlinkTest/link  -> "target"      (a link reached mid-path / as the leaf)
+ *   <root>/badlink           -> "nonexistent" (a deliberately dangling link)
+ * The server never resolves these -- a CREATE that traverses one returns
+ * STATUS_STOPPED_ON_SYMLINK -- so the link targets need not exist.  No client
+ * can create a Windows reparse-point symlink against an empty share, so the
+ * fixtures are seeded here at startup, mirroring chimera_server_mkpath's
+ * transient-mount/evpl_continue drive loop.  Best-effort: failures are logged
+ * but do not abort the daemon (only the symlink WPTS cases depend on them). */
+#define CHIMERA_SEED_TMP_NAME "__chimera_seed_tmp"
+
+struct chimera_seed_ctx {
+    struct chimera_vfs             *vfs;
+    struct chimera_vfs_thread      *thread;
+    struct chimera_vfs_open_handle *root_oh;
+    struct chimera_vfs_open_handle *dir_oh;
+    uint8_t                         dir_fh[CHIMERA_VFS_FH_SIZE + 16];
+    uint32_t                        dir_fh_len;
+    enum chimera_vfs_error status;
+    int                             done;
+};
+
+static void
+chimera_seed_umount_cb(
+    struct chimera_vfs_thread *thread,
+    enum chimera_vfs_error     status,
+    void                      *private_data)
+{
+    struct chimera_seed_ctx *ctx = private_data;
+
+    ctx->done = 1;
+} /* chimera_seed_umount_cb */
+
+static void
+chimera_seed_finish(
+    struct chimera_seed_ctx *ctx,
+    enum chimera_vfs_error   status)
+{
+    ctx->status = status;
+
+    if (ctx->dir_oh) {
+        chimera_vfs_release(ctx->thread, ctx->dir_oh);
+        ctx->dir_oh = NULL;
+    }
+    if (ctx->root_oh) {
+        chimera_vfs_release(ctx->thread, ctx->root_oh);
+        ctx->root_oh = NULL;
+    }
+
+    chimera_vfs_umount(ctx->thread, chimera_vfs_get_server_cred(),
+                       CHIMERA_SEED_TMP_NAME, chimera_seed_umount_cb, ctx);
+} /* chimera_seed_finish */
+
+/* Creating the dangling root-level "badlink" is the last step. */
+static void
+chimera_seed_badlink_cb(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    struct chimera_vfs_attrs *dir_pre_attr,
+    struct chimera_vfs_attrs *dir_post_attr,
+    void                     *private_data)
+{
+    struct chimera_seed_ctx *ctx = private_data;
+
+    /* EEXIST is fine -- idempotent re-seed of a persistent backend. */
+    if (error_code != CHIMERA_VFS_OK && error_code != CHIMERA_VFS_EEXIST) {
+        chimera_seed_finish(ctx, error_code);
+        return;
+    }
+    chimera_seed_finish(ctx, CHIMERA_VFS_OK);
+} /* chimera_seed_badlink_cb */
+
+/* The in-subfolder "SymlinkTest/link" was created; now make the dangling
+ * root-level "badlink". */
+static void
+chimera_seed_dirlink_cb(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    struct chimera_vfs_attrs *dir_pre_attr,
+    struct chimera_vfs_attrs *dir_post_attr,
+    void                     *private_data)
+{
+    struct chimera_seed_ctx *ctx = private_data;
+
+    if (error_code != CHIMERA_VFS_OK && error_code != CHIMERA_VFS_EEXIST) {
+        chimera_seed_finish(ctx, error_code);
+        return;
+    }
+
+    chimera_vfs_symlink_at(ctx->thread, chimera_vfs_get_server_cred(),
+                           ctx->root_oh, "badlink", 7,
+                           "nonexistent", 11, NULL,
+                           0, 0, 0, chimera_seed_badlink_cb, ctx);
+} /* chimera_seed_dirlink_cb */
+
+/* The "SymlinkTest" directory is open; create the symlink "link" inside it. */
+static void
+chimera_seed_diropen_cb(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *oh,
+    void                           *private_data)
+{
+    struct chimera_seed_ctx *ctx = private_data;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_seed_finish(ctx, error_code);
+        return;
+    }
+
+    ctx->dir_oh = oh;
+
+    chimera_vfs_symlink_at(ctx->thread, chimera_vfs_get_server_cred(),
+                           ctx->dir_oh, "link", 4,
+                           "target", 6, NULL,
+                           0, 0, 0, chimera_seed_dirlink_cb, ctx);
+} /* chimera_seed_diropen_cb */
+
+/* The "SymlinkTest" directory was created (or already existed); open it. */
+static void
+chimera_seed_mkdir_cb(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *set_attr,
+    struct chimera_vfs_attrs *attr,
+    struct chimera_vfs_attrs *dir_pre_attr,
+    struct chimera_vfs_attrs *dir_post_attr,
+    void                     *private_data)
+{
+    struct chimera_seed_ctx *ctx = private_data;
+
+    if (error_code != CHIMERA_VFS_OK || attr->va_fh_len == 0) {
+        chimera_seed_finish(ctx, error_code != CHIMERA_VFS_OK ? error_code : CHIMERA_VFS_EIO);
+        return;
+    }
+
+    memcpy(ctx->dir_fh, attr->va_fh, attr->va_fh_len);
+    ctx->dir_fh_len = attr->va_fh_len;
+
+    chimera_vfs_open_fh(ctx->thread, chimera_vfs_get_server_cred(),
+                        ctx->dir_fh, ctx->dir_fh_len,
+                        CHIMERA_VFS_OPEN_DIRECTORY | CHIMERA_VFS_OPEN_PATH,
+                        chimera_seed_diropen_cb, ctx);
+} /* chimera_seed_mkdir_cb */
+
+static void
+chimera_seed_rootopen_cb(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *oh,
+    void                           *private_data)
+{
+    struct chimera_seed_ctx *ctx = private_data;
+    struct chimera_vfs_attrs set_attr;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_seed_finish(ctx, error_code);
+        return;
+    }
+
+    ctx->root_oh = oh;
+
+    memset(&set_attr, 0, sizeof(set_attr));
+    set_attr.va_set_mask = CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_UID |
+        CHIMERA_VFS_ATTR_GID;
+    set_attr.va_mode = S_IFDIR | 0755;
+    set_attr.va_uid  = 0;
+    set_attr.va_gid  = 0;
+
+    chimera_vfs_mkdir_at(ctx->thread, chimera_vfs_get_server_cred(), ctx->root_oh,
+                         "SymlinkTest", 11, &set_attr,
+                         CHIMERA_VFS_ATTR_FH, 0, 0,
+                         chimera_seed_mkdir_cb, ctx);
+} /* chimera_seed_rootopen_cb */
+
+static void
+chimera_seed_mounted_cb(
+    struct chimera_vfs_thread *thread,
+    enum chimera_vfs_error     status,
+    void                      *private_data)
+{
+    struct chimera_seed_ctx  *ctx = private_data;
+    struct chimera_vfs_mount *m;
+
+    if (status != CHIMERA_VFS_OK) {
+        ctx->status = status;
+        ctx->done   = 1;
+        return;
+    }
+
+    m = chimera_vfs_mount_table_find_by_path(ctx->vfs->mount_table,
+                                             CHIMERA_SEED_TMP_NAME,
+                                             strlen(CHIMERA_SEED_TMP_NAME));
+    if (!m) {
+        chimera_seed_finish(ctx, CHIMERA_VFS_EIO);
+        return;
+    }
+
+    chimera_vfs_open_fh(thread, chimera_vfs_get_server_cred(),
+                        m->root_fh, m->root_fh_len,
+                        CHIMERA_VFS_OPEN_DIRECTORY | CHIMERA_VFS_OPEN_PATH,
+                        chimera_seed_rootopen_cb, ctx);
+} /* chimera_seed_mounted_cb */
+
+SYMBOL_EXPORT int
+chimera_server_seed_symlinks(
+    struct chimera_server *server,
+    const char            *module_name)
+{
+    struct evpl            *evpl;
+    struct chimera_seed_ctx ctx;
+
+    if (!module_name) {
+        return -1;
+    }
+
+    memset(&ctx, 0, sizeof(ctx));
+
+    evpl       = evpl_create(NULL);
+    ctx.vfs    = server->vfs;
+    ctx.thread = chimera_vfs_thread_init(evpl, server->vfs);
+    ctx.status = CHIMERA_VFS_OK;
+
+    chimera_vfs_mount(ctx.thread, chimera_vfs_get_server_cred(),
+                      CHIMERA_SEED_TMP_NAME, module_name, "/", NULL,
+                      chimera_seed_mounted_cb, &ctx);
+
+    while (!ctx.done) {
+        evpl_continue(evpl);
+    }
+
+    chimera_vfs_thread_destroy(ctx.thread);
+    evpl_destroy(evpl);
+
+    return ctx.status == CHIMERA_VFS_OK ? 0 : -1;
+} /* chimera_server_seed_symlinks */
 
 static void
 chimera_server_umount_callback(

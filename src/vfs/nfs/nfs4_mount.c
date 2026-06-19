@@ -637,12 +637,22 @@ chimera_nfs4_mount(
     thread->server_threads[server->index] = server_thread;
 
     if (need_discover) {
-        enum evpl_protocol_id proto;
-
-        /* Create NFS endpoint and connect */
+        /* First mount to this server: create the shared endpoint. */
         server->nfs_endpoint = evpl_endpoint_create(server->hostname, server->nfs_port);
+    }
 
-        proto = server->use_rdma ? server->rdma_protocol : server_thread->shared->tcp_protocol;
+    /*
+     * Every mount opens its OWN transient connection to the server.  The NFSv4.1
+     * session and back channel live on the persistent control connection; this
+     * connection only carries RECLAIM_COMPLETE + the root-FH lookup, which bind
+     * to the session via bind-on-SEQUENCE.  A prior mount to the same server may
+     * have come and gone (the control connection keeps the server alive), so a
+     * reused server still needs a fresh connection here -- otherwise
+     * server_thread->nfs_conn is NULL and RECLAIM_COMPLETE dereferences it.
+     */
+    {
+        enum evpl_protocol_id proto = server->use_rdma
+            ? server->rdma_protocol : shared->tcp_protocol;
 
         server_thread->nfs_conn = evpl_rpc2_client_connect(
             thread->rpc2_thread,
@@ -660,7 +670,7 @@ chimera_nfs4_mount(
 
         chimera_nfsclient_info("NFS4 connecting to %s:%d", server->hostname, server->nfs_port);
 
-        /* Send NULL call to verify connection */
+        /* Send NULL call to verify the connection, then proceed to mount. */
         shared->nfs_v4.send_call_NFSPROC4_NULL(
             &shared->nfs_v4.rpc2,
             thread->evpl,
@@ -669,8 +679,5 @@ chimera_nfs4_mount(
             0, 0, NULL, 0, 0,
             chimera_nfs4_mount_null_callback,
             request);
-    } else {
-        /* Server already discovered, proceed with mount */
-        chimera_nfs4_mount_process_mount(server_thread, request);
     }
 } /* chimera_nfs4_mount */

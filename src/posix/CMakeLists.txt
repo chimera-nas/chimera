@@ -58,12 +58,15 @@ add_library(chimera_posix SHARED
             posix_fchmodat.c
             posix_chown.c
             posix_lchown.c
+            posix_setacl.c
+            posix_getacl.c
             posix_fchown.c
             posix_fchownat.c
             posix_utimensat.c
             posix_pathconf.c
             posix_truncate.c
             posix_ftruncate.c
+            posix_fallocate.c
             posix_fcntl.c
             posix_lockf.c
             posix_fsync.c

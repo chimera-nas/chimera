@@ -19,7 +19,7 @@ RUN apt-get -y update && \
     apt-get -y --no-install-recommends upgrade && \
     apt-get -y --no-install-recommends install gcc g++ cmake ninja-build ccache git flex bison uuid-dev uthash-dev libkrb5-3 libkrb5-dev libgssapi-krb5-2 \
     librdmacm-dev libjansson-dev libxxhash-dev liburcu-dev liburing-dev libunwind-dev librocksdb-dev libssl-dev openssl libnuma-dev \
-    libwbclient-dev python3 python3-pip python3-venv python3-requests pkg-config && \
+    libwbclient-dev libcrypt-dev python3 python3-pip python3-venv python3-requests pkg-config && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 

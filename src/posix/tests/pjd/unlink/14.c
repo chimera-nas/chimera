@@ -22,7 +22,12 @@ main(
     EXPECT(0, pjd_mkdir(n2, 0755));
     pjd_cd(n2);
 
-    /* nlink of an open-but-unlinked file is 0. */
+    /* nlink of an open-but-unlinked file is 0.
+     *
+     * On NFSv3 the client silly-renames the still-open file to .nfsXXXX rather
+     * than removing it (there is no server-side open-file state), so its link
+     * count stays 1 until close -- the correct NFSv3 behavior, not a local
+     * unlink.  Skip the nlink==0 assertion there but still exercise the path. */
     EXPECT(0, pjd_create(n0, 0644));
     {
         int         fd = pjd_open(n0, O_RDONLY, 0644);
@@ -30,7 +35,9 @@ main(
         EXPECT(0, pjd_unlink(n0));
         struct stat stbuf;
         EXPECT(0, chimera_posix_fstat(fd, &stbuf));
-        EXPECT_EQ(0, (long) stbuf.st_nlink);
+        if (!pjd_backend_is_nfs3()) {
+            EXPECT_EQ(0, (long) stbuf.st_nlink);
+        }
         chimera_posix_close(fd);
     }
 
@@ -49,6 +56,23 @@ main(
     }
 
     pjd_cd("..");
-    EXPECT(0, pjd_rmdir(n2));
+
+    /* On NFSv3 the close above triggers removal of the silly-renamed .nfsXXXX
+     * entry, but the client dispatches it asynchronously (close(2) does not
+     * block on it here), so the directory may not be empty the instant rmdir
+     * runs.  Poll briefly until the silly entry drains.  Local backends remove
+     * the file synchronously and succeed on the first attempt. */
+    if (pjd_backend_is_nfs3()) {
+        int rc = -1;
+        for (int i = 0; i < 100 && rc != 0; i++) {
+            rc = pjd_rmdir(n2);
+            if (rc != 0) {
+                pjd_settle();
+            }
+        }
+        EXPECT_EQ(0, rc);
+    } else {
+        EXPECT(0, pjd_rmdir(n2));
+    }
     return pjd_end();
 } /* main */

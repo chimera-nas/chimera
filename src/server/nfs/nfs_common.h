@@ -21,6 +21,8 @@
 #include "nfs4_recovery.h"
 #include "nfs3_drc.h"
 #include "nfs_nlm_state.h"
+#include "nfs_nsm_state.h"
+#include "sm_inter_xdr.h"
 
 struct chimera_server_nfs_thread;
 
@@ -114,6 +116,11 @@ struct nfs_request {
      * NFS4_SLOT_TYPE_OPEN / NFS4_SLOT_TYPE_LOCK. */
     void                             *nfs_state_ref;
     uint8_t                           nfs_state_type;
+    /* Set when a READ/WRITE authorized by a delegation stateid is served via an
+     * on-the-fly open: the on-the-fly I/O must carry the delegation holder's
+     * own lease owner so the VFS I/O path does not treat the client's own I/O
+     * as a foreign actor and recall the client's own delegation. */
+    bool                              io_owner_from_deleg;
     /* In-flight vfs_state byte-range lease for an async NFSv4 LOCK.
      * Allocated at lock dispatch, linked onto the lock_state on grant,
      * freed on denial.  See nfs4_proc_lock.c. */
@@ -248,22 +255,11 @@ struct nfs4_replay_metrics {
     struct prometheus_gauge_instance   *bytes_in_use;
 };
 
-#define NFS4_V40_DRC_SLOTS NFS4_MAX_REPLY_CACHE_SLOTS
+/* The NFSv4.0 reply cache is now an instance of the shared connectionless DRC
+ * (struct nfs3_drc); see nfs4_v40_drc.{c,h}. */
 
-struct nfs4_v40_drc_entry {
-    struct evpl_rpc2_conn *conn;
-    uint32_t               xid;
-    uint32_t               len;
-    uint8_t                valid;
-    void                  *buf;
-};
-
-struct nfs4_v40_drc {
-    pthread_mutex_t           lock;
-    uint32_t                  next;
-    uint32_t                  bytes;
-    struct nfs4_v40_drc_entry entries[NFS4_V40_DRC_SLOTS];
-};
+/* uthash-tracked in-flight 4.1 session hydrate (defined in nfs4_drc.c). */
+struct nfs4_drc_hydra;
 
 struct chimera_server_nfs_shared {
 
@@ -281,6 +277,8 @@ struct chimera_server_nfs_shared {
     struct NFS_V4_CB                    nfs_v4_cb;
     struct NLM_V4                       nlm_v4;
     struct nlm_state                    nlm_state;
+    struct SM_INTER_V1                  nsm_v1;
+    struct nsm_state                    nsm_state;
 
     struct chimera_nfs_export          *exports;
     pthread_mutex_t                     exports_lock;
@@ -308,14 +306,23 @@ struct chimera_server_nfs_shared {
     struct evpl_endpoint               *portmap_endpoint;
     struct evpl_endpoint               *nfs_rdma_endpoint;
     struct evpl_endpoint               *nlm_endpoint;
+    struct evpl_endpoint               *nsm_endpoint;
 
     struct evpl_rpc2_server            *portmap_server;
     struct evpl_rpc2_server            *mount_server;
     struct evpl_rpc2_server            *nfs_server;
     struct evpl_rpc2_server            *nfs_rdma_server;
     struct evpl_rpc2_server            *nlm_server;
+    struct evpl_rpc2_server            *nsm_server;
 
     uint64_t                            nfs_verifier;
+
+    /* Stable identity of this server instance among any peers sharing the same
+     * backing KV store.  Namespaces every persisted record + the clientid /
+     * stateid epoch so N instances over one store never collide and each
+     * reloads only its own state.  From server.nfs4_node_id, else derived from
+     * the machine name (see nfs_server_init).  Range 1..0xFFFE. */
+    uint16_t                            node_id;
 
     /* Lease management (Phase 3).  Set from defaults at init; future
      * config knobs would override these in nfs_server_init. */
@@ -332,8 +339,13 @@ struct chimera_server_nfs_shared {
     struct prometheus_histogram        *op_histogram;
     struct prometheus_metrics          *metrics;
     struct nfs4_replay_metrics          replay_metrics;
-    struct nfs4_v40_drc                 v40_drc;
+    struct nfs3_drc                     v40_drc;
     struct nfs3_drc                     nfs3_drc;
+
+    /* Dedup / negative-cache for in-flight lazy 4.1 session hydrates, keyed by
+     * sessionid (see nfs4_drc_session_hydrate). */
+    pthread_mutex_t                     nfs4_drc_hydra_lock;
+    struct nfs4_drc_hydra              *nfs4_drc_hydra;
 };
 
 /* Forward decl for the per-thread lease sweeper (defined in nfs4_lease.h). */

@@ -16,7 +16,8 @@ chimera_vfs_getattr_complete(struct chimera_vfs_request *request)
     struct chimera_vfs_attr_cache *attr_cache = thread->vfs->vfs_attr_cache;
     chimera_vfs_getattr_callback_t callback   = request->proto_callback;
 
-    if (request->status == CHIMERA_VFS_OK) {
+    if (request->status == CHIMERA_VFS_OK &&
+        !(request->getattr.handle->flags & CHIMERA_VFS_OPEN_HANDLE_STREAM)) {
         chimera_vfs_attr_cache_refresh(thread, attr_cache,
                                        request->getattr.handle->fh_hash,
                                        request->getattr.handle->fh,
@@ -47,7 +48,8 @@ chimera_vfs_getattr(
     struct chimera_vfs_attrs       cached_attr;
     int                            rc;
 
-    if (!(req_attr_mask & ~(CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_CACHEABLE))) {
+    if (!(handle->flags & CHIMERA_VFS_OPEN_HANDLE_STREAM) &&
+        !(req_attr_mask & ~(CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_CACHEABLE))) {
         rc = chimera_vfs_attr_cache_lookup(attr_cache,
                                            handle->fh_hash,
                                            handle->fh,

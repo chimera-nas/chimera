@@ -41,7 +41,7 @@ struct chimera_vfs_request;
 /* Per-file state                                                       */
 /* -------------------------------------------------------------------- */
 
-#define CHIMERA_VFS_STATE_NUM_BUCKETS 64
+#define CHIMERA_VFS_STATE_NUM_BUCKETS 16384
 
 struct chimera_vfs_file_state {
     uint8_t                             fh[CHIMERA_VFS_FH_SIZE];
@@ -85,10 +85,15 @@ struct chimera_vfs_file_state {
      * pending queue without changing public-API signatures. */
     struct chimera_vfs_state           *state;
 
-    /* Phase-3 (SMB delete-pending): set while an open holds delete-on-close on
-     * this file so a subsequent open can be answered with STATUS_DELETE_PENDING
-     * without a break.  Tracked here (additive; no consumer enforces it yet). */
+    /* SMB delete-pending: set when this file's deletion was deferred because a
+     * named stream still holds it open; a subsequent name open of the base or a
+     * stream is answered STATUS_DELETE_PENDING (smb2.streams.delete). */
     uint8_t                             delete_pending;
+    /* Count of named-stream opens holding a file-level DELETE reservation on
+     * this (base) file.  A base delete-on-close defers only while > 0; the last
+     * stream close performs the deferred removal.  Distinguishes a cross-fh
+     * stream holder from an ordinary same-file open in the deferral decision. */
+    uint32_t                            stream_holders;
 
     uint32_t                            refcount;
     struct chimera_vfs_file_state      *bucket_next;
@@ -140,6 +145,34 @@ chimera_vfs_state_put(
     struct chimera_vfs_state      *state,
     struct chimera_vfs_file_state *file);
 
+/* SMB delete-on-close deferral helpers (smb2.streams.delete): a base file
+ * deletion must defer while a named stream still holds the file, and a name
+ * open of a delete-pending file is answered STATUS_DELETE_PENDING. */
+bool
+chimera_vfs_state_has_other_share_holder(
+    struct chimera_vfs_file_state  *file,
+    const struct chimera_vfs_lease *exclude);
+
+void
+chimera_vfs_state_set_delete_pending(
+    struct chimera_vfs_file_state *file);
+
+bool
+chimera_vfs_state_is_delete_pending(
+    struct chimera_vfs_file_state *file);
+
+void
+chimera_vfs_state_stream_holder_inc(
+    struct chimera_vfs_file_state *file);
+
+void
+chimera_vfs_state_stream_holder_dec(
+    struct chimera_vfs_file_state *file);
+
+uint32_t
+chimera_vfs_state_stream_holders(
+    struct chimera_vfs_file_state *file);
+
 /* -------------------------------------------------------------------- */
 /* Conflict matrix and lease insertion                                  */
 /* -------------------------------------------------------------------- */
@@ -166,6 +199,16 @@ chimera_vfs_state_try_insert(
     struct chimera_vfs_file_state *file,
     struct chimera_vfs_lease      *lease,
     struct chimera_vfs_lease     **conflict_out);
+
+/* Release the reference chimera_vfs_state_try_insert() (and the async
+ * chimera_vfs_lease_acquire() built on it) holds on a conflicting CACHING grant
+ * returned in *conflict_out, so the grant cannot be freed by a racing close
+ * while the caller inspects the conflict.  A no-op for non-grant / NULL
+ * conflicts; call it exactly once, after the last dereference of `conflict`. */
+void
+chimera_vfs_state_conflict_unref(
+    struct chimera_vfs_state *state,
+    struct chimera_vfs_lease *conflict);
 
 /* Remove a previously-inserted lease.  Caller must NOT hold file->lock. */
 void
@@ -245,6 +288,23 @@ uint8_t
 chimera_vfs_caching_grant_cap_mode(
     struct chimera_vfs_file_state  *file,
     const struct chimera_vfs_lease *lease);
+
+/* True if `client_key` already holds an SMB2 RqLs handle-caching (H) lease on
+* `file`.  Used by the SMB create path to deny a legacy oplock request (-> NONE)
+* when the same client already holds an H lease, without recalling its own
+* lease.  A lease without H does not preclude a coexisting level-II oplock. */
+bool
+chimera_vfs_client_holds_handle_lease(
+    struct chimera_vfs_file_state *file,
+    uint64_t                       client_key);
+
+/* True if `client_key` holds ANY live SMB2 RqLs caching lease on `file`.  Used
+ * by the SMB create path to cap a same-client legacy oplock request to level-II
+ * so it coexists with the client's R/RW lease without recalling it. */
+bool
+chimera_vfs_client_holds_caching_lease(
+    struct chimera_vfs_file_state *file,
+    uint64_t                       client_key);
 
 enum chimera_vfs_lease_result
 chimera_vfs_caching_grant_acquire(
@@ -475,6 +535,19 @@ chimera_vfs_io_recall(
     int                         flush_only,
     void (                     *next )(struct chimera_vfs_request *request));
 
+/* Single-step namespace recall: break each OTHER caching holder on (fh, fh_hash)
+ * exactly once down to `retain` (sparing request->io_handle) and PARK until the
+ * holder's break is ACKed, then invoke next(request).  Used by the SMB delete-
+ * on-close path (smb2.lease.unlink): one RH->R break per peer, reply after ack. */
+void
+chimera_vfs_io_recall_single(
+    struct chimera_vfs_request *request,
+    const uint8_t              *fh,
+    uint8_t                     fh_len,
+    uint64_t                    fh_hash,
+    uint8_t                     retain,
+    void (                     *next )(struct chimera_vfs_request *request));
+
 /* Drop every implicit lease that has been idle (no in-flight I/O) for at
  * least `idle_ms` milliseconds.  Driven by a periodic reaper. */
 void
@@ -539,4 +612,17 @@ chimera_vfs_state_break_caching_for_open(
     uint64_t                              fh_hash,
     const struct chimera_vfs_lease_owner *opener,
     uint8_t                               trigger_bits,
+    uint8_t                               retain_mode);
+
+/* Break-on-namespace-change: an unlink / delete-on-close / rename of an OPEN
+ * file recalls every OTHER holder's HANDLE cache down to retain_mode (R), strips
+ * an RqLs lease's H (a real mutation, unlike a mere conflicting open), and skips
+ * the requesting client's own lease (matched by opener). */
+void
+chimera_vfs_state_break_caching_for_namespace(
+    struct chimera_vfs_state             *state,
+    const uint8_t                        *fh,
+    uint8_t                               fh_len,
+    uint64_t                              fh_hash,
+    const struct chimera_vfs_lease_owner *opener,
     uint8_t                               retain_mode);

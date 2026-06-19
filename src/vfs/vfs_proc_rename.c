@@ -6,8 +6,59 @@
 #include "vfs_procs.h"
 #include "vfs_internal.h"
 #include "vfs_release.h"
+#include "vfs_mount_table.h"
 #include "common/misc.h"
 #include "common/macros.h"
+
+/*
+ * See vfs_proc_open.c for the rationale.  When `path` (slash-stripped, relative
+ * to the global vfs root) resolves into a path-only mount, copy out the mount's
+ * re-openable root fh and return the offset of the in-mount remainder.  Returns
+ * -1 when the target is not under a path-only mount.
+ */
+static int
+chimera_vfs_pathonly_rebase(
+    struct chimera_vfs_thread *thread,
+    const char                *path,
+    int                        pathlen,
+    uint8_t                   *r_root_fh,
+    int                       *r_root_fh_len)
+{
+    struct chimera_vfs_mount_table       *table = thread->vfs->mount_table;
+    struct chimera_vfs_mount_table_entry *entry;
+    uint32_t                              i;
+    int                                   offset = -1;
+
+    urcu_qsbr_read_lock();
+
+    for (i = 0; i < table->num_buckets && offset < 0; i++) {
+        entry = rcu_dereference(table->buckets[i]);
+        while (entry) {
+            struct chimera_vfs_mount *mount = entry->mount;
+
+            if (mount->pathlen <= (uint32_t) pathlen &&
+                memcmp(mount->path, path, mount->pathlen) == 0 &&
+                (mount->pathlen == (uint32_t) pathlen ||
+                 path[mount->pathlen] == '/') &&
+                chimera_vfs_module_is_path_only(mount->module)) {
+
+                memcpy(r_root_fh, mount->root_fh, mount->root_fh_len);
+                *r_root_fh_len = mount->root_fh_len;
+
+                offset = mount->pathlen;
+                while (offset < pathlen && path[offset] == '/') {
+                    offset++;
+                }
+                break;
+            }
+            entry = rcu_dereference(entry->next);
+        }
+    }
+
+    urcu_qsbr_read_unlock();
+
+    return offset;
+} /* chimera_vfs_pathonly_rebase */
 
 static void
 chimera_vfs_rename_op_complete(
@@ -266,6 +317,33 @@ chimera_vfs_rename(
         memcpy(request->rename.new_parent_fh, fh, fhlen);
         request->rename.new_parent_fh_len = fhlen;
 
+        /* Path-only backends have no target fh (no silly-rename); rename by full
+         * paths directly.  The backend returns EXDEV if the two parents are on
+         * different mounts. */
+        if (chimera_vfs_module_is_path_only(request->module)) {
+            request->rename.target_fh_len = 0;
+            chimera_vfs_rename_at(
+                thread,
+                cred,
+                request->rename.old_parent_fh,
+                request->rename.old_parent_fh_len,
+                request->rename.path,
+                request->rename.pathlen,
+                request->rename.new_parent_fh,
+                request->rename.new_parent_fh_len,
+                request->rename.new_path,
+                request->rename.new_pathlen,
+                NULL,
+                0,
+                0,
+                0,
+                NULL,  /* parent_lease_skip: path-only mount has no parent lease */
+                NULL,  /* op_handle */
+                chimera_vfs_rename_op_complete,
+                request);
+            return;
+        }
+
         /* Lookup the target to get its FH for silly rename optimization */
         chimera_vfs_lookup(
             thread,
@@ -278,7 +356,73 @@ chimera_vfs_rename(
             0,
             chimera_vfs_rename_fast_target_lookup_complete,
             request);
-    } else {
+        return;
+    }
+
+    /* Deep path crossing into a path-only mount: both paths must land in the
+     * SAME path-only mount.  Rebase onto the (shared) mount root and dispatch
+     * rename_at with the in-mount sub-paths; the path-only backend resolves the
+     * whole sub-paths in one operation (no child fh, no silly-rename). */
+    {
+        uint8_t old_root_fh[CHIMERA_VFS_FH_SIZE + 16];
+        uint8_t new_root_fh[CHIMERA_VFS_FH_SIZE + 16];
+        int     old_root_fh_len = 0;
+        int     new_root_fh_len = 0;
+        int     old_rebase, new_rebase;
+
+        old_rebase = chimera_vfs_pathonly_rebase(thread, request->rename.path,
+                                                 request->rename.pathlen,
+                                                 old_root_fh, &old_root_fh_len);
+
+        if (old_rebase >= 0 && old_rebase < request->rename.pathlen) {
+            new_rebase = chimera_vfs_pathonly_rebase(thread, request->rename.new_path,
+                                                     request->rename.new_pathlen,
+                                                     new_root_fh, &new_root_fh_len);
+
+            if (new_rebase >= 0 && new_rebase < request->rename.new_pathlen &&
+                old_root_fh_len == new_root_fh_len &&
+                memcmp(old_root_fh, new_root_fh, old_root_fh_len) == 0) {
+
+                request->rename.name_offset     = old_rebase;
+                request->rename.new_name_offset = new_rebase;
+
+                memcpy(request->rename.old_parent_fh, old_root_fh, old_root_fh_len);
+                request->rename.old_parent_fh_len = old_root_fh_len;
+                memcpy(request->rename.new_parent_fh, new_root_fh, new_root_fh_len);
+                request->rename.new_parent_fh_len = new_root_fh_len;
+
+                request->rename.target_fh_len = 0;
+
+                chimera_vfs_rename_at(
+                    thread,
+                    cred,
+                    request->rename.old_parent_fh,
+                    request->rename.old_parent_fh_len,
+                    request->rename.path + request->rename.name_offset,
+                    request->rename.pathlen - request->rename.name_offset,
+                    request->rename.new_parent_fh,
+                    request->rename.new_parent_fh_len,
+                    request->rename.new_path + request->rename.new_name_offset,
+                    request->rename.new_pathlen - request->rename.new_name_offset,
+                    NULL,
+                    0,
+                    0,
+                    0,
+                    NULL,  /* parent_lease_skip: path-only mount has no parent lease */
+                    NULL,  /* op_handle */
+                    chimera_vfs_rename_op_complete,
+                    request);
+                return;
+            }
+            /* TODO: old path is under a path-only mount but new path is not in
+             * the same path-only mount (cross-mount rename).  Fall through to
+             * the FH-relative fallback below, which will fail to resolve the
+             * intermediate path-only directories and surface an error; a proper
+             * cross-mount/EXDEV path-only rename is out of scope here. */
+        }
+    }
+
+    {
         /* Fallback: resolve both parent paths component-by-component */
 
         /* Split old path */

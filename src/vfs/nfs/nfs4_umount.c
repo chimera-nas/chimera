@@ -22,14 +22,15 @@ chimera_nfs4_umount(
 
     server->refcnt--;
 
-    /* Free session when last mount is removed.  Per-thread slot tables are
-     * freed in chimera_nfs_thread_destroy (they live on the server_threads). */
-    if (server->refcnt == 0 && server->nfs4_session) {
-        chimera_nfs4_session_pool_destroy(server->nfs4_session);
-        pthread_mutex_destroy(&server->nfs4_session->lock);
-        free(server->nfs4_session);
-        server->nfs4_session = NULL;
-    }
+    /*
+     * The server (and its persistent back-channel control connection) outlives
+     * an individual mount, so the NFSv4.1 session is kept alive here even when
+     * the last mount is removed: a subsequent mount of the same server reuses
+     * it (see chimera_nfs4_cb_control_doorbell).  Tearing it down on refcnt==0
+     * would force a CREATE_SESSION on remount while per-thread slot tables still
+     * reference the old session -- corrupting the slot pool.  The session and
+     * its slot pool are freed once, with the server, in chimera_nfs_destroy.
+     */
 
     pthread_mutex_unlock(&shared->lock);
 

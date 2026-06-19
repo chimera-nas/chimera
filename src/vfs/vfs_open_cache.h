@@ -36,6 +36,14 @@ struct vfs_open_cache {
     struct prometheus_counter_series *open_cache_insert;
 };
 
+#define CHIMERA_VFS_OPEN_CACHE_NO_BACKEND_OPEN (UINT64_MAX - 1)
+
+static inline int
+chimera_vfs_open_handle_needs_backend_close(const struct chimera_vfs_open_handle *handle)
+{
+    return !(handle->flags & CHIMERA_VFS_OPEN_HANDLE_NO_BACKEND_OPEN);
+} // chimera_vfs_open_handle_needs_backend_close
+
 /* --- Shard linked-list helpers --- */
 
 static inline void
@@ -321,11 +329,14 @@ chimera_vfs_open_cache_release(
                 struct chimera_vfs_module *close_module  = handle->vfs_module;
                 uint64_t                   close_private = handle->vfs_private;
                 uint64_t                   close_hash    = handle->fh_hash;
+                int                        needs_close   = chimera_vfs_open_handle_needs_backend_close(handle);
                 chimera_vfs_open_cache_free(shard, handle);
                 pthread_mutex_unlock(&shard->lock);
                 chimera_vfs_open_cache_release_blocked(thread, requests, error_code);
-                chimera_vfs_close(thread, close_module, close_private,
-                                  close_hash, NULL, NULL);
+                if (needs_close) {
+                    chimera_vfs_close(thread, close_module, close_private,
+                                      close_hash, NULL, NULL);
+                }
                 return;
             }
             handle->timestamp = chimera_vfs_now_ticks();
@@ -360,6 +371,76 @@ chimera_vfs_open_cache_dup(
     pthread_mutex_unlock(&shard->lock);
 
 } /* chimera_vfs_open_cache_dup */
+
+/* --- Evict by file handle --- */
+
+/*
+ * Evict the cached open handle for (fh, fhlen), closing it.  Intended for a
+ * backend that learns out-of-band that a cached handle must be relinquished --
+ * e.g. an SMB lease break, where the server is reclaiming a handle the client
+ * still caches and it must be closed so a conflicting operation can proceed.
+ *
+ * An idle handle (no current holders) is removed and closed immediately,
+ * mirroring the pending-close eviction in insert()/defer_close().  A handle
+ * still in use is detached: current holders keep working, but it is removed from
+ * the cache (never handed out again) and closes when the last holder releases.
+ *
+ * Shard-agnostic (scans every shard for the fh) so it does not depend on how the
+ * handle's fh_hash was derived; a file handle maps to a single cached handle, so
+ * the scan stops at the first match.  Called off the hot path (on a break), so
+ * the full scan is acceptable.
+ */
+static inline void
+chimera_vfs_open_cache_evict(
+    struct chimera_vfs_thread *thread,
+    struct vfs_open_cache     *cache,
+    const void                *fh,
+    uint32_t                   fhlen)
+{
+    uint32_t s;
+
+    for (s = 0; s <= cache->shard_mask; s++) {
+        struct vfs_open_cache_shard    *shard = &cache->shards[s];
+        struct chimera_vfs_open_handle *handle;
+
+        pthread_mutex_lock(&shard->lock);
+
+        for (handle = shard->handles; handle; handle = handle->bucket_next) {
+            if (handle->fh_len == fhlen && memcmp(handle->fh, fh, fhlen) == 0) {
+                break;
+            }
+        }
+
+        if (!handle) {
+            pthread_mutex_unlock(&shard->lock);
+            continue;
+        }
+
+        if (handle->opencnt == 0) {
+            /* Idle: remove from both lists and close (outside the lock). */
+            struct chimera_vfs_module *close_module  = handle->vfs_module;
+            uint64_t                   close_private = handle->vfs_private;
+            uint64_t                   close_hash    = handle->fh_hash;
+
+            DL_DELETE(shard->pending_close, handle);
+            chimera_vfs_open_cache_shard_remove(shard, handle);
+            shard->open_handles--;
+            chimera_vfs_open_cache_free(shard, handle);
+
+            pthread_mutex_unlock(&shard->lock);
+            chimera_vfs_close(thread, close_module, close_private,
+                              close_hash, NULL, NULL);
+        } else {
+            /* In use: detach now, close on the final release. */
+            chimera_vfs_open_cache_shard_remove(shard, handle);
+            shard->open_handles--;
+            handle->flags |= CHIMERA_VFS_OPEN_HANDLE_DETACHED;
+            pthread_mutex_unlock(&shard->lock);
+        }
+
+        return;   /* an fh maps to a single cached handle */
+    }
+} /* chimera_vfs_open_cache_evict */
 
 /* --- Close callback for eviction --- */
 
@@ -481,6 +562,11 @@ chimera_vfs_open_cache_acquire(
         handle->blocked_requests    = NULL;
         handle->doc_delete_on_close = 0;
 
+        if (handle->vfs_private == CHIMERA_VFS_OPEN_CACHE_NO_BACKEND_OPEN) {
+            handle->flags      |= CHIMERA_VFS_OPEN_HANDLE_NO_BACKEND_OPEN;
+            handle->vfs_private = 0;
+        }
+
         if (handle->vfs_private == UINT64_MAX) {
             handle->flags |= CHIMERA_VFS_OPEN_HANDLE_PENDING;
         }
@@ -501,15 +587,20 @@ chimera_vfs_open_cache_acquire(
             struct chimera_vfs_module *close_module  = existing->vfs_module;
             uint64_t                   close_private = existing->vfs_private;
             uint64_t                   close_hash    = existing->fh_hash;
+            int                        needs_close   = chimera_vfs_open_handle_needs_backend_close(existing);
 
             prometheus_counter_increment(shard->acquire);
 
             chimera_vfs_open_cache_free(shard, existing);
             pthread_mutex_unlock(&shard->lock);
 
-            chimera_vfs_close(thread, close_module, close_private,
-                              close_hash,
-                              chimera_vfs_open_cache_close_callback, handle);
+            if (needs_close) {
+                chimera_vfs_close(thread, close_module, close_private,
+                                  close_hash,
+                                  chimera_vfs_open_cache_close_callback, handle);
+            } else {
+                chimera_vfs_open_cache_close_callback(CHIMERA_VFS_OK, handle);
+            }
 
             return;
         } else {
@@ -575,6 +666,11 @@ chimera_vfs_open_cache_insert(
     handle->blocked_requests    = NULL;
     handle->doc_delete_on_close = 0;
 
+    if (handle->vfs_private == CHIMERA_VFS_OPEN_CACHE_NO_BACKEND_OPEN) {
+        handle->flags      |= CHIMERA_VFS_OPEN_HANDLE_NO_BACKEND_OPEN;
+        handle->vfs_private = 0;
+    }
+
     memcpy(handle->fh, fh, fhlen);
 
     /* Check for existing entry with same (fh, access_mode, cred) */
@@ -592,11 +688,14 @@ chimera_vfs_open_cache_insert(
             struct chimera_vfs_module *close_module  = existing->vfs_module;
             uint64_t                   close_private = existing->vfs_private;
             uint64_t                   close_hash    = existing->fh_hash;
+            int                        needs_close   = chimera_vfs_open_handle_needs_backend_close(existing);
 
             chimera_vfs_open_cache_free(shard, existing);
             pthread_mutex_unlock(&shard->lock);
-            chimera_vfs_close(thread, close_module, close_private,
-                              close_hash, NULL, NULL);
+            if (needs_close) {
+                chimera_vfs_close(thread, close_module, close_private,
+                                  close_hash, NULL, NULL);
+            }
             callback(request, handle);
             return;
         } else {
@@ -621,11 +720,14 @@ chimera_vfs_open_cache_insert(
                 struct chimera_vfs_module      *close_module  = victim->vfs_module;
                 uint64_t                        close_private = victim->vfs_private;
                 uint64_t                        close_hash    = victim->fh_hash;
+                int                             needs_close   = chimera_vfs_open_handle_needs_backend_close(victim);
 
                 chimera_vfs_open_cache_free(shard, victim);
                 pthread_mutex_unlock(&shard->lock);
-                chimera_vfs_close(thread, close_module, close_private,
-                                  close_hash, NULL, NULL);
+                if (needs_close) {
+                    chimera_vfs_close(thread, close_module, close_private,
+                                      close_hash, NULL, NULL);
+                }
                 callback(request, handle);
                 return;
             } else {

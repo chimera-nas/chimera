@@ -61,3 +61,16 @@ int smb_wbclient_identity_handler(
     const char                   *name,
     struct chimera_vfs_user      *out,
     void                         *private_data);
+
+// Authenticate a user via winbind using plaintext password
+// Returns: 0 on success, -1 on failure
+// sid_out should be at least SMB_WBCLIENT_SID_MAX_LEN bytes (can be NULL)
+int smb_wbclient_auth_password(
+    const char *username,
+    const char *domain,
+    const char *password,
+    uint32_t   *uid,
+    uint32_t   *gid,
+    uint32_t   *ngids,
+    uint32_t   *gids,
+    char       *sid_out);

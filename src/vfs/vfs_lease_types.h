@@ -274,6 +274,13 @@ struct chimera_vfs_pending_acquire {
     void                               *private_data;
     struct chimera_vfs_file_state      *file;
     bool                                queued;
+    /* Caller asked to block (wait==true).  A breakable conflict always queues
+     * regardless; this flag additionally keeps a RANGE-lease acquire queued on a
+     * HARD (DENIED) conflict with another owner's byte-range lock — an SMB2
+     * blocking lock (MS-SMB2 3.3.5.14) that must complete only once the
+     * conflicting range is released, not bounce back DENIED.  Without it a
+     * still-DENIED ticket would fire its callback at the next pump. */
+    bool                                wait;
     struct chimera_vfs_pending_acquire *prev;
     struct chimera_vfs_pending_acquire *next;
 };

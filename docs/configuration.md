@@ -125,6 +125,7 @@ the canonical place to set them.
 | `rest_https_port` | int | `0` | HTTPS port for the REST API (`0` = disabled). |
 | `rest_ssl_cert` | string | — | TLS certificate path. Auto-generated (self-signed) if HTTPS is enabled and this is unset. |
 | `rest_ssl_key` | string | — | TLS private-key path. Auto-generated alongside the cert if unset. |
+| `rest_auth_enabled` | bool | `true` | Require authentication (JWT Bearer token or HTTP Basic credentials) on all `/api/v1/*` endpoints. Set to `false` to disable auth entirely — only safe on a trusted/loopback-only management network. |
 | `soft_fail_bad_req` | bool | `false` | Return a soft error on a malformed REST request instead of dropping the connection. |
 
 See [Advanced and testing options](#advanced-and-testing-options) for a small set
@@ -367,7 +368,8 @@ The `config` object takes a `devices` array plus filesystem-level knobs.
 | `initialize` | flag | `false` | `mkfs` (format) the filesystem at mount. **Erases data.** |
 | `noatime` | bool | `false` | Disable atime updates. |
 | `mtime_defer_ms` | int (ms) | `1000` | Coalescing window for deferred mtime updates (`0` writes mtime on every write). |
-| `block_cache_blocks` | int | `32768` | Resident block-buffer cap (`0` = default; min ~24K). |
+| `intent_log_size` | int (bytes) | `1073741824` (1 GiB) | Size of the device-0 intent (redo) log; a larger log lets more redo records pipeline before the ring laps. Persisted in the superblock at format time (a remount uses the formatted value). Must fit device 0's first allocation group alongside the superblock and per-AG log; floored at 4 MiB. The block cache default scales with this. |
+| `block_cache_blocks` | int | `0` (2× the intent-log block count) | Resident block-buffer cap (`0` = default; floored at 1.5× the intent-log block count). |
 | `inode_cache_inodes` | int | `262144` | Resident inode cap (`0` = default). |
 | `block_layout` | bool | `false` | Source RFC 5663 pNFS **block** layouts (mutually exclusive with `scsi_layout`). |
 | `scsi_layout` | bool | `false` | Source RFC 8154 pNFS **SCSI** layouts (mutually exclusive with `block_layout`). |

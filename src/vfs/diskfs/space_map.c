@@ -76,6 +76,14 @@ struct sm_ag_jnl_slot {
     uint32_t idx;
 };
 
+static struct sm_ag *
+sm_free_resolve_ag(
+    struct space_map *sm,
+    uint32_t          device_id,
+    uint64_t          device_offset,
+    uint64_t          aligned,
+    const char       *who);
+
 /*
  * Claim the AG's log header + current delta block for an upcoming delta, BEFORE
  * any allocator state is mutated.  Caller holds ag->lock.  All disk access is
@@ -364,7 +372,8 @@ sm_ag_free_locked(
 struct space_map *
 space_map_create(
     const struct sm_device_cfg *cfg,
-    uint32_t                    num_devices)
+    uint32_t                    num_devices,
+    uint64_t                    intent_log_size)
 {
     struct space_map *sm;
     struct sm_device *dev;
@@ -376,10 +385,14 @@ space_map_create(
     sm_abort_if(num_devices == 0, "space_map_create with zero devices");
     sm_abort_if(cfg[0].role != SM_DEV_LOCAL,
                 "device 0 must be a local metadata device");
+    sm_abort_if(intent_log_size == 0 || (intent_log_size & SM_BLOCK_MASK),
+                "intent_log_size %lu must be a non-zero multiple of the block size",
+                intent_log_size);
 
-    sm              = calloc(1, sizeof(*sm));
-    sm->num_devices = num_devices;
-    sm->devices     = calloc(num_devices, sizeof(*sm->devices));
+    sm                  = calloc(1, sizeof(*sm));
+    sm->intent_log_size = intent_log_size;
+    sm->num_devices     = num_devices;
+    sm->devices         = calloc(num_devices, sizeof(*sm->devices));
     pthread_mutex_init(&sm->lock, NULL);
 
     /* Pass 1: size each device and count remote AGs so the relocated-log
@@ -412,7 +425,7 @@ space_map_create(
 
     /* The relocated remote-AG-log region sits on device 0, between the intent
      * log and AG 0's own space-map log.  Deterministic (device,ag)->slot map. */
-    region_base           = SM_SUPERBLOCK_SIZE + SM_INTENT_LOG_SIZE;
+    region_base           = SM_SUPERBLOCK_SIZE + sm->intent_log_size;
     sm->remote_log_offset = region_base;
     sm->remote_log_size   = (uint64_t) remote_ag_total * SM_AG_LOG_SIZE;
     reloc_cursor          = region_base;
@@ -461,7 +474,7 @@ space_map_create(
                  * AG's own log.  Then the bootstrap inode blocks after the log
                  * (block_idx 1=reserved, 2=root inode, 3..=orphan-list
                  * shards). */
-                uint64_t pre_log = SM_SUPERBLOCK_SIZE + SM_INTENT_LOG_SIZE +
+                uint64_t pre_log = SM_SUPERBLOCK_SIZE + sm->intent_log_size +
                     sm->remote_log_size;
                 uint64_t post_log = (2 + SM_BOOTSTRAP_ORPHAN_SLOTS) * SM_BLOCK_SIZE;
 
@@ -498,7 +511,7 @@ space_map_create(
     sm_info("Reserved intent log: device %u offset %lu size %lu",
             (unsigned) SM_INTENT_LOG_DEVICE,
             (uint64_t) SM_INTENT_LOG_OFFSET,
-            (uint64_t) SM_INTENT_LOG_SIZE);
+            sm->intent_log_size);
     sm_info("Per-AG log size: %lu (%u slots x %lu)",
             (uint64_t) SM_AG_LOG_SIZE,
             (unsigned) SM_AG_LOG_SLOT_COUNT,
@@ -614,6 +627,100 @@ sm_pick_and_alloc(
     return -1;
 } /* sm_pick_and_alloc */
 
+/*
+ * Volatile reservation: remove a range from the live in-memory free tree so
+ * concurrent allocators cannot reuse it, but do not journal it.  Callers must
+ * journal exact sub-allocations before exposing them durably.  Any unused tail
+ * can be returned with space_map_thread_cache_discard_volatile(); after a
+ * crash it was never removed from the persistent free map.
+ */
+static int
+sm_pick_and_reserve_volatile(
+    struct space_map *sm,
+    uint32_t          role,
+    uint64_t          want,
+    uint32_t         *r_device_id,
+    uint64_t         *r_device_offset)
+{
+    uint32_t start_dev, dev_id;
+    uint32_t d, a;
+
+    pthread_mutex_lock(&sm->lock);
+    start_dev = sm->device_rotor;
+    sm->device_rotor++;
+    if (sm->device_rotor >= sm->num_devices) {
+        sm->device_rotor = 0;
+    }
+    pthread_mutex_unlock(&sm->lock);
+
+    for (d = 0; d < sm->num_devices; d++) {
+        dev_id = (start_dev + d) % sm->num_devices;
+        struct sm_device *dev = &sm->devices[dev_id];
+        uint32_t          start_ag;
+
+        if (dev->role != role) {
+            continue;
+        }
+
+        pthread_mutex_lock(&sm->lock);
+        start_ag = dev->ag_rotor;
+        dev->ag_rotor++;
+        if (dev->ag_rotor >= dev->num_ags) {
+            dev->ag_rotor = 0;
+        }
+        pthread_mutex_unlock(&sm->lock);
+
+        for (a = 0; a < dev->num_ags; a++) {
+            uint32_t      ag_idx = (start_ag + a) % dev->num_ags;
+            struct sm_ag *ag     = &dev->ags[ag_idx];
+            uint64_t      offset;
+            int           rc;
+
+            if (ag->free_bytes < want) {
+                continue;
+            }
+
+            pthread_mutex_lock(&ag->lock);
+            rc = sm_ag_alloc_locked(ag, want, &offset);
+            pthread_mutex_unlock(&ag->lock);
+
+            if (rc == 0) {
+                *r_device_id     = dev_id;
+                *r_device_offset = offset;
+                return 0;
+            }
+        }
+    }
+
+    return -1;
+} /* sm_pick_and_reserve_volatile */
+
+static int
+space_map_journal_alloc_exact(
+    struct space_map        *sm,
+    const struct sm_journal *jnl,
+    uint32_t                 device_id,
+    uint64_t                 device_offset,
+    uint64_t                 length)
+{
+    struct sm_ag         *ag;
+    struct sm_ag_jnl_slot slot;
+    int                   jrc;
+
+    ag = sm_free_resolve_ag(sm, device_id, device_offset, length,
+                            "space_map_journal_alloc_exact");
+
+    pthread_mutex_lock(&ag->lock);
+    jrc = sm_ag_journal_claim(ag, jnl, &slot);
+    if (jrc == SM_AGAIN) {
+        pthread_mutex_unlock(&ag->lock);
+        return SM_AGAIN;
+    }
+    sm_ag_journal_write(ag, &slot, SM_AG_LOG_OP_ALLOC, device_offset, length);
+    pthread_mutex_unlock(&ag->lock);
+    return 0;
+} /* space_map_journal_alloc_exact */
+
 int
 space_map_reserve(
     struct space_map        *sm,
@@ -646,6 +753,22 @@ space_map_reserve(
     }
 
     want = need > floor ? need : floor;
+
+    /* Speculative over-reservation (want > need) batches future small writes by
+     * carving out a tail the caller keeps.  That tail is correct accounting --
+     * statfs counts it as used -- but on a near-full device it lets a single
+     * file privately corner the last free blocks: subsequent writes draw the
+     * cached tail on the fast path *without* re-checking the allocator, so they
+     * succeed even when the device truly has no free space (no ENOSPC).  Only
+     * speculate when the filesystem can comfortably afford it -- enough free
+     * that this reservation leaves at least another `want` behind.  Otherwise
+     * reserve exactly `need`, so every block a write consumes is drawn (and
+     * checked) against the live free pool and ENOSPC surfaces correctly.  This
+     * runs on the (already heavyweight, journaling) refill path, not the cache
+     * fast path, so the free-bytes scan is off the hot path. */
+    if (want > need && space_map_free_bytes(sm) < 2 * want) {
+        want = need;
+    }
 
     /* A reservation can't cross an AG boundary, so cap at the AG size; a
      * caller needing more than SM_AG_SIZE contiguous cannot be satisfied. */
@@ -713,6 +836,65 @@ space_map_alloc(
     }
     return 0;
 } /* space_map_alloc */
+
+int
+space_map_alloc_volatile_reservation(
+    struct space_map        *sm,
+    struct sm_thread_cache  *cache,
+    const struct sm_journal *jnl,
+    uint32_t                 role,
+    uint64_t                 size,
+    uint64_t                 floor,
+    uint32_t                *r_device_id,
+    uint64_t                *r_device_offset)
+{
+    uint64_t need = SM_ALIGN_UP(size);
+    uint64_t want;
+    int      rc;
+
+    sm_abort_if(need == 0, "alloc of zero bytes");
+
+    if (!cache->valid || cache->length < need) {
+        space_map_thread_cache_discard_volatile(sm, cache);
+
+        want = need > floor ? need : floor;
+        if (want > SM_AG_SIZE) {
+            return -1;
+        }
+
+        rc = sm_pick_and_reserve_volatile(sm, role, want,
+                                          &cache->device_id, &cache->offset);
+        if (rc != 0 && want != need) {
+            rc = sm_pick_and_reserve_volatile(sm, role, need,
+                                              &cache->device_id, &cache->offset);
+            if (rc == 0) {
+                cache->length = need;
+                cache->valid  = 1;
+            }
+        } else if (rc == 0) {
+            cache->length = want;
+            cache->valid  = 1;
+        }
+        if (rc != 0) {
+            return rc;
+        }
+    }
+
+    rc = space_map_journal_alloc_exact(sm, jnl, cache->device_id,
+                                       cache->offset, need);
+    if (rc == SM_AGAIN) {
+        return SM_AGAIN;
+    }
+
+    *r_device_id     = cache->device_id;
+    *r_device_offset = cache->offset;
+    cache->offset   += need;
+    cache->length   -= need;
+    if (cache->length == 0) {
+        cache->valid = 0;
+    }
+    return 0;
+} /* space_map_alloc_volatile_reservation */
 
 /* Resolve and validate the AG owning [device_offset, device_offset+aligned). */
 static struct sm_ag *
@@ -879,6 +1061,21 @@ space_map_thread_cache_return(
 } /* space_map_thread_cache_return */
 
 void
+space_map_thread_cache_discard_volatile(
+    struct space_map       *sm,
+    struct sm_thread_cache *cache)
+{
+    if (!cache->valid || cache->length == 0) {
+        cache->valid = 0;
+        return;
+    }
+
+    space_map_free_apply(sm, cache->device_id, cache->offset, cache->length);
+    cache->valid  = 0;
+    cache->length = 0;
+} /* space_map_thread_cache_discard_volatile */
+
+void
 space_map_fill_superblock(
     struct space_map *sm,
     void             *buf,
@@ -902,7 +1099,7 @@ space_map_fill_superblock(
     sb->num_devices        = sm->num_devices;
     sb->intent_log_device  = SM_INTENT_LOG_DEVICE;
     sb->intent_log_offset  = SM_INTENT_LOG_OFFSET;
-    sb->intent_log_size    = SM_INTENT_LOG_SIZE;
+    sb->intent_log_size    = sm->intent_log_size;
     sb->flags              = flags;
     sb->root_inum          = root_inum;
     sb->root_gen           = root_gen;

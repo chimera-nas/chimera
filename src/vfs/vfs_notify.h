@@ -217,6 +217,17 @@ chimera_vfs_notify_drain(
     int                             *overflowed);
 
 /*
+ * Mark a watch as overflowed so the next drain reports STATUS_NOTIFY_ENUM_DIR.
+ * Used by the SMB layer when a set of drained events cannot be delivered in the
+ * client's OutputBufferLength: the events are dropped and the client must
+ * rescan, so the *next* CHANGE_NOTIFY on the handle must also report overflow
+ * (MS-SMB2 / smb2.notify.valid-req).
+ */
+void
+chimera_vfs_notify_mark_overflow(
+    struct chimera_vfs_notify_watch *watch);
+
+/*
  * Atomically read and clear a watch's "deleted" flag.  Returns non-zero if
  * the watched object had been removed since the last call.  The SMB layer
  * polls this alongside drain to complete a pending CHANGE_NOTIFY with

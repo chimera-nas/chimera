@@ -76,15 +76,48 @@ run_smbtorture(
     const char *converter = getenv("SMBTORTURE_JUNIT_CONVERTER");
     char        capfile[512];
 
+    /* Advertise server-side-copy resume-key support only for the memfs backend,
+     * the one against which the smb2.ioctl.copy_chunk family is verified.  With
+     * resume_key_support=no smbtorture self-skips the whole copy_chunk family, so
+     * memfs needs "yes" to actually exercise the COPYCHUNK conformance path; the
+     * other backends stay "no" until their copy_range coverage is validated. */
+    const char *resume_key = (strcmp(backend, "memfs") == 0) ? "yes" : "no";
+
+    /* SMB3 signing-algorithm offer.  The smb2.session.signing-* and
+     * session.encryption-* subtests skip unless the server negotiated signing
+     * >= AES-128-GMAC, so offer GMAC (preferred) for those.
+     *
+     * The bind_negative_smb3sign / smb3sne family exercises session-bind
+     * signing-algorithm mismatches.  chimera currently implements only the
+     * non-GMAC-session-bound-from-a-GMAC-connection direction (the *toG cases
+     * -- CtoG/HtoG/C30toG/sneCtoG/sneHtoG -- which MS-SMB2 3.3.5.5 rejects with
+     * STATUS_NOT_SUPPORTED), so offer GMAC only for those (every *toG name
+     * carries the "toG" substring; none of the unimplemented reverse "Gto*"
+     * REQUEST_OUT_OF_SEQUENCE or CMAC<->HMAC cross-bind cases do).  The
+     * remainder keep AES-128-CMAC and so stay skipped rather than un-skipping
+     * into a failure; implementing them is a follow-up.  smb2.session is
+     * force-isolated (one daemon per subtest) so this scopes per-test. */
+    const char *sign_algos = "aes-128-cmac";
+
+    for (i = 0; i < num_tests; i++) {
+        if (strstr(tests[i], "session.signing") != NULL ||
+            strstr(tests[i], "session.encryption") != NULL ||
+            (strstr(tests[i], "bind_negative_smb3s") != NULL &&
+             strstr(tests[i], "toG") != NULL)) {
+            sign_algos = "aes-128-gmac, aes-128-cmac, hmac-sha256";
+            break;
+        }
+    }
+
     /* Size the command buffer to the base options plus every test name: a
      * consolidated suite run passes dozens, which overflowed the old fixed
      * buffer (the truncating snprintf underflowed sizeof()-off and aborted). */
-    size_t      cap = 1024 + (session_dir ? strlen(session_dir) : 0);
+    size_t cap = 1024 + (session_dir ? strlen(session_dir) : 0);
 
     for (i = 0; i < num_tests; i++) {
         cap += strlen(tests[i]) + 4;
     }
-    char       *cmd = malloc(cap);
+    char  *cmd = malloc(cap);
     if (!cmd) {
         return -1;
     }
@@ -95,7 +128,7 @@ run_smbtorture(
                    "smbtorture //127.0.0.1/share"
                    " -U myuser%%mypassword"
                    " --option=torture:samba3=yes"
-                   " --option=torture:resume_key_support=no"
+                   " --option=torture:resume_key_support=%s"
                    /* Provide the parameters that several suites abort
                     * without, so the real protocol logic runs instead of
                     * a "missing option" bail-out:
@@ -106,7 +139,23 @@ run_smbtorture(
                    " --option=torture:offset=0"
                    " --option=torture:beyond_final_zero=4096"
                    " --option=torture:acl_xattr_name=user.NTACL"
-                   " --option='client smb3 signing algorithms=aes-128-cmac'"
+                   /* Block a client transport with iptables (the default method
+                    * is an FSCTL_SMBTORTURE control op only Samba implements).
+                    * Tests that need to simulate an unresponsive transport
+                    * (smb2.replay.dhv2-pending3*, multichannel, some oplock/lease)
+                    * drop the connection's packets in their own private netns;
+                    * every test runs in a fresh netns the wrapper deletes on
+                    * exit, so the rules cannot leak between tests.  The default
+                    * iptables_command (/usr/sbin/iptables) is correct here. */
+                   " --option=torture:use_iptables=yes"
+                   /* smb2.lock.open-brlock-deadlock self-skips without the
+                    * deadlock timeout it uses to bound the blocking-lock wait;
+                    * the option is specific to that test. */
+                   " --option=torture:open_brlock_deadlock_timemout=2"
+                   /* SMB3 signing algorithms the client offers (see sign_algos
+                    * above): GMAC-first only for the signing/encryption subtests
+                    * that require it, CMAC otherwise. */
+                   " --option='client smb3 signing algorithms=%s'"
                    /* Fixed randomizer seed: several suites derive inputs from
                     * rand() with boundary hazards -- smb2.replay.channel-
                     * sequence's csn_rand_low/high table entries can draw
@@ -118,7 +167,8 @@ run_smbtorture(
                     * randomized input deterministic, so a suite that passes
                     * once passes always. */
                    " --seed=4242"
-                   " --fullname");
+                   " --fullname",
+                   resume_key, sign_algos);
 
     /* samba3misc's localposixlock test needs the share's on-disk path so
      * it can take a POSIX lock directly.  Only the passthrough backends
@@ -452,6 +502,9 @@ main(
         /* unsafe_async: this test does not exercise crash recovery, so skip FUA/sync
          * on writes to run lighter. */
         json_object_set_new(cfg, "unsafe_async", json_true());
+        /* Small intent log to fit the 1 GiB test devices (the production-default
+         * 1 GiB log would not fit the AG-0 metadata reservation). */
+        json_object_set_new(cfg, "intent_log_size", json_integer(64 * 1024 * 1024));
         /* smb2.maxfid keeps 65520 file handles open across ~256 inode-cache
          * shards; the inode home blocks stay pinned by the open handles and
          * concurrent close traffic also pins LOGGED blocks (held until tail
@@ -514,12 +567,19 @@ main(
         }
     }
 
-    /* The bind_negative_smb3enc* cases connect with encryption REQUIRED on the
-     * client credentials, so the server must actually support SMB3 transport
-     * encryption for the connection to come up at all.  Enable it only for
-     * those cases — every other suite runs with the default (off). */
+    /* The session.encryption, bind_negative_smb3enc and anon-encryption cases
+     * connect with encryption REQUIRED on the client credentials, so the server
+     * must actually support SMB3 transport encryption for the connection to come
+     * up at all.  Enable it only for those cases; every other suite runs with
+     * the default (off).  smb2.session is force-isolated (one daemon per
+     * subtest, SMBTORTURE_ISOLATE_SUITES) so this never bleeds into a subtest
+     * that asserts unencrypted behaviour such as reconnect2. */
     for (i = 0; i < num_tests; i++) {
-        if (strstr(tests[i], "bind_negative_smb3enc") != NULL) {
+        if (strstr(tests[i], "bind_negative_smb3enc") != NULL ||
+            (strstr(tests[i], "bind_negative_smb3s") != NULL &&
+             strstr(tests[i], "toG") != NULL) ||
+            strstr(tests[i], "session.encryption") != NULL ||
+            strstr(tests[i], "anon-encryption") != NULL) {
             chimera_server_config_set_smb_encryption(config, 1);
             break;
         }

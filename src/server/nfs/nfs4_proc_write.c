@@ -86,6 +86,35 @@ chimera_nfs4_write_open_callback(
     req->handle      = handle;
     req->args_write4 = args;
 
+    if (req->io_owner_from_deleg) {
+        /* A delegation-authorized write: present the delegation holder's own
+         * lease owner (same protocol/client/fh as the CACHING lease created at
+         * OPEN) so the VFS I/O path recognises the writer as the delegation
+         * holder and does not recall the client's own delegation.  Other
+         * (anonymous-stateid / pNFS-DS) on-the-fly writes keep the implicit
+         * lease so they still recall *other* clients' conflicting leases. */
+        struct chimera_vfs_lease_owner io_owner = {
+            .protocol   = CHIMERA_VFS_LEASE_PROTO_NFSV4,
+            .client_key = req->session->client_unified->client_id,
+            .owner_lo   = handle->fh_hash,
+            .owner_hi   = 0,
+        };
+
+        chimera_vfs_write_owned(req->thread->vfs_thread, &req->cred,
+                                handle,
+                                args->offset,
+                                args->data.length,
+                                args->stable,       /* 3-level requested stability */
+                                0,
+                                0,
+                                args->data.iov,
+                                args->data.niov,
+                                &io_owner,
+                                chimera_nfs4_write_complete,
+                                req);
+        return;
+    }
+
     chimera_vfs_write(req->thread->vfs_thread, &req->cred,
                       handle,
                       args->offset,
@@ -186,8 +215,9 @@ chimera_nfs4_write(
     struct nfs_open_state          *open_state;
     nfsstat4                        status;
 
-    req->nfs_state_ref = NULL;
-    req->handle        = NULL;
+    req->nfs_state_ref       = NULL;
+    req->handle              = NULL;
+    req->io_owner_from_deleg = false;
 
     /* NFS4.1 current-stateid substitution (RFC 8881 §16.2.3.1.2). */
     chimera_nfs4_resolve_current_stateid(req, &args->stateid);
@@ -277,6 +307,11 @@ chimera_nfs4_write(
             return;
         }
         req->args_write4 = args;
+        /* This write is authorized by the client's own (write) delegation:
+         * carry the holder's lease owner on the on-the-fly write so it does
+         * not recall the client's own delegation. */
+        req->io_owner_from_deleg = (req->session &&
+                                    req->session->client_unified);
         chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
                             req->fh,
                             req->fhlen,

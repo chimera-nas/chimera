@@ -81,6 +81,19 @@ chimera_nfs4_xattr_supported(
     const void                *fh,
     int                        fhlen)
 {
+    /*
+     * The NFSv4 pseudo-root ("CHIMERA NFS4 ROOT FH", see nfs4_procs.h) is a
+     * synthetic gateway to the exported filesystems and has no backing VFS
+     * module, so chimera_vfs_module_capabilities() reports nothing for it.
+     * RFC 8276 clients probe FATTR4_XATTR_SUPPORT on the PUTROOTFH handle, so
+     * report TRUE there to reflect that the server implements xattrs (its real
+     * backends do); returning FALSE on the very root the client first sees
+     * would wrongly signal that the whole export tree lacks xattr support.
+     */
+    if (fhlen == 21 && memcmp(fh, "CHIMERA NFS4 ROOT FH", 21) == 0) {
+        return 1;
+    }
+
     return (chimera_vfs_module_capabilities(vfs_thread, fh, fhlen) &
             CHIMERA_VFS_CAP_XATTR) ? 1 : 0;
 } /* chimera_nfs4_xattr_supported */
@@ -206,9 +219,20 @@ chimera_nfs4_mask2attr(
 {
     int max_word_used = 0;
 
-    memset(rsp_mask, 0, sizeof(uint32_t) * num_req_mask);
+    /*
+     * num_req_mask is the client-supplied request bitmap length and is
+     * unbounded (the XDR decoder does not cap it).  This routine only ever
+     * reports attributes that live in bitmap words 0 and 1, and every caller
+     * allocates a 4-word response buffer, so clear exactly the two words we may
+     * write rather than sizing the memset by num_req_mask -- the latter is a
+     * heap overflow of rsp_mask (e.g. SETATTR with num_attrmask=100 would zero
+     * 400 bytes into a 16-byte allocation).  Likewise, only index req_mask
+     * within its declared length: reads of word 1 require num_req_mask >= 2.
+     */
+    rsp_mask[0] = 0;
+    rsp_mask[1] = 0;
 
-    if (num_req_mask >= 1 &&
+    if (num_req_mask >= 2 &&
         (req_mask[1] & (1 << (FATTR4_MODE - 32))) &&
         (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE)) {
         rsp_mask[1]  |= (1 << (FATTR4_MODE - 32));

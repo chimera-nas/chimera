@@ -7,7 +7,14 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+/* Per-component filename limit (MS-FSA ComponentMaxLength, 255 chars). */
 #define SMB_FILENAME_MAX                              255
+
+/* Full-pathname buffer limit. An SMB2 CREATE/rename name is the whole path
+ * relative to the share root (which may span many components), so it must not
+ * be bounded by the per-component limit. Matches the VFS path ceiling
+ * (CHIMERA_VFS_PATH_MAX / Linux PATH_MAX). */
+#define SMB_PATH_MAX                                  4096
 
 
 #define SMB2_DIALECT_2_0_2                            0x0202
@@ -1034,6 +1041,25 @@ typedef uint8_t smb2_guid[SMB2_GUID_SIZE];
 #define SMB2_FSCTL_CREATE_OR_GET_OBJECT_ID          0x000900C0
 #define SMB2_FSCTL_SRV_ENUMERATE_SNAPSHOTS          0x00144064
 #define SMB2_FSCTL_LMR_REQUEST_RESILIENCY           0x001401D4
+#define SMB2_FSCTL_DUPLICATE_EXTENTS_TO_FILE        0x00098344
+#define SMB2_FSCTL_OFFLOAD_READ                     0x00094264
+#define SMB2_FSCTL_OFFLOAD_WRITE                    0x00098268
+#define SMB2_FSCTL_FILE_LEVEL_TRIM                  0x00098208
+#define SMB2_FSCTL_GET_INTEGRITY_INFORMATION        0x0009027C
+#define SMB2_FSCTL_SET_INTEGRITY_INFORMATION        0x0009C280
+
+/* ODX offload-token sizing (MS-FSCC 2.3.79.1 STORAGE_OFFLOAD_TOKEN):
+ * TokenType(4) + Reserved(2) + TokenIdLength(2) + TokenId(504) = 512 bytes.
+ * We mint a vendor token whose TokenId carries the source identity (see
+ * smb_proc_copyoffload.c).  The OFFLOAD_READ/WRITE output buffers are the
+ * fixed-size structs around it. */
+#define SMB2_OFFLOAD_TOKEN_SIZE                     512
+#define SMB2_OFFLOAD_TOKEN_ID_SIZE                  504
+#define SMB2_FSCTL_OFFLOAD_READ_OUTPUT_SIZE         (16 + SMB2_OFFLOAD_TOKEN_SIZE) /* Size(4)+Flags(4)+TransferLength(8)+Token */
+#define SMB2_FSCTL_OFFLOAD_WRITE_OUTPUT_SIZE        16                             /* Size(4)+Flags(4)+LengthWritten(8) */
+/* Vendor token type for our self-describing token (not a Windows-defined value;
+ * the client treats the token as opaque). */
+#define SMB2_OFFLOAD_TOKEN_TYPE_CHIMERA             0x43484d31U                    /* "CHM1" */
 
 /* Server policy for FSCTL_LMR_REQUEST_RESILIENCY: a Timeout of 0 selects the
  * default; any larger request is capped at the maximum (MS-SMB2 3.3.5.15.9). */
@@ -1117,7 +1143,9 @@ typedef uint8_t smb2_guid[SMB2_GUID_SIZE];
 #define SMB2_FS_ATTR_CASE_SENSITIVE_SEARCH          0x00000001
 #define SMB2_FS_ATTR_CASE_PRESERVED_NAMES           0x00000002
 #define SMB2_FS_ATTR_UNICODE_ON_DISK                0x00000004
+#define SMB2_FS_ATTR_SUPPORTS_SPARSE_FILES          0x00000040
 #define SMB2_FS_ATTR_SUPPORTS_REPARSE_POINTS        0x00000080
+#define SMB2_FS_ATTR_SUPPORTS_BLOCK_REFCOUNTING     0x08000000
 
 /*
  * FileAllInformation includes all the following structures:

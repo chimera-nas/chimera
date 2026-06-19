@@ -109,8 +109,9 @@ generate_config() {
             fi
             # nfstest_alloc fills the device to exercise ENOSPC, so give it a
             # small bounded backing (a local device's capacity is its file size);
-            # other tools get the usual 10x1 GiB.  Keep each device >= 1 AG
-            # (1 GiB metadata needs >64 MiB) -- 128 MiB works.
+            # other tools get the usual 10x1 GiB.  Device 0 must hold the AG 0
+            # metadata reservation: intent_log_size (64 MiB below) + the per-AG
+            # log (8 MiB) + bootstrap -- so 128 MiB leaves room to fill.
             local dev_count=10
             local dev_bytes="1G"
             if [ "$NFSTEST_PROGRAM" = "nfstest_alloc" ]; then
@@ -130,7 +131,7 @@ generate_config() {
             BACKEND="diskfs"
             vfs_section="\"vfs\": {
                 \"diskfs\": {
-                    \"config\": {\"initialize\":true,\"devices\":[$devices_json],\"unsafe_async\":true}
+                    \"config\": {\"initialize\":true,\"devices\":[$devices_json],\"unsafe_async\":true,\"intent_log_size\":67108864}
                 }
             },"
             ;;
@@ -214,6 +215,13 @@ case "$NFS_VERSION" in
     *)   NFSTEST_VERSION="$NFS_VERSION" ;;
 esac
 
+# nfstest_dio rejects a mount whose rsize/wsize is smaller than 3x its own
+# I/O size, so the default rsize=4096,wsize=4096 aborts it; give dio a large
+# transfer size instead.
+if [ "$NFSTEST_PROGRAM" = "nfstest_dio" ]; then
+    NFSTEST_MTOPTS="hard,rsize=1048576,wsize=1048576"
+fi
+
 # nfstest_interop drives its own mounts at several NFS versions (including v3),
 # so force nolock for it regardless of the top-level version.
 if [ "$NFSTEST_PROGRAM" = "nfstest_interop" ]; then
@@ -243,6 +251,35 @@ if [ "$NFSTEST_PROGRAM" = "nfstest_alloc" ]; then
     NFSTEST_EXTRA="${NFSTEST_EXTRA} --runtest ^perf01"
 fi
 
+# nfstest_ssc: chimera implements NFSv4.2 COPY (intra-server), and every COPY
+# mechanic the suite checks -- handles, stateids, offsets, byte count, sync
+# reply, committed level, and that the copied data is correct -- passes.  But
+# each *data-copying* test then asserts "READs should not be sent to the server
+# after the COPY", i.e. that the client serves the post-copy verify read from
+# cache.  The Linux client's copy_file_range unconditionally invalidates the
+# destination page cache (nfs42_copy_dest_done -> truncate_pagecache_range), so
+# that read always goes to the wire -- against any server, knfsd included.  That
+# assertion tests client behaviour, not the server, so restrict the suite to the
+# subset that does not make it: the COPY error/edge cases (bad opens, offsets at
+# or beyond EOF) plus the zero-byte copy, which still exercise the COPY op path
+# and its error handling.  Inter-server tests need a second server and are
+# excluded by selecting only the intra cases.
+if [ "$NFSTEST_PROGRAM" = "nfstest_ssc" ]; then
+    NFSTEST_EXTRA="${NFSTEST_EXTRA} --runtest intra06,intra09,intra10,intra11,intra13"
+fi
+
+# nfstest_xattr's delegation tests (the d* group: dgetxattr/dsetxattr/
+# dremovexattr/dlistxattr) take a read delegation on a *second* client and
+# assert a CB_RECALL fires when the first client mutates an xattr.  That needs a
+# second NFS client host (which this single-guest harness has not got) plus
+# protocol delegations; without them nfstest dereferences a missing recall
+# packet and aborts.  Skip those groups; the base + negative (n*) xattr tests
+# still run.  (--runtest negation is a single leading '^' on a comma list of
+# names; group names are expanded to their member tests.)
+if [ "$NFSTEST_PROGRAM" = "nfstest_xattr" ]; then
+    NFSTEST_EXTRA="${NFSTEST_EXTRA} --runtest ^dgetxattr,dsetxattr,dremovexattr,dlistxattr"
+fi
+
 # nfstest_sparse's per-lseek trace windows are the tightest (one SEEK each), so
 # give tcpdump extra time to flush before the trace is stopped.
 if [ "$NFSTEST_PROGRAM" = "nfstest_sparse" ]; then
@@ -259,9 +296,11 @@ TEST_CMD="mkdir -p /mnt/t && PYTHONPATH=/opt/nfstest /opt/nfstest/test/${NFSTEST
 # analyses the whole packet trace in memory and its fill/dealloc subtests
 # generate large traces.
 QEMU_MEM="1G"
-if [ "$NFSTEST_PROGRAM" = "nfstest_alloc" ]; then
-    QEMU_MEM="8G"
-fi
+case "$NFSTEST_PROGRAM" in
+    # nfstest_alloc analyses the whole packet trace in memory; nfstest_dio drives
+    # 1 MiB direct-I/O transfers whose traces and buffers blow past 1 GiB.
+    nfstest_alloc | nfstest_dio) QEMU_MEM="8G" ;;
+esac
 
 # Boot QEMU inside the netns; the guest's /init.sh runs test_cmd (no pre-mount).
 ip netns exec "${NETNS_NAME}" "$QEMU_BIN" \

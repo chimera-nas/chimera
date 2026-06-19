@@ -13,6 +13,11 @@
 #define DCE_RPC_PTYPE_PING               0x01     /* keepalive/probe (rare over SMB) */
 #define DCE_RPC_PTYPE_RESPONSE           0x02     /* normal call response */
 #define DCE_RPC_PTYPE_FAULT              0x03     /* call failed; carries nca_s_* status */
+
+/* Handler negative-return sentinels selecting the DCE/RPC fault status emitted
+ * by dce_rpc().  Any negative other than CONTEXT_MISMATCH yields the default
+ * nca_s_op_rng_error (e.g. an unknown opnum returning -1). */
+#define DCE_RC_FAULT_CONTEXT_MISMATCH    (-2)
 #define DCE_RPC_PTYPE_WORKING            0x04     /* server is processing (progress hint) */
 #define DCE_RPC_PTYPE_NOCALL             0x05     /* server didn’t match the call (legacy) */
 #define DCE_RPC_PTYPE_REJECT             0x06     /* association/call rejected */
@@ -332,18 +337,24 @@ dce_rpc(
             rc = handler(request_call.opnum, &input_cursor, outputp, private_data);
 
             if (unlikely(rc < 0)) {
-                /* Unknown or failed opnum: reply with a DCE/RPC fault rather
-                 * than dropping the connection, so the client receives a clean
-                 * nca_s_op_rng_error and the association stays usable.  The
-                 * response header already written (alloc_hint/p_cont_id/
-                 * cancel_count/reserved) matches the fault PDU's leading
-                 * fields; append the 32-bit status and a reserved word. */
+                /* A failed call replies with a DCE/RPC fault rather than dropping
+                 * the connection, so the client receives a clean nca_s_* status
+                 * and the association stays usable.  The handler selects the
+                 * fault via its negative return: DCE_RC_FAULT_CONTEXT_MISMATCH
+                 * (a bad/foreign context handle) maps to
+                 * nca_s_fault_context_mismatch; anything else (e.g. an unknown
+                 * opnum) to nca_s_op_rng_error.  The response header already
+                 * written (alloc_hint/p_cont_id/cancel_count/reserved) matches
+                 * the fault PDU's leading fields; append the status + a reserved
+                 * word. */
                 uint32_t *faultp = outputp;
 
                 reply_common->ptype = DCE_RPC_PTYPE_FAULT;
-                faultp[0]           = 0x1C010002; /* nca_s_op_rng_error */
-                faultp[1]           = 0;          /* reserved / pad */
-                outputp            += 2 * sizeof(uint32_t);
+                faultp[0]           = (rc == DCE_RC_FAULT_CONTEXT_MISMATCH)
+                                      ? 0x1C00001A  /* nca_s_fault_context_mismatch */
+                                      : 0x1C010002; /* nca_s_op_rng_error */
+                faultp[1] = 0;                    /* reserved / pad */
+                outputp  += 2 * sizeof(uint32_t);
 
                 reply_call->alloc_hint = 0;
                 reply_common->frag_len = (uint16_t) ((char *) outputp - (char *) reply_common);

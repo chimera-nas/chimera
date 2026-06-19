@@ -89,7 +89,7 @@ nfs3_drc_checksum(
     return nfs3_drc_fnv_accum(NFS3_DRC_FNV_OFFSET, data, len);
 } /* nfs3_drc_checksum */
 
-static uint64_t
+uint64_t
 nfs3_drc_checksum_iov(
     const xdr_iovec *iov,
     int              niov)
@@ -105,7 +105,7 @@ nfs3_drc_checksum_iov(
 
 /* Source IP with the ephemeral port stripped (stable across the reconnect a
  * retransmit rides in on).  Returns the address length written into out. */
-static uint8_t
+uint8_t
 nfs3_drc_client_addr(
     struct evpl_rpc2_conn *conn,
     uint8_t               *out)
@@ -286,7 +286,7 @@ nfs3_drc_cache_lookup(
 * ------------------------------------------------------------------ */
 
 struct nfs3_drc_kv_ctx {
-    uint8_t  key[CHIMERA_KV_NFS3_REPLY_KEY_MAX];
+    uint8_t  key[CHIMERA_KV_CONN_REPLY_KEY_MAX];
     uint32_t key_len;
     uint8_t *value;
     uint32_t value_len;
@@ -307,6 +307,7 @@ nfs3_drc_kv_done(
 static void
 nfs3_drc_kv_put(
     struct chimera_vfs_thread    *vfs_thread,
+    uint8_t                       kv_type,
     const struct nfs3_drc_keybuf *key,
     const void                   *body,
     uint32_t                      body_len,
@@ -314,8 +315,9 @@ nfs3_drc_kv_put(
 {
     struct nfs3_drc_kv_ctx *ctx = malloc(sizeof(*ctx));
 
-    ctx->key_len = nfs_kv_nfs3_reply_key(ctx->key, key->addr, key->addr_len,
-                                         key->proc, key->xid, key->cksum);
+    ctx->key_len = nfs_kv_conn_reply_key(ctx->key, kv_type, key->addr,
+                                         key->addr_len, key->proc, key->xid,
+                                         key->cksum);
     ctx->value     = malloc(NFS3_DRC_VALUE_HDR_LEN + body_len);
     ctx->value_len = nfs3_drc_value_serialize(ctx->value,
                                               NFS3_DRC_VALUE_HDR_LEN + body_len,
@@ -328,14 +330,16 @@ nfs3_drc_kv_put(
 static void
 nfs3_drc_kv_delete(
     struct chimera_vfs_thread    *vfs_thread,
+    uint8_t                       kv_type,
     const struct nfs3_drc_keybuf *key)
 {
     struct nfs3_drc_kv_ctx *ctx = malloc(sizeof(*ctx));
 
     ctx->value     = NULL;
     ctx->value_len = 0;
-    ctx->key_len   = nfs_kv_nfs3_reply_key(ctx->key, key->addr, key->addr_len,
-                                           key->proc, key->xid, key->cksum);
+    ctx->key_len   = nfs_kv_conn_reply_key(ctx->key, kv_type, key->addr,
+                                           key->addr_len, key->proc, key->xid,
+                                           key->cksum);
 
     chimera_vfs_delete_key(vfs_thread, ctx->key, ctx->key_len,
                            nfs3_drc_kv_done, ctx);
@@ -347,6 +351,7 @@ nfs3_drc_kv_delete(
 
 struct nfs3_drc_capture_ctx {
     struct chimera_server_nfs_thread *thread;
+    struct nfs3_drc                  *drc;
     struct nfs3_drc_keybuf            key;
 };
 
@@ -359,7 +364,7 @@ nfs3_drc_capture_reply(
 {
     struct nfs3_drc_capture_ctx      *ctx    = private_data;
     struct chimera_server_nfs_thread *thread = ctx->thread;
-    struct nfs3_drc                  *drc    = &thread->shared->nfs3_drc;
+    struct nfs3_drc                  *drc    = ctx->drc;
     struct nfs3_drc_keybuf            evicted[NFS3_DRC_EVICT_MAX];
     uint8_t                          *buf;
     size_t                            offset = 0;
@@ -384,9 +389,10 @@ nfs3_drc_capture_reply(
     pthread_mutex_unlock(&drc->lock);
 
     if (!drc->persistence_disabled) {
-        nfs3_drc_kv_put(thread->vfs_thread, &ctx->key, buf, total_length, ts);
+        nfs3_drc_kv_put(thread->vfs_thread, drc->kv_type, &ctx->key, buf,
+                        total_length, ts);
         for (i = 0; i < nev; i++) {
-            nfs3_drc_kv_delete(thread->vfs_thread, &evicted[i]);
+            nfs3_drc_kv_delete(thread->vfs_thread, drc->kv_type, &evicted[i]);
         }
     }
 
@@ -394,48 +400,163 @@ nfs3_drc_capture_reply(
 } /* nfs3_drc_capture_reply */
 
 /* ------------------------------------------------------------------ *
-*  cold-start reload                                                 *
+*  lazy per-client hydrate                                           *
+*                                                                    *
+*  A client's reply records are keyed by its address, not by node, so*
+*  they follow the client to whatever node it reconnects to.  On the *
+*  first cacheable op from a client this instance has not yet seen, we*
+*  load that client's whole band from the KV store BEFORE serving the *
+*  op (which may itself be the retransmit we need to replay).  Once an*
+*  address is hydrated, an in-memory miss is definitive -- no per-op  *
+*  KV read.  The set is shared; each un-hydrated op self-defers and   *
+*  scans, so the deferred op always resumes on its own thread (no     *
+*  cross-thread reply).  Bounded redundant scans during the window are*
+*  the price of that simplicity.                                     *
 * ------------------------------------------------------------------ */
 
-struct nfs3_drc_reload_ctx {
+#define NFS3_DRC_HYDRA_KEYLEN (NFS3_DRC_ADDR_MAX + 4)
+
+static bool
+nfs3_drc_addr_hydrated(
+    struct nfs3_drc *drc,
+    const uint8_t   *addr,
+    uint8_t          addr_len)
+{
+    struct nfs3_drc_hydra keyh, *h;
+
+    memset(&keyh, 0, sizeof(keyh));
+    memcpy(keyh.addr, addr, addr_len);
+    keyh.addr_len = addr_len;
+
+    pthread_mutex_lock(&drc->lock);
+    HASH_FIND(hh, drc->hydrated, keyh.addr, NFS3_DRC_HYDRA_KEYLEN, h);
+    pthread_mutex_unlock(&drc->lock);
+    return h != NULL;
+} /* nfs3_drc_addr_hydrated */
+
+static void
+nfs3_drc_addr_mark_hydrated(
+    struct nfs3_drc *drc,
+    const uint8_t   *addr,
+    uint8_t          addr_len)
+{
+    struct nfs3_drc_hydra keyh, *h;
+
+    memset(&keyh, 0, sizeof(keyh));
+    memcpy(keyh.addr, addr, addr_len);
+    keyh.addr_len = addr_len;
+
+    pthread_mutex_lock(&drc->lock);
+    HASH_FIND(hh, drc->hydrated, keyh.addr, NFS3_DRC_HYDRA_KEYLEN, h);
+    if (!h) {
+        h  = malloc(sizeof(*h));
+        *h = keyh;
+        HASH_ADD(hh, drc->hydrated, addr, NFS3_DRC_HYDRA_KEYLEN, h);
+    }
+    pthread_mutex_unlock(&drc->lock);
+} /* nfs3_drc_addr_mark_hydrated */
+
+/* In-memory lookup, then either replay (hit) or arm-capture + run the real
+ * handler (miss).  Used directly on the hydrated path and again to resume a
+ * deferred op once its client's band has loaded. */
+static int
+nfs3_drc_lookup_or_forward(
+    struct nfs3_drc                  *drc,
+    struct chimera_server_nfs_thread *thread,
+    const struct nfs3_drc_keybuf     *key,
+    struct evpl                      *evpl,
+    struct evpl_rpc2_conn            *conn,
+    struct evpl_rpc2_encoding        *encoding,
+    uint32_t                          proc,
+    void                             *program_data,
+    struct evpl_rpc2_cred            *cred,
+    xdr_iovec                        *iov,
+    int                               niov,
+    int                               length,
+    void                             *private_data)
+{
+    struct nfs3_drc_capture_ctx *cctx;
+    uint8_t                     *cached;
+    uint32_t                     cached_len;
+
+    if (nfs3_drc_cache_lookup(drc, key, &cached, &cached_len)) {
+        int rc = nfs_drc_send_cached_reply(thread, encoding, cached, cached_len);
+
+        free(cached);
+        if (rc == 0) {
+            return 0;  /* retransmit replayed from cache */
+        }
+        /* Unparseable cached reply (should not happen for a TCP MSG_ACCEPTED
+         * reply): fall through and re-execute. */
+    }
+
+    cctx = xdr_dbuf_alloc_space(sizeof(*cctx), encoding->dbuf);
+    if (cctx) {
+        cctx->thread                    = thread;
+        cctx->drc                       = drc;
+        cctx->key                       = *key;
+        encoding->reply_capture_cb      = nfs3_drc_capture_reply;
+        encoding->reply_capture_private = cctx;
+    }
+
+    return drc->orig_dispatch(evpl, conn, encoding, proc, program_data,
+                              cred, iov, niov, length, private_data);
+} /* nfs3_drc_lookup_or_forward */
+
+/* A deferred request + the in-flight scan that loads its client's band.  The
+ * dispatch returned without replying, so the request (and the dbuf its
+ * encoding/iov/cred point into) stays alive until we resume it here. */
+struct nfs3_drc_hydrate_ctx {
     struct chimera_server_nfs_thread *thread;
-    uint32_t                          loaded;
-    uint8_t                           start[CHIMERA_KV_HDR_LEN];
+    struct nfs3_drc                  *drc;
+    struct nfs3_drc_keybuf            key;
+    /* Stashed dispatch args to resume. */
+    struct evpl                      *evpl;
+    struct evpl_rpc2_conn            *conn;
+    struct evpl_rpc2_encoding        *encoding;
+    uint32_t                          proc;
+    void                             *program_data;
+    struct evpl_rpc2_cred             cred;   /* shallow copy; ptrs into dbuf */
+    int                               has_cred;
+    xdr_iovec                        *iov;
+    int                               niov;
+    int                               length;
+    void                             *private_data;
+    uint32_t                          loaded;   /* records found for this client */
+    uint32_t                          start_len;
+    uint8_t                           start[CHIMERA_KV_CONN_ADDR_PREFIX_MAX];
 };
 
 static int
-nfs3_drc_reload_scan_cb(
+nfs3_drc_hydrate_scan_cb(
     const void *key,
     uint32_t    key_len,
     const void *value,
     uint32_t    value_len,
     void       *private_data)
 {
-    struct nfs3_drc_reload_ctx       *ctx    = private_data;
-    struct chimera_server_nfs_thread *thread = ctx->thread;
-    struct nfs3_drc                  *drc    = &thread->shared->nfs3_drc;
-    const uint8_t                    *k      = key;
-    struct nfs3_drc_keybuf            kb;
-    const uint8_t                    *body;
-    uint64_t                          ts;
-    uint32_t                          p, body_len;
-    uint8_t                           addr_len;
+    struct nfs3_drc_hydrate_ctx *hc  = private_data;
+    struct nfs3_drc             *drc = hc->drc;
+    const uint8_t               *k   = key;
+    struct nfs3_drc_keybuf       kb;
+    const uint8_t               *body;
+    uint64_t                     ts;
+    uint32_t                     p = hc->start_len, body_len;
 
-    if (key_len < CHIMERA_KV_HDR_LEN + 1 ||
-        memcmp(k, ctx->start, CHIMERA_KV_HDR_LEN) != 0) {
-        return 1;  /* left the NFSv3 reply band */
+    /* Stop when we leave this client's [hdr][addr_len][addr] band. */
+    if (key_len < hc->start_len ||
+        memcmp(k, hc->start, hc->start_len) != 0) {
+        return 1;
+    }
+    if (p + 16 > key_len) {
+        return 0;  /* malformed tail */
     }
 
-    addr_len = k[CHIMERA_KV_HDR_LEN];
-    p        = CHIMERA_KV_HDR_LEN + 1;
-    if (addr_len > NFS3_DRC_ADDR_MAX || p + addr_len + 16 > key_len) {
-        return 0;  /* skip a malformed key */
-    }
-
+    /* Every record in this scan shares the client address; only the
+     * proc/xid/cksum tail varies. */
     memset(&kb, 0, sizeof(kb));
-    memcpy(kb.addr, k + p, addr_len);
-    kb.addr_len = addr_len;
-    p          += addr_len;
+    memcpy(kb.addr, hc->key.addr, hc->key.addr_len);
+    kb.addr_len = hc->key.addr_len;
     kb.proc     = nfs_kv_le32(k + p); p += 4;
     kb.xid      = nfs_kv_le32(k + p); p += 4;
     kb.cksum    = nfs_kv_le64(k + p);
@@ -443,71 +564,110 @@ nfs3_drc_reload_scan_cb(
     if (nfs3_drc_value_parse(value, value_len, &ts, &body, &body_len) != 0) {
         return 0;  /* skip a corrupt value */
     }
-
-    /* In-memory only here -- deleting KV entries mid-scan could disturb the
-     * backend's iteration, and KV size is already bounded by the previous
-     * uptime's evict-on-insert. */
     nfs3_drc_cache_insert(drc, &kb, body, body_len, ts);
-    ctx->loaded++;
+    hc->loaded++;
     return 0;
-} /* nfs3_drc_reload_scan_cb */
+} /* nfs3_drc_hydrate_scan_cb */
 
 static void
-nfs3_drc_reload_complete(
+nfs3_drc_hydrate_complete(
     enum chimera_vfs_error error_code,
     void                  *private_data)
 {
-    struct nfs3_drc_reload_ctx       *ctx    = private_data;
-    struct chimera_server_nfs_thread *thread = ctx->thread;
+    struct nfs3_drc_hydrate_ctx *hc  = private_data;
+    struct nfs3_drc             *drc = hc->drc;
 
     (void) error_code;
 
-    atomic_store(&thread->shared->nfs3_drc.load_state, NFS3_DRC_LOAD_READY);
-    chimera_nfs_info("NFSv3 DRC: cold-start load complete: %u reply record(s) "
-                     "reloaded", ctx->loaded);
-    free(ctx);
-} /* nfs3_drc_reload_complete */
+    nfs3_drc_addr_mark_hydrated(drc, hc->key.addr, hc->key.addr_len);
 
-static void
-nfs3_drc_reload(struct chimera_server_nfs_thread *thread)
-{
-    struct nfs3_drc_reload_ctx *ctx = malloc(sizeof(*ctx));
-
-    ctx->thread = thread;
-    ctx->loaded = 0;
-    nfs_kv_type_prefix(ctx->start, CHIMERA_KV_TYPE_NFS3_REPLY);
-
-    /* No end key + flags 0: key-ordered results, the callback stops when the
-     * 3-byte type header changes. */
-    chimera_vfs_search_keys(thread->vfs_thread,
-                            ctx->start, CHIMERA_KV_HDR_LEN,
-                            NULL, 0, 0,
-                            nfs3_drc_reload_scan_cb,
-                            nfs3_drc_reload_complete, ctx);
-} /* nfs3_drc_reload */
-
-/* One-shot cold-start reload.  Idempotent (atomic IDLE->RUNNING CAS); no-op
- * unless the cache is installed and the backend is persistent.  Called eagerly
- * from each worker's thread-init so the cache is warm before clients retransmit
- * across a restart, with the dispatch path as a fallback trigger. */
-void
-nfs3_drc_reload_kickoff(struct chimera_server_nfs_thread *thread)
-{
-    struct nfs3_drc *drc      = &thread->shared->nfs3_drc;
-    int              expected = NFS3_DRC_LOAD_IDLE;
-
-    if (!drc->orig_dispatch || drc->persistence_disabled) {
-        return;  /* DRC disabled or non-persistent: nothing to reload */
+    /* Only a returning client (one with persisted records) loads anything; a
+     * brand-new client hydrates 0 and stays quiet. */
+    if (hc->loaded) {
+        chimera_nfs_info("conn DRC (type 0x%02x): hydrated %u reply record(s) "
+                         "for a returning client", drc->kv_type, hc->loaded);
     }
 
-    if (atomic_compare_exchange_strong(&drc->load_state, &expected,
-                                       NFS3_DRC_LOAD_RUNNING)) {
-        nfs3_drc_reload(thread);
-    }
-} /* nfs3_drc_reload_kickoff */
+    nfs3_drc_lookup_or_forward(drc, hc->thread, &hc->key, hc->evpl, hc->conn,
+                               hc->encoding, hc->proc, hc->program_data,
+                               hc->has_cred ? &hc->cred : NULL,
+                               hc->iov, hc->niov, hc->length, hc->private_data);
+    free(hc);
+} /* nfs3_drc_hydrate_complete */
 
 /* ------------------------------------------------------------------ *
-*  dispatch wrapper                                                  *
+*  shared dispatch core (used by the NFSv3 + NFSv4.0 adapters)        *
+* ------------------------------------------------------------------ */
+
+int
+nfs3_drc_serve(
+    struct nfs3_drc              *drc,
+    const struct nfs3_drc_keybuf *key,
+    struct evpl                  *evpl,
+    struct evpl_rpc2_conn        *conn,
+    struct evpl_rpc2_encoding    *encoding,
+    uint32_t                      proc,
+    void                         *program_data,
+    struct evpl_rpc2_cred        *cred,
+    xdr_iovec                    *iov,
+    int                           niov,
+    int                           length,
+    void                         *private_data)
+{
+    struct chimera_server_nfs_thread *thread = private_data;
+    struct nfs3_drc_hydrate_ctx      *hc;
+
+    /* With a non-persistent backend there is nothing to hydrate -- the
+     * in-memory cache is the whole truth -- and once a client's band is loaded,
+     * an in-memory miss is definitive.  Either way, serve from memory. */
+    if (drc->persistence_disabled ||
+        nfs3_drc_addr_hydrated(drc, key->addr, key->addr_len)) {
+        return nfs3_drc_lookup_or_forward(drc, thread, key, evpl, conn, encoding,
+                                          proc, program_data, cred, iov, niov,
+                                          length, private_data);
+    }
+
+    /* First cacheable op from a client this instance has not hydrated: load its
+     * band from the KV store before serving this (possibly-replay) op.  Defer
+     * the request -- the dbuf its encoding/iov/cred point into stays alive
+     * because we do not reply -- and resume it when the scan completes. */
+    hc = malloc(sizeof(*hc));
+    if (!hc) {
+        return nfs3_drc_lookup_or_forward(drc, thread, key, evpl, conn, encoding,
+                                          proc, program_data, cred, iov, niov,
+                                          length, private_data);
+    }
+    hc->thread       = thread;
+    hc->drc          = drc;
+    hc->key          = *key;
+    hc->evpl         = evpl;
+    hc->conn         = conn;
+    hc->encoding     = encoding;
+    hc->proc         = proc;
+    hc->program_data = program_data;
+    if (cred) {
+        hc->cred     = *cred;  /* shallow copy; gids/machinename live in dbuf */
+        hc->has_cred = 1;
+    } else {
+        hc->has_cred = 0;
+    }
+    hc->iov          = iov;
+    hc->niov         = niov;
+    hc->length       = length;
+    hc->private_data = private_data;
+    hc->loaded       = 0;
+    hc->start_len    = nfs_kv_conn_addr_prefix(hc->start, drc->kv_type,
+                                               key->addr, key->addr_len);
+
+    chimera_vfs_search_keys(thread->vfs_thread, hc->start, hc->start_len,
+                            NULL, 0, 0,
+                            nfs3_drc_hydrate_scan_cb,
+                            nfs3_drc_hydrate_complete, hc);
+    return 0;  /* deferred; the reply is sent from nfs3_drc_hydrate_complete */
+} /* nfs3_drc_serve */
+
+/* ------------------------------------------------------------------ *
+*  NFSv3 dispatch wrapper                                            *
 * ------------------------------------------------------------------ */
 
 static int
@@ -525,16 +685,7 @@ nfs3_drc_dispatch(
 {
     struct chimera_server_nfs_thread *thread = private_data;
     struct nfs3_drc                  *drc    = &thread->shared->nfs3_drc;
-    struct nfs3_drc_capture_ctx      *cctx;
     struct nfs3_drc_keybuf            key;
-    uint8_t                          *cached;
-    uint32_t                          cached_len;
-
-    /* Warm the cache from stable storage on the first request of any kind (a
-     * live vfs_thread is required, which only requests have).  Idempotent.
-     * Lookups serve misses while the reload is in flight -- a miss just
-     * re-executes, the pre-feature behavior. */
-    nfs3_drc_reload_kickoff(thread);
 
     /* The cached reply is the TCP on-wire form; RDMA framing differs, so leave
     * RDMA requests (and idempotent procs) to the real dispatcher untouched. */
@@ -549,28 +700,8 @@ nfs3_drc_dispatch(
     key.xid      = encoding->xid;
     key.cksum    = nfs3_drc_checksum_iov(iov, niov);
 
-    if (nfs3_drc_cache_lookup(drc, &key, &cached, &cached_len)) {
-        int rc = nfs_drc_send_cached_reply(thread, encoding, cached, cached_len);
-
-        free(cached);
-        if (rc == 0) {
-            return 0;  /* retransmit replayed from cache */
-        }
-        /* Unparseable cached reply (should not happen for a TCP MSG_ACCEPTED
-         * reply): fall through and re-execute. */
-    }
-
-    /* Miss: arm the reply-capture hook, then run the real handler. */
-    cctx = xdr_dbuf_alloc_space(sizeof(*cctx), encoding->dbuf);
-    if (cctx) {
-        cctx->thread                    = thread;
-        cctx->key                       = key;
-        encoding->reply_capture_cb      = nfs3_drc_capture_reply;
-        encoding->reply_capture_private = cctx;
-    }
-
-    return drc->orig_dispatch(evpl, conn, encoding, proc, program_data,
-                              cred, iov, niov, length, private_data);
+    return nfs3_drc_serve(drc, &key, evpl, conn, encoding, proc, program_data,
+                          cred, iov, niov, length, private_data);
 } /* nfs3_drc_dispatch */
 
 /* ------------------------------------------------------------------ *
@@ -578,14 +709,17 @@ nfs3_drc_dispatch(
 * ------------------------------------------------------------------ */
 
 void
-nfs3_drc_init(struct nfs3_drc *drc)
+nfs3_drc_init(
+    struct nfs3_drc *drc,
+    uint8_t          kv_type)
 {
     pthread_mutex_init(&drc->lock, NULL);
     drc->table                = NULL;
+    drc->hydrated             = NULL;
     drc->bytes                = 0;
+    drc->kv_type              = kv_type;
     drc->persistence_disabled = 0;
     drc->orig_dispatch        = NULL;
-    atomic_store(&drc->load_state, NFS3_DRC_LOAD_IDLE);
 } /* nfs3_drc_init */
 
 void
@@ -596,12 +730,18 @@ nfs3_drc_destroy(struct nfs3_drc *drc)
      * checker; guard it the same way the other NFS hash-table teardowns do. */
 #ifndef __clang_analyzer__
     struct nfs3_drc_entry *e, *tmp;
+    struct nfs3_drc_hydra *h, *htmp;
 
     HASH_ITER(hh, drc->table, e, tmp)
     {
         HASH_DELETE(hh, drc->table, e);
         free(e->buf);
         free(e);
+    }
+    HASH_ITER(hh, drc->hydrated, h, htmp)
+    {
+        HASH_DELETE(hh, drc->hydrated, h);
+        free(h);
     }
 #endif /* ifndef __clang_analyzer__ */
     pthread_mutex_destroy(&drc->lock);

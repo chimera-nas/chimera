@@ -133,6 +133,27 @@ if(CHIMERA_NETNS_TESTING)
     endif()
 endif()
 
+# Cross-mount EXDEV test: link/rename across two VFS mounts must fail EXDEV.  It
+# mounts a second memfs instance alongside the primary backend, so the primary
+# must be a different module from memfs (two memfs mounts share one fsid, i.e.
+# the same filesystem).  Runs on the local non-memfs backends only.
+add_posix_testprog(test_exdev)
+if(CHIMERA_NETNS_TESTING)
+    if(CAIRN_ENABLED)
+        add_posix_test(exdev_cairn test_exdev cairn)
+    endif()
+    if(IO_URING_ENABLED)
+        add_posix_test(exdev_diskfs_io_uring test_exdev diskfs_io_uring)
+    endif()
+    if(HAVE_LIBAIO)
+        add_posix_test(exdev_diskfs_aio test_exdev diskfs_aio)
+    endif()
+    add_posix_test(exdev_linux test_exdev linux)
+    if(CHIMERA_VFS_IO_URING)
+        add_posix_test(exdev_io_uring test_exdev io_uring)
+    endif()
+endif()
+
 # ============================================================================
 # NFS3 Backend Tests
 # These tests run the POSIX tests through the Chimera NFS client,
@@ -236,6 +257,49 @@ endif()
 generate_posix_nfs4_backend_tests(cairn CAIRN_ENABLED)
 generate_posix_nfs4_backend_tests(linux "")
 generate_posix_nfs4_backend_tests(io_uring CHIMERA_VFS_IO_URING)
+
+# ============================================================================
+# Read-only mount (EROFS) test
+# Stands up a second, read-only export of the same backend and asserts that
+# mutating operations fail with EROFS while reads still work.  Registered
+# explicitly (not via POSIX_TEST_PROGRAMS) because it requires the dual
+# read-write / read-only export the standard harness does not create, and is
+# only meaningful over an NFS backend.
+# ============================================================================
+add_posix_testprog(test_erofs)
+
+macro(add_posix_erofs_test nfs_prefix nfs_backend)
+    if(CHIMERA_NETNS_TESTING)
+        add_test(NAME chimera/posix/erofs_${nfs_prefix}_${nfs_backend}
+            COMMAND ${NETNS_WRAPPER} ${CMAKE_CURRENT_BINARY_DIR}/posix_test_erofs -b ${nfs_prefix}_${nfs_backend}
+        )
+        get_target_property(test_file posix_test_erofs TEST_FILE)
+        set_tests_properties(chimera/posix/erofs_${nfs_prefix}_${nfs_backend} PROPERTIES
+            ENVIRONMENT "TEST_FILE=${test_file}"
+            TIMEOUT 60
+        )
+    endif()
+endmacro()
+
+# The test exercises the protocol-agnostic VFS read-only gate by mounting a
+# writable export and then a read-only sub-export of the same backend (in
+# sequence).  Registered over BOTH NFS3 and NFS4 for memfs.
+#
+# It is intentionally memfs-only.  The VFS read-only gate keys on the mount_id
+# (the first bytes of the mount's root_fh).  memfs encodes a distinct root_fh
+# for the read-only subdirectory mount, so the "ro" flag attaches only to that
+# mount.  cairn / diskfs / linux / io_uring derive a root_fh for a subdirectory
+# mount whose mount_id does not reliably differ from the parent root mount, so
+# the "ro" flag bleeds onto the writable mount (fixture creation then fails with
+# EROFS) -- making the sub-mount indistinguishable.  Giving those backends a
+# distinct sub-mount identity is a separate VFS change.
+#
+# The NFS4 registration also exercises (and depends on) the client mount/session
+# lifecycle fix for a sequential remount of the same server: each mount now
+# opens its own connection, and the NFSv4.1 session outlives an individual mount
+# instead of being torn down and recreated under the live per-thread slot tables.
+add_posix_erofs_test(nfs3 memfs)
+add_posix_erofs_test(nfs4 memfs)
 
 # ============================================================================
 # NFS3 over TCP-RDMA Backend Tests
@@ -1004,6 +1068,7 @@ set(PJD_TESTS
     open/13
     open/16
     open/22
+    open/23
     open/26
     chmod/00
     chmod/01
@@ -1013,6 +1078,7 @@ set(PJD_TESTS
     chmod/05
     chmod/06
     chmod/07
+    chmod/12
     chown/00
     chown/01
     chown/02
@@ -1109,6 +1175,8 @@ set(PJD_TESTS
     rename/03
     rename/04
     rename/05
+    rename/09
+    rename/10
     rename/11
     rename/12
     rename/13
@@ -1116,15 +1184,33 @@ set(PJD_TESTS
     rename/18
     rename/19
     rename/20
+    rename/21
     rename/22
+    rename/24
     utimensat/00
     utimensat/01
     utimensat/02
     utimensat/04
+    utimensat/05
     utimensat/08
     utimensat/06
     utimensat/07
     utimensat/09
+)
+
+# NFSv4 granular-ACL permission ports (pjdfstest tests/granular/).  These set
+# native NFSv4 ACLs via the Chimera-specific chimera_posix_{get,set}acl client
+# API and verify the VFS access engine enforces the granular ACE rights
+# (WRITE_DATA/APPEND_DATA, DELETE/DELETE_CHILD, WRITE_OWNER, ...).  They are only
+# meaningful on backends that store and return the canonical ACL (va_acl), so
+# they are registered separately below -- NOT on the NFS backends (the NFS client
+# cannot set FATTR4_ACL) nor passthrough linux/io_uring (POSIX-mode, not NFSv4
+# ACLs).
+set(PJD_GRANULAR_TESTS
+    granular/00
+    granular/03
+    granular/04
+    granular/05
 )
 
 macro(add_pjd_testprog path)
@@ -1150,6 +1236,23 @@ macro(add_pjd_test path backend)
     endif()
 endmacro()
 
+# As add_pjd_test, but for NFS backends (nfs3_memfs / nfs4_memfs): each test
+# starts a Chimera NFS server + client in-process, so it needs a longer timeout
+# than the in-process VFS backends.
+macro(add_pjd_nfs_test path backend)
+    if(CHIMERA_NETNS_TESTING)
+        string(REPLACE "/" "_" _pjd_flat ${path})
+        add_test(NAME chimera/posix/pjd/${path}/${backend}
+            COMMAND ${NETNS_WRAPPER} ${CMAKE_CURRENT_BINARY_DIR}/posix_pjd_${_pjd_flat} -b ${backend})
+        get_target_property(_pjd_tf posix_pjd_${_pjd_flat} TEST_FILE)
+        set_tests_properties(chimera/posix/pjd/${path}/${backend} PROPERTIES
+            ENVIRONMENT "TEST_FILE=${_pjd_tf}"
+            SKIP_RETURN_CODE 77
+            TIMEOUT 120)
+        list(APPEND _pjd_test_names chimera/posix/pjd/${path}/${backend})
+    endif()
+endmacro()
+
 # Backends the pjd suite is green on are registered here.  memfs and cairn pass
 # 134/134; diskfs/passthrough/NFS are widened by follow-up PRs as they green.
 set(_pjd_test_names "")
@@ -1168,6 +1271,78 @@ foreach(t ${PJD_TESTS})
     add_pjd_test(${t} linux)
     if(CHIMERA_VFS_IO_URING)
         add_pjd_test(${t} io_uring)
+    endif()
+    # NFS backends (Chimera NFS server + client over loopback).  Run pjdfstest
+    # over the NFS server against every VFS backend (gated like the direct-backend
+    # registrations above), not just memfs, to exercise the server<->backend open
+    # path on each store.
+    add_pjd_nfs_test(${t} nfs3_memfs)
+    add_pjd_nfs_test(${t} nfs4_memfs)
+    if(CAIRN_ENABLED)
+        add_pjd_nfs_test(${t} nfs3_cairn)
+        add_pjd_nfs_test(${t} nfs4_cairn)
+    endif()
+    if(IO_URING_ENABLED)
+        add_pjd_nfs_test(${t} nfs3_diskfs_io_uring)
+        add_pjd_nfs_test(${t} nfs4_diskfs_io_uring)
+    endif()
+    if(HAVE_LIBAIO)
+        add_pjd_nfs_test(${t} nfs3_diskfs_aio)
+        add_pjd_nfs_test(${t} nfs4_diskfs_aio)
+    endif()
+    add_pjd_nfs_test(${t} nfs3_linux)
+    add_pjd_nfs_test(${t} nfs4_linux)
+    if(CHIMERA_VFS_IO_URING)
+        add_pjd_nfs_test(${t} nfs3_io_uring)
+        add_pjd_nfs_test(${t} nfs4_io_uring)
+    endif()
+endforeach()
+
+# Granular-ACL ports: only on engine backends that store the canonical NFSv4 ACL
+# (memfs definitely; cairn and diskfs store/return va_acl as well).
+foreach(t ${PJD_GRANULAR_TESTS})
+    add_pjd_testprog(${t})
+    add_pjd_test(${t} memfs)
+    if(CAIRN_ENABLED)
+        add_pjd_test(${t} cairn)
+    endif()
+    if(IO_URING_ENABLED)
+        add_pjd_test(${t} diskfs_io_uring)
+    endif()
+    if(HAVE_LIBAIO)
+        add_pjd_test(${t} diskfs_aio)
+    endif()
+endforeach()
+
+# posix_fallocate: the VFS ALLOCATE op is implemented by every local backend
+# (memfs/cairn/diskfs/linux/io_uring) and, over NFSv4.2, by the NFS client
+# backend (vfs_nfs sends OP_ALLOCATE).  Register it on all local backends and
+# all NFSv4 backends, but NOT NFSv3 (no ALLOCATE in the protocol).
+set(PJD_LOCAL_TESTS
+    posix_fallocate/00
+    sparse/00
+)
+foreach(t ${PJD_LOCAL_TESTS})
+    add_pjd_testprog(${t})
+    add_pjd_test(${t} memfs)
+    add_pjd_nfs_test(${t} nfs4_memfs)
+    if(CAIRN_ENABLED)
+        add_pjd_test(${t} cairn)
+        add_pjd_nfs_test(${t} nfs4_cairn)
+    endif()
+    if(IO_URING_ENABLED)
+        add_pjd_test(${t} diskfs_io_uring)
+        add_pjd_nfs_test(${t} nfs4_diskfs_io_uring)
+    endif()
+    if(HAVE_LIBAIO)
+        add_pjd_test(${t} diskfs_aio)
+        add_pjd_nfs_test(${t} nfs4_diskfs_aio)
+    endif()
+    add_pjd_test(${t} linux)
+    add_pjd_nfs_test(${t} nfs4_linux)
+    if(CHIMERA_VFS_IO_URING)
+        add_pjd_test(${t} io_uring)
+        add_pjd_nfs_test(${t} nfs4_io_uring)
     endif()
 endforeach()
 

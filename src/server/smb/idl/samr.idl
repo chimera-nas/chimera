@@ -1,0 +1,103 @@
+/*
+ * SPDX-FileCopyrightText: 2026 Chimera-NAS Project Contributors
+ * SPDX-License-Identifier: LGPL-2.1-only
+ *
+ * SAMR (MS-SAMR) interface, compiled by ndrzcc.  Read-only foundation: connect
+ * to the SAM and enumerate / look up the server's domains (BUILTIN + the
+ * account domain).  Domain-handle ops (OpenDomain, QueryDomainInfo, user
+ * enumeration) are a follow-up.
+ */
+
+[ uuid(12345778-1234-abcd-ef00-0123456789ac), version(1.0) ]
+interface samr {
+
+    /* SAMPR_HANDLE: 4-byte attributes + 16-byte GUID (same shape as the LSA
+     * policy handle). */
+    typedef struct {
+        uint32 handle_type;
+        uint8  uuid[16];
+    } samr_handle;
+
+    /* RPC_UNICODE_STRING. */
+    typedef struct {
+        uint16            length;
+        uint16            size;
+        [string, nonul] wchar_t *buffer;
+    } samr_String;
+
+    /* SAMPR_RID_ENUMERATION: an index (RID for accounts, opaque for domains)
+     * and a name. */
+    typedef struct {
+        uint32             idx;
+        samr_String name;
+    } samr_SamEntry;
+
+    typedef struct {
+        uint32                          count;
+        [size_is(count)] samr_SamEntry *entries;
+    } samr_SamArray;
+
+    /* opnum 0 -- SamrConnect.  system_name is a single WCHAR pointer the server
+     * ignores; returns a connect (server) handle. */
+    [opnum(0)] uint32 samr_Connect(
+        [in, unique] uint16        *system_name,
+        [in]         uint32         access_mask,
+        [out]        samr_handle *connect_handle);
+
+    /* opnum 1 -- SamrCloseHandle. */
+    [opnum(1)] uint32 samr_Close(
+        [in, out] samr_handle *handle);
+
+    /* A [unique] pointer to a SID, wrapped in a struct so the [out] param
+     * marshals as a referent id + deferred SID body (the wire form of
+     * SamrLookupDomain's [out] dom_sid2 **sid); a bare dom_sid** is emitted
+     * inline by the codegen, which is the wrong shape. */
+    typedef struct {
+        dom_sid *sid;
+    } samr_SidPtr;
+
+    /* opnum 5 -- SamrLookupDomainInSamServer: domain name -> domain SID. */
+    [opnum(5)] uint32 samr_LookupDomain(
+        [in]  samr_handle      *connect_handle,
+        [in]  samr_String *domain_name,
+        [out] samr_SidPtr        *sid);
+
+    /* opnum 6 -- SamrEnumerateDomainsInSamServer: the server's domains. */
+    [opnum(6)] uint32 samr_EnumDomains(
+        [in]      samr_handle  *connect_handle,
+        [in, out] uint32          resume_handle,
+        [out]     samr_SamArray **sam,
+        [in]      uint32          buf_size,
+        [out]     uint32          num_entries);
+
+    /* opnum 21 -- SamrConnect2: string system_name. */
+    [opnum(21)] uint32 samr_Connect2(
+        [in, unique, string] wchar_t       *system_name,
+        [in]                 uint32         access_mask,
+        [out]                samr_handle *connect_handle);
+
+    /* SAMPR_REVISION_INFO_V1. */
+    typedef struct {
+        uint32 client_version;
+        uint32 supported_features;
+    } samr_ConnectInfo1;
+
+    /* SAMPR_REVISION_INFO union switched on the version; modelled as a struct
+     * whose leading uint32 is the (non-encapsulated) switch value followed by
+     * the level-1 arm. */
+    typedef struct {
+        uint32            level;
+        samr_ConnectInfo1 info1;
+    } samr_ConnectInfo;
+
+    /* opnum 64 -- SamrConnect5: the connect modern clients (rpcclient) call
+     * first; carries in/out revision info. */
+    [opnum(64)] uint32 samr_Connect5(
+        [in, unique, string] wchar_t          *system_name,
+        [in]  uint32           access_mask,
+        [in]  uint32           level_in,
+        [in]  samr_ConnectInfo *info_in,
+        [out] uint32           level_out,
+        [out] samr_ConnectInfo *info_out,
+        [out] samr_handle      *connect_handle);
+}

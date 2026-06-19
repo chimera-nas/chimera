@@ -6,6 +6,7 @@
             "config": {
                 "initialize": true,
                 "unsafe_async": true,
+                "intent_log_size": 67108864,
                 "devices": [
                     {
                         "type": "io_uring",

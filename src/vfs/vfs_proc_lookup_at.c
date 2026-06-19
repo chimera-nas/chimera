@@ -23,22 +23,28 @@ chimera_vfs_lookup_at_complete(struct chimera_vfs_request *request)
     chimera_vfs_lookup_at_callback_t callback   = request->proto_callback;
 
     if (request->status == CHIMERA_VFS_OK) {
-        chimera_vfs_name_cache_insert(thread, name_cache,
-                                      request->lookup_at.handle->fh_hash,
-                                      request->lookup_at.handle->fh,
-                                      request->lookup_at.handle->fh_len,
-                                      request->lookup_at.component_hash,
-                                      request->lookup_at.component,
-                                      request->lookup_at.component_len,
-                                      request->lookup_at.r_attr.va_fh,
-                                      request->lookup_at.r_attr.va_fh_len);
+        /* A path-only backend resolves the whole path in one shot and returns no
+         * stable child fh (va_fh_len == 0).  Skip the child name/attr cache: a
+         * zero-length fh is the name cache's NEGATIVE (ENOENT) marker, so caching
+         * a success-without-fh here would poison subsequent lookups. */
+        if (request->lookup_at.r_attr.va_fh_len > 0) {
+            chimera_vfs_name_cache_insert(thread, name_cache,
+                                          request->lookup_at.handle->fh_hash,
+                                          request->lookup_at.handle->fh,
+                                          request->lookup_at.handle->fh_len,
+                                          request->lookup_at.component_hash,
+                                          request->lookup_at.component,
+                                          request->lookup_at.component_len,
+                                          request->lookup_at.r_attr.va_fh,
+                                          request->lookup_at.r_attr.va_fh_len);
 
-        chimera_vfs_attr_cache_refresh(thread, attr_cache,
-                                       chimera_vfs_hash(request->lookup_at.r_attr.va_fh, request->lookup_at.r_attr.
-                                                        va_fh_len),
-                                       request->lookup_at.r_attr.va_fh,
-                                       request->lookup_at.r_attr.va_fh_len,
-                                       &request->lookup_at.r_attr);
+            chimera_vfs_attr_cache_refresh(thread, attr_cache,
+                                           chimera_vfs_hash(request->lookup_at.r_attr.va_fh, request->lookup_at.r_attr.
+                                                            va_fh_len),
+                                           request->lookup_at.r_attr.va_fh,
+                                           request->lookup_at.r_attr.va_fh_len,
+                                           &request->lookup_at.r_attr);
+        }
 
         chimera_vfs_attr_cache_refresh(thread, attr_cache,
                                        request->lookup_at.handle->fh_hash,

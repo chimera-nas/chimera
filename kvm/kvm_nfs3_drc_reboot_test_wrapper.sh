@@ -193,8 +193,11 @@ generate_config "false"
 start_chimera || exit 1
 
 # chimera B warms the DRC at thread-init; give the async scan a moment, then a
-# guest mount confirms the FS is still serviceable.
-RC2=$(run_guest "ls -l /mnt/d1 && cat /mnt/d1/g" boot2)
+# The records are keyed by client, not node, and loaded lazily: the first
+# CACHEABLE op from the returning client (the mkdir below) hydrates that
+# client's whole reply band from the KV store before the op is served.  A plain
+# read would not trigger it, so drive a mkdir.
+RC2=$(run_guest "mkdir -p /mnt/d3 && ls -l /mnt/d1 && cat /mnt/d1/g" boot2)
 echo "=== boot 2 guest exit: ${RC2:-<none>} ==="
 
 # --- assertions ---
@@ -205,15 +208,15 @@ if [ "${RC2:-1}" != "0" ]; then
     FAIL=1
 fi
 
-if grep -q "NFSv3 DRC: cold-start load complete:" "$CHIMERA_LOG"; then
-    RELOADED=$(grep -oP 'NFSv3 DRC: cold-start load complete: \K[0-9]+' "$CHIMERA_LOG" | tail -1)
-    echo "=== chimera B reloaded ${RELOADED} NFSv3 reply record(s) ==="
+if grep -q "conn DRC (type 0x05): hydrated" "$CHIMERA_LOG"; then
+    RELOADED=$(grep -oP 'conn DRC \(type 0x05\): hydrated \K[0-9]+' "$CHIMERA_LOG" | tail -1)
+    echo "=== chimera B hydrated ${RELOADED} NFSv3 reply record(s) for the returning client ==="
     if [ "${RELOADED:-0}" -lt 1 ]; then
-        echo "FAIL: no NFSv3 reply records were reloaded after restart"
+        echo "FAIL: no NFSv3 reply records hydrated for the returning client"
         FAIL=1
     fi
 else
-    echo "FAIL: chimera B did not log an NFSv3 DRC cold-start load"
+    echo "FAIL: chimera B did not lazily hydrate the returning client's DRC band"
     FAIL=1
 fi
 
@@ -228,5 +231,5 @@ if [ "$FAIL" != "0" ]; then
     exit 1
 fi
 
-echo "PASS: NFSv3 DRC cross-reboot persistence (reply records reloaded)"
+echo "PASS: NFSv3 DRC client-keyed persistence + lazy per-client hydrate"
 exit 0

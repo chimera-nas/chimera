@@ -7,6 +7,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <sys/fsuid.h>
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -290,3 +291,42 @@ chimera_restore_privilege(const struct chimera_vfs_cred *cred)
     }
     return 0;
 } // chimera_restore_privilege
+
+/*
+ * POSIX/Linux "kill-priv" on write: when a process *without appropriate
+ * privilege* modifies the contents of a regular file (write or truncate), the
+ * set-user-ID bit is cleared, and the set-group-ID bit is cleared if the file
+ * is group-executable.  (A set-group-ID file with no group-execute bit denotes
+ * mandatory locking, not a privileged execution, so that bit is preserved --
+ * this mirrors the kernel's should_remove_suid()/setattr_should_drop_suidgid()
+ * logic.)
+ *
+ * `cred` is the writer's credential (NULL or AUTH_NONE means an internal/server
+ * write, which is privileged and exempt); `mode` is the file's current mode.
+ * Returns the (possibly unchanged) mode with the offending bits removed.  Only
+ * a non-privileged (non-root) UNIX writer triggers the clear, and only for a
+ * regular file that actually carries S_ISUID/S_ISGID.
+ */
+static inline uint32_t
+chimera_vfs_killpriv_mode(
+    const struct chimera_vfs_cred *cred,
+    uint32_t                       mode)
+{
+    if (!cred || cred->flavor == CHIMERA_VFS_AUTH_NONE || cred->uid == 0) {
+        return mode;
+    }
+
+    if (!S_ISREG(mode)) {
+        return mode;
+    }
+
+    if (mode & S_ISUID) {
+        mode &= ~(uint32_t) S_ISUID;
+    }
+
+    if ((mode & S_ISGID) && (mode & S_IXGRP)) {
+        mode &= ~(uint32_t) S_ISGID;
+    }
+
+    return mode;
+} // chimera_vfs_killpriv_mode

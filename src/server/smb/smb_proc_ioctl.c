@@ -169,6 +169,75 @@ chimera_smb_ioctl(struct chimera_smb_request *request)
             chimera_smb_ioctl_copychunk(request);
             break;
 
+        case SMB2_FSCTL_DUPLICATE_EXTENTS_TO_FILE:
+            chimera_smb_ioctl_duplicate_extents(request);
+            break;
+
+        case SMB2_FSCTL_OFFLOAD_READ:
+            chimera_smb_ioctl_offload_read(request);
+            break;
+
+        case SMB2_FSCTL_OFFLOAD_WRITE:
+            chimera_smb_ioctl_offload_write(request);
+            break;
+
+        case SMB2_FSCTL_FILE_LEVEL_TRIM:
+            /* MS-FSCC 2.3.75: a best-effort hint to free storage for the given
+             * ranges.  The Key field MUST be 0 (else STATUS_INVALID_PARAMETER);
+             * otherwise we acknowledge the ranges (NumRangesProcessed emitted in
+             * the reply) without altering data -- trim is advisory. */
+            open_file = chimera_smb_open_file_resolve(request, &request->ioctl.file_id);
+            if (unlikely(!open_file)) {
+                chimera_smb_complete_request(request, SMB2_STATUS_FILE_CLOSED);
+                return;
+            }
+            chimera_smb_open_file_release(request, open_file);
+
+            if (request->ioctl.tr_key != 0) {
+                chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+                return;
+            }
+            if (request->ioctl.max_output_response < 4) {
+                chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+                return;
+            }
+            chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+            break;
+
+        case SMB2_FSCTL_GET_INTEGRITY_INFORMATION:
+            /* MS-FSCC 2.3.54: report the data-integrity (ReFS checksum)
+             * attributes remembered on this open. */
+            open_file = chimera_smb_open_file_resolve(request, &request->ioctl.file_id);
+            if (unlikely(!open_file)) {
+                chimera_smb_complete_request(request, SMB2_STATUS_FILE_CLOSED);
+                return;
+            }
+            request->ioctl.ii_algo  = open_file->integrity_algo;
+            request->ioctl.ii_flags = open_file->integrity_flags;
+            chimera_smb_open_file_release(request, open_file);
+
+            if (request->ioctl.max_output_response < 16) {
+                chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+                return;
+            }
+            chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+            break;
+
+        case SMB2_FSCTL_SET_INTEGRITY_INFORMATION:
+            /* MS-FSCC 2.3.55: remember the checksum algorithm + flags on the
+             * open so a subsequent GET_INTEGRITY_INFORMATION reflects them. */
+            open_file = chimera_smb_open_file_resolve(request, &request->ioctl.file_id);
+            if (unlikely(!open_file)) {
+                chimera_smb_complete_request(request, SMB2_STATUS_FILE_CLOSED);
+                return;
+            }
+            open_file->integrity_algo  = request->ioctl.ii_algo;
+            open_file->integrity_flags = request->ioctl.ii_flags;
+            chimera_smb_open_file_release(request, open_file);
+
+            chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+            break;
+
         case SMB2_FSCTL_CREATE_OR_GET_OBJECT_ID:
             /* MS-FSCC 2.3.7: returns FILE_OBJECTID_BUFFER (64 bytes).  We
              * don't persist object IDs, but the value is documented as
@@ -249,6 +318,20 @@ chimera_smb_ioctl(struct chimera_smb_request *request)
                     timeout_ms = CHIMERA_SMB_RESILIENCY_MAX_TIMEOUT_MS;
                 }
 
+                /* Register the open in the durable registry (as a non-persistent
+                 * entry) on the first resiliency grant so a disconnect parks it
+                 * and a reconnect can reclaim it -- a resilient handle survives a
+                 * network drop for its timeout (MS-SMB2 3.3.5.15.9) using the same
+                 * machinery durable handles use.  A durable open is already
+                 * registered; an already-resilient open must not register twice. */
+                if (!open_file->durable_flags && !open_file->resilient) {
+                    chimera_smb_durable_register(
+                        request->compound->thread->shared, open_file,
+                        request->session_handle->session->session_id,
+                        request->compound->conn->client_guid,
+                        open_file->name, open_file->name_len, false);
+                }
+
                 open_file->resilient            = true;
                 open_file->resilient_timeout_ms = timeout_ms;
             }
@@ -327,11 +410,23 @@ chimera_smb_ioctl_reply(
         case SMB2_FSCTL_SRV_COPYCHUNK_WRITE:
             output_length = 12; /* ChunksWritten + ChunkBytesWritten + TotalBytesWritten */
             break;
+        case SMB2_FSCTL_OFFLOAD_READ:
+            output_length = SMB2_FSCTL_OFFLOAD_READ_OUTPUT_SIZE; /* Size+Flags+TransferLength+Token */
+            break;
+        case SMB2_FSCTL_OFFLOAD_WRITE:
+            output_length = SMB2_FSCTL_OFFLOAD_WRITE_OUTPUT_SIZE; /* Size+Flags+LengthWritten */
+            break;
         case SMB2_FSCTL_CREATE_OR_GET_OBJECT_ID:
             output_length = 64; /* FILE_OBJECTID_BUFFER (type 1) */
             break;
         case SMB2_FSCTL_SRV_ENUMERATE_SNAPSHOTS:
             output_length = 12; /* SRV_SNAPSHOT_ARRAY header, empty list */
+            break;
+        case SMB2_FSCTL_FILE_LEVEL_TRIM:
+            output_length = 4; /* NumRangesProcessed */
+            break;
+        case SMB2_FSCTL_GET_INTEGRITY_INFORMATION:
+            output_length = 16; /* Algorithm(2)+Reserved(2)+Flags(4)+ChunkSize(4)+ClusterSize(4) */
             break;
     } /* switch */
 
@@ -431,6 +526,20 @@ chimera_smb_ioctl_reply(
             evpl_iovec_cursor_append_uint32(reply_cursor, 0); /* ChunkBytesWritten */
             evpl_iovec_cursor_append_uint32(reply_cursor, (uint32_t) request->ioctl.cc_total_written);
             break;
+        case SMB2_FSCTL_OFFLOAD_READ:
+            /* FSCTL_OFFLOAD_READ_OUTPUT (MS-FSCC 2.3.80): the self-describing
+             * STORAGE_OFFLOAD_TOKEN was minted into od_token by the handler. */
+            evpl_iovec_cursor_append_uint32(reply_cursor, SMB2_FSCTL_OFFLOAD_READ_OUTPUT_SIZE); /* Size */
+            evpl_iovec_cursor_append_uint32(reply_cursor, 0);                                   /* Flags */
+            evpl_iovec_cursor_append_uint64(reply_cursor, request->ioctl.od_transfer_length);
+            evpl_iovec_cursor_append_blob(reply_cursor, request->ioctl.od_token, SMB2_OFFLOAD_TOKEN_SIZE);
+            break;
+        case SMB2_FSCTL_OFFLOAD_WRITE:
+            /* FSCTL_OFFLOAD_WRITE_OUTPUT (MS-FSCC 2.3.82). */
+            evpl_iovec_cursor_append_uint32(reply_cursor, SMB2_FSCTL_OFFLOAD_WRITE_OUTPUT_SIZE); /* Size */
+            evpl_iovec_cursor_append_uint32(reply_cursor, 0);                                   /* Flags */
+            evpl_iovec_cursor_append_uint64(reply_cursor, request->ioctl.od_copy_length);       /* LengthWritten */
+            break;
         case SMB2_FSCTL_CREATE_OR_GET_OBJECT_ID:
             evpl_iovec_cursor_append_blob(reply_cursor, request->ioctl.oid_buffer, 64);
             break;
@@ -441,6 +550,18 @@ chimera_smb_ioctl_reply(
             evpl_iovec_cursor_append_uint32(reply_cursor, 0); /* NumberOfSnapShots */
             evpl_iovec_cursor_append_uint32(reply_cursor, 0); /* NumberOfSnapShotsReturned */
             evpl_iovec_cursor_append_uint32(reply_cursor, 0); /* SnapShotArraySize */
+            break;
+        case SMB2_FSCTL_FILE_LEVEL_TRIM:
+            /* FSCTL_FILE_LEVEL_TRIM_OUTPUT (MS-FSCC 2.3.76): NumRangesProcessed. */
+            evpl_iovec_cursor_append_uint32(reply_cursor, request->ioctl.tr_num_ranges);
+            break;
+        case SMB2_FSCTL_GET_INTEGRITY_INFORMATION:
+            /* GET_INTEGRITY_INFORMATION_BUFFER (MS-FSCC 2.3.54). */
+            evpl_iovec_cursor_append_uint16(reply_cursor, request->ioctl.ii_algo);  /* ChecksumAlgorithm */
+            evpl_iovec_cursor_append_uint16(reply_cursor, 0);                        /* Reserved */
+            evpl_iovec_cursor_append_uint32(reply_cursor, request->ioctl.ii_flags);  /* Flags */
+            evpl_iovec_cursor_append_uint32(reply_cursor, 65536);                    /* ChecksumChunkSizeInBytes */
+            evpl_iovec_cursor_append_uint32(reply_cursor, 4096);                     /* ClusterSizeInBytes */
             break;
         default:
             break;
@@ -792,6 +913,68 @@ chimera_smb_parse_ioctl(
                 }
                 break;
             }
+            case SMB2_FSCTL_DUPLICATE_EXTENTS_TO_FILE:
+                /* DUPLICATE_EXTENTS_DATA (MS-FSCC 2.3.8 / MS-SMB2 2.2.31.1.1):
+                 * SourceFileID is a 16-byte SMB2 FileId (pid + vid), then
+                 * SourceFileOffset(8), TargetFileOffset(8), ByteCount(8). */
+                if (request->ioctl.input_count < 40) {
+                    request->status = SMB2_STATUS_INVALID_PARAMETER;
+                    return -1;
+                }
+                evpl_iovec_cursor_get_uint64(request_cursor, &request->ioctl.de_src_file_id.pid);
+                evpl_iovec_cursor_get_uint64(request_cursor, &request->ioctl.de_src_file_id.vid);
+                evpl_iovec_cursor_get_uint64(request_cursor, &request->ioctl.de_src_offset);
+                evpl_iovec_cursor_get_uint64(request_cursor, &request->ioctl.de_dst_offset);
+                evpl_iovec_cursor_get_uint64(request_cursor, &request->ioctl.de_length);
+                break;
+            case SMB2_FSCTL_OFFLOAD_READ:
+                /* FSCTL_OFFLOAD_READ_INPUT (MS-FSCC 2.3.79): Size(4) + Flags(4)
+                 * + TokenTimeToLive(4) + Reserved(4) + FileOffset(8) +
+                 * CopyLength(8). */
+                if (request->ioctl.input_count < 32) {
+                    request->status = SMB2_STATUS_INVALID_PARAMETER;
+                    return -1;
+                }
+                evpl_iovec_cursor_skip(request_cursor, 16); /* Size, Flags, TTL, Reserved */
+                evpl_iovec_cursor_get_uint64(request_cursor, &request->ioctl.od_file_offset);
+                evpl_iovec_cursor_get_uint64(request_cursor, &request->ioctl.od_copy_length);
+                break;
+            case SMB2_FSCTL_OFFLOAD_WRITE:
+                /* FSCTL_OFFLOAD_WRITE_INPUT (MS-FSCC 2.3.81): Size(4) + Flags(4)
+                 * + FileOffset(8) + CopyLength(8) + TransferOffset(8) +
+                 * Token(512). */
+                if (request->ioctl.input_count < 32 + SMB2_OFFLOAD_TOKEN_SIZE) {
+                    request->status = SMB2_STATUS_INVALID_PARAMETER;
+                    return -1;
+                }
+                evpl_iovec_cursor_skip(request_cursor, 8); /* Size, Flags */
+                evpl_iovec_cursor_get_uint64(request_cursor, &request->ioctl.od_file_offset);
+                evpl_iovec_cursor_get_uint64(request_cursor, &request->ioctl.od_copy_length);
+                evpl_iovec_cursor_get_uint64(request_cursor, &request->ioctl.od_transfer_offset);
+                evpl_iovec_cursor_copy(request_cursor, request->ioctl.od_token, SMB2_OFFLOAD_TOKEN_SIZE);
+                break;
+            case SMB2_FSCTL_FILE_LEVEL_TRIM:
+                /* FSCTL_FILE_LEVEL_TRIM_INPUT (MS-FSCC 2.3.75): Key(4) +
+                 * NumRanges(4) + NumRanges * { Offset(8), Length(8) }.  We only
+                 * need Key (must be 0) and NumRanges (to report processed). */
+                if (request->ioctl.input_count < 8) {
+                    request->status = SMB2_STATUS_INVALID_PARAMETER;
+                    return -1;
+                }
+                evpl_iovec_cursor_get_uint32(request_cursor, &request->ioctl.tr_key);
+                evpl_iovec_cursor_get_uint32(request_cursor, &request->ioctl.tr_num_ranges);
+                break;
+            case SMB2_FSCTL_SET_INTEGRITY_INFORMATION:
+                /* SET_INTEGRITY_INFORMATION_BUFFER (MS-FSCC 2.3.55):
+                 * ChecksumAlgorithm(2) + Reserved(2) + Flags(4). */
+                if (request->ioctl.input_count < 8) {
+                    request->status = SMB2_STATUS_INVALID_PARAMETER;
+                    return -1;
+                }
+                evpl_iovec_cursor_get_uint16(request_cursor, &request->ioctl.ii_algo);
+                evpl_iovec_cursor_skip(request_cursor, 2); /* Reserved */
+                evpl_iovec_cursor_get_uint32(request_cursor, &request->ioctl.ii_flags);
+                break;
             case SMB2_FSCTL_LMR_REQUEST_RESILIENCY:
                 /* NETWORK_RESILIENCY_REQUEST (MS-SMB2 2.2.31.3): Timeout(4) +
                  * Reserved(4). */

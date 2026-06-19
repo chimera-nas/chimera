@@ -128,6 +128,14 @@ struct chimera_vfs_mount_options {
  * O_RDWR.  Read access is required unless WRITE_ONLY; write access is required
  * unless READ_ONLY.  Used by the open path to authorize the requested access. */
 #define CHIMERA_VFS_OPEN_WRITE_ONLY     (1U << 8)
+/* Stop if the final path component is an existing symbolic link: the backend
+ * returns CHIMERA_VFS_ELOOP instead of opening, colliding with (O_EXCL), or
+ * truncating it -- the check precedes the existence/EXCLUSIVE test.  Set by the
+ * SMB create path so a non-FILE_OPEN_REPARSE_POINT open of a symlink leaf yields
+ * STATUS_STOPPED_ON_SYMLINK regardless of the create disposition (MS-SMB2
+ * 3.3.5.9).  POSIX/NFS callers leave it clear and keep their existing
+ * symlink-leaf semantics. */
+#define CHIMERA_VFS_OPEN_STOP_SYMLINK   (1U << 9)
 
 /* Allocate flags */
 #define CHIMERA_VFS_ALLOCATE_DEALLOCATE 0x01
@@ -158,13 +166,19 @@ struct chimera_vfs_thread_metrics {
     struct prometheus_histogram_instance **op_latency_series;
 };
 
-#define CHIMERA_VFS_OPEN_HANDLE_EXCLUSIVE 0x1
-#define CHIMERA_VFS_OPEN_HANDLE_PENDING   0x2
-#define CHIMERA_VFS_OPEN_HANDLE_FILE_ID   0x4
-#define CHIMERA_VFS_OPEN_HANDLE_DETACHED  0x8
+#define CHIMERA_VFS_OPEN_HANDLE_EXCLUSIVE       0x1
+#define CHIMERA_VFS_OPEN_HANDLE_PENDING         0x2
+#define CHIMERA_VFS_OPEN_HANDLE_FILE_ID         0x4
+#define CHIMERA_VFS_OPEN_HANDLE_DETACHED        0x8
+/* A named-stream (ADS) handle.  Its file handle is distinct from the base
+ * file's, but its metadata (mode/owner/timestamps/DOS attributes) is the base
+ * inode's and mutates out-of-band relative to the stream fh, so the per-fh attr
+ * cache must not serve or store attributes for it (chimera_vfs_getattr). */
+#define CHIMERA_VFS_OPEN_HANDLE_STREAM          0x10
+#define CHIMERA_VFS_OPEN_HANDLE_NO_BACKEND_OPEN 0x20
 
-#define CHIMERA_VFS_ACCESS_MODE_RW        0
-#define CHIMERA_VFS_ACCESS_MODE_RO        1
+#define CHIMERA_VFS_ACCESS_MODE_RW              0
+#define CHIMERA_VFS_ACCESS_MODE_RO              1
 
 struct chimera_vfs_open_handle {
     struct chimera_vfs_module      *vfs_module;
@@ -368,7 +382,10 @@ struct chimera_vfs_request_handle {
     uint8_t slot;
 };
 
-#define CHIMERA_VFS_REQUEST_MAX_HANDLES 3
+/* Max chained sub-operations (SQE slots) a single request may have outstanding.
+ * The io_uring open_at uses four: the O_EXCL create-probe, the EEXIST re-open,
+ * and the child + parent statx. */
+#define CHIMERA_VFS_REQUEST_MAX_HANDLES 4
 
 /* One enumerated named stream, packed back-to-back in the list_streams reply
  * buffer.  `name_len` bytes of (un-terminated) stream name follow this header;
@@ -400,6 +417,13 @@ struct chimera_vfs_request {
     chimera_vfs_complete_callback_t    complete_delegate;
     struct prometheus_stopwatch        start_time;
     uint64_t                           elapsed_ns;
+
+    /* Temporary diagnostics: where a long-lived request is parked. */
+    const char                        *wait_reason;
+    uint64_t                           wait_since_ns;
+    uint64_t                           wait_arg0;
+    uint64_t                           wait_arg1;
+    uint64_t                           wait_arg2;
 
     /* Points to one page of memory that the plugin may use as desired */
     void                              *plugin_data;
@@ -446,6 +470,12 @@ struct chimera_vfs_request {
      * revocation -- the churn source for metadata-heavy single-client workloads
      * (rewinddir/fsstress) -- while preserving coherence. */
     uint8_t                            io_recall_flush_only;
+    /* Single-step namespace recall (smb2.lease.unlink delete-on-close): break
+     * each OTHER holder exactly ONCE to io_recall_retain (R) -- not a cascade to
+     * NONE -- and park until those breaks are acked.  io_recall_retain is the
+     * floor handed to begin_break for this flavor. */
+    uint8_t                            io_recall_single;
+    uint8_t                            io_recall_retain;
     void                               ( *io_next )(
         struct chimera_vfs_request *request);
     struct chimera_vfs_file_state     *io_lease_file;
@@ -506,6 +536,10 @@ struct chimera_vfs_request {
             void                           *private_data;
             uint8_t                         parent_fh[CHIMERA_VFS_FH_SIZE];
             int                             parent_fh_len;
+            /* Zeroed stand-in handed to open_at when the caller passes no
+             * set_attr (a non-create open) -- open_at requires a non-NULL
+             * set_attr that the backend only consults when creating. */
+            struct chimera_vfs_attrs        scratch_set_attr;
         } open;
 
         struct {
@@ -1101,7 +1135,8 @@ enum CHIMERA_FS_FH_MAGIC {
      * module slot so they can be selected as the default KV module). */
     CHIMERA_VFS_FH_MAGIC_MEMKV    = 7,
     CHIMERA_VFS_FH_MAGIC_SQLITE   = 8,
-    CHIMERA_VFS_FH_MAGIC_MAX      = 9
+    CHIMERA_VFS_FH_MAGIC_SMB      = 9,
+    CHIMERA_VFS_FH_MAGIC_MAX      = 10
 
 };
 
@@ -1162,6 +1197,16 @@ enum CHIMERA_FS_FH_MAGIC {
  * Path-based operations take a full path relative to the mount point.
  * If a module does not support path ops, the VFS core will resolve
  * path components one at a time using FH-relative operations.
+ *
+ * A module that sets CAP_FS_PATH_OP and does NOT set CAP_FS_RELATIVE_OP is
+ * "path-only" (see chimera_vfs_module_is_path_only): it has no persistent file
+ * handles.  Metadata ops are dispatched as a single path-relative op against the
+ * mount root; an open file's handle carries an OPAQUE per-open token (not a
+ * path, not re-openable via open_fh -- only the mount-root fh is re-openable),
+ * and read/write/getattr/setattr/commit/readdir/close operate through the open
+ * handle's vfs_private.  This mirrors the Linux cifs client.  A path-only mount
+ * therefore cannot be re-exported by a handle-based consumer (the NFS server):
+ * open_fh of a child token returns ESTALE.
  */
 #define CHIMERA_VFS_CAP_FS_PATH_OP          (1U << 7)
 
@@ -1367,6 +1412,18 @@ struct chimera_vfs_module {
         void                       *private_data);
 
 };
+
+/* mount->attrs.flags bits */
+#define CHIMERA_VFS_MOUNT_ATTR_READONLY (1ULL << 0)
+
+/* A module is "path-only" when it supports path-relative ops but has no
+ * persistent file handles (no FH-relative ops).  See CAP_FS_PATH_OP. */
+static inline int
+chimera_vfs_module_is_path_only(const struct chimera_vfs_module *module)
+{
+    return (module->capabilities & CHIMERA_VFS_CAP_FS_PATH_OP) &&
+           !(module->capabilities & CHIMERA_VFS_CAP_FS_RELATIVE_OP);
+} /* chimera_vfs_module_is_path_only */
 
 struct chimera_vfs_mount_attrs {
     uint64_t flags;

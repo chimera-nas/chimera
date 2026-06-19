@@ -76,10 +76,12 @@ chimera_smb_cancel(struct chimera_smb_request *request)
     if (match) {
         chimera_smb_notify_cancel(match);
     } else if (async) {
-        /* Search requests pending an async-interim (e.g. a CREATE blocked on a
-         * lease break).  The underlying wait is not yet cancellable from
-         * SMB2_CANCEL -- absorb it silently; the request still completes when its
-         * break acks.  A future phase can abort the parked open here. */
+        /* Search requests pending an async-interim.  A blocking byte-range LOCK
+         * (MS-SMB2 3.3.5.14) parked on a conflicting range is cancellable: cancel
+         * its VFS acquire and complete it with STATUS_CANCELLED (smb2.lock.cancel).
+         * A blocking named-pipe READ is likewise cancellable.  A CREATE blocked on
+         * a lease break is not (yet) cancellable from here -- absorb that silently;
+         * it completes when its break acks. */
         struct chimera_smb_request *parked;
 
         for (parked = conn->parked_requests; parked;
@@ -88,6 +90,33 @@ chimera_smb_cancel(struct chimera_smb_request *request)
                 break;
             }
         }
+
+        if (parked && parked->smb2_hdr.command == SMB2_LOCK &&
+            parked->lock.parked && parked->lock.open_file) {
+            struct chimera_smb_request *abort =
+                chimera_smb_lock_abort_parked(request->compound->thread,
+                                              parked->lock.open_file);
+
+            /* abort_parked clears open_file->parked_lock_req and returns the same
+             * request; complete it with CANCELLED rather than the abort default
+             * (RANGE_NOT_LOCKED). */
+            if (abort) {
+                chimera_smb_lock_park_finish(abort, SMB2_STATUS_CANCELLED);
+            }
+        } else if (parked && parked->async.pipe_read) {
+            /* A blocking named-pipe READ never completes on its own, so a
+             * CANCEL resolves it with STATUS_CANCELLED.  complete_request
+             * unlinks it from the parked list (via async_interim_cancel) and
+             * emits the final READ error response carrying the AsyncId.  Free
+             * its async-credit slot. */
+            if (conn->async_outstanding) {
+                conn->async_outstanding--;
+            }
+            chimera_smb_complete_request(parked, SMB2_STATUS_CANCELLED);
+        }
+        /* Other parked requests (e.g. a CREATE blocked on a lease break) are
+         * not yet cancellable from SMB2_CANCEL -- absorb silently; they
+         * complete when their break acks. */
     }
 
     /* CANCEL has no response per MS-SMB2.  Use STATUS_PENDING so the

@@ -22,6 +22,7 @@ add_library(chimera_vfs SHARED vfs.c vfs_lsan.c
             vfs_proc_remove_at.c vfs_proc_write.c vfs_proc_commit.c
             vfs_proc_open_at.c vfs_proc_symlink_at.c vfs_proc_link_at.c
             vfs_proc_readlink.c vfs_proc_rename_at.c vfs_proc_setattr.c
+            vfs_proc_recall.c
             vfs_proc_gate.c
             vfs_proc_create.c vfs_proc_create_unlinked.c
             vfs_proc_open.c vfs_proc_mkdir.c vfs_proc_remove.c

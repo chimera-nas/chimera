@@ -20,6 +20,7 @@ struct chimera_posix_client;
 struct chimera_client_config;
 struct prometheus_metrics;
 struct evpl_iovec;
+struct chimera_acl;
 
 struct chimera_posix_client *
 chimera_posix_init(
@@ -558,6 +559,24 @@ chimera_posix_futimens(
     int                   fd,
     const struct timespec times[2]);
 
+// Canonical NFSv4/Windows ACL get/set (Chimera-specific extension; NFSv4 ACLs
+// are not standard POSIX).  setacl applies the ACL via a VFS setattr
+// (CHIMERA_VFS_ATTR_ACL); getacl reads it back into a caller-owned buffer.
+// Both run under the calling thread's effective credential
+// (chimera_posix_set_cred), so they are authorized as the chosen user.
+int
+chimera_posix_setacl(
+    const char               *path,
+    const struct chimera_acl *acl);
+
+// Read the ACL of `path` into `buf` (capacity `bufsize` bytes).  Returns the
+// ACE count on success, or -1 with errno set (ERANGE if `buf` is too small).
+int
+chimera_posix_getacl(
+    const char         *path,
+    struct chimera_acl *buf,
+    size_t              bufsize);
+
 // Configurable pathname limits (pathconf(3)/fpathconf(3))
 long
 chimera_posix_pathconf(
@@ -579,6 +598,21 @@ int
 chimera_posix_ftruncate(
     int   fd,
     off_t length);
+
+// Preallocate space for a file (posix_fallocate(3))
+int
+chimera_posix_fallocate(
+    int   fd,
+    off_t offset,
+    off_t len);
+
+// fallocate(2) with a mode (0 = allocate; PUNCH_HOLE|KEEP_SIZE = deallocate)
+int
+chimera_posix_fallocate_mode(
+    int   fd,
+    int   mode,
+    off_t offset,
+    off_t len);
 
 // File locking
 int

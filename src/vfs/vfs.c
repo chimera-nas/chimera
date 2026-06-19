@@ -183,14 +183,16 @@ chimera_vfs_close_thread_sweep(
         handle = handles;
         LL_DELETE(handles, handle);
 
-        close_thread->num_pending++;
+        if (chimera_vfs_open_handle_needs_backend_close(handle)) {
+            close_thread->num_pending++;
 
-        chimera_vfs_close(thread,
-                          handle->vfs_module,
-                          handle->vfs_private,
-                          handle->fh_hash,
-                          chimera_vfs_close_thread_callback,
-                          close_thread);
+            chimera_vfs_close(thread,
+                              handle->vfs_module,
+                              handle->vfs_private,
+                              handle->fh_hash,
+                              chimera_vfs_close_thread_callback,
+                              close_thread);
+        }
 
         /* defer_close removed the handle from the bucket but frees the struct
          * here (not via open_cache_free), so drop its anchored lease ref. */
@@ -845,10 +847,20 @@ chimera_vfs_destroy(struct chimera_vfs *vfs)
         vfs->identity = NULL;
     }
 
-    /* Destroy delegation threads before the close thread so that any
-     * in-flight delegated close operations finish and their completion
-     * doorbell rings execute before the close thread's vfs_thread
-     * (and its doorbell) is freed. */
+    /* Stop the close thread before the delegation threads.  The shutdown-drain
+     * handshake above (signaled only when num_pending == 0) already guarantees
+     * every close the close thread dispatched to a delegation thread has
+     * completed and rung back, so no in-flight delegated close remains.  But the
+     * close thread's event loop is still running after that handshake -- its
+     * periodic timer sweep and idle-lease reaper can issue *new* closes, which
+     * for a CHIMERA_VFS_CAP_BLOCKING backend (cairn, diskfs) route through a
+     * delegation thread and ring its doorbell.  If the delegation threads (and
+     * their doorbells) were torn down first, such a late close would ring a
+     * closed doorbell fd -> EBADF fatal abort (a use-after-close of the
+     * doorbell's eventfd).  Quiescing the close thread first closes that window;
+     * its own doorbell/timer-driven completions need no delegation thread. */
+    evpl_thread_destroy(vfs->close_thread.evpl_thread);
+
     for (i = 0; i < vfs->num_sync_delegation_threads; i++) {
         evpl_thread_destroy(vfs->sync_delegation_threads[i].evpl_thread);
     }
@@ -858,8 +870,6 @@ chimera_vfs_destroy(struct chimera_vfs *vfs)
         evpl_thread_destroy(vfs->async_delegation_threads[i].evpl_thread);
     }
     free(vfs->async_delegation_threads);
-
-    evpl_thread_destroy(vfs->close_thread.evpl_thread);
 
     chimera_vfs_mount_table_destroy(vfs->mount_table);
 
@@ -989,11 +999,29 @@ chimera_vfs_watchdog(struct chimera_vfs_thread *thread)
 
         if (ts.tv_sec - thread->watchdog_last_report >= 30) {
             thread->watchdog_last_report = ts.tv_sec;
-            chimera_vfs_error(
-                "request %p op %s active for %lu sec (oldest on this thread)",
-                (void *) request,
-                chimera_vfs_op_name(request->opcode),
-                elapsed / 1000000000UL);
+            if (request->wait_reason) {
+                uint64_t now_ns = (uint64_t) ts.tv_sec * 1000000000ULL +
+                    (uint64_t) ts.tv_nsec;
+                uint64_t wait_ns = request->wait_since_ns ?
+                    now_ns - request->wait_since_ns : 0;
+
+                chimera_vfs_error(
+                    "request %p op %s active for %lu sec wait=%s wait_sec=%llu arg0=%llu arg1=%llu arg2=%llu (oldest on this thread)",
+                    (void *) request,
+                    chimera_vfs_op_name(request->opcode),
+                    elapsed / 1000000000UL,
+                    request->wait_reason,
+                    (unsigned long long) (wait_ns / 1000000000ULL),
+                    (unsigned long long) request->wait_arg0,
+                    (unsigned long long) request->wait_arg1,
+                    (unsigned long long) request->wait_arg2);
+            } else {
+                chimera_vfs_error(
+                    "request %p op %s active for %lu sec (oldest on this thread)",
+                    (void *) request,
+                    chimera_vfs_op_name(request->opcode),
+                    elapsed / 1000000000UL);
+            }
         }
         chimera_vfs_dump_request(request);
     }

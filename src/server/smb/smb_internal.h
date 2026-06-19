@@ -233,6 +233,12 @@ struct chimera_smb_config {
      * SET_SECURITY; see chimera_server_config_set_smb_acl_inherited_canonicalize
      * for semantics.  Default 1 (canonical). */
     int                            acl_inherited_canonicalize;
+    /* Per-connection ceiling on simultaneously outstanding async (STATUS_PENDING)
+     * operations.  A blocking named-pipe READ that cannot be served now is made
+     * async until the connection holds (smb2_max_async_credits - 1) of them;
+     * beyond that it is rejected with STATUS_INSUFFICIENT_RESOURCES (the contract
+     * smb2.credits.*_ipc_max_async_credits asserts).  Default 512. */
+    int                            smb2_max_async_credits;
     uint32_t                       capabilities;
     uint32_t                       dialects[16];
     struct chimera_smb_nic_info    nic_info[16];
@@ -355,6 +361,10 @@ struct chimera_smb_request {
         uint16_t                       credit_charge;
         uint16_t                       credit_request;
         uint8_t                        armed;
+        /* Set when this parked request is a blocking named-pipe READ counted
+         * against conn->async_outstanding, so SMB2_CANCEL and teardown drain
+         * decrement that counter when the request leaves the parked list. */
+        uint8_t                        pipe_read;
     } async;
 
     union {
@@ -462,6 +472,14 @@ struct chimera_smb_request {
             uint8_t                         access_retries;
             /* Open handle parked across the access-retry getattr. */
             struct chimera_vfs_open_handle *access_retry_oh;
+            /* Bounded retry budget + parked handle for a share conflict against a
+             * durable holder whose owning connection is mid-disconnect: the
+             * holder will yield once its disconnect parks it, so re-attempt the
+             * open completion on a short timer until it does (or the budget
+             * lapses into a real SHARING_VIOLATION).  See
+             * chimera_smb_create_open_at_callback. */
+            uint16_t                        share_conflict_retries;
+            struct chimera_vfs_open_handle *share_conflict_oh;
             /* Set by the durable-reconnect path: this CREATE is reclaiming a
             * surviving open, not opening a new one.  The access was granted at
             * the original open, and MS-SMB2 has the reconnect ignore the
@@ -527,7 +545,7 @@ struct chimera_smb_request {
             struct chimera_vfs_handle_state    persist_hs;
             uint8_t                            persist_key[CHIMERA_SMB_DURABLE_KEY_LEN];
             uint8_t                            persist_value[CHIMERA_SMB_DURABLE_VALUE_MAX];
-            char                               parent_path[SMB_FILENAME_MAX];
+            char                               parent_path[SMB_PATH_MAX];
             char                              *name;
             /* Named-stream (ADS) suffix parsed off the final path component.
              * has_stream is set when the create targets "file:stream[:$DATA]";
@@ -535,6 +553,11 @@ struct chimera_smb_request {
              * trimmed to the base file.  base_oh is the base file's open handle
              * held across the chained chimera_vfs_open_stream. */
             uint8_t                            has_stream;
+            /* Set when the final component is the explicit default data fork
+             * "file::$DATA" (has_stream stays 0; the base file is opened).  A
+             * directory has no data fork, so the open path rejects this form on
+             * a directory target (smb2.streams.dir). */
+            uint8_t                            explicit_data_fork;
             uint16_t                           stream_name_len;
             char                               stream_name[SMB_FILENAME_MAX];
             struct chimera_vfs_open_handle    *base_oh;
@@ -552,6 +575,14 @@ struct chimera_smb_request {
             struct chimera_vfs_pending_acquire gen_ticket;
             uint8_t                            gen_held_granted;
             uint8_t                            gen_parked;
+            /* Set by chimera_smb_create_gen_open_file_normal when the share
+             * conflict it could not resolve is against a durable holder that will
+             * park+yield shortly: an enum chimera_smb_durable_yield value telling
+             * the open-completion path whether to retry on a timer instead of
+             * failing SHARING_VIOLATION, and on which budget (CONFIRMED = full,
+             * SPECULATIVE = short).  Re-evaluated (cleared first) per create
+             * attempt. */
+            uint8_t                            gen_share_retry;
             /* GRANTED/DENIED result stashed by chimera_smb_create_share_park_cb
              * when the share-park ticket resolves on another thread, so the
              * owning thread's resume doorbell can finish the open with it.  The
@@ -664,6 +695,25 @@ struct chimera_smb_request {
             }                              elements[CHIMERA_SMB_LOCK_MAX_ELEMENTS];
             bool                           lock_too_many;
             struct chimera_smb_lock_entry *entry;  /* live for the in-flight acquire */
+            /* Blocking-lock (MS-SMB2 3.3.5.14) park state.  Set once a contended
+             * LOCK without FAIL_IMMEDIATELY emits its STATUS_PENDING interim and
+             * parks on the VFS pending-acquire queue.  The grant callback may fire
+             * on ANOTHER thread (whoever released the conflicting range); it stashes
+             * resume_status and enqueues the request on its owning thread's
+             * lock_resume_head via lock_resume_next, then rings the resume doorbell.
+             * The owning thread drains the queue, retires the interim, and completes
+             * with resume_status.  parked stays set from interim until completion so
+             * the close / teardown abort path can find and cancel it. */
+            uint8_t                        parked;
+            uint32_t                       resume_status;
+            struct chimera_smb_request    *lock_resume_next;
+            /* MS-SMB2 3.3.5.14 LockSequence replay bucket for this single-element
+             * request: 1..64 when replay detection is active for the open and the
+             * client supplied a valid bucket, else 0 (no caching).  Captured at
+             * handler entry; the status of a non-replayed op is written back into
+             * open_file->lock_seq_* under this bucket at completion. */
+            uint8_t                        seq_bucket;
+            uint8_t                        seq_index;
         } lock;
 
         struct {
@@ -765,6 +815,46 @@ struct chimera_smb_request {
             /* FSCTL_LMR_REQUEST_RESILIENCY (NETWORK_RESILIENCY_REQUEST,
              * MS-SMB2 2.2.31.3): requested resiliency Timeout in milliseconds. */
             uint32_t                        rr_timeout_ms;
+            /* FSCTL_DUPLICATE_EXTENTS_TO_FILE (DUPLICATE_EXTENTS_DATA, MS-FSCC
+             * 2.3.8 / MS-SMB2 2.2.31.1.1): SourceFileID(16) is an SMB2 FileId,
+             * SourceFileOffset(8), TargetFileOffset(8), ByteCount(8). */
+            struct chimera_smb_file_id      de_src_file_id;
+            uint64_t                        de_src_offset;
+            uint64_t                        de_dst_offset;
+            uint64_t                        de_length;
+            struct chimera_smb_open_file   *de_src_open_file;
+            struct chimera_smb_open_file   *de_dst_open_file;
+            /* Destination file size, fetched before the source so the dest
+             * range can be validated against EOF (dup_extents must not extend
+             * the destination). */
+            uint64_t                        de_dst_size;
+            uint8_t                         de_dst_sparse;
+            /* Set once the zero-copy clone has fallen back to copy_range, so the
+             * completion callback doesn't loop the fallback again. */
+            uint8_t                         de_copy_fallback;
+            /* FSCTL_OFFLOAD_READ / FSCTL_OFFLOAD_WRITE (ODX, MS-FSCC 2.3.79-82).
+             * The 512-byte STORAGE_OFFLOAD_TOKEN is self-describing: it encodes
+             * the source open's FileId, the OFFLOAD_READ base offset, and the
+             * valid transfer length, so OFFLOAD_WRITE resolves the source the
+             * same way COPYCHUNK resolves a resume key (no server-side token
+             * table needed). */
+            uint64_t                        od_file_offset;
+            uint64_t                        od_copy_length;
+            uint64_t                        od_transfer_offset;
+            uint64_t                        od_transfer_length;
+            struct chimera_smb_file_id      od_src_file_id;
+            struct chimera_smb_open_file   *od_src_open_file;
+            struct chimera_smb_open_file   *od_dst_open_file;
+            uint8_t                         od_copy_fallback;
+            uint8_t                         od_token[512];
+            /* FSCTL_FILE_LEVEL_TRIM (MS-FSCC 2.3.75): Key must be 0; we
+             * acknowledge the (advisory) trim of NumRanges ranges. */
+            uint32_t                        tr_key;
+            uint32_t                        tr_num_ranges;
+            /* FSCTL_GET/SET_INTEGRITY_INFORMATION (MS-FSCC 2.3.54/2.3.55): the
+             * checksum algorithm + flags carried in/out of the request. */
+            uint16_t                        ii_algo;
+            uint32_t                        ii_flags;
         } ioctl;
         struct {
             uint8_t                         info_type;
@@ -963,6 +1053,15 @@ struct chimera_smb_session_handle {
 
 #define CHIMERA_SMB_CONN_FLAG_SIGNING_REQUIRED      0x01
 #define CHIMERA_SMB_CONN_FLAG_SMB_DIRECT_NEGOTIATED 0x02
+/* A non-anonymous (real user/guest) session has been established on this
+ * connection, lifting it out of the MS-SMB2 "constrained connection" state.
+ * Until then the connection has only ever carried null (anonymous) sessions and
+ * MUST reject SMB3-encrypted traffic by resetting (smb2.session.anon-
+ * encryption1): a null session holds no key, so an encrypted request on an
+ * exclusively-anonymous connection is invalid.  Once a real session exists, an
+ * (otherwise unenforced) encrypted request on a null session is decrypted with
+ * the null session's zero-derived key like any other (anon-encryption2). */
+#define CHIMERA_SMB_CONN_FLAG_AUTHENTICATED         0x04
 
 /* Bits identifying which negotiate contexts the client sent (and that we
  * accepted on the wire). Phase 0 records this so unit tests can assert
@@ -977,6 +1076,8 @@ struct chimera_smb_session_handle {
 
 struct chimera_smb_notify_request;
 
+#define CHIMERA_SMB_RPC_MAX_HANDLES                 16
+
 struct chimera_smb_conn {
     OM_uint32                          gss_major;
     OM_uint32                          gss_minor;
@@ -988,11 +1089,29 @@ struct chimera_smb_conn {
     uint8_t                           *ntlm_output;
     size_t                             ntlm_output_len;
     unsigned int                       flags;
+    /* DCE/RPC context (policy) handles currently open on this connection: each
+     * 16-byte slot holds an issued handle's id, an all-zero slot is free.  An op
+     * presented a handle not in this set -- issued on another connection,
+     * already closed, or never issued -- faults with
+     * nca_s_fault_context_mismatch.  Scoping the set to the connection is what
+     * makes a cross-connection use and a double-close fail (MS-LSAD,
+     * smbtorture rpc.handles).  16 slots is far more than the one or two policy
+     * handles a client holds at once. */
+    uint8_t                            rpc_handles[CHIMERA_SMB_RPC_MAX_HANDLES][16];
     /* Set under the owning thread's lease_break_lock while conn_free drains
      * this connection's queued lease-break notifications, so a break_cb racing
      * on another thread does not enqueue a send for a connection whose bind is
      * being torn down.  Reset on reuse in chimera_smb_conn_alloc. */
     uint8_t                            lease_break_tearing_down;
+    /* Set at the very start of disconnect processing (EVPL_NOTIFY_DISCONNECTED),
+     * BEFORE the heavyweight session/tree teardown that parks this connection's
+     * durable handles.  A conflicting CREATE racing into that window on another
+     * connection (the disconnect-vs-conflicting-open race: the durable holder's
+     * share reservation is still live because its disconnect has not yet parked
+     * it) reads this through the durable registry to tell "this durable's owner
+     * is gone, it will yield -- retry briefly" from "a genuinely-live durable
+     * holder -- real SHARING_VIOLATION".  Cleared on reuse in conn_alloc. */
+    uint8_t                            disconnecting;
     /* Count of compounds in flight on THIS connection (guarded by the owning
     * thread's lease_break_lock).  A dir-lease break whose holder connection is
     * mid-compound is a self-break: the same connection's reply must precede the
@@ -1084,6 +1203,17 @@ struct chimera_smb_conn {
      * SMB2_CANCEL walks this list by AsyncId; conn_free drains it before tearing
      * down the bind. */
     struct chimera_smb_request        *parked_requests;
+    /* Count of currently-parked async named-pipe READs on this connection.
+     * Capped at (config.smb2_max_async_credits - 1); reaching the cap makes
+     * further blocking pipe reads fail with STATUS_INSUFFICIENT_RESOURCES.
+     * Incremented when a pipe read parks, decremented when it is cancelled or
+     * drained at teardown. */
+    uint32_t                           async_outstanding;
+    /* Server-side estimate of the client's current SMB2 credit balance (granted
+     * minus charged), used to cap how many credits a response grants so a client
+     * that keeps requesting more (e.g. the smb2.credits async flood) cannot
+     * overflow its 16-bit credit window.  See chimera_smb_grant_credits. */
+    uint32_t                           credits_balance;
     struct chimera_server_smb_thread  *thread;
     struct evpl_bind                  *bind;
     struct chimera_smb_conn           *prev;
@@ -1097,6 +1227,47 @@ struct chimera_smb_conn {
     char                               local_addr[128];
     char                               remote_addr[128];
 };
+
+/* Ceiling on the credit balance the server will let a single connection
+ * accumulate.  A response grants the credits the client asked for, but never so
+ * many that the client's balance would exceed this -- otherwise a client that
+ * keeps requesting more (smb2.credits async flood requests 1,2,3,...) would
+ * overflow its 16-bit credit window and fault the connection.  Matches Samba's
+ * default `smb2 max credits`; the credits.c tests require >= 8192 grantable. */
+#define CHIMERA_SMB_MAX_CREDITS 8192
+
+/*
+ * Compute the SMB2 CreditResponse for one response and update the connection's
+ * running estimate of the client's credit balance.
+ *
+ * `consume` is the number of credits the client spent sending the request (its
+ * effective CreditCharge), debited once per request -- callers pass 0 for the
+ * final response of an async request whose interim already accounted the charge.
+ * The grant is the client's CreditRequest, clamped so the balance stays at or
+ * below CHIMERA_SMB_MAX_CREDITS, and never zero while the client holds none (so
+ * the window cannot collapse).  Single-threaded on the conn's SMB thread.
+ */
+static inline uint16_t
+chimera_smb_grant_credits(
+    struct chimera_smb_conn *conn,
+    uint32_t                 consume,
+    uint16_t                 credit_request)
+{
+    uint32_t want = credit_request ? credit_request : 1;
+    uint32_t bal  = conn->credits_balance;
+    uint32_t room, grant;
+
+    bal   = bal > consume ? bal - consume : 0;
+    room  = bal < CHIMERA_SMB_MAX_CREDITS ? CHIMERA_SMB_MAX_CREDITS - bal : 0;
+    grant = want < room ? want : room;
+
+    if (grant == 0 && bal == 0) {
+        grant = 1;
+    }
+
+    conn->credits_balance = bal + grant;
+    return (uint16_t) grant;
+} /* chimera_smb_grant_credits */
 
 /* Default and ceiling for a durable handle's reconnect grace window.  A v2
  * client may request a timeout; we honor it up to the ceiling, falling back to
@@ -1155,6 +1326,10 @@ struct chimera_server_smb_shared {
     int                               rdma;
     enum evpl_protocol_id             tcp_protocol;
     uint8_t                           guid[SMB2_GUID_SIZE];
+    /* Account-domain (machine) SID sub-authorities: S-1-5-21-X-Y-Z, derived once
+     * at startup from a stable per-host id (see chimera_smb_server_init).  The
+     * LSARPC/SAMR services issue domain-relative SIDs under this. */
+    uint32_t                          machine_domain_sub[3];
     gss_name_t                        svc;
     gss_cred_id_t                     srv_cred;
     struct chimera_vfs               *vfs;
@@ -1195,6 +1370,18 @@ chimera_smb_open_file_drain_locks(
     struct chimera_server_smb_thread *thread,
     struct chimera_smb_open_file     *open_file);
 
+/* Forward decls (defined in smb_proc_lock.c; also in smb_procs.h, which this
+ * header cannot include) so the inline tree-teardown path can abort and complete
+ * a blocking byte-range LOCK parked on an open being torn down. */
+struct chimera_smb_request *
+chimera_smb_lock_abort_parked(
+    struct chimera_server_smb_thread *thread,
+    struct chimera_smb_open_file     *open_file);
+void
+chimera_smb_lock_park_finish(
+    struct chimera_smb_request *request,
+    uint32_t                    status);
+
 /* Ring every peer SMB thread's lease-resume doorbell so each re-sweeps its
  * connections for parked CREATEs an event on this thread unblocked (defined in
  * smb_proc_create.c; also declared in smb_procs.h, which this header cannot
@@ -1202,6 +1389,19 @@ chimera_smb_open_file_drain_locks(
 void
 chimera_smb_create_resume_parked_broadcast(
     struct chimera_server_smb_thread *origin);
+
+/* Fire a request-less, fire-and-forget delete-on-close unlink during teardown
+ * (defined in smb_proc_close.c).  The teardown handle-release paths free open
+ * files without a live chimera_smb_request, so the clean-CLOSE DOC machinery
+ * (which threads everything through the request) cannot be reused directly.
+ * This drives the same open-parent -> remove_at -> close-backend sequence off a
+ * self-contained, heap-owned copy of the doc_info returned by
+ * chimera_vfs_release_doc.  Used only for opens teardown is genuinely
+ * discarding (never a preserved/parked durable handle). */
+void
+chimera_smb_teardown_doc_unlink(
+    struct chimera_server_smb_thread  *thread,
+    const struct chimera_vfs_doc_info *doc_info);
 
 /* Durable/persistent handle registry (smb_durable.c). */
 void
@@ -1273,6 +1473,41 @@ chimera_smb_durable_drain_all(
 bool
 chimera_smb_durable_purge_parked(
     struct chimera_server_smb_thread *thread,
+    uint64_t                          persistent_id);
+
+/* How a conflicting CREATE should treat a share conflict against a not-yet-parked
+ * non-persistent durable holder it could not purge.  See
+ * chimera_smb_durable_conn_disconnecting. */
+enum chimera_smb_durable_yield {
+    /* Genuinely-live holder on a fully-connected conn (or persistent/unknown):
+     * the conflict is real, deny SHARING_VIOLATION immediately, no retry. */
+    CHIMERA_SMB_DURABLE_YIELD_NONE        = 0,
+    /* The holder's disconnect has been observed (create_conn cleared, conn
+     * flagged disconnecting, bind already closing, or the entry already parked --
+     * a purge that lost the park race by an instant): the park + MS-SMB2 yield is
+     * imminent or done -- retry on the full (~3 s) budget for it to be reaped. */
+    CHIMERA_SMB_DURABLE_YIELD_CONFIRMED   = 1,
+    /* No disconnect signal yet, but the holder is a non-persistent durable open
+     * (which MS-SMB2 requires to yield once its owner disconnects).  The conflict
+     * can only resolve two ways: the holder is disconnecting (its FIN just has not
+     * been read yet -- a later probe flips to CONFIRMED once it is) or it is
+     * genuinely live and staying.  Retry on a SHORT budget that covers the
+     * FIN-read latency; a genuinely-live holder simply lapses that short budget
+     * into the same SHARING_VIOLATION it would have returned immediately. */
+    CHIMERA_SMB_DURABLE_YIELD_SPECULATIVE = 2,
+};
+
+/* Classify a share conflict against a non-persistent durable open with this
+* persistent id that a conflicting CREATE could not purge.  Returns
+* CHIMERA_SMB_DURABLE_YIELD_NONE for a persistent handle or unknown id;
+* _CONFIRMED once the holder's disconnect has been observed (the pre-notify
+* window via its bind already closing, or later stages: conn flagged
+* disconnecting, create_conn cleared, or the entry already parked); _SPECULATIVE
+* when no disconnect signal is visible yet but the holder is a non-persistent
+* durable open (and so must yield if its owner is in fact disconnecting). */
+enum chimera_smb_durable_yield
+chimera_smb_durable_conn_disconnecting(
+    struct chimera_server_smb_shared *shared,
     uint64_t                          persistent_id);
 
 /* Scan a share's backend (routed via `fh`) for persisted handle records and
@@ -1387,6 +1622,15 @@ struct chimera_server_smb_thread {
      * by lease_break_lock. */
     struct chimera_smb_request         *share_resume_head;
 
+    /* Cross-thread queue of blocking byte-range LOCKs (MS-SMB2 3.3.5.14) parked
+     * on a conflicting range whose VFS acquire ticket was GRANTED on ANOTHER
+     * thread (whichever released the conflicting lock).  The deferred LOCK
+     * response's iovecs are thread-local, so the granting thread enqueues the
+     * request here and rings this thread's lease_resume_doorbell; the handler
+     * drains the queue and completes each blocking lock on its owning thread.
+     * Guarded by lease_break_lock; link reuses request->async.park_next. */
+    struct chimera_smb_request         *lock_resume_head;
+
     /* Active (non-pooled) connections owned by this thread, threaded on
      * conn->active_prev / conn->active_next.  Lets a thread walk every
      * connection it owns to find parked CREATEs to resume.  Only touched on the
@@ -1491,6 +1735,7 @@ chimera_smb_request_alloc(struct chimera_server_smb_thread *thread)
     request->async_id        = 0;
     request->tree            = NULL;
     request->async.armed     = 0;
+    request->async.pipe_read = 0;
     request->async.park_next = NULL;
 
     return request;
@@ -1631,6 +1876,14 @@ chimera_smb_session_release(
 static inline bool
 chimera_smb_durable_open_preservable(const struct chimera_smb_open_file *open_file)
 {
+    /* A resilient handle (FSCTL_LMR_REQUEST_RESILIENCY) preserves its byte-range
+     * locks across the disconnect for the resiliency timeout regardless of its
+     * caching state (MS-SMB2 3.3.5.15.9), so it is always preservable -- unlike a
+     * plain durable open, which yields its locks if it has no write-caching
+     * oplock/lease to defend them. */
+    if (open_file->resilient) {
+        return true;
+    }
     if (open_file->lock_entries) {
         bool write_caching =
             (open_file->oplock_level == SMB2_OPLOCK_LEVEL_BATCH) ||
@@ -1693,7 +1946,7 @@ chimera_smb_session_park_durables(
             pthread_mutex_lock(&tree->open_files_lock[b]);
             HASH_ITER(hh, tree->open_files[b], open_file, tmp)
             {
-                if (!open_file->durable_flags ||
+                if ((!open_file->durable_flags && !open_file->resilient) ||
                     (open_file->flags & CHIMERA_SMB_OPEN_FILE_PARKED) ||
                     !chimera_smb_durable_open_preservable(open_file) ||
                     /* Mid-break opens are not preserved (MS-SMB2 3.3.7.1);
@@ -1851,10 +2104,15 @@ chimera_smb_conn_alloc(struct chimera_server_smb_thread *thread)
     if (conn) {
         LL_DELETE(thread->free_conns, conn);
         conn->lease_break_tearing_down = 0;
+        conn->disconnecting            = 0;
         conn->in_compound              = 0;
     } else {
         conn = calloc(1, sizeof(*conn));
     }
+
+    /* No RPC context handles open yet; clear the set since the connection pool
+    * does not zero on reuse (a stale slot would validate a foreign handle). */
+    memset(conn->rpc_handles, 0, sizeof(conn->rpc_handles));
 
     return conn;
 } /* chimera_smb_conn_alloc */
@@ -1925,6 +2183,14 @@ chimera_smb_conn_free(
         if (!s) {
             continue;
         }
+
+        /* Walk the session's trees under session->lock, matching
+         * chimera_smb_session_park_durables / _flush_notifies: a concurrent
+         * chimera_smb_tree_disconnect on another channel clears s->trees[i] and
+         * frees the tree under session->lock, so reading the slot and taking
+         * tree->open_files_lock without it can touch a freed/recycled tree.  The
+         * lock order session->lock -> open_files_lock matches those iterators. */
+        pthread_mutex_lock(&s->lock);
         for (i = 0; i < s->max_trees; i++) {
             struct chimera_smb_tree      *t = s->trees[i];
             struct chimera_smb_open_file *of;
@@ -1945,6 +2211,7 @@ chimera_smb_conn_free(
                 pthread_mutex_unlock(&t->open_files_lock[b]);
             }
         }
+        pthread_mutex_unlock(&s->lock);
     }
 
     HASH_ITER(hh, conn->session_handles, session_handle, tmp)
@@ -2062,6 +2329,8 @@ chimera_smb_tree_free(
     struct chimera_smb_open_file    *open_file, *tmp;
     struct chimera_smb_notify_state *gc_states = NULL;
     struct chimera_smb_notify_state *nstate;
+    struct chimera_smb_request      *lock_aborts = NULL;
+    struct chimera_smb_request      *labort;
     bool                             closed_breaking = false;
     int                              i;
 
@@ -2073,6 +2342,21 @@ chimera_smb_tree_free(
         {
             chimera_smb_abort_if(open_file->refcnt == 0, "open file refcnt is 0 at tree destruction");
             HASH_DELETE(hh, tree->open_files[i], open_file);
+
+            /* Detach any blocking byte-range LOCK parked on this open (MS-SMB2
+             * smb2.lock.cancel-tdis / cancel-logoff) BEFORE the durable-preserve
+             * decision: a blocking lock cannot survive a disconnect/teardown, so
+             * abort it even when the handle itself is preserved durable.  Defer
+             * its completion until the bucket lock is dropped — finishing it
+             * releases the open_file reference it holds, which re-takes this same
+             * bucket lock.  The parked request keeps refcnt > 0, so the open is not
+             * freed in this loop; the deferred completion below drops that ref.
+             * Aborts are chained on lock.lock_resume_next (the abort cleared it). */
+            labort = chimera_smb_lock_abort_parked(thread, open_file);
+            if (labort) {
+                labort->lock.lock_resume_next = lock_aborts;
+                lock_aborts                   = labort;
+            }
 
             /* A durable/persistent open survives the teardown of its session
              * (connection loss or a graceful LOGOFF, MS-SMB2 3.3.5.6): keep the
@@ -2089,7 +2373,7 @@ chimera_smb_tree_free(
              * the normal close path, which also forgets the registry entry --
              * a later durable reconnect with the stale FileId then correctly
              * returns OBJECT_NAME_NOT_FOUND. */
-            if (open_file->durable_flags && preserve_durable &&
+            if ((open_file->durable_flags || open_file->resilient) && preserve_durable &&
                 chimera_smb_durable_open_preservable(open_file)) {
                 /* Clear create_conn BEFORE deciding park-vs-close: a break
                  * that begins after this point finds no live member, revokes
@@ -2145,12 +2429,28 @@ chimera_smb_tree_free(
                  * tree/session teardown: drop its registry entry so a later
                  * reconnect with the stale FileId is not matched against a
                  * freed open_file. */
-                if (open_file->durable_flags) {
+                if (open_file->durable_flags || open_file->resilient) {
                     chimera_smb_durable_forget(shared, open_file->file_id.pid);
                 }
                 chimera_smb_open_file_drain_locks(thread, open_file);
                 if (open_file->handle) {
-                    chimera_vfs_release(thread->vfs_thread, open_file->handle);
+                    /* Abrupt teardown (disconnect / LOGOFF / TREE_DISCONNECT)
+                     * of an open this teardown is genuinely DISCARDING: route
+                     * the VFS handle release through the delete-on-close-aware
+                     * path so a DOC-armed file is actually unlinked on the last
+                     * reference, exactly as a clean multi-handle CLOSE does
+                     * (smb2.lease.initial_delete_*).  A preserved/parked durable
+                     * handle never reaches here — it was parked via `continue`
+                     * above with its VFS handle kept intact — so its file is
+                     * never deleted on disconnect.  release_doc behaves like an
+                     * ordinary release (returns 0) when no DOC is armed. */
+                    struct chimera_vfs_doc_info doc_info;
+
+                    if (chimera_vfs_release_doc(thread->vfs_thread,
+                                                open_file->handle,
+                                                &doc_info)) {
+                        chimera_smb_teardown_doc_unlink(thread, &doc_info);
+                    }
                 }
                 chimera_smb_open_file_free(thread, open_file);
             }
@@ -2170,6 +2470,17 @@ chimera_smb_tree_free(
         nstate    = gc_states;
         gc_states = nstate->gc_next;
         chimera_smb_notify_close(shared->vfs->vfs_notify, nstate);
+    }
+
+    /* Complete the blocking LOCKs aborted above with RANGE_NOT_LOCKED, now that
+     * no bucket lock is held (the completion drops the open_file reference, which
+     * re-takes the bucket lock and frees the open). */
+    while (lock_aborts) {
+        labort      = lock_aborts;
+        lock_aborts = labort->lock.lock_resume_next;
+
+        labort->lock.lock_resume_next = NULL;
+        chimera_smb_lock_park_finish(labort, labort->lock.resume_status);
     }
 
     /* Closing a mid-break durable open above resolved its (unackable) break;
@@ -2464,7 +2775,7 @@ chimera_smb_open_file_release(
     if (open_file->refcnt == 0) {
         /* Final teardown of a live durable open (e.g. an explicit CLOSE):
          * drop its registry entry before the object is recycled. */
-        if (open_file->durable_flags) {
+        if (open_file->durable_flags || open_file->resilient) {
             chimera_smb_durable_forget(request->compound->thread->shared,
                                        open_file->file_id.pid);
         }
@@ -2505,7 +2816,7 @@ chimera_smb_open_file_release_nr(
     open_file->refcnt--;
 
     if (open_file->refcnt == 0) {
-        if (open_file->durable_flags) {
+        if (open_file->durable_flags || open_file->resilient) {
             chimera_smb_durable_forget(thread->shared, open_file->file_id.pid);
         }
         chimera_smb_open_file_drain_locks(thread, open_file);
