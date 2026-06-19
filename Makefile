@@ -15,6 +15,8 @@ endif
 CMAKE_ARGS := -DCMAKE_EXPORT_COMPILE_COMMANDS=1 -G Ninja
 CMAKE_ARGS_RELEASE := -DCMAKE_BUILD_TYPE=Release
 CMAKE_ARGS_DEBUG := -DCMAKE_BUILD_TYPE=Debug
+# Coverage uses clang's source-based coverage, so force the clang toolchain.
+CMAKE_ARGS_COVERAGE := -DCMAKE_BUILD_TYPE=Coverage -DCMAKE_C_COMPILER=clang
 CTEST_PARALLEL := $(shell n=$$(nproc); echo $$(( n < 64 ? n : 64 )))
 CTEST_ARGS := --output-on-failure --timeout 30 -j $(CTEST_PARALLEL)
 
@@ -42,11 +44,33 @@ test_debug: build_debug
 test_release: build_release
 	cd ${CHIMERA_BUILD_DIR}/Release && ctest ${CTEST_ARGS}
 
+.PHONY: build_coverage
+build_coverage:
+	@mkdir -p ${CHIMERA_BUILD_DIR}/Coverage
+	@cmake ${CMAKE_ARGS} ${CMAKE_ARGS_COVERAGE} -S . -B ${CHIMERA_BUILD_DIR}/Coverage
+	@ninja -C ${CHIMERA_BUILD_DIR}/Coverage
+
+# Run the suite against the instrumented build, then merge the raw profiles and
+# print a coverage report. Each test (and any daemon it spawns) writes its own
+# profile via the %p/%m patterns; the path is absolute so it survives the cwd
+# changes and netns hops the tests make. The report runs even when tests fail.
+COVERAGE_DIR := $(abspath ${CHIMERA_BUILD_DIR}/Coverage)/coverage
+.PHONY: test_coverage
+test_coverage: build_coverage
+	@rm -rf ${COVERAGE_DIR}
+	@mkdir -p ${COVERAGE_DIR}/profraw
+	-cd ${CHIMERA_BUILD_DIR}/Coverage && \
+		LLVM_PROFILE_FILE=${COVERAGE_DIR}/profraw/%m-%p.profraw ctest ${CTEST_ARGS}
+	@bash etc/coverage-report.sh ${CHIMERA_BUILD_DIR}/Coverage
+
 .PHONY: debug
 debug: build_debug test_debug
 
 .PHONY: release
 release: build_release test_release
+
+.PHONY: coverage
+coverage: build_coverage test_coverage
 
 clean:
 	@rm -rf ${CHIMERA_BUILD_DIR}/*

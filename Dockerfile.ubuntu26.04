@@ -20,7 +20,7 @@ RUN if [ -n "$APT_MIRROR" ]; then \
 RUN apt-get -y update && \
     apt-get -y --no-install-recommends upgrade && \
     apt-get -y --no-install-recommends install clang clang-tools cmake ninja-build ccache git flex bison llvm \
-    libclang-rt-18-dev uuid-dev uthash-dev libkrb5-dev libgssapi-krb5-2 gss-ntlmssp-dev \
+    libclang-rt-21-dev uuid-dev uthash-dev libkrb5-dev libgssapi-krb5-2 gss-ntlmssp-dev \
     librdmacm-dev libjansson-dev libxxhash-dev liburcu-dev liburing-dev libunwind-dev librocksdb-dev \
     libssl-dev openssl libnuma-dev libcurl4-openssl-dev libs3-dev libaio-dev libcrypt-dev \
     build-essential autoconf automake libtool pkg-config ca-certificates uncrustify iproute2 curl \
