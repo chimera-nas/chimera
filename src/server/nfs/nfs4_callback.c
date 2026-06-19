@@ -624,6 +624,8 @@ nfs4_cb_recall_send(
     struct nfs_cb_argop4       ops[2];
     struct stateid4            sid;
     int                        nops = 0;
+    uint8_t                    fhwire[CHIMERA_NFS_FH_MAX];
+    int                        fhwire_len;
 
     if (!conn) {
         /* The backchannel went away before this queued recall could be sent
@@ -666,11 +668,17 @@ nfs4_cb_recall_send(
                         deleg->shard, deleg->slot_idx, deleg->generation,
                         thread->shared->nfs4_state_table.epoch);
 
+    /* The client matches the recall against the on-wire (wrapped) handle it
+     * holds, so re-wrap the internal VFS handle with its export id + signing. */
+    chimera_nfs_fh_wrap(fhwire, &fhwire_len, deleg->export_id,
+                        deleg->fh, deleg->fh_len,
+                        thread->shared->fh_key, thread->shared->fh_sign);
+
     ops[nops].argop               = OP_CB_RECALL;
     ops[nops].opcbrecall.stateid  = sid;
     ops[nops].opcbrecall.truncate = 0;
-    ops[nops].opcbrecall.fh.len   = deleg->fh_len;
-    ops[nops].opcbrecall.fh.data  = deleg->fh;
+    ops[nops].opcbrecall.fh.len   = fhwire_len;
+    ops[nops].opcbrecall.fh.data  = fhwire;
     nops++;
 
     args.tag.len        = 0;
@@ -760,6 +768,7 @@ nfs4_cb_layoutrecall(
     struct nfs_client *client,
     const uint8_t *fh,
     uint32_t fh_len,
+    uint16_t export_id,
     const struct stateid4 *layout_stateid,
     void ( *done )(int cb_status, void *arg),
     void *arg)
@@ -770,6 +779,8 @@ nfs4_cb_layoutrecall(
     struct CB_COMPOUND4args          args;
     struct nfs_cb_argop4             ops[2];
     int                              nops = 0;
+    uint8_t                          fhwire[CHIMERA_NFS_FH_MAX];
+    int                              fhwire_len;
 
     if (!conn) {
         return false;
@@ -793,13 +804,15 @@ nfs4_cb_layoutrecall(
         nops++;
     }
 
-    ops[nops].argop                                                = OP_CB_LAYOUTRECALL;
-    ops[nops].opcblayoutrecall.clora_type                          = NFS4_LAYOUT4_FLEX_FILES;
-    ops[nops].opcblayoutrecall.clora_iomode                        = LAYOUTIOMODE4_ANY;
-    ops[nops].opcblayoutrecall.clora_changed                       = 0;
-    ops[nops].opcblayoutrecall.clora_recall.lor_recalltype         = LAYOUTRECALL4_FILE;
-    ops[nops].opcblayoutrecall.clora_recall.lor_layout.lor_fh.len  = fh_len;
-    ops[nops].opcblayoutrecall.clora_recall.lor_layout.lor_fh.data = (void *) fh;
+    ops[nops].argop                                        = OP_CB_LAYOUTRECALL;
+    ops[nops].opcblayoutrecall.clora_type                  = NFS4_LAYOUT4_FLEX_FILES;
+    ops[nops].opcblayoutrecall.clora_iomode                = LAYOUTIOMODE4_ANY;
+    ops[nops].opcblayoutrecall.clora_changed               = 0;
+    ops[nops].opcblayoutrecall.clora_recall.lor_recalltype = LAYOUTRECALL4_FILE;
+    chimera_nfs_fh_wrap(fhwire, &fhwire_len, export_id, fh, fh_len,
+                        thread->shared->fh_key, thread->shared->fh_sign);
+    ops[nops].opcblayoutrecall.clora_recall.lor_layout.lor_fh.len  = fhwire_len;
+    ops[nops].opcblayoutrecall.clora_recall.lor_layout.lor_fh.data = fhwire;
     ops[nops].opcblayoutrecall.clora_recall.lor_layout.lor_offset  = 0;
     ops[nops].opcblayoutrecall.clora_recall.lor_layout.lor_length  = UINT64_MAX;
     ops[nops].opcblayoutrecall.clora_recall.lor_layout.lor_stateid = *layout_stateid;
@@ -1010,6 +1023,8 @@ nfs4_cb_getattr_send(
     struct nfs_cb_argop4    ops[2];
     uint32_t                attr_req = (1u << FATTR4_CHANGE) | (1u << FATTR4_SIZE);
     int                     nops     = 0;
+    uint8_t                 fhwire[CHIMERA_NFS_FH_MAX];
+    int                     fhwire_len;
 
     if (!conn) {
         /* No usable callback path: no RPC is issued, so the request item can
@@ -1037,9 +1052,13 @@ nfs4_cb_getattr_send(
         nops++;
     }
 
+    chimera_nfs_fh_wrap(fhwire, &fhwire_len, deleg->export_id,
+                        deleg->fh, deleg->fh_len,
+                        thread->shared->fh_key, thread->shared->fh_sign);
+
     ops[nops].argop                        = OP_CB_GETATTR;
-    ops[nops].opcbgetattr.fh.len           = deleg->fh_len;
-    ops[nops].opcbgetattr.fh.data          = deleg->fh;
+    ops[nops].opcbgetattr.fh.len           = fhwire_len;
+    ops[nops].opcbgetattr.fh.data          = fhwire;
     ops[nops].opcbgetattr.num_attr_request = 1;
     ops[nops].opcbgetattr.attr_request     = &attr_req;
     nops++;

@@ -396,6 +396,10 @@ struct nfs_delegation {
     uint8_t                        fh[NFS4_FHSIZE];
     uint16_t                       fh_len;
     uint64_t                       fh_hash;
+    /* Export the file belongs to, so the (internal, unwrapped) fh above can be
+     * re-wrapped to the client's on-wire form when sent in a CB_RECALL /
+     * CB_GETATTR callback. */
+    uint16_t                       export_id;
 
     /* Slot identity (decoded from stateid.other). */
     uint8_t                        shard;
@@ -444,6 +448,7 @@ struct nfs_layout_state {
     struct nfs_client       *client;    /* borrowed; client outlives the layout */
     uint8_t                  fh[NFS4_FHSIZE];
     uint16_t                 fh_len;
+    uint16_t                 export_id; /* to re-wrap fh for CB_LAYOUTRECALL */
     uint32_t                 seqid;     /* server-incremented layout stateid seqid */
     uint32_t                 iomode;    /* current LAYOUTIOMODE4 */
 
@@ -816,6 +821,7 @@ nfs_delegation_create(
     const uint8_t          *fh,
     uint16_t                fh_len,
     uint64_t                fh_hash,
+    uint16_t                export_id,
     struct nfs_state_table *table,
     struct stateid4        *out_stateid);
 
@@ -880,6 +886,7 @@ nfs_layout_state_create(
     struct nfs_client       *client,
     const uint8_t           *fh,
     uint16_t                 fh_len,
+    uint16_t                 export_id,
     uint32_t                 iomode,
     uint32_t                 client_short_id,
     struct nfs_state_table  *table,
