@@ -16,15 +16,17 @@ get_filename_component(BUILD_ROOT ${CMAKE_BINARY_DIR} DIRECTORY)
 set(KVM_IMAGE_REGISTRY "ghcr.io/chimera-nas/kvm-test-base" CACHE STRING
     "OCI registry base that hosts the prebuilt KVM guest images.")
 # Pinned version of the prebuilt images to consume; bump to adopt a newer
-# kvm-test-base release.  v1.7.0 bakes sshd + a symmetric key so nfstest's
-# cross-client suites can drive a second NFS client over ssh (and parameterizes
-# the guest IP from the kernel cmdline); v1.6.0 pinned cthon04 to a gcc-15 fix;
-# v1.5.0 pares LTP to the non-duplicative slice and adds the curated
-# chimera_nfs42 runtest + an ltp-run.sh JSON-fallback; v1.4.0 added the
+# kvm-test-base release.  v1.8.0 pins nfstest to the chimera fork tag
+# v3.2-chimera2, carrying the Python 3.14 compatibility fixes so the nfstest
+# suite runs on Ubuntu 26.04 (Python 3.14); v1.7.0 bakes sshd + a symmetric key
+# so nfstest's cross-client suites can drive a second NFS client over ssh (and
+# parameterizes the guest IP from the kernel cmdline); v1.6.0 pinned cthon04 to
+# a gcc-15 fix; v1.5.0 pares LTP to the non-duplicative slice and adds the
+# curated chimera_nfs42 runtest + an ltp-run.sh JSON-fallback; v1.4.0 added the
 # ubuntu2604 variant; v1.3.0 added the Linux Test Project (LTP) tree under
 # /opt/ltp{,-skip}; v1.2.0 added the Linux nfstest suite; v1.1.0 dropped the 22.04
 # generic variant (see the KVM_IMAGES note below); v1.0.0 still has all four.
-set(KVM_IMAGE_VERSION "v1.7.0" CACHE STRING
+set(KVM_IMAGE_VERSION "v1.8.0" CACHE STRING
     "Version tag of the KVM guest images to consume.")
 
 # Note: the 22.04 generic (non-HWE) kernel does not build the virtio block
@@ -36,6 +38,7 @@ set(KVM_IMAGES
     ubuntu2404
     ubuntu2404_hwe
     ubuntu2204_hwe
+    ubuntu2604
 )
 
 # When ON (default) the guest images are fetched as part of the default build

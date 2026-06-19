@@ -834,7 +834,7 @@ jobs:
                 kvm-ltp)      SEL="-L kvm -R /ltp/";      NEED_KVM=1 ;;
               esac
               if [ -n "$NEED_KVM" ]; then
-                ninja kvm_ubuntu2404_image kvm_ubuntu2404_hwe_image kvm_ubuntu2204_hwe_image
+                ninja kvm_ubuntu2404_image kvm_ubuntu2404_hwe_image kvm_ubuntu2204_hwe_image kvm_ubuntu2604_image
               fi
               mkdir -p /workspace/ctest-results
               rm -f /workspace/flaky-rescued.log
