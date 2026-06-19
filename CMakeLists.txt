@@ -94,6 +94,21 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
     add_definitions(-O3)
 endif()
 
+# Coverage build: clang source-based code coverage. Instruments every TU (and,
+# being directory-scoped, the bundled libevpl under ext/ too -- the report step
+# filters those back out). The matching merge/report step lives in
+# etc/coverage-report.sh, driven by the Makefile's test_coverage target.
+if(CMAKE_BUILD_TYPE STREQUAL "Coverage")
+    if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
+        message(FATAL_ERROR
+            "Coverage build requires clang for source-based coverage "
+            "(re-run with -DCMAKE_C_COMPILER=clang; the Makefile does this for you).")
+    endif()
+    message(STATUS "Enabling clang source-based code coverage")
+    add_definitions(-O0 -fprofile-instr-generate -fcoverage-mapping -DCHIMERA_COVERAGE=1)
+    add_link_options(-fprofile-instr-generate -fcoverage-mapping)
+endif()
+
 if(EVPL_IOVEC_PROFILE)
     message(STATUS "Enabling libevpl retained-iovec stack profiling")
     add_definitions(-DEVPL_IOVEC_PROFILE=1)
@@ -120,6 +135,24 @@ add_definitions(${MARCH_FLAG})
 
 if(CMAKE_C_COMPILER_ID MATCHES "GNU")
     add_link_options(-Wl,--no-as-needed)
+endif()
+
+if(CMAKE_C_COMPILER_ID MATCHES "Clang")
+    # The codebase (and the xdrzcc-generated XDR sources) is written for gcc's
+    # GNU C dialect, which clang flags under -Werror where gcc -- the default
+    # toolchain for Release/Debug -- stays silent: a declaration immediately
+    # after a label (-Wc23-extensions) and a variable-sized struct member that
+    # is not the last field (-Wgnu-...). Accept the same GNU/C23 extensions gcc
+    # does so the clang-only Coverage build isn't tripped. Added after -Werror
+    # above so these are not re-promoted.
+    #
+    # Likewise tolerate clang/gcc warning-tooling differences in the test
+    # sources: gcc-only `#pragma GCC diagnostic ignored` names clang doesn't
+    # know (-Wunknown-warning-option, e.g. -Wstringop-truncation in
+    # cthon_common.c) and clang-only diagnostics gcc lacks (-Wabsolute-value on
+    # an unsigned abs() in fsx.c).
+    add_definitions(-Wno-c23-extensions -Wno-gnu
+                    -Wno-unknown-warning-option -Wno-absolute-value)
 endif()
 
 if (CUDA_ENABLED)
