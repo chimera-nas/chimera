@@ -459,6 +459,9 @@ chimera_nfs_nlm4_do_test(
     struct chimera_server_nfs_thread *thread = private_data;
     struct chimera_server_nfs_shared *shared = thread->shared;
     struct nlm_test_ctx              *ctx;
+    uint8_t                           vfh[CHIMERA_VFS_FH_SIZE];
+    int                               vfh_len;
+    uint16_t                          vexp;
 
     chimera_nfs_debug("NLM TEST: caller='%.*s' fh_len=%u offset=%lu len=%lu exclusive=%d",
                       (int) args->alock.caller_name.len, args->alock.caller_name.str,
@@ -466,6 +469,27 @@ chimera_nfs_nlm4_do_test(
                       (unsigned long) args->alock.l_offset,
                       (unsigned long) args->alock.l_len,
                       (int) args->exclusive);
+
+    /* The wire handle is wrapped (export id + signing MAC); recover the inner
+     * VFS handle for the open below.  NLM keeps the client's wrapped bytes for
+     * lock identity, but the VFS layer needs the unwrapped handle. */
+    if (chimera_nfs_fh_unwrap(args->alock.fh.data, args->alock.fh.len, &vexp,
+                              vfh, &vfh_len, shared->fh_key, shared->fh_sign) !=
+        CHIMERA_NFS_FH_OK) {
+        struct nlm4_testres err_res;
+        err_res.cookie.len     = args->cookie.len;
+        err_res.cookie.data    = args->cookie.data;
+        err_res.test_stat.stat = NLM4_STALE_FH;
+        if (proc == 16) {
+            shared->nlm_v4.send_call_NLMPROC4_TEST_RES(&shared->nlm_v4.rpc2, evpl, conn, NULL, &err_res, 0, 0, NULL, 0,
+                                                       0, NULL,
+                                                       NULL);
+        } else {
+            int rc = shared->nlm_v4.send_reply_NLMPROC4_TEST(evpl, NULL, &err_res, encoding);
+            chimera_nfs_abort_if(rc, "Failed to send NLM TEST stale-fh reply");
+        }
+        return;
+    }
 
     ctx = calloc(1, sizeof(*ctx));
     if (!ctx) {
@@ -524,8 +548,8 @@ chimera_nfs_nlm4_do_test(
     /* Conflict detection is delegated to vfs_state — the test_open_cb
      * does the lookup and probe synchronously once the FH is validated. */
     chimera_vfs_open_fh(thread->vfs_thread, NULL,
-                        args->alock.fh.data,
-                        args->alock.fh.len,
+                        vfh,
+                        vfh_len,
                         CHIMERA_VFS_OPEN_INFERRED,
                         chimera_nfs_nlm4_test_open_cb,
                         ctx);
@@ -563,6 +587,9 @@ chimera_nfs_nlm4_do_lock(
     char                              safe_hostname[LM_MAXSTRLEN + 1];
     size_t                            hn_len;
     int                               rc = 0;
+    uint8_t                           vfh[CHIMERA_VFS_FH_SIZE];
+    int                               vfh_len;
+    uint16_t                          vexp;
 
     /* NUL-terminate the XDR caller_name for use as a C-string hash key */
     hn_len = args->alock.caller_name.len < LM_MAXSTRLEN
@@ -576,6 +603,15 @@ chimera_nfs_nlm4_do_lock(
                       (unsigned long) args->alock.l_offset,
                       (unsigned long) args->alock.l_len,
                       (int) args->exclusive, (int) args->block, (int) args->reclaim, (int) nm_lock);
+
+    /* Recover the inner VFS handle from the wrapped wire handle for the open
+    * below (lock identity keeps the client's wrapped bytes in entry->fh). */
+    if (chimera_nfs_fh_unwrap(args->alock.fh.data, args->alock.fh.len, &vexp,
+                              vfh, &vfh_len, shared->fh_key, shared->fh_sign) !=
+        CHIMERA_NFS_FH_OK) {
+        nlm4_send_res(shared, evpl, encoding, &args->cookie, NLM4_STALE_FH, proc);
+        return;
+    }
 
     /* Build the in-flight lock entry (handle filled in by open callback) */
     entry = nlm_lock_entry_alloc();
@@ -712,8 +748,8 @@ chimera_nfs_nlm4_do_lock(
     }
 
     chimera_vfs_open_fh(thread->vfs_thread, NULL,
-                        args->alock.fh.data,
-                        args->alock.fh.len,
+                        vfh,
+                        vfh_len,
                         CHIMERA_VFS_OPEN_INFERRED,
                         chimera_nfs_nlm4_lock_open_cb,
                         ctx);
