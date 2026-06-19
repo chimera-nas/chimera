@@ -314,7 +314,7 @@ foreach(image_spec ${KVM_IMAGES})
         endforeach()
     endif()
 
-    # ----- Linux nfstest single-host suite (ubuntu2404 only) -----
+    # ----- Linux nfstest single-host suite (ubuntu2404 + ubuntu2604) -----
     # nfstest is a client-side conformance suite: it mounts the share itself (so
     # this uses a dedicated no-pre-mount wrapper) and verifies on-the-wire
     # behaviour with its own tcpdump-driven RPC dissector.  The nfstest tree and
@@ -331,7 +331,7 @@ foreach(image_spec ${KVM_IMAGES})
     # nfstest_cache and nfstest_delegation are registered below (they need a
     # second client host -- see the 2-client wrapper).  Not yet registered:
     # nfstest_pnfs.
-    if(IMAGE_NAME STREQUAL "ubuntu2404")
+    if(IMAGE_NAME STREQUAL "ubuntu2404" OR IMAGE_NAME STREQUAL "ubuntu2604")
         set(NFSTEST_MATRIX
             "nfstest_posix|3 4.0 4.1 4.2"
             "nfstest_interop|4.0"
@@ -447,11 +447,11 @@ foreach(image_spec ${KVM_IMAGES})
             PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 4 TIMEOUT 1800)
     endif()
 
-    # Linux Test Project (LTP) -- ubuntu2404 only.  Reuses the plain NFS wrapper:
+    # Linux Test Project (LTP) -- ubuntu2404 + ubuntu2604.  Reuses the plain NFS wrapper:
     # LTP runs against the pre-mounted share at /mnt exactly like cthon/xfstests,
     # so it needs no dedicated wrapper.  See LTP_MATRIX above for the pared-down
     # group selection (the non-duplicative slice).
-    if(IMAGE_NAME STREQUAL "ubuntu2404")
+    if(IMAGE_NAME STREQUAL "ubuntu2404" OR IMAGE_NAME STREQUAL "ubuntu2604")
         set(LTP_BACKENDS ${KVM_BACKENDS})
         if(CAIRN_ENABLED)
             list(APPEND LTP_BACKENDS cairn)
@@ -548,6 +548,17 @@ foreach(image_spec ${KVM_IMAGES})
     # pNFS block layout (RFC 5663): diskfs sources block layouts; the client
     # does data I/O directly to the signed virtio-SCSI data disk (/dev/sda),
     # never through the MDS (which can't reach it).
+    #
+    # Disabled on ubuntu2604: Ubuntu 26.04 (resolute) dropped the blkmapd binary
+    # from nfs-common (nfs-utils 2.8.5) and ships it in no package, so the block-
+    # layout client cannot be brought up (PNFS_BLOCK_SETUP runs /usr/sbin/blkmapd).
+    # The block-layout MDS path stays covered by the ubuntu2404 / ubuntu2204_hwe
+    # variants.  Only block layout needs blkmapd; the file/proxy pNFS tests above
+    # still run on 2604.
+    set(PNFS_BLOCK_DISABLED FALSE)
+    if(IMAGE_NAME STREQUAL "ubuntu2604")
+        set(PNFS_BLOCK_DISABLED TRUE)
+    endif()
     foreach(prog ${PNFS_BLOCK_PROGRAMS})
         foreach(pbackend ${PNFS_BLOCK_BACKENDS})
             add_test(NAME chimera/kvm/${IMAGE_NAME}/pnfs/block_${prog}_${pbackend}_nfs4.1
@@ -556,7 +567,8 @@ foreach(image_spec ${KVM_IMAGES})
                         ${CHIMERA_BINARY} ${pbackend}
                         "${PNFS_BLOCK_SETUP} && ${PNFS_BLOCK_WL_${prog}}")
             set_tests_properties(chimera/kvm/${IMAGE_NAME}/pnfs/block_${prog}_${pbackend}_nfs4.1
-                PROPERTIES LABELS "kvm;${IMAGE_NAME};pnfs" PROCESSORS 2)
+                PROPERTIES LABELS "kvm;${IMAGE_NAME};pnfs" PROCESSORS 2
+                           DISABLED ${PNFS_BLOCK_DISABLED})
         endforeach()
     endforeach()
 
