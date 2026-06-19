@@ -534,6 +534,8 @@ ff_lg_emit(struct ff_layoutget_ctx *ctx)
     uint32_t                 body_len;
     struct layout4          *lo;
     int                      rc;
+    uint8_t                  ds_fhwire[CHIMERA_NFS_FH_MAX];
+    int                      ds_fhwire_len;
 
     if (!client) {
         ff_lg_fail(ctx, NFS4ERR_LAYOUTUNAVAILABLE);
@@ -569,7 +571,7 @@ ff_lg_emit(struct ff_layoutget_ctx *ctx)
     if (layout) {
         nfs_layout_state_bump(layout, client_short_id, &res->logr_resok4.logr_stateid);
     } else {
-        nfs_layout_state_create(client, req->fh, req->fhlen, args->loga_iomode,
+        nfs_layout_state_create(client, req->fh, req->fhlen, req->export_id, args->loga_iomode,
                                 client_short_id, table,
                                 &req->thread->shared->nfs4_layout_table,
                                 &res->logr_resok4.logr_stateid);
@@ -579,9 +581,18 @@ ff_lg_emit(struct ff_layoutget_ctx *ctx)
      * this layout; CB_LAYOUTRECALL rides the shared delegation channel. */
     nfs4_cb_ensure_probe(req->thread, client, req);
 
+    /* The client uses this handle against the data server over NFSv3, which
+     * decodes the wrapped on-wire form; wrap the native DS handle with the
+     * file's export id (and this server's signing key).  For a local DS this is
+     * the same server/key, so it verifies.  (A remote/proxied DS has its own
+     * key and is not yet supported with signing -- see pNFS proxy deferral.) */
+    chimera_nfs_fh_wrap(ds_fhwire, &ds_fhwire_len, req->export_id,
+                        native_fh, native_fh_len,
+                        req->thread->shared->fh_key, req->thread->shared->fh_sign);
+
     body = xdr_dbuf_alloc_space(256, req->encoding->dbuf);
     chimera_nfs_abort_if(body == NULL, "Failed to allocate space");
-    body_len = chimera_nfs4_encode_ff_layout(body, deviceid, native_fh, native_fh_len,
+    body_len = chimera_nfs4_encode_ff_layout(body, deviceid, ds_fhwire, ds_fhwire_len,
                                              args->loga_iomode);
 
     lo = xdr_dbuf_alloc_space(sizeof(*lo), req->encoding->dbuf);
@@ -801,7 +812,7 @@ lg_sourced_cb(
     if (layout) {
         nfs_layout_state_bump(layout, client_short_id, &res->logr_resok4.logr_stateid);
     } else {
-        nfs_layout_state_create(client, req->fh, req->fhlen, args->loga_iomode,
+        nfs_layout_state_create(client, req->fh, req->fhlen, req->export_id, args->loga_iomode,
                                 client_short_id, table,
                                 &req->thread->shared->nfs4_layout_table,
                                 &res->logr_resok4.logr_stateid);

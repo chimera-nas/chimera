@@ -1164,6 +1164,7 @@ nfs_layout_state_create(
     struct nfs_client       *client,
     const uint8_t           *fh,
     uint16_t                 fh_len,
+    uint16_t                 export_id,
     uint32_t                 iomode,
     uint32_t                 client_short_id,
     struct nfs_state_table  *table,
@@ -1187,6 +1188,7 @@ nfs_layout_state_create(
     st->client = client;
     memcpy(st->fh, fh, fh_len);
     st->fh_len       = fh_len;
+    st->export_id    = export_id;
     st->seqid        = 1;
     st->iomode       = iomode;
     st->shard        = shard;
@@ -1504,6 +1506,7 @@ nfs_delegation_create(
     const uint8_t          *fh,
     uint16_t                fh_len,
     uint64_t                fh_hash,
+    uint16_t                export_id,
     struct nfs_state_table *table,
     struct stateid4        *out_stateid)
 {
@@ -1526,6 +1529,7 @@ nfs_delegation_create(
     memcpy(deleg->fh, fh, fh_len);
     deleg->fh_len     = fh_len;
     deleg->fh_hash    = fh_hash;
+    deleg->export_id  = export_id;
     deleg->shard      = shard;
     deleg->slot_idx   = slot_idx;
     deleg->generation = gen;

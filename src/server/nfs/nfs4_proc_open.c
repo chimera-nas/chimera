@@ -222,6 +222,7 @@ chimera_nfs4_open_grant_delegation(
 
     deleg = nfs_delegation_create(client, deleg_type,
                                   req->fh, req->fhlen, fh_hash,
+                                  req->export_id,
                                   &thread->shared->nfs4_state_table,
                                   &deleg_stateid);
 
