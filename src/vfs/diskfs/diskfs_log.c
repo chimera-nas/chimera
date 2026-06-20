@@ -461,6 +461,10 @@ diskfs_push_clean_block(
         }
     }
     pthread_mutex_unlock(&shard->lock);
+
+    /* A block just became a CLEAN LRU victim; wake any CoW fork parked on this
+     * shard for want of one (cross-thread pusher -> doorbell, self=NULL). */
+    diskfs_block_buf_wake(NULL, shard);
 } /* diskfs_push_clean_block */
 
 
