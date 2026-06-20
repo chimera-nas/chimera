@@ -11,6 +11,45 @@
 
 #include "diskfs_internal.h"
 
+/* Debug: live handle to the intent log + a per-queue CQ dumper (in libevpl),
+ * so a wedge can be inspected from gdb with `call dbg_dump_push()`. */
+struct diskfs_intent_log *g_dbg_il;
+extern void               evpl_vfio_queue_dump(struct evpl_block_queue *bq);
+
+SYMBOL_EXPORT void
+dbg_dump_push(void)
+{
+    struct diskfs_intent_log *il = g_dbg_il;
+    struct diskfs_shared     *shared;
+    int                       i;
+
+    if (!il) {
+        chimera_diskfs_error("DBG-PUSH: no il");
+        return;
+    }
+
+    shared = container_of(il, struct diskfs_shared, intent_log);
+
+    chimera_diskfs_error(
+        "DBG-PUSH push_outstanding=%d ready=%s push_head=%p redo_inflight=%d log_head=%lu log_tail=%lu used=%lu num_devices=%d",
+        il->push_outstanding, il->ready_head ? "NONEMPTY" : "empty",
+        (void *) il->push_head, il->redo_inflight,
+        (unsigned long) __atomic_load_n(&il->log_head, __ATOMIC_RELAXED),
+        (unsigned long) __atomic_load_n(&il->log_tail, __ATOMIC_RELAXED),
+        (unsigned long) (__atomic_load_n(&il->log_head, __ATOMIC_RELAXED) -
+                         __atomic_load_n(&il->log_tail, __ATOMIC_RELAXED)),
+        shared->num_devices);
+
+    if (il->log_queue) {
+        evpl_vfio_queue_dump(il->log_queue);    /* redo / commit queue */
+    }
+    for (i = 0; i < shared->num_devices; i++) {
+        if (il->home_queue[i]) {
+            evpl_vfio_queue_dump(il->home_queue[i]);
+        }
+    }
+} /* dbg_dump_push */
+
 /* Forward declarations (definitions below, in call-graph order) */
 
 static uint64_t
@@ -76,13 +115,6 @@ diskfs_push_fold_record(
     struct diskfs_intent_log *il,
     struct diskfs_il_record  *rec);
 
-static void
-diskfs_push_clean_block(
-    struct diskfs_intent_log *il,
-    uint32_t                  dev,
-    uint64_t                  off,
-    uint64_t                  seq);
-
 static int
 diskfs_push_record_covered(
     struct diskfs_intent_log *il,
@@ -112,7 +144,8 @@ diskfs_il_write_redo(
     struct diskfs_intent_log *il,
     struct diskfs_redo_entry *entries,
     uint32_t                  num_entries,
-    uint32_t                  nblocks);
+    uint32_t                  nblocks,
+    uint32_t                  num_deltas);
 
 static uint32_t
 diskfs_il_txn_blocks(
@@ -120,7 +153,8 @@ diskfs_il_txn_blocks(
 
 static uint64_t
 diskfs_il_blocks_reclen(
-    uint32_t nblocks);
+    uint32_t nblocks,
+    uint32_t num_deltas);
 
 static uint64_t
 diskfs_il_txn_reclen(
@@ -170,7 +204,10 @@ diskfs_txn_request_complete_cb(
 {
     struct chimera_vfs_request *request = private_data;
 
-    (void) txn;
+    if (txn) {
+        txn->dbg_stage = 6;     /* COMPLETE (durable, locks dropped) */
+    }
+    request->wait_reason = NULL;
     if (status != 0 && request->status == CHIMERA_VFS_OK) {
         request->status = status;
     }
@@ -374,6 +411,11 @@ diskfs_ready_pop(struct diskfs_intent_log *il)
 } /* diskfs_ready_pop */
 
 
+static void diskfs_push_unpin_block(
+    struct diskfs_intent_log *il,
+    uint32_t                  dev,
+    uint64_t                  off);
+
 static void
 diskfs_il_free_record(
     struct diskfs_intent_log *il,
@@ -381,11 +423,31 @@ diskfs_il_free_record(
 {
     uint32_t i;
 
-    evpl_iovec_release(il->push_evpl, &rec->iovs[0]);
-    for (i = 0; i < rec->num_blocks; i++) {
-        evpl_iovec_release(il->push_evpl, &rec->iovs[1 + i]);
-        diskfs_block_buf_release(rec->block_bufs[i]);
+    /* This record is pushed home and trimmed.  For each block image it carried:
+     *  - drop the submitting txn's claim pin (diskfs_push_unpin_block); this is
+     *    the "decrement on flush/skip" -- the record is done whether its image
+     *    was written home or superseded by a newer record, and it happens at
+     *    record granularity here, after the home write, so it never races ahead
+     *    of durability.  The block becomes CLEAN once its last pin drops.
+     *  - release the record's snapshot reference on the buffer (buf->refs).
+     * Done before releasing iovs[0], whose header region we read dev/off from. */
+    {
+        char *p = (char *) rec->iovs[0].data + sizeof(struct diskfs_redo_header);
+
+        for (i = 0; i < rec->num_blocks; i++) {
+            struct diskfs_redo_block_header *bh = (struct diskfs_redo_block_header *) p;
+
+            p += sizeof(*bh);
+            diskfs_push_unpin_block(il, bh->device_id, bh->device_offset);
+            diskfs_block_buf_release(rec->block_bufs[i]);
+        }
     }
+
+    /* iovs[0] is the materialized header (a real SHARED buffer) -- release it.
+     * iovs[1..] are non-owning GLOBAL slices of block-cache buffers (cloned at
+     * zero cost in the IL builder); they own nothing, so they are NOT released
+     * here -- the backing GLOBAL buffer is freed only at cache teardown. */
+    evpl_iovec_release(il->push_evpl, &rec->iovs[0]);
     free(rec->block_bufs);
     free(rec->iovs);
     free(rec);
@@ -421,12 +483,17 @@ diskfs_push_fold_record(
             e->seq           = rec->seq;
             e->iov           = &rec->iovs[1 + i];
             e->owner         = rec;
+            rec->uncovered++;            /* R now owns this newly-pending block */
             diskfs_pending_insert(il, e);
             diskfs_ready_push(il, e);
         } else {
-            e->seq   = rec->seq;     /* newest image supersedes */
+            /* Newest image supersedes: ownership passes from the old owner
+             * (which now needs one fewer block home) to R. */
+            e->owner->uncovered--;
+            e->seq   = rec->seq;
             e->iov   = &rec->iovs[1 + i];
             e->owner = rec;
+            rec->uncovered++;
             if (!e->inflight) {
                 diskfs_ready_push(il, e);
             }
@@ -435,15 +502,22 @@ diskfs_push_fold_record(
 } /* diskfs_push_fold_record */
 
 
-/* A block is durably home at `seq`: LOGGED -> CLEAN if it has not been
- * re-logged since (blk->seq still == seq) and isn't pinned.  Under the shard
- * lock so it serializes against diskfs_block_claim re-dirtying the block. */
+/*
+ * A redo record holding an image of this block has been pushed home and
+ * trimmed (free_record): drop the claim pin the submitting txn took for that
+ * generation.  pin_count is the block's outstanding-reference count, so when
+ * this is the last pin -- no other un-home generation and no active reader --
+ * the block's newest content is durably home and idle, hence CLEAN and
+ * LRU-reusable.  Under the shard lock so it serializes against
+ * diskfs_block_claim re-pinning/re-dirtying the block.  The block is guaranteed
+ * resident: it was pinned (>=1) until this very drop, so it can't have been
+ * recycled.
+ */
 static void
-diskfs_push_clean_block(
+diskfs_push_unpin_block(
     struct diskfs_intent_log *il,
     uint32_t                  dev,
-    uint64_t                  off,
-    uint64_t                  seq)
+    uint64_t                  off)
 {
     struct diskfs_shared      *shared = container_of(il, struct diskfs_shared, intent_log);
     struct diskfs_block_cache *cache  = shared->block_cache;
@@ -453,19 +527,22 @@ diskfs_push_clean_block(
 
     pthread_mutex_lock(&shard->lock);
     blk = diskfs_block_lookup_locked(shard, bucket, dev, off);
-    if (blk && blk->state == DISKFS_BLOCK_LOGGED &&
-        __atomic_load_n(&blk->seq, __ATOMIC_ACQUIRE) == seq && blk->pin_count == 0) {
-        blk->state = DISKFS_BLOCK_CLEAN;
+    chimera_diskfs_abort_if(!blk,
+                            "tail-push unpin: pinned block dev=%u off=%lu vanished",
+                            dev, off);
+    if (__atomic_sub_fetch(&blk->pin_count, 1, __ATOMIC_ACQ_REL) == 0) {
+        __atomic_store_n(&blk->state, DISKFS_BLOCK_CLEAN, __ATOMIC_RELEASE);
         if (!blk->on_lru) {
             diskfs_block_lru_push_tail(shard, blk);
         }
     }
     pthread_mutex_unlock(&shard->lock);
 
-    /* A block just became a CLEAN LRU victim; wake any CoW fork parked on this
-     * shard for want of one (cross-thread pusher -> doorbell, self=NULL). */
+    /* This pin drop may have produced a CLEAN LRU victim; wake any CoW fork
+     * parked on this shard for want of a reclaimable buffer.  Cross-thread
+     * (push thread -> worker doorbell), so self == NULL. */
     diskfs_block_buf_wake(NULL, shard);
-} /* diskfs_push_clean_block */
+} /* diskfs_push_unpin_block */
 
 
 /*
@@ -473,27 +550,78 @@ diskfs_push_clean_block(
  * seq (absent from pending) or superseded by a later still-logged record
  * (pending seq > R.seq).  pending[X].seq == R.seq means R's own image is still
  * the newest pending and not yet home, so R must wait.
+ *
+ * rec->uncovered tracks exactly this in O(1): it is the count of blocks for
+ * which R is still the newest-pending owner (pending[X].owner == R).  It is
+ * raised to num_blocks at fold (R owns every block it just dirtied), and
+ * decremented when each such block is either written home (diskfs_push_block_cb)
+ * or superseded by a newer record taking ownership (diskfs_push_fold_record).
+ * Covered <=> uncovered == 0 -- no per-completion O(num_blocks) re-scan.
  */
 static int
 diskfs_push_record_covered(
     struct diskfs_intent_log *il,
     struct diskfs_il_record  *rec)
 {
-    char    *p = (char *) rec->iovs[0].data + sizeof(struct diskfs_redo_header);
-    uint32_t i;
+    (void) il;
+    return rec->uncovered == 0;
+} /* diskfs_push_record_covered */
 
-    for (i = 0; i < rec->num_blocks; i++) {
-        struct diskfs_redo_block_header *bh = (struct diskfs_redo_block_header *) p;
-        struct diskfs_pending           *e;
 
-        p += sizeof(*bh);
-        e  = diskfs_pending_lookup(il, bh->device_id, bh->device_offset);
-        if (e && e->seq == rec->seq) {
-            return 0;
+/*
+ * Checkpoint frontier gate: a record may be trimmed only once every AG it
+ * carries a space delta for has been checkpointed to >= the record's seq (so
+ * the delta is folded into a durable on-disk snapshot and losing the record on
+ * trim is safe).  The delta section lives in iovs[0] right after the per-block
+ * headers (same region diskfs_push_fold_record walks).  Returns 1 if ready;
+ * otherwise kicks a background checkpoint for each lagging AG and returns 0
+ * (the push thread retries when a checkpoint completes -- see
+ * diskfs_il_checkpoint_advanced).  Because a checkpoint stamps ckpt_seq from
+ * the durable frontier (near log_head), one checkpoint of a hot AG unblocks all
+ * of its in-ring records at once, so this is not per-record work.
+ */
+static int
+diskfs_push_checkpoint_ready(
+    struct diskfs_intent_log *il,
+    struct diskfs_il_record  *rec)
+{
+    struct diskfs_shared      *shared = container_of(il, struct diskfs_shared,
+                                                     intent_log);
+    struct diskfs_redo_header *hdr    = (struct diskfs_redo_header *) rec->iovs[0].data;
+    char                      *p;
+    uint32_t                   i;
+    int                        ready  = 1;
+
+    if (hdr->num_deltas == 0) {
+        return 1;
+    }
+
+    p = (char *) rec->iovs[0].data + sizeof(struct diskfs_redo_header) +
+        (size_t) rec->num_blocks * sizeof(struct diskfs_redo_block_header);
+
+    for (i = 0; i < hdr->num_deltas; i++) {
+        struct diskfs_redo_delta *rd = (struct diskfs_redo_delta *) p;
+
+        p += sizeof(*rd);
+
+        if (space_map_ag_ckpt_seq(shared->space_map, rd->device_id,
+                                  rd->ag_index) < rec->seq) {
+            ready = 0;
+            diskfs_checkpoint_kick(shared, rd->device_id, rd->ag_index);
         }
     }
-    return 1;
-} /* diskfs_push_record_covered */
+    return ready;
+} /* diskfs_push_checkpoint_ready */
+
+
+/* The push thread: a background checkpoint advanced some AG's ckpt_seq; retry
+ * the trim that may have been blocked on the frontier gate.  Rung from the
+ * checkpoint-completion path (any reclaim worker). */
+void
+diskfs_il_checkpoint_advanced(struct diskfs_intent_log *il)
+{
+    evpl_ring_doorbell(&il->push_doorbell);
+} /* diskfs_il_checkpoint_advanced */
 
 
 /* Advance the trim point over the contiguous prefix of fully-covered records,
@@ -503,7 +631,8 @@ diskfs_push_trim(struct diskfs_intent_log *il)
 {
     int advanced = 0;
 
-    while (il->push_head && diskfs_push_record_covered(il, il->push_head)) {
+    while (il->push_head && diskfs_push_record_covered(il, il->push_head) &&
+           diskfs_push_checkpoint_ready(il, il->push_head)) {
         struct diskfs_il_record *rec = il->push_head;
 
         il->push_head = rec->next;
@@ -611,8 +740,12 @@ diskfs_push_block_cb(
         /* A newer image arrived mid-flight: re-issue it (newest lands last). */
         diskfs_ready_push(il, e);
     } else {
-        /* Durably home at its newest seq: mark CLEAN and drop the entry. */
-        diskfs_push_clean_block(il, e->device_id, e->device_offset, e->issued_seq);
+        /* Durably home at its newest seq: drop the pending entry.  The owning
+         * record needs one fewer block home -> may become coverable.  The block
+         * is marked CLEAN later, when that record is trimmed and its claim pin
+         * is dropped (diskfs_il_free_record -> diskfs_push_unpin_block); a block
+         * stays pinned/DIRTY as long as any record still owes it home. */
+        e->owner->uncovered--;
         diskfs_pending_remove(il, e);
     }
 
@@ -647,6 +780,7 @@ diskfs_il_push_doorbell_cb(
         rec->next          = NULL;
         rec->inflight_refs = 0;
         rec->retired       = 0;
+        rec->uncovered     = 0;     /* raised to num_blocks by the fold below */
         if (il->push_tail) {
             il->push_tail->next = rec;
         } else {
@@ -720,12 +854,18 @@ diskfs_redo_write_cb(
                 il->metrics.txn_latency[DISKFS_METRIC_TXN_QUEUE_TO_DURABLE],
                 &entry->enqueue_time);
 
-            /* Record durable & recoverable: drop block pins (-> LOGGED),
-             * return freed ranges to the allocator, release inode locks, then
-             * ACK this transaction back to its worker. */
-            diskfs_txn_unpin_blocks(entry->txn, DISKFS_BLOCK_LOGGED);
+            /* Record durable & recoverable: release the inode->block links and
+             * the per-block txn structs (NOT the block pins -- each block's
+             * claim pin is held until this record is pushed home and trimmed,
+             * where the push thread drops it; see diskfs_il_free_record).  Then
+             * return freed ranges to the allocator and ACK the transaction back
+             * to its worker.  Inode locks were already released in
+             * diskfs_il_write_redo once this record's log order was fixed, so
+             * the hot parent-directory lock is not held across the log write.
+             * The IL thread no longer touches any block reference/state field. */
+            diskfs_txn_retire_blocks(entry->txn);
+            diskfs_txn_apply_allocs(entry->txn);
             diskfs_txn_apply_frees(entry->txn);
-            diskfs_txn_unlock_all(entry->txn);
 
             entry->status                                 = 0;
             cq_tail                                       = __atomic_load_n(&ch->cq.tail, __ATOMIC_RELAXED);
@@ -733,6 +873,11 @@ diskfs_redo_write_cb(
             __atomic_store_n(&ch->cq.tail, cq_tail + 1, __ATOMIC_RELEASE);
             ch->cq_inflight--;
         }
+
+        /* This record is durable and all its frees are applied; records retire
+         * strictly in seq order, so durable_seq advances monotonically.  A
+         * space-map checkpoint stamps its ckpt_seq from this. */
+        __atomic_store_n(&il->durable_seq, rec->seq, __ATOMIC_RELEASE);
 
         /* Hand the durable record to the push thread, in log order.  The
          * hand-off ring is sized larger than the log can ever hold, so it
@@ -767,20 +912,20 @@ diskfs_il_write_redo(
     struct diskfs_intent_log *il,
     struct diskfs_redo_entry *entries,
     uint32_t                  num_entries,
-    uint32_t                  nblocks)
+    uint32_t                  nblocks,
+    uint32_t                  num_deltas)
 {
     struct diskfs_redo_ctx          *ctx;
     struct diskfs_il_record         *rec;
     struct diskfs_redo_header       *hdr;
     struct diskfs_redo_block_header *bh;
     uint64_t                         hdr_len, reclen, offset;
-    uint32_t                         i, e;
+    uint32_t                         i, e, nd;
     char                            *p;
     int                              niov;
-    XXH3_state_t                     xs;
 
-    hdr_len = diskfs_il_hdr_len(nblocks);
-    reclen  = diskfs_il_blocks_reclen(nblocks);
+    hdr_len = diskfs_il_hdr_len(nblocks, num_deltas);
+    reclen  = diskfs_il_blocks_reclen(nblocks, num_deltas);
 
     /* Caller guarantees space (diskfs_iq_process_channel checks diskfs_il_fits
      * before consuming SQ entries), so placement always succeeds. */
@@ -818,6 +963,8 @@ diskfs_il_write_redo(
     hdr->tail       = __atomic_load_n(&il->log_tail, __ATOMIC_ACQUIRE);
     hdr->num_blocks = nblocks;
     hdr->reclen     = (uint32_t) reclen;
+    hdr->num_deltas = num_deltas;
+    hdr->pad0       = 0;
     p              += sizeof(*hdr);
 
     i = 0;
@@ -827,14 +974,15 @@ diskfs_il_write_redo(
         for (tb = entries[e].entry.txn->blocks; tb; tb = tb->next, i++) {
             struct diskfs_block *blk = tb->block;
 
-            /* Stamp the block with this record's seq so the tail-pusher can
-            * tell whether the block has been re-logged since this image. */
-            __atomic_store_n(&blk->seq, rec->seq, __ATOMIC_RELEASE);
-
             bh                = (struct diskfs_redo_block_header *) p;
             bh->device_id     = blk->device_id;
             bh->pad           = 0;
             bh->device_offset = blk->device_offset;
+            /* Per-block XXH3-128 computed by the submitting worker at commit
+             * (tb->snap_csum); recovery verifies each image against this, so
+             * the IL thread no longer hashes the block images itself. */
+            bh->block_csum_lo = tb->snap_csum_lo;
+            bh->block_csum_hi = tb->snap_csum_hi;
             p                += sizeof(*bh);
 
             evpl_iovec_clone(&rec->iovs[1 + i], &tb->snap_buf->iov);
@@ -844,8 +992,39 @@ diskfs_il_write_redo(
     chimera_diskfs_abort_if(i != nblocks,
                             "redo grouped block count changed (%u != %u)", i, nblocks);
 
+    /* Serialize this batch's space-map deltas after the per-block headers.  The
+     * allocator hot path no longer journals alloc/free to a per-AG on-disk log;
+     * instead each delta rides this redo record (struct diskfs_redo_delta) and
+     * is replayed on crash against the owning AG's checkpoint.  Both alloc and
+     * (immediate) free deltas live on txn->space_deltas; deferred transactional
+     * frees are applied in-memory from txn->pending_frees on durability but ride
+     * here too (recorded into space_deltas by the pre-commit free-journal
+     * flush). */
+    nd = 0;
+    for (e = 0; e < num_entries; e++) {
+        struct diskfs_txn_delta *d;
+
+        for (d = entries[e].entry.txn->space_deltas; d; d = d->next, nd++) {
+            struct diskfs_redo_delta *rd = (struct diskfs_redo_delta *) p;
+
+            rd->device_id     = d->device_id;
+            rd->ag_index      = d->ag_index;
+            rd->device_offset = d->device_offset;
+            rd->length        = d->length;
+            rd->op            = d->op;
+            rd->pad           = 0;
+            p                += sizeof(*rd);
+        }
+    }
+    chimera_diskfs_abort_if(nd != num_deltas,
+                            "redo grouped delta count changed (%u != %u)", nd, num_deltas);
+
     /* Zero the header-region tail padding so the checksum covers deterministic
-     * bytes, then stamp the XXH3-128 over the header region + every block. */
+     * bytes, then stamp the XXH3-128 over the header region only.  Each block
+     * image is protected by its own block_csum (stamped above from the worker's
+     * commit-time hash), so the IL thread no longer hashes the 4 KiB images --
+     * recovery verifies this header csum, then each image against its block_csum
+     * (see diskfs_recover_log). */
     {
         char *end = (char *) rec->iovs[0].data + hdr_len;
 
@@ -853,13 +1032,8 @@ diskfs_il_write_redo(
             memset(p, 0, (size_t) (end - p));
         }
     }
-    XXH3_128bits_reset(&xs);
-    XXH3_128bits_update(&xs, rec->iovs[0].data, hdr_len);
-    for (i = 0; i < nblocks; i++) {
-        XXH3_128bits_update(&xs, rec->iovs[1 + i].data, DISKFS_BLOCK_SIZE);
-    }
     {
-        XXH128_hash_t h = XXH3_128bits_digest(&xs);
+        XXH128_hash_t h = XXH3_128bits(rec->iovs[0].data, hdr_len);
 
         hdr->csum_lo = h.low64;
         hdr->csum_hi = h.high64;
@@ -908,6 +1082,27 @@ diskfs_il_write_redo(
             done += cnt;
         }
     }
+
+    /* The record now owns an independent snapshot of every block (refs held in
+     * rec->block_bufs, data cloned into rec->iovs) and its log order is fixed
+     * (seq stamped, retire slot reserved, write issued above).  Release each
+     * txn's inode locks NOW, in log order, instead of waiting for the record to
+     * be durable: a later writer of any of these blocks will COW-fork it
+     * (diskfs_block_claim sees buf->refs > 1), preserving this record's image.
+     * Only the block pins, deferred frees, and the client ACK still wait for
+     * durable (diskfs_redo_write_cb) -- so the hot parent-directory inode lock
+     * is no longer held across the intent-log write latency. */
+    for (e = 0; e < num_entries; e++) {
+        struct diskfs_txn *t = entries[e].entry.txn;
+        int                j;
+
+        for (j = 0; j < t->num_inodes; j++) {
+            if (t->inodes[j].mode == DISKFS_INODE_LOCK_WRITE) {
+                t->inodes[j].inode->block = NULL;
+            }
+        }
+        diskfs_txn_unlock_all(t);
+    }
 } /* diskfs_il_write_redo */
 
 static uint32_t
@@ -923,10 +1118,19 @@ diskfs_il_txn_blocks(struct diskfs_txn *txn)
 } /* diskfs_il_txn_blocks */
 
 
-static uint64_t
-diskfs_il_blocks_reclen(uint32_t nblocks)
+/* Count of space-map deltas this txn carries into its redo record. */
+static uint32_t
+diskfs_il_txn_deltas(struct diskfs_txn *txn)
 {
-    return diskfs_il_hdr_len(nblocks) + (uint64_t) nblocks * DISKFS_BLOCK_SIZE;
+    return txn->n_space_deltas;
+} /* diskfs_il_txn_deltas */
+
+
+static uint64_t
+diskfs_il_blocks_reclen(uint32_t nblocks, uint32_t num_deltas)
+{
+    return diskfs_il_hdr_len(nblocks, num_deltas) +
+           (uint64_t) nblocks * DISKFS_BLOCK_SIZE;
 } /* diskfs_il_blocks_reclen */
 
 
@@ -934,27 +1138,75 @@ diskfs_il_blocks_reclen(uint32_t nblocks)
 static uint64_t
 diskfs_il_txn_reclen(struct diskfs_txn *txn)
 {
-    return diskfs_il_blocks_reclen(diskfs_il_txn_blocks(txn));
+    return diskfs_il_blocks_reclen(diskfs_il_txn_blocks(txn),
+                                   diskfs_il_txn_deltas(txn));
 } /* diskfs_il_txn_reclen */
 
+
+/* --- TEMP IL throughput instrumentation (collector is single-threaded, so
+ * plain counters are safe).  Printed once/sec to the daemon log to find why the
+ * redo pipeline runs shallow.  Remove after the investigation. --- */
+static uint64_t g_il_calls, g_il_submits, g_il_txns, g_il_gate_redo,
+                g_il_gate_retire, g_il_empty, g_il_sum_inflight;
+static int      g_il_max_inflight;
+static uint64_t g_il_last_print_ns;
+
+static void
+diskfs_il_dbg_tick(struct diskfs_intent_log *il)
+{
+    struct timespec ts;
+    uint64_t        now;
+    double          dt;
+
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    now = (uint64_t) ts.tv_sec * 1000000000ull + (uint64_t) ts.tv_nsec;
+    if (g_il_last_print_ns == 0) {
+        g_il_last_print_ns = now;
+        return;
+    }
+    if (now - g_il_last_print_ns < 1000000000ull) {
+        return;
+    }
+    dt = (double) (now - g_il_last_print_ns) / 1e9;
+    chimera_diskfs_info(
+        "IL/s calls=%.0f submits=%.0f txns/rec=%.1f gate_redo=%.0f "
+        "gate_retire=%.0f empty=%.0f avg_inflight=%.1f max_inflight=%d "
+        "now_inflight=%d retire_depth=%u",
+        g_il_calls / dt, g_il_submits / dt,
+        g_il_submits ? (double) g_il_txns / (double) g_il_submits : 0.0,
+        g_il_gate_redo / dt, g_il_gate_retire / dt, g_il_empty / dt,
+        g_il_submits ? (double) g_il_sum_inflight / (double) g_il_submits : 0.0,
+        g_il_max_inflight, il->redo_inflight,
+        il->retire_tail - il->retire_head);
+    g_il_calls = g_il_submits = g_il_txns = g_il_gate_redo = 0;
+    g_il_gate_retire = g_il_empty = g_il_sum_inflight = 0;
+    g_il_max_inflight  = 0;
+    g_il_last_print_ns = now;
+} /* diskfs_il_dbg_tick */
 
 static int
 diskfs_iq_process_batch(struct diskfs_intent_log *il)
 {
     struct diskfs_redo_entry entries[DISKFS_IL_MAX_IOV];
-    uint32_t                 sq_head[DISKFS_IL_MAX_CHANNELS]  = { 0 };
-    uint32_t                 sq_tail[DISKFS_IL_MAX_CHANNELS]  = { 0 };
-    uint32_t                 consumed[DISKFS_IL_MAX_CHANNELS] = { 0 };
-    uint32_t                 batch_count                      = 0;
-    uint32_t                 batch_blocks                     = 0;
+    uint32_t                 sq_head[DISKFS_IL_MAX_CHANNELS];
+    uint32_t                 sq_tail[DISKFS_IL_MAX_CHANNELS];
+    uint32_t                 consumed[DISKFS_IL_MAX_CHANNELS];
+    uint32_t                 batch_count  = 0;
+    uint32_t                 batch_blocks = 0;
+    uint32_t                 batch_deltas = 0;
     uint32_t                 start, rounds, pass, i;
     int                      stopped = 0;
 
+    g_il_calls++;
+    diskfs_il_dbg_tick(il);
+
     if (il->redo_inflight >= DISKFS_COMMIT_WATERMARK) {
+        g_il_gate_redo++;
         return 0;
     }
 
     if (il->retire_tail - il->retire_head >= DISKFS_RETIRE_RING_SIZE) {
+        g_il_gate_retire++;
         return 0;
     }
 
@@ -980,6 +1232,7 @@ diskfs_iq_process_batch(struct diskfs_intent_log *il)
             struct diskfs_iq_channel *ch  = il->channels[idx];
             struct diskfs_iq_entry   *slot;
             uint32_t                  nblocks, next_blocks;
+            uint32_t                  ndeltas, next_deltas;
             uint32_t                  cq_tail, cq_head;
             uint64_t                  reclen;
 
@@ -991,6 +1244,8 @@ diskfs_iq_process_batch(struct diskfs_intent_log *il)
                                    DISKFS_IQ_RING_MASK];
             nblocks     = diskfs_il_txn_blocks(slot->txn);
             next_blocks = batch_blocks + nblocks;
+            ndeltas     = diskfs_il_txn_deltas(slot->txn);
+            next_deltas = batch_deltas + ndeltas;
 
             /* Keep one normal record to one backend write.  Transactions larger
              * than the iov cap still go alone and use the segmented path. */
@@ -1006,7 +1261,7 @@ diskfs_iq_process_batch(struct diskfs_intent_log *il)
                 continue;
             }
 
-            reclen = diskfs_il_blocks_reclen(next_blocks);
+            reclen = diskfs_il_blocks_reclen(next_blocks, next_deltas);
             if (!diskfs_il_fits(il, reclen)) {
                 if (batch_count > 0) {
                     stopped = 1;
@@ -1027,6 +1282,7 @@ diskfs_iq_process_batch(struct diskfs_intent_log *il)
             entries[batch_count].entry = *slot;
             batch_count++;
             batch_blocks = next_blocks;
+            batch_deltas = next_deltas;
             consumed[idx]++;
             took = 1;
 
@@ -1046,7 +1302,15 @@ diskfs_iq_process_batch(struct diskfs_intent_log *il)
     }
 
     if (batch_count == 0) {
+        g_il_empty++;
         return 0;
+    }
+
+    g_il_submits++;
+    g_il_txns        += batch_count;
+    g_il_sum_inflight += (uint64_t) il->redo_inflight;   /* depth at decision time */
+    if (il->redo_inflight > g_il_max_inflight) {
+        g_il_max_inflight = il->redo_inflight;
     }
 
     for (i = 0; i < batch_count; i++) {
@@ -1067,7 +1331,7 @@ diskfs_iq_process_batch(struct diskfs_intent_log *il)
         il->channels[i]->cq_inflight += consumed[i];
     }
 
-    diskfs_il_write_redo(il, entries, batch_count, batch_blocks);
+    diskfs_il_write_redo(il, entries, batch_count, batch_blocks, batch_deltas);
     return 1;
 } /* diskfs_iq_process_batch */
 
@@ -1162,12 +1426,19 @@ diskfs_il_service_registrations(struct diskfs_intent_log *il)
 static int
 diskfs_il_process_all(struct diskfs_intent_log *il)
 {
-    int worked = 0;
-
-    while (diskfs_iq_process_batch(il)) {
-        worked = 1;
-    }
-    return worked;
+    /* One redo submission per call: build a SINGLE cross-channel redo record
+     * (one txn per channel per round, up to the DISKFS_IL_MAX_IOV size cap or
+     * until the SQs run dry) and submit it, then return so the event loop polls
+     * the redo CQ and reaps completions before we build the next record.
+     *
+     * Previously this drained the entire SQ backlog in one heads-down stretch
+     * (looping process_batch), so the per-iteration CQ poll could not reap redo
+     * completions until the whole stretch finished -- inflating completion
+     * latency (the ~1.87ms reap-delay mode) and leaving the device under-driven.
+     * Submitting one record per iteration interleaves submit with reap; the
+     * caller's evpl_activity keeps us in poll mode so the next record is built
+     * on the very next iteration with no sleep in between. */
+    return diskfs_iq_process_batch(il);
 } /* diskfs_il_process_all */
 
 
@@ -1518,6 +1789,8 @@ diskfs_il_push_thread_init(
     il->ready_tail = NULL;
     il->pfree      = NULL;
 
+    g_dbg_il = il;     /* debug handle for gdb: call dbg_dump_push() at a wedge */
+
     /* Pending map: one bucket budget per distinct block the log can hold. */
     cap            = diskfs_il_pow2((shared->intent_log_size / DISKFS_BLOCK_SIZE) * 2);
     il->phash_mask = cap - 1;
@@ -1612,12 +1885,22 @@ diskfs_txn_commit_finish(
                 diskfs_block_shard(thread->shared->block_cache,
                                    tb->block->device_id,
                                    tb->block->device_offset);
+            XXH128_hash_t snap_hash;
 
             pthread_mutex_lock(&bshard->lock);
             diskfs_block_buf_ref_locked(tb->block->buf);
             tb->snap     = tb->block->iov;
             tb->snap_buf = tb->block->buf;
             pthread_mutex_unlock(&bshard->lock);
+
+            /* Hash the snapshotted image here, on the submitting worker, so the
+             * single IL thread never hashes 4 KiB/block -- it just copies this
+             * csum into the block header.  The snapshot is frozen (snap_buf's
+             * ref pins it; any later writer COW-forks), so hashing after the
+             * unlock is safe and keeps it off the shard lock. */
+            snap_hash        = XXH3_128bits(tb->snap.data, DISKFS_BLOCK_SIZE);
+            tb->snap_csum_lo = snap_hash.low64;
+            tb->snap_csum_hi = snap_hash.high64;
             blocks++;
         }
         diskfs_metric_counter_inc(thread->metrics.txn[0]);
@@ -1652,9 +1935,11 @@ diskfs_txn_commit_finish(
 
     if (!thread->commit_wait_head &&
         diskfs_iq_try_submit(thread, txn, cb, private_data)) {
+        txn->dbg_stage = 3;     /* SUBMITTED to IL */
         return;
     }
 
+    txn->dbg_stage        = 4;     /* PARKED on commit-wait FIFO */
     txn->commit_cb        = cb;
     txn->commit_private   = private_data;
     txn->commit_wait_next = NULL;

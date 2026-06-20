@@ -49,32 +49,6 @@ sm_condense_test_deltas_get(void)
     return val;
 } /* sm_condense_test_deltas_get */
 
-/*
- * Append one allocation/free delta to the AG's active log slot, journaled
- * through the current transaction (via jnl) so it rides the main redo log and
- * is replayed on crash.  Caller holds ag->lock.  A NULL jnl (format-time or
- * bootstrap allocations) skips logging -- those are captured in the next
- * condensed base instead.  Deltas are appended after the condensed base in
- * 4 KiB-aligned, 128-per-block units (no block-spanning); the delta count
- * lives in the slot header (block 0).
- *
- * When the active slot's delta region hits its high-water mark, journaling
- * parks and a background condensation rewrites the inactive slot with a
- * fresh base and flips (space_map_condense_prepare/commit); clean unmounts
- * also re-condense every AG.
- */
-/*
- * The two AG-log blocks an upcoming delta touches, claimed (and pinned into the
- * journaling transaction) up front so the actual write never faults.  Filled by
- * sm_ag_journal_claim; consumed by sm_ag_journal_write.  blk_buf == NULL means
- * "no journaling" (jnl was NULL, e.g. format/bootstrap).
- */
-struct sm_ag_jnl_slot {
-    void    *hdr_buf;
-    void    *blk_buf;
-    uint32_t in_block;
-    uint32_t idx;
-};
 
 static struct sm_ag *
 sm_free_resolve_ag(
@@ -84,106 +58,9 @@ sm_free_resolve_ag(
     uint64_t          aligned,
     const char       *who);
 
-/*
- * Claim the AG's log header + current delta block for an upcoming delta, BEFORE
- * any allocator state is mutated.  Caller holds ag->lock.  All disk access is
- * async: claim_block returns NULL when the block is not resident (it parks the
- * journaling request and issues the read), in which case this returns SM_AGAIN
- * and the caller must unwind and retry the whole operation once resumed -- no
- * state has changed, so the retry is clean.  Claims the header (is_new == 0, so
- * it may need a read) first, so an SM_AGAIN there leaves nothing half-claimed;
- * a new delta block (in_block == 0) is is_new and never reads.
- */
-static int
-sm_ag_journal_claim(
-    struct sm_ag            *ag,
-    const struct sm_journal *jnl,
-    struct sm_ag_jnl_slot   *slot)
-{
-    uint64_t slot_base, region_off, delta_byte, blk_off;
-
-    if (!jnl) {
-        slot->blk_buf = NULL;
-        return 0;
-    }
-
-    /* Already condensing: park behind it. */
-    if (ag->condensing) {
-        jnl->ag_park(jnl->user, ag->device_id, ag->ag_index);
-        return SM_AGAIN;
-    }
-
-    slot_base  = ag->log_offset + (uint64_t) ag->log_slot * SM_AG_LOG_SLOT_SIZE;
-    region_off = (sizeof(struct sm_ag_log_header) +
-                  (uint64_t) ag->log_base_count * sizeof(struct sm_ag_log_ext) +
-                  SM_BLOCK_SIZE - 1) & ~((uint64_t) SM_BLOCK_SIZE - 1);
-    slot->idx = ag->log_delta_count;
-
-    delta_byte = region_off + (uint64_t) slot->idx * sizeof(struct sm_ag_log_delta);
-
-    /* High-water: hand the slot to a background condensation (writes the
-     * current free set as a fresh base into the inactive slot and flips) and
-     * park this operation behind it.  The margin below the hard limit
-     * absorbs nothing -- claims park immediately -- it is simply headroom so
-     * the abort is unreachable short of a condensation bug.  The test knob
-     * (DISKFS_AG_CONDENSE_DELTAS) triggers after a small fixed delta count
-     * so tests can exercise the condensation path without journaling ~100K
-     * deltas per AG. */
-    if (delta_byte + SM_AG_LOG_CONDENSE_MARGIN > SM_AG_LOG_SLOT_SIZE ||
-        (sm_condense_test_deltas_get() && slot->idx >= sm_condense_test_deltas_get())) {
-        ag->condensing = 1;
-        jnl->ag_condense(jnl->user, ag->device_id, ag->ag_index);
-        jnl->ag_park(jnl->user, ag->device_id, ag->ag_index);
-        return SM_AGAIN;
-    }
-
-    sm_abort_if(delta_byte + sizeof(struct sm_ag_log_delta) > SM_AG_LOG_SLOT_SIZE,
-                "AG %u/%u delta region full (%u deltas) despite condensation",
-                ag->device_id, ag->ag_index, slot->idx);
-
-    blk_off        = slot_base + (delta_byte & ~((uint64_t) SM_BLOCK_SIZE - 1));
-    slot->in_block = (uint32_t) (delta_byte & (SM_BLOCK_SIZE - 1));
-
-    slot->hdr_buf = jnl->claim_block(jnl->user, ag->log_device_id, slot_base, 0);
-    if (!slot->hdr_buf) {
-        return SM_AGAIN;
-    }
-    slot->blk_buf = jnl->claim_block(jnl->user, ag->log_device_id, blk_off,
-                                     slot->in_block == 0);
-    if (!slot->blk_buf) {
-        return SM_AGAIN;
-    }
-    return 0;
-} /* sm_ag_journal_claim */
-
-/* Write the delta into the pre-claimed log blocks.  Caller holds ag->lock and
- * has already mutated the free tree; this cannot fault. */
 static void
-sm_ag_journal_write(
-    struct sm_ag                *ag,
-    const struct sm_ag_jnl_slot *slot,
-    uint32_t                     op,
-    uint64_t                     offset,
-    uint64_t                     length)
-{
-    struct sm_ag_log_header *h;
-    struct sm_ag_log_delta  *d;
+sm_init_device_free_totals(struct space_map *sm);
 
-    if (!slot->blk_buf) {
-        return;     /* no journaling */
-    }
-
-    d         = (struct sm_ag_log_delta *) ((char *) slot->blk_buf + slot->in_block);
-    d->offset = offset;
-    d->length = length;
-    d->op     = op;
-    d->pad    = 0;
-    d->pad2   = 0;
-
-    h                   = (struct sm_ag_log_header *) slot->hdr_buf;
-    h->delta_count      = slot->idx + 1;
-    ag->log_delta_count = slot->idx + 1;
-} /* sm_ag_journal_write */
 
 static struct sm_extent *
 sm_extent_new(
@@ -209,6 +86,105 @@ sm_extent_release(
 } /* sm_extent_release */
 
 /*
+ * Segregated free-list (by-size) index, maintained alongside free_by_offset.
+ * An extent's class is floor(log2(blocks)); allocation finds an adequate
+ * extent via the per-AG non-empty class bitmask instead of scanning the
+ * offset-ordered tree.  All callers hold ag->lock.
+ */
+static inline uint32_t
+sm_ag_size_class(uint64_t length)
+{
+    uint64_t blocks = length >> SM_BLOCK_SHIFT;
+    uint32_t c;
+
+    if (blocks <= 1) {
+        return 0;
+    }
+    c = 63u - (uint32_t) __builtin_clzll(blocks);   /* floor(log2(blocks)) */
+    return c < SM_SIZE_CLASSES ? c : SM_SIZE_CLASSES - 1;
+} /* sm_ag_size_class */
+
+/*
+ * Mirror this AG's current largest non-empty size class into the device's
+ * lock-free free-space index.  Called at the end of every size-list mutation
+ * (under ag->lock).  Only acts on a max-class transition (infrequent); the
+ * bitmap writes are atomic OR/AND with no shared lock, so concurrent
+ * allocators on different AGs never serialize here -- the only interference is
+ * cache-line sharing among the 64 AGs that share a word.
+ */
+static void
+sm_ag_mc_update(struct sm_ag *ag)
+{
+    struct sm_device *dev = ag->dev;
+    int               newmax;
+
+    if (!dev) {
+        return;     /* pre-wiring (should not happen once initialized) */
+    }
+    newmax = ag->size_nonempty
+             ? (int) (31u - (uint32_t) __builtin_clz(ag->size_nonempty))
+             : -1;
+    if (newmax == ag->maxclass) {
+        return;
+    }
+    /* Publish into the new class BEFORE retiring the old one, so a concurrent
+     * lock-free lookup always finds this AG in at least one class (never in a
+     * gap).  A transiently-stale entry in the old class is harmless: the
+     * lookup re-verifies under ag->lock (sm_ag_can_alloc_locked). */
+    if (newmax >= 0) {
+        __atomic_fetch_or(&dev->maxclass_bits[newmax][ag->ag_index >> 6],
+                          (1ULL << (ag->ag_index & 63u)), __ATOMIC_RELAXED);
+        __atomic_fetch_add(&dev->mc_class_count[newmax], 1, __ATOMIC_RELAXED);
+    }
+    if (ag->maxclass >= 0) {
+        __atomic_fetch_and(&dev->maxclass_bits[ag->maxclass][ag->ag_index >> 6],
+                           ~(1ULL << (ag->ag_index & 63u)), __ATOMIC_RELAXED);
+        __atomic_fetch_sub(&dev->mc_class_count[ag->maxclass], 1, __ATOMIC_RELAXED);
+    }
+    ag->maxclass = (int16_t) newmax;
+} /* sm_ag_mc_update */
+
+/* Push ext onto the head of its size-class list. */
+static void
+sm_ag_size_link(struct sm_ag *ag, struct sm_extent *ext)
+{
+    uint32_t c = sm_ag_size_class(ext->length);
+
+    ext->size_prev = NULL;
+    ext->size_next = ag->free_by_size[c];
+    if (ag->free_by_size[c]) {
+        ag->free_by_size[c]->size_prev = ext;
+    }
+    ag->free_by_size[c]  = ext;
+    ag->size_nonempty   |= (1u << c);
+    sm_ag_mc_update(ag);
+} /* sm_ag_size_link */
+
+/*
+ * Unlink ext from its size-class list.  Must be called while ext->length still
+ * holds the value it was linked under (i.e. unlink before mutating length).
+ */
+static void
+sm_ag_size_unlink(struct sm_ag *ag, struct sm_extent *ext)
+{
+    uint32_t c = sm_ag_size_class(ext->length);
+
+    if (ext->size_prev) {
+        ext->size_prev->size_next = ext->size_next;
+    } else {
+        ag->free_by_size[c] = ext->size_next;
+    }
+    if (ext->size_next) {
+        ext->size_next->size_prev = ext->size_prev;
+    }
+    ext->size_prev = ext->size_next = NULL;
+    if (!ag->free_by_size[c]) {
+        ag->size_nonempty &= ~(1u << c);
+    }
+    sm_ag_mc_update(ag);
+} /* sm_ag_size_unlink */
+
+/*
  * Initialize an AG.  Offsets are absolute device offsets.  The log lives on
  * `log_device_id` at `log_offset` (for a LOCAL AG this is the AG's own device,
  * carved off the front of the AG; for a relocated REMOTE AG it is a slot on the
@@ -218,20 +194,23 @@ sm_extent_release(
  */
 static void
 sm_ag_init(
-    struct sm_ag *ag,
-    uint32_t      device_id,
-    uint32_t      ag_index,
-    uint64_t      base_offset,
-    uint64_t      size,
-    uint32_t      log_device_id,
-    uint64_t      log_offset,
-    uint64_t      data_off,
-    uint64_t      data_len)
+    struct sm_ag     *ag,
+    struct sm_device *dev,
+    uint32_t          device_id,
+    uint32_t          ag_index,
+    uint64_t          base_offset,
+    uint64_t          size,
+    uint32_t          log_device_id,
+    uint64_t          log_offset,
+    uint64_t          data_off,
+    uint64_t          data_len)
 {
     struct sm_extent *initial;
 
     ag->device_id       = device_id;
     ag->ag_index        = ag_index;
+    ag->dev             = dev;       /* must precede size_link -> sm_ag_mc_update */
+    ag->maxclass        = -1;
     ag->base_offset     = base_offset;
     ag->size            = size;
     ag->log_device_id   = log_device_id;
@@ -245,6 +224,8 @@ sm_ag_init(
 
     pthread_mutex_init(&ag->lock, NULL);
     rb_tree_init(&ag->free_by_offset);
+    memset(ag->free_by_size, 0, sizeof(ag->free_by_size));
+    ag->size_nonempty = 0;
 
     if ((int64_t) data_len <= 0) {
         /* AG too small to hold even its own log + reservations: no data range. */
@@ -255,6 +236,7 @@ sm_ag_init(
     initial = sm_extent_new(data_off, data_len);
 
     rb_tree_insert(&ag->free_by_offset, offset, initial);
+    sm_ag_size_link(ag, initial);
     ag->free_bytes = data_len;
 } /* sm_ag_init */
 
@@ -280,38 +262,100 @@ sm_ag_alloc_locked(
     uint64_t      size,
     uint64_t     *r_offset)
 {
-    struct sm_extent *ext;
+    struct sm_extent *ext   = NULL;
+    uint32_t          klass = sm_ag_size_class(size);
+    uint32_t          higher;
 
     if (ag->free_bytes < size) {
         return -1;
     }
 
-    rb_tree_first(&ag->free_by_offset, ext);
+    /*
+     * Find an adequate free extent via the size-class index instead of
+     * scanning free_by_offset.  Every class strictly above `klass` holds only
+     * extents whose block count is >= 2^(klass+1) > size, so any of their
+     * heads fits -- pick the lowest non-empty such class in O(1).  Extents
+     * smaller than the request live in lower classes the mask skips, so the
+     * old O(N) walk past small fragments is gone.
+     */
+    higher = (klass + 1 < SM_SIZE_CLASSES)
+             ? (ag->size_nonempty & ~((1u << (klass + 1)) - 1u))
+             : 0u;
+    if (higher) {
+        ext = ag->free_by_size[__builtin_ctz(higher)];
+    } else if (ag->size_nonempty & (1u << klass)) {
+        /*
+         * No larger extent anywhere in the AG (near-full): the only candidates
+         * share `size`'s class and may be smaller than the request, so scan
+         * just that one class for the first fit.  Bounded to a single class
+         * and only reached when the AG holds no bigger extent.
+         */
+        struct sm_extent *e;
 
-    while (ext) {
-        if (ext->length >= size) {
-            *r_offset = ext->offset;
-
-            if (ext->length == size) {
-                rb_tree_remove(&ag->free_by_offset, &ext->node);
-                free(ext);
-            } else {
-                /* Shrink: offset is the rb-tree key, so remove + reinsert. */
-                rb_tree_remove(&ag->free_by_offset, &ext->node);
-                ext->offset += size;
-                ext->length -= size;
-                rb_tree_insert(&ag->free_by_offset, offset, ext);
+        for (e = ag->free_by_size[klass]; e; e = e->size_next) {
+            if (e->length >= size) {
+                ext = e;
+                break;
             }
-
-            ag->free_bytes -= size;
-            return 0;
         }
-
-        ext = rb_tree_next(&ag->free_by_offset, ext);
     }
 
-    return -1;
+    if (!ext) {
+        return -1;
+    }
+
+    *r_offset = ext->offset;
+    rb_tree_remove(&ag->free_by_offset, &ext->node);
+    sm_ag_size_unlink(ag, ext);
+
+    if (ext->length == size) {
+        free(ext);
+    } else {
+        /* Shrink: offset is the rb-tree key, so remove + reinsert both indexes. */
+        ext->offset += size;
+        ext->length -= size;
+        rb_tree_insert(&ag->free_by_offset, offset, ext);
+        sm_ag_size_link(ag, ext);
+    }
+
+    ag->free_bytes -= size;
+    __atomic_sub_fetch(&ag->dev->free_bytes, size, __ATOMIC_RELAXED);
+    return 0;
 } /* sm_ag_alloc_locked */
+
+/*
+ * Read-only peek: does this AG hold a free extent that can satisfy `size`?
+ * Same selection logic as sm_ag_alloc_locked but without mutating.  Used by
+ * sm_pick_and_alloc to avoid claiming/journaling an AG's log blocks before we
+ * know it can actually satisfy the request (Bug 2: a fragmented AG with
+ * free_bytes >= size but no contiguous extent would otherwise leak a journal
+ * block into the transaction on every visit).  Caller holds ag->lock.
+ */
+static int
+sm_ag_can_alloc_locked(struct sm_ag *ag, uint64_t size)
+{
+    uint32_t klass = sm_ag_size_class(size);
+    uint32_t higher;
+
+    if (ag->free_bytes < size) {
+        return 0;
+    }
+    higher = (klass + 1 < SM_SIZE_CLASSES)
+             ? (ag->size_nonempty & ~((1u << (klass + 1)) - 1u))
+             : 0u;
+    if (higher) {
+        return 1;       /* a strictly-larger class holds an extent >= size */
+    }
+    if (ag->size_nonempty & (1u << klass)) {
+        struct sm_extent *e;
+        for (e = ag->free_by_size[klass]; e; e = e->size_next) {
+            if (e->length >= size) {
+                return 1;
+            }
+        }
+    }
+    return 0;
+} /* sm_ag_can_alloc_locked */
 
 /*
  * Return [offset, offset+length) to `ag`'s free tree, coalescing with any
@@ -346,27 +390,34 @@ sm_ag_free_locked(
                 offset, next_ext->offset, next_ext->length);
 
     if (prev_ext && prev_ext->offset + prev_ext->length == offset) {
+        sm_ag_size_unlink(ag, prev_ext);   /* length about to grow; relink below */
         prev_ext->length += length;
         merged_with_prev  = 1;
     }
 
     if (merged_with_prev) {
         if (next_ext && next_ext->offset == prev_ext->offset + prev_ext->length) {
+            sm_ag_size_unlink(ag, next_ext);
             prev_ext->length += next_ext->length;
             rb_tree_remove(&ag->free_by_offset, &next_ext->node);
             free(next_ext);
         }
+        sm_ag_size_link(ag, prev_ext);     /* relink prev with its final length */
     } else if (next_ext && next_ext->offset == offset + length) {
+        sm_ag_size_unlink(ag, next_ext);   /* offset/length about to change */
         rb_tree_remove(&ag->free_by_offset, &next_ext->node);
         next_ext->offset  = offset;
         next_ext->length += length;
         rb_tree_insert(&ag->free_by_offset, offset, next_ext);
+        sm_ag_size_link(ag, next_ext);
     } else {
         struct sm_extent *fresh = sm_extent_new(offset, length);
         rb_tree_insert(&ag->free_by_offset, offset, fresh);
+        sm_ag_size_link(ag, fresh);
     }
 
     ag->free_bytes += length;
+    __atomic_add_fetch(&ag->dev->free_bytes, length, __ATOMIC_RELAXED);
 } /* sm_ag_free_locked */
 
 struct space_map *
@@ -421,6 +472,19 @@ space_map_create(
 
         dev->ags            = calloc(dev->num_ags, sizeof(*dev->ags));
         sm->total_capacity += dev->size;
+
+        /* Lock-free free-space index: one bit per AG per size class.  Allocated
+         * before sm_ag_init (which links the AG's initial extent and sets its
+         * max-class bit). */
+        dev->mc_words = (dev->num_ags + 63u) >> 6;
+        dev->mc_rotor = 0;
+        {
+            uint32_t c;
+            for (c = 0; c < SM_SIZE_CLASSES; c++) {
+                dev->maxclass_bits[c] = calloc(dev->mc_words, sizeof(uint64_t));
+                sm_abort_if(!dev->maxclass_bits[c], "maxclass_bits alloc failed");
+            }
+        }
     }
 
     /* The relocated remote-AG-log region sits on device 0, between the intent
@@ -459,7 +523,7 @@ space_map_create(
                     data_off = base + SM_ALIGN_UP(dev->sig_offset + dev->sig_len);
                 }
                 data_end = base + span;
-                sm_ag_init(ag, d, a, base, span, log_device_id, log_offset,
+                sm_ag_init(ag, dev, d, a, base, span, log_device_id, log_offset,
                            data_off, data_end > data_off ? data_end - data_off : 0);
                 continue;
             }
@@ -493,7 +557,7 @@ space_map_create(
             }
 
             data_end = base + span;
-            sm_ag_init(ag, d, a, base, span, log_device_id, log_offset,
+            sm_ag_init(ag, dev, d, a, base, span, log_device_id, log_offset,
                        data_off, data_end > data_off ? data_end - data_off : 0);
         }
     }
@@ -523,6 +587,7 @@ space_map_create(
                 sm->remote_log_offset, sm->remote_log_size);
     }
 
+    sm_init_device_free_totals(sm);
     return sm;
 } /* space_map_create */
 
@@ -538,12 +603,59 @@ space_map_destroy(struct space_map *sm)
             sm_ag_destroy(&dev->ags[a]);
         }
         free(dev->ags);
+        {
+            uint32_t c;
+            for (c = 0; c < SM_SIZE_CLASSES; c++) {
+                free(dev->maxclass_bits[c]);
+            }
+        }
     }
 
     pthread_mutex_destroy(&sm->lock);
     free(sm->devices);
     free(sm);
 } /* space_map_destroy */
+
+/* Try to allocate `want` from one AG: 0 = allocated, SM_AGAIN = parked (retry
+ * the whole allocation), 1 = this AG cannot satisfy (try another).  Claims and
+ * journals only after confirming a fit under ag->lock, so a non-fitting AG
+ * never leaks a journal block into the txn (Bug 2). */
+static int
+sm_try_alloc_from_ag(
+    struct sm_ag            *ag,
+    const struct sm_journal *jnl,
+    uint64_t                 want,
+    uint32_t                *r_device_id,
+    uint64_t                *r_device_offset)
+{
+    uint64_t offset;
+    int      rc;
+
+    if (__atomic_load_n(&ag->free_bytes, __ATOMIC_RELAXED) < want) {
+        return 1;
+    }
+    pthread_mutex_lock(&ag->lock);
+    if (!sm_ag_can_alloc_locked(ag, want)) {
+        pthread_mutex_unlock(&ag->lock);
+        return 1;
+    }
+    rc = sm_ag_alloc_locked(ag, want, &offset);
+    sm_abort_if(rc != 0, "AG %u/%u: can_alloc/alloc mismatch (want=%lu)",
+                ag->device_id, ag->ag_index, (unsigned long) want);
+    ag->ckpt_dirty = 1;     /* un-checkpointed delta now exists for this AG */
+    pthread_mutex_unlock(&ag->lock);
+
+    /* Record the alloc delta into the txn so it rides the redo record (durable +
+     * replayed on crash).  Purely in-memory -- no AG-log block claim, so the
+     * allocator hot path never parks. */
+    if (jnl && jnl->record_delta) {
+        jnl->record_delta(jnl->user, ag->device_id, ag->ag_index,
+                          offset, want, SM_AG_LOG_OP_ALLOC);
+    }
+    *r_device_id     = ag->device_id;
+    *r_device_offset = offset;
+    return 0;
+} /* sm_try_alloc_from_ag */
 
 /*
  * Attempt to reserve `want` bytes by allocating from some AG.  Walks every
@@ -558,23 +670,43 @@ sm_pick_and_alloc(
     uint32_t                 role,
     uint64_t                 want,
     uint32_t                *r_device_id,
-    uint64_t                *r_device_offset)
+    uint64_t                *r_device_offset,
+    struct sm_thread_cache  *cache,
+    uint32_t                 pick_seed)
 {
-    uint32_t start_dev, dev_id;
-    uint32_t d, a;
+    uint32_t start_dev, dev_id, d, a;
+    uint32_t want_class = sm_ag_size_class(want);
+    int      r;
+
+    /* Phase 0 arena fast path: try this thread's sticky AG first.  Each worker
+     * sticks to a different AG, so its ag->lock is essentially uncontended --
+     * eliminating the thundering herd where many workers gang on one hot AG. */
+    if (cache && cache->arena_valid &&
+        cache->arena_dev < sm->num_devices &&
+        sm->devices[cache->arena_dev].role == role &&
+        cache->arena_ag < sm->devices[cache->arena_dev].num_ags) {
+        r = sm_try_alloc_from_ag(&sm->devices[cache->arena_dev].ags[cache->arena_ag],
+                                 jnl, want, r_device_id, r_device_offset);
+        if (r == 0) {
+            return 0;
+        }
+        /* r != 0: arena AG can't satisfy `want` -- re-pick + re-home below.  (The
+         * allocator no longer parks, so sm_try_alloc_from_ag never returns
+         * SM_AGAIN; r is success(0) or can't-satisfy.  Note SM_AGAIN == 1 aliases
+         * the can't-satisfy return, so it must NOT be treated as a park here.) */
+    }
 
     pthread_mutex_lock(&sm->lock);
     start_dev = sm->device_rotor;
-    sm->device_rotor++;
-    if (sm->device_rotor >= sm->num_devices) {
+    if (++sm->device_rotor >= sm->num_devices) {
         sm->device_rotor = 0;
     }
     pthread_mutex_unlock(&sm->lock);
 
     for (d = 0; d < sm->num_devices; d++) {
+        uint32_t          C, w, start_w, start_ag;
         dev_id = (start_dev + d) % sm->num_devices;
         struct sm_device *dev = &sm->devices[dev_id];
-        uint32_t          start_ag;
 
         /* Block mode keeps metadata on LOCAL devices and data on REMOTE
          * devices; a role-matched allocation skips the other class. */
@@ -582,45 +714,87 @@ sm_pick_and_alloc(
             continue;
         }
 
+        /* Bug 1: fast path -- jump straight to an AG with an adequate free
+         * extent via the device's lock-free free-space index, instead of
+         * walking all ~30K AGs (and, before Bug 2, dirtying each one's log).
+         * mc_class_count[C] names the populated max-free size classes; for
+         * each class C >= want_class (lowest first, ~best fit) we walk
+         * maxclass_bits[C] to a candidate AG.  C > want_class is a guaranteed
+         * fit; C == want_class may not fit `want` exactly, so the per-AG
+         * helper re-verifies under the lock.  The count and bitmap are
+         * maintained with relaxed atomics (no shared mutex), so updating the
+         * index never serializes allocators. */
+        /* pick_seed diverges each worker's scan start so they spread across AGs
+         * instead of converging on the index's globally "best" AG and convoying
+         * on its ag->lock.  The arena (metadata) path derives it from the thread
+         * cache pointer; the data path passes its own per-thread seed (cache is
+         * NULL there to skip arena stickiness, but it still needs divergence). */
+        start_w = dev->mc_words
+                  ? ((pick_seed + dev->mc_rotor++) % dev->mc_words)
+                  : 0;
+        for (C = want_class; C < SM_SIZE_CLASSES; C++) {
+            uint64_t *bits;
+
+            if (__atomic_load_n(&dev->mc_class_count[C], __ATOMIC_RELAXED) == 0) {
+                continue;       /* no AG's largest free extent is in class C */
+            }
+            bits = dev->maxclass_bits[C];
+            for (w = 0; w < dev->mc_words; w++) {
+                uint32_t wi   = (start_w + w) % dev->mc_words;
+                uint64_t word = __atomic_load_n(&bits[wi], __ATOMIC_RELAXED);
+
+                while (word) {
+                    uint32_t b  = (uint32_t) __builtin_ctzll(word);
+                    uint32_t ai = wi * 64u + b;
+
+                    word &= ~(1ULL << b);
+                    if (ai >= dev->num_ags) {
+                        continue;
+                    }
+                    r = sm_try_alloc_from_ag(&dev->ags[ai], jnl, want,
+                                             r_device_id, r_device_offset);
+                    if (r == 0) {
+                        if (cache) {
+                            cache->arena_dev   = dev_id;
+                            cache->arena_ag    = ai;
+                            cache->arena_valid = 1;
+                        }
+                        return 0;
+                    }
+                    /* r != 0: stale index bit, or a class-want_class extent too
+                     * small for `want` -- try the next candidate.  (Never a park:
+                     * the allocator does not park; SM_AGAIN==1 aliases this
+                     * can't-satisfy return and must not short-circuit here.) */
+                }
+            }
+        }
+
+        /* Backstop: a transiently stale/missing index bit must never produce a
+         * false ENOSPC, so before giving up on this device fall back to the
+         * full linear scan.  With a consistent index this finds nothing the
+         * fast path missed; it exists purely as a correctness guarantee. */
         pthread_mutex_lock(&sm->lock);
         start_ag = dev->ag_rotor;
-        dev->ag_rotor++;
-        if (dev->ag_rotor >= dev->num_ags) {
+        if (++dev->ag_rotor >= dev->num_ags) {
             dev->ag_rotor = 0;
         }
         pthread_mutex_unlock(&sm->lock);
 
         for (a = 0; a < dev->num_ags; a++) {
-            uint32_t              ag_idx = (start_ag + a) % dev->num_ags;
-            struct sm_ag         *ag     = &dev->ags[ag_idx];
-            struct sm_ag_jnl_slot slot;
-            uint64_t              offset;
-            int                   rc, jrc;
+            uint32_t ai = (start_ag + a) % dev->num_ags;
 
-            if (ag->free_bytes < want) {
-                continue;
-            }
-
-            pthread_mutex_lock(&ag->lock);
-            /* Claim the log blocks before mutating: on a journal-block miss this
-             * returns SM_AGAIN with nothing changed, so the parked caller can
-             * cleanly retry the whole allocation once the read completes. */
-            jrc = sm_ag_journal_claim(ag, jnl, &slot);
-            if (jrc == SM_AGAIN) {
-                pthread_mutex_unlock(&ag->lock);
-                return SM_AGAIN;
-            }
-            rc = sm_ag_alloc_locked(ag, want, &offset);
-            if (rc == 0) {
-                sm_ag_journal_write(ag, &slot, SM_AG_LOG_OP_ALLOC, offset, want);
-            }
-            pthread_mutex_unlock(&ag->lock);
-
-            if (rc == 0) {
-                *r_device_id     = dev_id;
-                *r_device_offset = offset;
+            r = sm_try_alloc_from_ag(&dev->ags[ai], jnl, want,
+                                     r_device_id, r_device_offset);
+            if (r == 0) {
+                if (cache) {
+                    cache->arena_dev   = dev_id;
+                    cache->arena_ag    = ai;
+                    cache->arena_valid = 1;
+                }
                 return 0;
             }
+            /* r != 0: this AG can't satisfy `want` -- try the next.  (Not a park;
+             * SM_AGAIN==1 aliases the can't-satisfy return.) */
         }
     }
 
@@ -640,59 +814,23 @@ sm_pick_and_reserve_volatile(
     uint32_t          role,
     uint64_t          want,
     uint32_t         *r_device_id,
-    uint64_t         *r_device_offset)
+    uint64_t         *r_device_offset,
+    uint32_t          pick_seed)
 {
-    uint32_t start_dev, dev_id;
-    uint32_t d, a;
-
-    pthread_mutex_lock(&sm->lock);
-    start_dev = sm->device_rotor;
-    sm->device_rotor++;
-    if (sm->device_rotor >= sm->num_devices) {
-        sm->device_rotor = 0;
-    }
-    pthread_mutex_unlock(&sm->lock);
-
-    for (d = 0; d < sm->num_devices; d++) {
-        dev_id = (start_dev + d) % sm->num_devices;
-        struct sm_device *dev = &sm->devices[dev_id];
-        uint32_t          start_ag;
-
-        if (dev->role != role) {
-            continue;
-        }
-
-        pthread_mutex_lock(&sm->lock);
-        start_ag = dev->ag_rotor;
-        dev->ag_rotor++;
-        if (dev->ag_rotor >= dev->num_ags) {
-            dev->ag_rotor = 0;
-        }
-        pthread_mutex_unlock(&sm->lock);
-
-        for (a = 0; a < dev->num_ags; a++) {
-            uint32_t      ag_idx = (start_ag + a) % dev->num_ags;
-            struct sm_ag *ag     = &dev->ags[ag_idx];
-            uint64_t      offset;
-            int           rc;
-
-            if (ag->free_bytes < want) {
-                continue;
-            }
-
-            pthread_mutex_lock(&ag->lock);
-            rc = sm_ag_alloc_locked(ag, want, &offset);
-            pthread_mutex_unlock(&ag->lock);
-
-            if (rc == 0) {
-                *r_device_id     = dev_id;
-                *r_device_offset = offset;
-                return 0;
-            }
-        }
-    }
-
-    return -1;
+    /*
+     * Use the lock-free size-class index (sm_pick_and_alloc) to jump straight to
+     * an AG with an adequate free extent, instead of the old linear walk that
+     * locked AG after AG -- a major CPU + ag->lock-contention cost on the data
+     * write path at scale.  jnl == NULL: sm_try_alloc_from_ag removes the range
+     * from the in-memory free tree without journaling (the durable ALLOC delta
+     * for the exact sub-range is recorded later by space_map_journal_alloc_exact
+     * when the write commits; the unused tail is returned).  cache == NULL: this
+     * is the data path, which has no per-thread arena.  pick_seed still gives it
+     * per-thread scan divergence so concurrent data writers don't convoy on the
+     * same AG's lock (the dominant cost as free extents fragment under INIT).
+     */
+    return sm_pick_and_alloc(sm, NULL, role, want, r_device_id, r_device_offset,
+                             NULL, pick_seed);
 } /* sm_pick_and_reserve_volatile */
 
 static int
@@ -703,21 +841,21 @@ space_map_journal_alloc_exact(
     uint64_t                 device_offset,
     uint64_t                 length)
 {
-    struct sm_ag         *ag;
-    struct sm_ag_jnl_slot slot;
-    int                   jrc;
+    struct sm_ag *ag;
 
     ag = sm_free_resolve_ag(sm, device_id, device_offset, length,
                             "space_map_journal_alloc_exact");
 
     pthread_mutex_lock(&ag->lock);
-    jrc = sm_ag_journal_claim(ag, jnl, &slot);
-    if (jrc == SM_AGAIN) {
-        pthread_mutex_unlock(&ag->lock);
-        return SM_AGAIN;
-    }
-    sm_ag_journal_write(ag, &slot, SM_AG_LOG_OP_ALLOC, device_offset, length);
+    ag->ckpt_dirty = 1;
     pthread_mutex_unlock(&ag->lock);
+
+    /* The exact range was already removed from the free tree by the volatile
+     * reservation; here we only record the alloc delta for the redo record. */
+    if (jnl && jnl->record_delta) {
+        jnl->record_delta(jnl->user, device_id, ag->ag_index,
+                          device_offset, length, SM_AG_LOG_OP_ALLOC);
+    }
     return 0;
 } /* space_map_journal_alloc_exact */
 
@@ -776,7 +914,8 @@ space_map_reserve(
         return -1;
     }
 
-    rc = sm_pick_and_alloc(sm, jnl, role, want, &cache->device_id, &cache->offset);
+    rc = sm_pick_and_alloc(sm, jnl, role, want, &cache->device_id, &cache->offset, cache,
+                           (uint32_t) ((uintptr_t) cache >> 6));
     if (rc == SM_AGAIN) {
         return SM_AGAIN;
     }
@@ -784,7 +923,8 @@ space_map_reserve(
         /* Try the smaller exact size before giving up, in case fragmentation
          * blocks the reservation but the caller's actual ask is small. */
         if (want != need) {
-            rc = sm_pick_and_alloc(sm, jnl, role, need, &cache->device_id, &cache->offset);
+            rc = sm_pick_and_alloc(sm, jnl, role, need, &cache->device_id, &cache->offset, cache,
+                                   (uint32_t) ((uintptr_t) cache >> 6));
             if (rc == SM_AGAIN) {
                 return SM_AGAIN;
             }
@@ -863,10 +1003,12 @@ space_map_alloc_volatile_reservation(
         }
 
         rc = sm_pick_and_reserve_volatile(sm, role, want,
-                                          &cache->device_id, &cache->offset);
+                                          &cache->device_id, &cache->offset,
+                                          (uint32_t) ((uintptr_t) cache >> 6));
         if (rc != 0 && want != need) {
             rc = sm_pick_and_reserve_volatile(sm, role, need,
-                                              &cache->device_id, &cache->offset);
+                                              &cache->device_id, &cache->offset,
+                                              (uint32_t) ((uintptr_t) cache >> 6));
             if (rc == 0) {
                 cache->length = need;
                 cache->valid  = 1;
@@ -970,10 +1112,8 @@ space_map_free_journal(
     uint64_t                 device_offset,
     uint64_t                 length)
 {
-    uint64_t              offset, aligned;
-    struct sm_ag         *ag;
-    struct sm_ag_jnl_slot slot;
-    int                   jrc;
+    uint64_t      offset, aligned;
+    struct sm_ag *ag;
 
     if (!sm_free_block_range(device_offset, length, &offset, &aligned)) {
         return 0;
@@ -981,15 +1121,17 @@ space_map_free_journal(
     ag = sm_free_resolve_ag(sm, device_id, offset, aligned, "space_map_free_journal");
 
     pthread_mutex_lock(&ag->lock);
-    /* Claim before write; on a cold log block this parks the caller and
-     * returns SM_AGAIN with nothing changed, for a clean retry. */
-    jrc = sm_ag_journal_claim(ag, jnl, &slot);
-    if (jrc == SM_AGAIN) {
-        pthread_mutex_unlock(&ag->lock);
-        return SM_AGAIN;
-    }
-    sm_ag_journal_write(ag, &slot, SM_AG_LOG_OP_FREE, offset, aligned);
+    ag->ckpt_dirty = 1;
     pthread_mutex_unlock(&ag->lock);
+
+    /* Record the FREE delta into the txn so it rides the redo record.  Purely
+     * in-memory -- no AG-log block claim, never parks.  (The transactional free
+     * path records its frees from txn->pending_frees instead; this immediate
+     * path is used only for non-transactional returns, where jnl is NULL.) */
+    if (jnl && jnl->record_delta) {
+        jnl->record_delta(jnl->user, device_id, ag->ag_index,
+                          offset, aligned, SM_AG_LOG_OP_FREE);
+    }
     return 0;
 } /* space_map_free_journal */
 
@@ -1016,6 +1158,445 @@ space_map_free_apply(
     sm_ag_free_locked(ag, offset, aligned);
     pthread_mutex_unlock(&ag->lock);
 } /* space_map_free_apply */
+
+static void
+sm_ag_mark_used_locked(
+    struct sm_ag *ag,
+    uint64_t      offset,
+    uint64_t      length);
+
+static void
+sm_ag_remove_claim_locked(
+    struct sm_ag    *ag,
+    struct sm_claim *claim);
+
+/*
+ * Apply a COMMITTED allocation to the in-memory free tree at durability (retire),
+ * mirroring space_map_free_apply.  The reservation allocator hands out blocks
+ * thread-locally from a claim WITHOUT removing them from the tree, so the tree
+ * stays == committed state (condense never captures an uncommitted reservation
+ * tail -> no crash leak).  This removes the committed sub-range when its txn's
+ * redo record retires, single-owner and in seq order, so it never contends with
+ * itself and only briefly with a concurrent grab on the same AG.
+ */
+void
+space_map_alloc_apply(
+    struct space_map *sm,
+    uint32_t          device_id,
+    uint64_t          device_offset,
+    uint64_t          length)
+{
+    uint64_t      offset, aligned;
+    struct sm_ag *ag;
+
+    if (!sm_free_block_range(device_offset, length, &offset, &aligned)) {
+        return;
+    }
+    ag = sm_free_resolve_ag(sm, device_id, offset, aligned, "space_map_alloc_apply");
+
+    pthread_mutex_lock(&ag->lock);
+    /* The claim kept this range free in the tree until now; remove it.  (mark_used
+     * asserts the range is within a free extent, catching any double-apply.) */
+    sm_ag_mark_used_locked(ag, offset, aligned);
+    ag->ckpt_dirty = 1;
+
+    /* Unpin the claim backing this range; GC it if its owner has moved on
+     * (retiring) and this was the last in-flight allocation from it. */
+    {
+        struct sm_claim *c;
+
+        for (c = ag->claims; c; c = c->next) {
+            if (offset >= c->base && offset < c->base + c->len) {
+                if (__atomic_sub_fetch(&c->refcount, 1, __ATOMIC_RELAXED) == 0 &&
+                    c->retiring) {
+                    sm_ag_remove_claim_locked(ag, c);
+                }
+                break;
+            }
+        }
+    }
+    pthread_mutex_unlock(&ag->lock);
+} /* space_map_alloc_apply */
+
+/*
+ * Discard an uncommitted allocation (txn abort): the range was never removed
+ * from the free tree (only retire does that), so the tree needs no change -- but
+ * the claim was pinned at bump, so unpin it (and GC if it was retiring and this
+ * was its last in-flight allocation).  Mirrors the unpin half of alloc_apply.
+ */
+void
+space_map_alloc_discard(
+    struct space_map *sm,
+    uint32_t          device_id,
+    uint64_t          device_offset,
+    uint64_t          length)
+{
+    uint64_t         offset, aligned;
+    struct sm_ag    *ag;
+    struct sm_claim *c;
+
+    if (!sm_free_block_range(device_offset, length, &offset, &aligned)) {
+        return;
+    }
+    ag = sm_free_resolve_ag(sm, device_id, offset, aligned, "space_map_alloc_discard");
+
+    pthread_mutex_lock(&ag->lock);
+    for (c = ag->claims; c; c = c->next) {
+        if (offset >= c->base && offset < c->base + c->len) {
+            if (__atomic_sub_fetch(&c->refcount, 1, __ATOMIC_RELAXED) == 0 &&
+                c->retiring) {
+                sm_ag_remove_claim_locked(ag, c);
+            }
+            break;
+        }
+    }
+    pthread_mutex_unlock(&ag->lock);
+} /* space_map_alloc_discard */
+
+/* --- Reservation claim list (per-AG, protected by ag->lock) --- */
+
+/* Add a claim for [base, base+len) to the AG.  Caller holds ag->lock. */
+static struct sm_claim *
+sm_ag_add_claim_locked(
+    struct sm_ag *ag,
+    uint64_t      base,
+    uint64_t      len)
+{
+    struct sm_claim *c = calloc(1, sizeof(*c));
+
+    c->base     = base;
+    c->len      = len;
+    c->refcount = 0;
+    c->retiring = 0;
+    c->next     = ag->claims;
+    ag->claims  = c;
+    return c;
+} /* sm_ag_add_claim_locked */
+
+/* Unlink and free a claim from the AG.  Caller holds ag->lock. */
+static void
+sm_ag_remove_claim_locked(
+    struct sm_ag    *ag,
+    struct sm_claim *claim)
+{
+    struct sm_claim **link;
+
+    for (link = &ag->claims; *link; link = &(*link)->next) {
+        if (*link == claim) {
+            *link = claim->next;
+            free(claim);
+            return;
+        }
+    }
+} /* sm_ag_remove_claim_locked */
+
+/* Lowest claim base strictly above `from` in this AG (or UINT64_MAX if none),
+ * used to cap a new claim so it can't swallow a higher existing claim.  Caller
+ * holds ag->lock. */
+static uint64_t
+sm_ag_next_claim_base_locked(
+    struct sm_ag *ag,
+    uint64_t      from)
+{
+    struct sm_claim *c;
+    uint64_t         best = UINT64_MAX;
+
+    for (c = ag->claims; c; c = c->next) {
+        if (c->base >= from && c->base < best) {
+            best = c->base;
+        }
+    }
+    return best;
+} /* sm_ag_next_claim_base_locked */
+
+/*
+ * Try to carve a claim-free region of at least `want` (ideally up to `chunk`)
+ * out of this AG's committed-free tree, without removing it from the tree.  On
+ * success records the claim and returns it via *out_claim with [*out_base,
+ * *out_base+*out_len).  Caller holds ag->lock.  Returns 0 on success, 1 if this
+ * AG has no claim-free extent big enough.
+ */
+static int
+sm_ag_try_claim_locked(
+    struct sm_ag     *ag,
+    uint64_t          want,
+    uint64_t          chunk,
+    uint64_t         *out_base,
+    uint64_t         *out_len,
+    struct sm_claim **out_claim)
+{
+    struct sm_extent *e;
+
+    /* Walk free extents large enough to possibly hold `want`.  rb_tree_next
+     * RETURNS the next node (it does not advance in place), so capture it before
+     * the body and assign at the bottom -- never call it as a bare statement. */
+    rb_tree_first(&ag->free_by_offset, e);
+    while (e) {
+        struct sm_extent *next_e = rb_tree_next(&ag->free_by_offset, e);
+        uint64_t          e_end  = e->offset + e->length;
+        uint64_t          s      = e->offset;
+
+        if (e->length < want) {
+            e = next_e;
+            continue;
+        }
+        /* Advance `s` past any claim overlapping [s, s+want) until a claim-free
+         * window of `want` fits, or we run off the end of this extent. */
+        for (;; ) {
+            struct sm_claim *blk = NULL;
+            struct sm_claim *c;
+
+            if (s + want > e_end) {
+                break;          /* no room left in this extent */
+            }
+            for (c = ag->claims; c; c = c->next) {
+                if (s < c->base + c->len && c->base < s + want) {
+                    if (!blk || c->base + c->len > blk->base + blk->len) {
+                        blk = c;        /* the overlapping claim that ends highest */
+                    }
+                }
+            }
+            if (!blk) {
+                /* [s, s+want) is claim-free.  Extend the claim up to `chunk`,
+                 * capped at the extent end and the next claim above s. */
+                uint64_t cap = e_end;
+                uint64_t nb  = sm_ag_next_claim_base_locked(ag, s);
+                uint64_t len;
+
+                if (nb < cap) {
+                    cap = nb;
+                }
+                len = cap - s;
+                if (len > chunk) {
+                    len = chunk;
+                }
+                *out_base  = s;
+                *out_len   = len;
+                *out_claim = sm_ag_add_claim_locked(ag, s, len);
+                return 0;
+            }
+            s = blk->base + blk->len;   /* jump past the blocking claim */
+        }
+        e = next_e;
+    }
+    return 1;
+} /* sm_ag_try_claim_locked */
+
+/*
+ * Grab a fresh bump reservation for a worker thread: find a claim-free,
+ * committed-free region of at least `want` (up to `chunk`) in a role-matched AG,
+ * record a claim for it (NOT removing it from the free tree), and fill `r`.
+ * Returns 0 on success, -1 on ENOSPC.  Rare (~once per chunk consumed), so the
+ * AG scan cost is amortized away.  `seed` diverges concurrent grabs across AGs.
+ */
+int
+space_map_reserve_chunk(
+    struct space_map      *sm,
+    struct sm_reservation *r,
+    uint32_t               role,
+    uint64_t               want,
+    uint64_t               chunk,
+    uint32_t               seed)
+{
+    uint32_t start_dev, d;
+
+    want = SM_ALIGN_UP(want);
+    if (chunk < want) {
+        chunk = want;
+    }
+
+    pthread_mutex_lock(&sm->lock);
+    start_dev = sm->device_rotor;
+    if (++sm->device_rotor >= sm->num_devices) {
+        sm->device_rotor = 0;
+    }
+    pthread_mutex_unlock(&sm->lock);
+
+    for (d = 0; d < sm->num_devices; d++) {
+        uint32_t          dev_id = (start_dev + d) % sm->num_devices;
+        struct sm_device *dev    = &sm->devices[dev_id];
+        uint32_t          want_class = sm_ag_size_class(want);
+        uint32_t          C;
+
+        if (dev->role != role) {
+            continue;
+        }
+        /* Jump to AGs whose largest free extent can hold `want` via the lock-free
+         * size-class index, seeded per-thread so concurrent grabs diverge. */
+        for (C = want_class; C < SM_SIZE_CLASSES; C++) {
+            uint64_t *bits;
+            uint32_t  w, start_w;
+
+            if (!dev->mc_words ||
+                __atomic_load_n(&dev->mc_class_count[C], __ATOMIC_RELAXED) == 0) {
+                continue;
+            }
+            bits    = dev->maxclass_bits[C];
+            start_w = (seed + dev->mc_rotor++) % dev->mc_words;
+            for (w = 0; w < dev->mc_words; w++) {
+                uint32_t wi   = (start_w + w) % dev->mc_words;
+                uint64_t word = __atomic_load_n(&bits[wi], __ATOMIC_RELAXED);
+
+                while (word) {
+                    uint32_t      b  = (uint32_t) __builtin_ctzll(word);
+                    uint32_t      ai = wi * 64u + b;
+                    struct sm_ag *ag;
+                    uint64_t      base, len;
+                    struct sm_claim *claim;
+
+                    word &= ~(1ULL << b);
+                    if (ai >= dev->num_ags) {
+                        continue;
+                    }
+                    ag = &dev->ags[ai];
+                    pthread_mutex_lock(&ag->lock);
+                    if (sm_ag_try_claim_locked(ag, want, chunk, &base, &len,
+                                               &claim) == 0) {
+                        pthread_mutex_unlock(&ag->lock);
+                        r->device_id = dev_id;
+                        r->ag_index  = ai;
+                        r->base      = base;
+                        r->len       = len;
+                        r->cursor    = base;
+                        r->claim     = claim;
+                        r->valid     = 1;
+                        return 0;
+                    }
+                    pthread_mutex_unlock(&ag->lock);
+                }
+            }
+        }
+    }
+    return -1;      /* ENOSPC */
+} /* space_map_reserve_chunk */
+
+/*
+ * Hand out `need` bytes from a thread's bump reservation, thread-local: no lock,
+ * no per-block allocator call.  Records the ALLOC delta (rides the txn redo and
+ * is applied to the free tree at retire via space_map_alloc_apply).  Returns 0
+ * on success; 1 if the reservation can't satisfy `need` (caller must refill via
+ * space_map_reserve_chunk and retry).
+ */
+int
+space_map_bump_alloc(
+    struct sm_reservation   *r,
+    const struct sm_journal *jnl,
+    uint64_t                 need,
+    uint32_t                *r_device_id,
+    uint64_t                *r_device_offset)
+{
+    need = SM_ALIGN_UP(need);
+
+    if (!r->valid || r->cursor + need > r->base + r->len) {
+        return 1;       /* exhausted -- caller refills */
+    }
+    *r_device_id     = r->device_id;
+    *r_device_offset = r->cursor;
+
+    /* Pin the claim: it must outlive this allocation's retire (when
+     * space_map_alloc_apply decrements), so a re-grant of the region can't race
+     * an in-flight ALLOC delta.  Owner-only increment, sequenced-before any
+     * release of this claim, so it never races the retiring flag. */
+    __atomic_fetch_add(&r->claim->refcount, 1, __ATOMIC_RELAXED);
+
+    /* ALLOC delta for crash recovery; applied to the in-memory tree only when
+     * this txn's redo retires (space_map_alloc_apply), never eagerly -- so the
+     * tree stays == committed state and condense can't leak the tail. */
+    if (jnl && jnl->record_delta) {
+        jnl->record_delta(jnl->user, r->device_id, r->ag_index,
+                          r->cursor, need, SM_AG_LOG_OP_ALLOC);
+    }
+    r->cursor += need;
+    return 0;
+} /* space_map_bump_alloc */
+
+/*
+ * Release a thread's reservation: mark its claim `retiring` so it is GC'd once
+ * its in-flight allocations have all retired (refcount==0); if no in-flight
+ * allocations remain, drop it now.  The uncommitted tail [cursor, base+len) was
+ * never removed from the free tree, so nothing is returned -- it is already
+ * free.  Caller passes the reservation; safe to call on an invalid one.
+ */
+void
+space_map_release_reservation(
+    struct space_map      *sm,
+    struct sm_reservation *r)
+{
+    struct sm_ag *ag;
+
+    if (!r->valid || !r->claim) {
+        r->valid = 0;
+        r->claim = NULL;
+        return;
+    }
+    ag = &sm->devices[r->device_id].ags[r->ag_index];
+
+    pthread_mutex_lock(&ag->lock);
+    if (r->claim->refcount == 0) {
+        sm_ag_remove_claim_locked(ag, r->claim);
+    } else {
+        r->claim->retiring = 1;
+    }
+    pthread_mutex_unlock(&ag->lock);
+
+    r->valid = 0;
+    r->claim = NULL;
+} /* space_map_release_reservation */
+
+/*
+ * Ensure `r` can satisfy a `want`-byte bump without refilling: if not, release
+ * the (exhausted-or-too-small) current claim and grab a fresh chunk of at least
+ * `want`, up to `chunk`.  Lets a caller (e.g. the b+tree RESERVE phase) guarantee
+ * a subsequent run of bump_allocs draws purely thread-locally.  Returns 0, or -1
+ * on ENOSPC.  Never journals, never parks.
+ */
+int
+space_map_reservation_ensure(
+    struct space_map      *sm,
+    struct sm_reservation *r,
+    uint32_t               role,
+    uint64_t               want,
+    uint64_t               chunk,
+    uint32_t               seed)
+{
+    want = SM_ALIGN_UP(want);
+
+    if (r->valid && r->cursor + want <= r->base + r->len) {
+        return 0;
+    }
+    space_map_release_reservation(sm, r);       /* retire the old claim (if any) */
+    return space_map_reserve_chunk(sm, r, role, want, chunk, seed);
+} /* space_map_reservation_ensure */
+
+/*
+ * Allocate `need` bytes from `r`, refilling once if exhausted.  The one-stop
+ * call for sites that don't pre-reserve (e.g. file data).  Returns 0, or -1 on
+ * ENOSPC.
+ */
+int
+space_map_reservation_alloc(
+    struct space_map        *sm,
+    struct sm_reservation   *r,
+    const struct sm_journal *jnl,
+    uint32_t                 role,
+    uint64_t                 need,
+    uint64_t                 chunk,
+    uint32_t                 seed,
+    uint32_t                *r_device_id,
+    uint64_t                *r_device_offset)
+{
+    if (space_map_bump_alloc(r, jnl, need, r_device_id, r_device_offset) == 0) {
+        return 0;
+    }
+    /* Exhausted: retire the old claim, grab a fresh chunk, retry once. */
+    if (space_map_reservation_ensure(sm, r, role, need, chunk, seed) != 0) {
+        return -1;
+    }
+    if (space_map_bump_alloc(r, jnl, need, r_device_id, r_device_offset) != 0) {
+        return -1;      /* a freshly-grabbed chunk >= need must satisfy */
+    }
+    return 0;
+} /* space_map_reservation_alloc */
 
 /*
  * Immediate free (journal + apply in one step).  Safe only for ranges that are
@@ -1193,38 +1774,96 @@ sm_ag_mark_used_locked(
     e_off = e->offset;
     e_len = e->length;
     rb_tree_remove(&ag->free_by_offset, &e->node);
+    sm_ag_size_unlink(ag, e);
 
     if (offset > e_off) {
         struct sm_extent *l = sm_extent_new(e_off, offset - e_off);
         rb_tree_insert(&ag->free_by_offset, offset, l);
+        sm_ag_size_link(ag, l);
     }
     if (offset + length < e_off + e_len) {
         struct sm_extent *r = sm_extent_new(offset + length,
                                             (e_off + e_len) - (offset + length));
         rb_tree_insert(&ag->free_by_offset, offset, r);
+        sm_ag_size_link(ag, r);
     }
     ag->free_bytes -= length;
+    __atomic_sub_fetch(&ag->dev->free_bytes, length, __ATOMIC_RELAXED);
     free(e);
 } /* sm_ag_mark_used_locked */
+
+/* Is [offset, offset+length) entirely within a single free extent?  Caller
+ * holds ag->lock.  Used to make redo-delta recovery idempotent. */
+static int
+sm_ag_range_is_free_locked(
+    struct sm_ag *ag,
+    uint64_t      offset,
+    uint64_t      length)
+{
+    struct sm_extent *e = NULL;
+
+    rb_tree_query_floor(&ag->free_by_offset, offset, offset, e);
+    return e && e->offset <= offset &&
+           e->offset + e->length >= offset + length;
+} /* sm_ag_range_is_free_locked */
+
+/*
+ * Apply one redo-replayed space delta during crash recovery, idempotently.  The
+ * AG's checkpoint base may already reflect this delta: an alloc is applied to
+ * the free tree eagerly, so a base snapshot can capture an alloc whose seq is
+ * above the stamped ckpt_seq (the conservatively-low durable frontier).  So an
+ * ALLOC whose range is already used is a no-op (a committed txn re-applying its
+ * own eager alloc), and a FREE whose range is already free is a no-op.  Caller
+ * is the single-threaded mount-time recovery path.
+ */
+void
+space_map_recover_delta(
+    struct space_map *sm,
+    uint32_t          device_id,
+    uint32_t          ag_index,
+    uint64_t          offset,
+    uint64_t          length,
+    uint32_t          op)
+{
+    struct sm_ag *ag;
+
+    if (device_id >= sm->num_devices ||
+        ag_index >= sm->devices[device_id].num_ags || length == 0) {
+        return;     /* corrupt delta -- ignore */
+    }
+    ag = &sm->devices[device_id].ags[ag_index];
+
+    pthread_mutex_lock(&ag->lock);
+    if (op == SM_AG_LOG_OP_ALLOC) {
+        if (sm_ag_range_is_free_locked(ag, offset, length)) {
+            sm_ag_mark_used_locked(ag, offset, length);
+        }
+    } else {
+        if (!sm_ag_range_is_free_locked(ag, offset, length)) {
+            sm_ag_free_locked(ag, offset, length);
+        }
+    }
+    sm_ag_mc_update(ag);
+    pthread_mutex_unlock(&ag->lock);
+} /* space_map_recover_delta */
 
 static uint64_t sm_ag_condense_into(
     struct sm_ag *ag,
     uint8_t      *slot,
-    uint64_t      generation);
+    uint64_t      generation,
+    uint64_t      ckpt_seq);
 
 /*
- * Runtime condensation, phase 1: snapshot the AG's free set as a condensed
- * base image (header at buf[0]) for the INACTIVE slot.  Called by the
- * background condenser once jnl->ag_condense fired; all journaling into this
- * AG is parked, so the set is mutated only by free-applies of durable
- * transactions, and any snapshot is crash-safe: allocations are reflected
- * eagerly (a lost one merely leaks) and frees only once durable (so the base
- * never frees a block a committed file still references).  One bounded,
- * self-healing crash window exists: a FREE delta journaled into the old slot
- * whose txn becomes durable after the flip lives only in the dead slot, so a
- * crash before the next condensation/clean unmount leaks that range (the
- * next snapshot re-captures it from memory).  buf must hold
- * SM_AG_LOG_SLOT_SIZE bytes.
+ * Checkpoint, phase 1: snapshot the AG's free set as a condensed base image
+ * (header at buf[0]) for the INACTIVE slot, stamped with ckpt_seq.  Kicked by
+ * the push thread (diskfs_checkpoint_kick) when the redo trim frontier is
+ * blocked on this AG; the allocator never parks on it.  Allocs continue
+ * concurrently under ag->lock -- the snapshot is a consistent point: allocs are
+ * reflected eagerly (an alloc above ckpt_seq merely replays idempotently on
+ * recovery, or leaks if its txn never commits) and frees only once durable (so
+ * the base never frees a block a committed file still references; ckpt_seq is
+ * sampled from the durable frontier, so every delta <= ckpt_seq is reflected).
+ * buf must hold SM_AG_LOG_SLOT_SIZE bytes.
  *
  * The caller must write the image to *r_slot_offset with the HEADER BLOCK
  * (first 4 KiB) LAST and FUA: the inactive slot stays invalid (stale, lower
@@ -1238,7 +1877,8 @@ space_map_condense_prepare(
     uint32_t          ag_index,
     void             *buf,
     uint64_t         *r_slot_offset,
-    uint64_t         *r_payload)
+    uint64_t         *r_payload,
+    uint64_t          ckpt_seq)
 {
     struct sm_ag *ag = &sm->devices[device_id].ags[ag_index];
     uint64_t      payload;
@@ -1246,7 +1886,8 @@ space_map_condense_prepare(
     pthread_mutex_lock(&ag->lock);
     sm_abort_if(!ag->condensing, "condense_prepare on a non-condensing AG");
 
-    payload = sm_ag_condense_into(ag, (uint8_t *) buf, ag->log_generation + 1);
+    payload = sm_ag_condense_into(ag, (uint8_t *) buf, ag->log_generation + 1,
+                                  ckpt_seq);
 
     *r_slot_offset = ag->log_offset +
         (uint64_t) (1 - ag->log_slot) * SM_AG_LOG_SLOT_SIZE;
@@ -1256,16 +1897,17 @@ space_map_condense_prepare(
 } /* space_map_condense_prepare */
 
 /*
- * Runtime condensation, phase 2: the new base image is durable in the
- * inactive slot (header written last) -- flip to it and clear the gate.  The
- * caller then re-drives every operation it parked for this AG.
+ * Runtime checkpoint, phase 2: the new base image is durable in the inactive
+ * slot (header written last) -- flip to it, publish ckpt_seq (the redo trim
+ * frontier reads it), and clear the in-progress gate.
  */
 void
 space_map_condense_commit(
     struct space_map *sm,
     uint32_t          device_id,
     uint32_t          ag_index,
-    uint32_t          base_count)
+    uint32_t          base_count,
+    uint64_t          ckpt_seq)
 {
     struct sm_ag *ag = &sm->devices[device_id].ags[ag_index];
 
@@ -1276,16 +1918,59 @@ space_map_condense_commit(
     ag->log_base_count  = base_count;
     ag->log_delta_count = 0;
     ag->condensing      = 0;
+    /* Publish the new checkpoint frontier for this AG.  A concurrent alloc/free
+     * may have re-dirtied it (delta with seq > ckpt_seq) -- leave ckpt_dirty as
+     * it stands in that case; only clear it if no newer delta arrived. */
+    __atomic_store_n(&ag->ckpt_seq, ckpt_seq, __ATOMIC_RELEASE);
     pthread_mutex_unlock(&ag->lock);
 } /* space_map_condense_commit */
 
+/* Read an AG's published checkpoint frontier (the highest redo seq folded into
+ * its on-disk snapshot).  Used by the push-thread trim gate. */
+uint64_t
+space_map_ag_ckpt_seq(
+    struct space_map *sm,
+    uint32_t          device_id,
+    uint32_t          ag_index)
+{
+    struct sm_ag *ag = &sm->devices[device_id].ags[ag_index];
+
+    return __atomic_load_n(&ag->ckpt_seq, __ATOMIC_ACQUIRE);
+} /* space_map_ag_ckpt_seq */
+
+/*
+ * Claim the right to start a background checkpoint of this AG.  Returns 1 if the
+ * caller (the push thread) should submit the checkpoint job, 0 if a checkpoint
+ * is already in progress (its commit will advance ckpt_seq).  Sets the
+ * in-progress gate that space_map_condense_prepare/commit assert on.
+ */
+int
+space_map_ag_begin_checkpoint(
+    struct space_map *sm,
+    uint32_t          device_id,
+    uint32_t          ag_index)
+{
+    struct sm_ag *ag = &sm->devices[device_id].ags[ag_index];
+    int           start = 0;
+
+    pthread_mutex_lock(&ag->lock);
+    if (!ag->condensing) {
+        ag->condensing = 1;
+        start          = 1;
+    }
+    pthread_mutex_unlock(&ag->lock);
+    return start;
+} /* space_map_ag_begin_checkpoint */
+
 /* Serialize the AG's current free set into `slot` as a condensed base (no
- * deltas) at `generation`.  Caller holds ag->lock.  Returns bytes written. */
+ * deltas) at `generation`, stamped with `ckpt_seq` (the highest redo seq folded
+ * into this snapshot).  Caller holds ag->lock.  Returns bytes written. */
 static uint64_t
 sm_ag_condense_into(
     struct sm_ag *ag,
     uint8_t      *slot,
-    uint64_t      generation)
+    uint64_t      generation,
+    uint64_t      ckpt_seq)
 {
     struct sm_ag_log_header *h    = (struct sm_ag_log_header *) slot;
     struct sm_ag_log_ext    *base = (struct sm_ag_log_ext *) (slot + sizeof(*h));
@@ -1307,7 +1992,7 @@ sm_ag_condense_into(
     h->generation  = generation;
     h->base_count  = n;
     h->delta_count = 0;
-    h->reserved    = 0;
+    h->ckpt_seq    = ckpt_seq;
     return sizeof(*h) + (uint64_t) n * sizeof(struct sm_ag_log_ext);
 } /* sm_ag_condense_into */
 
@@ -1326,11 +2011,14 @@ sm_ag_reconstruct(
 
     rb_tree_destroy(&ag->free_by_offset, sm_extent_release, NULL);
     rb_tree_init(&ag->free_by_offset);
+    memset(ag->free_by_size, 0, sizeof(ag->free_by_size));
+    ag->size_nonempty = 0;
     ag->free_bytes = 0;
 
     for (i = 0; i < h->base_count; i++) {
         struct sm_extent *e = sm_extent_new(base[i].offset, base[i].length);
         rb_tree_insert(&ag->free_by_offset, offset, e);
+        sm_ag_size_link(ag, e);
         ag->free_bytes += base[i].length;
     }
     for (i = 0; i < h->delta_count; i++) {
@@ -1344,6 +2032,13 @@ sm_ag_reconstruct(
     ag->log_generation  = h->generation;
     ag->log_base_count  = h->base_count;
     ag->log_delta_count = h->delta_count;
+    ag->ckpt_seq        = h->ckpt_seq;
+    ag->ckpt_dirty      = 0;
+
+    /* Reconcile the lock-free index in case this AG reconstructed to empty
+     * (no size_link/unlink ran above, so a pre-reconstruct max-class bit could
+     * otherwise be left stale). */
+    sm_ag_mc_update(ag);
 } /* sm_ag_reconstruct */
 
 struct sm_persist_update {
@@ -1351,6 +2046,7 @@ struct sm_persist_update {
     uint32_t      slot;
     uint64_t      generation;
     uint32_t      base_count;
+    uint64_t      ckpt_seq;
 };
 
 static int
@@ -1387,6 +2083,9 @@ sm_persist_batch_submit(
             updates[i].ag->log_generation  = updates[i].generation;
             updates[i].ag->log_base_count  = updates[i].base_count;
             updates[i].ag->log_delta_count = 0;
+            __atomic_store_n(&updates[i].ag->ckpt_seq, updates[i].ckpt_seq,
+                             __ATOMIC_RELEASE);
+            updates[i].ag->ckpt_dirty      = 0;
             pthread_mutex_unlock(&updates[i].ag->lock);
         }
     }
@@ -1405,7 +2104,8 @@ sm_persist_batch_submit(
 int
 space_map_persist(
     struct space_map   *sm,
-    const struct sm_io *io)
+    const struct sm_io *io,
+    uint64_t            ckpt_seq)
 {
     struct sm_io_write       writes[SM_PERSIST_BATCH_OPS];
     struct sm_persist_update updates[SM_PERSIST_BATCH_OPS];
@@ -1436,7 +2136,7 @@ space_map_persist(
             buf      = arena + bytes;
             slot     = 1 - ag->log_slot;
             gen      = ag->log_generation + 1;
-            payload  = sm_ag_condense_into(ag, buf, gen);
+            payload  = sm_ag_condense_into(ag, buf, gen, ckpt_seq);
             slot_off = ag->log_offset + (uint64_t) slot * SM_AG_LOG_SLOT_SIZE;
             aligned  = (payload + SM_BLOCK_SIZE - 1) & ~((uint64_t) SM_BLOCK_SIZE - 1);
             memset(buf + payload, 0, aligned - payload);
@@ -1454,7 +2154,7 @@ space_map_persist(
                 buf      = arena;
                 slot     = 1 - ag->log_slot;
                 gen      = ag->log_generation + 1;
-                payload  = sm_ag_condense_into(ag, buf, gen);
+                payload  = sm_ag_condense_into(ag, buf, gen, ckpt_seq);
                 slot_off = ag->log_offset + (uint64_t) slot * SM_AG_LOG_SLOT_SIZE;
                 aligned  = (payload + SM_BLOCK_SIZE - 1) & ~((uint64_t) SM_BLOCK_SIZE - 1);
                 memset(buf + payload, 0, aligned - payload);
@@ -1471,6 +2171,7 @@ space_map_persist(
             updates[count].generation = gen;
             updates[count].base_count =
                 ((struct sm_ag_log_header *) buf)->base_count;
+            updates[count].ckpt_seq   = ckpt_seq;
             count++;
             bytes += aligned;
             pthread_mutex_unlock(&ag->lock);
@@ -1502,25 +2203,38 @@ uint64_t
 space_map_free_bytes(struct space_map *sm)
 {
     uint64_t free = 0;
-    uint32_t d, a;
+    uint32_t d;
 
-    /* Cold path (statfs): sum each AG's live free count.  Space held in a
-     * thread's reservation cache (carved out of an AG but not yet handed to a
-     * file) reads as not-free here, so the report is conservative -- never an
-     * overestimate of what can still be allocated. */
+    /* O(num_devices): sum the per-device running totals (maintained under the
+     * AG lock on every alloc/free).  Space held in a thread's reservation cache
+     * (carved out of an AG but not yet handed to a file) reads as not-free here,
+     * so the report is conservative -- never an overestimate of what can still
+     * be allocated.  This replaces an O(all-AGs) scan that locked every AG and
+     * dominated CPU on the reservation hot path. */
     for (d = 0; d < sm->num_devices; d++) {
-        struct sm_device *dev = &sm->devices[d];
-
-        for (a = 0; a < dev->num_ags; a++) {
-            struct sm_ag *ag = &dev->ags[a];
-
-            pthread_mutex_lock(&ag->lock);
-            free += ag->free_bytes;
-            pthread_mutex_unlock(&ag->lock);
-        }
+        free += __atomic_load_n(&sm->devices[d].free_bytes, __ATOMIC_RELAXED);
     }
     return free;
 } /* space_map_free_bytes */
+
+/* Seed each device's running free_bytes total from its AGs.  Called once after
+ * format and after load; the alloc/free path maintains it incrementally after
+ * that. */
+static void
+sm_init_device_free_totals(struct space_map *sm)
+{
+    uint32_t d, a;
+
+    for (d = 0; d < sm->num_devices; d++) {
+        struct sm_device *dev   = &sm->devices[d];
+        uint64_t          total = 0;
+
+        for (a = 0; a < dev->num_ags; a++) {
+            total += dev->ags[a].free_bytes;
+        }
+        __atomic_store_n(&dev->free_bytes, total, __ATOMIC_RELAXED);
+    }
+} /* sm_init_device_free_totals */
 
 int
 space_map_load(
@@ -1573,5 +2287,6 @@ space_map_load(
         }
     }
 
+    sm_init_device_free_totals(sm);
     return 0;
 } /* space_map_load */

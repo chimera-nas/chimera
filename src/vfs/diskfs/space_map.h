@@ -34,7 +34,7 @@
 #define SM_SUPERBLOCK_OFFSET      0
 #define SM_SUPERBLOCK_SIZE        4096
 #define SM_SUPERBLOCK_MAGIC       0x4D5346534B534944ULL     /* "DISKSFSM" */
-#define SM_FORMAT_VERSION         2
+#define SM_FORMAT_VERSION         3
 
 /*
  * Bootstrap inode blocks carved after AG 0's log on device 0 at format time:
@@ -48,6 +48,17 @@
 #define SM_RESERVATION_MIN        (1ULL << 20)              /* 1 MiB */
 
 #define SM_ALIGN_UP(x) (((x) + SM_BLOCK_MASK) & ~SM_BLOCK_MASK)
+
+/*
+ * Segregated free-list size classes for the per-AG allocator.  An extent of
+ * `length` belongs to class floor(log2(length >> SM_BLOCK_SHIFT)) (block-count
+ * classes); class C holds extents whose block count is in [2^C, 2^(C+1)).  A
+ * 2 GiB AG with 4 KiB blocks tops out at 2^19 blocks, so 22 classes covers it
+ * with headroom, and the per-AG non-empty bitmask fits in a uint32_t.  This
+ * size index lets allocation find an adequate free extent without the old
+ * O(N) first-fit scan over the offset-ordered tree.
+ */
+#define SM_SIZE_CLASSES           22
 
 /*
  * Inode-number encoding.  A 64-bit inum is a (disk, ag, block_idx) tuple
@@ -111,7 +122,11 @@ struct sm_ag_log_header {
     uint64_t generation;
     uint32_t base_count;
     uint32_t delta_count;
-    uint64_t reserved;
+    /* Checkpoint sequence: the highest redo-record seq whose space deltas for
+     * this AG are folded into the base extents below.  On recovery, redo deltas
+     * with seq > ckpt_seq are replayed against this snapshot (idempotent).  See
+     * the checkpoint/trim coupling in diskfs_log.c. */
+    uint64_t ckpt_seq;
 };
 
 struct sm_ag_log_ext {          /* condensed base free extent */
@@ -143,20 +158,18 @@ struct sm_journal {
         uint32_t device_id,
         uint64_t device_offset,
         int      is_new);
-    /* The AG's active log slot hit its high-water mark: schedule a runtime
-     * condensation (background; see space_map_condense_prepare/commit).
-     * Called once per condensation cycle, under the AG lock. */
-    void  (*ag_condense)(
+    /* Record an alloc delta into the current transaction so it is serialized
+     * into the txn's redo record (struct diskfs_redo_delta) and replayed on
+     * crash.  Purely in-memory -- no block read, never parks.  op is
+     * SM_AG_LOG_OP_ALLOC / SM_AG_LOG_OP_FREE.  Called under the AG lock by the
+     * allocator hot path. */
+    void  (*record_delta)(
         void    *user,
         uint32_t device_id,
-        uint32_t ag_index);
-    /* The AG is condensing: park the current operation's continuation; it is
-     * re-driven when the condensation commits.  Called under the AG lock
-     * (park on a caller-side list; do not call back into the space map). */
-    void  (*ag_park)(
-        void    *user,
-        uint32_t device_id,
-        uint32_t ag_index);
+        uint32_t ag_index,
+        uint64_t device_offset,
+        uint64_t length,
+        uint32_t op);
     void *user;
 };
 
@@ -307,14 +320,49 @@ struct sm_device_cfg {
 };
 
 struct sm_extent {
-    struct rb_node node;
-    uint64_t       offset;
-    uint64_t       length;
+    struct rb_node    node;                    /* free_by_offset (coalescing) */
+    uint64_t          offset;
+    uint64_t          length;
+    struct sm_extent *size_prev, *size_next;   /* free_by_size[class] list links */
 };
+
+/* A reservation claim: a contiguous region of an AG handed to one worker thread
+ * as a bump arena.  It is NOT removed from the AG free tree (the tree stays
+ * == committed state, so condense never leaks the uncommitted tail); the claim
+ * only stops a concurrent grab from re-handing the same region.  refcount =
+ * in-flight (submitted-but-not-yet-durable) txns that allocated from it; the
+ * claim is GC'd only once it is `retiring` (the owner thread moved off it) AND
+ * refcount hits 0, so no in-flight ALLOC delta can apply to a re-granted
+ * region.  Protected by the owning AG's lock. */
+struct sm_claim {
+    uint64_t         base;          /* absolute device offset of the claimed region */
+    uint64_t         len;
+    uint32_t         refcount;      /* in-flight txns that allocated from this claim */
+    int              retiring;      /* owner released it; GC when refcount==0 */
+    struct sm_claim *next;
+};
+
+/* Per-thread bump reservation (one for metadata, one for data).  Hands out
+ * [cursor, base+len) thread-locally with no lock and no per-block allocator
+ * call; refills via space_map_reserve_chunk when exhausted. */
+struct sm_reservation {
+    uint32_t         device_id;
+    uint32_t         ag_index;
+    uint64_t         base;
+    uint64_t         len;
+    uint64_t         cursor;        /* next free offset within [base, base+len) */
+    struct sm_claim *claim;         /* the AG claim backing this reservation */
+    int              valid;
+};
+
+struct sm_device;
 
 struct sm_ag {
     uint32_t        device_id;
     uint32_t        ag_index;
+    struct sm_device *dev;          /* owning device (for the lock-free free-space index) */
+    int16_t         maxclass;       /* largest non-empty size class, -1 if full; mirrored
+                                     * into dev->maxclass_bits[maxclass] (lock-free) */
     uint64_t        base_offset;
     uint64_t        size;
     uint32_t        log_device_id;   /* device whose storage holds this AG's log
@@ -323,7 +371,10 @@ struct sm_ag {
     uint64_t        log_offset;      /* absolute offset of this AG's log on log_device_id */
     uint64_t        log_size;        /* total log bytes (both slots) */
     uint64_t        free_bytes;
-    struct rb_tree  free_by_offset;
+    struct rb_tree  free_by_offset;                       /* extents keyed by offset */
+    struct sm_extent *free_by_size[SM_SIZE_CLASSES];      /* same extents, by size class */
+    uint32_t        size_nonempty;                        /* bitmask of non-empty classes */
+    struct sm_claim *claims;        /* outstanding reservation claims (protected by lock) */
     pthread_mutex_t lock;
 
     /* On-disk allocation-log state (protected by lock). */
@@ -332,10 +383,20 @@ struct sm_ag {
     uint32_t        log_base_count;  /* condensed base extents in the active slot */
     uint32_t        log_delta_count; /* deltas appended since the last condense */
 
-    /* Runtime condensation gate (protected by lock): while set, every
-     * journaling operation parks (jnl->ag_park) until the background
-     * condense commits the inactive slot and flips. */
+    /* Checkpoint-in-progress gate (protected by lock): set by
+     * space_map_ag_begin_checkpoint, cleared by space_map_condense_commit, so
+     * only one background checkpoint of this AG runs at a time.  Allocs/frees
+     * proceed concurrently (they no longer park on it). */
     int             condensing;
+
+    /* Checkpoint coupling (protected by lock).  ckpt_seq is the highest redo
+     * seq folded into this AG's on-disk base snapshot; the redo trim frontier
+     * (diskfs_push_trim) may not advance past a record carrying a delta for an
+     * AG whose ckpt_seq is still below that record's seq.  ckpt_dirty is set on
+     * the first delta after a checkpoint and cleared when the next checkpoint
+     * commits, so only AGs with un-checkpointed deltas are rewritten. */
+    uint64_t        ckpt_seq;
+    int             ckpt_dirty;
 };
 
 struct sm_device {
@@ -349,6 +410,25 @@ struct sm_device {
     uint32_t      sig_len;
     uint8_t       sig[SM_SIG_MAX];
     struct sm_ag *ags;
+
+    /* Lock-free free-space index: maxclass_bits[c] is a bit array over AG
+     * indices; bit a is set iff ags[a].maxclass == c.  Maintained with atomic
+     * OR/AND on AG max-class transitions (no shared lock -> allocators never
+     * serialize on it).  sm_pick_and_alloc scans these to jump straight to an
+     * AG with an adequate extent instead of walking every AG. */
+    uint64_t     *maxclass_bits[SM_SIZE_CLASSES];
+    uint32_t      mc_class_count[SM_SIZE_CLASSES]; /* #AGs in each class (atomic) -- lets the
+                                                    * lookup skip empty classes without scanning */
+    uint32_t      mc_words;        /* (num_ags + 63) / 64 */
+    uint32_t      mc_rotor;        /* spreads the lookup start to balance AGs */
+
+    /* Running sum of this device's AGs' free_bytes (atomic; adjusted under the
+     * AG lock on every alloc/free).  Lets space_map_free_bytes report total free
+     * by summing num_devices counters instead of locking and scanning every AG
+     * (~30K/device) -- the old scan was an O(all-AGs) lock storm on the
+     * reservation hot path.  Seeded by sm_init_device_free_totals after
+     * format/load. */
+    uint64_t      free_bytes;
 };
 
 struct space_map {
@@ -358,11 +438,10 @@ struct space_map {
     uint64_t          total_capacity;  /* raw sum of device sizes */
     uint64_t          usable_capacity; /* allocatable total (sum of AG data
                                         * ranges, metadata excluded); constant
-                                        * after create.  Free/used for statfs are
-                                        * derived on demand from the AGs' live
-                                        * free counts -- see space_map_free_bytes
-                                        * -- so the alloc/free hot path keeps no
-                                        * running counter. */
+                                        * after create.  Total free is the sum of
+                                        * the per-device free_bytes counters (see
+                                        * space_map_free_bytes), maintained
+                                        * incrementally on the alloc/free path. */
     pthread_mutex_t   lock;           /* protects rotors and journaled writes */
 
     /* Relocated remote-AG-log region on device 0 (block mode); zero if no
@@ -382,6 +461,14 @@ struct sm_thread_cache {
     uint64_t offset;
     uint64_t length;
     int      valid;
+    /* Per-thread AG arena (Phase 0 thundering-herd avoidance): the AG this
+     * thread most recently allocated from.  Tried first on the next allocation
+     * so workers stick to their own AG (uncontended ag->lock) instead of all
+     * ganging on the same hot AG.  Re-homed on every successful pick; valid==0
+     * until the first allocation. */
+    uint32_t arena_dev;
+    uint32_t arena_ag;
+    int      arena_valid;
 };
 
 struct space_map *
@@ -457,6 +544,81 @@ space_map_has_remote(const struct space_map *sm)
 {
     return sm->num_remote_devices > 0;
 } // space_map_has_remote
+
+/* --- Per-thread reservation allocator (leak-free, intent-log-accounted) --- */
+
+/* Grab a fresh bump reservation (claim-free committed-free region, >= want, up
+ * to chunk) into `r`.  Returns 0 / -1 (ENOSPC). */
+int
+space_map_reserve_chunk(
+    struct space_map      *sm,
+    struct sm_reservation *r,
+    uint32_t               role,
+    uint64_t               want,
+    uint64_t               chunk,
+    uint32_t               seed);
+
+/* Hand out `need` from `r` thread-locally (records the ALLOC delta).  Returns 0,
+ * or 1 if exhausted (caller refills via space_map_reserve_chunk and retries). */
+int
+space_map_bump_alloc(
+    struct sm_reservation   *r,
+    const struct sm_journal *jnl,
+    uint64_t                 need,
+    uint32_t                *r_device_id,
+    uint64_t                *r_device_offset);
+
+/* Release `r`'s claim (GC'd once its in-flight allocations retire). */
+void
+space_map_release_reservation(
+    struct space_map      *sm,
+    struct sm_reservation *r);
+
+/* Ensure `r` can satisfy `want` without refilling (pre-reserve).  0 / -1. */
+int
+space_map_reservation_ensure(
+    struct space_map      *sm,
+    struct sm_reservation *r,
+    uint32_t               role,
+    uint64_t               want,
+    uint64_t               chunk,
+    uint32_t               seed);
+
+/* Allocate `need` from `r`, refilling once if exhausted.  0 / -1. */
+int
+space_map_reservation_alloc(
+    struct space_map        *sm,
+    struct sm_reservation   *r,
+    const struct sm_journal *jnl,
+    uint32_t                 role,
+    uint64_t                 need,
+    uint64_t                 chunk,
+    uint32_t                 seed,
+    uint32_t                *r_device_id,
+    uint64_t                *r_device_offset);
+
+/* Default per-thread reservation chunk (configurable later via diskfs).  Small
+ * enough for small test filesystems, large enough that the shared allocator is
+ * touched only ~once per chunk consumed. */
+#define SM_RESERVATION_CHUNK (4ULL << 20)       /* 4 MiB */
+
+/* Apply a COMMITTED allocation to the in-memory free tree at retire/durability
+ * (mirrors space_map_free_apply). */
+void
+space_map_alloc_apply(
+    struct space_map *sm,
+    uint32_t          device_id,
+    uint64_t          device_offset,
+    uint64_t          length);
+
+/* Discard an uncommitted allocation on txn abort (unpin its claim, no tree
+ * change). */
+void
+space_map_alloc_discard(
+    struct space_map *sm,
+    uint32_t          device_id,
+    uint64_t          device_offset,
+    uint64_t          length);
 
 int
 space_map_free(
@@ -539,14 +701,33 @@ space_map_condense_prepare(
     uint32_t          ag_index,
     void             *buf,
     uint64_t         *r_slot_offset,
-    uint64_t         *r_payload);
+    uint64_t         *r_payload,
+    uint64_t          ckpt_seq);
 
 void
 space_map_condense_commit(
     struct space_map *sm,
     uint32_t          device_id,
     uint32_t          ag_index,
-    uint32_t          base_count);
+    uint32_t          base_count,
+    uint64_t          ckpt_seq);
+
+/* Read an AG's published checkpoint frontier (highest redo seq folded into its
+ * on-disk snapshot); used by the redo trim gate. */
+uint64_t
+space_map_ag_ckpt_seq(
+    struct space_map *sm,
+    uint32_t          device_id,
+    uint32_t          ag_index);
+
+/* Claim the right to start a background checkpoint of this AG: 1 -> caller
+ * submits the job, 0 -> one is already in progress.  Sets the in-progress gate
+ * that space_map_condense_prepare/commit assert on. */
+int
+space_map_ag_begin_checkpoint(
+    struct space_map *sm,
+    uint32_t          device_id,
+    uint32_t          ag_index);
 
 /* Read + validate the superblock from device 0; 0 on success (fills *out),
  * -1 if absent/corrupt/wrong-version (caller should mkfs). */
@@ -565,12 +746,26 @@ space_map_read_superblock(
 int
 space_map_persist(
     struct space_map   *sm,
-    const struct sm_io *io);
+    const struct sm_io *io,
+    uint64_t            ckpt_seq);
 
 int
 space_map_load(
     struct space_map   *sm,
     const struct sm_io *io);
+
+/* Apply one redo-replayed space delta to the in-memory free trees during crash
+ * recovery (idempotent against the checkpoint base).  op is
+ * SM_AG_LOG_OP_ALLOC / SM_AG_LOG_OP_FREE.  Call after space_map_load, in redo
+ * seq order, for deltas whose record seq exceeds the owning AG's ckpt_seq. */
+void
+space_map_recover_delta(
+    struct space_map *sm,
+    uint32_t          device_id,
+    uint32_t          ag_index,
+    uint64_t          offset,
+    uint64_t          length,
+    uint32_t          op);
 
 static inline uint64_t
 space_map_total_capacity(const struct space_map *sm)

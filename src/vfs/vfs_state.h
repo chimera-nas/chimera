@@ -41,7 +41,16 @@ struct chimera_vfs_request;
 /* Per-file state                                                       */
 /* -------------------------------------------------------------------- */
 
-#define CHIMERA_VFS_STATE_NUM_BUCKETS 16384
+/* The per-file state table anchors one entry per *cached open handle* that has
+ * done I/O (the handle holds the ref; see chimera_vfs_io_lease_acquire), so its
+ * live population tracks the open-handle cache capacity (open_file_cache =
+ * 128K handles), NOT the small set of protocol-open files.  Sized at 16384 the
+ * chains ran ~8 deep, and since each chain node is a separately-allocated
+ * struct, the bucket walk in chimera_vfs_state_get was a serialized cache-miss
+ * pointer-chase that dominated write-path CPU (~72% self under SWBUILD INIT).
+ * Size to comfortably exceed the handle-cache capacity (load factor ~0.13) so
+ * lookups touch 0-1 nodes.  Must stay a power of two (used as a mask). */
+#define CHIMERA_VFS_STATE_NUM_BUCKETS (1 << 20)
 
 struct chimera_vfs_file_state {
     uint8_t                             fh[CHIMERA_VFS_FH_SIZE];

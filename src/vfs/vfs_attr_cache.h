@@ -244,7 +244,8 @@ chimera_vfs_attr_cache_insert(
 
     slot_best = slot;
 
-    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_MASK_STAT) == CHIMERA_VFS_ATTR_MASK_STAT) {
+    if ((attr->va_set_mask & (CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_FSID)) ==
+        (CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_FSID)) {
 
         entry = (struct chimera_vfs_attr_cache_entry *)
             chimera_rcu_pool_alloc(&thread->rcu_magazines[CHIMERA_RCU_POOL_ATTR], &cache->pool);
@@ -352,8 +353,10 @@ chimera_vfs_attr_cache_refresh(
         return;
     }
 
-    /* Only stat-complete attrs are cacheable (same gate as _insert). */
-    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_MASK_STAT) != CHIMERA_VFS_ATTR_MASK_STAT) {
+    /* Only stat-complete attrs that also carry FSID are cacheable (same gate as
+     * _insert): a cached entry must be able to satisfy an FSID-carrying GETATTR. */
+    if ((attr->va_set_mask & (CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_FSID)) !=
+        (CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_FSID)) {
         return;
     }
 
