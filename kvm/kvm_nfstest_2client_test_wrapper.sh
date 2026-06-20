@@ -216,7 +216,15 @@ NFSTEST_MTOPTS="hard,rsize=4096,wsize=4096"
 # the same on authorized_keys.  No double quotes: this is embedded in the
 # kernel-cmdline test_cmd="..." which the guest parses by stripping at the
 # first quote.
-SSHFIX='mkdir -p /run/sshd; chown root:root /run/sshd; chmod 0755 /run/sshd; chown root:root /root; chmod 700 /root; chown -R root:root /root/.ssh /etc/ssh 2>/dev/null; chmod 700 /root/.ssh 2>/dev/null; chmod 600 /root/.ssh/id_ed25519 /root/.ssh/authorized_keys /root/.ssh/config 2>/dev/null; chmod 600 /etc/ssh/ssh_host_ed25519_key /etc/ssh/ssh_host_rsa_key /etc/ssh/ssh_host_ecdsa_key 2>/dev/null; /usr/sbin/sshd'
+#
+# Ubuntu 26.04 ships /etc/ssh/ssh_config.d/20-systemd-ssh-proxy.conf (a symlink
+# whose perms `chown -R`/`chmod -R` on /etc/ssh cannot normalise), and ssh
+# treats a bad-mode Include in the system ssh_config as fatal -- so *every*
+# `ssh 10.0.0.3` on guest A dies before connecting: the reachability wait times
+# out ("second client unreachable") and nfstest's rexec gets ConnectionRefused.
+# That drop-in only proxies systemd machine names (.host etc.), never the IP we
+# use, so just remove it.  (No-op on 24.04, which ships no such file.)
+SSHFIX='mkdir -p /run/sshd; chown root:root /run/sshd; chmod 0755 /run/sshd; chown root:root /root; chmod 700 /root; chown -R root:root /root/.ssh /etc/ssh 2>/dev/null; rm -f /etc/ssh/ssh_config.d/*.conf 2>/dev/null; chmod 700 /root/.ssh 2>/dev/null; chmod 600 /root/.ssh/id_ed25519 /root/.ssh/authorized_keys /root/.ssh/config 2>/dev/null; chmod 600 /etc/ssh/ssh_host_ed25519_key /etc/ssh/ssh_host_rsa_key /etc/ssh/ssh_host_ecdsa_key 2>/dev/null; /usr/sbin/sshd'
 
 # ----- guest B (secondary client): idle with sshd up -------------------------
 ip netns exec "${NETNS_NAME}" "$QEMU_BIN" \
