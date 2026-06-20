@@ -121,6 +121,14 @@ struct nfs4_client_principal {
     uint32_t    machinename_len;
 };
 
+/* SP4_MACH_CRED enforcement: 1 if `p` may operate on client `c` (no protection,
+ * or the bound machine principal matches); 0 -> reject with NFS4ERR_WRONG_CRED. */
+struct nfs4_client;
+int
+nfs4_client_mach_cred_ok(
+    const struct nfs4_client           *c,
+    const struct nfs4_client_principal *p);
+
 struct nfs4_client {
     uint64_t              nfs4_client_id;
     uint32_t              nfs4_client_owner_len;
@@ -136,12 +144,18 @@ struct nfs4_client {
      * possession of the clientid via a successful CREATE_SESSION; only then
      * is it "confirmed". */
     uint8_t               nfs4_client_confirmed;
-    /* Principal that created the record (see nfs4_client_principal). */
+    /* Principal that created the record (see nfs4_client_principal).  Under
+     * SP4_MACH_CRED this is the bound "machine credential": state-management
+     * operations must be issued with this same (RPCSEC_GSS) principal. */
     uint32_t              nfs4_client_princ_flavor;
     uint32_t              nfs4_client_princ_uid;
     uint32_t              nfs4_client_princ_gid;
     uint32_t              nfs4_client_princ_mach_len;
     char                  nfs4_client_princ_mach[NFS4_OPAQUE_LIMIT];
+    /* Negotiated state-protection mode (RFC 8881 §2.10.8.3): SP4_NONE (0,
+     * default), SP4_MACH_CRED, or SP4_SSV.  When SP4_MACH_CRED, the enforced
+     * state-management ops require the bound principal above. */
+    uint32_t              nfs4_client_sp_how;
     /* Client-reboot (RFC 8881 §18.35.4 case 5): when a confirmed record is
      * replaced by a new EXCHANGE_ID from the same principal with a new boot
      * verifier, the new (unconfirmed) record records the old clientid here.

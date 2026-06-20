@@ -58,6 +58,24 @@ chimera_nfs4_bind_conn_to_session(
         return;
     }
 
+    /* SP4_MACH_CRED: only the bound machine credential may bind a connection
+     * to the session (RFC 8881 §2.10.8.3). */
+    {
+        const struct nfs4_client_principal p = {
+            .flavor          = req->principal_flavor,
+            .uid             = req->principal_uid,
+            .gid             = req->principal_gid,
+            .machinename     = req->principal_machinename,
+            .machinename_len = req->principal_machinename_len,
+        };
+        if (!nfs4_client_mach_cred_ok(session->nfs4_session_client, &p)) {
+            nfs4_session_put(session);
+            res->bctsr_status = NFS4ERR_WRONG_CRED;
+            chimera_nfs4_compound_complete(req, NFS4ERR_WRONG_CRED);
+            return;
+        }
+    }
+
     switch (args->bctsa_dir) {
         case CDFC4_FORE:
             bind_fore = true;

@@ -669,9 +669,9 @@ chimera_nfs_fill_secinfo(
         uint32_t bit;
         uint32_t service;
     } gss_flavors[] = {
-        { CHIMERA_NFS_SEC_KRB5,  RPC_GSS_SVC_NONE       },
-        { CHIMERA_NFS_SEC_KRB5I, RPC_GSS_SVC_INTEGRITY  },
-        { CHIMERA_NFS_SEC_KRB5P, RPC_GSS_SVC_PRIVACY    },
+        { CHIMERA_NFS_SEC_KRB5,  RPC_GSS_SVC_NONE        },
+        { CHIMERA_NFS_SEC_KRB5I, RPC_GSS_SVC_INTEGRITY   },
+        { CHIMERA_NFS_SEC_KRB5P, RPC_GSS_SVC_PRIVACY     },
     };
     unsigned             i;
 
