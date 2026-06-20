@@ -111,7 +111,9 @@ struct chimera_vfs_mount_options {
 #define CHIMERA_VFS_OP_OPEN_STREAM      37
 #define CHIMERA_VFS_OP_LIST_STREAMS     38
 #define CHIMERA_VFS_OP_REMOVE_STREAM    39
-#define CHIMERA_VFS_OP_NUM              40
+#define CHIMERA_VFS_OP_LEASE_ACQUIRE    40
+#define CHIMERA_VFS_OP_LEASE_RELEASE    41
+#define CHIMERA_VFS_OP_NUM              42
 
 #define CHIMERA_VFS_OPEN_CREATE         (1U << 0)
 #define CHIMERA_VFS_OPEN_PATH           (1U << 1)
@@ -362,6 +364,22 @@ typedef void (*chimera_vfs_search_keys_complete_t)(
     enum chimera_vfs_error error_code,
     void                  *private_data);
 
+/* CAP_LEASE backend-projection callbacks.  On a successful round-trip
+ * `result` is GRANTED or DENIED; on GRANTED `granted` carries the mode the
+ * backend actually granted (a possible subset of the request) and `token` is
+ * the opaque backend lease handle.  error_code reflects transport/dispatch
+ * errors (e.g. ENOTSUP if the backend is not CAP_LEASE). */
+typedef void (*chimera_vfs_lease_backend_acquire_cb_t)(
+    enum chimera_vfs_error        error_code,
+    enum chimera_vfs_lease_result result,
+    struct chimera_vfs_lease_mode granted,
+    uint64_t                      token,
+    void                         *private_data);
+
+typedef void (*chimera_vfs_lease_backend_release_cb_t)(
+    enum chimera_vfs_error error_code,
+    void                  *private_data);
+
 
 struct chimera_vfs_find_result {
     int                             path_len;
@@ -487,6 +505,11 @@ struct chimera_vfs_request {
      * state_put); 1 = the legacy path that takes and drops its own per-I/O ref. */
     struct chimera_vfs_open_handle    *io_handle;
     uint8_t                            io_owns_lease_ref;
+    /* Set when a parked I/O request is resumed after its CAP_LEASE backend
+     * DENIED the escalation it was waiting on (another node holds a conflicting
+     * lease the backend would not recall).  chimera_vfs_io_try() observes it on
+     * re-entry and fails the I/O rather than re-attempting the backend acquire. */
+    uint8_t                            io_backend_denied;
     struct chimera_vfs_pending_acquire io_lease_ticket;
 
     struct chimera_vfs_open_handle    *pending_handle;
@@ -1106,6 +1129,36 @@ struct chimera_vfs_request {
             struct chimera_vfs_layout_segment r_segments[CHIMERA_VFS_LAYOUT_MAX_SEGMENTS];
             struct chimera_vfs_layout_device  r_devices[CHIMERA_VFS_LAYOUT_MAX_DEVICES];
         } get_layout;
+
+        /* CAP_LEASE: the VFS core acquires/escalates a lease on a file FROM an
+         * authoritative (possibly distributed) backend, holding it at file
+         * granularity on behalf of its local clients.  The backend MAY deny
+         * (another node holds a conflicting lease).  `mode` is the requested
+         * RWH triple; `r_granted` is what the backend actually granted (a subset
+         * on a partial grant); `r_token` is an opaque backend handle echoed back
+         * on release and matched against an inbound recall. */
+        struct {
+            uint8_t                       kind;       /* enum chimera_vfs_lease_kind */
+            struct chimera_vfs_lease_mode mode;       /* requested RWH */
+            uint64_t                      offset;     /* RANGE only */
+            uint64_t                      length;     /* RANGE only; 0 = to EOF */
+            uint32_t                      protocol;   /* owner.protocol, for arbitration */
+            uint64_t                      owner_lo;
+            uint64_t                      owner_hi;
+            uint64_t                      r_token;    /* opaque backend lease token */
+            struct chimera_vfs_lease_mode r_granted;  /* mode the backend granted */
+        } lease_acquire;
+
+        /* CAP_LEASE: release or downgrade a previously-acquired backend lease.
+         * `mode.granted == 0` means full release; otherwise the backend
+         * downgrades the held lease to `mode`.  Issued lazily (idle-reap) or as
+         * the ack of an inbound recall. */
+        struct {
+            uint64_t                      token;
+            struct chimera_vfs_lease_mode mode;       /* target; granted==0 => release */
+            uint64_t                      offset;     /* RANGE only */
+            uint64_t                      length;
+        } lease_release;
     };
 };
 
@@ -1325,6 +1378,22 @@ struct chimera_vfs_handle_state {
  * ENOTSUP.  Currently only memfs advertises it. */
 #define CHIMERA_VFS_CAP_NAMED_STREAMS         (1U << 22)
 
+/* If set, the module is the AUTHORITATIVE arbiter of lease state for the files
+ * it backs, via chimera_vfs_lease_acquire_backend / _release_backend (ops
+ * CHIMERA_VFS_OP_LEASE_ACQUIRE / _RELEASE) plus the backend->core recall upcall
+ * chimera_vfs_lease_backend_recall().  The backend may be distributed across
+ * many chimera nodes; it persists and enforces the cross-node lease state.  The
+ * VFS core projects its in-memory leases down into such a backend, holding a
+ * file-granularity backend lease lazily on behalf of its local clients (see
+ * vfs_state.c backend_lease_*).
+ *
+ * Modules WITHOUT this bit do not arbitrate leases; the VFS core persists their
+ * leases to a KV store instead (the module's own KV if CHIMERA_VFS_CAP_KV, else
+ * the default KV module) purely for crash recovery / restart reclaim -- this is
+ * fire-and-forget and NOT coherent across nodes.  memfs and diskfs advertise
+ * CAP_LEASE; cairn/linux/io_uring use the KV-persistence fallback. */
+#define CHIMERA_VFS_CAP_LEASE                 (1U << 24)
+
 struct chimera_vfs_module {
     /* Required
      * Short name for the module to be used in creating shares
@@ -1483,6 +1552,7 @@ struct chimera_vfs_mount_table;
 struct chimera_vfs_notify;
 struct chimera_vfs_state;
 struct chimera_vfs_pnfs;
+struct chimera_vfs_lease_kv_job;
 
 struct chimera_vfs {
     struct chimera_vfs_module            *modules[CHIMERA_VFS_FH_MAGIC_MAX];
@@ -1528,6 +1598,24 @@ struct chimera_vfs_thread {
      * pump runs on whatever thread released/broke a lease, but a request's
      * dispatch+reply must run on the thread that owns its connection iovecs). */
     struct chimera_vfs_request          *pending_io_resume;
+    /* CAP_LEASE backend-lease state-machine work marshaled to the lease service
+     * thread (the VFS close thread).  Each entry is a file whose held backend
+     * lease needs an acquire/release issued or a recall driven; the service
+     * thread runs chimera_vfs_backend_lease_run() for each.  Only the service
+     * thread is ever posted to, so all per-file backend-lease transitions are
+     * serialized on one thread.  Linked via file_state->bl_work_next under
+     * thread->lock. */
+    struct chimera_vfs_file_state       *pending_lease_work;
+    /* KV-fallback lease persistence jobs (put/delete) marshaled to the lease
+     * service thread, where they are issued via chimera_vfs_{put,delete}_key_at.
+     * Fire-and-forget; only the service thread is posted to.  Defined in
+     * vfs_state.c. */
+    struct chimera_vfs_lease_kv_job     *pending_lease_kv;
+    /* Protocol-lease (RANGE/SHARE) re-grants marshaled here from the break pump
+     * (which may run on another thread) so their authoritative backend
+     * projection + callback run on this, the lease's owning thread.  Linked via
+     * pending_acquire->next. */
+    struct chimera_vfs_pending_acquire  *pending_lease_proj;
     /* Monotonic seconds of the last watchdog stuck-request report. */
     time_t                               watchdog_last_report;
     struct evpl_doorbell                 doorbell;

@@ -63,6 +63,16 @@ struct chimera_vfs_lease_mode {
  * the server and is itself breakable (drained, then dropped) when another
  * holder needs it or it goes idle. */
 #define CHIMERA_VFS_LEASE_PROTO_INTERNAL 4
+/* Identity under which the VFS core projects a per-instance protocol lock
+ * (byte-range lock / share reservation) to an authoritative CAP_LEASE backend.
+ * The owner key carries the NODE identity (chimera_vfs_state.node_id), NOT the
+ * client owner: the per-node conflict matrix already enforces mutual exclusion
+ * among a node's own clients (every lock it grants is mutually compatible), so
+ * the backend only needs to arbitrate ACROSS nodes.  Using node identity means
+ * a node's own locks never self-conflict at the backend; two different nodes'
+ * overlapping locks do.  (memfs routes INTERNAL to its whole-file aggregate
+ * lease and everything else to range arbitration.) */
+#define CHIMERA_VFS_LEASE_PROTO_NODE     5
 
 /* Break callback — invoked synchronously by vfs_state when this lease must
  * downgrade or release.  The callback is expected to kick off the protocol-
@@ -181,6 +191,14 @@ struct chimera_vfs_lease {
      * any CACHING lease not (yet) managed by a grant. */
     struct chimera_vfs_caching_grant *grant;
 
+    /* Token of the per-instance lock this lease projects to an authoritative
+     * CAP_LEASE backend (RANGE byte-range locks and SHARE reservations are
+     * projected 1:1 with the lease, range-faithfully, so cross-node mutual
+     * exclusion is enforced -- distinct from the whole-file implicit/CACHING
+     * lease tracked by chimera_vfs_file_state.bl_*).  0 = not projected (no
+     * CAP_LEASE backend, or a CACHING/implicit lease). */
+    uint64_t                          backend_token;
+
     /* Intrusive linkage on the appropriate file->{range,share,caching} list. */
     struct chimera_vfs_lease         *prev;
     struct chimera_vfs_lease         *next;
@@ -273,6 +291,11 @@ struct chimera_vfs_pending_acquire {
     chimera_vfs_lease_acquire_cb_t      cb;
     void                               *private_data;
     struct chimera_vfs_file_state      *file;
+    /* The owning (connection) thread that issued the acquire.  Authoritative
+     * CAP_LEASE backend projection for this lease is issued on this thread so
+     * the result callback fires here (no cross-thread reply); the break-pump,
+     * which can run on another thread, marshals the re-grant back here. */
+    struct chimera_vfs_thread          *thread;
     bool                                queued;
     /* Caller asked to block (wait==true).  A breakable conflict always queues
      * regardless; this flag additionally keeps a RANGE-lease acquire queued on a

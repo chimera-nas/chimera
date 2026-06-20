@@ -105,6 +105,15 @@ generate_posix_backend_tests(cairn CAIRN_ENABLED)
 generate_posix_backend_tests(linux "")
 generate_posix_backend_tests(io_uring CHIMERA_VFS_IO_URING)
 
+# CAP_LEASE backend-projection: authoritative DENY (memfs-only -- memfs is the
+# only backend advertising CHIMERA_VFS_CAP_LEASE).
+add_posix_testprog(test_lease_deny)
+add_posix_testprog(test_lease_recall)
+if(CHIMERA_NETNS_TESTING)
+    add_posix_test(lease_deny_memfs test_lease_deny memfs)
+    add_posix_test(lease_recall_memfs test_lease_recall memfs)
+endif()
+
 # diskfs-only cache-eviction / cold-remount stress (not part of the
 # all-backend matrix: it shrinks the diskfs caches and remounts the devices)
 add_posix_testprog(test_diskfs_evict)

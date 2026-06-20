@@ -886,7 +886,7 @@ chimera_smb_create_gen_open_file(
             request->create.gen_parked_fs    = file_state;
             request->create.gen_held_granted = held_granted;
             request->create.gen_parked       = 1;
-            chimera_vfs_lease_acquire(vfs_state, file_state,
+            chimera_vfs_lease_acquire(thread->vfs_thread, vfs_state, file_state,
                                       &open_file->share_lease,
                                       &request->create.gen_ticket, true,
                                       chimera_smb_create_share_park_cb, request);

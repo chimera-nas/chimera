@@ -521,7 +521,8 @@ chimera_smb_lock_take_one(
     entry->lease.owner.owner_hi   = open_file->file_id.vid;
     entry->lease.owner.cb_private = open_file;
 
-    chimera_vfs_lease_acquire(vfs_state, entry->file_state, &entry->lease,
+    chimera_vfs_lease_acquire(thread->vfs_thread, vfs_state, entry->file_state,
+                              &entry->lease,
                               &entry->ticket, false /* no wait */,
                               chimera_smb_lock_sync_cb, &result);
 
@@ -900,7 +901,7 @@ chimera_smb_lock(struct chimera_smb_request *request)
      * its callback always fires inline; leave it on the synchronous path. */
     request->lock.parked = wait ? 1 : 0;
 
-    chimera_vfs_lease_acquire(vfs_state, entry->file_state,
+    chimera_vfs_lease_acquire(thread->vfs_thread, vfs_state, entry->file_state,
                               &entry->lease, &entry->ticket, wait,
                               chimera_smb_lock_acquire_cb, entry);
 

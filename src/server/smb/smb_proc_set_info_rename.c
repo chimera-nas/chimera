@@ -265,7 +265,8 @@ chimera_smb_set_info_rename_do_rename(struct chimera_smb_request *request)
 
     struct chimera_server_smb_thread *thread = request->compound->thread;
 
-    chimera_vfs_lease_acquire(vfs_state, fs, &request->set_info.dp_probe,
+    chimera_vfs_lease_acquire(thread->vfs_thread, vfs_state, fs,
+                              &request->set_info.dp_probe,
                               &request->set_info.dp_ticket, true,
                               chimera_smb_set_info_rename_dp_cb, request);
 
