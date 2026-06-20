@@ -824,6 +824,24 @@ chimera_server_config_get_smb_kerberos_keytab(
     const struct chimera_server_config *config);
 
 void
+chimera_server_config_set_nfs_kerberos_enabled(
+    struct chimera_server_config *config,
+    int                           enabled);
+
+int
+chimera_server_config_get_nfs_kerberos_enabled(
+    const struct chimera_server_config *config);
+
+void
+chimera_server_config_set_nfs_kerberos_keytab(
+    struct chimera_server_config *config,
+    const char                   *keytab);
+
+const char *
+chimera_server_config_get_nfs_kerberos_keytab(
+    const struct chimera_server_config *config);
+
+void
 chimera_server_config_set_smb_kerberos_realm(
     struct chimera_server_config *config,
     const char                   *realm);

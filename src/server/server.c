@@ -42,6 +42,11 @@ struct chimera_server_config_smb_auth {
     char kerberos_realm[256];
 };
 
+struct chimera_server_config_nfs_auth {
+    int  kerberos_enabled;       /* enable RPCSEC_GSS (sec=krb5) on the NFS server */
+    char kerberos_keytab[256];   /* keytab path; empty => KRB5_KTNAME default */
+};
+
 struct chimera_server_config {
     int                                   nfs_rdma;
     int                                   nfs_rdma_port;
@@ -104,6 +109,7 @@ struct chimera_server_config {
     struct chimera_vfs_module_cfg         modules[CHIMERA_SERVER_MAX_MODULES];
     struct chimera_server_config_smb_nic  smb_nic_info[16];
     struct chimera_server_config_smb_auth smb_auth;
+    struct chimera_server_config_nfs_auth nfs_auth;
     int                                   pnfs_enabled;
     int                                   pnfs_num_ds;
     struct chimera_server_config_pnfs_ds {
@@ -229,6 +235,8 @@ chimera_server_config_init(void)
     config->smb_auth.winbind_domain[0]  = '\0';
     config->smb_auth.kerberos_keytab[0] = '\0';
     config->smb_auth.kerberos_realm[0]  = '\0';
+    config->nfs_auth.kerberos_enabled   = 0;
+    config->nfs_auth.kerberos_keytab[0] = '\0';
 
     config->anonuid = 65534;
     config->anongid = 65534;
@@ -2588,6 +2596,35 @@ chimera_server_config_get_smb_kerberos_keytab(const struct chimera_server_config
 {
     return config->smb_auth.kerberos_keytab;
 } /* chimera_server_config_get_smb_kerberos_keytab */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_nfs_kerberos_enabled(
+    struct chimera_server_config *config,
+    int                           enabled)
+{
+    config->nfs_auth.kerberos_enabled = enabled;
+} /* chimera_server_config_set_nfs_kerberos_enabled */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_nfs_kerberos_enabled(const struct chimera_server_config *config)
+{
+    return config->nfs_auth.kerberos_enabled;
+} /* chimera_server_config_get_nfs_kerberos_enabled */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_nfs_kerberos_keytab(
+    struct chimera_server_config *config,
+    const char                   *keytab)
+{
+    strncpy(config->nfs_auth.kerberos_keytab, keytab,
+            sizeof(config->nfs_auth.kerberos_keytab) - 1);
+} /* chimera_server_config_set_nfs_kerberos_keytab */
+
+SYMBOL_EXPORT const char *
+chimera_server_config_get_nfs_kerberos_keytab(const struct chimera_server_config *config)
+{
+    return config->nfs_auth.kerberos_keytab;
+} /* chimera_server_config_get_nfs_kerberos_keytab */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_smb_kerberos_realm(

@@ -349,3 +349,19 @@ foreach(code ${PYNFS_FLEX_CODES})
         LABELS "pynfs;pynfs_flex;memfs;nfs4.1"
         ENVIRONMENT "PYTHONUNBUFFERED=1;PYNFS_RUNDEPS=1")
 endforeach()
+
+# RPCSEC_GSS / Kerberos (sec=krb5) end-to-end smoke.  Stands up an MIT KDC and a
+# chimera NFS server with Kerberos enabled inside a netns, then drives pynfs 4.1
+# with sec=krb5 (pynfs 4.1 derives the GSS target as nfs@<server>, so it works
+# unmodified).  Exercises the full RPCSEC_GSS path: context establishment, the
+# per-request call/reply verifiers, the replay window, and -- via BIND -- a GSS
+# context shared across trunked connections.  Skips (77) without krb5 tooling or
+# python gssapi.  memfs only; gated like the other netns tests.
+set(NFS_KRB_WRAPPER ${CMAKE_SOURCE_DIR}/scripts/nfs_kerberos_test_wrapper.sh)
+set(NFS_KRB_CODES EID1 EID2 CSESS1 CSESS2 SEQ1 SEQ4 BIND1 BIND2 BIND3 RECC1 OPEN1 OPEN2)
+add_test(NAME chimera/pynfs/kerberos/krb5_smoke_memfs_nfs4.1
+    COMMAND bash ${NFS_KRB_WRAPPER} ${CHIMERA_BINARY} memfs ${PYNFS_DIR} ${NFS_KRB_CODES})
+set_tests_properties(chimera/pynfs/kerberos/krb5_smoke_memfs_nfs4.1 PROPERTIES
+    LABELS "pynfs;pynfs_kerberos;rpcsec_gss;memfs;nfs4.1"
+    SKIP_RETURN_CODE 77
+    ENVIRONMENT "PYTHONUNBUFFERED=1")
