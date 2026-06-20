@@ -230,6 +230,41 @@ test_change_value_native_vs_ctime(void)
     assert(get_u64(attrvals, 0) == 1000ULL * 1000000000ULL + 500ULL);
 } /* test_change_value_native_vs_ctime */
 
+/* fattr4 values must be packed in ascending attribute order so the client,
+ * which decodes the response bitmap low-to-high, reads each value at the right
+ * offset.  change_attr_type (79) and xattr_support (82) live in word 2 and are
+ * co-requested by the Linux v4.2 client at mount; emitting them out of order
+ * misframes the reply (this regressed nfstest_xattr). */
+static void
+test_word2_values_packed_in_ascending_order(void)
+{
+    struct chimera_vfs_attrs attr;
+    uint32_t                 req_mask[3] = { 0 };
+    uint32_t                 rsp_mask[3] = { 0 };
+    uint32_t                 num_rsp_mask;
+    uint32_t                 attrvals_len;
+    uint8_t                  attrvals[256];
+
+    memset(&attr, 0, sizeof(attr));
+    attr.va_set_mask = CHIMERA_VFS_ATTR_CHANGE; /* native -> MONOTONIC_INCR */
+    attr.va_change   = 1;
+    req_mask[2]      = (1 << (FATTR4_CHANGE_ATTR_TYPE - 64)) |
+        (1 << (FATTR4_XATTR_SUPPORT - 64));
+
+    /* xattr_supported = 1 passed in. */
+    chimera_nfs4_marshall_attrs(&attr, 3, req_mask, &num_rsp_mask, rsp_mask, 3,
+                                attrvals, &attrvals_len, sizeof(attrvals), 2, 0, 1, 0, 60, 0, NULL, 0);
+
+    assert(num_rsp_mask == 3);
+    assert((rsp_mask[2] & (1 << (FATTR4_CHANGE_ATTR_TYPE - 64))) != 0);
+    assert((rsp_mask[2] & (1 << (FATTR4_XATTR_SUPPORT - 64))) != 0);
+    assert(attrvals_len == 8); /* two uint32 values */
+
+    /* Ascending: change_attr_type (79) first, then xattr_support (82). */
+    assert(get_u32(attrvals, 0) == NFS4_CHANGE_TYPE_IS_MONOTONIC_INCR);
+    assert(get_u32(attrvals, 1) == 1);
+} /* test_word2_values_packed_in_ascending_order */
+
 int
 main(void)
 {
@@ -240,6 +275,7 @@ main(void)
     test_change_attr_type_advertised_for_v42();
     test_change_attr_type_value_follows_native_change();
     test_change_value_native_vs_ctime();
+    test_word2_values_packed_in_ascending_order();
 
     return 0;
 } /* main */
