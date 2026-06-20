@@ -102,6 +102,28 @@ chimera_nfs4_create_session(
     principal.machinename     = req->principal_machinename;
     principal.machinename_len = req->principal_machinename_len;
 
+    /* SP4_MACH_CRED: CREATE_SESSION for this client must use the bound machine
+     * credential (RFC 8881 §2.10.8.3). */
+    {
+        struct nfs4_client *c;
+        bool                wrong_cred = false;
+
+        pthread_mutex_lock(&shared->nfs4_shared_clients.nfs4_ct_lock);
+        HASH_FIND(nfs4_client_hh_by_id,
+                  shared->nfs4_shared_clients.nfs4_ct_clients_by_id,
+                  &args->csa_clientid, sizeof(args->csa_clientid), c);
+        if (c && !nfs4_client_mach_cred_ok(c, &principal)) {
+            wrong_cred = true;
+        }
+        pthread_mutex_unlock(&shared->nfs4_shared_clients.nfs4_ct_lock);
+
+        if (wrong_cred) {
+            res->csr_status = NFS4ERR_WRONG_CRED;
+            chimera_nfs4_compound_complete(req, NFS4ERR_WRONG_CRED);
+            return;
+        }
+    }
+
     nfs4_client_create_session_classify(&shared->nfs4_shared_clients,
                                         args->csa_clientid,
                                         args->csa_sequence,

@@ -36,19 +36,39 @@ chimera_nfs4_destroy_clientid(
      * persistent recovery record once the destroy succeeds (the nfs4_client is
      * freed inside nfs4_client_destroy_clientid). */
     uint8_t  owner[NFS4_OPAQUE_LIMIT];
-    uint16_t owner_len = 0;
+    uint16_t owner_len  = 0;
+    bool     wrong_cred = false;
     {
-        struct nfs4_client *c;
+        struct nfs4_client                *c;
+        const struct nfs4_client_principal p = {
+            .flavor          = req->principal_flavor,
+            .uid             = req->principal_uid,
+            .gid             = req->principal_gid,
+            .machinename     = req->principal_machinename,
+            .machinename_len = req->principal_machinename_len,
+        };
 
         pthread_mutex_lock(&shared->nfs4_shared_clients.nfs4_ct_lock);
         HASH_FIND(nfs4_client_hh_by_id,
                   shared->nfs4_shared_clients.nfs4_ct_clients_by_id,
                   &args->dca_clientid, sizeof(args->dca_clientid), c);
         if (c) {
-            owner_len = c->nfs4_client_owner_len;
-            memcpy(owner, c->nfs4_client_owner, owner_len);
+            /* SP4_MACH_CRED: only the bound machine credential may destroy
+             * this client (RFC 8881 §2.10.8.3). */
+            if (!nfs4_client_mach_cred_ok(c, &p)) {
+                wrong_cred = true;
+            } else {
+                owner_len = c->nfs4_client_owner_len;
+                memcpy(owner, c->nfs4_client_owner, owner_len);
+            }
         }
         pthread_mutex_unlock(&shared->nfs4_shared_clients.nfs4_ct_lock);
+    }
+
+    if (wrong_cred) {
+        res->dcr_status = NFS4ERR_WRONG_CRED;
+        chimera_nfs4_compound_complete(req, res->dcr_status);
+        return;
     }
 
     /* NFS4ERR_STALE_CLIENTID for an unknown clientid, NFS4ERR_CLIENTID_BUSY

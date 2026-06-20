@@ -218,6 +218,24 @@ nfs4_principal_matches(
                   p->machinename_len) == 0;
 } /* nfs4_principal_matches */
 
+/*
+ * SP4_MACH_CRED enforcement (RFC 8881 §2.10.8.3): a state-management operation
+ * on a client that negotiated SP4_MACH_CRED must be issued with the same
+ * (machine) credential that established the client at EXCHANGE_ID.  Returns 1
+ * if the operation is permitted (client absent, or SP4_NONE/SP4_SSV, or the
+ * principal matches), 0 if it must be rejected with NFS4ERR_WRONG_CRED.
+ */
+SYMBOL_EXPORT int
+nfs4_client_mach_cred_ok(
+    const struct nfs4_client           *c,
+    const struct nfs4_client_principal *p)
+{
+    if (!c || c->nfs4_client_sp_how != SP4_MACH_CRED) {
+        return 1;
+    }
+    return nfs4_principal_matches(c, p);
+} /* nfs4_client_mach_cred_ok */
+
 /* Caller must hold table->nfs4_ct_lock.  Allocates a fresh (unconfirmed)
  * client record, brings up its unified state hierarchy, and inserts it into
  * both hash tables. */
