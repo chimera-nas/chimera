@@ -348,10 +348,11 @@ diskfs_bt_alloc_node(
      * space (bt_run's RESERVE phase) so this draws from the thread cache and
      * never journals -- hence no_suspend and the rc != 0 abort. */
     DISKFS_SM_JNL(jnl, thread, txn, diskfs_sm_no_suspend, NULL);
-    rc = space_map_alloc(shared->space_map, &thread->space_cache, &jnl,
-                         SM_DEV_LOCAL, DISKFS_BLOCK_SIZE, SM_RESERVATION_MIN,
-                         &device_id, &device_offset);
-    chimera_diskfs_abort_if(rc != 0, "b+tree node allocation failed (ENOSPC)");
+    rc = space_map_bump_alloc(&thread->meta_resv, &jnl, DISKFS_BLOCK_SIZE,
+                              &device_id, &device_offset);
+    chimera_diskfs_abort_if(rc != 0,
+                            "b+tree node alloc: metadata reservation exhausted "
+                            "(RESERVE phase underprovisioned)");
 
     blk = diskfs_block_claim(thread, device_id, device_offset, 1);
     diskfs_txn_add_block(txn, blk);
@@ -1247,24 +1248,15 @@ diskfs_bt_run(struct diskfs_bt_op *op)
             /* Worst case a split allocates one node per tree level plus a new
              * root (height+1 <= DISKFS_BT_MAX_DEPTH+1); +2 for margin so the
              * modify can never exhaust the reservation and journal. */
-            DISKFS_SM_JNL(jnl, thread, op->txn, diskfs_bt_op_resume_cb, op);
-            int rrc = space_map_reserve(thread->shared->space_map,
-                                        &thread->space_cache, &jnl, SM_DEV_LOCAL,
-                                        (uint64_t) (DISKFS_BT_MAX_DEPTH + 2) * DISKFS_BLOCK_SIZE,
-                                        SM_RESERVATION_MIN);
-
-            if (rrc == SM_AGAIN) {
-                /* Parked on a cold journal block.  Mark the op suspended so
-                 * completion is delivered via the callback even when the rest
-                 * of the traversal never parks again: a fully-resident descent
-                 * after a reserve-only park would otherwise complete into
-                 * `done` with no caller left to read it, dropping the op (and
-                 * the request) on the floor. */
-                op->suspended = 1;
-                return;     /* resumes back into this phase */
-            }
-            /* ENOSPC here is left to the modify's allocation to surface; just
-             * proceed to the descent. */
+            /* Ensure the thread's metadata reservation can cover the worst-case
+             * split (one node per level + a new root), so the synchronous modify
+             * below draws purely thread-locally (bump, no lock, no journal, no
+             * park).  Pure in-memory: never SM_AGAIN.  ENOSPC is left to the
+             * modify's bump to surface (as before). */
+            (void) space_map_reservation_ensure(
+                thread->shared->space_map, &thread->meta_resv, SM_DEV_LOCAL,
+                (uint64_t) (DISKFS_BT_MAX_DEPTH + 2) * DISKFS_BLOCK_SIZE,
+                SM_RESERVATION_CHUNK, (uint32_t) ((uintptr_t) thread >> 7));
             op->phase = DISKFS_BT_PHASE_DESCEND;
             continue;
         }

@@ -8,7 +8,172 @@
  * cross-thread waiter dispatch (doorbell/deferral) machinery.
  */
 
+#include <execinfo.h>
 #include "diskfs_internal.h"
+
+/* Diag: a single transaction has grown pathologically large.  Dump the count
+ * and the call path (once, at the threshold crossing) so we can see what is
+ * bulk-adding blocks -- e.g. an unbounded AG-log condense folding a whole AG
+ * log into one txn. */
+static int g_giant_bt_budget = 120;     /* cap total backtraces so the log doesn't flood */
+
+/* Diag: distinct (device_id, device_offset) among the txn's block entries, via
+ * a temporary open-addressing hash set.  If unique << nblocks, the txn is
+ * re-appending the same few blocks (the re-claim/re-journal duplication theory). */
+static uint32_t
+diskfs_txn_count_unique_blocks(struct diskfs_txn *txn)
+{
+    struct diskfs_txn_block *tb;
+    uint32_t                 cap  = 1u << 17;     /* 131072 slots */
+    uint32_t                 mask = cap - 1, unique = 0;
+    uint64_t                *keys = calloc(cap, sizeof(*keys));
+
+    if (!keys) {
+        return 0;
+    }
+    for (tb = txn->blocks; tb; tb = tb->next) {
+        uint64_t k = ((uint64_t) tb->block->device_id << 48) | tb->block->device_offset;
+        uint32_t h = (uint32_t) ((k * 0x9E3779B97F4A7C15ULL) >> 32) & mask;
+        while (keys[h] && keys[h] != k) {
+            h = (h + 1) & mask;
+        }
+        if (!keys[h]) {
+            keys[h] = k;
+            unique++;
+        }
+    }
+    free(keys);
+    return unique;
+} /* diskfs_txn_count_unique_blocks */
+
+void
+diskfs_txn_trace_giant(struct diskfs_txn *txn)
+{
+    void    *frames[40];
+    int      n, i;
+    char   **syms;
+    uint32_t unique;
+
+    if (g_giant_bt_budget <= 0) {
+        return;
+    }
+    g_giant_bt_budget--;
+
+    unique = diskfs_txn_count_unique_blocks(txn);
+    n      = backtrace(frames, 40);
+    syms   = backtrace_symbols(frames, n);
+
+    /* journal = AG-log journal-block claims; direct = btree-node/inode adds.
+     * unique = distinct blocks; reserve_again = RESERVE-phase re-drives.
+     * journal>>direct + unique<<nblocks + high reserve_again == the re-journal
+     * duplication theory confirmed. */
+    chimera_diskfs_error("GIANT-TXN txn=%p type=%d num_inodes=%d nblocks=%u journal=%u direct=%u unique=%u reserve_again=%u -- backtrace:",
+                         (void *) txn, (int) txn->type, txn->num_inodes,
+                         txn->nblocks, txn->n_journal, txn->nblocks - txn->n_journal,
+                         unique, txn->n_reserve_again);
+    for (i = 0; i < n; i++) {
+        chimera_diskfs_error("  GIANT-TXN bt[%d] %s", i, syms ? syms[i] : "?");
+    }
+    free(syms);
+} /* diskfs_txn_trace_giant */
+
+static int g_dbg_btdone_budget = 80;     /* cap dropped-continuation backtraces */
+
+void
+diskfs_bt_done_trace(struct diskfs_bt_op *op)
+{
+    void  *frames[40];
+    int    n, i;
+    char **syms;
+
+    if (g_dbg_btdone_budget <= 0) {
+        return;
+    }
+    g_dbg_btdone_budget--;
+
+    n    = backtrace(frames, 40);
+    syms = backtrace_symbols(frames, n);
+
+    /* A mutating op whose txn reserve-parked is completing via the done-path
+     * (suspended==0) -- the async caller already left, so this op is dropped.
+     * If the backtrace contains diskfs_bt_op_resume_cb, it completed on the
+     * resume path with suspended still clear (the reserve-park race). */
+    chimera_diskfs_error("BT-DONE-DROP op=%p opcode=%d result=%d suspended=%d txn=%p dbg_stage=%d n_reserve_again=%u -- backtrace:",
+                         (void *) op, (int) op->opcode, op->result, op->suspended,
+                         (void *) op->txn,
+                         op->txn ? op->txn->dbg_stage : -1,
+                         op->txn ? op->txn->n_reserve_again : 0);
+    for (i = 0; i < n; i++) {
+        chimera_diskfs_error("  BT-DONE-DROP bt[%d] %s", i, syms ? syms[i] : "?");
+    }
+    free(syms);
+} /* diskfs_bt_done_trace */
+
+static int g_dbg_recyc_waiter_budget = 40;     /* cap recycle-with-waiter backtraces */
+int        g_dbg_recyc_waiter_count  = 0;      /* total such events (atomic) */
+
+/* Smoking-gun detector: a block being recycled (its slot reused for a new
+ * (dev,offset)) still has parked waiters on its wait_head. Those waiters'
+ * resume continuations are now lost forever -> the dirent-insert reserve hang.
+ * Always counts; backtraces are budgeted so the log doesn't flood. */
+static void
+diskfs_block_recycle_waiter_trace(struct diskfs_block *blk)
+{
+    void                       *frames[40];
+    int                         n, i, wc = 0;
+    char                      **syms;
+    struct diskfs_block_waiter *w;
+
+    __atomic_fetch_add(&g_dbg_recyc_waiter_count, 1, __ATOMIC_RELAXED);
+    if (g_dbg_recyc_waiter_budget <= 0) {
+        return;
+    }
+    g_dbg_recyc_waiter_budget--;
+
+    for (w = blk->wait_head; w; w = w->next) {
+        wc++;
+    }
+    n    = backtrace(frames, 40);
+    syms = backtrace_symbols(frames, n);
+    chimera_diskfs_error("RECYC-WAITER blk=%p state=%d dev=%u off=%lu pin=%d on_lru=%d waiters=%d -- recycling a block with parked waiters (lost wakeup!) -- backtrace:",
+                         (void *) blk, (int) blk->state, blk->device_id,
+                         (unsigned long) blk->device_offset,
+                         (int) blk->pin_count, blk->on_lru, wc);
+    for (i = 0; i < n; i++) {
+        chimera_diskfs_error("  RECYC-WAITER bt[%d] %s", i, syms ? syms[i] : "?");
+    }
+    free(syms);
+} /* diskfs_block_recycle_waiter_trace */
+
+/* Per-phase count of bt ops currently parked (indexed by enum diskfs_bt_phase,
+ * 0..5). Read via gdb at a hang to localize which park site loses wakeups. */
+int g_dbg_park[6] = { 0 };
+
+/* Called at a park point (op is parking, alive): record the phase and bump its
+ * count once. Cleared when the op resumes (diskfs_bt_op_park_clear). */
+void
+diskfs_bt_op_park_account(struct diskfs_bt_op *op)
+{
+    if (!op->dbg_park_counted) {
+        op->dbg_park_counted = 1;
+        op->dbg_park_phase   = op->phase;
+        if ((unsigned) op->phase < 6) {
+            __atomic_fetch_add(&g_dbg_park[op->phase], 1, __ATOMIC_RELAXED);
+        }
+    }
+} /* diskfs_bt_op_park_account */
+
+/* Called when a parked op is about to resume: drop its park-count. */
+void
+diskfs_bt_op_park_clear(struct diskfs_bt_op *op)
+{
+    if (op->dbg_park_counted) {
+        op->dbg_park_counted = 0;
+        if ((unsigned) op->dbg_park_phase < 6) {
+            __atomic_fetch_sub(&g_dbg_park[op->dbg_park_phase], 1, __ATOMIC_RELAXED);
+        }
+    }
+} /* diskfs_bt_op_park_clear */
 
 /* Forward declarations (definitions below, in call-graph order) */
 
@@ -166,6 +331,13 @@ diskfs_block_recycle(
                             "or a pin was leaked)");
     diskfs_metric_block_cache(thread, DISKFS_METRIC_BLOCK_CACHE_RECYCLE);
 
+    /* Diag: a recycle victim must have no parked waiters (the LRU should hold
+     * only CLEAN, unpinned, waiter-free blocks). If it does, those waiters are
+     * about to be stranded -- the suspected dirent-insert reserve hang. */
+    if (blk->wait_head != NULL) {
+        diskfs_block_recycle_waiter_trace(blk);
+    }
+
     diskfs_block_lru_unlink(shard, blk);
 
     /* Unhook from its current bucket (no-op for a never-keyed free buffer:
@@ -301,24 +473,48 @@ diskfs_block_unpin(
     struct diskfs_block    *blk,
     enum diskfs_block_state new_state)
 {
-    struct diskfs_block_shard *shard = diskfs_block_shard(thread->shared->block_cache,
-                                                          blk->device_id, blk->device_offset);
-
-    pthread_mutex_lock(&shard->lock);
-    diskfs_block_drain_clean_locked(shard);
-    __atomic_store_n(&blk->state, new_state, __ATOMIC_RELEASE);
-    if (__atomic_sub_fetch(&blk->pin_count, 1, __ATOMIC_ACQ_REL) == 0 &&
-        __atomic_load_n(&blk->state, __ATOMIC_ACQUIRE) == DISKFS_BLOCK_CLEAN && !blk->on_lru) {
-        diskfs_block_lru_push_tail(shard, blk);
+    /*
+     * Drop one pin.  pin_count is the block's outstanding-reference count: every
+     * un-home write generation holds a pin from claim until its redo record is
+     * pushed home and trimmed (released by the push thread in free_record), and
+     * every active read/descent holds one for its duration.  So pin_count == 0
+     * is exactly "content is home and nobody is using it" -- the block is then
+     * CLEAN and reusable.  A block is therefore marked CLEAN by *whichever* drop
+     * takes the count to zero, never before (a concurrent generation or read
+     * keeps it pinned and thus DIRTY).  new_state is advisory: we only ever
+     * transition to CLEAN, and only at pin==0.
+     */
+    (void) new_state;
+    if (__atomic_sub_fetch(&blk->pin_count, 1, __ATOMIC_ACQ_REL) != 0) {
+        return;     /* still referenced -- stays as-is (DIRTY if un-home) */
     }
-    pthread_mutex_unlock(&shard->lock);
 
-    /* Unpinning may have produced an LRU victim a parked CoW fork can reclaim. */
-    diskfs_block_buf_wake(thread, shard);
+    /* Took the last pin: home + idle -> publish CLEAN and link onto the LRU
+     * under the shard lock, re-checking since a concurrent claim may have
+     * re-pinned, and draining deferred clean insertions while we hold it. */
+    {
+        struct diskfs_block_shard *shard = diskfs_block_shard(thread->shared->block_cache,
+                                                              blk->device_id, blk->device_offset);
+        pthread_mutex_lock(&shard->lock);
+        diskfs_block_drain_clean_locked(shard);
+        if (__atomic_load_n(&blk->pin_count, __ATOMIC_ACQUIRE) == 0) {
+            __atomic_store_n(&blk->state, DISKFS_BLOCK_CLEAN, __ATOMIC_RELEASE);
+            if (!blk->on_lru) {
+                diskfs_block_lru_push_tail(shard, blk);
+            }
+        }
+        pthread_mutex_unlock(&shard->lock);
+
+        /* This produced a CLEAN, unpinned LRU victim -- resume any CoW fork
+         * parked waiting for a reclaimable buffer (main's park machinery). */
+        diskfs_block_buf_wake(thread, shard);
+    }
 } /* diskfs_block_unpin */
 
 
-/* Release a descent pin without changing the block's state. */
+/* Release a descent pin.  Like diskfs_block_unpin: the block becomes CLEAN and
+ * LRU-reusable only if this was the last pin (no un-home generation, no other
+ * reader still holds it). */
 void
 diskfs_block_release(
     struct diskfs_thread *thread,
@@ -329,9 +525,11 @@ diskfs_block_release(
 
     pthread_mutex_lock(&shard->lock);
     diskfs_block_drain_clean_locked(shard);
-    if (__atomic_sub_fetch(&blk->pin_count, 1, __ATOMIC_ACQ_REL) == 0 &&
-        __atomic_load_n(&blk->state, __ATOMIC_ACQUIRE) == DISKFS_BLOCK_CLEAN && !blk->on_lru) {
-        diskfs_block_lru_push_tail(shard, blk);
+    if (__atomic_sub_fetch(&blk->pin_count, 1, __ATOMIC_ACQ_REL) == 0) {
+        __atomic_store_n(&blk->state, DISKFS_BLOCK_CLEAN, __ATOMIC_RELEASE);
+        if (!blk->on_lru) {
+            diskfs_block_lru_push_tail(shard, blk);
+        }
     }
     pthread_mutex_unlock(&shard->lock);
 
@@ -412,23 +610,54 @@ diskfs_block_cache_prealloc(
         struct diskfs_block_shard *shard = &cache->shards[i];
         uint32_t                   total = shard->nblocks + cache->buffer_extra_per_shard;
 
+        struct evpl_iovec *big           = NULL;
+        uint32_t           slices_per_big = 0;
+        uint32_t           slot_in_big    = 0;
+
         shard->buffers  = calloc(total, sizeof(*shard->buffers));
         shard->nbuffers = total;
 
+        /* Backing GLOBAL buffers: worst case (buffer_size == BLOCK_SIZE) is one
+         * big buffer per slice; trimmed to the exact count after carving. */
+        shard->global_bufs   = calloc(total ? total : 1, sizeof(*shard->global_bufs));
+        shard->n_global_bufs = 0;
+
         for (j = 0; j < total; j++) {
             struct diskfs_block_buf *buf = &shard->buffers[j];
-            int                      niov;
 
-            niov = evpl_iovec_alloc(evpl, DISKFS_BLOCK_SIZE, DISKFS_BLOCK_SIZE, 1,
-                                    EVPL_IOVEC_FLAG_SHARED, &buf->iov);
-            chimera_diskfs_abort_if(niov != 1,
-                                    "diskfs block buffer did not fit in one iovec (%d)",
-                                    niov);
+            if (slot_in_big == 0) {
+                /* Carve subsequent slices from a fresh whole GLOBAL buffer. */
+                big = &shard->global_bufs[shard->n_global_bufs++];
+                evpl_iovec_alloc_global(evpl, big);
+                slices_per_big = big->length / DISKFS_BLOCK_SIZE;
+                chimera_diskfs_abort_if(slices_per_big == 0,
+                                        "evpl buffer_size %u < DISKFS_BLOCK_SIZE %u",
+                                        big->length, (unsigned) DISKFS_BLOCK_SIZE);
+            }
+
+            /* Non-owning GLOBAL slice into the big buffer: clone_segment copies
+             * the (GLOBAL) ref and sets data+offset/length.  The ref incr is a
+             * no-op, so the slice takes no atomic and owns nothing -- the big
+             * buffer is freed once at teardown, never the slice. */
+            evpl_iovec_clone_segment(&buf->iov, big,
+                                     slot_in_big * DISKFS_BLOCK_SIZE,
+                                     DISKFS_BLOCK_SIZE);
+
+            if (++slot_in_big == slices_per_big) {
+                slot_in_big = 0;
+            }
+
             buf->shard          = shard;
             buf->on_free        = 1;
             buf->next           = shard->free_buffers;
             shard->free_buffers = buf;
             shard->nfree_buffers++;
+        }
+
+        if (shard->n_global_bufs) {
+            shard->global_bufs = realloc(shard->global_bufs,
+                                         shard->n_global_bufs *
+                                         sizeof(*shard->global_bufs));
         }
 
         for (j = 0; j < shard->nblocks; j++) {
@@ -459,12 +688,14 @@ diskfs_block_cache_destroy(struct diskfs_shared *shared)
         struct diskfs_block_shard *shard = &cache->shards[i];
         uint32_t                   j;
 
-        /* Release each block's buffer (NULL evpl -> straight to the global
-         * allocator, which is correct at teardown); the structs are one pool
-         * array.  At a clean unmount every block is CLEAN (refcount 1). */
-        for (j = 0; j < shard->nbuffers; j++) {
-            evpl_iovec_release(NULL, &shard->buffers[j].iov);
+        /* Free the backing GLOBAL buffers once each (NULL evpl -> straight to
+         * the global allocator, correct at teardown).  The per-block iovecs are
+         * non-owning slices into these and must NOT be released individually --
+         * doing so would free a whole buffer still backing its sibling slices. */
+        for (j = 0; j < shard->n_global_bufs; j++) {
+            evpl_iovec_release(NULL, &shard->global_bufs[j]);
         }
+        free(shard->global_bufs);
         free(shard->buffers);
         free(shard->pool);
         free(shard->buckets);
@@ -583,7 +814,7 @@ diskfs_block_claim(
     } else if (blk->on_lru) {
         diskfs_metric_block_cache(thread, DISKFS_METRIC_BLOCK_CACHE_HIT);
         diskfs_block_lru_unlink(shard, blk);
-    } else if (__atomic_load_n(&blk->state, __ATOMIC_ACQUIRE) == DISKFS_BLOCK_LOGGED) {
+    } else if (blk->buf->refs > 1) {
         /* COW: this buffer is still referenced by an un-pushed redo record (and
          * the tail-pusher will write it home), so it must stay immutable.  Fork
          * a private writable copy; the old buffer rides the record to its home
@@ -641,8 +872,41 @@ diskfs_sm_claim_block(
     }
 
     diskfs_txn_add_block(c->txn, blk);
+    c->txn->n_journal++;     /* diag: this add is an AG-log journal-block claim */
     return blk->iov.data;
 } /* diskfs_sm_claim_block */
+
+
+/*
+ * Record an ALLOC space-map delta into the current transaction.  Replaces the
+ * old per-AG on-disk delta log for allocations: instead of claiming (and
+ * possibly parking on) a shared AG-log block, the allocator appends an in-memory
+ * node that diskfs_il_write_redo serializes into this txn's redo record.  Purely
+ * in-memory -- no block I/O, never parks.  Frees are not recorded here; they
+ * ride the redo record from txn->pending_frees.
+ */
+void
+diskfs_sm_record_delta(
+    void    *user,
+    uint32_t device_id,
+    uint32_t ag_index,
+    uint64_t device_offset,
+    uint64_t length,
+    uint32_t op)
+{
+    struct diskfs_sm_jnl    *c = user;
+    struct diskfs_txn_delta *d;
+
+    d                 = malloc(sizeof(*d));
+    d->device_id      = device_id;
+    d->ag_index       = ag_index;
+    d->device_offset  = device_offset;
+    d->length         = length;
+    d->op             = op;
+    d->next           = c->txn->space_deltas;
+    c->txn->space_deltas = d;
+    c->txn->n_space_deltas++;
+} /* diskfs_sm_record_delta */
 
 
 /* A journaling context for a site that has guaranteed its log blocks are
@@ -660,15 +924,15 @@ diskfs_sm_no_suspend(
 
 
 /*
- * Free a device range as part of a transaction.  The FREE delta is journaled
- * now (it rides this txn's redo), but the in-memory free is deferred onto the
- * txn's pending list and applied only once the record is durable
- * (diskfs_txn_apply_frees) or discarded on abort (diskfs_txn_discard_frees).
- * This is required for metadata blocks (b+tree nodes), which unlike file data
- * are resident + pinned in the block cache: applying the free immediately
- * could hand the range to a concurrent allocation that then claims the stale,
- * still-pinned block.  Deferring to commit (block is LOGGED, unpinned by then)
- * makes a re-claim COW cleanly.
+ * Free a device range as part of a transaction.  The FREE delta rides this
+ * txn's redo record, but the in-memory free is deferred onto the txn's pending
+ * list and applied only once the record is durable (diskfs_txn_apply_frees) or
+ * discarded on abort (diskfs_txn_discard_frees).  This is required for metadata
+ * blocks (b+tree nodes), which unlike file data are resident + pinned in the
+ * block cache: applying the free immediately could hand the range to a
+ * concurrent allocation that then claims the stale, still-pinned block.
+ * Deferring to commit (block is LOGGED, unpinned by then) makes a re-claim COW
+ * cleanly.
  */
 void
 diskfs_txn_free_space(
@@ -682,12 +946,12 @@ diskfs_txn_free_space(
 
     (void) thread;
 
-    /* Record the pending free only -- the FREE delta is journaled later, in the
-     * suspendable pre-commit flush (diskfs_txn_flush_free_journals).  This is
-     * because diskfs_txn_free_space runs inside the b+tree synchronous modify
-     * (merge frees the emptied sibling, teardown frees nodes), which cannot
-     * suspend on a cold journal block.  The in-memory free stays deferred to
-     * commit (diskfs_txn_apply_frees). */
+    /* Record the pending free only -- the FREE delta is appended to the txn's
+     * redo space-delta list later, in the pre-commit flush
+     * (diskfs_txn_flush_free_journals), since diskfs_txn_free_space runs inside
+     * the b+tree synchronous modify (merge frees the emptied sibling, teardown
+     * frees nodes).  The in-memory free stays deferred to commit
+     * (diskfs_txn_apply_frees). */
     f                  = malloc(sizeof(*f));
     f->device_id       = device_id;
     f->device_offset   = device_offset;
@@ -699,13 +963,12 @@ diskfs_txn_free_space(
 
 
 /*
- * Journal the FREE delta for every pending free recorded during the op's
- * modify.  A suspendable pre-commit phase (run on the worker before the txn is
- * handed to the intent-log thread): the delta write goes through the async
- * journal claim, so on a not-resident log block this parks the request (with
- * diskfs_commit_resume re-driving the commit) and returns SM_AGAIN.  Already-
- * journaled frees are flagged so a resumed flush continues where it left off.
- * Returns 0 when all frees are journaled.
+ * Append the FREE delta for every pending free recorded during the op's modify
+ * onto the txn's redo space-delta list (so it rides this txn's redo record and
+ * is replayed on crash).  A pre-commit phase run on the worker before the txn
+ * is handed to the intent-log thread.  Purely in-memory now (the allocator no
+ * longer journals to a per-AG on-disk log), so it never parks; the SM_AGAIN
+ * return is vestigial.  Already-recorded frees are flagged for idempotency.
  */
 int
 diskfs_txn_flush_free_journals(
@@ -765,6 +1028,43 @@ diskfs_txn_discard_frees(struct diskfs_txn *txn)
 } /* diskfs_txn_discard_frees */
 
 
+/* Apply a txn's committed allocations to the in-memory free tree, on the
+ * intent-log thread once the redo record is durable (beside diskfs_txn_apply_
+ * frees).  The reservation allocator hands out blocks thread-locally without
+ * removing them from the tree, so the tree stays == committed state until here
+ * -- which is what lets condense snapshot committed-only and never leak an
+ * uncommitted reservation tail on crash. */
+void
+diskfs_txn_apply_allocs(struct diskfs_txn *txn)
+{
+    struct space_map        *sm = txn->thread->shared->space_map;
+    struct diskfs_txn_delta *d;
+
+    for (d = txn->space_deltas; d; d = d->next) {
+        if (d->op == SM_AG_LOG_OP_ALLOC) {
+            space_map_alloc_apply(sm, d->device_id, d->device_offset, d->length);
+        }
+    }
+} /* diskfs_txn_apply_allocs */
+
+
+/* Discard a txn's allocations on abort: the redo never becomes durable so the
+ * ranges were never marked used (tree untouched), but each bump pinned its
+ * claim -- unpin them so the claim can be GC'd. */
+void
+diskfs_txn_discard_allocs(struct diskfs_txn *txn)
+{
+    struct space_map        *sm = txn->thread->shared->space_map;
+    struct diskfs_txn_delta *d;
+
+    for (d = txn->space_deltas; d; d = d->next) {
+        if (d->op == SM_AG_LOG_OP_ALLOC) {
+            space_map_alloc_discard(sm, d->device_id, d->device_offset, d->length);
+        }
+    }
+} /* diskfs_txn_discard_allocs */
+
+
 /*
  * Enqueue a ready waiter on its owning worker's resume queue.  If the waking
  * thread is the waiter's own worker, schedule a deferral (no eventfd);
@@ -802,8 +1102,11 @@ diskfs_bt_op_resume_cb(
     struct diskfs_thread *thread,
     void                 *arg)
 {
+    struct diskfs_bt_op *op = arg;
+
     (void) thread;
-    diskfs_bt_run((struct diskfs_bt_op *) arg);
+    diskfs_bt_op_park_clear(op);     /* resuming -> no longer parked (op alive here) */
+    diskfs_bt_run(op);               /* may complete + free op via cb; do NOT touch op after */
 } /* diskfs_bt_op_resume_cb */
 
 
@@ -986,6 +1289,7 @@ diskfs_bt_block_get(
         struct diskfs_block_waiter *w = diskfs_block_waiter_alloc(thread);
 
         op->suspended = 1;
+        diskfs_bt_op_park_account(op);   /* diag: parked at op->phase on a block fault */
         w->thread     = op->thread;
         w->resume     = diskfs_bt_op_resume_cb;
         w->arg        = op;
@@ -1102,7 +1406,7 @@ diskfs_block_claim_async(
     } else if (blk->on_lru) {
         diskfs_metric_block_cache(thread, DISKFS_METRIC_BLOCK_CACHE_HIT);
         diskfs_block_lru_unlink(shard, blk);
-    } else if (__atomic_load_n(&blk->state, __ATOMIC_ACQUIRE) == DISKFS_BLOCK_LOGGED) {
+    } else if (blk->buf->refs > 1) {
         /* COW (see diskfs_block_claim): fork a private writable copy.  The new
          * buffer comes from the regular LRU (diskfs_block_buf_reclaim_locked).
          * If every block in the shard is pinned there is no victim: park this
@@ -1343,16 +1647,20 @@ diskfs_txn_flush_inodes(struct diskfs_txn *txn)
 
 
 /*
- * Unpin all blocks held by this txn, transitioning them to new_state.  Also
- * clears each write-locked inode's cached block pointer (it is only valid
- * while the txn holds the block pinned; a later txn re-claims it).  Used at
- * commit (intent-log thread) and abort (worker).  Must run while the txn's
- * inode slots are still populated (before diskfs_txn_unlock_all).
+ * Unpin all blocks held by this txn, transitioning them to new_state -- except
+ * a block a later writer has already COW-forked away from this txn's snapshot
+ * (snap_buf != live buf), where only this txn's pin is dropped and the live
+ * block's state is left to its new owner.  Also clears each write-locked
+ * inode's cached block pointer (valid only while the txn holds the block
+ * pinned).  Used at abort (worker, inodes still locked) and at durable commit
+ * (intent-log thread).  On the commit path the inodes were already released in
+ * diskfs_il_write_redo, so num_inodes is 0 and the clearing loop is a no-op
+ * here (the clear happened there, before the locks dropped); only the abort
+ * path still does the clearing.
  */
 void
 diskfs_txn_unpin_blocks(
-    struct diskfs_txn      *txn,
-    enum diskfs_block_state new_state)
+    struct diskfs_txn *txn)
 {
     struct diskfs_thread    *thread = txn->thread;
     struct diskfs_txn_block *tb     = txn->blocks;
@@ -1367,11 +1675,42 @@ diskfs_txn_unpin_blocks(
 
     txn->blocks = NULL;
     while (tb) {
-        struct diskfs_block *blk = tb->block;
-
         n = tb->next;
-        diskfs_block_unpin(thread, blk, new_state);
+        /* Abort: no record was logged, so no tail-push will ever release this
+         * txn's claim pin -- drop it here.  The block is home (nothing of ours
+         * went un-home), so unpin marks it CLEAN once fully unpinned. */
+        diskfs_block_unpin(thread, tb->block, DISKFS_BLOCK_CLEAN);
         free(tb);
         tb = n;
     }
 } /* diskfs_txn_unpin_blocks */
+
+
+/*
+ * Commit-path counterpart of diskfs_txn_unpin_blocks, run by the intent-log
+ * thread once a record is durable.  It releases the inode->block links and the
+ * per-block txn structs but does NOT drop the block pins: each block's claim
+ * pin is now held until its redo record is pushed home and trimmed, where the
+ * push thread drops it (diskfs_il_free_record -> diskfs_push_unpin_block).  So
+ * the IL thread touches none of the block's reference/state fields.
+ */
+void
+diskfs_txn_retire_blocks(struct diskfs_txn *txn)
+{
+    struct diskfs_txn_block *tb = txn->blocks;
+    struct diskfs_txn_block *n;
+    int                      i;
+
+    for (i = 0; i < txn->num_inodes; i++) {
+        if (txn->inodes[i].mode == DISKFS_INODE_LOCK_WRITE) {
+            txn->inodes[i].inode->block = NULL;
+        }
+    }
+
+    txn->blocks = NULL;
+    while (tb) {
+        n = tb->next;
+        free(tb);
+        tb = n;
+    }
+} /* diskfs_txn_retire_blocks */

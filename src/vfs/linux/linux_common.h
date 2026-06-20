@@ -11,6 +11,7 @@
 #include "common/varint.h"
 #include "vfs/vfs_fh.h"
 #include "vfs/vfs_xattr_name.h"
+#include "vfs/vfs_fsid.h"
 
 #define chimera_linux_debug(...) chimera_debug("linux", \
                                                __FILE__, \
@@ -144,12 +145,13 @@ chimera_linux_stat_to_attr(
     attr->va_ctime      = st->st_ctim;
 
     /* FSID is part of the statfs set but is also an ordinary per-file
-     * attribute (NFSv3 post-op attrs carry it).  Satisfy it cheaply from the
-     * device id here so an FSID-carrying stat request does not have to make a
-     * cold fstatvfs() call on the hot path. */
+     * attribute (NFSv3 post-op attrs carry it, and the attr cache needs it).
+     * Map the device id to a stable per-filesystem fsid (see vfs_fsid.h) so it
+     * is distinct per submount and survives server restarts; the map is a cheap
+     * in-memory lookup, no fstatvfs() on the hot path. */
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_FSID) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_FSID;
-        attr->va_fsid      = st->st_dev;
+        attr->va_fsid      = chimera_vfs_fsid_for_dev(major(st->st_dev), minor(st->st_dev));
     }
 } /* linux_stat_to_chimera_attr */
 
@@ -177,12 +179,12 @@ chimera_linux_statx_to_attr(
     attr->va_ctime.tv_sec  = stx->stx_ctime.tv_sec;
     attr->va_ctime.tv_nsec = stx->stx_ctime.tv_nsec;
 
-    /* See chimera_linux_stat_to_attr: satisfy FSID cheaply from the device id
-     * so an FSID-carrying stat request avoids a cold fstatvfs() on the hot
-     * path. */
+    /* See chimera_linux_stat_to_attr: map the device id to a stable
+     * per-filesystem fsid (vfs_fsid.h) rather than exposing the raw device
+     * number, so it is distinct per submount and survives server restarts. */
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_FSID) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_FSID;
-        attr->va_fsid      = attr->va_dev;
+        attr->va_fsid      = chimera_vfs_fsid_for_dev(stx->stx_dev_major, stx->stx_dev_minor);
     }
 } /* io_uring_stat_to_chimera_attr */
 

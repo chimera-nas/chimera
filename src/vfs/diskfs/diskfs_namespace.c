@@ -1838,6 +1838,7 @@ diskfs_open_at_acl_cb(
     (void) result;
     diskfs_bt_op_free(thread, op);
 
+    request->wait_reason = "openat:dir_insert";   /* diag: park-point localization */
     op = diskfs_bt_op_alloc(thread);
     if (diskfs_dir_insert_async(op, thread, p->txn, parent,
                                 request->open_at.name_hash, request->open_at.name,
@@ -1904,6 +1905,7 @@ diskfs_open_at_alloc_cb(
     /* Seed the new file's ACL (inherited from the parent, or a Windows default
      * DACL for SMB creates) as the child's ACL record.  An explicit ACL in
      * set_attr (e.g. an SMB SD via SecD) takes precedence. */
+    request->wait_reason = "openat:inherit_acl";   /* diag: park-point localization */
     op = diskfs_bt_op_alloc(thread);
     if (diskfs_inherit_acl_async(op, thread, p->txn, inode, parent,
                                  new_acl_open,
@@ -1948,6 +1950,7 @@ diskfs_open_at_check_cb(
             return;
         }
 
+        request->wait_reason = "openat:inode_alloc";   /* diag: park-point localization */
         diskfs_inode_alloc_async(thread, p->txn, diskfs_open_at_alloc_cb, request);
         return;
     }

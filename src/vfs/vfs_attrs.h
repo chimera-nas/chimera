@@ -128,11 +128,21 @@ struct chimera_acl;
  * deliberately NOT part of MASK_STAT: MASK_STAT is the set every backend is
  * required to supply, and the attr cache's "complete entry" gate and the
  * remove_at hardlink-invalidation both rely on that.  Backends that don't
- * track btime (linux/io_uring/cairn) must still satisfy MASK_STAT. */
+ * track btime (linux/io_uring/cairn) must still satisfy MASK_STAT.
+ *
+ * FSID is included so the attr cache can satisfy a GETATTR (the hottest op):
+ * NFSv3 GETATTR carries FSID in its requested mask, so without FSID here the
+ * cache-consult gate (req_mask subset of {FH|CACHEABLE}) never fired and every
+ * GETATTR fell through to the backend.  FSID is per-filehandle (bound to one
+ * inode on one filesystem), so it is safe to cache; every backend fills it
+ * cheaply (native: a constant fsid; linux/io_uring: a per-mount fsid).  The
+ * cache's complete-entry gate (vfs_attr_cache.h) requires FSID for exactly this
+ * reason -- an entry that lacks it must not be served to an FSID request. */
 #define CHIMERA_VFS_ATTR_MASK_CACHEABLE     ( \
             CHIMERA_VFS_ATTR_MASK_STAT | \
             CHIMERA_VFS_ATTR_BTIME | \
-            CHIMERA_VFS_ATTR_CHANGE)
+            CHIMERA_VFS_ATTR_CHANGE | \
+            CHIMERA_VFS_ATTR_FSID)
 
 #define CHIMERA_VFS_TIME_NOW                ((1l << 30) - 3l)
 
