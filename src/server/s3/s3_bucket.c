@@ -22,6 +22,7 @@
 #include "s3_internal.h"
 #include "s3.h"
 #include "s3_procs.h"
+#include "s3_acl.h"
 
 /* ---------------------------------------------------------------- ListBuckets */
 
@@ -161,12 +162,18 @@ chimera_s3_create_bucket_lookup_cb(
     memcpy(request->bucket_fh, attr->va_fh, attr->va_fh_len);
     request->bucket_fhlen = attr->va_fh_len;
 
+    /* The bucket directory is created (as the server) under the bucket root,
+     * but is owned by the requesting principal and carries the mode implied by
+     * the canned ACL (x-amz-acl) on the CreateBucket request. This makes the
+     * unified VFS permission gate enforce per-credential access to the bucket
+     * for every subsequent operation. */
     memset(&request->set_attr, 0, sizeof(request->set_attr));
     request->set_attr.va_set_mask = CHIMERA_VFS_ATTR_MODE |
         CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID;
-    request->set_attr.va_mode = S_IFDIR | 0755;
-    request->set_attr.va_uid  = 0;
-    request->set_attr.va_gid  = 0;
+    request->set_attr.va_mode = S_IFDIR |
+        chimera_s3_canned_acl_to_mode(request->canned_acl, 1);
+    request->set_attr.va_uid = request->cred.uid;
+    request->set_attr.va_gid = request->cred.gid;
 
     chimera_vfs_mkdir(thread->vfs, &thread->shared->cred,
                       request->bucket_fh, request->bucket_fhlen,

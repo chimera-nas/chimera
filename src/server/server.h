@@ -758,6 +758,10 @@ chimera_server_add_s3_cred(
     struct chimera_server *server,
     const char            *access_key,
     const char            *secret_key,
+    uint32_t               uid,
+    uint32_t               gid,
+    const char            *canon_id,
+    const char            *display_name,
     int                    pinned);
 
 void

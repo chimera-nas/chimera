@@ -52,7 +52,7 @@ chimera_s3_delete_open_callback(
 
     request->dir_handle = oh;
 
-    chimera_vfs_remove_at(thread->vfs, &thread->shared->cred,
+    chimera_vfs_remove_at(thread->vfs, &request->cred,
                           oh,
                           request->name,
                           request->name_len,
@@ -83,7 +83,7 @@ chimera_s3_get_lookup_callback(
 
     chimera_s3_abort_if(!(attr->va_set_mask & CHIMERA_VFS_ATTR_FH), "put lookup callback: no fh");
 
-    chimera_vfs_open_fh(thread->vfs, &thread->shared->cred,
+    chimera_vfs_open_fh(thread->vfs, &request->cred,
                         attr->va_fh,
                         attr->va_fh_len,
                         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
@@ -125,7 +125,7 @@ chimera_s3_delete(
     request->set_attr.va_set_mask = 0;
 
 
-    chimera_vfs_lookup(thread->vfs, &thread->shared->cred,
+    chimera_vfs_lookup(thread->vfs, &request->cred,
                        request->bucket_fh,
                        request->bucket_fhlen,
                        dirpath,
