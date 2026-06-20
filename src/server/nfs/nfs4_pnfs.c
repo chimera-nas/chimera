@@ -558,9 +558,21 @@ ff_lg_emit(struct ff_layoutget_ctx *ctx)
         chimera_vfs_pnfs_find_device(req->thread->shared->vfs, deviceid);
 
     if (ds && ds->backing_local) {
-        native_fh     = backing_fh;
-        native_fh_len = backing_fh_len;
+        /* Local DS (this server, local mount): backing_fh is a raw VFS handle,
+        * so wrap it into the on-wire form the DS's NFS decode expects.  The DS
+        * is this same server, so it shares the signing key and verifies it. */
+        chimera_nfs_fh_wrap(ds_fhwire, &ds_fhwire_len, req->export_id,
+                            backing_fh, backing_fh_len,
+                            req->thread->shared->fh_key, req->thread->shared->fh_sign);
+        native_fh     = ds_fhwire;
+        native_fh_len = ds_fhwire_len;
     } else {
+        /* Remote DS reached through the nfs proxy: the proxy already holds the
+         * DS's on-wire handle (signed by the DS itself), so strip the proxy's
+         * mount wrapper and pass it through unchanged.  Re-wrapping here would
+         * double-wrap it and the DS would fail to decode.  (A split-DS cluster
+         * must share one nfs_fh_key so the DS-minted handle verifies after the
+         * round-trip through the client.) */
         native_fh     = backing_fh + FF_BLOB_FH_SKIP;
         native_fh_len = backing_fh_len - FF_BLOB_FH_SKIP;
     }
@@ -581,18 +593,9 @@ ff_lg_emit(struct ff_layoutget_ctx *ctx)
      * this layout; CB_LAYOUTRECALL rides the shared delegation channel. */
     nfs4_cb_ensure_probe(req->thread, client, req);
 
-    /* The client uses this handle against the data server over NFSv3, which
-     * decodes the wrapped on-wire form; wrap the native DS handle with the
-     * file's export id (and this server's signing key).  For a local DS this is
-     * the same server/key, so it verifies.  (A remote/proxied DS has its own
-     * key and is not yet supported with signing -- see pNFS proxy deferral.) */
-    chimera_nfs_fh_wrap(ds_fhwire, &ds_fhwire_len, req->export_id,
-                        native_fh, native_fh_len,
-                        req->thread->shared->fh_key, req->thread->shared->fh_sign);
-
     body = xdr_dbuf_alloc_space(256, req->encoding->dbuf);
     chimera_nfs_abort_if(body == NULL, "Failed to allocate space");
-    body_len = chimera_nfs4_encode_ff_layout(body, deviceid, ds_fhwire, ds_fhwire_len,
+    body_len = chimera_nfs4_encode_ff_layout(body, deviceid, native_fh, native_fh_len,
                                              args->loga_iomode);
 
     lo = xdr_dbuf_alloc_space(sizeof(*lo), req->encoding->dbuf);
