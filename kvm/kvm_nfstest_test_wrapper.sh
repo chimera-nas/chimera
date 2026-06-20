@@ -300,6 +300,15 @@ case "$NFSTEST_PROGRAM" in
     # nfstest_alloc analyses the whole packet trace in memory; nfstest_dio drives
     # 1 MiB direct-I/O transfers whose traces and buffers blow past 1 GiB.
     nfstest_alloc | nfstest_dio) QEMU_MEM="8G" ;;
+    # nfstest_delegation / nfstest_cache bracket every subtest with a fresh
+    # in-guest tcpdump trace window whose AF_PACKET ring is ~192 MiB and is not
+    # reliably reaped before the next window opens.  Several live rings have
+    # OOM-killed tcpdump in a 1 GiB guest (8 x 192 MiB observed under -j32 load),
+    # which then fails the trace-based assertions ("OPEN should be sent", "WRITE
+    # delegation should be granted") even though the functional sub-asserts pass.
+    # The -m value is only a ceiling -- KVM guest RAM is demand-paged -- so the
+    # extra headroom costs no host memory unless the guest actually touches it.
+    nfstest_delegation | nfstest_cache) QEMU_MEM="4G" ;;
 esac
 
 # Boot QEMU inside the netns; the guest's /init.sh runs test_cmd (no pre-mount).
