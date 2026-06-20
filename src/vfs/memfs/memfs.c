@@ -183,6 +183,7 @@ struct memfs_inode {
     struct timespec            mtime;
     struct timespec            ctime;
     struct timespec            btime;
+    uint64_t                   change; /* native monotonic change counter */
     struct memfs_inode        *next;
     struct memfs_xattr        *xattrs;
     struct memfs_remote       *remote; /* non-NULL => pNFS stub (data lives on a DS) */
@@ -672,6 +673,7 @@ memfs_inode_alloc(
     inode->gen++;
     inode->refcnt         = 1;
     inode->mode           = 0;
+    inode->change         = 0;
     inode->dos_attributes = 0;
     inode->acl            = NULL;
     inode->xattrs         = NULL;
@@ -1093,6 +1095,7 @@ memfs_init(
     inode->atime = now;
     inode->mtime = now;
     inode->ctime = now;
+    inode->change++;
     inode->btime = now;
 
     rb_tree_init(&inode->dir.dirents);
@@ -1360,6 +1363,12 @@ memfs_map_attrs(
         attr->va_btime     = inode->btime;
     }
 
+    /* Native monotonic change counter (CHIMERA_VFS_CAP_CHANGE). */
+    if (attr->va_req_mask & CHIMERA_VFS_ATTR_CHANGE) {
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_CHANGE;
+        attr->va_change    = inode->change;
+    }
+
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_FSID) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_FSID;
         attr->va_fsid      = shared->fsid;
@@ -1519,6 +1528,9 @@ memfs_apply_attrs(
     } else {
         inode->ctime = now;
     }
+
+    /* Any setattr is a metadata change; advance the native change counter. */
+    inode->change++;
 
 } /* memfs_apply_attrs */
 
@@ -1931,6 +1943,12 @@ memfs_mount(
         attr->va_btime     = inode->btime;
     }
 
+    /* Native monotonic change counter (CHIMERA_VFS_CAP_CHANGE). */
+    if (attr->va_req_mask & CHIMERA_VFS_ATTR_CHANGE) {
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_CHANGE;
+        attr->va_change    = inode->change;
+    }
+
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_FSID) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_FSID;
         attr->va_fsid      = shared->fsid;
@@ -2200,7 +2218,8 @@ memfs_mkdir_at(
     inode->atime      = now;
     inode->mtime      = now;
     inode->ctime      = now;
-    inode->btime      = now;
+    inode->change++;
+    inode->btime = now;
 
     rb_tree_init(&inode->dir.dirents);
 
@@ -2276,6 +2295,7 @@ memfs_mkdir_at(
 
     parent_inode->mtime = now;
     parent_inode->ctime = now;
+    parent_inode->change++;
 
     memfs_map_attrs(shared, r_dir_post_attr, parent_inode, request->fh);
 
@@ -2316,7 +2336,8 @@ memfs_mknod_at(
     inode->atime      = now;
     inode->mtime      = now;
     inode->ctime      = now;
-    inode->btime      = now;
+    inode->change++;
+    inode->btime = now;
 
     /* The mode (including file type bits S_IFCHR/S_IFBLK/S_IFSOCK/S_IFIFO)
      * and rdev are set via set_attr by the caller */
@@ -2390,6 +2411,7 @@ memfs_mknod_at(
 
     parent_inode->mtime = now;
     parent_inode->ctime = now;
+    parent_inode->change++;
 
     memfs_map_attrs(shared, r_dir_post_attr, parent_inode, request->fh);
 
@@ -2463,6 +2485,7 @@ memfs_remove_at(
     }
     parent_inode->mtime = now;
     parent_inode->ctime = now;
+    parent_inode->change++;
 
     rb_tree_remove(&parent_inode->dir.dirents, &dirent->node);
 
@@ -2474,6 +2497,7 @@ memfs_remove_at(
          * link count, which is a status change: bump its ctime. */
         if (inode->nlink > 0) {
             inode->ctime = now;
+            inode->change++;
         }
     }
 
@@ -2769,15 +2793,16 @@ memfs_open_at(
 
         pthread_mutex_lock(&inode->lock);
 
-        inode->size            = 0;
-        inode->space_used      = 0;
-        inode->uid             = request->cred->uid;
-        inode->gid             = request->cred->gid;
-        inode->nlink           = 1;
-        inode->mode            = S_IFREG |  0644;
-        inode->atime           = now;
-        inode->mtime           = now;
-        inode->ctime           = now;
+        inode->size       = 0;
+        inode->space_used = 0;
+        inode->uid        = request->cred->uid;
+        inode->gid        = request->cred->gid;
+        inode->nlink      = 1;
+        inode->mode       = S_IFREG |  0644;
+        inode->atime      = now;
+        inode->mtime      = now;
+        inode->ctime      = now;
+        inode->change++;
         inode->file.blocks     = NULL;
         inode->file.max_blocks = 0;
         inode->file.num_blocks = 0;
@@ -2796,8 +2821,9 @@ memfs_open_at(
 
         rb_tree_insert(&parent_inode->dir.dirents, hash, dirent);
 
-        parent_inode->mtime        = now;
-        parent_inode->ctime        = now;
+        parent_inode->mtime = now;
+        parent_inode->ctime = now;
+        parent_inode->change++;
         request->open_at.r_created = 1;
     } else {
         inode = memfs_inode_get_inum(shared, dirent->inum, dirent->gen);
@@ -2923,15 +2949,16 @@ memfs_create_unlinked(
 
     inode = memfs_inode_alloc_thread(thread);
 
-    inode->size            = 0;
-    inode->space_used      = 0;
-    inode->uid             = request->cred->uid;
-    inode->gid             = request->cred->gid;
-    inode->nlink           = 0;
-    inode->mode            = S_IFREG |  0644;
-    inode->atime           = now;
-    inode->mtime           = now;
-    inode->ctime           = now;
+    inode->size       = 0;
+    inode->space_used = 0;
+    inode->uid        = request->cred->uid;
+    inode->gid        = request->cred->gid;
+    inode->nlink      = 0;
+    inode->mode       = S_IFREG |  0644;
+    inode->atime      = now;
+    inode->mtime      = now;
+    inode->ctime      = now;
+    inode->change++;
     inode->file.blocks     = NULL;
     inode->file.max_blocks = 0;
     inode->file.num_blocks = 0;
@@ -3361,6 +3388,7 @@ memfs_write(
 
     inode->mtime = now;
     inode->ctime = now;
+    inode->change++;
 
     /* POSIX kill-priv: a non-privileged write to a regular file clears the
      * set-user-ID bit and the set-group-ID bit (when group-executable).  Named
@@ -3553,6 +3581,7 @@ memfs_allocate(
 
     inode->mtime = now;
     inode->ctime = now;
+    inode->change++;
 
     memfs_map_attrs_fork(shared, &request->allocate.r_post_attr, inode, stream, request->fh);
 
@@ -3862,6 +3891,7 @@ memfs_copy_range(
 
     dst_inode->mtime = now;
     dst_inode->ctime = now;
+    dst_inode->change++;
     src_inode->atime = now;
 
     memfs_map_attrs(shared, &request->copy_range.r_post_attr, dst_inode,
@@ -4008,8 +4038,10 @@ memfs_move_range(
 
     dst_inode->mtime = now;
     dst_inode->ctime = now;
+    dst_inode->change++;
     src_inode->mtime = now;
     src_inode->ctime = now;
+    src_inode->change++;
 
     memfs_map_attrs(shared, &request->move_range.r_dst_post_attr, dst_inode,
                     request->move_range.dst_handle->fh);
@@ -4251,6 +4283,7 @@ memfs_clone_range(
 
     dst_inode->mtime = now;
     dst_inode->ctime = now;
+    dst_inode->change++;
     src_inode->atime = now;
 
     memfs_map_attrs(shared, &request->clone_range.r_post_attr, dst_inode,
@@ -4401,7 +4434,8 @@ memfs_symlink_at(
     inode->atime      = now;
     inode->mtime      = now;
     inode->ctime      = now;
-    inode->btime      = now;
+    inode->change++;
+    inode->btime = now;
 
     inode->symlink.target = memfs_symlink_target_alloc(thread);
 
@@ -4456,6 +4490,7 @@ memfs_symlink_at(
 
     parent_inode->mtime = now;
     parent_inode->ctime = now;
+    parent_inode->change++;
 
     memfs_map_attrs(shared, &request->symlink_at.r_dir_post_attr, parent_inode, request->fh);
 
@@ -4783,11 +4818,14 @@ memfs_rename_at(
 
     old_parent_inode->mtime = now;
     old_parent_inode->ctime = now;
+    old_parent_inode->change++;
     new_parent_inode->mtime = now;
     new_parent_inode->ctime = now;
+    new_parent_inode->change++;
 
     /* POSIX: a successful rename marks the renamed file's status-change time. */
     child_inode->ctime = now;
+    child_inode->change++;
 
     memfs_map_attrs(shared, &request->rename_at.r_fromdir_post_attr, old_parent_inode, request->fh);
     memfs_map_attrs(shared, &request->rename_at.r_todir_post_attr, new_parent_inode, request->rename_at.new_fh);
@@ -4884,9 +4922,11 @@ memfs_link_at(
          * the target's mutex. */
         if (existing_dirent->inum == inode->inum &&
             existing_dirent->gen == inode->gen) {
-            inode->ctime        = now;
+            inode->ctime = now;
+            inode->change++;
             parent_inode->mtime = now;
             parent_inode->ctime = now;
+            parent_inode->change++;
             memfs_map_attrs(shared, &request->link_at.r_dir_post_attr,
                             parent_inode, request->link_at.dir_fh);
             memfs_map_attrs(shared, &request->link_at.r_attr, inode,
@@ -4938,9 +4978,11 @@ memfs_link_at(
 
     inode->nlink++;
 
-    inode->ctime        = now;
+    inode->ctime = now;
+    inode->change++;
     parent_inode->mtime = now;
     parent_inode->ctime = now;
+    parent_inode->change++;
 
     memfs_map_attrs(shared, &request->link_at.r_dir_post_attr, parent_inode, request->link_at.dir_fh);
     memfs_map_attrs(shared, &request->link_at.r_attr, inode, request->fh);
@@ -5067,6 +5109,7 @@ memfs_set_xattr(
 
     chimera_vfs_realtime(&now);
     inode->ctime = now;
+    inode->change++;
 
     memfs_map_attrs(shared, &request->set_xattr.r_post_attr, inode, request->fh);
 
@@ -5166,6 +5209,7 @@ memfs_remove_xattr(
 
     chimera_vfs_realtime(&now);
     inode->ctime = now;
+    inode->change++;
 
     memfs_map_attrs(shared, &request->remove_xattr.r_post_attr, inode, request->fh);
 
@@ -5221,13 +5265,14 @@ memfs_open_stream(
         stream->name = malloc(request->open_stream.namelen);
         memcpy(stream->name, request->open_stream.name,
                request->open_stream.namelen);
-        stream->name_len               = request->open_stream.namelen;
-        stream->id                     = ++inode->next_stream_id;
-        stream->linked                 = 1;
-        stream->next                   = inode->streams;
-        inode->streams                 = stream;
-        inode->mtime                   = now;
-        inode->ctime                   = now;
+        stream->name_len = request->open_stream.namelen;
+        stream->id       = ++inode->next_stream_id;
+        stream->linked   = 1;
+        stream->next     = inode->streams;
+        inode->streams   = stream;
+        inode->mtime     = now;
+        inode->ctime     = now;
+        inode->change++;
         request->open_stream.r_created = 1;
     } else if (flags & CHIMERA_VFS_OPEN_EXCLUSIVE) {
         pthread_mutex_unlock(&inode->lock);
@@ -5240,6 +5285,7 @@ memfs_open_stream(
         stream->space_used = 0;
         inode->mtime       = now;
         inode->ctime       = now;
+        inode->change++;
     }
 
     /* Named streams share the base file's metadata (mode/owner/timestamps and
@@ -5401,6 +5447,7 @@ memfs_remove_stream(
     }
 
     inode->ctime = now;
+    inode->change++;
 
     memfs_map_attrs(shared, &request->remove_stream.r_post_attr, inode, request->fh);
 
@@ -5535,7 +5582,8 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_memfs = {
         CHIMERA_VFS_CAP_COPY_RANGE | CHIMERA_VFS_CAP_CLONE_RANGE | CHIMERA_VFS_CAP_MOVE_RANGE |
         CHIMERA_VFS_CAP_ACL_NATIVE | CHIMERA_VFS_CAP_XATTR | CHIMERA_VFS_CAP_LAYOUT |
         CHIMERA_VFS_CAP_READ_PROVIDES_BUFFERS |
-        CHIMERA_VFS_CAP_NAMED_STREAMS | CHIMERA_VFS_CAP_RPL | CHIMERA_VFS_CAP_FS_LOCK,
+        CHIMERA_VFS_CAP_NAMED_STREAMS | CHIMERA_VFS_CAP_RPL | CHIMERA_VFS_CAP_FS_LOCK |
+        CHIMERA_VFS_CAP_CHANGE,
     .init           = memfs_init,
     .destroy        = memfs_destroy,
     .thread_init    = memfs_thread_init,

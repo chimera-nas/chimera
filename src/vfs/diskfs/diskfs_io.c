@@ -847,6 +847,7 @@ diskfs_inode_load_complete(
         inode->btime_sec      = di->btime_sec;
         inode->btime_nsec     = di->btime_nsec;
         inode->dos_attributes = di->dos_attributes;
+        inode->change         = di->change;
         inode->parent_inum    = di->parent_inum;
         inode->parent_gen     = di->parent_gen;
         /* Publish write-locked, held by this fault: nobody can grant (or
@@ -1867,6 +1868,7 @@ diskfs_write_finish_map(struct chimera_vfs_request *request)
     inode->mtime_nsec = now.tv_nsec;
     inode->ctime_sec  = now.tv_sec;
     inode->ctime_nsec = now.tv_nsec;
+    inode->change++;
 
     /* POSIX kill-priv: a non-privileged write to a regular file clears the
      * set-user-ID bit and the set-group-ID bit (when group-executable).  When
@@ -2995,6 +2997,7 @@ diskfs_allocate_finalize(struct chimera_vfs_request *request)
     inode->mtime_nsec = now.tv_nsec;
     inode->ctime_sec  = now.tv_sec;
     inode->ctime_nsec = now.tv_nsec;
+    inode->change++;
 
     diskfs_map_attrs(thread, &request->allocate.r_post_attr, inode);
     diskfs_op_ok(request, p->txn);

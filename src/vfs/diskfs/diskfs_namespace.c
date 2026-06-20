@@ -787,18 +787,19 @@ diskfs_mkdir_at_alloc_cb(
 
     clock_gettime(CLOCK_REALTIME, &now);
 
-    inode->size           = 4096;
-    inode->space_used     = 4096;
-    inode->uid            = request->cred->uid;
-    inode->gid            = request->cred->gid;
-    inode->nlink          = 2;
-    inode->mode           = S_IFDIR | 0755;
-    inode->atime_sec      = now.tv_sec;
-    inode->atime_nsec     = now.tv_nsec;
-    inode->mtime_sec      = now.tv_sec;
-    inode->mtime_nsec     = now.tv_nsec;
-    inode->ctime_sec      = now.tv_sec;
-    inode->ctime_nsec     = now.tv_nsec;
+    inode->size       = 4096;
+    inode->space_used = 4096;
+    inode->uid        = request->cred->uid;
+    inode->gid        = request->cred->gid;
+    inode->nlink      = 2;
+    inode->mode       = S_IFDIR | 0755;
+    inode->atime_sec  = now.tv_sec;
+    inode->atime_nsec = now.tv_nsec;
+    inode->mtime_sec  = now.tv_sec;
+    inode->mtime_nsec = now.tv_nsec;
+    inode->ctime_sec  = now.tv_sec;
+    inode->ctime_nsec = now.tv_nsec;
+    inode->change++;
     inode->btime_sec      = now.tv_sec;
     inode->btime_nsec     = now.tv_nsec;
     inode->dos_attributes = 0;
@@ -819,6 +820,7 @@ diskfs_mkdir_at_alloc_cb(
     parent->mtime_nsec = now.tv_nsec;
     parent->ctime_sec  = now.tv_sec;
     parent->ctime_nsec = now.tv_nsec;
+    parent->change++;
 
     p->inode_stash[1] = inode;
 
@@ -972,18 +974,19 @@ diskfs_mknod_at_alloc_cb(
 
     clock_gettime(CLOCK_REALTIME, &now);
 
-    inode->size           = 0;
-    inode->space_used     = 0;
-    inode->uid            = request->cred->uid;
-    inode->gid            = request->cred->gid;
-    inode->nlink          = 1;
-    inode->rdev           = 0;
-    inode->atime_sec      = now.tv_sec;
-    inode->atime_nsec     = now.tv_nsec;
-    inode->mtime_sec      = now.tv_sec;
-    inode->mtime_nsec     = now.tv_nsec;
-    inode->ctime_sec      = now.tv_sec;
-    inode->ctime_nsec     = now.tv_nsec;
+    inode->size       = 0;
+    inode->space_used = 0;
+    inode->uid        = request->cred->uid;
+    inode->gid        = request->cred->gid;
+    inode->nlink      = 1;
+    inode->rdev       = 0;
+    inode->atime_sec  = now.tv_sec;
+    inode->atime_nsec = now.tv_nsec;
+    inode->mtime_sec  = now.tv_sec;
+    inode->mtime_nsec = now.tv_nsec;
+    inode->ctime_sec  = now.tv_sec;
+    inode->ctime_nsec = now.tv_nsec;
+    inode->change++;
     inode->btime_sec      = now.tv_sec;
     inode->btime_nsec     = now.tv_nsec;
     inode->dos_attributes = 0;
@@ -1004,6 +1007,7 @@ diskfs_mknod_at_alloc_cb(
     parent->mtime_nsec = now.tv_nsec;
     parent->ctime_sec  = now.tv_sec;
     parent->ctime_nsec = now.tv_nsec;
+    parent->change++;
 
     diskfs_map_attrs(thread, &request->mknod_at.r_dir_post_attr, parent);
 
@@ -1156,6 +1160,7 @@ diskfs_remove_at_removed_cb(
     parent->mtime_nsec = now.tv_nsec;
     parent->ctime_sec  = now.tv_sec;
     parent->ctime_nsec = now.tv_nsec;
+    parent->change++;
 
     if (S_ISDIR(inode->mode)) {
         inode->nlink = 0;
@@ -1166,6 +1171,7 @@ diskfs_remove_at_removed_cb(
         if (inode->nlink > 0) {
             inode->ctime_sec  = now.tv_sec;
             inode->ctime_nsec = now.tv_nsec;
+            inode->change++;
         }
     }
 
@@ -1862,18 +1868,19 @@ diskfs_open_at_alloc_cb(
 
     clock_gettime(CLOCK_REALTIME, &now);
 
-    inode->size           = 0;
-    inode->space_used     = 0;
-    inode->uid            = request->cred->uid;
-    inode->gid            = request->cred->gid;
-    inode->nlink          = 1;
-    inode->mode           = S_IFREG | 0644;
-    inode->atime_sec      = now.tv_sec;
-    inode->atime_nsec     = now.tv_nsec;
-    inode->mtime_sec      = now.tv_sec;
-    inode->mtime_nsec     = now.tv_nsec;
-    inode->ctime_sec      = now.tv_sec;
-    inode->ctime_nsec     = now.tv_nsec;
+    inode->size       = 0;
+    inode->space_used = 0;
+    inode->uid        = request->cred->uid;
+    inode->gid        = request->cred->gid;
+    inode->nlink      = 1;
+    inode->mode       = S_IFREG | 0644;
+    inode->atime_sec  = now.tv_sec;
+    inode->atime_nsec = now.tv_nsec;
+    inode->mtime_sec  = now.tv_sec;
+    inode->mtime_nsec = now.tv_nsec;
+    inode->ctime_sec  = now.tv_sec;
+    inode->ctime_nsec = now.tv_nsec;
+    inode->change++;
     inode->btime_sec      = now.tv_sec;
     inode->btime_nsec     = now.tv_nsec;
     inode->dos_attributes = 0;
@@ -1890,6 +1897,7 @@ diskfs_open_at_alloc_cb(
     parent->mtime_nsec = now.tv_nsec;
     parent->ctime_sec  = now.tv_sec;
     parent->ctime_nsec = now.tv_nsec;
+    parent->change++;
 
     p->inode_stash[1] = inode;
 
@@ -2043,18 +2051,19 @@ diskfs_create_unlinked_alloc_cb(
 
     clock_gettime(CLOCK_REALTIME, &now);
 
-    inode->size           = 0;
-    inode->space_used     = 0;
-    inode->uid            = request->cred->uid;
-    inode->gid            = request->cred->gid;
-    inode->nlink          = 0;     /* anonymous; orphan-recorded below */
-    inode->mode           = S_IFREG | 0644;
-    inode->atime_sec      = now.tv_sec;
-    inode->atime_nsec     = now.tv_nsec;
-    inode->mtime_sec      = now.tv_sec;
-    inode->mtime_nsec     = now.tv_nsec;
-    inode->ctime_sec      = now.tv_sec;
-    inode->ctime_nsec     = now.tv_nsec;
+    inode->size       = 0;
+    inode->space_used = 0;
+    inode->uid        = request->cred->uid;
+    inode->gid        = request->cred->gid;
+    inode->nlink      = 0;         /* anonymous; orphan-recorded below */
+    inode->mode       = S_IFREG | 0644;
+    inode->atime_sec  = now.tv_sec;
+    inode->atime_nsec = now.tv_nsec;
+    inode->mtime_sec  = now.tv_sec;
+    inode->mtime_nsec = now.tv_nsec;
+    inode->ctime_sec  = now.tv_sec;
+    inode->ctime_nsec = now.tv_nsec;
+    inode->change++;
     inode->btime_sec      = now.tv_sec;
     inode->btime_nsec     = now.tv_nsec;
     inode->dos_attributes = 0;
@@ -2234,18 +2243,19 @@ diskfs_symlink_at_alloc_cb(
 
     clock_gettime(CLOCK_REALTIME, &now);
 
-    inode->size           = request->symlink_at.targetlen;
-    inode->space_used     = request->symlink_at.targetlen;
-    inode->uid            = request->cred->uid;
-    inode->gid            = request->cred->gid;
-    inode->nlink          = 1;
-    inode->mode           = S_IFLNK | 0755;
-    inode->atime_sec      = now.tv_sec;
-    inode->atime_nsec     = now.tv_nsec;
-    inode->mtime_sec      = now.tv_sec;
-    inode->mtime_nsec     = now.tv_nsec;
-    inode->ctime_sec      = now.tv_sec;
-    inode->ctime_nsec     = now.tv_nsec;
+    inode->size       = request->symlink_at.targetlen;
+    inode->space_used = request->symlink_at.targetlen;
+    inode->uid        = request->cred->uid;
+    inode->gid        = request->cred->gid;
+    inode->nlink      = 1;
+    inode->mode       = S_IFLNK | 0755;
+    inode->atime_sec  = now.tv_sec;
+    inode->atime_nsec = now.tv_nsec;
+    inode->mtime_sec  = now.tv_sec;
+    inode->mtime_nsec = now.tv_nsec;
+    inode->ctime_sec  = now.tv_sec;
+    inode->ctime_nsec = now.tv_nsec;
+    inode->change++;
     inode->btime_sec      = now.tv_sec;
     inode->btime_nsec     = now.tv_nsec;
     inode->dos_attributes = 0;
@@ -2256,6 +2266,7 @@ diskfs_symlink_at_alloc_cb(
     parent->mtime_nsec = now.tv_nsec;
     parent->ctime_sec  = now.tv_sec;
     parent->ctime_nsec = now.tv_nsec;
+    parent->change++;
 
     diskfs_map_attrs(thread, &request->symlink_at.r_dir_post_attr, parent);
 
@@ -2561,16 +2572,19 @@ diskfs_rename_at_perform_final_cb(
     op->mtime_nsec = now.tv_nsec;
     op->ctime_sec  = now.tv_sec;
     op->ctime_nsec = now.tv_nsec;
+    op->change++;
     if (np != op) {
         np->mtime_sec  = now.tv_sec;
         np->mtime_nsec = now.tv_nsec;
         np->ctime_sec  = now.tv_sec;
         np->ctime_nsec = now.tv_nsec;
+        np->change++;
     }
 
     /* POSIX: a successful rename marks the renamed file's status-change time. */
     child->ctime_sec  = now.tv_sec;
     child->ctime_nsec = now.tv_nsec;
+    child->change++;
 
     diskfs_map_attrs(thread, &request->rename_at.r_fromdir_post_attr, op);
     diskfs_map_attrs(thread, &request->rename_at.r_todir_post_attr, np);
@@ -3091,12 +3105,14 @@ diskfs_link_at_finish(struct chimera_vfs_request *request)
     clock_gettime(CLOCK_REALTIME, &now);
 
     inode->nlink++;
-    inode->ctime_sec   = now.tv_sec;
-    inode->ctime_nsec  = now.tv_nsec;
+    inode->ctime_sec  = now.tv_sec;
+    inode->ctime_nsec = now.tv_nsec;
+    inode->change++;
     parent->mtime_sec  = now.tv_sec;
     parent->mtime_nsec = now.tv_nsec;
     parent->ctime_sec  = now.tv_sec;
     parent->ctime_nsec = now.tv_nsec;
+    parent->change++;
 
     diskfs_map_attrs(thread, &request->link_at.r_attr, inode);
     diskfs_map_attrs(thread, &request->link_at.r_dir_post_attr, parent);
