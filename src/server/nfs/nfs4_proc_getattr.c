@@ -126,12 +126,19 @@ chimera_nfs4_getattr_cb_resume(
 
     if (status == 0) {
         if (got_change) {
-            /* The CHANGE attribute is encoded from va_ctime as
-             * sec*1e9 + nsec; reconstruct a ctime that re-encodes to the
-             * holder's exact change value. */
-            park->attr.va_ctime.tv_sec  = change / 1000000000ULL;
-            park->attr.va_ctime.tv_nsec = change % 1000000000ULL;
-            park->attr.va_set_mask     |= CHIMERA_VFS_ATTR_CTIME;
+            /* Override the server's view with the holder's change value, in
+            * whichever representation this file's backend uses -- so the
+            * marshaller emits the holder's value AND keeps change_attr_type
+            * stable per object.  A native-counter backend (CAP_CHANGE) carries
+            * it in va_change; a ctime-derived backend has no CHANGE bit, so we
+            * reconstruct a ctime that re-encodes (sec*1e9 + nsec) to it. */
+            if (park->attr.va_set_mask & CHIMERA_VFS_ATTR_CHANGE) {
+                park->attr.va_change = change;
+            } else {
+                park->attr.va_ctime.tv_sec  = change / 1000000000ULL;
+                park->attr.va_ctime.tv_nsec = change % 1000000000ULL;
+                park->attr.va_set_mask     |= CHIMERA_VFS_ATTR_CTIME;
+            }
         }
         if (got_size) {
             park->attr.va_size      = size;
