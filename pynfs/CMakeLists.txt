@@ -383,3 +383,24 @@ set_tests_properties(chimera/pynfs/kerberos/sec_krb5only_deny_sys_memfs_nfs4.1 P
     LABELS "pynfs;pynfs_kerberos;rpcsec_gss;memfs;nfs4.1"
     SKIP_RETURN_CODE 77
     ENVIRONMENT "PYTHONUNBUFFERED=1;NFS_EXPORT_SEC=krb5;NFS_KRB_SEC=sys;NFS_EXPECT_WRONGSEC=1")
+
+# Privacy service (krb5p) end-to-end smoke.  Same path as the krb5 smoke but
+# drives pynfs with sec=krb5p, so every call's arguments are GSS-wrapped as
+# rpc_gss_priv_data (gss_wrap, conf=1) and every reply's results are wrapped
+# symmetrically -- exercising the encrypt/decrypt framing on both directions
+# (including a multi-block WRITE/READ via OPEN1/OPEN2).
+add_test(NAME chimera/pynfs/kerberos/krb5p_smoke_memfs_nfs4.1
+    COMMAND bash ${NFS_KRB_WRAPPER} ${CHIMERA_BINARY} memfs ${PYNFS_DIR} ${NFS_KRB_CODES})
+set_tests_properties(chimera/pynfs/kerberos/krb5p_smoke_memfs_nfs4.1 PROPERTIES
+    LABELS "pynfs;pynfs_kerberos;rpcsec_gss;memfs;nfs4.1"
+    SKIP_RETURN_CODE 77
+    ENVIRONMENT "PYTHONUNBUFFERED=1;NFS_KRB_SEC=krb5p")
+
+# Per-export sec=krb5p policy: restrict the export to privacy only and verify an
+# allowed flavor (krb5p) works through the enforcement path.
+add_test(NAME chimera/pynfs/kerberos/sec_krb5p_only_allow_memfs_nfs4.1
+    COMMAND bash ${NFS_KRB_WRAPPER} ${CHIMERA_BINARY} memfs ${PYNFS_DIR} ${NFS_KRB_CODES})
+set_tests_properties(chimera/pynfs/kerberos/sec_krb5p_only_allow_memfs_nfs4.1 PROPERTIES
+    LABELS "pynfs;pynfs_kerberos;rpcsec_gss;memfs;nfs4.1"
+    SKIP_RETURN_CODE 77
+    ENVIRONMENT "PYTHONUNBUFFERED=1;NFS_EXPORT_SEC=krb5p;NFS_KRB_SEC=krb5p")

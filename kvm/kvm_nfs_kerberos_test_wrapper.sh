@@ -228,7 +228,10 @@ done
 # build looks for it at /run/rpc_pipefs.  (init.sh copies the krb5.conf/keytab/
 # hosts material from the 9p share; we start gssd here so the mount path is
 # explicit and correct regardless of the guest's nfs-utils pipefs default.)
-NFS_MOUNT_OPTS="vers=${NFS_VERSION},sec=krb5,tcp"
+# Mount security flavor: krb5 (auth), krb5i (integrity) or krb5p (privacy).
+# Defaults to krb5; the krb5p test sets MOUNT_SEC=krb5p so the kernel client
+# negotiates GSS privacy and every call/reply is gss_wrap-sealed on the wire.
+NFS_MOUNT_OPTS="vers=${NFS_VERSION},sec=${MOUNT_SEC:-krb5},tcp"
 # Self-contained krb5 client bring-up (does not rely on init.sh's single-shot
 # attempt): set the hostname, then deliver the per-test realm material from the
 # 9p share with a retry loop -- under ctest the 9p backend can race the guest's

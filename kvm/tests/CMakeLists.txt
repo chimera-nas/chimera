@@ -271,6 +271,20 @@ foreach(image_spec ${KVM_IMAGES})
         PROPERTIES LABELS "kvm;${IMAGE_NAME};rpcsec_gss" PROCESSORS 2
         SKIP_RETURN_CODE 77)
 
+    # Privacy service (krb5p): same real-client mount but with sec=krb5p, so the
+    # kernel client GSS-wraps (encrypts + seals) every call's arguments and the
+    # server wraps every reply symmetrically.  The RW post-mount command drives a
+    # multi-block WRITE + READ through the encrypted path.  memfs only; NFSv4.1.
+    add_test(NAME chimera/kvm/${IMAGE_NAME}/kerberos/krb5p_mount_memfs_nfs4.1
+        COMMAND bash ${NFS_KRB_WRAPPER}
+                ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
+                ${CHIMERA_BINARY} memfs 4.1
+                "stat /mnt && echo hello-krb5p > /mnt/f && grep -q hello-krb5p /mnt/f && dd if=/dev/zero of=/mnt/big bs=4k count=64 2>/dev/null && rm /mnt/f /mnt/big && echo KRB5P_RW_OK")
+    set_tests_properties(chimera/kvm/${IMAGE_NAME}/kerberos/krb5p_mount_memfs_nfs4.1
+        PROPERTIES LABELS "kvm;${IMAGE_NAME};rpcsec_gss" PROCESSORS 2
+        SKIP_RETURN_CODE 77
+        ENVIRONMENT "MOUNT_SEC=krb5p")
+
     # NFS cthon04 tests
     foreach(nfsver ${NFS_VERSIONS})
         foreach(category ${CTHON_CATEGORIES})
