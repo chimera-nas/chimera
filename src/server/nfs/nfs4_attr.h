@@ -907,16 +907,6 @@ chimera_nfs4_marshall_attrs(
             chimera_nfs4_attr_append_uint32(&attrs, 4096);
         }
 
-        if ((req_mask[2] & (1 << (FATTR4_XATTR_SUPPORT - 64))) &&
-            minorversion >= 2) {
-            rsp_mask[2]  |= (1 << (FATTR4_XATTR_SUPPORT - 64));
-            *num_rsp_mask = 3;
-
-            /* Per-object: TRUE only if this file's backend implements xattrs
-             * (CHIMERA_VFS_CAP_XATTR). See RFC 8276 sec 8.2.1 - per-fs attribute. */
-            chimera_nfs4_attr_append_uint32(&attrs, xattr_supported);
-        }
-
         if (req_mask[2] & (1 << (FATTR4_SUPPATTR_EXCLCREAT - 64))) {
             rsp_mask[2]  |= (1 << (FATTR4_SUPPATTR_EXCLCREAT - 64));
             *num_rsp_mask = 3;
@@ -946,6 +936,21 @@ chimera_nfs4_marshall_attrs(
                                             (attr->va_set_mask & CHIMERA_VFS_ATTR_CHANGE) ?
                                             NFS4_CHANGE_TYPE_IS_MONOTONIC_INCR :
                                             NFS4_CHANGE_TYPE_IS_TIME_METADATA);
+        }
+
+        /* xattr_support is attr 82: it MUST be emitted after change_attr_type
+         * (79) and suppattr_exclcreat (75) -- fattr4 values are packed in
+         * ascending attribute order to match the response bitmap the client
+         * decodes low-to-high.  (Previously emitted before them, a latent bug
+         * that bit once change_attr_type became co-requested at v4.2 mount.) */
+        if ((req_mask[2] & (1 << (FATTR4_XATTR_SUPPORT - 64))) &&
+            minorversion >= 2) {
+            rsp_mask[2]  |= (1 << (FATTR4_XATTR_SUPPORT - 64));
+            *num_rsp_mask = 3;
+
+            /* Per-object: TRUE only if this file's backend implements xattrs
+             * (CHIMERA_VFS_CAP_XATTR). See RFC 8276 sec 8.2.1 - per-fs attribute. */
+            chimera_nfs4_attr_append_uint32(&attrs, xattr_supported);
         }
 
         if (nfs4_delegations &&
