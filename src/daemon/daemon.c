@@ -1086,6 +1086,37 @@ main(
                 anongid = (uint32_t) json_integer_value(anongid_j);
             }
 
+            /* Allowed security flavors: an optional array of
+             * "sys"/"krb5"/"krb5i"/"krb5p".  Absent (mask 0) permits any
+             * flavor, preserving historical behavior; a non-empty list
+             * restricts the export and rejects others with NFS4ERR_WRONGSEC. */
+            json_t  *sec_j    = json_object_get(export, "sec");
+            uint32_t sec_mask = 0;
+            if (sec_j && json_is_array(sec_j)) {
+                size_t  si;
+                json_t *flavor_j;
+                json_array_foreach(sec_j, si, flavor_j)
+                {
+                    const char *f = json_string_value(flavor_j);
+
+                    if (!f) {
+                        continue;
+                    }
+                    if (strcasecmp(f, "sys") == 0 || strcasecmp(f, "auth_sys") == 0) {
+                        sec_mask |= CHIMERA_NFS_SEC_SYS;
+                    } else if (strcasecmp(f, "krb5") == 0) {
+                        sec_mask |= CHIMERA_NFS_SEC_KRB5;
+                    } else if (strcasecmp(f, "krb5i") == 0) {
+                        sec_mask |= CHIMERA_NFS_SEC_KRB5I;
+                    } else if (strcasecmp(f, "krb5p") == 0) {
+                        sec_mask |= CHIMERA_NFS_SEC_KRB5P;
+                    } else {
+                        chimera_server_error("Invalid export '%s' sec flavor '%s' "
+                                             "(expected sys/krb5/krb5i/krb5p)", name, f);
+                    }
+                }
+            }
+
             chimera_server_info("Adding NFS export %s -> %s (%s, %s)", name, path,
                                 options & CHIMERA_NFS_EXPORT_OPT_RO ? "ro" : "rw",
                                 squash == CHIMERA_NFS_SQUASH_ALL ? "all_squash" :
@@ -1094,6 +1125,9 @@ main(
             chimera_server_create_export(server, name, path);
             chimera_server_export_set_options(server, name, options, squash,
                                               anonuid, anongid);
+            if (sec_mask) {
+                chimera_server_export_set_sec(server, name, sec_mask);
+            }
         }
     }
 

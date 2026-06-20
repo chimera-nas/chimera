@@ -99,6 +99,10 @@ struct nfs_request {
      * root). */
     uint16_t                          export_id;
     uint16_t                          saved_export_id;
+    /* The request's RPC security flavor as a CHIMERA_NFS_SEC_* bit, derived
+     * from the RPC credential at request entry.  Checked against the target
+     * export's sec_allowed mask. */
+    uint32_t                          sec_bit;
     struct chimera_vfs_open_handle   *handle;
     int                               index;
     uint8_t                           minorversion;     /* COMPOUND4args.minorversion */
@@ -220,6 +224,7 @@ struct chimera_nfs_export {
     uint32_t                   squash;
     uint32_t                   anonuid;
     uint32_t                   anongid;
+    uint32_t                   sec_allowed;  /* CHIMERA_NFS_SEC_* mask; 0 = any */
     struct chimera_nfs_export *prev;
     struct chimera_nfs_export *next;
 };
@@ -476,6 +481,42 @@ chimera_nfs_map_cred(
 } /* chimera_nfs_map_cred */
 
 /*
+ * Classify an RPC credential into a CHIMERA_NFS_SEC_* bit for per-export
+ * security-flavor policy.  AUTH_SYS and AUTH_NONE both map to "sys";
+ * RPCSEC_GSS maps to krb5 / krb5i / krb5p by its negotiated GSS service.
+ */
+static inline uint32_t
+chimera_nfs_sec_bit(const struct evpl_rpc2_cred *rpc_cred)
+{
+    if (rpc_cred && rpc_cred->flavor == EVPL_RPC2_AUTH_RPCSEC_GSS) {
+        switch (rpc_cred->gss.service) {
+            case EVPL_RPC2_GSS_SVC_INTEGRITY:
+                return CHIMERA_NFS_SEC_KRB5I;
+            case EVPL_RPC2_GSS_SVC_PRIVACY:
+                return CHIMERA_NFS_SEC_KRB5P;
+            default:
+                return CHIMERA_NFS_SEC_KRB5;
+        } /* switch */
+    }
+    return CHIMERA_NFS_SEC_SYS;
+} /* chimera_nfs_sec_bit */
+
+/*
+ * True if an export permits the given security-flavor bit.  An export with no
+ * explicit policy (sec_allowed == 0) permits everything.
+ */
+static inline int
+chimera_nfs_export_sec_ok(
+    const struct chimera_nfs_export *export,
+    uint32_t sec_bit)
+{
+    if (!export || export->sec_allowed == 0) {
+        return 1;
+    }
+    return (export->sec_allowed & sec_bit) != 0;
+} /* chimera_nfs_export_sec_ok */
+
+/*
  * Map the RPC credential into a request and snapshot it as the pre-squash
  * original.  Use this from every proc/compound entry instead of calling
  * chimera_nfs_map_cred directly so that file-handle decoding can recompute the
@@ -488,6 +529,7 @@ chimera_nfs_map_cred_req(
 {
     chimera_nfs_map_cred(&req->cred, rpc_cred);
     req->orig_cred = req->cred;
+    req->sec_bit   = chimera_nfs_sec_bit(rpc_cred);
 } /* chimera_nfs_map_cred_req */
 
 /*
@@ -556,7 +598,15 @@ chimera_nfs_fh_decode(
     /* Recompute the effective credential from the pre-squash original so that
      * switching exports within a compound applies the new export's policy
      * rather than stacking on a previous squash. */
-    export    = chimera_nfs_get_export_by_id(shared, req->export_id);
+    export = chimera_nfs_get_export_by_id(shared, req->export_id);
+
+    /* Enforce the export's security-flavor policy: a handle that authenticates
+     * fine but arrives under a flavor the export does not permit is rejected
+     * (NFS4ERR_WRONGSEC), which drives the client to renegotiate via SECINFO. */
+    if (!chimera_nfs_export_sec_ok(export, req->sec_bit)) {
+        return CHIMERA_NFS_FH_WRONGSEC;
+    }
+
     req->cred = req->orig_cred;
     chimera_nfs_squash_cred(&req->cred, export);
 
@@ -596,3 +646,47 @@ chimera_nfs_fh_encode(
     chimera_nfs_fh_wrap(out, outlen, req->export_id, vfs_fh, vfs_len,
                         shared->fh_key, shared->fh_sign);
 } /* chimera_nfs_fh_encode */
+
+/*
+ * Populate `out` (capacity >= 4) with the secinfo4 entries advertising an
+ * export's allowed security flavors.  An export with no explicit policy
+ * (sec_allowed == 0) advertises everything chimera supports.  Returns the
+ * number of entries written, in the server's preference order.
+ */
+static inline int
+chimera_nfs_fill_secinfo(
+    struct secinfo4 *out,
+    uint32_t         sec_allowed)
+{
+    /* Kerberos v5 mechanism OID 1.2.840.113554.1.2.2 (RFC 1964). */
+    static const uint8_t krb5_oid[9] = {
+        0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02
+    };
+    uint32_t             mask = sec_allowed ? sec_allowed : CHIMERA_NFS_SEC_ALL;
+    int                  n    = 0;
+
+    static const struct {
+        uint32_t bit;
+        uint32_t service;
+    } gss_flavors[] = {
+        { CHIMERA_NFS_SEC_KRB5,  RPC_GSS_SVC_NONE       },
+        { CHIMERA_NFS_SEC_KRB5I, RPC_GSS_SVC_INTEGRITY  },
+        { CHIMERA_NFS_SEC_KRB5P, RPC_GSS_SVC_PRIVACY    },
+    };
+    unsigned             i;
+
+    if (mask & CHIMERA_NFS_SEC_SYS) {
+        out[n++].flavor = AUTH_SYS;
+    }
+    for (i = 0; i < sizeof(gss_flavors) / sizeof(gss_flavors[0]); i++) {
+        if (mask & gss_flavors[i].bit) {
+            out[n].flavor                   = RPCSEC_GSS;
+            out[n].flavor_info.oid.oid.len  = sizeof(krb5_oid);
+            out[n].flavor_info.oid.oid.data = (void *) krb5_oid;
+            out[n].flavor_info.qop          = 0;
+            out[n].flavor_info.service      = gss_flavors[i].service;
+            n++;
+        }
+    }
+    return n;
+} /* chimera_nfs_fill_secinfo */

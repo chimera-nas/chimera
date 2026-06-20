@@ -39,6 +39,13 @@ NFS_HOST="nfshost.test.local"
 KEYTAB_FILE="${KRB_DIR}/chimera.keytab"
 CCACHE="FILE:${KRB_DIR}/krb5cc_testuser1"
 
+# Optional per-export security policy: NFS_EXPORT_SEC="krb5,krb5i" restricts the
+# /share export to those flavors (testing NFS4ERR_WRONGSEC enforcement).
+EXPORT_SEC_JSON=""
+if [ -n "${NFS_EXPORT_SEC:-}" ]; then
+    EXPORT_SEC_JSON=", \"sec\": [$(echo "${NFS_EXPORT_SEC}" | sed 's/[^,]\+/"&"/g')]"
+fi
+
 BUILD_DIR=$(dirname "$(dirname "$CHIMERA_BINARY")")
 SESSION_DIR=$(mktemp -d "${BUILD_DIR}/nfskrb_session_XXXXXX")
 CONFIG_FILE="${SESSION_DIR}/chimera.json"
@@ -238,7 +245,7 @@ generate_config() {
         "share": { "module": "$BACKEND", "path": "$mount_path" }
     },
     "exports": {
-        "/share": { "path": "/share" }
+        "/share": { "path": "/share"${EXPORT_SEC_JSON} }
     }
 }
 EOF
@@ -284,8 +291,8 @@ run_pynfs() {
         PYTHONPATH="${PYTHONPATH}" \
         python3 "${testserver}" "${NFS_HOST}:/share" \
         --minorversion=1 --security="${NFS_KRB_SEC:-krb5}" --maketree --force -v \
-        --xml="${RESULTS_XML}" $FLAG_ARGS
-    return $?
+        --xml="${RESULTS_XML}" $FLAG_ARGS 2>&1 | tee "${SESSION_DIR}/pynfs.out"
+    return "${PIPESTATUS[0]}"
 }
 
 main() {
@@ -299,6 +306,17 @@ main() {
 
     run_pynfs
     local rc=$?
+
+    # Negative test: a disallowed flavor must be rejected with NFS4ERR_WRONGSEC.
+    # pynfs then fails to initialize, which is the expected, passing outcome.
+    if [ -n "${NFS_EXPECT_WRONGSEC:-}" ]; then
+        if grep -q 'NFS4ERR_WRONGSEC' "${SESSION_DIR}/pynfs.out" 2>/dev/null; then
+            log "PASS (got expected NFS4ERR_WRONGSEC for disallowed flavor)"
+            exit 0
+        fi
+        log "FAIL (expected NFS4ERR_WRONGSEC, not observed)"
+        exit 1
+    fi
 
     if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
         log "pynfs wall-clock timeout"

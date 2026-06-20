@@ -969,6 +969,30 @@ chimera_nfs_export_set_options(
     return found ? 0 : -1;
 } /* chimera_nfs_export_set_options */
 
+SYMBOL_EXPORT int
+chimera_nfs_export_set_sec(
+    void       *nfs_shared,
+    const char *name,
+    uint32_t    sec_allowed)
+{
+    struct chimera_server_nfs_shared *shared = nfs_shared;
+    struct chimera_nfs_export        *export;
+    int                               found = 0;
+
+    pthread_mutex_lock(&shared->exports_lock);
+    LL_FOREACH(shared->exports, export)
+    {
+        if (strcmp(export->name, name) == 0) {
+            export->sec_allowed = sec_allowed;
+            found               = 1;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&shared->exports_lock);
+
+    return found ? 0 : -1;
+} /* chimera_nfs_export_set_sec */
+
 SYMBOL_EXPORT const struct chimera_nfs_export *
 chimera_nfs_get_export_by_id(
     void    *nfs_shared,

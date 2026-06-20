@@ -4,15 +4,17 @@
 
 #include "nfs4_procs.h"
 #include "nfs4_status.h"
+#include "nfs.h"
 #include "evpl/evpl_rpc2.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 
 /* RFC 7530 §16.31: SECINFO returns the security mechanisms the server will
- * accept for the named entry in the current-filehandle directory. Chimera
- * only offers AUTH_SYS, so a successful lookup yields a single-flavor list.
- * The name lookup also produces the spec-mandated error returns:
- * NFS4ERR_NOTDIR (cfh not a directory) and NFS4ERR_NOENT (name absent). */
+ * accept for the named entry in the current-filehandle directory.  Chimera
+ * advertises the owning export's configured flavors (or all supported flavors
+ * if the export has no explicit policy).  The name lookup also produces the
+ * spec-mandated error returns: NFS4ERR_NOTDIR (cfh not a directory) and
+ * NFS4ERR_NOENT (name absent). */
 
 static void
 chimera_nfs4_secinfo_complete(
@@ -21,11 +23,9 @@ chimera_nfs4_secinfo_complete(
     struct chimera_vfs_attrs *dir_attr,
     void                     *private_data)
 {
-    struct nfs_request  *req        = private_data;
-    struct SECINFO4res  *res        = &req->res_compound.resarray[req->index].opsecinfo;
-    static const uint8_t krb5_oid[] = {
-        0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02
-    };
+    struct nfs_request              *req = private_data;
+    struct SECINFO4res              *res = &req->res_compound.resarray[req->index].opsecinfo;
+    const struct chimera_nfs_export *export;
 
     chimera_vfs_release(req->thread->vfs_thread, req->handle);
 
@@ -35,17 +35,13 @@ chimera_nfs4_secinfo_complete(
         return;
     }
 
-    res->resok4 = xdr_dbuf_alloc_space(2 * sizeof(struct secinfo4), req->encoding->dbuf);
+    /* The looked-up name lives in the current FH's export. */
+    export      = chimera_nfs_get_export_by_id(req->thread->shared, req->export_id);
+    res->resok4 = xdr_dbuf_alloc_space(4 * sizeof(struct secinfo4), req->encoding->dbuf);
     chimera_nfs_abort_if(res->resok4 == NULL, "Failed to allocate space");
 
-    res->num_resok4                         = 2;
-    res->resok4[0].flavor                   = AUTH_SYS;
-    res->resok4[1].flavor                   = RPCSEC_GSS;
-    res->resok4[1].flavor_info.oid.oid.len  = sizeof(krb5_oid);
-    res->resok4[1].flavor_info.oid.oid.data = (void *) krb5_oid;
-    res->resok4[1].flavor_info.qop          = 0;
-    res->resok4[1].flavor_info.service      = RPC_GSS_SVC_NONE;
-
+    res->num_resok4 = chimera_nfs_fill_secinfo(res->resok4,
+                                               export ? export->sec_allowed : 0);
     res->status = NFS4_OK;
     chimera_nfs4_compound_complete(req, NFS4_OK);
 } /* chimera_nfs4_secinfo_complete */
@@ -99,6 +95,32 @@ chimera_nfs4_secinfo(
     res->status = chimera_nfs4_validate_name(&args->name);
     if (res->status != NFS4_OK) {
         chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
+    /* When the current FH is the NFSv4 pseudo-fs root, the name is an export
+     * name (not a VFS object).  This is the path a client takes to renegotiate
+     * after NFS4ERR_WRONGSEC at the export boundary, so resolve the export
+     * directly and advertise its configured flavors. */
+    if (fh_is_nfs4_root(req->fh, req->fhlen)) {
+        const struct chimera_nfs_export *export    = NULL;
+        char                            *full_path = NULL;
+
+        if (chimera_nfs_find_export_path(thread->shared, args->name.data,
+                                         args->name.len, &full_path, &export) != 0) {
+            res->status = NFS4ERR_NOENT;
+            chimera_nfs4_compound_complete(req, NFS4ERR_NOENT);
+            return;
+        }
+        free(full_path);
+
+        res->resok4 = xdr_dbuf_alloc_space(4 * sizeof(struct secinfo4),
+                                           req->encoding->dbuf);
+        chimera_nfs_abort_if(res->resok4 == NULL, "Failed to allocate space");
+        res->num_resok4 = chimera_nfs_fill_secinfo(res->resok4,
+                                                   export ? export->sec_allowed : 0);
+        res->status = NFS4_OK;
+        chimera_nfs4_compound_complete(req, NFS4_OK);
         return;
     }
 

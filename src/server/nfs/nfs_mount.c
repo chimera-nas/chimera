@@ -180,16 +180,35 @@ chimera_nfs_mount_lookup_complete(
     struct chimera_server_nfs_thread *thread = req->thread;
     struct evpl                      *evpl   = thread->evpl;
     struct chimera_server_nfs_shared *shared = thread->shared;
-    int32_t                           auth_flavors[2];
+    int32_t                           auth_flavors[3];
     struct mountres3                  res;
     int                               rc;
 
     if (error_code == CHIMERA_VFS_OK) {
-        res.fhs_status                 = MNT3_OK;
-        res.mountinfo.num_auth_flavors = 2;
+        const struct chimera_nfs_export *export =
+            chimera_nfs_get_export_by_id(shared, req->export_id);
+        uint32_t                         sec = export ? export->sec_allowed : 0;
+        int                              nf  = 0;
+
+        res.fhs_status = MNT3_OK;
+
+        /* Advertise the export's allowed flavors.  MOUNT carries bare flavor
+         * numbers, so krb5/krb5i/krb5p collapse to RPCSEC_GSS (6).  An export
+         * with no explicit policy keeps the historical [AUTH_NONE, AUTH_SYS]. */
+        if (sec == 0) {
+            auth_flavors[nf++] = AUTH_NONE;
+            auth_flavors[nf++] = AUTH_SYS;
+        } else {
+            if (sec & CHIMERA_NFS_SEC_SYS) {
+                auth_flavors[nf++] = AUTH_SYS;
+            }
+            if (sec & (CHIMERA_NFS_SEC_KRB5 | CHIMERA_NFS_SEC_KRB5I |
+                       CHIMERA_NFS_SEC_KRB5P)) {
+                auth_flavors[nf++] = 6;   /* RPCSEC_GSS */
+            }
+        }
+        res.mountinfo.num_auth_flavors = nf;
         res.mountinfo.auth_flavors     = auth_flavors;
-        auth_flavors[0]                = AUTH_NONE;
-        auth_flavors[1]                = AUTH_SYS;
 
         uint8_t wire[CHIMERA_NFS_FH_MAX];
         int     wirelen;

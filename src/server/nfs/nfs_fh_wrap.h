@@ -44,6 +44,8 @@
 enum chimera_nfs_fh_status {
     CHIMERA_NFS_FH_OK        = 0,
     CHIMERA_NFS_FH_BADHANDLE = -1,   /* malformed, wrong tag, or MAC mismatch */
+    CHIMERA_NFS_FH_WRONGSEC  = -2,   /* handle ok, but RPC sec flavor not permitted
+                                      * for the owning export (NFS4ERR_WRONGSEC) */
 };
 
 /*
