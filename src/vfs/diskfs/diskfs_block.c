@@ -65,6 +65,11 @@ diskfs_pin_cont_resume(
     struct diskfs_thread *thread,
     void                 *arg);
 
+static struct diskfs_block_buf *
+diskfs_block_buf_reclaim_locked(
+    struct diskfs_thread      *thread,
+    struct diskfs_block_shard *shard);
+
 
 static inline void
 diskfs_block_lru_unlink(
@@ -100,9 +105,7 @@ diskfs_block_drain_returned_locked(struct diskfs_block_shard *shard)
 
         chimera_diskfs_abort_if(!buf->on_free,
                                 "returned diskfs block buffer is not marked free");
-        buf->next           = shard->free_buffers;
-        shard->free_buffers = buf;
-        shard->nfree_buffers++;
+        diskfs_block_return_buf_locked(shard, buf);
         buf = next;
     }
 } /* diskfs_block_drain_returned_locked */
@@ -184,6 +187,114 @@ diskfs_block_recycle(
 } /* diskfs_block_recycle */
 
 
+/*
+ * Obtain a buffer for a CoW fork.  Prefer a spare on the free list; otherwise
+ * evict the LRU's least-recently-used CLEAN, unpinned block and take its buffer
+ * -- exactly like a cache miss recycles -- leaving the donor struct bufless on
+ * free_blocks until a freed buffer re-pairs with it (diskfs_block_return_buf_
+ * locked).  Returns NULL when every block in the shard is pinned (no victim):
+ * the async caller parks and resumes when a buffer/victim frees; a synchronous
+ * caller (pre-faulted descent) treats it as the recycle provisioning violation
+ * it already is.  Caller holds the shard lock.
+ */
+static struct diskfs_block_buf *
+diskfs_block_buf_reclaim_locked(
+    struct diskfs_thread      *thread,
+    struct diskfs_block_shard *shard)
+{
+    struct diskfs_block_buf *buf;
+    struct diskfs_block     *blk, *cur, *prev;
+    uint32_t                 ob;
+
+    diskfs_block_drain_returned_locked(shard);
+
+    buf = shard->free_buffers;
+    if (buf) {
+        shard->free_buffers = buf->next;
+        shard->nfree_buffers--;
+        buf->next = NULL;
+        __atomic_store_n(&buf->on_free, 0, __ATOMIC_RELEASE);
+        __atomic_store_n(&buf->refs, 1, __ATOMIC_RELEASE);
+        return buf;
+    }
+
+    blk = shard->lru_head;
+    if (!blk) {
+        return NULL;        /* every block pinned: park (async) / abort (sync) */
+    }
+    diskfs_block_lru_unlink(shard, blk);
+
+    /* Unhook from its bucket (no-op for an already-keyless struct). */
+    ob   = diskfs_block_bucket(blk->device_id, blk->device_offset);
+    prev = NULL;
+    for (cur = shard->buckets[ob]; cur; prev = cur, cur = cur->hash_next) {
+        if (cur == blk) {
+            if (prev) {
+                prev->hash_next = cur->hash_next;
+            } else {
+                shard->buckets[ob] = cur->hash_next;
+            }
+            break;
+        }
+    }
+    blk->hash_next = NULL;
+
+    buf                = blk->buf;
+    blk->buf           = NULL;
+    blk->iov.data      = NULL;
+    blk->free_next     = shard->free_blocks;
+    shard->free_blocks = blk;
+
+    buf->next = NULL;
+    __atomic_store_n(&buf->on_free, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&buf->refs, 1, __ATOMIC_RELEASE);
+    diskfs_metric_block_cache(thread, DISKFS_METRIC_BLOCK_CACHE_RECYCLE);
+    return buf;
+} /* diskfs_block_buf_reclaim_locked */
+
+
+/*
+ * Wake CoW forks parked on this shard for want of a buffer.  Called from every
+ * path that frees a buffer or unpins a block (so a victim/buffer is now
+ * reclaimable), including the cross-thread tail-pusher -- otherwise a shard
+ * whose every op is parked would never be drained and would hang.  Wakes one
+ * waiter per available resource; a waiter that loses the reclaim race re-parks.
+ */
+void
+diskfs_block_buf_wake(
+    struct diskfs_thread      *self,
+    struct diskfs_block_shard *shard)
+{
+    struct diskfs_block_waiter *list = NULL, *w;
+
+    if (!__atomic_load_n(&shard->buf_wait_pending, __ATOMIC_ACQUIRE)) {
+        return;
+    }
+
+    pthread_mutex_lock(&shard->lock);
+    diskfs_block_drain_returned_locked(shard);
+    while (shard->buf_wait_head && (shard->free_buffers || shard->lru_head)) {
+        w                    = shard->buf_wait_head;
+        shard->buf_wait_head = w->next;
+        if (!shard->buf_wait_head) {
+            shard->buf_wait_tail = NULL;
+        }
+        w->next = list;
+        list    = w;
+    }
+    if (!shard->buf_wait_head) {
+        __atomic_store_n(&shard->buf_wait_pending, 0, __ATOMIC_RELEASE);
+    }
+    pthread_mutex_unlock(&shard->lock);
+
+    while (list) {
+        w    = list;
+        list = w->next;
+        diskfs_block_waiter_dispatch(self, w);
+    }
+} /* diskfs_block_buf_wake */
+
+
 void
 diskfs_block_unpin(
     struct diskfs_thread   *thread,
@@ -201,6 +312,9 @@ diskfs_block_unpin(
         diskfs_block_lru_push_tail(shard, blk);
     }
     pthread_mutex_unlock(&shard->lock);
+
+    /* Unpinning may have produced an LRU victim a parked CoW fork can reclaim. */
+    diskfs_block_buf_wake(thread, shard);
 } /* diskfs_block_unpin */
 
 
@@ -220,6 +334,9 @@ diskfs_block_release(
         diskfs_block_lru_push_tail(shard, blk);
     }
     pthread_mutex_unlock(&shard->lock);
+
+    /* Unpinning may have produced an LRU victim a parked CoW fork can reclaim. */
+    diskfs_block_buf_wake(thread, shard);
 } /* diskfs_block_release */
 
 
@@ -247,7 +364,10 @@ diskfs_block_cache_create(struct diskfs_shared *shared)
         cache->shard_cap = 1;
     }
 
-    extra                         = cache->shard_cap;
+    /* No dedicated CoW slush: a fork draws its buffer from the regular LRU
+     * (diskfs_block_buf_reclaim_locked) and parks if the shard is fully pinned,
+     * so backing buffers are 1:1 with block structs. */
+    extra                         = 0;
     cache->buffer_extra_per_shard = extra;
     pthread_mutex_init(&cache->prealloc_lock, NULL);
 
@@ -377,6 +497,12 @@ diskfs_block_buf_release(struct diskfs_block_buf *buf)
         buf->next = head;
     } while (!__atomic_compare_exchange_n(&shard->returned_buffers, &head, buf,
                                           0, __ATOMIC_RELEASE, __ATOMIC_ACQUIRE));
+
+    /* The tail-pusher just freed a buffer cross-thread.  Wake any CoW fork
+     * parked on this shard -- if every worker op on the shard is parked, nothing
+     * else will drain the returned stack and the shard would hang.  self=NULL:
+     * the pusher is no waiter's worker, so the wake always rings the doorbell. */
+    diskfs_block_buf_wake(NULL, shard);
 } /* diskfs_block_buf_release */
 
 
@@ -462,10 +588,21 @@ diskfs_block_claim(
          * the tail-pusher will write it home), so it must stay immutable.  Fork
          * a private writable copy; the old buffer rides the record to its home
          * and is freed when the pusher releases it.  Done under the shard lock
-         * so it serializes against the pusher's LOGGED->CLEAN transition. */
+         * so it serializes against the pusher's LOGGED->CLEAN transition.
+         *
+         * The synchronous claim cannot park, so the fork must find a victim.  It
+         * always does: this path runs only on a pre-faulted, pinned descent
+         * (inode home block / b+tree node) whose async pre-fault already brought
+         * the shard's working set resident, leaving CLEAN LRU victims; a NULL
+         * here means every block in the shard is pinned -- the same provisioning
+         * violation diskfs_block_recycle aborts on. */
         struct diskfs_block_buf *old = blk->buf;
-        struct diskfs_block_buf *new = diskfs_block_buf_alloc_locked(shard);
+        struct diskfs_block_buf *new = diskfs_block_buf_reclaim_locked(thread, shard);
 
+        chimera_diskfs_abort_if(!new,
+                                "block cache shard exhausted during synchronous "
+                                "CoW: every buffer pinned (raise block_cache_blocks "
+                                "above the intent-log size, or a pin was leaked)");
         memcpy(new->iov.data, old->iov.data, DISKFS_BLOCK_SIZE);
         blk->buf = new;
         blk->iov = new->iov;
@@ -966,9 +1103,32 @@ diskfs_block_claim_async(
         diskfs_metric_block_cache(thread, DISKFS_METRIC_BLOCK_CACHE_HIT);
         diskfs_block_lru_unlink(shard, blk);
     } else if (__atomic_load_n(&blk->state, __ATOMIC_ACQUIRE) == DISKFS_BLOCK_LOGGED) {
-        /* COW (see diskfs_block_claim): fork a private writable copy. */
+        /* COW (see diskfs_block_claim): fork a private writable copy.  The new
+         * buffer comes from the regular LRU (diskfs_block_buf_reclaim_locked).
+         * If every block in the shard is pinned there is no victim: park this
+         * op's continuation on the shard buffer-wait queue and resume it when a
+         * buffer/victim frees (diskfs_block_buf_wake).  blk is LOGGED (not on the
+         * LRU), so the reclaim never evicts the very block being forked. */
         struct diskfs_block_buf *old = blk->buf;
-        struct diskfs_block_buf *new = diskfs_block_buf_alloc_locked(shard);
+        struct diskfs_block_buf *new = diskfs_block_buf_reclaim_locked(thread, shard);
+
+        if (!new) {
+            diskfs_metric_block_cache(thread, DISKFS_METRIC_BLOCK_CACHE_WAIT);
+            w         = diskfs_block_waiter_alloc(thread);
+            w->thread = thread;
+            w->resume = resume;
+            w->arg    = arg;
+            w->next   = NULL;
+            if (shard->buf_wait_tail) {
+                shard->buf_wait_tail->next = w;
+            } else {
+                shard->buf_wait_head = w;
+            }
+            shard->buf_wait_tail = w;
+            __atomic_store_n(&shard->buf_wait_pending, 1, __ATOMIC_RELEASE);
+            pthread_mutex_unlock(&shard->lock);
+            return NULL;
+        }
 
         memcpy(new->iov.data, old->iov.data, DISKFS_BLOCK_SIZE);
         blk->buf = new;

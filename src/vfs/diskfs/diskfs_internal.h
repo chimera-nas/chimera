@@ -704,6 +704,7 @@ struct diskfs_block {
     struct diskfs_block        *hash_next;     /* bucket chain */
     struct diskfs_block        *lru_prev, *lru_next; /* shard LRU (CLEAN + unpinned) */
     struct diskfs_block        *clean_next;    /* atomic clean-return queue */
+    struct diskfs_block        *free_next;     /* free_blocks chain (bufless struct) */
     int                         on_lru;        /* 1 iff linked on the shard LRU */
     int                         clean_queued;  /* 1 iff queued on shard clean queue */
 
@@ -717,25 +718,37 @@ struct diskfs_block {
 
 
 struct diskfs_block_shard {
-    pthread_mutex_t          lock;
-    struct diskfs_block    **buckets;  /* [DISKFS_BLOCK_CACHE_BUCKETS_PER_SHARD] */
+    pthread_mutex_t             lock;
+    struct diskfs_block       **buckets; /* [DISKFS_BLOCK_CACHE_BUCKETS_PER_SHARD] */
 
     /* Pre-allocated fixed pool of block structs (all protected by lock); the
      * structs are never individually freed.  Each struct's buffer is a SHARED
      * evpl iovec allocated lazily on first use and reused across recyclings
      * (released only at teardown).  The LRU holds only CLEAN, unpinned buffers
      * (recycle candidates), ordered least-recently-used first. */
-    struct diskfs_block     *pool;              /* [nblocks] */
-    struct diskfs_block     *lru_head, *lru_tail; /* lru_head = next to recycle */
-    uint32_t                 nblocks;           /* block structs owned by this shard */
+    struct diskfs_block        *pool;           /* [nblocks] */
+    struct diskfs_block        *lru_head, *lru_tail; /* lru_head = next to recycle */
+    uint32_t                    nblocks;        /* block structs owned by this shard */
 
-    struct diskfs_block_buf *buffers;           /* [nbuffers] */
-    struct diskfs_block_buf *free_buffers;
-    struct diskfs_block_buf *returned_buffers;   /* atomic stack, drained under lock */
-    struct diskfs_block     *clean_head;
-    struct diskfs_block     *clean_tail;
-    uint32_t                 nbuffers;
-    uint32_t                 nfree_buffers;
+    struct diskfs_block_buf    *buffers;        /* [nbuffers] */
+    struct diskfs_block_buf    *free_buffers;
+    struct diskfs_block_buf    *returned_buffers; /* atomic stack, drained under lock */
+    struct diskfs_block        *clean_head;
+    struct diskfs_block        *clean_tail;
+    uint32_t                    nbuffers;
+    uint32_t                    nfree_buffers;
+
+    /* Block structs whose buffer was donated to a CoW fork (see
+     * diskfs_block_buf_reclaim_locked); bufless and off the LRU until a freed
+     * buffer is re-paired to one.  Chained via blk->free_next. */
+    struct diskfs_block        *free_blocks;
+
+    /* Continuations parked because a CoW fork found no reclaimable buffer (every
+     * block in this shard pinned).  Woken when a buffer/LRU victim frees.  Each
+     * names its owning worker so a cross-thread freer can dispatch it home. */
+    struct diskfs_block_waiter *buf_wait_head;
+    struct diskfs_block_waiter *buf_wait_tail;
+    int                         buf_wait_pending; /* atomic: waiters present */
 };
 
 
@@ -2069,6 +2082,11 @@ void
 diskfs_block_waiter_dispatch(
     struct diskfs_thread       *waker,
     struct diskfs_block_waiter *w);
+
+void
+diskfs_block_buf_wake(
+    struct diskfs_thread      *self,
+    struct diskfs_block_shard *shard);
 
 void
 diskfs_bt_op_resume_cb(
@@ -3805,6 +3823,41 @@ diskfs_block_buf_ref_locked(struct diskfs_block_buf *buf)
 } /* diskfs_block_buf_ref_locked */
 
 
+/*
+ * Return a no-longer-referenced buffer to the shard.  If a CoW fork left a
+ * donor struct bufless (free_blocks), re-pair the buffer with it and hand the
+ * now-whole block back to the LRU as a keyless recycle candidate -- recovering
+ * the cache capacity the fork borrowed.  Otherwise park the bare buffer on the
+ * free list for the next fork.  Caller holds the shard lock.
+ */
+static inline void
+diskfs_block_return_buf_locked(
+    struct diskfs_block_shard *shard,
+    struct diskfs_block_buf   *buf)
+{
+    struct diskfs_block *blk = shard->free_blocks;
+
+    if (blk) {
+        shard->free_blocks = blk->free_next;
+        blk->free_next     = NULL;
+        buf->next          = NULL;
+        __atomic_store_n(&buf->on_free, 0, __ATOMIC_RELEASE);
+        __atomic_store_n(&buf->refs, 1, __ATOMIC_RELEASE);
+        blk->buf       = buf;
+        blk->iov       = buf->iov;
+        blk->pin_count = 0;
+        blk->hash_next = NULL;          /* keyless: linked in no bucket */
+        __atomic_store_n(&blk->state, DISKFS_BLOCK_CLEAN, __ATOMIC_RELEASE);
+        diskfs_block_lru_push_tail(shard, blk);
+    } else {
+        buf->on_free        = 1;
+        buf->next           = shard->free_buffers;
+        shard->free_buffers = buf;
+        shard->nfree_buffers++;
+    }
+} /* diskfs_block_return_buf_locked */
+
+
 static inline void
 diskfs_block_buf_release_locked(
     struct diskfs_block_shard *shard,
@@ -3815,10 +3868,7 @@ diskfs_block_buf_release_locked(
     if (--buf->refs == 0) {
         chimera_diskfs_abort_if(buf->on_free,
                                 "diskfs block buffer already free");
-        buf->on_free        = 1;
-        buf->next           = shard->free_buffers;
-        shard->free_buffers = buf;
-        shard->nfree_buffers++;
+        diskfs_block_return_buf_locked(shard, buf);
     }
 } /* diskfs_block_buf_release_locked */
 
