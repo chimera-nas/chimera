@@ -120,7 +120,12 @@ chimera_nfs4_attr2mask(
                         attr_mask |= CHIMERA_VFS_ATTR_FH;
                         break;
                     case FATTR4_CHANGE:
-                        attr_mask |= CHIMERA_VFS_ATTR_CTIME;
+                    case FATTR4_CHANGE_ATTR_TYPE:
+                        /* Request the native change counter as well as ctime:
+                         * backends with CHIMERA_VFS_CAP_CHANGE fill va_change,
+                         * the rest fill only ctime and the marshaller derives
+                         * change from it. */
+                        attr_mask |= CHIMERA_VFS_ATTR_CTIME | CHIMERA_VFS_ATTR_CHANGE;
                         break;
                     case FATTR4_SIZE:
                         attr_mask |= CHIMERA_VFS_ATTR_SIZE;
@@ -472,9 +477,13 @@ chimera_nfs4_marshall_attrs(
                     word2 |= (1 << (FATTR4_OPEN_ARGUMENTS - 64));
                 }
 
-                /* Extended attributes (RFC 8276) are an NFSv4.2 feature. */
+                /* Extended attributes (RFC 8276) and change_attr_type
+                 * (RFC 7862) are NFSv4.2 features.  change_attr_type is always
+                 * supported at 4.2: the marshaller returns a value for every
+                 * object (native MONOTONIC_INCR or ctime-derived TIME_METADATA). */
                 if (minorversion >= 2) {
                     word2 |= (1 << (FATTR4_XATTR_SUPPORT - 64));
+                    word2 |= (1 << (FATTR4_CHANGE_ATTR_TYPE - 64));
                 }
 
                 /* Layout types (attr 64) advertised when pNFS is enabled. */
@@ -529,7 +538,14 @@ chimera_nfs4_marshall_attrs(
             rsp_mask[0]  |= (1 << FATTR4_CHANGE);
             *num_rsp_mask = 1;
 
-            v64 = attr->va_ctime.tv_sec * 1000000000 + attr->va_ctime.tv_nsec;
+            if (attr->va_set_mask & CHIMERA_VFS_ATTR_CHANGE) {
+                /* Backend supplied a native monotonic version counter. */
+                v64 = attr->va_change;
+            } else {
+                /* Derive change from ctime (matches Linux nfsd without
+                 * i_version: change_attr_type is then TIME_METADATA). */
+                v64 = attr->va_ctime.tv_sec * 1000000000 + attr->va_ctime.tv_nsec;
+            }
             chimera_nfs4_attr_append_uint64(&attrs, v64);
         }
 
@@ -915,6 +931,21 @@ chimera_nfs4_marshall_attrs(
                                             (1UL << (FATTR4_MODE - 32)) |
                                             (1UL << (FATTR4_OWNER - 32)) |
                                             (1UL << (FATTR4_OWNER_GROUP - 32)));
+        }
+
+        if ((req_mask[2] & (1 << (FATTR4_CHANGE_ATTR_TYPE - 64))) &&
+            minorversion >= 2) {
+            rsp_mask[2]  |= (1 << (FATTR4_CHANGE_ATTR_TYPE - 64));
+            *num_rsp_mask = 3;
+
+            /* Per-object: a backend with a native change counter
+             * (CHIMERA_VFS_ATTR_CHANGE) reports a strictly increasing value;
+             * otherwise change is the ctime, i.e. time_metadata.  Mirrors the
+             * fattr4_change source chosen in the FATTR4_CHANGE block above. */
+            chimera_nfs4_attr_append_uint32(&attrs,
+                                            (attr->va_set_mask & CHIMERA_VFS_ATTR_CHANGE) ?
+                                            NFS4_CHANGE_TYPE_IS_MONOTONIC_INCR :
+                                            NFS4_CHANGE_TYPE_IS_TIME_METADATA);
         }
 
         if (nfs4_delegations &&

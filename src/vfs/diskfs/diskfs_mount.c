@@ -1362,13 +1362,14 @@ diskfs_bootstrap(struct diskfs_thread *thread)
      * enforcement a root-owned 0755 root would refuse all creation by non-root
      * clients on this engine-authoritative backend (matches memfs/cairn).
      * Subdirs are still created owned by their creator with 0755. */
-    inode->mode           = S_IFDIR | 0777;
-    inode->atime_sec      = now.tv_sec;
-    inode->atime_nsec     = now.tv_nsec;
-    inode->mtime_sec      = now.tv_sec;
-    inode->mtime_nsec     = now.tv_nsec;
-    inode->ctime_sec      = now.tv_sec;
-    inode->ctime_nsec     = now.tv_nsec;
+    inode->mode       = S_IFDIR | 0777;
+    inode->atime_sec  = now.tv_sec;
+    inode->atime_nsec = now.tv_nsec;
+    inode->mtime_sec  = now.tv_sec;
+    inode->mtime_nsec = now.tv_nsec;
+    inode->ctime_sec  = now.tv_sec;
+    inode->ctime_nsec = now.tv_nsec;
+    inode->change++;
     inode->btime_sec      = now.tv_sec;
     inode->btime_nsec     = now.tv_nsec;
     inode->dos_attributes = 0;
@@ -1408,16 +1409,17 @@ diskfs_bootstrap(struct diskfs_thread *thread)
                                                              oinum, &odev);
         struct diskfs_inode *oin = diskfs_inode_struct_new(oinum);
 
-        oin->size           = 4096;
-        oin->space_used     = 4096;
-        oin->nlink          = 1;
-        oin->mode           = S_IFDIR | 0700;
-        oin->atime_sec      = now.tv_sec;
-        oin->atime_nsec     = now.tv_nsec;
-        oin->mtime_sec      = now.tv_sec;
-        oin->mtime_nsec     = now.tv_nsec;
-        oin->ctime_sec      = now.tv_sec;
-        oin->ctime_nsec     = now.tv_nsec;
+        oin->size       = 4096;
+        oin->space_used = 4096;
+        oin->nlink      = 1;
+        oin->mode       = S_IFDIR | 0700;
+        oin->atime_sec  = now.tv_sec;
+        oin->atime_nsec = now.tv_nsec;
+        oin->mtime_sec  = now.tv_sec;
+        oin->mtime_nsec = now.tv_nsec;
+        oin->ctime_sec  = now.tv_sec;
+        oin->ctime_nsec = now.tv_nsec;
+        oin->change++;
         oin->btime_sec      = now.tv_sec;
         oin->btime_nsec     = now.tv_nsec;
         oin->dos_attributes = 0;

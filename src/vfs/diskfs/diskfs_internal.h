@@ -556,6 +556,7 @@ struct diskfs_inode {
     uint32_t                    mtime_nsec;
     uint32_t                    btime_nsec;
     uint32_t                    dos_attributes;
+    uint64_t                    change;      /* native monotonic change counter */
 
     /* Inode-cache linkage, keyed by inum.  Lock state and the wait list
      * below are protected by the owning shard's mutex, never held across
@@ -803,6 +804,7 @@ struct diskfs_dinode {
     uint32_t dos_attributes;
     uint64_t parent_inum;     /* directories only */
     uint32_t parent_gen;
+    uint64_t change;          /* native monotonic change counter */
 };
 
 
@@ -4476,6 +4478,12 @@ diskfs_map_attrs(
         attr->va_btime.tv_nsec = inode->btime_nsec;
     }
 
+    /* Native monotonic change counter (CHIMERA_VFS_CAP_CHANGE). */
+    if (attr->va_req_mask & CHIMERA_VFS_ATTR_CHANGE) {
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_CHANGE;
+        attr->va_change    = inode->change;
+    }
+
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_FSID) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_FSID;
         attr->va_fsid      = shared->fsid;
@@ -4603,5 +4611,8 @@ diskfs_apply_attrs(
         inode->ctime_sec  = now.tv_sec;
         inode->ctime_nsec = now.tv_nsec;
     }
+
+    /* Any setattr is a metadata change; advance the native change counter. */
+    inode->change++;
 
 } /* diskfs_apply_attrs */

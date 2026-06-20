@@ -1592,6 +1592,7 @@ diskfs_set_xattr_inserted_cb(
     clock_gettime(CLOCK_REALTIME, &now);
     inode->ctime_sec  = now.tv_sec;
     inode->ctime_nsec = now.tv_nsec;
+    inode->change++;
 
     diskfs_map_attrs(p->thread, &request->set_xattr.r_post_attr, inode);
     diskfs_op_ok(request, p->txn);
@@ -1928,6 +1929,7 @@ diskfs_remove_xattr_removed_cb(
     clock_gettime(CLOCK_REALTIME, &now);
     inode->ctime_sec  = now.tv_sec;
     inode->ctime_nsec = now.tv_nsec;
+    inode->change++;
 
     diskfs_map_attrs(p->thread, &request->remove_xattr.r_post_attr, inode);
     diskfs_op_ok(request, p->txn);

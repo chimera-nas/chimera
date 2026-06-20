@@ -1153,6 +1153,7 @@ diskfs_inode_flush(struct diskfs_inode *inode)
     di->ctime_nsec     = inode->ctime_nsec;
     di->btime_nsec     = inode->btime_nsec;
     di->dos_attributes = inode->dos_attributes;
+    di->change         = inode->change;
     if (S_ISDIR(inode->mode)) {
         di->parent_inum = inode->parent_inum;
         di->parent_gen  = inode->parent_gen;

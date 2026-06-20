@@ -65,6 +65,13 @@ struct chimera_acl;
  * fresh, mask-gated, only when a protocol asks for them. */
 #define CHIMERA_VFS_ATTR_ACL                (1UL << 24)
 
+/* Native change attribute (va_change).  Optional and cacheable, modeled on
+ * BTIME: a backend sets this bit in va_set_mask only if it tracks a real
+ * monotonic change counter (CHIMERA_VFS_CAP_CHANGE).  Deliberately NOT part of
+ * MASK_STAT (which every backend must supply); backends without a native
+ * counter simply leave it unset and the NFS server derives change from ctime. */
+#define CHIMERA_VFS_ATTR_CHANGE             (1UL << 25)
+
 #define CHIMERA_VFS_ATTR_MASK_STAT          ( \
             CHIMERA_VFS_ATTR_DEV | \
             CHIMERA_VFS_ATTR_INUM | \
@@ -108,7 +115,8 @@ struct chimera_acl;
  * track btime (linux/io_uring/cairn) must still satisfy MASK_STAT. */
 #define CHIMERA_VFS_ATTR_MASK_CACHEABLE     ( \
             CHIMERA_VFS_ATTR_MASK_STAT | \
-            CHIMERA_VFS_ATTR_BTIME)
+            CHIMERA_VFS_ATTR_BTIME | \
+            CHIMERA_VFS_ATTR_CHANGE)
 
 #define CHIMERA_VFS_TIME_NOW                ((1l << 30) - 3l)
 
@@ -165,6 +173,13 @@ struct chimera_vfs_attrs {
     struct timespec     va_mtime;
     struct timespec     va_ctime;
     struct timespec     va_btime;
+
+    /* Native change attribute (CHIMERA_VFS_ATTR_CHANGE): a monotonically
+     * increasing per-object version counter.  Optional: a backend sets this bit
+     * in va_set_mask only if it supplies a real counter (CHIMERA_VFS_CAP_CHANGE),
+     * letting the NFS server report change_attr_type MONOTONIC_INCR instead of
+     * falling back to a ctime-derived change value. */
+    uint64_t            va_change;
 
     uint64_t            va_fs_space_avail;
     uint64_t            va_fs_space_free;

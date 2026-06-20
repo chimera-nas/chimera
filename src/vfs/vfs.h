@@ -1325,6 +1325,14 @@ struct chimera_vfs_handle_state {
  * ENOTSUP.  Currently only memfs advertises it. */
 #define CHIMERA_VFS_CAP_NAMED_STREAMS         (1U << 22)
 
+/* If set, the module supplies a native change attribute: a monotonically
+ * increasing per-object version counter returned via va_change /
+ * CHIMERA_VFS_ATTR_CHANGE, bumped on every data or metadata mutation.  This
+ * lets the NFS server return the counter as fattr4_change and report
+ * change_attr_type NFS4_CHANGE_TYPE_IS_MONOTONIC_INCR.  Modules that leave this
+ * unset have change derived from ctime (change_attr_type TIME_METADATA). */
+#define CHIMERA_VFS_CAP_CHANGE                (1U << 24)
+
 struct chimera_vfs_module {
     /* Required
      * Short name for the module to be used in creating shares
