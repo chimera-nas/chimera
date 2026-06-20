@@ -129,6 +129,15 @@ nfs4_root_lookup(
         return;
     }
 
+    /* Enforce the export's security-flavor policy at the pseudo-fs boundary:
+     * a client traversing into the export under a disallowed flavor gets
+     * NFS4ERR_WRONGSEC and renegotiates via SECINFO. */
+    if (!chimera_nfs_export_sec_ok(export, req->sec_bit)) {
+        res->status = NFS4ERR_WRONGSEC;
+        chimera_nfs4_compound_complete(req, NFS4ERR_WRONGSEC);
+        return;
+    }
+
     /* Entering an export from the pseudo-fs: adopt its id (so the handle minted
      * for the client carries it) and apply its squash policy. */
     chimera_nfs_set_export(req, export);

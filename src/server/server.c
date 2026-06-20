@@ -2041,6 +2041,19 @@ chimera_server_export_set_options(
                                           squash, anonuid, anongid);
 } /* chimera_server_export_set_options */
 
+SYMBOL_EXPORT int
+chimera_server_export_set_sec(
+    struct chimera_server *server,
+    const char            *name,
+    uint32_t               sec_allowed)
+{
+    if (!server->nfs_shared) {
+        return -1;
+    }
+
+    return chimera_nfs_export_set_sec(server->nfs_shared, name, sec_allowed);
+} /* chimera_server_export_set_sec */
+
 static void
 chimera_server_thread_shutdown(
     struct evpl *evpl,

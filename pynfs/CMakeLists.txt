@@ -365,3 +365,21 @@ set_tests_properties(chimera/pynfs/kerberos/krb5_smoke_memfs_nfs4.1 PROPERTIES
     LABELS "pynfs;pynfs_kerberos;rpcsec_gss;memfs;nfs4.1"
     SKIP_RETURN_CODE 77
     ENVIRONMENT "PYTHONUNBUFFERED=1")
+
+# Per-export sec= policy (Phase 2).  Restrict the export to krb5/krb5i and
+# verify (a) an allowed flavor (krb5) still works end-to-end through the
+# enforcement path, and (b) a disallowed flavor (sys) is rejected with
+# NFS4ERR_WRONGSEC at the export boundary.
+add_test(NAME chimera/pynfs/kerberos/sec_krb5only_allow_memfs_nfs4.1
+    COMMAND bash ${NFS_KRB_WRAPPER} ${CHIMERA_BINARY} memfs ${PYNFS_DIR} ${NFS_KRB_CODES})
+set_tests_properties(chimera/pynfs/kerberos/sec_krb5only_allow_memfs_nfs4.1 PROPERTIES
+    LABELS "pynfs;pynfs_kerberos;rpcsec_gss;memfs;nfs4.1"
+    SKIP_RETURN_CODE 77
+    ENVIRONMENT "PYTHONUNBUFFERED=1;NFS_EXPORT_SEC=krb5,krb5i;NFS_KRB_SEC=krb5")
+
+add_test(NAME chimera/pynfs/kerberos/sec_krb5only_deny_sys_memfs_nfs4.1
+    COMMAND bash ${NFS_KRB_WRAPPER} ${CHIMERA_BINARY} memfs ${PYNFS_DIR} EID1 CSESS1)
+set_tests_properties(chimera/pynfs/kerberos/sec_krb5only_deny_sys_memfs_nfs4.1 PROPERTIES
+    LABELS "pynfs;pynfs_kerberos;rpcsec_gss;memfs;nfs4.1"
+    SKIP_RETURN_CODE 77
+    ENVIRONMENT "PYTHONUNBUFFERED=1;NFS_EXPORT_SEC=krb5;NFS_KRB_SEC=sys;NFS_EXPECT_WRONGSEC=1")

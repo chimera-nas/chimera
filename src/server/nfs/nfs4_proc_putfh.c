@@ -134,9 +134,19 @@ chimera_nfs4_putfh(
      * the squashed credential.  A forged/tampered handle fails authentication
      * here; a well-formed but deleted handle surfaces NFS4ERR_STALE on the
      * operation that dereferences it. */
-    if (args->object.len > NFS4_FHSIZE ||
+    int decode_rc = args->object.len > NFS4_FHSIZE ? CHIMERA_NFS_FH_BADHANDLE :
         chimera_nfs_fh_decode(req, args->object.data, args->object.len,
-                              req->fh, &req->fhlen) != CHIMERA_NFS_FH_OK ||
+                              req->fh, &req->fhlen);
+
+    if (decode_rc == CHIMERA_NFS_FH_WRONGSEC) {
+        /* Handle is valid but its export does not permit this RPC security
+         * flavor; the client renegotiates via SECINFO (RFC 7530 §16.20.5). */
+        res->status = NFS4ERR_WRONGSEC;
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
+    if (decode_rc != CHIMERA_NFS_FH_OK ||
         !chimera_vfs_fh_is_plausible(thread->vfs_thread, req->fh, req->fhlen)) {
         res->status = NFS4ERR_BADHANDLE;
         chimera_nfs4_compound_complete(req, res->status);

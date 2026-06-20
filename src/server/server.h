@@ -666,6 +666,12 @@ chimera_server_export_set_options(
     uint32_t               anonuid,
     uint32_t               anongid);
 
+int
+chimera_server_export_set_sec(
+    struct chimera_server *server,
+    const char            *name,
+    uint32_t               sec_allowed);
+
 struct chimera_server *
 chimera_server_init(
     const struct chimera_server_config *config,
