@@ -665,15 +665,20 @@ chimera_nfs_fill_secinfo(
     uint32_t             mask = sec_allowed ? sec_allowed : CHIMERA_NFS_SEC_ALL;
     int                  n    = 0;
 
+    /* *INDENT-OFF* */
+    /* uncrustify oscillates on the column alignment of this initializer, so
+     * format it by hand (see the same treatment of the OID tables in
+     * nfs4_proc_exchange_id.c). */
     static const struct {
         uint32_t bit;
         uint32_t service;
     } gss_flavors[] = {
-        { CHIMERA_NFS_SEC_KRB5,  RPC_GSS_SVC_NONE        },
-        { CHIMERA_NFS_SEC_KRB5I, RPC_GSS_SVC_INTEGRITY   },
-        { CHIMERA_NFS_SEC_KRB5P, RPC_GSS_SVC_PRIVACY     },
+        { CHIMERA_NFS_SEC_KRB5,  RPC_GSS_SVC_NONE },
+        { CHIMERA_NFS_SEC_KRB5I, RPC_GSS_SVC_INTEGRITY },
+        { CHIMERA_NFS_SEC_KRB5P, RPC_GSS_SVC_PRIVACY },
     };
-    unsigned             i;
+    /* *INDENT-ON* */
+    unsigned i;
 
     if (mask & CHIMERA_NFS_SEC_SYS) {
         out[n++].flavor = AUTH_SYS;
