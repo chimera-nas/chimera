@@ -16,7 +16,9 @@ get_filename_component(BUILD_ROOT ${CMAKE_BINARY_DIR} DIRECTORY)
 set(KVM_IMAGE_REGISTRY "ghcr.io/chimera-nas/kvm-test-base" CACHE STRING
     "OCI registry base that hosts the prebuilt KVM guest images.")
 # Pinned version of the prebuilt images to consume; bump to adopt a newer
-# kvm-test-base release.  v1.8.0 pins nfstest to the chimera fork tag
+# kvm-test-base release.  v1.9.0 adds krb5-user + an init.sh sec=krb5 bring-up
+# (rpc.gssd, with the per-test keytab/conf handed in over a 9p share) for the
+# RPCSEC_GSS/Kerberos NFS test; v1.8.0 pins nfstest to the chimera fork tag
 # v3.2-chimera2, carrying the Python 3.14 compatibility fixes so the nfstest
 # suite runs on Ubuntu 26.04 (Python 3.14); v1.7.0 bakes sshd + a symmetric key
 # so nfstest's cross-client suites can drive a second NFS client over ssh (and
@@ -26,7 +28,7 @@ set(KVM_IMAGE_REGISTRY "ghcr.io/chimera-nas/kvm-test-base" CACHE STRING
 # ubuntu2604 variant; v1.3.0 added the Linux Test Project (LTP) tree under
 # /opt/ltp{,-skip}; v1.2.0 added the Linux nfstest suite; v1.1.0 dropped the 22.04
 # generic variant (see the KVM_IMAGES note below); v1.0.0 still has all four.
-set(KVM_IMAGE_VERSION "v1.8.0" CACHE STRING
+set(KVM_IMAGE_VERSION "v1.9.0" CACHE STRING
     "Version tag of the KVM guest images to consume.")
 
 # Note: the 22.04 generic (non-HWE) kernel does not build the virtio block

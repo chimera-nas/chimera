@@ -11,6 +11,7 @@
 #include "evpl/evpl_rpc2.h"
 #include "portmap_xdr.h"
 #include "vfs/vfs_cred.h"
+#include "nfs_gss.h"
 #include "nfs_mount_xdr.h"
 #include "nfs3_xdr.h"
 #include "nfs4_xdr.h"
@@ -463,6 +464,9 @@ chimera_nfs_map_cred(
                                    rpc_cred->authsys.gid,
                                    rpc_cred->authsys.num_gids,
                                    rpc_cred->authsys.gids);
+    } else if (rpc_cred->flavor == EVPL_RPC2_AUTH_RPCSEC_GSS) {
+        /* RPCSEC_GSS: map the authenticated principal to a UNIX identity. */
+        chimera_nfs_gss_map_principal(rpc_cred->gss.principal, vfs_cred);
     } else {
         /* Unknown auth flavor - use anonymous */
         chimera_vfs_cred_init_anonymous(vfs_cred,

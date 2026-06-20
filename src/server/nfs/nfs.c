@@ -16,6 +16,8 @@
 #include "server/server.h"
 #include "vfs/vfs.h"
 #include "evpl/evpl_rpc2.h"
+#include "evpl/evpl_rpc2_gss.h"
+#include "nfs_gss.h"
 #include "nfs3_procs.h"
 #include "nfs4_procs.h"
 #include "nfs_mount.h"
@@ -175,6 +177,13 @@ nfs_server_init(
     shared->config = config;
 
     nfs_fh_key_init(shared, config);
+
+    /* RPCSEC_GSS (Kerberos): register the acceptor keytab once at startup.
+     * Per-thread provider registration happens in nfs_server_thread_init. */
+    if (chimera_server_config_get_nfs_kerberos_enabled(config)) {
+        chimera_nfs_gss_init(chimera_server_config_get_nfs_kerberos_keytab(config));
+        chimera_nfs_info("RPCSEC_GSS: Kerberos authentication enabled");
+    }
 
     shared->portmap_hostname[0] = '\0';
     if (portmap_hostname) {
@@ -796,6 +805,13 @@ nfs_server_thread_init(
     thread->vfs_thread = vfs_thread;
 
     thread->rpc2_thread = evpl_rpc2_thread_init(evpl, NULL, 0, chimera_nfs_server_notify, thread);
+
+    /* Install the GSSAPI/Kerberos acceptor on this rpc2 thread so RPCSEC_GSS
+     * calls (sec=krb5) can establish contexts and authenticate. */
+    if (chimera_server_config_get_nfs_kerberos_enabled(shared->config)) {
+        evpl_rpc2_set_gss_provider(thread->rpc2_thread,
+                                   &chimera_nfs_gss_provider, shared);
+    }
 
     if (shared->mount_server) {
         evpl_rpc2_server_attach(thread->rpc2_thread, shared->mount_server, thread);

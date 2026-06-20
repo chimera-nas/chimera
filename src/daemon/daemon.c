@@ -801,6 +801,21 @@ main(
         }
     }
 
+    // Parse NFS auth configuration (RPCSEC_GSS / Kerberos)
+    json_t *nfs_auth = json_object_get(server_params, "nfs_auth");
+    if (nfs_auth && json_is_object(nfs_auth)) {
+        json_t *kerberos_enabled = json_object_get(nfs_auth, "kerberos_enabled");
+        if (kerberos_enabled && json_is_true(kerberos_enabled)) {
+            chimera_server_config_set_nfs_kerberos_enabled(server_config, 1);
+        }
+
+        json_t *kerberos_keytab = json_object_get(nfs_auth, "kerberos_keytab");
+        if (kerberos_keytab && json_is_string(kerberos_keytab)) {
+            chimera_server_config_set_nfs_kerberos_keytab(server_config,
+                                                          json_string_value(kerberos_keytab));
+        }
+    }
+
     json_t *smb_multichannel = json_object_get(server_params, "smb_multichannel");
     if (json_is_array(smb_multichannel)) {
         json_t *smb_nic_info_json;
