@@ -3,13 +3,20 @@
 #
 # SPDX-License-Identifier: Unlicense
 
-# Usage: kvm_smb_test_wrapper.sh <vmlinuz> <rootfs.qcow2> <chimera_binary> <backend> <test_cmd>
+# Usage: kvm_smb_test_wrapper.sh <vmlinuz> <rootfs.qcow2> <chimera_binary> \
+#            <backend> <dialect> <secmode> <test_cmd>
+#
+#   <dialect>  SMB protocol version the guest mounts with and the server's
+#              dialect floor: one of 2.0.2 | 2.1 | 3.0 | 3.0.2 | 3.1.1.
+#   <secmode>  per-mount security mode: none | sign | seal.  "sign" forces SMB
+#              signing on the mount; "seal" forces SMB3 transport encryption.
 #
 # Orchestrates a chimera SMB server + QEMU VM to run tests over CIFS.
-# 1. Generates chimera config for the given backend
+# 1. Generates chimera config for the given backend (dialect floor = <dialect>)
 # 2. Creates a network namespace with TAP device
 # 3. Starts chimera daemon in the netns (SMB on 10.0.0.1:445)
-# 4. Boots QEMU VM which mounts CIFS and runs the test command
+# 4. Boots QEMU VM which mounts CIFS (vers=<dialect>, <secmode>) and runs the
+#    test command
 # 5. Captures exit code and cleans up
 
 set -u
@@ -34,7 +41,18 @@ VMLINUZ=$1; shift
 ROOTFS=$1; shift
 CHIMERA_BINARY=$1; shift
 BACKEND=$1; shift
+DIALECT=$1; shift
+SECMODE=$1; shift
 TEST_CMD_ARG="$*"
+
+case "$DIALECT" in
+    2.0.2|2.1|3.0|3.0.2|3.1.1) ;;
+    *) echo "invalid dialect '$DIALECT' (expected 2.0.2|2.1|3.0|3.0.2|3.1.1)" >&2; exit 1 ;;
+esac
+case "$SECMODE" in
+    none|sign|seal) ;;
+    *) echo "invalid secmode '$SECMODE' (expected none|sign|seal)" >&2; exit 1 ;;
+esac
 
 # Boot with no initrd: every kernel in the KVM image matrix builds the virtio
 # block/net drivers in, so the kernel mounts the virtio root disk directly.
@@ -61,6 +79,16 @@ cleanup() {
     fi
     if [ -n "$CHIMERA_PID" ]; then
         kill "$CHIMERA_PID" 2>/dev/null || true
+        # Give chimera up to 3 seconds to shut down cleanly
+        for i in $(seq 1 150); do
+            kill -0 "$CHIMERA_PID" 2>/dev/null || break
+            sleep 0.02
+        done
+        # Force kill if still alive
+        if kill -0 "$CHIMERA_PID" 2>/dev/null; then
+            echo "=== Chimera shutdown hung, force killing ===" >&2
+            kill -9 "$CHIMERA_PID" 2>/dev/null || true
+        fi
         wait "$CHIMERA_PID" 2>/dev/null || true
     fi
     ip netns delete "${NETNS_NAME}" 2>/dev/null || true
@@ -123,6 +151,7 @@ generate_config() {
         "threads": 4,
         "delegation_threads": 4,
         $vfs_section
+        "smb_min_dialect": "$DIALECT",
         "external_portmap": false
     },
     "mounts": {
@@ -190,10 +219,32 @@ for i in $(seq 1 150); do
     sleep 0.02
 done
 
+# Translate the server-side dialect string into the kernel cifs `vers=` token.
+# They are NOT identical: SMB 2.0.2 mounts as vers=2.0 (there is no "2.0.2"
+# token) and 3.0.2 canonically as vers=3.02.  2.1 / 3.0 / 3.1.1 match as-is.
+case "$DIALECT" in
+    2.0.2) VERS="2.0"   ;;
+    2.1)   VERS="2.1"   ;;
+    3.0)   VERS="3.0"   ;;
+    3.0.2) VERS="3.02"  ;;
+    3.1.1) VERS="3.1.1" ;;
+esac
+
+# Build the mount options for the CIFS mount.  vers= pins the dialect; seal/sign
+# add SMB3 transport encryption / signing for the secmode variants.
+SMB_MOUNT_OPTS="username=root,password=secret,vers=${VERS},nobrl,modefromsid,cache=loose"
+case "$SECMODE" in
+    seal) SMB_MOUNT_OPTS="${SMB_MOUNT_OPTS},seal" ;;
+    sign) SMB_MOUNT_OPTS="${SMB_MOUNT_OPTS},sign" ;;
+esac
+
 # Build the test command to run inside the VM
-TEST_CMD="mount -t cifs //10.0.0.1/share /mnt -o username=root,password=secret,vers=2.1,nobrl,modefromsid,cache=loose && ${TEST_CMD_ARG}"
+TEST_CMD="mount -t cifs //10.0.0.1/share /mnt -o ${SMB_MOUNT_OPTS} && ${TEST_CMD_ARG}"
 
 # Boot QEMU inside the netns
+# Use -serial stdio so serial output goes to stdout in real-time (captured by ctest).
+# Pipe through tee to also write to LOG_FILE for exit code parsing.
+# This ensures guest output is visible even when ctest kills the process on timeout.
 ip netns exec "${NETNS_NAME}" "$QEMU_BIN" \
     -enable-kvm -smp 4 -m 1G -cpu host \
     -kernel "$VMLINUZ" \
@@ -203,12 +254,19 @@ ip netns exec "${NETNS_NAME}" "$QEMU_BIN" \
     -drive file="$ROOTFS",if=virtio,format=qcow2,snapshot=on \
     -netdev tap,id=net0,ifname="${TAP_NAME}",script=no,downscript=no \
     -device virtio-net-pci,netdev=net0,romfile="" \
-    -serial file:"$LOG_FILE" \
+    -serial stdio \
     -nographic \
     -no-reboot \
-    -append "root=/dev/vda rw console=${QEMU_CONSOLE} net.ifnames=0 biosdevname=0 quiet mitigations=off tsc=reliable panic=-1 test_cmd=\"${TEST_CMD}\" init=/init.sh"
+    -append "root=/dev/vda rw console=${QEMU_CONSOLE} net.ifnames=0 biosdevname=0 quiet mitigations=off tsc=reliable panic=-1 test_cmd=\"${TEST_CMD}\" init=/init.sh" \
+    2>/dev/null | tee "$LOG_FILE"
 
-cat "$LOG_FILE"
+# Check if chimera is still alive after QEMU exits
+if ! kill -0 "$CHIMERA_PID" 2>/dev/null; then
+    wait "$CHIMERA_PID" 2>/dev/null
+    CHIMERA_EXIT=$?
+    echo "=== Chimera daemon DIED during test (exit code: $CHIMERA_EXIT) ==="
+    CHIMERA_PID=""
+fi
 
 # Show chimera debug output if present
 if [ -f "$CHIMERA_LOG" ]; then
