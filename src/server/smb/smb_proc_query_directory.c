@@ -205,7 +205,7 @@ chimera_smb_query_directory_readdir_callback(
             evpl_iovec_cursor_append_uint64(&entry_cursor, smb_attrs.smb_alloc_size);
             evpl_iovec_cursor_append_uint32(&entry_cursor, smb_attrs.smb_attributes);
             evpl_iovec_cursor_append_uint32(&entry_cursor, namelen * 2);
-            evpl_iovec_cursor_append_uint32(&entry_cursor, 0);
+            evpl_iovec_cursor_append_uint32(&entry_cursor, smb_attrs.smb_ea_size);
             evpl_iovec_cursor_zero(&entry_cursor, 26); /* short name */
 
 
@@ -241,7 +241,7 @@ chimera_smb_query_directory_readdir_callback(
             evpl_iovec_cursor_append_uint32(&entry_cursor, smb_attrs.smb_attributes);
             evpl_iovec_cursor_append_uint32(&entry_cursor, namelen * 2);
 
-            evpl_iovec_cursor_append_uint32(&entry_cursor, 0);
+            evpl_iovec_cursor_append_uint32(&entry_cursor, smb_attrs.smb_ea_size);
             namebuf = evpl_iovec_cursor_data(&entry_cursor);
             chimera_smb_utf8_to_utf16le(&thread->iconv_ctx,
                                         name, namelen,
@@ -261,7 +261,7 @@ chimera_smb_query_directory_readdir_callback(
             evpl_iovec_cursor_append_uint64(&entry_cursor, smb_attrs.smb_alloc_size);
             evpl_iovec_cursor_append_uint32(&entry_cursor, smb_attrs.smb_attributes);
             evpl_iovec_cursor_append_uint32(&entry_cursor, namelen * 2);
-            evpl_iovec_cursor_append_uint32(&entry_cursor, 0);
+            evpl_iovec_cursor_append_uint32(&entry_cursor, smb_attrs.smb_ea_size);
             evpl_iovec_cursor_zero(&entry_cursor, 28); /* short name */
             evpl_iovec_cursor_append_uint64(&entry_cursor, attrs->va_ino);
 
@@ -283,7 +283,7 @@ chimera_smb_query_directory_readdir_callback(
             evpl_iovec_cursor_append_uint64(&entry_cursor, smb_attrs.smb_alloc_size);
             evpl_iovec_cursor_append_uint32(&entry_cursor, smb_attrs.smb_attributes);
             evpl_iovec_cursor_append_uint32(&entry_cursor, namelen * 2);
-            evpl_iovec_cursor_append_uint32(&entry_cursor, 0);
+            evpl_iovec_cursor_append_uint32(&entry_cursor, smb_attrs.smb_ea_size);
             evpl_iovec_cursor_append_uint64(&entry_cursor, attrs->va_ino);
 
             namebuf = evpl_iovec_cursor_data(&entry_cursor);
@@ -375,16 +375,32 @@ chimera_smb_query_directory(struct chimera_smb_request *request)
         chimera_vfs_dup_handle(thread->vfs_thread, request->query_directory.open_file->handle);
     }
 
+    uint64_t readdir_mask = CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_BTIME;
+
+    /* Only the info classes that carry an EaSize field pay for the per-entry EA
+     * enumeration; FILE_DIRECTORY/NAMES information do not. */
+    switch (request->query_directory.info_class) {
+        case SMB2_FILE_BOTH_DIRECTORY_INFORMATION:
+        case SMB2_FILE_FULL_DIRECTORY_INFORMATION:
+        case SMB2_FILE_ID_BOTH_DIRECTORY_INFORMATION:
+        case SMB2_FILE_ID_FULL_DIRECTORY_INFORMATION:
+            readdir_mask |= CHIMERA_VFS_ATTR_EA_SIZE;
+            break;
+        default:
+            break;
+    } /* switch */
+
+    /* Access-based enumeration needs each entry's ACL to decide visibility. */
+    if (request->tree && request->tree->share &&
+        request->tree->share->access_based_enum) {
+        readdir_mask |= CHIMERA_VFS_ATTR_ACL;
+    }
+
     chimera_vfs_readdir(
         thread->vfs_thread,
         &request->session_handle->session->cred,
         request->query_directory.open_file->handle,
-        /* Access-based enumeration needs each entry's ACL to decide
-         * visibility. */
-        (request->tree && request->tree->share &&
-         request->tree->share->access_based_enum) ?
-        (CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_BTIME | CHIMERA_VFS_ATTR_ACL) :
-        (CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_BTIME),
+        readdir_mask,
         0, /* dir_attr_mask */
         request->query_directory.open_file->position,
         0, /* verifier */

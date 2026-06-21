@@ -32,6 +32,7 @@
 #include "vfs/vfs_idmap.h"
 #include "vfs/vfs_release.h"
 #include "vfs/vfs_notify.h"
+#include "vfs/vfs_xattr_name.h"
 
 #define SMB2_MAX_DIALECTS           16
 #define SMB2_MAX_NEGOTIATE_CONTEXTS 16
@@ -537,6 +538,14 @@ struct chimera_smb_request {
              * context (SMB2_CREATE_SD_BUFFER); set_attr.va_acl points here. */
             uint8_t                            acl_storage[sizeof(struct chimera_acl) +
                                                            64 * sizeof(struct chimera_ace)];
+            /* SMB2_CREATE_EA_BUFFER ("ExtA") create context: the client's
+             * FILE_FULL_EA_INFORMATION buffer, copied in parse and applied to the
+             * new/opened object via chimera_smb_ea_apply at create completion.
+             * ea_buf_len == 0 means no ExtA context.  The whole create-context
+             * blob is capped at 1024 bytes (see chimera_smb_parse_create), so a
+             * fixed buffer holds any ExtA payload without a heap allocation. */
+            uint32_t                           ea_buf_len;
+            uint8_t                            ea_buf[1024];
             /* SMB3 persistent-handle write-through.  persist_pid != 0 marks this
              * open as a persistent grant (fresh or cold reclaim): the record is
              * persisted atomically with the VFS open via persist_hs, and
@@ -894,6 +903,16 @@ struct chimera_smb_request {
             uint32_t                        stream_record_len;
             uint32_t                        stream_record_count;
             uint8_t                         stream_records[4096];
+            /* FILE_FULL_EA_INFORMATION query: stream_base_handle is reused as the
+             * EA enumeration handle and stream_records holds the listed user.*
+             * names.  Values are fetched one at a time and the wire FULL_EA list
+             * is built into ea_out (malloc'd, freed by the reply emitter on
+             * success or by the finish path on error). */
+            uint8_t                        *ea_out;
+            uint32_t                        ea_out_len;
+            uint32_t                        ea_out_cap;
+            uint32_t                        ea_last_off;
+            const char                     *ea_cursor;
         } query_info;
 
         struct {
@@ -935,6 +954,20 @@ struct chimera_smb_request {
              * security descriptor; vfs_attrs.va_acl points here. */
             uint8_t                            acl_storage[sizeof(struct chimera_acl) +
                                                            64 * sizeof(struct chimera_ace)];
+            /* FILE_FULL_EA_INFORMATION set: the client's EA buffer is captured
+             * in parse (malloc'd, freed at completion) and applied one EA at a
+             * time in an async set_xattr/remove_xattr loop.  ea_list holds the
+             * object's existing user.* names so each set can reuse an existing
+             * case-variant's spelling (Samba canonicalize_ea_name); ea_name is
+             * the "user."+name built for the in-flight op. */
+            uint8_t                           *ea_buf;
+            uint32_t                           ea_buf_len;
+            uint32_t                           ea_off;
+            uint8_t                            ea_list[4096];
+            uint32_t                           ea_list_len;
+            uint32_t                           ea_list_count;
+            char                               ea_name[CHIMERA_VFS_XATTR_NAME_MAX];
+            uint32_t                           ea_name_len;
         } set_info;
 
         struct {
