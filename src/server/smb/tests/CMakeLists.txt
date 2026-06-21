@@ -268,6 +268,85 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
     else()
         message(STATUS "WPTS MS-FSAModel tests: disabled (MS-FSAModel_ServerTestSuite.dll not found)")
     endif()
+
+    # ------------------------------------------------------------------
+    # WPTS MS-SMB2Model -- the Spec-Explorer model-based companion to MS-SMB2,
+    # run through the same generalized wrapper via WPTS_SUITE=MS-SMB2Model.
+    # Unlike MS-FSAModel (single config), it is feature-config-aware like
+    # MS-SMB2: smb2model_cases.csv carries a home_config column, and each
+    # config's green list reuses the same CHIMERA_SMB_* env fragments / labels /
+    # suffixes defined for MS-SMB2 above.  CI gates ONLY on status=green; xfail
+    # (tracked defects incl. the lease-break-handle timeouts) and skip
+    # (never-applicable: SOFS/cluster, per-share ForceLevel2, 2-server) are not
+    # registered.  The green set is large (~1.3k), so each config's list is
+    # sharded into several consolidated vstest invocations that run in parallel
+    # under ctest -j; all carry the wpts-smb2model label so they shard
+    # separately from MS-SMB2 (wpts), MS-FSA (wpts-fsa) and MS-FSAModel
+    # (wpts-fsamodel).
+    # ------------------------------------------------------------------
+    find_file(WPTS_SMB2MODEL_DLL MS-SMB2Model_ServerTestSuite.dll
+              HINTS ${WPTS_BIN_DIR} NO_DEFAULT_PATH)
+    if(WPTS_SMB2MODEL_DLL)
+        set(_smb2model_configs base persistent multichannel encryption
+            multichannel_persistent_encryption)
+        foreach(_c ${_smb2model_configs})
+            set(WPTS_SMB2MODEL_GREEN_${_c} "")
+        endforeach()
+
+        file(STRINGS ${CMAKE_CURRENT_SOURCE_DIR}/wpts/smb2model_cases.csv
+             _smb2model_rows)
+        foreach(_row ${_smb2model_rows})
+            if(_row MATCHES "^case,")              # CSV header
+                continue()
+            endif()
+            string(REPLACE "," ";" _f "${_row}")
+            list(GET _f 0 _case)
+            list(GET _f 1 _home)
+            list(GET _f 2 _status)
+            if(NOT _status STREQUAL "green")        # CI gates only on green
+                continue()
+            endif()
+            list(APPEND WPTS_SMB2MODEL_GREEN_${_home} "${_case}")
+        endforeach()
+
+        # Cases per consolidated vstest invocation (parallelism vs. bringup
+        # overhead trade-off; ~120 keeps each shard well under the timeout).
+        set(WPTS_SMB2MODEL_SHARD 120 CACHE STRING
+            "MS-SMB2Model green cases per consolidated ctest shard.")
+
+        foreach(_cfg ${_smb2model_configs})
+            set(_g ${WPTS_SMB2MODEL_GREEN_${_cfg}})
+            list(LENGTH _g _n)
+            if(_n EQUAL 0)
+                continue()                          # no green cases for this config
+            endif()
+            set(_idx 0)
+            set(_shard 0)
+            while(_idx LESS _n)
+                math(EXPR _rem "${_n} - ${_idx}")
+                if(_rem GREATER ${WPTS_SMB2MODEL_SHARD})
+                    set(_take ${WPTS_SMB2MODEL_SHARD})
+                else()
+                    set(_take ${_rem})
+                endif()
+                list(SUBLIST _g ${_idx} ${_take} _sub)
+                string(REPLACE ";" "," _tests "${_sub}")
+                set(_name chimera/server/smb/wpts-smb2model/memfs${_wpts_suf_${_cfg}}_s${_shard})
+                add_test(NAME ${_name}
+                    COMMAND ${CMAKE_SOURCE_DIR}/scripts/wpts_smb_test_wrapper.sh
+                            ${CHIMERA_DAEMON} memfs "${_tests}")
+                set_tests_properties(${_name} PROPERTIES
+                    LABELS "smb;wpts;wpts-smb2model${_wpts_lbl_${_cfg}}"
+                    TIMEOUT 1800
+                    ENVIRONMENT "WPTS_BIN_DIR=${WPTS_BIN_DIR};DOTNET=${WPTS_DOTNET};WPTS_SUITE=MS-SMB2Model${_wpts_envfrag_${_cfg}};WPTS_JUNIT_FILE=${WPTS_JUNIT_DIR}/smb2model_memfs${_wpts_suf_${_cfg}}_s${_shard}.xml;WPTS_JUNIT_CONVERTER=${CMAKE_SOURCE_DIR}/scripts/trx_to_junit.py")
+                math(EXPR _idx "${_idx} + ${WPTS_SMB2MODEL_SHARD}")
+                math(EXPR _shard "${_shard} + 1")
+            endwhile()
+        endforeach()
+        message(STATUS "WPTS MS-SMB2Model tests: enabled (${WPTS_SMB2MODEL_DLL})")
+    else()
+        message(STATUS "WPTS MS-SMB2Model tests: disabled (MS-SMB2Model_ServerTestSuite.dll not found)")
+    endif()
 elseif(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND NOT WPTS_ARCH_SUPPORTED)
     message(STATUS "WPTS MS-SMB2 tests: disabled "
             "(unsupported arch ${CMAKE_SYSTEM_PROCESSOR}; .NET test host needs x86_64)")
