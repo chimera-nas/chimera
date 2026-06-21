@@ -178,6 +178,7 @@ chimera_nfs4_readdir_open_callback(
                         args->cookie,
                         cookieverf,
                         0,
+                        NULL, 0, /* no search-pattern filter */
                         chimera_nfs4_readdir_callback,
                         chimera_nfs4_readdir_complete,
                         req);

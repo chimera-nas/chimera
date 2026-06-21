@@ -63,6 +63,7 @@ chimera_dispatch_readdir(
                         request->readdir.cookie,
                         0,  // verifier
                         CHIMERA_VFS_READDIR_EMIT_DOT,
+                        NULL, 0, /* no search-pattern filter */
                         chimera_readdir_entry_callback,
                         chimera_readdir_complete,
                         request);

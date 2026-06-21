@@ -228,6 +228,7 @@ chimera_vfs_find_open_callback(
         0,
         0, /* verifier */
         0, /* flags: don't emit . and .. entries */
+        NULL, 0, /* no search-pattern filter */
         chimera_vfs_find_readdir_callback,
         chimera_vfs_find_readdir_complete,
         find_request);

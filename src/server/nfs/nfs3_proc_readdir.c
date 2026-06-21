@@ -117,6 +117,7 @@ chimera_nfs3_readdir_open_callback(
                             args->cookie,
                             cookieverf,
                             CHIMERA_VFS_READDIR_EMIT_DOT,
+                            NULL, 0, /* no search-pattern filter */
                             chimera_nfs3_readdir_callback,
                             chimera_nfs3_readdir_complete,
                             req);
