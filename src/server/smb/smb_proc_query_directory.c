@@ -84,24 +84,10 @@ chimera_smb_query_directory_readdir_callback(
     uint32_t                          file_index, expected_length;
     struct evpl_iovec_cursor          entry_cursor;
     struct chimera_smb_attrs          smb_attrs;
-    int                               match;
 
-    if (request->query_directory.pattern_length == 1 &&
-        request->query_directory.pattern[0] == '*') {
-        match = 1;
-    } else {
-        /* XXX this is assuming pattern is not a glob */
-        if (namelen == request->query_directory.pattern_length) {
-            match = strncmp(name, request->query_directory.pattern, namelen) == 0;
-        } else {
-            match = 0;
-        }
-    }
-
-    if (!match) {
-        return 0;
-    }
-
+    /* The search-pattern wildcard match is applied by the VFS core
+     * (chimera_vfs_readdir match_pattern), so every entry that reaches here has
+     * already matched -- no per-entry filtering needed. */
 
     /* Access-based directory enumeration: hide an entry the caller cannot read.
      * Windows requires the DACL itself to grant the read rights (DATA + EA +
@@ -403,6 +389,10 @@ chimera_smb_query_directory(struct chimera_smb_request *request)
         request->query_directory.open_file->position,
         0, /* verifier */
         CHIMERA_VFS_READDIR_EMIT_DOT,
+        /* SMB search pattern: the VFS core applies the MS-FSA wildcard match so
+         * the backend stays oblivious; the callback below no longer filters. */
+        request->query_directory.pattern,
+        request->query_directory.pattern_length,
         chimera_smb_query_directory_readdir_callback,
         chimera_smb_query_directory_readdir_complete,
         request

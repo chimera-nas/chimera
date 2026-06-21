@@ -711,6 +711,14 @@ struct chimera_vfs_request {
             int                             bounce_offset;
             chimera_vfs_readdir_callback_t  orig_callback;
             void                           *orig_private_data;
+            /* Optional SMB-style wildcard filter applied in the VFS core so the
+             * backend stays oblivious: only entries matching match_pattern are
+             * forwarded to inner_callback (the path's real per-entry callback).
+             * match_pattern == NULL disables filtering. */
+            const char                     *match_pattern;
+            int                             match_pattern_len;
+            chimera_vfs_readdir_callback_t  inner_callback;
+            void                           *inner_arg;
         } readdir;
 
         struct {

@@ -262,9 +262,20 @@ chimera_vfs_readdir(
     uint64_t                        cookie,
     uint64_t                        verifier,
     uint32_t                        flags,
+    const char                     *match_pattern,
+    int                             match_pattern_len,
     chimera_vfs_readdir_callback_t  callback,
     chimera_vfs_readdir_complete_t  complete,
     void                           *private_data);
+
+/* SMB-style directory wildcard match (MS-FSA 2.1.4.4), exposed for callers that
+ * filter outside chimera_vfs_readdir.  A NULL/empty pattern matches everything. */
+int
+chimera_vfs_dirent_match(
+    const char *name,
+    int         namelen,
+    const char *pattern,
+    int         patternlen);
 
 typedef void (*chimera_vfs_open_fh_callback_t)(
     enum chimera_vfs_error          error_code,
