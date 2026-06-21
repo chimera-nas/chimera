@@ -67,6 +67,8 @@
 
 #include "vfs/vfs_acl_serialize.h"
 
+#include "vfs/vfs_xattr_name.h"
+
 #include "diskfs.h"
 
 #include "space_map.h"
@@ -192,6 +194,11 @@ struct diskfs_request_private {
     int                         status;
     int                         pending;
     int                         niov;
+
+    /* xattr EaSize maintenance: captured in set_xattr's lookup callback so the
+     * insert-completion can update the inode's cached ea_size/ea_count delta. */
+    uint64_t                    ea_old_size;  /* FEALIST size of the replaced EA, 0 if new */
+    int                         ea_replace;   /* set: replacing an existing EA */
     uint32_t                    read_prefix;
     uint32_t                    read_suffix;
     struct diskfs_thread       *thread;  // Thread for tracking pending I/O
@@ -557,6 +564,13 @@ struct diskfs_inode {
     uint32_t                    btime_nsec;
     uint32_t                    dos_attributes;
     uint64_t                    change;      /* native monotonic change counter */
+    /* Cached SMB/OS-2 EaSize aggregate: sum of per-EA FEALIST sizes over this
+     * inode's user.* xattrs (excluding the one-time +4 overhead) plus the EA
+     * count.  Maintained incrementally on xattr set/remove and persisted in the
+     * dinode (like change), so the synchronous attr-fill reports va_ea_size
+     * without an async b+tree walk. */
+    uint64_t                    ea_size;
+    uint32_t                    ea_count;
 
     /* Inode-cache linkage, keyed by inum.  Lock state and the wait list
      * below are protected by the owning shard's mutex, never held across
@@ -818,6 +832,8 @@ struct diskfs_dinode {
     uint64_t parent_inum;     /* directories only */
     uint32_t parent_gen;
     uint64_t change;          /* native monotonic change counter */
+    uint64_t ea_size;         /* cached SMB EaSize aggregate (sans +4 overhead) */
+    uint32_t ea_count;        /* number of user.* xattrs */
 };
 
 
@@ -4532,6 +4548,13 @@ diskfs_map_attrs(
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_CHANGE) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_CHANGE;
         attr->va_change    = inode->change;
+    }
+
+    /* SMB/OS-2 EaSize from the cached aggregate (+4 once if any EA exists). */
+    if (attr->va_req_mask & CHIMERA_VFS_ATTR_EA_SIZE) {
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_EA_SIZE;
+        attr->va_ea_size   = inode->ea_size +
+            (inode->ea_count ? CHIMERA_VFS_XATTR_EA_LIST_OVERHEAD : 0);
     }
 
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_FSID) {

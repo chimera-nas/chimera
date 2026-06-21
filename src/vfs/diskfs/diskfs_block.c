@@ -1314,6 +1314,8 @@ diskfs_inode_flush(struct diskfs_inode *inode)
     di->btime_nsec     = inode->btime_nsec;
     di->dos_attributes = inode->dos_attributes;
     di->change         = inode->change;
+    di->ea_size        = inode->ea_size;
+    di->ea_count       = inode->ea_count;
     if (S_ISDIR(inode->mode)) {
         di->parent_inum = inode->parent_inum;
         di->parent_gen  = inode->parent_gen;

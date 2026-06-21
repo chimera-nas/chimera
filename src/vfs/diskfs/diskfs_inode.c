@@ -466,6 +466,8 @@ diskfs_inode_load_sync(
         inode->btime_nsec     = di->btime_nsec;
         inode->dos_attributes = di->dos_attributes;
         inode->change         = di->change;
+        inode->ea_size        = di->ea_size;
+        inode->ea_count       = di->ea_count;
         inode->parent_inum    = di->parent_inum;
         inode->parent_gen     = di->parent_gen;
         rb_tree_insert(&shard->inodes, inum, inode);

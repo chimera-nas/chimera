@@ -79,6 +79,15 @@ struct chimera_acl;
  * reported va_space_used (max of real usage and the reservation). */
 #define CHIMERA_VFS_ATTR_ALLOC_SIZE         (1UL << 26)
 
+/* SMB/OS-2 EaSize: the combined byte length of the object's user-namespace
+ * extended attributes, in the OS/2 FEALIST encoding (see
+ * chimera_vfs_xattr_ea_entry_size in vfs_xattr_name.h).  Optional and computed
+ * by enumeration only when requested, so it is deliberately NOT in MASK_STAT or
+ * MASK_CACHEABLE -- only the SMB server asks for it, and only for the info
+ * levels that carry EaSize.  A backend sets the bit in va_set_mask iff it
+ * supports xattrs (CHIMERA_VFS_CAP_XATTR). */
+#define CHIMERA_VFS_ATTR_EA_SIZE            (1UL << 27)
+
 #define CHIMERA_VFS_ATTR_MASK_STAT          ( \
             CHIMERA_VFS_ATTR_DEV | \
             CHIMERA_VFS_ATTR_INUM | \
@@ -188,6 +197,11 @@ struct chimera_vfs_attrs {
      * letting the NFS server report change_attr_type MONOTONIC_INCR instead of
      * falling back to a ctime-derived change value. */
     uint64_t            va_change;
+
+    /* SMB/OS-2 EaSize (CHIMERA_VFS_ATTR_EA_SIZE): combined OS/2-FEALIST byte
+     * length of this object's user-namespace xattrs.  Optional; filled only when
+     * the bit is requested. */
+    uint64_t            va_ea_size;
 
     uint64_t            va_fs_space_avail;
     uint64_t            va_fs_space_free;
