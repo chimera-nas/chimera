@@ -2794,17 +2794,28 @@ memfs_open_at(
             return;
         }
 
-        /* Creating a new file requires add-file (WRITE_DATA) + search (EXECUTE)
-         * permission on the parent directory.  On the NFSv4/Windows ACL model
-         * WRITE_DATA == ADD_FILE and APPEND_DATA == ADD_SUBDIRECTORY, so a plain
-         * file create is gated by WRITE_DATA (mkdir, which adds a subdirectory,
-         * is gated by APPEND_DATA in the VFS-core mkdir_at path).  Enforce POSIX
-         * semantics for AUTH_UNIX callers (root is exempt); SMB/ACL (AUTH_ATTR)
-         * callers are authorized by the engine. */
+        /* Creating a new file requires add-file permission on the parent
+         * directory.  On the NFSv4/Windows ACL model WRITE_DATA == ADD_FILE and
+         * APPEND_DATA == ADD_SUBDIRECTORY, so a plain file create is gated by
+         * WRITE_DATA (mkdir, which adds a subdirectory, is gated by APPEND_DATA in
+         * the VFS-core mkdir_at path).  The required parent access differs by
+         * credential model: AUTH_UNIX (POSIX, root exempt) needs write + search
+         * (WRITE_DATA | EXECUTE) on the directory; AUTH_ATTR (SMB/Windows) checks
+         * ADD_FILE (WRITE_DATA) only -- traverse (EXECUTE) is bypassed by default
+         * on Windows (SeChangeNotifyPrivilege), so a directory whose DACL grants
+         * ADD_FILE without EXECUTE must still permit the create (smb2.acls.DYNAMIC),
+         * while an explicit deny-ADD_FILE ace still blocks it (smb2.create.mkdir-visible). */
+        uint32_t create_access = 0;
+
         if (request->cred->flavor == CHIMERA_VFS_AUTH_UNIX &&
-            request->cred->uid != 0 &&
-            !memfs_inode_access(parent_inode, request->cred,
-                                CHIMERA_ACE_WRITE_DATA | CHIMERA_ACE_EXECUTE)) {
+            request->cred->uid != 0) {
+            create_access = CHIMERA_ACE_WRITE_DATA | CHIMERA_ACE_EXECUTE;
+        } else if (request->cred->flavor == CHIMERA_VFS_AUTH_ATTR) {
+            create_access = CHIMERA_ACE_WRITE_DATA;
+        }
+
+        if (create_access &&
+            !memfs_inode_access(parent_inode, request->cred, create_access)) {
             pthread_mutex_unlock(&parent_inode->lock);
             request->status = CHIMERA_VFS_EACCES;
             request->complete(request);
