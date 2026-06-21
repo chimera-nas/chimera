@@ -765,7 +765,7 @@ jobs:
       matrix:
         arch: [amd64, arm64]
         build_type: [Release, Debug]
-        category: [pynfs, smbtorture, wpts, posix-client, pjdfstest, s3, ceph-s3, client, unit, kvm-cthon, kvm-xfsprogs, kvm-pnfs, kvm-nfstest-lock, kvm-nfstest-dio, kvm-nfstest-rest, kvm-ltp]
+        category: [pynfs, smbtorture, wpts-smb2, wpts-fsa, posix-client, pjdfstest, s3, ceph-s3, client, unit, kvm-cthon, kvm-xfsprogs, kvm-pnfs, kvm-nfstest-lock, kvm-nfstest-dio, kvm-nfstest-rest, kvm-ltp]
         include:
           - { arch: amd64, runner: arc-amd64 }
           - { arch: arm64, runner: arc-arm64 }
@@ -780,7 +780,8 @@ jobs:
           - { arch: arm64, category: kvm-ltp }
           # WPTS (Microsoft Protocol Test Suite) is not supported on arm64 —
           # the shard would only skip every test, so don't run it at all.
-          - { arch: arm64, category: wpts }
+          - { arch: arm64, category: wpts-smb2 }
+          - { arch: arm64, category: wpts-fsa }
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -822,7 +823,8 @@ jobs:
               case "$CATEGORY" in
                 pynfs)        SEL="-L pynfs" ;;
                 smbtorture)   SEL="-L smbtorture" ;;
-                wpts)         SEL="-L wpts" ;;
+                wpts-smb2)    SEL="-L wpts-smb2" ;;
+                wpts-fsa)     SEL="-L wpts-fsa" ;;
                 posix-client) SEL="-L posix" ;;
                 pjdfstest)    SEL="-L pjdfstest" ;;
                 s3)           SEL="-L s3 -LE ceph-s3" ;;

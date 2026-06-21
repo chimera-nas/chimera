@@ -219,7 +219,7 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
             COMMAND ${CMAKE_SOURCE_DIR}/scripts/wpts_smb_test_wrapper.sh
                     ${CHIMERA_DAEMON} memfs "${_tests}")
         set_tests_properties(${_name} PROPERTIES
-            LABELS "smb;wpts${_wpts_lbl_${_cfg}}"
+            LABELS "smb;wpts;wpts-smb2${_wpts_lbl_${_cfg}}"
             TIMEOUT 900
             ENVIRONMENT "WPTS_BIN_DIR=${WPTS_BIN_DIR};DOTNET=${WPTS_DOTNET}${_wpts_envfrag_${_cfg}};WPTS_JUNIT_FILE=${WPTS_JUNIT_DIR}/memfs${_wpts_suf_${_cfg}}.xml;WPTS_JUNIT_CONVERTER=${CMAKE_SOURCE_DIR}/scripts/trx_to_junit.py")
     endforeach()
@@ -231,6 +231,55 @@ elseif(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND NOT WPTS_ARCH
 else()
     message(STATUS "WPTS MS-SMB2 tests: disabled "
             "(need CHIMERA_NETNS_TESTING + dotnet + -DWPTS_FILESERVER_DIR=<Bin>)")
+endif()
+
+# ------------------------------------------------------------------
+# WPTS MS-FSA (File System Algorithms) suite -- runs parallel to MS-SMB2 against
+# the same daemon via WPTS_SUITE=MS-FSA.  fsa_cases.csv classifies every case
+# green (CI-gating) / xfail (applicable but failing -- tracked defect, NOT gated)
+# / skip (inapplicable: an unimplemented feature or an environment-only test).
+# CI gates ONLY on status=green; the green set runs in one consolidated vstest
+# invocation, labelled wpts-fsa so it shards separately from MS-SMB2 (wpts-smb2).
+# ------------------------------------------------------------------
+find_file(WPTS_FSA_DLL MS-FSA_ServerTestSuite.dll
+          HINTS ${WPTS_FILESERVER_DIR} /opt/wpts/Bin
+          NO_DEFAULT_PATH)
+
+if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_FSA_DLL AND WPTS_ARCH_SUPPORTED)
+    get_filename_component(WPTS_BIN_DIR "${WPTS_FSA_DLL}" DIRECTORY)
+    set(CHIMERA_DAEMON $<TARGET_FILE:chimera>)
+
+    set(_fsa_green "")
+    file(STRINGS ${CMAKE_CURRENT_SOURCE_DIR}/wpts/fsa_cases.csv _fsa_rows)
+    foreach(_row ${_fsa_rows})
+        if(_row MATCHES "^case,")
+            continue()
+        endif()
+        string(REPLACE "," ";" _f "${_row}")
+        list(GET _f 0 _case)
+        list(GET _f 1 _status)
+        if(NOT _status STREQUAL "green")
+            continue()
+        endif()
+        list(APPEND _fsa_green "${_case}")
+    endforeach()
+
+    if(_fsa_green)
+        string(REPLACE ";" "," _fsa_tests "${_fsa_green}")
+        set(_fsa_name chimera/server/smb/wpts-fsa/memfs)
+        add_test(NAME ${_fsa_name}
+            COMMAND ${CMAKE_SOURCE_DIR}/scripts/wpts_smb_test_wrapper.sh
+                    ${CHIMERA_DAEMON} memfs "${_fsa_tests}")
+        set_tests_properties(${_fsa_name} PROPERTIES
+            LABELS "smb;wpts;wpts-fsa"
+            TIMEOUT 1200
+            ENVIRONMENT "WPTS_BIN_DIR=${WPTS_BIN_DIR};DOTNET=${WPTS_DOTNET};WPTS_SUITE=MS-FSA;WPTS_JUNIT_FILE=${WPTS_JUNIT_DIR}/fsa_memfs.xml;WPTS_JUNIT_CONVERTER=${CMAKE_SOURCE_DIR}/scripts/trx_to_junit.py")
+    endif()
+
+    message(STATUS "WPTS MS-FSA tests: enabled (${WPTS_BIN_DIR}, ${WPTS_DOTNET})")
+else()
+    message(STATUS "WPTS MS-FSA tests: disabled "
+            "(need CHIMERA_NETNS_TESTING + dotnet + x86_64 + MS-FSA DLL)")
 endif()
 
 # SMB smbtorture integration tests
