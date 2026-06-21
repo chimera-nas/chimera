@@ -54,6 +54,7 @@ case "$WPTS_SUITE" in
     MS-SMB2)     WPTS_SUITE_DLL="MS-SMB2_ServerTestSuite.dll";     WPTS_TRX="SMB2TestResult.trx" ;;
     MS-FSA)      WPTS_SUITE_DLL="MS-FSA_ServerTestSuite.dll";      WPTS_TRX="FSATestResult.trx" ;;
     MS-FSAModel) WPTS_SUITE_DLL="MS-FSAModel_ServerTestSuite.dll"; WPTS_TRX="FSAModelTestResult.trx" ;;
+    MS-SMB2Model) WPTS_SUITE_DLL="MS-SMB2Model_ServerTestSuite.dll"; WPTS_TRX="SMB2ModelTestResult.trx" ;;
     *) echo "unknown WPTS_SUITE: $WPTS_SUITE" >&2; exit 2 ;;
 esac
 WPTS_SUITE_PTFCONFIG="${WPTS_SUITE}_ServerTestSuite.deployment.ptfconfig"
@@ -81,6 +82,14 @@ CHIMERA_PID=""
 # WPTS-required share names. Each gets its own VFS mount so the share root
 # exists and is isolated (mirrors how the KVM config mounts at /share).
 SHARES=(SMBBasic SMBEncrypted FileShare ShareForceLevel2)
+
+# The MS-SMB2Model AppInstanceId model needs two extra shares: one whose local
+# path DIFFERS from SMBBasic (its own mount) and one whose local path is the
+# SAME as SMBBasic (a second share name over the SMBBasic mount, added in
+# generate_config below).
+if [ "$WPTS_SUITE" = "MS-SMB2Model" ]; then
+    SHARES+=(DifferentFromSMBBasic)
+fi
 
 cleanup() {
     if [ -n "$CHIMERA_PID" ]; then
@@ -158,6 +167,13 @@ generate_config() {
         sep=",
         "
     done
+
+    # AppInstanceId model (MS-SMB2Model): a second share NAME mapping to the SAME
+    # local path as SMBBasic.  It shares SMBBasic's mount, so it is a share entry
+    # only (no extra mount).
+    if [ "$WPTS_SUITE" = "MS-SMB2Model" ]; then
+        shares="${shares}${sep}\"SameWithSMBBasic\": {\"path\": \"/SMBBasic\"}"
+    fi
 
     # Enable SMB3 durable/persistent handles when requested (the durable/
     # persistent WPTS cases need the feature on; default off keeps the rest of
