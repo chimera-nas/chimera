@@ -271,6 +271,26 @@ foreach(image_spec ${KVM_IMAGES})
         PROPERTIES LABELS "kvm;${IMAGE_NAME};rpcsec_gss" PROCESSORS 2
         SKIP_RETURN_CODE 77)
 
+    # RPCSEC_GSS over NFSv3: the GSS layer lives below the RPC program dispatch,
+    # so krb5/krb5i work for NFSv3 just as for NFSv4 -- this drives a real-client
+    # vers=3 mount through MOUNT + portmap + a directory/file workload (MKDIR,
+    # CREATE, WRITE, READ, RENAME, READDIR, REMOVE) under GSS.  Mounted nolock:
+    # NFSv3's kernel mount wants rpc.statd for NLM, which is not in the image, so
+    # NLM-under-krb5 is out of scope here (the data path is what we validate).
+    # One entry per flavor (krb5 = auth, krb5i = integrity wrapping on v3 I/O).
+    set(KRB_V3_WORKLOAD "stat /mnt && mkdir /mnt/d && echo hello-v3 > /mnt/d/f && grep -q hello-v3 /mnt/d/f && dd if=/dev/zero of=/mnt/d/big bs=4k count=64 2>/dev/null && mv /mnt/d/f /mnt/d/f2 && ls /mnt/d | grep -q f2 && rm /mnt/d/f2 /mnt/d/big && rmdir /mnt/d && echo NFS3_KRB_RW_OK")
+    foreach(krbflavor krb5 krb5i)
+        add_test(NAME chimera/kvm/${IMAGE_NAME}/kerberos/${krbflavor}_mount_memfs_nfs3
+            COMMAND bash ${NFS_KRB_WRAPPER}
+                    ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
+                    ${CHIMERA_BINARY} memfs 3
+                    "${KRB_V3_WORKLOAD}")
+        set_tests_properties(chimera/kvm/${IMAGE_NAME}/kerberos/${krbflavor}_mount_memfs_nfs3
+            PROPERTIES LABELS "kvm;${IMAGE_NAME};rpcsec_gss" PROCESSORS 2
+            SKIP_RETURN_CODE 77
+            ENVIRONMENT "MOUNT_SEC=${krbflavor}")
+    endforeach()
+
     # NFS cthon04 tests
     foreach(nfsver ${NFS_VERSIONS})
         foreach(category ${CTHON_CATEGORIES})

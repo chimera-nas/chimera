@@ -228,13 +228,26 @@ done
 # build looks for it at /run/rpc_pipefs.  (init.sh copies the krb5.conf/keytab/
 # hosts material from the 9p share; we start gssd here so the mount path is
 # explicit and correct regardless of the guest's nfs-utils pipefs default.)
-NFS_MOUNT_OPTS="vers=${NFS_VERSION},sec=krb5,tcp"
+# Mount security flavor: krb5 (auth), krb5i (integrity) or krb5p (privacy).
+# Defaults to krb5; a test sets MOUNT_SEC to exercise the integrity/privacy
+# wrapping on the data path.
+NFS_MOUNT_OPTS="vers=${NFS_VERSION},sec=${MOUNT_SEC:-krb5},tcp"
 # Self-contained krb5 client bring-up (does not rely on init.sh's single-shot
 # attempt): set the hostname, then deliver the per-test realm material from the
 # 9p share with a retry loop -- under ctest the 9p backend can race the guest's
 # probe and a one-shot mount silently misses, leaving rpc.gssd without a keytab.
 # Then mount rpc_pipefs (/run is this nfs-utils' default) and (re)start rpc.gssd.
 KRB_PREP="hostname ${CLIENT_HOST} 2>/dev/null; modprobe 9pnet_virtio 2>/dev/null; modprobe 9p 2>/dev/null; for i in 1 2 3 4 5 6 7 8; do [ -s /etc/krb5.keytab ] && break; mkdir -p /mnt/krb; if mount -t 9p -o trans=virtio,version=9p2000.L krbshare /mnt/krb 2>/dev/null; then cp /mnt/krb/krb5.conf /etc/krb5.conf; cp /mnt/krb/krb5.keytab /etc/krb5.keytab; cat /mnt/krb/hosts >> /etc/hosts; umount /mnt/krb; else sleep 1; fi; done; mkdir -p /run/rpc_pipefs; mountpoint -q /run/rpc_pipefs || mount -t rpc_pipefs rpc_pipefs /run/rpc_pipefs; pkill -x rpc.gssd 2>/dev/null; /usr/sbin/rpc.gssd; sleep 1;"
+# NFSv3's kernel mount path wants rpc.statd (NSM) for NLM locking and aborts the
+# mount (rc=32) if it cannot reach it; rpc.statd is not in the test image, so we
+# mount v3 with nolock (the krb5 data path -- MOUNT + portmap + NFS READ/WRITE
+# under RPCSEC_GSS -- is what we are validating; NLM-under-krb5 needs statd in
+# the guest image and is a separate exercise).  NFSv4 needs none of this.
+NFS_NOLOCK=""
+case "${NFS_VERSION}" in
+    3*) NFS_NOLOCK=",nolock" ;;
+esac
+NFS_MOUNT_OPTS="${NFS_MOUNT_OPTS}${NFS_NOLOCK}"
 if [ -n "${KVM_KRB_DEBUG:-}" ]; then
     TEST_CMD="${KRB_PREP} echo '=== keytab ==='; ls -l /etc/krb5.keytab; klist -k /etc/krb5.keytab 2>&1; echo '=== KDC reach ==='; (echo > /dev/tcp/10.0.0.1/${KDC_PORT}) 2>&1 && echo kdc-tcp-ok || echo kdc-tcp-FAIL; echo '=== kinit -k ==='; timeout 10 kinit -k -t /etc/krb5.keytab host/${CLIENT_HOST}@${REALM} 2>&1; echo kinit_rc=\$?; klist 2>&1; echo '=== krb5 mount -v ==='; timeout 25 mount -v -t nfs -o ${NFS_MOUNT_OPTS} ${SERVER_HOST}:/share /mnt 2>&1; echo krb5_rc=\$?"
 else
