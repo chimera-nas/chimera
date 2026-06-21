@@ -547,11 +547,16 @@ generate_challenge(
     u32 = (uint32_t) fixed_len;
     memcpy(buf + 16, &u32, 4);
 
-    // Negotiate flags
+    // Negotiate flags.  NTLMSSP_NEGOTIATE_SIGN advertises that the server
+    // supports NTLM message signing: the Linux cifs client gates SMB2 signing
+    // on it (a signing-required mount, or any mount against a server that sets
+    // SMB2_NEGOTIATE_SIGNING_REQUIRED, aborts with -EOPNOTSUPP if the CHALLENGE
+    // omits it), so it must be present for kernel-client signing to work.
     flags = NTLMSSP_NEGOTIATE_128 |
         NTLMSSP_NEGOTIATE_TARGET_INFO |
         NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY |
         NTLMSSP_NEGOTIATE_NTLM |
+        NTLMSSP_NEGOTIATE_SIGN |
         NTLMSSP_REQUEST_TARGET |
         NTLMSSP_NEGOTIATE_UNICODE;
 
