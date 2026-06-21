@@ -250,9 +250,9 @@ diskfs_inode_grant_locked(
         pthread_mutex_unlock(&shard->lock);
         diskfs_txn_add_slot(txn, inode, mode);
         /* The grant no longer eager-faults the home block: a b+tree modify links
-         * its inode's root in the descent, attr-only modifiers fault it at
-         * commit-prep (diskfs_txn_commit_finish), and read-only/volatile holders
-         * (getattr, close) never touch it -- so reporting the grant is enough. */
+        * its inode's root in the descent, attr-only modifiers fault it at
+        * commit-prep (diskfs_txn_commit_finish), and read-only/volatile holders
+        * (getattr, close) never touch it -- so reporting the grant is enough. */
         cb(inode, CHIMERA_VFS_OK, private_data);
         return;
     }

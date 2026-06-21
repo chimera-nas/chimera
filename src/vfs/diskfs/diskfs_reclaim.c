@@ -290,7 +290,7 @@ diskfs_drain_pinned_cb(
     int                  status,
     void                *priv)
 {
-    struct diskfs_drain *d   = priv;
+    struct diskfs_drain *d = priv;
     uint32_t             dev;
     uint64_t             off = sm_inum_to_device_offset(d->thread->shared->space_map,
                                                         d->inum, &dev);

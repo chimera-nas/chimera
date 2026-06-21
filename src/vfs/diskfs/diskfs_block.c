@@ -37,7 +37,7 @@ static uint32_t
 diskfs_txn_count_unique_blocks(struct diskfs_txn *txn)
 {
     struct diskfs_txn_block *tb;
-    uint32_t                 cap  = 1u << 17;     /* 131072 slots */
+    uint32_t                 cap = 1u << 17;      /* 131072 slots */
     uint32_t                 mask = cap - 1, unique = 0;
     uint64_t                *keys = calloc(cap, sizeof(*keys));
 
@@ -80,10 +80,11 @@ diskfs_txn_trace_giant(struct diskfs_txn *txn)
      * unique = distinct blocks; reserve_again = RESERVE-phase re-drives.
      * journal>>direct + unique<<nblocks + high reserve_again == the re-journal
      * duplication theory confirmed. */
-    chimera_diskfs_error("GIANT-TXN txn=%p type=%d num_inodes=%d nblocks=%u journal=%u direct=%u unique=%u reserve_again=%u -- backtrace:",
-                         (void *) txn, (int) txn->type, txn->num_inodes,
-                         txn->nblocks, txn->n_journal, txn->nblocks - txn->n_journal,
-                         unique, txn->n_reserve_again);
+    chimera_diskfs_error(
+        "GIANT-TXN txn=%p type=%d num_inodes=%d nblocks=%u journal=%u direct=%u unique=%u reserve_again=%u -- backtrace:",
+        (void *) txn, (int) txn->type, txn->num_inodes,
+        txn->nblocks, txn->n_journal, txn->nblocks - txn->n_journal,
+        unique, txn->n_reserve_again);
     for (i = 0; i < n; i++) {
         chimera_diskfs_error("  GIANT-TXN bt[%d] %s", i, syms ? syms[i] : "?");
     }
@@ -111,11 +112,12 @@ diskfs_bt_done_trace(struct diskfs_bt_op *op)
      * (suspended==0) -- the async caller already left, so this op is dropped.
      * If the backtrace contains diskfs_bt_op_resume_cb, it completed on the
      * resume path with suspended still clear (the reserve-park race). */
-    chimera_diskfs_error("BT-DONE-DROP op=%p opcode=%d result=%d suspended=%d txn=%p dbg_stage=%d n_reserve_again=%u -- backtrace:",
-                         (void *) op, (int) op->opcode, op->result, op->suspended,
-                         (void *) op->txn,
-                         op->txn ? op->txn->dbg_stage : -1,
-                         op->txn ? op->txn->n_reserve_again : 0);
+    chimera_diskfs_error(
+        "BT-DONE-DROP op=%p opcode=%d result=%d suspended=%d txn=%p dbg_stage=%d n_reserve_again=%u -- backtrace:",
+        (void *) op, (int) op->opcode, op->result, op->suspended,
+        (void *) op->txn,
+        op->txn ? op->txn->dbg_stage : -1,
+        op->txn ? op->txn->n_reserve_again : 0);
     for (i = 0; i < n; i++) {
         chimera_diskfs_error("  BT-DONE-DROP bt[%d] %s", i, syms ? syms[i] : "?");
     }
@@ -148,10 +150,11 @@ diskfs_block_recycle_waiter_trace(struct diskfs_block *blk)
     }
     n    = backtrace(frames, 40);
     syms = backtrace_symbols(frames, n);
-    chimera_diskfs_error("RECYC-WAITER blk=%p state=%d dev=%u off=%lu pin=%d on_lru=%d waiters=%d -- recycling a block with parked waiters (lost wakeup!) -- backtrace:",
-                         (void *) blk, (int) blk->state, blk->device_id,
-                         (unsigned long) blk->device_offset,
-                         (int) blk->pin_count, blk->on_lru, wc);
+    chimera_diskfs_error(
+        "RECYC-WAITER blk=%p state=%d dev=%u off=%lu pin=%d on_lru=%d waiters=%d -- recycling a block with parked waiters (lost wakeup!) -- backtrace:",
+        (void *) blk, (int) blk->state, blk->device_id,
+        (unsigned long) blk->device_offset,
+        (int) blk->pin_count, blk->on_lru, wc);
     for (i = 0; i < n; i++) {
         chimera_diskfs_error("  RECYC-WAITER bt[%d] %s", i, syms ? syms[i] : "?");
     }
@@ -604,8 +607,8 @@ diskfs_block_unpin(
     }
 
     /* Took the last pin: home + idle -> publish CLEAN and link onto the LRU
-     * under the shard lock, re-checking since a concurrent claim may have
-     * re-pinned, and draining deferred clean insertions while we hold it. */
+    * under the shard lock, re-checking since a concurrent claim may have
+    * re-pinned, and draining deferred clean insertions while we hold it. */
     {
         struct diskfs_block_shard *shard = diskfs_block_shard(thread->shared->block_cache,
                                                               blk->device_id, blk->device_offset);
@@ -726,9 +729,9 @@ diskfs_block_cache_prealloc(
         struct diskfs_block_shard *shard = &cache->shards[i];
         uint32_t                   total = shard->nblocks + cache->buffer_extra_per_shard;
 
-        struct evpl_iovec *big           = NULL;
-        uint32_t           slices_per_big = 0;
-        uint32_t           slot_in_big    = 0;
+        struct evpl_iovec         *big            = NULL;
+        uint32_t                   slices_per_big = 0;
+        uint32_t                   slot_in_big    = 0;
 
         shard->buffers  = calloc(total, sizeof(*shard->buffers));
         shard->nbuffers = total;
@@ -948,7 +951,9 @@ diskfs_block_claim(
         diskfs_block_lru_push_tail(shard, blk);
     }
 
-    if (__atomic_add_fetch(&blk->pin_count, 1, __ATOMIC_ACQ_REL) == 1) { __atomic_add_fetch(&shard->pinned, 1, __ATOMIC_RELAXED); }
+    if (__atomic_add_fetch(&blk->pin_count, 1, __ATOMIC_ACQ_REL) == 1) {
+        __atomic_add_fetch(&shard->pinned, 1, __ATOMIC_RELAXED);
+    }
     pthread_mutex_unlock(&shard->lock);
 
     return blk;
@@ -1001,13 +1006,13 @@ diskfs_sm_record_delta(
     struct diskfs_sm_jnl    *c = user;
     struct diskfs_txn_delta *d;
 
-    d                 = malloc(sizeof(*d));
-    d->device_id      = device_id;
-    d->ag_index       = ag_index;
-    d->device_offset  = device_offset;
-    d->length         = length;
-    d->op             = op;
-    d->next           = c->txn->space_deltas;
+    d                    = malloc(sizeof(*d));
+    d->device_id         = device_id;
+    d->ag_index          = ag_index;
+    d->device_offset     = device_offset;
+    d->length            = length;
+    d->op                = op;
+    d->next              = c->txn->space_deltas;
     c->txn->space_deltas = d;
     c->txn->n_space_deltas++;
 } /* diskfs_sm_record_delta */
@@ -1212,10 +1217,10 @@ diskfs_block_waiter_dispatch(
  */
 static inline struct diskfs_block *
 diskfs_block_defer_retry(
-    struct diskfs_thread      *thread,
+    struct diskfs_thread *thread,
     struct diskfs_block_shard *shard,
-    void                       (*resume)(struct diskfs_thread *, void *),
-    void                      *arg)
+    void ( *resume )(struct diskfs_thread *, void *),
+    void *arg)
 {
     struct diskfs_block_waiter *w = diskfs_block_waiter_alloc(thread);
 
@@ -1370,7 +1375,9 @@ diskfs_bt_op_pin(
      * to the MRU end since it is now active (recyclers take the unpinned head). */
     diskfs_block_lru_unlink(shard, blk);
     diskfs_block_lru_push_tail(shard, blk);
-    if (__atomic_add_fetch(&blk->pin_count, 1, __ATOMIC_ACQ_REL) == 1) { __atomic_add_fetch(&shard->pinned, 1, __ATOMIC_RELAXED); }
+    if (__atomic_add_fetch(&blk->pin_count, 1, __ATOMIC_ACQ_REL) == 1) {
+        __atomic_add_fetch(&shard->pinned, 1, __ATOMIC_RELAXED);
+    }
     chimera_diskfs_abort_if(op->npins >= (int) (sizeof(op->pins) / sizeof(op->pins[0])),
                             "b+tree op pin list overflow");
     op->pins[op->npins++] = blk;
@@ -1432,9 +1439,9 @@ diskfs_bt_block_get(
 
         op->suspended = 1;
         diskfs_bt_op_park_account(op);   /* diag: parked at op->phase on a block fault */
-        w->thread     = op->thread;
-        w->resume     = diskfs_bt_op_resume_cb;
-        w->arg        = op;
+        w->thread = op->thread;
+        w->resume = diskfs_bt_op_resume_cb;
+        w->arg    = op;
         if (blk->wait_tail) {
             blk->wait_tail->next = w;
         } else {
@@ -1535,7 +1542,9 @@ diskfs_block_claim_async(
             memset(blk->iov.data, 0, DISKFS_BLOCK_SIZE);
             blk->hash_next         = shard->buckets[bucket];
             shard->buckets[bucket] = blk;
-            if (__atomic_add_fetch(&blk->pin_count, 1, __ATOMIC_ACQ_REL) == 1) { __atomic_add_fetch(&shard->pinned, 1, __ATOMIC_RELAXED); }
+            if (__atomic_add_fetch(&blk->pin_count, 1, __ATOMIC_ACQ_REL) == 1) {
+                __atomic_add_fetch(&shard->pinned, 1, __ATOMIC_RELAXED);
+            }
             pthread_mutex_unlock(&shard->lock);
             return blk;
         }
@@ -1588,7 +1597,9 @@ diskfs_block_claim_async(
         return NULL;
     }
 
-    if (__atomic_add_fetch(&blk->pin_count, 1, __ATOMIC_ACQ_REL) == 1) { __atomic_add_fetch(&shard->pinned, 1, __ATOMIC_RELAXED); }
+    if (__atomic_add_fetch(&blk->pin_count, 1, __ATOMIC_ACQ_REL) == 1) {
+        __atomic_add_fetch(&shard->pinned, 1, __ATOMIC_RELAXED);
+    }
     pthread_mutex_unlock(&shard->lock);
     return blk;
 } /* diskfs_block_claim_async */
@@ -1828,8 +1839,7 @@ diskfs_txn_flush_inodes(struct diskfs_txn *txn)
  * path still does the clearing.
  */
 void
-diskfs_txn_unpin_blocks(
-    struct diskfs_txn *txn)
+diskfs_txn_unpin_blocks(struct diskfs_txn *txn)
 {
     struct diskfs_thread    *thread = txn->thread;
     struct diskfs_txn_block *tb     = txn->blocks;

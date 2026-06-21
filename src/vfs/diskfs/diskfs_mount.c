@@ -1539,7 +1539,7 @@ diskfs_destroy(void *private_data)
          * checkpoint with it.  The redo ring is fully trimmed, so the next clean
          * mount loads these snapshots with no deltas left to replay. */
         uint64_t                ckpt_seq = __atomic_load_n(&shared->intent_log.durable_seq,
-                                                          __ATOMIC_ACQUIRE);
+                                                           __ATOMIC_ACQUIRE);
 
         if (space_map_persist(shared->space_map, &smio, ckpt_seq) != 0) {
             chimera_diskfs_error("space-map persist at unmount failed");
