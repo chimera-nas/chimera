@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "nfs.h"
+
 #include "nfs_common.h"
 
 /*
@@ -12,7 +14,7 @@
  * the wire count to it, so the advertised limit and the enforced limit cannot
  * drift apart.  RFC 1813 3.3.6/3.3.7 permit the resulting short read or write.
  */
-#define CHIMERA_NFS3_MAX_XFER (1024 * 1024)
+#define CHIMERA_NFS3_MAX_XFER CHIMERA_NFS_MAX_XFER
 
 /*
  * Decode a wire NFSv3 filehandle into req->fh and translate a decode failure to

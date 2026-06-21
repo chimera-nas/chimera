@@ -10,6 +10,26 @@ extern struct chimera_server_protocol nfs_protocol;
 struct chimera_nfs_export;
 
 /*
+ * Largest single READ or WRITE payload the NFS server serves, and the framing
+ * that rides with it inside one RPC message.
+ *
+ * Declared here rather than beside the protocol code because the daemon has to
+ * turn it into libevpl's RPC2 message ceiling: one payload plus its framing
+ * must fit a single message, and a message must fit a single iovec buffer.
+ * The chain matters under RPCSEC_GSS privacy, where a sealed call is one
+ * opaque that gss_unwrap needs contiguous -- so a transfer size that outgrows
+ * a message does not degrade, it fails to unseal.  Stating both numbers in one
+ * place is what lets evpl_init refuse such a configuration instead of leaving
+ * it to be discovered at that size, under that flavor.
+ */
+#define CHIMERA_NFS_MAX_XFER            (1024 * 1024)
+
+/* RPC and record-marking headers, the RPCSEC_GSS credential and verifier, and
+ * the header/confounder/padding/trailer a krb5p seal adds.  Loose: it only
+ * sizes a ceiling, and being generous costs nothing. */
+#define CHIMERA_NFS_RPC_OVERHEAD        (64 * 1024)
+
+/*
  * Per-export access-control constants (see struct chimera_nfs_export).
  * Declared here so the daemon JSON config parser can translate user-supplied
  * access strings into these values.
