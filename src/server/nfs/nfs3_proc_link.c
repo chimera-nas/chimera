@@ -64,13 +64,14 @@ chimera_nfs3_link(
      * the target-directory handle (authenticated into req->saved_fh).  The
      * target handle must outlive this (async) call, so it lives in the request
      * rather than on the stack (saved_fh is unused by NFSv3). */
-    if (chimera_nfs_fh_decode(req, args->file.data.data, args->file.data.len,
-                              req->fh, &req->fhlen) != CHIMERA_NFS_FH_OK ||
+    res.status = chimera_nfs3_decode_fh(req, args->file.data.data, args->file.data.len);
+    if (res.status != NFS3_OK ||
         chimera_nfs_fh_unwrap(args->link.dir.data.data, args->link.dir.data.len,
                               &linkdir_export_id, req->saved_fh, &req->saved_fhlen,
                               shared->fh_key, shared->fh_sign) != CHIMERA_NFS_FH_OK) {
+        nfsstat3 fh_status = res.status != NFS3_OK ? res.status : NFS3ERR_BADHANDLE;
         memset(&res, 0, sizeof(res));
-        res.status = NFS3ERR_BADHANDLE;
+        res.status = fh_status;
         rc         = shared->nfs_v3.send_reply_NFSPROC3_LINK(evpl, NULL, &res, req->encoding);
         chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
         nfs_request_free(thread, req);

@@ -105,10 +105,11 @@ chimera_nfs3_fsinfo(
 
     req->args_fsinfo = args;
 
-    if (chimera_nfs_fh_decode(req, args->fsroot.data.data, args->fsroot.data.len,
-                              req->fh, &req->fhlen) != CHIMERA_NFS_FH_OK) {
+    res.status = chimera_nfs3_decode_fh(req, args->fsroot.data.data, args->fsroot.data.len);
+    if (res.status != NFS3_OK) {
+        nfsstat3 fh_status = res.status;
         memset(&res, 0, sizeof(res));
-        res.status = NFS3ERR_BADHANDLE;
+        res.status = fh_status;
         rc         = shared->nfs_v3.send_reply_NFSPROC3_FSINFO(evpl, NULL, &res, req->encoding);
         chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
         nfs_request_free(thread, req);

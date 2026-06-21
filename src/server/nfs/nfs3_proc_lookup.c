@@ -117,10 +117,11 @@ chimera_nfs3_lookup(
 
     req->args_lookup = args;
 
-    if (chimera_nfs_fh_decode(req, args->what.dir.data.data, args->what.dir.data.len,
-                              req->fh, &req->fhlen) != CHIMERA_NFS_FH_OK) {
+    res.status = chimera_nfs3_decode_fh(req, args->what.dir.data.data, args->what.dir.data.len);
+    if (res.status != NFS3_OK) {
+        nfsstat3 fh_status = res.status;
         memset(&res, 0, sizeof(res));
-        res.status = NFS3ERR_BADHANDLE;
+        res.status = fh_status;
         rc         = shared->nfs_v3.send_reply_NFSPROC3_LOOKUP(evpl, NULL, &res, req->encoding);
         chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
         nfs_request_free(thread, req);
