@@ -64,6 +64,15 @@ target_include_directories(smb_harden_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME chimera/server/smb/harden_test
     COMMAND ${CMAKE_CURRENT_BINARY_DIR}/smb_harden_test)
 
+# SMB2 Extended Attribute wire-format helpers (smb_ea.h): FILE_FULL_EA /
+# FILE_GET_EA parse/emit round-trip and bounds, case-insensitive name compare,
+# NTSTATUS mapping, and the shared OS/2 EaSize formula.  Header-only.
+add_executable(smb_ea_test smb_ea_test.c)
+target_include_directories(smb_ea_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
+add_test(NAME chimera/server/smb/ea_test
+    COMMAND ${CMAKE_CURRENT_BINARY_DIR}/smb_ea_test)
+
 # SMB3 transport-compression codec unit test (pure MS-XCA Plain LZ77)
 add_executable(smb_compress_test smb_compress_test.c)
 target_link_libraries(smb_compress_test chimera_server chimera_smb)

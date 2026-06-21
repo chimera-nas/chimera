@@ -22,6 +22,42 @@
 #include "smb_samr.h"
 #include "smb_wkssvc.h"
 
+/* Final step of a successful create: apply any SMB2_CREATE_EA_BUFFER ("ExtA")
+ * EAs to the new/opened object, then release the open and reply.  When no ExtA
+ * context was supplied (ea_buf_len == 0) this is exactly the prior behaviour
+ * (release + SUCCESS), so it is safe to route every immediate create-success
+ * completion through it. */
+static void
+chimera_smb_create_ea_done(
+    uint32_t status,
+    void    *arg)
+{
+    struct chimera_smb_request *request = arg;
+
+    chimera_smb_open_file_release(request, request->create.r_open_file);
+    chimera_smb_complete_request(request, status);
+} /* chimera_smb_create_ea_done */
+
+static void
+chimera_smb_create_finish_with_eas(
+    struct chimera_smb_request   *request,
+    struct chimera_smb_open_file *open_file)
+{
+    if (request->create.ea_buf_len == 0) {
+        chimera_smb_open_file_release(request, open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+        return;
+    }
+
+    request->create.r_open_file = open_file;
+    chimera_smb_ea_apply(request->compound->thread,
+                         &request->session_handle->session->cred,
+                         open_file->handle,
+                         request->create.ea_buf,
+                         request->create.ea_buf_len,
+                         chimera_smb_create_ea_done, request);
+} /* chimera_smb_create_finish_with_eas */
+
 #define SMB2_WRITE_MASK                            (SMB2_FILE_WRITE_DATA | \
                                                     SMB2_FILE_APPEND_DATA | \
                                                     SMB2_FILE_WRITE_EA | \
@@ -1593,8 +1629,7 @@ chimera_smb_create_mkdir_open_callback(
     open_file->maximal_access = CHIMERA_ACE_MASK_ALL;
 
     chimera_smb_create_release_parent(request);
-    chimera_smb_open_file_release(request, open_file);
-    chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+    chimera_smb_create_finish_with_eas(request, open_file);
 
 } /* chimera_smb_create_mkdir_open_callback */
 
@@ -1894,8 +1929,7 @@ chimera_smb_create_open_stream_callback(
     request->create.base_oh = NULL;
 
     chimera_smb_create_release_parent(request);
-    chimera_smb_open_file_release(request, open_file);
-    chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+    chimera_smb_create_finish_with_eas(request, open_file);
 } /* chimera_smb_create_open_stream_callback */
 
 /* The base file is open; open (and per the disposition create/truncate) the
@@ -2494,8 +2528,7 @@ chimera_smb_create_open_finish(
         return;
     }
 
-    chimera_smb_open_file_release(request, open_file);
-    chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+    chimera_smb_create_finish_with_eas(request, open_file);
 } /* chimera_smb_create_open_finish */
 
 /* Re-arbitrate a parked CREATE's caching grant as its break wait resolves.
@@ -4713,6 +4746,23 @@ parse_ctx_secd(
 } /* parse_ctx_secd */
 
 static void
+parse_ctx_exta(
+    const uint8_t              *data,
+    uint32_t                    data_len,
+    struct chimera_smb_request *request)
+{
+    /* SMB2_CREATE_EA_BUFFER: a FILE_FULL_EA_INFORMATION list to apply to the
+     * created/opened object.  Copied out of the (stack-local) context blob so it
+     * survives to the async EA-apply at create completion.  The whole context
+     * blob is capped at 1024 bytes, so it always fits ea_buf. */
+    if (data_len > sizeof(request->create.ea_buf)) {
+        data_len = sizeof(request->create.ea_buf);
+    }
+    memcpy(request->create.ea_buf, data, data_len);
+    request->create.ea_buf_len = data_len;
+} /* parse_ctx_exta */
+
+static void
 parse_ctx_dhnc(
     const uint8_t              *data,
     uint32_t                    data_len,
@@ -4875,7 +4925,7 @@ struct chimera_smb_create_ctx_parser {
 /* *INDENT-OFF* */ /* uncrustify oscillates on aligned struct-init tables */
 static const struct chimera_smb_create_ctx_parser smb_create_ctx_parsers[] = {
     { "SecD", CHIMERA_SMB_CREATE_CTX_SECD, parse_ctx_secd },
-    { "ExtA", CHIMERA_SMB_CREATE_CTX_EXTA, NULL           },
+    { "ExtA", CHIMERA_SMB_CREATE_CTX_EXTA, parse_ctx_exta },
     { "DHnQ", CHIMERA_SMB_CREATE_CTX_DHNQ, NULL           },
     { "DHnC", CHIMERA_SMB_CREATE_CTX_DHNC, parse_ctx_dhnc },
     { "DH2Q", CHIMERA_SMB_CREATE_CTX_DH2Q, parse_ctx_dh2q },
@@ -5162,6 +5212,7 @@ chimera_smb_parse_create(
     request->create.set_attr.va_set_mask = 0;
     request->create.set_attr.va_acl      = NULL;
     request->create.ctx_present_mask     = 0;
+    request->create.ea_buf_len           = 0;
 
     /* The request slot is pooled, so the AppInstanceId/AppInstanceVersion
      * fields survive from a prior CREATE on this same slot.  Each create

@@ -221,8 +221,10 @@ chimera_smb_marshal_ea_attrs(
     const struct chimera_vfs_attrs *attr,
     struct chimera_smb_attrs       *smb_attr)
 {
-    /* EA size (not tracked in VFS) */
-    smb_attr->smb_ea_size    = 0;
+    /* OS/2 EaSize from the VFS (CHIMERA_VFS_ATTR_EA_SIZE), or 0 when the backend
+     * does not supply it (e.g. no xattr support). */
+    smb_attr->smb_ea_size = (attr->va_set_mask & CHIMERA_VFS_ATTR_EA_SIZE) ?
+        attr->va_ea_size : 0;
     smb_attr->smb_attr_mask |= SMB_ATTR_EA_SIZE;
 } /* chimera_smb_marshal_ea_attrs */
 
