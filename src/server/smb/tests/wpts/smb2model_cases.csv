@@ -544,38 +544,38 @@ CreditMgmtTestCaseS1066,base,green,0,
 CreditMgmtTestCaseS1080,base,green,0,
 CreditMgmtTestCaseS1094,base,green,0,
 CreditMgmtTestCaseS1110,base,green,0,
-CreditMgmtTestCaseS1124,base,xfail,0,executed but fails (candidate defect)
-CreditMgmtTestCaseS1147,base,xfail,0,executed but fails (candidate defect)
-CreditMgmtTestCaseS1168,base,xfail,0,executed but fails (candidate defect)
-CreditMgmtTestCaseS1182,base,xfail,0,executed but fails (candidate defect)
-CreditMgmtTestCaseS1199,base,xfail,0,executed but fails (candidate defect)
-CreditMgmtTestCaseS121,base,xfail,0,executed but fails (candidate defect)
-CreditMgmtTestCaseS1217,base,xfail,0,executed but fails (candidate defect)
-CreditMgmtTestCaseS1225,base,xfail,0,executed but fails (candidate defect)
-CreditMgmtTestCaseS1233,base,xfail,0,executed but fails (candidate defect)
-CreditMgmtTestCaseS1241,base,xfail,0,executed but fails (candidate defect)
-CreditMgmtTestCaseS1249,base,xfail,0,executed but fails (candidate defect)
-CreditMgmtTestCaseS1257,base,xfail,0,executed but fails (candidate defect)
+CreditMgmtTestCaseS1124,base,green,0,
+CreditMgmtTestCaseS1147,base,green,0,
+CreditMgmtTestCaseS1168,base,green,0,
+CreditMgmtTestCaseS1182,base,green,0,
+CreditMgmtTestCaseS1199,base,green,0,
+CreditMgmtTestCaseS121,base,green,0,
+CreditMgmtTestCaseS1217,base,green,0,
+CreditMgmtTestCaseS1225,base,green,0,
+CreditMgmtTestCaseS1233,base,green,0,
+CreditMgmtTestCaseS1241,base,green,0,
+CreditMgmtTestCaseS1249,base,green,0,
+CreditMgmtTestCaseS1257,base,green,0,
 CreditMgmtTestCaseS151,base,green,0,
-CreditMgmtTestCaseS185,base,xfail,0,executed but fails (candidate defect)
+CreditMgmtTestCaseS185,base,green,0,
 CreditMgmtTestCaseS216,base,green,0,
 CreditMgmtTestCaseS248,base,green,0,
 CreditMgmtTestCaseS276,base,green,0,
-CreditMgmtTestCaseS300,base,xfail,0,executed but fails (candidate defect)
+CreditMgmtTestCaseS300,base,green,0,
 CreditMgmtTestCaseS325,base,green,0,
-CreditMgmtTestCaseS349,base,xfail,0,executed but fails (candidate defect)
-CreditMgmtTestCaseS397,base,xfail,0,executed but fails (candidate defect)
-CreditMgmtTestCaseS435,base,xfail,0,executed but fails (candidate defect)
+CreditMgmtTestCaseS349,base,green,0,
+CreditMgmtTestCaseS397,base,green,0,
+CreditMgmtTestCaseS435,base,green,0,
 CreditMgmtTestCaseS462,base,green,0,
-CreditMgmtTestCaseS492,base,xfail,0,executed but fails (candidate defect)
+CreditMgmtTestCaseS492,base,green,0,
 CreditMgmtTestCaseS520,base,green,0,
 CreditMgmtTestCaseS552,base,green,0,
 CreditMgmtTestCaseS578,base,green,0,
 CreditMgmtTestCaseS602,base,green,0,
-CreditMgmtTestCaseS627,base,xfail,0,executed but fails (candidate defect)
-CreditMgmtTestCaseS63,base,xfail,0,executed but fails (candidate defect)
-CreditMgmtTestCaseS681,base,xfail,0,executed but fails (candidate defect)
-CreditMgmtTestCaseS717,base,xfail,0,executed but fails (candidate defect)
+CreditMgmtTestCaseS627,base,green,0,
+CreditMgmtTestCaseS63,base,green,0,
+CreditMgmtTestCaseS681,base,green,0,
+CreditMgmtTestCaseS717,base,green,0,
 CreditMgmtTestCaseS748,base,green,0,
 CreditMgmtTestCaseS776,base,green,0,
 CreditMgmtTestCaseS801,base,green,0,
@@ -583,10 +583,10 @@ CreditMgmtTestCaseS836,base,green,0,
 CreditMgmtTestCaseS861,base,green,0,
 CreditMgmtTestCaseS885,base,green,0,
 CreditMgmtTestCaseS909,base,green,0,
-CreditMgmtTestCaseS933,base,xfail,0,executed but fails (candidate defect)
-CreditMgmtTestCaseS959,base,xfail,0,executed but fails (candidate defect)
-CreditMgmtTestCaseS978,base,xfail,0,executed but fails (candidate defect)
-CreditMgmtTestCaseS997,base,xfail,0,executed but fails (candidate defect)
+CreditMgmtTestCaseS933,base,green,0,
+CreditMgmtTestCaseS959,base,green,0,
+CreditMgmtTestCaseS978,base,green,0,
+CreditMgmtTestCaseS997,base,green,0,
 DurableHandleV1PreparedWithBatchOplockReconnectTestCaseS0,base,green,0,
 DurableHandleV1PreparedWithBatchOplockReconnectTestCaseS109,persistent,green,0,
 DurableHandleV1PreparedWithBatchOplockReconnectTestCaseS125,persistent,green,0,
