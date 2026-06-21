@@ -19,6 +19,9 @@ chimera_vfs_open_fh_complete(struct chimera_vfs_request *request)
 
     if (request->status == CHIMERA_VFS_OK) {
         chimera_vfs_populate_handle(thread, handle, request->open_fh.r_vfs_private);
+        if (request->open_fh.r_stream) {
+            handle->flags |= CHIMERA_VFS_OPEN_HANDLE_STREAM;
+        }
     } else {
         chimera_vfs_release_failed(thread, handle, request->status);
         handle = NULL;
@@ -113,6 +116,7 @@ chimera_vfs_open_fh_hs(
         request->complete             = chimera_vfs_open_fh_complete;
         request->open_fh.flags        = flags;
         request->open_fh.handle_state = handle_state;
+        request->open_fh.r_stream     = 0;
         request->proto_callback       = callback;
         request->proto_private_data   = private_data;
 
