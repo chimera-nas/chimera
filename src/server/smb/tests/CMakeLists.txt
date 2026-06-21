@@ -1309,6 +1309,7 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.create.impersonation
     smb2.create.leading-slash
     smb2.create.mkdir-dup
+    smb2.create.mkdir-visible
     smb2.create.multi
     smb2.create.open
     smb2.create.path-length
