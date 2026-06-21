@@ -1356,6 +1356,19 @@ diskfs_bt_run(struct diskfs_bt_op *op)
         buf = blk->iov.data;
         h   = diskfs_bt_hdr(buf, base);
 
+        /* Root just faulted for a structural modify: link it as the inode's
+         * home block and take a txn-lifetime pin.  The synchronous modify
+         * (diskfs_bt_insert_locked / diskfs_bt_remove_locked) derefs
+         * inode->block, and flush_inodes serializes the dinode into it at
+         * commit -- both outlive this op's own descent pin.  Lookups never
+         * modify and must NOT pin the root into txn->blocks (that would defeat
+         * the deferred-mtime inline commit), so they skip this. */
+        if (op->use_root && !inode->block &&
+            (op->opcode == DISKFS_BT_OP_INSERT ||
+             op->opcode == DISKFS_BT_OP_REMOVE)) {
+            diskfs_inode_link_root(op->txn, inode, blk);
+        }
+
         if (op->phase == DISKFS_BT_PHASE_DESCEND) {
             if (h->level > 0) {
                 struct diskfs_bt_islot *isl = diskfs_bt_islots(buf, base);

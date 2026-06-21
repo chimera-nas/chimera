@@ -281,19 +281,38 @@ diskfs_drain_final_cb(
  * home block itself is returned to the space map.  Generation reuse is safe:
  * generations are drawn from the global epoch counter, so whatever this inum
  * becomes next carries a generation no file handle has ever seen. */
+/* Home block resident (faulted async if it had been evicted): log the final
+ * tombstone dinode, return the reservation, free the inode and its home block,
+ * and commit. */
 static void
-diskfs_drain_after_unrecord(void *priv)
+diskfs_drain_pinned_cb(
+    struct diskfs_inode *inode,
+    int                  status,
+    void                *priv)
 {
-    struct diskfs_drain *d = priv;
+    struct diskfs_drain *d   = priv;
     uint32_t             dev;
     uint64_t             off = sm_inum_to_device_offset(d->thread->shared->space_map,
                                                         d->inum, &dev);
 
-    diskfs_txn_pin_inode_block(d->thread, d->txn, d->inode, 0);
+    (void) inode;
+    (void) status;
     diskfs_inode_return_reservation(d->thread, d->txn, d->inode);
     diskfs_inode_free(d->thread, d->inode);
     diskfs_txn_free_space(d->thread, d->txn, dev, off, DISKFS_BLOCK_SIZE);
     diskfs_txn_commit(d->txn, diskfs_drain_final_cb, d);
+} /* diskfs_drain_pinned_cb */
+
+
+static void
+diskfs_drain_after_unrecord(void *priv)
+{
+    struct diskfs_drain *d = priv;
+
+    /* Establish the home block (async-load if evicted), then log the tombstone
+     * dinode and free everything in diskfs_drain_pinned_cb. */
+    diskfs_inode_finish_write_pin(d->thread, d->txn, d->inode,
+                                  diskfs_drain_pinned_cb, d, 0);
 } /* diskfs_drain_after_unrecord */
 
 

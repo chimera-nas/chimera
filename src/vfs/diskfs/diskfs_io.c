@@ -1360,6 +1360,16 @@ diskfs_read_inode_cb(
      * On the (rare) re-entry the txn is already WRITE: pin the inode block and
      * stamp atime only (never ctime); the WRITE commit journals it.
      */
+    /* Cold-file atime bump: the home block is no longer eager-faulted at the
+     * grant, so on a cold file it may not be resident -- and the atime journal
+     * below needs it for the commit flush.  Fault it async and re-enter (inline
+     * and idempotent when already resident; the sync pin below then no-ops). */
+    if (diskfs_private->txn->type == DISKFS_TXN_WRITE && !inode->block) {
+        diskfs_inode_finish_write_pin(thread, diskfs_private->txn, inode,
+                                      diskfs_read_inode_cb, request, 0);
+        return;
+    }
+
     if (diskfs_private->txn->type == DISKFS_TXN_WRITE) {
         struct timespec now;
 
@@ -3734,6 +3744,21 @@ diskfs_seek(
  * waits behind COMMIT.
  */
 static void
+diskfs_commit_pinned_cb(
+    struct diskfs_inode *inode,
+    int                  status,
+    void                *priv)
+{
+    struct chimera_vfs_request    *request = priv;
+    struct diskfs_request_private *cp      = request->plugin_data;
+
+    (void) inode;
+    (void) status;
+    diskfs_op_ok(request, cp->txn);     /* home block resident now; logs the inode */
+} /* diskfs_commit_pinned_cb */
+
+
+static void
 diskfs_commit_acquired_cb(
     struct diskfs_inode *inode,
     int                  status,
@@ -3760,12 +3785,16 @@ diskfs_commit_acquired_cb(
          * no reclaim check is needed here. */
         --inode->refcnt;
         pthread_mutex_unlock(&shard->lock);
-        diskfs_txn_pin_inode_block(thread, cp->txn, inode, 0);
-    } else {
-        pthread_mutex_unlock(&shard->lock);
+        /* Establish the home block (async-load if it was evicted) so the commit
+         * logs the coalesced mtime; inline when resident, else resumes via
+         * diskfs_commit_pinned_cb. */
+        diskfs_inode_finish_write_pin(thread, cp->txn, inode,
+                                      diskfs_commit_pinned_cb, request, 0);
+        return;
     }
+    pthread_mutex_unlock(&shard->lock);
 
-    diskfs_op_ok(request, cp->txn);     /* logs the inode if pinned, else inline */
+    diskfs_op_ok(request, cp->txn);     /* nothing deferred -- inline commit */
 } /* diskfs_commit_acquired_cb */
 
 

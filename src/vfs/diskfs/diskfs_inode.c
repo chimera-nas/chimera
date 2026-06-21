@@ -99,7 +99,7 @@ diskfs_inode_lock_compatible(
     struct diskfs_inode        *inode,
     enum diskfs_inode_lock_mode mode)
 {
-    if (mode == DISKFS_INODE_LOCK_WRITE) {
+    if (mode != DISKFS_INODE_LOCK_READ) {     /* WRITE and WRITE_NOPIN are exclusive */
         return inode->writer == 0 && inode->readers == 0;
     }
     return inode->writer == 0;
@@ -112,7 +112,7 @@ diskfs_inode_lock_grant(
     struct diskfs_inode        *inode,
     enum diskfs_inode_lock_mode mode)
 {
-    if (mode == DISKFS_INODE_LOCK_WRITE) {
+    if (mode != DISKFS_INODE_LOCK_READ) {     /* WRITE and WRITE_NOPIN are exclusive */
         inode->writer = 1;
     } else {
         inode->readers++;
@@ -163,7 +163,7 @@ diskfs_inode_release_one(
 
     pthread_mutex_lock(&shard->lock);
 
-    if (mode == DISKFS_INODE_LOCK_WRITE) {
+    if (mode != DISKFS_INODE_LOCK_READ) {     /* WRITE and WRITE_NOPIN are exclusive */
         inode->writer = 0;
     } else {
         inode->readers--;
@@ -200,8 +200,8 @@ diskfs_inode_release_one(
         w->next   = granted;
         granted   = w;
 
-        if (w->mode == DISKFS_INODE_LOCK_WRITE) {
-            break;     /* exclusive: stop granting */
+        if (w->mode != DISKFS_INODE_LOCK_READ) {
+            break;     /* exclusive (WRITE/WRITE_NOPIN): stop granting */
         }
     }
 
@@ -249,13 +249,11 @@ diskfs_inode_grant_locked(
         diskfs_inode_lru_unlink(shard, inode);     /* busy now, not a candidate */
         pthread_mutex_unlock(&shard->lock);
         diskfs_txn_add_slot(txn, inode, mode);
-        if (mode == DISKFS_INODE_LOCK_WRITE) {
-            /* Pin the home block before reporting the grant; may async-load it
-             * (and defer cb) if it was evicted while the inode stayed cached. */
-            diskfs_inode_finish_write_pin(thread, txn, inode, cb, private_data, 0);
-        } else {
-            cb(inode, CHIMERA_VFS_OK, private_data);
-        }
+        /* The grant no longer eager-faults the home block: a b+tree modify links
+         * its inode's root in the descent, attr-only modifiers fault it at
+         * commit-prep (diskfs_txn_commit_finish), and read-only/volatile holders
+         * (getattr, close) never touch it -- so reporting the grant is enough. */
+        cb(inode, CHIMERA_VFS_OK, private_data);
         return;
     }
 
@@ -696,13 +694,10 @@ diskfs_grant_drain(struct diskfs_thread *thread)
             diskfs_txn_add_slot(wtxn, inode, wmode);
             diskfs_waiter_free(thread, w);
 
-            if (wmode == DISKFS_INODE_LOCK_WRITE) {
-                /* Pin the home block (async-load if evicted) before reporting
-                 * the grant; cb may fire later, back on this worker. */
-                diskfs_inode_finish_write_pin(thread, wtxn, inode, cb, private_data, 0);
-            } else {
-                cb(inode, CHIMERA_VFS_OK, private_data);
-            }
+            /* No eager home-block fault (see diskfs_inode_grant_locked): the
+             * descent links a modify's root and commit-prep faults attr-only
+             * inodes, so just report the grant. */
+            cb(inode, CHIMERA_VFS_OK, private_data);
         } else {
             diskfs_waiter_free(thread, w);
             cb(NULL, status, private_data);
@@ -863,6 +858,22 @@ diskfs_mtime_flush_committed_cb(
 
 
 static void
+diskfs_mtime_flush_pinned_cb(
+    struct diskfs_inode *inode,
+    int                  status,
+    void                *priv)
+{
+    struct diskfs_mtime_flush *f = priv;
+
+    (void) inode;
+    (void) status;
+    /* Home block resident (faulted async if it had been evicted); commit
+     * serializes the coalesced mtime/ctime into it and logs it. */
+    diskfs_txn_commit(f->txn, diskfs_mtime_flush_committed_cb, f);
+} /* diskfs_mtime_flush_pinned_cb */
+
+
+static void
 diskfs_mtime_flush_acquired_cb(
     struct diskfs_inode *inode,
     int                  status,
@@ -881,10 +892,12 @@ diskfs_mtime_flush_acquired_cb(
         return;
     }
 
-    /* Pin the home block; commit serializes the current in-memory mtime/ctime
-     * (coalescing every write since it went dirty) into it and logs it. */
-    diskfs_txn_pin_inode_block(thread, f->txn, inode, 0);
-    diskfs_txn_commit(f->txn, diskfs_mtime_flush_committed_cb, f);
+    /* Establish the home block (async-load if it was evicted) before commit, so
+     * the commit serializes the coalesced mtime/ctime into it and logs it.
+     * Inline when resident; suspends to diskfs_mtime_flush_pinned_cb on a cold
+     * reload. */
+    diskfs_inode_finish_write_pin(thread, f->txn, inode,
+                                  diskfs_mtime_flush_pinned_cb, f, 0);
 } /* diskfs_mtime_flush_acquired_cb */
 
 

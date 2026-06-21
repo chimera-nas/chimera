@@ -1647,6 +1647,34 @@ diskfs_inode_finish_write_pin(
 } /* diskfs_inode_finish_write_pin */
 
 
+/*
+ * Link an inode's already-resident home (root) block as its txn home block and
+ * take a txn-lifetime pin on it.  Used by the b+tree descent when it faults the
+ * root for a structural modify (insert/remove): the synchronous modify derefs
+ * inode->block, and flush_inodes serializes the dinode into it at commit, so the
+ * block must outlive the descent op's own (op->pins[]) pin, which is released at
+ * op completion -- before commit.  The block is already pin-held by the descent
+ * (diskfs_bt_op_pin), so this increment races no recycle; the inode is held
+ * under the write lock, so inode->block is owned by this thread.
+ */
+void
+diskfs_inode_link_root(
+    struct diskfs_txn   *txn,
+    struct diskfs_inode *inode,
+    struct diskfs_block *blk)
+{
+    struct diskfs_block_shard *shard =
+        diskfs_block_shard(txn->thread->shared->block_cache,
+                           blk->device_id, blk->device_offset);
+
+    if (__atomic_add_fetch(&blk->pin_count, 1, __ATOMIC_ACQ_REL) == 1) {
+        __atomic_add_fetch(&shard->pinned, 1, __ATOMIC_RELAXED);
+    }
+    diskfs_txn_add_block(txn, blk);
+    inode->block = blk;
+} /* diskfs_inode_link_root */
+
+
 static void
 diskfs_pin_cont_resume(
     struct diskfs_thread *thread,

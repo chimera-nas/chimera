@@ -1984,6 +1984,39 @@ diskfs_il_push_thread_shutdown(
 
 
 /*
+ * Commit-prep fault context.  The grant no longer eager-faults the inode home
+ * block; a b+tree modify links its inode's root in the descent, but an attr-only
+ * modify (setattr, and the nlink/parent change on a link/unlink/rename target)
+ * touches no b+tree, so its home block may not be resident at commit.  The
+ * commit-prep loop below is the single can't-miss chokepoint that faults any
+ * still-unlinked write inode before the dinode flush.
+ */
+struct diskfs_commit_fault_ctx {
+    struct diskfs_txn     *txn;
+    diskfs_txn_commit_cb_t cb;
+    void                  *private_data;
+};
+
+static void
+diskfs_commit_fault_resume(
+    struct diskfs_inode *inode,
+    int                  status,
+    void                *private_data)
+{
+    struct diskfs_commit_fault_ctx *c   = private_data;
+    struct diskfs_txn              *txn = c->txn;
+    diskfs_txn_commit_cb_t          cb  = c->cb;
+    void                           *pd  = c->private_data;
+
+    (void) inode;
+    (void) status;
+    free(c);
+    /* Re-enter: the loop skips the inode we just linked and faults the next. */
+    diskfs_txn_commit_finish(txn, cb, pd);
+} /* diskfs_commit_fault_resume */
+
+
+/*
  * The post-free-flush half of commit: serialize the dirty inodes, snapshot the
  * pinned blocks, and hand the txn to the intent-log thread.  Runs once the
  * deferred FREE deltas are journaled (inline, or resumed via the load).
@@ -1995,6 +2028,30 @@ diskfs_txn_commit_finish(
     void                  *private_data)
 {
     struct diskfs_thread *thread = txn->thread;
+    int                   i;
+
+    /* Commit-prep: fault any write-locked inode whose home block is not yet
+     * resident, so the flush below can serialize its dinode.  A no-op for
+     * descent-linked inodes, inline for a cache hit, suspending only on a cold
+     * reload (diskfs_commit_fault_resume re-enters here when it lands). */
+    for (i = 0; i < txn->num_inodes; i++) {
+        struct diskfs_inode *in = txn->inodes[i].inode;
+
+        /* Skip deferred-mtime inodes (mtime_dirty): they intentionally commit
+         * without their home block (the coalescing flusher logs them later).
+         * Everything else write-locked needs its dinode flushed here. */
+        if (txn->inodes[i].mode == DISKFS_INODE_LOCK_WRITE && !in->block &&
+            !in->mtime_dirty) {
+            struct diskfs_commit_fault_ctx *c = malloc(sizeof(*c));
+
+            c->txn          = txn;
+            c->cb           = cb;
+            c->private_data = private_data;
+            diskfs_inode_finish_write_pin(thread, txn, in,
+                                          diskfs_commit_fault_resume, c, 0);
+            return;
+        }
+    }
 
     /* Serialize every dirty inode into its block buffer now, on the worker
      * that owns the live inodes under write lock, before handing the txn
