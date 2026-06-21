@@ -622,13 +622,17 @@ main(
     if ((childpid = fork()) == 0) {
         who = CHILD;
         signal(SIGINT, childsig);
-        /* Fail fast with a stack if this child wedges (the recurring
-         * lock-family post-fork hang); fires well before the ctest timeout. */
-        posix_test_child_watchdog(240);
+        /* Fail fast with a stack if either side wedges (the recurring
+         * lock-family hang).  45 s beats the shortest ctest timeout this binary
+         * runs under while leaving room for the gstack dump; normal runtime is
+         * <2 s so it never false-fires.  Armed on both sides so a parent-side
+         * wedge is captured too. */
+        posix_test_child_watchdog(45);
     } else {
         who = PARENT;
         signal(SIGINT, parentsig);
         signal(SIGCHLD, SIG_DFL);
+        posix_test_child_watchdog(45);
     }
 
     /*

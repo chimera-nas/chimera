@@ -59,8 +59,12 @@ child_main(
     close(c2p[0]);
 
     /* Fail fast with a stack if this child wedges (the recurring lock-family
-     * post-fork hang); fires well before the 300s ctest timeout. */
-    posix_test_child_watchdog(240);
+     * hang).  Must fire before the *shortest* ctest timeout for any test built
+     * from this binary -- the _myuser / nfs3rdma variants run with TIMEOUT 60,
+     * so a 240 s alarm never fired (ctest SIGKILLed at 60 s first, leaving zero
+     * diagnostics).  45 s leaves headroom for the gstack dump before the 60 s
+     * kill, and normal runtime is <2 s so it never false-fires. */
+    posix_test_child_watchdog(45);
 
     fprintf(stderr, "child: Testing chimera_posix_fcntl()...\n");
     env->posix = chimera_posix_init_json(posix_json_path, cred, env->metrics);
@@ -286,6 +290,11 @@ main(
     /* ---- parent ---- */
     close(p2c[0]);
     close(c2p[1]);
+
+    /* The hang can wedge the parent too (it runs the in-process NFS server and
+     * its own lock ops, then waitpid()s the child).  Arm the same self-dumping
+     * watchdog here so a parent-side wedge is captured, not just a child one. */
+    posix_test_child_watchdog(45);
 
     fprintf(stderr, "parent: Testing chimera_posix_fcntl()...\n");
     if (is_nfs) {
