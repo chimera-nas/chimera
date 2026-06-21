@@ -848,6 +848,8 @@ diskfs_inode_load_complete(
         inode->btime_nsec     = di->btime_nsec;
         inode->dos_attributes = di->dos_attributes;
         inode->change         = di->change;
+        inode->ea_size        = di->ea_size;
+        inode->ea_count       = di->ea_count;
         inode->parent_inum    = di->parent_inum;
         inode->parent_gen     = di->parent_gen;
         /* Publish write-locked, held by this fault: nobody can grant (or

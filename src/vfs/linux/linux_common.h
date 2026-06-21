@@ -5,9 +5,12 @@
 #pragma once
 
 #include <sys/sysmacros.h>
+#include <sys/xattr.h>
+#include <fcntl.h>
 
 #include "common/varint.h"
 #include "vfs/vfs_fh.h"
+#include "vfs/vfs_xattr_name.h"
 
 #define chimera_linux_debug(...) chimera_debug("linux", \
                                                __FILE__, \
@@ -376,6 +379,65 @@ linux_open_by_handle(
     return open_by_handle_at(mount->mount_fd, handle, flags);
 } /* linux_open_by_handle */
 
+/*
+ * SMB/OS-2 EaSize for a passthrough object: sum the FEALIST contribution of
+ * every user.* xattr on the host filesystem (flistxattr + per-name length via
+ * fgetxattr).  Only computed when CHIMERA_VFS_ATTR_EA_SIZE is requested (SMB EA
+ * info classes), so NFS getattr/readdir never pay for it.
+ */
+static inline uint64_t
+chimera_linux_ea_size_fd(int fd)
+{
+    char     names[4096];
+    ssize_t  nlen     = flistxattr(fd, names, sizeof(names));
+    ssize_t  off      = 0;
+    uint64_t ea_size  = 0;
+    uint32_t ea_count = 0;
+
+    if (nlen <= 0) {
+        return 0;
+    }
+
+    while (off < nlen) {
+        const char *nm    = names + off;
+        uint32_t    nmlen = strlen(nm);
+
+        if (chimera_vfs_xattr_is_user(nm, nmlen)) {
+            ssize_t vlen = fgetxattr(fd, nm, NULL, 0);
+
+            if (vlen >= 0) {
+                ea_size += chimera_vfs_xattr_ea_entry_size(
+                    nmlen - CHIMERA_VFS_XATTR_USER_PREFIX_LEN, (uint32_t) vlen);
+                ea_count++;
+            }
+        }
+        off += nmlen + 1;
+    }
+
+    if (ea_count) {
+        ea_size += CHIMERA_VFS_XATTR_EA_LIST_OVERHEAD;
+    }
+    return ea_size;
+} /* chimera_linux_ea_size_fd */
+
+/* Same, for a directory-relative child (readdir): open it (regular/dir only --
+ * callers gate on the type to avoid opening devices), compute, close. */
+static inline uint64_t
+chimera_linux_ea_size_at(
+    int         dirfd,
+    const char *name)
+{
+    int      fd = openat(dirfd, name, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+    uint64_t sz;
+
+    if (fd < 0) {
+        return 0;
+    }
+    sz = chimera_linux_ea_size_fd(fd);
+    close(fd);
+    return sz;
+} /* chimera_linux_ea_size_at */
+
 static inline void
 chimera_linux_map_attrs(
     uint8_t                   fh_magic,
@@ -405,6 +467,11 @@ chimera_linux_map_attrs(
         }
     }
 
+    if (attr->va_req_mask & CHIMERA_VFS_ATTR_EA_SIZE) {
+        attr->va_ea_size   = chimera_linux_ea_size_fd(fd);
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_EA_SIZE;
+    }
+
 } /* chimera_linux_map_attrs */
 
 static inline void
@@ -431,6 +498,11 @@ chimera_linux_map_attrs_statx(
         }
     }
 
+    if (attr->va_req_mask & CHIMERA_VFS_ATTR_EA_SIZE) {
+        attr->va_ea_size   = chimera_linux_ea_size_fd(fd);
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_EA_SIZE;
+    }
+
 } /* chimera_linux_map_attrs */
 
 static inline int
@@ -444,6 +516,7 @@ chimera_linux_map_child_attrs(
     int            rc;
     struct stat    st;
     struct statvfs stvfs;
+    int            stat_valid = 0;
 
     (void) fh_magic; /* No longer used, kept for API compatibility */
 
@@ -458,6 +531,7 @@ chimera_linux_map_child_attrs(
         }
 
         chimera_linux_stat_to_attr(attr, &st);
+        stat_valid = 1;
     }
 
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_FH) {
@@ -478,6 +552,12 @@ chimera_linux_map_child_attrs(
         if (rc == 0) {
             chimera_linux_statvfs_to_attr(attr, &stvfs);
         }
+    }
+
+    if ((attr->va_req_mask & CHIMERA_VFS_ATTR_EA_SIZE) && stat_valid &&
+        (S_ISREG(st.st_mode) || S_ISDIR(st.st_mode))) {
+        attr->va_ea_size   = chimera_linux_ea_size_at(dirfd, name);
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_EA_SIZE;
     }
 
     return CHIMERA_VFS_OK;
@@ -520,6 +600,12 @@ chimera_linux_map_child_attrs_statx(
         if (rc == 0) {
             chimera_linux_statvfs_to_attr(attr, &stvfs);
         }
+    }
+
+    if ((attr->va_req_mask & CHIMERA_VFS_ATTR_EA_SIZE) &&
+        (S_ISREG(stx->stx_mode) || S_ISDIR(stx->stx_mode))) {
+        attr->va_ea_size   = chimera_linux_ea_size_at(dirfd, name);
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_EA_SIZE;
     }
 
     return CHIMERA_VFS_OK;

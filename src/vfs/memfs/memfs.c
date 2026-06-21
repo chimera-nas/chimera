@@ -21,6 +21,7 @@
 #include "vfs/vfs_internal.h"
 #include "vfs/vfs_acl.h"
 #include "vfs/vfs_access.h"
+#include "vfs/vfs_xattr_name.h"
 #include "memfs.h"
 #include "common/logging.h"
 #include "common/misc.h"
@@ -1371,6 +1372,27 @@ memfs_map_attrs(
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_CHANGE) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_CHANGE;
         attr->va_change    = inode->change;
+    }
+
+    /* SMB/OS-2 EaSize: sum the FEALIST contribution of every user.* xattr. */
+    if (attr->va_req_mask & CHIMERA_VFS_ATTR_EA_SIZE) {
+        struct memfs_xattr *xa;
+        uint64_t            ea_size  = 0;
+        uint32_t            ea_count = 0;
+
+        for (xa = inode->xattrs; xa; xa = xa->next) {
+            if (chimera_vfs_xattr_is_user(xa->name, xa->name_len)) {
+                ea_size += chimera_vfs_xattr_ea_entry_size(
+                    xa->name_len - CHIMERA_VFS_XATTR_USER_PREFIX_LEN,
+                    xa->value_len);
+                ea_count++;
+            }
+        }
+        if (ea_count) {
+            ea_size += CHIMERA_VFS_XATTR_EA_LIST_OVERHEAD;
+        }
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_EA_SIZE;
+        attr->va_ea_size   = ea_size;
     }
 
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_FSID) {

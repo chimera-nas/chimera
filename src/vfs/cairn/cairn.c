@@ -34,6 +34,7 @@ void rocksdb_flush_wal(
 #include "vfs/vfs_acl.h"
 #include "vfs/vfs_acl_serialize.h"
 #include "vfs/vfs_access.h"
+#include "vfs/vfs_xattr_name.h"
 #include "cairn.h"
 #include "common/logging.h"
 #include "common/misc.h"
@@ -1746,6 +1747,70 @@ cairn_map_attrs(
     }
 } /* cairn_map_attrs */
 
+/*
+ * Compute the SMB/OS-2 EaSize (CHIMERA_VFS_ATTR_EA_SIZE) for an inode by range-
+ * scanning its xattr records and summing the FEALIST contribution of each
+ * user.* attribute.  Kept out of cairn_map_attrs() because it needs the thread
+ * (for the RocksDB iterator) and only getattr/readdir request it; call it after
+ * cairn_map_attrs(), which has already reset va_set_mask.
+ */
+static inline void
+cairn_map_ea_size(
+    struct cairn_thread      *thread,
+    struct cairn_inode       *inode,
+    struct chimera_vfs_attrs *attr)
+{
+    struct cairn_xattr_key start_key, *key;
+    rocksdb_iterator_t    *iter;
+    const char            *value;
+    size_t                 klen, vlen;
+    uint64_t               ea_size  = 0;
+    uint32_t               ea_count = 0;
+
+    if (!(attr->va_req_mask & CHIMERA_VFS_ATTR_EA_SIZE)) {
+        return;
+    }
+
+    start_key.keytype = CAIRN_KEY_XATTR;
+    start_key.inum    = inode->inum;
+    start_key.hash    = 0;
+
+    iter = cairn_meta_iterator(thread);
+    rocksdb_iter_seek(iter, (const char *) &start_key, sizeof(start_key));
+
+    while (rocksdb_iter_valid(iter)) {
+        key = (struct cairn_xattr_key *) rocksdb_iter_key(iter, &klen);
+        if (klen != sizeof(*key) ||
+            key->keytype != CAIRN_KEY_XATTR ||
+            key->inum != start_key.inum) {
+            break;
+        }
+
+        value = rocksdb_iter_value(iter, &vlen);
+        if (vlen >= sizeof(struct cairn_xattr_value)) {
+            const struct cairn_xattr_value *xv =
+                (const struct cairn_xattr_value *) value;
+            if (vlen >= sizeof(*xv) + xv->name_len + xv->value_len &&
+                chimera_vfs_xattr_is_user(xv->data, xv->name_len)) {
+                ea_size += chimera_vfs_xattr_ea_entry_size(
+                    xv->name_len - CHIMERA_VFS_XATTR_USER_PREFIX_LEN,
+                    xv->value_len);
+                ea_count++;
+            }
+        }
+
+        rocksdb_iter_next(iter);
+    }
+
+    rocksdb_iter_destroy(iter);
+
+    if (ea_count) {
+        ea_size += CHIMERA_VFS_XATTR_EA_LIST_OVERHEAD;
+    }
+    attr->va_set_mask |= CHIMERA_VFS_ATTR_EA_SIZE;
+    attr->va_ea_size   = ea_size;
+} /* cairn_map_ea_size */
+
 static inline void
 cairn_apply_attrs(
     struct cairn_inode       *inode,
@@ -1835,6 +1900,7 @@ cairn_getattr(
     inode = ih.inode;
 
     cairn_map_attrs(shared, &request->getattr.r_attr, inode);
+    cairn_map_ea_size(thread, inode, &request->getattr.r_attr);
     cairn_map_acl(thread, &request->getattr.r_attr, inode);
 
     cairn_inode_handle_release(&ih);
@@ -2600,6 +2666,7 @@ cairn_readdir(
         /* Handle "." entry (cookie 0 -> 1) */
         if (cookie < CAIRN_COOKIE_DOT) {
             cairn_map_attrs(shared, &attr, inode);
+            cairn_map_ea_size(thread, inode, &attr);
 
             rc = request->readdir.callback(
                 inode->inum,
@@ -2625,9 +2692,11 @@ cairn_readdir(
             if (rc == 0) {
                 parent_inode = parent_ih.inode;
                 cairn_map_attrs(shared, &attr, parent_inode);
+                cairn_map_ea_size(thread, parent_inode, &attr);
                 cairn_inode_handle_release(&parent_ih);
             } else {
                 cairn_map_attrs(shared, &attr, inode);
+                cairn_map_ea_size(thread, inode, &attr);
             }
 
             rc = request->readdir.callback(
@@ -2694,6 +2763,7 @@ cairn_readdir(
         dirent_inode = dirent_ih.inode;
 
         cairn_map_attrs(shared, &attr, dirent_inode);
+        cairn_map_ea_size(thread, dirent_inode, &attr);
         cairn_map_acl(thread, &attr, dirent_inode);
 
         cairn_inode_handle_release(&dirent_ih);
