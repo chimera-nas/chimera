@@ -1340,6 +1340,21 @@ struct diskfs_intent_log {
     struct diskfs_pending           *pfree;           /* pending entry free list */
     int                              push_outstanding; /* home writes in flight (push watermark) */
 
+    /* ---------- apply thread (Stage B) ---------- */
+    /* Space-map delta application + worker ACK run here, off the commit thread.
+     * The commit thread enqueues each durable record's completion ctx and rings
+     * apply_doorbell; the apply thread applies the txn deltas in log order,
+     * ACKs the worker, and advances applied_seq. */
+    struct evpl_doorbell             apply_doorbell;   /* commit rings after enqueue */
+    struct evpl                     *apply_evpl;
+    struct evpl_thread              *apply_thread;
+    int                              apply_ready;       /* atomic */
+    struct diskfs_redo_ctx         **apply_queue;       /* SPSC ring of ctx* (commit -> apply) */
+    uint32_t                         apply_head;      /* atomic: apply consumer */
+    uint32_t                         apply_tail;      /* atomic: commit producer */
+    uint32_t                         apply_ring_size;
+    uint32_t                         apply_ring_mask;
+
     /* ---------- shared (cross-thread) ---------- */
     struct diskfs_il_record        **handoff;         /* SPSC ring of record* (commit -> push) */
     uint32_t                         handoff_head;    /* atomic: push consumer */
@@ -1349,13 +1364,18 @@ struct diskfs_intent_log {
     uint64_t                         log_head;        /* atomic: commit-written (next free byte) */
     uint64_t                         log_tail;        /* atomic: push-written (trim point) */
     uint64_t                         intent_log_size; /* active log size (from space_map / superblock) */
-    /* atomic: highest redo seq whose record is durable AND whose frees are
-     * applied (set in-order as records retire in diskfs_redo_write_cb).  A
-     * space-map checkpoint stamps its on-disk ckpt_seq from this, so every
-     * delta <= durable_seq is reflected in the snapshot; the push-thread trim
-     * frontier cannot pass a record until the AGs it touched are checkpointed
-     * to >= that record's seq (diskfs_push_trim). */
+    /* atomic: highest redo seq whose record is durably logged (set in-order as
+     * records retire in diskfs_redo_write_cb).  Stage B: this no longer implies
+     * the deltas are applied -- apply is async; see applied_seq. */
     uint64_t                         durable_seq;
+    /* atomic: highest redo seq whose record's space-map deltas have been applied
+     * to the in-memory free map (advanced in log order by the apply thread).
+     * durable_seq leads this, since apply is async.  A checkpoint stamps its
+     * on-disk ckpt_seq from applied_seq (NOT durable_seq), so every delta <= the
+     * stamped seq is reflected in the snapshot; the push-thread trim frontier
+     * cannot pass a record until the AGs it touched are checkpointed to >= that
+     * record's seq (diskfs_push_trim). */
+    uint64_t                         applied_seq;
     int                              sync;            /* FUA/sync flag (0 in unsafe_async) */
 
     /* ---------- metrics ---------- */
@@ -2619,6 +2639,16 @@ diskfs_il_push_thread_init(
 
 void
 diskfs_il_push_thread_shutdown(
+    struct evpl *evpl,
+    void        *private_data);
+
+void *
+diskfs_il_apply_thread_init(
+    struct evpl *evpl,
+    void        *private_data);
+
+void
+diskfs_il_apply_thread_shutdown(
     struct evpl *evpl,
     void        *private_data);
 

@@ -1005,7 +1005,77 @@ diskfs_redo_write_cb(
         struct diskfs_retire_slot *slot = &il->retire[il->retire_head & DISKFS_RETIRE_RING_MASK];
         struct diskfs_redo_ctx    *rc   = slot->ctx;
         struct diskfs_il_record   *rec  = rc->rec;
-        uint32_t                   ht, i;
+        uint32_t                   ht, at;
+
+        /* This record is durably logged; records retire strictly in seq order,
+         * so durable_seq advances monotonically.  The per-txn work -- releasing
+         * inode->block links + per-block txn structs, applying the committed
+         * space-map deltas to the in-memory free map, and ACKing each txn to its
+         * worker -- is done off this thread by the apply thread, which advances
+         * applied_seq (the frontier a checkpoint actually stamps from).  Inode
+         * locks were already released in diskfs_il_write_redo once log order was
+         * fixed; the block pins are dropped by the push thread at trim. */
+        __atomic_store_n(&il->durable_seq, rec->seq, __ATOMIC_RELEASE);
+
+        /* Hand the record image to the push thread (block home writes) and the
+         * completion ctx to the apply thread (space-map apply + worker ACK),
+         * both in log order.  Each ring is sized larger than the log can ever
+         * hold, so neither can fill before the log does. */
+        ht = il->handoff_tail;
+        chimera_diskfs_abort_if(ht - __atomic_load_n(&il->handoff_head, __ATOMIC_ACQUIRE) >=
+                                il->handoff_ring_size, "intent-log hand-off ring overflow");
+        il->handoff[ht & il->handoff_ring_mask] = rec;
+        __atomic_store_n(&il->handoff_tail, ht + 1, __ATOMIC_RELEASE);
+
+        at = il->apply_tail;
+        chimera_diskfs_abort_if(at - __atomic_load_n(&il->apply_head, __ATOMIC_ACQUIRE) >=
+                                il->apply_ring_size, "intent-log apply ring overflow");
+        il->apply_queue[at & il->apply_ring_mask] = rc;
+        __atomic_store_n(&il->apply_tail, at + 1, __ATOMIC_RELEASE);
+
+        handed_off = 1;
+
+        slot->ctx  = NULL;
+        slot->done = 0;
+        il->retire_head++;
+    }
+
+    diskfs_il_commit_metrics(il);
+
+    if (handed_off) {
+        evpl_ring_doorbell(&il->push_doorbell);
+        evpl_ring_doorbell(&il->apply_doorbell);
+    }
+} /* diskfs_redo_write_cb */
+
+
+/*
+ * Apply thread (Stage B): drains the durable records the commit thread enqueued
+ * and does the per-txn work off the commit hot path -- release the inode->block
+ * links + per-block txn structs, apply the committed space-map deltas to the
+ * in-memory free map, and ACK each txn to its worker.  Records arrive strictly
+ * in seq order, so per-AG apply stays single-owner and in order, and applied_seq
+ * advances monotonically -- the checkpoint stamps ckpt_seq from it (durable_seq
+ * now leads it, since apply is async).
+ */
+static void
+diskfs_il_apply_doorbell_cb(
+    struct evpl          *evpl,
+    struct evpl_doorbell *doorbell)
+{
+    struct diskfs_intent_log *il = container_of(doorbell,
+                                                struct diskfs_intent_log,
+                                                apply_doorbell);
+    uint32_t                  head = il->apply_head;
+    uint32_t                  tail = __atomic_load_n(&il->apply_tail, __ATOMIC_ACQUIRE);
+
+    (void) evpl;
+
+    while (head != tail) {
+        struct diskfs_redo_ctx *rc = il->apply_queue[head & il->apply_ring_mask];
+        uint32_t                i;
+
+        head++;
 
         for (i = 0; i < rc->num_entries; i++) {
             struct diskfs_iq_channel *ch    = rc->entries[i].ch;
@@ -1020,15 +1090,10 @@ diskfs_redo_write_cb(
                 il->metrics.txn_latency[DISKFS_METRIC_TXN_QUEUE_TO_DURABLE],
                 &entry->enqueue_time);
 
-            /* Record durable & recoverable: release the inode->block links and
-             * the per-block txn structs (NOT the block pins -- each block's
-             * claim pin is held until this record is pushed home and trimmed,
-             * where the push thread drops it; see diskfs_il_free_record).  Then
-             * return freed ranges to the allocator and ACK the transaction back
-             * to its worker.  Inode locks were already released in
-             * diskfs_il_write_redo once this record's log order was fixed, so
-             * the hot parent-directory lock is not held across the log write.
-             * The IL thread no longer touches any block reference/state field. */
+            /* NOT the block pins -- each block's claim pin is held until the
+             * record is pushed home and trimmed (the push thread drops it).
+             * The worker polls its CQ every loop iteration, so posting the CQE
+             * needs no cq_doorbell ring (matches the old commit-thread path). */
             diskfs_txn_retire_blocks(entry->txn);
             diskfs_txn_apply_allocs(entry->txn);
             diskfs_txn_apply_frees(entry->txn);
@@ -1037,36 +1102,20 @@ diskfs_redo_write_cb(
             cq_tail                                       = __atomic_load_n(&ch->cq.tail, __ATOMIC_RELAXED);
             ch->cq.entries[cq_tail & DISKFS_IQ_RING_MASK] = *entry;
             __atomic_store_n(&ch->cq.tail, cq_tail + 1, __ATOMIC_RELEASE);
-            ch->cq_inflight--;
+            __atomic_sub_fetch(&ch->cq_inflight, 1, __ATOMIC_ACQ_REL);
         }
 
-        /* This record is durable and all its frees are applied; records retire
-         * strictly in seq order, so durable_seq advances monotonically.  A
-         * space-map checkpoint stamps its ckpt_seq from this. */
-        __atomic_store_n(&il->durable_seq, rec->seq, __ATOMIC_RELEASE);
+        /* Deltas applied; advance the apply frontier in log order (monotonic).
+         * A checkpoint stamps ckpt_seq <= applied_seq, so every delta it folds
+         * is already reflected in the in-memory free map. */
+        __atomic_store_n(&il->applied_seq, rc->seq, __ATOMIC_RELEASE);
 
-        /* Hand the durable record to the push thread, in log order.  The
-         * hand-off ring is sized larger than the log can ever hold, so it
-         * cannot fill before the log does. */
-        ht = il->handoff_tail;
-        chimera_diskfs_abort_if(ht - __atomic_load_n(&il->handoff_head, __ATOMIC_ACQUIRE) >=
-                                il->handoff_ring_size, "intent-log hand-off ring overflow");
-        il->handoff[ht & il->handoff_ring_mask] = rec;
-        __atomic_store_n(&il->handoff_tail, ht + 1, __ATOMIC_RELEASE);
-        handed_off = 1;
-
-        slot->ctx  = NULL;
-        slot->done = 0;
         diskfs_il_ctx_recycle(il, rc);
-        il->retire_head++;
     }
 
-    diskfs_il_commit_metrics(il);
+    __atomic_store_n(&il->apply_head, head, __ATOMIC_RELEASE);
+} /* diskfs_il_apply_doorbell_cb */
 
-    if (handed_off) {
-        evpl_ring_doorbell(&il->push_doorbell);
-    }
-} /* diskfs_redo_write_cb */
 
 /*
  * Build a full-block redo record for one transaction and issue a durable
@@ -1360,7 +1409,7 @@ diskfs_iq_process_batch(struct diskfs_intent_log *il)
             struct diskfs_iq_entry   *slot;
             uint32_t                  nblocks, next_blocks;
             uint32_t                  ndeltas, next_deltas;
-            uint32_t                  cq_tail, cq_head;
+            uint32_t                  cq_tail, cq_head, cqi;
             uint64_t                  reclen;
 
             if (sq_head[idx] + consumed[idx] == sq_tail[idx]) {
@@ -1381,9 +1430,15 @@ diskfs_iq_process_batch(struct diskfs_intent_log *il)
                 break;
             }
 
-            cq_tail = __atomic_load_n(&ch->cq.tail, __ATOMIC_RELAXED);
+            /* CQ-space gate.  cq_inflight (CQEs reserved by consuming SQ but not
+             * yet posted) is decremented by the apply thread AFTER it advances
+             * cq.tail, so read cq_inflight (acquire) BEFORE cq.tail: observing
+             * the decrement then implies observing the matching cq.tail advance,
+             * so this occupancy estimate can only over-count, never overflow. */
+            cqi     = __atomic_load_n(&ch->cq_inflight, __ATOMIC_ACQUIRE);
+            cq_tail = __atomic_load_n(&ch->cq.tail, __ATOMIC_ACQUIRE);
             cq_head = __atomic_load_n(&ch->cq.head, __ATOMIC_ACQUIRE);
-            if ((cq_tail - cq_head) + ch->cq_inflight + consumed[idx] >=
+            if ((cq_tail - cq_head) + cqi + consumed[idx] >=
                 DISKFS_IQ_RING_SIZE) {
                 continue;
             }
@@ -1447,7 +1502,8 @@ diskfs_iq_process_batch(struct diskfs_intent_log *il)
         __atomic_store_n(&il->channels[i]->sq.head,
                          sq_head[i] + consumed[i],
                          __ATOMIC_RELEASE);
-        il->channels[i]->cq_inflight += consumed[i];
+        __atomic_add_fetch(&il->channels[i]->cq_inflight, consumed[i],
+                           __ATOMIC_ACQ_REL);
     }
 
     diskfs_il_write_redo(il, entries, batch_count, batch_blocks, batch_deltas);
@@ -1520,12 +1576,17 @@ diskfs_il_service_registrations(struct diskfs_intent_log *il)
              * quiescence (commits_inflight drained to zero) before
              * requesting unregistration; make a violation loud instead of
              * corrupting memory. */
+            /* The worker drained its own commits before unregistering, but the
+             * apply thread posts each CQE before decrementing cq_inflight, so the
+             * matching decrement can trail the worker's last completion by a
+             * hair -- wait for it to settle rather than asserting on the race. */
+            while (__atomic_load_n(&ch->cq_inflight, __ATOMIC_ACQUIRE) != 0) {
+                /* apply is finishing the cq_inflight decrement; spin briefly */
+            }
             chimera_diskfs_abort_if(
-                ch->cq_inflight != 0 ||
                 __atomic_load_n(&ch->sq.tail, __ATOMIC_ACQUIRE) !=
                 __atomic_load_n(&ch->sq.head, __ATOMIC_RELAXED),
-                "intent-log channel unregistered with work in flight "
-                "(cq_inflight=%u)", ch->cq_inflight);
+                "intent-log channel unregistered with SQ work in flight");
 
             if (i != last) {
                 il->channels[i] = il->channels[last];
@@ -1840,6 +1901,14 @@ diskfs_intent_log_thread_init(
     __atomic_store_n(&il->handoff_head, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&il->handoff_tail, 0, __ATOMIC_RELAXED);
 
+    /* Stage B: cross-thread apply ring (commit -> apply thread).  Sized like the
+     * hand-off ring (larger than the log can hold) so it cannot overflow. */
+    il->apply_ring_size = il->handoff_ring_size;
+    il->apply_ring_mask = il->handoff_ring_mask;
+    il->apply_queue     = calloc(il->apply_ring_size, sizeof(*il->apply_queue));
+    __atomic_store_n(&il->apply_head, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&il->apply_tail, 0, __ATOMIC_RELAXED);
+
     diskfs_intent_log_metrics_init(il);
     diskfs_il_commit_metrics(il);
 
@@ -1964,6 +2033,40 @@ diskfs_il_push_thread_shutdown(
     }
     free(il->phash);
 } /* diskfs_il_push_thread_shutdown */
+
+
+void *
+diskfs_il_apply_thread_init(
+    struct evpl *evpl,
+    void        *private_data)
+{
+    struct diskfs_intent_log *il = private_data;
+
+    il->apply_evpl = evpl;
+    evpl_add_doorbell(evpl, &il->apply_doorbell, diskfs_il_apply_doorbell_cb);
+    __atomic_store_n(&il->apply_ready, 1, __ATOMIC_RELEASE);
+    return il;
+} /* diskfs_il_apply_thread_init */
+
+
+void
+diskfs_il_apply_thread_shutdown(
+    struct evpl *evpl,
+    void        *private_data)
+{
+    struct diskfs_intent_log *il = private_data;
+
+    /* The commit thread is gone, so no new ctxs are enqueued.  Apply every
+     * remaining record's deltas and ACK its txns, advancing applied_seq up to
+     * the final durable_seq -- so the push thread can finish trimming (its
+     * checkpoint frontier reads applied_seq) and the unmount checkpoint persists
+     * a complete free map. */
+    while (il->apply_head != __atomic_load_n(&il->apply_tail, __ATOMIC_ACQUIRE)) {
+        diskfs_il_apply_doorbell_cb(evpl, &il->apply_doorbell);
+        evpl_continue(evpl);
+    }
+    evpl_remove_doorbell(evpl, &il->apply_doorbell);
+} /* diskfs_il_apply_thread_shutdown */
 
 
 /*

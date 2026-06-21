@@ -1303,6 +1303,8 @@ diskfs_init(
     shared->intent_log.pending_head = NULL;
     shared->intent_log.rec_pool     = NULL;   /* Stage A: commit-hot-path recycle pools */
     shared->intent_log.ctx_pool     = NULL;
+    shared->intent_log.apply_ready  = 0;      /* Stage B: apply thread */
+    shared->intent_log.applied_seq  = 0;
     pthread_mutex_init(&shared->intent_log.registration_lock, NULL);
 
     /* Commit thread first: it allocates the cross-thread hand-off ring the
@@ -1312,6 +1314,18 @@ diskfs_init(
                                                    diskfs_intent_log_thread_shutdown,
                                                    &shared->intent_log);
     while (!__atomic_load_n(&shared->intent_log.ready, __ATOMIC_ACQUIRE)) {
+        /* spin briefly */
+    }
+
+    /* Apply thread next: it consumes the commit thread's durable records and
+     * applies their space-map deltas off the commit hot path.  The commit thread
+     * allocated the apply ring in its init above, so it exists before any
+     * record is produced into it. */
+    shared->intent_log.apply_thread = evpl_thread_create(NULL,
+                                                         diskfs_il_apply_thread_init,
+                                                         diskfs_il_apply_thread_shutdown,
+                                                         &shared->intent_log);
+    while (!__atomic_load_n(&shared->intent_log.apply_ready, __ATOMIC_ACQUIRE)) {
         /* spin briefly */
     }
 
@@ -1521,10 +1535,16 @@ diskfs_destroy(void *private_data)
      * otherwise abort writing to it. */
     __atomic_store_n(&shared->intent_log.commit_alive, 0, __ATOMIC_RELEASE);
     evpl_thread_destroy(shared->intent_log.thread);
+    /* Apply thread next: its shutdown drains the apply queue (applying every
+     * remaining record's deltas and advancing applied_seq to the final
+     * durable_seq) so the push thread can finish trimming -- its checkpoint
+     * frontier reads applied_seq -- and the unmount checkpoint below persists a
+     * complete free map. */
+    evpl_thread_destroy(shared->intent_log.apply_thread);
     evpl_thread_destroy(shared->intent_log.push_thread);
 
-    /* Stage A: drain the commit-thread record/ctx recycle pools (both IL
-     * threads are stopped now, so the pools are quiescent). */
+    /* Stage A: drain the commit-thread record/ctx recycle pools (all IL threads
+     * are stopped now, so the pools are quiescent). */
     {
         struct diskfs_il_record *rec;
         struct diskfs_redo_ctx  *ctx;
@@ -1545,6 +1565,7 @@ diskfs_destroy(void *private_data)
 
     pthread_mutex_destroy(&shared->intent_log.registration_lock);
     free(shared->intent_log.handoff);
+    free(shared->intent_log.apply_queue);   /* Stage B */
     free(shared->intent_log.metrics.block_io_device_ops);
     free(shared->intent_log.metrics.block_io_device_bytes);
 
@@ -1558,10 +1579,11 @@ diskfs_destroy(void *private_data)
     {
         struct diskfs_mount_io *mio  = diskfs_mount_io_open(shared);
         struct sm_io            smio = diskfs_mount_sm_io(mio);
-        /* Every record drained, so durable_seq is the final seq; stamp every
-         * checkpoint with it.  The redo ring is fully trimmed, so the next clean
-         * mount loads these snapshots with no deltas left to replay. */
-        uint64_t                ckpt_seq = __atomic_load_n(&shared->intent_log.durable_seq,
+        /* The apply thread drained at teardown, so applied_seq == the final
+         * durable_seq; stamp every checkpoint with it.  The redo ring is fully
+         * trimmed, so the next clean mount loads these snapshots with no deltas
+         * left to replay. */
+        uint64_t                ckpt_seq = __atomic_load_n(&shared->intent_log.applied_seq,
                                                            __ATOMIC_ACQUIRE);
 
         if (space_map_persist(shared->space_map, &smio, ckpt_seq) != 0) {
