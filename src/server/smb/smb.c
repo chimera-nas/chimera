@@ -1324,6 +1324,43 @@ chimera_smb_server_handle_smb2(
                                &request->request_struct_size,
                                sizeof(request->request_struct_size));
 
+        /* Validate the request's MessageId / CreditCharge against
+         * Connection.CommandSequenceWindow (MS-SMB2 3.3.5.2.3).  Every command
+         * consumes max(CreditCharge, 1) MessageIds from the window; if the range
+         * is not currently granted-and-unconsumed -- a MessageId the client has
+         * already used, or one beyond the credits the server has granted (the
+         * model's UsedMid / UnavailableMid cases, and a multi-credit
+         * CreditCharge that exceeds the window's remaining width) -- the server
+         * SHOULD terminate the connection rather than process it.  SMB2_CANCEL is
+         * exempt: it reuses the MessageId of an in-flight request and does not
+         * consume a new sequence number (MS-SMB2 3.3.5.16). */
+        if (likely(request->smb2_hdr.command != SMB2_CANCEL)) {
+            /* The window consumes CreditCharge MessageIds only when
+             * Connection.SupportsMultiCredit is TRUE (dialect 2.1 / 3.x).  On
+             * SMB 2.0.2 the CreditCharge field is reserved and each request
+             * consumes exactly one sequence number regardless of its value
+             * (MS-SMB2 3.1.5.2 / 3.3.5.2.3); treating it otherwise would
+             * spuriously reject a valid 2.0.2 request whose header happens to
+             * carry a non-zero CreditCharge. */
+            uint32_t charge =
+                (conn->dialect >= SMB2_DIALECT_2_1 &&
+                 request->smb2_hdr.credit_charge) ?
+                request->smb2_hdr.credit_charge : 1;
+
+            if (unlikely(chimera_smb_seq_window_consume(conn,
+                                                        request->smb2_hdr.message_id,
+                                                        charge) != 0)) {
+                chimera_smb_error(
+                    "SMB2 request MessageId %lu (CreditCharge %u) outside the "
+                    "command sequence window [%lu, %lu); closing connection",
+                    request->smb2_hdr.message_id, charge,
+                    conn->seq_low, conn->seq_high);
+                chimera_smb_request_free(thread, request);
+                evpl_close(evpl, conn->bind);
+                return;
+            }
+        }
+
         /* Validate the compound chain link before anything trusts it -- the
          * per-element cursor window, the signing payload length, and the skip to
          * the next element all derive from NextCommand.  When present it must be
@@ -1661,6 +1698,42 @@ chimera_smb_server_handle_smb2(
                 request->status = SMB2_STATUS_NOT_IMPLEMENTED;
                 rc              = 0;
         } /* switch */
+
+        /* MS-SMB2 3.3.5.2.5: when Connection.SupportsMultiCredit is TRUE (the
+         * negotiated dialect is 2.1 or a 3.x family member) the server MUST
+         * verify the request's CreditCharge against the payload size of the
+         * operation (here a READ or WRITE data length).  Compute the credits the
+         * operation actually requires -- one per 64 KiB started (3.1.5.2) -- and
+         * fail the request with STATUS_INVALID_PARAMETER if the client charged
+         * fewer: a CreditCharge of zero for a payload over 64 KiB, or a non-zero
+         * CreditCharge smaller than the calculated number.  A normal small
+         * operation needs one credit, so any CreditCharge >= 1 (or 0 for <= 64
+         * KiB) passes untouched. */
+        if (rc == 0 && conn->dialect >= SMB2_DIALECT_2_1 &&
+            (request->smb2_hdr.command == SMB2_READ ||
+             request->smb2_hdr.command == SMB2_WRITE)) {
+            uint32_t payload = request->smb2_hdr.command == SMB2_READ ?
+                request->read.length : request->write.length;
+            uint16_t charge        = request->smb2_hdr.credit_charge;
+            int      charge_failed = 0;
+
+            if (charge == 0) {
+                charge_failed = payload > 65536;
+            } else {
+                uint32_t need = payload ? (payload - 1) / 65536 + 1 : 1;
+
+                charge_failed = need > charge;
+            }
+
+            if (unlikely(charge_failed)) {
+                /* Fail the request itself (not the connection) -- the model and
+                 * MS-SMB2 expect the error reply, with the connection left up. */
+                request->status                              = SMB2_STATUS_INVALID_PARAMETER;
+                request->flags                              |= CHIMERA_SMB_REQUEST_FLAG_PARSE_FAILED;
+                compound->requests[compound->num_requests++] = request;
+                goto next_compound_request;
+            }
+        }
 
         compound->requests[compound->num_requests++] = request;
 
@@ -2357,6 +2430,14 @@ chimera_smb_server_accept(
     conn->requests_completed = 0;
     conn->async_outstanding  = 0;
     conn->credits_balance    = 0;
+    /* Connection.CommandSequenceWindow starts holding exactly MessageId 0 -- the
+     * one implicit credit a client may use for its first request (NEGOTIATE)
+     * before any credits are granted (MS-SMB2 3.3.1.1).  Each credit granted in a
+     * response extends the window (chimera_smb_grant_credits). */
+    conn->seq_low  = 0;
+    conn->seq_high = 1;
+    memset(conn->seq_bitmap, 0, sizeof(conn->seq_bitmap));
+    conn->seq_bitmap[0] = 1ULL;
 
     evpl_bind_get_local_address(bind, conn->local_addr, sizeof(conn->local_addr));
     evpl_bind_get_remote_address(bind, conn->remote_addr, sizeof(conn->remote_addr));

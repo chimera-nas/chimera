@@ -1111,6 +1111,16 @@ struct chimera_smb_notify_request;
 
 #define CHIMERA_SMB_RPC_MAX_HANDLES                 16
 
+/* Ceiling on the credit balance the server will let a single connection
+ * accumulate.  A response grants the credits the client asked for, but never so
+ * many that the client's balance would exceed this -- otherwise a client that
+ * keeps requesting more (smb2.credits async flood requests 1,2,3,...) would
+ * overflow its 16-bit credit window and fault the connection.  Matches Samba's
+ * default `smb2 max credits`; the credits.c tests require >= 8192 grantable.
+ * Defined here (ahead of struct chimera_smb_conn) because the connection's
+ * sequence-window bitmap is sized to it. */
+#define CHIMERA_SMB_MAX_CREDITS                     8192
+
 struct chimera_smb_conn {
     OM_uint32                          gss_major;
     OM_uint32                          gss_minor;
@@ -1247,6 +1257,20 @@ struct chimera_smb_conn {
      * that keeps requesting more (e.g. the smb2.credits async flood) cannot
      * overflow its 16-bit credit window.  See chimera_smb_grant_credits. */
     uint32_t                           credits_balance;
+    /* Connection.CommandSequenceWindow (MS-SMB2 3.3.1.1).  The set of MessageIds
+     * the server has granted credits for and the client has not yet consumed,
+     * tracked as a sliding bitmap based at seq_low: bit i set means MessageId
+     * (seq_low + i) is granted-and-unconsumed.  seq_high is one past the highest
+     * MessageId ever granted (every credit granted in a response extends it).
+     * Used by chimera_smb_seq_window_consume to reject a request whose
+     * MessageId range falls outside the window (already used, or never granted),
+     * which MS-SMB2 3.3.5.2.3 requires the server to terminate the connection
+     * for.  Capped at CHIMERA_SMB_MAX_CREDITS outstanding ids (the same ceiling
+     * credits_balance is clamped to), so the bitmap is fixed-size.  Only touched
+     * on the conn's owning SMB thread. */
+    uint64_t                           seq_low;
+    uint64_t                           seq_high;
+    uint64_t                           seq_bitmap[CHIMERA_SMB_MAX_CREDITS / 64];
     struct chimera_server_smb_thread  *thread;
     struct evpl_bind                  *bind;
     struct chimera_smb_conn           *prev;
@@ -1261,14 +1285,6 @@ struct chimera_smb_conn {
     char                               remote_addr[128];
 };
 
-/* Ceiling on the credit balance the server will let a single connection
- * accumulate.  A response grants the credits the client asked for, but never so
- * many that the client's balance would exceed this -- otherwise a client that
- * keeps requesting more (smb2.credits async flood requests 1,2,3,...) would
- * overflow its 16-bit credit window and fault the connection.  Matches Samba's
- * default `smb2 max credits`; the credits.c tests require >= 8192 grantable. */
-#define CHIMERA_SMB_MAX_CREDITS 8192
-
 /*
  * Compute the SMB2 CreditResponse for one response and update the connection's
  * running estimate of the client's credit balance.
@@ -1280,6 +1296,77 @@ struct chimera_smb_conn {
  * below CHIMERA_SMB_MAX_CREDITS, and never zero while the client holds none (so
  * the window cannot collapse).  Single-threaded on the conn's SMB thread.
  */
+/* Mark MessageId `mid` as granted-and-unconsumed in the connection's sequence
+ * window bitmap (see seq_bitmap above).  `mid` must be in [seq_low, seq_high). */
+static inline void
+chimera_smb_seq_window_set(
+    struct chimera_smb_conn *conn,
+    uint64_t                 mid)
+{
+    uint64_t off = mid - conn->seq_low;
+
+    conn->seq_bitmap[off >> 6] |= (1ULL << (off & 63));
+} /* chimera_smb_seq_window_set */
+
+/* Slide the sequence-window base forward over any leading consumed (cleared)
+ * bits, so the bitmap stays anchored at the lowest still-granted MessageId and
+ * the window width never exceeds the granted-credit ceiling. */
+static inline void
+chimera_smb_seq_window_slide(struct chimera_smb_conn *conn)
+{
+    while (conn->seq_low < conn->seq_high && !(conn->seq_bitmap[0] & 1ULL)) {
+        /* Lowest bit is clear (that MessageId was consumed) -- drop it by
+         * shifting the whole bitmap down one and advancing the base. */
+        for (int i = 0; i < CHIMERA_SMB_MAX_CREDITS / 64; i++) {
+            uint64_t next = (i + 1 < CHIMERA_SMB_MAX_CREDITS / 64) ?
+                conn->seq_bitmap[i + 1] : 0;
+
+            conn->seq_bitmap[i] = (conn->seq_bitmap[i] >> 1) | (next << 63);
+        }
+        conn->seq_low++;
+    }
+} /* chimera_smb_seq_window_slide */
+
+/*
+ * Validate and consume a request's MessageId range against the connection's
+ * sequence window (MS-SMB2 3.3.5.2.3 / 3.3.1.1).  `mid` is the request's
+ * MessageId and `charge` its effective CreditCharge (>= 1).  Returns 0 if the
+ * full range [mid, mid+charge) is currently granted-and-unconsumed (the bits are
+ * then cleared); returns -1 if any MessageId in the range is already consumed
+ * (below the window / cleared) or has never been granted (at or beyond
+ * seq_high) -- an invalid identifier the caller must terminate the connection
+ * for.  Single-threaded on the conn's owning SMB thread.
+ */
+static inline int
+chimera_smb_seq_window_consume(
+    struct chimera_smb_conn *conn,
+    uint64_t                 mid,
+    uint32_t                 charge)
+{
+    uint64_t m;
+
+    if (mid < conn->seq_low || mid + charge > conn->seq_high) {
+        return -1;
+    }
+
+    for (m = mid; m < mid + charge; m++) {
+        uint64_t off = m - conn->seq_low;
+
+        if (!(conn->seq_bitmap[off >> 6] & (1ULL << (off & 63)))) {
+            return -1;
+        }
+    }
+
+    for (m = mid; m < mid + charge; m++) {
+        uint64_t off = m - conn->seq_low;
+
+        conn->seq_bitmap[off >> 6] &= ~(1ULL << (off & 63));
+    }
+
+    chimera_smb_seq_window_slide(conn);
+    return 0;
+} /* chimera_smb_seq_window_consume */
+
 static inline uint16_t
 chimera_smb_grant_credits(
     struct chimera_smb_conn *conn,
@@ -1299,6 +1386,21 @@ chimera_smb_grant_credits(
     }
 
     conn->credits_balance = bal + grant;
+
+    /* Extend Connection.CommandSequenceWindow by the granted credits: each new
+     * credit makes one more MessageId (seq_high, seq_high+1, ...) valid for a
+     * future request (MS-SMB2 3.3.1.1).  Guarded against the bitmap width -- the
+     * balance clamp above keeps the unconsumed window within the ceiling, but
+     * slide first to reclaim space from anything already consumed. */
+    chimera_smb_seq_window_slide(conn);
+    for (uint32_t i = 0; i < grant; i++) {
+        if (conn->seq_high - conn->seq_low >= CHIMERA_SMB_MAX_CREDITS) {
+            break;
+        }
+        chimera_smb_seq_window_set(conn, conn->seq_high);
+        conn->seq_high++;
+    }
+
     return (uint16_t) grant;
 } /* chimera_smb_grant_credits */
 
