@@ -56,6 +56,16 @@ struct chimera_acl;
  * fresh, mask-gated, only when a protocol asks for them. */
 #define CHIMERA_VFS_ATTR_ACL                (1UL << 24)
 
+/* Boolean (va_named_attr): does this object currently have >=1 named stream
+ * (SMB ADS / NFSv4 named attribute)?  Backend-reported, never synthesized by a
+ * protocol server: an in-tree backend that owns its metadata answers accurately
+ * and cheaply from its own state (memfs: inode->streams != NULL); a backend
+ * where establishing the truth would cost an extra syscall may report a
+ * constant.  A backend sets this bit in va_set_mask only when it has populated
+ * va_named_attr (backends without named-stream support leave it unset, which the
+ * NFS marshaller treats as false). */
+#define CHIMERA_VFS_ATTR_NAMED_ATTR         (1UL << 25)
+
 #define CHIMERA_VFS_ATTR_MASK_STAT          ( \
             CHIMERA_VFS_ATTR_DEV | \
             CHIMERA_VFS_ATTR_INUM | \
@@ -167,6 +177,9 @@ struct chimera_vfs_attrs {
     uint64_t            va_fsid;
 
     uint32_t            va_dos_attributes;
+
+    /* CHIMERA_VFS_ATTR_NAMED_ATTR: 1 if the object has >=1 named stream. */
+    uint8_t             va_named_attr;
 
     /* Canonical ACL (CHIMERA_VFS_ATTR_ACL).  On getattr, the backend points
      * this at storage valid only for the duration of the completion callback

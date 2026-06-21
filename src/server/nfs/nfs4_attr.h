@@ -136,7 +136,7 @@ chimera_nfs4_attr2mask(
                         attr_mask |= CHIMERA_VFS_ATTR_MODE;
                         break;
                     case FATTR4_NAMED_ATTR:
-                        attr_mask |= CHIMERA_VFS_ATTR_MODE;
+                        attr_mask |= CHIMERA_VFS_ATTR_NAMED_ATTR;
                         break;
                     case FATTR4_FSID:
                         attr_mask |= CHIMERA_VFS_ATTR_FSID;
@@ -389,7 +389,8 @@ chimera_nfs4_marshall_attrs(
     uint32_t                        pnfs_layout_type,
     int                             xattr_supported,
     int                             nfs4_delegations,
-    uint32_t                        lease_time_s)
+    uint32_t                        lease_time_s,
+    uint32_t                        type_override)
 {
     /* pnfs_layout_type is the single layouttype4 this file's backend supports
      * (LAYOUT4_FLEX_FILES 0x4 or LAYOUT4_BLOCK_VOLUME 0x3), or 0 when pNFS is
@@ -491,11 +492,16 @@ chimera_nfs4_marshall_attrs(
         }
 
         if (req_mask[0] & (1 << FATTR4_TYPE) &&
-            (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE)) {
+            ((attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) || type_override)) {
             rsp_mask[0]  |= (1 << FATTR4_TYPE);
             *num_rsp_mask = 1;
 
-            if (S_ISREG(attr->va_mode)) {
+            if (type_override) {
+                /* Named-attribute namespace: the synthetic attr directory
+                 * (NF4ATTRDIR) and its entries (NF4NAMEDATTR) carry a type the
+                 * underlying mode bits cannot express. */
+                chimera_nfs4_attr_append_uint32(&attrs, type_override);
+            } else if (S_ISREG(attr->va_mode)) {
                 chimera_nfs4_attr_append_uint32(&attrs, NF4REG);
             } else if (S_ISDIR(attr->va_mode)) {
                 chimera_nfs4_attr_append_uint32(&attrs, NF4DIR);
@@ -552,10 +558,16 @@ chimera_nfs4_marshall_attrs(
         }
 
         if (req_mask[0] & (1 << FATTR4_NAMED_ATTR)) {
+            /* Backend-reported (CHIMERA_VFS_ATTR_NAMED_ATTR): true iff the object
+             * currently has >=1 named stream (SMB ADS / NFSv4 named attribute).
+             * Backends without named-stream support leave the bit unset, which we
+             * report as false. */
             rsp_mask[0]  |= (1 << FATTR4_NAMED_ATTR);
             *num_rsp_mask = 1;
 
-            chimera_nfs4_attr_append_uint32(&attrs, 0);
+            chimera_nfs4_attr_append_uint32(&attrs,
+                                            (attr->va_set_mask & CHIMERA_VFS_ATTR_NAMED_ATTR) &&
+                                            attr->va_named_attr ? 1 : 0);
         }
 
         if ((req_mask[0] & (1 << FATTR4_FSID)) &&

@@ -1365,6 +1365,15 @@ memfs_map_attrs(
         attr->va_fsid      = shared->fsid;
     }
 
+    /* Named-stream presence (SMB ADS / NFSv4 named attributes).  memfs owns the
+     * stream list, so it answers accurately and for free: a regular file with at
+     * least one named stream reports true.  A named-stream view overrides this
+     * to false in memfs_map_attrs_fork (a stream has no sub-streams). */
+    if (attr->va_req_mask & CHIMERA_VFS_ATTR_NAMED_ATTR) {
+        attr->va_set_mask  |= CHIMERA_VFS_ATTR_NAMED_ATTR;
+        attr->va_named_attr = (S_ISREG(inode->mode) && inode->streams) ? 1 : 0;
+    }
+
     /* Opaque pNFS layout state, persisted verbatim for the NFS server. */
     if ((attr->va_req_mask & CHIMERA_VFS_ATTR_PNFS_LAYOUT) && inode->remote) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_PNFS_LAYOUT;
@@ -1415,6 +1424,11 @@ memfs_map_attrs_fork(
         attr->va_fh_len = memfs_encode_stream_fh(base_fh, inode->inum,
                                                  inode->gen, stream->id,
                                                  attr->va_fh);
+    }
+
+    /* A named stream is a leaf data fork; it has no named attributes of its own. */
+    if (attr->va_set_mask & CHIMERA_VFS_ATTR_NAMED_ATTR) {
+        attr->va_named_attr = 0;
     }
 } /* memfs_map_attrs_fork */
 
@@ -2676,12 +2690,54 @@ memfs_open_fh(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct memfs_inode *inode;
+    struct memfs_inode        *inode;
+    struct memfs_named_stream *stream;
+    struct memfs_stream_open  *so;
+    uint64_t                   inum;
+    uint32_t                   gen, stream_id = 0;
 
     inode = memfs_inode_get_fh(shared, request->fh, request->fh_len);
 
     if (!inode) {
         request->status = CHIMERA_VFS_ENOENT;
+        request->complete(request);
+        return;
+    }
+
+    /* A named-stream file handle carries a non-zero stream id appended after the
+     * base inum/gen (memfs_encode_stream_fh).  Resolve it to a pinned per-open
+     * stream descriptor and hand back a tagged vfs_private so subsequent data ops
+     * (read/write/getattr/setattr) act on the stream fork, not the base/default
+     * fork.  This is the path NFSv4 takes when a stream fh arrives via PUTFH;
+     * SMB instead always carries the tagged handle returned by open_stream. */
+    memfs_decode_stream_fh(request->fh, request->fh_len, &inum, &gen, &stream_id);
+
+    if (stream_id) {
+        stream = memfs_stream_find_by_id(inode, stream_id);
+
+        if (!stream) {
+            /* Stale stream fh: the stream was removed.  Ids are never reused, so
+             * this resolves to nothing rather than the wrong fork. */
+            pthread_mutex_unlock(&inode->lock);
+            request->status = CHIMERA_VFS_ENOENT;
+            request->complete(request);
+            return;
+        }
+
+        stream->refcnt++;
+        inode->refcnt++;
+
+        so                  = malloc(sizeof(*so));
+        so->inode           = inode;
+        so->stream          = stream;
+        so->open_next       = inode->stream_opens;
+        inode->stream_opens = so;
+
+        pthread_mutex_unlock(&inode->lock);
+
+        request->open_fh.r_vfs_private = (uint64_t) (uintptr_t) so | 1ULL;
+        request->open_fh.r_stream      = 1;
+        request->status                = CHIMERA_VFS_OK;
         request->complete(request);
         return;
     }
@@ -5282,11 +5338,14 @@ memfs_list_streams(
 {
     struct memfs_inode             *inode;
     struct memfs_named_stream      *stream;
-    uint8_t                        *buf    = request->list_streams.buffer;
-    uint32_t                        max    = request->list_streams.max_bytes;
-    uint32_t                        offset = 0;
-    uint32_t                        count  = 0;
+    uint8_t                        *buf     = request->list_streams.buffer;
+    uint32_t                        max     = request->list_streams.max_bytes;
+    int                             want_fh = request->list_streams.want_fh;
+    uint32_t                        offset  = 0;
+    uint32_t                        count   = 0;
     struct chimera_vfs_stream_entry entry;
+    uint8_t                         fhbuf[CHIMERA_VFS_FH_SIZE + 16];
+    uint32_t                        fh_len;
     uint32_t                        rec;
 
     inode = memfs_inode_get_fh(shared, request->fh, request->fh_len);
@@ -5300,9 +5359,15 @@ memfs_list_streams(
     /* Default unnamed data fork ("::$DATA"), reported first with an empty name
      * so the SMB layer can format it as the default stream.  Only regular files
      * have a data fork -- a directory reports no streams (smb2.streams.dir
-     * expects an empty stream list on a directory). */
+     * expects an empty stream list on a directory).  When the caller requested
+     * handles (NFSv4 named-attr READDIR), the default fork carries the base fh
+     * and each named stream carries its own stream fh. */
     if (S_ISREG(inode->mode)) {
-        rec = sizeof(entry);
+        fh_len = want_fh ? request->fh_len : 0;
+        if (want_fh) {
+            memcpy(fhbuf, request->fh, request->fh_len);
+        }
+        rec = sizeof(entry) + fh_len;
         if (offset + rec > max) {
             pthread_mutex_unlock(&inode->lock);
             request->status = CHIMERA_VFS_ERANGE;
@@ -5312,14 +5377,22 @@ memfs_list_streams(
         entry.size     = inode->size;
         entry.alloc    = inode->space_used;
         entry.name_len = 0;
+        entry.fh_len   = fh_len;
         memcpy(buf + offset, &entry, sizeof(entry));
+        memcpy(buf + offset + sizeof(entry), fhbuf, fh_len);
         offset += rec;
         offset  = (offset + 7) & ~7u;
         count++;
     }
 
     for (stream = inode->streams; stream; stream = stream->next) {
-        rec = sizeof(entry) + stream->name_len;
+        if (want_fh) {
+            fh_len = memfs_encode_stream_fh(request->fh, inode->inum,
+                                            inode->gen, stream->id, fhbuf);
+        } else {
+            fh_len = 0;
+        }
+        rec = sizeof(entry) + stream->name_len + fh_len;
         if (offset + rec > max) {
             pthread_mutex_unlock(&inode->lock);
             request->status = CHIMERA_VFS_ERANGE;
@@ -5329,8 +5402,10 @@ memfs_list_streams(
         entry.size     = stream->size;
         entry.alloc    = stream->space_used;
         entry.name_len = stream->name_len;
+        entry.fh_len   = fh_len;
         memcpy(buf + offset, &entry, sizeof(entry));
         memcpy(buf + offset + sizeof(entry), stream->name, stream->name_len);
+        memcpy(buf + offset + sizeof(entry) + stream->name_len, fhbuf, fh_len);
         offset += rec;
         offset  = (offset + 7) & ~7u;
         count++;

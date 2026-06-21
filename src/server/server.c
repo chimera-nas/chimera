@@ -417,6 +417,15 @@ chimera_server_config_get_smb_named_streams(const struct chimera_server_config *
     return config->smb_named_streams;
 } /* chimera_server_config_get_smb_named_streams */
 
+/* Protocol-neutral view of the named-streams knob.  Named streams are one VFS
+* feature exposed by two protocols -- SMB alternate data streams and NFSv4 named
+* attributes -- so both gate on the same switch (originally named for SMB). */
+SYMBOL_EXPORT int
+chimera_server_config_get_named_streams(const struct chimera_server_config *config)
+{
+    return config->smb_named_streams;
+} /* chimera_server_config_get_named_streams */
+
 SYMBOL_EXPORT void
 chimera_server_config_set_smb_signing_required(
     struct chimera_server_config *config,

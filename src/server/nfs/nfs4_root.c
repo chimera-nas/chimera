@@ -166,7 +166,8 @@ nfs4_root_readdir_lookup_callback(
                                 0, /* pNFS not advertised on the pseudo-fs root */
                                 0, /* pseudo-fs root has no xattr-capable backend */
                                 0,
-                                ctx->lease_time_s);
+                                ctx->lease_time_s,
+                                0);
 } /* nfs4_root_readdir_lookup_callback */
 
 struct nfs4_root_readdir_itr_ctx {

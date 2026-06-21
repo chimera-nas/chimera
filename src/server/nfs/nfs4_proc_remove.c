@@ -6,12 +6,69 @@
 
 #include "nfs4_procs.h"
 #include "nfs4_status.h"
+#include "nfs4_named_attr.h"
 #include "server/server.h"
 #include "nfs_internal.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 #include "vfs/vfs_state.h"
 #include "vfs/vfs_pnfs.h"
+
+/* REMOVE of a name inside a named-attribute directory deletes the named stream
+ * of that name from the base file. */
+static void
+chimera_nfs4_remove_stream_complete(
+    enum chimera_vfs_error          error_code,
+    const struct chimera_vfs_attrs *pre_attr,
+    const struct chimera_vfs_attrs *post_attr,
+    void                           *private_data)
+{
+    struct nfs_request *req = private_data;
+    struct REMOVE4res  *res = &req->res_compound.resarray[req->index].opremove;
+
+    chimera_vfs_release(req->thread->vfs_thread, req->handle);
+    req->handle = NULL;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
+    /* change_info4 is non-atomic and best-effort here (mirrors the ordinary
+     * REMOVE path, which also leaves it zeroed). */
+    res->resok4.cinfo.atomic = 0;
+    res->resok4.cinfo.before = 0;
+    res->resok4.cinfo.after  = 0;
+
+    res->status = NFS4_OK;
+    chimera_nfs4_compound_complete(req, NFS4_OK);
+} /* chimera_nfs4_remove_stream_complete */
+
+static void
+chimera_nfs4_remove_attrdir_open_callback(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *handle,
+    void                           *private_data)
+{
+    struct nfs_request *req  = private_data;
+    struct REMOVE4args *args = &req->args_compound->argarray[req->index].opremove;
+    struct REMOVE4res  *res  = &req->res_compound.resarray[req->index].opremove;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
+    req->handle = handle;
+
+    chimera_vfs_remove_stream(req->thread->vfs_thread, &req->cred,
+                              handle,
+                              args->target.data, args->target.len,
+                              chimera_nfs4_remove_stream_complete,
+                              req);
+} /* chimera_nfs4_remove_attrdir_open_callback */
 
 /*
  * REMOVE.  When pNFS is enabled the target may be a flex-files file whose data
@@ -243,6 +300,21 @@ chimera_nfs4_remove(
 
     if (res->status != NFS4_OK) {
         chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
+    /* REMOVE inside a named-attribute directory: drop the named stream. */
+    if (chimera_nfs4_fh_is_attrdir(req->fh, req->fhlen)) {
+        const uint8_t *base;
+        int            base_len;
+
+        chimera_nfs4_attrdir_base(req->fh, req->fhlen, &base, &base_len);
+
+        chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+                            base, base_len,
+                            CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
+                            chimera_nfs4_remove_attrdir_open_callback,
+                            req);
         return;
     }
 

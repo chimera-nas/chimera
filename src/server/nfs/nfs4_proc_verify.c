@@ -102,7 +102,8 @@ chimera_nfs4_verify_complete(
                                                              req->fh, req->fhlen),
                                 chimera_server_config_get_nfs4_delegations(
                                     req->thread->shared->config),
-                                req->thread->shared->nfs_lease_time_s);
+                                req->thread->shared->nfs_lease_time_s,
+                                0);
 
     bool match = (num_out_mask == args->num_attrmask) &&
         (memcmp(out_mask, args->attrmask,

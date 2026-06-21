@@ -388,12 +388,17 @@ struct chimera_vfs_request_handle {
 #define CHIMERA_VFS_REQUEST_MAX_HANDLES 4
 
 /* One enumerated named stream, packed back-to-back in the list_streams reply
- * buffer.  `name_len` bytes of (un-terminated) stream name follow this header;
- * the next record begins at the following 8-byte-aligned offset. */
+ * buffer.  `name_len` bytes of (un-terminated) stream name follow this header,
+ * then `fh_len` bytes of stream file handle (only when the caller requested
+ * handles via want_fh -- otherwise fh_len is 0); the next record begins at the
+ * following 8-byte-aligned offset.  NFSv4 named-attribute READDIR needs each
+ * entry's fh (to derive fileid / answer FATTR4_FILEHANDLE); SMB stream info does
+ * not, so it omits them and keeps the compact name-only record. */
 struct chimera_vfs_stream_entry {
     uint64_t size;        /* stream end-of-file */
     uint64_t alloc;       /* stream allocation size */
     uint16_t name_len;    /* bytes of name that follow this struct */
+    uint16_t fh_len;      /* bytes of file handle following the name (0 if none) */
 };
 
 /*
@@ -741,6 +746,12 @@ struct chimera_vfs_request {
              * honored only by modules advertising CAP_ATOMIC_HANDLE_STATE. */
             struct chimera_vfs_handle_state *handle_state;
             uint64_t                         r_vfs_private;
+            /* Set by the backend when the resolved fh is a named stream (ADS /
+             * NFSv4 named attribute) rather than a base file: the open layer then
+             * tags the handle CHIMERA_VFS_OPEN_HANDLE_STREAM so the per-fh attr
+             * cache is bypassed (a stream's metadata is the base inode's and
+             * mutates out-of-band relative to the stream fh). */
+            uint8_t                          r_stream;
         } open_fh;
 
         struct {
@@ -1073,8 +1084,10 @@ struct chimera_vfs_request {
             uint64_t                        cookie;
             void                           *buffer;       /* caller-provided buffer */
             uint32_t                        max_bytes;
-            /* buffer is filled with packed chimera_vfs_stream_entry records,
-             * each followed by name_len bytes of (un-terminated) name. */
+            uint8_t                         want_fh;      /* emit each stream's fh */
+            /* buffer is filled with packed chimera_vfs_stream_entry records, each
+             * followed by name_len bytes of (un-terminated) name, then (when
+             * want_fh) fh_len bytes of stream file handle. */
             uint32_t                        r_len;        /* bytes written to buffer */
             uint32_t                        r_count;      /* number of streams written */
             uint32_t                        r_eof;

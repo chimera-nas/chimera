@@ -132,7 +132,7 @@ chimera_smb_emit_stream_info(
         }
 
         out += aligned;
-        in  += (sizeof(entry) + entry.name_len + 7) & ~7u;
+        in  += (sizeof(entry) + entry.name_len + entry.fh_len + 7) & ~7u;
     }
 
     return out;
@@ -202,6 +202,7 @@ chimera_smb_query_stream_info_open_callback(
         0,
         request->query_info.stream_records,
         sizeof(request->query_info.stream_records),
+        0, /* SMB FILE_STREAM_INFORMATION does not need per-stream handles */
         chimera_smb_query_stream_info_list_callback,
         request);
 } /* chimera_smb_query_stream_info_open_callback */

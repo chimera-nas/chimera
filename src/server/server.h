@@ -101,6 +101,10 @@ int
 chimera_server_config_get_smb_named_streams(
     const struct chimera_server_config *config);
 
+int
+chimera_server_config_get_named_streams(
+    const struct chimera_server_config *config);
+
 void
 chimera_server_config_set_smb_signing_required(
     struct chimera_server_config *config,

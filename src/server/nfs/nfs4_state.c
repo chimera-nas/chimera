@@ -1120,6 +1120,13 @@ open_state_cleanup(
         state->share_file_state = NULL;
     }
 
+    /* Drop the base-file stream holder taken for a named-attribute open. */
+    if (vfs_state && state->base_stream_file_state) {
+        chimera_vfs_state_stream_holder_dec(state->base_stream_file_state);
+        chimera_vfs_state_put(vfs_state, state->base_stream_file_state);
+        state->base_stream_file_state = NULL;
+    }
+
     if (state->handle && vfs_thread) {
         chimera_vfs_release(vfs_thread, state->handle);
         state->handle = NULL;

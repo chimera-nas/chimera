@@ -326,6 +326,12 @@ struct nfs_open_state {
     struct chimera_vfs_file_state  *share_file_state;
     bool                            share_lease_held;
 
+    /* For an NFSv4 named-attribute (stream) open: a stream_holder taken on the
+     * BASE file's vfs_state so a cross-protocol base delete-on-close defers while
+     * this stream is open (the NFSv4 analogue of the SMB ADS stream holder).
+     * NULL for an ordinary file open; released in open_state_cleanup. */
+    struct chimera_vfs_file_state  *base_stream_file_state;
+
     /* Lifetime: starts at 1 for the state's slot; each acquire bumps it.
      * destroy() flips `destroyed` and drops the +1.  When refcount reaches
      * zero AND destroyed is set, the handle is released and the struct

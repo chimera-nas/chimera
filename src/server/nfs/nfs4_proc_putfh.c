@@ -5,8 +5,40 @@
 #include "nfs4_procs.h"
 #include "nfs4_status.h"
 #include "nfs4_state.h"
+#include "nfs4_named_attr.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
+
+/* A synthetic named-attribute-directory handle (OPENATTR result): validate that
+ * the underlying base file still exists, then accept the *marked* handle as the
+ * current fh so GETFH/SAVEFH round-trip it back to the client unchanged.  The
+ * attr-dir-aware ops (READDIR/LOOKUP/OPEN/REMOVE/GETATTR) unwrap it on use. */
+static void
+chimera_nfs4_putfh_attrdir_complete(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *handle,
+    void                           *private_data)
+{
+    struct nfs_request *req  = private_data;
+    struct PUTFH4args  *args = &req->args_compound->argarray[req->index].opputfh;
+    struct PUTFH4res   *res  = &req->res_compound.resarray[req->index].opputfh;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        res->status = (error_code == CHIMERA_VFS_ENOENT ||
+                       error_code == CHIMERA_VFS_ESTALE) ?
+            NFS4ERR_STALE : chimera_nfs4_errno_to_nfsstat4(error_code);
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
+    chimera_vfs_release(req->thread->vfs_thread, handle);
+
+    memcpy(req->fh, args->object.data, args->object.len);
+    req->fhlen = args->object.len;
+
+    res->status = NFS4_OK;
+    chimera_nfs4_compound_complete(req, NFS4_OK);
+} /* chimera_nfs4_putfh_attrdir_complete */
 
 static bool
 chimera_nfs4_putfh_has_open_state(
@@ -113,6 +145,30 @@ chimera_nfs4_putfh(
 {
     struct PUTFH4args *args = &argop->opputfh;
     struct  PUTFH4res *res  = &resop->opputfh;
+
+    /* A named-attribute-directory handle is a base-file fh wrapped with a magic
+    * prefix; validate the base it wraps and keep the marked form as current. */
+    if (chimera_nfs4_fh_is_attrdir(args->object.data, args->object.len)) {
+        const uint8_t *base;
+        int            base_len;
+
+        chimera_nfs4_attrdir_base(args->object.data, args->object.len,
+                                  &base, &base_len);
+
+        if (base_len > NFS4_FHSIZE ||
+            !chimera_vfs_fh_is_plausible(thread->vfs_thread, base, base_len)) {
+            res->status = NFS4ERR_BADHANDLE;
+            chimera_nfs4_compound_complete(req, res->status);
+            return;
+        }
+
+        chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+                            base, base_len,
+                            CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
+                            chimera_nfs4_putfh_attrdir_complete,
+                            req);
+        return;
+    }
 
     /* RFC 7530 §16.20.5: a structurally invalid handle (wrong length, unknown
      * mount) is NFS4ERR_BADHANDLE. Existence of the target is not checked here

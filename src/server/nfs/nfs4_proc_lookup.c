@@ -4,8 +4,82 @@
 
 #include "nfs4_procs.h"
 #include "nfs4_status.h"
+#include "nfs4_named_attr.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
+
+/* LOOKUP of a name inside a named-attribute directory resolves to the named
+ * stream of that name on the base file.  open_stream (no-create) is the lightest
+ * way to obtain the stream's file handle; we then drop the transient handle and
+ * leave the stream fh as the current filehandle. */
+static void
+chimera_nfs4_lookup_attrdir_stream_complete(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *oh,
+    struct chimera_vfs_attrs       *attr,
+    void                           *private_data)
+{
+    struct nfs_request *req = private_data;
+    struct LOOKUP4res  *res = &req->res_compound.resarray[req->index].oplookup;
+
+    /* Release the base handle opened to reach the stream. */
+    chimera_vfs_release(req->thread->vfs_thread, req->handle);
+    req->handle = NULL;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
+    if (!(attr->va_set_mask & CHIMERA_VFS_ATTR_FH)) {
+        res->status = NFS4ERR_SERVERFAULT;
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
+    memcpy(req->fh, attr->va_fh, attr->va_fh_len);
+    req->fhlen = attr->va_fh_len;
+
+    /* The stream open handle is transient -- the current fh is stateless until a
+     * subsequent OPEN.  Release it. */
+    if (oh) {
+        chimera_vfs_release(req->thread->vfs_thread, oh);
+    }
+
+    res->status = NFS4_OK;
+    chimera_nfs4_compound_complete(req, NFS4_OK);
+} /* chimera_nfs4_lookup_attrdir_stream_complete */
+
+static void
+chimera_nfs4_lookup_attrdir_open_callback(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *handle,
+    void                           *private_data)
+{
+    struct nfs_request *req  = private_data;
+    struct LOOKUP4args *args = &req->args_compound->argarray[req->index].oplookup;
+    struct LOOKUP4res  *res  = &req->res_compound.resarray[req->index].oplookup;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
+    req->handle = handle;
+
+    chimera_vfs_open_stream(req->thread->vfs_thread, &req->cred,
+                            handle,
+                            args->objname.data,
+                            args->objname.len,
+                            0, /* no create: a plain lookup */
+                            NULL,
+                            0,
+                            chimera_nfs4_lookup_attrdir_stream_complete,
+                            req);
+} /* chimera_nfs4_lookup_attrdir_open_callback */
+
 static void
 chimera_nfs4_lookup_complete(
     enum chimera_vfs_error    error_code,
@@ -86,6 +160,22 @@ chimera_nfs4_lookup(
 
     if (fh_is_nfs4_root(req->fh, req->fhlen)) {
         nfs4_root_lookup(thread, req);
+        return;
+    }
+
+    /* LOOKUP inside a named-attribute directory: open the base file and resolve
+     * the named stream of this name. */
+    if (chimera_nfs4_fh_is_attrdir(req->fh, req->fhlen)) {
+        const uint8_t *base;
+        int            base_len;
+
+        chimera_nfs4_attrdir_base(req->fh, req->fhlen, &base, &base_len);
+
+        chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+                            base, base_len,
+                            CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
+                            chimera_nfs4_lookup_attrdir_open_callback,
+                            req);
         return;
     }
 

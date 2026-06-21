@@ -5,6 +5,7 @@
 #include "nfs4_procs.h"
 #include "nfs4_status.h"
 #include "nfs4_attr.h"
+#include "nfs4_named_attr.h"
 #include "nfs4_session.h"
 #include "nfs4_state.h"
 #include "nfs4_callback.h"
@@ -81,6 +82,16 @@ chimera_nfs4_getattr_finish(
                                        req->fh,
                                        req->fhlen);
 
+    /* The synthetic named-attribute directory reports NF4ATTRDIR (invisible in
+     * the underlying mode bits).  The named-attribute *files* themselves are
+     * plain data forks and report NF4REG, matching how Solaris/Linux clients
+     * (and SMB ADS) treat them -- NF4NAMEDATTR is avoided as some clients
+     * mishandle it. */
+    uint32_t type_override = 0;
+    if (chimera_nfs4_fh_is_attrdir(req->fh, req->fhlen)) {
+        type_override = NF4ATTRDIR;
+    }
+
     chimera_nfs4_marshall_attrs(&marshall_attr,
                                 args->num_attr_request,
                                 args->attr_request,
@@ -98,7 +109,8 @@ chimera_nfs4_getattr_finish(
                                                              req->fh, req->fhlen),
                                 chimera_server_config_get_nfs4_delegations(
                                     req->thread->shared->config),
-                                req->thread->shared->nfs_lease_time_s);
+                                req->thread->shared->nfs_lease_time_s,
+                                type_override);
 
     if (req->handle) {
         chimera_vfs_release(req->thread->vfs_thread, req->handle);
@@ -205,6 +217,61 @@ chimera_nfs4_getattr_open_callback(
     }
 } /* chimera_nfs4_getattr_open_callback */
 
+/* A named-attribute directory is synthetic: its attributes are the base file's
+ * owner/timestamps presented as a directory.  Override mode/type/nlink so the
+ * object reads back as NF4ATTRDIR, then run the normal marshalling path (which
+ * derives the NF4ATTRDIR type override from req->fh). */
+static void
+chimera_nfs4_getattr_attrdir_complete(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct nfs_request *req = private_data;
+    struct GETATTR4res *res = &req->res_compound.resarray[req->index].opgetattr;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        if (req->handle) {
+            chimera_vfs_release(req->thread->vfs_thread, req->handle);
+            req->handle = NULL;
+        }
+        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
+    attr->va_mode      = S_IFDIR | 0755;
+    attr->va_nlink     = 2;
+    attr->va_size      = 0;
+    attr->va_set_mask |= CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_NLINK;
+
+    chimera_nfs4_getattr_finish(req, attr);
+} /* chimera_nfs4_getattr_attrdir_complete */
+
+static void
+chimera_nfs4_getattr_attrdir_open_callback(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *handle,
+    void                           *private_data)
+{
+    struct nfs_request  *req  = private_data;
+    struct GETATTR4args *args = &req->args_compound->argarray[req->index].opgetattr;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_nfs4_compound_complete(req, chimera_nfs4_errno_to_nfsstat4(error_code));
+        return;
+    }
+
+    req->handle = handle;
+
+    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred,
+                        handle,
+                        chimera_nfs4_attr2mask(args->attr_request,
+                                               args->num_attr_request),
+                        chimera_nfs4_getattr_attrdir_complete,
+                        req);
+} /* chimera_nfs4_getattr_attrdir_open_callback */
+
 void
 chimera_nfs4_getattr(
     struct chimera_server_nfs_thread *thread,
@@ -225,6 +292,22 @@ chimera_nfs4_getattr(
                                                         args->attr_request);
     if (res->status != NFS4_OK) {
         chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
+    /* GETATTR on a synthetic named-attribute directory: stat the base file it
+     * wraps, then present it as a directory. */
+    if (chimera_nfs4_fh_is_attrdir(req->fh, req->fhlen)) {
+        const uint8_t *base;
+        int            base_len;
+
+        chimera_nfs4_attrdir_base(req->fh, req->fhlen, &base, &base_len);
+
+        chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+                            base, base_len,
+                            CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
+                            chimera_nfs4_getattr_attrdir_open_callback,
+                            req);
         return;
     }
 

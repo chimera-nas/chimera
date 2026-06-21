@@ -9,6 +9,7 @@
 #include "nfs4_attr.h"
 #include "nfs4_state.h"
 #include "nfs4_callback.h"
+#include "nfs4_named_attr.h"
 #include "server/server.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
@@ -303,6 +304,8 @@ chimera_nfs4_open_install_state(
     struct nfs_request             *req,
     struct chimera_vfs_open_handle *handle,
     const struct chimera_vfs_attrs *attr,
+    const uint8_t                  *base_fh,
+    int                             base_fh_len,
     struct stateid4                *out_stateid,
     uint32_t                       *out_rflags)
 {
@@ -406,6 +409,23 @@ chimera_nfs4_open_install_state(
                                    &req->thread->shared->nfs4_state_table,
                                    req->thread->vfs_thread);
             return share_status;
+        }
+
+        /* Named-attribute (stream) open: take a stream holder on the BASE file so
+         * a cross-protocol base delete-on-close defers while this stream is open,
+         * unifying delete-on-close with SMB ADS (smb_proc_close checks
+         * stream_holders).  Released in open_state_cleanup. */
+        if (base_fh) {
+            struct chimera_vfs_state      *vfs_state = req->thread->vfs->vfs_state;
+            struct chimera_vfs_file_state *base_fs;
+
+            base_fs = chimera_vfs_state_get(vfs_state, base_fh, base_fh_len,
+                                            chimera_vfs_hash(base_fh, base_fh_len),
+                                            true);
+            if (base_fs) {
+                chimera_vfs_state_stream_holder_inc(base_fs);
+                new_state->base_stream_file_state = base_fs;
+            }
         }
     }
 
@@ -536,6 +556,7 @@ chimera_nfs4_open_exclusive_verify(
         req->fhlen = handle->fh_len;
 
         status = chimera_nfs4_open_install_state(req, handle, attr,
+                                                 NULL, 0,
                                                  &res->resok4.stateid,
                                                  &install_rflags);
         if (status != NFS4_OK) {
@@ -628,6 +649,7 @@ chimera_nfs4_open_at_complete(
         req->fhlen = handle->fh_len;
 
         status = chimera_nfs4_open_install_state(req, handle, attr,
+                                                 NULL, 0,
                                                  &res->resok4.stateid,
                                                  &install_rflags);
         if (status != NFS4_OK) {
@@ -813,6 +835,7 @@ chimera_nfs4_open_claim_fh_complete(
         lock_caps = handle->vfs_module->capabilities;
 
         status = chimera_nfs4_open_install_state(req, handle, NULL,
+                                                 NULL, 0,
                                                  &res->resok4.stateid,
                                                  &install_rflags);
         if (status != NFS4_OK) {
@@ -1141,6 +1164,114 @@ chimera_nfs4_open_parent_complete(
 
 } /* chimera_nfs4_open_complete */
 
+/*
+ * OPEN of a named attribute (CLAIM_NULL with the current fh being a synthetic
+ * named-attribute directory): create/open the named stream of that name on the
+ * base file and install ordinary NFSv4 open state keyed on the stream fh.  No
+ * delegation is offered for named attributes.
+ */
+static void
+chimera_nfs4_open_attrdir_stream_complete(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *oh,
+    struct chimera_vfs_attrs       *attr,
+    void                           *private_data)
+{
+    struct nfs_request *req = private_data;
+    struct OPEN4res    *res = &req->res_compound.resarray[req->index].opopen;
+    uint8_t             base_fh[NFS4_FHSIZE];
+    int                 base_fh_len;
+    const uint8_t      *base;
+
+    /* Release the base-file handle opened to reach the stream. */
+    chimera_vfs_release(req->thread->vfs_thread, req->handle);
+    req->handle = NULL;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
+        chimera_nfs4_open_complete(req, res->status);
+        return;
+    }
+
+    /* Capture the base fh (for the stream holder) before req->fh is overwritten
+     * with the stream fh. */
+    chimera_nfs4_attrdir_base(req->fh, req->fhlen, &base, &base_fh_len);
+    memcpy(base_fh, base, base_fh_len);
+
+    {
+        uint32_t lock_caps      = oh->vfs_module->capabilities;
+        uint32_t install_rflags = 0;
+        nfsstat4 status;
+
+        /* Capture the stream fh before install_state may release the handle. */
+        memcpy(req->fh, oh->fh, oh->fh_len);
+        req->fhlen = oh->fh_len;
+
+        status = chimera_nfs4_open_install_state(req, oh, attr,
+                                                 base_fh, base_fh_len,
+                                                 &res->resok4.stateid,
+                                                 &install_rflags);
+        if (status != NFS4_OK) {
+            res->status = status;
+            chimera_nfs4_open_complete(req, status);
+            return;
+        }
+
+        res->status              = NFS4_OK;
+        res->resok4.cinfo.atomic = 0;
+        res->resok4.cinfo.before = 0;
+        res->resok4.cinfo.after  = 0;
+        res->resok4.rflags       = install_rflags |
+            ((lock_caps & CHIMERA_VFS_CAP_FS_LOCK) ?
+             OPEN4_RESULT_LOCKTYPE_POSIX : 0);
+        res->resok4.num_attrset = 0;
+    }
+
+    /* Named attributes are never delegated. */
+    res->resok4.delegation.delegation_type = OPEN_DELEGATE_NONE;
+    chimera_nfs4_open_complete(req, NFS4_OK);
+} /* chimera_nfs4_open_attrdir_stream_complete */
+
+static void
+chimera_nfs4_open_attrdir_base_open_callback(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *handle,
+    void                           *private_data)
+{
+    struct nfs_request *req   = private_data;
+    struct OPEN4args   *args  = &req->args_compound->argarray[req->index].opopen;
+    struct OPEN4res    *res   = &req->res_compound.resarray[req->index].opopen;
+    uint32_t            flags = 0;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
+        chimera_nfs4_open_complete(req, res->status);
+        return;
+    }
+
+    req->handle = handle;
+
+    if (args->openhow.opentype == OPEN4_CREATE) {
+        flags |= CHIMERA_VFS_OPEN_CREATE;
+        if (args->openhow.how.mode == GUARDED4 ||
+            args->openhow.how.mode == EXCLUSIVE4 ||
+            args->openhow.how.mode == EXCLUSIVE4_1) {
+            flags |= CHIMERA_VFS_OPEN_EXCLUSIVE;
+        }
+    }
+
+    /* set_attr is NULL: a named-stream open must not stamp the base file's
+    * mode/owner (memfs applies open_stream set_attr to the base inode). */
+    chimera_vfs_open_stream(req->thread->vfs_thread, &req->cred,
+                            handle,
+                            args->claim.file.data, args->claim.file.len,
+                            flags,
+                            NULL,
+                            CHIMERA_VFS_ATTR_MASK_STAT,
+                            chimera_nfs4_open_attrdir_stream_complete,
+                            req);
+} /* chimera_nfs4_open_attrdir_base_open_callback */
+
 void
 chimera_nfs4_open(
     struct chimera_server_nfs_thread *thread,
@@ -1271,6 +1402,29 @@ chimera_nfs4_open(
             chimera_nfs4_open_complete(req, res->status);
             return;
         }
+    }
+
+    /* OPEN of a named attribute: the current fh is a synthetic named-attribute
+     * directory and the claim names the attribute.  Only CLAIM_NULL is defined
+     * inside a named-attr directory. */
+    if (chimera_nfs4_fh_is_attrdir(req->fh, req->fhlen)) {
+        const uint8_t *base;
+        int            base_len;
+
+        if (args->claim.claim != CLAIM_NULL) {
+            res->status = NFS4ERR_NOTSUPP;
+            chimera_nfs4_open_complete(req, res->status);
+            return;
+        }
+
+        chimera_nfs4_attrdir_base(req->fh, req->fhlen, &base, &base_len);
+
+        chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+                            base, base_len,
+                            CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
+                            chimera_nfs4_open_attrdir_base_open_callback,
+                            req);
+        return;
     }
 
     chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
