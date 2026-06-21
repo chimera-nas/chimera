@@ -601,6 +601,14 @@ chimera_server_seed_symlinks(
     struct chimera_server *server,
     const char            *module_name);
 
+/* Seed the fixtures the WPTS MS-FSA suite expects to pre-exist on a memfs-backed
+ * share: a directory (ExistingFolder) and a regular file (ExistingFile.txt).  A
+ * test-harness aid.  Returns 0 on success, -1 otherwise. */
+int
+chimera_server_seed_fsa(
+    struct chimera_server *server,
+    const char            *module_name);
+
 int
 chimera_server_unmount(
     struct chimera_server *server,

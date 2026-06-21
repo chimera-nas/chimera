@@ -1850,6 +1850,156 @@ chimera_server_seed_symlinks(
     return ctx.status == CHIMERA_VFS_OK ? 0 : -1;
 } /* chimera_server_seed_symlinks */
 
+/* ---- test-only MS-FSA fixture seeding -------------------------------------
+ * The WPTS MS-FSA suite opens two fixtures it expects to pre-exist on the share:
+ *   <root>/ExistingFolder    (a directory)
+ *   <root>/ExistingFile.txt  (a regular file)
+ * Seed them at startup (memfs shares one tree across mounts), gated by env
+ * CHIMERA_SMB_SEED_FSA naming the backend module.  Best-effort; reuses the
+ * symlink seed's transient-mount/evpl_continue drive loop. */
+
+static void
+chimera_seed_fsa_fileopen_cb(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *oh,
+    struct chimera_vfs_attrs       *set_attr,
+    struct chimera_vfs_attrs       *attr,
+    struct chimera_vfs_attrs       *dir_pre_attr,
+    struct chimera_vfs_attrs       *dir_post_attr,
+    void                           *private_data)
+{
+    struct chimera_seed_ctx *ctx = private_data;
+
+    if (oh) {
+        chimera_vfs_release(ctx->thread, oh);
+    }
+    chimera_seed_finish(ctx, (error_code == CHIMERA_VFS_OK ||
+                              error_code == CHIMERA_VFS_EEXIST) ?
+                        CHIMERA_VFS_OK : error_code);
+} /* chimera_seed_fsa_fileopen_cb */
+
+static void
+chimera_seed_fsa_mkdir_cb(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *set_attr,
+    struct chimera_vfs_attrs *attr,
+    struct chimera_vfs_attrs *dir_pre_attr,
+    struct chimera_vfs_attrs *dir_post_attr,
+    void                     *private_data)
+{
+    struct chimera_seed_ctx *ctx = private_data;
+    struct chimera_vfs_attrs file_attr;
+
+    if (error_code != CHIMERA_VFS_OK && error_code != CHIMERA_VFS_EEXIST) {
+        chimera_seed_finish(ctx, error_code);
+        return;
+    }
+
+    memset(&file_attr, 0, sizeof(file_attr));
+    file_attr.va_set_mask = CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_UID |
+        CHIMERA_VFS_ATTR_GID;
+    file_attr.va_mode = S_IFREG | 0644;
+    file_attr.va_uid  = 0;
+    file_attr.va_gid  = 0;
+
+    chimera_vfs_open_at(ctx->thread, chimera_vfs_get_server_cred(), ctx->root_oh,
+                        "ExistingFile.txt", 16,
+                        CHIMERA_VFS_OPEN_CREATE, &file_attr,
+                        CHIMERA_VFS_ATTR_FH, 0, 0,
+                        chimera_seed_fsa_fileopen_cb, ctx);
+} /* chimera_seed_fsa_mkdir_cb */
+
+static void
+chimera_seed_fsa_rootopen_cb(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *oh,
+    void                           *private_data)
+{
+    struct chimera_seed_ctx *ctx = private_data;
+    struct chimera_vfs_attrs set_attr;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_seed_finish(ctx, error_code);
+        return;
+    }
+
+    ctx->root_oh = oh;
+
+    memset(&set_attr, 0, sizeof(set_attr));
+    set_attr.va_set_mask = CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_UID |
+        CHIMERA_VFS_ATTR_GID;
+    set_attr.va_mode = S_IFDIR | 0755;
+    set_attr.va_uid  = 0;
+    set_attr.va_gid  = 0;
+
+    chimera_vfs_mkdir_at(ctx->thread, chimera_vfs_get_server_cred(), ctx->root_oh,
+                         "ExistingFolder", 14, &set_attr,
+                         CHIMERA_VFS_ATTR_FH, 0, 0,
+                         chimera_seed_fsa_mkdir_cb, ctx);
+} /* chimera_seed_fsa_rootopen_cb */
+
+static void
+chimera_seed_fsa_mounted_cb(
+    struct chimera_vfs_thread *thread,
+    enum chimera_vfs_error     status,
+    void                      *private_data)
+{
+    struct chimera_seed_ctx  *ctx = private_data;
+    struct chimera_vfs_mount *m;
+
+    if (status != CHIMERA_VFS_OK) {
+        ctx->status = status;
+        ctx->done   = 1;
+        return;
+    }
+
+    m = chimera_vfs_mount_table_find_by_path(ctx->vfs->mount_table,
+                                             CHIMERA_SEED_TMP_NAME,
+                                             strlen(CHIMERA_SEED_TMP_NAME));
+    if (!m) {
+        chimera_seed_finish(ctx, CHIMERA_VFS_EIO);
+        return;
+    }
+
+    chimera_vfs_open_fh(thread, chimera_vfs_get_server_cred(),
+                        m->root_fh, m->root_fh_len,
+                        CHIMERA_VFS_OPEN_DIRECTORY | CHIMERA_VFS_OPEN_PATH,
+                        chimera_seed_fsa_rootopen_cb, ctx);
+} /* chimera_seed_fsa_mounted_cb */
+
+SYMBOL_EXPORT int
+chimera_server_seed_fsa(
+    struct chimera_server *server,
+    const char            *module_name)
+{
+    struct evpl            *evpl;
+    struct chimera_seed_ctx ctx;
+
+    if (!module_name) {
+        return -1;
+    }
+
+    memset(&ctx, 0, sizeof(ctx));
+
+    evpl       = evpl_create(NULL);
+    ctx.vfs    = server->vfs;
+    ctx.thread = chimera_vfs_thread_init(evpl, server->vfs);
+    ctx.status = CHIMERA_VFS_OK;
+
+    chimera_vfs_mount(ctx.thread, chimera_vfs_get_server_cred(),
+                      CHIMERA_SEED_TMP_NAME, module_name, "/", NULL,
+                      chimera_seed_fsa_mounted_cb, &ctx);
+
+    while (!ctx.done) {
+        evpl_continue(evpl);
+    }
+
+    chimera_vfs_thread_destroy(ctx.thread);
+    evpl_destroy(evpl);
+
+    return ctx.status == CHIMERA_VFS_OK ? 0 : -1;
+} /* chimera_server_seed_fsa */
+
 static void
 chimera_server_umount_callback(
     struct chimera_vfs_thread *thread,

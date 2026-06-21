@@ -45,6 +45,17 @@ TEST_FILTER="$1"; shift || true
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WPTS_PTFCONFIG_DIR="${WPTS_PTFCONFIG_DIR:-${SCRIPT_DIR}/../src/server/smb/tests/wpts}"
 
+# Which WPTS suite to drive.  Defaults to MS-SMB2 (the original behavior); set
+# WPTS_SUITE=MS-FSA to run the File System Algorithms suite against the same
+# daemon.  The suite DLL, its deployment ptfconfig, and the TRX name follow.
+WPTS_SUITE="${WPTS_SUITE:-MS-SMB2}"
+case "$WPTS_SUITE" in
+    MS-SMB2) WPTS_SUITE_DLL="MS-SMB2_ServerTestSuite.dll"; WPTS_TRX="SMB2TestResult.trx" ;;
+    MS-FSA)  WPTS_SUITE_DLL="MS-FSA_ServerTestSuite.dll";  WPTS_TRX="FSATestResult.trx" ;;
+    *) echo "unknown WPTS_SUITE: $WPTS_SUITE" >&2; exit 2 ;;
+esac
+WPTS_SUITE_PTFCONFIG="${WPTS_SUITE}_ServerTestSuite.deployment.ptfconfig"
+
 SUT_IP="10.0.0.1"
 # Second SUT IP for SMB3 multichannel (a redundant "NIC"). Only wired up when
 # CHIMERA_SMB_MULTICHANNEL=1; the WPTS MultipleChannel cases establish the
@@ -255,6 +266,12 @@ if [ "${CHIMERA_SMB_SYMLINK:-0}" = "1" ]; then
     export CHIMERA_SMB_SEED_SYMLINKS="$BACKEND"
 fi
 
+# The MS-FSA suite opens fixtures (ExistingFolder + ExistingFile.txt) it expects
+# to pre-exist on the share; have the daemon seed them at startup.
+if [ "$WPTS_SUITE" = "MS-FSA" ]; then
+    export CHIMERA_SMB_SEED_FSA="$BACKEND"
+fi
+
 # Start the chimera daemon inside the netns
 ip netns exec "${NETNS_NAME}" env \
     ASAN_OPTIONS="detect_leaks=0:handle_abort=2:print_cmdline=1" \
@@ -320,11 +337,11 @@ fi
 # scratch outputs carried over from the source so each session writes its own
 # (the '.\TestLog' dir name is a literal backslash on Linux).
 rm -f "${WPTS_STAGE_DIR}/CommonTestSuite.deployment.ptfconfig" \
-      "${WPTS_STAGE_DIR}/MS-SMB2_ServerTestSuite.deployment.ptfconfig" \
+      "${WPTS_STAGE_DIR}/${WPTS_SUITE_PTFCONFIG}" \
       "${WPTS_STAGE_DIR}/PTFApplicationLog.txt"
 rm -rf "${WPTS_STAGE_DIR}/TestResults" "${WPTS_STAGE_DIR}/.\\TestLog"
 cp "${WPTS_PTFCONFIG_DIR}/CommonTestSuite.deployment.ptfconfig" \
-   "${WPTS_PTFCONFIG_DIR}/MS-SMB2_ServerTestSuite.deployment.ptfconfig" \
+   "${WPTS_PTFCONFIG_DIR}/${WPTS_SUITE_PTFCONFIG}" \
    "${WPTS_STAGE_DIR}/"
 
 # When persistent handles are enabled, advertise the matching capability +
@@ -483,9 +500,9 @@ ip netns exec "${NETNS_NAME}" env \
     DOTNET_NOLOGO=1 \
     DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1 \
     HOME="${SESSION_DIR}" \
-    "$DOTNET" vstest "${WPTS_STAGE_DIR}/MS-SMB2_ServerTestSuite.dll" \
+    "$DOTNET" vstest "${WPTS_STAGE_DIR}/${WPTS_SUITE_DLL}" \
         "${FILTER_ARGS[@]}" \
-        --logger:"trx;LogFileName=SMB2TestResult.trx" \
+        --logger:"trx;LogFileName=${WPTS_TRX}" \
         --ResultsDirectory:"${RESULT_DIR}"
 VSTEST_RC=$?
 
@@ -495,7 +512,7 @@ echo "=== vstest exit code: ${VSTEST_RC} ==="
 # convert the TRX into a per-case JUnit (the smbtorture-style hook) when the
 # caller asks.  Non-fatal -- a conversion failure must not fail the run.
 if [ -n "${WPTS_JUNIT_FILE:-}" ] && [ -n "${WPTS_JUNIT_CONVERTER:-}" ]; then
-    python3 "${WPTS_JUNIT_CONVERTER}" "${RESULT_DIR}/SMB2TestResult.trx" \
+    python3 "${WPTS_JUNIT_CONVERTER}" "${RESULT_DIR}/${WPTS_TRX}" \
         "${WPTS_JUNIT_FILE}" 2>/dev/null \
         || echo "WPTS JUnit conversion failed (non-fatal)"
 fi

@@ -1021,6 +1021,19 @@ main(
         }
     }
 
+    /* Likewise seed the MS-FSA suite's fixtures (a directory + a regular file)
+     * when CHIMERA_SMB_SEED_FSA names the backend module. */
+    const char *seed_fsa_module = getenv("CHIMERA_SMB_SEED_FSA");
+
+    if (seed_fsa_module && seed_fsa_module[0]) {
+        if (chimera_server_seed_fsa(server, seed_fsa_module) != 0) {
+            chimera_server_error("Failed to seed FSA fixtures on module %s",
+                                 seed_fsa_module);
+        } else {
+            chimera_server_info("Seeded FSA fixtures on module %s", seed_fsa_module);
+        }
+    }
+
     exports = json_object_get(config, "exports");
 
     if (exports) {
