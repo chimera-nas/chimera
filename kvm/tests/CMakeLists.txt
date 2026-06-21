@@ -888,6 +888,21 @@ foreach(image_spec ${KVM_IMAGES})
                     PROPERTIES DISABLED TRUE)
             endif()
         endforeach()
+
+        # Multichannel: advertise two server NICs (SMB_MULTICHANNEL=1 adds a
+        # second tap IP + smb_multichannel config) and mount
+        # multichannel,max_channels=2.  Assert the second advertised address
+        # (10.0.0.4) reached the client's interface list -- proving chimera's
+        # FSCTL_QUERY_NETWORK_INTERFACE_INFO round-trip -- then run a bulk
+        # fsstress over the multichannel mount.  Server feature, so memfs only.
+        add_test(NAME chimera/kvm/${IMAGE_NAME}/smb/multichannel/fsstress_memfs
+            COMMAND env SMB_MULTICHANNEL=1
+                    bash ${SMB_WRAPPER}
+                    ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
+                    ${CHIMERA_BINARY} memfs 3.1.1 none
+                    "grep -q 10.0.0.4 /proc/fs/cifs/DebugData && mkdir -p /mnt/test && /opt/xfstests/ltp/fsstress -d /mnt/test -n 100 -p 1")
+        set_tests_properties(chimera/kvm/${IMAGE_NAME}/smb/multichannel/fsstress_memfs
+            PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2)
     endif()
 
 endforeach()
