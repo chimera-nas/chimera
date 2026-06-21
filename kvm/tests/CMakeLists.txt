@@ -115,10 +115,18 @@ set(CTHON_CMD_special "cd /opt/cthon04 && ./runtests -s -f /mnt/test")
 
 # SMB cthon04 commands set CIFS=yes so the test suite skips NFS-specific
 # sub-tests (e.g. nfsidem duplicate request check, NFS-style op_ren).
-# MNTOPTIONS is checked by runtests.wrk to detect SMB version.
-set(SMB_CTHON_CMD_basic   "cd /opt/cthon04 && CIFS=yes MNTOPTIONS=vers=2.1 ./runtests -b -f /mnt/test")
-set(SMB_CTHON_CMD_general "cd /opt/cthon04 && CIFS=yes MNTOPTIONS=vers=2.1 ./runtests -g -f /mnt/test")
-set(SMB_CTHON_CMD_special "cd /opt/cthon04 && CIFS=yes MNTOPTIONS=vers=2.1 ./runtests -s -f /mnt/test")
+# MNTOPTIONS is checked by runtests.wrk to detect the SMB version; it is filled
+# in per dialect at registration time (the runtests flag per category below).
+set(SMB_CTHON_FLAG_basic   -b)
+set(SMB_CTHON_FLAG_general -g)
+set(SMB_CTHON_FLAG_special -s)
+
+# SMB dialect matrix.  The kernel cifs client mounts with vers=<dialect> and the
+# server's dialect floor is set to match (see kvm_smb_test_wrapper.sh).  The full
+# backend x dialect cross is expensive, so only the two broadest suites (cthon
+# "general" + xfstests fsstress/fsx) run on every dialect; the narrower suites
+# run on the newest dialect (3.1.1) only.  cairn runs at 3.1.1 only throughout.
+set(SMB_DIALECTS 2.0.2 2.1 3.0 3.0.2 3.1.1)
 
 # pNFS (NFSv4.1 file layout) workloads.  These run against an MDS + a separate
 # memfs data server.  The MDS holds no data for pNFS-backed files (it returns
@@ -667,60 +675,76 @@ foreach(image_spec ${KVM_IMAGES})
         endforeach()
     endforeach()
 
-    # SMB cthon04 tests
+    # SMB cthon04 tests, fanned over the dialect matrix (see SMB_DIALECTS).
     foreach(category ${CTHON_CATEGORIES})
-        foreach(backend ${KVM_BACKENDS})
-            add_test(NAME chimera/kvm/${IMAGE_NAME}/smb/cthon/${category}_${backend}
-                COMMAND bash ${SMB_WRAPPER}
-                        ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
-                        ${CHIMERA_BINARY} ${backend}
-                        "${SMB_CTHON_CMD_${category}}")
-            set_tests_properties(chimera/kvm/${IMAGE_NAME}/smb/cthon/${category}_${backend}
-                PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2)
+        # "general" exercises every dialect; basic/special run on 3.1.1 only.
+        if(category STREQUAL "general")
+            set(_smb_cthon_dialects ${SMB_DIALECTS})
+        else()
+            set(_smb_cthon_dialects 3.1.1)
+        endif()
+        foreach(dialect ${_smb_cthon_dialects})
+            foreach(backend ${KVM_BACKENDS})
+                add_test(NAME chimera/kvm/${IMAGE_NAME}/smb/${dialect}/cthon/${category}_${backend}
+                    COMMAND bash ${SMB_WRAPPER}
+                            ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
+                            ${CHIMERA_BINARY} ${backend} ${dialect} none
+                            "cd /opt/cthon04 && CIFS=yes MNTOPTIONS=vers=${dialect} ./runtests ${SMB_CTHON_FLAG_${category}} -f /mnt/test")
+                set_tests_properties(chimera/kvm/${IMAGE_NAME}/smb/${dialect}/cthon/${category}_${backend}
+                    PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2)
+            endforeach()
         endforeach()
     endforeach()
 
     if(CAIRN_ENABLED)
         foreach(category ${CTHON_CATEGORIES})
-            add_test(NAME chimera/kvm/${IMAGE_NAME}/smb/cthon/${category}_cairn
+            add_test(NAME chimera/kvm/${IMAGE_NAME}/smb/3.1.1/cthon/${category}_cairn
                 COMMAND bash ${SMB_WRAPPER}
                         ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
-                        ${CHIMERA_BINARY} cairn
-                        "${SMB_CTHON_CMD_${category}}")
+                        ${CHIMERA_BINARY} cairn 3.1.1 none
+                        "cd /opt/cthon04 && CIFS=yes MNTOPTIONS=vers=3.1.1 ./runtests ${SMB_CTHON_FLAG_${category}} -f /mnt/test")
             # cairn's lock-key contention can push the SMB cthon run past the CI
             # default `ctest --timeout 300` under parallel load, so it flakes
             # (fails once, passes on rerun -- tracker #733).  Give it headroom
             # like the other contention-bound suites (cf. fsx, #805); a test
             # TIMEOUT property overrides the command-line default.
-            set_tests_properties(chimera/kvm/${IMAGE_NAME}/smb/cthon/${category}_cairn
+            set_tests_properties(chimera/kvm/${IMAGE_NAME}/smb/3.1.1/cthon/${category}_cairn
                 PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2 TIMEOUT 600)
         endforeach()
     endif()
 
-    # SMB xfstests
+    # SMB xfstests, fanned over the dialect matrix.  The two broad stress
+    # programs (fsstress, fsx) run on every dialect; the rest run on 3.1.1 only.
     foreach(prog ${XFSTESTS_PROGRAMS})
-        foreach(backend ${KVM_BACKENDS})
-            add_test(NAME chimera/kvm/${IMAGE_NAME}/smb/xfstests/${prog}_${backend}
-                COMMAND bash ${SMB_WRAPPER}
-                        ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
-                        ${CHIMERA_BINARY} ${backend}
-                        "${XFSTESTS_CMD_${prog}}")
-            set_tests_properties(chimera/kvm/${IMAGE_NAME}/smb/xfstests/${prog}_${backend}
-                PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2)
+        if(prog STREQUAL "fsstress" OR prog STREQUAL "fsx")
+            set(_smb_xfs_dialects ${SMB_DIALECTS})
+        else()
+            set(_smb_xfs_dialects 3.1.1)
+        endif()
+        foreach(dialect ${_smb_xfs_dialects})
+            foreach(backend ${KVM_BACKENDS})
+                add_test(NAME chimera/kvm/${IMAGE_NAME}/smb/${dialect}/xfstests/${prog}_${backend}
+                    COMMAND bash ${SMB_WRAPPER}
+                            ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
+                            ${CHIMERA_BINARY} ${backend} ${dialect} none
+                            "${XFSTESTS_CMD_${prog}}")
+                set_tests_properties(chimera/kvm/${IMAGE_NAME}/smb/${dialect}/xfstests/${prog}_${backend}
+                    PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2)
+            endforeach()
         endforeach()
     endforeach()
 
     if(CAIRN_ENABLED)
         foreach(prog ${XFSTESTS_PROGRAMS})
-            add_test(NAME chimera/kvm/${IMAGE_NAME}/smb/xfstests/${prog}_cairn
+            add_test(NAME chimera/kvm/${IMAGE_NAME}/smb/3.1.1/xfstests/${prog}_cairn
                 COMMAND bash ${SMB_WRAPPER}
                         ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
-                        ${CHIMERA_BINARY} cairn
+                        ${CHIMERA_BINARY} cairn 3.1.1 none
                         "${XFSTESTS_CMD_${prog}}")
             # Same cairn lock-key contention as the SMB cthon cairn block above:
             # under load these can exceed the 300s CI default (e.g. the recurring
             # rewinddir_cairn timeout, #733).  Give them matching headroom.
-            set_tests_properties(chimera/kvm/${IMAGE_NAME}/smb/xfstests/${prog}_cairn
+            set_tests_properties(chimera/kvm/${IMAGE_NAME}/smb/3.1.1/xfstests/${prog}_cairn
                 PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2 TIMEOUT 600)
         endforeach()
     endif()
