@@ -2176,11 +2176,17 @@ diskfs_close(
      * that drop must still happen under the inode write lock to serialize
      * against concurrent writes mutating the same reservation (see the cb).
      * The handle pinned the inode (refcnt), so it is resident; acquire its
-     * lock by the pinned pointer (no fh/cache lookup) and finish in the cb. */
+     * lock by the pinned pointer (no fh/cache lookup) and finish in the cb.
+     *
+     * Use WRITE_NOPIN: close holds the inode exclusively only to drop the
+     * volatile reservation and never reads or writes the on-disk dinode/b+tree.
+     * Plain WRITE would fault the inode's home block (finish_write_pin) just to
+     * abort it -- the dominant source of metadata read I/O, since close targets
+     * idle inodes whose home block has usually been recycled out of cache. */
     p->thread = thread;
     p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
 
-    diskfs_inode_acquire_pinned(thread, p->txn, inode, DISKFS_INODE_LOCK_WRITE,
+    diskfs_inode_acquire_pinned(thread, p->txn, inode, DISKFS_INODE_LOCK_WRITE_NOPIN,
                                 diskfs_close_inode_cb, request);
 } /* diskfs_close */
 

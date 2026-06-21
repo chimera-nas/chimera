@@ -511,6 +511,13 @@ struct diskfs_intent_log_metrics {
 enum diskfs_inode_lock_mode {
     DISKFS_INODE_LOCK_READ,
     DISKFS_INODE_LOCK_WRITE,
+    /* Exclusive like WRITE, but the grant does NOT pin/fault the inode's home
+     * block.  For ops that hold the inode exclusively only to mutate volatile,
+     * non-persisted state (e.g. close returning its data-space reservation) and
+     * never read or write the on-disk dinode/b+tree -- so they must not fault a
+     * metadata block they will not touch.  Treated as WRITE everywhere lock
+     * exclusivity is decided; skipped everywhere a block is pinned or flushed. */
+    DISKFS_INODE_LOCK_WRITE_NOPIN,
 };
 
 
@@ -2239,6 +2246,12 @@ diskfs_inode_finish_write_pin(
     diskfs_inode_cb_t     cb,
     void                 *private_data,
     int                   is_new);
+
+void
+diskfs_inode_link_root(
+    struct diskfs_txn   *txn,
+    struct diskfs_inode *inode,
+    struct diskfs_block *blk);
 
 void
 diskfs_txn_pin_inode_block(
@@ -4612,6 +4625,31 @@ diskfs_il_hdr_len(uint32_t nblocks, uint32_t num_deltas)
 } /* diskfs_il_hdr_len */
 
 
+/*
+ * True if the txn write-locks an inode that needs a durable dinode flush but
+ * has no home block yet -- and is NOT a deferred-mtime inode (mtime_dirty),
+ * which intentionally commits inline.  Since the grant no longer eager-faults
+ * the home block, a durable attr-only change (setattr, a FILE_SYNC mtime) has
+ * neither a dirty block nor a deferred mtime, so without this it would short-
+ * circuit to the inline path and never reach commit_finish's fault+flush.
+ */
+static inline int
+diskfs_txn_has_durable_inode(struct diskfs_txn *txn)
+{
+    int i;
+
+    for (i = 0; i < txn->num_inodes; i++) {
+        struct diskfs_inode *in = txn->inodes[i].inode;
+
+        if (txn->inodes[i].mode == DISKFS_INODE_LOCK_WRITE &&
+            !in->block && !in->mtime_dirty) {
+            return 1;
+        }
+    }
+    return 0;
+} /* diskfs_txn_has_durable_inode */
+
+
 static inline void
 diskfs_txn_commit(
     struct diskfs_txn     *txn,
@@ -4636,7 +4674,8 @@ diskfs_txn_commit(
      * whose data went straight to the device.  Unlock inline like a read txn;
      * routing it through the intent log would write a header-only record per
      * write and defeat the deferral. */
-    if (!txn->blocks && !txn->pending_frees) {
+    if (!txn->blocks && !txn->pending_frees &&
+        !diskfs_txn_has_durable_inode(txn)) {
         diskfs_txn_unlock_all(txn);
         cb(txn, 0, private_data);
         diskfs_txn_release(txn);
