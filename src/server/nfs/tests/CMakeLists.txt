@@ -82,7 +82,7 @@ target_link_libraries(test_protocol_advertise chimera_vfs chimera_common evpl ev
 add_dependencies(test_protocol_advertise chimera_nfs_common)
 add_test(NAME chimera/server/nfs/protocol_advertise COMMAND test_protocol_advertise)
 
-# Unit test for the RFC 8276 xattr name translation helpers (nfs4_xattr.h).
+# Unit test for the shared xattr name translation helpers (vfs/vfs_xattr_name.h).
 add_executable(test_xattr_name test_xattr_name.c)
 target_include_directories(test_xattr_name PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/..

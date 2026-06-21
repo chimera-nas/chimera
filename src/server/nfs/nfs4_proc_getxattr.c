@@ -4,7 +4,7 @@
 
 #include "nfs4_procs.h"
 #include "nfs4_status.h"
-#include "nfs4_xattr.h"
+#include "vfs/vfs_xattr_name.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 
@@ -60,7 +60,7 @@ chimera_nfs4_getxattr_open_callback(
         return;
     }
 
-    namecap = CHIMERA_NFS4_XATTR_USER_PREFIX_LEN + args->gxa_name.len;
+    namecap = CHIMERA_VFS_XATTR_USER_PREFIX_LEN + args->gxa_name.len;
     name    = xdr_dbuf_alloc_space(namecap, req->encoding->dbuf);
     if (!name) {
         res->gxr_status = NFS4ERR_RESOURCE;
@@ -69,9 +69,9 @@ chimera_nfs4_getxattr_open_callback(
         return;
     }
 
-    namelen = chimera_nfs4_xattr_build_user(name, namecap,
-                                            args->gxa_name.data,
-                                            args->gxa_name.len);
+    namelen = chimera_vfs_xattr_build_user(name, namecap,
+                                           args->gxa_name.data,
+                                           args->gxa_name.len);
     if (namelen < 0) {
         res->gxr_status = NFS4ERR_NAMETOOLONG;
         chimera_vfs_release(req->thread->vfs_thread, req->handle);

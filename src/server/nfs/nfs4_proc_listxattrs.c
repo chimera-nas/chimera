@@ -4,7 +4,7 @@
 
 #include "nfs4_procs.h"
 #include "nfs4_status.h"
-#include "nfs4_xattr.h"
+#include "vfs/vfs_xattr_name.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 
@@ -42,7 +42,7 @@ chimera_nfs4_listxattrs_complete(
     for (i = 0; i < count; i++) {
         uint32_t namelen = strlen(p);
 
-        if (chimera_nfs4_xattr_is_user(p, namelen)) {
+        if (chimera_vfs_xattr_is_user(p, namelen)) {
             emitted++;
         }
         p += namelen + 1;
@@ -65,11 +65,11 @@ chimera_nfs4_listxattrs_complete(
     for (i = 0; i < count; i++) {
         uint32_t namelen = strlen(p);
 
-        if (chimera_nfs4_xattr_is_user(p, namelen)) {
+        if (chimera_vfs_xattr_is_user(p, namelen)) {
             res->lxr_value.lxr_names[emitted].xn_name.data =
-                (void *) (p + CHIMERA_NFS4_XATTR_USER_PREFIX_LEN);
+                (void *) (p + CHIMERA_VFS_XATTR_USER_PREFIX_LEN);
             res->lxr_value.lxr_names[emitted].xn_name.len =
-                namelen - CHIMERA_NFS4_XATTR_USER_PREFIX_LEN;
+                namelen - CHIMERA_VFS_XATTR_USER_PREFIX_LEN;
             emitted++;
         }
         p += namelen + 1;
