@@ -307,6 +307,20 @@ foreach(image_spec ${KVM_IMAGES})
         SKIP_RETURN_CODE 77
         ENVIRONMENT "NFS_ENABLE_NLM=1")
 
+    # NFSv3 sec= policy rejection: an export restricted to krb5 must reject a
+    # sec=sys mount.  The real client reports "access denied by server" only if
+    # the server answers the post-mount probe with NFS3ERR_ACCES -- a stale/bad
+    # handle (the pre-fix behaviour) would surface a different error and fail
+    # this test, so it pins the WRONGSEC->ACCES mapping.
+    add_test(NAME chimera/kvm/${IMAGE_NAME}/kerberos/sec_krb5only_deny_sys_memfs_nfs3
+        COMMAND bash ${NFS_KRB_WRAPPER}
+                ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
+                ${CHIMERA_BINARY} memfs 3 "deny")
+    set_tests_properties(chimera/kvm/${IMAGE_NAME}/kerberos/sec_krb5only_deny_sys_memfs_nfs3
+        PROPERTIES LABELS "kvm;${IMAGE_NAME};rpcsec_gss" PROCESSORS 2
+        SKIP_RETURN_CODE 77
+        ENVIRONMENT "MOUNT_SEC=sys;NFS_EXPORT_SEC=krb5;NFS_EXPECT_DENY=1")
+
     # NFS cthon04 tests
     foreach(nfsver ${NFS_VERSIONS})
         foreach(category ${CTHON_CATEGORIES})

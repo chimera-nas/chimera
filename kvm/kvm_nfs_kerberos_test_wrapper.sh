@@ -168,6 +168,13 @@ generate_config() {
         *) log "Unsupported backend: $BACKEND"; exit 1 ;;
     esac
 
+    # Optional per-export security policy: NFS_EXPORT_SEC="krb5,krb5i" restricts
+    # the export to those flavors so a disallowed flavor is rejected.
+    local export_sec_json=""
+    if [ -n "${NFS_EXPORT_SEC:-}" ]; then
+        export_sec_json=", \"sec\": [$(echo "${NFS_EXPORT_SEC}" | sed 's/[^,]\+/"&"/g')]"
+    fi
+
     cat > "$CONFIG_FILE" <<EOF
 {
     "common": { "rcu_reclaim_threads": 4 },
@@ -179,7 +186,7 @@ generate_config() {
         "external_portmap": false
     },
     "mounts": { "share": { "module": "$BACKEND", "path": "$mount_path" } },
-    "exports": { "/share": { "path": "/share" } }
+    "exports": { "/share": { "path": "/share"${export_sec_json} } }
 }
 EOF
 }
@@ -256,6 +263,12 @@ case "${NFS_VERSION}" in
 esac
 if [ -n "${KVM_KRB_DEBUG:-}" ]; then
     TEST_CMD="${KRB_PREP} echo '=== keytab ==='; ls -l /etc/krb5.keytab; klist -k /etc/krb5.keytab 2>&1; echo '=== KDC reach ==='; (echo > /dev/tcp/10.0.0.1/${KDC_PORT}) 2>&1 && echo kdc-tcp-ok || echo kdc-tcp-FAIL; echo '=== kinit -k ==='; timeout 10 kinit -k -t /etc/krb5.keytab host/${CLIENT_HOST}@${REALM} 2>&1; echo kinit_rc=\$?; klist 2>&1; echo '=== krb5 mount -v ==='; timeout 25 mount -v -t nfs -o ${NFS_MOUNT_OPTS} ${SERVER_HOST}:/share /mnt 2>&1; echo krb5_rc=\$?"
+elif [ -n "${NFS_EXPECT_DENY:-}" ]; then
+    # Negative test: the export's sec= policy forbids this mount's flavor, so the
+    # mount must be rejected -- the server returns a permission error (for NFSv3,
+    # NFS3ERR_ACCES on the post-mount probe).  Pass only if the mount fails with a
+    # denied/permission error; a successful mount or any other failure is a fail.
+    TEST_CMD="${KRB_PREP} if mount -t nfs -o ${NFS_MOUNT_OPTS} ${SERVER_HOST}:/share /mnt 2>/tmp/mnterr; then echo SEC_DENY_FAILED_MOUNTED; umount /mnt 2>/dev/null; exit 1; fi; cat /tmp/mnterr; if grep -qiE 'denied|not permitted|permission' /tmp/mnterr; then echo NFS_SEC_DENY_OK; exit 0; else echo SEC_DENY_WRONG_ERROR; exit 1; fi"
 else
     TEST_CMD="${KRB_PREP} mount -t nfs -o ${NFS_MOUNT_OPTS} ${SERVER_HOST}:/share /mnt && ${POST_MOUNT_CMD}"
 fi
