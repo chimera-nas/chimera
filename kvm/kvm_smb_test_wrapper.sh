@@ -54,6 +54,41 @@ case "$SECMODE" in
     *) echo "invalid secmode '$SECMODE' (expected none|sign|seal)" >&2; exit 1 ;;
 esac
 
+# Optional server-side feature knobs, passed through the environment so the
+# positional argument list stays stable.
+#   SMB_FEATURES  comma-separated tokens injected into the generated config:
+#                   encrypt -> smb_encryption="enabled" + share encrypt_data:true
+#                   sign    -> smb_signing_required:true
+#                   leases  -> smb_leases + smb_oplocks + smb_directory_leases
+#   SMB_EXPECT    pass (default) | denied.  "denied" inverts the verdict: the
+#                 test passes iff the mount/first access is rejected (used for
+#                 the per-share encryption-enforcement negative case).
+SMB_FEATURES="${SMB_FEATURES:-}"
+SMB_EXPECT="${SMB_EXPECT:-pass}"
+#   SMB_CACHE     cifs cache mode (loose|strict|none); default loose.  strict
+#                 makes the client lean on leases/oplocks for cache coherency,
+#                 which is what the leases feature test wants to exercise.
+SMB_CACHE="${SMB_CACHE:-loose}"
+
+SERVER_EXTRA=""
+SHARE_EXTRA=""
+for feat in ${SMB_FEATURES//,/ }; do
+    case "$feat" in
+        encrypt)
+            SERVER_EXTRA="${SERVER_EXTRA}\"smb_encryption\": \"enabled\","
+            SHARE_EXTRA="${SHARE_EXTRA}\"encrypt_data\": true,"
+            ;;
+        sign)
+            SERVER_EXTRA="${SERVER_EXTRA}\"smb_signing_required\": true,"
+            ;;
+        leases)
+            SERVER_EXTRA="${SERVER_EXTRA}\"smb_leases\": true, \"smb_oplocks\": true, \"smb_directory_leases\": true,"
+            ;;
+        "") ;;
+        *) echo "unknown SMB_FEATURES token '$feat'" >&2; exit 1 ;;
+    esac
+done
+
 # Boot with no initrd: every kernel in the KVM image matrix builds the virtio
 # block/net drivers in, so the kernel mounts the virtio root disk directly.
 # Skipping the ~63MB initrd unpack saves ~0.9s/test.  (See kvm/CMakeLists.txt:
@@ -151,6 +186,7 @@ generate_config() {
         "threads": 4,
         "delegation_threads": 4,
         $vfs_section
+        $SERVER_EXTRA
         "smb_min_dialect": "$DIALECT",
         "external_portmap": false
     },
@@ -162,6 +198,7 @@ generate_config() {
     },
     "shares": {
         "share": {
+            $SHARE_EXTRA
             "path": "/share"
         }
     },
@@ -232,14 +269,28 @@ esac
 
 # Build the mount options for the CIFS mount.  vers= pins the dialect; seal/sign
 # add SMB3 transport encryption / signing for the secmode variants.
-SMB_MOUNT_OPTS="username=root,password=secret,vers=${VERS},nobrl,modefromsid,cache=loose"
+SMB_MOUNT_OPTS="username=root,password=secret,vers=${VERS},nobrl,modefromsid,cache=${SMB_CACHE}"
 case "$SECMODE" in
     seal) SMB_MOUNT_OPTS="${SMB_MOUNT_OPTS},seal" ;;
     sign) SMB_MOUNT_OPTS="${SMB_MOUNT_OPTS},sign" ;;
 esac
 
-# Build the test command to run inside the VM
-TEST_CMD="mount -t cifs //10.0.0.1/share /mnt -o ${SMB_MOUNT_OPTS} && ${TEST_CMD_ARG}"
+# Build the test command to run inside the VM.  Normally we mount and then run
+# the supplied command; for SMB_EXPECT=denied we instead assert that the mount
+# (or the first access through it) is rejected -- the per-share encryption
+# enforcement returns STATUS_ACCESS_DENIED, which tree-connect is exempt from,
+# so a mount can succeed while the first I/O is denied.  Either is a pass.
+if [ "$SMB_EXPECT" = "denied" ]; then
+    # Pass iff access is denied: the if/else is the last command so its status
+    # becomes the test's exit code (no explicit `exit`, which could terminate
+    # the guest init harness before it records the result -- as the positive
+    # path also relies on $? of its last command).  If the mount succeeds, the
+    # first I/O ("! ls") must fail; if the mount itself is refused, that is also
+    # a pass.
+    TEST_CMD="if mount -t cifs //10.0.0.1/share /mnt -o ${SMB_MOUNT_OPTS} 2>/dev/null; then ! ls /mnt >/dev/null 2>&1; else true; fi"
+else
+    TEST_CMD="mount -t cifs //10.0.0.1/share /mnt -o ${SMB_MOUNT_OPTS} && ${TEST_CMD_ARG}"
+fi
 
 # Boot QEMU inside the netns
 # Use -serial stdio so serial output goes to stdout in real-time (captured by ctest).

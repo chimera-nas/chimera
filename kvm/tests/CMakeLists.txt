@@ -194,6 +194,28 @@ set(XFSTESTS_CMD_nametest  "mkdir -p /mnt/test && cd /mnt/test && /opt/xfstests/
 set(XFSTESTS_CMD_fstest    "mkdir -p /mnt/test && /opt/xfstests/src/fstest -p /mnt/test -n 1 -f 2 -l 5 -s 65536")
 set(XFSTESTS_CMD_rewinddir "mkdir -p /mnt/test && /opt/xfstests/src/rewinddir-test /mnt/test")
 
+# SMB3 feature-config tests.  Each combines a server-side config knob (injected
+# via the SMB_FEATURES env knob the wrapper reads) with the matching kernel
+# cifs mount mode, to drive one SMB3 feature end-to-end through a real client.
+# Pinned to memfs (feature correctness is backend-independent at this layer).
+# Each entry is "<name>|<SMB_FEATURES>|<secmode>|<cache>|<expect>|<workload>":
+#   encrypt_seal*    encrypt_data share + seal mount -> TRANSFORM path e2e.
+#   signing          smb_signing_required + sign mount.
+#   leases           file+dir leases + oplocks under cache=strict (the client
+#                    leans on leases for coherency, exercising grant/break).
+#                    DISABLED below pending a server fix (see the foreach).
+# There is deliberately no encryption "negative" case: a compliant kernel cifs
+# client auto-encrypts once TREE_CONNECT advertises SMB2_SHAREFLAG_ENCRYPT_DATA,
+# so an unsealed mount of an encrypt_data share is never denied -- it just seals
+# transparently.  Per-share denial is only observable against a non-compliant
+# client (covered by smbtorture/WPTS), not from a real Linux client.
+set(SMB_FEATURE_TESTS
+    "encrypt_seal|encrypt|seal|loose|pass|${XFSTESTS_CMD_fsstress}"
+    "encrypt_seal_cthon|encrypt|seal|loose|pass|cd /opt/cthon04 && CIFS=yes MNTOPTIONS=vers=3.1.1 ./runtests -g -f /mnt/test"
+    "signing|sign|sign|loose|pass|${XFSTESTS_CMD_fsstress}"
+    "leases|leases|none|strict|pass|${XFSTESTS_CMD_fsx}"
+)
+
 # Linux Test Project (LTP) scenario groups, run against the server-mounted share.
 # Matrix entries are "<group>|<space-separated NFS versions>"; <group> names a
 # runtest file shipped in the guest's /opt/ltp/runtest (>= kvm-test-base v1.5.0).
@@ -746,6 +768,36 @@ foreach(image_spec ${KVM_IMAGES})
             # rewinddir_cairn timeout, #733).  Give them matching headroom.
             set_tests_properties(chimera/kvm/${IMAGE_NAME}/smb/3.1.1/xfstests/${prog}_cairn
                 PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2 TIMEOUT 600)
+        endforeach()
+    endif()
+
+    # SMB3 feature-config tests -- ubuntu2404 + memfs only (see SMB_FEATURE_TESTS).
+    if(IMAGE_NAME STREQUAL "ubuntu2404")
+        foreach(entry ${SMB_FEATURE_TESTS})
+            string(REPLACE "|" ";" parts "${entry}")
+            list(GET parts 0 fname)
+            list(GET parts 1 ffeatures)
+            list(GET parts 2 fsecmode)
+            list(GET parts 3 fcache)
+            list(GET parts 4 fexpect)
+            list(GET parts 5 fworkload)
+            add_test(NAME chimera/kvm/${IMAGE_NAME}/smb/feature/${fname}_memfs
+                COMMAND env SMB_FEATURES=${ffeatures} SMB_EXPECT=${fexpect} SMB_CACHE=${fcache}
+                        bash ${SMB_WRAPPER}
+                        ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
+                        ${CHIMERA_BINARY} memfs 3.1.1 ${fsecmode}
+                        "${fworkload}")
+            set_tests_properties(chimera/kvm/${IMAGE_NAME}/smb/feature/${fname}_memfs
+                PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2)
+            # The leases test deadlocks the server: a kernel-client ftruncate on
+            # a file it holds a write lease on hangs (state=D wait_for_response)
+            # -- the SET_INFO end-of-file recall/break path never completes (a
+            # lease self-break).  fsx is clean without leases, so this is a real
+            # lease-path bug; disabled until it is fixed.
+            if(fname STREQUAL "leases")
+                set_tests_properties(chimera/kvm/${IMAGE_NAME}/smb/feature/leases_memfs
+                    PROPERTIES DISABLED TRUE)
+            endif()
         endforeach()
     endif()
 
