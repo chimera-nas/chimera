@@ -765,7 +765,7 @@ jobs:
       matrix:
         arch: [amd64, arm64]
         build_type: [Release, Debug]
-        category: [pynfs, smbtorture, wpts-smb2, wpts-fsa, posix-client, pjdfstest, s3, ceph-s3, client, unit, kvm-cthon, kvm-xfsprogs, kvm-pnfs, kvm-nfstest-lock, kvm-nfstest-dio, kvm-nfstest-rest, kvm-ltp]
+        category: [pynfs, smbtorture, wpts-smb2, wpts-fsa, wpts-fsamodel, posix-client, pjdfstest, s3, ceph-s3, client, unit, kvm-cthon, kvm-xfsprogs, kvm-pnfs, kvm-nfstest-lock, kvm-nfstest-dio, kvm-nfstest-rest, kvm-ltp]
         include:
           - { arch: amd64, runner: arc-amd64 }
           - { arch: arm64, runner: arc-arm64 }
@@ -782,6 +782,7 @@ jobs:
           # the shard would only skip every test, so don't run it at all.
           - { arch: arm64, category: wpts-smb2 }
           - { arch: arm64, category: wpts-fsa }
+          - { arch: arm64, category: wpts-fsamodel }
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -824,7 +825,11 @@ jobs:
                 pynfs)        SEL="-L pynfs" ;;
                 smbtorture)   SEL="-L smbtorture" ;;
                 wpts-smb2)    SEL="-L wpts-smb2" ;;
-                wpts-fsa)     SEL="-L wpts-fsa" ;;
+                # Anchor wpts-fsa$ so it does NOT also match the wpts-fsamodel
+                # label (ctest -L is a substring regex; "wpts-fsa" is a prefix of
+                # "wpts-fsamodel").
+                wpts-fsa)     SEL="-L wpts-fsa$" ;;
+                wpts-fsamodel) SEL="-L wpts-fsamodel" ;;
                 posix-client) SEL="-L posix" ;;
                 pjdfstest)    SEL="-L pjdfstest" ;;
                 s3)           SEL="-L s3 -LE ceph-s3" ;;

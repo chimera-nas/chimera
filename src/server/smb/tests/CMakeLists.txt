@@ -225,6 +225,39 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
     endforeach()
 
     message(STATUS "WPTS MS-SMB2 tests: enabled (${WPTS_BIN_DIR}, ${WPTS_DOTNET})")
+
+    # ------------------------------------------------------------------
+    # WPTS MS-FSAModel -- model-based [MS-FSA] File System Algorithms over
+    # SMB3.  Its own shard (label wpts-fsamodel) alongside MS-SMB2; runs
+    # host-side via the managed FSA adapter against the chimera daemon in a
+    # netns.
+    #
+    # Unlike MS-SMB2, MS-FSAModel cases are NOT independent -- it is a
+    # model-based suite whose outcomes depend on the full ordered S0,S2,...
+    # sequence run against one server (a subset behaves differently from the
+    # full run).  So we do NOT curate a green allowlist; instead the WHOLE
+    # suite runs every time and the run is gated by REGRESSION against a
+    # recorded baseline (wpts/wpts_fsa_cases.csv, <case,baseline,area,detail>):
+    # CI fails only if a case the baseline records as `pass` stops passing (or
+    # the daemon dies).  The comparator (tools/wpts/fsa_baseline.py) is invoked
+    # by the wrapper when WPTS_FSA_BASELINE is set and decides the exit code
+    # (vstest itself always exits non-zero on the known-failing cases).
+    # ------------------------------------------------------------------
+    find_file(WPTS_FSAMODEL_DLL MS-FSAModel_ServerTestSuite.dll
+              HINTS ${WPTS_BIN_DIR} NO_DEFAULT_PATH)
+    if(WPTS_FSAMODEL_DLL)
+        set(_fsa_name chimera/server/smb/wpts/fsamodel/memfs)
+        add_test(NAME ${_fsa_name}
+            COMMAND ${CMAKE_SOURCE_DIR}/scripts/wpts_fsa_test_wrapper.sh
+                    ${CHIMERA_DAEMON} memfs "")
+        set_tests_properties(${_fsa_name} PROPERTIES
+            LABELS "smb;wpts;wpts-fsamodel"
+            TIMEOUT 1200
+            ENVIRONMENT "WPTS_BIN_DIR=${WPTS_BIN_DIR};DOTNET=${WPTS_DOTNET};WPTS_FSA_BASELINE=${CMAKE_CURRENT_SOURCE_DIR}/wpts/wpts_fsa_cases.csv;WPTS_JUNIT_FILE=${WPTS_JUNIT_DIR}/fsamodel_memfs.xml;WPTS_JUNIT_CONVERTER=${CMAKE_SOURCE_DIR}/scripts/trx_to_junit.py")
+        message(STATUS "WPTS MS-FSAModel tests: enabled (${WPTS_FSAMODEL_DLL})")
+    else()
+        message(STATUS "WPTS MS-FSAModel tests: disabled (MS-FSAModel_ServerTestSuite.dll not found)")
+    endif()
 elseif(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND NOT WPTS_ARCH_SUPPORTED)
     message(STATUS "WPTS MS-SMB2 tests: disabled "
             "(unsupported arch ${CMAKE_SYSTEM_PROCESSOR}; .NET test host needs x86_64)")
