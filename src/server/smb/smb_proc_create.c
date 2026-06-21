@@ -4201,6 +4201,23 @@ chimera_smb_create(struct chimera_smb_request *request)
             return;
         }
 
+        /* MS-FSA 2.1.5.1 Phase 1 (MS-FSA_R2374 / R2376): a CreateOptions of
+         * FILE_DIRECTORY_FILE combined with a destructive CreateDisposition is
+         * a contradiction -- SUPERSEDE/OVERWRITE/OVERWRITE_IF replace the data
+         * of a target that, as a directory, has none -- so the open MUST fail
+         * with STATUS_INVALID_PARAMETER.  This validation runs in Phase 1,
+         * BEFORE the open reaches the backend and resolves a directory-vs-file
+         * type mismatch (which would otherwise surface as NOT_A_DIRECTORY and
+         * mask the parameter error).  FSAModel CreateFileTestCaseS24/S26,
+         * OpenFileTestCaseS22/S24. */
+        if ((request->create.create_options & SMB2_FILE_DIRECTORY_FILE) &&
+            (request->create.create_disposition == SMB2_FILE_SUPERSEDE ||
+             request->create.create_disposition == SMB2_FILE_OVERWRITE ||
+             request->create.create_disposition == SMB2_FILE_OVERWRITE_IF)) {
+            chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+            return;
+        }
+
         /* MS-FSCC 2.6 FileAttributes validation (smb2.create.gentest).  Any bit
         * outside the settable/valid set -- e.g. FILE_ATTRIBUTE_VOLUME (0x08) or
         * FILE_ATTRIBUTE_DEVICE (0x40) -- is rejected with INVALID_PARAMETER. */
