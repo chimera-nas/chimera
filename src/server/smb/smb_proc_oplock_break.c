@@ -623,6 +623,13 @@ chimera_smb_oplock_break(struct chimera_smb_request *request)
             }
             open_file->lease_state = request->oplock_break.lease_state;
             chimera_smb_open_file_release(request, open_file);
+        } else {
+            /* MS-SMB2 3.3.5.22.1: if the acknowledgment cannot be matched to an
+             * open (the open was closed before the ack arrived), fail the request
+             * with STATUS_FILE_CLOSED rather than silently succeeding. */
+            chimera_smb_create_resume_parked(request);
+            chimera_smb_complete_request(request, SMB2_STATUS_FILE_CLOSED);
+            return;
         }
 
         /* The ack settled the lease; resume any CREATE that parked waiting for
@@ -665,6 +672,15 @@ chimera_smb_oplock_break(struct chimera_smb_request *request)
         open_file->oplock_break_ack_required = 0;
 
         chimera_smb_open_file_release(request, open_file);
+    } else {
+        /* MS-SMB2 3.3.5.22.1 "Processing an Oplock Acknowledgment": if the
+         * FileId in the acknowledgment does not map to an open in the table
+         * (the open was closed before the client's ack arrived), the server
+         * MUST fail the request with STATUS_FILE_CLOSED.  Previously this path
+         * fell through to STATUS_SUCCESS, which the MS-SMB2Model suite flags. */
+        chimera_smb_create_resume_parked(request);
+        chimera_smb_complete_request(request, SMB2_STATUS_FILE_CLOSED);
+        return;
     }
 
     /* Resume any CREATE parked waiting for this break to complete. */

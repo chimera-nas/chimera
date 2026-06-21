@@ -1194,7 +1194,7 @@ OplockOnShareWithForceLevel2WithoutSOFSTestCaseS898,base,skip,0,unsup-forcelevel
 OplockOnShareWithForceLevel2WithoutSOFSTestCaseS934,base,skip,0,unsup-forcelevel2: per-share SHAREFLAG_FORCE_LEVELII_OPLOCK not configurable
 OplockOnShareWithForceLevel2WithoutSOFSTestCaseS972,base,skip,0,unsup-forcelevel2: per-share SHAREFLAG_FORCE_LEVELII_OPLOCK not configurable
 OplockOnShareWithoutForceLevel2OrSOFSTestCaseS0,base,xfail,0,executed but fails (candidate defect)
-OplockOnShareWithoutForceLevel2OrSOFSTestCaseS1033,base,xfail,0,executed but fails (candidate defect)
+OplockOnShareWithoutForceLevel2OrSOFSTestCaseS1033,base,green,0,
 OplockOnShareWithoutForceLevel2OrSOFSTestCaseS1063,base,xfail,0,executed but fails (candidate defect)
 OplockOnShareWithoutForceLevel2OrSOFSTestCaseS1097,base,green,0,
 OplockOnShareWithoutForceLevel2OrSOFSTestCaseS1129,base,green,0,
@@ -1202,48 +1202,48 @@ OplockOnShareWithoutForceLevel2OrSOFSTestCaseS1150,base,xfail,0,executed but fai
 OplockOnShareWithoutForceLevel2OrSOFSTestCaseS1169,base,green,0,
 OplockOnShareWithoutForceLevel2OrSOFSTestCaseS1203,base,green,0,
 OplockOnShareWithoutForceLevel2OrSOFSTestCaseS1225,base,green,0,
-OplockOnShareWithoutForceLevel2OrSOFSTestCaseS1246,base,xfail,0,executed but fails (candidate defect)
+OplockOnShareWithoutForceLevel2OrSOFSTestCaseS1246,base,green,0,
 OplockOnShareWithoutForceLevel2OrSOFSTestCaseS1283,base,green,0,
-OplockOnShareWithoutForceLevel2OrSOFSTestCaseS1303,base,xfail,0,executed but fails (candidate defect)
+OplockOnShareWithoutForceLevel2OrSOFSTestCaseS1303,base,green,0,
 OplockOnShareWithoutForceLevel2OrSOFSTestCaseS1318,base,green,0,
 OplockOnShareWithoutForceLevel2OrSOFSTestCaseS1331,base,green,0,
 OplockOnShareWithoutForceLevel2OrSOFSTestCaseS1355,base,green,0,
 OplockOnShareWithoutForceLevel2OrSOFSTestCaseS1363,base,xfail,0,executed but fails (candidate defect)
 OplockOnShareWithoutForceLevel2OrSOFSTestCaseS1372,base,green,0,
 OplockOnShareWithoutForceLevel2OrSOFSTestCaseS1380,base,xfail,0,executed but fails (candidate defect)
-OplockOnShareWithoutForceLevel2OrSOFSTestCaseS1388,base,xfail,0,executed but fails (candidate defect)
-OplockOnShareWithoutForceLevel2OrSOFSTestCaseS1396,base,xfail,0,executed but fails (candidate defect)
-OplockOnShareWithoutForceLevel2OrSOFSTestCaseS1402,base,xfail,0,executed but fails (candidate defect)
-OplockOnShareWithoutForceLevel2OrSOFSTestCaseS1407,base,xfail,0,executed but fails (candidate defect)
-OplockOnShareWithoutForceLevel2OrSOFSTestCaseS1412,base,xfail,0,executed but fails (candidate defect)
-OplockOnShareWithoutForceLevel2OrSOFSTestCaseS170,base,xfail,0,executed but fails (candidate defect)
-OplockOnShareWithoutForceLevel2OrSOFSTestCaseS206,base,xfail,0,executed but fails (candidate defect)
-OplockOnShareWithoutForceLevel2OrSOFSTestCaseS242,base,xfail,0,executed but fails (candidate defect)
-OplockOnShareWithoutForceLevel2OrSOFSTestCaseS276,base,xfail,0,executed but fails (candidate defect)
-OplockOnShareWithoutForceLevel2OrSOFSTestCaseS311,base,xfail,0,executed but fails (candidate defect)
-OplockOnShareWithoutForceLevel2OrSOFSTestCaseS344,base,xfail,0,executed but fails (candidate defect)
-OplockOnShareWithoutForceLevel2OrSOFSTestCaseS385,base,xfail,0,executed but fails (candidate defect)
+OplockOnShareWithoutForceLevel2OrSOFSTestCaseS1388,base,green,0,
+OplockOnShareWithoutForceLevel2OrSOFSTestCaseS1396,base,green,0,
+OplockOnShareWithoutForceLevel2OrSOFSTestCaseS1402,base,green,0,
+OplockOnShareWithoutForceLevel2OrSOFSTestCaseS1407,base,green,0,
+OplockOnShareWithoutForceLevel2OrSOFSTestCaseS1412,base,green,0,
+OplockOnShareWithoutForceLevel2OrSOFSTestCaseS170,base,green,0,
+OplockOnShareWithoutForceLevel2OrSOFSTestCaseS206,base,green,0,
+OplockOnShareWithoutForceLevel2OrSOFSTestCaseS242,base,green,0,
+OplockOnShareWithoutForceLevel2OrSOFSTestCaseS276,base,green,0,
+OplockOnShareWithoutForceLevel2OrSOFSTestCaseS311,base,green,0,
+OplockOnShareWithoutForceLevel2OrSOFSTestCaseS344,base,green,0,
+OplockOnShareWithoutForceLevel2OrSOFSTestCaseS385,base,green,0,
 OplockOnShareWithoutForceLevel2OrSOFSTestCaseS409,base,green,0,
 OplockOnShareWithoutForceLevel2OrSOFSTestCaseS432,base,green,0,
 OplockOnShareWithoutForceLevel2OrSOFSTestCaseS492,base,xfail,0,executed but fails (candidate defect)
 OplockOnShareWithoutForceLevel2OrSOFSTestCaseS529,base,green,0,
-OplockOnShareWithoutForceLevel2OrSOFSTestCaseS560,base,xfail,0,executed but fails (candidate defect)
-OplockOnShareWithoutForceLevel2OrSOFSTestCaseS578,base,xfail,0,executed but fails (candidate defect)
+OplockOnShareWithoutForceLevel2OrSOFSTestCaseS560,base,green,0,
+OplockOnShareWithoutForceLevel2OrSOFSTestCaseS578,base,green,0,
 OplockOnShareWithoutForceLevel2OrSOFSTestCaseS614,base,green,0,
 OplockOnShareWithoutForceLevel2OrSOFSTestCaseS643,base,green,0,
 OplockOnShareWithoutForceLevel2OrSOFSTestCaseS675,base,xfail,0,executed but fails (candidate defect)
 OplockOnShareWithoutForceLevel2OrSOFSTestCaseS711,base,green,0,
 OplockOnShareWithoutForceLevel2OrSOFSTestCaseS743,base,green,0,
-OplockOnShareWithoutForceLevel2OrSOFSTestCaseS780,base,xfail,0,executed but fails (candidate defect)
-OplockOnShareWithoutForceLevel2OrSOFSTestCaseS804,base,xfail,0,executed but fails (candidate defect)
+OplockOnShareWithoutForceLevel2OrSOFSTestCaseS780,base,green,0,
+OplockOnShareWithoutForceLevel2OrSOFSTestCaseS804,base,green,0,
 OplockOnShareWithoutForceLevel2OrSOFSTestCaseS826,base,green,0,
 OplockOnShareWithoutForceLevel2OrSOFSTestCaseS847,base,xfail,0,executed but fails (candidate defect)
 OplockOnShareWithoutForceLevel2OrSOFSTestCaseS882,base,green,0,
-OplockOnShareWithoutForceLevel2OrSOFSTestCaseS90,base,xfail,0,executed but fails (candidate defect)
-OplockOnShareWithoutForceLevel2OrSOFSTestCaseS918,base,xfail,0,executed but fails (candidate defect)
+OplockOnShareWithoutForceLevel2OrSOFSTestCaseS90,base,green,0,
+OplockOnShareWithoutForceLevel2OrSOFSTestCaseS918,base,green,0,
 OplockOnShareWithoutForceLevel2OrSOFSTestCaseS955,base,green,0,
-OplockOnShareWithoutForceLevel2OrSOFSTestCaseS977,base,xfail,0,executed but fails (candidate defect)
-OplockOnShareWithoutForceLevel2OrSOFSTestCaseS998,base,xfail,0,executed but fails (candidate defect)
+OplockOnShareWithoutForceLevel2OrSOFSTestCaseS977,base,green,0,
+OplockOnShareWithoutForceLevel2OrSOFSTestCaseS998,base,green,0,
 OplockOnShareWithoutForceLevel2WithSOFSTestCaseS0,base,skip,0,env-sofs: STYPE_CLUSTER_SOFS clustered share unsupported (standalone server)
 OplockOnShareWithoutForceLevel2WithSOFSTestCaseS100,base,skip,0,env-sofs: STYPE_CLUSTER_SOFS clustered share unsupported (standalone server)
 OplockOnShareWithoutForceLevel2WithSOFSTestCaseS1016,base,skip,0,env-sofs: STYPE_CLUSTER_SOFS clustered share unsupported (standalone server)
