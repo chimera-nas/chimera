@@ -72,6 +72,13 @@ struct chimera_acl;
  * counter simply leave it unset and the NFS server derives change from ctime. */
 #define CHIMERA_VFS_ATTR_CHANGE             (1UL << 25)
 
+/* SMB AllocationSize reservation (va_alloc_size): the minimum allocated size a
+ * file reserves independent of its EOF, set via a CREATE AllocationSize context
+ * or FileAllocationInformation.  Optional: a backend sets this bit in
+ * va_set_mask only if it persists the reservation, and folds it into the
+ * reported va_space_used (max of real usage and the reservation). */
+#define CHIMERA_VFS_ATTR_ALLOC_SIZE         (1UL << 26)
+
 #define CHIMERA_VFS_ATTR_MASK_STAT          ( \
             CHIMERA_VFS_ATTR_DEV | \
             CHIMERA_VFS_ATTR_INUM | \
@@ -169,6 +176,7 @@ struct chimera_vfs_attrs {
     uint64_t            va_rdev;
     uint64_t            va_size;
     uint64_t            va_space_used;
+    uint64_t            va_alloc_size;
     struct timespec     va_atime;
     struct timespec     va_mtime;
     struct timespec     va_ctime;
