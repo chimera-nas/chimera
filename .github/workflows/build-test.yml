@@ -765,7 +765,7 @@ jobs:
       matrix:
         arch: [amd64, arm64]
         build_type: [Release, Debug]
-        category: [pynfs, smbtorture, wpts, posix-client, pjdfstest, s3, ceph-s3, client, unit, kvm-cthon, kvm-xfsprogs, kvm-pnfs, kvm-nfstest, kvm-ltp]
+        category: [pynfs, smbtorture, wpts, posix-client, pjdfstest, s3, ceph-s3, client, unit, kvm-cthon, kvm-xfsprogs, kvm-pnfs, kvm-nfstest-lock, kvm-nfstest-dio, kvm-nfstest-rest, kvm-ltp]
         include:
           - { arch: amd64, runner: arc-amd64 }
           - { arch: arm64, runner: arc-arm64 }
@@ -774,7 +774,9 @@ jobs:
           - { arch: arm64, category: kvm-cthon }
           - { arch: arm64, category: kvm-xfsprogs }
           - { arch: arm64, category: kvm-pnfs }
-          - { arch: arm64, category: kvm-nfstest }
+          - { arch: arm64, category: kvm-nfstest-lock }
+          - { arch: arm64, category: kvm-nfstest-dio }
+          - { arch: arm64, category: kvm-nfstest-rest }
           - { arch: arm64, category: kvm-ltp }
           # WPTS (Microsoft Protocol Test Suite) is not supported on arm64 —
           # the shard would only skip every test, so don't run it at all.
@@ -830,7 +832,14 @@ jobs:
                 kvm-cthon)    SEL="-L kvm -R /cthon/";    NEED_KVM=1 ;;
                 kvm-xfsprogs) SEL="-L kvm -R /xfstests/"; NEED_KVM=1 ;;
                 kvm-pnfs)     SEL="-L pnfs";              NEED_KVM=1 ;;
-                kvm-nfstest)  SEL="-L kvm -R /nfstest/";  NEED_KVM=1 ;;
+                # nfstest is the test long-pole; split by suite so each shard
+                # lands on its own runner.  lock isolates the single longest
+                # test (nfstest_lock_*_linux), dio the next-heaviest family, and
+                # rest is everything else.  Keep these three collectively exact
+                # to "-L kvm -R /nfstest/" so no nfstest test is dropped.
+                kvm-nfstest-lock) SEL="-L kvm -R nfstest_lock_";                    NEED_KVM=1 ;;
+                kvm-nfstest-dio)  SEL="-L kvm -R nfstest_dio_";                     NEED_KVM=1 ;;
+                kvm-nfstest-rest) SEL="-L kvm -R /nfstest/ -E nfstest_(lock|dio)_"; NEED_KVM=1 ;;
                 kvm-ltp)      SEL="-L kvm -R /ltp/";      NEED_KVM=1 ;;
               esac
               if [ -n "$NEED_KVM" ]; then
