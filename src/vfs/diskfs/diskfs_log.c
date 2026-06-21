@@ -473,6 +473,111 @@ diskfs_il_try_discharge(
 } /* diskfs_il_try_discharge */
 
 
+/* ---------------------------------------------------------------------------
+* Stage A: commit-hot-path memory recycling.
+*
+* The record builder allocated six heap blocks per redo record (the record and
+* its three block arrays, the completion ctx and its entry array).  At a few
+* hundred thousand commits/s that malloc/free traffic was a large slice of the
+* single commit thread.  Recycle the structs -- and their variable-length
+* arrays, grown on demand and never shrunk -- through lock-free pools so the
+* steady-state hot path never calls malloc().  Each pool is single-consumer
+* (the commit thread, which allocates in diskfs_il_write_redo) and single-
+* producer (the thread that frees the object: the push thread for records, the
+* apply thread for ctxs), so the Treiber pop is ABA-free.
+* ------------------------------------------------------------------------- */
+
+static struct diskfs_il_record *
+diskfs_il_rec_alloc(
+    struct diskfs_intent_log *il,
+    uint32_t                  nblocks)
+{
+    struct diskfs_il_record *rec;
+
+    rec = __atomic_load_n(&il->rec_pool, __ATOMIC_ACQUIRE);
+    while (rec &&
+           !__atomic_compare_exchange_n(&il->rec_pool, &rec, rec->recycle_next,
+                                        0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+    }
+    if (!rec) {
+        rec             = malloc(sizeof(*rec));
+        rec->blocks_cap = 0;
+        rec->iovs       = NULL;
+        rec->block_bufs = NULL;
+        rec->blocks     = NULL;
+    }
+
+    /* Grow the arrays only when this record needs more blocks than any prior
+     * use of this struct -- the common (batched) case reuses them untouched. */
+    if (nblocks > rec->blocks_cap) {
+        free(rec->iovs);
+        free(rec->block_bufs);
+        free(rec->blocks);
+        rec->iovs       = malloc((1 + nblocks) * sizeof(*rec->iovs));
+        rec->block_bufs = malloc(nblocks * sizeof(*rec->block_bufs));
+        rec->blocks     = malloc(nblocks * sizeof(*rec->blocks));
+        rec->blocks_cap = nblocks;
+    }
+    return rec;
+} /* diskfs_il_rec_alloc */
+
+
+static void
+diskfs_il_rec_recycle(
+    struct diskfs_intent_log *il,
+    struct diskfs_il_record  *rec)
+{
+    struct diskfs_il_record *head;
+
+    head = __atomic_load_n(&il->rec_pool, __ATOMIC_ACQUIRE);
+    do {
+        rec->recycle_next = head;
+    } while (!__atomic_compare_exchange_n(&il->rec_pool, &head, rec,
+                                          0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE));
+} /* diskfs_il_rec_recycle */
+
+
+static struct diskfs_redo_ctx *
+diskfs_il_ctx_alloc(
+    struct diskfs_intent_log *il,
+    uint32_t                  num_entries)
+{
+    struct diskfs_redo_ctx *ctx;
+
+    ctx = __atomic_load_n(&il->ctx_pool, __ATOMIC_ACQUIRE);
+    while (ctx &&
+           !__atomic_compare_exchange_n(&il->ctx_pool, &ctx, ctx->free_next,
+                                        0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+    }
+    if (!ctx) {
+        ctx              = malloc(sizeof(*ctx));
+        ctx->entries_cap = 0;
+        ctx->entries     = NULL;
+    }
+    if (num_entries > ctx->entries_cap) {
+        free(ctx->entries);
+        ctx->entries     = malloc(num_entries * sizeof(*ctx->entries));
+        ctx->entries_cap = num_entries;
+    }
+    return ctx;
+} /* diskfs_il_ctx_alloc */
+
+
+static void
+diskfs_il_ctx_recycle(
+    struct diskfs_intent_log *il,
+    struct diskfs_redo_ctx   *ctx)
+{
+    struct diskfs_redo_ctx *head;
+
+    head = __atomic_load_n(&il->ctx_pool, __ATOMIC_ACQUIRE);
+    do {
+        ctx->free_next = head;
+    } while (!__atomic_compare_exchange_n(&il->ctx_pool, &head, ctx,
+                                          0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE));
+} /* diskfs_il_ctx_recycle */
+
+
 static void
 diskfs_il_free_record(
     struct diskfs_intent_log *il,
@@ -487,10 +592,10 @@ diskfs_il_free_record(
      * zero cost in the IL builder); they own nothing, so they are NOT released
      * here -- the backing GLOBAL buffer is freed only at cache teardown. */
     evpl_iovec_release(il->push_evpl, &rec->iovs[0]);
-    free(rec->block_bufs);
-    free(rec->blocks);
-    free(rec->iovs);
-    free(rec);
+
+    /* Stage A: recycle the record + its (capacity-tracked) block arrays for the
+     * commit thread to reuse instead of freeing them. */
+    diskfs_il_rec_recycle(il, rec);
 } /* diskfs_il_free_record */
 
 
@@ -952,8 +1057,7 @@ diskfs_redo_write_cb(
 
         slot->ctx  = NULL;
         slot->done = 0;
-        free(rc->entries);
-        free(rc);
+        diskfs_il_ctx_recycle(il, rc);
         il->retire_head++;
     }
 
@@ -992,29 +1096,28 @@ diskfs_il_write_redo(
      * before consuming SQ entries), so placement always succeeds. */
     offset = diskfs_il_place(il, reclen);
 
-    rec             = malloc(sizeof(*rec));
+    /* Stage A: draw the record + its block arrays (iovs/block_bufs/blocks,
+     * sized >= nblocks and fully populated below) from the recycle pool -- no
+     * malloc in steady state.  Block-swap CoW retires the dirtied block out of
+     * the hash but keeps the struct alive (on the LRU, pinned, holding its
+     * buffer); rec->blocks carries the block pointer so the tail-pusher drops
+     * the obligation pin on THIS block (a (dev,off) lookup would find the new
+     * live block after a CoW). */
+    rec             = diskfs_il_rec_alloc(il, nblocks);
     rec->seq        = il->log_seq;
     rec->offset     = offset;
     rec->reclen     = reclen;
     rec->num_blocks = nblocks;
     rec->niov       = 1 + nblocks;
-    rec->iovs       = malloc(rec->niov * sizeof(struct evpl_iovec));
-    rec->block_bufs = calloc(nblocks, sizeof(*rec->block_bufs));
-    /* Block-swap CoW retires the dirtied block out of the hash but keeps the
-     * struct alive (on the LRU, pinned, holding its buffer).  Carry the block
-     * pointer so the tail-pusher drops the obligation pin on THIS block by
-     * pointer -- a (dev,off) lookup would now find the new live block instead. */
-    rec->blocks = calloc(nblocks, sizeof(*rec->blocks));
-    rec->next   = NULL;
+    rec->next       = NULL;
 
     /* iovs[0]: materialized header region (redo_header + per-block headers). */
     niov = evpl_iovec_alloc(il->evpl, hdr_len, DISKFS_BLOCK_SIZE, 1,
                             EVPL_IOVEC_FLAG_SHARED, &rec->iovs[0]);
     chimera_diskfs_abort_if(niov != 1, "redo header did not fit in one iovec (%d)", niov);
 
-    ctx              = malloc(sizeof(*ctx));
+    ctx              = diskfs_il_ctx_alloc(il, num_entries);
     ctx->il          = il;
-    ctx->entries     = malloc(num_entries * sizeof(*ctx->entries));
     ctx->num_entries = num_entries;
     ctx->rec         = rec;
     memcpy(ctx->entries, entries, num_entries * sizeof(*ctx->entries));
@@ -1026,6 +1129,7 @@ diskfs_il_write_redo(
     hdr->csum_hi    = 0;
     hdr->seq        = il->log_seq++;
     rec->seq        = hdr->seq;
+    ctx->seq        = hdr->seq;     /* Stage B: apply thread advances applied_seq from this */
     hdr->tail       = __atomic_load_n(&il->log_tail, __ATOMIC_ACQUIRE);
     hdr->num_blocks = nblocks;
     hdr->reclen     = (uint32_t) reclen;

@@ -1301,6 +1301,8 @@ diskfs_init(
     shared->intent_log.commit_alive = 1;
     shared->intent_log.num_channels = 0;
     shared->intent_log.pending_head = NULL;
+    shared->intent_log.rec_pool     = NULL;   /* Stage A: commit-hot-path recycle pools */
+    shared->intent_log.ctx_pool     = NULL;
     pthread_mutex_init(&shared->intent_log.registration_lock, NULL);
 
     /* Commit thread first: it allocates the cross-thread hand-off ring the
@@ -1520,6 +1522,27 @@ diskfs_destroy(void *private_data)
     __atomic_store_n(&shared->intent_log.commit_alive, 0, __ATOMIC_RELEASE);
     evpl_thread_destroy(shared->intent_log.thread);
     evpl_thread_destroy(shared->intent_log.push_thread);
+
+    /* Stage A: drain the commit-thread record/ctx recycle pools (both IL
+     * threads are stopped now, so the pools are quiescent). */
+    {
+        struct diskfs_il_record *rec;
+        struct diskfs_redo_ctx  *ctx;
+
+        while ((rec = shared->intent_log.rec_pool)) {
+            shared->intent_log.rec_pool = rec->recycle_next;
+            free(rec->iovs);
+            free(rec->block_bufs);
+            free(rec->blocks);
+            free(rec);
+        }
+        while ((ctx = shared->intent_log.ctx_pool)) {
+            shared->intent_log.ctx_pool = ctx->free_next;
+            free(ctx->entries);
+            free(ctx);
+        }
+    }
+
     pthread_mutex_destroy(&shared->intent_log.registration_lock);
     free(shared->intent_log.handoff);
     free(shared->intent_log.metrics.block_io_device_ops);

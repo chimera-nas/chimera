@@ -1221,6 +1221,16 @@ struct diskfs_il_record {
      * raised to num_blocks at fold, decremented on each block's home write or
      * supersession.  covered <=> uncovered == 0 (O(1), no per-completion scan). */
     uint32_t                  uncovered;
+
+    /* Stage A (commit-hot-path memory recycling): the record struct and its
+     * three block arrays are recycled instead of malloc/free'd per record.
+     * blocks_cap tracks the arrays' capacity (grown on demand, never shrunk),
+     * so a reused record re-mallocs only when it needs more blocks than any
+     * prior use -- zero malloc in steady state.  recycle_next links the
+     * cross-thread free pool: the push thread frees at trim (diskfs_il_free_
+     * record), the commit thread reuses at write_redo (diskfs_il_rec_alloc). */
+    uint32_t                  blocks_cap;
+    struct diskfs_il_record  *recycle_next;
 };
 
 
@@ -1306,6 +1316,14 @@ struct diskfs_intent_log {
     uint64_t                         retire_head;     /* next slot to retire (in order) */
     uint64_t                         retire_tail;     /* next submission index */
     int                              redo_inflight;   /* redo block writes in flight (commit watermark) */
+    /* Stage A: commit-hot-path memory recycling.  Lock-free (Treiber) free
+     * pools drained by the commit thread (diskfs_il_write_redo) and fed by the
+     * thread that frees each object -- the push thread for records (rec_pool,
+     * at diskfs_il_free_record) and, after Stage B, the apply thread for
+     * completion ctxs (ctx_pool).  Single-consumer (commit) / single-producer,
+     * so the Treiber pop is ABA-free. */
+    struct diskfs_il_record         *rec_pool;        /* atomic Treiber head */
+    struct diskfs_redo_ctx          *ctx_pool;        /* atomic Treiber head */
 
     /* ---------- push thread ---------- */
     struct evpl_doorbell             push_doorbell;   /* commit rings after hand-off */
@@ -1907,6 +1925,14 @@ struct diskfs_redo_ctx {
     struct diskfs_il_record  *rec;     /* owns the record image (iovs) */
     int                       segments; /* outstanding journal writes (see below) */
     uint64_t                  retire_idx; /* slot in the commit retirement ring */
+    /* Stage A: recycled instead of malloc/free'd per record.  entries_cap
+     * tracks the entries-array capacity (grown on demand); free_next links the
+     * free pool.  seq is a private copy of rec->seq so the apply thread (Stage
+     * B) advances applied_seq without dereferencing rec, which the push thread
+     * owns concurrently. */
+    uint32_t                  entries_cap;
+    uint64_t                  seq;
+    struct diskfs_redo_ctx   *free_next;
 };
 
 
