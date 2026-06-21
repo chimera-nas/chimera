@@ -10,9 +10,9 @@ CreateFileTestCaseS16,skip,inapplicable: model branch not executed
 CreateFileTestCaseS18,xfail,fidelity: expected INVALID_PARAMETER got ACCESS_DENIED
 CreateFileTestCaseS2,xfail,fidelity: expected ACCESS_DENIED got OBJECT_PATH_NOT_FOUND
 CreateFileTestCaseS20,skip,inapplicable: model branch not executed
-CreateFileTestCaseS22,xfail,fidelity: expected INVALID_PARAMETER got OBJECT_NAME_NOT_FOUND
-CreateFileTestCaseS24,xfail,fidelity: expected INVALID_PARAMETER got NOT_A_DIRECTORY
-CreateFileTestCaseS26,xfail,fidelity: expected INVALID_PARAMETER got NOT_A_DIRECTORY
+CreateFileTestCaseS22,green,
+CreateFileTestCaseS24,green,
+CreateFileTestCaseS26,green,
 CreateFileTestCaseS28,skip,inapplicable: model branch not executed
 CreateFileTestCaseS30,skip,inapplicable: model branch not executed
 CreateFileTestCaseS32,xfail,fidelity: expected OBJECT_NAME_INVALID got 3221225734
@@ -108,9 +108,9 @@ OpenFileTestCaseS14,skip,inapplicable: model branch not executed
 OpenFileTestCaseS16,xfail,fidelity: expected INVALID_PARAMETER got ACCESS_DENIED
 OpenFileTestCaseS18,skip,inapplicable: model branch not executed
 OpenFileTestCaseS2,xfail,fidelity: no parameter validation
-OpenFileTestCaseS20,xfail,fidelity: expected INVALID_PARAMETER got OBJECT_NAME_NOT_FOUND
-OpenFileTestCaseS22,xfail,fidelity: expected INVALID_PARAMETER got NOT_A_DIRECTORY
-OpenFileTestCaseS24,xfail,fidelity: expected INVALID_PARAMETER got NOT_A_DIRECTORY
+OpenFileTestCaseS20,green,
+OpenFileTestCaseS22,green,
+OpenFileTestCaseS24,green,
 OpenFileTestCaseS26,green,
 OpenFileTestCaseS28,xfail,fidelity: access check too permissive
 OpenFileTestCaseS30,xfail,fidelity: expected OBJECT_NAME_INVALID got SUCCESS
