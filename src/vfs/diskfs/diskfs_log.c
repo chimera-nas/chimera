@@ -50,17 +50,6 @@ dbg_dump_push(void)
     }
 } /* dbg_dump_push */
 
-/* TEMP push-path telemetry: written by the push thread, read+reset by the IL
- * thread's per-second tick.  Relaxed atomics (approximate is fine).  Answers:
- * is the tail-pusher STARVED (no ready blocks), SATURATED (watermark of in-flight
- * home writes), or BLOCKED (ready work exists but it isn't issuing -> stuck on a
- * lock)?  Remove after the investigation. */
-static uint64_t g_push_issued, g_push_starved, g_push_full;
-
-/* TEMP pin-balance telemetry: are records covering/discharging at the commit
- * rate (so claim pins get dropped), or are pins accumulating?  Remove later. */
-static uint64_t g_disc_records, g_disc_pins, g_disc_via_trim;
-
 /* Forward declarations (definitions below, in call-graph order) */
 
 static uint64_t
@@ -456,8 +445,6 @@ diskfs_il_discharge_record(
         return;
     }
     rec->discharged = 1;
-    __atomic_add_fetch(&g_disc_records, 1, __ATOMIC_RELAXED);
-    __atomic_add_fetch(&g_disc_pins, rec->num_blocks, __ATOMIC_RELAXED);
 
     for (i = 0; i < rec->num_blocks; i++) {
         /* Drop the snapshot buffer ref BEFORE the obligation pin so that a
@@ -492,9 +479,6 @@ diskfs_il_free_record(
 {
     /* Resources are normally already released at coverage; ensure it (no-op if
      * so) before we free the record. */
-    if (!rec->discharged) {
-        __atomic_add_fetch(&g_disc_via_trim, 1, __ATOMIC_RELAXED);
-    }
     diskfs_il_discharge_record(il, rec);
 
     /* iovs[0] is the materialized header (a real SHARED buffer) -- release it.
@@ -759,7 +743,6 @@ diskfs_push_issue(struct diskfs_intent_log *il)
             /* Ran out of ready blocks before hitting the watermark: the pusher
              * is STARVED (coverage/fold pipeline isn't feeding it), not in-flight
              * limited. */
-            __atomic_add_fetch(&g_push_starved, 1, __ATOMIC_RELAXED);
             return;
         }
 
@@ -768,7 +751,6 @@ diskfs_push_issue(struct diskfs_intent_log *il)
         e->issued_owner = e->owner;
         e->owner->inflight_refs++;
         il->push_outstanding++;
-        __atomic_add_fetch(&g_push_issued, 1, __ATOMIC_RELAXED);
         diskfs_il_push_metrics(il);
 
         diskfs_metric_il_block_io(il, DISKFS_METRIC_IO_WRITE,
@@ -780,7 +762,6 @@ diskfs_push_issue(struct diskfs_intent_log *il)
     }
     /* Fell out of the loop with ready work still possible == in-flight watermark
      * reached: the pusher is SATURATED (home-write concurrency limited). */
-    __atomic_add_fetch(&g_push_full, 1, __ATOMIC_RELAXED);
 } /* diskfs_push_issue */
 
 
@@ -1228,98 +1209,6 @@ diskfs_il_txn_reclen(struct diskfs_txn *txn)
 } /* diskfs_il_txn_reclen */
 
 
-/* --- TEMP IL throughput instrumentation (collector is single-threaded, so
- * plain counters are safe).  Printed once/sec to the daemon log to find why the
- * redo pipeline runs shallow.  Remove after the investigation. --- */
-static uint64_t g_il_calls, g_il_submits, g_il_txns, g_il_gate_redo,
-                g_il_gate_retire, g_il_empty, g_il_sum_inflight;
-static int      g_il_max_inflight;
-static uint64_t g_il_last_print_ns;
-
-static void
-diskfs_il_dbg_tick(struct diskfs_intent_log *il)
-{
-    struct timespec ts;
-    uint64_t        now;
-    double          dt;
-
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    now = (uint64_t) ts.tv_sec * 1000000000ull + (uint64_t) ts.tv_nsec;
-    if (g_il_last_print_ns == 0) {
-        g_il_last_print_ns = now;
-        return;
-    }
-    if (now - g_il_last_print_ns < 1000000000ull) {
-        return;
-    }
-    dt = (double) (now - g_il_last_print_ns) / 1e9;
-    {
-        uint64_t pi = __atomic_exchange_n(&g_push_issued, 0, __ATOMIC_RELAXED);
-        uint64_t ps = __atomic_exchange_n(&g_push_starved, 0, __ATOMIC_RELAXED);
-        uint64_t pf = __atomic_exchange_n(&g_push_full, 0, __ATOMIC_RELAXED);
-        uint64_t lh = __atomic_load_n(&il->log_head, __ATOMIC_RELAXED);
-        uint64_t lt = __atomic_load_n(&il->log_tail, __ATOMIC_RELAXED);
-        int      po = __atomic_load_n(&il->push_outstanding, __ATOMIC_RELAXED);
-        int      rne = il->ready_head ? 1 : 0;
-
-        chimera_diskfs_info(
-            "IL/s calls=%.0f submits=%.0f txns/rec=%.1f gate_redo=%.0f "
-            "gate_retire=%.0f empty=%.0f avg_inflight=%.1f max_inflight=%d "
-            "now_inflight=%d retire_depth=%u | PUSH issued=%.0f starved=%.0f "
-            "full=%.0f outstanding=%d ready=%d log_used_mb=%lu",
-            g_il_calls / dt, g_il_submits / dt,
-            g_il_submits ? (double) g_il_txns / (double) g_il_submits : 0.0,
-            g_il_gate_redo / dt, g_il_gate_retire / dt, g_il_empty / dt,
-            g_il_submits ? (double) g_il_sum_inflight / (double) g_il_submits : 0.0,
-            g_il_max_inflight, il->redo_inflight,
-            il->retire_tail - il->retire_head,
-            pi / dt, ps / dt, pf / dt, po, rne,
-            (unsigned long) ((lh - lt) >> 20));
-
-        /* Block-cache aggregate (relaxed reads, approximate): is the buffer
-         * pressure bounded by the journal, or is something retaining buffers far
-         * beyond the live working set?  log_blocks = journal bytes in use / 4K
-         * bounds how many CoW-old buffers (bufless donors) can legitimately be
-         * outstanding; if bufless >> log_blocks, buffers are being retained
-         * beyond the journal == a leak/excessive-retention bug. */
-        {
-            struct diskfs_shared      *sh = container_of(il, struct diskfs_shared,
-                                                         intent_log);
-            struct diskfs_block_cache *bc = sh->block_cache;
-            uint64_t s_pin = 0, s_lru = 0, s_free = 0, s_bufless = 0, s_nblk = 0;
-            uint32_t s_maxpin = 0, s_maxbufless = 0, si;
-
-            for (si = 0; si < DISKFS_BLOCK_CACHE_SHARDS; si++) {
-                struct diskfs_block_shard *sd = &bc->shards[si];
-                uint32_t p  = __atomic_load_n(&sd->pinned, __ATOMIC_RELAXED);
-                uint32_t bl = __atomic_load_n(&sd->n_bufless, __ATOMIC_RELAXED);
-
-                s_pin     += p;
-                s_lru     += __atomic_load_n(&sd->lru_count, __ATOMIC_RELAXED);
-                s_free    += __atomic_load_n(&sd->nfree_buffers, __ATOMIC_RELAXED);
-                s_bufless += bl;
-                s_nblk    += sd->nblocks;
-                if (p > s_maxpin) s_maxpin = p;
-                if (bl > s_maxbufless) s_maxbufless = bl;
-            }
-            chimera_diskfs_info(
-                "BLKCACHE nblocks=%lu pinned=%lu(max/shard=%u) bufless=%lu"
-                "(max/shard=%u) lru=%lu free_bufs=%lu | journal_blocks=%ld | "
-                "DISC records=%.0f/s pins=%.0f/s via_trim=%.0f/s",
-                (unsigned long) s_nblk, (unsigned long) s_pin, s_maxpin,
-                (unsigned long) s_bufless, s_maxbufless, (unsigned long) s_lru,
-                (unsigned long) s_free, (long) (((int64_t) lh - (int64_t) lt) / DISKFS_BLOCK_SIZE),
-                __atomic_exchange_n(&g_disc_records, 0, __ATOMIC_RELAXED) / dt,
-                __atomic_exchange_n(&g_disc_pins, 0, __ATOMIC_RELAXED) / dt,
-                __atomic_exchange_n(&g_disc_via_trim, 0, __ATOMIC_RELAXED) / dt);
-        }
-    }
-    g_il_calls = g_il_submits = g_il_txns = g_il_gate_redo = 0;
-    g_il_gate_retire = g_il_empty = g_il_sum_inflight = 0;
-    g_il_max_inflight  = 0;
-    g_il_last_print_ns = now;
-} /* diskfs_il_dbg_tick */
-
 static int
 diskfs_iq_process_batch(struct diskfs_intent_log *il)
 {
@@ -1333,16 +1222,11 @@ diskfs_iq_process_batch(struct diskfs_intent_log *il)
     uint32_t                 start, rounds, pass, i;
     int                      stopped = 0;
 
-    g_il_calls++;
-    diskfs_il_dbg_tick(il);
-
     if (il->redo_inflight >= DISKFS_COMMIT_WATERMARK) {
-        g_il_gate_redo++;
         return 0;
     }
 
     if (il->retire_tail - il->retire_head >= DISKFS_RETIRE_RING_SIZE) {
-        g_il_gate_retire++;
         return 0;
     }
 
@@ -1438,15 +1322,7 @@ diskfs_iq_process_batch(struct diskfs_intent_log *il)
     }
 
     if (batch_count == 0) {
-        g_il_empty++;
         return 0;
-    }
-
-    g_il_submits++;
-    g_il_txns        += batch_count;
-    g_il_sum_inflight += (uint64_t) il->redo_inflight;   /* depth at decision time */
-    if (il->redo_inflight > g_il_max_inflight) {
-        g_il_max_inflight = il->redo_inflight;
     }
 
     for (i = 0; i < batch_count; i++) {
