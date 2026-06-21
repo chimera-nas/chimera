@@ -1,0 +1,344 @@
+case,status,skip_reason
+ChangeNotificationTestCaseS0,skip,inapplicable: model branch not executed
+ChangeNotificationTestCaseS2,xfail,fidelity: expected SUCCESS got OBJECT_NAME_INVALID
+CloseFileTestCaseS0,green,
+CreateFileTestCaseS0,green,
+CreateFileTestCaseS10,green,
+CreateFileTestCaseS12,xfail,fidelity: expected INVALID_PARAMETER got OBJECT_NAME_INVALID
+CreateFileTestCaseS14,skip,inapplicable: model branch not executed
+CreateFileTestCaseS16,skip,inapplicable: model branch not executed
+CreateFileTestCaseS18,xfail,fidelity: expected INVALID_PARAMETER got ACCESS_DENIED
+CreateFileTestCaseS2,xfail,fidelity: expected ACCESS_DENIED got OBJECT_PATH_NOT_FOUND
+CreateFileTestCaseS20,skip,inapplicable: model branch not executed
+CreateFileTestCaseS22,xfail,fidelity: expected INVALID_PARAMETER got OBJECT_NAME_NOT_FOUND
+CreateFileTestCaseS24,xfail,fidelity: expected INVALID_PARAMETER got NOT_A_DIRECTORY
+CreateFileTestCaseS26,xfail,fidelity: expected INVALID_PARAMETER got NOT_A_DIRECTORY
+CreateFileTestCaseS28,skip,inapplicable: model branch not executed
+CreateFileTestCaseS30,skip,inapplicable: model branch not executed
+CreateFileTestCaseS32,xfail,fidelity: expected OBJECT_NAME_INVALID got 3221225734
+CreateFileTestCaseS34,xfail,fidelity: expected OBJECT_NAME_INVALID got OBJECT_PATH_NOT_FOUND
+CreateFileTestCaseS38,xfail,fidelity: expected OBJECT_NAME_NOT_FOUND got OBJECT_NAME_INVALID
+CreateFileTestCaseS4,xfail,fidelity: no parameter validation
+CreateFileTestCaseS40,xfail,fidelity: expected OBJECT_NAME_NOT_FOUND got OBJECT_NAME_INVALID
+CreateFileTestCaseS42,skip,unimplemented: symlink reparse fixture
+CreateFileTestCaseS44,xfail,fidelity: expected IS_A_DIRECTORY got SUCCESS
+CreateFileTestCaseS46,xfail,fidelity: no parameter validation
+CreateFileTestCaseS48,xfail,fidelity: expected CANNOT_DELETE got OBJECT_NAME_INVALID
+CreateFileTestCaseS50,green,
+CreateFileTestCaseS6,green,
+CreateFileTestCaseS8,green,
+FlushCachedDataTestCaseS0,green,
+IoCtlRequestTestCaseS0,xfail,fidelity: expected True got False
+IoCtlRequestTestCaseS10,skip,unimplemented: FSCTL
+IoCtlRequestTestCaseS100,skip,unimplemented: FSCTL
+IoCtlRequestTestCaseS102,skip,inapplicable: disabled-on-NTFS/REFS branch
+IoCtlRequestTestCaseS104,skip,unimplemented: FSCTL
+IoCtlRequestTestCaseS106,skip,unimplemented: FSCTL
+IoCtlRequestTestCaseS108,xfail,fidelity: expected IO_REPARSE_DATA_INVALID got INVALID_PARAMETER
+IoCtlRequestTestCaseS110,skip,inapplicable: disabled-on-NTFS/REFS branch
+IoCtlRequestTestCaseS112,skip,inapplicable: disabled-on-NTFS/REFS branch
+IoCtlRequestTestCaseS114,skip,inapplicable: disabled-on-NTFS/REFS branch
+IoCtlRequestTestCaseS116,skip,inapplicable: disabled-on-NTFS/REFS branch
+IoCtlRequestTestCaseS118,green,
+IoCtlRequestTestCaseS12,skip,unimplemented: FSCTL
+IoCtlRequestTestCaseS120,skip,inapplicable: disabled-on-NTFS/REFS branch
+IoCtlRequestTestCaseS122,skip,inapplicable: disabled-on-NTFS/REFS branch
+IoCtlRequestTestCaseS124,skip,inapplicable: disabled-on-NTFS/REFS branch
+IoCtlRequestTestCaseS126,green,
+IoCtlRequestTestCaseS128,skip,inapplicable: SIS (optional NTFS feature)
+IoCtlRequestTestCaseS130,skip,inapplicable: SIS (optional NTFS feature)
+IoCtlRequestTestCaseS132,skip,inapplicable: SIS (optional NTFS feature)
+IoCtlRequestTestCaseS134,skip,inapplicable: SIS (optional NTFS feature)
+IoCtlRequestTestCaseS136,skip,inapplicable: SIS (optional NTFS feature)
+IoCtlRequestTestCaseS138,skip,inapplicable: SIS (optional NTFS feature)
+IoCtlRequestTestCaseS14,xfail,fidelity: expected True got False
+IoCtlRequestTestCaseS140,skip,inapplicable: SIS (optional NTFS feature)
+IoCtlRequestTestCaseS16,skip,unimplemented: FSCTL
+IoCtlRequestTestCaseS18,xfail,fidelity: expected True got False
+IoCtlRequestTestCaseS2,skip,unimplemented: FSCTL
+IoCtlRequestTestCaseS20,green,
+IoCtlRequestTestCaseS22,xfail,fidelity: expected INVALID_PARAMETER got BUFFER_TOO_SMALL
+IoCtlRequestTestCaseS24,skip,unimplemented: FSCTL
+IoCtlRequestTestCaseS26,skip,inapplicable: disabled-on-NTFS/REFS branch
+IoCtlRequestTestCaseS28,skip,inapplicable: disabled-on-NTFS/REFS branch
+IoCtlRequestTestCaseS30,skip,inapplicable: disabled-on-NTFS/REFS branch
+IoCtlRequestTestCaseS32,skip,inapplicable: disabled-on-NTFS/REFS branch
+IoCtlRequestTestCaseS34,skip,inapplicable: disabled-on-NTFS/REFS branch
+IoCtlRequestTestCaseS36,skip,inapplicable: disabled-on-NTFS/REFS branch
+IoCtlRequestTestCaseS38,green,
+IoCtlRequestTestCaseS4,skip,unimplemented: FSCTL
+IoCtlRequestTestCaseS40,green,
+IoCtlRequestTestCaseS42,green,
+IoCtlRequestTestCaseS44,green,
+IoCtlRequestTestCaseS46,green,
+IoCtlRequestTestCaseS48,xfail,fidelity: expected True got False
+IoCtlRequestTestCaseS50,xfail,fidelity: expected BUFFER_TOO_SMALL got NOT_A_REPARSE_POINT
+IoCtlRequestTestCaseS52,green,
+IoCtlRequestTestCaseS54,xfail,fidelity: expected BUFFER_TOO_SMALL got NOT_A_REPARSE_POINT
+IoCtlRequestTestCaseS56,xfail,fidelity: expected True got False
+IoCtlRequestTestCaseS58,skip,unimplemented: FSCTL
+IoCtlRequestTestCaseS6,skip,unimplemented: FSCTL
+IoCtlRequestTestCaseS60,skip,unimplemented: FSCTL
+IoCtlRequestTestCaseS62,skip,unimplemented: FSCTL
+IoCtlRequestTestCaseS64,xfail,fidelity: expected False got True
+IoCtlRequestTestCaseS66,green,
+IoCtlRequestTestCaseS68,xfail,fidelity: expected False got True
+IoCtlRequestTestCaseS70,xfail,fidelity: expected False got True
+IoCtlRequestTestCaseS72,xfail,fidelity: expected False got True
+IoCtlRequestTestCaseS74,xfail,fidelity: expected False got True
+IoCtlRequestTestCaseS76,skip,unimplemented: FSCTL
+IoCtlRequestTestCaseS78,skip,unimplemented: FSCTL
+IoCtlRequestTestCaseS8,skip,unimplemented: FSCTL
+IoCtlRequestTestCaseS80,xfail,fidelity: expected True got False
+IoCtlRequestTestCaseS82,skip,unimplemented: FSCTL
+IoCtlRequestTestCaseS84,skip,unimplemented: FSCTL
+IoCtlRequestTestCaseS86,skip,unimplemented: FSCTL
+IoCtlRequestTestCaseS88,skip,unimplemented: FSCTL
+IoCtlRequestTestCaseS90,skip,unimplemented: FSCTL
+IoCtlRequestTestCaseS92,skip,inapplicable: model branch not executed
+IoCtlRequestTestCaseS94,skip,inapplicable: model branch not executed
+IoCtlRequestTestCaseS96,skip,inapplicable: model branch not executed
+IoCtlRequestTestCaseS98,skip,inapplicable: model branch not executed
+LockAndUnlockTestCaseS0,xfail,fidelity: expected SUCCESS got OBJECT_NAME_INVALID
+LockAndUnlockTestCaseS2,green,
+OpenFileTestCaseS0,xfail,fidelity: access check too permissive
+OpenFileTestCaseS10,xfail,fidelity: no parameter validation
+OpenFileTestCaseS12,skip,inapplicable: model branch not executed
+OpenFileTestCaseS14,skip,inapplicable: model branch not executed
+OpenFileTestCaseS16,xfail,fidelity: expected INVALID_PARAMETER got ACCESS_DENIED
+OpenFileTestCaseS18,skip,inapplicable: model branch not executed
+OpenFileTestCaseS2,xfail,fidelity: no parameter validation
+OpenFileTestCaseS20,xfail,fidelity: expected INVALID_PARAMETER got OBJECT_NAME_NOT_FOUND
+OpenFileTestCaseS22,xfail,fidelity: expected INVALID_PARAMETER got NOT_A_DIRECTORY
+OpenFileTestCaseS24,xfail,fidelity: expected INVALID_PARAMETER got NOT_A_DIRECTORY
+OpenFileTestCaseS26,green,
+OpenFileTestCaseS28,xfail,fidelity: access check too permissive
+OpenFileTestCaseS30,xfail,fidelity: expected OBJECT_NAME_INVALID got SUCCESS
+OpenFileTestCaseS32,xfail,fidelity: expected OBJECT_NAME_INVALID got SUCCESS
+OpenFileTestCaseS36,green,
+OpenFileTestCaseS38,green,
+OpenFileTestCaseS4,green,
+OpenFileTestCaseS40,skip,unimplemented: symlink reparse fixture
+OpenFileTestCaseS42,green,
+OpenFileTestCaseS44,xfail,fidelity: access check too permissive
+OpenFileTestCaseS46,xfail,fidelity: access check too permissive
+OpenFileTestCaseS48,xfail,fidelity: expected CANNOT_DELETE got SUCCESS
+OpenFileTestCaseS50,green,
+OpenFileTestCaseS52,skip,inapplicable: model branch not executed
+OpenFileTestCaseS54,skip,inapplicable: model branch not executed
+OpenFileTestCaseS56,green,
+OpenFileTestCaseS58,green,
+OpenFileTestCaseS6,green,
+OpenFileTestCaseS60,green,
+OpenFileTestCaseS8,green,
+QueryDirectoryTestCaseS0,skip,inapplicable: model branch not executed
+QueryDirectoryTestCaseS10,skip,inapplicable: model branch not executed
+QueryDirectoryTestCaseS12,skip,inapplicable: model branch not executed
+QueryDirectoryTestCaseS14,skip,inapplicable: model branch not executed
+QueryDirectoryTestCaseS16,skip,inapplicable: model branch not executed
+QueryDirectoryTestCaseS18,skip,inapplicable: model branch not executed
+QueryDirectoryTestCaseS2,skip,inapplicable: model branch not executed
+QueryDirectoryTestCaseS20,skip,inapplicable: model branch not executed
+QueryDirectoryTestCaseS22,skip,inapplicable: model branch not executed
+QueryDirectoryTestCaseS24,skip,inapplicable: model branch not executed
+QueryDirectoryTestCaseS26,xfail,fidelity: expected INFO_LENGTH_MISMATCH got NO_MORE_FILES
+QueryDirectoryTestCaseS28,skip,inapplicable: model branch not executed
+QueryDirectoryTestCaseS30,xfail,fidelity: expected NO_SUCH_FILE got NO_MORE_FILES
+QueryDirectoryTestCaseS32,xfail,fidelity: expected INFO_LENGTH_MISMATCH got NO_MORE_FILES
+QueryDirectoryTestCaseS34,xfail,fidelity: expected INFO_LENGTH_MISMATCH got NO_MORE_FILES
+QueryDirectoryTestCaseS36,xfail,fidelity: expected INFO_LENGTH_MISMATCH got NO_MORE_FILES
+QueryDirectoryTestCaseS38,xfail,fidelity: expected INFO_LENGTH_MISMATCH got NO_MORE_FILES
+QueryDirectoryTestCaseS4,skip,inapplicable: model branch not executed
+QueryDirectoryTestCaseS6,skip,inapplicable: model branch not executed
+QueryDirectoryTestCaseS8,skip,inapplicable: model branch not executed
+QueryFileInformationTestCaseS0,green,
+QueryFileInformationTestCaseS10,green,
+QueryFileInformationTestCaseS12,green,
+QueryFileInformationTestCaseS14,green,
+QueryFileInformationTestCaseS16,green,
+QueryFileInformationTestCaseS18,skip,unimplemented: info-class/op
+QueryFileInformationTestCaseS2,skip,unimplemented: info-class/op
+QueryFileInformationTestCaseS20,skip,unimplemented: info-class/op
+QueryFileInformationTestCaseS22,skip,unimplemented: info-class/op
+QueryFileInformationTestCaseS24,skip,unimplemented: info-class/op
+QueryFileInformationTestCaseS26,green,
+QueryFileInformationTestCaseS28,xfail,fidelity: no info-class validation
+QueryFileInformationTestCaseS30,skip,unimplemented: info-class/op
+QueryFileInformationTestCaseS32,skip,unimplemented: info-class/op
+QueryFileInformationTestCaseS34,skip,unimplemented: info-class/op
+QueryFileInformationTestCaseS36,green,
+QueryFileInformationTestCaseS38,green,
+QueryFileInformationTestCaseS4,green,
+QueryFileInformationTestCaseS40,green,
+QueryFileInformationTestCaseS42,xfail,fidelity: expected SizeofFILE_COMPRESSION_INFORMATION got NotSet
+QueryFileInformationTestCaseS44,green,
+QueryFileInformationTestCaseS46,green,
+QueryFileInformationTestCaseS48,green,
+QueryFileInformationTestCaseS50,green,
+QueryFileInformationTestCaseS52,skip,inapplicable: model branch not executed
+QueryFileInformationTestCaseS54,green,
+QueryFileInformationTestCaseS56,skip,unimplemented: info-class/op
+QueryFileInformationTestCaseS58,green,
+QueryFileInformationTestCaseS6,green,
+QueryFileInformationTestCaseS60,green,
+QueryFileInformationTestCaseS62,skip,unimplemented: info-class/op
+QueryFileInformationTestCaseS64,skip,inapplicable: model branch not executed
+QueryFileInformationTestCaseS66,skip,inapplicable: model branch not executed
+QueryFileInformationTestCaseS68,xfail,fidelity: expected FieldOffsetFILE_NAME_INFORMATION_FileNameAddOutputBuffer_FileNameLength got NotSet
+QueryFileInformationTestCaseS70,green,
+QueryFileInformationTestCaseS72,green,
+QueryFileInformationTestCaseS74,green,
+QueryFileInformationTestCaseS76,skip,unimplemented: info-class/op
+QueryFileInformationTestCaseS78,skip,unimplemented: info-class/op
+QueryFileInformationTestCaseS8,green,
+QueryFileInformationTestCaseS80,skip,unimplemented: info-class/op
+QueryFileInformationTestCaseS82,skip,unimplemented: info-class/op
+QueryFileInformationTestCaseS84,skip,unimplemented: info-class/op
+QueryFileInformationTestCaseS86,skip,unimplemented: info-class/op
+QueryFileSystemInformationTestCaseS0,green,
+QueryFileSystemInformationTestCaseS10,green,
+QueryFileSystemInformationTestCaseS12,skip,unimplemented: info-class/op
+QueryFileSystemInformationTestCaseS14,skip,unimplemented: info-class/op
+QueryFileSystemInformationTestCaseS16,skip,unimplemented: info-class/op
+QueryFileSystemInformationTestCaseS18,green,
+QueryFileSystemInformationTestCaseS2,green,
+QueryFileSystemInformationTestCaseS20,skip,unimplemented: info-class/op
+QueryFileSystemInformationTestCaseS22,green,
+QueryFileSystemInformationTestCaseS24,green,
+QueryFileSystemInformationTestCaseS26,green,
+QueryFileSystemInformationTestCaseS28,green,
+QueryFileSystemInformationTestCaseS30,skip,unimplemented: info-class/op
+QueryFileSystemInformationTestCaseS32,green,
+QueryFileSystemInformationTestCaseS34,green,
+QueryFileSystemInformationTestCaseS36,green,
+QueryFileSystemInformationTestCaseS38,skip,unimplemented: info-class/op
+QueryFileSystemInformationTestCaseS4,green,
+QueryFileSystemInformationTestCaseS40,green,
+QueryFileSystemInformationTestCaseS42,green,
+QueryFileSystemInformationTestCaseS44,green,
+QueryFileSystemInformationTestCaseS46,green,
+QueryFileSystemInformationTestCaseS6,skip,unimplemented: info-class/op
+QueryFileSystemInformationTestCaseS8,skip,unimplemented: info-class/op
+QuerySecurityInformationTestCaseS0,green,
+QuerySecurityInformationTestCaseS10,xfail,fidelity: security-descriptor
+QuerySecurityInformationTestCaseS12,xfail,fidelity: security-descriptor
+QuerySecurityInformationTestCaseS14,xfail,fidelity: security-descriptor
+QuerySecurityInformationTestCaseS16,xfail,fidelity: security-descriptor
+QuerySecurityInformationTestCaseS18,xfail,fidelity: security-descriptor
+QuerySecurityInformationTestCaseS2,green,
+QuerySecurityInformationTestCaseS20,xfail,fidelity: security-descriptor
+QuerySecurityInformationTestCaseS22,xfail,fidelity: security-descriptor
+QuerySecurityInformationTestCaseS4,xfail,fidelity: security-descriptor
+QuerySecurityInformationTestCaseS6,xfail,fidelity: security-descriptor
+QuerySecurityInformationTestCaseS8,xfail,fidelity: security-descriptor
+ReadFileTestCaseS0,green,
+ReadFileTestCaseS2,green,
+ReadFileTestCaseS4,xfail,fidelity: expected INVALID_PARAMETER got END_OF_FILE
+SetFileAllocOrObjIdInformationTestCaseS0,skip,unimplemented: info-class/op
+SetFileAllocOrObjIdInformationTestCaseS10,skip,unimplemented: info-class/op
+SetFileAllocOrObjIdInformationTestCaseS2,skip,unimplemented: info-class/op
+SetFileAllocOrObjIdInformationTestCaseS4,green,
+SetFileAllocOrObjIdInformationTestCaseS6,xfail,fidelity: no parameter validation
+SetFileAllocOrObjIdInformationTestCaseS8,skip,unimplemented: info-class/op
+SetFileBasicInformationTestCaseS0,xfail,fidelity: no buffer-length validation
+SetFileBasicInformationTestCaseS10,xfail,fidelity: no parameter validation
+SetFileBasicInformationTestCaseS12,xfail,fidelity: no buffer-length validation
+SetFileBasicInformationTestCaseS14,xfail,fidelity: no buffer-length validation
+SetFileBasicInformationTestCaseS2,xfail,fidelity: no buffer-length validation
+SetFileBasicInformationTestCaseS4,xfail,fidelity: no parameter validation
+SetFileBasicInformationTestCaseS6,xfail,fidelity: no parameter validation
+SetFileBasicInformationTestCaseS8,xfail,fidelity: no parameter validation
+SetFileDispositionInformationTestCaseS0,green,
+SetFileDispositionInformationTestCaseS2,green,
+SetFileEndOfFileInformationTestCaseS0,green,
+SetFileEndOfFileInformationTestCaseS2,xfail,fidelity: no parameter validation
+SetFileEndOfFileInformationTestCaseS4,xfail,fidelity: no parameter validation
+SetFileEndOfFileInformationTestCaseS6,green,
+SetFileFullEaInformationTestCaseS0,green,
+SetFileFullEaInformationTestCaseS2,xfail,fidelity: EA-name validation
+SetFileFullEaInformationTestCaseS4,green,
+SetFileFullEaInformationTestCaseS6,xfail,fidelity: EA-name validation
+SetFileLinkInformationTestCaseS0,green,
+SetFileLinkInformationTestCaseS2,xfail,fidelity: expected OBJECT_NAME_INVALID got SUCCESS
+SetFileLinkInformationTestCaseS4,xfail,fidelity: expected OBJECT_NAME_INVALID got 3221225701
+SetFileLinkInformationTestCaseS6,xfail,fidelity: expected OBJECT_NAME_COLLISION got 3221225701
+SetFileModeInformationTestCaseS0,skip,unimplemented: info-class/op
+SetFileModeInformationTestCaseS2,skip,unimplemented: info-class/op
+SetFileModeInformationTestCaseS4,skip,unimplemented: info-class/op
+SetFileModeInformationTestCaseS6,skip,unimplemented: info-class/op
+SetFilePositionInformationTestCaseS0,green,
+SetFilePositionInformationTestCaseS10,skip,inapplicable: model branch not executed
+SetFilePositionInformationTestCaseS2,green,
+SetFilePositionInformationTestCaseS4,green,
+SetFilePositionInformationTestCaseS6,green,
+SetFilePositionInformationTestCaseS8,xfail,fidelity: no parameter validation
+SetFileRenameInformationTestCaseS0,green,
+SetFileRenameInformationTestCaseS10,green,
+SetFileRenameInformationTestCaseS12,green,
+SetFileRenameInformationTestCaseS14,green,
+SetFileRenameInformationTestCaseS16,green,
+SetFileRenameInformationTestCaseS2,green,
+SetFileRenameInformationTestCaseS4,green,
+SetFileRenameInformationTestCaseS6,green,
+SetFileRenameInformationTestCaseS8,green,
+SetFileShortNameInformationTestCaseS0,skip,inapplicable: model branch not executed
+SetFileShortNameInformationTestCaseS2,skip,inapplicable: model branch not executed
+SetFileShortNameInformationTestCaseS4,skip,unimplemented: info-class/op
+SetFileShortNameInformationTestCaseS6,skip,unimplemented: info-class/op
+SetFileShortNameInformationTestCaseS8,skip,inapplicable: model branch not executed
+SetFileStreamRenameInformationTestCaseS0,xfail,fidelity: no parameter validation
+SetFileStreamRenameInformationTestCaseS10,xfail,fidelity: ADS stream-rename semantics
+SetFileStreamRenameInformationTestCaseS12,xfail,fidelity: no parameter validation
+SetFileStreamRenameInformationTestCaseS14,xfail,fidelity: no parameter validation
+SetFileStreamRenameInformationTestCaseS16,xfail,fidelity: ADS stream-rename semantics
+SetFileStreamRenameInformationTestCaseS18,xfail,fidelity: ADS stream-rename semantics
+SetFileStreamRenameInformationTestCaseS2,skip,inapplicable: model branch not executed
+SetFileStreamRenameInformationTestCaseS20,xfail,fidelity: ADS stream-rename semantics
+SetFileStreamRenameInformationTestCaseS22,xfail,fidelity: ADS stream-rename semantics
+SetFileStreamRenameInformationTestCaseS24,skip,inapplicable: model branch not executed
+SetFileStreamRenameInformationTestCaseS26,skip,inapplicable: model branch not executed
+SetFileStreamRenameInformationTestCaseS28,green,
+SetFileStreamRenameInformationTestCaseS30,xfail,fidelity: no parameter validation
+SetFileStreamRenameInformationTestCaseS32,green,
+SetFileStreamRenameInformationTestCaseS34,green,
+SetFileStreamRenameInformationTestCaseS36,green,
+SetFileStreamRenameInformationTestCaseS38,xfail,fidelity: ADS stream-rename semantics
+SetFileStreamRenameInformationTestCaseS4,xfail,fidelity: ADS stream-rename semantics
+SetFileStreamRenameInformationTestCaseS40,xfail,fidelity: ADS stream-rename semantics
+SetFileStreamRenameInformationTestCaseS42,skip,inapplicable: model branch not executed
+SetFileStreamRenameInformationTestCaseS44,xfail,fidelity: no parameter validation
+SetFileStreamRenameInformationTestCaseS46,xfail,fidelity: no parameter validation
+SetFileStreamRenameInformationTestCaseS48,xfail,fidelity: ADS stream-rename semantics
+SetFileStreamRenameInformationTestCaseS50,xfail,fidelity: ADS stream-rename semantics
+SetFileStreamRenameInformationTestCaseS52,green,
+SetFileStreamRenameInformationTestCaseS54,xfail,fidelity: ADS stream-rename semantics
+SetFileStreamRenameInformationTestCaseS56,green,
+SetFileStreamRenameInformationTestCaseS58,xfail,fidelity: ADS stream-rename semantics
+SetFileStreamRenameInformationTestCaseS6,xfail,fidelity: ADS stream-rename semantics
+SetFileStreamRenameInformationTestCaseS60,xfail,fidelity: no parameter validation
+SetFileStreamRenameInformationTestCaseS62,skip,inapplicable: model branch not executed
+SetFileStreamRenameInformationTestCaseS64,xfail,fidelity: ADS stream-rename semantics
+SetFileStreamRenameInformationTestCaseS66,xfail,fidelity: ADS stream-rename semantics
+SetFileStreamRenameInformationTestCaseS68,xfail,fidelity: no parameter validation
+SetFileStreamRenameInformationTestCaseS8,xfail,fidelity: ADS stream-rename semantics
+SetFileValidDataLengthInformationTestCaseS0,skip,unimplemented: info-class/op
+SetFileValidDataLengthInformationTestCaseS2,skip,unimplemented: info-class/op
+SetSecurityInformationTestCaseS0,skip,inapplicable: model branch not executed
+SetSecurityInformationTestCaseS10,xfail,fidelity: access check too permissive
+SetSecurityInformationTestCaseS12,xfail,fidelity: access check too permissive
+SetSecurityInformationTestCaseS14,skip,inapplicable: model branch not executed
+SetSecurityInformationTestCaseS16,green,
+SetSecurityInformationTestCaseS18,xfail,fidelity: access check too permissive
+SetSecurityInformationTestCaseS2,xfail,fidelity: access check too permissive
+SetSecurityInformationTestCaseS20,xfail,fidelity: access check too permissive
+SetSecurityInformationTestCaseS22,xfail,fidelity: access check too permissive
+SetSecurityInformationTestCaseS24,skip,inapplicable: model branch not executed
+SetSecurityInformationTestCaseS26,skip,inapplicable: model branch not executed
+SetSecurityInformationTestCaseS28,skip,inapplicable: model branch not executed
+SetSecurityInformationTestCaseS30,xfail,fidelity: access check too permissive
+SetSecurityInformationTestCaseS32,xfail,fidelity: access check too permissive
+SetSecurityInformationTestCaseS34,green,
+SetSecurityInformationTestCaseS4,xfail,fidelity: access check too permissive
+SetSecurityInformationTestCaseS6,xfail,fidelity: access check too permissive
+SetSecurityInformationTestCaseS8,xfail,fidelity: access check too permissive
+WriteFileTestCaseS0,xfail,fidelity: expected 0 got 1

@@ -46,12 +46,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WPTS_PTFCONFIG_DIR="${WPTS_PTFCONFIG_DIR:-${SCRIPT_DIR}/../src/server/smb/tests/wpts}"
 
 # Which WPTS suite to drive.  Defaults to MS-SMB2 (the original behavior); set
-# WPTS_SUITE=MS-FSA to run the File System Algorithms suite against the same
-# daemon.  The suite DLL, its deployment ptfconfig, and the TRX name follow.
+# WPTS_SUITE=MS-FSA to run the File System Algorithms suite, or MS-FSAModel for
+# its model-based variant, against the same daemon.  The suite DLL, its
+# deployment ptfconfig, and the TRX name follow.
 WPTS_SUITE="${WPTS_SUITE:-MS-SMB2}"
 case "$WPTS_SUITE" in
-    MS-SMB2) WPTS_SUITE_DLL="MS-SMB2_ServerTestSuite.dll"; WPTS_TRX="SMB2TestResult.trx" ;;
-    MS-FSA)  WPTS_SUITE_DLL="MS-FSA_ServerTestSuite.dll";  WPTS_TRX="FSATestResult.trx" ;;
+    MS-SMB2)     WPTS_SUITE_DLL="MS-SMB2_ServerTestSuite.dll";     WPTS_TRX="SMB2TestResult.trx" ;;
+    MS-FSA)      WPTS_SUITE_DLL="MS-FSA_ServerTestSuite.dll";      WPTS_TRX="FSATestResult.trx" ;;
+    MS-FSAModel) WPTS_SUITE_DLL="MS-FSAModel_ServerTestSuite.dll"; WPTS_TRX="FSAModelTestResult.trx" ;;
     *) echo "unknown WPTS_SUITE: $WPTS_SUITE" >&2; exit 2 ;;
 esac
 WPTS_SUITE_PTFCONFIG="${WPTS_SUITE}_ServerTestSuite.deployment.ptfconfig"
@@ -266,9 +268,9 @@ if [ "${CHIMERA_SMB_SYMLINK:-0}" = "1" ]; then
     export CHIMERA_SMB_SEED_SYMLINKS="$BACKEND"
 fi
 
-# The MS-FSA suite opens fixtures (ExistingFolder + ExistingFile.txt) it expects
-# to pre-exist on the share; have the daemon seed them at startup.
-if [ "$WPTS_SUITE" = "MS-FSA" ]; then
+# The MS-FSA / MS-FSAModel suites open fixtures (ExistingFolder + ExistingFile.txt)
+# they expect to pre-exist on the share; have the daemon seed them at startup.
+if [ "$WPTS_SUITE" = "MS-FSA" ] || [ "$WPTS_SUITE" = "MS-FSAModel" ]; then
     export CHIMERA_SMB_SEED_FSA="$BACKEND"
 fi
 

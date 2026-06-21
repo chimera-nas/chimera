@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SPDX-FileCopyrightText: 2026 Chimera-NAS Project Contributors
+  SPDX-License-Identifier: Unlicense
+
+  Chimera deployment overrides for the WPTS MS-FSAModel suite (the model-based
+  variant of MS-FSA).  It carries no properties of its own: the FSA capability
+  group comes from the included MS-FSA deployment profile, and the SUT identity
+  and credentials from the CommonTestSuite deployment profile that MS-FSA pulls
+  in.  Present so wpts_smb_test_wrapper.sh can stage a chimera-owned suite
+  ptfconfig next to the DLL (PTF auto-loads it by real path).
+-->
+<TestSite xmlns="http://schemas.microsoft.com/windows/ProtocolsTest/2007/07/TestConfig"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://schemas.microsoft.com/windows/ProtocolsTest/2007/07/TestConfig http://schemas.microsoft.com/windows/ProtocolsTest/2007/07/TestConfig.xsd">
+  <Include>
+    <File name="MS-FSA_ServerTestSuite.deployment.ptfconfig"/>
+  </Include>
+
+  <Properties/>
+
+</TestSite>
