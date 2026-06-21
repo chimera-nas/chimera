@@ -553,6 +553,15 @@ chimera_smb_create_gen_open_file(
     open_file->lease_flags        = 0;
     open_file->durable_flags      = 0;
     open_file->durable_timeout_ms = 0;
+    /* Clear the resiliency state too (open_file is reused from a free list
+     * without being zeroed): a slot recycled from a prior FSCTL_LMR_REQUEST_
+     * RESILIENCY handle would otherwise carry a stale resilient==true, making
+     * this open's own resiliency request skip its durable-registry registration
+     * (smb_proc_ioctl.c gates registration on !resilient) -- so a later reconnect
+     * finds no parked handle and fails OBJECT_NAME_NOT_FOUND (#845:
+     * BVT_ResilientHandle_LockSequence_Lease flaked under batch load). */
+    open_file->resilient            = 0;
+    open_file->resilient_timeout_ms = 0;
     /* No caching grant until the caching block below acquires one (open_file is
      * reused from a free list without being zeroed). */
     open_file->grant = NULL;
