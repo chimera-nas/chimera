@@ -240,11 +240,11 @@ SetFileAllocOrObjIdInformationTestCaseS2,skip,unimplemented: info-class/op
 SetFileAllocOrObjIdInformationTestCaseS4,green,
 SetFileAllocOrObjIdInformationTestCaseS6,xfail,fidelity: no parameter validation
 SetFileAllocOrObjIdInformationTestCaseS8,skip,unimplemented: info-class/op
-SetFileBasicInformationTestCaseS0,xfail,fidelity: no buffer-length validation
+SetFileBasicInformationTestCaseS0,green,
 SetFileBasicInformationTestCaseS10,xfail,fidelity: no parameter validation
-SetFileBasicInformationTestCaseS12,xfail,fidelity: no buffer-length validation
-SetFileBasicInformationTestCaseS14,xfail,fidelity: no buffer-length validation
-SetFileBasicInformationTestCaseS2,xfail,fidelity: no buffer-length validation
+SetFileBasicInformationTestCaseS12,green,
+SetFileBasicInformationTestCaseS14,green,
+SetFileBasicInformationTestCaseS2,green,
 SetFileBasicInformationTestCaseS4,xfail,fidelity: no parameter validation
 SetFileBasicInformationTestCaseS6,xfail,fidelity: no parameter validation
 SetFileBasicInformationTestCaseS8,xfail,fidelity: no parameter validation

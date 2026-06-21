@@ -498,6 +498,15 @@ chimera_smb_parse_set_info(
         case SMB2_INFO_FILE:
             switch (request->set_info.info_class) {
                 case SMB2_FILE_BASIC_INFO:
+                    /* [MS-FSA] 2.1.5.14.2 / [MS-FSCC] 2.4.7: the input buffer
+                     * must be at least sizeof(FILE_BASIC_INFORMATION) (40 bytes:
+                     * four 8-byte timestamps + 4-byte FileAttributes + 4-byte
+                     * Reserved).  A shorter buffer is rejected with
+                     * STATUS_INFO_LENGTH_MISMATCH rather than silently accepted
+                     * (WPTS MS-FSAModel SetFileBasicInformation cases). */
+                    if (unlikely(request->set_info.buffer_length < SMB2_FILE_BASIC_INFO_SIZE)) {
+                        return chimera_smb_parse_reject(request, SMB2_STATUS_INFO_LENGTH_MISMATCH);
+                    }
                     rc = chimera_smb_parse_basic_info(request_cursor, &request->set_info.attrs);
                     break;
                 case SMB2_FILE_DISPOSITION_INFO:
