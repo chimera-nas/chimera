@@ -5204,5 +5204,19 @@ chimera_smb_parse_create(
         }
     }
 
+    /* Leasing was introduced in SMB 2.1.  Per MS-SMB2 3.3.5.9, if the negotiated
+     * dialect does not support leasing (i.e. it is "2.0.2"), the server MUST
+     * ignore the "RqLs" create context: it acquires no lease and emits no lease
+     * response context (ReturnLeaseContextNotIncluded).  Drop the RQLS request
+     * bits here so neither the lease-acquisition path nor the response-context
+     * emitter acts on them.  (The standalone context-parser unit test has no
+     * connection, so this dialect gate lives in the wire-parse path, not the
+     * shared parser.) */
+    if (request->compound && request->compound->conn &&
+        request->compound->conn->dialect < SMB2_DIALECT_2_1) {
+        request->create.ctx_present_mask &= ~(CHIMERA_SMB_CREATE_CTX_RQLS |
+                                              CHIMERA_SMB_CREATE_CTX_RQLS_V2);
+    }
+
     return 0;
 } /* chimera_smb_parse_create */

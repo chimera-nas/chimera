@@ -199,20 +199,20 @@ BreakReadLeaseV1TestCaseS223,base,green,0,
 BreakReadLeaseV1TestCaseS231,base,xfail,0,executed but fails (candidate defect)
 BreakReadLeaseV1TestCaseS247,base,green,0,
 BreakReadLeaseV1TestCaseS259,base,xfail,0,executed but fails (candidate defect)
-BreakReadLeaseV1TestCaseS271,base,xfail,0,executed but fails (candidate defect)
-BreakReadLeaseV1TestCaseS292,base,xfail,0,executed but fails (candidate defect)
-BreakReadLeaseV1TestCaseS299,base,xfail,0,executed but fails (candidate defect)
-BreakReadLeaseV1TestCaseS309,base,xfail,0,executed but fails (candidate defect)
-BreakReadLeaseV1TestCaseS317,base,xfail,0,executed but fails (candidate defect)
-BreakReadLeaseV1TestCaseS329,base,xfail,0,executed but fails (candidate defect)
-BreakReadLeaseV1TestCaseS337,base,xfail,0,executed but fails (candidate defect)
-BreakReadLeaseV1TestCaseS345,base,xfail,0,executed but fails (candidate defect)
-BreakReadLeaseV1TestCaseS347,base,xfail,0,executed but fails (candidate defect)
-BreakReadLeaseV1TestCaseS359,base,xfail,0,executed but fails (candidate defect)
-BreakReadLeaseV1TestCaseS371,base,xfail,0,executed but fails (candidate defect)
-BreakReadLeaseV1TestCaseS379,base,xfail,0,executed but fails (candidate defect)
-BreakReadLeaseV1TestCaseS391,base,xfail,0,executed but fails (candidate defect)
-BreakReadLeaseV1TestCaseS399,base,xfail,0,executed but fails (candidate defect)
+BreakReadLeaseV1TestCaseS271,base,green,0,
+BreakReadLeaseV1TestCaseS292,base,green,0,
+BreakReadLeaseV1TestCaseS299,base,green,0,
+BreakReadLeaseV1TestCaseS309,base,green,0,
+BreakReadLeaseV1TestCaseS317,base,green,0,
+BreakReadLeaseV1TestCaseS329,base,green,0,
+BreakReadLeaseV1TestCaseS337,base,green,0,
+BreakReadLeaseV1TestCaseS345,base,green,0,
+BreakReadLeaseV1TestCaseS347,base,green,0,
+BreakReadLeaseV1TestCaseS359,base,green,0,
+BreakReadLeaseV1TestCaseS371,base,green,0,
+BreakReadLeaseV1TestCaseS379,base,green,0,
+BreakReadLeaseV1TestCaseS391,base,green,0,
+BreakReadLeaseV1TestCaseS399,base,green,0,
 BreakReadLeaseV1TestCaseS407,base,green,0,
 BreakReadLeaseV1TestCaseS423,base,green,0,
 BreakReadLeaseV1TestCaseS439,base,xfail,0,executed but fails (candidate defect)
@@ -233,7 +233,7 @@ BreakReadLeaseV1TestCaseS607,base,xfail,0,executed but fails (candidate defect)
 BreakReadLeaseV1TestCaseS623,base,green,0,
 BreakReadLeaseV1TestCaseS631,base,xfail,0,executed but fails (candidate defect)
 BreakReadLeaseV1TestCaseS643,base,green,0,
-BreakReadLeaseV1TestCaseS651,base,xfail,0,executed but fails (candidate defect)
+BreakReadLeaseV1TestCaseS651,base,green,0,
 BreakReadLeaseV1TestCaseS659,base,green,0,
 BreakReadLeaseV1TestCaseS82,base,green,0,
 BreakReadLeaseV1TestCaseS98,base,green,0,
@@ -435,7 +435,7 @@ BreakReadWriteLeaseV1TestCaseS1194,base,green,0,
 BreakReadWriteLeaseV1TestCaseS1215,base,green,0,
 BreakReadWriteLeaseV1TestCaseS1232,base,green,0,
 BreakReadWriteLeaseV1TestCaseS1245,base,green,0,
-BreakReadWriteLeaseV1TestCaseS1266,base,xfail,0,executed but fails (candidate defect)
+BreakReadWriteLeaseV1TestCaseS1266,base,green,0,
 BreakReadWriteLeaseV1TestCaseS1268,base,green,0,
 BreakReadWriteLeaseV1TestCaseS1289,base,green,0,
 BreakReadWriteLeaseV1TestCaseS155,base,green,0,
@@ -446,17 +446,17 @@ BreakReadWriteLeaseV1TestCaseS315,base,green,0,
 BreakReadWriteLeaseV1TestCaseS355,base,green,0,
 BreakReadWriteLeaseV1TestCaseS387,base,green,0,
 BreakReadWriteLeaseV1TestCaseS411,base,green,0,
-BreakReadWriteLeaseV1TestCaseS435,base,xfail,0,executed but fails (candidate defect)
-BreakReadWriteLeaseV1TestCaseS504,base,xfail,0,executed but fails (candidate defect)
-BreakReadWriteLeaseV1TestCaseS544,base,xfail,0,executed but fails (candidate defect)
-BreakReadWriteLeaseV1TestCaseS584,base,xfail,0,executed but fails (candidate defect)
-BreakReadWriteLeaseV1TestCaseS624,base,xfail,0,executed but fails (candidate defect)
-BreakReadWriteLeaseV1TestCaseS664,base,xfail,0,executed but fails (candidate defect)
-BreakReadWriteLeaseV1TestCaseS704,base,xfail,0,executed but fails (candidate defect)
-BreakReadWriteLeaseV1TestCaseS744,base,xfail,0,executed but fails (candidate defect)
+BreakReadWriteLeaseV1TestCaseS435,base,green,0,
+BreakReadWriteLeaseV1TestCaseS504,base,green,0,
+BreakReadWriteLeaseV1TestCaseS544,base,green,0,
+BreakReadWriteLeaseV1TestCaseS584,base,green,0,
+BreakReadWriteLeaseV1TestCaseS624,base,green,0,
+BreakReadWriteLeaseV1TestCaseS664,base,green,0,
+BreakReadWriteLeaseV1TestCaseS704,base,green,0,
+BreakReadWriteLeaseV1TestCaseS744,base,green,0,
 BreakReadWriteLeaseV1TestCaseS75,base,green,0,
-BreakReadWriteLeaseV1TestCaseS776,base,xfail,0,executed but fails (candidate defect)
-BreakReadWriteLeaseV1TestCaseS800,base,xfail,0,executed but fails (candidate defect)
+BreakReadWriteLeaseV1TestCaseS776,base,green,0,
+BreakReadWriteLeaseV1TestCaseS800,base,green,0,
 BreakReadWriteLeaseV1TestCaseS840,base,green,0,
 BreakReadWriteLeaseV1TestCaseS890,base,green,0,
 BreakReadWriteLeaseV1TestCaseS911,base,xfail,0,executed but fails (candidate defect)
