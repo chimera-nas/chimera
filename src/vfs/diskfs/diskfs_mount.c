@@ -732,7 +732,7 @@ diskfs_recover_log(
             (hdr->reclen & (DISKFS_BLOCK_SIZE - 1)) ||
             hdr->reclen != diskfs_il_hdr_len(hdr->num_blocks, hdr->num_deltas) +
             (uint64_t) hdr->num_blocks * DISKFS_BLOCK_SIZE ||
-            o + hdr->reclen > SM_INTENT_LOG_SIZE) {
+            o + hdr->reclen > intent_log_size) {
             continue;
         }
         lo           = hdr->csum_lo;

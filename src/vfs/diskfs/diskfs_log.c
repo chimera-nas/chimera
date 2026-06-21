@@ -50,6 +50,17 @@ dbg_dump_push(void)
     }
 } /* dbg_dump_push */
 
+/* TEMP push-path telemetry: written by the push thread, read+reset by the IL
+ * thread's per-second tick.  Relaxed atomics (approximate is fine).  Answers:
+ * is the tail-pusher STARVED (no ready blocks), SATURATED (watermark of in-flight
+ * home writes), or BLOCKED (ready work exists but it isn't issuing -> stuck on a
+ * lock)?  Remove after the investigation. */
+static uint64_t g_push_issued, g_push_starved, g_push_full;
+
+/* TEMP pin-balance telemetry: are records covering/discharging at the commit
+ * rate (so claim pins get dropped), or are pins accumulating?  Remove later. */
+static uint64_t g_disc_records, g_disc_pins, g_disc_via_trim;
+
 /* Forward declarations (definitions below, in call-graph order) */
 
 static uint64_t
@@ -413,35 +424,78 @@ diskfs_ready_pop(struct diskfs_intent_log *il)
 
 static void diskfs_push_unpin_block(
     struct diskfs_intent_log *il,
-    uint32_t                  dev,
-    uint64_t                  off);
+    struct diskfs_block      *blk);
+
+/*
+ * Release a record's per-block resources: drop the submitting txn's claim pin
+ * on each block (diskfs_push_unpin_block -- the "decrement on flush/skip") and
+ * release the record's snapshot ref on each block's buffer (buf->refs).  This is
+ * the moment a block stops owing this record an image home, so its pin can fall
+ * to zero (-> CLEAN) and its un-home snapshot buffer can return to the pool.
+ *
+ * Called as soon as the record is COVERED (every block home or superseded) AND
+ * inflight-drained (no in-flight home write still reads its images) -- NOT
+ * deferred to the in-order log trim.  Deferring was the bug: a hot directory
+ * block logged by R1..RN kept N pins + N snapshot buffers alive until all N
+ * records trimmed in FIFO order, so one uncovered head record pinned the whole
+ * tail of the cache (measured: ~76% of buffers were detached snapshots riding
+ * un-trimmed-but-covered records).  Idempotent: the in-order trim path calls it
+ * again on free, a no-op once discharged.
+ *
+ * Reads dev/off from iovs[0]'s header region, so it must run before iovs[0] is
+ * released (only diskfs_il_free_record does that, at trim).
+ */
+static void
+diskfs_il_discharge_record(
+    struct diskfs_intent_log *il,
+    struct diskfs_il_record  *rec)
+{
+    uint32_t i;
+
+    if (rec->discharged) {
+        return;
+    }
+    rec->discharged = 1;
+    __atomic_add_fetch(&g_disc_records, 1, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&g_disc_pins, rec->num_blocks, __ATOMIC_RELAXED);
+
+    for (i = 0; i < rec->num_blocks; i++) {
+        /* Drop the snapshot buffer ref BEFORE the obligation pin so that a
+         * recycler which observes pin_count == 0 also sees the buffer's refs
+         * back to 1 (block-only) -- block-swap keeps a block and its buffer
+         * paired, so a recycled block reuses its own buffer.  Use the carried
+         * block pointer: after a CoW the block at (dev,off) is a different
+         * (live) block; the obligation is on THIS retired one. */
+        diskfs_block_buf_release(rec->block_bufs[i]);
+        diskfs_push_unpin_block(il, rec->blocks[i]);
+    }
+} /* diskfs_il_discharge_record */
+
+
+/* A record is COVERED (uncovered == 0) and inflight-drained: release its
+ * resources now rather than waiting for the in-order trim. */
+static inline void
+diskfs_il_try_discharge(
+    struct diskfs_intent_log *il,
+    struct diskfs_il_record  *rec)
+{
+    if (rec->uncovered == 0 && rec->inflight_refs == 0) {
+        diskfs_il_discharge_record(il, rec);
+    }
+} /* diskfs_il_try_discharge */
+
 
 static void
 diskfs_il_free_record(
     struct diskfs_intent_log *il,
     struct diskfs_il_record  *rec)
 {
-    uint32_t i;
-
-    /* This record is pushed home and trimmed.  For each block image it carried:
-     *  - drop the submitting txn's claim pin (diskfs_push_unpin_block); this is
-     *    the "decrement on flush/skip" -- the record is done whether its image
-     *    was written home or superseded by a newer record, and it happens at
-     *    record granularity here, after the home write, so it never races ahead
-     *    of durability.  The block becomes CLEAN once its last pin drops.
-     *  - release the record's snapshot reference on the buffer (buf->refs).
-     * Done before releasing iovs[0], whose header region we read dev/off from. */
-    {
-        char *p = (char *) rec->iovs[0].data + sizeof(struct diskfs_redo_header);
-
-        for (i = 0; i < rec->num_blocks; i++) {
-            struct diskfs_redo_block_header *bh = (struct diskfs_redo_block_header *) p;
-
-            p += sizeof(*bh);
-            diskfs_push_unpin_block(il, bh->device_id, bh->device_offset);
-            diskfs_block_buf_release(rec->block_bufs[i]);
-        }
+    /* Resources are normally already released at coverage; ensure it (no-op if
+     * so) before we free the record. */
+    if (!rec->discharged) {
+        __atomic_add_fetch(&g_disc_via_trim, 1, __ATOMIC_RELAXED);
     }
+    diskfs_il_discharge_record(il, rec);
 
     /* iovs[0] is the materialized header (a real SHARED buffer) -- release it.
      * iovs[1..] are non-owning GLOBAL slices of block-cache buffers (cloned at
@@ -449,6 +503,7 @@ diskfs_il_free_record(
      * here -- the backing GLOBAL buffer is freed only at cache teardown. */
     evpl_iovec_release(il->push_evpl, &rec->iovs[0]);
     free(rec->block_bufs);
+    free(rec->blocks);
     free(rec->iovs);
     free(rec);
 } /* diskfs_il_free_record */
@@ -489,7 +544,9 @@ diskfs_push_fold_record(
         } else {
             /* Newest image supersedes: ownership passes from the old owner
              * (which now needs one fewer block home) to R. */
-            e->owner->uncovered--;
+            struct diskfs_il_record *old_owner = e->owner;
+
+            old_owner->uncovered--;
             e->seq   = rec->seq;
             e->iov   = &rec->iovs[1 + i];
             e->owner = rec;
@@ -497,6 +554,10 @@ diskfs_push_fold_record(
             if (!e->inflight) {
                 diskfs_ready_push(il, e);
             }
+            /* The old owner no longer owes this block home; if that was its last
+             * obligation and nothing is in flight for it, release its resources
+             * now instead of waiting for the in-order trim. */
+            diskfs_il_try_discharge(il, old_owner);
         }
     }
 } /* diskfs_push_fold_record */
@@ -516,32 +577,35 @@ diskfs_push_fold_record(
 static void
 diskfs_push_unpin_block(
     struct diskfs_intent_log *il,
-    uint32_t                  dev,
-    uint64_t                  off)
+    struct diskfs_block      *blk)
 {
     struct diskfs_shared      *shared = container_of(il, struct diskfs_shared, intent_log);
-    struct diskfs_block_cache *cache  = shared->block_cache;
-    struct diskfs_block_shard *shard  = diskfs_block_shard(cache, dev, off);
-    uint32_t                   bucket = diskfs_block_bucket(dev, off);
-    struct diskfs_block       *blk;
+    struct diskfs_block_shard *shard  = diskfs_block_shard(shared->block_cache,
+                                                           blk->device_id,
+                                                           blk->device_offset);
 
-    pthread_mutex_lock(&shard->lock);
-    blk = diskfs_block_lookup_locked(shard, bucket, dev, off);
-    chimera_diskfs_abort_if(!blk,
-                            "tail-push unpin: pinned block dev=%u off=%lu vanished",
-                            dev, off);
+    /*
+     * LOCK-FREE discharge (the point of block-swap).  The block is retired but
+     * still on the LRU and pinned; recyclers only ever take the LRU head and
+     * require pin_count == 0 && CLEAN (re-checked atomically), so the pusher needs
+     * NO shard lock here and NO LRU surgery (the block never leaves the LRU).
+     * Drop the obligation pin on the carried block pointer (a (dev,off) lookup
+     * would find a different live block after a CoW; the struct is in the fixed
+     * pool and never freed, so the pointer is always valid).  On the last pin,
+     * publish CLEAN and account the 1->0 transition with relaxed atomics.  No
+     * wake: a claim parked for want of a victim self-retries via the worker's
+     * resume/defer queue.  Keeping this off the shard lock is what stops the push
+     * thread from being starved by claim/CoW lock contention under load -- the
+     * feedback collapse the locked version suffered.
+     *
+     * Note: we never read/touch on_lru or the LRU list here -- a concurrent
+     * worker may be moving this block to the MRU end under the shard lock
+     * (on_lru toggles 0->1), which is fine: the discharge only adjusts the
+     * atomic pin_count/state, and the block stays on the LRU either way. */
     if (__atomic_sub_fetch(&blk->pin_count, 1, __ATOMIC_ACQ_REL) == 0) {
         __atomic_store_n(&blk->state, DISKFS_BLOCK_CLEAN, __ATOMIC_RELEASE);
-        if (!blk->on_lru) {
-            diskfs_block_lru_push_tail(shard, blk);
-        }
+        __atomic_sub_fetch(&shard->pinned, 1, __ATOMIC_RELAXED);
     }
-    pthread_mutex_unlock(&shard->lock);
-
-    /* This pin drop may have produced a CLEAN LRU victim; wake any CoW fork
-     * parked on this shard for want of a reclaimable buffer.  Cross-thread
-     * (push thread -> worker doorbell), so self == NULL. */
-    diskfs_block_buf_wake(NULL, shard);
 } /* diskfs_push_unpin_block */
 
 
@@ -652,7 +716,7 @@ diskfs_push_trim(struct diskfs_intent_log *il)
             uint32_t ht = __atomic_load_n(&il->handoff_tail, __ATOMIC_ACQUIRE);
             if (hh != ht) {
                 __atomic_store_n(&il->log_tail,
-                                 il->handoff[hh & DISKFS_HANDOFF_RING_MASK]->offset,
+                                 il->handoff[hh & il->handoff_ring_mask]->offset,
                                  __ATOMIC_RELEASE);
             }
         }
@@ -692,7 +756,11 @@ diskfs_push_issue(struct diskfs_intent_log *il)
         struct diskfs_pending *e = diskfs_ready_pop(il);
 
         if (!e) {
-            break;
+            /* Ran out of ready blocks before hitting the watermark: the pusher
+             * is STARVED (coverage/fold pipeline isn't feeding it), not in-flight
+             * limited. */
+            __atomic_add_fetch(&g_push_starved, 1, __ATOMIC_RELAXED);
+            return;
         }
 
         e->inflight     = 1;
@@ -700,6 +768,7 @@ diskfs_push_issue(struct diskfs_intent_log *il)
         e->issued_owner = e->owner;
         e->owner->inflight_refs++;
         il->push_outstanding++;
+        __atomic_add_fetch(&g_push_issued, 1, __ATOMIC_RELAXED);
         diskfs_il_push_metrics(il);
 
         diskfs_metric_il_block_io(il, DISKFS_METRIC_IO_WRITE,
@@ -709,6 +778,9 @@ diskfs_push_issue(struct diskfs_intent_log *il)
         evpl_block_write(il->push_evpl, il->home_queue[e->device_id], e->iov, 1,
                          e->device_offset, il->sync, diskfs_push_block_cb, e);
     }
+    /* Fell out of the loop with ready work still possible == in-flight watermark
+     * reached: the pusher is SATURATED (home-write concurrency limited). */
+    __atomic_add_fetch(&g_push_full, 1, __ATOMIC_RELAXED);
 } /* diskfs_push_issue */
 
 
@@ -732,21 +804,27 @@ diskfs_push_block_cb(
      * retired and no other in-flight write still reads it. */
     if (--io->inflight_refs == 0 && io->retired) {
         diskfs_il_free_record(il, io);
+        io = NULL;     /* freed -- do not touch below */
     }
 
     e->inflight = 0;
 
     if (e->seq > e->issued_seq) {
-        /* A newer image arrived mid-flight: re-issue it (newest lands last). */
+        /* A newer image arrived mid-flight: re-issue it (newest lands last).
+         * The image just written belonged to the (now superseded) issued owner;
+         * its in-flight read just drained, so it may now be fully dischargeable. */
         diskfs_ready_push(il, e);
+        if (io) {
+            diskfs_il_try_discharge(il, io);
+        }
     } else {
         /* Durably home at its newest seq: drop the pending entry.  The owning
-         * record needs one fewer block home -> may become coverable.  The block
-         * is marked CLEAN later, when that record is trimmed and its claim pin
-         * is dropped (diskfs_il_free_record -> diskfs_push_unpin_block); a block
-         * stays pinned/DIRTY as long as any record still owes it home. */
+         * record needs one fewer block home; once it owes none (and nothing is
+         * in flight for it) release its pins + snapshot buffers immediately --
+         * the block goes CLEAN now, not at the in-order trim. */
         e->owner->uncovered--;
         diskfs_pending_remove(il, e);
+        diskfs_il_try_discharge(il, e->owner);
     }
 
     diskfs_il_push_metrics(il);
@@ -774,12 +852,13 @@ diskfs_il_push_doorbell_cb(
     (void) evpl;
 
     while (head != tail) {
-        struct diskfs_il_record *rec = il->handoff[head & DISKFS_HANDOFF_RING_MASK];
+        struct diskfs_il_record *rec = il->handoff[head & il->handoff_ring_mask];
 
         head++;
         rec->next          = NULL;
         rec->inflight_refs = 0;
         rec->retired       = 0;
+        rec->discharged    = 0;
         rec->uncovered     = 0;     /* raised to num_blocks by the fold below */
         if (il->push_tail) {
             il->push_tail->next = rec;
@@ -884,8 +963,8 @@ diskfs_redo_write_cb(
          * cannot fill before the log does. */
         ht = il->handoff_tail;
         chimera_diskfs_abort_if(ht - __atomic_load_n(&il->handoff_head, __ATOMIC_ACQUIRE) >=
-                                DISKFS_HANDOFF_RING_SIZE, "intent-log hand-off ring overflow");
-        il->handoff[ht & DISKFS_HANDOFF_RING_MASK] = rec;
+                                il->handoff_ring_size, "intent-log hand-off ring overflow");
+        il->handoff[ht & il->handoff_ring_mask] = rec;
         __atomic_store_n(&il->handoff_tail, ht + 1, __ATOMIC_RELEASE);
         handed_off = 1;
 
@@ -939,6 +1018,11 @@ diskfs_il_write_redo(
     rec->niov       = 1 + nblocks;
     rec->iovs       = malloc(rec->niov * sizeof(struct evpl_iovec));
     rec->block_bufs = calloc(nblocks, sizeof(*rec->block_bufs));
+    /* Block-swap CoW retires the dirtied block out of the hash but keeps the
+     * struct alive (on the LRU, pinned, holding its buffer).  Carry the block
+     * pointer so the tail-pusher drops the obligation pin on THIS block by
+     * pointer -- a (dev,off) lookup would now find the new live block instead. */
+    rec->blocks     = calloc(nblocks, sizeof(*rec->blocks));
     rec->next       = NULL;
 
     /* iovs[0]: materialized header region (redo_header + per-block headers). */
@@ -987,6 +1071,7 @@ diskfs_il_write_redo(
 
             evpl_iovec_clone(&rec->iovs[1 + i], &tb->snap_buf->iov);
             rec->block_bufs[i] = tb->snap_buf;
+            rec->blocks[i]     = blk;
         }
     }
     chimera_diskfs_abort_if(i != nblocks,
@@ -1168,16 +1253,67 @@ diskfs_il_dbg_tick(struct diskfs_intent_log *il)
         return;
     }
     dt = (double) (now - g_il_last_print_ns) / 1e9;
-    chimera_diskfs_info(
-        "IL/s calls=%.0f submits=%.0f txns/rec=%.1f gate_redo=%.0f "
-        "gate_retire=%.0f empty=%.0f avg_inflight=%.1f max_inflight=%d "
-        "now_inflight=%d retire_depth=%u",
-        g_il_calls / dt, g_il_submits / dt,
-        g_il_submits ? (double) g_il_txns / (double) g_il_submits : 0.0,
-        g_il_gate_redo / dt, g_il_gate_retire / dt, g_il_empty / dt,
-        g_il_submits ? (double) g_il_sum_inflight / (double) g_il_submits : 0.0,
-        g_il_max_inflight, il->redo_inflight,
-        il->retire_tail - il->retire_head);
+    {
+        uint64_t pi = __atomic_exchange_n(&g_push_issued, 0, __ATOMIC_RELAXED);
+        uint64_t ps = __atomic_exchange_n(&g_push_starved, 0, __ATOMIC_RELAXED);
+        uint64_t pf = __atomic_exchange_n(&g_push_full, 0, __ATOMIC_RELAXED);
+        uint64_t lh = __atomic_load_n(&il->log_head, __ATOMIC_RELAXED);
+        uint64_t lt = __atomic_load_n(&il->log_tail, __ATOMIC_RELAXED);
+        int      po = __atomic_load_n(&il->push_outstanding, __ATOMIC_RELAXED);
+        int      rne = il->ready_head ? 1 : 0;
+
+        chimera_diskfs_info(
+            "IL/s calls=%.0f submits=%.0f txns/rec=%.1f gate_redo=%.0f "
+            "gate_retire=%.0f empty=%.0f avg_inflight=%.1f max_inflight=%d "
+            "now_inflight=%d retire_depth=%u | PUSH issued=%.0f starved=%.0f "
+            "full=%.0f outstanding=%d ready=%d log_used_mb=%lu",
+            g_il_calls / dt, g_il_submits / dt,
+            g_il_submits ? (double) g_il_txns / (double) g_il_submits : 0.0,
+            g_il_gate_redo / dt, g_il_gate_retire / dt, g_il_empty / dt,
+            g_il_submits ? (double) g_il_sum_inflight / (double) g_il_submits : 0.0,
+            g_il_max_inflight, il->redo_inflight,
+            il->retire_tail - il->retire_head,
+            pi / dt, ps / dt, pf / dt, po, rne,
+            (unsigned long) ((lh - lt) >> 20));
+
+        /* Block-cache aggregate (relaxed reads, approximate): is the buffer
+         * pressure bounded by the journal, or is something retaining buffers far
+         * beyond the live working set?  log_blocks = journal bytes in use / 4K
+         * bounds how many CoW-old buffers (bufless donors) can legitimately be
+         * outstanding; if bufless >> log_blocks, buffers are being retained
+         * beyond the journal == a leak/excessive-retention bug. */
+        {
+            struct diskfs_shared      *sh = container_of(il, struct diskfs_shared,
+                                                         intent_log);
+            struct diskfs_block_cache *bc = sh->block_cache;
+            uint64_t s_pin = 0, s_lru = 0, s_free = 0, s_bufless = 0, s_nblk = 0;
+            uint32_t s_maxpin = 0, s_maxbufless = 0, si;
+
+            for (si = 0; si < DISKFS_BLOCK_CACHE_SHARDS; si++) {
+                struct diskfs_block_shard *sd = &bc->shards[si];
+                uint32_t p  = __atomic_load_n(&sd->pinned, __ATOMIC_RELAXED);
+                uint32_t bl = __atomic_load_n(&sd->n_bufless, __ATOMIC_RELAXED);
+
+                s_pin     += p;
+                s_lru     += __atomic_load_n(&sd->lru_count, __ATOMIC_RELAXED);
+                s_free    += __atomic_load_n(&sd->nfree_buffers, __ATOMIC_RELAXED);
+                s_bufless += bl;
+                s_nblk    += sd->nblocks;
+                if (p > s_maxpin) s_maxpin = p;
+                if (bl > s_maxbufless) s_maxbufless = bl;
+            }
+            chimera_diskfs_info(
+                "BLKCACHE nblocks=%lu pinned=%lu(max/shard=%u) bufless=%lu"
+                "(max/shard=%u) lru=%lu free_bufs=%lu | journal_blocks=%ld | "
+                "DISC records=%.0f/s pins=%.0f/s via_trim=%.0f/s",
+                (unsigned long) s_nblk, (unsigned long) s_pin, s_maxpin,
+                (unsigned long) s_bufless, s_maxbufless, (unsigned long) s_lru,
+                (unsigned long) s_free, (long) (((int64_t) lh - (int64_t) lt) / DISKFS_BLOCK_SIZE),
+                __atomic_exchange_n(&g_disc_records, 0, __ATOMIC_RELAXED) / dt,
+                __atomic_exchange_n(&g_disc_pins, 0, __ATOMIC_RELAXED) / dt,
+                __atomic_exchange_n(&g_disc_via_trim, 0, __ATOMIC_RELAXED) / dt);
+        }
+    }
     g_il_calls = g_il_submits = g_il_txns = g_il_gate_redo = 0;
     g_il_gate_retire = g_il_empty = g_il_sum_inflight = 0;
     g_il_max_inflight  = 0;
@@ -1700,6 +1836,8 @@ diskfs_intent_log_thread_init(
 
     il->evpl                        = evpl;
     il->intent_log_size             = shared->intent_log_size;
+    il->handoff_ring_size           = diskfs_il_pow2((uint32_t) (il->intent_log_size / SM_BLOCK_SIZE) * 2);
+    il->handoff_ring_mask           = il->handoff_ring_size - 1;
     il->log_head                    = SM_INTENT_LOG_OFFSET;
     il->log_tail                    = SM_INTENT_LOG_OFFSET;
     il->live_records                = 0;
@@ -1715,7 +1853,7 @@ diskfs_intent_log_thread_init(
     il->retire      = calloc(DISKFS_RETIRE_RING_SIZE, sizeof(*il->retire));
     il->retire_head = 0;
     il->retire_tail = 0;
-    il->handoff     = calloc(DISKFS_HANDOFF_RING_SIZE, sizeof(*il->handoff));
+    il->handoff     = calloc(il->handoff_ring_size, sizeof(*il->handoff));
     __atomic_store_n(&il->handoff_head, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&il->handoff_tail, 0, __ATOMIC_RELAXED);
 
