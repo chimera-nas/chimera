@@ -136,6 +136,20 @@ chimera_client_thread_shutdown(
 {
     struct chimera_client_request *request;
 
+    /* Drain in-flight VFS completions before chimera_vfs_thread_destroy() closes
+     * this thread's completion doorbell.  A delegated/parked request completes
+     * on another thread, which appends to our pending list and rings our
+     * doorbell (chimera_vfs_complete_delegate / the lease pump).  The delegation
+     * and close threads are still alive here -- chimera_vfs_destroy() tears them
+     * down only after the whole thread pool is gone -- so a late completion
+     * would write() to an fd that chimera_vfs_thread_destroy() has already
+     * close()d, EBADF -> fatal abort in evpl_ring_doorbell (doorbell.c).  Pump
+     * until quiescent so no producer can ring a closed doorbell.  The NFS server
+     * path already drains here; the client path did not, which is why the
+     * crash showed up on the client-only posix lock/open tests under teardown
+     * timing. */
+    chimera_vfs_thread_drain(thread->vfs_thread);
+
     while (thread->free_requests) {
         request = thread->free_requests;
         DL_DELETE(thread->free_requests, request);
