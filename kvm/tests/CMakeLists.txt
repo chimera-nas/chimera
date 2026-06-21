@@ -291,6 +291,22 @@ foreach(image_spec ${KVM_IMAGES})
             ENVIRONMENT "MOUNT_SEC=${krbflavor}")
     endforeach()
 
+    # NLM (lock manager) under RPCSEC_GSS: bring up rpcbind + rpc.statd in the
+    # guest (NFS_ENABLE_NLM), mount vers=3,sec=krb5 *with* locking, then take an
+    # exclusive file lock -- which routes a krb5-authenticated NLM LOCK to the
+    # server.  The lock-bookkeeping FH open runs with a system credential; before
+    # the fix it passed a NULL cred and crashed the server (NULL deref in the DAC
+    # gate) on engine-DAC backends like memfs.
+    add_test(NAME chimera/kvm/${IMAGE_NAME}/kerberos/krb5_nlm_lock_memfs_nfs3
+        COMMAND bash ${NFS_KRB_WRAPPER}
+                ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
+                ${CHIMERA_BINARY} memfs 3
+                "echo data > /mnt/lf && flock -x /mnt/lf -c 'echo NLM_LOCK_HELD' && echo NFS3_NLM_KRB5_OK")
+    set_tests_properties(chimera/kvm/${IMAGE_NAME}/kerberos/krb5_nlm_lock_memfs_nfs3
+        PROPERTIES LABELS "kvm;${IMAGE_NAME};rpcsec_gss" PROCESSORS 2
+        SKIP_RETURN_CODE 77
+        ENVIRONMENT "NFS_ENABLE_NLM=1")
+
     # NFS cthon04 tests
     foreach(nfsver ${NFS_VERSIONS})
         foreach(category ${CTHON_CATEGORIES})

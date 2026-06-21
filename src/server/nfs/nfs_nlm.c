@@ -16,6 +16,22 @@
 #include "vfs/vfs_release.h"
 #include "vfs/vfs_state.h"
 
+/*
+ * The FH opens below are internal lock-bookkeeping opens (the client already
+ * opened the file via NFS), not user data access, so they run with a system
+ * credential rather than re-evaluating DAC.  AUTH_NONE is the engine's
+ * privileged sentinel: chimera_vfs_gate_needed() short-circuits it, so the open
+ * is not access-gated.  Must be non-NULL -- the gate dereferences cred->flavor
+ * (passing NULL crashes on backends that do not delegate DAC, e.g. memfs).
+ * File-scope const so its lifetime spans the asynchronous open.
+ */
+static const struct chimera_vfs_cred nlm_system_cred = {
+    .flavor = CHIMERA_VFS_AUTH_NONE,
+    .uid    = 0,
+    .gid    = 0,
+    .ngids  = 0,
+};
+
 /* Peer IP of an NLM connection with the ephemeral port stripped, written as a
  * C-string into out (size bytes).  Handles both "ipv4:port" and "[ipv6]:port".
  * Used to record where a lock-holder's statd can be reached (NSM monitor). */
@@ -547,7 +563,7 @@ chimera_nfs_nlm4_do_test(
 
     /* Conflict detection is delegated to vfs_state — the test_open_cb
      * does the lookup and probe synchronously once the FH is validated. */
-    chimera_vfs_open_fh(thread->vfs_thread, NULL,
+    chimera_vfs_open_fh(thread->vfs_thread, &nlm_system_cred,
                         vfh,
                         vfh_len,
                         CHIMERA_VFS_OPEN_INFERRED,
@@ -747,7 +763,7 @@ chimera_nfs_nlm4_do_lock(
         pthread_mutex_unlock(&shared->nlm_state.mutex);
     }
 
-    chimera_vfs_open_fh(thread->vfs_thread, NULL,
+    chimera_vfs_open_fh(thread->vfs_thread, &nlm_system_cred,
                         vfh,
                         vfh_len,
                         CHIMERA_VFS_OPEN_INFERRED,
