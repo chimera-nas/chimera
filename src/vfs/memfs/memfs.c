@@ -1703,9 +1703,11 @@ memfs_setattr(
 
     /* SETATTR(SIZE) is only meaningful for regular files. RFC 7530 §5.7:
      * directories must report ISDIR; symlinks should report SYMLINK or
-     * INVAL; other non-regular file types report INVAL.  (A named-stream
-     * handle always resolves to a regular base inode, so streams pass.) */
+     * INVAL; other non-regular file types report INVAL.  A named-stream
+     * handle (stream != NULL) carries its own data fork and may be resized
+     * regardless of the base object's type -- a directory's ADS is sizeable. */
     if ((attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) &&
+        !stream &&
         !S_ISREG(inode->mode)) {
         enum chimera_vfs_error err;
         if (S_ISDIR(inode->mode)) {
@@ -3263,7 +3265,10 @@ memfs_write(
         return;
     }
 
-    if (!S_ISREG(inode->mode)) {
+    /* A write to a named stream (stream != NULL) targets the stream's own data
+     * fork and is valid on any base object, including a directory's ADS.  A
+     * plain write only makes sense for a regular file. */
+    if (!stream && !S_ISREG(inode->mode)) {
         request->status = S_ISDIR(inode->mode) ?
             CHIMERA_VFS_EISDIR : CHIMERA_VFS_EINVAL;
         pthread_mutex_unlock(&inode->lock);
@@ -5262,8 +5267,11 @@ memfs_open_stream(
         return;
     }
 
-    /* Named streams attach only to regular files. */
-    if (!S_ISREG(inode->mode)) {
+    /* Named streams (SMB alternate data streams) attach to regular files and
+     * directories alike -- NTFS allows ADS on a directory, it just has no
+     * default "::$DATA" data fork (that explicit form is rejected earlier in
+     * the SMB create path).  Symlinks and special files have no streams. */
+    if (!S_ISREG(inode->mode) && !S_ISDIR(inode->mode)) {
         pthread_mutex_unlock(&inode->lock);
         request->status = CHIMERA_VFS_EINVAL;
         request->complete(request);
