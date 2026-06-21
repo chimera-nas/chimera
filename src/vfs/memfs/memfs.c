@@ -172,6 +172,7 @@ struct memfs_inode {
     uint32_t                   refcnt;
     uint64_t                   size;
     uint64_t                   space_used;
+    uint64_t                   alloc_size;   /* SMB AllocationSize reservation */
     uint32_t                   mode;
     uint32_t                   nlink;
     uint32_t                   uid;
@@ -1317,19 +1318,22 @@ memfs_map_attrs(
     }
 
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STAT) {
-        attr->va_set_mask  |= CHIMERA_VFS_ATTR_MASK_STAT;
-        attr->va_mode       = inode->mode;
-        attr->va_nlink      = inode->nlink;
-        attr->va_uid        = inode->uid;
-        attr->va_gid        = inode->gid;
-        attr->va_size       = inode->size;
-        attr->va_space_used = inode->space_used;
-        attr->va_atime      = inode->atime;
-        attr->va_mtime      = inode->mtime;
-        attr->va_ctime      = inode->ctime;
-        attr->va_ino        = inode->inum;
-        attr->va_dev        = (42UL << 32) | 42;
-        attr->va_rdev       = inode->rdev;
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_MASK_STAT;
+        attr->va_mode      = inode->mode;
+        attr->va_nlink     = inode->nlink;
+        attr->va_uid       = inode->uid;
+        attr->va_gid       = inode->gid;
+        attr->va_size      = inode->size;
+        /* Report the larger of real usage and any AllocationSize reservation so
+         * an over-allocated file's AllocationSize reflects the reserved space. */
+        attr->va_space_used = inode->space_used > inode->alloc_size ?
+            inode->space_used : inode->alloc_size;
+        attr->va_atime = inode->atime;
+        attr->va_mtime = inode->mtime;
+        attr->va_ctime = inode->ctime;
+        attr->va_ino   = inode->inum;
+        attr->va_dev   = (42UL << 32) | 42;
+        attr->va_rdev  = inode->rdev;
 
         /* memfs persists DOS attributes, so report them alongside stat. */
         attr->va_set_mask      |= CHIMERA_VFS_ATTR_DOS_ATTRIBUTES;
@@ -1457,6 +1461,19 @@ memfs_apply_attrs(
     if (set_mask & CHIMERA_VFS_ATTR_SIZE) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_SIZE;
         inode->size        = attr->va_size;
+        /* A reservation only holds while it exceeds the live data; once EOF is
+         * set at/above it the reservation is subsumed and no longer separate. */
+        if (inode->alloc_size <= inode->size) {
+            inode->alloc_size = 0;
+        }
+    }
+
+    if (set_mask & CHIMERA_VFS_ATTR_ALLOC_SIZE) {
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_ALLOC_SIZE;
+        /* Reserve only the part of the allocation beyond the current EOF; a
+         * request at/below EOF is already satisfied by real usage. */
+        inode->alloc_size = attr->va_alloc_size > inode->size ?
+            attr->va_alloc_size : 0;
     }
 
     if (set_mask & CHIMERA_VFS_ATTR_DOS_ATTRIBUTES) {
@@ -1917,19 +1934,22 @@ memfs_mount(
 
     /* Fill in other attrs if requested */
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STAT) {
-        attr->va_set_mask  |= CHIMERA_VFS_ATTR_MASK_STAT;
-        attr->va_mode       = inode->mode;
-        attr->va_nlink      = inode->nlink;
-        attr->va_uid        = inode->uid;
-        attr->va_gid        = inode->gid;
-        attr->va_size       = inode->size;
-        attr->va_space_used = inode->space_used;
-        attr->va_atime      = inode->atime;
-        attr->va_mtime      = inode->mtime;
-        attr->va_ctime      = inode->ctime;
-        attr->va_ino        = inode->inum;
-        attr->va_dev        = (42UL << 32) | 42;
-        attr->va_rdev       = inode->rdev;
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_MASK_STAT;
+        attr->va_mode      = inode->mode;
+        attr->va_nlink     = inode->nlink;
+        attr->va_uid       = inode->uid;
+        attr->va_gid       = inode->gid;
+        attr->va_size      = inode->size;
+        /* Report the larger of real usage and any AllocationSize reservation so
+         * an over-allocated file's AllocationSize reflects the reserved space. */
+        attr->va_space_used = inode->space_used > inode->alloc_size ?
+            inode->space_used : inode->alloc_size;
+        attr->va_atime = inode->atime;
+        attr->va_mtime = inode->mtime;
+        attr->va_ctime = inode->ctime;
+        attr->va_ino   = inode->inum;
+        attr->va_dev   = (42UL << 32) | 42;
+        attr->va_rdev  = inode->rdev;
 
         /* memfs persists DOS attributes, so report them alongside stat. */
         attr->va_set_mask      |= CHIMERA_VFS_ATTR_DOS_ATTRIBUTES;

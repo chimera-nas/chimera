@@ -3207,6 +3207,17 @@ chimera_smb_create_issue_open(struct chimera_smb_request *request)
         request->create.set_attr.va_dos_attributes |= SMB2_FILE_ATTRIBUTE_ARCHIVE;
         request->create.set_attr.va_req_mask       |= CHIMERA_VFS_ATTR_DOS_ATTRIBUTES;
         request->create.set_attr.va_set_mask       |= CHIMERA_VFS_ATTR_DOS_ATTRIBUTES;
+
+        /* An AllocationSize create context reserves space for the new (or
+         * overwritten, hence 0-length) file.  Carry it to the backend so the
+         * reservation is reflected in the reported AllocationSize (MS-SMB2
+         * 2.2.13.2 "AlSi"; smb2.create.blob).  Backends that do not persist a
+         * reservation simply ignore the mask. */
+        if (request->create.alsi_alloc_size > 0) {
+            request->create.set_attr.va_alloc_size = request->create.alsi_alloc_size;
+            request->create.set_attr.va_req_mask  |= CHIMERA_VFS_ATTR_ALLOC_SIZE;
+            request->create.set_attr.va_set_mask  |= CHIMERA_VFS_ATTR_ALLOC_SIZE;
+        }
     }
 
     /* Persistent-handle grants are keyed by the base file name; skip them for
@@ -3969,6 +3980,15 @@ chimera_smb_create(struct chimera_smb_request *request)
     request->create.access_retry_oh        = NULL;
     request->create.share_conflict_retries = 0;
     request->create.share_conflict_oh      = NULL;
+
+    /* A TWRP ("@GMT-..." timewarp) create context opens a file as of a VSS
+     * snapshot.  chimera exposes no snapshots, so any non-zero timewarp names a
+     * version that cannot exist -- per MS-SMB2 3.3.5.9 report OBJECT_NAME_NOT_
+     * FOUND rather than silently opening the live file (smb2.create.blob). */
+    if (request->create.twrp_timestamp != 0) {
+        chimera_smb_complete_request(request, SMB2_STATUS_OBJECT_NAME_NOT_FOUND);
+        return;
+    }
 
     /* Handle stream-name syntax (file:stream[:$DATA]).  When named streams are
      * disabled (config off, or the backend lacks the capability) the legacy
@@ -4884,6 +4904,17 @@ chimera_smb_parse_create_contexts(
             return -1;
         }
 
+        /* A create-context name (tag) is a 4-byte identifier.  Windows rejects a
+         * 1-3 byte name as malformed (>=4 is accepted; an unknown 4+ byte tag is
+         * simply ignored).  Fail the whole CREATE with INVALID_PARAMETER, but
+         * gracefully (PARSE_FAILED, not a connection teardown) so the client
+         * gets an in-order error -- smb2.create.blob bad-tag-length 1/2/3. */
+        if (name_len > 0 && name_len < 4) {
+            request->status = SMB2_STATUS_INVALID_PARAMETER;
+            request->flags |= CHIMERA_SMB_REQUEST_FLAG_PARSE_FAILED;
+            return 0;
+        }
+
         if (data_len > 0) {
             if (data_off == 0 || data_off > avail || data_len > avail - data_off) {
                 chimera_smb_error("CREATE-context data out of bounds (pos=%u, data_off=%u, data_len=%u)",
@@ -4990,6 +5021,13 @@ chimera_smb_parse_create(
         request->flags |= CHIMERA_SMB_REQUEST_FLAG_PARSE_FAILED;
         return 0;
     }
+
+    /* Create-context outputs default to "absent".  The request struct is pooled
+     * and reused, and these are only written when their context is present, so
+     * reset them here for every CREATE or a prior request's value would leak
+     * (e.g. a stale TWRP would spuriously fail an unrelated open). */
+    request->create.twrp_timestamp  = 0;
+    request->create.alsi_alloc_size = 0;
 
     /* SMB2 CREATE fixed body (after the already-consumed 2-byte StructureSize):
      * SecurityFlags(1) | RequestedOplockLevel(1) | ImpersonationLevel(4) | ...

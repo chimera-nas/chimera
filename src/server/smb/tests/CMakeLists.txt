@@ -1120,6 +1120,7 @@ set(SMBTORTURE_ENABLED_memfs
     # smb2.create
     smb2.create.acldir
     smb2.create.aclfile
+    smb2.create.blob
     smb2.create.bench-path-contention-shared
     smb2.create.brlocked
     smb2.create.delete
