@@ -582,7 +582,8 @@ nfs4_root_readdir_lookup_callback(
                                     req->thread->shared->nfs_lease_time_s,
                                     state->exports[state->pos].id,
                                     req->thread->shared->fh_key,
-                                    req->thread->shared->fh_sign);
+                                    req->thread->shared->fh_sign,
+                                    0); /* pseudo-fs root: no named-attr type override */
 
         dbuf_cur = req->encoding->dbuf->used - state->dbuf_before;
 

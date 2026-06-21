@@ -105,7 +105,8 @@ chimera_nfs4_verify_complete(
                                 req->thread->shared->nfs_lease_time_s,
                                 req->export_id,
                                 req->thread->shared->fh_key,
-                                req->thread->shared->fh_sign);
+                                req->thread->shared->fh_sign,
+                                0);
 
     bool match = (num_out_mask == args->num_attrmask) &&
         (memcmp(out_mask, args->attrmask,
