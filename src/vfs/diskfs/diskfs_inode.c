@@ -252,7 +252,7 @@ diskfs_inode_grant_locked(
         if (mode == DISKFS_INODE_LOCK_WRITE) {
             /* Pin the home block before reporting the grant; may async-load it
              * (and defer cb) if it was evicted while the inode stayed cached. */
-            diskfs_inode_finish_write_pin(thread, txn, inode, cb, private_data);
+            diskfs_inode_finish_write_pin(thread, txn, inode, cb, private_data, 0);
         } else {
             cb(inode, CHIMERA_VFS_OK, private_data);
         }
@@ -699,7 +699,7 @@ diskfs_grant_drain(struct diskfs_thread *thread)
             if (wmode == DISKFS_INODE_LOCK_WRITE) {
                 /* Pin the home block (async-load if evicted) before reporting
                  * the grant; cb may fire later, back on this worker. */
-                diskfs_inode_finish_write_pin(thread, wtxn, inode, cb, private_data);
+                diskfs_inode_finish_write_pin(thread, wtxn, inode, cb, private_data, 0);
             } else {
                 cb(inode, CHIMERA_VFS_OK, private_data);
             }

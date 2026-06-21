@@ -752,6 +752,9 @@ struct diskfs_block_shard {
     struct diskfs_block        *clean_tail;
     uint32_t                    nbuffers;
     uint32_t                    nfree_buffers;
+    uint32_t                    pinned;         /* blocks with pin>0; non-atomic, 0<->1 under lock */
+    uint32_t                    lru_count;      /* CLEAN unpinned blocks on the LRU (reclaim candidates) */
+    uint32_t                    n_bufless;      /* DIAG: blocks on free_blocks (donated buffer to a CoW fork, awaiting re-pair) */
 
     /* Backing storage for this shard's block-buffer slices.  Each entry is a
      * whole GLOBAL evpl buffer (DMA/RDMA-registered, user-managed lifetime);
@@ -1199,6 +1202,12 @@ struct diskfs_il_record {
      * its iovs (inflight_refs == 0). */
     int                       inflight_refs;
     int                       retired;
+    /* Resources (per-block claim pins + snapshot buffer refs) are released as
+     * soon as the record is covered AND inflight-drained -- not deferred to the
+     * in-order log trim, which would pin every block behind one uncovered head
+     * record.  Set once by diskfs_il_discharge_record; the in-order trim then
+     * only reclaims log space + frees the structs. */
+    int                       discharged;
     /* Count of this record's blocks for which it is still the newest-pending
      * owner (not yet home, not superseded).  Maintained by the push thread:
      * raised to num_blocks at fold, decremented on each block's home write or
@@ -1259,9 +1268,7 @@ struct diskfs_retire_slot {
  * records shrank (per-AG journal blocks were dropped, and delta-only records can
  * be a single block), so a 1 GiB log can hold up to 262144 one-block records --
  * far more than 32768, which overflowed under sustained load. */
-#define DISKFS_HANDOFF_RING_SIZE (DISKFS_INTENT_LOG_BLOCKS * 2)
 
-#define DISKFS_HANDOFF_RING_MASK (DISKFS_HANDOFF_RING_SIZE - 1)
 
 
 struct diskfs_intent_log {
@@ -1311,6 +1318,8 @@ struct diskfs_intent_log {
     struct diskfs_il_record        **handoff;         /* SPSC ring of record* (commit -> push) */
     uint32_t                         handoff_head;    /* atomic: push consumer */
     uint32_t                         handoff_tail;    /* atomic: commit producer */
+    uint32_t                         handoff_ring_size; /* runtime: sized to the log */
+    uint32_t                         handoff_ring_mask;
     uint64_t                         log_head;        /* atomic: commit-written (next free byte) */
     uint64_t                         log_tail;        /* atomic: push-written (trim point) */
     uint64_t                         intent_log_size; /* active log size (from space_map / superblock) */
@@ -1655,6 +1664,7 @@ struct diskfs_pin_cont {
     struct diskfs_inode  *inode;
     diskfs_inode_cb_t     cb;
     void                 *private_data;
+    int                   is_new;   /* fresh inode: zero buffer + init b+tree root */
 };
 
 
@@ -2227,7 +2237,8 @@ diskfs_inode_finish_write_pin(
     struct diskfs_txn    *txn,
     struct diskfs_inode  *inode,
     diskfs_inode_cb_t     cb,
-    void                 *private_data);
+    void                 *private_data,
+    int                   is_new);
 
 void
 diskfs_txn_pin_inode_block(
@@ -3880,6 +3891,7 @@ diskfs_block_lru_push_tail(
     }
     shard->lru_tail = blk;
     blk->on_lru     = 1;
+    shard->lru_count++;
 } /* diskfs_block_lru_push_tail */
 
 
@@ -3962,6 +3974,7 @@ diskfs_block_return_buf_locked(
 
     if (blk) {
         shard->free_blocks = blk->free_next;
+        shard->n_bufless--;
         blk->free_next     = NULL;
         buf->next          = NULL;
         __atomic_store_n(&buf->on_free, 0, __ATOMIC_RELEASE);
@@ -4323,10 +4336,12 @@ diskfs_inode_alloc_async(
     diskfs_metric_inode_cache(thread, DISKFS_METRIC_INODE_CACHE_INSERT);
     diskfs_txn_add_slot(txn, inode, DISKFS_INODE_LOCK_WRITE);
 
-    /* Claim and pin the inode's freshly-allocated home block. */
-    diskfs_txn_pin_inode_block(thread, txn, inode, 1);
-
-    cb(inode, CHIMERA_VFS_OK, private_data);
+    /* Claim and pin the inode's freshly-allocated home block via the async path
+     * so the pin honors the per-shard pin threshold: under a create flood the
+     * claim parks (rather than driving the shard to exhaustion) until the
+     * tail-pusher drains pins.  finish_write_pin fires cb on completion -- inline
+     * if a buffer is immediately available, else from the resume after a park. */
+    diskfs_inode_finish_write_pin(thread, txn, inode, cb, private_data, 1);
 } /* diskfs_inode_alloc_async */
 
 
