@@ -623,13 +623,15 @@ diskfs_condense_try(struct diskfs_condense *c)
     struct evpl                  *evpl   = w->ctx->evpl;
     uint64_t                      payload, aligned;
 
-    /* Stamp the snapshot with the current durable frontier: every space delta
-     * with seq <= ckpt_seq is durable and (for frees) already applied to the
-     * in-memory tree, so it is reflected here.  Sampled before the snapshot is
-     * taken under ag->lock, so it can only undercount what the snapshot
-     * reflects -- conservative, never optimistic (recovery replays seq >
-     * ckpt_seq idempotently). */
-    c->ckpt_seq = __atomic_load_n(&shared->intent_log.durable_seq,
+    /* Stamp the snapshot with the apply frontier (Stage B): every space delta
+     * with seq <= applied_seq has been applied to the in-memory free map, so it
+     * is reflected here.  applied_seq (NOT durable_seq) is the correct frontier
+     * now that apply is async -- durable_seq leads it, and a delta that is
+     * durably logged but not yet applied must NOT be folded into the snapshot.
+     * Sampled before the snapshot is taken under ag->lock, so it can only
+     * undercount what the snapshot reflects -- conservative, never optimistic
+     * (recovery replays seq > ckpt_seq idempotently). */
+    c->ckpt_seq = __atomic_load_n(&shared->intent_log.applied_seq,
                                   __ATOMIC_ACQUIRE);
 
     space_map_condense_prepare(shared->space_map, c->device_id,
