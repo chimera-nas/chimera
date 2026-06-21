@@ -255,9 +255,9 @@ SetFileEndOfFileInformationTestCaseS2,xfail,fidelity: no parameter validation
 SetFileEndOfFileInformationTestCaseS4,xfail,fidelity: no parameter validation
 SetFileEndOfFileInformationTestCaseS6,green,
 SetFileFullEaInformationTestCaseS0,green,
-SetFileFullEaInformationTestCaseS2,xfail,fidelity: EA-name validation
+SetFileFullEaInformationTestCaseS2,green,
 SetFileFullEaInformationTestCaseS4,green,
-SetFileFullEaInformationTestCaseS6,xfail,fidelity: EA-name validation
+SetFileFullEaInformationTestCaseS6,green,
 SetFileLinkInformationTestCaseS0,green,
 SetFileLinkInformationTestCaseS2,xfail,fidelity: expected OBJECT_NAME_INVALID got SUCCESS
 SetFileLinkInformationTestCaseS4,xfail,fidelity: expected OBJECT_NAME_INVALID got 3221225701

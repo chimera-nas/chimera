@@ -322,7 +322,15 @@ chimera_smb_ea_apply_step(struct chimera_smb_ea_apply *a)
         return;
     }
 
-    if (entry.name_len == 0) {
+    if (entry.name_len == 0 ||
+        !chimera_smb_ea_name_valid(entry.name, entry.name_len)) {
+        chimera_smb_ea_apply_finish(a, SMB2_STATUS_INVALID_EA_NAME);
+        return;
+    }
+
+    /* Only Flags 0 and FILE_NEED_EA are defined (MS-FSCC 2.4.15); any other bit
+     * makes the entry malformed (MS-FSA fails the set with INVALID_EA_NAME). */
+    if (entry.flags & ~FILE_NEED_EA) {
         chimera_smb_ea_apply_finish(a, SMB2_STATUS_INVALID_EA_NAME);
         return;
     }

@@ -86,6 +86,30 @@ chimera_smb_ea_name_eq(
     return 1;
 } /* chimera_smb_ea_name_eq */
 
+/*
+ * Validate a client-facing EA name (MS-FSCC 2.4.15 / MS-FSA 2.1.5.14.2).  An EA
+ * name is invalid if it contains a control character (< 0x20) or any of the
+ * reserved punctuation set -- matching Samba's is_invalid_windows_ea_name.  An
+ * invalid name fails the SET with STATUS_INVALID_EA_NAME.  (An empty name is
+ * rejected separately by the caller.)
+ */
+static inline int
+chimera_smb_ea_name_valid(
+    const char *name,
+    uint32_t    len)
+{
+    uint32_t i;
+
+    for (i = 0; i < len; i++) {
+        unsigned char c = (unsigned char) name[i];
+
+        if (c < 0x20 || strchr("\"*+,/:;<=>?[\\]|", (char) c)) {
+            return 0;
+        }
+    }
+    return 1;
+} /* chimera_smb_ea_name_valid */
+
 /* One decoded FILE_FULL_EA_INFORMATION entry; name/value point into the buffer. */
 struct chimera_smb_ea_entry {
     uint8_t     flags;
