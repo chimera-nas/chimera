@@ -6,6 +6,31 @@
 
 #include "nfs_common.h"
 
+/*
+ * Decode a wire NFSv3 filehandle into req->fh and translate a decode failure to
+ * the appropriate NFSv3 status.  A security-policy rejection -- the request's
+ * RPC auth flavor is not permitted by the target export's sec= list -- maps to
+ * NFS3ERR_ACCES; any other malformed/unrecognized handle stays NFS3ERR_BADHANDLE.
+ * (NFSv3 has no dedicated wrong-security error, unlike NFSv4's NFS4ERR_WRONGSEC,
+ * so a permission error is the closest honest answer.)  Returns NFS3_OK on
+ * success.
+ */
+static inline nfsstat3
+chimera_nfs3_decode_fh(
+    struct nfs_request *req,
+    const void         *fhdata,
+    uint32_t            fhlen)
+{
+    switch (chimera_nfs_fh_decode(req, fhdata, fhlen, req->fh, &req->fhlen)) {
+        case CHIMERA_NFS_FH_OK:
+            return NFS3_OK;
+        case CHIMERA_NFS_FH_WRONGSEC:
+            return NFS3ERR_ACCES;
+        default:
+            return NFS3ERR_BADHANDLE;
+    } /* switch */
+} /* chimera_nfs3_decode_fh */
+
 void chimera_nfs3_null(
     struct evpl               *evpl,
     struct evpl_rpc2_conn     *conn,
