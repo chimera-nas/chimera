@@ -304,8 +304,21 @@ RUN_CMD="${KVM_DIAG_CMD:-${NFSTEST_CMD}}"
 # cmdline parser truncates test_cmd at the first one.
 TEST_CMD="${SSHFIX}; mkdir -p /mnt/t; command -v ssh >/dev/null 2>&1 || { echo CHIMERA_KVM_FATAL: ssh client missing on guest image, cannot run 2-client test; exit 1; }; ok=0; for i in \$(seq 1 120); do ssh -o ConnectTimeout=2 10.0.0.3 true 2>/dev/null && { ok=1; break; }; sleep 1; done; [ \$ok = 1 ] || { echo CHIMERA_KVM_FATAL: second client 10.0.0.3 unreachable after 120s; exit 1; }; ${RUN_CMD}"
 
+# Guest A RAM: nfstest brackets each subtest with a fresh in-guest tcpdump
+# whose AF_PACKET ring is ~192 MiB (the default --tbsize 192k -- which we must
+# NOT shrink here: on the primary the capture has to absorb its own traffic
+# plus the second client's flooded traffic, and a smaller -B drops the short
+# conflict ops the suite asserts on, see CLIENT_SPEC above).  Several of those
+# rings pile up before the kernel reaps them, OOM-killing tcpdump in a 2 GiB
+# guest -- the captures then go empty and the trace assertions ("OPEN should be
+# sent", "WRITE delegation should be granted") fail, which is the recurring
+# nfstest_delegation/_cache flake.  Give it 6 GiB; -m is only a ceiling (KVM
+# RAM is demand-paged) so the headroom costs no host memory unless touched.
+# (nfstest_alloc/_dio use 8 GiB for the same reason in the single-client
+# wrapper; #909 raised it there but those programs run via the *other* wrapper,
+# so the 2-client delegation/cache tests never got the bump.)
 ip netns exec "${NETNS_NAME}" "$QEMU_BIN" \
-    -enable-kvm -smp 4 -m 2G -cpu host \
+    -enable-kvm -smp 4 -m 6G -cpu host \
     -kernel "$VMLINUZ" $QEMU_INITRD $QEMU_MACHINE -nodefaults \
     -drive file="$ROOTFS",if=virtio,format=qcow2,snapshot=on \
     -netdev tap,id=net0,ifname="${TAP_A}",script=no,downscript=no \
