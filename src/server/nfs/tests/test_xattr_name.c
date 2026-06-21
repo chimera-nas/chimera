@@ -6,7 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "nfs4_xattr.h"
+#include "vfs/vfs_xattr_name.h"
 
 /*
  * Use an explicit check rather than assert(): the static-analysis build compiles
@@ -24,55 +24,55 @@
             }                                                    \
         } while (0)
 
-/* chimera_nfs4_xattr_is_user: only non-empty user.* names qualify. */
+/* chimera_vfs_xattr_is_user: only non-empty user.* names qualify. */
 static int
 test_is_user(void)
 {
-    CHECK(chimera_nfs4_xattr_is_user("user.test", 9) == 1);
-    CHECK(chimera_nfs4_xattr_is_user("user.x", 6) == 1);
+    CHECK(chimera_vfs_xattr_is_user("user.test", 9) == 1);
+    CHECK(chimera_vfs_xattr_is_user("user.x", 6) == 1);
 
     /* bare key, no prefix */
-    CHECK(chimera_nfs4_xattr_is_user("test", 4) == 0);
+    CHECK(chimera_vfs_xattr_is_user("test", 4) == 0);
 
     /* other namespaces are not user.* */
-    CHECK(chimera_nfs4_xattr_is_user("system.posix_acl_access", 23) == 0);
-    CHECK(chimera_nfs4_xattr_is_user("trusted.foo", 11) == 0);
-    CHECK(chimera_nfs4_xattr_is_user("security.selinux", 16) == 0);
+    CHECK(chimera_vfs_xattr_is_user("system.posix_acl_access", 23) == 0);
+    CHECK(chimera_vfs_xattr_is_user("trusted.foo", 11) == 0);
+    CHECK(chimera_vfs_xattr_is_user("security.selinux", 16) == 0);
 
     /* exact "user." with an empty key is not a valid user attribute */
-    CHECK(chimera_nfs4_xattr_is_user("user.", 5) == 0);
+    CHECK(chimera_vfs_xattr_is_user("user.", 5) == 0);
     return 0;
 } /* test_is_user */
 
-/* chimera_nfs4_xattr_build_user: prepend "user." with length validation. */
+/* chimera_vfs_xattr_build_user: prepend "user." with length validation. */
 static int
 test_build_user(void)
 {
-    char buf[CHIMERA_NFS4_XATTR_NAME_MAX + 1];
-    char longkey[CHIMERA_NFS4_XATTR_NAME_MAX + 1];
+    char buf[CHIMERA_VFS_XATTR_NAME_MAX + 1];
+    char longkey[CHIMERA_VFS_XATTR_NAME_MAX + 1];
 
     /* normal key -> "user.test" */
-    CHECK(chimera_nfs4_xattr_build_user(buf, sizeof(buf), "test", 4) == 9);
+    CHECK(chimera_vfs_xattr_build_user(buf, sizeof(buf), "test", 4) == 9);
     CHECK(memcmp(buf, "user.test", 9) == 0);
 
     /* empty key is rejected */
-    CHECK(chimera_nfs4_xattr_build_user(buf, sizeof(buf), "", 0) == -1);
+    CHECK(chimera_vfs_xattr_build_user(buf, sizeof(buf), "", 0) == -1);
 
     /* prefix + key may reach exactly XATTR_NAME_MAX (250 byte key) */
     memset(longkey, 'a', sizeof(longkey));
-    CHECK(chimera_nfs4_xattr_build_user(buf, sizeof(buf), longkey,
-                                        CHIMERA_NFS4_XATTR_NAME_MAX -
-                                        CHIMERA_NFS4_XATTR_USER_PREFIX_LEN) ==
-          CHIMERA_NFS4_XATTR_NAME_MAX);
+    CHECK(chimera_vfs_xattr_build_user(buf, sizeof(buf), longkey,
+                                       CHIMERA_VFS_XATTR_NAME_MAX -
+                                       CHIMERA_VFS_XATTR_USER_PREFIX_LEN) ==
+          CHIMERA_VFS_XATTR_NAME_MAX);
 
     /* one byte past the limit is rejected */
-    CHECK(chimera_nfs4_xattr_build_user(buf, sizeof(buf), longkey,
-                                        CHIMERA_NFS4_XATTR_NAME_MAX -
-                                        CHIMERA_NFS4_XATTR_USER_PREFIX_LEN + 1) ==
+    CHECK(chimera_vfs_xattr_build_user(buf, sizeof(buf), longkey,
+                                       CHIMERA_VFS_XATTR_NAME_MAX -
+                                       CHIMERA_VFS_XATTR_USER_PREFIX_LEN + 1) ==
           -1);
 
     /* a destination too small for the result is rejected */
-    CHECK(chimera_nfs4_xattr_build_user(buf, 5, "test", 4) == -1);
+    CHECK(chimera_vfs_xattr_build_user(buf, 5, "test", 4) == -1);
     return 0;
 } /* test_build_user */
 
@@ -96,9 +96,9 @@ test_list_strip_filter(void)
     while (p < end) {
         uint32_t namelen = strlen(p);
 
-        if (chimera_nfs4_xattr_is_user(p, namelen)) {
-            const char *stripped = p + CHIMERA_NFS4_XATTR_USER_PREFIX_LEN;
-            uint32_t    striplen = namelen - CHIMERA_NFS4_XATTR_USER_PREFIX_LEN;
+        if (chimera_vfs_xattr_is_user(p, namelen)) {
+            const char *stripped = p + CHIMERA_VFS_XATTR_USER_PREFIX_LEN;
+            uint32_t    striplen = namelen - CHIMERA_VFS_XATTR_USER_PREFIX_LEN;
 
             if (count == 0) {
                 CHECK(striplen == 4 && memcmp(stripped, "test", 4) == 0);
