@@ -59,7 +59,8 @@ sm_free_resolve_ag(
     const char       *who);
 
 static void
-sm_init_device_free_totals(struct space_map *sm);
+sm_init_device_free_totals(
+    struct space_map *sm);
 
 
 static struct sm_extent *
@@ -146,7 +147,9 @@ sm_ag_mc_update(struct sm_ag *ag)
 
 /* Push ext onto the head of its size-class list. */
 static void
-sm_ag_size_link(struct sm_ag *ag, struct sm_extent *ext)
+sm_ag_size_link(
+    struct sm_ag     *ag,
+    struct sm_extent *ext)
 {
     uint32_t c = sm_ag_size_class(ext->length);
 
@@ -155,8 +158,8 @@ sm_ag_size_link(struct sm_ag *ag, struct sm_extent *ext)
     if (ag->free_by_size[c]) {
         ag->free_by_size[c]->size_prev = ext;
     }
-    ag->free_by_size[c]  = ext;
-    ag->size_nonempty   |= (1u << c);
+    ag->free_by_size[c] = ext;
+    ag->size_nonempty  |= (1u << c);
     sm_ag_mc_update(ag);
 } /* sm_ag_size_link */
 
@@ -165,7 +168,9 @@ sm_ag_size_link(struct sm_ag *ag, struct sm_extent *ext)
  * holds the value it was linked under (i.e. unlink before mutating length).
  */
 static void
-sm_ag_size_unlink(struct sm_ag *ag, struct sm_extent *ext)
+sm_ag_size_unlink(
+    struct sm_ag     *ag,
+    struct sm_extent *ext)
 {
     uint32_t c = sm_ag_size_class(ext->length);
 
@@ -332,7 +337,9 @@ sm_ag_alloc_locked(
  * block into the transaction on every visit).  Caller holds ag->lock.
  */
 static int
-sm_ag_can_alloc_locked(struct sm_ag *ag, uint64_t size)
+sm_ag_can_alloc_locked(
+    struct sm_ag *ag,
+    uint64_t      size)
 {
     uint32_t klass = sm_ag_size_class(size);
     uint32_t higher;
@@ -679,8 +686,8 @@ sm_pick_and_alloc(
     int      r;
 
     /* Phase 0 arena fast path: try this thread's sticky AG first.  Each worker
-     * sticks to a different AG, so its ag->lock is essentially uncontended --
-     * eliminating the thundering herd where many workers gang on one hot AG. */
+    * sticks to a different AG, so its ag->lock is essentially uncontended --
+    * eliminating the thundering herd where many workers gang on one hot AG. */
     if (cache && cache->arena_valid &&
         cache->arena_dev < sm->num_devices &&
         sm->devices[cache->arena_dev].role == role &&
@@ -1347,12 +1354,12 @@ sm_ag_try_claim_locked(
             struct sm_claim *c;
 
             if (s + want > e_end) {
-                break;          /* no room left in this extent */
+                break;           /* no room left in this extent */
             }
             for (c = ag->claims; c; c = c->next) {
                 if (s < c->base + c->len && c->base < s + want) {
                     if (!blk || c->base + c->len > blk->base + blk->len) {
-                        blk = c;        /* the overlapping claim that ends highest */
+                        blk = c; /* the overlapping claim that ends highest */
                     }
                 }
             }
@@ -1413,8 +1420,8 @@ space_map_reserve_chunk(
     pthread_mutex_unlock(&sm->lock);
 
     for (d = 0; d < sm->num_devices; d++) {
-        uint32_t          dev_id = (start_dev + d) % sm->num_devices;
-        struct sm_device *dev    = &sm->devices[dev_id];
+        uint32_t          dev_id     = (start_dev + d) % sm->num_devices;
+        struct sm_device *dev        = &sm->devices[dev_id];
         uint32_t          want_class = sm_ag_size_class(want);
         uint32_t          C;
 
@@ -1438,10 +1445,10 @@ space_map_reserve_chunk(
                 uint64_t word = __atomic_load_n(&bits[wi], __ATOMIC_RELAXED);
 
                 while (word) {
-                    uint32_t      b  = (uint32_t) __builtin_ctzll(word);
-                    uint32_t      ai = wi * 64u + b;
-                    struct sm_ag *ag;
-                    uint64_t      base, len;
+                    uint32_t         b  = (uint32_t) __builtin_ctzll(word);
+                    uint32_t         ai = wi * 64u + b;
+                    struct sm_ag    *ag;
+                    uint64_t         base, len;
                     struct sm_claim *claim;
 
                     word &= ~(1ULL << b);
@@ -1494,9 +1501,9 @@ space_map_bump_alloc(
     *r_device_offset = r->cursor;
 
     /* Pin the claim: it must outlive this allocation's retire (when
-     * space_map_alloc_apply decrements), so a re-grant of the region can't race
-     * an in-flight ALLOC delta.  Owner-only increment, sequenced-before any
-     * release of this claim, so it never races the retiring flag. */
+    * space_map_alloc_apply decrements), so a re-grant of the region can't race
+    * an in-flight ALLOC delta.  Owner-only increment, sequenced-before any
+    * release of this claim, so it never races the retiring flag. */
     __atomic_fetch_add(&r->claim->refcount, 1, __ATOMIC_RELAXED);
 
     /* ALLOC delta for crash recovery; applied to the in-memory tree only when
@@ -1950,7 +1957,7 @@ space_map_ag_begin_checkpoint(
     uint32_t          device_id,
     uint32_t          ag_index)
 {
-    struct sm_ag *ag = &sm->devices[device_id].ags[ag_index];
+    struct sm_ag *ag    = &sm->devices[device_id].ags[ag_index];
     int           start = 0;
 
     pthread_mutex_lock(&ag->lock);
@@ -2013,7 +2020,7 @@ sm_ag_reconstruct(
     rb_tree_init(&ag->free_by_offset);
     memset(ag->free_by_size, 0, sizeof(ag->free_by_size));
     ag->size_nonempty = 0;
-    ag->free_bytes = 0;
+    ag->free_bytes    = 0;
 
     for (i = 0; i < h->base_count; i++) {
         struct sm_extent *e = sm_extent_new(base[i].offset, base[i].length);
@@ -2085,7 +2092,7 @@ sm_persist_batch_submit(
             updates[i].ag->log_delta_count = 0;
             __atomic_store_n(&updates[i].ag->ckpt_seq, updates[i].ckpt_seq,
                              __ATOMIC_RELEASE);
-            updates[i].ag->ckpt_dirty      = 0;
+            updates[i].ag->ckpt_dirty = 0;
             pthread_mutex_unlock(&updates[i].ag->lock);
         }
     }
@@ -2171,7 +2178,7 @@ space_map_persist(
             updates[count].generation = gen;
             updates[count].base_count =
                 ((struct sm_ag_log_header *) buf)->base_count;
-            updates[count].ckpt_seq   = ckpt_seq;
+            updates[count].ckpt_seq = ckpt_seq;
             count++;
             bytes += aligned;
             pthread_mutex_unlock(&ag->lock);

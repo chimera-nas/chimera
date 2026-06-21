@@ -358,36 +358,36 @@ struct sm_reservation {
 struct sm_device;
 
 struct sm_ag {
-    uint32_t        device_id;
-    uint32_t        ag_index;
-    struct sm_device *dev;          /* owning device (for the lock-free free-space index) */
-    int16_t         maxclass;       /* largest non-empty size class, -1 if full; mirrored
+    uint32_t          device_id;
+    uint32_t          ag_index;
+    struct sm_device *dev;            /* owning device (for the lock-free free-space index) */
+    int16_t           maxclass;     /* largest non-empty size class, -1 if full; mirrored
                                      * into dev->maxclass_bits[maxclass] (lock-free) */
-    uint64_t        base_offset;
-    uint64_t        size;
-    uint32_t        log_device_id;   /* device whose storage holds this AG's log
+    uint64_t          base_offset;
+    uint64_t          size;
+    uint32_t          log_device_id; /* device whose storage holds this AG's log
                                       * (always LOCAL; == device_id unless this
                                       * AG tracks a relocated REMOTE device) */
-    uint64_t        log_offset;      /* absolute offset of this AG's log on log_device_id */
-    uint64_t        log_size;        /* total log bytes (both slots) */
-    uint64_t        free_bytes;
-    struct rb_tree  free_by_offset;                       /* extents keyed by offset */
+    uint64_t          log_offset;    /* absolute offset of this AG's log on log_device_id */
+    uint64_t          log_size;       /* total log bytes (both slots) */
+    uint64_t          free_bytes;
+    struct rb_tree    free_by_offset; /* extents keyed by offset */
     struct sm_extent *free_by_size[SM_SIZE_CLASSES];      /* same extents, by size class */
-    uint32_t        size_nonempty;                        /* bitmask of non-empty classes */
-    struct sm_claim *claims;        /* outstanding reservation claims (protected by lock) */
-    pthread_mutex_t lock;
+    uint32_t          size_nonempty;  /* bitmask of non-empty classes */
+    struct sm_claim  *claims;         /* outstanding reservation claims (protected by lock) */
+    pthread_mutex_t   lock;
 
     /* On-disk allocation-log state (protected by lock). */
-    uint32_t        log_slot;        /* active slot index (0 or 1) */
-    uint64_t        log_generation;  /* generation of the active slot */
-    uint32_t        log_base_count;  /* condensed base extents in the active slot */
-    uint32_t        log_delta_count; /* deltas appended since the last condense */
+    uint32_t          log_slot;       /* active slot index (0 or 1) */
+    uint64_t          log_generation; /* generation of the active slot */
+    uint32_t          log_base_count; /* condensed base extents in the active slot */
+    uint32_t          log_delta_count; /* deltas appended since the last condense */
 
     /* Checkpoint-in-progress gate (protected by lock): set by
      * space_map_ag_begin_checkpoint, cleared by space_map_condense_commit, so
      * only one background checkpoint of this AG runs at a time.  Allocs/frees
      * proceed concurrently (they no longer park on it). */
-    int             condensing;
+    int               condensing;
 
     /* Checkpoint coupling (protected by lock).  ckpt_seq is the highest redo
      * seq folded into this AG's on-disk base snapshot; the redo trim frontier
@@ -395,8 +395,8 @@ struct sm_ag {
      * AG whose ckpt_seq is still below that record's seq.  ckpt_dirty is set on
      * the first delta after a checkpoint and cleared when the next checkpoint
      * commits, so only AGs with un-checkpointed deltas are rewritten. */
-    uint64_t        ckpt_seq;
-    int             ckpt_dirty;
+    uint64_t          ckpt_seq;
+    int               ckpt_dirty;
 };
 
 struct sm_device {

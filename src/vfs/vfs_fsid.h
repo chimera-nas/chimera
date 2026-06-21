@@ -61,7 +61,7 @@ chimera_vfs_fsid_hash(
         h *= 1099511628211ULL;
     }
     return h ? h : 1;   /* never 0 (0 is the "unknown" sentinel) */
-}
+} // chimera_vfs_fsid_hash
 
 static inline uint64_t
 chimera_vfs_fsid_devkey(
@@ -69,7 +69,7 @@ chimera_vfs_fsid_devkey(
     uint32_t min)
 {
     return ((uint64_t) maj << 32) | min;
-}
+} // chimera_vfs_fsid_devkey
 
 static inline void
 chimera_vfs_fsid_append(
@@ -84,7 +84,7 @@ chimera_vfs_fsid_append(
     chimera_vfs_fsid.ents[chimera_vfs_fsid.num].devkey = devkey;
     chimera_vfs_fsid.ents[chimera_vfs_fsid.num].fsid   = fsid;
     chimera_vfs_fsid.num++;
-}
+} // chimera_vfs_fsid_append
 
 static inline uint64_t
 chimera_vfs_fsid_lookup_locked(uint64_t devkey)
@@ -95,7 +95,7 @@ chimera_vfs_fsid_lookup_locked(uint64_t devkey)
         }
     }
     return 0;
-}
+} // chimera_vfs_fsid_lookup_locked
 
 /*
  * Snapshot /dev/disk/by-uuid into a (devkey -> uuid-hash) array.  The symlink
@@ -135,7 +135,7 @@ chimera_vfs_fsid_scan_uuids(struct chimera_vfs_fsid_ent **out)
     closedir(d);
     *out = ents;
     return num;
-}
+} // chimera_vfs_fsid_scan_uuids
 
 /* (Re)build the dev -> fsid map from /proc/self/mountinfo.  Caller holds lock. */
 static inline void
@@ -206,7 +206,7 @@ chimera_vfs_fsid_rebuild_locked(void)
 
     fclose(f);
     free(uuids);
-}
+} // chimera_vfs_fsid_rebuild_locked
 
 /*
  * Map a device (st_dev's major/minor) to its stable filesystem FSID.  Never
@@ -241,4 +241,4 @@ chimera_vfs_fsid_for_dev(
     pthread_mutex_unlock(&chimera_vfs_fsid.lock);
 
     return fsid;
-}
+} // chimera_vfs_fsid_for_dev

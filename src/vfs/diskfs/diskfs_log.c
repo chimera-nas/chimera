@@ -14,7 +14,8 @@
 /* Debug: live handle to the intent log + a per-queue CQ dumper (in libevpl),
  * so a wedge can be inspected from gdb with `call dbg_dump_push()`. */
 struct diskfs_intent_log *g_dbg_il;
-extern void               evpl_vfio_queue_dump(struct evpl_block_queue *bq);
+extern void evpl_vfio_queue_dump(
+    struct evpl_block_queue *bq);
 
 SYMBOL_EXPORT void
 dbg_dump_push(void)
@@ -635,10 +636,10 @@ diskfs_push_checkpoint_ready(
 {
     struct diskfs_shared      *shared = container_of(il, struct diskfs_shared,
                                                      intent_log);
-    struct diskfs_redo_header *hdr    = (struct diskfs_redo_header *) rec->iovs[0].data;
+    struct diskfs_redo_header *hdr = (struct diskfs_redo_header *) rec->iovs[0].data;
     char                      *p;
     uint32_t                   i;
-    int                        ready  = 1;
+    int                        ready = 1;
 
     if (hdr->num_deltas == 0) {
         return 1;
@@ -1003,8 +1004,8 @@ diskfs_il_write_redo(
      * struct alive (on the LRU, pinned, holding its buffer).  Carry the block
      * pointer so the tail-pusher drops the obligation pin on THIS block by
      * pointer -- a (dev,off) lookup would now find the new live block instead. */
-    rec->blocks     = calloc(nblocks, sizeof(*rec->blocks));
-    rec->next       = NULL;
+    rec->blocks = calloc(nblocks, sizeof(*rec->blocks));
+    rec->next   = NULL;
 
     /* iovs[0]: materialized header region (redo_header + per-block headers). */
     niov = evpl_iovec_alloc(il->evpl, hdr_len, DISKFS_BLOCK_SIZE, 1,
@@ -1193,7 +1194,9 @@ diskfs_il_txn_deltas(struct diskfs_txn *txn)
 
 
 static uint64_t
-diskfs_il_blocks_reclen(uint32_t nblocks, uint32_t num_deltas)
+diskfs_il_blocks_reclen(
+    uint32_t nblocks,
+    uint32_t num_deltas)
 {
     return diskfs_il_hdr_len(nblocks, num_deltas) +
            (uint64_t) nblocks * DISKFS_BLOCK_SIZE;
@@ -1956,7 +1959,7 @@ diskfs_txn_commit_finish(
                 diskfs_block_shard(thread->shared->block_cache,
                                    tb->block->device_id,
                                    tb->block->device_offset);
-            XXH128_hash_t snap_hash;
+            XXH128_hash_t              snap_hash;
 
             pthread_mutex_lock(&bshard->lock);
             diskfs_block_buf_ref_locked(tb->block->buf);

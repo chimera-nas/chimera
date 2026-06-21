@@ -769,7 +769,7 @@ struct diskfs_block_shard {
      * slices carved out of these.  libevpl never refcounts the slices, so the
      * IL builder clones them into the redo writev with zero atomics.  Freed
      * once each at teardown (the slices are borrows and are never freed). */
-    struct evpl_iovec          *global_bufs;        /* [n_global_bufs] */
+    struct evpl_iovec          *global_bufs;    /* [n_global_bufs] */
     uint32_t                    n_global_bufs;
 
     /* Block structs whose buffer was donated to a CoW fork (see
@@ -1126,7 +1126,8 @@ struct diskfs_txn {
 /* Diag: dump the call path the first time a single txn's block count crosses
  * this threshold, to find what builds pathologically large transactions. */
 #define DISKFS_TXN_TRACE_BLOCKS 1024
-void diskfs_txn_trace_giant(struct diskfs_txn *txn);
+void diskfs_txn_trace_giant(
+    struct diskfs_txn *txn);
 
 
 /*
@@ -1137,9 +1138,9 @@ void diskfs_txn_trace_giant(struct diskfs_txn *txn);
  *   sq:  worker (producer)        ->  intent log thread (consumer)
  *   cq:  intent log thread (prod) ->  worker (consumer)
  */
-#define DISKFS_IQ_RING_SIZE 1024
+#define DISKFS_IQ_RING_SIZE     1024
 
-#define DISKFS_IQ_RING_MASK (DISKFS_IQ_RING_SIZE - 1)
+#define DISKFS_IQ_RING_MASK     (DISKFS_IQ_RING_SIZE - 1)
 
 
 struct diskfs_iq_entry {
@@ -1261,9 +1262,9 @@ struct diskfs_retire_slot {
 };
 
 
-#define DISKFS_RETIRE_RING_SIZE  1024   /* >= DISKFS_COMMIT_WATERMARK */
+#define DISKFS_RETIRE_RING_SIZE 1024    /* >= DISKFS_COMMIT_WATERMARK */
 
-#define DISKFS_RETIRE_RING_MASK  (DISKFS_RETIRE_RING_SIZE - 1)
+#define DISKFS_RETIRE_RING_MASK (DISKFS_RETIRE_RING_SIZE - 1)
 
 /* The commit thread hands every durable record to the push thread through this
  * SPSC ring.  A record occupies at least one 4 KiB log block, so the intent log
@@ -2542,7 +2543,8 @@ diskfs_redo_write_cb(
 /* Nudge the push thread to retry the redo trim frontier gate after a background
  * AG checkpoint advanced some AG's ckpt_seq (see diskfs_push_trim). */
 void
-diskfs_il_checkpoint_advanced(struct diskfs_intent_log *il);
+diskfs_il_checkpoint_advanced(
+    struct diskfs_intent_log *il);
 
 void
 diskfs_iq_process_channel(
@@ -3988,8 +3990,8 @@ diskfs_block_return_buf_locked(
     if (blk) {
         shard->free_blocks = blk->free_next;
         shard->n_bufless--;
-        blk->free_next     = NULL;
-        buf->next          = NULL;
+        blk->free_next = NULL;
+        buf->next      = NULL;
         __atomic_store_n(&buf->on_free, 0, __ATOMIC_RELEASE);
         __atomic_store_n(&buf->refs, 1, __ATOMIC_RELEASE);
         blk->buf       = buf;
@@ -4139,15 +4141,18 @@ diskfs_bt_interior_underflow(
 
 
 /* Diag: budgeted backtrace for a reserve-parked mutating op completing via the
- * synchronous done-path (a dropped continuation). Defined in diskfs_block.c. */
-void diskfs_bt_done_trace(struct diskfs_bt_op *op);
+* synchronous done-path (a dropped continuation). Defined in diskfs_block.c. */
+void diskfs_bt_done_trace(
+    struct diskfs_bt_op *op);
 
 /* Diag: per-phase count of bt ops currently parked (lost-wakeup localization).
  * park_account() counts an op that parked (called after diskfs_bt_run returns
  * !done); park_clear() uncounts it when it resumes. Defined in diskfs_block.c. */
 extern int g_dbg_park[6];
-void diskfs_bt_op_park_account(struct diskfs_bt_op *op);
-void diskfs_bt_op_park_clear(struct diskfs_bt_op *op);
+void diskfs_bt_op_park_account(
+    struct diskfs_bt_op *op);
+void diskfs_bt_op_park_clear(
+    struct diskfs_bt_op *op);
 
 
 static inline void
@@ -4521,18 +4526,18 @@ diskfs_txn_begin(
         txn = malloc(sizeof(*txn));
     }
 
-    txn->type          = type;
-    txn->thread        = thread;
-    txn->next          = NULL;
-    txn->num_inodes    = 0;
-    txn->blocks        = NULL;
-    txn->nblocks       = 0;
-    txn->n_journal     = 0;
+    txn->type            = type;
+    txn->thread          = thread;
+    txn->next            = NULL;
+    txn->num_inodes      = 0;
+    txn->blocks          = NULL;
+    txn->nblocks         = 0;
+    txn->n_journal       = 0;
     txn->n_reserve_again = 0;
-    txn->dbg_stage     = 1;     /* BEGUN */
-    txn->pending_frees = NULL;
-    txn->space_deltas  = NULL;
-    txn->n_space_deltas = 0;
+    txn->dbg_stage       = 1;   /* BEGUN */
+    txn->pending_frees   = NULL;
+    txn->space_deltas    = NULL;
+    txn->n_space_deltas  = 0;
     return txn;
 } /* diskfs_txn_begin */
 
@@ -4615,7 +4620,9 @@ diskfs_op_ok(
  * zero-copy clone of the cache block's buffer.
  */
 static inline uint64_t
-diskfs_il_hdr_len(uint32_t nblocks, uint32_t num_deltas)
+diskfs_il_hdr_len(
+    uint32_t nblocks,
+    uint32_t num_deltas)
 {
     uint64_t h = sizeof(struct diskfs_redo_header) +
         (uint64_t) nblocks * sizeof(struct diskfs_redo_block_header) +
