@@ -68,7 +68,11 @@ SMB_EXPECT="${SMB_EXPECT:-pass}"
 #   SMB_CACHE     cifs cache mode (loose|strict|none); default loose.  strict
 #                 makes the client lean on leases/oplocks for cache coherency,
 #                 which is what the leases feature test wants to exercise.
+#   SMB_BRL       0 (default) mounts with nobrl, suppressing byte-range locks;
+#                 1 drops nobrl so the kernel client drives real SMB2 LOCK
+#                 requests (for the locking suites).
 SMB_CACHE="${SMB_CACHE:-loose}"
+SMB_BRL="${SMB_BRL:-0}"
 
 SERVER_EXTRA=""
 SHARE_EXTRA=""
@@ -269,7 +273,11 @@ esac
 
 # Build the mount options for the CIFS mount.  vers= pins the dialect; seal/sign
 # add SMB3 transport encryption / signing for the secmode variants.
-SMB_MOUNT_OPTS="username=root,password=secret,vers=${VERS},nobrl,modefromsid,cache=${SMB_CACHE}"
+# nobrl suppresses byte-range locking; drop it when SMB_BRL=1 so the kernel
+# client issues real SMB2 LOCK requests.
+BRL_OPT=",nobrl"
+[ "$SMB_BRL" = "1" ] && BRL_OPT=""
+SMB_MOUNT_OPTS="username=root,password=secret,vers=${VERS}${BRL_OPT},modefromsid,cache=${SMB_CACHE}"
 case "$SECMODE" in
     seal) SMB_MOUNT_OPTS="${SMB_MOUNT_OPTS},seal" ;;
     sign) SMB_MOUNT_OPTS="${SMB_MOUNT_OPTS},sign" ;;

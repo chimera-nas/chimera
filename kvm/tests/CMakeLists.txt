@@ -42,6 +42,18 @@ if(HAVE_LIBAIO)
     list(APPEND PNFS_BACKENDS diskfs_aio)
 endif()
 
+# Backends that implement a native VFS clone (reflink / FSCTL_DUPLICATE_EXTENTS):
+# memfs (4K-aligned CoW) and diskfs.  Passthrough backends (linux/io_uring) can
+# only clone if the host filesystem does, so they are excluded from the SMB
+# clone test (which forces the offload with `cp --reflink=always`).
+set(SMB_CLONE_BACKENDS memfs)
+if(IO_URING_ENABLED)
+    list(APPEND SMB_CLONE_BACKENDS diskfs_io_uring)
+endif()
+if(HAVE_LIBAIO)
+    list(APPEND SMB_CLONE_BACKENDS diskfs_aio)
+endif()
+
 # pNFS block layout (RFC 5663): diskfs-only (it sources block layouts).  The
 # data lives on a signed virtio-SCSI disk the client reaches directly as
 # /dev/sda; the MDS only allocates extents and never touches it.
@@ -798,6 +810,56 @@ foreach(image_spec ${KVM_IMAGES})
                 set_tests_properties(chimera/kvm/${IMAGE_NAME}/smb/feature/leases_memfs
                     PROPERTIES DISABLED TRUE)
             endif()
+        endforeach()
+    endif()
+
+    # SMB real byte-range locking + server-side copy -- ubuntu2404 only.
+    if(IMAGE_NAME STREQUAL "ubuntu2404")
+        # Byte-range locking: drop nobrl (SMB_BRL=1) so the kernel client issues
+        # real SMB2 LOCK requests, and run LTP's fcntl-locktests over the cifs
+        # mount.  With nobrl (every other SMB suite) locking is never exercised.
+        foreach(backend ${KVM_BACKENDS})
+            add_test(NAME chimera/kvm/${IMAGE_NAME}/smb/locking/fcntl-locktests_${backend}
+                COMMAND env SMB_BRL=1
+                        bash ${SMB_WRAPPER}
+                        ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
+                        ${CHIMERA_BINARY} ${backend} 3.1.1 none
+                        "/opt/ltp-run.sh fcntl-locktests")
+            set_tests_properties(chimera/kvm/${IMAGE_NAME}/smb/locking/fcntl-locktests_${backend}
+                PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2 TIMEOUT 600)
+        endforeach()
+
+        # Server-side copy via copy_file_range -> FSCTL_SRV_COPYCHUNK.
+        # --reflink=never keeps the kernel off the clone path so this exercises
+        # CopyChunk specifically; cmp verifies the bytes.
+        foreach(backend ${KVM_BACKENDS})
+            add_test(NAME chimera/kvm/${IMAGE_NAME}/smb/copy/copychunk_${backend}
+                COMMAND bash ${SMB_WRAPPER}
+                        ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
+                        ${CHIMERA_BINARY} ${backend} 3.1.1 none
+                        "mkdir -p /mnt/test && dd if=/dev/urandom of=/mnt/test/src bs=1M count=4 2>/dev/null && cp --reflink=never /mnt/test/src /mnt/test/dst && cmp /mnt/test/src /mnt/test/dst")
+            set_tests_properties(chimera/kvm/${IMAGE_NAME}/smb/copy/copychunk_${backend}
+                PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2)
+        endforeach()
+
+        # Clone via FSCTL_DUPLICATE_EXTENTS_TO_FILE.  --reflink=always forces the
+        # offload and errors loudly if it is not honored, so a pass proves the
+        # clone path end-to-end.  Only backends with a native VFS clone.
+        #
+        # DISABLED: the kernel cifs client refuses to even attempt FICLONE
+        # because chimera does not advertise FILE_SUPPORTS_BLOCK_REFCOUNTING in
+        # FileFsAttributeInformation, so cp fails with "Operation not supported"
+        # before any FSCTL is sent.  chimera handles the duplicate-extents FSCTL
+        # (exercised by smbtorture/WPTS), but advertising the FS-attribute flag
+        # has known smbtorture fallout; enable once that is sorted.
+        foreach(backend ${SMB_CLONE_BACKENDS})
+            add_test(NAME chimera/kvm/${IMAGE_NAME}/smb/copy/clone_${backend}
+                COMMAND bash ${SMB_WRAPPER}
+                        ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
+                        ${CHIMERA_BINARY} ${backend} 3.1.1 none
+                        "mkdir -p /mnt/test && dd if=/dev/urandom of=/mnt/test/src bs=1M count=4 2>/dev/null && cp --reflink=always /mnt/test/src /mnt/test/dst && cmp /mnt/test/src /mnt/test/dst")
+            set_tests_properties(chimera/kvm/${IMAGE_NAME}/smb/copy/clone_${backend}
+                PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2 DISABLED TRUE)
         endforeach()
     endif()
 
