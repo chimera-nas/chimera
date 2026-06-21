@@ -94,6 +94,21 @@ test_name_eq(void)
     return 0;
 } /* test_name_eq */
 
+/* MS-FSCC 2.4.15 / MS-FSA: a well-formed EA name has no control chars and none
+ * of the reserved punctuation; an invalid one fails the set (INVALID_EA_NAME). */
+static int
+test_name_valid(void)
+{
+    CHECK(chimera_smb_ea_name_valid("FOO", 3) == 1);
+    CHECK(chimera_smb_ea_name_valid("My Ea_Name.1", 12) == 1);  /* space + . + _ ok */
+    CHECK(chimera_smb_ea_name_valid("a=b", 3) == 0);            /* '=' reserved */
+    CHECK(chimera_smb_ea_name_valid("a,b", 3) == 0);            /* ',' reserved */
+    CHECK(chimera_smb_ea_name_valid("a/b", 3) == 0);            /* '/' reserved */
+    CHECK(chimera_smb_ea_name_valid("a\\b", 3) == 0);           /* '\' reserved */
+    CHECK(chimera_smb_ea_name_valid("a\tb", 3) == 0);           /* control char */
+    return 0;
+} /* test_name_valid */
+
 static int
 test_status_map(void)
 {
@@ -119,7 +134,8 @@ int
 main(void)
 {
     if (test_full_roundtrip() || test_full_parse_bounds() || test_get_parse() ||
-        test_name_eq() || test_status_map() || test_ea_size_formula()) {
+        test_name_eq() || test_name_valid() || test_status_map() ||
+        test_ea_size_formula()) {
         return 1;
     }
     printf("smb_ea_test: all checks passed\n");
