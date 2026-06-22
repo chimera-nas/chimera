@@ -111,7 +111,9 @@ chimera_nfs4_encode_ff_device_addr(
      * (NFSv3 or NFSv4.x), loosely coupled. */
     pnfs_put_u32(&p, 1);
     pnfs_put_u32(&p, version);                /* ffdv_version          */
-    pnfs_put_u32(&p, minorversion);           /* ffdv_minorversion     */
+    /* RFC 8435 §4.1: if ffdv_version == 3 the server MUST set ffdv_minorversion
+     * to 0 (and ffdv_tightly_coupled to false, hardcoded below). */
+    pnfs_put_u32(&p, version == 3 ? 0 : minorversion); /* ffdv_minorversion */
     pnfs_put_u32(&p, NFS4_PNFS_STRIPE_UNIT);  /* ffdv_rsize            */
     pnfs_put_u32(&p, NFS4_PNFS_STRIPE_UNIT);  /* ffdv_wsize            */
     pnfs_put_u32(&p, 0);                      /* ffdv_tightly_coupled=false */
