@@ -583,8 +583,10 @@ nfs4_client_setclientid_confirm(
     if (!r->nfs4_client_scid_confirm_valid ||
         memcmp(confirm, r->nfs4_client_scid_confirm, NFS4_VERIFIER_SIZE) != 0) {
         /* The (clientid, verifier) pair does not name a record awaiting
-         * confirmation (RFC 7530 §16.34.5). */
-        status = NFS4ERR_STALE_STATEID;
+         * confirmation.  SETCLIENTID_CONFIRM's error set (RFC 7530 §13 / §16.34.5)
+         * specifies NFS4ERR_STALE_CLIENTID here; NFS4ERR_STALE_STATEID is only
+         * valid for stateid operations. */
+        status = NFS4ERR_STALE_CLIENTID;
         goto out_unlock;
     }
 
