@@ -396,6 +396,14 @@ sm_ag_free_locked(
                 "double-free or overlap at offset=%lu (next=%lu+%lu)",
                 offset, next_ext->offset, next_ext->length);
 
+    /* prev (floor of offset) and next (ceil of offset+length) are necessarily
+     * distinct nodes: the overlap aborts above pin prev to end <= offset and
+     * next to start >= offset+length, so one extent cannot be both.  Asserting
+     * it makes the coalesce below provably safe -- it frees next_ext and then
+     * relinks prev_ext, which is only a use-after-free if the two alias. */
+    sm_abort_if(prev_ext && prev_ext == next_ext,
+                "floor/ceil resolved the same extent at offset=%lu", offset);
+
     if (prev_ext && prev_ext->offset + prev_ext->length == offset) {
         sm_ag_size_unlink(ag, prev_ext);   /* length about to grow; relink below */
         prev_ext->length += length;

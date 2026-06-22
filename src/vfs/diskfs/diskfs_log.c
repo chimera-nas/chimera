@@ -501,7 +501,8 @@ diskfs_il_rec_alloc(
                                         0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
     }
     if (!rec) {
-        rec             = malloc(sizeof(*rec));
+        rec = malloc(sizeof(*rec));
+        chimera_diskfs_abort_if(!rec, "out of memory allocating IL record");
         rec->blocks_cap = 0;
         rec->iovs       = NULL;
         rec->block_bufs = NULL;
@@ -509,14 +510,19 @@ diskfs_il_rec_alloc(
     }
 
     /* Grow the arrays only when this record needs more blocks than any prior
-     * use of this struct -- the common (batched) case reuses them untouched. */
-    if (nblocks > rec->blocks_cap) {
+     * use of this struct -- the common (batched) case reuses them untouched.
+     * A fresh struct (iovs == NULL) must always allocate, even at nblocks == 0:
+     * iovs[0] holds the redo header regardless of the block count. */
+    if (nblocks > rec->blocks_cap || !rec->iovs) {
         free(rec->iovs);
         free(rec->block_bufs);
         free(rec->blocks);
         rec->iovs       = malloc((1 + nblocks) * sizeof(*rec->iovs));
         rec->block_bufs = malloc(nblocks * sizeof(*rec->block_bufs));
         rec->blocks     = malloc(nblocks * sizeof(*rec->blocks));
+        chimera_diskfs_abort_if(!rec->iovs ||
+                                (nblocks && (!rec->block_bufs || !rec->blocks)),
+                                "out of memory growing IL record arrays");
         rec->blocks_cap = nblocks;
     }
     return rec;
@@ -551,13 +557,16 @@ diskfs_il_ctx_alloc(
                                         0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
     }
     if (!ctx) {
-        ctx              = malloc(sizeof(*ctx));
+        ctx = malloc(sizeof(*ctx));
+        chimera_diskfs_abort_if(!ctx, "out of memory allocating IL completion ctx");
         ctx->entries_cap = 0;
         ctx->entries     = NULL;
     }
     if (num_entries > ctx->entries_cap) {
         free(ctx->entries);
-        ctx->entries     = malloc(num_entries * sizeof(*ctx->entries));
+        ctx->entries = malloc(num_entries * sizeof(*ctx->entries));
+        chimera_diskfs_abort_if(!ctx->entries,
+                                "out of memory growing IL ctx entries");
         ctx->entries_cap = num_entries;
     }
     return ctx;
@@ -590,12 +599,19 @@ diskfs_il_free_record(
 
     /* iovs[0] is the materialized header (a real SHARED buffer) -- release it.
      * iovs[1..] are non-owning GLOBAL slices of block-cache buffers (cloned at
-     * zero cost in the IL builder); they own nothing, so they are NOT released
-     * here -- the backing GLOBAL buffer is freed only at cache teardown. */
+     * zero cost in the IL builder); they own nothing of the backing buffer, so
+     * release_internal leaves it untouched (its GLOBAL ref-release is inert, and
+     * the buffer is freed only at cache teardown) -- but it still frees each
+     * clone's trace canary, which evpl_iovec_clone allocates unconditionally. */
     evpl_iovec_release(il->push_evpl, &rec->iovs[0]);
+    if (rec->niov > 1) {
+        evpl_iovecs_release_internal(il->push_evpl, &rec->iovs[1], rec->niov - 1);
+    }
 
     /* Stage A: recycle the record + its (capacity-tracked) block arrays for the
-     * commit thread to reuse instead of freeing them. */
+     * commit thread to reuse instead of freeing them.  The iovs[1..] canaries
+     * are dropped above first, so the pooled iovs array carries none into reuse
+     * (the builder re-clones, allocating fresh canaries). */
     diskfs_il_rec_recycle(il, rec);
 } /* diskfs_il_free_record */
 
@@ -746,6 +762,18 @@ diskfs_push_checkpoint_ready(
     char                      *p;
     uint32_t                   i;
     int                        ready = 1;
+
+    /* During shutdown the reclaim workers that service checkpoint CONDENSE jobs
+     * are already gone (diskfs_reclaim_destroy runs before the push-thread
+     * drain), so kicking a checkpoint here would never complete and the drain
+     * would hang forever.  A clean unmount persists the whole space map after
+     * the drain (space_map_persist stamped with the final durable_seq) and marks
+     * the superblock CLEAN, so no record needs its per-AG snapshot frontier --
+     * the log is discarded wholesale and there is nothing to replay.  Trim every
+     * covered record unconditionally. */
+    if (__atomic_load_n(&il->shutdown, __ATOMIC_ACQUIRE)) {
+        return 1;
+    }
 
     if (hdr->num_deltas == 0) {
         return 1;
