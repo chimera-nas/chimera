@@ -170,6 +170,12 @@ chimera_nfs4_create_session(
      * to the client. */
     clamped_fore = args->csa_fore_chan_attrs;
 
+    /* Chimera applies no header padding, so its preferred ca_headerpadsize is 0
+     * on both channels (RFC 8881 §18.36: reply the preferred value, or zero if
+     * padding is not in use); do not parrot the client's requested value. */
+    clamped_fore.ca_headerpadsize              = 0;
+    args->csa_back_chan_attrs.ca_headerpadsize = 0;
+
     /* Server cap on fore-channel slots is configurable (server.nfs4_session_slots);
      * fall back to the compiled-in default if it is unset/invalid. */
     server_max_slots = (uint32_t) chimera_server_config_get_nfs4_session_slots(shared->config);
