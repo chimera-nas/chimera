@@ -25,6 +25,8 @@
 #define OWNER_SECURITY_INFORMATION 0x00000001
 #define GROUP_SECURITY_INFORMATION 0x00000002
 #define DACL_SECURITY_INFORMATION  0x00000004
+#define SACL_SECURITY_INFORMATION  0x00000008
+#define LABEL_SECURITY_INFORMATION 0x00000010
 
 /* Security descriptor control flags */
 #define SE_SELF_RELATIVE           0x8000
@@ -894,9 +896,42 @@ chimera_smb_set_resolve_cb(
 void
 chimera_smb_set_security(struct chimera_smb_request *request)
 {
-    struct chimera_vfs_thread *thread = request->compound->thread->vfs_thread;
-    struct smb_unres_sids      unres  = { .count = 0 };
+    struct chimera_vfs_thread *thread    = request->compound->thread->vfs_thread;
+    struct smb_unres_sids      unres     = { .count = 0 };
+    uint32_t                   addl_info = request->set_info.addl_info;
+    uint32_t                   granted   = request->set_info.open_file->granted_access;
+    uint32_t                   required  = 0;
     int                        i;
+
+    /* MS-FSA 2.1.5.16 (Server Requests Setting of Security Information): the
+     * handle's GrantedAccess must permit each SecurityInformation component
+     * being set, else the whole SET fails with STATUS_ACCESS_DENIED and no part
+     * of the descriptor is applied (WPTS MS-FSAModel SetSecurityInformation):
+     *   OWNER/GROUP/LABEL -> WRITE_OWNER
+     *   DACL              -> WRITE_DAC
+     *   SACL              -> ACCESS_SYSTEM_SECURITY
+     * A specific-bits open keeps the exact rights it requested; a
+     * MAXIMUM_ALLOWED/owner open whose ACL evaluation yields full control
+     * already carries WRITE_DAC/WRITE_OWNER, so legitimate owner/admin SD
+     * changes are unaffected.  chimera never grants ACCESS_SYSTEM_SECURITY, so
+     * a SACL set is always denied -- matching the model (no case expects a SACL
+     * set to succeed). */
+    if (addl_info & (OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
+                     LABEL_SECURITY_INFORMATION)) {
+        required |= SMB2_WRITE_OWNER;
+    }
+    if (addl_info & DACL_SECURITY_INFORMATION) {
+        required |= SMB2_WRITE_DACL;
+    }
+    if (addl_info & SACL_SECURITY_INFORMATION) {
+        required |= SMB2_ACCESS_SYSTEM_SECURITY;
+    }
+
+    if ((granted & required) != required) {
+        chimera_smb_open_file_release(request, request->set_info.open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_ACCESS_DENIED);
+        return;
+    }
 
     chimera_smb_set_decode_sd(request, &unres);
 

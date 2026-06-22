@@ -8,7 +8,7 @@ CreateFileTestCaseS12,xfail,fidelity: expected INVALID_PARAMETER got OBJECT_NAME
 CreateFileTestCaseS14,skip,inapplicable: model branch not executed
 CreateFileTestCaseS16,skip,inapplicable: model branch not executed
 CreateFileTestCaseS18,xfail,fidelity: expected INVALID_PARAMETER got ACCESS_DENIED
-CreateFileTestCaseS2,xfail,fidelity: expected ACCESS_DENIED got OBJECT_PATH_NOT_FOUND
+CreateFileTestCaseS2,green,
 CreateFileTestCaseS20,skip,inapplicable: model branch not executed
 CreateFileTestCaseS22,green,
 CreateFileTestCaseS24,green,
@@ -101,7 +101,7 @@ IoCtlRequestTestCaseS96,skip,inapplicable: model branch not executed
 IoCtlRequestTestCaseS98,skip,inapplicable: model branch not executed
 LockAndUnlockTestCaseS0,xfail,fidelity: expected SUCCESS got OBJECT_NAME_INVALID
 LockAndUnlockTestCaseS2,green,
-OpenFileTestCaseS0,xfail,fidelity: access check too permissive
+OpenFileTestCaseS0,green,
 OpenFileTestCaseS10,xfail,fidelity: no parameter validation
 OpenFileTestCaseS12,skip,inapplicable: model branch not executed
 OpenFileTestCaseS14,skip,inapplicable: model branch not executed
@@ -112,7 +112,7 @@ OpenFileTestCaseS20,green,
 OpenFileTestCaseS22,green,
 OpenFileTestCaseS24,green,
 OpenFileTestCaseS26,green,
-OpenFileTestCaseS28,xfail,fidelity: access check too permissive
+OpenFileTestCaseS28,green,
 OpenFileTestCaseS30,xfail,fidelity: expected OBJECT_NAME_INVALID got SUCCESS
 OpenFileTestCaseS32,xfail,fidelity: expected OBJECT_NAME_INVALID got SUCCESS
 OpenFileTestCaseS36,green,
@@ -120,9 +120,9 @@ OpenFileTestCaseS38,green,
 OpenFileTestCaseS4,green,
 OpenFileTestCaseS40,skip,unimplemented: symlink reparse fixture
 OpenFileTestCaseS42,green,
-OpenFileTestCaseS44,xfail,fidelity: access check too permissive
-OpenFileTestCaseS46,xfail,fidelity: access check too permissive
-OpenFileTestCaseS48,xfail,fidelity: expected CANNOT_DELETE got SUCCESS
+OpenFileTestCaseS44,green,
+OpenFileTestCaseS46,green,
+OpenFileTestCaseS48,green,
 OpenFileTestCaseS50,green,
 OpenFileTestCaseS52,skip,inapplicable: model branch not executed
 OpenFileTestCaseS54,skip,inapplicable: model branch not executed
@@ -324,21 +324,21 @@ SetFileStreamRenameInformationTestCaseS8,xfail,fidelity: ADS stream-rename seman
 SetFileValidDataLengthInformationTestCaseS0,skip,unimplemented: info-class/op
 SetFileValidDataLengthInformationTestCaseS2,skip,unimplemented: info-class/op
 SetSecurityInformationTestCaseS0,skip,inapplicable: model branch not executed
-SetSecurityInformationTestCaseS10,xfail,fidelity: access check too permissive
-SetSecurityInformationTestCaseS12,xfail,fidelity: access check too permissive
+SetSecurityInformationTestCaseS10,green,
+SetSecurityInformationTestCaseS12,green,
 SetSecurityInformationTestCaseS14,skip,inapplicable: model branch not executed
 SetSecurityInformationTestCaseS16,green,
-SetSecurityInformationTestCaseS18,xfail,fidelity: access check too permissive
-SetSecurityInformationTestCaseS2,xfail,fidelity: access check too permissive
-SetSecurityInformationTestCaseS20,xfail,fidelity: access check too permissive
-SetSecurityInformationTestCaseS22,xfail,fidelity: access check too permissive
+SetSecurityInformationTestCaseS18,green,
+SetSecurityInformationTestCaseS2,green,
+SetSecurityInformationTestCaseS20,green,
+SetSecurityInformationTestCaseS22,green,
 SetSecurityInformationTestCaseS24,skip,inapplicable: model branch not executed
 SetSecurityInformationTestCaseS26,skip,inapplicable: model branch not executed
 SetSecurityInformationTestCaseS28,skip,inapplicable: model branch not executed
-SetSecurityInformationTestCaseS30,xfail,fidelity: access check too permissive
-SetSecurityInformationTestCaseS32,xfail,fidelity: access check too permissive
+SetSecurityInformationTestCaseS30,green,
+SetSecurityInformationTestCaseS32,green,
 SetSecurityInformationTestCaseS34,green,
-SetSecurityInformationTestCaseS4,xfail,fidelity: access check too permissive
-SetSecurityInformationTestCaseS6,xfail,fidelity: access check too permissive
-SetSecurityInformationTestCaseS8,xfail,fidelity: access check too permissive
+SetSecurityInformationTestCaseS4,green,
+SetSecurityInformationTestCaseS6,green,
+SetSecurityInformationTestCaseS8,green,
 WriteFileTestCaseS0,xfail,fidelity: expected 0 got 1

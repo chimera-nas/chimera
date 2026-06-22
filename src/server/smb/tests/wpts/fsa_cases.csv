@@ -142,7 +142,7 @@ CreateFile_WithDoubleBackSlashInMiddle,green,
 DirectoryComparing_Child_Invalid_ParentLeaseKeys,skip,inapplicable
 DirectoryComparing_LeaseKeysV2,skip,inapplicable
 DirectoryComparing_ParentLeaseKey_ChildLeaseKey,skip,inapplicable
-FileAccess_DeleteReadOnlyDataFile,xfail,investigate
+FileAccess_DeleteReadOnlyDataFile,green,
 FileAccess_OpenNamedPipe_DesiredAccessZero,skip,named-pipe-env
 FileAccess_OpenNamedPipe_InactiveListener,skip,named-pipe-env
 FileAccess_OpenNamedPipe_Inbound,skip,named-pipe-env

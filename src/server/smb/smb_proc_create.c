@@ -2065,6 +2065,41 @@ chimera_smb_create_open_at_callback(
             chimera_smb_complete_request(request, access_status);
             return;
         }
+
+        /* MS-FSA 2.1.5.1.2 "Check Access to an Existing File" (MS-FSA_R53 /
+         * R2422 / R54): the FILE_ATTRIBUTE_READONLY DOS bit is a write/delete
+         * fence separate from the DACL evaluated above.  For an existing
+         * non-directory file marked READONLY: a DesiredAccess asking for
+         * WRITE_DATA/APPEND_DATA is denied with ACCESS_DENIED, and a
+         * FILE_DELETE_ON_CLOSE with CANNOT_DELETE (a read-only file cannot be
+         * deleted).  Truncating dispositions are gated earlier, so this covers
+         * the OPEN / OPEN_IF paths.  Skipped for a durable reconnect, whose
+         * access was settled at the original open, and when THIS open just
+         * created the file (oh->r_created): the readonly attribute set by a
+         * create does not fence that same creating handle from writing
+         * (smb2.durable-open.read-only).  FSAModel OpenFileTestCase S44/S46
+         * (write/append) and S48 (delete-on-close). */
+        if (!request->create.reconnect &&
+            !oh->r_created &&
+            !S_ISDIR(attr->va_mode) &&
+            (attr->va_set_mask & CHIMERA_VFS_ATTR_DOS_ATTRIBUTES) &&
+            (attr->va_dos_attributes & SMB2_FILE_ATTRIBUTE_READONLY)) {
+
+            if (request->create.create_options & SMB2_FILE_DELETE_ON_CLOSE) {
+                chimera_vfs_release(vfs_thread, oh);
+                chimera_vfs_release(vfs_thread, request->create.parent_handle);
+                chimera_smb_complete_request(request, SMB2_STATUS_CANNOT_DELETE);
+                return;
+            }
+
+            if (request->create.desired_access &
+                (SMB2_FILE_WRITE_DATA | SMB2_FILE_APPEND_DATA)) {
+                chimera_vfs_release(vfs_thread, oh);
+                chimera_vfs_release(vfs_thread, request->create.parent_handle);
+                chimera_smb_complete_request(request, SMB2_STATUS_ACCESS_DENIED);
+                return;
+            }
+        }
     }
 
     /* A lease key may be bound to only one file per client (MS-SMB2 3.3.5.9.8).
@@ -4267,6 +4302,23 @@ chimera_smb_create(struct chimera_smb_request *request)
         if (request->create.impersonation_level > SMB2_IMPERSONATION_DELEGATE) {
             chimera_smb_complete_request(request,
                                          SMB2_STATUS_BAD_IMPERSONATION_LEVEL);
+            return;
+        }
+
+        /* MS-FSA 2.1.5.1 Phase 1 - Parameter Validation (MS-FSA_R376): when
+         * CreateOptions carries FILE_NO_INTERMEDIATE_BUFFERING the server MUST
+         * clear FILE_APPEND_DATA from DesiredAccess (unbuffered I/O cannot
+         * append).  Strip it before the zero-DesiredAccess check so the residual
+         * mask is what gets validated (FSAModel OpenFileTestCaseS28). */
+        if (request->create.create_options & SMB2_FILE_NO_INTERMEDIATE_BUFFERING) {
+            request->create.desired_access &= ~SMB2_FILE_APPEND_DATA;
+        }
+
+        /* MS-FSA 2.1.5.1 Phase 1 - Parameter Validation (MS-FSA_R377): a
+         * DesiredAccess of zero is not a valid open and MUST be failed with
+         * STATUS_ACCESS_DENIED (FSAModel OpenFileTestCaseS0/S28). */
+        if (request->create.desired_access == 0) {
+            chimera_smb_complete_request(request, SMB2_STATUS_ACCESS_DENIED);
             return;
         }
 
