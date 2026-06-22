@@ -459,7 +459,9 @@ mask_to_perm_bits(
     if (mask & CHIMERA_ACE_READ_DATA) {
         bits |= S_IROTH;
     }
-    if (mask & CHIMERA_ACE_WRITE_DATA) {
+    /* RFC 7530 §6.3.2: set the write mode bit iff BOTH WRITE_DATA and
+     * APPEND_DATA are granted in the mask. */
+    if ((mask & CHIMERA_ACE_WRITE_DATA) && (mask & CHIMERA_ACE_APPEND_DATA)) {
         bits |= S_IWOTH;
     }
     if (mask & CHIMERA_ACE_EXECUTE) {
