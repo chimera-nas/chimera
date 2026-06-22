@@ -623,14 +623,13 @@ chimera_smb_oplock_break(struct chimera_smb_request *request)
             }
             open_file->lease_state = request->oplock_break.lease_state;
             chimera_smb_open_file_release(request, open_file);
-        } else {
-            /* MS-SMB2 3.3.5.22.1: if the acknowledgment cannot be matched to an
-             * open (the open was closed before the ack arrived), fail the request
-             * with STATUS_FILE_CLOSED rather than silently succeeding. */
-            chimera_smb_create_resume_parked(request);
-            chimera_smb_complete_request(request, SMB2_STATUS_FILE_CLOSED);
-            return;
         }
+        /* A lease-break ack whose lease key resolves to no open is benign --
+         * the holder closed before acking, or another handle still carries the
+         * lease (Samba smb2.lease.v2_complex2 acks after the breaking handle is
+         * gone and expects STATUS_OK).  FILE_CLOSED is reserved for the oplock
+         * (FileId) ack path below per MS-SMB2 3.3.5.22.1; here we fall through to
+         * settle/resume and reply SUCCESS. */
 
         /* The ack settled the lease; resume any CREATE that parked waiting for
          * this break to complete (MS-SMB2 pending-open). */
