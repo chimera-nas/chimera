@@ -12,6 +12,7 @@ set(NFSTEST_2CLIENT_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_nfstest_2client_test_wra
 set(NFS40_DRC_REBOOT_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_nfs40_drc_reboot_test_wrapper.sh)
 set(NFS_MULTINODE_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_nfs_multinode_test_wrapper.sh)
 set(SMB_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_smb_test_wrapper.sh)
+set(SMB_2CLIENT_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_smb_2client_test_wrapper.sh)
 set(PNFS_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_pnfs_test_wrapper.sh)
 set(PNFS_BLOCK_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_pnfs_block_test_wrapper.sh)
 set(PNFS_SCSI_WRAPPER ${CMAKE_SOURCE_DIR}/kvm/kvm_pnfs_scsi_test_wrapper.sh)
@@ -861,6 +862,47 @@ foreach(image_spec ${KVM_IMAGES})
             set_tests_properties(chimera/kvm/${IMAGE_NAME}/smb/copy/clone_${backend}
                 PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2 DISABLED TRUE)
         endforeach()
+    endif()
+
+    # SMB cross-client coherency: two guests, the second driven over ssh.  Boots
+    # two VMs + needs 4 CPUs, so (like nfstest_delegation) ubuntu2404 + memfs
+    # only.  Share-mode-conflict is intentionally absent: the kernel cifs client
+    # opens with share-all and does not expose Windows deny modes through a POSIX
+    # open(), so it is not reachable from a real Linux client.
+    if(IMAGE_NAME STREQUAL "ubuntu2404")
+        foreach(case cache_coherency brl_conflict)
+            add_test(NAME chimera/kvm/${IMAGE_NAME}/smb/2client/${case}_memfs
+                COMMAND bash ${SMB_2CLIENT_WRAPPER}
+                        ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
+                        ${CHIMERA_BINARY} memfs ${case})
+            set_tests_properties(chimera/kvm/${IMAGE_NAME}/smb/2client/${case}_memfs
+                PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 4 TIMEOUT 1800)
+            # brl_conflict hangs: client A holds a POSIX byte-range lock and
+            # client B's conflicting non-blocking lock never completes (the test
+            # deadlocks until the timeout).  Single-client fcntl-locktests pass
+            # on every backend, so the cross-client LOCK-conflict path is the
+            # differentiator -- a real interaction to investigate.  Disabled
+            # until then; cache_coherency keeps the 2-client lease coverage.
+            if(case STREQUAL "brl_conflict")
+                set_tests_properties(chimera/kvm/${IMAGE_NAME}/smb/2client/brl_conflict_memfs
+                    PROPERTIES DISABLED TRUE)
+            endif()
+        endforeach()
+
+        # Multichannel: advertise two server NICs (SMB_MULTICHANNEL=1 adds a
+        # second tap IP + smb_multichannel config) and mount
+        # multichannel,max_channels=2.  Assert the second advertised address
+        # (10.0.0.4) reached the client's interface list -- proving chimera's
+        # FSCTL_QUERY_NETWORK_INTERFACE_INFO round-trip -- then run a bulk
+        # fsstress over the multichannel mount.  Server feature, so memfs only.
+        add_test(NAME chimera/kvm/${IMAGE_NAME}/smb/multichannel/fsstress_memfs
+            COMMAND env SMB_MULTICHANNEL=1
+                    bash ${SMB_WRAPPER}
+                    ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
+                    ${CHIMERA_BINARY} memfs 3.1.1 none
+                    "grep -q 10.0.0.4 /proc/fs/cifs/DebugData && mkdir -p /mnt/test && /opt/xfstests/ltp/fsstress -d /mnt/test -n 100 -p 1")
+        set_tests_properties(chimera/kvm/${IMAGE_NAME}/smb/multichannel/fsstress_memfs
+            PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2)
     endif()
 
 endforeach()
