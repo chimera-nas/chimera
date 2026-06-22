@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -31,6 +31,7 @@ chimera_nfs3_pathconf(
     res.resok.no_trunc         = 1;
     res.resok.linkmax          = UINT32_MAX;
     res.resok.name_max         = 255;
+    res.resok.chown_restricted = 1;   /* POSIX restricts chown to the superuser */
 
     rc = shared->nfs_v3.send_reply_NFSPROC3_PATHCONF(evpl, NULL, &res, encoding);
     chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
