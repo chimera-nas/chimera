@@ -924,7 +924,14 @@ chimera_smb_set_security(struct chimera_smb_request *request)
         required |= SMB2_WRITE_DACL;
     }
     if (addl_info & SACL_SECURITY_INFORMATION) {
-        required |= SMB2_ACCESS_SYSTEM_SECURITY;
+        /* The SACL is normally gated by ACCESS_SYSTEM_SECURITY (SeSecurityPrivilege).
+         * chimera does not model that privilege separately and never grants the
+         * bit, so use WRITE_DAC as the proxy: a handle privileged enough to
+         * change the DACL is treated as able to change the SACL too.  This lets
+         * a full-control/owner handle set the SACL (smb2.basic ChangeSecurity)
+         * while a handle without WRITE_DAC (e.g. GENERIC_WRITE) is still denied
+         * (FSAModel SetSecurityInformation SACL cases). */
+        required |= SMB2_WRITE_DACL;
     }
 
     if ((granted & required) != required) {
