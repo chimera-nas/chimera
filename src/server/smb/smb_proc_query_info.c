@@ -375,6 +375,14 @@ chimera_smb_query_info(struct chimera_smb_request *request)
                     chimera_smb_query_stream_info(request);
                     return;
                 default:
+                    /* A FILE info class we do not handle: keep NOT_IMPLEMENTED.
+                     * Samba's smb2.getinfo.qfile_buffercheck enumerates every
+                     * file level and treats NOT_IMPLEMENTED as "level
+                     * unsupported, skip" while asserting OK otherwise -- so a
+                     * valid-but-unsupported level must NOT be reported as
+                     * INVALID_INFO_CLASS.  Distinguishing a genuinely invalid
+                     * class value from a valid-but-unsupported one needs a
+                     * file-info-class validity table (out of scope here). */
                     status = SMB2_STATUS_NOT_IMPLEMENTED;
                     break;
             } /* switch */
@@ -418,7 +426,8 @@ chimera_smb_query_info(struct chimera_smb_request *request)
                     request->query_info.output_length = SMB2_FILE_FS_SECTOR_SIZE_INFO_SIZE;
                     break;
                 default:
-                    status = SMB2_STATUS_NOT_IMPLEMENTED;
+                    /* Unhandled FS info class = invalid class for QUERY_INFO. */
+                    status = SMB2_STATUS_INVALID_INFO_CLASS;
                     break;
             } /* switch */
             break;
