@@ -1255,9 +1255,9 @@ chimera_nfs4_open(
      *
      *   1. Server-reboot grace window (nfs_recovery_open_check): non-reclaim
      *      OPENs are refused while in_grace, and CLAIM_PREVIOUS reclaims are
-     *      refused outside it.  Persistence is stubbed so in_grace is false in
-     *      practice today, leaving only the reclaim-outside-grace NO_GRACE leg
-     *      live.
+     *      refused outside it.  Recovery records are persisted to the KV store
+     *      (nfs4_recovery.c), so in_grace reflects a real post-restart grace
+     *      period.
      *
      *   2. Per-client reclaim completion (RFC 8881 §18.51.3): once a 4.1+
      *      client establishes a new client ID it MUST send RECLAIM_COMPLETE

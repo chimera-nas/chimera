@@ -6,14 +6,15 @@
 #include "nfs4_session.h"
 #include "nfs4_state.h"
 
-/* RFC 7530 §16.30: RENEW refreshes the lease for the given client. Chimera
- * does not currently enforce lease expiry, so this is a no-op that always
- * succeeds. Tests that require true lease-expiry semantics (e.g. pynfs
- * testExpired) will not behave correctly until real lease tracking lands.
+/* RFC 7530 §16.28: RENEW refreshes the lease for the given client. Chimera
+ * does enforce lease expiry (nfs4_lease.c sweeps expired leases at ~1 Hz), so
+ * RENEW returns NFS4ERR_STALE_CLIENTID for an unknown client and
+ * NFS4ERR_EXPIRED when the client's lease has been lost to a conflicting
+ * acquirer.
  *
  * One exception: if the client holds delegations but its callback path has
  * been found unusable (a CB_RECALL failed), RENEW returns NFS4ERR_CB_PATH_DOWN
- * (RFC 7530 §16.30.4) so the client knows to re-establish the callback path;
+ * (RFC 7530 §16.28.4) so the client knows to re-establish the callback path;
  * the server retains the delegations meanwhile. */
 void
 chimera_nfs4_renew(
