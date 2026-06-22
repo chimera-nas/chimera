@@ -1080,7 +1080,10 @@ chimera_linux_read(
     } else {
         chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX, &request->read.r_attr, fd);
 
-        request->read.r_eof = (len < request->read.length);
+        /* fstat() failed: we cannot compare against the file size, so report
+         * EOF only when the read returned nothing for a non-zero request -- a
+         * short read is NOT end-of-file (RFC 1813 §3.3.6). */
+        request->read.r_eof = (len == 0 && request->read.length > 0);
     }
 
     request->read.r_length = len;
