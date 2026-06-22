@@ -210,10 +210,13 @@ chimera_nfs4_getdeviceinfo(
                 break;
         } /* switch */
     } else {
+        /* Known layout type but unrecognized device id => NFS4ERR_NOENT so the
+         * client can distinguish a stale deviceid from a malformed request
+         * (RFC 8881 §18.40.3); an unsupported layout type => UNKNOWN_LAYOUTTYPE. */
         res->gdir_status = (args->gdia_layout_type != LAYOUT4_FLEX_FILES &&
                             args->gdia_layout_type != LAYOUT4_BLOCK_VOLUME &&
                             args->gdia_layout_type != LAYOUT4_SCSI)
-                           ? NFS4ERR_UNKNOWN_LAYOUTTYPE : NFS4ERR_INVAL;
+                           ? NFS4ERR_UNKNOWN_LAYOUTTYPE : NFS4ERR_NOENT;
         chimera_nfs4_compound_complete(req, res->gdir_status);
         return;
     }
