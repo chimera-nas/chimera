@@ -413,6 +413,11 @@ main(
         }
     }
 
+    /* The VFS attribute cache (common.attr_cache) is a VFS-level facility shared
+     * with the client; on by default. */
+    chimera_server_config_set_attr_cache_enabled(server_config,
+                                                 chimera_common_attr_cache_enabled(config));
+
     json_value = json_object_get(server_params, "smb_persistent_handles");
     if (json_is_boolean(json_value)) {
         chimera_server_config_set_smb_persistent_handles(server_config, json_is_true(json_value));

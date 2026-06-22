@@ -123,6 +123,10 @@ chimera_vfs_attr_cache_destroy(struct chimera_vfs_attr_cache *cache)
     struct chimera_vfs_attr_cache_entry *entry;
     int                                  i, j;
 
+    if (!cache) {
+        return;
+    }
+
     rcu_barrier();
 
     for (i = 0; i < cache->num_shards; i++) {
@@ -172,6 +176,10 @@ chimera_vfs_attr_cache_lookup(
     struct chimera_vfs_attr_cache_entry **slot, **slot_end;
     int                                   rc;
     uint64_t                              now = chimera_vfs_now_ticks();
+
+    if (!cache) {
+        return -1;
+    }
 
     shard = &cache->shards[fh_hash & cache->num_shards_mask];
 
@@ -223,6 +231,10 @@ chimera_vfs_attr_cache_insert(
     struct chimera_vfs_attr_cache_entry  *entry, *old_entry, *best_entry;
     struct chimera_vfs_attr_cache_shard  *shard;
     struct chimera_vfs_attr_cache_entry **slot, **slot_end, **slot_best;
+
+    if (!cache) {
+        return;
+    }
 
     shard = &cache->shards[fh_hash & cache->num_shards_mask];
 
@@ -335,6 +347,10 @@ chimera_vfs_attr_cache_refresh(
     struct chimera_vfs_attr_cache_entry **slot, **slot_end;
     int                                   unchanged = 0;
     uint64_t                              now       = chimera_vfs_now_ticks();
+
+    if (!cache) {
+        return;
+    }
 
     /* Only stat-complete attrs are cacheable (same gate as _insert). */
     if ((attr->va_set_mask & CHIMERA_VFS_ATTR_MASK_STAT) != CHIMERA_VFS_ATTR_MASK_STAT) {

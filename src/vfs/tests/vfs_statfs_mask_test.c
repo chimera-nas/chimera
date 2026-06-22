@@ -192,7 +192,7 @@ test_memfs_behaviour(void)
     ctx.evpl = evpl_create(NULL);
     assert(ctx.evpl != NULL);
 
-    vfs = chimera_vfs_init(0, 0, module_cfgs, 2, "memkv", 60, 0, metrics);
+    vfs = chimera_vfs_init(0, 0, module_cfgs, 2, "memkv", 60, 1, 0, metrics);
     assert(vfs != NULL);
 
     ctx.vfs_thread = chimera_vfs_thread_init(ctx.evpl, vfs);

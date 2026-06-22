@@ -67,6 +67,7 @@ struct chimera_server_config {
     int                                   async_delegation;
     int                                   async_delegation_threads;
     int                                   cache_ttl;
+    int                                   attr_cache_enabled;
     int                                   rcu_reclaim_threads;
     int                                   nfs4_session_slots;
     int                                   nfs4_delegations;
@@ -266,6 +267,9 @@ chimera_server_config_init(void)
     config->nfs_server_scope = 42;
 
     config->cache_ttl = 60;
+
+    /* The VFS attribute cache is on by default (common.attr_cache). */
+    config->attr_cache_enabled = 1;
 
     /* Number of liburcu call_rcu reclaim worker threads.  0 (the default) means
      * one worker per CPU (create_all_cpu_call_rcu_data) to keep RCU reclaim up
@@ -590,6 +594,14 @@ chimera_server_config_get_cache_ttl(const struct chimera_server_config *config)
 {
     return config->cache_ttl;
 } /* chimera_server_config_get_cache_ttl */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_attr_cache_enabled(
+    struct chimera_server_config *config,
+    int                           enabled)
+{
+    config->attr_cache_enabled = enabled;
+} /* chimera_server_config_set_attr_cache_enabled */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_rcu_reclaim_threads(
@@ -2291,6 +2303,7 @@ chimera_server_init(
                                    config->num_modules,
                                    config->kv_module,
                                    config->cache_ttl,
+                                   config->attr_cache_enabled,
                                    config->rcu_reclaim_threads,
                                    metrics);
 

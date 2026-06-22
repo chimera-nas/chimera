@@ -308,3 +308,33 @@ chimera_common_rcu_reclaim_threads(json_t *root)
 
     return -1;
 } /* chimera_common_rcu_reclaim_threads */
+
+/*
+ * Whether the VFS attribute cache is enabled, from the shared "common" section's
+ * "attr_cache" boolean key.  The attr cache is a VFS-level facility used by both
+ * the server and the client, so this is honored identically by both.  When
+ * disabled the cache is not instantiated and nothing is inserted into or looked
+ * up from it (the cache helpers no-op on a NULL cache).  Defaults to enabled
+ * (returns 1) when the section or key is absent; `root` may be NULL.
+ */
+static inline int
+chimera_common_attr_cache_enabled(json_t *root)
+{
+    json_t *common, *val;
+
+    if (!root) {
+        return 1;
+    }
+
+    common = json_object_get(root, "common");
+    if (!json_is_object(common)) {
+        return 1;
+    }
+
+    val = json_object_get(common, "attr_cache");
+    if (json_is_boolean(val)) {
+        return json_is_true(val) ? 1 : 0;
+    }
+
+    return 1;
+} /* chimera_common_attr_cache_enabled */

@@ -74,7 +74,7 @@ main(
     evpl = evpl_create(NULL);
     assert(evpl != NULL);
 
-    vfs = chimera_vfs_init(0, 0, module_cfgs, 2, "memkv", 60, 0, metrics);
+    vfs = chimera_vfs_init(0, 0, module_cfgs, 2, "memkv", 60, 1, 0, metrics);
     assert(vfs != NULL);
 
     thread = chimera_vfs_thread_init(evpl, vfs);
