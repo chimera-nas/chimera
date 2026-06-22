@@ -221,10 +221,14 @@ chimera_nfs4_getdeviceinfo(
         return;
     }
 
-    /* gdia_maxcount bounds the bytes the client will accept for the
-     * da_addr_body (RFC 8881 §18.40.3); signal TOOSMALL with the required
-     * size if it cannot fit. */
-    if (args->gdia_maxcount < body_len) {
+    /* gdia_maxcount bounds the bytes the client will accept for the da_addr_body
+     * (RFC 8881 §18.40.3).  A maxcount of 0 is the defined way for a client to
+     * validate a device id or (de)register notifications: TOOSMALL MUST NOT be
+     * returned and the reply's da_addr_body is zero length.  Otherwise signal
+     * TOOSMALL with the required size when the body cannot fit. */
+    if (args->gdia_maxcount == 0) {
+        body_len = 0;
+    } else if (args->gdia_maxcount < body_len) {
         res->gdir_status   = NFS4ERR_TOOSMALL;
         res->gdir_mincount = body_len;
         chimera_nfs4_compound_complete(req, res->gdir_status);
