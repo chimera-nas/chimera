@@ -474,6 +474,7 @@ chimera_vfs_init(
     int                                  num_modules,
     const char                          *kv_module_name,
     int                                  cache_ttl,
+    int                                  attr_cache_enabled,
     int                                  num_rcu_reclaim_threads,
     struct prometheus_metrics           *metrics)
 {
@@ -527,7 +528,11 @@ chimera_vfs_init(
                                                            "file_handles");
 
     vfs->vfs_name_cache = chimera_vfs_name_cache_create(8, 4, 2, cache_ttl, metrics);
-    vfs->vfs_attr_cache = chimera_vfs_attr_cache_create(8, 4, 2, cache_ttl, metrics);
+    /* The attr cache is optional (common.attr_cache).  When off we leave it
+     * NULL; the cache helpers (lookup/insert/refresh/destroy) are all no-ops on
+     * a NULL cache, so nothing is cached, consulted, or freed. */
+    vfs->vfs_attr_cache = attr_cache_enabled ?
+        chimera_vfs_attr_cache_create(8, 4, 2, cache_ttl, metrics) : NULL;
 
     vfs->vfs_user_cache = chimera_vfs_user_cache_create(8192, 600);
     vfs->identity       = chimera_vfs_identity_create(vfs, 4);
