@@ -1866,25 +1866,22 @@ diskfs_txn_unpin_blocks(struct diskfs_txn *txn)
 
 
 /*
- * Commit-path counterpart of diskfs_txn_unpin_blocks, run by the intent-log
- * thread once a record is durable.  It releases the inode->block links and the
- * per-block txn structs but does NOT drop the block pins: each block's claim
- * pin is now held until its redo record is pushed home and trimmed, where the
- * push thread drops it (diskfs_il_free_record -> diskfs_push_unpin_block).  So
- * the IL thread touches none of the block's reference/state fields.
+ * Run by the apply thread once a record is durable: free the per-block txn
+ * structs.  It does NOT drop the block pins (each block's claim pin is held
+ * until its redo record is pushed home and trimmed, where the push thread drops
+ * it via diskfs_il_free_record -> diskfs_push_unpin_block), and it does NOT
+ * touch the inode struct.  The inode->block links were already cleared by
+ * diskfs_il_write_redo on the commit thread, before the record was durable;
+ * doing it again here would be a use-after-free under complete-on-durable, where
+ * a worker can ACK at the durable watermark and -- for a drained dead inode
+ * (diskfs_drain_final_cb) -- free the inode before this async apply runs.  Apply
+ * therefore touches only txn-owned state.
  */
 void
 diskfs_txn_retire_blocks(struct diskfs_txn *txn)
 {
     struct diskfs_txn_block *tb = txn->blocks;
     struct diskfs_txn_block *n;
-    int                      i;
-
-    for (i = 0; i < txn->num_inodes; i++) {
-        if (txn->inodes[i].mode == DISKFS_INODE_LOCK_WRITE) {
-            txn->inodes[i].inode->block = NULL;
-        }
-    }
 
     txn->blocks = NULL;
     while (tb) {
