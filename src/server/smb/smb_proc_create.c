@@ -2078,9 +2078,17 @@ chimera_smb_create_open_at_callback(
          * created the file (oh->r_created): the readonly attribute set by a
          * create does not fence that same creating handle from writing
          * (smb2.durable-open.read-only).  FSAModel OpenFileTestCase S44/S46
-         * (write/append) and S48 (delete-on-close). */
+         * (write/append) and S48 (delete-on-close).  Only the plain OPEN /
+         * OPEN_IF dispositions are fenced: a truncating disposition
+         * (SUPERSEDE/OVERWRITE/OVERWRITE_IF) replaces the file and the READONLY
+         * bit it carries is the NEW state being applied, not a pre-existing
+         * constraint (smb2.openattr trunc-opens a file to set READONLY); those
+         * are gated separately. */
         if (!request->create.reconnect &&
             !oh->r_created &&
+            request->create.create_disposition != SMB2_FILE_SUPERSEDE &&
+            request->create.create_disposition != SMB2_FILE_OVERWRITE &&
+            request->create.create_disposition != SMB2_FILE_OVERWRITE_IF &&
             !S_ISDIR(attr->va_mode) &&
             (attr->va_set_mask & CHIMERA_VFS_ATTR_DOS_ATTRIBUTES) &&
             (attr->va_dos_attributes & SMB2_FILE_ATTRIBUTE_READONLY)) {
