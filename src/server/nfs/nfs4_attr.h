@@ -356,9 +356,10 @@ chimera_nfs4_attr_append_acl(
         uint32_t                  flag = ace->flags;
         int                       is_group;
 
-        is_group = (ace->who.type == CHIMERA_PRINCIPAL_GROUP) ||
-            (ace->who.type == CHIMERA_PRINCIPAL_SPECIAL &&
-             ace->who.special == CHIMERA_WHO_GROUP);
+        /* ACE4_IDENTIFIER_GROUP applies only to a named group principal; for
+         * special identifiers (incl. GROUP@) it SHOULD be zero on encode
+         * (RFC 7530 §6.2.1.5) and the decoder ignores it for specials. */
+        is_group = (ace->who.type == CHIMERA_PRINCIPAL_GROUP);
 
         if (is_group) {
             flag |= CHIMERA_ACE_FLAG_IDENTIFIER_GROUP;
