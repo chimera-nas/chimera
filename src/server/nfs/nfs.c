@@ -1089,7 +1089,9 @@ chimera_nfs_find_export_path(
             // path is shorter than export name, cannot match
             continue;
         }
-        if (strncasecmp(export_name, path, export_name_len) == 0) {
+        /* NFSv4 component names are case-sensitive and the synthetic pseudo-fs
+         * has no case-insensitive backend; match export names exactly. */
+        if (strncmp(export_name, path, export_name_len) == 0) {
             export = cur_export;
             // Check if this is a valid prefix match (at path boundary)
             if (path_len == export_name_len) {
