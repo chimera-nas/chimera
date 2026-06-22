@@ -202,6 +202,21 @@ chimera_smb_read_send_chunk(
 
     chimera_smb_client_pdu_begin(conn, SMB2_READ, &iov, &cursor, &hdr);
 
+    /* Multi-credit charging: a READ whose payload exceeds 64 KiB consumes
+     * ceil(len / 64 KiB) credits and that many MessageIds from the server's
+     * command sequence window (MS-SMB2 3.1.5.2 / 3.3.5.2.5).  A server that
+     * verifies CreditCharge rejects an under-charged large READ with
+     * STATUS_INVALID_PARAMETER, so charge the right amount and claim the extra
+     * MessageIds (pdu_begin already took one).  Only meaningful once the
+     * negotiated dialect supports multi-credit (2.1+); 2.0.2 keeps a request at
+     * one credit and the read chunk fits in 64 KiB. */
+    if (conn->server->dialect >= SMB2_DIALECT_2_1 && len > 65536) {
+        uint16_t charge = (len - 1) / 65536 + 1;
+
+        hdr->credit_charge     = charge;
+        conn->next_message_id += charge - 1;
+    }
+
     evpl_iovec_cursor_append_uint16(&cursor, SMB2_READ_REQUEST_SIZE);
     evpl_iovec_cursor_append_uint8(&cursor, 0);              /* Padding */
     evpl_iovec_cursor_append_uint8(&cursor, 0);              /* Flags */
