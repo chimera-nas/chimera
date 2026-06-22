@@ -40,6 +40,13 @@ chimera_nfs4_open_acquire_share(
     uint8_t                         granted = 0;
     uint8_t                         denied  = 0;
 
+    /* share_access MUST request at least one of READ or WRITE (RFC 7530
+     * §16.16.5 / §9.9); a value with neither base mode is invalid. */
+    if ((args->share_access &
+         (OPEN4_SHARE_ACCESS_READ | OPEN4_SHARE_ACCESS_WRITE)) == 0) {
+        return NFS4ERR_INVAL;
+    }
+
     if (args->share_access & OPEN4_SHARE_ACCESS_READ) {
         granted |= CHIMERA_VFS_LEASE_MODE_R;
     }
