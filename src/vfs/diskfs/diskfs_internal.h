@@ -1131,46 +1131,71 @@ void diskfs_txn_trace_giant(
 
 
 /*
- * Per-thread NVMe-style submission and completion queues used to hand
- * write transactions off to the intent log thread and to receive commit
- * completions back.  Each ring is single-producer / single-consumer:
+ * Transaction submission + completion between the request workers and the
+ * intent-log threads (Stage C: txn-ID sequencer + durable watermark).
  *
- *   sq:  worker (producer)        ->  intent log thread (consumer)
- *   cq:  intent log thread (prod) ->  worker (consumer)
+ * Submission is one GLOBAL bounded ring (Vyukov-style MPSC: many worker
+ * producers, the commit thread is the single in-order consumer).  The slot
+ * index a worker claims IS the transaction's monotonic id and its log order;
+ * the commit thread consumes slots strictly in id order and groups consecutive
+ * ones into a redo record.
+ *
+ * Completion has no per-txn completion queue.  The commit thread publishes a
+ * durable watermark (highest contiguous txn id whose record is durable) and the
+ * apply thread an applied watermark (... whose space-map deltas are applied).
+ * Each worker keeps a private in-flight ring of the txns it submitted (ordered
+ * by id) and, every loop iteration, ACKs the client for the prefix below the
+ * durable watermark and recycles the txn for the prefix below the applied one.
  */
-#define DISKFS_IQ_RING_SIZE     1024
+#define DISKFS_IQ_INFLIGHT_SIZE 1024             /* per-worker in-flight cap */
+#define DISKFS_IQ_INFLIGHT_MASK (DISKFS_IQ_INFLIGHT_SIZE - 1)
 
-#define DISKFS_IQ_RING_MASK     (DISKFS_IQ_RING_SIZE - 1)
+#define DISKFS_GSQ_SIZE         65536            /* global submission ring */
+#define DISKFS_GSQ_MASK         (DISKFS_GSQ_SIZE - 1)
 
 
+/* Carrier for one grouped txn inside a redo record/batch (commit + apply side).
+ * The stopwatches feed the queue->submit->durable latency metrics, sampled on
+ * the commit/apply threads; the client completion no longer rides this. */
 struct diskfs_iq_entry {
+    struct diskfs_txn          *txn;
+    struct prometheus_stopwatch enqueue_time;
+    struct prometheus_stopwatch submit_time;
+};
+
+
+/* Global submission-ring slot.  `turn` sequences safe reuse: a producer claiming
+ * id P spins until turn==P, fills the slot, sets turn=P+1; the single consumer
+ * at P spins until turn==P+1, reads, sets turn=P+DISKFS_GSQ_SIZE (free for the
+ * next wrap). */
+struct diskfs_gsq_slot {
+    uint64_t                    turn;            /* atomic */
+    struct diskfs_txn          *txn;
+    struct prometheus_stopwatch enqueue_time;
+};
+
+
+/* A txn this worker submitted and is waiting to complete.  Worker-private ring;
+ * cb/private_data deliver the client completion at the durable watermark. */
+struct diskfs_iq_inflight {
+    uint64_t                    txn_id;
     struct diskfs_txn          *txn;
     diskfs_txn_commit_cb_t      cb;
     void                       *private_data;
     struct prometheus_stopwatch enqueue_time;
-    struct prometheus_stopwatch submit_time;
-    struct prometheus_stopwatch durable_time;
-    int                         status;
-};
-
-
-struct diskfs_iq_ring {
-    /* Accessed via __atomic_* builtins. */
-    uint32_t               head;     /* consumer position */
-    uint32_t               tail;     /* producer position */
-    struct diskfs_iq_entry entries[DISKFS_IQ_RING_SIZE];
 };
 
 
 struct diskfs_iq_channel {
-    struct diskfs_iq_ring     sq;
-    struct diskfs_iq_ring     cq;
-    struct evpl_doorbell      cq_doorbell;
     struct diskfs_thread     *worker;
 
-    /* CQEs reserved for redo writes issued but not yet completed.  Owned by
-     * the intent-log thread; bounds in-flight writes to available CQ space. */
-    uint32_t                  cq_inflight;
+    /* Worker-private in-flight ring (this worker is the only accessor).  tail =
+     * next submit, ack = next to ACK (txn_id < durable_wm), recycle = next to
+     * free (txn_id < applied_wm).  recycle <= ack <= tail. */
+    struct diskfs_iq_inflight inflight[DISKFS_IQ_INFLIGHT_SIZE];
+    uint64_t                  inflight_tail;
+    uint64_t                  inflight_ack;
+    uint64_t                  inflight_recycle;
 
     /* Lifecycle: workers append on register, set flag on unregister.
      * Intent log thread owns the slot array. */
@@ -1297,13 +1322,24 @@ struct diskfs_intent_log {
     int                              ready;           /* atomic: commit thread up */
     int                              shutdown;        /* atomic */
     int                              commit_alive;    /* atomic: 1 while the commit thread's wake_doorbell is live; the push thread must not ring it once 0 (cleared before the commit thread is destroyed, which closes that fd) */
-    struct evpl_poll                *sq_poll;         /* polls all channel SQs every loop iteration */
+    struct evpl_poll                *sq_poll;         /* polls the global submission ring every loop iteration */
     int                              awake;           /* atomic (seq_cst): 1 while the commit thread is in poll mode (not blocked).  A submitter skips ringing wake_doorbell when this is set; see diskfs_iq_try_submit / diskfs_il_poll_exit. */
     int                              reg_dirty;       /* atomic (seq_cst): a channel (un)registration is pending.  Set by workers after touching pending_head / unregister_requested; the commit thread's per-iteration poll services it without waiting for the wake doorbell (which is starved while we stay in continuous poll mode under load). */
     uint32_t                         num_channels;
     struct diskfs_iq_channel        *channels[DISKFS_IL_MAX_CHANNELS];
     pthread_mutex_t                  registration_lock;
     struct diskfs_iq_channel        *pending_head;
+
+    /* Stage C: global submission ring (Vyukov MPSC).  Workers claim a slot via
+     * an atomic increment of gsq_tail (= the txn id); the commit thread consumes
+     * strictly in id order from gsq_head (commit-private).  durable_wm/applied_wm
+     * are the contiguous txn-id completion watermarks (one writer each, many
+     * worker readers); a worker ACKs/recycles its in-flight ring against them. */
+    struct diskfs_gsq_slot          *gsq;             /* [DISKFS_GSQ_SIZE] */
+    uint64_t                         gsq_tail;        /* atomic: producer reservation = next txn id */
+    uint64_t                         gsq_head;        /* commit-thread consumer position */
+    uint64_t                         durable_wm;      /* atomic: 1-past-last txn id durable */
+    uint64_t                         applied_wm;      /* atomic: 1-past-last txn id applied */
     struct evpl_block_queue         *log_queue;       /* redo writes -> intent-log device */
     uint64_t                         log_seq;         /* next redo seq (commit only) */
     /* Records placed in the log and not yet trimmed past (atomic; incremented
@@ -1933,14 +1969,13 @@ struct diskfs_inode_alloc_ctx {
 
 /* Completion context for an in-flight redo-record write. */
 struct diskfs_redo_entry {
-    struct diskfs_iq_channel *ch;
-    struct diskfs_iq_entry    entry;
+    struct diskfs_iq_entry entry;
 };
 
 
 struct diskfs_redo_ctx {
     struct diskfs_intent_log *il;
-    struct diskfs_redo_entry *entries; /* one CQE/completion per grouped txn */
+    struct diskfs_redo_entry *entries; /* one grouped txn each */
     uint32_t                  num_entries;
     struct diskfs_il_record  *rec;     /* owns the record image (iovs) */
     int                       segments; /* outstanding journal writes (see below) */
@@ -1952,6 +1987,11 @@ struct diskfs_redo_ctx {
      * owns concurrently. */
     uint32_t                  entries_cap;
     uint64_t                  seq;
+    /* Stage C: one-past-last txn id this record covers (the records consume
+     * consecutive global-ring slots, so a record spans a contiguous id range).
+     * The commit thread sets durable_wm = end_txn_id at in-order retire; the
+     * apply thread sets applied_wm = end_txn_id once its deltas are applied. */
+    uint64_t                  end_txn_id;
     struct diskfs_redo_ctx   *free_next;
 };
 
@@ -2611,11 +2651,6 @@ diskfs_iq_try_submit(
 int
 diskfs_iq_drain_cq(
     struct diskfs_iq_channel *ch);
-
-void
-diskfs_iq_cq_doorbell_cb(
-    struct evpl          *evpl,
-    struct evpl_doorbell *doorbell);
 
 void
 diskfs_iq_cq_poll(

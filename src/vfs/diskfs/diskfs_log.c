@@ -146,7 +146,8 @@ diskfs_il_write_redo(
     struct diskfs_redo_entry *entries,
     uint32_t                  num_entries,
     uint32_t                  nblocks,
-    uint32_t                  num_deltas);
+    uint32_t                  num_deltas,
+    uint64_t                  end_txn_id);
 
 static uint32_t
 diskfs_il_txn_blocks(
@@ -1017,10 +1018,16 @@ diskfs_redo_write_cb(
          * fixed; the block pins are dropped by the push thread at trim. */
         __atomic_store_n(&il->durable_seq, rec->seq, __ATOMIC_RELEASE);
 
+        /* Stage C: publish the durable watermark (1-past-last txn id of this
+         * record).  Records retire in id order, so it is monotonic; a worker
+         * polling it ACKs the client for every txn below it.  Release-ordered:
+         * the record (hence every grouped txn) is durable before this is seen. */
+        __atomic_store_n(&il->durable_wm, rc->end_txn_id, __ATOMIC_RELEASE);
+
         /* Hand the record image to the push thread (block home writes) and the
-         * completion ctx to the apply thread (space-map apply + worker ACK),
-         * both in log order.  Each ring is sized larger than the log can ever
-         * hold, so neither can fill before the log does. */
+         * completion ctx to the apply thread (space-map apply + txn recycle via
+         * applied_wm), both in log order.  Each ring is sized larger than the log
+         * can ever hold, so neither can fill before the log does. */
         ht = il->handoff_tail;
         chimera_diskfs_abort_if(ht - __atomic_load_n(&il->handoff_head, __ATOMIC_ACQUIRE) >=
                                 il->handoff_ring_size, "intent-log hand-off ring overflow");
@@ -1078,11 +1085,8 @@ diskfs_il_apply_doorbell_cb(
         head++;
 
         for (i = 0; i < rc->num_entries; i++) {
-            struct diskfs_iq_channel *ch    = rc->entries[i].ch;
-            struct diskfs_iq_entry   *entry = &rc->entries[i].entry;
-            uint32_t                  cq_tail;
+            struct diskfs_iq_entry *entry = &rc->entries[i].entry;
 
-            prometheus_stopwatch_start(&entry->durable_time);
             diskfs_metric_time_sample(
                 il->metrics.txn_latency[DISKFS_METRIC_TXN_SUBMIT_TO_DURABLE],
                 &entry->submit_time);
@@ -1090,25 +1094,24 @@ diskfs_il_apply_doorbell_cb(
                 il->metrics.txn_latency[DISKFS_METRIC_TXN_QUEUE_TO_DURABLE],
                 &entry->enqueue_time);
 
-            /* NOT the block pins -- each block's claim pin is held until the
-             * record is pushed home and trimmed (the push thread drops it).
-             * The worker polls its CQ every loop iteration, so posting the CQE
-             * needs no cq_doorbell ring (matches the old commit-thread path). */
+            /* Release the inode->block links + per-block txn structs and apply
+             * the committed space-map deltas to the in-memory free map.  NOT the
+             * block pins -- each block's claim pin is held until the record is
+             * pushed home and trimmed (the push thread drops it).  The txn itself
+             * is recycled by its owning worker once applied_wm passes it below. */
             diskfs_txn_retire_blocks(entry->txn);
             diskfs_txn_apply_allocs(entry->txn);
             diskfs_txn_apply_frees(entry->txn);
-
-            entry->status                                 = 0;
-            cq_tail                                       = __atomic_load_n(&ch->cq.tail, __ATOMIC_RELAXED);
-            ch->cq.entries[cq_tail & DISKFS_IQ_RING_MASK] = *entry;
-            __atomic_store_n(&ch->cq.tail, cq_tail + 1, __ATOMIC_RELEASE);
-            __atomic_sub_fetch(&ch->cq_inflight, 1, __ATOMIC_ACQ_REL);
         }
 
-        /* Deltas applied; advance the apply frontier in log order (monotonic).
-         * A checkpoint stamps ckpt_seq <= applied_seq, so every delta it folds
-         * is already reflected in the in-memory free map. */
+        /* Deltas applied + txn structs finished with; advance both apply
+         * frontiers in log order (monotonic).  applied_seq (record seq) is what a
+         * checkpoint stamps ckpt_seq from; applied_wm (txn id) is what each
+         * worker recycles its in-flight txns against.  Release-ordered so a
+         * worker that observes applied_wm also observes apply being done with the
+         * txn (safe to return it to the per-thread free list). */
         __atomic_store_n(&il->applied_seq, rc->seq, __ATOMIC_RELEASE);
+        __atomic_store_n(&il->applied_wm, rc->end_txn_id, __ATOMIC_RELEASE);
 
         diskfs_il_ctx_recycle(il, rc);
     }
@@ -1127,7 +1130,8 @@ diskfs_il_write_redo(
     struct diskfs_redo_entry *entries,
     uint32_t                  num_entries,
     uint32_t                  nblocks,
-    uint32_t                  num_deltas)
+    uint32_t                  num_deltas,
+    uint64_t                  end_txn_id)
 {
     struct diskfs_redo_ctx          *ctx;
     struct diskfs_il_record         *rec;
@@ -1169,6 +1173,7 @@ diskfs_il_write_redo(
     ctx->il          = il;
     ctx->num_entries = num_entries;
     ctx->rec         = rec;
+    ctx->end_txn_id  = end_txn_id;     /* Stage C: durable/applied watermark target */
     memcpy(ctx->entries, entries, num_entries * sizeof(*ctx->entries));
 
     p               = (char *) rec->iovs[0].data;
@@ -1369,14 +1374,11 @@ static int
 diskfs_iq_process_batch(struct diskfs_intent_log *il)
 {
     struct diskfs_redo_entry entries[DISKFS_IL_MAX_IOV];
-    uint32_t                 sq_head[DISKFS_IL_MAX_CHANNELS];
-    uint32_t                 sq_tail[DISKFS_IL_MAX_CHANNELS];
-    uint32_t                 consumed[DISKFS_IL_MAX_CHANNELS];
     uint32_t                 batch_count  = 0;
     uint32_t                 batch_blocks = 0;
     uint32_t                 batch_deltas = 0;
-    uint32_t                 start, rounds, pass, i;
-    int                      stopped = 0;
+    uint32_t                 i;
+    uint64_t                 pos;
 
     if (il->redo_inflight >= DISKFS_COMMIT_WATERMARK) {
         return 0;
@@ -1386,100 +1388,62 @@ diskfs_iq_process_batch(struct diskfs_intent_log *il)
         return 0;
     }
 
-    if (il->num_channels == 0) {
-        return 0;
-    }
+    /* Consume the global submission ring strictly in id order.  Slots that are
+     * reserved but not yet published (a producer mid-fill) stop the batch --
+     * head-of-line by design, since id order IS log order. */
+    pos = il->gsq_head;
+    while (batch_count < DISKFS_IL_MAX_IOV) {
+        struct diskfs_gsq_slot *slot = &il->gsq[pos & DISKFS_GSQ_MASK];
+        struct diskfs_txn      *txn;
+        uint32_t                nblocks, next_blocks;
+        uint32_t                ndeltas, next_deltas;
+        uint64_t                reclen;
 
-    for (i = 0; i < il->num_channels; i++) {
-        struct diskfs_iq_channel *ch = il->channels[i];
+        if (__atomic_load_n(&slot->turn, __ATOMIC_ACQUIRE) != pos + 1) {
+            break;                        /* empty or not yet published */
+        }
 
-        sq_head[i]  = __atomic_load_n(&ch->sq.head, __ATOMIC_RELAXED);
-        sq_tail[i]  = __atomic_load_n(&ch->sq.tail, __ATOMIC_ACQUIRE);
-        consumed[i] = 0;
-    }
+        txn         = slot->txn;
+        nblocks     = diskfs_il_txn_blocks(txn);
+        next_blocks = batch_blocks + nblocks;
+        ndeltas     = diskfs_il_txn_deltas(txn);
+        next_deltas = batch_deltas + ndeltas;
 
-    start = il->log_seq % il->num_channels;
+        /* Keep one normal record to one backend write.  A txn larger than the
+         * iov cap goes alone via the segmented path. */
+        if (batch_count > 0 && 1 + next_blocks > DISKFS_IL_MAX_IOV) {
+            break;
+        }
 
-    for (rounds = 0; !stopped && batch_count < DISKFS_IL_MAX_IOV; rounds++) {
-        int took = 0;
-
-        for (pass = 0; pass < il->num_channels && batch_count < DISKFS_IL_MAX_IOV; pass++) {
-            uint32_t                  idx = (start + pass) % il->num_channels;
-            struct diskfs_iq_channel *ch  = il->channels[idx];
-            struct diskfs_iq_entry   *slot;
-            uint32_t                  nblocks, next_blocks;
-            uint32_t                  ndeltas, next_deltas;
-            uint32_t                  cq_tail, cq_head, cqi;
-            uint64_t                  reclen;
-
-            if (sq_head[idx] + consumed[idx] == sq_tail[idx]) {
-                continue;
-            }
-
-            slot = &ch->sq.entries[(sq_head[idx] + consumed[idx]) &
-                                   DISKFS_IQ_RING_MASK];
-            nblocks     = diskfs_il_txn_blocks(slot->txn);
-            next_blocks = batch_blocks + nblocks;
-            ndeltas     = diskfs_il_txn_deltas(slot->txn);
-            next_deltas = batch_deltas + ndeltas;
-
-            /* Keep one normal record to one backend write.  Transactions larger
-             * than the iov cap still go alone and use the segmented path. */
-            if (batch_count > 0 && 1 + next_blocks > DISKFS_IL_MAX_IOV) {
-                stopped = 1;
+        reclen = diskfs_il_blocks_reclen(next_blocks, next_deltas);
+        if (!diskfs_il_fits(il, reclen)) {
+            if (batch_count > 0) {
                 break;
             }
-
-            /* CQ-space gate.  cq_inflight (CQEs reserved by consuming SQ but not
-             * yet posted) is decremented by the apply thread AFTER it advances
-             * cq.tail, so read cq_inflight (acquire) BEFORE cq.tail: observing
-             * the decrement then implies observing the matching cq.tail advance,
-             * so this occupancy estimate can only over-count, never overflow. */
-            cqi     = __atomic_load_n(&ch->cq_inflight, __ATOMIC_ACQUIRE);
-            cq_tail = __atomic_load_n(&ch->cq.tail, __ATOMIC_ACQUIRE);
-            cq_head = __atomic_load_n(&ch->cq.head, __ATOMIC_ACQUIRE);
-            if ((cq_tail - cq_head) + cqi + consumed[idx] >=
-                DISKFS_IQ_RING_SIZE) {
-                continue;
+            if (__atomic_load_n(&il->live_records, __ATOMIC_ACQUIRE) != 0) {
+                break;
             }
-
-            reclen = diskfs_il_blocks_reclen(next_blocks, next_deltas);
+            __atomic_store_n(&il->log_tail, il->log_head, __ATOMIC_RELEASE);
             if (!diskfs_il_fits(il, reclen)) {
-                if (batch_count > 0) {
-                    stopped = 1;
-                    break;
-                }
-                if (__atomic_load_n(&il->live_records, __ATOMIC_ACQUIRE) != 0) {
-                    stopped = 1;
-                    break;
-                }
-                __atomic_store_n(&il->log_tail, il->log_head, __ATOMIC_RELEASE);
-                if (!diskfs_il_fits(il, reclen)) {
-                    stopped = 1;
-                    break;
-                }
-            }
-
-            entries[batch_count].ch    = ch;
-            entries[batch_count].entry = *slot;
-            batch_count++;
-            batch_blocks = next_blocks;
-            batch_deltas = next_deltas;
-            consumed[idx]++;
-            took = 1;
-
-            if (1 + batch_blocks > DISKFS_IL_MAX_IOV) {
-                stopped = 1;
                 break;
             }
         }
 
-        if (!took) {
-            break;
-        }
+        entries[batch_count].entry.txn          = txn;
+        entries[batch_count].entry.enqueue_time = slot->enqueue_time;
 
-        if (rounds >= DISKFS_IQ_RING_SIZE) {
-            break;
+        /* Free the slot for reuse (Vyukov consumer publish): the next producer
+         * for this slot is at pos + DISKFS_GSQ_SIZE.  txn/enqueue were copied
+         * above, so the slot may be overwritten now. */
+        __atomic_store_n(&slot->turn, pos + DISKFS_GSQ_SIZE, __ATOMIC_RELEASE);
+
+        batch_count++;
+        batch_blocks = next_blocks;
+        batch_deltas = next_deltas;
+        pos++;
+
+        if (1 + batch_blocks > DISKFS_IL_MAX_IOV) {
+            break;                        /* the lone over-cap txn; stop here */
         }
     }
 
@@ -1488,25 +1452,14 @@ diskfs_iq_process_batch(struct diskfs_intent_log *il)
     }
 
     for (i = 0; i < batch_count; i++) {
-        entries[i].entry.status = 0;
         prometheus_stopwatch_start(&entries[i].entry.submit_time);
         diskfs_metric_time_sample(
             il->metrics.txn_latency[DISKFS_METRIC_TXN_QUEUE_TO_SUBMIT],
             &entries[i].entry.enqueue_time);
     }
 
-    for (i = 0; i < il->num_channels; i++) {
-        if (consumed[i] == 0) {
-            continue;
-        }
-        __atomic_store_n(&il->channels[i]->sq.head,
-                         sq_head[i] + consumed[i],
-                         __ATOMIC_RELEASE);
-        __atomic_add_fetch(&il->channels[i]->cq_inflight, consumed[i],
-                           __ATOMIC_ACQ_REL);
-    }
-
-    diskfs_il_write_redo(il, entries, batch_count, batch_blocks, batch_deltas);
+    il->gsq_head = pos;     /* == base + batch_count; the record covers [base, pos) */
+    diskfs_il_write_redo(il, entries, batch_count, batch_blocks, batch_deltas, pos);
     return 1;
 } /* diskfs_iq_process_batch */
 
@@ -1570,23 +1523,16 @@ diskfs_il_service_registrations(struct diskfs_intent_log *il)
             uint32_t last = il->num_channels - 1;
 
             /* The worker frees the channel (and soon its thread struct) the
-             * moment unregister_done is set, and retired txns dereference
-             * their submitting thread -- acking with anything still in
-             * flight would be a use-after-free.  The worker guarantees
-             * quiescence (commits_inflight drained to zero) before
-             * requesting unregistration; make a violation loud instead of
-             * corrupting memory. */
-            /* The worker drained its own commits before unregistering, but the
-             * apply thread posts each CQE before decrementing cq_inflight, so the
-             * matching decrement can trail the worker's last completion by a
-             * hair -- wait for it to settle rather than asserting on the race. */
-            while (__atomic_load_n(&ch->cq_inflight, __ATOMIC_ACQUIRE) != 0) {
-                /* apply is finishing the cq_inflight decrement; spin briefly */
-            }
+             * moment unregister_done is set, and a txn still referenced by the
+             * global ring or a record dereferences its submitting worker --
+             * acting with anything still in flight would be a use-after-free.
+             * The worker drains its in-flight ring (commits_inflight to zero,
+             * i.e. every txn it submitted recycled) BEFORE setting
+             * unregister_requested (release), which this acquire load pairs with,
+             * so the cursors below are settled.  Make a violation loud. */
             chimera_diskfs_abort_if(
-                __atomic_load_n(&ch->sq.tail, __ATOMIC_ACQUIRE) !=
-                __atomic_load_n(&ch->sq.head, __ATOMIC_RELAXED),
-                "intent-log channel unregistered with SQ work in flight");
+                ch->inflight_recycle != ch->inflight_tail,
+                "intent-log channel unregistered with txns in flight");
 
             if (i != last) {
                 il->channels[i] = il->channels[last];
@@ -1622,21 +1568,14 @@ diskfs_il_process_all(struct diskfs_intent_log *il)
 } /* diskfs_il_process_all */
 
 
-/* Seq-cst re-scan for the poll-exit wakeup handshake (diskfs_iq_try_submit). */
+/* Seq-cst re-scan for the poll-exit wakeup handshake (diskfs_iq_try_submit).
+ * gsq_head is commit-private; a producer that has reserved a slot but not yet
+ * published it still shows tail != head, so this conservatively reports work
+ * (the consumer spins on turn and picks it up momentarily). */
 static int
 diskfs_il_has_sq_work(struct diskfs_intent_log *il)
 {
-    uint32_t i;
-
-    for (i = 0; i < il->num_channels; i++) {
-        struct diskfs_iq_channel *ch = il->channels[i];
-
-        if (__atomic_load_n(&ch->sq.tail, __ATOMIC_SEQ_CST) !=
-            __atomic_load_n(&ch->sq.head, __ATOMIC_SEQ_CST)) {
-            return 1;
-        }
-    }
-    return 0;
+    return __atomic_load_n(&il->gsq_tail, __ATOMIC_SEQ_CST) != il->gsq_head;
 } /* diskfs_il_has_sq_work */
 
 
@@ -1719,8 +1658,11 @@ diskfs_il_poll_exit(
 } /* diskfs_il_poll_exit */
 
 
-/* Push one txn onto this worker's IL submission queue.  Returns 1 on success,
- * 0 if the SQ is full.  The completion fires later from the CQ doorbell. */
+/* Submit one txn into the global submission ring and record it on this worker's
+ * private in-flight ring (for watermark-driven completion).  Returns 1 on
+ * success, 0 if either ring is full (the caller then parks the commit).  The
+ * client completion fires later from diskfs_iq_drain_cq when the durable
+ * watermark passes this txn's id. */
 int
 diskfs_iq_try_submit(
     struct diskfs_thread  *thread,
@@ -1728,34 +1670,65 @@ diskfs_iq_try_submit(
     diskfs_txn_commit_cb_t cb,
     void                  *private_data)
 {
-    struct diskfs_shared     *shared = thread->shared;
-    struct diskfs_iq_channel *ch     = thread->iq_channel;
-    struct diskfs_iq_entry   *slot;
-    uint32_t                  tail, head;
+    struct diskfs_shared       *shared = thread->shared;
+    struct diskfs_intent_log   *il     = &shared->intent_log;
+    struct diskfs_iq_channel   *ch     = thread->iq_channel;
+    struct diskfs_iq_inflight  *fe;
+    struct diskfs_gsq_slot     *slot;
+    struct prometheus_stopwatch enqueue;
+    uint64_t                    pos;
 
-    tail = __atomic_load_n(&ch->sq.tail, __ATOMIC_RELAXED);
-    head = __atomic_load_n(&ch->sq.head, __ATOMIC_ACQUIRE);
-
-    if (tail - head >= DISKFS_IQ_RING_SIZE) {
+    /* Worker-private in-flight ring full?  (Bounds this worker's outstanding
+     * commits; recycle trails the applied watermark.) */
+    if (ch->inflight_tail - ch->inflight_recycle >= DISKFS_IQ_INFLIGHT_SIZE) {
         return 0;
     }
 
-    slot               = &ch->sq.entries[tail & DISKFS_IQ_RING_MASK];
+    /* Claim a global-ring slot (Vyukov bounded MPSC enqueue).  pos == the txn's
+     * monotonic id and its log order. */
+    prometheus_stopwatch_start(&enqueue);
+    pos = __atomic_load_n(&il->gsq_tail, __ATOMIC_RELAXED);
+    for ( ;; ) {
+        uint64_t turn;
+        int64_t  diff;
+
+        slot = &il->gsq[pos & DISKFS_GSQ_MASK];
+        turn = __atomic_load_n(&slot->turn, __ATOMIC_ACQUIRE);
+        diff = (int64_t) (turn - pos);
+
+        if (diff == 0) {
+            if (__atomic_compare_exchange_n(&il->gsq_tail, &pos, pos + 1, 1,
+                                            __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
+                break;                    /* claimed slot `pos` */
+            }
+            /* CAS reloaded pos; retry */
+        } else if (diff < 0) {
+            return 0;                     /* global ring full -> park */
+        } else {
+            pos = __atomic_load_n(&il->gsq_tail, __ATOMIC_RELAXED);
+        }
+    }
+
     slot->txn          = txn;
-    slot->cb           = cb;
-    slot->private_data = private_data;
-    slot->status       = 0;
-    prometheus_stopwatch_start(&slot->enqueue_time);
+    slot->enqueue_time = enqueue;
+    /* Publish: the commit thread spins on turn==pos+1 before reading the slot. */
+    __atomic_store_n(&slot->turn, pos + 1, __ATOMIC_RELEASE);
 
-    /* Seq-cst so this store is ordered before the awake load below; pairs with
-     * the commit thread's diskfs_il_poll_exit handshake. */
-    __atomic_store_n(&ch->sq.tail, tail + 1, __ATOMIC_SEQ_CST);
+    /* Record on the worker's in-flight ring so completion can find cb/private by
+     * id when the watermark passes. */
+    fe               = &ch->inflight[ch->inflight_tail & DISKFS_IQ_INFLIGHT_MASK];
+    fe->txn_id       = pos;
+    fe->txn          = txn;
+    fe->cb           = cb;
+    fe->private_data = private_data;
+    fe->enqueue_time = enqueue;
+    ch->inflight_tail++;
 
-    /* The commit thread polls every channel's SQ each loop iteration while it is
-     * awake, so the wake doorbell is only needed to rouse it once it has gone to
-     * sleep.  Skip the eventfd write in the common (awake) case. */
-    if (!__atomic_load_n(&shared->intent_log.awake, __ATOMIC_SEQ_CST)) {
-        evpl_ring_doorbell(&shared->intent_log.wake_doorbell);
+    /* The commit thread polls the global ring every loop iteration while awake,
+     * so the wake doorbell is only needed to rouse it once it has slept.  The
+     * seq-cst load pairs with the commit thread's diskfs_il_poll_exit handshake. */
+    if (!__atomic_load_n(&il->awake, __ATOMIC_SEQ_CST)) {
+        evpl_ring_doorbell(&il->wake_doorbell);
     }
     return 1;
 } /* diskfs_iq_try_submit */
@@ -1782,80 +1755,68 @@ diskfs_iq_resume_commit_waiters(struct diskfs_thread *thread)
 } /* diskfs_iq_resume_commit_waiters */
 
 
-/* Drain this worker's completion queue: deliver callbacks, release txns, drop
- * the poll-mode pin once no commits remain outstanding, and resume any commits
- * that parked on a full SQ.  Returns the number of completions drained.  Runs
- * every loop iteration via diskfs_iq_cq_poll (the fast path, while the worker is
- * poll-pinned) and also from the CQ doorbell as a backstop. */
+/* Complete this worker's in-flight txns against the global watermarks: ACK the
+ * client (cb) for every txn whose id is below the durable watermark, then
+ * recycle the txn (and drop the poll-mode pin) for every txn whose id is below
+ * the applied watermark -- the apply thread has finished with it by then.
+ * Finally retry any commits that parked on a full ring.  Returns the number of
+ * txns ACKed.  Runs every loop iteration via diskfs_iq_cq_poll while the worker
+ * is poll-pinned (a commit outstanding). */
 int
 diskfs_iq_drain_cq(struct diskfs_iq_channel *ch)
 {
-    struct diskfs_thread     *worker  = ch->worker;
-    struct diskfs_intent_log *il      = &worker->shared->intent_log;
-    uint32_t                  head    = __atomic_load_n(&ch->cq.head, __ATOMIC_RELAXED);
-    uint32_t                  tail    = __atomic_load_n(&ch->cq.tail, __ATOMIC_ACQUIRE);
-    int                       drained = 0;
+    struct diskfs_thread *worker  = ch->worker;
+    uint64_t              durable = __atomic_load_n(
+        &worker->shared->intent_log.durable_wm, __ATOMIC_ACQUIRE);
+    uint64_t              applied = __atomic_load_n(
+        &worker->shared->intent_log.applied_wm, __ATOMIC_ACQUIRE);
+    int                   drained = 0;
 
-    while (head != tail) {
-        struct diskfs_iq_entry entry = ch->cq.entries[head & DISKFS_IQ_RING_MASK];
-        head++;
-        drained++;
+    /* ACK the client for the contiguous prefix now durable (recoverable).  The
+     * txn's logical inode locks were already dropped by the commit thread in
+     * diskfs_il_write_redo, so this just delivers completion. */
+    while (ch->inflight_ack != ch->inflight_tail) {
+        struct diskfs_iq_inflight *fe =
+            &ch->inflight[ch->inflight_ack & DISKFS_IQ_INFLIGHT_MASK];
 
+        if ((int64_t) (fe->txn_id - durable) >= 0) {
+            break;                        /* not yet durable */
+        }
         diskfs_metric_time_sample(
             worker->metrics.txn_latency[DISKFS_METRIC_TXN_QUEUE_TO_CALLBACK],
-            &entry.enqueue_time);
-        diskfs_metric_time_sample(
-            worker->metrics.txn_latency[DISKFS_METRIC_TXN_DURABLE_TO_CALLBACK],
-            &entry.durable_time);
+            &fe->enqueue_time);
+        fe->cb(fe->txn, 0, fe->private_data);
+        ch->inflight_ack++;
+        drained++;
+    }
 
-        /* The txn's logical inode locks were already dropped by the intent
-         * log thread (diskfs_iq_process_channel); just deliver completion. */
-        entry.cb(entry.txn, entry.status, entry.private_data);
-        diskfs_txn_release(entry.txn);
+    /* Recycle the txn for the prefix now applied -- the apply thread has finished
+     * reading txn->blocks/space_deltas/pending_frees, so it is safe to return to
+     * this worker's per-thread free list (recycle <= ack always, since applied
+     * <= durable).  Drop the poll-mode pin once nothing is outstanding. */
+    while (ch->inflight_recycle != ch->inflight_ack) {
+        struct diskfs_iq_inflight *fe =
+            &ch->inflight[ch->inflight_recycle & DISKFS_IQ_INFLIGHT_MASK];
 
-        /* Last outstanding commit done -> release the poll-mode pin taken in
-         * diskfs_txn_commit_finish so the worker may sleep again when idle. */
+        if ((int64_t) (fe->txn_id - applied) >= 0) {
+            break;                        /* not yet applied */
+        }
+        diskfs_txn_release(fe->txn);
+        ch->inflight_recycle++;
         if (--worker->commits_inflight == 0) {
             evpl_poll_unpin(worker->evpl);
         }
     }
 
-    if (drained > 0) {
-        __atomic_store_n(&ch->cq.head, head, __ATOMIC_RELEASE);
-        /* Freeing CQ space may let the IL resume a channel it deferred; it sees
-         * that on its next poll if awake, so only rouse it if it is asleep. */
-        if (!__atomic_load_n(&il->awake, __ATOMIC_SEQ_CST)) {
-            evpl_ring_doorbell(&il->wake_doorbell);
-        }
-    }
-
-    /* The IL has now consumed SQ entries (freeing space), so retry any commits
-     * that parked on a full SQ.  No-op when none are waiting. */
+    /* Ring space may have freed, so retry any commits parked on a full ring. */
     diskfs_iq_resume_commit_waiters(worker);
     return drained;
 } /* diskfs_iq_drain_cq */
 
 
-/* Backstop: drain on the doorbell (rarely rung now -- the worker polls the CQ
- * every iteration while pinned). */
-void
-diskfs_iq_cq_doorbell_cb(
-    struct evpl          *evpl,
-    struct evpl_doorbell *doorbell)
-{
-    struct diskfs_iq_channel *ch = container_of(doorbell,
-                                                struct diskfs_iq_channel,
-                                                cq_doorbell);
-
-    (void) evpl;
-    diskfs_iq_drain_cq(ch);
-} /* diskfs_iq_cq_doorbell_cb */
-
-
 /* Per-iteration completion poll.  While a commit is outstanding the worker is
  * pinned in poll mode (diskfs_txn_commit_finish), so completions are reaped
- * within a loop iteration instead of waiting for the doorbell at the spin
- * boundary. */
+ * within a loop iteration instead of waiting at the spin boundary. */
 void
 diskfs_iq_cq_poll(
     struct evpl *evpl,
@@ -1909,6 +1870,24 @@ diskfs_intent_log_thread_init(
     __atomic_store_n(&il->apply_head, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&il->apply_tail, 0, __ATOMIC_RELAXED);
 
+    /* Stage C: global submission ring + completion watermarks.  Allocated here
+     * (before the commit thread publishes ready) so it exists before any worker
+     * registers and submits.  Vyukov init: slot i's turn starts at i, so the
+     * first producer claiming id i (turn==i) proceeds and the consumer at i waits
+     * for turn==i+1. */
+    {
+        uint64_t s;
+
+        il->gsq = calloc(DISKFS_GSQ_SIZE, sizeof(*il->gsq));
+        for (s = 0; s < DISKFS_GSQ_SIZE; s++) {
+            __atomic_store_n(&il->gsq[s].turn, s, __ATOMIC_RELAXED);
+        }
+        il->gsq_head = 0;
+        __atomic_store_n(&il->gsq_tail, 0, __ATOMIC_RELAXED);
+        __atomic_store_n(&il->durable_wm, 0, __ATOMIC_RELAXED);
+        __atomic_store_n(&il->applied_wm, 0, __ATOMIC_RELAXED);
+    }
+
     diskfs_intent_log_metrics_init(il);
     diskfs_il_commit_metrics(il);
 
@@ -1959,6 +1938,7 @@ diskfs_intent_log_thread_shutdown(
         evpl_block_close_queue(evpl, il->log_queue);
     }
     free(il->retire);
+    free(il->gsq);
 } /* diskfs_intent_log_thread_shutdown */
 
 

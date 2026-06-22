@@ -1656,15 +1656,15 @@ diskfs_thread_init(
     thread->shared = shared;
     thread->evpl   = evpl;
 
-    /* Allocate this worker's intent-log channel and register the CQ
-     * doorbell on the worker's own evpl. */
+    /* Allocate this worker's intent-log channel (holds its private in-flight
+     * ring; completion is watermark-driven, so there is no per-worker CQ or
+     * doorbell). */
     thread->iq_channel         = calloc(1, sizeof(*thread->iq_channel));
     thread->iq_channel->worker = thread;
     thread->commits_inflight   = 0;
-    evpl_add_doorbell(evpl, &thread->iq_channel->cq_doorbell,
-                      diskfs_iq_cq_doorbell_cb);
     /* Reap intent-log completions every loop iteration (the worker is pinned in
-     * poll mode while a commit is outstanding); the doorbell is only a backstop. */
+     * poll mode while a commit is outstanding): ACK txns below the durable
+     * watermark, recycle txns below the applied watermark. */
     thread->cq_poll = evpl_add_poll(evpl, NULL, NULL, diskfs_iq_cq_poll,
                                     thread->iq_channel);
 
@@ -1831,7 +1831,6 @@ diskfs_thread_destroy(void *private_data)
         }
 
         evpl_remove_poll(thread->evpl, thread->cq_poll);
-        evpl_remove_doorbell(thread->evpl, &ch->cq_doorbell);
         free(ch);
         thread->iq_channel = NULL;
     }
