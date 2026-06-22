@@ -163,7 +163,7 @@ verify_validate_mask(
         (1 << FATTR4_SYMLINK_SUPPORT) | (1 << FATTR4_NAMED_ATTR) |
         (1 << FATTR4_FSID)            | (1 << FATTR4_UNIQUE_HANDLES) |
         (1 << FATTR4_LEASE_TIME)      | (1 << FATTR4_RDATTR_ERROR) |
-        (1 << FATTR4_ACLSUPPORT)      | (1 << FATTR4_ARCHIVE) |
+        (1 << FATTR4_ACL)             | (1 << FATTR4_ACLSUPPORT)      | (1 << FATTR4_ARCHIVE) |
         (1 << FATTR4_CANSETTIME)      | (1 << FATTR4_CASE_INSENSITIVE) |
         (1 << FATTR4_CASE_PRESERVING) | (1 << FATTR4_CHOWN_RESTRICTED) |
         (1 << FATTR4_FILEHANDLE)      | (1 << FATTR4_FILEID) |
