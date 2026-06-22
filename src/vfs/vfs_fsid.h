@@ -137,27 +137,64 @@ chimera_vfs_fsid_scan_uuids(struct chimera_vfs_fsid_ent **out)
     return num;
 } // chimera_vfs_fsid_scan_uuids
 
-/* (Re)build the dev -> fsid map from /proc/self/mountinfo.  Caller holds lock. */
-static inline void
-chimera_vfs_fsid_rebuild_locked(void)
+/*
+ * Slurp a small /proc-style file into a malloc'd, NUL-terminated buffer.  This
+ * does blocking I/O, so callers run it WITHOUT the fsid lock held.  Returns
+ * NULL on error (caller treats it as an empty map).
+ */
+static inline char *
+chimera_vfs_fsid_slurp(const char *path)
 {
-    FILE                        *f;
-    char                         line[8192];
-    struct chimera_vfs_fsid_ent *uuids;
-    int                          num_uuids;
+    FILE  *f   = fopen(path, "re");
+    char  *buf = NULL;
+    size_t len = 0, cap = 0;
+
+    if (!f) {
+        return NULL;
+    }
+    for ( ;; ) {
+        size_t n;
+
+        if (len + 4096 + 1 > cap) {
+            cap = cap ? cap * 2 : 8192;
+            buf = realloc(buf, cap);
+        }
+        n    = fread(buf + len, 1, 4096, f);
+        len += n;
+        if (n < 4096) {
+            break;
+        }
+    }
+    fclose(f);
+    if (buf) {
+        buf[len] = '\0';
+    }
+    return buf;
+} // chimera_vfs_fsid_slurp
+
+/*
+ * (Re)build the dev -> fsid map from a previously-slurped mountinfo image and a
+ * pre-scanned by-uuid snapshot.  Pure in-memory parsing -- no blocking I/O --
+ * so it is safe under the fsid lock.  Caller holds the lock and owns (frees)
+ * both inputs; mountinfo is consumed in place (tokenized).
+ */
+static inline void
+chimera_vfs_fsid_rebuild_locked(
+    char                              *mountinfo,
+    const struct chimera_vfs_fsid_ent *uuids,
+    int                                num_uuids)
+{
+    char *save = NULL, *line;
 
     chimera_vfs_fsid.num   = 0;   /* discard the old map (keep the allocation) */
     chimera_vfs_fsid.built = 1;
 
-    num_uuids = chimera_vfs_fsid_scan_uuids(&uuids);
-
-    f = fopen("/proc/self/mountinfo", "re");
-    if (!f) {
-        free(uuids);
+    if (!mountinfo) {
         return;
     }
 
-    while (fgets(line, sizeof(line), f)) {
+    for (line = strtok_r(mountinfo, "\n", &save); line;
+         line = strtok_r(NULL, "\n", &save)) {
         unsigned maj = 0, min = 0;
         char    *sep, *fstype, *source, *sp;
         uint64_t devkey, fsid = 0;
@@ -203,9 +240,6 @@ chimera_vfs_fsid_rebuild_locked(void)
 
         chimera_vfs_fsid_append(devkey, fsid);
     }
-
-    fclose(f);
-    free(uuids);
 } // chimera_vfs_fsid_rebuild_locked
 
 /*
@@ -219,26 +253,40 @@ chimera_vfs_fsid_for_dev(
     uint32_t maj,
     uint32_t min)
 {
-    uint64_t devkey = chimera_vfs_fsid_devkey(maj, min);
-    uint64_t fsid;
+    uint64_t                     devkey = chimera_vfs_fsid_devkey(maj, min);
+    uint64_t                     fsid;
+    struct chimera_vfs_fsid_ent *uuids;
+    int                          num_uuids;
+    char                        *mountinfo;
 
+    /* Fast path: the map is built and already knows this device. */
     pthread_mutex_lock(&chimera_vfs_fsid.lock);
-
-    if (!chimera_vfs_fsid.built) {
-        chimera_vfs_fsid_rebuild_locked();
-    }
-
-    fsid = chimera_vfs_fsid_lookup_locked(devkey);
-    if (!fsid) {
-        chimera_vfs_fsid_rebuild_locked();   /* a filesystem may have been mounted since */
+    if (chimera_vfs_fsid.built) {
         fsid = chimera_vfs_fsid_lookup_locked(devkey);
+        if (fsid) {
+            pthread_mutex_unlock(&chimera_vfs_fsid.lock);
+            return fsid;
+        }
     }
-    if (!fsid) {
-        fsid = chimera_vfs_fsid_hash(&devkey, sizeof(devkey));
-        chimera_vfs_fsid_append(devkey, fsid);   /* cache so we don't rebuild again for it */
-    }
-
     pthread_mutex_unlock(&chimera_vfs_fsid.lock);
 
+    /* Slow path -- (re)build (first use, or a device mounted since the last
+     * build).  Do the blocking I/O (the by-uuid scan and the mountinfo read)
+     * with NO lock held, so concurrent lookups aren't serialized behind file
+     * I/O; then take the lock only to parse the in-memory snapshots. */
+    num_uuids = chimera_vfs_fsid_scan_uuids(&uuids);
+    mountinfo = chimera_vfs_fsid_slurp("/proc/self/mountinfo");
+
+    pthread_mutex_lock(&chimera_vfs_fsid.lock);
+    chimera_vfs_fsid_rebuild_locked(mountinfo, uuids, num_uuids);
+    fsid = chimera_vfs_fsid_lookup_locked(devkey);
+    if (!fsid) {
+        fsid = chimera_vfs_fsid_hash(&devkey, sizeof(devkey));
+        chimera_vfs_fsid_append(devkey, fsid);   /* anon dev: stable synthesized id */
+    }
+    pthread_mutex_unlock(&chimera_vfs_fsid.lock);
+
+    free(mountinfo);
+    free(uuids);
     return fsid;
 } // chimera_vfs_fsid_for_dev

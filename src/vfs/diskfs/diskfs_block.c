@@ -732,13 +732,32 @@ diskfs_block_cache_prealloc(
         struct evpl_iovec         *big            = NULL;
         uint32_t                   slices_per_big = 0;
         uint32_t                   slot_in_big    = 0;
+        uint32_t                   n_bigs;
 
         shard->buffers  = calloc(total, sizeof(*shard->buffers));
         shard->nbuffers = total;
 
-        /* Backing GLOBAL buffers: worst case (buffer_size == BLOCK_SIZE) is one
-         * big buffer per slice; trimmed to the exact count after carving. */
-        shard->global_bufs   = calloc(total ? total : 1, sizeof(*shard->global_bufs));
+        /* Probe one GLOBAL buffer to learn the slice geometry.  Every
+         * evpl_iovec_alloc_global() returns config->buffer_size, so a single
+         * probe yields the exact number of backing buffers we need.  Sizing the
+         * array up front avoids a later realloc: realloc would relocate these
+         * iovec structs, and under EVPL_IOVEC_TRACE each carries a canary that
+         * records its owning struct's address -- moving the struct without
+         * rebinding the canary trips an owner-mismatch abort at teardown
+         * release (the GLOBAL ref pointer itself survives, so non-trace builds
+         * silently tolerate it). */
+        {
+            struct evpl_iovec probe;
+            evpl_iovec_alloc_global(evpl, &probe);
+            slices_per_big = probe.length / DISKFS_BLOCK_SIZE;
+            chimera_diskfs_abort_if(slices_per_big == 0,
+                                    "evpl buffer_size %u < DISKFS_BLOCK_SIZE %u",
+                                    probe.length, (unsigned) DISKFS_BLOCK_SIZE);
+            evpl_iovec_release(evpl, &probe);
+        }
+
+        n_bigs               = (total + slices_per_big - 1) / slices_per_big;
+        shard->global_bufs   = calloc(n_bigs ? n_bigs : 1, sizeof(*shard->global_bufs));
         shard->n_global_bufs = 0;
 
         for (j = 0; j < total; j++) {
@@ -748,10 +767,6 @@ diskfs_block_cache_prealloc(
                 /* Carve subsequent slices from a fresh whole GLOBAL buffer. */
                 big = &shard->global_bufs[shard->n_global_bufs++];
                 evpl_iovec_alloc_global(evpl, big);
-                slices_per_big = big->length / DISKFS_BLOCK_SIZE;
-                chimera_diskfs_abort_if(slices_per_big == 0,
-                                        "evpl buffer_size %u < DISKFS_BLOCK_SIZE %u",
-                                        big->length, (unsigned) DISKFS_BLOCK_SIZE);
             }
 
             /* Non-owning GLOBAL slice into the big buffer: clone_segment copies
@@ -773,18 +788,14 @@ diskfs_block_cache_prealloc(
             shard->nfree_buffers++;
         }
 
-        if (shard->n_global_bufs) {
-            shard->global_bufs = realloc(shard->global_bufs,
-                                         shard->n_global_bufs *
-                                         sizeof(*shard->global_bufs));
-        }
-
         for (j = 0; j < shard->nblocks; j++) {
             struct diskfs_block     *blk = &shard->pool[j];
             struct diskfs_block_buf *buf = diskfs_block_buf_alloc_locked(shard);
 
             blk->buf = buf;
-            blk->iov = buf->iov;
+            /* clone (not raw struct copy) so blk->iov gets its own trace canary
+             * rather than aliasing buf->iov's; the GLOBAL ref incr is a no-op. */
+            evpl_iovec_clone(&blk->iov, &buf->iov);
         }
     }
 
@@ -806,6 +817,17 @@ diskfs_block_cache_destroy(struct diskfs_shared *shared)
     for (i = 0; i < DISKFS_BLOCK_CACHE_SHARDS; i++) {
         struct diskfs_block_shard *shard = &cache->shards[i];
         uint32_t                   j;
+
+        /* Drop the per-block and per-buffer non-owning GLOBAL slice references.
+         * release_internal frees each iovec's trace canary (a no-op in non-trace
+         * builds) but its ref-release is inert for a GLOBAL ref, so the backing
+         * buffer is untouched and is still freed exactly once below. */
+        for (j = 0; j < shard->nblocks; j++) {
+            evpl_iovec_release_internal(NULL, &shard->pool[j].iov);
+        }
+        for (j = 0; j < shard->nbuffers; j++) {
+            evpl_iovec_release_internal(NULL, &shard->buffers[j].iov);
+        }
 
         /* Free the backing GLOBAL buffers once each (NULL evpl -> straight to
          * the global allocator, correct at teardown).  The per-block iovecs are
