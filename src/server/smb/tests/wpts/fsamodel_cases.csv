@@ -197,12 +197,12 @@ QueryFileInformationTestCaseS84,skip,unimplemented: info-class/op
 QueryFileInformationTestCaseS86,skip,unimplemented: info-class/op
 QueryFileSystemInformationTestCaseS0,green,
 QueryFileSystemInformationTestCaseS10,green,
-QueryFileSystemInformationTestCaseS12,skip,unimplemented: info-class/op
-QueryFileSystemInformationTestCaseS14,skip,unimplemented: info-class/op
-QueryFileSystemInformationTestCaseS16,skip,unimplemented: info-class/op
+QueryFileSystemInformationTestCaseS12,green,
+QueryFileSystemInformationTestCaseS14,green,
+QueryFileSystemInformationTestCaseS16,green,
 QueryFileSystemInformationTestCaseS18,green,
 QueryFileSystemInformationTestCaseS2,green,
-QueryFileSystemInformationTestCaseS20,skip,unimplemented: info-class/op
+QueryFileSystemInformationTestCaseS20,green,
 QueryFileSystemInformationTestCaseS22,green,
 QueryFileSystemInformationTestCaseS24,green,
 QueryFileSystemInformationTestCaseS26,green,
