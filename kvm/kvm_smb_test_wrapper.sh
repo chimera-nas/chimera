@@ -71,8 +71,14 @@ SMB_EXPECT="${SMB_EXPECT:-pass}"
 #   SMB_BRL       0 (default) mounts with nobrl, suppressing byte-range locks;
 #                 1 drops nobrl so the kernel client drives real SMB2 LOCK
 #                 requests (for the locking suites).
+#   SMB_MULTICHANNEL  0 (default) | 1.  1 advertises two server interfaces
+#                 (a second IP on the tap) and mounts multichannel,max_channels=2
+#                 so the kernel client binds a second channel.
 SMB_CACHE="${SMB_CACHE:-loose}"
 SMB_BRL="${SMB_BRL:-0}"
+SMB_MULTICHANNEL="${SMB_MULTICHANNEL:-0}"
+# Second server IP advertised for multichannel (also assigned to the tap below).
+SMB_MC_IP2="10.0.0.4"
 
 SERVER_EXTRA=""
 SHARE_EXTRA=""
@@ -92,6 +98,12 @@ for feat in ${SMB_FEATURES//,/ }; do
         *) echo "unknown SMB_FEATURES token '$feat'" >&2; exit 1 ;;
     esac
 done
+
+# Multichannel: advertise two NICs (1 Gbit each; the speed is parsed through an
+# int in the daemon, so keep it under 2^31) so the client opens a 2nd channel.
+if [ "$SMB_MULTICHANNEL" = "1" ]; then
+    SERVER_EXTRA="${SERVER_EXTRA}\"smb_multichannel\": [ {\"address\":\"10.0.0.1\",\"speed\":1000000000,\"rdma\":false}, {\"address\":\"${SMB_MC_IP2}\",\"speed\":1000000000,\"rdma\":false} ],"
+fi
 
 # Boot with no initrd: every kernel in the KVM image matrix builds the virtio
 # block/net drivers in, so the kernel mounts the virtio root disk directly.
@@ -231,6 +243,8 @@ ip netns exec "${NETNS_NAME}" ip link set lo up
 # Create TAP device inside the netns
 ip netns exec "${NETNS_NAME}" ip tuntap add dev "${TAP_NAME}" mode tap
 ip netns exec "${NETNS_NAME}" ip addr add 10.0.0.1/24 dev "${TAP_NAME}"
+# Second server address for multichannel (advertised via smb_multichannel).
+[ "$SMB_MULTICHANNEL" = "1" ] && ip netns exec "${NETNS_NAME}" ip addr add "${SMB_MC_IP2}/24" dev "${TAP_NAME}"
 ip netns exec "${NETNS_NAME}" ip link set "${TAP_NAME}" up
 
 # Optionally start tcpdump to capture traffic (set KVM_PCAP_FILE to enable)
@@ -282,6 +296,7 @@ case "$SECMODE" in
     seal) SMB_MOUNT_OPTS="${SMB_MOUNT_OPTS},seal" ;;
     sign) SMB_MOUNT_OPTS="${SMB_MOUNT_OPTS},sign" ;;
 esac
+[ "$SMB_MULTICHANNEL" = "1" ] && SMB_MOUNT_OPTS="${SMB_MOUNT_OPTS},multichannel,max_channels=2"
 
 # Build the test command to run inside the VM.  Normally we mount and then run
 # the supplied command; for SMB_EXPECT=denied we instead assert that the mount
