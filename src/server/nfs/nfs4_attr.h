@@ -1337,9 +1337,23 @@ chimera_nfs4_set_changeinfo(
     struct chimera_vfs_attrs *dir_pre_attr,
     struct chimera_vfs_attrs *dir_post_attr)
 {
-    cinfo->atomic = (dir_pre_attr->va_set_mask & CHIMERA_VFS_ATTR_ATOMIC) &&
-        (dir_post_attr->va_set_mask & CHIMERA_VFS_ATTR_ATOMIC);
-    cinfo->before = dir_pre_attr->va_mtime.tv_sec * 1000000000 + dir_pre_attr->va_mtime.tv_nsec;
-    cinfo->after  = dir_post_attr->va_mtime.tv_sec * 1000000000 + dir_post_attr->va_mtime.tv_nsec;
-
+    /* before/after are the directory's change attribute (here, its mtime)
+     * pre and post the operation.  They are only meaningful if the backend
+     * actually filled mtime in both snapshots: not every backend populates the
+     * rename/link pre/post directory attrs, and reading va_mtime when the
+     * attr was never set reads uninitialized memory -- which a self-rename
+     * (RFC 7530 §10.4.5: must be a no-op) then reports as a spurious change,
+     * failing pynfs RNM18/19/20.  Without both mtimes, report a non-atomic,
+     * no-change cinfo (before == after) rather than fabricating a delta. */
+    if ((dir_pre_attr->va_set_mask & CHIMERA_VFS_ATTR_MTIME) &&
+        (dir_post_attr->va_set_mask & CHIMERA_VFS_ATTR_MTIME)) {
+        cinfo->atomic = (dir_pre_attr->va_set_mask & CHIMERA_VFS_ATTR_ATOMIC) &&
+            (dir_post_attr->va_set_mask & CHIMERA_VFS_ATTR_ATOMIC);
+        cinfo->before = dir_pre_attr->va_mtime.tv_sec * 1000000000 + dir_pre_attr->va_mtime.tv_nsec;
+        cinfo->after  = dir_post_attr->va_mtime.tv_sec * 1000000000 + dir_post_attr->va_mtime.tv_nsec;
+    } else {
+        cinfo->atomic = 0;
+        cinfo->before = 0;
+        cinfo->after  = 0;
+    }
 } /* chimera_nfs4_set_changeinfo */
