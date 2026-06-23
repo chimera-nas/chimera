@@ -1892,6 +1892,7 @@ space_map_condense_prepare(
     uint32_t          ag_index,
     void             *buf,
     uint64_t         *r_slot_offset,
+    uint32_t         *r_log_device_id,
     uint64_t         *r_payload,
     uint64_t          ckpt_seq)
 {
@@ -1906,7 +1907,10 @@ space_map_condense_prepare(
 
     *r_slot_offset = ag->log_offset +
         (uint64_t) (1 - ag->log_slot) * SM_AG_LOG_SLOT_SIZE;
-    *r_payload = payload;
+    /* The slot lives on the AG's log device, which for a relocated remote AG is
+     * device 0, NOT the AG's (queueless) remote data device. */
+    *r_log_device_id = ag->log_device_id;
+    *r_payload       = payload;
     pthread_mutex_unlock(&ag->lock);
     return 0;
 } /* space_map_condense_prepare */

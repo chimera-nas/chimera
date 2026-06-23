@@ -610,7 +610,7 @@ diskfs_condense_body_done(
                             "AG-log condense body write failed: %d", status);
 
     memcpy(c->hdr.data, c->scratch, DISKFS_BLOCK_SIZE);
-    evpl_block_write(evpl, w->ctx->queue[c->device_id], &c->hdr, 1,
+    evpl_block_write(evpl, w->ctx->queue[c->log_device_id], &c->hdr, 1,
                      c->slot_off, 1 /* FUA */, diskfs_condense_finish, c);
 } /* diskfs_condense_body_done */
 
@@ -636,7 +636,8 @@ diskfs_condense_try(struct diskfs_condense *c)
 
     space_map_condense_prepare(shared->space_map, c->device_id,
                                c->ag_index, c->scratch,
-                               &c->slot_off, &payload, c->ckpt_seq);
+                               &c->slot_off, &c->log_device_id, &payload,
+                               c->ckpt_seq);
 
     aligned = (payload + DISKFS_BLOCK_SIZE - 1) & ~((uint64_t) DISKFS_BLOCK_SIZE - 1);
     memset(c->scratch + payload, 0, aligned - payload);
@@ -649,7 +650,7 @@ diskfs_condense_try(struct diskfs_condense *c)
     if (c->body_len) {
         evpl_iovec_alloc(evpl, c->body_len, DISKFS_BLOCK_SIZE, 1, 0, &c->body);
         memcpy(c->body.data, c->scratch + DISKFS_BLOCK_SIZE, c->body_len);
-        evpl_block_write(evpl, w->ctx->queue[c->device_id], &c->body, 1,
+        evpl_block_write(evpl, w->ctx->queue[c->log_device_id], &c->body, 1,
                          c->slot_off + DISKFS_BLOCK_SIZE, 1 /* FUA */,
                          diskfs_condense_body_done, c);
     } else {
