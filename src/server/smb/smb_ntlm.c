@@ -793,7 +793,7 @@ validate_authenticate(
     memcpy(&lm_response_len, buf + 12, 2);
     memcpy(&lm_response_offset, buf + 16, 4);
 
-    if (lm_response_offset + lm_response_len > buf_len) {
+    if ((size_t) lm_response_offset + lm_response_len > buf_len) {
         smb_ntlm_error("NTLM: Invalid LM response field");
         goto cleanup;
     }
@@ -803,7 +803,7 @@ validate_authenticate(
     memcpy(&nt_response_len, buf + 20, 2);
     memcpy(&nt_response_offset, buf + 24, 4);
 
-    if (nt_response_offset + nt_response_len > buf_len) {
+    if ((size_t) nt_response_offset + nt_response_len > buf_len) {
         smb_ntlm_error("NTLM: Invalid NT response field");
         goto cleanup;
     }
