@@ -697,8 +697,9 @@ chimera_smb_oplock_break_reply(
         evpl_iovec_cursor_append_uint16(reply_cursor,
                                         SMB2_OPLOCK_BREAK_ACK_LEASE_SIZE);
         evpl_iovec_cursor_append_uint16(reply_cursor, 0);  /* Reserved */
-        evpl_iovec_cursor_append_uint32(reply_cursor,
-                                        request->oplock_break.lease_flags);
+        /* Flags is Reserved in the lease break-ack response (MS-SMB2 2.2.25.2):
+         * the server MUST set it to zero, not echo the client's LeaseFlags. */
+        evpl_iovec_cursor_append_uint32(reply_cursor, 0);
         /* LeaseKey (16) */
         evpl_iovec_cursor_append_blob(reply_cursor,
                                       request->oplock_break.lease_key, 16);
