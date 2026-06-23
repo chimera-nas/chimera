@@ -91,7 +91,15 @@ SIG_HEX=$(printf '%s' "$SIG_MAGIC" | od -An -v -tx1 | tr -d ' \n')
 dump_mds_state() {
     local reason="$1" t tid comm state wchan
     [ -n "$MDS_PID" ] || return 0
-    kill -0 "$MDS_PID" 2>/dev/null || { echo "=== MDS (pid ${MDS_PID:-?}) not running; no state to dump (${reason}) ==="; return 0; }
+    # If the MDS already exited, its thread state is gone -- but its log still
+    # holds the exit reason (assertion/abort, or a clean exit), so dump that.
+    kill -0 "$MDS_PID" 2>/dev/null || {
+        echo "=== MDS (pid ${MDS_PID:-?}) already exited; dumping its log for post-mortem (${reason}) ==="
+        echo "=== MDS log (full) ==="
+        cat "$MDS_LOG" 2>/dev/null
+        echo "=== end MDS log ==="
+        return 0
+    }
 
     echo "=== MDS STATE DUMP (${reason}) pid=$MDS_PID ==="
     echo "--- per-thread comm / state / wchan (from /proc) ---"
@@ -176,6 +184,7 @@ generate_mds_config() {
                     "initialize": true,
                     "unsafe_async": true,
                     "block_layout": true,
+                    "intent_log_size": 67108864,
                     "devices": [
                         { "type": "${device_type}", "size": 4294967296, "path": "${meta}" },
                         { "role": "remote", "size": ${DATA_SIZE}, "deviceid": "${DEVICEID}",
