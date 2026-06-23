@@ -4582,11 +4582,19 @@ memfs_readlink(
         return;
     }
 
-    request->readlink.r_target_length = inode->symlink.target->length;
+    /* Clamp to the caller-supplied buffer; a stored target longer than the
+     * provided buffer must not overrun it. */
+    uint32_t copy_len = inode->symlink.target->length;
+
+    if (copy_len > request->readlink.target_maxlength) {
+        copy_len = request->readlink.target_maxlength;
+    }
+
+    request->readlink.r_target_length = copy_len;
 
     memcpy(request->readlink.r_target,
            inode->symlink.target->data,
-           inode->symlink.target->length);
+           copy_len);
 
     memfs_map_attrs(shared, &request->readlink.r_attr, inode, request->fh);
 
