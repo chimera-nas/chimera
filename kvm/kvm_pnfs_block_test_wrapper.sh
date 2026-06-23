@@ -65,6 +65,14 @@ MDS_LOG="${SESSION_DIR}/mds.log"
 DATA_IMG="${SESSION_DIR}/data.img"
 MDS_PID=""
 
+# Stall watchdog: ctest hard-kills this test at its 300s global timeout with no
+# chance to inspect the server, so a hang only ever captured CLIENT stacks.  We
+# fire our own dump at WATCHDOG_SECS (< 300) to record the MDS thread state +
+# log in the test output before ctest's SIGKILL.  Override via env if the global
+# ctest timeout changes.
+WATCHDOG_SECS="${CHIMERA_PNFS_WATCHDOG_SECS:-240}"
+WATCHDOG_PID=""
+
 MDS_IP="10.0.0.1"
 MDS_PORT=2049
 
@@ -76,7 +84,51 @@ SIG_OFFSET=0
 SIG_MAGIC="CHIMERAPNFSBLK01"
 SIG_HEX=$(printf '%s' "$SIG_MAGIC" | od -An -v -tx1 | tr -d ' \n')
 
+# Dump the chimera MDS daemon's state for a hang post-mortem: per-thread kernel
+# wait-channel/run-state (always available, from /proc) plus best-effort
+# userspace backtraces of every thread, then the full MDS log.  Goes to our
+# stdout, which ctest captures into the test output.
+dump_mds_state() {
+    local reason="$1" t tid comm state wchan
+    [ -n "$MDS_PID" ] || return 0
+    kill -0 "$MDS_PID" 2>/dev/null || { echo "=== MDS (pid ${MDS_PID:-?}) not running; no state to dump (${reason}) ==="; return 0; }
+
+    echo "=== MDS STATE DUMP (${reason}) pid=$MDS_PID ==="
+    echo "--- per-thread comm / state / wchan (from /proc) ---"
+    for t in /proc/"$MDS_PID"/task/*; do
+        [ -d "$t" ] || continue
+        tid=$(basename "$t")
+        comm=$(cat "$t/comm" 2>/dev/null)
+        state=$(awk '{print $3}' "$t/stat" 2>/dev/null)
+        wchan=$(cat "$t/wchan" 2>/dev/null)
+        echo "  tid=$tid comm=${comm:-?} state=${state:-?} wchan=${wchan:-?}"
+    done
+
+    echo "--- userspace backtraces, all threads (best effort) ---"
+    if command -v eu-stack >/dev/null 2>&1; then
+        eu-stack -p "$MDS_PID" 2>&1
+    elif command -v gstack >/dev/null 2>&1; then
+        gstack "$MDS_PID" 2>&1
+    elif command -v gdb >/dev/null 2>&1; then
+        gdb -batch -p "$MDS_PID" -ex 'thread apply all bt' 2>&1
+    else
+        echo "  (no eu-stack/gstack/gdb; /proc wchan above is the only thread state)"
+    fi
+
+    echo "=== MDS log (full) ==="
+    cat "$MDS_LOG" 2>/dev/null
+    echo "=== end MDS STATE DUMP ==="
+}
+
 cleanup() {
+    # Re-entrancy guard: we trap EXIT *and* INT/TERM, so a signal-driven cleanup
+    # would otherwise run again on the subsequent shell exit.
+    [ -n "${CLEANED_UP:-}" ] && return 0
+    CLEANED_UP=1
+    if [ -n "$WATCHDOG_PID" ]; then
+        kill "$WATCHDOG_PID" 2>/dev/null || true
+        wait "$WATCHDOG_PID" 2>/dev/null || true
+    fi
     if [ -n "$MDS_PID" ]; then
         kill "$MDS_PID" 2>/dev/null || true
         for i in $(seq 1 150); do
@@ -98,7 +150,9 @@ cleanup() {
     rm -f "$LOG_FILE"
     rm -rf "$SESSION_DIR"
 }
-trap cleanup EXIT
+# Trap TERM/INT as well as EXIT so a ctest-issued SIGTERM still tears down the
+# netns, the MDS, and the watchdog instead of orphaning them.
+trap cleanup EXIT INT TERM
 
 # The block-mode metadata server: a local metadata device (device 0) plus the
 # remote data device (device 1) described purely by config.
@@ -172,7 +226,15 @@ generate_mds_config
 ip netns exec "${NETNS_NAME}" "$CHIMERA_BINARY" -c "$MDS_CONFIG" > "$MDS_LOG" 2>&1 &
 MDS_PID=$!
 wait_for_port "$MDS_IP" "$MDS_PORT" "$MDS_PID" || exit 1
-echo "=== pNFS block metadata server up on ${MDS_IP}:${MDS_PORT} ==="
+echo "=== pNFS block metadata server up on ${MDS_IP}:${MDS_PORT} (pid $MDS_PID) ==="
+
+# Arm the stall watchdog now that the MDS PID is known.  If the workload hangs,
+# this fires before ctest's 300s kill and captures the MDS thread state + log.
+# A normal (fast) test reaches cleanup() in seconds and kills it unused.
+( sleep "$WATCHDOG_SECS"
+  echo "=== WATCHDOG: test still running after ${WATCHDOG_SECS}s; dumping MDS state ==="
+  dump_mds_state "watchdog ${WATCHDOG_SECS}s" ) &
+WATCHDOG_PID=$!
 
 # Boot the VM: rootfs as vda (virtio-blk), the signed data volume as /dev/sda
 # (virtio-SCSI, so blkmapd can SG_IO-identify it).  The test command

@@ -1858,6 +1858,86 @@ diskfs_iq_cq_poll(
 } /* diskfs_iq_cq_poll */
 
 
+/*
+ * IL pipeline stall watchdog.  Runs on the commit thread on a ~1s timer.  The
+ * commit thread produces durable_wm; the apply thread produces applied_wm.  If
+ * there is outstanding pipeline work (txns submitted-but-not-durable, durable-
+ * but-not-applied, records still queued to apply, or the in-order retire ring
+ * not drained) and none of those frontiers have advanced for
+ * DISKFS_IL_WD_STALL_TICKS ticks, dump the full pipeline state so a CI hang
+ * shows which stage froze (classically: the apply thread wedged, leaving
+ * applied_wm stuck below durable_wm).  Read-only on the pipeline.
+ */
+static void
+diskfs_il_watchdog_cb(
+    struct evpl       *evpl,
+    struct evpl_timer *timer)
+{
+    struct diskfs_intent_log *il = container_of(timer,
+                                                struct diskfs_intent_log,
+                                                wd_timer);
+    uint64_t                  durable_wm  = __atomic_load_n(&il->durable_wm, __ATOMIC_ACQUIRE);
+    uint64_t                  applied_wm  = __atomic_load_n(&il->applied_wm, __ATOMIC_ACQUIRE);
+    uint64_t                  gsq_tail    = __atomic_load_n(&il->gsq_tail, __ATOMIC_ACQUIRE);
+    uint32_t                  apply_head  = __atomic_load_n(&il->apply_head, __ATOMIC_ACQUIRE);
+    uint32_t                  apply_tail  = __atomic_load_n(&il->apply_tail, __ATOMIC_ACQUIRE);
+    uint64_t                  retire_head = il->retire_head;   /* commit-thread private (we are it) */
+    uint64_t                  retire_tail = il->retire_tail;
+    int                       apply_stalled, commit_stalled;
+    const char               *stage;
+
+    (void) evpl;
+
+    /* Per-stage stall detection, evaluated independently so forward progress in
+     * one stage cannot mask a freeze in another.  The apply check is the load-
+     * bearing one: the apply thread is a *different* thread, so a wedge there is
+     * visible from this (live) commit-thread timer even while the commit thread
+     * keeps advancing durable_wm -- apply_head frozen with records still queued
+     * (apply_head != apply_tail) is exactly the LAYOUTCOMMIT apply-pipeline
+     * hang.  The commit check catches the commit thread failing to drain its
+     * claimed slots / retire ring (only observable while it is still looping). */
+    apply_stalled = (apply_head != apply_tail) &&
+        (apply_head == il->wd_last_apply_head);
+
+    commit_stalled = ((gsq_tail != durable_wm) || (retire_head != retire_tail)) &&
+        (durable_wm == il->wd_last_durable_wm) &&
+        (retire_head == il->wd_last_retire_head);
+
+    il->wd_last_durable_wm  = durable_wm;
+    il->wd_last_applied_wm  = applied_wm;
+    il->wd_last_apply_head  = apply_head;
+    il->wd_last_retire_head = retire_head;
+
+    if (!apply_stalled && !commit_stalled) {
+        il->wd_stall_ticks = 0;
+        return;
+    }
+
+    il->wd_stall_ticks++;
+
+    if (il->wd_stall_ticks == DISKFS_IL_WD_STALL_TICKS ||
+        (il->wd_stall_ticks > DISKFS_IL_WD_STALL_TICKS &&
+         (il->wd_stall_ticks % DISKFS_IL_WD_RELOG_TICKS) == 0)) {
+        stage = (apply_stalled && commit_stalled) ? "apply+commit" :
+            apply_stalled ? "apply" : "commit";
+        chimera_diskfs_error(
+            "IL pipeline STALLED ~%us [%s]: gsq_tail=%lu durable_wm=%lu applied_wm=%lu "
+            "(submitted-not-durable=%lu durable-not-applied=%lu) "
+            "retire[head=%lu tail=%lu] apply_ring[head=%u tail=%u] "
+            "redo_inflight=%d push_outstanding=%d live_records=%lu log[head=%lu tail=%lu]",
+            il->wd_stall_ticks, stage,
+            (unsigned long) gsq_tail, (unsigned long) durable_wm, (unsigned long) applied_wm,
+            (unsigned long) (gsq_tail - durable_wm), (unsigned long) (durable_wm - applied_wm),
+            (unsigned long) retire_head, (unsigned long) retire_tail,
+            apply_head, apply_tail,
+            il->redo_inflight, il->push_outstanding,
+            (unsigned long) il->live_records,
+            (unsigned long) __atomic_load_n(&il->log_head, __ATOMIC_ACQUIRE),
+            (unsigned long) __atomic_load_n(&il->log_tail, __ATOMIC_ACQUIRE));
+    }
+} /* diskfs_il_watchdog_cb */
+
+
 void *
 diskfs_intent_log_thread_init(
     struct evpl *evpl,
@@ -1940,6 +2020,16 @@ diskfs_intent_log_thread_init(
     il->sq_poll = evpl_add_poll(evpl, diskfs_il_poll_enter, diskfs_il_poll_exit,
                                 diskfs_il_sq_poll, il);
 
+    /* Stall watchdog: ~1s timer that dumps the pipeline frontiers if they stop
+     * advancing while work is outstanding (diagnostic for the pNFS LAYOUTCOMMIT
+     * apply-pipeline hang).  See diskfs_il_watchdog_cb. */
+    il->wd_last_durable_wm  = 0;
+    il->wd_last_applied_wm  = 0;
+    il->wd_last_retire_head = 0;
+    il->wd_last_apply_head  = 0;
+    il->wd_stall_ticks      = 0;
+    evpl_add_timer(evpl, &il->wd_timer, diskfs_il_watchdog_cb, DISKFS_IL_WD_INTERVAL_US);
+
     __atomic_store_n(&il->ready, 1, __ATOMIC_RELEASE);
     return il;
 } /* diskfs_intent_log_thread_init */
@@ -1960,6 +2050,7 @@ diskfs_intent_log_thread_shutdown(
         evpl_continue(evpl);
     }
 
+    evpl_remove_timer(evpl, &il->wd_timer);
     evpl_remove_poll(evpl, il->sq_poll);
     evpl_remove_doorbell(evpl, &il->wake_doorbell);
     if (il->log_queue) {

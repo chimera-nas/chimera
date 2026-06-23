@@ -1162,6 +1162,9 @@ chimera_nfs4_layoutcommit_setattr_complete(
     (void) pre_attr;
     (void) set_attr;
 
+    chimera_nfs_info("LAYOUTCOMMIT req=%p setattr complete err=%d -> reply",
+                     req, error_code);
+
     if (req->handle) {
         chimera_vfs_release(req->thread->vfs_thread, req->handle);
         req->handle = NULL;
@@ -1203,6 +1206,8 @@ chimera_nfs4_layoutcommit_open_callback(
 
     /* No new high-water byte reported: nothing to sync to the MDS. */
     if (!args->loca_last_write_offset.no_newoffset) {
+        chimera_nfs_info("LAYOUTCOMMIT req=%p open ok, no new offset (no MDS size sync) -> reply",
+                         req);
         chimera_vfs_release(req->thread->vfs_thread, req->handle);
         req->handle                                  = NULL;
         res->locr_resok4.locr_newsize.ns_sizechanged = 0;
@@ -1225,6 +1230,9 @@ chimera_nfs4_layoutcommit_open_callback(
         set_attr->va_mtime.tv_nsec = args->loca_time_modify.nt_time.nseconds;
     }
 
+    chimera_nfs_info("LAYOUTCOMMIT req=%p open ok -> setattr size=%llu mtime_chg=%d",
+                     req, (unsigned long long) set_attr->va_size,
+                     args->loca_time_modify.nt_timechanged);
     chimera_vfs_setattr(req->thread->vfs_thread, &req->cred, handle,
                         set_attr, 0, CHIMERA_VFS_ATTR_SIZE,
                         chimera_nfs4_layoutcommit_setattr_complete, req);
@@ -1256,6 +1264,8 @@ chimera_nfs4_layoutcommit(
     /* Open the MDS file to apply the client-reported size/mtime.  Data lives
      * on the DS; with COMMIT_THRU_MDS the client reports the new high-water
      * mark here so MDS metadata catches up. */
+    chimera_nfs_info("LAYOUTCOMMIT enter req=%p fhlen=%u -> opening MDS file",
+                     req, req->fhlen);
     chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
                         req->fh, req->fhlen,
                         CHIMERA_VFS_OPEN_INFERRED,
