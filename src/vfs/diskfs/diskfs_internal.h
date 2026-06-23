@@ -1892,6 +1892,11 @@ struct diskfs_condense {
     struct diskfs_reclaim_worker *worker;
     uint32_t                      device_id;
     uint32_t                      ag_index;
+    /* Device the AG-log slot actually lives on: the AG's own device for a LOCAL
+     * AG, but device 0 (SM_INTENT_LOG_DEVICE) for a relocated REMOTE-device AG.
+     * The slot writes MUST target this, not device_id -- a block-layout remote
+     * data device has no open block queue (queue[device_id] is NULL). */
+    uint32_t                      log_device_id;
     struct evpl_iovec             hdr;       /* slot block 0 */
     struct evpl_iovec             body;      /* remaining payload blocks */
     uint64_t                      slot_off;

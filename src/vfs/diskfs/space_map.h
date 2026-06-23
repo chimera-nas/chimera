@@ -701,6 +701,7 @@ space_map_condense_prepare(
     uint32_t          ag_index,
     void             *buf,
     uint64_t         *r_slot_offset,
+    uint32_t         *r_log_device_id,
     uint64_t         *r_payload,
     uint64_t          ckpt_seq);
 
