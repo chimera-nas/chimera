@@ -92,6 +92,12 @@ struct nfs_request {
     int                               fhlen;
     uint8_t                           saved_fh[NFS4_FHSIZE];
     int                               saved_fhlen;
+    /* Scratch for an NFSv3 RENAME's clobbered-target FH, resolved before the
+     * rename so the VFS recalls a delegation/lease on it (#1071).  Held here
+     * (not on the stack) because rename_at stores target_fh as a bare pointer
+     * that must outlive the async call. */
+    uint8_t                           rename_target_fh[NFS4_FHSIZE];
+    int                               rename_target_fhlen;
     /* Export the current/saved file handle belongs to, recovered from the
      * wire handle on receive (and inherited by child handles minted in the
      * reply).  Drives per-request squash attribution and is re-stamped into
@@ -174,6 +180,7 @@ struct nfs_request {
         struct COMMIT3args      *args_commit;
         struct RMDIR3args       *args_rmdir;
         struct REMOVE3args      *args_remove;
+        struct RENAME3args      *args_rename;
         struct MKDIR3args       *args_mkdir;
         struct SYMLINK3args     *args_symlink;
         struct SETATTR3args     *args_setattr;
