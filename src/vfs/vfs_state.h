@@ -166,6 +166,10 @@ void
 chimera_vfs_state_set_delete_pending(
     struct chimera_vfs_file_state *file);
 
+void
+chimera_vfs_state_clear_delete_pending(
+    struct chimera_vfs_file_state *file);
+
 bool
 chimera_vfs_state_is_delete_pending(
     struct chimera_vfs_file_state *file);
@@ -292,11 +296,18 @@ chimera_vfs_caching_grant_link(
 /* Cap a fresh lease's requested mode to the largest subset grantable WITHOUT
  * breaking another owner (MS-SMB2 3.3.5.9: granting a lease never recalls
  * another lease).  Steps the candidate mode down W then H toward the R floor
- * until it would be granted.  Caller must NOT hold file->lock. */
+ * until it would be granted.  Caller must NOT hold file->lock.
+ *
+ * When `strict` is false a residual read/handle conflict at the R floor returns
+ * R anyway (the caller's try_insert then resolves it).  When `strict` is true a
+ * mode that still conflicts at the R floor returns 0 -- i.e. grant ONLY a subset
+ * that needs no break at all.  Used for an "oplock-transparent" stat-open, which
+ * must never break a holder: it gets its full oplock when sole, NONE otherwise. */
 uint8_t
 chimera_vfs_caching_grant_cap_mode(
     struct chimera_vfs_file_state  *file,
-    const struct chimera_vfs_lease *lease);
+    const struct chimera_vfs_lease *lease,
+    bool                            strict);
 
 /* True if `client_key` already holds an SMB2 RqLs handle-caching (H) lease on
 * `file`.  Used by the SMB create path to deny a legacy oplock request (-> NONE)
@@ -612,6 +623,13 @@ chimera_vfs_state_dir_lease_break(
  *   - batch (H) holders break before the share-mode check (handle caching, the
  *     holder may close): trigger = H;
  *   - exclusive (W) holders break only once the open is granted: trigger = W|H.
+ *
+ * `break_leases`: by default an H-trigger break spares SMB2 RqLs leases (a lease
+ * keeps its handle cache on a *compatible* open -- only its write cache is
+ * exclusive).  Set break_leases=1 to also handle-break leases; the caller uses
+ * this on a genuine SHARE conflict, where a handle-caching lease holder must be
+ * told to relinquish its handle cache (RWH->RW) even though the conflicting open
+ * is still refused (MS-SMB2 / smb2.lease.break_twice).
  */
 void
 chimera_vfs_state_break_caching_for_open(
@@ -621,7 +639,8 @@ chimera_vfs_state_break_caching_for_open(
     uint64_t                              fh_hash,
     const struct chimera_vfs_lease_owner *opener,
     uint8_t                               trigger_bits,
-    uint8_t                               retain_mode);
+    uint8_t                               retain_mode,
+    int                                   break_leases);
 
 /* Break-on-namespace-change: an unlink / delete-on-close / rename of an OPEN
  * file recalls every OTHER holder's HANDLE cache down to retain_mode (R), strips

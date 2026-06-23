@@ -264,12 +264,21 @@ chimera_smb_parse_read(
     uint8_t  padding;
     int      i;
 
+    /* MS-SMB2 3.3.5.12 / 2.2.19: a READ StructureSize that is not exactly 49 is
+     * a per-request STATUS_INVALID_PARAMETER -- the truncation check below
+     * catches a too-short body but not a wrong-yet-large-enough StructureSize. */
+    if (unlikely(request->request_struct_size != SMB2_READ_REQUEST_SIZE)) {
+        chimera_smb_error("Received SMB2 READ request with invalid struct size (%u expected %u)",
+                          request->request_struct_size, SMB2_READ_REQUEST_SIZE);
+        return chimera_smb_parse_reject(request, SMB2_STATUS_INVALID_PARAMETER);
+    }
+
     /* MS-SMB2 §2.2.19: StructureSize(2, already consumed) is followed by
      * Padding(1) then Flags(1).  Read both explicitly — the Length uint32 read
      * below realigns to a 4-byte boundary, so a single byte read here would
      * capture Padding and silently skip the Flags field (which carries
      * SMB2_READFLAG_REQUEST_COMPRESSED). */
-    int      prc = 0;
+    int prc = 0;
 
     prc |= evpl_iovec_cursor_try_get_uint8(request_cursor, &padding);
     prc |= evpl_iovec_cursor_try_get_uint8(request_cursor, &request->read.flags);

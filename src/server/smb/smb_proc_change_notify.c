@@ -30,6 +30,14 @@ chimera_smb_parse_change_notify(
 
     int prc = 0;
 
+    /* MS-SMB2 3.3.5.19 / 2.2.35: a CHANGE_NOTIFY StructureSize that is not
+     * exactly 32 is a per-request STATUS_INVALID_PARAMETER. */
+    if (unlikely(request->request_struct_size != SMB2_CHANGE_NOTIFY_REQUEST_SIZE)) {
+        chimera_smb_error("Received SMB2 CHANGE_NOTIFY request with invalid struct size (%u expected %u)",
+                          request->request_struct_size, SMB2_CHANGE_NOTIFY_REQUEST_SIZE);
+        return chimera_smb_parse_reject(request, SMB2_STATUS_INVALID_PARAMETER);
+    }
+
     prc |= evpl_iovec_cursor_try_get_uint16(request_cursor, &flags);
     prc |= evpl_iovec_cursor_try_get_uint32(request_cursor, &output_buffer_length);
     prc |= evpl_iovec_cursor_try_get_uint64(request_cursor, &file_id_pid);

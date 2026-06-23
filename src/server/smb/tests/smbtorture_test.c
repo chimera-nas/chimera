@@ -430,12 +430,21 @@ main(
      * suite still runs with the feature off on the same backend.  Also match
      * individual smb2.streams.* subtests so the per-subtest harvest variant
      * (run one stream subtest in its own server process) gets the same
-     * capability the combined smb2.streams suite needs. */
+     * capability the combined smb2.streams suite needs.
+     *
+     * A handful of oplock/lease subtests open named streams (a real Windows
+     * server always exposes the ADS namespace), so they need the same
+     * capability: smb2.oplock.stream1 / smb2.oplock.batch26 take oplocks on a
+     * stream, and smb2.lease.request leases a stream.  Without it the stream
+     * create is refused OBJECT_NAME_INVALID by the named-streams-off gate. */
     for (i = 0; i < num_tests; i++) {
         if (strcmp(tests[i], "smb2.streams") == 0 ||
             strncmp(tests[i], "smb2.streams.", 13) == 0 ||
             strcmp(tests[i], "smb2.ioctl-on-stream") == 0 ||
-            strcmp(tests[i], "smb2.sdread") == 0) {
+            strcmp(tests[i], "smb2.sdread") == 0 ||
+            strcmp(tests[i], "smb2.oplock.stream1") == 0 ||
+            strcmp(tests[i], "smb2.oplock.batch26") == 0 ||
+            strcmp(tests[i], "smb2.lease.request") == 0) {
             chimera_server_config_set_smb_named_streams(config, 1);
             break;
         }

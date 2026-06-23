@@ -32,6 +32,18 @@ chimera_smb_cancel(struct chimera_smb_request *request)
     uint64_t                           target_id;
     int                                async;
 
+    /* MS-SMB2 3.3.5.2.2 / 2.2.30: a CANCEL StructureSize that is not exactly 4
+     * is invalid and the request is failed before command processing.  CANCEL
+     * has no response (3.3.5.17), so "fail" here means drop it without
+     * processing -- completing it as PENDING suppresses any reply, the same as
+     * the normal CANCEL completion below. */
+    if (unlikely(request->request_struct_size != SMB2_CANCEL_REQUEST_SIZE)) {
+        chimera_smb_error("Received SMB2 CANCEL with invalid struct size (%u expected %u)",
+                          request->request_struct_size, SMB2_CANCEL_REQUEST_SIZE);
+        chimera_smb_complete_request(request, SMB2_STATUS_PENDING);
+        return;
+    }
+
     /* A CANCEL targets an async_id when SMB2_FLAGS_ASYNC_COMMAND is set
      * (the client received our interim STATUS_PENDING and learned the
      * AsyncId), otherwise it targets a MessageId.  See MS-SMB2 3.2.4.24. */

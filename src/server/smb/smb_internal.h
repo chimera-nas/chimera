@@ -2764,13 +2764,19 @@ chimera_smb_channel_sequence_stale(
 
 /*
  * Resolve the open_file that owns the caching lease registered under `lease_key`
- * (an SMB2 RqLs lease).  Unlike file_id, lease keys are not hashed, so this scans
- * the tree's open_files buckets -- a lease-break ack is rare relative to I/O, so
- * the linear scan is acceptable; a dedicated lease-key index is a later
- * optimization.  Multiple opens may share one lease key (coalesced), but only the
- * one that inserted the lease carries caching_lease_inserted, so match on that.
- * On success the returned open_file has had its refcnt bumped (release with
- * chimera_smb_open_file_release).
+ * (an SMB2 RqLs lease).  A lease is a per-client (ClientGuid) identity in the
+ * client's lease table (MS-SMB2 3.3.1.x / 3.3.5.22.1): the same lease key may be
+ * used by opens under any tree-connect of the session, and the break ack may
+ * arrive on a different tree than the one the lease-bearing open lives on (e.g.
+ * a multichannel client, or one that reached the file via a different share).
+ * So the lookup must span every tree of the session, not just request->tree --
+ * mirroring chimera_smb_session_lease_key_conflict below.  Unlike file_id, lease
+ * keys are not hashed, so this scans the open_files buckets -- a lease-break ack
+ * is rare relative to I/O, so the linear scan is acceptable; a dedicated
+ * lease-key index is a later optimization.  Multiple opens may share one lease
+ * key (coalesced), but only the one that inserted the lease carries
+ * caching_lease_inserted, so match on that.  On success the returned open_file
+ * has had its refcnt bumped (release with chimera_smb_open_file_release).
  */
 static inline struct chimera_smb_open_file *
 chimera_smb_open_file_resolve_by_lease_key(
@@ -2778,26 +2784,37 @@ chimera_smb_open_file_resolve_by_lease_key(
     const uint8_t              *lease_key)
 {
     struct chimera_smb_open_file *open_file, *tmp, *found = NULL;
-    struct chimera_smb_tree      *tree = request->tree;
-    int                           b;
+    struct chimera_smb_session   *session;
+    int                           t, b;
 
-    chimera_smb_abort_if(!tree, "tree is NULL");
+    chimera_smb_abort_if(!request->session_handle, "session_handle is NULL");
+    session = request->session_handle->session;
+    chimera_smb_abort_if(!session, "session is NULL");
 
-    for (b = 0; b < CHIMERA_SMB_OPEN_FILE_BUCKETS && !found; b++) {
-        pthread_mutex_lock(&tree->open_files_lock[b]);
-        HASH_ITER(hh, tree->open_files[b], open_file, tmp)
-        {
-            if (!(open_file->flags & CHIMERA_SMB_OPEN_FILE_CLOSED) &&
-                open_file->caching_lease_inserted &&
-                open_file->oplock_level == SMB2_OPLOCK_LEVEL_LEASE &&
-                memcmp(open_file->lease_key, lease_key, 16) == 0) {
-                open_file->refcnt++;
-                found = open_file;
-                break;
-            }
+    pthread_mutex_lock(&session->lock);
+    for (t = 0; t < session->max_trees && !found; t++) {
+        struct chimera_smb_tree *tree = session->trees[t];
+
+        if (!tree) {
+            continue;
         }
-        pthread_mutex_unlock(&tree->open_files_lock[b]);
+        for (b = 0; b < CHIMERA_SMB_OPEN_FILE_BUCKETS && !found; b++) {
+            pthread_mutex_lock(&tree->open_files_lock[b]);
+            HASH_ITER(hh, tree->open_files[b], open_file, tmp)
+            {
+                if (!(open_file->flags & CHIMERA_SMB_OPEN_FILE_CLOSED) &&
+                    open_file->caching_lease_inserted &&
+                    open_file->oplock_level == SMB2_OPLOCK_LEVEL_LEASE &&
+                    memcmp(open_file->lease_key, lease_key, 16) == 0) {
+                    open_file->refcnt++;
+                    found = open_file;
+                    break;
+                }
+            }
+            pthread_mutex_unlock(&tree->open_files_lock[b]);
+        }
     }
+    pthread_mutex_unlock(&session->lock);
 
     return found;
 } /* chimera_smb_open_file_resolve_by_lease_key */
@@ -2893,7 +2910,11 @@ chimera_smb_open_file_release(
     struct chimera_smb_request   *request,
     struct chimera_smb_open_file *open_file)
 {
-    struct chimera_smb_tree      *tree              = request->tree;
+    /* Lock the bucket of the tree the open is actually hashed into, not
+     * request->tree: a lease-break ack may resolve an open living under a
+     * different tree-connect of the same session (see
+     * chimera_smb_open_file_resolve_by_lease_key). */
+    struct chimera_smb_tree      *tree              = open_file->tree;
     struct chimera_smb_open_file *open_file_to_free = NULL;
     int                           open_file_bucket;
 

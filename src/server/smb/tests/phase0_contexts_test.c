@@ -419,6 +419,43 @@ test_create_rqls_v1_vs_v2(void)
 } /* test_create_rqls_v1_vs_v2 */
 
 static void
+test_create_rqls_malformed_clears_mask(void)
+{
+    struct chimera_smb_request req;
+    uint8_t                    buf[64];
+    uint8_t                    rqls_bad[20];  /* neither 32 nor 52 -> malformed */
+    uint32_t                   pos = 0;
+    int                        i;
+
+    memset(&req, 0, sizeof(req));
+    memset(buf, 0, sizeof(buf));
+    memset(rqls_bad, 0xAB, sizeof(rqls_bad));
+
+    /* Simulate a pooled request slot still carrying a lease key from a prior
+     * CREATE on this slot. */
+    for (i = 0; i < 16; i++) {
+        req.create.rqls.key[i] = (uint8_t) (0x11 + i);
+    }
+
+    pos = emit_create_ctx_entry(buf, 0, "RqLs", rqls_bad, 20, 1);
+
+    if (chimera_smb_parse_create_contexts(buf, pos, &req) != 0) {
+        TEST_FAIL("malformed RqLs parse returned error");
+        return;
+    }
+
+    /* #1116: a malformed RqLs (DataLength != 32/52) must NOT set the RQLS
+     * present-mask bit, so the stale lease key is never honored downstream. */
+    if (!(req.create.ctx_present_mask & CHIMERA_SMB_CREATE_CTX_RQLS) &&
+        !(req.create.ctx_present_mask & CHIMERA_SMB_CREATE_CTX_RQLS_V2) &&
+        req.create.rqls.is_v2 == 0) {
+        TEST_PASS("malformed RqLs leaves RQLS present-mask clear (#1116)");
+    } else {
+        TEST_FAIL("malformed RqLs leaves RQLS present-mask clear (#1116)");
+    }
+} /* test_create_rqls_malformed_clears_mask */
+
+static void
 test_create_malformed_short_next(void)
 {
     struct chimera_smb_request req;
@@ -1206,6 +1243,7 @@ main(
     fprintf(stderr, "=== Phase 0: CREATE context parse ===\n");
     test_create_win11_chain();
     test_create_rqls_v1_vs_v2();
+    test_create_rqls_malformed_clears_mask();
     test_create_ctx_dhnc();
     test_create_ctx_dh2c();
     test_create_ctx_alsi();
