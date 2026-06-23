@@ -4277,6 +4277,15 @@ chimera_smb_create(struct chimera_smb_request *request)
             return;
         }
 
+        /* MS-SMB2 3.3.5.9 / MS-FSA 2.1.5.1: FILE_DIRECTORY_FILE and
+         * FILE_NON_DIRECTORY_FILE are mutually exclusive; both set together is
+         * STATUS_INVALID_PARAMETER. */
+        if ((request->create.create_options & SMB2_FILE_DIRECTORY_FILE) &&
+            (request->create.create_options & SMB2_FILE_NON_DIRECTORY_FILE)) {
+            chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+            return;
+        }
+
         /* MS-FSA 2.1.5.1 Phase 1 (MS-FSA_R2374 / R2376): a CreateOptions of
          * FILE_DIRECTORY_FILE combined with a destructive CreateDisposition is
          * a contradiction -- SUPERSEDE/OVERWRITE/OVERWRITE_IF replace the data
