@@ -19,14 +19,14 @@
 
 #ifndef container_of
 #define container_of(ptr, type, member) \
-    ((type *) ((char *) (ptr) - offsetof(type, member)))
+        ((type *) ((char *) (ptr) - offsetof(type, member)))
 #endif /* ifndef container_of */
 
 #define sm_abort_if(cond, ...) \
-    chimera_abort_if(cond, "space_map", __FILE__, __LINE__, __VA_ARGS__)
+        chimera_abort_if(cond, "space_map", __FILE__, __LINE__, __VA_ARGS__)
 
 #define sm_info(...) \
-    chimera_info("space_map", __FILE__, __LINE__, __VA_ARGS__)
+        chimera_info("space_map", __FILE__, __LINE__, __VA_ARGS__)
 
 #define SM_PERSIST_BATCH_OPS   128U
 #define SM_PERSIST_BATCH_BYTES (16ULL << 20)
