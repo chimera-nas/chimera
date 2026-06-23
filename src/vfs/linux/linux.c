@@ -1176,9 +1176,10 @@ chimera_linux_commit(
 {
     int fd = (int) request->commit.handle->vfs_private;
 
-    fsync(fd);
-
-    request->status = CHIMERA_VFS_OK;
+    /* Propagate a flush failure as NFS3ERR_IO so the client retransmits the
+     * UNSTABLE data instead of dropping it (RFC 1813 §3.3.21); discarding the
+     * fsync result turns a recoverable error into silent data loss. */
+    request->status = (fsync(fd) < 0) ? CHIMERA_VFS_EIO : CHIMERA_VFS_OK;
     request->complete(request);
 
 } /* chimera_linux_commit */
