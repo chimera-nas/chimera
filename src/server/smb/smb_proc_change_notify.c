@@ -21,8 +21,14 @@ chimera_smb_parse_change_notify(
     uint64_t file_id_vid;
     uint32_t completion_filter;
 
-    /* StructureSize (2 bytes) already consumed by the framework */
-    int      prc = 0;
+    /* StructureSize (2 bytes) already consumed by the framework; MS-SMB2 §2.2.35
+     * requires it to equal 32, else fail with STATUS_INVALID_PARAMETER (§3.3.5.2.6). */
+    if (unlikely(request->request_struct_size != SMB2_CHANGE_NOTIFY_REQUEST_SIZE)) {
+        request->status = SMB2_STATUS_INVALID_PARAMETER;
+        return -1;
+    }
+
+    int prc = 0;
 
     prc |= evpl_iovec_cursor_try_get_uint16(request_cursor, &flags);
     prc |= evpl_iovec_cursor_try_get_uint32(request_cursor, &output_buffer_length);
