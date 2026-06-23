@@ -900,8 +900,9 @@ chimera_smb_query_info_reply(
                     break;
                 case SMB2_FILE_FS_CONTROL_INFO:
                     /* MS-FSCC 2.5.2 FileFsControlInformation.  No quota tracking:
-                     * NO_QUOTAS state with all thresholds/limits = -1 (no limit)
-                     * and no control flags. */
+                     * the FreeSpace* quota-event byte counts are 0 (filtering
+                     * disabled), DefaultQuotaThreshold/Limit are -1 (UINT64_MAX,
+                     * no limit), and no control flags are set. */
                     evpl_iovec_cursor_append_uint64(reply_cursor, 0); /* FreeSpaceStartFiltering */
                     evpl_iovec_cursor_append_uint64(reply_cursor, 0); /* FreeSpaceThreshold */
                     evpl_iovec_cursor_append_uint64(reply_cursor, 0); /* FreeSpaceStopFiltering */
