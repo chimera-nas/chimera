@@ -208,6 +208,12 @@ nfs3_drc_cache_insert_locked(
         drc->bytes -= e->len;
         free(e->buf);
         e->buf = malloc(body_len);
+        if (!e->buf) {
+            /* OOM: drop the now-empty entry rather than caching a NULL buf. */
+            HASH_DELETE(hh, drc->table, e);
+            free(e);
+            return 0;
+        }
         memcpy(e->buf, body, body_len);
         e->len      = body_len;
         e->ts       = ts;
@@ -228,9 +234,16 @@ nfs3_drc_cache_insert_locked(
         free(old);
     }
 
-    e      = calloc(1, sizeof(*e));
+    e = calloc(1, sizeof(*e));
+    if (!e) {
+        return nev;
+    }
     e->key = *key;
     e->buf = malloc(body_len);
+    if (!e->buf) {
+        free(e);
+        return nev;
+    }
     memcpy(e->buf, body, body_len);
     e->len = body_len;
     e->ts  = ts;
@@ -269,7 +282,9 @@ nfs3_drc_cache_lookup(
     if (e) {
         len = e->len;
         buf = malloc(len);
-        memcpy(buf, e->buf, len);
+        if (buf) {
+            memcpy(buf, e->buf, len);
+        }
     }
     pthread_mutex_unlock(&drc->lock);
 
@@ -376,6 +391,9 @@ nfs3_drc_capture_reply(
     }
 
     buf = malloc(total_length);
+    if (!buf) {
+        return;  /* OOM: skip caching this reply (degrade to a cache miss) */
+    }
     for (i = 0; i < niov; i++) {
         memcpy(buf + offset, iov[i].data, iov[i].length);
         offset += iov[i].length;

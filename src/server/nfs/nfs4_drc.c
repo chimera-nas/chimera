@@ -515,6 +515,9 @@ nfs4_drc_repopulate_slot(
     }
 
     slot->cached_buf = malloc(len);
+    if (!slot->cached_buf) {
+        return;  /* OOM: leave the slot uncached (degrade to a cache miss) */
+    }
     memcpy(slot->cached_buf, data, len);
     slot->cached_len = len;
     atomic_fetch_add_explicit(&session->replay_bytes_in_use, len,
