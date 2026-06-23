@@ -171,9 +171,16 @@ chimera_nfs3_create_open_at_parent_complete(
         case EXCLUSIVE:
             flags            |= CHIMERA_VFS_OPEN_EXCLUSIVE;
             attr->va_set_mask = CHIMERA_VFS_ATTR_ATIME | CHIMERA_VFS_ATTR_MTIME;
-            memcpy(&attr->va_atime.tv_sec, args->how.verf, 4);
+            /* Zero-extend the two 32-bit verifier halves into the 64-bit tv_sec
+             * via uint32 temporaries; a bare 4-byte memcpy leaves the high bytes
+             * as stale dbuf data, which breaks EXCLUSIVE-create retransmit
+             * idempotency against the uint32 read back at verify time. */
+            uint32_t verf_lo, verf_hi;
+            memcpy(&verf_lo, args->how.verf, 4);
+            memcpy(&verf_hi, args->how.verf + 4, 4);
+            attr->va_atime.tv_sec  = verf_lo;
             attr->va_atime.tv_nsec = 0;
-            memcpy(&attr->va_mtime.tv_sec, args->how.verf + 4, 4);
+            attr->va_mtime.tv_sec  = verf_hi;
             attr->va_mtime.tv_nsec = 0;
             break;
     } /* switch */
