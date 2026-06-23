@@ -28,14 +28,14 @@
  */
 
 /* MS-SMB2 server-side copy limits (2.2.32.1):
- *   MaxChunkCount  = 256
+ *   MaxChunkCount  = 16
  *   MaxChunkSize   = 1 MiB
  *   TotalSizeLimit = 16 MiB
  * A request that exceeds any of these is answered with STATUS_INVALID_PARAMETER
  * and a SRV_COPYCHUNK_RESPONSE whose ChunksWritten / ChunkBytesWritten /
  * TotalBytesWritten advertise these maxima so the client resubmits within them
  * (MS-SMB2 3.3.5.15.6). */
-#define CHIMERA_SMB_CC_MAX_CHUNKS    256
+#define CHIMERA_SMB_CC_MAX_CHUNKS    16
 #define CHIMERA_SMB_CC_MAX_CHUNK_LEN (1024 * 1024)
 #define CHIMERA_SMB_CC_MAX_TOTAL_LEN (16 * 1024 * 1024)
 
