@@ -111,6 +111,10 @@ chimera_nfs3_readdirplus_complete(
         memcpy(res->resok.cookieverf,
                &verifier,
                sizeof(res->resok.cookieverf));
+    } else {
+        /* Initialize the failure post-op attr so a recycled request slot does
+         * not leak stale attribute bytes on the error reply. */
+        chimera_nfs3_set_post_op_attr(&res->resfail.dir_attributes, dir_attr);
     }
 
     rc = shared->nfs_v3.send_reply_NFSPROC3_READDIRPLUS(evpl, NULL, res, req->encoding);
@@ -154,7 +158,8 @@ chimera_nfs3_readdirplus_open_callback(
 
     } else {
         res->status = chimera_vfs_error_to_nfsstat3(error_code);
-        rc          = shared->nfs_v3.send_reply_NFSPROC3_READDIRPLUS(evpl, NULL, res, req->encoding);
+        chimera_nfs3_set_post_op_attr(&res->resfail.dir_attributes, NULL);
+        rc = shared->nfs_v3.send_reply_NFSPROC3_READDIRPLUS(evpl, NULL, res, req->encoding);
         chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
         nfs_request_free(thread, req);
     }
