@@ -193,6 +193,11 @@ chimera_server_config_set_attr_cache_enabled(
     int                           enabled);
 
 void
+chimera_server_config_set_name_cache_enabled(
+    struct chimera_server_config *config,
+    int                           enabled);
+
+void
 chimera_server_config_set_nfs4_session_slots(
     struct chimera_server_config *config,
     int                           slots);

@@ -338,3 +338,34 @@ chimera_common_attr_cache_enabled(json_t *root)
 
     return 1;
 } /* chimera_common_attr_cache_enabled */
+
+/*
+ * Whether the VFS name (lookup) cache is enabled, from the shared "common"
+ * section's "name_cache" boolean key.  Like the attr cache it is a VFS-level
+ * facility used by both the server and the client, so this is honored
+ * identically by both.  When disabled the cache is not instantiated and nothing
+ * is inserted into, looked up from, or removed from it (the cache helpers no-op
+ * on a NULL cache).  Defaults to enabled (returns 1) when the section or key is
+ * absent; `root` may be NULL.
+ */
+static inline int
+chimera_common_name_cache_enabled(json_t *root)
+{
+    json_t *common, *val;
+
+    if (!root) {
+        return 1;
+    }
+
+    common = json_object_get(root, "common");
+    if (!json_is_object(common)) {
+        return 1;
+    }
+
+    val = json_object_get(common, "name_cache");
+    if (json_is_boolean(val)) {
+        return json_is_true(val) ? 1 : 0;
+    }
+
+    return 1;
+} /* chimera_common_name_cache_enabled */

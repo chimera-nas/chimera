@@ -382,7 +382,7 @@ main(
     ctx.evpl = evpl_create(NULL);
     assert(ctx.evpl != NULL);
 
-    ctx.vfs = chimera_vfs_init(0, 0, module_cfgs, spec.ncfg, "memkv", 60, 1, 0,
+    ctx.vfs = chimera_vfs_init(0, 0, module_cfgs, spec.ncfg, "memkv", 60, 1, 1, 0,
                                metrics);
     assert(ctx.vfs != NULL);
 

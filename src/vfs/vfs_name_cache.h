@@ -120,6 +120,10 @@ chimera_vfs_name_cache_destroy(struct chimera_vfs_name_cache *cache)
     struct chimera_vfs_name_cache_entry *entry;
     int                                  i, j;
 
+    if (!cache) {
+        return;
+    }
+
     rcu_barrier();
 
     for (i = 0; i < cache->num_shards; i++) {
@@ -175,6 +179,10 @@ chimera_vfs_name_cache_lookup(
     uint64_t                              key = fh_hash ^ name_hash;
     int                                   rc;
     uint64_t                              now = chimera_vfs_now_ticks();
+
+    if (!cache) {
+        return -1;
+    }
 
     shard = &cache->shards[key & cache->num_shards_mask];
 
@@ -234,6 +242,10 @@ chimera_vfs_name_cache_insert(
     struct chimera_vfs_name_cache_entry **slot, **slot_end, **slot_best;
     uint64_t                              key = fh_hash ^ name_hash;
     uint64_t                              now = chimera_vfs_now_ticks();
+
+    if (!cache) {
+        return;
+    }
 
     shard = &cache->shards[key & cache->num_shards_mask];
 
@@ -345,6 +357,10 @@ chimera_vfs_name_cache_remove(
     struct chimera_vfs_name_cache_shard  *shard;
     struct chimera_vfs_name_cache_entry **slot, **slot_end;
     uint64_t                              key = fh_hash ^ name_hash;
+
+    if (!cache) {
+        return;
+    }
 
     shard = &cache->shards[key & cache->num_shards_mask];
 
