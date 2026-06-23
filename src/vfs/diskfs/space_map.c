@@ -19,14 +19,14 @@
 
 #ifndef container_of
 #define container_of(ptr, type, member) \
-        ((type *) ((char *) (ptr) - offsetof(type, member)))
+    ((type *) ((char *) (ptr) - offsetof(type, member)))
 #endif /* ifndef container_of */
 
 #define sm_abort_if(cond, ...) \
-        chimera_abort_if(cond, "space_map", __FILE__, __LINE__, __VA_ARGS__)
+    chimera_abort_if(cond, "space_map", __FILE__, __LINE__, __VA_ARGS__)
 
 #define sm_info(...) \
-        chimera_info("space_map", __FILE__, __LINE__, __VA_ARGS__)
+    chimera_info("space_map", __FILE__, __LINE__, __VA_ARGS__)
 
 #define SM_PERSIST_BATCH_OPS   128U
 #define SM_PERSIST_BATCH_BYTES (16ULL << 20)
@@ -1340,59 +1340,71 @@ sm_ag_try_claim_locked(
     uint64_t         *out_len,
     struct sm_claim **out_claim)
 {
-    struct sm_extent *e;
+    uint32_t want_class = sm_ag_size_class(want);
+    uint32_t klass;
 
-    /* Walk free extents large enough to possibly hold `want`.  rb_tree_next
-     * RETURNS the next node (it does not advance in place), so capture it before
-     * the body and assign at the bottom -- never call it as a bare statement. */
-    rb_tree_first(&ag->free_by_offset, e);
-    while (e) {
-        struct sm_extent *next_e = rb_tree_next(&ag->free_by_offset, e);
-        uint64_t          e_end  = e->offset + e->length;
-        uint64_t          s      = e->offset;
+    /*
+     * Find a claim-free window via the by-size index instead of walking
+     * free_by_offset.  Every extent that can hold `want` lives in a class
+     * >= want_class (sm_ag_size_class is monotonic in length), so we only ever
+     * visit candidate extents -- the old first-fit walk that scanned past
+     * thousands of sub-`want` fragments under heavy COW churn is gone.  Largest
+     * class first: a bigger extent is most likely to yield the full `chunk`
+     * grant (which keeps reserve_chunk genuinely "once per chunk consumed"
+     * rather than once per fragment) and least likely to be wholly blocked by
+     * in-flight claims, so the common case succeeds on the first extent tried.
+     */
+    for (klass = SM_SIZE_CLASSES; klass-- > want_class; ) {
+        struct sm_extent *e;
 
-        if (e->length < want) {
-            e = next_e;
+        if (!(ag->size_nonempty & (1u << klass))) {
             continue;
         }
-        /* Advance `s` past any claim overlapping [s, s+want) until a claim-free
-         * window of `want` fits, or we run off the end of this extent. */
-        for (;; ) {
-            struct sm_claim *blk = NULL;
-            struct sm_claim *c;
+        for (e = ag->free_by_size[klass]; e; e = e->size_next) {
+            uint64_t e_end = e->offset + e->length;
+            uint64_t s     = e->offset;
 
-            if (s + want > e_end) {
-                break;           /* no room left in this extent */
+            if (e->length < want) {
+                continue;       /* only reachable in the want_class bucket */
             }
-            for (c = ag->claims; c; c = c->next) {
-                if (s < c->base + c->len && c->base < s + want) {
-                    if (!blk || c->base + c->len > blk->base + blk->len) {
-                        blk = c; /* the overlapping claim that ends highest */
+            /* Advance `s` past any claim overlapping [s, s+want) until a claim-free
+             * window of `want` fits, or we run off the end of this extent. */
+            for (;; ) {
+                struct sm_claim *blk = NULL;
+                struct sm_claim *c;
+
+                if (s + want > e_end) {
+                    break;           /* no room left in this extent */
+                }
+                for (c = ag->claims; c; c = c->next) {
+                    if (s < c->base + c->len && c->base < s + want) {
+                        if (!blk || c->base + c->len > blk->base + blk->len) {
+                            blk = c; /* the overlapping claim that ends highest */
+                        }
                     }
                 }
-            }
-            if (!blk) {
-                /* [s, s+want) is claim-free.  Extend the claim up to `chunk`,
-                 * capped at the extent end and the next claim above s. */
-                uint64_t cap = e_end;
-                uint64_t nb  = sm_ag_next_claim_base_locked(ag, s);
-                uint64_t len;
+                if (!blk) {
+                    /* [s, s+want) is claim-free.  Extend the claim up to `chunk`,
+                     * capped at the extent end and the next claim above s. */
+                    uint64_t cap = e_end;
+                    uint64_t nb  = sm_ag_next_claim_base_locked(ag, s);
+                    uint64_t len;
 
-                if (nb < cap) {
-                    cap = nb;
+                    if (nb < cap) {
+                        cap = nb;
+                    }
+                    len = cap - s;
+                    if (len > chunk) {
+                        len = chunk;
+                    }
+                    *out_base  = s;
+                    *out_len   = len;
+                    *out_claim = sm_ag_add_claim_locked(ag, s, len);
+                    return 0;
                 }
-                len = cap - s;
-                if (len > chunk) {
-                    len = chunk;
-                }
-                *out_base  = s;
-                *out_len   = len;
-                *out_claim = sm_ag_add_claim_locked(ag, s, len);
-                return 0;
+                s = blk->base + blk->len;   /* jump past the blocking claim */
             }
-            s = blk->base + blk->len;   /* jump past the blocking claim */
         }
-        e = next_e;
     }
     return 1;
 } /* sm_ag_try_claim_locked */
