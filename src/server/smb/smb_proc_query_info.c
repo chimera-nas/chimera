@@ -866,7 +866,7 @@ chimera_smb_query_info_reply(
                     break;
                 case SMB2_FILE_FS_DEVICE_INFO:
                     evpl_iovec_cursor_append_uint32(reply_cursor, 0x14); /* Network File System */
-                    evpl_iovec_cursor_append_uint32(reply_cursor, 0x20); /* Remote Device */
+                    evpl_iovec_cursor_append_uint32(reply_cursor, 0x10); /* FILE_REMOTE_DEVICE */
                     break;
                 case SMB2_FILE_FS_ATTRIBUTE_INFO:
                     evpl_iovec_cursor_append_uint32(reply_cursor,
