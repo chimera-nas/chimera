@@ -375,10 +375,14 @@ chimera_smb_marshal_network_open_info(
 
     chimera_smb_marshal_basic_attrs(attr, smb_attr);
 
-    smb_attr->smb_alloc_size = attr->va_space_used;
+    /* A directory's data stream has no size; report 0/0 like FileStandardInformation
+     * (MS-FSCC 2.4.40), not the backend's internal directory size. */
+    smb_attr->smb_alloc_size = ((attr->va_mode & S_IFMT) == S_IFDIR) ?
+        0 : attr->va_space_used;
     smb_attr->smb_attr_mask |= SMB_ATTR_ALLOC_SIZE;
 
-    smb_attr->smb_size       = attr->va_size;
+    smb_attr->smb_size = ((attr->va_mode & S_IFMT) == S_IFDIR) ?
+        0 : attr->va_size;
     smb_attr->smb_attr_mask |= SMB_ATTR_SIZE;
 } /* chimera_smb_marshal_network_open_info */
 
