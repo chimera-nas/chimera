@@ -112,8 +112,16 @@ chimera_smb_negotiate(struct chimera_smb_request *request)
     }
 
     if (dialect == 0) {
-        chimera_smb_error("No valid dialect found");
-        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+        /* MS-SMB2 3.3.5.4: DialectCount == 0 (no dialects offered) MUST fail with
+         * STATUS_INVALID_PARAMETER; dialects offered but none in common is
+         * STATUS_NOT_SUPPORTED. */
+        if (request->negotiate.dialect_count == 0) {
+            chimera_smb_error("SMB2 NEGOTIATE with DialectCount 0");
+            chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+        } else {
+            chimera_smb_error("No common SMB2 dialect found");
+            chimera_smb_complete_request(request, SMB2_STATUS_NOT_SUPPORTED);
+        }
         return;
     }
 
