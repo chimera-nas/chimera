@@ -226,7 +226,15 @@ chimera_nfs_mount_lookup_complete(
         chimera_nfs_abort_if(rc, "Failed to allocate opaque");
         memcpy(res.mountinfo.fhandle.data, wire, wirelen);
     } else {
-        res.fhs_status = MNT3ERR_NOENT;
+        /* Map the export-root lookup failure to the matching mountstat3 rather
+         * than collapsing everything to NOENT (RFC 1813 App. I). */
+        switch (error_code) {
+            case CHIMERA_VFS_EACCES:  res.fhs_status = MNT3ERR_ACCES; break;
+            case CHIMERA_VFS_ENOTDIR: res.fhs_status = MNT3ERR_NOTDIR; break;
+            case CHIMERA_VFS_EINVAL:  res.fhs_status = MNT3ERR_INVAL; break;
+            case CHIMERA_VFS_ENOENT:  res.fhs_status = MNT3ERR_NOENT; break;
+            default:                  res.fhs_status = MNT3ERR_SERVERFAULT; break;
+        } /* switch */
     }
 
     rc = shared->mount_v3.send_reply_MOUNTPROC3_MNT(evpl, NULL, &res, req->encoding);
