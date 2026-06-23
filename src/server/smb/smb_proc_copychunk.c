@@ -125,6 +125,13 @@ chimera_smb_copychunk_error_with_body(
     struct chimera_smb_request *request,
     uint32_t                    status)
 {
+    /* On a byte-range lock conflict the response MUST report zero chunks written
+     * (MS-SMB2 3.3.5.15.6); other error bodies (e.g. the past-EOF
+     * STATUS_INVALID_VIEW_SIZE reply) keep the partial progress recorded so far. */
+    if (status == SMB2_STATUS_FILE_LOCK_CONFLICT) {
+        request->ioctl.cc_chunks_written = 0;
+        request->ioctl.cc_total_written  = 0;
+    }
     request->ioctl.cc_limit_response = 1;
     chimera_smb_copychunk_done(request, status);
 } /* chimera_smb_copychunk_error_with_body */
