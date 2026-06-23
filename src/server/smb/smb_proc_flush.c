@@ -34,6 +34,14 @@ chimera_smb_flush(struct chimera_smb_request *request)
         return;
     }
 
+    if (!request->flush.open_file->handle) {
+        /* Named-pipe FIDs carry no VFS handle; FLUSH on a pipe completes
+         * immediately with success (MS-SMB2 3.3.5.15) -- do not deref NULL. */
+        chimera_smb_open_file_release(request, request->flush.open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+        return;
+    }
+
     chimera_vfs_commit(
         thread->vfs_thread,
         &request->session_handle->session->cred,
