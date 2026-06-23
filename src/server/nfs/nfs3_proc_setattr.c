@@ -84,7 +84,8 @@ chimera_nfs3_setattr_guard_callback(
         return;
     }
 
-    if (attr->va_ctime.tv_sec  != args->guard.obj_ctime.seconds ||
+    if (!(attr->va_set_mask & CHIMERA_VFS_ATTR_CTIME) ||
+        attr->va_ctime.tv_sec  != args->guard.obj_ctime.seconds ||
         attr->va_ctime.tv_nsec != args->guard.obj_ctime.nseconds) {
         res.status = NFS3ERR_NOT_SYNC;
         chimera_nfs3_set_wcc_data(&res.resfail.obj_wcc, NULL, NULL);
