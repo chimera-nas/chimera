@@ -81,10 +81,20 @@ chimera_smb_tree_connect(struct chimera_smb_request *request)
 
         tree->tree_id = session->max_trees;
 
-        session->max_trees *= 2;
-        session->trees      = realloc(session->trees,
-                                      session->max_trees * sizeof(struct chimera_smb_tree *));
+        struct chimera_smb_tree **grown =
+            realloc(session->trees,
+                    session->max_trees * 2 * sizeof(struct chimera_smb_tree *));
 
+        if (unlikely(!grown)) {
+            /* realloc failed: the original array is intact (not freed); reject
+             * the tree connect rather than dereferencing NULL (MS-SMB2 3.3.5.7). */
+            pthread_mutex_unlock(&session->lock);
+            chimera_smb_complete_request(request, SMB2_STATUS_INSUFFICIENT_RESOURCES);
+            return;
+        }
+
+        session->max_trees           *= 2;
+        session->trees                = grown;
         session->trees[tree->tree_id] = tree;
     }
 
