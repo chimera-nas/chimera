@@ -627,8 +627,11 @@ chimera_smb_close(struct chimera_smb_request *request)
                                   chimera_smb_close_durable_delete_callback, NULL);
     }
 
-    if (request->close.flags & SMB2_CLOSE_FLAG_POSTQUERY_ATTRIB) {
+    if ((request->close.flags & SMB2_CLOSE_FLAG_POSTQUERY_ATTRIB) &&
+        request->close.open_file->handle) {
 
+        /* Named-pipe FIDs carry handle==NULL; fall through to the zero-attrs
+         * path rather than dereferencing NULL in getattr (MS-SMB2 3.3.5.10). */
         chimera_vfs_getattr(thread->vfs_thread,
                             &request->session_handle->session->cred,
                             request->close.open_file->handle,
