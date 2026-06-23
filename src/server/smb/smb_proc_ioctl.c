@@ -315,7 +315,11 @@ chimera_smb_ioctl(struct chimera_smb_request *request)
                 if (timeout_ms == 0) {
                     timeout_ms = CHIMERA_SMB_RESILIENCY_DEFAULT_TIMEOUT_MS;
                 } else if (timeout_ms > CHIMERA_SMB_RESILIENCY_MAX_TIMEOUT_MS) {
-                    timeout_ms = CHIMERA_SMB_RESILIENCY_MAX_TIMEOUT_MS;
+                    /* MS-SMB2 3.3.5.15.9: a Timeout greater than the maximum MUST
+                     * fail with STATUS_INVALID_PARAMETER, not be silently clamped. */
+                    chimera_smb_open_file_release(request, open_file);
+                    chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+                    return;
                 }
 
                 /* Register the open in the durable registry (as a non-persistent
