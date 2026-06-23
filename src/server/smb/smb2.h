@@ -1216,4 +1216,5 @@ struct smb_direct_hdr {
     uint32_t data_length;
 };
 
-#define SMB2_CHANNEL_RDMA_V1 0x00000001
+#define SMB2_CHANNEL_RDMA_V1            0x00000001
+#define SMB2_CHANNEL_RDMA_V1_INVALIDATE 0x00000002

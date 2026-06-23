@@ -341,6 +341,11 @@ struct chimera_smb_request {
      * the SMB2_FLAGS_REPLAY_OPERATION header flag. */
     uint16_t                           channel_sequence;
     uint8_t                            is_replay;
+    /* Set at dispatch for a channel-binding SESSION_SETUP whose signature did not
+     * verify against the established Session.SigningKey.  The rejection is
+     * applied in the handler AFTER its compatibility checks so their statuses
+     * take precedence over ACCESS_DENIED (MS-SMB2 3.3.5.5). */
+    uint8_t                            bind_sig_failed;
     struct chimera_smb_session_handle *session_handle;
     struct chimera_smb_tree           *tree;
     struct chimera_smb_compound       *compound;
@@ -2003,6 +2008,31 @@ chimera_smb_session_release(
     }
 } /* chimera_smb_session_free */
 
+/* Mark a session globally deleted: clear AUTHORIZED, set DELETED, and unlink it
+ * from the GlobalSessionTable under sessions_lock.  After this, the dispatch
+ * path answers any request that resolves to the session with
+ * USER_SESSION_DELETED on EVERY channel, and the refcnt-driven
+ * chimera_smb_session_release() will not HASH_DEL it a second time (it keys that
+ * on AUTHORIZED, now cleared).  Only acts while the session is still AUTHORIZED,
+ * so a redundant call is a no-op.  Mirrors the inline unlink in
+ * chimera_smb_session_invalidate_previous (which additionally pins a refcnt
+ * across a durable-handle park, so it keeps its own copy). */
+static inline void
+chimera_smb_session_mark_deleted(
+    struct chimera_server_smb_shared *shared,
+    struct chimera_smb_session       *session)
+{
+    pthread_mutex_lock(&shared->sessions_lock);
+
+    if (session->flags & CHIMERA_SMB_SESSION_AUTHORIZED) {
+        session->flags |= CHIMERA_SMB_SESSION_DELETED;
+        session->flags &= ~CHIMERA_SMB_SESSION_AUTHORIZED;
+        HASH_DEL(shared->sessions, session);
+    }
+
+    pthread_mutex_unlock(&shared->sessions_lock);
+} /* chimera_smb_session_mark_deleted */
+
 /* MS-SMB2 3.3.4.4 open-preservation rule: a durable open holding byte-range
  * locks survives a disconnect only if it also holds a batch oplock or a
  * WRITE-caching lease -- otherwise the locks cannot be safely maintained across
@@ -2757,7 +2787,11 @@ chimera_smb_channel_sequence_stale(
         return mutating ? true : false;
     }
 
-    /* Equal or ahead: this becomes the new high-water sequence. */
+    /* Equal or ahead: this becomes the new high-water sequence.  The forward
+     * jump advances REGARDLESS of SMB2_FLAGS_REPLAY_OPERATION -- the Windows
+     * reference behavior (smb2.replay.channel-sequence) treats a replayed and a
+     * fresh forward jump identically, so the replay flag plays no role here
+     * (the premise of #1290 is contradicted by that conformance test). */
     open_file->channel_sequence = req_cs;
     return false;
 } /* chimera_smb_channel_sequence_stale */

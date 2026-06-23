@@ -133,7 +133,13 @@ chimera_smb_negotiate(struct chimera_smb_request *request)
     if (dialect >= 0x210 && (shared->config.capabilities & SMB2_GLOBAL_CAP_LEASING)) {
         conn->capabilities |= SMB2_GLOBAL_CAP_LEASING;
     }
-    if (dialect >= 0x300 && (shared->config.capabilities & SMB2_GLOBAL_CAP_MULTI_CHANNEL)) {
+    /* Only advertise MULTI_CHANNEL when at least one network interface is
+     * actually configured (MS-SMB2 §3.3.5.4): the capability is meaningless
+     * without interfaces to return from FSCTL_QUERY_NETWORK_INTERFACE_INFO, and
+     * advertising it with an empty interface list invites the client to attempt
+     * a second channel it can never discover an endpoint for. */
+    if (dialect >= 0x300 && (shared->config.capabilities & SMB2_GLOBAL_CAP_MULTI_CHANNEL) &&
+        shared->config.num_nic_info > 0) {
         conn->capabilities |= SMB2_GLOBAL_CAP_MULTI_CHANNEL;
     }
     if (dialect >= 0x300 && shared->config.persistent_handles) {

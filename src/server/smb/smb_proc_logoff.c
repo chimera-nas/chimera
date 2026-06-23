@@ -26,9 +26,23 @@ chimera_smb_logoff(struct chimera_smb_request *request)
 
     chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
 
-    /* MS-SMB2 3.3.5.6: LOGOFF closes the session's non-durable opens but
-     * DISASSOCIATES (preserves) any durable/persistent handle so a later
-     * session on the same transport can durably reconnect it. */
+    /* MS-SMB2 3.3.5.6: for an SMB 3.x session the server MUST remove the session
+     * from every Channel.Connection.SessionTable in Session.ChannelList and from
+     * the GlobalSessionTable -- not just from THIS connection.  A bare
+     * per-connection release only decrements the refcnt, so with sibling
+     * channels bound (num_channels>1) the session would stay live and keep
+     * serving requests on the other connections after the client logged off.
+     * Mark it DELETED + unlink it globally here so the dispatch path answers
+     * USER_SESSION_DELETED on the sibling channels (their handles are reclaimed
+     * as those connections drop).  For single-channel sessions this is
+     * equivalent to the plain release below. */
+    if (conn->dialect >= SMB2_DIALECT_3_0) {
+        chimera_smb_session_mark_deleted(thread->shared, session_handle->session);
+    }
+
+    /* LOGOFF closes the session's non-durable opens but DISASSOCIATES
+     * (preserves) any durable/persistent handle so a later session on the same
+     * transport can durably reconnect it. */
     chimera_smb_session_release(thread, thread->shared, session_handle->session, true);
 
     HASH_DELETE(hh, conn->session_handles, session_handle);

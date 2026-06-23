@@ -36,10 +36,10 @@
                                    SMB2_LOCKFLAG_UNLOCK)
 
 /* MS-SMB2 3.3.5.14 LockSequence replay detection.  The 32-bit LockSequence is a
- * 4-bit LockSequenceNumber (the "bucket", valid 1..64) in bits [4..7] and a 4-bit
- * LockSequenceIndex in bits [0..3]; the rest is reserved.  Replay verification is
- * performed only for a durable / persistent / resilient handle, or on an SMB 3.x
- * connection that negotiated multichannel (per the spec and Note <314>). */
+ * 28-bit LockSequenceNumber (the "bucket", valid 1..64) in bits [4..31] and a
+ * 4-bit LockSequenceIndex in bits [0..3].  Replay verification is performed only
+ * for a durable / persistent / resilient handle, or on an SMB 3.x connection
+ * that negotiated multichannel (per the spec and Note <314>). */
 static inline uint32_t
 chimera_smb_lock_seq_bucket(uint32_t lock_sequence)
 {
@@ -90,6 +90,22 @@ chimera_smb_lock_seq_record(
         open_file->lock_seq_status[b - 1] = status;
     }
 } /* chimera_smb_lock_seq_record */
+
+/* Complete a multi-element LOCK/UNLOCK: record the outcome in the replay cache
+ * (so a retransmit on a durable/persistent/resilient/multichannel handle returns
+ * the cached status without re-applying the ranges -- issue #1119), drop the
+ * handle, and reply.  seq_record is a no-op unless the dispatch captured a valid
+ * replay bucket, so this is also correct for non-replay-active opens. */
+static inline void
+chimera_smb_lock_multi_complete(
+    struct chimera_smb_request   *request,
+    struct chimera_smb_open_file *open_file,
+    uint32_t                      status)
+{
+    chimera_smb_lock_seq_record(request, open_file, status);
+    chimera_smb_open_file_release(request, open_file);
+    chimera_smb_complete_request(request, status);
+} /* chimera_smb_lock_multi_complete */
 
 /* Half-open byte-range overlap, mirroring chimera_vfs_range_overlap: length 0
  * is a genuine zero-byte range and the exclusive end saturates at UINT64_MAX on
@@ -627,8 +643,7 @@ chimera_smb_lock_multi(
             freelist = t;
         }
 
-        chimera_smb_open_file_release(request, open_file);
-        chimera_smb_complete_request(request, status);
+        chimera_smb_lock_multi_complete(request, open_file, status);
         return;
     }
 
@@ -639,13 +654,11 @@ chimera_smb_lock_multi(
         uint64_t len  = request->lock.elements[i].length;
 
         if (kind != SMB2_LOCKFLAG_SHARED_LOCK && kind != SMB2_LOCKFLAG_EXCLUSIVE) {
-            chimera_smb_open_file_release(request, open_file);
-            chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+            chimera_smb_lock_multi_complete(request, open_file, SMB2_STATUS_INVALID_PARAMETER);
             return;
         }
         if ((__uint128_t) off + len > ((__uint128_t) 1 << 64)) {
-            chimera_smb_open_file_release(request, open_file);
-            chimera_smb_complete_request(request, SMB2_STATUS_INVALID_LOCK_RANGE);
+            chimera_smb_lock_multi_complete(request, open_file, SMB2_STATUS_INVALID_LOCK_RANGE);
             return;
         }
     }
@@ -659,9 +672,8 @@ chimera_smb_lock_multi(
                                         request->lock.elements[i].length,
                                         request->lock.elements[j].offset,
                                         request->lock.elements[j].length)) {
-                chimera_smb_open_file_release(request, open_file);
-                chimera_smb_complete_request(request,
-                                             SMB2_STATUS_INVALID_PARAMETER);
+                chimera_smb_lock_multi_complete(request, open_file,
+                                                SMB2_STATUS_INVALID_PARAMETER);
                 return;
             }
         }
@@ -682,15 +694,13 @@ chimera_smb_lock_multi(
             while (ntaken > 0) {
                 chimera_smb_lock_entry_drop(vfs_state, open_file, taken[--ntaken]);
             }
-            chimera_smb_open_file_release(request, open_file);
-            chimera_smb_complete_request(request, SMB2_STATUS_LOCK_NOT_GRANTED);
+            chimera_smb_lock_multi_complete(request, open_file, SMB2_STATUS_LOCK_NOT_GRANTED);
             return;
         }
         taken[ntaken++] = e;
     }
 
-    chimera_smb_open_file_release(request, open_file);
-    chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+    chimera_smb_lock_multi_complete(request, open_file, SMB2_STATUS_SUCCESS);
 } /* chimera_smb_lock_multi */
 
 void
@@ -721,17 +731,14 @@ chimera_smb_lock(struct chimera_smb_request *request)
         return;
     }
 
-    /* A multi-element request is handled synchronously (all FAIL_IMMEDIATELY). */
-    if (request->lock.lock_count > 1) {
-        chimera_smb_lock_multi(thread, request, open_file);
-        return;
-    }
-
-    /* MS-SMB2 3.3.5.14 LockSequence replay detection (single-element path).
-     * Capture the bucket for an open that performs replay verification, and if it
-     * is a replay of the last op recorded under that bucket (same index), return
-     * the cached status without re-applying the lock — making a retransmit after a
-     * lost reply idempotent. */
+    /* MS-SMB2 3.3.5.14 LockSequence replay detection.  Capture the replay bucket
+     * and short-circuit a replay BEFORE dispatching either the single- or
+     * multi-element path: the spec mandates replay verification for EVERY LOCK
+     * request on a durable/persistent/resilient/multichannel handle regardless of
+     * LockCount, and the multi path records its outcome under the same bucket
+     * (issue #1119).  On a replay of the last op recorded under this bucket (same
+     * index), return the cached status without re-applying the lock(s) — making a
+     * retransmit after a lost reply idempotent. */
     request->lock.seq_bucket = 0;
     request->lock.seq_index  = chimera_smb_lock_seq_index(request->lock.lock_sequence);
     if (chimera_smb_lock_replay_active(request, open_file)) {
@@ -747,6 +754,12 @@ chimera_smb_lock(struct chimera_smb_request *request)
                 return;
             }
         }
+    }
+
+    /* A multi-element request is handled synchronously (all FAIL_IMMEDIATELY). */
+    if (request->lock.lock_count > 1) {
+        chimera_smb_lock_multi(thread, request, open_file);
+        return;
     }
 
     kind = request->lock.l_flags & SMB2_LOCKFLAG_KIND_MASK;

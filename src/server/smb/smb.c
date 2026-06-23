@@ -1302,6 +1302,7 @@ chimera_smb_server_handle_smb2(
          * MS-SMB2 §3.3.5.2.10 stale-write detection and create-context replay. */
         request->channel_sequence = (uint16_t) (request->smb2_hdr.status & 0xFFFF);
         request->is_replay        = (request->smb2_hdr.flags & SMB2_FLAGS_REPLAY_OPERATION) ? 1 : 0;
+        request->bind_sig_failed  = 0;
 
         signature_cursor = *request_cursor;
 
@@ -1506,6 +1507,49 @@ chimera_smb_server_handle_smb2(
          * verification for a successfully decrypted request.  Such inner SMB2
          * headers commonly carry SMB2_FLAGS_SIGNED with a zeroed Signature
          * field, which would otherwise fail verification. */
+        /* MS-SMB2 §3.3.5.5 step 4 / §3.3.5.2.4: a channel-binding SESSION_SETUP
+         * carries a signature over the EXISTING Session.SigningKey -- the proof
+         * that the binding connection belongs to the already-authenticated
+         * principal (without it a client that learns a victim's SessionId could
+         * hijack the session).  The generic block below skips ALL SESSION_SETUP
+         * signature verification (correct only for an initial/re-auth leg, whose
+         * key is derived while processing it), so a bind is verified here, where
+         * the on-wire bytes are still available.  But we only STASH the result --
+         * the rejection is applied in the handler AFTER its dialect/cipher/
+         * algorithm compatibility checks, whose INVALID_PARAMETER/NOT_SUPPORTED
+         * statuses MUST take precedence over ACCESS_DENIED (MS-SMB2 3.3.5.5;
+         * smb2model SessionMgmtBindSession).  The dispatcher already adopted the
+         * target session onto this connection and copied its signing key into
+         * request->session_handle->signing_key, so the key is in hand. */
+        if (request->smb2_hdr.command == SMB2_SESSION_SETUP &&
+            conn->dialect >= SMB2_DIALECT_3_0 &&
+            (request->smb2_hdr.flags & SMB2_FLAGS_SIGNED) &&
+            !received_encrypted &&
+            request->session_handle &&
+            (request->session_handle->session->flags & CHIMERA_SMB_SESSION_AUTHORIZED)) {
+            struct evpl_iovec_cursor peek = signature_cursor;
+            uint8_t                  ss_byte = 0, ss_flags = 0;
+
+            /* SESSION_SETUP body (MS-SMB2 2.2.5): StructureSize(2), Flags(1).
+             * signature_cursor sits at the body start; peek Flags off a copy. */
+            evpl_iovec_cursor_try_get_uint8(&peek, &ss_byte);  /* StructureSize lo */
+            evpl_iovec_cursor_try_get_uint8(&peek, &ss_byte);  /* StructureSize hi */
+            evpl_iovec_cursor_try_get_uint8(&peek, &ss_flags); /* Flags */
+
+            if (ss_flags & SMB2_SESSION_FLAG_BINDING) {
+                if (request->smb2_hdr.next_command) {
+                    payload_length = request->smb2_hdr.next_command - sizeof(request->smb2_hdr);
+                } else {
+                    payload_length = left;
+                }
+
+                request->bind_sig_failed =
+                    chimera_smb_verify_signature(thread->signing_ctx, request,
+                                                 request->session_handle->signing_key,
+                                                 &signature_cursor, payload_length) != 0;
+            }
+        }
+
         if ((request->smb2_hdr.flags & SMB2_FLAGS_SIGNED) &&
             !received_encrypted &&
             request->smb2_hdr.command != SMB2_SESSION_SETUP) {

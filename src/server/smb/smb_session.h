@@ -389,6 +389,13 @@ struct chimera_smb_session {
     _Atomic uint64_t            enc_nonce_counter;
 
     struct chimera_vfs_cred     cred;
+
+    /* Kerberos principal that ESTABLISHED the session, captured on the first
+     * (authorizing) leg.  A multichannel bind over Kerberos compares the binding
+     * connection's authenticated principal against this to enforce that the
+     * binding user is the session owner (MS-SMB2 3.3.5.5.3); empty for an
+     * NTLM-established session (which is matched by uid instead). */
+    char                        principal[256];
 };
 
 /* Derive the stable per-client lease owner key from a 16-byte ClientGuid.

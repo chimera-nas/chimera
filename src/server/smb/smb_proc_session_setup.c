@@ -228,6 +228,20 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
                                 request->session_setup.input_niov);
             return;
         }
+
+        /* MS-SMB2 3.3.5.5 / 3.3.5.2.4: the bind request's signature, verified at
+         * dispatch against the established Session.SigningKey, must hold.  Applied
+         * HERE -- after the dialect/cipher/algorithm compatibility checks above --
+         * so those statuses (INVALID_PARAMETER / NOT_SUPPORTED) take precedence
+         * over the ACCESS_DENIED a signature failure yields, and so a bind that
+         * resolves to no session is answered USER_SESSION_DELETED rather than
+         * ACCESS_DENIED (smb2model SessionMgmtBindSession S268/S431). */
+        if (request->bind_sig_failed) {
+            chimera_smb_complete_request(request, SMB2_STATUS_ACCESS_DENIED);
+            evpl_iovecs_release(thread->evpl, request->session_setup.input_iov,
+                                request->session_setup.input_niov);
+            return;
+        }
     }
 
     /* A non-binding SESSION_SETUP that names an established session which has
@@ -390,13 +404,30 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
             int over_limit = 0;
 
             /* MS-SMB2 3.3.5.5.3: the binding user MUST be the user the session
-            * was established by; a successful authentication as a DIFFERENT
-            * principal is rejected with STATUS_ACCESS_DENIED and the session
-            * (and its channels) survive (smb2.session.bind_different_user). */
-            if (mech == SMB_AUTH_MECH_NTLM &&
-                smb_ntlm_get_uid(&conn->ntlm_ctx) != session->cred.uid) {
-                chimera_smb_error("Channel bind rejected: user mismatch (uid %u != session uid %u)",
-                                  smb_ntlm_get_uid(&conn->ntlm_ctx), session->cred.uid);
+             * was established by; a successful authentication as a DIFFERENT
+             * principal is rejected with STATUS_ACCESS_DENIED and the session
+             * (and its channels) survive (smb2.session.bind_different_user).
+             * NTLM matches on the resolved uid; Kerberos matches on the
+             * establishing principal captured at session setup -- without this a
+             * service ticket for ANY principal could bind a channel onto a
+             * victim's session (cross-user session hijack). */
+            int bind_user_mismatch = 0;
+
+            if (mech == SMB_AUTH_MECH_NTLM) {
+                bind_user_mismatch =
+                    smb_ntlm_get_uid(&conn->ntlm_ctx) != session->cred.uid;
+            } else if (mech == SMB_AUTH_MECH_KERBEROS) {
+                const char *bind_principal =
+                    smb_gssapi_get_principal(&conn->gssapi_ctx);
+
+                bind_user_mismatch =
+                    !bind_principal || session->principal[0] == '\0' ||
+                    strcmp(bind_principal, session->principal) != 0;
+            }
+
+            if (bind_user_mismatch) {
+                chimera_smb_error("Channel bind rejected: binding user does not match session owner (%s)",
+                                  smb_auth_mech_name(mech));
                 chimera_smb_complete_request(request, SMB2_STATUS_ACCESS_DENIED);
                 evpl_iovecs_release(thread->evpl,
                                     request->session_setup.input_iov,
@@ -507,6 +538,14 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
 
             chimera_smb_info("Kerberos auth complete: principal=%s uid=%u gid=%u sid=%s",
                              principal, uid, gid, sid ? sid : "none");
+
+            /* Record the establishing principal so a later multichannel bind can
+             * verify the binding connection authenticated as the SAME principal
+             * (MS-SMB2 3.3.5.5.3).  Only on the authorizing leg -- a bind/re-auth
+             * must not move the session's owning identity. */
+            if (!(session->flags & CHIMERA_SMB_SESSION_AUTHORIZED) && principal) {
+                snprintf(session->principal, sizeof(session->principal), "%s", principal);
+            }
         }
 
         // Cache AD users in VFS user cache (non-pinned, will expire)
@@ -521,8 +560,13 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
             chimera_smb_debug("Cached AD user '%s' in VFS user cache", username);
         }
 
-        // Set session credentials
-        chimera_vfs_cred_init_attr(&session->cred, uid, gid, ngids, gids);
+        /* Set session credentials.  A binding leg must NOT replace the session's
+         * credentials: the binding user was already verified to match the
+         * session owner, and overwriting here would let a bind move the owning
+         * identity.  Re-authentication does refresh the security context. */
+        if (!is_binding) {
+            chimera_vfs_cred_init_attr(&session->cred, uid, gid, ngids, gids);
+        }
 
         /* SMB3 transport encryption: derive per-session keys from the raw
          * session key.
