@@ -527,7 +527,14 @@ chimera_smb_verify_signature(
         return rc;
     }
 
-    if (unlikely(memcmp(signature, calculated, sizeof(signature)) != 0)) {
+    /* Constant-time comparison to avoid a timing oracle on the MAC. */
+    uint8_t sig_diff = 0;
+
+    for (size_t i = 0; i < sizeof(signature); i++) {
+        sig_diff |= signature[i] ^ calculated[i];
+    }
+
+    if (unlikely(sig_diff != 0)) {
         format_hex(recv_sig, sizeof(recv_sig), signature, sizeof(signature));
         format_hex(calc_sig, sizeof(calc_sig), calculated, sizeof(calculated));
         chimera_smb_error("Received signature: %s does not match calculated signature: %s", recv_sig, calc_sig);
