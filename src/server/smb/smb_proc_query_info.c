@@ -521,8 +521,10 @@ chimera_smb_query_info(struct chimera_smb_request *request)
                 case SMB2_FILE_BASIC_INFO:
                 case SMB2_FILE_NETWORK_OPEN_INFO:
                 case SMB2_FILE_ATTRIBUTE_TAG_INFO:
-                case SMB2_FILE_COMPRESSION_INFO:
                 case SMB2_FILE_ALL_INFO:
+                    /* FileCompressionInformation is intentionally NOT gated:
+                     * MS-SMB2 3.3.5.20.1's READ_ATTRIBUTES list does not include
+                     * it (the always-NONE compression state is readable). */
                     if (!(request->query_info.open_file->granted_access &
                           SMB2_FILE_READ_ATTRIBUTES)) {
                         status = SMB2_STATUS_ACCESS_DENIED;
