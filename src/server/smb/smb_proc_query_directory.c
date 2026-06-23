@@ -115,7 +115,7 @@ chimera_smb_query_directory_readdir_callback(
 
     namelen_padded = namelen ? namelen * 2 : 2;
 
-    namelen_padded += 8 - (namelen_padded & 7);
+    namelen_padded += (8 - (namelen_padded & 7)) & 7;
 
     if ((request->query_directory.flags & SMB2_INDEX_SPECIFIED) &&
         (file_index != request->query_directory.file_index)) {
