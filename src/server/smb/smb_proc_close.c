@@ -653,7 +653,10 @@ chimera_smb_close_reply(
 {
 
     evpl_iovec_cursor_append_uint16(reply_cursor, SMB2_CLOSE_REPLY_SIZE);
-    evpl_iovec_cursor_append_uint16(reply_cursor, request->close.flags);
+    /* Emit only the defined POSTQUERY_ATTRIB bit; do not reflect reserved client
+     * Flags bits (MS-SMB2 3.3.5.10 / 2.2.16). */
+    evpl_iovec_cursor_append_uint16(reply_cursor,
+                                    request->close.flags & SMB2_CLOSE_FLAG_POSTQUERY_ATTRIB);
 
     if (request->close.flags & SMB2_CLOSE_FLAG_POSTQUERY_ATTRIB) {
         chimera_smb_append_network_open_info(reply_cursor, &request->close.r_attrs);
