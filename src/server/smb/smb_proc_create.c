@@ -4268,6 +4268,14 @@ chimera_smb_create(struct chimera_smb_request *request)
         * An undefined high CreateOptions bit is STATUS_INVALID_PARAMETER; a
         * defined-but-unsupported one (TREE_CONNECTION / OPEN_BY_FILE_ID /
         * RESERVE_OPFILTER) is STATUS_NOT_SUPPORTED.  INVALID takes precedence. */
+        /* MS-SMB2 2.2.13: ShareAccess is built only from FILE_SHARE_READ/WRITE/
+         * DELETE; any other (reserved) bit set is STATUS_INVALID_PARAMETER. */
+        if (request->create.share_access &
+            ~(SMB2_FILE_SHARE_READ | SMB2_FILE_SHARE_WRITE | SMB2_FILE_SHARE_DELETE)) {
+            chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+            return;
+        }
+
         if (request->create.create_options & SMB2_CREATE_OPTIONS_INVALID_MASK) {
             chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
             return;
