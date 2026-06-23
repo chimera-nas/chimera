@@ -1825,6 +1825,16 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.winattr2
     # smb2.zero-data-ioctl
     smb2.zero-data-ioctl
+    # attribute-only ("stat") opens acquire their requested oplock when sole
+    smb2.oplock.batch9
+    smb2.oplock.batch9a
+    # oplocks/leases on named streams (harness enables ADS for these subtests)
+    smb2.oplock.batch26
+    smb2.lease.request
+    # delete-on-close via SET_INFO marks the file delete-pending
+    smb2.oplock.doc
+    # a share-conflicting open handle-breaks a conflicting RqLs lease (RWH->RW)
+    smb2.lease.break_twice
 )
 
 set(SMBTORTURE_ENABLED_linux

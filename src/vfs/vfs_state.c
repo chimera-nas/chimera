@@ -310,6 +310,18 @@ chimera_vfs_state_set_delete_pending(struct chimera_vfs_file_state *file)
     }
 } /* chimera_vfs_state_set_delete_pending */
 
+/* Clear delete-pending -- e.g. a SET_INFO disposition that turns delete-on-close
+ * back off before the last close (smb2.* DispositionInformation toggling). */
+SYMBOL_EXPORT void
+chimera_vfs_state_clear_delete_pending(struct chimera_vfs_file_state *file)
+{
+    if (file) {
+        pthread_mutex_lock(&file->lock);
+        file->delete_pending = 0;
+        pthread_mutex_unlock(&file->lock);
+    }
+} /* chimera_vfs_state_clear_delete_pending */
+
 SYMBOL_EXPORT bool
 chimera_vfs_state_is_delete_pending(struct chimera_vfs_file_state *file)
 {
@@ -1907,7 +1919,8 @@ chimera_vfs_caching_grant_try_upgrade(
 SYMBOL_EXPORT uint8_t
 chimera_vfs_caching_grant_cap_mode(
     struct chimera_vfs_file_state  *file,
-    const struct chimera_vfs_lease *lease)
+    const struct chimera_vfs_lease *lease,
+    bool                            strict)
 {
     struct chimera_vfs_lease  probe    = *lease;
     struct chimera_vfs_lease *conflict = NULL;
@@ -1922,13 +1935,20 @@ chimera_vfs_caching_grant_cap_mode(
         }
         /* Step down toward the read floor: drop the exclusive write cache first,
          * then handle caching.  Once at R with a remaining conflict there is
-         * nothing left to yield -- return R and let try_insert resolve it (a
-         * genuine cross-client read/handle conflict that a cap cannot dissolve). */
+         * nothing left to yield. */
         if (mode & CHIMERA_VFS_LEASE_MODE_W) {
             mode &= ~CHIMERA_VFS_LEASE_MODE_W;
         } else if (mode & CHIMERA_VFS_LEASE_MODE_H) {
             mode &= ~CHIMERA_VFS_LEASE_MODE_H;
         } else {
+            /* At the R floor and still conflicting.  Non-strict: return R and let
+             * the caller's try_insert resolve the residual cross-client read /
+             * handle conflict.  Strict (an oplock-transparent stat-open): yield
+             * everything -- no subset is grantable without a break -- so return 0
+             * and take no oplock rather than breaking the holder. */
+            if (strict) {
+                mode = 0;
+            }
             break;
         }
     }
@@ -3009,7 +3029,8 @@ chimera_vfs_state_break_caching_for_open(
     uint64_t                              fh_hash,
     const struct chimera_vfs_lease_owner *opener,
     uint8_t                               trigger_bits,
-    uint8_t                               retain_mode)
+    uint8_t                               retain_mode,
+    int                                   break_leases)
 {
     struct chimera_vfs_file_state    *file;
     struct chimera_vfs_lease         *cur;
@@ -3051,7 +3072,7 @@ chimera_vfs_state_break_caching_for_open(
          * lease's handle is only recalled by a genuine share conflict (handled in
          * the share path) or when the directory itself is removed/renamed. */
         if (trigger_bits == CHIMERA_VFS_LEASE_MODE_H &&
-            cur->grant && !cur->grant->is_oplock) {
+            cur->grant && !cur->grant->is_oplock && !break_leases) {
             continue;
         }
         if (n < CHIMERA_VFS_STATE_MAX_BREAK_BATCH) {
@@ -3758,10 +3779,13 @@ chimera_vfs_state_reap_idle(
         for (file = bucket->files;
              file && n < CHIMERA_VFS_STATE_REAP_BATCH;
              file = file->bucket_next) {
-            /* Candidates: files holding an implicit lease (reapable when idle)
-             * or with parked I/O waiters (re-pumped so an unresponsive holder
-             * is revoked at its recall deadline and the waiter makes progress). */
-            if (file->implicit_active || file->io_wait_head) {
+            /* Candidates: files holding an implicit lease (reapable when idle),
+             * with parked I/O waiters (re-pumped so an unresponsive holder is
+             * revoked at its recall deadline and the waiter makes progress), or
+             * holding any caching lease (an oplock/lease/delegation may be stuck
+             * BREAKING past its deadline with NO waiter behind it -- #1030). */
+            if (file->implicit_active || file->io_wait_head ||
+                file->caching_leases) {
                 file->refcount++;
                 cand[n++] = file;
             }
@@ -3774,6 +3798,8 @@ chimera_vfs_state_reap_idle(
 
             file = cand[i];
 
+            bool has_caching;
+
             pthread_mutex_lock(&file->lock);
             reapable = file->implicit_active &&
                 !file->implicit_draining &&
@@ -3783,17 +3809,27 @@ chimera_vfs_state_reap_idle(
                 file->implicit_draining = 1;
             }
             has_waiters = (file->io_wait_head != NULL);
+            has_caching = (file->caching_leases != NULL);
             pthread_mutex_unlock(&file->lock);
+
+            /* Forcibly revoke any caching lease stuck BREAKING past its deadline
+             * (MS-SMB2 oplock-break ack timeout / NFSv4 recall timeout) even
+             * when no conflicting acquirer is waiting -- otherwise a
+             * dead-but-not-disconnected client that never sends its OPLOCK_BREAK
+             * ack pins the lease BREAKING forever, holding caching state the
+             * server already told it to relinquish (#1030).  revoke_expired_
+             * breaks is a no-op when nothing has expired, and the revoke itself
+             * pumps the file's pending / I/O queues. */
+            if (has_caching) {
+                chimera_vfs_state_revoke_expired_breaks(state, file);
+            }
 
             if (reapable) {
                 /* finish_drain pumps the wait queue itself. */
                 chimera_vfs_implicit_finish_drain(state, file);
             } else if (has_waiters) {
                 /* A parked I/O / namespace op is waiting on a caching holder to
-                 * break.  If that holder never acknowledged and its break
-                 * deadline has elapsed, forcibly revoke it (MS-SMB2 / NFSv4
-                 * recall timeout) so the waiter can proceed, then re-pump. */
-                chimera_vfs_state_revoke_expired_breaks(state, file);
+                * break; re-pump so it makes progress once the break settles. */
                 chimera_vfs_state_pump_io(state, file);
             }
 

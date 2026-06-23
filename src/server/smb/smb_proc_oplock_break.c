@@ -651,19 +651,58 @@ chimera_smb_oplock_break(struct chimera_smb_request *request)
             return;
         }
 
+        /* MS-SMB2 2.2.24.1: the acknowledged OplockLevel may only be
+         * SMB2_OPLOCK_LEVEL_II or SMB2_OPLOCK_LEVEL_NONE -- a client cannot
+         * acknowledge a break by claiming a higher level (EXCLUSIVE/BATCH) or a
+         * garbage value.  The lease path's mapping silently collapses such
+         * values to 0 caching bits, but open_file->oplock_level would still be
+         * stamped with the bogus level; reject up front (#1284). */
+        if (request->oplock_break.oplock_level != SMB2_OPLOCK_LEVEL_II &&
+            request->oplock_break.oplock_level != SMB2_OPLOCK_LEVEL_NONE) {
+            chimera_smb_open_file_release(request, open_file);
+            chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+            return;
+        }
+
         /* Resolve the outstanding break with the level the client chose to
          * keep (it may drop further than what we asked -- e.g. straight to
          * NONE).  The lease is genuinely BREAKING here (we no longer ack
          * optimistically), so the canonical ack applies the mode, re-arms a
          * surviving lease, and pumps any parked acquirer. */
         if (open_file->grant) {
-            struct chimera_vfs_lease_mode kept = {
-                .granted = (request->oplock_break.oplock_level ==
-                            SMB2_OPLOCK_LEVEL_II) ? CHIMERA_VFS_LEASE_MODE_R : 0,
-                .denied  = 0,
-            };
+            struct chimera_vfs_lease     *lease    = &open_file->grant->lease;
+            uint8_t                       kept_vfs = (request->oplock_break.oplock_level ==
+                                                      SMB2_OPLOCK_LEVEL_II) ?
+                CHIMERA_VFS_LEASE_MODE_R : 0;
+            struct chimera_vfs_lease_mode kept;
 
-            chimera_vfs_lease_ack(&open_file->grant->lease, kept);
+            /* MS-SMB2 3.3.5.22.1: an ack is valid only while a break is
+             * outstanding.  The lease path guards this; bring the legacy path
+             * to parity rather than silently SUCCEEDing on a settled/revoked
+             * break (#1287). */
+            if (lease->break_state != CHIMERA_VFS_BREAK_BREAKING) {
+                chimera_smb_open_file_release(request, open_file);
+                chimera_smb_complete_request(request, SMB2_STATUS_UNSUCCESSFUL);
+                return;
+            }
+
+            /* The kept level must be a subset of what the break left the holder
+             * (break_needed_mode).  A break driven by a write / namespace
+             * invalidation breaks to NONE (break_needed_mode == 0), so an ack
+             * that keeps LEVEL_II (a read cache) on data a conflicting writer is
+             * mutating is rejected rather than silently re-arming a stale read
+             * cache (#1285). */
+            if (kept_vfs & ~lease->break_needed_mode) {
+                chimera_smb_open_file_release(request, open_file);
+                chimera_smb_complete_request(request,
+                                             SMB2_STATUS_REQUEST_NOT_ACCEPTED);
+                return;
+            }
+
+            kept.granted = kept_vfs;
+            kept.denied  = 0;
+
+            chimera_vfs_lease_ack(lease, kept);
         }
         (void) vfs_state;
 

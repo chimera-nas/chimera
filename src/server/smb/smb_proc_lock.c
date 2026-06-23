@@ -538,7 +538,14 @@ chimera_smb_lock_take_one(
     entry->lease.owner.client_key = request->session_handle->session->session_id;
     entry->lease.owner.owner_lo   = open_file->file_id.pid;
     entry->lease.owner.owner_hi   = open_file->file_id.vid;
-    entry->lease.owner.cb_private = open_file;
+    /* Point at the open's caching grant (NULL if it holds no oplock/lease), not
+     * the open_file, so the range-vs-caching conflict check sees that this
+     * byte-range lock and the same open's (or a coalesced peer's) caching lease
+     * -- whose owner identity is the lease key, not the file id -- share one
+     * grant and must not break each other (vfs_state.c same-cb_private
+     * exemption; smb2.oplock.brl2).  The grant's lease carries the same pointer.
+     * Mirrors the single-element path. */
+    entry->lease.owner.cb_private = open_file->grant;
 
     chimera_vfs_lease_acquire(vfs_state, entry->file_state, &entry->lease,
                               &entry->ticket, false /* no wait */,

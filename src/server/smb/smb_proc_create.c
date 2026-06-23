@@ -506,7 +506,9 @@ chimera_smb_create_break_for_open(
         chimera_vfs_state_break_caching_for_open(
             vfs_state, oh->fh, oh->fh_len, oh->fh_hash, &io_owner,
             CHIMERA_VFS_LEASE_MODE_H,
-            truncates ? 0 : CHIMERA_VFS_LEASE_MODE_R);
+            truncates ? 0 : CHIMERA_VFS_LEASE_MODE_R,
+            0 /* spare leases pre-share-check; a lease keeps H on a
+               * compatible open */);
     } else if (truncates) {
         chimera_vfs_state_break_on_write(vfs_state, oh->fh, oh->fh_len,
                                          oh->fh_hash, &io_owner);
@@ -522,7 +524,8 @@ chimera_smb_create_break_for_open(
         chimera_vfs_state_break_caching_for_open(
             vfs_state, oh->fh, oh->fh_len, oh->fh_hash, &io_owner,
             CHIMERA_VFS_LEASE_MODE_W,
-            CHIMERA_VFS_LEASE_MODE_R | CHIMERA_VFS_LEASE_MODE_H);
+            CHIMERA_VFS_LEASE_MODE_R | CHIMERA_VFS_LEASE_MODE_H,
+            0 /* W-trigger: lease-skip does not apply */);
     }
 } /* chimera_smb_create_break_for_open */
 
@@ -939,6 +942,26 @@ chimera_smb_create_gen_open_file(
         }
 
         if (result != CHIMERA_VFS_LEASE_GRANTED) {
+            /* A genuine share conflict (SHARING_VIOLATION).  A handle-caching
+             * RqLs lease holder must still be told to relinquish its handle
+             * cache (RWH->RW) even though this open is refused -- the holder may
+             * close its deferred handle so a later retry succeeds (MS-SMB2;
+             * smb2.lease.break_twice).  Batch oplocks already broke via the
+             * BREAKING/park path above; this covers leases, which try_insert
+             * spares.  The opener is identified by lease key (RqLs) or file id so
+             * the holder's own lease is not self-broken. */
+            struct chimera_vfs_lease_owner brk_owner = open_file->share_lease.owner;
+            if (request->create.ctx_present_mask & CHIMERA_SMB_CREATE_CTX_RQLS) {
+                memcpy(&brk_owner.owner_lo, request->create.rqls.key, 8);
+                memcpy(&brk_owner.owner_hi, request->create.rqls.key + 8, 8);
+                brk_owner.is_lease = 1;
+            }
+            chimera_vfs_state_break_caching_for_open(
+                vfs_state, oh->fh, oh->fh_len, oh->fh_hash, &brk_owner,
+                CHIMERA_VFS_LEASE_MODE_H,
+                CHIMERA_VFS_LEASE_MODE_R | CHIMERA_VFS_LEASE_MODE_W,
+                1 /* break handle-caching leases on a real share conflict */);
+
             chimera_vfs_state_put(vfs_state, file_state);
             open_file->handle = NULL;
             chimera_smb_open_file_free(thread, open_file);
@@ -1022,6 +1045,13 @@ chimera_smb_create_after_share(
              * cached, so no lease break can ever stall a conflicting open. */
             req_smb = thread->shared->config.leases
                 ? (uint8_t) (request->create.rqls.state & 0x07) : 0;
+            /* MS-SMB2 3.3.5.9.8 / smb2.lease.request: WRITE- and HANDLE-caching
+             * are meaningful only alongside READ caching.  A requested lease
+             * state with W or H but no R is invalid and granted NONE (H->"",
+             * W->"", HW->""); R/RH/RW/RHW pass through. */
+            if (!(req_smb & SMB2_LEASE_READ_CACHING)) {
+                req_smb = 0;
+            }
         } else if (thread->shared->config.oplocks) {
             /* Legacy SMB oplocks are opt-in (smb_oplocks); when disabled no
              * oplock is granted (req_smb stays 0 -> reply OPLOCK_LEVEL_NONE). */
@@ -1071,25 +1101,6 @@ chimera_smb_create_after_share(
             req_vfs &= ~CHIMERA_VFS_LEASE_MODE_W;
         }
 
-        /* Oplocks are about data caching: an attribute-only open (no
-         * read/write/execute data access) neither acquires nor breaks an
-         * oplock — UNLESS its disposition replaces the file's data
-         * (OVERWRITE / OVERWRITE_IF / SUPERSEDE all truncate), which is a
-         * data-modifying open and does break.  So gate on data access OR a
-         * data-replacing disposition; a plain READ_ATTRIBUTES|SYNCHRONIZE
-         * probe with OPEN/OPEN_IF leaves an existing holder's oplock intact. */
-        bool caching_touches_data =
-            (request->create.desired_access & SMB2_DATA_ACCESS_MASK) ||
-            request->create.create_disposition == SMB2_FILE_OVERWRITE ||
-            request->create.create_disposition == SMB2_FILE_OVERWRITE_IF ||
-            request->create.create_disposition == SMB2_FILE_SUPERSEDE;
-
-        /* An explicitly requested SMB2 lease (RqLs) is acquired even for an
-         * attribute-only ("stat") open: a handle/read-caching lease is about the
-         * handle, not data access, and such an open is still eligible for a
-         * durable handle (MS-SMB2).  The caching_touches_data gate only governs
-         * the implicit legacy-oplock path, where an attribute probe must not
-         * acquire an oplock. */
         /* A caching lease (oplock / SMB2 lease) lives in a VFS-owned, owner-keyed,
          * refcounted grant.  Opens by one client under one lease key (RqLs) COALESCE
          * onto a single grant; legacy oplocks are keyed by file id and so are always
@@ -1097,15 +1108,48 @@ chimera_smb_create_after_share(
          * requests no caching bits -- so a re-open under an existing lease key joins
          * (and never downgrades) the shared lease (MS-SMB2 3.3.5.9.8: a lease is not
          * reduced by a subsequent open).  A *fresh* grant is created only when the
-         * open warrants caching (real bits).  The grant is backend-independent:
-         * coherence does not rely on the backend serving FSCTL_SRV_COPYCHUNK
-         * (CAP_COPY_RANGE).  A client whose COPYCHUNK is answered NOT_SUPPORTED
-         * falls back to plain READ/WRITE, and those paths (like every other
-         * conflicting open / lock / delete) break conflicting caching holders
-         * via vfs_state before touching data, so the old "uncached unless
-         * copy-capable" rule from the pre-break era is no longer needed. */
-        bool want_fresh_caching =
-            (req_vfs != 0 && (caching_touches_data || via_rqls));
+         * open actually requests caching bits (req_vfs != 0).
+         *
+         * An attribute-only ("stat") open is eligible for an oplock/lease just
+         * like a data open: MS-SMB2 3.3.5.9 grants the requested oplock based on
+         * the existing-open set, not the requester's data-access bits (Windows
+         * grants a BATCH oplock to a READ_ATTRIBUTES|SYNCHRONIZE create --
+         * smb2.oplock.batch9/batch9a/statopen1).  A purely passive probe that
+         * requests no oplock asks for NONE, so req_vfs == 0 and no grant is taken
+         * -- which is what leaves an existing holder's oplock intact.  The break
+         * side (a later real open breaking this holder) is handled separately by
+         * the conflict matrix, independent of how this open's access looked. */
+        bool want_fresh_caching = (req_vfs != 0);
+
+        /* A stat-open (attribute-only access, non-data-replacing disposition) is
+         * "oplock-transparent" (MS-FSA): it must NEVER break an existing holder.
+         * It may still ACQUIRE the oplock it requested, but only the subset
+         * grantable WITHOUT breaking anyone -- so a sole stat-open gets its full
+         * BATCH (smb2.oplock.batch9/batch9a/statopen1), while a stat-open behind
+         * an existing holder caps to NONE and fires no break
+         * (smb2.oplock.batch8/exclusive4).  This is the same cap-self rule the
+         * RqLs lease path uses; for a stat-open we apply it to legacy oplocks too
+         * (a *data* legacy oplock keeps the break-the-peer arbitration). */
+        /* "stat-open" == an open that does NOT break a conflicting holder: the
+         * exact inverse of break_for_open's break_trigger (MS-FSA / smb2.oplock.
+         * statopen1).  DELETE, WRITE_DAC, WRITE_OWNER, EA and any data/generic
+         * access -- plus delete-on-close or a truncating disposition -- make it a
+         * "real" open that breaks; only READ_ATTRIBUTES / WRITE_ATTRIBUTES /
+         * READ_CONTROL / SYNCHRONIZE leave it transparent.  Keep this mask in
+         * sync with chimera_smb_create_break_for_open. */
+        bool stat_open =
+            !((request->create.desired_access &
+               (SMB2_FILE_READ_DATA | SMB2_FILE_WRITE_DATA |
+                SMB2_FILE_APPEND_DATA | SMB2_FILE_EXECUTE |
+                SMB2_FILE_READ_EA | SMB2_FILE_WRITE_EA |
+                SMB2_WRITE_DACL | SMB2_WRITE_OWNER |
+                SMB2_GENERIC_READ | SMB2_GENERIC_WRITE |
+                SMB2_GENERIC_EXECUTE | SMB2_GENERIC_ALL |
+                SMB2_MAXIMUM_ALLOWED | SMB2_DELETE)) ||
+              (request->create.create_options & SMB2_FILE_DELETE_ON_CLOSE) ||
+              request->create.create_disposition == SMB2_FILE_OVERWRITE ||
+              request->create.create_disposition == SMB2_FILE_OVERWRITE_IF ||
+              request->create.create_disposition == SMB2_FILE_SUPERSEDE);
 
         if (via_rqls || want_fresh_caching) {
             file_state = chimera_vfs_state_get(vfs_state,
@@ -1230,19 +1274,38 @@ chimera_smb_create_after_share(
                          * must find a live member or it revokes the fresh lease. */
                         chimera_smb_grant_add_member(grant, open_file);
 
-                        /* MS-SMB2 3.3.5.9: granting a lease never breaks another
-                         * lease.  A fresh RqLs lease whose requested mode collides
-                         * with another key's holder (e.g. RHW behind a peer's R)
-                         * must CAP ITSELF to the grantable subset (-> RH) rather
-                         * than recall the peer; otherwise try_insert would fire a
-                         * spurious break (smb2.lease.break's "no break + no change"
-                         * re-open check, nobreakself).  Legacy oplocks keep the
-                         * break-the-peer behavior (exclusive/batch arbitration), so
-                         * cap only the lease path. */
-                        if (via_rqls) {
-                            grant->lease.mode.granted =
-                                chimera_vfs_caching_grant_cap_mode(file_state,
-                                                                   &grant->lease);
+                        /* MS-SMB2 3.3.5.9: granting an oplock/lease never breaks a
+                         * peer that the requester can simply coexist with.  Cap
+                         * the requested mode to the subset grantable against the
+                         * current holders:
+                         *   - behind a peer's READ cache (LEVEL_II / R lease) an
+                         *     exclusive/batch request caps to a shared R(H) cache,
+                         *     so two readers coexist with NO break
+                         *     (smb2.oplock.batch9 phase 3; smb2.lease.nobreakself);
+                         *   - behind a peer's EXCLUSIVE/BATCH holder the non-strict
+                         *     cap still returns the R floor with a residual
+                         *     conflict, so try_insert below breaks that holder down
+                         *     (the exclusive-arbitration path -- batch1..8).
+                         * A legacy stat-open caps STRICTLY (0 rather than R) so an
+                         * oplock-transparent probe never breaks anyone; the RqLs
+                         * lease and data-oplock paths use the non-strict cap. */
+                        grant->lease.mode.granted =
+                            chimera_vfs_caching_grant_cap_mode(
+                                file_state, &grant->lease,
+                                stat_open && !via_rqls);
+
+                        /* A stat-open that capped to no caching bits takes no
+                         * oplock at all (and breaks nobody): abandon the grant so
+                         * the open reports OPLOCK_LEVEL_NONE.  A bare RqLs lease
+                         * (LEASE_NONE) is still tracked, so this applies only to
+                         * the legacy stat-open path.  file_state is released by the
+                         * grant==NULL reporting branch below. */
+                        if (stat_open && !via_rqls &&
+                            grant->lease.mode.granted == 0) {
+                            chimera_smb_grant_remove_member(grant, open_file);
+                            free(grant);
+                            grant = NULL;
+                            goto report_caching;
                         }
 
                         result = chimera_vfs_state_try_insert(vfs_state, file_state,
@@ -1287,6 +1350,8 @@ chimera_smb_create_after_share(
                         }
                     }
                 }
+
+ report_caching:
 
                 if (grant) {
                     uint8_t granted_vfs = grant->lease.mode.granted;
@@ -1334,6 +1399,32 @@ chimera_smb_create_after_share(
                     }
                 }
             }
+        }
+    }
+
+    /* MS-SMB2 3.3.5.9.9: FILE_OPEN_REQUIRING_OPLOCK is an atomic "open only if I
+     * am granted the oplock/lease" request.  When the requested caching could
+     * not be granted (the effective oplock is NONE), the server MUST close the
+     * open and fail the CREATE with STATUS_CANNOT_BREAK_OPLOCK (#1016).  The open
+     * holds its share + caching leases and VFS handle by this point but is not
+     * yet hashed into the tree or durable-registered, so drain its leases here
+     * and return NULL with force_close_status set; the caller releases the VFS
+     * handle and completes the request, matching the AppInstanceId reject
+     * contract in gen_open_file. */
+    if ((request->create.create_options & SMB2_FILE_OPEN_REQUIRING_OPLOCK) &&
+        type == CHIMERA_SMB_OPEN_FILE_TYPE_FILE) {
+        bool got_cache =
+            (open_file->oplock_level == SMB2_OPLOCK_LEVEL_LEASE)
+            ? (open_file->lease_state != 0)
+            : (open_file->oplock_level != SMB2_OPLOCK_LEVEL_NONE);
+
+        if (!got_cache) {
+            chimera_smb_open_file_drain_locks(thread, open_file);
+            open_file->handle = NULL;
+            chimera_smb_open_file_free(thread, open_file);
+            request->create.force_close_status =
+                SMB2_STATUS_CANNOT_BREAK_OPLOCK;
+            return NULL;
         }
     }
 
@@ -4809,7 +4900,7 @@ chimera_smb_create_reply(
  * NULL handler = presence-only (the bit in ctx_present_mask is all that matters
  * for Phase 0; Phase 1/3 will add real semantics for the open-after-CREATE step). */
 
-static void
+static bool
 parse_ctx_secd(
     const uint8_t              *data,
     uint32_t                    data_len,
@@ -4830,26 +4921,27 @@ parse_ctx_secd(
                                 request->create.acl_storage,
                                 sizeof(request->create.acl_storage),
                                 canonicalize);
+    return true;
 } /* parse_ctx_secd */
 
-static void
+static bool
 parse_ctx_exta(
     const uint8_t              *data,
     uint32_t                    data_len,
     struct chimera_smb_request *request)
 {
     /* SMB2_CREATE_EA_BUFFER: a FILE_FULL_EA_INFORMATION list to apply to the
-     * created/opened object.  Copied out of the (stack-local) context blob so it
-     * survives to the async EA-apply at create completion.  The whole context
-     * blob is capped at 1024 bytes, so it always fits ea_buf. */
+     * created/opened object.  Copied out of the context blob so it survives to
+     * the async EA-apply at create completion; truncated to the fixed ea_buf. */
     if (data_len > sizeof(request->create.ea_buf)) {
         data_len = sizeof(request->create.ea_buf);
     }
     memcpy(request->create.ea_buf, data, data_len);
     request->create.ea_buf_len = data_len;
+    return true;
 } /* parse_ctx_exta */
 
-static void
+static bool
 parse_ctx_dhnc(
     const uint8_t              *data,
     uint32_t                    data_len,
@@ -4857,13 +4949,14 @@ parse_ctx_dhnc(
 {
     /* DHnC body: 16-byte SMB2_FILEID (persistent | volatile) + 16 reserved bytes. */
     if (data_len < 16) {
-        return;
+        return false;
     }
     request->create.dhnc.persistent  = smb_wire_le64(data);
     request->create.dhnc.volatile_id = smb_wire_le64(data + 8);
+    return true;
 } /* parse_ctx_dhnc */
 
-static void
+static bool
 parse_ctx_dh2q(
     const uint8_t              *data,
     uint32_t                    data_len,
@@ -4871,14 +4964,15 @@ parse_ctx_dh2q(
 {
     /* DH2Q body: Timeout(4) | Flags(4) | Reserved(8) | CreateGuid(16) = 32 bytes. */
     if (data_len < 32) {
-        return;
+        return false;
     }
     request->create.dh2q.timeout_ms = smb_wire_le32(data);
     request->create.dh2q.flags      = smb_wire_le32(data + 4);
     memcpy(request->create.dh2q.create_guid, data + 16, 16);
+    return true;
 } /* parse_ctx_dh2q */
 
-static void
+static bool
 parse_ctx_dh2c(
     const uint8_t              *data,
     uint32_t                    data_len,
@@ -4886,15 +4980,16 @@ parse_ctx_dh2c(
 {
     /* DH2C body: FileId(16) | CreateGuid(16) | Flags(4) = 36 bytes. */
     if (data_len < 36) {
-        return;
+        return false;
     }
     request->create.dh2c.persistent  = smb_wire_le64(data);
     request->create.dh2c.volatile_id = smb_wire_le64(data + 8);
     memcpy(request->create.dh2c.create_guid, data + 16, 16);
     request->create.dh2c.flags = smb_wire_le32(data + 32);
+    return true;
 } /* parse_ctx_dh2c */
 
-static void
+static bool
 parse_ctx_rqls(
     const uint8_t              *data,
     uint32_t                    data_len,
@@ -4902,14 +4997,25 @@ parse_ctx_rqls(
 {
     /* RqLs v1 body (32 bytes): LeaseKey(16) | LeaseState(4) | LeaseFlags(4) | LeaseDuration(8 reserved).
      * RqLs v2 body (52 bytes): adds ParentLeaseKey(16) | Epoch(2) | Reserved(2).
-     * Differentiate by data_len. Other sizes: malformed; skip without setting fields. */
+     * Differentiate by data_len. Other sizes: malformed; reject so the caller
+     * does not set the RQLS present-mask bit over stale pooled fields (#1116). */
     if (data_len != 32 && data_len != 52) {
-        return;
+        return false;
     }
     memcpy(request->create.rqls.key, data, 16);
     request->create.rqls.state = smb_wire_le32(data + 16);
     request->create.rqls.flags = smb_wire_le32(data + 20);
-    if (data_len == 52) {
+    /* The lease-v2 context (ParentLeaseKey/Epoch) is only valid on an SMB 3.x
+     * dialect (MS-SMB2 2.2.13.2.10 / 3.3.5.9.11).  On 2.0.2 / 2.1 a 52-byte RqLs
+     * must be processed as a v1 lease -- its v1 fields are a prefix of the v2
+     * body, so we keep LeaseKey/State/Flags and drop the v2 tail, answering with
+     * a 32-byte v1 response and tracking an unversioned lease (#1281). */
+    /* request->compound is NULL when the parser is exercised standalone by
+     * phase0_contexts_test; treat that as v2-capable (canonical) like the
+     * other handlers do. */
+    if (data_len == 52 &&
+        (!request->compound ||
+         request->compound->conn->dialect >= SMB2_DIALECT_3_0)) {
         request->create.rqls.is_v2 = 1;
         /* The ParentLeaseKey is meaningful only when the client set
          * SMB2_LEASE_FLAG_PARENT_LEASE_KEY_SET; otherwise the bytes are reserved
@@ -4924,30 +5030,33 @@ parse_ctx_rqls(
     } else {
         request->create.rqls.is_v2 = 0;
     }
+    return true;
 } /* parse_ctx_rqls */
 
-static void
+static bool
 parse_ctx_alsi(
     const uint8_t              *data,
     uint32_t                    data_len,
     struct chimera_smb_request *request)
 {
     if (data_len < 8) {
-        return;
+        return false;
     }
     request->create.alsi_alloc_size = smb_wire_le64(data);
+    return true;
 } /* parse_ctx_alsi */
 
-static void
+static bool
 parse_ctx_twrp(
     const uint8_t              *data,
     uint32_t                    data_len,
     struct chimera_smb_request *request)
 {
     if (data_len < 8) {
-        return;
+        return false;
     }
     request->create.twrp_timestamp = smb_wire_le64(data);
+    return true;
 } /* parse_ctx_twrp */
 
 /* GUID-named CREATE contexts (MS-SMB2 2.2.13.2.13 / 2.2.13.2.14).  The context
@@ -4996,7 +5105,12 @@ parse_ctx_app_instance_version(
     request->create.ctx_present_mask   |= CHIMERA_SMB_CREATE_CTX_APP_VERSION;
 } /* parse_ctx_app_instance_version */
 
-typedef void (*chimera_smb_create_ctx_handler_t)(
+/* Returns true when the context body was well-formed and its typed fields were
+ * populated.  A malformed body (wrong DataLength) returns false so the caller
+ * leaves the present-mask bit CLEAR -- otherwise a stale lease key / create
+ * GUID left in the pooled request slot by a prior CREATE would be honored
+ * (#1116). */
+typedef bool (*chimera_smb_create_ctx_handler_t)(
     const uint8_t              *data,
     uint32_t                    data_len,
     struct chimera_smb_request *request);
@@ -5097,17 +5211,25 @@ chimera_smb_parse_create_contexts(
             for (p = smb_create_ctx_parsers; p->tag != NULL; p++) {
                 if (memcmp(name, p->tag, 4) == 0) {
 
-                    /* Always set the base mask bit; RqLs v2 (52-byte body)
-                     * additionally sets RQLS_V2 so the response emit can tell
-                     * which lease variant the client requested.  (The base RQLS
-                     * bit must be set for v2 too — gen_open_file keys lease
-                     * handling off it.) */
-                    request->create.ctx_present_mask |= p->mask_bit;
-                    if (p->mask_bit == CHIMERA_SMB_CREATE_CTX_RQLS && data_len == 52) {
-                        request->create.ctx_present_mask |= CHIMERA_SMB_CREATE_CTX_RQLS_V2;
+                    /* Run the body handler first.  A malformed body (wrong
+                     * DataLength) returns false: leave the present-mask bit
+                     * CLEAR so a stale lease key / create GUID left in this
+                     * pooled request slot by a prior CREATE is not honored
+                     * (#1116).  Presence-only contexts (NULL handler) always set
+                     * the bit. */
+                    if (p->handler && !p->handler(data, data_len, request)) {
+                        break;
                     }
-                    if (p->handler) {
-                        p->handler(data, data_len, request);
+
+                    /* The base RQLS bit must be set for v2 too — gen_open_file
+                     * keys lease handling off it.  RQLS_V2 tracks whether a
+                     * versioned (epoch-bearing) lease was actually accepted; that
+                     * is gated on the SMB 3.x dialect inside parse_ctx_rqls
+                     * (#1281), so key off rqls.is_v2, not the raw 52-byte body. */
+                    request->create.ctx_present_mask |= p->mask_bit;
+                    if (p->mask_bit == CHIMERA_SMB_CREATE_CTX_RQLS &&
+                        request->create.rqls.is_v2) {
+                        request->create.ctx_present_mask |= CHIMERA_SMB_CREATE_CTX_RQLS_V2;
                     }
                     break;
                 }
@@ -5323,22 +5445,52 @@ chimera_smb_parse_create(
         request->create.set_attr.va_set_mask |= CHIMERA_VFS_ATTR_DOS_ATTRIBUTES;
     }
 
-    if (blob_offset > 0 && blob_length > 0 && blob_length <= 1024) {
-        uint8_t ctx_buf[1024];
+    if (blob_offset > 0 && blob_length > 0) {
+        uint8_t  inline_buf[1024];
+        uint8_t *ctx_buf  = inline_buf;
+        uint8_t *heap_buf = NULL;
+        int      crc;
+
+        /* The context chain must fit within a single request, which the
+         * transport already capped at the negotiated MaxTransactSize; a larger
+         * declared length is malformed.  Reject it rather than truncating
+         * (STATUS_INVALID_PARAMETER). */
+        if (blob_length > CHIMERA_SMB_MAX_TRANSACT_SIZE) {
+            chimera_smb_error("CREATE create-context blob too large (%u)", blob_length);
+            return chimera_smb_parse_reject(request, SMB2_STATUS_INVALID_PARAMETER);
+        }
+
+        /* A chain larger than the inline buffer is heap-allocated so every
+         * context (durable/lease/SD/EA/...) is still parsed.  Previously such a
+         * CREATE had ALL its contexts silently dropped -- the client believed it
+         * held a durable lease the server never granted (#1115). */
+        if (blob_length > sizeof(inline_buf)) {
+            heap_buf = malloc(blob_length);
+            if (!heap_buf) {
+                return chimera_smb_parse_reject(request,
+                                                SMB2_STATUS_INSUFFICIENT_RESOURCES);
+            }
+            ctx_buf = heap_buf;
+        }
 
         /* Seek to the client-declared create-context offset (validated to be
          * forward and within this request's window) and pull the blob with the
          * bounds-checked reader; a malformed offset/length rejects cleanly
          * rather than driving an out-of-bounds skip or read. */
         if (unlikely(smb_cursor_seek_to(request_cursor, blob_offset) != 0)) {
+            free(heap_buf);
             chimera_smb_error("CREATE create-context offset %u out of range", blob_offset);
             return chimera_smb_parse_reject(request, SMB2_STATUS_INVALID_PARAMETER);
         }
 
         if (evpl_iovec_cursor_try_copy(request_cursor, ctx_buf, blob_length) == 0) {
-            if (chimera_smb_parse_create_contexts(ctx_buf, blob_length, request) < 0) {
+            crc = chimera_smb_parse_create_contexts(ctx_buf, blob_length, request);
+            free(heap_buf);
+            if (crc < 0) {
                 return -1;
             }
+        } else {
+            free(heap_buf);
         }
     }
 

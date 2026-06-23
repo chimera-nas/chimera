@@ -274,6 +274,9 @@
 #define SMB2_STATUS_DOMAIN_LIMIT_EXCEEDED             0xC00000E1
 #define SMB2_STATUS_OPLOCK_NOT_GRANTED                0xC00000E2
 #define SMB2_STATUS_INVALID_OPLOCK_PROTOCOL           0xC00000E3
+/* Returned for an atomic FILE_OPEN_REQUIRING_OPLOCK create whose oplock/lease
+ * could not be granted (MS-SMB2 3.3.5.9.9). */
+#define SMB2_STATUS_CANNOT_BREAK_OPLOCK               0xC0000909
 #define SMB2_STATUS_INTERNAL_DB_CORRUPTION            0xC00000E4
 #define SMB2_STATUS_INTERNAL_ERROR                    0xC00000E5
 #define SMB2_STATUS_GENERIC_NOT_MAPPED                0xC00000E6
@@ -795,6 +798,9 @@ typedef uint8_t smb2_guid[SMB2_GUID_SIZE];
 /* CHANGE_NOTIFY constants */
 #define SMB2_CHANGE_NOTIFY_REQUEST_SIZE             32
 #define SMB2_CHANGE_NOTIFY_REPLY_SIZE               9
+
+/* CANCEL request fixed StructureSize (MS-SMB2 2.2.30). */
+#define SMB2_CANCEL_REQUEST_SIZE                    4
 
 #define SMB2_WATCH_TREE                             0x0001
 

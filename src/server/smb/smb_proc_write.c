@@ -402,6 +402,14 @@ chimera_smb_parse_write(
 
     int          prc = 0;
 
+    /* MS-SMB2 3.3.5.13 / 2.2.21: a WRITE StructureSize that is not exactly 49
+     * is a per-request STATUS_INVALID_PARAMETER. */
+    if (unlikely(request->request_struct_size != SMB2_WRITE_REQUEST_SIZE)) {
+        chimera_smb_error("Received SMB2 WRITE request with invalid struct size (%u expected %u)",
+                          request->request_struct_size, SMB2_WRITE_REQUEST_SIZE);
+        return chimera_smb_parse_reject(request, SMB2_STATUS_INVALID_PARAMETER);
+    }
+
     prc |= evpl_iovec_cursor_try_get_uint16(request_cursor, &data_offset);
     prc |= evpl_iovec_cursor_try_get_uint32(request_cursor, &request->write.length);
     prc |= evpl_iovec_cursor_try_get_uint64(request_cursor, &request->write.offset);

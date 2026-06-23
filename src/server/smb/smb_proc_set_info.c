@@ -598,6 +598,11 @@ chimera_smb_set_info(struct chimera_smb_request *request)
                          * mechanism (which would remove_at the whole file). */
                         if (!(request->set_info.open_file->flags &
                               CHIMERA_SMB_OPEN_FILE_FLAG_STREAM)) {
+                            /* The file is now delete-pending: a subsequent name
+                            * open is answered STATUS_DELETE_PENDING while this
+                            * handle keeps it open (MS-FSA; smb2.oplock.doc). */
+                            chimera_vfs_state_set_delete_pending(
+                                request->set_info.open_file->share_file_state);
                             /* Propagate to VFS handle for final-close deletion */
                             chimera_vfs_set_delete_on_close(
                                 request->compound->thread->vfs_thread,
@@ -632,6 +637,10 @@ chimera_smb_set_info(struct chimera_smb_request *request)
                             chimera_vfs_clear_delete_on_close(
                                 request->compound->thread->vfs_thread,
                                 request->set_info.open_file->handle);
+                            /* Disposition turned back off: no longer delete-
+                             * pending, so new opens succeed again. */
+                            chimera_vfs_state_clear_delete_pending(
+                                request->set_info.open_file->share_file_state);
                         }
                     }
                     chimera_smb_open_file_release(request, request->set_info.open_file);
