@@ -1835,6 +1835,8 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.oplock.doc
     # a share-conflicting open handle-breaks a conflicting RqLs lease (RWH->RW)
     smb2.lease.break_twice
+    # rename source recall is a single handle-recall (RH->R), not a cascade
+    smb2.lease.v2_rename
 )
 
 set(SMBTORTURE_ENABLED_linux
