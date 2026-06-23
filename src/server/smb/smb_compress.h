@@ -17,10 +17,10 @@ struct chimera_smb_compress_ctx;
  * encryption context: a per-thread object holding reusable codec scratch (the
  * LZ77 match-finder hash table), since that scratch is not thread-safe.
  *
- * Codecs implemented so far: Plain LZ77 (MS-XCA §2.4) and the chained Pattern_V1
- * run-length payload (MS-SMB2 §2.2.42.2.2) plus the NONE chained pass-through.
- * LZ77+Huffman and LZNT1 are not yet implemented; the negotiation layer only
- * advertises the algorithms below, so a peer never selects an unimplemented one.
+ * Codecs implemented: Plain LZ77 (MS-XCA §2.4), LZ77+Huffman (MS-XCA §2.1),
+ * LZNT1 (MS-XCA §2.5), the chained Pattern_V1 run-length payload (MS-SMB2
+ * §2.2.42.2.2), and the NONE chained pass-through.  All are advertised by the
+ * negotiation layer and may be selected by a peer.
  */
 struct chimera_smb_compress_ctx *
 chimera_smb_compress_ctx_create(
