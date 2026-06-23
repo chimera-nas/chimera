@@ -33,6 +33,7 @@ chimera_client_config_init(void)
     config->async_delegation_threads = 8;
     config->cache_ttl                = 60;
     config->attr_cache_enabled       = 1;
+    config->name_cache_enabled       = 1;
     config->rcu_reclaim_threads      = 4; /* 4 = cap RCU reclaim workers to avoid thread exhaustion on many-core hosts */
     config->max_fds                  = 1024;
 
@@ -196,6 +197,7 @@ chimera_client_init(
                                    config->kv_module,
                                    config->cache_ttl,
                                    config->attr_cache_enabled,
+                                   config->name_cache_enabled,
                                    config->rcu_reclaim_threads,
                                    metrics);
 
@@ -343,6 +345,10 @@ chimera_client_init_json(
     /* The VFS attribute cache (common.attr_cache) is a VFS-level facility shared
      * with the server; on by default. */
     config->attr_cache_enabled = chimera_common_attr_cache_enabled(root);
+
+    /* The VFS name (lookup) cache (common.name_cache) is likewise shared with
+     * the server; on by default. */
+    config->name_cache_enabled = chimera_common_name_cache_enabled(root);
 
     client = chimera_client_init(config, cred, metrics);
 

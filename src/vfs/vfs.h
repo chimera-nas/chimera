@@ -1568,6 +1568,7 @@ chimera_vfs_init(
     const char                          *kv_module_name,
     int                                  cache_ttl,
     int                                  attr_cache_enabled,
+    int                                  name_cache_enabled,
     int                                  num_rcu_reclaim_threads,
     struct prometheus_metrics           *metrics);
 
