@@ -1297,9 +1297,17 @@ struct diskfs_retire_slot {
 };
 
 
-#define DISKFS_RETIRE_RING_SIZE 1024    /* >= DISKFS_COMMIT_WATERMARK */
+#define DISKFS_RETIRE_RING_SIZE  1024   /* >= DISKFS_COMMIT_WATERMARK */
 
-#define DISKFS_RETIRE_RING_MASK (DISKFS_RETIRE_RING_SIZE - 1)
+#define DISKFS_RETIRE_RING_MASK  (DISKFS_RETIRE_RING_SIZE - 1)
+
+/* IL pipeline stall watchdog (diskfs_il_watchdog_cb, commit thread): tick
+ * interval, the number of consecutive no-progress ticks before the first
+ * report, and the re-log cadence while still stalled.  Diagnostic only -- it
+ * observes the pipeline atomics and never mutates them. */
+#define DISKFS_IL_WD_INTERVAL_US 1000000   /* 1s tick */
+#define DISKFS_IL_WD_STALL_TICKS 3         /* report after ~3s of no progress */
+#define DISKFS_IL_WD_RELOG_TICKS 5         /* then re-log every ~5s while stalled */
 
 /* The commit thread hands every durable record to the push thread through this
  * SPSC ring.  A record occupies at least one 4 KiB log block, so the intent log
@@ -1360,6 +1368,19 @@ struct diskfs_intent_log {
      * so the Treiber pop is ABA-free. */
     struct diskfs_il_record         *rec_pool;        /* atomic Treiber head */
     struct diskfs_redo_ctx          *ctx_pool;        /* atomic Treiber head */
+
+    /* Stall watchdog (commit thread, ~1s timer).  Reports when the pipeline has
+     * outstanding work (txns submitted-but-not-durable, durable-but-not-applied,
+     * records queued to apply, or the retire ring non-empty) and none of the
+     * frontiers have advanced for several ticks -- e.g. the apply thread wedged
+     * (applied_wm frozen below durable_wm).  Diagnostic for the pNFS
+     * LAYOUTCOMMIT apply-pipeline hang; observes atomics, mutates nothing. */
+    struct evpl_timer                wd_timer;
+    uint64_t                         wd_last_durable_wm;
+    uint64_t                         wd_last_applied_wm;
+    uint64_t                         wd_last_retire_head;
+    uint32_t                         wd_last_apply_head;
+    uint32_t                         wd_stall_ticks;
 
     /* ---------- push thread ---------- */
     struct evpl_doorbell             push_doorbell;   /* commit rings after hand-off */

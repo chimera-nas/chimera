@@ -529,6 +529,8 @@ diskfs_setattr_trunc_done(struct chimera_vfs_request *request)
     }
 
     diskfs_map_attrs(thread, &request->setattr.r_post_attr, inode);
+    chimera_diskfs_info("setattr trunc done inum=%lu new_size=%lu -> committing",
+                        (unsigned long) inode->inum, (unsigned long) inode->size);
     diskfs_op_ok(request, p->txn);
 } /* diskfs_setattr_trunc_done */
 
@@ -857,6 +859,16 @@ diskfs_setattr_inode_cb(
     }
 
     diskfs_map_attrs(thread, &request->setattr.r_pre_attr, inode);
+
+    if (orig_mask & CHIMERA_VFS_ATTR_SIZE) {
+        chimera_diskfs_info("setattr SIZE inum=%lu cur=%lu new=%lu mask=0x%lx (%s)",
+                            (unsigned long) inode->inum,
+                            (unsigned long) inode->size,
+                            (unsigned long) request->setattr.set_attr->va_size,
+                            (unsigned long) orig_mask,
+                            (request->setattr.set_attr->va_size < inode->size) ?
+                            "trunc" : "grow");
+    }
 
     /* Handle truncation: remove/trim extents past new EOF. */
     if ((request->setattr.set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) &&
