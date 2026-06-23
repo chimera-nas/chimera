@@ -472,9 +472,9 @@ chimera_smb_parse_query_directory(
     request->query_directory.eof              = 1;
     request->query_directory.last_file_offset = NULL;
 
-    if (request->query_directory.pattern_length > SMB_FILENAME_MAX) {
+    if (request->query_directory.pattern_length > SMB_FILENAME_MAX * 2) {
         chimera_smb_error("Received SMB2 QUERY_DIRECTORY request with invalid name length (%u > %u)",
-                          request->query_directory.pattern_length, SMB_FILENAME_MAX);
+                          request->query_directory.pattern_length, SMB_FILENAME_MAX * 2);
         request->status = SMB2_STATUS_NAME_TOO_LONG;
         return -1;
     }
