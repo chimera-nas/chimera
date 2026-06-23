@@ -10,6 +10,40 @@
 #include "vfs/vfs.h"
 #include "vfs/vfs_state.h"
 
+/*
+ * Completion for one SMB2_CHANNEL_RDMA_V1 read transfer (RDMA Write to a client
+ * buffer descriptor).  evpl invokes this once per evpl_rdma_write issued by
+ * chimera_smb_read_callback.  The SMB2 READ response must not be sent until all
+ * descriptors have been written -- otherwise the client is told SUCCESS while
+ * data is still in flight (MS-SMB2 3.3.5.12) -- so the request is held until the
+ * last write completes here.  The data iovecs were handed to evpl with
+ * EVPL_RDMA_FLAG_TAKE_REF, so the library owns and releases them; this callback
+ * only accounts for completion.
+ */
+static void
+chimera_smb_rdma_write_callback(
+    int   status,
+    void *private_data)
+{
+    struct chimera_smb_request *request = private_data;
+
+    chimera_smb_abort_if(request->read.pending_rdma_writes == 0,
+                         "Pending RDMA writes is 0");
+
+    if (status) {
+        request->read.r_rdma_status = status;
+    }
+
+    request->read.pending_rdma_writes--;
+
+    if (request->read.pending_rdma_writes == 0) {
+        chimera_smb_complete_request(request,
+                                     request->read.r_rdma_status ?
+                                     SMB2_STATUS_INTERNAL_ERROR :
+                                     SMB2_STATUS_SUCCESS);
+    }
+} /* chimera_smb_rdma_write_callback */
+
 static void
 chimera_smb_read_callback(
     enum chimera_vfs_error    error_code,
@@ -61,7 +95,8 @@ chimera_smb_read_callback(
         return;
     }
 
-    if (request->read.channel == SMB2_CHANNEL_RDMA_V1) {
+    if (request->read.channel == SMB2_CHANNEL_RDMA_V1 &&
+        request->read.num_rdma_elements > 0) {
 
         request->read.pending_rdma_writes = request->read.num_rdma_elements;
         request->read.r_rdma_status       = 0;
@@ -70,21 +105,30 @@ chimera_smb_read_callback(
 
         for (i = 0; i < request->read.num_rdma_elements; i++) {
 
-            chunk_niov = evpl_iovec_cursor_move(&cursor, chunk_iov, 64, request->read.rdma_elements[0].length, 0);
+            /* Each descriptor gets its OWN slice of the read data and its OWN
+             * remote token/offset -- index [i], not [0].  Writing every chunk
+             * to rdma_elements[0] corrupts/overruns the first registration and
+             * leaves the rest empty (issue #950). */
+            chunk_niov = evpl_iovec_cursor_move(&cursor, chunk_iov, 64,
+                                                request->read.rdma_elements[i].length, 0);
 
             evpl_rdma_write(
                 evpl,
                 request->compound->conn->bind,
-                request->read.rdma_elements[0].token,
-                request->read.rdma_elements[0].offset,
+                request->read.rdma_elements[i].token,
+                request->read.rdma_elements[i].offset,
                 chunk_iov,
                 chunk_niov,
                 EVPL_RDMA_FLAG_TAKE_REF,
-                NULL,
-                NULL);
+                chimera_smb_rdma_write_callback,
+                request);
 
             chunk_iov += chunk_niov;
         }
+
+        /* SUCCESS is sent from chimera_smb_rdma_write_callback once the final
+         * descriptor's RDMA Write completes, not here. */
+        return;
     }
 
     chimera_smb_complete_request(private_data, SMB2_STATUS_SUCCESS);
@@ -202,6 +246,20 @@ chimera_smb_read(struct chimera_smb_request *request)
     if (request->read.offset > 0x7FFFFFFFFFFFFFFFULL ||
         request->read.offset + request->read.length > 0x7FFFFFFFFFFFFFFFULL ||
         request->read.length > (8 * 1024 * 1024)) {
+        chimera_smb_open_file_release(request, request->read.open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+        return;
+    }
+
+    /* MS-SMB2 §3.3.5.12: an RDMA channel is only valid when the connection was
+     * established over an RDMA transport.  The Channel field is fully
+     * client-controlled, so a plain-TCP client can request RDMA_V1 and supply a
+     * parseable descriptor list; dispatching that to evpl_rdma_write on a
+     * non-RDMA bind would call through a NULL rdma op and crash the thread.
+     * Reject before issuing the read. */
+    if ((request->read.channel == SMB2_CHANNEL_RDMA_V1 ||
+         request->read.channel == SMB2_CHANNEL_RDMA_V1_INVALIDATE) &&
+        !evpl_bind_is_rdma(request->compound->conn->bind)) {
         chimera_smb_open_file_release(request, request->read.open_file);
         chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
         return;

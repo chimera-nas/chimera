@@ -280,6 +280,19 @@ chimera_smb_write(struct chimera_smb_request *request)
         return;
     }
 
+    /* MS-SMB2 §3.3.5.13: an RDMA channel is only valid over an RDMA transport.
+    * The Channel field is client-controlled; honoring RDMA_V1 on a plain-TCP
+    * connection would dispatch evpl_rdma_read on a non-RDMA bind.  Reject with
+    * INVALID_PARAMETER (the spec-required status) before touching the data. */
+    if ((request->write.channel == SMB2_CHANNEL_RDMA_V1 ||
+         request->write.channel == SMB2_CHANNEL_RDMA_V1_INVALIDATE) &&
+        !evpl_bind_is_rdma(request->compound->conn->bind)) {
+        evpl_iovecs_release(evpl, request->write.iov, request->write.niov);
+        chimera_smb_open_file_release(request, request->write.open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+        return;
+    }
+
     /* MS-SMB2 §3.3.5.2.10: a WRITE carrying a stale ChannelSequence (the client
      * has since failed over to a higher sequence) must be rejected with
      * FILE_NOT_AVAILABLE so a delayed retry cannot clobber newer data. */

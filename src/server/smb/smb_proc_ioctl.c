@@ -68,6 +68,40 @@ chimera_smb_ioctl(struct chimera_smb_request *request)
     struct chimera_smb_open_file     *open_file;
     int                               status;
 
+    /* MS-SMB2 §3.3.5.2.10: the state-modifying FSCTLs belong to the same
+     * channel-sequence-checked set as WRITE/SET_INFO.  A stale, post-failover
+     * replay of one of these must be rejected with FILE_NOT_AVAILABLE so it
+     * cannot re-apply a write the client has since superseded (e.g. re-zeroing a
+     * range a newer write refilled).  Previously ONLY the read-only
+     * CREATE_OR_GET_OBJECT_ID was guarded while the genuinely mutating FSCTLs
+     * were not (issues #1123/#1256).  Resolve the IOCTL's target handle, run the
+     * check, and release -- the per-FSCTL handlers re-resolve as needed. */
+    switch (request->ioctl.ctl_code) {
+        case SMB2_FSCTL_SET_REPARSE_POINT:
+        case SMB2_FSCTL_SET_SPARSE:
+        case SMB2_FSCTL_SET_ZERO_DATA:
+        case SMB2_FSCTL_SRV_COPYCHUNK:
+        case SMB2_FSCTL_SRV_COPYCHUNK_WRITE:
+        case SMB2_FSCTL_DUPLICATE_EXTENTS_TO_FILE:
+        case SMB2_FSCTL_OFFLOAD_WRITE:
+        case SMB2_FSCTL_SET_INTEGRITY_INFORMATION:
+            open_file = chimera_smb_open_file_resolve(request, &request->ioctl.file_id);
+            if (open_file) {
+                bool stale = chimera_smb_channel_sequence_stale(
+                    open_file, request->channel_sequence, 1);
+
+                chimera_smb_open_file_release(request, open_file);
+
+                if (stale) {
+                    chimera_smb_complete_request(request, SMB2_STATUS_FILE_NOT_AVAILABLE);
+                    return;
+                }
+            }
+            break;
+        default:
+            break;
+    } /* state-modifying FSCTL channel-sequence guard */
+
     switch (request->ioctl.ctl_code) {
         case SMB2_FSCTL_DFS_GET_REFERRALS:
             /* No DFS support; tell the client to stop asking. */
@@ -491,17 +525,30 @@ chimera_smb_ioctl_reply(
                 evpl_iovec_cursor_append_uint16(reply_cursor, nic_info->addr.ss_family == AF_INET ? 2 :
                                                 23);                                                                    /* Windows AF_INET / AF_INET6 */
                 evpl_iovec_cursor_append_uint16(reply_cursor, 0); /* port */
+                /* The SockAddr field is a fixed 128-byte SOCKADDR_STORAGE
+                 * (MS-SMB2 2.2.32 / MS-DTYP).  family(2)+port(2) are already
+                 * written; emit the family-specific body and zero-fill the
+                 * remainder so EVERY record is exactly Next(4)+IfIndex(4)+
+                 * Capability(4)+Reserved(4)+LinkSpeed(8)+SockAddr(128) = 152
+                 * bytes -- matching the hardcoded Next and the declared
+                 * output_length.  The IPv6 form is family(2)+port(2)+
+                 * flowinfo(4)+addr(16)+scope_id(4), NOT the IPv4 layout. */
                 if (nic_info->addr.ss_family == AF_INET) {
                     evpl_iovec_cursor_append_blob(reply_cursor,
                                                   &((struct sockaddr_in *) &nic_info->addr)->sin_addr.s_addr,
-                                                  4);                                                                   /* IPv4 address */
+                                                  4);                                                                   /* sin_addr */
+                    evpl_iovec_cursor_zero(reply_cursor, 120); /* SOCKADDR_STORAGE remainder: 128 - (2+2+4) */
                 } else {
+                    evpl_iovec_cursor_append_uint32(reply_cursor,
+                                                    ((struct sockaddr_in6 *) &nic_info->addr)->sin6_flowinfo); /* sin6_flowinfo */
                     evpl_iovec_cursor_append_blob(reply_cursor,
                                                   &((struct sockaddr_in6 *) &nic_info->addr)->sin6_addr.
                                                   s6_addr,
-                                                  16);                                                                  /* IPv6 address */
+                                                  16);                                                                  /* sin6_addr */
+                    evpl_iovec_cursor_append_uint32(reply_cursor,
+                                                    ((struct sockaddr_in6 *) &nic_info->addr)->sin6_scope_id); /* sin6_scope_id */
+                    evpl_iovec_cursor_zero(reply_cursor, 100); /* SOCKADDR_STORAGE remainder: 128 - (2+2+4+16+4) */
                 }
-                evpl_iovec_cursor_zero(reply_cursor, 120); /* ifname length */
             }
             break;
         case SMB2_FSCTL_GET_REPARSE_POINT:
