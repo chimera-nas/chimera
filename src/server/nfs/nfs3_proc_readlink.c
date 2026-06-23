@@ -27,6 +27,16 @@ chimera_nfs3_readlink_complete(
 
     res->status = chimera_vfs_error_to_nfsstat3(error_code);
 
+    /* READLINK is only valid on a symlink (RFC 1813 §3.3.5); enforce at the
+     * protocol layer rather than relying on every backend to map a non-symlink
+     * to EINVAL.  The type comes from the attrs already fetched, so no extra
+     * round-trip. */
+    if (res->status == NFS3_OK && attr &&
+        (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
+        (attr->va_mode & S_IFMT) != S_IFLNK) {
+        res->status = NFS3ERR_INVAL;
+    }
+
     if (res->status == NFS3_OK) {
         chimera_nfs3_set_post_op_attr(&res->resok.symlink_attributes, attr);
         res->resok.data.len = targetlen;
