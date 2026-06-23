@@ -40,10 +40,13 @@
  * LockSequenceIndex in bits [0..3]; the rest is reserved.  Replay verification is
  * performed only for a durable / persistent / resilient handle, or on an SMB 3.x
  * connection that negotiated multichannel (per the spec and Note <314>). */
-static inline uint8_t
+static inline uint32_t
 chimera_smb_lock_seq_bucket(uint32_t lock_sequence)
 {
-    return (uint8_t) ((lock_sequence >> 4) & 0xFF);
+    /* The full 28-bit LockSequenceNumber (bits 4..31); the 1..64 range check at
+     * the call site rejects out-of-extent values instead of aliasing them via an
+     * 8-bit truncation (MS-SMB2 2.2.26 / 3.3.5.14). */
+    return lock_sequence >> 4;
 } /* chimera_smb_lock_seq_bucket */
 
 static inline uint8_t
@@ -732,7 +735,7 @@ chimera_smb_lock(struct chimera_smb_request *request)
     request->lock.seq_bucket = 0;
     request->lock.seq_index  = chimera_smb_lock_seq_index(request->lock.lock_sequence);
     if (chimera_smb_lock_replay_active(request, open_file)) {
-        uint8_t b = chimera_smb_lock_seq_bucket(request->lock.lock_sequence);
+        uint32_t b = chimera_smb_lock_seq_bucket(request->lock.lock_sequence);
 
         if (b >= 1 && b <= 64) {
             request->lock.seq_bucket = b;
