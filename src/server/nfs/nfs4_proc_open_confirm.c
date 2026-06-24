@@ -96,6 +96,21 @@ chimera_nfs4_open_confirm(
         return;
     }
 
+    /* RFC 7530 §9.1.4.2: OPEN_CONFIRM must carry the exact stateid OPEN minted.
+     * The acquire above validates structural identity (generation) but not the
+     * stateid.seqid; check it explicitly as CLOSE/OPEN_DOWNGRADE do, so a stale
+     * seqid is OLD_STATEID and a future one BAD_STATEID. */
+    status = nfs4_stateid_check_seqid(open_state->seqid,
+                                      args->open_stateid.seqid);
+    if (status != NFS4_OK) {
+        pthread_mutex_unlock(&owner->lock);
+        nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
+                                thread->vfs_thread);
+        res->status = status;
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
     /* New op: confirm the owner and advance state.seqid. */
     owner->confirmed   = true;
     owner->seqid       = args->seqid;
