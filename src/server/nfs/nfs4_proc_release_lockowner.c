@@ -32,6 +32,10 @@ chimera_nfs4_release_lockowner(
         return;
     }
 
+    /* RFC 7530 §9.5: RELEASE_LOCKOWNER is a clientid-bearing operation and
+     * renews all of the client's leases. */
+    nfs_client_touch(client);
+
     pthread_mutex_lock(&client->lock);
 
     HASH_FIND(hh, client->lock_owners_by_str,
