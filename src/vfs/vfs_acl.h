@@ -98,6 +98,14 @@ enum chimera_special_who {
      * presence in a DACL suppresses the otherwise-implicit owner rights so the
      * owner's access is defined entirely by the ACEs. */
     CHIMERA_WHO_OWNER_RIGHTS  = 10,
+    /* RFC 7530 §6.2.1.5 Table 5 special identifiers (DIALUP@ / BATCH@ /
+     * SERVICE@, SIDs S-1-5-1 / S-1-5-3 / S-1-5-6).  Like INTERACTIVE@/NETWORK@
+     * they describe an access method no Unix caller matches, but the spec
+     * requires they be accepted, stored, and displayed so a client can set and
+     * read them; they match nothing during access evaluation. */
+    CHIMERA_WHO_DIALUP        = 11,
+    CHIMERA_WHO_BATCH         = 12,
+    CHIMERA_WHO_SERVICE       = 13,
 };
 
 struct chimera_principal {

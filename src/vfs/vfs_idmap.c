@@ -21,6 +21,9 @@
 #define SID_NETWORK       "S-1-5-2"  /* Network          */
 #define SID_INTERACTIVE   "S-1-5-4"  /* Interactive      */
 #define SID_ANONYMOUS     "S-1-5-7"  /* Anonymous        */
+#define SID_DIALUP        "S-1-5-1"  /* Dialup           */
+#define SID_BATCH         "S-1-5-3"  /* Batch            */
+#define SID_SERVICE       "S-1-5-6"  /* Service          */
 
 static const char *
 special_to_who_string(uint8_t special)
@@ -33,6 +36,9 @@ special_to_who_string(uint8_t special)
         case CHIMERA_WHO_NETWORK:       return "NETWORK@";
         case CHIMERA_WHO_AUTHENTICATED: return "AUTHENTICATED@";
         case CHIMERA_WHO_ANONYMOUS:     return "ANONYMOUS@";
+        case CHIMERA_WHO_DIALUP:        return "DIALUP@";
+        case CHIMERA_WHO_BATCH:         return "BATCH@";
+        case CHIMERA_WHO_SERVICE:       return "SERVICE@";
         default:                        return NULL;
     } /* switch */
 } /* special_to_who_string */
@@ -55,6 +61,9 @@ who_string_to_special(
         { "NETWORK@",       CHIMERA_WHO_NETWORK       },
         { "AUTHENTICATED@", CHIMERA_WHO_AUTHENTICATED },
         { "ANONYMOUS@",     CHIMERA_WHO_ANONYMOUS     },
+        { "DIALUP@",        CHIMERA_WHO_DIALUP        },
+        { "BATCH@",         CHIMERA_WHO_BATCH         },
+        { "SERVICE@",       CHIMERA_WHO_SERVICE       },
     };
     /* *INDENT-ON* */
 
@@ -242,6 +251,9 @@ chimera_idmap_principal_to_sid(
             case CHIMERA_WHO_NETWORK:       s = SID_NETWORK; break;
             case CHIMERA_WHO_AUTHENTICATED: s = SID_AUTHENTICATED; break;
             case CHIMERA_WHO_ANONYMOUS:     s = SID_ANONYMOUS; break;
+            case CHIMERA_WHO_DIALUP:        s = SID_DIALUP; break;
+            case CHIMERA_WHO_BATCH:         s = SID_BATCH; break;
+            case CHIMERA_WHO_SERVICE:       s = SID_SERVICE; break;
             default:                        return -1;
         } /* switch */
         len = (int) strlen(s);
