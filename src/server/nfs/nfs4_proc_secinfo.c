@@ -42,6 +42,10 @@ chimera_nfs4_secinfo_complete(
 
     res->num_resok4 = chimera_nfs_fill_secinfo(res->resok4,
                                                export ? export->sec_allowed : 0);
+    /* RFC 7530 §16.31.3 / RFC 8881 §18.29.3: SECINFO consumes the current
+     * filehandle on success, so a following op relying on it fails with
+     * NFS4ERR_NOFILEHANDLE. */
+    req->fhlen  = 0;
     res->status = NFS4_OK;
     chimera_nfs4_compound_complete(req, NFS4_OK);
 } /* chimera_nfs4_secinfo_complete */
@@ -119,6 +123,8 @@ chimera_nfs4_secinfo(
         chimera_nfs_abort_if(res->resok4 == NULL, "Failed to allocate space");
         res->num_resok4 = chimera_nfs_fill_secinfo(res->resok4,
                                                    export ? export->sec_allowed : 0);
+        /* Consume the current filehandle on success (see above). */
+        req->fhlen  = 0;
         res->status = NFS4_OK;
         chimera_nfs4_compound_complete(req, NFS4_OK);
         return;
