@@ -46,7 +46,10 @@ chimera_s3_put_getattr_callback(
         chimera_s3_attach_etag(request->http_request, attr);
     }
 
-    chimera_vfs_release(thread->vfs, request->file_handle);
+    if (request->file_handle) {
+        chimera_vfs_release(thread->vfs, request->file_handle);
+        request->file_handle = NULL;
+    }
 
     /* If the PutObject carried an x-amz-tagging header, store the parsed tags
      * as xattrs on the freshly-written object before responding. */
@@ -69,11 +72,17 @@ chimera_s3_put_finish_common(
     struct chimera_server_s3_thread *thread  = request->thread;
     struct evpl                     *evpl    = thread->evpl;
 
-    chimera_vfs_release(thread->vfs, request->dir_handle);
+    if (request->dir_handle) {
+        chimera_vfs_release(thread->vfs, request->dir_handle);
+        request->dir_handle = NULL;
+    }
 
     if (error_code) {
         request->status = CHIMERA_S3_STATUS_INTERNAL_ERROR;
-        chimera_vfs_release(thread->vfs, request->file_handle);
+        if (request->file_handle) {
+            chimera_vfs_release(thread->vfs, request->file_handle);
+            request->file_handle = NULL;
+        }
         request->vfs_state = CHIMERA_S3_VFS_STATE_SEND;
         if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
             s3_server_respond(evpl, request);

@@ -502,6 +502,19 @@ s3_server_dispatch(
     s3_request->query_part_number  = 0;
     s3_request->http_request       = request;
 
+    /* Requests are recycled through a per-thread free list (see
+     * chimera_s3_request_alloc) and are NOT zeroed on reuse. The VFS open
+     * handles are released by each handler's completion path, but several of
+     * those paths drop the reference without clearing the pointer, so a
+     * recycled request can carry a dangling file_handle / dir_handle from a
+     * prior op. If a later handler's error path then releases that stale
+     * pointer (e.g. CompleteMultipartUpload's create-dir error branch in
+     * chimera_s3_complete_finish_common), and the VFS close thread has since
+     * swept the now-idle cached handle, the release is a use-after-free.
+     * Clear them here so a fresh request always starts with no held handles. */
+    s3_request->file_handle = NULL;
+    s3_request->dir_handle  = NULL;
+
     *notify_callback = s3_server_notify;
     *notify_data     = s3_request;
 

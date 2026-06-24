@@ -39,6 +39,13 @@ struct chimera_s3_multipart_upload {
     pthread_mutex_t                     lock;
     int                                 refcount;
     int                                 removed;
+    /* Set by the CompleteMultipartUpload that wins the race to assemble this
+     * upload. The upload stays in the table (so a retried Complete still finds
+     * it) until assembly succeeds and detaches it. A second Complete that finds
+     * this set is a duplicate/retry and replays the success response instead of
+     * re-assembling. Cleared on assembly failure so a genuine retry can drive
+     * it again. Guarded by `lock`. */
+    int                                 completing;
     struct chimera_s3_part             *parts;
     struct chimera_s3_multipart_upload *prev, *next;
     uint8_t                             bucket_fh[CHIMERA_VFS_FH_SIZE];
