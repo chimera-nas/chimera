@@ -41,7 +41,10 @@ chimera_s3_get_finish(struct chimera_s3_request *request)
 {
     struct chimera_server_s3_thread *thread = request->thread;
 
-    chimera_vfs_release(thread->vfs, request->file_handle);
+    if (request->file_handle) {
+        chimera_vfs_release(thread->vfs, request->file_handle);
+        request->file_handle = NULL;
+    }
 
     request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
 
