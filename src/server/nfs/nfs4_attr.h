@@ -1057,6 +1057,16 @@ chimera_nfs4_unmarshall_attrs(
                     return NFS4ERR_BADXDR;
                 }
 
+                /* aclsupport advertises only ALLOW/DENY ACEs (see the
+                 * fattr4_aclsupport encode below).  RFC 7530 §6.2.1.4.1
+                 * requires rejecting an ACE of an unsupported type with
+                 * NFS4ERR_ATTRNOTSUPP rather than silently storing an
+                 * AUDIT/ALARM ACE that would never be enforced. */
+                if (type != ACE4_ACCESS_ALLOWED_ACE_TYPE &&
+                    type != ACE4_ACCESS_DENIED_ACE_TYPE) {
+                    return NFS4ERR_ATTRNOTSUPP;
+                }
+
                 is_group = !!(flag & CHIMERA_ACE_FLAG_IDENTIFIER_GROUP);
 
                 acl_buf->aces[i].type        = (uint16_t) type;
