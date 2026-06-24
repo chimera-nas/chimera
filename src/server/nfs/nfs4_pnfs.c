@@ -226,11 +226,20 @@ chimera_nfs4_getdeviceinfo(
      * validate a device id or (de)register notifications: TOOSMALL MUST NOT be
      * returned and the reply's da_addr_body is zero length.  Otherwise signal
      * TOOSMALL with the required size when the body cannot fit. */
+    /* gdia_maxcount bounds the entire GETDEVICEINFO4resok, including XDR
+     * overhead, not just the da_addr_body (RFC 8881 §18.40.3).  Beyond the
+     * body the resok carries da_layout_type (4), the da_addr_body opaque
+     * length prefix (4, with the body padded to a 4-byte boundary) and the
+     * gdir_notification bitmap count (4).  Compare maxcount against -- and
+     * report gdir_mincount as -- that full size, so a client that retries at
+     * exactly gdir_mincount does not TOOSMALL again. */
+    uint32_t resok_len = 4 + 4 + ((body_len + 3) & ~3u) + 4;
+
     if (args->gdia_maxcount == 0) {
         body_len = 0;
-    } else if (args->gdia_maxcount < body_len) {
+    } else if (args->gdia_maxcount < resok_len) {
         res->gdir_status   = NFS4ERR_TOOSMALL;
-        res->gdir_mincount = body_len;
+        res->gdir_mincount = resok_len;
         chimera_nfs4_compound_complete(req, res->gdir_status);
         return;
     }
