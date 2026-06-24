@@ -3230,10 +3230,18 @@ diskfs_dealloc_process(struct chimera_vfs_request *request)
     }
 
     if (es >= hole_start && ee <= hole_end) {
-        /* Completely inside the hole: free + remove, then advance. */
+        /* Completely inside the hole: free + remove, then advance.  Pass the raw
+         * extent range (not block-rounded-up): an extent can end mid-block when a
+         * sub-block-unaligned DEALLOCATE left a kept sibling extent in the same
+         * 4 KiB block (e.g. written | unwritten fragments from a prior punch).
+         * space_map_free frees only whole blocks strictly contained, so the raw
+         * range never frees that shared edge block.  Rounding the length UP would
+         * free the partial trailing block out from under the kept sibling, which
+         * is then re-allocated to a later write -> the sibling reads back the new
+         * writer's data (silent cross-extent corruption). */
         diskfs_thread_free_space(thread, p->txn, p->ext_iter.device_id,
                                  p->ext_iter.device_offset,
-                                 SM_ALIGN_UP(p->ext_iter.length));
+                                 p->ext_iter.length);
         op = diskfs_bt_op_alloc(thread);
         if (diskfs_ext_remove_async(op, thread, p->txn, p->inode_stash[0], es,
                                     diskfs_dealloc_modify_advance_cb, request)) {
