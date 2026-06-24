@@ -1051,12 +1051,22 @@ chimera_nfs4_layoutreturn(
             uint32_t in_seqid =
                 args->lora_layoutreturn.lr_layout.lrf_stateid.seqid;
 
+            /* RFC 8881 §18.44.3: for LAYOUTRETURN4_FILE the layout stateid's
+             * seqid MUST NOT be zero -- unlike the anonymous/current special
+             * stateids used elsewhere, a zero seqid here is rejected with
+             * NFS4ERR_BAD_STATEID rather than treated as a wildcard. */
+            if (in_seqid == 0) {
+                res->lorr_status = NFS4ERR_BAD_STATEID;
+                chimera_nfs4_compound_complete(req, res->lorr_status);
+                return;
+            }
+
             /* RFC 8881 §12.5.3: the layout stateid carried by LAYOUTRETURN must
              * match the server's current seqid for this layout.  A stale seqid
-             * is OLD_STATEID, a future one BAD_STATEID; seqid 0 is the wildcard
-             * "current" and always matches.  (LAYOUTGET, by contrast, tolerates
-             * an old seqid -- the client may race two LAYOUTGETs.) */
-            if (in_seqid != 0 && in_seqid < layout->seqid) {
+             * is OLD_STATEID, a future one BAD_STATEID.  (LAYOUTGET, by
+             * contrast, tolerates an old seqid -- the client may race two
+             * LAYOUTGETs.) */
+            if (in_seqid < layout->seqid) {
                 res->lorr_status = NFS4ERR_OLD_STATEID;
                 chimera_nfs4_compound_complete(req, res->lorr_status);
                 return;
