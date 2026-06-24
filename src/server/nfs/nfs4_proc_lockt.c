@@ -155,6 +155,9 @@ chimera_nfs4_lockt(
         struct nfs4_session *s = nfs4_session_find_by_clientid(
             &thread->shared->nfs4_shared_clients, args->owner.clientid);
         if (s) {
+            /* RFC 7530 §9.5: LOCKT is a clientid-bearing operation and renews
+             * all of the client's leases. */
+            nfs_client_touch(s->client_unified);
             nfs4_session_put(s);
         } else {
             res->status = NFS4ERR_STALE_CLIENTID;
