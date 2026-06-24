@@ -117,13 +117,26 @@ nfs_state_table_init(
      *   bits 31..16 : node_id  -- attributes the stateid to its minting
      *                 instance, so peers sharing one backing store never mint
      *                 colliding epochs and a foreign stateid is recognisable.
-     *   bits 15..1  : low 15 bits of boot time -- differs across this node's
+     *   bits 15..1  : 15-bit boot discriminator -- differs across this node's
      *                 restarts, so a previous instance's stateids read as stale.
      *   bit  0      : 1 -- with node_id >= 1 this keeps the epoch away from the
      *                 special all-zero/all-ones stateids and pynfs's small
      *                 "old epoch" probe values (replacing the old 0x80000000). */
+    struct timespec ts;
+
+    clock_gettime(CLOCK_REALTIME, &ts);
+
+    /* Fold the full-resolution boot time (seconds AND nanoseconds) into the
+     * 15-bit discriminator.  A bare `time(NULL) & 0x7FFF` collides whenever two
+     * restarts' wall-clock seconds are congruent mod 32768 (~9.1h) -- a
+     * deterministic, easily-hit alias.  Mixing the high seconds bits and the
+     * nanosecond field makes a collision a ~1/32768 chance instead, so a
+     * previous instance's stateids reliably read as STALE_STATEID on reboot. */
+    uint32_t boot = (uint32_t) ts.tv_sec ^ ((uint32_t) ts.tv_sec >> 15) ^
+        (uint32_t) ts.tv_nsec ^ ((uint32_t) ts.tv_nsec >> 15);
+
     table->epoch = ((uint32_t) node_id << 16) |
-        (((uint32_t) time(NULL) & 0x7FFFu) << 1) | 1u;
+        ((boot & 0x7FFFu) << 1) | 1u;
 } /* nfs_state_table_init */
 
 void
