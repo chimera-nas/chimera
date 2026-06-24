@@ -275,13 +275,21 @@ chimera_server_config_init(void)
     /* The VFS name (lookup) cache is on by default (common.name_cache). */
     config->name_cache_enabled = 1;
 
-    /* Number of liburcu call_rcu reclaim worker threads.  0 (the default) means
-     * one worker per CPU (create_all_cpu_call_rcu_data) to keep RCU reclaim up
-     * with per-request cache churn under heavy load.  On a many-core host that
-     * spawns hundreds of threads, which is wasteful for short-lived or
-     * lightly-loaded instances (memory, and process-teardown cost); set a small
-     * positive value (e.g. the CI test daemons) to cap the worker count. */
-    config->rcu_reclaim_threads = 0;
+    /* Number of liburcu call_rcu reclaim worker threads.  0 means one worker
+     * per CPU (create_all_cpu_call_rcu_data) to keep RCU reclaim up with
+     * per-request cache churn under heavy load.  On a many-core host that
+     * spawns hundreds of threads per server instance, which is wasteful for
+     * short-lived or lightly-loaded instances (memory, process-teardown cost)
+     * AND is a correctness hazard: liburcu's call_rcu_data_init does NOT retry
+     * pthread_create and abort()s the whole process on a transient EAGAIN
+     * ("Unrecoverable error: Resource temporarily unavailable").  Spawning
+     * hundreds of RCU threads at once -- as many in-process server instances do
+     * in parallel under a -j CI run -- makes that EAGAIN abort likely, which is
+     * the root cause of the intermittent lockf/fcntl NFS3 test flakes.  Default
+     * to a small cap (matching the chimera client default) so the common case
+     * stays well clear of the thread-exhaustion abort; a real server with a
+     * heavy workload can raise it via common.rcu_reclaim_threads. */
+    config->rcu_reclaim_threads = 4;
 
     /* Default NFSv4.1 fore-channel session slots (server cap on the number
      * of concurrent SEQUENCE requests a client may have outstanding per
