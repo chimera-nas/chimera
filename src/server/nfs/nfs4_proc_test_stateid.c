@@ -25,8 +25,16 @@ chimera_nfs4_test_stateid(
         req->encoding->dbuf);
 
     for (i = 0; i < args->num_ts_stateids; i++) {
-        resok->tsr_status_codes[i] = nfs_state_table_validate(
-            table, &args->ts_stateids[i]);
+        nfsstat4 st = nfs_state_table_validate(table, &args->ts_stateids[i]);
+
+        /* NFS4ERR_STALE_STATEID is a 4.0-only code and is not a valid
+         * per-stateid status for TEST_STATEID (RFC 8881 §18.48.3 / §15.1.16.5);
+         * a wrong-epoch or older-generation stateid is reported as
+         * NFS4ERR_BAD_STATEID to a 4.1+ client. */
+        if (st == NFS4ERR_STALE_STATEID) {
+            st = NFS4ERR_BAD_STATEID;
+        }
+        resok->tsr_status_codes[i] = st;
     }
 
     res->tsr_status = NFS4_OK;

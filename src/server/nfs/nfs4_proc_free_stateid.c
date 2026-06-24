@@ -57,6 +57,13 @@ chimera_nfs4_free_stateid(
         return;
     }
 
+    /* NFS4ERR_STALE_STATEID is a 4.0-only code; FREE_STATEID is 4.1+-only, so
+     * a wrong-epoch / older-generation stateid is reported as
+     * NFS4ERR_BAD_STATEID per the RFC 8881 §15.2 FREE_STATEID error set. */
+    if (status == NFS4ERR_STALE_STATEID) {
+        status = NFS4ERR_BAD_STATEID;
+    }
+
     if (status != NFS4_OK) {
         res->fsr_status = status;
         chimera_nfs4_compound_complete(req, res->fsr_status);
