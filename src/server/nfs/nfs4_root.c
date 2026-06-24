@@ -170,7 +170,13 @@ nfs4_root_readdir_lookup_callback(
     struct entry4                       *entry = ctx->entry;
 
     if (error_code != CHIMERA_VFS_OK) {
-        abort();
+        /* An export root that fails to resolve (deleted directory, config
+        * typo, momentarily unavailable backend) is a routine condition, not
+        * a server fault.  Record it so nfs4_root_readdir_itr_cb surfaces it
+        * as an NFS4ERR_* READDIR status instead of aborting the whole process
+        * (RFC 7530 §16.24 / RFC 8881 §18.23: report errors as status). */
+        ctx->error_code = error_code;
+        return;
     }
     chimera_nfs4_marshall_attrs(attrs,
                                 args->num_attr_request,
