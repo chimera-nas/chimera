@@ -138,6 +138,12 @@ chimera_nfs4_close(
     nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
                             thread->vfs_thread);
 
+    /* RFC 8881 §16.2.3.1.2: CLOSE destroys the open state, so the COMPOUND's
+     * current stateid must not continue to name it.  Invalidate it -- a
+     * following op that uses the current stateid then fails with
+     * NFS4ERR_BAD_STATEID instead of resolving to destroyed state. */
+    chimera_nfs4_clear_current_stateid(req);
+
     res->status = NFS4_OK;
     chimera_nfs4_compound_complete(req, NFS4_OK);
 } /* chimera_nfs4_close */
