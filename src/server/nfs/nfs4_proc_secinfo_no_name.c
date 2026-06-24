@@ -31,6 +31,9 @@ chimera_nfs4_secinfo_no_name(
 
     res->num_resok4 = chimera_nfs_fill_secinfo(res->resok4,
                                                export ? export->sec_allowed : 0);
+    /* RFC 8881 §18.45.3: SECINFO_NO_NAME consumes the current filehandle on
+     * success, so a following op relying on it fails with NFS4ERR_NOFILEHANDLE. */
+    req->fhlen  = 0;
     res->status = NFS4_OK;
 
     chimera_nfs4_compound_complete(req, NFS4_OK);
