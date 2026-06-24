@@ -46,10 +46,6 @@ chimera_nfs4_sequence(
 
     req->session = session;
 
-    /* SEQUENCE is the 4.1+ lease tick (RFC 8881 §8.4); touch the owning
-     * client's lease before consulting the slot table. */
-    nfs_client_touch(session->client_unified);
-
     status = nfs4_replay_slot_acquire(session,
                                       args->sa_slotid,
                                       args->sa_sequenceid,
@@ -68,6 +64,7 @@ chimera_nfs4_sequence(
          * the cached reply bytes verbatim.  Phase 1 has no cache so
          * this branch is unreachable today; nfs4_replay_slot_acquire
          * returns NFS4ERR_RETRY_UNCACHED_REP instead. */
+        nfs_client_touch(session->client_unified);
         chimera_nfs4_compound_complete(req, NFS4_OK);
         return;
     }
@@ -121,6 +118,13 @@ chimera_nfs4_sequence(
         chimera_nfs4_compound_complete(req, NFS4ERR_REP_TOO_BIG_TO_CACHE);
         return;
     }
+
+    /* SEQUENCE is the 4.1+ lease tick (RFC 8881 §8.4).  §18.46.3 requires the
+     * lease be renewed only when SEQUENCE returns NFS4_OK and the slot state
+     * advances -- never on a BADSLOT/MISORDERED/REQ_TOO_BIG/TOO_MANY_OPS error
+     * -- so the touch happens here, after every validation has passed, rather
+     * than up front. */
+    nfs_client_touch(session->client_unified);
 
     chimera_nfs4_compound_complete(req, NFS4_OK);
 } /* chimera_nfs4_sequence */
