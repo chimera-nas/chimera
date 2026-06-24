@@ -84,6 +84,16 @@ chimera_nfs4_seek(
     req->nfs_state_ref = NULL;
     req->handle        = NULL;
 
+    /* RFC 7862 §15.11.3: sa_what selects the content type to seek for and is
+     * only defined for NFS4_CONTENT_DATA / NFS4_CONTENT_HOLE.  Reject anything
+     * else with NFS4ERR_INVAL rather than passing it through to the backend. */
+    if (args->sa_what != NFS4_CONTENT_DATA &&
+        args->sa_what != NFS4_CONTENT_HOLE) {
+        res->sa_status = NFS4ERR_INVAL;
+        chimera_nfs4_compound_complete(req, res->sa_status);
+        return;
+    }
+
     /* NFS4.1 current-stateid substitution (RFC 8881 §16.2.3.1.2). */
     chimera_nfs4_resolve_current_stateid(req, &args->sa_stateid);
 
