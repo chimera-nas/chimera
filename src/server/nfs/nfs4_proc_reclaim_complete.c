@@ -27,14 +27,18 @@ chimera_nfs4_reclaim_complete(
         return;
     }
 
-    /* RFC 8881 §18.51 / RFC 7530 §10.2.5: client signals end of reclaim
-     * activity.  Drop the per-client recovery marker.  When persistence
-     * lands and the to_reclaim hash is populated at boot, the
-     * pending_reclaim counter hitting zero will also end the grace window
-     * early via nfs_recovery_sweep_once. */
-    nfs_recovery_reclaim_complete(
-        &thread->shared->nfs4_recovery,
-        req->session ? req->session->client_unified : NULL);
+    /* RFC 8881 §18.51.3: rca_one_fs == TRUE signals the client finished
+     * reclaim for a SINGLE file system after migration -- it is NOT the global
+     * end-of-reclaim and must not retire the client's whole reclaim obligation
+     * or decrement the server-wide pending_reclaim counter (which would end the
+     * grace window early for everyone).  Only the global form (rca_one_fs ==
+     * FALSE) drops the recovery marker.  Chimera does not track per-fs reclaim
+     * (no fs_locations/migration yet), so the per-fs variant is a no-op. */
+    if (!args->rca_one_fs) {
+        nfs_recovery_reclaim_complete(
+            &thread->shared->nfs4_recovery,
+            req->session ? req->session->client_unified : NULL);
+    }
 
     res->rcr_status = NFS4_OK;
 
