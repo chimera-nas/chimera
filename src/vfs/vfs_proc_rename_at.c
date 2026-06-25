@@ -182,21 +182,42 @@ chimera_vfs_rename_at_source_lookup_complete(
         memcpy(request->rename_at.source_fh, attr->va_fh, attr->va_fh_len);
         request->rename_at.source_fh_len = attr->va_fh_len;
 
-        /* The renamed file SURVIVES the rename -- only its name/handle binding is
-         * invalidated, the data is unchanged -- so this is a single HANDLE recall
-         * (RH->R), not a cascade to NONE.  A full revoke would drive a v2 lease
-         * RH->R->NONE, two break notifications, where the client expects one
-         * (smb2.lease.v2_rename).  NFSv4 delegations on the source are recalled
-         * explicitly by the NFSv4 rename op before rename_at runs, so this leaves
-         * them already gone.  The doomed DESTINATION (recall_target) is destroyed
-         * and is still fully revoked. */
-        chimera_vfs_io_recall_single(request,
-                                     request->rename_at.source_fh,
-                                     request->rename_at.source_fh_len,
-                                     chimera_vfs_hash(request->rename_at.source_fh,
-                                                      request->rename_at.source_fh_len),
-                                     CHIMERA_VFS_LEASE_MODE_R,
-                                     chimera_vfs_rename_at_recall_target);
+        /* How hard to recall the source's caching holders depends on the caller:
+         *
+         *  - SMB (op_handle != NULL): the renamed file SURVIVES with its data
+         *    intact -- only the name/handle binding is invalidated -- so an SMB
+         *    v2 lease is broken with a SINGLE handle recall (RH->R), preserving
+         *    the read cache.  A full revoke would cascade RH->R->NONE, sending
+         *    two break notifications where the client expects one
+         *    (smb2.lease.v2_rename).
+         *
+         *  - NFS / S3 (op_handle == NULL): an NFSv4 delegation on the source must
+         *    be RECALLED outright on rename (RFC 7530 namespace recall) -- there
+         *    is no "keep the read cache" downgrade for a delegation, and the
+         *    explicit NFSv4-rename recall does not cover every backend/path -- so
+         *    fall back to a full revoke (retain NONE).  Single-stepping a
+         *    delegation to R here would leave it un-recalled and the client
+         *    would never see CB_RECALL (pynfs DELEG6/17/18).
+         *
+         * The doomed DESTINATION (recall_target) is always destroyed and so is
+         * always fully revoked. */
+        if (request->io_handle) {
+            chimera_vfs_io_recall_single(request,
+                                         request->rename_at.source_fh,
+                                         request->rename_at.source_fh_len,
+                                         chimera_vfs_hash(request->rename_at.source_fh,
+                                                          request->rename_at.source_fh_len),
+                                         CHIMERA_VFS_LEASE_MODE_R,
+                                         chimera_vfs_rename_at_recall_target);
+        } else {
+            chimera_vfs_io_recall(request,
+                                  request->rename_at.source_fh,
+                                  request->rename_at.source_fh_len,
+                                  chimera_vfs_hash(request->rename_at.source_fh,
+                                                   request->rename_at.source_fh_len),
+                                  0 /* namespace recall: revoke fully */,
+                                  chimera_vfs_rename_at_recall_target);
+        }
     } else {
         /* Source not resolvable (e.g. ENOENT); the backend rename will return
          * the appropriate error.  Just recall the destination and proceed. */
