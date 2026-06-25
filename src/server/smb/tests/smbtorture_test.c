@@ -152,6 +152,12 @@ run_smbtorture(
                     * deadlock timeout it uses to bound the blocking-lock wait;
                     * the option is specific to that test. */
                    " --option=torture:open_brlock_deadlock_timemout=2"
+                   /* chimera revokes an unacked oplock/lease break at its 30s
+                    * deadline (CHIMERA_VFS_STATE_DEFAULT_BREAK_DEADLINE_MS); tell
+                    * the client so the smb2.oplock.batch22a/b break-timeout
+                    * duration assertion (CHECK_RANGE(te, timeout-1, timeout+15))
+                    * brackets 30s rather than the 35s Windows default. */
+                   " --option=torture:oplocktimeout=30"
                    /* SMB3 signing algorithms the client offers (see sign_algos
                     * above): GMAC-first only for the signing/encryption subtests
                     * that require it, CMAC otherwise. */

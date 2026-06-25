@@ -1391,8 +1391,14 @@ chimera_smb_create_after_share(
                     chimera_vfs_state_put(vfs_state, file_state);
                     file_state = NULL;
                     if (via_rqls) {
+                        /* No caching state was established (granted NONE), so the
+                         * v2 epoch does NOT advance -- it is echoed unchanged.
+                         * The epoch increments only when a lease actually holds
+                         * or changes caching bits (MS-SMB2 3.3.5.9.11;
+                         * smb2.lease.lease-epoch: a lease capped to NONE behind a
+                         * byte-range lock keeps its requested epoch). */
                         if (request->create.rqls.is_v2) {
-                            open_file->lease_epoch = request->create.rqls.epoch + 1;
+                            open_file->lease_epoch = request->create.rqls.epoch;
                         }
                         open_file->lease_state  = 0;
                         open_file->oplock_level = SMB2_OPLOCK_LEVEL_LEASE;
