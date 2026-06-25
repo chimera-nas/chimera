@@ -271,6 +271,11 @@ struct chimera_smb_share {
      * be encrypted (an unsigned, unencrypted access is rejected).  Independent
      * of the global smb_encryption knob. */
     bool                               encrypt_data;
+    /* Per-share SMB2_SHAREFLAG_FORCE_LEVELII_OPLOCK (MS-SMB2 §2.2.10): the share
+     * forces level-2 oplocks, so the server grants at most a read (LEVEL_II)
+     * cache -- an exclusive/batch oplock or a write/handle lease is downgraded
+     * by clearing the W and H caching bits at grant time (3.3.5.9.x). */
+    bool                               force_level2_oplock;
     /* Set once the share's backend has been scanned for persisted handle
      * records at first use (best-effort, idempotent recovery). */
     bool                               durable_recovered;

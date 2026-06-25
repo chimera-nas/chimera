@@ -163,7 +163,15 @@ generate_config() {
            [ "$share" = "SMBEncrypted" ]; then
             share_enc=', "encrypt_data": true'
         fi
-        shares="${shares}${sep}\"${share}\": {\"path\": \"/${share}\"${share_ca}${share_enc}}"
+        # ShareForceLevel2 is the designated FORCE_LEVELII_OPLOCK share (matches
+        # the ForceLevel2 share name in the ptfconfig): flag it so TREE_CONNECT
+        # advertises SMB2_SHAREFLAG_FORCE_LEVELII_OPLOCK and oplock/lease grants
+        # there are capped to LEVEL_II (WPTS OplockOnShareWithForceLevel2).
+        local share_fl2=""
+        if [ "$share" = "ShareForceLevel2" ]; then
+            share_fl2=', "force_level2_oplock": true'
+        fi
+        shares="${shares}${sep}\"${share}\": {\"path\": \"/${share}\"${share_ca}${share_enc}${share_fl2}}"
         sep=",
         "
     done

@@ -137,6 +137,12 @@ chimera_smb_tree_connect_reply(
             request->tree->share->access_based_enum) {
             share_flags |= SMB2_SHAREFLAG_ACCESS_BASED_DIRECTORY_ENUM;
         }
+        /* Force level-2 oplocks: advertise so the client knows this share grants
+         * at most a read (LEVEL_II) cache (MS-SMB2 §2.2.10). */
+        if (request->tree && request->tree->share &&
+            request->tree->share->force_level2_oplock) {
+            share_flags |= SMB2_SHAREFLAG_FORCE_LEVELII_OPLOCK;
+        }
         /* Per-share encryption: tell the client to encrypt all traffic on this
          * tree (MS-SMB2 §2.2.10 / §3.3.5.7). */
         if (request->tree && request->tree->share &&

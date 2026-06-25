@@ -2192,6 +2192,19 @@ chimera_server_share_set_encrypt_data(
 } /* chimera_server_share_set_encrypt_data */
 
 SYMBOL_EXPORT int
+chimera_server_share_set_force_level2_oplock(
+    struct chimera_server *server,
+    const char            *share_name)
+{
+    if (!server->smb_shared) {
+        return -1;
+    }
+
+    return chimera_smb_share_set_force_level2_oplock(server->smb_shared,
+                                                     share_name);
+} /* chimera_server_share_set_force_level2_oplock */
+
+SYMBOL_EXPORT int
 chimera_server_create_export(
     struct chimera_server *server,
     const char            *name,
