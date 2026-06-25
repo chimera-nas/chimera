@@ -205,11 +205,20 @@ done
 # Build the test command to run inside the VM
 # Build mount options based on NFS version
 NFS_MOUNT_OPTS="vers=${NFS_VERSION},tcp,nconnect=16"
+NLM_PREP=""
 if [ "$NFS_VERSION" = "3" ]; then
-    NFS_MOUNT_OPTS="${NFS_MOUNT_OPTS},nolock"
+    if [ -n "${NFS_ENABLE_NLM:-}" ]; then
+        # NLM locking over NFSv3 needs the kernel client's NSM (rpc.statd) and a
+        # registered rpcbind; bring them up in the guest and mount *with* locking
+        # so a post-mount byte-range lock routes a real NLM LOCK to the server.
+        # (Mirrors the krb5_nlm test's bring-up.)
+        NLM_PREP="mkdir -p /run/rpcbind /var/lib/nfs/sm /var/lib/nfs/sm.bak /var/lib/nfs/statd; modprobe lockd 2>/dev/null; /usr/sbin/rpcbind 2>/dev/null; sleep 0.3; /usr/sbin/rpc.statd 2>/dev/null; sleep 0.5;"
+    else
+        NFS_MOUNT_OPTS="${NFS_MOUNT_OPTS},nolock"
+    fi
 fi
 
-TEST_CMD="mount -t nfs -o ${NFS_MOUNT_OPTS} 10.0.0.1:/share /mnt && ${TEST_CMD_ARG}"
+TEST_CMD="${NLM_PREP} mount -t nfs -o ${NFS_MOUNT_OPTS} 10.0.0.1:/share /mnt && ${TEST_CMD_ARG}"
 
 # Boot QEMU inside the netns
 # Use -serial stdio so serial output goes to stdout in real-time (captured by ctest).
