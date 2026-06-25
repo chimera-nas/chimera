@@ -264,6 +264,19 @@ struct diskfs_request_private {
     int                         loop_have;
     uint64_t                    alloc_cap;   /* ALLOCATE: adaptive per-chunk cap */
 
+    /* DEALLOCATE edge-zeroing (diskfs_dealloc_edge_*): the punch's two sub-block
+     * remainders -- [hole_start, SM_ALIGN_UP(hole_start)) and
+     * (hole_end & ~MASK, hole_end) -- are zeroed in place on the backing device
+     * block so the surviving extent owns whole blocks (no block is ever split
+     * between a freed region and a kept extent, which is what keeps the space-map
+     * free accounting whole-block and leak-free).  dz_zs is the moving cursor
+     * over the remainders (the block-aligned interior is skipped); dz_ze is the
+     * hole end; dz_edge is the current block's RMW phase (0 = read, 1 = write);
+     * dz_blk is the 4 KiB RMW buffer for the block being zeroed. */
+    uint64_t                    dz_zs, dz_ze;
+    int                         dz_edge;
+    struct evpl_iovec           dz_blk;
+
     struct evpl_iovec           iov[66];
 
     // For RMW (read-modify-write) on partial block writes
