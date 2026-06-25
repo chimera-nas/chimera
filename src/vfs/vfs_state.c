@@ -3799,6 +3799,17 @@ chimera_vfs_state_revoke_expired_breaks(
 
     pthread_mutex_lock(&file->lock);
     for (cur = file->caching_leases; cur; cur = cur->next) {
+        /* NFSv4 delegations are NOT force-revoked on a recall-deadline miss:
+         * RFC 7530 governs their lifetime through the client's lease (a client
+         * that stops renewing has ALL state expired by the NFSv4 lease-expiry
+         * path; a client that keeps renewing while its callback path is down is
+         * told CB_PATH_DOWN and given the chance to recover and DELEGRETURN --
+         * pynfs DELEG6).  This proactive sweep exists for SMB2 oplock/lease
+         * break-ack timeouts (#1030), where a dead-but-not-disconnected client
+         * would otherwise pin the lease BREAKING forever. */
+        if (cur->owner.protocol == CHIMERA_VFS_LEASE_PROTO_NFSV4) {
+            continue;
+        }
         if (cur->break_state == CHIMERA_VFS_BREAK_BREAKING &&
             chimera_vfs_break_deadline_passed(cur) &&
             n < CHIMERA_VFS_STATE_MAX_BREAK_BATCH) {
