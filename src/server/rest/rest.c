@@ -165,6 +165,11 @@ enum chimera_rest_post_handler {
 
 #define REST_POST_MAX_BODY 65536
 
+/* evpl_iovec_ring_copyv writes one output iovec per recv-ring segment it
+ * consumes, with no capacity check.  Size the output array to this and bound
+ * each copy request (below) so the returned segment count can never exceed it. */
+#define REST_POST_MAX_IOV  256
+
 struct chimera_rest_post_ctx {
     enum chimera_rest_post_handler handler;
 };
@@ -183,8 +188,8 @@ chimera_rest_notify(
     struct chimera_rest_post_ctx *ctx    = notify_data;
     struct chimera_rest_thread   *thread = private_data;
     uint64_t                      avail;
-    struct evpl_iovec             iov;
-    int                           niov;
+    struct evpl_iovec             iov[REST_POST_MAX_IOV];
+    int                           niov, i;
     char                          body[REST_POST_MAX_BODY];
     int                           body_len = 0;
 
@@ -205,12 +210,22 @@ chimera_rest_notify(
             chunk = REST_POST_MAX_BODY - body_len;
         }
 
-        niov = evpl_http_request_get_datav(evpl, request, &iov, chunk);
+        /* Bound the request by the iovec array size: copyv emits at most one
+         * output iovec per byte (a one-byte recv segment), so a chunk no larger
+         * than REST_POST_MAX_IOV can never overflow iov[]. */
+        if (chunk > REST_POST_MAX_IOV) {
+            chunk = REST_POST_MAX_IOV;
+        }
 
-        if (niov > 0) {
-            memcpy(body + body_len, evpl_iovec_data(&iov), iov.length);
-            body_len += iov.length;
-            evpl_iovec_release(evpl, &iov);
+        niov = evpl_http_request_get_datav(evpl, request, iov, chunk);
+
+        /* Copy every segment copyv returned (it may split one chunk across
+         * several): copying only iov[0] both under-reads the body and leaves
+         * the ring accounting ahead of body_len. */
+        for (i = 0; i < niov; i++) {
+            memcpy(body + body_len, evpl_iovec_data(&iov[i]), iov[i].length);
+            body_len += iov[i].length;
+            evpl_iovec_release(evpl, &iov[i]);
         }
 
         avail = evpl_http_request_get_data_avail(request);
