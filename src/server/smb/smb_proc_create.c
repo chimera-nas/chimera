@@ -3978,14 +3978,20 @@ chimera_smb_create_guid_replay(struct chimera_smb_request *request)
          * replay6); and an ineligible replay that falls through to a fresh open
          * (replay-twice-durable, replay6). */
         if (request->compound->thread->shared->config.persistent_handles) {
-            struct chimera_smb_open_file       *parked = NULL;
-            enum chimera_smb_guid_replay_result gr     =
+            struct chimera_smb_open_file       *parked        = NULL;
+            bool                                has_lease_ctx =
+                (request->create.ctx_present_mask & CHIMERA_SMB_CREATE_CTX_RQLS) != 0;
+            const uint8_t                      *lease_key =
+                has_lease_ctx ? request->create.rqls.key : NULL;
+            enum chimera_smb_guid_replay_result gr =
                 chimera_smb_durable_claim_by_guid(
                     request->compound->thread->shared,
                     request->create.dh2q.create_guid,
                     request->compound->conn->client_guid,
                     request->compound->conn,
                     request->is_replay,
+                    has_lease_ctx,
+                    lease_key,
                     &parked);
 
             switch (gr) {
@@ -3995,6 +4001,10 @@ chimera_smb_create_guid_replay(struct chimera_smb_request *request)
                 case CHIMERA_SMB_GUID_REPLAY_DUPLICATE:
                     chimera_smb_complete_request(request,
                                                  SMB2_STATUS_DUPLICATE_OBJECTID);
+                    return 1;
+                case CHIMERA_SMB_GUID_REPLAY_DENIED:
+                    chimera_smb_complete_request(request,
+                                                 SMB2_STATUS_ACCESS_DENIED);
                     return 1;
                 case CHIMERA_SMB_GUID_REPLAY_NONE:
                     break;
