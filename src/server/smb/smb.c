@@ -1550,6 +1550,22 @@ chimera_smb_server_handle_smb2(
             }
         }
 
+        /* MS-SMB2 3.3.5.2.4 / 3.3.5.3: an SMB2 NEGOTIATE request is exchanged
+         * before any session (and therefore any signing key) exists, so it can
+         * never carry a valid signature -- a NEGOTIATE with SMB2_FLAGS_SIGNED set
+         * is malformed and MUST be failed with STATUS_INVALID_PARAMETER (answered
+         * in order, not by dropping the transport).  SMB2Model Signing cases that
+         * negotiate with the signed flag set. */
+        if ((request->smb2_hdr.flags & SMB2_FLAGS_SIGNED) &&
+            !received_encrypted &&
+            request->smb2_hdr.command == SMB2_NEGOTIATE) {
+            request->session_handle                      = NULL;
+            request->status                              = SMB2_STATUS_INVALID_PARAMETER;
+            request->flags                              |= CHIMERA_SMB_REQUEST_FLAG_PARSE_FAILED;
+            compound->requests[compound->num_requests++] = request;
+            goto next_compound_request;
+        }
+
         if ((request->smb2_hdr.flags & SMB2_FLAGS_SIGNED) &&
             !received_encrypted &&
             request->smb2_hdr.command != SMB2_SESSION_SETUP) {
@@ -1573,11 +1589,20 @@ chimera_smb_server_handle_smb2(
                 signing_key = conn->last_session_handle->signing_key;
             } else {
                 if (unlikely(request->session_handle == NULL)) {
+                    /* MS-SMB2 3.3.5.2.4: a signed request whose SessionId names no
+                     * session (e.g. a signed NEGOTIATE, or any signed non-
+                     * SESSION_SETUP command carrying SessionId 0 or a stale id)
+                     * cannot be signature-verified.  Answer STATUS_USER_SESSION_
+                     * DELETED in order -- the same graceful deferral the unsigned
+                     * unknown-session path uses -- rather than dropping the
+                     * transport (SMB2Model Signing InvalidIdentifier cases). */
                     chimera_smb_error("Received signed SMB2 message with missing/invalid session id %x",
                                       request->smb2_hdr.session_id);
-                    chimera_smb_request_free(thread, request);
-                    evpl_close(evpl, conn->bind);
-                    return;
+                    request->session_handle                      = NULL;
+                    request->status                              = SMB2_STATUS_USER_SESSION_DELETED;
+                    request->flags                              |= CHIMERA_SMB_REQUEST_FLAG_PARSE_FAILED;
+                    compound->requests[compound->num_requests++] = request;
+                    goto next_compound_request;
                 }
                 signing_key = request->session_handle->signing_key;
             }

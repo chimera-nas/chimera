@@ -2266,21 +2266,21 @@ SigningTestCaseS0,base,skip,0,feature-off: model found case inapplicable under a
 SigningTestCaseS1010,base,skip,0,feature-off: model found case inapplicable under all tested configs
 SigningTestCaseS1022,base,green,0,
 SigningTestCaseS1034,base,green,0,
-SigningTestCaseS1107,base,xfail,0,executed but fails (candidate defect)
+SigningTestCaseS1107,base,green,0,
 SigningTestCaseS1128,base,green,0,
 SigningTestCaseS1140,base,green,0,
 SigningTestCaseS1152,base,skip,0,feature-off: model found case inapplicable under all tested configs
 SigningTestCaseS1164,base,skip,0,feature-off: model found case inapplicable under all tested configs
 SigningTestCaseS1176,base,green,0,
-SigningTestCaseS1188,base,xfail,0,executed but fails (candidate defect)
-SigningTestCaseS1200,base,xfail,0,executed but fails (candidate defect)
-SigningTestCaseS1218,base,xfail,0,executed but fails (candidate defect)
-SigningTestCaseS1230,base,xfail,0,executed but fails (candidate defect)
-SigningTestCaseS1242,base,xfail,0,executed but fails (candidate defect)
-SigningTestCaseS1254,base,xfail,0,executed but fails (candidate defect)
-SigningTestCaseS1266,base,xfail,0,executed but fails (candidate defect)
+SigningTestCaseS1188,base,green,0,
+SigningTestCaseS1200,base,green,0,
+SigningTestCaseS1218,base,green,0,
+SigningTestCaseS1230,base,green,0,
+SigningTestCaseS1242,base,green,0,
+SigningTestCaseS1254,base,green,0,
+SigningTestCaseS1266,base,green,0,
 SigningTestCaseS1278,base,green,0,
-SigningTestCaseS1354,base,xfail,0,executed but fails (candidate defect)
+SigningTestCaseS1354,base,green,0,
 SigningTestCaseS136,base,green,0,
 SigningTestCaseS1378,base,green,0,
 SigningTestCaseS1390,base,green,0,
@@ -2288,13 +2288,13 @@ SigningTestCaseS1402,base,skip,0,feature-off: model found case inapplicable unde
 SigningTestCaseS1414,base,green,0,
 SigningTestCaseS1426,base,skip,0,feature-off: model found case inapplicable under all tested configs
 SigningTestCaseS1438,base,green,0,
-SigningTestCaseS1462,base,xfail,0,executed but fails (candidate defect)
+SigningTestCaseS1462,base,green,0,
 SigningTestCaseS1499,base,green,0,
 SigningTestCaseS1511,base,green,0,
 SigningTestCaseS1523,base,skip,0,feature-off: model found case inapplicable under all tested configs
 SigningTestCaseS1535,base,green,0,
 SigningTestCaseS1547,base,skip,0,feature-off: model found case inapplicable under all tested configs
-SigningTestCaseS1559,base,xfail,0,executed but fails (candidate defect)
+SigningTestCaseS1559,base,green,0,
 SigningTestCaseS1561,base,green,0,
 SigningTestCaseS1576,base,skip,0,feature-off: model found case inapplicable under all tested configs
 SigningTestCaseS1588,base,skip,0,feature-off: model found case inapplicable under all tested configs
@@ -2310,50 +2310,50 @@ SigningTestCaseS1697,base,skip,0,feature-off: model found case inapplicable unde
 SigningTestCaseS1704,base,skip,0,feature-off: model found case inapplicable under all tested configs
 SigningTestCaseS1716,base,skip,0,feature-off: model found case inapplicable under all tested configs
 SigningTestCaseS1728,base,skip,0,feature-off: model found case inapplicable under all tested configs
-SigningTestCaseS1740,base,xfail,0,executed but fails (candidate defect)
-SigningTestCaseS1747,base,xfail,0,executed but fails (candidate defect)
-SigningTestCaseS1754,base,xfail,0,executed but fails (candidate defect)
-SigningTestCaseS1761,base,xfail,0,executed but fails (candidate defect)
-SigningTestCaseS1768,base,xfail,0,executed but fails (candidate defect)
-SigningTestCaseS1775,base,xfail,0,executed but fails (candidate defect)
-SigningTestCaseS1782,base,xfail,0,executed but fails (candidate defect)
-SigningTestCaseS1789,base,xfail,0,executed but fails (candidate defect)
-SigningTestCaseS193,base,xfail,0,executed but fails (candidate defect)
+SigningTestCaseS1740,base,green,0,
+SigningTestCaseS1747,base,green,0,
+SigningTestCaseS1754,base,green,0,
+SigningTestCaseS1761,base,green,0,
+SigningTestCaseS1768,base,green,0,
+SigningTestCaseS1775,base,green,0,
+SigningTestCaseS1782,base,green,0,
+SigningTestCaseS1789,base,green,0,
+SigningTestCaseS193,base,green,0,
 SigningTestCaseS230,base,green,0,
 SigningTestCaseS242,base,green,0,
 SigningTestCaseS254,base,skip,0,feature-off: model found case inapplicable under all tested configs
 SigningTestCaseS266,base,green,0,
 SigningTestCaseS278,base,skip,0,feature-off: model found case inapplicable under all tested configs
 SigningTestCaseS290,base,green,0,
-SigningTestCaseS333,base,xfail,0,executed but fails (candidate defect)
+SigningTestCaseS333,base,green,0,
 SigningTestCaseS383,base,green,0,
 SigningTestCaseS395,base,green,0,
 SigningTestCaseS407,base,skip,0,feature-off: model found case inapplicable under all tested configs
 SigningTestCaseS419,base,skip,0,feature-off: model found case inapplicable under all tested configs
 SigningTestCaseS431,base,green,0,
 SigningTestCaseS443,base,green,0,
-SigningTestCaseS487,base,xfail,0,executed but fails (candidate defect)
+SigningTestCaseS487,base,green,0,
 SigningTestCaseS511,base,green,0,
 SigningTestCaseS523,base,skip,0,feature-off: model found case inapplicable under all tested configs
 SigningTestCaseS535,base,skip,0,feature-off: model found case inapplicable under all tested configs
 SigningTestCaseS547,base,green,0,
 SigningTestCaseS559,base,skip,0,feature-off: model found case inapplicable under all tested configs
-SigningTestCaseS571,base,xfail,0,executed but fails (candidate defect)
+SigningTestCaseS571,base,green,0,
 SigningTestCaseS621,base,green,0,
 SigningTestCaseS664,base,green,0,
 SigningTestCaseS676,base,skip,0,feature-off: model found case inapplicable under all tested configs
 SigningTestCaseS688,base,skip,0,feature-off: model found case inapplicable under all tested configs
 SigningTestCaseS700,base,green,0,
 SigningTestCaseS712,base,skip,0,feature-off: model found case inapplicable under all tested configs
-SigningTestCaseS724,base,xfail,0,executed but fails (candidate defect)
-SigningTestCaseS765,base,xfail,0,executed but fails (candidate defect)
-SigningTestCaseS821,base,xfail,0,executed but fails (candidate defect)
-SigningTestCaseS833,base,xfail,0,executed but fails (candidate defect)
-SigningTestCaseS845,base,xfail,0,executed but fails (candidate defect)
-SigningTestCaseS857,base,xfail,0,executed but fails (candidate defect)
-SigningTestCaseS869,base,xfail,0,executed but fails (candidate defect)
+SigningTestCaseS724,base,green,0,
+SigningTestCaseS765,base,green,0,
+SigningTestCaseS821,base,green,0,
+SigningTestCaseS833,base,green,0,
+SigningTestCaseS845,base,green,0,
+SigningTestCaseS857,base,green,0,
+SigningTestCaseS869,base,green,0,
 SigningTestCaseS881,base,green,0,
-SigningTestCaseS937,base,xfail,0,executed but fails (candidate defect)
+SigningTestCaseS937,base,green,0,
 SigningTestCaseS974,base,green,0,
 SigningTestCaseS986,base,green,0,
 SigningTestCaseS998,base,skip,0,feature-off: model found case inapplicable under all tested configs
