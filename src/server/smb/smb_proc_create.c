@@ -5247,6 +5247,27 @@ chimera_smb_parse_create(
         return -1;
     }
 
+    /* MS-FSA 2.1.5.1: a trailing backslash denotes "this name must resolve to a
+     * directory".  For a directory open it is valid and stripped so the path
+     * walk sees the bare name (FsaCreateDirectory_EndWithBackSlash); with
+     * FILE_NON_DIRECTORY_FILE it is STATUS_OBJECT_NAME_INVALID
+     * (FsaCreateFile_EndWithInvalidBackSlash).  Only the non-stream case is
+     * handled here -- a trailing backslash inside a stream suffix (after a ':')
+     * is left to the stream-name validation (smb2.streams.names2). */
+    if (request->create.parent_path_len > 0 &&
+        request->create.parent_path[request->create.parent_path_len - 1] == '\\' &&
+        !memchr(request->create.parent_path, ':', request->create.parent_path_len)) {
+        if (request->create.create_options & SMB2_FILE_NON_DIRECTORY_FILE) {
+            request->status = SMB2_STATUS_OBJECT_NAME_INVALID;
+            return -1;
+        }
+        do {
+            request->create.parent_path_len--;
+        } while (request->create.parent_path_len > 0 &&
+                 request->create.parent_path[request->create.parent_path_len - 1] == '\\');
+        request->create.parent_path[request->create.parent_path_len] = '\0';
+    }
+
     /* Split the final path component off at the last backslash.  A named-stream
      * suffix (everything from the first ':' onward) is part of the final
      * component and may itself contain backslashes (e.g. an invalid stream name

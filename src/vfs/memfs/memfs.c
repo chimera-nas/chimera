@@ -186,6 +186,13 @@ struct memfs_inode {
     struct timespec            ctime;
     struct timespec            btime;
     uint64_t                   change; /* native monotonic change counter */
+
+    /* MS-FSA 2.1.5.14.2 timestamp-update suppression.  A SetInfo
+     * (FileBasicInformation) with a -1 sentinel for a field "halts" the
+     * object store's implicit, I/O-driven updates to that timestamp until a
+     * -2 sentinel resumes them; the pin is a persistent property of the file
+     * (it survives close/reopen), so it lives on the inode, not the open. */
+    uint8_t                    time_halt;
     struct memfs_inode        *next;
     struct memfs_xattr        *xattrs;
     struct memfs_remote       *remote; /* non-NULL => pNFS stub (data lives on a DS) */
@@ -676,6 +683,7 @@ memfs_inode_alloc(
     inode->refcnt         = 1;
     inode->mode           = 0;
     inode->change         = 0;
+    inode->time_halt      = 0;
     inode->dos_attributes = 0;
     inode->acl            = NULL;
     inode->xattrs         = NULL;
@@ -1453,6 +1461,41 @@ memfs_map_attrs_fork(
     }
 } /* memfs_map_attrs_fork */
 
+/* Per-field bits for memfs_inode.time_halt (the MS-FSA timestamp pin). */
+#define MEMFS_TIME_HALT_ATIME 0x1
+#define MEMFS_TIME_HALT_MTIME 0x2
+#define MEMFS_TIME_HALT_CTIME 0x4
+
+/* Apply a settable timestamp to its stored field while honoring the MS-FSA
+ * halt/resume pins (CHIMERA_VFS_TIME_HALT / _RESUME, carried in tv_nsec):
+ *   - HALT   sets the inode's per-field pin and leaves the value untouched;
+ *   - RESUME clears the pin and leaves the value untouched;
+ *   - an implicit "now" bump (TIME_NOW) is suppressed while the field is pinned;
+ *   - everything else (a concrete value, or TIME_OMIT) resolves as usual.
+ * `bit` is 0 for fields that are never implicitly updated (btime), so HALT/
+ * RESUME degrade to a value-preserving no-op there. */
+static inline void
+memfs_apply_set_time(
+    struct memfs_inode    *inode,
+    const struct timespec *in,
+    struct timespec       *stored,
+    const struct timespec *now,
+    uint8_t                bit)
+{
+    if (in->tv_nsec == CHIMERA_VFS_TIME_HALT) {
+        inode->time_halt |= bit;
+        return;
+    }
+    if (in->tv_nsec == CHIMERA_VFS_TIME_RESUME) {
+        inode->time_halt &= ~bit;
+        return;
+    }
+    if (in->tv_nsec == CHIMERA_VFS_TIME_NOW && (inode->time_halt & bit)) {
+        return;
+    }
+    chimera_vfs_resolve_set_time(in, now, stored);
+} /* memfs_apply_set_time */
+
 static inline void
 memfs_apply_attrs(
     struct memfs_inode       *inode,
@@ -1505,12 +1548,14 @@ memfs_apply_attrs(
 
     if (set_mask & CHIMERA_VFS_ATTR_ATIME) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_ATIME;
-        chimera_vfs_resolve_set_time(&attr->va_atime, &now, &inode->atime);
+        memfs_apply_set_time(inode, &attr->va_atime, &inode->atime, &now,
+                             MEMFS_TIME_HALT_ATIME);
     }
 
     if (set_mask & CHIMERA_VFS_ATTR_MTIME) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_MTIME;
-        chimera_vfs_resolve_set_time(&attr->va_mtime, &now, &inode->mtime);
+        memfs_apply_set_time(inode, &attr->va_mtime, &inode->mtime, &now,
+                             MEMFS_TIME_HALT_MTIME);
     }
 
     /* ACL coherence.  An explicit ACL set replaces storage and re-derives mode;
@@ -1538,7 +1583,10 @@ memfs_apply_attrs(
 
     if (set_mask & CHIMERA_VFS_ATTR_BTIME) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_BTIME;
-        chimera_vfs_resolve_set_time(&attr->va_btime, &now, &inode->btime);
+        /* Creation time is never implicitly updated, so it has no pin bit (0):
+         * -1/-2 degrade to a value-preserving no-op (MS-FSA: "-1 and -2 ...
+         * have no effect" on CreationTime). */
+        memfs_apply_set_time(inode, &attr->va_btime, &inode->btime, &now, 0);
     }
 
     /* Opaque pNFS layout state: persist the NFS server's blob verbatim. */
@@ -1563,8 +1611,9 @@ memfs_apply_attrs(
      * all (NFS chmod/chown, etc.), stamp it with `now`. */
     if (set_mask & CHIMERA_VFS_ATTR_CTIME) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_CTIME;
-        chimera_vfs_resolve_set_time(&attr->va_ctime, &now, &inode->ctime);
-    } else {
+        memfs_apply_set_time(inode, &attr->va_ctime, &inode->ctime, &now,
+                             MEMFS_TIME_HALT_CTIME);
+    } else if (!(inode->time_halt & MEMFS_TIME_HALT_CTIME)) {
         inode->ctime = now;
     }
 
@@ -3241,6 +3290,7 @@ memfs_read(
      * the recorded atime is a day stale, so steady-state reads return identical
      * attrs (and stop churning the VFS attr cache). */
     if (!shared->noatime &&
+        !(inode->time_halt & MEMFS_TIME_HALT_ATIME) &&
         chimera_vfs_relatime_needs_update(&inode->atime, &inode->mtime, &inode->ctime, &now)) {
         inode->atime = now;
     }
@@ -3444,8 +3494,14 @@ memfs_write(
         *p_space_used = (*p_size + 4095) & ~4095;
     }
 
-    inode->mtime = now;
-    inode->ctime = now;
+    /* Skip the implicit timestamp bumps the caller pinned via SetInfo
+     * (FileBasicInformation) -1 (MS-FSA 2.1.5.14.2). */
+    if (!(inode->time_halt & MEMFS_TIME_HALT_MTIME)) {
+        inode->mtime = now;
+    }
+    if (!(inode->time_halt & MEMFS_TIME_HALT_CTIME)) {
+        inode->ctime = now;
+    }
     inode->change++;
 
     /* POSIX kill-priv: a non-privileged write to a regular file clears the
@@ -3637,8 +3693,12 @@ memfs_allocate(
         }
     }
 
-    inode->mtime = now;
-    inode->ctime = now;
+    if (!(inode->time_halt & MEMFS_TIME_HALT_MTIME)) {
+        inode->mtime = now;
+    }
+    if (!(inode->time_halt & MEMFS_TIME_HALT_CTIME)) {
+        inode->ctime = now;
+    }
     inode->change++;
 
     memfs_map_attrs_fork(shared, &request->allocate.r_post_attr, inode, stream, request->fh);
@@ -5339,8 +5399,13 @@ memfs_open_stream(
         stream->linked   = 1;
         stream->next     = inode->streams;
         inode->streams   = stream;
-        inode->mtime     = now;
-        inode->ctime     = now;
+        /* Creating a named stream is a metadata change to the base file: it
+         * advances ChangeTime, but NOT LastWriteTime -- no write reached the
+         * default data stream (MS-FSA; FileInfo_Set_FileBasicInformation_
+         * Timestamp_MinusOne_Dir_LastWriteTime).  Honor any ctime halt pin. */
+        if (!(inode->time_halt & MEMFS_TIME_HALT_CTIME)) {
+            inode->ctime = now;
+        }
         inode->change++;
         request->open_stream.r_created = 1;
     } else if (flags & CHIMERA_VFS_OPEN_EXCLUSIVE) {
@@ -5349,11 +5414,17 @@ memfs_open_stream(
         request->complete(request);
         return;
     } else if (flags & CHIMERA_VFS_OPEN_TRUNCATE) {
+        /* Truncating the stream changes its data: advance both LastWriteTime
+         * and ChangeTime, subject to the halt pins. */
         memfs_fork_free_blocks(thread, &stream->fork);
         stream->size       = 0;
         stream->space_used = 0;
-        inode->mtime       = now;
-        inode->ctime       = now;
+        if (!(inode->time_halt & MEMFS_TIME_HALT_MTIME)) {
+            inode->mtime = now;
+        }
+        if (!(inode->time_halt & MEMFS_TIME_HALT_CTIME)) {
+            inode->ctime = now;
+        }
         inode->change++;
     }
 

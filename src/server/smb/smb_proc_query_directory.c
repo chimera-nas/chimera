@@ -304,6 +304,25 @@ chimera_smb_query_directory_readdir_callback(
     return 0;
 } /* chimera_smb_query_directory_readdir_callback */
 
+/* FieldOffset(FileName) of each directory-info class -- the minimum
+ * OutputBufferLength that can hold even one entry's fixed header.  Per
+ * MS-SMB2 3.3.5.18 / MS-FSA 2.1.5.5.3, a buffer smaller than this is failed
+ * with STATUS_INFO_LENGTH_MISMATCH rather than treated as "no entries fit"
+ * (WPTS MS-FSAModel QueryDirectory OutBufferSizeLess cases). */
+static inline uint32_t
+chimera_smb_query_directory_min_length(uint8_t info_class)
+{
+    switch (info_class) {
+        case SMB2_FILE_DIRECTORY_INFORMATION:         return 64;
+        case SMB2_FILE_BOTH_DIRECTORY_INFORMATION:    return 94;
+        case SMB2_FILE_NAMES_INFORMATION:             return 12;
+        case SMB2_FILE_FULL_DIRECTORY_INFORMATION:    return 68;
+        case SMB2_FILE_ID_BOTH_DIRECTORY_INFORMATION: return 104;
+        case SMB2_FILE_ID_FULL_DIRECTORY_INFORMATION: return 80;
+        default:                                      return 0;
+    } /* switch */
+} /* chimera_smb_query_directory_min_length */
+
 void
 chimera_smb_query_directory(struct chimera_smb_request *request)
 {
@@ -341,6 +360,19 @@ chimera_smb_query_directory(struct chimera_smb_request *request)
 
     if (request->query_directory.flags & SMB2_REOPEN) {
         request->query_directory.open_file->position = 0;
+    }
+
+    /* An OutputBufferLength too small to hold one entry's fixed header
+     * (FieldOffset(FileName)) is STATUS_INFO_LENGTH_MISMATCH, distinct from an
+     * adequately-sized buffer that simply enumerated nothing (NO_MORE_FILES). */
+    {
+        uint32_t min_len = chimera_smb_query_directory_min_length(
+            request->query_directory.info_class);
+        if (min_len && request->query_directory.max_output_length < min_len) {
+            chimera_smb_open_file_release(request, request->query_directory.open_file);
+            chimera_smb_complete_request(request, SMB2_STATUS_INFO_LENGTH_MISMATCH);
+            return;
+        }
     }
 
     /* The reply buffer is allocated below as a single contiguous iovec

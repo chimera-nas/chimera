@@ -18,7 +18,7 @@ CreateFileTestCaseS30,skip,inapplicable: model branch not executed
 CreateFileTestCaseS32,xfail,fidelity: expected OBJECT_NAME_INVALID got 3221225734
 CreateFileTestCaseS34,xfail,fidelity: expected OBJECT_NAME_INVALID got OBJECT_PATH_NOT_FOUND
 CreateFileTestCaseS38,xfail,fidelity: expected OBJECT_NAME_NOT_FOUND got OBJECT_NAME_INVALID
-CreateFileTestCaseS4,xfail,fidelity: no parameter validation
+CreateFileTestCaseS4,green,
 CreateFileTestCaseS40,xfail,fidelity: expected OBJECT_NAME_NOT_FOUND got OBJECT_NAME_INVALID
 CreateFileTestCaseS42,skip,unimplemented: symlink reparse fixture
 CreateFileTestCaseS44,xfail,fidelity: expected IS_A_DIRECTORY got SUCCESS
@@ -102,12 +102,12 @@ IoCtlRequestTestCaseS98,skip,inapplicable: model branch not executed
 LockAndUnlockTestCaseS0,xfail,fidelity: expected SUCCESS got OBJECT_NAME_INVALID
 LockAndUnlockTestCaseS2,green,
 OpenFileTestCaseS0,green,
-OpenFileTestCaseS10,xfail,fidelity: no parameter validation
+OpenFileTestCaseS10,green,
 OpenFileTestCaseS12,skip,inapplicable: model branch not executed
 OpenFileTestCaseS14,skip,inapplicable: model branch not executed
 OpenFileTestCaseS16,xfail,fidelity: expected INVALID_PARAMETER got ACCESS_DENIED
 OpenFileTestCaseS18,skip,inapplicable: model branch not executed
-OpenFileTestCaseS2,xfail,fidelity: no parameter validation
+OpenFileTestCaseS2,green,
 OpenFileTestCaseS20,green,
 OpenFileTestCaseS22,green,
 OpenFileTestCaseS24,green,
@@ -141,13 +141,13 @@ QueryDirectoryTestCaseS2,skip,inapplicable: model branch not executed
 QueryDirectoryTestCaseS20,skip,inapplicable: model branch not executed
 QueryDirectoryTestCaseS22,skip,inapplicable: model branch not executed
 QueryDirectoryTestCaseS24,skip,inapplicable: model branch not executed
-QueryDirectoryTestCaseS26,xfail,fidelity: expected INFO_LENGTH_MISMATCH got NO_MORE_FILES
+QueryDirectoryTestCaseS26,green,
 QueryDirectoryTestCaseS28,skip,inapplicable: model branch not executed
 QueryDirectoryTestCaseS30,xfail,fidelity: expected NO_SUCH_FILE got NO_MORE_FILES
-QueryDirectoryTestCaseS32,xfail,fidelity: expected INFO_LENGTH_MISMATCH got NO_MORE_FILES
-QueryDirectoryTestCaseS34,xfail,fidelity: expected INFO_LENGTH_MISMATCH got NO_MORE_FILES
-QueryDirectoryTestCaseS36,xfail,fidelity: expected INFO_LENGTH_MISMATCH got NO_MORE_FILES
-QueryDirectoryTestCaseS38,xfail,fidelity: expected INFO_LENGTH_MISMATCH got NO_MORE_FILES
+QueryDirectoryTestCaseS32,green,
+QueryDirectoryTestCaseS34,green,
+QueryDirectoryTestCaseS36,green,
+QueryDirectoryTestCaseS38,green,
 QueryDirectoryTestCaseS4,skip,inapplicable: model branch not executed
 QueryDirectoryTestCaseS6,skip,inapplicable: model branch not executed
 QueryDirectoryTestCaseS8,skip,inapplicable: model branch not executed
@@ -238,21 +238,21 @@ SetFileAllocOrObjIdInformationTestCaseS0,skip,unimplemented: info-class/op
 SetFileAllocOrObjIdInformationTestCaseS10,skip,unimplemented: info-class/op
 SetFileAllocOrObjIdInformationTestCaseS2,skip,unimplemented: info-class/op
 SetFileAllocOrObjIdInformationTestCaseS4,green,
-SetFileAllocOrObjIdInformationTestCaseS6,xfail,fidelity: no parameter validation
+SetFileAllocOrObjIdInformationTestCaseS6,green,
 SetFileAllocOrObjIdInformationTestCaseS8,skip,unimplemented: info-class/op
 SetFileBasicInformationTestCaseS0,green,
-SetFileBasicInformationTestCaseS10,xfail,fidelity: no parameter validation
+SetFileBasicInformationTestCaseS10,green,
 SetFileBasicInformationTestCaseS12,green,
 SetFileBasicInformationTestCaseS14,green,
 SetFileBasicInformationTestCaseS2,green,
-SetFileBasicInformationTestCaseS4,xfail,fidelity: no parameter validation
-SetFileBasicInformationTestCaseS6,xfail,fidelity: no parameter validation
-SetFileBasicInformationTestCaseS8,xfail,fidelity: no parameter validation
+SetFileBasicInformationTestCaseS4,green,
+SetFileBasicInformationTestCaseS6,green,
+SetFileBasicInformationTestCaseS8,green,
 SetFileDispositionInformationTestCaseS0,green,
 SetFileDispositionInformationTestCaseS2,green,
 SetFileEndOfFileInformationTestCaseS0,green,
-SetFileEndOfFileInformationTestCaseS2,xfail,fidelity: no parameter validation
-SetFileEndOfFileInformationTestCaseS4,xfail,fidelity: no parameter validation
+SetFileEndOfFileInformationTestCaseS2,green,
+SetFileEndOfFileInformationTestCaseS4,green,
 SetFileEndOfFileInformationTestCaseS6,green,
 SetFileFullEaInformationTestCaseS0,green,
 SetFileFullEaInformationTestCaseS2,green,
@@ -271,7 +271,7 @@ SetFilePositionInformationTestCaseS10,skip,inapplicable: model branch not execut
 SetFilePositionInformationTestCaseS2,green,
 SetFilePositionInformationTestCaseS4,green,
 SetFilePositionInformationTestCaseS6,green,
-SetFilePositionInformationTestCaseS8,xfail,fidelity: no parameter validation
+SetFilePositionInformationTestCaseS8,green,
 SetFileRenameInformationTestCaseS0,green,
 SetFileRenameInformationTestCaseS10,green,
 SetFileRenameInformationTestCaseS12,green,

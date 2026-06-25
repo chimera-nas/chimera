@@ -9,11 +9,6 @@
 #include "vfs/vfs_notify.h"
 #include "vfs/vfs_state.h"
 
-/* Maximum supported file size, matching the Windows/Samba value
- * (0xFFFFFFF0000 == 2^44 - 2^16).  A write whose last byte would extend past
- * this is rejected with INVALID_PARAMETER. */
-#define CHIMERA_SMB_MAX_FILE_SIZE 0xfffffff0000ULL
-
 /* A write-time-sticky handle needs the pre-write mtime back from the VFS so the
  * write callback can restore it; otherwise no pre-attrs are requested. */
 static inline uint64_t
