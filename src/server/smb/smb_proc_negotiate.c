@@ -152,8 +152,12 @@ chimera_smb_negotiate(struct chimera_smb_request *request)
     }
     /* Encryption is advertised via SMB2_GLOBAL_CAP_ENCRYPTION for 3.0/3.0.2;
      * for 3.1.1 it is negotiated through the encryption-capabilities context
-     * instead and the capability bit MUST NOT be set (MS-SMB2 §3.3.5.4). */
-    if (dialect >= 0x300 && dialect < 0x311 && shared->config.encryption) {
+     * instead and the capability bit MUST NOT be set (MS-SMB2 §3.3.5.4).  The
+     * server echoes the capability only when the CLIENT also advertised it: per
+     * §3.3.5.4 SMB2_GLOBAL_CAP_ENCRYPTION is set in the response only if it was
+     * set in the request (SMB2Model Encryption ClientNotSupportsEncryption). */
+    if (dialect >= 0x300 && dialect < 0x311 && shared->config.encryption &&
+        (request->negotiate.capabilities & SMB2_GLOBAL_CAP_ENCRYPTION)) {
         conn->capabilities |= SMB2_GLOBAL_CAP_ENCRYPTION;
     }
 
@@ -966,12 +970,20 @@ chimera_smb_select_negotiated_algorithms(
         }
     } else if (conn->dialect >= SMB2_DIALECT_3_0 &&
                conn->dialect < SMB2_DIALECT_3_1_1 &&
-               (conn->thread->shared->config.encryption ||
-                conn->thread->shared->any_share_encrypt)) {
+               (conn->thread->shared->config.encryption
+                ? (request->negotiate.capabilities & SMB2_GLOBAL_CAP_ENCRYPTION)
+                : conn->thread->shared->any_share_encrypt)) {
         /* SMB 3.0/3.0.2 has no encryption-capabilities context; the only cipher
          * is AES-128-CCM (MS-SMB2 §3.1.4.3).  Set it so SESSION_SETUP can derive
          * keys when encryption is enabled globally OR a per-share-encrypted tree
-         * may be reached on this connection. */
+         * may be reached on this connection.  Under GLOBAL (whole-session)
+         * encryption the cipher is set only when the CLIENT advertised
+         * SMB2_GLOBAL_CAP_ENCRYPTION: a 3.x client that cannot encrypt must not be
+         * marked encrypt-all and then have its cleartext traffic rejected (SMB2Model
+         * Encryption ClientNotSupportsEncryption).  Under per-share-only encryption
+         * the session is not encrypt-all, so the cipher is provisioned whenever an
+         * encrypted share may be reached (a non-encrypting client is instead denied
+         * by the per-share ENCRYPT_DATA check), preserving the prior behavior. */
         conn->negotiated.cipher_id = SMB2_ENCRYPTION_AES_128_CCM;
     }
 
