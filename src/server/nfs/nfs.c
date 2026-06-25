@@ -31,6 +31,7 @@
 #include "nfs_kv_keys.h"
 #include "nfs4_callback.h"
 #include "nfs_nlm.h"
+#include "nfs_nlm_granted.h"
 #include "nfs_nsm.h"
 #include "prometheus-c.h"
 #include "nfs_external_portmap.h"
@@ -699,6 +700,13 @@ nfs_server_destroy(void *data)
         free(mount_entry);
     }
 
+    /* Stop and join the NLM_GRANTED callback engine before destroying NLM
+     * state: it owns its own evpl_thread and may have in-flight grant jobs;
+     * nlm_granter_destroy aborts them cleanly.  NULL-safe (never created if no
+     * blocking lock ever queued). */
+    nlm_granter_destroy(shared->nlm_granter);
+    shared->nlm_granter = NULL;
+
     nlm_state_destroy(&shared->nlm_state);
     /* Join the reboot-notify worker (idle once its notifies completed) before
      * tearing down NSM state. */
@@ -762,14 +770,19 @@ chimera_nfs_server_notify(
                     nlm_cli->conn_count--;
                 }
                 if (nlm_cli->conn_count == 0) {
-                    /* Last connection for this hostname -- release locks */
+                    release_locks = true;
+                }
+                pthread_mutex_unlock(&shared->nlm_state.mutex);
+                /* Last connection for this hostname -- release its locks.  Done
+                 * outside the mutex: release_all takes state->mutex itself and
+                 * pumps the VFS pending queue (which can re-enter the NLM
+                 * acquire callback that also wants state->mutex). */
+                if (release_locks) {
                     nlm_client_release_all_locks(&shared->nlm_state, nlm_cli,
                                                  thread->vfs_thread,
                                                  thread->vfs->vfs_state,
                                                  &anon_cred);
-                    release_locks = true;
                 }
-                pthread_mutex_unlock(&shared->nlm_state.mutex);
                 /* Remove on-disk state outside the mutex (blocking I/O) */
                 if (release_locks) {
                     nlm_state_remove_client_file(&shared->nlm_state,

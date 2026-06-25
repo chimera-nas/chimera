@@ -408,6 +408,34 @@ chimera_vfs_lease_acquire(
     chimera_vfs_lease_acquire_cb_t      cb,
     void                               *private_data);
 
+/* Optional one-shot notification fired iff an acquire QUEUES the ticket (i.e.
+ * the result callback is being deferred and will fire later from the pending
+ * pump).  It runs synchronously inside chimera_vfs_lease_acquire_blocking()
+ * before that call returns, under no file lock, and never fires when the result
+ * callback completes synchronously (GRANTED/DENIED inline).  NLM uses it to send
+ * the immediate NLM4_BLOCKED interim reply that RFC 1813 / XNFS require for a
+ * blocking LOCK that cannot be granted at once. */
+typedef void (*chimera_vfs_lease_blocked_cb_t)(
+    void *private_data);
+
+/* Identical to chimera_vfs_lease_acquire() but also takes an optional
+ * blocked_cb.  When the ticket is queued (a breakable conflict, or an SMB2/NLM
+ * blocking RANGE lock that hard-conflicts with another owner), blocked_cb is
+ * invoked exactly once -- synchronously, before this function returns -- and the
+ * result callback (cb) fires later from the pump.  blocked_cb may be NULL.  The
+ * plain chimera_vfs_lease_acquire() is a NULL-blocked_cb wrapper around this, so
+ * existing SMB/NFSv4 callers keep their exact prior contract. */
+void
+chimera_vfs_lease_acquire_blocking(
+    struct chimera_vfs_state           *state,
+    struct chimera_vfs_file_state      *file,
+    struct chimera_vfs_lease           *lease,
+    struct chimera_vfs_pending_acquire *ticket,
+    bool                                wait,
+    chimera_vfs_lease_acquire_cb_t      cb,
+    chimera_vfs_lease_blocked_cb_t      blocked_cb,
+    void                               *private_data);
+
 /* Release a previously-granted lease and free its slot in the file
  * state.  Equivalent to chimera_vfs_state_remove() but also pumps the
  * pending-acquire queue in case the released lease was holding back a
