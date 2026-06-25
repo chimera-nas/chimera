@@ -1548,6 +1548,13 @@ nfs_delegation_create(
     deleg->generation = gen;
     deleg->seqid      = 1;
     deleg->lease_held = false;
+    /* RFC 7530/8881 §10.4.3 combine state.  sc is captured at grant by the
+     * OPEN path; combine_valid stays false until then (lazy capture on first
+     * CB_GETATTR otherwise). */
+    pthread_mutex_init(&deleg->combine_lock, NULL);
+    deleg->combine_sc    = 0;
+    deleg->combine_last  = 0;
+    deleg->combine_valid = false;
     atomic_init(&deleg->cb_recall_state, NFS4_DELEG_ACTIVE);
     atomic_init(&deleg->cb_recall_retries, 0);
     atomic_init(&deleg->refcount, 1);
@@ -1581,6 +1588,7 @@ delegation_cleanup(
         chimera_vfs_state_put(vfs_state, deleg->file_state);
         deleg->file_state = NULL;
     }
+    pthread_mutex_destroy(&deleg->combine_lock);
     free(deleg);
 } /* delegation_cleanup */
 

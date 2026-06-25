@@ -13,10 +13,13 @@
 #include "vfs/vfs_release.h"
 
 /* Parked-GETATTR context while a CB_GETATTR to a write-delegation holder is
- * outstanding.  Holds a copy of the server's attrs (the VFS completion's are
- * transient); the holder's reply overrides change/size. */
+ * outstanding.  Holds a copy of the server's LOCAL attrs (the VFS completion's
+ * are transient).  `deleg` is the conflicting write delegation (held with a +1
+ * ref by the CB_GETATTR machinery for the duration of the query); the §10.4.3
+ * combine in the resume reads/updates its cached sc through it. */
 struct nfs4_getattr_park {
     struct nfs_request      *req;
+    struct nfs_delegation   *deleg;
     struct chimera_vfs_attrs attr;
 };
 
@@ -110,9 +113,44 @@ chimera_nfs4_getattr_finish(
     chimera_nfs4_compound_complete(req, NFS4_OK);
 } /* chimera_nfs4_getattr_finish */
 
+/* Encode an NFSv4 fattr4_change value back into park->attr in whichever
+ * representation this file's backend uses, so the marshaller emits exactly
+ * `change` while keeping change_attr_type stable per object: a native-counter
+ * backend (CAP_CHANGE) carries it in va_change; a ctime-derived backend has no
+ * CHANGE bit, so the value is split into a ctime that re-encodes to it. */
+static void
+chimera_nfs4_getattr_set_change(
+    struct chimera_vfs_attrs *attr,
+    uint64_t                  change)
+{
+    if (attr->va_set_mask & CHIMERA_VFS_ATTR_CHANGE) {
+        attr->va_change = change;
+    } else {
+        attr->va_ctime.tv_sec  = change / 1000000000ULL;
+        attr->va_ctime.tv_nsec = change % 1000000000ULL;
+        attr->va_set_mask     |= CHIMERA_VFS_ATTR_CTIME;
+    }
+} /* chimera_nfs4_getattr_set_change */
+
 /* Resume (on the requester's thread) after the write-delegation holder has
- * answered CB_GETATTR: override change/size with the holder's view, then
- * finish the GETATTR.  On failure, fall back to the server's own attrs. */
+ * answered CB_GETATTR.  Implements the RFC 7530/8881 §10.4.3 server-side
+ * change-attribute combine algorithm.
+ *
+ * The server caches the file's change attribute at delegation grant time (sc).
+ * The holder reports its current change value (cc) via CB_GETATTR:
+ *   cc == sc  -> the holder has NOT modified the file: return the server's own
+ *                LOCAL change / time_metadata / time_modify (already in
+ *                park->attr) -- do NOT substitute the holder's values.
+ *   cc != sc  -> the holder HAS modified the file: synthesise time_metadata
+ *                (ctime) and time_modify (mtime) from the current time, compute
+ *                a new server change value nsc >= sc + 1, return nsc, replace
+ *                the cached sc with nsc, and ensure each returned nsc STRICTLY
+ *                exceeds the previously returned one (monotonicity) so a peer
+ *                re-reading after the holder re-dirties always sees a change.
+ * On query failure, fall back to the server's own LOCAL attrs unchanged.
+ *
+ * combine_lock serialises the per-delegation sc/last bookkeeping against
+ * concurrent peer GETATTRs on other requester threads. */
 static void
 chimera_nfs4_getattr_cb_resume(
     void    *priv,
@@ -122,28 +160,66 @@ chimera_nfs4_getattr_cb_resume(
     bool     got_size,
     uint64_t size)
 {
-    struct nfs4_getattr_park *park = priv;
+    struct nfs4_getattr_park *park  = priv;
+    struct nfs_delegation    *deleg = park->deleg;
 
-    if (status == 0) {
-        if (got_change) {
-            /* Override the server's view with the holder's change value, in
-            * whichever representation this file's backend uses -- so the
-            * marshaller emits the holder's value AND keeps change_attr_type
-            * stable per object.  A native-counter backend (CAP_CHANGE) carries
-            * it in va_change; a ctime-derived backend has no CHANGE bit, so we
-            * reconstruct a ctime that re-encodes (sec*1e9 + nsec) to it. */
-            if (park->attr.va_set_mask & CHIMERA_VFS_ATTR_CHANGE) {
-                park->attr.va_change = change;
-            } else {
-                park->attr.va_ctime.tv_sec  = change / 1000000000ULL;
-                park->attr.va_ctime.tv_nsec = change % 1000000000ULL;
-                park->attr.va_set_mask     |= CHIMERA_VFS_ATTR_CTIME;
+    if (status == 0 && got_change && deleg) {
+        uint64_t cc = change;          /* holder's current change value */
+        bool     modified;
+        uint64_t nsc = 0;
+
+        pthread_mutex_lock(&deleg->combine_lock);
+
+        if (!deleg->combine_valid) {
+            /* sc was not captured at grant (CLAIM_FH / probe-deferred resume):
+             * adopt the holder's first reported value as the baseline sc.  The
+             * file is treated as unmodified at this instant; a later cc change
+             * is then detected normally. */
+            deleg->combine_sc    = cc;
+            deleg->combine_last  = cc;
+            deleg->combine_valid = true;
+        }
+
+        modified = (cc != deleg->combine_sc);
+
+        if (modified) {
+            /* nsc must exceed BOTH the cached sc and the last value we ever
+             * returned, by at least one -- so repeated GETATTRs after the holder
+             * re-dirties strictly advance even when cc itself does not change
+             * between queries (the holder's d=c+1 stays constant). */
+            uint64_t floor = deleg->combine_sc;
+            if (deleg->combine_last > floor) {
+                floor = deleg->combine_last;
+            }
+            /* If the holder reports a value already past our floor, honour it
+             * (still strictly advancing); otherwise bump by one. */
+            nsc                 = (cc > floor) ? cc : floor + 1;
+            deleg->combine_sc   = nsc;
+            deleg->combine_last = nsc;
+        }
+
+        pthread_mutex_unlock(&deleg->combine_lock);
+
+        if (modified) {
+            struct timespec now;
+
+            /* §10.4.3: on modification, construct time_metadata/time_modify
+             * from the current time so peers that revalidate on mtime/ctime
+             * observe the file as changed. */
+            clock_gettime(CLOCK_REALTIME, &now);
+            park->attr.va_ctime     = now;
+            park->attr.va_mtime     = now;
+            park->attr.va_set_mask |= CHIMERA_VFS_ATTR_CTIME |
+                CHIMERA_VFS_ATTR_MTIME;
+
+            chimera_nfs4_getattr_set_change(&park->attr, nsc);
+
+            if (got_size) {
+                park->attr.va_size      = size;
+                park->attr.va_set_mask |= CHIMERA_VFS_ATTR_SIZE;
             }
         }
-        if (got_size) {
-            park->attr.va_size      = size;
-            park->attr.va_set_mask |= CHIMERA_VFS_ATTR_SIZE;
-        }
+        /* cc == sc (unmodified): leave park->attr as the server's local view. */
     }
 
     chimera_nfs4_getattr_finish(park->req, &park->attr);
@@ -180,8 +256,9 @@ chimera_nfs4_getattr_complete(
                                                     client->client_id)) != NULL) {
         struct nfs4_getattr_park *park = calloc(1, sizeof(*park));
 
-        park->req  = req;
-        park->attr = *attr;
+        park->req   = req;
+        park->deleg = wdeleg;
+        park->attr  = *attr;
         nfs4_cb_getattr(req->thread, wdeleg, park,
                         chimera_nfs4_getattr_cb_resume);
         return; /* parked; resume finishes the GETATTR */
