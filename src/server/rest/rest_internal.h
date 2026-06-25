@@ -15,6 +15,7 @@ struct evpl_http_request;
 #define chimera_rest_debug(...) chimera_debug("rest", __FILE__, __LINE__, __VA_ARGS__)
 #define chimera_rest_info(...)  chimera_info("rest", __FILE__, __LINE__, __VA_ARGS__)
 #define chimera_rest_error(...) chimera_error("rest", __FILE__, __LINE__, __VA_ARGS__)
+#define chimera_rest_abort(...) chimera_abort("rest", __FILE__, __LINE__, __VA_ARGS__)
 
 struct chimera_rest_server {
     int                    http_port;
