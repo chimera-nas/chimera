@@ -2041,9 +2041,22 @@ struct chimera_s3_complete_ctx {
     int                                 create_retries;
     int                                 dirpathlen;
     char                                dirpath[CHIMERA_S3_KEY_MAX];
+    /* One-shot timer used to back off between destination parent-dir create
+     * retries so a concurrent open-handle-cache eviction (the source of the
+     * transient ESTALE/ENOENT, see chimera_s3_complete_create_root_callback)
+     * has time to drain before we re-walk. */
+    struct evpl_timer                   create_retry_timer;
 };
 
-#define CHIMERA_S3_COMPLETE_CREATE_MAX_RETRIES 8
+#define CHIMERA_S3_COMPLETE_CREATE_MAX_RETRIES      32
+/* Back-off between create retries. The transient ESTALE/ENOENT is caused by a
+ * directory handle being recycled by the VFS close-sweep thread under load; the
+ * earlier immediate (same-event-loop) re-walks could all race the same eviction
+ * window and exhaust the bound while the sweep was still in flight. Yielding for
+ * a short interval between attempts lets the sweep drain so the re-walk resolves
+ * a fresh handle. 1ms * 32 retries = up to ~32ms, comfortably longer than the
+ * eviction window while still well inside the client's request timeout. */
+#define CHIMERA_S3_COMPLETE_CREATE_RETRY_BACKOFF_US 1000
 
 static void chimera_s3_complete_assemble_next(
     struct chimera_s3_complete_ctx *ctx);
@@ -2057,6 +2070,10 @@ static void chimera_s3_complete_finish_common(
 
 static void chimera_s3_complete_create_dir(
     struct chimera_s3_complete_ctx *ctx);
+
+static int chimera_s3_complete_create_retry(
+    struct chimera_s3_complete_ctx *ctx,
+    enum chimera_vfs_error          error_code);
 
 /* ----- Assembly: walk parts list, copy/move/rw each part into dest ----- */
 
@@ -2548,12 +2565,9 @@ chimera_s3_complete_open_dir_callback(
     if (error_code) {
         /* Same transient ESTALE/ENOENT window as create_root_callback: the just
          * -created dir's handle can be recycled before this open resolves it.
-         * Re-walk the create rather than failing the whole Complete. */
-        if ((error_code == CHIMERA_VFS_ESTALE ||
-             error_code == CHIMERA_VFS_ENOENT) &&
-            ctx->create_retries < CHIMERA_S3_COMPLETE_CREATE_MAX_RETRIES) {
-            ctx->create_retries++;
-            chimera_s3_complete_create_dir(ctx);
+         * Re-walk the create (after a back-off) rather than failing the whole
+         * Complete. */
+        if (chimera_s3_complete_create_retry(ctx, error_code)) {
             return;
         }
         chimera_s3_complete_finish_common(error_code, ctx);
@@ -2614,13 +2628,10 @@ chimera_s3_complete_create_root_callback(
         /* The linux backend can transiently return ESTALE (and, while a parent
          * directory is being recycled, ENOENT) from open_by_handle_at when a
          * cached directory handle is being evicted concurrently. Re-walking the
-         * create from the bucket handle resolves a fresh handle and succeeds.
-         * Bound the retries so a genuinely missing parent still errors out. */
-        if ((error_code == CHIMERA_VFS_ESTALE ||
-             error_code == CHIMERA_VFS_ENOENT) &&
-            ctx->create_retries < CHIMERA_S3_COMPLETE_CREATE_MAX_RETRIES) {
-            ctx->create_retries++;
-            chimera_s3_complete_create_dir(ctx);
+         * create from the bucket handle (after a back-off so the concurrent
+         * eviction drains) resolves a fresh handle and succeeds. Bound the
+         * retries so a genuinely missing parent still errors out. */
+        if (chimera_s3_complete_create_retry(ctx, error_code)) {
             return;
         }
         chimera_s3_complete_finish_common(error_code, ctx);
@@ -2658,6 +2669,63 @@ chimera_s3_complete_create_dir(struct chimera_s3_complete_ctx *ctx)
         chimera_s3_complete_create_root_callback,
         ctx);
 } /* chimera_s3_complete_create_dir */
+
+/* One-shot timer callback: re-drive the parent-dir create after a back-off. */
+static void
+chimera_s3_complete_create_retry_timer_cb(
+    struct evpl       *evpl,
+    struct evpl_timer *timer)
+{
+    struct chimera_s3_complete_ctx *ctx = (struct chimera_s3_complete_ctx *)
+        ((char *) timer - offsetof(struct chimera_s3_complete_ctx,
+                                   create_retry_timer));
+
+    (void) evpl;
+    chimera_s3_complete_create_dir(ctx);
+} /* chimera_s3_complete_create_retry_timer_cb */
+
+/*
+ * Schedule a back-off'd retry of the destination parent-dir create. Returns 1 if
+ * a retry was armed (caller must return), 0 if the bound is exhausted or the
+ * error is not a transient handle-recycle error (caller should fail the op).
+ *
+ * The transient ESTALE/ENOENT is produced by the linux backend's
+ * open_by_handle_at when a cached directory handle is being evicted by the VFS
+ * close-sweep thread under concurrent load. An immediate re-walk in the same
+ * event-loop turn races the same eviction window; backing off for a short
+ * interval lets the sweep drain so the re-walk resolves a fresh handle.
+ */
+static int
+chimera_s3_complete_create_retry(
+    struct chimera_s3_complete_ctx *ctx,
+    enum chimera_vfs_error          error_code)
+{
+    struct chimera_server_s3_thread *thread = ctx->request->thread;
+
+    if ((error_code != CHIMERA_VFS_ESTALE &&
+         error_code != CHIMERA_VFS_ENOENT) ||
+        ctx->create_retries >= CHIMERA_S3_COMPLETE_CREATE_MAX_RETRIES) {
+        return 0;
+    }
+
+    ctx->create_retries++;
+
+    /* Drop any partially-resolved destination handles before re-walking so the
+     * retry starts clean (and so a stale handle is not released twice). */
+    if (ctx->request->dir_handle) {
+        chimera_vfs_release(thread->vfs, ctx->request->dir_handle);
+        ctx->request->dir_handle = NULL;
+    }
+    if (ctx->request->file_handle) {
+        chimera_vfs_release(thread->vfs, ctx->request->file_handle);
+        ctx->request->file_handle = NULL;
+    }
+
+    evpl_add_oneshot_timer(thread->evpl, &ctx->create_retry_timer,
+                           chimera_s3_complete_create_retry_timer_cb,
+                           CHIMERA_S3_COMPLETE_CREATE_RETRY_BACKOFF_US);
+    return 1;
+} /* chimera_s3_complete_create_retry */
 
 /*
  * Phase 1: dispatcher entry. Just initialize the body buffer so the
