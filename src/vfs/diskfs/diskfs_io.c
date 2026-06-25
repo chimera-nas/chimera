@@ -415,6 +415,14 @@ diskfs_dealloc_process(
     struct chimera_vfs_request *request);
 
 static void
+diskfs_dealloc_edge_step(
+    struct chimera_vfs_request *request);
+
+static void
+diskfs_dealloc_loop_start(
+    struct chimera_vfs_request *request);
+
+static void
 diskfs_dealloc_first_cb(
     struct diskfs_bt_op *op,
     int                  result,
@@ -3229,30 +3237,29 @@ diskfs_dealloc_process(struct chimera_vfs_request *request)
         return;
     }
 
+    /* hole_start (loop_off) and hole_end (loop_left) are block-aligned -- the
+     * sub-block remainders of the requested punch were already zeroed in place by
+     * diskfs_dealloc_edge_step, so every surviving extent here starts and ends on
+     * a 4 KiB boundary in BOTH file and device offset, and no 4 KiB block is ever
+     * shared between a freed region and a kept extent.  That lets the frees round
+     * the length UP to whole blocks (SM_ALIGN_UP) without ever clipping a sibling:
+     * a partial trailing block can only belong to the single extent being removed
+     * (a file whose size is sub-block-aligned), so freeing it whole is correct and
+     * is what keeps the space-map free accounting from leaking the edge. */
     if (es >= hole_start && ee <= hole_end) {
-        /* Completely inside the hole: free + remove, then advance.  Pass the raw
-         * extent range (not block-rounded-up): an extent can end mid-block when a
-         * sub-block-unaligned DEALLOCATE left a kept sibling extent in the same
-         * 4 KiB block (e.g. written | unwritten fragments from a prior punch).
-         * space_map_free frees only whole blocks strictly contained, so the raw
-         * range never frees that shared edge block.  Rounding the length UP would
-         * free the partial trailing block out from under the kept sibling, which
-         * is then re-allocated to a later write -> the sibling reads back the new
-         * writer's data (silent cross-extent corruption). */
+        /* Completely inside the hole: free + remove, then advance. */
         diskfs_thread_free_space(thread, p->txn, p->ext_iter.device_id,
                                  p->ext_iter.device_offset,
-                                 p->ext_iter.length);
+                                 SM_ALIGN_UP(p->ext_iter.length));
         op = diskfs_bt_op_alloc(thread);
         if (diskfs_ext_remove_async(op, thread, p->txn, p->inode_stash[0], es,
                                     diskfs_dealloc_modify_advance_cb, request)) {
             diskfs_dealloc_modify_advance_cb(op, op->result, request);
         }
     } else if (es < hole_start && ee > hole_end) {
-        /* Spans the hole: free the punched-out middle [hole_start, hole_end) of
-         * this extent's backing, then insert tail at hole_end.  The raw range is
-         * passed (not block-rounded): space_map_free frees only whole blocks
-         * strictly contained, so a sub-block hole edge shared with a kept piece
-         * is never freed. */
+        /* Spans the hole: free the (block-aligned) punched-out middle
+         * [hole_start, hole_end) of this extent's backing, then insert the tail at
+         * hole_end (block-aligned device offset). */
         diskfs_thread_free_space(thread, p->txn, p->ext_iter.device_id,
                                  p->ext_iter.device_offset + (hole_start - es),
                                  hole_end - hole_start);
@@ -3266,10 +3273,11 @@ diskfs_dealloc_process(struct chimera_vfs_request *request)
         }
     } else if (es < hole_start) {
         /* Overlaps the hole start: free the punched tail [hole_start, ee) of this
-         * extent's backing, then remove + reinsert the kept head [es, hole_start). */
+         * extent's backing (rounded up to whole blocks -- the extent is removed
+         * entirely past hole_start), then remove + reinsert the kept head. */
         diskfs_thread_free_space(thread, p->txn, p->ext_iter.device_id,
                                  p->ext_iter.device_offset + (hole_start - es),
-                                 ee - hole_start);
+                                 SM_ALIGN_UP(ee - hole_start));
         op = diskfs_bt_op_alloc(thread);
         if (diskfs_ext_remove_async(op, thread, p->txn, p->inode_stash[0], es,
                                     diskfs_dealloc_ostart_removed_cb, request)) {
@@ -3288,6 +3296,222 @@ diskfs_dealloc_process(struct chimera_vfs_request *request)
         }
     }
 } /* diskfs_dealloc_process */
+
+
+/*
+ * Begin the block-aligned interior punch: free + remove the whole 4 KiB blocks
+ * in [loop_off, loop_left).  Runs once both sub-block edge remainders have been
+ * zeroed.  If there is no whole-block interior (a punch contained within one or
+ * two blocks), loop_off >= loop_left and the loop terminates immediately at its
+ * first extent test -- the edge zeroing already realized the punch.
+ */
+static void
+diskfs_dealloc_loop_start(struct chimera_vfs_request *request)
+{
+    struct diskfs_request_private *p      = request->plugin_data;
+    struct diskfs_thread          *thread = p->thread;
+    struct diskfs_bt_op           *op;
+
+    if (p->loop_off >= p->loop_left) {
+        diskfs_dealloc_finish(request);
+        return;
+    }
+
+    op = diskfs_bt_op_alloc(thread);
+    if (diskfs_ext_floor_async(op, thread, p->inode_stash[0], p->loop_off,
+                               p->rec_scratch, sizeof(p->rec_scratch),
+                               diskfs_dealloc_first_cb, request)) {
+        diskfs_dealloc_first_cb(op, op->result, request);
+    }
+} /* diskfs_dealloc_loop_start */
+
+
+/* The next file offset at/after `from` that must be zeroed: inside the hole
+ * [dz_zs(orig)..dz_ze) but outside the block-aligned interior [loop_off,
+ * loop_left).  Returns dz_ze when nothing more needs zeroing. */
+static uint64_t
+diskfs_dealloc_next_edge(
+    struct diskfs_request_private *p,
+    uint64_t                       from)
+{
+    if (from < p->loop_left && from >= p->loop_off) {
+        /* Skip over the interior (it is freed as whole blocks, not zeroed). */
+        from = p->loop_left;
+    }
+    return from;
+} /* diskfs_dealloc_next_edge */
+
+
+/* Completion of an edge block's read-modify-write zeroing: release the buffer
+ * and advance to the next sub-block remainder (or the interior loop). */
+static void
+diskfs_dealloc_edge_io_cb(
+    struct evpl *evpl,
+    int          status,
+    void        *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+    struct diskfs_thread          *thread  = p->thread;
+
+    (void) evpl;
+
+    if (status && p->status == 0) {
+        p->status = status;
+    }
+
+    p->pending--;
+    diskfs_pending_io_add(thread, -1);
+    diskfs_io_resume_waiters(thread);
+
+    if (p->pending) {
+        return;     /* RMW read still outstanding; the write is issued from here */
+    }
+
+    if (p->dz_edge == 0) {
+        /* Read phase done: zero the sliver in the block buffer and write back. */
+        struct diskfs_extent *e         = &p->ext_iter;
+        uint64_t              bs        = p->dz_zs & ~(uint64_t) SM_BLOCK_MASK;
+        uint64_t              be        = bs + SM_BLOCK_SIZE;
+        uint64_t              zs        = p->dz_zs;
+        uint64_t              ze        = be < p->dz_ze ? be : p->dz_ze;
+        uint64_t              dev_block = e->device_offset + (bs - e->file_offset);
+
+        if (p->status) {
+            evpl_iovec_release(thread->evpl, &p->dz_blk);
+            diskfs_op_fail(request, p->txn, p->status);
+            return;
+        }
+
+        memset((uint8_t *) evpl_iovec_data(&p->dz_blk) + (zs - bs), 0,
+               (size_t) (ze - zs));
+
+        p->dz_edge = 1;
+        p->dz_zs   = ze;        /* advance the cursor past this block's sliver */
+        p->pending = 1;
+        diskfs_pending_io_add(thread, 1);
+        diskfs_metric_block_io(thread, DISKFS_METRIC_IO_WRITE,
+                               DISKFS_METRIC_IO_RMW, SM_BLOCK_SIZE);
+        diskfs_metric_block_io_device(thread, e->device_id,
+                                      DISKFS_METRIC_IO_WRITE,
+                                      DISKFS_METRIC_IO_RMW, SM_BLOCK_SIZE);
+        /* The edge write is data: it completes before this op's redo record is
+         * committed (op_ok runs only at the end of the dealloc chain), and in the
+         * crash-safe mode it carries FUA so the zeroed edge is durable before that
+         * redo.  unsafe_async drops the FUA exactly as the ordinary write path
+         * does -- that mode is an explicit opt-out of crash safety, not a
+         * regression introduced here. */
+        evpl_block_write(thread->evpl, thread->queue[e->device_id], &p->dz_blk, 1,
+                         dev_block, !thread->shared->unsafe_async,
+                         diskfs_dealloc_edge_io_cb, request);
+        return;
+    }
+
+    /* Write phase done: this block's sliver is zeroed and durable. */
+    evpl_iovec_release(thread->evpl, &p->dz_blk);
+
+    if (p->status) {
+        diskfs_op_fail(request, p->txn, p->status);
+        return;
+    }
+
+    diskfs_dealloc_edge_step(request);
+} /* diskfs_dealloc_edge_io_cb */
+
+
+/* Floor-lookup completion for the current edge sliver: if a WRITTEN extent backs
+ * the sliver's block, read the whole block (RMW) so its in-place data outside
+ * the hole is preserved; otherwise the block reads as zeros already (hole or
+ * UNWRITTEN) and we just advance past it. */
+static void
+diskfs_dealloc_edge_floor_cb(
+    struct diskfs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+    struct diskfs_thread          *thread  = p->thread;
+    int                            have    = diskfs_ext_from_op(op, result, &p->ext_iter);
+    uint64_t                       bs      = p->dz_zs & ~(uint64_t) SM_BLOCK_MASK;
+    uint64_t                       be      = bs + SM_BLOCK_SIZE;
+    struct diskfs_extent          *e       = &p->ext_iter;
+    uint64_t                       dev_block;
+    int                            niov;
+
+    diskfs_bt_op_free(thread, op);
+
+    /* Does a WRITTEN extent back this whole 4 KiB block?  The floor lookup
+     * returns the extent at/before the sliver, so e->file_offset <= dz_zs.  An
+     * extent's device backing is always whole-block (allocated via SM_ALIGN_UP),
+     * so the block is backed iff it starts at/after the extent and lies within
+     * that block-rounded backing -- the extent's logical length can stop mid-
+     * block (a file whose size is sub-block-aligned) yet the block is still fully
+     * device-backed.  Going forward no extent starts mid-block (the punch keeps
+     * every extent block-aligned), so e->file_offset <= bs always holds for a
+     * backed block; the guard also tolerates any legacy mid-block-start extent by
+     * simply leaving its sliver as-is (it would already read as a hole/zero for
+     * the unbacked part). */
+    if (have && !(e->flags & DISKFS_EXT_UNWRITTEN) &&
+        e->file_offset <= bs &&
+        e->file_offset + SM_ALIGN_UP(e->length) >= be) {
+
+        dev_block = e->device_offset + (bs - e->file_offset);
+
+        niov = evpl_iovec_alloc(thread->evpl, SM_BLOCK_SIZE, 4096, 1, 0,
+                                &p->dz_blk);
+        if (niov != 1) {
+            diskfs_op_fail(request, p->txn, CHIMERA_VFS_EIO);
+            return;
+        }
+
+        p->dz_edge = 0;     /* read phase */
+        p->pending = 1;
+        diskfs_pending_io_add(thread, 1);
+        diskfs_metric_block_io(thread, DISKFS_METRIC_IO_READ,
+                               DISKFS_METRIC_IO_RMW, SM_BLOCK_SIZE);
+        diskfs_metric_block_io_device(thread, e->device_id,
+                                      DISKFS_METRIC_IO_READ,
+                                      DISKFS_METRIC_IO_RMW, SM_BLOCK_SIZE);
+        evpl_block_read(thread->evpl, thread->queue[e->device_id], &p->dz_blk, 1,
+                        dev_block, diskfs_dealloc_edge_io_cb, request);
+        return;
+    }
+
+    /* Nothing to zero in this block (hole / unwritten / no backing): advance the
+     * cursor to the next block of the hole and keep walking the edge. */
+    p->dz_zs = be < p->dz_ze ? be : p->dz_ze;
+    diskfs_dealloc_edge_step(request);
+} /* diskfs_dealloc_edge_floor_cb */
+
+
+/*
+ * Walk the punch's sub-block edge remainders one 4 KiB block at a time, zeroing
+ * each backed block in place.  dz_zs is the moving cursor; the block-aligned
+ * interior [loop_off, loop_left) is skipped (it is freed whole by the loop).
+ * When the cursor reaches the hole end, hand off to the interior free loop.
+ */
+static void
+diskfs_dealloc_edge_step(struct chimera_vfs_request *request)
+{
+    struct diskfs_request_private *p      = request->plugin_data;
+    struct diskfs_thread          *thread = p->thread;
+    struct diskfs_bt_op           *op;
+
+    p->dz_zs = diskfs_dealloc_next_edge(p, p->dz_zs);
+
+    if (p->dz_zs >= p->dz_ze) {
+        diskfs_dealloc_loop_start(request);
+        return;
+    }
+
+    op = diskfs_bt_op_alloc(thread);
+    if (diskfs_ext_floor_async(op, thread, p->inode_stash[0], p->dz_zs,
+                               p->rec_scratch, sizeof(p->rec_scratch),
+                               diskfs_dealloc_edge_floor_cb, request)) {
+        diskfs_dealloc_edge_floor_cb(op, op->result, request);
+    }
+} /* diskfs_dealloc_edge_step */
 
 
 static void
@@ -3494,7 +3718,6 @@ diskfs_allocate_inode_cb(
     struct chimera_vfs_request    *request = private_data;
     struct diskfs_request_private *p       = request->plugin_data;
     struct diskfs_thread          *thread  = p->thread;
-    struct diskfs_bt_op           *op;
 
     if (unlikely(status != CHIMERA_VFS_OK)) {
         diskfs_op_fail(request, p->txn, status);
@@ -3513,15 +3736,29 @@ diskfs_allocate_inode_cb(
         }
 
         if (hole_start < hole_end) {
-            p->loop_off  = hole_start;
-            p->loop_left = hole_end;
+            /* Punch the hole in two parts so no 4 KiB block is ever split
+             * between a freed region and a surviving extent.  loop_off/loop_left
+             * hold the block-aligned INNER core [ib, ie): only whole blocks are
+             * removed + freed there, so the space-map free accounting (which
+             * credits whole blocks only) never leaks an edge.  The two sub-block
+             * remainders [hole_start, ib) and [ie, hole_end) are zeroed in place
+             * on their backing device block first, by diskfs_dealloc_edge_step,
+             * which leaves them owned by the surviving extent (reading as zeros)
+             * rather than carved into a sub-block extent that shares a block.
+             * The edge zero-writes are data and complete before this txn's redo
+             * commits, so a crash replays to a fully-punched or un-punched range,
+             * never a punched extent whose edge still reads stale bytes. */
+            p->loop_off  = SM_ALIGN_UP(hole_start);
+            p->loop_left = hole_end & ~(uint64_t) SM_BLOCK_MASK;
+            p->dz_zs     = hole_start;
+            p->dz_ze     = hole_end;
+            p->dz_edge   = 0;
+            /* plugin_data is pooled and not memset on reuse: zero the edge-I/O
+             * bookkeeping the edge zeroing relies on. */
+            p->status  = 0;
+            p->pending = 0;
 
-            op = diskfs_bt_op_alloc(thread);
-            if (diskfs_ext_floor_async(op, thread, inode, hole_start, p->rec_scratch,
-                                       sizeof(p->rec_scratch), diskfs_dealloc_first_cb,
-                                       request)) {
-                diskfs_dealloc_first_cb(op, op->result, request);
-            }
+            diskfs_dealloc_edge_step(request);
             return;
         }
     } else if (request->allocate.length) {
