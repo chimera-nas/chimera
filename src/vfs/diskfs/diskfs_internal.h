@@ -1396,6 +1396,7 @@ struct diskfs_intent_log {
     struct diskfs_pending           *ready_tail;
     struct diskfs_pending           *pfree;           /* pending entry free list */
     int                              push_outstanding; /* home writes in flight (push watermark) */
+    int                             *push_outstanding_dev; /* [num_devices] in-flight home writes per device */
 
     /* ---------- apply thread (Stage B) ---------- */
     /* Space-map delta application + worker ACK run here, off the commit thread.
@@ -2028,7 +2029,7 @@ struct diskfs_redo_ctx {
  * txn is issued in consecutive chunks sharing one redo_ctx; the record is
  * durable only when the last chunk completes.
  */
-#define DISKFS_IL_MAX_IOV       64
+#define DISKFS_IL_MAX_IOV         64
 
 
 /*
@@ -2048,13 +2049,18 @@ struct diskfs_redo_ctx {
  * submission at the high watermark and resume from a completion at the low
  * watermark.  (The libaio/io_uring submission ring defaults to 256 pending.)
  */
-#define DISKFS_COMMIT_WATERMARK 256
+#define DISKFS_COMMIT_WATERMARK   256
 
-#define DISKFS_COMMIT_LOWAT     128
+#define DISKFS_COMMIT_LOWAT       128
 
-#define DISKFS_PUSH_WATERMARK   256
+/* Per-device in-flight home-write cap.  The tail-push thread issues at most
+ * this many concurrent home writes to any single device before parking on it
+ * (gated in diskfs_push_issue); a completion on that device re-kicks issue.
+ * Replaces the old single global in-flight watermark, which let one slow device
+ * monopolize the in-flight budget and stall pushes to idle devices. */
+#define DISKFS_PUSH_DEV_WATERMARK 64
 
-#define DISKFS_PUSH_LOWAT       128
+#define DISKFS_PUSH_LOWAT         128
 
 
 struct diskfs_recover_rec {
