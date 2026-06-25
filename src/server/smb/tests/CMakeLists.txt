@@ -319,8 +319,11 @@ if(CHIMERA_NETNS_TESTING AND WPTS_DOTNET AND WPTS_SMB2_DLL AND WPTS_ARCH_SUPPORT
         endforeach()
 
         # Cases per consolidated vstest invocation (parallelism vs. bringup
-        # overhead trade-off; ~120 keeps each shard well under the timeout).
-        set(WPTS_SMB2MODEL_SHARD 120 CACHE STRING
+        # overhead trade-off).  Most model cases run in a few seconds, but the
+        # OplockOnShare* break-wait cases each take ~18s (they wait out the
+        # model's no-break window), so a shard packed with them must stay small
+        # enough to finish under the 1800s ctest timeout: 70 * ~18s = ~21min.
+        set(WPTS_SMB2MODEL_SHARD 70 CACHE STRING
             "MS-SMB2Model green cases per consolidated ctest shard.")
 
         foreach(_cfg ${_smb2model_configs})
