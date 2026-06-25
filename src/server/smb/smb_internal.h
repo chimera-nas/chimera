@@ -302,6 +302,14 @@ struct chimera_smb_rename_info {
     int                             new_name_len;
 };
 
+/* One child of a directory being renamed that holds a live share reservation;
+ * its caching lease is recalled before the rename proceeds (see the
+ * recall_children array in the set_info request). */
+struct chimera_smb_rename_recall {
+    uint8_t  fh[CHIMERA_VFS_FH_SIZE + 16];
+    uint32_t fh_len;
+};
+
 int
 chimera_smb_parse_rename_info(
     struct evpl_iovec_cursor   *cursor,
@@ -944,6 +952,24 @@ struct chimera_smb_request {
             struct chimera_vfs_file_state     *dp_file_state;
             struct chimera_vfs_pending_acquire dp_ticket;
             uint8_t                            dp_probe_active;
+            /* Directory-rename contained-open recall
+             * (smb2.lease.rename_dir_openfile): renaming a directory breaks the
+             * handle leases of files open INSIDE it.  readdir the source dir
+             * collecting children that have a live (non-implicit) share holder,
+             * recall each one's caching lease (RH->R) one at a time so a
+             * well-behaved holder closes, then fail the rename ACCESS_DENIED if
+             * any holder kept the file open.  Only the source-is-a-directory
+             * path enters this; file renames skip it entirely. */
+            struct chimera_smb_rename_recall  *recall_children; /* malloc'd */
+            uint32_t                           recall_child_count;
+            uint32_t                           recall_child_cap;
+            uint32_t                           recall_child_idx;
+            uint64_t                           recall_readdir_cookie;
+            uint8_t                            recall_deny;
+            /* Second enumeration pass: after the contained holders have been
+             * broken and released, re-scan for a child opened DURING the break
+             * wave (which races the rename and must deny it). */
+            uint8_t                            recall_final;
             /* Security descriptor buffer for SMB2_INFO_SECURITY */
             uint8_t                            sec_buf[2048];
             uint32_t                           sec_buf_len;

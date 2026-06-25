@@ -225,6 +225,36 @@ chimera_vfs_recall_handle_lease(
     chimera_vfs_recall_callback_t   callback,
     void                           *private_data);
 
+/* True if the file named by `fh` currently has a live (non-implicit) share
+* holder -- i.e. some protocol open is still active on it.  Synchronous. */
+int
+chimera_vfs_fh_has_share_holder(
+    struct chimera_vfs_thread *thread,
+    const uint8_t             *fh,
+    uint32_t                   fh_len);
+
+/* Completion for chimera_vfs_recall_caching_fh: `still_open` reports whether the
+ * file still has a live (non-implicit) share holder once the recall has drained
+ * (a holder that did NOT close in response to the handle-lease break). */
+typedef void (*chimera_vfs_recall_fh_callback_t)(
+    enum chimera_vfs_error error_code,
+    int                    still_open,
+    void                  *private_data);
+
+/* Single-step recall of every caching lease on the file named by a bare FH
+ * (no open handle is spared), breaking each holder's handle cache once
+ * (RH -> R) and PARKing until the recall drains, then report whether a holder
+ * kept the file open.  Used by the SMB directory-rename path to break the
+ * handle leases of files open inside a directory being renamed. */
+void
+chimera_vfs_recall_caching_fh(
+    struct chimera_vfs_thread       *thread,
+    const struct chimera_vfs_cred   *cred,
+    const uint8_t                   *fh,
+    uint32_t                         fh_len,
+    chimera_vfs_recall_fh_callback_t callback,
+    void                            *private_data);
+
 void
 chimera_vfs_getattr(
     struct chimera_vfs_thread      *thread,
