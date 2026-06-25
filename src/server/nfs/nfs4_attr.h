@@ -18,6 +18,23 @@
 #include "nfs4_lease.h"
 #include "nfs_fh_wrap.h"
 
+/*
+ * Derive the NFSv4 fattr4_change value from a set of VFS attributes, using the
+ * exact same rule as the FATTR4_CHANGE marshaller below: a native monotonic
+ * counter (CHIMERA_VFS_ATTR_CHANGE) when the backend supplies one, otherwise
+ * ctime in nanoseconds (matching Linux nfsd without i_version).  Shared with the
+ * §10.4.3 combine logic so the cached sc and the marshalled change always agree.
+ */
+static inline uint64_t
+chimera_nfs4_change_from_attrs(const struct chimera_vfs_attrs *attr)
+{
+    if (attr->va_set_mask & CHIMERA_VFS_ATTR_CHANGE) {
+        return attr->va_change;
+    }
+    return (uint64_t) attr->va_ctime.tv_sec * 1000000000ULL +
+           (uint64_t) attr->va_ctime.tv_nsec;
+} /* chimera_nfs4_change_from_attrs */
+
 /* RFC 8275 OPEN-arguments attribute and its enumerations.  Not present in our
  * generated nfs4.x (which stops at FATTR4_SEC_LABEL), so define what we need to
  * advertise the attribute. */
