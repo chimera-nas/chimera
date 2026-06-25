@@ -148,6 +148,22 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
         return;
     }
 
+    /* MS-SMB2 3.3.5.2.4 (Verifying the Signature): a request whose SMB2 header
+    * has SMB2_FLAGS_SIGNED set is signature-verified against the session named
+    * by the header SessionId.  If that SessionId resolves to no session -- a
+    * signed first-leg SESSION_SETUP carrying SessionId 0, or any signed
+    * SESSION_SETUP whose id names no live session -- the lookup fails the
+    * request with STATUS_USER_SESSION_DELETED before authentication runs (a
+    * signed leg of an in-progress exchange resolves to its in-progress session
+    * handle and is unaffected).  SMB2Model Signing InvalidIdentifier cases. */
+    if ((request->smb2_hdr.flags & SMB2_FLAGS_SIGNED) &&
+        !request->session_handle) {
+        chimera_smb_complete_request(request, SMB2_STATUS_USER_SESSION_DELETED);
+        evpl_iovecs_release(thread->evpl, request->session_setup.input_iov,
+                            request->session_setup.input_niov);
+        return;
+    }
+
     /* MS-SMB2 3.3.5.5 step 4: a SESSION_SETUP that binds a new channel to an
      * existing session (SMB2_SESSION_FLAG_BINDING set, non-zero header
      * SessionId, dialect in the 3.x family, and the session found in the
