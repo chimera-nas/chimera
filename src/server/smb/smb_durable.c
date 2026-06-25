@@ -532,6 +532,13 @@ chimera_smb_durable_claim(
  *       replay collides with the still-open original and is rejected with
  *       STATUS_DUPLICATE_OBJECTID.  (durable-reconnect-replay2)
  *
+ *   CHIMERA_SMB_GUID_REPLAY_DENIED   - a *parked* durable open matches a replay
+ *       but the reclaim fails MS-SMB2 3.3.5.9.10 replay verification (the
+ *       surviving open holds a lease whose LeaseKey differs from the one named in
+ *       the replayed create, or the requested handle type oplock-vs-lease differs):
+ *       rejected with STATUS_ACCESS_DENIED.  (SMB2Model ReplayCreateDurableHandleV2
+ *       *PersistentTestCaseS54 / S1575.)
+ *
  *   CHIMERA_SMB_GUID_REPLAY_NONE     - no registry entry carries this guid (or
  *       the only live match is the requesting connection's own open, handled by
  *       the live open_files scan): the caller proceeds with a fresh create.
@@ -543,6 +550,8 @@ chimera_smb_durable_claim_by_guid(
     const uint8_t                    *client_guid,
     const struct chimera_smb_conn    *req_conn,
     int                               is_replay,
+    bool                              has_lease_ctx,
+    const uint8_t                    *lease_key,
     struct chimera_smb_open_file    **r_open_file)
 {
     struct chimera_smb_durable_entry   *entry, *tmp;
@@ -576,6 +585,22 @@ chimera_smb_durable_claim_by_guid(
                  * (parked) open of this client collides with it. */
                 result = CHIMERA_SMB_GUID_REPLAY_DUPLICATE;
                 break;
+            }
+            /* MS-SMB2 3.3.5.9.10 replay verification: a found Open is reclaimed
+             * only if the replayed create matches its handle type and (when
+             * leased) its LeaseKey -- otherwise STATUS_ACCESS_DENIED.  Mirrors
+             * the live-open replay check in chimera_smb_create_guid_replay; the
+             * DH2C/DHnC reconnect path enforces the same in chimera_smb_durable_claim. */
+            {
+                bool open_is_lease = entry->open_file->oplock_level ==
+                    SMB2_OPLOCK_LEVEL_LEASE;
+
+                if (has_lease_ctx != open_is_lease ||
+                    (has_lease_ctx && lease_key &&
+                     memcmp(entry->open_file->lease_key, lease_key, 16) != 0)) {
+                    result = CHIMERA_SMB_GUID_REPLAY_DENIED;
+                    break;
+                }
             }
             entry->parked = false;
             *r_open_file  = entry->open_file;

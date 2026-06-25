@@ -1586,6 +1586,7 @@ enum chimera_smb_guid_replay_result {
     CHIMERA_SMB_GUID_REPLAY_NONE = 0,  /* no match -- proceed with a fresh create */
     CHIMERA_SMB_GUID_REPLAY_RECLAIM,   /* parked open reclaimed -> *r_open_file */
     CHIMERA_SMB_GUID_REPLAY_DUPLICATE, /* live open on another conn -> DUPLICATE_OBJECTID */
+    CHIMERA_SMB_GUID_REPLAY_DENIED,    /* replay verify failed (lease key/type) -> ACCESS_DENIED */
 };
 
 enum chimera_smb_guid_replay_result
@@ -1595,6 +1596,8 @@ chimera_smb_durable_claim_by_guid(
     const uint8_t                    *client_guid,
     const struct chimera_smb_conn    *req_conn,
     int                               is_replay,
+    bool                              has_lease_ctx,
+    const uint8_t                    *lease_key,
     struct chimera_smb_open_file    **r_open_file);
 void
 chimera_smb_durable_sweep(
