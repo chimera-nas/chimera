@@ -520,12 +520,44 @@ chimera_smb_set_info(struct chimera_smb_request *request)
                         break;
                     }
 
+                    /* The mirror case: FILE_ATTRIBUTE_DIRECTORY is meaningful only
+                     * for a directory, so setting it on a data stream is
+                     * STATUS_INVALID_PARAMETER (MS-FSA 2.1.5.14.2;
+                     * FsaFileInfo_Set_FileBasicInformation_File_Negative). */
+                    if (!(request->set_info.open_file->flags &
+                          CHIMERA_SMB_OPEN_FILE_FLAG_DIRECTORY) &&
+                        (request->set_info.attrs.smb_attributes &
+                         SMB2_FILE_ATTRIBUTE_DIRECTORY)) {
+                        chimera_smb_open_file_release(request, request->set_info.open_file);
+                        chimera_smb_complete_request(request,
+                                                     SMB2_STATUS_INVALID_PARAMETER);
+                        break;
+                    }
+
+                    /* MS-FSA 2.1.5.14.2: a settable timestamp below -2 (as a
+                     * signed value) is invalid -- only 0/-1/-2 and concrete NT
+                     * times are accepted (FsaFileInfo_Set_FileBasicInformation
+                     * _Timestamp_Negative_*). */
+                    if (chimera_smb_basic_info_time_invalid(&request->set_info.attrs)) {
+                        chimera_smb_open_file_release(request, request->set_info.open_file);
+                        chimera_smb_complete_request(request,
+                                                     SMB2_STATUS_INVALID_PARAMETER);
+                        break;
+                    }
+
                     chimera_smb_unmarshal_basic_info(&request->set_info.attrs, &request->set_info.vfs_attrs);
 
-                    /* An explicit (non-sentinel) write-time set hands control of
-                     * the LastWriteTime to this handle: its own subsequent writes
-                     * and size-sets must stop advancing it (MS-FSA sticky mtime). */
-                    if (request->set_info.vfs_attrs.va_set_mask & CHIMERA_VFS_ATTR_MTIME) {
+                    /* An explicit (concrete) write-time set hands control of the
+                     * LastWriteTime to this handle: its own subsequent writes and
+                     * size-sets must stop advancing it (classic SMB sticky mtime).
+                     * The sentinels are NOT concrete: 0 leaves the field alone, and
+                     * -1/-2 (TIME_HALT/_RESUME) are the persistent MS-FSA halt/resume
+                     * pins handled by the backend -- engaging the per-handle restore
+                     * for them would fight a -2 resume (it would re-freeze mtime). */
+                    if ((request->set_info.vfs_attrs.va_set_mask & CHIMERA_VFS_ATTR_MTIME) &&
+                        request->set_info.vfs_attrs.va_mtime.tv_nsec != CHIMERA_VFS_TIME_OMIT &&
+                        request->set_info.vfs_attrs.va_mtime.tv_nsec != CHIMERA_VFS_TIME_HALT &&
+                        request->set_info.vfs_attrs.va_mtime.tv_nsec != CHIMERA_VFS_TIME_RESUME) {
                         request->set_info.open_file->flags |= CHIMERA_SMB_OPEN_FILE_WRITE_TIME_STICKY;
                     }
 
@@ -540,6 +572,16 @@ chimera_smb_set_info(struct chimera_smb_request *request)
                         request);
                     break;
                 case SMB2_FILE_ENDOFFILE_INFO:
+                    /* MS-FSA 2.1.5.14.5: a requested EndOfFile beyond the maximum
+                     * file size the object store allows is STATUS_INVALID_PARAMETER
+                     * (FsaSetFileEndOfFileInformationTestCaseS2/S4). */
+                    if (request->set_info.attrs.smb_size > CHIMERA_SMB_MAX_FILE_SIZE) {
+                        chimera_smb_open_file_release(request, request->set_info.open_file);
+                        chimera_smb_complete_request(request,
+                                                     SMB2_STATUS_INVALID_PARAMETER);
+                        break;
+                    }
+
                     chimera_smb_unmarshal_end_of_file_info(&request->set_info.attrs, &request->set_info.vfs_attrs);
 
                     /* A size change fires FILE_NOTIFY_CHANGE_SIZE (and, via the
@@ -577,6 +619,17 @@ chimera_smb_set_info(struct chimera_smb_request *request)
                     request->set_info.notify_mask = CHIMERA_VFS_NOTIFY_SIZE_CHANGED |
                         CHIMERA_VFS_NOTIFY_FILE_MODIFIED |
                         CHIMERA_VFS_NOTIFY_STREAM_SIZE;
+
+                    /* MS-FSA 2.1.5.14.1: an AllocationSize beyond the maximum file
+                     * size is STATUS_INVALID_PARAMETER
+                     * (FsaSetFileAllocOrObjIdInformationTestCaseS6). */
+                    if (request->set_info.attrs.smb_size > CHIMERA_SMB_MAX_FILE_SIZE) {
+                        chimera_smb_open_file_release(request, request->set_info.open_file);
+                        chimera_smb_complete_request(request,
+                                                     SMB2_STATUS_INVALID_PARAMETER);
+                        break;
+                    }
+
                     chimera_smb_unmarshal_end_of_file_info(&request->set_info.attrs, &request->set_info.vfs_attrs);
 
                     chimera_vfs_getattr(
@@ -647,6 +700,15 @@ chimera_smb_set_info(struct chimera_smb_request *request)
                     chimera_smb_set_ea(request);
                     break;
                 case SMB2_FILE_POSITION_INFO:
+                    /* MS-FSA 2.1.5.14.7: a CurrentByteOffset less than 0 is
+                     * STATUS_INVALID_PARAMETER
+                     * (FsaSetFilePositionInformationTestCaseS8). */
+                    if ((int64_t) request->set_info.attrs.smb_position < 0) {
+                        chimera_smb_open_file_release(request, request->set_info.open_file);
+                        chimera_smb_complete_request(request,
+                                                     SMB2_STATUS_INVALID_PARAMETER);
+                        break;
+                    }
                     request->set_info.open_file->position = request->set_info.attrs.smb_position;
                     chimera_smb_open_file_release(request, request->set_info.open_file);
                     chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);

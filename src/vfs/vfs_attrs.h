@@ -144,6 +144,16 @@ struct chimera_acl;
  * a value of TIME_OMIT means the backend should leave that timestamp alone. */
 #define CHIMERA_VFS_TIME_OMIT               ((1l << 30) - 4l)
 
+/* Sentinels for the MS-FSA 2.1.5.14.2 timestamp "halt"/"resume" semantics: a
+ * SetInfo(FileBasicInformation) value of -1 (TIME_HALT) pins the field so the
+ * object store stops applying implicit, I/O-driven updates to it; -2
+ * (TIME_RESUME) re-enables them.  Neither changes the stored value, so like
+ * TIME_OMIT they preserve it (resolve_set_time returns 0); a backend that
+ * tracks the halt state (memfs) acts on the sentinel separately, before
+ * resolving.  Backends that don't simply preserve the value -- no corruption. */
+#define CHIMERA_VFS_TIME_HALT               ((1l << 30) - 5l)
+#define CHIMERA_VFS_TIME_RESUME             ((1l << 30) - 6l)
+
 /*
  * Resolve a settable timestamp against the TIME_NOW / TIME_OMIT sentinels that
  * the SMB and NFS layers carry in a settable atime/mtime/btime/ctime field.
@@ -164,7 +174,9 @@ chimera_vfs_resolve_set_time(
     if (in->tv_nsec == CHIMERA_VFS_TIME_NOW) {
         *out = *now;
         return 1;
-    } else if (in->tv_nsec != CHIMERA_VFS_TIME_OMIT) {
+    } else if (in->tv_nsec != CHIMERA_VFS_TIME_OMIT &&
+               in->tv_nsec != CHIMERA_VFS_TIME_HALT &&
+               in->tv_nsec != CHIMERA_VFS_TIME_RESUME) {
         *out = *in;
         return 1;
     }

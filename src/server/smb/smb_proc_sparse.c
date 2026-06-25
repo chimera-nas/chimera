@@ -164,6 +164,15 @@ chimera_smb_ioctl_set_zero_data(struct chimera_smb_request *request)
         return;
     }
 
+    /* Set-zero-data is a data-stream operation; a directory has no data stream,
+     * so it is STATUS_INVALID_PARAMETER (MS-FSA 2.1.5.9.5;
+     * FsaFsCtl_Set_ZeroData_Dir). */
+    if (open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_DIRECTORY) {
+        chimera_smb_open_file_release(request, open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+        return;
+    }
+
     /* Zeroing data writes the file, so the handle must hold write access
      * (smb2.ioctl.sparse_perms). */
     if (!(open_file->granted_access &
@@ -362,6 +371,15 @@ chimera_smb_ioctl_query_allocated_ranges(struct chimera_smb_request *request)
 
     if (unlikely(!open_file)) {
         chimera_smb_complete_request(request, SMB2_STATUS_FILE_CLOSED);
+        return;
+    }
+
+    /* Querying allocated ranges is a data-stream operation; a directory has no
+     * data stream, so it is STATUS_INVALID_PARAMETER (MS-FSA 2.1.5.9.20;
+     * FsaFsCtl_Query_AllocatedRanges_Dir). */
+    if (open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_DIRECTORY) {
+        chimera_smb_open_file_release(request, open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
         return;
     }
 

@@ -407,13 +407,47 @@ chimera_smb_marshal_fs_full_size_info(
  *   0xFFFFFFFFFFFFFFFE (NTTIME_THAW)   - leave unchanged, resume auto-updates
  * Any other value is a real timestamp to store.  (MS-FSCC 2.4.7; the
  * freeze/thaw values are exercised by smbtorture's smb2.timestamps.) */
-static inline int
-chimera_smb_time_is_omit(uint64_t nttime)
+/* Map a wire FILE_BASIC_INFORMATION timestamp to a settable VFS timespec,
+ * honoring the MS-FSA 2.1.5.14.2 sentinels: 0 = "no change" (TIME_OMIT),
+ * -1 = halt implicit (I/O-driven) updates to the field (TIME_HALT), -2 =
+ * resume them (TIME_RESUME).  Any other value is a concrete NT time -- callers
+ * must already have rejected the invalid (signed) < -2 range via
+ * chimera_smb_basic_info_time_invalid(). */
+static inline void
+chimera_smb_unmarshal_settable_time(
+    uint64_t         nttime,
+    struct timespec *out)
 {
-    return nttime == 0 ||
-           nttime == UINT64_MAX ||
-           nttime == UINT64_MAX - 1;
-} /* chimera_smb_time_is_omit */
+    switch (nttime) {
+        case 0:
+            out->tv_sec  = 0;
+            out->tv_nsec = CHIMERA_VFS_TIME_OMIT;
+            break;
+        case UINT64_MAX:                /* -1: halt implicit updates */
+            out->tv_sec  = 0;
+            out->tv_nsec = CHIMERA_VFS_TIME_HALT;
+            break;
+        case UINT64_MAX - 1:            /* -2: resume implicit updates */
+            out->tv_sec  = 0;
+            out->tv_nsec = CHIMERA_VFS_TIME_RESUME;
+            break;
+        default:
+            chimera_nt_to_epoch(nttime, out);
+    } // switch
+} /* chimera_smb_unmarshal_settable_time */
+
+/* MS-FSA 2.1.5.14.2: a settable basic-info timestamp whose value, interpreted
+ * as a signed 64-bit, is less than -2 is invalid -- only 0, -1, -2 and concrete
+ * (non-negative) NT times are accepted.  Returns 1 when any of the four
+ * timestamps is in that range so the caller can fail with INVALID_PARAMETER. */
+static inline int
+chimera_smb_basic_info_time_invalid(const struct chimera_smb_attrs *smb_attrs)
+{
+    return (int64_t) smb_attrs->smb_crttime < -2 ||
+           (int64_t) smb_attrs->smb_atime < -2 ||
+           (int64_t) smb_attrs->smb_mtime < -2 ||
+           (int64_t) smb_attrs->smb_ctime < -2;
+} /* chimera_smb_basic_info_time_invalid */
 
 static inline void
 chimera_smb_unmarshal_basic_info(
@@ -423,46 +457,26 @@ chimera_smb_unmarshal_basic_info(
     attr->va_req_mask = 0;
     attr->va_set_mask = 0;
 
-    /* MS-FSCC 2.4.7 FileBasicInformation: a non-zero timestamp replaces the
-     * stored value; a zero (or freeze/thaw sentinel) means "don't change".
-     * Carry every time field through to the backend even when it is omitted,
-     * using the TIME_OMIT sentinel — that way the implicit ctime bump (which
-     * apply_attrs would otherwise stamp because the co-present DOS-attribute
-     * change is a metadata write) is suppressed for the fields the client
-     * asked to leave alone.  apply_attrs treats TIME_OMIT as "preserve". */
-    if (!chimera_smb_time_is_omit(smb_attrs->smb_atime)) {
-        chimera_nt_to_epoch(smb_attrs->smb_atime, &attr->va_atime);
-    } else {
-        attr->va_atime.tv_sec  = 0;
-        attr->va_atime.tv_nsec = CHIMERA_VFS_TIME_OMIT;
-    }
+    /* MS-FSCC 2.4.7 / MS-FSA 2.1.5.14.2 FileBasicInformation: a concrete
+     * timestamp replaces the stored value; 0 means "don't change"; -1/-2 halt
+     * or resume the field's implicit I/O-driven updates without changing its
+     * value.  Carry every time field through to the backend even when it is a
+     * no-op sentinel -- that way the implicit ctime bump (which apply_attrs
+     * would otherwise stamp because the co-present DOS-attribute change is a
+     * metadata write) is suppressed for the fields the client left alone. */
+    chimera_smb_unmarshal_settable_time(smb_attrs->smb_atime, &attr->va_atime);
     attr->va_req_mask |= CHIMERA_VFS_ATTR_ATIME;
     attr->va_set_mask |= CHIMERA_VFS_ATTR_ATIME;
 
-    if (!chimera_smb_time_is_omit(smb_attrs->smb_mtime)) {
-        chimera_nt_to_epoch(smb_attrs->smb_mtime, &attr->va_mtime);
-    } else {
-        attr->va_mtime.tv_sec  = 0;
-        attr->va_mtime.tv_nsec = CHIMERA_VFS_TIME_OMIT;
-    }
+    chimera_smb_unmarshal_settable_time(smb_attrs->smb_mtime, &attr->va_mtime);
     attr->va_req_mask |= CHIMERA_VFS_ATTR_MTIME;
     attr->va_set_mask |= CHIMERA_VFS_ATTR_MTIME;
 
-    if (!chimera_smb_time_is_omit(smb_attrs->smb_ctime)) {
-        chimera_nt_to_epoch(smb_attrs->smb_ctime, &attr->va_ctime);
-    } else {
-        attr->va_ctime.tv_sec  = 0;
-        attr->va_ctime.tv_nsec = CHIMERA_VFS_TIME_OMIT;
-    }
+    chimera_smb_unmarshal_settable_time(smb_attrs->smb_ctime, &attr->va_ctime);
     attr->va_req_mask |= CHIMERA_VFS_ATTR_CTIME;
     attr->va_set_mask |= CHIMERA_VFS_ATTR_CTIME;
 
-    if (!chimera_smb_time_is_omit(smb_attrs->smb_crttime)) {
-        chimera_nt_to_epoch(smb_attrs->smb_crttime, &attr->va_btime);
-    } else {
-        attr->va_btime.tv_sec  = 0;
-        attr->va_btime.tv_nsec = CHIMERA_VFS_TIME_OMIT;
-    }
+    chimera_smb_unmarshal_settable_time(smb_attrs->smb_crttime, &attr->va_btime);
     attr->va_req_mask |= CHIMERA_VFS_ATTR_BTIME;
     attr->va_set_mask |= CHIMERA_VFS_ATTR_BTIME;
 
