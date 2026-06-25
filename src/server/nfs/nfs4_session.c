@@ -102,10 +102,23 @@ nfs4_client_table_free(struct nfs4_client_table *table)
 
     /* HASH_DEL blows clangs mind so we disable this block under analyzer */
 
-    HASH_ITER(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id, cur, tmp)
+    /* A client record is always present in the by-id table but only
+     * *optionally* in the by-owner table: an unconfirmed SETCLIENTID reboot
+     * record (nfs4_client_new_locked with add_to_owner=false) and a superseded
+     * record both live in by-id only.  Unhashing every by-id record from
+     * by-owner would therefore HASH_DELETE records that were never added there,
+     * corrupting the by-owner table (NULL-head deref / SEGV).  Drain by-owner
+     * with its own iterator first -- freeing nothing -- then free every record
+     * via the by-id table. */
+    HASH_ITER(nfs4_client_hh_by_owner, table->nfs4_ct_clients_by_owner,
+              cur, tmp)
     {
         HASH_DELETE(nfs4_client_hh_by_owner, table->nfs4_ct_clients_by_owner,
                     cur);
+    }
+
+    HASH_ITER(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id, cur, tmp)
+    {
         HASH_DELETE(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id, cur);
         free(cur);
     }
