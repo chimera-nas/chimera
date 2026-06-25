@@ -429,11 +429,11 @@ struct nfs_delegation {
      * requester thread that runs a peer GETATTR against this delegation.
      */
     pthread_mutex_t        combine_lock;
-    uint64_t               combine_sc;                /* cached change attr (sc) */
-    uint64_t               combine_last;              /* last nsc returned to a peer */
-    bool                   combine_valid;             /* sc captured at grant     */
+    uint64_t               combine_sc;              /* cached change attr (sc) */
+    uint64_t               combine_last;            /* last nsc returned to a peer */
+    bool                   combine_valid;           /* sc captured at grant     */
 
-    _Atomic uint8_t        cb_recall_state;          /* NFS4_DELEG_* */
+    _Atomic uint8_t        cb_recall_state;         /* NFS4_DELEG_* */
     /* Count of CB_RECALL retransmits attempted because the client's callback
      * session was not yet usable (CB_SEQUENCE returned NFS4ERR_BADSESSION right
      * after a CREATE_SESSION, before the client finished registering the new
