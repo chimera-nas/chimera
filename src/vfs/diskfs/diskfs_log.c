@@ -867,25 +867,37 @@ diskfs_push_trim(struct diskfs_intent_log *il)
 } /* diskfs_push_trim */
 
 
-/* Issue ready home writes up to the push watermark, one per unique block. */
+/* Issue ready home writes up to a per-device in-flight cap, one per unique
+ * block. */
 static void
 diskfs_push_issue(struct diskfs_intent_log *il)
 {
-    while (il->push_outstanding < DISKFS_PUSH_WATERMARK) {
-        struct diskfs_pending *e = diskfs_ready_pop(il);
+    for ( ;; ) {
+        struct diskfs_pending *e = il->ready_head;   /* peek; don't pop yet */
 
         if (!e) {
-            /* Ran out of ready blocks before hitting the watermark: the pusher
-             * is STARVED (coverage/fold pipeline isn't feeding it), not in-flight
-             * limited. */
+            /* Ran out of ready blocks: the pusher is STARVED (the coverage/fold
+             * pipeline isn't feeding it), not in-flight limited. */
             return;
         }
 
+        /* Per-device in-flight cap: if this block's home device already has
+         * DISKFS_PUSH_DEV_WATERMARK home writes in flight, the pusher is
+         * SATURATED on that device -- park.  A completion on that device
+         * re-kicks push_issue (diskfs_push_block_cb).  Peeking the head before
+         * popping keeps the gate exact: one block per iteration, so we never
+         * commit to a block we then have to park mid-record. */
+        if (il->push_outstanding_dev[e->device_id] >= DISKFS_PUSH_DEV_WATERMARK) {
+            return;
+        }
+
+        e               = diskfs_ready_pop(il);
         e->inflight     = 1;
         e->issued_seq   = e->seq;
         e->issued_owner = e->owner;
         e->owner->inflight_refs++;
         il->push_outstanding++;
+        il->push_outstanding_dev[e->device_id]++;
         diskfs_il_push_metrics(il);
 
         diskfs_metric_il_block_io(il, DISKFS_METRIC_IO_WRITE,
@@ -895,8 +907,6 @@ diskfs_push_issue(struct diskfs_intent_log *il)
         evpl_block_write(il->push_evpl, il->home_queue[e->device_id], e->iov, 1,
                          e->device_offset, il->sync, diskfs_push_block_cb, e);
     }
-    /* Fell out of the loop with ready work still possible == in-flight watermark
-     * reached: the pusher is SATURATED (home-write concurrency limited). */
 } /* diskfs_push_issue */
 
 
@@ -915,6 +925,7 @@ diskfs_push_block_cb(
     chimera_diskfs_abort_if(status, "tail-push home write failed: %d", status);
 
     il->push_outstanding--;
+    il->push_outstanding_dev[e->device_id]--;
 
     /* Release the record the in-flight write read from; free it if it has been
      * retired and no other in-flight write still reads it. */
@@ -2087,6 +2098,9 @@ diskfs_il_push_thread_init(
 
     /* Home writes can target any device. */
     il->home_queue = calloc(shared->num_devices, sizeof(*il->home_queue));
+    /* Per-device in-flight home-write counters (gate in diskfs_push_issue). */
+    il->push_outstanding_dev = calloc(shared->num_devices,
+                                      sizeof(*il->push_outstanding_dev));
     for (i = 0; i < shared->num_devices; i++) {
         il->home_queue[i] = shared->devices[i].bdev ?
             evpl_block_open_queue(evpl, shared->devices[i].bdev) : NULL;
@@ -2125,6 +2139,7 @@ diskfs_il_push_thread_shutdown(
         }
     }
     free(il->home_queue);
+    free(il->push_outstanding_dev);
 
     while ((p = il->pfree)) {
         il->pfree = p->rnext;
