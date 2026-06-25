@@ -331,6 +331,16 @@ nlm_state_remove_client_file(
     (void) hostname;
 } /* nlm_state_remove_client_file */
 
+/*
+ * Release every lock held (or being acquired) by `client`.
+ *
+ * IMPORTANT: the caller must NOT hold state->mutex.  This function takes it
+ * internally for the detach phase and DROPS it before releasing leases.  That
+ * matters because chimera_vfs_lease_release() pumps the file's pending queue,
+ * which can synchronously fire another waiter's NLM acquire callback -- and
+ * that callback itself takes state->mutex.  Releasing leases under the mutex
+ * would therefore self-deadlock.
+ */
 void
 nlm_client_release_all_locks(
     struct nlm_state          *state,
@@ -340,23 +350,75 @@ nlm_client_release_all_locks(
     struct chimera_vfs_cred   *cred)
 {
     struct nlm_lock_entry *entry, *tmp;
+    struct nlm_lock_entry *reap  = NULL;  /* detached entries this call owns */
     int                    count = 0;
 
-    (void) state;
     (void) cred;
+#ifdef __clang_analyzer__
+    /* The list-walk bodies below are elided under the analyzer (utlist macro
+     * false positive); keep these from tripping unused-variable diagnostics. */
+    (void) entry;
+    (void) tmp;
+    (void) reap;
+    (void) count;
+    (void) vfs_thread;
+    (void) vfs_state;
+#endif /* __clang_analyzer__ */
+
+    /* Phase 1 (under the lock): cancel queued blocking tickets and detach every
+     * entry we own onto a private `reap` list.  Entries whose acquire callback
+     * is firing concurrently (cancel lost the race) are left on client->locks
+     * for that callback to remove and free. */
+    pthread_mutex_lock(&state->mutex);
 
     DL_FOREACH(client->locks, entry)
     {
         count++;
     }
+    chimera_nfs_debug("NLM: releasing all %d lock(s) for client '%s'", count,
+                      client->hostname);
 
-    chimera_nfs_debug("NLM: releasing all %d lock(s) for client '%s'", count, client->hostname);
-
+    /* The DL_DELETE/DL_APPEND utlist macros trip a scan-build null-deref false
+     * positive on the list head's prev field; guarded the same way as
+     * nlm_state_destroy in this file. */
+#ifndef __clang_analyzer__
     DL_FOREACH_SAFE(client->locks, entry, tmp)
     {
-        /* Drop the vfs_state lease (if granted) and put the file_state
-         * ref.  Pending entries (lease_inserted == false) skip the
-         * release; their VFS callback will clean up when it fires. */
+        /* A still-pending entry whose blocking acquire is queued in vfs_state
+         * (an NLM blocking LOCK not yet granted) must have its ticket cancelled
+         * before we free it -- otherwise the pending pump would later fire the
+         * acquire callback on freed memory.  chimera_vfs_lease_acquire_cancel is
+         * the atomic arbiter: true exactly once if it dequeued the ticket before
+         * the pump claimed it.
+         *
+         *   - cancel == true : the callback will NOT fire; WE own the entry.
+         *     Its original LOCK RPC already received NLM4_BLOCKED, so no reply is
+         *     owed; free the acquire ctx the callback would have freed.
+         *   - cancel == false: the acquire callback is firing concurrently and
+         *     will DL_DELETE + free this entry itself -- leave it linked, skip. */
+        if (entry->pending && !entry->lease_inserted && entry->file_state) {
+            if (!chimera_vfs_lease_acquire_cancel(vfs_state, &entry->ticket)) {
+                continue;
+            }
+            free(entry->ticket.private_data);
+            entry->ticket.private_data = NULL;
+            entry->pending             = false;
+        }
+
+        DL_DELETE(client->locks, entry);
+        entry->next = NULL;
+        entry->prev = NULL;
+        DL_APPEND(reap, entry);
+    }
+#endif /* ifndef __clang_analyzer__ */
+
+    pthread_mutex_unlock(&state->mutex);
+
+    /* Phase 2 (no lock held): release leases (which may pump and fire other
+     * waiters' callbacks), drop file_state refs, close handles, free. */
+#ifndef __clang_analyzer__
+    DL_FOREACH_SAFE(reap, entry, tmp)
+    {
         if (entry->lease_inserted) {
             chimera_vfs_lease_release(vfs_state, entry->file_state, &entry->lease);
             entry->lease_inserted = false;
@@ -368,7 +430,8 @@ nlm_client_release_all_locks(
         if (entry->handle) {
             chimera_vfs_release(vfs_thread, entry->handle);
         }
+        DL_DELETE(reap, entry);
         nlm_lock_entry_free(entry);
     }
-    client->locks = NULL;
+#endif /* ifndef __clang_analyzer__ */
 } /* nlm_client_release_all_locks */

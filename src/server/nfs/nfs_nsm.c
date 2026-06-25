@@ -649,8 +649,13 @@ nsm_release_host_locks(
     struct chimera_vfs_cred           anon_cred;
     int                               found = 0;
 
+    /* Locate the client under the lock, then release outside it: release_all
+    * takes state->mutex itself and must not be called with it held (it pumps
+    * the VFS pending queue, which can re-enter the NLM acquire callback). */
     pthread_mutex_lock(&shared->nlm_state.mutex);
     HASH_FIND_STR(shared->nlm_state.clients, host, client);
+    pthread_mutex_unlock(&shared->nlm_state.mutex);
+
     if (client) {
         found = 1;
         chimera_vfs_cred_init_anonymous(&anon_cred,
@@ -661,7 +666,6 @@ nsm_release_host_locks(
                                      thread->vfs->vfs_state,
                                      &anon_cred);
     }
-    pthread_mutex_unlock(&shared->nlm_state.mutex);
     return found;
 } /* nsm_release_host_locks */
 

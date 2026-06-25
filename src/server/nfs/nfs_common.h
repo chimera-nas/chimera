@@ -292,6 +292,11 @@ struct chimera_server_nfs_shared {
     struct nlm_state                    nlm_state;
     struct SM_INTER_V1                  nsm_v1;
     struct nsm_state                    nsm_state;
+    /* Outbound NLM_GRANTED callback engine (RFC 1813 blocking-lock grant
+     * delivery).  Lazily created on the first deferred grant; owns its own
+     * evpl_thread, so grant delivery + retransmit never touch a core loop.
+     * Forward-declared in nfs_nlm_granted.h. */
+    struct nlm_granter                 *nlm_granter;
 
     struct chimera_nfs_export          *exports;
     pthread_mutex_t                     exports_lock;

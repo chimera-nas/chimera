@@ -1720,13 +1720,14 @@ chimera_vfs_state_remove(
 /* -------------------------------------------------------------------- */
 
 SYMBOL_EXPORT void
-chimera_vfs_lease_acquire(
+chimera_vfs_lease_acquire_blocking(
     struct chimera_vfs_state           *state,
     struct chimera_vfs_file_state      *file,
     struct chimera_vfs_lease           *lease,
     struct chimera_vfs_pending_acquire *ticket,
     bool                                wait,
     chimera_vfs_lease_acquire_cb_t      cb,
+    chimera_vfs_lease_blocked_cb_t      blocked_cb,
     void                               *private_data)
 {
     enum chimera_vfs_lease_result result;
@@ -1750,12 +1751,20 @@ chimera_vfs_lease_acquire(
         pthread_mutex_lock(&file->lock);
         chimera_vfs_pending_enqueue_locked(file, ticket);
         pthread_mutex_unlock(&file->lock);
+        /* Tell the caller the result is deferred (e.g. NLM sends NLM4_BLOCKED).
+         * Fired after the enqueue but before return, so the result callback (run
+         * from a later pump, possibly on another thread) cannot race ahead of it;
+         * a NULL blocked_cb (every non-NLM caller) is simply a no-op. */
+        if (blocked_cb) {
+            blocked_cb(private_data);
+        }
         return;
     }
 
     /* A RANGE lease (byte-range lock) that is hard-DENIED by another owner's
      * conflicting lock, when the caller asked to wait, is an SMB2 blocking lock
-     * (MS-SMB2 3.3.5.14): queue it rather than bouncing DENIED.  The ticket fires
+     * (MS-SMB2 3.3.5.14) or a blocking NLM lock (RFC 1813 / XNFS NLM_LOCK with
+     * block==true): queue it rather than bouncing DENIED.  The ticket fires
      * GRANTED when the conflicting range is released (chimera_vfs_state_remove ->
      * pump_pending re-runs try_insert), or the caller cancels it
      * (chimera_vfs_lease_acquire_cancel) on CANCEL / handle close / teardown.
@@ -1767,6 +1776,9 @@ chimera_vfs_lease_acquire(
         pthread_mutex_lock(&file->lock);
         chimera_vfs_pending_enqueue_locked(file, ticket);
         pthread_mutex_unlock(&file->lock);
+        if (blocked_cb) {
+            blocked_cb(private_data);
+        }
         return;
     }
 
@@ -1779,6 +1791,20 @@ chimera_vfs_lease_acquire(
     /* Done exposing `conflict` to the cb; drop the try_insert pin (no-op unless
      * it is a caching grant). */
     chimera_vfs_state_conflict_unref(state, conflict);
+} /* chimera_vfs_lease_acquire_blocking */
+
+SYMBOL_EXPORT void
+chimera_vfs_lease_acquire(
+    struct chimera_vfs_state           *state,
+    struct chimera_vfs_file_state      *file,
+    struct chimera_vfs_lease           *lease,
+    struct chimera_vfs_pending_acquire *ticket,
+    bool                                wait,
+    chimera_vfs_lease_acquire_cb_t      cb,
+    void                               *private_data)
+{
+    chimera_vfs_lease_acquire_blocking(state, file, lease, ticket, wait, cb,
+                                       NULL, private_data);
 } /* chimera_vfs_lease_acquire */
 
 SYMBOL_EXPORT void
