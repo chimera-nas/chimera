@@ -235,8 +235,10 @@ nfs4_principal_matches(
  * SP4_MACH_CRED enforcement (RFC 8881 §2.10.8.3): a state-management operation
  * on a client that negotiated SP4_MACH_CRED must be issued with the same
  * (machine) credential that established the client at EXCHANGE_ID.  Returns 1
- * if the operation is permitted (client absent, or SP4_NONE/SP4_SSV, or the
- * principal matches), 0 if it must be rejected with NFS4ERR_WRONG_CRED.
+ * if the operation is permitted (client absent, or SP4_NONE, or the principal
+ * matches), 0 if it must be rejected with NFS4ERR_WRONG_CRED.  SP4_SSV is never
+ * negotiated (EXCHANGE_ID declines it -- see nfs4_set_state_protect), so the
+ * only modes a client record can carry here are SP4_NONE and SP4_MACH_CRED.
  */
 SYMBOL_EXPORT int
 nfs4_client_mach_cred_ok(

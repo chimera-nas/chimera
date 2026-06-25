@@ -18,102 +18,6 @@
          EXCHGID4_FLAG_USE_PNFS_MDS | EXCHGID4_FLAG_USE_PNFS_DS |             \
          EXCHGID4_FLAG_UPD_CONFIRMED_REC_A)
 
-/*
- * SSV state-protection (SP4_SSV) algorithm tables.  Each entry is a DER-encoded
- * ASN.1 OBJECT IDENTIFIER as it appears on the wire in ssv_sp_parms4, plus (for
- * hashes) the SSV length, which is the hash's output size (RFC 8881 §2.10.9).
- */
-struct nfs4_ssv_alg {
-    const uint8_t *oid;
-    uint32_t       oid_len;
-    uint32_t       ssv_len; /* hash digest size; unused (0) for ciphers */
-};
-
-/* *INDENT-OFF* */
-/* DER-encoded OBJECT IDENTIFIERs and the column-aligned tables below confuse
- * uncrustify's alignment pass (it oscillates), so format them by hand. */
-static const uint8_t nfs4_oid_sha1[]   = { 0x06, 0x05, 0x2b, 0x0e, 0x03, 0x02, 0x1a };
-static const uint8_t nfs4_oid_sha224[] = { 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x04 };
-static const uint8_t nfs4_oid_sha256[] = { 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01 };
-static const uint8_t nfs4_oid_sha384[] = { 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x02 };
-static const uint8_t nfs4_oid_sha512[] = { 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03 };
-
-static const struct nfs4_ssv_alg nfs4_ssv_hashes[] = {
-    { nfs4_oid_sha256, sizeof(nfs4_oid_sha256), 32 },
-    { nfs4_oid_sha1,   sizeof(nfs4_oid_sha1),   20 },
-    { nfs4_oid_sha512, sizeof(nfs4_oid_sha512), 64 },
-    { nfs4_oid_sha384, sizeof(nfs4_oid_sha384), 48 },
-    { nfs4_oid_sha224, sizeof(nfs4_oid_sha224), 28 },
-};
-
-static const uint8_t nfs4_oid_aes128_cbc[] = { 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x01, 0x02 };
-static const uint8_t nfs4_oid_aes192_cbc[] = { 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x01, 0x16 };
-static const uint8_t nfs4_oid_aes256_cbc[] = { 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x01, 0x2a };
-
-static const struct nfs4_ssv_alg nfs4_ssv_ciphers[] = {
-    { nfs4_oid_aes256_cbc, sizeof(nfs4_oid_aes256_cbc), 0 },
-    { nfs4_oid_aes192_cbc, sizeof(nfs4_oid_aes192_cbc), 0 },
-    { nfs4_oid_aes128_cbc, sizeof(nfs4_oid_aes128_cbc), 0 },
-};
-/* *INDENT-ON* */
-
-/*
- * Walk the client's offered algorithm list in preference order and pick the
- * first entry the server recognizes.  spi_hash_alg / spi_encr_alg are returned
- * as indices into the client's list (RFC 8881 §18.35.3), so the client must
- * present at least one algorithm we know.  Returns 0 on a match.
- */
-static int
-nfs4_ssv_select(
-    const struct sec_oid4     *offered,
-    uint32_t                   num_offered,
-    const struct nfs4_ssv_alg *known,
-    size_t                     num_known,
-    uint32_t                  *out_idx,
-    uint32_t                  *out_ssv_len)
-{
-    for (uint32_t i = 0; i < num_offered; i++) {
-        for (size_t k = 0; k < num_known; k++) {
-            if (offered[i].oid.len == known[k].oid_len &&
-                memcmp(offered[i].oid.data, known[k].oid, known[k].oid_len) == 0) {
-                *out_idx = i;
-                if (out_ssv_len) {
-                    *out_ssv_len = known[k].ssv_len;
-                }
-                return 0;
-            }
-        }
-    }
-    return -1;
-} /* nfs4_ssv_select */
-
-/* Echo a state_protect_ops4 (the operations the server will enforce / allow)
- * into the reply, copying the bitmap arrays into the response dbuf. */
-static void
-nfs4_copy_protect_ops(
-    struct state_protect_ops4       *dst,
-    const struct state_protect_ops4 *src,
-    xdr_dbuf                        *dbuf)
-{
-    dst->num_spo_must_enforce = src->num_spo_must_enforce;
-    dst->spo_must_enforce     = NULL;
-    if (src->num_spo_must_enforce) {
-        size_t sz = (size_t) src->num_spo_must_enforce * sizeof(uint32_t);
-        dst->spo_must_enforce = xdr_dbuf_alloc_space(sz, dbuf);
-        chimera_nfs_abort_if(dst->spo_must_enforce == NULL, "Failed to allocate space");
-        memcpy(dst->spo_must_enforce, src->spo_must_enforce, sz);
-    }
-
-    dst->num_spo_must_allow = src->num_spo_must_allow;
-    dst->spo_must_allow     = NULL;
-    if (src->num_spo_must_allow) {
-        size_t sz = (size_t) src->num_spo_must_allow * sizeof(uint32_t);
-        dst->spo_must_allow = xdr_dbuf_alloc_space(sz, dbuf);
-        chimera_nfs_abort_if(dst->spo_must_allow == NULL, "Failed to allocate space");
-        memcpy(dst->spo_must_allow, src->spo_must_allow, sz);
-    }
-} /* nfs4_copy_protect_ops */
-
 /* State-management operations chimera enforces under SP4_MACH_CRED, as a
  * bitmap4 (RFC 8881 §2.10.8.3): BIND_CONN_TO_SESSION(41), EXCHANGE_ID(42),
  * CREATE_SESSION(43), DESTROY_SESSION(44), DESTROY_CLIENTID(57).  Bit op N is
@@ -126,9 +30,19 @@ nfs4_copy_protect_ops(
  * Build the EXCHANGE_ID reply's state-protection result (RFC 8881 §18.35.3)
  * and return the negotiated mode (stored on the client record for per-op
  * enforcement).  SP4_MACH_CRED is honored when requested: the server echoes
- * the operations it will enforce against the machine credential.  SP4_SSV is
- * honored when the client offers an SSV hash (and cipher) we support.  Any
- * case we cannot satisfy falls back to SP4_NONE.
+ * the operations it will enforce against the machine credential.
+ *
+ * SP4_SSV is declined -- we fall back to SP4_NONE.  Although the wire encoding
+ * could be negotiated, chimera does not actually enforce the SSV-derived
+ * RPCSEC_GSS credential on the spo_must_enforce state-management operations,
+ * SET_SSV does not compute the ssr_digest proof-of-knowledge, and
+ * nfs4_client_mach_cred_ok never checks an SSV credential (RFC 8881
+ * §2.10.8.3 / §18.47.3).  Advertising SP4_SSV would therefore be both a
+ * protocol lie (claiming a capability we cannot back) and a security
+ * overstatement (a client would believe its session-management operations are
+ * cryptographically bound to a shared secret when they are not).  Until real
+ * SSV enforcement is implemented we decline it.  Any case we cannot satisfy
+ * falls back to SP4_NONE.
  */
 static uint32_t
 nfs4_set_state_protect(
@@ -151,35 +65,13 @@ nfs4_set_state_protect(
         return SP4_MACH_CRED;
     }
 
+    /* SP4_SSV is declined: chimera cannot enforce SSV-derived credentials, so
+     * it falls through to the SP4_NONE result below rather than advertising a
+     * capability it does not back.  See the function comment above. */
     if (req_sp->spa_how == SP4_SSV) {
-        const struct ssv_sp_parms4 *p = &req_sp->spa_ssv_parms;
-        uint32_t                    hash_idx, encr_idx, ssv_len;
-
-        if (nfs4_ssv_select(p->ssp_hash_algs, p->num_ssp_hash_algs,
-                            nfs4_ssv_hashes,
-                            sizeof(nfs4_ssv_hashes) / sizeof(nfs4_ssv_hashes[0]),
-                            &hash_idx, &ssv_len) == 0 &&
-            nfs4_ssv_select(p->ssp_encr_algs, p->num_ssp_encr_algs,
-                            nfs4_ssv_ciphers,
-                            sizeof(nfs4_ssv_ciphers) / sizeof(nfs4_ssv_ciphers[0]),
-                            &encr_idx, NULL) == 0) {
-            struct ssv_prot_info4 *info = &res_sp->spr_ssv_info;
-
-            res_sp->spr_how = SP4_SSV;
-            nfs4_copy_protect_ops(&info->spi_ops, &p->ssp_ops, dbuf);
-            info->spi_hash_alg = hash_idx;
-            info->spi_encr_alg = encr_idx;
-            info->spi_ssv_len  = ssv_len;
-            /* ssp_window is the number of concurrent SSV versions the client
-             * wants tracked; echo it (a zero window is meaningless, so floor
-             * it at one). */
-            info->spi_window = p->ssp_window ? p->ssp_window : 1;
-            /* No GSS handles are pre-provisioned; the client gets them via the
-             * RPCSEC_GSS SSV mechanism if/when it uses SSV-secured RPC. */
-            info->spi_handles.len  = 0;
-            info->spi_handles.data = NULL;
-            return SP4_SSV;
-        }
+        chimera_nfs_debug(
+            "EXCHANGE_ID: client requested SP4_SSV; declining (not enforced), "
+            "negotiating SP4_NONE instead");
     }
 
     res_sp->spr_how = SP4_NONE;
