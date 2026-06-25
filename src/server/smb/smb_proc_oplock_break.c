@@ -651,16 +651,20 @@ chimera_smb_oplock_break(struct chimera_smb_request *request)
             return;
         }
 
-        /* MS-SMB2 2.2.24.1: the acknowledged OplockLevel may only be
+        /* MS-SMB2 3.3.5.22.1: the acknowledged OplockLevel may only be
          * SMB2_OPLOCK_LEVEL_II or SMB2_OPLOCK_LEVEL_NONE -- a client cannot
          * acknowledge a break by claiming a higher level (EXCLUSIVE/BATCH) or a
          * garbage value.  The lease path's mapping silently collapses such
          * values to 0 caching bits, but open_file->oplock_level would still be
-         * stamped with the bogus level; reject up front (#1284). */
+         * stamped with the bogus level; reject up front (#1284).  The spec's
+         * code for an oplock-acknowledgment level violation is
+         * STATUS_INVALID_OPLOCK_PROTOCOL (WPTS OplockOnShare S432), NOT the
+         * generic INVALID_PARAMETER. */
         if (request->oplock_break.oplock_level != SMB2_OPLOCK_LEVEL_II &&
             request->oplock_break.oplock_level != SMB2_OPLOCK_LEVEL_NONE) {
             chimera_smb_open_file_release(request, open_file);
-            chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+            chimera_smb_complete_request(request,
+                                         SMB2_STATUS_INVALID_OPLOCK_PROTOCOL);
             return;
         }
 
@@ -677,12 +681,15 @@ chimera_smb_oplock_break(struct chimera_smb_request *request)
             struct chimera_vfs_lease_mode kept;
 
             /* MS-SMB2 3.3.5.22.1: an ack is valid only while a break is
-             * outstanding.  The lease path guards this; bring the legacy path
-             * to parity rather than silently SUCCEEDing on a settled/revoked
-             * break (#1287). */
+             * outstanding (Open.OplockState == Breaking).  The legacy oplock
+             * path reports a stale/duplicate ack as STATUS_INVALID_OPLOCK_PROTOCOL
+             * (WPTS OplockOnShare S1225) -- not STATUS_UNSUCCESSFUL, which is the
+             * lease-path (3.3.5.22.2) convention -- rather than silently
+             * SUCCEEDing on a settled/revoked break (#1287). */
             if (lease->break_state != CHIMERA_VFS_BREAK_BREAKING) {
                 chimera_smb_open_file_release(request, open_file);
-                chimera_smb_complete_request(request, SMB2_STATUS_UNSUCCESSFUL);
+                chimera_smb_complete_request(request,
+                                             SMB2_STATUS_INVALID_OPLOCK_PROTOCOL);
                 return;
             }
 
