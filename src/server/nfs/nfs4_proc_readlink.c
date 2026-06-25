@@ -48,8 +48,19 @@ chimera_nfs4_readlink_getattr_complete(
         return;
     }
 
-    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
-        !S_ISLNK(attr->va_mode)) {
+    /* RFC 7530 §16.22: READLINK is valid only on a symbolic link; a
+     * non-symlink current filehandle is NFS4ERR_INVAL.  The type comes from the
+     * getattr we just issued -- if a backend completed getattr without
+     * reporting MODE we cannot prove the object is a link, so fail closed
+     * (NFS4ERR_SERVERFAULT) rather than reading a non-symlink. */
+    if (!(attr->va_set_mask & CHIMERA_VFS_ATTR_MODE)) {
+        res->status = NFS4ERR_SERVERFAULT;
+        chimera_vfs_release(req->thread->vfs_thread, req->handle);
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
+    if (!S_ISLNK(attr->va_mode)) {
         res->status = NFS4ERR_INVAL;
         chimera_vfs_release(req->thread->vfs_thread, req->handle);
         chimera_nfs4_compound_complete(req, res->status);
