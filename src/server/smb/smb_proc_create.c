@@ -178,6 +178,29 @@ chimera_smb_app_instance_decision(
         return 0;
     }
 
+    /* The AppInstanceId force-close is a client *failover*: it replaces an open
+     * held by a DIFFERENT client (one whose ClientGuid differs from the
+     * requesting connection's).  A second open carrying the same AppInstanceId
+     * from the SAME client (same ClientGuid, different connection) is not a
+     * failover and must leave the prior open intact.  (SMB2Model AppInstanceId
+     * SameClientGuid cases; the MS-SMB2 AppInstanceVersion failover uses two
+     * distinct clients, so its ClientGuids differ and the close still applies.) */
+    if (existing->create_conn &&
+        memcmp(existing->create_conn->client_guid,
+               request->compound->conn->client_guid, 16) == 0) {
+        return 0;
+    }
+
+    /* The replacement applies to the open of the same file on the SAME share:
+     * the prior open is located by file handle, which spans share names that map
+     * to one local path, so an open under a DIFFERENT share name (even of the
+     * same underlying file) is not the failover target and is left intact.
+     * (SMB2Model AppInstanceId DifferentShare* cases.) */
+    if (!existing->tree || !request->tree ||
+        existing->tree->share != request->tree->share) {
+        return 0;
+    }
+
     /* existing.V ABSENT -> force-close (an old open with no version always
      * yields to a new AppInstanceId open). */
     if (!existing->app_version_present) {
@@ -614,8 +637,13 @@ chimera_smb_create_gen_open_file(
 
     /* Record the AppInstanceId/AppInstanceVersion this open carried so a later
      * CREATE on a different connection can match it and apply the version-gated
-     * force-close (MS-SMB2 3.3.5.9.7 / 3.3.5.9.16). */
-    if (request->create.ctx_present_mask & CHIMERA_SMB_CREATE_CTX_APP) {
+     * force-close (MS-SMB2 3.3.5.9.7 / 3.3.5.9.16).  SMB2_CREATE_APP_INSTANCE_ID
+     * is an SMB 3.x create context: on a pre-3.x (2.0.2 / 2.1) connection the
+     * server does not process it, so no failover identity is established and it
+     * must not later match (and close) a conflicting open.  (SMB2Model
+     * AppInstanceId cases whose initial open is on an Smb2002 connection.) */
+    if ((request->create.ctx_present_mask & CHIMERA_SMB_CREATE_CTX_APP) &&
+        request->compound->conn->dialect >= SMB2_DIALECT_3_0) {
         memcpy(open_file->app_instance_id, request->create.app_instance_id, 16);
         open_file->ctx_present_mask   |= CHIMERA_SMB_CREATE_CTX_APP;
         open_file->app_version_high    = request->create.app_version_high;

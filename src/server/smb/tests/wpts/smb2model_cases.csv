@@ -1,59 +1,59 @@
 case,home_config,status,enc_path,skip_reason
 AppInstanceIdTestCaseS0,base,green,0,
 AppInstanceIdTestCaseS100,base,green,0,
-AppInstanceIdTestCaseS108,base,xfail,0,executed but fails (candidate defect)
+AppInstanceIdTestCaseS108,base,green,0,
 AppInstanceIdTestCaseS122,base,green,0,
-AppInstanceIdTestCaseS130,base,xfail,0,executed but fails (candidate defect)
-AppInstanceIdTestCaseS138,base,xfail,0,executed but fails (candidate defect)
-AppInstanceIdTestCaseS149,base,xfail,0,executed but fails (candidate defect)
-AppInstanceIdTestCaseS160,base,xfail,0,executed but fails (candidate defect)
-AppInstanceIdTestCaseS171,base,xfail,0,executed but fails (candidate defect)
-AppInstanceIdTestCaseS179,base,xfail,0,executed but fails (candidate defect)
-AppInstanceIdTestCaseS187,base,xfail,0,executed but fails (candidate defect)
-AppInstanceIdTestCaseS195,base,xfail,0,executed but fails (candidate defect)
-AppInstanceIdTestCaseS203,base,xfail,0,executed but fails (candidate defect)
+AppInstanceIdTestCaseS130,base,green,0,
+AppInstanceIdTestCaseS138,base,green,0,
+AppInstanceIdTestCaseS149,base,green,0,
+AppInstanceIdTestCaseS160,base,green,0,
+AppInstanceIdTestCaseS171,base,green,0,
+AppInstanceIdTestCaseS179,base,green,0,
+AppInstanceIdTestCaseS187,base,green,0,
+AppInstanceIdTestCaseS195,base,green,0,
+AppInstanceIdTestCaseS203,base,green,0,
 AppInstanceIdTestCaseS217,base,green,0,
-AppInstanceIdTestCaseS225,base,xfail,0,executed but fails (candidate defect)
-AppInstanceIdTestCaseS233,base,xfail,0,executed but fails (candidate defect)
+AppInstanceIdTestCaseS225,base,green,0,
+AppInstanceIdTestCaseS233,base,green,0,
 AppInstanceIdTestCaseS241,base,green,0,
 AppInstanceIdTestCaseS249,base,green,0,
 AppInstanceIdTestCaseS26,base,green,0,
 AppInstanceIdTestCaseS260,base,green,0,
-AppInstanceIdTestCaseS268,base,xfail,0,executed but fails (candidate defect)
-AppInstanceIdTestCaseS273,base,xfail,0,executed but fails (candidate defect)
-AppInstanceIdTestCaseS281,base,xfail,0,executed but fails (candidate defect)
-AppInstanceIdTestCaseS289,base,xfail,0,executed but fails (candidate defect)
-AppInstanceIdTestCaseS297,base,xfail,0,executed but fails (candidate defect)
-AppInstanceIdTestCaseS308,base,xfail,0,executed but fails (candidate defect)
-AppInstanceIdTestCaseS316,base,xfail,0,executed but fails (candidate defect)
-AppInstanceIdTestCaseS324,base,xfail,0,executed but fails (candidate defect)
-AppInstanceIdTestCaseS332,base,xfail,0,executed but fails (candidate defect)
-AppInstanceIdTestCaseS340,base,xfail,0,executed but fails (candidate defect)
-AppInstanceIdTestCaseS348,base,xfail,0,executed but fails (candidate defect)
-AppInstanceIdTestCaseS353,base,xfail,0,executed but fails (candidate defect)
-AppInstanceIdTestCaseS361,base,xfail,0,executed but fails (candidate defect)
-AppInstanceIdTestCaseS369,base,xfail,0,executed but fails (candidate defect)
-AppInstanceIdTestCaseS377,base,xfail,0,executed but fails (candidate defect)
-AppInstanceIdTestCaseS385,base,xfail,0,executed but fails (candidate defect)
-AppInstanceIdTestCaseS393,base,xfail,0,executed but fails (candidate defect)
-AppInstanceIdTestCaseS401,base,xfail,0,executed but fails (candidate defect)
-AppInstanceIdTestCaseS409,base,xfail,0,executed but fails (candidate defect)
-AppInstanceIdTestCaseS417,base,xfail,0,executed but fails (candidate defect)
-AppInstanceIdTestCaseS425,base,xfail,0,executed but fails (candidate defect)
-AppInstanceIdTestCaseS433,base,xfail,0,executed but fails (candidate defect)
-AppInstanceIdTestCaseS441,base,xfail,0,executed but fails (candidate defect)
-AppInstanceIdTestCaseS449,base,xfail,0,executed but fails (candidate defect)
-AppInstanceIdTestCaseS457,base,xfail,0,executed but fails (candidate defect)
+AppInstanceIdTestCaseS268,base,green,0,
+AppInstanceIdTestCaseS273,base,green,0,
+AppInstanceIdTestCaseS281,base,green,0,
+AppInstanceIdTestCaseS289,base,green,0,
+AppInstanceIdTestCaseS297,base,green,0,
+AppInstanceIdTestCaseS308,base,green,0,
+AppInstanceIdTestCaseS316,base,green,0,
+AppInstanceIdTestCaseS324,base,green,0,
+AppInstanceIdTestCaseS332,base,green,0,
+AppInstanceIdTestCaseS340,base,green,0,
+AppInstanceIdTestCaseS348,base,green,0,
+AppInstanceIdTestCaseS353,base,green,0,
+AppInstanceIdTestCaseS361,base,green,0,
+AppInstanceIdTestCaseS369,base,green,0,
+AppInstanceIdTestCaseS377,base,green,0,
+AppInstanceIdTestCaseS385,base,green,0,
+AppInstanceIdTestCaseS393,base,green,0,
+AppInstanceIdTestCaseS401,base,green,0,
+AppInstanceIdTestCaseS409,base,green,0,
+AppInstanceIdTestCaseS417,base,green,0,
+AppInstanceIdTestCaseS425,base,green,0,
+AppInstanceIdTestCaseS433,base,green,0,
+AppInstanceIdTestCaseS441,base,green,0,
+AppInstanceIdTestCaseS449,base,green,0,
+AppInstanceIdTestCaseS457,base,green,0,
 AppInstanceIdTestCaseS46,base,green,0,
-AppInstanceIdTestCaseS465,base,xfail,0,executed but fails (candidate defect)
-AppInstanceIdTestCaseS473,base,xfail,0,executed but fails (candidate defect)
+AppInstanceIdTestCaseS465,base,green,0,
+AppInstanceIdTestCaseS473,base,green,0,
 AppInstanceIdTestCaseS484,base,green,0,
-AppInstanceIdTestCaseS492,base,xfail,0,executed but fails (candidate defect)
-AppInstanceIdTestCaseS500,base,xfail,0,executed but fails (candidate defect)
+AppInstanceIdTestCaseS492,base,green,0,
+AppInstanceIdTestCaseS500,base,green,0,
 AppInstanceIdTestCaseS508,base,green,0,
 AppInstanceIdTestCaseS516,base,green,0,
 AppInstanceIdTestCaseS524,base,green,0,
-AppInstanceIdTestCaseS532,base,xfail,0,executed but fails (candidate defect)
+AppInstanceIdTestCaseS532,base,green,0,
 AppInstanceIdTestCaseS54,base,green,0,
 AppInstanceIdTestCaseS540,base,green,0,
 AppInstanceIdTestCaseS548,base,green,0,
@@ -64,11 +64,11 @@ AppInstanceIdTestCaseS576,base,green,0,
 AppInstanceIdTestCaseS586,base,green,0,
 AppInstanceIdTestCaseS591,base,green,0,
 AppInstanceIdTestCaseS616,base,green,0,
-AppInstanceIdTestCaseS62,base,xfail,0,executed but fails (candidate defect)
+AppInstanceIdTestCaseS62,base,green,0,
 AppInstanceIdTestCaseS621,base,green,0,
 AppInstanceIdTestCaseS76,base,green,0,
-AppInstanceIdTestCaseS84,base,xfail,0,executed but fails (candidate defect)
-AppInstanceIdTestCaseS92,base,xfail,0,executed but fails (candidate defect)
+AppInstanceIdTestCaseS84,base,green,0,
+AppInstanceIdTestCaseS92,base,green,0,
 BreakReadHandleLeaseV1TestCaseS0,base,xfail,0,lease-break handle model: break not delivered as modeled
 BreakReadHandleLeaseV1TestCaseS1009,base,xfail,0,lease-break handle model: break not delivered as modeled
 BreakReadHandleLeaseV1TestCaseS1033,base,xfail,0,lease-break handle model: break not delivered as modeled
