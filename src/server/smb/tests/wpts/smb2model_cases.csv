@@ -1519,21 +1519,21 @@ ReplayCreateDurableHandleV2PersistentTestCaseS998,multichannel_persistent_encryp
 ReplayCreateDurableHandleV2TestCaseS0,persistent,green,0,
 ReplayCreateDurableHandleV2TestCaseS1012,multichannel_persistent_encryption,green,0,
 ReplayCreateDurableHandleV2TestCaseS1025,multichannel_persistent_encryption,green,0,
-ReplayCreateDurableHandleV2TestCaseS104,base,xfail,0,durable-not-granted: baseline (non-persistent) config gates durable handles behind the persistent-handles feature
-ReplayCreateDurableHandleV2TestCaseS1040,base,xfail,0,durable-not-granted: baseline (non-persistent) config gates durable handles behind the persistent-handles feature
+ReplayCreateDurableHandleV2TestCaseS104,base,skip,0,feature-off: durable handles require the persistent-handles feature, not enabled in the baseline config
+ReplayCreateDurableHandleV2TestCaseS1040,base,skip,0,feature-off: durable handles require the persistent-handles feature, not enabled in the baseline config
 ReplayCreateDurableHandleV2TestCaseS1053,multichannel_persistent_encryption,green,0,
 ReplayCreateDurableHandleV2TestCaseS1067,multichannel_persistent_encryption,green,0,
 ReplayCreateDurableHandleV2TestCaseS1082,multichannel_persistent_encryption,green,0,
 ReplayCreateDurableHandleV2TestCaseS1095,multichannel_persistent_encryption,green,0,
 ReplayCreateDurableHandleV2TestCaseS1108,persistent,green,0,
-ReplayCreateDurableHandleV2TestCaseS1123,base,xfail,0,durable-not-granted: baseline (non-persistent) config gates durable handles behind the persistent-handles feature
+ReplayCreateDurableHandleV2TestCaseS1123,base,skip,0,feature-off: durable handles require the persistent-handles feature, not enabled in the baseline config
 ReplayCreateDurableHandleV2TestCaseS1137,persistent,green,0,
 ReplayCreateDurableHandleV2TestCaseS1150,multichannel_persistent_encryption,green,0,
 ReplayCreateDurableHandleV2TestCaseS1163,multichannel_persistent_encryption,green,0,
 ReplayCreateDurableHandleV2TestCaseS1176,multichannel_persistent_encryption,green,0,
 ReplayCreateDurableHandleV2TestCaseS118,persistent,green,0,
 ReplayCreateDurableHandleV2TestCaseS1190,multichannel_persistent_encryption,green,0,
-ReplayCreateDurableHandleV2TestCaseS1203,base,xfail,0,durable-not-granted: baseline (non-persistent) config gates durable handles behind the persistent-handles feature
+ReplayCreateDurableHandleV2TestCaseS1203,base,skip,0,feature-off: durable handles require the persistent-handles feature, not enabled in the baseline config
 ReplayCreateDurableHandleV2TestCaseS1217,multichannel_persistent_encryption,green,0,
 ReplayCreateDurableHandleV2TestCaseS1230,multichannel_persistent_encryption,green,0,
 ReplayCreateDurableHandleV2TestCaseS1243,persistent,green,0,
@@ -1549,7 +1549,7 @@ ReplayCreateDurableHandleV2TestCaseS1348,multichannel_persistent_encryption,gree
 ReplayCreateDurableHandleV2TestCaseS1362,persistent,green,0,
 ReplayCreateDurableHandleV2TestCaseS1375,persistent,green,0,
 ReplayCreateDurableHandleV2TestCaseS1389,persistent,green,0,
-ReplayCreateDurableHandleV2TestCaseS1403,base,xfail,0,durable-not-granted: baseline (non-persistent) config gates durable handles behind the persistent-handles feature
+ReplayCreateDurableHandleV2TestCaseS1403,base,skip,0,feature-off: durable handles require the persistent-handles feature, not enabled in the baseline config
 ReplayCreateDurableHandleV2TestCaseS1418,multichannel_persistent_encryption,green,0,
 ReplayCreateDurableHandleV2TestCaseS1433,multichannel_persistent_encryption,green,0,
 ReplayCreateDurableHandleV2TestCaseS1448,multichannel_persistent_encryption,green,0,
@@ -1580,7 +1580,7 @@ ReplayCreateDurableHandleV2TestCaseS1741,persistent,green,0,
 ReplayCreateDurableHandleV2TestCaseS1755,multichannel_persistent_encryption,green,0,
 ReplayCreateDurableHandleV2TestCaseS176,multichannel_persistent_encryption,green,0,
 ReplayCreateDurableHandleV2TestCaseS1768,multichannel_persistent_encryption,green,0,
-ReplayCreateDurableHandleV2TestCaseS1781,base,xfail,0,durable-not-granted: baseline (non-persistent) config gates durable handles behind the persistent-handles feature
+ReplayCreateDurableHandleV2TestCaseS1781,base,skip,0,feature-off: durable handles require the persistent-handles feature, not enabled in the baseline config
 ReplayCreateDurableHandleV2TestCaseS1794,persistent,green,0,
 ReplayCreateDurableHandleV2TestCaseS1808,multichannel_persistent_encryption,green,0,
 ReplayCreateDurableHandleV2TestCaseS1816,multichannel_persistent_encryption,green,0,
@@ -1594,13 +1594,13 @@ ReplayCreateDurableHandleV2TestCaseS259,multichannel_persistent_encryption,green
 ReplayCreateDurableHandleV2TestCaseS27,multichannel_persistent_encryption,green,0,
 ReplayCreateDurableHandleV2TestCaseS272,multichannel_persistent_encryption,green,0,
 ReplayCreateDurableHandleV2TestCaseS285,persistent,green,0,
-ReplayCreateDurableHandleV2TestCaseS298,base,xfail,0,durable-not-granted: baseline (non-persistent) config gates durable handles behind the persistent-handles feature
-ReplayCreateDurableHandleV2TestCaseS311,base,xfail,0,durable-not-granted: baseline (non-persistent) config gates durable handles behind the persistent-handles feature
+ReplayCreateDurableHandleV2TestCaseS298,base,skip,0,feature-off: durable handles require the persistent-handles feature, not enabled in the baseline config
+ReplayCreateDurableHandleV2TestCaseS311,base,skip,0,feature-off: durable handles require the persistent-handles feature, not enabled in the baseline config
 ReplayCreateDurableHandleV2TestCaseS324,multichannel_persistent_encryption,green,0,
 ReplayCreateDurableHandleV2TestCaseS337,persistent,green,0,
 ReplayCreateDurableHandleV2TestCaseS350,multichannel_persistent_encryption,green,0,
 ReplayCreateDurableHandleV2TestCaseS363,persistent,green,0,
-ReplayCreateDurableHandleV2TestCaseS376,base,xfail,0,durable-not-granted: baseline (non-persistent) config gates durable handles behind the persistent-handles feature
+ReplayCreateDurableHandleV2TestCaseS376,base,skip,0,feature-off: durable handles require the persistent-handles feature, not enabled in the baseline config
 ReplayCreateDurableHandleV2TestCaseS389,multichannel_persistent_encryption,green,0,
 ReplayCreateDurableHandleV2TestCaseS402,persistent,green,0,
 ReplayCreateDurableHandleV2TestCaseS415,multichannel_persistent_encryption,green,0,
@@ -1646,7 +1646,7 @@ ReplayCreateDurableHandleV2TestCaseS904,persistent,green,0,
 ReplayCreateDurableHandleV2TestCaseS918,persistent,green,0,
 ReplayCreateDurableHandleV2TestCaseS932,persistent,green,0,
 ReplayCreateDurableHandleV2TestCaseS941,multichannel_persistent_encryption,green,0,
-ReplayCreateDurableHandleV2TestCaseS955,base,xfail,0,durable-not-granted: baseline (non-persistent) config gates durable handles behind the persistent-handles feature
+ReplayCreateDurableHandleV2TestCaseS955,base,skip,0,feature-off: durable handles require the persistent-handles feature, not enabled in the baseline config
 ReplayCreateDurableHandleV2TestCaseS969,multichannel_persistent_encryption,green,0,
 ReplayCreateDurableHandleV2TestCaseS984,persistent,green,0,
 ReplayCreateDurableHandleV2TestCaseS998,multichannel_persistent_encryption,green,0,
