@@ -79,6 +79,17 @@ set(PYNFS_EXTRA_currentstateid nopnfs)
 set(PYNFS_SKIP_BACKENDS_WRT18  linux io_uring)
 set(PYNFS_SKIP_BACKENDS_SATT15 linux io_uring)
 
+# EID50 (st_exchange_id.testSSV) exercises SP4_SSV state protection.  Chimera
+# declines SP4_SSV in EXCHANGE_ID (returning SP4_NONE) because it cannot enforce
+# the SSV-derived RPCSEC_GSS credential -- advertising it would be a security
+# overstatement (issue #946).  testSSV unconditionally assumes the server
+# granted SSV and dereferences the (now-absent) ssv context, so it cannot pass
+# against a correctly-declining server.  Skip it on every backend, mirroring the
+# nopnfs exclusion of the pNFS-only CSID7 -- it is testing an unsupported
+# feature.  (EID50's only flag is `exchange_id`, which is isolated, so it is
+# already excluded from the combined suite; this drops the per-code entries.)
+set(PYNFS_SKIP_BACKENDS_EID50  ${PYNFS_BACKENDS})
+
 # Per-code NFSv4 lease-time override (seconds).  Delegation recall-handshake
 # tests open a file as one client, then drive a *second* client's conflicting
 # OPEN to force a CB_RECALL.  Establishing that second client (SETCLIENTID /
