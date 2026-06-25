@@ -1843,6 +1843,8 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.lease.lease-epoch
     # batch oplock break-ack timeout duration (harness sets oplocktimeout=30)
     smb2.oplock.batch22a
+    # renaming a directory breaks the handle leases of files open inside it
+    smb2.lease.rename_dir_openfile
 )
 
 set(SMBTORTURE_ENABLED_linux
