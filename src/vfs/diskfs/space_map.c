@@ -1443,7 +1443,7 @@ space_map_reserve_chunk(
         uint32_t          dev_id     = (start_dev + d) % sm->num_devices;
         struct sm_device *dev        = &sm->devices[dev_id];
         uint32_t          want_class = sm_ag_size_class(want);
-        uint32_t          C;
+        uint32_t          C, a, start_ag;
 
         if (dev->role != role) {
             continue;
@@ -1492,6 +1492,46 @@ space_map_reserve_chunk(
                     pthread_mutex_unlock(&ag->lock);
                 }
             }
+        }
+
+        /* Backstop: the (count, bitmap) size-class index is read with two
+         * independent relaxed loads above, so it is not a consistent snapshot --
+         * a concurrent sm_ag_mc_update on a shared word can leave a reader seeing
+         * mc_class_count[C] > 0 while maxclass_bits[C] reads 0 (the bit was
+         * cleared by one max-class transition before the re-set of the next).
+         * The fast path would then visit no AG for class C and fall through to a
+         * false ENOSPC even though space is available.  Before giving up on this
+         * device, fall back to a full linear scan that re-verifies each AG under
+         * ag->lock -- authoritative, and (like sm_pick_and_alloc's backstop) a
+         * pure correctness guarantee that finds nothing the fast path missed once
+         * the index reconciles. */
+        pthread_mutex_lock(&sm->lock);
+        start_ag = dev->ag_rotor;
+        if (++dev->ag_rotor >= dev->num_ags) {
+            dev->ag_rotor = 0;
+        }
+        pthread_mutex_unlock(&sm->lock);
+
+        for (a = 0; a < dev->num_ags; a++) {
+            uint32_t         ai = (start_ag + a) % dev->num_ags;
+            struct sm_ag    *ag = &dev->ags[ai];
+            uint64_t         base, len;
+            struct sm_claim *claim;
+
+            pthread_mutex_lock(&ag->lock);
+            if (sm_ag_try_claim_locked(ag, want, chunk, &base, &len,
+                                       &claim) == 0) {
+                pthread_mutex_unlock(&ag->lock);
+                r->device_id = dev_id;
+                r->ag_index  = ai;
+                r->base      = base;
+                r->len       = len;
+                r->cursor    = base;
+                r->claim     = claim;
+                r->valid     = 1;
+                return 0;
+            }
+            pthread_mutex_unlock(&ag->lock);
         }
     }
     return -1;      /* ENOSPC */
