@@ -1032,6 +1032,32 @@ chimera_vfs_state_would_conflict(
         break;
 
         case CHIMERA_VFS_LEASE_CACHING:
+            /* A byte-range lock is incompatible with caching on the stream
+             * (MS-FSA 2.1.5.18): a caching lease cannot be granted while another
+             * owner holds a range lock, so a fresh lease behind a peer's lock is
+             * capped to NONE (smb2.lease.lease-epoch).  Same-owner / same-grant
+             * locks are exempt -- a handle may lock its own file and keep its
+             * cache (smb2.oplock.brl2) -- as is an NFSv4 client's own lock vs its
+             * own delegation (RFC 8881 §10.2).  A bare LEASE_NONE probe (no
+             * caching bits) is unaffected. */
+            if (probe->mode.granted) {
+                for (cur = file->range_locks; cur; cur = cur->next) {
+                    if (chimera_vfs_lease_owner_equal(&cur->owner, &probe->owner) ||
+                        (probe->owner.cb_private &&
+                         cur->owner.cb_private == probe->owner.cb_private)) {
+                        continue;
+                    }
+                    if (cur->owner.protocol == CHIMERA_VFS_LEASE_PROTO_NFSV4 &&
+                        probe->owner.protocol == CHIMERA_VFS_LEASE_PROTO_NFSV4 &&
+                        cur->owner.client_key == probe->owner.client_key) {
+                        continue;
+                    }
+                    if (conflict_out) {
+                        *conflict_out = cur;
+                    }
+                    return CHIMERA_VFS_LEASE_DENIED;
+                }
+            }
             for (cur = file->caching_leases; cur; cur = cur->next) {
                 if (chimera_vfs_lease_owner_equal(&cur->owner, &probe->owner)) {
                     continue;
@@ -1250,6 +1276,16 @@ chimera_vfs_file_state_remove_lease(
     lease->file = NULL;
 } /* chimera_vfs_file_state_remove_lease */
 
+/* Forward declaration: defined below, used by the conflict-resolution break
+ * paths above its definition. */
+static void
+chimera_vfs_lease_begin_break_ex(
+    struct chimera_vfs_state *state,
+    struct chimera_vfs_lease *lease,
+    uint8_t                   floor,
+    uint32_t                  deadline_ms,
+    bool                      one_shot);
+
 /* The mode a conflicting holder is allowed to RETAIN when `acquirer` forces it to
 * break -- i.e. the break floor handed to begin_break.  The floor must be the
 * holder's granted mode with exactly the bits that CONFLICT with the acquirer
@@ -1422,8 +1458,26 @@ chimera_vfs_state_try_insert(
                     floor = conflict->mode.granted & ~CHIMERA_VFS_LEASE_MODE_H;
                 }
 
-                chimera_vfs_lease_begin_break(state, conflict, floor,
-                                              deadline_ms);
+                /* A byte-range lock is incompatible with ANY caching on the
+                 * stream -- read AND handle -- so a range-lock acquirer breaks a
+                 * conflicting caching lease all the way to NONE, not just down to
+                 * the generic write-contention floor (which would leave H).  The
+                 * same-open / same-grant exemption already ran in
+                 * would_conflict, so a holder reaching here genuinely conflicts
+                 * (MS-FSA 2.1.5.18; smb2.lease.lock1 expects LEASE2/LEASE3 -> 0). */
+                if (lease->kind == CHIMERA_VFS_LEASE_RANGE &&
+                    conflict->kind == CHIMERA_VFS_LEASE_CACHING) {
+                    floor = 0;
+                }
+
+                /* A byte-range lock invalidates the whole caching lease at once,
+                 * like a write or namespace mutation, so break it in a SINGLE
+                 * shot to the floor rather than cascading one bit per ack (a
+                 * cascade RH->R->NONE would send two notifications where the
+                 * client expects one -- smb2.lease.lock1). */
+                chimera_vfs_lease_begin_break_ex(
+                    state, conflict, floor, deadline_ms,
+                    lease->kind == CHIMERA_VFS_LEASE_RANGE /* one_shot */);
                 began_live_break = true;
             } else {
                 /* Surfaced because its recall deadline elapsed -- the holder

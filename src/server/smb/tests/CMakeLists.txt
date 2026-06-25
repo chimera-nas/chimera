@@ -1837,6 +1837,12 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.lease.break_twice
     # rename source recall is a single handle-recall (RH->R), not a cascade
     smb2.lease.v2_rename
+    # byte-range lock breaks a caching lease to NONE in a single shot, and a
+    # fresh lease behind a lock is capped to NONE (lock-vs-caching conflict)
+    smb2.lease.lock1
+    smb2.lease.lease-epoch
+    # batch oplock break-ack timeout duration (harness sets oplocktimeout=30)
+    smb2.oplock.batch22a
 )
 
 set(SMBTORTURE_ENABLED_linux
