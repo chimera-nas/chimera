@@ -252,13 +252,26 @@ if [ "$NFSTEST_PROGRAM" = "nfstest_delegation" ]; then
     CLIENT_SPEC="10.0.0.3:nfsversion=${NFSTEST_VERSION}"
     # nfstest_delegation's own captures are short per-op windows; -U flushes each
     # packet to the trace file immediately so the tiny per-op traces aren't lost
-    # (see the single-client wrapper). Keep the default capture buffer (--tbsize
-    # 192k): on the primary, promiscuous capture must absorb its own NFS traffic
-    # *plus* all of the second client's flooded traffic and the server's replies
-    # to both, so a shrunken kernel buffer (-B) drops the short single-compound
-    # conflict ops (REMOVE/RENAME/SETATTR/OPEN) under burst, which the test then
-    # reports as "should be sent from second client".
-    NFSTEST_EXTRA=" --tcpdump '/usr/bin/tcpdump -U'"
+    # (see the single-client wrapper).
+    #
+    # Cap the per-capture kernel buffer at 16 MiB (--tbsize 16384 -> tcpdump
+    # -B 16384, which is in KiB).  nfstest brackets EVERY subtest with a fresh
+    # in-guest tcpdump and does not reap the previous one before starting the
+    # next (it SIGTERMs the prior tcpdump but the next trace_start races ahead),
+    # so the live tcpdumps accumulate one-per-subtest (~30-60 by the end of the
+    # delegation subset).  At nfstest's default --tbsize 192k the "k" is folded
+    # into tcpdump's already-KiB -B, giving a 192 MiB ring *each*; ~30 of those
+    # plus the .cap files (which pile up in the guest's tmpfs /tmp, never freed
+    # until the suite ends) exhaust even a 6 GiB guest and the kernel OOM-kills
+    # tcpdump mid-flush -> empty .cap -> "Packet trace file is empty" / "<op>
+    # should be sent" failures (issue #733; load-dependent, hence flaky).
+    # 16 MiB is still a ~4000x margin over this small-IO test's actual per-op
+    # traffic (rsize/wsize=4096, a handful of compounds per subtest, even with
+    # the second client's flooded traffic), so it captures every conflict op the
+    # suite asserts on while bounding peak RAM to <1 GiB of rings.  Measured:
+    # at 192k MemAvailable collapsed to 0 with 77+ oom-kills; at 16384 it stayed
+    # >4 GiB with 0 oom-kills and the same 1678/1678-pass result.
+    NFSTEST_EXTRA=" --tcpdump '/usr/bin/tcpdump -U' --tbsize 16384"
     # Exclude a small residual cluster (the rest -- ~1770 assertions -- pass):
     #   recall01,recall03  deterministic: after a recalled READ delegation is
     #     returned, the suite expects the second client's conflicting OPEN(WRITE)
@@ -304,19 +317,16 @@ RUN_CMD="${KVM_DIAG_CMD:-${NFSTEST_CMD}}"
 # cmdline parser truncates test_cmd at the first one.
 TEST_CMD="${SSHFIX}; mkdir -p /mnt/t; command -v ssh >/dev/null 2>&1 || { echo CHIMERA_KVM_FATAL: ssh client missing on guest image, cannot run 2-client test; exit 1; }; ok=0; for i in \$(seq 1 120); do ssh -o ConnectTimeout=2 10.0.0.3 true 2>/dev/null && { ok=1; break; }; sleep 1; done; [ \$ok = 1 ] || { echo CHIMERA_KVM_FATAL: second client 10.0.0.3 unreachable after 120s; exit 1; }; ${RUN_CMD}"
 
-# Guest A RAM: nfstest brackets each subtest with a fresh in-guest tcpdump
-# whose AF_PACKET ring is ~192 MiB (the default --tbsize 192k -- which we must
-# NOT shrink here: on the primary the capture has to absorb its own traffic
-# plus the second client's flooded traffic, and a smaller -B drops the short
-# conflict ops the suite asserts on, see CLIENT_SPEC above).  Several of those
-# rings pile up before the kernel reaps them, OOM-killing tcpdump in a 2 GiB
-# guest -- the captures then go empty and the trace assertions ("OPEN should be
-# sent", "WRITE delegation should be granted") fail, which is the recurring
-# nfstest_delegation/_cache flake.  Give it 6 GiB; -m is only a ceiling (KVM
-# RAM is demand-paged) so the headroom costs no host memory unless touched.
-# (nfstest_alloc/_dio use 8 GiB for the same reason in the single-client
-# wrapper; #909 raised it there but those programs run via the *other* wrapper,
-# so the 2-client delegation/cache tests never got the bump.)
+# Guest A RAM: nfstest brackets each subtest with a fresh in-guest tcpdump and
+# does not reap the previous one before the next starts, so the live tcpdumps
+# (and their .cap files in the guest's tmpfs /tmp, freed only at suite end) pile
+# up one-per-subtest.  The real fix for that pile-up is the per-capture buffer
+# cap (--tbsize 16384 = 16 MiB rings, set in NFSTEST_EXTRA above) which keeps
+# peak ring RAM under ~1 GiB even with ~60 live tcpdumps; before it the default
+# 192 MiB rings OOM-killed tcpdump and produced empty captures (issue #733).
+# 6 GiB is now just comfortable headroom (measured peak with the cap is ~1.5 GiB
+# -- ~1 GiB of rings + ~0.3 GiB of tmpfs captures + the OS); -m is only a
+# ceiling (KVM RAM is demand-paged) so it costs no host memory unless touched.
 ip netns exec "${NETNS_NAME}" "$QEMU_BIN" \
     -enable-kvm -smp 4 -m 6G -cpu host \
     -kernel "$VMLINUZ" $QEMU_INITRD $QEMU_MACHINE -nodefaults \
