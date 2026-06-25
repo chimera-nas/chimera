@@ -1047,6 +1047,33 @@ chimera_smb_compound_advance(struct chimera_smb_compound *compound)
         return;
     }
 
+    /* Global encrypt-all (MS-SMB2 3.3.5.2.9): when the session negotiated
+     * Session.EncryptData every post-session-setup request MUST arrive
+     * encrypted, and signing does NOT substitute for encryption -- an
+     * unencrypted (even if signed) request is rejected with STATUS_ACCESS_DENIED.
+     * Checked in the request preamble, BEFORE tree resolution, so an unencrypted
+     * operation whose tree-connect was itself refused is answered ACCESS_DENIED
+     * rather than NETWORK_NAME_DELETED (MS-SMB2 sequences the encryption check
+     * ahead of TreeId validation).  A bare unsigned + unencrypted request was
+     * already torn down at parse as a protocol violation (it cannot be
+     * signature-verified either), so this is the signed-but-unencrypted path;
+     * NEGOTIATE / SESSION_SETUP precede the encrypt-all decision and ECHO is
+     * exempt, matching the parse-time check.  (SMB2Model Encryption
+     * ConnectToUnEncryptedShare / UnEncryptedRequest cases.) */
+    if (unlikely(request->session_handle && request->session_handle->session &&
+                 (request->session_handle->session->flags &
+                  CHIMERA_SMB_SESSION_ENCRYPT_DATA) &&
+                 !compound->received_encrypted &&
+                 request->smb2_hdr.command != SMB2_NEGOTIATE &&
+                 request->smb2_hdr.command != SMB2_SESSION_SETUP &&
+                 request->smb2_hdr.command != SMB2_ECHO)) {
+        if (request->smb2_hdr.command == SMB2_WRITE) {
+            evpl_iovecs_release(compound->thread->evpl, request->write.iov, request->write.niov);
+        }
+        chimera_smb_complete_request(request, SMB2_STATUS_ACCESS_DENIED);
+        return;
+    }
+
     /* Reject commands that require a valid tree connection */
     if (unlikely(!request->tree &&
                  request->smb2_hdr.command != SMB2_NEGOTIATE &&
