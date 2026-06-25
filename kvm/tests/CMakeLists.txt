@@ -315,6 +315,34 @@ foreach(image_spec ${KVM_IMAGES})
         SKIP_RETURN_CODE 77
         ENVIRONMENT "NFS_ENABLE_NLM=1")
 
+    # NLM blocking-lock grant delivery (RFC 1813 / XNFS): two processes contend
+    # for the SAME exclusive POSIX byte-range lock over a real Linux NLM client
+    # (sec=sys, vers=3 mounted *with* locking via NFS_ENABLE_NLM).  A small Python
+    # program forks a holder that takes the lock and holds it 3s, while the waiter
+    # issues a BLOCKING fcntl lock (F_SETLKW -> NLM LOCK block=true) on the same
+    # range: the server must reply NLM4_BLOCKED, then once the holder releases
+    # make an NLM_GRANTED callback that unblocks the waiter.  The waiter's lockf
+    # returns only after that grant lands.  The test passes only if the event
+    # order is exactly A-LOCKED, A-UNLOCK, B-GRANTED AND the waiter genuinely
+    # blocked (>=1s) -- i.e. it did not get the lock until the holder released.
+    # See issue #971.
+    #
+    # fcntl byte-range locks (not flock(2)) are used deliberately: the Linux NFS
+    # client always routes POSIX byte-range locks through NLM, whereas flock(2)
+    # can be handled locally.  The script is base64-embedded so the kernel
+    # cmdline that carries the test command stays quote-free.
+    set(NLM_BLOCK_PY "aW1wb3J0IG9zLHN5cyx0aW1lLGZjbnRsClA9Ii9tbnQvbmxtX2JsayI7RT0iL21udC9ubG1fZXZ0IgpkZWYgbihtKToKIGY9b3BlbihFLCJhIik7Zi53cml0ZShtKyJcbiIpO2YuZmx1c2goKTtvcy5mc3luYyhmLmZpbGVubygpKTtmLmNsb3NlKCkKb3BlbihQLCJ3IikuY2xvc2UoKTtvcGVuKEUsInciKS5jbG9zZSgpCmlmIG9zLmZvcmsoKT09MDoKIGg9b3BlbihQLCJyKyIpO2ZjbnRsLmxvY2tmKGgsZmNudGwuTE9DS19FWCwwLDEpO24oIkFMIik7dGltZS5zbGVlcCgzKTtuKCJBVSIpO2ZjbnRsLmxvY2tmKGgsZmNudGwuTE9DS19VTiwwLDEpO29zLl9leGl0KDApCnRpbWUuc2xlZXAoMSkKdz1vcGVuKFAsInIrIik7dD10aW1lLnRpbWUoKTtmY250bC5sb2NrZih3LGZjbnRsLkxPQ0tfRVgsMCwxKTtkPXRpbWUudGltZSgpLXQ7bigiQkciKQpvcy53YWl0KCkKZT1vcGVuKEUpLnJlYWQoKS5zcGxpdCgpO3ByaW50KCJFVlQiLGUsIldBSVQgJS4xZiIlZCkKc3lzLmV4aXQoMCBpZiBlPT1bIkFMIiwiQVUiLCJCRyJdIGFuZCBkPj0xIGVsc2UgMSkK")
+    set(NLM_BLOCK_CMD "echo ${NLM_BLOCK_PY} | base64 -d > /tmp/nb.py && python3 /tmp/nb.py")
+    add_test(NAME chimera/kvm/${IMAGE_NAME}/nlm/blocking_lock_memfs_nfs3
+        COMMAND bash ${NFS_WRAPPER}
+                ${IMAGE_DIR}/vmlinuz ${IMAGE_DIR}/rootfs.qcow2
+                ${CHIMERA_BINARY} memfs 3
+                "${NLM_BLOCK_CMD}")
+    set_tests_properties(chimera/kvm/${IMAGE_NAME}/nlm/blocking_lock_memfs_nfs3
+        PROPERTIES LABELS "kvm;${IMAGE_NAME}" PROCESSORS 2
+        TIMEOUT 180
+        ENVIRONMENT "NFS_ENABLE_NLM=1")
+
     # NFSv3 sec= policy rejection: an export restricted to krb5 must reject a
     # sec=sys mount.  The real client reports "access denied by server" only if
     # the server answers the post-mount probe with NFS3ERR_ACCES -- a stale/bad
