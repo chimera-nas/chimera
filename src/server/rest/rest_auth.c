@@ -181,7 +181,14 @@ hmac_sha256(
 void
 chimera_rest_auth_init_secret(struct chimera_rest_server *rest)
 {
-    RAND_bytes(rest->jwt_secret, CHIMERA_REST_JWT_SECRET_LEN);
+    /* RAND_bytes returns 1 on success; on 0/-1 it may not write the buffer at
+     * all (CWE-252).  A zero/unseeded jwt_secret would let anyone forge a valid
+     * JWT for any user -- a full control-plane authentication bypass -- so a
+     * CSPRNG failure must abort startup rather than silently run with a known
+     * key. */
+    if (RAND_bytes(rest->jwt_secret, CHIMERA_REST_JWT_SECRET_LEN) != 1) {
+        chimera_rest_abort("Failed to seed JWT signing secret from CSPRNG");
+    }
     chimera_rest_info("JWT authentication secret initialized");
 } /* chimera_rest_auth_init_secret */
 
