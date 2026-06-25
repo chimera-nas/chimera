@@ -1004,6 +1004,7 @@ main(
         {
             json_t *ca  = json_object_get(share, "continuous_availability");
             json_t *enc = json_object_get(share, "encrypt_data");
+            json_t *fl2 = json_object_get(share, "force_level2_oplock");
 
             path = json_string_value(json_object_get(share, "path"));
             chimera_server_info("Adding SMB share %s -> %s", name, path);
@@ -1012,6 +1013,10 @@ main(
 
             if (json_is_true(enc)) {
                 chimera_server_share_set_encrypt_data(server, name);
+            }
+
+            if (json_is_true(fl2)) {
+                chimera_server_share_set_force_level2_oplock(server, name);
             }
         }
     }

@@ -29,6 +29,13 @@ chimera_smb_share_set_encrypt_data(
     void       *smb_shared,
     const char *name);
 
+/* Force level-2 oplocks (SMB2_SHAREFLAG_FORCE_LEVELII_OPLOCK) on a named share:
+ * the server grants at most a read (LEVEL_II) cache there. */
+int
+chimera_smb_share_set_force_level2_oplock(
+    void       *smb_shared,
+    const char *name);
+
 int
 chimera_smb_remove_share(
     void       *smb_shared,

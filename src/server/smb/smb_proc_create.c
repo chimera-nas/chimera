@@ -1103,6 +1103,16 @@ chimera_smb_create_after_share(
             } /* switch */
         }
 
+        /* SMB2_SHAREFLAG_FORCE_LEVELII_OPLOCK: on a force-level-2 share the
+         * server grants at most a read (LEVEL_II) cache, so an exclusive/batch
+         * oplock or a write/handle lease is downgraded by clearing the W and H
+         * caching bits (MS-SMB2 3.3.5.9.x; WPTS OplockOnShareWithForceLevel2).
+         * A bare R (or already-NONE) request is unaffected. */
+        if (request->tree && request->tree->share &&
+            request->tree->share->force_level2_oplock) {
+            req_smb &= SMB2_LEASE_READ_CACHING;
+        }
+
         /* SMB lease bits use R=0x01, H=0x02, W=0x04 — a different layout from
          * vfs_state's R/W/H mask, so map field-by-field.  We grant the full
          * requested set: read caching (R → LEVEL_II), write caching
@@ -2751,6 +2761,13 @@ chimera_smb_create_resume_rearbitrate(struct chimera_smb_request *request)
             default:
                 break;
         } /* switch */
+    }
+
+    /* Honor the share's force-level-2 cap on the re-arbitrate path too, so the
+     * deferred reply cannot upgrade past LEVEL_II on a force-level-2 share. */
+    if (request->tree && request->tree->share &&
+        request->tree->share->force_level2_oplock) {
+        req_smb &= SMB2_LEASE_READ_CACHING;
     }
 
     want_vfs = chimera_smb_lease_bits_to_vfs(req_smb);

@@ -670,6 +670,11 @@ chimera_server_share_set_encrypt_data(
     const char            *share_name);
 
 int
+chimera_server_share_set_force_level2_oplock(
+    struct chimera_server *server,
+    const char            *share_name);
+
+int
 chimera_server_create_export(
     struct chimera_server *server,
     const char            *share_name,
