@@ -12,12 +12,15 @@
  * requested.  The SSV underpins the RPCSEC_GSS SSV mechanism used to integrity-
  * or privacy-protect the state-protected operations.
  *
- * chimera negotiates SP4_SSV at EXCHANGE_ID (see chimera_nfs4_exchange_id) but
- * does not yet enforce the SSV-backed GSS credential on the protected
- * operations, so SET_SSV here accepts the client's contribution and completes
- * the exchange.  ssr_digest is the server's proof-of-knowledge over the
- * SEQUENCE reply; it is returned empty until SSV-secured RPC is wired up
- * (clients that do not verify it -- e.g. pynfs EID50 -- are unaffected).
+ * chimera declines SP4_SSV at EXCHANGE_ID (see nfs4_set_state_protect, which
+ * falls back to SP4_NONE because the SSV-backed GSS credential is not
+ * enforced), so a conforming client never negotiates SSV and never reaches
+ * SET_SSV.  For any client that issues it anyway this remains a benign no-op:
+ * we accept the contribution and complete the exchange.  ssr_digest is the
+ * server's proof-of-knowledge over the SEQUENCE reply; it is returned empty
+ * because no SSV is in effect (clients that do not verify it -- e.g. pynfs
+ * EID50 -- are unaffected).  Full SSV enforcement (storing the SSV, computing
+ * the HMAC digest, binding RPCSEC_GSS credentials) is deferred.
  */
 void
 chimera_nfs4_set_ssv(
