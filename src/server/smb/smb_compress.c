@@ -1421,11 +1421,18 @@ chimera_smb_decompress_message(
     uint32_t segment_size = rd32(cin + 4);
     uint32_t prefix       = is_unchained ? rd32(cin + 12) : 0;
 
-    orig_size = prefix + segment_size;
-    if (orig_size < sizeof(struct smb2_header) || orig_size > SMB_COMPRESS_MAX_ORIGINAL) {
-        chimera_smb_error("Invalid SMB3 compression original size %u", orig_size);
+    /* Reconstruct the size in 64-bit: prefix + segment_size are both
+     * attacker-controlled 32-bit fields, so summing them in uint32 wraps
+     * (CWE-190) and could hide a ~4 GB prefix behind a small total, defeating
+     * the cap below.  Once bounded by SMB_COMPRESS_MAX_ORIGINAL each of prefix
+     * and segment_size is itself <= the cap. */
+    uint64_t orig_size64 = (uint64_t) prefix + segment_size;
+    if (orig_size64 < sizeof(struct smb2_header) || orig_size64 > SMB_COMPRESS_MAX_ORIGINAL) {
+        chimera_smb_error("Invalid SMB3 compression original size %lu",
+                          (unsigned long) orig_size64);
         goto out;
     }
+    orig_size = (uint32_t) orig_size64;
 
     if (evpl_iovec_alloc(evpl, orig_size, 8, 1, 0, plain_out) < 1) {
         chimera_smb_error("Failed to allocate SMB3 decompression buffer");
@@ -1440,7 +1447,10 @@ chimera_smb_decompress_message(
         uint16_t alg = rd16(cin + 8);
         int      hdr = (int) sizeof(struct smb2_compression_transform_header);
 
-        if (hdr + (int) prefix > length) {
+        /* Bound the prefix copy in 64-bit unsigned: casting prefix to int makes
+         * any value >= 0x80000000 negative, so the original signed compare could
+         * never reject it and the memcpy below would read ~4 GB out of bounds. */
+        if ((uint64_t) hdr + prefix > (uint64_t) length) {
             chimera_smb_error("Invalid SMB3 compression offset %u", prefix);
             goto release;
         }
