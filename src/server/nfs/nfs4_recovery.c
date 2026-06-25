@@ -530,9 +530,8 @@ nfs_recovery_open_check(
     bool                     is_reclaim)
 {
     bool in_grace;
+    bool load_ready;
     int  ls;
-
-    (void) client;  /* not gated per-client yet; future use. */
 
     ls = atomic_load_explicit(&rec->load_state, memory_order_acquire);
 
@@ -542,7 +541,8 @@ nfs_recovery_open_check(
 
     /* While the cold-start load is still in flight, behave as in-grace so a
      * reclaim that races its record load is not refused. */
-    if (!rec->persistence_disabled && ls != NFS_REC_LOAD_READY) {
+    load_ready = rec->persistence_disabled || ls == NFS_REC_LOAD_READY;
+    if (!load_ready) {
         in_grace = true;
     }
 
@@ -552,6 +552,32 @@ nfs_recovery_open_check(
     if (!in_grace && is_reclaim) {
         return NFS4ERR_NO_GRACE;
     }
+
+    /* RFC 7530 §9.6.3.1: a CLAIM_PREVIOUS reclaim is only valid for state this
+     * client actually held before the server restart.  The to_reclaim set is
+     * the authoritative list of clients with persisted pre-reboot state; a
+     * reclaim from a client absent from it is bogus and MUST be rejected with
+     * NFS4ERR_RECLAIM_BAD rather than silently fabricating share state.
+     *
+     * Only enforced once the cold-start load is READY (to_reclaim fully
+     * populated) -- while the load is still in flight a reclaim that races its
+     * record load must not be refused (handled by the load_ready=in_grace path
+     * above, which short-circuits here only when the load has completed).  When
+     * persistence is disabled to_reclaim is empty and in_grace is never set, so
+     * this leg is unreachable on the default memkv backend. */
+    if (in_grace && is_reclaim && load_ready && client) {
+        struct nfs_recovery_record *r;
+
+        pthread_mutex_lock(&rec->lock);
+        HASH_FIND(hh, rec->to_reclaim, client->owner_string,
+                  client->owner_len, r);
+        pthread_mutex_unlock(&rec->lock);
+
+        if (!r) {
+            return NFS4ERR_RECLAIM_BAD;
+        }
+    }
+
     return NFS4_OK;
 } /* nfs_recovery_open_check */
 
