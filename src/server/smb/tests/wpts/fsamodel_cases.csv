@@ -141,13 +141,13 @@ QueryDirectoryTestCaseS2,skip,inapplicable: model branch not executed
 QueryDirectoryTestCaseS20,skip,inapplicable: model branch not executed
 QueryDirectoryTestCaseS22,skip,inapplicable: model branch not executed
 QueryDirectoryTestCaseS24,skip,inapplicable: model branch not executed
-QueryDirectoryTestCaseS26,xfail,fidelity: expected INFO_LENGTH_MISMATCH got NO_MORE_FILES
+QueryDirectoryTestCaseS26,green,
 QueryDirectoryTestCaseS28,skip,inapplicable: model branch not executed
 QueryDirectoryTestCaseS30,xfail,fidelity: expected NO_SUCH_FILE got NO_MORE_FILES
-QueryDirectoryTestCaseS32,xfail,fidelity: expected INFO_LENGTH_MISMATCH got NO_MORE_FILES
-QueryDirectoryTestCaseS34,xfail,fidelity: expected INFO_LENGTH_MISMATCH got NO_MORE_FILES
-QueryDirectoryTestCaseS36,xfail,fidelity: expected INFO_LENGTH_MISMATCH got NO_MORE_FILES
-QueryDirectoryTestCaseS38,xfail,fidelity: expected INFO_LENGTH_MISMATCH got NO_MORE_FILES
+QueryDirectoryTestCaseS32,green,
+QueryDirectoryTestCaseS34,green,
+QueryDirectoryTestCaseS36,green,
+QueryDirectoryTestCaseS38,green,
 QueryDirectoryTestCaseS4,skip,inapplicable: model branch not executed
 QueryDirectoryTestCaseS6,skip,inapplicable: model branch not executed
 QueryDirectoryTestCaseS8,skip,inapplicable: model branch not executed
