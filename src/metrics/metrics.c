@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include "evpl/evpl.h"
 #include "evpl/evpl_http.h"
 #include "common/logging.h"
@@ -241,6 +242,16 @@ chimera_metrics_dump_file(
         chimera_metrics_error("Failed to open metrics file %s for writing", path);
         free(buf);
         return -1;
+    }
+
+    /*
+     * The daemon runs with umask(0), so fopen("w") would leave this file
+     * world-writable (mode 0666).  Restrict it to 0644 (owner-write,
+     * world-readable is fine for non-sensitive metrics) so other local users
+     * cannot tamper with the dump -- CWE-276 (Incorrect Default Permissions).
+     */
+    if (fchmod(fileno(fp), 0644) < 0) {
+        chimera_metrics_error("Failed to set metrics file permissions on %s", path);
     }
 
     written = fwrite(buf, 1, len, fp);
