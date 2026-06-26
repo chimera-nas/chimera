@@ -4,6 +4,11 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/random.h>
 #include <pthread.h>
 #include <arpa/inet.h>
 #include <gssapi/gssapi.h>
@@ -44,6 +49,71 @@ chimera_smb_is_error_status(unsigned int status)
            status != SMB2_STATUS_MORE_PROCESSING_REQUIRED &&
            status != SMB2_STATUS_NOTIFY_ENUM_DIR;
 } /* chimera_smb_is_error_status */
+
+/*
+ * Establish the server's ServerGuid (MS-SMB2 2.2.4 / 3.3.5.4).  The ServerGuid
+ * must uniquely identify this server AND stay stable across restarts so that
+ * SMB3 clients can session-bind / durable-reconnect / multichannel-match to the
+ * same node.  Generate it once and persist it under the configured state_dir
+ * (mirroring the NFS fh.key mechanism); regenerate only if the file is absent
+ * or invalid.  If no state_dir is configured, fall back to a per-process random
+ * GUID (unique, but not stable -- acceptable for an ephemeral deployment).
+ */
+static void
+chimera_smb_server_guid_init(
+    struct chimera_server_smb_shared   *shared,
+    const struct chimera_server_config *config)
+{
+    const char *state_dir = chimera_server_config_get_state_dir(config);
+    char        path[512];
+    int         fd;
+
+    if (state_dir && state_dir[0]) {
+        snprintf(path, sizeof(path), "%s/smb_server.guid", state_dir);
+
+        fd = open(path, O_RDONLY);
+        if (fd >= 0) {
+            ssize_t n = read(fd, shared->guid, SMB2_GUID_SIZE);
+            close(fd);
+            if (n == (ssize_t) SMB2_GUID_SIZE) {
+                chimera_smb_info("Loaded SMB ServerGuid from %s", path);
+                return;
+            }
+            chimera_smb_error("Short read of SMB ServerGuid %s; regenerating", path);
+        }
+    }
+
+    if (getrandom(shared->guid, SMB2_GUID_SIZE, 0) != (ssize_t) SMB2_GUID_SIZE) {
+        /* Last-resort fallback: derive from a per-host identity so two distinct
+         * hosts still differ even if getrandom is unavailable. */
+        XXH128_hash_t h = XXH3_128bits(shared->config.identity,
+                                       strlen(shared->config.identity));
+        memcpy(shared->guid, &h, SMB2_GUID_SIZE);
+        chimera_smb_error("getrandom failed for SMB ServerGuid; "
+                          "falling back to identity-derived GUID");
+        return;
+    }
+
+    if (!state_dir || !state_dir[0]) {
+        chimera_smb_info("Generated per-process SMB ServerGuid "
+                         "(no state_dir; not stable across restarts)");
+        return;
+    }
+
+    fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd >= 0) {
+        if (write(fd, shared->guid, SMB2_GUID_SIZE) != (ssize_t) SMB2_GUID_SIZE) {
+            chimera_smb_error("Failed to persist SMB ServerGuid to %s; GUID will "
+                              "not survive restart", path);
+        } else {
+            chimera_smb_info("Generated and persisted SMB ServerGuid at %s", path);
+        }
+        close(fd);
+    } else {
+        chimera_smb_error("Could not persist SMB ServerGuid to %s (%s); GUID will "
+                          "not survive restart", path, strerror(errno));
+    }
+} /* chimera_smb_server_guid_init */
 
 static void *
 chimera_smb_server_init(
@@ -173,7 +243,10 @@ chimera_smb_server_init(
     shared->vfs     = vfs;
     shared->metrics = metrics;
 
-    *(XXH128_hash_t *) shared->guid = XXH3_128bits(shared->config.identity, strlen(shared->config.identity));
+    /* ServerGuid: unique per server, stable across restarts (persisted under
+     * state_dir).  Was previously XXH3_128("chimera") -- identical on every
+     * instance (issue #984). */
+    chimera_smb_server_guid_init(shared, config);
 
     /* Derive the server's account-domain (machine) SID S-1-5-21-X-Y-Z once, from
      * a stable per-host identity (/etc/machine-id, else hostname), so the SIDs
