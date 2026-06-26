@@ -1483,6 +1483,14 @@ struct chimera_smb_durable_entry {
      * is not in memory (open_file == NULL) and must be re-opened on reclaim. */
     bool                              persistent;
     bool                              cold;
+    /* Captured at park time so the registry can reason about expiry without
+     * dereferencing open_file: resilient => the open carried a resiliency
+     * grant (its timeout governs the disconnect deadline, MS-SMB2 3.3.5.15.9);
+     * never_expires => a pure persistent (CA) handle that holds the file until
+     * an explicit reclaim/close (it is exempt from the grace-timer sweep and
+     * blocks conflicting opens with STATUS_FILE_NOT_AVAILABLE indefinitely). */
+    bool                              resilient;
+    bool                              never_expires;
     struct chimera_smb_open_file     *open_file;
     uint32_t                          name_len;
     char                              name[SMB_FILENAME_MAX];
@@ -1622,6 +1630,23 @@ void
 chimera_smb_durable_park(
     struct chimera_server_smb_shared *shared,
     struct chimera_smb_open_file     *open_file);
+
+/* How a parked durable holder (identified by persistent id) behaves toward a
+ * conflicting fresh open, per MS-SMB2 disconnected-handle rules.  Returned by
+ * chimera_smb_durable_parked_hold(). */
+enum chimera_smb_durable_hold {
+    CHIMERA_SMB_DURABLE_HOLD_NONE = 0, /* durable-only, expired, or not parked:
+                                        * yields to the conflicting open */
+    CHIMERA_SMB_DURABLE_HOLD_CAP,      /* resilient within its timeout: courtesy-
+                                       * held, the conflicting open caps its own
+                                       * grant instead of evicting this holder */
+    CHIMERA_SMB_DURABLE_HOLD_BLOCK,    /* persistent within its timeout: the
+                                        * conflicting open fails FILE_NOT_AVAILABLE */
+};
+enum chimera_smb_durable_hold
+chimera_smb_durable_parked_hold(
+    struct chimera_server_smb_shared *shared,
+    uint64_t                          persistent_id);
 struct chimera_smb_open_file *
 chimera_smb_durable_claim(
     struct chimera_server_smb_shared *shared,

@@ -397,13 +397,21 @@ chimera_smb_durable_park(
     pthread_mutex_lock(&shared->durable.lock);
     HASH_FIND(hh, shared->durable.by_pid, &pid, sizeof(pid), entry);
     if (entry) {
-        /* A resilient open is held for its resiliency timeout; a durable open
-         * for its durable timeout.  When an open is both, keep it for the
-         * longer of the two. */
-        uint64_t timeout_ms = open_file->durable_timeout_ms;
-        if (open_file->resilient && open_file->resilient_timeout_ms > timeout_ms) {
-            timeout_ms = open_file->resilient_timeout_ms;
-        }
+        /* The disconnect-survival timeout: a resiliency request SETS the open's
+         * timeout (MS-SMB2 3.3.5.15.9 -- it governs even when the open is also
+         * durable/persistent, and may be SHORTER than the durable default), so
+         * when the open is resilient the resiliency timeout wins outright; a
+         * plain durable open uses its durable timeout. */
+        uint64_t timeout_ms = open_file->resilient
+            ? open_file->resilient_timeout_ms
+            : open_file->durable_timeout_ms;
+
+        entry->resilient = open_file->resilient;
+        /* A pure persistent (CA) handle with no resiliency timeout holds the
+         * file until an explicit reclaim/close: it never expires on the grace
+         * timer.  A persistent+resilient handle DOES expire at the resiliency
+         * timeout (test_resiliency_*_after_timeout). */
+        entry->never_expires     = entry->persistent && !open_file->resilient;
         entry->parked            = true;
         entry->deadline          = now;
         entry->deadline.tv_sec  += timeout_ms / 1000;
@@ -417,10 +425,13 @@ chimera_smb_durable_park(
 
     /* Mark the caching grant's lease AND the share reservation parked so the
      * vfs_state conflict matrix treats this disconnected holder as
-     * courtesy-held: a compatible new open coexists (keep) and a write-cache
-     * holder is evicted by the caching-acquire path (purge).  The share-resv
-     * flag stops the sole-opener rule from capping a new opener's lease to R on
-     * account of a disconnected holder.  Cleared on reconnect. */
+     * courtesy-held: a compatible new open coexists (keep).  A durable-only
+     * write-cache holder is then evicted by the caching-acquire path (purge,
+     * the MS-SMB2 yield); a resilient/persistent holder within its timeout is
+     * spared by that path (chimera_smb_durable_parked_hold) so a conflicting
+     * open caps its own grant instead.  The share-resv flag stops the
+     * sole-opener rule from capping a new opener's lease to R on account of a
+     * disconnected holder.  Cleared on reconnect. */
     if (open_file->grant) {
         open_file->grant->lease.parked = 1;
     }
@@ -428,6 +439,42 @@ chimera_smb_durable_park(
         open_file->share_lease.parked = 1;
     }
 } /* chimera_smb_durable_park */
+
+/* Classify how a parked durable holder (by persistent id) treats a conflicting
+ * fresh open -- see enum chimera_smb_durable_hold.  A durable-only holder, an
+ * expired holder (past its deadline, whether or not the sweep has reaped it
+ * yet), an unknown id, or a live (not-parked) entry all YIELD (NONE).  A
+ * resilient holder within its timeout is courtesy-held and CAPs the opener; a
+ * persistent holder within its timeout BLOCKs the opener (FILE_NOT_AVAILABLE).
+ * Persistent outranks resilient (a persistent+resilient holder BLOCKs). */
+SYMBOL_EXPORT enum chimera_smb_durable_hold
+chimera_smb_durable_parked_hold(
+    struct chimera_server_smb_shared *shared,
+    uint64_t                          persistent_id)
+{
+    struct chimera_smb_durable_entry *entry;
+    enum chimera_smb_durable_hold     hold = CHIMERA_SMB_DURABLE_HOLD_NONE;
+    struct timespec                   now;
+
+    clock_gettime(CLOCK_MONOTONIC, &now);
+
+    pthread_mutex_lock(&shared->durable.lock);
+    HASH_FIND(hh, shared->durable.by_pid, &persistent_id, sizeof(persistent_id), entry);
+    if (entry && entry->parked && !entry->cold && entry->open_file) {
+        bool within = entry->never_expires ||
+            chimera_timespec_cmp(&now, &entry->deadline) < 0;
+        if (within) {
+            if (entry->persistent) {
+                hold = CHIMERA_SMB_DURABLE_HOLD_BLOCK;
+            } else if (entry->resilient) {
+                hold = CHIMERA_SMB_DURABLE_HOLD_CAP;
+            }
+        }
+    }
+    pthread_mutex_unlock(&shared->durable.lock);
+
+    return hold;
+} /* chimera_smb_durable_parked_hold */
 
 SYMBOL_EXPORT struct chimera_smb_open_file *
 chimera_smb_durable_claim(
@@ -448,9 +495,12 @@ chimera_smb_durable_claim(
     struct chimera_smb_durable_entry *entry;
     struct chimera_smb_open_file     *open_file = NULL;
     bool                              had_lease;
+    struct timespec                   now;
 
     *r_cold  = false;
     *r_retry = false;
+
+    clock_gettime(CLOCK_MONOTONIC, &now);
 
     pthread_mutex_lock(&shared->durable.lock);
 
@@ -476,6 +526,14 @@ chimera_smb_durable_claim(
          * lapses into OBJECT_NAME_NOT_FOUND. */
         *r_retry = true;
         *status  = SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
+    } else if (!entry->never_expires && !entry->cold &&
+               chimera_timespec_cmp(&now, &entry->deadline) >= 0) {
+        /* Lazy expiry: the parked handle has outlived its disconnect-survival
+         * deadline (durable timeout, or a shorter resiliency timeout).  Whether
+         * or not the grace-timer sweep has physically reaped it yet, it is gone
+         * for reclaim purposes -- OBJECT_NAME_NOT_FOUND.  The sweep frees the
+         * carcass (test_resiliency_*_after_timeout). */
+        *status = SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
     } else if (entry->open_file &&
                (entry->open_file->flags & CHIMERA_SMB_OPEN_FILE_YIELDED)) {
         /* While disconnected, this open's write-caching oplock/lease was
@@ -683,10 +741,11 @@ chimera_smb_durable_sweep(struct chimera_server_smb_thread *thread)
         if (!entry->parked) {
             continue;
         }
-        /* Persistent handles do not expire on the durable grace timer (they
-         * live until explicit close or admin action), and cold entries have no
-         * live open to tear down — skip both. */
-        if (entry->persistent || entry->cold || !entry->open_file) {
+        /* A pure persistent (CA) handle does not expire on the grace timer (it
+         * lives until explicit close or admin action), and cold entries have no
+         * live open to tear down — skip both.  A persistent+resilient handle is
+         * NOT never_expires: its resiliency timeout governs and it IS reaped. */
+        if (entry->never_expires || entry->cold || !entry->open_file) {
             continue;
         }
         if (chimera_timespec_cmp(&now, &entry->deadline) < 0) {
