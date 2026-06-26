@@ -520,6 +520,21 @@ chimera_smb_set_info(struct chimera_smb_request *request)
                         break;
                     }
 
+                    /* MS-FSA 2.1.5.14.2: a FileBasicInformation timestamp is
+                     * either a valid (non-negative) FILETIME or one of the
+                     * sentinels 0 (omit), -1 (freeze) or -2 (thaw); any value
+                     * below -2 is rejected with STATUS_INVALID_PARAMETER (WPTS
+                     * MS-FSAModel SetFileBasicInformation {Creation,LastAccess,
+                     * LastWrite,Change}TimeLessthanM1). */
+                    if ((int64_t) request->set_info.attrs.smb_crttime < -2 ||
+                        (int64_t) request->set_info.attrs.smb_atime < -2 ||
+                        (int64_t) request->set_info.attrs.smb_mtime < -2 ||
+                        (int64_t) request->set_info.attrs.smb_ctime < -2) {
+                        chimera_smb_open_file_release(request, request->set_info.open_file);
+                        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+                        break;
+                    }
+
                     chimera_smb_unmarshal_basic_info(&request->set_info.attrs, &request->set_info.vfs_attrs);
 
                     /* An explicit (non-sentinel) write-time set hands control of
@@ -550,6 +565,18 @@ chimera_smb_set_info(struct chimera_smb_request *request)
                         chimera_smb_open_file_release(request, request->set_info.open_file);
                         chimera_smb_complete_request(request,
                                                      SMB2_STATUS_INVALID_PARAMETER);
+                        break;
+                    }
+
+                    /* MS-FSA 2.1.5.16: EndOfFile is a signed LONGLONG that must
+                     * leave headroom to extend; a value at or above MAXLONGLONG
+                     * (which includes every negative value once read as signed)
+                     * is "greater than the maximum file size" and is rejected
+                     * with STATUS_INVALID_PARAMETER (WPTS MS-FSAModel
+                     * SetFileEndOfFileInformation isEndOfFileGreatThanMaxSize). */
+                    if (request->set_info.attrs.smb_size >= (uint64_t) INT64_MAX) {
+                        chimera_smb_open_file_release(request, request->set_info.open_file);
+                        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
                         break;
                     }
 
@@ -598,6 +625,18 @@ chimera_smb_set_info(struct chimera_smb_request *request)
                      * advances LastWriteTime; a grow/hint only touches
                      * ChangeTime.  Both need the current size to decide, so this
                      * is resolved in the getattr callback. */
+                    /* MS-FSA 2.1.5.13: AllocationSize is a signed LONGLONG that
+                     * must leave headroom; a value at or above MAXLONGLONG (every
+                     * negative value once read as signed) is "greater than the
+                     * maximum file size" and is rejected with
+                     * STATUS_INVALID_PARAMETER (WPTS MS-FSAModel
+                     * SetFileAllocOrObjIdInformation). */
+                    if (request->set_info.attrs.smb_size >= (uint64_t) INT64_MAX) {
+                        chimera_smb_open_file_release(request, request->set_info.open_file);
+                        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+                        break;
+                    }
+
                     request->set_info.notify_mask = CHIMERA_VFS_NOTIFY_SIZE_CHANGED |
                         CHIMERA_VFS_NOTIFY_FILE_MODIFIED |
                         CHIMERA_VFS_NOTIFY_STREAM_SIZE;
@@ -680,6 +719,14 @@ chimera_smb_set_info(struct chimera_smb_request *request)
                     chimera_smb_set_ea(request);
                     break;
                 case SMB2_FILE_POSITION_INFO:
+                    /* MS-FSA 2.1.5.20: CurrentByteOffset is a signed LONGLONG; a
+                     * negative value is rejected with STATUS_INVALID_PARAMETER
+                     * (WPTS MS-FSAModel SetFilePositionInformation). */
+                    if ((int64_t) request->set_info.attrs.smb_position < 0) {
+                        chimera_smb_open_file_release(request, request->set_info.open_file);
+                        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+                        break;
+                    }
                     request->set_info.open_file->position = request->set_info.attrs.smb_position;
                     chimera_smb_open_file_release(request, request->set_info.open_file);
                     chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
