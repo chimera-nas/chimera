@@ -1955,94 +1955,94 @@ RequestPersistentHandleTestCaseS30,persistent,green,0,
 RequestPersistentHandleTestCaseS50,persistent,green,0,
 RequestPersistentHandleTestCaseS74,persistent,green,0,
 RequestPersistentHandleTestCaseS93,persistent,green,0,
-ResilientHandleBasicTestCaseS0,base,xfail,0,executed but fails (candidate defect)
+ResilientHandleBasicTestCaseS0,persistent,green,0,
 ResilientHandleBasicTestCaseS1031,persistent,green,0,
-ResilientHandleBasicTestCaseS1109,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleBasicTestCaseS1199,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleBasicTestCaseS1217,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleBasicTestCaseS1267,base,xfail,0,executed but fails (candidate defect)
+ResilientHandleBasicTestCaseS1109,persistent,green,0,
+ResilientHandleBasicTestCaseS1199,persistent,green,0,
+ResilientHandleBasicTestCaseS1217,persistent,green,0,
+ResilientHandleBasicTestCaseS1267,persistent,green,0,
 ResilientHandleBasicTestCaseS1333,persistent,green,0,
-ResilientHandleBasicTestCaseS1375,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleBasicTestCaseS1566,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleBasicTestCaseS1654,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleBasicTestCaseS1733,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleBasicTestCaseS1799,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleBasicTestCaseS1817,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleBasicTestCaseS1860,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleBasicTestCaseS1926,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleBasicTestCaseS1938,base,xfail,0,executed but fails (candidate defect)
+ResilientHandleBasicTestCaseS1375,persistent,green,0,
+ResilientHandleBasicTestCaseS1566,persistent,green,0,
+ResilientHandleBasicTestCaseS1654,persistent,green,0,
+ResilientHandleBasicTestCaseS1733,persistent,green,0,
+ResilientHandleBasicTestCaseS1799,persistent,green,0,
+ResilientHandleBasicTestCaseS1817,persistent,green,0,
+ResilientHandleBasicTestCaseS1860,persistent,green,0,
+ResilientHandleBasicTestCaseS1926,persistent,green,0,
+ResilientHandleBasicTestCaseS1938,persistent,green,0,
 ResilientHandleBasicTestCaseS2028,persistent,green,0,
 ResilientHandleBasicTestCaseS2148,persistent,green,0,
 ResilientHandleBasicTestCaseS2204,persistent,green,0,
-ResilientHandleBasicTestCaseS2246,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleBasicTestCaseS2326,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleBasicTestCaseS2368,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleBasicTestCaseS238,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleBasicTestCaseS2412,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleBasicTestCaseS2454,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleBasicTestCaseS2508,base,xfail,0,executed but fails (candidate defect)
+ResilientHandleBasicTestCaseS2246,persistent,green,0,
+ResilientHandleBasicTestCaseS2326,persistent,green,0,
+ResilientHandleBasicTestCaseS2368,persistent,green,0,
+ResilientHandleBasicTestCaseS238,persistent,green,0,
+ResilientHandleBasicTestCaseS2412,persistent,green,0,
+ResilientHandleBasicTestCaseS2454,persistent,green,0,
+ResilientHandleBasicTestCaseS2508,persistent,green,0,
 ResilientHandleBasicTestCaseS2556,persistent,green,0,
-ResilientHandleBasicTestCaseS2670,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleBasicTestCaseS2729,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleBasicTestCaseS2777,base,xfail,0,executed but fails (candidate defect)
+ResilientHandleBasicTestCaseS2670,persistent,green,0,
+ResilientHandleBasicTestCaseS2729,persistent,green,0,
+ResilientHandleBasicTestCaseS2777,persistent,green,0,
 ResilientHandleBasicTestCaseS2843,persistent,green,0,
 ResilientHandleBasicTestCaseS2898,persistent,green,0,
-ResilientHandleBasicTestCaseS2964,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleBasicTestCaseS2982,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleBasicTestCaseS3036,base,xfail,0,executed but fails (candidate defect)
+ResilientHandleBasicTestCaseS2964,persistent,green,0,
+ResilientHandleBasicTestCaseS2982,persistent,green,0,
+ResilientHandleBasicTestCaseS3036,persistent,green,0,
 ResilientHandleBasicTestCaseS470,persistent,green,0,
-ResilientHandleBasicTestCaseS536,base,xfail,0,executed but fails (candidate defect)
+ResilientHandleBasicTestCaseS536,persistent,green,0,
 ResilientHandleBasicTestCaseS582,persistent,green,0,
-ResilientHandleBasicTestCaseS600,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleBasicTestCaseS642,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleBasicTestCaseS686,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleBasicTestCaseS752,base,xfail,0,executed but fails (candidate defect)
+ResilientHandleBasicTestCaseS600,persistent,green,0,
+ResilientHandleBasicTestCaseS642,persistent,green,0,
+ResilientHandleBasicTestCaseS686,persistent,green,0,
+ResilientHandleBasicTestCaseS752,persistent,green,0,
 ResilientHandleBasicTestCaseS764,persistent,green,0,
-ResilientHandleBasicTestCaseS919,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleDurableTestCaseS0,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleDurableTestCaseS1066,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleDurableTestCaseS1134,base,xfail,0,executed but fails (candidate defect)
+ResilientHandleBasicTestCaseS919,persistent,green,0,
+ResilientHandleDurableTestCaseS0,persistent,green,0,
+ResilientHandleDurableTestCaseS1066,persistent,green,0,
+ResilientHandleDurableTestCaseS1134,persistent,green,0,
 ResilientHandleDurableTestCaseS1367,persistent,green,0,
-ResilientHandleDurableTestCaseS1504,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleDurableTestCaseS1627,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleDurableTestCaseS1753,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleDurableTestCaseS1856,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleDurableTestCaseS1935,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleDurableTestCaseS1967,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleDurableTestCaseS2039,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleDurableTestCaseS2123,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleDurableTestCaseS2192,base,xfail,0,executed but fails (candidate defect)
+ResilientHandleDurableTestCaseS1504,persistent,green,0,
+ResilientHandleDurableTestCaseS1627,persistent,green,0,
+ResilientHandleDurableTestCaseS1753,persistent,green,0,
+ResilientHandleDurableTestCaseS1856,persistent,green,0,
+ResilientHandleDurableTestCaseS1935,persistent,green,0,
+ResilientHandleDurableTestCaseS1967,persistent,green,0,
+ResilientHandleDurableTestCaseS2039,persistent,green,0,
+ResilientHandleDurableTestCaseS2123,persistent,green,0,
+ResilientHandleDurableTestCaseS2192,persistent,green,0,
 ResilientHandleDurableTestCaseS2255,persistent,green,0,
-ResilientHandleDurableTestCaseS2317,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleDurableTestCaseS2356,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleDurableTestCaseS2420,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleDurableTestCaseS244,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleDurableTestCaseS2467,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleDurableTestCaseS2516,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleDurableTestCaseS2655,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleDurableTestCaseS2743,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleDurableTestCaseS2816,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleDurableTestCaseS2894,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleDurableTestCaseS2967,base,xfail,0,executed but fails (candidate defect)
+ResilientHandleDurableTestCaseS2317,persistent,green,0,
+ResilientHandleDurableTestCaseS2356,persistent,green,0,
+ResilientHandleDurableTestCaseS2420,persistent,green,0,
+ResilientHandleDurableTestCaseS244,persistent,green,0,
+ResilientHandleDurableTestCaseS2467,persistent,green,0,
+ResilientHandleDurableTestCaseS2516,persistent,green,0,
+ResilientHandleDurableTestCaseS2655,persistent,green,0,
+ResilientHandleDurableTestCaseS2743,persistent,green,0,
+ResilientHandleDurableTestCaseS2816,persistent,green,0,
+ResilientHandleDurableTestCaseS2894,persistent,green,0,
+ResilientHandleDurableTestCaseS2967,persistent,green,0,
 ResilientHandleDurableTestCaseS3056,persistent,green,0,
-ResilientHandleDurableTestCaseS3152,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleDurableTestCaseS3220,base,xfail,0,executed but fails (candidate defect)
+ResilientHandleDurableTestCaseS3152,persistent,green,0,
+ResilientHandleDurableTestCaseS3220,persistent,green,0,
 ResilientHandleDurableTestCaseS3307,persistent,green,0,
-ResilientHandleDurableTestCaseS3392,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleDurableTestCaseS3502,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleDurableTestCaseS3611,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleDurableTestCaseS3674,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleDurableTestCaseS3754,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleDurableTestCaseS3831,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleDurableTestCaseS3923,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleDurableTestCaseS3980,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleDurableTestCaseS4052,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleDurableTestCaseS476,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleDurableTestCaseS583,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleDurableTestCaseS697,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleDurableTestCaseS781,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleDurableTestCaseS894,base,xfail,0,executed but fails (candidate defect)
-ResilientHandleDurableTestCaseS976,base,xfail,0,executed but fails (candidate defect)
+ResilientHandleDurableTestCaseS3392,persistent,green,0,
+ResilientHandleDurableTestCaseS3502,persistent,green,0,
+ResilientHandleDurableTestCaseS3611,persistent,green,0,
+ResilientHandleDurableTestCaseS3674,persistent,green,0,
+ResilientHandleDurableTestCaseS3754,persistent,green,0,
+ResilientHandleDurableTestCaseS3831,persistent,green,0,
+ResilientHandleDurableTestCaseS3923,persistent,green,0,
+ResilientHandleDurableTestCaseS3980,persistent,green,0,
+ResilientHandleDurableTestCaseS4052,persistent,green,0,
+ResilientHandleDurableTestCaseS476,persistent,green,0,
+ResilientHandleDurableTestCaseS583,persistent,green,0,
+ResilientHandleDurableTestCaseS697,persistent,green,0,
+ResilientHandleDurableTestCaseS781,persistent,green,0,
+ResilientHandleDurableTestCaseS894,persistent,green,0,
+ResilientHandleDurableTestCaseS976,persistent,green,0,
 SessionMgmtBindSessionAfterDisconnectionScenarioTestCaseS0,multichannel,green,0,
 SessionMgmtBindSessionAfterDisconnectionScenarioTestCaseS155,multichannel,green,0,
 SessionMgmtBindSessionAfterDisconnectionScenarioTestCaseS185,multichannel,green,0,

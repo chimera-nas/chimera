@@ -400,6 +400,7 @@ chimera_smb_create_register_durable(
     }
     chimera_smb_durable_register(request->compound->thread->shared, open_file,
                                  request->session_handle->session->session_id,
+                                 request->session_handle->session->cred.uid,
                                  request->compound->conn->client_guid,
                                  open_file->name, open_file->name_len,
                                  request->create.persist_pid != 0);
@@ -3813,6 +3814,7 @@ chimera_smb_durable_reconnect_attempt(struct chimera_smb_request *request)
 
     open_file = chimera_smb_durable_claim(shared, persistent_id, create_guid,
                                           request->compound->conn->client_guid,
+                                          request->session_handle->session->cred.uid,
                                           request->create.name, request->create.name_len,
                                           has_lease_ctx, lease_key,
                                           &cold, &retry, &status);
@@ -4280,7 +4282,11 @@ chimera_smb_create(struct chimera_smb_request *request)
      * ignores the create fields entirely -- CreateDisposition, file name, access
      * and the rest are not interpreted (MS-SMB2 3.3.5.9.7/.12) -- so the field
      * validations below must not run for it; it is dispatched straight to
-     * chimera_smb_durable_reconnect. */
+     * chimera_smb_durable_reconnect.  Gated on the persistent-handles config:
+     * that knob enables chimera's whole durable/resilient reconnect machinery
+     * (durable grants, the registry, park/reclaim).  With it off, durable
+     * contexts are not granted, so a DH2C/DHnC carries no reclaimable handle and
+     * is treated as an ordinary create (the context is ignored, per 3.3.5.9). */
     bool is_durable_reconnect =
         request->compound->thread->shared->config.persistent_handles &&
         (request->create.ctx_present_mask &
