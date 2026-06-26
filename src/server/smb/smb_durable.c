@@ -70,6 +70,7 @@ chimera_smb_durable_register(
     struct chimera_server_smb_shared *shared,
     struct chimera_smb_open_file     *open_file,
     uint64_t                          session_id,
+    uint32_t                          owner_uid,
     const uint8_t                    *client_guid,
     const char                       *name,
     uint32_t                          name_len,
@@ -79,6 +80,7 @@ chimera_smb_durable_register(
 
     entry->persistent_id = open_file->file_id.pid;
     entry->session_id    = session_id;
+    entry->owner_uid     = owner_uid;
     entry->open_file     = open_file;
     entry->parked        = false;
     entry->persistent    = persistent;
@@ -415,6 +417,7 @@ chimera_smb_durable_claim(
     uint64_t                          persistent_id,
     const uint8_t                    *create_guid,
     const uint8_t                    *client_guid,
+    uint32_t                          owner_uid,
     const char                       *name,
     uint32_t                          name_len,
     bool                              has_lease_ctx,
@@ -492,6 +495,13 @@ chimera_smb_durable_claim(
          * non-lease (oplock) reconnect both ignore the name entirely: the
          * handle's identity is its persistent id, plus the create_guid for v2. */
         *status = SMB2_STATUS_INVALID_PARAMETER;
+    } else if (!entry->cold && entry->owner_uid != owner_uid) {
+        /* MS-SMB2 3.3.5.9.7 step 9: the reconnecting session's user must be the
+         * same user that owns the durable/resilient open (Open.DurableOwner).  A
+         * reclaim by a different user is denied with STATUS_ACCESS_DENIED.  Cold
+         * (server-restart-recovered) entries carry no in-memory owner, so the
+         * check applies only to warm handles. */
+        *status = SMB2_STATUS_ACCESS_DENIED;
     } else if (entry->cold) {
         /* Recovered-after-restart entry: there is no live open to re-home.
          * Remove it and tell the caller to re-open the file (cold reclaim);

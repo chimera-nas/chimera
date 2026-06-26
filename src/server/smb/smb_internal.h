@@ -1453,6 +1453,11 @@ struct chimera_smb_durable_entry {
      * session after the original connection dropped. */
     uint8_t                           client_guid[16];
     uint64_t                          session_id; /* original owning session (informational) */
+    /* Owner identity (MS-SMB2 Open.DurableOwner): the uid of the security
+     * context that created the durable/resilient handle.  A durable reconnect
+     * (DH2C/DHnC, 3.3.5.9.7 step 9) by a different user MUST be denied with
+     * STATUS_ACCESS_DENIED. */
+    uint32_t                          owner_uid;
     struct timespec                   deadline;  /* reconnect grace; valid only while parked */
     bool                              parked;    /* true => disconnected, awaiting reconnect */
     /* persistent: the record is also persisted in the share's backend (survives
@@ -1581,6 +1586,7 @@ chimera_smb_durable_register(
     struct chimera_server_smb_shared *shared,
     struct chimera_smb_open_file     *open_file,
     uint64_t                          session_id,
+    uint32_t                          owner_uid,
     const uint8_t                    *client_guid,
     const char                       *name,
     uint32_t                          name_len,
@@ -1599,6 +1605,7 @@ chimera_smb_durable_claim(
     uint64_t                          persistent_id,
     const uint8_t                    *create_guid,
     const uint8_t                    *client_guid,
+    uint32_t                          owner_uid,
     const char                       *name,
     uint32_t                          name_len,
     bool                              has_lease_ctx,

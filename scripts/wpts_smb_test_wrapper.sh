@@ -247,6 +247,12 @@ generate_config() {
             "smbpasswd": "Password01!",
             "uid": 0,
             "gid": 0
+        },
+        {
+            "username": "nonadmin",
+            "smbpasswd": "Password01!",
+            "uid": 1000,
+            "gid": 1000
         }
     ]
 }
@@ -361,6 +367,14 @@ rm -rf "${WPTS_STAGE_DIR}/TestResults" "${WPTS_STAGE_DIR}/.\\TestLog"
 cp "${WPTS_PTFCONFIG_DIR}/CommonTestSuite.deployment.ptfconfig" \
    "${WPTS_PTFCONFIG_DIR}/${WPTS_SUITE_PTFCONFIG}" \
    "${WPTS_STAGE_DIR}/"
+
+# Advertise the second (non-administrator) local account the daemon serves
+# (uid 1000, same PasswordForAllUsers). Cases that reconnect a durable/resilient
+# handle as a different user (MS-SMB2 3.3.5.9.7 step 9 -> STATUS_ACCESS_DENIED)
+# need a NonAdminUserName; without it the driver reports them Inconclusive.
+sed -i \
+    -e 's#<Property name="NonAdminUserName" value=""/>#<Property name="NonAdminUserName" value="nonadmin"/>#' \
+    "${WPTS_STAGE_DIR}/CommonTestSuite.deployment.ptfconfig"
 
 # When persistent handles are enabled, advertise the matching capability +
 # CA-share to the test driver so the DurableHandleV2 / PersistentHandle cases
