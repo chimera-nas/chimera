@@ -641,57 +641,61 @@ chimera_smb_oplock_break(struct chimera_smb_request *request)
     open_file = chimera_smb_open_file_resolve(request, &request->oplock_break.file_id);
 
     if (open_file) {
-        if (!open_file->oplock_break_ack_required) {
-            /* No acknowledgment was expected for this break -- e.g. it broke a
-             * LEVEL_II oplock to NONE, which MS-SMB2 says the client must not
-             * acknowledge.  Reply with the protocol error (3.3.5.22.2). */
+        uint8_t ack = request->oplock_break.oplock_level;
+        uint8_t cur = open_file->oplock_level;
+        /* "Open.OplockState == Breaking": a break that requires an ack is
+         * outstanding on this open.  A LEVEL_II break (to NONE) needs no ack, so
+         * such an open is never in this state -- a client ack against it is
+         * handled by the not-Breaking branch below. */
+        bool    breaking = open_file->oplock_break_ack_required &&
+            open_file->grant &&
+            open_file->grant->lease.break_state == CHIMERA_VFS_BREAK_BREAKING;
+
+        if (!breaking) {
+            /* MS-SMB2 3.3.5.22.1: an oplock acknowledgment received while the
+             * open is NOT in the Breaking state is rejected, and the exact
+             * status depends on the acknowledged OplockLevel and the level
+             * currently held on the open:
+             *   - ack == LEASE                          -> INVALID_PARAMETER
+             *   - open EXCLUSIVE/BATCH, ack not II/NONE  -> INVALID_OPLOCK_PROTOCOL
+             *   - open LEVEL_II, ack != NONE            -> INVALID_OPLOCK_PROTOCOL
+             *   - ack == II or NONE                     -> INVALID_DEVICE_STATE
+             * chimera previously collapsed every not-Breaking ack to
+             * INVALID_OPLOCK_PROTOCOL (WPTS OplockOnShareWithForceLevel2
+             * not-Breaking acks expect INVALID_PARAMETER / INVALID_DEVICE_STATE). */
+            uint32_t status;
+
+            if (ack == SMB2_OPLOCK_LEVEL_LEASE) {
+                status = SMB2_STATUS_INVALID_PARAMETER;
+            } else if ((cur == SMB2_OPLOCK_LEVEL_EXCLUSIVE ||
+                        cur == SMB2_OPLOCK_LEVEL_BATCH) &&
+                       ack != SMB2_OPLOCK_LEVEL_II &&
+                       ack != SMB2_OPLOCK_LEVEL_NONE) {
+                status = SMB2_STATUS_INVALID_OPLOCK_PROTOCOL;
+            } else if (cur == SMB2_OPLOCK_LEVEL_II &&
+                       ack != SMB2_OPLOCK_LEVEL_NONE) {
+                status = SMB2_STATUS_INVALID_OPLOCK_PROTOCOL;
+            } else if (ack == SMB2_OPLOCK_LEVEL_II ||
+                       ack == SMB2_OPLOCK_LEVEL_NONE) {
+                status = SMB2_STATUS_INVALID_DEVICE_STATE;
+            } else {
+                status = SMB2_STATUS_INVALID_OPLOCK_PROTOCOL;
+            }
+
             chimera_smb_open_file_release(request, open_file);
-            chimera_smb_complete_request(request,
-                                         SMB2_STATUS_INVALID_OPLOCK_PROTOCOL);
+            chimera_smb_complete_request(request, status);
             return;
         }
 
-        /* MS-SMB2 3.3.5.22.1: the acknowledged OplockLevel may only be
-         * SMB2_OPLOCK_LEVEL_II or SMB2_OPLOCK_LEVEL_NONE -- a client cannot
-         * acknowledge a break by claiming a higher level (EXCLUSIVE/BATCH) or a
-         * garbage value.  The lease path's mapping silently collapses such
-         * values to 0 caching bits, but open_file->oplock_level would still be
-         * stamped with the bogus level; reject up front (#1284).  The spec's
-         * code for an oplock-acknowledgment level violation is
-         * STATUS_INVALID_OPLOCK_PROTOCOL (WPTS OplockOnShare S432), NOT the
-         * generic INVALID_PARAMETER. */
-        if (request->oplock_break.oplock_level != SMB2_OPLOCK_LEVEL_II &&
-            request->oplock_break.oplock_level != SMB2_OPLOCK_LEVEL_NONE) {
-            chimera_smb_open_file_release(request, open_file);
-            chimera_smb_complete_request(request,
-                                         SMB2_STATUS_INVALID_OPLOCK_PROTOCOL);
-            return;
-        }
-
-        /* Resolve the outstanding break with the level the client chose to
-         * keep (it may drop further than what we asked -- e.g. straight to
-         * NONE).  The lease is genuinely BREAKING here (we no longer ack
-         * optimistically), so the canonical ack applies the mode, re-arms a
-         * surviving lease, and pumps any parked acquirer. */
+        /* Breaking: complete the outstanding break with the level the client
+         * chose to keep (it may drop further than what we asked -- e.g. straight
+         * to NONE).  Only LEVEL_II retains a read cache; NONE and any
+         * higher/garbage acknowledged level collapse to no caching. */
         if (open_file->grant) {
             struct chimera_vfs_lease     *lease    = &open_file->grant->lease;
-            uint8_t                       kept_vfs = (request->oplock_break.oplock_level ==
-                                                      SMB2_OPLOCK_LEVEL_II) ?
+            uint8_t                       kept_vfs = (ack == SMB2_OPLOCK_LEVEL_II) ?
                 CHIMERA_VFS_LEASE_MODE_R : 0;
             struct chimera_vfs_lease_mode kept;
-
-            /* MS-SMB2 3.3.5.22.1: an ack is valid only while a break is
-             * outstanding (Open.OplockState == Breaking).  The legacy oplock
-             * path reports a stale/duplicate ack as STATUS_INVALID_OPLOCK_PROTOCOL
-             * (WPTS OplockOnShare S1225) -- not STATUS_UNSUCCESSFUL, which is the
-             * lease-path (3.3.5.22.2) convention -- rather than silently
-             * SUCCEEDing on a settled/revoked break (#1287). */
-            if (lease->break_state != CHIMERA_VFS_BREAK_BREAKING) {
-                chimera_smb_open_file_release(request, open_file);
-                chimera_smb_complete_request(request,
-                                             SMB2_STATUS_INVALID_OPLOCK_PROTOCOL);
-                return;
-            }
 
             /* The kept level must be a subset of what the break left the holder
              * (break_needed_mode).  A break driven by a write / namespace
@@ -713,7 +717,10 @@ chimera_smb_oplock_break(struct chimera_smb_request *request)
         }
         (void) vfs_state;
 
-        open_file->oplock_level              = request->oplock_break.oplock_level;
+        /* 3.3.5.22.1: set Open.OplockLevel to II only when the client kept a
+         * LEVEL_II read cache; otherwise the open drops to NONE. */
+        open_file->oplock_level = (ack == SMB2_OPLOCK_LEVEL_II) ?
+            SMB2_OPLOCK_LEVEL_II : SMB2_OPLOCK_LEVEL_NONE;
         open_file->oplock_break_ack_required = 0;
 
         chimera_smb_open_file_release(request, open_file);

@@ -4682,6 +4682,14 @@ set(SMBTORTURE_DISABLED_SUBTESTS
     smb2.ioctl.sparse_punch
     smb2.ioctl.sparse_qar_malformed
     smb2.ioctl.sparse_qar_truncated
+    # Acknowledging a LEVEL_II break (to NONE) on an open that is not Breaking:
+    # this Samba test asserts STATUS_INVALID_OPLOCK_PROTOCOL, but MS-SMB2
+    # 3.3.5.22.1 (and the MS-SMB2Model conformance suite,
+    # OplockOnShareWithForceLevel2WithoutSOFS) mandate STATUS_INVALID_DEVICE_STATE
+    # for an ack of II/NONE while not Breaking.  The two expectations are mutually
+    # exclusive; chimera follows the spec.  The test's own comment notes Windows
+    # was historically inconsistent here (NT_STATUS_OK vs OPLOCK_PROTOCOL).
+    smb2.oplock.levelii500
 )
 
 # Group the (backend-agnostic) subtest catalog by parent suite -- the first two
