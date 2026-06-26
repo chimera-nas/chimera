@@ -27,15 +27,17 @@
  * resolves that FileId within the same session to find the source handle.
  */
 
-/* MS-SMB2 server-side copy limits (2.2.32.1):
- *   MaxChunkCount  = 16
+/* Server-side copy limits:
+ *   MaxChunkCount  = 256
  *   MaxChunkSize   = 1 MiB
  *   TotalSizeLimit = 16 MiB
  * A request that exceeds any of these is answered with STATUS_INVALID_PARAMETER
  * and a SRV_COPYCHUNK_RESPONSE whose ChunksWritten / ChunkBytesWritten /
  * TotalBytesWritten advertise these maxima so the client resubmits within them
- * (MS-SMB2 3.3.5.15.6). */
-#define CHIMERA_SMB_CC_MAX_CHUNKS    16
+ * (MS-SMB2 3.3.5.15.6).  ServerSideCopyMaxNumberOfChunks is an implementation-
+ * chosen ADM value; we use 256 (the Windows Server value real clients -- pike,
+ * Windows -- expect), not the 16 a prior audit read into the spec. */
+#define CHIMERA_SMB_CC_MAX_CHUNKS    256
 #define CHIMERA_SMB_CC_MAX_CHUNK_LEN (1024 * 1024)
 #define CHIMERA_SMB_CC_MAX_TOTAL_LEN (16 * 1024 * 1024)
 

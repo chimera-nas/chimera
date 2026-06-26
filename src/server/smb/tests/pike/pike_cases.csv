@@ -29,13 +29,13 @@ copychunk.py::TestServerSideCopy::test_multiple_ssc_file,base,green,
 copychunk.py::TestServerSideCopy::test_multiple_ssc_file_with_writethrough_flag,base,green,
 copychunk.py::TestServerSideCopy::test_multiple_ssc_same_dest_file,base,green,
 copychunk.py::TestServerSideCopy::test_multiple_ssc_same_source_file,base,green,
-copychunk.py::TestServerSideCopy::test_neg_cross_chunk_size,base,xfail,chimera caps COPYCHUNK MaxChunkCount at 16 per MS-SMB2 (8057501d); pike expects Windows 256
-copychunk.py::TestServerSideCopy::test_neg_cross_chunk_size_allf,base,xfail,chimera caps COPYCHUNK MaxChunkCount at 16 per MS-SMB2 (8057501d); pike expects Windows 256
-copychunk.py::TestServerSideCopy::test_neg_cross_max_chunks,base,xfail,chimera caps COPYCHUNK MaxChunkCount at 16 per MS-SMB2 (8057501d); pike expects Windows 256
+copychunk.py::TestServerSideCopy::test_neg_cross_chunk_size,base,green,
+copychunk.py::TestServerSideCopy::test_neg_cross_chunk_size_allf,base,green,
+copychunk.py::TestServerSideCopy::test_neg_cross_max_chunks,base,green,
 copychunk.py::TestServerSideCopy::test_neg_cross_offset_basic,base,green,
 copychunk.py::TestServerSideCopy::test_neg_cross_offset_fifth_chunk,base,green,
 copychunk.py::TestServerSideCopy::test_neg_cross_offset_second_chunk,base,green,
-copychunk.py::TestServerSideCopy::test_neg_cross_second_chunk_size,base,xfail,chimera caps COPYCHUNK MaxChunkCount at 16 per MS-SMB2 (8057501d); pike expects Windows 256
+copychunk.py::TestServerSideCopy::test_neg_cross_second_chunk_size,base,green,
 copychunk.py::TestServerSideCopy::test_neg_dst_exc_brl,base,green,
 copychunk.py::TestServerSideCopy::test_neg_dst_is_a_dir,base,green,
 copychunk.py::TestServerSideCopy::test_neg_dst_no_read,base,green,
