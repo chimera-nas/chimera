@@ -540,6 +540,19 @@ chimera_smb_set_info(struct chimera_smb_request *request)
                         request);
                     break;
                 case SMB2_FILE_ENDOFFILE_INFO:
+
+                    /* EndOfFile/Allocation apply to a data stream; a directory
+                     * has none, so Windows fails the set with
+                     * STATUS_INVALID_PARAMETER (MS-FSCC 2.4.14 / MS-FSA
+                     * 2.1.5.14.13; issue #1261). */
+                    if (request->set_info.open_file->flags &
+                        CHIMERA_SMB_OPEN_FILE_FLAG_DIRECTORY) {
+                        chimera_smb_open_file_release(request, request->set_info.open_file);
+                        chimera_smb_complete_request(request,
+                                                     SMB2_STATUS_INVALID_PARAMETER);
+                        break;
+                    }
+
                     chimera_smb_unmarshal_end_of_file_info(&request->set_info.attrs, &request->set_info.vfs_attrs);
 
                     /* A size change fires FILE_NOTIFY_CHANGE_SIZE (and, via the
@@ -568,6 +581,17 @@ chimera_smb_set_info(struct chimera_smb_request *request)
                         request);
                     break;
                 case SMB2_FILE_ALLOCATION_INFO:
+
+                    /* A directory has no data stream to (de)allocate; reject with
+                    * STATUS_INVALID_PARAMETER (MS-FSCC 2.4.4 / MS-FSA; #1261). */
+                    if (request->set_info.open_file->flags &
+                        CHIMERA_SMB_OPEN_FILE_FLAG_DIRECTORY) {
+                        chimera_smb_open_file_release(request, request->set_info.open_file);
+                        chimera_smb_complete_request(request,
+                                                     SMB2_STATUS_INVALID_PARAMETER);
+                        break;
+                    }
+
                     /* AllocationInfo only changes the file when the requested
                      * allocation is below the current EOF, in which case the
                      * file is truncated to it (MS-FSCC §2.4.4).  A truncation
