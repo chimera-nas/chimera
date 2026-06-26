@@ -1,11 +1,11 @@
 case,home_config,status,skip_reason
-acl.py::SecTest::test_set_sec_dacl,base,xfail,ValueError: Invalid AclRevision: 1
-acl.py::SecTest::test_set_sec_dacl_append_ace,base,xfail,ValueError: Invalid AclRevision: 1
-acl.py::SecTest::test_set_sec_dacl_new,base,xfail,ValueError: Invalid AclRevision: 1
-acl.py::SecTest::test_set_sec_dacl_partial_copy,base,xfail,ValueError: Invalid AclRevision: 1
-acl.py::SecTest::test_set_sec_group,base,xfail,ValueError: Invalid AclRevision: 1
-acl.py::SecTest::test_set_sec_owner,base,xfail,ValueError: Invalid AclRevision: 1
-acl.py::SecTest::test_set_sec_same,base,xfail,ValueError: Invalid AclRevision: 1
+acl.py::SecTest::test_set_sec_dacl,base,green,
+acl.py::SecTest::test_set_sec_dacl_append_ace,base,green,
+acl.py::SecTest::test_set_sec_dacl_new,base,green,
+acl.py::SecTest::test_set_sec_dacl_partial_copy,base,green,
+acl.py::SecTest::test_set_sec_group,base,green,
+acl.py::SecTest::test_set_sec_owner,base,green,
+acl.py::SecTest::test_set_sec_same,base,green,
 appinstanceid.py::AppInstanceIdTest::test_appinstanceid,persistent,green,
 appinstanceid.py::AppInstanceIdTest::test_appinstanceid_persistent_with_disconnect,persistent,green,
 appinstanceid.py::AppInstanceIdTest::test_appinstanceid_reconnect_same_clientguid,persistent,xfail,same-client-guid AppInstanceId reopen should return FILE_NOT_AVAILABLE
@@ -151,18 +151,18 @@ query.py::QueryTest::test_mismatch_0_file_mode_info,base,green,
 query.py::QueryTest::test_mismatch_0_file_position_info,base,green,
 query.py::QueryTest::test_mismatch_0_file_standard_info,base,green,
 query.py::QueryTest::test_query_file_alignment_info,base,green,
-query.py::QueryTest::test_query_file_all_info,base,xfail,ValueError: Invalid Alignment: fff
+query.py::QueryTest::test_query_file_all_info,base,green,
 query.py::QueryTest::test_query_file_basic_info,base,green,
 query.py::QueryTest::test_query_file_ea_info,base,green,
 query.py::QueryTest::test_query_file_internal_info,base,green,
 query.py::QueryTest::test_query_file_mode_info,base,green,
 query.py::QueryTest::test_query_file_position_info,base,green,
-query.py::QueryTest::test_query_file_sec_info_all,base,xfail,ValueError: Invalid AclRevision: 1
+query.py::QueryTest::test_query_file_sec_info_all,base,green,
 query.py::QueryTest::test_query_file_sec_info_dacl,base,green,
 query.py::QueryTest::test_query_file_sec_info_group,base,green,
 query.py::QueryTest::test_query_file_sec_info_owner,base,green,
 query.py::QueryTest::test_query_file_standard_info,base,green,
-query.py::QueryTest::test_query_sec_desc_0,base,xfail,IndexError: list index out of range
+query.py::QueryTest::test_query_sec_desc_0,base,xfail,BUFFER_TOO_SMALL reply needs the 4-byte required-length error body
 querydirectory.py::QueryDirectoryTest::test_file_directory_info,base,green,
 querydirectory.py::QueryDirectoryTest::test_file_id_both_directory_information,base,green,
 querydirectory.py::QueryDirectoryTest::test_restart_scan,base,green,

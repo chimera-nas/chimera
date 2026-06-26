@@ -543,6 +543,31 @@ chimera_smb_acl_to_sd(
     }
     memset(out, 0, SD_HEADER_SIZE);
 
+    /* Emit the body in canonical order: owner SID, group SID, SACL, DACL.
+     * MS-DTYP 2.4.6 lets the self-relative offsets place these blocks anywhere,
+     * but Windows and real clients (Linux cifs, pike) decode the body in this
+     * fixed order and only consult OffsetXxx as a present/absent flag -- a
+     * DACL-first layout is then misparsed (the DACL bytes are read as the owner
+     * SID), so the owner/group SIDs must precede the DACL here. */
+    if (has_owner) {
+        int n = chimera_smb_emit_owner_sid(&out[offset], cap - offset, vfs, uid);
+
+        if (n < 0) {
+            return -1;
+        }
+        owner_off = offset;
+        offset   += n;
+    }
+
+    if (has_group) {
+        if (offset + SID_UNIX_SIZE > cap) {
+            return -1;
+        }
+        group_off = offset;
+        write_unix_sid(&out[offset], 2, gid);
+        offset += SID_UNIX_SIZE;
+    }
+
     if (has_dacl) {
         uint32_t acl_hdr   = offset;
         uint16_t ace_count = 0;
@@ -644,25 +669,6 @@ chimera_smb_acl_to_sd(
 
         dacl_off = acl_hdr;
         offset   = ace_pos;
-    }
-
-    if (has_owner) {
-        int n = chimera_smb_emit_owner_sid(&out[offset], cap - offset, vfs, uid);
-
-        if (n < 0) {
-            return -1;
-        }
-        owner_off = offset;
-        offset   += n;
-    }
-
-    if (has_group) {
-        if (offset + SID_UNIX_SIZE > cap) {
-            return -1;
-        }
-        group_off = offset;
-        write_unix_sid(&out[offset], 2, gid);
-        offset += SID_UNIX_SIZE;
     }
 
     out[0]  = 1; /* revision */
