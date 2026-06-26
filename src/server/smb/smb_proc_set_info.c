@@ -568,13 +568,13 @@ chimera_smb_set_info(struct chimera_smb_request *request)
                         break;
                     }
 
-                    /* MS-FSA 2.1.5.16: EndOfFile is a signed LONGLONG that must
-                     * leave headroom to extend; a value at or above MAXLONGLONG
-                     * (which includes every negative value once read as signed)
-                     * is "greater than the maximum file size" and is rejected
-                     * with STATUS_INVALID_PARAMETER (WPTS MS-FSAModel
+                    /* MS-FSA 2.1.5.16: a SetEndOfFile whose size exceeds the
+                     * maximum supported file size is rejected with
+                     * STATUS_INVALID_PARAMETER -- the same bound the write path
+                     * enforces, which also covers every value that is negative
+                     * when read as a signed LONGLONG (WPTS MS-FSAModel
                      * SetFileEndOfFileInformation isEndOfFileGreatThanMaxSize). */
-                    if (request->set_info.attrs.smb_size >= (uint64_t) INT64_MAX) {
+                    if (request->set_info.attrs.smb_size > CHIMERA_SMB_MAX_FILE_SIZE) {
                         chimera_smb_open_file_release(request, request->set_info.open_file);
                         chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
                         break;
@@ -625,13 +625,12 @@ chimera_smb_set_info(struct chimera_smb_request *request)
                      * advances LastWriteTime; a grow/hint only touches
                      * ChangeTime.  Both need the current size to decide, so this
                      * is resolved in the getattr callback. */
-                    /* MS-FSA 2.1.5.13: AllocationSize is a signed LONGLONG that
-                     * must leave headroom; a value at or above MAXLONGLONG (every
-                     * negative value once read as signed) is "greater than the
-                     * maximum file size" and is rejected with
-                     * STATUS_INVALID_PARAMETER (WPTS MS-FSAModel
-                     * SetFileAllocOrObjIdInformation). */
-                    if (request->set_info.attrs.smb_size >= (uint64_t) INT64_MAX) {
+                    /* MS-FSA 2.1.5.13: a SetAllocation whose size exceeds the
+                     * maximum supported file size is rejected with
+                     * STATUS_INVALID_PARAMETER (also covers every value negative
+                     * when read as a signed LONGLONG) -- WPTS MS-FSAModel
+                     * SetFileAllocOrObjIdInformation. */
+                    if (request->set_info.attrs.smb_size > CHIMERA_SMB_MAX_FILE_SIZE) {
                         chimera_smb_open_file_release(request, request->set_info.open_file);
                         chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
                         break;

@@ -293,6 +293,11 @@ struct chimera_smb_conn;
  * evpl buffer cannot be satisfied with one iovec. */
 #define CHIMERA_SMB_MAX_TRANSACT_SIZE         (1 * 1024 * 1024)
 
+/* Maximum supported file size, matching the Windows/Samba value
+ * (0xFFFFFFF0000 == 2^44 - 2^16).  A write, SetEndOfFile or SetAllocation whose
+ * size would exceed this is rejected with STATUS_INVALID_PARAMETER. */
+#define CHIMERA_SMB_MAX_FILE_SIZE             0xfffffff0000ULL
+
 struct chimera_smb_rename_info {
     uint8_t                         replace_if_exist;
     struct chimera_vfs_open_handle *new_parent_handle;
