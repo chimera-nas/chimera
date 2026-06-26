@@ -8,6 +8,26 @@
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
 
+/* Map a VFS commit error to the SMB2 status a client expects at FLUSH time.
+ * FLUSH is where a write-back backend surfaces a deferred-write failure, so the
+ * real status (disk-full / quota / write-protected / IO) MUST be reported rather
+ * than collapsing everything to INTERNAL_ERROR (issue #1250, MS-SMB2 3.3.5.11 /
+ * MS-FSA flush). */
+static inline uint32_t
+chimera_smb_flush_error_status(enum chimera_vfs_error error_code)
+{
+    switch (error_code) {
+        case CHIMERA_VFS_OK:     return SMB2_STATUS_SUCCESS;
+        case CHIMERA_VFS_ENOSPC:
+        case CHIMERA_VFS_EDQUOT: return SMB2_STATUS_DISK_FULL;
+        case CHIMERA_VFS_EROFS:  return SMB2_STATUS_MEDIA_WRITE_PROTECTED;
+        case CHIMERA_VFS_EACCES:
+        case CHIMERA_VFS_EPERM:  return SMB2_STATUS_ACCESS_DENIED;
+        case CHIMERA_VFS_EIO:    return SMB2_STATUS_IO_DEVICE_ERROR;
+        default:                 return SMB2_STATUS_INTERNAL_ERROR;
+    } /* switch */
+} /* chimera_smb_flush_error_status */
+
 static void
 chimera_smb_flush_callback(
     enum chimera_vfs_error    error_code,
@@ -19,7 +39,7 @@ chimera_smb_flush_callback(
 
     chimera_smb_open_file_release(request, request->flush.open_file);
 
-    chimera_smb_complete_request(request, error_code ? SMB2_STATUS_INTERNAL_ERROR : SMB2_STATUS_SUCCESS);
+    chimera_smb_complete_request(request, chimera_smb_flush_error_status(error_code));
 } /* chimera_smb_flush_callback */
 
 void
