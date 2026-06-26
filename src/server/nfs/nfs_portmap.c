@@ -77,14 +77,39 @@ portmap_make_uaddr(
 } /* portmap_make_uaddr */
 
 /*
- * Look up port number for a given program.
- * Returns the port number, or 0 if not found.
+ * Map an rpcbind network ID string (GETADDR) to a transport protocol
+ * number as used in the service table (6 = TCP, 17 = UDP).  Returns 0 for
+ * an unrecognised/unsupported netid, which the caller treats as "not served".
+ */
+static uint32_t
+portmap_netid_to_prot(const xdr_string *netid)
+{
+    if (netid->len == 3 && memcmp(netid->str, "tcp", 3) == 0) {
+        return IPPROTO_TCP;
+    }
+    if (netid->len == 3 && memcmp(netid->str, "udp", 3) == 0) {
+        return IPPROTO_UDP;
+    }
+    return 0;
+} /* portmap_netid_to_prot */
+
+/*
+ * Look up the port number for an exact (program, version, protocol) tuple.
+ * Per RFC 1833, GETPORT/GETADDR must only return a port for a tuple that is
+ * actually served; an unsupported version or protocol yields port 0 ("not
+ * registered") rather than the port of some other version/transport.
+ * Returns the port number, or 0 if the tuple is not served.
  */
 static unsigned int
-portmap_lookup_port(uint32_t prog)
+portmap_lookup_port(
+    uint32_t prog,
+    uint32_t vers,
+    uint32_t prot)
 {
     for (unsigned int i = 0; i < num_portmap_services; i++) {
-        if (portmap_services[i].prog == prog) {
+        if (portmap_services[i].prog == prog &&
+            portmap_services[i].vers == vers &&
+            portmap_services[i].prot == prot) {
             return portmap_services[i].port;
         }
     }
@@ -231,11 +256,12 @@ chimera_portmap_getport_v2(
     unsigned int                      port;
     int                               rc;
 
-    port = portmap_lookup_port(mapping->prog);
+    port = portmap_lookup_port(mapping->prog, mapping->vers, mapping->prot);
 
     if (port == 0) {
-        chimera_nfs_error("portmap request for unknown program %u",
-                          mapping->prog);
+        chimera_nfs_error(
+            "portmap request for unserved program %u vers %u prot %u",
+            mapping->prog, mapping->vers, mapping->prot);
     }
 
     rc = shared->portmap_v2.send_reply_PMAPPROC_GETPORT(evpl, NULL, port, encoding);
@@ -279,11 +305,14 @@ portmap_getaddr_common(
     unsigned int port;
     int          rc;
 
-    port = portmap_lookup_port(args->r_prog);
+    port = portmap_lookup_port(args->r_prog, args->r_vers,
+                               portmap_netid_to_prot(&args->r_netid));
 
     if (port == 0) {
-        chimera_nfs_error("rpcbind getaddr request for unknown program %u",
-                          args->r_prog);
+        chimera_nfs_error(
+            "rpcbind getaddr request for unserved program %u vers %u netid %.*s",
+            args->r_prog, args->r_vers,
+            args->r_netid.len, args->r_netid.str);
         addr.str = "";
         addr.len = 0;
     } else {
