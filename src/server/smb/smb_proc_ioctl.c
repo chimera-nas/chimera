@@ -515,7 +515,12 @@ chimera_smb_ioctl_reply(
             for (int i = 0; i < shared->config.num_nic_info; i++) {
                 nic_info = &shared->config.nic_info[i];
 
-                caps = 0x1; /* RSS */
+                /* MS-SMB2 2.2.32 RSS_CAPABLE (0x1) must mirror the real NIC
+                 * capability; chimera has no RSS backing and no config knob, so
+                 * report 0 (no RSS) rather than asserting it unconditionally
+                 * (issue #1289).  RDMA_CAPABLE (0x2) is reported only when the
+                 * interface is actually configured for RDMA. */
+                caps = 0;
 
                 if (nic_info->rdma) {
                     caps |= 0x2; /* RDMA */
@@ -523,7 +528,7 @@ chimera_smb_ioctl_reply(
 
                 evpl_iovec_cursor_append_uint32(reply_cursor,  i == shared->config.num_nic_info - 1 ? 0 : 152); /* next */
                 evpl_iovec_cursor_append_uint32(reply_cursor, i + 1); /* ifindex */
-                evpl_iovec_cursor_append_uint32(reply_cursor, caps); /* capabilities (RSS) */
+                evpl_iovec_cursor_append_uint32(reply_cursor, caps); /* capabilities (RSS/RDMA) */
                 evpl_iovec_cursor_append_uint32(reply_cursor, 0); /* reserved */
                 evpl_iovec_cursor_append_uint64(reply_cursor, nic_info->speed); /* speed */
                 /* SOCKADDR_STORAGE.ss_family is the Windows AF_* value on the
