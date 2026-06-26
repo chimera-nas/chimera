@@ -1083,26 +1083,26 @@ OplockOnShareWithForceLevel2AndSOFSTestCaseS954,base,skip,0,env-sofs: STYPE_CLUS
 OplockOnShareWithForceLevel2AndSOFSTestCaseS988,base,skip,0,env-sofs: STYPE_CLUSTER_SOFS clustered share unsupported (standalone server)
 OplockOnShareWithForceLevel2WithoutSOFSTestCaseS0,base,green,0,
 OplockOnShareWithForceLevel2WithoutSOFSTestCaseS1006,base,green,0,
-OplockOnShareWithForceLevel2WithoutSOFSTestCaseS1041,base,xfail,0,"xfail: oplock-ack not-Breaking status (MS-SMB2 3.3.5.22.1 wants INVALID_DEVICE_STATE/INVALID_PARAMETER, server returns INVALID_OPLOCK_PROTOCOL)"
+OplockOnShareWithForceLevel2WithoutSOFSTestCaseS1041,base,green,0,
 OplockOnShareWithForceLevel2WithoutSOFSTestCaseS1075,base,green,0,
 OplockOnShareWithForceLevel2WithoutSOFSTestCaseS1141,base,green,0,
 OplockOnShareWithForceLevel2WithoutSOFSTestCaseS1178,base,green,0,
-OplockOnShareWithForceLevel2WithoutSOFSTestCaseS1211,base,xfail,0,"xfail: oplock-ack not-Breaking status (MS-SMB2 3.3.5.22.1 wants INVALID_DEVICE_STATE/INVALID_PARAMETER, server returns INVALID_OPLOCK_PROTOCOL)"
+OplockOnShareWithForceLevel2WithoutSOFSTestCaseS1211,base,green,0,
 OplockOnShareWithForceLevel2WithoutSOFSTestCaseS1245,base,green,0,
 OplockOnShareWithForceLevel2WithoutSOFSTestCaseS1279,base,green,0,
-OplockOnShareWithForceLevel2WithoutSOFSTestCaseS1314,base,xfail,0,"xfail: oplock-ack not-Breaking status (MS-SMB2 3.3.5.22.1 wants INVALID_DEVICE_STATE/INVALID_PARAMETER, server returns INVALID_OPLOCK_PROTOCOL)"
+OplockOnShareWithForceLevel2WithoutSOFSTestCaseS1314,base,green,0,
 OplockOnShareWithForceLevel2WithoutSOFSTestCaseS1332,base,green,0,
 OplockOnShareWithForceLevel2WithoutSOFSTestCaseS1357,base,green,0,
 OplockOnShareWithForceLevel2WithoutSOFSTestCaseS136,base,green,0,
 OplockOnShareWithForceLevel2WithoutSOFSTestCaseS1387,base,green,0,
 OplockOnShareWithForceLevel2WithoutSOFSTestCaseS1421,base,green,0,
-OplockOnShareWithForceLevel2WithoutSOFSTestCaseS1455,base,xfail,0,"xfail: oplock-ack not-Breaking status (MS-SMB2 3.3.5.22.1 wants INVALID_DEVICE_STATE/INVALID_PARAMETER, server returns INVALID_OPLOCK_PROTOCOL)"
+OplockOnShareWithForceLevel2WithoutSOFSTestCaseS1455,base,green,0,
 OplockOnShareWithForceLevel2WithoutSOFSTestCaseS1491,base,green,0,
 OplockOnShareWithForceLevel2WithoutSOFSTestCaseS1539,base,green,0,
 OplockOnShareWithForceLevel2WithoutSOFSTestCaseS1578,base,green,0,
 OplockOnShareWithForceLevel2WithoutSOFSTestCaseS1616,base,green,0,
 OplockOnShareWithForceLevel2WithoutSOFSTestCaseS1653,base,green,0,
-OplockOnShareWithForceLevel2WithoutSOFSTestCaseS1688,base,xfail,0,"xfail: oplock-ack not-Breaking status (MS-SMB2 3.3.5.22.1 wants INVALID_DEVICE_STATE/INVALID_PARAMETER, server returns INVALID_OPLOCK_PROTOCOL)"
+OplockOnShareWithForceLevel2WithoutSOFSTestCaseS1688,base,green,0,
 OplockOnShareWithForceLevel2WithoutSOFSTestCaseS1722,base,green,0,
 OplockOnShareWithForceLevel2WithoutSOFSTestCaseS1741,base,green,0,
 OplockOnShareWithForceLevel2WithoutSOFSTestCaseS1787,base,green,0,
@@ -1131,13 +1131,13 @@ OplockOnShareWithForceLevel2WithoutSOFSTestCaseS2428,base,green,0,
 OplockOnShareWithForceLevel2WithoutSOFSTestCaseS2450,base,green,0,
 OplockOnShareWithForceLevel2WithoutSOFSTestCaseS2473,base,green,0,
 OplockOnShareWithForceLevel2WithoutSOFSTestCaseS2507,base,green,0,
-OplockOnShareWithForceLevel2WithoutSOFSTestCaseS2553,base,xfail,0,"xfail: oplock-ack not-Breaking status (MS-SMB2 3.3.5.22.1 wants INVALID_DEVICE_STATE/INVALID_PARAMETER, server returns INVALID_OPLOCK_PROTOCOL)"
+OplockOnShareWithForceLevel2WithoutSOFSTestCaseS2553,base,green,0,
 OplockOnShareWithForceLevel2WithoutSOFSTestCaseS256,base,green,0,
 OplockOnShareWithForceLevel2WithoutSOFSTestCaseS2561,base,green,0,
 OplockOnShareWithForceLevel2WithoutSOFSTestCaseS2586,base,green,0,
 OplockOnShareWithForceLevel2WithoutSOFSTestCaseS2632,base,green,0,
 OplockOnShareWithForceLevel2WithoutSOFSTestCaseS2655,base,green,0,
-OplockOnShareWithForceLevel2WithoutSOFSTestCaseS2683,base,xfail,0,"xfail: oplock-ack not-Breaking status (MS-SMB2 3.3.5.22.1 wants INVALID_DEVICE_STATE/INVALID_PARAMETER, server returns INVALID_OPLOCK_PROTOCOL)"
+OplockOnShareWithForceLevel2WithoutSOFSTestCaseS2683,base,green,0,
 OplockOnShareWithForceLevel2WithoutSOFSTestCaseS2708,base,green,0,
 OplockOnShareWithForceLevel2WithoutSOFSTestCaseS2736,base,green,0,
 OplockOnShareWithForceLevel2WithoutSOFSTestCaseS2748,base,green,0,
@@ -1147,7 +1147,7 @@ OplockOnShareWithForceLevel2WithoutSOFSTestCaseS2821,base,green,0,
 OplockOnShareWithForceLevel2WithoutSOFSTestCaseS2836,base,green,0,
 OplockOnShareWithForceLevel2WithoutSOFSTestCaseS2854,base,green,0,
 OplockOnShareWithForceLevel2WithoutSOFSTestCaseS2879,base,green,0,
-OplockOnShareWithForceLevel2WithoutSOFSTestCaseS2917,base,xfail,0,"xfail: oplock-ack not-Breaking status (MS-SMB2 3.3.5.22.1 wants INVALID_DEVICE_STATE/INVALID_PARAMETER, server returns INVALID_OPLOCK_PROTOCOL)"
+OplockOnShareWithForceLevel2WithoutSOFSTestCaseS2917,base,green,0,
 OplockOnShareWithForceLevel2WithoutSOFSTestCaseS293,base,green,0,
 OplockOnShareWithForceLevel2WithoutSOFSTestCaseS2932,base,green,0,
 OplockOnShareWithForceLevel2WithoutSOFSTestCaseS2949,base,green,0,
@@ -1166,10 +1166,10 @@ OplockOnShareWithForceLevel2WithoutSOFSTestCaseS3232,base,green,0,
 OplockOnShareWithForceLevel2WithoutSOFSTestCaseS3270,base,green,0,
 OplockOnShareWithForceLevel2WithoutSOFSTestCaseS328,base,green,0,
 OplockOnShareWithForceLevel2WithoutSOFSTestCaseS3291,base,green,0,
-OplockOnShareWithForceLevel2WithoutSOFSTestCaseS3296,base,xfail,0,"xfail: oplock-ack not-Breaking status (MS-SMB2 3.3.5.22.1 wants INVALID_DEVICE_STATE/INVALID_PARAMETER, server returns INVALID_OPLOCK_PROTOCOL)"
-OplockOnShareWithForceLevel2WithoutSOFSTestCaseS3311,base,xfail,0,"xfail: oplock-ack not-Breaking status (MS-SMB2 3.3.5.22.1 wants INVALID_DEVICE_STATE/INVALID_PARAMETER, server returns INVALID_OPLOCK_PROTOCOL)"
-OplockOnShareWithForceLevel2WithoutSOFSTestCaseS3326,base,xfail,0,"xfail: oplock-ack not-Breaking status (MS-SMB2 3.3.5.22.1 wants INVALID_DEVICE_STATE/INVALID_PARAMETER, server returns INVALID_OPLOCK_PROTOCOL)"
-OplockOnShareWithForceLevel2WithoutSOFSTestCaseS3341,base,xfail,0,"xfail: oplock-ack not-Breaking status (MS-SMB2 3.3.5.22.1 wants INVALID_DEVICE_STATE/INVALID_PARAMETER, server returns INVALID_OPLOCK_PROTOCOL)"
+OplockOnShareWithForceLevel2WithoutSOFSTestCaseS3296,base,green,0,
+OplockOnShareWithForceLevel2WithoutSOFSTestCaseS3311,base,green,0,
+OplockOnShareWithForceLevel2WithoutSOFSTestCaseS3326,base,green,0,
+OplockOnShareWithForceLevel2WithoutSOFSTestCaseS3341,base,green,0,
 OplockOnShareWithForceLevel2WithoutSOFSTestCaseS3357,base,green,0,
 OplockOnShareWithForceLevel2WithoutSOFSTestCaseS3369,base,green,0,
 OplockOnShareWithForceLevel2WithoutSOFSTestCaseS3374,base,green,0,
@@ -1192,7 +1192,7 @@ OplockOnShareWithForceLevel2WithoutSOFSTestCaseS817,base,green,0,
 OplockOnShareWithForceLevel2WithoutSOFSTestCaseS846,base,green,0,
 OplockOnShareWithForceLevel2WithoutSOFSTestCaseS898,base,green,0,
 OplockOnShareWithForceLevel2WithoutSOFSTestCaseS934,base,green,0,
-OplockOnShareWithForceLevel2WithoutSOFSTestCaseS972,base,xfail,0,"xfail: oplock-ack not-Breaking status (MS-SMB2 3.3.5.22.1 wants INVALID_DEVICE_STATE/INVALID_PARAMETER, server returns INVALID_OPLOCK_PROTOCOL)"
+OplockOnShareWithForceLevel2WithoutSOFSTestCaseS972,base,green,0,
 OplockOnShareWithoutForceLevel2OrSOFSTestCaseS0,base,xfail,0,executed but fails (candidate defect)
 OplockOnShareWithoutForceLevel2OrSOFSTestCaseS1033,base,green,0,
 OplockOnShareWithoutForceLevel2OrSOFSTestCaseS1063,base,xfail,0,executed but fails (candidate defect)
