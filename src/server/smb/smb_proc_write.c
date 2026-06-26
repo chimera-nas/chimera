@@ -299,6 +299,20 @@ chimera_smb_write(struct chimera_smb_request *request)
         return;
     }
 
+    /* A zero-length write accesses no byte range: per MS-FSA 2.1.5.3 it
+     * completes immediately with Count 0.  It must take NO byte-range-lock
+     * conflict (a 0-byte write inside another owner's exclusive lock is allowed
+     * -- smb2.lock.allow_zero_byte_write) and break NO oplock/lease (it changes
+     * no data, so cached readers stay valid -- smb2 readwrite write_none_*).
+     * Short-circuit here, before the lock-conflict check and the VFS write that
+     * would otherwise drive a read-cache break. */
+    if (request->write.length == 0) {
+        evpl_iovecs_release(evpl, request->write.iov, request->write.niov);
+        chimera_smb_open_file_release(request, request->write.open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+        return;
+    }
+
     /* When the open holds a caching lease, use the lease's owner identity for
      * the write so chimera_vfs_break_reads_for_write self-exempts (mode.granted
      * & MODE_W AND owner_equal): the holder is writing through its own granted
