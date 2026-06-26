@@ -1497,6 +1497,11 @@ struct chimera_server_smb_shared {
     int                               rdma;
     enum evpl_protocol_id             tcp_protocol;
     uint8_t                           guid[SMB2_GUID_SIZE];
+    /* MS-SMB2 2.2.4 / 3.3.1.5 Global ServerStartTime: the instant this SMB
+     * server instance started (NT time), captured once at init.  Reported in
+     * NEGOTIATE so clients can detect an in-place restart -- distinct from the
+     * OS boot time. */
+    uint64_t                          server_start_time;
     /* Account-domain (machine) SID sub-authorities: S-1-5-21-X-Y-Z, derived once
      * at startup from a stable per-host id (see chimera_smb_server_init).  The
      * LSARPC/SAMR services issue domain-relative SIDs under this. */
