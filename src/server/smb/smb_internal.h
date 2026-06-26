@@ -1640,6 +1640,7 @@ chimera_smb_durable_claim(
     uint32_t                          name_len,
     bool                              has_lease_ctx,
     const uint8_t                    *lease_key,
+    bool                              reconnect_persistent,
     bool                             *r_cold,
     bool                             *r_retry,
     uint32_t                         *status);

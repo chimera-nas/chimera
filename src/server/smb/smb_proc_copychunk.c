@@ -322,8 +322,17 @@ chimera_smb_ioctl_copychunk(struct chimera_smb_request *request)
         return;
     }
 
-    /* The source is identified by the resume key (its FileId). */
-    src_open_file = chimera_smb_open_file_resolve(request, &request->ioctl.cc_src_file_id);
+    /* The source is identified by the resume key (its FileId).  Resolving it is
+     * an internal lookup that must NOT clobber the compound's related-handle
+     * inheritance: chimera_smb_open_file_resolve updates compound->saved_file_id
+     * to the last resolved handle, but the FSCTL "operates on" the DESTINATION,
+     * so a chained READ/CLOSE after this copychunk must inherit the destination
+     * handle, not the source (MS-SMB2 3.3.5.2.7.2; pike copychunk
+     * ssc_in_compound_req).  Snapshot saved_file_id (= dst, set just above) and
+     * restore it after the source lookup. */
+    struct chimera_smb_file_id cc_saved_file_id = request->compound->saved_file_id;
+    src_open_file                    = chimera_smb_open_file_resolve(request, &request->ioctl.cc_src_file_id);
+    request->compound->saved_file_id = cc_saved_file_id;
     if (unlikely(!src_open_file)) {
         chimera_smb_open_file_release(request, dst_open_file);
         /* An unknown/expired resume key -> OBJECT_NAME_NOT_FOUND per
