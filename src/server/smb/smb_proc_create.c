@@ -2578,10 +2578,29 @@ chimera_smb_create_open_finish(
      * in flight (a conflicting/overwriting open whose ack-required break has not
      * settled).  Computed here so a content break can be DEFERRED past the park. */
     if (open_file->handle) {
-        struct chimera_vfs_open_handle *oh = open_file->handle;
-        will_park = chimera_vfs_state_caching_breaking(vfs_state, oh->fh,
-                                                       oh->fh_len, oh->fh_hash,
-                                                       open_file->grant);
+        bool delete_on_close =
+            (request->create.create_options & SMB2_FILE_DELETE_ON_CLOSE) != 0;
+
+        /* A delete-on-close open is a namespace mutation: it completes ON NOTIFY.
+         * The conflicting holder's handle-cache break (RqLs RH->R / a batch
+         * oplock's deferred handle) is informational -- the holder relinquishes
+         * asynchronously and the deferred removal at LAST close still drains the
+         * break (chimera_vfs_remove_at's io_recall) -- so this open must NOT wait
+         * for a break ack the holder is never obliged to send.  smbtorture passes
+         * the equivalent flows only because its lease handler auto-acks; the WPTS
+         * MS-SMB2Model BreakRead{,Write}HandleLease holder deliberately never
+         * acks, so waiting here deadlocks the open for the model's ~20s timeout.
+         *
+         * A DATA open (read / write / truncate) still pends on a write/read-cache
+         * break for flush coherence (smb2.lease.breaking3), and a delete-on-close
+         * that ALSO requested its own oplock still parks to re-arbitrate that
+         * grant once the holder's break settles (smb2.durable-open.oplock). */
+        if (!delete_on_close || open_file->grant != NULL) {
+            struct chimera_vfs_open_handle *oh = open_file->handle;
+            will_park = chimera_vfs_state_caching_breaking(vfs_state, oh->fh,
+                                                           oh->fh_len, oh->fh_hash,
+                                                           open_file->grant);
+        }
     }
 
     /* Emit notification on parent directory for any disposition that can

@@ -512,6 +512,15 @@ chimera_smb_set_info_rename_recall_scan(struct chimera_smb_request *request)
 {
     chimera_smb_set_info_rename_recall_free(request);
 
+    /* The operating connection can disconnect while a child recall is parked
+     * (the peer timed out); its teardown releases open_file->handle.  Abort the
+     * scan cleanly rather than dereferencing a NULL directory handle in readdir
+     * (recall_deny releases the parent handles + the open file and replies). */
+    if (!request->set_info.open_file || !request->set_info.open_file->handle) {
+        chimera_smb_set_info_rename_recall_deny(request);
+        return;
+    }
+
     chimera_vfs_readdir(
         request->compound->thread->vfs_thread,
         &request->session_handle->session->cred,

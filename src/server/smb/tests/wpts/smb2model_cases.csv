@@ -69,124 +69,124 @@ AppInstanceIdTestCaseS621,base,green,0,
 AppInstanceIdTestCaseS76,base,green,0,
 AppInstanceIdTestCaseS84,base,green,0,
 AppInstanceIdTestCaseS92,base,green,0,
-BreakReadHandleLeaseV1TestCaseS0,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV1TestCaseS1009,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV1TestCaseS1033,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV1TestCaseS1065,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV1TestCaseS1105,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV1TestCaseS1144,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV1TestCaseS1171,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV1TestCaseS1205,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV1TestCaseS1245,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV1TestCaseS1277,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV1TestCaseS1301,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV1TestCaseS1333,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV1TestCaseS1365,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV1TestCaseS1389,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV1TestCaseS1413,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV1TestCaseS144,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV1TestCaseS1445,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV1TestCaseS1469,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV1TestCaseS1493,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV1TestCaseS1517,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV1TestCaseS1538,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV1TestCaseS1570,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV1TestCaseS1591,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV1TestCaseS1611,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV1TestCaseS1624,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV1TestCaseS1637,base,xfail,0,flaky: lease-break-handle model unstable (timing-sensitive)
-BreakReadHandleLeaseV1TestCaseS1650,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV1TestCaseS1663,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV1TestCaseS1676,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV1TestCaseS1697,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV1TestCaseS1710,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV1TestCaseS1723,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV1TestCaseS1736,base,xfail,0,flaky: lease-break-handle model unstable (timing-sensitive)
-BreakReadHandleLeaseV1TestCaseS1752,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV1TestCaseS1765,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV1TestCaseS1778,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV1TestCaseS1799,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV1TestCaseS1820,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV1TestCaseS184,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV1TestCaseS1841,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV1TestCaseS1862,base,xfail,0,flaky: lease-break-handle model unstable (timing-sensitive)
-BreakReadHandleLeaseV1TestCaseS1878,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV1TestCaseS1898,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV1TestCaseS1911,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV1TestCaseS1924,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV1TestCaseS1937,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV1TestCaseS1950,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV1TestCaseS1971,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV1TestCaseS1992,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV1TestCaseS2005,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV1TestCaseS2018,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadHandleLeaseV1TestCaseS2031,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadHandleLeaseV1TestCaseS2044,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadHandleLeaseV1TestCaseS2046,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadHandleLeaseV1TestCaseS2059,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadHandleLeaseV1TestCaseS224,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadHandleLeaseV1TestCaseS275,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadHandleLeaseV1TestCaseS315,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadHandleLeaseV1TestCaseS366,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadHandleLeaseV1TestCaseS406,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadHandleLeaseV1TestCaseS446,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadHandleLeaseV1TestCaseS470,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadHandleLeaseV1TestCaseS494,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadHandleLeaseV1TestCaseS534,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadHandleLeaseV1TestCaseS574,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadHandleLeaseV1TestCaseS614,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadHandleLeaseV1TestCaseS648,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadHandleLeaseV1TestCaseS682,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadHandleLeaseV1TestCaseS714,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadHandleLeaseV1TestCaseS738,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadHandleLeaseV1TestCaseS75,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadHandleLeaseV1TestCaseS762,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadHandleLeaseV1TestCaseS794,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadHandleLeaseV1TestCaseS834,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadHandleLeaseV1TestCaseS858,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadHandleLeaseV1TestCaseS882,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadHandleLeaseV1TestCaseS906,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadHandleLeaseV1TestCaseS930,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadHandleLeaseV1TestCaseS954,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadHandleLeaseV1TestCaseS985,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadHandleLeaseV2TestCaseS0,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadHandleLeaseV2TestCaseS135,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadHandleLeaseV2TestCaseS175,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadHandleLeaseV2TestCaseS215,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadHandleLeaseV2TestCaseS247,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadHandleLeaseV2TestCaseS279,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadHandleLeaseV2TestCaseS319,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadHandleLeaseV2TestCaseS359,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadHandleLeaseV2TestCaseS399,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadHandleLeaseV2TestCaseS439,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadHandleLeaseV2TestCaseS478,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV2TestCaseS513,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV2TestCaseS537,base,xfail,0,flaky: lease-break-handle model unstable (timing-sensitive)
-BreakReadHandleLeaseV2TestCaseS564,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV2TestCaseS595,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV2TestCaseS619,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV2TestCaseS643,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV2TestCaseS667,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV2TestCaseS691,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV2TestCaseS723,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV2TestCaseS742,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV2TestCaseS763,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV2TestCaseS776,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV2TestCaseS789,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV2TestCaseS802,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV2TestCaseS823,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV2TestCaseS84,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV2TestCaseS843,base,xfail,0,flaky: lease-break-handle model unstable (timing-sensitive)
-BreakReadHandleLeaseV2TestCaseS859,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV2TestCaseS872,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV2TestCaseS885,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV2TestCaseS898,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV2TestCaseS911,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV2TestCaseS924,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV2TestCaseS937,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV2TestCaseS950,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV2TestCaseS963,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadHandleLeaseV2TestCaseS976,base,xfail,0,lease-break handle model: break not delivered as modeled
+BreakReadHandleLeaseV1TestCaseS0,base,green,0,
+BreakReadHandleLeaseV1TestCaseS1009,base,green,0,
+BreakReadHandleLeaseV1TestCaseS1033,base,green,0,
+BreakReadHandleLeaseV1TestCaseS1065,base,green,0,
+BreakReadHandleLeaseV1TestCaseS1105,base,green,0,
+BreakReadHandleLeaseV1TestCaseS1144,base,green,0,
+BreakReadHandleLeaseV1TestCaseS1171,base,green,0,
+BreakReadHandleLeaseV1TestCaseS1205,base,green,0,
+BreakReadHandleLeaseV1TestCaseS1245,base,green,0,
+BreakReadHandleLeaseV1TestCaseS1277,base,green,0,
+BreakReadHandleLeaseV1TestCaseS1301,base,green,0,
+BreakReadHandleLeaseV1TestCaseS1333,base,green,0,
+BreakReadHandleLeaseV1TestCaseS1365,base,green,0,
+BreakReadHandleLeaseV1TestCaseS1389,base,green,0,
+BreakReadHandleLeaseV1TestCaseS1413,base,green,0,
+BreakReadHandleLeaseV1TestCaseS144,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadHandleLeaseV1TestCaseS1445,base,green,0,
+BreakReadHandleLeaseV1TestCaseS1469,base,green,0,
+BreakReadHandleLeaseV1TestCaseS1493,base,green,0,
+BreakReadHandleLeaseV1TestCaseS1517,base,green,0,
+BreakReadHandleLeaseV1TestCaseS1538,base,green,0,
+BreakReadHandleLeaseV1TestCaseS1570,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadHandleLeaseV1TestCaseS1591,base,green,0,
+BreakReadHandleLeaseV1TestCaseS1611,base,green,0,
+BreakReadHandleLeaseV1TestCaseS1624,base,green,0,
+BreakReadHandleLeaseV1TestCaseS1637,base,green,0,
+BreakReadHandleLeaseV1TestCaseS1650,base,green,0,
+BreakReadHandleLeaseV1TestCaseS1663,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadHandleLeaseV1TestCaseS1676,base,green,0,
+BreakReadHandleLeaseV1TestCaseS1697,base,green,0,
+BreakReadHandleLeaseV1TestCaseS1710,base,green,0,
+BreakReadHandleLeaseV1TestCaseS1723,base,green,0,
+BreakReadHandleLeaseV1TestCaseS1736,base,green,0,
+BreakReadHandleLeaseV1TestCaseS1752,base,xfail,0,lease-break ack on already-settled break returns STATUS_UNSUCCESSFUL
+BreakReadHandleLeaseV1TestCaseS1765,base,green,0,
+BreakReadHandleLeaseV1TestCaseS1778,base,green,0,
+BreakReadHandleLeaseV1TestCaseS1799,base,green,0,
+BreakReadHandleLeaseV1TestCaseS1820,base,green,0,
+BreakReadHandleLeaseV1TestCaseS184,base,green,0,
+BreakReadHandleLeaseV1TestCaseS1841,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadHandleLeaseV1TestCaseS1862,base,green,0,
+BreakReadHandleLeaseV1TestCaseS1878,base,green,0,
+BreakReadHandleLeaseV1TestCaseS1898,base,green,0,
+BreakReadHandleLeaseV1TestCaseS1911,base,green,0,
+BreakReadHandleLeaseV1TestCaseS1924,base,green,0,
+BreakReadHandleLeaseV1TestCaseS1937,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadHandleLeaseV1TestCaseS1950,base,green,0,
+BreakReadHandleLeaseV1TestCaseS1971,base,green,0,
+BreakReadHandleLeaseV1TestCaseS1992,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadHandleLeaseV1TestCaseS2005,base,green,0,
+BreakReadHandleLeaseV1TestCaseS2018,base,green,0,
+BreakReadHandleLeaseV1TestCaseS2031,base,green,0,
+BreakReadHandleLeaseV1TestCaseS2044,base,green,0,
+BreakReadHandleLeaseV1TestCaseS2046,base,green,0,
+BreakReadHandleLeaseV1TestCaseS2059,base,xfail,0,lease-break ack on already-settled break returns STATUS_UNSUCCESSFUL
+BreakReadHandleLeaseV1TestCaseS224,base,green,0,
+BreakReadHandleLeaseV1TestCaseS275,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadHandleLeaseV1TestCaseS315,base,green,0,
+BreakReadHandleLeaseV1TestCaseS366,base,green,0,
+BreakReadHandleLeaseV1TestCaseS406,base,green,0,
+BreakReadHandleLeaseV1TestCaseS446,base,green,0,
+BreakReadHandleLeaseV1TestCaseS470,base,green,0,
+BreakReadHandleLeaseV1TestCaseS494,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadHandleLeaseV1TestCaseS534,base,green,0,
+BreakReadHandleLeaseV1TestCaseS574,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadHandleLeaseV1TestCaseS614,base,green,0,
+BreakReadHandleLeaseV1TestCaseS648,base,green,0,
+BreakReadHandleLeaseV1TestCaseS682,base,green,0,
+BreakReadHandleLeaseV1TestCaseS714,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadHandleLeaseV1TestCaseS738,base,green,0,
+BreakReadHandleLeaseV1TestCaseS75,base,green,0,
+BreakReadHandleLeaseV1TestCaseS762,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadHandleLeaseV1TestCaseS794,base,green,0,
+BreakReadHandleLeaseV1TestCaseS834,base,green,0,
+BreakReadHandleLeaseV1TestCaseS858,base,green,0,
+BreakReadHandleLeaseV1TestCaseS882,base,green,0,
+BreakReadHandleLeaseV1TestCaseS906,base,green,0,
+BreakReadHandleLeaseV1TestCaseS930,base,xfail,0,lease-break ack on already-settled break returns STATUS_UNSUCCESSFUL
+BreakReadHandleLeaseV1TestCaseS954,base,green,0,
+BreakReadHandleLeaseV1TestCaseS985,base,green,0,
+BreakReadHandleLeaseV2TestCaseS0,base,green,0,
+BreakReadHandleLeaseV2TestCaseS135,base,green,0,
+BreakReadHandleLeaseV2TestCaseS175,base,green,0,
+BreakReadHandleLeaseV2TestCaseS215,base,green,0,
+BreakReadHandleLeaseV2TestCaseS247,base,green,0,
+BreakReadHandleLeaseV2TestCaseS279,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadHandleLeaseV2TestCaseS319,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadHandleLeaseV2TestCaseS359,base,green,0,
+BreakReadHandleLeaseV2TestCaseS399,base,green,0,
+BreakReadHandleLeaseV2TestCaseS439,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadHandleLeaseV2TestCaseS478,base,green,0,
+BreakReadHandleLeaseV2TestCaseS513,base,green,0,
+BreakReadHandleLeaseV2TestCaseS537,base,green,0,
+BreakReadHandleLeaseV2TestCaseS564,base,green,0,
+BreakReadHandleLeaseV2TestCaseS595,base,green,0,
+BreakReadHandleLeaseV2TestCaseS619,base,green,0,
+BreakReadHandleLeaseV2TestCaseS643,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadHandleLeaseV2TestCaseS667,base,green,0,
+BreakReadHandleLeaseV2TestCaseS691,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadHandleLeaseV2TestCaseS723,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadHandleLeaseV2TestCaseS742,base,green,0,
+BreakReadHandleLeaseV2TestCaseS763,base,green,0,
+BreakReadHandleLeaseV2TestCaseS776,base,green,0,
+BreakReadHandleLeaseV2TestCaseS789,base,green,0,
+BreakReadHandleLeaseV2TestCaseS802,base,green,0,
+BreakReadHandleLeaseV2TestCaseS823,base,green,0,
+BreakReadHandleLeaseV2TestCaseS84,base,green,0,
+BreakReadHandleLeaseV2TestCaseS843,base,green,0,
+BreakReadHandleLeaseV2TestCaseS859,base,green,0,
+BreakReadHandleLeaseV2TestCaseS872,base,green,0,
+BreakReadHandleLeaseV2TestCaseS885,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadHandleLeaseV2TestCaseS898,base,green,0,
+BreakReadHandleLeaseV2TestCaseS911,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadHandleLeaseV2TestCaseS924,base,green,0,
+BreakReadHandleLeaseV2TestCaseS937,base,green,0,
+BreakReadHandleLeaseV2TestCaseS950,base,green,0,
+BreakReadHandleLeaseV2TestCaseS963,base,green,0,
+BreakReadHandleLeaseV2TestCaseS976,base,green,0,
 BreakReadLeaseV1TestCaseS0,base,green,0,
 BreakReadLeaseV1TestCaseS114,base,xfail,0,executed but fails (candidate defect)
 BreakReadLeaseV1TestCaseS130,base,green,0,
@@ -253,173 +253,173 @@ BreakReadLeaseV2TestCaseS30,base,green,0,
 BreakReadLeaseV2TestCaseS51,base,green,0,
 BreakReadLeaseV2TestCaseS67,base,green,0,
 BreakReadLeaseV2TestCaseS83,base,xfail,0,executed but fails (candidate defect)
-BreakReadWriteHandleLeaseV1TestCaseS0,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadWriteHandleLeaseV1TestCaseS1001,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadWriteHandleLeaseV1TestCaseS1054,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadWriteHandleLeaseV1TestCaseS1102,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadWriteHandleLeaseV1TestCaseS1138,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadWriteHandleLeaseV1TestCaseS1182,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadWriteHandleLeaseV1TestCaseS1229,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadWriteHandleLeaseV1TestCaseS1261,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadWriteHandleLeaseV1TestCaseS1300,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadWriteHandleLeaseV1TestCaseS1336,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadWriteHandleLeaseV1TestCaseS1368,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadWriteHandleLeaseV1TestCaseS1407,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadWriteHandleLeaseV1TestCaseS1439,base,xfail,0,flaky: lease-break-handle model unstable (timing-sensitive)
-BreakReadWriteHandleLeaseV1TestCaseS1478,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadWriteHandleLeaseV1TestCaseS1510,base,xfail,0,flaky: lease-break-handle model unstable (timing-sensitive)
-BreakReadWriteHandleLeaseV1TestCaseS1542,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadWriteHandleLeaseV1TestCaseS1578,base,xfail,0,flaky: lease-break-handle model unstable (timing-sensitive)
-BreakReadWriteHandleLeaseV1TestCaseS1635,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadWriteHandleLeaseV1TestCaseS1675,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadWriteHandleLeaseV1TestCaseS1723,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadWriteHandleLeaseV1TestCaseS1763,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadWriteHandleLeaseV1TestCaseS1807,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadWriteHandleLeaseV1TestCaseS184,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadWriteHandleLeaseV1TestCaseS1856,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadWriteHandleLeaseV1TestCaseS1896,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadWriteHandleLeaseV1TestCaseS1936,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadWriteHandleLeaseV1TestCaseS1972,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS2008,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS2036,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS2068,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS2104,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS2140,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS2187,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS2227,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS2266,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS2306,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS232,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS2345,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS2380,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS2412,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS2452,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS2484,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS2520,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS2552,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS2588,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS2624,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS2656,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS2692,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS2728,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS2768,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS2792,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS280,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS2828,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS2868,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS2900,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS2916,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS2952,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS2988,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS3032,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS3064,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS3088,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS3124,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS3167,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS3207,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS3246,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS3290,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS3322,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS333,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS3361,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS3397,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS3432,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS3472,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS3504,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS3536,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS3572,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS3608,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS3640,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS3676,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS3712,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS3752,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS3780,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS3812,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS3836,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS3872,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS390,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS3900,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS3924,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS3933,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS3935,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS434,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS482,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS530,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS583,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS640,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS684,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS728,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS772,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS812,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS877,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS921,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS95,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV1TestCaseS961,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV2TestCaseS0,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV2TestCaseS1020,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV2TestCaseS1052,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV2TestCaseS1084,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV2TestCaseS1116,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV2TestCaseS1140,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV2TestCaseS1183,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV2TestCaseS1222,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV2TestCaseS1258,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV2TestCaseS1298,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV2TestCaseS130,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV2TestCaseS1338,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV2TestCaseS1366,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV2TestCaseS1393,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV2TestCaseS1410,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV2TestCaseS1427,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV2TestCaseS1444,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV2TestCaseS1461,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV2TestCaseS1478,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV2TestCaseS1503,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV2TestCaseS1528,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV2TestCaseS1553,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV2TestCaseS1577,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV2TestCaseS1594,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV2TestCaseS1614,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV2TestCaseS1631,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV2TestCaseS1648,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV2TestCaseS1665,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV2TestCaseS1682,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV2TestCaseS1707,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV2TestCaseS1724,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV2TestCaseS1741,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV2TestCaseS1758,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV2TestCaseS1779,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV2TestCaseS1800,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV2TestCaseS1821,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV2TestCaseS1842,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV2TestCaseS1866,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV2TestCaseS1875,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV2TestCaseS1892,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV2TestCaseS1901,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV2TestCaseS1922,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV2TestCaseS1943,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV2TestCaseS195,base,xfail,0,hang: lease-break handle model times out (>900s)
-BreakReadWriteHandleLeaseV2TestCaseS1964,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadWriteHandleLeaseV2TestCaseS1973,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadWriteHandleLeaseV2TestCaseS243,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadWriteHandleLeaseV2TestCaseS291,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadWriteHandleLeaseV2TestCaseS344,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadWriteHandleLeaseV2TestCaseS388,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadWriteHandleLeaseV2TestCaseS432,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadWriteHandleLeaseV2TestCaseS480,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadWriteHandleLeaseV2TestCaseS520,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadWriteHandleLeaseV2TestCaseS560,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadWriteHandleLeaseV2TestCaseS600,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadWriteHandleLeaseV2TestCaseS636,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadWriteHandleLeaseV2TestCaseS676,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadWriteHandleLeaseV2TestCaseS720,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadWriteHandleLeaseV2TestCaseS763,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadWriteHandleLeaseV2TestCaseS795,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadWriteHandleLeaseV2TestCaseS834,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadWriteHandleLeaseV2TestCaseS873,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadWriteHandleLeaseV2TestCaseS905,base,xfail,0,flaky: lease-break-handle model unstable (timing-sensitive)
-BreakReadWriteHandleLeaseV2TestCaseS940,base,xfail,0,lease-break handle model: break not delivered as modeled
-BreakReadWriteHandleLeaseV2TestCaseS980,base,xfail,0,lease-break handle model: break not delivered as modeled
+BreakReadWriteHandleLeaseV1TestCaseS0,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS1001,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS1054,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS1102,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS1138,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS1182,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS1229,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS1261,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS1300,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV1TestCaseS1336,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS1368,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS1407,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS1439,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS1478,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS1510,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS1542,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV1TestCaseS1578,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS1635,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV1TestCaseS1675,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS1723,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS1763,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS1807,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS184,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS1856,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS1896,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV1TestCaseS1936,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV1TestCaseS1972,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV1TestCaseS2008,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS2036,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV1TestCaseS2068,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS2104,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS2140,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS2187,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV1TestCaseS2227,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV1TestCaseS2266,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS2306,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS232,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV1TestCaseS2345,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS2380,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS2412,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS2452,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV1TestCaseS2484,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS2520,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV1TestCaseS2552,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS2588,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS2624,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS2656,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS2692,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS2728,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS2768,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV1TestCaseS2792,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV1TestCaseS280,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS2828,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV1TestCaseS2868,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS2900,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS2916,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS2952,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS2988,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS3032,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV1TestCaseS3064,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS3088,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV1TestCaseS3124,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS3167,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS3207,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS3246,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS3290,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS3322,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV1TestCaseS333,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS3361,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS3397,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV1TestCaseS3432,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS3472,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS3504,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS3536,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS3572,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS3608,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS3640,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV1TestCaseS3676,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV1TestCaseS3712,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV1TestCaseS3752,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS3780,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS3812,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS3836,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS3872,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS390,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS3900,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS3924,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS3933,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS3935,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS434,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV1TestCaseS482,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS530,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS583,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS640,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS684,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS728,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS772,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS812,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS877,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS921,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV1TestCaseS95,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV1TestCaseS961,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS0,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS1020,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV2TestCaseS1052,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS1084,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS1116,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS1140,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS1183,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS1222,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS1258,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS1298,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV2TestCaseS130,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS1338,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV2TestCaseS1366,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV2TestCaseS1393,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS1410,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS1427,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS1444,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS1461,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS1478,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV2TestCaseS1503,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS1528,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV2TestCaseS1553,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS1577,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS1594,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS1614,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV2TestCaseS1631,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS1648,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS1665,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV2TestCaseS1682,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS1707,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS1724,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS1741,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS1758,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS1779,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV2TestCaseS1800,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV2TestCaseS1821,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS1842,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS1866,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS1875,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS1892,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS1901,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV2TestCaseS1922,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV2TestCaseS1943,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV2TestCaseS195,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS1964,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS1973,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS243,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV2TestCaseS291,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV2TestCaseS344,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS388,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV2TestCaseS432,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS480,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS520,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS560,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS600,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS636,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS676,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS720,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV2TestCaseS763,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV2TestCaseS795,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS834,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS873,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS905,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS940,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS980,base,green,0,
 BreakReadWriteLeaseV1TestCaseS0,base,green,0,
 BreakReadWriteLeaseV1TestCaseS1006,base,green,0,
 BreakReadWriteLeaseV1TestCaseS1023,base,green,0,
