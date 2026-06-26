@@ -8,6 +8,8 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
+#include <fcntl.h>
+#include <errno.h>
 #include <unistd.h>
 #include <jansson.h>
 #include <openssl/pem.h>
@@ -108,11 +110,39 @@ generate_self_signed_cert(
         goto cleanup;
     }
 
-    /* Write private key */
-    fp = fopen(key_path, "w");
-    if (!fp) {
-        chimera_server_error("Failed to open key file: %s", key_path);
-        goto cleanup;
+    /*
+     * Write the private key with owner-only (0600) permissions.  The daemon
+     * runs with umask(0) (so client file modes on the data path apply
+     * verbatim), which means fopen("w") would create this control-plane RSA
+     * private key world-readable AND world-writable (mode 0666) -- CWE-276
+     * (Incorrect Default Permissions).  Create the file explicitly with
+     * O_CREAT|O_EXCL|0600 so the mode is enforced regardless of umask and so a
+     * pre-existing (potentially attacker-planted) file in the world-writable
+     * /tmp path is rejected rather than overwritten (CWE-377).
+     */
+    {
+        int key_fd = open(key_path, O_WRONLY | O_CREAT | O_EXCL, 0600);
+
+        if (key_fd < 0) {
+            chimera_server_error("Failed to open key file: %s (%s)",
+                                 key_path, strerror(errno));
+            goto cleanup;
+        }
+
+        /* Belt-and-suspenders: enforce 0600 explicitly (defense in depth). */
+        if (fchmod(key_fd, 0600) < 0) {
+            chimera_server_error("Failed to set key file permissions: %s (%s)",
+                                 key_path, strerror(errno));
+            close(key_fd);
+            goto cleanup;
+        }
+
+        fp = fdopen(key_fd, "w");
+        if (!fp) {
+            chimera_server_error("Failed to open key file stream: %s", key_path);
+            close(key_fd);
+            goto cleanup;
+        }
     }
     PEM_write_PrivateKey(fp, pkey, NULL, NULL, 0, NULL, NULL);
     fclose(fp);
