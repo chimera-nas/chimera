@@ -4835,13 +4835,43 @@ build_dhnq_response(
     return 8;
 } /* build_dhnq_response */
 
+/* Build the QFid (SMB2_CREATE_QUERY_ON_DISK_ID) response body.  32 bytes:
+ * DiskFileId(8) | VolumeId(8) | Reserved(16) (MS-SMB2 2.2.14.2.9).  The
+ * DiskFileId must be stable across opens of the same file and unique per file;
+ * the VFS file-handle hash (a 64-bit hash of the persistent file handle) is
+ * exactly such an identifier.  VolumeId/Reserved are left zero -- the client
+ * treats the 32 bytes opaquely (it only checks same-file equality and
+ * cross-file inequality). */
+static int
+build_qfid_response(
+    struct chimera_smb_request *request,
+    uint8_t                    *out,
+    uint32_t                    out_size)
+{
+    struct chimera_smb_open_file *of = request->create.r_open_file;
+    uint64_t                      disk_id;
+    int                           i;
+
+    if (out_size < 32 || !of || !of->handle) {
+        return -1;
+    }
+
+    disk_id = of->handle->fh_hash;
+
+    memset(out, 0, 32);
+    for (i = 0; i < 8; i++) {
+        out[i] = (disk_id >> (8 * i)) & 0xff;  /* DiskFileId, little-endian */
+    }
+    return 32;
+} /* build_qfid_response */
+
 /* *INDENT-OFF* */ /* uncrustify oscillates on aligned struct-init tables */
 static const struct chimera_smb_create_response_emitter smb_create_response_emitters[] = {
     { CHIMERA_SMB_CREATE_CTX_MXAC, "MxAc", build_mxac_response  },
     { CHIMERA_SMB_CREATE_CTX_RQLS, "RqLs", build_rqls_response  },
     { CHIMERA_SMB_CREATE_CTX_DH2Q, "DH2Q", build_dh2q_response  },
     { CHIMERA_SMB_CREATE_CTX_DHNQ, "DHnQ", build_dhnq_response  },
-    /* Phase 8: + QFid (32-byte on-disk id) */
+    { CHIMERA_SMB_CREATE_CTX_QFID, "QFid", build_qfid_response  },
     { 0,                           NULL,   NULL                },
 };
 /* *INDENT-ON* */
