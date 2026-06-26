@@ -3825,6 +3825,26 @@ memfs_copy_range(
         return;
     }
 
+    /* Range copy is only defined between regular files.  The inode's block fork
+     * (inode->file) shares a union with the directory dirent tree (inode->dir)
+     * and the symlink target, so treating a non-regular inode as a file here
+     * would scribble over that other union member and corrupt the heap (a
+     * directory destination with FILE_DELETE_ON_CLOSE then double-frees its
+     * dirent tree on teardown).  Reject a directory with EISDIR (the SMB
+     * copychunk path maps it to STATUS_INVALID_DEVICE_REQUEST) and any other
+     * non-regular type with EINVAL. */
+    if (S_ISDIR(src_inode->mode) || S_ISDIR(dst_inode->mode)) {
+        request->status = CHIMERA_VFS_EISDIR;
+        request->complete(request);
+        return;
+    }
+
+    if (!S_ISREG(src_inode->mode) || !S_ISREG(dst_inode->mode)) {
+        request->status = CHIMERA_VFS_EINVAL;
+        request->complete(request);
+        return;
+    }
+
     src_offset = request->copy_range.src_offset;
     dst_offset = request->copy_range.dst_offset;
     length     = request->copy_range.length;

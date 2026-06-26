@@ -827,6 +827,10 @@ struct chimera_smb_request {
             uint32_t                        cc_chunk_count;
             uint32_t                        cc_chunk_idx;
             uint32_t                        cc_chunks_written;
+            /* SRV_COPYCHUNK_RESPONSE.ChunkBytesWritten: 0 on success, but on a
+             * limit violation it carries MaxChunkSize so the client resubmits
+             * within bounds (MS-SMB2 3.3.5.15.6). */
+            uint32_t                        cc_chunk_bytes;
             uint64_t                        cc_total_written;
             /* Source file size, fetched before copying so an out-of-range chunk
              * (src_offset + length beyond EOF) can be rejected with
