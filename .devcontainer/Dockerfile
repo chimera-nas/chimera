@@ -13,11 +13,17 @@ ARG ENABLE_CLAUDE=1
 ARG ENABLE_CODEX=1
 ARG ENABLE_UV=1
 ARG ENABLE_WPTS=1
+ARG ENABLE_PIKE=1
 # Pinned to an exact chimera-nas/pynfs commit (on branch chimera-fast-ci).  Using
 # a SHA rather than a moving branch makes the image reproducible and, critically,
 # busts the Docker layer cache whenever pynfs is bumped -- otherwise the cached
 # clone layer keeps shipping a stale pynfs.  Bump this SHA when pynfs changes.
 ARG PYNFS_REF=b861f7b8211b4dc798b88a7e81b300fb4615189c
+# Pinned chimera-nas/pike commit.  pike is a pure-Python SMB2/3 protocol test
+# framework (the SMB analog of pynfs); the MS-SMB2 pike ctests run it host-side
+# in a netns against the chimera daemon.  SHA-pinned for the same reason as
+# pynfs: reproducible image + cache-bust on bump.
+ARG PIKE_REF=bcbb343c5bfb7dd3198d2d79d7381dfdad0f0873
 # Pinned Microsoft Windows Protocol Test Suites (WPTS) FileServer release.
 ARG WPTS_VERSION=4.26.3.0
 ARG ELBENCHO_REF=96b1bf29c35e437715c0527194e69e4c96ed9922
@@ -114,6 +120,19 @@ RUN apt-get -y update && \
     git clone https://github.com/chimera-nas/pynfs.git /opt/pynfs && \
     cd /opt/pynfs && git checkout "$PYNFS_REF" && python3 ./setup.py build && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# pike: a pure-Python SMB2/3 protocol correctness test framework (the SMB analog
+# of pynfs). Cloned at a pinned SHA and run from source via PYTHONPATH=/opt/pike/src
+# (the pike_smb_test_wrapper.sh sets it), exactly like pynfs runs from /opt/pynfs.
+# We deliberately do NOT `pip install` it: that would compile the OPTIONAL
+# pike.kerberos C extension (needs python3-dev + gssapi headers), and the chimera
+# pike ctests authenticate over pure-Python NTLM (PIKE_CREDS), so Kerberos is
+# unneeded. Instead we install only pike's pure-Python runtime deps as wheels.
+RUN if [ "$ENABLE_PIKE" = "1" ] ; then \
+    pip3 install --break-system-packages pytest pytest-timeout pycryptodome pycryptodomex future six attrs && \
+    git clone https://github.com/chimera-nas/pike.git /opt/pike && \
+    cd /opt/pike && git checkout "$PIKE_REF" ; \
+    fi
 
 RUN if [ "$ENABLE_UV" = "1" ] ; then \
     curl -LsSf https://astral.sh/uv/install.sh | sh ; \

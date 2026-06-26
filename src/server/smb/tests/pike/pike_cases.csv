@@ -1,0 +1,188 @@
+case,home_config,status,skip_reason
+acl.py::SecTest::test_set_sec_dacl,base,xfail,ValueError: Invalid AclRevision: 1
+acl.py::SecTest::test_set_sec_dacl_append_ace,base,xfail,ValueError: Invalid AclRevision: 1
+acl.py::SecTest::test_set_sec_dacl_new,base,xfail,ValueError: Invalid AclRevision: 1
+acl.py::SecTest::test_set_sec_dacl_partial_copy,base,xfail,ValueError: Invalid AclRevision: 1
+acl.py::SecTest::test_set_sec_group,base,xfail,ValueError: Invalid AclRevision: 1
+acl.py::SecTest::test_set_sec_owner,base,xfail,ValueError: Invalid AclRevision: 1
+acl.py::SecTest::test_set_sec_same,base,xfail,ValueError: Invalid AclRevision: 1
+appinstanceid.py::AppInstanceIdTest::test_appinstanceid,persistent,green,
+appinstanceid.py::AppInstanceIdTest::test_appinstanceid_persistent_with_disconnect,persistent,xfail,daemon-crash
+appinstanceid.py::AppInstanceIdTest::test_appinstanceid_reconnect_same_clientguid,persistent,xfail,daemon-crash
+changenotify.py::ChangeNotifyTest::test_change_notify_cancel,base,green,
+changenotify.py::ChangeNotifyTest::test_change_notify_file_name,base,green,
+compound.py::CompoundTest::test_create_close,base,green,
+compound.py::CompoundTest::test_create_failed_and_query,base,green,
+compound.py::CompoundTest::test_create_query_close,base,green,
+compound.py::CompoundTest::test_create_write_close,base,green,
+compound.py::CompoundTest::test_create_write_close_access_denied,base,green,
+copychunk.py::TestServerSideCopy::test_bogus_resume_key,base,green,
+copychunk.py::TestServerSideCopy::test_copy_big_file,base,green,
+copychunk.py::TestServerSideCopy::test_copy_max_chunks,base,green,
+copychunk.py::TestServerSideCopy::test_copy_multiple_chunks,base,green,
+copychunk.py::TestServerSideCopy::test_copy_small_file,base,green,
+copychunk.py::TestServerSideCopy::test_copy_write_max_chunks,base,green,
+copychunk.py::TestServerSideCopy::test_copy_write_multiple_chunks,base,green,
+copychunk.py::TestServerSideCopy::test_copy_write_small_file,base,green,
+copychunk.py::TestServerSideCopy::test_multiple_resume_key,base,green,
+copychunk.py::TestServerSideCopy::test_multiple_ssc_file,base,green,
+copychunk.py::TestServerSideCopy::test_multiple_ssc_file_with_writethrough_flag,base,green,
+copychunk.py::TestServerSideCopy::test_multiple_ssc_same_dest_file,base,green,
+copychunk.py::TestServerSideCopy::test_multiple_ssc_same_source_file,base,green,
+copychunk.py::TestServerSideCopy::test_neg_cross_chunk_size,base,xfail,AssertionError: 0 != 1048576
+copychunk.py::TestServerSideCopy::test_neg_cross_chunk_size_allf,base,xfail,AssertionError: 0 != 1048576
+copychunk.py::TestServerSideCopy::test_neg_cross_max_chunks,base,xfail,pike.exceptions.TimeoutError: Timed out after 30 seconds Request: Smb2 credit_charge: 1 ch
+copychunk.py::TestServerSideCopy::test_neg_cross_offset_basic,base,green,
+copychunk.py::TestServerSideCopy::test_neg_cross_offset_fifth_chunk,base,green,
+copychunk.py::TestServerSideCopy::test_neg_cross_offset_second_chunk,base,green,
+copychunk.py::TestServerSideCopy::test_neg_cross_second_chunk_size,base,xfail,AssertionError: 0 != 1048576
+copychunk.py::TestServerSideCopy::test_neg_dst_exc_brl,base,green,
+copychunk.py::TestServerSideCopy::test_neg_dst_is_a_dir,base,xfail,daemon-crash
+copychunk.py::TestServerSideCopy::test_neg_dst_no_read,base,green,
+copychunk.py::TestServerSideCopy::test_neg_dst_no_write,base,green,
+copychunk.py::TestServerSideCopy::test_neg_src_exc_brl,base,green,
+copychunk.py::TestServerSideCopy::test_neg_src_no_read,base,green,
+copychunk.py::TestServerSideCopy::test_offset_copy_big_file,base,green,
+copychunk.py::TestServerSideCopy::test_offset_copy_multiple_chunks,base,green,
+copychunk.py::TestServerSideCopy::test_offset_copy_small_file,base,green,
+copychunk.py::TestServerSideCopy::test_other_resume_key,base,green,
+copychunk.py::TestServerSideCopy::test_overlap_15_chunks_4096_overlap,base,green,
+copychunk.py::TestServerSideCopy::test_overlap_16_chunks_1024_overlap,base,green,
+copychunk.py::TestServerSideCopy::test_overlap_multiple_chunks,base,green,
+copychunk.py::TestServerSideCopy::test_random_all,base,green,
+copychunk.py::TestServerSideCopy::test_random_chunk_size,base,green,
+copychunk.py::TestServerSideCopy::test_random_copy_length,base,green,
+copychunk.py::TestServerSideCopy::test_random_file_offset,base,green,
+copychunk.py::TestServerSideCopy::test_same_big_file,base,green,
+copychunk.py::TestServerSideCopy::test_same_multiple_chunks,base,green,
+copychunk.py::TestServerSideCopy::test_same_offset_big_file,base,green,
+copychunk.py::TestServerSideCopy::test_same_offset_multiple_chunks,base,green,
+copychunk.py::TestServerSideCopy::test_same_offset_small_file,base,green,
+copychunk.py::TestServerSideCopy::test_same_small_file,base,green,
+copychunk.py::TestServerSideCopy::test_ssc_in_compound_req,base,xfail,pike.exceptions.ResponseError: (SMB2_CLOSE; STATUS_FILE_CLOSED)
+copychunk.py::TestServerSideCopy::test_ssc_in_multchannel,base,green,
+credit.py::AsyncCreditTest::test_async_lock,base,xfail,AssertionError: 3 != 0
+credit.py::AsyncCreditTest::test_async_write,base,green,
+credit.py::EdgeCreditTest::test_sequence_number_wrap,base,green,
+credit.py::PowerOf2CreditTest::test_16_128k_write_2_1m_read,base,green,
+credit.py::PowerOf2CreditTest::test_16_128k_write_4_512k_read,base,green,
+credit.py::PowerOf2CreditTest::test_16_512k_write_8_1m_read,base,green,
+credit.py::PowerOf2CreditTest::test_16_64k_write_1_1m_read,base,green,
+credit.py::PowerOf2CreditTest::test_1_1m_write_1_1m_read,base,green,
+credit.py::PowerOf2CreditTest::test_4_1m_write_64_64k_read,base,green,
+credit.py::PowerOf2CreditTest::test_5_192k_write_1_960k_read,base,green,
+credit.py::PowerOf2CreditTest::test_8_1m_write_64_128k_read,base,green,
+durable.py::DurableHandleTest::test_durable,persistent,green,
+durable.py::DurableHandleTest::test_durable_invalidate,persistent,green,
+durable.py::DurableHandleTest::test_durable_reconnect,persistent,green,
+durable.py::DurableHandleTest::test_durable_reconnect_fails_client_guid,persistent,green,
+durable.py::DurableHandleTest::test_durable_reconnect_v2,persistent,green,
+durable.py::DurableHandleTest::test_durable_reconnect_v2_fails,persistent,xfail,AssertionError: No error raised when "STATUS_INVALID_PARAMETER" expected
+durable.py::DurableHandleTest::test_durable_reconnect_v2_fails_client_guid,persistent,green,
+durable.py::DurableHandleTest::test_durable_reconnect_without_durable_open,persistent,green,
+durable.py::DurableHandleTest::test_durable_v2,persistent,green,
+durable.py::DurableHandleTest::test_durable_v2_invalidate,persistent,green,
+durable.py::DurableHandleTest::test_durable_v2_timer,persistent,xfail,Failed: Timeout (>40.0s) from pytest-timeout.
+durable.py::DurableHandleTest::test_resiliency_buffer_too_small,persistent,green,
+durable.py::DurableHandleTest::test_resiliency_reconnect_after_timeout,persistent,green,
+durable.py::DurableHandleTest::test_resiliency_reconnect_before_timeout,persistent,xfail,AssertionError: SMB2_LEASE_READ_CACHING | SMB2_LEASE_WRITE_CACHING != SMB2_LEASE_READ_CACH
+durable.py::DurableHandleTest::test_resiliency_upgrade_buffer_too_small,persistent,green,
+durable.py::DurableHandleTest::test_resiliency_upgrade_reconnect_after_timeout,persistent,green,
+durable.py::DurableHandleTest::test_resiliency_upgrade_reconnect_before_timeout,persistent,xfail,AssertionError: SMB2_LEASE_READ_CACHING | SMB2_LEASE_WRITE_CACHING != SMB2_LEASE_READ_CACH
+echo.py::EchoTest::test_echo,base,green,
+encryption.py::TestEncryption::test_smb_3_0_2_encryption,encryption,green,
+encryption.py::TestEncryption::test_smb_3_0_encryption,encryption,green,
+encryption.py::TestEncryption::test_smb_3_1_1_compound,encryption,xfail,pike.core.BadPacket
+encryption.py::TestEncryption::test_smb_3_1_1_encryption_ccm,encryption,xfail,pike.core.BadPacket
+encryption.py::TestEncryption::test_smb_3_1_1_encryption_gcm,encryption,xfail,pike.core.BadPacket
+invalid_session.py::InvalidSessionTest::test_ioctl,base,green,
+invalid_session.py::InvalidSessionTest::test_logoff,base,green,
+invalid_session.py::InvalidSessionTest::test_oplock_break_ack,base,green,
+invalid_session.py::InvalidSessionTest::test_treeconnect,base,green,
+invalid_tree.py::InvalidTreeTest::test_ioctl,base,green,
+invalid_tree.py::InvalidTreeTest::test_oplock_break_ack,base,green,
+invalid_tree.py::InvalidTreeTest::test_treeconnect,base,green,
+ioctl.py::QueryNetworkInterfaceInfo::test_query_interface_info_smb3,persistent,green,
+ioctl.py::ValidateNegotiateInfo::test_validate_negotiate_smb3,base,green,
+lease.py::LeaseTest::test_lease_break_close_ack,base,green,
+lease.py::LeaseTest::test_lease_multiple_connections,base,green,
+lease.py::LeaseTest::test_lease_upgrade_break,base,green,
+lock.py::LockTest::test_allow_zero_byte_write,base,xfail,pike.exceptions.ResponseError: (SMB2_WRITE; STATUS_FILE_LOCK_CONFLICT)
+lock.py::LockTest::test_cancel,base,green,
+lock.py::LockTest::test_deny_write,base,green,
+lock.py::LockTest::test_lock,base,green,
+multichannel.py::MultiChannelTest::test_open_bind_close,base,green,
+multichannel.py::MultiChannelTest::test_write_fence_reject_stale,persistent,skip,pike-bug-assertEquals-removed-py3.12
+negotiate.py::CapMultichannel::test_downlevel,base,green,
+negotiate.py::CapMultichannel::test_downlevel_no_advert,base,green,
+negotiate.py::CapMultichannel::test_smb3,base,green,
+negotiate.py::CapMultichannel::test_smb3_many_capabilities,base,green,
+negotiate.py::CapMultichannel::test_smb3_no_advert,base,xfail,AssertionError: SMB2_GLOBAL_CAP_MULTI_CHANNEL != 0
+negotiate.py::CapMulticredit::test_downlevel,base,green,
+negotiate.py::CapMulticredit::test_smb21,base,green,
+negotiate.py::CapMulticredit::test_smb3,base,green,
+negotiate.py::CapMulticredit::test_smb3_many_capabilities,base,green,
+negotiate.py::CapPersistent::test_downlevel,base,green,
+negotiate.py::CapPersistent::test_downlevel_no_advert,base,green,
+negotiate.py::CapPersistent::test_smb3,persistent,green,
+negotiate.py::CapPersistent::test_smb3_many_capabilities,persistent,green,
+negotiate.py::CapPersistent::test_smb3_no_advert,base,green,
+negotiate.py::NegotiateContext::test_encryption_capabilities_both_prefer_ccm,base,xfail,AssertionError: SMB2_AES_128_CCM not found in [SMB2_AES_128_GCM]
+negotiate.py::NegotiateContext::test_encryption_capabilities_both_prefer_gcm,base,green,
+negotiate.py::NegotiateContext::test_encryption_capabilities_ccm,base,green,
+negotiate.py::NegotiateContext::test_encryption_capabilities_gcm,base,green,
+negotiate.py::NegotiateContext::test_preauth_integrity_capabilities,base,green,
+oplock.py::OplockTest::test_oplock_break,base,green,
+persistent.py::Persistent::test_buffer_too_small,persistent,xfail,AssertionError: "STATUS_INVALID_PARAMETER" raised when "STATUS_BUFFER_TOO_SMALL" expected
+persistent.py::Persistent::test_create,persistent,green,
+persistent.py::Persistent::test_open_while_disconnected,persistent,xfail,AssertionError: No error raised when "STATUS_FILE_NOT_AVAILABLE" expected
+persistent.py::Persistent::test_reconnect,persistent,green,
+persistent.py::Persistent::test_reconnect_fails,persistent,xfail,AssertionError: No error raised when "STATUS_OBJECT_NAME_NOT_FOUND" expected
+persistent.py::Persistent::test_resiliency_reconnect_after_timeout,persistent,green,
+persistent.py::Persistent::test_resiliency_reconnect_before_timeout,persistent,xfail,AssertionError: No error raised when "STATUS_FILE_NOT_AVAILABLE" expected
+persistent.py::Persistent::test_resiliency_same_timeout_reconnect_after_timeout,persistent,xfail,Failed: Timeout (>40.0s) from pytest-timeout.
+persistent.py::Persistent::test_resiliency_same_timeout_reconnect_before_timeout,persistent,xfail,AssertionError: No error raised when "STATUS_FILE_NOT_AVAILABLE" expected
+query.py::QueryTest::test_mismatch_0_file_alignment_info,base,green,
+query.py::QueryTest::test_mismatch_0_file_all_info,base,green,
+query.py::QueryTest::test_mismatch_0_file_basic_info,base,green,
+query.py::QueryTest::test_mismatch_0_file_ea_info,base,green,
+query.py::QueryTest::test_mismatch_0_file_internal_info,base,green,
+query.py::QueryTest::test_mismatch_0_file_mode_info,base,green,
+query.py::QueryTest::test_mismatch_0_file_position_info,base,green,
+query.py::QueryTest::test_mismatch_0_file_standard_info,base,green,
+query.py::QueryTest::test_query_file_alignment_info,base,green,
+query.py::QueryTest::test_query_file_all_info,base,xfail,ValueError: Invalid Alignment: fff
+query.py::QueryTest::test_query_file_basic_info,base,green,
+query.py::QueryTest::test_query_file_ea_info,base,green,
+query.py::QueryTest::test_query_file_internal_info,base,green,
+query.py::QueryTest::test_query_file_mode_info,base,green,
+query.py::QueryTest::test_query_file_position_info,base,green,
+query.py::QueryTest::test_query_file_sec_info_all,base,xfail,ValueError: Invalid AclRevision: 1
+query.py::QueryTest::test_query_file_sec_info_dacl,base,green,
+query.py::QueryTest::test_query_file_sec_info_group,base,green,
+query.py::QueryTest::test_query_file_sec_info_owner,base,green,
+query.py::QueryTest::test_query_file_standard_info,base,green,
+query.py::QueryTest::test_query_sec_desc_0,base,xfail,IndexError: list index out of range
+querydirectory.py::QueryDirectoryTest::test_file_directory_info,base,green,
+querydirectory.py::QueryDirectoryTest::test_file_id_both_directory_information,base,green,
+querydirectory.py::QueryDirectoryTest::test_restart_scan,base,green,
+querydirectory.py::QueryDirectoryTest::test_specific_name,base,green,
+queryondiskid.py::TestQueryOnDiskID::test_qfid_diff_file,base,xfail,AssertionError: unexpectedly None : CreateResponse didn't contain a QueryOnDiskIDResponse:
+queryondiskid.py::TestQueryOnDiskID::test_qfid_functional,base,xfail,AssertionError: unexpectedly None : CreateResponse didn't contain a QueryOnDiskIDResponse:
+queryondiskid.py::TestQueryOnDiskID::test_qfid_same_file,base,xfail,AssertionError: unexpectedly None : CreateResponse didn't contain a QueryOnDiskIDResponse:
+queryondiskid.py::TestQueryOnDiskID::test_qfid_same_file_seq,base,xfail,AssertionError: unexpectedly None : CreateResponse didn't contain a QueryOnDiskIDResponse:
+queryondiskid.py::TestQueryOnDiskID::test_qfid_same_file_seq_delete,base,xfail,AssertionError: unexpectedly None : CreateResponse didn't contain a QueryOnDiskIDResponse:
+readwrite.py::ReadWriteTest::test_write,base,green,
+readwrite.py::ReadWriteTest::test_write_none,base,green,
+readwrite.py::ReadWriteTest::test_write_none_access,base,green,
+readwrite.py::ReadWriteTest::test_write_none_lease,base,xfail,AssertionError: TimeoutError not raised
+readwrite.py::ReadWriteTest::test_write_none_oplock,base,xfail,AssertionError: TimeoutError not raised
+reparse.py::TestReparsePoint::test_set_get_reparse_point,base,xfail,pike.exceptions.ResponseError: (SMB2_IOCTL; STATUS_NOT_A_REPARSE_POINT)
+reparse.py::TestReparsePoint::test_symbolic_link_error_response,base,xfail,IndexError: list index out of range
+session.py::SessionTest::test_session_logoff,base,green,
+session.py::SessionTest::test_session_multiplex,base,green,
+set.py::SetTest::test_set_file_basic_info,base,green,
+set.py::SetTest::test_set_file_mode_info,base,xfail,pike.exceptions.ResponseError: (SMB2_SET_INFO; STATUS_NOT_IMPLEMENTED)
+set.py::SetTest::test_set_file_name,base,green,
+set.py::SetTest::test_set_file_position_info,base,green,
+tree.py::TreeTest::test_tree,base,green,
