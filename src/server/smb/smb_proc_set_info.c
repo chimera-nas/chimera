@@ -730,6 +730,14 @@ chimera_smb_set_info(struct chimera_smb_request *request)
                     chimera_smb_open_file_release(request, request->set_info.open_file);
                     chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
                     break;
+                case SMB2_FILE_MODE_INFO:
+                    /* FileModeInformation (MS-FSCC 2.4.26) is a single Mode DWORD
+                     * of per-handle I/O hints (write-through, sequential-only,
+                     * no-buffering, ...); chimera tracks none of them, so accept
+                     * the set and report success (pike set test_set_file_mode_info). */
+                    chimera_smb_open_file_release(request, request->set_info.open_file);
+                    chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+                    break;
                 default:
                     chimera_smb_error("SET_INFO info_class %u not implemented", request->set_info.info_class);
                     chimera_smb_open_file_release(request, request->set_info.open_file);
@@ -853,6 +861,15 @@ chimera_smb_parse_set_info(
                     break;
                 case SMB2_FILE_POSITION_INFO:
                     rc = chimera_smb_parse_position_info(request_cursor, &request->set_info.attrs);
+                    break;
+                case SMB2_FILE_MODE_INFO:
+                    /* FileModeInformation: a 4-byte Mode DWORD (MS-FSCC 2.4.26).
+                     * Nothing to capture (the flags are per-handle I/O hints we
+                     * do not track); just validate the length. */
+                    if (unlikely(request->set_info.buffer_length < SMB2_FILE_MODE_INFO_SIZE)) {
+                        return chimera_smb_parse_reject(request,
+                                                        SMB2_STATUS_INFO_LENGTH_MISMATCH);
+                    }
                     break;
 
                 default:

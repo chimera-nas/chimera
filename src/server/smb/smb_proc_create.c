@@ -3889,11 +3889,17 @@ chimera_smb_durable_reconnect_attempt(struct chimera_smb_request *request)
         lease_key = request->create.rqls.key;
     }
 
+    /* A DH2C reconnect that sets SMB2_DHANDLE_FLAG_PERSISTENT must target a
+     * persistent Open; the claim rejects it with INVALID_PARAMETER otherwise
+     * (MS-SMB2 3.3.5.9.12).  DHnC (v1) has no Flags field, so this is false. */
+    bool reconnect_persistent = (ctx & CHIMERA_SMB_CREATE_CTX_DH2C) &&
+        (request->create.dh2c.flags & SMB2_DHANDLE_FLAG_PERSISTENT);
+
     open_file = chimera_smb_durable_claim(shared, persistent_id, create_guid,
                                           request->compound->conn->client_guid,
                                           request->session_handle->session->cred.uid,
                                           request->create.name, request->create.name_len,
-                                          has_lease_ctx, lease_key,
+                                          has_lease_ctx, lease_key, reconnect_persistent,
                                           &cold, &retry, &status);
 
     if (cold) {

@@ -440,6 +440,7 @@ chimera_smb_durable_claim(
     uint32_t                          name_len,
     bool                              has_lease_ctx,
     const uint8_t                    *lease_key,
+    bool                              reconnect_persistent,
     bool                             *r_cold,
     bool                             *r_retry,
     uint32_t                         *status)
@@ -485,6 +486,11 @@ chimera_smb_durable_claim(
         *status = SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
     } else if (create_guid && memcmp(entry->create_guid, create_guid, 16) != 0) {
         *status = SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
+    } else if (reconnect_persistent && !entry->persistent) {
+        /* MS-SMB2 3.3.5.9.12: the reconnect set SMB2_DHANDLE_FLAG_PERSISTENT but
+         * the surviving Open is not persistent (Open.IsPersistent == FALSE) ->
+         * STATUS_INVALID_PARAMETER (pike durable test_durable_reconnect_v2_fails). */
+        *status = SMB2_STATUS_INVALID_PARAMETER;
     } else if ((had_lease || entry->persistent) && client_guid &&
                memcmp(entry->client_guid, client_guid, 16) != 0) {
         /* Reconnect from a different client.  MS-SMB2 3.3.5.9.7 binds the

@@ -59,9 +59,9 @@ copychunk.py::TestServerSideCopy::test_same_offset_big_file,base,green,
 copychunk.py::TestServerSideCopy::test_same_offset_multiple_chunks,base,green,
 copychunk.py::TestServerSideCopy::test_same_offset_small_file,base,green,
 copychunk.py::TestServerSideCopy::test_same_small_file,base,green,
-copychunk.py::TestServerSideCopy::test_ssc_in_compound_req,base,xfail,pike.exceptions.ResponseError: (SMB2_CLOSE; STATUS_FILE_CLOSED)
+copychunk.py::TestServerSideCopy::test_ssc_in_compound_req,base,green,
 copychunk.py::TestServerSideCopy::test_ssc_in_multchannel,persistent,green,
-credit.py::AsyncCreditTest::test_async_lock,base,xfail,AssertionError: 3 != 0
+credit.py::AsyncCreditTest::test_async_lock,base,xfail,async-final double-grants credits (fixable) AND over-credit write must terminate conn via seq-window (deeper); 2 fixes needed
 credit.py::AsyncCreditTest::test_async_write,base,green,
 credit.py::EdgeCreditTest::test_sequence_number_wrap,base,green,
 credit.py::PowerOf2CreditTest::test_16_128k_write_2_1m_read,base,green,
@@ -77,7 +77,7 @@ durable.py::DurableHandleTest::test_durable_invalidate,persistent,green,
 durable.py::DurableHandleTest::test_durable_reconnect,persistent,green,
 durable.py::DurableHandleTest::test_durable_reconnect_fails_client_guid,persistent,green,
 durable.py::DurableHandleTest::test_durable_reconnect_v2,persistent,green,
-durable.py::DurableHandleTest::test_durable_reconnect_v2_fails,persistent,xfail,"AssertionError: No error raised when ""STATUS_INVALID_PARAMETER"" expected"
+durable.py::DurableHandleTest::test_durable_reconnect_v2_fails,persistent,green,
 durable.py::DurableHandleTest::test_durable_reconnect_v2_fails_client_guid,persistent,green,
 durable.py::DurableHandleTest::test_durable_reconnect_without_durable_open,persistent,green,
 durable.py::DurableHandleTest::test_durable_v2,persistent,green,
@@ -182,7 +182,7 @@ reparse.py::TestReparsePoint::test_symbolic_link_error_response,base,xfail,Index
 session.py::SessionTest::test_session_logoff,base,green,
 session.py::SessionTest::test_session_multiplex,base,green,
 set.py::SetTest::test_set_file_basic_info,base,green,
-set.py::SetTest::test_set_file_mode_info,base,xfail,pike.exceptions.ResponseError: (SMB2_SET_INFO; STATUS_NOT_IMPLEMENTED)
+set.py::SetTest::test_set_file_mode_info,base,green,
 set.py::SetTest::test_set_file_name,base,green,
 set.py::SetTest::test_set_file_position_info,base,green,
 tree.py::TreeTest::test_tree,base,green,
