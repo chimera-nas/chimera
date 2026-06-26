@@ -632,10 +632,13 @@ chimera_smb_close(struct chimera_smb_request *request)
 
         /* Named-pipe FIDs carry handle==NULL; fall through to the zero-attrs
          * path rather than dereferencing NULL in getattr (MS-SMB2 3.3.5.10). */
+        /* The POSTQUERY response is FILE_NETWORK_OPEN_INFORMATION whose first
+         * field is CreationTime (BTIME).  MASK_STAT deliberately omits BTIME, so
+         * request it explicitly or CreationTime is emitted as 0 (issue #1117). */
         chimera_vfs_getattr(thread->vfs_thread,
                             &request->session_handle->session->cred,
                             request->close.open_file->handle,
-                            CHIMERA_VFS_ATTR_MASK_STAT,
+                            CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_BTIME,
                             chimera_smb_close_getattr_callback,
                             request);
 
