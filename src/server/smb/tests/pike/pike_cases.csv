@@ -82,7 +82,7 @@ durable.py::DurableHandleTest::test_durable_reconnect_v2_fails_client_guid,persi
 durable.py::DurableHandleTest::test_durable_reconnect_without_durable_open,persistent,green,
 durable.py::DurableHandleTest::test_durable_v2,persistent,green,
 durable.py::DurableHandleTest::test_durable_v2_invalidate,persistent,green,
-durable.py::DurableHandleTest::test_durable_v2_timer,persistent,xfail,Failed: Timeout (>40.0s) from pytest-timeout.
+durable.py::DurableHandleTest::test_durable_v2_timer,persistent,xfail,passes but waits a real ~80s durable timer; too slow for the gated run
 durable.py::DurableHandleTest::test_resiliency_buffer_too_small,persistent,green,
 durable.py::DurableHandleTest::test_resiliency_reconnect_after_timeout,persistent,green,
 durable.py::DurableHandleTest::test_resiliency_reconnect_before_timeout,persistent,xfail,AssertionError: SMB2_LEASE_READ_CACHING | SMB2_LEASE_WRITE_CACHING != SMB2_LEASE_READ_CACH
@@ -107,7 +107,7 @@ ioctl.py::ValidateNegotiateInfo::test_validate_negotiate_smb3,base,green,
 lease.py::LeaseTest::test_lease_break_close_ack,base,green,
 lease.py::LeaseTest::test_lease_multiple_connections,base,green,
 lease.py::LeaseTest::test_lease_upgrade_break,base,green,
-lock.py::LockTest::test_allow_zero_byte_write,base,xfail,pike.exceptions.ResponseError: (SMB2_WRITE; STATUS_FILE_LOCK_CONFLICT)
+lock.py::LockTest::test_allow_zero_byte_write,base,green,
 lock.py::LockTest::test_cancel,base,green,
 lock.py::LockTest::test_deny_write,base,green,
 lock.py::LockTest::test_lock,base,green,
@@ -117,7 +117,7 @@ negotiate.py::CapMultichannel::test_downlevel,base,green,
 negotiate.py::CapMultichannel::test_downlevel_no_advert,base,green,
 negotiate.py::CapMultichannel::test_smb3,base,green,
 negotiate.py::CapMultichannel::test_smb3_many_capabilities,base,green,
-negotiate.py::CapMultichannel::test_smb3_no_advert,base,xfail,AssertionError: SMB2_GLOBAL_CAP_MULTI_CHANNEL != 0
+negotiate.py::CapMultichannel::test_smb3_no_advert,base,green,
 negotiate.py::CapMulticredit::test_downlevel,base,green,
 negotiate.py::CapMulticredit::test_smb21,base,green,
 negotiate.py::CapMulticredit::test_smb3,base,green,
@@ -140,7 +140,7 @@ persistent.py::Persistent::test_reconnect,persistent,green,
 persistent.py::Persistent::test_reconnect_fails,persistent,xfail,AssertionError: No error raised when "STATUS_OBJECT_NAME_NOT_FOUND" expected
 persistent.py::Persistent::test_resiliency_reconnect_after_timeout,persistent,green,
 persistent.py::Persistent::test_resiliency_reconnect_before_timeout,persistent,xfail,AssertionError: No error raised when "STATUS_FILE_NOT_AVAILABLE" expected
-persistent.py::Persistent::test_resiliency_same_timeout_reconnect_after_timeout,persistent,xfail,Failed: Timeout (>40.0s) from pytest-timeout.
+persistent.py::Persistent::test_resiliency_same_timeout_reconnect_after_timeout,persistent,xfail,passes but waits a real >90s resiliency timer; too slow for the gated run
 persistent.py::Persistent::test_resiliency_same_timeout_reconnect_before_timeout,persistent,xfail,AssertionError: No error raised when "STATUS_FILE_NOT_AVAILABLE" expected
 query.py::QueryTest::test_mismatch_0_file_alignment_info,base,green,
 query.py::QueryTest::test_mismatch_0_file_all_info,base,green,
@@ -175,8 +175,8 @@ queryondiskid.py::TestQueryOnDiskID::test_qfid_same_file_seq_delete,base,xfail,A
 readwrite.py::ReadWriteTest::test_write,base,green,
 readwrite.py::ReadWriteTest::test_write_none,base,green,
 readwrite.py::ReadWriteTest::test_write_none_access,base,green,
-readwrite.py::ReadWriteTest::test_write_none_lease,base,xfail,oplock/lease broken on a zero-length write (should be a no-op)
-readwrite.py::ReadWriteTest::test_write_none_oplock,base,xfail,oplock/lease broken on a zero-length write (should be a no-op)
+readwrite.py::ReadWriteTest::test_write_none_lease,base,green,
+readwrite.py::ReadWriteTest::test_write_none_oplock,base,xfail,delete-on-close unlinks on first of two DOC handles' close not last
 reparse.py::TestReparsePoint::test_set_get_reparse_point,base,xfail,pike.exceptions.ResponseError: (SMB2_IOCTL; STATUS_NOT_A_REPARSE_POINT)
 reparse.py::TestReparsePoint::test_symbolic_link_error_response,base,xfail,IndexError: list index out of range
 session.py::SessionTest::test_session_logoff,base,green,
