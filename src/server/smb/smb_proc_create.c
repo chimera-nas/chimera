@@ -236,10 +236,26 @@ chimera_smb_app_instance_force_close(
     struct chimera_server_smb_thread *thread,
     struct chimera_smb_open_file     *open_file)
 {
-    struct chimera_smb_tree      *tree = open_file->tree;
+    struct chimera_smb_tree      *tree;
     int                           bucket;
     bool                          unhashed = false;
     struct chimera_smb_open_file *to_free  = NULL;
+
+    /* A parked (disconnected durable/persistent) open is no longer in any tree's
+     * open_files hash -- chimera_smb_tree_free already HASH_DELETEd it and
+     * returned its tree to the free pool, leaving open_file->tree dangling at a
+     * recycled tree.  Taking the live-open path below (which locks that tree and
+     * HASH_DELETEs again) would double-delete a stale hash node on a recycled
+     * tree and crash.  Tear it down through the durable registry instead, the
+     * same way the grace-timer sweeper does -- and force the persistent case,
+     * since an AppInstanceId failover displaces even a persistent handle
+     * (MS-SMB2 3.3.5.9.7). */
+    if (open_file->flags & CHIMERA_SMB_OPEN_FILE_PARKED) {
+        return chimera_smb_durable_purge_parked(thread, open_file->file_id.pid,
+                                                true);
+    }
+
+    tree = open_file->tree;
 
     if (!tree) {
         return false;
@@ -449,7 +465,7 @@ chimera_smb_create_purge_parked_writers(
     chimera_vfs_state_put(vfs_state, file_state);
 
     for (i = 0; i < npids; i++) {
-        chimera_smb_durable_purge_parked(thread, pids[i]);
+        chimera_smb_durable_purge_parked(thread, pids[i], false);
     }
 } /* chimera_smb_create_purge_parked_writers */
 
@@ -923,7 +939,7 @@ chimera_smb_create_gen_open_file(
                 break;
             }
 
-            if (!chimera_smb_durable_purge_parked(thread, conflict_pid)) {
+            if (!chimera_smb_durable_purge_parked(thread, conflict_pid, false)) {
                 /* The durable holder is not parked yet.  If its owning connection
                 * is on its way out, the park (and the MS-SMB2 yield) is imminent
                 * but has not landed -- this is the disconnect-vs-conflicting-open

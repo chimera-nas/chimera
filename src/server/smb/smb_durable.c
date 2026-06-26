@@ -282,7 +282,8 @@ chimera_smb_durable_release_handle(
 SYMBOL_EXPORT bool
 chimera_smb_durable_purge_parked(
     struct chimera_server_smb_thread *thread,
-    uint64_t                          persistent_id)
+    uint64_t                          persistent_id,
+    bool                              include_persistent)
 {
     struct chimera_server_smb_shared *shared = thread->shared;
     struct chimera_smb_durable_entry *entry;
@@ -290,8 +291,8 @@ chimera_smb_durable_purge_parked(
 
     pthread_mutex_lock(&shared->durable.lock);
     HASH_FIND(hh, shared->durable.by_pid, &persistent_id, sizeof(persistent_id), entry);
-    if (entry && entry->parked && !entry->persistent && !entry->cold &&
-        entry->open_file) {
+    if (entry && entry->parked && (include_persistent || !entry->persistent) &&
+        !entry->cold && entry->open_file) {
         HASH_DELETE(hh, shared->durable.by_pid, entry);
         open_file = entry->open_file;
         free(entry);
