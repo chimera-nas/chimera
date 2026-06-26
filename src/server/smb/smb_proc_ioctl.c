@@ -1032,6 +1032,10 @@ chimera_smb_parse_ioctl(
                 /* NETWORK_RESILIENCY_REQUEST (MS-SMB2 2.2.31.3): Timeout(4) +
                  * Reserved(4). */
                 if (request->ioctl.input_count < 8) {
+                    /* A NETWORK_RESILIENCY_REQUEST shorter than 8 bytes is
+                     * rejected with STATUS_INVALID_PARAMETER (smb2.durable-v2
+                     * resiliency_buffer_too_small; pike's persistent suite wants
+                     * BUFFER_TOO_SMALL here but that is a OneFS-specific quirk). */
                     chimera_smb_error("LMR_REQUEST_RESILIENCY input too small (%u < 8)",
                                       request->ioctl.input_count);
                     return chimera_smb_parse_reject(request, SMB2_STATUS_INVALID_PARAMETER);

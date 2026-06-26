@@ -82,7 +82,7 @@ durable.py::DurableHandleTest::test_durable_reconnect_v2_fails_client_guid,persi
 durable.py::DurableHandleTest::test_durable_reconnect_without_durable_open,persistent,green,
 durable.py::DurableHandleTest::test_durable_v2,persistent,green,
 durable.py::DurableHandleTest::test_durable_v2_invalidate,persistent,green,
-durable.py::DurableHandleTest::test_durable_v2_timer,persistent,xfail,passes but waits a real ~80s durable timer; too slow for the gated run
+durable.py::DurableHandleTest::test_durable_v2_timer,persistent,green,
 durable.py::DurableHandleTest::test_resiliency_buffer_too_small,persistent,green,
 durable.py::DurableHandleTest::test_resiliency_reconnect_after_timeout,persistent,green,
 durable.py::DurableHandleTest::test_resiliency_reconnect_before_timeout,persistent,xfail,AssertionError: SMB2_LEASE_READ_CACHING | SMB2_LEASE_WRITE_CACHING != SMB2_LEASE_READ_CACH
@@ -133,14 +133,14 @@ negotiate.py::NegotiateContext::test_encryption_capabilities_ccm,base,green,
 negotiate.py::NegotiateContext::test_encryption_capabilities_gcm,base,green,
 negotiate.py::NegotiateContext::test_preauth_integrity_capabilities,base,green,
 oplock.py::OplockTest::test_oplock_break,base,green,
-persistent.py::Persistent::test_buffer_too_small,persistent,xfail,"AssertionError: ""STATUS_INVALID_PARAMETER"" raised when ""STATUS_BUFFER_TOO_SMALL"" expected"
+persistent.py::Persistent::test_buffer_too_small,persistent,xfail,wants OneFS BUFFER_TOO_SMALL for short resiliency FSCTL (chimera+durable suite use INVALID_PARAMETER); also cluster-A blocked
 persistent.py::Persistent::test_create,persistent,green,
 persistent.py::Persistent::test_open_while_disconnected,persistent,xfail,"AssertionError: No error raised when ""STATUS_FILE_NOT_AVAILABLE"" expected"
 persistent.py::Persistent::test_reconnect,persistent,green,
 persistent.py::Persistent::test_reconnect_fails,persistent,xfail,"AssertionError: No error raised when ""STATUS_OBJECT_NAME_NOT_FOUND"" expected"
 persistent.py::Persistent::test_resiliency_reconnect_after_timeout,persistent,green,
 persistent.py::Persistent::test_resiliency_reconnect_before_timeout,persistent,xfail,"AssertionError: No error raised when ""STATUS_FILE_NOT_AVAILABLE"" expected"
-persistent.py::Persistent::test_resiliency_same_timeout_reconnect_after_timeout,persistent,xfail,passes but waits a real >90s resiliency timer; too slow for the gated run
+persistent.py::Persistent::test_resiliency_same_timeout_reconnect_after_timeout,persistent,xfail,cluster-A: new open should displace the expired handle so reconnect fails OBJECT_NAME_NOT_FOUND
 persistent.py::Persistent::test_resiliency_same_timeout_reconnect_before_timeout,persistent,xfail,"AssertionError: No error raised when ""STATUS_FILE_NOT_AVAILABLE"" expected"
 query.py::QueryTest::test_mismatch_0_file_alignment_info,base,green,
 query.py::QueryTest::test_mismatch_0_file_all_info,base,green,
@@ -162,7 +162,7 @@ query.py::QueryTest::test_query_file_sec_info_dacl,base,green,
 query.py::QueryTest::test_query_file_sec_info_group,base,green,
 query.py::QueryTest::test_query_file_sec_info_owner,base,green,
 query.py::QueryTest::test_query_file_standard_info,base,green,
-query.py::QueryTest::test_query_sec_desc_0,base,xfail,BUFFER_TOO_SMALL reply needs the 4-byte required-length error body
+query.py::QueryTest::test_query_sec_desc_0,base,green,
 querydirectory.py::QueryDirectoryTest::test_file_directory_info,base,green,
 querydirectory.py::QueryDirectoryTest::test_file_id_both_directory_information,base,green,
 querydirectory.py::QueryDirectoryTest::test_restart_scan,base,green,

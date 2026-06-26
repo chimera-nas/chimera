@@ -464,8 +464,13 @@ if(CHIMERA_NETNS_TESTING AND EXISTS ${PIKE_DIR}/src/pike/test)
     # config also enables multichannel: the durable/persistent suites need a CA
     # share, and the appinstanceid / QueryNetworkInterfaceInfo cases need the
     # second NIC -- they share one daemon config.
+    # The persistent config also raises the per-case pytest timeout: durable
+    # test_durable_v2_timer deliberately waits out a real ~80s durable-handle
+    # timer, which exceeds the wrapper's 90s default by too little margin under
+    # CI load.  150s gives it room without risking the whole run (the ctest
+    # entry's own 900s TIMEOUT still bounds it).
     set(_pike_envfrag_base         "")
-    set(_pike_envfrag_persistent   ";CHIMERA_SMB_PERSISTENT=1;CHIMERA_SMB_MULTICHANNEL=1")
+    set(_pike_envfrag_persistent   ";CHIMERA_SMB_PERSISTENT=1;CHIMERA_SMB_MULTICHANNEL=1;PIKE_CASE_TIMEOUT=150")
     set(_pike_envfrag_encryption   ";CHIMERA_SMB_ENCRYPTION=1")
     set(_pike_lbl_base         "")
     set(_pike_lbl_persistent   ";persistent;multichannel")

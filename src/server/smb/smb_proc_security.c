@@ -1004,8 +1004,11 @@ chimera_smb_query_emit_sd(
 
     /* MS-SMB2 3.3.5.20.3: if the security descriptor does not fit in the
      * client-supplied OutputBufferLength, fail with STATUS_BUFFER_TOO_SMALL
-     * (smb2.getinfo.qsec_buffercheck). */
+     * (smb2.getinfo.qsec_buffercheck).  The error reply carries the minimum
+     * required length so the client can resize and retry (MS-SMB2 2.2.2 /
+     * 3.3.4.4); stash it in output_length, which the error-reply path emits. */
     if (request->query_info.max_response_size < (uint32_t) sd_len) {
+        request->query_info.output_length = (uint32_t) sd_len;
         chimera_smb_complete_request(request, SMB2_STATUS_BUFFER_TOO_SMALL);
         return;
     }
