@@ -950,16 +950,20 @@ chimera_nfs_nlm4_cancel(
         DL_FOREACH(client->locks, entry)
         {
             /* Only pending entries can be cancelled; granted entries
-             * require UNLOCK to release.  Match the exact (oh, svid,
-             * fh, range) tuple. */
+             * require UNLOCK to release.  CANCEL identifies the specific
+             * outstanding blocked LOCK request, which per RFC 1813 (struct
+             * nlm4_cancargs / nlm4_lock) is keyed by its mode as well as
+             * owner+range, so match the exact
+             * (oh, svid, fh, range, exclusive) tuple. */
             if (!entry->pending) {
                 continue;
             }
-            if (entry->oh_len  != args->alock.oh.len  ||
-                entry->fh_len  != args->alock.fh.len  ||
-                entry->svid    != args->alock.svid    ||
-                entry->offset  != args->alock.l_offset ||
-                entry->length  != want_length          ||
+            if (entry->oh_len    != args->alock.oh.len  ||
+                entry->fh_len    != args->alock.fh.len  ||
+                entry->svid      != args->alock.svid    ||
+                entry->offset    != args->alock.l_offset ||
+                entry->length    != want_length          ||
+                entry->exclusive != args->exclusive      ||
                 memcmp(entry->oh, args->alock.oh.data, entry->oh_len) != 0 ||
                 memcmp(entry->fh, args->alock.fh.data, entry->fh_len) != 0) {
                 continue;
