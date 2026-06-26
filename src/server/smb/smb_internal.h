@@ -1675,11 +1675,15 @@ chimera_smb_durable_drain_all(
 
 /* Purge a parked (disconnected) durable open by persistent id when a new
  * conflicting open arrives.  Returns true iff found+purged.  No-op for live,
- * persistent, cold, or unknown ids. */
+ * cold, or unknown ids.  Persistent parked opens are purged only when
+ * include_persistent is set: an ordinary conflicting open must not displace a
+ * persistent handle (it has to be reclaimed via CreateGuid), but an
+ * AppInstanceId failover (MS-SMB2 3.3.5.9.7) does displace it. */
 bool
 chimera_smb_durable_purge_parked(
     struct chimera_server_smb_thread *thread,
-    uint64_t                          persistent_id);
+    uint64_t                          persistent_id,
+    bool                              include_persistent);
 
 /* How a conflicting CREATE should treat a share conflict against a not-yet-parked
  * non-persistent durable holder it could not purge.  See

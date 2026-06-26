@@ -7,8 +7,8 @@ acl.py::SecTest::test_set_sec_group,base,xfail,ValueError: Invalid AclRevision: 
 acl.py::SecTest::test_set_sec_owner,base,xfail,ValueError: Invalid AclRevision: 1
 acl.py::SecTest::test_set_sec_same,base,xfail,ValueError: Invalid AclRevision: 1
 appinstanceid.py::AppInstanceIdTest::test_appinstanceid,persistent,green,
-appinstanceid.py::AppInstanceIdTest::test_appinstanceid_persistent_with_disconnect,persistent,xfail,daemon-crash
-appinstanceid.py::AppInstanceIdTest::test_appinstanceid_reconnect_same_clientguid,persistent,xfail,daemon-crash
+appinstanceid.py::AppInstanceIdTest::test_appinstanceid_persistent_with_disconnect,persistent,green,
+appinstanceid.py::AppInstanceIdTest::test_appinstanceid_reconnect_same_clientguid,persistent,xfail,same-client-guid AppInstanceId reopen should return FILE_NOT_AVAILABLE
 changenotify.py::ChangeNotifyTest::test_change_notify_cancel,base,green,
 changenotify.py::ChangeNotifyTest::test_change_notify_file_name,base,green,
 compound.py::CompoundTest::test_create_close,base,green,
@@ -29,15 +29,15 @@ copychunk.py::TestServerSideCopy::test_multiple_ssc_file,base,green,
 copychunk.py::TestServerSideCopy::test_multiple_ssc_file_with_writethrough_flag,base,green,
 copychunk.py::TestServerSideCopy::test_multiple_ssc_same_dest_file,base,green,
 copychunk.py::TestServerSideCopy::test_multiple_ssc_same_source_file,base,green,
-copychunk.py::TestServerSideCopy::test_neg_cross_chunk_size,base,xfail,AssertionError: 0 != 1048576
-copychunk.py::TestServerSideCopy::test_neg_cross_chunk_size_allf,base,xfail,AssertionError: 0 != 1048576
-copychunk.py::TestServerSideCopy::test_neg_cross_max_chunks,base,xfail,pike.exceptions.TimeoutError: Timed out after 30 seconds Request: Smb2 credit_charge: 1 ch
+copychunk.py::TestServerSideCopy::test_neg_cross_chunk_size,base,green,
+copychunk.py::TestServerSideCopy::test_neg_cross_chunk_size_allf,base,green,
+copychunk.py::TestServerSideCopy::test_neg_cross_max_chunks,base,green,
 copychunk.py::TestServerSideCopy::test_neg_cross_offset_basic,base,green,
 copychunk.py::TestServerSideCopy::test_neg_cross_offset_fifth_chunk,base,green,
 copychunk.py::TestServerSideCopy::test_neg_cross_offset_second_chunk,base,green,
-copychunk.py::TestServerSideCopy::test_neg_cross_second_chunk_size,base,xfail,AssertionError: 0 != 1048576
+copychunk.py::TestServerSideCopy::test_neg_cross_second_chunk_size,base,green,
 copychunk.py::TestServerSideCopy::test_neg_dst_exc_brl,base,green,
-copychunk.py::TestServerSideCopy::test_neg_dst_is_a_dir,base,xfail,daemon-crash
+copychunk.py::TestServerSideCopy::test_neg_dst_is_a_dir,base,green,
 copychunk.py::TestServerSideCopy::test_neg_dst_no_read,base,green,
 copychunk.py::TestServerSideCopy::test_neg_dst_no_write,base,green,
 copychunk.py::TestServerSideCopy::test_neg_src_exc_brl,base,green,
