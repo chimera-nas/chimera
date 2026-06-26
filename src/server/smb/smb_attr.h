@@ -715,11 +715,14 @@ chimera_smb_append_all_info(
     evpl_iovec_cursor_append_uint32(cursor, open_file->granted_access);
     evpl_iovec_cursor_append_uint64(cursor, open_file->position);
 
-    /* Mode */
+    /* FileModeInformation: no special open-mode flags tracked. */
     evpl_iovec_cursor_append_uint32(cursor, 0);
 
-    /* Alignemnt */
-    evpl_iovec_cursor_append_uint32(cursor, 4095);
+    /* FileAlignmentInformation: FILE_BYTE_ALIGNMENT (0) -- no alignment
+     * requirement for buffered I/O (matches the standalone
+     * FileAlignmentInformation path; 4095/0xFFF is not a valid
+     * AlignmentRequirement value and trips strict clients). */
+    evpl_iovec_cursor_append_uint32(cursor, 0);
 
     /* Name Info: FileNameInformation (MS-FSCC 2.1.7).  FileNameLength is the
      * length in bytes of the UTF-16LE name, followed by the name itself —
