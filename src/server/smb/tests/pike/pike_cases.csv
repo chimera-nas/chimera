@@ -175,8 +175,8 @@ queryondiskid.py::TestQueryOnDiskID::test_qfid_same_file_seq_delete,base,xfail,A
 readwrite.py::ReadWriteTest::test_write,base,green,
 readwrite.py::ReadWriteTest::test_write_none,base,green,
 readwrite.py::ReadWriteTest::test_write_none_access,base,green,
-readwrite.py::ReadWriteTest::test_write_none_lease,base,xfail,AssertionError: TimeoutError not raised
-readwrite.py::ReadWriteTest::test_write_none_oplock,base,xfail,AssertionError: TimeoutError not raised
+readwrite.py::ReadWriteTest::test_write_none_lease,base,xfail,oplock/lease broken on a zero-length write (should be a no-op)
+readwrite.py::ReadWriteTest::test_write_none_oplock,base,xfail,oplock/lease broken on a zero-length write (should be a no-op)
 reparse.py::TestReparsePoint::test_set_get_reparse_point,base,xfail,pike.exceptions.ResponseError: (SMB2_IOCTL; STATUS_NOT_A_REPARSE_POINT)
 reparse.py::TestReparsePoint::test_symbolic_link_error_response,base,xfail,IndexError: list index out of range
 session.py::SessionTest::test_session_logoff,base,green,
