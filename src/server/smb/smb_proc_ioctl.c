@@ -587,7 +587,7 @@ chimera_smb_ioctl_reply(
         case SMB2_FSCTL_SRV_COPYCHUNK:
         case SMB2_FSCTL_SRV_COPYCHUNK_WRITE:
             evpl_iovec_cursor_append_uint32(reply_cursor, request->ioctl.cc_chunks_written);
-            evpl_iovec_cursor_append_uint32(reply_cursor, 0); /* ChunkBytesWritten */
+            evpl_iovec_cursor_append_uint32(reply_cursor, request->ioctl.cc_chunk_bytes); /* ChunkBytesWritten */
             evpl_iovec_cursor_append_uint32(reply_cursor, (uint32_t) request->ioctl.cc_total_written);
             break;
         case SMB2_FSCTL_OFFLOAD_READ:
@@ -947,12 +947,22 @@ chimera_smb_parse_ioctl(
                 evpl_iovec_cursor_get_uint32(request_cursor, &cc);
                 evpl_iovec_cursor_get_uint32(request_cursor, &reserved);
 
-                if (cc > CHIMERA_SMB_COPYCHUNK_MAX ||
-                    request->ioctl.input_count < 32 + (uint64_t) cc * 24) {
+                request->ioctl.cc_chunk_count = cc;
+
+                /* An over-limit ChunkCount is NOT a parse failure: the handler
+                 * answers STATUS_INVALID_PARAMETER with the SRV_COPYCHUNK_RESPONSE
+                 * limit body so the client can resubmit (MS-SMB2 3.3.5.15.6).
+                 * Rejecting it here would leave the client hanging, and parsing
+                 * cc entries would overrun cc_chunks[], so skip the chunk array
+                 * entirely and let the handler reject by count. */
+                if (cc > CHIMERA_SMB_COPYCHUNK_MAX) {
+                    break;
+                }
+
+                if (request->ioctl.input_count < 32 + (uint64_t) cc * 24) {
                     return chimera_smb_parse_reject(request, SMB2_STATUS_INVALID_PARAMETER);
                 }
 
-                request->ioctl.cc_chunk_count = cc;
                 for (i = 0; i < cc; i++) {
                     evpl_iovec_cursor_get_uint64(request_cursor, &request->ioctl.cc_chunks[i].src_offset);
                     evpl_iovec_cursor_get_uint64(request_cursor, &request->ioctl.cc_chunks[i].dst_offset);
