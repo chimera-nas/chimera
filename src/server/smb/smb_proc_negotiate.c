@@ -1017,8 +1017,15 @@ chimera_smb_select_negotiated_algorithms(
                 conn->negotiated.compression_flags = SMB2_COMPRESSION_FLAG_CHAINED;
             }
         } else {
-            /* No shared algorithm: do not emit a response context. */
-            conn->negotiated.ctx_present_mask &= ~CHIMERA_SMB_NEGOTIATE_CTX_COMPRESSION;
+            /* No shared algorithm: MS-SMB2 3.3.5.4 still requires the server to
+             * build a COMPRESSION_CAPABILITIES response context when it processed
+             * the request context, advertising CompressionAlgorithmCount=1 with
+             * the algorithm NONE.  This lets the client distinguish "no common
+             * algorithm" from "no compression support" (issue #1031).  Keep the
+             * context bit set so the emitter runs. */
+            conn->negotiated.compression_algs[0]   = SMB2_COMPRESSION_NONE;
+            conn->negotiated.compression_alg_count = 1;
+            conn->negotiated.compression_flags     = 0;
         }
     }
 } /* chimera_smb_select_negotiated_algorithms */
