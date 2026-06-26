@@ -1081,6 +1081,18 @@ chimera_smb_parse_negotiate(
     request->negotiate.ctx_present_mask = 0;
 
     if (request->negotiate.negotiate_context_count) {
+        /* Bound NegotiateContextCount up-front (MS-SMB2 2.2.3.1 / 3.3.5.4): a
+         * hostile count (e.g. 0xFFFF) would otherwise drive the parse loop until
+         * a truncation guard fires.  There are only a handful of valid context
+         * types; reject anything beyond the supported maximum rather than
+         * leniently scanning off the end of the message (issue #1224). */
+        if (request->negotiate.negotiate_context_count > SMB2_MAX_NEGOTIATE_CONTEXTS) {
+            chimera_smb_error("SMB2 NEGOTIATE context count %u exceeds max %u",
+                              request->negotiate.negotiate_context_count,
+                              SMB2_MAX_NEGOTIATE_CONTEXTS);
+            return chimera_smb_parse_reject(request, SMB2_STATUS_INVALID_PARAMETER);
+        }
+
         /* Seek to the context list (validated forward and within the message);
          * smb_cursor_seek_to subsumes the old precedes-consumed underflow guard. */
         if (unlikely(smb_cursor_seek_to(request_cursor,
