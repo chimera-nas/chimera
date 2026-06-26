@@ -729,6 +729,16 @@ chimera_smb_lock(struct chimera_smb_request *request)
 
     request->lock.open_file = open_file;
 
+    /* Byte-range locking applies to a file (data stream); a directory handle has
+     * no byte range to lock.  Reject LOCK against a directory FID with
+     * STATUS_INVALID_DEVICE_REQUEST -- locking is not a directory operation
+     * (MS-SMB2 3.3.5.14; issue #1254). */
+    if (unlikely(open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_DIRECTORY)) {
+        chimera_smb_open_file_release(request, open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_DEVICE_REQUEST);
+        return;
+    }
+
     /* LockCount==0 is illegal, and more than CHIMERA_SMB_LOCK_MAX_ELEMENTS is
      * rejected rather than parsed; both reply INVALID_PARAMETER without dropping
      * the connection. */
