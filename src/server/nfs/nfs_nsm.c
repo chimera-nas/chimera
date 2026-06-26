@@ -40,6 +40,10 @@ nsm_kv_done(
     free(private_data);
 } /* nsm_kv_done */
 
+/* Bound on the number of monitor entries an IP- or caller-keyed sweep will
+ * collect on the stack in one pass (SM_NOTIFY fallback / SM_UNMON_ALL). */
+#define NSM_NOTIFY_FALLBACK_MAX 32
+
 static void
 nsm_state_persist(
     struct chimera_vfs_thread *vfs_thread,
@@ -549,7 +553,21 @@ chimera_nfs_sm_unmon(
     struct chimera_server_nfs_thread *thread = private_data;
     struct chimera_server_nfs_shared *shared = thread->shared;
     struct sm_stat                    res;
+    char                              host[SM_MAXSTRLEN + 1];
+    size_t                            hn_len;
     int                               rc;
+
+    /* SM_UNMON removes monitoring of the single named host (mon_id.mon_name),
+     * the same key space used by SM_MON / SM_NOTIFY and the NLM caller_name.
+     * Drop it symmetrically to the add path (nsm_monitor): unlink under the
+     * lock and delete the persisted record. */
+    hn_len = args->mon_name.len < SM_MAXSTRLEN ? args->mon_name.len : SM_MAXSTRLEN;
+    memcpy(host, args->mon_name.str, hn_len);
+    host[hn_len] = '\0';
+
+    chimera_nfs_info("NSM SM_UNMON: stop monitoring host '%s'", host);
+
+    nsm_unmonitor(thread, host);
 
     res.state = (int) nsm_state_current(&shared->nsm_state);
 
@@ -568,8 +586,51 @@ chimera_nfs_sm_unmon_all(
 {
     struct chimera_server_nfs_thread *thread = private_data;
     struct chimera_server_nfs_shared *shared = thread->shared;
+    struct nsm_state                 *nsm    = &shared->nsm_state;
     struct sm_stat                    res;
-    int                               rc;
+    char                              caller[SM_MAXSTRLEN + 1];
+    size_t                            cn_len;
+    char                              matched[NSM_NOTIFY_FALLBACK_MAX][SM_MAXSTRLEN + 1];
+    struct nsm_monitor               *mon, *tmp;
+    int                               n = 0, truncated = 0, i, rc;
+
+    /* SM_UNMON_ALL removes every monitor relationship the calling host
+     * (my_id.my_name) established.  chimera's monitor table is keyed by the
+     * monitored-host name (== the peer's NLM caller_name), which for a host
+     * monitoring itself is the caller's own name; remove the entry matching the
+     * caller plus any other entry the caller reaches at the same key.  Collect
+     * matches under the lock, then drop each symmetrically to the add path. */
+    cn_len = args->my_name.len < SM_MAXSTRLEN ? args->my_name.len : SM_MAXSTRLEN;
+    memcpy(caller, args->my_name.str, cn_len);
+    caller[cn_len] = '\0';
+
+    chimera_nfs_info("NSM SM_UNMON_ALL: drop all monitors for caller '%s' "
+                     "(prog=%d vers=%d proc=%d)", caller,
+                     args->my_prog, args->my_vers, args->my_proc);
+
+    pthread_mutex_lock(&nsm->mutex);
+    HASH_ITER(hh, nsm->monitors, mon, tmp)
+    {
+        if (strcmp(mon->host, caller) != 0) {
+            continue;
+        }
+        if (n < NSM_NOTIFY_FALLBACK_MAX) {
+            snprintf(matched[n++], SM_MAXSTRLEN + 1, "%s", mon->host);
+        } else {
+            truncated = 1;
+        }
+    }
+    pthread_mutex_unlock(&nsm->mutex);
+
+    if (truncated) {
+        chimera_nfs_info("NSM SM_UNMON_ALL: >%d monitors for '%s'; removing "
+                         "only the first %d", NSM_NOTIFY_FALLBACK_MAX, caller,
+                         NSM_NOTIFY_FALLBACK_MAX);
+    }
+
+    for (i = 0; i < n; i++) {
+        nsm_unmonitor(thread, matched[i]);
+    }
 
     res.state = (int) nsm_state_current(&shared->nsm_state);
 
@@ -668,8 +729,6 @@ nsm_release_host_locks(
     }
     return found;
 } /* nsm_release_host_locks */
-
-#define NSM_NOTIFY_FALLBACK_MAX 32
 
 void
 chimera_nfs_sm_notify(
