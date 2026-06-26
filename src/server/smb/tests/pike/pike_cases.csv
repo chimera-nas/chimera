@@ -167,11 +167,11 @@ querydirectory.py::QueryDirectoryTest::test_file_directory_info,base,green,
 querydirectory.py::QueryDirectoryTest::test_file_id_both_directory_information,base,green,
 querydirectory.py::QueryDirectoryTest::test_restart_scan,base,green,
 querydirectory.py::QueryDirectoryTest::test_specific_name,base,green,
-queryondiskid.py::TestQueryOnDiskID::test_qfid_diff_file,base,xfail,AssertionError: unexpectedly None : CreateResponse didn't contain a QueryOnDiskIDResponse:
-queryondiskid.py::TestQueryOnDiskID::test_qfid_functional,base,xfail,AssertionError: unexpectedly None : CreateResponse didn't contain a QueryOnDiskIDResponse:
-queryondiskid.py::TestQueryOnDiskID::test_qfid_same_file,base,xfail,AssertionError: unexpectedly None : CreateResponse didn't contain a QueryOnDiskIDResponse:
-queryondiskid.py::TestQueryOnDiskID::test_qfid_same_file_seq,base,xfail,AssertionError: unexpectedly None : CreateResponse didn't contain a QueryOnDiskIDResponse:
-queryondiskid.py::TestQueryOnDiskID::test_qfid_same_file_seq_delete,base,xfail,AssertionError: unexpectedly None : CreateResponse didn't contain a QueryOnDiskIDResponse:
+queryondiskid.py::TestQueryOnDiskID::test_qfid_diff_file,base,green,
+queryondiskid.py::TestQueryOnDiskID::test_qfid_functional,base,green,
+queryondiskid.py::TestQueryOnDiskID::test_qfid_same_file,base,green,
+queryondiskid.py::TestQueryOnDiskID::test_qfid_same_file_seq,base,green,
+queryondiskid.py::TestQueryOnDiskID::test_qfid_same_file_seq_delete,base,green,
 readwrite.py::ReadWriteTest::test_write,base,green,
 readwrite.py::ReadWriteTest::test_write_none,base,green,
 readwrite.py::ReadWriteTest::test_write_none_access,base,green,
