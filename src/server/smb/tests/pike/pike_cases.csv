@@ -29,13 +29,13 @@ copychunk.py::TestServerSideCopy::test_multiple_ssc_file,base,green,
 copychunk.py::TestServerSideCopy::test_multiple_ssc_file_with_writethrough_flag,base,green,
 copychunk.py::TestServerSideCopy::test_multiple_ssc_same_dest_file,base,green,
 copychunk.py::TestServerSideCopy::test_multiple_ssc_same_source_file,base,green,
-copychunk.py::TestServerSideCopy::test_neg_cross_chunk_size,base,green,
-copychunk.py::TestServerSideCopy::test_neg_cross_chunk_size_allf,base,green,
-copychunk.py::TestServerSideCopy::test_neg_cross_max_chunks,base,green,
+copychunk.py::TestServerSideCopy::test_neg_cross_chunk_size,base,xfail,chimera caps COPYCHUNK MaxChunkCount at 16 per MS-SMB2 (8057501d); pike expects Windows 256
+copychunk.py::TestServerSideCopy::test_neg_cross_chunk_size_allf,base,xfail,chimera caps COPYCHUNK MaxChunkCount at 16 per MS-SMB2 (8057501d); pike expects Windows 256
+copychunk.py::TestServerSideCopy::test_neg_cross_max_chunks,base,xfail,chimera caps COPYCHUNK MaxChunkCount at 16 per MS-SMB2 (8057501d); pike expects Windows 256
 copychunk.py::TestServerSideCopy::test_neg_cross_offset_basic,base,green,
 copychunk.py::TestServerSideCopy::test_neg_cross_offset_fifth_chunk,base,green,
 copychunk.py::TestServerSideCopy::test_neg_cross_offset_second_chunk,base,green,
-copychunk.py::TestServerSideCopy::test_neg_cross_second_chunk_size,base,green,
+copychunk.py::TestServerSideCopy::test_neg_cross_second_chunk_size,base,xfail,chimera caps COPYCHUNK MaxChunkCount at 16 per MS-SMB2 (8057501d); pike expects Windows 256
 copychunk.py::TestServerSideCopy::test_neg_dst_exc_brl,base,green,
 copychunk.py::TestServerSideCopy::test_neg_dst_is_a_dir,base,green,
 copychunk.py::TestServerSideCopy::test_neg_dst_no_read,base,green,
@@ -60,7 +60,7 @@ copychunk.py::TestServerSideCopy::test_same_offset_multiple_chunks,base,green,
 copychunk.py::TestServerSideCopy::test_same_offset_small_file,base,green,
 copychunk.py::TestServerSideCopy::test_same_small_file,base,green,
 copychunk.py::TestServerSideCopy::test_ssc_in_compound_req,base,xfail,pike.exceptions.ResponseError: (SMB2_CLOSE; STATUS_FILE_CLOSED)
-copychunk.py::TestServerSideCopy::test_ssc_in_multchannel,base,green,
+copychunk.py::TestServerSideCopy::test_ssc_in_multchannel,persistent,green,
 credit.py::AsyncCreditTest::test_async_lock,base,xfail,AssertionError: 3 != 0
 credit.py::AsyncCreditTest::test_async_write,base,green,
 credit.py::EdgeCreditTest::test_sequence_number_wrap,base,green,
@@ -77,7 +77,7 @@ durable.py::DurableHandleTest::test_durable_invalidate,persistent,green,
 durable.py::DurableHandleTest::test_durable_reconnect,persistent,green,
 durable.py::DurableHandleTest::test_durable_reconnect_fails_client_guid,persistent,green,
 durable.py::DurableHandleTest::test_durable_reconnect_v2,persistent,green,
-durable.py::DurableHandleTest::test_durable_reconnect_v2_fails,persistent,xfail,AssertionError: No error raised when "STATUS_INVALID_PARAMETER" expected
+durable.py::DurableHandleTest::test_durable_reconnect_v2_fails,persistent,xfail,"AssertionError: No error raised when ""STATUS_INVALID_PARAMETER"" expected"
 durable.py::DurableHandleTest::test_durable_reconnect_v2_fails_client_guid,persistent,green,
 durable.py::DurableHandleTest::test_durable_reconnect_without_durable_open,persistent,green,
 durable.py::DurableHandleTest::test_durable_v2,persistent,green,
@@ -111,12 +111,12 @@ lock.py::LockTest::test_allow_zero_byte_write,base,green,
 lock.py::LockTest::test_cancel,base,green,
 lock.py::LockTest::test_deny_write,base,green,
 lock.py::LockTest::test_lock,base,green,
-multichannel.py::MultiChannelTest::test_open_bind_close,base,green,
+multichannel.py::MultiChannelTest::test_open_bind_close,persistent,green,
 multichannel.py::MultiChannelTest::test_write_fence_reject_stale,persistent,skip,pike-bug-assertEquals-removed-py3.12
 negotiate.py::CapMultichannel::test_downlevel,base,green,
 negotiate.py::CapMultichannel::test_downlevel_no_advert,base,green,
-negotiate.py::CapMultichannel::test_smb3,base,green,
-negotiate.py::CapMultichannel::test_smb3_many_capabilities,base,green,
+negotiate.py::CapMultichannel::test_smb3,persistent,green,
+negotiate.py::CapMultichannel::test_smb3_many_capabilities,persistent,green,
 negotiate.py::CapMultichannel::test_smb3_no_advert,base,green,
 negotiate.py::CapMulticredit::test_downlevel,base,green,
 negotiate.py::CapMulticredit::test_smb21,base,green,
@@ -133,15 +133,15 @@ negotiate.py::NegotiateContext::test_encryption_capabilities_ccm,base,green,
 negotiate.py::NegotiateContext::test_encryption_capabilities_gcm,base,green,
 negotiate.py::NegotiateContext::test_preauth_integrity_capabilities,base,green,
 oplock.py::OplockTest::test_oplock_break,base,green,
-persistent.py::Persistent::test_buffer_too_small,persistent,xfail,AssertionError: "STATUS_INVALID_PARAMETER" raised when "STATUS_BUFFER_TOO_SMALL" expected
+persistent.py::Persistent::test_buffer_too_small,persistent,xfail,"AssertionError: ""STATUS_INVALID_PARAMETER"" raised when ""STATUS_BUFFER_TOO_SMALL"" expected"
 persistent.py::Persistent::test_create,persistent,green,
-persistent.py::Persistent::test_open_while_disconnected,persistent,xfail,AssertionError: No error raised when "STATUS_FILE_NOT_AVAILABLE" expected
+persistent.py::Persistent::test_open_while_disconnected,persistent,xfail,"AssertionError: No error raised when ""STATUS_FILE_NOT_AVAILABLE"" expected"
 persistent.py::Persistent::test_reconnect,persistent,green,
-persistent.py::Persistent::test_reconnect_fails,persistent,xfail,AssertionError: No error raised when "STATUS_OBJECT_NAME_NOT_FOUND" expected
+persistent.py::Persistent::test_reconnect_fails,persistent,xfail,"AssertionError: No error raised when ""STATUS_OBJECT_NAME_NOT_FOUND"" expected"
 persistent.py::Persistent::test_resiliency_reconnect_after_timeout,persistent,green,
-persistent.py::Persistent::test_resiliency_reconnect_before_timeout,persistent,xfail,AssertionError: No error raised when "STATUS_FILE_NOT_AVAILABLE" expected
+persistent.py::Persistent::test_resiliency_reconnect_before_timeout,persistent,xfail,"AssertionError: No error raised when ""STATUS_FILE_NOT_AVAILABLE"" expected"
 persistent.py::Persistent::test_resiliency_same_timeout_reconnect_after_timeout,persistent,xfail,passes but waits a real >90s resiliency timer; too slow for the gated run
-persistent.py::Persistent::test_resiliency_same_timeout_reconnect_before_timeout,persistent,xfail,AssertionError: No error raised when "STATUS_FILE_NOT_AVAILABLE" expected
+persistent.py::Persistent::test_resiliency_same_timeout_reconnect_before_timeout,persistent,xfail,"AssertionError: No error raised when ""STATUS_FILE_NOT_AVAILABLE"" expected"
 query.py::QueryTest::test_mismatch_0_file_alignment_info,base,green,
 query.py::QueryTest::test_mismatch_0_file_all_info,base,green,
 query.py::QueryTest::test_mismatch_0_file_basic_info,base,green,
