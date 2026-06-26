@@ -1108,8 +1108,7 @@ chimera_smb_create_after_share(
          * oplock or a write/handle lease is downgraded by clearing the W and H
          * caching bits (MS-SMB2 3.3.5.9.x; WPTS OplockOnShareWithForceLevel2).
          * A bare R (or already-NONE) request is unaffected. */
-        if (request->tree && request->tree->share &&
-            request->tree->share->force_level2_oplock) {
+        if (tree->share && tree->share->force_level2_oplock) {
             req_smb &= SMB2_LEASE_READ_CACHING;
         }
 
