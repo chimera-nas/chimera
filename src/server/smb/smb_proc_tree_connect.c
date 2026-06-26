@@ -93,6 +93,13 @@ chimera_smb_tree_connect(struct chimera_smb_request *request)
             return;
         }
 
+        /* realloc() does not zero the newly grown region.  The free-slot scan
+         * above and the dispatcher's TreeId resolution both rely on unused
+         * slots being NULL, so zero every newly added slot before publishing
+         * the grown array. */
+        memset(&grown[session->max_trees], 0,
+               session->max_trees * sizeof(struct chimera_smb_tree *));
+
         session->max_trees           *= 2;
         session->trees                = grown;
         session->trees[tree->tree_id] = tree;
