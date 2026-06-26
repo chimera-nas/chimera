@@ -356,6 +356,29 @@ chimera_smb_query_directory(struct chimera_smb_request *request)
         request->query_directory.max_output_length = CHIMERA_SMB_MAX_TRANSACT_SIZE;
     }
 
+    /* MS-FSA 2.1.5.5.3: if OutputBufferLength is too small to hold even the
+     * fixed header of one entry of the requested FileInformationClass, the
+     * query is failed with STATUS_INFO_LENGTH_MISMATCH -- regardless of whether
+     * the directory has matching entries (WPTS MS-FSAModel QueryDirectory
+     * tiny-buffer cases).  The header sizes match the per-class expected_length
+     * base in the readdir callback below. */
+    uint32_t qd_header_len;
+    switch (request->query_directory.info_class) {
+        case SMB2_FILE_DIRECTORY_INFORMATION:         qd_header_len = 64;  break;
+        case SMB2_FILE_FULL_DIRECTORY_INFORMATION:    qd_header_len = 68;  break;
+        case SMB2_FILE_BOTH_DIRECTORY_INFORMATION:    qd_header_len = 94;  break;
+        case SMB2_FILE_NAMES_INFORMATION:             qd_header_len = 12;  break;
+        case SMB2_FILE_ID_BOTH_DIRECTORY_INFORMATION: qd_header_len = 102; break;
+        case SMB2_FILE_ID_FULL_DIRECTORY_INFORMATION: qd_header_len = 74;  break;
+        default:                                      qd_header_len = 0;   break;
+    } /* switch */
+
+    if (request->query_directory.max_output_length < qd_header_len) {
+        chimera_smb_open_file_release(request, request->query_directory.open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_INFO_LENGTH_MISMATCH);
+        return;
+    }
+
     evpl_iovec_alloc(evpl,
                      request->query_directory.max_output_length,
                      4096,
