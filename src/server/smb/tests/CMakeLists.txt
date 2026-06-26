@@ -418,6 +418,83 @@ else()
             "(need CHIMERA_NETNS_TESTING + dotnet + x86_64 + MS-FSA DLL)")
 endif()
 
+# ---------------------------------------------------------------------------
+# pike -- pure-Python SMB2/3 protocol correctness suite (the SMB analog of
+# pynfs). Like WPTS it speaks SMB2 from its own (Python) client stack and runs
+# host-side in a netns against the chimera daemon -- no VM / kernel CIFS client
+# needed. pike is run straight from its source tree (PYTHONPATH); the install
+# lives at /opt/pike (the devcontainer clones it there at a pinned SHA, like
+# /opt/pynfs). Override with -DPIKE_DIR=<path>.
+#
+# pike/pike_cases.csv maps every pike case (a pytest node-id
+# "module.py::Class::method") to the config whose features it needs (home_config)
+# and a status: green (CI-gating), xfail (applicable but currently failing -- a
+# tracked defect, NOT gated here), or skip (never-applicable today, e.g. needs a
+# second client NIC). CI gates ONLY on status=green. Each config's green list
+# runs in ONE pytest invocation against a single daemon.
+# ---------------------------------------------------------------------------
+set(PIKE_DIR /opt/pike CACHE PATH "pike SMB2/3 test framework source root")
+if(CHIMERA_NETNS_TESTING AND EXISTS ${PIKE_DIR}/src/pike/test)
+    set(CHIMERA_DAEMON $<TARGET_FILE:chimera>)
+    set(PIKE_JUNIT_DIR ${CMAKE_BINARY_DIR}/pike-junit
+        CACHE PATH "Directory for per-case pike JUnit XML output.")
+
+    set(_pike_configs base persistent encryption)
+    foreach(_c ${_pike_configs})
+        set(PIKE_GREEN_${_c} "")
+    endforeach()
+
+    file(STRINGS ${CMAKE_CURRENT_SOURCE_DIR}/pike/pike_cases.csv _pike_rows)
+    foreach(_row ${_pike_rows})
+        if(_row MATCHES "^case,")             # CSV header
+            continue()
+        endif()
+        string(REPLACE "," ";" _f "${_row}")
+        list(GET _f 0 _case)
+        list(GET _f 1 _home)
+        list(GET _f 2 _status)
+        if(NOT _status STREQUAL "green")      # CI gates only on green
+            continue()
+        endif()
+        list(APPEND PIKE_GREEN_${_home} "${_case}")
+    endforeach()
+
+    # Per-config CHIMERA_SMB_* env fragment (drives the wrapper's daemon config),
+    # ctest label suffix, and ctest-name suffix. base = none. The persistent
+    # config also enables multichannel: the durable/persistent suites need a CA
+    # share, and the appinstanceid / QueryNetworkInterfaceInfo cases need the
+    # second NIC -- they share one daemon config.
+    set(_pike_envfrag_base         "")
+    set(_pike_envfrag_persistent   ";CHIMERA_SMB_PERSISTENT=1;CHIMERA_SMB_MULTICHANNEL=1")
+    set(_pike_envfrag_encryption   ";CHIMERA_SMB_ENCRYPTION=1")
+    set(_pike_lbl_base         "")
+    set(_pike_lbl_persistent   ";persistent;multichannel")
+    set(_pike_lbl_encryption   ";encryption")
+    set(_pike_suf_base         "")
+    set(_pike_suf_persistent   "_persistent")
+    set(_pike_suf_encryption   "_encryption")
+
+    foreach(_cfg ${_pike_configs})
+        if(NOT PIKE_GREEN_${_cfg})
+            continue()                        # no green cases for this config
+        endif()
+        string(REPLACE ";" "," _tests "${PIKE_GREEN_${_cfg}}")
+        set(_name chimera/server/smb/pike/memfs${_pike_suf_${_cfg}})
+        add_test(NAME ${_name}
+            COMMAND ${CMAKE_SOURCE_DIR}/scripts/pike_smb_test_wrapper.sh
+                    ${CHIMERA_DAEMON} memfs "${_tests}")
+        set_tests_properties(${_name} PROPERTIES
+            LABELS "smb;pike${_pike_lbl_${_cfg}}"
+            TIMEOUT 900
+            ENVIRONMENT "PIKE_DIR=${PIKE_DIR};PIKE_JUNIT_FILE=${PIKE_JUNIT_DIR}/memfs${_pike_suf_${_cfg}}.xml${_pike_envfrag_${_cfg}}")
+    endforeach()
+
+    message(STATUS "pike SMB tests: enabled (${PIKE_DIR})")
+else()
+    message(STATUS "pike SMB tests: disabled "
+            "(need CHIMERA_NETNS_TESTING + pike at ${PIKE_DIR})")
+endif()
+
 # SMB smbtorture integration tests
 add_executable(smbtorture_test smbtorture_test.c)
 target_link_libraries(smbtorture_test chimera_server chimera_metrics jansson)
