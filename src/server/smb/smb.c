@@ -248,6 +248,15 @@ chimera_smb_server_init(
      * instance (issue #984). */
     chimera_smb_server_guid_init(shared, config);
 
+    /* Capture this SMB server instance's start time (MS-SMB2 3.3.1.5 Global
+     * ServerStartTime).  Reported in NEGOTIATE so clients can detect an
+     * in-place restart -- this is the instance start, not the OS boot time. */
+    {
+        struct timespec start;
+        clock_gettime(CLOCK_REALTIME, &start);
+        shared->server_start_time = chimera_nt_time(&start);
+    }
+
     /* Derive the server's account-domain (machine) SID S-1-5-21-X-Y-Z once, from
      * a stable per-host identity (/etc/machine-id, else hostname), so the SIDs
      * the LSARPC/SAMR services hand out are unique per server and survive a

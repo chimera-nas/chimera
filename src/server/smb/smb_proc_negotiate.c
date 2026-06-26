@@ -53,7 +53,7 @@ chimera_smb_negotiate(struct chimera_smb_request *request)
     struct chimera_server_smb_thread *thread = request->compound->thread;
     struct chimera_server_smb_shared *shared = thread->shared;
     struct chimera_smb_conn          *conn   = request->compound->conn;
-    struct timespec                   now, up, boot;
+    struct timespec                   now;
     uint16_t                          dialect = 0, candidate;
     int                               i, j;
 
@@ -81,19 +81,6 @@ chimera_smb_negotiate(struct chimera_smb_request *request)
     clock_gettime(
         CLOCK_REALTIME,
         &now);
-
-    clock_gettime(
-        CLOCK_BOOTTIME,
-        &up);
-
-    boot.tv_sec = now.tv_sec  - up.tv_sec;
-
-    if (now.tv_nsec >= up.tv_nsec) {
-        boot.tv_nsec = now.tv_nsec - up.tv_nsec;
-    } else {
-        boot.tv_nsec = up.tv_nsec - now.tv_nsec;
-        boot.tv_sec--;
-    }
 
     for (i = 0; i < request->negotiate.dialect_count; i++) {
 
@@ -178,7 +165,10 @@ chimera_smb_negotiate(struct chimera_smb_request *request)
     request->negotiate.r_max_read_size     = 8 * 1024 * 1024;
     request->negotiate.r_max_write_size    = 8 * 1024 * 1024;
     request->negotiate.r_system_time       = chimera_nt_time(&now);
-    request->negotiate.r_server_start_time = chimera_nt_time(&boot);
+    /* ServerStartTime is the SMB server instance start time (captured once at
+     * init), not the OS boot time -- so an in-place chimera restart is visible
+     * to clients keying off this field (issue #1225, MS-SMB2 3.3.1.5). */
+    request->negotiate.r_server_start_time = shared->server_start_time;
 
     memcpy(request->negotiate.r_server_guid, shared->guid, SMB2_GUID_SIZE);
 
