@@ -590,6 +590,10 @@ struct chimera_smb_request {
              * directory has no data fork, so the open path rejects this form on
              * a directory target (smb2.streams.dir). */
             uint8_t                            explicit_data_fork;
+            /* "DNAME::$INDEX_ALLOCATION" names a directory's index stream (the
+             * directory itself); valid only on a directory, so the open path
+             * rejects this form on a non-directory target (MS-FSCC 2.1.5). */
+            uint8_t                            explicit_index_fork;
             uint16_t                           stream_name_len;
             char                               stream_name[SMB_FILENAME_MAX];
             struct chimera_vfs_open_handle    *base_oh;

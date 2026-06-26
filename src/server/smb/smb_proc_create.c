@@ -2298,6 +2298,32 @@ chimera_smb_create_open_at_callback(
         return;
     }
 
+    /* "DNAME::$INDEX_ALLOCATION" names a directory's index stream -- the
+     * directory itself, so it is valid only when the target really is a
+     * directory; reject it on a file (WPTS MS-FSAModel directory-index-stream
+     * cases). */
+    if (request->create.explicit_index_fork && !S_ISDIR(attr->va_mode)) {
+        chimera_smb_create_release_handle(vfs_thread, oh);
+        chimera_smb_create_release_parent(request);
+        chimera_smb_complete_request(request, SMB2_STATUS_NOT_A_DIRECTORY);
+        return;
+    }
+
+    /* FILE_NON_DIRECTORY_FILE on a target that resolved to a directory is
+     * STATUS_FILE_IS_A_DIRECTORY (MS-SMB2 3.3.5.9 / MS-FSA 2.1.5.1).  chimera
+     * only translates FILE_DIRECTORY_FILE into the VFS open, so without this an
+     * open of a directory with the non-directory option silently succeeded.
+     * Applies only when the base object itself is the target: a named-stream
+     * open ("dir:stream:$DATA") opens a data fork, so the non-directory option
+     * is about the stream, not the directory carrying it (FSA ADS-on-dir). */
+    if ((request->create.create_options & SMB2_FILE_NON_DIRECTORY_FILE) &&
+        !request->create.has_stream && S_ISDIR(attr->va_mode)) {
+        chimera_smb_create_release_handle(vfs_thread, oh);
+        chimera_smb_create_release_parent(request);
+        chimera_smb_complete_request(request, SMB2_STATUS_FILE_IS_A_DIRECTORY);
+        return;
+    }
+
     /* Named-stream open: the base file is now open; open the stream on it and
      * build the SMB open_file around the stream handle. */
     if (request->create.has_stream) {
@@ -3965,14 +3991,16 @@ chimera_smb_parse_stream_name(
     const char **r_stream,
     uint16_t    *r_stream_len,
     uint8_t     *r_has_stream,
-    uint8_t     *r_explicit_data_fork)
+    uint8_t     *r_explicit_data_fork,
+    uint8_t     *r_explicit_index_fork)
 {
     const char *colon = memchr(name, ':', name_len);
     const char *rest, *type, *colon2;
     uint16_t    base_len, rest_len, stream_len;
 
-    *r_has_stream         = 0;
-    *r_explicit_data_fork = 0;
+    *r_has_stream          = 0;
+    *r_explicit_data_fork  = 0;
+    *r_explicit_index_fork = 0;
 
     if (!colon) {
         *r_base_len = name_len;
@@ -3990,8 +4018,17 @@ chimera_smb_parse_stream_name(
         type       = colon2 + 1;
         uint16_t type_len = rest_len - stream_len - 1;
 
-        /* Only the $DATA stream type is supported. */
-        if (type_len != 5 || strncasecmp(type, "$DATA", 5) != 0) {
+        /* $DATA names a data fork; $INDEX_ALLOCATION (only as the bare
+         * "::$INDEX_ALLOCATION" form) names a directory's index stream -- i.e.
+         * the directory itself.  Every other stream type is unsupported. */
+        if (type_len == 5 && strncasecmp(type, "$DATA", 5) == 0) {
+            /* data fork -- falls through to the stream-name handling below */
+        } else if (type_len == 17 && stream_len == 0 &&
+                   strncasecmp(type, "$INDEX_ALLOCATION", 17) == 0) {
+            *r_base_len            = base_len;
+            *r_explicit_index_fork = 1;
+            return SMB2_STATUS_SUCCESS;
+        } else {
             return SMB2_STATUS_OBJECT_NAME_INVALID;
         }
     } else {
@@ -4224,9 +4261,10 @@ chimera_smb_create(struct chimera_smb_request *request)
     enum chimera_smb_pipe_magic   pipe_magic;
     chimera_smb_pipe_transceive_t transceive;
 
-    request->create.has_stream         = 0;
-    request->create.explicit_data_fork = 0;
-    request->create.base_oh            = NULL;
+    request->create.has_stream          = 0;
+    request->create.explicit_data_fork  = 0;
+    request->create.explicit_index_fork = 0;
+    request->create.base_oh             = NULL;
     /* Only the regular-file open path (open_at_callback) registers a finish
      * callback and may park on a batch-oplock break; clear it so the mkdir /
      * stream / pipe paths never inherit a stale callback and park. */
@@ -4260,23 +4298,28 @@ chimera_smb_create(struct chimera_smb_request *request)
             return;
         }
 
-        const char *sname              = NULL;
-        uint16_t    base_len           = request->create.name_len;
-        uint16_t    sname_len          = 0;
-        uint8_t     has_stream         = 0;
-        uint8_t     explicit_data_fork = 0;
-        uint32_t    pstatus            = chimera_smb_parse_stream_name(
+        const char *sname               = NULL;
+        uint16_t    base_len            = request->create.name_len;
+        uint16_t    sname_len           = 0;
+        uint8_t     has_stream          = 0;
+        uint8_t     explicit_data_fork  = 0;
+        uint8_t     explicit_index_fork = 0;
+        uint32_t    pstatus             = chimera_smb_parse_stream_name(
             request->create.name, request->create.name_len,
-            &base_len, &sname, &sname_len, &has_stream, &explicit_data_fork);
+            &base_len, &sname, &sname_len, &has_stream, &explicit_data_fork,
+            &explicit_index_fork);
 
         if (pstatus != SMB2_STATUS_SUCCESS) {
             chimera_smb_complete_request(request, pstatus);
             return;
         }
 
-        /* "DNAME::$DATA" names the default data fork explicitly; remember it so
-         * the open-completion path can reject it on a directory target. */
-        request->create.explicit_data_fork = explicit_data_fork;
+        /* "DNAME::$DATA" names the default data fork explicitly; "DNAME::
+         * $INDEX_ALLOCATION" names a directory's index stream.  Remember which
+         * so the open-completion path can reject the data form on a directory
+         * and the index form on a non-directory. */
+        request->create.explicit_data_fork  = explicit_data_fork;
+        request->create.explicit_index_fork = explicit_index_fork;
 
         /* A wildcard/invalid character in the BASE file name of a stream path
          * is rejected with OBJECT_NAME_INVALID (smb2.streams.names "stream*").
