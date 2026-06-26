@@ -238,21 +238,21 @@ SetFileAllocOrObjIdInformationTestCaseS0,skip,unimplemented: info-class/op
 SetFileAllocOrObjIdInformationTestCaseS10,skip,unimplemented: info-class/op
 SetFileAllocOrObjIdInformationTestCaseS2,skip,unimplemented: info-class/op
 SetFileAllocOrObjIdInformationTestCaseS4,green,
-SetFileAllocOrObjIdInformationTestCaseS6,xfail,fidelity: no parameter validation
+SetFileAllocOrObjIdInformationTestCaseS6,green,
 SetFileAllocOrObjIdInformationTestCaseS8,skip,unimplemented: info-class/op
 SetFileBasicInformationTestCaseS0,green,
-SetFileBasicInformationTestCaseS10,xfail,fidelity: no parameter validation
+SetFileBasicInformationTestCaseS10,green,
 SetFileBasicInformationTestCaseS12,green,
 SetFileBasicInformationTestCaseS14,green,
 SetFileBasicInformationTestCaseS2,green,
-SetFileBasicInformationTestCaseS4,xfail,fidelity: no parameter validation
-SetFileBasicInformationTestCaseS6,xfail,fidelity: no parameter validation
-SetFileBasicInformationTestCaseS8,xfail,fidelity: no parameter validation
+SetFileBasicInformationTestCaseS4,green,
+SetFileBasicInformationTestCaseS6,green,
+SetFileBasicInformationTestCaseS8,green,
 SetFileDispositionInformationTestCaseS0,green,
 SetFileDispositionInformationTestCaseS2,green,
 SetFileEndOfFileInformationTestCaseS0,green,
-SetFileEndOfFileInformationTestCaseS2,xfail,fidelity: no parameter validation
-SetFileEndOfFileInformationTestCaseS4,xfail,fidelity: no parameter validation
+SetFileEndOfFileInformationTestCaseS2,green,
+SetFileEndOfFileInformationTestCaseS4,green,
 SetFileEndOfFileInformationTestCaseS6,green,
 SetFileFullEaInformationTestCaseS0,green,
 SetFileFullEaInformationTestCaseS2,green,
@@ -271,7 +271,7 @@ SetFilePositionInformationTestCaseS10,skip,inapplicable: model branch not execut
 SetFilePositionInformationTestCaseS2,green,
 SetFilePositionInformationTestCaseS4,green,
 SetFilePositionInformationTestCaseS6,green,
-SetFilePositionInformationTestCaseS8,xfail,fidelity: no parameter validation
+SetFilePositionInformationTestCaseS8,green,
 SetFileRenameInformationTestCaseS0,green,
 SetFileRenameInformationTestCaseS10,green,
 SetFileRenameInformationTestCaseS12,green,
