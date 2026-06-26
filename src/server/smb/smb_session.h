@@ -195,6 +195,12 @@ struct chimera_smb_open_file {
     uint8_t                           lease_key[16];
     uint8_t                           parent_lease_key[16];
     uint8_t                           create_guid[16];
+    /* The ClientGuid of the connection that created this open.  Retained so a
+     * conflicting CREATE can compare clients even after this open is parked (its
+     * create_conn is cleared at disconnect) -- e.g. the AppInstanceId same-client
+     * rule must not failover-displace a parked persistent handle of its own
+     * client (pike appinstanceid test_appinstanceid_reconnect_same_clientguid). */
+    uint8_t                           client_guid[16];
     /* SMB2_CREATE_APP_INSTANCE_ID / *_VERSION (MS-SMB2 2.2.13.2.13/14).
      * Recorded when the open carried an AppInstanceId so a later CREATE on a
      * different connection can match it and apply the version-gated

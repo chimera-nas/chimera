@@ -8,7 +8,7 @@ acl.py::SecTest::test_set_sec_owner,base,green,
 acl.py::SecTest::test_set_sec_same,base,green,
 appinstanceid.py::AppInstanceIdTest::test_appinstanceid,persistent,green,
 appinstanceid.py::AppInstanceIdTest::test_appinstanceid_persistent_with_disconnect,persistent,green,
-appinstanceid.py::AppInstanceIdTest::test_appinstanceid_reconnect_same_clientguid,persistent,xfail,same-client-guid AppInstanceId reopen should return FILE_NOT_AVAILABLE
+appinstanceid.py::AppInstanceIdTest::test_appinstanceid_reconnect_same_clientguid,persistent,green,
 changenotify.py::ChangeNotifyTest::test_change_notify_cancel,base,green,
 changenotify.py::ChangeNotifyTest::test_change_notify_file_name,base,green,
 compound.py::CompoundTest::test_create_close,base,green,
@@ -85,10 +85,10 @@ durable.py::DurableHandleTest::test_durable_v2_invalidate,persistent,green,
 durable.py::DurableHandleTest::test_durable_v2_timer,persistent,green,
 durable.py::DurableHandleTest::test_resiliency_buffer_too_small,persistent,green,
 durable.py::DurableHandleTest::test_resiliency_reconnect_after_timeout,persistent,green,
-durable.py::DurableHandleTest::test_resiliency_reconnect_before_timeout,persistent,xfail,AssertionError: SMB2_LEASE_READ_CACHING | SMB2_LEASE_WRITE_CACHING != SMB2_LEASE_READ_CACH
+durable.py::DurableHandleTest::test_resiliency_reconnect_before_timeout,persistent,green,
 durable.py::DurableHandleTest::test_resiliency_upgrade_buffer_too_small,persistent,green,
 durable.py::DurableHandleTest::test_resiliency_upgrade_reconnect_after_timeout,persistent,green,
-durable.py::DurableHandleTest::test_resiliency_upgrade_reconnect_before_timeout,persistent,xfail,AssertionError: SMB2_LEASE_READ_CACHING | SMB2_LEASE_WRITE_CACHING != SMB2_LEASE_READ_CACH
+durable.py::DurableHandleTest::test_resiliency_upgrade_reconnect_before_timeout,persistent,green,
 echo.py::EchoTest::test_echo,base,green,
 encryption.py::TestEncryption::test_smb_3_0_2_encryption,encryption,green,
 encryption.py::TestEncryption::test_smb_3_0_encryption,encryption,green,
@@ -133,15 +133,15 @@ negotiate.py::NegotiateContext::test_encryption_capabilities_ccm,base,green,
 negotiate.py::NegotiateContext::test_encryption_capabilities_gcm,base,green,
 negotiate.py::NegotiateContext::test_preauth_integrity_capabilities,base,green,
 oplock.py::OplockTest::test_oplock_break,base,green,
-persistent.py::Persistent::test_buffer_too_small,persistent,xfail,wants OneFS BUFFER_TOO_SMALL for short resiliency FSCTL (chimera+durable suite use INVALID_PARAMETER); also cluster-A blocked
+persistent.py::Persistent::test_buffer_too_small,persistent,xfail,OneFS-only: persistent.py wants BUFFER_TOO_SMALL but pike durable.py wants INVALID_PARAMETER (chimera returns the latter) -- contradictory
 persistent.py::Persistent::test_create,persistent,green,
-persistent.py::Persistent::test_open_while_disconnected,persistent,xfail,"AssertionError: No error raised when ""STATUS_FILE_NOT_AVAILABLE"" expected"
+persistent.py::Persistent::test_open_while_disconnected,persistent,green,
 persistent.py::Persistent::test_reconnect,persistent,green,
-persistent.py::Persistent::test_reconnect_fails,persistent,xfail,"AssertionError: No error raised when ""STATUS_OBJECT_NAME_NOT_FOUND"" expected"
+persistent.py::Persistent::test_reconnect_fails,persistent,xfail,pike-bug: persistent=False inherits durable_flags=PERSISTENT (model.py:1477) so the DH2C reconnect is byte-identical to the passing test_reconnect -- cannot trigger 3.3.5.9.12 ONNF
 persistent.py::Persistent::test_resiliency_reconnect_after_timeout,persistent,green,
-persistent.py::Persistent::test_resiliency_reconnect_before_timeout,persistent,xfail,"AssertionError: No error raised when ""STATUS_FILE_NOT_AVAILABLE"" expected"
-persistent.py::Persistent::test_resiliency_same_timeout_reconnect_after_timeout,persistent,xfail,cluster-A: new open should displace the expired handle so reconnect fails OBJECT_NAME_NOT_FOUND
-persistent.py::Persistent::test_resiliency_same_timeout_reconnect_before_timeout,persistent,xfail,"AssertionError: No error raised when ""STATUS_FILE_NOT_AVAILABLE"" expected"
+persistent.py::Persistent::test_resiliency_reconnect_before_timeout,persistent,green,
+persistent.py::Persistent::test_resiliency_same_timeout_reconnect_after_timeout,persistent,green,
+persistent.py::Persistent::test_resiliency_same_timeout_reconnect_before_timeout,persistent,green,
 query.py::QueryTest::test_mismatch_0_file_alignment_info,base,green,
 query.py::QueryTest::test_mismatch_0_file_all_info,base,green,
 query.py::QueryTest::test_mismatch_0_file_basic_info,base,green,
