@@ -560,11 +560,24 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
         if (chimera_smb_is_error_status(request->status) &&
             !(request->smb2_hdr.command == SMB2_IOCTL &&
               request->ioctl.cc_limit_response)) {
-            evpl_iovec_cursor_append_uint16(&reply_cursor, SMB2_ERROR_REPLY_SIZE);
-            evpl_iovec_cursor_append_uint16(&reply_cursor, 0);
-            evpl_iovec_cursor_append_uint16(&reply_cursor, 0);
-            evpl_iovec_cursor_append_uint16(&reply_cursor, 0);
-            evpl_iovec_cursor_append_uint8(&reply_cursor, 0);
+            if (request->status == SMB2_STATUS_BUFFER_TOO_SMALL &&
+                request->smb2_hdr.command == SMB2_QUERY_INFO) {
+                /* MS-SMB2 2.2.2 / 3.3.4.4: a QUERY_INFO that fails
+                 * STATUS_BUFFER_TOO_SMALL returns an ERROR Response whose
+                 * ByteCount is 4 and whose ErrorData is the minimum buffer
+                 * length the client must supply (stashed in output_length). */
+                evpl_iovec_cursor_append_uint16(&reply_cursor, SMB2_ERROR_REPLY_SIZE);
+                evpl_iovec_cursor_append_uint16(&reply_cursor, 0); /* ErrorContextCount + Reserved */
+                evpl_iovec_cursor_append_uint32(&reply_cursor, 4); /* ByteCount */
+                evpl_iovec_cursor_append_uint32(&reply_cursor,
+                                                request->query_info.output_length);
+            } else {
+                evpl_iovec_cursor_append_uint16(&reply_cursor, SMB2_ERROR_REPLY_SIZE);
+                evpl_iovec_cursor_append_uint16(&reply_cursor, 0);
+                evpl_iovec_cursor_append_uint16(&reply_cursor, 0);
+                evpl_iovec_cursor_append_uint16(&reply_cursor, 0);
+                evpl_iovec_cursor_append_uint8(&reply_cursor, 0);
+            }
         } else {
             switch (request->smb2_hdr.command) {
                 case SMB2_NEGOTIATE:
