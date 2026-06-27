@@ -84,19 +84,19 @@ BreakReadHandleLeaseV1TestCaseS1333,base,green,0,
 BreakReadHandleLeaseV1TestCaseS1365,base,green,0,
 BreakReadHandleLeaseV1TestCaseS1389,base,green,0,
 BreakReadHandleLeaseV1TestCaseS1413,base,green,0,
-BreakReadHandleLeaseV1TestCaseS144,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadHandleLeaseV1TestCaseS144,base,green,0,
 BreakReadHandleLeaseV1TestCaseS1445,base,green,0,
 BreakReadHandleLeaseV1TestCaseS1469,base,green,0,
 BreakReadHandleLeaseV1TestCaseS1493,base,green,0,
 BreakReadHandleLeaseV1TestCaseS1517,base,green,0,
 BreakReadHandleLeaseV1TestCaseS1538,base,green,0,
-BreakReadHandleLeaseV1TestCaseS1570,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadHandleLeaseV1TestCaseS1570,base,green,0,
 BreakReadHandleLeaseV1TestCaseS1591,base,green,0,
 BreakReadHandleLeaseV1TestCaseS1611,base,green,0,
 BreakReadHandleLeaseV1TestCaseS1624,base,green,0,
 BreakReadHandleLeaseV1TestCaseS1637,base,green,0,
 BreakReadHandleLeaseV1TestCaseS1650,base,green,0,
-BreakReadHandleLeaseV1TestCaseS1663,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadHandleLeaseV1TestCaseS1663,base,green,0,
 BreakReadHandleLeaseV1TestCaseS1676,base,green,0,
 BreakReadHandleLeaseV1TestCaseS1697,base,green,0,
 BreakReadHandleLeaseV1TestCaseS1710,base,green,0,
@@ -108,16 +108,16 @@ BreakReadHandleLeaseV1TestCaseS1778,base,green,0,
 BreakReadHandleLeaseV1TestCaseS1799,base,green,0,
 BreakReadHandleLeaseV1TestCaseS1820,base,green,0,
 BreakReadHandleLeaseV1TestCaseS184,base,green,0,
-BreakReadHandleLeaseV1TestCaseS1841,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadHandleLeaseV1TestCaseS1841,base,green,0,
 BreakReadHandleLeaseV1TestCaseS1862,base,green,0,
 BreakReadHandleLeaseV1TestCaseS1878,base,green,0,
 BreakReadHandleLeaseV1TestCaseS1898,base,green,0,
 BreakReadHandleLeaseV1TestCaseS1911,base,green,0,
 BreakReadHandleLeaseV1TestCaseS1924,base,green,0,
-BreakReadHandleLeaseV1TestCaseS1937,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadHandleLeaseV1TestCaseS1937,base,green,0,
 BreakReadHandleLeaseV1TestCaseS1950,base,green,0,
 BreakReadHandleLeaseV1TestCaseS1971,base,green,0,
-BreakReadHandleLeaseV1TestCaseS1992,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadHandleLeaseV1TestCaseS1992,base,green,0,
 BreakReadHandleLeaseV1TestCaseS2005,base,green,0,
 BreakReadHandleLeaseV1TestCaseS2018,base,green,0,
 BreakReadHandleLeaseV1TestCaseS2031,base,green,0,
@@ -125,22 +125,22 @@ BreakReadHandleLeaseV1TestCaseS2044,base,green,0,
 BreakReadHandleLeaseV1TestCaseS2046,base,green,0,
 BreakReadHandleLeaseV1TestCaseS2059,base,xfail,0,lease-break ack on already-settled break returns STATUS_UNSUCCESSFUL
 BreakReadHandleLeaseV1TestCaseS224,base,green,0,
-BreakReadHandleLeaseV1TestCaseS275,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadHandleLeaseV1TestCaseS275,base,green,0,
 BreakReadHandleLeaseV1TestCaseS315,base,green,0,
 BreakReadHandleLeaseV1TestCaseS366,base,green,0,
 BreakReadHandleLeaseV1TestCaseS406,base,green,0,
 BreakReadHandleLeaseV1TestCaseS446,base,green,0,
 BreakReadHandleLeaseV1TestCaseS470,base,green,0,
-BreakReadHandleLeaseV1TestCaseS494,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadHandleLeaseV1TestCaseS494,base,green,0,
 BreakReadHandleLeaseV1TestCaseS534,base,green,0,
-BreakReadHandleLeaseV1TestCaseS574,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadHandleLeaseV1TestCaseS574,base,green,0,
 BreakReadHandleLeaseV1TestCaseS614,base,green,0,
 BreakReadHandleLeaseV1TestCaseS648,base,green,0,
 BreakReadHandleLeaseV1TestCaseS682,base,green,0,
-BreakReadHandleLeaseV1TestCaseS714,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadHandleLeaseV1TestCaseS714,base,green,0,
 BreakReadHandleLeaseV1TestCaseS738,base,green,0,
 BreakReadHandleLeaseV1TestCaseS75,base,green,0,
-BreakReadHandleLeaseV1TestCaseS762,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadHandleLeaseV1TestCaseS762,base,green,0,
 BreakReadHandleLeaseV1TestCaseS794,base,green,0,
 BreakReadHandleLeaseV1TestCaseS834,base,green,0,
 BreakReadHandleLeaseV1TestCaseS858,base,green,0,
@@ -154,21 +154,21 @@ BreakReadHandleLeaseV2TestCaseS135,base,green,0,
 BreakReadHandleLeaseV2TestCaseS175,base,green,0,
 BreakReadHandleLeaseV2TestCaseS215,base,green,0,
 BreakReadHandleLeaseV2TestCaseS247,base,green,0,
-BreakReadHandleLeaseV2TestCaseS279,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
-BreakReadHandleLeaseV2TestCaseS319,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadHandleLeaseV2TestCaseS279,base,green,0,
+BreakReadHandleLeaseV2TestCaseS319,base,green,0,
 BreakReadHandleLeaseV2TestCaseS359,base,green,0,
 BreakReadHandleLeaseV2TestCaseS399,base,green,0,
-BreakReadHandleLeaseV2TestCaseS439,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadHandleLeaseV2TestCaseS439,base,green,0,
 BreakReadHandleLeaseV2TestCaseS478,base,green,0,
 BreakReadHandleLeaseV2TestCaseS513,base,green,0,
 BreakReadHandleLeaseV2TestCaseS537,base,green,0,
 BreakReadHandleLeaseV2TestCaseS564,base,green,0,
 BreakReadHandleLeaseV2TestCaseS595,base,green,0,
 BreakReadHandleLeaseV2TestCaseS619,base,green,0,
-BreakReadHandleLeaseV2TestCaseS643,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadHandleLeaseV2TestCaseS643,base,green,0,
 BreakReadHandleLeaseV2TestCaseS667,base,green,0,
-BreakReadHandleLeaseV2TestCaseS691,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
-BreakReadHandleLeaseV2TestCaseS723,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadHandleLeaseV2TestCaseS691,base,green,0,
+BreakReadHandleLeaseV2TestCaseS723,base,green,0,
 BreakReadHandleLeaseV2TestCaseS742,base,green,0,
 BreakReadHandleLeaseV2TestCaseS763,base,green,0,
 BreakReadHandleLeaseV2TestCaseS776,base,green,0,
@@ -179,9 +179,9 @@ BreakReadHandleLeaseV2TestCaseS84,base,green,0,
 BreakReadHandleLeaseV2TestCaseS843,base,green,0,
 BreakReadHandleLeaseV2TestCaseS859,base,green,0,
 BreakReadHandleLeaseV2TestCaseS872,base,green,0,
-BreakReadHandleLeaseV2TestCaseS885,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadHandleLeaseV2TestCaseS885,base,green,0,
 BreakReadHandleLeaseV2TestCaseS898,base,green,0,
-BreakReadHandleLeaseV2TestCaseS911,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadHandleLeaseV2TestCaseS911,base,green,0,
 BreakReadHandleLeaseV2TestCaseS924,base,green,0,
 BreakReadHandleLeaseV2TestCaseS937,base,green,0,
 BreakReadHandleLeaseV2TestCaseS950,base,green,0,
@@ -261,77 +261,77 @@ BreakReadWriteHandleLeaseV1TestCaseS1138,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS1182,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS1229,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS1261,base,green,0,
-BreakReadWriteHandleLeaseV1TestCaseS1300,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV1TestCaseS1300,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS1336,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS1368,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS1407,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS1439,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS1478,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS1510,base,green,0,
-BreakReadWriteHandleLeaseV1TestCaseS1542,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV1TestCaseS1542,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS1578,base,green,0,
-BreakReadWriteHandleLeaseV1TestCaseS1635,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV1TestCaseS1635,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS1675,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS1723,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS1763,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS1807,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS184,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS1856,base,green,0,
-BreakReadWriteHandleLeaseV1TestCaseS1896,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
-BreakReadWriteHandleLeaseV1TestCaseS1936,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
-BreakReadWriteHandleLeaseV1TestCaseS1972,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV1TestCaseS1896,base,xfail,0,xfail: parent-dir-rename handle-break (RWH->RW): server breaks W (RWH->RH) not H
+BreakReadWriteHandleLeaseV1TestCaseS1936,base,xfail,0,xfail: parent-dir-rename handle-break (RWH->RW): server breaks W (RWH->RH) not H
+BreakReadWriteHandleLeaseV1TestCaseS1972,base,xfail,0,xfail: parent-dir-rename handle-break (RWH->RW): server breaks W (RWH->RH) not H
 BreakReadWriteHandleLeaseV1TestCaseS2008,base,green,0,
-BreakReadWriteHandleLeaseV1TestCaseS2036,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV1TestCaseS2036,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS2068,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS2104,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS2140,base,green,0,
-BreakReadWriteHandleLeaseV1TestCaseS2187,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
-BreakReadWriteHandleLeaseV1TestCaseS2227,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV1TestCaseS2187,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS2227,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS2266,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS2306,base,green,0,
-BreakReadWriteHandleLeaseV1TestCaseS232,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV1TestCaseS232,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS2345,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS2380,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS2412,base,green,0,
-BreakReadWriteHandleLeaseV1TestCaseS2452,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV1TestCaseS2452,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS2484,base,green,0,
-BreakReadWriteHandleLeaseV1TestCaseS2520,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV1TestCaseS2520,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS2552,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS2588,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS2624,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS2656,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS2692,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS2728,base,green,0,
-BreakReadWriteHandleLeaseV1TestCaseS2768,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
-BreakReadWriteHandleLeaseV1TestCaseS2792,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV1TestCaseS2768,base,xfail,0,xfail: parent-dir-rename handle-break (RWH->RW): server breaks W (RWH->RH) not H
+BreakReadWriteHandleLeaseV1TestCaseS2792,base,xfail,0,xfail: parent-dir-rename handle-break (RWH->RW): server breaks W (RWH->RH) not H
 BreakReadWriteHandleLeaseV1TestCaseS280,base,green,0,
-BreakReadWriteHandleLeaseV1TestCaseS2828,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV1TestCaseS2828,base,xfail,0,xfail: parent-dir-rename handle-break (RWH->RW): server breaks W (RWH->RH) not H
 BreakReadWriteHandleLeaseV1TestCaseS2868,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS2900,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS2916,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS2952,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS2988,base,green,0,
-BreakReadWriteHandleLeaseV1TestCaseS3032,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV1TestCaseS3032,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS3064,base,green,0,
-BreakReadWriteHandleLeaseV1TestCaseS3088,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV1TestCaseS3088,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS3124,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS3167,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS3207,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS3246,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS3290,base,green,0,
-BreakReadWriteHandleLeaseV1TestCaseS3322,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV1TestCaseS3322,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS333,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS3361,base,green,0,
-BreakReadWriteHandleLeaseV1TestCaseS3397,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV1TestCaseS3397,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS3432,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS3472,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS3504,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS3536,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS3572,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS3608,base,green,0,
-BreakReadWriteHandleLeaseV1TestCaseS3640,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
-BreakReadWriteHandleLeaseV1TestCaseS3676,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
-BreakReadWriteHandleLeaseV1TestCaseS3712,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV1TestCaseS3640,base,xfail,0,xfail: parent-dir-rename handle-break (RWH->RW): server breaks W (RWH->RH) not H
+BreakReadWriteHandleLeaseV1TestCaseS3676,base,xfail,0,xfail: parent-dir-rename handle-break (RWH->RW): server breaks W (RWH->RH) not H
+BreakReadWriteHandleLeaseV1TestCaseS3712,base,xfail,0,xfail: parent-dir-rename handle-break (RWH->RW): server breaks W (RWH->RH) not H
 BreakReadWriteHandleLeaseV1TestCaseS3752,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS3780,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS3812,base,green,0,
@@ -342,7 +342,7 @@ BreakReadWriteHandleLeaseV1TestCaseS3900,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS3924,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS3933,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS3935,base,green,0,
-BreakReadWriteHandleLeaseV1TestCaseS434,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV1TestCaseS434,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS482,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS530,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS583,base,green,0,
@@ -352,11 +352,11 @@ BreakReadWriteHandleLeaseV1TestCaseS728,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS772,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS812,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS877,base,green,0,
-BreakReadWriteHandleLeaseV1TestCaseS921,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
-BreakReadWriteHandleLeaseV1TestCaseS95,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV1TestCaseS921,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS95,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS961,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS0,base,green,0,
-BreakReadWriteHandleLeaseV2TestCaseS1020,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV2TestCaseS1020,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS1052,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS1084,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS1116,base,green,0,
@@ -364,47 +364,47 @@ BreakReadWriteHandleLeaseV2TestCaseS1140,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS1183,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS1222,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS1258,base,green,0,
-BreakReadWriteHandleLeaseV2TestCaseS1298,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV2TestCaseS1298,base,xfail,0,xfail: parent-dir-rename handle-break (RWH->RW): server breaks W (RWH->RH) not H
 BreakReadWriteHandleLeaseV2TestCaseS130,base,green,0,
-BreakReadWriteHandleLeaseV2TestCaseS1338,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
-BreakReadWriteHandleLeaseV2TestCaseS1366,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV2TestCaseS1338,base,xfail,0,xfail: parent-dir-rename handle-break (RWH->RW): server breaks W (RWH->RH) not H
+BreakReadWriteHandleLeaseV2TestCaseS1366,base,xfail,0,xfail: parent-dir-rename handle-break (RWH->RW): server breaks W (RWH->RH) not H
 BreakReadWriteHandleLeaseV2TestCaseS1393,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS1410,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS1427,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS1444,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS1461,base,green,0,
-BreakReadWriteHandleLeaseV2TestCaseS1478,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV2TestCaseS1478,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS1503,base,green,0,
-BreakReadWriteHandleLeaseV2TestCaseS1528,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV2TestCaseS1528,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS1553,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS1577,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS1594,base,green,0,
-BreakReadWriteHandleLeaseV2TestCaseS1614,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV2TestCaseS1614,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS1631,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS1648,base,green,0,
-BreakReadWriteHandleLeaseV2TestCaseS1665,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV2TestCaseS1665,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS1682,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS1707,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS1724,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS1741,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS1758,base,green,0,
-BreakReadWriteHandleLeaseV2TestCaseS1779,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
-BreakReadWriteHandleLeaseV2TestCaseS1800,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV2TestCaseS1779,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS1800,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS1821,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS1842,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS1866,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS1875,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS1892,base,green,0,
-BreakReadWriteHandleLeaseV2TestCaseS1901,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
-BreakReadWriteHandleLeaseV2TestCaseS1922,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
-BreakReadWriteHandleLeaseV2TestCaseS1943,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV2TestCaseS1901,base,xfail,0,xfail: parent-dir-rename handle-break (RWH->RW): server breaks W (RWH->RH) not H
+BreakReadWriteHandleLeaseV2TestCaseS1922,base,xfail,0,xfail: parent-dir-rename handle-break (RWH->RW): server breaks W (RWH->RH) not H
+BreakReadWriteHandleLeaseV2TestCaseS1943,base,xfail,0,xfail: parent-dir-rename handle-break (RWH->RW): server breaks W (RWH->RH) not H
 BreakReadWriteHandleLeaseV2TestCaseS195,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS1964,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS1973,base,green,0,
-BreakReadWriteHandleLeaseV2TestCaseS243,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
-BreakReadWriteHandleLeaseV2TestCaseS291,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV2TestCaseS243,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS291,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS344,base,green,0,
-BreakReadWriteHandleLeaseV2TestCaseS388,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV2TestCaseS388,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS432,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS480,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS520,base,green,0,
@@ -412,8 +412,8 @@ BreakReadWriteHandleLeaseV2TestCaseS560,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS600,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS636,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS676,base,green,0,
-BreakReadWriteHandleLeaseV2TestCaseS720,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
-BreakReadWriteHandleLeaseV2TestCaseS763,base,xfail,0,lease-break handle: break-notification shape differs from model (NewLeaseState/flags)
+BreakReadWriteHandleLeaseV2TestCaseS720,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS763,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS795,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS834,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS873,base,green,0,

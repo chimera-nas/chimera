@@ -878,6 +878,35 @@ chimera_smb_lock(struct chimera_smb_request *request)
         }
     }
 
+    /* MS-SMB2 3.3.4.x / [MS-FSA] 2.1.5.1.2: requesting a byte-range lock revokes
+     * READ caching on every OTHER holder's lease -- a cached reader cannot be
+     * trusted once another open coordinates access via locks.  This is the same
+     * read-cache revocation a write performs (break to NONE; no acknowledgment
+     * required), so reuse it.  The locker self-exempts via its own grant identity
+     * (RqLs lease key, or file id for a legacy oplock), mirroring the WRITE path,
+     * so a client locking through its own caching handle does not break itself.
+     * (WPTS MS-SMB2Model BreakRead*HandleLease: after the handle break settles the
+     * holder to R, a peer RANGE_LOCK must then break that R lease to NONE.) */
+    {
+        struct chimera_vfs_lease_owner brk_owner;
+        memset(&brk_owner, 0, sizeof(brk_owner));
+        brk_owner.protocol   = CHIMERA_VFS_LEASE_PROTO_SMB2;
+        brk_owner.client_key = request->session_handle->session->client_key;
+        if (open_file->grant) {
+            brk_owner.owner_lo = open_file->grant->lease.owner.owner_lo;
+            brk_owner.owner_hi = open_file->grant->lease.owner.owner_hi;
+            brk_owner.is_lease = open_file->grant->lease.owner.is_lease;
+        } else {
+            brk_owner.owner_lo = open_file->file_id.pid;
+            brk_owner.owner_hi = open_file->file_id.vid;
+        }
+        chimera_vfs_state_break_on_write(vfs_state,
+                                         open_file->handle->fh,
+                                         open_file->handle->fh_len,
+                                         open_file->handle->fh_hash,
+                                         &brk_owner);
+    }
+
     /* LOCK acquire. */
     entry = calloc(1, sizeof(*entry));
     if (!entry) {
