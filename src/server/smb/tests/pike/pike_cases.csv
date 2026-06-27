@@ -92,9 +92,9 @@ durable.py::DurableHandleTest::test_resiliency_upgrade_reconnect_before_timeout,
 echo.py::EchoTest::test_echo,base,green,
 encryption.py::TestEncryption::test_smb_3_0_2_encryption,encryption,green,
 encryption.py::TestEncryption::test_smb_3_0_encryption,encryption,green,
-encryption.py::TestEncryption::test_smb_3_1_1_compound,encryption,xfail,pike.core.BadPacket
-encryption.py::TestEncryption::test_smb_3_1_1_encryption_ccm,encryption,xfail,pike.core.BadPacket
-encryption.py::TestEncryption::test_smb_3_1_1_encryption_gcm,encryption,xfail,pike.core.BadPacket
+encryption.py::TestEncryption::test_smb_3_1_1_compound,encryption,green,
+encryption.py::TestEncryption::test_smb_3_1_1_encryption_ccm,encryption,green,
+encryption.py::TestEncryption::test_smb_3_1_1_encryption_gcm,encryption,green,
 invalid_session.py::InvalidSessionTest::test_ioctl,base,green,
 invalid_session.py::InvalidSessionTest::test_logoff,base,green,
 invalid_session.py::InvalidSessionTest::test_oplock_break_ack,base,green,

@@ -1600,6 +1600,22 @@ chimera_smb_server_handle_smb2(
             goto next_compound_request;
         }
 
+        /* A request received inside a TRANSFORM is authenticated by the AEAD
+         * tag, NOT by a signature: encryption and signing are mutually exclusive
+         * per message (MS-SMB2 3.1.4.3).  Its inner header may nonetheless carry
+         * SMB2_FLAGS_SIGNED (some clients set it before encrypting), but the
+         * message is not signed.  Clear the bit on the request now, because the
+         * reply header inherits the request's flags (see reply_hdr->flags below)
+         * and the reply will itself be encrypted, not signed -- leaving the bit
+         * set would make the encrypted reply falsely advertise SMB2_FLAGS_SIGNED
+         * with no valid signature.  A conformant peer skips verifying a decrypted
+         * message's signature (3.3.5.2.9, which this server also does on receive
+         * just below), but a stricter one verifies whenever the flag is set and
+         * then rejects the reply (pike's SMB 3.1.1 encryption cases). */
+        if (received_encrypted) {
+            request->smb2_hdr.flags &= ~SMB2_FLAGS_SIGNED;
+        }
+
         /* A session that exists globally but has no channel on THIS connection
          * (the handle was attached by the global-session lookup above, e.g.
          * for a channel bind in progress or one that failed) may only be
