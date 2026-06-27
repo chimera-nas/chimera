@@ -4146,9 +4146,9 @@ chimera_smb_create_guid_replay(struct chimera_smb_request *request)
     struct chimera_server_smb_thread *thread = request->compound->thread;
     int                               b;
     bool                              req_is_lease, open_is_lease;
-    bool                              pending_match = false;
+    struct chimera_smb_open_file     *pending_of = NULL;
 
-    for (b = 0; b < CHIMERA_SMB_OPEN_FILE_BUCKETS && !match && !pending_match; b++) {
+    for (b = 0; b < CHIMERA_SMB_OPEN_FILE_BUCKETS && !match && !pending_of; b++) {
         pthread_mutex_lock(&tree->open_files_lock[b]);
         HASH_ITER(hh, tree->open_files[b], of, tmp)
         {
@@ -4162,7 +4162,8 @@ chimera_smb_create_guid_replay(struct chimera_smb_request *request)
             if (request->is_replay &&
                 (of->flags & CHIMERA_SMB_OPEN_FILE_CREATE_PENDING) &&
                 memcmp(of->create_guid, request->create.dh2q.create_guid, 16) == 0) {
-                pending_match = true;
+                of->refcnt++;   /* held while we decide reject vs. evict */
+                pending_of = of;
                 break;
             }
 
@@ -4187,9 +4188,51 @@ chimera_smb_create_guid_replay(struct chimera_smb_request *request)
         pthread_mutex_unlock(&tree->open_files_lock[b]);
     }
 
-    if (pending_match) {
-        chimera_smb_complete_request(request, SMB2_STATUS_FILE_NOT_AVAILABLE);
-        return 1;
+    if (pending_of) {
+        /* A replay matched a still-pending create carrying this create_guid.
+         * Normally the original create is genuinely in flight, so the replay is
+         * answered FILE_NOT_AVAILABLE (MS-SMB2 3.3.5.9.10).  But if that create was
+         * orphaned when its connection disconnected (CREATE_PENDING never resumed)
+         * AND the break it parked on has since settled -- the conflicting holder
+         * closed or acked -- the original create can never complete: evict the
+         * resolved zombie (unhash + full teardown) and fall through to a fresh open.
+         * A still-active break, or a non-orphaned pending create (which resumes
+         * normally), still yields FILE_NOT_AVAILABLE.
+         * smb2.replay.dhv2-pending2*-vs-{lease,oplock}-sane. */
+        struct chimera_vfs_state *vfs_state = thread->vfs_thread->vfs->vfs_state;
+        bool                      evict, won = false;
+
+        evict = (pending_of->flags & CHIMERA_SMB_OPEN_FILE_PENDING_ORPHANED) &&
+            pending_of->handle &&
+            !chimera_vfs_state_caching_breaking(vfs_state,
+                                                pending_of->handle->fh,
+                                                pending_of->handle->fh_len,
+                                                pending_of->handle->fh_hash,
+                                                pending_of->grant);
+
+        if (!evict) {
+            chimera_smb_open_file_release(request, pending_of);
+            chimera_smb_complete_request(request, SMB2_STATUS_FILE_NOT_AVAILABLE);
+            return 1;
+        }
+
+        /* Unhash under the bucket lock (idempotent via CLOSED so concurrent
+         * evictors don't double-unhash); the winner drops the orphan's surviving
+         * handle ref so the open is torn down + freed exactly once.  Every evictor
+         * always drops the scan ref it took above. */
+        b = pending_of->file_id.vid & CHIMERA_SMB_OPEN_FILE_BUCKET_MASK;
+        pthread_mutex_lock(&tree->open_files_lock[b]);
+        if (!(pending_of->flags & CHIMERA_SMB_OPEN_FILE_CLOSED)) {
+            pending_of->flags |= CHIMERA_SMB_OPEN_FILE_CLOSED;
+            HASH_DELETE(hh, tree->open_files[b], pending_of);
+            won = true;
+        }
+        pthread_mutex_unlock(&tree->open_files_lock[b]);
+        chimera_smb_open_file_release(request, pending_of);       /* scan ref */
+        if (won) {
+            chimera_smb_open_file_release(request, pending_of);   /* handle ref */
+        }
+        /* fall through: no pending match remains -> proceed to a fresh open. */
     }
 
     if (!match) {
