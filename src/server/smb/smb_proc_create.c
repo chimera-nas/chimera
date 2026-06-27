@@ -2595,6 +2595,7 @@ chimera_smb_create_open_finish(
 
     request->create.r_open_file       = open_file;
     request->create.dir_break_pending = 0;
+    request->create.park_on_notify    = 0;
 
     open_file->granted_access = request->create.r_granted_access;
     open_file->maximal_access = request->create.r_maximal_access;
@@ -2611,20 +2612,35 @@ chimera_smb_create_open_finish(
          * oplock's deferred handle) is informational -- the holder relinquishes
          * asynchronously and the deferred removal at LAST close still drains the
          * break (chimera_vfs_remove_at's io_recall) -- so this open must NOT wait
-         * for a break ack the holder is never obliged to send.  smbtorture passes
-         * the equivalent flows only because its lease handler auto-acks; the WPTS
+         * for a break ack the holder is never obliged to send (the WPTS
          * MS-SMB2Model BreakRead{,Write}HandleLease holder deliberately never
-         * acks, so waiting here deadlocks the open for the model's ~20s timeout.
+         * acks; waiting for an ack here deadlocks the open for the model's ~20s
+         * timeout).
+         *
+         * But "on notify" means once the break is actually SENT, not merely
+         * queued: park until its notification reaches the holder so this open's
+         * reply cannot overtake the break on the wire.  smbtorture's
+         * smb2.lease.unlink checks lease_break_info.count the instant the unlink
+         * returns -- a cross-connection RH->R break delivered a hair late (the
+         * holder thread had not yet flushed its doorbell) read as count 0 (the
+         * dominant CI flake).  This park resumes the moment the break flush marks
+         * it delivered (chimera_vfs_state_caching_break_pending_notify ->
+         * mark_break_notified), so an ack the holder never sends is irrelevant.
          *
          * A DATA open (read / write / truncate) still pends on a write/read-cache
          * break for flush coherence (smb2.lease.breaking3), and a delete-on-close
          * that ALSO requested its own oplock still parks to re-arbitrate that
          * grant once the holder's break settles (smb2.durable-open.oplock). */
+        struct chimera_vfs_open_handle *oh = open_file->handle;
+
         if (!delete_on_close || open_file->grant != NULL) {
-            struct chimera_vfs_open_handle *oh = open_file->handle;
             will_park = chimera_vfs_state_caching_breaking(vfs_state, oh->fh,
                                                            oh->fh_len, oh->fh_hash,
                                                            open_file->grant);
+        } else if (chimera_vfs_state_caching_break_pending_notify(
+                       vfs_state, oh->fh, oh->fh_len, oh->fh_hash)) {
+            will_park                      = true;
+            request->create.park_on_notify = 1;
         }
     }
 
@@ -2865,14 +2881,23 @@ chimera_smb_create_resume_parked_conn(
      * re-walk / re-cancel the list we are iterating. */
     pp = &conn->parked_requests;
     while ((req = *pp)) {
+        /* req->create is only valid for a parked CREATE; the command check must
+         * gate the create-field reads below (the parked list also carries other
+         * commands, e.g. a byte-range LOCK parked on a lease break).  A
+         * delete-on-close open parked for delivery (park_on_notify) resumes the
+         * moment its break leaves the pending-notify state -- i.e. the
+         * notification has been sent -- whereas an ordinary ack-required park
+         * resumes only once the file's caching leases actually settle. */
         if (req->smb2_hdr.command == SMB2_CREATE &&
-            !chimera_vfs_state_caching_breaking(vfs_state,
-                                                req->create.park_fh,
-                                                req->create.park_fh_len,
-                                                req->create.park_fh_hash,
-                                                req->create.r_open_file
-                                                ? req->create.r_open_file->grant
-                                                : NULL)) {
+            (req->create.park_on_notify
+             ? !chimera_vfs_state_caching_break_pending_notify(
+                 vfs_state, req->create.park_fh, req->create.park_fh_len,
+                 req->create.park_fh_hash)
+             : !chimera_vfs_state_caching_breaking(
+                 vfs_state, req->create.park_fh, req->create.park_fh_len,
+                 req->create.park_fh_hash,
+                 req->create.r_open_file ? req->create.r_open_file->grant
+                                         : NULL))) {
             *pp                  = req->async.park_next;
             req->async.park_next = resume;
             req->async.armed     = 0; /* already unlinked; skip re-cancel */

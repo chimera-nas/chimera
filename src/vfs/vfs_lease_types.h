@@ -148,6 +148,15 @@ struct chimera_vfs_lease {
     uint8_t                           break_floor;
     uint64_t                          break_deadline; /* stopwatch ticks */
 
+    /* Set once the protocol server has actually SENT the outstanding break
+     * notification to the holder (not merely queued it).  Re-armed to 0 each
+     * time a new break begins (begin_break, should_invoke).  A namespace
+     * mutation that completes ON NOTIFY rather than on the holder's ack (an SMB
+     * delete-on-close open whose holder need never ack) waits for this so its
+     * reply cannot overtake the break on the wire -- the cross-connection
+     * ordering smbtorture smb2.lease.unlink checks. */
+    uint8_t                           break_notified;
+
     /* For a SHARE probe only: a caching (handle) lease held under this same
      * key is the requester's own lease (SMB2 same-client, same lease key) and
      * must NOT be broken when acquiring the share — the opens coalesce.  Set by
