@@ -354,6 +354,17 @@ chimera_smb_ioctl(struct chimera_smb_request *request)
                     chimera_smb_open_file_release(request, open_file);
                     chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
                     return;
+                } else if (timeout_ms < CHIMERA_SMB_RESILIENCY_MIN_TIMEOUT_MS) {
+                    /* Enforce a server minimum on the disconnect-survival window.
+                     * A client may request an absurdly short timeout (pike's
+                     * durable resiliency cases ask for 100 ms), but a real handle
+                     * reconnect involves several round trips after the network
+                     * drop; honoring a sub-second timeout literally would expire
+                     * the handle mid-reconnect on a loaded server.  OneFS (whose
+                     * suite these are) likewise floors the granted timeout.  The
+                     * grant is reported only as SUCCESS (no granted-timeout field),
+                     * so raising it is invisible to the client. */
+                    timeout_ms = CHIMERA_SMB_RESILIENCY_MIN_TIMEOUT_MS;
                 }
 
                 /* Register the open in the durable registry (as a non-persistent

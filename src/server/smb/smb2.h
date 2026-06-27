@@ -1074,6 +1074,12 @@ typedef uint8_t smb2_guid[SMB2_GUID_SIZE];
  * default; any larger request is capped at the maximum (MS-SMB2 3.3.5.15.9). */
 #define CHIMERA_SMB_RESILIENCY_DEFAULT_TIMEOUT_MS   120000U
 #define CHIMERA_SMB_RESILIENCY_MAX_TIMEOUT_MS       300000U
+/* Server floor on a requested resiliency timeout: a handle reconnect needs
+ * several round trips after the network drop, so a sub-second window would
+ * expire the handle mid-reconnect under load.  Below every resiliency timeout
+ * the pike persistent.py suite uses (>= 2 s), so it only affects durable.py's
+ * 100 ms cases. */
+#define CHIMERA_SMB_RESILIENCY_MIN_TIMEOUT_MS       1000U
 
 #define SMB2_IO_REPARSE_TAG_NFS                     0x80000014
 #define SMB2_IO_REPARSE_TAG_SYMLINK                 0xA000000C
