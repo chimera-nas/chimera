@@ -584,7 +584,12 @@ chimera_smb_client_open_at(
 {
     uint32_t       disposition;
     uint32_t       desired_access;
-    uint32_t       options = SMB2_FILE_NON_DIRECTORY_FILE;
+    /* A directory open must request FILE_DIRECTORY_FILE; only a non-directory
+     * open may set FILE_NON_DIRECTORY_FILE.  The server now enforces the option
+     * against the target type (FILE_IS_A_DIRECTORY otherwise), so a directory
+     * open that left NON_DIRECTORY_FILE set would be refused. */
+    uint32_t       options = (request->open_at.flags & CHIMERA_VFS_OPEN_DIRECTORY)
+                             ? SMB2_FILE_DIRECTORY_FILE : SMB2_FILE_NON_DIRECTORY_FILE;
     uint8_t        lease_ctx[CHIMERA_SMB_LEASE_CTX_SIZE];
     uint8_t        lease_key[16];
     const uint8_t *ctx     = NULL;
