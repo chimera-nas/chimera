@@ -171,6 +171,13 @@ struct chimera_smb_durable_doc {
     struct chimera_vfs_thread      *vfs_thread;
     struct chimera_vfs_doc_info     doc_info;
     struct chimera_vfs_open_handle *parent_handle;
+    /* FH of the file this delete-on-close targets, so the async remove only
+     * unlinks the name while it still resolves to THIS object -- not a fresh
+     * file another opener created with the same name in the meantime (the
+     * grace-timer reap of a DELETE_ON_CLOSE handle can land arbitrarily late
+     * under load). */
+    uint8_t                         file_fh[CHIMERA_VFS_FH_SIZE];
+    int                             file_fh_len;
 };
 
 static void
@@ -209,10 +216,11 @@ chimera_smb_durable_doc_open_parent_cb(
         return;
     }
     ctx->parent_handle = oh;
-    chimera_vfs_remove_at(ctx->vfs_thread, &ctx->doc_info.cred, oh,
-                          ctx->doc_info.name, ctx->doc_info.name_len, NULL, 0, 0, 0,
-                          NULL, /* parent_lease_skip */
-                          chimera_smb_durable_doc_remove_cb, ctx);
+    chimera_vfs_remove_at_match_fh(ctx->vfs_thread, &ctx->doc_info.cred, oh,
+                                   ctx->doc_info.name, ctx->doc_info.name_len,
+                                   ctx->file_fh, ctx->file_fh_len, 0, 0,
+                                   NULL, /* parent_lease_skip */
+                                   chimera_smb_durable_doc_remove_cb, ctx);
 } /* chimera_smb_durable_doc_open_parent_cb */
 
 /*
@@ -228,11 +236,18 @@ chimera_smb_durable_release_handle(
 {
     struct chimera_smb_durable_doc *ctx;
     struct chimera_vfs_doc_info     doc_info;
+    uint8_t                         file_fh[CHIMERA_VFS_FH_SIZE];
+    int                             file_fh_len;
     int                             need_doc;
 
     if (!open_file->handle) {
         return;
     }
+
+    /* Capture the target file's FH before release_doc clears the handle, so the
+     * async unlink below is inode-scoped (see struct chimera_smb_durable_doc). */
+    file_fh_len = open_file->handle->fh_len;
+    memcpy(file_fh, open_file->handle->fh, file_fh_len);
 
     need_doc          = chimera_vfs_release_doc(thread->vfs_thread, open_file->handle, &doc_info);
     open_file->handle = NULL;
@@ -245,6 +260,8 @@ chimera_smb_durable_release_handle(
     ctx->vfs_thread    = thread->vfs_thread;
     ctx->doc_info      = doc_info;
     ctx->parent_handle = NULL;
+    ctx->file_fh_len   = file_fh_len;
+    memcpy(ctx->file_fh, file_fh, file_fh_len);
 
     chimera_vfs_open_fh(thread->vfs_thread, &ctx->doc_info.cred,
                         ctx->doc_info.parent_fh, ctx->doc_info.parent_fh_len,

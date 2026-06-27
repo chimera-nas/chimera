@@ -844,6 +844,19 @@ struct chimera_vfs_request {
             uint64_t                        name_hash;
             const uint8_t                  *child_fh;     /* Optional: child FH if known */
             int                             child_fh_len; /* 0 if child_fh not provided */
+            /* Inode-scoped removal: when set (with child_fh), the backend MUST
+             * only unlink the name while it still resolves to child_fh -- if the
+             * original object was removed and a new one created with the same
+             * name, the name is left intact.  Used by delete-on-close so an
+             * async unlink cannot destroy an unrelated file another opener
+             * created at the same path.  Default 0 = unconditional by-name
+             * remove (every existing caller's behaviour is unchanged). */
+            uint8_t                         match_child_fh;
+            /* Backend-set: the match_child_fh guard found the name resolving to
+             * a different object and left it intact, so NO unlink happened.
+             * The op still completes OK, but the post-removal bookkeeping
+             * (negative name-cache entry, FILE_REMOVED notify) must be skipped. */
+            uint8_t                         r_unmatched;
             /* SMB3 directory-lease self-exemption (see link_at): spare the dir
              * lease named by the deleting open's ParentLeaseKey from the
              * FILE_REMOVED break on the parent.  NULL caller = break all. */

@@ -23,7 +23,7 @@ chimera_vfs_remove_at_complete(struct chimera_vfs_request *request)
     struct chimera_vfs_name_cache   *name_cache = thread->vfs->vfs_name_cache;
     chimera_vfs_remove_at_callback_t callback   = request->proto_callback;
 
-    if (request->status == CHIMERA_VFS_OK) {
+    if (request->status == CHIMERA_VFS_OK && !request->remove_at.r_unmatched) {
         /* Pick FILE_REMOVED vs DIR_REMOVED based on the removed
          * object's mode.  Clients filtering only SMB2_NOTIFY_CHANGE_DIR_NAME
          * would otherwise miss rmdir entirely, since the SMB
@@ -128,6 +128,7 @@ chimera_vfs_remove_at_dispatch(
     int                              namelen,
     const uint8_t                   *child_fh,
     int                              child_fh_len,
+    int                              match_child_fh,
     uint64_t                         pre_attr_mask,
     uint64_t                         post_attr_mask,
     const uint8_t                   *parent_lease_skip,
@@ -143,14 +144,16 @@ chimera_vfs_remove_at_dispatch(
         return;
     }
 
-    request->opcode                 = CHIMERA_VFS_OP_REMOVE_AT;
-    request->complete               = chimera_vfs_remove_at_complete;
-    request->remove_at.handle       = handle;
-    request->remove_at.name         = name;
-    request->remove_at.namelen      = namelen;
-    request->remove_at.name_hash    = chimera_vfs_hash(name, namelen);
-    request->remove_at.child_fh     = child_fh;
-    request->remove_at.child_fh_len = child_fh_len;
+    request->opcode                   = CHIMERA_VFS_OP_REMOVE_AT;
+    request->complete                 = chimera_vfs_remove_at_complete;
+    request->remove_at.handle         = handle;
+    request->remove_at.name           = name;
+    request->remove_at.namelen        = namelen;
+    request->remove_at.name_hash      = chimera_vfs_hash(name, namelen);
+    request->remove_at.child_fh       = child_fh;
+    request->remove_at.child_fh_len   = child_fh_len;
+    request->remove_at.match_child_fh = match_child_fh ? 1 : 0;
+    request->remove_at.r_unmatched    = 0;
     if (parent_lease_skip) {
         memcpy(request->remove_at.parent_lease_skip, parent_lease_skip, 16);
         request->remove_at.parent_lease_skip_valid = 1;
@@ -190,6 +193,7 @@ struct chimera_vfs_remove_at_gate {
     int                              namelen;
     const uint8_t                   *child_fh;
     int                              child_fh_len;
+    int                              match_child_fh;
     uint64_t                         pre_attr_mask;
     uint64_t                         post_attr_mask;
     uint8_t                          parent_lease_skip[16];
@@ -213,7 +217,8 @@ chimera_vfs_remove_at_gate_complete(
 
     chimera_vfs_remove_at_dispatch(gate->thread, gate->cred, gate->handle,
                                    gate->name, gate->namelen, gate->child_fh,
-                                   gate->child_fh_len, gate->pre_attr_mask,
+                                   gate->child_fh_len, gate->match_child_fh,
+                                   gate->pre_attr_mask,
                                    gate->post_attr_mask,
                                    gate->parent_lease_skip_valid ?
                                    gate->parent_lease_skip : NULL,
@@ -222,8 +227,8 @@ chimera_vfs_remove_at_gate_complete(
     free(gate);
 } /* chimera_vfs_remove_at_gate_complete */
 
-SYMBOL_EXPORT void
-chimera_vfs_remove_at(
+static void
+chimera_vfs_remove_at_common(
     struct chimera_vfs_thread       *thread,
     const struct chimera_vfs_cred   *cred,
     struct chimera_vfs_open_handle  *handle,
@@ -231,6 +236,7 @@ chimera_vfs_remove_at(
     int                              namelen,
     const uint8_t                   *child_fh,
     int                              child_fh_len,
+    int                              match_child_fh,
     uint64_t                         pre_attr_mask,
     uint64_t                         post_attr_mask,
     const uint8_t                   *parent_lease_skip,
@@ -264,6 +270,7 @@ chimera_vfs_remove_at(
         gate->namelen        = namelen;
         gate->child_fh       = child_fh;
         gate->child_fh_len   = child_fh_len;
+        gate->match_child_fh = match_child_fh;
         gate->pre_attr_mask  = pre_attr_mask;
         gate->post_attr_mask = post_attr_mask;
         if (parent_lease_skip) {
@@ -291,7 +298,60 @@ chimera_vfs_remove_at(
     }
 
     chimera_vfs_remove_at_dispatch(thread, cred, handle, name, namelen,
-                                   child_fh, child_fh_len, pre_attr_mask,
+                                   child_fh, child_fh_len, match_child_fh,
+                                   pre_attr_mask,
                                    post_attr_mask, parent_lease_skip,
                                    callback, private_data);
+} /* chimera_vfs_remove_at_common */
+
+/* Remove a name in a directory (unconditional by-name unlink).  child_fh, when
+ * supplied, is used for delegation/oplock recall and change-notify, NOT to guard
+ * the unlink. */
+SYMBOL_EXPORT void
+chimera_vfs_remove_at(
+    struct chimera_vfs_thread       *thread,
+    const struct chimera_vfs_cred   *cred,
+    struct chimera_vfs_open_handle  *handle,
+    const char                      *name,
+    int                              namelen,
+    const uint8_t                   *child_fh,
+    int                              child_fh_len,
+    uint64_t                         pre_attr_mask,
+    uint64_t                         post_attr_mask,
+    const uint8_t                   *parent_lease_skip,
+    chimera_vfs_remove_at_callback_t callback,
+    void                            *private_data)
+{
+    chimera_vfs_remove_at_common(thread, cred, handle, name, namelen,
+                                 child_fh, child_fh_len, 0 /* match_child_fh */,
+                                 pre_attr_mask, post_attr_mask, parent_lease_skip,
+                                 callback, private_data);
 } /* chimera_vfs_remove_at */
+
+/* Inode-scoped variant: only unlink the name while it STILL resolves to
+ * child_fh.  If the original object was removed and a different one created at
+ * the same name in the meantime, the name is left intact and the callback
+ * reports success (the caller's object is already gone).  Used by delete-on-
+ * close so an async unlink cannot destroy an unrelated file (see
+ * remove_at.match_child_fh).  Requires child_fh; a backend that does not honor
+ * the flag falls back to an unconditional remove. */
+SYMBOL_EXPORT void
+chimera_vfs_remove_at_match_fh(
+    struct chimera_vfs_thread       *thread,
+    const struct chimera_vfs_cred   *cred,
+    struct chimera_vfs_open_handle  *handle,
+    const char                      *name,
+    int                              namelen,
+    const uint8_t                   *child_fh,
+    int                              child_fh_len,
+    uint64_t                         pre_attr_mask,
+    uint64_t                         post_attr_mask,
+    const uint8_t                   *parent_lease_skip,
+    chimera_vfs_remove_at_callback_t callback,
+    void                            *private_data)
+{
+    chimera_vfs_remove_at_common(thread, cred, handle, name, namelen,
+                                 child_fh, child_fh_len, 1 /* match_child_fh */,
+                                 pre_attr_mask, post_attr_mask, parent_lease_skip,
+                                 callback, private_data);
+} /* chimera_vfs_remove_at_match_fh */
