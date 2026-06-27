@@ -2241,6 +2241,93 @@ chimera_vfs_state_caching_breaking(
     return breaking;
 } /* chimera_vfs_state_caching_breaking */
 
+/*
+ * True while a caching break has been BEGUN on this file but its notification
+ * has NOT yet been delivered to the holder (break_notified == 0).  An SMB
+ * delete-on-close open -- a namespace mutation that must complete ON NOTIFY
+ * rather than on an ack the holder need never send -- parks on this so its reply
+ * cannot overtake the break on the wire (smbtorture smb2.lease.unlink, a
+ * cross-connection RH->R handle break).  Once the protocol server flushes the
+ * notification (chimera_vfs_state_mark_break_notified) this returns false and
+ * the parked open resumes.
+ */
+SYMBOL_EXPORT bool
+chimera_vfs_state_caching_break_pending_notify(
+    struct chimera_vfs_state *state,
+    const uint8_t            *fh,
+    uint8_t                   fh_len,
+    uint64_t                  fh_hash)
+{
+    struct chimera_vfs_file_state *file;
+    struct chimera_vfs_lease      *cur;
+    bool                           pending = false;
+
+    if (!state || fh_len == 0) {
+        return false;
+    }
+
+    file = chimera_vfs_state_get(state, fh, fh_len, fh_hash, false);
+    if (!file) {
+        return false;
+    }
+
+    pthread_mutex_lock(&file->lock);
+    for (cur = file->caching_leases; cur; cur = cur->next) {
+        if (cur->break_state == CHIMERA_VFS_BREAK_BREAKING &&
+            !cur->break_notified) {
+            pending = true;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&file->lock);
+
+    chimera_vfs_state_put(state, file);
+    return pending;
+} /* chimera_vfs_state_caching_break_pending_notify */
+
+/*
+ * Mark the outstanding break on this file's SMB2 caching lease identified by
+ * `lease_key` as DELIVERED: the protocol server has now sent the notification on
+ * the wire.  Called from the lease-break flush right after the send, so a
+ * delete-on-close open parked in caching_break_pending_notify resumes only after
+ * its break has actually left for the holder.  No-op if the lease has already
+ * settled (acked/closed) or no longer matches.
+ */
+SYMBOL_EXPORT void
+chimera_vfs_state_mark_break_notified(
+    struct chimera_vfs_state *state,
+    const uint8_t            *fh,
+    uint8_t                   fh_len,
+    uint64_t                  fh_hash,
+    const uint8_t            *lease_key)
+{
+    struct chimera_vfs_file_state *file;
+    struct chimera_vfs_lease      *cur;
+
+    if (!state || fh_len == 0) {
+        return;
+    }
+
+    file = chimera_vfs_state_get(state, fh, fh_len, fh_hash, false);
+    if (!file) {
+        return;
+    }
+
+    pthread_mutex_lock(&file->lock);
+    for (cur = file->caching_leases; cur; cur = cur->next) {
+        if (cur->break_state == CHIMERA_VFS_BREAK_BREAKING &&
+            cur->owner.is_lease &&
+            memcmp(&cur->owner.owner_lo, lease_key, 8) == 0 &&
+            memcmp(&cur->owner.owner_hi, lease_key + 8, 8) == 0) {
+            cur->break_notified = 1;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&file->lock);
+
+    chimera_vfs_state_put(state, file);
+} /* chimera_vfs_state_mark_break_notified */
+
 SYMBOL_EXPORT bool
 chimera_vfs_lease_acquire_cancel(
     struct chimera_vfs_state           *state,
@@ -2433,7 +2520,11 @@ chimera_vfs_lease_begin_break_ex(
         lease->break_state       = CHIMERA_VFS_BREAK_BREAKING;
         lease->break_floor       = floor;
         lease->break_needed_mode = step;
-        lease->break_deadline    = chimera_vfs_now_ticks() +
+        /* A fresh notification is about to be queued for this break: it has not
+         * been delivered to the holder yet (set under file->lock, paired with
+         * break_state, so caching_break_pending_notify observes them together). */
+        lease->break_notified = 0;
+        lease->break_deadline = chimera_vfs_now_ticks() +
             chimera_vfs_ns_to_ticks((uint64_t) deadline_ms * 1000000ULL);
         /* Publish break_ack_required ATOMICALLY with break_state, under file->lock.
          * A break needs a client acknowledgment when it strips write or handle
