@@ -5196,11 +5196,14 @@ build_dhnq_response(
 
 /* Build the QFid (SMB2_CREATE_QUERY_ON_DISK_ID) response body.  32 bytes:
  * DiskFileId(8) | VolumeId(8) | Reserved(16) (MS-SMB2 2.2.14.2.9).  The
- * DiskFileId must be stable across opens of the same file and unique per file;
- * the VFS file-handle hash (a 64-bit hash of the persistent file handle) is
- * exactly such an identifier.  VolumeId/Reserved are left zero -- the client
- * treats the 32 bytes opaquely (it only checks same-file equality and
- * cross-file inequality). */
+ * DiskFileId must be the SAME unique file id the client also obtains via
+ * FileInternalInformation (IndexNumber) and directory queries -- the VFS inode
+ * number (va_ino).  The Linux kernel cifs client cross-checks the two: if the
+ * QFid DiskFileId disagrees with the IndexNumber it re-resolves the open to a
+ * fresh, empty inode after a write and loses the data (cthon basic test5: a
+ * written file is then seen with size 0).  Use the marshaled inode number,
+ * falling back to the handle hash only if it was somehow not reported.
+ * VolumeId/Reserved are left zero. */
 static int
 build_qfid_response(
     struct chimera_smb_request *request,
@@ -5215,7 +5218,11 @@ build_qfid_response(
         return -1;
     }
 
-    disk_id = of->handle->fh_hash;
+    if (request->create.r_attrs.smb_attr_mask & SMB_ATTR_INODE) {
+        disk_id = request->create.r_attrs.smb_ino;
+    } else {
+        disk_id = of->handle->fh_hash;
+    }
 
     memset(out, 0, 32);
     for (i = 0; i < 8; i++) {

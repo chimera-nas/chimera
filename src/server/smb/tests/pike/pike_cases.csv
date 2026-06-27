@@ -171,7 +171,7 @@ queryondiskid.py::TestQueryOnDiskID::test_qfid_diff_file,base,green,
 queryondiskid.py::TestQueryOnDiskID::test_qfid_functional,base,green,
 queryondiskid.py::TestQueryOnDiskID::test_qfid_same_file,base,green,
 queryondiskid.py::TestQueryOnDiskID::test_qfid_same_file_seq,base,green,
-queryondiskid.py::TestQueryOnDiskID::test_qfid_same_file_seq_delete,base,green,
+queryondiskid.py::TestQueryOnDiskID::test_qfid_same_file_seq_delete,base,xfail,wants a unique on-disk id after delete+recreate of the same name; chimera's DiskFileId is the inode number (va_ino) to stay consistent with FileInternalInformation IndexNumber (the Linux cifs client cross-checks them -- a mismatch loses writes), and memfs recycles inode numbers after delete so the recreated file reuses the id. A unique-across-delete id would need a generation-bearing IndexNumber everywhere (separate change)
 readwrite.py::ReadWriteTest::test_write,base,green,
 readwrite.py::ReadWriteTest::test_write_none,base,green,
 readwrite.py::ReadWriteTest::test_write_none_access,base,green,
