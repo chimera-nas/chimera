@@ -137,6 +137,70 @@ chimera_smb_create_error_status(enum chimera_vfs_error error_code)
     } /* switch */
 } /* chimera_smb_create_error_status */
 
+/* Emit the SMB2 ERROR Response carrying a SymbolicLinkErrorResponse body
+ * (MS-SMB2 2.2.2 / 2.2.2.2.1) for a create that STATUS_STOPPED_ON_SYMLINK'd.
+ * The link target (UTF-8, already '\'-separated) and its relative flag were
+ * stashed on the request by the create's readlink step.  Called only when
+ * request->create.r_symlink_error is set; a UTF-16 conversion failure degrades
+ * to the bare 9-byte error body so the client still sees STOPPED_ON_SYMLINK. */
+void
+chimera_smb_create_emit_symlink_error(
+    struct evpl_iovec_cursor   *cursor,
+    struct chimera_smb_request *request)
+{
+    struct chimera_server_smb_thread *thread = request->compound->thread;
+    uint16_t                          utf16[CHIMERA_VFS_PATH_MAX];
+    int                               name_len;
+    uint16_t                          reparse_data_length;
+    uint32_t                          sym_link_length, byte_count, flags;
+
+    name_len = chimera_smb_utf8_to_utf16le(
+        &thread->iconv_ctx,
+        request->create.r_symlink_target,
+        request->create.r_symlink_target_len,
+        utf16,
+        sizeof(utf16));
+
+    if (name_len <= 0) {
+        evpl_iovec_cursor_append_uint16(cursor, SMB2_ERROR_REPLY_SIZE);
+        evpl_iovec_cursor_append_uint16(cursor, 0);
+        evpl_iovec_cursor_append_uint16(cursor, 0);
+        evpl_iovec_cursor_append_uint16(cursor, 0);
+        evpl_iovec_cursor_append_uint8(cursor, 0);
+        return;
+    }
+
+    flags = request->create.r_symlink_relative ?
+        SMB2_SYMLINK_FLAG_RELATIVE : SMB2_SYMLINK_FLAG_ABSOLUTE;
+
+    /* ReparseDataLength counts the SubstituteNameOffset..PathBuffer fields; the
+     * substitute and print names are stored back to back (substitute first). */
+    reparse_data_length = 12 + 2 * name_len;
+    /* SymLinkLength counts everything after itself (SymLinkErrorTag onward). */
+    sym_link_length = 4 /* SymLinkErrorTag */ + 4 /* ReparseTag */ +
+        2 /* ReparseDataLength */ + 2 /* UnparsedPathLength */ + reparse_data_length;
+    byte_count = 4 /* SymLinkLength */ + sym_link_length;
+
+    /* SMB2 ERROR Response header (StructureSize=9, ErrorContextCount=0). */
+    evpl_iovec_cursor_append_uint16(cursor, SMB2_ERROR_REPLY_SIZE);
+    evpl_iovec_cursor_append_uint16(cursor, 0); /* ErrorContextCount + Reserved */
+    evpl_iovec_cursor_append_uint32(cursor, byte_count);
+
+    /* SymbolicLinkErrorResponse (MS-SMB2 2.2.2.2.1). */
+    evpl_iovec_cursor_append_uint32(cursor, sym_link_length);
+    evpl_iovec_cursor_append_uint32(cursor, SMB2_SYMLINK_ERROR_TAG);     /* 'SYML' */
+    evpl_iovec_cursor_append_uint32(cursor, SMB2_IO_REPARSE_TAG_SYMLINK);
+    evpl_iovec_cursor_append_uint16(cursor, reparse_data_length);
+    evpl_iovec_cursor_append_uint16(cursor, 0);        /* UnparsedPathLength */
+    evpl_iovec_cursor_append_uint16(cursor, 0);        /* SubstituteNameOffset */
+    evpl_iovec_cursor_append_uint16(cursor, name_len); /* SubstituteNameLength */
+    evpl_iovec_cursor_append_uint16(cursor, name_len); /* PrintNameOffset */
+    evpl_iovec_cursor_append_uint16(cursor, name_len); /* PrintNameLength */
+    evpl_iovec_cursor_append_uint32(cursor, flags);
+    evpl_iovec_cursor_append_blob(cursor, utf16, name_len); /* SubstituteName */
+    evpl_iovec_cursor_append_blob(cursor, utf16, name_len); /* PrintName */
+} /* chimera_smb_create_emit_symlink_error */
+
 /*
  * Decide what to do when a CREATE carrying an SMB2_CREATE_APP_INSTANCE_ID
  * conflicts with an existing Open that holds the same AppInstanceId on a
@@ -2232,6 +2296,112 @@ chimera_smb_create_open_stream_chain(
         request);
 } /* chimera_smb_create_open_stream_chain */
 
+/* STATUS_STOPPED_ON_SYMLINK must carry a SymbolicLinkErrorResponse body (MS-SMB2
+ * 2.2.2.2.1) so the client can resolve the link and retry.  The target is read
+ * back from a handle on the link (r_symlink_handle) and stashed for the error-
+ * reply builder (chimera_smb_create_emit_symlink_error in smb.c); r_symlink_error
+ * gates the emission.  On any failure we still return the bare error -- a missing
+ * body costs the client only one extra resolve round-trip, never correctness. */
+static void
+chimera_smb_create_symlink_readlink_cb(
+    enum chimera_vfs_error    error_code,
+    int                       target_length,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct chimera_smb_request *request    = private_data;
+    struct chimera_vfs_thread  *vfs_thread = request->compound->thread->vfs_thread;
+    int                         i;
+
+    if (request->create.r_symlink_handle) {
+        chimera_vfs_release(vfs_thread, request->create.r_symlink_handle);
+        request->create.r_symlink_handle = NULL;
+    }
+    chimera_vfs_release(vfs_thread, request->create.parent_handle);
+
+    if (error_code == CHIMERA_VFS_OK && target_length > 0 &&
+        target_length < CHIMERA_VFS_PATH_MAX) {
+        /* SMB substitute names use backslash separators; a leading separator (or
+         * its absence) sets the response's relative/absolute Flags. */
+        request->create.r_symlink_relative =
+            (request->create.r_symlink_target[0] != '/');
+        for (i = 0; i < target_length; i++) {
+            if (request->create.r_symlink_target[i] == '/') {
+                request->create.r_symlink_target[i] = '\\';
+            }
+        }
+        request->create.r_symlink_target_len = target_length;
+        request->create.r_symlink_error      = 1;
+    }
+
+    chimera_smb_complete_request(request, SMB2_STATUS_STOPPED_ON_SYMLINK);
+} /* chimera_smb_create_symlink_readlink_cb */
+
+static void
+chimera_smb_create_symlink_open_cb(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *oh,
+    struct chimera_vfs_attrs       *set_attr,
+    struct chimera_vfs_attrs       *attr,
+    struct chimera_vfs_attrs       *dir_pre_attr,
+    struct chimera_vfs_attrs       *dir_post_attr,
+    void                           *private_data)
+{
+    struct chimera_smb_request *request    = private_data;
+    struct chimera_vfs_thread  *vfs_thread = request->compound->thread->vfs_thread;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        /* Could not reopen the link to read its target -- return the bare error. */
+        chimera_vfs_release(vfs_thread, request->create.parent_handle);
+        chimera_smb_complete_request(request, SMB2_STATUS_STOPPED_ON_SYMLINK);
+        return;
+    }
+
+    request->create.r_symlink_handle = oh;
+
+    chimera_vfs_readlink(
+        vfs_thread,
+        &request->session_handle->session->cred,
+        oh,
+        request->create.r_symlink_target,
+        CHIMERA_VFS_PATH_MAX,
+        0,
+        chimera_smb_create_symlink_readlink_cb,
+        request);
+} /* chimera_smb_create_symlink_open_cb */
+
+/* A create stopped on a symbolic-link leaf (memfs returned ELOOP under the
+ * STOP_SYMLINK open).  Reopen the link itself (NOFOLLOW) to read its target for
+ * the SymbolicLinkErrorResponse body, then complete.  parent_handle is held
+ * until the readlink callback releases it. */
+static void
+chimera_smb_create_stopped_on_symlink(struct chimera_smb_request *request)
+{
+    struct chimera_vfs_thread *vfs_thread = request->compound->thread->vfs_thread;
+
+    request->create.r_symlink_handle = NULL;
+
+    /* open_at requires a (non-NULL) set_attr even for a pure open; this open
+     * carries no CREATE flag so the attrs are not applied. */
+    memset(&request->create.set_attr, 0, sizeof(request->create.set_attr));
+
+    chimera_vfs_open_at(
+        vfs_thread,
+        &request->session_handle->session->cred,
+        request->create.parent_handle,
+        request->create.name,
+        request->create.name_len,
+        /* O_PATH|O_NOFOLLOW: open the link itself (memfs returns ELOOP for a bare
+        * NOFOLLOW data open of a symlink leaf; PATH requests the link handle). */
+        CHIMERA_VFS_OPEN_NOFOLLOW | CHIMERA_VFS_OPEN_PATH,
+        &request->create.set_attr,
+        CHIMERA_VFS_ATTR_FH,
+        0,
+        0,
+        chimera_smb_create_symlink_open_cb,
+        request);
+} /* chimera_smb_create_stopped_on_symlink */
+
 static inline void
 chimera_smb_create_open_at_callback(
     enum chimera_vfs_error          error_code,
@@ -2247,6 +2417,13 @@ chimera_smb_create_open_at_callback(
     struct chimera_smb_open_file *open_file;
 
     if (error_code != CHIMERA_VFS_OK) {
+        if (error_code == CHIMERA_VFS_ELOOP) {
+            /* Stopped on a symbolic-link leaf: read the link target for the
+             * SymbolicLinkErrorResponse body before completing (the readlink
+             * callback releases parent_handle). */
+            chimera_smb_create_stopped_on_symlink(request);
+            return;
+        }
         chimera_smb_create_release_parent(request);
         chimera_smb_complete_request(request, chimera_smb_create_error_status(error_code));
         return;
@@ -2259,9 +2436,18 @@ chimera_smb_create_open_at_callback(
      * inode's attributes for a non-NOFOLLOW open of a final-component symlink. */
     if ((attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) && S_ISLNK(attr->va_mode) &&
         !(request->create.create_options & SMB2_FILE_OPEN_REPARSE_POINT)) {
-        chimera_vfs_release(vfs_thread, oh);
-        chimera_vfs_release(vfs_thread, request->create.parent_handle);
-        chimera_smb_complete_request(request, SMB2_STATUS_STOPPED_ON_SYMLINK);
+        /* Read the link target for the error body, then complete (the callback
+         * releases oh via r_symlink_handle and parent_handle). */
+        request->create.r_symlink_handle = oh;
+        chimera_vfs_readlink(
+            vfs_thread,
+            &request->session_handle->session->cred,
+            oh,
+            request->create.r_symlink_target,
+            CHIMERA_VFS_PATH_MAX,
+            0,
+            chimera_smb_create_symlink_readlink_cb,
+            request);
         return;
     }
 
@@ -4462,6 +4648,8 @@ chimera_smb_create(struct chimera_smb_request *request)
     request->create.access_retry_oh        = NULL;
     request->create.share_conflict_retries = 0;
     request->create.share_conflict_oh      = NULL;
+    request->create.r_symlink_error        = 0;
+    request->create.r_symlink_handle       = NULL;
 
     /* A TWRP ("@GMT-..." timewarp) create context opens a file as of a VSS
      * snapshot.  chimera exposes no snapshots, so any non-zero timewarp names a
