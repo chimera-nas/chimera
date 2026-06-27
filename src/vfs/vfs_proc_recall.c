@@ -98,14 +98,17 @@ chimera_vfs_recall_caching_fh_complete(struct chimera_vfs_request *request)
 } /* chimera_vfs_recall_caching_fh_complete */
 
 /* Single-step recall of EVERY caching lease on the file named by a bare FH
- * (no open handle, so nothing is spared), breaking each holder's handle cache
- * once (RH -> R) and PARKing until the recall drains, then report whether a
- * holder kept the file open.  A well-behaved holder closes on the handle-lease
- * break (freeing its share reservation); a holder that only acks keeps the file
- * open at R.  Used by the SMB directory-rename path to break the handle leases
- * of files open inside a directory being renamed (MS-SMB2 / Windows: a
- * directory rename breaks the handle lease of each contained open and proceeds
- * only once every holder has released). */
+ * (no open handle, so nothing is spared), breaking each holder's HANDLE cache
+ * once -- and ONLY the handle cache (RWH -> RW, RH -> R) -- then PARKing until
+ * the recall drains and reporting whether a holder kept the file open.  A
+ * directory rename invalidates only the cached path/handle of a contained open,
+ * not its data: per MS-SMB2 3.3.4.7 / [MS-FSA] 2.1.5.1.2 the handle-caching bit
+ * is revoked while read+write caching is retained, so the retain floor is R|W
+ * (a single RWH->RW break, NOT a RWH->RH->R cascade that would strip the write
+ * cache first).  A well-behaved holder closes on the handle-lease break (freeing
+ * its share reservation); a holder that only acks keeps the file open.  Used by
+ * the SMB directory-rename path to break the handle leases of files open inside
+ * a directory being renamed. */
 SYMBOL_EXPORT void
 chimera_vfs_recall_caching_fh(
     struct chimera_vfs_thread       *thread,
@@ -131,6 +134,6 @@ chimera_vfs_recall_caching_fh(
     request->proto_private_data = private_data;
 
     chimera_vfs_io_recall_single(request, fh, fh_len, request->fh_hash,
-                                 CHIMERA_VFS_LEASE_MODE_R,
+                                 CHIMERA_VFS_LEASE_MODE_R | CHIMERA_VFS_LEASE_MODE_W,
                                  chimera_vfs_recall_caching_fh_complete);
 } /* chimera_vfs_recall_caching_fh */

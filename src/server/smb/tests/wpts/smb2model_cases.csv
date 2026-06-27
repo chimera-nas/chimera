@@ -277,9 +277,9 @@ BreakReadWriteHandleLeaseV1TestCaseS1763,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS1807,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS184,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS1856,base,green,0,
-BreakReadWriteHandleLeaseV1TestCaseS1896,base,xfail,0,xfail: parent-dir-rename handle-break (RWH->RW): server breaks W (RWH->RH) not H
-BreakReadWriteHandleLeaseV1TestCaseS1936,base,xfail,0,xfail: parent-dir-rename handle-break (RWH->RW): server breaks W (RWH->RH) not H
-BreakReadWriteHandleLeaseV1TestCaseS1972,base,xfail,0,xfail: parent-dir-rename handle-break (RWH->RW): server breaks W (RWH->RH) not H
+BreakReadWriteHandleLeaseV1TestCaseS1896,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS1936,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS1972,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS2008,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS2036,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS2068,base,green,0,
@@ -302,10 +302,10 @@ BreakReadWriteHandleLeaseV1TestCaseS2624,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS2656,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS2692,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS2728,base,green,0,
-BreakReadWriteHandleLeaseV1TestCaseS2768,base,xfail,0,xfail: parent-dir-rename handle-break (RWH->RW): server breaks W (RWH->RH) not H
-BreakReadWriteHandleLeaseV1TestCaseS2792,base,xfail,0,xfail: parent-dir-rename handle-break (RWH->RW): server breaks W (RWH->RH) not H
+BreakReadWriteHandleLeaseV1TestCaseS2768,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS2792,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS280,base,green,0,
-BreakReadWriteHandleLeaseV1TestCaseS2828,base,xfail,0,xfail: parent-dir-rename handle-break (RWH->RW): server breaks W (RWH->RH) not H
+BreakReadWriteHandleLeaseV1TestCaseS2828,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS2868,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS2900,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS2916,base,green,0,
@@ -329,9 +329,9 @@ BreakReadWriteHandleLeaseV1TestCaseS3504,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS3536,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS3572,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS3608,base,green,0,
-BreakReadWriteHandleLeaseV1TestCaseS3640,base,xfail,0,xfail: parent-dir-rename handle-break (RWH->RW): server breaks W (RWH->RH) not H
-BreakReadWriteHandleLeaseV1TestCaseS3676,base,xfail,0,xfail: parent-dir-rename handle-break (RWH->RW): server breaks W (RWH->RH) not H
-BreakReadWriteHandleLeaseV1TestCaseS3712,base,xfail,0,xfail: parent-dir-rename handle-break (RWH->RW): server breaks W (RWH->RH) not H
+BreakReadWriteHandleLeaseV1TestCaseS3640,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS3676,base,green,0,
+BreakReadWriteHandleLeaseV1TestCaseS3712,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS3752,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS3780,base,green,0,
 BreakReadWriteHandleLeaseV1TestCaseS3812,base,green,0,
@@ -364,10 +364,10 @@ BreakReadWriteHandleLeaseV2TestCaseS1140,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS1183,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS1222,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS1258,base,green,0,
-BreakReadWriteHandleLeaseV2TestCaseS1298,base,xfail,0,xfail: parent-dir-rename handle-break (RWH->RW): server breaks W (RWH->RH) not H
+BreakReadWriteHandleLeaseV2TestCaseS1298,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS130,base,green,0,
-BreakReadWriteHandleLeaseV2TestCaseS1338,base,xfail,0,xfail: parent-dir-rename handle-break (RWH->RW): server breaks W (RWH->RH) not H
-BreakReadWriteHandleLeaseV2TestCaseS1366,base,xfail,0,xfail: parent-dir-rename handle-break (RWH->RW): server breaks W (RWH->RH) not H
+BreakReadWriteHandleLeaseV2TestCaseS1338,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS1366,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS1393,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS1410,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS1427,base,green,0,
@@ -395,9 +395,9 @@ BreakReadWriteHandleLeaseV2TestCaseS1842,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS1866,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS1875,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS1892,base,green,0,
-BreakReadWriteHandleLeaseV2TestCaseS1901,base,xfail,0,xfail: parent-dir-rename handle-break (RWH->RW): server breaks W (RWH->RH) not H
-BreakReadWriteHandleLeaseV2TestCaseS1922,base,xfail,0,xfail: parent-dir-rename handle-break (RWH->RW): server breaks W (RWH->RH) not H
-BreakReadWriteHandleLeaseV2TestCaseS1943,base,xfail,0,xfail: parent-dir-rename handle-break (RWH->RW): server breaks W (RWH->RH) not H
+BreakReadWriteHandleLeaseV2TestCaseS1901,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS1922,base,green,0,
+BreakReadWriteHandleLeaseV2TestCaseS1943,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS195,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS1964,base,green,0,
 BreakReadWriteHandleLeaseV2TestCaseS1973,base,green,0,
