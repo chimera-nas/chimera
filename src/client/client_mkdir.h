@@ -80,7 +80,7 @@ chimera_dispatch_mkdir_at(
 {
     chimera_vfs_mkdir_at(
         thread->vfs_thread,
-        chimera_client_req_cred(request),
+        chimera_client_req_cred(request), NULL,
         parent_handle,
         request->mkdir.path,
         request->mkdir.path_len,

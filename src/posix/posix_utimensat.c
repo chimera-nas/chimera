@@ -184,7 +184,7 @@ chimera_posix_utimensat_open_complete(
 
     chimera_vfs_setattr(
         request->thread->vfs_thread,
-        chimera_client_req_cred(request),
+        chimera_client_req_cred(request), NULL,
         oh,
         &ctx->set_attr,
         0,  /* pre_attr_mask */
@@ -209,7 +209,7 @@ chimera_posix_utimensat_lookup_complete(
 
     chimera_vfs_open_fh(
         request->thread->vfs_thread,
-        chimera_client_req_cred(request),
+        chimera_client_req_cred(request), NULL,
         attr->va_fh,
         attr->va_fh_len,
         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED,
@@ -226,7 +226,7 @@ chimera_posix_utimensat_exec(
 
     chimera_vfs_lookup(
         thread->vfs_thread,
-        chimera_client_req_cred(request),
+        chimera_client_req_cred(request), NULL,
         ctx->start_fh,
         ctx->start_fh_len,
         ctx->path,

@@ -1855,7 +1855,7 @@ chimera_smb_create_mkdir_callback(
              * the existing entry is a symbolic link). */
             chimera_vfs_open_at(
                 vfs_thread,
-                &request->session_handle->session->cred,
+                &request->session_handle->session->cred, NULL,
                 request->create.parent_handle,
                 request->create.name,
                 request->create.name_len,
@@ -1877,7 +1877,7 @@ chimera_smb_create_mkdir_callback(
             !(request->create.create_options & SMB2_FILE_OPEN_REPARSE_POINT)) {
             chimera_vfs_lookup_at(
                 vfs_thread,
-                &request->session_handle->session->cred,
+                &request->session_handle->session->cred, NULL,
                 request->create.parent_handle,
                 request->create.name,
                 request->create.name_len,
@@ -1906,7 +1906,7 @@ chimera_smb_create_mkdir_callback(
 
     chimera_vfs_open_fh(
         vfs_thread,
-        &request->session_handle->session->cred,
+        &request->session_handle->session->cred, NULL,
         attr->va_fh,
         attr->va_fh_len,
         CHIMERA_VFS_OPEN_PATH,
@@ -2185,7 +2185,7 @@ chimera_smb_create_open_at_callback(
             request->create.access_retry_oh = oh;
             chimera_vfs_getattr(
                 vfs_thread,
-                &request->session_handle->session->cred,
+                &request->session_handle->session->cred, NULL,
                 oh,
                 CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT |
                 CHIMERA_VFS_ATTR_ACL | CHIMERA_VFS_ATTR_BTIME,
@@ -2491,7 +2491,7 @@ chimera_smb_create_share_retry_cb(
     (void) evpl;
 
     chimera_vfs_getattr(vfs_thread,
-                        &request->session_handle->session->cred,
+                        &request->session_handle->session->cred, NULL,
                         oh,
                         CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT |
                         CHIMERA_VFS_ATTR_ACL | CHIMERA_VFS_ATTR_BTIME,
@@ -2595,7 +2595,6 @@ chimera_smb_create_open_finish(
 
     request->create.r_open_file       = open_file;
     request->create.dir_break_pending = 0;
-    request->create.park_on_notify    = 0;
 
     open_file->granted_access = request->create.r_granted_access;
     open_file->maximal_access = request->create.r_maximal_access;
@@ -2612,35 +2611,20 @@ chimera_smb_create_open_finish(
          * oplock's deferred handle) is informational -- the holder relinquishes
          * asynchronously and the deferred removal at LAST close still drains the
          * break (chimera_vfs_remove_at's io_recall) -- so this open must NOT wait
-         * for a break ack the holder is never obliged to send (the WPTS
+         * for a break ack the holder is never obliged to send.  smbtorture passes
+         * the equivalent flows only because its lease handler auto-acks; the WPTS
          * MS-SMB2Model BreakRead{,Write}HandleLease holder deliberately never
-         * acks; waiting for an ack here deadlocks the open for the model's ~20s
-         * timeout).
-         *
-         * But "on notify" means once the break is actually SENT, not merely
-         * queued: park until its notification reaches the holder so this open's
-         * reply cannot overtake the break on the wire.  smbtorture's
-         * smb2.lease.unlink checks lease_break_info.count the instant the unlink
-         * returns -- a cross-connection RH->R break delivered a hair late (the
-         * holder thread had not yet flushed its doorbell) read as count 0 (the
-         * dominant CI flake).  This park resumes the moment the break flush marks
-         * it delivered (chimera_vfs_state_caching_break_pending_notify ->
-         * mark_break_notified), so an ack the holder never sends is irrelevant.
+         * acks, so waiting here deadlocks the open for the model's ~20s timeout.
          *
          * A DATA open (read / write / truncate) still pends on a write/read-cache
          * break for flush coherence (smb2.lease.breaking3), and a delete-on-close
          * that ALSO requested its own oplock still parks to re-arbitrate that
          * grant once the holder's break settles (smb2.durable-open.oplock). */
-        struct chimera_vfs_open_handle *oh = open_file->handle;
-
         if (!delete_on_close || open_file->grant != NULL) {
+            struct chimera_vfs_open_handle *oh = open_file->handle;
             will_park = chimera_vfs_state_caching_breaking(vfs_state, oh->fh,
                                                            oh->fh_len, oh->fh_hash,
                                                            open_file->grant);
-        } else if (chimera_vfs_state_caching_break_pending_notify(
-                       vfs_state, oh->fh, oh->fh_len, oh->fh_hash)) {
-            will_park                      = true;
-            request->create.park_on_notify = 1;
         }
     }
 
@@ -2881,23 +2865,14 @@ chimera_smb_create_resume_parked_conn(
      * re-walk / re-cancel the list we are iterating. */
     pp = &conn->parked_requests;
     while ((req = *pp)) {
-        /* req->create is only valid for a parked CREATE; the command check must
-         * gate the create-field reads below (the parked list also carries other
-         * commands, e.g. a byte-range LOCK parked on a lease break).  A
-         * delete-on-close open parked for delivery (park_on_notify) resumes the
-         * moment its break leaves the pending-notify state -- i.e. the
-         * notification has been sent -- whereas an ordinary ack-required park
-         * resumes only once the file's caching leases actually settle. */
         if (req->smb2_hdr.command == SMB2_CREATE &&
-            (req->create.park_on_notify
-             ? !chimera_vfs_state_caching_break_pending_notify(
-                 vfs_state, req->create.park_fh, req->create.park_fh_len,
-                 req->create.park_fh_hash)
-             : !chimera_vfs_state_caching_breaking(
-                 vfs_state, req->create.park_fh, req->create.park_fh_len,
-                 req->create.park_fh_hash,
-                 req->create.r_open_file ? req->create.r_open_file->grant
-                                         : NULL))) {
+            !chimera_vfs_state_caching_breaking(vfs_state,
+                                                req->create.park_fh,
+                                                req->create.park_fh_len,
+                                                req->create.park_fh_hash,
+                                                req->create.r_open_file
+                                                ? req->create.r_open_file->grant
+                                                : NULL)) {
             *pp                  = req->async.park_next;
             req->async.park_next = resume;
             req->async.armed     = 0; /* already unlinked; skip re-cancel */
@@ -3323,7 +3298,7 @@ chimera_smb_create_open_callback(
     request->create.r_open_file = open_file;
 
     chimera_vfs_getattr(vfs_thread,
-                        &request->session_handle->session->cred,
+                        &request->session_handle->session->cred, NULL,
                         oh,
                         CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT |
                         CHIMERA_VFS_ATTR_ACL,
@@ -3523,7 +3498,7 @@ chimera_smb_create_issue_open(struct chimera_smb_request *request)
         chimera_smb_create_persist_prepare(request, request->create.parent_handle)) {
         chimera_vfs_open_at_hs(
             vfs_thread,
-            &request->session_handle->session->cred,
+            &request->session_handle->session->cred, NULL,
             request->create.parent_handle,
             request->create.name,
             request->create.name_len,
@@ -3539,7 +3514,7 @@ chimera_smb_create_issue_open(struct chimera_smb_request *request)
     } else {
         chimera_vfs_open_at(
             vfs_thread,
-            &request->session_handle->session->cred,
+            &request->session_handle->session->cred, NULL,
             request->create.parent_handle,
             request->create.name,
             request->create.name_len,
@@ -3628,7 +3603,7 @@ chimera_smb_create_open_parent_callback(
 
         chimera_vfs_mkdir_at(
             vfs_thread,
-            &request->session_handle->session->cred,
+            &request->session_handle->session->cred, NULL,
             oh,
             request->create.name,
             request->create.name_len,
@@ -3646,7 +3621,7 @@ chimera_smb_create_open_parent_callback(
          * skipped for streams (the disposition applies to the stream). */
         chimera_vfs_lookup_at(
             vfs_thread,
-            &request->session_handle->session->cred,
+            &request->session_handle->session->cred, NULL,
             oh,
             request->create.name,
             request->create.name_len,
@@ -3686,7 +3661,7 @@ chimera_smb_create_lookup_parent_callback(
 
     chimera_vfs_open_fh(
         vfs_thread,
-        &request->session_handle->session->cred,
+        &request->session_handle->session->cred, NULL,
         attr->va_fh,
         attr->va_fh_len,
         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
@@ -3703,7 +3678,7 @@ chimera_smb_create_process(struct chimera_smb_request *request)
     if (request->create.parent_path_len) {
         chimera_vfs_lookup(
             vfs_thread,
-            &request->session_handle->session->cred,
+            &request->session_handle->session->cred, NULL,
             tree->fh,
             tree->fh_len,
             request->create.parent_path,
@@ -3715,7 +3690,7 @@ chimera_smb_create_process(struct chimera_smb_request *request)
     } else if (request->create.name_len) {
         chimera_vfs_open_fh(
             vfs_thread,
-            &request->session_handle->session->cred,
+            &request->session_handle->session->cred, NULL,
             request->tree->fh,
             request->tree->fh_len,
             CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
@@ -3724,7 +3699,7 @@ chimera_smb_create_process(struct chimera_smb_request *request)
     } else {
         chimera_vfs_open_fh(
             vfs_thread,
-            &request->session_handle->session->cred,
+            &request->session_handle->session->cred, NULL,
             request->tree->fh,
             request->tree->fh_len,
             CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED,
@@ -3783,7 +3758,7 @@ chimera_smb_revalidate_tree(
 
     chimera_vfs_lookup(
         vfs_thread,
-        &request->session_handle->session->cred,
+        &request->session_handle->session->cred, NULL,
         root_fh,
         root_fh_len,
         tree->share->path,
@@ -3860,7 +3835,7 @@ chimera_smb_durable_rehome(
     /* Refresh the network-open-info from the surviving handle, then reply.
      * Reuses the normal create getattr callback (releases the request ref). */
     chimera_vfs_getattr(thread->vfs_thread,
-                        &request->session_handle->session->cred,
+                        &request->session_handle->session->cred, NULL,
                         open_file->handle,
                         CHIMERA_VFS_ATTR_MASK_STAT,
                         chimera_smb_create_open_getattr_callback,
@@ -4146,9 +4121,9 @@ chimera_smb_create_guid_replay(struct chimera_smb_request *request)
     struct chimera_server_smb_thread *thread = request->compound->thread;
     int                               b;
     bool                              req_is_lease, open_is_lease;
-    struct chimera_smb_open_file     *pending_of = NULL;
+    bool                              pending_match = false;
 
-    for (b = 0; b < CHIMERA_SMB_OPEN_FILE_BUCKETS && !match && !pending_of; b++) {
+    for (b = 0; b < CHIMERA_SMB_OPEN_FILE_BUCKETS && !match && !pending_match; b++) {
         pthread_mutex_lock(&tree->open_files_lock[b]);
         HASH_ITER(hh, tree->open_files[b], of, tmp)
         {
@@ -4162,8 +4137,7 @@ chimera_smb_create_guid_replay(struct chimera_smb_request *request)
             if (request->is_replay &&
                 (of->flags & CHIMERA_SMB_OPEN_FILE_CREATE_PENDING) &&
                 memcmp(of->create_guid, request->create.dh2q.create_guid, 16) == 0) {
-                of->refcnt++;   /* held while we decide reject vs. evict */
-                pending_of = of;
+                pending_match = true;
                 break;
             }
 
@@ -4188,51 +4162,9 @@ chimera_smb_create_guid_replay(struct chimera_smb_request *request)
         pthread_mutex_unlock(&tree->open_files_lock[b]);
     }
 
-    if (pending_of) {
-        /* A replay matched a still-pending create carrying this create_guid.
-         * Normally the original create is genuinely in flight, so the replay is
-         * answered FILE_NOT_AVAILABLE (MS-SMB2 3.3.5.9.10).  But if that create was
-         * orphaned when its connection disconnected (CREATE_PENDING never resumed)
-         * AND the break it parked on has since settled -- the conflicting holder
-         * closed or acked -- the original create can never complete: evict the
-         * resolved zombie (unhash + full teardown) and fall through to a fresh open.
-         * A still-active break, or a non-orphaned pending create (which resumes
-         * normally), still yields FILE_NOT_AVAILABLE.
-         * smb2.replay.dhv2-pending2*-vs-{lease,oplock}-sane. */
-        struct chimera_vfs_state *vfs_state = thread->vfs_thread->vfs->vfs_state;
-        bool                      evict, won = false;
-
-        evict = (pending_of->flags & CHIMERA_SMB_OPEN_FILE_PENDING_ORPHANED) &&
-            pending_of->handle &&
-            !chimera_vfs_state_caching_breaking(vfs_state,
-                                                pending_of->handle->fh,
-                                                pending_of->handle->fh_len,
-                                                pending_of->handle->fh_hash,
-                                                pending_of->grant);
-
-        if (!evict) {
-            chimera_smb_open_file_release(request, pending_of);
-            chimera_smb_complete_request(request, SMB2_STATUS_FILE_NOT_AVAILABLE);
-            return 1;
-        }
-
-        /* Unhash under the bucket lock (idempotent via CLOSED so concurrent
-         * evictors don't double-unhash); the winner drops the orphan's surviving
-         * handle ref so the open is torn down + freed exactly once.  Every evictor
-         * always drops the scan ref it took above. */
-        b = pending_of->file_id.vid & CHIMERA_SMB_OPEN_FILE_BUCKET_MASK;
-        pthread_mutex_lock(&tree->open_files_lock[b]);
-        if (!(pending_of->flags & CHIMERA_SMB_OPEN_FILE_CLOSED)) {
-            pending_of->flags |= CHIMERA_SMB_OPEN_FILE_CLOSED;
-            HASH_DELETE(hh, tree->open_files[b], pending_of);
-            won = true;
-        }
-        pthread_mutex_unlock(&tree->open_files_lock[b]);
-        chimera_smb_open_file_release(request, pending_of);       /* scan ref */
-        if (won) {
-            chimera_smb_open_file_release(request, pending_of);   /* handle ref */
-        }
-        /* fall through: no pending match remains -> proceed to a fresh open. */
+    if (pending_match) {
+        chimera_smb_complete_request(request, SMB2_STATUS_FILE_NOT_AVAILABLE);
+        return 1;
     }
 
     if (!match) {
@@ -4313,7 +4245,7 @@ chimera_smb_create_guid_replay(struct chimera_smb_request *request)
     request->compound->saved_file_id = match->file_id;
 
     chimera_vfs_getattr(thread->vfs_thread,
-                        &request->session_handle->session->cred,
+                        &request->session_handle->session->cred, NULL,
                         match->handle,
                         CHIMERA_VFS_ATTR_MASK_STAT,
                         chimera_smb_create_open_getattr_callback,

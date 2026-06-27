@@ -176,7 +176,7 @@ chimera_vfs_copy_fallback_read_cb(
 
     chimera_vfs_write(
         ctx->thread,
-        &ctx->cred,
+        &ctx->cred, NULL,
         ctx->dst_handle,
         ctx->dst_offset,
         count,
@@ -207,7 +207,7 @@ chimera_vfs_copy_fallback_step(struct chimera_vfs_copy_fallback *ctx)
 
     chimera_vfs_read(
         ctx->thread,
-        &ctx->cred,
+        &ctx->cred, NULL,
         ctx->src_handle,
         ctx->src_offset,
         chunk,

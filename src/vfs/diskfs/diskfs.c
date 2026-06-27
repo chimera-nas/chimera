@@ -18,6 +18,69 @@ diskfs_dispatch(
     void                       *private_data);
 
 
+/*
+ * Explicit-transaction lifecycle (CHIMERA_VFS_CAP_TRANSACTIONAL).  The VFS core
+ * allocates the opaque handle (diskfs_txn, txn_size below) and stamps its core
+ * header (wait-die priority + routing key) before any enlisted op runs.  Begin
+ * initializes the diskfs-private portion in place; every enlisted op recovers
+ * the txn from request->transaction (see diskfs_txn_begin) and holds its
+ * locks/blocks until End commits (one intent-log FUA for the whole txn) or
+ * aborts.
+ */
+static void
+diskfs_begin_transaction(
+    struct diskfs_thread       *thread,
+    struct diskfs_shared       *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    struct diskfs_txn   *txn = (struct diskfs_txn *) request->transaction;
+    enum diskfs_txn_type type;
+
+    (void) shared;
+    (void) private_data;
+
+    /* The core allocated and zeroed the handle and stamped its core header;
+     * initialize the diskfs-private portion in place on this owning thread
+     * before the first enlisted op arrives. */
+    type = (txn->core.mode == CHIMERA_VFS_TXN_WRITE)
+           ? DISKFS_TXN_WRITE : DISKFS_TXN_READ;
+
+    diskfs_txn_init(thread, txn, type, 0 /* explicit */);
+
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* diskfs_begin_transaction */
+
+
+static void
+diskfs_end_transaction(
+    struct diskfs_thread       *thread,
+    struct diskfs_shared       *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    struct diskfs_txn *txn = (struct diskfs_txn *) request->transaction;
+
+    (void) thread;
+    (void) shared;
+    (void) private_data;
+
+    if (request->transaction_op.end_flag == CHIMERA_VFS_TXN_ABORT) {
+        diskfs_txn_abort(txn);
+        request->status = CHIMERA_VFS_OK;
+        request->complete(request);
+        return;
+    }
+
+    /* COMMIT_ASYNC and COMMIT_SYNC both commit durably in v1 -- being more
+     * durable than UNSTABLE requires is always NFS-correct; skipping the redo
+     * FUA for COMMIT_ASYNC is a follow-up optimization. */
+    request->status = CHIMERA_VFS_OK;
+    diskfs_txn_commit(txn, diskfs_txn_request_complete_cb, request);
+} /* diskfs_end_transaction */
+
+
 static void
 diskfs_dispatch(
     struct chimera_vfs_request *request,
@@ -124,6 +187,12 @@ diskfs_dispatch(
         case CHIMERA_VFS_OP_GET_LAYOUT:
             diskfs_get_layout(thread, shared, request, private_data);
             break;
+        case CHIMERA_VFS_OP_BEGIN_TRANSACTION:
+            diskfs_begin_transaction(thread, shared, request, private_data);
+            break;
+        case CHIMERA_VFS_OP_END_TRANSACTION:
+            diskfs_end_transaction(thread, shared, request, private_data);
+            break;
         default:
             chimera_diskfs_error("diskfs_dispatch: unknown operation %d",
                                  request->opcode);
@@ -139,6 +208,7 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_diskfs = {
     .fh_magic     = CHIMERA_VFS_FH_MAGIC_DISKFS,
     .capabilities = CHIMERA_VFS_CAP_CREATE_UNLINKED | CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_KV |
         CHIMERA_VFS_CAP_FS_RELATIVE_OP | CHIMERA_VFS_CAP_XATTR | CHIMERA_VFS_CAP_LAYOUT |
+        CHIMERA_VFS_CAP_TRANSACTIONAL |
         /* Require a real open so every file op carries a pinned inode in
          * handle->vfs_private (diskfs_open_fh_inode_cb), which read/write reuse
          * to skip per-I/O inode resolution. */
@@ -149,4 +219,5 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_diskfs = {
     .thread_init    = diskfs_thread_init,
     .thread_destroy = diskfs_thread_destroy,
     .dispatch       = diskfs_dispatch,
+    .txn_size       = sizeof(struct diskfs_txn),
 };

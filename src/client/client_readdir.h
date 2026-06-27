@@ -56,7 +56,7 @@ chimera_dispatch_readdir(
     struct chimera_client_request *request)
 {
     chimera_vfs_readdir(thread->vfs_thread,
-                        chimera_client_req_cred(request),
+                        chimera_client_req_cred(request), NULL,
                         request->readdir.handle,
                         0,  // attr_mask for entries
                         0,  // dir_attr_mask

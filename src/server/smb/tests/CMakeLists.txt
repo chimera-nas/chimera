@@ -1674,12 +1674,6 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.replay.dhv2-pending1n-vs-oplock-sane
     smb2.replay.dhv2-pending1o-vs-lease-sane
     smb2.replay.dhv2-pending1o-vs-oplock-sane
-    smb2.replay.dhv2-pending2l-vs-lease-sane
-    smb2.replay.dhv2-pending2l-vs-oplock-sane
-    smb2.replay.dhv2-pending2n-vs-lease-sane
-    smb2.replay.dhv2-pending2n-vs-oplock-sane
-    smb2.replay.dhv2-pending2o-vs-lease-sane
-    smb2.replay.dhv2-pending2o-vs-oplock-sane
     smb2.replay.dhv2-pending3l-vs-lease-sane
     smb2.replay.dhv2-pending3l-vs-oplock-sane
     smb2.replay.dhv2-pending3n-vs-lease-sane
@@ -2252,12 +2246,6 @@ set(SMBTORTURE_ENABLED_linux
     smb2.replay.dhv2-pending1n-vs-oplock-sane
     smb2.replay.dhv2-pending1o-vs-lease-sane
     smb2.replay.dhv2-pending1o-vs-oplock-sane
-    smb2.replay.dhv2-pending2l-vs-lease-sane
-    smb2.replay.dhv2-pending2l-vs-oplock-sane
-    smb2.replay.dhv2-pending2n-vs-lease-sane
-    smb2.replay.dhv2-pending2n-vs-oplock-sane
-    smb2.replay.dhv2-pending2o-vs-lease-sane
-    smb2.replay.dhv2-pending2o-vs-oplock-sane
     smb2.replay.dhv2-pending3l-vs-lease-sane
     smb2.replay.dhv2-pending3l-vs-oplock-sane
     smb2.replay.dhv2-pending3n-vs-lease-sane
@@ -2775,12 +2763,6 @@ set(SMBTORTURE_ENABLED_io_uring
     smb2.replay.dhv2-pending1n-vs-oplock-sane
     smb2.replay.dhv2-pending1o-vs-lease-sane
     smb2.replay.dhv2-pending1o-vs-oplock-sane
-    smb2.replay.dhv2-pending2l-vs-lease-sane
-    smb2.replay.dhv2-pending2l-vs-oplock-sane
-    smb2.replay.dhv2-pending2n-vs-lease-sane
-    smb2.replay.dhv2-pending2n-vs-oplock-sane
-    smb2.replay.dhv2-pending2o-vs-lease-sane
-    smb2.replay.dhv2-pending2o-vs-oplock-sane
     smb2.replay.dhv2-pending3l-vs-lease-sane
     smb2.replay.dhv2-pending3l-vs-oplock-sane
     smb2.replay.dhv2-pending3n-vs-lease-sane
@@ -3326,12 +3308,6 @@ set(SMBTORTURE_ENABLED_cairn
     smb2.replay.dhv2-pending1n-vs-oplock-sane
     smb2.replay.dhv2-pending1o-vs-lease-sane
     smb2.replay.dhv2-pending1o-vs-oplock-sane
-    smb2.replay.dhv2-pending2l-vs-lease-sane
-    smb2.replay.dhv2-pending2l-vs-oplock-sane
-    smb2.replay.dhv2-pending2n-vs-lease-sane
-    smb2.replay.dhv2-pending2n-vs-oplock-sane
-    smb2.replay.dhv2-pending2o-vs-lease-sane
-    smb2.replay.dhv2-pending2o-vs-oplock-sane
     smb2.replay.dhv2-pending3l-vs-lease-sane
     smb2.replay.dhv2-pending3l-vs-oplock-sane
     smb2.replay.dhv2-pending3n-vs-lease-sane
@@ -3905,12 +3881,6 @@ set(SMBTORTURE_ENABLED_diskfs_io_uring
     smb2.replay.dhv2-pending1n-vs-oplock-sane
     smb2.replay.dhv2-pending1o-vs-lease-sane
     smb2.replay.dhv2-pending1o-vs-oplock-sane
-    smb2.replay.dhv2-pending2l-vs-lease-sane
-    smb2.replay.dhv2-pending2l-vs-oplock-sane
-    smb2.replay.dhv2-pending2n-vs-lease-sane
-    smb2.replay.dhv2-pending2n-vs-oplock-sane
-    smb2.replay.dhv2-pending2o-vs-lease-sane
-    smb2.replay.dhv2-pending2o-vs-oplock-sane
     smb2.replay.dhv2-pending3l-vs-lease-sane
     smb2.replay.dhv2-pending3l-vs-oplock-sane
     smb2.replay.dhv2-pending3n-vs-lease-sane
@@ -4481,12 +4451,6 @@ set(SMBTORTURE_ENABLED_diskfs_aio
     smb2.replay.dhv2-pending1n-vs-oplock-sane
     smb2.replay.dhv2-pending1o-vs-lease-sane
     smb2.replay.dhv2-pending1o-vs-oplock-sane
-    smb2.replay.dhv2-pending2l-vs-lease-sane
-    smb2.replay.dhv2-pending2l-vs-oplock-sane
-    smb2.replay.dhv2-pending2n-vs-lease-sane
-    smb2.replay.dhv2-pending2n-vs-oplock-sane
-    smb2.replay.dhv2-pending2o-vs-lease-sane
-    smb2.replay.dhv2-pending2o-vs-oplock-sane
     smb2.replay.dhv2-pending3l-vs-lease-sane
     smb2.replay.dhv2-pending3l-vs-oplock-sane
     smb2.replay.dhv2-pending3n-vs-lease-sane

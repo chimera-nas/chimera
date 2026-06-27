@@ -234,7 +234,7 @@ chimera_smb_duplicate_extents_dst_getattr_cb(
 
     chimera_vfs_getattr(
         request->compound->thread->vfs_thread,
-        &request->session_handle->session->cred,
+        &request->session_handle->session->cred, NULL,
         request->ioctl.de_src_open_file->handle,
         CHIMERA_VFS_ATTR_MASK_STAT,
         chimera_smb_duplicate_extents_getattr_cb,
@@ -299,7 +299,7 @@ chimera_smb_ioctl_duplicate_extents(struct chimera_smb_request *request)
      * the source range. */
     chimera_vfs_getattr(
         request->compound->thread->vfs_thread,
-        &request->session_handle->session->cred,
+        &request->session_handle->session->cred, NULL,
         dst_open_file->handle,
         CHIMERA_VFS_ATTR_MASK_STAT,
         chimera_smb_duplicate_extents_dst_getattr_cb,
@@ -382,7 +382,7 @@ chimera_smb_ioctl_offload_read(struct chimera_smb_request *request)
 
     chimera_vfs_getattr(
         request->compound->thread->vfs_thread,
-        &request->session_handle->session->cred,
+        &request->session_handle->session->cred, NULL,
         src_open_file->handle,
         CHIMERA_VFS_ATTR_MASK_STAT,
         chimera_smb_offload_read_getattr_cb,

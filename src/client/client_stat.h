@@ -66,7 +66,7 @@ chimera_dispatch_stat(
 {
     chimera_vfs_lookup(
         thread->vfs_thread,
-        chimera_client_req_cred(request),
+        chimera_client_req_cred(request), NULL,
         thread->client->root_fh,
         thread->client->root_fh_len,
         request->stat.path,
