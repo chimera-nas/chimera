@@ -177,8 +177,8 @@ readwrite.py::ReadWriteTest::test_write_none,base,green,
 readwrite.py::ReadWriteTest::test_write_none_access,base,green,
 readwrite.py::ReadWriteTest::test_write_none_lease,base,green,
 readwrite.py::ReadWriteTest::test_write_none_oplock,base,xfail,delete-on-close unlinks on first of two DOC handles' close not last
-reparse.py::TestReparsePoint::test_set_get_reparse_point,base,xfail,pike.exceptions.ResponseError: (SMB2_IOCTL; STATUS_NOT_A_REPARSE_POINT)
-reparse.py::TestReparsePoint::test_symbolic_link_error_response,base,xfail,IndexError: list index out of range
+reparse.py::TestReparsePoint::test_set_get_reparse_point,base,green,
+reparse.py::TestReparsePoint::test_symbolic_link_error_response,base,green,
 session.py::SessionTest::test_session_logoff,base,green,
 session.py::SessionTest::test_session_multiplex,base,green,
 set.py::SetTest::test_set_file_basic_info,base,green,

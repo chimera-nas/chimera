@@ -654,6 +654,16 @@ struct chimera_smb_request {
             uint32_t                           dir_break_action;
             uint64_t                           dir_break_skip_lo;
             uint64_t                           dir_break_skip_hi;
+            /* A non-FILE_OPEN_REPARSE_POINT create that stops on a symbolic-link
+             * leaf returns STATUS_STOPPED_ON_SYMLINK with a SymbolicLinkError
+             * Response body (MS-SMB2 2.2.2.2.1) carrying the link target.  The
+             * target is read back from the link and stashed here for the error
+             * reply builder (smb.c); r_symlink_error gates the body emission. */
+            uint8_t                            r_symlink_error;
+            uint8_t                            r_symlink_relative;
+            uint16_t                           r_symlink_target_len;
+            char                               r_symlink_target[CHIMERA_VFS_PATH_MAX];
+            struct chimera_vfs_open_handle    *r_symlink_handle;
         } create;
 
         struct  {
@@ -800,8 +810,16 @@ struct chimera_smb_request {
             int                             rp_target_len;
             char                            rp_target[CHIMERA_VFS_PATH_MAX];
             struct chimera_vfs_attrs        rp_set_attr;
-            /* GET response buffer */
-            uint8_t                         rp_response[16 + (CHIMERA_VFS_PATH_MAX - 1) * 2];
+            /* SET_REPARSE replaces the original object with a freshly-created
+             * special file (symlink/device); its file handle is captured here so
+             * the open's VFS handle can be re-bound to the new inode, keeping the
+             * client's open valid for a following GET_REPARSE / handle op. */
+            uint8_t                         rp_new_fh[CHIMERA_VFS_FH_SIZE + 16];
+            uint32_t                        rp_new_fh_len;
+            /* GET response buffer.  Sized for the largest layout: a SYMLINK-tag
+             * SYMBOLIC_LINK_REPARSE_BUFFER (20-byte header + Substitute and Print
+             * names, each up to the full UTF-16 target). */
+            uint8_t                         rp_response[20 + (CHIMERA_VFS_PATH_MAX - 1) * 2 * 2];
             int                             rp_response_len;
             /* SET_SPARSE / SET_ZERO_DATA / QUERY_ALLOCATED_RANGES fields */
             struct chimera_smb_open_file   *sp_open_file;

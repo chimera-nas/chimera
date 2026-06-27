@@ -38,6 +38,48 @@ chimera_smb_set_reparse_create_cb(
     chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
 } /* chimera_smb_set_reparse_create_cb */
 
+/* The SET created a new symlink inode, replacing the original object that the
+ * client's open still references.  Re-bind the open's VFS handle (open_file->
+ * handle) to the new inode so a following GET_REPARSE_POINT -- or any handle op
+ * -- resolves the link rather than the now-orphaned original
+ * (pike reparse test_set_get_reparse_point). */
+static void
+chimera_smb_set_reparse_rebind_cb(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *oh,
+    void                           *private_data)
+{
+    struct chimera_smb_request   *request    = private_data;
+    struct chimera_vfs_thread    *vfs_thread = request->compound->thread->vfs_thread;
+    struct chimera_smb_open_file *open_file  = request->ioctl.rp_open_file;
+
+    chimera_vfs_release(vfs_thread, request->ioctl.rp_parent_handle);
+
+    if (error_code == CHIMERA_VFS_OK && oh) {
+        struct chimera_vfs_open_handle *old = open_file->handle;
+        open_file->handle = oh;
+
+        /* The delete-on-close reservation was armed on the original handle (and
+         * does not fire on a plain release).  Re-arm it on the new handle so the
+         * close still unlinks the link by name (the pike test_set_get create
+         * carries FILE_DELETE_ON_CLOSE). */
+        if (open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_DELETE_ON_CLOSE) {
+            chimera_vfs_set_delete_on_close(
+                vfs_thread, oh,
+                open_file->parent_fh, open_file->parent_fh_len,
+                open_file->name, open_file->name_len,
+                &request->session_handle->session->cred);
+        }
+
+        if (old) {
+            chimera_vfs_release(vfs_thread, old);
+        }
+    }
+
+    chimera_smb_open_file_release(request, open_file);
+    chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+} /* chimera_smb_set_reparse_rebind_cb */
+
 static void
 chimera_smb_set_reparse_symlink_cb(
     enum chimera_vfs_error    error_code,
@@ -49,18 +91,43 @@ chimera_smb_set_reparse_symlink_cb(
     struct chimera_smb_request *request    = private_data;
     struct chimera_vfs_thread  *vfs_thread = request->compound->thread->vfs_thread;
 
-    chimera_vfs_release(vfs_thread, request->ioctl.rp_parent_handle);
-    chimera_smb_open_file_release(request, request->ioctl.rp_open_file);
-
     if (error_code != CHIMERA_VFS_OK) {
         chimera_smb_error("SET_REPARSE: symlink failed error=%d target='%s' target_len=%d",
                           error_code,
                           request->ioctl.rp_target,
                           request->ioctl.rp_target_len);
+        chimera_vfs_release(vfs_thread, request->ioctl.rp_parent_handle);
+        chimera_smb_open_file_release(request, request->ioctl.rp_open_file);
         chimera_smb_complete_request(request, SMB2_STATUS_INTERNAL_ERROR);
         return;
     }
 
+    /* Re-bind the open handle to the new symlink inode (its file handle was
+     * returned in attr->va_fh).  rp_parent_handle and rp_open_file are released
+     * in the rebind callback. */
+    if (attr && (attr->va_set_mask & CHIMERA_VFS_ATTR_FH) &&
+        attr->va_fh_len <= sizeof(request->ioctl.rp_new_fh)) {
+        memcpy(request->ioctl.rp_new_fh, attr->va_fh, attr->va_fh_len);
+        request->ioctl.rp_new_fh_len = attr->va_fh_len;
+
+        /* Open a real (backend) handle on the new inode -- not an INFERRED/PATH
+         * handle -- so the open keeps a valid backend handle for delete-on-close
+         * (the close path closes it via chimera_vfs_close). */
+        chimera_vfs_open_fh(
+            vfs_thread,
+            &request->session_handle->session->cred,
+            request->ioctl.rp_new_fh,
+            request->ioctl.rp_new_fh_len,
+            0,
+            chimera_smb_set_reparse_rebind_cb,
+            request);
+        return;
+    }
+
+    /* No file handle returned -- the open keeps its (now stale) handle, but the
+     * SET itself succeeded. */
+    chimera_vfs_release(vfs_thread, request->ioctl.rp_parent_handle);
+    chimera_smb_open_file_release(request, request->ioctl.rp_open_file);
     chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
 } /* chimera_smb_set_reparse_symlink_cb */
 
@@ -264,7 +331,8 @@ chimera_smb_get_reparse_readlink_cb(
     struct chimera_server_smb_thread *thread  = request->compound->thread;
     uint8_t                          *buf     = request->ioctl.rp_response;
     int                               utf16_len;
-    int                               data_len;
+    uint16_t                          reparse_data_length;
+    uint32_t                          flags;
 
     chimera_smb_open_file_release(request, request->ioctl.rp_open_file);
 
@@ -273,6 +341,11 @@ chimera_smb_get_reparse_readlink_cb(
         return;
     }
 
+    /* A relative target carries no leading separator (test before the slash
+     * conversion below). */
+    flags = (target_length > 0 && request->ioctl.rp_target[0] != '/') ?
+        SMB2_SYMLINK_FLAG_RELATIVE : SMB2_SYMLINK_FLAG_ABSOLUTE;
+
     /* Convert Unix forward slashes to Windows backslashes */
     for (int i = 0; i < target_length; i++) {
         if (request->ioctl.rp_target[i] == '/') {
@@ -280,12 +353,16 @@ chimera_smb_get_reparse_readlink_cb(
         }
     }
 
-    /* Convert UTF-8 target to UTF-16LE */
+    /* A symlink is reported as a SYMBOLIC_LINK_REPARSE_BUFFER under
+     * IO_REPARSE_TAG_SYMLINK (MS-FSCC 2.1.2.4): the Windows representation that
+     * Windows-style clients (e.g. pike's get_symlink) decode.  Convert the
+     * target to UTF-16LE for the Substitute name; the Print name is an identical
+     * copy that immediately follows it. */
     utf16_len = chimera_smb_utf8_to_utf16le(
         &thread->iconv_ctx,
         request->ioctl.rp_target,
         target_length,
-        (uint16_t *) (buf + 16),
+        (uint16_t *) (buf + 20),
         (CHIMERA_VFS_PATH_MAX - 1) * 2);
 
     if (utf16_len < 0) {
@@ -293,31 +370,41 @@ chimera_smb_get_reparse_readlink_cb(
         return;
     }
 
-    data_len = 8 + utf16_len; /* InodeType(8) + UTF-16LE target */
+    memcpy(buf + 20 + utf16_len, buf + 20, utf16_len); /* Print name copy */
 
-    /* ReparseTag */
-    buf[0] = (SMB2_IO_REPARSE_TAG_NFS >>  0) & 0xff;
-    buf[1] = (SMB2_IO_REPARSE_TAG_NFS >>  8) & 0xff;
-    buf[2] = (SMB2_IO_REPARSE_TAG_NFS >> 16) & 0xff;
-    buf[3] = (SMB2_IO_REPARSE_TAG_NFS >> 24) & 0xff;
+    reparse_data_length = 12 + 2 * utf16_len;
+
+    /* ReparseTag = IO_REPARSE_TAG_SYMLINK */
+    buf[0] = (SMB2_IO_REPARSE_TAG_SYMLINK >>  0) & 0xff;
+    buf[1] = (SMB2_IO_REPARSE_TAG_SYMLINK >>  8) & 0xff;
+    buf[2] = (SMB2_IO_REPARSE_TAG_SYMLINK >> 16) & 0xff;
+    buf[3] = (SMB2_IO_REPARSE_TAG_SYMLINK >> 24) & 0xff;
     /* ReparseDataLength */
-    buf[4] = (data_len >>  0) & 0xff;
-    buf[5] = (data_len >>  8) & 0xff;
+    buf[4] = (reparse_data_length >> 0) & 0xff;
+    buf[5] = (reparse_data_length >> 8) & 0xff;
     /* Reserved */
     buf[6] = 0;
     buf[7] = 0;
-    /* InodeType = NFS_SPECFILE_LNK */
-    buf[8]  = (SMB2_NFS_SPECFILE_LNK >>  0) & 0xff;
-    buf[9]  = (SMB2_NFS_SPECFILE_LNK >>  8) & 0xff;
-    buf[10] = (SMB2_NFS_SPECFILE_LNK >> 16) & 0xff;
-    buf[11] = (SMB2_NFS_SPECFILE_LNK >> 24) & 0xff;
-    buf[12] = (SMB2_NFS_SPECFILE_LNK >> 32) & 0xff;
-    buf[13] = (SMB2_NFS_SPECFILE_LNK >> 40) & 0xff;
-    buf[14] = (SMB2_NFS_SPECFILE_LNK >> 48) & 0xff;
-    buf[15] = (SMB2_NFS_SPECFILE_LNK >> 56) & 0xff;
-    /* UTF-16LE data is already at buf+16 */
+    /* SubstituteNameOffset = 0 */
+    buf[8] = 0;
+    buf[9] = 0;
+    /* SubstituteNameLength */
+    buf[10] = (utf16_len >> 0) & 0xff;
+    buf[11] = (utf16_len >> 8) & 0xff;
+    /* PrintNameOffset (immediately after the Substitute name) */
+    buf[12] = (utf16_len >> 0) & 0xff;
+    buf[13] = (utf16_len >> 8) & 0xff;
+    /* PrintNameLength */
+    buf[14] = (utf16_len >> 0) & 0xff;
+    buf[15] = (utf16_len >> 8) & 0xff;
+    /* Flags */
+    buf[16] = (flags >>  0) & 0xff;
+    buf[17] = (flags >>  8) & 0xff;
+    buf[18] = (flags >> 16) & 0xff;
+    buf[19] = (flags >> 24) & 0xff;
+    /* PathBuffer (Substitute name + Print name) already at buf+20 */
 
-    request->ioctl.rp_response_len = 8 + data_len; /* header(8) + data */
+    request->ioctl.rp_response_len = 20 + 2 * utf16_len;
 
     chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
 } /* chimera_smb_get_reparse_readlink_cb */

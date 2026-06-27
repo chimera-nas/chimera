@@ -571,6 +571,13 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
                 evpl_iovec_cursor_append_uint32(&reply_cursor, 4); /* ByteCount */
                 evpl_iovec_cursor_append_uint32(&reply_cursor,
                                                 request->query_info.output_length);
+            } else if (request->status == SMB2_STATUS_STOPPED_ON_SYMLINK &&
+                       request->smb2_hdr.command == SMB2_CREATE &&
+                       request->create.r_symlink_error) {
+                /* MS-SMB2 2.2.2.2.1: a CREATE that stopped on a symbolic link
+                 * returns the SymbolicLinkErrorResponse body so the client can
+                 * resolve the link target and reissue the open. */
+                chimera_smb_create_emit_symlink_error(&reply_cursor, request);
             } else {
                 evpl_iovec_cursor_append_uint16(&reply_cursor, SMB2_ERROR_REPLY_SIZE);
                 evpl_iovec_cursor_append_uint16(&reply_cursor, 0);

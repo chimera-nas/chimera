@@ -1083,6 +1083,11 @@ typedef uint8_t smb2_guid[SMB2_GUID_SIZE];
 
 #define SMB2_IO_REPARSE_TAG_NFS                     0x80000014
 #define SMB2_IO_REPARSE_TAG_SYMLINK                 0xA000000C
+/* SymbolicLinkErrorResponse SymLinkErrorTag (MS-SMB2 2.2.2.2.1): 'SYML'. */
+#define SMB2_SYMLINK_ERROR_TAG                      0x4C4D5953
+/* SYMBOLIC_LINK_REPARSE_BUFFER Flags (MS-FSCC 2.1.2.4). */
+#define SMB2_SYMLINK_FLAG_ABSOLUTE                  0x00000000
+#define SMB2_SYMLINK_FLAG_RELATIVE                  0x00000001
 #define SMB2_NFS_SPECFILE_LNK                       0x0000000000004B4E4CULL
 #define SMB2_NFS_SPECFILE_CHR                       0x0000000000524843ULL
 #define SMB2_NFS_SPECFILE_BLK                       0x00000000004B4C42ULL
