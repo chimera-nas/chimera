@@ -74,7 +74,7 @@ chimera_vfs_gate_fh_open(
 
     ctx->handle = handle;
 
-    chimera_vfs_getattr(ctx->thread, ctx->cred, handle,
+    chimera_vfs_getattr(ctx->thread, ctx->cred, NULL, handle,
                         CHIMERA_VFS_GATE_ATTR_MASK,
                         chimera_vfs_gate_fh_getattr, ctx);
 } /* chimera_vfs_gate_fh_open */
@@ -103,7 +103,7 @@ chimera_vfs_gate_fh_impl(
     ctx->private_data = private_data;
     ctx->handle       = NULL;
 
-    chimera_vfs_open_fh(thread, cred, fh, fhlen,
+    chimera_vfs_open_fh(thread, cred, NULL, fh, fhlen,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
                         chimera_vfs_gate_fh_open, ctx);
 } /* chimera_vfs_gate_fh_impl */
@@ -327,7 +327,7 @@ chimera_vfs_gate_delete_child_open(
 
     ctx->handle = handle;
 
-    chimera_vfs_getattr(ctx->thread, ctx->cred, handle,
+    chimera_vfs_getattr(ctx->thread, ctx->cred, NULL, handle,
                         CHIMERA_VFS_GATE_ATTR_MASK,
                         chimera_vfs_gate_delete_child_getattr, ctx);
 } /* chimera_vfs_gate_delete_child_open */
@@ -364,7 +364,7 @@ chimera_vfs_gate_delete_parent_getattr(
         return;
     }
 
-    chimera_vfs_open_fh(ctx->thread, ctx->cred, ctx->child_fh, ctx->child_fhlen,
+    chimera_vfs_open_fh(ctx->thread, ctx->cred, NULL, ctx->child_fh, ctx->child_fhlen,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
                         chimera_vfs_gate_delete_child_open, ctx);
 } /* chimera_vfs_gate_delete_parent_getattr */
@@ -384,7 +384,7 @@ chimera_vfs_gate_delete_parent_open(
 
     ctx->handle = handle;
 
-    chimera_vfs_getattr(ctx->thread, ctx->cred, handle,
+    chimera_vfs_getattr(ctx->thread, ctx->cred, NULL, handle,
                         CHIMERA_VFS_GATE_ATTR_MASK,
                         chimera_vfs_gate_delete_parent_getattr, ctx);
 } /* chimera_vfs_gate_delete_parent_open */
@@ -449,7 +449,7 @@ chimera_vfs_gate_delete_always(
     ctx->sticky       = 0;
     ctx->parent_uid   = (uint64_t) -1;
 
-    chimera_vfs_open_fh(thread, cred, parent_fh, parent_fhlen,
+    chimera_vfs_open_fh(thread, cred, NULL, parent_fh, parent_fhlen,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
                         chimera_vfs_gate_delete_parent_open, ctx);
 } /* chimera_vfs_gate_delete_always */

@@ -41,6 +41,7 @@ chimera_dispatch_write_same(
     chimera_vfs_write_same(
         thread->vfs_thread,
         chimera_client_req_cred(request),
+        NULL,
         request->write_same.handle,
         request->write_same.offset,
         request->write_same.block_size,

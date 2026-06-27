@@ -68,7 +68,7 @@ chimera_nfs4_write_same_issue(
 {
     struct WRITE_SAME4args *args = &req->args_compound->argarray[req->index].opwrite_same;
 
-    chimera_vfs_write_same(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_write_same(req->thread->vfs_thread, &req->cred, NULL,
                            handle,
                            args->wsa_adb.adb_offset,
                            (uint32_t) args->wsa_adb.adb_block_size,
@@ -178,7 +178,7 @@ chimera_nfs4_write_same(
             }
         }
 
-        chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+        chimera_vfs_open_fh(thread->vfs_thread, &req->cred, NULL,
                             req->fh, req->fhlen,
                             CHIMERA_VFS_OPEN_INFERRED,
                             chimera_nfs4_write_same_open_callback,
@@ -214,7 +214,7 @@ chimera_nfs4_write_same(
             chimera_nfs4_compound_complete(req, res->wsr_status);
             return;
         }
-        chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+        chimera_vfs_open_fh(thread->vfs_thread, &req->cred, NULL,
                             req->fh, req->fhlen,
                             CHIMERA_VFS_OPEN_INFERRED,
                             chimera_nfs4_write_same_open_callback,

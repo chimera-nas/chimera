@@ -758,7 +758,10 @@ diskfs_inode_load_recs_done(struct diskfs_inode_load_ctx *lc)
         inode->pnfs_blob_len = (uint32_t) lc->pnfs_len;
     }
 
-    diskfs_inode_release_one(thread, inode, DISKFS_INODE_LOCK_WRITE);
+    /* This loader hold is anonymous (no txn -- it is a fault-time exclusive
+     * guard, never enlisted), so it has no WFG holder record; release with a
+     * NULL txn (holder_remove is a no-op when it finds no matching record). */
+    diskfs_inode_release_one(thread, NULL, inode, DISKFS_INODE_LOCK_WRITE);
 
     diskfs_inode_acquire(thread, lc->txn, lc->fs, lc->inum, lc->gen, lc->mode,
                          lc->cb, lc->private_data);
@@ -1408,7 +1411,12 @@ diskfs_read_inode_cb(
         diskfs_txn_pin_inode_block(thread, diskfs_private->txn, inode, 0);
         inode->atime_sec  = now.tv_sec;
         inode->atime_nsec = now.tv_nsec;
-    } else if (!thread->shared->noatime) {
+    } else if (!thread->shared->noatime && !request->transaction) {
+        /* Autocommit reads only: the relatime atime bump aborts this read txn
+         * and re-runs under a fresh WRITE txn.  We must not do that to a caller-
+         * owned explicit transaction (diskfs_txn_begin would just hand back the
+         * same enlisted txn, recursing forever) -- skip the best-effort atime
+         * bump for enlisted reads instead. */
         struct timespec atime = { inode->atime_sec, inode->atime_nsec };
         struct timespec mtime = { inode->mtime_sec, inode->mtime_nsec };
         struct timespec ctime = { inode->ctime_sec, inode->ctime_nsec };
@@ -1422,7 +1430,7 @@ diskfs_read_inode_cb(
                 (struct diskfs_inode *) request->read.handle->vfs_private : NULL;
 
             diskfs_txn_abort(diskfs_private->txn);
-            diskfs_private->txn = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+            diskfs_private->txn = diskfs_txn_begin(thread, DISKFS_TXN_WRITE, request);
 
             if (pinned) {
                 diskfs_inode_acquire_pinned(thread, diskfs_private->txn, pinned,
@@ -1497,7 +1505,7 @@ diskfs_read(
     p->niov       = 0;
     p->thread     = thread;
     p->io_reading = 1;     /* cleared in diskfs_read_finish when the walk ends */
-    p->txn        = diskfs_txn_begin(thread, DISKFS_TXN_READ);
+    p->txn        = diskfs_txn_begin(thread, DISKFS_TXN_READ, request);
 
     /* Warm-handle fast path: diskfs advertises CAP_OPEN_FILE_REQUIRED, so a read
      * is preceded by a real open that pinned the inode and stashed it in
@@ -3102,7 +3110,7 @@ diskfs_write(
     p->need_suffix_read    = 0;
     p->inplace_written     = 0;
     p->inode_stash[2]      = NULL;   /* refcount inode (acquired lazily on CoW) */
-    p->txn                 = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+    p->txn                 = diskfs_txn_begin(thread, DISKFS_TXN_WRITE, request);
 
     /* Warm-handle fast path (see diskfs_read): reuse the inode pinned at open
     * via handle->vfs_private, skipping the by-fh resolve.  The WRITE-mode grant
@@ -3930,7 +3938,7 @@ diskfs_allocate(
 
     p->thread    = thread;
     p->ws_active = 0;      /* not a WRITE_SAME-borrowed punch */
-    p->txn       = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+    p->txn       = diskfs_txn_begin(thread, DISKFS_TXN_WRITE, request);
 
     diskfs_inode_get_fh_async(thread, p->txn, p->fs,
                               request->fh, request->fh_len,
@@ -4111,7 +4119,7 @@ diskfs_seek(
     (void) private_data;
 
     p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ);
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ, request);
 
     diskfs_inode_get_fh_async(thread, p->txn, p->fs,
                               request->fh, request->fh_len,
@@ -4280,7 +4288,7 @@ diskfs_read_plus(
     (void) private_data;
 
     p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ);
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ, request);
 
     diskfs_inode_get_fh_async(thread, p->txn, p->fs,
                               request->fh, request->fh_len,
@@ -4665,7 +4673,7 @@ diskfs_write_same(
     p->niov      = 0;
     p->ws_active = 0;
     p->ws_tmpl   = NULL;
-    p->txn       = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+    p->txn       = diskfs_txn_begin(thread, DISKFS_TXN_WRITE, request);
 
     diskfs_inode_get_fh_async(thread, p->txn, p->fs,
                               request->fh, request->fh_len,
@@ -4761,7 +4769,7 @@ diskfs_commit(
         (struct diskfs_inode *) request->commit.handle->vfs_private : NULL;
 
     if (!warm || shared->mtime_defer_us == 0) {
-        cp->txn = diskfs_txn_begin(thread, DISKFS_TXN_READ);
+        cp->txn = diskfs_txn_begin(thread, DISKFS_TXN_READ, request);
         if (warm) {
             /* COMMIT mutates no metadata, so report WCC before == after from
              * the pinned inode.  The read is lock-free: that is acceptable for
@@ -4775,7 +4783,7 @@ diskfs_commit(
         return;
     }
 
-    cp->txn = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+    cp->txn = diskfs_txn_begin(thread, DISKFS_TXN_WRITE, request);
     diskfs_inode_acquire_pinned(thread, cp->txn, warm, DISKFS_INODE_LOCK_WRITE,
                                 diskfs_commit_acquired_cb, request);
 } /* diskfs_commit */

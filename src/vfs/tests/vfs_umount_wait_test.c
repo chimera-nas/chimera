@@ -182,13 +182,13 @@ main(
     /* Take a handle on the mount root and keep it, so umount finds a
      * reference it cannot dispose of and has to wait on the poll timer. */
     chimera_vfs_get_root_fh(root_fh, &root_fh_len);
-    chimera_vfs_lookup(ctx.vfs_thread, &cred, root_fh, root_fh_len, "test", 4,
+    chimera_vfs_lookup(ctx.vfs_thread, &cred, NULL, root_fh, root_fh_len, "test", 4,
                        CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT, 0,
                        lookup_cb, &ctx);
     wait_done(&ctx);
     assert(ctx.status == CHIMERA_VFS_OK);
 
-    chimera_vfs_open_fh(ctx.vfs_thread, &cred, ctx.fh, ctx.fh_len,
+    chimera_vfs_open_fh(ctx.vfs_thread, &cred, NULL, ctx.fh, ctx.fh_len,
                         CHIMERA_VFS_OPEN_INFERRED, openfh_cb, &ctx);
     wait_done(&ctx);
     assert(ctx.status == CHIMERA_VFS_OK);

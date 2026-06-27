@@ -141,6 +141,7 @@ static void
 chimera_vfs_remove_at_dispatch(
     struct chimera_vfs_thread       *thread,
     const struct chimera_vfs_cred   *cred,
+    struct chimera_vfs_transaction  *txn,
     struct chimera_vfs_open_handle  *handle,
     const char                      *name,
     int                              namelen,
@@ -162,6 +163,8 @@ chimera_vfs_remove_at_dispatch(
         callback(CHIMERA_VFS_PTR_ERR(request), NULL, NULL, private_data);
         return;
     }
+
+    request->transaction = txn;
 
     request->opcode              = CHIMERA_VFS_OP_REMOVE_AT;
     request->complete            = chimera_vfs_remove_at_complete;
@@ -216,6 +219,7 @@ struct chimera_vfs_remove_at_gate {
     struct chimera_vfs_gate_ctx      gate_ctx;
     struct chimera_vfs_thread       *thread;
     const struct chimera_vfs_cred   *cred;
+    struct chimera_vfs_transaction  *txn;
     struct chimera_vfs_open_handle  *handle;
     const char                      *name;
     int                              namelen;
@@ -295,7 +299,7 @@ chimera_vfs_remove_at_gate_complete(
      * sticky-resolved FH authorized the gate above but is withheld here so the
      * name-based delete recalls once (via the post-unlink notify), matching the
      * pre-sticky-lookup behavior. */
-    chimera_vfs_remove_at_dispatch(gate->thread, gate->cred, gate->handle,
+    chimera_vfs_remove_at_dispatch(gate->thread, gate->cred, gate->txn, gate->handle,
                                    gate->name, gate->namelen,
                                    gate->child_fh_resolved ? NULL :
                                    gate->child_fh,
@@ -315,6 +319,7 @@ static void
 chimera_vfs_remove_at_common(
     struct chimera_vfs_thread       *thread,
     const struct chimera_vfs_cred   *cred,
+    struct chimera_vfs_transaction  *txn,
     struct chimera_vfs_open_handle  *handle,
     const char                      *name,
     int                              namelen,
@@ -350,6 +355,7 @@ chimera_vfs_remove_at_common(
         gate                    = chimera_vfs_gate_scratch_alloc(thread);
         gate->thread            = thread;
         gate->cred              = cred;
+        gate->txn               = txn;
         gate->handle            = handle;
         gate->name              = name;
         gate->namelen           = namelen;
@@ -378,14 +384,14 @@ chimera_vfs_remove_at_common(
             /* No child FH from the caller (e.g. an NFS name-based REMOVE):
             * resolve it by name so the sticky-directory owner rule and any
             * per-object DELETE grant are honored, not silently skipped. */
-            chimera_vfs_lookup(thread, cred, handle->fh, handle->fh_len,
+            chimera_vfs_lookup(thread, cred, NULL, handle->fh, handle->fh_len,
                                name, namelen, CHIMERA_VFS_ATTR_FH, 0,
                                chimera_vfs_remove_at_sticky_lookup, gate);
         }
         return;
     }
 
-    chimera_vfs_remove_at_dispatch(thread, cred, handle, name, namelen,
+    chimera_vfs_remove_at_dispatch(thread, cred, txn, handle, name, namelen,
                                    child_fh, child_fh_len, match_child_fh,
                                    flags, pre_attr_mask,
                                    post_attr_mask, parent_lease_skip,
@@ -404,6 +410,7 @@ chimera_vfs_remove_at_common(
 struct chimera_vfs_remove_recall_ctx {
     struct chimera_vfs_thread       *thread;
     const struct chimera_vfs_cred   *cred;
+    struct chimera_vfs_transaction  *txn;
     struct chimera_vfs_open_handle  *handle;
     const char                      *name;
     int                              namelen;
@@ -439,7 +446,7 @@ chimera_vfs_remove_recall_lookup_complete(
         child_fh_len      = ctx->child_fh_len;
     }
 
-    chimera_vfs_remove_at_common(ctx->thread, ctx->cred, ctx->handle,
+    chimera_vfs_remove_at_common(ctx->thread, ctx->cred, ctx->txn, ctx->handle,
                                  ctx->name, ctx->namelen, child_fh, child_fh_len,
                                  0 /* match_child_fh */, ctx->flags,
                                  ctx->pre_attr_mask, ctx->post_attr_mask,
@@ -457,6 +464,7 @@ SYMBOL_EXPORT void
 chimera_vfs_remove_at(
     struct chimera_vfs_thread       *thread,
     const struct chimera_vfs_cred   *cred,
+    struct chimera_vfs_transaction  *txn,
     struct chimera_vfs_open_handle  *handle,
     const char                      *name,
     int                              namelen,
@@ -482,6 +490,7 @@ chimera_vfs_remove_at(
 
         ctx->thread            = thread;
         ctx->cred              = cred;
+        ctx->txn               = txn;
         ctx->handle            = handle;
         ctx->name              = name;
         ctx->namelen           = namelen;
@@ -493,13 +502,13 @@ chimera_vfs_remove_at(
         ctx->private_data      = private_data;
         ctx->child_fh_len      = 0;
 
-        chimera_vfs_lookup_at(thread, cred, handle, name, namelen,
+        chimera_vfs_lookup_at(thread, cred, NULL, handle, name, namelen,
                               CHIMERA_VFS_ATTR_FH, 0,
                               chimera_vfs_remove_recall_lookup_complete, ctx);
         return;
     }
 
-    chimera_vfs_remove_at_common(thread, cred, handle, name, namelen,
+    chimera_vfs_remove_at_common(thread, cred, txn, handle, name, namelen,
                                  child_fh, child_fh_len, 0 /* match_child_fh */,
                                  flags, pre_attr_mask, post_attr_mask, parent_lease_skip,
                                  callback, private_data);
@@ -516,6 +525,7 @@ SYMBOL_EXPORT void
 chimera_vfs_remove_at_match_fh(
     struct chimera_vfs_thread       *thread,
     const struct chimera_vfs_cred   *cred,
+    struct chimera_vfs_transaction  *txn,
     struct chimera_vfs_open_handle  *handle,
     const char                      *name,
     int                              namelen,
@@ -527,7 +537,7 @@ chimera_vfs_remove_at_match_fh(
     chimera_vfs_remove_at_callback_t callback,
     void                            *private_data)
 {
-    chimera_vfs_remove_at_common(thread, cred, handle, name, namelen,
+    chimera_vfs_remove_at_common(thread, cred, txn, handle, name, namelen,
                                  child_fh, child_fh_len, 1 /* match_child_fh */,
                                  0 /* flags */, pre_attr_mask, post_attr_mask, parent_lease_skip,
                                  callback, private_data);

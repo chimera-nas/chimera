@@ -92,7 +92,7 @@ chimera_getacl_open_complete(
 
     chimera_vfs_getattr(
         request->thread->vfs_thread,
-        chimera_client_req_cred(request),
+        chimera_client_req_cred(request), NULL,
         oh,
         CHIMERA_VFS_ATTR_ACL,
         chimera_getacl_getattr_complete,
@@ -122,7 +122,7 @@ chimera_getacl_lookup_complete(
 
     chimera_vfs_open_fh(
         request->thread->vfs_thread,
-        chimera_client_req_cred(request),
+        chimera_client_req_cred(request), NULL,
         request->fh,
         request->fh_len,
         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED,
@@ -137,7 +137,7 @@ chimera_dispatch_getacl(
 {
     chimera_vfs_lookup(
         thread->vfs_thread,
-        chimera_client_req_cred(request),
+        chimera_client_req_cred(request), NULL,
         thread->client->root_fh,
         thread->client->root_fh_len,
         request->getacl.path,

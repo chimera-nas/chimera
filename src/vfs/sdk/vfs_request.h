@@ -115,7 +115,9 @@ struct chimera_vfs_mount_options {
 #define CHIMERA_VFS_OP_CLAIM_RELEASE            43
 #define CHIMERA_VFS_OP_READ_PLUS                44
 #define CHIMERA_VFS_OP_WRITE_SAME               45
-#define CHIMERA_VFS_OP_NUM                      46
+#define CHIMERA_VFS_OP_BEGIN_TRANSACTION        46
+#define CHIMERA_VFS_OP_END_TRANSACTION          47
+#define CHIMERA_VFS_OP_NUM                      48
 
 #define CHIMERA_VFS_OPEN_CREATE                 (1U << 0)
 #define CHIMERA_VFS_OPEN_PATH                   (1U << 1)
@@ -430,7 +432,7 @@ struct chimera_vfs_request_handle {
  * resume struct against this; raise it if one legitimately outgrows it.  It is
  * a union member, so it costs nothing until it is the largest arm -- and the
  * request union is already an order of magnitude bigger than this. */
-#define CHIMERA_VFS_GATE_SCRATCH_SIZE   384
+#define CHIMERA_VFS_GATE_SCRATCH_SIZE   448
 
 /* One enumerated named stream, packed back-to-back in the list_streams reply
  * buffer.  `name_len` bytes of (un-terminated) stream name follow this header;
@@ -454,6 +456,50 @@ struct chimera_vfs_stream_entry {
 #define CHIMERA_VFS_WRITE_FILESYNC 2
 
 struct chimera_vfs_notify_gate;
+
+/* Explicit multi-operation transactions (CHIMERA_VFS_CAP_TRANSACTIONAL).
+ *
+ * chimera_vfs_begin_transaction() returns a handle which the caller attaches to
+ * every subsequent op via request->transaction; the backend enlists the op in
+ * that transaction and defers durability until chimera_vfs_end_transaction().
+ * One client request (an NFS3 op, an S3 request, later an NFS4/SMB2 compound)
+ * is run under one transaction so the backend amortises a single intent-log FUA
+ * / RocksDB commit over the whole sequence and commits it before the client is
+ * ACKed.
+ *
+ * The handle is largely backend-private, but it begins with a small core-owned
+ * header the VFS core reads directly: `ts` is the wait-die priority (lower =
+ * older = wins; assigned once by the caller and reused across retries so a
+ * conflicting transaction never starves), and `route_hash` pins every enlisted
+ * op + the end op to the same backend thread the begin ran on (mandatory for
+ * thread-local backend transaction state).  A transactional backend embeds this
+ * header as the first member of its own (pooled) transaction object and returns
+ * a pointer to it, so an enlisted op recovers the backend object by casting
+ * request->transaction back to the backend type. */
+enum chimera_vfs_txn_mode {
+    CHIMERA_VFS_TXN_READ,          /* read-only: consistent snapshot, no durability */
+    CHIMERA_VFS_TXN_WRITE,         /* may mutate */
+};
+
+enum chimera_vfs_txn_end {
+    CHIMERA_VFS_TXN_ABORT,         /* discard all enlisted effects */
+    CHIMERA_VFS_TXN_COMMIT_ASYNC, /* commit, no FUA/fsync (UNSTABLE) */
+    CHIMERA_VFS_TXN_COMMIT_SYNC,  /* commit durably (FUA/fsync) */
+};
+
+struct chimera_vfs_transaction {
+    uint64_t                   ts; /* wait-die priority (core-owned) */
+    uint64_t                   route_hash; /* dispatch affinity key (core-owned) */
+    enum chimera_vfs_txn_mode mode;        /* core-owned */
+    struct chimera_vfs_module *module;     /* core-owned */
+    /* The named filesystem the hint FH belongs to, captured at begin so the
+     * end op can be routed with the same context (core-owned). */
+    void                      *mount_private;
+};
+
+typedef void (*chimera_vfs_end_txn_callback_t)(
+    enum chimera_vfs_error error_code,     /* ETXN_CONFLICT => retry from the top */
+    void                  *private_data);
 
 struct chimera_vfs_request {
     struct chimera_vfs_thread         *thread;
@@ -583,6 +629,12 @@ struct chimera_vfs_request {
     void                               ( *unblock_callback )(
         struct chimera_vfs_request     *request,
         struct chimera_vfs_open_handle *handle);
+
+    /* Non-NULL when this op is enlisted in an explicit transaction
+     * (CHIMERA_VFS_CAP_TRANSACTIONAL).  The backend recovers its transaction
+     * object from here and must NOT commit at op end; commit happens only at
+     * CHIMERA_VFS_OP_END_TRANSACTION.  NULL = legacy autocommit-per-op. */
+    struct chimera_vfs_transaction    *transaction;
 
     union {
         /*
@@ -1391,5 +1443,16 @@ struct chimera_vfs_request {
             struct chimera_vfs_layout_segment r_segments[CHIMERA_VFS_LAYOUT_MAX_SEGMENTS];
             struct chimera_vfs_layout_device  r_devices[CHIMERA_VFS_LAYOUT_MAX_DEVICES];
         } get_layout;
+
+        struct {
+            /* begin carries nothing: the core stamps the handle (ts/mode/
+             * route_hash/module) at local alloc and links it via
+             * request->transaction, so the backend's fire-and-forget begin
+             * handler just initializes its in-place state.  end carries the
+             * commit/abort disposition and the caller's completion. */
+            enum chimera_vfs_txn_end end_flag;           /* end: commit/abort */
+            chimera_vfs_end_txn_callback_t end_callback;
+            void                          *private_data;
+        } transaction_op;
     };
 };

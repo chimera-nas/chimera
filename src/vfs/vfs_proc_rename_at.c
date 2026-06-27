@@ -264,7 +264,7 @@ chimera_vfs_rename_at_recall_source(struct chimera_vfs_request *request)
     struct chimera_vfs_thread *thread = request->thread;
 
     if (thread->vfs->vfs_state) {
-        chimera_vfs_lookup(thread, request->cred, request->fh, request->fh_len,
+        chimera_vfs_lookup(thread, request->cred, NULL, request->fh, request->fh_len,
                            request->rename_at.name, request->rename_at.namelen,
                            CHIMERA_VFS_ATTR_FH, 0,
                            chimera_vfs_rename_at_source_lookup_complete,
@@ -300,6 +300,7 @@ static void
 chimera_vfs_rename_at_dispatch(
     struct chimera_vfs_thread       *thread,
     const struct chimera_vfs_cred   *cred,
+    struct chimera_vfs_transaction  *txn,
     const void                      *fh,
     int                              fhlen,
     const char                      *name,
@@ -326,6 +327,8 @@ chimera_vfs_rename_at_dispatch(
         callback(CHIMERA_VFS_PTR_ERR(request), NULL, NULL, NULL, NULL, private_data);
         return;
     }
+
+    request->transaction = txn;
 
     request->opcode                  = CHIMERA_VFS_OP_RENAME_AT;
     request->complete                = chimera_vfs_rename_at_complete;
@@ -386,7 +389,7 @@ chimera_vfs_rename_at_dispatch(
      * itself.  Only when a caching protocol is enabled. */
     if ((flags & CHIMERA_VFS_REMOVE_RECALL) && thread->vfs->caching_enabled &&
         !target_fh) {
-        chimera_vfs_lookup(thread, cred, new_fh, new_fhlen, new_name, new_namelen,
+        chimera_vfs_lookup(thread, cred, NULL, new_fh, new_fhlen, new_name, new_namelen,
                            CHIMERA_VFS_ATTR_FH, 0,
                            chimera_vfs_rename_at_target_lookup_complete,
                            request);
@@ -415,6 +418,7 @@ struct chimera_vfs_rename_at_gate {
     struct chimera_vfs_gate_ctx      gate_ctx;
     struct chimera_vfs_thread       *thread;
     const struct chimera_vfs_cred   *cred;
+    struct chimera_vfs_transaction  *txn;
     const void                      *fh;
     int                              fhlen;
     const char                      *name;
@@ -454,7 +458,7 @@ chimera_vfs_rename_at_gate_fail(
 static void
 chimera_vfs_rename_at_gate_dispatch(struct chimera_vfs_rename_at_gate *gate)
 {
-    chimera_vfs_rename_at_dispatch(gate->thread, gate->cred, gate->fh,
+    chimera_vfs_rename_at_dispatch(gate->thread, gate->cred, gate->txn, gate->fh,
                                    gate->fhlen, gate->name, gate->namelen,
                                    gate->new_fh, gate->new_fhlen,
                                    gate->new_name, gate->new_namelen,
@@ -550,7 +554,7 @@ chimera_vfs_rename_at_gate_dst(
      * which does not resolve the destination name up front).  Resolve it here
      * so a sticky destination directory's owner rule is enforced against the
      * object actually being replaced. */
-    chimera_vfs_lookup(gate->thread, gate->cred, gate->new_fh, gate->new_fhlen,
+    chimera_vfs_lookup(gate->thread, gate->cred, NULL, gate->new_fh, gate->new_fhlen,
                        gate->new_name, gate->new_namelen,
                        CHIMERA_VFS_ATTR_FH, 0,
                        chimera_vfs_rename_at_gate_dst_lookup, gate);
@@ -614,6 +618,7 @@ SYMBOL_EXPORT void
 chimera_vfs_rename_at(
     struct chimera_vfs_thread       *thread,
     const struct chimera_vfs_cred   *cred,
+    struct chimera_vfs_transaction  *txn,
     const void                      *fh,
     int                              fhlen,
     const char                      *name,
@@ -672,6 +677,7 @@ chimera_vfs_rename_at(
         gate                 = chimera_vfs_gate_scratch_alloc(thread);
         gate->thread         = thread;
         gate->cred           = cred;
+        gate->txn            = txn;
         gate->fh             = fh;
         gate->fhlen          = fhlen;
         gate->name           = name;
@@ -700,13 +706,13 @@ chimera_vfs_rename_at(
         /* Resolve the source object's FH first so the sticky-bit owner check on
          * the source directory can be evaluated (no-follow: rename operates on
          * the name itself). */
-        chimera_vfs_lookup(thread, cred, fh, fhlen, name, namelen,
+        chimera_vfs_lookup(thread, cred, NULL, fh, fhlen, name, namelen,
                            CHIMERA_VFS_ATTR_FH, 0,
                            chimera_vfs_rename_at_gate_lookup, gate);
         return;
     }
 
-    chimera_vfs_rename_at_dispatch(thread, cred, fh, fhlen, name, namelen,
+    chimera_vfs_rename_at_dispatch(thread, cred, txn, fh, fhlen, name, namelen,
                                    new_fh, new_fhlen, new_name, new_namelen,
                                    target_fh, target_fh_len, flags, pre_attr_mask,
                                    post_attr_mask, parent_lease_skip,

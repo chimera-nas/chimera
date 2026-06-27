@@ -1210,7 +1210,7 @@ diskfs_clone_range(
     p->status  = 0;
     p->pending = 0;
     p->niov    = 0;
-    p->txn     = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+    p->txn     = diskfs_txn_begin(thread, DISKFS_TXN_WRITE, request);
 
     if (request->clone_range.length == 0) {
         diskfs_map_attrs(thread, &request->clone_range.r_pre_attr, dst);

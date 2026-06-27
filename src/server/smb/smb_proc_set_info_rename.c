@@ -213,7 +213,7 @@ chimera_smb_set_info_rename_emit(struct chimera_smb_request *request)
 
     chimera_vfs_rename_at(
         request->compound->thread->vfs_thread,
-        &request->session_handle->session->cred,
+        &request->session_handle->session->cred, NULL,
         open_file->parent_fh,
         open_file->parent_fh_len,
         open_file->name,
@@ -543,6 +543,7 @@ chimera_smb_set_info_rename_recall_readdir_complete(
         chimera_vfs_readdir(
             request->compound->thread->vfs_thread,
             &request->session_handle->session->cred,
+            NULL,
             request->set_info.open_file->handle,
             CHIMERA_VFS_ATTR_FH,
             0,
@@ -593,6 +594,7 @@ chimera_smb_set_info_rename_recall_scan(struct chimera_smb_request *request)
     chimera_vfs_readdir(
         request->compound->thread->vfs_thread,
         &request->session_handle->session->cred,
+        NULL,
         request->set_info.open_file->handle,
         CHIMERA_VFS_ATTR_FH, /* per-entry attr: need the child FH */
         0,                   /* dir_attr_mask */
@@ -658,7 +660,7 @@ chimera_smb_set_info_rename_open_dest_dir_callback(
     /* Check if source filename exists in this directory */
     chimera_vfs_lookup_at(
         request->compound->thread->vfs_thread,
-        &request->session_handle->session->cred,
+        &request->session_handle->session->cred, NULL,
         oh,
         open_file->name,
         open_file->name_len,
@@ -698,7 +700,7 @@ chimera_smb_set_info_rename_check_dest_callback(
             /* Open the directory so we can use it as the new parent */
             chimera_vfs_open_fh(
                 request->compound->thread->vfs_thread,
-                &request->session_handle->session->cred,
+                &request->session_handle->session->cred, NULL,
                 attr->va_fh,
                 attr->va_fh_len,
                 CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
@@ -758,7 +760,7 @@ chimera_smb_set_info_rename_open_dest_parent_callback(
     /* Check if destination exists */
     chimera_vfs_lookup_at(
         request->compound->thread->vfs_thread,
-        &request->session_handle->session->cred,
+        &request->session_handle->session->cred, NULL,
         oh,
         dest_name,
         dest_name_len,
@@ -786,7 +788,7 @@ chimera_smb_set_info_rename_lookup_dest_parent_callback(
 
     chimera_vfs_open_fh(
         vfs_thread,
-        &request->session_handle->session->cred,
+        &request->session_handle->session->cred, NULL,
         attr->va_fh,
         attr->va_fh_len,
         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
@@ -816,7 +818,7 @@ chimera_smb_set_info_rename_open_callback(
     /* Check if destination exists */
     chimera_vfs_lookup_at(
         request->compound->thread->vfs_thread,
-        &request->session_handle->session->cred,
+        &request->session_handle->session->cred, NULL,
         oh,
         dest_name,
         dest_name_len,
@@ -851,7 +853,7 @@ chimera_smb_set_info_rename_process(struct chimera_smb_request *request)
         /* Moving to a different directory - lookup the new parent path */
         chimera_vfs_lookup(
             vfs_thread,
-            &request->session_handle->session->cred,
+            &request->session_handle->session->cred, NULL,
             tree->fh,
             tree->fh_len,
             rename_info->new_parent,
@@ -864,7 +866,7 @@ chimera_smb_set_info_rename_process(struct chimera_smb_request *request)
         /* Destination is in tree root (no parent path specified) */
         chimera_vfs_open_fh(
             vfs_thread,
-            &request->session_handle->session->cred,
+            &request->session_handle->session->cred, NULL,
             tree->fh,
             tree->fh_len,
             CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,

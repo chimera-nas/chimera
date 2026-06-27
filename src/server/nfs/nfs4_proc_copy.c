@@ -215,7 +215,7 @@ chimera_nfs4_copy_read_complete(
         },
     };
 
-    chimera_vfs_write_owned(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_write_owned(req->thread->vfs_thread, &req->cred, NULL,
                             dst_handle,
                             refs->dst_offset,
                             count,
@@ -259,7 +259,7 @@ chimera_nfs4_copy_rw_step(struct nfs4_copy_state_refs *refs)
         },
     };
 
-    chimera_vfs_read_owned(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_read_owned(req->thread->vfs_thread, &req->cred, NULL,
                            src_handle,
                            refs->src_offset,
                            (uint32_t) chunk,
@@ -415,7 +415,7 @@ chimera_nfs4_copy_begin(struct nfs4_copy_state_refs *refs)
     refs->src_handle = src_handle;
     refs->dst_handle = dst_handle;
 
-    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred, NULL,
                         src_handle,
                         CHIMERA_VFS_ATTR_SIZE,
                         chimera_nfs4_copy_srcattr_complete,
@@ -485,7 +485,7 @@ chimera_nfs4_copy_open_dst(struct nfs4_copy_state_refs *refs)
 {
     struct nfs_request *req = refs->req;
 
-    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred, NULL,
                         req->fh,
                         req->fhlen,
                         CHIMERA_VFS_OPEN_INFERRED,
@@ -598,7 +598,7 @@ chimera_nfs4_copy(
     }
 
     if (refs->src_special) {
-        chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+        chimera_vfs_open_fh(thread->vfs_thread, &req->cred, NULL,
                             req->saved_fh,
                             req->saved_fhlen,
                             CHIMERA_VFS_OPEN_INFERRED |

@@ -36,7 +36,7 @@ chimera_dispatch_fsetattr(
      * futimens-to-now) ride the descriptor's open-time grant. */
     chimera_vfs_fsetattr(
         thread->vfs_thread,
-        chimera_client_req_cred(request),
+        chimera_client_req_cred(request), NULL,
         request->fsetattr.handle,
         &request->fsetattr.set_attr,
         0,  /* pre_attr_mask */

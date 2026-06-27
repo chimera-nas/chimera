@@ -1748,7 +1748,7 @@ chimera_mkpath_descend_cb(
 static void
 chimera_mkpath_open_child(struct chimera_mkpath_ctx *ctx)
 {
-    chimera_vfs_open_fh(ctx->thread, chimera_vfs_get_server_cred(),
+    chimera_vfs_open_fh(ctx->thread, chimera_vfs_get_server_cred(), NULL,
                         ctx->child_fh, ctx->child_fh_len,
                         CHIMERA_VFS_OPEN_DIRECTORY | CHIMERA_VFS_OPEN_PATH,
                         chimera_mkpath_descend_cb, ctx);
@@ -1808,7 +1808,7 @@ chimera_mkpath_lookup_cb(
         ctx->set_attr.va_uid = chimera_vfs_get_server_cred()->uid;
         ctx->set_attr.va_gid = chimera_vfs_get_server_cred()->gid;
 
-        chimera_vfs_mkdir_at(ctx->thread, chimera_vfs_get_server_cred(), ctx->oh,
+        chimera_vfs_mkdir_at(ctx->thread, chimera_vfs_get_server_cred(), NULL, ctx->oh,
                              ctx->comp, ctx->complen, &ctx->set_attr,
                              CHIMERA_VFS_ATTR_FH, 0, 0,
                              chimera_mkpath_mkdir_cb, ctx);
@@ -1847,7 +1847,7 @@ chimera_mkpath_next(struct chimera_mkpath_ctx *ctx)
     memcpy(ctx->comp, ctx->path + start, ctx->complen);
     ctx->comp[ctx->complen] = '\0';
 
-    chimera_vfs_lookup_at(ctx->thread, chimera_vfs_get_server_cred(), ctx->oh,
+    chimera_vfs_lookup_at(ctx->thread, chimera_vfs_get_server_cred(), NULL, ctx->oh,
                           ctx->comp, ctx->complen, CHIMERA_VFS_ATTR_FH, 0,
                           chimera_mkpath_lookup_cb, ctx);
 } /* chimera_mkpath_next */
@@ -1892,7 +1892,7 @@ chimera_mkpath_mounted_cb(
         return;
     }
 
-    chimera_vfs_open_fh(thread, chimera_vfs_get_server_cred(),
+    chimera_vfs_open_fh(thread, chimera_vfs_get_server_cred(), NULL,
                         m->root_fh, m->root_fh_len,
                         CHIMERA_VFS_OPEN_DIRECTORY | CHIMERA_VFS_OPEN_PATH,
                         chimera_mkpath_root_open_cb, ctx);
@@ -2061,7 +2061,7 @@ chimera_seed_dirlink_cb(
         return;
     }
 
-    chimera_vfs_symlink_at(ctx->thread, chimera_vfs_get_server_cred(),
+    chimera_vfs_symlink_at(ctx->thread, chimera_vfs_get_server_cred(), NULL,
                            ctx->root_oh, "badlink", 7,
                            "nonexistent", 11, NULL,
                            0, 0, 0, chimera_seed_badlink_cb, ctx);
@@ -2083,7 +2083,7 @@ chimera_seed_diropen_cb(
 
     ctx->dir_oh = oh;
 
-    chimera_vfs_symlink_at(ctx->thread, chimera_vfs_get_server_cred(),
+    chimera_vfs_symlink_at(ctx->thread, chimera_vfs_get_server_cred(), NULL,
                            ctx->dir_oh, "link", 4,
                            "target", 6, NULL,
                            0, 0, 0, chimera_seed_dirlink_cb, ctx);
@@ -2109,7 +2109,7 @@ chimera_seed_mkdir_cb(
     memcpy(ctx->dir_fh, attr->va_fh, attr->va_fh_len);
     ctx->dir_fh_len = attr->va_fh_len;
 
-    chimera_vfs_open_fh(ctx->thread, chimera_vfs_get_server_cred(),
+    chimera_vfs_open_fh(ctx->thread, chimera_vfs_get_server_cred(), NULL,
                         ctx->dir_fh, ctx->dir_fh_len,
                         CHIMERA_VFS_OPEN_DIRECTORY | CHIMERA_VFS_OPEN_PATH,
                         chimera_seed_diropen_cb, ctx);
@@ -2138,7 +2138,7 @@ chimera_seed_rootopen_cb(
     set_attr.va_uid  = 0;
     set_attr.va_gid  = 0;
 
-    chimera_vfs_mkdir_at(ctx->thread, chimera_vfs_get_server_cred(), ctx->root_oh,
+    chimera_vfs_mkdir_at(ctx->thread, chimera_vfs_get_server_cred(), NULL, ctx->root_oh,
                          "SymlinkTest", 11, &set_attr,
                          CHIMERA_VFS_ATTR_FH, 0, 0,
                          chimera_seed_mkdir_cb, ctx);
@@ -2167,7 +2167,7 @@ chimera_seed_mounted_cb(
         return;
     }
 
-    chimera_vfs_open_fh(thread, chimera_vfs_get_server_cred(),
+    chimera_vfs_open_fh(thread, chimera_vfs_get_server_cred(), NULL,
                         m->root_fh, m->root_fh_len,
                         CHIMERA_VFS_OPEN_DIRECTORY | CHIMERA_VFS_OPEN_PATH,
                         chimera_seed_rootopen_cb, ctx);
@@ -2259,7 +2259,7 @@ chimera_seed_fsa_mkdir_cb(
     file_attr.va_uid  = 0;
     file_attr.va_gid  = 0;
 
-    chimera_vfs_open_at(ctx->thread, chimera_vfs_get_server_cred(), ctx->root_oh,
+    chimera_vfs_open_at(ctx->thread, chimera_vfs_get_server_cred(), NULL, ctx->root_oh,
                         "ExistingFile.txt", 16,
                         CHIMERA_VFS_OPEN_CREATE, &file_attr,
                         CHIMERA_VFS_ATTR_FH, 0, 0,
@@ -2289,7 +2289,7 @@ chimera_seed_fsa_rootopen_cb(
     set_attr.va_uid  = 0;
     set_attr.va_gid  = 0;
 
-    chimera_vfs_mkdir_at(ctx->thread, chimera_vfs_get_server_cred(), ctx->root_oh,
+    chimera_vfs_mkdir_at(ctx->thread, chimera_vfs_get_server_cred(), NULL, ctx->root_oh,
                          "ExistingFolder", 14, &set_attr,
                          CHIMERA_VFS_ATTR_FH, 0, 0,
                          chimera_seed_fsa_mkdir_cb, ctx);
@@ -2318,7 +2318,7 @@ chimera_seed_fsa_mounted_cb(
         return;
     }
 
-    chimera_vfs_open_fh(thread, chimera_vfs_get_server_cred(),
+    chimera_vfs_open_fh(thread, chimera_vfs_get_server_cred(), NULL,
                         m->root_fh, m->root_fh_len,
                         CHIMERA_VFS_OPEN_DIRECTORY | CHIMERA_VFS_OPEN_PATH,
                         chimera_seed_fsa_rootopen_cb, ctx);

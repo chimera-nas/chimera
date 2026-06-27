@@ -424,7 +424,7 @@ chimera_s3_del_open_cb(
 
     chimera_s3_request_get(request);
 
-    chimera_vfs_remove_at(thread->vfs, &thread->shared->cred,
+    chimera_vfs_remove_at(thread->vfs, &thread->shared->cred, NULL,
                           oh,
                           request->del.cur_name,
                           request->del.cur_name_len,
@@ -459,7 +459,7 @@ chimera_s3_del_lookup_cb(
 
     chimera_s3_request_get(request);
 
-    chimera_vfs_open_fh(thread->vfs, &thread->shared->cred,
+    chimera_vfs_open_fh(thread->vfs, &thread->shared->cred, NULL,
                         attr->va_fh,
                         attr->va_fh_len,
                         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
@@ -518,7 +518,7 @@ chimera_s3_del_drive(struct chimera_s3_request *request)
 
         chimera_s3_request_get(request);
 
-        chimera_vfs_lookup(thread->vfs, &thread->shared->cred,
+        chimera_vfs_lookup(thread->vfs, &thread->shared->cred, NULL,
                            request->bucket_fh,
                            request->bucket_fhlen,
                            dirpath,

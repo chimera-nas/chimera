@@ -104,7 +104,7 @@ chimera_vfs_rename_target_lookup_complete(
 
     chimera_vfs_rename_at(
         thread,
-        request->cred,
+        request->cred, NULL,
         request->rename.old_parent_fh,
         request->rename.old_parent_fh_len,
         request->rename.path + request->rename.name_offset,
@@ -148,7 +148,7 @@ chimera_vfs_rename_new_parent_lookup_complete(
     /* Lookup the target to get its FH for silly rename optimization */
     chimera_vfs_lookup(
         thread,
-        request->cred,
+        request->cred, NULL,
         request->rename.new_parent_fh,
         request->rename.new_parent_fh_len,
         request->rename.new_path + request->rename.new_name_offset,
@@ -184,7 +184,7 @@ chimera_vfs_rename_fast_target_lookup_complete(
 
     chimera_vfs_rename_at(
         thread,
-        request->cred,
+        request->cred, NULL,
         request->rename.old_parent_fh,
         request->rename.old_parent_fh_len,
         request->rename.path,
@@ -227,7 +227,7 @@ chimera_vfs_rename_old_parent_lookup_complete(
 
     chimera_vfs_lookup(
         thread,
-        request->cred,
+        request->cred, NULL,
         request->fh,
         request->fh_len,
         request->rename.new_path,
@@ -326,7 +326,7 @@ chimera_vfs_rename(
             request->rename.target_fh_len = 0;
             chimera_vfs_rename_at(
                 thread,
-                cred,
+                cred, NULL,
                 request->rename.old_parent_fh,
                 request->rename.old_parent_fh_len,
                 request->rename.path,
@@ -350,7 +350,7 @@ chimera_vfs_rename(
         /* Lookup the target to get its FH for silly rename optimization */
         chimera_vfs_lookup(
             thread,
-            cred,
+            cred, NULL,
             fh,
             fhlen,
             request->rename.new_path,
@@ -398,7 +398,7 @@ chimera_vfs_rename(
 
                 chimera_vfs_rename_at(
                     thread,
-                    cred,
+                    cred, NULL,
                     request->rename.old_parent_fh,
                     request->rename.old_parent_fh_len,
                     request->rename.path + request->rename.name_offset,
@@ -453,7 +453,7 @@ chimera_vfs_rename(
 
         chimera_vfs_lookup(
             thread,
-            cred,
+            cred, NULL,
             fh,
             fhlen,
             request->rename.path,

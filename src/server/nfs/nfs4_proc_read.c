@@ -88,7 +88,7 @@ chimera_nfs4_read_open_callback(
             },
         };
 
-        chimera_vfs_read_owned(req->thread->vfs_thread, &req->cred,
+        chimera_vfs_read_owned(req->thread->vfs_thread, &req->cred, NULL,
                                handle,
                                args->offset,
                                args->count,
@@ -101,7 +101,7 @@ chimera_nfs4_read_open_callback(
         return;
     }
 
-    chimera_vfs_read(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_read(req->thread->vfs_thread, &req->cred, NULL,
                      handle,
                      args->offset,
                      args->count,
@@ -141,7 +141,7 @@ chimera_nfs4_read_typecheck_complete(
     chimera_vfs_release(req->thread->vfs_thread, req->handle);
     req->handle = NULL;
 
-    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred, NULL,
                         req->fh,
                         req->fhlen,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_READ_ONLY,
@@ -165,7 +165,7 @@ chimera_nfs4_read_typecheck_open_callback(
     }
 
     req->handle = handle;
-    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred, NULL,
                         handle,
                         CHIMERA_VFS_ATTR_MODE,
                         chimera_nfs4_read_typecheck_complete,
@@ -234,7 +234,7 @@ chimera_nfs4_read(
             }
         }
 
-        chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+        chimera_vfs_open_fh(thread->vfs_thread, &req->cred, NULL,
                             req->fh,
                             req->fhlen,
                             CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_NOFOLLOW,
@@ -278,7 +278,7 @@ chimera_nfs4_read(
          * client's own delegation. */
         req->io_owner_from_deleg = (req->session &&
                                     req->session->client_unified);
-        chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+        chimera_vfs_open_fh(thread->vfs_thread, &req->cred, NULL,
                             req->fh,
                             req->fhlen,
                             CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_NOFOLLOW,
@@ -356,7 +356,7 @@ chimera_nfs4_read(
                                                           req->encoding->dbuf);
     chimera_nfs_abort_if(iov == NULL, "Failed to allocate space");
 
-    chimera_vfs_read_owned(thread->vfs_thread, &req->cred,
+    chimera_vfs_read_owned(thread->vfs_thread, &req->cred, NULL,
                            state_handle,
                            args->offset,
                            args->count,

@@ -27,6 +27,7 @@ SYMBOL_EXPORT void
 chimera_vfs_readlink(
     struct chimera_vfs_thread      *thread,
     const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_transaction *txn,
     struct chimera_vfs_open_handle *handle,
     void                           *target,
     uint32_t                        target_maxlength,
@@ -42,6 +43,8 @@ chimera_vfs_readlink(
         callback(CHIMERA_VFS_PTR_ERR(request), 0, NULL, private_data);
         return;
     }
+
+    request->transaction = txn;
 
     request->opcode                      = CHIMERA_VFS_OP_READLINK;
     request->complete                    = chimera_vfs_readlink_complete;

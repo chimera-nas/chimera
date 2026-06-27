@@ -823,7 +823,7 @@ chimera_s3_tagging_lookup_cb(
 
     chimera_s3_request_get(request);
 
-    chimera_vfs_open_fh(thread->vfs, &thread->shared->cred,
+    chimera_vfs_open_fh(thread->vfs, &thread->shared->cred, NULL,
                         attr->va_fh, attr->va_fh_len,
                         CHIMERA_VFS_OPEN_INFERRED,
                         chimera_s3_tagging_open_cb, request);
@@ -847,7 +847,7 @@ chimera_s3_tagging_dispatch(
         /* Bucket-level tagging: the bucket directory FH is already in hand. */
         chimera_s3_request_get(request);
 
-        chimera_vfs_open_fh(thread->vfs, &thread->shared->cred,
+        chimera_vfs_open_fh(thread->vfs, &thread->shared->cred, NULL,
                             request->bucket_fh, request->bucket_fhlen,
                             CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
                             chimera_s3_tagging_open_cb, request);
@@ -856,7 +856,7 @@ chimera_s3_tagging_dispatch(
 
     chimera_s3_request_get(request);
 
-    chimera_vfs_lookup(thread->vfs, &thread->shared->cred,
+    chimera_vfs_lookup(thread->vfs, &thread->shared->cred, NULL,
                        request->bucket_fh, request->bucket_fhlen,
                        request->path, request->path_len,
                        CHIMERA_VFS_ATTR_FH,
@@ -1091,7 +1091,7 @@ chimera_s3_tagging_store_lookup_cb(
 
     chimera_s3_request_get(request);
 
-    chimera_vfs_open_fh(thread->vfs, &thread->shared->cred,
+    chimera_vfs_open_fh(thread->vfs, &thread->shared->cred, NULL,
                         attr->va_fh, attr->va_fh_len,
                         CHIMERA_VFS_OPEN_INFERRED,
                         chimera_s3_tagging_store_open_cb, request);
@@ -1120,7 +1120,7 @@ chimera_s3_tagging_store_by_path(
 
     chimera_s3_request_get(request);
 
-    chimera_vfs_lookup(thread->vfs, &thread->shared->cred,
+    chimera_vfs_lookup(thread->vfs, &thread->shared->cred, NULL,
                        request->bucket_fh, request->bucket_fhlen,
                        request->path, request->path_len,
                        CHIMERA_VFS_ATTR_FH,
@@ -1229,7 +1229,7 @@ chimera_s3_tagging_count_for_head(
 
     chimera_s3_request_get(request);
 
-    chimera_vfs_open_fh(thread->vfs, &thread->shared->cred,
+    chimera_vfs_open_fh(thread->vfs, &thread->shared->cred, NULL,
                         fh, fh_len,
                         CHIMERA_VFS_OPEN_INFERRED,
                         chimera_s3_tagging_count_open_cb, request);

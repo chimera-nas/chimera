@@ -250,6 +250,7 @@ static void
 chimera_vfs_setattr_dispatch(
     struct chimera_vfs_thread      *thread,
     const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_transaction *txn,
     struct chimera_vfs_open_handle *handle,
     struct chimera_vfs_attrs       *set_attr,
     uint64_t                        pre_attr_mask,
@@ -265,6 +266,8 @@ chimera_vfs_setattr_dispatch(
         callback(CHIMERA_VFS_PTR_ERR(request), NULL, NULL, NULL, private_data);
         return;
     }
+
+    request->transaction = txn;
 
     request->opcode         = CHIMERA_VFS_OP_SETATTR;
     request->complete       = chimera_vfs_setattr_complete;
@@ -310,6 +313,7 @@ chimera_vfs_setattr_dispatch(
 struct chimera_vfs_setattr_gate {
     struct chimera_vfs_thread      *thread;
     const struct chimera_vfs_cred  *cred;
+    struct chimera_vfs_transaction *txn;
     struct chimera_vfs_open_handle *handle;
     struct chimera_vfs_attrs       *set_attr;
     uint64_t                        pre_attr_mask;
@@ -498,7 +502,7 @@ chimera_vfs_setattr_gate_complete(
         gate->set_attr->va_mode &= ~(uint64_t) S_ISGID;
     }
 
-    chimera_vfs_setattr_dispatch(gate->thread, gate->cred, gate->handle,
+    chimera_vfs_setattr_dispatch(gate->thread, gate->cred, gate->txn, gate->handle,
                                  gate->set_attr, gate->pre_attr_mask,
                                  gate->post_attr_mask, gate->callback,
                                  gate->private_data);
@@ -509,6 +513,7 @@ static void
 chimera_vfs_setattr_common(
     struct chimera_vfs_thread      *thread,
     const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_transaction *txn,
     struct chimera_vfs_open_handle *handle,
     struct chimera_vfs_attrs       *set_attr,
     uint64_t                        pre_attr_mask,
@@ -552,6 +557,7 @@ chimera_vfs_setattr_common(
 
             gate->thread         = thread;
             gate->cred           = cred;
+            gate->txn            = txn;
             gate->handle         = handle;
             gate->set_attr       = set_attr;
             gate->pre_attr_mask  = pre_attr_mask;
@@ -559,14 +565,14 @@ chimera_vfs_setattr_common(
             gate->callback       = callback;
             gate->private_data   = private_data;
 
-            chimera_vfs_getattr(thread, cred, handle,
+            chimera_vfs_getattr(thread, cred, txn, handle,
                                 CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_ACL,
                                 chimera_vfs_setattr_gate_complete, gate);
             return;
         }
     }
 
-    chimera_vfs_setattr_dispatch(thread, cred, handle, set_attr,
+    chimera_vfs_setattr_dispatch(thread, cred, txn, handle, set_attr,
                                  pre_attr_mask, post_attr_mask,
                                  callback, private_data);
 } /* chimera_vfs_setattr_common */
@@ -575,6 +581,7 @@ SYMBOL_EXPORT void
 chimera_vfs_setattr(
     struct chimera_vfs_thread      *thread,
     const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_transaction *txn,
     struct chimera_vfs_open_handle *handle,
     struct chimera_vfs_attrs       *set_attr,
     uint64_t                        pre_attr_mask,
@@ -582,7 +589,7 @@ chimera_vfs_setattr(
     chimera_vfs_setattr_callback_t  callback,
     void                           *private_data)
 {
-    chimera_vfs_setattr_common(thread, cred, handle, set_attr,
+    chimera_vfs_setattr_common(thread, cred, txn, handle, set_attr,
                                pre_attr_mask, post_attr_mask, 0,
                                callback, private_data);
 } /* chimera_vfs_setattr */
@@ -595,6 +602,7 @@ SYMBOL_EXPORT void
 chimera_vfs_fsetattr(
     struct chimera_vfs_thread      *thread,
     const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_transaction *txn,
     struct chimera_vfs_open_handle *handle,
     struct chimera_vfs_attrs       *set_attr,
     uint64_t                        pre_attr_mask,
@@ -602,7 +610,7 @@ chimera_vfs_fsetattr(
     chimera_vfs_setattr_callback_t  callback,
     void                           *private_data)
 {
-    chimera_vfs_setattr_common(thread, cred, handle, set_attr,
+    chimera_vfs_setattr_common(thread, cred, txn, handle, set_attr,
                                pre_attr_mask, post_attr_mask, 1,
                                callback, private_data);
 } /* chimera_vfs_fsetattr */

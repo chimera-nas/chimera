@@ -223,7 +223,7 @@ diskfs_drain_acquired_cb(
 static void
 diskfs_drain_begin(struct diskfs_drain *d)
 {
-    d->txn      = diskfs_txn_begin(d->thread, DISKFS_TXN_WRITE);
+    d->txn      = diskfs_txn_begin(d->thread, DISKFS_TXN_WRITE, NULL);
     d->rc_inode = NULL;     /* refcount inode is per-txn; re-acquire if needed */
     /* Orphaned inodes are pool-level from here on (their filesystem may
      * already be removed); no fs stamp. */

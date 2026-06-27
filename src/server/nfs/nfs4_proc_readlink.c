@@ -71,7 +71,7 @@ chimera_nfs4_readlink_getattr_complete(
     chimera_nfs_abort_if(res->resok4.link.data == NULL, "Failed to allocate space");
     res->resok4.link.len = 4096;
 
-    chimera_vfs_readlink(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_readlink(req->thread->vfs_thread, &req->cred, NULL,
                          req->handle,
                          res->resok4.link.data,
                          res->resok4.link.len,
@@ -97,7 +97,7 @@ chimera_nfs4_readlink_open_callback(
         return;
     }
 
-    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred, NULL,
                         handle,
                         CHIMERA_VFS_ATTR_MODE,
                         chimera_nfs4_readlink_getattr_complete,
@@ -119,7 +119,7 @@ chimera_nfs4_readlink(
         return;
     }
 
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+    chimera_vfs_open_fh(thread->vfs_thread, &req->cred, NULL,
                         req->fh,
                         req->fhlen,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_NOFOLLOW,

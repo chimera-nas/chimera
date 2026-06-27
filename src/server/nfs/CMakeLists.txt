@@ -12,6 +12,7 @@ add_library(chimera_nfs SHARED nfs.c nfs4_session.c nfs4_state.c nfs4_lease.c nf
             nfs3_proc_create.c nfs3_proc_mkdir.c nfs3_proc_remove.c nfs3_proc_mknod.c nfs3_proc_symlink.c
             nfs3_proc_rmdir.c nfs3_proc_rename.c nfs3_proc_readdir.c nfs3_proc_readdirplus.c
             nfs3_proc_link.c nfs3_proc_commit.c nfs3_proc_fsinfo.c nfs3_proc_pathconf.c nfs3_proc_fsstat.c
+            nfs3_txn.c
 
 
             nfs4_proc_getfh.c nfs4_proc_access.c nfs4_proc_putrootfh.c nfs4_proc_putfh.c

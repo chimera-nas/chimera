@@ -92,6 +92,7 @@ chimera_nfs4_setattr_apply(
     if (fd_rights) {
         chimera_vfs_fsetattr(req->thread->vfs_thread,
                              &req->cred,
+                             NULL,
                              handle,
                              attr,
                              0,
@@ -101,6 +102,7 @@ chimera_nfs4_setattr_apply(
     } else {
         chimera_vfs_setattr(req->thread->vfs_thread,
                             &req->cred,
+                            NULL,
                             handle,
                             attr,
                             0,
@@ -147,7 +149,7 @@ nfs4_setattr_proceed(void *arg)
     }
 
     chimera_vfs_open_fh(req->thread->vfs_thread,
-                        &req->cred,
+                        &req->cred, NULL,
                         req->fh,
                         req->fhlen,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,

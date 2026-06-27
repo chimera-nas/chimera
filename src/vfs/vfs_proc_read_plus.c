@@ -26,6 +26,7 @@ SYMBOL_EXPORT void
 chimera_vfs_read_plus(
     struct chimera_vfs_thread       *thread,
     const struct chimera_vfs_cred   *cred,
+    struct chimera_vfs_transaction  *txn,
     struct chimera_vfs_open_handle  *handle,
     uint64_t                         offset,
     uint64_t                         length,
@@ -47,6 +48,7 @@ chimera_vfs_read_plus(
     }
 
     request->opcode              = CHIMERA_VFS_OP_READ_PLUS;
+    request->transaction         = txn;
     request->complete            = chimera_vfs_read_plus_complete;
     request->read_plus.handle    = handle;
     request->read_plus.offset    = offset;

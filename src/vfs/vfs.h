@@ -178,6 +178,14 @@ struct chimera_vfs {
     char                                  machine_name[256];
 };
 
+/* Transaction priority (`core.ts`) layout: the high bits carry a per-thread,
+ * TSC-anchored, strictly-increasing counter (age order -> a longer-lived txn
+ * outranks a newcomer, which keeps WFG victim selection starvation-free), and
+ * the low CHIMERA_VFS_TXN_THREAD_BITS carry the allocating thread's dense id so
+ * values are globally unique without a shared atomic.  See
+ * chimera_vfs_txn_alloc_ts(). */
+#define CHIMERA_VFS_TXN_THREAD_BITS 16
+
 struct chimera_vfs_thread {
     struct evpl                         *evpl;
     struct chimera_vfs                  *vfs;
@@ -208,6 +216,13 @@ struct chimera_vfs_thread {
      * chimera_vfs_* call and consumed (cleared) synchronously at request alloc,
      * so a forgotten set drops the child span rather than misattributing it. */
     struct otel_span                    *otel_parent;
+
+    /* Transaction-priority allocation (chimera_vfs_txn_alloc_ts): a dense thread
+     * id assigned once at thread init (low bits of every ts -> global
+     * uniqueness) plus the last high-part handed out (kept strictly increasing
+     * for per-thread uniqueness within a TSC tick).  No shared atomic. */
+    uint32_t                             txn_thread_id;
+    uint64_t                             txn_ts_hi;
 
     struct chimera_vfs_thread_metrics    metrics;
 };

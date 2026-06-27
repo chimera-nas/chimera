@@ -102,7 +102,7 @@ chimera_nfs4_write_open_callback(
             },
         };
 
-        chimera_vfs_write_owned(req->thread->vfs_thread, &req->cred,
+        chimera_vfs_write_owned(req->thread->vfs_thread, &req->cred, NULL,
                                 handle,
                                 args->offset,
                                 args->data.length,
@@ -117,7 +117,7 @@ chimera_nfs4_write_open_callback(
         return;
     }
 
-    chimera_vfs_write(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_write(req->thread->vfs_thread, &req->cred, NULL,
                       handle,
                       args->offset,
                       args->data.length,
@@ -168,7 +168,7 @@ chimera_nfs4_write_typecheck_complete(
         return;
     }
 
-    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred, NULL,
                         req->fh,
                         req->fhlen,
                         CHIMERA_VFS_OPEN_INFERRED,
@@ -194,7 +194,7 @@ chimera_nfs4_write_typecheck_open_callback(
     }
 
     req->handle = handle;
-    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred, NULL,
                         handle,
                         CHIMERA_VFS_ATTR_MODE,
                         chimera_nfs4_write_typecheck_complete,
@@ -271,7 +271,7 @@ chimera_nfs4_write(
             }
         }
 
-        chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+        chimera_vfs_open_fh(thread->vfs_thread, &req->cred, NULL,
                             req->fh,
                             req->fhlen,
                             CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH |
@@ -319,7 +319,7 @@ chimera_nfs4_write(
          * not recall the client's own delegation. */
         req->io_owner_from_deleg = (req->session &&
                                     req->session->client_unified);
-        chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+        chimera_vfs_open_fh(thread->vfs_thread, &req->cred, NULL,
                             req->fh,
                             req->fhlen,
                             CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH |
@@ -404,7 +404,7 @@ chimera_nfs4_write(
         },
     };
 
-    chimera_vfs_write_owned(thread->vfs_thread, &req->cred,
+    chimera_vfs_write_owned(thread->vfs_thread, &req->cred, NULL,
                             state_handle,
                             args->offset,
                             args->data.length,

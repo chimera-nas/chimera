@@ -137,7 +137,7 @@ chimera_nfs4_read_plus_classify_complete(
         iov = xdr_dbuf_alloc_space(sizeof(*iov) * 256, req->encoding->dbuf);
         chimera_nfs_abort_if(iov == NULL, "Failed to allocate space");
 
-        chimera_vfs_read(req->thread->vfs_thread, &req->cred,
+        chimera_vfs_read(req->thread->vfs_thread, &req->cred, NULL,
                          req->handle,
                          args->rpa_offset,
                          (uint32_t) length,
@@ -178,7 +178,7 @@ chimera_nfs4_read_plus_issue(
      * for an on-the-fly open it is already req->handle. */
     req->handle = handle;
 
-    chimera_vfs_read_plus(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_read_plus(req->thread->vfs_thread, &req->cred, NULL,
                           handle,
                           args->rpa_offset,
                           args->rpa_count,
@@ -234,7 +234,7 @@ chimera_nfs4_read_plus_typecheck_complete(
     chimera_vfs_release(req->thread->vfs_thread, req->handle);
     req->handle = NULL;
 
-    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred, NULL,
                         req->fh,
                         req->fhlen,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_READ_ONLY,
@@ -258,7 +258,7 @@ chimera_nfs4_read_plus_typecheck_open_callback(
     }
 
     req->handle = handle;
-    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred, NULL,
                         handle,
                         CHIMERA_VFS_ATTR_MODE,
                         chimera_nfs4_read_plus_typecheck_complete,
@@ -317,7 +317,7 @@ chimera_nfs4_read_plus(
             }
         }
 
-        chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+        chimera_vfs_open_fh(thread->vfs_thread, &req->cred, NULL,
                             req->fh, req->fhlen,
                             CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_NOFOLLOW,
                             chimera_nfs4_read_plus_typecheck_open_callback,
@@ -354,7 +354,7 @@ chimera_nfs4_read_plus(
             chimera_nfs4_compound_complete(req, res->rp_status);
             return;
         }
-        chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+        chimera_vfs_open_fh(thread->vfs_thread, &req->cred, NULL,
                             req->fh, req->fhlen,
                             CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_NOFOLLOW,
                             chimera_nfs4_read_plus_typecheck_open_callback,

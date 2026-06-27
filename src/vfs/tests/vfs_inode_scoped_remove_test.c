@@ -139,7 +139,7 @@ create_file(
     sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
     sattr.va_mode     = 0644;
 
-    chimera_vfs_open_at(ctx->vfs_thread, cred, dir, name, strlen(name),
+    chimera_vfs_open_at(ctx->vfs_thread, cred, NULL, dir, name, strlen(name),
                         CHIMERA_VFS_OPEN_CREATE, &sattr, CHIMERA_VFS_ATTR_FH,
                         0, 0, openat_cb, ctx);
     wait_done(ctx);
@@ -154,7 +154,7 @@ open_fh(
     const uint8_t                 *fh,
     uint32_t                       fh_len)
 {
-    chimera_vfs_open_fh(ctx->vfs_thread, cred, fh, fh_len,
+    chimera_vfs_open_fh(ctx->vfs_thread, cred, NULL, fh, fh_len,
                         CHIMERA_VFS_OPEN_INFERRED, openfh_cb, ctx);
     wait_done(ctx);
     assert(ctx->status == CHIMERA_VFS_OK);
@@ -169,7 +169,7 @@ do_lookup(
     struct chimera_vfs_open_handle *dir,
     const char                     *name)
 {
-    chimera_vfs_lookup(ctx->vfs_thread, cred, dir->fh, dir->fh_len,
+    chimera_vfs_lookup(ctx->vfs_thread, cred, NULL, dir->fh, dir->fh_len,
                        name, strlen(name),
                        CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT, 0,
                        lookup_cb, ctx);
@@ -184,7 +184,7 @@ do_remove(
     struct chimera_vfs_open_handle *dir,
     const char                     *name)
 {
-    chimera_vfs_remove_at(ctx->vfs_thread, cred, dir, name, strlen(name),
+    chimera_vfs_remove_at(ctx->vfs_thread, cred, NULL, dir, name, strlen(name),
                           NULL, 0, 0, 0, 0, NULL, remove_cb, ctx);
     wait_done(ctx);
     return ctx->status;
@@ -199,7 +199,7 @@ do_remove_match(
     const uint8_t                  *child_fh,
     uint32_t                        child_fh_len)
 {
-    chimera_vfs_remove_at_match_fh(ctx->vfs_thread, cred, dir, name, strlen(name),
+    chimera_vfs_remove_at_match_fh(ctx->vfs_thread, cred, NULL, dir, name, strlen(name),
                                    child_fh, child_fh_len, 0, 0, NULL,
                                    remove_cb, ctx);
     wait_done(ctx);
@@ -251,7 +251,7 @@ main(
     assert(ctx.status == CHIMERA_VFS_OK);
 
     chimera_vfs_get_root_fh(root_fh, &root_fh_len);
-    chimera_vfs_lookup(ctx.vfs_thread, &cred, root_fh, root_fh_len, "test", 4,
+    chimera_vfs_lookup(ctx.vfs_thread, &cred, NULL, root_fh, root_fh_len, "test", 4,
                        CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT, 0,
                        lookup_cb, &ctx);
     wait_done(&ctx);

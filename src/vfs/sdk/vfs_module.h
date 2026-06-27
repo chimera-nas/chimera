@@ -28,7 +28,7 @@ struct chimera_vfs_request;
  * chimera_vfs_register() refuses a module built against a different
  * version, so a stale out-of-tree binary fails loudly at load time
  * instead of corrupting memory. */
-#define CHIMERA_VFS_SDK_VERSION             1
+#define CHIMERA_VFS_SDK_VERSION             2
 
 /* If set, module requires open handles for path operations
  * such as mkdir, remove, open_at, etc.  Equivalent to POSIX open
@@ -293,6 +293,14 @@ struct chimera_vfs_handle_state {
 * via chimera_vfs_write_same.  Modules that leave this unset surface ENOTSUP. */
 #define CHIMERA_VFS_CAP_WRITE_SAME            (1U << 28)
 
+/* If set, the module implements explicit multi-operation transactions via
+ * CHIMERA_VFS_OP_BEGIN_TRANSACTION / CHIMERA_VFS_OP_END_TRANSACTION and honours
+ * request->transaction on every other op (enlist; commit only at end).  Modules
+ * that leave this unset behave exactly as before: chimera_vfs_begin_transaction
+ * is a no-op returning a NULL handle, request->transaction stays NULL, and each
+ * op autocommits independently.  Only diskfs and cairn advertise it. */
+#define CHIMERA_VFS_CAP_TRANSACTIONAL         (1U << 30)
+
 struct chimera_vfs_module {
     /* Required
      * Set to CHIMERA_VFS_SDK_VERSION.  Checked at registration so a module
@@ -372,9 +380,17 @@ struct chimera_vfs_module {
      * Implementing VFS modules in a non-blocking manner is recommended
      * where feasible.
      */
-    void (*dispatch)(
+    void     (*dispatch)(
         struct chimera_vfs_request *request,
         void                       *private_data);
+
+    /* Required when CHIMERA_VFS_CAP_TRANSACTIONAL is set: sizeof the backend's
+     * transaction object (whose first member is struct chimera_vfs_transaction).
+     * The VFS core allocates this many bytes locally at begin so the handle is
+     * available synchronously; the backend initializes it in place in its
+     * OP_BEGIN_TRANSACTION handler (running on the transaction's owning thread)
+     * and must NOT free it (the core owns the allocation). */
+    uint32_t txn_size;
 };
 
 /* A module is "path-only" when it supports path-relative ops but has no

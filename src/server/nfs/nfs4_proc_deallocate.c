@@ -98,7 +98,7 @@ chimera_nfs4_deallocate_typecheck_complete(
     chimera_vfs_release(req->thread->vfs_thread, req->handle);
     req->handle = NULL;
 
-    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred, NULL,
                         req->fh,
                         req->fhlen,
                         CHIMERA_VFS_OPEN_INFERRED,
@@ -128,7 +128,7 @@ chimera_nfs4_deallocate_typecheck_open_callback(
     }
 
     req->handle = handle;
-    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred, NULL,
                         handle,
                         CHIMERA_VFS_ATTR_MODE,
                         chimera_nfs4_deallocate_typecheck_complete,
@@ -183,7 +183,7 @@ chimera_nfs4_deallocate(
             chimera_nfs4_compound_complete(req, res->dr_status);
             return;
         }
-        chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+        chimera_vfs_open_fh(thread->vfs_thread, &req->cred, NULL,
                             req->fh,
                             req->fhlen,
                             CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH |

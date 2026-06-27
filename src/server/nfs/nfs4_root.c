@@ -126,7 +126,7 @@ nfs4_root_lookup_export(
     req->handle = NULL; // Ensure handle is NULL so that the lookup callback does not attempt to release it
     chimera_vfs_get_root_fh(root_fh, &root_fh_len);
     chimera_vfs_lookup(nfs_thread->vfs_thread,
-                       &req->cred,
+                       &req->cred, NULL,
                        root_fh,
                        root_fh_len,
                        full_path,
@@ -295,7 +295,7 @@ nfs4_root_export_fh_resolve(
     ctx->export_id = root_id;
 
     chimera_vfs_lookup(thread->vfs_thread,
-                       &req->cred,
+                       &req->cred, NULL,
                        fh,
                        fh_len,
                        path,
@@ -676,7 +676,7 @@ nfs4_root_readdir_advance(struct nfs4_root_readdir_state *state)
         state->lookup_done = 0;
 
         chimera_vfs_lookup(state->vfs_thread,
-                           &req->cred,
+                           &req->cred, NULL,
                            state->root_fh,
                            state->root_fh_len,
                            export->path,

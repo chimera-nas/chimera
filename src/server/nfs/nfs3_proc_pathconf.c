@@ -71,7 +71,7 @@ chimera_nfs3_pathconf_open_callback(
     if (error_code == CHIMERA_VFS_OK) {
         req->handle = handle;
 
-        chimera_vfs_getattr(thread->vfs_thread, &req->cred,
+        chimera_vfs_getattr(thread->vfs_thread, &req->cred, NULL,
                             handle,
                             CHIMERA_NFS3_ATTR_MASK,
                             chimera_nfs3_pathconf_complete,
@@ -118,7 +118,7 @@ chimera_nfs3_pathconf(
         return;
     }
 
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+    chimera_vfs_open_fh(thread->vfs_thread, &req->cred, NULL,
                         req->fh,
                         req->fhlen,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,

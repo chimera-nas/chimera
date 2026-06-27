@@ -62,7 +62,7 @@ chimera_readlink_open_complete(
 
     chimera_vfs_readlink(
         request->thread->vfs_thread,
-        chimera_client_req_cred(request),
+        chimera_client_req_cred(request), NULL,
         oh,
         request->readlink.target,
         request->readlink.target_maxlength,
