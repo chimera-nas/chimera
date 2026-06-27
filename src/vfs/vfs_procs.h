@@ -476,6 +476,23 @@ chimera_vfs_remove_at(
     chimera_vfs_remove_at_callback_t callback,
     void                            *private_data);
 
+/* Inode-scoped remove (only unlinks the name while it still resolves to
+ * child_fh).  Same signature as chimera_vfs_remove_at; see its definition. */
+void
+chimera_vfs_remove_at_match_fh(
+    struct chimera_vfs_thread       *thread,
+    const struct chimera_vfs_cred   *cred,
+    struct chimera_vfs_open_handle  *handle,
+    const char                      *name,
+    int                              namelen,
+    const uint8_t                   *child_fh,
+    int                              child_fh_len,
+    uint64_t                         pre_attr_mask,
+    uint64_t                         post_attr_mask,
+    const uint8_t                   *parent_lease_skip,
+    chimera_vfs_remove_at_callback_t callback,
+    void                            *private_data);
+
 typedef void (*chimera_vfs_read_callback_t)(
     enum chimera_vfs_error    error_code,
     uint32_t                  count,
