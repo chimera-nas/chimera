@@ -298,6 +298,18 @@ chimera_nfs4_compound_process(
                 case OP_SEEK:
                     chimera_nfs4_seek(thread, req, argop, resop);
                     break;
+                case OP_READ_PLUS:
+                    chimera_nfs4_read_plus(thread, req, argop, resop);
+                    break;
+                case OP_IO_ADVISE:
+                    chimera_nfs4_io_advise(thread, req, argop, resop);
+                    break;
+                case OP_WRITE_SAME:
+                    chimera_nfs4_write_same(thread, req, argop, resop);
+                    break;
+                case OP_CLONE:
+                    chimera_nfs4_clone(thread, req, argop, resop);
+                    break;
                 case OP_GETXATTR:
                     chimera_nfs4_getxattr(thread, req, argop, resop);
                     break;

@@ -895,6 +895,48 @@ chimera_vfs_clone_range(
     chimera_vfs_clone_range_callback_t callback,
     void                              *private_data);
 
+typedef void (*chimera_vfs_read_plus_callback_t)(
+    enum chimera_vfs_error error_code,
+    uint32_t               is_data,
+    uint64_t               length,
+    uint32_t               eof,
+    void                  *private_data);
+
+void
+chimera_vfs_read_plus(
+    struct chimera_vfs_thread       *thread,
+    const struct chimera_vfs_cred   *cred,
+    struct chimera_vfs_open_handle  *handle,
+    uint64_t                         offset,
+    uint64_t                         length,
+    chimera_vfs_read_plus_callback_t callback,
+    void                            *private_data);
+
+typedef void (*chimera_vfs_write_same_callback_t)(
+    enum chimera_vfs_error    error_code,
+    uint64_t                  count,
+    uint32_t                  sync,
+    struct chimera_vfs_attrs *pre_attr,
+    struct chimera_vfs_attrs *post_attr,
+    void                     *private_data);
+
+void
+chimera_vfs_write_same(
+    struct chimera_vfs_thread        *thread,
+    const struct chimera_vfs_cred    *cred,
+    struct chimera_vfs_open_handle   *handle,
+    uint64_t                          offset,
+    uint32_t                          block_size,
+    uint64_t                          block_count,
+    const void                       *pattern,
+    uint32_t                          pattern_len,
+    uint32_t                          reloff_pattern,
+    uint32_t                          sync,
+    uint64_t                          pre_attr_mask,
+    uint64_t                          post_attr_mask,
+    chimera_vfs_write_same_callback_t callback,
+    void                             *private_data);
+
 typedef void (*chimera_vfs_move_range_callback_t)(
     enum chimera_vfs_error    error_code,
     struct chimera_vfs_attrs *src_post_attr,

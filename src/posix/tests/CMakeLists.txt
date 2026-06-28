@@ -71,6 +71,7 @@ set(POSIX_TEST_PROGRAMS
     test_dup
     test_fdopen
     test_copy_range
+    test_write_same
 )
 
 # Create test programs
