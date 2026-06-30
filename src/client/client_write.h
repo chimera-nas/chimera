@@ -7,10 +7,20 @@
 #include <string.h>
 
 #include "client_internal.h"
+#include "client_txn.h"
 
-/* Completion callback for chimera_write (buffer variant) */
+/*
+ * Each write variant runs as one write transaction.  The evpl_iovec staging
+ * buffers are allocated ONCE in the dispatch (before BeginTransaction) and
+ * reused across every conflict replay -- the txn driver re-runs *_start, which
+ * re-issues the write from the same iovecs -- and are released only in the
+ * reply (after the durable commit or a terminal error).
+ */
+
+/* ---- chimera_write (buffer variant) ---- */
+
 static void
-chimera_write_complete(
+chimera_write_op_complete(
     enum chimera_vfs_error    error_code,
     uint32_t                  length,
     uint32_t                  sync,
@@ -18,70 +28,48 @@ chimera_write_complete(
     struct chimera_vfs_attrs *post_attr,
     void                     *private_data)
 {
-    struct chimera_client_request *request       = private_data;
-    struct chimera_client_thread  *client_thread = request->thread;
-    struct evpl                   *evpl          = client_thread->vfs_thread->evpl;
-    chimera_write_callback_t       callback      = request->write.callback;
-    void                          *callback_arg  = request->write.private_data;
+    struct chimera_client_request *request = private_data;
+
+    chimera_client_txn_finish(request->thread, request, error_code);
+} /* chimera_write_op_complete */
+
+static void
+chimera_write_start(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request)
+{
+    chimera_vfs_write(thread->vfs_thread,
+                      chimera_client_req_cred(request), request->txn,
+                      request->write.handle,
+                      request->write.offset,
+                      request->write.length,
+                      1,
+                      0,
+                      0,
+                      request->write.iov,
+                      request->write.niov,
+                      chimera_write_op_complete,
+                      request);
+} /* chimera_write_start */
+
+static void
+chimera_write_reply(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request)
+{
+    struct evpl             *evpl         = thread->vfs_thread->evpl;
+    chimera_write_callback_t callback     = request->write.callback;
+    void                    *callback_arg = request->write.private_data;
+    enum chimera_vfs_error   status       = request->txn_op_status;
 
     if (request->write.niov > 0 && request->write.iov[0].data != NULL) {
         evpl_iovecs_release(evpl, request->write.iov, request->write.niov);
     }
 
-    chimera_client_request_free(client_thread, request);
+    chimera_client_request_free(thread, request);
 
-    callback(client_thread, error_code, callback_arg);
-} /* chimera_write_complete */
-
-/* Completion callback for chimera_writev (iovec variant) */
-static void
-chimera_writev_complete(
-    enum chimera_vfs_error    error_code,
-    uint32_t                  length,
-    uint32_t                  sync,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
-{
-    struct chimera_client_request *request       = private_data;
-    struct chimera_client_thread  *client_thread = request->thread;
-    struct evpl                   *evpl          = client_thread->vfs_thread->evpl;
-    chimera_write_callback_t       callback      = request->writev.callback;
-    void                          *callback_arg  = request->writev.private_data;
-
-    if (request->writev.niov > 0 && request->writev.iov[0].data != NULL) {
-        evpl_iovecs_release(evpl, request->writev.iov, request->writev.niov);
-    }
-
-    chimera_client_request_free(client_thread, request);
-
-    callback(client_thread, error_code, callback_arg);
-} /* chimera_writev_complete */
-
-/* Completion callback for chimera_writerv (evpl_iovec variant) */
-static void
-chimera_writerv_complete(
-    enum chimera_vfs_error    error_code,
-    uint32_t                  length,
-    uint32_t                  sync,
-    struct chimera_vfs_attrs *pre_attr,
-    struct chimera_vfs_attrs *post_attr,
-    void                     *private_data)
-{
-    struct chimera_client_request *request       = private_data;
-    struct chimera_client_thread  *client_thread = request->thread;
-    struct evpl                   *evpl          = client_thread->vfs_thread->evpl;
-    chimera_write_callback_t       callback      = request->writerv.callback;
-    void                          *callback_arg  = request->writerv.private_data;
-
-    if (request->writerv.niov > 0 && request->writerv.iov[0].data != NULL) {
-        evpl_iovecs_release(evpl, request->writerv.iov, request->writerv.niov);
-    }
-
-    chimera_client_request_free(client_thread, request);
-
-    callback(client_thread, error_code, callback_arg);
-} /* chimera_writerv_complete */
+    callback(thread, status, callback_arg);
+} /* chimera_write_reply */
 
 /* Dispatch for chimera_write - allocate evpl_iovec and copy from buffer */
 static inline void
@@ -96,9 +84,12 @@ chimera_dispatch_write(
                                          0, request->write.iov);
 
     if (niov < 0) {
+        chimera_write_callback_t callback     = request->write.callback;
+        void                    *callback_arg = request->write.private_data;
+
         request->write.niov = 0;
-        chimera_write_complete(CHIMERA_VFS_EIO, 0, 0,
-                               NULL, NULL, request);
+        chimera_client_request_free(thread, request);
+        callback(thread, CHIMERA_VFS_EIO, callback_arg);
         return;
     }
 
@@ -119,19 +110,66 @@ chimera_dispatch_write(
         copied += chunk;
     }
 
+    chimera_client_txn_run(thread, request,
+                           request->write.handle->fh,
+                           request->write.handle->fh_len,
+                           CHIMERA_VFS_TXN_WRITE,
+                           chimera_write_start, chimera_write_reply);
+} /* chimera_dispatch_write */
+
+/* ---- chimera_writev (struct iovec variant) ---- */
+
+static void
+chimera_writev_op_complete(
+    enum chimera_vfs_error    error_code,
+    uint32_t                  length,
+    uint32_t                  sync,
+    struct chimera_vfs_attrs *pre_attr,
+    struct chimera_vfs_attrs *post_attr,
+    void                     *private_data)
+{
+    struct chimera_client_request *request = private_data;
+
+    chimera_client_txn_finish(request->thread, request, error_code);
+} /* chimera_writev_op_complete */
+
+static void
+chimera_writev_start(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request)
+{
     chimera_vfs_write(thread->vfs_thread,
-                      chimera_client_req_cred(request),
-                      request->write.handle,
-                      request->write.offset,
-                      request->write.length,
+                      chimera_client_req_cred(request), request->txn,
+                      request->writev.handle,
+                      request->writev.offset,
+                      request->writev.length,
                       1,
                       0,
                       0,
-                      request->write.iov,
-                      niov,
-                      chimera_write_complete,
+                      request->writev.iov,
+                      request->writev.niov,
+                      chimera_writev_op_complete,
                       request);
-} /* chimera_dispatch_write */
+} /* chimera_writev_start */
+
+static void
+chimera_writev_reply(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request)
+{
+    struct evpl             *evpl         = thread->vfs_thread->evpl;
+    chimera_write_callback_t callback     = request->writev.callback;
+    void                    *callback_arg = request->writev.private_data;
+    enum chimera_vfs_error   status       = request->txn_op_status;
+
+    if (request->writev.niov > 0 && request->writev.iov[0].data != NULL) {
+        evpl_iovecs_release(evpl, request->writev.iov, request->writev.niov);
+    }
+
+    chimera_client_request_free(thread, request);
+
+    callback(thread, status, callback_arg);
+} /* chimera_writev_reply */
 
 /* Dispatch for chimera_writev - allocate evpl_iovec and copy from iovec */
 static inline void
@@ -148,9 +186,12 @@ chimera_dispatch_writev(
                                                 0, request->writev.iov);
 
     if (niov < 0) {
+        chimera_write_callback_t callback     = request->writev.callback;
+        void                    *callback_arg = request->writev.private_data;
+
         request->writev.niov = 0;
-        chimera_writev_complete(CHIMERA_VFS_EIO, 0, 0,
-                                NULL, NULL, request);
+        chimera_client_request_free(thread, request);
+        callback(thread, CHIMERA_VFS_EIO, callback_arg);
         return;
     }
 
@@ -182,28 +223,36 @@ chimera_dispatch_writev(
         }
     }
 
-    chimera_vfs_write(thread->vfs_thread,
-                      chimera_client_req_cred(request),
-                      request->writev.handle,
-                      request->writev.offset,
-                      request->writev.length,
-                      1,
-                      0,
-                      0,
-                      request->writev.iov,
-                      niov,
-                      chimera_writev_complete,
-                      request);
+    chimera_client_txn_run(thread, request,
+                           request->writev.handle->fh,
+                           request->writev.handle->fh_len,
+                           CHIMERA_VFS_TXN_WRITE,
+                           chimera_writev_start, chimera_writev_reply);
 } /* chimera_dispatch_writev */
 
-/* Dispatch for chimera_writerv - evpl_iovec already provided */
-static inline void
-chimera_dispatch_writerv(
+/* ---- chimera_writerv (evpl_iovec variant) ---- */
+
+static void
+chimera_writerv_op_complete(
+    enum chimera_vfs_error    error_code,
+    uint32_t                  length,
+    uint32_t                  sync,
+    struct chimera_vfs_attrs *pre_attr,
+    struct chimera_vfs_attrs *post_attr,
+    void                     *private_data)
+{
+    struct chimera_client_request *request = private_data;
+
+    chimera_client_txn_finish(request->thread, request, error_code);
+} /* chimera_writerv_op_complete */
+
+static void
+chimera_writerv_start(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
     chimera_vfs_write(thread->vfs_thread,
-                      chimera_client_req_cred(request),
+                      chimera_client_req_cred(request), request->txn,
                       request->writerv.handle,
                       request->writerv.offset,
                       request->writerv.length,
@@ -212,6 +261,38 @@ chimera_dispatch_writerv(
                       0,
                       request->writerv.iov,
                       request->writerv.niov,
-                      chimera_writerv_complete,
+                      chimera_writerv_op_complete,
                       request);
+} /* chimera_writerv_start */
+
+static void
+chimera_writerv_reply(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request)
+{
+    struct evpl             *evpl         = thread->vfs_thread->evpl;
+    chimera_write_callback_t callback     = request->writerv.callback;
+    void                    *callback_arg = request->writerv.private_data;
+    enum chimera_vfs_error   status       = request->txn_op_status;
+
+    if (request->writerv.niov > 0 && request->writerv.iov[0].data != NULL) {
+        evpl_iovecs_release(evpl, request->writerv.iov, request->writerv.niov);
+    }
+
+    chimera_client_request_free(thread, request);
+
+    callback(thread, status, callback_arg);
+} /* chimera_writerv_reply */
+
+/* Dispatch for chimera_writerv - evpl_iovec already provided */
+static inline void
+chimera_dispatch_writerv(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request)
+{
+    chimera_client_txn_run(thread, request,
+                           request->writerv.handle->fh,
+                           request->writerv.handle->fh_len,
+                           CHIMERA_VFS_TXN_WRITE,
+                           chimera_writerv_start, chimera_writerv_reply);
 } /* chimera_dispatch_writerv */

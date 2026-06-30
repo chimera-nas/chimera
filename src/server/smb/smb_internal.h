@@ -637,13 +637,6 @@ struct chimera_smb_request {
             uint8_t                            park_fh[CHIMERA_VFS_FH_SIZE];
             uint8_t                            park_fh_len;
             uint64_t                           park_fh_hash;
-            /* This parked open is a delete-on-close namespace mutation waiting
-             * only for its triggered break to be NOTIFIED (sent on the wire),
-             * not acked -- the holder need never ack.  Resumed when the file's
-             * break leaves the pending-notify state, vs. park_fh's caching
-             * leases settling for an ordinary ack-required park.  (smb2.lease.
-             * unlink cross-connection ordering.) */
-            uint8_t                            park_on_notify;
             /* Durable-reconnect retry: a reclaim that finds its handle still
              * flagged live (the previous connection's disconnect has not yet
              * been processed -- a cross-connection race) re-arms a short timer
@@ -1806,12 +1799,6 @@ chimera_smb_durable_deserialize(
 struct chimera_smb_lease_break_msg {
     struct chimera_smb_conn            *conn;
     bool                                is_lease;
-    /* FH of the file whose lease is breaking, so the flush can mark the break
-     * delivered (chimera_vfs_state_mark_break_notified) once it is sent -- which
-     * resumes a delete-on-close open parked waiting for that delivery. */
-    uint8_t                             fh[CHIMERA_VFS_FH_SIZE];
-    uint8_t                             fh_len;
-    uint64_t                            fh_hash;
     uint8_t                             lease_key[16];
     uint8_t                             current_state;
     uint8_t                             new_state;

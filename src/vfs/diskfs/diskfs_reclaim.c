@@ -221,7 +221,7 @@ diskfs_drain_acquired_cb(
 static void
 diskfs_drain_begin(struct diskfs_drain *d)
 {
-    d->txn = diskfs_txn_begin(d->thread, DISKFS_TXN_WRITE);
+    d->txn = diskfs_txn_begin(d->thread, DISKFS_TXN_WRITE, NULL);
     diskfs_inode_acquire(d->thread, d->txn, d->inum, d->gen,
                          DISKFS_INODE_LOCK_WRITE, diskfs_drain_acquired_cb, d);
 } /* diskfs_drain_begin */

@@ -162,7 +162,7 @@ getattr(
     uint64_t                       mask)
 {
     memset(&ctx->attr, 0, sizeof(ctx->attr));
-    chimera_vfs_getattr(ctx->vfs_thread, cred, ctx->handle, mask,
+    chimera_vfs_getattr(ctx->vfs_thread, cred, NULL, ctx->handle, mask,
                         getattr_cb, ctx);
     wait_done(ctx);
     assert(ctx->status == CHIMERA_VFS_OK);
@@ -205,13 +205,13 @@ test_memfs_behaviour(void)
 
     /* Resolve the mounted share's root handle. */
     chimera_vfs_get_root_fh(root_fh, &root_fh_len);
-    chimera_vfs_lookup(ctx.vfs_thread, &cred, root_fh, root_fh_len, "test", 4,
+    chimera_vfs_lookup(ctx.vfs_thread, &cred, NULL, root_fh, root_fh_len, "test", 4,
                        CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT, 0,
                        lookup_cb, &ctx);
     wait_done(&ctx);
     assert(ctx.status == CHIMERA_VFS_OK);
 
-    chimera_vfs_open_fh(ctx.vfs_thread, &cred, ctx.fh, ctx.fh_len,
+    chimera_vfs_open_fh(ctx.vfs_thread, &cred, NULL, ctx.fh, ctx.fh_len,
                         CHIMERA_VFS_OPEN_INFERRED, openfh_cb, &ctx);
     wait_done(&ctx);
     assert(ctx.status == CHIMERA_VFS_OK);

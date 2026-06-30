@@ -5,6 +5,7 @@
 #pragma once
 
 #include "client_internal.h"
+#include "client_txn.h"
 
 static int
 chimera_readdir_entry_callback(
@@ -40,23 +41,25 @@ chimera_readdir_complete(
     struct chimera_vfs_attrs       *attr,
     void                           *private_data)
 {
-    struct chimera_client_request *request       = private_data;
-    struct chimera_client_thread  *client_thread = request->thread;
-    chimera_readdir_complete_t     complete      = request->readdir.complete;
-    void                          *callback_arg  = request->readdir.private_data;
+    struct chimera_client_request *request = private_data;
 
-    chimera_client_request_free(client_thread, request);
+    request->readdir.r_cookie = cookie;
+    request->readdir.r_eof    = eof;
 
-    complete(client_thread, error_code, cookie, eof, callback_arg);
-} /* chimera_readdir_complete */ /* chimera_readdir_complete */
+    chimera_client_txn_finish(request->thread, request, error_code);
+} /* chimera_readdir_complete */
 
-static inline void
-chimera_dispatch_readdir(
+static void
+chimera_readdir_start(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
+    /* One batch from request->readdir.cookie runs as one read transaction.  A
+     * conflict replay re-reads from the same input cookie; entries stream via
+     * the entry callback, but a diskfs wait-die abort fires at lock acquisition
+     * before any entry is emitted, so a replay does not double-emit. */
     chimera_vfs_readdir(thread->vfs_thread,
-                        chimera_client_req_cred(request),
+                        chimera_client_req_cred(request), request->txn,
                         request->readdir.handle,
                         0,  // attr_mask for entries
                         0,  // dir_attr_mask
@@ -67,4 +70,32 @@ chimera_dispatch_readdir(
                         chimera_readdir_entry_callback,
                         chimera_readdir_complete,
                         request);
+} /* chimera_readdir_start */
+
+static void
+chimera_readdir_reply(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request)
+{
+    chimera_readdir_complete_t complete     = request->readdir.complete;
+    void                      *callback_arg = request->readdir.private_data;
+    enum chimera_vfs_error     status       = request->txn_op_status;
+    uint64_t                   cookie       = request->readdir.r_cookie;
+    uint32_t                   eof          = request->readdir.r_eof;
+
+    chimera_client_request_free(thread, request);
+
+    complete(thread, status, cookie, eof, callback_arg);
+} /* chimera_readdir_reply */
+
+static inline void
+chimera_dispatch_readdir(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request)
+{
+    chimera_client_txn_run(thread, request,
+                           request->readdir.handle->fh,
+                           request->readdir.handle->fh_len,
+                           CHIMERA_VFS_TXN_READ,
+                           chimera_readdir_start, chimera_readdir_reply);
 } /* chimera_dispatch_readdir */

@@ -497,7 +497,7 @@ diskfs_getattr(
     (void) private_data;
 
     p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ);
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ, request);
 
     diskfs_inode_get_fh_async(thread, p->txn,
                               request->fh, request->fh_len,
@@ -1009,7 +1009,7 @@ diskfs_setattr(
     (void) private_data;
 
     p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE, request);
 
     diskfs_inode_get_fh_async(thread, p->txn,
                               request->fh, request->fh_len,
@@ -1122,7 +1122,7 @@ diskfs_mount(
         diskfs_orphan_scan(thread);
     }
     p->thread     = thread;
-    p->txn        = diskfs_txn_begin(thread, DISKFS_TXN_READ);
+    p->txn        = diskfs_txn_begin(thread, DISKFS_TXN_READ, request);
     p->op_scratch = 0;
 
     /* Resolve the mount path asynchronously starting from the root inode. */
@@ -1145,7 +1145,7 @@ diskfs_umount(
     (void) private_data;
 
     p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ);
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ, request);
     diskfs_op_ok(request, p->txn);
 } /* diskfs_umount */
 
@@ -1189,7 +1189,7 @@ diskfs_put_key(
     (void) private_data;
 
     p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE, request);
 
     hash      = chimera_vfs_hash(request->put_key.key, request->put_key.key_len);
     shard_idx = hash % shared->num_kv_shards;
@@ -1235,7 +1235,7 @@ diskfs_get_key(
     (void) private_data;
 
     p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ);
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ, request);
 
     hash      = chimera_vfs_hash(request->get_key.key, request->get_key.key_len);
     shard_idx = hash % shared->num_kv_shards;
@@ -1276,7 +1276,7 @@ diskfs_delete_key(
     (void) private_data;
 
     p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE, request);
 
     hash      = chimera_vfs_hash(request->delete_key.key, request->delete_key.key_len);
     shard_idx = hash % shared->num_kv_shards;
@@ -1383,7 +1383,7 @@ diskfs_search_keys(
     (void) private_data;
 
     p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ);
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ, request);
 
     /* Entries are stored hash-ordered (sharded by hash), so collect every
      * in-range match across all shards, then sort by key to return results in
@@ -1566,7 +1566,7 @@ diskfs_get_xattr(
     (void) private_data;
 
     p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ);
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ, request);
 
     diskfs_inode_get_fh_async(thread, p->txn,
                               request->fh, request->fh_len,
@@ -1788,7 +1788,7 @@ diskfs_set_xattr(
     (void) private_data;
 
     p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE, request);
 
     diskfs_inode_get_fh_async(thread, p->txn,
                               request->fh, request->fh_len,
@@ -1929,7 +1929,7 @@ diskfs_list_xattrs(
     (void) private_data;
 
     p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ);
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ, request);
 
     diskfs_inode_get_fh_async(thread, p->txn,
                               request->fh, request->fh_len,
@@ -2066,7 +2066,7 @@ diskfs_remove_xattr(
     (void) private_data;
 
     p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE, request);
 
     diskfs_inode_get_fh_async(thread, p->txn,
                               request->fh, request->fh_len,
@@ -2430,7 +2430,7 @@ diskfs_get_layout(
 
     rw        = request->get_layout.iomode == DISKFS_LAYOUTIOMODE_RW;
     p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, rw ? DISKFS_TXN_WRITE : DISKFS_TXN_READ);
+    p->txn    = diskfs_txn_begin(thread, rw ? DISKFS_TXN_WRITE : DISKFS_TXN_READ, request);
 
     diskfs_inode_get_fh_async(thread, p->txn, request->fh, request->fh_len,
                               diskfs_get_layout_inode_cb, request);

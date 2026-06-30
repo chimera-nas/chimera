@@ -212,7 +212,7 @@ create_file(
     sattr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
     sattr.va_mode     = 0644;
 
-    chimera_vfs_open_at(ctx->vfs_thread, cred, dir, name, strlen(name),
+    chimera_vfs_open_at(ctx->vfs_thread, cred, NULL, dir, name, strlen(name),
                         CHIMERA_VFS_OPEN_CREATE, &sattr, CHIMERA_VFS_ATTR_FH,
                         0, 0, openat_cb, ctx);
     wait_done(ctx);
@@ -227,7 +227,7 @@ open_fh(
     const uint8_t                 *fh,
     uint32_t                       fh_len)
 {
-    chimera_vfs_open_fh(ctx->vfs_thread, cred, fh, fh_len,
+    chimera_vfs_open_fh(ctx->vfs_thread, cred, NULL, fh, fh_len,
                         CHIMERA_VFS_OPEN_INFERRED, openfh_cb, ctx);
     wait_done(ctx);
     assert(ctx->status == CHIMERA_VFS_OK);
@@ -250,7 +250,7 @@ write_data(
     assert(niov == 1);
     memcpy(iov.data, buf, len);
 
-    chimera_vfs_write(ctx->vfs_thread, cred, h, offset, len, 1, 0, 0,
+    chimera_vfs_write(ctx->vfs_thread, cred, NULL, h, offset, len, 1, 0, 0,
                       &iov, 1, write_cb, ctx);
     wait_done(ctx);
     assert(ctx->status == CHIMERA_VFS_OK);
@@ -277,7 +277,7 @@ read_verify(
     ctx->expect     = expect;
     ctx->expect_len = len;
 
-    chimera_vfs_read(ctx->vfs_thread, cred, h, 0, len, iov, READ_MAX_IOV, 0,
+    chimera_vfs_read(ctx->vfs_thread, cred, NULL, h, 0, len, iov, READ_MAX_IOV, 0,
                      read_cb, ctx);
     wait_done(ctx);
     assert(ctx->status == CHIMERA_VFS_OK);
@@ -294,7 +294,7 @@ clone(
     uint64_t                        dst_off,
     uint64_t                        len)
 {
-    chimera_vfs_clone_range(ctx->vfs_thread, cred, src, src_off, dst, dst_off,
+    chimera_vfs_clone_range(ctx->vfs_thread, cred, NULL, src, src_off, dst, dst_off,
                             len, 0, 0, clone_cb, ctx);
     wait_done(ctx);
     assert(ctx->status == CHIMERA_VFS_OK);
@@ -341,7 +341,7 @@ main(
     assert(ctx.status == CHIMERA_VFS_OK);
 
     chimera_vfs_get_root_fh(root_fh, &root_fh_len);
-    chimera_vfs_lookup(ctx.vfs_thread, &cred, root_fh, root_fh_len, "test", 4,
+    chimera_vfs_lookup(ctx.vfs_thread, &cred, NULL, root_fh, root_fh_len, "test", 4,
                        CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT, 0,
                        lookup_cb, &ctx);
     wait_done(&ctx);
@@ -397,7 +397,7 @@ main(
     TEST_PASS("clone straddling the internal-block boundary RMWs correctly");
 
     /* 4. Misaligned offset/length must be rejected (POSIX FICLONERANGE). */
-    chimera_vfs_clone_range(ctx.vfs_thread, &cred, src_h, 100, dst_h, 0, 4096,
+    chimera_vfs_clone_range(ctx.vfs_thread, &cred, NULL, src_h, 100, dst_h, 0, 4096,
                             0, 0, clone_cb, &ctx);
     wait_done(&ctx);
     assert(ctx.status == CHIMERA_VFS_EINVAL);
@@ -408,11 +408,11 @@ main(
 
     /* Unlink the files so their (and the CoW-shared) block buffers are freed
      * before the module is torn down -- keeps LeakSanitizer quiet. */
-    chimera_vfs_remove_at(ctx.vfs_thread, &cred, root_handle, "src", 3,
+    chimera_vfs_remove_at(ctx.vfs_thread, &cred, NULL, root_handle, "src", 3,
                           src_fh, src_fh_len, 0, 0, NULL, remove_cb, &ctx);
     wait_done(&ctx);
     assert(ctx.status == CHIMERA_VFS_OK);
-    chimera_vfs_remove_at(ctx.vfs_thread, &cred, root_handle, "dst", 3,
+    chimera_vfs_remove_at(ctx.vfs_thread, &cred, NULL, root_handle, "dst", 3,
                           dst_fh, dst_fh_len, 0, 0, NULL, remove_cb, &ctx);
     wait_done(&ctx);
     assert(ctx.status == CHIMERA_VFS_OK);

@@ -168,7 +168,7 @@ chimera_s3_create_bucket_lookup_cb(
     request->set_attr.va_uid  = 0;
     request->set_attr.va_gid  = 0;
 
-    chimera_vfs_mkdir(thread->vfs, &thread->shared->cred,
+    chimera_vfs_mkdir(thread->vfs, &thread->shared->cred, NULL,
                       request->bucket_fh, request->bucket_fhlen,
                       request->bucket_name, request->bucket_namelen,
                       &request->set_attr, CHIMERA_VFS_ATTR_FH,
@@ -190,7 +190,7 @@ chimera_s3_create_bucket(
         return;
     }
 
-    chimera_vfs_lookup(thread->vfs, &shared->cred,
+    chimera_vfs_lookup(thread->vfs, &shared->cred, NULL,
                        shared->root_fh, shared->root_fh_len,
                        shared->bucket_root_path, shared->bucket_root_pathlen,
                        CHIMERA_VFS_ATTR_FH, CHIMERA_VFS_LOOKUP_FOLLOW,
@@ -329,7 +329,7 @@ chimera_s3_delbucket_remove_next(struct s3_delbucket_ctx *ctx)
     struct chimera_server_s3_shared *shared  = thread->shared;
 
     if (ctx->cur < ctx->ndirs) {
-        chimera_vfs_remove(thread->vfs, &shared->cred,
+        chimera_vfs_remove(thread->vfs, &shared->cred, NULL,
                            ctx->bucket_fh, ctx->bucket_fhlen,
                            ctx->dirs[ctx->cur], strlen(ctx->dirs[ctx->cur]),
                            chimera_s3_delbucket_dir_removed, ctx);
@@ -337,7 +337,7 @@ chimera_s3_delbucket_remove_next(struct s3_delbucket_ctx *ctx)
     }
 
     /* All scaffolding gone; remove the bucket directory from the bucket root. */
-    chimera_vfs_remove(thread->vfs, &shared->cred,
+    chimera_vfs_remove(thread->vfs, &shared->cred, NULL,
                        shared->root_fh, shared->root_fh_len,
                        ctx->bucket_path, ctx->bucket_path_len,
                        chimera_s3_delbucket_root_removed, ctx);
@@ -450,7 +450,7 @@ chimera_s3_delete_bucket(
                                     request->bucket_namelen, request->bucket_name);
 
     /* Resolve the bucket directory, then walk + purge it. */
-    chimera_vfs_lookup(thread->vfs, &shared->cred,
+    chimera_vfs_lookup(thread->vfs, &shared->cred, NULL,
                        shared->root_fh, shared->root_fh_len,
                        ctx->bucket_path, ctx->bucket_path_len,
                        CHIMERA_VFS_ATTR_FH, CHIMERA_VFS_LOOKUP_FOLLOW,

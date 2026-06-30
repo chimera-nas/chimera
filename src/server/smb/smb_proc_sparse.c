@@ -84,7 +84,7 @@ chimera_smb_set_sparse_getattr_cb(
 
     chimera_vfs_setattr(
         vfs_thread,
-        &request->session_handle->session->cred,
+        &request->session_handle->session->cred, NULL,
         request->ioctl.sp_open_file->handle,
         &request->ioctl.sp_set_attr,
         0,
@@ -121,7 +121,7 @@ chimera_smb_ioctl_set_sparse(struct chimera_smb_request *request)
 
     chimera_vfs_getattr(
         vfs_thread,
-        &request->session_handle->session->cred,
+        &request->session_handle->session->cred, NULL,
         open_file->handle,
         CHIMERA_VFS_ATTR_MASK_STAT,
         chimera_smb_set_sparse_getattr_cb,
@@ -188,6 +188,7 @@ chimera_smb_ioctl_set_zero_data(struct chimera_smb_request *request)
     chimera_vfs_allocate(
         vfs_thread,
         &request->session_handle->session->cred,
+        NULL,
         open_file->handle,
         request->ioctl.sp_zero_offset,
         length,
@@ -330,6 +331,7 @@ chimera_smb_qar_seek_data_cb(
     chimera_vfs_seek(
         vfs_thread,
         &request->session_handle->session->cred,
+        NULL,
         request->ioctl.sp_open_file->handle,
         sr_offset,
         CHIMERA_SMB_SEEK_HOLE,
@@ -345,6 +347,7 @@ chimera_smb_qar_seek_data(struct chimera_smb_request *request)
     chimera_vfs_seek(
         vfs_thread,
         &request->session_handle->session->cred,
+        NULL,
         request->ioctl.sp_open_file->handle,
         request->ioctl.sp_qar_cursor,
         CHIMERA_SMB_SEEK_DATA,

@@ -176,7 +176,7 @@ chimera_vfs_copy_fallback_read_cb(
 
     chimera_vfs_write(
         ctx->thread,
-        &ctx->cred,
+        &ctx->cred, NULL,
         ctx->dst_handle,
         ctx->dst_offset,
         count,
@@ -207,7 +207,7 @@ chimera_vfs_copy_fallback_step(struct chimera_vfs_copy_fallback *ctx)
 
     chimera_vfs_read(
         ctx->thread,
-        &ctx->cred,
+        &ctx->cred, NULL,
         ctx->src_handle,
         ctx->src_offset,
         chunk,
@@ -289,6 +289,7 @@ SYMBOL_EXPORT void
 chimera_vfs_copy_range(
     struct chimera_vfs_thread        *thread,
     const struct chimera_vfs_cred    *cred,
+    struct chimera_vfs_transaction   *txn,
     struct chimera_vfs_open_handle   *src_handle,
     uint64_t                          src_offset,
     struct chimera_vfs_open_handle   *dst_handle,
@@ -333,6 +334,7 @@ chimera_vfs_copy_range(
 
     request->opcode                             = CHIMERA_VFS_OP_COPY_RANGE;
     request->complete                           = chimera_vfs_copy_range_complete;
+    request->transaction                        = txn;
     request->copy_range.src_handle              = src_handle;
     request->copy_range.dst_handle              = dst_handle;
     request->copy_range.src_offset              = src_offset;

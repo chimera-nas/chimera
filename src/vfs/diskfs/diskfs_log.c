@@ -1760,6 +1760,7 @@ diskfs_iq_try_submit(
     fe->txn          = txn;
     fe->cb           = cb;
     fe->private_data = private_data;
+    fe->autocommit   = txn->autocommit;
     fe->enqueue_time = enqueue;
     ch->inflight_tail++;
 
@@ -1813,7 +1814,17 @@ diskfs_iq_drain_cq(struct diskfs_iq_channel *ch)
 
     /* ACK the client for the contiguous prefix now durable (recoverable).  The
      * txn's logical inode locks were already dropped by the commit thread in
-     * diskfs_il_write_redo, so this just delivers completion. */
+     * diskfs_il_write_redo, so this just delivers completion.
+     *
+     * AUTOCOMMIT only: a pooled autocommit txn survives (diskfs-owned) until it
+     * is recycled at applied_wm below, so its completion can fire here at
+     * durable.  An EXPLICIT (CAP_TRANSACTIONAL) txn is core-owned and the VFS
+     * core frees it the moment its EndTransaction completion fires -- but the
+     * apply thread still reads txn->blocks/space_deltas/pending_frees until
+     * applied_wm passes, so firing it here would free the txn out from under the
+     * apply thread (heap-use-after-free in diskfs_txn_apply_frees).  Its
+     * completion is therefore deferred to the recycle loop below, where
+     * applied_wm guarantees the apply thread is done with the txn. */
     while (ch->inflight_ack != ch->inflight_tail) {
         struct diskfs_iq_inflight *fe =
             &ch->inflight[ch->inflight_ack & DISKFS_IQ_INFLIGHT_MASK];
@@ -1821,18 +1832,22 @@ diskfs_iq_drain_cq(struct diskfs_iq_channel *ch)
         if ((int64_t) (fe->txn_id - durable) >= 0) {
             break;                        /* not yet durable */
         }
-        diskfs_metric_time_sample(
-            worker->metrics.txn_latency[DISKFS_METRIC_TXN_QUEUE_TO_CALLBACK],
-            &fe->enqueue_time);
-        fe->cb(fe->txn, 0, fe->private_data);
+        if (fe->autocommit) {
+            diskfs_metric_time_sample(
+                worker->metrics.txn_latency[DISKFS_METRIC_TXN_QUEUE_TO_CALLBACK],
+                &fe->enqueue_time);
+            fe->cb(fe->txn, 0, fe->private_data);
+        }
         ch->inflight_ack++;
         drained++;
     }
 
-    /* Recycle the txn for the prefix now applied -- the apply thread has finished
-     * reading txn->blocks/space_deltas/pending_frees, so it is safe to return to
-     * this worker's per-thread free list (recycle <= ack always, since applied
-     * <= durable).  Drop the poll-mode pin once nothing is outstanding. */
+    /* The prefix now applied: the apply thread has finished reading
+     * txn->blocks/space_deltas/pending_frees (release-ordered with applied_wm),
+     * so a pooled autocommit txn is safe to return to this worker's free list,
+     * and a deferred explicit txn is safe to complete (which frees the core-owned
+     * handle).  recycle <= ack always, since applied <= durable.  Drop the
+     * poll-mode pin once nothing is outstanding. */
     while (ch->inflight_recycle != ch->inflight_ack) {
         struct diskfs_iq_inflight *fe =
             &ch->inflight[ch->inflight_recycle & DISKFS_IQ_INFLIGHT_MASK];
@@ -1840,7 +1855,21 @@ diskfs_iq_drain_cq(struct diskfs_iq_channel *ch)
         if ((int64_t) (fe->txn_id - applied) >= 0) {
             break;                        /* not yet applied */
         }
+        /* diskfs_txn_release frees the txn's diskfs-private space_delta nodes
+         * (allocated in diskfs_sm_record_delta) for BOTH txn kinds; it then
+         * returns the handle to the per-thread pool only for autocommit txns,
+         * and early-returns for an explicit (core-owned) txn without touching
+         * the handle. */
         diskfs_txn_release(fe->txn);
+        if (!fe->autocommit) {
+            /* Deferred explicit EndTransaction completion -- the handle is still
+             * alive (release early-returned for it) and the apply thread is done
+             * with it, so deliver completion now; the VFS core frees the handle. */
+            diskfs_metric_time_sample(
+                worker->metrics.txn_latency[DISKFS_METRIC_TXN_QUEUE_TO_CALLBACK],
+                &fe->enqueue_time);
+            fe->cb(fe->txn, 0, fe->private_data);
+        }
         ch->inflight_recycle++;
         if (--worker->commits_inflight == 0) {
             evpl_poll_unpin(worker->evpl);

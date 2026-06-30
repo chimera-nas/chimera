@@ -686,7 +686,7 @@ diskfs_lookup_at(
     uint32_t                       gen;
 
     p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ);
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ, request);
 
     diskfs_fh_to_inum(&inum, &gen, request->fh, request->fh_len);
     request->wait_reason   = "diskfs_open_fh_inode_lock";
@@ -910,7 +910,7 @@ diskfs_mkdir_at(
     (void) private_data;
 
     p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE, request);
 
     diskfs_inode_get_fh_async(thread, p->txn,
                               request->fh, request->fh_len,
@@ -1093,7 +1093,7 @@ diskfs_mknod_at(
     (void) private_data;
 
     p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE, request);
 
     diskfs_inode_get_fh_async(thread, p->txn,
                               request->fh, request->fh_len,
@@ -1339,7 +1339,7 @@ diskfs_remove_at(
     (void) private_data;
 
     p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE, request);
 
     diskfs_inode_get_fh_async(thread, p->txn,
                               request->fh, request->fh_len,
@@ -1640,7 +1640,7 @@ diskfs_readdir(
     (void) private_data;
 
     p->thread     = thread;
-    p->txn        = diskfs_txn_begin(thread, DISKFS_TXN_READ);
+    p->txn        = diskfs_txn_begin(thread, DISKFS_TXN_READ, request);
     p->rd_looping = 0;
     p->rd_advance = 0;
     p->rd_done    = 0;
@@ -1704,7 +1704,7 @@ diskfs_open_fh(
     (void) private_data;
 
     p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ);
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ, request);
 
     diskfs_inode_get_fh_async(thread, p->txn,
                               request->fh, request->fh_len,
@@ -2017,7 +2017,7 @@ diskfs_open_at(
     (void) private_data;
 
     p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE, request);
 
     diskfs_inode_get_fh_async(thread, p->txn,
                               request->fh, request->fh_len,
@@ -2100,7 +2100,7 @@ diskfs_create_unlinked(
     (void) private_data;
 
     p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE, request);
 
     diskfs_inode_alloc_async(thread, p->txn,
                              diskfs_create_unlinked_alloc_cb, request);
@@ -2184,7 +2184,7 @@ diskfs_close(
      * abort it -- the dominant source of metadata read I/O, since close targets
      * idle inodes whose home block has usually been recycled out of cache. */
     p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE, request);
 
     diskfs_inode_acquire_pinned(thread, p->txn, inode, DISKFS_INODE_LOCK_WRITE_NOPIN,
                                 diskfs_close_inode_cb, request);
@@ -2370,7 +2370,7 @@ diskfs_symlink_at(
         return;
     }
 
-    p->txn = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+    p->txn = diskfs_txn_begin(thread, DISKFS_TXN_WRITE, request);
 
     diskfs_inode_get_fh_async(thread, p->txn,
                               request->fh, request->fh_len,
@@ -2444,7 +2444,7 @@ diskfs_readlink(
     (void) private_data;
 
     p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ);
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ, request);
 
     diskfs_inode_get_fh_async(thread, p->txn,
                               request->fh, request->fh_len,
@@ -3038,7 +3038,7 @@ diskfs_rename_at(
     (void) private_data;
 
     p->thread         = thread;
-    p->txn            = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+    p->txn            = diskfs_txn_begin(thread, DISKFS_TXN_WRITE, request);
     p->inode_stash[0] = NULL;
     p->inode_stash[1] = NULL;
     p->inode_stash[2] = NULL;
@@ -3308,7 +3308,7 @@ diskfs_link_at(
     (void) private_data;
 
     p->thread     = thread;
-    p->txn        = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+    p->txn        = diskfs_txn_begin(thread, DISKFS_TXN_WRITE, request);
     p->op_scratch = 0;     /* anonymous-source unorphan latch (link_at_finish) */
 
     diskfs_inode_get_fh_async(thread, p->txn,

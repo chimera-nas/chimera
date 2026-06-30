@@ -300,7 +300,7 @@ chimera_smb_read(struct chimera_smb_request *request)
      * other holders without recalling the client's own oplock/lease. */
     chimera_vfs_read_owned(
         thread->vfs_thread,
-        &request->session_handle->session->cred,
+        &request->session_handle->session->cred, NULL,
         request->read.open_file->handle,
         request->read.offset,
         request->read.length,

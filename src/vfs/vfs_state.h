@@ -363,30 +363,6 @@ chimera_vfs_state_caching_breaking(
     uint64_t                                fh_hash,
     const struct chimera_vfs_caching_grant *except);
 
-/* True while a break on this file has been begun but its notification has NOT
- * yet been delivered to the holder.  An SMB delete-on-close open that completes
- * ON NOTIFY (rather than on an ack the holder need never send) parks on this so
- * its reply cannot overtake the break on the wire (smb2.lease.unlink).  Caller
- * must NOT hold file->lock. */
-bool
-chimera_vfs_state_caching_break_pending_notify(
-    struct chimera_vfs_state *state,
-    const uint8_t            *fh,
-    uint8_t                   fh_len,
-    uint64_t                  fh_hash);
-
-/* Mark the outstanding break on this file's SMB2 caching lease `lease_key` as
- * delivered (the protocol server has sent the notification).  Resumes any
- * delete-on-close open parked in caching_break_pending_notify.  Caller must NOT
- * hold file->lock. */
-void
-chimera_vfs_state_mark_break_notified(
-    struct chimera_vfs_state *state,
-    const uint8_t            *fh,
-    uint8_t                   fh_len,
-    uint64_t                  fh_hash,
-    const uint8_t            *lease_key);
-
 /* Forcibly revoke every caching lease on the file that is mid-break, EXCLUDING
  * the grant `except`.  Used when a parked open's break deadline expires (the
  * holder never acknowledged): the holder is revoked so the waiting open can

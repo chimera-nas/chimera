@@ -94,7 +94,7 @@ chimera_s3_put_finish_common(
      * release the file handle and respond (storing x-amz-tagging xattrs first,
      * if present) from the getattr callback. */
     chimera_vfs_getattr(thread->vfs,
-                        &thread->shared->cred,
+                        &thread->shared->cred, NULL,
                         request->file_handle,
                         CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_SIZE |
                         CHIMERA_VFS_ATTR_MTIME,
@@ -133,7 +133,7 @@ chimera_s3_put_rename(struct chimera_s3_request *request)
     if (request->put.tmp_name_len) {
         chimera_vfs_rename_at(
             thread->vfs,
-            &thread->shared->cred,
+            &thread->shared->cred, NULL,
             request->dir_handle->fh,
             request->dir_handle->fh_len,
             request->put.tmp_name,
@@ -153,7 +153,7 @@ chimera_s3_put_rename(struct chimera_s3_request *request)
     } else {
         chimera_vfs_link_at(
             thread->vfs,
-            &thread->shared->cred,
+            &thread->shared->cred, NULL,
             request->file_handle->fh,
             request->file_handle->fh_len,
             request->dir_handle->fh,
@@ -292,7 +292,7 @@ chimera_s3_put_recv(
 
     request->io_pending++;
 
-    chimera_vfs_write(request->thread->vfs, &thread->shared->cred,
+    chimera_vfs_write(request->thread->vfs, &thread->shared->cred, NULL,
                       request->file_handle,
                       request->file_cur_offset,
                       avail,
@@ -427,7 +427,7 @@ chimera_s3_put_open_dir_callback(
 
         request->put.tmp_name_len = 0;
 
-        chimera_vfs_create_unlinked(thread->vfs, &thread->shared->cred,
+        chimera_vfs_create_unlinked(thread->vfs, &thread->shared->cred, NULL,
                                     oh->fh,
                                     oh->fh_len,
                                     &request->set_attr,
@@ -438,7 +438,7 @@ chimera_s3_put_open_dir_callback(
         request->put.tmp_name_len = snprintf(request->put.tmp_name, sizeof(request->put.tmp_name),
                                              "._chimera_%lx%lx%lx", (uint64_t) request,
                                              request->start_time.tv_sec, request->start_time.tv_nsec);
-        chimera_vfs_open_at(thread->vfs, &thread->shared->cred,
+        chimera_vfs_open_at(thread->vfs, &thread->shared->cred, NULL,
                             oh,
                             request->put.tmp_name,
                             request->put.tmp_name_len,
@@ -470,7 +470,7 @@ chimera_s3_put_lookup_callback(
 
     chimera_s3_abort_if(!(attr->va_set_mask & CHIMERA_VFS_ATTR_FH), "put lookup callback: no fh");
 
-    chimera_vfs_open_fh(thread->vfs, &thread->shared->cred,
+    chimera_vfs_open_fh(thread->vfs, &thread->shared->cred, NULL,
                         attr->va_fh,
                         attr->va_fh_len,
                         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
@@ -536,7 +536,7 @@ chimera_s3_put(
 
     request->io_pending = 0;
 
-    chimera_vfs_create(thread->vfs, &thread->shared->cred,
+    chimera_vfs_create(thread->vfs, &thread->shared->cred, NULL,
                        request->bucket_fh,
                        request->bucket_fhlen,
                        dirpath,

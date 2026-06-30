@@ -238,7 +238,7 @@ chimera_smb_query_stream_info(struct chimera_smb_request *request)
 
     chimera_vfs_open_fh(
         thread->vfs_thread,
-        &request->session_handle->session->cred,
+        &request->session_handle->session->cred, NULL,
         base_fh,
         base_fh_len,
         CHIMERA_VFS_OPEN_PATH,
@@ -480,6 +480,7 @@ chimera_smb_query_full_ea_info(struct chimera_smb_request *request)
     chimera_vfs_open_fh(
         thread->vfs_thread,
         &request->session_handle->session->cred,
+        NULL,
         base_fh,
         base_fh_len,
         CHIMERA_VFS_OPEN_PATH,
@@ -710,7 +711,7 @@ chimera_smb_query_info(struct chimera_smb_request *request)
     if (getattr_mask) {
         /* Get the file attributes */
         chimera_vfs_getattr(thread->vfs_thread,
-                            &request->session_handle->session->cred,
+                            &request->session_handle->session->cred, NULL,
                             request->query_info.open_file->handle,
                             getattr_mask,
                             chimera_smb_query_info_getattr_callback,

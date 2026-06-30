@@ -254,7 +254,7 @@ chimera_s3_copy_link_callback(
         return;
     }
 
-    chimera_vfs_getattr(thread->vfs, &thread->shared->cred,
+    chimera_vfs_getattr(thread->vfs, &thread->shared->cred, NULL,
                         ctx->request->file_handle,
                         CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,
                         chimera_s3_copy_getattr_callback,
@@ -278,7 +278,7 @@ chimera_s3_copy_rename_callback(
         return;
     }
 
-    chimera_vfs_getattr(thread->vfs, &thread->shared->cred,
+    chimera_vfs_getattr(thread->vfs, &thread->shared->cred, NULL,
                         ctx->request->file_handle,
                         CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MASK_STAT,
                         chimera_s3_copy_getattr_callback,
@@ -339,7 +339,7 @@ chimera_s3_copy_finalize(struct chimera_s3_copy_ctx *ctx)
     if (ctx->tmp_name_len) {
         chimera_vfs_rename_at(
             thread->vfs,
-            &thread->shared->cred,
+            &thread->shared->cred, NULL,
             request->dir_handle->fh,
             request->dir_handle->fh_len,
             ctx->tmp_name,
@@ -359,7 +359,7 @@ chimera_s3_copy_finalize(struct chimera_s3_copy_ctx *ctx)
     } else {
         chimera_vfs_link_at(
             thread->vfs,
-            &thread->shared->cred,
+            &thread->shared->cred, NULL,
             request->file_handle->fh,
             request->file_handle->fh_len,
             request->dir_handle->fh,
@@ -480,7 +480,7 @@ chimera_s3_copy_read_callback(
     ctx->rw_niov = niov;
 
     chimera_vfs_write(
-        thread->vfs, &thread->shared->cred,
+        thread->vfs, &thread->shared->cred, NULL,
         ctx->request->file_handle,
         ctx->offset,
         count,
@@ -511,7 +511,7 @@ chimera_s3_copy_step(struct chimera_s3_copy_ctx *ctx)
         case CHIMERA_S3_COPY_CLONE:
             /* Whole remaining range in a single reflink. */
             chimera_vfs_clone_range(
-                thread->vfs, &thread->shared->cred,
+                thread->vfs, &thread->shared->cred, NULL,
                 ctx->src_handle,
                 ctx->offset,
                 request->file_handle,
@@ -527,7 +527,7 @@ chimera_s3_copy_step(struct chimera_s3_copy_ctx *ctx)
                 chunk = remaining;
             }
             chimera_vfs_copy_range(
-                thread->vfs, &thread->shared->cred,
+                thread->vfs, &thread->shared->cred, NULL,
                 ctx->src_handle,
                 ctx->offset,
                 request->file_handle,
@@ -544,7 +544,7 @@ chimera_s3_copy_step(struct chimera_s3_copy_ctx *ctx)
             }
             ctx->rw_niov = CHIMERA_S3_IOV_MAX;
             chimera_vfs_read(
-                thread->vfs, &thread->shared->cred,
+                thread->vfs, &thread->shared->cred, NULL,
                 ctx->src_handle,
                 ctx->offset,
                 chunk,
@@ -667,7 +667,7 @@ chimera_s3_copy_open_dir_callback(
     if (module->capabilities & CHIMERA_VFS_CAP_CREATE_UNLINKED) {
         ctx->tmp_name_len = 0;
         chimera_vfs_create_unlinked(
-            thread->vfs, &thread->shared->cred,
+            thread->vfs, &thread->shared->cred, NULL,
             oh->fh,
             oh->fh_len,
             &request->set_attr,
@@ -679,7 +679,7 @@ chimera_s3_copy_open_dir_callback(
                                      "._chimera_cp_%lx%lx", (uint64_t) request,
                                      (uint64_t) request->start_time.tv_nsec);
         chimera_vfs_open_at(
-            thread->vfs, &thread->shared->cred,
+            thread->vfs, &thread->shared->cred, NULL,
             oh,
             ctx->tmp_name,
             ctx->tmp_name_len,
@@ -708,7 +708,7 @@ chimera_s3_copy_create_dir_callback(
         return;
     }
 
-    chimera_vfs_open_fh(thread->vfs, &thread->shared->cred,
+    chimera_vfs_open_fh(thread->vfs, &thread->shared->cred, NULL,
                         attr->va_fh,
                         attr->va_fh_len,
                         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED |
@@ -767,7 +767,7 @@ chimera_s3_copy_open_src_callback(
     request->set_attr.va_req_mask = 0;
     request->set_attr.va_set_mask = 0;
 
-    chimera_vfs_create(thread->vfs, &thread->shared->cred,
+    chimera_vfs_create(thread->vfs, &thread->shared->cred, NULL,
                        request->bucket_fh,
                        request->bucket_fhlen,
                        dirpath,
@@ -802,7 +802,7 @@ chimera_s3_copy_lookup_src_callback(
     ctx->src_size  = attr->va_size;
     ctx->src_mtime = attr->va_mtime;
 
-    chimera_vfs_open_fh(thread->vfs, &thread->shared->cred,
+    chimera_vfs_open_fh(thread->vfs, &thread->shared->cred, NULL,
                         attr->va_fh,
                         attr->va_fh_len,
                         0,
@@ -825,7 +825,7 @@ chimera_s3_copy_lookup_src_bucket_callback(
         return;
     }
 
-    chimera_vfs_lookup(thread->vfs, &thread->shared->cred,
+    chimera_vfs_lookup(thread->vfs, &thread->shared->cred, NULL,
                        attr->va_fh,
                        attr->va_fh_len,
                        ctx->src_key,
@@ -887,7 +887,7 @@ chimera_s3_copy(
     src_path = chimera_s3_bucket_get_path(src_bucket);
 
     chimera_vfs_lookup(thread->vfs,
-                       &thread->shared->cred,
+                       &thread->shared->cred, NULL,
                        shared->root_fh,
                        shared->root_fh_len,
                        src_path,

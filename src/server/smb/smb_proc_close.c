@@ -156,7 +156,7 @@ chimera_smb_close_doc_open_parent_callback(
 
     chimera_vfs_remove_at(
         vfs_thread,
-        &request->close.doc_info.cred,
+        &request->close.doc_info.cred, NULL,
         oh,
         request->close.doc_info.name,
         request->close.doc_info.name_len,
@@ -256,7 +256,7 @@ chimera_smb_teardown_doc_open_parent_callback(
      * not recall here. */
     chimera_vfs_remove_at(
         ctx->vfs_thread,
-        &ctx->doc_info.cred,
+        &ctx->doc_info.cred, NULL,
         oh,
         ctx->doc_info.name,
         ctx->doc_info.name_len,
@@ -295,7 +295,7 @@ chimera_smb_teardown_doc_unlink(
 
     chimera_vfs_open_fh(
         ctx->vfs_thread,
-        &ctx->doc_info.cred,
+        &ctx->doc_info.cred, NULL,
         ctx->doc_info.parent_fh,
         ctx->doc_info.parent_fh_len,
         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
@@ -402,7 +402,7 @@ chimera_smb_close_stream_base_parent_callback(
 
     chimera_vfs_remove_at(
         vfs_thread,
-        &request->session_handle->session->cred,
+        &request->session_handle->session->cred, NULL,
         oh,
         open_file->name,
         open_file->name_len,
@@ -455,7 +455,7 @@ chimera_smb_close_release(struct chimera_smb_request *request)
          * the remove completes. */
         chimera_vfs_open_fh(
             vfs_thread,
-            &request->session_handle->session->cred,
+            &request->session_handle->session->cred, NULL,
             open_file->base_fh,
             open_file->base_fh_len,
             CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
@@ -476,7 +476,7 @@ chimera_smb_close_release(struct chimera_smb_request *request)
         open_file->parent_fh_len > 0) {
         chimera_vfs_open_fh(
             vfs_thread,
-            &request->session_handle->session->cred,
+            &request->session_handle->session->cred, NULL,
             open_file->parent_fh,
             open_file->parent_fh_len,
             CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
@@ -508,7 +508,7 @@ chimera_smb_close_release(struct chimera_smb_request *request)
     if (need_doc && request->close.doc_info.parent_fh_len > 0) {
         chimera_vfs_open_fh(
             vfs_thread,
-            &request->close.doc_info.cred,
+            &request->close.doc_info.cred, NULL,
             request->close.doc_info.parent_fh,
             request->close.doc_info.parent_fh_len,
             CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
@@ -636,7 +636,7 @@ chimera_smb_close(struct chimera_smb_request *request)
          * field is CreationTime (BTIME).  MASK_STAT deliberately omits BTIME, so
          * request it explicitly or CreationTime is emitted as 0 (issue #1117). */
         chimera_vfs_getattr(thread->vfs_thread,
-                            &request->session_handle->session->cred,
+                            &request->session_handle->session->cred, NULL,
                             request->close.open_file->handle,
                             CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_BTIME,
                             chimera_smb_close_getattr_callback,

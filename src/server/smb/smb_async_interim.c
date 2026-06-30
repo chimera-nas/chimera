@@ -182,19 +182,7 @@ chimera_smb_async_interim_drain(struct chimera_smb_conn *conn)
         * completion of the orphaned request cannot touch the released open. */
         if (request->smb2_hdr.command == SMB2_CREATE &&
             request->create.r_open_file) {
-            struct chimera_smb_open_file *of = request->create.r_open_file;
-
-            /* If this CREATE was still pending on a break ack (its half-open is
-             * hashed + CREATE_PENDING), mark it orphaned before dropping the
-             * request ref: the resume that would clear CREATE_PENDING and complete
-             * the open will never come (the connection is gone), but the open must
-             * stay hashed so a replayed durable create with this create_guid still
-             * answers FILE_NOT_AVAILABLE.  Once the break it waited on settles, a
-             * later replay evicts it (chimera_smb_create_guid_replay). */
-            if (of->flags & CHIMERA_SMB_OPEN_FILE_CREATE_PENDING) {
-                of->flags |= CHIMERA_SMB_OPEN_FILE_PENDING_ORPHANED;
-            }
-            chimera_smb_open_file_release(request, of);
+            chimera_smb_open_file_release(request, request->create.r_open_file);
             request->create.r_open_file = NULL;
         }
     }
