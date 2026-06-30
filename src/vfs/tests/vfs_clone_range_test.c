@@ -294,7 +294,7 @@ clone(
     uint64_t                        dst_off,
     uint64_t                        len)
 {
-    chimera_vfs_clone_range(ctx->vfs_thread, cred, src, src_off, dst, dst_off,
+    chimera_vfs_clone_range(ctx->vfs_thread, cred, NULL, src, src_off, dst, dst_off,
                             len, 0, 0, clone_cb, ctx);
     wait_done(ctx);
     assert(ctx->status == CHIMERA_VFS_OK);
@@ -397,7 +397,7 @@ main(
     TEST_PASS("clone straddling the internal-block boundary RMWs correctly");
 
     /* 4. Misaligned offset/length must be rejected (POSIX FICLONERANGE). */
-    chimera_vfs_clone_range(ctx.vfs_thread, &cred, src_h, 100, dst_h, 0, 4096,
+    chimera_vfs_clone_range(ctx.vfs_thread, &cred, NULL, src_h, 100, dst_h, 0, 4096,
                             0, 0, clone_cb, &ctx);
     wait_done(&ctx);
     assert(ctx.status == CHIMERA_VFS_EINVAL);

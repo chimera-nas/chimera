@@ -217,6 +217,7 @@ chimera_smb_copychunk_next(struct chimera_smb_request *request)
     chimera_vfs_copy_range(
         vfs_thread,
         &request->session_handle->session->cred,
+        NULL,
         request->ioctl.cc_src_open_file->handle,
         request->ioctl.cc_chunks[i].src_offset,
         request->ioctl.cc_dst_open_file->handle,

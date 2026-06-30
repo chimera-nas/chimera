@@ -24,6 +24,7 @@ SYMBOL_EXPORT void
 chimera_vfs_seek(
     struct chimera_vfs_thread      *thread,
     const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_transaction *txn,
     struct chimera_vfs_open_handle *handle,
     uint64_t                        offset,
     uint32_t                        what,
@@ -41,6 +42,7 @@ chimera_vfs_seek(
 
     request->opcode             = CHIMERA_VFS_OP_SEEK;
     request->complete           = chimera_vfs_seek_complete;
+    request->transaction        = txn;
     request->seek.handle        = handle;
     request->seek.offset        = offset;
     request->seek.what          = what;

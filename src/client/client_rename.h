@@ -6,21 +6,49 @@
 
 #include "client_internal.h"
 #include "client_dispatch.h"
+#include "client_txn.h"
 
 static void
 chimera_rename_vfs_complete(
     enum chimera_vfs_error error_code,
     void                  *private_data)
 {
-    struct chimera_client_request *request      = private_data;
-    struct chimera_client_thread  *thread       = request->thread;
-    chimera_rename_callback_t      callback     = request->rename.callback;
-    void                          *callback_arg = request->rename.private_data;
+    struct chimera_client_request *request = private_data;
+
+    chimera_client_txn_finish(request->thread, request, error_code);
+} /* chimera_rename_vfs_complete */
+
+static void
+chimera_rename_start(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request)
+{
+    chimera_vfs_rename(
+        thread->vfs_thread,
+        chimera_client_req_cred(request), request->txn,
+        thread->client->root_fh,
+        thread->client->root_fh_len,
+        request->rename.source_path,
+        request->rename.source_path_len,
+        request->rename.dest_path,
+        request->rename.dest_path_len,
+        chimera_rename_vfs_complete,
+        request);
+} /* chimera_rename_start */
+
+static void
+chimera_rename_reply(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request)
+{
+    chimera_rename_callback_t callback     = request->rename.callback;
+    void                     *callback_arg = request->rename.private_data;
+    enum chimera_vfs_error    status       = request->txn_op_status;
 
     chimera_client_request_free(thread, request);
 
-    callback(thread, error_code, callback_arg);
-} /* chimera_rename_vfs_complete */
+    callback(thread, status, callback_arg);
+} /* chimera_rename_reply */
 
 static inline void
 chimera_dispatch_rename(
@@ -33,15 +61,9 @@ chimera_dispatch_rename(
         return;
     }
 
-    chimera_vfs_rename(
-        thread->vfs_thread,
-        chimera_client_req_cred(request),
-        thread->client->root_fh,
-        thread->client->root_fh_len,
-        request->rename.source_path,
-        request->rename.source_path_len,
-        request->rename.dest_path,
-        request->rename.dest_path_len,
-        chimera_rename_vfs_complete,
-        request);
+    chimera_client_txn_run(thread, request,
+                           thread->client->root_fh,
+                           thread->client->root_fh_len,
+                           CHIMERA_VFS_TXN_WRITE,
+                           chimera_rename_start, chimera_rename_reply);
 } /* chimera_dispatch_rename */

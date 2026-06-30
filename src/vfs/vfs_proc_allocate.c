@@ -34,6 +34,7 @@ SYMBOL_EXPORT void
 chimera_vfs_allocate(
     struct chimera_vfs_thread      *thread,
     const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_transaction *txn,
     struct chimera_vfs_open_handle *handle,
     uint64_t                        offset,
     uint64_t                        length,
@@ -54,6 +55,7 @@ chimera_vfs_allocate(
 
     request->opcode                           = CHIMERA_VFS_OP_ALLOCATE;
     request->complete                         = chimera_vfs_allocate_complete;
+    request->transaction                      = txn;
     request->allocate.handle                  = handle;
     request->allocate.offset                  = offset;
     request->allocate.length                  = length;

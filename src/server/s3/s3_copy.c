@@ -511,7 +511,7 @@ chimera_s3_copy_step(struct chimera_s3_copy_ctx *ctx)
         case CHIMERA_S3_COPY_CLONE:
             /* Whole remaining range in a single reflink. */
             chimera_vfs_clone_range(
-                thread->vfs, &thread->shared->cred,
+                thread->vfs, &thread->shared->cred, NULL,
                 ctx->src_handle,
                 ctx->offset,
                 request->file_handle,
@@ -527,7 +527,7 @@ chimera_s3_copy_step(struct chimera_s3_copy_ctx *ctx)
                 chunk = remaining;
             }
             chimera_vfs_copy_range(
-                thread->vfs, &thread->shared->cred,
+                thread->vfs, &thread->shared->cred, NULL,
                 ctx->src_handle,
                 ctx->offset,
                 request->file_handle,

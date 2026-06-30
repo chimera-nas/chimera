@@ -6,21 +6,49 @@
 
 #include "client_internal.h"
 #include "client_dispatch.h"
+#include "client_txn.h"
+
+/* Shared reply for both the path and _at remove transactions. */
+static void
+chimera_remove_reply(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request)
+{
+    chimera_remove_callback_t callback     = request->remove.callback;
+    void                     *callback_arg = request->remove.private_data;
+    enum chimera_vfs_error    status       = request->txn_op_status;
+
+    /* Note: parent handle (for the _at variant) is NOT released - caller owns it */
+    chimera_client_request_free(thread, request);
+
+    callback(thread, status, callback_arg);
+} /* chimera_remove_reply */
 
 static void
 chimera_remove_vfs_complete(
     enum chimera_vfs_error error_code,
     void                  *private_data)
 {
-    struct chimera_client_request *request      = private_data;
-    struct chimera_client_thread  *thread       = request->thread;
-    chimera_remove_callback_t      callback     = request->remove.callback;
-    void                          *callback_arg = request->remove.private_data;
+    struct chimera_client_request *request = private_data;
 
-    chimera_client_request_free(thread, request);
-
-    callback(thread, error_code, callback_arg);
+    chimera_client_txn_finish(request->thread, request, error_code);
 } /* chimera_remove_vfs_complete */
+
+static void
+chimera_remove_start(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request)
+{
+    chimera_vfs_remove(
+        thread->vfs_thread,
+        chimera_client_req_cred(request), request->txn,
+        thread->client->root_fh,
+        thread->client->root_fh_len,
+        request->remove.path,
+        request->remove.path_len,
+        chimera_remove_vfs_complete,
+        request);
+} /* chimera_remove_start */
 
 static inline void
 chimera_dispatch_remove(
@@ -33,15 +61,11 @@ chimera_dispatch_remove(
         return;
     }
 
-    chimera_vfs_remove(
-        thread->vfs_thread,
-        chimera_client_req_cred(request),
-        thread->client->root_fh,
-        thread->client->root_fh_len,
-        request->remove.path,
-        request->remove.path_len,
-        chimera_remove_vfs_complete,
-        request);
+    chimera_client_txn_run(thread, request,
+                           thread->client->root_fh,
+                           thread->client->root_fh_len,
+                           CHIMERA_VFS_TXN_WRITE,
+                           chimera_remove_start, chimera_remove_reply);
 } /* chimera_dispatch_remove */
 
 static void
@@ -51,18 +75,9 @@ chimera_remove_dispatch_at_complete(
     struct chimera_vfs_attrs *post_attr,
     void                     *private_data)
 {
-    struct chimera_client_request *request        = private_data;
-    struct chimera_client_thread  *thread         = request->thread;
-    chimera_remove_callback_t      callback       = request->remove.callback;
-    void                          *callback_arg   = request->remove.private_data;
-    int                            heap_allocated = request->heap_allocated;
+    struct chimera_client_request *request = private_data;
 
-    if (heap_allocated) {
-        chimera_client_request_free(thread, request);
-    }
-
-    /* Note: parent handle is NOT released - caller owns it */
-    callback(thread, error_code, callback_arg);
+    chimera_client_txn_finish(request->thread, request, error_code);
 } /* chimera_remove_dispatch_at_complete */
 
 static void
@@ -76,15 +91,8 @@ chimera_remove_at_lookup_complete(
     struct chimera_client_thread  *thread  = request->thread;
 
     if (error_code != CHIMERA_VFS_OK) {
-        /* Child doesn't exist or other error - return immediately */
-        chimera_remove_callback_t callback       = request->remove.callback;
-        void                     *callback_arg   = request->remove.private_data;
-        int                       heap_allocated = request->heap_allocated;
-
-        if (heap_allocated) {
-            chimera_client_request_free(thread, request);
-        }
-        callback(thread, error_code, callback_arg);
+        /* Child doesn't exist or other error - fail the transaction. */
+        chimera_client_txn_finish(thread, request, error_code);
         return;
     }
 
@@ -95,7 +103,7 @@ chimera_remove_at_lookup_complete(
     /* Now call remove with the child FH */
     chimera_vfs_remove_at(
         thread->vfs_thread,
-        chimera_client_req_cred(request), NULL,
+        chimera_client_req_cred(request), request->txn,
         request->remove.parent_handle,
         request->remove.path,
         request->remove.path_len,
@@ -108,26 +116,37 @@ chimera_remove_at_lookup_complete(
         request);
 } /* chimera_remove_at_lookup_complete */
 
-static inline void
-chimera_dispatch_remove_at(
-    struct chimera_client_thread   *thread,
-    struct chimera_vfs_open_handle *parent_handle,
-    struct chimera_client_request  *request)
+static void
+chimera_remove_at_start(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request)
 {
-    /* Save parent handle for use in callback */
-    request->remove.parent_handle = parent_handle;
-
     /* First lookup the child to get its FH for silly rename optimization.
      * Use NOFOLLOW (0) because we want the FH of the symlink itself,
      * not the target it points to. */
     chimera_vfs_lookup_at(
         thread->vfs_thread,
-        chimera_client_req_cred(request), NULL,
-        parent_handle,
+        chimera_client_req_cred(request), request->txn,
+        request->remove.parent_handle,
         request->remove.path,
         request->remove.path_len,
         CHIMERA_VFS_ATTR_FH,
         0,
         chimera_remove_at_lookup_complete,
         request);
+} /* chimera_remove_at_start */
+
+static inline void
+chimera_dispatch_remove_at(
+    struct chimera_client_thread   *thread,
+    struct chimera_vfs_open_handle *parent_handle,
+    struct chimera_client_request  *request)
+{
+    /* Save parent handle for use in the start/lookup callbacks */
+    request->remove.parent_handle = parent_handle;
+
+    chimera_client_txn_run(thread, request,
+                           parent_handle->fh, parent_handle->fh_len,
+                           CHIMERA_VFS_TXN_WRITE,
+                           chimera_remove_at_start, chimera_remove_reply);
 } /* chimera_dispatch_remove_at */

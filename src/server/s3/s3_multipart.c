@@ -1278,7 +1278,7 @@ chimera_s3_upc_step(struct chimera_s3_upload_copy_ctx *ctx)
 
     if (ctx->mode == CHIMERA_S3_UPC_COPY) {
         chimera_vfs_copy_range(
-            thread->vfs, &thread->shared->cred,
+            thread->vfs, &thread->shared->cred, NULL,
             ctx->src_handle,
             ctx->src_first + ctx->copied,
             request->file_handle,
@@ -2284,7 +2284,7 @@ chimera_s3_complete_assemble_next(struct chimera_s3_complete_ctx *ctx)
             break;
         case CHIMERA_S3_ASSEMBLE_COPY:
             chimera_vfs_copy_range(
-                thread->vfs, &thread->shared->cred,
+                thread->vfs, &thread->shared->cred, NULL,
                 part->file_handle,
                 ctx->part_offset,
                 request->file_handle,

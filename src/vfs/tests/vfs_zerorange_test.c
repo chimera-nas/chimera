@@ -242,7 +242,7 @@ do_allocate(
     uint64_t                       len,
     uint32_t                       flags)
 {
-    chimera_vfs_allocate(ctx->vfs_thread, cred, ctx->fhandle, off, len, flags,
+    chimera_vfs_allocate(ctx->vfs_thread, cred, NULL, ctx->fhandle, off, len, flags,
                          0, 0, allocate_cb, ctx);
     wait_done(ctx);
     return ctx->status;

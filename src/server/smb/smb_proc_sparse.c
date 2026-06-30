@@ -188,6 +188,7 @@ chimera_smb_ioctl_set_zero_data(struct chimera_smb_request *request)
     chimera_vfs_allocate(
         vfs_thread,
         &request->session_handle->session->cred,
+        NULL,
         open_file->handle,
         request->ioctl.sp_zero_offset,
         length,
@@ -330,6 +331,7 @@ chimera_smb_qar_seek_data_cb(
     chimera_vfs_seek(
         vfs_thread,
         &request->session_handle->session->cred,
+        NULL,
         request->ioctl.sp_open_file->handle,
         sr_offset,
         CHIMERA_SMB_SEEK_HOLE,
@@ -345,6 +347,7 @@ chimera_smb_qar_seek_data(struct chimera_smb_request *request)
     chimera_vfs_seek(
         vfs_thread,
         &request->session_handle->session->cred,
+        NULL,
         request->ioctl.sp_open_file->handle,
         request->ioctl.sp_qar_cursor,
         CHIMERA_SMB_SEEK_DATA,

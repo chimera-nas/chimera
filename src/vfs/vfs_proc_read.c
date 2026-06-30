@@ -421,6 +421,7 @@ SYMBOL_EXPORT void
 chimera_vfs_read_into(
     struct chimera_vfs_thread      *thread,
     const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_transaction *txn,
     struct chimera_vfs_open_handle *handle,
     uint64_t                        offset,
     uint32_t                        count,
@@ -432,7 +433,7 @@ chimera_vfs_read_into(
     chimera_vfs_read_callback_t     callback,
     void                           *private_data)
 {
-    chimera_vfs_read_submit(thread, cred, NULL, handle, offset, count,
+    chimera_vfs_read_submit(thread, cred, txn, handle, offset, count,
                             work_iov, work_niov, dest_iov, dest_niov,
                             attr_mask, NULL, callback, private_data);
 } /* chimera_vfs_read_into */

@@ -223,7 +223,7 @@ chimera_rest_handle_debug_fsop(
     chimera_vfs_get_root_fh(root_fh, &root_fh_len);
 
     if (strcmp(op, "unlink") == 0) {
-        chimera_vfs_remove(ctx->vfs_thread, cred, root_fh, root_fh_len,
+        chimera_vfs_remove(ctx->vfs_thread, cred, NULL, root_fh, root_fh_len,
                            ctx->path, strlen(ctx->path),
                            rest_fsop_remove_cb, ctx);
     } else if (strcmp(op, "rename") == 0) {
@@ -236,7 +236,7 @@ chimera_rest_handle_debug_fsop(
             return;
         }
         snprintf(ctx->path2, sizeof(ctx->path2), "%s", path2);
-        chimera_vfs_rename(ctx->vfs_thread, cred, root_fh, root_fh_len,
+        chimera_vfs_rename(ctx->vfs_thread, cred, NULL, root_fh, root_fh_len,
                            ctx->path, strlen(ctx->path),
                            ctx->path2, strlen(ctx->path2),
                            rest_fsop_rename_cb, ctx);
@@ -250,7 +250,7 @@ chimera_rest_handle_debug_fsop(
             return;
         }
         snprintf(ctx->path2, sizeof(ctx->path2), "%s", path2);
-        chimera_vfs_link(ctx->vfs_thread, cred, root_fh, root_fh_len,
+        chimera_vfs_link(ctx->vfs_thread, cred, NULL, root_fh, root_fh_len,
                          ctx->path, strlen(ctx->path),
                          ctx->path2, strlen(ctx->path2),
                          0, 0, rest_fsop_link_cb, ctx);
