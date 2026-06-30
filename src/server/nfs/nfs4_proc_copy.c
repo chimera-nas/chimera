@@ -433,7 +433,7 @@ chimera_nfs4_copy_start(struct nfs4_copy_state_refs *refs)
 
     if (src_handle->vfs_module == dst_handle->vfs_module &&
         (dst_handle->vfs_module->capabilities & CHIMERA_VFS_CAP_COPY_RANGE)) {
-        chimera_vfs_copy_range(req->thread->vfs_thread, &req->cred,
+        chimera_vfs_copy_range(req->thread->vfs_thread, &req->cred, NULL,
                                src_handle,
                                refs->src_offset,
                                dst_handle,

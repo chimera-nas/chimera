@@ -95,7 +95,7 @@ chimera_nfs4_clone_issue(
         return;
     }
 
-    chimera_vfs_clone_range(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_clone_range(req->thread->vfs_thread, &req->cred, NULL,
                             src_handle, args->cl_src_offset,
                             dst_handle, args->cl_dst_offset,
                             length,

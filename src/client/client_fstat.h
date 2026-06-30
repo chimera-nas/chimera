@@ -6,6 +6,7 @@
 
 #include "client_internal.h"
 #include "client_stat.h"
+#include "client_txn.h"
 
 static void
 chimera_fstat_getattr_complete(
@@ -13,34 +14,57 @@ chimera_fstat_getattr_complete(
     struct chimera_vfs_attrs *attr,
     void                     *private_data)
 {
-    struct chimera_client_request *request       = private_data;
-    struct chimera_client_thread  *client_thread = request->thread;
-    chimera_fstat_callback_t       callback      = request->fstat.callback;
-    void                          *callback_arg  = request->fstat.private_data;
-    struct chimera_stat            st;
+    struct chimera_client_request *request = private_data;
 
-    chimera_client_request_free(client_thread, request);
+    if (error_code == CHIMERA_VFS_OK) {
+        chimera_attrs_to_stat(attr, &request->sync_stat);
+    }
 
-    if (error_code != CHIMERA_VFS_OK) {
-        callback(client_thread, error_code, NULL, callback_arg);
+    chimera_client_txn_finish(request->thread, request, error_code);
+} /* chimera_fstat_getattr_complete */
+
+static void
+chimera_fstat_start(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request)
+{
+    chimera_vfs_getattr(
+        thread->vfs_thread,
+        chimera_client_req_cred(request), request->txn,
+        request->fstat.handle,
+        CHIMERA_VFS_ATTR_MASK_STAT,
+        chimera_fstat_getattr_complete,
+        request);
+} /* chimera_fstat_start */
+
+static void
+chimera_fstat_reply(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request)
+{
+    chimera_fstat_callback_t callback     = request->fstat.callback;
+    void                    *callback_arg = request->fstat.private_data;
+    enum chimera_vfs_error   status       = request->txn_op_status;
+    struct chimera_stat      st           = request->sync_stat;
+
+    chimera_client_request_free(thread, request);
+
+    if (status != CHIMERA_VFS_OK) {
+        callback(thread, status, NULL, callback_arg);
         return;
     }
 
-    chimera_attrs_to_stat(attr, &st);
-
-    callback(client_thread, CHIMERA_VFS_OK, &st, callback_arg);
-} /* chimera_fstat_getattr_complete */
+    callback(thread, CHIMERA_VFS_OK, &st, callback_arg);
+} /* chimera_fstat_reply */
 
 static inline void
 chimera_dispatch_fstat(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
-    chimera_vfs_getattr(
-        thread->vfs_thread,
-        chimera_client_req_cred(request), NULL,
-        request->fstat.handle,
-        CHIMERA_VFS_ATTR_MASK_STAT,
-        chimera_fstat_getattr_complete,
-        request);
+    chimera_client_txn_run(thread, request,
+                           request->fstat.handle->fh,
+                           request->fstat.handle->fh_len,
+                           CHIMERA_VFS_TXN_READ,
+                           chimera_fstat_start, chimera_fstat_reply);
 } /* chimera_dispatch_fstat */

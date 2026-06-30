@@ -131,7 +131,7 @@ chimera_vfs_remove_child_lookup_complete(
 
     chimera_vfs_remove_at(
         thread,
-        request->cred, NULL,
+        request->cred, request->transaction,
         request->remove.parent_handle,
         request->remove.path + request->remove.name_offset,
         request->remove.pathlen - request->remove.name_offset,
@@ -171,7 +171,7 @@ chimera_vfs_remove_parent_open_complete(
         request->remove.child_fh_len = 0;
         chimera_vfs_remove_at(
             thread,
-            request->cred, NULL,
+            request->cred, request->transaction,
             oh,
             request->remove.path + request->remove.name_offset,
             request->remove.pathlen - request->remove.name_offset,
@@ -188,7 +188,7 @@ chimera_vfs_remove_parent_open_complete(
 
     chimera_vfs_lookup_at(
         thread,
-        request->cred, NULL,
+        request->cred, request->transaction,
         oh,
         request->remove.path + request->remove.name_offset,
         request->remove.pathlen - request->remove.name_offset,
@@ -221,7 +221,7 @@ chimera_vfs_remove_parent_lookup_complete(
 
     chimera_vfs_open_fh(
         thread,
-        request->cred, NULL,
+        request->cred, request->transaction,
         request->remove.parent_fh,
         request->remove.parent_fh_len,
         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
@@ -231,15 +231,16 @@ chimera_vfs_remove_parent_lookup_complete(
 
 SYMBOL_EXPORT void
 chimera_vfs_remove(
-    struct chimera_vfs_thread     *thread,
-    const struct chimera_vfs_cred *cred,
-    const void                    *fh,
-    int                            fhlen,
-    const char                    *path,
-    int                            pathlen,
-    unsigned int                   flags,
-    chimera_vfs_remove_callback_t  callback,
-    void                          *private_data)
+    struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_transaction *txn,
+    const void                     *fh,
+    int                             fhlen,
+    const char                     *path,
+    int                             pathlen,
+    unsigned int                    flags,
+    chimera_vfs_remove_callback_t   callback,
+    void                           *private_data)
 {
     struct chimera_vfs_request *request;
     const char                 *slash;
@@ -278,6 +279,7 @@ chimera_vfs_remove(
     request->remove.flags        = flags;
     request->remove.callback     = callback;
     request->remove.private_data = private_data;
+    request->transaction         = txn;
 
     if (request->module->capabilities & CHIMERA_VFS_CAP_FS_PATH_OP) {
         request->remove.name_offset = 0;
@@ -287,7 +289,7 @@ chimera_vfs_remove(
 
         chimera_vfs_open_fh(
             thread,
-            cred, NULL,
+            cred, request->transaction,
             request->remove.parent_fh,
             request->remove.parent_fh_len,
             CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
@@ -309,7 +311,7 @@ chimera_vfs_remove(
 
             chimera_vfs_open_fh(
                 thread,
-                cred, NULL,
+                cred, request->transaction,
                 request->remove.parent_fh,
                 request->remove.parent_fh_len,
                 CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
@@ -332,7 +334,7 @@ chimera_vfs_remove(
 
         chimera_vfs_lookup(
             thread,
-            cred, NULL,
+            cred, request->transaction,
             fh,
             fhlen,
             request->remove.path,

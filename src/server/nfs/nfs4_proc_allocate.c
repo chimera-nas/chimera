@@ -57,7 +57,7 @@ chimera_nfs4_allocate_open_callback(
 
     req->handle = handle;
 
-    chimera_vfs_allocate(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_allocate(req->thread->vfs_thread, &req->cred, NULL,
                          handle,
                          args->aa_offset,
                          args->aa_length,
@@ -218,7 +218,7 @@ chimera_nfs4_allocate(
     req->nfs_state_ref  = state_void;
     req->nfs_state_type = state_type;
 
-    chimera_vfs_allocate(thread->vfs_thread, &req->cred,
+    chimera_vfs_allocate(thread->vfs_thread, &req->cred, NULL,
                          state_handle,
                          args->aa_offset,
                          args->aa_length,

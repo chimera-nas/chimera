@@ -5,6 +5,7 @@
 #pragma once
 
 #include "client_internal.h"
+#include "client_txn.h"
 
 static void
 chimera_seek_complete(
@@ -13,30 +14,53 @@ chimera_seek_complete(
     uint64_t               offset,
     void                  *private_data)
 {
-    struct chimera_client_request *request        = private_data;
-    struct chimera_client_thread  *client_thread  = request->thread;
-    chimera_seek_callback_t        callback       = request->seek.callback;
-    void                          *callback_arg   = request->seek.private_data;
-    int                            heap_allocated = request->heap_allocated;
+    struct chimera_client_request *request = private_data;
 
-    if (heap_allocated) {
-        chimera_client_request_free(client_thread, request);
-    }
+    request->seek.r_eof    = eof;
+    request->seek.r_offset = offset;
 
-    callback(client_thread, error_code, eof, offset, callback_arg);
+    chimera_client_txn_finish(request->thread, request, error_code);
 } /* chimera_seek_complete */
+
+static void
+chimera_seek_start(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request)
+{
+    chimera_vfs_seek(
+        thread->vfs_thread,
+        chimera_client_req_cred(request), request->txn,
+        request->seek.handle,
+        request->seek.offset,
+        request->seek.what,
+        chimera_seek_complete,
+        request);
+} /* chimera_seek_start */
+
+static void
+chimera_seek_reply(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request)
+{
+    chimera_seek_callback_t callback     = request->seek.callback;
+    void                   *callback_arg = request->seek.private_data;
+    enum chimera_vfs_error  status       = request->txn_op_status;
+    int                     eof          = request->seek.r_eof;
+    uint64_t                offset       = request->seek.r_offset;
+
+    chimera_client_request_free(thread, request);
+
+    callback(thread, status, eof, offset, callback_arg);
+} /* chimera_seek_reply */
 
 static inline void
 chimera_dispatch_seek(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
-    chimera_vfs_seek(
-        thread->vfs_thread,
-        chimera_client_req_cred(request),
-        request->seek.handle,
-        request->seek.offset,
-        request->seek.what,
-        chimera_seek_complete,
-        request);
+    chimera_client_txn_run(thread, request,
+                           request->seek.handle->fh,
+                           request->seek.handle->fh_len,
+                           CHIMERA_VFS_TXN_READ,
+                           chimera_seek_start, chimera_seek_reply);
 } /* chimera_dispatch_seek */
