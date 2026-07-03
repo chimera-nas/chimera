@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <stddef.h>
 #include "vfs.h"
 
 struct evpl_iovec;
@@ -34,6 +35,16 @@ chimera_vfs_mount(
     const char                    *options,
     chimera_vfs_mount_callback_t   callback,
     void                          *private_data);
+
+/* Synchronous, no-I/O syntactic check of a mount options string (the
+ * comma-separated key[=value] format). Returns 1 if the string is well-formed
+ * (or NULL/empty), 0 if it is invalid, in which case errbuf (when non-NULL) is
+ * filled with a specific reason (empty key / too many options / too long). */
+int
+chimera_vfs_mount_options_valid(
+    const char *options,
+    char       *errbuf,
+    size_t      errbuf_len);
 
 typedef void (*chimera_vfs_umount_callback_t)(
     struct chimera_vfs_thread *thread,

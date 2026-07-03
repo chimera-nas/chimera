@@ -4,6 +4,7 @@
 
 #include <string.h>
 #include <errno.h>
+#include <stdio.h>
 #include "vfs_procs.h"
 #include "vfs_internal.h"
 #include "common/misc.h"
@@ -17,7 +18,9 @@ chimera_vfs_parse_mount_options(
     const char                       *options,
     struct chimera_vfs_mount_options *mount_options,
     char                             *buffer,
-    int                               buffer_size)
+    int                               buffer_size,
+    char                             *errbuf,
+    size_t                            errbuf_len)
 {
     const char *p, *end, *eq;
     int         opt_idx    = 0;
@@ -50,6 +53,10 @@ chimera_vfs_parse_mount_options(
 
         /* Check for too many options */
         if (opt_idx >= CHIMERA_VFS_MOUNT_OPT_MAX) {
+            if (errbuf) {
+                snprintf(errbuf, errbuf_len, "too many options (max %d)",
+                         CHIMERA_VFS_MOUNT_OPT_MAX);
+            }
             return -EINVAL;
         }
 
@@ -61,6 +68,9 @@ chimera_vfs_parse_mount_options(
 
         if (eq == p) {
             /* Empty key */
+            if (errbuf) {
+                snprintf(errbuf, errbuf_len, "empty option key");
+            }
             return -EINVAL;
         }
 
@@ -68,6 +78,9 @@ chimera_vfs_parse_mount_options(
 
         /* Check buffer space for key + null terminator */
         if (buf_offset + key_len + 1 > buffer_size) {
+            if (errbuf) {
+                snprintf(errbuf, errbuf_len, "options string too long");
+            }
             return -EINVAL;
         }
 
@@ -84,6 +97,9 @@ chimera_vfs_parse_mount_options(
 
             /* Check buffer space for value + null terminator */
             if (buf_offset + value_len + 1 > buffer_size) {
+                if (errbuf) {
+                    snprintf(errbuf, errbuf_len, "options string too long");
+                }
                 return -EINVAL;
             }
 
@@ -108,6 +124,21 @@ chimera_vfs_parse_mount_options(
     return 0;
 } /* chimera_vfs_parse_mount_options */
 
+SYMBOL_EXPORT int
+chimera_vfs_mount_options_valid(
+    const char *options,
+    char       *errbuf,
+    size_t      errbuf_len)
+{
+    struct chimera_vfs_mount_options tmp_opts;
+    char                             tmp_buf[CHIMERA_VFS_MOUNT_OPT_BUFFER_MAX];
+    int                              rc;
+
+    rc = chimera_vfs_parse_mount_options(options, &tmp_opts, tmp_buf,
+                                         sizeof(tmp_buf), errbuf, errbuf_len);
+    return rc == 0;
+} /* chimera_vfs_mount_options_valid */
+
 
 static void
 chimera_vfs_mount_complete(struct chimera_vfs_request *request)
@@ -130,6 +161,7 @@ chimera_vfs_mount_complete(struct chimera_vfs_request *request)
     mount->module        = request->mount.module;
     mount->path          = strdup(request->mount.mount_path);
     mount->module_path   = strdup(request->mount.path ? request->mount.path : "");
+    mount->options       = request->mount.raw_options ? strdup(request->mount.raw_options) : NULL;
     mount->pathlen       = strlen(request->mount.mount_path);
     mount->mount_private = request->mount.r_mount_private;
 
@@ -210,7 +242,8 @@ chimera_vfs_mount(
     rc = chimera_vfs_parse_mount_options(options,
                                          &request->mount.options,
                                          request->mount.options_buffer,
-                                         sizeof(request->mount.options_buffer));
+                                         sizeof(request->mount.options_buffer),
+                                         NULL, 0);
     if (rc) {
         chimera_vfs_error("chimera_vfs_mount: invalid mount options: %s",
                           options ? options : "(null)");
@@ -226,6 +259,7 @@ chimera_vfs_mount(
     request->mount.module             = module;
     request->mount.mount_path         = mount_path;
     request->mount.mount_pathlen      = strlen(mount_path);
+    request->mount.raw_options        = options;
     request->mount.r_attr.va_req_mask = CHIMERA_VFS_ATTR_MASK_CACHEABLE | CHIMERA_VFS_ATTR_FH;
     request->mount.r_attr.va_set_mask = 0;
     request->proto_callback           = callback;

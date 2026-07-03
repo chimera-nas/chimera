@@ -7,9 +7,9 @@ permalink: /api-reference
 
 # REST API Reference
 
-Chimera exposes a REST API for server administration: managing builtin users, NFS
-exports, SMB shares, and S3 buckets. This page documents every endpoint and its
-arguments.
+Chimera exposes a REST API for server administration: managing builtin users, VFS
+mounts, NFS exports, SMB shares, and S3 buckets. This page documents every endpoint
+and its arguments.
 
 The same API is also available interactively:
 
@@ -442,6 +442,114 @@ DELETE /api/v1/buckets/{name}
 
 ```bash
 curl -X DELETE http://localhost:8080/api/v1/buckets/export
+```
+
+---
+
+## VFS Mounts
+
+VFS mounts map a mount name to a backing path served by a VFS module (for example
+`linux` or `memfs`). A mount may carry an optional comma-separated `key[=value]`
+options string; when present it is echoed back on reads.
+
+### List mounts
+
+```
+GET /api/v1/mounts
+```
+
+**Response `200`**
+
+```json
+[
+  { "name": "share", "module": "memfs", "path": "/", "options": "ro" }
+]
+```
+
+| Field     | Type   | Description                                              |
+|-----------|--------|----------------------------------------------------------|
+| `name`    | string | Mount name (the VFS mount path)                          |
+| `module`  | string | VFS module backing the mount                             |
+| `path`    | string | Backing path passed to the module                        |
+| `options` | string | Options string; present only when the mount has options  |
+
+```bash
+curl http://localhost:8080/api/v1/mounts
+```
+
+### Get mount
+
+```
+GET /api/v1/mounts/{name}
+```
+
+| Path parameter | Type   | Description   |
+|----------------|--------|---------------|
+| `name`         | string | Name of mount |
+
+**Response `200`** - a single mount object (`name`, `module`, `path`, and `options`
+if the mount was created with options).
+
+**Errors:** `404` if the mount does not exist.
+
+```bash
+curl http://localhost:8080/api/v1/mounts/share
+```
+
+### Create mount
+
+```
+POST /api/v1/mounts
+```
+
+**Request body**
+
+| Field     | Type   | Required | Description                                       |
+|-----------|--------|----------|---------------------------------------------------|
+| `name`    | string | yes      | Mount name (the VFS mount path)                   |
+| `module`  | string | yes      | VFS module backing the mount (e.g. linux, memfs)  |
+| `path`    | string | yes      | Backing path passed to the module                 |
+| `options` | string | no       | Comma-separated `key[=value]` options string      |
+
+**Response `201`**
+
+```json
+{ "message": "Mount created" }
+```
+
+**Errors:** `400` (invalid JSON, missing `name`/`module`/`path`, or a malformed
+`options` string), `409` (a mount with that name already exists), `500` (creation
+failed).
+
+```bash
+curl -X POST http://localhost:8080/api/v1/mounts \
+  -H "Content-Type: application/json" \
+  -d '{"name":"share","module":"memfs","path":"/","options":"ro,foo=bar"}'
+```
+
+### Delete mount
+
+```
+DELETE /api/v1/mounts/{name}
+```
+
+| Path parameter | Type   | Description   |
+|----------------|--------|---------------|
+| `name`         | string | Name of mount |
+
+**Response `204`** - no body.
+
+**Errors:** `404` if the mount does not exist.
+
+```bash
+curl -X DELETE http://localhost:8080/api/v1/mounts/share
+```
+
+The same operations are available from the `chimera-admin` CLI, where the create
+command accepts the options string via the `--options` flag:
+
+```bash
+chimera-admin mount create share --module memfs --path / --options ro,foo=bar
 ```
 
 ---

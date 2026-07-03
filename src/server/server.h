@@ -633,6 +633,7 @@ typedef int (*chimera_server_mount_iterate_cb)(
     const char *mount_path,
     const char *module_name,
     const char *module_path,
+    const char *options,
     void       *data);
 
 void

@@ -77,6 +77,7 @@ def chimera_server():
             "threads": 2,
             "sync_delegation_threads": 4,
             "rest_http_port": rest_port,
+            "rest_auth_enabled": False,
         },
         "mounts": {
             "testshare": {
@@ -167,6 +168,7 @@ def chimera_server_https():
             "sync_delegation_threads": 4,
             "rest_http_port": http_port,
             "rest_https_port": https_port,
+            "rest_auth_enabled": False,
             # No rest_ssl_cert/rest_ssl_key - will auto-generate
         },
         "mounts": {

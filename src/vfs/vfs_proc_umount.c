@@ -24,6 +24,7 @@ chimera_vfs_umount_complete(struct chimera_vfs_request *request)
 
     free(request->umount.mount->path);
     free(request->umount.mount->module_path);
+    free(request->umount.mount->options);
     free(request->umount.mount);
 
 } /* chimera_vfs_umount */

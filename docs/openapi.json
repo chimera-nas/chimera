@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "Chimera NAS REST API",
-    "description": "REST API for managing Chimera NAS server configuration including users, NFS exports, SMB shares, and S3 buckets.",
+    "description": "REST API for managing Chimera NAS server configuration including users, VFS mounts, NFS exports, SMB shares, and S3 buckets.",
     "version": "1.0.0",
     "license": {
       "name": "LGPL-2.1-only",
@@ -231,6 +231,170 @@
           },
           "404": {
             "description": "User not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/mounts": {
+      "get": {
+        "summary": "List VFS mounts",
+        "description": "Returns a list of all VFS mounts.",
+        "operationId": "listMounts",
+        "tags": ["VFS Mounts"],
+        "responses": {
+          "200": {
+            "description": "List of mounts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Mount"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized - missing or invalid Bearer token"
+          }
+        }
+      },
+      "post": {
+        "summary": "Create VFS mount",
+        "description": "Creates a new VFS mount.",
+        "operationId": "createMount",
+        "tags": ["VFS Mounts"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MountCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Mount created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Message"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request (missing required field or malformed options)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "A mount with that name already exists",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Failed to create mount",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized - missing or invalid Bearer token"
+          }
+        }
+      }
+    },
+    "/mounts/{name}": {
+      "get": {
+        "summary": "Get VFS mount",
+        "description": "Returns details for a specific VFS mount.",
+        "operationId": "getMount",
+        "tags": ["VFS Mounts"],
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Mount details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Mount"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized - missing or invalid Bearer token"
+          },
+          "404": {
+            "description": "Mount not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Delete VFS mount",
+        "description": "Deletes a VFS mount.",
+        "operationId": "deleteMount",
+        "tags": ["VFS Mounts"],
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Mount deleted"
+          },
+          "401": {
+            "description": "Unauthorized - missing or invalid Bearer token"
+          },
+          "404": {
+            "description": "Mount not found",
             "content": {
               "application/json": {
                 "schema": {
@@ -807,6 +971,49 @@
           }
         }
       },
+      "Mount": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Mount name (the VFS mount path)"
+          },
+          "module": {
+            "type": "string",
+            "description": "VFS module backing the mount (e.g. linux, memfs)"
+          },
+          "path": {
+            "type": "string",
+            "description": "Backing path passed to the module"
+          },
+          "options": {
+            "type": "string",
+            "description": "Comma-separated key[=value] options string; only present when the mount was created with options"
+          }
+        }
+      },
+      "MountCreate": {
+        "type": "object",
+        "required": ["name", "module", "path"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Mount name (the VFS mount path)"
+          },
+          "module": {
+            "type": "string",
+            "description": "VFS module backing the mount (e.g. linux, memfs)"
+          },
+          "path": {
+            "type": "string",
+            "description": "Backing path passed to the module"
+          },
+          "options": {
+            "type": "string",
+            "description": "Optional comma-separated key[=value] options string"
+          }
+        }
+      },
       "Export": {
         "type": "object",
         "properties": {
@@ -905,6 +1112,10 @@
                 "path": {
                   "type": "string",
                   "description": "Backend path"
+                },
+                "options": {
+                  "type": "string",
+                  "description": "Comma-separated key[=value] options string; only present when the mount was created with options"
                 }
               }
             }

@@ -660,6 +660,7 @@ struct chimera_vfs_request {
             uint32_t                         mount_pathlen;
             struct chimera_vfs_mount_options options;
             char                             options_buffer[CHIMERA_VFS_MOUNT_OPT_BUFFER_MAX];
+            const char                      *raw_options;
             void                            *r_mount_private;
             struct chimera_vfs_attrs         r_attr;
         } mount;
@@ -1462,6 +1463,7 @@ struct chimera_vfs_mount {
     struct chimera_vfs_module     *module;
     char                          *path;
     char                          *module_path;
+    char                          *options;
     uint32_t                       pathlen;
     int                            root_fh_len;
     void                          *mount_private;
