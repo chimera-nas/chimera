@@ -382,7 +382,8 @@ class ChimeraAdminClient:
 
         Returns:
             List of mount dictionaries, each with "name", "module", and
-            "path" keys.
+            "path" keys, plus an "options" key for mounts created with
+            options.
 
         Raises:
             ChimeraAdminError: If the request fails
@@ -397,7 +398,8 @@ class ChimeraAdminClient:
                 away server-side to match how the mount was registered.
 
         Returns:
-            Mount dictionary with "name", "module", and "path" keys.
+            Mount dictionary with "name", "module", and "path" keys, plus an
+            "options" key if the mount was created with options.
 
         Raises:
             ChimeraAdminError: If the request fails or mount not found
@@ -417,14 +419,17 @@ class ChimeraAdminClient:
             name: Mount name (the VFS mount path).
             module: VFS module backing the mount (e.g. "linux", "memfs").
             path: Backing path passed to the module.
-            options: Optional module-specific options string.
+            options: Optional module-specific options string. When set, it is
+                stored on the mount and echoed back by get_mount/list_mounts
+                and in the server config.
 
         Returns:
             Response message.
 
         Raises:
             ChimeraAdminError: If the request fails (e.g. 400 for missing
-                fields, 500 if the server fails to create the mount).
+                fields or a malformed options string, 500 if the server fails
+                to create the mount).
         """
         data = {"name": name, "module": module, "path": path}
         if options is not None:

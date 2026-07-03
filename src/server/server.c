@@ -2621,6 +2621,7 @@ mount_iterate_wrapper(
     return ctx->callback(mount->path,
                          mount->module ? mount->module->name : "",
                          mount->module_path ? mount->module_path : "",
+                         mount->options,
                          ctx->data);
 } /* mount_iterate_wrapper */
 

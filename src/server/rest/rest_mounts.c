@@ -25,6 +25,7 @@ mount_to_json_callback(
     const char *mount_path,
     const char *module_name,
     const char *module_path,
+    const char *options,
     void       *data)
 {
     struct mount_list_ctx *ctx = data;
@@ -40,6 +41,9 @@ mount_to_json_callback(
     json_object_set_new(obj, "name", json_string(mount_path));
     json_object_set_new(obj, "module", json_string(module_name));
     json_object_set_new(obj, "path", json_string(module_path));
+    if (options && options[0]) {
+        json_object_set_new(obj, "options", json_string(options));
+    }
 
     json_array_append_new(ctx->array, obj);
 
@@ -72,6 +76,7 @@ mount_get_callback(
     const char *mount_path,
     const char *module_name,
     const char *module_path,
+    const char *options,
     void       *data)
 {
     struct mount_get_ctx *ctx = data;
@@ -90,6 +95,9 @@ mount_get_callback(
     json_object_set_new(ctx->result, "name", json_string(mount_path));
     json_object_set_new(ctx->result, "module", json_string(module_name));
     json_object_set_new(ctx->result, "path", json_string(module_path));
+    if (options && options[0]) {
+        json_object_set_new(ctx->result, "options", json_string(options));
+    }
 
     return 1;
 } /* mount_get_callback */
@@ -144,6 +152,7 @@ mount_exists_callback(
     const char *mount_path,
     const char *module_name,
     const char *module_path,
+    const char *options,
     void       *data)
 {
     struct mount_exists_ctx *ctx = data;
@@ -199,6 +208,7 @@ chimera_rest_handle_mounts_create(
     const char              *module;
     const char              *path;
     const char              *options;
+    json_t                  *options_json;
     const char              *normalized;
     struct mount_create_ctx *ctx;
     struct mount_exists_ctx  exists_ctx;
@@ -210,16 +220,38 @@ chimera_rest_handle_mounts_create(
         return;
     }
 
-    name    = json_string_value(json_object_get(root, "name"));
-    module  = json_string_value(json_object_get(root, "module"));
-    path    = json_string_value(json_object_get(root, "path"));
-    options = json_string_value(json_object_get(root, "options"));
+    name         = json_string_value(json_object_get(root, "name"));
+    module       = json_string_value(json_object_get(root, "module"));
+    path         = json_string_value(json_object_get(root, "path"));
+    options_json = json_object_get(root, "options");
+    options      = json_string_value(options_json);
 
     if (!name || !module || !path) {
         json_decref(root);
         chimera_rest_send_error(evpl, request, 400, "Bad Request",
                                 "Missing required fields: name, module, path");
         return;
+    }
+
+    /* A present-but-non-string "options" would otherwise be silently dropped
+     * (json_string_value returns NULL), so reject it explicitly. */
+    if (options_json && !options) {
+        json_decref(root);
+        chimera_rest_send_error(evpl, request, 400, "Bad Request",
+                                "Field 'options' must be a string");
+        return;
+    }
+
+    /* Validate the options string syntactically up front so a malformed value
+     * fails fast with a descriptive 400 rather than a generic async 500. */
+    if (options) {
+        char errbuf[256];
+
+        if (!chimera_vfs_mount_options_valid(options, errbuf, sizeof(errbuf))) {
+            json_decref(root);
+            chimera_rest_send_error(evpl, request, 400, "Bad Request", errbuf);
+            return;
+        }
     }
 
     /* Mount paths are registered with leading slashes stripped, so normalize

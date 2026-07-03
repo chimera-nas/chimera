@@ -30,6 +30,7 @@ config_mount_callback(
     const char *mount_path,
     const char *module_name,
     const char *module_path,
+    const char *options,
     void       *data)
 {
     json_t *mounts = data;
@@ -44,6 +45,9 @@ config_mount_callback(
     obj = json_object();
     json_object_set_new(obj, "module", json_string(module_name));
     json_object_set_new(obj, "path", json_string(module_path));
+    if (options && options[0]) {
+        json_object_set_new(obj, "options", json_string(options));
+    }
 
     json_object_set_new(mounts, mount_path, obj);
 
