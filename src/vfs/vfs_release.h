@@ -40,7 +40,7 @@ chimera_vfs_release(
     } else {
         chimera_vfs_abort("invalid cache id");
     }
-} /* chimera_vfs_release_handle */
+} /* chimera_vfs_release */
 
 /* Duplicate a handle by incrementing its opencnt (for dup operations) */
 static inline void
@@ -151,4 +151,4 @@ chimera_vfs_release_failed(
     } else {
         chimera_vfs_abort("invalid cache id");
     }
-} /* chimera_vfs_release_handle */
+} /* chimera_vfs_release_failed */
