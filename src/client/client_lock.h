@@ -5,6 +5,7 @@
 #pragma once
 
 #include "client_internal.h"
+#include "client_txn.h"
 
 static void
 chimera_lock_complete(
@@ -15,34 +16,24 @@ chimera_lock_complete(
     pid_t                  conflict_pid,
     void                  *private_data)
 {
-    struct chimera_client_request *request        = private_data;
-    struct chimera_client_thread  *client_thread  = request->thread;
-    chimera_lock_callback_t        callback       = request->lock.callback;
-    void                          *callback_arg   = request->lock.private_data;
-    int                            heap_allocated = request->heap_allocated;
+    struct chimera_client_request *request = private_data;
 
-    if (heap_allocated) {
-        chimera_client_request_free(client_thread, request);
-    } else {
-        request->lock.r_conflict_type   = conflict_type;
-        request->lock.r_conflict_offset = conflict_offset;
-        request->lock.r_conflict_length = conflict_length;
-        request->lock.r_conflict_pid    = conflict_pid;
-    }
+    request->lock.r_conflict_type   = conflict_type;
+    request->lock.r_conflict_offset = conflict_offset;
+    request->lock.r_conflict_length = conflict_length;
+    request->lock.r_conflict_pid    = conflict_pid;
 
-    callback(client_thread, error_code,
-             conflict_type, conflict_offset, conflict_length, conflict_pid,
-             callback_arg);
+    chimera_client_txn_finish(request->thread, request, error_code);
 } /* chimera_lock_complete */
 
-static inline void
-chimera_dispatch_lock(
+static void
+chimera_lock_start(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
     chimera_vfs_lock(
         thread->vfs_thread,
-        chimera_client_req_cred(request),
+        chimera_client_req_cred(request), request->txn,
         request->lock.handle,
         request->lock.whence,
         request->lock.offset,
@@ -51,4 +42,34 @@ chimera_dispatch_lock(
         request->lock.flags,
         chimera_lock_complete,
         request);
+} /* chimera_lock_start */
+
+static void
+chimera_lock_reply(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request)
+{
+    chimera_lock_callback_t callback     = request->lock.callback;
+    void                   *callback_arg = request->lock.private_data;
+    enum chimera_vfs_error  status       = request->txn_op_status;
+    uint32_t                ct           = request->lock.r_conflict_type;
+    uint64_t                co           = request->lock.r_conflict_offset;
+    uint64_t                cl           = request->lock.r_conflict_length;
+    pid_t                   cp           = request->lock.r_conflict_pid;
+
+    chimera_client_request_free(thread, request);
+
+    callback(thread, status, ct, co, cl, cp, callback_arg);
+} /* chimera_lock_reply */
+
+static inline void
+chimera_dispatch_lock(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request)
+{
+    chimera_client_txn_run(thread, request,
+                           request->lock.handle->fh,
+                           request->lock.handle->fh_len,
+                           CHIMERA_VFS_TXN_WRITE,
+                           chimera_lock_start, chimera_lock_reply);
 } /* chimera_dispatch_lock */

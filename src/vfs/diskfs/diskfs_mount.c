@@ -1495,9 +1495,16 @@ diskfs_inode_cache_release(
     struct rb_node *node,
     void           *private_data)
 {
-    struct diskfs_inode *inode = container_of(node, struct diskfs_inode, node);
+    struct diskfs_inode        *inode = container_of(node, struct diskfs_inode, node);
+    struct diskfs_inode_holder *h;
 
     (void) private_data;
+
+    /* Free any still-attached WFG holder records (a lock held at shutdown). */
+    while ((h = inode->holders)) {
+        inode->holders = h->next;
+        free(h);
+    }
 
     /* All inode contents live in b+tree blocks freed via the block cache;
      * we only own the inode struct itself and the record mirrors riding it. */
@@ -1516,8 +1523,15 @@ diskfs_destroy(void *private_data)
     diskfs_reclaim_destroy(shared);
 
     for (i = 0; i < DISKFS_INODE_CACHE_SHARDS; i++) {
+        struct diskfs_inode_holder *h;
+
         rb_tree_destroy(&shared->inode_cache->shards[i].inodes,
                         diskfs_inode_cache_release, NULL);
+        /* Drain the per-shard WFG holder-record pool. */
+        while ((h = shared->inode_cache->shards[i].holder_free_list)) {
+            shared->inode_cache->shards[i].holder_free_list = h->next;
+            free(h);
+        }
         pthread_mutex_destroy(&shared->inode_cache->shards[i].lock);
     }
 

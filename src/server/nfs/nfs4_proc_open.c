@@ -620,7 +620,7 @@ chimera_nfs4_open_at_complete(
              args->openhow.how.mode == EXCLUSIVE4_1)) {
             set_attr->va_set_mask = 0;
             set_attr->va_req_mask = 0;
-            chimera_vfs_open_at(req->thread->vfs_thread, &req->cred,
+            chimera_vfs_open_at(req->thread->vfs_thread, &req->cred, NULL,
                                 parent_handle,
                                 args->claim.file.data,
                                 args->claim.file.len,
@@ -760,7 +760,7 @@ chimera_nfs4_open_lookup_regular_complete(
         return;
     }
 
-    chimera_vfs_open_at(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_open_at(req->thread->vfs_thread, &req->cred, NULL,
                         parent_handle,
                         ctx->name,
                         ctx->namelen,
@@ -807,7 +807,7 @@ chimera_nfs4_open_unchecked_lookup_complete(
         return;
     }
 
-    chimera_vfs_open_at(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_open_at(req->thread->vfs_thread, &req->cred, NULL,
                         parent_handle,
                         ctx->name,
                         ctx->namelen,
@@ -1027,7 +1027,7 @@ chimera_nfs4_open_parent_complete(
                 ctx->namelen = args->claim.file.len;
                 ctx->flags   = flags;
 
-                chimera_vfs_lookup_at(req->thread->vfs_thread, &req->cred,
+                chimera_vfs_lookup_at(req->thread->vfs_thread, &req->cred, NULL,
                                       parent_handle,
                                       args->claim.file.data,
                                       args->claim.file.len,
@@ -1050,7 +1050,7 @@ chimera_nfs4_open_parent_complete(
                 ctx->namelen = args->claim.file.len;
                 ctx->flags   = flags;
 
-                chimera_vfs_lookup_at(req->thread->vfs_thread, &req->cred,
+                chimera_vfs_lookup_at(req->thread->vfs_thread, &req->cred, NULL,
                                       parent_handle,
                                       args->claim.file.data,
                                       args->claim.file.len,
@@ -1061,7 +1061,7 @@ chimera_nfs4_open_parent_complete(
                 return;
             }
 
-            chimera_vfs_open_at(req->thread->vfs_thread, &req->cred,
+            chimera_vfs_open_at(req->thread->vfs_thread, &req->cred, NULL,
                                 parent_handle,
                                 args->claim.file.data,
                                 args->claim.file.len,
@@ -1099,7 +1099,7 @@ chimera_nfs4_open_parent_complete(
                 ctx->namelen = args->claim.delegate_cur_info.file.len;
                 ctx->flags   = flags;
 
-                chimera_vfs_lookup_at(req->thread->vfs_thread, &req->cred,
+                chimera_vfs_lookup_at(req->thread->vfs_thread, &req->cred, NULL,
                                       parent_handle,
                                       args->claim.delegate_cur_info.file.data,
                                       args->claim.delegate_cur_info.file.len,
@@ -1122,7 +1122,7 @@ chimera_nfs4_open_parent_complete(
                 ctx->namelen = args->claim.delegate_cur_info.file.len;
                 ctx->flags   = flags;
 
-                chimera_vfs_lookup_at(req->thread->vfs_thread, &req->cred,
+                chimera_vfs_lookup_at(req->thread->vfs_thread, &req->cred, NULL,
                                       parent_handle,
                                       args->claim.delegate_cur_info.file.data,
                                       args->claim.delegate_cur_info.file.len,
@@ -1132,7 +1132,7 @@ chimera_nfs4_open_parent_complete(
                                       ctx);
                 return;
             }
-            chimera_vfs_open_at(req->thread->vfs_thread, &req->cred,
+            chimera_vfs_open_at(req->thread->vfs_thread, &req->cred, NULL,
                                 parent_handle,
                                 args->claim.delegate_cur_info.file.data,
                                 args->claim.delegate_cur_info.file.len,
@@ -1158,7 +1158,7 @@ chimera_nfs4_open_parent_complete(
              * the delegation against.  A client issues this in response to a
              * CB_RECALL, so failing it (NFS4ERR_NOTSUPP) stalls the recall and
              * prevents a clean DELEGRETURN. */
-            chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
+            chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred, NULL,
                                 req->fh,
                                 req->fhlen,
                                 flags,
@@ -1312,7 +1312,7 @@ chimera_nfs4_open(
         }
     }
 
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+    chimera_vfs_open_fh(thread->vfs_thread, &req->cred, NULL,
                         req->fh,
                         req->fhlen,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,

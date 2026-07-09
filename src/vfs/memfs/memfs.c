@@ -2516,32 +2516,6 @@ memfs_remove_at(
         return;
     }
 
-    /* Inode-scoped removal (request->remove_at.match_child_fh): only unlink the
-     * name while it STILL resolves to the caller's object.  Guards an async
-     * delete-on-close against a file that was removed and re-created with the
-     * same name by another opener in the meantime -- removing the replacement
-     * would destroy an unrelated file.  The original is already gone, so report
-     * success and leave the new entry intact.  Gated on the flag so every
-     * ordinary by-name caller is unaffected. */
-    if (request->remove_at.match_child_fh &&
-        request->remove_at.child_fh && request->remove_at.child_fh_len > 0) {
-        uint64_t want_inum;
-        uint32_t want_gen;
-
-        memfs_fh_to_inum(&want_inum, &want_gen,
-                         request->remove_at.child_fh,
-                         request->remove_at.child_fh_len);
-
-        if (want_inum != dirent->inum || want_gen != dirent->gen) {
-            pthread_mutex_unlock(&inode->lock);
-            pthread_mutex_unlock(&parent_inode->lock);
-            request->remove_at.r_unmatched = 1;
-            request->status                = CHIMERA_VFS_OK;
-            request->complete(request);
-            return;
-        }
-    }
-
     if (S_ISDIR(inode->mode) && !rb_tree_empty(&inode->dir.dirents)) {
         pthread_mutex_unlock(&parent_inode->lock);
         pthread_mutex_unlock(&inode->lock);

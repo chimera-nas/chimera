@@ -144,7 +144,7 @@ chimera_nfs4_verify_open_callback(
     uint64_t attr_mask = chimera_nfs4_attr2mask(args->attrmask,
                                                 args->num_attrmask);
 
-    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred, NULL,
                         handle,
                         attr_mask,
                         chimera_nfs4_verify_complete,
@@ -223,7 +223,7 @@ chimera_nfs4_verify_dispatch(
         return;
     }
 
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+    chimera_vfs_open_fh(thread->vfs_thread, &req->cred, NULL,
                         req->fh,
                         req->fhlen,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,

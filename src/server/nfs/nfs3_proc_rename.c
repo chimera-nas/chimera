@@ -21,6 +21,26 @@ chimera_nfs3_recall_needed(struct chimera_server_nfs_thread *thread)
 } /* chimera_nfs3_recall_needed */
 
 static void
+chimera_nfs3_rename_reply(struct nfs_request *req)
+{
+    struct chimera_server_nfs_thread *thread = req->thread;
+    struct chimera_server_nfs_shared *shared = thread->shared;
+    int                               rc;
+
+    if (req->txn_op_status != CHIMERA_VFS_OK) {
+        req->res_rename.status = chimera_vfs_error_to_nfsstat3(req->txn_op_status);
+        chimera_nfs3_set_wcc_data(&req->res_rename.resfail.fromdir_wcc, NULL, NULL);
+        chimera_nfs3_set_wcc_data(&req->res_rename.resfail.todir_wcc, NULL, NULL);
+    }
+
+    rc = shared->nfs_v3.send_reply_NFSPROC3_RENAME(thread->evpl, NULL,
+                                                   &req->res_rename, req->encoding);
+    chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
+
+    nfs_request_free(thread, req);
+} /* chimera_nfs3_rename_reply */
+
+static void
 chimera_nfs3_rename_complete(
     enum chimera_vfs_error    error_code,
     struct chimera_vfs_attrs *fromdir_pre_attr,
@@ -29,29 +49,16 @@ chimera_nfs3_rename_complete(
     struct chimera_vfs_attrs *todir_post_attr,
     void                     *private_data)
 {
-    struct nfs_request               *req    = private_data;
-    struct chimera_server_nfs_thread *thread = req->thread;
-    struct chimera_server_nfs_shared *shared = thread->shared;
-    struct evpl                      *evpl   = thread->evpl;
-    struct RENAME3res                 res;
-    int                               rc;
+    struct nfs_request *req = private_data;
 
-    res.status = chimera_vfs_error_to_nfsstat3(
-        error_code);
-
-    if (res.status == NFS3_OK) {
-        chimera_nfs3_set_wcc_data(&res.resok.fromdir_wcc, fromdir_pre_attr, fromdir_post_attr);
-        chimera_nfs3_set_wcc_data(&res.resok.todir_wcc, todir_pre_attr, todir_post_attr);
-    } else {
-        chimera_nfs3_set_wcc_data(&res.resfail.fromdir_wcc, fromdir_pre_attr, fromdir_post_attr);
-        chimera_nfs3_set_wcc_data(&res.resfail.todir_wcc, todir_pre_attr, todir_post_attr);
+    if (error_code == CHIMERA_VFS_OK) {
+        req->res_rename.status = NFS3_OK;
+        chimera_nfs3_set_wcc_data(&req->res_rename.resok.fromdir_wcc, fromdir_pre_attr, fromdir_post_attr);
+        chimera_nfs3_set_wcc_data(&req->res_rename.resok.todir_wcc, todir_pre_attr, todir_post_attr);
     }
 
-    rc = shared->nfs_v3.send_reply_NFSPROC3_RENAME(evpl, NULL, &res, req->encoding);
-    chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
-
-    nfs_request_free(thread, req);
-} /* chimera_nfs3_mkdir_complete */
+    chimera_nfs3_txn_finish(req, error_code);
+} /* chimera_nfs3_rename_complete */
 
 /* Issue the rename.  target_fh (when the destination name already exists) lets
  * the VFS recall any delegation/lease on the clobbered file before it is
@@ -69,6 +76,7 @@ chimera_nfs3_rename_dispatch(
      * directory handles (set in chimera_nfs3_rename below). */
     chimera_vfs_rename_at(thread->vfs_thread,
                           &req->cred,
+                          req->txn,
                           req->fh,
                           req->fhlen,
                           args->from.name.str,
@@ -112,6 +120,32 @@ chimera_nfs3_rename_target_lookup_callback(
     }
 } /* chimera_nfs3_rename_target_lookup_callback */
 
+static void
+chimera_nfs3_rename_start(struct nfs_request *req)
+{
+    struct chimera_server_nfs_thread *thread = req->thread;
+    struct RENAME3args               *args   = req->args_rename;
+
+    /* Resolve the destination name first (in the decoded dest dir) so a
+     * delegation/lease on a clobbered target is recalled before the rename.
+     * Skip the lookup when no caching protocol is enabled (no holder can
+     * exist).  req->fh / req->saved_fh hold the decoded source / dest dir
+     * handles (set in chimera_nfs3_rename). */
+    if (chimera_nfs3_recall_needed(thread)) {
+        chimera_vfs_lookup(thread->vfs_thread, &req->cred, req->txn,
+                           req->saved_fh,
+                           req->saved_fhlen,
+                           args->to.name.str,
+                           args->to.name.len,
+                           CHIMERA_VFS_ATTR_FH,
+                           0,
+                           chimera_nfs3_rename_target_lookup_callback,
+                           req);
+    } else {
+        chimera_nfs3_rename_dispatch(req, NULL, 0);
+    }
+} /* chimera_nfs3_rename_start */
+
 void
 chimera_nfs3_rename(
     struct evpl               *evpl,
@@ -133,9 +167,12 @@ chimera_nfs3_rename(
 
     nfs3_dump_rename(req, args);
 
+    req->args_rename = args;
+
     /* Decode both directory handles: the source sets the request export (and
      * squash); the destination is authenticated into req->saved_fh.  Both must
-     * outlive this (async) call, so they go in the request, not on the stack. */
+     * outlive the async transaction (and survive a conflict replay), so they go
+     * in the request, not on the stack. */
     res.status = chimera_nfs3_decode_fh(req, args->from.dir.data.data, args->from.dir.data.len);
     if (res.status != NFS3_OK ||
         chimera_nfs_fh_unwrap(args->to.dir.data.data, args->to.dir.data.len,
@@ -150,23 +187,7 @@ chimera_nfs3_rename(
         return;
     }
 
-    req->args_rename = args;
-
-    /* Resolve the destination name first (in the decoded dest dir) so a
-     * delegation/lease on a clobbered target is recalled before the rename.
-     * Skip the lookup when no caching protocol is enabled (no holder can
-     * exist). */
-    if (chimera_nfs3_recall_needed(thread)) {
-        chimera_vfs_lookup(thread->vfs_thread, &req->cred,
-                           req->saved_fh,
-                           req->saved_fhlen,
-                           args->to.name.str,
-                           args->to.name.len,
-                           CHIMERA_VFS_ATTR_FH,
-                           0,
-                           chimera_nfs3_rename_target_lookup_callback,
-                           req);
-    } else {
-        chimera_nfs3_rename_dispatch(req, NULL, 0);
-    }
+    chimera_nfs3_txn_run(req, req->fh, req->fhlen,
+                         CHIMERA_VFS_TXN_WRITE,
+                         chimera_nfs3_rename_start, chimera_nfs3_rename_reply);
 } /* chimera_nfs3_rename */

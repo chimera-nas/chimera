@@ -119,7 +119,7 @@ chimera_s3_get_send(
     request->io_pending++;
 
     chimera_vfs_read(request->thread->vfs,
-                     &request->thread->shared->cred,
+                     &request->thread->shared->cred, NULL,
                      request->file_handle,
                      request->file_cur_offset,
                      left,
@@ -317,7 +317,7 @@ chimera_s3_get_lookup_callback(
      * be read and re-emitted as response headers before the response is
      * dispatched. For HEAD the x-amz-tagging-count header is also attached once
      * the object is open. The body is only streamed for GET. */
-    chimera_vfs_open_fh(thread->vfs, &thread->shared->cred,
+    chimera_vfs_open_fh(thread->vfs, &thread->shared->cred, NULL,
                         attr->va_fh,
                         attr->va_fh_len,
                         0,
@@ -333,7 +333,7 @@ chimera_s3_get(
 {
     request->io_pending = 0;
 
-    chimera_vfs_lookup(thread->vfs, &thread->shared->cred,
+    chimera_vfs_lookup(thread->vfs, &thread->shared->cred, NULL,
                        request->bucket_fh,
                        request->bucket_fhlen,
                        request->path,
@@ -434,7 +434,7 @@ chimera_s3_get_object_attributes(
 {
     request->io_pending = 0;
 
-    chimera_vfs_lookup(thread->vfs, &thread->shared->cred,
+    chimera_vfs_lookup(thread->vfs, &thread->shared->cred, NULL,
                        request->bucket_fh,
                        request->bucket_fhlen,
                        request->path,

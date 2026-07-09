@@ -151,7 +151,7 @@ rest_fsop_chmod_open_cb(
     ctx->set_attr.va_set_mask = CHIMERA_VFS_ATTR_MODE;
     ctx->set_attr.va_mode     = ctx->mode;
 
-    chimera_vfs_setattr(ctx->vfs_thread, chimera_vfs_get_server_cred(),
+    chimera_vfs_setattr(ctx->vfs_thread, chimera_vfs_get_server_cred(), NULL,
                         ctx->handle, &ctx->set_attr, 0, 0,
                         rest_fsop_chmod_setattr_cb, ctx);
 } /* rest_fsop_chmod_open_cb */
@@ -172,7 +172,7 @@ rest_fsop_chmod_lookup_cb(
     memcpy(ctx->fh, attr->va_fh, attr->va_fh_len);
     ctx->fh_len = attr->va_fh_len;
 
-    chimera_vfs_open_fh(ctx->vfs_thread, chimera_vfs_get_server_cred(),
+    chimera_vfs_open_fh(ctx->vfs_thread, chimera_vfs_get_server_cred(), NULL,
                         ctx->fh, ctx->fh_len,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
                         rest_fsop_chmod_open_cb, ctx);
@@ -223,7 +223,7 @@ chimera_rest_handle_debug_fsop(
     chimera_vfs_get_root_fh(root_fh, &root_fh_len);
 
     if (strcmp(op, "unlink") == 0) {
-        chimera_vfs_remove(ctx->vfs_thread, cred, root_fh, root_fh_len,
+        chimera_vfs_remove(ctx->vfs_thread, cred, NULL, root_fh, root_fh_len,
                            ctx->path, strlen(ctx->path),
                            rest_fsop_remove_cb, ctx);
     } else if (strcmp(op, "rename") == 0) {
@@ -236,7 +236,7 @@ chimera_rest_handle_debug_fsop(
             return;
         }
         snprintf(ctx->path2, sizeof(ctx->path2), "%s", path2);
-        chimera_vfs_rename(ctx->vfs_thread, cred, root_fh, root_fh_len,
+        chimera_vfs_rename(ctx->vfs_thread, cred, NULL, root_fh, root_fh_len,
                            ctx->path, strlen(ctx->path),
                            ctx->path2, strlen(ctx->path2),
                            rest_fsop_rename_cb, ctx);
@@ -250,7 +250,7 @@ chimera_rest_handle_debug_fsop(
             return;
         }
         snprintf(ctx->path2, sizeof(ctx->path2), "%s", path2);
-        chimera_vfs_link(ctx->vfs_thread, cred, root_fh, root_fh_len,
+        chimera_vfs_link(ctx->vfs_thread, cred, NULL, root_fh, root_fh_len,
                          ctx->path, strlen(ctx->path),
                          ctx->path2, strlen(ctx->path2),
                          0, 0, rest_fsop_link_cb, ctx);
@@ -264,7 +264,7 @@ chimera_rest_handle_debug_fsop(
             return;
         }
         ctx->mode = json_integer_value(mode_obj);
-        chimera_vfs_lookup(ctx->vfs_thread, cred, root_fh, root_fh_len,
+        chimera_vfs_lookup(ctx->vfs_thread, cred, NULL, root_fh, root_fh_len,
                            ctx->path, strlen(ctx->path),
                            CHIMERA_VFS_ATTR_FH, CHIMERA_VFS_LOOKUP_FOLLOW,
                            rest_fsop_chmod_lookup_cb, ctx);

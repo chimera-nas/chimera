@@ -93,6 +93,28 @@ struct chimera_client_request {
 
     uint8_t                            fh[CHIMERA_VFS_FH_SIZE];
 
+    /* Explicit-transaction bookkeeping (CHIMERA_VFS_CAP_TRANSACTIONAL).  Every
+     * client operation runs as one VFS transaction: begin (READ/WRITE) -> the
+     * op's VFS calls (enlisted via request->txn) -> commit before the user
+     * callback fires.  txn is the backend handle (NULL for a non-transactional
+     * backend -> autocommit, unchanged).  txn_ts is the wait-die priority,
+     * assigned once and reused across retries so a conflicting op cannot starve;
+     * txn_attempt bounds the retries.  txn_op_status carries the op result
+     * across an async EndTransaction.  txn_fh/txn_fhlen is the routing hint the
+     * transaction begins on (saved for replay), txn_mode the begin mode, and
+     * txn_start/txn_reply the op's two driver callbacks (see client_txn.h):
+     * txn_start runs the op's VFS chain with request->txn set; txn_reply
+     * releases resources, invokes the user callback and frees the request. */
+    struct chimera_vfs_transaction    *txn;
+    uint64_t                           txn_ts;
+    int                                txn_attempt;
+    enum chimera_vfs_error             txn_op_status;
+    int                                txn_fhlen;
+    uint8_t                            txn_mode;
+    uint8_t                            txn_fh[CHIMERA_VFS_FH_SIZE];
+    chimera_client_request_callback    txn_start;
+    chimera_client_request_callback    txn_reply;
+
     union {
         struct {
             chimera_mount_callback_t callback;
@@ -153,6 +175,10 @@ struct chimera_client_request {
             chimera_read_callback_t         callback;
             void                           *private_data;
             void                           *buf;
+            /* Result iov/niov stashed by the op completion for the txn reply to
+             * hand back to the caller (the buffers survive the read commit). */
+            struct evpl_iovec              *r_iov;
+            int                             r_niov;
             struct evpl_iovec               iov[CHIMERA_CLIENT_IOV_MAX];
         } read;
 
@@ -169,6 +195,8 @@ struct chimera_client_request {
             int                             dest_niov;
             chimera_read_into_callback_t    callback;
             void                           *private_data;
+            struct evpl_iovec              *r_iov;
+            int                             r_niov;
             struct evpl_iovec               dest_iov[CHIMERA_CLIENT_IOV_MAX];
             struct evpl_iovec               iov[CHIMERA_CLIENT_IOV_MAX];
         } read_into;
@@ -304,6 +332,11 @@ struct chimera_client_request {
             chimera_readdir_callback_t      callback;
             chimera_readdir_complete_t      complete;
             void                           *private_data;
+            /* Result cookie/eof stashed by the op completion for the txn reply
+             * (kept separate from the input cookie so a replay re-reads from the
+             * same starting cookie). */
+            uint64_t                        r_cookie;
+            uint32_t                        r_eof;
         } readdir;
 
         struct {
@@ -345,6 +378,8 @@ struct chimera_client_request {
             uint32_t                        what;   /* 0 = SEEK_DATA, 1 = SEEK_HOLE */
             chimera_seek_callback_t         callback;
             void                           *private_data;
+            int                             r_eof;
+            uint64_t                        r_offset;
         } seek;
 
         struct {

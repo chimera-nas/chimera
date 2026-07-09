@@ -869,7 +869,7 @@ chimera_smb_set_security_dispatch(struct chimera_smb_request *request)
 
     chimera_vfs_setattr(
         request->compound->thread->vfs_thread,
-        &request->session_handle->session->cred,
+        &request->session_handle->session->cred, NULL,
         request->set_info.open_file->handle,
         vfs_attrs,
         0,
@@ -1141,7 +1141,7 @@ chimera_smb_query_security(struct chimera_smb_request *request)
 {
     chimera_vfs_getattr(
         request->compound->thread->vfs_thread,
-        &request->session_handle->session->cred,
+        &request->session_handle->session->cred, NULL,
         request->query_info.open_file->handle,
         CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_ACL,
         chimera_smb_query_security_getattr_callback,

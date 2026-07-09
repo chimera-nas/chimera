@@ -104,7 +104,7 @@ chimera_vfs_rename_target_lookup_complete(
 
     chimera_vfs_rename_at(
         thread,
-        request->cred,
+        request->cred, request->transaction,
         request->rename.old_parent_fh,
         request->rename.old_parent_fh_len,
         request->rename.path + request->rename.name_offset,
@@ -147,7 +147,7 @@ chimera_vfs_rename_new_parent_lookup_complete(
     /* Lookup the target to get its FH for silly rename optimization */
     chimera_vfs_lookup(
         thread,
-        request->cred,
+        request->cred, request->transaction,
         request->rename.new_parent_fh,
         request->rename.new_parent_fh_len,
         request->rename.new_path + request->rename.new_name_offset,
@@ -183,7 +183,7 @@ chimera_vfs_rename_fast_target_lookup_complete(
 
     chimera_vfs_rename_at(
         thread,
-        request->cred,
+        request->cred, request->transaction,
         request->rename.old_parent_fh,
         request->rename.old_parent_fh_len,
         request->rename.path,
@@ -225,7 +225,7 @@ chimera_vfs_rename_old_parent_lookup_complete(
 
     chimera_vfs_lookup(
         thread,
-        request->cred,
+        request->cred, request->transaction,
         request->fh,
         request->fh_len,
         request->rename.new_path,
@@ -238,16 +238,17 @@ chimera_vfs_rename_old_parent_lookup_complete(
 
 SYMBOL_EXPORT void
 chimera_vfs_rename(
-    struct chimera_vfs_thread     *thread,
-    const struct chimera_vfs_cred *cred,
-    const void                    *fh,
-    int                            fhlen,
-    const char                    *old_path,
-    int                            old_pathlen,
-    const char                    *new_path,
-    int                            new_pathlen,
-    chimera_vfs_rename_callback_t  callback,
-    void                          *private_data)
+    struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_transaction *txn,
+    const void                     *fh,
+    int                             fhlen,
+    const char                     *old_path,
+    int                             old_pathlen,
+    const char                     *new_path,
+    int                             new_pathlen,
+    chimera_vfs_rename_callback_t   callback,
+    void                           *private_data)
 {
     struct chimera_vfs_request *request;
     const char                 *slash;
@@ -306,6 +307,7 @@ chimera_vfs_rename(
     request->rename.new_pathlen  = new_pathlen;
     request->rename.callback     = callback;
     request->rename.private_data = private_data;
+    request->transaction         = txn;
 
     if (request->module->capabilities & CHIMERA_VFS_CAP_FS_PATH_OP) {
         /* Fast path: pass full paths directly, kernel resolves */
@@ -324,7 +326,7 @@ chimera_vfs_rename(
             request->rename.target_fh_len = 0;
             chimera_vfs_rename_at(
                 thread,
-                cred,
+                cred, request->transaction,
                 request->rename.old_parent_fh,
                 request->rename.old_parent_fh_len,
                 request->rename.path,
@@ -347,7 +349,7 @@ chimera_vfs_rename(
         /* Lookup the target to get its FH for silly rename optimization */
         chimera_vfs_lookup(
             thread,
-            cred,
+            cred, request->transaction,
             fh,
             fhlen,
             request->rename.new_path,
@@ -395,7 +397,7 @@ chimera_vfs_rename(
 
                 chimera_vfs_rename_at(
                     thread,
-                    cred,
+                    cred, request->transaction,
                     request->rename.old_parent_fh,
                     request->rename.old_parent_fh_len,
                     request->rename.path + request->rename.name_offset,
@@ -449,7 +451,7 @@ chimera_vfs_rename(
 
         chimera_vfs_lookup(
             thread,
-            cred,
+            cred, request->transaction,
             fh,
             fhlen,
             request->rename.path,

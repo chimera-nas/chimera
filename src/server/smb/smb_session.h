@@ -74,15 +74,6 @@ struct chimera_smb_file_id {
  * content break is deferred to this open's close (MS-SMB2; dirlease.v2_request
  * "write ... only the close ... break the directory lease"). */
 #define CHIMERA_SMB_OPEN_FILE_FLAG_MODIFIED        0x00000400
-/* A CREATE_PENDING open whose originating connection disconnected while it was
- * still parked on a break ack: chimera_smb_async_interim_drain dropped the parked
- * request without a resume, so the open's CREATE can never complete.  It is left
- * hashed + CREATE_PENDING so a replayed durable create with this create_guid still
- * answers FILE_NOT_AVAILABLE -- until the break it waited on settles (the holder
- * closed/acked), at which point chimera_smb_create_guid_replay lazy-evicts the
- * resolved zombie and a replay falls through to a fresh open
- * (smb2.replay.dhv2-pending2*-vs-{lease,oplock}-sane). */
-#define CHIMERA_SMB_OPEN_FILE_PENDING_ORPHANED     0x00000800
 
 /* Bits identifying which CREATE contexts a client supplied on the open. Mirrored
  * from request->create.ctx_present_mask into the open file so later phases

@@ -61,9 +61,11 @@ chimera_vfs_create_open_dispatch(
 
     final = (*cp_request->create.pathc == '\0');
 
+    /* Propagate this walk's transaction (NULL for non-transactional callers) so
+     * every component op is enlisted, not just the first. */
     chimera_vfs_mkdir_at(
         thread,
-        cp_request->cred,
+        cp_request->cred, cp_request->transaction,
         oh,
         component,
         componentlen,
@@ -110,7 +112,7 @@ chimera_vfs_create_complete(
         memcpy(cp_request->create.next_fh, attr->va_fh, attr->va_fh_len);
 
         chimera_vfs_open_fh(thread,
-                            cp_request->cred,
+                            cp_request->cred, cp_request->transaction,
                             cp_request->create.next_fh,
                             attr->va_fh_len,
                             CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
@@ -159,7 +161,7 @@ chimera_vfs_create_mkdir_complete(
         memcpy(cp_request->create.next_fh, attr->va_fh, attr->va_fh_len);
 
         chimera_vfs_open_fh(thread,
-                            cp_request->cred,
+                            cp_request->cred, cp_request->transaction,
                             cp_request->create.next_fh,
                             attr->va_fh_len,
                             CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
@@ -170,16 +172,17 @@ chimera_vfs_create_mkdir_complete(
 
 SYMBOL_EXPORT void
 chimera_vfs_create(
-    struct chimera_vfs_thread     *thread,
-    const struct chimera_vfs_cred *cred,
-    const void                    *fh,
-    int                            fhlen,
-    const char                    *path,
-    int                            pathlen,
-    struct chimera_vfs_attrs      *set_attr,
-    uint64_t                       attr_mask,
-    chimera_vfs_create_callback_t  callback,
-    void                          *private_data)
+    struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_transaction *txn,
+    const void                     *fh,
+    int                             fhlen,
+    const char                     *path,
+    int                             pathlen,
+    struct chimera_vfs_attrs       *set_attr,
+    uint64_t                        attr_mask,
+    chimera_vfs_create_callback_t   callback,
+    void                           *private_data)
 {
     struct chimera_vfs_request *cp_request;
 
@@ -213,6 +216,8 @@ chimera_vfs_create(
         return;
     }
 
+    cp_request->transaction = txn;
+
     cp_request->create.path         = cp_request->plugin_data;
     cp_request->create.pathlen      = pathlen;
     cp_request->create.pathc        = cp_request->create.path;
@@ -227,7 +232,7 @@ chimera_vfs_create(
     cp_request->create.path[pathlen] = '\0';
 
     chimera_vfs_open_fh(thread,
-                        cred,
+                        cred, cp_request->transaction,
                         fh,
                         fhlen,
                         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,

@@ -94,6 +94,7 @@ static void
 chimera_vfs_link_at_dispatch(
     struct chimera_vfs_thread      *thread,
     const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_transaction *txn,
     const void                     *fh,
     int                             fhlen,
     const void                     *dir_fh,
@@ -117,6 +118,8 @@ chimera_vfs_link_at_dispatch(
         callback(CHIMERA_VFS_PTR_ERR(request), NULL, NULL, NULL, private_data);
         return;
     }
+
+    request->transaction = txn;
 
     request->opcode              = CHIMERA_VFS_OP_LINK_AT;
     request->complete            = chimera_vfs_link_at_complete;
@@ -162,6 +165,7 @@ chimera_vfs_link_at_dispatch(
 struct chimera_vfs_link_at_gate {
     struct chimera_vfs_thread      *thread;
     const struct chimera_vfs_cred  *cred;
+    struct chimera_vfs_transaction *txn;
     const void                     *fh;
     int                             fhlen;
     const void                     *dir_fh;
@@ -192,7 +196,7 @@ chimera_vfs_link_at_gate_complete(
         return;
     }
 
-    chimera_vfs_link_at_dispatch(gate->thread, gate->cred, gate->fh, gate->fhlen,
+    chimera_vfs_link_at_dispatch(gate->thread, gate->cred, gate->txn, gate->fh, gate->fhlen,
                                  gate->dir_fh, gate->dir_fhlen, gate->name,
                                  gate->namelen, gate->replace, gate->attr_mask,
                                  gate->pre_attr_mask, gate->post_attr_mask,
@@ -207,6 +211,7 @@ SYMBOL_EXPORT void
 chimera_vfs_link_at(
     struct chimera_vfs_thread      *thread,
     const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_transaction *txn,
     const void                     *fh,
     int                             fhlen,
     const void                     *dir_fh,
@@ -252,6 +257,7 @@ chimera_vfs_link_at(
         gate                 = malloc(sizeof(*gate));
         gate->thread         = thread;
         gate->cred           = cred;
+        gate->txn            = txn;
         gate->fh             = fh;
         gate->fhlen          = fhlen;
         gate->dir_fh         = dir_fh;
@@ -278,7 +284,7 @@ chimera_vfs_link_at(
         return;
     }
 
-    chimera_vfs_link_at_dispatch(thread, cred, fh, fhlen, dir_fh, dir_fhlen,
+    chimera_vfs_link_at_dispatch(thread, cred, txn, fh, fhlen, dir_fh, dir_fhlen,
                                  name, namelen, replace, attr_mask,
                                  pre_attr_mask, post_attr_mask,
                                  parent_lease_skip, op_handle, callback,

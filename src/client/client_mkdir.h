@@ -6,6 +6,23 @@
 
 #include "client_internal.h"
 #include "client_dispatch.h"
+#include "client_txn.h"
+
+/* Shared reply for both the path and _at mkdir transactions. */
+static void
+chimera_mkdir_reply(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request)
+{
+    chimera_mkdir_callback_t callback     = request->mkdir.callback;
+    void                    *callback_arg = request->mkdir.private_data;
+    enum chimera_vfs_error   status       = request->txn_op_status;
+
+    /* Note: parent handle (for the _at variant) is NOT released - caller owns it */
+    chimera_client_request_free(thread, request);
+
+    callback(thread, status, callback_arg);
+} /* chimera_mkdir_reply */
 
 static void
 chimera_mkdir_vfs_complete(
@@ -13,15 +30,29 @@ chimera_mkdir_vfs_complete(
     struct chimera_vfs_attrs *attr,
     void                     *private_data)
 {
-    struct chimera_client_request *request      = private_data;
-    struct chimera_client_thread  *thread       = request->thread;
-    chimera_mkdir_callback_t       callback     = request->mkdir.callback;
-    void                          *callback_arg = request->mkdir.private_data;
+    struct chimera_client_request *request = private_data;
 
-    chimera_client_request_free(thread, request);
-
-    callback(thread, error_code, callback_arg);
+    chimera_client_txn_finish(request->thread, request, error_code);
 } /* chimera_mkdir_vfs_complete */
+
+static void
+chimera_mkdir_start(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request)
+{
+    /* set_attr (creation mode) is initialized by the caller. */
+    chimera_vfs_mkdir(
+        thread->vfs_thread,
+        chimera_client_req_cred(request), request->txn,
+        thread->client->root_fh,
+        thread->client->root_fh_len,
+        request->mkdir.path,
+        request->mkdir.path_len,
+        &request->mkdir.set_attr,
+        0,
+        chimera_mkdir_vfs_complete,
+        request);
+} /* chimera_mkdir_start */
 
 static inline void
 chimera_dispatch_mkdir(
@@ -35,18 +66,11 @@ chimera_dispatch_mkdir(
         return;
     }
 
-    /* set_attr (creation mode) is initialized by the caller. */
-    chimera_vfs_mkdir(
-        thread->vfs_thread,
-        chimera_client_req_cred(request),
-        thread->client->root_fh,
-        thread->client->root_fh_len,
-        request->mkdir.path,
-        request->mkdir.path_len,
-        &request->mkdir.set_attr,
-        0,
-        chimera_mkdir_vfs_complete,
-        request);
+    chimera_client_txn_run(thread, request,
+                           thread->client->root_fh,
+                           thread->client->root_fh_len,
+                           CHIMERA_VFS_TXN_WRITE,
+                           chimera_mkdir_start, chimera_mkdir_reply);
 } /* chimera_dispatch_mkdir */
 
 static void
@@ -58,30 +82,20 @@ chimera_mkdir_dispatch_at_complete(
     struct chimera_vfs_attrs *dir_post_attr,
     void                     *private_data)
 {
-    struct chimera_client_request *request        = private_data;
-    struct chimera_client_thread  *client_thread  = request->thread;
-    chimera_mkdir_callback_t       callback       = request->mkdir.callback;
-    void                          *callback_arg   = request->mkdir.private_data;
-    int                            heap_allocated = request->heap_allocated;
+    struct chimera_client_request *request = private_data;
 
-    if (heap_allocated) {
-        chimera_client_request_free(client_thread, request);
-    }
-
-    /* Note: parent handle is NOT released - caller owns it */
-    callback(client_thread, error_code, callback_arg);
+    chimera_client_txn_finish(request->thread, request, error_code);
 } /* chimera_mkdir_dispatch_at_complete */
 
-static inline void
-chimera_dispatch_mkdir_at(
-    struct chimera_client_thread   *thread,
-    struct chimera_vfs_open_handle *parent_handle,
-    struct chimera_client_request  *request)
+static void
+chimera_mkdir_at_start(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request)
 {
     chimera_vfs_mkdir_at(
         thread->vfs_thread,
-        chimera_client_req_cred(request),
-        parent_handle,
+        chimera_client_req_cred(request), request->txn,
+        request->mkdir.parent_handle,
         request->mkdir.path,
         request->mkdir.path_len,
         &request->mkdir.set_attr,
@@ -90,4 +104,18 @@ chimera_dispatch_mkdir_at(
         0,
         chimera_mkdir_dispatch_at_complete,
         request);
+} /* chimera_mkdir_at_start */
+
+static inline void
+chimera_dispatch_mkdir_at(
+    struct chimera_client_thread   *thread,
+    struct chimera_vfs_open_handle *parent_handle,
+    struct chimera_client_request  *request)
+{
+    request->mkdir.parent_handle = parent_handle;
+
+    chimera_client_txn_run(thread, request,
+                           parent_handle->fh, parent_handle->fh_len,
+                           CHIMERA_VFS_TXN_WRITE,
+                           chimera_mkdir_at_start, chimera_mkdir_reply);
 } /* chimera_dispatch_mkdir_at */

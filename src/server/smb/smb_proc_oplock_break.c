@@ -317,9 +317,6 @@ chimera_smb_lease_break_cb(
                 msg           = calloc(1, sizeof(*msg));
                 msg->conn     = conn;
                 msg->is_lease = true;
-                memcpy(msg->fh, file->fh, file->fh_len);
-                msg->fh_len  = file->fh_len;
-                msg->fh_hash = file->fh_hash;
                 memcpy(msg->lease_key, lease_key, 16);
                 msg->current_state             = current_smb;
                 msg->new_state                 = new_smb;
@@ -432,9 +429,6 @@ SYMBOL_EXPORT void
 chimera_smb_lease_break_flush(struct chimera_server_smb_thread *thread)
 {
     struct chimera_smb_lease_break_msg *list, *msg, *fifo = NULL;
-    struct chimera_vfs_state           *vfs_state =
-        thread->vfs_thread->vfs->vfs_state;
-    bool                                sent_lease = false;
 
     pthread_mutex_lock(&thread->lease_break_lock);
     list                      = thread->lease_break_ready;
@@ -460,12 +454,6 @@ chimera_smb_lease_break_flush(struct chimera_server_smb_thread *thread)
             chimera_smb_send_oplock_break_lease(msg->conn, msg->lease_key,
                                                 msg->current_state, msg->new_state,
                                                 msg->ack_required, msg->new_epoch);
-            /* The notification is now on the wire: mark the break delivered so a
-             * delete-on-close open parked for delivery (not for an ack) resumes
-             * with its reply ordered AFTER this break (smb2.lease.unlink). */
-            chimera_vfs_state_mark_break_notified(vfs_state, msg->fh, msg->fh_len,
-                                                  msg->fh_hash, msg->lease_key);
-            sent_lease = true;
         } else {
             chimera_smb_send_oplock_break_legacy(msg->conn,
                                                  msg->file_id_pid,
@@ -473,13 +461,6 @@ chimera_smb_lease_break_flush(struct chimera_server_smb_thread *thread)
                                                  msg->new_oplock_level);
         }
         free(msg);
-    }
-
-    /* Wake any delete-on-close open parked on a now-delivered break so it can
-     * complete on notify.  Broadcast (not just this thread) because the parked
-     * open lives on the triggering connection's thread, not the holder's. */
-    if (sent_lease) {
-        chimera_smb_create_resume_parked_broadcast(thread);
     }
 } /* chimera_smb_lease_break_flush */
 

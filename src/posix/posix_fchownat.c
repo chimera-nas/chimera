@@ -75,7 +75,7 @@ chimera_posix_fchownat_open_complete(
 
     chimera_vfs_setattr(
         request->thread->vfs_thread,
-        chimera_client_req_cred(request),
+        chimera_client_req_cred(request), NULL,
         oh,
         &ctx->set_attr,
         0,  /* pre_attr_mask */
@@ -96,7 +96,7 @@ chimera_posix_fchownat_at_exec(
     /* Open the target file relative to the parent directory */
     chimera_vfs_open_at(
         thread->vfs_thread,
-        chimera_client_req_cred(request),
+        chimera_client_req_cred(request), NULL,
         request->setattr.parent_handle,
         request->setattr.path,
         request->setattr.path_len,

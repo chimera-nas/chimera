@@ -7,6 +7,7 @@
 #include <sys/sysmacros.h>
 
 #include "client_internal.h"
+#include "client_txn.h"
 
 static inline void
 chimera_attrs_to_stat(
@@ -40,33 +41,23 @@ chimera_stat_lookup_complete(
     struct chimera_vfs_attrs *attr,
     void                     *private_data)
 {
-    struct chimera_client_request *request      = private_data;
-    struct chimera_client_thread  *thread       = request->thread;
-    chimera_stat_callback_t        callback     = request->stat.callback;
-    void                          *callback_arg = request->stat.private_data;
-    struct chimera_stat            st;
+    struct chimera_client_request *request = private_data;
 
-    if (error_code != CHIMERA_VFS_OK) {
-        chimera_client_request_free(thread, request);
-        callback(thread, error_code, NULL, callback_arg);
-        return;
+    if (error_code == CHIMERA_VFS_OK) {
+        chimera_attrs_to_stat(attr, &request->sync_stat);
     }
 
-    chimera_attrs_to_stat(attr, &st);
-
-    chimera_client_request_free(thread, request);
-
-    callback(thread, CHIMERA_VFS_OK, &st, callback_arg);
+    chimera_client_txn_finish(request->thread, request, error_code);
 } /* chimera_stat_lookup_complete */
 
-static inline void
-chimera_dispatch_stat(
+static void
+chimera_stat_start(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
     chimera_vfs_lookup(
         thread->vfs_thread,
-        chimera_client_req_cred(request),
+        chimera_client_req_cred(request), request->txn,
         thread->client->root_fh,
         thread->client->root_fh_len,
         request->stat.path,
@@ -75,4 +66,36 @@ chimera_dispatch_stat(
         request->stat.flags,
         chimera_stat_lookup_complete,
         request);
+} /* chimera_stat_start */
+
+static void
+chimera_stat_reply(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request)
+{
+    chimera_stat_callback_t callback     = request->stat.callback;
+    void                   *callback_arg = request->stat.private_data;
+    enum chimera_vfs_error  status       = request->txn_op_status;
+    struct chimera_stat     st           = request->sync_stat;
+
+    chimera_client_request_free(thread, request);
+
+    if (status != CHIMERA_VFS_OK) {
+        callback(thread, status, NULL, callback_arg);
+        return;
+    }
+
+    callback(thread, CHIMERA_VFS_OK, &st, callback_arg);
+} /* chimera_stat_reply */
+
+static inline void
+chimera_dispatch_stat(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request)
+{
+    chimera_client_txn_run(thread, request,
+                           thread->client->root_fh,
+                           thread->client->root_fh_len,
+                           CHIMERA_VFS_TXN_READ,
+                           chimera_stat_start, chimera_stat_reply);
 } /* chimera_dispatch_stat */

@@ -58,7 +58,7 @@ chimera_nfs4_seek_open_callback(
 
     req->handle = handle;
 
-    chimera_vfs_seek(req->thread->vfs_thread, &req->cred,
+    chimera_vfs_seek(req->thread->vfs_thread, &req->cred, NULL,
                      handle,
                      args->sa_offset,
                      args->sa_what,
@@ -109,7 +109,7 @@ chimera_nfs4_seek(
             return;
         }
 
-        chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+        chimera_vfs_open_fh(thread->vfs_thread, &req->cred, NULL,
                             req->fh,
                             req->fhlen,
                             CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_READ_ONLY,
@@ -135,7 +135,7 @@ chimera_nfs4_seek(
     req->nfs_state_ref  = state_void;
     req->nfs_state_type = state_type;
 
-    chimera_vfs_seek(thread->vfs_thread, &req->cred,
+    chimera_vfs_seek(thread->vfs_thread, &req->cred, NULL,
                      state_handle,
                      args->sa_offset,
                      args->sa_what,

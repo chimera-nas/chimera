@@ -230,6 +230,7 @@ static void
 chimera_vfs_rename_at_dispatch(
     struct chimera_vfs_thread       *thread,
     const struct chimera_vfs_cred   *cred,
+    struct chimera_vfs_transaction  *txn,
     const void                      *fh,
     int                              fhlen,
     const char                      *name,
@@ -255,6 +256,8 @@ chimera_vfs_rename_at_dispatch(
         callback(CHIMERA_VFS_PTR_ERR(request), NULL, NULL, NULL, NULL, private_data);
         return;
     }
+
+    request->transaction = txn;
 
     request->opcode                                    = CHIMERA_VFS_OP_RENAME_AT;
     request->complete                                  = chimera_vfs_rename_at_complete;
@@ -299,7 +302,7 @@ chimera_vfs_rename_at_dispatch(
      * the lease subsystem is active; otherwise go straight to the destination
      * recall (which fast-paths to dispatch when there is nothing to break). */
     if (thread->vfs->vfs_state) {
-        chimera_vfs_lookup(thread, cred, fh, fhlen, name, namelen,
+        chimera_vfs_lookup(thread, cred, NULL, fh, fhlen, name, namelen,
                            CHIMERA_VFS_ATTR_FH, 0,
                            chimera_vfs_rename_at_source_lookup_complete,
                            request);
@@ -326,6 +329,7 @@ chimera_vfs_rename_at_dispatch(
 struct chimera_vfs_rename_at_gate {
     struct chimera_vfs_thread       *thread;
     const struct chimera_vfs_cred   *cred;
+    struct chimera_vfs_transaction  *txn;
     const void                      *fh;
     int                              fhlen;
     const char                      *name;
@@ -359,7 +363,7 @@ chimera_vfs_rename_at_gate_fail(
 static void
 chimera_vfs_rename_at_gate_dispatch(struct chimera_vfs_rename_at_gate *gate)
 {
-    chimera_vfs_rename_at_dispatch(gate->thread, gate->cred, gate->fh,
+    chimera_vfs_rename_at_dispatch(gate->thread, gate->cred, gate->txn, gate->fh,
                                    gate->fhlen, gate->name, gate->namelen,
                                    gate->new_fh, gate->new_fhlen,
                                    gate->new_name, gate->new_namelen,
@@ -467,6 +471,7 @@ SYMBOL_EXPORT void
 chimera_vfs_rename_at(
     struct chimera_vfs_thread       *thread,
     const struct chimera_vfs_cred   *cred,
+    struct chimera_vfs_transaction  *txn,
     const void                      *fh,
     int                              fhlen,
     const char                      *name,
@@ -518,6 +523,7 @@ chimera_vfs_rename_at(
         gate                 = malloc(sizeof(*gate));
         gate->thread         = thread;
         gate->cred           = cred;
+        gate->txn            = txn;
         gate->fh             = fh;
         gate->fhlen          = fhlen;
         gate->name           = name;
@@ -544,13 +550,13 @@ chimera_vfs_rename_at(
         /* Resolve the source object's FH first so the sticky-bit owner check on
          * the source directory can be evaluated (no-follow: rename operates on
          * the name itself). */
-        chimera_vfs_lookup(thread, cred, fh, fhlen, name, namelen,
+        chimera_vfs_lookup(thread, cred, NULL, fh, fhlen, name, namelen,
                            CHIMERA_VFS_ATTR_FH, 0,
                            chimera_vfs_rename_at_gate_lookup, gate);
         return;
     }
 
-    chimera_vfs_rename_at_dispatch(thread, cred, fh, fhlen, name, namelen,
+    chimera_vfs_rename_at_dispatch(thread, cred, txn, fh, fhlen, name, namelen,
                                    new_fh, new_fhlen, new_name, new_namelen,
                                    target_fh, target_fh_len, pre_attr_mask,
                                    post_attr_mask, parent_lease_skip,

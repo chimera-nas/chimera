@@ -154,7 +154,7 @@ chimera_s3_meta_capture_user_cb(
     /* Lower-case the user key so the xattr name is canonical (S3 metadata keys
      * are case-insensitive and AWS returns them lower-cased). */
     suffix_len = snprintf(suffix, sizeof(suffix), "%s",
-                          &CHIMERA_S3_XATTR_META[CHIMERA_S3_XATTR_PREFIX_LEN]);
+                          CHIMERA_S3_XATTR_META + CHIMERA_S3_XATTR_PREFIX_LEN);
 
     for (i = 0; i < key_len && suffix_len < (int) sizeof(suffix) - 1; i++) {
         suffix[suffix_len++] = (char) tolower((unsigned char) key[i]);

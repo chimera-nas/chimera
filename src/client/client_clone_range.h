@@ -5,6 +5,7 @@
 #pragma once
 
 #include "client_internal.h"
+#include "client_txn.h"
 
 static void
 chimera_clone_range_complete(
@@ -13,27 +14,19 @@ chimera_clone_range_complete(
     struct chimera_vfs_attrs *post_attr,
     void                     *private_data)
 {
-    struct chimera_client_request *request        = private_data;
-    struct chimera_client_thread  *client_thread  = request->thread;
-    chimera_clone_range_callback_t callback       = request->clone_range.callback;
-    void                          *callback_arg   = request->clone_range.private_data;
-    int                            heap_allocated = request->heap_allocated;
+    struct chimera_client_request *request = private_data;
 
-    if (heap_allocated) {
-        chimera_client_request_free(client_thread, request);
-    }
-
-    callback(client_thread, error_code, callback_arg);
+    chimera_client_txn_finish(request->thread, request, error_code);
 } /* chimera_clone_range_complete */
 
-static inline void
-chimera_dispatch_clone_range(
+static void
+chimera_clone_range_start(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
     chimera_vfs_clone_range(
         thread->vfs_thread,
-        chimera_client_req_cred(request),
+        chimera_client_req_cred(request), request->txn,
         request->clone_range.src_handle,
         request->clone_range.src_offset,
         request->clone_range.dst_handle,
@@ -43,4 +36,30 @@ chimera_dispatch_clone_range(
         0,
         chimera_clone_range_complete,
         request);
+} /* chimera_clone_range_start */
+
+static void
+chimera_clone_range_reply(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request)
+{
+    chimera_clone_range_callback_t callback     = request->clone_range.callback;
+    void                          *callback_arg = request->clone_range.private_data;
+    enum chimera_vfs_error         status       = request->txn_op_status;
+
+    chimera_client_request_free(thread, request);
+
+    callback(thread, status, callback_arg);
+} /* chimera_clone_range_reply */
+
+static inline void
+chimera_dispatch_clone_range(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request)
+{
+    chimera_client_txn_run(thread, request,
+                           request->clone_range.dst_handle->fh,
+                           request->clone_range.dst_handle->fh_len,
+                           CHIMERA_VFS_TXN_WRITE,
+                           chimera_clone_range_start, chimera_clone_range_reply);
 } /* chimera_dispatch_clone_range */

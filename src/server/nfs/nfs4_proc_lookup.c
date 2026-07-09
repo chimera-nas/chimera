@@ -47,7 +47,7 @@ chimera_nfs4_lookup_open_callback(
     if (error_code == CHIMERA_VFS_OK) {
         req->handle = handle;
 
-        chimera_vfs_lookup_at(req->thread->vfs_thread, &req->cred,
+        chimera_vfs_lookup_at(req->thread->vfs_thread, &req->cred, NULL,
                               handle,
                               args->objname.data,
                               args->objname.len,
@@ -90,7 +90,7 @@ chimera_nfs4_lookup(
     }
 
     // For non-root lookups, we can just open the directory and let the VFS handle the lookup
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+    chimera_vfs_open_fh(thread->vfs_thread, &req->cred, NULL,
                         req->fh,
                         req->fhlen,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,

@@ -232,6 +232,7 @@ chimera_smb_copychunk_next(struct chimera_smb_request *request)
     chimera_vfs_copy_range(
         vfs_thread,
         &request->session_handle->session->cred,
+        NULL,
         request->ioctl.cc_src_open_file->handle,
         request->ioctl.cc_chunks[i].src_offset,
         request->ioctl.cc_dst_open_file->handle,
@@ -369,7 +370,7 @@ chimera_smb_ioctl_copychunk(struct chimera_smb_request *request)
      * with STATUS_INVALID_VIEW_SIZE before any data is copied. */
     chimera_vfs_getattr(
         request->compound->thread->vfs_thread,
-        &request->session_handle->session->cred,
+        &request->session_handle->session->cred, NULL,
         src_open_file->handle,
         CHIMERA_VFS_ATTR_MASK_STAT,
         chimera_smb_copychunk_src_getattr_cb,

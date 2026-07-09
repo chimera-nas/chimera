@@ -50,7 +50,7 @@ chimera_vfs_symlink_parent_open_complete(
 
     chimera_vfs_symlink_at(
         thread,
-        request->cred,
+        request->cred, request->transaction,
         oh,
         request->symlink.path + request->symlink.name_offset,
         request->symlink.pathlen - request->symlink.name_offset,
@@ -87,7 +87,7 @@ chimera_vfs_symlink_parent_lookup_complete(
 
     chimera_vfs_open_fh(
         thread,
-        request->cred,
+        request->cred, request->transaction,
         request->symlink.parent_fh,
         request->symlink.parent_fh_len,
         CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
@@ -97,18 +97,19 @@ chimera_vfs_symlink_parent_lookup_complete(
 
 SYMBOL_EXPORT void
 chimera_vfs_symlink(
-    struct chimera_vfs_thread     *thread,
-    const struct chimera_vfs_cred *cred,
-    const void                    *fh,
-    int                            fhlen,
-    const char                    *path,
-    int                            pathlen,
-    const char                    *target,
-    int                            targetlen,
-    struct chimera_vfs_attrs      *set_attr,
-    uint64_t                       attr_mask,
-    chimera_vfs_symlink_callback_t callback,
-    void                          *private_data)
+    struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_transaction *txn,
+    const void                     *fh,
+    int                             fhlen,
+    const char                     *path,
+    int                             pathlen,
+    const char                     *target,
+    int                             targetlen,
+    struct chimera_vfs_attrs       *set_attr,
+    uint64_t                        attr_mask,
+    chimera_vfs_symlink_callback_t  callback,
+    void                           *private_data)
 {
     struct chimera_vfs_request *request;
     const char                 *slash;
@@ -155,6 +156,7 @@ chimera_vfs_symlink(
     request->symlink.targetlen    = targetlen;
     request->symlink.set_attr     = set_attr;
     request->symlink.attr_mask    = attr_mask;
+    request->transaction          = txn;
     request->symlink.callback     = callback;
     request->symlink.private_data = private_data;
 
@@ -166,7 +168,7 @@ chimera_vfs_symlink(
 
         chimera_vfs_open_fh(
             thread,
-            cred,
+            cred, request->transaction,
             request->symlink.parent_fh,
             request->symlink.parent_fh_len,
             CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_DIRECTORY,
@@ -185,7 +187,7 @@ chimera_vfs_symlink(
 
         chimera_vfs_lookup(
             thread,
-            cred,
+            cred, request->transaction,
             fh,
             fhlen,
             request->symlink.path,
