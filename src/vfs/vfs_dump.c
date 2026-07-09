@@ -38,9 +38,15 @@ chimera_vfs_op_name(unsigned int opcode)
         case CHIMERA_VFS_OP_SETATTR: return "SetAttr";
         case CHIMERA_VFS_OP_LINK_AT: return "Link";
         case CHIMERA_VFS_OP_CREATE_UNLINKED: return "CreateUnlinked";
+        case CHIMERA_VFS_OP_MKNOD_AT: return "MknodAt";
+        case CHIMERA_VFS_OP_PUT_KEY: return "PutKey";
+        case CHIMERA_VFS_OP_GET_KEY: return "GetKey";
+        case CHIMERA_VFS_OP_DELETE_KEY: return "DeleteKey";
+        case CHIMERA_VFS_OP_SEARCH_KEYS: return "SearchKeys";
         case CHIMERA_VFS_OP_ALLOCATE: return "Allocate";
         case CHIMERA_VFS_OP_SEEK: return "Seek";
         case CHIMERA_VFS_OP_LOCK: return "Lock";
+        case CHIMERA_VFS_OP_GETPARENT: return "GetParent";
         case CHIMERA_VFS_OP_COPY_RANGE: return "CopyRange";
         case CHIMERA_VFS_OP_CLONE_RANGE: return "CloneRange";
         case CHIMERA_VFS_OP_MOVE_RANGE: return "MoveRange";
