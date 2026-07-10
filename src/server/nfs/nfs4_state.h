@@ -294,6 +294,14 @@ struct nfs_open_owner {
     struct nfs_open_state   *states_by_fh; /* uthash keyed on {fh, fh_len} */
     UT_hash_handle           hh;
     pthread_mutex_t          lock;
+
+    /* Lifetime: starts at 1 for the hash-table slot.  find_or_create returns
+     * the owner with one extra caller ref (taken under client->lock, the only
+     * point serialized against teardown's HASH_DELETE); an in-flight OPEN that
+     * borrows the owner across an async VFS round-trip holds that ref.  Client
+     * teardown HASH_DELETEs the owner and drops the slot ref; the last put()
+     * destroys the lock and frees the struct. */
+    _Atomic uint32_t         refcount;
 };
 
 struct nfs_open_state {
@@ -343,6 +351,9 @@ struct nfs_lock_owner {
     struct nfs_lock_state   *states;       /* utlist via next_in_owner */
     UT_hash_handle           hh;
     pthread_mutex_t          lock;
+
+    /* Lifetime: same refcount contract as nfs_open_owner (see above). */
+    _Atomic uint32_t         refcount;
 };
 
 struct nfs_lock_state {
@@ -366,6 +377,15 @@ struct nfs_lock_state {
      * cascade, wired up in Phase 4). */
     struct nfs_lock_state          *next_in_open;
     struct nfs_lock_state          *next_in_owner;
+
+    /* Linked-state flags, protected by open_state->owner->lock and
+     * lock_owner->lock respectively.  Two destroyers can race (LOCKU vs the
+     * expire/CLOSE cascade); the destroyed CAS makes the slot/ref phase
+     * idempotent, and these flags make the LIST unlinks idempotent too --
+     * without them the loser deletes an already-removed node and corrupts
+     * the utlist. */
+    uint8_t                         on_open_list;
+    uint8_t                         on_owner_list;
 
     _Atomic uint32_t                refcount;
     _Atomic uint8_t                 destroyed;
@@ -717,13 +737,42 @@ nfs_client_expire_state(
     struct chimera_vfs_thread *vfs_thread);
 
 /* Find an existing open_owner under `client` by byte-string, or create one.
- * Sets *out_created = true if a new one was allocated. */
+ * Sets *out_created = true if a new one was allocated.  Returns the owner with
+ * one caller-owned reference held (taken under client->lock); the caller must
+ * release it with nfs_open_owner_put() when done, or transfer it onto a request
+ * that borrows the owner across an async VFS round-trip. */
 SYMBOL_EXPORT struct nfs_open_owner *
 nfs_open_owner_find_or_create(
     struct nfs_client *client,
     const void        *owner_bytes,
     uint16_t           owner_len,
     bool              *out_created);
+
+/* Like nfs_open_owner_find_or_create, but if the owner is not published and
+ * `adopt` is non-NULL, re-publishes `adopt` (a still-pinned owner that a
+ * mid-flight lease sweep unpublished) instead of creating a fresh struct, so
+ * 4.0 seqid/replay state stays on a single object.  The caller must
+ * hold a reference on `adopt`.  Returns the owner with one caller-owned
+ * reference held, exactly like find_or_create. */
+SYMBOL_EXPORT struct nfs_open_owner *
+nfs_open_owner_find_or_adopt(
+    struct nfs_client     *client,
+    struct nfs_open_owner *adopt,
+    const void            *owner_bytes,
+    uint16_t               owner_len,
+    bool                  *out_created);
+
+/* Refcount helpers for pinning an open_owner across an async operation that
+ * borrowed it, so the lease sweeper cannot free it out from under an in-flight
+ * request.  get() bumps; put() drops and, on the last reference,
+ * destroys the lock and frees the struct.  Both abort on underflow /
+ * get-after-free, matching the sibling state objects. */
+SYMBOL_EXPORT void
+nfs_open_owner_get(
+    struct nfs_open_owner *owner);
+SYMBOL_EXPORT void
+nfs_open_owner_put(
+    struct nfs_open_owner *owner);
 
 /* Find an existing open_state on `owner` whose FH matches.  Returns NULL if
  * none.  Does NOT acquire a ref. */
@@ -737,7 +786,13 @@ nfs_open_owner_find_state(
  * dup'd reference (caller invoked chimera_vfs_dup_handle).  Allocates a slot
  * in `table` and writes the encoded stateid to `out_stateid`.
  *
- * The returned state has refcount = 1 (its lifetime ref). */
+ * Installation is serialized against client teardown under client->lock:
+ * returns NULL (nothing installed; the caller still owns `handle_dup` and
+ * typically fails the OPEN with NFS4ERR_EXPIRED) if the owner was already
+ * unpublished by lease expiry.
+ *
+ * The returned state has refcount = 1 (its lifetime ref) and holds its own
+ * pin on the owner. */
 SYMBOL_EXPORT struct nfs_open_state *
 nfs_open_state_create(
     struct nfs_open_owner          *owner,
@@ -807,7 +862,8 @@ nfs_open_state_destroy(
     struct nfs_state_table    *table,
     struct chimera_vfs_thread *vfs_thread);
 
-/* Lock-owner / lock-state equivalents. */
+/* Lock-owner / lock-state equivalents.  find_or_create returns the lock_owner
+* with one caller-owned reference held (see nfs_open_owner_find_or_create). */
 SYMBOL_EXPORT struct nfs_lock_owner *
 nfs_lock_owner_find_or_create(
     struct nfs_client *client,
@@ -815,6 +871,19 @@ nfs_lock_owner_find_or_create(
     uint16_t           owner_len,
     bool              *out_created);
 
+SYMBOL_EXPORT void
+nfs_lock_owner_get(
+    struct nfs_lock_owner *owner);
+SYMBOL_EXPORT void
+nfs_lock_owner_put(
+    struct nfs_lock_owner *owner);
+
+/* Create a lock_state linking `lock_owner` and `open_state`.  Installation is
+ * serialized against client teardown under client->lock: if the lock_owner
+ * was already unpublished by lease expiry, or the open_state destroyed,
+ * returns NULL (caller fails the LOCK, typically NFS4ERR_EXPIRED) instead of
+ * installing state no teardown path would ever visit.  On success
+ * the state holds its own pin on the lock_owner. */
 SYMBOL_EXPORT struct nfs_lock_state *
 nfs_lock_state_create(
     struct nfs_lock_owner          *lock_owner,

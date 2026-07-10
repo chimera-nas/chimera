@@ -91,6 +91,18 @@ chimera_nfs4_lock_finish(
         }
     }
 
+    /* Drop the owner borrow refs transferred onto the request during
+     * dispatch.  Unconditional so every status/minorversion path releases
+     * them exactly once; NULL to guard against a double drop. */
+    if (req->lock_4_0_open_owner) {
+        nfs_open_owner_put(req->lock_4_0_open_owner);
+        req->lock_4_0_open_owner = NULL;
+    }
+    if (req->lock_4_0_lock_owner) {
+        nfs_lock_owner_put(req->lock_4_0_lock_owner);
+        req->lock_4_0_lock_owner = NULL;
+    }
+
     chimera_nfs4_compound_complete(req, status);
 } /* chimera_nfs4_lock_finish */
 
@@ -217,6 +229,26 @@ chimera_nfs4_lock_complete(
     chimera_nfs4_lock_finish(req, res->status);
 } /* chimera_nfs4_lock_complete */
 
+/*
+ * Shared rejection tail for the new-lock-owner entry-time checks: release the
+ * open_state acquire ref and the lock_owner find_or_create ref,
+ * then complete without touching owner seqid/replay state (replay and the
+ * no-advance statuses land here).
+ */
+static void
+chimera_nfs4_lock_new_owner_reject(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    struct nfs_open_state            *open_state,
+    struct nfs_lock_owner            *lock_owner,
+    nfsstat4                          status)
+{
+    nfs_state_table_release(&thread->shared->nfs4_state_table, open_state,
+                            NFS4_SLOT_TYPE_OPEN, thread->vfs_thread);
+    nfs_lock_owner_put(lock_owner);
+    chimera_nfs4_compound_complete(req, status);
+} /* chimera_nfs4_lock_new_owner_reject */
+
 void
 chimera_nfs4_lock(
     struct chimera_server_nfs_thread *thread,
@@ -303,19 +335,15 @@ chimera_nfs4_lock(
                 res->status              = oo->replay.status;
                 res->resok4.lock_stateid = oo->replay.stateid;
                 pthread_mutex_unlock(&oo->lock);
-                nfs_state_table_release(table, open_state,
-                                        NFS4_SLOT_TYPE_OPEN,
-                                        thread->vfs_thread);
-                chimera_nfs4_compound_complete(req, res->status);
+                chimera_nfs4_lock_new_owner_reject(thread, req, open_state,
+                                                   lock_owner, res->status);
                 return;
             }
             if (cls != NFS4_SEQID_NEW) {
                 pthread_mutex_unlock(&oo->lock);
-                nfs_state_table_release(table, open_state,
-                                        NFS4_SLOT_TYPE_OPEN,
-                                        thread->vfs_thread);
                 res->status = NFS4ERR_BAD_SEQID;
-                chimera_nfs4_compound_complete(req, res->status);
+                chimera_nfs4_lock_new_owner_reject(thread, req, open_state,
+                                                   lock_owner, res->status);
                 return;
             }
             pthread_mutex_unlock(&oo->lock);
@@ -326,17 +354,23 @@ chimera_nfs4_lock(
                 open_state->seqid,
                 args->locker.open_owner.open_stateid.seqid);
             if (status != NFS4_OK) {
-                nfs_state_table_release(table, open_state,
-                                        NFS4_SLOT_TYPE_OPEN,
-                                        thread->vfs_thread);
                 res->status = status;
-                chimera_nfs4_compound_complete(req, res->status);
+                chimera_nfs4_lock_new_owner_reject(thread, req, open_state,
+                                                   lock_owner, res->status);
                 return;
             }
 
+            /* Transfer the borrow refs onto the request; dropped in
+             * chimera_nfs4_lock_finish.  open_state is acquire-held here, so
+             * open_state->owner (== oo) is guaranteed alive for the get.  The
+             * lock_owner ref is the find_or_create ref, transferred directly. */
+            nfs_open_owner_get(oo);
             req->lock_4_0_open_owner = oo;
             req->lock_4_0_lock_owner = lock_owner;
         }
+        /* 4.1+: the find_or_create ref is held across nfs_lock_state_create
+         * (whose internal get needs the owner alive) and dropped right after
+         * it -- the state's own pin covers the owner from then on. */
 
         /* Take a distinct +1 dup on the VFS handle: lock_state's lifetime
          * is independent of the open_state's. */
@@ -345,6 +379,25 @@ chimera_nfs4_lock(
 
         lock_state = nfs_lock_state_create(lock_owner, open_state, handle,
                                            table, &res->resok4.lock_stateid);
+
+        if (req->minorversion != 0) {
+            /* chimera_nfs4_lock_finish never touches the owners on 4.1+, so
+             * the borrow ref is not transferred to the request; drop it now
+             * that the state (if created) holds its own pin. */
+            nfs_lock_owner_put(lock_owner);
+        }
+
+        if (!lock_state) {
+            /* The client's lease was reaped while this LOCK was in flight:
+             * the lock_owner is unpublished and/or the open_state destroyed,
+             * so installing lock state now would orphan it. */
+            chimera_vfs_release(thread->vfs_thread, handle);
+            nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
+                                    thread->vfs_thread);
+            res->status = NFS4ERR_EXPIRED;
+            chimera_nfs4_lock_finish(req, res->status);
+            return;
+        }
 
         /* Release the open_state acquire ref.  The lock_state holds its
          * own dup of the handle; the open_state's lifetime remains its
@@ -432,6 +485,10 @@ chimera_nfs4_lock(
                 return;
             }
 
+            /* Transfer a borrow ref onto the request; dropped in
+             * chimera_nfs4_lock_finish.  lock_state is acquire-held here, so
+             * lock_state->lock_owner (== lo) is guaranteed alive. */
+            nfs_lock_owner_get(lo);
             req->lock_4_0_lock_owner = lo;
         }
     }

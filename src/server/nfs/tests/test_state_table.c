@@ -198,6 +198,12 @@ test_owner_state_lifecycle(void)
                                      &acquired, &acquired_type);
     CHECK(status != NFS4_OK);
 
+    /* find_or_create returns a caller ref; release both (owner_again is the
+     * same object).  The hash-table slot ref keeps the owner alive until
+     * nfs_client_destroy. */
+    nfs_open_owner_put(owner_again);
+    nfs_open_owner_put(owner);
+
     nfs_client_destroy(client, &table, NULL, true);
     nfs_state_table_free(&table, NULL);
     printf("ok: owner_state_lifecycle\n");
@@ -312,6 +318,9 @@ test_share_mode_conflict(void)
     CHECK(status == NFS4_OK);
 
     nfs_open_state_destroy(state_a, &table, NULL);
+    /* Release the find_or_create caller refs. */
+    nfs_open_owner_put(owner_a);
+    nfs_open_owner_put(owner_b);
     nfs_client_destroy(client, &table, NULL, true);
     nfs_state_table_free(&table, NULL);
     printf("ok: share_mode_conflict\n");
