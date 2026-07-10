@@ -337,6 +337,7 @@ chimera_nfs4_open_install_state(
     struct nfs_open_owner *owner;
     struct nfs_open_state *existing;
     bool                   created = false;
+    nfsstat4               status;
 
     *out_rflags = 0;
 
@@ -373,23 +374,36 @@ chimera_nfs4_open_install_state(
         }
     }
 
-    owner = nfs_open_owner_find_or_create(client,
-                                          args->owner.owner.data,
-                                          args->owner.owner.len,
-                                          &created);
+    /* Resolve the open_owner on the completion path.  For a 4.0 OPEN the
+    * dispatch path already pinned it on req->open_4_0_owner; passing it as
+    * the adopt candidate means a lease sweep that unpublished it mid-flight
+    * republishes the SAME struct here, keeping the seqid/replay bookkeeping
+    * in chimera_nfs4_open_complete and this open_state on one object. */
+    owner = nfs_open_owner_find_or_adopt(client,
+                                         req->open_4_0_owner,
+                                         args->owner.owner.data,
+                                         args->owner.owner.len,
+                                         &created);
+
+    /* Pathological double-race: the sweep unpublished the pinned owner AND
+     * another OPEN already recreated the key.  Move the request's seqid/replay
+     * bookkeeping onto the published object so the reply is cached where the
+     * client's retransmit will look. */
+    if (req->open_4_0_owner && owner != req->open_4_0_owner) {
+        nfs_open_owner_put(req->open_4_0_owner);
+        nfs_open_owner_get(owner);
+        req->open_4_0_owner = owner;
+    }
 
     /* RFC 7530 §9.10: check share-mode conflict against opens by *other*
      * owners on this client.  Same-owner OPEN coalesces via the
      * find_state path below and is exempt. */
-    {
-        nfsstat4 conflict = nfs_client_check_share_conflict(
-            client, owner,
-            handle->fh, handle->fh_len,
-            args->share_access, args->share_deny);
-        if (conflict != NFS4_OK) {
-            chimera_vfs_release(req->thread->vfs_thread, handle);
-            return conflict;
-        }
+    status = nfs_client_check_share_conflict(client, owner,
+                                             handle->fh, handle->fh_len,
+                                             args->share_access,
+                                             args->share_deny);
+    if (status != NFS4_OK) {
+        goto err_release_handle;
     }
 
     existing = nfs_open_owner_find_state(owner, handle->fh, handle->fh_len);
@@ -401,8 +415,8 @@ chimera_nfs4_open_install_state(
          * normal clients issue, never trip this.) */
         if ((existing->share_access & args->share_deny) ||
             (args->share_access & existing->share_deny)) {
-            chimera_vfs_release(req->thread->vfs_thread, handle);
-            return NFS4ERR_SHARE_DENIED;
+            status = NFS4ERR_SHARE_DENIED;
+            goto err_release_handle;
         }
         nfs_open_state_coalesce(existing,
                                 args->share_access, args->share_deny,
@@ -415,7 +429,6 @@ chimera_nfs4_open_install_state(
          * upstream's intra-client check is likewise coalesce-exempt. */
     } else {
         struct nfs_open_state *new_state;
-        nfsstat4               share_status;
 
         new_state = nfs_open_state_create(owner,
                                           req->principal_flavor,
@@ -426,15 +439,21 @@ chimera_nfs4_open_install_state(
                                           handle,
                                           &req->thread->shared->nfs4_state_table,
                                           out_stateid);
+        if (!new_state) {
+            /* The lease sweeper unpublished the owner between find_or_adopt
+             * and here; installing would orphan the state. */
+            status = NFS4ERR_EXPIRED;
+            goto err_release_handle;
+        }
 
         /* Cross-protocol SHARE coordination.  On conflict, tear the
          * just-created state back down (releasing the handle) and fail. */
-        share_status = chimera_nfs4_open_acquire_share(req, new_state);
-        if (share_status != NFS4_OK) {
+        status = chimera_nfs4_open_acquire_share(req, new_state);
+        if (status != NFS4_OK) {
             nfs_open_state_destroy(new_state,
                                    &req->thread->shared->nfs4_state_table,
                                    req->thread->vfs_thread);
-            return share_status;
+            goto err_put_owner;
         }
     }
 
@@ -445,7 +464,17 @@ chimera_nfs4_open_install_state(
         *out_rflags |= OPEN4_RESULT_CONFIRM;
     }
 
+    /* Done with the synchronous borrow; release the find_or_adopt ref.  The
+     * hash-table slot ref (and any open_state referencing this owner) keeps it
+     * alive. */
+    nfs_open_owner_put(owner);
     return NFS4_OK;
+
+ err_release_handle:
+    chimera_vfs_release(req->thread->vfs_thread, handle);
+ err_put_owner:
+    nfs_open_owner_put(owner);
+    return status;
 } /* chimera_nfs4_open_install_state */
 
 /*
@@ -480,6 +509,15 @@ chimera_nfs4_open_complete(
         nfs4_replay_record(&owner->replay, args->seqid, OP_OPEN, status,
                            status == NFS4_OK ? &res->resok4.stateid : NULL);
         pthread_mutex_unlock(&owner->lock);
+    }
+
+    /* Drop the borrow ref transferred onto the request in
+     * chimera_nfs4_open.  Unconditional -- every 4.0 completion/error path that set
+     * open_4_0_owner funnels through here exactly once; NULL it to guard
+     * against any double drop. */
+    if (req->open_4_0_owner) {
+        nfs_open_owner_put(req->open_4_0_owner);
+        req->open_4_0_owner = NULL;
     }
 
     /* NFS4.1: a successful OPEN sets the COMPOUND's current stateid. */
@@ -1259,6 +1297,9 @@ chimera_nfs4_open(
             res->resok4.num_attrset                = 0;
             res->resok4.delegation.delegation_type = OPEN_DELEGATE_NONE;
             pthread_mutex_unlock(&owner->lock);
+            /* Early return before the borrow ref transfers to the request;
+             * release it here. */
+            nfs_open_owner_put(owner);
             chimera_nfs4_compound_complete(req, res->status);
             return;
         }
@@ -1267,12 +1308,15 @@ chimera_nfs4_open(
             /* NFS4ERR_BAD_SEQID is in the no-advance set; do not touch
              * owner state. */
             pthread_mutex_unlock(&owner->lock);
+            nfs_open_owner_put(owner);
             res->status = NFS4ERR_BAD_SEQID;
             chimera_nfs4_compound_complete(req, res->status);
             return;
         }
 
         pthread_mutex_unlock(&owner->lock);
+        /* Transfer the find_or_create ref onto the request; dropped in
+         * chimera_nfs4_open_complete. */
         req->open_4_0_owner = owner;
     }
 

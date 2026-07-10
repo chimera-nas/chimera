@@ -677,8 +677,20 @@ open_state_destroy_locked(
         uint8_t                ls_prev_destroyed;
 
         LL_DELETE2(state->locks, ls, next_in_open);
+        ls->on_open_list = 0;
         if (ls->lock_owner) {
-            LL_DELETE2(ls->lock_owner->states, ls, next_in_owner);
+            /* lock_owner->states is mutated under lock_owner->lock everywhere
+             * else (nfs_lock_state_create / nfs_lock_state_destroy); take it
+             * here too or a concurrent create corrupts the list.
+             * Ordering: owner->lock (held by caller) -> lock_owner->lock.
+             * Flag-guarded: a racing nfs_lock_state_destroy may have unlinked
+             * this side already. */
+            pthread_mutex_lock(&ls->lock_owner->lock);
+            if (ls->on_owner_list) {
+                LL_DELETE2(ls->lock_owner->states, ls, next_in_owner);
+                ls->on_owner_list = 0;
+            }
+            pthread_mutex_unlock(&ls->lock_owner->lock);
         }
         ls_prev_destroyed = atomic_exchange_explicit(&ls->destroyed, 1,
                                                      memory_order_acq_rel);
@@ -752,9 +764,10 @@ nfs_client_destroy(
         }
         pthread_mutex_unlock(&oo->lock);
 
+        /* Unpublish, then drop the hash-table slot ref; a borrowing in-flight
+         * request defers the free to its own put(). */
         HASH_DELETE(hh, client->open_owners_by_str, oo);
-        pthread_mutex_destroy(&oo->lock);
-        free(oo);
+        nfs_open_owner_put(oo);
     }
 
     HASH_ITER(hh, client->lock_owners_by_str, lo, lo_tmp)
@@ -764,8 +777,7 @@ nfs_client_destroy(
         chimera_nfs_abort_if(lo->states != NULL,
                              "lock_owner %p has leftover lock_states", lo);
         HASH_DELETE(hh, client->lock_owners_by_str, lo);
-        pthread_mutex_destroy(&lo->lock);
-        free(lo);
+        nfs_lock_owner_put(lo);
     }
 
     /* pNFS layouts held by the client (NFSv4.1+).  No recall is performed in
@@ -823,9 +835,11 @@ nfs_client_expire_state(
         }
         pthread_mutex_unlock(&oo->lock);
 
+        /* Unpublish, then drop the hash-table slot ref.  If an in-flight OPEN
+         * still borrows this owner, its ref keeps the struct alive until its
+         * own put(); the last put() destroys the lock and frees. */
         HASH_DELETE(hh, client->open_owners_by_str, oo);
-        pthread_mutex_destroy(&oo->lock);
-        free(oo);
+        nfs_open_owner_put(oo);
     }
 
     HASH_ITER(hh, client->lock_owners_by_str, lo, lo_tmp)
@@ -833,8 +847,7 @@ nfs_client_expire_state(
         chimera_nfs_abort_if(lo->states != NULL,
                              "lock_owner %p has leftover lock_states", lo);
         HASH_DELETE(hh, client->lock_owners_by_str, lo);
-        pthread_mutex_destroy(&lo->lock);
-        free(lo);
+        nfs_lock_owner_put(lo);
     }
 
     struct nfs_layout_state *ly, *ly_tmp;
@@ -857,11 +870,12 @@ nfs_client_expire_state(
 } /* nfs_client_expire_state */
 
 struct nfs_open_owner *
-nfs_open_owner_find_or_create(
-    struct nfs_client *client,
-    const void        *owner_bytes,
-    uint16_t           owner_len,
-    bool              *out_created)
+nfs_open_owner_find_or_adopt(
+    struct nfs_client     *client,
+    struct nfs_open_owner *adopt,
+    const void            *owner_bytes,
+    uint16_t               owner_len,
+    bool                  *out_created)
 {
     struct nfs_open_owner *owner;
 
@@ -877,8 +891,28 @@ nfs_open_owner_find_or_create(
         if (out_created) {
             *out_created = false;
         }
+        /* Take the caller ref while still holding client->lock, which is
+         * serialized against teardown's HASH_DELETE. */
+        nfs_open_owner_get(owner);
         pthread_mutex_unlock(&client->lock);
         return owner;
+    }
+
+    if (adopt) {
+        /* Republish a still-pinned owner that a mid-flight lease sweep
+         * unpublished, so an OPEN completing after the sweep keeps its
+         * seqid/replay state on a single object instead of splitting it
+         * across a fresh one.  One get() re-takes the hash-table
+         * slot ref, the other is the caller ref. */
+        nfs_open_owner_get(adopt);
+        nfs_open_owner_get(adopt);
+        HASH_ADD_KEYPTR(hh, client->open_owners_by_str,
+                        adopt->owner, adopt->owner_len, adopt);
+        if (out_created) {
+            *out_created = false;
+        }
+        pthread_mutex_unlock(&client->lock);
+        return adopt;
     }
 
     owner = calloc(1, sizeof(*owner));
@@ -889,6 +923,8 @@ nfs_open_owner_find_or_create(
     owner->seqid     = 0;
     owner->confirmed = false;
     pthread_mutex_init(&owner->lock, NULL);
+    /* refcount 2: one for the hash-table slot, one for the caller. */
+    atomic_init(&owner->refcount, 2);
 
     HASH_ADD_KEYPTR(hh, client->open_owners_by_str,
                     owner->owner, owner->owner_len, owner);
@@ -898,7 +934,41 @@ nfs_open_owner_find_or_create(
     }
     pthread_mutex_unlock(&client->lock);
     return owner;
+} /* nfs_open_owner_find_or_adopt */
+
+struct nfs_open_owner *
+nfs_open_owner_find_or_create(
+    struct nfs_client *client,
+    const void        *owner_bytes,
+    uint16_t           owner_len,
+    bool              *out_created)
+{
+    return nfs_open_owner_find_or_adopt(client, NULL, owner_bytes, owner_len,
+                                        out_created);
 } /* nfs_open_owner_find_or_create */
+
+void
+nfs_open_owner_get(struct nfs_open_owner *owner)
+{
+    uint32_t prev = atomic_fetch_add_explicit(&owner->refcount, 1,
+                                              memory_order_acq_rel);
+
+    chimera_nfs_abort_if(prev == 0, "open_owner get after free on %p", owner);
+} /* nfs_open_owner_get */
+
+void
+nfs_open_owner_put(struct nfs_open_owner *owner)
+{
+    uint32_t prev = atomic_fetch_sub_explicit(&owner->refcount, 1,
+                                              memory_order_acq_rel);
+
+    chimera_nfs_abort_if(prev == 0, "open_owner refcount underflow on %p",
+                         owner);
+    if (prev == 1) {
+        pthread_mutex_destroy(&owner->lock);
+        free(owner);
+    }
+} /* nfs_open_owner_put */
 
 struct nfs_open_state *
 nfs_open_owner_find_state(
@@ -940,6 +1010,8 @@ nfs_open_state_create(
     struct nfs_state_table         *table,
     struct stateid4                *out_stateid)
 {
+    struct nfs_client     *client = owner->client;
+    struct nfs_open_owner *published;
     struct nfs_open_state *state;
     uint8_t                shard;
     uint32_t               slot_idx, gen;
@@ -979,15 +1051,40 @@ nfs_open_state_create(
     atomic_init(&state->refcount, 1);
     atomic_init(&state->destroyed, 0);
 
+    /* Serialize installation against client teardown, mirroring
+     * nfs_lock_state_create: if the lease sweeper already
+     * unpublished this owner, installing a fresh open_state on it would
+     * orphan the state (and any lock_state later rooted on it) forever --
+     * no teardown walk can reach it through the client's owner hash. */
+    pthread_mutex_lock(&client->lock);
+
+    HASH_FIND(hh, client->open_owners_by_str,
+              owner->owner, owner->owner_len, published);
+    if (published != owner) {
+        pthread_mutex_unlock(&client->lock);
+        nfs_state_table_free_slot(table, shard, slot_idx);
+        free(state);
+        return NULL;
+    }
+
+    /* Pin the owner for the state's lifetime so an acquire-held open_state
+     * always has a valid ->owner, even if the lease sweeper reaps the client
+     * mid-flight.  Released in open_state_cleanup. */
+    nfs_open_owner_get(owner);
+
     nfs_state_table_install(table, shard, slot_idx, NFS4_SLOT_TYPE_OPEN, state);
 
     pthread_mutex_lock(&owner->lock);
     HASH_ADD_KEYPTR(hh, owner->states_by_fh, state->fh, state->fh_len, state);
     pthread_mutex_unlock(&owner->lock);
 
+    /* Encode before dropping client->lock: once published, a concurrent
+     * expire may destroy and free the state. */
     nfs4_stateid_encode(out_stateid, state->seqid,
                         NFS4_STATEID_TYPE_OPEN, shard, slot_idx, gen,
                         table->epoch);
+
+    pthread_mutex_unlock(&client->lock);
     return state;
 } /* nfs_open_state_create */
 
@@ -1137,6 +1234,8 @@ open_state_cleanup(
         chimera_vfs_release(vfs_thread, state->handle);
         state->handle = NULL;
     }
+    /* Release the owner ref taken in nfs_open_state_create. */
+    nfs_open_owner_put(state->owner);
     free(state);
 } /* open_state_cleanup */
 
@@ -1322,6 +1421,8 @@ nfs_lock_owner_find_or_create(
         if (out_created) {
             *out_created = false;
         }
+        /* Take the caller ref while still holding client->lock. */
+        nfs_lock_owner_get(owner);
         pthread_mutex_unlock(&client->lock);
         return owner;
     }
@@ -1333,6 +1434,8 @@ nfs_lock_owner_find_or_create(
     owner->owner_len = owner_len;
     owner->seqid     = 0;
     pthread_mutex_init(&owner->lock, NULL);
+    /* refcount 2: one for the hash-table slot, one for the caller. */
+    atomic_init(&owner->refcount, 2);
 
     HASH_ADD_KEYPTR(hh, client->lock_owners_by_str,
                     owner->owner, owner->owner_len, owner);
@@ -1344,6 +1447,29 @@ nfs_lock_owner_find_or_create(
     return owner;
 } /* nfs_lock_owner_find_or_create */
 
+void
+nfs_lock_owner_get(struct nfs_lock_owner *owner)
+{
+    uint32_t prev = atomic_fetch_add_explicit(&owner->refcount, 1,
+                                              memory_order_acq_rel);
+
+    chimera_nfs_abort_if(prev == 0, "lock_owner get after free on %p", owner);
+} /* nfs_lock_owner_get */
+
+void
+nfs_lock_owner_put(struct nfs_lock_owner *owner)
+{
+    uint32_t prev = atomic_fetch_sub_explicit(&owner->refcount, 1,
+                                              memory_order_acq_rel);
+
+    chimera_nfs_abort_if(prev == 0, "lock_owner refcount underflow on %p",
+                         owner);
+    if (prev == 1) {
+        pthread_mutex_destroy(&owner->lock);
+        free(owner);
+    }
+} /* nfs_lock_owner_put */
+
 struct nfs_lock_state *
 nfs_lock_state_create(
     struct nfs_lock_owner          *lock_owner,
@@ -1352,6 +1478,8 @@ nfs_lock_state_create(
     struct nfs_state_table         *table,
     struct stateid4                *out_stateid)
 {
+    struct nfs_client     *client = lock_owner->client;
+    struct nfs_lock_owner *published;
     struct nfs_lock_state *state;
     uint8_t                shard;
     uint32_t               slot_idx, gen;
@@ -1373,20 +1501,67 @@ nfs_lock_state_create(
     atomic_init(&state->refcount, 1);
     atomic_init(&state->destroyed, 0);
 
+    /* Serialize installation against client teardown.  Under
+     * client->lock the lease sweeper cannot be mid-walk, so either the
+     * lock_owner is still published and the open_state alive (install
+     * proceeds and a later sweep finds the state on both lists), or the
+     * client was already expired (fail: installing now would orphan the
+     * state forever, since teardown has already walked these lists). */
+    pthread_mutex_lock(&client->lock);
+
+    HASH_FIND(hh, client->lock_owners_by_str,
+              lock_owner->owner, lock_owner->owner_len, published);
+    if (published != lock_owner) {
+        pthread_mutex_unlock(&client->lock);
+        nfs_state_table_free_slot(table, shard, slot_idx);
+        free(state);
+        return NULL;
+    }
+
+    /* Both list links happen under open_state->owner->lock so that
+     * open_state_destroy_locked (CLOSE / expiry), which walks and unlinks
+     * under that same lock, sees either no links or both -- never a
+     * lock_state on one list only.  The destroyed check must share that
+     * critical section: destroy_locked flips the flag under owner->lock
+     * before walking. */
+    pthread_mutex_lock(&open_state->owner->lock);
+    if (atomic_load_explicit(&open_state->destroyed, memory_order_acquire)) {
+        pthread_mutex_unlock(&open_state->owner->lock);
+        pthread_mutex_unlock(&client->lock);
+        nfs_state_table_free_slot(table, shard, slot_idx);
+        free(state);
+        return NULL;
+    }
+
+    /* Pin the lock_owner for the state's lifetime; released in
+     * lock_state_cleanup. */
+    nfs_lock_owner_get(lock_owner);
+
+    /* Pin the open_state too: nfs_lock_state_destroy dereferences
+     * state->open_state (owner lock, locks list) and can race the expire
+     * cascade freeing it.  Released in lock_state_cleanup via
+     * nfs_state_table_release, which defers the open_state cleanup to the
+     * last reference as usual. */
+    atomic_fetch_add_explicit(&open_state->refcount, 1, memory_order_acq_rel);
+
     nfs_state_table_install(table, shard, slot_idx, NFS4_SLOT_TYPE_LOCK, state);
 
-    /* Link onto both the lock_owner's list and the open_state's list. */
     pthread_mutex_lock(&lock_owner->lock);
     LL_PREPEND2(lock_owner->states, state, next_in_owner);
+    state->on_owner_list = 1;
     pthread_mutex_unlock(&lock_owner->lock);
 
-    pthread_mutex_lock(&open_state->owner->lock);
     LL_PREPEND2(open_state->locks, state, next_in_open);
+    state->on_open_list = 1;
     pthread_mutex_unlock(&open_state->owner->lock);
 
+    /* Encode before dropping client->lock: once published, a concurrent
+     * expire may destroy and free the state. */
     nfs4_stateid_encode(out_stateid, state->seqid,
                         NFS4_STATEID_TYPE_LOCK, shard, slot_idx, gen,
                         table->epoch);
+
+    pthread_mutex_unlock(&client->lock);
     return state;
 } /* nfs_lock_state_create */
 
@@ -1450,8 +1625,6 @@ lock_state_cleanup(
     struct chimera_vfs_state *vfs_state = vfs_thread ? vfs_thread->vfs->vfs_state : NULL;
     struct nfs4_range_lease  *rl, *tmp;
 
-    (void) table;
-
     /* Drain any byte-range leases still held (ranges not explicitly
      * released by LOCKU before CLOSE / lock-owner teardown). */
     rl                  = state->range_leases;
@@ -1469,6 +1642,14 @@ lock_state_cleanup(
     if (state->handle && vfs_thread) {
         chimera_vfs_release(vfs_thread, state->handle);
         state->handle = NULL;
+    }
+    /* Release the owner and open_state pins taken in
+     * nfs_lock_state_create.  The open_state release goes through the table so a
+     * destroyed-and-otherwise-unreferenced open_state is cleaned up here. */
+    nfs_lock_owner_put(state->lock_owner);
+    if (state->open_state) {
+        nfs_state_table_release(table, state->open_state,
+                                NFS4_SLOT_TYPE_OPEN, vfs_thread);
     }
     free(state);
 } /* lock_state_cleanup */
@@ -1489,13 +1670,22 @@ nfs_lock_state_destroy(
         return;
     }
 
+    /* Flag-guarded unlinks: the expire/CLOSE cascade in
+     * open_state_destroy_locked may race this and unlink either side
+     * first. */
     pthread_mutex_lock(&lock_owner->lock);
-    LL_DELETE2(lock_owner->states, state, next_in_owner);
+    if (state->on_owner_list) {
+        LL_DELETE2(lock_owner->states, state, next_in_owner);
+        state->on_owner_list = 0;
+    }
     pthread_mutex_unlock(&lock_owner->lock);
 
     if (open_state) {
         pthread_mutex_lock(&open_state->owner->lock);
-        LL_DELETE2(open_state->locks, state, next_in_open);
+        if (state->on_open_list) {
+            LL_DELETE2(open_state->locks, state, next_in_open);
+            state->on_open_list = 0;
+        }
         pthread_mutex_unlock(&open_state->owner->lock);
     }
 

@@ -114,6 +114,18 @@ target_include_directories(test_fh_security PRIVATE
 add_dependencies(test_fh_security chimera_nfs_common)
 add_test(NAME chimera/server/nfs/fh_security COMMAND test_fh_security)
 
+# Regression test: open_owner / lock_owner refcount lifetime under
+# a lease sweep racing an in-flight OPEN/LOCK.  Links the exported nfs4_state
+# API the same way as test_state_table (no production sources compiled in).
+add_executable(test_open_owner_lifetime test_open_owner_lifetime.c)
+target_link_libraries(test_open_owner_lifetime chimera_nfs chimera_server chimera_vfs chimera_nfs_common chimera_common evpl evpl_rpc2 pthread uuid urcu-qsbr urcu-common)
+target_include_directories(test_open_owner_lifetime PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/server/nfs
+    ${NFS_COMMON_INCLUDE_DIR})
+add_test(NAME chimera/server/nfs/open_owner_lifetime
+    COMMAND ${CMAKE_CURRENT_BINARY_DIR}/test_open_owner_lifetime)
+
 # Tag every test registered above with the 'nfs' label so these NFS server unit
 # tests can be run independently via `ctest -L nfs`.
 get_property(_nfs_tests DIRECTORY PROPERTY TESTS)
