@@ -186,7 +186,7 @@ chimera_vfs_name_cache_lookup(
 
     shard = &cache->shards[key & cache->num_shards_mask];
 
-    slot = &shard->entries[(key & cache->num_slots_mask) << cache->num_entries_bits];
+    slot = &shard->entries[((key >> cache->num_shards_bits) & cache->num_slots_mask) << cache->num_entries_bits];
 
     slot_end = slot + cache->num_entries;
 
@@ -249,7 +249,7 @@ chimera_vfs_name_cache_insert(
 
     shard = &cache->shards[key & cache->num_shards_mask];
 
-    slot = &shard->entries[(key & cache->num_slots_mask) << cache->num_entries_bits];
+    slot = &shard->entries[((key >> cache->num_shards_bits) & cache->num_slots_mask) << cache->num_entries_bits];
 
     slot_end = slot + cache->num_entries;
 
@@ -364,7 +364,7 @@ chimera_vfs_name_cache_remove(
 
     shard = &cache->shards[key & cache->num_shards_mask];
 
-    slot = &shard->entries[(key & cache->num_slots_mask) << cache->num_entries_bits];
+    slot = &shard->entries[((key >> cache->num_shards_bits) & cache->num_slots_mask) << cache->num_entries_bits];
 
     slot_end = slot + cache->num_entries;
 
