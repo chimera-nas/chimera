@@ -452,11 +452,14 @@ expect_abort(void ( *fn )(void))
         _exit(0);  /* not reached: fn must abort */
     }
     CHECK(waitpid(pid, &status, 0) == pid);
-    /* The chimera crash handler may terminate via raw SIGABRT or via a
-     * nonzero exit (sanitizer builds); either way the child must not have
-     * survived to _exit(0). */
-    CHECK((WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT) ||
-          (WIFEXITED(status) && WEXITSTATUS(status) != 0));
+    /* The guard must have fired: chimera_nfs_abort_if -> __chimera_abort ends
+     * the process.  How it ends is build-dependent: sanitizer (debug) builds
+     * flush and abort() -> SIGABRT; non-sanitizer (release) builds first run
+     * chimera_crash_handler, whose libunwind backtrace can itself terminate
+     * the (minimal, -O3) test binary with a different fatal signal before it
+     * reaches raise(SIGABRT).  Either way the child must NOT have survived to
+     * _exit(0) -- that (and only that) means the guard did not fire. */
+    CHECK(!(WIFEXITED(status) && WEXITSTATUS(status) == 0));
 } /* expect_abort */
 
 static void
