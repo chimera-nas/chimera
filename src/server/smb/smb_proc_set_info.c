@@ -492,6 +492,18 @@ chimera_smb_set_info(struct chimera_smb_request *request)
         return;
     }
 
+    /* Named-pipe FIDs carry open_file->handle == NULL (see
+     * chimera_smb_create_gen_open_file_pipe); every set-info branch below
+     * eventually calls chimera_vfs_setattr / chimera_vfs_getattr on that
+     * handle and would deref NULL.  SET_INFO is not defined for named pipe
+     * FIDs -- reject cleanly with STATUS_INVALID_DEVICE_REQUEST (what a real
+     * pipe filesystem returns). */
+    if (unlikely(request->set_info.open_file->type == CHIMERA_SMB_OPEN_FILE_TYPE_PIPE)) {
+        chimera_smb_open_file_release(request, request->set_info.open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_DEVICE_REQUEST);
+        return;
+    }
+
     /* MS-SMB2 §3.3.5.2.10: SET_INFO is a mutating op; reject a stale
      * ChannelSequence with FILE_NOT_AVAILABLE. */
     if (chimera_smb_channel_sequence_stale(request->set_info.open_file,
