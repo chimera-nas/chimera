@@ -2642,6 +2642,23 @@ chimera_smb_create_open_at_callback(
         chimera_vfs_access_check(attr, &request->session_handle->session->cred,
                                  CHIMERA_ACE_MASK_ALL);
     chimera_smb_marshal_attrs(attr, &request->create.r_attrs);
+
+    /* MS-SMB2 2.2.13.2 AlSi: for creates, overwrites, and supersedes (not
+     * plain opens of existing files), report max(backend_alloc, requested_AlSi).
+     * Directories never report an AlSi reservation.
+     * r_created covers newly created files; the disposition checks cover
+     * truncated/replaced cases where the file existed but content was reset. */
+    bool alsi_applies = request->create.r_created ||
+                        request->create.create_disposition == SMB2_FILE_OVERWRITE ||
+                        request->create.create_disposition == SMB2_FILE_OVERWRITE_IF ||
+                        request->create.create_disposition == SMB2_FILE_SUPERSEDE;
+
+    if (request->create.alsi_alloc_size > 0 &&
+        !request->create.r_is_directory && alsi_applies &&
+        request->create.r_attrs.smb_alloc_size < request->create.alsi_alloc_size) {
+        request->create.r_attrs.smb_alloc_size = request->create.alsi_alloc_size;
+    }
+
     /* Activate the park-on-conflict-break path: if gen_open_file parks on a
      * handle-caching break (a batch oplock, or an SMB3 directory lease whose
      * HANDLE must be relinquished for a conflicting open), the share-park resume
