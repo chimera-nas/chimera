@@ -321,8 +321,11 @@ function(pynfs_add_combined_suite backend minor)
     # (readdir's RDDR8b loops ~300 READDIRs) keeps it alive, and there are no
     # lease-scaled sleeps to bloat.  ~500 codes run through one Python client, so
     # give a generous timeout (the wrapper's fires first, with diagnostics).
+    # Label along every dimension in the name (like the per-code tests above)
+    # so the suite can be sharded by backend or minor version -- e.g. the
+    # coverage CI leg selects `-L pynfs -L memfs`.
     set_tests_properties(${name} PROPERTIES
-        LABELS pynfs
+        LABELS "pynfs;${backend};nfs4.${minor}"
         TIMEOUT 900
         ENVIRONMENT
             "PYTHONUNBUFFERED=1;PYNFS_RUNDEPS=1;PYNFS_TIMEOUT=800;PYNFS_NFS4_LEASE_TIME=90;PYNFS_JUNIT_FILE=${PYNFS_JUNIT_DIR}/combined_${backend}_nfs4.${minor}.xml")
