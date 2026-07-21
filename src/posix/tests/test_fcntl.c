@@ -247,10 +247,11 @@ main(
     ChimeraLogLevel = CHIMERA_LOG_DEBUG;
 
     snprintf(env.session_dir, sizeof(env.session_dir),
-             "/build/test/posix_session_%d_%lu_%lu",
+             "%s/posix_session_%d_%lu_%lu",
+             posix_test_session_root(),
              getpid(), (unsigned long) tv.tv_sec, (unsigned long) tv.tv_nsec);
 
-    (void) mkdir("/build/test", 0755);
+    (void) mkdir(posix_test_session_root(), 0755);
     (void) mkdir(env.session_dir, 0755);
 
     rc = chown(env.session_dir, env.cred.uid, env.cred.gid);
@@ -260,7 +261,14 @@ main(
     }
 
     posix_json_root = json_object();
-    json_object_set_new(posix_json_root, "config", json_object());
+    {
+        /* External-module backends need their vfs entry in the pre-fork
+         * config too (posix_test_init is bypassed here). */
+        json_t *posix_json_config = json_object();
+
+        posix_test_emit_ext_module_config(env.backend, posix_json_config);
+        json_object_set_new(posix_json_root, "config", posix_json_config);
+    }
     chimera_test_write_users_json(posix_json_root);
     snprintf(posix_json_path, sizeof(posix_json_path),
              "%s/posix.json", env.session_dir);
