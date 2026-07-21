@@ -190,6 +190,97 @@ posix_test_is_diskfs(const char *backend)
            strcmp(backend, "diskfs_aio") == 0;
 } // posix_test_is_diskfs
 
+/* Generic external-module backend support, driven entirely by environment
+ * variables so an out-of-tree VFS module can run the whole posix suite
+ * without the tests knowing anything about it.  Active when "-b <name>"
+ * matches CHIMERA_TEST_EXT_MODULE_NAME:
+ *
+ *   CHIMERA_TEST_EXT_MODULE_NAME       backend name using this mechanism
+ *   CHIMERA_TEST_EXT_MODULE_SO         module .so for the client to dlopen
+ *                                      (required; hard error if unset)
+ *   CHIMERA_TEST_EXT_MODULE_CONFIG     module config as JSON text (the
+ *                                      client contract wants a string, not
+ *                                      an object)
+ *   CHIMERA_TEST_EXT_MODULE_MOUNTPATH  module_path for chimera_posix_mount
+ *                                      (defaults to "/")
+ *
+ * Unrelated but part of the same mechanism: CHIMERA_TEST_ROOT overrides the
+ * session-dir root (default /build/test) so orchestrators can point the
+ * suite at a private scratch directory. */
+static inline int
+posix_test_is_ext_module(const char *backend)
+{
+    const char *ext = getenv("CHIMERA_TEST_EXT_MODULE_NAME");
+
+    return ext && strcmp(backend, ext) == 0;
+} // posix_test_is_ext_module
+
+/* Session-dir root: CHIMERA_TEST_ROOT when set, else /build/test.  Used by
+ * posix_test_init and by the lock-family tests that do their own pre-fork
+ * setup. */
+static inline const char *
+posix_test_session_root(void)
+{
+    const char *root = getenv("CHIMERA_TEST_ROOT");
+
+    return root ? root : "/build/test";
+} // posix_test_session_root
+
+/* Emit the external-module client config into a posix.json "config" object:
+ * the config.vfs.<backend> entry (module .so path + config text, both plain
+ * strings per the client contract) and reduced thread pools (external modules
+ * may sit on a heavyweight blocking client stack behind them; the defaults --
+ * 64 delegation threads, 16 cores -- are oversized for a unit test and can
+ * exhaust the backend's connection budget).  No-op for built-in backends, so
+ * callers doing their own pre-fork config generation (the lock-family tests)
+ * can call it unconditionally. */
+static inline void
+posix_test_emit_ext_module_config(
+    const char *backend,
+    json_t     *posix_json_config)
+{
+    const char *ext_so, *ext_cfg;
+    json_t     *vfs, *vfs_entry;
+
+    if (!posix_test_is_ext_module(backend)) {
+        return;
+    }
+
+    ext_so  = getenv("CHIMERA_TEST_EXT_MODULE_SO");
+    ext_cfg = getenv("CHIMERA_TEST_EXT_MODULE_CONFIG");
+
+    if (!ext_so) {
+        fprintf(stderr,
+                "Backend '%s' uses the external-module mechanism "
+                "but CHIMERA_TEST_EXT_MODULE_SO is not set\n",
+                backend);
+        exit(EXIT_FAILURE);
+    }
+
+    vfs       = json_object();
+    vfs_entry = json_object();
+    json_object_set_new(vfs_entry, "path", json_string(ext_so));
+    json_object_set_new(vfs_entry, "config",
+                        json_string(ext_cfg ? ext_cfg : ""));
+    json_object_set_new(vfs, backend, vfs_entry);
+    json_object_set_new(posix_json_config, "vfs", vfs);
+
+    {
+        /* Thread-pool size, overridable via CHIMERA_TEST_EXT_MODULE_THREADS
+         * (e.g. to probe thread-affinity-dependent backend behavior). */
+        const char *threads_env = getenv("CHIMERA_TEST_EXT_MODULE_THREADS");
+        int         threads     = 4;
+
+        if (threads_env && atoi(threads_env) > 0) {
+            threads = atoi(threads_env);
+        }
+        json_object_set_new(posix_json_config, "sync_delegation_threads",
+                            json_integer(threads));
+        json_object_set_new(posix_json_config, "core_threads",
+                            json_integer(threads));
+    }
+} // posix_test_emit_ext_module_config
+
 /* Optional diskfs-config overrides for tests that need a non-default setup.
  * posix_test_diskfs_extra_cfg is a JSON object (text) merged into the
  * generated diskfs config (e.g. to shrink the caches for an eviction stress);
@@ -466,15 +557,17 @@ posix_test_init(
         evpl_set_log_fn(chimera_vlog, chimera_log_flush);
     }
 
+    const char *session_root = posix_test_session_root();
+
     snprintf(env->session_dir, sizeof(env->session_dir),
-             "/build/test/posix_session_%d_%lu_%lu",
-             getpid(), tv.tv_sec, tv.tv_nsec);
+             "%s/posix_session_%d_%lu_%lu",
+             session_root, getpid(), tv.tv_sec, tv.tv_nsec);
 
     fprintf(stderr, "Creating session directory %s\n", env->session_dir);
 
-    int rc;
+    int         rc;
 
-    (void) mkdir("/build/test", 0755);
+    (void) mkdir(session_root, 0755);
     (void) mkdir(env->session_dir, 0755);
 
     rc = chown(env->session_dir, env->cred.uid, env->cred.gid);
@@ -495,7 +588,9 @@ posix_test_init(
         posix_json_config = json_object();
 
         if (!is_nfs) {
-            if (posix_test_is_diskfs(backend)) {
+            if (posix_test_is_ext_module(backend)) {
+                posix_test_emit_ext_module_config(backend, posix_json_config);
+            } else if (posix_test_is_diskfs(backend)) {
                 char    diskfs_cfg[4096];
                 json_t *vfs, *vfs_entry;
                 posix_test_configure_diskfs(env->session_dir,
@@ -603,7 +698,13 @@ posix_test_mount(struct posix_test_env *env)
 
     // Direct backend
     module_name = env->backend;
-    if (posix_test_is_diskfs(env->backend)) {
+    if (posix_test_is_ext_module(env->backend)) {
+        const char *ext_mountpath = getenv("CHIMERA_TEST_EXT_MODULE_MOUNTPATH");
+
+        if (ext_mountpath) {
+            module_path = ext_mountpath;
+        }
+    } else if (posix_test_is_diskfs(env->backend)) {
         module_name = "diskfs";
     } else if (strcmp(env->backend, "linux") == 0 || strcmp(env->backend, "io_uring") == 0) {
         module_path = env->session_dir;
