@@ -84,6 +84,135 @@ class TestExportsAPI:
             client.get_export("nonexistent_export")
         assert exc_info.value.status_code == 404
 
+    def test_create_get_delete_export(self, client):
+        """Test creating, fetching, and deleting an export."""
+        name = "sdk_test_export"
+        try:
+            client.create_export(name, "/testshare")
+
+            export = client.get_export(name)
+            assert export["name"] == name
+            assert export["path"] == "/testshare"
+            # Auto-assigned export ids start at 1; 0 is reserved.
+            assert export["export_id"] >= 1
+        finally:
+            client.delete_export(name)
+
+        with pytest.raises(ChimeraAdminError) as exc_info:
+            client.get_export(name)
+        assert exc_info.value.status_code == 404
+
+    def test_create_export_id_round_trip(self, client):
+        """An explicit export_id is echoed back everywhere."""
+        name = "sdk_test_export_id"
+        export_id = 4000
+        try:
+            client.create_export(name, "/testshare", export_id=export_id)
+
+            # get_export echoes the id.
+            export = client.get_export(name)
+            assert export["export_id"] == export_id
+
+            # list_exports carries it on the matching entry.
+            listed = next(
+                e for e in client.list_exports() if e["name"] == name)
+            assert listed["export_id"] == export_id
+
+            # The running config round-trips it for chimera.json.
+            config = client.get_config()
+            assert config["exports"][name]["export_id"] == export_id
+        finally:
+            client.delete_export(name)
+
+    def test_create_export_options_round_trip(self, client):
+        """Access options given at create time are echoed back."""
+        name = "sdk_test_export_opts"
+        try:
+            client.create_export(
+                name, "/testshare", export_id=4003,
+                options="ro", squash="none")
+
+            export = client.get_export(name)
+            assert export["export_id"] == 4003
+            assert export["options"] == "ro"
+            assert export["squash"] == "none"
+
+            # The running config round-trips them for chimera.json.
+            config = client.get_config()
+            assert config["exports"][name]["options"] == "ro"
+            assert config["exports"][name]["squash"] == "none"
+        finally:
+            client.delete_export(name)
+
+    def test_create_export_duplicate_id(self, client):
+        """A second export reusing an export_id is rejected with 409."""
+        name = "sdk_test_export_dup"
+        other = "sdk_test_export_dup2"
+        export_id = 4001
+        try:
+            client.create_export(name, "/testshare", export_id=export_id)
+
+            with pytest.raises(ChimeraAdminError) as exc_info:
+                client.create_export(other, "/testshare",
+                                     export_id=export_id)
+            assert exc_info.value.status_code == 409
+
+            # The rejected export must not have been created.
+            with pytest.raises(ChimeraAdminError) as exc_info:
+                client.get_export(other)
+            assert exc_info.value.status_code == 404
+        finally:
+            client.delete_export(name)
+
+    def test_create_export_invalid_id(self, client):
+        """Out-of-range export ids are rejected with 400."""
+        for bad_id in (0, 4096, -5):
+            with pytest.raises(ChimeraAdminError) as exc_info:
+                client.create_export(
+                    "sdk_test_export_bad", "/testshare", export_id=bad_id)
+            assert exc_info.value.status_code == 400
+
+        with pytest.raises(ChimeraAdminError) as exc_info:
+            client.get_export("sdk_test_export_bad")
+        assert exc_info.value.status_code == 404
+
+    def test_auto_assign_skips_explicit_id(self, client):
+        """Auto-assignment never reuses a slot pinned explicitly."""
+        auto1 = "sdk_test_export_auto1"
+        pinned = "sdk_test_export_pinned"
+        auto2 = "sdk_test_export_auto2"
+        created = []
+        try:
+            client.create_export(auto1, "/testshare")
+            created.append(auto1)
+            base = client.get_export(auto1)["export_id"]
+            if base + 2 > 4095:
+                pytest.skip("export id space nearly exhausted")
+
+            client.create_export(pinned, "/testshare", export_id=base + 1)
+            created.append(pinned)
+
+            client.create_export(auto2, "/testshare")
+            created.append(auto2)
+            assert client.get_export(auto2)["export_id"] == base + 2
+        finally:
+            for name in created:
+                client.delete_export(name)
+
+    def test_export_id_reusable_after_delete(self, client):
+        """Deleting an export frees its id for a new export."""
+        export_id = 4002
+        client.create_export(
+            "sdk_test_export_free", "/testshare", export_id=export_id)
+        client.delete_export("sdk_test_export_free")
+
+        name = "sdk_test_export_reuse"
+        try:
+            client.create_export(name, "/testshare", export_id=export_id)
+            assert client.get_export(name)["export_id"] == export_id
+        finally:
+            client.delete_export(name)
+
 
 class TestSharesAPI:
     """Test the SMB Shares API endpoints."""

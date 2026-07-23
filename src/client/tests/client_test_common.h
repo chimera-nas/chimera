@@ -208,7 +208,7 @@ client_test_init(
 
         // Create NFSv3 server export entry
         if (env->use_nfs) {
-            chimera_server_create_export(env->server, "/share", "/share");
+            chimera_server_create_export(env->server, "/share", "/share", 0);
         }
 
         chimera_server_start(env->server);

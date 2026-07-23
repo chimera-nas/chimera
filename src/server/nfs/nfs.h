@@ -35,6 +35,12 @@ struct chimera_nfs_export;
         (CHIMERA_NFS_SEC_SYS | CHIMERA_NFS_SEC_KRB5 | \
          CHIMERA_NFS_SEC_KRB5I | CHIMERA_NFS_SEC_KRB5P)
 
+/*
+ * Largest export id an operator may assign.  Ids are embedded in wire file
+ * handles as a 16-bit field; id 0 is reserved as invalid/pseudo-root and the
+ * id space is bounded by CHIMERA_NFS_MAX_EXPORTS (4096) internally.
+ */
+#define CHIMERA_NFS_EXPORT_ID_MAX 4095u
 
 /**
  * @brief Adds a new NFS export to the shared context.
@@ -42,11 +48,18 @@ struct chimera_nfs_export;
  * @param nfs_shared Pointer to the NFS shared context.
  * @param name       Name of the export.
  * @param path       Filesystem path for the export.
+ * @param export_id  Explicit export id (1..CHIMERA_NFS_EXPORT_ID_MAX), or 0
+ *                   to auto-assign the next free id.  The id is embedded in
+ *                   wire file handles, so clustered servers exporting the
+ *                   same directory must pin identical ids.
+ * @return 0 on success, -EINVAL if export_id is out of range, -EEXIST if the
+ *         id is already in use, -ENOSPC if the id space is exhausted.
  */
-void chimera_nfs_add_export(
+int chimera_nfs_add_export(
     void       *nfs_shared,
     const char *name,
-    const char *path);
+    const char *path,
+    uint32_t    export_id);
 
 
 /**

@@ -1081,9 +1081,19 @@ main(
 
     exports = json_object_get(config, "exports");
 
-    if (exports) {
+    /* Two passes over the exports object: entries pinning an explicit
+     * export_id are created first so auto-assignment for the remaining
+     * entries cannot take an id a later entry pins; with a single pass,
+     * whether startup succeeds would depend on key order in the config. */
+    for (int pass = 0; exports && pass < 2; pass++) {
         json_object_foreach(exports, name, export)
         {
+            json_t     *exp_id_j = json_object_get(export, "export_id");
+
+            if ((exp_id_j != NULL) != (pass == 0)) {
+                continue;
+            }
+
             json_t     *opt_j     = json_object_get(export, "options");
             json_t     *squash_j  = json_object_get(export, "squash");
             json_t     *rsq_j     = json_object_get(export, "root_squash");
@@ -1091,6 +1101,7 @@ main(
             json_t     *allsq_j   = json_object_get(export, "all_squash");
             json_t     *anonuid_j = json_object_get(export, "anonuid");
             json_t     *anongid_j = json_object_get(export, "anongid");
+            uint32_t    export_id = 0;
             const char *opt_s     = json_string_value(opt_j);
             const char *squash_s  = json_string_value(squash_j);
             uint32_t    options   = CHIMERA_NFS_EXPORT_OPT_RW;
@@ -1144,6 +1155,24 @@ main(
                 anongid = (uint32_t) json_integer_value(anongid_j);
             }
 
+            /* Stable export id: the id is embedded in wire file handles, so
+             * clustered servers exporting the same directory must pin the
+             * same value.  A wrong id silently defeats that, so reject bad
+             * values outright rather than falling back to auto-assignment. */
+            if (exp_id_j) {
+                json_int_t v = json_is_integer(exp_id_j) ?
+                    json_integer_value(exp_id_j) : -1;
+
+                if (!json_is_integer(exp_id_j) ||
+                    v < 1 || v > CHIMERA_NFS_EXPORT_ID_MAX) {
+                    chimera_server_error("Export '%s': invalid export_id "
+                                         "(expected integer 1..%u)",
+                                         name, CHIMERA_NFS_EXPORT_ID_MAX);
+                    exit(1);
+                }
+                export_id = (uint32_t) v;
+            }
+
             /* Allowed security flavors: an optional array of
              * "sys"/"krb5"/"krb5i"/"krb5p".  Absent (mask 0) permits any
              * flavor, preserving historical behavior; a non-empty list
@@ -1175,12 +1204,27 @@ main(
                 }
             }
 
-            chimera_server_info("Adding NFS export %s -> %s (%s, %s)", name, path,
+            char export_id_str[16] = "auto";
+
+            if (export_id) {
+                snprintf(export_id_str, sizeof(export_id_str), "%u", export_id);
+            }
+
+            chimera_server_info("Adding NFS export %s -> %s (%s, %s, export_id %s)",
+                                name, path,
                                 options & CHIMERA_NFS_EXPORT_OPT_RO ? "ro" : "rw",
                                 squash == CHIMERA_NFS_SQUASH_ALL ? "all_squash" :
                                 squash == CHIMERA_NFS_SQUASH_NONE ? "no_root_squash" :
-                                "root_squash");
-            chimera_server_create_export(server, name, path);
+                                "root_squash",
+                                export_id_str);
+            if (chimera_server_create_export(server, name, path, export_id) != 0) {
+                /* Duplicate or unusable export_id: proceeding would mint file
+                 * handles under a different id than the operator pinned, which
+                 * breaks cluster failover in a way clients only notice later.
+                 * Fail hard like the mount-path errors above. */
+                chimera_server_error("Failed to create export '%s'", name);
+                exit(1);
+            }
             chimera_server_export_set_options(server, name, options, squash,
                                               anonuid, anongid);
             if (sec_mask) {

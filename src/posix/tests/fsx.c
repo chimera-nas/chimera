@@ -4024,7 +4024,7 @@ main(
             }
 
             // Create NFSv3 server export entry
-            chimera_server_create_export(chimera_server, "/share", "/share");
+            chimera_server_create_export(chimera_server, "/share", "/share", 0);
 
             chimera_server_start(chimera_server);
 

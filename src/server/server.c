@@ -2208,15 +2208,14 @@ SYMBOL_EXPORT int
 chimera_server_create_export(
     struct chimera_server *server,
     const char            *name,
-    const char            *path)
+    const char            *path,
+    uint32_t               export_id)
 {
     if (!server->nfs_shared) {
         return -1;
     }
 
-    chimera_nfs_add_export(server->nfs_shared, name, path);
-
-    return 0;
+    return chimera_nfs_add_export(server->nfs_shared, name, path, export_id);
 } /* chimera_server_create_export */
 
 SYMBOL_EXPORT int
