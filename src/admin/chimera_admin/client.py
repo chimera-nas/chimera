@@ -237,22 +237,43 @@ class ChimeraAdminClient:
         """
         return self._request("GET", f"/api/v1/exports/{name}")
 
-    def create_export(self, name: str, path: str) -> dict:
+    def create_export(
+        self,
+        name: str,
+        path: str,
+        export_id: Optional[int] = None,
+        options: Optional[str] = None,
+        squash: Optional[str] = None,
+    ) -> dict:
         """Create a new NFS export.
 
         Args:
             name: Export name.
             path: VFS path for the export.
+            export_id: Optional stable export id (1-4095), embedded in NFS
+                file handles; auto-assigned when omitted. Clustered servers
+                exporting the same directory must pin the same id so file
+                handles stay valid across failover.
+            options: Optional access mode, "ro" or "rw" (server default: rw).
+            squash: Optional squash policy, "none", "root", or "all"
+                (server default: none).
 
         Returns:
             Response message.
 
         Raises:
-            ChimeraAdminError: If the request fails
+            ChimeraAdminError: If the request fails (e.g. 400 for an
+                out-of-range export_id, 409 if the name or export_id is
+                already in use).
         """
-        return self._request(
-            "POST", "/api/v1/exports", json={"name": name, "path": path}
-        )
+        data = {"name": name, "path": path}
+        if export_id is not None:
+            data["export_id"] = export_id
+        if options is not None:
+            data["options"] = options
+        if squash is not None:
+            data["squash"] = squash
+        return self._request("POST", "/api/v1/exports", json=data)
 
     def delete_export(self, name: str) -> None:
         """Delete an NFS export.

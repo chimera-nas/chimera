@@ -38,6 +38,12 @@
 
 #include "common/macros.h"
 
+/* nfs.h defines the public id range without seeing nfs_common.h; if the two
+ * constants ever drift apart, the range check in chimera_nfs_add_export()
+ * would index exports_by_id[] out of bounds. */
+_Static_assert(CHIMERA_NFS_EXPORT_ID_MAX == CHIMERA_NFS_MAX_EXPORTS - 1,
+               "CHIMERA_NFS_EXPORT_ID_MAX must match the exports_by_id table size");
+
 #define NFS_PROGIDX_PORTMAP_V2 0
 #define NFS_PROGIDX_MOUNT_V3   1
 #define NFS_PROGIDX_V3         2
@@ -906,14 +912,23 @@ nfs_server_thread_destroy(void *data)
     free(thread);
 } /* nfs_server_thread_destroy */
 
-SYMBOL_EXPORT void
+SYMBOL_EXPORT int
 chimera_nfs_add_export(
     void       *nfs_shared,
     const char *name,
-    const char *path)
+    const char *path,
+    uint32_t    export_id)
 {
     struct chimera_server_nfs_shared *shared = nfs_shared;
-    struct chimera_nfs_export        *export = calloc(1, sizeof(*export));
+    struct chimera_nfs_export        *export;
+
+    if (export_id > CHIMERA_NFS_EXPORT_ID_MAX) {
+        chimera_nfs_error("Export '%s' id %u out of range (1..%u)",
+                          name, export_id, CHIMERA_NFS_EXPORT_ID_MAX);
+        return -EINVAL;
+    }
+
+    export = calloc(1, sizeof(*export));
 
     snprintf(export->name, sizeof(export->name), "%s", name);
     snprintf(export->path, sizeof(export->path), "%s", path);
@@ -932,24 +947,53 @@ chimera_nfs_add_export(
     pthread_mutex_lock(&shared->exports_lock);
 
     /* Assign a stable, non-zero id and publish into the direct index used for
-     * per-request attribution.  Ids start at 1 (slot 0 reserved as invalid). */
-    if (shared->next_export_id == 0) {
-        shared->next_export_id = 1;
-    }
-    if (shared->next_export_id < CHIMERA_NFS_MAX_EXPORTS) {
-        export->id                        = shared->next_export_id++;
-        shared->exports_by_id[export->id] = export;
+     * per-request attribution.  Ids start at 1 (slot 0 reserved as invalid).
+     * An explicit id is honored verbatim (or rejected if taken); auto
+     * assignment scans forward from the last assigned id, skipping slots
+     * pinned explicitly, and wraps around the end of the id space. */
+    if (export_id) {
+        if (shared->exports_by_id[export_id]) {
+            /* Log before dropping the lock: a concurrent remove can free the
+             * owning export and NULL the slot the moment it is released. */
+            chimera_nfs_error("Export '%s' id %u already in use by export '%s'",
+                              name, export_id,
+                              shared->exports_by_id[export_id]->name);
+            pthread_mutex_unlock(&shared->exports_lock);
+            free(export);
+            return -EEXIST;
+        }
+        export->id = (uint16_t) export_id;
     } else {
-        chimera_nfs_error("Export id space exhausted (max %d); export '%s' will "
-                          "not be addressable by file handle",
-                          CHIMERA_NFS_MAX_EXPORTS, name);
-        export->id = 0;
+        uint16_t id = shared->next_export_id;
+
+        if (id == 0 || id >= CHIMERA_NFS_MAX_EXPORTS) {
+            id = 1;
+        }
+        for (int probes = 0; probes < CHIMERA_NFS_MAX_EXPORTS - 1; probes++) {
+            if (!shared->exports_by_id[id]) {
+                break;
+            }
+            id = (id == CHIMERA_NFS_MAX_EXPORTS - 1) ? 1 : id + 1;
+        }
+        if (shared->exports_by_id[id]) {
+            pthread_mutex_unlock(&shared->exports_lock);
+            chimera_nfs_error("Export id space exhausted (max %d); cannot "
+                              "create export '%s'",
+                              CHIMERA_NFS_MAX_EXPORTS, name);
+            free(export);
+            return -ENOSPC;
+        }
+        export->id             = id;
+        shared->next_export_id = id + 1;
     }
+
+    shared->exports_by_id[export->id] = export;
 
     LL_PREPEND(shared->exports, export);
     shared->num_exports++;
     pthread_mutex_unlock(&shared->exports_lock);
 
+    return 0;
 } /* chimera_nfs_add_export */
 
 SYMBOL_EXPORT int

@@ -467,6 +467,16 @@
               }
             }
           },
+          "409": {
+            "description": "Conflict - export name or export_id already in use",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Failed to create export",
             "content": {
@@ -1024,6 +1034,12 @@
           "path": {
             "type": "string",
             "description": "VFS path"
+          },
+          "export_id": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4095,
+            "description": "Stable export identifier embedded in NFS file handles"
           }
         }
       },
@@ -1038,6 +1054,12 @@
           "path": {
             "type": "string",
             "description": "VFS path"
+          },
+          "export_id": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4095,
+            "description": "Optional explicit export id (1..4095); auto-assigned when omitted. Must match across clustered servers exporting the same directory so file handles stay valid on failover."
           }
         }
       },
@@ -1129,6 +1151,12 @@
                 "path": {
                   "type": "string",
                   "description": "VFS path"
+                },
+                "export_id": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 4095,
+                  "description": "Stable export identifier embedded in NFS file handles"
                 }
               }
             }

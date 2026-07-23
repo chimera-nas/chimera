@@ -44,8 +44,8 @@ def _delete_and_msg(method, ident: str, noun: str) -> str:
 def _add_crud_commands(sub, noun: str, label: str) -> None:
     """Add list/get/create/delete commands for a name+path resource.
 
-    Covers exports, shares, and buckets, which share an identical REST
-    shape. Client methods are resolved by convention: ``list_<noun>s``,
+    Covers shares and buckets, which share an identical REST shape.
+    Client methods are resolved by convention: ``list_<noun>s``,
     ``get_<noun>``, ``create_<noun>``, ``delete_<noun>``.
     """
     plural = noun + "s"
@@ -70,6 +70,45 @@ def _add_crud_commands(sub, noun: str, label: str) -> None:
     p.set_defaults(
         func=lambda c, a: _delete_and_msg(
             getattr(c, f"delete_{noun}"), a.name, noun))
+
+
+def _add_export_commands(sub) -> None:
+    """Add the ``export`` resource commands.
+
+    Exports follow the generic name+path CRUD shape but grow an
+    export-specific ``--export-id`` create option, so they get their own
+    builder rather than sharing _add_crud_commands with shares/buckets.
+    """
+    res = sub.add_parser("export", help="Manage NFS exports")
+    actions = res.add_subparsers(dest="action", required=True)
+
+    p = actions.add_parser("list", help="List NFS exports")
+    p.set_defaults(func=lambda c, a: c.list_exports())
+
+    p = actions.add_parser("get", help="Get a NFS export")
+    p.add_argument("name")
+    p.set_defaults(func=lambda c, a: c.get_export(a.name))
+
+    p = actions.add_parser("create", help="Create a NFS export")
+    p.add_argument("name")
+    p.add_argument("path", help="VFS path for the resource")
+    p.add_argument(
+        "--export-id", type=int, dest="export_id",
+        help="Stable export id (1-4095, default: auto-assigned)")
+    p.add_argument(
+        "--options", choices=["ro", "rw"],
+        help="Access mode (default: rw)")
+    p.add_argument(
+        "--squash", choices=["none", "root", "all"],
+        help="Squash policy (default: none)")
+    p.set_defaults(func=lambda c, a: c.create_export(
+        a.name, a.path, export_id=a.export_id, options=a.options,
+        squash=a.squash))
+
+    p = actions.add_parser("delete", help="Delete a NFS export")
+    p.add_argument("name")
+    p.set_defaults(
+        func=lambda c, a: _delete_and_msg(c.delete_export, a.name, "export"))
 
 
 def _add_user_commands(sub) -> None:
@@ -162,7 +201,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=lambda c, a: c.get_config())
 
     _add_user_commands(sub)
-    _add_crud_commands(sub, "export", "NFS export")
+    _add_export_commands(sub)
     _add_crud_commands(sub, "share", "SMB share")
     _add_crud_commands(sub, "bucket", "S3 bucket")
     _add_mount_commands(sub)

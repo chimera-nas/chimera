@@ -675,11 +675,19 @@ chimera_server_share_set_force_level2_oplock(
     struct chimera_server *server,
     const char            *share_name);
 
+/*
+ * Create an NFS export.  export_id pins the stable id embedded in wire file
+ * handles (1..CHIMERA_NFS_EXPORT_ID_MAX); 0 auto-assigns the next free id.
+ * Returns 0 on success, -EINVAL for an out-of-range id, -EEXIST if the id is
+ * already in use, -ENOSPC if the id space is exhausted, -1 if the NFS
+ * protocol is not initialized.
+ */
 int
 chimera_server_create_export(
     struct chimera_server *server,
     const char            *share_name,
-    const char            *share_path);
+    const char            *share_path,
+    uint32_t               export_id);
 
 int
 chimera_server_export_set_options(

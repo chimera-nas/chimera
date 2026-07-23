@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <errno.h>
 #include <jansson.h>
 
 #include "evpl/evpl.h"
@@ -61,6 +62,8 @@ export_to_json_callback(
                         json_string(chimera_nfs_export_get_name(export)));
     json_object_set_new(obj, "path",
                         json_string(chimera_nfs_export_get_path(export)));
+    json_object_set_new(obj, "export_id",
+                        json_integer(chimera_nfs_export_get_id(export)));
     export_options_to_json(export, obj);
 
     json_array_append_new(ctx->array, obj);
@@ -106,6 +109,8 @@ chimera_rest_handle_exports_get(
                         json_string(chimera_nfs_export_get_name(export)));
     json_object_set_new(obj, "path",
                         json_string(chimera_nfs_export_get_path(export)));
+    json_object_set_new(obj, "export_id",
+                        json_integer(chimera_nfs_export_get_id(export)));
     export_options_to_json(export, obj);
 
     chimera_rest_send_json(evpl, request, 200, obj);
@@ -123,6 +128,8 @@ chimera_rest_handle_exports_create(
     json_error_t error;
     const char  *name;
     const char  *path;
+    json_t      *exp_id_j;
+    uint32_t     export_id = 0;
     int          rc;
     json_t      *obj;
 
@@ -143,6 +150,23 @@ chimera_rest_handle_exports_create(
         return;
     }
 
+    /* Optional stable export id.  Validate the signed json value before any
+     * unsigned cast so negatives and non-integers are rejected rather than
+     * silently becoming auto-assignment (0) or wrapping into range. */
+    exp_id_j = json_object_get(root, "export_id");
+    if (exp_id_j) {
+        json_int_t v = json_integer_value(exp_id_j);
+
+        if (!json_is_integer(exp_id_j) ||
+            v < 1 || v > CHIMERA_NFS_EXPORT_ID_MAX) {
+            json_decref(root);
+            chimera_rest_send_error(evpl, request, 400, "Bad Request",
+                                    "export_id must be an integer in range 1..4095");
+            return;
+        }
+        export_id = (uint32_t) v;
+    }
+
     if (chimera_server_get_export(thread->shared->server, name)) {
         json_decref(root);
         chimera_rest_send_error(evpl, request, 409, "Conflict",
@@ -150,7 +174,22 @@ chimera_rest_handle_exports_create(
         return;
     }
 
-    rc = chimera_server_create_export(thread->shared->server, name, path);
+    rc = chimera_server_create_export(thread->shared->server, name, path,
+                                      export_id);
+
+    if (rc == -EEXIST) {
+        json_decref(root);
+        chimera_rest_send_error(evpl, request, 409, "Conflict",
+                                "export_id already in use");
+        return;
+    }
+
+    if (rc == -EINVAL) {
+        json_decref(root);
+        chimera_rest_send_error(evpl, request, 400, "Bad Request",
+                                "export_id out of range");
+        return;
+    }
 
     if (rc != 0) {
         json_decref(root);

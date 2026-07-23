@@ -65,6 +65,8 @@ config_export_callback(
     obj = json_object();
     json_object_set_new(obj, "path",
                         json_string(chimera_nfs_export_get_path(export)));
+    json_object_set_new(obj, "export_id",
+                        json_integer(chimera_nfs_export_get_id(export)));
     json_object_set_new(obj, "options",
                         json_string(chimera_nfs_export_get_options(export) &
                                     CHIMERA_NFS_EXPORT_OPT_RO ? "ro" : "rw"));
