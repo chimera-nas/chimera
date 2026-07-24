@@ -204,15 +204,30 @@ becomes visible in the Chimera namespace at `/<name>`.
 | `path` | string | required | Backend-specific root. For passthrough modules this is a host path; for `nfs` it's the upstream export; for in-memory modules it's typically `/`. |
 | `options` | string | - | Module-specific mount options (e.g. `"vers=4.1,rdma,port=20049"` for the `nfs` module). |
 
-### `exports`, `shares`, `buckets`
+### `exports` (NFS)
 
-Each is an object keyed by the published name. All three take a `path` that
+An object keyed by export name. Each export publishes a VFS path
+(`/<mount-name>[/subdir]`) over NFSv3/NFSv4.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `path` | string | required | VFS path to export; a missing or non-string value fails startup. |
+| `export_id` | int | auto | Stable id (1..65535) embedded in every NFS file handle minted for this export; auto-assigned when omitted. Clustered servers exporting the same directory must pin the same id so file handles stay valid across failover. Startup fails on an out-of-range or already-used id. |
+| `access` | string | `"rw"` | Access mode, `"ro"` or `"rw"`; any other value fails startup. (Renamed from `options`; the old key is rejected at startup.) |
+| `squash` | string | `"none"` | Credential squashing policy: `"none"` (aka `"no_root_squash"`), `"root"` (aka `"root_squash"`), or `"all"` (aka `"all_squash"`); any other value fails startup. |
+| `root_squash` / `no_root_squash` / `all_squash` | bool | - | Boolean aliases for `squash`; an explicit `squash` string takes precedence. |
+| `anonuid` | int | `65534` | Anonymous uid that squashed callers are mapped to (0..4294967295; anything else fails startup). |
+| `anongid` | int | `65534` | Anonymous gid that squashed callers are mapped to (0..4294967295; anything else fails startup). |
+| `sec` | array | any | Allowed RPC security flavors: any of `"sys"` (aka `"auth_sys"`), `"krb5"`, `"krb5i"`, `"krb5p"`. Absent or empty permits any flavor; a non-empty list rejects others (NFSv4: `NFS4ERR_WRONGSEC`). An unknown flavor, non-string entry, or non-array value fails startup (silently dropping one would leave the export open to any flavor). |
+
+### `shares`, `buckets`
+
+Each is an object keyed by the published name. Both take a `path` that
 points into the Chimera namespace (`/<mount-name>[/subdir]`). `shares` also
 accepts one extra key.
 
 | Section | Key | Type | Default | Description |
 |---|---|---|---|---|
-| `exports` (NFS) | `path` | string | required | VFS path to export. |
 | `shares` (SMB) | `path` | string | required | VFS path to share. |
 | `shares` (SMB) | `continuous_availability` | bool | `false` | Advertise SMB Continuous Availability (requires `smb_persistent_handles`). |
 | `buckets` (S3) | `path` | string | required | VFS path backing the bucket. |
@@ -261,7 +276,15 @@ An **array** of S3 credentials. Both keys are required per entry.
     "mounts": {
         "data": { "module": "memfs", "path": "/" }
     },
-    "exports": { "/nfs": { "path": "/data" } },
+    "exports": {
+        "/nfs": {
+            "path": "/data",
+            "export_id": 1,
+            "access": "rw",
+            "squash": "root",
+            "sec": ["sys", "krb5"]
+        }
+    },
     "shares":  { "data": { "path": "/data", "continuous_availability": true } },
     "buckets": { "data": { "path": "/data" } },
     "users": [
