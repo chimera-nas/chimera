@@ -75,9 +75,11 @@ def _add_crud_commands(sub, noun: str, label: str) -> None:
 def _add_export_commands(sub) -> None:
     """Add the ``export`` resource commands.
 
-    Exports follow the generic name+path CRUD shape but grow an
-    export-specific ``--export-id`` create option, so they get their own
-    builder rather than sharing _add_crud_commands with shares/buckets.
+    Exports follow the generic name+path CRUD shape but grow
+    export-specific create options (``--export-id``, ``--access``,
+    ``--squash``, ``--anonuid``, ``--anongid``, ``--sec``), so they get
+    their own builder rather than sharing _add_crud_commands with
+    shares/buckets.
     """
     res = sub.add_parser("export", help="Manage NFS exports")
     actions = res.add_subparsers(dest="action", required=True)
@@ -94,16 +96,26 @@ def _add_export_commands(sub) -> None:
     p.add_argument("path", help="VFS path for the resource")
     p.add_argument(
         "--export-id", type=int, dest="export_id",
-        help="Stable export id (1-4095, default: auto-assigned)")
+        help="Stable export id (1-65535, default: auto-assigned)")
     p.add_argument(
-        "--options", choices=["ro", "rw"],
+        "--access", choices=["ro", "rw"],
         help="Access mode (default: rw)")
     p.add_argument(
         "--squash", choices=["none", "root", "all"],
         help="Squash policy (default: none)")
+    p.add_argument(
+        "--anonuid", type=int,
+        help="Anonymous uid squashed callers are mapped to (default: 65534)")
+    p.add_argument(
+        "--anongid", type=int,
+        help="Anonymous gid squashed callers are mapped to (default: 65534)")
+    p.add_argument(
+        "--sec", action="append", choices=["sys", "krb5", "krb5i", "krb5p"],
+        help="Allowed RPC security flavor; repeat for several "
+             "(default: any flavor)")
     p.set_defaults(func=lambda c, a: c.create_export(
-        a.name, a.path, export_id=a.export_id, options=a.options,
-        squash=a.squash))
+        a.name, a.path, export_id=a.export_id, access=a.access,
+        squash=a.squash, anonuid=a.anonuid, anongid=a.anongid, sec=a.sec))
 
     p = actions.add_parser("delete", help="Delete a NFS export")
     p.add_argument("name")
