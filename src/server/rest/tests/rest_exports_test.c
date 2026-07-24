@@ -5,29 +5,41 @@
 /*
  * REST API NFS Exports Test
  *
- * Exercises the /api/v1/exports endpoints in rest_shares.c with REST
+ * Exercises the /api/v1/exports endpoints in rest_exports.c with REST
  * authentication disabled, focusing on the export_id support:
  *   1. Create an export with an explicit export_id returns 201
  *   2. GET the export echoes the export_id back
  *   3. List exports includes the export_id on the matching entry
  *   4. GET /api/v1/config round-trips the export_id
  *   5. A duplicate export_id returns 409 and the export is not created
- *   6. Out-of-range or non-integer export_id returns 400
+ *   6. Out-of-range or non-integer export_id returns 400; the id space
+ *      boundary (65535) is accepted
  *   7. Auto-assignment skips slots pinned by explicit ids
  *   8. Delete frees the id so it can be pinned again
  *   9. Missing required fields return 400; a duplicate name returns 409
+ *  10. The access mode round-trips; the legacy "options" key and invalid
+ *      access/squash/anonuid/anongid values are rejected with 400 rather
+ *      than silently ignored; squash aliases are accepted
+ *  11. A sec restriction round-trips; no/empty restriction omits the field;
+ *      malformed sec shapes are rejected with 400
+ *  12. Creating past the configured nfs_max_exports cap returns 409 and a
+ *      delete frees a slot under the cap again
  */
 
 #include "common/logging.h"
 #include "prometheus-c.h"
 #include "server/server.h"
+#include <jansson.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
-#define REST_PORT 18082
+#define REST_PORT        18082
+
+/* Concurrent-export cap configured for this test (nfs_max_exports). */
+#define TEST_MAX_EXPORTS 8
 
 static int tests_passed = 0;
 static int tests_failed = 0;
@@ -155,6 +167,35 @@ curl_get_body(
     return 0;
 } /* curl_get_body */
 
+/* Return the number of live exports per GET /api/v1/exports, or -1 on any
+ * request/parse failure.  Used so the count-cap test fills from the actual
+ * live count instead of hard-coding how many exports earlier tests left. */
+static long
+count_exports(void)
+{
+    char    response[8192];
+    long    http_code = 0;
+    json_t *array;
+    long    count;
+
+    if (curl_get_body("GET", "/api/v1/exports", NULL, response,
+                      sizeof(response), &http_code) != 0 ||
+        http_code != 200) {
+        return -1;
+    }
+
+    array = json_loads(response, 0, NULL);
+    if (!array || !json_is_array(array)) {
+        json_decref(array);
+        return -1;
+    }
+
+    count = (long) json_array_size(array);
+    json_decref(array);
+
+    return count;
+} /* count_exports */
+
 /* Assert that a request returns the expected status code. */
 static void
 check_code(
@@ -251,6 +292,10 @@ main(
     /* Disable auth so the export endpoints can be exercised directly,
      * mirroring the admin pytest setup. */
     chimera_server_config_set_rest_auth_enabled(config, 0);
+    /* Small concurrent-export cap so the nfs_max_exports enforcement can be
+     * exercised without thousands of creates; test 11 queries the live
+     * export count and fills the remaining slots up to this cap. */
+    chimera_server_config_set_nfs_max_exports(config, TEST_MAX_EXPORTS);
 
     server = chimera_server_init(config, metrics);
     if (!server) {
@@ -276,17 +321,17 @@ main(
     fprintf(stderr, "\n  Test: export_id is echoed on read...\n");
     check_body_contains("GET /api/v1/exports/exp1 echoes export_id",
                         "GET", "/api/v1/exports/exp1", NULL,
-                        200, "\"export_id\":42", 1, &failures);
+                        200, "\"export_id\":42,", 1, &failures);
 
     /* ===== Test 3: List includes the export_id ===== */
     check_body_contains("GET /api/v1/exports lists export_id",
                         "GET", "/api/v1/exports", NULL,
-                        200, "\"export_id\":42", 1, &failures);
+                        200, "\"export_id\":42,", 1, &failures);
 
     /* ===== Test 4: Config round-trips the export_id ===== */
     check_body_contains("GET /api/v1/config round-trips export_id",
                         "GET", "/api/v1/config", NULL,
-                        200, "\"export_id\":42", 1, &failures);
+                        200, "\"export_id\":42,", 1, &failures);
 
     /* ===== Test 5: Duplicate export_id is rejected with 409 ===== */
     fprintf(stderr, "\n  Test: Duplicate export_id rejected with 409...\n");
@@ -332,6 +377,17 @@ main(
     check_code("Rejected export bad4 does not exist (404)",
                "GET", "/api/v1/exports/bad4", NULL, 404, &failures);
 
+    /* The top of the id space is valid: 65535 is the largest id that fits the
+     * 16-bit wire file-handle field. */
+    check_code("export_id 65535 (id space boundary) returns 201",
+               "POST", "/api/v1/exports",
+               "{\"name\":\"expmax\",\"path\":\"/share\",\"export_id\":65535}",
+               201, &failures);
+
+    check_body_contains("GET /api/v1/exports/expmax echoes export_id",
+                        "GET", "/api/v1/exports/expmax", NULL,
+                        200, "\"export_id\":65535,", 1, &failures);
+
     /* ===== Test 7: Auto-assignment skips explicit ids =====
      * On this fresh server the auto counter is at 1.  Pin id 1, then an auto
      * export must skip to 2; pin 3, and the next auto export must skip over
@@ -349,7 +405,7 @@ main(
 
     check_body_contains("Auto export skipped pinned id 1, got 2",
                         "GET", "/api/v1/exports/expb", NULL,
-                        200, "\"export_id\":2", 1, &failures);
+                        200, "\"export_id\":2,", 1, &failures);
 
     check_code("POST export pinned to id 3 returns 201",
                "POST", "/api/v1/exports",
@@ -363,7 +419,7 @@ main(
 
     check_body_contains("Auto export skipped pinned id 3, got 4",
                         "GET", "/api/v1/exports/expd", NULL,
-                        200, "\"export_id\":4", 1, &failures);
+                        200, "\"export_id\":4,", 1, &failures);
 
     /* ===== Test 8: Delete frees the id for reuse ===== */
     fprintf(stderr, "\n  Test: Delete frees the export_id...\n");
@@ -385,10 +441,186 @@ main(
                "{\"name\":\"nopath\"}",
                400, &failures);
 
-    check_code("Duplicate export name returns 409",
+    /* The name-conflict message distinguishes this 409 from a duplicate
+     * export_id (the uniqueness check runs inside create, under the exports
+     * lock, so it cannot be raced by a concurrent create of the same name). */
+    check_body_contains("Duplicate export name returns 409",
+                        "POST", "/api/v1/exports",
+                        "{\"name\":\"exp1b\",\"path\":\"/share\"}",
+                        409, "already exists", 1, &failures);
+
+    /* ===== Test 10: access mode round-trip; legacy "options" rejected ===== */
+    fprintf(stderr, "\n  Test: access mode round-trip and legacy key...\n");
+    check_code("POST export with access=ro returns 201",
                "POST", "/api/v1/exports",
-               "{\"name\":\"exp1b\",\"path\":\"/share\"}",
-               409, &failures);
+               "{\"name\":\"expro\",\"path\":\"/share\",\"access\":\"ro\"}",
+               201, &failures);
+
+    check_body_contains("GET echoes access=ro",
+                        "GET", "/api/v1/exports/expro", NULL,
+                        200, "\"access\":\"ro\"", 1, &failures);
+
+    check_body_contains("Legacy \"options\" key returns 400",
+                        "POST", "/api/v1/exports",
+                        "{\"name\":\"expleg\",\"path\":\"/share\",\"options\":\"ro\"}",
+                        400, "has been renamed", 1, &failures);
+
+    check_code("Rejected legacy export does not exist (404)",
+               "GET", "/api/v1/exports/expleg", NULL, 404, &failures);
+
+    check_code("DELETE access round-trip export returns 204",
+               "DELETE", "/api/v1/exports/expro", NULL, 204, &failures);
+
+    /* Unrecognized or mistyped export option values must be rejected, not
+     * silently replaced with the (more permissive) defaults. */
+    check_body_contains("Invalid access value returns 400",
+                        "POST", "/api/v1/exports",
+                        "{\"name\":\"expbad\",\"path\":\"/share\",\"access\":\"readonly\"}",
+                        400, "access must be", 1, &failures);
+
+    check_body_contains("Non-string access value returns 400",
+                        "POST", "/api/v1/exports",
+                        "{\"name\":\"expbad\",\"path\":\"/share\",\"access\":1}",
+                        400, "access must be", 1, &failures);
+
+    check_body_contains("Invalid squash value returns 400",
+                        "POST", "/api/v1/exports",
+                        "{\"name\":\"expbad\",\"path\":\"/share\",\"squash\":\"rootsquash\"}",
+                        400, "squash must be", 1, &failures);
+
+    check_body_contains("String anonuid returns 400",
+                        "POST", "/api/v1/exports",
+                        "{\"name\":\"expbad\",\"path\":\"/share\",\"anonuid\":\"1000\"}",
+                        400, "anonuid must be", 1, &failures);
+
+    check_body_contains("Negative anonuid returns 400",
+                        "POST", "/api/v1/exports",
+                        "{\"name\":\"expbad\",\"path\":\"/share\",\"anonuid\":-1}",
+                        400, "anonuid must be", 1, &failures);
+
+    check_body_contains("Out-of-range anongid returns 400",
+                        "POST", "/api/v1/exports",
+                        "{\"name\":\"expbad\",\"path\":\"/share\",\"anongid\":4294967296}",
+                        400, "anongid must be", 1, &failures);
+
+    check_code("Rejected export expbad does not exist (404)",
+               "GET", "/api/v1/exports/expbad", NULL, 404, &failures);
+
+    /* Squash aliases parse to the canonical value. */
+    check_code("POST export with squash=root_squash returns 201",
+               "POST", "/api/v1/exports",
+               "{\"name\":\"expsq\",\"path\":\"/share\",\"squash\":\"root_squash\",\"anonuid\":1000}",
+               201, &failures);
+
+    check_body_contains("GET echoes canonical squash=root",
+                        "GET", "/api/v1/exports/expsq", NULL,
+                        200, "\"squash\":\"root\"", 1, &failures);
+
+    check_body_contains("GET echoes anonuid=1000",
+                        "GET", "/api/v1/exports/expsq", NULL,
+                        200, "\"anonuid\":1000,", 1, &failures);
+
+    check_code("DELETE squash alias export returns 204",
+               "DELETE", "/api/v1/exports/expsq", NULL, 204, &failures);
+
+    /* ===== Test 11: sec restriction round-trip and validation ===== */
+    fprintf(stderr, "\n  Test: sec restriction round-trip...\n");
+    check_code("POST export with sec returns 201",
+               "POST", "/api/v1/exports",
+               "{\"name\":\"expsec\",\"path\":\"/share\",\"sec\":[\"krb5\",\"krb5i\"]}",
+               201, &failures);
+
+    check_body_contains("GET echoes the sec array",
+                        "GET", "/api/v1/exports/expsec", NULL,
+                        200, "\"sec\":[\"krb5\",\"krb5i\"]", 1, &failures);
+
+    /* No restriction (or an empty one) means any flavor: the field must be
+    * absent so a captured config round-trips the config-file semantics. */
+    check_body_contains("Export without a restriction omits sec",
+                        "GET", "/api/v1/exports/expa", NULL,
+                        200, "\"sec\"", 0, &failures);
+
+    check_code("POST export with empty sec returns 201",
+               "POST", "/api/v1/exports",
+               "{\"name\":\"expsece\",\"path\":\"/share\",\"sec\":[]}",
+               201, &failures);
+
+    check_body_contains("Empty sec restriction omits the field",
+                        "GET", "/api/v1/exports/expsece", NULL,
+                        200, "\"sec\"", 0, &failures);
+
+    /* Malformed sec shapes are rejected, not silently widened to "any". */
+    check_body_contains("Unknown sec flavor returns 400",
+                        "POST", "/api/v1/exports",
+                        "{\"name\":\"expbad\",\"path\":\"/share\",\"sec\":[\"krb5x\"]}",
+                        400, "sec flavors must be", 1, &failures);
+
+    check_body_contains("Non-array sec returns 400",
+                        "POST", "/api/v1/exports",
+                        "{\"name\":\"expbad\",\"path\":\"/share\",\"sec\":\"krb5\"}",
+                        400, "sec must be an array", 1, &failures);
+
+    check_body_contains("Non-string sec entry returns 400",
+                        "POST", "/api/v1/exports",
+                        "{\"name\":\"expbad\",\"path\":\"/share\",\"sec\":[5]}",
+                        400, "sec flavors must be", 1, &failures);
+
+    check_code("Rejected sec export expbad does not exist (404)",
+               "GET", "/api/v1/exports/expbad", NULL, 404, &failures);
+
+    check_code("DELETE sec export returns 204",
+               "DELETE", "/api/v1/exports/expsec", NULL, 204, &failures);
+
+    check_code("DELETE empty-sec export returns 204",
+               "DELETE", "/api/v1/exports/expsece", NULL, 204, &failures);
+
+    /* ===== Test 12: nfs_max_exports count cap =====
+     * Fill from the live export count (queried, so inserting a create in an
+     * earlier test cannot break the arithmetic here) up to the configured
+     * cap of 8; the next create is rejected, and deleting one frees a slot
+     * under the cap again. */
+    fprintf(stderr, "\n  Test: nfs_max_exports cap enforcement...\n");
+    {
+        long live = count_exports();
+
+        if (live < 1 || live >= TEST_MAX_EXPORTS) {
+            test_fail("Live export count within cap before fill");
+            fprintf(stderr, "    Expected 1..%d live exports, found %ld\n",
+                    TEST_MAX_EXPORTS - 1, live);
+            failures++;
+        } else {
+            test_pass("Live export count within cap before fill");
+        }
+
+        for (long i = live; i < TEST_MAX_EXPORTS; i++) {
+            char label[64];
+            char fill_body[128];
+
+            snprintf(label, sizeof(label),
+                     "Create below the cap returns 201 (%ld/%d)",
+                     i + 1, TEST_MAX_EXPORTS);
+            snprintf(fill_body, sizeof(fill_body),
+                     "{\"name\":\"fill%ld\",\"path\":\"/share\"}", i);
+            check_code(label, "POST", "/api/v1/exports", fill_body,
+                       201, &failures);
+        }
+    }
+
+    check_body_contains("Create past the cap returns 409",
+                        "POST", "/api/v1/exports",
+                        "{\"name\":\"fillover\",\"path\":\"/share\"}",
+                        409, "Export limit reached", 1, &failures);
+
+    check_code("Rejected export fillover does not exist (404)",
+               "GET", "/api/v1/exports/fillover", NULL, 404, &failures);
+
+    check_code("DELETE frees a slot under the cap",
+               "DELETE", "/api/v1/exports/exp1b", NULL, 204, &failures);
+
+    check_code("Create succeeds again after delete",
+               "POST", "/api/v1/exports",
+               "{\"name\":\"fillafter\",\"path\":\"/share\"}",
+               201, &failures);
 
     fprintf(stderr, "\n========================================\n");
     fprintf(stderr, "Test Summary\n");

@@ -4023,8 +4023,13 @@ main(
                 exit(100);
             }
 
-            // Create NFSv3 server export entry
-            chimera_server_create_export(chimera_server, "/share", "/share", 0, NULL);
+            // Create NFSv3 server export entry (pinned id, see
+            // posix_test_common.h)
+            if (chimera_server_create_export(chimera_server, "/share",
+                                             "/share", 4242, NULL) != 0) {
+                fprintf(stderr, "Failed to create /share export\n");
+                exit(100);
+            }
 
             chimera_server_start(chimera_server);
 

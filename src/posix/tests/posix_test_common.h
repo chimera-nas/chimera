@@ -306,6 +306,11 @@ static int posix_test_ro_export __attribute__ ((unused)) = 0;
  * export is mounted at; the read-write export sees it as "/share/ro". */
 #define POSIX_TEST_RO_SUBDIR "ro"
 
+/* Explicit export id above the default nfs_max_exports count cap (4096),
+ * so tests cover pinned-id file-handle attribution across the whole 16-bit
+ * id space rather than only small auto-assigned ids. */
+#define POSIX_TEST_EXPORT_ID 4242
+
 // Helper to configure diskfs backend
 static inline void
 posix_test_configure_diskfs(
@@ -470,7 +475,16 @@ posix_test_start_nfs_server(struct posix_test_env *env)
     chimera_server_mount(env->server, "share", share_module, share_module_path,
                          NULL);
 
-    chimera_server_create_export(env->server, "/share", "/share", 0, NULL);
+    /* Pin an export id above the default count cap (4096) so every posix
+     * test exercises an explicitly-pinned id on the NFS wire path: the id
+     * is stamped into each file handle and resolved per request, and a
+     * regression bounding the id lookup by the count cap instead of the id
+     * space would pass any test using auto-assigned (small) ids. */
+    if (chimera_server_create_export(env->server, "/share", "/share",
+                                     POSIX_TEST_EXPORT_ID, NULL) != 0) {
+        fprintf(stderr, "Failed to create /share export\n");
+        exit(EXIT_FAILURE);
+    }
 
     if (posix_test_ro_export) {
         /* Second, read-only mount of the same backend rooted at the subdir.
@@ -486,7 +500,11 @@ posix_test_start_nfs_server(struct posix_test_env *env)
             exit(EXIT_FAILURE);
         }
 
-        chimera_server_create_export(env->server, "/roshare", "/roshare", 0, NULL);
+        if (chimera_server_create_export(env->server, "/roshare", "/roshare",
+                                         POSIX_TEST_EXPORT_ID + 1, NULL) != 0) {
+            fprintf(stderr, "Failed to create /roshare export\n");
+            exit(EXIT_FAILURE);
+        }
     }
 
     chimera_server_start(env->server);
