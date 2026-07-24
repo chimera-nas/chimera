@@ -62,29 +62,12 @@ config_export_callback(
     json_t *exports = data;
     json_t *obj;
 
+    /* Shared with the /api/v1/exports handlers; includes the sec restriction
+     * so a captured config regenerates chimera.json faithfully (omitting it
+     * would silently drop a security restriction on the next boot).  The
+     * name is the entry's key rather than a field, matching chimera.json. */
     obj = json_object();
-    json_object_set_new(obj, "path",
-                        json_string(chimera_nfs_export_get_path(export)));
-    json_object_set_new(obj, "export_id",
-                        json_integer(chimera_nfs_export_get_id(export)));
-    json_object_set_new(obj, "access",
-                        json_string(chimera_nfs_export_get_access(export) &
-                                    CHIMERA_NFS_EXPORT_ACCESS_RO ? "ro" : "rw"));
-    switch (chimera_nfs_export_get_squash(export)) {
-        case CHIMERA_NFS_SQUASH_ALL:
-            json_object_set_new(obj, "squash", json_string("all"));
-            break;
-        case CHIMERA_NFS_SQUASH_NONE:
-            json_object_set_new(obj, "squash", json_string("none"));
-            break;
-        default:
-            json_object_set_new(obj, "squash", json_string("root"));
-            break;
-    } /* switch */
-    json_object_set_new(obj, "anonuid",
-                        json_integer(chimera_nfs_export_get_anonuid(export)));
-    json_object_set_new(obj, "anongid",
-                        json_integer(chimera_nfs_export_get_anongid(export)));
+    chimera_rest_export_options_to_json(export, obj);
 
     json_object_set_new(exports, chimera_nfs_export_get_name(export), obj);
 

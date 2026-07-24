@@ -9,6 +9,7 @@
 #include "common/logging.h"
 
 struct chimera_vfs_thread;
+struct chimera_nfs_export;
 struct evpl;
 struct evpl_http_request;
 
@@ -93,3 +94,19 @@ chimera_rest_send_json_response(
     struct evpl_http_request *request,
     int                       status,
     const char               *json_body);
+
+/**
+ * Populate every export field except the name (path, export_id, access
+ * mode, squash, anon ids, and the sec restriction when one is set) into a
+ * JSON object.  Shared between the export handlers (rest_exports.c), which
+ * add a "name" field, and the config serializer (rest_config.c), which keys
+ * its entries by name, so the two representations cannot drift apart.
+ *
+ * @param export Export to serialize
+ * @param obj    JSON object to add the fields to
+ */
+void
+chimera_rest_export_options_to_json(
+    const struct chimera_nfs_export *export,
+    json_t *obj);
+

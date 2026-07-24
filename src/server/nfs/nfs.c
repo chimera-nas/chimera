@@ -1369,6 +1369,12 @@ chimera_nfs_export_get_anongid(const struct chimera_nfs_export *export)
     return export->anongid;
 } /* chimera_nfs_export_get_anongid */
 
+SYMBOL_EXPORT uint32_t
+chimera_nfs_export_get_sec(const struct chimera_nfs_export *export)
+{
+    return export->sec_allowed;
+} /* chimera_nfs_export_get_sec */
+
 SYMBOL_EXPORT struct chimera_server_protocol nfs_protocol = {
     .init           = nfs_server_init,
     .destroy        = nfs_server_destroy,
