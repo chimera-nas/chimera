@@ -38,11 +38,14 @@
 
 #include "common/macros.h"
 
-/* nfs.h defines the public id range without seeing nfs_common.h; if the two
- * constants ever drift apart, the range check in chimera_nfs_add_export()
- * would index exports_by_id[] out of bounds. */
-_Static_assert(CHIMERA_NFS_EXPORT_ID_MAX == CHIMERA_NFS_MAX_EXPORTS - 1,
-               "CHIMERA_NFS_EXPORT_ID_MAX must match the exports_by_id table size");
+/* Export ids are held in uint16_t fields and stamped into a 16-bit wire
+ * file-handle field; exports_by_id[] is sized by that id space, so any
+ * uint16_t value indexes it safely.  The count cap must fit in the id space
+ * or add_export() could admit more exports than there are ids to assign. */
+_Static_assert(CHIMERA_NFS_EXPORT_ID_MAX == 65535u,
+               "export id space must match the 16-bit wire file-handle field");
+_Static_assert(CHIMERA_NFS_MAX_EXPORTS_DEFAULT <= CHIMERA_NFS_EXPORT_ID_MAX,
+               "default export count cap must fit in the id space");
 
 #define NFS_PROGIDX_PORTMAP_V2 0
 #define NFS_PROGIDX_MOUNT_V3   1
@@ -182,6 +185,10 @@ nfs_server_init(
     shared = calloc(1, sizeof(*shared));
 
     shared->config = config;
+
+    /* Concurrent-export count cap (distinct from the id space; see
+     * exports_by_id commentary in nfs_common.h). */
+    shared->max_exports = chimera_server_config_get_nfs_max_exports(config);
 
     nfs_fh_key_init(shared, config);
 
@@ -946,6 +953,16 @@ chimera_nfs_add_export(
 
     pthread_mutex_lock(&shared->exports_lock);
 
+    /* Enforce the configured concurrent-export count cap (nfs_max_exports)
+     * before either id path, so explicitly-pinned ids are bounded too. */
+    if ((uint32_t) shared->num_exports >= shared->max_exports) {
+        pthread_mutex_unlock(&shared->exports_lock);
+        chimera_nfs_error("Export limit reached (%u); cannot create export '%s'",
+                          shared->max_exports, name);
+        free(export);
+        return -ENOSPC;
+    }
+
     /* Assign a stable, non-zero id and publish into the direct index used for
      * per-request attribution.  Ids start at 1 (slot 0 reserved as invalid).
      * An explicit id is honored verbatim (or rejected if taken); auto
@@ -966,20 +983,24 @@ chimera_nfs_add_export(
     } else {
         uint16_t id = shared->next_export_id;
 
-        if (id == 0 || id >= CHIMERA_NFS_MAX_EXPORTS) {
+        /* id 0 means "unset" (startup) or a wrap of the uint16_t cursor past
+         * the end of the id space; either way restart at 1. */
+        if (id == 0) {
             id = 1;
         }
-        for (int probes = 0; probes < CHIMERA_NFS_MAX_EXPORTS - 1; probes++) {
+        for (uint32_t probes = 0; probes < CHIMERA_NFS_EXPORT_ID_MAX; probes++) {
             if (!shared->exports_by_id[id]) {
                 break;
             }
-            id = (id == CHIMERA_NFS_MAX_EXPORTS - 1) ? 1 : id + 1;
+            id = (id == CHIMERA_NFS_EXPORT_ID_MAX) ? 1 : id + 1;
         }
         if (shared->exports_by_id[id]) {
+            /* Unreachable while max_exports <= the id space (asserted for the
+             * default, validated for configured values); kept as a backstop. */
             pthread_mutex_unlock(&shared->exports_lock);
-            chimera_nfs_error("Export id space exhausted (max %d); cannot "
+            chimera_nfs_error("Export id space exhausted (max %u); cannot "
                               "create export '%s'",
-                              CHIMERA_NFS_MAX_EXPORTS, name);
+                              CHIMERA_NFS_EXPORT_ID_MAX, name);
             free(export);
             return -ENOSPC;
         }
@@ -1057,7 +1078,9 @@ chimera_nfs_get_export_by_id(
 {
     struct chimera_server_nfs_shared *shared = nfs_shared;
 
-    if (id == 0 || id >= CHIMERA_NFS_MAX_EXPORTS) {
+    /* exports_by_id[] covers the full uint16_t id space, so any id indexes it
+     * safely; slot 0 is reserved as invalid. */
+    if (id == 0) {
         return NULL;
     }
 
@@ -1079,7 +1102,7 @@ chimera_nfs_remove_export(
     LL_FOREACH(shared->exports, export)
     {
         if (strcmp(export->name, name) == 0) {
-            if (export->id != 0 && export->id < CHIMERA_NFS_MAX_EXPORTS) {
+            if (export->id != 0) {
                 shared->exports_by_id[export->id] = NULL;
             }
             LL_DELETE(shared->exports, export);

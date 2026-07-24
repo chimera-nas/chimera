@@ -551,6 +551,21 @@ uint32_t
 chimera_server_config_get_anonuid(
     const struct chimera_server_config *config);
 
+/* Concurrent NFS export count cap (default CHIMERA_NFS_MAX_EXPORTS_DEFAULT).
+ * Bounds how many exports may exist at once; the export id space
+ * (1..CHIMERA_NFS_EXPORT_ID_MAX) is fixed by the wire format and unaffected.
+ * Values outside 1..CHIMERA_NFS_EXPORT_ID_MAX are clamped into range with an
+ * error logged (0 would reject every create; a larger cap could never be
+ * reached, ids being unique per export). */
+void
+chimera_server_config_set_nfs_max_exports(
+    struct chimera_server_config *config,
+    uint32_t                      nfs_max_exports);
+
+uint32_t
+chimera_server_config_get_nfs_max_exports(
+    const struct chimera_server_config *config);
+
 void
 chimera_server_config_set_anongid(
     struct chimera_server_config *config,

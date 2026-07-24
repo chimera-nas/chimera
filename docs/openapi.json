@@ -1038,7 +1038,7 @@
           "export_id": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 4095,
+            "maximum": 65535,
             "description": "Stable export identifier embedded in NFS file handles"
           }
         }
@@ -1058,8 +1058,8 @@
           "export_id": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 4095,
-            "description": "Optional explicit export id (1..4095); auto-assigned when omitted. Must match across clustered servers exporting the same directory so file handles stay valid on failover."
+            "maximum": 65535,
+            "description": "Optional explicit export id (1..65535); auto-assigned when omitted. Must match across clustered servers exporting the same directory so file handles stay valid on failover."
           }
         }
       },
@@ -1155,7 +1155,7 @@
                 "export_id": {
                   "type": "integer",
                   "minimum": 1,
-                  "maximum": 4095,
+                  "maximum": 65535,
                   "description": "Stable export identifier embedded in NFS file handles"
                 }
               }

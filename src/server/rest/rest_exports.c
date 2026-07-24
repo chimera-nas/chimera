@@ -159,7 +159,7 @@ chimera_rest_handle_exports_create(
             v < 1 || v > CHIMERA_NFS_EXPORT_ID_MAX) {
             json_decref(root);
             chimera_rest_send_error(evpl, request, 400, "Bad Request",
-                                    "export_id must be an integer in range 1..4095");
+                                    "export_id must be an integer in range 1..65535");
             return;
         }
         export_id = (uint32_t) v;
@@ -196,6 +196,13 @@ chimera_rest_handle_exports_create(
         json_decref(root);
         chimera_rest_send_error(evpl, request, 400, "Bad Request",
                                 "export_id out of range");
+        return;
+    }
+
+    if (rc == -ENOSPC) {
+        json_decref(root);
+        chimera_rest_send_error(evpl, request, 409, "Conflict",
+                                "Export limit reached (server nfs_max_exports)");
         return;
     }
 
