@@ -73,6 +73,39 @@ class TestUsersAPI:
 class TestExportsAPI:
     """Test the NFS Exports API endpoints."""
 
+    # Every export name these tests create, for the pre-clean fixture below.
+    _TEST_EXPORTS = [
+        "sdk_test_export",
+        "sdk_test_export_id",
+        "sdk_test_export_access",
+        "sdk_test_export_anon",
+        "sdk_test_export_sec",
+        "sdk_test_export_dup",
+        "sdk_test_export_dup2",
+        "sdk_test_export_bad",
+        "sdk_test_export_bad_ac",
+        "sdk_test_export_auto1",
+        "sdk_test_export_pinned",
+        "sdk_test_export_auto2",
+        "sdk_test_export_free",
+        "sdk_test_export_reuse",
+    ]
+
+    @pytest.fixture(autouse=True)
+    def _clean_exports(self, client):
+        """Best-effort removal of leftovers from a previous killed run.
+
+        The tests pin fixed names and export ids (4000-4004); a run killed
+        before its finally-blocks would otherwise leave exports behind and
+        turn every later run into 409 conflicts until the server restarts.
+        """
+        for name in self._TEST_EXPORTS:
+            try:
+                client.delete_export(name)
+            except ChimeraAdminError:
+                pass
+        yield
+
     def test_list_exports(self, client):
         """Test listing NFS exports."""
         exports = client.list_exports()
@@ -124,25 +157,66 @@ class TestExportsAPI:
         finally:
             client.delete_export(name)
 
-    def test_create_export_options_round_trip(self, client):
-        """Access options given at create time are echoed back."""
-        name = "sdk_test_export_opts"
+    def test_create_export_access_round_trip(self, client):
+        """Access control given at create time is echoed back."""
+        name = "sdk_test_export_access"
         try:
             client.create_export(
                 name, "/testshare", export_id=4003,
-                options="ro", squash="none")
+                access="ro", squash="none")
 
             export = client.get_export(name)
             assert export["export_id"] == 4003
-            assert export["options"] == "ro"
+            assert export["access"] == "ro"
             assert export["squash"] == "none"
 
             # The running config round-trips them for chimera.json.
             config = client.get_config()
-            assert config["exports"][name]["options"] == "ro"
+            assert config["exports"][name]["access"] == "ro"
             assert config["exports"][name]["squash"] == "none"
         finally:
             client.delete_export(name)
+
+    def test_create_export_anon_ids_round_trip(self, client):
+        """anonuid/anongid given at create time are echoed back."""
+        name = "sdk_test_export_anon"
+        try:
+            client.create_export(
+                name, "/testshare", export_id=4004,
+                squash="all", anonuid=1234, anongid=5678)
+
+            export = client.get_export(name)
+            assert export["squash"] == "all"
+            assert export["anonuid"] == 1234
+            assert export["anongid"] == 5678
+        finally:
+            client.delete_export(name)
+
+    def test_create_export_sec_round_trip(self, client):
+        """A sec restriction given at create time is echoed back."""
+        name = "sdk_test_export_sec"
+        try:
+            client.create_export(name, "/testshare", sec=["krb5", "krb5i"])
+
+            export = client.get_export(name)
+            assert export["sec"] == ["krb5", "krb5i"]
+
+            # The running config round-trips it for chimera.json.
+            config = client.get_config()
+            assert config["exports"][name]["sec"] == ["krb5", "krb5i"]
+        finally:
+            client.delete_export(name)
+
+    def test_create_export_invalid_sec(self, client):
+        """Unknown sec flavors are rejected with 400, not widened to any."""
+        name = "sdk_test_export_sec"
+        with pytest.raises(ChimeraAdminError) as exc_info:
+            client.create_export(name, "/testshare", sec=["krb5x"])
+        assert exc_info.value.status_code == 400
+
+        with pytest.raises(ChimeraAdminError) as exc_info:
+            client.get_export(name)
+        assert exc_info.value.status_code == 404
 
     def test_create_export_duplicate_id(self, client):
         """A second export reusing an export_id is rejected with 409."""
@@ -166,7 +240,7 @@ class TestExportsAPI:
 
     def test_create_export_invalid_id(self, client):
         """Out-of-range export ids are rejected with 400."""
-        for bad_id in (0, 4096, -5):
+        for bad_id in (0, 65536, -5):
             with pytest.raises(ChimeraAdminError) as exc_info:
                 client.create_export(
                     "sdk_test_export_bad", "/testshare", export_id=bad_id)
@@ -174,6 +248,22 @@ class TestExportsAPI:
 
         with pytest.raises(ChimeraAdminError) as exc_info:
             client.get_export("sdk_test_export_bad")
+        assert exc_info.value.status_code == 404
+
+    def test_create_export_invalid_access_control(self, client):
+        """Unrecognized access/squash values are rejected with 400 rather
+        than silently replaced with the (more permissive) defaults."""
+        name = "sdk_test_export_bad_ac"
+        for bad_kwargs in (
+            {"access": "readonly"},
+            {"squash": "rootsquash"},
+        ):
+            with pytest.raises(ChimeraAdminError) as exc_info:
+                client.create_export(name, "/testshare", **bad_kwargs)
+            assert exc_info.value.status_code == 400
+
+        with pytest.raises(ChimeraAdminError) as exc_info:
+            client.get_export(name)
         assert exc_info.value.status_code == 404
 
     def test_auto_assign_skips_explicit_id(self, client):
@@ -186,7 +276,7 @@ class TestExportsAPI:
             client.create_export(auto1, "/testshare")
             created.append(auto1)
             base = client.get_export(auto1)["export_id"]
-            if base + 2 > 4095:
+            if base + 2 > 65535:
                 pytest.skip("export id space nearly exhausted")
 
             client.create_export(pinned, "/testshare", export_id=base + 1)

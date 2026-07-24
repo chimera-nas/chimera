@@ -70,7 +70,8 @@ python3 -m chimera_admin mount delete data
 
 # Users, NFS exports, SMB shares, and S3 buckets
 python3 -m chimera_admin user create alice --uid 1000 --gid 1000
-python3 -m chimera_admin export create home /home
+python3 -m chimera_admin export create home /home \
+    --export-id 7 --access ro --squash root --sec krb5
 python3 -m chimera_admin share list
 python3 -m chimera_admin bucket delete photos
 ```

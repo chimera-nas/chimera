@@ -45,6 +45,25 @@ class ChimeraAdminClient:
         self._base_url = f"{scheme}://{host}:{port}"
         self._session = requests.Session()
 
+    @staticmethod
+    def _http_error_message(e: requests.exceptions.HTTPError) -> str:
+        """Build an error string that keeps the server's explanation.
+
+        The server returns ``{"error": ..., "message": ...}`` bodies whose
+        message distinguishes causes that share a status code (e.g. a 409
+        for a duplicate export name vs a duplicate export_id). Reporting
+        only the requests exception would discard that and leave the user
+        guessing which validation failed.
+        """
+        if e.response is not None:
+            try:
+                message = e.response.json().get("message")
+            except ValueError:
+                message = None
+            if message:
+                return f"HTTP error: {e}: {message}"
+        return f"HTTP error: {e}"
+
     def _request(
         self,
         method: str,
@@ -78,7 +97,7 @@ class ChimeraAdminClient:
             raise ChimeraAdminError(f"Request timed out: {e}") from e
         except requests.exceptions.HTTPError as e:
             raise ChimeraAdminError(
-                f"HTTP error: {e}",
+                self._http_error_message(e),
                 status_code=e.response.status_code
                 if e.response is not None
                 else None,
@@ -242,37 +261,53 @@ class ChimeraAdminClient:
         name: str,
         path: str,
         export_id: Optional[int] = None,
-        options: Optional[str] = None,
+        access: Optional[str] = None,
         squash: Optional[str] = None,
+        anonuid: Optional[int] = None,
+        anongid: Optional[int] = None,
+        sec: Optional[list] = None,
     ) -> dict:
         """Create a new NFS export.
 
         Args:
             name: Export name.
             path: VFS path for the export.
-            export_id: Optional stable export id (1-4095), embedded in NFS
+            export_id: Optional stable export id (1-65535), embedded in NFS
                 file handles; auto-assigned when omitted. Clustered servers
                 exporting the same directory must pin the same id so file
                 handles stay valid across failover.
-            options: Optional access mode, "ro" or "rw" (server default: rw).
+            access: Optional access mode, "ro" or "rw" (server default: rw).
             squash: Optional squash policy, "none", "root", or "all"
                 (server default: none).
+            anonuid: Optional anonymous uid squashed callers are mapped to
+                (server default: 65534).
+            anongid: Optional anonymous gid squashed callers are mapped to
+                (server default: 65534).
+            sec: Optional list of allowed RPC security flavors ("sys",
+                "krb5", "krb5i", "krb5p"); other flavors are rejected.
+                Omitted or empty permits any flavor (the server default).
 
         Returns:
             Response message.
 
         Raises:
             ChimeraAdminError: If the request fails (e.g. 400 for an
-                out-of-range export_id, 409 if the name or export_id is
-                already in use).
+                out-of-range export_id or an unknown sec flavor, 409 if the
+                name or export_id is already in use).
         """
         data = {"name": name, "path": path}
         if export_id is not None:
             data["export_id"] = export_id
-        if options is not None:
-            data["options"] = options
+        if access is not None:
+            data["access"] = access
         if squash is not None:
             data["squash"] = squash
+        if anonuid is not None:
+            data["anonuid"] = anonuid
+        if anongid is not None:
+            data["anongid"] = anongid
+        if sec is not None:
+            data["sec"] = sec
         return self._request("POST", "/api/v1/exports", json=data)
 
     def delete_export(self, name: str) -> None:
@@ -490,7 +525,7 @@ class ChimeraAdminClient:
             raise ChimeraAdminError(f"Request timed out: {e}") from e
         except requests.exceptions.HTTPError as e:
             raise ChimeraAdminError(
-                f"HTTP error: {e}",
+                self._http_error_message(e),
                 status_code=e.response.status_code
                 if e.response is not None
                 else None,
