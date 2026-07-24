@@ -14,3 +14,5 @@ configure_file(
   ${CMAKE_CURRENT_BINARY_DIR}/daemon.h
 )
 include_directories(${CMAKE_CURRENT_BINARY_DIR})
+
+add_subdirectory(tests)
