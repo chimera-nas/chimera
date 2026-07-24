@@ -206,9 +206,15 @@ client_test_init(
             exit(EXIT_FAILURE);
         }
 
-        // Create NFSv3 server export entry
+        // Create NFSv3 server export entry.  Pin an id above the default
+        // count cap (4096) so the tests exercise pinned-id file-handle
+        // attribution across the full 16-bit id space.
         if (env->use_nfs) {
-            chimera_server_create_export(env->server, "/share", "/share", 0, NULL);
+            if (chimera_server_create_export(env->server, "/share", "/share",
+                                             4242, NULL) != 0) {
+                fprintf(stderr, "Failed to create /share export\n");
+                exit(EXIT_FAILURE);
+            }
         }
 
         chimera_server_start(env->server);
