@@ -470,7 +470,7 @@ posix_test_start_nfs_server(struct posix_test_env *env)
     chimera_server_mount(env->server, "share", share_module, share_module_path,
                          NULL);
 
-    chimera_server_create_export(env->server, "/share", "/share", 0);
+    chimera_server_create_export(env->server, "/share", "/share", 0, NULL);
 
     if (posix_test_ro_export) {
         /* Second, read-only mount of the same backend rooted at the subdir.
@@ -486,7 +486,7 @@ posix_test_start_nfs_server(struct posix_test_env *env)
             exit(EXIT_FAILURE);
         }
 
-        chimera_server_create_export(env->server, "/roshare", "/roshare", 0);
+        chimera_server_create_export(env->server, "/roshare", "/roshare", 0, NULL);
     }
 
     chimera_server_start(env->server);

@@ -1245,18 +1245,30 @@ main(
                                 squash == CHIMERA_NFS_SQUASH_NONE ? "no_root_squash" :
                                 "root_squash",
                                 export_id_str);
-            if (chimera_server_create_export(server, name, path, export_id) != 0) {
-                /* Duplicate or unusable export_id: proceeding would mint file
-                 * handles under a different id than the operator pinned, which
-                 * breaks cluster failover in a way clients only notice later.
-                 * Fail hard like the mount-path errors above. */
+            /* All validated settings are applied atomically at creation, so
+             * the export is never live with permissive defaults while a
+             * follow-up set_options/set_sec call is pending. */
+            struct chimera_nfs_export_opts opts = {
+                .has_access  = 1,
+                .has_squash  = 1,
+                .has_anonuid = 1,
+                .has_anongid = 1,
+                .has_sec     = 1,
+                .access      = access,
+                .squash      = squash,
+                .anonuid     = anonuid,
+                .anongid     = anongid,
+                .sec_allowed = sec_mask,
+            };
+
+            if (chimera_server_create_export(server, name, path, export_id,
+                                             &opts) != 0) {
+                /* Duplicate name or unusable export_id: proceeding would mint
+                 * file handles under a different id than the operator pinned,
+                 * which breaks cluster failover in a way clients only notice
+                 * later.  Fail hard like the mount-path errors above. */
                 chimera_server_error("Failed to create export '%s'", name);
                 exit(1);
-            }
-            chimera_server_export_set_options(server, name, access, squash,
-                                              anonuid, anongid);
-            if (sec_mask) {
-                chimera_server_export_set_sec(server, name, sec_mask);
             }
         }
     }

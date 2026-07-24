@@ -458,7 +458,7 @@
             }
           },
           "400": {
-            "description": "Bad request",
+            "description": "Bad request (missing name/path, out-of-range export_id, an unrecognized access/squash value, a non-integer or out-of-range anonuid/anongid, or the legacy \"options\" field, which was renamed to \"access\")",
             "content": {
               "application/json": {
                 "schema": {
@@ -468,7 +468,7 @@
             }
           },
           "409": {
-            "description": "Conflict - export name or export_id already in use",
+            "description": "Conflict - export name or export_id already in use, or the configured nfs_max_exports limit is reached",
             "content": {
               "application/json": {
                 "schema": {
@@ -1040,6 +1040,24 @@
             "minimum": 1,
             "maximum": 65535,
             "description": "Stable export identifier embedded in NFS file handles"
+          },
+          "access": {
+            "type": "string",
+            "enum": ["ro", "rw"],
+            "description": "Access mode"
+          },
+          "squash": {
+            "type": "string",
+            "enum": ["none", "root", "all"],
+            "description": "Credential squashing policy"
+          },
+          "anonuid": {
+            "type": "integer",
+            "description": "Anonymous uid squashed callers are mapped to"
+          },
+          "anongid": {
+            "type": "integer",
+            "description": "Anonymous gid squashed callers are mapped to"
           }
         }
       },
@@ -1060,6 +1078,28 @@
             "minimum": 1,
             "maximum": 65535,
             "description": "Optional explicit export id (1..65535); auto-assigned when omitted. Must match across clustered servers exporting the same directory so file handles stay valid on failover."
+          },
+          "access": {
+            "type": "string",
+            "enum": ["ro", "rw"],
+            "description": "Optional access mode (default rw)"
+          },
+          "squash": {
+            "type": "string",
+            "enum": ["none", "root", "all", "no_root_squash", "root_squash", "all_squash"],
+            "description": "Optional credential squashing policy (default none). The *_squash values are aliases; responses always use the canonical none/root/all."
+          },
+          "anonuid": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295,
+            "description": "Optional anonymous uid squashed callers are mapped to"
+          },
+          "anongid": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295,
+            "description": "Optional anonymous gid squashed callers are mapped to"
           }
         }
       },
@@ -1157,6 +1197,24 @@
                   "minimum": 1,
                   "maximum": 65535,
                   "description": "Stable export identifier embedded in NFS file handles"
+                },
+                "access": {
+                  "type": "string",
+                  "enum": ["ro", "rw"],
+                  "description": "Access mode"
+                },
+                "squash": {
+                  "type": "string",
+                  "enum": ["none", "root", "all"],
+                  "description": "Credential squashing policy"
+                },
+                "anonuid": {
+                  "type": "integer",
+                  "description": "Anonymous uid squashed callers are mapped to"
+                },
+                "anongid": {
+                  "type": "integer",
+                  "description": "Anonymous gid squashed callers are mapped to"
                 }
               }
             }

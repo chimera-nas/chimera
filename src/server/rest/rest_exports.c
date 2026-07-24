@@ -122,14 +122,19 @@ chimera_rest_handle_exports_create(
     const char                 *body,
     int                         body_len)
 {
-    json_t      *root;
-    json_error_t error;
-    const char  *name;
-    const char  *path;
-    json_t      *exp_id_j;
-    uint32_t     export_id = 0;
-    int          rc;
-    json_t      *obj;
+    json_t                        *root;
+    json_error_t                   error;
+    const char                    *name;
+    const char                    *path;
+    json_t                        *exp_id_j;
+    json_t                        *access_j;
+    json_t                        *squash_j;
+    json_t                        *anonuid_j;
+    json_t                        *anongid_j;
+    uint32_t                       export_id = 0;
+    struct chimera_nfs_export_opts opts      = { 0 };
+    int                            rc;
+    json_t                        *obj;
 
     root = json_loadb(body, body_len, 0, &error);
     if (!root) {
@@ -175,90 +180,116 @@ chimera_rest_handle_exports_create(
         return;
     }
 
-    if (chimera_server_get_export(thread->shared->server, name)) {
-        json_decref(root);
+    /* Validate the optional export options before creating anything:
+     * an unrecognized value silently falling back to the defaults would turn
+     * a requested read-only or squashed export into an open one, and a
+     * non-integer anonuid/anongid would map squashed callers to uid/gid 0. */
+    access_j = json_object_get(root, "access");
+    if (access_j) {
+        const char *s = json_string_value(access_j);
+
+        opts.has_access = 1;
+        if (s && strcasecmp(s, "ro") == 0) {
+            opts.access = CHIMERA_NFS_EXPORT_ACCESS_RO;
+        } else if (s && strcasecmp(s, "rw") == 0) {
+            opts.access = CHIMERA_NFS_EXPORT_ACCESS_RW;
+        } else {
+            json_decref(root);
+            chimera_rest_send_error(evpl, request, 400, "Bad Request",
+                                    "access must be \"ro\" or \"rw\"");
+            return;
+        }
+    }
+
+    squash_j = json_object_get(root, "squash");
+    if (squash_j) {
+        const char *s = json_string_value(squash_j);
+
+        opts.has_squash = 1;
+        if (s && (strcasecmp(s, "none") == 0 ||
+                  strcasecmp(s, "no_root_squash") == 0)) {
+            opts.squash = CHIMERA_NFS_SQUASH_NONE;
+        } else if (s && (strcasecmp(s, "all") == 0 ||
+                         strcasecmp(s, "all_squash") == 0)) {
+            opts.squash = CHIMERA_NFS_SQUASH_ALL;
+        } else if (s && (strcasecmp(s, "root") == 0 ||
+                         strcasecmp(s, "root_squash") == 0)) {
+            opts.squash = CHIMERA_NFS_SQUASH_ROOT;
+        } else {
+            json_decref(root);
+            chimera_rest_send_error(evpl, request, 400, "Bad Request",
+                                    "squash must be \"none\", \"root\", or \"all\"");
+            return;
+        }
+    }
+
+    anonuid_j = json_object_get(root, "anonuid");
+    if (anonuid_j) {
+        json_int_t v = json_integer_value(anonuid_j);
+
+        if (!json_is_integer(anonuid_j) || v < 0 || v > UINT32_MAX) {
+            json_decref(root);
+            chimera_rest_send_error(evpl, request, 400, "Bad Request",
+                                    "anonuid must be an integer in range 0..4294967295");
+            return;
+        }
+        opts.has_anonuid = 1;
+        opts.anonuid     = (uint32_t) v;
+    }
+
+    anongid_j = json_object_get(root, "anongid");
+    if (anongid_j) {
+        json_int_t v = json_integer_value(anongid_j);
+
+        if (!json_is_integer(anongid_j) || v < 0 || v > UINT32_MAX) {
+            json_decref(root);
+            chimera_rest_send_error(evpl, request, 400, "Bad Request",
+                                    "anongid must be an integer in range 0..4294967295");
+            return;
+        }
+        opts.has_anongid = 1;
+        opts.anongid     = (uint32_t) v;
+    }
+
+    /* Create the export with the validated options applied atomically, so it
+     * is never live half-configured.  Name and id uniqueness are decided
+     * inside create_export under its lock: a handler-side check-then-create
+     * would race a concurrent create/delete of the same name (REST handlers
+     * run one per core thread). */
+    rc = chimera_server_create_export(thread->shared->server, name, path,
+                                      export_id, &opts);
+
+    json_decref(root);
+
+    if (rc == -EEXIST) {
         chimera_rest_send_error(evpl, request, 409, "Conflict",
                                 "Export with that name already exists");
         return;
     }
 
-    rc = chimera_server_create_export(thread->shared->server, name, path,
-                                      export_id);
-
-    if (rc == -EEXIST) {
-        json_decref(root);
+    if (rc == -EADDRINUSE) {
         chimera_rest_send_error(evpl, request, 409, "Conflict",
                                 "export_id already in use");
         return;
     }
 
     if (rc == -EINVAL) {
-        json_decref(root);
         chimera_rest_send_error(evpl, request, 400, "Bad Request",
                                 "export_id out of range");
         return;
     }
 
     if (rc == -ENOSPC) {
-        json_decref(root);
         chimera_rest_send_error(evpl, request, 409, "Conflict",
                                 "Export limit reached (server nfs_max_exports)");
         return;
     }
 
     if (rc != 0) {
-        json_decref(root);
         chimera_rest_send_error(evpl, request, 500, "Internal Server Error",
                                 "Failed to create export");
         return;
     }
-
-    /* Apply optional export options.  create_export seeded the defaults
-     * (rw, no squashing, configured anon); seed from those and override only
-     * the fields present in the request body. */
-    {
-        const struct chimera_nfs_export *created =
-            chimera_server_get_export(thread->shared->server, name);
-        const char                      *access_s  = json_string_value(json_object_get(root, "access"));
-        const char                      *squash_s  = json_string_value(json_object_get(root, "squash"));
-        json_t                          *anonuid_j = json_object_get(root, "anonuid");
-        json_t                          *anongid_j = json_object_get(root, "anongid");
-        uint32_t                         access    = chimera_nfs_export_get_access(created);
-        uint32_t                         squash    = chimera_nfs_export_get_squash(created);
-        uint32_t                         anonuid   = chimera_nfs_export_get_anonuid(created);
-        uint32_t                         anongid   = chimera_nfs_export_get_anongid(created);
-
-        if (access_s) {
-            if (strcasecmp(access_s, "ro") == 0) {
-                access = CHIMERA_NFS_EXPORT_ACCESS_RO;
-            } else if (strcasecmp(access_s, "rw") == 0) {
-                access = CHIMERA_NFS_EXPORT_ACCESS_RW;
-            }
-        }
-        if (squash_s) {
-            if (strcasecmp(squash_s, "none") == 0 ||
-                strcasecmp(squash_s, "no_root_squash") == 0) {
-                squash = CHIMERA_NFS_SQUASH_NONE;
-            } else if (strcasecmp(squash_s, "all") == 0 ||
-                       strcasecmp(squash_s, "all_squash") == 0) {
-                squash = CHIMERA_NFS_SQUASH_ALL;
-            } else if (strcasecmp(squash_s, "root") == 0 ||
-                       strcasecmp(squash_s, "root_squash") == 0) {
-                squash = CHIMERA_NFS_SQUASH_ROOT;
-            }
-        }
-        if (anonuid_j) {
-            anonuid = (uint32_t) json_integer_value(anonuid_j);
-        }
-        if (anongid_j) {
-            anongid = (uint32_t) json_integer_value(anongid_j);
-        }
-
-        chimera_server_export_set_options(thread->shared->server, name, access,
-                                          squash, anonuid, anongid);
-    }
-
-    json_decref(root);
 
     obj = json_object();
     json_object_set_new(obj, "message", json_string("Export created"));
