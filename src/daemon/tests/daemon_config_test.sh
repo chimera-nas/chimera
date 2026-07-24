@@ -123,6 +123,17 @@ expect_startup_failure "invalid access value rejected" \
 expect_startup_failure "invalid squash value rejected" \
     '{ "/e": { "path": "/data", "squash": "rootsquash" } }'
 
+# The boolean squash aliases silently ignored on a non-boolean value would
+# leave the export unsquashed (the permissive default).
+expect_startup_failure "string root_squash rejected" \
+    '{ "/e": { "path": "/data", "root_squash": "true" } }'
+
+expect_startup_failure "integer all_squash rejected" \
+    '{ "/e": { "path": "/data", "all_squash": 1 } }'
+
+expect_startup_failure "string no_root_squash rejected" \
+    '{ "/e": { "path": "/data", "no_root_squash": "yes" } }'
+
 expect_startup_failure "export_id 0 rejected" \
     '{ "/e": { "path": "/data", "export_id": 0 } }'
 
@@ -163,9 +174,10 @@ echo "  Test: valid config starts; auto-assignment skips pinned ids..."
 # single ordered pass would hand the auto export id 1 and then fail startup
 # on the pinned entry's conflict; the two-pass parse must give the pinned
 # entry id 1 and the auto entry id 2.  The sec restriction on the pinned
-# entry must round-trip through GET /api/v1/config.
+# entry must round-trip through GET /api/v1/config.  The boolean root_squash
+# alias on the auto entry must parse (and serialize as the canonical "root").
 write_config '{
-    "/a_auto":   { "path": "/data" },
+    "/a_auto":   { "path": "/data", "root_squash": true },
     "/b_pinned": { "path": "/data", "export_id": 1, "sec": ["krb5"] }
 }' > "${TMPDIR}/good.json"
 
@@ -209,6 +221,13 @@ else
         pass "auto export skipped pinned id, got export_id 2"
     else
         fail "auto export skipped pinned id, got export_id 2 (body: ${BODY})"
+    fi
+
+    if echo "${BODY}" | grep -o '{[^}]*}' | grep '"name":"/a_auto"' |
+        grep -q '"squash":"root"'; then
+        pass "boolean root_squash alias parsed to squash=root"
+    else
+        fail "boolean root_squash alias parsed to squash=root (body: ${BODY})"
     fi
 
     if echo "${BODY}" | grep -o '{[^}]*}' | grep '"name":"/b_pinned"' |
