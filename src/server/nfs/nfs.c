@@ -921,13 +921,15 @@ nfs_server_thread_destroy(void *data)
 
 SYMBOL_EXPORT int
 chimera_nfs_add_export(
-    void       *nfs_shared,
-    const char *name,
-    const char *path,
-    uint32_t    export_id)
+    void                                 *nfs_shared,
+    const char                           *name,
+    const char                           *path,
+    uint32_t                              export_id,
+    const struct chimera_nfs_export_opts *opts)
 {
     struct chimera_server_nfs_shared *shared = nfs_shared;
     struct chimera_nfs_export        *export;
+    struct chimera_nfs_export        *existing;
 
     if (export_id > CHIMERA_NFS_EXPORT_ID_MAX) {
         chimera_nfs_error("Export '%s' id %u out of range (1..%u)",
@@ -935,15 +937,25 @@ chimera_nfs_add_export(
         return -EINVAL;
     }
 
+    /* This path is reachable from a runtime REST request, not just startup,
+     * so an allocation failure must surface as an error to the caller rather
+     * than crash the daemon on the dereference below. */
     export = calloc(1, sizeof(*export));
+
+    if (!export) {
+        chimera_nfs_error("Failed to allocate export '%s'", name);
+        return -ENOMEM;
+    }
 
     snprintf(export->name, sizeof(export->name), "%s", name);
     snprintf(export->path, sizeof(export->path), "%s", path);
 
     /* Defaults: read-write, no squashing (preserving historical behavior where
      * a client's credentials pass through unchanged); anon = configured global
-     * anonuid/anongid (65534 by default).  root_squash / all_squash are opt-in
-     * per export via chimera_nfs_export_set_options(). */
+     * anonuid/anongid (65534 by default); any security flavor.  Callers
+     * override individual fields via opts so the export is published fully
+     * configured; a post-create set_options call would leave a window where
+     * NFS request threads see the permissive defaults. */
     export->access  = CHIMERA_NFS_EXPORT_ACCESS_RW;
     export->squash  = CHIMERA_NFS_SQUASH_NONE;
     export->anonuid = shared->config ?
@@ -951,7 +963,40 @@ chimera_nfs_add_export(
     export->anongid = shared->config ?
         chimera_server_config_get_anongid(shared->config) : CHIMERA_VFS_ANON_GID;
 
+    if (opts) {
+        if (opts->has_access) {
+            export->access = opts->access;
+        }
+        if (opts->has_squash) {
+            export->squash = opts->squash;
+        }
+        if (opts->has_anonuid) {
+            export->anonuid = opts->anonuid;
+        }
+        if (opts->has_anongid) {
+            export->anongid = opts->anongid;
+        }
+        if (opts->has_sec) {
+            export->sec_allowed = opts->sec_allowed;
+        }
+    }
+
     pthread_mutex_lock(&shared->exports_lock);
+
+    /* Name uniqueness must be decided here, under the same lock as the
+     * insert: a caller-side check-then-create is a race in which two
+     * concurrent creates of the same name both succeed, leaving the second
+     * export unreachable (name lookups stop at the first match) and its id
+     * leaked. */
+    LL_FOREACH(shared->exports, existing)
+    {
+        if (strcmp(existing->name, name) == 0) {
+            pthread_mutex_unlock(&shared->exports_lock);
+            chimera_nfs_error("Export '%s' already exists", name);
+            free(export);
+            return -EEXIST;
+        }
+    }
 
     /* Enforce the configured concurrent-export count cap (nfs_max_exports)
      * before either id path, so explicitly-pinned ids are bounded too. */
@@ -977,7 +1022,7 @@ chimera_nfs_add_export(
                               shared->exports_by_id[export_id]->name);
             pthread_mutex_unlock(&shared->exports_lock);
             free(export);
-            return -EEXIST;
+            return -EADDRINUSE;
         }
         export->id = (uint16_t) export_id;
     } else {

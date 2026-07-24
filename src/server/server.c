@@ -2236,16 +2236,18 @@ chimera_server_share_set_force_level2_oplock(
 
 SYMBOL_EXPORT int
 chimera_server_create_export(
-    struct chimera_server *server,
-    const char            *name,
-    const char            *path,
-    uint32_t               export_id)
+    struct chimera_server                *server,
+    const char                           *name,
+    const char                           *path,
+    uint32_t                              export_id,
+    const struct chimera_nfs_export_opts *opts)
 {
     if (!server->nfs_shared) {
         return -1;
     }
 
-    return chimera_nfs_add_export(server->nfs_shared, name, path, export_id);
+    return chimera_nfs_add_export(server->nfs_shared, name, path, export_id,
+                                  opts);
 } /* chimera_server_create_export */
 
 SYMBOL_EXPORT int

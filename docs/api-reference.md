@@ -184,14 +184,27 @@ GET /api/v1/exports
 
 ```json
 [
-  { "name": "export", "path": "/memfs/export" }
+  {
+    "name": "export",
+    "path": "/memfs/export",
+    "export_id": 1,
+    "access": "rw",
+    "squash": "none",
+    "anonuid": 65534,
+    "anongid": 65534
+  }
 ]
 ```
 
-| Field  | Type   | Description |
-|--------|--------|-------------|
-| `name` | string | Export name |
-| `path` | string | VFS path    |
+| Field       | Type   | Description |
+|-------------|--------|-------------|
+| `name`      | string | Export name |
+| `path`      | string | VFS path    |
+| `export_id` | int    | Stable id (1..65535) embedded in NFS file handles |
+| `access`    | string | Access mode: `ro` or `rw` |
+| `squash`    | string | Credential squashing policy: `none`, `root`, or `all` |
+| `anonuid`   | int    | Anonymous uid squashed callers are mapped to |
+| `anongid`   | int    | Anonymous gid squashed callers are mapped to |
 
 ```bash
 curl http://localhost:8080/api/v1/exports
@@ -207,7 +220,8 @@ GET /api/v1/exports/{name}
 |----------------|--------|-----------------|
 | `name`         | string | Name of export  |
 
-**Response `200`** - a single export object (`name`, `path`).
+**Response `200`** - a single export object with the same fields as a list
+entry (`name`, `path`, `export_id`, `access`, `squash`, `anonuid`, `anongid`).
 
 **Errors:** `404` if the export does not exist.
 
@@ -223,10 +237,15 @@ POST /api/v1/exports
 
 **Request body**
 
-| Field  | Type   | Required | Description |
-|--------|--------|----------|-------------|
-| `name` | string | yes      | Export name |
-| `path` | string | yes      | VFS path    |
+| Field       | Type   | Required | Description |
+|-------------|--------|----------|-------------|
+| `name`      | string | yes      | Export name |
+| `path`      | string | yes      | VFS path    |
+| `export_id` | int    | no       | Explicit stable id (1..65535); auto-assigned when omitted. Clustered servers exporting the same directory must pin the same id so file handles stay valid across failover. |
+| `access`    | string | no       | Access mode, `ro` or `rw` (default `rw`). Replaces the former `options` field, which is now rejected with `400`. |
+| `squash`    | string | no       | Squashing policy: `none`/`no_root_squash`, `root`/`root_squash`, or `all`/`all_squash` (default `none`). |
+| `anonuid`   | int    | no       | Anonymous uid squashed callers are mapped to (default `65534`). |
+| `anongid`   | int    | no       | Anonymous gid squashed callers are mapped to (default `65534`). |
 
 **Response `201`**
 
@@ -234,12 +253,16 @@ POST /api/v1/exports
 { "message": "Export created" }
 ```
 
-**Errors:** `400` (invalid JSON, or missing `name`/`path`), `500` (creation failed).
+**Errors:** `400` (invalid JSON, missing `name`/`path`, out-of-range
+`export_id`, an unrecognized `access`/`squash` value, a non-integer or
+out-of-range `anonuid`/`anongid`, or the legacy `options` field), `409`
+(export name or `export_id` already in use, or the `nfs_max_exports` limit
+is reached), `500` (creation failed).
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/exports \
   -H "Content-Type: application/json" \
-  -d '{"name":"export","path":"/memfs/export"}'
+  -d '{"name":"export","path":"/memfs/export","export_id":7,"access":"ro","squash":"root"}'
 ```
 
 ### Delete export
