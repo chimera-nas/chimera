@@ -937,7 +937,7 @@ chimera_nfs_add_export(
      * a client's credentials pass through unchanged); anon = configured global
      * anonuid/anongid (65534 by default).  root_squash / all_squash are opt-in
      * per export via chimera_nfs_export_set_options(). */
-    export->options = CHIMERA_NFS_EXPORT_OPT_RW;
+    export->access  = CHIMERA_NFS_EXPORT_ACCESS_RW;
     export->squash  = CHIMERA_NFS_SQUASH_NONE;
     export->anonuid = shared->config ?
         chimera_server_config_get_anonuid(shared->config) : CHIMERA_VFS_ANON_UID;
@@ -1000,7 +1000,7 @@ SYMBOL_EXPORT int
 chimera_nfs_export_set_options(
     void       *nfs_shared,
     const char *name,
-    uint32_t    options,
+    uint32_t    access,
     uint32_t    squash,
     uint32_t    anonuid,
     uint32_t    anongid)
@@ -1013,7 +1013,7 @@ chimera_nfs_export_set_options(
     LL_FOREACH(shared->exports, export)
     {
         if (strcmp(export->name, name) == 0) {
-            export->options = options;
+            export->access  = access;
             export->squash  = squash;
             export->anonuid = anonuid;
             export->anongid = anongid;
@@ -1278,10 +1278,10 @@ chimera_nfs_export_get_id(const struct chimera_nfs_export *export)
 } /* chimera_nfs_export_get_id */
 
 SYMBOL_EXPORT uint32_t
-chimera_nfs_export_get_options(const struct chimera_nfs_export *export)
+chimera_nfs_export_get_access(const struct chimera_nfs_export *export)
 {
-    return export->options;
-} /* chimera_nfs_export_get_options */
+    return export->access;
+} /* chimera_nfs_export_get_access */
 
 SYMBOL_EXPORT uint32_t
 chimera_nfs_export_get_squash(const struct chimera_nfs_export *export)

@@ -693,7 +693,7 @@ int
 chimera_server_export_set_options(
     struct chimera_server *server,
     const char            *name,
-    uint32_t               options,
+    uint32_t               access,
     uint32_t               squash,
     uint32_t               anonuid,
     uint32_t               anongid);

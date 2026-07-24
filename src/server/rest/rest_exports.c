@@ -21,15 +21,15 @@ struct export_list_ctx {
     json_t *array;
 };
 
-/* Populate the per-export access options (mode, squash, anon ids) into obj. */
+/* Populate the per-export options (access mode, squash, anon ids) into obj. */
 static void
 export_options_to_json(
     const struct chimera_nfs_export *export,
     json_t                          *obj)
 {
-    json_object_set_new(obj, "options",
-                        json_string(chimera_nfs_export_get_options(export) &
-                                    CHIMERA_NFS_EXPORT_OPT_RO ? "ro" : "rw"));
+    json_object_set_new(obj, "access",
+                        json_string(chimera_nfs_export_get_access(export) &
+                                    CHIMERA_NFS_EXPORT_ACCESS_RO ? "ro" : "rw"));
     switch (chimera_nfs_export_get_squash(export)) {
         case CHIMERA_NFS_SQUASH_ALL:
             json_object_set_new(obj, "squash", json_string("all"));
@@ -165,6 +165,16 @@ chimera_rest_handle_exports_create(
         export_id = (uint32_t) v;
     }
 
+    /* The access mode field was renamed from "options" to "access".  Reject
+     * the old key before creating anything: silently ignoring it would turn
+     * a requested read-only export read-write. */
+    if (json_object_get(root, "options")) {
+        json_decref(root);
+        chimera_rest_send_error(evpl, request, 400, "Bad Request",
+                                "\"options\" has been renamed to \"access\"");
+        return;
+    }
+
     if (chimera_server_get_export(thread->shared->server, name)) {
         json_decref(root);
         chimera_rest_send_error(evpl, request, 409, "Conflict",
@@ -196,26 +206,26 @@ chimera_rest_handle_exports_create(
         return;
     }
 
-    /* Apply optional access options.  create_export seeded secure defaults
-     * (root_squash, rw, configured anon); seed from those and override only the
-     * fields present in the request body. */
+    /* Apply optional export options.  create_export seeded the defaults
+     * (rw, no squashing, configured anon); seed from those and override only
+     * the fields present in the request body. */
     {
         const struct chimera_nfs_export *created =
             chimera_server_get_export(thread->shared->server, name);
-        const char                      *opt_s     = json_string_value(json_object_get(root, "options"));
+        const char                      *access_s  = json_string_value(json_object_get(root, "access"));
         const char                      *squash_s  = json_string_value(json_object_get(root, "squash"));
         json_t                          *anonuid_j = json_object_get(root, "anonuid");
         json_t                          *anongid_j = json_object_get(root, "anongid");
-        uint32_t                         options   = chimera_nfs_export_get_options(created);
+        uint32_t                         access    = chimera_nfs_export_get_access(created);
         uint32_t                         squash    = chimera_nfs_export_get_squash(created);
         uint32_t                         anonuid   = chimera_nfs_export_get_anonuid(created);
         uint32_t                         anongid   = chimera_nfs_export_get_anongid(created);
 
-        if (opt_s) {
-            if (strcasecmp(opt_s, "ro") == 0) {
-                options = CHIMERA_NFS_EXPORT_OPT_RO;
-            } else if (strcasecmp(opt_s, "rw") == 0) {
-                options = CHIMERA_NFS_EXPORT_OPT_RW;
+        if (access_s) {
+            if (strcasecmp(access_s, "ro") == 0) {
+                access = CHIMERA_NFS_EXPORT_ACCESS_RO;
+            } else if (strcasecmp(access_s, "rw") == 0) {
+                access = CHIMERA_NFS_EXPORT_ACCESS_RW;
             }
         }
         if (squash_s) {
@@ -237,7 +247,7 @@ chimera_rest_handle_exports_create(
             anongid = (uint32_t) json_integer_value(anongid_j);
         }
 
-        chimera_server_export_set_options(thread->shared->server, name, options,
+        chimera_server_export_set_options(thread->shared->server, name, access,
                                           squash, anonuid, anongid);
     }
 

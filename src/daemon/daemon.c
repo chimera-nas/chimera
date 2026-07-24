@@ -1094,7 +1094,7 @@ main(
                 continue;
             }
 
-            json_t     *opt_j     = json_object_get(export, "options");
+            json_t     *access_j  = json_object_get(export, "access");
             json_t     *squash_j  = json_object_get(export, "squash");
             json_t     *rsq_j     = json_object_get(export, "root_squash");
             json_t     *norsq_j   = json_object_get(export, "no_root_squash");
@@ -1102,24 +1102,34 @@ main(
             json_t     *anonuid_j = json_object_get(export, "anonuid");
             json_t     *anongid_j = json_object_get(export, "anongid");
             uint32_t    export_id = 0;
-            const char *opt_s     = json_string_value(opt_j);
+            const char *access_s  = json_string_value(access_j);
             const char *squash_s  = json_string_value(squash_j);
-            uint32_t    options   = CHIMERA_NFS_EXPORT_OPT_RW;
+            uint32_t    access    = CHIMERA_NFS_EXPORT_ACCESS_RW;
             uint32_t    squash    = CHIMERA_NFS_SQUASH_NONE;
             uint32_t    anonuid   = chimera_server_config_get_anonuid(server_config);
             uint32_t    anongid   = chimera_server_config_get_anongid(server_config);
 
             path = json_string_value(json_object_get(export, "path"));
 
+            /* The access mode key was renamed from "options" to "access".
+             * Ignoring the old key would silently turn an "options": "ro"
+             * export read-write, so reject it outright. */
+            if (json_object_get(export, "options")) {
+                chimera_server_error("Export '%s': \"options\" has been "
+                                     "renamed to \"access\"; update the config",
+                                     name);
+                exit(1);
+            }
+
             /* Access mode: "ro" | "rw" (default rw). */
-            if (opt_s) {
-                if (strcasecmp(opt_s, "ro") == 0) {
-                    options = CHIMERA_NFS_EXPORT_OPT_RO;
-                } else if (strcasecmp(opt_s, "rw") == 0) {
-                    options = CHIMERA_NFS_EXPORT_OPT_RW;
+            if (access_s) {
+                if (strcasecmp(access_s, "ro") == 0) {
+                    access = CHIMERA_NFS_EXPORT_ACCESS_RO;
+                } else if (strcasecmp(access_s, "rw") == 0) {
+                    access = CHIMERA_NFS_EXPORT_ACCESS_RW;
                 } else {
-                    chimera_server_error("Invalid export '%s' options value '%s' "
-                                         "(expected ro/rw)", name, opt_s);
+                    chimera_server_error("Invalid export '%s' access value '%s' "
+                                         "(expected ro/rw)", name, access_s);
                 }
             }
 
@@ -1212,7 +1222,7 @@ main(
 
             chimera_server_info("Adding NFS export %s -> %s (%s, %s, export_id %s)",
                                 name, path,
-                                options & CHIMERA_NFS_EXPORT_OPT_RO ? "ro" : "rw",
+                                access & CHIMERA_NFS_EXPORT_ACCESS_RO ? "ro" : "rw",
                                 squash == CHIMERA_NFS_SQUASH_ALL ? "all_squash" :
                                 squash == CHIMERA_NFS_SQUASH_NONE ? "no_root_squash" :
                                 "root_squash",
@@ -1225,7 +1235,7 @@ main(
                 chimera_server_error("Failed to create export '%s'", name);
                 exit(1);
             }
-            chimera_server_export_set_options(server, name, options, squash,
+            chimera_server_export_set_options(server, name, access, squash,
                                               anonuid, anongid);
             if (sec_mask) {
                 chimera_server_export_set_sec(server, name, sec_mask);

@@ -14,12 +14,12 @@ struct chimera_nfs_export;
  * Declared here so the daemon JSON config parser can translate user-supplied
  * option strings into these values.
  */
-#define CHIMERA_NFS_EXPORT_OPT_RO 0x00000001u
-#define CHIMERA_NFS_EXPORT_OPT_RW 0x00000002u
+#define CHIMERA_NFS_EXPORT_ACCESS_RO 0x00000001u
+#define CHIMERA_NFS_EXPORT_ACCESS_RW 0x00000002u
 
-#define CHIMERA_NFS_SQUASH_NONE   0u   /* no_root_squash: credentials pass through */
-#define CHIMERA_NFS_SQUASH_ROOT   1u   /* root_squash (default): uid 0 -> anon      */
-#define CHIMERA_NFS_SQUASH_ALL    2u   /* all_squash: every caller -> anon          */
+#define CHIMERA_NFS_SQUASH_NONE      0u /* no_root_squash: credentials pass through */
+#define CHIMERA_NFS_SQUASH_ROOT      1u /* root_squash (default): uid 0 -> anon      */
+#define CHIMERA_NFS_SQUASH_ALL       2u /* all_squash: every caller -> anon          */
 
 /*
  * Per-export allowed RPC security flavors, as a bitmask.  sec_allowed == 0
@@ -27,10 +27,10 @@ struct chimera_nfs_export;
  * restricts the export to exactly those flavors (others -> NFS4ERR_WRONGSEC).
  * krb5/krb5i/krb5p all ride RPCSEC_GSS, distinguished by the GSS service.
  */
-#define CHIMERA_NFS_SEC_SYS       0x01u  /* AUTH_SYS (and AUTH_NONE)         */
-#define CHIMERA_NFS_SEC_KRB5      0x02u  /* RPCSEC_GSS, service = none       */
-#define CHIMERA_NFS_SEC_KRB5I     0x04u  /* RPCSEC_GSS, service = integrity  */
-#define CHIMERA_NFS_SEC_KRB5P     0x08u  /* RPCSEC_GSS, service = privacy    */
+#define CHIMERA_NFS_SEC_SYS          0x01u /* AUTH_SYS (and AUTH_NONE)         */
+#define CHIMERA_NFS_SEC_KRB5         0x02u /* RPCSEC_GSS, service = none       */
+#define CHIMERA_NFS_SEC_KRB5I        0x04u /* RPCSEC_GSS, service = integrity  */
+#define CHIMERA_NFS_SEC_KRB5P        0x08u /* RPCSEC_GSS, service = privacy    */
 #define CHIMERA_NFS_SEC_ALL \
         (CHIMERA_NFS_SEC_SYS | CHIMERA_NFS_SEC_KRB5 | \
          CHIMERA_NFS_SEC_KRB5I | CHIMERA_NFS_SEC_KRB5P)
@@ -40,7 +40,7 @@ struct chimera_nfs_export;
  * handles as a 16-bit field; id 0 is reserved as invalid/pseudo-root and the
  * id space is bounded by CHIMERA_NFS_MAX_EXPORTS (4096) internally.
  */
-#define CHIMERA_NFS_EXPORT_ID_MAX 4095u
+#define CHIMERA_NFS_EXPORT_ID_MAX    4095u
 
 /**
  * @brief Adds a new NFS export to the shared context.
@@ -167,11 +167,11 @@ chimera_nfs_export_get_path(
     const struct chimera_nfs_export *export);
 
 /**
- * @brief Sets per-export access options (RO/RW, squash, anon uid/gid).
+ * @brief Sets per-export options (RO/RW access mode, squash, anon uid/gid).
  *
  * @param nfs_shared Pointer to the NFS shared context.
  * @param name       Name of the export.
- * @param options    CHIMERA_NFS_EXPORT_OPT_* bitmask.
+ * @param access     CHIMERA_NFS_EXPORT_ACCESS_* bitmask.
  * @param squash     CHIMERA_NFS_SQUASH_* policy.
  * @param anonuid    Anonymous uid squashed callers are mapped to.
  * @param anongid    Anonymous gid squashed callers are mapped to.
@@ -181,7 +181,7 @@ int
 chimera_nfs_export_set_options(
     void       *nfs_shared,
     const char *name,
-    uint32_t    options,
+    uint32_t    access,
     uint32_t    squash,
     uint32_t    anonuid,
     uint32_t    anongid);
@@ -212,7 +212,7 @@ chimera_nfs_export_get_id(
     const struct chimera_nfs_export *export);
 
 uint32_t
-chimera_nfs_export_get_options(
+chimera_nfs_export_get_access(
     const struct chimera_nfs_export *export);
 
 uint32_t
