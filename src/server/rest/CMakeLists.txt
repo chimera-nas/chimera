@@ -9,7 +9,9 @@ pkg_check_modules(JANSSON REQUIRED jansson)
 add_library(chimera_rest SHARED
     rest.c
     rest_users.c
+    rest_exports.c
     rest_shares.c
+    rest_buckets.c
     rest_mounts.c
     rest_config.c
     rest_swagger.c
