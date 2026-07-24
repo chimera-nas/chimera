@@ -206,7 +206,7 @@ struct nfs_request {
 /*
  * Per-export access-control options.
  *
- * options : RO/RW access mode (CHIMERA_NFS_EXPORT_OPT_*).
+ * access  : RO/RW access mode (CHIMERA_NFS_EXPORT_ACCESS_*).
  * squash  : credential squashing policy (CHIMERA_NFS_SQUASH_*).  Default is
  *           SQUASH_NONE (no squashing), preserving chimera's historical
  *           pass-through behavior; root_squash / all_squash are opt-in.
@@ -217,7 +217,7 @@ struct nfs_request {
  *
  * Per-client (IP/network) access control is tracked separately (issue #69).
  *
- * The CHIMERA_NFS_EXPORT_OPT_* / CHIMERA_NFS_SQUASH_* option constants are
+ * The CHIMERA_NFS_EXPORT_ACCESS_* / CHIMERA_NFS_SQUASH_* constants are
  * declared in the public nfs.h (included below) so the daemon config parser can
  * reach them.
  */
@@ -227,7 +227,7 @@ struct chimera_nfs_export {
     char                       name[CHIMERA_VFS_NAME_MAX];
     char                       path[CHIMERA_VFS_PATH_MAX];
     uint16_t                   id;
-    uint32_t                   options;
+    uint32_t                   access;
     uint32_t                   squash;
     uint32_t                   anonuid;
     uint32_t                   anongid;

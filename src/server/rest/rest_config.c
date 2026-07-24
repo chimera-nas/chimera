@@ -67,9 +67,9 @@ config_export_callback(
                         json_string(chimera_nfs_export_get_path(export)));
     json_object_set_new(obj, "export_id",
                         json_integer(chimera_nfs_export_get_id(export)));
-    json_object_set_new(obj, "options",
-                        json_string(chimera_nfs_export_get_options(export) &
-                                    CHIMERA_NFS_EXPORT_OPT_RO ? "ro" : "rw"));
+    json_object_set_new(obj, "access",
+                        json_string(chimera_nfs_export_get_access(export) &
+                                    CHIMERA_NFS_EXPORT_ACCESS_RO ? "ro" : "rw"));
     switch (chimera_nfs_export_get_squash(export)) {
         case CHIMERA_NFS_SQUASH_ALL:
             json_object_set_new(obj, "squash", json_string("all"));
