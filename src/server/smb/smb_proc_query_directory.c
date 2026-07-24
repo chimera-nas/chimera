@@ -343,6 +343,20 @@ chimera_smb_query_directory(struct chimera_smb_request *request)
         request->query_directory.open_file->position = 0;
     }
 
+    /* UINT64_MAX marks a fully-enumerated directory.  SMB2 clients always issue
+     * one trailing QUERY_DIRECTORY after the last real entry to receive
+     * STATUS_NO_MORE_FILES; short-circuiting here avoids a redundant backend
+     * round-trip.  MS-SMB2 §3.3.5.18 permits this early response. */
+    if (request->query_directory.open_file->position == UINT64_MAX) {
+        /* Release the resolve ref -- this early return never enters the
+         * async readdir, so leaking it would pin the open_file's share
+         * reservation and cause later deletes to fail with
+         * SHARING_VIOLATION. */
+        chimera_smb_open_file_release(request, request->query_directory.open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_NO_MORE_FILES);
+        return;
+    }
+
     /* The reply buffer is allocated below as a single contiguous iovec
      * (max_iovecs == 1).  A client may advertise an OutputBufferLength far
      * larger than the negotiated MaxTransactSize (smbtorture's
