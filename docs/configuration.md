@@ -113,6 +113,7 @@ the canonical place to set them.
 | `nfs4_grace_time` | int (s) | `180` | NFSv4 grace period after restart (state reclaim window). |
 | `nfs4_courtesy_time` | int (s) | `86400` | How long expired-but-courteous client state is retained. |
 | `nfs_server_scope` | int | `42` | NFSv4.1 `EXCHANGE_ID` server scope. Give independent servers (e.g. an MDS and a co-located DS) distinct values so clients don't coalesce them. |
+| `nfs_max_exports` | int | `4096` | Maximum number of NFS exports that may exist at once (1..65535). Distinct from the export id space, which is always 1..65535; creating an export past this cap fails. |
 | `data_server` | bool | `false` | pNFS data-server mode: bind only the NFSv4 service (no portmap/mount/NLM) so a DS can share a host with its MDS. |
 | `kv_module` | string | - | Key-value module used to persist server state. |
 | `state_dir` | string | `<prefix>/share/state` | Directory for persisted NFS/SMB state. |

@@ -305,9 +305,9 @@ main(
                "{\"name\":\"bad1\",\"path\":\"/share\",\"export_id\":0}",
                400, &failures);
 
-    check_code("export_id 4096 returns 400",
+    check_code("export_id 65536 returns 400",
                "POST", "/api/v1/exports",
-               "{\"name\":\"bad2\",\"path\":\"/share\",\"export_id\":4096}",
+               "{\"name\":\"bad2\",\"path\":\"/share\",\"export_id\":65536}",
                400, &failures);
 
     check_code("Negative export_id returns 400",

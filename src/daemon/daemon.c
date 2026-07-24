@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <signal.h>
 #include <string.h>
@@ -388,6 +389,23 @@ main(
     if (json_is_integer(json_value)) {
         int_value = json_integer_value(json_value);
         chimera_server_config_set_max_open_files(server_config, int_value);
+    }
+
+    /* Concurrent NFS export count cap.  A misconfigured limit silently
+     * ignored would defeat its purpose, so reject bad values outright.  The
+     * cap may not exceed the export id space (ids are unique per export, so
+     * a larger count could never be reached anyway). */
+    json_value = json_object_get(server_params, "nfs_max_exports");
+    if (json_value) {
+        json_int_t v = json_is_integer(json_value) ?
+            json_integer_value(json_value) : -1;
+
+        if (v < 1 || v > CHIMERA_NFS_EXPORT_ID_MAX) {
+            chimera_server_error("Invalid nfs_max_exports (expected integer "
+                                 "1..%u)", CHIMERA_NFS_EXPORT_ID_MAX);
+            exit(1);
+        }
+        chimera_server_config_set_nfs_max_exports(server_config, (uint32_t) v);
     }
 
     json_value = json_object_get(server_params, "sync_delegation");

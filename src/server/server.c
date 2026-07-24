@@ -100,6 +100,7 @@ struct chimera_server_config {
     int                                   smb_num_nic_info;
     uint32_t                              anonuid;
     uint32_t                              anongid;
+    uint32_t                              nfs_max_exports;   /* concurrent-export count cap */
     int                                   nfs_fh_sign;       /* sign wire file handles (default on) */
     char                                  nfs_fh_key[33];    /* optional 32-hex-char (128-bit) signing key */
     enum chimera_tcp_flavor               tcp_flavor;
@@ -242,6 +243,11 @@ chimera_server_config_init(void)
 
     config->anonuid = 65534;
     config->anongid = 65534;
+
+    /* Concurrent NFS export count cap; distinct from the export id space
+     * (1..CHIMERA_NFS_EXPORT_ID_MAX), which is fixed by the 16-bit wire
+     * file-handle field regardless of this cap. */
+    config->nfs_max_exports = CHIMERA_NFS_MAX_EXPORTS_DEFAULT;
 
     /* Sign NFS wire file handles by default (unforgeable handles); the key is
      * generated/persisted at NFS init unless nfs_fh_key is configured. */
@@ -1198,6 +1204,30 @@ chimera_server_config_set_anonuid(
 {
     config->anonuid = anonuid;
 } /* chimera_server_config_set_anonuid */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_nfs_max_exports(
+    struct chimera_server_config *config,
+    uint32_t                      nfs_max_exports)
+{
+    /* Clamp rather than trust the caller: 0 would reject every export create
+    * with a baffling "limit reached (0)", and a cap beyond the id space
+    * could never be reached (ids are unique per export).  The daemon config
+    * parser validates before calling; this guards direct library callers. */
+    if (nfs_max_exports < 1 || nfs_max_exports > CHIMERA_NFS_EXPORT_ID_MAX) {
+        chimera_server_error("nfs_max_exports %u out of range (1..%u); clamping",
+                             nfs_max_exports, CHIMERA_NFS_EXPORT_ID_MAX);
+        nfs_max_exports = nfs_max_exports < 1 ?
+            1 : CHIMERA_NFS_EXPORT_ID_MAX;
+    }
+    config->nfs_max_exports = nfs_max_exports;
+} /* chimera_server_config_set_nfs_max_exports */
+
+SYMBOL_EXPORT uint32_t
+chimera_server_config_get_nfs_max_exports(const struct chimera_server_config *config)
+{
+    return config->nfs_max_exports;
+} /* chimera_server_config_get_nfs_max_exports */
 
 SYMBOL_EXPORT uint32_t
 chimera_server_config_get_anonuid(const struct chimera_server_config *config)
