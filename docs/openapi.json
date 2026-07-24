@@ -458,7 +458,7 @@
             }
           },
           "400": {
-            "description": "Bad request (missing name/path, out-of-range export_id, an unrecognized access/squash value, a non-integer or out-of-range anonuid/anongid, or the legacy \"options\" field, which was renamed to \"access\")",
+            "description": "Bad request (missing name/path, out-of-range export_id, an unrecognized access/squash value, a non-integer or out-of-range anonuid/anongid, a malformed sec array or unknown sec flavor, or the legacy \"options\" field, which was renamed to \"access\")",
             "content": {
               "application/json": {
                 "schema": {
@@ -1058,6 +1058,14 @@
           "anongid": {
             "type": "integer",
             "description": "Anonymous gid squashed callers are mapped to"
+          },
+          "sec": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": ["sys", "krb5", "krb5i", "krb5p"]
+            },
+            "description": "Allowed RPC security flavors; present only when a restriction is configured (absent means any flavor is permitted)"
           }
         }
       },
@@ -1100,6 +1108,14 @@
             "minimum": 0,
             "maximum": 4294967295,
             "description": "Optional anonymous gid squashed callers are mapped to"
+          },
+          "sec": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": ["sys", "krb5", "krb5i", "krb5p"]
+            },
+            "description": "Optional allowed RPC security flavors; other flavors are rejected. Omitted or empty permits any flavor."
           }
         }
       },
@@ -1215,6 +1231,14 @@
                 "anongid": {
                   "type": "integer",
                   "description": "Anonymous gid squashed callers are mapped to"
+                },
+                "sec": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "enum": ["sys", "krb5", "krb5i", "krb5p"]
+                  },
+                  "description": "Allowed RPC security flavors; present only when a restriction is configured (absent means any flavor is permitted)"
                 }
               }
             }

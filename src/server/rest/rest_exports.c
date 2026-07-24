@@ -4,6 +4,7 @@
 
 
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -21,12 +22,22 @@ struct export_list_ctx {
     json_t *array;
 };
 
-/* Populate the per-export options (access mode, squash, anon ids) into obj. */
-static void
-export_options_to_json(
+/* Populate every export field except the name (path, export_id, access
+ * mode, squash, anon ids, sec) into obj.  Shared with the config serializer
+ * (rest_config.c), whose entries are keyed by export name, so the export
+ * objects returned by /api/v1/exports and the exports section of
+ * /api/v1/config cannot drift apart. */
+void
+chimera_rest_export_options_to_json(
     const struct chimera_nfs_export *export,
     json_t                          *obj)
 {
+    uint32_t sec_mask = chimera_nfs_export_get_sec(export);
+
+    json_object_set_new(obj, "path",
+                        json_string(chimera_nfs_export_get_path(export)));
+    json_object_set_new(obj, "export_id",
+                        json_integer(chimera_nfs_export_get_id(export)));
     json_object_set_new(obj, "access",
                         json_string(chimera_nfs_export_get_access(export) &
                                     CHIMERA_NFS_EXPORT_ACCESS_RO ? "ro" : "rw"));
@@ -45,7 +56,27 @@ export_options_to_json(
                         json_integer(chimera_nfs_export_get_anonuid(export)));
     json_object_set_new(obj, "anongid",
                         json_integer(chimera_nfs_export_get_anongid(export)));
-} /* export_options_to_json */
+
+    /* Absent (mask 0) means any flavor is permitted, matching the config
+     * file semantics; emit the restriction only when one is set. */
+    if (sec_mask) {
+        json_t *sec = json_array();
+
+        if (sec_mask & CHIMERA_NFS_SEC_SYS) {
+            json_array_append_new(sec, json_string("sys"));
+        }
+        if (sec_mask & CHIMERA_NFS_SEC_KRB5) {
+            json_array_append_new(sec, json_string("krb5"));
+        }
+        if (sec_mask & CHIMERA_NFS_SEC_KRB5I) {
+            json_array_append_new(sec, json_string("krb5i"));
+        }
+        if (sec_mask & CHIMERA_NFS_SEC_KRB5P) {
+            json_array_append_new(sec, json_string("krb5p"));
+        }
+        json_object_set_new(obj, "sec", sec);
+    }
+} /* chimera_rest_export_options_to_json */
 
 static int
 export_to_json_callback(
@@ -53,16 +84,11 @@ export_to_json_callback(
     void                            *data)
 {
     struct export_list_ctx *ctx = data;
-    json_t                 *obj;
+    json_t                 *obj = json_object();
 
-    obj = json_object();
     json_object_set_new(obj, "name",
                         json_string(chimera_nfs_export_get_name(export)));
-    json_object_set_new(obj, "path",
-                        json_string(chimera_nfs_export_get_path(export)));
-    json_object_set_new(obj, "export_id",
-                        json_integer(chimera_nfs_export_get_id(export)));
-    export_options_to_json(export, obj);
+    chimera_rest_export_options_to_json(export, obj);
 
     json_array_append_new(ctx->array, obj);
 
@@ -105,11 +131,7 @@ chimera_rest_handle_exports_get(
     obj = json_object();
     json_object_set_new(obj, "name",
                         json_string(chimera_nfs_export_get_name(export)));
-    json_object_set_new(obj, "path",
-                        json_string(chimera_nfs_export_get_path(export)));
-    json_object_set_new(obj, "export_id",
-                        json_integer(chimera_nfs_export_get_id(export)));
-    export_options_to_json(export, obj);
+    chimera_rest_export_options_to_json(export, obj);
 
     chimera_rest_send_json(evpl, request, 200, obj);
 } /* chimera_rest_handle_exports_get */
@@ -131,6 +153,7 @@ chimera_rest_handle_exports_create(
     json_t                        *squash_j;
     json_t                        *anonuid_j;
     json_t                        *anongid_j;
+    json_t                        *sec_j;
     uint32_t                       export_id = 0;
     struct chimera_nfs_export_opts opts      = { 0 };
     int                            rc;
@@ -249,6 +272,48 @@ chimera_rest_handle_exports_create(
         }
         opts.has_anongid = 1;
         opts.anongid     = (uint32_t) v;
+    }
+
+    /* Allowed security flavors: an optional array of
+     * "sys"/"krb5"/"krb5i"/"krb5p" strings, matching the config file.  An
+     * absent key or empty array permits any flavor.  Every malformed shape
+     * is rejected: a typo'd flavor, non-string entry, or non-array value
+     * silently dropped would leave the mask at 0 -- "any flavor allowed" --
+     * turning a requested Kerberos-only export wide open to AUTH_SYS. */
+    sec_j = json_object_get(root, "sec");
+    if (sec_j) {
+        size_t  si;
+        json_t *flavor_j;
+
+        if (!json_is_array(sec_j)) {
+            json_decref(root);
+            chimera_rest_send_error(evpl, request, 400, "Bad Request",
+                                    "sec must be an array of flavor strings");
+            return;
+        }
+
+        opts.has_sec = 1;
+        json_array_foreach(sec_j, si, flavor_j)
+        {
+            const char *f = json_string_value(flavor_j);
+
+            if (f && (strcasecmp(f, "sys") == 0 ||
+                      strcasecmp(f, "auth_sys") == 0)) {
+                opts.sec_allowed |= CHIMERA_NFS_SEC_SYS;
+            } else if (f && strcasecmp(f, "krb5") == 0) {
+                opts.sec_allowed |= CHIMERA_NFS_SEC_KRB5;
+            } else if (f && strcasecmp(f, "krb5i") == 0) {
+                opts.sec_allowed |= CHIMERA_NFS_SEC_KRB5I;
+            } else if (f && strcasecmp(f, "krb5p") == 0) {
+                opts.sec_allowed |= CHIMERA_NFS_SEC_KRB5P;
+            } else {
+                json_decref(root);
+                chimera_rest_send_error(evpl, request, 400, "Bad Request",
+                                        "sec flavors must be \"sys\", \"krb5\", "
+                                        "\"krb5i\", or \"krb5p\"");
+                return;
+            }
+        }
     }
 
     /* Create the export with the validated options applied atomically, so it

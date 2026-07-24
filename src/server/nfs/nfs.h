@@ -10,15 +10,15 @@ extern struct chimera_server_protocol nfs_protocol;
 struct chimera_nfs_export;
 
 /*
- * Per-export access-control option constants (see struct chimera_nfs_export).
+ * Per-export access-control constants (see struct chimera_nfs_export).
  * Declared here so the daemon JSON config parser can translate user-supplied
- * option strings into these values.
+ * access strings into these values.
  */
 #define CHIMERA_NFS_EXPORT_ACCESS_RO    0x00000001u
 #define CHIMERA_NFS_EXPORT_ACCESS_RW    0x00000002u
 
-#define CHIMERA_NFS_SQUASH_NONE         0u /* no_root_squash: credentials pass through */
-#define CHIMERA_NFS_SQUASH_ROOT         1u /* root_squash (default): uid 0 -> anon      */
+#define CHIMERA_NFS_SQUASH_NONE         0u /* no_root_squash (default): pass through   */
+#define CHIMERA_NFS_SQUASH_ROOT         1u /* root_squash: uid 0 -> anon                */
 #define CHIMERA_NFS_SQUASH_ALL          2u /* all_squash: every caller -> anon          */
 
 /*
@@ -237,7 +237,7 @@ chimera_nfs_get_export_by_id(
     uint16_t id);
 
 /**
- * @brief Per-export option accessors.
+ * @brief Per-export attribute accessors.
  */
 uint16_t
 chimera_nfs_export_get_id(
@@ -257,4 +257,8 @@ chimera_nfs_export_get_anonuid(
 
 uint32_t
 chimera_nfs_export_get_anongid(
+    const struct chimera_nfs_export *export);
+
+uint32_t
+chimera_nfs_export_get_sec(
     const struct chimera_nfs_export *export);

@@ -205,6 +205,7 @@ GET /api/v1/exports
 | `squash`    | string | Credential squashing policy: `none`, `root`, or `all` |
 | `anonuid`   | int    | Anonymous uid squashed callers are mapped to |
 | `anongid`   | int    | Anonymous gid squashed callers are mapped to |
+| `sec`       | array  | Allowed RPC security flavors (`sys`/`krb5`/`krb5i`/`krb5p`); present only when a restriction is configured, absent means any flavor |
 
 ```bash
 curl http://localhost:8080/api/v1/exports
@@ -221,7 +222,8 @@ GET /api/v1/exports/{name}
 | `name`         | string | Name of export  |
 
 **Response `200`** - a single export object with the same fields as a list
-entry (`name`, `path`, `export_id`, `access`, `squash`, `anonuid`, `anongid`).
+entry (`name`, `path`, `export_id`, `access`, `squash`, `anonuid`, `anongid`,
+plus `sec` when a security-flavor restriction is configured).
 
 **Errors:** `404` if the export does not exist.
 
@@ -246,6 +248,7 @@ POST /api/v1/exports
 | `squash`    | string | no       | Squashing policy: `none`/`no_root_squash`, `root`/`root_squash`, or `all`/`all_squash` (default `none`). |
 | `anonuid`   | int    | no       | Anonymous uid squashed callers are mapped to (default `65534`). |
 | `anongid`   | int    | no       | Anonymous gid squashed callers are mapped to (default `65534`). |
+| `sec`       | array  | no       | Allowed RPC security flavors: any of `sys`, `krb5`, `krb5i`, `krb5p`; other flavors are rejected. Omitted or empty permits any flavor. |
 
 **Response `201`**
 
@@ -255,9 +258,10 @@ POST /api/v1/exports
 
 **Errors:** `400` (invalid JSON, missing `name`/`path`, out-of-range
 `export_id`, an unrecognized `access`/`squash` value, a non-integer or
-out-of-range `anonuid`/`anongid`, or the legacy `options` field), `409`
-(export name or `export_id` already in use, or the `nfs_max_exports` limit
-is reached), `500` (creation failed).
+out-of-range `anonuid`/`anongid`, a malformed `sec` array or unknown sec
+flavor, or the legacy `options` field), `409` (export name or `export_id`
+already in use, or the `nfs_max_exports` limit is reached), `500`
+(creation failed).
 
 ```bash
 curl -X POST http://localhost:8080/api/v1/exports \
