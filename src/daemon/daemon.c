@@ -1183,12 +1183,34 @@ main(
                                          squash_s ? squash_s : "(not a string)");
                     exit(1);
                 }
-            } else if (allsq_j && json_is_true(allsq_j)) {
-                squash = CHIMERA_NFS_SQUASH_ALL;
-            } else if (rsq_j && json_is_true(rsq_j)) {
-                squash = CHIMERA_NFS_SQUASH_ROOT;
-            } else if (norsq_j && json_is_true(norsq_j)) {
-                squash = CHIMERA_NFS_SQUASH_NONE;
+            } else {
+                /* The aliases must actually be booleans: a value like
+                 * "root_squash": "true" (a string) or "all_squash": 1
+                 * silently ignored would leave the export unsquashed -- the
+                 * same silent-permissive fallback the string form above
+                 * rejects. */
+                if (allsq_j && !json_is_boolean(allsq_j)) {
+                    chimera_server_error("Export '%s': \"all_squash\" must be "
+                                         "a boolean", name);
+                    exit(1);
+                }
+                if (rsq_j && !json_is_boolean(rsq_j)) {
+                    chimera_server_error("Export '%s': \"root_squash\" must be "
+                                         "a boolean", name);
+                    exit(1);
+                }
+                if (norsq_j && !json_is_boolean(norsq_j)) {
+                    chimera_server_error("Export '%s': \"no_root_squash\" must "
+                                         "be a boolean", name);
+                    exit(1);
+                }
+                if (allsq_j && json_is_true(allsq_j)) {
+                    squash = CHIMERA_NFS_SQUASH_ALL;
+                } else if (rsq_j && json_is_true(rsq_j)) {
+                    squash = CHIMERA_NFS_SQUASH_ROOT;
+                } else if (norsq_j && json_is_true(norsq_j)) {
+                    squash = CHIMERA_NFS_SQUASH_NONE;
+                }
             }
 
             /* Anon ids must be validated before the unsigned cast: a
