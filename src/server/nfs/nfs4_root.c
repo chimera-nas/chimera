@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <sys/stat.h>
@@ -61,16 +62,6 @@ nfs4_root_getattr(
         attr->va_fsid           = 0;
     }
 } /* nfs4_getattr_root */
-
-struct nfs4_root_readdir_lookup_ctx {
-    enum chimera_vfs_error error_code;
-    struct entry4       *entry;
-    struct READDIR4args *args;
-    uint32_t             lease_time_s;
-    uint16_t             export_id;
-    const uint8_t       *fh_key;
-    int                  fh_sign;
-};
 
 static void
 nfs4_root_lookup_complete(
@@ -159,169 +150,288 @@ nfs4_root_lookup(
 
 } /* nfs4_root_lookup */
 
+/*
+ * Pseudo-fs root READDIR.
+ *
+ * Each entry's attributes require resolving the export's backing path via
+ * chimera_vfs_lookup(), which completes asynchronously, so the exports are
+ * walked one at a time by a state machine: issue the lookup for the current
+ * export, marshal its attrs in the completion callback, then advance to the
+ * next export, and complete the compound only after the walk finishes.
+ *
+ * The export list is snapshotted up front (under exports_lock, inside
+ * chimera_nfs_iterate_exports) because exports may be removed via the REST
+ * API while lookups are in flight; the walk must not retain pointers into
+ * the live list.
+ *
+ * The pseudo-root has its own cookie space: entry cookies are the export's
+ * snapshot position biased by +3 to stay clear of the reserved cookie values
+ * 0-2 (RFC 7530 §16.24.4), and a client cookie resumes the walk at the
+ * position after the entry that carried it.
+ */
+
+struct nfs4_root_readdir_export {
+    char    *name;  /* leading '/' stripped, validated single component */
+    char    *path;
+    uint16_t id;
+};
+
+struct nfs4_root_readdir_state {
+    struct nfs_request              *req;
+    struct chimera_vfs_thread       *vfs_thread;
+    uint8_t                          root_fh[CHIMERA_VFS_FH_SIZE];
+    uint32_t                         root_fh_len;
+    uint64_t                         attrmask;
+    struct nfs4_root_readdir_export *exports;
+    int                              num_exports;
+    int                              pos;         /* current snapshot position */
+    int                              first_pos;   /* resume position from args->cookie */
+    struct entry4                   *entry;       /* entry awaiting its lookup */
+    uint32_t                         dbuf_before; /* dbuf watermark for rollback */
+    enum chimera_vfs_error error_code;
+    int                              in_advance;  /* advance() loop is on the stack */
+    int                              lookup_done; /* current lookup completed synchronously */
+};
+
+struct nfs4_root_readdir_snap {
+    struct nfs4_root_readdir_export *exports;
+    int                              count;
+    int                              capacity;
+};
+
+static int
+nfs4_root_readdir_snap_cb(
+    const struct chimera_nfs_export *export,
+    void                            *private_data)
+{
+    struct nfs4_root_readdir_snap   *snap = private_data;
+    struct nfs4_root_readdir_export *e;
+    const char                      *export_name = export->name;
+
+    // remove leading '/' from export name if present
+    while (export_name[0] == '/') {
+        export_name++;
+    }
+
+    /* The pseudo-root lists each export as a single directory entry, so the
+     * name must be exactly one non-empty path component */
+    if (export_name[0] == '\0' || strchr(export_name, '/')) {
+        chimera_nfs_error("Invalid export name %s for export path %s: "
+                          "export name must be a single non-empty path component",
+                          export->name, export->path);
+        return 0;
+    }
+
+    if (snap->count == snap->capacity) {
+        snap->capacity = snap->capacity ? snap->capacity * 2 : 8;
+        snap->exports  = realloc(snap->exports,
+                                 snap->capacity * sizeof(*snap->exports));
+        chimera_nfs_abort_if(snap->exports == NULL, "Failed to allocate export snapshot");
+    }
+
+    e       = &snap->exports[snap->count++];
+    e->name = strdup(export_name);
+    e->path = strdup(export->path);
+    e->id   = export->id;
+    chimera_nfs_abort_if(e->name == NULL || e->path == NULL, "Failed to allocate export snapshot");
+
+    return 0;
+} /* nfs4_root_readdir_snap_cb */
+
+static void
+nfs4_root_readdir_finish(struct nfs4_root_readdir_state *state)
+{
+    struct nfs_request             *req    = state->req;
+    struct READDIR4res             *res    = &req->res_compound.resarray[req->index].opreaddir;
+    struct nfs_nfs4_readdir_cursor *cursor = &req->readdir4_cursor;
+    int                             eof    = 1;
+    int                             i;
+
+    if (state->error_code == CHIMERA_VFS_EOVERFLOW) {
+        /* Overflow means there are more entries to be read */
+        eof = 0;
+        if (cursor->entries == NULL) {
+            /* RFC 7530 §16.24.4: not even one entry fit in maxcount and we
+             * are not at end-of-directory.  Returning an empty, non-eof page
+             * would stall a paging client. */
+            res->status = NFS4ERR_TOOSMALL;
+        }
+    } else if (state->error_code != CHIMERA_VFS_OK) {
+        chimera_nfs_error("Error iterating exports for readdir: %d", state->error_code);
+        res->status = chimera_nfs4_errno_to_nfsstat4(state->error_code);
+    }
+
+    /* The pseudo-root export list has no change verifier; cookies are
+     * positional and best-effort across list mutations. */
+    memset(res->resok4.cookieverf, 0, sizeof(res->resok4.cookieverf));
+
+    res->resok4.reply.eof     = eof;
+    res->resok4.reply.entries = res->status == NFS4_OK ? cursor->entries : NULL;
+
+    for (i = 0; i < state->num_exports; i++) {
+        free(state->exports[i].name);
+        free(state->exports[i].path);
+    }
+    free(state->exports);
+
+    chimera_nfs4_compound_complete(req, res->status);
+
+    free(state);
+} /* nfs4_root_readdir_finish */
+
+static void nfs4_root_readdir_advance(
+    struct nfs4_root_readdir_state *state);
+
 static void
 nfs4_root_readdir_lookup_callback(
     enum chimera_vfs_error    error_code,
     struct chimera_vfs_attrs *attrs,
     void                     *private_data)
 {
-    struct nfs4_root_readdir_lookup_ctx *ctx   = private_data;
-    struct READDIR4args                 *args  = ctx->args;
-    struct entry4                       *entry = ctx->entry;
+    struct nfs4_root_readdir_state *state  = private_data;
+    struct nfs_request             *req    = state->req;
+    struct READDIR4args            *args   = &req->args_compound->argarray[req->index].opreaddir;
+    struct nfs_nfs4_readdir_cursor *cursor = &req->readdir4_cursor;
+    struct entry4                  *entry  = state->entry;
+    uint32_t                        dbuf_cur;
+
+    state->lookup_done = 1;
 
     if (error_code != CHIMERA_VFS_OK) {
         /* An export root that fails to resolve (deleted directory, config
-        * typo, momentarily unavailable backend) is a routine condition, not
-        * a server fault.  Record it so nfs4_root_readdir_itr_cb surfaces it
-        * as an NFS4ERR_* READDIR status instead of aborting the whole process
-        * (RFC 7530 §16.24 / RFC 8881 §18.23: report errors as status). */
-        ctx->error_code = error_code;
-        return;
+         * typo, momentarily unavailable backend) is a routine condition, not
+         * a server fault.  Surface it as an NFS4ERR_* READDIR status instead
+         * of aborting the whole process (RFC 7530 §16.24 / RFC 8881 §18.23:
+         * report errors as status). */
+        req->encoding->dbuf->used = state->dbuf_before;
+        state->error_code         = error_code;
+    } else {
+        chimera_nfs4_marshall_attrs(attrs,
+                                    args->num_attr_request,
+                                    args->attr_request,
+                                    &entry->attrs.num_attrmask,
+                                    entry->attrs.attrmask,
+                                    3,
+                                    entry->attrs.attr_vals.data,
+                                    &entry->attrs.attr_vals.len,
+                                    256,
+                                    0,
+                                    0, /* pNFS not advertised on the pseudo-fs root */
+                                    0, /* pseudo-fs root has no xattr-capable backend */
+                                    0,
+                                    req->thread->shared->nfs_lease_time_s,
+                                    state->exports[state->pos].id,
+                                    req->thread->shared->fh_key,
+                                    req->thread->shared->fh_sign);
+
+        dbuf_cur = req->encoding->dbuf->used - state->dbuf_before;
+
+        if (cursor->count + dbuf_cur > args->maxcount ||
+            req->encoding->dbuf->used + 8192 > (uint32_t) req->encoding->dbuf->size) {
+            req->encoding->dbuf->used = state->dbuf_before;
+            state->error_code         = CHIMERA_VFS_EOVERFLOW;
+        } else {
+            cursor->count += dbuf_cur;
+
+            if (cursor->entries) {
+                cursor->last->nextentry = entry;
+                cursor->last            = entry;
+            } else {
+                cursor->entries = entry;
+                cursor->last    = entry;
+            }
+            state->pos++;
+        }
     }
-    chimera_nfs4_marshall_attrs(attrs,
-                                args->num_attr_request,
-                                args->attr_request,
-                                &entry->attrs.num_attrmask,
-                                entry->attrs.attrmask,
-                                3,
-                                entry->attrs.attr_vals.data,
-                                &entry->attrs.attr_vals.len,
-                                256,
-                                0,
-                                0, /* pNFS not advertised on the pseudo-fs root */
-                                0, /* pseudo-fs root has no xattr-capable backend */
-                                0,
-                                ctx->lease_time_s,
-                                ctx->export_id,
-                                ctx->fh_key,
-                                ctx->fh_sign);
+
+    /* If the lookup completed synchronously the advance() loop is still on
+     * the stack and continues the walk itself; re-entering it here would
+     * recurse once per export. */
+    if (!state->in_advance) {
+        nfs4_root_readdir_advance(state);
+    }
 } /* nfs4_root_readdir_lookup_callback */
 
-struct nfs4_root_readdir_itr_ctx {
-    uint8_t                         root_fh[CHIMERA_VFS_FH_SIZE];
-    uint32_t                        root_fh_len;
-    struct chimera_vfs_thread      *vfs_thread;
-    struct nfs_request             *req;
-    struct nfs_nfs4_readdir_cursor *cursor;
-    uint64_t                        attrmask;
-    uint64_t                        cookie;
-    int                             index;
-    enum chimera_vfs_error error_code;
-};
-
-static int
-nfs4_root_readdir_itr_cb(
-    const struct chimera_nfs_export *export,
-    void                            *private_data)
+static void
+nfs4_root_readdir_advance(struct nfs4_root_readdir_state *state)
 {
-    struct nfs4_root_readdir_itr_ctx   *ctx    = private_data;
-    struct nfs_request                 *req    = ctx->req;
-    struct READDIR4args                *args   = &req->args_compound->argarray[req->index].opreaddir;
-    struct nfs_nfs4_readdir_cursor     *cursor = ctx->cursor;
-    uint32_t                            dbuf_cur;
-    uint32_t                            dbuf_before = req->encoding->dbuf->used;
-    struct nfs4_root_readdir_lookup_ctx lookup_ctx;
-    struct entry4                      *entry;
-    const char                         *export_name = export->name;
-    int                                 rc;
+    struct nfs_request              *req = state->req;
+    struct nfs4_root_readdir_export *export;
+    struct entry4                   *entry;
+    int                              rc;
 
-    if (ctx->index < ctx->cookie) {
-        ctx->index++;
-        return 0;
-    }
-    if (ctx->error_code != CHIMERA_VFS_OK) {
-        return -1;
-    }
-    // remove leading '/' from export name if present
-    while (export_name && export_name[0] == '/') {
-        export_name++;
-    }
-    if (!export_name) {
-        chimera_nfs_error("Invalid export name %s for export path %s", export->name, export->path);
-        return 0;
-    }
+    state->in_advance = 1;
 
-    // Report error if any / character is present in the export name after removing leading /
-    if (strchr(export_name, '/')) {
-        chimera_nfs_error("Invalid export name %s for export path %s: export name cannot contain '/' character",
-                          export_name, export->path);
-        return 0;
-    }
-    /* allocate a new entry and populate it with the export name and path */
-    entry = xdr_dbuf_alloc_space(sizeof(*entry), req->encoding->dbuf);
-    if (!entry) {
-        req->encoding->dbuf->used = dbuf_before;
-        ctx->error_code           = CHIMERA_VFS_EOVERFLOW;
-        return -1;
-    }
+    while (state->error_code == CHIMERA_VFS_OK && state->pos < state->num_exports) {
 
-    rc = xdr_dbuf_opaque_copy(&entry->name, export_name, strlen(export_name), req->encoding->dbuf);
-    if (rc) {
-        // TODO: do we need to free the entry here?
-        req->encoding->dbuf->used = dbuf_before;
-        ctx->error_code           = CHIMERA_VFS_EOVERFLOW;
-        return -1;
-    }
-    entry->cookie    = ctx->index;
-    entry->nextentry = NULL;
+        if (state->pos < state->first_pos) {
+            state->pos++;
+            continue;
+        }
 
-    rc = xdr_dbuf_alloc_array(&entry->attrs, attrmask, 3, req->encoding->dbuf);
-    if (rc) {
-        req->encoding->dbuf->used = dbuf_before;
-        ctx->error_code           = CHIMERA_VFS_EOVERFLOW;
-        return -1;
-    }
+        export             = &state->exports[state->pos];
+        state->dbuf_before = req->encoding->dbuf->used;
 
-    rc = xdr_dbuf_alloc_opaque(&entry->attrs.attr_vals,
-                               256,
-                               req->encoding->dbuf);
-    if (rc) {
-        req->encoding->dbuf->used = dbuf_before;
-        ctx->error_code           = CHIMERA_VFS_EOVERFLOW;
-        return -1;
-    }
-    lookup_ctx.entry        = entry;
-    lookup_ctx.args         = args;
-    lookup_ctx.error_code   = CHIMERA_VFS_OK;
-    lookup_ctx.lease_time_s = req->thread->shared->nfs_lease_time_s;
-    lookup_ctx.export_id    = export->id;
-    lookup_ctx.fh_key       = req->thread->shared->fh_key;
-    lookup_ctx.fh_sign      = req->thread->shared->fh_sign;
-    chimera_vfs_lookup(ctx->vfs_thread,
-                       &req->cred,
-                       ctx->root_fh,
-                       ctx->root_fh_len,
-                       export->path,
-                       strlen(export->path),
-                       CHIMERA_VFS_ATTR_FH,
-                       ctx->attrmask,
-                       nfs4_root_readdir_lookup_callback,
-                       &lookup_ctx);
-    if (lookup_ctx.error_code != CHIMERA_VFS_OK) {
-        ctx->error_code           = lookup_ctx.error_code;
-        req->encoding->dbuf->used = dbuf_before;
-        return -1;
-    }
-    dbuf_cur = req->encoding->dbuf->used - dbuf_before;
+        /* allocate a new entry and populate it with the export name */
+        entry = xdr_dbuf_alloc_space(sizeof(*entry), req->encoding->dbuf);
+        if (!entry) {
+            state->error_code = CHIMERA_VFS_EOVERFLOW;
+            break;
+        }
 
-    if (cursor->count + dbuf_cur > args->maxcount ||
-        req->encoding->dbuf->used + 8192 > (uint32_t) req->encoding->dbuf->size) {
-        req->encoding->dbuf->used = dbuf_before;
-        ctx->error_code           = CHIMERA_VFS_EOVERFLOW;
-        return -1;
+        rc = xdr_dbuf_opaque_copy(&entry->name, export->name, strlen(export->name), req->encoding->dbuf);
+        if (rc) {
+            req->encoding->dbuf->used = state->dbuf_before;
+            state->error_code         = CHIMERA_VFS_EOVERFLOW;
+            break;
+        }
+
+        /* Resuming with this cookie skips every export up to and including
+         * this one; the +3 bias keeps clear of reserved cookies 0-2. */
+        entry->cookie    = state->pos + 3;
+        entry->nextentry = NULL;
+
+        rc = xdr_dbuf_alloc_array(&entry->attrs, attrmask, 3, req->encoding->dbuf);
+        if (rc) {
+            req->encoding->dbuf->used = state->dbuf_before;
+            state->error_code         = CHIMERA_VFS_EOVERFLOW;
+            break;
+        }
+
+        rc = xdr_dbuf_alloc_opaque(&entry->attrs.attr_vals,
+                                   256,
+                                   req->encoding->dbuf);
+        if (rc) {
+            req->encoding->dbuf->used = state->dbuf_before;
+            state->error_code         = CHIMERA_VFS_EOVERFLOW;
+            break;
+        }
+
+        state->entry       = entry;
+        state->lookup_done = 0;
+
+        chimera_vfs_lookup(state->vfs_thread,
+                           &req->cred,
+                           state->root_fh,
+                           state->root_fh_len,
+                           export->path,
+                           strlen(export->path),
+                           CHIMERA_VFS_ATTR_FH,
+                           state->attrmask,
+                           nfs4_root_readdir_lookup_callback,
+                           state);
+
+        if (!state->lookup_done) {
+            /* Lookup is in flight; its callback resumes the walk. */
+            state->in_advance = 0;
+            return;
+        }
     }
 
-    cursor->count += dbuf_cur;
+    state->in_advance = 0;
 
-    if (cursor->entries) {
-        cursor->last->nextentry = entry;
-        cursor->last            = entry;
-    } else {
-        cursor->entries = entry;
-        cursor->last    = entry;
-    }
-    return 0;
-} /* nfs4_root_readdir_itr_cb */
+    nfs4_root_readdir_finish(state);
+} /* nfs4_root_readdir_advance */
 
 SYMBOL_EXPORT void
 nfs4_root_readdir(
@@ -330,11 +440,18 @@ nfs4_root_readdir(
 {
     struct READDIR4args              *args   = &req->args_compound->argarray[req->index].opreaddir;
     struct chimera_server_nfs_shared *shared = nfs_thread->shared;
-    struct nfs4_root_readdir_itr_ctx  ctx;
+    struct READDIR4res               *res    = &req->res_compound.resarray[req->index].opreaddir;
     struct nfs_nfs4_readdir_cursor   *cursor;
-    struct READDIR4res               *res = &req->res_compound.resarray[req->index].opreaddir;
-    int                               eof = 1;
+    struct nfs4_root_readdir_state   *state;
+    struct nfs4_root_readdir_snap     snap = { NULL, 0, 0 };
 
+    /* Cookies 1 and 2 are reserved (RFC 7530 §16.24.4); the pseudo-root
+     * never emits them, so receiving one back is a client error. */
+    if (args->cookie == 1 || args->cookie == 2) {
+        res->status = NFS4ERR_BAD_COOKIE;
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
 
     cursor                    = &req->readdir4_cursor;
     res->resok4.reply.entries = NULL;
@@ -344,30 +461,20 @@ nfs4_root_readdir(
     cursor->entries = NULL;
     cursor->last    = NULL;
 
-    ctx.error_code = CHIMERA_VFS_OK;
-    ctx.vfs_thread = nfs_thread->vfs_thread;
-    ctx.req        = req;
-    ctx.cursor     = cursor;
-    ctx.index      = 0;
-    ctx.cookie     = args->cookie;
-    ctx.attrmask   = chimera_nfs4_attr2mask(args->attr_request,
-                                            args->num_attr_request);
-    chimera_vfs_get_root_fh(ctx.root_fh, &ctx.root_fh_len);
+    chimera_nfs_iterate_exports(shared, nfs4_root_readdir_snap_cb, &snap);
 
-    /* Iterate over exports and populate the readdir response */
-    chimera_nfs_iterate_exports(shared, nfs4_root_readdir_itr_cb, &ctx);
+    state = calloc(1, sizeof(*state));
+    chimera_nfs_abort_if(state == NULL, "Failed to allocate readdir state");
 
-    if (ctx.error_code == CHIMERA_VFS_EOVERFLOW) {
-        /* If we hit overflow, it means there are more entries to be read */
-        eof = 0;
-    } else if (ctx.error_code != CHIMERA_VFS_OK) {
-        /* For any other error, return the error code */
-        chimera_nfs_error("Error iterating exports for readdir: %d", ctx.error_code);
-        res->status = chimera_nfs4_errno_to_nfsstat4(ctx.error_code);
-    }
+    state->req         = req;
+    state->vfs_thread  = nfs_thread->vfs_thread;
+    state->exports     = snap.exports;
+    state->num_exports = snap.count;
+    state->first_pos   = args->cookie ? args->cookie - 2 : 0;
+    state->error_code  = CHIMERA_VFS_OK;
+    state->attrmask    = chimera_nfs4_attr2mask(args->attr_request,
+                                                args->num_attr_request);
+    chimera_vfs_get_root_fh(state->root_fh, &state->root_fh_len);
 
-    res->resok4.reply.eof     = eof;
-    res->resok4.reply.entries = cursor->entries;
-
-    chimera_nfs4_compound_complete(req, res->status);
+    nfs4_root_readdir_advance(state);
 } /* nfs4_root_readdir */

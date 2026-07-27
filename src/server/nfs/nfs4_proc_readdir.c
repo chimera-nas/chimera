@@ -227,7 +227,8 @@ chimera_nfs4_readdir(
      * sent by a client (0 means "start of directory"). The VFS backends emit
      * only cookie 0 or values >= 3 for regular directories, so a reserved
      * cookie here is a client error. The pseudo-root, handled above, uses its
-     * own export-index cookie space and is intentionally exempt. */
+     * own export-position cookie space (also >= 3) and applies the same check
+     * in nfs4_root_readdir. */
     if (args->cookie == 1 || args->cookie == 2) {
         res->status = NFS4ERR_BAD_COOKIE;
         chimera_nfs4_compound_complete(req, res->status);
