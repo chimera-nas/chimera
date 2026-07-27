@@ -85,6 +85,15 @@ diskfs_dispatch(
         case CHIMERA_VFS_OP_SEEK:
             diskfs_seek(thread, shared, request, private_data);
             break;
+        case CHIMERA_VFS_OP_READ_PLUS:
+            diskfs_read_plus(thread, shared, request, private_data);
+            break;
+        case CHIMERA_VFS_OP_WRITE_SAME:
+            diskfs_write_same(thread, shared, request, private_data);
+            break;
+        case CHIMERA_VFS_OP_CLONE_RANGE:
+            diskfs_clone_range(thread, shared, request, private_data);
+            break;
         case CHIMERA_VFS_OP_SYMLINK_AT:
             diskfs_symlink_at(thread, shared, request, private_data);
             break;
@@ -143,7 +152,9 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_diskfs = {
          * handle->vfs_private (diskfs_open_fh_inode_cb), which read/write reuse
          * to skip per-I/O inode resolution. */
         CHIMERA_VFS_CAP_OPEN_FILE_REQUIRED | CHIMERA_VFS_CAP_FS_LOCK |
-        CHIMERA_VFS_CAP_CHANGE,
+        CHIMERA_VFS_CAP_CHANGE |
+        CHIMERA_VFS_CAP_READ_PLUS | CHIMERA_VFS_CAP_WRITE_SAME |
+        CHIMERA_VFS_CAP_CLONE_RANGE,
     .init           = diskfs_init,
     .destroy        = diskfs_destroy,
     .thread_init    = diskfs_thread_init,

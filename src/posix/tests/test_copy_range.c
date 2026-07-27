@@ -357,6 +357,75 @@ test_clone_content(void)
     fprintf(stderr, "  clone content + COW passed\n");
 } /* test_clone_content */
 
+/* Clone, then unlink the source: the destination must keep the (now sole-owned)
+ * data, and a write to it must still succeed.  Exercises the refcount-decrement
+ * free path on the unlinked source's shared extents. */
+static void
+test_clone_unlink(void)
+{
+    char   *src_buf;
+    char   *over;
+    char   *verify;
+    int     src_fd, dst_fd, rc;
+    ssize_t n;
+
+    fprintf(stderr, "Testing clone then unlink source (refcount free path)...\n");
+
+    src_buf = malloc(CLONE_PROBE_LEN);
+    over    = malloc(CLONE_PROBE_LEN);
+    verify  = malloc(CLONE_PROBE_LEN);
+    if (!src_buf || !over || !verify) {
+        die("clone_unlink malloc", -1);
+    }
+    fill_pattern(src_buf, CLONE_PROBE_LEN, 'm');
+    fill_pattern(over, CLONE_PROBE_LEN, 'n');
+
+    src_fd = chimera_posix_open("/test/clone_ul_src", O_CREAT | O_RDWR | O_TRUNC, 0644);
+    dst_fd = chimera_posix_open("/test/clone_ul_dst", O_CREAT | O_RDWR | O_TRUNC, 0644);
+    if (src_fd < 0 || dst_fd < 0) {
+        die("clone_unlink open", -1);
+    }
+
+    n = chimera_posix_pwrite(src_fd, src_buf, CLONE_PROBE_LEN, 0);
+    if (n != CLONE_PROBE_LEN) {
+        die("clone_unlink pwrite", n);
+    }
+
+    rc = chimera_posix_clone_file_range(dst_fd, 0, src_fd, 0, CLONE_PROBE_LEN);
+    if (rc != 0) {
+        die("clone_unlink clone", rc);
+    }
+
+    /* Unlink + close the source; its shared extents must decrement, not free. */
+    chimera_posix_close(src_fd);
+    if (chimera_posix_unlink("/test/clone_ul_src") != 0) {
+        die("clone_unlink unlink", -1);
+    }
+
+    /* Destination still reads the cloned data... */
+    n = chimera_posix_pread(dst_fd, verify, CLONE_PROBE_LEN, 0);
+    if (n != CLONE_PROBE_LEN || memcmp(src_buf, verify, CLONE_PROBE_LEN) != 0) {
+        die("clone_unlink dst data lost after src unlink", n);
+    }
+
+    /* ...and remains writable (it is now the sole owner). */
+    n = chimera_posix_pwrite(dst_fd, over, CLONE_PROBE_LEN, 0);
+    if (n != CLONE_PROBE_LEN) {
+        die("clone_unlink dst rewrite", n);
+    }
+    n = chimera_posix_pread(dst_fd, verify, CLONE_PROBE_LEN, 0);
+    if (n != CLONE_PROBE_LEN || memcmp(over, verify, CLONE_PROBE_LEN) != 0) {
+        die("clone_unlink dst rewrite mismatch", n);
+    }
+
+    chimera_posix_close(dst_fd);
+    free(src_buf);
+    free(over);
+    free(verify);
+
+    fprintf(stderr, "  clone-then-unlink passed\n");
+} /* test_clone_unlink */
+
 static void
 test_clone_unsupported(void)
 {
@@ -421,6 +490,7 @@ main(
         fprintf(stderr, "Backend '%s' supports clone_file_range - validating content\n",
                 env.backend);
         test_clone_content();
+        test_clone_unlink();
     } else {
         fprintf(stderr, "Backend '%s' does not advertise CAP_CLONE_RANGE - "
                 "verifying ENOTSUP path\n", env.backend);

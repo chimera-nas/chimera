@@ -4510,6 +4510,317 @@ memfs_seek(
     }
 } /* memfs_seek */
 
+/*
+ * READ_PLUS: classify the leading byte-run at request->read_plus.offset as a
+ * single DATA or HOLE segment from the sparse block map (NULL block = hole).
+ * Returns only the classification + run length; the NFS server fetches DATA
+ * bytes via a normal read.  One segment per call is sufficient (the client
+ * re-issues from the last byte returned).
+ */
+static void
+memfs_read_plus(
+    struct memfs_thread        *thread,
+    struct memfs_shared        *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    struct memfs_inode        *inode;
+    struct memfs_named_stream *stream;
+    struct memfs_fork         *fork;
+    uint64_t                   fork_size;
+    uint64_t                   offset = request->read_plus.offset;
+    uint64_t                   length = request->read_plus.length;
+    uint64_t                   first_block, bi, natural_end, seg_end;
+    int                        is_data;
+
+    (void) thread;
+
+    inode = memfs_resolve_io(shared, request->read_plus.handle,
+                             request->fh, request->fh_len, &stream);
+
+    if (unlikely(!inode)) {
+        request->status = CHIMERA_VFS_ENOENT;
+        request->complete(request);
+        return;
+    }
+
+    fork      = stream ? &stream->fork : &inode->file;
+    fork_size = stream ? stream->size : inode->size;
+
+    /* At or past EOF: no segment, just report eof (the NFS server returns
+     * NFS4_OK with an empty content array). */
+    if (offset >= fork_size || length == 0) {
+        pthread_mutex_unlock(&inode->lock);
+        request->status              = CHIMERA_VFS_OK;
+        request->read_plus.r_is_data = 0;
+        request->read_plus.r_length  = 0;
+        request->read_plus.r_eof     = (offset >= fork_size);
+        request->complete(request);
+        return;
+    }
+
+    const uint32_t block_shift = shared->block_shift;
+
+    first_block = offset >> block_shift;
+    is_data     = (fork->blocks && first_block < fork->num_blocks &&
+                   fork->blocks[first_block]) ? 1 : 0;
+
+    /* Walk forward to the run boundary (where block presence flips). */
+    bi = first_block;
+    if (is_data) {
+        while (bi < fork->num_blocks && fork->blocks[bi]) {
+            bi++;
+        }
+        natural_end = bi << block_shift;
+    } else {
+        while (bi < fork->num_blocks &&
+               !(fork->blocks && fork->blocks[bi])) {
+            bi++;
+        }
+        natural_end = (bi >= fork->num_blocks) ? fork_size : (bi << block_shift);
+    }
+
+    if (natural_end > fork_size) {
+        natural_end = fork_size;
+    }
+
+    seg_end = natural_end;
+    if (seg_end > offset + length) {
+        seg_end = offset + length;
+    }
+
+    pthread_mutex_unlock(&inode->lock);
+
+    request->status              = CHIMERA_VFS_OK;
+    request->read_plus.r_is_data = is_data;
+    request->read_plus.r_length  = seg_end - offset;
+    request->read_plus.r_eof     = (seg_end >= fork_size);
+
+    request->complete(request);
+} /* memfs_read_plus */
+
+/* Tile `tmpl` (period `period` bytes) into dst[0..len), starting at template
+ * phase (rel_off % period). */
+static inline void
+memfs_tile_pattern(
+    uint8_t       *dst,
+    uint64_t       len,
+    uint64_t       rel_off,
+    const uint8_t *tmpl,
+    uint32_t       period)
+{
+    uint32_t phase = rel_off % period;
+    uint64_t done  = 0;
+
+    while (done < len) {
+        uint32_t chunk = period - phase;
+        if (chunk > len - done) {
+            chunk = len - done;
+        }
+        memcpy(dst + done, tmpl + phase, chunk);
+        done += chunk;
+        phase = 0;
+    }
+} /* memfs_tile_pattern */
+
+/*
+ * WRITE_SAME: materialize block_count Application Data Blocks of block_size
+ * bytes from offset, each block zero-filled with `pattern` placed at
+ * reloff_pattern.  Implemented by tiling a single ADB-block template across the
+ * affected memfs blocks (memfs block size is independent of the ADB block size).
+ */
+static void
+memfs_write_same(
+    struct memfs_thread        *thread,
+    struct memfs_shared        *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    struct evpl               *evpl = thread->evpl;
+    struct memfs_inode        *inode;
+    struct memfs_named_stream *stream;
+    struct memfs_fork         *fork;
+    uint64_t                  *p_size, *p_space_used;
+    struct memfs_block        *block, *old_block;
+    uint64_t                   offset    = request->write_same.offset;
+    uint32_t                   adb_bsize = request->write_same.block_size;
+    uint64_t                   total;
+    uint64_t                   first_block, last_block, bi;
+    uint32_t                   block_offset, block_len;
+    uint64_t                   left, cur_off;
+    uint8_t                   *tmpl;
+    struct timespec            now;
+
+    total = adb_bsize * request->write_same.block_count;
+
+    if (total == 0) {
+        /* Nothing to write (block_count or block_size is 0). */
+        inode = memfs_resolve_io(shared, request->write_same.handle,
+                                 request->fh, request->fh_len, &stream);
+        if (unlikely(!inode)) {
+            request->status = CHIMERA_VFS_ENOENT;
+            request->complete(request);
+            return;
+        }
+        memfs_map_attrs_fork(shared, &request->write_same.r_pre_attr, inode, stream, request->fh);
+        memfs_map_attrs_fork(shared, &request->write_same.r_post_attr, inode, stream, request->fh);
+        pthread_mutex_unlock(&inode->lock);
+        request->status             = CHIMERA_VFS_OK;
+        request->write_same.r_count = 0;
+        request->write_same.r_sync  = CHIMERA_VFS_WRITE_FILESYNC;
+        request->complete(request);
+        return;
+    }
+
+    chimera_vfs_realtime(&now);
+
+    const uint32_t block_size  = shared->block_size;
+    const uint32_t block_shift = shared->block_shift;
+    const uint32_t block_mask  = shared->block_mask;
+
+    /* Build one ADB-block template: zero-filled with the pattern at
+     * reloff_pattern.  The NFS server has already validated that
+     * reloff_pattern + pattern_len <= adb_bsize. */
+    tmpl = malloc(adb_bsize);
+    chimera_memfs_abort_if(tmpl == NULL, "write_same template OOM");
+    memset(tmpl, 0, adb_bsize);
+    if (request->write_same.pattern_len) {
+        memcpy(tmpl + request->write_same.reloff_pattern,
+               request->write_same.pattern,
+               request->write_same.pattern_len);
+    }
+
+    inode = memfs_resolve_io(shared, request->write_same.handle,
+                             request->fh, request->fh_len, &stream);
+
+    if (unlikely(!inode)) {
+        free(tmpl);
+        request->status = CHIMERA_VFS_ENOENT;
+        request->complete(request);
+        return;
+    }
+
+    if (!S_ISREG(inode->mode)) {
+        request->status = S_ISDIR(inode->mode) ?
+            CHIMERA_VFS_EISDIR : CHIMERA_VFS_EINVAL;
+        pthread_mutex_unlock(&inode->lock);
+        free(tmpl);
+        request->complete(request);
+        return;
+    }
+
+    fork         = stream ? &stream->fork : &inode->file;
+    p_size       = stream ? &stream->size : &inode->size;
+    p_space_used = stream ? &stream->space_used : &inode->space_used;
+
+    memfs_map_attrs_fork(shared, &request->write_same.r_pre_attr, inode, stream, request->fh);
+
+    first_block  = offset >> block_shift;
+    block_offset = offset & block_mask;
+    last_block   = (offset + total - 1) >> block_shift;
+    left         = total;
+    cur_off      = offset;
+
+    if (fork->max_blocks <= last_block || !fork->blocks) {
+        struct memfs_block **new_blocks;
+        unsigned int         new_max_blocks = 1024;
+
+        while (new_max_blocks <= last_block) {
+            new_max_blocks <<= 1;
+        }
+
+        new_blocks = calloc(new_max_blocks, sizeof(struct memfs_block *));
+
+        if (!new_blocks) {
+            pthread_mutex_unlock(&inode->lock);
+            free(tmpl);
+            request->status = CHIMERA_VFS_ENOSPC;
+            request->complete(request);
+            return;
+        }
+
+        if (fork->blocks) {
+            memcpy(new_blocks, fork->blocks,
+                   fork->num_blocks * sizeof(struct memfs_block *));
+            free(fork->blocks);
+        }
+
+        fork->blocks     = new_blocks;
+        fork->max_blocks = new_max_blocks;
+    }
+
+    if (last_block + 1 > fork->num_blocks) {
+        fork->num_blocks = last_block + 1;
+    }
+
+    for (bi = first_block; bi <= last_block; bi++) {
+        block_len = block_size - block_offset;
+        if (left < block_len) {
+            block_len = left;
+        }
+
+        old_block = fork->blocks ? fork->blocks[bi] : NULL;
+
+        block = memfs_block_alloc_charged(thread, old_block ? 0 : 1);
+
+        if (!block) {
+            pthread_mutex_unlock(&inode->lock);
+            free(tmpl);
+            request->status = CHIMERA_VFS_ENOSPC;
+            request->complete(request);
+            return;
+        }
+
+        block->niov = evpl_iovec_alloc(evpl, block_size, 4096,
+                                       CHIMERA_MEMFS_BLOCK_MAX_IOV,
+                                       EVPL_IOVEC_FLAG_SHARED, block->iov);
+
+        /* Zero any prefix/suffix of this memfs block that the ADB region does
+         * not cover (partial leading/trailing block). */
+        if (block_offset) {
+            memset(block->iov[0].data, 0, block_offset);
+        }
+        if (block_offset + block_len < block_size) {
+            memset(block->iov[0].data + block_offset + block_len, 0,
+                   block_size - block_offset - block_len);
+        }
+
+        /* Tile the ADB pattern into the covered span. */
+        memfs_tile_pattern(block->iov[0].data + block_offset, block_len,
+                           cur_off - offset, tmpl, adb_bsize);
+
+        if (old_block) {
+            fork->blocks[bi] = NULL;
+            memfs_block_free_charged(thread, old_block, 0);
+        }
+        fork->blocks[bi] = block;
+
+        cur_off     += block_len;
+        left        -= block_len;
+        block_offset = 0;
+    }
+
+    if (*p_size < offset + total) {
+        *p_size       = offset + total;
+        *p_space_used = (*p_size + 4095) & ~4095;
+    }
+
+    inode->mtime = now;
+    inode->ctime = now;
+
+    memfs_map_attrs_fork(shared, &request->write_same.r_post_attr, inode, stream, request->fh);
+
+    pthread_mutex_unlock(&inode->lock);
+
+    free(tmpl);
+
+    request->status             = CHIMERA_VFS_OK;
+    request->write_same.r_count = total;
+    request->write_same.r_sync  = CHIMERA_VFS_WRITE_FILESYNC;
+
+    request->complete(request);
+} /* memfs_write_same */
+
 static void
 memfs_symlink_at(
     struct memfs_thread        *thread,
@@ -5647,6 +5958,12 @@ memfs_dispatch(
         case CHIMERA_VFS_OP_SEEK:
             memfs_seek(thread, shared, request, private_data);
             break;
+        case CHIMERA_VFS_OP_READ_PLUS:
+            memfs_read_plus(thread, shared, request, private_data);
+            break;
+        case CHIMERA_VFS_OP_WRITE_SAME:
+            memfs_write_same(thread, shared, request, private_data);
+            break;
         case CHIMERA_VFS_OP_SYMLINK_AT:
             memfs_symlink_at(thread, shared, request, private_data);
             break;
@@ -5698,7 +6015,8 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_memfs = {
         CHIMERA_VFS_CAP_ACL_NATIVE | CHIMERA_VFS_CAP_XATTR | CHIMERA_VFS_CAP_LAYOUT |
         CHIMERA_VFS_CAP_READ_PROVIDES_BUFFERS |
         CHIMERA_VFS_CAP_NAMED_STREAMS | CHIMERA_VFS_CAP_RPL | CHIMERA_VFS_CAP_FS_LOCK |
-        CHIMERA_VFS_CAP_CHANGE,
+        CHIMERA_VFS_CAP_CHANGE |
+        CHIMERA_VFS_CAP_READ_PLUS | CHIMERA_VFS_CAP_WRITE_SAME,
     .init           = memfs_init,
     .destroy        = memfs_destroy,
     .thread_init    = memfs_thread_init,

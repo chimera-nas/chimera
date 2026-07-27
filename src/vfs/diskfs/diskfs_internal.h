@@ -116,6 +116,21 @@
         (DISKFS_ORPHAN_INUM_BASE + ((inum) % DISKFS_ORPHAN_SHARDS))
 
 
+/* Statically-reserved extent-refcount inodes (inums after the orphan shards):
+ * their b+trees hold DISKFS_REC_REFCOUNT records (keyed by device offset)
+ * counting how many inodes share a reflinked device range.  Created at format,
+ * permanent.  Count is baked into the on-disk bootstrap layout. */
+#define DISKFS_REFCOUNT_INUM_BASE (DISKFS_ORPHAN_INUM_BASE + DISKFS_ORPHAN_SHARDS)
+
+#define DISKFS_REFCOUNT_SHARDS    SM_BOOTSTRAP_REFCOUNT_SLOTS
+
+#define DISKFS_REFCOUNT_GEN       1   /* permanent: created at format */
+
+#define DISKFS_REFCOUNT_SHARD_INUM(device_offset) \
+        (DISKFS_REFCOUNT_INUM_BASE + \
+         (((device_offset) >> 12) % DISKFS_REFCOUNT_SHARDS))
+
+
 /* Max inodes a single transaction can hold locked at once.  rename needs
  * 5 (two parents, child, replaced target, plus the orphan-list shard when
  * the replace deletes the target); others (e.g. readdir) touch many but
@@ -315,6 +330,38 @@ struct diskfs_request_private {
     uint64_t                    ci_off, ci_len, ci_devoff;
     uint32_t                    ci_devid, ci_flags;
     void                        (*ci_cont)(
+        struct chimera_vfs_request *);
+
+    /* WRITE_SAME state.  ws_active marks that the shared punch (dealloc) loop is
+     * being borrowed by WRITE_SAME, so diskfs_dealloc_finish hands control back
+     * to the pattern-fill phase instead of finalizing.  ws_tmpl is the one
+     * block-size pattern template (zero + pattern at reloff) tiled into each
+     * device write; freed at finish. */
+    int                         ws_active;
+    uint8_t                    *ws_tmpl;
+
+    /* Reflink (CLONE) + copy-on-write state.  inode_stash[2] holds the acquired
+     * refcount inode.  rc_* describe the device range a refcount op acts on;
+     * rc_cont is the continuation after the lookup->remove->insert chain;
+     * rc_should_free is the dec result (free the range only when it hits 0). */
+    void                        (*rc_cont)(
+        struct chimera_vfs_request *);
+    uint64_t                    rc_devoff;
+    uint64_t                    rc_length;
+    uint64_t                    rc_newcount;
+    uint32_t                    rc_devid;
+    int                         rc_should_free;
+    int                         rc_found;
+    /* CLONE: source/destination base offsets for translating extent keys. */
+    uint64_t                    clone_src_base;
+    uint64_t                    clone_dst_base;
+    /* Whole-extent CoW privatize: the shared extent being copied to private
+     * blocks, the freshly-allocated destination, and the bytes copied so far. */
+    struct diskfs_extent        cow_ext;
+    uint64_t                    cow_new_devoff;
+    uint32_t                    cow_new_devid;
+    uint64_t                    cow_copied;
+    void                        (*cow_cont)(
         struct chimera_vfs_request *);
 };
 
@@ -876,13 +923,15 @@ struct diskfs_dinode {
 
 /* Record types share one tree per inode; each occupies a key range. */
 enum diskfs_bt_rectype {
-    DISKFS_REC_DIRENT  = 1,
-    DISKFS_REC_EXTENT  = 2,
-    DISKFS_REC_SYMLINK = 3,
-    DISKFS_REC_ORPHAN  = 4,   /* orphan-list inode only: subkey = orphaned inum */
-    DISKFS_REC_XATTR   = 5,
-    DISKFS_REC_PNFS    = 6,   /* regular file: opaque pNFS layout blob (flex-files) */
-    DISKFS_REC_ACL     = 7,   /* single record: serialized NFSv4/Windows ACL (subkey 0) */
+    DISKFS_REC_DIRENT   = 1,
+    DISKFS_REC_EXTENT   = 2,
+    DISKFS_REC_SYMLINK  = 3,
+    DISKFS_REC_ORPHAN   = 4,  /* orphan-list inode only: subkey = orphaned inum */
+    DISKFS_REC_XATTR    = 5,
+    DISKFS_REC_PNFS     = 6,  /* regular file: opaque pNFS layout blob (flex-files) */
+    DISKFS_REC_ACL      = 7,  /* single record: serialized NFSv4/Windows ACL (subkey 0) */
+    DISKFS_REC_REFCOUNT = 8,  /* refcount inode only: subkey = device offset of a
+                               * reflink-shared extent; payload = share count */
 };
 
 
@@ -939,12 +988,25 @@ struct diskfs_dirent_rec {
                                      *
                                      * written: reads return zeros, the first
                                      * write clears the bit */
+#define DISKFS_EXT_SHARED    0x2u   /* reflink-shared (CLONE): the backing device
+                                    * range has a refcount > 1.  A write must
+                                    * copy-on-write (the write path forces the
+                                    * redirect branch) and a free must decrement
+                                    * the refcount instead of releasing space. */
 
 struct diskfs_extent_rec {
     uint64_t length;
     uint32_t device_id;
     uint32_t flags;
     uint64_t device_offset;
+} __attribute__((packed));
+
+
+/* DISKFS_REC_REFCOUNT payload: how many inodes share the device range named by
+ * the record's key (device offset).  device_id is folded into the key. */
+struct diskfs_refcount_rec {
+    uint64_t length;        /* device byte range length (for the free at ref 0) */
+    uint64_t refcount;      /* number of inodes sharing this range */
 } __attribute__((packed));
 
 
@@ -1836,6 +1898,14 @@ struct diskfs_drain {
     struct diskfs_bt_key  found_key;
     uint8_t               recbuf[sizeof(struct diskfs_extent_rec)];
     struct diskfs_drain  *next;
+    /* Reflink: the refcount inode (acquired lazily when a doomed inode holds a
+     * shared extent) plus transient state for the decrement chain. */
+    struct diskfs_inode  *rc_inode;
+    uint64_t              rc_devoff;
+    uint64_t              rc_length;
+    uint64_t              rc_newcount;
+    uint32_t              rc_devid;
+    uint8_t               rc_scratch[sizeof(struct diskfs_refcount_rec)];
 };
 
 
@@ -2616,6 +2686,22 @@ diskfs_ext_next_async(
     void                 *private_data);
 
 int
+diskfs_ext_remove_async(
+    struct diskfs_bt_op  *op,
+    struct diskfs_thread *thread,
+    struct diskfs_txn    *txn,
+    struct diskfs_inode  *inode,
+    uint64_t              file_offset,
+    diskfs_bt_cb_t        cb,
+    void                 *private_data);
+
+int
+diskfs_io_gate(
+    struct diskfs_thread       *thread,
+    struct chimera_vfs_request *request,
+    void (                     *resume )(struct chimera_vfs_request *));
+
+int
 diskfs_ext_insert_async(
     struct diskfs_bt_op  *op,
     struct diskfs_thread *thread,
@@ -2979,6 +3065,62 @@ diskfs_seek(
     struct diskfs_shared       *shared,
     struct chimera_vfs_request *request,
     void                       *private_data);
+
+void
+diskfs_read_plus(
+    struct diskfs_thread       *thread,
+    struct diskfs_shared       *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data);
+
+void
+diskfs_write_same(
+    struct diskfs_thread       *thread,
+    struct diskfs_shared       *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data);
+
+void
+diskfs_clone_range(
+    struct diskfs_thread       *thread,
+    struct diskfs_shared       *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data);
+
+/* Reflink refcount + copy-on-write helpers (diskfs_clone.c).  The refcount
+ * inode must already be acquired (write-locked) in the txn at inode_stash[2]. */
+void
+diskfs_refcount_inc(
+    struct chimera_vfs_request *request,
+    uint32_t                    device_id,
+    uint64_t                    device_offset,
+    uint64_t                    length,
+    void (                     *cont )(struct chimera_vfs_request *));
+
+void
+diskfs_refcount_dec(
+    struct chimera_vfs_request *request,
+    uint32_t                    device_id,
+    uint64_t                    device_offset,
+    void (                     *cont )(struct chimera_vfs_request *));
+
+/* Privatize one reflink-shared extent of inode_stash[0]: copy its blocks to
+ * fresh private space, replace the extent record (clearing SHARED), and drop
+ * the refcount (freeing the old range when it hits zero).  Runs cont when done. */
+void
+diskfs_cow_privatize(
+    struct chimera_vfs_request *request,
+    const struct diskfs_extent *ext,
+    void (                     *cont )(struct chimera_vfs_request *));
+
+/* Release one extent's backing space: free a private extent directly, or
+ * decrement a shared extent's refcount (freeing only at the last owner).  The
+ * refcount inode must be acquired at inode_stash[2] when ext is SHARED. */
+void
+diskfs_ext_release(
+    struct chimera_vfs_request *request,
+    const struct diskfs_extent *ext,
+    void (                     *cont )(struct chimera_vfs_request *));
 
 void
 diskfs_symlink_at(
@@ -4343,6 +4485,23 @@ diskfs_extent_key(uint64_t file_offset)
 
     return k;
 } /* diskfs_extent_key */
+
+/* Refcount records are keyed by (device_id, device_offset) folded into the
+ * 64-bit subkey: device_id in the top 8 bits, the (4 KiB-block-aligned) device
+ * offset in the low 56 bits.  56 bits of byte offset covers 64 PiB per device. */
+static inline struct diskfs_bt_key
+diskfs_refcount_key(
+    uint32_t device_id,
+    uint64_t device_offset)
+{
+    struct diskfs_bt_key k = {
+        .type              = DISKFS_REC_REFCOUNT,
+        .subkey            = ((uint64_t) device_id << 56) |
+            (device_offset & ((1ULL << 56) - 1)),
+    };
+
+    return k;
+} /* diskfs_refcount_key */
 
 
 /* Materialize the extent from a completed async lookup op (result + the

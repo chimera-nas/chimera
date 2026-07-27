@@ -13,7 +13,7 @@
 
 /* Forward declarations (definitions below, in call-graph order) */
 
-static int
+int
 diskfs_ext_remove_async(
     struct diskfs_bt_op  *op,
     struct diskfs_thread *thread,
@@ -117,7 +117,7 @@ diskfs_dirent_free(
     struct diskfs_thread *thread,
     struct diskfs_dirent *dirent);
 
-static int
+int
 diskfs_io_gate(
     struct diskfs_thread       *thread,
     struct chimera_vfs_request *request,
@@ -304,6 +304,10 @@ diskfs_write_classify_cb(
     struct diskfs_bt_op *op,
     int                  result,
     void                *private_data);
+
+static void
+diskfs_write_cow_scan(
+    struct chimera_vfs_request *request);
 
 static void
 diskfs_write_redirect_alloc(
@@ -583,7 +587,7 @@ diskfs_ext_insert_async(
 } /* diskfs_ext_insert_async */
 
 
-static int
+int
 diskfs_ext_remove_async(
     struct diskfs_bt_op  *op,
     struct diskfs_thread *thread,
@@ -1028,7 +1032,7 @@ diskfs_kv_entry_release(
  * caller must then return without issuing); 0 if it is clear to submit.  resume
  * re-enters the paused path once a completion drains the queue.
  */
-static int
+int
 diskfs_io_gate(
     struct diskfs_thread       *thread,
     struct chimera_vfs_request *request,
@@ -2661,7 +2665,6 @@ diskfs_write_inode_cb(
     uint64_t                       write_start = request->write.offset;
     uint64_t                       write_end   = write_start + request->write.length;
     uint64_t                       aligned_start, aligned_end;
-    struct diskfs_bt_op           *op;
 
     if (unlikely(status != CHIMERA_VFS_OK)) {
         diskfs_op_fail(request, p->txn, status);
@@ -2698,13 +2701,104 @@ diskfs_write_inode_cb(
     p->need_suffix_read   = 0;
     p->inode_stash[0]     = inode;
 
-    op = diskfs_bt_op_alloc(thread);
-    if (diskfs_ext_floor_async(op, thread, inode, aligned_start, p->rec_scratch,
-                               sizeof(p->rec_scratch), diskfs_write_classify_cb,
-                               request)) {
+    /* Reflink copy-on-write: privatize any shared extents overlapping the write
+     * before the normal write machinery runs, so the redirect/trim never frees a
+     * block another file still references. */
+    diskfs_write_cow_scan(request);
+} /* diskfs_write_inode_cb */
+
+/* Start the normal write classification (after any CoW privatization). */
+static void
+diskfs_write_classify_start(struct chimera_vfs_request *request)
+{
+    struct diskfs_request_private *p      = request->plugin_data;
+    struct diskfs_thread          *thread = p->thread;
+    struct diskfs_bt_op           *op     = diskfs_bt_op_alloc(thread);
+
+    if (diskfs_ext_floor_async(op, thread, p->inode_stash[0], p->rmw_aligned_start,
+                               p->rec_scratch, sizeof(p->rec_scratch),
+                               diskfs_write_classify_cb, request)) {
         diskfs_write_classify_cb(op, op->result, request);
     }
-} /* diskfs_write_inode_cb */
+} /* diskfs_write_classify_start */
+
+static void
+diskfs_write_cow_rc_acquired_cb(
+    struct diskfs_inode *inode,
+    int                  status,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+
+    if (unlikely(status != CHIMERA_VFS_OK)) {
+        diskfs_op_fail(request, p->txn, status);
+        return;
+    }
+
+    p->inode_stash[2] = inode;
+    /* cow_ext was stashed by the scan callback; privatize then re-scan. */
+    diskfs_cow_privatize(request, &p->cow_ext, diskfs_write_cow_scan);
+} /* diskfs_write_cow_rc_acquired_cb */
+
+static void
+diskfs_write_cow_scan_cb(
+    struct diskfs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+    struct diskfs_thread          *thread  = p->thread;
+    uint64_t                       astart  = p->rmw_aligned_start;
+    uint64_t                       aend    = astart + p->rmw_aligned_length;
+    struct diskfs_extent           e;
+    int                            have;
+
+    have = diskfs_ext_from_op(op, result, &e);
+    diskfs_bt_op_free(thread, op);
+
+    /* No (more) extents overlapping the write region: nothing to privatize. */
+    if (!have || e.file_offset >= aend) {
+        diskfs_write_classify_start(request);
+        return;
+    }
+
+    if ((e.flags & DISKFS_EXT_SHARED) && e.file_offset + e.length > astart) {
+        p->cow_ext = e;
+        if (p->inode_stash[2] == NULL) {
+            /* Acquire the refcount inode (lock leaf, always last), then CoW. */
+            diskfs_inode_acquire(thread, p->txn, DISKFS_REFCOUNT_INUM_BASE,
+                                 DISKFS_REFCOUNT_GEN, DISKFS_INODE_LOCK_WRITE,
+                                 diskfs_write_cow_rc_acquired_cb, request);
+            return;
+        }
+        diskfs_cow_privatize(request, &p->cow_ext, diskfs_write_cow_scan);
+        return;
+    }
+
+    /* Not shared: step to the next extent. */
+    op = diskfs_bt_op_alloc(thread);
+    if (diskfs_ext_next_async(op, thread, p->inode_stash[0], e.file_offset,
+                              p->rec_scratch, sizeof(p->rec_scratch),
+                              diskfs_write_cow_scan_cb, request)) {
+        diskfs_write_cow_scan_cb(op, op->result, request);
+    }
+} /* diskfs_write_cow_scan_cb */
+
+static void
+diskfs_write_cow_scan(struct chimera_vfs_request *request)
+{
+    struct diskfs_request_private *p      = request->plugin_data;
+    struct diskfs_thread          *thread = p->thread;
+    struct diskfs_bt_op           *op     = diskfs_bt_op_alloc(thread);
+
+    if (diskfs_ext_floor_async(op, thread, p->inode_stash[0], p->rmw_aligned_start,
+                               p->rec_scratch, sizeof(p->rec_scratch),
+                               diskfs_write_cow_scan_cb, request)) {
+        diskfs_write_cow_scan_cb(op, op->result, request);
+    }
+} /* diskfs_write_cow_scan */
 
 
 static void
@@ -2724,7 +2818,8 @@ diskfs_write_classify_cb(
     have = diskfs_ext_from_op(op, result, &e);
     diskfs_bt_op_free(thread, op);
 
-    if (have && e.file_offset <= astart && e.file_offset + e.length >= aend) {
+    if (have && e.file_offset <= astart && e.file_offset + e.length >= aend &&
+        !(e.flags & DISKFS_EXT_SHARED)) {
         /* Single extent fully covers the region: overwrite its blocks in
          * place at the matching device offset. */
         p->rmw_device_id     = e.device_id;
@@ -2986,6 +3081,7 @@ diskfs_write(
     p->need_prefix_read    = 0;
     p->need_suffix_read    = 0;
     p->inplace_written     = 0;
+    p->inode_stash[2]      = NULL;   /* refcount inode (acquired lazily on CoW) */
     p->txn                 = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
 
     /* Warm-handle fast path (see diskfs_read): reuse the inode pinned at open
@@ -3025,10 +3121,21 @@ diskfs_allocate_finalize(struct chimera_vfs_request *request)
 
 
 static void
+diskfs_write_same_after_punch(
+    struct chimera_vfs_request *request);
+
+static void
 diskfs_dealloc_finish(struct chimera_vfs_request *request)
 {
     struct diskfs_request_private *p     = request->plugin_data;
     struct diskfs_inode           *inode = p->inode_stash[0];
+
+    /* WRITE_SAME borrows this punch loop to clear existing extents before
+     * filling; hand back to its fill phase rather than finalizing. */
+    if (p->ws_active) {
+        diskfs_write_same_after_punch(request);
+        return;
+    }
 
     inode->space_used = (inode->size + 4095) & ~4095;
     diskfs_allocate_finalize(request);
@@ -3247,10 +3354,14 @@ diskfs_dealloc_process(struct chimera_vfs_request *request)
      * (a file whose size is sub-block-aligned), so freeing it whole is correct and
      * is what keeps the space-map free accounting from leaking the edge. */
     if (es >= hole_start && ee <= hole_end) {
-        /* Completely inside the hole: free + remove, then advance. */
-        diskfs_thread_free_space(thread, p->txn, p->ext_iter.device_id,
-                                 p->ext_iter.device_offset,
-                                 SM_ALIGN_UP(p->ext_iter.length));
+        /* Completely inside the hole: free + remove, then advance.  A reflink-
+         * shared extent keeps its backing (other owners reference it; the
+         * refcount frees it at the last owner) -- see diskfs_ext_release. */
+        if (!(p->ext_iter.flags & DISKFS_EXT_SHARED)) {
+            diskfs_thread_free_space(thread, p->txn, p->ext_iter.device_id,
+                                     p->ext_iter.device_offset,
+                                     SM_ALIGN_UP(p->ext_iter.length));
+        }
         op = diskfs_bt_op_alloc(thread);
         if (diskfs_ext_remove_async(op, thread, p->txn, p->inode_stash[0], es,
                                     diskfs_dealloc_modify_advance_cb, request)) {
@@ -3259,10 +3370,13 @@ diskfs_dealloc_process(struct chimera_vfs_request *request)
     } else if (es < hole_start && ee > hole_end) {
         /* Spans the hole: free the (block-aligned) punched-out middle
          * [hole_start, hole_end) of this extent's backing, then insert the tail at
-         * hole_end (block-aligned device offset). */
-        diskfs_thread_free_space(thread, p->txn, p->ext_iter.device_id,
-                                 p->ext_iter.device_offset + (hole_start - es),
-                                 hole_end - hole_start);
+         * hole_end (block-aligned device offset).  A reflink-shared extent keeps
+         * its backing (the refcount frees it at the last owner). */
+        if (!(p->ext_iter.flags & DISKFS_EXT_SHARED)) {
+            diskfs_thread_free_space(thread, p->txn, p->ext_iter.device_id,
+                                     p->ext_iter.device_offset + (hole_start - es),
+                                     hole_end - hole_start);
+        }
         op = diskfs_bt_op_alloc(thread);
         if (diskfs_ext_insert_async(op, thread, p->txn, p->inode_stash[0], hole_end,
                                     ee - hole_end, p->ext_iter.device_id,
@@ -3274,10 +3388,13 @@ diskfs_dealloc_process(struct chimera_vfs_request *request)
     } else if (es < hole_start) {
         /* Overlaps the hole start: free the punched tail [hole_start, ee) of this
          * extent's backing (rounded up to whole blocks -- the extent is removed
-         * entirely past hole_start), then remove + reinsert the kept head. */
-        diskfs_thread_free_space(thread, p->txn, p->ext_iter.device_id,
-                                 p->ext_iter.device_offset + (hole_start - es),
-                                 SM_ALIGN_UP(ee - hole_start));
+         * entirely past hole_start), then remove + reinsert the kept head.  A
+         * reflink-shared extent keeps its backing (refcount frees at last owner). */
+        if (!(p->ext_iter.flags & DISKFS_EXT_SHARED)) {
+            diskfs_thread_free_space(thread, p->txn, p->ext_iter.device_id,
+                                     p->ext_iter.device_offset + (hole_start - es),
+                                     SM_ALIGN_UP(ee - hole_start));
+        }
         op = diskfs_bt_op_alloc(thread);
         if (diskfs_ext_remove_async(op, thread, p->txn, p->inode_stash[0], es,
                                     diskfs_dealloc_ostart_removed_cb, request)) {
@@ -3286,9 +3403,11 @@ diskfs_dealloc_process(struct chimera_vfs_request *request)
     } else {
         /* Overlaps the hole end: free the punched head [es, hole_end) of this
          * extent's backing, then remove + reinsert the kept tail at hole_end. */
-        diskfs_thread_free_space(thread, p->txn, p->ext_iter.device_id,
-                                 p->ext_iter.device_offset,
-                                 hole_end - es);
+        if (!(p->ext_iter.flags & DISKFS_EXT_SHARED)) {
+            diskfs_thread_free_space(thread, p->txn, p->ext_iter.device_id,
+                                     p->ext_iter.device_offset,
+                                     hole_end - es);
+        }
         op = diskfs_bt_op_alloc(thread);
         if (diskfs_ext_remove_async(op, thread, p->txn, p->inode_stash[0], es,
                                     diskfs_dealloc_oend_removed_cb, request)) {
@@ -3789,8 +3908,9 @@ diskfs_allocate(
     (void) shared;
     (void) private_data;
 
-    p->thread = thread;
-    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+    p->thread    = thread;
+    p->ws_active = 0;      /* not a WRITE_SAME-borrowed punch */
+    p->txn       = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
 
     diskfs_inode_get_fh_async(thread, p->txn,
                               request->fh, request->fh_len,
@@ -3977,6 +4097,556 @@ diskfs_seek(
                               request->fh, request->fh_len,
                               diskfs_seek_inode_cb, request);
 } /* diskfs_seek */
+
+
+/*
+ * READ_PLUS classification: report the leading byte-run at request->read_plus
+ * .offset as a single DATA or HOLE segment from the extent map.  An extent
+ * covering the offset is data (running to the extent end); a gap is a hole
+ * (running to the next extent or EOF).  Mirrors diskfs_seek's extent semantics
+ * (an extent is data, a gap is a hole); the NFS server fetches DATA bytes via a
+ * normal read.
+ */
+static void
+diskfs_read_plus_finish_data(
+    struct chimera_vfs_request *request,
+    uint64_t                    seg_end)
+{
+    struct diskfs_request_private *p      = request->plugin_data;
+    struct diskfs_inode           *inode  = p->inode_stash[0];
+    uint64_t                       offset = request->read_plus.offset;
+
+    if (seg_end > inode->size) {
+        seg_end = inode->size;
+    }
+    if (seg_end > offset + request->read_plus.length) {
+        seg_end = offset + request->read_plus.length;
+    }
+
+    request->read_plus.r_is_data = 1;
+    request->read_plus.r_length  = seg_end - offset;
+    request->read_plus.r_eof     = (seg_end >= inode->size);
+    diskfs_op_ok(request, p->txn);
+} /* diskfs_read_plus_finish_data */
+
+static void
+diskfs_read_plus_finish_hole(
+    struct chimera_vfs_request *request,
+    uint64_t                    seg_end)
+{
+    struct diskfs_request_private *p      = request->plugin_data;
+    struct diskfs_inode           *inode  = p->inode_stash[0];
+    uint64_t                       offset = request->read_plus.offset;
+
+    if (seg_end > inode->size) {
+        seg_end = inode->size;
+    }
+    if (seg_end > offset + request->read_plus.length) {
+        seg_end = offset + request->read_plus.length;
+    }
+
+    request->read_plus.r_is_data = 0;
+    request->read_plus.r_length  = seg_end - offset;
+    request->read_plus.r_eof     = (seg_end >= inode->size);
+    diskfs_op_ok(request, p->txn);
+} /* diskfs_read_plus_finish_hole */
+
+/* Found the extent after a gap: its start bounds the hole (else EOF). */
+static void
+diskfs_read_plus_holeend_cb(
+    struct diskfs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+    struct diskfs_extent           next;
+    int                            have;
+
+    have = diskfs_ext_from_op(op, result, &next);
+    diskfs_bt_op_free(p->thread, op);
+
+    diskfs_read_plus_finish_hole(request,
+                                 have ? next.file_offset : p->inode_stash[0]->size);
+} /* diskfs_read_plus_holeend_cb */
+
+/* floor(offset): if it covers offset the run is data, else offset is in a hole
+ * and we look up the following extent to bound it. */
+static void
+diskfs_read_plus_floor_cb(
+    struct diskfs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+    struct diskfs_thread          *thread  = p->thread;
+    uint64_t                       offset  = request->read_plus.offset;
+    struct diskfs_extent           e;
+    int                            have;
+
+    have = diskfs_ext_from_op(op, result, &e);
+    diskfs_bt_op_free(thread, op);
+
+    if (have && e.file_offset <= offset && e.file_offset + e.length > offset) {
+        /* Data extent covering the offset: run to the end of this extent. */
+        diskfs_read_plus_finish_data(request, e.file_offset + e.length);
+        return;
+    }
+
+    /* Hole at offset: bound it by the next extent after the floor (or, if there
+     * is no floor extent, the first extent at/after the offset). */
+    op = diskfs_bt_op_alloc(thread);
+    if (have) {
+        if (diskfs_ext_next_async(op, thread, p->inode_stash[0], e.file_offset,
+                                  p->rec_scratch, sizeof(p->rec_scratch),
+                                  diskfs_read_plus_holeend_cb, request)) {
+            diskfs_read_plus_holeend_cb(op, op->result, request);
+        }
+    } else {
+        if (diskfs_ext_ceil_async(op, thread, p->inode_stash[0], offset,
+                                  p->rec_scratch, sizeof(p->rec_scratch),
+                                  diskfs_read_plus_holeend_cb, request)) {
+            diskfs_read_plus_holeend_cb(op, op->result, request);
+        }
+    }
+} /* diskfs_read_plus_floor_cb */
+
+static void
+diskfs_read_plus_inode_cb(
+    struct diskfs_inode *inode,
+    int                  status,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+    struct diskfs_thread          *thread  = p->thread;
+    uint64_t                       offset  = request->read_plus.offset;
+    struct diskfs_bt_op           *op;
+
+    if (unlikely(status != CHIMERA_VFS_OK)) {
+        diskfs_op_fail(request, p->txn, status);
+        return;
+    }
+
+    p->inode_stash[0] = inode;
+
+    if (offset >= inode->size || request->read_plus.length == 0) {
+        request->read_plus.r_is_data = 0;
+        request->read_plus.r_length  = 0;
+        request->read_plus.r_eof     = (offset >= inode->size);
+        diskfs_op_ok(request, p->txn);
+        return;
+    }
+
+    op = diskfs_bt_op_alloc(thread);
+    if (diskfs_ext_floor_async(op, thread, inode, offset, p->rec_scratch,
+                               sizeof(p->rec_scratch), diskfs_read_plus_floor_cb,
+                               request)) {
+        diskfs_read_plus_floor_cb(op, op->result, request);
+    }
+} /* diskfs_read_plus_inode_cb */
+
+void
+diskfs_read_plus(
+    struct diskfs_thread       *thread,
+    struct diskfs_shared       *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    struct diskfs_request_private *p = request->plugin_data;
+
+    (void) shared;
+    (void) private_data;
+
+    p->thread = thread;
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ);
+
+    diskfs_inode_get_fh_async(thread, p->txn,
+                              request->fh, request->fh_len,
+                              diskfs_read_plus_inode_cb, request);
+} /* diskfs_read_plus */
+
+
+/*
+ * WRITE_SAME (RFC 7862): expand an Application Data Block pattern across a run
+ * of blocks.  Implemented as punch-then-fill in one write txn:
+ *   1. free any existing extents in the range (reusing the dealloc punch loop),
+ *   2a. zero pattern  -> just extend the size (the punched range reads as zero),
+ *   2b. fixed pattern -> allocate + write the tiled pattern, chunk by chunk.
+ */
+
+#define DISKFS_WS_CHUNK (256ULL << 10)   /* per-step alloc + device-write chunk */
+
+/* Tile one block-size template into dst[0..len), starting at the template phase
+ * for the given file offset (relative to the ADB offset). */
+static void
+diskfs_ws_tile(
+    uint8_t       *dst,
+    uint64_t       len,
+    uint64_t       rel_off,
+    const uint8_t *tmpl,
+    uint32_t       block_size)
+{
+    uint32_t phase = rel_off % block_size;
+    uint64_t done  = 0;
+
+    while (done < len) {
+        uint32_t chunk = block_size - phase;
+        if (chunk > len - done) {
+            chunk = len - done;
+        }
+        memcpy(dst + done, tmpl + phase, chunk);
+        done += chunk;
+        phase = 0;
+    }
+} /* diskfs_ws_tile */
+
+static void
+diskfs_write_same_fill_step(
+    struct chimera_vfs_request *request);
+
+static void
+diskfs_write_same_fail(
+    struct chimera_vfs_request *request,
+    int                         status)
+{
+    struct diskfs_request_private *p = request->plugin_data;
+
+    p->ws_active = 0;
+    if (p->ws_tmpl) {
+        free(p->ws_tmpl);
+        p->ws_tmpl = NULL;
+    }
+    diskfs_op_fail(request, p->txn, status);
+} /* diskfs_write_same_fail */
+
+static void
+diskfs_write_same_finalize(struct chimera_vfs_request *request)
+{
+    struct diskfs_request_private *p      = request->plugin_data;
+    struct diskfs_thread          *thread = p->thread;
+    struct diskfs_inode           *inode  = p->inode_stash[0];
+    uint64_t                       total  = (uint64_t) request->write_same.block_size *
+        request->write_same.block_count;
+    uint64_t                       end = request->write_same.offset + total;
+    struct timespec                now;
+
+    p->ws_active = 0;
+    if (p->ws_tmpl) {
+        free(p->ws_tmpl);
+        p->ws_tmpl = NULL;
+    }
+
+    if (end > inode->size) {
+        inode->size = end;
+    }
+    inode->space_used = (inode->size + 4095) & ~4095;
+
+    clock_gettime(CLOCK_REALTIME, &now);
+    inode->mtime_sec  = now.tv_sec;
+    inode->mtime_nsec = now.tv_nsec;
+    inode->ctime_sec  = now.tv_sec;
+    inode->ctime_nsec = now.tv_nsec;
+
+    request->write_same.r_count = total;
+    request->write_same.r_sync  = CHIMERA_VFS_WRITE_FILESYNC;
+    diskfs_map_attrs(thread, &request->write_same.r_post_attr, inode);
+    diskfs_op_ok(request, p->txn);
+} /* diskfs_write_same_finalize */
+
+/* Device-write completion: when a chunk's writes all land, record it as a
+ * WRITTEN extent and continue the fill loop. */
+static void
+diskfs_write_same_io_cb(
+    struct evpl *evpl,
+    int          status,
+    void        *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+    struct diskfs_thread          *thread  = p->thread;
+
+    (void) evpl;
+
+    if (p->status == 0 && status) {
+        p->status = status;
+    }
+
+    p->pending--;
+    diskfs_pending_io_add(thread, -1);
+    diskfs_io_resume_waiters(thread);
+
+    if (p->pending == 0) {
+        evpl_iovecs_release(thread->evpl, p->iov, p->niov);
+        p->niov = 0;
+
+        if (p->status) {
+            diskfs_write_same_fail(request, p->status);
+            return;
+        }
+
+        /* Record the just-written chunk (ci_* set in fill_step), then continue. */
+        p->ci_flags = 0;   /* WRITTEN */
+        p->ci_cont  = diskfs_write_same_fill_step;
+        diskfs_ext_put(request);
+    }
+} /* diskfs_write_same_io_cb */
+
+static void
+diskfs_write_same_alloc_resume(
+    struct diskfs_thread *thread,
+    void                 *arg)
+{
+    (void) thread;
+    diskfs_write_same_fill_step((struct chimera_vfs_request *) arg);
+} /* diskfs_write_same_alloc_resume */
+
+static void
+diskfs_write_same_fill_step(struct chimera_vfs_request *request)
+{
+    struct diskfs_request_private *p      = request->plugin_data;
+    struct diskfs_thread          *thread = p->thread;
+    struct diskfs_shared          *shared = thread->shared;
+    struct evpl                   *evpl   = thread->evpl;
+    uint64_t                       off    = p->loop_off;
+    uint64_t                       end    = p->loop_pos;
+    uint64_t                       chunk, dev_id, dev_off, max_req, written;
+    int                            rc;
+
+    if (off >= end) {
+        diskfs_write_same_finalize(request);
+        return;
+    }
+
+    chunk = end - off;
+    if (chunk > p->alloc_cap) {
+        chunk = p->alloc_cap;
+    }
+
+    /* Park if the device queue is full; resume re-enters fill_step (nothing
+     * allocated yet, so re-entry is clean). */
+    if (diskfs_io_gate(thread, request, diskfs_write_same_fill_step)) {
+        return;
+    }
+
+    rc = diskfs_inode_alloc_space(thread, p->txn, p->inode_stash[0],
+                                  (int64_t) chunk, 0, &dev_id, &dev_off,
+                                  diskfs_write_same_alloc_resume, request);
+    if (rc == SM_AGAIN) {
+        return;     /* parked mid-allocation; resume retries cleanly */
+    }
+    if (rc) {
+        /* Spread a large request across allocation groups before giving up. */
+        if (p->alloc_cap > SM_BLOCK_SIZE) {
+            p->alloc_cap >>= 1;
+            diskfs_write_same_fill_step(request);
+            return;
+        }
+        diskfs_write_same_fail(request, CHIMERA_VFS_ENOSPC);
+        return;
+    }
+
+    p->alloc_cap = DISKFS_WS_CHUNK;     /* reset for the next chunk */
+
+    /* Extent to record once the device writes for this chunk complete. */
+    p->ci_off    = off;
+    p->ci_len    = chunk;
+    p->ci_devid  = (uint32_t) dev_id;
+    p->ci_devoff = dev_off;
+    p->loop_off  = off + chunk;         /* advance for the next step */
+
+    /* Issue the device writes for [dev_off, dev_off+chunk), each piece filled
+     * with the tiled pattern, split by the device's max request size. */
+    max_req    = shared->devices[dev_id].max_request_size;
+    p->niov    = 0;
+    p->pending = 0;
+    written    = 0;
+
+    while (written < chunk) {
+        struct evpl_iovec *piece_iov = &p->iov[p->niov];
+        uint64_t           piece     = chunk - written;
+        uint64_t           rel, fill_done;
+        int                piece_niov, i;
+
+        if (piece > max_req) {
+            piece = max_req;
+        }
+
+        /* Defensive: never overrun the fixed per-request iovec scratch. */
+        if (p->niov + 32 > (int) (sizeof(p->iov) / sizeof(p->iov[0]))) {
+            if (p->pending == 0) {
+                diskfs_write_same_fail(request, CHIMERA_VFS_EIO);
+                return;
+            }
+            p->status = CHIMERA_VFS_EIO;
+            break;
+        }
+
+        piece_niov = evpl_iovec_alloc(evpl, piece, 4096, 32, 0, piece_iov);
+        if (piece_niov <= 0) {
+            if (p->pending == 0) {
+                diskfs_write_same_fail(request, CHIMERA_VFS_EIO);
+                return;
+            }
+            p->status = CHIMERA_VFS_EIO;
+            break;
+        }
+
+        rel       = (off + written) - request->write_same.offset;
+        fill_done = 0;
+        for (i = 0; i < piece_niov; i++) {
+            diskfs_ws_tile(piece_iov[i].data, piece_iov[i].length,
+                           rel + fill_done, p->ws_tmpl,
+                           request->write_same.block_size);
+            fill_done += piece_iov[i].length;
+        }
+
+        p->niov += piece_niov;
+        p->pending++;
+        diskfs_pending_io_add(thread, 1);
+
+        evpl_block_write(evpl, thread->queue[dev_id], piece_iov, piece_niov,
+                         dev_off + written, !shared->unsafe_async,
+                         diskfs_write_same_io_cb, request);
+
+        written += piece;
+    }
+} /* diskfs_write_same_fill_step */
+
+static void
+diskfs_write_same_after_punch(struct chimera_vfs_request *request)
+{
+    struct diskfs_request_private *p      = request->plugin_data;
+    uint64_t                       offset = request->write_same.offset;
+    uint64_t                       total  = (uint64_t) request->write_same.block_size *
+        request->write_same.block_count;
+    const uint8_t                 *pat     = request->write_same.pattern;
+    uint32_t                       patlen  = request->write_same.pattern_len;
+    int                            is_zero = 1;
+    uint32_t                       i;
+
+    for (i = 0; i < patlen; i++) {
+        if (pat[i]) {
+            is_zero = 0;
+            break;
+        }
+    }
+
+    if (is_zero) {
+        /* The punched range already reads as zeros; just extend the size. */
+        diskfs_write_same_finalize(request);
+        return;
+    }
+
+    p->loop_off  = offset;
+    p->loop_pos  = offset + total;
+    p->alloc_cap = DISKFS_WS_CHUNK;
+    diskfs_write_same_fill_step(request);
+} /* diskfs_write_same_after_punch */
+
+static void
+diskfs_write_same_inode_cb(
+    struct diskfs_inode *inode,
+    int                  status,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+    struct diskfs_thread          *thread  = p->thread;
+    uint64_t                       offset  = request->write_same.offset;
+    uint32_t                       bs      = request->write_same.block_size;
+    uint64_t                       total, punch_end;
+    struct diskfs_bt_op           *op;
+
+    if (unlikely(status != CHIMERA_VFS_OK)) {
+        diskfs_op_fail(request, p->txn, status);
+        return;
+    }
+
+    p->inode_stash[0] = inode;
+
+    if (!S_ISREG(inode->mode)) {
+        diskfs_op_fail(request, p->txn,
+                       S_ISDIR(inode->mode) ? CHIMERA_VFS_EISDIR : CHIMERA_VFS_EINVAL);
+        return;
+    }
+
+    diskfs_map_attrs(thread, &request->write_same.r_pre_attr, inode);
+
+    total = (uint64_t) bs * request->write_same.block_count;
+    if (total == 0) {
+        request->write_same.r_count = 0;
+        request->write_same.r_sync  = CHIMERA_VFS_WRITE_FILESYNC;
+        diskfs_map_attrs(thread, &request->write_same.r_post_attr, inode);
+        diskfs_op_ok(request, p->txn);
+        return;
+    }
+
+    /* Build the one block-size pattern template (zero + pattern at reloff). */
+    p->ws_tmpl = malloc(bs);
+    chimera_diskfs_abort_if(p->ws_tmpl == NULL, "write_same template OOM");
+    memset(p->ws_tmpl, 0, bs);
+    if (request->write_same.pattern_len) {
+        memcpy(p->ws_tmpl + request->write_same.reloff_pattern,
+               request->write_same.pattern,
+               request->write_same.pattern_len);
+    }
+
+    p->ws_active = 1;
+
+    /* Punch existing extents in [offset, min(offset+total, size)); the dealloc
+     * loop hands back to diskfs_write_same_after_punch via ws_active. */
+    punch_end = offset + total;
+    if (punch_end > inode->size) {
+        punch_end = inode->size;
+    }
+
+    if (offset < punch_end) {
+        p->loop_off  = offset;
+        p->loop_left = punch_end;
+
+        op = diskfs_bt_op_alloc(thread);
+        if (diskfs_ext_floor_async(op, thread, inode, offset, p->rec_scratch,
+                                   sizeof(p->rec_scratch), diskfs_dealloc_first_cb,
+                                   request)) {
+            diskfs_dealloc_first_cb(op, op->result, request);
+        }
+        return;
+    }
+
+    diskfs_write_same_after_punch(request);
+} /* diskfs_write_same_inode_cb */
+
+void
+diskfs_write_same(
+    struct diskfs_thread       *thread,
+    struct diskfs_shared       *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    struct diskfs_request_private *p = request->plugin_data;
+
+    (void) private_data;
+
+    if (unlikely(shared->block_layout || shared->scsi_layout)) {
+        request->status = CHIMERA_VFS_EINVAL;
+        request->complete(request);
+        return;
+    }
+
+    p->thread    = thread;
+    p->status    = 0;
+    p->pending   = 0;
+    p->niov      = 0;
+    p->ws_active = 0;
+    p->ws_tmpl   = NULL;
+    p->txn       = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+
+    diskfs_inode_get_fh_async(thread, p->txn,
+                              request->fh, request->fh_len,
+                              diskfs_write_same_inode_cb, request);
+} /* diskfs_write_same */
 
 
 /*

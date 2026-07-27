@@ -27,6 +27,7 @@ add_library(chimera_nfs SHARED nfs.c nfs4_session.c nfs4_state.c nfs4_lease.c nf
             nfs4_proc_set_ssv.c
             nfs4_proc_free_stateid.c nfs4_root.c
             nfs4_proc_allocate.c nfs4_proc_deallocate.c nfs4_proc_seek.c
+            nfs4_proc_read_plus.c nfs4_proc_io_advise.c nfs4_proc_write_same.c nfs4_proc_clone.c
             nfs4_proc_lock.c nfs4_proc_lockt.c nfs4_proc_locku.c
             nfs4_proc_verify.c
             nfs4_proc_putpubfh.c

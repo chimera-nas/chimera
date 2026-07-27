@@ -221,7 +221,8 @@ diskfs_drain_acquired_cb(
 static void
 diskfs_drain_begin(struct diskfs_drain *d)
 {
-    d->txn = diskfs_txn_begin(d->thread, DISKFS_TXN_WRITE);
+    d->txn      = diskfs_txn_begin(d->thread, DISKFS_TXN_WRITE);
+    d->rc_inode = NULL;     /* refcount inode is per-txn; re-acquire if needed */
     diskfs_inode_acquire(d->thread, d->txn, d->inum, d->gen,
                          DISKFS_INODE_LOCK_WRITE, diskfs_drain_acquired_cb, d);
 } /* diskfs_drain_begin */
@@ -335,6 +336,142 @@ diskfs_drain_removed_cb(
 } /* diskfs_drain_removed_cb */
 
 
+/* Remove the just-processed record (its backing already released). */
+static void
+diskfs_drain_remove_record(struct diskfs_drain *d)
+{
+    struct diskfs_bt_op *rop = diskfs_bt_op_alloc(d->thread);
+
+    if (diskfs_bt_remove_async(rop, d->thread, d->txn, d->inode, &d->found_key,
+                               diskfs_drain_removed_cb, d)) {
+        diskfs_drain_removed_cb(rop, rop->result, d);
+    }
+} /* diskfs_drain_remove_record */
+
+/* Reflink decrement for a unlinked file's shared extent (drain context).  The
+ * refcount inode is at d->rc_inode.  Frees the device range only at the last
+ * owner; otherwise the surviving owner keeps it. */
+static void
+diskfs_drain_dec_reinserted_cb(
+    struct diskfs_bt_op *op,
+    int                  result,
+    void                *priv)
+{
+    struct diskfs_drain *d = priv;
+
+    (void) result;
+    diskfs_bt_op_free(d->thread, op);
+    diskfs_drain_remove_record(d);
+} /* diskfs_drain_dec_reinserted_cb */
+
+static void
+diskfs_drain_dec_removed_cb(
+    struct diskfs_bt_op *op,
+    int                  result,
+    void                *priv)
+{
+    struct diskfs_drain *d = priv;
+
+    (void) result;
+    diskfs_bt_op_free(d->thread, op);
+
+    if (d->rc_newcount >= 2) {
+        struct diskfs_bt_key       key = diskfs_refcount_key(d->rc_devid, d->rc_devoff);
+        struct diskfs_refcount_rec rec = { .length = d->rc_length, .refcount = d->rc_newcount };
+        op = diskfs_bt_op_alloc(d->thread);
+        if (diskfs_bt_insert_async(op, d->thread, d->txn, d->rc_inode, &key, &rec,
+                                   sizeof(rec), diskfs_drain_dec_reinserted_cb, d)) {
+            diskfs_drain_dec_reinserted_cb(op, op->result, d);
+        }
+        return;
+    }
+    /* Dropped to a single owner: no record, keep the blocks for that owner. */
+    diskfs_drain_remove_record(d);
+} /* diskfs_drain_dec_removed_cb */
+
+static void
+diskfs_drain_dec_lookup_cb(
+    struct diskfs_bt_op *op,
+    int                  result,
+    void                *priv)
+{
+    struct diskfs_drain *d = priv;
+
+    if (result < 0) {
+        /* No record: this was the last owner, release the device range. */
+        diskfs_bt_op_free(d->thread, op);
+        diskfs_thread_free_space(d->thread, d->txn, d->rc_devid, d->rc_devoff,
+                                 SM_ALIGN_UP(d->rc_length));
+        diskfs_drain_remove_record(d);
+        return;
+    }
+
+    struct diskfs_refcount_rec *rec = (struct diskfs_refcount_rec *) d->rc_scratch;
+    d->rc_length   = rec->length;
+    d->rc_newcount = rec->refcount - 1;
+    diskfs_bt_op_free(d->thread, op);
+
+    struct diskfs_bt_key        key = diskfs_refcount_key(d->rc_devid, d->rc_devoff);
+    op = diskfs_bt_op_alloc(d->thread);
+    if (diskfs_bt_remove_async(op, d->thread, d->txn, d->rc_inode, &key,
+                               diskfs_drain_dec_removed_cb, d)) {
+        diskfs_drain_dec_removed_cb(op, op->result, d);
+    }
+} /* diskfs_drain_dec_lookup_cb */
+
+static void
+diskfs_drain_release_ext(
+    struct diskfs_drain *d);
+
+static void
+diskfs_drain_rc_acquired_cb(
+    struct diskfs_inode *inode,
+    int                  status,
+    void                *priv)
+{
+    struct diskfs_drain *d = priv;
+
+    chimera_diskfs_abort_if(status != CHIMERA_VFS_OK,
+                            "reclaim: refcount inode acquire failed (%d)", status);
+    d->rc_inode = inode;
+    diskfs_drain_release_ext(d);   /* retry now that the refcount inode is held */
+} /* diskfs_drain_rc_acquired_cb */
+
+/* Release the current extent record's backing: decrement if reflink-shared
+ * (acquiring the refcount inode lazily), else free outright.  Continues to the
+ * record removal. */
+static void
+diskfs_drain_release_ext(struct diskfs_drain *d)
+{
+    struct diskfs_extent_rec *e = (struct diskfs_extent_rec *) d->recbuf;
+
+    if (e->flags & DISKFS_EXT_SHARED) {
+        if (d->rc_inode == NULL) {
+            diskfs_inode_acquire(d->thread, d->txn, DISKFS_REFCOUNT_INUM_BASE,
+                                 DISKFS_REFCOUNT_GEN, DISKFS_INODE_LOCK_WRITE,
+                                 diskfs_drain_rc_acquired_cb, d);
+            return;
+        }
+        d->rc_devid  = e->device_id;
+        d->rc_devoff = e->device_offset;
+        d->rc_length = e->length;
+
+        struct diskfs_bt_key key = diskfs_refcount_key(e->device_id, e->device_offset);
+        struct diskfs_bt_op *op  = diskfs_bt_op_alloc(d->thread);
+        if (diskfs_bt_lookup_async(op, d->thread, d->rc_inode,
+                                   DISKFS_BT_OP_LOOKUP_EXACT, &key, &op->found_key,
+                                   d->rc_scratch, sizeof(struct diskfs_refcount_rec),
+                                   diskfs_drain_dec_lookup_cb, d)) {
+            diskfs_drain_dec_lookup_cb(op, op->result, d);
+        }
+        return;
+    }
+
+    diskfs_thread_free_space(d->thread, d->txn, e->device_id, e->device_offset,
+                             SM_ALIGN_UP(e->length));
+    diskfs_drain_remove_record(d);
+} /* diskfs_drain_release_ext */
+
 static void
 diskfs_drain_looked_cb(
     struct diskfs_bt_op *op,
@@ -342,7 +479,6 @@ diskfs_drain_looked_cb(
     void                *priv)
 {
     struct diskfs_drain *d = priv;
-    struct diskfs_bt_op *rop;
 
     if (result < 0) {
         /* Tree empty: remove the durable orphan entry, then retire the inode in
@@ -355,21 +491,16 @@ diskfs_drain_looked_cb(
         return;
     }
 
-    /* Free a file extent's backing data before removing the record.  The
-     * remove reclaims any emptied b+tree node blocks (generic, any entry). */
+    /* Free a file extent's backing before removing the record (a reflink-shared
+     * extent decrements its refcount instead).  The remove reclaims any emptied
+     * b+tree node blocks (generic, any entry). */
     if (d->found_key.type == DISKFS_REC_EXTENT) {
-        struct diskfs_extent_rec *e = (struct diskfs_extent_rec *) d->recbuf;
-
-        diskfs_thread_free_space(d->thread, d->txn, e->device_id, e->device_offset,
-                                 SM_ALIGN_UP(e->length));
+        diskfs_bt_op_free(d->thread, op);
+        diskfs_drain_release_ext(d);
+        return;
     }
     diskfs_bt_op_free(d->thread, op);
-
-    rop = diskfs_bt_op_alloc(d->thread);
-    if (diskfs_bt_remove_async(rop, d->thread, d->txn, d->inode, &d->found_key,
-                               diskfs_drain_removed_cb, d)) {
-        diskfs_drain_removed_cb(rop, rop->result, d);
-    }
+    diskfs_drain_remove_record(d);
 } /* diskfs_drain_looked_cb */
 
 

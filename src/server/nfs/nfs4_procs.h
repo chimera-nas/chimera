@@ -490,6 +490,34 @@ chimera_nfs4_seek(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop);
 
+void
+chimera_nfs4_read_plus(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop);
+
+void
+chimera_nfs4_io_advise(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop);
+
+void
+chimera_nfs4_write_same(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop);
+
+void
+chimera_nfs4_clone(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop);
+
 /* pNFS (NFSv4.1 file layout) operations — see nfs4_pnfs.c */
 void
 chimera_nfs4_getdeviceinfo(
