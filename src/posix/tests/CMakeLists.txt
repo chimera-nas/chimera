@@ -302,6 +302,33 @@ add_posix_erofs_test(nfs3 memfs)
 add_posix_erofs_test(nfs4 memfs)
 
 # ============================================================================
+# NFSv4 pseudo-fs root mount test
+# Mounts the bare pseudo-fs root ("server:/") instead of an export and lists
+# it, exercising nfs4_root_readdir's asynchronous per-export lookup walk (a
+# stack-use-after-return regression) plus entry into an export via
+# nfs4_root_lookup.  Registered explicitly because the standard harness always
+# mounts the "/share" export.  NFS4-only: the pseudo-fs root is an NFSv4
+# concept.
+# ============================================================================
+add_posix_testprog(test_pseudo_root)
+
+macro(add_posix_pseudo_root_test nfs_backend)
+    if(CHIMERA_NETNS_TESTING)
+        add_test(NAME chimera/posix/pseudo_root_nfs4_${nfs_backend}
+            COMMAND ${NETNS_WRAPPER} ${CMAKE_CURRENT_BINARY_DIR}/posix_test_pseudo_root -b nfs4_${nfs_backend}
+        )
+        get_target_property(test_file posix_test_pseudo_root TEST_FILE)
+        set_tests_properties(chimera/posix/pseudo_root_nfs4_${nfs_backend} PROPERTIES
+            ENVIRONMENT "TEST_FILE=${test_file}"
+            TIMEOUT 60
+        )
+    endif()
+endmacro()
+
+add_posix_pseudo_root_test(memfs)
+add_posix_pseudo_root_test(linux)
+
+# ============================================================================
 # NFS3 over TCP-RDMA Backend Tests
 # These tests run the POSIX tests through the Chimera NFS client using TCP-RDMA,
 # connecting to a Chimera NFS server in the same process.
