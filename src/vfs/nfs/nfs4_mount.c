@@ -168,6 +168,7 @@ chimera_nfs4_mount_get_root_fh_callback(
     int                              hash_input_len;
     int                              fh_fragment_len;
     int                              hostname_len;
+    int                              op;
     XXH128_hash_t                    fsid_hash;
 
     if (status != 0) {
@@ -184,14 +185,10 @@ chimera_nfs4_mount_get_root_fh_callback(
         return;
     }
 
-    /* Check individual operation results */
-    /* res->resarray[0] = SEQUENCE */
-    /* res->resarray[1] = PUTROOTFH */
-    /* res->resarray[2] = LOOKUP */
-    /* res->resarray[3] = GETFH */
-    /* res->resarray[4] = GETATTR */
-
-    if (res->num_resarray < 5) {
+    /* Check individual operation results.  The compound is
+     * SEQUENCE + PUTROOTFH [+ LOOKUP] + GETFH + GETATTR; the LOOKUP is
+     * omitted when the mount targets the bare pseudo-fs root. */
+    if (res->num_resarray < 4) {
         chimera_nfsclient_error("NFS4 mount get_root_fh: incomplete response");
         request->status = CHIMERA_VFS_EIO;
         request->complete(request);
@@ -212,14 +209,19 @@ chimera_nfs4_mount_get_root_fh_callback(
         return;
     }
 
-    if (res->resarray[2].oplookup.status != NFS4_OK) {
-        chimera_nfsclient_error("NFS4 LOOKUP failed: %d", res->resarray[2].oplookup.status);
-        request->status = chimera_nfs4_status_to_errno(res->resarray[2].oplookup.status);
-        request->complete(request);
-        return;
+    op = 2;
+
+    if (res->num_resarray >= 5) {
+        if (res->resarray[op].oplookup.status != NFS4_OK) {
+            chimera_nfsclient_error("NFS4 LOOKUP failed: %d", res->resarray[op].oplookup.status);
+            request->status = chimera_nfs4_status_to_errno(res->resarray[op].oplookup.status);
+            request->complete(request);
+            return;
+        }
+        op++;
     }
 
-    getfh_res = &res->resarray[3];
+    getfh_res = &res->resarray[op];
     if (getfh_res->opgetfh.status != NFS4_OK) {
         chimera_nfsclient_error("NFS4 GETFH failed: %d", getfh_res->opgetfh.status);
         request->status = CHIMERA_VFS_EIO;
@@ -289,32 +291,41 @@ chimera_nfs4_mount_get_root_fh(
     }
     pathlen = strlen(path);
 
+    int op = 0;
+
     memset(&args, 0, sizeof(args));
     args.tag.len      = 0;
     args.minorversion = 1;
     args.argarray     = argarray;
-    args.num_argarray = 5;
 
-    /* Op 0: SEQUENCE (slot fields filled by chimera_nfs4_compound_call) */
-    argarray[0].argop = OP_SEQUENCE;
+    /* SEQUENCE (slot fields filled by chimera_nfs4_compound_call) */
+    argarray[op++].argop = OP_SEQUENCE;
 
-    /* Op 1: PUTROOTFH */
-    argarray[1].argop = OP_PUTROOTFH;
+    /* PUTROOTFH */
+    argarray[op++].argop = OP_PUTROOTFH;
 
-    /* Op 2: LOOKUP - lookup the export/share name */
-    argarray[2].argop                 = OP_LOOKUP;
-    argarray[2].oplookup.objname.data = (uint8_t *) path;
-    argarray[2].oplookup.objname.len  = pathlen;
+    /* LOOKUP the export/share name.  A mount of the bare pseudo-fs root
+     * ("server:/") has no name to look up; the root FH itself is the mount
+     * point. */
+    if (pathlen > 0) {
+        argarray[op].argop                 = OP_LOOKUP;
+        argarray[op].oplookup.objname.data = (uint8_t *) path;
+        argarray[op].oplookup.objname.len  = pathlen;
+        op++;
+    }
 
-    /* Op 3: GETFH */
-    argarray[3].argop = OP_GETFH;
+    /* GETFH */
+    argarray[op++].argop = OP_GETFH;
 
-    /* Op 4: GETATTR - request basic attributes */
-    argarray[4].argop                      = OP_GETATTR;
-    attr_request[0]                        = (1 << FATTR4_TYPE) | (1 << FATTR4_SIZE) | (1 << FATTR4_FILEID);
-    attr_request[1]                        = (1 << (FATTR4_MODE - 32)) | (1 << (FATTR4_NUMLINKS - 32));
-    argarray[4].opgetattr.attr_request     = attr_request;
-    argarray[4].opgetattr.num_attr_request = 2;
+    /* GETATTR - request basic attributes */
+    argarray[op].argop                      = OP_GETATTR;
+    attr_request[0]                         = (1 << FATTR4_TYPE) | (1 << FATTR4_SIZE) | (1 << FATTR4_FILEID);
+    attr_request[1]                         = (1 << (FATTR4_MODE - 32)) | (1 << (FATTR4_NUMLINKS - 32));
+    argarray[op].opgetattr.attr_request     = attr_request;
+    argarray[op].opgetattr.num_attr_request = 2;
+    op++;
+
+    args.num_argarray = op;
 
     (void) session;
 
