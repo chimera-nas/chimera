@@ -25,6 +25,12 @@
 struct chimera_nfs4_mount_ctx {
     struct chimera_nfs_client_server_thread *server_thread;
     struct chimera_nfs_client_mount         *mount;
+    /* 1 when the mount compound carried an OP_LOOKUP (a path-bearing mount),
+     * 0 for a bare pseudo-fs root mount.  Recorded where the compound is
+     * built so the reply is indexed by what was requested rather than by how
+     * long the reply is: a compound stops at its first failing op, so
+     * num_resarray says nothing about which ops were sent. */
+    int                                      lookup_included;
 };
 
 /* Forward declarations */
@@ -169,6 +175,7 @@ chimera_nfs4_mount_get_root_fh_callback(
     int                              fh_fragment_len;
     int                              hostname_len;
     int                              op;
+    int                              expected_ops;
     XXH128_hash_t                    fsid_hash;
 
     if (status != 0) {
@@ -187,8 +194,11 @@ chimera_nfs4_mount_get_root_fh_callback(
 
     /* Check individual operation results.  The compound is
      * SEQUENCE + PUTROOTFH [+ LOOKUP] + GETFH + GETATTR; the LOOKUP is
-     * omitted when the mount targets the bare pseudo-fs root. */
-    if (res->num_resarray < 4) {
+     * omitted when the mount targets the bare pseudo-fs root, which
+     * ctx->lookup_included records -- do not infer it from num_resarray. */
+    expected_ops = 4 + ctx->lookup_included;
+
+    if (res->num_resarray < expected_ops) {
         chimera_nfsclient_error("NFS4 mount get_root_fh: incomplete response");
         request->status = CHIMERA_VFS_EIO;
         request->complete(request);
@@ -211,7 +221,7 @@ chimera_nfs4_mount_get_root_fh_callback(
 
     op = 2;
 
-    if (res->num_resarray >= 5) {
+    if (ctx->lookup_included) {
         if (res->resarray[op].oplookup.status != NFS4_OK) {
             chimera_nfsclient_error("NFS4 LOOKUP failed: %d", res->resarray[op].oplookup.status);
             request->status = chimera_nfs4_status_to_errno(res->resarray[op].oplookup.status);
@@ -313,6 +323,10 @@ chimera_nfs4_mount_get_root_fh(
         argarray[op].oplookup.objname.len  = pathlen;
         op++;
     }
+
+    /* Re-stamped on every slot-exhaustion replay: this function rebuilds args
+     * from scratch each time it runs, so the flag cannot go stale. */
+    ctx->lookup_included = pathlen > 0;
 
     /* GETFH */
     argarray[op++].argop = OP_GETFH;
