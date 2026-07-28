@@ -13,8 +13,9 @@
  * request thread.
  *
  * Verifies that READDIR of the root lists the "/share" export, that the
- * export can be entered by lookup from the root, and that files created
- * through the pseudo-root path are readable back through it.
+ * export can be entered by lookup from the root, that files created through
+ * the pseudo-root path are readable back through it, and that mounting an
+ * export the server does not have reports ENOENT.
  */
 
 #include "posix_test_common.h"
@@ -40,6 +41,23 @@ main(
 
     if (env.nfs_version != 4) {
         fprintf(stderr, "test_pseudo_root requires an NFS4 backend\n");
+        posix_test_fail(&env);
+    }
+
+    /* Mounting an export the server does not have must report ENOENT.  The
+     * mount compound's LOOKUP fails with NFS4ERR_NOENT, and the client maps
+     * that per-op status rather than collapsing it into EIO. */
+    rc = chimera_posix_mount_with_options("/badexport", "nfs",
+                                          "127.0.0.1:/nosuchexport", "vers=4");
+    if (rc == 0) {
+        fprintf(stderr, "Mount of a nonexistent export unexpectedly "
+                "succeeded\n");
+        posix_test_fail(&env);
+    }
+
+    if (errno != ENOENT) {
+        fprintf(stderr, "Mount of a nonexistent export reported %s, "
+                "expected ENOENT\n", strerror(errno));
         posix_test_fail(&env);
     }
 
