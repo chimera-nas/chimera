@@ -42,6 +42,26 @@
 struct chimera_vfs;
 struct chimera_smb_auth_config;
 
+/* Names the server advertises in the CHALLENGE target info.  Domain
+ * controllers validate the target info echoed back inside the client's NTLMv2
+ * response against the machine account on the netlogon channel (NTLM relay
+ * protection), so a pass-through (winbind) logon fails with LOGON_FAILURE
+ * unless these match what the host is actually joined as. */
+struct smb_ntlm_server_identity {
+    char netbios_name[16];
+    char netbios_domain[256];
+    char dns_name[256];
+};
+
+// Resolve the identity advertised in CHALLENGE messages, preferring the
+// winbind join identity when auth_config enables winbind.  The winbind lookup
+// is a blocking winbindd round trip, so call this once at server startup and
+// cache the result; it must not run on the per-connection request path.
+void
+smb_ntlm_resolve_server_identity(
+    const struct chimera_smb_auth_config *auth_config,
+    struct smb_ntlm_server_identity      *id);
+
 // NTLM authentication context (per-connection)
 struct smb_ntlm_ctx {
     uint8_t  server_challenge[SMB_NTLM_CHALLENGE_SIZE];

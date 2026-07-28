@@ -51,6 +51,20 @@ int smb_wbclient_map_principal(
 int smb_wbclient_available(
     void);
 
+// Fetch the NetBIOS identity winbind is joined with (name of the machine
+// account, short domain and DNS domain).  Domain controllers validate the
+// NTLMv2 target info a pass-through logon carries against the machine account
+// on the netlogon channel, so the CHALLENGE must advertise these names.
+// Any output may be NULL when not wanted; empty string when unknown.
+// Returns: 0 on success, -1 on failure (output buffers left unmodified)
+int smb_wbclient_netbios_identity(
+    char  *netbios_name,
+    size_t netbios_name_len,
+    char  *netbios_domain,
+    size_t netbios_domain_len,
+    char  *dns_domain,
+    size_t dns_domain_len);
+
 // Identity-resolver miss handler backed by winbind.  Resolves BY_UID / BY_SID /
 // BY_NAME to a full user record (uid/gid/groups/name/real SID) via libwbclient.
 // Registered with the VFS identity authority at SMB server init when winbind is

@@ -6,7 +6,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <errno.h>
 #include <time.h>
+#include <unistd.h>
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
 #include <openssl/rand.h>
@@ -432,56 +434,142 @@ get_ntlm_message_type(
     return 0;
 } /* get_ntlm_message_type */
 
+// Convert an ASCII string to UTF-16LE; returns the encoded byte length
+static size_t
+ascii_to_utf16le(
+    const char *src,
+    uint8_t    *dst,
+    size_t      dst_max)
+{
+    size_t i;
+    size_t n = strlen(src);
+
+    if (n * 2 > dst_max) {
+        n = dst_max / 2;
+    }
+
+    for (i = 0; i < n; i++) {
+        dst[i * 2]     = (uint8_t) src[i];
+        dst[i * 2 + 1] = 0;
+    }
+
+    return n * 2;
+} /* ascii_to_utf16le */
+
+// Append one AV_PAIR (AvId(2) + AvLen(2) + Value) at pos, returns new pos
+static size_t
+append_av_pair(
+    uint8_t       *buf,
+    size_t         pos,
+    uint16_t       av_id,
+    const uint8_t *value,
+    uint16_t       value_len)
+{
+    memcpy(buf + pos, &av_id, 2);
+    pos += 2;
+    memcpy(buf + pos, &value_len, 2);
+    pos += 2;
+    if (value && value_len) {
+        memcpy(buf + pos, value, value_len);
+        pos += value_len;
+    }
+    return pos;
+} /* append_av_pair */
+
+void
+smb_ntlm_resolve_server_identity(
+    const struct chimera_smb_auth_config *auth_config,
+    struct smb_ntlm_server_identity      *id)
+{
+    char   hostname[256];
+    size_t i;
+    int    winbind_name   = 0;
+    int    winbind_domain = 0;
+
+    memset(id, 0, sizeof(*id));
+
+    /* Winbind knows the exact identity the host is joined with. */
+    if (auth_config && auth_config->winbind_enabled) {
+        if (smb_wbclient_netbios_identity(id->netbios_name, sizeof(id->netbios_name),
+                                          id->netbios_domain, sizeof(id->netbios_domain),
+                                          NULL, 0) != 0) {
+            smb_ntlm_error(
+                "NTLM: winbind join identity unavailable; advertising fallback "
+                "CHALLENGE target names, pass-through logons may fail against "
+                "DCs that validate target info");
+        }
+        winbind_name   = id->netbios_name[0] != '\0';
+        winbind_domain = id->netbios_domain[0] != '\0';
+    }
+
+    if (gethostname(hostname, sizeof(hostname)) != 0) {
+        smb_ntlm_error("NTLM: gethostname failed (%s); using placeholder host name",
+                       strerror(errno));
+        snprintf(hostname, sizeof(hostname), "CHIMERA");
+    }
+    hostname[sizeof(hostname) - 1] = '\0';
+    snprintf(id->dns_name, sizeof(id->dns_name), "%s", hostname);
+
+    if (!winbind_name) {
+        // NetBIOS computer name: short hostname, uppercased, max 15 chars
+        for (i = 0;
+             i < sizeof(id->netbios_name) - 1 && hostname[i] && hostname[i] != '.';
+             i++) {
+            id->netbios_name[i] = (char) toupper((unsigned char) hostname[i]);
+        }
+        id->netbios_name[i] = '\0';
+    }
+
+    if (!winbind_domain) {
+        if (auth_config && auth_config->winbind_domain[0]) {
+            snprintf(id->netbios_domain, sizeof(id->netbios_domain), "%s",
+                     auth_config->winbind_domain);
+        } else {
+            snprintf(id->netbios_domain, sizeof(id->netbios_domain), "CHIMERA");
+        }
+    }
+
+    smb_ntlm_info("NTLM CHALLENGE identity: computer '%s' (%s) domain '%s' (%s) dns '%s'",
+                  id->netbios_name, winbind_name ? "winbind" : "fallback",
+                  id->netbios_domain, winbind_domain ? "winbind" : "fallback",
+                  id->dns_name);
+} /* smb_ntlm_resolve_server_identity */
+
 // Build NTLMv2 target info (AV_PAIR list) for CHALLENGE message
 // Returns allocated buffer and sets *info_len
 static uint8_t *
-build_target_info(size_t *info_len)
+build_target_info(
+    const struct smb_ntlm_server_identity *id,
+    size_t                                *info_len)
 {
-    // Domain name "CHIMERA" in UTF-16LE
-    static const uint8_t domain_utf16[] = {
-        'C', 0, 'H', 0, 'I', 0, 'M', 0, 'E', 0, 'R', 0, 'A', 0
-    };
-    // Computer name "CHIMERA" in UTF-16LE
-    static const uint8_t computer_utf16[] = {
-        'C', 0, 'H', 0, 'I', 0, 'M', 0, 'E', 0, 'R', 0, 'A', 0
-    };
+    uint8_t  domain_utf16[512];
+    uint8_t  computer_utf16[32];
+    uint8_t  dns_utf16[512];
+    size_t   domain_len;
+    size_t   computer_len;
+    size_t   dns_len;
+    uint64_t filetime;
+    uint8_t *buf;
+    size_t   pos = 0;
 
-    // Each AV_PAIR: AvId(2) + AvLen(2) + Value(AvLen)
-    size_t               pair_domain   = 4 + sizeof(domain_utf16);
-    size_t               pair_computer = 4 + sizeof(computer_utf16);
-    size_t               pair_eol      = 4;
-    size_t               total         = pair_domain + pair_computer + pair_eol;
-    uint8_t             *buf           = calloc(1, total);
-    size_t               pos           = 0;
-    uint16_t             u16;
+    domain_len   = ascii_to_utf16le(id->netbios_domain, domain_utf16, sizeof(domain_utf16));
+    computer_len = ascii_to_utf16le(id->netbios_name, computer_utf16, sizeof(computer_utf16));
+    dns_len      = ascii_to_utf16le(id->dns_name, dns_utf16, sizeof(dns_utf16));
 
+    // MsvAvTimestamp: 100ns intervals since 1601-01-01 (FILETIME)
+    filetime = ((uint64_t) time(NULL) + 11644473600ULL) * 10000000ULL;
+
+    // 5 AV_PAIR headers (incl. MsvAvEOL) + values
+    buf = calloc(1, 5 * 4 + domain_len + computer_len + dns_len + sizeof(filetime));
     if (!buf) {
         return NULL;
     }
 
-    // MsvAvNbDomainName (AvId=2)
-    u16 = 2;
-    memcpy(buf + pos, &u16, 2);
-    pos += 2;
-    u16  = sizeof(domain_utf16);
-    memcpy(buf + pos, &u16, 2);
-    pos += 2;
-    memcpy(buf + pos, domain_utf16, sizeof(domain_utf16));
-    pos += sizeof(domain_utf16);
-
-    // MsvAvNbComputerName (AvId=1)
-    u16 = 1;
-    memcpy(buf + pos, &u16, 2);
-    pos += 2;
-    u16  = sizeof(computer_utf16);
-    memcpy(buf + pos, &u16, 2);
-    pos += 2;
-    memcpy(buf + pos, computer_utf16, sizeof(computer_utf16));
-    pos += sizeof(computer_utf16);
-
-    // MsvAvEOL (AvId=0, AvLen=0)
-    memset(buf + pos, 0, 4);
-    pos += 4;
+    pos = append_av_pair(buf, pos, 2, domain_utf16, (uint16_t) domain_len);     // MsvAvNbDomainName
+    pos = append_av_pair(buf, pos, 1, computer_utf16, (uint16_t) computer_len); // MsvAvNbComputerName
+    pos = append_av_pair(buf, pos, 3, dns_utf16, (uint16_t) dns_len);           // MsvAvDnsComputerName
+    pos = append_av_pair(buf, pos, 7, (const uint8_t *) &filetime, 8);          // MsvAvTimestamp
+    pos = append_av_pair(buf, pos, 0, NULL, 0);                                 // MsvAvEOL
 
     *info_len = pos;
     return buf;
@@ -490,17 +578,22 @@ build_target_info(size_t *info_len)
 // Generate CHALLENGE message
 static int
 generate_challenge(
-    struct smb_ntlm_ctx *ctx,
-    uint8_t            **output,
-    size_t              *output_len)
+    struct smb_ntlm_ctx                  *ctx,
+    const struct chimera_smb_auth_config *auth_config,
+    uint8_t                             **output,
+    size_t                               *output_len)
 {
-    uint8_t *buf;
-    size_t   buf_len;
-    uint32_t flags;
-    uint32_t u32;
-    uint16_t u16;
-    uint8_t *target_info;
-    size_t   target_info_len;
+    uint8_t                               *buf;
+    size_t                                 buf_len;
+    uint32_t                               flags;
+    uint32_t                               u32;
+    uint16_t                               u16;
+    uint8_t                               *target_info;
+    size_t                                 target_info_len;
+    uint8_t                                target_name[512];
+    size_t                                 target_name_len;
+    const struct smb_ntlm_server_identity *identity;
+    struct smb_ntlm_server_identity        local_identity;
 
     // Generate random server challenge
     if (RAND_bytes(ctx->server_challenge, SMB_NTLM_CHALLENGE_SIZE) != 1) {
@@ -508,25 +601,33 @@ generate_challenge(
     }
     ctx->have_challenge = 1;
 
+    if (auth_config && auth_config->server_identity.netbios_name[0]) {
+        identity = &auth_config->server_identity;
+    } else {
+        /* No identity resolved at server init (no auth config); resolve
+         * without winbind so the request path never blocks on winbindd. */
+        smb_ntlm_resolve_server_identity(NULL, &local_identity);
+        identity = &local_identity;
+    }
+
     // Build target info AvPairs (required for NTLMv2 clients like smbclient)
-    target_info = build_target_info(&target_info_len);
+    target_info = build_target_info(identity, &target_info_len);
     if (!target_info) {
         return -1;
     }
 
-    // Target name "CHIMERA" in UTF-16LE
-    static const uint8_t target_name[] = {
-        'C', 0, 'H', 0, 'I', 0, 'M', 0, 'E', 0, 'R', 0, 'A', 0
-    };
+    // Target name (the domain we authenticate against) in UTF-16LE
+    target_name_len = ascii_to_utf16le(identity->netbios_domain,
+                                       target_name, sizeof(target_name));
 
     // Build CHALLENGE message
     // Fixed part: signature(8) + type(4) + target_name_fields(8) +
     //             flags(4) + challenge(8) + reserved(8) +
     //             target_info_fields(8) + version(8) = 56 bytes
     // Variable: target_name + target_info
-    size_t               fixed_len = 56;
+    size_t fixed_len = 56;
 
-    buf_len = fixed_len + sizeof(target_name) + target_info_len;
+    buf_len = fixed_len + target_name_len + target_info_len;
     buf     = calloc(1, buf_len);
     if (!buf) {
         free(target_info);
@@ -541,7 +642,7 @@ generate_challenge(
     memcpy(buf + 8, &u32, 4);
 
     // Target name fields: Len(2) + MaxLen(2) + Offset(4) at offset 12
-    u16 = sizeof(target_name);
+    u16 = (uint16_t) target_name_len;
     memcpy(buf + 12, &u16, 2);
     memcpy(buf + 14, &u16, 2);
     u32 = (uint32_t) fixed_len;
@@ -567,15 +668,15 @@ generate_challenge(
     u16 = (uint16_t) target_info_len;
     memcpy(buf + 40, &u16, 2);
     memcpy(buf + 42, &u16, 2);
-    u32 = (uint32_t) (fixed_len + sizeof(target_name));
+    u32 = (uint32_t) (fixed_len + target_name_len);
     memcpy(buf + 44, &u32, 4);
 
     // Version (optional, 8 bytes at offset 48)
     // Leave as zeros
 
     // Variable data: target name then target info
-    memcpy(buf + fixed_len, target_name, sizeof(target_name));
-    memcpy(buf + fixed_len + sizeof(target_name), target_info, target_info_len);
+    memcpy(buf + fixed_len, target_name, target_name_len);
+    memcpy(buf + fixed_len + target_name_len, target_info, target_info_len);
 
     free(target_info);
 
@@ -983,7 +1084,7 @@ smb_ntlm_process(
              * exchange on this connection left behind (a re-authentication
              * reuses the connection's context after a completed logon). */
             smb_ntlm_ctx_init(ctx);
-            if (generate_challenge(ctx, &ntlm_output, &ntlm_output_len) < 0) {
+            if (generate_challenge(ctx, auth_config, &ntlm_output, &ntlm_output_len) < 0) {
                 return -1;
             }
 

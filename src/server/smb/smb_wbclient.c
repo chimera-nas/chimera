@@ -23,6 +23,49 @@ smb_wbclient_available(void)
     return (wbc_err == WBC_ERR_SUCCESS) ? 1 : 0;
 } // smb_wbclient_available
 
+static void
+wbc_copy_string(
+    char       *dst,
+    size_t      dst_len,
+    const char *src)
+{
+    if (!dst || dst_len == 0) {
+        return;
+    }
+    dst[0] = '\0';
+    if (src) {
+        strncpy(dst, src, dst_len - 1);
+        dst[dst_len - 1] = '\0';
+    }
+} // wbc_copy_string
+
+int
+smb_wbclient_netbios_identity(
+    char  *netbios_name,
+    size_t netbios_name_len,
+    char  *netbios_domain,
+    size_t netbios_domain_len,
+    char  *dns_domain,
+    size_t dns_domain_len)
+{
+    wbcErr                      wbc_err;
+    struct wbcInterfaceDetails *details = NULL;
+
+    wbc_err = wbcInterfaceDetails(&details);
+    if (wbc_err != WBC_ERR_SUCCESS || !details) {
+        chimera_smb_error("wbcInterfaceDetails failed: %s",
+                          wbcErrorString(wbc_err));
+        return -1;
+    }
+
+    wbc_copy_string(netbios_name, netbios_name_len, details->netbios_name);
+    wbc_copy_string(netbios_domain, netbios_domain_len, details->netbios_domain);
+    wbc_copy_string(dns_domain, dns_domain_len, details->dns_domain);
+
+    wbcFreeMemory(details);
+    return 0;
+} // smb_wbclient_netbios_identity
+
 // Convert wbcDomainSid to string format
 static int
 wbc_sid_to_string(
@@ -77,6 +120,11 @@ smb_wbclient_auth_ntlm(
     params.account_name     = username;
     params.domain_name      = domain;
     params.workstation_name = workstation ? workstation : "UNKNOWN";
+
+    /* Same MSV1_0 parameter control smbd passes for network logons; some
+     * domain controllers reject requests without these bits. */
+    params.parameter_control = WBC_MSV1_0_ALLOW_SERVER_TRUST_ACCOUNT |
+        WBC_MSV1_0_ALLOW_WORKSTATION_TRUST_ACCOUNT;
 
     // Set up challenge/response authentication
     memcpy(params.password.response.challenge, challenge, 8);
@@ -487,6 +535,25 @@ smb_wbclient_available(void)
 {
     return 0;
 } // smb_wbclient_available
+
+int
+smb_wbclient_netbios_identity(
+    char  *netbios_name,
+    size_t netbios_name_len,
+    char  *netbios_domain,
+    size_t netbios_domain_len,
+    char  *dns_domain,
+    size_t dns_domain_len)
+{
+    (void) netbios_name;
+    (void) netbios_name_len;
+    (void) netbios_domain;
+    (void) netbios_domain_len;
+    (void) dns_domain;
+    (void) dns_domain_len;
+
+    return -1;
+} // smb_wbclient_netbios_identity
 
 int
 smb_wbclient_auth_ntlm(

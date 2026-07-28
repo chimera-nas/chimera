@@ -190,11 +190,14 @@ struct chimera_smb_rdma_element {
 };
 
 struct chimera_smb_auth_config {
-    int  winbind_enabled;
-    int  kerberos_enabled;
-    char winbind_domain[256];
-    char kerberos_keytab[256];
-    char kerberos_realm[256];
+    int                             winbind_enabled;
+    int                             kerberos_enabled;
+    char                            winbind_domain[256];
+    char                            kerberos_keytab[256];
+    char                            kerberos_realm[256];
+    /* Resolved once at server init by smb_ntlm_resolve_server_identity();
+     * the winbind lookup behind it must stay off the request path. */
+    struct smb_ntlm_server_identity server_identity;
 };
 
 struct chimera_smb_config {
