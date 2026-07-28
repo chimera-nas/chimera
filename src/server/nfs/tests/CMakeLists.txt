@@ -114,6 +114,18 @@ target_include_directories(test_fh_security PRIVATE
 add_dependencies(test_fh_security chimera_nfs_common)
 add_test(NAME chimera/server/nfs/fh_security COMMAND test_fh_security)
 
+# Unit test for the pseudo-fs root READDIR cookie policy (nfs4_root_cookie.h):
+# reserved and out-of-range client cookies must be rejected rather than
+# truncated into the int resume position.  The header includes the generated
+# nfs4_xdr.h (for nfsstat4), hence the chimera_nfs_common dependency.
+add_executable(test_root_cookie test_root_cookie.c)
+target_include_directories(test_root_cookie PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${CMAKE_SOURCE_DIR}/src
+    ${NFS_COMMON_INCLUDE_DIR})
+add_dependencies(test_root_cookie chimera_nfs_common)
+add_test(NAME chimera/server/nfs/root_cookie COMMAND test_root_cookie)
+
 # Regression test: open_owner / lock_owner refcount lifetime under
 # a lease sweep racing an in-flight OPEN/LOCK.  Links the exported nfs4_state
 # API the same way as test_state_table (no production sources compiled in).
