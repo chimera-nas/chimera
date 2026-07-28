@@ -12,6 +12,7 @@
 #include "nfs4_procs.h"
 #include "nfs4_attr.h"
 #include "nfs4_status.h"
+#include "nfs4_root_cookie.h"
 #include "vfs/vfs_procs.h"
 #include "common/logging.h"
 #include "common/macros.h"
@@ -167,7 +168,19 @@ nfs4_root_lookup(
  * The pseudo-root has its own cookie space: entry cookies are the export's
  * snapshot position biased by +3 to stay clear of the reserved cookie values
  * 0-2 (RFC 7530 §16.24.4), and a client cookie resumes the walk at the
- * position after the entry that carried it.
+ * position after the entry that carried it.  The cookie is validated against
+ * the snapshot (nfs4_root_cookie.h) before the walk starts; a reserved or
+ * out-of-range cookie gets NFS4ERR_BAD_COOKIE rather than truncating into the
+ * int resume position.
+ *
+ * Cookies are positional and the cookieverf is always zero, so a client
+ * mid-walk across a list mutation is not protected.  chimera_nfs_add_export
+ * prepends, so an addition shifts every position by one and the client
+ * re-reads an entry it already saw; a removal shifts the other way and an
+ * export the client has not reached yet is skipped.  Only a cookie left past
+ * the end of the shrunken snapshot is caught, as NFS4ERR_BAD_COOKIE.  Closing
+ * that needs an export-list generation counter returned as the cookieverf,
+ * which is what RFC 7530 §16.24.4 provides it for.
  */
 
 struct nfs4_root_readdir_export {
@@ -239,13 +252,27 @@ nfs4_root_readdir_snap_cb(
 } /* nfs4_root_readdir_snap_cb */
 
 static void
+nfs4_root_readdir_exports_free(
+    struct nfs4_root_readdir_export *exports,
+    int                              count)
+{
+    int i;
+
+    for (i = 0; i < count; i++) {
+        free(exports[i].name);
+        free(exports[i].path);
+    }
+
+    free(exports);
+} /* nfs4_root_readdir_exports_free */
+
+static void
 nfs4_root_readdir_finish(struct nfs4_root_readdir_state *state)
 {
     struct nfs_request             *req    = state->req;
     struct READDIR4res             *res    = &req->res_compound.resarray[req->index].opreaddir;
     struct nfs_nfs4_readdir_cursor *cursor = &req->readdir4_cursor;
     int                             eof    = 1;
-    int                             i;
 
     if (state->error_code == CHIMERA_VFS_EOVERFLOW) {
         /* Overflow means there are more entries to be read */
@@ -268,11 +295,7 @@ nfs4_root_readdir_finish(struct nfs4_root_readdir_state *state)
     res->resok4.reply.eof     = eof;
     res->resok4.reply.entries = res->status == NFS4_OK ? cursor->entries : NULL;
 
-    for (i = 0; i < state->num_exports; i++) {
-        free(state->exports[i].name);
-        free(state->exports[i].path);
-    }
-    free(state->exports);
+    nfs4_root_readdir_exports_free(state->exports, state->num_exports);
 
     chimera_nfs4_compound_complete(req, res->status);
 
@@ -387,8 +410,9 @@ nfs4_root_readdir_advance(struct nfs4_root_readdir_state *state)
         }
 
         /* Resuming with this cookie skips every export up to and including
-         * this one; the +3 bias keeps clear of reserved cookies 0-2. */
-        entry->cookie    = state->pos + 3;
+         * this one; the bias keeps clear of reserved cookies 0-2.  Paired with
+         * nfs4_root_readdir_cookie_first_pos, which inverts it. */
+        entry->cookie    = nfs4_root_readdir_pos_cookie(state->pos);
         entry->nextentry = NULL;
 
         rc = xdr_dbuf_alloc_array(&entry->attrs, attrmask, 3, req->encoding->dbuf);
@@ -443,25 +467,28 @@ nfs4_root_readdir(
     struct READDIR4res               *res    = &req->res_compound.resarray[req->index].opreaddir;
     struct nfs_nfs4_readdir_cursor   *cursor;
     struct nfs4_root_readdir_state   *state;
-    struct nfs4_root_readdir_snap     snap = { NULL, 0, 0 };
+    struct nfs4_root_readdir_snap     snap      = { NULL, 0, 0 };
+    int                               first_pos = 0;
 
-    /* Cookies 1 and 2 are reserved (RFC 7530 §16.24.4); the pseudo-root
-     * never emits them, so receiving one back is a client error. */
-    if (args->cookie == 1 || args->cookie == 2) {
-        res->status = NFS4ERR_BAD_COOKIE;
+    chimera_nfs_iterate_exports(shared, nfs4_root_readdir_snap_cb, &snap);
+
+    /* The valid cookie range depends on the export count, so the cookie is
+     * validated against the snapshot -- before any walk state is allocated. */
+    res->status = nfs4_root_readdir_cookie_first_pos(args->cookie, snap.count,
+                                                     &first_pos);
+
+    if (res->status != NFS4_OK) {
+        nfs4_root_readdir_exports_free(snap.exports, snap.count);
         chimera_nfs4_compound_complete(req, res->status);
         return;
     }
 
     cursor                    = &req->readdir4_cursor;
     res->resok4.reply.entries = NULL;
-    res->status               = NFS4_OK;
 
     cursor->count   = 256;
     cursor->entries = NULL;
     cursor->last    = NULL;
-
-    chimera_nfs_iterate_exports(shared, nfs4_root_readdir_snap_cb, &snap);
 
     state = calloc(1, sizeof(*state));
     chimera_nfs_abort_if(state == NULL, "Failed to allocate readdir state");
@@ -470,7 +497,7 @@ nfs4_root_readdir(
     state->vfs_thread  = nfs_thread->vfs_thread;
     state->exports     = snap.exports;
     state->num_exports = snap.count;
-    state->first_pos   = args->cookie ? args->cookie - 2 : 0;
+    state->first_pos   = first_pos;
     state->error_code  = CHIMERA_VFS_OK;
     state->attrmask    = chimera_nfs4_attr2mask(args->attr_request,
                                                 args->num_attr_request);
