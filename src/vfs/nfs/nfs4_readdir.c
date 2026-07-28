@@ -341,7 +341,9 @@ chimera_nfs4_readdir(
     argarray[1].opputfh.object.data = fh;
     argarray[1].opputfh.object.len  = fhlen;
 
-    /* Op 2: READDIR */
+    /* Op 2: READDIR.  test_pseudo_root sizes its export list off this maxcount
+     * to force a multi-page listing; raising it means raising that test's
+     * PSEUDO_ROOT_MAX_PAGE_ENTRIES too, or its page-boundary coverage lapses. */
     argarray[2].argop              = OP_READDIR;
     argarray[2].opreaddir.dircount = 8192;
     argarray[2].opreaddir.maxcount = 8192;
