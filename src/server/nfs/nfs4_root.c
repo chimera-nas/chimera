@@ -422,6 +422,10 @@ nfs4_root_readdir_advance(struct nfs4_root_readdir_state *state)
             break;
         }
 
+        /* Per-entry attribute buffer.  test_pseudo_root sizes its export list
+         * off this to force a multi-page listing; shrinking it means raising
+         * that test's PSEUDO_ROOT_MAX_PAGE_ENTRIES too, or its page-boundary
+         * coverage lapses. */
         rc = xdr_dbuf_alloc_opaque(&entry->attrs.attr_vals,
                                    256,
                                    req->encoding->dbuf);

@@ -304,12 +304,54 @@ static int posix_test_ro_export __attribute__ ((unused)) = 0;
 
 /* Name of the subdirectory (relative to the backend root) that the read-only
  * export is mounted at; the read-write export sees it as "/share/ro". */
-#define POSIX_TEST_RO_SUBDIR "ro"
+#define POSIX_TEST_RO_SUBDIR             "ro"
 
 /* Explicit export id above the default nfs_max_exports count cap (4096),
  * so tests cover pinned-id file-handle attribution across the whole 16-bit
  * id space rather than only small auto-assigned ids. */
-#define POSIX_TEST_EXPORT_ID 4242
+#define POSIX_TEST_EXPORT_ID             4242
+
+/* When non-zero (set before posix_test_init), posix_test_start_nfs_server
+ * creates this many EXTRA exports alongside "/share", each its own mount of
+ * the same backend rooted at its own subdirectory.
+ *
+ * The pseudo-root test uses them to make an NFSv4 pseudo-fs root listing span
+ * multiple READDIR pages, reaching the page-boundary path where the server
+ * fills a page and returns eof=0.  The client's maxcount is fixed at 8192 and
+ * each entry costs a 256-byte attr_vals allocation plus its entry4, name and
+ * attrmask, which fits 23 entries per page in practice; see the bound in
+ * test_pseudo_root.c.
+ *
+ * Export names are fixed width ("page00", "page01", ...) so no name is a
+ * string prefix of another: chimera_nfs_find_export_path matches export names
+ * by prefix, the same collision the "roshare" note below avoids. */
+static int posix_test_extra_exports __attribute__ ((unused)) = 0;
+
+/* Name of the i'th extra export and its mount (fixed width, see above). */
+#define POSIX_TEST_EXTRA_EXPORT_NAME_FMT "page%02d"
+
+/* Pinned ids for the extra exports, clear of POSIX_TEST_EXPORT_ID and the
+ * read-only export's POSIX_TEST_EXPORT_ID + 1. */
+#define POSIX_TEST_EXTRA_EXPORT_ID_BASE  (POSIX_TEST_EXPORT_ID + 100)
+
+/* Build the i'th extra export's module_path for the given backend, matching
+ * how the "/share" mount roots itself: passthrough backends live under the
+ * host session dir, everything else at the backend root. */
+static inline void
+posix_test_extra_export_module_path(
+    const char *nfs_backend_name,
+    const char *session_dir,
+    const char *name,
+    char       *out,
+    size_t      out_size)
+{
+    if (strcmp(nfs_backend_name, "linux") == 0 ||
+        strcmp(nfs_backend_name, "io_uring") == 0) {
+        snprintf(out, out_size, "%s/%s", session_dir, name);
+    } else {
+        snprintf(out, out_size, "/%s", name);
+    }
+} // posix_test_extra_export_module_path
 
 // Helper to configure diskfs backend
 static inline void
@@ -472,6 +514,39 @@ posix_test_start_nfs_server(struct posix_test_env *env)
         }
     }
 
+    /* Create every extra export's backing subdirectory before any mount of
+     * this backend exists: for the in-backend case chimera_server_mkpath does a
+     * transient mount of the backend root, which would otherwise collide in the
+     * mount table with the "/share" mount below.  Same reason the read-only
+     * subdir is created up here. */
+    for (int i = 0; i < posix_test_extra_exports; i++) {
+        char name[32], module_path[400];
+
+        snprintf(name, sizeof(name), POSIX_TEST_EXTRA_EXPORT_NAME_FMT, i);
+        posix_test_extra_export_module_path(nfs_backend_name, env->session_dir,
+                                            name, module_path,
+                                            sizeof(module_path));
+
+        /* For the passthrough backends the subdirectory is a real host
+         * directory under the session dir, so create it directly:
+         * chimera_server_mkpath transiently mounts the backend at "/", and the
+         * linux/io_uring mount derives a file handle via name_to_handle_at(),
+         * which the container's overlayfs root rejects with EOPNOTSUPP. */
+        if (strcmp(nfs_backend_name, "linux") == 0 ||
+            strcmp(nfs_backend_name, "io_uring") == 0) {
+            if (mkdir(module_path, 0777) != 0 && errno != EEXIST) {
+                fprintf(stderr, "Failed to create extra export subdir %s: %s\n",
+                        module_path, strerror(errno));
+                exit(EXIT_FAILURE);
+            }
+        } else if (chimera_server_mkpath(env->server, share_module, module_path,
+                                         0777) != 0) {
+            fprintf(stderr, "Failed to create extra export subdir %s in %s\n",
+                    module_path, share_module);
+            exit(EXIT_FAILURE);
+        }
+    }
+
     chimera_server_mount(env->server, "share", share_module, share_module_path,
                          NULL);
 
@@ -503,6 +578,32 @@ posix_test_start_nfs_server(struct posix_test_env *env)
         if (chimera_server_create_export(env->server, "/roshare", "/roshare",
                                          POSIX_TEST_EXPORT_ID + 1, NULL) != 0) {
             fprintf(stderr, "Failed to create /roshare export\n");
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    /* One mount plus one pinned-id export per subdirectory created above.
+     * These exist only to give the NFSv4 pseudo-fs root enough entries to span
+     * multiple READDIR pages. */
+    for (int i = 0; i < posix_test_extra_exports; i++) {
+        char name[32], module_path[400], export_path[64];
+
+        snprintf(name, sizeof(name), POSIX_TEST_EXTRA_EXPORT_NAME_FMT, i);
+        snprintf(export_path, sizeof(export_path), "/%s", name);
+        posix_test_extra_export_module_path(nfs_backend_name, env->session_dir,
+                                            name, module_path,
+                                            sizeof(module_path));
+
+        if (chimera_server_mount(env->server, name, share_module, module_path,
+                                 NULL) != 0) {
+            fprintf(stderr, "Failed to mount extra export %s\n", name);
+            exit(EXIT_FAILURE);
+        }
+
+        if (chimera_server_create_export(env->server, export_path, export_path,
+                                         POSIX_TEST_EXTRA_EXPORT_ID_BASE + i,
+                                         NULL) != 0) {
+            fprintf(stderr, "Failed to create %s export\n", export_path);
             exit(EXIT_FAILURE);
         }
     }
