@@ -117,12 +117,19 @@ chimera_smb_query_directory_readdir_callback(
 
     namelen_padded += (8 - (namelen_padded & 7)) & 7;
 
-    if ((request->query_directory.flags & SMB2_INDEX_SPECIFIED) &&
-        (file_index != request->query_directory.file_index)) {
-        return -1;
+    if (request->query_directory.flags & SMB2_INDEX_SPECIFIED) {
+        if (file_index != request->query_directory.file_index) {
+            /* Not the target entry -- skip it but keep iterating.
+             * Return 0 because any non-zero return value means "stop" to the VFS
+             * readdir layer, which would halt the scan prematurely. */
+            return 0;
+        }
+        /* Found the matching entry.  Clear the flag so subsequent entries
+         * are accepted normally, but skip this entry itself -- it was
+         * already returned in the previous response. */
+        request->query_directory.flags &= ~SMB2_INDEX_SPECIFIED;
+        return 0;
     }
-
-    request->query_directory.flags &= ~SMB2_INDEX_SPECIFIED;
 
     switch (request->query_directory.info_class) {
         case SMB2_FILE_DIRECTORY_INFORMATION:
@@ -340,6 +347,16 @@ chimera_smb_query_directory(struct chimera_smb_request *request)
     }
 
     if (request->query_directory.flags & SMB2_REOPEN) {
+        request->query_directory.open_file->position = 0;
+    }
+
+    /* MS-SMB2 §3.3.5.18: when SMB2_INDEX_SPECIFIED is set, the client
+     * supplies a FileIndex from a previous response and expects the server
+     * to resume from the entry matching that index.  Reset position to the
+     * beginning so the readdir callback can scan for the matching entry;
+     * the callback itself (INDEX_SPECIFIED check) skips entries until the
+     * file_index matches and then clears the flag. */
+    if (request->query_directory.flags & SMB2_INDEX_SPECIFIED) {
         request->query_directory.open_file->position = 0;
     }
 
