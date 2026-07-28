@@ -215,6 +215,12 @@ chimera_smb_server_init(
                          shared->config.auth.kerberos_keytab[0] ? shared->config.auth.kerberos_keytab : "(default)");
     }
 
+    /* Resolve the identity advertised in NTLM CHALLENGE messages once at
+     * startup: the winbind lookup behind it is a blocking winbindd round
+     * trip that must stay off the per-connection request path. */
+    smb_ntlm_resolve_server_identity(&shared->config.auth,
+                                     &shared->config.auth.server_identity);
+
     shared->config.soft_fail_bad_req          = chimera_server_config_get_soft_fail_bad_req(config);
     shared->config.persistent_handles         = chimera_server_config_get_smb_persistent_handles(config);
     shared->config.directory_leases           = chimera_server_config_get_smb_directory_leases(config);
