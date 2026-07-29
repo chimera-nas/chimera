@@ -596,6 +596,11 @@ chimera_nfs4_status_to_errno(nfsstat4 status)
             return CHIMERA_VFS_EBADCOOKIE;
         case NFS4ERR_BADHANDLE:
             return CHIMERA_VFS_EBADF;
+        case NFS4ERR_WRONGSEC:
+            /* The filesystem rejects the security flavor in use (chimera's own
+             * pseudo-fs root does this).  EPERM matches what the Linux client
+             * reports; the default below would call it EINVAL. */
+            return CHIMERA_VFS_EPERM;
         case NFS4ERR_NOTSUPP:
             return CHIMERA_VFS_ENOTSUP;
         case NFS4ERR_TOOSMALL:
