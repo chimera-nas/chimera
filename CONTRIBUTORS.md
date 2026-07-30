@@ -9,4 +9,5 @@ The following individuals and organizations have contributed to this project:
 Ben Jarvis
 Alain Renaud
 Joe Habermann
+Peter Dunlap
 Quantum Corporation
