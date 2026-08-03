@@ -441,7 +441,10 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
      * stream from the first message (seen as a fresh smbtorture connection
      * failing NEGOTIATE with NT_STATUS_INVALID_NETWORK_RESPONSE).  The client
      * this reply was for is gone; drop it and just release the compound. */
-    if (unlikely(conn->generation != compound->conn_generation)) {
+    if (unlikely(conn->generation != compound->conn_generation ||
+                 conn->disconnecting ||
+                 !conn->bind ||
+                 evpl_bind_is_closing(conn->bind))) {
         chimera_smb_compound_free(thread, compound);
         return;
     }
