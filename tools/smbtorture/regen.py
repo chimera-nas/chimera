@@ -253,15 +253,24 @@ def do_compare(args):
             else:
                 buckets["still failing"].append(
                     f"{s} {log_path(args.results[0], b, s)}")
-        report.append((b, len(baseline), buckets))
+        # Report the baseline as a fraction of the catalog actually measured, not
+        # of the whole allowlist: a --backends/--filter run restricts the catalog,
+        # and "baseline 551/15" is worse than no number at all.
+        report.append((b, len(baseline & set(catalog)), buckets))
         for k, v in buckets.items():
             totals[k] += len(v)
 
     md = args.format == "markdown"
+    unmeasured = []
     for b, n_baseline, buckets in report:
+        # A --backends run leaves whole backends unmeasured; listing each as an
+        # empty section buries the ones that were actually run.
+        if len(buckets.get("not measured", ())) == len(catalog):
+            unmeasured.append(b)
+            continue
         counts = ", ".join(f"{k} {len(buckets[k])}" for k in sorted(buckets)
                            if k != "not measured")
-        head = f"{b}: baseline {n_baseline}/{len(catalog)}"
+        head = f"{b}: baseline {n_baseline}/{len(catalog)} measured"
         print(f"\n### {head}\n" if md else f"\n== {head}")
         print(f"{counts or 'no cells measured'}\n")
         for k in ("newly failing", "newly passing", "flaky", "timing out",
@@ -274,6 +283,8 @@ def do_compare(args):
                 print(f"  {'- ' if md else ''}{s}")
             print()
 
+    if unmeasured:
+        print(f"\n{'> ' if md else ''}not run: {', '.join(unmeasured)}")
     print("== totals: " + (", ".join(f"{k} {v}" for k, v in sorted(totals.items()))
                            or "nothing measured"))
     if totals["newly failing"] and args.fail_on_newly_failing:
