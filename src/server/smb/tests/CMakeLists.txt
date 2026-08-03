@@ -4721,6 +4721,21 @@ set(SMBTORTURE_ENABLED_diskfs_aio
 set(SMBTORTURE_JUNIT_DIR ${CMAKE_BINARY_DIR}/smbtorture-junit
     CACHE PATH "Directory for per-subtest smbtorture JUnit XML output.")
 
+# Register the subtests the gating suite does NOT run -- everything in the
+# catalog that add_smbtorture_backend_tests() skips, i.e. the per-backend
+# complement of the generated allowlist plus the entries held back by
+# SMBTORTURE_DISABLED_SUBTESTS.  Together the two labels cover the catalog
+# exactly once per backend, so `ctest -L smbtorture_explore -R smb2_streams` is
+# a one-liner for iterating on one area without hand-running the matrix.
+#
+# OFF by default and adds nothing to the gating suite: these are the cells known
+# to fail, hang, or flake, so the label exists to make them addressable, not to
+# gate on them.  Use tools/smbtorture/regen.sh --report-only for a full matrix
+# measurement; this is for local iteration on a single family.
+option(SMBTORTURE_EXPLORE_TESTS
+       "Register the currently-unenabled smbtorture subtests under the \
+smbtorture_explore label (off by default; not part of the gating suite)." OFF)
+
 # A whole suite's subtests run in ONE server+netns+smbtorture invocation instead
 # of one each.  smbtorture is a fast C client (~0.4s startup), but that per-test
 # tax (fork+exec the daemon, set up the netns, start the client) is paid ~1800
@@ -4865,6 +4880,39 @@ function(_smbtorture_add_subtest backend subtest)
     endif()
 endfunction()
 
+# One per-subtest ctest entry for a subtest the gating suite does not run.
+# Mirrors _smbtorture_add_subtest's properties (SKIP_RETURN_CODE 77, 300s, the
+# durable-family resource lock, the LSAN suppressions) so a subtest promoted out
+# of here into the allowlist behaves identically, and reuses the JUnit converter
+# so an explore run still produces per-subtest XML.
+function(_smbtorture_add_explore backend subtest)
+    string(REGEX REPLACE "[^A-Za-z0-9]" "_" sid "${subtest}")
+    set(name chimera/server/smb/smbtorture_explore_${sid}_${backend})
+    add_test(NAME ${name}
+        COMMAND ${CMAKE_SOURCE_DIR}/scripts/netns_test_wrapper.sh
+                ${SMBTORTURE_CMD} -b ${backend} ${subtest})
+    set_tests_properties(${name} PROPERTIES
+        LABELS "smbtorture_explore"
+        ENVIRONMENT "${SMBTORTURE_LSAN};SMBTORTURE_JUNIT_FILE=${SMBTORTURE_JUNIT_DIR}/smbtorture_explore_${sid}_${backend}.xml;SMBTORTURE_JUNIT_CONVERTER=${CMAKE_SOURCE_DIR}/scripts/smbtorture_to_junit.py"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 300)
+    if(subtest MATCHES "^smb2\\.durable-(v2-)?open\\.")
+        set_tests_properties(${name} PROPERTIES
+            RESOURCE_LOCK smb_durable_oplock_family)
+    endif()
+endfunction()
+
+macro(add_smbtorture_explore_tests backend)
+    foreach(_sub ${SMBTORTURE_SUITES})
+        # The complement of what the gating suite registers: not enabled for this
+        # backend, or enabled but held back by the disabled list.
+        if(NOT "${_sub}" IN_LIST SMBTORTURE_ENABLED_${backend}
+           OR "${_sub}" IN_LIST SMBTORTURE_DISABLED_SUBTESTS)
+            _smbtorture_add_explore(${backend} "${_sub}")
+        endif()
+    endforeach()
+endmacro()
+
 macro(add_smbtorture_backend_tests backend)
     foreach(_parent ${SMBTORTURE_PARENTS})
         set(_pid ${SMBTORTURE_PID_${_parent}})
@@ -4959,6 +5007,22 @@ if(CHIMERA_NETNS_TESTING AND SMBTORTURE_EXECUTABLE)
     endif()
     if(IO_URING_ENABLED)
         add_smbtorture_backend_tests(io_uring)
+    endif()
+
+    # Same backend set, gated on the option so the default ctest set is unchanged.
+    if(SMBTORTURE_EXPLORE_TESTS)
+        add_smbtorture_explore_tests(memfs)
+        add_smbtorture_explore_tests(linux)
+        add_smbtorture_explore_tests(diskfs_io_uring)
+        if(HAVE_LIBAIO)
+            add_smbtorture_explore_tests(diskfs_aio)
+        endif()
+        if(CAIRN_ENABLED)
+            add_smbtorture_explore_tests(cairn)
+        endif()
+        if(IO_URING_ENABLED)
+            add_smbtorture_explore_tests(io_uring)
+        endif()
     endif()
 elseif(CHIMERA_NETNS_TESTING)
     message(STATUS "smbtorture tests: disabled (smbtorture client not found; "

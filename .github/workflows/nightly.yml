@@ -505,6 +505,111 @@ jobs:
               /workspace/scripts/cap_ctest_output.sh \
               ctest --output-on-failure --test-output-size-failed 65536 --timeout 300 -j 32'
 
+  # Informational measurement of the full smbtorture smb2 matrix (655 subtests x
+  # 6 VFS backends).  The gating suite only registers the subtests in the
+  # generated SMBTORTURE_ENABLED_<backend> allowlists, so 15-30% of the catalog
+  # per backend never runs in CI at all; this job runs the complement too and
+  # diffs the outcome against the checked-in baseline.
+  #
+  # It fails ONLY on a "newly failing" cell -- a subtest that is in the baseline
+  # (and therefore gated) but did not pass.  A "still failing" cell is the
+  # expected state of the exploration backlog and must not be noise, or the job
+  # would be red every night and nobody would read it.
+  #
+  # amd64 Release only: the matrix is ~3900 daemon+netns+client invocations and
+  # the baselines were measured on that configuration.
+  smbtorture-matrix:
+    name: smbtorture matrix (informational)
+    needs: [build-devcontainer]
+    runs-on: arc-amd64
+    permissions:
+      contents: read
+    # Passing cells cost ~0.6s, but a hung cell burns the full 300s timeout and
+    # there are ~880 non-passing cells across the matrix; 3h leaves headroom.
+    timeout-minutes: 180
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      # --privileged: the netns wrapper needs CAP_NET_ADMIN.  smbtorture itself
+      # ships in the devcontainer image (samba-testsuite).
+      # The matrix and both compare passes run in the container (which is where
+      # python3 and smbtorture live); the runner steps only read the files it
+      # leaves behind, so publishing never depends on tooling outside the image.
+      #
+      # compare runs twice over the same results: once to render the buckets for
+      # the job summary, once to decide the exit status.  The verdict is recorded
+      # as a flag file rather than failing here, so the summary and the artifacts
+      # still publish when a gated test regressed -- exactly when they are worth
+      # reading.  "still failing" is summarized but not listed; it is ~880 cells
+      # of known backlog.
+      - name: Build and run the matrix
+        run: |
+          rm -rf smbt-report
+          mkdir -p smbt-report
+          docker run --rm --privileged \
+            -e DOCKER_MIRROR=${{ env.DOCKER_MIRROR }} \
+            -e APT_MIRROR=${{ env.APT_MIRROR }} \
+            -v "${{ github.workspace }}:/workspace" \
+            -v /build \
+            -w /build \
+            ${{ env.DEV_IMAGE_TAG_PREFIX }}:${{ github.sha }}-amd64 \
+            bash -euxc '\
+              cmake -G Ninja -DCMAKE_BUILD_TYPE=Release -DREQUIRE_NETNS_TESTS=ON /workspace && \
+              ninja smbtorture_test && \
+              /workspace/tools/smbtorture/regen.sh --report-only \
+                  --build-dir /build \
+                  --out-dir /workspace/smbt-report \
+                  --parallel 32 && \
+              cd /workspace && \
+              python3 tools/smbtorture/regen.py compare \
+                  --results smbt-report/results.txt \
+                  --cmake src/server/smb/tests/CMakeLists.txt \
+                  --format markdown \
+                  --quiet-buckets "still failing" \
+                > smbt-report/drift.md && \
+              { python3 tools/smbtorture/regen.py compare \
+                  --results smbt-report/results.txt \
+                  --cmake src/server/smb/tests/CMakeLists.txt \
+                  --quiet-buckets "still failing,skipped" \
+                  --fail-on-newly-failing > /dev/null \
+                || touch smbt-report/newly-failing.flag; }'
+
+      - name: Report baseline drift
+        if: always()
+        run: |
+          if [ -f smbt-report/drift.md ]; then
+            {
+              echo '## smbtorture baseline drift'
+              cat smbt-report/drift.md
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo '## smbtorture baseline drift' >> "$GITHUB_STEP_SUMMARY"
+            echo 'The matrix did not complete; no results to compare.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload matrix results and failure logs
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: smbtorture-matrix-amd64
+          path: smbt-report/
+          if-no-files-found: warn
+          retention-days: 30
+
+      # Only a regression in a gated subtest turns the job red.  A missing flag
+      # file means either no regression or a matrix that never finished, and the
+      # latter already failed its own step.
+      - name: Fail on a regression in a gated subtest
+        if: always()
+        run: |
+          if [ -f smbt-report/newly-failing.flag ]; then
+            echo "a gated smbtorture subtest regressed; see the job summary" >&2
+            exit 1
+          fi
+
   static-analysis:
     name: Analyze ${{ matrix.image_name }} ${{ matrix.arch }} ${{ matrix.build_type }}
     needs: [build-devcontainer, build-ubuntu26, build-ubuntu24, build-ubuntu22, build-rocky9, build-rocky10]
