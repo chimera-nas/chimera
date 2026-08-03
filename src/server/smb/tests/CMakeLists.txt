@@ -1920,9 +1920,11 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.zero-data-ioctl
     # attribute-only ("stat") opens acquire their requested oplock when sole
     smb2.oplock.batch9
+    # attribute-only ("stat") opens acquire their requested oplock when sole
     smb2.oplock.batch9a
     # oplocks/leases on named streams (harness enables ADS for these subtests)
     smb2.oplock.batch26
+    # oplocks/leases on named streams (harness enables ADS for these subtests)
     smb2.lease.request
     # delete-on-close via SET_INFO marks the file delete-pending
     smb2.oplock.doc
@@ -1933,6 +1935,8 @@ set(SMBTORTURE_ENABLED_memfs
     # byte-range lock breaks a caching lease to NONE in a single shot, and a
     # fresh lease behind a lock is capped to NONE (lock-vs-caching conflict)
     smb2.lease.lock1
+    # byte-range lock breaks a caching lease to NONE in a single shot, and a
+    # fresh lease behind a lock is capped to NONE (lock-vs-caching conflict)
     smb2.lease.lease-epoch
     # batch oplock break-ack timeout duration (harness sets oplocktimeout=30)
     smb2.oplock.batch22a
