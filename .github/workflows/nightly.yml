@@ -8,6 +8,25 @@ on:
   schedule:
     - cron: '0 7 * * *'  # 07:00 UTC daily
   workflow_dispatch:     # allow manual runs
+    # Scope the smbtorture matrix for a manual run.  All three default to the
+    # full matrix, so the scheduled run is unaffected; they exist so the job can
+    # be exercised end to end (privileged container, netns, artifact upload, job
+    # summary, regression gate) in a minute rather than the hours a full ~3900
+    # cell sweep takes.  Ignored by every other job.
+    inputs:
+      smbtorture_backends:
+        description: 'smbtorture: backends to run (default: all six)'
+        required: false
+        type: string
+      smbtorture_filter:
+        description: 'smbtorture: only subtests matching this regex (default: all)'
+        required: false
+        type: string
+      smbtorture_parallel:
+        description: 'smbtorture: concurrent cells'
+        required: false
+        type: string
+        default: '32'
 
 env:
   DEV_IMAGE_TAG_PREFIX: repository.mdh.quantum.com:5004/cache/chimera-dev
@@ -545,13 +564,32 @@ jobs:
       # still publish when a gated test regressed -- exactly when they are worth
       # reading.  "still failing" is summarized but not listed; it is ~880 cells
       # of known backlog.
+      # The scoping inputs reach regen.sh as environment variables passed through
+      # by `docker run -e NAME` (value taken from the step env), never
+      # interpolated into the container's command line -- a dispatch input is
+      # attacker-controlled text and must not be able to break out of quoting.
+      # Empty means the full matrix, which is what the scheduled run sends.
+      #
+      # compare measures against measured-catalog.txt -- the catalog the run
+      # actually covered -- and not the checked-in SMBTORTURE_SUITES.  Identical
+      # for a full run today; they diverge as soon as a dispatch scopes the
+      # matrix or a Samba upgrade changes the catalog, and then the live one is
+      # the honest denominator.  regen.sh writes that file on every run, scoped
+      # or not, so nothing here has to infer the scope from which files exist.
       - name: Build and run the matrix
+        env:
+          SMBTORTURE_BACKENDS: ${{ inputs.smbtorture_backends }}
+          SMBTORTURE_FILTER: ${{ inputs.smbtorture_filter }}
+          SMBTORTURE_PARALLEL: ${{ inputs.smbtorture_parallel || '32' }}
         run: |
           rm -rf smbt-report
           mkdir -p smbt-report
           docker run --rm --privileged \
             -e DOCKER_MIRROR=${{ env.DOCKER_MIRROR }} \
             -e APT_MIRROR=${{ env.APT_MIRROR }} \
+            -e SMBTORTURE_BACKENDS \
+            -e SMBTORTURE_FILTER \
+            -e SMBTORTURE_PARALLEL \
             -v "${{ github.workspace }}:/workspace" \
             -v /build \
             -w /build \
@@ -561,18 +599,19 @@ jobs:
               ninja smbtorture_test && \
               /workspace/tools/smbtorture/regen.sh --report-only \
                   --build-dir /build \
-                  --out-dir /workspace/smbt-report \
-                  --parallel 32 && \
+                  --out-dir /workspace/smbt-report && \
               cd /workspace && \
               python3 tools/smbtorture/regen.py compare \
                   --results smbt-report/results.txt \
                   --cmake src/server/smb/tests/CMakeLists.txt \
+                  --subs smbt-report/measured-catalog.txt \
                   --format markdown \
                   --quiet-buckets "still failing" \
                 > smbt-report/drift.md && \
               { python3 tools/smbtorture/regen.py compare \
                   --results smbt-report/results.txt \
                   --cmake src/server/smb/tests/CMakeLists.txt \
+                  --subs smbt-report/measured-catalog.txt \
                   --quiet-buckets "still failing,skipped" \
                   --fail-on-newly-failing > /dev/null \
                 || touch smbt-report/newly-failing.flag; }'
