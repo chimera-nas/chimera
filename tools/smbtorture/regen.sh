@@ -42,8 +42,11 @@ ALL_BACKENDS="memfs linux io_uring cairn diskfs_io_uring diskfs_aio"
 BUILD_DIR=${SMBTORTURE_BUILD_DIR:-}
 OUT_DIR=${SMBTORTURE_OUT_DIR:-/tmp}
 PARALLEL=${SMBTORTURE_PARALLEL:-12}
-BACKENDS=$ALL_BACKENDS
-FILTER=
+# Env fallbacks so a caller that cannot easily append flags -- a CI job passing
+# `docker run -e` -- can scope a run without interpolating anything into a shell
+# command line.  Unset or empty means "the whole matrix".
+BACKENDS=${SMBTORTURE_BACKENDS:-$ALL_BACKENDS}
+FILTER=${SMBTORTURE_FILTER:-}
 REPORT_ONLY=0
 
 usage()
@@ -53,8 +56,11 @@ usage: regen.sh [options]
 
   --report-only        run the matrix and stop; do not splice CMakeLists.txt
   --out-dir <dir>      where results.txt and per-failure logs land (default /tmp)
+                       ($SMBTORTURE_OUT_DIR)
   --backends <list>    comma/space separated subset of backends to run
+                       ($SMBTORTURE_BACKENDS)
   --filter <regex>     only run catalog subtests matching this extended regex
+                       ($SMBTORTURE_FILTER)
   --build-dir <dir>    build tree holding src/server/smb/tests/smbtorture_test
                        (default: first of $SMBTORTURE_BUILD_DIR, ./build/Release,
                        /build/Release that exists)
@@ -77,6 +83,11 @@ while [ $# -gt 0 ]; do
         *)             echo "error: unknown option '$1'" >&2; usage >&2; exit 2;;
     esac
 done
+
+# Normalize commas once every input source has been consumed.  --backends did it
+# on the way in, but $SMBTORTURE_BACKENDS handed its text straight to the
+# validation below, where "memfs,linux" is a single unknown backend.
+BACKENDS=${BACKENDS//,/ }
 
 # Canonical form for a backend set, so "is this the whole matrix" is a question
 # about the set and not about the order it happened to be typed in.
@@ -223,6 +234,13 @@ cat > "$RUNNER" <<'RUNNER_EOF'
 set -u
 BACKEND="$1"; SUITE="$2"
 LOG=$(mktemp "$SMBT_OUTDIR/smbt.XXXXXX.log")
+# mktemp creates 0600 regardless of umask, and this runs as root inside the
+# container while the out-dir is a bind mount the CI runner reads as an
+# unprivileged user.  Without this the kept failure logs are unreadable outside
+# the container and artifact upload dies with EACCES.  Done before the run, not
+# after the mv, so the temporaries an aborted matrix leaves behind are readable
+# too -- upload happens even when the matrix never finished.
+chmod 644 "$LOG"
 cd "$SMBT_REPO"
 timeout --signal=KILL 300 \
     scripts/netns_test_wrapper.sh \
@@ -246,7 +264,10 @@ fi
 # would discard a multi-hour matrix over one unlink.
 exit 0
 RUNNER_EOF
-chmod +x "$RUNNER"
+# 755 rather than +x for the same reason the per-cell log is 644: mktemp made it
+# 0600, and a matrix that dies before the cleanup below leaves it in an out-dir
+# that CI uploads as an unprivileged user.
+chmod 755 "$RUNNER"
 export SMBT_REPO=$REPO
 export SMBT_RESULTS=$RESULTS
 export SMBT_OUTDIR=$OUT_DIR

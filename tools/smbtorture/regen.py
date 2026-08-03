@@ -220,6 +220,7 @@ def do_compare(args):
     res = parse_results(args.results)
 
     report, totals = [], collections.Counter()
+    n_measured = n_cells = 0
     for b in BACKENDS:
         raw = lists.get(f"ENABLED_{b}")
         if raw is None:
@@ -253,26 +254,39 @@ def do_compare(args):
             else:
                 buckets["still failing"].append(
                     f"{s} {log_path(args.results[0], b, s)}")
+        # Count what was measured on its own, not off the buckets: the buckets
+        # hold only deviations, so a clean backend leaves every one of them empty
+        # and any total derived from them alone reports a fully green matrix of
+        # thousands of cells as "nothing measured".
+        measured = len(catalog) - len(buckets.get("not measured", ()))
+        n_measured += measured
+        n_cells += len(catalog)
         # Report the baseline as a fraction of the catalog actually measured, not
         # of the whole allowlist: a --backends/--filter run restricts the catalog,
         # and "baseline 551/15" is worse than no number at all.
-        report.append((b, len(baseline & set(catalog)), buckets))
+        report.append((b, len(baseline & set(catalog)), measured, buckets))
         for k, v in buckets.items():
-            totals[k] += len(v)
+            # "not measured" is scope, not drift, and n_measured now carries it.
+            if k != "not measured":
+                totals[k] += len(v)
 
     md = args.format == "markdown"
     unmeasured = []
-    for b, n_baseline, buckets in report:
+    for b, n_baseline, measured, buckets in report:
         # A --backends run leaves whole backends unmeasured; listing each as an
         # empty section buries the ones that were actually run.
-        if len(buckets.get("not measured", ())) == len(catalog):
+        if not measured:
             unmeasured.append(b)
             continue
         counts = ", ".join(f"{k} {len(buckets[k])}" for k in sorted(buckets)
                            if k != "not measured")
-        head = f"{b}: baseline {n_baseline}/{len(catalog)} measured"
+        # Buckets hold only deviations, so an empty bucket set means every
+        # measured cell agreed with the baseline -- report that as no drift, not
+        # as an absence of measurement.
+        head = (f"{b}: {measured}/{len(catalog)} cells measured, "
+                f"{n_baseline} in baseline")
         print(f"\n### {head}\n" if md else f"\n== {head}")
-        print(f"{counts or 'no cells measured'}\n")
+        print(f"{counts or 'no drift from the baseline'}\n")
         for k in ("newly failing", "newly passing", "flaky", "timing out",
                   "still failing", "failing (disabled)", "skipped"):
             items = buckets.get(k)
@@ -285,8 +299,9 @@ def do_compare(args):
 
     if unmeasured:
         print(f"\n{'> ' if md else ''}not run: {', '.join(unmeasured)}")
-    print("== totals: " + (", ".join(f"{k} {v}" for k, v in sorted(totals.items()))
-                           or "nothing measured"))
+    print(f"== totals: {n_measured}/{n_cells} cells measured, "
+          + (", ".join(f"{k} {v}" for k, v in sorted(totals.items()))
+             or "no drift from the baseline"))
     if totals["newly failing"] and args.fail_on_newly_failing:
         print(f"\nerror: {totals['newly failing']} newly failing cell(s) -- "
               "a gated test regressed", file=sys.stderr)
