@@ -325,26 +325,30 @@ chimera_vfs_setattr_gate_complete(
      * permission.  For a setattr that changes only timestamps, the owner is
      * therefore unconditionally authorized.
      *
-     * The exempt set includes BTIME (creation time): the SMB
+     * The exempt set includes BTIME and DOS_ATTRIBUTES: the SMB
      * SetInfo(FileBasicInformation) path always carries all four timestamps
-     * (atime/mtime/ctime AND btime, the last two typically as TIME_OMIT
-     * "no-op" sentinels), so an owner's plain `touch` arrives with BTIME in
-     * set_mask.  Excluding BTIME here made the exemption miss, leaving
-     * required=WRITE_ATTRIBUTES -- a right the mode-only owner is not granted
-     * (mode_access_check withholds it, Windows-style) -- so the owner's own
-     * touch was denied (STATUS_INTERNAL_ERROR over SMB).  NFS never sets BTIME
-     * on a touch, which is why it was unaffected. */
+     * plus DOS attributes (the extras typically as TIME_OMIT / no-op
+     * sentinels), so an owner's plain `touch` arrives with BTIME and
+     * DOS_ATTRIBUTES in set_mask.  Excluding them made the exemption miss,
+     * leaving required=WRITE_ATTRIBUTES -- a right the mode-only owner is not
+     * granted (mode_access_check withholds it, Windows-style) -- so the
+     * owner's own touch was denied (STATUS_INTERNAL_ERROR over SMB).  NFS
+     * never sets BTIME on a touch, which is why it was unaffected. */
     {
         uint64_t m     = gate->set_attr->va_set_mask;
         int      owner = (gate->cred->uid == 0) ||
             ((attr->va_set_mask & CHIMERA_VFS_ATTR_UID) &&
              (uint64_t) gate->cred->uid == attr->va_uid);
 
-        if (owner &&
-            (m & (CHIMERA_VFS_ATTR_ATIME | CHIMERA_VFS_ATTR_MTIME |
-                  CHIMERA_VFS_ATTR_BTIME)) &&
-            !(m & ~(CHIMERA_VFS_ATTR_ATIME | CHIMERA_VFS_ATTR_MTIME |
-                    CHIMERA_VFS_ATTR_CTIME | CHIMERA_VFS_ATTR_BTIME))) {
+        const uint64_t time_trigger  = CHIMERA_VFS_ATTR_ATIME |
+                                       CHIMERA_VFS_ATTR_MTIME |
+                                       CHIMERA_VFS_ATTR_BTIME;
+        const uint64_t owner_exempt  = time_trigger |
+                                       CHIMERA_VFS_ATTR_CTIME |
+                                       CHIMERA_VFS_ATTR_DOS_ATTRIBUTES;
+
+        /* Owner setting only timestamps (+ benign SMB sentinels): skip ACL. */
+        if (owner && (m & time_trigger) && !(m & ~owner_exempt)) {
             required = 0;
         }
     }
