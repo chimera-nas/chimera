@@ -522,6 +522,13 @@ chimera_smb_query_info(struct chimera_smb_request *request)
         memset(&pipe_attrs, 0, sizeof(pipe_attrs));
         pipe_attrs.va_mode     = S_IFREG | 0666;
         pipe_attrs.va_nlink    = 1;
+        /* FileInternalInformation (and FileAllInformation) marshal
+         * IndexNumber directly from va_ino (smb_attr.h); leaving it 0 would
+         * report every pipe FID with the same all-zero index number.  There
+         * is no real inode backing a pipe FID, so use the open's persistent
+         * id (unique and stable for the life of this open) as a synthetic
+         * one instead. */
+        pipe_attrs.va_ino      = request->query_info.open_file->file_id.pid;
         pipe_attrs.va_set_mask = CHIMERA_VFS_ATTR_MASK_STAT;
 
         /* Set output_length based on info class before completing (the reply
