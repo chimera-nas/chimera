@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "vfs/vfs_attrs.h"
+#include "nfs_common/nfs_fh_limits.h"
 #include "nfs_siphash.h"
 
 /*
@@ -40,6 +41,40 @@
 #define CHIMERA_NFS_FH_HDR        3   /* tag(1) + export_id(2) */
 #define CHIMERA_NFS_FH_MAC        8   /* SipHash-2-4 tag, 64-bit */
 #define CHIMERA_NFS_FH_MAX        (CHIMERA_NFS_FH_HDR + CHIMERA_VFS_FH_SIZE + CHIMERA_NFS_FH_MAC)
+
+/*
+ * Proxying one chimera through another has to keep working: the downstream
+ * chimera's NFS client re-embeds whatever handle this wrap puts on the wire,
+ * and it has only CHIMERA_NFS_PROXY_REMOTE_FH_MAX bytes to do it in.  A share on
+ * an inum-varint backend (memfs, diskfs, cairn) fits that ceiling -- exactly, in
+ * the named-stream case, with no slack.  That is the shipped, CI-exercised
+ * topology (kvm/kvm_pnfs_proxy_test_wrapper.sh mounts a memfs or diskfs share
+ * through the nfs module), so it is the case pinned below: widen any term of the
+ * sum and this fails to build rather than silently making chimera refuse to
+ * proxy chimera.  See the margin table at CHIMERA_NFS_PROXY_REMOTE_FH_MAX.
+ *
+ * It is deliberately NOT an assertion about every backend, because two of them
+ * do not fit and cannot be made to:
+ *
+ *   linux  a fragment of up to 32 wraps and signs to 59
+ *   nfs    a fragment of up to 48 wraps and signs to 75
+ *
+ * Chaining a third chimera behind those is refused at the ceiling -- EOVERFLOW
+ * per operation, EIO at mount -- by the re-encoder checks named in
+ * nfs_common/nfs_fh_limits.h.  Refused, not corrupted: before those checks
+ * existed this was the memory-corruption path.  Lifting the restriction needs a
+ * handle indirection table, not a wider assert.
+ *
+ * smb sits between the two: 44 bytes, three to spare, unasserted.  Expressing it
+ * here would mean either reaching into vfs/smb/smb_internal.h from the NFS
+ * server -- wrong direction -- or restating sizeof(chimera_smb_client_file_id)
+ * as a literal, which would stop tracking the struct the moment it changed.  A
+ * silent 16 is worse than a documented gap, so it is documented.
+ */
+_Static_assert(CHIMERA_NFS_FH_HDR + CHIMERA_VFS_FH_INUM_EMITTED_MAX + CHIMERA_NFS_FH_MAC
+               <= CHIMERA_NFS_PROXY_REMOTE_FH_MAX,
+               "a signed chimera wire handle from an inum-varint backend no longer fits"
+               " what the NFS proxy client can re-embed");
 
 enum chimera_nfs_fh_status {
     CHIMERA_NFS_FH_OK        = 0,

@@ -170,7 +170,7 @@ chimera_nfs4_mount_get_root_fh_callback(
     xdr_opaque                      *remote_fh;
     uint8_t                          fh_fragment[CHIMERA_VFS_FH_SIZE];
     uint8_t                          fsid_buf[CHIMERA_VFS_FSID_SIZE];
-    uint8_t                          hash_input[256 + NFS4_FHSIZE];
+    uint8_t                          hash_input[256 + CHIMERA_NFS_PROXY_REMOTE_FH_MAX];
     int                              hash_input_len;
     int                              fh_fragment_len;
     int                              hostname_len;
@@ -270,6 +270,19 @@ chimera_nfs4_mount_get_root_fh_callback(
 
     getfh_res = &res->resarray[op];
     remote_fh = &getfh_res->opgetfh.resok4.object;
+
+    /* The server chose this length and the generated decoder does not enforce
+     * the `<NFS4_FHSIZE>` bound, so it is checked before it reaches either the
+     * fh_fragment or hash_input buffer below.  A root handle chimera cannot
+     * embed makes the whole mount unusable, so the mount fails here the way the
+     * GETFH failure above does. */
+    if (remote_fh->len > CHIMERA_NFS_PROXY_REMOTE_FH_MAX) {
+        chimera_nfsclient_error("NFS4 mount root file handle too large: %u bytes (max %d)",
+                                remote_fh->len, CHIMERA_NFS_PROXY_REMOTE_FH_MAX);
+        request->status = CHIMERA_VFS_EIO;
+        request->complete(request);
+        return;
+    }
 
     /*
      * Build the local file handle:

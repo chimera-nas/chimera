@@ -83,7 +83,11 @@ chimera_nfs4_mknod_callback(
     remote_fh = &getfh_res->opgetfh.resok4.object;
 
     /* Build local file handle from server index + remote FH */
-    chimera_nfs4_unmarshall_fh(remote_fh, ctx->server->index, request->fh, &request->mknod_at.r_attr);
+    if (chimera_nfs4_unmarshall_fh(remote_fh, ctx->server->index, request->fh, &request->mknod_at.r_attr) != 0) {
+        request->status = CHIMERA_VFS_EOVERFLOW;
+        request->complete(request);
+        return;
+    }
 
     /* Get GETATTR result */
     if (res->num_resarray >= 5) {

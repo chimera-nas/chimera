@@ -9,6 +9,7 @@
 #include "nfs3_xdr.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_fh.h"
+#include "nfs_common/nfs_fh_limits.h"
 
 #define CHIMERA_NFS3_ATTR_MASK     ( \
             CHIMERA_VFS_ATTR_DEV | \
@@ -298,12 +299,16 @@ chimera_nfs3_unmarshall_attrs(
  * fh->data is server-supplied (this is the NFS *client* module parsing a
  * backend server's reply) and bounded only by the wire frame, NOT by the
  * NFS3_FHSIZE the schema declares -- the generated XDR decoder does not enforce
- * the `<NFS3_FHSIZE>` bound.  The local `fragment` buffer holds the 1-byte
- * server index plus the handle data, so the handle must be small enough that
- * 1 + fh->data.len fits in CHIMERA_VFS_FH_SIZE (which also keeps the subsequent
- * encode into the larger attr->va_fh in bounds).  An oversized handle -- a
- * malformed/malicious server, or simply a backend whose handles are larger than
- * chimera can represent -- is rejected rather than overflowing the stack buffer.
+ * the `<NFS3_FHSIZE>` bound.  The bound that matters is the *encoded* handle:
+ * encode_fh_parent returns mount_id + server_index + data.len, and that has to
+ * fit CHIMERA_VFS_FH_SIZE, so the handle is capped at
+ * CHIMERA_NFS_PROXY_REMOTE_FH_MAX.  Bounding only the `fragment` buffer is not
+ * enough -- it admits lengths of 48..63, which encode to 65..80 and fit
+ * attr->va_fh solely because that field carries 16 bytes of padding for XXH3
+ * SIMD overreads.  Callers then copy va_fh_len bytes into bare
+ * uint8_t[CHIMERA_VFS_FH_SIZE] fields and overrun them.  An oversized handle --
+ * a malformed/malicious server, or simply a backend whose handles are larger
+ * than chimera can represent -- is rejected rather than overflowing anything.
  *
  * Returns 0 on success (ATTR_FH set), -1 if the handle does not fit (ATTR_FH
  * left unset; the caller fails the operation with EOVERFLOW, or omits the
@@ -319,8 +324,8 @@ chimera_nfs3_unmarshall_fh(
     uint8_t fragment[CHIMERA_VFS_FH_SIZE];
     int     fragment_len;
 
-    /* 1 (server_index) + data must fit the fragment buffer. */
-    if (fh->data.len > CHIMERA_VFS_FH_SIZE - 1) {
+    /* mount_id + 1 (server_index) + data must fit the encoded handle. */
+    if (fh->data.len > CHIMERA_NFS_PROXY_REMOTE_FH_MAX) {
         return -1;
     }
 

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -6,6 +6,15 @@
 
 #include <stdint.h>
 #include <stddef.h>
+
+/*
+ * Worst-case encoded sizes: the encoders emit 7 value bits per byte, so a
+ * 64-bit value needs ceil(64/7) = 10 bytes and a 32-bit value ceil(32/7) = 5.
+ * Callers that size a buffer for an encode, or that reason about the length of
+ * a composed varint sequence, use these rather than open-coding the arithmetic.
+ */
+#define CHIMERA_VARINT_UINT64_MAX_BYTES 10
+#define CHIMERA_VARINT_UINT32_MAX_BYTES 5
 
 static inline int
 chimera_decode_uint64(

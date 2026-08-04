@@ -115,6 +115,19 @@ chimera_mount_mountd_mnt_callback(
     evpl_rpc2_client_disconnect(server_thread->thread->rpc2_thread, server_thread->mount_conn);
     server_thread->mount_conn = NULL;
 
+    /* mountd chose this length and the generated decoder does not enforce the
+     * `<NFS3_FHSIZE>` bound, so it is checked before it reaches either the
+     * fh_fragment or hash_input buffer below.  A root handle chimera cannot
+     * embed makes the whole mount unusable, so the mount fails here the way the
+     * mountd failure above does. */
+    if (reply->mountinfo.fhandle.len > CHIMERA_NFS_PROXY_REMOTE_FH_MAX) {
+        chimera_nfsclient_error("NFS3 mount root file handle too large: %u bytes (max %d)",
+                                reply->mountinfo.fhandle.len, CHIMERA_NFS_PROXY_REMOTE_FH_MAX);
+        request->status = CHIMERA_VFS_EIO;
+        request->complete(request);
+        return;
+    }
+
     /*
      * Build the FH using the new format:
      * - fh_fragment = [server_index (1 byte)][remote_root_fh]
@@ -126,7 +139,7 @@ chimera_mount_mountd_mnt_callback(
     {
         uint8_t       fh_fragment[CHIMERA_VFS_FH_SIZE];
         uint8_t       fsid_buf[CHIMERA_VFS_FSID_SIZE];
-        uint8_t       hash_input[256 + 64];  /* hostname + remote fh */
+        uint8_t       hash_input[256 + CHIMERA_NFS_PROXY_REMOTE_FH_MAX];
         int           hash_input_len;
         int           fh_fragment_len;
         int           hostname_len;
