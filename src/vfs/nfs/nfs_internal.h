@@ -21,6 +21,7 @@
 #include "uthash.h"
 #include "common/misc.h"
 #include "vfs/vfs_fh.h"
+#include "nfs_common/nfs_fh_limits.h"
 #include "evpl/evpl_rpc2.h"
 #include "nlm4_xdr.h"
 
@@ -615,8 +616,18 @@ chimera_nfs4_status_to_errno(nfsstat4 status)
 /*
  * Unmarshall a file handle from NFS4 GETFH response
  * Builds local FH: [parent_mount_id][server_index][remote_fh]
+ *
+ * fh->len is chosen by the upstream server and is not bounded by the generated
+ * XDR decoder, which ignores the `<NFS4_FHSIZE>` bound nfs4.x declares.  An
+ * unchecked handle overflows both the local fragment buffer and, via
+ * encode_fh_parent, attr->va_fh -- and va_fh is the last member of the pooled
+ * chimera_vfs_request, so the write continues into its callback pointers.
+ *
+ * Returns 0 on success (ATTR_FH set), -1 if the handle is too large to embed
+ * (ATTR_FH left unset; the caller fails the operation with EOVERFLOW).  This
+ * mirrors chimera_nfs3_unmarshall_fh in nfs_common/nfs3_attr.h.
  */
-static inline void
+static inline int
 chimera_nfs4_unmarshall_fh(
     const xdr_opaque         *fh,
     int                       server_index,
@@ -626,6 +637,12 @@ chimera_nfs4_unmarshall_fh(
     uint8_t fragment[CHIMERA_VFS_FH_SIZE];
     int     fragment_len;
 
+    /* The encoded handle is mount_id + server_index + data and must fit
+     * CHIMERA_VFS_FH_SIZE, not merely fit the fragment buffer. */
+    if (fh->len > CHIMERA_NFS_PROXY_REMOTE_FH_MAX) {
+        return -1;
+    }
+
     /* Build fh_fragment: [server_index][remote_fh_data] */
     fragment[0] = server_index;
     memcpy(fragment + 1, fh->data, fh->len);
@@ -633,6 +650,7 @@ chimera_nfs4_unmarshall_fh(
 
     attr->va_set_mask |= CHIMERA_VFS_ATTR_FH;
     attr->va_fh_len    = chimera_vfs_encode_fh_parent(parent_fh, fragment, fragment_len, attr->va_fh);
+    return 0;
 } // chimera_nfs4_unmarshall_fh
 
 /*
