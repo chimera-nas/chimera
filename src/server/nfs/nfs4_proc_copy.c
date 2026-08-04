@@ -26,15 +26,21 @@ struct nfs4_copy_state_refs {
     struct evpl_iovec   rw_iov[CHIMERA_NFS4_COPY_IOV_MAX];
 };
 
+/* Returns NULL for any state type that carries no open handle -- a delegation
+ * or layout stateid must not be reinterpreted as one of the two that do. */
 static struct chimera_vfs_open_handle *
 chimera_nfs4_copy_state_handle(
     void   *state,
     uint8_t state_type)
 {
-    if (state_type == NFS4_SLOT_TYPE_OPEN) {
-        return ((struct nfs_open_state *) state)->handle;
-    }
-    return ((struct nfs_lock_state *) state)->handle;
+    switch (state_type) {
+        case NFS4_SLOT_TYPE_OPEN:
+            return ((struct nfs_open_state *) state)->handle;
+        case NFS4_SLOT_TYPE_LOCK:
+            return ((struct nfs_lock_state *) state)->handle;
+        default:
+            return NULL;
+    } /* switch */
 } /* chimera_nfs4_copy_state_handle */
 
 static void
@@ -277,8 +283,28 @@ chimera_nfs4_copy(
         return;
     }
 
+    /* The destination stateid must name a write-capable open of the current
+     * filehandle (the saved filehandle is the source -- RFC 7862 sec 15.2).
+     * Without this the write would target whatever handle the stateid carries,
+     * rather than the object the compound named. */
+    status = nfs_state_check_write_for_fh(refs->dst_state, refs->dst_type,
+                                          req->fh, req->fhlen);
+    if (status != NFS4_OK) {
+        chimera_nfs4_copy_release_refs(req, refs);
+        res->cr_status = status;
+        chimera_nfs4_compound_complete(req, res->cr_status);
+        return;
+    }
+
     src_handle = chimera_nfs4_copy_state_handle(refs->src_state, refs->src_type);
     dst_handle = chimera_nfs4_copy_state_handle(refs->dst_state, refs->dst_type);
+
+    if (!src_handle || !dst_handle) {
+        chimera_nfs4_copy_release_refs(req, refs);
+        res->cr_status = NFS4ERR_BAD_STATEID;
+        chimera_nfs4_compound_complete(req, res->cr_status);
+        return;
+    }
 
     refs->req        = req;
     refs->src_offset = args->ca_src_offset;

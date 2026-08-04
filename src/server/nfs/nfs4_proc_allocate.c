@@ -87,18 +87,20 @@ chimera_nfs4_allocate(
     /* NFS4.1 current-stateid substitution (RFC 8881 §16.2.3.1.2). */
     chimera_nfs4_resolve_current_stateid(req, &args->aa_stateid);
 
+    /* Every path below acts on the current filehandle: the special-stateid
+     * path opens it directly, and the state-table path must name it. */
+    if (req->fhlen == 0) {
+        res->ar_status = NFS4ERR_NOFILEHANDLE;
+        chimera_nfs4_compound_complete(req, res->ar_status);
+        return;
+    }
+
     /*
      * RFC 8881 §8.2.3 requires ALLOCATE to honor the special stateids.  These
      * carry no state-table entry, so open the current FH on the fly instead of
      * consulting the state table.
      */
     if (nfs4_stateid_is_special(&args->aa_stateid)) {
-        if (req->fhlen == 0) {
-            res->ar_status = NFS4ERR_NOFILEHANDLE;
-            chimera_nfs4_compound_complete(req, res->ar_status);
-            return;
-        }
-
         chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
                             req->fh,
                             req->fhlen,
@@ -111,6 +113,16 @@ chimera_nfs4_allocate(
     status = nfs_state_table_acquire(table, &args->aa_stateid, 0,
                                      &state_void, &state_type);
     if (status != NFS4_OK) {
+        res->ar_status = status;
+        chimera_nfs4_compound_complete(req, res->ar_status);
+        return;
+    }
+
+    status = nfs_state_check_write_for_fh(state_void, state_type,
+                                          req->fh, req->fhlen);
+    if (status != NFS4_OK) {
+        nfs_state_table_release(table, state_void, state_type,
+                                thread->vfs_thread);
         res->ar_status = status;
         chimera_nfs4_compound_complete(req, res->ar_status);
         return;
