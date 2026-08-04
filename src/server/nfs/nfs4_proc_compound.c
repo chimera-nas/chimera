@@ -41,6 +41,45 @@ nfs4_release_write_args(
     }
 } /* nfs4_release_write_args */
 
+/*
+ * Prepare the result slot of an op that failed before any handler ran.
+ *
+ * The per-op result union is uninitialized dbuf memory (xdr_dbuf_alloc_space
+ * does not zero), and some result types marshal fields even on the error
+ * branch -- SETATTR4res carries num_attrsset and attrsset outside any union --
+ * so an un-zeroed slot encodes heap contents onto the wire or crashes the
+ * encoder.  Zero it and set the discriminant.
+ *
+ * A WRITE that never dispatches also still holds the +1 the XDR unmarshal
+ * cloned onto its data iovecs: chimera_nfs4_compound_complete sweeps only the
+ * WRITEs past the failed op, and the release that normally happens in the
+ * WRITE completion will never run.  Releasing here is idempotent with that
+ * sweep and with the replay path, both of which skip a niov already zeroed.
+ *
+ * WRITE is the only op needing the release: xdr_iovecr appears only on
+ * WRITE4args.data, while SETXATTR, SETATTR and CREATE payloads are xdr_opaque
+ * in dbuf memory freed with the encoding.
+ */
+static void
+nfs4_fail_undispatched_op(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_argop4                *argop,
+    struct nfs_resop4                *resop,
+    nfsstat4                          status)
+{
+    memset(resop, 0, sizeof(*resop));
+
+    /* An out-of-range argop is not a valid result discriminant. */
+    resop->resop = (status == NFS4ERR_OP_ILLEGAL) ? OP_ILLEGAL : argop->argop;
+
+    if (argop->argop == OP_WRITE && argop->opwrite.data.niov) {
+        evpl_iovecs_release(thread->evpl,
+                            argop->opwrite.data.iov,
+                            argop->opwrite.data.niov);
+        argop->opwrite.data.niov = 0;
+    }
+} /* nfs4_fail_undispatched_op */
+
 void
 chimera_nfs4_compound_process(
     struct nfs_request *req,
@@ -118,20 +157,22 @@ chimera_nfs4_compound_process(
 
     thread->active = 1;
 
-    /* If the response buffer is running low, fail early with RESOURCE
-     * rather than letting individual procs abort on allocation failure */
-    if (req->encoding->dbuf->size - req->encoding->dbuf->used < 8192) {
-        chimera_nfs4_compound_complete(req, NFS4ERR_RESOURCE);
-    } else {
-        nfsstat4 gate = nfs4_op_check_minor(argop->argop,
-                                            req->minorversion,
-                                            (uint32_t) req->index,
-                                            req->seen_sequence);
+    {
+        nfsstat4 gate;
+
+        /* If the response buffer is running low, fail early with RESOURCE
+         * rather than letting individual procs abort on allocation failure */
+        if (req->encoding->dbuf->size - req->encoding->dbuf->used < 8192) {
+            gate = NFS4ERR_RESOURCE;
+        } else {
+            gate = nfs4_op_check_minor(argop->argop,
+                                       req->minorversion,
+                                       (uint32_t) req->index,
+                                       req->seen_sequence);
+        }
 
         if (gate != NFS4_OK) {
-            if (gate == NFS4ERR_OP_ILLEGAL) {
-                resop->resop = OP_ILLEGAL;
-            }
+            nfs4_fail_undispatched_op(thread, argop, resop, gate);
             chimera_nfs4_compound_complete(req, gate);
         } else {
             /* NFS4.1 current-stateid lifecycle (RFC 8881 §16.2.3.1.2):
