@@ -629,6 +629,56 @@ nfs_open_state_check_principal(
 } /* nfs_open_state_check_principal */
 
 /*
+ * Validate a stateid that authorizes a mutation of the current filehandle.
+ *
+ * Returns NFS4ERR_BAD_STATEID unless `state` names an open (directly, or the
+ * open a lock state is anchored to) of the object that is the current
+ * filehandle -- required by RFC 7530 sec 9.1.4.3 / RFC 8881 sec 8.2.4 -- and
+ * NFS4ERR_OPENMODE if that open does not carry write access.
+ *
+ * The current-filehandle half matters beyond conformance: any access check the
+ * server makes against the current filehandle is only meaningful if the
+ * operation actually acts on that filehandle.  An op that instead mutated some
+ * other handle carried by its stateid would slip past such a check entirely.
+ *
+ * Delegation and layout stateids are rejected rather than misinterpreted:
+ * neither carries an open_state, and callers that support them (see WRITE)
+ * must handle them before calling this.
+ */
+static inline nfsstat4
+nfs_state_check_write_for_fh(
+    void          *state,
+    uint8_t        type,
+    const uint8_t *fh,
+    uint32_t       fh_len)
+{
+    const struct nfs_open_state *open_state;
+
+    switch (type) {
+        case NFS4_SLOT_TYPE_OPEN:
+            open_state = state;
+            break;
+        case NFS4_SLOT_TYPE_LOCK:
+            open_state = ((struct nfs_lock_state *) state)->open_state;
+            break;
+        default:
+            return NFS4ERR_BAD_STATEID;
+    } /* switch */
+
+    if (!open_state ||
+        open_state->fh_len != fh_len ||
+        memcmp(open_state->fh, fh, fh_len) != 0) {
+        return NFS4ERR_BAD_STATEID;
+    }
+
+    if ((open_state->share_access & OPEN4_SHARE_ACCESS_WRITE) == 0) {
+        return NFS4ERR_OPENMODE;
+    }
+
+    return NFS4_OK;
+} /* nfs_state_check_write_for_fh */
+
+/*
  * Public API.
  */
 
