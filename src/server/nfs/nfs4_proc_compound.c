@@ -12,6 +12,7 @@
 #include "nfs4_dump.h"
 #include "nfs4_trace.h"
 #include "nfs4_op_matrix.h"
+#include "nfs4_rofs.h"
 #include "nfs_drc_reply.h"
 
 static int
@@ -41,6 +42,51 @@ nfs4_release_write_args(
         }
     }
 } /* nfs4_release_write_args */
+
+/*
+ * Enforce per-export read-only policy at dispatch time.  Extracts the inputs
+ * nfs4_rofs_check needs from the request and the op's arguments; that header
+ * carries the policy itself and the reasoning behind each branch.
+ *
+ * This gate covers only mutations reached through the current filehandle.  Ops
+ * that mutate a handle carried by a stateid cannot use it to escape: ALLOCATE,
+ * DEALLOCATE, and COPY call nfs_state_check_write_for_fh, and SETATTR performs
+ * the same stateid-vs-current-filehandle check inline, so the stateid must
+ * name the gated filehandle.  WRITE instead relies on its NFS4ERR_OPENMODE
+ * check: a write-mode open can only have been granted through a writable
+ * export.  (After a runtime flip to read-only, existing write-mode opens keep
+ * writing -- the same window the COMMIT rationale in nfs4_rofs.h accepts.)
+ *
+ * Only call this after nfs4_op_check_minor has accepted the op (argop is then a
+ * valid matrix index).
+ */
+static nfsstat4
+nfs4_rofs_gate(
+    struct nfs_request      *req,
+    const struct nfs_argop4 *argop)
+{
+    struct chimera_server_nfs_shared *shared = req->thread->shared;
+    struct nfs4_rofs_input            in     = {
+        .op            = argop->argop,
+        .export_ro     = chimera_nfs_export_id_is_ro(shared, req->export_id),
+        .have_saved_fh = req->saved_fhlen != 0,
+    };
+
+    if (in.have_saved_fh) {
+        in.saved_export_ro = chimera_nfs_export_id_is_ro(shared,
+                                                         req->saved_export_id);
+    }
+
+    if (argop->argop == OP_OPEN) {
+        in.open_writes =
+            (argop->opopen.share_access & OPEN4_SHARE_ACCESS_WRITE) != 0 ||
+            argop->opopen.openhow.opentype == OPEN4_CREATE;
+    } else if (argop->argop == OP_OPENATTR) {
+        in.openattr_creates = argop->opopenattr.createdir != 0;
+    }
+
+    return nfs4_rofs_check(&in);
+} /* nfs4_rofs_gate */
 
 /*
  * Prepare the result slot of an op that failed before any handler ran.
@@ -181,6 +227,10 @@ chimera_nfs4_compound_process(
                                        req->minorversion,
                                        (uint32_t) req->index,
                                        req->seen_sequence);
+
+            if (gate == NFS4_OK) {
+                gate = nfs4_rofs_gate(req, argop);
+            }
         }
 
         if (gate != NFS4_OK) {
@@ -496,9 +546,13 @@ chimera_nfs4_compound(
     /* RFC 7530 §16.2.4: the server MUST echo the request tag back to the
      * client unchanged. xdr_opaque .data is owned by the request msg buffer
      * which lives until the response is sent. */
-    req->res_compound.tag            = args->tag;
-    req->fhlen                       = 0;
-    req->saved_fhlen                 = 0;
+    req->res_compound.tag = args->tag;
+    req->fhlen            = 0;
+    req->saved_fhlen      = 0;
+    /* Requests are recycled from a per-thread free list without being zeroed,
+     * and only SAVEFH ever writes saved_export_id -- reset it so a policy
+     * check on the saved side cannot read a previous compound's export. */
+    req->saved_export_id             = 0;
     req->minorversion                = (uint8_t) args->minorversion;
     req->seen_sequence               = false;
     req->current_stateid_valid       = false;

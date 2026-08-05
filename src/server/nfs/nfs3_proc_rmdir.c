@@ -157,6 +157,9 @@ chimera_nfs3_rmdir(
     req->args_rmdir = args;
 
     res.status = chimera_nfs3_decode_fh(req, args->object.dir.data.data, args->object.dir.data.len);
+    if (res.status == NFS3_OK) {
+        res.status = chimera_nfs3_check_rofs(req, req->export_id);
+    }
     if (res.status != NFS3_OK) {
         nfsstat3 fh_status = res.status;
         memset(&res, 0, sizeof(res));

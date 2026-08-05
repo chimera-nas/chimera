@@ -138,6 +138,9 @@ chimera_nfs3_write(
     evpl_rpc2_encoding_take_read_chunk(req->encoding, NULL, NULL);
 
     res.status = chimera_nfs3_decode_fh(req, args->file.data.data, args->file.data.len);
+    if (res.status == NFS3_OK) {
+        res.status = chimera_nfs3_check_rofs(req, req->export_id);
+    }
     if (res.status != NFS3_OK) {
         nfsstat3 fh_status = res.status;
         memset(&res, 0, sizeof(res));

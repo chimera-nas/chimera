@@ -302,6 +302,38 @@ add_posix_erofs_test(nfs3 memfs)
 add_posix_erofs_test(nfs4 memfs)
 
 # ============================================================================
+# NFS export-level read-only ("access": "ro") test
+# Exposes the SAME writable VFS mount through a rw and an access-ro export and
+# asserts that mutations through the ro export fail with EROFS while the rw
+# export stays writable.  Unlike the EROFS test above (which read-only-flags a
+# separate VFS mount), the backing mount here is read-write, so this exercises
+# the NFS server's per-export access enforcement in isolation.  Registered
+# explicitly because it requires the extra export the standard harness does
+# not create, and is only meaningful over an NFS backend.  Any backend works
+# (the gate keys on the export id in the wire file handle, not the mount);
+# registered for linux and memfs over both NFS3 and NFS4.
+# ============================================================================
+add_posix_testprog(test_export_ro)
+
+macro(add_posix_export_ro_test nfs_prefix nfs_backend)
+    if(CHIMERA_NETNS_TESTING)
+        add_test(NAME chimera/posix/export_ro_${nfs_prefix}_${nfs_backend}
+            COMMAND ${NETNS_WRAPPER} ${CMAKE_CURRENT_BINARY_DIR}/posix_test_export_ro -b ${nfs_prefix}_${nfs_backend}
+        )
+        get_target_property(test_file posix_test_export_ro TEST_FILE)
+        set_tests_properties(chimera/posix/export_ro_${nfs_prefix}_${nfs_backend} PROPERTIES
+            ENVIRONMENT "TEST_FILE=${test_file}"
+            TIMEOUT 60
+        )
+    endif()
+endmacro()
+
+add_posix_export_ro_test(nfs3 linux)
+add_posix_export_ro_test(nfs4 linux)
+add_posix_export_ro_test(nfs3 memfs)
+add_posix_export_ro_test(nfs4 memfs)
+
+# ============================================================================
 # NFSv4 pseudo-fs root mount test
 # Mounts the bare pseudo-fs root ("server:/") instead of an export and lists
 # it, exercising nfs4_root_readdir's asynchronous per-export lookup walk (a

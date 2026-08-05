@@ -302,6 +302,15 @@ static int         posix_test_diskfs_reuse_devices __attribute__ ((unused)) = 0;
  * read-only gate keys on. */
 static int posix_test_ro_export __attribute__ ((unused)) = 0;
 
+/* When non-zero (set before posix_test_init), posix_test_start_nfs_server also
+ * creates a SECOND export "/roaccess" of the SAME writable "/share" mount,
+ * configured with the export-level access "ro" option.  Unlike
+ * posix_test_ro_export above (which read-only-flags a separate VFS mount), the
+ * backing mount here stays read-write, so a test using this flag isolates the
+ * NFS per-export access enforcement from the VFS-mount read-only gate: any
+ * EROFS seen through "/roaccess" can only come from the export policy. */
+static int posix_test_ro_access_export __attribute__ ((unused)) = 0;
+
 /* Name of the subdirectory (relative to the backend root) that the read-only
  * export is mounted at; the read-write export sees it as "/share/ro". */
 #define POSIX_TEST_RO_SUBDIR             "ro"
@@ -559,6 +568,24 @@ posix_test_start_nfs_server(struct posix_test_env *env)
                                      POSIX_TEST_EXPORT_ID, NULL) != 0) {
         fprintf(stderr, "Failed to create /share export\n");
         exit(EXIT_FAILURE);
+    }
+
+    if (posix_test_ro_access_export) {
+        /* Second export of the SAME writable "/share" mount, differing only in
+         * the export-level access option (this creates no new mount).  The
+         * export name must not be a string prefix of "share" nor have "share"
+         * as its prefix (see the "roshare" note below). */
+        struct chimera_nfs_export_opts ro_opts = {
+            .has_access = 1,
+            .access     = CHIMERA_NFS_EXPORT_ACCESS_RO,
+        };
+
+        if (chimera_server_create_export(env->server, "/roaccess", "/share",
+                                         POSIX_TEST_EXPORT_ID + 2,
+                                         &ro_opts) != 0) {
+            fprintf(stderr, "Failed to create /roaccess export\n");
+            exit(EXIT_FAILURE);
+        }
     }
 
     if (posix_test_ro_export) {

@@ -86,6 +86,12 @@ chimera_nfs3_access_complete(
         if ((args->access & ACCESS3_EXECUTE) && (granted & CHIMERA_ACE_EXECUTE)) {
             res.resok.access |= ACCESS3_EXECUTE;
         }
+
+        /* A read-only export never grants write-class access, regardless of
+         * what the ACL/mode would allow. */
+        if (chimera_nfs_export_id_is_ro(shared, req->export_id)) {
+            res.resok.access &= ~(ACCESS3_MODIFY | ACCESS3_EXTEND | ACCESS3_DELETE);
+        }
     } else {
         chimera_nfs3_set_post_op_attr(&res.resfail.obj_attributes, attr);
     }
