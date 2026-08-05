@@ -98,6 +98,8 @@ struct chimera_server_config {
     int                                   smb_notify_disabled;
     int                                   smb_acl_inherited_canonicalize;
     int                                   smb2_max_async_credits;
+    uint32_t                              smb_fs_physical_bytes_per_sector;
+    uint32_t                              smb_fs_sector_size_flags;
     int                                   smb_num_nic_info;
     uint32_t                              anonuid;
     uint32_t                              anongid;
@@ -232,6 +234,11 @@ chimera_server_config_init(void)
     /* Per-connection ceiling on outstanding async (STATUS_PENDING) operations.
      * 512 matches the value smb2.credits.*_ipc_max_async_credits asserts. */
     config->smb2_max_async_credits = 512;
+
+    /* FileFsSectorSizeInformation defaults: report 4KiB physical sectors and
+     * aligned + partition-aligned flags for modern storage. */
+    config->smb_fs_physical_bytes_per_sector = 4096;
+    config->smb_fs_sector_size_flags         = 0x300;
 
     // SMB auth config defaults - local NTLM only
     config->smb_auth.winbind_enabled    = 0;
@@ -566,6 +573,34 @@ chimera_server_config_get_smb2_max_async_credits(const struct chimera_server_con
 {
     return config->smb2_max_async_credits;
 } /* chimera_server_config_get_smb2_max_async_credits */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_smb_fs_physical_bytes_per_sector(
+    struct chimera_server_config *config,
+    uint32_t                      value)
+{
+    config->smb_fs_physical_bytes_per_sector = value;
+} /* chimera_server_config_set_smb_fs_physical_bytes_per_sector */
+
+SYMBOL_EXPORT uint32_t
+chimera_server_config_get_smb_fs_physical_bytes_per_sector(const struct chimera_server_config *config)
+{
+    return config->smb_fs_physical_bytes_per_sector;
+} /* chimera_server_config_get_smb_fs_physical_bytes_per_sector */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_smb_fs_sector_size_flags(
+    struct chimera_server_config *config,
+    uint32_t                      value)
+{
+    config->smb_fs_sector_size_flags = value;
+} /* chimera_server_config_set_smb_fs_sector_size_flags */
+
+SYMBOL_EXPORT uint32_t
+chimera_server_config_get_smb_fs_sector_size_flags(const struct chimera_server_config *config)
+{
+    return config->smb_fs_sector_size_flags;
+} /* chimera_server_config_get_smb_fs_sector_size_flags */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_max_open_files(

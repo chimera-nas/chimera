@@ -244,6 +244,9 @@ struct chimera_smb_config {
      * beyond that it is rejected with STATUS_INSUFFICIENT_RESOURCES (the contract
      * smb2.credits.*_ipc_max_async_credits asserts).  Default 512. */
     int                            smb2_max_async_credits;
+    /* FileFsSectorSizeInformation values returned from SMB_QUERY_INFO. */
+    uint32_t                       fs_physical_bytes_per_sector;
+    uint32_t                       fs_sector_size_flags;
     uint32_t                       capabilities;
     uint32_t                       dialects[16];
     struct chimera_smb_nic_info    nic_info[16];

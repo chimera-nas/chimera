@@ -727,6 +727,7 @@ chimera_smb_query_info_reply(
     struct evpl_iovec_cursor   *reply_cursor,
     struct chimera_smb_request *request)
 {
+    struct chimera_server_smb_thread *thread = request->compound->thread;
     uint16_t namebuf[8];
 
     if (request->query_info.info_type == SMB2_INFO_SECURITY) {
@@ -919,10 +920,10 @@ chimera_smb_query_info_reply(
                 case SMB2_FILE_FS_SECTOR_SIZE_INFO:
                     /* MS-FSCC 2.5.7 FileFsSectorSizeInformation. */
                     evpl_iovec_cursor_append_uint32(reply_cursor, 512); /* LogicalBytesPerSector */
-                    evpl_iovec_cursor_append_uint32(reply_cursor, 512); /* PhysicalBytesPerSectorForAtomicity */
-                    evpl_iovec_cursor_append_uint32(reply_cursor, 512); /* PhysicalBytesPerSectorForPerformance */
-                    evpl_iovec_cursor_append_uint32(reply_cursor, 512); /* FSEffPhysicalBytesPerSectorForAtomicity */
-                    evpl_iovec_cursor_append_uint32(reply_cursor, 0); /* Flags */
+                    evpl_iovec_cursor_append_uint32(reply_cursor, thread->shared->config.fs_physical_bytes_per_sector); /* PhysicalBytesPerSectorForAtomicity */
+                    evpl_iovec_cursor_append_uint32(reply_cursor, thread->shared->config.fs_physical_bytes_per_sector); /* PhysicalBytesPerSectorForPerformance */
+                    evpl_iovec_cursor_append_uint32(reply_cursor, thread->shared->config.fs_physical_bytes_per_sector); /* FSEffPhysicalBytesPerSectorForAtomicity */
+                    evpl_iovec_cursor_append_uint32(reply_cursor, thread->shared->config.fs_sector_size_flags); /* Flags: aligned + partition aligned */
                     evpl_iovec_cursor_append_uint32(reply_cursor, 0); /* ByteOffsetForSectorAlignment */
                     evpl_iovec_cursor_append_uint32(reply_cursor, 0); /* ByteOffsetForPartitionAlignment */
                     break;

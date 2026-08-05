@@ -568,6 +568,16 @@ main(
         chimera_server_config_set_smb2_max_async_credits(server_config, json_integer_value(json_value));
     }
 
+    json_value = json_object_get(server_params, "smb_fs_physical_bytes_per_sector");
+    if (json_is_integer(json_value)) {
+        chimera_server_config_set_smb_fs_physical_bytes_per_sector(server_config, (uint32_t) json_integer_value(json_value));
+    }
+
+    json_value = json_object_get(server_params, "smb_fs_sector_size_flags");
+    if (json_is_integer(json_value)) {
+        chimera_server_config_set_smb_fs_sector_size_flags(server_config, (uint32_t) json_integer_value(json_value));
+    }
+
     json_value = json_object_get(server_params, "nfs4_session_slots");
     if (json_is_integer(json_value)) {
         int_value = json_integer_value(json_value);
