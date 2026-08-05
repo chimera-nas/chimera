@@ -20,6 +20,11 @@
 /* Behavioral flags applied during dispatch. */
 #define NFS4_OP_FLAG_MUST_BE_FIRST  0x01 /* SEQUENCE in 4.1+: must be at op_index 0 */
 #define NFS4_OP_FLAG_NO_REQ_SESSION 0x02 /* allowed in 4.1+ even without a preceding SEQUENCE */
+/* Always mutates, so it unconditionally fails NFS4ERR_ROFS on a read-only
+ * export.  Ops that mutate only for certain arguments (OPEN, OPENATTR) or that
+ * need a different error (LAYOUTGET) are gated explicitly in nfs4_rofs_gate
+ * instead -- do not flag those here. */
+#define NFS4_OP_FLAG_MUTATES        0x04
 
 struct nfs4_op_info {
     uint8_t minors;
@@ -34,7 +39,7 @@ static const struct nfs4_op_info nfs4_op_support[NFS4_OP_MAX + 1] = {
     },
     [OP_COMMIT] =               { NFS4_OP_V40 | NFS4_OP_V41 | NFS4_OP_V42, 0
     },
-    [OP_CREATE] =               { NFS4_OP_V40 | NFS4_OP_V41 | NFS4_OP_V42, 0
+    [OP_CREATE] =               { NFS4_OP_V40 | NFS4_OP_V41 | NFS4_OP_V42, NFS4_OP_FLAG_MUTATES
     },
     [OP_DELEGPURGE] =           { NFS4_OP_V40 | NFS4_OP_V41 | NFS4_OP_V42, 0
     },
@@ -44,7 +49,7 @@ static const struct nfs4_op_info nfs4_op_support[NFS4_OP_MAX + 1] = {
     },
     [OP_GETFH] =                { NFS4_OP_V40 | NFS4_OP_V41 | NFS4_OP_V42, 0
     },
-    [OP_LINK] =                 { NFS4_OP_V40 | NFS4_OP_V41 | NFS4_OP_V42, 0
+    [OP_LINK] =                 { NFS4_OP_V40 | NFS4_OP_V41 | NFS4_OP_V42, NFS4_OP_FLAG_MUTATES
     },
     [OP_LOCK] =                 { NFS4_OP_V40 | NFS4_OP_V41 | NFS4_OP_V42, 0
     },
@@ -60,6 +65,7 @@ static const struct nfs4_op_info nfs4_op_support[NFS4_OP_MAX + 1] = {
     },
     [OP_OPEN] =                 { NFS4_OP_V40 | NFS4_OP_V41 | NFS4_OP_V42, 0
     },
+    /* OPENATTR mutates only when createdir is set; gated conditionally. */
     [OP_OPENATTR] =             { NFS4_OP_V40 | NFS4_OP_V41 | NFS4_OP_V42, 0
     },
     [OP_OPEN_DOWNGRADE] =       { NFS4_OP_V40 | NFS4_OP_V41 | NFS4_OP_V42, 0
@@ -76,9 +82,9 @@ static const struct nfs4_op_info nfs4_op_support[NFS4_OP_MAX + 1] = {
     },
     [OP_READLINK] =             { NFS4_OP_V40 | NFS4_OP_V41 | NFS4_OP_V42, 0
     },
-    [OP_REMOVE] =               { NFS4_OP_V40 | NFS4_OP_V41 | NFS4_OP_V42, 0
+    [OP_REMOVE] =               { NFS4_OP_V40 | NFS4_OP_V41 | NFS4_OP_V42, NFS4_OP_FLAG_MUTATES
     },
-    [OP_RENAME] =               { NFS4_OP_V40 | NFS4_OP_V41 | NFS4_OP_V42, 0
+    [OP_RENAME] =               { NFS4_OP_V40 | NFS4_OP_V41 | NFS4_OP_V42, NFS4_OP_FLAG_MUTATES
     },
     [OP_RESTOREFH] =            { NFS4_OP_V40 | NFS4_OP_V41 | NFS4_OP_V42, 0
     },
@@ -86,11 +92,11 @@ static const struct nfs4_op_info nfs4_op_support[NFS4_OP_MAX + 1] = {
     },
     [OP_SECINFO] =              { NFS4_OP_V40 | NFS4_OP_V41 | NFS4_OP_V42, 0
     },
-    [OP_SETATTR] =              { NFS4_OP_V40 | NFS4_OP_V41 | NFS4_OP_V42, 0
+    [OP_SETATTR] =              { NFS4_OP_V40 | NFS4_OP_V41 | NFS4_OP_V42, NFS4_OP_FLAG_MUTATES
     },
     [OP_VERIFY] =               { NFS4_OP_V40 | NFS4_OP_V41 | NFS4_OP_V42, 0
     },
-    [OP_WRITE] =                { NFS4_OP_V40 | NFS4_OP_V41 | NFS4_OP_V42, 0
+    [OP_WRITE] =                { NFS4_OP_V40 | NFS4_OP_V41 | NFS4_OP_V42, NFS4_OP_FLAG_MUTATES
     },
 
     /* 4.0-only ops (RFC 7530); MNI in 4.1+ per RFC 5661 / 8881. */
@@ -125,7 +131,7 @@ static const struct nfs4_op_info nfs4_op_support[NFS4_OP_MAX + 1] = {
     },
     [OP_GETDEVICELIST] =        { NFS4_OP_V41 | NFS4_OP_V42,               0
     },
-    [OP_LAYOUTCOMMIT] =         { NFS4_OP_V41 | NFS4_OP_V42,               0
+    [OP_LAYOUTCOMMIT] =         { NFS4_OP_V41 | NFS4_OP_V42,               NFS4_OP_FLAG_MUTATES
     },
     [OP_LAYOUTGET] =            { NFS4_OP_V41 | NFS4_OP_V42,               0
     },
@@ -151,13 +157,13 @@ static const struct nfs4_op_info nfs4_op_support[NFS4_OP_MAX + 1] = {
     },
 
     /* 4.2-only ops. */
-    [OP_ALLOCATE] =             { NFS4_OP_V42,                             0
+    [OP_ALLOCATE] =             { NFS4_OP_V42,                             NFS4_OP_FLAG_MUTATES
     },
-    [OP_COPY] =                 { NFS4_OP_V42,                             0
+    [OP_COPY] =                 { NFS4_OP_V42,                             NFS4_OP_FLAG_MUTATES
     },
     [OP_COPY_NOTIFY] =          { NFS4_OP_V42,                             0
     },
-    [OP_DEALLOCATE] =           { NFS4_OP_V42,                             0
+    [OP_DEALLOCATE] =           { NFS4_OP_V42,                             NFS4_OP_FLAG_MUTATES
     },
     [OP_IO_ADVISE] =            { NFS4_OP_V42,                             0
     },
@@ -171,19 +177,19 @@ static const struct nfs4_op_info nfs4_op_support[NFS4_OP_MAX + 1] = {
     },
     [OP_SEEK] =                 { NFS4_OP_V42,                             0
     },
-    [OP_WRITE_SAME] =           { NFS4_OP_V42,                             0
+    [OP_WRITE_SAME] =           { NFS4_OP_V42,                             NFS4_OP_FLAG_MUTATES
     },
-    [OP_CLONE] =                { NFS4_OP_V42,                             0
+    [OP_CLONE] =                { NFS4_OP_V42,                             NFS4_OP_FLAG_MUTATES
     },
 
     /* RFC 8276 extended attribute ops (NFSv4.2 only) */
     [OP_GETXATTR] =             { NFS4_OP_V42,                             0
     },
-    [OP_SETXATTR] =             { NFS4_OP_V42,                             0
+    [OP_SETXATTR] =             { NFS4_OP_V42,                             NFS4_OP_FLAG_MUTATES
     },
     [OP_LISTXATTRS] =           { NFS4_OP_V42,                             0
     },
-    [OP_REMOVEXATTR] =          { NFS4_OP_V42,                             0
+    [OP_REMOVEXATTR] =          { NFS4_OP_V42,                             NFS4_OP_FLAG_MUTATES
     },
 };
 

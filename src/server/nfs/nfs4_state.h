@@ -640,6 +640,8 @@ nfs_open_state_check_principal(
  * server makes against the current filehandle is only meaningful if the
  * operation actually acts on that filehandle.  An op that instead mutated some
  * other handle carried by its stateid would slip past such a check entirely.
+ * The per-export read-only gate (nfs4_rofs_gate) is exactly such a check, and
+ * relies on this one to stay a dispatch-time decision.
  *
  * Delegation and layout stateids are rejected rather than misinterpreted:
  * neither carries an open_state, and callers that support them (see WRITE)

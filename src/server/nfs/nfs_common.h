@@ -547,6 +547,34 @@ chimera_nfs_export_sec_ok(
 } /* chimera_nfs_export_sec_ok */
 
 /*
+ * True iff export_id names a live export configured read-only.
+ *
+ * Export id 0 (pseudo-root / no export) returns false; the pseudo-root's own
+ * immutability is enforced elsewhere.  An unknown id also returns false, which
+ * is fail-open for this gate: the handle either fails at the VFS layer because
+ * its mount is gone, or -- if the mount survives because another export still
+ * references it -- is treated as unrestricted.  Removing an export unlinks only
+ * the export record (chimera_nfs_remove_export) and unmounts nothing, so a
+ * client holding handles minted under a deleted read-only export keeps them
+ * usable.  The same fail-open applies to the squash and sec policies; closing
+ * it means rejecting well-formed handles that name an unknown export at decode
+ * time, not patching each policy check.
+ */
+static inline int
+chimera_nfs_export_id_is_ro(
+    struct chimera_server_nfs_shared *shared,
+    uint16_t                          export_id)
+{
+    const struct chimera_nfs_export *export =
+        chimera_nfs_get_export_by_id(shared, export_id);
+
+    /* access is a CHIMERA_NFS_EXPORT_ACCESS_* bitmask (see nfs.h); test the RO
+     * bit rather than comparing the whole mask so an over-set value such as
+     * RO|RW fails closed instead of silently granting write access. */
+    return export && (export->access & CHIMERA_NFS_EXPORT_ACCESS_RO) != 0;
+} /* chimera_nfs_export_id_is_ro */
+
+/*
  * Map the RPC credential into a request and snapshot it as the pre-squash
  * original.  Use this from every proc/compound entry instead of calling
  * chimera_nfs_map_cred directly so that file-handle decoding can recompute the

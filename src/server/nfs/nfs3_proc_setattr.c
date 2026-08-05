@@ -161,6 +161,9 @@ chimera_nfs3_setattr(
     req->args_setattr = args;
 
     res.status = chimera_nfs3_decode_fh(req, args->object.data.data, args->object.data.len);
+    if (res.status == NFS3_OK) {
+        res.status = chimera_nfs3_check_rofs(req, req->export_id);
+    }
     if (res.status != NFS3_OK) {
         nfsstat3 fh_status = res.status;
         memset(&res, 0, sizeof(res));

@@ -127,7 +127,7 @@ chimera_nfs3_rename(
     struct chimera_server_nfs_shared *shared = thread->shared;
     struct nfs_request               *req;
     struct RENAME3res                 res;
-    uint16_t                          todir_export_id;
+    uint16_t                          todir_export_id = 0;
     int                               rc;
 
     req = nfs_request_alloc(thread, conn, encoding);
@@ -140,11 +140,18 @@ chimera_nfs3_rename(
      * squash); the destination is authenticated into req->saved_fh.  Both must
      * outlive this (async) call, so they go in the request, not on the stack. */
     res.status = chimera_nfs3_decode_fh(req, args->from.dir.data.data, args->from.dir.data.len);
-    if (res.status != NFS3_OK ||
+    if (res.status == NFS3_OK &&
         chimera_nfs_fh_unwrap(args->to.dir.data.data, args->to.dir.data.len,
                               &todir_export_id, req->saved_fh, &req->saved_fhlen,
                               shared->fh_key, shared->fh_sign) != CHIMERA_NFS_FH_OK) {
-        nfsstat3 fh_status = res.status != NFS3_OK ? res.status : NFS3ERR_BADHANDLE;
+        res.status = NFS3ERR_BADHANDLE;
+    }
+    /* Both directories are mutated, so both exports must be writable. */
+    if (res.status == NFS3_OK) {
+        res.status = chimera_nfs3_check_rofs2(req, todir_export_id);
+    }
+    if (res.status != NFS3_OK) {
+        nfsstat3 fh_status = res.status;
         memset(&res, 0, sizeof(res));
         res.status = fh_status;
         rc         = shared->nfs_v3.send_reply_NFSPROC3_RENAME(evpl, NULL, &res, req->encoding);

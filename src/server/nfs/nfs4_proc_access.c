@@ -53,6 +53,14 @@ chimera_nfs4_access_complete(
     res->resok4.supported = requested;
     res->resok4.access    = chimera_nfs4_access_from_granted(requested, granted);
 
+    /* A read-only export never grants write-class access, regardless of what
+     * the ACL/mode would allow.  `supported` stays unmasked: the bits were
+     * evaluated, just not granted (RFC 7530 sec 16.1). */
+    if (chimera_nfs_export_id_is_ro(req->thread->shared, req->export_id)) {
+        res->resok4.access &= ~(ACCESS4_MODIFY | ACCESS4_EXTEND |
+                                ACCESS4_DELETE | ACCESS4_XAWRITE);
+    }
+
     chimera_nfs4_compound_complete(req, NFS4_OK);
 } /* chimera_nfs4_access_complete */
 
@@ -96,13 +104,14 @@ chimera_nfs4_access(
 
     if (fh_is_nfs4_root(req->fh, req->fhlen)) {
         /* The pseudo-root is a directory with no backing store (no xattrs):
-         * report only the directory-meaningful bits the client asked for, and
-         * grant them all. */
+         * report only the directory-meaningful bits the client asked for.
+         * It is immutable, so the write-class bits are never granted. */
         uint32_t meaningful = chimera_nfs4_access_meaningful(1, 0);
 
         res->status           = NFS4_OK;
         res->resok4.supported = args->access & meaningful;
-        res->resok4.access    = args->access & meaningful;
+        res->resok4.access    = args->access & meaningful &
+            ~(ACCESS4_MODIFY | ACCESS4_EXTEND | ACCESS4_DELETE);
         chimera_nfs4_compound_complete(req, NFS4_OK);
         return;
     }

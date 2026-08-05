@@ -82,6 +82,32 @@ target_link_libraries(test_protocol_advertise chimera_vfs chimera_common evpl ev
 add_dependencies(test_protocol_advertise chimera_nfs_common)
 add_test(NAME chimera/server/nfs/protocol_advertise COMMAND test_protocol_advertise)
 
+# Unit test for the per-export read-only gate decision logic (nfs4_rofs.h) and
+# the NFS4_OP_FLAG_MUTATES set it keys on.  Header logic only, but nfs4_rofs.h
+# pulls in the generated nfs4_xdr.h, hence the chimera_nfs_common dependency.
+add_executable(test_rofs_gate test_rofs_gate.c)
+target_include_directories(test_rofs_gate PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    ${CMAKE_SOURCE_DIR}/src
+    ${NFS_COMMON_INCLUDE_DIR})
+target_link_libraries(test_rofs_gate chimera_vfs chimera_common evpl evpl_rpc2 pthread uuid urcu-qsbr urcu-common)
+add_dependencies(test_rofs_gate chimera_nfs_common)
+add_test(NAME chimera/server/nfs/rofs_gate COMMAND test_rofs_gate)
+
+# Unit test for the NFSv3 per-export read-only gate (nfs3_procs.h): the single-
+# and two-handle (RENAME/LINK) checks against a fixture export table, including
+# the cross-export directions a POSIX client cannot reach (cross-mount
+# RENAME/LINK fails client-side with EXDEV).  Links chimera_nfs for the export
+# id lookup (chimera_nfs_get_export_by_id).
+add_executable(test_nfs3_rofs test_nfs3_rofs.c)
+target_link_libraries(test_nfs3_rofs chimera_nfs chimera_server chimera_vfs chimera_nfs_common chimera_common evpl evpl_rpc2 pthread uuid urcu-qsbr urcu-common)
+target_include_directories(test_nfs3_rofs PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/server/nfs
+    ${NFS_COMMON_INCLUDE_DIR})
+add_test(NAME chimera/server/nfs/nfs3_rofs
+    COMMAND ${CMAKE_CURRENT_BINARY_DIR}/test_nfs3_rofs)
+
 # Unit test for the shared xattr name translation helpers (vfs/vfs_xattr_name.h).
 add_executable(test_xattr_name test_xattr_name.c)
 target_include_directories(test_xattr_name PRIVATE

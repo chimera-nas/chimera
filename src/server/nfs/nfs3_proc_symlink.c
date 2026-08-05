@@ -127,6 +127,9 @@ chimera_nfs3_symlink(
     req->args_symlink = args;
 
     res.status = chimera_nfs3_decode_fh(req, args->where.dir.data.data, args->where.dir.data.len);
+    if (res.status == NFS3_OK) {
+        res.status = chimera_nfs3_check_rofs(req, req->export_id);
+    }
     if (res.status != NFS3_OK) {
         nfsstat3 fh_status = res.status;
         memset(&res, 0, sizeof(res));
