@@ -29,8 +29,15 @@
  *
  * and so must the two mount paths that open-code the same fragment build
  * (vfs/nfs/nfs3_mount.c, vfs/nfs/nfs4_mount.c).  The three above are covered by
- * vfs/nfs/tests/nfs_fh_bounds_test.c; the mount paths need a live upstream, so
- * they are covered by the pynfs and kvm proxy suites instead.
+ * vfs/nfs/tests/nfs_fh_bounds_test.c.  The mount paths are not, in either
+ * direction.  Every nfs-module mount in the tree is vers=4
+ * (kvm/kvm_pnfs_proxy_test_wrapper.sh, kvm/kvm_pnfs_test_wrapper.sh,
+ * scripts/pynfs_pnfs_test_wrapper.sh), so chimera_mount_mountd_mnt_callback is
+ * reached by no suite at all; and the v4 upstreams those suites do run are
+ * chimera-on-memfs, whose root handles sit well inside the ceiling, so the
+ * reject branch is never taken there either.  Both hold by inspection only.
+ * Pinning them from the bounds test would mean extracting the predicate the
+ * five sites currently open-code.
  *
  * NFSv3 permits 64-byte handles and NFSv4 permits 128, both above this ceiling,
  * so a general upstream can legitimately hand us a handle we cannot represent.

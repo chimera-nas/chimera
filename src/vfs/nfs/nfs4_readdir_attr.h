@@ -109,8 +109,16 @@ chimera_nfs4_readdir_parse_attrs(
          * caller prepends a mount_id and a server index, and the result has to
          * fit CHIMERA_VFS_FH_SIZE.  Leaving *fh_len at 0 omits this entry's
          * handle while keeping the rest of its attributes, which is what the v3
-         * readdir does with the same case (nfs3_readdir.c) -- readdir handles
-         * are an optimization, so the client just looks the entry up instead.
+         * readdir does with the same case (nfs3_readdir.c).
+         *
+         * That is degradation, not recovery.  A readdir handle is normally an
+         * optimization a client can do without by issuing a LOOKUP -- but that
+         * LOOKUP is proxied upstream, comes back with the same oversized handle,
+         * and fails EOVERFLOW in chimera_nfs4_unmarshall_fh.  So the entry lists
+         * with its attributes and every access to it fails.  Skipping is still
+         * the right branch: stopping the parse here would cost the entry every
+         * attribute after the handle as well, and there is no usable handle to
+         * return either way.  Neither the skip nor the failing LOOKUP is logged.
          *
          * This ceiling is 47, below the 128 NFS4_FHSIZE permits, so it subsumes
          * the protocol bound rather than needing a separate test for it: a
