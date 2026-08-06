@@ -21,6 +21,7 @@
 #include "uthash.h"
 #include "common/misc.h"
 #include "vfs/vfs_fh.h"
+#include "nfs_common/nfs_fh_limits.h"
 #include "evpl/evpl_rpc2.h"
 #include "nlm4_xdr.h"
 
@@ -615,8 +616,36 @@ chimera_nfs4_status_to_errno(nfsstat4 status)
 /*
  * Unmarshall a file handle from NFS4 GETFH response
  * Builds local FH: [parent_mount_id][server_index][remote_fh]
+ *
+ * fh->len is chosen by the upstream server and is not bounded by the generated
+ * XDR decoder, which ignores the `<NFS4_FHSIZE>` bound nfs4.x declares.  What an
+ * unchecked length does splits into two bands, and neither is local to this
+ * function in the way it looks:
+ *
+ *   fh->len 48..63   Nothing here overflows.  The fragment takes 1 + len, so 63
+ *                    fills it exactly; encode_fh_parent then writes
+ *                    16 + 1 + len into attr->va_fh, and 80 fills that exactly
+ *                    because va_fh carries 16 bytes of XXH3 SIMD padding past
+ *                    CHIMERA_VFS_FH_SIZE.  So the padding swallows it silently
+ *                    and the damage is exported: va_fh_len is now 65..80, and
+ *                    the callers that copy that many bytes into a bare
+ *                    uint8_t[CHIMERA_VFS_FH_SIZE] (vfs_proc_lookup.c,
+ *                    vfs_proc_rename.c, vfs_proc_mkdir.c, vfs_proc_mknod.c,
+ *                    vfs_proc_link.c) overrun.  This is the band the check
+ *                    below exists for, and the band a bounds check written
+ *                    against the fragment buffer alone would let through.
+ *
+ *   fh->len >= 64    The memcpy into fragment[] overflows this function's own
+ *                    stack frame.  Both destinations cross at the same length
+ *                    -- 1 + len past 64 and 17 + len past 80 are both len >= 64
+ *                    -- and the fragment write happens first, so this is where
+ *                    it stops; a va_fh overrun is not separately reachable.
+ *
+ * Returns 0 on success (ATTR_FH set), -1 if the handle is too large to embed
+ * (ATTR_FH left unset; the caller fails the operation with EOVERFLOW).  This
+ * mirrors chimera_nfs3_unmarshall_fh in nfs_common/nfs3_attr.h.
  */
-static inline void
+static inline int
 chimera_nfs4_unmarshall_fh(
     const xdr_opaque         *fh,
     int                       server_index,
@@ -626,6 +655,12 @@ chimera_nfs4_unmarshall_fh(
     uint8_t fragment[CHIMERA_VFS_FH_SIZE];
     int     fragment_len;
 
+    /* The encoded handle is mount_id + server_index + data and must fit
+     * CHIMERA_VFS_FH_SIZE, not merely fit the fragment buffer. */
+    if (fh->len > CHIMERA_NFS_PROXY_REMOTE_FH_MAX) {
+        return -1;
+    }
+
     /* Build fh_fragment: [server_index][remote_fh_data] */
     fragment[0] = server_index;
     memcpy(fragment + 1, fh->data, fh->len);
@@ -633,6 +668,7 @@ chimera_nfs4_unmarshall_fh(
 
     attr->va_set_mask |= CHIMERA_VFS_ATTR_FH;
     attr->va_fh_len    = chimera_vfs_encode_fh_parent(parent_fh, fragment, fragment_len, attr->va_fh);
+    return 0;
 } // chimera_nfs4_unmarshall_fh
 
 /*

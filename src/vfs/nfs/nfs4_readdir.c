@@ -3,142 +3,13 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "nfs_internal.h"
+#include "nfs4_readdir_attr.h"
 
 struct chimera_nfs4_readdir_ctx {
     struct chimera_nfs_thread        *thread;
     struct chimera_nfs_client_server *server;
     uint32_t                          attr_request[2];
 };
-
-/*
- * Parse readdir entry attributes from fattr4
- * This is a specialized version for readdir that handles FATTR4_FILEHANDLE
- */
-static void
-chimera_nfs4_readdir_parse_attrs(
-    const struct fattr4      *fattr,
-    struct chimera_vfs_attrs *attr,
-    uint64_t                 *fileid,
-    uint8_t                  *fh_data,
-    int                      *fh_len)
-{
-    void    *data    = fattr->attr_vals.data;
-    void    *dataend = data + fattr->attr_vals.len;
-    uint32_t type;
-    uint32_t len;
-
-    *fileid           = 0;
-    *fh_len           = 0;
-    attr->va_set_mask = 0;
-
-    if (fattr->num_attrmask < 1) {
-        return;
-    }
-
-    /* Parse attributes in bitmap order */
-
-    /* FATTR4_TYPE = 1 */
-    if (fattr->attrmask[0] & (1 << FATTR4_TYPE)) {
-        if (data + sizeof(uint32_t) > dataend) {
-            return;
-        }
-        type               = chimera_nfs_ntoh32(*(uint32_t *) data);
-        data              += sizeof(uint32_t);
-        attr->va_set_mask |= CHIMERA_VFS_ATTR_MODE;
-        switch (type) {
-            case NF4REG:
-                attr->va_mode = S_IFREG;
-                break;
-            case NF4DIR:
-                attr->va_mode = S_IFDIR;
-                break;
-            case NF4BLK:
-                attr->va_mode = S_IFBLK;
-                break;
-            case NF4CHR:
-                attr->va_mode = S_IFCHR;
-                break;
-            case NF4LNK:
-                attr->va_mode = S_IFLNK;
-                break;
-            case NF4SOCK:
-                attr->va_mode = S_IFSOCK;
-                break;
-            case NF4FIFO:
-                attr->va_mode = S_IFIFO;
-                break;
-            default:
-                attr->va_mode = S_IFREG;
-                break;
-        } /* switch */
-    }
-
-    /* FATTR4_SIZE = 4 */
-    if (fattr->attrmask[0] & (1 << FATTR4_SIZE)) {
-        if (data + sizeof(uint64_t) > dataend) {
-            return;
-        }
-        attr->va_size      = chimera_nfs_ntoh64(*(uint64_t *) data);
-        data              += sizeof(uint64_t);
-        attr->va_set_mask |= CHIMERA_VFS_ATTR_SIZE;
-    }
-
-    /* FATTR4_FILEHANDLE = 19 - opaque<NFS4_FHSIZE> */
-    if (fattr->attrmask[0] & (1 << FATTR4_FILEHANDLE)) {
-        if (data + sizeof(uint32_t) > dataend) {
-            return;
-        }
-        len   = chimera_nfs_ntoh32(*(uint32_t *) data);
-        data += sizeof(uint32_t);
-
-        if (data + len > dataend || len > NFS4_FHSIZE) {
-            return;
-        }
-
-        memcpy(fh_data, data, len);
-        *fh_len = len;
-        data   += len;
-
-        /* XDR padding to 4-byte boundary */
-        if (len % 4) {
-            data += 4 - (len % 4);
-        }
-    }
-
-    /* FATTR4_FILEID = 20 */
-    if (fattr->attrmask[0] & (1 << FATTR4_FILEID)) {
-        if (data + sizeof(uint64_t) > dataend) {
-            return;
-        }
-        *fileid            = chimera_nfs_ntoh64(*(uint64_t *) data);
-        attr->va_ino       = *fileid;
-        data              += sizeof(uint64_t);
-        attr->va_set_mask |= CHIMERA_VFS_ATTR_INUM;
-    }
-
-    if (fattr->num_attrmask < 2) {
-        return;
-    }
-
-    /* FATTR4_MODE = 33 */
-    if (fattr->attrmask[1] & (1 << (FATTR4_MODE - 32))) {
-        if (data + sizeof(uint32_t) > dataend) {
-            return;
-        }
-        attr->va_mode     |= chimera_nfs_ntoh32(*(uint32_t *) data) & ~S_IFMT;
-        data              += sizeof(uint32_t);
-        attr->va_set_mask |= CHIMERA_VFS_ATTR_MODE;
-    }
-
-    /* FATTR4_NUMLINKS = 35 */
-    if (fattr->attrmask[1] & (1 << (FATTR4_NUMLINKS - 32))) {
-        if (data + sizeof(uint32_t) > dataend) {
-            return;
-        }
-        attr->va_nlink     = chimera_nfs_ntoh32(*(uint32_t *) data);
-        attr->va_set_mask |= CHIMERA_VFS_ATTR_NLINK;
-    }
-} /* chimera_nfs4_readdir_parse_attrs */
 
 static void
 chimera_nfs4_readdir_callback(
@@ -154,9 +25,10 @@ chimera_nfs4_readdir_callback(
     struct entry4                   *entry;
     struct chimera_vfs_attrs         attrs;
     uint64_t                         fileid;
-    uint8_t                          remote_fh[NFS4_FHSIZE];
+    uint8_t                          remote_fh[CHIMERA_NFS_PROXY_REMOTE_FH_MAX];
     int                              remote_fh_len;
-    uint8_t                          fh_fragment[NFS4_FHSIZE + 1];
+    uint8_t                          fh_fragment[CHIMERA_NFS_PROXY_FH_SERVER_IDX_SIZE +
+                                                 CHIMERA_NFS_PROXY_REMOTE_FH_MAX];
     int                              fh_fragment_len;
     int                              rc, eof = 0;
 

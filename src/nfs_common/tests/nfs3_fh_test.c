@@ -10,9 +10,16 @@
  * XDR decoder, so an oversized handle must be rejected rather than overflowing
  * the fixed-size fragment / va_fh buffers (the V-001 report).  This pins:
  *   - data.len within capacity  -> returns 0, ATTR_FH set, bytes copied intact
- *   - data.len at the boundary  -> the largest accepted len is FH_SIZE-1
+ *   - data.len at the boundary  -> the largest accepted len is
+ *                                  CHIMERA_NFS_PROXY_REMOTE_FH_MAX, the point
+ *                                  at which the *encoded* handle exactly fills
+ *                                  CHIMERA_VFS_FH_SIZE
  *   - data.len over capacity    -> returns -1, ATTR_FH NOT set, no write past
  *                                  the destination (verified with a canary)
+ *
+ * The band just past the boundary (48..63) is the interesting one and is
+ * covered in depth, alongside the NFSv4 twin, by
+ * src/vfs/nfs/tests/nfs_fh_bounds_test.c.
  */
 
 #include <stdio.h>
@@ -61,12 +68,17 @@ main(void)
 
     memset(fh_data, 0x55, sizeof(fh_data));
 
-    const uint32_t max_ok = CHIMERA_VFS_FH_SIZE - 1; /* largest accepted len */
+    /* Largest accepted len: what is left of the encoded handle once the
+     * mount_id and the 1-byte server index are paid for. */
+    const uint32_t max_ok = CHIMERA_NFS_PROXY_REMOTE_FH_MAX;
 
     /*
      * (len, expect_ok) cases spanning over / boundary / valid:
      *   1024        far oversized -- would smash the stack fragment
      *   256         oversized
+     *   63          fits the fragment buffer but not the encoded handle:
+     *               bounding only the fragment let this through and produced a
+     *               va_fh_len of 80
      *   max_ok + 1  one byte over the boundary
      *   max_ok      exactly the largest that fits
      *   32          comfortably valid
@@ -78,13 +90,14 @@ main(void)
         uint32_t len;
         int      expect_ok;
     } cases[] = {
-        { 1024,       0 },
-        { 256,        0 },
-        { max_ok + 1, 0 },
-        { max_ok,     1 },
-        { 32,         1 },
-        { 1,          1 },
-        { 0,          1 },
+        { 1024,                     0 },
+        { 256,                      0 },
+        { CHIMERA_VFS_FH_SIZE - 1,  0 },
+        { max_ok + 1,               0 },
+        { max_ok,                   1 },
+        { 32,                       1 },
+        { 1,                        1 },
+        { 0,                        1 },
     };
     /* *INDENT-ON* */
     int ncases = (int) (sizeof(cases) / sizeof(cases[0]));
@@ -110,6 +123,10 @@ main(void)
              * mount_id(16) + server_index(1) + data.len. */
             assert(g.attr.va_set_mask & CHIMERA_VFS_ATTR_FH);
             assert(g.attr.va_fh_len == 16 + 1 + cases[i].len);
+            /* The invariant the bound exists to protect: every accepted handle
+             * encodes to something a caller can copy into a bare
+             * uint8_t[CHIMERA_VFS_FH_SIZE]. */
+            assert(g.attr.va_fh_len <= CHIMERA_VFS_FH_SIZE);
             /* server_index then the handle bytes land after the mount id. */
             assert(g.attr.va_fh[16] == 7);
             for (uint32_t b = 0; b < cases[i].len; b++) {

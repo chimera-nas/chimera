@@ -110,7 +110,10 @@ All of these checks are verified by CI, so running `make check` locally ensures 
 ### Key Design Patterns
 
 - **Asynchronous I/O**: Uses libevpl for event-driven architecture
-- **File Handles**: 32-byte opaque handles (CHIMERA_VFS_FH_SIZE)
+- **File Handles**: variable-length opaque handles, at most CHIMERA_VFS_FH_SIZE
+  (64) bytes; the actual length travels in `va_fh_len` and depends on the
+  backend — roughly 18-22 for the inum-varint modules (memfs, diskfs, cairn),
+  33 for smb, 26-42 for linux, and up to 64 for the nfs proxy
 - **VFS Operations**: All VFS modules implement common interface with chimera_vfs_attrs
 - **Threading**: Core threads + delegation threads model
 - **High-Performance Networking**: Support for kernel bypass (RDMA, XLIO)

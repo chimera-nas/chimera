@@ -8,9 +8,46 @@
 #include <string.h>
 #include <xxhash.h>
 #include "common/varint.h"
+#include "vfs/vfs_attrs.h"     /* CHIMERA_VFS_FH_SIZE */
 
 #define CHIMERA_VFS_MOUNT_ID_SIZE 16
 #define CHIMERA_VFS_FSID_SIZE     16
+
+/*
+ * A chimera file handle is [mount_id : 16][fh_fragment : N], and the whole
+ * thing has to fit CHIMERA_VFS_FH_SIZE, so this is all the room a backend has
+ * for its fragment.
+ */
+#define CHIMERA_VFS_FH_FRAGMENT_MAX \
+        (CHIMERA_VFS_FH_SIZE - CHIMERA_VFS_MOUNT_ID_SIZE)
+
+/*
+ * The longest fragment, and hence the longest handle, the *inum-varint* family
+ * of backends mints: memfs, diskfs and cairn encode inum then gen as varints,
+ * and memfs's named-stream handles (memfs_encode_stream_fh) append a third
+ * varint for the stream id, which is the longest fragment that family composes.
+ *
+ * Scoped to that family on purpose -- it is NOT the maximum over all backends,
+ * and the name says INUM so no caller mistakes it for one.  The others compose
+ * fragments this does not describe:
+ *
+ *   smb   1 + sizeof(chimera_smb_client_file_id) = 17  (vfs/smb/smb_internal.h)
+ *   linux varint(mount_id) + varint(type) + f_handle, up to 32
+ *                                                    (vfs/linux/linux_common.h)
+ *   nfs   1 + remote handle, up to 48                 (vfs/nfs/nfs_internal.h)
+ *
+ * All of them are bounded by CHIMERA_VFS_FH_FRAGMENT_MAX above, which is what
+ * keeps a chimera handle a chimera handle.  The narrower question -- which of
+ * them are small enough to survive being re-embedded by a chimera NFS *client*
+ * proxying this server -- is answered at CHIMERA_NFS_PROXY_REMOTE_FH_MAX in
+ * nfs_common/nfs_fh_limits.h, where the family below is the one asserted to fit.
+ */
+#define CHIMERA_VFS_FH_INUM_FRAGMENT_MAX \
+        (CHIMERA_VARINT_UINT64_MAX_BYTES + CHIMERA_VARINT_UINT32_MAX_BYTES)
+#define CHIMERA_VFS_FH_STREAM_FRAGMENT_MAX \
+        (CHIMERA_VFS_FH_INUM_FRAGMENT_MAX + CHIMERA_VARINT_UINT32_MAX_BYTES)
+#define CHIMERA_VFS_FH_INUM_EMITTED_MAX \
+        (CHIMERA_VFS_MOUNT_ID_SIZE + CHIMERA_VFS_FH_STREAM_FRAGMENT_MAX)
 
 /*
  * Encode a file handle for a mount root or cross-mount reference.
@@ -112,7 +149,7 @@ chimera_vfs_encode_fh_inum_mount(
     uint32_t    gen,
     void       *out_fh)
 {
-    uint8_t  fragment[15];  /* Max: 10 bytes for uint64 + 5 bytes for uint32 */
+    uint8_t  fragment[CHIMERA_VFS_FH_INUM_FRAGMENT_MAX];
     uint8_t *ptr = fragment;
 
     ptr += chimera_encode_uint64(inum, ptr);
