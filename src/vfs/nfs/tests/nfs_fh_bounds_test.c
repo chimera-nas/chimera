@@ -19,8 +19,9 @@
  * accept N up to CHIMERA_NFS_PROXY_REMOTE_FH_MAX (47), the point at which the
  * encoded handle exactly fills CHIMERA_VFS_FH_SIZE.  (The two mount paths,
  * nfs3_mount.c and nfs4_mount.c, open-code the same check against the same
- * ceiling; they need a live upstream to reach, so they are covered by
- * inspection and the pynfs/kvm proxy suites rather than here.)
+ * ceiling.  They need a live upstream to reach and no suite drives one past the
+ * ceiling, so they hold by inspection only -- the note at
+ * CHIMERA_NFS_PROXY_REMOTE_FH_MAX has the details.)
  *
  * Bands 1-3 drive the two re-encoders, split by symptom rather than by input:
  *
@@ -55,10 +56,23 @@
 #include "nfs_common/nfs_fh_limits.h"
 
 /*
- * The immediate sink is attr->va_fh.  In the daemon the attrs sit inside a
- * pooled chimera_vfs_request and va_fh is its final member, so a write past it
- * lands on the request's callback pointers and private_data; the canary stands
- * in for that.
+ * The immediate sink is attr->va_fh, the last member of struct
+ * chimera_vfs_attrs.  In the daemon that attrs struct is embedded in a pooled
+ * chimera_vfs_request -- lookup_at.r_attr, open_at.r_attr, and the mkdir/mknod/
+ * symlink equivalents -- where it is followed by the sibling attrs of the same
+ * union member (r_dir_attr, or r_dir_pre_attr and r_dir_post_attr), and past
+ * those by the next request in the pool.  The request's callback pointers are
+ * ahead of the union, not behind va_fh.  This canary stands in for whatever
+ * follows.
+ *
+ * It cannot fire on anything driven below, and that is a property of the
+ * current layout rather than an accident: va_fh is written 16 + 1 + N bytes
+ * into 64 + 16, and fragment[] is written 1 + N into 64, so both overflow at
+ * exactly N >= 64 and the fragment memcpy gets there first (band 3).  The
+ * canary that catches the real bug is struct sink's.  This one is a guard
+ * against a future change that decouples the two thresholds -- a wider
+ * mount_id, a larger fragment buffer, a sink that grows padding -- at which
+ * point va_fh becomes reachable on its own and this is what notices.
  */
 struct probe {
     struct chimera_vfs_attrs attr;
