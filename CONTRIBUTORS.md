@@ -10,4 +10,9 @@ Ben Jarvis
 Alain Renaud
 Joe Habermann
 Peter Dunlap
+Georgi Damyanov
+Kanaga Shanmugam
+Joshua Lugo-Mclellan
+Ilya Mirsky
 Quantum Corporation
+Nasuni Corporation
