@@ -139,3 +139,18 @@ nfs4_stateid_is_special(const struct stateid4 *sid)
     }
     return 0;
 } /* nfs4_stateid_is_special */
+
+static inline int
+nfs4_stateid_is_bypass(const struct stateid4 *sid)
+{
+    /* The all-ones READ-bypass stateid (RFC 8881 §8.2.3): READ through it
+     * MAY bypass share-reservation deny checking; every other use treats
+     * it like the anonymous stateid. */
+    static const uint8_t ones[NFS4_OTHER_SIZE] = {
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff
+    };
+
+    return sid->seqid == 0xffffffff &&
+           memcmp(sid->other, ones, NFS4_OTHER_SIZE) == 0;
+} /* nfs4_stateid_is_bypass */

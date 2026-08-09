@@ -167,6 +167,12 @@ chimera_nfs4_exchange_id(
                            thread->vfs_thread,
                            false);
     }
+    if (eid.destroy_unified2) {
+        nfs_client_destroy(eid.destroy_unified2,
+                           &thread->shared->nfs4_state_table,
+                           thread->vfs_thread,
+                           false);
+    }
 
     if (eid.status != NFS4_OK) {
         res->eir_status = eid.status;

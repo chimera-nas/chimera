@@ -159,6 +159,25 @@ chimera_nfs4_setattr(
      * stateid must identify an open with write access.  Special stateids
      * (all-zero / all-ones) are exempt -- treated as anonymous, like the
      * pre-Phase-2 behavior. */
+    /* RFC 7530 §9.1.4.3 / RFC 8881 §9.7: a size-changing SETATTR is a
+     * write; through a special stateid it must honor deny-WRITE share
+     * reservations held by any owner of any client (NFS4ERR_LOCKED). */
+    if (args->obj_attributes.num_attrmask >= 1 &&
+        (args->obj_attributes.attrmask[0] & (1 << FATTR4_SIZE)) &&
+        nfs4_stateid_is_special(&args->stateid)) {
+        nfsstat4 dstatus = nfs4_clients_check_io_denied(
+            &thread->shared->nfs4_shared_clients,
+            req->fh,
+            req->fhlen,
+            OPEN4_SHARE_ACCESS_WRITE);
+
+        if (dstatus != NFS4_OK) {
+            res->status = dstatus;
+            chimera_nfs4_compound_complete(req, res->status);
+            return;
+        }
+    }
+
     if (args->obj_attributes.num_attrmask >= 1 &&
         (args->obj_attributes.attrmask[0] & (1 << FATTR4_SIZE)) &&
         !nfs4_stateid_is_special(&args->stateid)) {

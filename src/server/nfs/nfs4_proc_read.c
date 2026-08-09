@@ -212,12 +212,19 @@ chimera_nfs4_read(
             return;
         }
 
-        if (req->session && req->session->client_unified) {
-            status = nfs_client_check_io_denied(req->session->client_unified,
-                                                NULL,
-                                                req->fh,
-                                                req->fhlen,
-                                                OPEN4_SHARE_ACCESS_READ);
+        /* RFC 7530 §9.1.4.3 / RFC 8881 §9.7: special-stateid READ against
+         * a deny-READ share reservation held by ANY owner of ANY client is
+         * NFS4ERR_LOCKED.  Honoring the all-ones READ-bypass stateid is a
+         * MAY (RFC 8881 §8.2.3) chimera does not exercise: the unified VFS
+         * lease machinery enforces deny modes below this layer anyway, so
+         * the bypass is treated as anonymous and gets the RFC errno here. */
+        if (!chimera_server_config_get_nfs_data_server(
+                thread->shared->config)) {
+            status = nfs4_clients_check_io_denied(
+                &thread->shared->nfs4_shared_clients,
+                req->fh,
+                req->fhlen,
+                OPEN4_SHARE_ACCESS_READ);
             if (status != NFS4_OK) {
                 res->status = status;
                 chimera_nfs4_compound_complete(req, res->status);
