@@ -895,6 +895,15 @@ nfs_client_check_io_denied(
     uint16_t               fh_len,
     uint32_t               requested_access);
 
+/* True if `client` holds any open state keyed by `fh` (i.e. it has this file
+ * open).  Used to keep a filehandle valid after its last link is removed
+ * while an open still references the inode (RFC 7530 §16.2.5). */
+SYMBOL_EXPORT bool
+nfs_client_has_open_state_for_fh(
+    struct nfs_client *client,
+    const uint8_t     *fh,
+    uint16_t           fh_len);
+
 /* Re-open: merge share bits onto an existing state, bump its seqid, and
  * write the (now-updated) stateid to `out_stateid`. */
 SYMBOL_EXPORT void

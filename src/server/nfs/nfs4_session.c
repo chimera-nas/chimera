@@ -1016,6 +1016,37 @@ nfs4_clients_check_io_denied(
     return status;
 } /* nfs4_clients_check_io_denied */
 
+/* Cross-client analogue of nfs_client_has_open_state_for_fh: true if ANY
+ * client holds this file open.  A removed-but-open file keeps its filehandle
+ * valid until the last CLOSE regardless of which client opened it (RFC 7530
+ * §16.2.5), so PUTFH must consult every client's open state, not just the one
+ * bound to the querying connection. */
+SYMBOL_EXPORT bool
+nfs4_clients_have_open_state(
+    struct nfs4_client_table *table,
+    const uint8_t            *fh,
+    uint16_t                  fh_len)
+{
+    struct nfs4_client *c, *tmp;
+    bool                found = false;
+
+    pthread_mutex_lock(&table->nfs4_ct_lock);
+
+    HASH_ITER(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id, c, tmp)
+    {
+        if (!c->unified) {
+            continue;
+        }
+        if (nfs_client_has_open_state_for_fh(c->unified, fh, fh_len)) {
+            found = true;
+            break;
+        }
+    }
+
+    pthread_mutex_unlock(&table->nfs4_ct_lock);
+    return found;
+} /* nfs4_clients_have_open_state */
+
 /* Recover the byte-string of an NFSv4 lock-owner from the (clientid,
  * owner-hash) pair the VFS range-lease layer stores.  The lease layer
  * keeps only XXH3_64bits(owner) (see nfs4_proc_lock's lease acquisition),
