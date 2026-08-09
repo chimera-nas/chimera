@@ -224,7 +224,7 @@ chimera_rest_handle_debug_fsop(
 
     if (strcmp(op, "unlink") == 0) {
         chimera_vfs_remove(ctx->vfs_thread, cred, root_fh, root_fh_len,
-                           ctx->path, strlen(ctx->path),
+                           ctx->path, strlen(ctx->path), 0,
                            rest_fsop_remove_cb, ctx);
     } else if (strcmp(op, "rename") == 0) {
         path2 = json_string_value(json_object_get(root, "path2"));

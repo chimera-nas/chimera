@@ -20,6 +20,7 @@ chimera_remove(
     request = chimera_client_request_alloc(thread);
 
     request->opcode              = CHIMERA_CLIENT_OP_REMOVE;
+    request->remove.flags        = 0; /* generic remove: no type assertion */
     request->remove.callback     = callback;
     request->remove.private_data = private_data;
     request->remove.path_len     = path_len;

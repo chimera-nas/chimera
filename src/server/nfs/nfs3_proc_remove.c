@@ -72,6 +72,7 @@ chimera_nfs3_remove_dispatch(
                           args->object.name.len,
                           child_fh,
                           child_fh_len,
+                          CHIMERA_VFS_REMOVE_ISNOTDIR,
                           CHIMERA_NFS3_ATTR_WCC_MASK,
                           CHIMERA_NFS3_ATTR_MASK,
                           NULL,

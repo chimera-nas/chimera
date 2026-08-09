@@ -129,6 +129,7 @@ chimera_vfs_remove_at_dispatch(
     const uint8_t                   *child_fh,
     int                              child_fh_len,
     int                              match_child_fh,
+    unsigned int                     flags,
     uint64_t                         pre_attr_mask,
     uint64_t                         post_attr_mask,
     const uint8_t                   *parent_lease_skip,
@@ -150,6 +151,7 @@ chimera_vfs_remove_at_dispatch(
     request->remove_at.name           = name;
     request->remove_at.namelen        = namelen;
     request->remove_at.name_hash      = chimera_vfs_hash(name, namelen);
+    request->remove_at.flags          = flags;
     request->remove_at.child_fh       = child_fh;
     request->remove_at.child_fh_len   = child_fh_len;
     request->remove_at.match_child_fh = match_child_fh ? 1 : 0;
@@ -194,6 +196,7 @@ struct chimera_vfs_remove_at_gate {
     const uint8_t                   *child_fh;
     int                              child_fh_len;
     int                              match_child_fh;
+    unsigned int                     flags;
     uint64_t                         pre_attr_mask;
     uint64_t                         post_attr_mask;
     uint8_t                          parent_lease_skip[16];
@@ -218,6 +221,7 @@ chimera_vfs_remove_at_gate_complete(
     chimera_vfs_remove_at_dispatch(gate->thread, gate->cred, gate->handle,
                                    gate->name, gate->namelen, gate->child_fh,
                                    gate->child_fh_len, gate->match_child_fh,
+                                   gate->flags,
                                    gate->pre_attr_mask,
                                    gate->post_attr_mask,
                                    gate->parent_lease_skip_valid ?
@@ -237,6 +241,7 @@ chimera_vfs_remove_at_common(
     const uint8_t                   *child_fh,
     int                              child_fh_len,
     int                              match_child_fh,
+    unsigned int                     flags,
     uint64_t                         pre_attr_mask,
     uint64_t                         post_attr_mask,
     const uint8_t                   *parent_lease_skip,
@@ -271,6 +276,7 @@ chimera_vfs_remove_at_common(
         gate->child_fh       = child_fh;
         gate->child_fh_len   = child_fh_len;
         gate->match_child_fh = match_child_fh;
+        gate->flags          = flags;
         gate->pre_attr_mask  = pre_attr_mask;
         gate->post_attr_mask = post_attr_mask;
         if (parent_lease_skip) {
@@ -299,7 +305,7 @@ chimera_vfs_remove_at_common(
 
     chimera_vfs_remove_at_dispatch(thread, cred, handle, name, namelen,
                                    child_fh, child_fh_len, match_child_fh,
-                                   pre_attr_mask,
+                                   flags, pre_attr_mask,
                                    post_attr_mask, parent_lease_skip,
                                    callback, private_data);
 } /* chimera_vfs_remove_at_common */
@@ -316,6 +322,7 @@ chimera_vfs_remove_at(
     int                              namelen,
     const uint8_t                   *child_fh,
     int                              child_fh_len,
+    unsigned int                     flags,
     uint64_t                         pre_attr_mask,
     uint64_t                         post_attr_mask,
     const uint8_t                   *parent_lease_skip,
@@ -324,7 +331,7 @@ chimera_vfs_remove_at(
 {
     chimera_vfs_remove_at_common(thread, cred, handle, name, namelen,
                                  child_fh, child_fh_len, 0 /* match_child_fh */,
-                                 pre_attr_mask, post_attr_mask, parent_lease_skip,
+                                 flags, pre_attr_mask, post_attr_mask, parent_lease_skip,
                                  callback, private_data);
 } /* chimera_vfs_remove_at */
 
@@ -352,6 +359,6 @@ chimera_vfs_remove_at_match_fh(
 {
     chimera_vfs_remove_at_common(thread, cred, handle, name, namelen,
                                  child_fh, child_fh_len, 1 /* match_child_fh */,
-                                 pre_attr_mask, post_attr_mask, parent_lease_skip,
+                                 0 /* flags */, pre_attr_mask, post_attr_mask, parent_lease_skip,
                                  callback, private_data);
 } /* chimera_vfs_remove_at_match_fh */

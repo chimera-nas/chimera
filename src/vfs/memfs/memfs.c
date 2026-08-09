@@ -2542,6 +2542,18 @@ memfs_remove_at(
         }
     }
 
+    /* Enforce the caller's type assertion: RMDIR/rmdir(2) sets ISDIR (a
+     * non-directory is ENOTDIR); REMOVE/unlink(2) sets ISNOTDIR (a directory
+     * is EISDIR).  Neither set removes whichever kind is present. */
+    if (((request->remove_at.flags & CHIMERA_VFS_REMOVE_ISDIR) && !S_ISDIR(inode->mode)) ||
+        ((request->remove_at.flags & CHIMERA_VFS_REMOVE_ISNOTDIR) && S_ISDIR(inode->mode))) {
+        pthread_mutex_unlock(&parent_inode->lock);
+        pthread_mutex_unlock(&inode->lock);
+        request->status = S_ISDIR(inode->mode) ? CHIMERA_VFS_EISDIR : CHIMERA_VFS_ENOTDIR;
+        request->complete(request);
+        return;
+    }
+
     if (S_ISDIR(inode->mode) && !rb_tree_empty(&inode->dir.dirents)) {
         pthread_mutex_unlock(&parent_inode->lock);
         pthread_mutex_unlock(&inode->lock);

@@ -1702,10 +1702,19 @@ chimera_io_uring_remove_at(
         return;
     }
 
-    rc = unlinkat(fd, fullname, 0);
-
-    if (rc == -1 && errno == EISDIR) {
+    /* Use the caller's type assertion to pick unlink vs rmdir: ISDIR ->
+     * AT_REMOVEDIR (a non-directory then yields ENOTDIR), ISNOTDIR -> plain
+     * unlink (a directory then yields EISDIR).  Neither set keeps the legacy
+     * try-file-then-directory fallback. */
+    if (request->remove_at.flags & CHIMERA_VFS_REMOVE_ISDIR) {
         rc = unlinkat(fd, fullname, AT_REMOVEDIR);
+    } else if (request->remove_at.flags & CHIMERA_VFS_REMOVE_ISNOTDIR) {
+        rc = unlinkat(fd, fullname, 0);
+    } else {
+        rc = unlinkat(fd, fullname, 0);
+        if (rc == -1 && errno == EISDIR) {
+            rc = unlinkat(fd, fullname, AT_REMOVEDIR);
+        }
     }
 
     int unlinkat_errno = errno;

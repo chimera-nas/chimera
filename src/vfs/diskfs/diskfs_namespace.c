@@ -1247,6 +1247,15 @@ diskfs_remove_at_child_cb(
 
     p->inode_stash[1] = inode;
 
+    /* Enforce the caller's type assertion (RMDIR/ISDIR vs REMOVE/ISNOTDIR);
+     * neither flag removes whichever kind is present. */
+    if (((request->remove_at.flags & CHIMERA_VFS_REMOVE_ISDIR) && !S_ISDIR(inode->mode)) ||
+        ((request->remove_at.flags & CHIMERA_VFS_REMOVE_ISNOTDIR) && S_ISDIR(inode->mode))) {
+        diskfs_op_fail(request, p->txn,
+                       S_ISDIR(inode->mode) ? CHIMERA_VFS_EISDIR : CHIMERA_VFS_ENOTDIR);
+        return;
+    }
+
     /* rmdir of a non-empty directory: probe for any dirent record
      * (asynchronously -- the child's tree may not be cached).  "." and ".."
      * are synthesised, so one record means non-empty. */

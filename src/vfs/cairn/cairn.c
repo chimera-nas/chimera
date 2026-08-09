@@ -2540,6 +2540,23 @@ cairn_remove_at(
 
     inode = child_ih.inode;
 
+    /* Enforce the caller's type assertion (RMDIR/ISDIR vs REMOVE/ISNOTDIR);
+     * neither flag removes whichever kind is present.  Capture the type
+     * before releasing the handles below -- the release invalidates `inode`. */
+    {
+        int child_is_dir = S_ISDIR(inode->mode);
+
+        if (((request->remove_at.flags & CHIMERA_VFS_REMOVE_ISDIR) && !child_is_dir) ||
+            ((request->remove_at.flags & CHIMERA_VFS_REMOVE_ISNOTDIR) && child_is_dir)) {
+            cairn_inode_handle_release(&parent_ih);
+            cairn_inode_handle_release(&child_ih);
+            cairn_dirent_handle_release(&dh);
+            request->status = child_is_dir ? CHIMERA_VFS_EISDIR : CHIMERA_VFS_ENOTDIR;
+            request->complete(request);
+            return;
+        }
+    }
+
     if (S_ISDIR(inode->mode)) {
         /* Check if directory is empty (proper rmdir semantics) */
         if (!cairn_directory_is_empty(thread, inode->inum)) {
