@@ -4031,8 +4031,6 @@ cairn_rename_at(
      * commit window.  Neither is in this change; for now we rely on the
      * fh-hash routing for correctness and document the gap.
      */
-    (void) shared;
-
     clock_gettime(CLOCK_REALTIME, &now);
     cmp = cairn_fh_compare(request->fh,
                            request->fh_len,
@@ -4195,6 +4193,12 @@ cairn_rename_at(
         // Target exists
         // Per POSIX: if old and new refer to same file, return success with no action
         if (new_dh.dirent->inum == old_dirent_value->inum) {
+            /* No-op rename (onto itself or a hardlink pair): nothing changes,
+            * so the dir WCC before == after == the parents' current attrs. */
+            cairn_map_attrs(shared, &request->rename_at.r_fromdir_pre_attr, old_parent_inode);
+            cairn_map_attrs(shared, &request->rename_at.r_todir_pre_attr, new_parent_inode);
+            cairn_map_attrs(shared, &request->rename_at.r_fromdir_post_attr, old_parent_inode);
+            cairn_map_attrs(shared, &request->rename_at.r_todir_post_attr, new_parent_inode);
             cairn_dirent_handle_release(&old_dh);
             cairn_dirent_handle_release(&new_dh);
             cairn_inode_handle_release(&target_ih);
@@ -4291,6 +4295,12 @@ cairn_rename_at(
     new_dirent_value.name_len = request->rename_at.new_namelen;
     memcpy(new_dirent_value.name, request->rename_at.new_name, request->rename_at.new_namelen);
 
+    /* Snapshot both parents before the rename mutates their mtime/ctime, for
+     * the RENAME dir WCC (before).  For a same-directory rename both handles
+     * name the same inode. */
+    cairn_map_attrs(shared, &request->rename_at.r_fromdir_pre_attr, old_parent_inode);
+    cairn_map_attrs(shared, &request->rename_at.r_todir_pre_attr, new_parent_inode);
+
     // Update directory entries and parent inodes
     cairn_remove_dirent(thread, &old_dirent_key);
     cairn_put_dirent(thread, &new_dirent_key, &new_dirent_value);
@@ -4306,6 +4316,10 @@ cairn_rename_at(
         old_parent_inode->nlink--;
         new_parent_inode->nlink++;
     }
+
+    /* Post-rename dir WCC (after). */
+    cairn_map_attrs(shared, &request->rename_at.r_fromdir_post_attr, old_parent_inode);
+    cairn_map_attrs(shared, &request->rename_at.r_todir_post_attr, new_parent_inode);
 
     cairn_put_inode(thread, old_parent_inode);
     if (cmp != 0) {
@@ -4398,12 +4412,21 @@ cairn_link_at(
     dirent_value.name_len = request->link_at.namelen;
     memcpy(dirent_value.name, request->link_at.name, request->link_at.namelen);
 
+    /* Directory WCC (before), captured while the parent's mtime is still the
+     * pre-link value. */
+    cairn_map_attrs(shared, &request->link_at.r_dir_pre_attr, parent_inode);
+
     target_inode->nlink++;
     target_inode->ctime = now;
     target_inode->change++;
     parent_inode->mtime = now;
     parent_inode->ctime = now;
     parent_inode->change++;
+
+    /* The linked file's post-op attributes (new nlink) and the directory WCC
+     * (after). */
+    cairn_map_attrs(shared, &request->link_at.r_attr, target_inode);
+    cairn_map_attrs(shared, &request->link_at.r_dir_post_attr, parent_inode);
 
     cairn_put_dirent(thread, &dirent_key, &dirent_value);
     cairn_put_inode(thread, parent_inode);
@@ -4440,11 +4463,27 @@ cairn_commit_op(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    (void) shared;
+    struct cairn_inode_handle ih;
+    int                       rc;
+
     (void) private_data;
     thread->data_needs_sync      = 1;
     thread->needs_data_wal_flush = 1;
-    request->status              = CHIMERA_VFS_OK;
+
+    /* COMMIT does not modify the file, so its pre- and post-op file WCC are
+     * both the file's current attributes.  Resolve the handle to fill them (and
+     * to reject a stale handle). */
+    rc = cairn_inode_get_fh(thread, request->fh, request->fh_len, &ih);
+    if (unlikely(rc)) {
+        request->status = CHIMERA_VFS_ENOENT;
+        request->complete(request);
+        return;
+    }
+    cairn_map_attrs(shared, &request->commit.r_pre_attr, ih.inode);
+    cairn_map_attrs(shared, &request->commit.r_post_attr, ih.inode);
+    cairn_inode_handle_release(&ih);
+
+    request->status = CHIMERA_VFS_OK;
     cairn_queue_request(thread, request);
 } /* cairn_commit_op */
 
