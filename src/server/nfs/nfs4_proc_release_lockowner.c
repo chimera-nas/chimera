@@ -22,9 +22,12 @@ chimera_nfs4_release_lockowner(
     struct RELEASE_LOCKOWNER4res  *res    = &resop->oprelease_lockowner;
     struct nfs_client             *client =
         req->session ? req->session->client_unified : NULL;
+    struct nfs_state_table        *table      = &thread->shared->nfs4_state_table;
+    struct chimera_vfs_thread     *vfs_thread = thread->vfs_thread;
     struct nfs_lock_owner         *lo;
     struct nfs_lock_state         *ls;
-    bool                           held = false;
+    bool                           held    = false;
+    bool                           release = false;
 
     if (!client || args->lock_owner.clientid != client->client_id) {
         res->status = NFS4ERR_STALE_CLIENTID;
@@ -50,9 +53,36 @@ chimera_nfs4_release_lockowner(
             }
         }
         pthread_mutex_unlock(&lo->lock);
+
+        /* RFC 7530 §16.37: on success the server discards the lock-owner and
+         * all state it anchors, so the client may reuse the owner string for a
+         * fresh lock-owner (and a later new_lock_owner=TRUE OPEN-to-lock is not
+         * rejected as a duplicate -- see R-LOCK-6 in nfs4_proc_lock.c).
+         * Unpublish it here while holding client->lock; keep the hash-slot ref
+         * and tear the states down below, outside the client lock. */
+        if (!held) {
+            HASH_DELETE(hh, client->lock_owners_by_str, lo);
+            release = true;
+        }
     }
 
     pthread_mutex_unlock(&client->lock);
+
+    if (release) {
+        /* Drain the (now rangeless) lock stateids.  nfs_lock_state_destroy
+         * unlinks each entry under lo->lock, so re-read the head each pass
+         * rather than iterate a list being mutated underneath us. */
+        for ( ; ;) {
+            pthread_mutex_lock(&lo->lock);
+            ls = lo->states;
+            pthread_mutex_unlock(&lo->lock);
+            if (!ls) {
+                break;
+            }
+            nfs_lock_state_destroy(ls, table, vfs_thread);
+        }
+        nfs_lock_owner_put(lo);
+    }
 
     res->status = held ? NFS4ERR_LOCKS_HELD : NFS4_OK;
     chimera_nfs4_compound_complete(req, res->status);
