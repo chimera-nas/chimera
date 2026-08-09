@@ -1177,6 +1177,39 @@ nfs_client_check_io_denied(
     return status;
 } /* nfs_client_check_io_denied */
 
+bool
+nfs_client_has_open_state_for_fh(
+    struct nfs_client *client,
+    const uint8_t     *fh,
+    uint16_t           fh_len)
+{
+    struct nfs_open_owner *oo, *oo_tmp;
+    bool                   found = false;
+
+    if (fh_len > NFS4_FHSIZE) {
+        return false;
+    }
+
+    pthread_mutex_lock(&client->lock);
+
+    HASH_ITER(hh, client->open_owners_by_str, oo, oo_tmp)
+    {
+        struct nfs_open_state *state = NULL;
+
+        pthread_mutex_lock(&oo->lock);
+        HASH_FIND(hh, oo->states_by_fh, fh, fh_len, state);
+        pthread_mutex_unlock(&oo->lock);
+
+        if (state) {
+            found = true;
+            break;
+        }
+    }
+
+    pthread_mutex_unlock(&client->lock);
+    return found;
+} /* nfs_client_has_open_state_for_fh */
+
 nfsstat4
 nfs_open_state_check_io_denied(
     struct nfs_open_state *requesting_state,

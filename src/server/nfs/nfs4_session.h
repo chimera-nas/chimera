@@ -450,6 +450,13 @@ nfs4_clients_check_io_denied(
     uint16_t                  fh_len,
     uint32_t                  requested_access);
 
+/* True if any client holds `fh` open; keeps a removed-but-open file's
+ * handle valid regardless of which connection issues the PUTFH. */
+bool
+nfs4_clients_have_open_state(
+    struct nfs4_client_table *table,
+    const uint8_t            *fh,
+    uint16_t                  fh_len);
 /* Recover an NFSv4 lock-owner byte-string from the (clientid, XXH3 owner
  * hash) the VFS range-lease layer records, for a LOCK/LOCKT DENIED reply.
  * Returns true and fills out_owner/out_len on a hit. */
