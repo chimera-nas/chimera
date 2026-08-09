@@ -54,6 +54,13 @@ chimera_vfs_error_to_nfsstat3(enum chimera_vfs_error err)
             return NFS3ERR_BADHANDLE;
         case CHIMERA_VFS_ENOTSUP:
             return NFS3ERR_NOTSUPP;
+        case CHIMERA_VFS_ESYMLINK:
+            /* A symlink where a directory was required (e.g. LOOKUP or
+             * READDIR with a symlink file handle).  NFSv3 has no dedicated
+             * symlink error for this; RFC 1813 uses NFS3ERR_NOTDIR for a
+             * non-directory object.  (The NFSv4 mapping is separate and
+             * keeps NFS4ERR_SYMLINK, which v4 LOOKUP relies on.) */
+            return NFS3ERR_NOTDIR;
         case CHIMERA_VFS_EFAULT:
             return NFS3ERR_SERVERFAULT;
         case CHIMERA_VFS_EOVERFLOW:
