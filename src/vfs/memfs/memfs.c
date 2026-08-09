@@ -4936,11 +4936,24 @@ memfs_rename_at(
                 return;
             }
 
-            /* Remove the existing destination entry and decrement link count */
+            /* Remove the existing destination entry and drop its link.  If that
+             * was its last link and no open handle still references it, free the
+             * clobbered inode -- bumping its generation so a stale handle to it
+             * returns ENOENT, exactly as unlink does (memfs_remove_at).  Without
+             * this the clobbered inode leaked and its file handle kept resolving
+             * after the rename that replaced it. */
             rb_tree_remove(&new_parent_inode->dir.dirents, &existing_dirent->node);
-            existing_inode->nlink--;
             if (S_ISDIR(existing_inode->mode)) {
                 new_parent_inode->nlink--;
+                existing_inode->nlink = 0;
+            } else {
+                existing_inode->nlink--;
+            }
+            if (existing_inode->nlink == 0) {
+                --existing_inode->refcnt;
+                if (existing_inode->refcnt == 0) {
+                    memfs_inode_free(thread, existing_inode);
+                }
             }
             pthread_mutex_unlock(&existing_inode->lock);
             memfs_dirent_free(thread, existing_dirent);
