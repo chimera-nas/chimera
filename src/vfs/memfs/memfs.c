@@ -3620,15 +3620,16 @@ memfs_allocate(
         /* ALLOCATE: reserve space for [offset, offset+length) and extend size. */
         uint64_t new_end = request->allocate.offset + request->allocate.length;
 
-        /* In capacity mode, materialize zero blocks across the range so the
-         * space is actually consumed -- and charged at the block alloc/free
-         * choke points.  This keeps the accounting honest under the operations
-         * the reservation model got wrong: a later write reuses these blocks
-         * (alloc-new + free-old nets to zero, so no double charge), and a
-         * DEALLOCATE frees them (releasing the space).  block_alloc returns
+        /* Materialize zero blocks across the range so the space is actually
+         * allocated: an ALLOCATE'd region is *data* (allocated space), not a
+         * hole, so SEEK_DATA/SEEK_HOLE and sr_eof must see it as data (RFC 7862
+         * §11.1/§15.11).  Materializing is also what keeps capacity accounting
+         * honest -- the space is charged at the block alloc/free choke points;
+         * a later write reuses these blocks (alloc-new + free-old nets to zero,
+         * so no double charge) and DEALLOCATE frees them.  block_alloc returns
          * NULL (ENOSPC) when the filesystem is full.  Streams keep the cheap
          * size-only path (memfs_grow_blocks operates on the base fork). */
-        if (shared->fs_size && !stream && request->allocate.length) {
+        if (!stream && request->allocate.length) {
             const uint32_t block_size  = shared->block_size;
             const uint32_t block_shift = shared->block_shift;
             uint64_t       first_block = request->allocate.offset >> block_shift;
