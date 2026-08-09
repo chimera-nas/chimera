@@ -8,6 +8,7 @@
 #include "nfs4_status.h"
 #include "nfs4_attr.h"
 #include "nfs4_state.h"
+#include "nfs4_session.h"
 #include "nfs4_callback.h"
 #include "server/server.h"
 #include "vfs/vfs_procs.h"
@@ -397,7 +398,10 @@ chimera_nfs4_open_install_state(
 
     /* RFC 7530 §9.10: check share-mode conflict against opens by *other*
      * owners on this client.  Same-owner OPEN coalesces via the
-     * find_state path below and is exempt. */
+     * find_state path below and is exempt.  Cross-client (and cross-
+     * protocol) deny, including revocation of a conflicting courtesy
+     * client whose lease has lapsed, is enforced by the VFS share-lease
+     * layer when the open state is installed. */
     status = nfs_client_check_share_conflict(client, owner,
                                              handle->fh, handle->fh_len,
                                              args->share_access,

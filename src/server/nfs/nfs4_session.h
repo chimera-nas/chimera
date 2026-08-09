@@ -144,6 +144,11 @@ struct nfs4_client {
      * possession of the clientid via a successful CREATE_SESSION; only then
      * is it "confirmed". */
     uint8_t               nfs4_client_confirmed;
+    /* Whether this record currently occupies the by-owner hash slot.  A
+     * superseding (reboot) registration lives in the by-id table only until
+     * it is confirmed; removal paths must not HASH_DELETE a record from a
+     * table it was never added to (uthash corruption). */
+    uint8_t               nfs4_client_in_owner_table;
     /* Principal that created the record (see nfs4_client_principal).  Under
      * SP4_MACH_CRED this is the bound "machine credential": state-management
      * operations must be issued with this same (RPCSEC_GSS) principal. */
@@ -206,6 +211,9 @@ struct nfs4_exchange_id_result {
     uint64_t           clientid;
     uint32_t           confirmed;
     struct nfs_client *destroy_unified;
+    /* A second hierarchy to tear down: replacing a principal-mismatched
+     * confirmed record also destroys its in-flight superseding record. */
+    struct nfs_client *destroy_unified2;
 };
 
 struct nfs4_session {
@@ -433,6 +441,15 @@ nfs4_client_destroy_clientid(
  * sessions are torn down and its state hierarchy is returned via
  * *destroy_unified for teardown outside the table lock.  Returns false when no
  * such client exists (caller maps to NFS4ERR_STALE_CLIENTID). */
+struct nfs_open_owner;
+
+nfsstat4
+nfs4_clients_check_io_denied(
+    struct nfs4_client_table *table,
+    const uint8_t            *fh,
+    uint16_t                  fh_len,
+    uint32_t                  requested_access);
+
 bool
 nfs4_client_confirm(
     struct nfs4_client_table *table,

@@ -43,8 +43,17 @@ chimera_nfs4_destroy_session(
         return;
     }
 
+    /* RFC 8881 §18.37.3: DESTROY_SESSION must arrive over a connection bound
+     * to a session of the same client -- not necessarily the target session
+     * itself.  chimera keeps only the most recently bound session in a
+     * connection's private data, and one connection may create several
+     * sessions, so match on the owning client rather than session identity:
+     * an unbound connection, or one bound to a different client's session, is
+     * rejected with CONN_NOT_BOUND_TO_SESSION.  SP4_MACH_CRED still gates the
+     * principal below. */
     bound = evpl_rpc2_conn_get_private_data(req->conn);
-    if (!nfs4_session_is_live(bound) || bound != session) {
+    if (!nfs4_session_is_live(bound) ||
+        bound->nfs4_session_clientid != session->nfs4_session_clientid) {
         nfs4_session_put(session);
         res->dsr_status = NFS4ERR_CONN_NOT_BOUND_TO_SESSION;
         chimera_nfs4_compound_complete(req, res->dsr_status);

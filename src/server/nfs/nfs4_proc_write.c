@@ -249,12 +249,17 @@ chimera_nfs4_write(
             return;
         }
 
-        if (req->session && req->session->client_unified) {
-            status = nfs_client_check_io_denied(req->session->client_unified,
-                                                NULL,
-                                                req->fh,
-                                                req->fhlen,
-                                                OPEN4_SHARE_ACCESS_WRITE);
+        /* RFC 7530 §9.1.4.3 / RFC 8881 §9.7: a special-stateid WRITE
+         * against a deny-WRITE share reservation held by ANY owner of ANY
+         * client is NFS4ERR_LOCKED (the all-ones stateid bypasses only
+         * READ deny checking). */
+        if (!chimera_server_config_get_nfs_data_server(
+                thread->shared->config)) {
+            status = nfs4_clients_check_io_denied(
+                &thread->shared->nfs4_shared_clients,
+                req->fh,
+                req->fhlen,
+                OPEN4_SHARE_ACCESS_WRITE);
             if (status != NFS4_OK) {
                 res->status = status;
                 evpl_iovecs_release(thread->evpl, args->data.iov,
