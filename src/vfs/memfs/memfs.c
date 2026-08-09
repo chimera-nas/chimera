@@ -4993,6 +4993,20 @@ memfs_link_at(
         return;
     }
 
+    /* If the link target's handle is the parent directory itself, the
+     * memfs_inode_get_fh() below would re-lock parent_inode's non-recursive
+     * mutex and self-deadlock (wedging this thread while it holds the lock).
+     * The parent passed the S_ISDIR check above, so the target is a
+     * directory: reject it as EISDIR (as the S_ISDIR(inode->mode) path below
+     * would) without taking the lock a second time. */
+    if (request->fh_len == request->link_at.dir_fhlen &&
+        memcmp(request->fh, request->link_at.dir_fh, request->fh_len) == 0) {
+        pthread_mutex_unlock(&parent_inode->lock);
+        request->status = CHIMERA_VFS_EISDIR;
+        request->complete(request);
+        return;
+    }
+
     inode = memfs_inode_get_fh(shared, request->fh, request->fh_len);
 
     if (!inode) {
