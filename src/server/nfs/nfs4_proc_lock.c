@@ -361,6 +361,48 @@ chimera_nfs4_lock(
                 return;
             }
 
+            /* RFC 7530 §16.10.5: new_lock_owner=TRUE when this (lock-owner,
+             * file) *already holds* byte-range locks is NFS4ERR_BAD_SEQID; the
+             * sole exception is a retransmission of the establishing LOCK
+             * (matching lock_seqid), answered as a replay.  A lock stateid that
+             * exists but holds no ranges (every lock LOCKU'd) does NOT count --
+             * open_to_lock_owner may re-establish it (pynfs LOCK24).  The owner
+             * list is stable and every entry's open_state is alive while
+             * lock_owner->lock is held (nfs_lock_state_destroy unlinks under the
+             * same lock before releasing the open_state). */
+            if (!created) {
+                struct nfs_lock_state *ls;
+                bool                   dup = false;
+
+                pthread_mutex_lock(&lock_owner->lock);
+                for (ls = lock_owner->states; ls; ls = ls->next_in_owner) {
+                    if (ls->range_leases != NULL &&
+                        ls->open_state &&
+                        ls->open_state->fh_len == req->fhlen &&
+                        memcmp(ls->open_state->fh, req->fh, req->fhlen) == 0) {
+                        dup = true;
+                        break;
+                    }
+                }
+                if (dup) {
+                    int lcls = nfs4_owner_seqid_classify(
+                        lock_owner->seqid, &lock_owner->replay,
+                        args->locker.open_owner.lock_seqid);
+
+                    if (lcls == NFS4_SEQID_REPLAY) {
+                        res->status              = lock_owner->replay.status;
+                        res->resok4.lock_stateid = lock_owner->replay.stateid;
+                    } else {
+                        res->status = NFS4ERR_BAD_SEQID;
+                    }
+                    pthread_mutex_unlock(&lock_owner->lock);
+                    chimera_nfs4_lock_new_owner_reject(thread, req, open_state,
+                                                       lock_owner, res->status);
+                    return;
+                }
+                pthread_mutex_unlock(&lock_owner->lock);
+            }
+
             /* Transfer the borrow refs onto the request; dropped in
              * chimera_nfs4_lock_finish.  open_state is acquire-held here, so
              * open_state->owner (== oo) is guaranteed alive for the get.  The
