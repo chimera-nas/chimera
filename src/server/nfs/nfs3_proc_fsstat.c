@@ -24,7 +24,12 @@ chimera_nfs3_fsstat_complete(
 
     res.status = chimera_vfs_error_to_nfsstat3(error_code);
 
-    if ((attr->va_set_mask & CHIMERA_NFS3_FSSTAT_MASK) != CHIMERA_NFS3_FSSTAT_MASK) {
+    /* Only treat missing statfs attributes as NOTSUPP when the getattr itself
+     * succeeded -- otherwise a real error (e.g. NFS3ERR_NOENT from a stale
+     * handle, whose failed getattr leaves va_set_mask empty) would be
+     * clobbered into a misleading NFS3ERR_NOTSUPP. */
+    if (res.status == NFS3_OK &&
+        (attr->va_set_mask & CHIMERA_NFS3_FSSTAT_MASK) != CHIMERA_NFS3_FSSTAT_MASK) {
         res.status = NFS3ERR_NOTSUPP;
     }
 
