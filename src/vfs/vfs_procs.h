@@ -733,6 +733,7 @@ chimera_vfs_rename_at(
     int                              new_namelen,
     const uint8_t                   *target_fh,
     int                              target_fh_len,
+    unsigned int                     flags,
     uint64_t                         pre_attr_mask,
     uint64_t                         post_attr_mask,
     const uint8_t                   *parent_lease_skip,

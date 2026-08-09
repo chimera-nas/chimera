@@ -2455,6 +2455,7 @@ chimera_s3_complete_finalize(struct chimera_s3_complete_ctx *ctx)
             0,
             0,
             0,
+            0,
             NULL,
             NULL,
             chimera_s3_complete_rename_callback,

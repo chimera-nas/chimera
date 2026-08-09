@@ -117,6 +117,7 @@ chimera_vfs_rename_target_lookup_complete(
         request->rename.target_fh_len,
         0,
         0,
+        0,
         NULL,
         NULL,
         chimera_vfs_rename_op_complete,
@@ -194,6 +195,7 @@ chimera_vfs_rename_fast_target_lookup_complete(
         request->rename.new_pathlen,
         request->rename.target_fh_len ? request->rename.target_fh : NULL,
         request->rename.target_fh_len,
+        0,
         0,
         0,
         NULL,
@@ -337,6 +339,7 @@ chimera_vfs_rename(
                 0,
                 0,
                 0,
+                0,
                 NULL,  /* parent_lease_skip: path-only mount has no parent lease */
                 NULL,  /* op_handle */
                 chimera_vfs_rename_op_complete,
@@ -405,6 +408,7 @@ chimera_vfs_rename(
                     request->rename.new_path + request->rename.new_name_offset,
                     request->rename.new_pathlen - request->rename.new_name_offset,
                     NULL,
+                    0,
                     0,
                     0,
                     0,

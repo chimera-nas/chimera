@@ -61,6 +61,7 @@ chimera_nfs4_rename_do(struct nfs_request *req)
         args->newname.len,
         NULL,
         0,
+        0,
         CHIMERA_VFS_ATTR_MTIME,
         CHIMERA_VFS_ATTR_MTIME,
         NULL,

@@ -660,6 +660,14 @@ chimera_vfs_set_tcp_flavor(
     vfs->tcp_flavor = flavor;
 } /* chimera_vfs_set_tcp_flavor */
 
+SYMBOL_EXPORT void
+chimera_vfs_set_caching_enabled(
+    struct chimera_vfs *vfs,
+    int                 enabled)
+{
+    vfs->caching_enabled = enabled;
+} /* chimera_vfs_set_caching_enabled */
+
 SYMBOL_EXPORT int
 chimera_vfs_fh_is_plausible(
     struct chimera_vfs_thread *thread,

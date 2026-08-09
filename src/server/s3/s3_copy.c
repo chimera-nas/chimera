@@ -352,6 +352,7 @@ chimera_s3_copy_finalize(struct chimera_s3_copy_ctx *ctx)
             0,
             0,
             0,
+            0,
             NULL,
             NULL,
             chimera_s3_copy_rename_callback,

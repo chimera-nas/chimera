@@ -146,6 +146,7 @@ chimera_s3_put_rename(struct chimera_s3_request *request)
             0,
             0,
             0,
+            0,
             NULL,
             NULL,
             chimera_s3_put_rename_callback,

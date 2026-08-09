@@ -160,6 +160,7 @@ chimera_smb_set_info_rename_emit(struct chimera_smb_request *request)
         0,
         0,
         0,
+        0,
         /* Self-exempt the directory lease named by the operating open's
          * ParentLeaseKey (dirlease.rename correct-parent-leaskey case). */
         open_file->parent_lease_key,

@@ -2386,6 +2386,15 @@ chimera_server_init(
      * open outbound connections with the same transport. */
     chimera_vfs_set_tcp_flavor(server->vfs, config->tcp_flavor);
 
+    /* Tell the VFS whether any caching protocol is enabled, so its
+     * remove/rename paths know to resolve a by-name victim's FH and recall a
+     * cross-protocol holder before the namespace change (see
+     * chimera_vfs_remove_at).  When none are enabled the lookup is skipped. */
+    chimera_vfs_set_caching_enabled(server->vfs,
+                                    config->nfs4_delegations ||
+                                    config->smb_leases ||
+                                    config->smb_oplocks);
+
     /* Enable the pNFS feature whenever configured.  Orchestrated flex-files
      * needs a data-server table (below); a layout-sourcing backend (e.g. diskfs
      * block mode) produces its own layouts and needs no data servers, so the
