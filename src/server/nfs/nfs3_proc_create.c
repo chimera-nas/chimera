@@ -111,6 +111,10 @@ chimera_nfs3_create_open_at_complete(
     if (error_code == CHIMERA_VFS_EEXIST &&
         args->how.mode == EXCLUSIVE) {
         set_attr->va_set_mask = 0;
+        /* Re-open to read the existing file's attrs and verify the verifier.
+         * Request the directory WCC masks too: an idempotent EXCLUSIVE retry
+         * still owes the caller dir_wcc (RFC 1813 3.3.8), even though the
+         * directory is unchanged (before == after). */
         chimera_vfs_open_at(thread->vfs_thread, &req->cred,
                             req->handle,
                             args->where.name.str,
@@ -118,8 +122,8 @@ chimera_nfs3_create_open_at_complete(
                             CHIMERA_VFS_OPEN_INFERRED,
                             set_attr,
                             CHIMERA_NFS3_ATTR_MASK | CHIMERA_VFS_ATTR_FH,
-                            0,
-                            0,
+                            CHIMERA_NFS3_ATTR_WCC_MASK,
+                            CHIMERA_NFS3_ATTR_MASK,
                             chimera_nfs3_create_exclusive_verify,
                             req);
         return;
