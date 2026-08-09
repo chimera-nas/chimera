@@ -226,6 +226,49 @@ chimera_vfs_rename_at_source_lookup_complete(
     }
 } /* chimera_vfs_rename_at_source_lookup_complete */
 
+/* Recall the source file being moved, then (via the chain above) the target.
+ * The source FH is resolved only when the lease subsystem is active; otherwise
+ * we go straight to the destination recall (which fast-paths to dispatch when
+ * there is nothing to break).  Uses the source dir FH / cred / name stashed on
+ * the request so it can run after an optional target-FH resolution. */
+static void
+chimera_vfs_rename_at_recall_source(struct chimera_vfs_request *request)
+{
+    struct chimera_vfs_thread *thread = request->thread;
+
+    if (thread->vfs->vfs_state) {
+        chimera_vfs_lookup(thread, request->cred, request->fh, request->fh_len,
+                           request->rename_at.name, request->rename_at.namelen,
+                           CHIMERA_VFS_ATTR_FH, 0,
+                           chimera_vfs_rename_at_source_lookup_complete,
+                           request);
+    } else {
+        chimera_vfs_rename_at_recall_target(request);
+    }
+} /* chimera_vfs_rename_at_recall_source */
+
+/* Completion of the VFS-driven destination lookup (CHIMERA_VFS_REMOVE_RECALL):
+ * a resolved FH means the destination exists and will be clobbered, so stash it
+ * for the target recall; an error (e.g. ENOENT -- the common no-overwrite case)
+ * just proceeds with no target recall. */
+static void
+chimera_vfs_rename_at_target_lookup_complete(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct chimera_vfs_request *request = private_data;
+
+    if (error_code == CHIMERA_VFS_OK &&
+        (attr->va_set_mask & CHIMERA_VFS_ATTR_FH)) {
+        memcpy(request->rename_at.resolved_target_fh, attr->va_fh, attr->va_fh_len);
+        request->rename_at.target_fh     = request->rename_at.resolved_target_fh;
+        request->rename_at.target_fh_len = attr->va_fh_len;
+    }
+
+    chimera_vfs_rename_at_recall_source(request);
+} /* chimera_vfs_rename_at_target_lookup_complete */
+
 static void
 chimera_vfs_rename_at_dispatch(
     struct chimera_vfs_thread       *thread,
@@ -240,6 +283,7 @@ chimera_vfs_rename_at_dispatch(
     int                              new_namelen,
     const uint8_t                   *target_fh,
     int                              target_fh_len,
+    unsigned int                     flags,
     uint64_t                         pre_attr_mask,
     uint64_t                         post_attr_mask,
     const uint8_t                   *parent_lease_skip,
@@ -267,6 +311,7 @@ chimera_vfs_rename_at_dispatch(
     request->rename_at.new_name                        = new_name;
     request->rename_at.new_namelen                     = new_namelen;
     request->rename_at.new_name_hash                   = chimera_vfs_hash(new_name, new_namelen);
+    request->rename_at.flags                           = flags;
     request->rename_at.target_fh                       = target_fh;
     request->rename_at.target_fh_len                   = target_fh_len;
     request->rename_at.r_fromdir_pre_attr.va_req_mask  = pre_attr_mask;
@@ -295,17 +340,23 @@ chimera_vfs_rename_at_dispatch(
 
     /* Recall delegations before the directory change: first on the source file
      * being moved (its ctime/linkage changes invalidate cached state), then on
-     * any file overwritten at the destination.  Resolve the source FH only when
-     * the lease subsystem is active; otherwise go straight to the destination
-     * recall (which fast-paths to dispatch when there is nothing to break). */
-    if (thread->vfs->vfs_state) {
-        chimera_vfs_lookup(thread, cred, fh, fhlen, name, namelen,
+     * any file overwritten at the destination.
+     *
+     * When the caller opted into VFS recall (CHIMERA_VFS_REMOVE_RECALL) and did
+     * not supply the clobbered destination's FH, resolve it here so a
+     * delegation/lease on the doomed target is recalled before it is replaced
+     * -- rather than making every by-name caller (NFSv3 RENAME) do that lookup
+     * itself.  Only when a caching protocol is enabled. */
+    if ((flags & CHIMERA_VFS_REMOVE_RECALL) && thread->vfs->caching_enabled &&
+        !target_fh) {
+        chimera_vfs_lookup(thread, cred, new_fh, new_fhlen, new_name, new_namelen,
                            CHIMERA_VFS_ATTR_FH, 0,
-                           chimera_vfs_rename_at_source_lookup_complete,
+                           chimera_vfs_rename_at_target_lookup_complete,
                            request);
-    } else {
-        chimera_vfs_rename_at_recall_target(request);
+        return;
     }
+
+    chimera_vfs_rename_at_recall_source(request);
 } /* chimera_vfs_rename_at_dispatch */
 
 /*
@@ -336,6 +387,7 @@ struct chimera_vfs_rename_at_gate {
     int                              new_namelen;
     const uint8_t                   *target_fh;
     int                              target_fh_len;
+    unsigned int                     flags;
     uint8_t                          src_child_fh[CHIMERA_VFS_FH_SIZE];
     int                              src_child_fh_len;
     uint64_t                         pre_attr_mask;
@@ -364,6 +416,7 @@ chimera_vfs_rename_at_gate_dispatch(struct chimera_vfs_rename_at_gate *gate)
                                    gate->new_fh, gate->new_fhlen,
                                    gate->new_name, gate->new_namelen,
                                    gate->target_fh, gate->target_fh_len,
+                                   gate->flags,
                                    gate->pre_attr_mask, gate->post_attr_mask,
                                    gate->parent_lease_skip_valid ?
                                    gate->parent_lease_skip : NULL,
@@ -477,6 +530,7 @@ chimera_vfs_rename_at(
     int                              new_namelen,
     const uint8_t                   *target_fh,
     int                              target_fh_len,
+    unsigned int                     flags,
     uint64_t                         pre_attr_mask,
     uint64_t                         post_attr_mask,
     const uint8_t                   *parent_lease_skip,
@@ -528,6 +582,7 @@ chimera_vfs_rename_at(
         gate->new_namelen    = new_namelen;
         gate->target_fh      = target_fh;
         gate->target_fh_len  = target_fh_len;
+        gate->flags          = flags;
         gate->pre_attr_mask  = pre_attr_mask;
         gate->post_attr_mask = post_attr_mask;
         if (parent_lease_skip) {
@@ -552,7 +607,7 @@ chimera_vfs_rename_at(
 
     chimera_vfs_rename_at_dispatch(thread, cred, fh, fhlen, name, namelen,
                                    new_fh, new_fhlen, new_name, new_namelen,
-                                   target_fh, target_fh_len, pre_attr_mask,
+                                   target_fh, target_fh_len, flags, pre_attr_mask,
                                    post_attr_mask, parent_lease_skip,
                                    op_handle, callback, private_data);
 } /* chimera_vfs_rename_at */
