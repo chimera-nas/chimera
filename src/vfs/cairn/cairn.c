@@ -2320,6 +2320,8 @@ cairn_mkdir_at(
     inode.uid         = request->cred->uid;
     inode.gid         = request->cred->gid;
     inode.nlink       = 2;
+    inode.refcnt      = 1;   /* open reference; without it rmdir underflows the
+                              * count and never frees the inode (stale handle) */
     inode.rdev        = 0;
     inode.mode        = S_IFDIR | 0755;
     inode.atime       = now;
@@ -2434,6 +2436,8 @@ cairn_mknod_at(
     inode.uid         = request->cred->uid;
     inode.gid         = request->cred->gid;
     inode.nlink       = 1;
+    inode.refcnt      = 1;   /* open reference (see cairn_open_at); without it
+                              * unlink underflows the count and leaks the inode */
     inode.rdev        = 0;
     inode.atime       = now;
     inode.mtime       = now;
@@ -3874,6 +3878,8 @@ cairn_symlink_at(
     new_inode.uid        = request->cred->uid;
     new_inode.gid        = request->cred->gid;
     new_inode.nlink      = 1;
+    new_inode.refcnt     = 1;   /* open reference (see cairn_open_at); without it
+                                 * unlink underflows the count and leaks the inode */
     new_inode.rdev       = 0;
     new_inode.mode       = S_IFLNK | 0755;
     new_inode.atime      = now;
