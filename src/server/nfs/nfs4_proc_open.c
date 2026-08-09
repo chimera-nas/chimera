@@ -493,6 +493,28 @@ chimera_nfs4_open_install_state(
  * OPEN response path in this file calls this wrapper instead of
  * chimera_nfs4_compound_complete directly.
  */
+/*
+ * Status for an OPEN whose target is not a regular file (mode already
+ * fetched).  A directory is always NFS4ERR_ISDIR.  For any other
+ * non-regular object the two minor versions diverge (RFC 7530 §16.16.6
+ * vs RFC 8881 §18.16.4): 4.0 reports NFS4ERR_SYMLINK for every special
+ * file, while 4.1+ reports NFS4ERR_SYMLINK only for an actual symlink and
+ * NFS4ERR_WRONG_TYPE for fifos, sockets, and devices.
+ */
+static nfsstat4
+chimera_nfs4_open_nonreg_status(
+    uint8_t minorversion,
+    mode_t  mode)
+{
+    if (S_ISDIR(mode)) {
+        return NFS4ERR_ISDIR;
+    }
+    if (minorversion == 0 || S_ISLNK(mode)) {
+        return NFS4ERR_SYMLINK;
+    }
+    return NFS4ERR_WRONG_TYPE;
+} /* chimera_nfs4_open_nonreg_status */
+
 static void
 chimera_nfs4_open_complete(
     struct nfs_request *req,
@@ -681,11 +703,12 @@ chimera_nfs4_open_at_complete(
         return;
     }
 
-    /* RFC 7530 §16.16.5: OPEN targets a regular file. A directory yields
-     * NFS4ERR_ISDIR; any other non-regular object (symlink, socket, fifo,
-     * block/char device) yields NFS4ERR_SYMLINK. */
+    /* RFC 7530 §16.16.6 / RFC 8881 §18.16.4: OPEN targets a regular file.
+     * A directory yields NFS4ERR_ISDIR; other non-regular objects yield
+     * NFS4ERR_SYMLINK (4.0) or NFS4ERR_SYMLINK/WRONG_TYPE (4.1+). */
     if ((attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) && !S_ISREG(attr->va_mode)) {
-        res->status = S_ISDIR(attr->va_mode) ? NFS4ERR_ISDIR : NFS4ERR_SYMLINK;
+        res->status = chimera_nfs4_open_nonreg_status(req->minorversion,
+                                                      attr->va_mode);
         chimera_vfs_release(req->thread->vfs_thread, handle);
         chimera_vfs_release(req->thread->vfs_thread, parent_handle);
         chimera_nfs4_open_complete(req, res->status);
@@ -794,9 +817,11 @@ chimera_nfs4_open_lookup_regular_complete(
 
     /* OPEN4_NOCREATE must classify special objects by type before the
      * backend tries to open them.  Native opens of FIFOs, sockets, and
-     * devices can otherwise block or report backend-specific errors. */
+     * devices can otherwise block or report backend-specific errors.
+     * Typing follows RFC 7530 §16.16.6 / RFC 8881 §18.16.4. */
     if ((attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) && !S_ISREG(attr->va_mode)) {
-        res->status = S_ISDIR(attr->va_mode) ? NFS4ERR_ISDIR : NFS4ERR_SYMLINK;
+        res->status = chimera_nfs4_open_nonreg_status(req->minorversion,
+                                                      attr->va_mode);
         chimera_vfs_release(req->thread->vfs_thread, parent_handle);
         chimera_nfs4_open_complete(req, res->status);
         return;
@@ -810,8 +835,8 @@ chimera_nfs4_open_lookup_regular_complete(
                         ctx->attr,
                         CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MODE |
                         CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME,
-                        CHIMERA_VFS_ATTR_MTIME,
-                        CHIMERA_VFS_ATTR_MTIME,
+                        (CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME),
+                        (CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME),
                         chimera_nfs4_open_at_complete,
                         req);
 } /* chimera_nfs4_open_lookup_regular_complete */
@@ -857,8 +882,8 @@ chimera_nfs4_open_unchecked_lookup_complete(
                         ctx->attr,
                         CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MODE |
                         CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME,
-                        CHIMERA_VFS_ATTR_MTIME,
-                        CHIMERA_VFS_ATTR_MTIME,
+                        (CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME),
+                        (CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME),
                         chimera_nfs4_open_at_complete,
                         req);
 } /* chimera_nfs4_open_unchecked_lookup_complete */
@@ -1111,8 +1136,8 @@ chimera_nfs4_open_parent_complete(
                                 attr,
                                 CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MODE |
                                 CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME,
-                                CHIMERA_VFS_ATTR_MTIME,
-                                CHIMERA_VFS_ATTR_MTIME,
+                                (CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME),
+                                (CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME),
                                 chimera_nfs4_open_at_complete,
                                 req);
             break;
@@ -1182,8 +1207,8 @@ chimera_nfs4_open_parent_complete(
                                 attr,
                                 CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MODE |
                                 CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME,
-                                CHIMERA_VFS_ATTR_MTIME,
-                                CHIMERA_VFS_ATTR_MTIME,
+                                (CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME),
+                                (CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME),
                                 chimera_nfs4_open_at_complete,
                                 req);
             break;

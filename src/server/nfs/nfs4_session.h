@@ -450,6 +450,34 @@ nfs4_clients_check_io_denied(
     uint16_t                  fh_len,
     uint32_t                  requested_access);
 
+/* Recover an NFSv4 lock-owner byte-string from the (clientid, XXH3 owner
+ * hash) the VFS range-lease layer records, for a LOCK/LOCKT DENIED reply.
+ * Returns true and fills out_owner/out_len on a hit. */
+bool
+nfs4_client_lookup_lock_owner(
+    struct nfs4_client_table *table,
+    uint64_t                  clientid,
+    uint64_t                  owner_hash,
+    uint8_t                  *out_owner,
+    uint32_t                  out_cap,
+    uint32_t                 *out_len);
+
+/* Fill a LOCK4denied / LOCKT4res owner from a conflicting VFS range lease.
+ * For an NFSv4 conflict the clientid and (reconstructed) owner byte-string
+ * name the holder (RFC 7530 §16.10.5 / §16.11.5); a non-NFSv4 conflict has
+ * no NFSv4 lock-owner, so the owner is left empty but the clientid still
+ * reflects the holder's client_key.  `dbuf` allocates the owner copy from
+ * the reply buffer. */
+struct chimera_vfs_lease;
+struct state_owner4;
+struct xdr_dbuf;
+void
+nfs4_fill_denied_owner(
+    struct nfs4_client_table       *table,
+    const struct chimera_vfs_lease *conflict,
+    struct state_owner4            *denied_owner,
+    struct xdr_dbuf                *dbuf);
+
 bool
 nfs4_client_confirm(
     struct nfs4_client_table *table,

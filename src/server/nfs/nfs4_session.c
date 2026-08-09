@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <uuid/uuid.h>
+#include <xxhash.h>
 #include "prometheus-c.h"
 #include "nfs4_session.h"
 #include "nfs4_state.h"
@@ -16,6 +17,7 @@
 #include "nfs_common.h"
 #include "evpl/evpl_rpc2.h"
 #include "vfs/vfs_release.h"
+#include "vfs/vfs_state.h"
 
 /* Bump a replay-cache counter on the shared struct.  Safe when the
  * thread/shared are not set up (e.g. in the unit test). */
@@ -1013,6 +1015,93 @@ nfs4_clients_check_io_denied(
     pthread_mutex_unlock(&table->nfs4_ct_lock);
     return status;
 } /* nfs4_clients_check_io_denied */
+
+/* Recover the byte-string of an NFSv4 lock-owner from the (clientid,
+ * owner-hash) pair the VFS range-lease layer stores.  The lease layer
+ * keeps only XXH3_64bits(owner) (see nfs4_proc_lock's lease acquisition),
+ * so a LOCK/LOCKT NFS4ERR_DENIED reply reconstructs the conflicting
+ * lock_owner4 by scanning the owning client's lock owners for a matching
+ * hash (RFC 7530 §16.10.5 / §16.11.5 require the holder's owner in the
+ * denied structure).  Returns true and fills out_owner/out_len on a hit.
+ * A non-NFSv4 (SMB/NLM) conflict has no NFSv4 lock-owner and returns
+ * false; the caller leaves the owner empty. */
+SYMBOL_EXPORT bool
+nfs4_client_lookup_lock_owner(
+    struct nfs4_client_table *table,
+    uint64_t                  clientid,
+    uint64_t                  owner_hash,
+    uint8_t                  *out_owner,
+    uint32_t                  out_cap,
+    uint32_t                 *out_len)
+{
+    struct nfs4_client    *c;
+    struct nfs_lock_owner *lo, *lo_tmp;
+    bool                   found = false;
+
+    pthread_mutex_lock(&table->nfs4_ct_lock);
+
+    HASH_FIND(nfs4_client_hh_by_id, table->nfs4_ct_clients_by_id,
+              &clientid, sizeof(clientid), c);
+
+    if (c && c->unified) {
+        struct nfs_client *uc = c->unified;
+
+        pthread_mutex_lock(&uc->lock);
+        HASH_ITER(hh, uc->lock_owners_by_str, lo, lo_tmp)
+        {
+            if (XXH3_64bits(lo->owner, lo->owner_len) == owner_hash) {
+                uint32_t n = lo->owner_len < out_cap ? lo->owner_len : out_cap;
+                memcpy(out_owner, lo->owner, n);
+                *out_len = n;
+                found    = true;
+                break;
+            }
+        }
+        pthread_mutex_unlock(&uc->lock);
+    }
+
+    pthread_mutex_unlock(&table->nfs4_ct_lock);
+    return found;
+} /* nfs4_client_lookup_lock_owner */
+
+void
+nfs4_fill_denied_owner(
+    struct nfs4_client_table       *table,
+    const struct chimera_vfs_lease *conflict,
+    struct state_owner4            *denied_owner,
+    struct xdr_dbuf                *dbuf)
+{
+    uint8_t  owner_buf[NFS4_OPAQUE_LIMIT];
+    uint32_t owner_len = 0;
+
+    denied_owner->clientid   = 0;
+    denied_owner->owner.len  = 0;
+    denied_owner->owner.data = NULL;
+
+    if (!conflict) {
+        return;
+    }
+
+    /* The clientid is directly recoverable; for an NFSv4 holder the owner
+     * byte-string is reconstructed from its hash. */
+    denied_owner->clientid = conflict->owner.client_key;
+
+    if (conflict->owner.protocol == CHIMERA_VFS_LEASE_PROTO_NFSV4 &&
+        nfs4_client_lookup_lock_owner(table,
+                                      conflict->owner.client_key,
+                                      conflict->owner.owner_lo,
+                                      owner_buf, sizeof(owner_buf),
+                                      &owner_len) &&
+        owner_len > 0) {
+        void *copy = xdr_dbuf_alloc_space(owner_len, dbuf);
+
+        if (copy) {
+            memcpy(copy, owner_buf, owner_len);
+            denied_owner->owner.data = copy;
+            denied_owner->owner.len  = owner_len;
+        }
+    }
+} /* nfs4_fill_denied_owner */
 
 void
 nfs4_client_unregister(

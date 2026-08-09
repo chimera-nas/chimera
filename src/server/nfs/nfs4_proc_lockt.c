@@ -88,9 +88,9 @@ chimera_nfs4_lockt_probe(
         res->denied.length   = conflict ? conflict->length : UINT64_MAX;
         res->denied.locktype = (conflict && (conflict->mode.granted & CHIMERA_VFS_LEASE_MODE_W))
                                ? WRITE_LT : READ_LT;
-        res->denied.owner.clientid   = 0;
-        res->denied.owner.owner.len  = 0;
-        res->denied.owner.owner.data = NULL;
+        nfs4_fill_denied_owner(&req->thread->shared->nfs4_shared_clients,
+                               conflict, &res->denied.owner,
+                               req->encoding->dbuf);
     }
 
     chimera_vfs_state_put(vfs_state, file_state);

@@ -222,10 +222,11 @@ chimera_nfs4_lock_complete(
     res->denied.length   = conflict ? conflict->length : UINT64_MAX;
     res->denied.locktype = (conflict && (conflict->mode.granted & CHIMERA_VFS_LEASE_MODE_W)) ?
         WRITE_LT : READ_LT;
-    /* vfs_state does not expose the conflicting lock's NFS owner; zero it. */
-    res->denied.owner.clientid   = 0;
-    res->denied.owner.owner.len  = 0;
-    res->denied.owner.owner.data = NULL;
+    /* Name the conflicting holder (RFC 7530 §16.10.5): clientid directly,
+     * owner byte-string reconstructed from the lease's owner hash. */
+    nfs4_fill_denied_owner(&req->thread->shared->nfs4_shared_clients,
+                           conflict, &res->denied.owner,
+                           req->encoding->dbuf);
     chimera_nfs4_lock_finish(req, res->status);
 } /* chimera_nfs4_lock_complete */
 

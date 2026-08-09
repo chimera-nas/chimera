@@ -145,8 +145,8 @@ chimera_nfs4_create_open_callback(
                                      args->objname.len,
                                      attr,
                                      CHIMERA_VFS_ATTR_FH,
-                                     CHIMERA_VFS_ATTR_MTIME,
-                                     CHIMERA_VFS_ATTR_MTIME,
+                                     (CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME),
+                                     (CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME),
                                      chimera_nfs4_create_complete,
                                      req);
                 break;
@@ -182,8 +182,8 @@ chimera_nfs4_create_open_callback(
                                      args->objname.len,
                                      attr,
                                      CHIMERA_VFS_ATTR_FH,
-                                     CHIMERA_VFS_ATTR_MTIME,
-                                     CHIMERA_VFS_ATTR_MTIME,
+                                     (CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME),
+                                     (CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME),
                                      chimera_nfs4_create_complete,
                                      req);
                 break;
@@ -212,8 +212,8 @@ chimera_nfs4_create_open_callback(
                     args->objtype.linkdata.len,
                     attr,
                     CHIMERA_VFS_ATTR_FH,
-                    CHIMERA_VFS_ATTR_MTIME,
-                    CHIMERA_VFS_ATTR_MTIME,
+                    (CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME),
+                    (CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME),
                     chimera_nfs4_create_symlink_complete,
                     req);
                 break;
