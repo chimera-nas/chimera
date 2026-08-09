@@ -88,10 +88,16 @@ chimera_nfs4_open_downgrade(
         }
 
         /* RFC 7530 §9.1.4.2: reject a superseded (old) or never-issued
-         * stateid seqid. */
+         * stateid seqid.  Per §9.1.7 the owner seqid still advances for a
+         * consuming error (e.g. OLD_STATEID) but not for BAD_STATEID. */
         status = nfs4_stateid_check_seqid(open_state->seqid,
                                           args->open_stateid.seqid);
         if (status != NFS4_OK) {
+            if (nfs4_seqid_should_advance(status)) {
+                owner->seqid = args->seqid;
+                nfs4_replay_record(&owner->replay, args->seqid,
+                                   OP_OPEN_DOWNGRADE, status, NULL);
+            }
             pthread_mutex_unlock(&owner->lock);
             nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
                                     thread->vfs_thread);
@@ -112,6 +118,15 @@ chimera_nfs4_open_downgrade(
          ~open_state->share_access_hist) ||
         (chimera_nfs4_open_share_history(args->share_deny) &
          ~open_state->share_deny_hist)) {
+        /* RFC 7530 §9.1.7: NFS4ERR_INVAL is not in the no-consume list, so
+        * a failed downgrade still advances the owner seqid and caches the
+        * (error) reply for replay.  Not doing so left the owner's seqid
+        * stuck, turning the client's next op into a spurious BAD_SEQID. */
+        if (is_v40) {
+            owner->seqid = args->seqid;
+            nfs4_replay_record(&owner->replay, args->seqid,
+                               OP_OPEN_DOWNGRADE, NFS4ERR_INVAL, NULL);
+        }
         pthread_mutex_unlock(&owner->lock);
         nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
                                 thread->vfs_thread);
