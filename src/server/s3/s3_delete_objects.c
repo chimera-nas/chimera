@@ -421,7 +421,7 @@ chimera_s3_del_open_cb(
                           oh,
                           request->del.cur_name,
                           request->del.cur_name_len,
-                          NULL, 0, 0, 0,
+                          NULL, 0, 0, 0, 0,
                           NULL,
                           chimera_s3_del_remove_cb,
                           request);

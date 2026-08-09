@@ -280,6 +280,7 @@ chimera_smb_set_reparse_open_parent_cb(
         0,
         0,
         0,
+        0,
         NULL,
         chimera_smb_set_reparse_remove_cb,
         request);

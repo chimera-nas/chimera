@@ -47,6 +47,7 @@ chimera_posix_unlink(const char *path)
     slash = rindex(path, '/');
 
     req.opcode              = CHIMERA_CLIENT_OP_REMOVE;
+    req.remove.flags        = CHIMERA_VFS_REMOVE_ISNOTDIR; /* unlink(2): not a directory */
     req.remove.callback     = chimera_posix_remove_callback;
     req.remove.private_data = &comp;
     req.remove.path_len     = path_len;

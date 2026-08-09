@@ -40,6 +40,7 @@ chimera_dispatch_remove(
         thread->client->root_fh_len,
         request->remove.path,
         request->remove.path_len,
+        request->remove.flags,
         chimera_remove_vfs_complete,
         request);
 } /* chimera_dispatch_remove */
@@ -101,6 +102,7 @@ chimera_remove_at_lookup_complete(
         request->remove.path_len,
         request->remove.child_fh,
         request->remove.child_fh_len,
+        request->remove.flags,
         0,
         0,
         NULL,

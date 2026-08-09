@@ -115,6 +115,7 @@ chimera_vfs_remove_child_lookup_complete(
         request->remove.pathlen - request->remove.name_offset,
         request->remove.child_fh_len ? request->remove.child_fh : NULL,
         request->remove.child_fh_len,
+        request->remove.flags,
         0,
         0,
         NULL,
@@ -154,6 +155,7 @@ chimera_vfs_remove_parent_open_complete(
             request->remove.pathlen - request->remove.name_offset,
             NULL,
             0,
+            request->remove.flags,
             0,
             0,
             NULL,  /* parent_lease_skip: path-only mount has no parent lease */
@@ -213,6 +215,7 @@ chimera_vfs_remove(
     int                            fhlen,
     const char                    *path,
     int                            pathlen,
+    unsigned int                   flags,
     chimera_vfs_remove_callback_t  callback,
     void                          *private_data)
 {
@@ -250,6 +253,7 @@ chimera_vfs_remove(
 
     request->remove.path         = request->plugin_data;
     request->remove.pathlen      = pathlen;
+    request->remove.flags        = flags;
     request->remove.callback     = callback;
     request->remove.private_data = private_data;
 

@@ -331,7 +331,7 @@ chimera_s3_delbucket_remove_next(struct s3_delbucket_ctx *ctx)
     if (ctx->cur < ctx->ndirs) {
         chimera_vfs_remove(thread->vfs, &shared->cred,
                            ctx->bucket_fh, ctx->bucket_fhlen,
-                           ctx->dirs[ctx->cur], strlen(ctx->dirs[ctx->cur]),
+                           ctx->dirs[ctx->cur], strlen(ctx->dirs[ctx->cur]), 0,
                            chimera_s3_delbucket_dir_removed, ctx);
         return;
     }
@@ -339,7 +339,7 @@ chimera_s3_delbucket_remove_next(struct s3_delbucket_ctx *ctx)
     /* All scaffolding gone; remove the bucket directory from the bucket root. */
     chimera_vfs_remove(thread->vfs, &shared->cred,
                        shared->root_fh, shared->root_fh_len,
-                       ctx->bucket_path, ctx->bucket_path_len,
+                       ctx->bucket_path, ctx->bucket_path_len, 0,
                        chimera_s3_delbucket_root_removed, ctx);
 } /* chimera_s3_delbucket_remove_next */
 

@@ -69,6 +69,7 @@ chimera_nfs3_rmdir_dispatch(
                           args->object.name.len,
                           child_fh,
                           child_fh_len,
+                          CHIMERA_VFS_REMOVE_ISDIR,
                           CHIMERA_NFS3_ATTR_WCC_MASK,
                           CHIMERA_NFS3_ATTR_MASK,
                           NULL,

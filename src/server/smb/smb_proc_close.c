@@ -164,6 +164,7 @@ chimera_smb_close_doc_open_parent_callback(
         0,
         0,
         0,
+        0,
         unlink_skip,
         chimera_smb_close_doc_remove_callback,
         request);
@@ -261,6 +262,7 @@ chimera_smb_teardown_doc_open_parent_callback(
         ctx->doc_info.name,
         ctx->doc_info.name_len,
         NULL,
+        0,
         0,
         0,
         0,
@@ -407,6 +409,7 @@ chimera_smb_close_stream_base_parent_callback(
         open_file->name,
         open_file->name_len,
         NULL,
+        0,
         0,
         0,
         0,

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -55,10 +55,6 @@ chimera_posix_unlinkat(
     int                             path_len;
     const char                     *slash;
 
-    // Note: AT_REMOVEDIR flag is handled by the VFS layer
-    // which will enforce directory-only removal semantics
-    (void) flags;
-
     chimera_posix_completion_init(&comp, &req);
 
     // Handle AT_FDCWD case
@@ -102,7 +98,12 @@ chimera_posix_unlinkat(
         req.remove.name_offset   = 0;
     }
 
-    req.opcode              = CHIMERA_CLIENT_OP_REMOVE;
+    req.opcode = CHIMERA_CLIENT_OP_REMOVE;
+    /* AT_REMOVEDIR selects rmdir(2) semantics (directory only); its absence
+     * selects unlink(2) semantics (non-directory only).  The VFS remove op
+     * enforces the assertion in the backend. */
+    req.remove.flags = (flags & AT_REMOVEDIR) ?
+        CHIMERA_VFS_REMOVE_ISDIR : CHIMERA_VFS_REMOVE_ISNOTDIR;
     req.remove.callback     = chimera_posix_unlinkat_callback;
     req.remove.private_data = &comp;
 

@@ -184,7 +184,7 @@ do_remove(
     const char                     *name)
 {
     chimera_vfs_remove_at(ctx->vfs_thread, cred, dir, name, strlen(name),
-                          NULL, 0, 0, 0, NULL, remove_cb, ctx);
+                          NULL, 0, 0, 0, 0, NULL, remove_cb, ctx);
     wait_done(ctx);
     return ctx->status;
 } /* do_remove */

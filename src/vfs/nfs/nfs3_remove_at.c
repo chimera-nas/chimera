@@ -169,6 +169,80 @@ chimera_nfs3_remove_do_remove(
                                                   chimera_nfs3_remove_callback, request);
 } /* chimera_nfs3_remove_do_remove */
 
+static void
+chimera_nfs3_rmdir_callback(
+    struct evpl                 *evpl,
+    const struct evpl_rpc2_verf *verf,
+    struct RMDIR3res            *res,
+    int                          status,
+    void                        *private_data)
+{
+    struct chimera_vfs_request *request = private_data;
+
+    if (unlikely(status)) {
+        request->status = CHIMERA_VFS_EFAULT;
+        request->complete(request);
+        return;
+    }
+
+    if (res->status != NFS3_OK) {
+        chimera_nfs3_get_wcc_data(&request->remove_at.r_dir_pre_attr,
+                                  &request->remove_at.r_dir_post_attr,
+                                  &res->resfail.dir_wcc);
+        request->status = nfs3_client_status_to_chimera_vfs_error(res->status);
+        request->complete(request);
+        return;
+    }
+
+    chimera_nfs3_get_wcc_data(&request->remove_at.r_dir_pre_attr,
+                              &request->remove_at.r_dir_post_attr,
+                              &res->resok.dir_wcc);
+
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* chimera_nfs3_rmdir_callback */
+
+/*
+ * A directory removal (the caller asserted CHIMERA_VFS_REMOVE_ISDIR) maps to
+ * the RMDIR RPC, not REMOVE.  Directories are never silly-renamed, so this is
+ * a direct send with no open-cache check.
+ */
+static void
+chimera_nfs3_remove_do_rmdir(
+    struct chimera_vfs_request     *request,
+    struct chimera_nfs3_remove_ctx *ctx)
+{
+    struct chimera_nfs_client_server_thread *server_thread;
+    struct RMDIR3args                        args;
+    struct evpl_rpc2_cred                    rpc2_cred;
+    uint8_t                                 *dir_fh;
+    int                                      dir_fhlen;
+
+    server_thread = chimera_nfs_thread_get_server_thread(ctx->thread, request->fh, request->fh_len);
+
+    if (!server_thread) {
+        request->status = CHIMERA_VFS_ESTALE;
+        request->complete(request);
+        return;
+    }
+
+    chimera_nfs3_map_fh(request->fh, request->fh_len, &dir_fh, &dir_fhlen);
+
+    args.object.dir.data.data = dir_fh;
+    args.object.dir.data.len  = dir_fhlen;
+    args.object.name.str      = (char *) request->remove_at.name;
+    args.object.name.len      = request->remove_at.namelen;
+
+    chimera_nfs_init_rpc2_cred(&rpc2_cred, request->cred,
+                               request->thread->vfs->machine_name,
+                               request->thread->vfs->machine_name_len);
+
+    ctx->shared->nfs_v3.send_call_NFSPROC3_RMDIR(&ctx->shared->nfs_v3.rpc2, ctx->thread->evpl,
+                                                 server_thread->nfs_conn, &rpc2_cred, &args,
+                                                 0, 0, NULL, 0, 0,
+                                                 chimera_nfs3_rmdir_callback, request);
+} /* chimera_nfs3_remove_do_rmdir */
+
 void
 chimera_nfs3_remove_at(
     struct chimera_nfs_thread  *thread,
@@ -197,6 +271,12 @@ chimera_nfs3_remove_at(
     ctx->thread = thread;
     ctx->shared = shared;
     ctx->server = server_thread->server;
+
+    /* A directory removal maps to RMDIR (never silly-renamed). */
+    if (request->remove_at.flags & CHIMERA_VFS_REMOVE_ISDIR) {
+        chimera_nfs3_remove_do_rmdir(request, ctx);
+        return;
+    }
 
     /*
      * If no child FH provided, skip silly rename handling entirely.

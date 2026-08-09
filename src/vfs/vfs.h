@@ -138,6 +138,17 @@ struct chimera_vfs_mount_options {
  * symlink-leaf semantics. */
 #define CHIMERA_VFS_OPEN_STOP_SYMLINK   (1U << 9)
 
+/* remove_at flags: an optional assertion about the target's type, letting the
+ * single VFS remove op express the rmdir(2)/RMDIR vs unlink(2)/REMOVE
+ * distinction the callers know but the op otherwise loses.  Enforcing backends
+ * (memfs, cairn, diskfs) reject a mismatch (ENOTDIR when ISDIR is set on a
+ * non-directory, EISDIR when ISNOTDIR is set on a directory); passthrough
+ * backends (linux, io_uring) use it to choose unlinkat's AT_REMOVEDIR flag.
+ * With neither set the op removes whatever the name resolves to (legacy
+ * behavior). */
+#define CHIMERA_VFS_REMOVE_ISDIR        (1U << 0)  /* target must be a directory */
+#define CHIMERA_VFS_REMOVE_ISNOTDIR     (1U << 1)  /* target must not be a directory */
+
 /* Allocate flags */
 #define CHIMERA_VFS_ALLOCATE_DEALLOCATE 0x01
 
@@ -573,6 +584,7 @@ struct chimera_vfs_request {
             int                             pathlen;
             int                             parent_len;
             int                             name_offset;
+            unsigned int                    flags; /* CHIMERA_VFS_REMOVE_* type assertion */
             struct chimera_vfs_open_handle *parent_handle;
             chimera_vfs_remove_callback_t   callback;
             void                           *private_data;
@@ -855,6 +867,7 @@ struct chimera_vfs_request {
             const char                     *name;
             int                             namelen;
             uint64_t                        name_hash;
+            uint32_t                        flags;        /* CHIMERA_VFS_REMOVE_* type assertion */
             const uint8_t                  *child_fh;     /* Optional: child FH if known */
             int                             child_fh_len; /* 0 if child_fh not provided */
             /* Inode-scoped removal: when set (with child_fh), the backend MUST

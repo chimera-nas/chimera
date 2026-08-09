@@ -409,11 +409,11 @@ main(
     /* Unlink the files so their (and the CoW-shared) block buffers are freed
      * before the module is torn down -- keeps LeakSanitizer quiet. */
     chimera_vfs_remove_at(ctx.vfs_thread, &cred, root_handle, "src", 3,
-                          src_fh, src_fh_len, 0, 0, NULL, remove_cb, &ctx);
+                          src_fh, src_fh_len, 0, 0, 0, NULL, remove_cb, &ctx);
     wait_done(&ctx);
     assert(ctx.status == CHIMERA_VFS_OK);
     chimera_vfs_remove_at(ctx.vfs_thread, &cred, root_handle, "dst", 3,
-                          dst_fh, dst_fh_len, 0, 0, NULL, remove_cb, &ctx);
+                          dst_fh, dst_fh_len, 0, 0, 0, NULL, remove_cb, &ctx);
     wait_done(&ctx);
     assert(ctx.status == CHIMERA_VFS_OK);
     chimera_vfs_release(ctx.vfs_thread, root_handle);

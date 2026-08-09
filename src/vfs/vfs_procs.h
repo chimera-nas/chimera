@@ -141,6 +141,7 @@ chimera_vfs_remove(
     int                            fhlen,
     const char                    *path,
     int                            pathlen,
+    unsigned int                   flags,
     chimera_vfs_remove_callback_t  callback,
     void                          *private_data);
 
@@ -492,6 +493,7 @@ chimera_vfs_remove_at(
     int                              namelen,
     const uint8_t                   *child_fh,
     int                              child_fh_len,
+    unsigned int                     flags,
     uint64_t                         pre_attr_mask,
     uint64_t                         post_attr_mask,
     const uint8_t                   *parent_lease_skip,
