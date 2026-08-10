@@ -751,20 +751,26 @@ chimera_rest_init(
 SYMBOL_EXPORT void
 chimera_rest_start(struct chimera_rest_server *rest)
 {
+    int rc;
+
     if (!rest) {
         return;
     }
 
     if (rest->http_listener) {
-        evpl_listen(rest->http_listener, EVPL_STREAM_SOCKET_TCP,
-                    rest->http_endpoint);
+        rc = evpl_listen(rest->http_listener, EVPL_STREAM_SOCKET_TCP,
+                         rest->http_endpoint);
+        chimera_rest_abort_if(rc, "failed to listen for REST HTTP on port %d",
+                              rest->http_port);
         chimera_rest_info("REST API HTTP server started on port %d",
                           rest->http_port);
     }
 
     if (rest->https_listener) {
-        evpl_listen(rest->https_listener, EVPL_STREAM_SOCKET_TLS,
-                    rest->https_endpoint);
+        rc = evpl_listen(rest->https_listener, EVPL_STREAM_SOCKET_TLS,
+                         rest->https_endpoint);
+        chimera_rest_abort_if(rc, "failed to listen for REST HTTPS on port %d",
+                              rest->https_port);
         chimera_rest_info("REST API HTTPS server started on port %d",
                           rest->https_port);
     }

@@ -387,11 +387,14 @@ static void
 chimera_smb_server_start(void *data)
 {
     struct chimera_server_smb_shared *shared = data;
+    int                               rc;
 
-    evpl_listen(shared->listener, shared->tcp_protocol, shared->endpoint);
+    rc = evpl_listen(shared->listener, shared->tcp_protocol, shared->endpoint);
+    chimera_smb_abort_if(rc, "failed to listen for SMB");
 
     if (shared->endpoint_rdma) {
-        evpl_listen(shared->listener, EVPL_DATAGRAM_RDMACM_RC, shared->endpoint_rdma);
+        rc = evpl_listen(shared->listener, EVPL_DATAGRAM_RDMACM_RC, shared->endpoint_rdma);
+        chimera_smb_abort_if(rc, "failed to listen for SMB over RDMA");
     }
 } /* smb_server_start */
 
@@ -2608,8 +2611,11 @@ chimera_smb_server_segment(
 
     len = evpl_peek(evpl, bind, &hdr, 4);
 
+    /* Not enough buffered yet to read the NBSS length prefix.  Zero means
+    * "no complete segment available", which leaves the connection alone
+    * until more arrives; a negative return would ask evpl to close it. */
     if (len < 4) {
-        return -1;
+        return 0;
     }
 
     hdr = __builtin_bswap32(hdr);

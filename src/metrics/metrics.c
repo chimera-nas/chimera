@@ -132,6 +132,7 @@ chimera_metrics_thread_init(
     void        *private_data)
 {
     struct chimera_metrics *metrics = private_data;
+    int                     rc;
 
     metrics->metrics = prometheus_metrics_create(NULL, NULL, 0);
 
@@ -144,7 +145,9 @@ chimera_metrics_thread_init(
 
     metrics->server = evpl_http_attach(metrics->agent, metrics->listener, chimera_metrics_dispatch, metrics);
 
-    evpl_listen(metrics->listener, EVPL_STREAM_SOCKET_TCP, metrics->endpoint);
+    rc = evpl_listen(metrics->listener, EVPL_STREAM_SOCKET_TCP, metrics->endpoint);
+    chimera_metrics_abort_if(rc, "failed to listen for prometheus metrics on port %d",
+                             metrics->port);
 
     chimera_metrics_info("Serving prometheus metrics on http://0.0.0.0:%d/metrics", metrics->port);
 
