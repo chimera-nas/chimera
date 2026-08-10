@@ -39,6 +39,13 @@ chimera_posix_dup(int oldfd)
         return -1;
     }
 
+    /* POSIX: the duplicate shares the open file description -- same file
+     * offset and status flags.  The description is not yet a shared object
+     * here, so propagate both at duplication time; a later lseek on one
+     * descriptor still does not move the other (known gap). */
+    posix->fds[newfd].offset = entry->offset;
+    posix->fds[newfd].oflags = entry->oflags;
+
     chimera_posix_fd_release(entry, 0);
 
     return newfd;

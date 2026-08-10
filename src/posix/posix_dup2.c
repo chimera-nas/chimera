@@ -90,10 +90,13 @@ chimera_posix_dup2(
     /* Increment the opencnt on the source handle */
     chimera_dup_handle(worker->client_thread, handle);
 
-    /* Set up the new fd entry */
+    /* Set up the new fd entry.  POSIX: the duplicate shares the open file
+     * description, so it takes the source's file offset and status flags
+     * (previously the offset was reset to 0 and oflags left stale). */
     pthread_mutex_lock(&new_entry->lock);
     new_entry->handle      = handle;
-    new_entry->offset      = 0;
+    new_entry->offset      = old_entry->offset;
+    new_entry->oflags      = old_entry->oflags;
     new_entry->flags       = 0;
     new_entry->refcnt      = 0;
     new_entry->eof_flag    = 0;
