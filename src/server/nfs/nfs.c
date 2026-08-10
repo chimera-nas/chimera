@@ -522,33 +522,45 @@ nfs_server_start(void *arg)
 {
     struct chimera_server_nfs_shared *shared = arg;
     enum evpl_protocol_id             rdma_protocol;
+    int                               rc;
 
-    evpl_rpc2_server_start(shared->nfs_server,
-                           chimera_server_config_get_tcp_stream_protocol(shared->config),
-                           shared->nfs_endpoint);
+    /* evpl_rpc2_server_start reports a listen it could not establish -- a port
+     * already in use, an address that cannot be bound.  A server that carried
+     * on regardless would come up advertising a service nothing is listening
+     * on, so every one of these is checked; there is no useful recovery at
+     * this point, so the failure is fatal and named. */
+    rc = evpl_rpc2_server_start(shared->nfs_server,
+                                chimera_server_config_get_tcp_stream_protocol(shared->config),
+                                shared->nfs_endpoint);
+    chimera_nfs_abort_if(rc, "failed to start the NFS server");
 
     if (shared->nfs_rdma_endpoint) {
         /* Use TCP-RDMA emulation when nfs_tcp_rdma_port > 0, otherwise use native RDMA */
         rdma_protocol = chimera_server_config_get_nfs_tcp_rdma_port(shared->config) > 0
                         ? EVPL_DATAGRAM_TCP_RDMA : EVPL_DATAGRAM_RDMACM_RC;
-        evpl_rpc2_server_start(shared->nfs_server, rdma_protocol, shared->nfs_rdma_endpoint);
+        rc = evpl_rpc2_server_start(shared->nfs_server, rdma_protocol, shared->nfs_rdma_endpoint);
+        chimera_nfs_abort_if(rc, "failed to start the NFS RDMA server");
     }
 
     if (shared->mount_server) {
-        evpl_rpc2_server_start(shared->mount_server, EVPL_STREAM_SOCKET_TCP, shared->mount_endpoint);
+        rc = evpl_rpc2_server_start(shared->mount_server, EVPL_STREAM_SOCKET_TCP, shared->mount_endpoint);
+        chimera_nfs_abort_if(rc, "failed to start the MOUNT server");
     }
     if (shared->nlm_server) {
-        evpl_rpc2_server_start(shared->nlm_server, EVPL_STREAM_SOCKET_TCP, shared->nlm_endpoint);
+        rc = evpl_rpc2_server_start(shared->nlm_server, EVPL_STREAM_SOCKET_TCP, shared->nlm_endpoint);
+        chimera_nfs_abort_if(rc, "failed to start the NLM server");
     }
     if (shared->nsm_server) {
-        evpl_rpc2_server_start(shared->nsm_server, EVPL_STREAM_SOCKET_TCP, shared->nsm_endpoint);
+        rc = evpl_rpc2_server_start(shared->nsm_server, EVPL_STREAM_SOCKET_TCP, shared->nsm_endpoint);
+        chimera_nfs_abort_if(rc, "failed to start the NSM server");
     }
 
     /* A data server registers no portmap services (it skips the auxiliary
      * protocols entirely). */
     if (!chimera_server_config_get_nfs_data_server(shared->config)) {
         if (shared->portmap_server) {
-            evpl_rpc2_server_start(shared->portmap_server, EVPL_STREAM_SOCKET_TCP, shared->portmap_endpoint);
+            rc = evpl_rpc2_server_start(shared->portmap_server, EVPL_STREAM_SOCKET_TCP, shared->portmap_endpoint);
+            chimera_nfs_abort_if(rc, "failed to start the PORTMAP server");
         } else {
             register_nfs_rpc_services(chimera_server_config_get_nfs_lockmgr_port(shared->config),
                                       chimera_server_config_get_nfs_nsm_port(shared->config));

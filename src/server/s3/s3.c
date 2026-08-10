@@ -1212,8 +1212,10 @@ static void
 s3_server_start(void *data)
 {
     struct chimera_server_s3_shared *shared = data;
+    int                              rc;
 
-    evpl_listen(shared->listener, shared->tcp_protocol, shared->endpoint);
+    rc = evpl_listen(shared->listener, shared->tcp_protocol, shared->endpoint);
+    chimera_s3_abort_if(rc, "failed to listen for S3");
 } /* s3_server_start */
 
 static void *

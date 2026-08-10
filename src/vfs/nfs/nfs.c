@@ -167,6 +167,12 @@ chimera_nfs_protocol_to_string(enum evpl_protocol_id protocol)
             return "RDMA-RC";
         case EVPL_STREAM_SOCKET_TLS:
             return "TLS";
+        case EVPL_STREAM_SOCKET_UNIX:
+            return "UNIX";
+        case EVPL_STREAM_INPROC:
+            return "INPROC";
+        case EVPL_DATAGRAM_INPROC:
+            return "INPROC-DGRAM";
         case EVPL_NUM_PROTO:
             return "UNKNOWN";
     } /* switch */
