@@ -4949,11 +4949,21 @@ memfs_rename_at(
             } else {
                 existing_inode->nlink--;
             }
+            int existing_freed = 0;
             if (existing_inode->nlink == 0) {
                 --existing_inode->refcnt;
                 if (existing_inode->refcnt == 0) {
                     memfs_inode_free(thread, existing_inode);
+                    existing_freed = 1;
                 }
+            }
+            /* POSIX: dropping a link is a status change on the clobbered
+             * inode.  If it survives (a remaining hard link, or unlinked but
+             * still open) its ctime/change must advance so a handle that still
+             * resolves to it observes the update. */
+            if (!existing_freed) {
+                existing_inode->ctime = now;
+                existing_inode->change++;
             }
             pthread_mutex_unlock(&existing_inode->lock);
             memfs_dirent_free(thread, existing_dirent);
