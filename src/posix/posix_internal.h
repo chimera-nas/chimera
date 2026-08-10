@@ -542,6 +542,22 @@ chimera_posix_fd_release(
     pthread_mutex_unlock(&entry->lock);
 } // chimera_posix_fd_release
 
+/* POSIX ties I/O rights to the descriptor's access mode, checked at open
+ * and carried in oflags (propagated by dup/dup2): read-family calls need a
+ * descriptor open for reading and write-family calls one open for writing,
+ * otherwise EBADF (read()/write() ERRORS). */
+static FORCE_INLINE int
+chimera_posix_fd_may_read(const struct chimera_posix_fd_entry *entry)
+{
+    return (entry->oflags & O_ACCMODE) != O_WRONLY;
+} /* chimera_posix_fd_may_read */
+
+static FORCE_INLINE int
+chimera_posix_fd_may_write(const struct chimera_posix_fd_entry *entry)
+{
+    return (entry->oflags & O_ACCMODE) != O_RDONLY;
+} /* chimera_posix_fd_may_write */
+
 static FORCE_INLINE off_t
 chimera_posix_fd_lseek(
     struct chimera_posix_client *posix,
@@ -613,6 +629,14 @@ chimera_posix_fd_lseek(
 
     return new_offset;
 } // chimera_posix_fd_lseek
+
+/* Resolve the current EOF of the file behind an fd entry, for O_APPEND
+ * write placement.  Returns 0 and fills *eof, or an errno value.
+ * Defined in posix_write.c. */
+int chimera_posix_fd_eof(
+    struct chimera_posix_worker   *worker,
+    struct chimera_posix_fd_entry *entry,
+    uint64_t                      *eof);
 
 void * chimera_posix_worker_init(
     struct evpl *evpl,
