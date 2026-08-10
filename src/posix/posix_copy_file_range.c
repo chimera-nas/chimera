@@ -70,6 +70,17 @@ chimera_posix_copy_file_range(
         return -1;
     }
 
+    /* copy_file_range(2): fd_in must be open for reading and fd_out for
+     * writing, and fd_out must not have O_APPEND set -- all EBADF. */
+    if (!chimera_posix_fd_may_read(in_entry) ||
+        !chimera_posix_fd_may_write(out_entry) ||
+        (out_entry->oflags & O_APPEND)) {
+        chimera_posix_fd_release(out_entry, 0);
+        chimera_posix_fd_release(in_entry, 0);
+        errno = EBADF;
+        return -1;
+    }
+
     src_off = off_in ? *off_in : (off_t) in_entry->offset;
     dst_off = off_out ? *off_out : (off_t) out_entry->offset;
 
