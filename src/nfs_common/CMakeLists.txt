@@ -27,44 +27,56 @@ set(SM_INTER_XDR_X ${CMAKE_CURRENT_SOURCE_DIR}/sm_inter.x)
 set(SM_INTER_XDR_C ${CMAKE_CURRENT_BINARY_DIR}/sm_inter_xdr.c)
 set(SM_INTER_XDR_H ${CMAKE_CURRENT_BINARY_DIR}/sm_inter_xdr.h)
 
+# Flags for every .x here.
+#
+# -r emits the RPC2 client and server dispatch code.
+#
+# -e accepts an enum value the declaration does not name.  These files are
+# snapshots of IETF protocols that keep gaining values: layouttype4 here stops
+# at LAYOUT4_BLOCK_VOLUME, but flex-files is 0x4 from RFC 8435 and the pNFS
+# code uses it.  Rejecting such a value on decode fails a request the rest of
+# the stack handles perfectly well, so take it and let the protocol code
+# decide.
+set(XDRZCC_FLAGS -r -e)
+
 add_custom_command(
     OUTPUT ${NFS3_XDR_C} ${NFS3_XDR_H}
-    COMMAND ${XDRZCC} -r ${NFS3_XDR_X} ${NFS3_XDR_C} ${NFS3_XDR_H}
+    COMMAND ${XDRZCC} ${XDRZCC_FLAGS} ${NFS3_XDR_X} ${NFS3_XDR_C} ${NFS3_XDR_H}
     DEPENDS ${NFS3_XDR_X} ${XDRZCC}
     COMMENT "Compiling ${NFS3_XDR_X}"
 )
 
 add_custom_command(
     OUTPUT ${NFS4_XDR_C} ${NFS4_XDR_H}
-    COMMAND ${XDRZCC} -r ${NFS4_XDR_X} ${NFS4_XDR_C} ${NFS4_XDR_H}
+    COMMAND ${XDRZCC} ${XDRZCC_FLAGS} ${NFS4_XDR_X} ${NFS4_XDR_C} ${NFS4_XDR_H}
     DEPENDS ${NFS4_XDR_X} ${XDRZCC}
     COMMENT "Compiling ${NFS4_XDR_X}"
 )
 
 add_custom_command(
     OUTPUT ${NFS_MOUNT_XDR_C} ${NFS_MOUNT_XDR_H}
-    COMMAND ${XDRZCC} -r ${NFS_MOUNT_XDR_X} ${NFS_MOUNT_XDR_C} ${NFS_MOUNT_XDR_H}
+    COMMAND ${XDRZCC} ${XDRZCC_FLAGS} ${NFS_MOUNT_XDR_X} ${NFS_MOUNT_XDR_C} ${NFS_MOUNT_XDR_H}
     DEPENDS ${NFS_MOUNT_XDR_X} ${XDRZCC}
     COMMENT "Compiling ${NFS_MOUNT_XDR_X}"
 )
 
 add_custom_command(
     OUTPUT ${PORTMAP_XDR_C} ${PORTMAP_XDR_H}
-    COMMAND ${XDRZCC} -r ${PORTMAP_XDR_X} ${PORTMAP_XDR_C} ${PORTMAP_XDR_H}
+    COMMAND ${XDRZCC} ${XDRZCC_FLAGS} ${PORTMAP_XDR_X} ${PORTMAP_XDR_C} ${PORTMAP_XDR_H}
     DEPENDS ${PORTMAP_XDR_X} ${XDRZCC}
     COMMENT "Compiling ${PORTMAP_XDR_X}"
 )
 
 add_custom_command(
     OUTPUT ${NLM4_XDR_C} ${NLM4_XDR_H}
-    COMMAND ${XDRZCC} -r ${NLM4_XDR_X} ${NLM4_XDR_C} ${NLM4_XDR_H}
+    COMMAND ${XDRZCC} ${XDRZCC_FLAGS} ${NLM4_XDR_X} ${NLM4_XDR_C} ${NLM4_XDR_H}
     DEPENDS ${NLM4_XDR_X} ${XDRZCC}
     COMMENT "Compiling ${NLM4_XDR_X}"
 )
 
 add_custom_command(
     OUTPUT ${SM_INTER_XDR_C} ${SM_INTER_XDR_H}
-    COMMAND ${XDRZCC} -r ${SM_INTER_XDR_X} ${SM_INTER_XDR_C} ${SM_INTER_XDR_H}
+    COMMAND ${XDRZCC} ${XDRZCC_FLAGS} ${SM_INTER_XDR_X} ${SM_INTER_XDR_C} ${SM_INTER_XDR_H}
     DEPENDS ${SM_INTER_XDR_X} ${XDRZCC}
     COMMENT "Compiling ${SM_INTER_XDR_X}"
 )
@@ -75,7 +87,7 @@ include_directories(${CMAKE_CURRENT_BINARY_DIR})
 
 # Suppress warnings for the generated source files
 set_source_files_properties(
-    ${NFS3_XDR_C} ${NFS4_XDR_C} ${NFS_MOUNT_XDR_C} ${PORTMAP_XDR_C} ${NLM4_XDR_C} ${SM_INTER_XDR_C} PROPERTIES COMPILE_OPTIONS "-Wno-unused;-Wno-switch;-Wno-format-truncation"
+    ${NFS3_XDR_C} ${NFS4_XDR_C} ${NFS_MOUNT_XDR_C} ${PORTMAP_XDR_C} ${NLM4_XDR_C} ${SM_INTER_XDR_C} PROPERTIES COMPILE_OPTIONS "-Wno-unused;-Wno-format-truncation"
 )
 
 add_definitions(-fvisibility=default)
