@@ -17,14 +17,6 @@
 #include "nfs4_state.h"
 #include "vfs/vfs_release.h"
 
-static uint32_t
-chimera_nfs4_open_share_history(uint32_t share)
-{
-    share &= (OPEN4_SHARE_ACCESS_READ | OPEN4_SHARE_ACCESS_WRITE);
-    return share == (OPEN4_SHARE_ACCESS_READ | OPEN4_SHARE_ACCESS_WRITE) ?
-           0x04 : share;
-} /* chimera_nfs4_open_share_history */
-
 void
 chimera_nfs4_open_downgrade(
     struct chimera_server_nfs_thread *thread,
@@ -107,17 +99,17 @@ chimera_nfs4_open_downgrade(
         }
     }
 
-    /* RFC 7530 §16.19.4: new bits must be a non-empty subset of current and
-     * match the union of some subset of OPENs currently in effect.  The
-     * history bit maps BOTH to a separate bit so OPEN(BOTH) cannot be
-     * downgraded to READ unless READ was opened separately. */
+    /* RFC 7530 §16.19.4: the new (access, deny) must be non-empty, a subset
+     * of the current bits, and match the union of some subset of the OPENs in
+     * effect for this owner+file -- checked jointly against the recorded event
+     * set, so e.g. OPEN(WRITE,NONE)+OPEN(READ,READ) cannot be downgraded to
+     * (READ,NONE) (no single OPEN, nor their union, is (READ,NONE)). */
     if (args->share_access == 0 ||
         (args->share_access & ~open_state->share_access) ||
         (args->share_deny   & ~open_state->share_deny) ||
-        (chimera_nfs4_open_share_history(args->share_access) &
-         ~open_state->share_access_hist) ||
-        (chimera_nfs4_open_share_history(args->share_deny) &
-         ~open_state->share_deny_hist)) {
+        !nfs_open_downgrade_expressible(open_state->share_combos,
+                                        args->share_access,
+                                        args->share_deny)) {
         /* RFC 7530 §9.1.7: NFS4ERR_INVAL is not in the no-consume list, so
         * a failed downgrade still advances the owner seqid and caches the
         * (error) reply for replay.  Not doing so left the owner's seqid
@@ -135,11 +127,13 @@ chimera_nfs4_open_downgrade(
         return;
     }
 
-    open_state->share_access      = args->share_access;
-    open_state->share_deny        = args->share_deny;
-    open_state->share_access_hist = chimera_nfs4_open_share_history(args->share_access);
-    open_state->share_deny_hist   = chimera_nfs4_open_share_history(args->share_deny);
-    open_state->seqid            += 1;
+    open_state->share_access = args->share_access;
+    open_state->share_deny   = args->share_deny;
+    /* The downgrade collapses the event history to the single surviving
+     * (access, deny) pair (matching the model's `events` reset). */
+    open_state->share_combos = nfs_open_combo_bit(args->share_access,
+                                                  args->share_deny);
+    open_state->seqid += 1;
 
     nfs4_stateid_encode(&res->resok4.open_stateid,
                         open_state->seqid,
