@@ -33,9 +33,8 @@ chimera_posix_faccessat_callback(
     void                         *private_data)
 {
     struct chimera_posix_faccessat_state *state = private_data;
-    int                                   r, w, x;
-    uid_t                                 proc_uid;
-    gid_t                                 proc_gid;
+    const struct chimera_vfs_cred        *cred;
+    int                                   r, w, x, in_group;
     mode_t                                mode;
 
     if (status != CHIMERA_VFS_OK) {
@@ -48,20 +47,41 @@ chimera_posix_faccessat_callback(
         return;
     }
 
-    proc_uid = getuid();
-    proc_gid = getgid();
-    mode     = st->st_mode;
+    /* Evaluate the XBD 4.5 file access permission algorithm against the
+     * chimera credential the operation runs as -- the caller's effective
+     * credential captured into the request by completion_init (this
+     * callback runs on a worker thread, so the thread-local override must
+     * not be consulted here), else the client-global credential.  NOT the
+     * host process's uid/gid, which have nothing to do with the identity
+     * chimera authorizes.  The chimera credential carries a single
+     * identity, so the real-vs-effective distinction (AT_EACCESS) is
+     * vacuous here.  Class selection is exclusive: the owner class
+     * applies whenever the uid matches, even if its bits deny what
+     * another class would grant. */
+    if (state->comp.request->has_cred) {
+        cred = &state->comp.request->req_cred;
+    } else {
+        cred = &chimera_posix_get_global()->client->cred;
+    }
 
-    if (proc_uid == 0) {
-        /* Root can read/write anything; execute requires at least one x bit */
+    mode = st->st_mode;
+
+    in_group = (cred->gid == st->st_gid);
+    for (uint32_t i = 0; !in_group && i < cred->ngids; i++) {
+        in_group = (cred->gids[i] == st->st_gid);
+    }
+
+    if (cred->uid == 0) {
+        /* Privilege grants read/write outright; execute needs the file to
+         * be a directory or carry at least one execute bit. */
         r = 1;
         w = 1;
-        x = !!(mode & (S_IXUSR | S_IXGRP | S_IXOTH));
-    } else if ((uint64_t) proc_uid == st->st_uid) {
+        x = S_ISDIR(mode) || !!(mode & (S_IXUSR | S_IXGRP | S_IXOTH));
+    } else if (cred->uid == st->st_uid) {
         r = !!(mode & S_IRUSR);
         w = !!(mode & S_IWUSR);
         x = !!(mode & S_IXUSR);
-    } else if ((uint64_t) proc_gid == st->st_gid) {
+    } else if (in_group) {
         r = !!(mode & S_IRGRP);
         w = !!(mode & S_IWGRP);
         x = !!(mode & S_IXGRP);
