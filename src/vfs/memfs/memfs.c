@@ -1944,6 +1944,10 @@ memfs_setattr(
             request->cred->flavor != CHIMERA_VFS_AUTH_ATTR) {
             chimera_vfs_realtime(&inode->mtime);
         }
+        /* POSIX kill-priv: truncation by an unprivileged writer clears
+         * set-user-ID (and set-group-ID when group-executable), exactly
+         * like the write path does. */
+        inode->mode        = chimera_vfs_killpriv_mode(request->cred, inode->mode);
         attr->va_set_mask &= ~CHIMERA_VFS_ATTR_SIZE;
         memfs_apply_attrs(inode, attr);
         attr->va_set_mask |= CHIMERA_VFS_ATTR_SIZE;
@@ -3299,6 +3303,15 @@ memfs_read(
         return;
     }
 
+    /* read() of a directory is EISDIR (the previous behavior fabricated
+     * zero-filled bytes from the empty data fork). */
+    if (unlikely(!stream && S_ISDIR(inode->mode))) {
+        pthread_mutex_unlock(&inode->lock);
+        request->status = CHIMERA_VFS_EISDIR;
+        request->complete(request);
+        return;
+    }
+
     fork      = stream ? &stream->fork : &inode->file;
     fork_size = stream ? stream->size : inode->size;
 
@@ -4370,6 +4383,19 @@ memfs_clone_range(
     } else {
         pthread_mutex_lock(&dst_inode->lock);
         pthread_mutex_lock(&src_inode->lock);
+    }
+
+    /* The source range must lie within the source file (FICLONERANGE
+     * contract: EINVAL otherwise).  Checked under the inode lock so the
+     * size cannot move underneath the decision. */
+    if (src_offset + length > src_inode->size) {
+        if (src_inode != dst_inode) {
+            pthread_mutex_unlock(&src_inode->lock);
+        }
+        pthread_mutex_unlock(&dst_inode->lock);
+        request->status = CHIMERA_VFS_EINVAL;
+        request->complete(request);
+        return;
     }
 
     memfs_map_pre_attr(shared, &request->clone_range.r_pre_attr, dst_inode,
