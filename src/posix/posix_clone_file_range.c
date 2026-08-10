@@ -52,6 +52,16 @@ chimera_posix_clone_file_range(
         return -1;
     }
 
+    /* FICLONERANGE: the source must be open for reading and the
+     * destination for writing (EBADF otherwise). */
+    if (!chimera_posix_fd_may_read(src_entry) ||
+        !chimera_posix_fd_may_write(dst_entry)) {
+        chimera_posix_fd_release(dst_entry, 0);
+        chimera_posix_fd_release(src_entry, 0);
+        errno = EBADF;
+        return -1;
+    }
+
     chimera_posix_completion_init(&comp, &req);
 
     req.opcode                   = CHIMERA_CLIENT_OP_CLONE_RANGE;
