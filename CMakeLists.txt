@@ -376,3 +376,4 @@ add_definitions(-DXDR_CUSTOM_IOVEC=${CHIMERA_EXT_SRC}/libevpl/src/rpc2/xdr_iovec
 add_definitions(-DXDR_CUSTOM_DUMP=1)
 
 add_subdirectory(src)
+add_subdirectory(tools)
