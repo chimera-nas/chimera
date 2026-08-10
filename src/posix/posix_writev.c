@@ -72,13 +72,33 @@ chimera_posix_writev_internal(
         return -1;
     }
 
+    if (!chimera_posix_fd_may_write(entry)) {
+        chimera_posix_fd_release(entry, flags);
+        errno = EBADF;
+        return -1;
+    }
+
+    uint64_t write_offset = use_fd_offset ? entry->offset : (uint64_t) offset;
+
+    /* writev() honors O_APPEND like write(): offset moves to EOF prior to
+     * each write (pwritev keeps its explicit offset per POSIX). */
+    if (use_fd_offset && (entry->oflags & O_APPEND)) {
+        int aerr = chimera_posix_fd_eof(worker, entry, &write_offset);
+
+        if (aerr) {
+            chimera_posix_fd_release(entry, flags);
+            errno = aerr;
+            return -1;
+        }
+    }
+
     chimera_posix_completion_init(&comp, &req);
 
     req.opcode              = CHIMERA_CLIENT_OP_WRITE;
     req.writev.callback     = chimera_posix_writev_callback;
     req.writev.private_data = &comp;
     req.writev.handle       = entry->handle;
-    req.writev.offset       = use_fd_offset ? entry->offset : (uint64_t) offset;
+    req.writev.offset       = write_offset;
     req.writev.length       = total_len;
     req.writev.src_iov      = iov;
     req.writev.src_iovcnt   = iovcnt;
@@ -88,7 +108,7 @@ chimera_posix_writev_internal(
     int     err = chimera_posix_wait(&comp);
 
     if (!err && req.sync_result >= 0 && use_fd_offset) {
-        entry->offset += (uint64_t) req.sync_result;
+        entry->offset = write_offset + (uint64_t) req.sync_result;
     }
 
     ssize_t ret = req.sync_result;

@@ -60,6 +60,12 @@ chimera_posix_read_into_common(
         return -1;
     }
 
+    if (!chimera_posix_fd_may_read(entry)) {
+        chimera_posix_fd_release(entry, CHIMERA_POSIX_FD_IO_ACTIVE);
+        errno = EBADF;
+        return -1;
+    }
+
     chimera_posix_completion_init(&comp, &req);
 
     req.opcode                 = CHIMERA_CLIENT_OP_READ;

@@ -111,6 +111,12 @@ chimera_posix_readv_internal(
         return -1;
     }
 
+    if (!chimera_posix_fd_may_read(entry)) {
+        chimera_posix_fd_release(entry, flags);
+        errno = EBADF;
+        return -1;
+    }
+
     chimera_posix_completion_init(&comp, &req);
 
     req.opcode            = CHIMERA_CLIENT_OP_READ;

@@ -52,6 +52,12 @@ chimera_posix_pwrite(
         return -1;
     }
 
+    if (!chimera_posix_fd_may_write(entry)) {
+        chimera_posix_fd_release(entry, 0);
+        errno = EBADF;
+        return -1;
+    }
+
     chimera_posix_completion_init(&comp, &req);
 
     req.opcode             = CHIMERA_CLIENT_OP_WRITE;
