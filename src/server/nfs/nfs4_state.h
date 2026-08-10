@@ -313,8 +313,13 @@ struct nfs_open_state {
     uint16_t                        fh_len;
     uint32_t                        share_access;       /* OPEN4_SHARE_ACCESS_* */
     uint32_t                        share_deny;         /* OPEN4_SHARE_DENY_*   */
-    uint32_t                        share_access_hist;  /* 3-bit OPEN_DOWNGRADE history */
-    uint32_t                        share_deny_hist;    /* 3-bit OPEN_DOWNGRADE history */
+    /* Set of (share_access, share_deny) pairs this open-owner has OPENed on
+     * this file, one bit per (access<<2 | deny) combo.  OPEN_DOWNGRADE must
+     * land on the union of some subset of these events (RFC 7530 §16.19.4),
+     * not merely a subset of the current bits, so the two dimensions must be
+     * checked jointly -- an independent per-dimension history cannot tell
+     * "OPEN(READ,NONE)+OPEN(WRITE,WRITE)" from "OPEN(READ,WRITE)+OPEN(WRITE,NONE)". */
+    uint16_t                        share_combos;
     uint32_t                        seqid;              /* stateid.seqid */
 
     /* Slot identity (decoded from stateid.other). */
@@ -903,6 +908,41 @@ nfs_client_has_open_state_for_fh(
     struct nfs_client *client,
     const uint8_t     *fh,
     uint16_t           fh_len);
+
+/* One bit identifying a (share_access, share_deny) OPEN event for
+ * nfs_open_state.share_combos.  access and deny are each 2-bit masks. */
+static inline uint16_t
+nfs_open_combo_bit(
+    uint32_t share_access,
+    uint32_t share_deny)
+{
+    return (uint16_t) (1u << (((share_access & 0x3) << 2) | (share_deny & 0x3)));
+} /* nfs_open_combo_bit */
+
+/* RFC 7530 §16.19.4: is (share_access, share_deny) expressible as the union
+ * of some subset of the OPEN events recorded in `combos`?  Equivalently, the
+ * OR of every recorded event that fits jointly within the target equals the
+ * target (a subset that excluded a fitting event could only fall short). */
+static inline bool
+nfs_open_downgrade_expressible(
+    uint16_t combos,
+    uint32_t share_access,
+    uint32_t share_deny)
+{
+    uint32_t acc = 0, den = 0;
+
+    for (uint32_t a = 0; a <= 3; a++) {
+        for (uint32_t d = 0; d <= 3; d++) {
+            if ((combos & (1u << ((a << 2) | d))) &&
+                (a & ~share_access) == 0 &&
+                (d & ~share_deny) == 0) {
+                acc |= a;
+                den |= d;
+            }
+        }
+    }
+    return acc == share_access && den == share_deny;
+} /* nfs_open_downgrade_expressible */
 
 /* Re-open: merge share bits onto an existing state, bump its seqid, and
  * write the (now-updated) stateid to `out_stateid`. */

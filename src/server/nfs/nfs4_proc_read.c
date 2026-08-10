@@ -307,6 +307,17 @@ chimera_nfs4_read(
         }
     }
 
+    /* RFC 7530 §9.1.4 / RFC 8881 §9.1.2: I/O through an open (or lock) stateid
+     * is limited to the associated open's granted access mode; a READ needs
+     * OPEN4_SHARE_ACCESS_READ (WRITE enforces the symmetric check). */
+    if ((open_state->share_access & OPEN4_SHARE_ACCESS_READ) == 0) {
+        nfs_state_table_release(table, state_void, state_type,
+                                thread->vfs_thread);
+        res->status = NFS4ERR_OPENMODE;
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
     status = nfs_open_state_check_io_denied(open_state,
                                             OPEN4_SHARE_ACCESS_READ);
     if (status != NFS4_OK) {
