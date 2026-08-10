@@ -370,25 +370,40 @@ chimera_posix_check_path(const char *path)
     return (int) len;
 } /* chimera_posix_check_path */
 
+/* Allocate the lowest free descriptor slot with index >= minfd (POSIX
+ * open()/dup() require the lowest available descriptor; F_DUPFD the lowest
+ * >= its argument).  The free list is unordered, so scan it for the best
+ * index; it holds at most max_fds entries and allocation is not a hot
+ * path in this compatibility layer. */
 static FORCE_INLINE int
-chimera_posix_fd_alloc(
+chimera_posix_fd_alloc_at_least(
     struct chimera_posix_client    *posix,
-    struct chimera_vfs_open_handle *handle)
+    struct chimera_vfs_open_handle *handle,
+    int                             minfd)
 {
-    struct chimera_posix_fd_entry *entry;
-    int                            fd;
+    struct chimera_posix_fd_entry  *entry;
+    struct chimera_posix_fd_entry **pp, **best_pp = NULL;
+    int                             fd, best = posix->max_fds;
 
     pthread_mutex_lock(&posix->fd_lock);
 
-    entry = posix->free_list;
+    for (pp = &posix->free_list; *pp; pp = &(*pp)->next) {
+        int idx = (int) (*pp - posix->fds);
 
-    if (!entry) {
+        if (idx >= minfd && idx < best) {
+            best    = idx;
+            best_pp = pp;
+        }
+    }
+
+    if (!best_pp) {
         pthread_mutex_unlock(&posix->fd_lock);
         return -1;
     }
 
-    posix->free_list = entry->next;
-    entry->next      = NULL;
+    entry       = *best_pp;
+    *best_pp    = entry->next;
+    entry->next = NULL;
 
     pthread_mutex_unlock(&posix->fd_lock);
 
@@ -407,6 +422,14 @@ chimera_posix_fd_alloc(
     entry->oflags        = 0;
 
     return fd;
+} // chimera_posix_fd_alloc_at_least
+
+static FORCE_INLINE int
+chimera_posix_fd_alloc(
+    struct chimera_posix_client    *posix,
+    struct chimera_vfs_open_handle *handle)
+{
+    return chimera_posix_fd_alloc_at_least(posix, handle, 0);
 } // chimera_posix_fd_alloc
 
 static FORCE_INLINE void

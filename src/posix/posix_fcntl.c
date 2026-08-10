@@ -9,6 +9,103 @@
 
 #include "posix_internal.h"
 #include "../client/client_lock.h"
+#include "../client/client_dup.h"
+
+/* Status flags F_SETFL may change; everything else in the argument is
+ * ignored per POSIX (the access mode and creation flags are immutable). */
+#define CHIMERA_POSIX_SETFL_MASK (O_APPEND | O_NONBLOCK)
+
+static int
+chimera_posix_fcntl_dupfd(
+    struct chimera_posix_client *posix,
+    struct chimera_posix_worker *worker,
+    int                          fd,
+    int                          minfd)
+{
+    struct chimera_posix_fd_entry  *entry;
+    struct chimera_vfs_open_handle *handle;
+    int                             newfd;
+
+    if (minfd < 0 || minfd >= posix->max_fds) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    entry = chimera_posix_fd_acquire(posix, fd, 0);
+
+    if (!entry) {
+        errno = EBADF;
+        return -1;
+    }
+
+    handle = entry->handle;
+
+    chimera_dup_handle(worker->client_thread, handle);
+
+    newfd = chimera_posix_fd_alloc_at_least(posix, handle, minfd);
+
+    if (newfd < 0) {
+        chimera_close(worker->client_thread, handle);
+        chimera_posix_fd_release(entry, 0);
+        errno = EMFILE;
+        return -1;
+    }
+
+    /* Like dup(): the duplicate takes the description's offset and
+     * status flags. */
+    posix->fds[newfd].offset = entry->offset;
+    posix->fds[newfd].oflags = entry->oflags;
+
+    chimera_posix_fd_release(entry, 0);
+
+    return newfd;
+} /* chimera_posix_fcntl_dupfd */
+
+static int
+chimera_posix_fcntl_getfl(
+    struct chimera_posix_client *posix,
+    int                          fd)
+{
+    struct chimera_posix_fd_entry *entry;
+    int                            flags;
+
+    entry = chimera_posix_fd_acquire(posix, fd, 0);
+
+    if (!entry) {
+        errno = EBADF;
+        return -1;
+    }
+
+    flags = (int) (entry->oflags &
+                   (O_ACCMODE | CHIMERA_POSIX_SETFL_MASK));
+
+    chimera_posix_fd_release(entry, 0);
+
+    return flags;
+} /* chimera_posix_fcntl_getfl */
+
+static int
+chimera_posix_fcntl_setfl(
+    struct chimera_posix_client *posix,
+    int                          fd,
+    int                          arg)
+{
+    struct chimera_posix_fd_entry *entry;
+
+    entry = chimera_posix_fd_acquire(posix, fd, 0);
+
+    if (!entry) {
+        errno = EBADF;
+        return -1;
+    }
+
+    entry->oflags = (entry->oflags & ~(unsigned int) CHIMERA_POSIX_SETFL_MASK)
+        | ((unsigned int) arg & CHIMERA_POSIX_SETFL_MASK);
+
+    chimera_posix_fd_release(entry, 0);
+
+    return 0;
+} /* chimera_posix_fcntl_setfl */
 
 static void
 chimera_posix_fcntl_lock_callback(
@@ -53,6 +150,24 @@ chimera_posix_fcntl(
     va_list                         args;
 
     switch (cmd) {
+        case F_DUPFD: {
+            int minfd;
+
+            va_start(args, cmd);
+            minfd = va_arg(args, int);
+            va_end(args);
+            return chimera_posix_fcntl_dupfd(posix, worker, fd, minfd);
+        }
+        case F_GETFL:
+            return chimera_posix_fcntl_getfl(posix, fd);
+        case F_SETFL: {
+            int arg;
+
+            va_start(args, cmd);
+            arg = va_arg(args, int);
+            va_end(args);
+            return chimera_posix_fcntl_setfl(posix, fd, arg);
+        }
         case F_GETLK:
             flags |= CHIMERA_VFS_LOCK_TEST;
         /* fall through */
