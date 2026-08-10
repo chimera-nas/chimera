@@ -59,7 +59,10 @@ chimera_posix_lseek_hole_data(
     struct chimera_posix_seek_ctx  ctx;
 
     if (offset < 0) {
-        errno = EINVAL;
+        /* No data or hole can exist at a negative offset; this is the same
+         * out-of-range condition as an offset at/past EOF, which POSIX and
+         * Linux report as ENXIO (not EINVAL) for SEEK_DATA/SEEK_HOLE. */
+        errno = ENXIO;
         return -1;
     }
 
