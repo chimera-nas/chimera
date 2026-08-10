@@ -799,9 +799,28 @@ chimera_vfs_share_batch_escape(
         bool dir_lease_match =
             cur->grant && cur->grant->is_dir &&
             cur->owner.client_key == share_holder->owner.client_key;
+        /* An RqLs FILE lease is keyed by LeaseKey, so neither cb_private (the
+         * grant) nor owner_lo/hi (the key) matches the share holder's open;
+         * the holder's own lease key, stamped on its share reservation when the
+         * open took it, is the link.  A conflicting open must be able to park on
+         * such a lease's HANDLE break exactly as it parks on a batch oplock's:
+         * the holder may close its handle-cached open and free the conflict
+         * (MS-FSA break-before-share; smb2.replay.dhv2-pending1n-vs-violation-
+         * lease-*, where the holder either closes -> the open is granted, or acks
+         * and keeps the handle -> SHARING_VIOLATION).  Note this does NOT make an
+         * RqLs lease sole-handle across clients: only a genuine share-mode
+         * conflict reaches here, and a compatible open still coexists with the
+         * holder's H via the caching matrix. */
+        bool rqls_lease_match =
+            cur->grant && !cur->grant->is_oplock && !cur->grant->is_dir &&
+            share_holder->has_own_lease_key &&
+            cur->owner.is_lease &&
+            cur->owner.client_key == share_holder->owner.client_key &&
+            cur->owner.owner_lo == share_holder->own_lease_lo &&
+            cur->owner.owner_hi == share_holder->own_lease_hi;
 
         if (cur->owner.cb_private != share_holder->owner.cb_private &&
-            !legacy_oplock_match && !dir_lease_match) {
+            !legacy_oplock_match && !dir_lease_match && !rqls_lease_match) {
             continue;
         }
 
@@ -1524,9 +1543,21 @@ chimera_vfs_state_try_insert(
                  * holder may close and free the share conflict (else it stands ->
                  * SHARING_VIOLATION).  A SHARE acquirer carries no H bit, so the
                  * generic retain floor would leave H intact; force it off for a
-                 * directory-lease conflict (dirlease.v2_request / rename_dst_parent). */
+                 * directory-lease conflict (dirlease.v2_request / rename_dst_parent).
+                 *
+                 * The same applies to a FILE lease whose handle cache is what a
+                 * hard share conflict must dislodge (the RqLs arm of
+                 * chimera_vfs_share_batch_escape): break H and ONLY H, leaving the
+                 * holder's read/write caching alone -- the conflicting open never
+                 * gains access unless the holder closes, so its cached data stays
+                 * valid (smb2.replay.dhv2-pending1n-vs-violation-lease-* assert
+                 * exactly one break, RWH -> RW). */
                 if (conflict->kind == CHIMERA_VFS_LEASE_CACHING &&
-                    conflict->grant && conflict->grant->is_dir) {
+                    conflict->grant &&
+                    (conflict->grant->is_dir ||
+                     (lease->kind == CHIMERA_VFS_LEASE_SHARE &&
+                      !conflict->grant->is_oplock &&
+                      (conflict->mode.granted & CHIMERA_VFS_LEASE_MODE_H)))) {
                     floor = conflict->mode.granted & ~CHIMERA_VFS_LEASE_MODE_H;
                 }
 
@@ -2725,6 +2756,7 @@ chimera_vfs_lease_ack(
 SYMBOL_EXPORT void
 chimera_vfs_lease_revoke(struct chimera_vfs_lease *lease)
 {
+
     struct chimera_vfs_file_state *file = lease->file;
     chimera_vfs_lease_revoked_cb_t revoked_cb;
     void                          *cb_private;

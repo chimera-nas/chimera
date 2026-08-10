@@ -477,6 +477,51 @@ main(
         }
     }
 
+    /* The smb2.replay.dhv2-pending*-{sane,windows} pairs send byte-identical
+     * traffic and differ only in the status each requires for a replayed durable
+     * create that collides with a still-deferred create: FILE_NOT_AVAILABLE
+     * (Samba, the chimera default) vs ACCESS_DENIED (Windows).  No server can
+     * satisfy both, so the -windows variants run against a daemon put in the
+     * Windows profile; the -sane variants keep the default.  Both halves are
+     * gated, which is what keeps the non-default profile from rotting.  This
+     * works only because smb2.replay is in SMBTORTURE_ISOLATE_SUITES (one daemon
+     * per subtest) so the knob cannot bleed into a -sane case; the refusal below
+     * enforces that rather than trusting the note in that list. */
+    {
+        int want_windows = 0, want_sane = 0;
+
+        for (i = 0; i < num_tests; i++) {
+            if (strstr(tests[i], "dhv2-pending") == NULL) {
+                continue;
+            }
+            if (strstr(tests[i], "-windows") != NULL) {
+                want_windows = 1;
+            } else if (strstr(tests[i], "-sane") != NULL) {
+                want_sane = 1;
+            }
+        }
+
+        /* Both halves in one invocation means one daemon would have to answer a
+         * replayed create two different ways: whichever profile we picked, the
+         * other half would fail and read as a protocol regression rather than a
+         * harness mistake.  Refuse instead -- the only way to get here is to
+         * consolidate smb2.replay, so say what to do about it. */
+        if (want_windows && want_sane) {
+            fprintf(stderr,
+                    "smbtorture_test: refusing to run dhv2-pending -sane and "
+                    "-windows subtests in one daemon: they require mutually "
+                    "exclusive replay-vs-pending-create profiles.  Keep "
+                    "smb2.replay in SMBTORTURE_ISOLATE_SUITES so each subtest "
+                    "gets its own daemon.\n");
+            test_cleanup(&env, 0);
+            return EXIT_FAILURE;
+        }
+
+        if (want_windows) {
+            chimera_server_config_set_smb_replay_pending_windows(config, 1);
+        }
+    }
+
     /* Configure backend-specific modules */
     if (strcmp(backend, "diskfs_io_uring") == 0 ||
         strcmp(backend, "diskfs_aio") == 0) {

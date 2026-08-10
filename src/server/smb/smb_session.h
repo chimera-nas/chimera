@@ -64,9 +64,14 @@ struct chimera_smb_file_id {
  * holder to acknowledge a lease/oplock break (MS-SMB2 3.3.5.9 pending open).
  * The handle is already in the tree (so its durable create_guid is visible) but
  * the open has not completed.  A replayed durable create whose create_guid
- * matches a still-pending open must be answered STATUS_FILE_NOT_AVAILABLE
- * rather than parking a second time and timing out (MS-SMB2 3.3.5.9.10):
- * smb2.replay.dhv2-pending*. Cleared on resume / break-deadline. */
+ * matches a still-pending open is answered from the pending open rather than
+ * parking a second time and timing out: STATUS_FILE_NOT_AVAILABLE by default,
+ * STATUS_ACCESS_DENIED under the Windows profile (smb_replay_pending_windows --
+ * MS-SMB2 3.3.5.9 / 3.3.5.9.10 do not cover a create that has not completed, so
+ * the two implementations diverge).  Covers both halves of
+ * smb2.replay.dhv2-pending{1,2,3}{l,n,o}-vs-{lease,oplock}-{sane,windows}.
+ * Cleared on resume / break-deadline.  A create deferred BEFORE it is hashed
+ * (share conflict) is not covered here -- see tree->pending_creates. */
 #define CHIMERA_SMB_OPEN_FILE_CREATE_PENDING       0x00000200
 /* The file's data was modified through this open (a write occurred).  A write
  * does NOT immediately break the parent directory lease -- the file's size/mtime
@@ -78,10 +83,10 @@ struct chimera_smb_file_id {
  * still parked on a break ack: chimera_smb_async_interim_drain dropped the parked
  * request without a resume, so the open's CREATE can never complete.  It is left
  * hashed + CREATE_PENDING so a replayed durable create with this create_guid still
- * answers FILE_NOT_AVAILABLE -- until the break it waited on settles (the holder
+ * gets the pending answer -- until the break it waited on settles (the holder
  * closed/acked), at which point chimera_smb_create_guid_replay lazy-evicts the
  * resolved zombie and a replay falls through to a fresh open
- * (smb2.replay.dhv2-pending2*-vs-{lease,oplock}-sane). */
+ * (smb2.replay.dhv2-pending2*-vs-{lease,oplock}-{sane,windows}). */
 #define CHIMERA_SMB_OPEN_FILE_PENDING_ORPHANED     0x00000800
 
 /* Bits identifying which CREATE contexts a client supplied on the open. Mirrored
@@ -311,6 +316,21 @@ struct chimera_smb_tree {
 
     struct chimera_smb_open_file *open_files[CHIMERA_SMB_OPEN_FILE_BUCKETS];
     pthread_mutex_t               open_files_lock[CHIMERA_SMB_OPEN_FILE_BUCKETS];
+
+    /* DH2Q creates that are deferred BEFORE their open_file is hashed into
+     * open_files[]: a hard share conflict against a holder whose handle-caching
+     * oplock/lease is mid-break, which parks on that break (or retries a
+     * disconnecting durable holder on a timer).  Such a create is invisible to
+     * the CREATE_PENDING scan in chimera_smb_create_guid_replay -- the open is
+     * hashed only once its share reservation is granted -- so a replay of it
+     * would fall through to a fresh open and collide with the very conflict the
+     * original is waiting out (smb2.replay.dhv2-pending1n-vs-violation-lease-*).
+     * The entries live in the deferred requests themselves (no allocation) and
+     * are unlinked when the create resolves, so an entry never outlives its
+     * request.  Guarded by pending_creates_lock; the list is short (one entry per
+     * deferred create on this tree). */
+    struct chimera_smb_request   *pending_creates;
+    pthread_mutex_t               pending_creates_lock;
 
     struct chimera_smb_tree      *prev;
     struct chimera_smb_tree      *next;
