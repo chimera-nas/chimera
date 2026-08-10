@@ -1,0 +1,8 @@
+time=2026-08-06T14:09:36.133850092Z message="Initializing VFS module linux..." level=info module=vfs
+test: smb2.dir.large-files
+Directory enumeration completed in 0.023 s.
+smbtorture: FAILED (exit code 134)
+INTERNAL ERROR: Signal 11: Segmentation fault in smbtorture () () pid 338717
+PANIC (pid 338717): Signal 11: Segmentation fault
+BACKTRACE: 3 stack frames:
+ #0 /usr/lib/x86_64-linux-gnu/samba/libgenrand-private-samba.so.0(log_stack_trace+0x32)

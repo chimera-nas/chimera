@@ -1,0 +1,8 @@
+PASS|memfs|smb2.acls.CREATOR
+FAIL|memfs|smb2.acls.DENY1
+FAIL|memfs|smb2.charset.Testing wide-a
+PASS|linux|smb2.acls.CREATOR
+FAIL|linux|smb2.dir.large-files
+FAIL|linux|smb2.setinfo
+FAIL|linux|smb2.acls.DENY1
+PASS|linux|smb2.charset.Testing wide-a

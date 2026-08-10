@@ -1,0 +1,10 @@
+time=2026-08-06T14:09:36.133850092Z message="Initializing VFS module memfs..." level=info module=vfs
+========================================
+Backend: memfs
+========================================
+smbtorture: FAILED (exit code 1)
+test: smb2.acls.DENY1
+failure: smb2.acls.DENY1 [
+source4/torture/smb2/acls.c:1234: status was NT_STATUS_ACCESS_DENIED, expected NT_STATUS_OK
+]
+time=2026-08-06T14:09:37.000000000Z message="Shutting down" level=info module=server
