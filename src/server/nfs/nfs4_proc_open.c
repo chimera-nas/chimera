@@ -641,11 +641,13 @@ chimera_nfs4_open_exclusive_verify(
             return;
         }
 
-        res->status              = NFS4_OK;
-        res->resok4.cinfo.atomic = 0;
-        res->resok4.cinfo.before = 0;
-        res->resok4.cinfo.after  = 0;
-        res->resok4.rflags       = install_rflags |
+        res->status = NFS4_OK;
+        /* An exclusive-create retry does not modify the directory, so cinfo
+         * reports before == after == the directory's (unchanged) change
+         * attribute rather than a bare zero, which a revalidating client would
+         * otherwise mistake for the directory changing. */
+        chimera_nfs4_set_changeinfo(&res->resok4.cinfo, dir_pre_attr, dir_post_attr);
+        res->resok4.rflags = install_rflags |
             ((lock_caps & CHIMERA_VFS_CAP_FS_LOCK) ?
              OPEN4_RESULT_LOCKTYPE_POSIX : 0);
     }
@@ -691,8 +693,8 @@ chimera_nfs4_open_at_complete(
                                 CHIMERA_VFS_OPEN_INFERRED,
                                 set_attr,
                                 CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_ATIME | CHIMERA_VFS_ATTR_MTIME,
-                                0,
-                                0,
+                                CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME,
+                                CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME,
                                 chimera_nfs4_open_exclusive_verify,
                                 req);
             return;
