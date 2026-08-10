@@ -44,9 +44,17 @@ chimera_posix_lstat(
     struct chimera_posix_completion comp;
     int                             path_len;
 
-    chimera_posix_completion_init(&comp, &req);
-
     path_len = strlen(path);
+
+    /* XBD 4.16: a trailing slash forces a final symlink to be followed
+     * (the slash names the directory the link resolves to) and requires
+     * the result to be a directory -- so lstat("lnk/") behaves as
+     * stat("lnk/"), including its ENOTDIR check. */
+    if (path_len > 1 && path[path_len - 1] == '/') {
+        return chimera_posix_stat(path, st);
+    }
+
+    chimera_posix_completion_init(&comp, &req);
 
     req.opcode            = CHIMERA_CLIENT_OP_STAT;
     req.stat.callback     = chimera_posix_lstat_callback;
