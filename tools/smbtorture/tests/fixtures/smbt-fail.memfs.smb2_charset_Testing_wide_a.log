@@ -1,0 +1,5 @@
+time=2026-08-06T14:09:36.133850092Z message="start" level=info module=vfs
+test: smb2.charset.Testing wide-a
+failure: smb2.charset.Testing wide-a [
+dir.c:1435: didn't expect <script>alert(1)</script> & aaa慡慡
+]
