@@ -889,6 +889,21 @@ diskfs_setattr_inode_cb(
 
     diskfs_apply_attrs(inode, request->setattr.set_attr);
 
+    /* POSIX: a size change (grow, or truncate to the same size) updates mtime,
+     * just like the shrink path does in diskfs_setattr_trunc_done.  This branch
+     * handles every non-shrink setattr, so bump mtime only when SIZE was set,
+     * and not when the caller supplied an explicit mtime or manages the write
+     * time itself (AUTH_ATTR / SMB).  Uses orig_mask because diskfs_apply_attrs
+     * has already rewritten set_attr->va_set_mask above. */
+    if ((orig_mask & CHIMERA_VFS_ATTR_SIZE) &&
+        !(orig_mask & CHIMERA_VFS_ATTR_MTIME) &&
+        request->cred->flavor != CHIMERA_VFS_AUTH_ATTR) {
+        struct timespec now;
+        clock_gettime(CLOCK_REALTIME, &now);
+        inode->mtime_sec  = now.tv_sec;
+        inode->mtime_nsec = now.tv_nsec;
+    }
+
     p->inode_stash[0] = inode;
 
     /* Persist the opaque pNFS layout blob as this inode's single PNFS record,
