@@ -5,6 +5,7 @@
 #include "nfs4_procs.h"
 #include "nfs4_status.h"
 #include "nfs4_state.h"
+#include "nfs4_session.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 
@@ -103,6 +104,19 @@ chimera_nfs4_deallocate(
      * consulting the state table.
      */
     if (nfs4_stateid_is_special(&args->da_stateid)) {
+        /* A special-stateid write op must still honor share-reservation
+         * deny-WRITE modes held by any owner of any client (RFC 8881
+         * §9.7): DEALLOCATE modifies file data, so a conflicting
+         * deny-WRITE open makes it NFS4ERR_LOCKED, exactly as WRITE. */
+        nfsstat4 dstatus = nfs4_clients_check_io_denied(
+            &thread->shared->nfs4_shared_clients,
+            req->fh, req->fhlen, OPEN4_SHARE_ACCESS_WRITE);
+
+        if (dstatus != NFS4_OK) {
+            res->dr_status = dstatus;
+            chimera_nfs4_compound_complete(req, res->dr_status);
+            return;
+        }
         chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
                             req->fh,
                             req->fhlen,
