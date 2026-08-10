@@ -180,8 +180,9 @@ chimera_nfs4_lock_complete(
         lock_state->range_leases = rl;
 
         /* RFC 7530 §9.1.3: stateid.seqid starts at 1 for a new lock_stateid;
-         * only increment when modifying an existing lock state. */
-        if (!args->locker.new_lock_owner) {
+         * only increment when modifying an existing lock state -- including a
+         * new_lock_owner request that re-established (reused) an emptied one. */
+        if (!args->locker.new_lock_owner || req->lock_reused) {
             lock_state->seqid += 1;
         }
 
@@ -205,8 +206,9 @@ chimera_nfs4_lock_complete(
     free(rl);
 
     /* Tear down the freshly-allocated lock_state if this was a new
-     * lock_owner request; otherwise just drop the acquire ref. */
-    if (args->locker.new_lock_owner) {
+     * lock_owner request that created one; otherwise (existing stateid, or a
+     * new_lock_owner that reused an emptied one) just drop the acquire ref. */
+    if (args->locker.new_lock_owner && !req->lock_reused) {
         nfs_state_table_release(table, lock_state, NFS4_SLOT_TYPE_LOCK,
                                 req->thread->vfs_thread);
         nfs_lock_state_destroy(lock_state, table, req->thread->vfs_thread);
@@ -268,6 +270,8 @@ chimera_nfs4_lock(
     uint32_t                        lock_type;
     nfsstat4                        status;
 
+    req->lock_reused = false;
+
     /* RFC 7530 §16.10.3: current filehandle must be set */
     if (req->fhlen == 0) {
         res->status = NFS4ERR_NOFILEHANDLE;
@@ -286,6 +290,11 @@ chimera_nfs4_lock(
         struct nfs_client     *client;
         struct nfs_lock_owner *lock_owner;
         bool                   created;
+        /* An emptied-but-alive lock stateid for this (lock-owner, file) is
+         * re-established in place rather than replaced (see below). */
+        bool                   have_reuse  = false;
+        uint8_t                reuse_shard = 0;
+        uint32_t               reuse_slot  = 0, reuse_gen = 0;
 
         /* Validate the supplied open stateid. */
         status = nfs_state_table_acquire(table,
@@ -361,30 +370,31 @@ chimera_nfs4_lock(
                 return;
             }
 
-            /* RFC 7530 §16.10.5: new_lock_owner=TRUE when this (lock-owner,
-             * file) *already holds* byte-range locks is NFS4ERR_BAD_SEQID; the
-             * sole exception is a retransmission of the establishing LOCK
-             * (matching lock_seqid), answered as a replay.  A lock stateid that
-             * exists but holds no ranges (every lock LOCKU'd) does NOT count --
-             * open_to_lock_owner may re-establish it (pynfs LOCK24).  The owner
-             * list is stable and every entry's open_state is alive while
+            /* RFC 7530 §16.10.5 / §9.1.4.2: an existing lock stateid for this
+             * (lock-owner, file) governs how new_lock_owner=TRUE resolves.  If
+             * it *holds* byte-range locks the re-establish is NFS4ERR_BAD_SEQID
+             * (sole exception: a retransmission of the establishing LOCK, with
+             * matching lock_seqid, answered as a replay).  If it exists but
+             * holds no ranges (every lock LOCKU'd) it is re-established *in
+             * place* -- the "other" is stable for a stateid's life, so we reuse
+             * the emptied stateid rather than mint a fresh one (matches pynfs
+             * LOCK24 and the model's one-stateid-per-(owner,file) reuse).  The
+             * owner list is stable and every entry's open_state is alive while
              * lock_owner->lock is held (nfs_lock_state_destroy unlinks under the
              * same lock before releasing the open_state). */
             if (!created) {
-                struct nfs_lock_state *ls;
-                bool                   dup = false;
+                struct nfs_lock_state *ls, *match = NULL;
 
                 pthread_mutex_lock(&lock_owner->lock);
                 for (ls = lock_owner->states; ls; ls = ls->next_in_owner) {
-                    if (ls->range_leases != NULL &&
-                        ls->open_state &&
+                    if (ls->open_state &&
                         ls->open_state->fh_len == req->fhlen &&
                         memcmp(ls->open_state->fh, req->fh, req->fhlen) == 0) {
-                        dup = true;
+                        match = ls;
                         break;
                     }
                 }
-                if (dup) {
+                if (match && match->range_leases != NULL) {
                     int lcls = nfs4_owner_seqid_classify(
                         lock_owner->seqid, &lock_owner->replay,
                         args->locker.open_owner.lock_seqid);
@@ -400,6 +410,14 @@ chimera_nfs4_lock(
                                                        lock_owner, res->status);
                     return;
                 }
+                if (match) {
+                    /* Empty existing stateid: capture its slot so it can be
+                     * re-acquired and reused below. */
+                    have_reuse  = true;
+                    reuse_shard = match->shard;
+                    reuse_slot  = match->slot_idx;
+                    reuse_gen   = match->generation;
+                }
                 pthread_mutex_unlock(&lock_owner->lock);
             }
 
@@ -411,60 +429,90 @@ chimera_nfs4_lock(
             req->lock_4_0_open_owner = oo;
             req->lock_4_0_lock_owner = lock_owner;
         }
+        /* Re-establish an emptied stateid in place: re-acquire it by its slot
+         * (the lookup checks shard/slot/generation, not the stateid seqid) and
+         * reuse it instead of creating a fresh one, so its "other" is stable
+         * and its seqid continues.  It already carries its own handle and
+         * open_state pin, so the current open_state acquire ref is dropped.
+         * A raced teardown (acquire fails) falls back to a fresh create. */
+        if (have_reuse) {
+            struct stateid4 reuse_sid;
+
+            nfs4_stateid_encode(&reuse_sid, 0, NFS4_STATEID_TYPE_LOCK,
+                                reuse_shard, reuse_slot, reuse_gen,
+                                table->epoch);
+            status = nfs_state_table_acquire(table, &reuse_sid,
+                                             NFS4_SLOT_TYPE_LOCK,
+                                             &state_void, &state_type);
+            if (status == NFS4_OK) {
+                lock_state          = state_void;
+                handle              = lock_state->handle;
+                req->lock_reused    = true;
+                req->nfs_state_ref  = lock_state;
+                req->nfs_state_type = NFS4_SLOT_TYPE_LOCK;
+                nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
+                                        thread->vfs_thread);
+            } else {
+                have_reuse = false;
+            }
+        }
+
         /* 4.1+: the find_or_create ref is held across nfs_lock_state_create
          * (whose internal get needs the owner alive) and dropped right after
          * it -- the state's own pin covers the owner from then on. */
 
         /* Take a distinct +1 dup on the VFS handle: lock_state's lifetime
          * is independent of the open_state's. */
-        handle = open_state->handle;
-        chimera_vfs_dup_handle(thread->vfs_thread, handle);
+        if (!have_reuse) {
+            handle = open_state->handle;
+            chimera_vfs_dup_handle(thread->vfs_thread, handle);
 
-        lock_state = nfs_lock_state_create(lock_owner, open_state, handle,
-                                           table, &res->resok4.lock_stateid);
+            lock_state = nfs_lock_state_create(lock_owner, open_state, handle,
+                                               table, &res->resok4.lock_stateid);
 
-        if (req->minorversion != 0) {
-            /* chimera_nfs4_lock_finish never touches the owners on 4.1+, so
-             * the borrow ref is not transferred to the request; drop it now
-             * that the state (if created) holds its own pin. */
-            nfs_lock_owner_put(lock_owner);
-        }
+            if (req->minorversion != 0) {
+                /* chimera_nfs4_lock_finish never touches the owners on 4.1+, so
+                 * the borrow ref is not transferred to the request; drop it now
+                 * that the state (if created) holds its own pin. */
+                nfs_lock_owner_put(lock_owner);
+            }
 
-        if (!lock_state) {
-            /* The client's lease was reaped while this LOCK was in flight:
-             * the lock_owner is unpublished and/or the open_state destroyed,
-             * so installing lock state now would orphan it. */
-            chimera_vfs_release(thread->vfs_thread, handle);
+            if (!lock_state) {
+                /* The client's lease was reaped while this LOCK was in flight:
+                 * the lock_owner is unpublished and/or the open_state destroyed,
+                 * so installing lock state now would orphan it. */
+                chimera_vfs_release(thread->vfs_thread, handle);
+                nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
+                                        thread->vfs_thread);
+                res->status = NFS4ERR_EXPIRED;
+                chimera_nfs4_lock_finish(req, res->status);
+                return;
+            }
+
+            /* Release the open_state acquire ref.  The lock_state holds its
+             * own dup of the handle; the open_state's lifetime remains its
+             * own concern. */
             nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
                                     thread->vfs_thread);
-            res->status = NFS4ERR_EXPIRED;
-            chimera_nfs4_lock_finish(req, res->status);
-            return;
-        }
 
-        /* Release the open_state acquire ref.  The lock_state holds its
-         * own dup of the handle; the open_state's lifetime remains its
-         * own concern. */
-        nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
-                                thread->vfs_thread);
+            /* For the async VFS call, hold an acquire ref on the lock_state.
+             * Acquire it via the slot table so the refcount machinery is
+             * consistent (avoid manual increments). */
+            struct stateid4 lock_stateid_for_acquire;
+            nfs4_stateid_encode(&lock_stateid_for_acquire, lock_state->seqid,
+                                NFS4_STATEID_TYPE_LOCK,
+                                lock_state->shard, lock_state->slot_idx,
+                                lock_state->generation,
+                                table->epoch);
+            status = nfs_state_table_acquire(table, &lock_stateid_for_acquire,
+                                             NFS4_SLOT_TYPE_LOCK,
+                                             &state_void, &state_type);
+            chimera_nfs_abort_if(status != NFS4_OK,
+                                 "freshly-created lock_state not findable");
 
-        /* For the async VFS call, hold an acquire ref on the lock_state.
-         * Acquire it via the slot table so the refcount machinery is
-         * consistent (avoid manual increments). */
-        struct stateid4 lock_stateid_for_acquire;
-        nfs4_stateid_encode(&lock_stateid_for_acquire, lock_state->seqid,
-                            NFS4_STATEID_TYPE_LOCK,
-                            lock_state->shard, lock_state->slot_idx,
-                            lock_state->generation,
-                            table->epoch);
-        status = nfs_state_table_acquire(table, &lock_stateid_for_acquire,
-                                         NFS4_SLOT_TYPE_LOCK,
-                                         &state_void, &state_type);
-        chimera_nfs_abort_if(status != NFS4_OK,
-                             "freshly-created lock_state not findable");
-
-        req->nfs_state_ref  = lock_state;
-        req->nfs_state_type = NFS4_SLOT_TYPE_LOCK;
+            req->nfs_state_ref  = lock_state;
+            req->nfs_state_type = NFS4_SLOT_TYPE_LOCK;
+        } /* if (!have_reuse) */
 
     } else {
         /* Subsequent lock under an existing lock stateid. */
@@ -540,7 +588,7 @@ chimera_nfs4_lock(
      * "to-EOF" sentinel, offset+length must not exceed UINT64_MAX. */
     if (args->length == 0 ||
         (args->length != UINT64_MAX && args->offset > UINT64_MAX - args->length)) {
-        if (args->locker.new_lock_owner) {
+        if (args->locker.new_lock_owner && !req->lock_reused) {
             nfs_state_table_release(table, lock_state, NFS4_SLOT_TYPE_LOCK,
                                     thread->vfs_thread);
             nfs_lock_state_destroy(lock_state, table, thread->vfs_thread);
@@ -564,7 +612,7 @@ chimera_nfs4_lock(
 
         rl = calloc(1, sizeof(*rl));
         if (!rl) {
-            if (args->locker.new_lock_owner) {
+            if (args->locker.new_lock_owner && !req->lock_reused) {
                 nfs_state_table_release(table, lock_state, NFS4_SLOT_TYPE_LOCK,
                                         thread->vfs_thread);
                 nfs_lock_state_destroy(lock_state, table, thread->vfs_thread);
@@ -583,7 +631,7 @@ chimera_nfs4_lock(
                                            handle->fh_hash, true);
         if (!file_state) {
             free(rl);
-            if (args->locker.new_lock_owner) {
+            if (args->locker.new_lock_owner && !req->lock_reused) {
                 nfs_state_table_release(table, lock_state, NFS4_SLOT_TYPE_LOCK,
                                         thread->vfs_thread);
                 nfs_lock_state_destroy(lock_state, table, thread->vfs_thread);

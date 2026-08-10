@@ -148,6 +148,13 @@ struct nfs_request {
      * by chimera_nfs4_lock_finish. */
     struct nfs_open_owner            *lock_4_0_open_owner;
     struct nfs_lock_owner            *lock_4_0_lock_owner;
+    /* A new_lock_owner (open_to_lock_owner) LOCK that re-establishes an
+     * existing but emptied lock stateid reuses that stateid rather than
+     * minting a fresh one (RFC 7530 §9.1.4.2: the stateid "other" is stable
+     * for its life).  When set, the LOCK's error/seqid paths treat the
+     * lock_state as pre-existing (bump its seqid, do not destroy it) even
+     * though new_lock_owner is true. */
+    bool                              lock_reused;
     struct evpl_rpc2_conn            *conn;
     struct evpl_rpc2_encoding        *encoding;
     struct nlm_lock_entry            *nlm_pending_entry; /* in-flight NLM lock/test */
