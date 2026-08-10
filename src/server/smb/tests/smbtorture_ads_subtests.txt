@@ -1,0 +1,170 @@
+# SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
+#
+# SPDX-License-Identifier: LGPL-2.1-only
+#
+# smbtorture subtests that require named-stream (ADS) support on the server.
+#
+# THIS IS THE SINGLE SOURCE OF TRUTH.  Two consumers read it:
+#
+#   smbtorture_test.c  -- enables chimera's smb_named_streams config knob when
+#                         any test named on its command line appears here.
+#   CMakeLists.txt     -- scopes that knob correctly under ctest.  A suite's
+#                         subtests share one server process, so a subtest listed
+#                         here is registered as its own ctest entry when its
+#                         siblings are not (otherwise enabling ADS for one
+#                         subtest silently enables it for the whole suite).
+#
+# Do NOT blanket-enable ADS instead of maintaining this list.
+# smb2.create_no_streams.no_stream is a negative test: it asserts that a server
+# without stream support rejects a stream path, and it passes on all six
+# backends today precisely because the feature is off.  Per-test selection is
+# load-bearing.
+#
+# That test also pins down how COARSE the rejection has to be, which is worth
+# recording because the gate looks over-broad.  It opens four names with
+# disposition OPEN -- "test_no_stream::$DATA", "test_no_stream::foooooooooooo",
+# "test_no_stream:stream", "test_no_stream:stream:$DATA" -- and requires
+# OBJECT_NAME_INVALID for every one, including the "::$DATA" default-fork
+# spelling that names nothing but the base file.  So gate 1 in smb_proc_create.c
+# is right to reject any ':' in the name BEFORE parsing it: narrowing it to
+# reject only genuine named streams would resolve "test_no_stream::$DATA" to a
+# base file the test never creates, answer OBJECT_NAME_NOT_FOUND, and break this
+# subtest on all six backends.  With named_streams ON the default-fork forms
+# parse to has_stream = 0 and open the base object without needing
+# CHIMERA_VFS_CAP_NAMED_STREAMS, so both behaviours are already reachable by
+# config and there is nothing here to fix.
+#
+# MATCHING: an entry matches a test name exactly, or as a parent-suite prefix --
+# "smb2.streams" matches both "smb2.streams" and "smb2.streams.io".  It does not
+# match "smb2.stream-inherit-perms" (the '.' is required), which is why that
+# subtest is listed separately below.
+#
+# REGENERATING: do not grow this list one entry at a time by hand -- that is how
+# eleven subtests came to be missing from it.  Run
+# tools/smbtorture/derive_ads.sh, which sweeps the catalog with ADS forced off
+# and harvests every subtest the server logs as hitting the named-streams gate.
+# Re-run it after upgrading the Samba devcontainer image, which changes the
+# subtest catalog.
+
+# The named-streams suites themselves.
+smb2.streams
+smb2.ioctl-on-stream
+smb2.sdread
+
+# smb2.stream-inherit-perms is a top-level test, NOT a member of smb2.streams --
+# note the missing 's'.  It needs its own entry; the suite prefix cannot cover
+# it.
+smb2.stream-inherit-perms
+
+# Oplock/lease subtests that need the ADS namespace to exist.  Read from
+# source4/torture/smb2/{oplock,lease}.c rather than inferred -- there are two
+# shapes, and both use REAL named streams ("file:foo"), never the default-fork
+# spelling, so a narrower gate would not rescue any of them:
+#
+#   Grant taken on a stream handle.  smb2.oplock.stream1 opens streams directly.
+#   smb2.oplock.batch26 takes a BATCH oplock on the base file, then opens
+#   "test_oplock.txt:Stream One:$DATA" and asserts the stream gets its own BATCH
+#   grant while the base file drops to LEVEL_II.  smb2.lease.request leases
+#   "lease_request.dat:stream" -- "And grants leases on streams (with separate
+#   leasekey)".
+#
+#   Grant taken on the BASE file, with a stream open as the SECOND opener.  The
+#   kernel_oplocks subtests are this shape: kernel_oplocks2 takes an EXCLUSIVE
+#   oplock on "test_kernel_oplock2.dat", opens "test_kernel_oplock2.dat:foo",
+#   then asserts the stream open did not break it ("Stream open caused oplock
+#   break").
+#   No grant is ever taken on a stream here, but the stream CREATE still has to
+#   succeed for the subtest to reach its assertion.
+#
+# A real Windows server always exposes the ADS namespace, so these were written
+# without a guard.
+smb2.oplock.stream1
+smb2.oplock.batch26
+smb2.lease.request
+smb2.kernel-oplocks.kernel_oplocks2
+smb2.kernel-oplocks.kernel_oplocks4
+smb2.kernel-oplocks.kernel_oplocks5
+smb2.kernel-oplocks.kernel_oplocks6
+
+# Subtests of other suites that open a stream incidentally, as scaffolding for
+# whatever they actually assert -- a second handle on a file, an elaborate file
+# or directory to query.  None is a streams test by name, which is why they went
+# unnoticed.  The paths, read from the Samba sources:
+#
+#   smb2.getinfo.complex   torture_setup_complex_file on FNAME ":streamtwo" AND
+#                          on DNAME ":streamtwo" -- a stream on a directory as
+#                          well as on a file.
+#   smb2.getinfo.normalized
+#                          builds "%s:sTrEaM3", "%s::$dAtA" and "%s:StReAm4"
+#                          with talloc_asprintf at run time.  This is the
+#                          concrete reason the set cannot be derived
+#                          statically: those
+#                          paths exist nowhere as literals, in the binary or out
+#                          of it.
+#   smb2.fileid.fileid     DNAME "\foo:bar".
+#   smb2.fileid.fileid-dir DNAME "\foo:bar" as well -- despite the name it is
+#                          an ordinary named stream, not a directory index
+#                          stream.
+#   smb2.compound.compound-padding
+#                          "compound_read.dat:foo".
+#   smb2.create.quota-fake-file
+#                          "$Extend\$Quota:$Q:$INDEX_ALLOCATION" -- stream "$Q"
+#                          of type $INDEX_ALLOCATION.  chimera's parser takes
+#                          $INDEX_ALLOCATION only in the bare "::$INDEX_
+#                          ALLOCATION" form, so with ADS on this one is refused
+#                          by the parse rather than by either gate.
+smb2.getinfo.complex
+smb2.getinfo.normalized
+smb2.fileid.fileid
+smb2.fileid.fileid-dir
+smb2.compound.compound-padding
+smb2.create.quota-fake-file
+
+# The space in the next entry is part of the subtest name as smbtorture reports
+# it, not a separator -- both readers keep the line intact (the driver reads
+# whole lines; cmake's file(STRINGS) splits on ';' only, never on blanks).  It
+# copies between named streams of one file, so its stream opens are scaffolding
+# for the copy-chunk assertions rather than the thing under test.
+smb2.ioctl.copy-chunk streams
+
+# Listed above but NOT yet in SMBTORTURE_ENABLED_memfs: these reach their real
+# assertions once the gate is open and then fail for genuine reasons, tracked
+# separately.  They stay out of the ctest allowlists until fixed.
+#
+#   smb2.fileid.fileid-dir        -- the subtest passes, but the server then
+#                                    aborts at teardown with a leaked evpl
+#                                    buffer reference (deterministic).  This
+#                                    note used to blame the
+#                                    "::$INDEX_ALLOCATION" open path; the
+#                                    subtest opens DNAME "\foo:bar" and no
+#                                    index-stream path at all, so that
+#                                    attribution was wrong.  Re-confirm the
+#                                    leak site from a fresh log when fixing.
+#   smb2.getinfo.complex          -- RAW_FILEINFO_ALT_NAME_INFORMATION returns
+#                                    NT_STATUS_NOT_IMPLEMENTED (getinfo.c:115).
+#   smb2.getinfo.normalized       -- the normalized-name query does not preserve
+#                                    case ("torture_dir1n" for "torture_dIr1N").
+#   smb2.compound.compound-padding-- response body_size is 19, should be 24
+#                                    (compound.c:1356).
+#   smb2.kernel-oplocks.kernel_oplocks5
+#                                 -- granted oplock level is not NONE
+#                                    (oplock.c:4848).
+#   smb2.create.quota-fake-file   -- not a gate failure at all: it opens
+#                                    "$Extend\$Quota:$Q:$INDEX_ALLOCATION", a
+#                                    Samba fake file backing quota queries.
+#                                    chimera has no quota namespace, so this
+#                                    still fails with ADS on.  Listed here only
+#                                    so the sweep in derive_ads.sh stays
+#                                    idempotent -- it does reach the gate first.
+#
+# smb2.ioctl.copy-chunk streams is out of SMBTORTURE_ENABLED_memfs for a
+# different reason from the block above: nobody has run it with the gate open,
+# so there is no "it then fails for reason X" to record.  What is known is only
+# that it reaches gate 1 today -- the server logs "named streams: disabled by
+# config; rejecting stream CREATE 'src:foo'" and never "SMB named streams (ADS)
+# enabled", and it fails (rc=1) at source4/torture/smb2/ioctl.c:2041
+# "copy_one_stream failed" after ioctl.c:325 warns
+# "status was NT_STATUS_OBJECT_NAME_INVALID, expected NT_STATUS_OK: file
+# create".  Listing it here only opens the gate for a run that names it; it does
+# not claim an outcome.  Run it and record what happens before adding it to any
+# backend allowlist.
