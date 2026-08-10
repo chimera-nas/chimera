@@ -164,6 +164,20 @@ int
 chimera_server_config_get_smb_acl_inherited_canonicalize(
     const struct chimera_server_config *config);
 
+/* Answer a replayed durable-v2 CREATE that collides with a still-deferred
+ * CREATE the way Windows servers do (STATUS_ACCESS_DENIED, and no replay
+ * detection while the original is deferred on a share conflict) instead of the
+ * default Samba behaviour (STATUS_FILE_NOT_AVAILABLE, which clients retry).
+ * The two are mutually exclusive; see the default in chimera_server_config_init. */
+void
+chimera_server_config_set_smb_replay_pending_windows(
+    struct chimera_server_config *config,
+    int                           enable);
+
+int
+chimera_server_config_get_smb_replay_pending_windows(
+    const struct chimera_server_config *config);
+
 void
 chimera_server_config_set_smb2_max_async_credits(
     struct chimera_server_config *config,

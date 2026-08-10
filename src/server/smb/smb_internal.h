@@ -239,6 +239,12 @@ struct chimera_smb_config {
      * SET_SECURITY; see chimera_server_config_set_smb_acl_inherited_canonicalize
      * for semantics.  Default 1 (canonical). */
     int                            acl_inherited_canonicalize;
+    /* Answer a replayed durable-v2 CREATE that matches a still-deferred CREATE
+     * the Windows way (ACCESS_DENIED, and no replay detection while the original
+     * is deferred on a share conflict) rather than the default Samba way
+     * (FILE_NOT_AVAILABLE, which clients retry).  The two are mutually exclusive;
+     * see chimera_server_config_set_smb_replay_pending_windows.  Default 0. */
+    int                            replay_pending_windows;
     /* Per-connection ceiling on simultaneously outstanding async (STATUS_PENDING)
      * operations.  A blocking named-pipe READ that cannot be served now is made
      * async until the connection holds (smb2_max_async_credits - 1) of them;
@@ -629,10 +635,21 @@ struct chimera_smb_request {
             uint8_t                            gen_share_retry;
             /* GRANTED/DENIED result stashed by chimera_smb_create_share_park_cb
              * when the share-park ticket resolves on another thread, so the
-             * owning thread's resume doorbell can finish the open with it.  The
-             * queue link reuses async.park_next (a gen_parked CREATE is not on
-             * conn->parked_requests). */
+             * owning thread's resume doorbell can finish the open with it.
+             * gen_resume_next is that queue's own link: it must NOT share
+             * async.park_next, because a share-parked CREATE also emits an
+             * async interim and is therefore linked on conn->parked_requests by
+             * that field at the same time. */
             enum chimera_vfs_lease_result      gen_resume_result;
+            struct chimera_smb_request        *gen_resume_next;
+            /* Registration of this deferred DH2Q create on tree->pending_creates
+            * (see the comment there): pending_link chains the list, and
+            * pending_linked says whether this request is currently on it.  The
+            * client GUID is snapshotted so the replay lookup can match
+            * Open.ClientGuid without touching the (possibly gone) connection. */
+            struct chimera_smb_request        *pending_link;
+            uint8_t                            pending_linked;
+            uint8_t                            pending_client_guid[16];
             uint8_t                            r_is_directory;
             uint32_t                           r_granted_access;
             uint32_t                           r_maximal_access;
@@ -2610,6 +2627,7 @@ chimera_smb_tree_alloc(struct chimera_server_smb_shared *shared)
         for (int i = 0; i < CHIMERA_SMB_OPEN_FILE_BUCKETS; i++) {
             pthread_mutex_init(&tree->open_files_lock[i], NULL);
         }
+        pthread_mutex_init(&tree->pending_creates_lock, NULL);
     }
 
     tree->fh_expiration.tv_sec  = 0;

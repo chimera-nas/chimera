@@ -9,6 +9,18 @@ chimera_smb_complete_request(
     struct chimera_smb_request *request,
     unsigned int                status);
 
+/* Drop a deferred CREATE's registration on tree->pending_creates (see
+ * smb_proc_create.c).  Idempotent; safe on a request that was never registered. */
+void
+chimera_smb_create_pending_unregister(
+    struct chimera_smb_request *request);
+
+/* Tear down a CREATE parked on a share-acquire ticket whose connection is going
+ * away (called from the async-interim drain). */
+void
+chimera_smb_create_abandon_share_park(
+    struct chimera_smb_request *request);
+
 int chimera_smb_parse_negotiate(
     struct evpl_iovec_cursor   *request_cursor,
     struct chimera_smb_request *request);

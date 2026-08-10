@@ -166,6 +166,18 @@ struct chimera_vfs_lease {
     uint64_t                          break_skip_lo;
     uint64_t                          break_skip_hi;
 
+    /* For a SHARE reservation only: the LeaseKey of the SMB2 RqLs caching lease
+     * that the SAME open holds, when it holds one.  A hard share conflict against
+     * this open may still be resolvable -- if that lease caches the handle, the
+     * holder can be told to relinquish it and may close, freeing the conflict --
+     * but an RqLs lease is keyed by LeaseKey while the share reservation is keyed
+     * by open, so nothing else links the two (chimera_vfs_share_batch_escape).
+     * Set by the SMB server when a lease-bearing open takes its share
+     * reservation; left zero by every other caller. */
+    uint8_t                           has_own_lease_key;
+    uint64_t                          own_lease_lo;
+    uint64_t                          own_lease_hi;
+
     /* Set by the SMB server when this caching lease's owning open is PARKED as a
      * disconnected durable handle (MS-SMB2 "courtesy-held" open).  A parked
      * holder with no write cache is treated as non-conflicting for the

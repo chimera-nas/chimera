@@ -26,6 +26,7 @@
 
 #include "smb_internal.h"
 #include "smb_async_interim.h"
+#include "smb_procs.h"
 #include "smb_signing.h"
 #include "smb2.h"
 
@@ -172,6 +173,17 @@ chimera_smb_async_interim_drain(struct chimera_smb_conn *conn)
         request->async.park_next = NULL;
         request->async.armed     = 0;
         evpl_remove_timer(thread->evpl, &request->async.timer);
+
+        /* A CREATE parked on a share-acquire ticket (rather than on a break ack)
+         * is resumed by the VFS pump, which would dereference this request after
+         * the connection is gone.  Cancel the ticket and release the half-built
+         * open the way the DENIED resume would; there is nobody left to reply
+         * to. */
+        if (request->smb2_hdr.command == SMB2_CREATE &&
+            request->create.gen_parked) {
+            chimera_smb_create_abandon_share_park(request);
+            continue;
+        }
 
         /* A parked CREATE holds an open_file reference (taken when it deferred
         * on the lease/oplock break it triggered) that only its resume path

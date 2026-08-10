@@ -579,6 +579,11 @@ main(
         chimera_server_config_set_smb_acl_inherited_canonicalize(server_config, json_is_true(json_value));
     }
 
+    json_value = json_object_get(server_params, "smb_replay_pending_windows");
+    if (json_is_boolean(json_value)) {
+        chimera_server_config_set_smb_replay_pending_windows(server_config, json_is_true(json_value));
+    }
+
     json_value = json_object_get(server_params, "smb2_max_async_credits");
     if (json_is_integer(json_value)) {
         chimera_server_config_set_smb2_max_async_credits(server_config, json_integer_value(json_value));

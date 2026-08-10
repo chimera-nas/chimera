@@ -113,6 +113,87 @@ chimera_smb_create_finish_with_eas(
 #define CHIMERA_SMB_CREATE_SHARE_RETRY_MAX         150    /* ~3 s total */
 #define CHIMERA_SMB_CREATE_SHARE_SPEC_RETRY_MAX    25     /* ~0.5 s total */
 
+/* ---------------------------------------------------------------------------
+ * In-flight (deferred, not-yet-hashed) DH2Q creates -- tree->pending_creates.
+ *
+ * A create is hashed into tree->open_files[] only once its share reservation is
+ * granted (chimera_smb_create_after_share), so a create that is deferred BEFORE
+ * that -- parked on a conflicting holder's handle-caching break, or retrying a
+ * disconnecting durable holder -- carries a create_guid no lookup can see.  A
+ * replay of such a create would fall through to a fresh open and hit the very
+ * conflict the original is waiting out, answering SHARING_VIOLATION where the
+ * pending-open rule requires FILE_NOT_AVAILABLE (smb2.replay.dhv2-pending1n-vs-
+ * violation-lease-{ack,close}-sane).  These three helpers make that window
+ * visible to chimera_smb_create_guid_replay.  Entries are stored in the deferred
+ * requests themselves, so an entry cannot outlive its request.
+ * --------------------------------------------------------------------------- */
+
+static void
+chimera_smb_create_pending_register(struct chimera_smb_request *request)
+{
+    struct chimera_smb_tree *tree = request->tree;
+
+    if (request->create.pending_linked || !tree ||
+        !(request->create.ctx_present_mask & CHIMERA_SMB_CREATE_CTX_DH2Q)) {
+        return;
+    }
+
+    memcpy(request->create.pending_client_guid,
+           request->compound->conn->client_guid, 16);
+
+    pthread_mutex_lock(&tree->pending_creates_lock);
+    request->create.pending_link   = tree->pending_creates;
+    tree->pending_creates          = request;
+    request->create.pending_linked = 1;
+    pthread_mutex_unlock(&tree->pending_creates_lock);
+} /* chimera_smb_create_pending_register */
+
+void
+chimera_smb_create_pending_unregister(struct chimera_smb_request *request)
+{
+    struct chimera_smb_tree     *tree = request->tree;
+    struct chimera_smb_request **pp;
+
+    if (!request->create.pending_linked || !tree) {
+        return;
+    }
+
+    pthread_mutex_lock(&tree->pending_creates_lock);
+    for (pp = &tree->pending_creates; *pp; pp = &(*pp)->create.pending_link) {
+        if (*pp == request) {
+            *pp = request->create.pending_link;
+            break;
+        }
+    }
+    request->create.pending_link   = NULL;
+    request->create.pending_linked = 0;
+    pthread_mutex_unlock(&tree->pending_creates_lock);
+} /* chimera_smb_create_pending_unregister */
+
+/* Non-zero if a create carrying `create_guid` from `client_guid` is deferred on
+ * this tree right now (MS-SMB2 3.3.5.9.10 matches Open.CreateGuid together with
+ * Open.ClientGuid).  Scoped to one tree connect, like the hashed open scan. */
+static int
+chimera_smb_create_pending_match(
+    struct chimera_smb_tree *tree,
+    const uint8_t           *create_guid,
+    const uint8_t           *client_guid)
+{
+    struct chimera_smb_request *req;
+    int                         found = 0;
+
+    pthread_mutex_lock(&tree->pending_creates_lock);
+    for (req = tree->pending_creates; req; req = req->create.pending_link) {
+        if (memcmp(req->create.dh2q.create_guid, create_guid, 16) == 0 &&
+            memcmp(req->create.pending_client_guid, client_guid, 16) == 0) {
+            found = 1;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&tree->pending_creates_lock);
+    return found;
+} /* chimera_smb_create_pending_match */
+
 /* Map a VFS error from an open-or-create path to the SMB2 status that
  * Windows clients expect.  EISDIR/ENOTDIR are critical here: cmd.exe and
  * other tools probe with FILE_NON_DIRECTORY_FILE first and retry with
@@ -1058,8 +1139,19 @@ chimera_smb_create_gen_open_file(
                    request->create.rqls.key, 8);
             memcpy(&open_file->share_lease.break_skip_hi,
                    request->create.rqls.key + 8, 8);
+            /* Same key, recorded for the opposite direction: a LATER conflicting
+             * open needs to find THIS open's handle-caching lease to park on its
+             * H break instead of denying outright (chimera_vfs_share_batch_escape's
+             * RqLs arm).  An RqLs lease is keyed by LeaseKey, so the reservation
+             * carries the key that links it to its own lease. */
+            open_file->share_lease.has_own_lease_key = 1;
+            memcpy(&open_file->share_lease.own_lease_lo,
+                   request->create.rqls.key, 8);
+            memcpy(&open_file->share_lease.own_lease_hi,
+                   request->create.rqls.key + 8, 8);
         } else {
             open_file->share_lease.has_break_skip_key = 0;
+            open_file->share_lease.has_own_lease_key  = 0;
         }
 
         /* AppInstanceId failover (MS-SMB2 3.3.5.9.7 / 3.3.5.9.16) was already
@@ -1137,6 +1229,23 @@ chimera_smb_create_gen_open_file(
             request->create.gen_parked_fs    = file_state;
             request->create.gen_held_granted = held_granted;
             request->create.gen_parked       = 1;
+            /* Publish this create's create_guid before the park: while it waits,
+             * it is not in tree->open_files[], so only tree->pending_creates lets
+             * a replay of it be recognised as a pending create. */
+            chimera_smb_create_pending_register(request);
+            /* Emit the interim STATUS_PENDING now, exactly as the break-park path
+             * does (MS-SMB2 3.3.5.9 pending open): the client must learn the
+             * create is in flight so it can cancel it and does not time out across
+             * the break wait, which lasts until the holder acks/closes (or the
+             * break deadline revokes it).  Without this a conflicting open looks
+             * simply unanswered -- smbtorture's WAIT_FOR_ASYNC_RESPONSE spins to
+             * its own request timeout and the test's later break ack arrives after
+             * the deadline has already revoked the lease
+             * (smb2.replay.dhv2-pending1n-vs-violation-lease-*).  The request lands
+             * on conn->parked_requests for CANCEL/teardown, but it resumes through
+             * its vfs ticket, NOT the parked-CREATE break sweep -- see the
+             * gen_parked guard in chimera_smb_create_resume_parked_conn. */
+            chimera_smb_async_interim_begin(request);
             chimera_vfs_lease_acquire(vfs_state, file_state,
                                       &open_file->share_lease,
                                       &request->create.gen_ticket, true,
@@ -1818,8 +1927,8 @@ chimera_smb_create_share_park_cb(
     request->create.gen_resume_result = result;
 
     pthread_mutex_lock(&thread->lease_break_lock);
-    request->async.park_next  = thread->share_resume_head;
-    thread->share_resume_head = request;
+    request->create.gen_resume_next = thread->share_resume_head;
+    thread->share_resume_head       = request;
     pthread_mutex_unlock(&thread->lease_break_lock);
 
     evpl_ring_doorbell(&thread->lease_resume_doorbell);
@@ -1852,9 +1961,15 @@ chimera_smb_create_share_park_finish(
         chimera_smb_create_finish_share_grant(open_file, file_state,
                                               request->create.gen_held_granted);
         chimera_smb_create_after_share(request, open_file);
+        /* after_share hashed the open, so drop the in-flight registration only
+         * now: a replay is covered by open_files[] from here on, with no window
+         * in which neither lookup can see this create. */
+        chimera_smb_create_pending_unregister(request);
         request->create.gen_finish_cb(request, open_file);
         return;
     }
+
+    chimera_smb_create_pending_unregister(request);
 
     /* DENIED: the holder acked its oplock / dir-lease break but kept the handle
      * open, so the share conflict stands. */
@@ -1867,6 +1982,42 @@ chimera_smb_create_share_park_finish(
     chimera_smb_create_release_parent(request);
     chimera_smb_complete_request(request, SMB2_STATUS_SHARING_VIOLATION);
 } /* chimera_smb_create_share_park_finish */
+
+/* Abandon a CREATE that is parked on a share-acquire ticket because its
+ * connection is being torn down (chimera_smb_async_interim_drain): cancel the
+ * ticket so the VFS pump can never resume into a dead request, then release the
+ * half-built open exactly as the DENIED resume does.  No reply is sent -- the
+ * connection is gone.  Runs on the conn's own thread. */
+void
+chimera_smb_create_abandon_share_park(struct chimera_smb_request *request)
+{
+    struct chimera_server_smb_thread *thread     = request->compound->thread;
+    struct chimera_vfs_thread        *vfs_thread = thread->vfs_thread;
+    struct chimera_vfs_state         *vfs_state  = vfs_thread->vfs->vfs_state;
+    struct chimera_smb_open_file     *open_file  = request->create.gen_parked_open;
+    struct chimera_vfs_file_state    *file_state = request->create.gen_parked_fs;
+
+    request->create.gen_parked = 0;
+
+    /* If the ticket had already fired (its resume is queued on a thread's resume
+     * doorbell) the cancel returns false and that resume still owns the open:
+     * leave the teardown to it. */
+    if (!chimera_vfs_lease_acquire_cancel(vfs_state, &request->create.gen_ticket)) {
+        return;
+    }
+
+    chimera_smb_create_pending_unregister(request);
+    chimera_vfs_state_put(vfs_state, file_state);
+    if (open_file) {
+        if (open_file->handle) {
+            chimera_vfs_release(vfs_thread, open_file->handle);
+            open_file->handle = NULL;
+        }
+        chimera_smb_open_file_free(thread, open_file);
+        request->create.gen_parked_open = NULL;
+    }
+    chimera_smb_create_release_parent(request);
+} /* chimera_smb_create_abandon_share_park */
 
 static inline uint32_t
 chimera_smb_create_granted_access(
@@ -2706,6 +2857,9 @@ chimera_smb_create_open_at_callback(
             request->create.share_conflict_retries < share_budget) {
             request->create.share_conflict_retries++;
             request->create.share_conflict_oh = oh;
+            /* Deferred without a hashed open, as for the share park above: keep
+             * the create_guid visible to a replay for the length of the retry. */
+            chimera_smb_create_pending_register(request);
             evpl_add_oneshot_timer(request->compound->thread->evpl,
                                    &request->async.timer,
                                    chimera_smb_create_share_retry_cb,
@@ -2713,11 +2867,16 @@ chimera_smb_create_open_at_callback(
             return;
         }
 
+        chimera_smb_create_pending_unregister(request);
         chimera_smb_create_release_handle(vfs_thread, oh);
         chimera_smb_create_release_parent(request);
         chimera_smb_complete_request(request, request->create.force_close_status);
         return;
     }
+
+    /* The open is hashed now (chimera_smb_create_after_share), so any replay of
+     * it is served by the CREATE_PENDING / live-open scan from here on. */
+    chimera_smb_create_pending_unregister(request);
 
     chimera_smb_create_open_finish(request, open_file);
 } /* chimera_smb_create_open_at_callback */
@@ -3201,7 +3360,13 @@ chimera_smb_create_resume_parked_conn(
          * moment its break leaves the pending-notify state -- i.e. the
          * notification has been sent -- whereas an ordinary ack-required park
          * resumes only once the file's caching leases actually settle. */
+        /* A share-parked CREATE (gen_parked) is on this list only so CANCEL and
+         * teardown can find it: it waits on a vfs share-acquire ticket, has no
+         * park_fh, and completes through chimera_smb_create_share_park_finish.
+         * Sweeping it here would complete a create that never got its share
+         * reservation -- with SUCCESS, since park_fh_len 0 reads as "settled". */
         if (req->smb2_hdr.command == SMB2_CREATE &&
+            !req->create.gen_parked &&
             (req->create.park_on_notify
              ? !chimera_vfs_state_caching_break_pending_notify(
                  vfs_state, req->create.park_fh, req->create.park_fh_len,
@@ -3307,7 +3472,7 @@ chimera_smb_create_resume_doorbell_callback(
         pthread_mutex_lock(&thread->lease_break_lock);
         req = thread->share_resume_head;
         if (req) {
-            thread->share_resume_head = req->async.park_next;
+            thread->share_resume_head = req->create.gen_resume_next;
         }
         pthread_mutex_unlock(&thread->lease_break_lock);
 
@@ -3315,7 +3480,7 @@ chimera_smb_create_resume_doorbell_callback(
             break;
         }
 
-        req->async.park_next = NULL;
+        req->create.gen_resume_next = NULL;
         chimera_smb_create_share_park_finish(req, req->create.gen_resume_result);
     }
 
@@ -4510,17 +4675,39 @@ chimera_smb_create_guid_replay(struct chimera_smb_request *request)
         pthread_mutex_unlock(&tree->open_files_lock[b]);
     }
 
+    /* The create this replay matches may be deferred BEFORE it was hashed (parked
+     * on a conflicting holder's handle-cache break, or retrying a disconnecting
+     * durable holder), in which case the scan above cannot see it: consult the
+     * in-flight registry and answer the replay the same way a hashed pending open
+     * is answered.  Under the Windows profile the replay is not recognised here at
+     * all -- Windows lets it run the ordinary create path, where the unresolved
+     * conflict answers it SHARING_VIOLATION, which is what
+     * smb2.replay.dhv2-pending1n-vs-violation-lease-{ack,close}-windows assert;
+     * the -sane variants require the pending answer below. */
+    if (!pending_of && !match && request->is_replay &&
+        !thread->shared->config.replay_pending_windows &&
+        chimera_smb_create_pending_match(tree,
+                                         request->create.dh2q.create_guid,
+                                         request->compound->conn->client_guid)) {
+        chimera_smb_complete_request(request, SMB2_STATUS_FILE_NOT_AVAILABLE);
+        return 1;
+    }
+
     if (pending_of) {
         /* A replay matched a still-pending create carrying this create_guid.
          * Normally the original create is genuinely in flight, so the replay is
-         * answered FILE_NOT_AVAILABLE (MS-SMB2 3.3.5.9.10).  But if that create was
+         * answered FILE_NOT_AVAILABLE -- the profile default; the Windows profile
+         * answers ACCESS_DENIED instead (see
+         * chimera_server_config_set_smb_replay_pending_windows: MS-SMB2 3.3.5.9 /
+         * 3.3.5.9.10 do not specify this race and the two real implementations
+         * diverge).  But if that create was
          * orphaned when its connection disconnected (CREATE_PENDING never resumed)
          * AND the break it parked on has since settled -- the conflicting holder
          * closed or acked -- the original create can never complete: evict the
          * resolved zombie (unhash + full teardown) and fall through to a fresh open.
          * A still-active break, or a non-orphaned pending create (which resumes
-         * normally), still yields FILE_NOT_AVAILABLE.
-         * smb2.replay.dhv2-pending2*-vs-{lease,oplock}-sane. */
+         * normally), still yields the pending answer.
+         * smb2.replay.dhv2-pending{1,2,3}*-vs-{lease,oplock}-{sane,windows}. */
         struct chimera_vfs_state *vfs_state = thread->vfs_thread->vfs->vfs_state;
         bool                      evict, won = false;
 
@@ -4534,7 +4721,10 @@ chimera_smb_create_guid_replay(struct chimera_smb_request *request)
 
         if (!evict) {
             chimera_smb_open_file_release(request, pending_of);
-            chimera_smb_complete_request(request, SMB2_STATUS_FILE_NOT_AVAILABLE);
+            chimera_smb_complete_request(request,
+                                         thread->shared->config.replay_pending_windows
+                                         ? SMB2_STATUS_ACCESS_DENIED
+                                         : SMB2_STATUS_FILE_NOT_AVAILABLE);
             return 1;
         }
 
@@ -4665,6 +4855,8 @@ chimera_smb_create(struct chimera_smb_request *request)
     request->create.access_retry_oh        = NULL;
     request->create.share_conflict_retries = 0;
     request->create.share_conflict_oh      = NULL;
+    request->create.pending_link           = NULL;
+    request->create.pending_linked         = 0;
     request->create.r_symlink_error        = 0;
     request->create.r_symlink_handle       = NULL;
 

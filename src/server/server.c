@@ -101,6 +101,7 @@ struct chimera_server_config {
     int                                   smb_oplocks;
     int                                   smb_notify_disabled;
     int                                   smb_acl_inherited_canonicalize;
+    int                                   smb_replay_pending_windows;
     int                                   smb2_max_async_credits;
     uint32_t                              smb_fs_physical_bytes_per_sector;
     uint32_t                              smb_fs_sector_size_flags;
@@ -234,6 +235,32 @@ chimera_server_config_init(void)
      * verbatim (Samba's "= no" mode that the smb2.acls_non_canonical suite
      * exercises). */
     config->smb_acl_inherited_canonicalize = 1;
+
+    /* How a replayed durable-v2 CREATE is answered when its create_guid matches
+     * an open whose own CREATE has not completed yet (it is deferred on a
+     * conflicting holder's oplock/lease break).  MS-SMB2 3.3.5.9 / 3.3.5.9.10
+     * do not cover this race -- the spec's replay lookup assumes a fully
+     * initialised Open -- so the two real implementations diverge:
+     *
+     *   0 (default): STATUS_FILE_NOT_AVAILABLE, as Samba answers.  A client
+     *      RETRIES on this status (three times, then every 5s until the
+     *      resiliency timeout), so the replay succeeds once the original create
+     *      completes -- which is the point of replaying it after a channel
+     *      failure.  smb2.replay.dhv2-pending*-sane assert this.
+     *   1: STATUS_ACCESS_DENIED, as Windows servers answer (it falls out of
+     *      the "Open.DurableOwner is NULL" rule in 3.3.5.9, DurableOwner not
+     *      being set until the open completes).  A client reports this to the
+     *      application rather than retrying.  Also suppresses replay detection
+     *      entirely while the original create is deferred on a SHARE conflict,
+     *      which is the other half of the Windows profile.
+     *      smb2.replay.dhv2-pending*-windows assert this.
+     *
+     * The two profiles are mutually exclusive on identical wire traffic (the
+     * -sane and -windows smbtorture variants send byte-identical sequences and
+     * differ only in the status they require), so one daemon satisfies one of
+     * them: the smbtorture driver runs each half against a daemon in the matching
+     * profile.  See https://bugzilla.samba.org/show_bug.cgi?id=14449. */
+    config->smb_replay_pending_windows = 0;
 
     /* Per-connection ceiling on outstanding async (STATUS_PENDING) operations.
      * 512 matches the value smb2.credits.*_ipc_max_async_credits asserts. */
@@ -583,6 +610,20 @@ chimera_server_config_get_smb_acl_inherited_canonicalize(const struct chimera_se
 {
     return config->smb_acl_inherited_canonicalize;
 } /* chimera_server_config_get_smb_acl_inherited_canonicalize */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_smb_replay_pending_windows(
+    struct chimera_server_config *config,
+    int                           enable)
+{
+    config->smb_replay_pending_windows = enable;
+} /* chimera_server_config_set_smb_replay_pending_windows */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_smb_replay_pending_windows(const struct chimera_server_config *config)
+{
+    return config->smb_replay_pending_windows;
+} /* chimera_server_config_get_smb_replay_pending_windows */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_smb2_max_async_credits(

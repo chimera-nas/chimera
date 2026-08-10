@@ -121,6 +121,7 @@ the canonical place to set them.
 | `smb_named_streams` | bool | `false` | Enable SMB named streams (alternate data streams). |
 | `smb_encryption` | string/int | `"off"` | SMB3 transport encryption: `"off"`/`"disabled"` (0), `"enabled"`/`"on"` (1), or `"required"` (2). |
 | `smb_acl_inherited_canonicalize` | bool | `true` | Canonicalize inherited ACLs on SMB. |
+| `smb_replay_pending_windows` | bool | `false` | Answer a replayed durable-v2 CREATE that collides with a still-deferred CREATE the way Windows servers do (`STATUS_ACCESS_DENIED`, and no replay detection while the original waits on a share conflict). The default answers `STATUS_FILE_NOT_AVAILABLE`, which clients retry until the original create completes. MS-SMB2 does not specify this race; the two profiles are mutually exclusive. |
 | `metrics_port` | int | `9000` | Prometheus metrics port (`/metrics`). Make it distinct when running multiple daemons per host. |
 | `rest_http_port` | int | - | HTTP port for the REST admin API. Set to enable it (examples use `8080`). |
 | `rest_https_port` | int | `0` | HTTPS port for the REST API (`0` = disabled). |
