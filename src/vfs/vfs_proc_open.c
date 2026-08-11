@@ -106,6 +106,102 @@ chimera_vfs_open_root_complete(
     callback(error_code, oh, NULL, priv);
 } /* chimera_vfs_open_root_complete */
 
+/* ----------------------------------------------------------------------------
+ * Final-symlink follow on the create (parent + open_at) leg.
+ *
+ * open_at opens the named entry itself; when that entry is a symlink and the
+ * open wants to follow (no O_NOFOLLOW, no O_PATH), POSIX resolution must
+ * continue through the link: an existing target is opened, a dangling target
+ * is created (O_CREAT), and a loop is ELOOP.  Implemented by reading the
+ * link and restarting chimera_vfs_open() on the rewritten path; the hop
+ * count rides the high byte of the (internal) open flags so a chain of
+ * links terminates at SYMLOOP_MAX with ELOOP.
+ * ------------------------------------------------------------------------- */
+
+#define CHIMERA_VFS_OPEN_HOPS_SHIFT 24
+#define CHIMERA_VFS_OPEN_HOPS_MASK  (0xffu << CHIMERA_VFS_OPEN_HOPS_SHIFT)
+#define CHIMERA_VFS_OPEN_HOPS(f) (((f)&CHIMERA_VFS_OPEN_HOPS_MASK) >> \
+                                  CHIMERA_VFS_OPEN_HOPS_SHIFT)
+#define CHIMERA_VFS_OPEN_SYMLOOP    8
+
+struct chimera_vfs_open_follow_ctx {
+    struct chimera_vfs_thread      *thread;
+    const struct chimera_vfs_cred  *cred;
+    struct chimera_vfs_open_handle *oh;         /* handle on the symlink */
+    chimera_vfs_open_callback_t     callback;
+    void                           *private_data;
+    unsigned int                    flags;      /* original + bumped hops */
+    uint64_t                        attr_mask;
+    struct chimera_vfs_attrs        set_attr;   /* copy: the original may
+                                                 * live in the request */
+    int                             root_fh_len;
+    int                             parent_len;
+    uint8_t                         root_fh[CHIMERA_VFS_FH_SIZE];
+    char                            parent[CHIMERA_VFS_PATH_MAX];
+    char                            target[CHIMERA_VFS_PATH_MAX];
+};
+
+static void
+chimera_vfs_open_follow_done(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *oh,
+    struct chimera_vfs_attrs       *attr,
+    void                           *private_data)
+{
+    struct chimera_vfs_open_follow_ctx *ctx = private_data;
+
+    ctx->callback(error_code, oh, attr, ctx->private_data);
+    free(ctx);
+} /* chimera_vfs_open_follow_done */
+
+static void
+chimera_vfs_open_follow_readlink_complete(
+    enum chimera_vfs_error    error_code,
+    int                       targetlen,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct chimera_vfs_open_follow_ctx *ctx = private_data;
+    char                                newpath[CHIMERA_VFS_PATH_MAX];
+    int                                 newlen;
+
+    chimera_vfs_release(ctx->thread, ctx->oh);
+
+    if (error_code != CHIMERA_VFS_OK) {
+        ctx->callback(error_code, NULL, NULL, ctx->private_data);
+        free(ctx);
+        return;
+    }
+
+    ctx->target[targetlen] = '\0';
+
+    if (ctx->target[0] == '/' || ctx->parent_len == 0) {
+        newlen = snprintf(newpath, sizeof(newpath), "%s", ctx->target);
+    } else {
+        newlen = snprintf(newpath, sizeof(newpath), "%.*s/%s",
+                          ctx->parent_len, ctx->parent, ctx->target);
+    }
+
+    if (newlen >= (int) sizeof(newpath)) {
+        ctx->callback(CHIMERA_VFS_ENAMETOOLONG, NULL, NULL,
+                      ctx->private_data);
+        free(ctx);
+        return;
+    }
+
+    chimera_vfs_open(ctx->thread,
+                     ctx->cred,
+                     ctx->root_fh,
+                     ctx->root_fh_len,
+                     newpath,
+                     newlen,
+                     ctx->flags,
+                     &ctx->set_attr,
+                     ctx->attr_mask,
+                     chimera_vfs_open_follow_done,
+                     ctx);
+} /* chimera_vfs_open_follow_readlink_complete */
+
 static void
 chimera_vfs_open_op_complete(
     enum chimera_vfs_error          error_code,
@@ -120,6 +216,58 @@ chimera_vfs_open_op_complete(
     struct chimera_vfs_thread  *thread   = request->thread;
     chimera_vfs_open_callback_t callback = request->open.callback;
     void                       *priv     = request->open.private_data;
+
+    /* The named entry is a symlink and the open follows: resolve through
+     * it (see the block comment above).  SMB (AUTH_ATTR) handles reparse
+     * points in its own model and is exempt. */
+    if (error_code == CHIMERA_VFS_OK && oh && attr &&
+        (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
+        S_ISLNK(attr->va_mode) &&
+        !(request->open.flags & (CHIMERA_VFS_OPEN_NOFOLLOW |
+                                 CHIMERA_VFS_OPEN_PATH)) &&
+        request->cred->flavor != CHIMERA_VFS_AUTH_ATTR) {
+
+        unsigned int hops = CHIMERA_VFS_OPEN_HOPS(request->open.flags);
+
+        if (hops >= CHIMERA_VFS_OPEN_SYMLOOP) {
+            chimera_vfs_release(thread, oh);
+            chimera_vfs_release(thread, request->open.parent_handle);
+            chimera_vfs_request_free(thread, request);
+            callback(CHIMERA_VFS_ELOOP, NULL, NULL, priv);
+            return;
+        }
+
+        struct chimera_vfs_open_follow_ctx *ctx = malloc(sizeof(*ctx));
+
+        ctx->thread       = thread;
+        ctx->cred         = request->cred;
+        ctx->oh           = oh;
+        ctx->callback     = callback;
+        ctx->private_data = priv;
+        ctx->flags        =
+            (request->open.flags & ~(unsigned int)
+             CHIMERA_VFS_OPEN_HOPS_MASK) |
+            ((hops + 1) << CHIMERA_VFS_OPEN_HOPS_SHIFT);
+        ctx->attr_mask = request->open.attr_mask;
+        /* Copy: the original may live inside the request being freed. */
+        ctx->set_attr = *request->open.set_attr;
+
+        memcpy(ctx->root_fh, request->fh, request->fh_len);
+        ctx->root_fh_len = request->fh_len;
+
+        ctx->parent_len = request->open.parent_len;
+        memcpy(ctx->parent, request->open.path, request->open.parent_len);
+
+        chimera_vfs_release(thread, request->open.parent_handle);
+        chimera_vfs_request_free(thread, request);
+
+        chimera_vfs_readlink(thread, ctx->cred, ctx->oh,
+                             ctx->target, sizeof(ctx->target) - 1,
+                             0,
+                             chimera_vfs_open_follow_readlink_complete,
+                             ctx);
+        return;
+    }
 
     chimera_vfs_release(thread, request->open.parent_handle);
     chimera_vfs_request_free(thread, request);
