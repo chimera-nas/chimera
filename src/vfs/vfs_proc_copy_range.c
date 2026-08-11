@@ -301,6 +301,19 @@ chimera_vfs_copy_range(
 {
     struct chimera_vfs_request *request;
 
+    /* POSIX copy_file_range(): overlapping source and destination ranges
+     * within one file are EINVAL.  Enforced here so the streaming fallback
+     * and every backend agree with the native implementations (memfs applies
+     * the same check internally). */
+    if (length > 0 &&
+        src_handle->fh_len == dst_handle->fh_len &&
+        memcmp(src_handle->fh, dst_handle->fh, src_handle->fh_len) == 0 &&
+        src_offset < dst_offset + length &&
+        dst_offset < src_offset + length) {
+        callback(CHIMERA_VFS_EINVAL, 0, NULL, NULL, private_data);
+        return;
+    }
+
     /* A storage module without native server-side copy still gets working copy
      * semantics via a generic read/write streaming fallback.
      *
