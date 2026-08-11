@@ -316,6 +316,34 @@ endif()
 # Forward result to libevpl so it doesn't probe again.
 set(LIBEVPL_NETNS_TESTING ${CHIMERA_NETNS_TESTING})
 
+# Raised-limit testing detection.
+#
+# Distinct from the netns probe above, and deliberately so.  Tests whose client
+# and server share a process now talk over the in-process transport, so they
+# bind no port and need no namespace to keep them apart -- but some VFS
+# backends still need unlimited locked memory (io_uring queues) and a raised
+# aio-max-nr (libaio contexts), which the netns wrapper had been supplying as a
+# side effect of running privileged.
+#
+# Probing the two separately is what lets those tests run in an environment
+# that grants the limits but not CAP_NET_ADMIN: previously the netns probe was
+# the only gate, so no namespace meant no tests, whatever else was available.
+execute_process(
+    COMMAND bash -c "set -e; ulimit -l unlimited; test -w /proc/sys/fs/aio-max-nr"
+    RESULT_VARIABLE LIMITS_PROBE_RESULT
+    OUTPUT_QUIET
+    ERROR_QUIET
+)
+
+if(LIMITS_PROBE_RESULT EQUAL 0)
+    set(CHIMERA_LIMITS_TESTING TRUE)
+    message(STATUS "Raised-limit testing enabled")
+else()
+    set(CHIMERA_LIMITS_TESTING FALSE)
+    message(STATUS "Raised-limit testing disabled "
+        "(cannot raise memlock / aio-max-nr; backends needing them are skipped)")
+endif()
+
 # PyNFS testing.  Every suite is registered, but only the combinations known
 # to pass are actually run; the rest are marked DISABLED (see
 # pynfs/CMakeLists.txt) so a normal `ctest` stays green while still listing the

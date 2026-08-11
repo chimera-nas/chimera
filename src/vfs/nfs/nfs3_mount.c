@@ -28,13 +28,22 @@ struct chimera_nfs_client_server_thread_ctx {
  *   EVPL_DATAGRAM_RDMACM_RC - native RDMACM (rdma or rdma=rdmacm)
  */
 static enum evpl_protocol_id
-chimera_nfs_mount_get_rdma_protocol(const struct chimera_vfs_mount_options *options)
+chimera_nfs_mount_get_rdma_protocol(
+    const struct chimera_vfs_mount_options *options,
+    enum chimera_tcp_flavor                 flavor)
 {
     int i;
 
     for (i = 0; i < options->num_options; i++) {
         if (strcmp(options->options[i].key, "rdma") == 0) {
             /* rdma=tcp -> TCP-RDMA */
+            /* Under the in-process transport there is no socket to run
+             * either emulation over; DATAGRAM_INPROC is the chunk-bearing
+             * protocol there, whichever rdma= spelling asked for one. */
+            if (flavor == CHIMERA_TCP_FLAVOR_INPROC) {
+                return EVPL_DATAGRAM_INPROC;
+            }
+
             if (options->options[i].value &&
                 strcmp(options->options[i].value, "tcp") == 0) {
                 return EVPL_DATAGRAM_TCP_RDMA;
@@ -261,7 +270,8 @@ chimera_portmap_getport_nlm_callback(
         server->nlm_endpoint = NULL;
     } else {
         server->nlm_port     = port;
-        server->nlm_endpoint = evpl_endpoint_create(server->hostname, port);
+        server->nlm_endpoint = chimera_tcp_flavor_endpoint_create(
+            server_thread->shared->tcp_flavor, server->hostname, port);
     }
 
     chimera_nfs3_mount_discover_callback(server_thread, 0);
@@ -325,7 +335,8 @@ chimera_portmap_getport_nfs_callback(
     }
 
     server->nfs_port     = port;
-    server->nfs_endpoint = evpl_endpoint_create(server->hostname, port);
+    server->nfs_endpoint = chimera_tcp_flavor_endpoint_create(
+        shared->tcp_flavor, server->hostname, port);
 
     server_thread->nfs_conn = evpl_rpc2_client_connect(server_thread->thread->rpc2_thread,
                                                        server_thread->shared->tcp_protocol,
@@ -362,7 +373,8 @@ chimera_mount_mountd_null_callback(
 
     if (server->use_rdma) {
         /* For RDMA, skip portmap discovery and connect directly to RDMA port */
-        server->nfs_endpoint = evpl_endpoint_create(server->hostname, server->nfs_port);
+        server->nfs_endpoint = chimera_tcp_flavor_endpoint_create(
+            shared->tcp_flavor, server->hostname, server->nfs_port);
 
         server_thread->nfs_conn = evpl_rpc2_client_connect(server_thread->thread->rpc2_thread,
                                                            server->rdma_protocol,
@@ -411,7 +423,8 @@ chimera_portmap_getport_mountd_callback(
     }
 
     server->mount_port     = port;
-    server->mount_endpoint = evpl_endpoint_create(server->hostname, port);
+    server->mount_endpoint = chimera_tcp_flavor_endpoint_create(
+        shared->tcp_flavor, server->hostname, port);
 
     server_thread->mount_conn = evpl_rpc2_client_connect(server_thread->thread->rpc2_thread,
                                                          server_thread->shared->tcp_protocol,
@@ -533,8 +546,9 @@ chimera_nfs3_mount(
         server->shared  = shared;
 
         /* Parse RDMA options from mount request */
-        server->rdma_protocol = chimera_nfs_mount_get_rdma_protocol(&request->mount.options);
-        server->use_rdma      = server->rdma_protocol != 0;
+        server->rdma_protocol = chimera_nfs_mount_get_rdma_protocol(&request->mount.options,
+                                                                    shared->tcp_flavor);
+        server->use_rdma = server->rdma_protocol != 0;
         if (server->use_rdma) {
             server->nfs_port = chimera_nfs_mount_get_port(&request->mount.options, CHIMERA_NFS_RDMA_PORT);
         }
@@ -572,7 +586,8 @@ chimera_nfs3_mount(
 
     if (need_discover) {
 
-        server->portmap_endpoint = evpl_endpoint_create(server->hostname, 111);
+        server->portmap_endpoint = chimera_tcp_flavor_endpoint_create(
+            shared->tcp_flavor, server->hostname, 111);
 
         server_thread->portmap_conn = evpl_rpc2_client_connect(thread->rpc2_thread,
                                                                server_thread->shared->tcp_protocol,

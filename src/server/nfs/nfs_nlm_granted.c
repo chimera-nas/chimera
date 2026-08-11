@@ -285,9 +285,10 @@ nlm_grant_getport_cb(
     }
 
     job->nlm_port = port;
-    job->nlm_ep   = evpl_endpoint_create(job->req.client_addr, port);
+    job->nlm_ep   = chimera_tcp_flavor_endpoint_create(nfs_callback_tcp_flavor(),
+                                                       job->req.client_addr, port);
     job->nlm_conn = evpl_rpc2_client_connect(ctx->rpc2_thread,
-                                             EVPL_STREAM_SOCKET_TCP,
+                                             chimera_tcp_flavor_to_protocol(nfs_callback_tcp_flavor()),
                                              job->nlm_ep, NULL, 0, NULL);
     if (!job->nlm_conn) {
         chimera_nfs_info("NLM GRANTED: cannot connect to NLM at %s:%u",
@@ -327,9 +328,10 @@ nlm_grant_job_start(
 
     /* Resolve the client's NLM (prog 100021 v4) callback port via its
      * portmapper, exactly as the NSM reboot-notify path resolves statd. */
-    job->pm_ep   = evpl_endpoint_create(job->req.client_addr, 111);
+    job->pm_ep = chimera_tcp_flavor_endpoint_create(nfs_callback_tcp_flavor(),
+                                                    job->req.client_addr, 111);
     job->pm_conn = evpl_rpc2_client_connect(ctx->rpc2_thread,
-                                            EVPL_STREAM_SOCKET_TCP,
+                                            chimera_tcp_flavor_to_protocol(nfs_callback_tcp_flavor()),
                                             job->pm_ep, NULL, 0, NULL);
     if (!job->pm_conn) {
         chimera_nfs_info("NLM GRANTED: cannot reach portmap at %s for host '%s'",

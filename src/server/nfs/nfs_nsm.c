@@ -193,8 +193,9 @@ nsm_notify_one(
     int                       done = 0;
 
     /* Resolve the peer's statd port via its portmapper. */
-    ep   = evpl_endpoint_create(t->addr, 111);
-    conn = evpl_rpc2_client_connect(rpc2_thread, EVPL_STREAM_SOCKET_TCP, ep,
+    ep   = chimera_tcp_flavor_endpoint_create(nfs_callback_tcp_flavor(), t->addr, 111);
+    conn = evpl_rpc2_client_connect(rpc2_thread,
+                                    chimera_tcp_flavor_to_protocol(nfs_callback_tcp_flavor()), ep,
                                     NULL, 0, NULL);
     if (!conn) {
         evpl_endpoint_close(ep);
@@ -219,8 +220,9 @@ nsm_notify_one(
     }
 
     /* Tell the peer's statd that we (mon_name) restarted with `state`. */
-    ep   = evpl_endpoint_create(t->addr, g.port);
-    conn = evpl_rpc2_client_connect(rpc2_thread, EVPL_STREAM_SOCKET_TCP, ep,
+    ep   = chimera_tcp_flavor_endpoint_create(nfs_callback_tcp_flavor(), t->addr, g.port);
+    conn = evpl_rpc2_client_connect(rpc2_thread,
+                                    chimera_tcp_flavor_to_protocol(nfs_callback_tcp_flavor()), ep,
                                     NULL, 0, NULL);
     if (!conn) {
         evpl_endpoint_close(ep);

@@ -119,6 +119,12 @@ client_test_init(
     if (env->use_nfs || env->use_smb) {
         server_config = chimera_server_config_init();
 
+        /* Serve over the in-process transport: the client below lives in this
+         * same process, so there is no reason to bind a port, and an inproc
+         * name is private to the process -- so concurrent copies of this test
+         * cannot collide and need no network namespace to separate them. */
+        chimera_server_config_set_tcp_flavor(server_config, CHIMERA_TCP_FLAVOR_INPROC);
+
         if (strcmp(backend, "diskfs_io_uring") == 0 ||
             strcmp(backend, "diskfs_aio") == 0) {
             char        diskfs_cfg[4096];
@@ -329,6 +335,16 @@ client_test_init(
         }
 
         json_object_set_new(client_json_root, "config", client_json_config);
+
+        /* Match the server started above.  The transport is read from the
+         * top-level "common" section rather than from "config". */
+        {
+            json_t *common = json_object();
+
+            json_object_set_new(common, "tcp_flavor", json_string("inproc"));
+            json_object_set_new(client_json_root, "common", common);
+        }
+
         chimera_test_write_users_json(client_json_root);
 
         snprintf(client_json_path, sizeof(client_json_path), "%s/client.json", env->session_dir);

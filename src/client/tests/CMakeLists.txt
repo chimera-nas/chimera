@@ -11,10 +11,12 @@ endmacro()
 
 # These run unwrapped, but their fixture chowns the per-test session dir to
 # the target test uid/gid (CAP_CHOWN) and brings up the io_uring VFS module
-# (unlimited RLIMIT_MEMLOCK) -- the same privileges the netns environment
-# provides. Gate them on it so unprivileged `make` skips rather than fails.
+# (unlimited RLIMIT_MEMLOCK). Gate them on the raised-limit probe so an
+# unprivileged `make` skips rather than fails.  That probe is deliberately not
+# the netns one: the NFS and SMB variants below reach their server over the
+# in-process transport now, so none of this needs CAP_NET_ADMIN.
 macro(add_client_test testname prog backend user)
-    if(CHIMERA_NETNS_TESTING)
+    if(CHIMERA_LIMITS_TESTING)
         add_test(NAME chimera/client/${testname} COMMAND ${CMAKE_CURRENT_BINARY_DIR}/${prog} -b ${backend} -U ${user})
         get_target_property(test_file ${prog} TEST_FILE)
         set_tests_properties(chimera/client/${testname} PROPERTIES
@@ -23,8 +25,8 @@ macro(add_client_test testname prog backend user)
 endmacro()
 
 macro(add_client_nfs_test testname prog backend user)
-    if(CHIMERA_NETNS_TESTING)
-        add_test(NAME chimera/client/${testname} COMMAND ${CMAKE_SOURCE_DIR}/scripts/netns_test_wrapper.sh ${CMAKE_CURRENT_BINARY_DIR}/${prog} -v 3 -b ${backend} -U ${user})
+    if(CHIMERA_LIMITS_TESTING)
+        add_test(NAME chimera/client/${testname} COMMAND ${CMAKE_SOURCE_DIR}/scripts/test_limits_wrapper.sh ${CMAKE_CURRENT_BINARY_DIR}/${prog} -v 3 -b ${backend} -U ${user})
         get_target_property(test_file ${prog} TEST_FILE)
         set_tests_properties(chimera/client/${testname} PROPERTIES
             ENVIRONMENT "TEST_FILE=${test_file}")
@@ -33,17 +35,17 @@ endmacro()
 
 add_executable(client_basic basic.c)
 target_link_libraries(client_basic chimera_client)
-# Runs unwrapped (no loopback networking needed), but initializing the VFS
-# brings up the io_uring module, whose queue allocation needs an unlimited
-# RLIMIT_MEMLOCK. The netns wrapper raises that limit for every other test;
-# gate this one on the same privilege so unprivileged `make` doesn't abort.
-if(CHIMERA_NETNS_TESTING)
+# Runs unwrapped (no networking of any kind), but initializing the VFS brings
+# up the io_uring module, whose queue allocation needs an unlimited
+# RLIMIT_MEMLOCK. The limits wrapper raises that for every other test; gate
+# this one on the same privilege so unprivileged `make` doesn't abort.
+if(CHIMERA_LIMITS_TESTING)
     add_test(NAME chimera/client/basic COMMAND client_basic)
 endif()
 
 add_executable(client_read_into read_into.c)
 target_link_libraries(client_read_into chimera_client evpl prometheus-c)
-if(CHIMERA_NETNS_TESTING)
+if(CHIMERA_LIMITS_TESTING)
     add_test(NAME chimera/client/read_into COMMAND client_read_into)
 endif()
 
@@ -102,15 +104,15 @@ generate_backend_tests(linux "")
 generate_backend_tests(io_uring CHIMERA_VFS_IO_URING)
 
 # SMB client tests: drive the vfs_smb client against an in-process SMB server
-# (backed by memfs) over loopback.  Limited to the file operations implemented
+# (backed by memfs) over the in-process transport.  Limited to the file operations implemented
 # so far, and to the root user -- the memfs share root's ACL denies an
 # unprivileged user's create, so myuser variants fail server-side authorization
 # (not a client defect).  The "-s" flag selects SMB mode in client_test_common.h.
 macro(add_client_smb_test prog)
     string(REGEX REPLACE "^test_" "" _smb_name ${prog})
-    if(CHIMERA_NETNS_TESTING)
+    if(CHIMERA_LIMITS_TESTING)
         add_test(NAME chimera/client/${_smb_name}_smb_memfs_root
-            COMMAND ${CMAKE_SOURCE_DIR}/scripts/netns_test_wrapper.sh
+            COMMAND ${CMAKE_SOURCE_DIR}/scripts/test_limits_wrapper.sh
                     ${CMAKE_CURRENT_BINARY_DIR}/${prog} -s -b memfs -U root)
         get_target_property(_smb_test_file ${prog} TEST_FILE)
         set_tests_properties(chimera/client/${_smb_name}_smb_memfs_root PROPERTIES

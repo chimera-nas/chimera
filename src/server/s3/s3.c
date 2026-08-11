@@ -1159,12 +1159,17 @@ s3_server_init(
 
     shared->config = calloc(1, sizeof(*shared->config));
 
-    shared->tcp_protocol = chimera_server_config_get_tcp_stream_protocol(config);
+    shared->tcp_flavor   = chimera_server_config_get_tcp_flavor(config);
+    shared->tcp_protocol = chimera_tcp_flavor_to_protocol(shared->tcp_flavor);
 
     shared->config->port    = chimera_server_config_get_s3_port(config);
     shared->config->io_size = 128 * 1024;
 
-    shared->endpoint = evpl_endpoint_create("0.0.0.0", shared->config->port);
+    /* Built from the same flavor tcp_protocol came from: a protocol and an
+     * endpoint that disagree about whether they are a socket is a listen
+     * failure at startup. */
+    shared->endpoint = chimera_tcp_flavor_endpoint_create(shared->tcp_flavor, "0.0.0.0",
+                                                          shared->config->port);
 
     shared->listener = evpl_listener_create();
 
