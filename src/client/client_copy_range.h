@@ -42,6 +42,7 @@ chimera_dispatch_copy_range(
         request->copy_range.dst_handle,
         request->copy_range.dst_offset,
         request->copy_range.length,
+        request->copy_range.flags,
         0,
         0,
         chimera_copy_range_complete,

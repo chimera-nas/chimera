@@ -535,6 +535,7 @@ chimera_s3_copy_step(struct chimera_s3_copy_ctx *ctx)
                 request->file_handle,
                 ctx->offset,
                 chunk,
+                0,
                 0, 0,
                 chimera_s3_copy_copy_callback,
                 ctx);
