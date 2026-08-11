@@ -2364,7 +2364,9 @@ cairn_mkdir_at(
     inode.size        = 4096;
     inode.space_used  = 4096;
     inode.uid         = request->cred->uid;
-    inode.gid         = request->cred->gid;
+    /* POSIX: a set-group-ID parent directory forces the new node's group. */
+    inode.gid         = (parent_inode->mode & S_ISGID) ?
+        parent_inode->gid : request->cred->gid;
     inode.nlink       = 2;
     inode.refcnt      = 1;   /* open reference; without it rmdir underflows the
                               * count and never frees the inode (stale handle) */
@@ -2480,7 +2482,9 @@ cairn_mknod_at(
     inode.size        = 0;
     inode.space_used  = 0;
     inode.uid         = request->cred->uid;
-    inode.gid         = request->cred->gid;
+    /* POSIX: a set-group-ID parent directory forces the new node's group. */
+    inode.gid         = (parent_inode->mode & S_ISGID) ?
+        parent_inode->gid : request->cred->gid;
     inode.nlink       = 1;
     inode.refcnt      = 1;   /* open reference (see cairn_open_at); without it
                               * unlink underflows the count and leaks the inode */
@@ -3018,13 +3022,16 @@ cairn_open_at(
         new_inode.size       = 0;
         new_inode.space_used = 0;
         new_inode.uid        = request->cred->uid;
-        new_inode.gid        = request->cred->gid;
-        new_inode.nlink      = 1;
-        new_inode.rdev       = 0;
-        new_inode.mode       = S_IFREG |  0644;
-        new_inode.atime      = now;
-        new_inode.mtime      = now;
-        new_inode.ctime      = now;
+        /* POSIX: a set-group-ID parent directory forces the new file's
+         * group. */
+        new_inode.gid = (parent_inode->mode & S_ISGID) ?
+            parent_inode->gid : request->cred->gid;
+        new_inode.nlink = 1;
+        new_inode.rdev  = 0;
+        new_inode.mode  = S_IFREG |  0644;
+        new_inode.atime = now;
+        new_inode.mtime = now;
+        new_inode.ctime = now;
         new_inode.change++;
         new_inode.btime          = now;
         new_inode.dos_attributes = 0;
@@ -3930,7 +3937,9 @@ cairn_symlink_at(
     new_inode.size       = request->symlink_at.targetlen;
     new_inode.space_used = request->symlink_at.targetlen;
     new_inode.uid        = request->cred->uid;
-    new_inode.gid        = request->cred->gid;
+    /* POSIX: a set-group-ID parent directory forces the new node's group. */
+    new_inode.gid        = (parent_inode->mode & S_ISGID) ?
+        parent_inode->gid : request->cred->gid;
     new_inode.nlink      = 1;
     new_inode.refcnt     = 1;   /* open reference (see cairn_open_at); without it
                                  * unlink underflows the count and leaks the inode */
