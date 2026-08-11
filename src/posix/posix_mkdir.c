@@ -71,6 +71,23 @@ chimera_posix_mkdir(
     chimera_posix_completion_destroy(&comp);
 
     if (err) {
+        if ((err == EEXIST || err == EACCES) &&
+            path_len > 1 && path[path_len - 1] == '/') {
+            /* The backend judged the slash-stripped name.  XBD 4.16: a
+             * trailing slash makes the pathname resolve through the final
+             * component -- a non-directory there is ENOTDIR and a symlink
+             * loop is ELOOP, and resolution errors precede the operation's
+             * own existence/permission errors.  stat() with the slash
+             * preserved applies exactly those rules; any other stat
+             * outcome (a directory, a dangling link) keeps the backend's
+             * errno. */
+            struct stat st;
+
+            if (chimera_posix_stat(path, &st) < 0 &&
+                (errno == ENOTDIR || errno == ELOOP)) {
+                return -1;
+            }
+        }
         errno = err;
         return -1;
     }
