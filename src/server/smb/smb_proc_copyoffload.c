@@ -151,6 +151,7 @@ chimera_smb_duplicate_extents_clone_cb(
             request->ioctl.de_dst_open_file->handle,
             request->ioctl.de_dst_offset,
             request->ioctl.de_length,
+            0,
             0, 0,
             chimera_smb_duplicate_extents_copy_cb,
             request);
@@ -449,6 +450,7 @@ chimera_smb_offload_write_clone_cb(
             request->ioctl.od_dst_open_file->handle,
             request->ioctl.od_file_offset,
             request->ioctl.od_copy_length,
+            0,
             0, 0,
             chimera_smb_offload_write_copy_cb,
             request);

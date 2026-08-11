@@ -94,6 +94,7 @@ chimera_posix_copy_file_range(
     req.copy_range.dst_offset   = (uint64_t) dst_off;
     req.copy_range.length       = len;
     req.copy_range.r_length     = 0;
+    req.copy_range.flags        = CHIMERA_VFS_COPY_PRESERVE_HOLES;
     req.copy_range.callback     = chimera_posix_copy_file_range_callback;
     req.copy_range.private_data = &st;
 

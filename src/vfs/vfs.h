@@ -163,6 +163,15 @@ struct chimera_vfs_mount_options {
 /* Allocate flags */
 #define CHIMERA_VFS_ALLOCATE_DEALLOCATE 0x01
 
+/* Copy-range flags */
+/* Preserve source holes: when a full destination block's source is entirely a
+ * hole, drop the destination block rather than materializing zeroes, so
+ * SEEK_HOLE still sees the hole after the copy.  This is POSIX
+ * copy_file_range() semantics; the POSIX client sets it.  SMB copychunk, NFS4
+ * COPY and S3 copy leave it clear and get the materializing behavior their
+ * conformance suites expect. */
+#define CHIMERA_VFS_COPY_PRESERVE_HOLES 0x01
+
 /* Lock types */
 #define CHIMERA_VFS_LOCK_READ           0 /* shared / read lock */
 #define CHIMERA_VFS_LOCK_WRITE          1 /* exclusive / write lock */
@@ -1017,6 +1026,7 @@ struct chimera_vfs_request {
             uint64_t                        dst_offset;
             uint64_t                        length;
             uint64_t                        r_length;
+            uint32_t                        flags;
             struct chimera_vfs_attrs        r_pre_attr;
             struct chimera_vfs_attrs        r_post_attr;
         } copy_range;

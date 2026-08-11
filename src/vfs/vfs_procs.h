@@ -907,6 +907,7 @@ chimera_vfs_copy_range(
     struct chimera_vfs_open_handle   *dst_handle,
     uint64_t                          dst_offset,
     uint64_t                          length,
+    uint32_t                          flags,
     uint64_t                          pre_attr_mask,
     uint64_t                          post_attr_mask,
     chimera_vfs_copy_range_callback_t callback,

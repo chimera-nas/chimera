@@ -237,6 +237,7 @@ chimera_smb_copychunk_next(struct chimera_smb_request *request)
         request->ioctl.cc_dst_open_file->handle,
         request->ioctl.cc_chunks[i].dst_offset,
         request->ioctl.cc_chunks[i].length,
+        0,                     /* flags: copychunk materializes holes */
         0,
         0,
         chimera_smb_copychunk_cb,

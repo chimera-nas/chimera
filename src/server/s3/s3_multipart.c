@@ -1299,6 +1299,7 @@ chimera_s3_upc_step(struct chimera_s3_upload_copy_ctx *ctx)
             request->file_handle,
             ctx->copied,
             chunk,
+            0,
             0, 0,
             chimera_s3_upc_copy_callback,
             ctx);
@@ -2306,6 +2307,7 @@ chimera_s3_complete_assemble_next(struct chimera_s3_complete_ctx *ctx)
                 request->file_handle,
                 ctx->write_offset,
                 remaining,
+                0,
                 0, 0,
                 chimera_s3_complete_copy_callback,
                 ctx);

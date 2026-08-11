@@ -389,6 +389,7 @@ struct chimera_client_request {
             uint64_t                        dst_offset;
             uint64_t                        length;
             uint64_t                        r_length;
+            uint32_t                        flags;
             chimera_copy_range_callback_t   callback;
             void                           *private_data;
         } copy_range;

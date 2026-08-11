@@ -294,6 +294,7 @@ chimera_vfs_copy_range(
     struct chimera_vfs_open_handle   *dst_handle,
     uint64_t                          dst_offset,
     uint64_t                          length,
+    uint32_t                          flags,
     uint64_t                          pre_attr_mask,
     uint64_t                          post_attr_mask,
     chimera_vfs_copy_range_callback_t callback,
@@ -339,6 +340,7 @@ chimera_vfs_copy_range(
     request->copy_range.dst_offset              = dst_offset;
     request->copy_range.length                  = length;
     request->copy_range.r_length                = 0;
+    request->copy_range.flags                   = flags;
     request->copy_range.r_pre_attr.va_req_mask  = pre_attr_mask;
     request->copy_range.r_pre_attr.va_set_mask  = 0;
     request->copy_range.r_post_attr.va_req_mask = post_attr_mask | CHIMERA_VFS_ATTR_MASK_CACHEABLE;
