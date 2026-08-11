@@ -240,6 +240,18 @@ chimera_vfs_open_lookup_complete(
             return;
         }
 
+        /* FIFOs/sockets/devices have no blocking-open or device semantics
+         * behind a NAS client; opening one with data access is ENXIO.
+         * Accessless (O_PATH-style / INFERRED) opens still work so path
+         * metadata operations on such nodes are unaffected. */
+        if (!S_ISREG(attr->va_mode) && !S_ISDIR(attr->va_mode) &&
+            !S_ISLNK(attr->va_mode) &&
+            (f & (CHIMERA_VFS_OPEN_READ_ONLY | CHIMERA_VFS_OPEN_WRITE_ONLY))) {
+            chimera_vfs_request_free(thread, request);
+            callback(CHIMERA_VFS_ENXIO, NULL, NULL, priv);
+            return;
+        }
+
         /* Authorize the requested read/write access against the file. */
         if (chimera_vfs_gate_needed(request->module->capabilities, request->cred)) {
             if (chimera_vfs_gate(attr, request->cred,
