@@ -64,6 +64,36 @@ test_cleanup(
     }
 } /* test_cleanup */
 
+/* Log level for this run.  Defaults to info, as every other test harness here
+ * does; SMBTORTURE_LOG_LEVEL=error|info|debug overrides it.  An unrecognized
+ * value is a hard error rather than a silent fallback: a sweep that asked for
+ * debug and quietly got info would harvest nothing and report success. */
+static int
+smbtorture_log_level(void)
+{
+    const char *env = getenv("SMBTORTURE_LOG_LEVEL");
+
+    if (!env || *env == '\0') {
+        return CHIMERA_LOG_INFO;
+    }
+
+    if (strcmp(env, "debug") == 0) {
+        return CHIMERA_LOG_DEBUG;
+    }
+
+    if (strcmp(env, "info") == 0) {
+        return CHIMERA_LOG_INFO;
+    }
+
+    if (strcmp(env, "error") == 0) {
+        return CHIMERA_LOG_ERROR;
+    }
+
+    fprintf(stderr, "SMBTORTURE_LOG_LEVEL='%s' is not one of error|info|debug\n",
+            env);
+    exit(EXIT_FAILURE);
+} /* smbtorture_log_level */
+
 /* Does `name` match `entry` from the ADS list?  Exact, or as a parent-suite
  * prefix: "smb2.streams" matches "smb2.streams" and "smb2.streams.io", but not
  * "smb2.stream-inherit-perms" (the '.' is required).  The old hand-written
@@ -445,8 +475,11 @@ main(
         return 77;
     }
 
-    /* Initialize logging */
-    ChimeraLogLevel = CHIMERA_LOG_INFO;
+    /* Initialize logging.  SMBTORTURE_LOG_LEVEL raises (or lowers) the level for
+     * a single run; tools/smbtorture/derive_ads.sh sets it to debug because the
+     * named-streams gate it harvests logs at debug -- that log is on a
+     * client-driven per-request path, so it cannot default to info. */
+    ChimeraLogLevel = smbtorture_log_level();
     evpl_set_log_fn(chimera_vlog, chimera_log_flush);
 
     env.metrics = prometheus_metrics_create(NULL, NULL, 0);

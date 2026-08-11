@@ -2404,10 +2404,12 @@ chimera_smb_create_open_stream_chain(
 
     if (!(base_oh->vfs_module->capabilities & CHIMERA_VFS_CAP_NAMED_STREAMS)) {
         /* Gate 2: the feature is configured on, but this backend cannot do it.
-         * Distinct from the gate in chimera_smb_create_start(), which fires when
-         * the feature is off entirely -- both return OBJECT_NAME_INVALID, so the
-         * log line is the only way to tell them apart after the fact. */
-        chimera_smb_info(
+         * Distinct from the gate in chimera_smb_create(), which fires when the
+         * feature is off entirely -- both return OBJECT_NAME_INVALID, so the log
+         * line is the only way to tell them apart after the fact.  Debug level:
+         * the rejected name is client-controlled and clients probe stream paths
+         * on essentially every file, so this must not be on by default. */
+        chimera_smb_debug(
             "named streams: backend '%s' does not advertise CHIMERA_VFS_CAP_"
             "NAMED_STREAMS; rejecting stream CREATE '%.*s:%.*s'",
             base_oh->vfs_module->name,
@@ -4891,11 +4893,18 @@ chimera_smb_create(struct chimera_smb_request *request)
             /* Gate 1: the feature is off in config, so the name is refused
              * before any backend is consulted.  Indistinguishable on the wire
              * from gate 2 in chimera_smb_create_open_stream_chain() ("backend
-             * cannot do this") -- both are OBJECT_NAME_INVALID, which is
-             * correct but hid a cluster of misconfigured smbtorture subtests
-             *.  Log which one fired; tools/smbtorture/derive_ads.sh
-             * harvests this line to rediscover the tests that need the feature. */
-            chimera_smb_info(
+             * cannot do this") -- both are OBJECT_NAME_INVALID, which is correct
+             * but hid a cluster of misconfigured smbtorture subtests.  Log which
+             * one fired; tools/smbtorture/derive_ads.sh harvests this line to
+             * rediscover the tests that need the feature.
+             *
+             * Debug level, not info: named_streams is off by default, and macOS
+             * clients probe ':AFP_AfpInfo' / ':com.apple.ResourceFork' while
+             * Windows probes ':Zone.Identifier' on essentially every file, so at
+             * info a directory browse would emit a line per file -- unbounded,
+             * client-driven log volume carrying a client-controlled path.  The
+             * sweep raises the level itself via SMBTORTURE_LOG_LEVEL. */
+            chimera_smb_debug(
                 "named streams: disabled by config; rejecting stream CREATE '%.*s'",
                 request->create.name_len, request->create.name);
             chimera_smb_complete_request(request, SMB2_STATUS_OBJECT_NAME_INVALID);
