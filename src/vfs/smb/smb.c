@@ -380,6 +380,7 @@ chimera_smb_client_init(
 
     shared->max_servers  = CHIMERA_SMB_CLIENT_MAX_SERVERS;
     shared->servers      = calloc(shared->max_servers, sizeof(*shared->servers));
+    shared->tcp_flavor   = CHIMERA_TCP_FLAVOR_PLAIN;
     shared->tcp_protocol = EVPL_STREAM_SOCKET_TCP;
 
     return shared;

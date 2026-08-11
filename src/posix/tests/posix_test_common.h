@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -454,6 +455,22 @@ posix_test_configure_cairn(
 } // posix_test_configure_cairn
 
 // Helper to start NFS server with the given backend and mount it as "share"
+/*
+ * Which transport the in-process server and its client should use.
+ *
+ * The in-process one by default: it binds nothing, so any number of test
+ * binaries run at once without a namespace to separate them.  A test that
+ * fork()s must opt out with CHIMERA_TEST_TRANSPORT=tcp, because an inproc name
+ * is reachable only from the process that registered it.
+ */
+static inline int
+posix_test_transport_is_inproc(void)
+{
+    const char *t = getenv("CHIMERA_TEST_TRANSPORT");
+
+    return !(t && strcasecmp(t, "tcp") == 0);
+} /* posix_test_transport_is_inproc */
+
 static inline void
 posix_test_start_nfs_server(struct posix_test_env *env)
 {
@@ -464,6 +481,22 @@ posix_test_start_nfs_server(struct posix_test_env *env)
 
     server_config = chimera_server_config_init();
     chimera_server_config_set_state_dir(server_config, env->session_dir);
+
+    /* Serve over the in-process transport rather than a socket.  The client is
+     * in this same process, so nothing here needs a port -- which is the point:
+     * an inproc name is private to the process, so any number of these test
+     * binaries can run at once without colliding, and without a network
+     * namespace to keep them apart.
+     *
+     * A test that fork()s is the exception and sets CHIMERA_TEST_TRANSPORT=tcp:
+     * an inproc name reaches only the process that registered it, so a child
+     * that initialises its own client after fork() could never find a server
+     * living in its parent.  Those keep a real socket, and the namespace that
+     * isolates it. */
+    chimera_server_config_set_tcp_flavor(server_config,
+                                         posix_test_transport_is_inproc()
+                                         ? CHIMERA_TCP_FLAVOR_INPROC
+                                         : CHIMERA_TCP_FLAVOR_PLAIN);
 
     if (posix_test_is_diskfs(nfs_backend_name)) {
         posix_test_configure_diskfs(env->session_dir,
@@ -762,6 +795,16 @@ posix_test_init(
         }
 
         json_object_set_new(posix_json_root, "config", posix_json_config);
+
+        /* Match the server (see posix_test_start_nfs_server).  Read from the
+         * top-level "common" section, not from "config". */
+        if (posix_test_transport_is_inproc()) {
+            json_t *common = json_object();
+
+            json_object_set_new(common, "tcp_flavor", json_string("inproc"));
+            json_object_set_new(posix_json_root, "common", common);
+        }
+
         chimera_test_write_users_json(posix_json_root);
 
         snprintf(posix_json_path, sizeof(posix_json_path), "%s/posix.json", env->session_dir);
@@ -831,6 +874,9 @@ posix_test_mount(struct posix_test_env *env)
     if (env->nfs_version > 0) {
         // NFS backend: mount via NFS client
         // Mount path format: hostname:path
+        /* The host half is ignored under the in-process transport -- the peer
+         * is addressed by name, not by address -- but the mount path grammar
+         * still requires it. */
         snprintf(nfs_mount_path, sizeof(nfs_mount_path), "127.0.0.1:/share");
         if (env->use_nfs_rdma) {
             // Use RDMA protocol and port for NFS3 over TCP-RDMA

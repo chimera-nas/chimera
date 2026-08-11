@@ -26,6 +26,27 @@
 #include "nfs_nsm_state.h"
 #include "sm_inter_xdr.h"
 
+#include "common/tcp_flavor.h"
+
+/*
+ * Transport for server-initiated callbacks: the NLM GRANTED delivery and the
+ * NSM reboot notify, both of which connect *out* to a peer.  They run from
+ * contexts that carry no config pointer, and the flavor is a process-wide
+ * setting, so it is cached at server init in the same spirit as
+ * portmap_set_nlm_port().
+ *
+ * Over the socket transports these dial the client's own address.  Under the
+ * in-process transport there is no such address -- so they resolve to the
+ * port-derived name, which in a single-process test lands on this server's own
+ * portmap and NLM.  That is exactly what happened over loopback before, where
+ * "the client's portmap at 127.0.0.1:111" was in fact this server's.
+ */
+void nfs_set_callback_tcp_flavor(
+    enum chimera_tcp_flavor flavor);
+
+enum chimera_tcp_flavor nfs_callback_tcp_flavor(
+    void);
+
 struct chimera_server_nfs_thread;
 
 /*

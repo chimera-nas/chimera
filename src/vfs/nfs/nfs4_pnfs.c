@@ -452,7 +452,8 @@ chimera_nfs4_pnfs_register_ds(
     server->rdma_protocol = use_rdma ? rdma_protocol : 0;
     snprintf(server->hostname, sizeof(server->hostname), "%s", host);
 
-    server->nfs_endpoint = evpl_endpoint_create(server->hostname, server->nfs_port);
+    server->nfs_endpoint = chimera_tcp_flavor_endpoint_create(
+        shared->tcp_flavor, server->hostname, server->nfs_port);
 
     shared->servers[idx] = server;
 

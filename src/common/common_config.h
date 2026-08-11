@@ -43,6 +43,10 @@ chimera_common_tcp_flavor(json_t *root)
         return CHIMERA_TCP_FLAVOR_XLIO;
     } else if (strcasecmp(s, "io_uring") == 0) {
         return CHIMERA_TCP_FLAVOR_IO_URING;
+    } else if (strcasecmp(s, "inproc") == 0) {
+        /* Only meaningful when the client shares the process with the server,
+         * which outside the test suite it does not. */
+        return CHIMERA_TCP_FLAVOR_INPROC;
     }
 
     return CHIMERA_TCP_FLAVOR_PLAIN;

@@ -11,6 +11,7 @@
 #include <sys/stat.h>
 
 #include "vfs/vfs.h"
+#include "common/tcp_flavor.h"
 #include "vfs/vfs_fh.h"
 #include "vfs/vfs_error.h"
 #include "vfs/vfs_attrs.h"
@@ -173,6 +174,11 @@ struct chimera_smb_client_shared {
     struct chimera_smb_client_server **servers;
     int                                max_servers;
     enum evpl_protocol_id tcp_protocol;
+
+    /* The flavor it was resolved from: the in-process transport names a
+     * service rather than addressing it by host and port, so endpoint
+     * construction needs this as well as the protocol id. */
+    enum chimera_tcp_flavor tcp_flavor;
 };
 
 /* Per-open state stored in the VFS open handle's vfs_private; carries the SMB

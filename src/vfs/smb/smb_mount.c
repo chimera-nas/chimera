@@ -636,7 +636,8 @@ chimera_smb_client_mount(
     int                               host_len;
     uint16_t                          port;
 
-    shared->tcp_protocol = chimera_tcp_flavor_to_protocol(request->thread->vfs->tcp_flavor);
+    shared->tcp_flavor   = request->thread->vfs->tcp_flavor;
+    shared->tcp_protocol = chimera_tcp_flavor_to_protocol(shared->tcp_flavor);
 
     colon = memchr(request->mount.path, ':', request->mount.pathlen);
     if (!colon) {
@@ -685,7 +686,8 @@ chimera_smb_client_mount(
              domain ? domain : CHIMERA_SMB_CLIENT_DEFAULT_DOMAIN);
     snprintf(server->password, sizeof(server->password), "%s", password);
     server->port     = port;
-    server->endpoint = evpl_endpoint_create(server->hostname, server->port);
+    server->endpoint = chimera_tcp_flavor_endpoint_create(
+        shared->tcp_flavor, server->hostname, server->port);
 
     conn = chimera_smb_client_get_conn(thread, server);
 

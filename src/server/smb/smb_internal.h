@@ -29,6 +29,7 @@
 #include "smb_sharemode.h"
 #include "smb_notify.h"
 #include "vfs/vfs.h"
+#include "common/tcp_flavor.h"
 #include "vfs/vfs_acl.h"
 #include "vfs/vfs_idmap.h"
 #include "vfs/vfs_release.h"
@@ -1554,6 +1555,11 @@ struct chimera_server_smb_shared {
     struct chimera_smb_config         config;
     int                               rdma;
     enum evpl_protocol_id             tcp_protocol;
+
+    /* The flavor tcp_protocol came from.  Kept because the in-process
+     * transport names a service instead of binding host and port, so
+     * endpoint construction needs it too. */
+    enum chimera_tcp_flavor           tcp_flavor;
     uint8_t                           guid[SMB2_GUID_SIZE];
     /* MS-SMB2 2.2.4 / 3.3.1.5 Global ServerStartTime: the instant this SMB
      * server instance started (NT time), captured once at init.  Reported in

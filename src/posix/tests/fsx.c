@@ -58,6 +58,7 @@
 #include "client/client.h"
 #include "server/server.h"
 #include "common/logging.h"
+#include "common/tcp_flavor.h"
 #include "prometheus-c.h"
 
 #ifndef MAP_FILE
@@ -3894,6 +3895,16 @@ main(
     }
 
     chimera_config = chimera_client_config_init();
+
+    /* Client half of the in-process transport (the server half is set on the
+     * server config below).  Set here rather than through the generated JSON:
+     * fsx builds its client config in code and reads that file only for
+     * modules and mounts, so a "common" section in it would be ignored. */
+    if (chimera_config) {
+        chimera_client_config_set_tcp_flavor(chimera_config,
+                                             CHIMERA_TCP_FLAVOR_INPROC);
+    }
+
     if (!chimera_config) {
         fprintf(stderr, "Failed to initialize chimera client config\n");
         exit(100);
@@ -3936,6 +3947,14 @@ main(
         if (chimera_nfs_version > 0) {
             /* NFS backend: Start server with the actual backend */
             chimera_server_config = chimera_server_config_init();
+
+            /* fsx builds its own server and client rather than going through
+             * posix_test_common.h, so it needs the same transport set here:
+             * the in-process one, so that concurrent fsx runs do not contend
+             * for a port.  The client half is set where the client config is
+             * built, above. */
+            chimera_server_config_set_tcp_flavor(chimera_server_config,
+                                                 CHIMERA_TCP_FLAVOR_INPROC);
 
             /* Configure diskfs/cairn modules before server init */
             if (strcmp(chimera_nfs_backend, "diskfs_io_uring") == 0 ||

@@ -163,6 +163,7 @@ nfs_server_init(
     int                               data_server;
     int                               external_portmap;
     const char                       *portmap_hostname;
+    enum chimera_tcp_flavor           tcp_flavor;
 
     nfs_port          = chimera_server_config_get_nfs_port(config);
     data_server       = chimera_server_config_get_nfs_data_server(config);
@@ -427,7 +428,15 @@ nfs_server_init(
 
     nsm_state_init(&shared->nsm_state, shared->vfs);
 
-    shared->nfs_endpoint = evpl_endpoint_create("0.0.0.0", nfs_port);
+    /* Every endpoint below goes through the flavor helper rather than
+     * evpl_endpoint_create() directly, so that a run configured for the
+     * in-process transport names its services instead of binding ports.  The
+     * port still identifies the service either way. */
+    tcp_flavor = chimera_server_config_get_tcp_flavor(config);
+
+    nfs_set_callback_tcp_flavor(tcp_flavor);
+
+    shared->nfs_endpoint = chimera_tcp_flavor_endpoint_create(tcp_flavor, "0.0.0.0", nfs_port);
 
     /* A pNFS data server only needs the NFSv4 service (clients reach it by
      * file handle for READ/WRITE); skip portmap/mountd/NLM so it can share a
@@ -445,16 +454,16 @@ nfs_server_init(
     }
 
     if (!data_server) {
-        shared->mount_endpoint = evpl_endpoint_create("0.0.0.0", NFS_MOUNT_PORT);
+        shared->mount_endpoint = chimera_tcp_flavor_endpoint_create(tcp_flavor, "0.0.0.0", NFS_MOUNT_PORT);
     }
 
     if (nfs_tcp_rdma_port > 0) {
         /* TCP-RDMA enabled - use TCP-RDMA port (hostname falls back to 0.0.0.0 if not set) */
         const char *rdma_host = nfs_rdma_hostname ? nfs_rdma_hostname : "0.0.0.0";
-        shared->nfs_rdma_endpoint = evpl_endpoint_create(rdma_host, nfs_tcp_rdma_port);
+        shared->nfs_rdma_endpoint = chimera_tcp_flavor_endpoint_create(tcp_flavor, rdma_host, nfs_tcp_rdma_port);
     } else if (nfs_rdma) {
         /* Native RDMA enabled */
-        shared->nfs_rdma_endpoint = evpl_endpoint_create(nfs_rdma_hostname, nfs_rdma_port);
+        shared->nfs_rdma_endpoint = chimera_tcp_flavor_endpoint_create(tcp_flavor, nfs_rdma_hostname, nfs_rdma_port);
     }
     if (!data_server) {
         if (external_portmap) {
@@ -463,7 +472,7 @@ nfs_server_init(
             shared->portmap_endpoint = NULL;
         } else {
             chimera_nfs_debug("Initializing internal portmap support");
-            shared->portmap_endpoint = evpl_endpoint_create("0.0.0.0", 111);
+            shared->portmap_endpoint = chimera_tcp_flavor_endpoint_create(tcp_flavor, "0.0.0.0", 111);
             programs[0]              = &shared->portmap_v2.rpc2;
             programs[1]              = &shared->portmap_v3.rpc2;
             programs[2]              = &shared->portmap_v4.rpc2;
@@ -486,12 +495,12 @@ nfs_server_init(
 
     if (!data_server) {
         chimera_nfs_debug("Initializing NFS lock manager server on port %d", nfs_lockmgr_port);
-        shared->nlm_endpoint = evpl_endpoint_create("0.0.0.0", nfs_lockmgr_port);
+        shared->nlm_endpoint = chimera_tcp_flavor_endpoint_create(tcp_flavor, "0.0.0.0", nfs_lockmgr_port);
         programs[0]          = &shared->nlm_v4.rpc2;
         shared->nlm_server   = evpl_rpc2_server_init(programs, 1);
 
         chimera_nfs_debug("Initializing NSM/statd server on port %d", nfs_nsm_port);
-        shared->nsm_endpoint = evpl_endpoint_create("0.0.0.0", nfs_nsm_port);
+        shared->nsm_endpoint = chimera_tcp_flavor_endpoint_create(tcp_flavor, "0.0.0.0", nfs_nsm_port);
         programs[0]          = &shared->nsm_v1.rpc2;
         shared->nsm_server   = evpl_rpc2_server_init(programs, 1);
     }
@@ -517,12 +526,36 @@ nfs_server_init(
 } /* nfs_server_init */
 
 
+/* See nfs_common.h: cached because the callback paths have no config to
+ * consult when they need to build an endpoint. */
+static enum chimera_tcp_flavor NfsCallbackTcpFlavor = CHIMERA_TCP_FLAVOR_PLAIN;
+
+void
+nfs_set_callback_tcp_flavor(enum chimera_tcp_flavor flavor)
+{
+    NfsCallbackTcpFlavor = flavor;
+} /* nfs_set_callback_tcp_flavor */
+
+enum chimera_tcp_flavor
+nfs_callback_tcp_flavor(void)
+{
+    return NfsCallbackTcpFlavor;
+} /* nfs_callback_tcp_flavor */
+
 void
 nfs_server_start(void *arg)
 {
     struct chimera_server_nfs_shared *shared = arg;
     enum evpl_protocol_id             rdma_protocol;
+    enum evpl_protocol_id             stream_protocol;
     int                               rc;
+
+    /* One transport for every service this server offers.  The auxiliary ones
+     * used to name EVPL_STREAM_SOCKET_TCP outright, which meant they ignored
+     * the configured flavor and would have stayed on TCP while the NFS service
+     * moved -- and under inproc they would have been reached by a name nobody
+     * was listening on. */
+    stream_protocol = chimera_server_config_get_tcp_stream_protocol(shared->config);
 
     /* evpl_rpc2_server_start reports a listen it could not establish -- a port
      * already in use, an address that cannot be bound.  A server that carried
@@ -530,28 +563,31 @@ nfs_server_start(void *arg)
      * on, so every one of these is checked; there is no useful recovery at
      * this point, so the failure is fatal and named. */
     rc = evpl_rpc2_server_start(shared->nfs_server,
-                                chimera_server_config_get_tcp_stream_protocol(shared->config),
+                                stream_protocol,
                                 shared->nfs_endpoint);
     chimera_nfs_abort_if(rc, "failed to start the NFS server");
 
     if (shared->nfs_rdma_endpoint) {
-        /* Use TCP-RDMA emulation when nfs_tcp_rdma_port > 0, otherwise use native RDMA */
-        rdma_protocol = chimera_server_config_get_nfs_tcp_rdma_port(shared->config) > 0
-                        ? EVPL_DATAGRAM_TCP_RDMA : EVPL_DATAGRAM_RDMACM_RC;
+        /* Use TCP-RDMA emulation when nfs_tcp_rdma_port > 0, otherwise use native
+         * RDMA -- or the in-process transport, which carries the chunk framing
+         * of either. */
+        rdma_protocol = chimera_tcp_flavor_to_rdma_protocol(
+            chimera_server_config_get_tcp_flavor(shared->config),
+            chimera_server_config_get_nfs_tcp_rdma_port(shared->config) > 0);
         rc = evpl_rpc2_server_start(shared->nfs_server, rdma_protocol, shared->nfs_rdma_endpoint);
         chimera_nfs_abort_if(rc, "failed to start the NFS RDMA server");
     }
 
     if (shared->mount_server) {
-        rc = evpl_rpc2_server_start(shared->mount_server, EVPL_STREAM_SOCKET_TCP, shared->mount_endpoint);
+        rc = evpl_rpc2_server_start(shared->mount_server, stream_protocol, shared->mount_endpoint);
         chimera_nfs_abort_if(rc, "failed to start the MOUNT server");
     }
     if (shared->nlm_server) {
-        rc = evpl_rpc2_server_start(shared->nlm_server, EVPL_STREAM_SOCKET_TCP, shared->nlm_endpoint);
+        rc = evpl_rpc2_server_start(shared->nlm_server, stream_protocol, shared->nlm_endpoint);
         chimera_nfs_abort_if(rc, "failed to start the NLM server");
     }
     if (shared->nsm_server) {
-        rc = evpl_rpc2_server_start(shared->nsm_server, EVPL_STREAM_SOCKET_TCP, shared->nsm_endpoint);
+        rc = evpl_rpc2_server_start(shared->nsm_server, stream_protocol, shared->nsm_endpoint);
         chimera_nfs_abort_if(rc, "failed to start the NSM server");
     }
 
@@ -559,7 +595,7 @@ nfs_server_start(void *arg)
      * protocols entirely). */
     if (!chimera_server_config_get_nfs_data_server(shared->config)) {
         if (shared->portmap_server) {
-            rc = evpl_rpc2_server_start(shared->portmap_server, EVPL_STREAM_SOCKET_TCP, shared->portmap_endpoint);
+            rc = evpl_rpc2_server_start(shared->portmap_server, stream_protocol, shared->portmap_endpoint);
             chimera_nfs_abort_if(rc, "failed to start the PORTMAP server");
         } else {
             register_nfs_rpc_services(chimera_server_config_get_nfs_lockmgr_port(shared->config),

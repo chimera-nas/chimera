@@ -133,7 +133,8 @@ chimera_smb_server_init(
         return NULL;
     }
 
-    shared->tcp_protocol = chimera_server_config_get_tcp_stream_protocol(config);
+    shared->tcp_flavor   = chimera_server_config_get_tcp_flavor(config);
+    shared->tcp_protocol = chimera_tcp_flavor_to_protocol(shared->tcp_flavor);
 
     shared->config.port      = 445;
     shared->config.rdma_port = 445;
@@ -305,10 +306,12 @@ chimera_smb_server_init(
     gss_import_name(&min, &name, GSS_C_NT_HOSTBASED_SERVICE, &shared->svc);
     //gss_acquire_cred(&min, shared->svc, 0, GSS_C_NO_OID_SET, GSS_C_ACCEPT, &shared->srv_cred, NULL, NULL);
 
-    shared->endpoint = evpl_endpoint_create("0.0.0.0", shared->config.port);
+    shared->endpoint = chimera_tcp_flavor_endpoint_create(shared->tcp_flavor, "0.0.0.0",
+                                                          shared->config.port);
 
     if (rdma) {
-        shared->endpoint_rdma = evpl_endpoint_create("0.0.0.0", shared->config.rdma_port);
+        shared->endpoint_rdma = chimera_tcp_flavor_endpoint_create(shared->tcp_flavor, "0.0.0.0",
+                                                                   shared->config.rdma_port);
     }
 
     shared->listener = evpl_listener_create();
@@ -393,7 +396,9 @@ chimera_smb_server_start(void *data)
     chimera_smb_abort_if(rc, "failed to listen for SMB");
 
     if (shared->endpoint_rdma) {
-        rc = evpl_listen(shared->listener, EVPL_DATAGRAM_RDMACM_RC, shared->endpoint_rdma);
+        rc = evpl_listen(shared->listener,
+                         chimera_tcp_flavor_to_rdma_protocol(shared->tcp_flavor, 0),
+                         shared->endpoint_rdma);
         chimera_smb_abort_if(rc, "failed to listen for SMB over RDMA");
     }
 } /* smb_server_start */

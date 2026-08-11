@@ -23,6 +23,7 @@
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
 #include "evpl/evpl.h"
+#include "common/tcp_flavor.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -83,6 +84,12 @@ main(
     metrics = prometheus_metrics_create(NULL, NULL, 0);
 
     config = chimera_server_config_init();
+
+    /* Server and client are the same process here -- the client VFS is the
+     * server's -- so serve SMB over the in-process transport.  Nothing binds
+     * 445, which is what previously forced this test into a namespace of its
+     * own to keep it off the host's port. */
+    chimera_server_config_set_tcp_flavor(config, CHIMERA_TCP_FLAVOR_INPROC);
     /* Register the SMB2 client VFS module (statically linked into chimera_vfs;
      * empty path => resolve the vfs_smb symbol, do not dlopen). */
     chimera_server_config_add_module(config, "smb", NULL, "");

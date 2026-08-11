@@ -72,12 +72,21 @@ chimera_nfs4_mount_reclaim_complete_retry(
 
 /* Get the RDMA protocol from mount options */
 static enum evpl_protocol_id
-chimera_nfs4_mount_get_rdma_protocol(const struct chimera_vfs_mount_options *options)
+chimera_nfs4_mount_get_rdma_protocol(
+    const struct chimera_vfs_mount_options *options,
+    enum chimera_tcp_flavor                 flavor)
 {
     int i;
 
     for (i = 0; i < options->num_options; i++) {
         if (strcmp(options->options[i].key, "rdma") == 0) {
+            /* Under the in-process transport there is no socket to run
+             * either emulation over; DATAGRAM_INPROC is the chunk-bearing
+             * protocol there, whichever rdma= spelling asked for one. */
+            if (flavor == CHIMERA_TCP_FLAVOR_INPROC) {
+                return EVPL_DATAGRAM_INPROC;
+            }
+
             if (options->options[i].value &&
                 strcmp(options->options[i].value, "tcp") == 0) {
                 return EVPL_DATAGRAM_TCP_RDMA;
@@ -658,8 +667,9 @@ chimera_nfs4_mount(
         server->shared  = shared;
 
         /* Parse RDMA options */
-        server->rdma_protocol = chimera_nfs4_mount_get_rdma_protocol(&request->mount.options);
-        server->use_rdma      = server->rdma_protocol != 0;
+        server->rdma_protocol = chimera_nfs4_mount_get_rdma_protocol(&request->mount.options,
+                                                                     shared->tcp_flavor);
+        server->use_rdma = server->rdma_protocol != 0;
 
         /* pNFS opt-in (default off); confirmed against eir_flags at EXCHANGE_ID. */
         server->pnfs_requested = chimera_nfs4_mount_get_pnfs(&request->mount.options);
@@ -706,7 +716,8 @@ chimera_nfs4_mount(
 
     if (need_discover) {
         /* First mount to this server: create the shared endpoint. */
-        server->nfs_endpoint = evpl_endpoint_create(server->hostname, server->nfs_port);
+        server->nfs_endpoint = chimera_tcp_flavor_endpoint_create(
+            shared->tcp_flavor, server->hostname, server->nfs_port);
     }
 
     /*

@@ -20,6 +20,7 @@
 #include "nfs4_xdr.h"
 #include "uthash.h"
 #include "common/misc.h"
+#include "common/tcp_flavor.h"
 #include "vfs/vfs_fh.h"
 #include "nfs_common/nfs_fh_limits.h"
 #include "evpl/evpl_rpc2.h"
@@ -390,6 +391,11 @@ struct chimera_nfs_shared {
      * the common tcp_flavor setting (chimera_vfs->tcp_flavor) at mount time.
      * Defaults to EVPL_STREAM_SOCKET_TCP. */
     enum evpl_protocol_id tcp_protocol;
+
+    /* The flavor tcp_protocol was resolved from, kept because endpoints are
+     * built from it too, not just the protocol id: the in-process transport
+     * addresses a service by name rather than by host and port. */
+    enum chimera_tcp_flavor tcp_flavor;
 };
 
 struct chimera_nfs_thread {
