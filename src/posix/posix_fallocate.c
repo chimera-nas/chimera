@@ -55,7 +55,7 @@ chimera_posix_do_fallocate(
     }
 
     /* (de)allocate requires the descriptor be open for writing. */
-    if ((entry->oflags & O_ACCMODE) == O_RDONLY) {
+    if ((entry->ofd->oflags & O_ACCMODE) == O_RDONLY) {
         chimera_posix_fd_release(entry, 0);
         errno = EBADF;
         return -1;

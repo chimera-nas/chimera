@@ -51,10 +51,8 @@ chimera_posix_fcntl_dupfd(
         return -1;
     }
 
-    /* Like dup(): the duplicate takes the description's offset and
-     * status flags. */
-    posix->fds[newfd].offset = entry->offset;
-    posix->fds[newfd].oflags = entry->oflags;
+    /* Like dup(): the duplicate SHARES the open file description. */
+    chimera_posix_ofd_adopt(posix, &posix->fds[newfd], entry);
 
     chimera_posix_fd_release(entry, 0);
 
@@ -76,7 +74,7 @@ chimera_posix_fcntl_getfl(
         return -1;
     }
 
-    flags = (int) (entry->oflags &
+    flags = (int) (entry->ofd->oflags &
                    (O_ACCMODE | CHIMERA_POSIX_SETFL_MASK));
 
     chimera_posix_fd_release(entry, 0);
@@ -99,7 +97,7 @@ chimera_posix_fcntl_setfl(
         return -1;
     }
 
-    entry->oflags = (entry->oflags & ~(unsigned int) CHIMERA_POSIX_SETFL_MASK)
+    entry->ofd->oflags = (entry->ofd->oflags & ~(unsigned int) CHIMERA_POSIX_SETFL_MASK)
         | ((unsigned int) arg & CHIMERA_POSIX_SETFL_MASK);
 
     chimera_posix_fd_release(entry, 0);
@@ -219,7 +217,7 @@ chimera_posix_fcntl(
             break;
         }
         case SEEK_CUR: {
-            int64_t abs_offset = (int64_t) entry->offset + (int64_t) fl->l_start;
+            int64_t abs_offset = (int64_t) entry->ofd->offset + (int64_t) fl->l_start;
 
             if (abs_offset < 0) {
                 chimera_posix_fd_release(entry, 0);
