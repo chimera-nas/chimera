@@ -14,11 +14,56 @@
 
 #include "vfs/vfs.h"
 #include "vfs/vfs_fh.h"
+#include "vfs/vfs_acl.h"
 #include "vfs/vfs_mount_table.h"
 #include "common/logging.h"
 #include "common/misc.h"
 #include "metrics/metrics.h"
 #include "vfs/vfs_dump.h"
+
+/* Canonical access bits an open with the given flags requires against
+ * the target file. */
+static inline uint32_t
+chimera_vfs_open_required_access(unsigned int flags)
+{
+    uint32_t required = 0;
+
+    /* Access intent is signalled positively: O_RDONLY -> READ_ONLY,
+     * O_WRONLY -> WRITE_ONLY, O_RDWR -> both.  A raw open with neither bit
+     * (e.g. an O_PATH-style handle open) requests no data access and is not
+     * gated. */
+    if (flags & CHIMERA_VFS_OPEN_READ_ONLY) {
+        required |= CHIMERA_ACE_READ_DATA;
+    }
+    if (flags & CHIMERA_VFS_OPEN_WRITE_ONLY) {
+        required |= CHIMERA_ACE_WRITE_DATA;
+    }
+    if (flags & CHIMERA_VFS_OPEN_TRUNCATE) {
+        required |= CHIMERA_ACE_WRITE_DATA;
+    }
+    return required;
+} /* chimera_vfs_open_required_access */
+
+/* Record an open-time effective-access grant on a handle.  POSIX (and the
+ * NFSv4/SMB stateful-open models) bind I/O rights when the file is opened;
+ * the I/O paths consult granted_access instead of re-deriving from the
+ * file's current mode, so later chmods do not revoke existing descriptors.
+ * The open cache shards handles by (fh, access_mode, cred_hash), so grants
+ * from same-credential opens of one file share a handle: union them --
+ * a successful open never narrows what an earlier open of the same handle
+ * legitimately obtained. */
+static inline void
+chimera_vfs_handle_stamp_access(
+    struct chimera_vfs_open_handle *handle,
+    uint32_t                        granted)
+{
+    if (handle->granted_valid) {
+        handle->granted_access |= granted;
+    } else {
+        handle->granted_access = granted;
+        handle->granted_valid  = 1;
+    }
+} /* chimera_vfs_handle_stamp_access */
 
 /* Size of the per-request scratch buffer used by VFS modules.
  * Must be large enough for the largest operation (symlink: name + target + 2 NULs). */

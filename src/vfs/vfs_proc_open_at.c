@@ -5,11 +5,30 @@
 #include <string.h>
 #include "vfs_procs.h"
 #include "vfs_internal.h"
+#include "vfs_release.h"
+#include "vfs_access.h"
 #include "common/misc.h"
 #include "vfs_open_cache.h"
 #include "vfs_name_cache.h"
 #include "vfs_attr_cache.h"
 #include "common/macros.h"
+
+/* Whether the engine authorizes this open at completion (see the gate in
+ * chimera_vfs_open_at_hdl_callback): engine-authoritative backend, a
+ * non-exempt caller, a real (non-INFERRED) open.  SMB (AUTH_ATTR) evaluates
+ * its own access model and is exempt, as are internal INFERRED opens (NFS3
+ * create and the path-setattr plumbing), which keep their protocol-specific
+ * per-operation semantics. */
+static inline int
+chimera_vfs_open_at_gated(
+    const struct chimera_vfs_module *module,
+    const struct chimera_vfs_cred   *cred,
+    unsigned int                     flags)
+{
+    return !(flags & CHIMERA_VFS_OPEN_INFERRED) &&
+           cred->flavor != CHIMERA_VFS_AUTH_ATTR &&
+           chimera_vfs_gate_needed(module->capabilities, cred);
+} /* chimera_vfs_open_at_gated */
 
 static void
 chimera_vfs_open_at_hdl_callback(
@@ -51,6 +70,37 @@ chimera_vfs_open_at_hdl_callback(
 
     if (handle) {
         handle->r_created = request->open_at.r_created;
+    }
+
+    /* POSIX (and the NFSv4/SMB stateful-open models) bind I/O rights at
+     * open.  Authorize the requested access against the just-returned
+     * attrs -- an existing file the caller may not access this way fails
+     * EACCES, while a freshly created file grants the requested access
+     * unconditionally (no permission check applies to a file that did not
+     * exist) -- and stamp the effective grant on the handle so subsequent
+     * I/O is immune to later mode changes. */
+    if (request->status == CHIMERA_VFS_OK && handle &&
+        chimera_vfs_open_at_gated(request->module, request->cred,
+                                  request->open_at.flags) &&
+        (request->open_at.r_attr.va_set_mask & CHIMERA_VFS_ATTR_MODE)) {
+
+        uint32_t required = chimera_vfs_open_required_access(
+            request->open_at.flags);
+        uint32_t granted = chimera_vfs_access_check(&request->open_at.r_attr,
+                                                    request->cred,
+                                                    CHIMERA_ACE_MASK_ALL);
+
+        if (request->open_at.r_created) {
+            granted |= required;
+        }
+
+        if ((granted & required) != required) {
+            chimera_vfs_release(thread, handle);
+            handle          = NULL;
+            request->status = CHIMERA_VFS_EACCES;
+        } else {
+            chimera_vfs_handle_stamp_access(handle, granted);
+        }
     }
 
     chimera_vfs_complete(request);
@@ -208,17 +258,24 @@ chimera_vfs_open_at_hs(
         return;
     }
 
-    request->opcode                              = CHIMERA_VFS_OP_OPEN_AT;
-    request->complete                            = chimera_vfs_open_complete;
-    request->open_at.handle                      = handle;
-    request->open_at.name                        = name;
-    request->open_at.namelen                     = namelen;
-    request->open_at.name_hash                   = chimera_vfs_hash(name, namelen);
-    request->open_at.flags                       = flags;
-    request->open_at.set_attr                    = set_attr;
-    request->open_at.handle_state                = handle_state;
-    request->open_at.r_created                   = 0;
-    request->open_at.r_attr.va_req_mask          = attr_mask | CHIMERA_VFS_ATTR_MASK_CACHEABLE;
+    request->opcode                     = CHIMERA_VFS_OP_OPEN_AT;
+    request->complete                   = chimera_vfs_open_complete;
+    request->open_at.handle             = handle;
+    request->open_at.name               = name;
+    request->open_at.namelen            = namelen;
+    request->open_at.name_hash          = chimera_vfs_hash(name, namelen);
+    request->open_at.flags              = flags;
+    request->open_at.set_attr           = set_attr;
+    request->open_at.handle_state       = handle_state;
+    request->open_at.r_created          = 0;
+    request->open_at.r_attr.va_req_mask = attr_mask | CHIMERA_VFS_ATTR_MASK_CACHEABLE;
+
+    /* The completion gate needs mode/uid/gid (and a native ACL, if any) to
+     * authorize the open; make sure the backend returns them. */
+    if (chimera_vfs_open_at_gated(handle->vfs_module, cred, flags)) {
+        request->open_at.r_attr.va_req_mask |=
+            CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_ACL;
+    }
     request->open_at.r_attr.va_set_mask          = 0;
     request->open_at.r_dir_pre_attr.va_req_mask  = pre_attr_mask;
     request->open_at.r_dir_pre_attr.va_set_mask  = 0;
