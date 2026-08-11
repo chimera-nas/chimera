@@ -2403,6 +2403,11 @@ memfs_mkdir_at(
     inode->dir.parent_inum = parent_inode->inum;
     inode->dir.parent_gen  = parent_inode->gen;
 
+    /* POSIX: a set-group-ID parent directory forces the new node's group. */
+    if (parent_inode->mode & S_ISGID) {
+        inode->gid = parent_inode->gid;
+    }
+
     /* Inherit the parent's inheritable ACEs (or seed a Windows default DACL for
      * SMB creates); refresh the child's attrs since the mode may have changed. */
     memfs_inherit_acl(inode, parent_inode,
@@ -2525,6 +2530,12 @@ memfs_mknod_at(
         memfs_inode_free(thread, inode);
         memfs_dirent_free(thread, dirent);
         return;
+    }
+
+    /* POSIX: a set-group-ID parent directory forces the new node's group. */
+    if (parent_inode->mode & S_ISGID) {
+        inode->gid = parent_inode->gid;
+        memfs_map_attrs(shared, r_attr, inode, request->fh);
     }
 
     memfs_map_pre_attr(shared, r_dir_pre_attr, parent_inode, request->fh);
@@ -2990,12 +3001,15 @@ memfs_open_at(
         inode->size       = 0;
         inode->space_used = 0;
         inode->uid        = request->cred->uid;
-        inode->gid        = request->cred->gid;
-        inode->nlink      = 1;
-        inode->mode       = S_IFREG |  0644;
-        inode->atime      = now;
-        inode->mtime      = now;
-        inode->ctime      = now;
+        /* POSIX: a set-group-ID parent directory forces the new file's
+         * group; the parent lock is held throughout the create. */
+        inode->gid = (parent_inode->mode & S_ISGID) ?
+            parent_inode->gid : request->cred->gid;
+        inode->nlink = 1;
+        inode->mode  = S_IFREG |  0644;
+        inode->atime = now;
+        inode->mtime = now;
+        inode->ctime = now;
         inode->change++;
         inode->file.blocks     = NULL;
         inode->file.max_blocks = 0;
@@ -4746,6 +4760,12 @@ memfs_symlink_at(
         memfs_inode_free(thread, inode);
         memfs_dirent_free(thread, dirent);
         return;
+    }
+
+    /* POSIX: a set-group-ID parent directory forces the new node's group. */
+    if (parent_inode->mode & S_ISGID) {
+        inode->gid = parent_inode->gid;
+        memfs_map_attrs(shared, &request->symlink_at.r_attr, inode, request->fh);
     }
 
     rb_tree_query_exact(&parent_inode->dir.dirents, hash, hash, existing_dirent);
