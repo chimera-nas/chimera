@@ -150,6 +150,7 @@ chimera_vfs_link(
     int                            fhlen,
     const char                    *old_path,
     int                            old_pathlen,
+    unsigned int                   source_lookup_flags,
     const char                    *new_path,
     int                            new_pathlen,
     unsigned int                   replace,
@@ -231,7 +232,9 @@ chimera_vfs_link(
         memcpy(request->link.dest_parent_fh, fh, fhlen);
         request->link.dest_parent_fh_len = fhlen;
 
-        /* Still need to resolve source path to get source FH */
+        /* Still need to resolve source path to get source FH; the caller's
+         * lookup flags decide whether a final-component symlink is
+         * followed (linkat AT_SYMLINK_FOLLOW) or linked itself. */
         chimera_vfs_lookup(
             thread,
             cred,
@@ -240,7 +243,7 @@ chimera_vfs_link(
             request->link.path,
             request->link.pathlen,
             CHIMERA_VFS_ATTR_FH,
-            0,
+            source_lookup_flags & CHIMERA_VFS_LOOKUP_FOLLOW,
             chimera_vfs_link_source_lookup_fast_complete,
             request);
     } else {
@@ -257,7 +260,8 @@ chimera_vfs_link(
             request->link.new_name_offset = 0;
         }
 
-        /* Resolve source (full path) to get source FH */
+        /* Resolve source (full path) to get source FH; follow semantics
+         * as above. */
         chimera_vfs_lookup(
             thread,
             cred,
@@ -266,7 +270,7 @@ chimera_vfs_link(
             request->link.path,
             request->link.pathlen,
             CHIMERA_VFS_ATTR_FH,
-            0,
+            source_lookup_flags & CHIMERA_VFS_LOOKUP_FOLLOW,
             chimera_vfs_link_source_lookup_complete,
             request);
     }

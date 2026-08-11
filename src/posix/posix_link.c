@@ -52,13 +52,16 @@ chimera_posix_link(
     source_slash = rindex(oldpath, '/');
     dest_slash   = rindex(newpath, '/');
 
-    req.opcode                 = CHIMERA_CLIENT_OP_LINK;
-    req.link.callback          = chimera_posix_link_callback;
-    req.link.private_data      = &comp;
-    req.link.source_path_len   = source_path_len;
-    req.link.source_parent_len = source_slash ? source_slash - oldpath : source_path_len;
-    req.link.dest_path_len     = dest_path_len;
-    req.link.dest_parent_len   = dest_slash ? dest_slash - newpath : dest_path_len;
+    req.opcode            = CHIMERA_CLIENT_OP_LINK;
+    req.link.callback     = chimera_posix_link_callback;
+    req.link.private_data = &comp;
+    /* link() links the symlink itself (Linux semantics; linkat with
+     * AT_SYMLINK_FOLLOW is the follow variant). */
+    req.link.source_lookup_flags = 0;
+    req.link.source_path_len     = source_path_len;
+    req.link.source_parent_len   = source_slash ? source_slash - oldpath : source_path_len;
+    req.link.dest_path_len       = dest_path_len;
+    req.link.dest_parent_len     = dest_slash ? dest_slash - newpath : dest_path_len;
 
     while (dest_slash && *dest_slash == '/') {
         dest_slash++;
