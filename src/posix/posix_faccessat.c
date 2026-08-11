@@ -156,7 +156,11 @@ chimera_posix_faccessat(
     req.opcode            = CHIMERA_CLIENT_OP_STAT;
     req.stat.callback     = chimera_posix_faccessat_callback;
     req.stat.private_data = &state;
-    req.stat.path_len     = path_len;
+    /* access()/faccessat() check the file a symlink resolves to, so the
+     * underlying stat must follow (a dangling link is ENOENT, a loop
+     * ELOOP).  This was previously left uninitialized. */
+    req.stat.flags    = CHIMERA_VFS_LOOKUP_FOLLOW;
+    req.stat.path_len = path_len;
 
     chimera_posix_worker_enqueue(worker, &req, chimera_posix_faccessat_exec);
 
