@@ -1994,6 +1994,13 @@ cairn_setattr(
         cairn_punch_hole(thread, shared, inode, new_size, old_size - new_size);
     }
 
+    /* POSIX kill-priv: truncation by an unprivileged caller clears
+     * set-user-ID (and set-group-ID when group-executable), exactly like
+     * the write path does. */
+    if (request->setattr.set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) {
+        inode->mode = chimera_vfs_killpriv_mode(request->cred, inode->mode);
+    }
+
     /* cairn_apply_attrs() rewrites set_attr->va_set_mask down to the scalar
      * bits it consumes (it drops the ACL bit), so capture the caller's original
      * mask first -- the ACL-coherence block below keys off it. */

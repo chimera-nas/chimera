@@ -860,6 +860,14 @@ diskfs_setattr_inode_cb(
 
     diskfs_map_attrs(thread, &request->setattr.r_pre_attr, inode);
 
+    /* POSIX kill-priv: truncation by an unprivileged caller clears
+     * set-user-ID (and set-group-ID when group-executable), exactly like
+     * the write path; both the truncate chain and the direct apply path
+     * below see the cleared mode, and the setattr txn journals it. */
+    if (request->setattr.set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) {
+        inode->mode = chimera_vfs_killpriv_mode(request->cred, inode->mode);
+    }
+
     if (orig_mask & CHIMERA_VFS_ATTR_SIZE) {
         chimera_diskfs_info("setattr SIZE inum=%lu cur=%lu new=%lu mask=0x%lx (%s)",
                             (unsigned long) inode->inum,
