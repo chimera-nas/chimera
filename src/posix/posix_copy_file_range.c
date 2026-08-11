@@ -74,15 +74,15 @@ chimera_posix_copy_file_range(
      * writing, and fd_out must not have O_APPEND set -- all EBADF. */
     if (!chimera_posix_fd_may_read(in_entry) ||
         !chimera_posix_fd_may_write(out_entry) ||
-        (out_entry->oflags & O_APPEND)) {
+        (out_entry->ofd->oflags & O_APPEND)) {
         chimera_posix_fd_release(out_entry, 0);
         chimera_posix_fd_release(in_entry, 0);
         errno = EBADF;
         return -1;
     }
 
-    src_off = off_in ? *off_in : (off_t) in_entry->offset;
-    dst_off = off_out ? *off_out : (off_t) out_entry->offset;
+    src_off = off_in ? *off_in : (off_t) in_entry->ofd->offset;
+    dst_off = off_out ? *off_out : (off_t) out_entry->ofd->offset;
 
     chimera_posix_completion_init(&st.comp, &req);
     st.bytes_copied = 0;
@@ -105,12 +105,12 @@ chimera_posix_copy_file_range(
         if (off_in) {
             *off_in = src_off + (off_t) st.bytes_copied;
         } else {
-            in_entry->offset = (uint64_t) (src_off + (off_t) st.bytes_copied);
+            in_entry->ofd->offset = (uint64_t) (src_off + (off_t) st.bytes_copied);
         }
         if (off_out) {
             *off_out = dst_off + (off_t) st.bytes_copied;
         } else {
-            out_entry->offset = (uint64_t) (dst_off + (off_t) st.bytes_copied);
+            out_entry->ofd->offset = (uint64_t) (dst_off + (off_t) st.bytes_copied);
         }
     }
 

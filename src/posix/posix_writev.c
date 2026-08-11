@@ -78,11 +78,11 @@ chimera_posix_writev_internal(
         return -1;
     }
 
-    uint64_t write_offset = use_fd_offset ? entry->offset : (uint64_t) offset;
+    uint64_t write_offset = use_fd_offset ? entry->ofd->offset : (uint64_t) offset;
 
     /* writev() honors O_APPEND like write(): offset moves to EOF prior to
      * each write (pwritev keeps its explicit offset per POSIX). */
-    if (use_fd_offset && (entry->oflags & O_APPEND)) {
+    if (use_fd_offset && (entry->ofd->oflags & O_APPEND)) {
         int aerr = chimera_posix_fd_eof(worker, entry, &write_offset);
 
         if (aerr) {
@@ -108,7 +108,7 @@ chimera_posix_writev_internal(
     int     err = chimera_posix_wait(&comp);
 
     if (!err && req.sync_result >= 0 && use_fd_offset) {
-        entry->offset = write_offset + (uint64_t) req.sync_result;
+        entry->ofd->offset = write_offset + (uint64_t) req.sync_result;
     }
 
     ssize_t ret = req.sync_result;

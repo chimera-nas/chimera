@@ -94,7 +94,7 @@ chimera_posix_open(
             chimera_close(worker->client_thread, req.sync_open_handle);
             err = EMFILE;
         } else {
-            posix->fds[fd].oflags = (unsigned int) flags;
+            posix->fds[fd].ofd->oflags = (unsigned int) flags;
         }
     }
 

@@ -51,7 +51,7 @@ chimera_posix_ftruncate(
     }
 
     /* POSIX: ftruncate on a descriptor not open for writing fails with EINVAL. */
-    if ((entry->oflags & O_ACCMODE) == O_RDONLY) {
+    if ((entry->ofd->oflags & O_ACCMODE) == O_RDONLY) {
         chimera_posix_fd_release(entry, 0);
         errno = EINVAL;
         return -1;

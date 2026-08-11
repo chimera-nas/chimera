@@ -46,12 +46,30 @@ struct chimera_posix_completion {
 #define CHIMERA_POSIX_FD_CLOSING   0x02
 #define CHIMERA_POSIX_FD_CLOSED    0x04
 
+/* One open file description (POSIX XBD): the file offset and status flags
+ * shared by every descriptor duplicated from one open() -- dup/dup2/
+ * F_DUPFD return descriptors referencing the SAME description, so an
+ * lseek or F_SETFL through one duplicate is visible through the others.
+ * Independent open() calls create independent descriptions.
+ *
+ * refcnt counts fd entries referencing the description and is managed
+ * under the client's fd_lock.  offset/oflags carry the same (loose)
+ * concurrency discipline the per-entry fields had: the per-descriptor
+ * IO_ACTIVE gate serializes offset-consuming I/O on one descriptor;
+ * concurrent I/O through two duplicates of one description is not
+ * additionally serialized here. */
+struct chimera_posix_ofd {
+    uint64_t     offset;
+    unsigned int oflags;     // Raw open(2) flags (for O_ACCMODE checks)
+    int          refcnt;
+};
+
 struct chimera_posix_fd_entry {
     pthread_mutex_t                 lock;
     pthread_cond_t                  cond;
     struct chimera_vfs_open_handle *handle;
     struct chimera_posix_fd_entry  *next;
-    uint64_t                        offset;
+    struct chimera_posix_ofd       *ofd;
     unsigned int                    flags;
     int                             refcnt;
     int                             io_waiters;
@@ -60,7 +78,6 @@ struct chimera_posix_fd_entry {
     int                             eof_flag;    // For FILE* feof() support
     int                             error_flag;  // For FILE* ferror() support
     int                             ungetc_char; // For FILE* ungetc() support (-1 = none)
-    unsigned int                    oflags;      // Raw open(2) flags (for O_ACCMODE checks)
 } __attribute__((aligned(64)));
 
 // CHIMERA_FILE is a pointer to an fd_entry for FILE* operations
@@ -124,6 +141,33 @@ chimera_posix_get_global(void)
 {
     return chimera_posix_global;
 } // chimera_posix_get_global
+
+/* Drop an fd entry's reference on its open file description, freeing the
+ * description when the last duplicate goes.  Caller holds fd_lock. */
+static FORCE_INLINE void
+chimera_posix_ofd_release_locked(struct chimera_posix_fd_entry *entry)
+{
+    if (entry->ofd && --entry->ofd->refcnt == 0) {
+        free(entry->ofd);
+    }
+    entry->ofd = NULL;
+} // chimera_posix_ofd_release_locked
+
+/* Point `entry` at `src`'s open file description (dup/dup2/F_DUPFD: the
+ * duplicate SHARES the description), releasing whatever description the
+ * entry held. */
+static FORCE_INLINE void
+chimera_posix_ofd_adopt(
+    struct chimera_posix_client   *posix,
+    struct chimera_posix_fd_entry *entry,
+    struct chimera_posix_fd_entry *src)
+{
+    pthread_mutex_lock(&posix->fd_lock);
+    chimera_posix_ofd_release_locked(entry);
+    entry->ofd = src->ofd;
+    entry->ofd->refcnt++;
+    pthread_mutex_unlock(&posix->fd_lock);
+} // chimera_posix_ofd_adopt
 
 /* chimera_vfs_error values are a protocol enum whose numbers happen to follow
  * the Linux errno layout; the host's errno numbering differs on other
@@ -409,8 +453,21 @@ chimera_posix_fd_alloc_at_least(
 
     fd = (int) (entry - posix->fds);
 
+    /* A fresh open gets a fresh open file description (not shared with
+     * anyone yet, so no lock needed for the refcount). */
+    entry->ofd = calloc(1, sizeof(*entry->ofd));
+
+    if (!entry->ofd) {
+        pthread_mutex_lock(&posix->fd_lock);
+        entry->next      = posix->free_list;
+        posix->free_list = entry;
+        pthread_mutex_unlock(&posix->fd_lock);
+        return -1;
+    }
+
+    entry->ofd->refcnt = 1;
+
     entry->handle        = handle;
-    entry->offset        = 0;
     entry->flags         = 0;
     entry->refcnt        = 0;
     entry->io_waiters    = 0;
@@ -419,7 +476,6 @@ chimera_posix_fd_alloc_at_least(
     entry->eof_flag      = 0;
     entry->error_flag    = 0;
     entry->ungetc_char   = -1;
-    entry->oflags        = 0;
 
     return fd;
 } // chimera_posix_fd_alloc_at_least
@@ -446,12 +502,12 @@ chimera_posix_fd_free(
     entry = &posix->fds[fd];
 
     entry->handle      = NULL;
-    entry->offset      = 0;
     entry->eof_flag    = 0;
     entry->error_flag  = 0;
     entry->ungetc_char = -1;
 
     pthread_mutex_lock(&posix->fd_lock);
+    chimera_posix_ofd_release_locked(entry);
     entry->next      = posix->free_list;
     posix->free_list = entry;
     pthread_mutex_unlock(&posix->fd_lock);
@@ -566,20 +622,21 @@ chimera_posix_fd_release(
 } // chimera_posix_fd_release
 
 /* POSIX ties I/O rights to the descriptor's access mode, checked at open
- * and carried in oflags (propagated by dup/dup2): read-family calls need a
+ * and carried in the shared description's oflags: read-family calls need a
  * descriptor open for reading and write-family calls one open for writing,
  * otherwise EBADF (read()/write() ERRORS). */
 static FORCE_INLINE int
 chimera_posix_fd_may_read(const struct chimera_posix_fd_entry *entry)
 {
-    return (entry->oflags & O_ACCMODE) != O_WRONLY;
+    return (entry->ofd->oflags & O_ACCMODE) != O_WRONLY;
 } /* chimera_posix_fd_may_read */
 
 static FORCE_INLINE int
 chimera_posix_fd_may_write(const struct chimera_posix_fd_entry *entry)
 {
-    return (entry->oflags & O_ACCMODE) != O_RDONLY;
+    return (entry->ofd->oflags & O_ACCMODE) != O_RDONLY;
 } /* chimera_posix_fd_may_write */
+
 
 static FORCE_INLINE off_t
 chimera_posix_fd_lseek(
@@ -628,7 +685,7 @@ chimera_posix_fd_lseek(
             new_offset = offset;
             break;
         case SEEK_CUR:
-            new_offset = (off_t) entry->offset + offset;
+            new_offset = (off_t) entry->ofd->offset + offset;
             break;
         case SEEK_END:
             new_offset = file_size + offset;
@@ -646,7 +703,7 @@ chimera_posix_fd_lseek(
         return -1;
     }
 
-    entry->offset = (uint64_t) new_offset;
+    entry->ofd->offset = (uint64_t) new_offset;
 
     pthread_mutex_unlock(&entry->lock);
 

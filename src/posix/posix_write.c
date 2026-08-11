@@ -112,13 +112,13 @@ chimera_posix_write(
         return -1;
     }
 
-    uint64_t write_offset = entry->offset;
+    uint64_t write_offset = entry->ofd->offset;
 
     /* POSIX write(): under O_APPEND the file offset is set to the end of
      * the file prior to each write.  The IO_ACTIVE gate serializes appends
      * through this descriptor; cross-descriptor append atomicity would
      * need append support in the VFS write path. */
-    if (entry->oflags & O_APPEND) {
+    if (entry->ofd->oflags & O_APPEND) {
         int aerr = chimera_posix_fd_eof(worker, entry, &write_offset);
 
         if (aerr) {
@@ -143,7 +143,7 @@ chimera_posix_write(
     int     err = chimera_posix_wait(&comp);
 
     if (!err && req.sync_result >= 0) {
-        entry->offset = write_offset + (uint64_t) req.sync_result;
+        entry->ofd->offset = write_offset + (uint64_t) req.sync_result;
     }
 
     ssize_t ret = req.sync_result;
