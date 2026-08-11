@@ -49,6 +49,15 @@ chimera_vfs_gate_fh_getattr(
 
     if (error_code != CHIMERA_VFS_OK) {
         status = error_code;
+    } else if ((attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
+               !S_ISDIR(attr->va_mode)) {
+        /* Every gate_fh caller gates a directory (the parent of a create/
+         * remove, a rename/link destination, a lookup dir); reaching a
+         * non-directory means the caller resolved through a non-directory
+         * descriptor or handle.  Report POSIX's ENOTDIR ahead of the
+         * access evaluation, so the type error is not masked as EACCES
+         * for callers the backend's own type check never reaches. */
+        status = CHIMERA_VFS_ENOTDIR;
     } else {
         status = chimera_vfs_gate(attr, ctx->cred, ctx->required);
     }
