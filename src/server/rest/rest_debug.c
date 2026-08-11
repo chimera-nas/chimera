@@ -251,7 +251,7 @@ chimera_rest_handle_debug_fsop(
         }
         snprintf(ctx->path2, sizeof(ctx->path2), "%s", path2);
         chimera_vfs_link(ctx->vfs_thread, cred, root_fh, root_fh_len,
-                         ctx->path, strlen(ctx->path),
+                         ctx->path, strlen(ctx->path), 0,
                          ctx->path2, strlen(ctx->path2),
                          0, 0, rest_fsop_link_cb, ctx);
     } else if (strcmp(op, "chmod") == 0) {

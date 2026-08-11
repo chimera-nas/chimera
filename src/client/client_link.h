@@ -41,6 +41,7 @@ chimera_dispatch_link(
         thread->client->root_fh_len,
         request->link.source_path,
         request->link.source_path_len,
+        request->link.source_lookup_flags,
         request->link.dest_path,
         request->link.dest_path_len,
         0,

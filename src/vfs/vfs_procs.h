@@ -181,6 +181,10 @@ chimera_vfs_link(
     int                            fhlen,
     const char                    *old_path,
     int                            old_pathlen,
+    /* CHIMERA_VFS_LOOKUP_FOLLOW resolves a final-component symlink in
+     * old_path and links its target (linkat AT_SYMLINK_FOLLOW); 0 links
+     * the symlink itself. */
+    unsigned int                   source_lookup_flags,
     const char                    *new_path,
     int                            new_pathlen,
     unsigned int                   replace,

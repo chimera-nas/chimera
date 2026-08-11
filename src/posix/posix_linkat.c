@@ -9,8 +9,12 @@
 #include "../client/client_link.h"
 
 #ifndef AT_FDCWD
-#define AT_FDCWD -100
+#define AT_FDCWD          -100
 #endif /* ifndef AT_FDCWD */
+
+#ifndef AT_SYMLINK_FOLLOW
+#define AT_SYMLINK_FOLLOW 0x400
+#endif /* ifndef AT_SYMLINK_FOLLOW */
 
 static void
 chimera_posix_linkat_callback(
@@ -46,9 +50,6 @@ chimera_posix_linkat(
     int                             old_path_len, new_path_len;
     const char                     *new_slash;
 
-    // Note: flags like AT_SYMLINK_FOLLOW are not yet implemented
-    (void) flags;
-
     // For now, only support AT_FDCWD for both paths
     if (olddirfd != AT_FDCWD || newdirfd != AT_FDCWD) {
         errno = ENOSYS;
@@ -70,6 +71,10 @@ chimera_posix_linkat(
 
     req.link.source_path_len   = old_path_len;
     req.link.source_parent_len = old_path_len;
+    /* AT_SYMLINK_FOLLOW resolves a final-component symlink in oldpath and
+     * links its target; without it the symlink itself is linked. */
+    req.link.source_lookup_flags = (flags & AT_SYMLINK_FOLLOW) ?
+        CHIMERA_VFS_LOOKUP_FOLLOW : 0;
 
     // Build dest path
     if (newpath[0] == '/') {
