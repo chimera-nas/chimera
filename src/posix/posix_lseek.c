@@ -90,7 +90,7 @@ chimera_posix_lseek_hole_data(
 
     if (!err) {
         pthread_mutex_lock(&entry->lock);
-        entry->offset = ctx.r_offset;
+        entry->ofd->offset = ctx.r_offset;
         pthread_mutex_unlock(&entry->lock);
     }
 

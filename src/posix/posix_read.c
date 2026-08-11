@@ -86,7 +86,7 @@ chimera_posix_read(
     req.read.callback     = chimera_posix_read_callback;
     req.read.private_data = &comp;
     req.read.handle       = entry->handle;
-    req.read.offset       = entry->offset;
+    req.read.offset       = entry->ofd->offset;
     req.read.length       = count;
     req.read.buf          = buf;
 
@@ -95,7 +95,7 @@ chimera_posix_read(
     int     err = chimera_posix_wait(&comp);
 
     if (!err && req.sync_result >= 0) {
-        entry->offset += (uint64_t) req.sync_result;
+        entry->ofd->offset += (uint64_t) req.sync_result;
     }
 
     ssize_t ret = req.sync_result;

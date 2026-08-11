@@ -170,7 +170,7 @@ chimera_posix_init(
         pthread_mutex_init(&posix->fds[i].lock, NULL);
         pthread_cond_init(&posix->fds[i].cond, NULL);
         posix->fds[i].handle        = NULL;
-        posix->fds[i].offset        = 0;
+        posix->fds[i].ofd           = NULL;
         posix->fds[i].flags         = CHIMERA_POSIX_FD_CLOSED;
         posix->fds[i].refcnt        = 0;
         posix->fds[i].io_waiters    = 0;
@@ -264,7 +264,7 @@ chimera_posix_init_json(
         pthread_mutex_init(&posix->fds[i].lock, NULL);
         pthread_cond_init(&posix->fds[i].cond, NULL);
         posix->fds[i].handle        = NULL;
-        posix->fds[i].offset        = 0;
+        posix->fds[i].ofd           = NULL;
         posix->fds[i].flags         = CHIMERA_POSIX_FD_CLOSED;
         posix->fds[i].refcnt        = 0;
         posix->fds[i].io_waiters    = 0;
