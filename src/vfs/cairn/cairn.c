@@ -1850,6 +1850,20 @@ cairn_apply_attrs(
         inode->gid         = attr->va_gid;
     }
 
+    /* POSIX chown(): changing (or restating) a regular file's owner or group
+    * clears set-user-ID, and set-group-ID when group-executable (a S_ISGID
+    * bit without group-exec marks mandatory locking and is preserved).  This
+    * applies to privileged callers too, matching Linux.  An explicit mode in
+    * the same setattr wins outright, so the clear only fires without one. */
+    if ((set_mask & (CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID)) &&
+        !(set_mask & CHIMERA_VFS_ATTR_MODE) &&
+        S_ISREG(inode->mode)) {
+        inode->mode &= ~(uint32_t) S_ISUID;
+        if (inode->mode & S_IXGRP) {
+            inode->mode &= ~(uint32_t) S_ISGID;
+        }
+    }
+
     if (set_mask & CHIMERA_VFS_ATTR_SIZE) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_SIZE;
         inode->size        = attr->va_size;
