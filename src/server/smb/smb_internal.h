@@ -2650,6 +2650,7 @@ chimera_smb_tree_free(
     struct chimera_smb_notify_state *nstate;
     struct chimera_smb_request      *lock_aborts = NULL;
     struct chimera_smb_request      *labort;
+    struct chimera_smb_request      *pcreate;
     bool                             closed_breaking = false;
     int                              i;
 
@@ -2810,6 +2811,25 @@ chimera_smb_tree_free(
         evpl_ring_doorbell(&thread->lease_resume_doorbell);
         chimera_smb_create_resume_parked_broadcast(thread);
     }
+
+    /* Detach any DH2Q creates still registered as deferred-and-not-yet-hashed on
+     * this tree (tree->pending_creates).  A deferred CREATE holds no tree
+     * reference -- refcnt is touched only by TREE_DISCONNECT -- so the tree can
+     * reach here while a create is parked on a handle-lease break or retrying a
+     * disconnecting durable holder, and the free list below does NOT zero the
+     * tree.  A surviving head would be inherited by the next tree to take this
+     * slot, where chimera_smb_create_pending_match would walk a request from a
+     * different tree connect and could answer an unrelated replay
+     * FILE_NOT_AVAILABLE (a client's two tree connects share one client_guid).
+     * Clear each entry's link as well, so the unregister those requests still run
+     * when they resolve is a no-op instead of a walk against a recycled list. */
+    pthread_mutex_lock(&tree->pending_creates_lock);
+    while ((pcreate = tree->pending_creates)) {
+        tree->pending_creates          = pcreate->create.pending_link;
+        pcreate->create.pending_link   = NULL;
+        pcreate->create.pending_linked = 0;
+    }
+    pthread_mutex_unlock(&tree->pending_creates_lock);
 
     pthread_mutex_lock(&shared->trees_lock);
 
