@@ -31,9 +31,10 @@ chimera_posix_fill_utimes(
     const struct timespec     times[2])
 {
     sa->va_req_mask = 0;
-    sa->va_set_mask = CHIMERA_VFS_ATTR_ATIME | CHIMERA_VFS_ATTR_MTIME;
+    sa->va_set_mask = 0;
 
     if (times == NULL) {
+        sa->va_set_mask      = CHIMERA_VFS_ATTR_ATIME | CHIMERA_VFS_ATTR_MTIME;
         sa->va_atime.tv_sec  = 0;
         sa->va_atime.tv_nsec = CHIMERA_VFS_TIME_NOW;
         sa->va_mtime.tv_sec  = 0;
@@ -41,26 +42,40 @@ chimera_posix_fill_utimes(
         return;
     }
 
+    /* An omitted field must not appear in the set mask at all: a stray
+     * OMIT sentinel under CHIMERA_VFS_ATTR_ATIME/MTIME made the setattr
+     * permission gate treat it as an EXPLICIT timestamp, demanding
+     * ownership (EPERM) for calls POSIX tiers by write access -- e.g. a
+     * to-now update paired with one omitted field, or a both-omitted
+     * no-op. */
     if (times[0].tv_nsec == UTIME_NOW) {
+        sa->va_set_mask     |= CHIMERA_VFS_ATTR_ATIME;
         sa->va_atime.tv_sec  = 0;
         sa->va_atime.tv_nsec = CHIMERA_VFS_TIME_NOW;
-    } else if (times[0].tv_nsec == UTIME_OMIT) {
-        sa->va_atime.tv_sec  = 0;
-        sa->va_atime.tv_nsec = CHIMERA_VFS_TIME_OMIT;
-    } else {
-        sa->va_atime = times[0];
+    } else if (times[0].tv_nsec != UTIME_OMIT) {
+        sa->va_set_mask |= CHIMERA_VFS_ATTR_ATIME;
+        sa->va_atime     = times[0];
     }
 
     if (times[1].tv_nsec == UTIME_NOW) {
+        sa->va_set_mask     |= CHIMERA_VFS_ATTR_MTIME;
         sa->va_mtime.tv_sec  = 0;
         sa->va_mtime.tv_nsec = CHIMERA_VFS_TIME_NOW;
-    } else if (times[1].tv_nsec == UTIME_OMIT) {
-        sa->va_mtime.tv_sec  = 0;
-        sa->va_mtime.tv_nsec = CHIMERA_VFS_TIME_OMIT;
-    } else {
-        sa->va_mtime = times[1];
+    } else if (times[1].tv_nsec != UTIME_OMIT) {
+        sa->va_set_mask |= CHIMERA_VFS_ATTR_MTIME;
+        sa->va_mtime     = times[1];
     }
 } /* chimera_posix_fill_utimes */
+
+/* Both fields omitted: POSIX requires no ownership or permission check and
+ * no timestamp change -- only resolution/descriptor errors may surface. */
+static inline int
+chimera_posix_utimes_noop(const struct timespec times[2])
+{
+    return times != NULL &&
+           times[0].tv_nsec == UTIME_OMIT &&
+           times[1].tv_nsec == UTIME_OMIT;
+} /* chimera_posix_utimes_noop */
 
 /* ---- futimens(fd, times) : fsetattr on the open handle ---- */
 
@@ -99,6 +114,13 @@ chimera_posix_futimens(
     if (!entry) {
         errno = EBADF;
         return -1;
+    }
+
+    if (chimera_posix_utimes_noop(times)) {
+        /* The descriptor is valid and a both-omitted call changes
+         * nothing; POSIX forbids any further permission check. */
+        chimera_posix_fd_release(entry, 0);
+        return 0;
     }
 
     chimera_posix_completion_init(&comp, &req);
@@ -146,6 +168,9 @@ struct chimera_posix_utimensat_ctx {
     struct chimera_vfs_open_handle *file_handle;
     struct chimera_vfs_attrs        set_attr;
     uint32_t                        lookup_flags;   /* CHIMERA_VFS_LOOKUP_FOLLOW or 0 */
+    /* Both timestamps omitted: validate the path resolution, change
+     * nothing (see chimera_posix_utimes_noop). */
+    int                             validate_only;
     int                             start_fh_len;
     uint8_t                         start_fh[CHIMERA_VFS_FH_SIZE + 16];
     char                            path[CHIMERA_VFS_PATH_MAX];
@@ -207,6 +232,12 @@ chimera_posix_utimensat_lookup_complete(
         return;
     }
 
+    if (ctx->validate_only) {
+        /* Resolution succeeded; a both-omitted call changes nothing. */
+        chimera_posix_complete(&ctx->comp, CHIMERA_VFS_OK);
+        return;
+    }
+
     chimera_vfs_open_fh(
         request->thread->vfs_thread,
         chimera_client_req_cred(request),
@@ -253,7 +284,8 @@ chimera_posix_utimensat(
 
     chimera_posix_completion_init(&ctx.comp, &req);
 
-    ctx.file_handle = NULL;
+    ctx.file_handle   = NULL;
+    ctx.validate_only = chimera_posix_utimes_noop(times);
 
     /* By default follow a final symlink and set times on its target; with
      * AT_SYMLINK_NOFOLLOW operate on the symlink itself. */
