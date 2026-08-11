@@ -37,7 +37,16 @@
 # MATCHING: an entry matches a test name exactly, or as a parent-suite prefix --
 # "smb2.streams" matches both "smb2.streams" and "smb2.streams.io".  It does not
 # match "smb2.stream-inherit-perms" (the '.' is required), which is why that
-# subtest is listed separately below.
+# subtest is listed separately below.  The required '.' is load-bearing in the
+# other direction too: an entry "smb2.create" would NOT match
+# "smb2.create_no_streams.no_stream", so it cannot break the negative test.
+#
+# The match is one-directional -- the ENTRY may be a prefix of the test name,
+# never the reverse.  So a whole-suite invocation whose name is shorter than the
+# entry does not enable the feature: "smbtorture_test -b memfs smb2.fileid" runs
+# smb2.fileid.fileid with ADS off and it fails at the gate, even though the
+# subtest is listed.  ctest never does this (it passes subtest names), but
+# reproducing by hand needs the subtest name, not the suite name.
 #
 # REGENERATING: do not grow this list one entry at a time by hand -- that is how
 # eleven subtests came to be missing from it.  Run
@@ -144,7 +153,8 @@ smb2.ioctl.copy-chunk streams
 #                                    NT_STATUS_NOT_IMPLEMENTED (getinfo.c:115).
 #   smb2.getinfo.normalized       -- the normalized-name query does not preserve
 #                                    case ("torture_dir1n" for "torture_dIr1N").
-#   smb2.compound.compound-padding-- response body_size is 19, should be 24
+#   smb2.compound.compound-padding
+#                                 -- response body_size is 19, should be 24
 #                                    (compound.c:1356).
 #   smb2.kernel-oplocks.kernel_oplocks5
 #                                 -- granted oplock level is not NONE

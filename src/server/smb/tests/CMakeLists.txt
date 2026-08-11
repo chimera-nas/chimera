@@ -505,13 +505,19 @@ target_include_directories(smbtorture_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 # both the driver (at run time, to set the config knob) and this file (at
 # configure time, to scope that knob under ctest -- see
 # add_smbtorture_backend_tests).  Editing the list re-runs cmake.
-set(SMBTORTURE_ADS_LIST ${CMAKE_CURRENT_SOURCE_DIR}/smbtorture_ads_subtests.txt)
+#
+# The driver opens this by absolute path at run time and treats a failure to
+# read it as EXIT_FAILURE (not the suites' SKIP_RETURN_CODE 77), so the copy it
+# points at must be the one guaranteed to exist wherever ctest runs: the build
+# tree, not the source tree.  configure_file COPYONLY also registers the source
+# as a configure dependency, so editing the list still re-runs cmake.
+set(SMBTORTURE_ADS_LIST_SRC ${CMAKE_CURRENT_SOURCE_DIR}/smbtorture_ads_subtests.txt)
+set(SMBTORTURE_ADS_LIST ${CMAKE_CURRENT_BINARY_DIR}/smbtorture_ads_subtests.txt)
+configure_file(${SMBTORTURE_ADS_LIST_SRC} ${SMBTORTURE_ADS_LIST} COPYONLY)
 target_compile_definitions(smbtorture_test
     PRIVATE SMBTORTURE_ADS_LIST="${SMBTORTURE_ADS_LIST}")
-set_property(DIRECTORY APPEND
-    PROPERTY CMAKE_CONFIGURE_DEPENDS ${SMBTORTURE_ADS_LIST})
 
-file(STRINGS ${SMBTORTURE_ADS_LIST} _ads_lines)
+file(STRINGS ${SMBTORTURE_ADS_LIST_SRC} _ads_lines)
 set(SMBTORTURE_ADS_PATTERNS "")
 foreach(_line ${_ads_lines})
     string(REGEX REPLACE "#.*$" "" _line "${_line}")
@@ -5120,10 +5126,26 @@ macro(add_smbtorture_backend_tests backend)
                 _smbtorture_add_subtest(${backend} "${_sub}")
             endforeach()
         elseif(_plain AND _ads)
-            _smbtorture_add_suite(${backend} "${_parent}" "${_pid}" ${_plain})
-            foreach(_sub ${_ads})
-                _smbtorture_add_subtest(${backend} "${_sub}")
-            endforeach()
+            # _smbtorture_add_suite names the ctest entry from the mangled PARENT
+            # and _smbtorture_add_subtest from the mangled SUBTEST, which are the
+            # same string for a bare two-component test.  So if the suite's own
+            # bare name is the ADS member, registering both here would be a
+            # duplicate add_test NAME and cmake would hard-fail.  No parent in
+            # today's catalog has both a bare entry and dotted siblings, but the
+            # three bare ADS entries (smb2.ioctl-on-stream, smb2.sdread,
+            # smb2.stream-inherit-perms) are exactly that shape -- a Samba image
+            # upgrade that adds a subtest under one of them would trip it.  Split
+            # the whole suite in that case; every entry then gets a distinct name.
+            if("${_parent}" IN_LIST _ads)
+                foreach(_sub ${_plain} ${_ads})
+                    _smbtorture_add_subtest(${backend} "${_sub}")
+                endforeach()
+            else()
+                _smbtorture_add_suite(${backend} "${_parent}" "${_pid}" ${_plain})
+                foreach(_sub ${_ads})
+                    _smbtorture_add_subtest(${backend} "${_sub}")
+                endforeach()
+            endif()
         elseif(_plain)
             _smbtorture_add_suite(${backend} "${_parent}" "${_pid}" ${_plain})
         elseif(_ads)
