@@ -94,8 +94,15 @@ chimera_vfs_open_at_hdl_callback(
         uint32_t               mode   = request->open_at.r_attr.va_mode;
         enum chimera_vfs_error status = CHIMERA_VFS_OK;
 
-        if (S_ISLNK(mode) && (f & CHIMERA_VFS_OPEN_NOFOLLOW) &&
+        if (S_ISLNK(mode) && !(f & CHIMERA_VFS_OPEN_NOFOLLOW) &&
             !(f & CHIMERA_VFS_OPEN_PATH)) {
+            /* A symlink the open will FOLLOW (chimera_vfs_open's create
+             * leg restarts resolution on the link target): neither type
+             * checks nor the access gate apply to the link itself -- a
+             * symlink's permission bits are never consulted, and the
+             * restarted open authorizes the real target. */
+        } else if (S_ISLNK(mode) && (f & CHIMERA_VFS_OPEN_NOFOLLOW) &&
+                   !(f & CHIMERA_VFS_OPEN_PATH)) {
             status = CHIMERA_VFS_ELOOP;
         } else if (S_ISDIR(mode) &&
                    (f & (CHIMERA_VFS_OPEN_WRITE_ONLY |
