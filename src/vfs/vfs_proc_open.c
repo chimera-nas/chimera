@@ -17,27 +17,8 @@
 #define CHIMERA_VFS_OPEN_GATE_MASK (CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_ACL)
 
 /* Map an open's access mode + O_TRUNC to the ACE rights the caller must hold on
- * the target file. */
-static inline uint32_t
-chimera_vfs_open_required_access(unsigned int flags)
-{
-    uint32_t required = 0;
-
-    /* Access intent is signalled positively: O_RDONLY -> READ_ONLY,
-     * O_WRONLY -> WRITE_ONLY, O_RDWR -> both.  A raw open with neither bit
-     * (e.g. an O_PATH-style handle open) requests no data access and is not
-     * gated here. */
-    if (flags & CHIMERA_VFS_OPEN_READ_ONLY) {
-        required |= CHIMERA_ACE_READ_DATA;
-    }
-    if (flags & CHIMERA_VFS_OPEN_WRITE_ONLY) {
-        required |= CHIMERA_ACE_WRITE_DATA;
-    }
-    if (flags & CHIMERA_VFS_OPEN_TRUNCATE) {
-        required |= CHIMERA_ACE_WRITE_DATA;
-    }
-    return required;
-} /* chimera_vfs_open_required_access */
+ * the target file (moved to vfs_internal.h as
+ * chimera_vfs_open_required_access, shared with the open_at wrapper). */
 
 /*
  * Path-only deep-path rebasing.
@@ -113,6 +94,12 @@ chimera_vfs_open_root_complete(
     struct chimera_vfs_thread  *thread   = request->thread;
     chimera_vfs_open_callback_t callback = request->open.callback;
     void                       *priv     = request->open.private_data;
+
+    /* Bind the open-time access grant computed by the lookup gate (POSIX
+     * rights retention; only set on the gated non-create path). */
+    if (error_code == CHIMERA_VFS_OK && oh && request->open.granted_valid) {
+        chimera_vfs_handle_stamp_access(oh, request->open.granted_access);
+    }
 
     chimera_vfs_request_free(thread, request);
 
@@ -254,12 +241,22 @@ chimera_vfs_open_lookup_complete(
         }
 
         /* Authorize the requested read/write access against the file. */
-        if (chimera_vfs_gate_needed(request->module->capabilities, request->cred) &&
-            chimera_vfs_gate(attr, request->cred,
-                             chimera_vfs_open_required_access(f)) != CHIMERA_VFS_OK) {
-            chimera_vfs_request_free(thread, request);
-            callback(CHIMERA_VFS_EACCES, NULL, NULL, priv);
-            return;
+        if (chimera_vfs_gate_needed(request->module->capabilities, request->cred)) {
+            if (chimera_vfs_gate(attr, request->cred,
+                                 chimera_vfs_open_required_access(f)) != CHIMERA_VFS_OK) {
+                chimera_vfs_request_free(thread, request);
+                callback(CHIMERA_VFS_EACCES, NULL, NULL, priv);
+                return;
+            }
+
+            /* POSIX binds I/O rights at open: capture the effective grant
+             * now and stamp it on the handle once it exists (see
+             * chimera_vfs_open_root_complete), so later I/O through the
+             * descriptor is immune to subsequent mode changes. */
+            request->open.granted_access =
+                chimera_vfs_access_check(attr, request->cred,
+                                         CHIMERA_ACE_MASK_ALL);
+            request->open.granted_valid = 1;
         }
     }
 
@@ -307,8 +304,9 @@ chimera_vfs_open(
             return;
         }
 
-        request->open.callback     = callback;
-        request->open.private_data = private_data;
+        request->open.callback      = callback;
+        request->open.private_data  = private_data;
+        request->open.granted_valid = 0;
 
         chimera_vfs_open_fh(
             thread,
@@ -340,12 +338,13 @@ chimera_vfs_open(
     memcpy(request->plugin_data, path, pathlen);
     ((char *) request->plugin_data)[pathlen] = '\0';
 
-    request->open.path         = request->plugin_data;
-    request->open.pathlen      = pathlen;
-    request->open.flags        = flags;
-    request->open.attr_mask    = attr_mask;
-    request->open.callback     = callback;
-    request->open.private_data = private_data;
+    request->open.path          = request->plugin_data;
+    request->open.pathlen       = pathlen;
+    request->open.flags         = flags;
+    request->open.attr_mask     = attr_mask;
+    request->open.callback      = callback;
+    request->open.private_data  = private_data;
+    request->open.granted_valid = 0;
 
     /* A non-create open may pass no set_attr, but open_at (the path-op / deep
      * path-only dispatch) requires a non-NULL one; hand it a zeroed stand-in. */
