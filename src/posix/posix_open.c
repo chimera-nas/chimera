@@ -108,12 +108,13 @@ chimera_posix_open(
     /* O_TRUNC: truncate an existing writable file to zero length on open.
      * The VFS open path does not yet honor CHIMERA_VFS_OPEN_TRUNCATE, so apply
      * it here for regular files opened for writing.  Truncation failures on
-     * non-regular targets are ignored (O_TRUNC is unspecified for them). */
+     * non-regular targets are ignored (O_TRUNC is unspecified for them).
+     * This runs even when the file is already empty: O_TRUNC marks
+     * mtime/ctime and clears set-user/group-ID regardless of the size. */
     if ((flags & O_TRUNC) && (flags & O_ACCMODE) != O_RDONLY) {
         struct stat st;
 
-        if (chimera_posix_fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
-            st.st_size != 0) {
+        if (chimera_posix_fstat(fd, &st) == 0 && S_ISREG(st.st_mode)) {
             (void) chimera_posix_ftruncate(fd, 0);
         }
     }
