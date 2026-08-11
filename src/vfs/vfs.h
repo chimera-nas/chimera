@@ -570,6 +570,12 @@ struct chimera_vfs_request {
             void                           *private_data;
             uint8_t                         parent_fh[CHIMERA_VFS_FH_SIZE];
             int                             parent_fh_len;
+            /* Open-time effective-access grant computed by the lookup gate,
+             * stamped onto the handle at completion (POSIX rights bind at
+             * open).  granted_valid is 0 unless the gated non-create path
+             * ran the access check. */
+            uint32_t                        granted_access;
+            uint8_t                         granted_valid;
             /* Zeroed stand-in handed to open_at when the caller passes no
              * set_attr (a non-create open) -- open_at requires a non-NULL
              * set_attr that the backend only consults when creating. */

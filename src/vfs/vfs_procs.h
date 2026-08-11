@@ -294,6 +294,20 @@ chimera_vfs_setattr(
     chimera_vfs_setattr_callback_t  callback,
     void                           *private_data);
 
+/* Descriptor-originated variant: WRITE_DATA-only mutations (ftruncate,
+ * futimens-to-now) are authorized by the handle's open-time access grant
+ * rather than the file's current mode (POSIX rights retention). */
+void
+chimera_vfs_fsetattr(
+    struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_cred  *cred,
+    struct chimera_vfs_open_handle *handle,
+    struct chimera_vfs_attrs       *set_attr,
+    uint64_t                        pre_attr_mask,
+    uint64_t                        post_attr_mask,
+    chimera_vfs_setattr_callback_t  callback,
+    void                           *private_data);
+
 void
 chimera_vfs_readdir(
     struct chimera_vfs_thread      *thread,

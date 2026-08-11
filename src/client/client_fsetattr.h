@@ -32,7 +32,9 @@ chimera_dispatch_fsetattr(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request)
 {
-    chimera_vfs_setattr(
+    /* Descriptor-originated: WRITE_DATA-only mutations (ftruncate,
+     * futimens-to-now) ride the descriptor's open-time grant. */
+    chimera_vfs_fsetattr(
         thread->vfs_thread,
         chimera_client_req_cred(request),
         request->fsetattr.handle,
