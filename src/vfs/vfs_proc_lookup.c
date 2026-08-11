@@ -188,7 +188,13 @@ chimera_vfs_lookup_readlink_complete(
         start_fh_len = lp_request->lookup.parent_fh_len;
     }
 
-    /* Construct new path in plugin_data buffer */
+    /* Construct new path in the plugin_data buffer.  After the first
+     * followed link the current path (and the readlink target stored just
+     * past it) already live in plugin_data, so assemble the spliced path in
+     * a scratch buffer before copying it back to avoid overlapping the
+     * sources with the destination. */
+    char scratch[CHIMERA_VFS_PATH_MAX];
+
     new_path = lp_request->plugin_data;
 
     if (remaining_len > 0) {
@@ -201,16 +207,17 @@ chimera_vfs_lookup_readlink_complete(
             chimera_vfs_request_free(thread, lp_request);
             return;
         }
-        memcpy(new_path, target, target_length);
-        new_path[target_length] = '/';
-        memcpy(new_path + target_length + 1, lp_request->lookup.pathc, remaining_len);
-        new_path[new_pathlen] = '\0';
+        memcpy(scratch, target, target_length);
+        scratch[target_length] = '/';
+        memcpy(scratch + target_length + 1, lp_request->lookup.pathc, remaining_len);
     } else {
         /* Just the target */
         new_pathlen = target_length;
-        memcpy(new_path, target, target_length);
-        new_path[new_pathlen] = '\0';
+        memcpy(scratch, target, target_length);
     }
+
+    memcpy(new_path, scratch, new_pathlen);
+    new_path[new_pathlen] = '\0';
 
     /* Reset path pointer */
     lp_request->lookup.path    = new_path;
