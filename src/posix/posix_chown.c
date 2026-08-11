@@ -44,6 +44,17 @@ chimera_posix_chown(
         return -1;
     }
 
+    if (owner == (uid_t) -1 && group == (gid_t) -1) {
+        /* No id named: nothing travels in the setattr mask, so apply the
+         * POSIX ownership rule here (see chown_restate_check). */
+        struct stat st;
+
+        if (chimera_posix_stat(path, &st) < 0) {
+            return -1;
+        }
+        return chimera_posix_chown_restate_check(&st);
+    }
+
     chimera_posix_completion_init(&comp, &req);
 
     req.opcode               = CHIMERA_CLIENT_OP_SETATTR;

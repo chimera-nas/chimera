@@ -618,6 +618,28 @@ chimera_posix_fd_lseek(
     return new_offset;
 } // chimera_posix_fd_lseek
 
+/* chown()-family calls with both ids -1 change nothing, but POSIX still
+ * applies the ownership rule: "the effective user ID does not match the
+ * owner of the file and the process does not have appropriate privileges"
+ * is EPERM regardless (the VFS setattr gate never sees such a call because
+ * no UID/GID travels in the set mask, so the check lives client-side).
+ * Runs on the calling thread, so the thread-local credential override is
+ * the right identity source.  Returns 0 or -1 with errno = EPERM. */
+static FORCE_INLINE int
+chimera_posix_chown_restate_check(const struct stat *st)
+{
+    const struct chimera_vfs_cred *cred = chimera_posix_effective_cred();
+    uint32_t                       uid;
+
+    uid = cred ? cred->uid : chimera_posix_get_global()->client->cred.uid;
+
+    if (uid != 0 && uid != st->st_uid) {
+        errno = EPERM;
+        return -1;
+    }
+    return 0;
+} /* chimera_posix_chown_restate_check */
+
 /* Resolve the current EOF of the file behind an fd entry, for O_APPEND
  * write placement.  Returns 0 and fills *eof, or an errno value.
  * Defined in posix_write.c. */

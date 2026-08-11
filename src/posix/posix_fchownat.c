@@ -137,6 +137,18 @@ chimera_posix_fchownat(
     // AT_SYMLINK_NOFOLLOW and AT_EMPTY_PATH are not implemented
     (void) flags;
 
+    if (owner == (uid_t) -1 && group == (gid_t) -1 && dirfd == AT_FDCWD) {
+        /* No id named: nothing travels in the setattr mask, so apply the
+         * POSIX ownership rule here (see chown_restate_check).  Real
+         * dirfds keep the normal path below. */
+        struct stat st;
+
+        if (chimera_posix_stat(pathname, &st) < 0) {
+            return -1;
+        }
+        return chimera_posix_chown_restate_check(&st);
+    }
+
     chimera_posix_completion_init(&ctx.comp, &req);
 
     // Handle AT_FDCWD case - use simple path-based setattr
