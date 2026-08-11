@@ -54,9 +54,6 @@ chimera_posix_fstatat(
     struct chimera_posix_completion comp;
     int                             path_len;
 
-    // Note: AT_SYMLINK_NOFOLLOW is not yet implemented (would need lstat)
-    (void) flags;
-
     // For now, only support AT_FDCWD
     if (dirfd != AT_FDCWD) {
         errno = ENOSYS;
@@ -79,7 +76,11 @@ chimera_posix_fstatat(
     req.opcode            = CHIMERA_CLIENT_OP_STAT;
     req.stat.callback     = chimera_posix_fstatat_callback;
     req.stat.private_data = &comp;
-    req.stat.path_len     = path_len;
+    /* AT_SYMLINK_NOFOLLOW selects lstat semantics; the flag was previously
+     * ignored and req.stat.flags left uninitialized. */
+    req.stat.flags = (flags & AT_SYMLINK_NOFOLLOW) ?
+        0 : CHIMERA_VFS_LOOKUP_FOLLOW;
+    req.stat.path_len = path_len;
 
     chimera_posix_worker_enqueue(worker, &req, chimera_posix_fstatat_exec);
 
