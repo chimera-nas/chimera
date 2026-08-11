@@ -1337,8 +1337,11 @@ diskfs_read_inode_cb(
         return;
     }
 
+    /* read() of a directory is EISDIR; other non-regular types are EINVAL. */
     if (unlikely(!S_ISREG(inode->mode))) {
-        diskfs_op_fail(request, diskfs_private->txn, CHIMERA_VFS_EINVAL);
+        diskfs_op_fail(request, diskfs_private->txn,
+                       S_ISDIR(inode->mode) ?
+                       CHIMERA_VFS_EISDIR : CHIMERA_VFS_EINVAL);
         return;
     }
 
