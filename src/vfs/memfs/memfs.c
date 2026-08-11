@@ -4042,6 +4042,41 @@ memfs_copy_range(
         }
 
         old_block = dst_inode->file.blocks[bi];
+
+        /* Full-destination-block copies preserve source holes: when every
+         * source block covering this destination block is absent, drop the
+         * destination block instead of materializing zeroes, so SEEK_HOLE
+         * still sees the hole after the copy.  (Partial edges keep the
+         * copy-through-zeroes behavior; byte overlap between source and
+         * destination was rejected above, so freeing here cannot free a
+         * block the source side still needs.) */
+        if (block_offset == 0 && block_len == block_size) {
+            uint64_t s_off  = src_offset + copied;
+            uint64_t s_bi   = s_off >> block_shift;
+            uint64_t s_last = (s_off + block_len - 1) >> block_shift;
+            int      hole   = 1;
+
+            for (uint64_t sb = s_bi; sb <= s_last; sb++) {
+                if (sb < src_inode->file.num_blocks &&
+                    src_inode->file.blocks &&
+                    src_inode->file.blocks[sb]) {
+                    hole = 0;
+                    break;
+                }
+            }
+
+            if (hole) {
+                if (old_block) {
+                    memfs_block_free(thread, old_block);
+                    dst_inode->file.blocks[bi] = NULL;
+                }
+                copied      += block_len;
+                left        -= block_len;
+                block_offset = 0;
+                continue;
+            }
+        }
+
         new_block = memfs_block_alloc(thread);
 
         if (!new_block) {
