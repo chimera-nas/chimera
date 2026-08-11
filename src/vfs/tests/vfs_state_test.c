@@ -1040,6 +1040,116 @@ test_nonbreakable_share_denies(void)
     chimera_vfs_state_destroy(state);
 } /* test_nonbreakable_share_denies */
 
+/* Test 19: the share-conflict escape onto a handle-caching RqLs lease must
+* never land on the ACQUIRER's own lease.  A second open under one LeaseKey
+* presents that key on both opens, so the escape's RqLs arm -- which matches a
+* holder's lease via the own_lease_key stamped on its share reservation -- would
+* otherwise match the probe's own lease and break a handle cache the client is
+* still using, parking the conflicting open behind its own ack.  A DIFFERENT
+* key must still escape, or a conflicting open could never wait for a
+* handle-lease holder to close. ---------------------------------------- */
+static void
+test_share_escape_skips_own_lease(void)
+{
+    struct chimera_vfs_state         *state;
+    struct chimera_vfs_file_state    *file;
+    struct chimera_vfs_caching_grant *grant = NULL;
+    struct chimera_vfs_lease_owner    lease_owner;
+    struct chimera_vfs_lease_mode     want;
+    struct chimera_vfs_lease          holder, probe;
+    enum chimera_vfs_lease_result     r;
+    struct chimera_vfs_lease         *conflict    = NULL;
+    struct break_recorder             rec         = { 0 };
+    int                               holder_open = 0; /* stands in for open_file */
+
+    fprintf(stderr, "\ntest_share_escape_skips_own_lease\n");
+
+    state = chimera_vfs_state_init();
+    file  = get_file(state, 1);
+
+    /* The holder's RqLs lease under LeaseKey 0x1111/0x2222: RWH, breakable,
+     * keyed by lease key (is_lease), with a grant that is neither an oplock nor
+     * a directory lease -- the shape the escape's RqLs arm matches. */
+    init_owner(&lease_owner, CHIMERA_VFS_LEASE_PROTO_SMB2, 0xA, 0x1111);
+    lease_owner.owner_hi   = 0x2222;
+    lease_owner.is_lease   = 1;
+    lease_owner.break_cb   = recording_break_cb;
+    lease_owner.cb_private = &rec;
+
+    want.granted = CHIMERA_VFS_LEASE_MODE_R | CHIMERA_VFS_LEASE_MODE_W |
+        CHIMERA_VFS_LEASE_MODE_H;
+    want.denied = 0;
+
+    r = chimera_vfs_caching_grant_acquire(state, file, &lease_owner, want, 0,
+                                          &grant, &conflict);
+    CHECK(r == CHIMERA_VFS_LEASE_GRANTED && grant, "holder RWH lease granted");
+
+    /* The holder's open: ShareAccess=0 (denies R and W), NOT breakable (an
+     * ordinary client open), carrying the lease key that links it to the lease
+     * above. */
+    memset(&holder, 0, sizeof(holder));
+    holder.kind         = CHIMERA_VFS_LEASE_SHARE;
+    holder.mode.granted = CHIMERA_VFS_LEASE_MODE_R | CHIMERA_VFS_LEASE_MODE_W;
+    holder.mode.denied  = CHIMERA_VFS_LEASE_MODE_R | CHIMERA_VFS_LEASE_MODE_W;
+    init_owner(&holder.owner, CHIMERA_VFS_LEASE_PROTO_SMB2, 0xA, 1);
+    holder.owner.owner_hi    = 1;
+    holder.owner.cb_private  = &holder_open;
+    holder.has_own_lease_key = 1;
+    holder.own_lease_lo      = 0x1111;
+    holder.own_lease_hi      = 0x2222;
+
+    r = chimera_vfs_state_try_insert(state, file, &holder, &conflict);
+    CHECK(r == CHIMERA_VFS_LEASE_GRANTED, "holder deny-all open granted");
+
+    /* Same client, SAME LeaseKey, a second open that share-conflicts.  The
+     * conflict is real and stands, but it must be answered without breaking the
+     * client's own lease. */
+    rec.fired = 0;
+    memset(&probe, 0, sizeof(probe));
+    probe.kind         = CHIMERA_VFS_LEASE_SHARE;
+    probe.mode.granted = CHIMERA_VFS_LEASE_MODE_R;
+    init_owner(&probe.owner, CHIMERA_VFS_LEASE_PROTO_SMB2, 0xA, 2);
+    probe.owner.owner_hi     = 2;
+    probe.has_break_skip_key = 1;
+    probe.break_skip_lo      = 0x1111;
+    probe.break_skip_hi      = 0x2222;
+
+    r = chimera_vfs_state_try_insert(state, file, &probe, &conflict);
+    chimera_vfs_state_conflict_unref(state, conflict);
+    conflict = NULL;
+    CHECK(r == CHIMERA_VFS_LEASE_DENIED,
+          "same-lease-key second open denied, not parked");
+    CHECK(rec.fired == 0, "own handle lease not broken by its own opener");
+
+    /* A different LeaseKey is a genuine peer: the escape applies, so the open
+     * parks on the holder's HANDLE break instead of being denied outright. */
+    memset(&probe, 0, sizeof(probe));
+    probe.kind         = CHIMERA_VFS_LEASE_SHARE;
+    probe.mode.granted = CHIMERA_VFS_LEASE_MODE_R;
+    init_owner(&probe.owner, CHIMERA_VFS_LEASE_PROTO_SMB2, 0xA, 3);
+    probe.owner.owner_hi     = 3;
+    probe.has_break_skip_key = 1;
+    probe.break_skip_lo      = 0x3333;
+    probe.break_skip_hi      = 0x4444;
+
+    r = chimera_vfs_state_try_insert(state, file, &probe, &conflict);
+    chimera_vfs_state_conflict_unref(state, conflict);
+    conflict = NULL;
+    CHECK(r == CHIMERA_VFS_LEASE_BREAKING,
+          "different-lease-key open still escapes onto the H break");
+    CHECK(rec.fired == 1, "holder lease broken for a peer opener");
+    CHECK((rec.last_needed_mode & CHIMERA_VFS_LEASE_MODE_H) == 0 &&
+          (rec.last_needed_mode &
+           (CHIMERA_VFS_LEASE_MODE_R | CHIMERA_VFS_LEASE_MODE_W)) ==
+          (CHIMERA_VFS_LEASE_MODE_R | CHIMERA_VFS_LEASE_MODE_W),
+          "break drops H only, leaving read/write caching (RWH -> RW)");
+
+    chimera_vfs_state_remove(state, file, &holder);
+    chimera_vfs_caching_grant_release(state, grant, false);
+    chimera_vfs_state_put(state, file);
+    chimera_vfs_state_destroy(state);
+} /* test_share_escape_skips_own_lease */
+
 /* Main ---------------------------------------------------------------- */
 int
 main(
@@ -1070,6 +1180,7 @@ main(
     test_lease_test();
     test_breakable_share_recall();
     test_nonbreakable_share_denies();
+    test_share_escape_skips_own_lease();
 
     fprintf(stderr, "\n========================================\n");
     fprintf(stderr, "Results: %d passed, %d failed\n", passed, failed);

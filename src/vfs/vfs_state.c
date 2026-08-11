@@ -758,11 +758,15 @@ chimera_vfs_eval_breakable(
  * common owning open (cb_private, set identically on an SMB open's share
  * reservation and caching lease) -- so a SHARE acquire can park on its break
  * instead of denying outright.  Returns NULL when the holder has no
- * still-breakable handle-caching lease, i.e. a genuine hard conflict. */
+ * still-breakable handle-caching lease, i.e. a genuine hard conflict.
+ *
+ * `probe` is the acquiring lease, needed only so the RqLs arm can skip the
+ * acquirer's OWN caching lease (see the same-key skip below). */
 static inline struct chimera_vfs_lease *
 chimera_vfs_share_batch_escape(
     const struct chimera_vfs_file_state *file,
-    const struct chimera_vfs_lease      *share_holder)
+    const struct chimera_vfs_lease      *share_holder,
+    const struct chimera_vfs_lease      *probe)
 {
     struct chimera_vfs_lease *cur;
 
@@ -810,11 +814,30 @@ chimera_vfs_share_batch_escape(
          * and keeps the handle -> SHARING_VIOLATION).  Note this does NOT make an
          * RqLs lease sole-handle across clients: only a genuine share-mode
          * conflict reaches here, and a compatible open still coexists with the
-         * holder's H via the caching matrix. */
+         * holder's H via the caching matrix.
+         *
+         * The escape must never land on the ACQUIRER's own caching lease.  A
+         * second open under one LeaseKey presents that key on both opens, so
+         * without the skip the arm matches the probe's own lease: same
+         * client_key, and the holder's own_lease_* IS the probe's key.  The
+         * client would then be told to relinquish a handle cache it is still
+         * using, and its conflicting open would park behind its own break ack
+         * before the share conflict was answered at all -- where MS-SMB2 has a
+         * create never break the lease it presents.  This mirrors the
+         * SHARE-acquire skip in chimera_vfs_state_would_conflict's caching loop
+         * and chimera_vfs_lease_smb2_same_key; the escape needs `probe` passed in
+         * to apply it.  Deliberately scoped to this arm: a legacy oplock's
+         * caching lease is keyed by open rather than by LeaseKey, and the
+         * dir-lease arm matches by client alone (pre-existing, untouched here). */
+        bool probe_owns_lease =
+            probe->has_break_skip_key &&
+            cur->owner.owner_lo == probe->break_skip_lo &&
+            cur->owner.owner_hi == probe->break_skip_hi;
+
         bool rqls_lease_match =
             cur->grant && !cur->grant->is_oplock && !cur->grant->is_dir &&
             share_holder->has_own_lease_key &&
-            cur->owner.is_lease &&
+            cur->owner.is_lease && !probe_owns_lease &&
             cur->owner.client_key == share_holder->owner.client_key &&
             cur->owner.owner_lo == share_holder->own_lease_lo &&
             cur->owner.owner_hi == share_holder->own_lease_hi;
@@ -1004,7 +1027,7 @@ chimera_vfs_state_would_conflict(
                 if (chimera_vfs_eval_breakable(cur, &has_breakable_conflict,
                                                &idle_break, &expired_break)) {
                     struct chimera_vfs_lease *batch =
-                        chimera_vfs_share_batch_escape(file, cur);
+                        chimera_vfs_share_batch_escape(file, cur, probe);
 
                     if (!batch) {
                         if (conflict_out) {
