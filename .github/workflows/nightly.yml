@@ -576,6 +576,23 @@ jobs:
       # matrix or a Samba upgrade changes the catalog, and then the live one is
       # the honest denominator.  regen.sh writes that file on every run, scoped
       # or not, so nothing here has to infer the scope from which files exist.
+      #
+      # report.py runs last, after the verdict flag is settled: it renders the
+      # same results into one self-contained HTML file, so the artifact carries
+      # a path from a named cell down to the log that explains it rather than
+      # ~880 loose smbt-fail.*.log files.  Last on purpose -- everything ahead
+      # of it in the chain either publishes or decides the exit status, and a
+      # rendering failure must not be able to skip the regression verdict.
+      # It exits non-zero only when it genuinely could not read the results or
+      # write the page (a regression is still a 0), so && is the same contract
+      # the drift.md render above already runs under.
+      #
+      # safe.directory: the page stamps the revision of the baseline it judged
+      # against, which is the whole defence against an old results set read
+      # against newer allowlists.  /workspace is checked out by the runner and
+      # the container is root, so without this git refuses the repo as dubious
+      # ownership and the stamp silently degrades to "unknown revision" --
+      # exactly the unlabelled report the stamp exists to prevent.
       - name: Build and run the matrix
         env:
           SMBTORTURE_BACKENDS: ${{ inputs.smbtorture_backends }}
@@ -614,7 +631,12 @@ jobs:
                   --subs smbt-report/measured-catalog.txt \
                   --quiet-buckets "still failing,skipped" \
                   --fail-on-newly-failing > /dev/null \
-                || touch smbt-report/newly-failing.flag; }'
+                || touch smbt-report/newly-failing.flag; } && \
+              git config --global --add safe.directory /workspace && \
+              python3 tools/smbtorture/report.py \
+                  --results smbt-report/results.txt \
+                  --cmake src/server/smb/tests/CMakeLists.txt \
+                  --output smbt-report/report.html'
 
       - name: Report baseline drift
         if: always()
@@ -627,6 +649,15 @@ jobs:
           else
             echo '## smbtorture baseline drift' >> "$GITHUB_STEP_SUMMARY"
             echo 'The matrix did not complete; no results to compare.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+          # The buckets above name the cells but cannot show why any of them
+          # failed.  A step summary cannot link to a file inside an artifact,
+          # so name the artifact and let the reader download it.
+          if [ -f smbt-report/report.html ]; then
+            {
+              echo
+              echo 'Browsable per-cell report: `report.html` in the `smbtorture-matrix-amd64` artifact.'
+            } >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Upload matrix results and failure logs
