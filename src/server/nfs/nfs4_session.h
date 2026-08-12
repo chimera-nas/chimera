@@ -9,6 +9,7 @@
 #include <time.h>
 #include <uthash.h>
 
+#include "common/platform.h"
 #include "nfs4_xdr.h"
 #include "nfs_internal.h"
 
@@ -282,7 +283,7 @@ struct nfs4_client_table {
  * never hand out the same value (and `clientid >> 48` is the owning node). */
 #define NFS4_CLIENTID_COUNTER_MASK 0xFFFFFFFFFFFFULL
 #define nfs4_make_clientid(node_id, counter) \
-        (((uint64_t) (node_id) << 48) | ((counter)&NFS4_CLIENTID_COUNTER_MASK))
+        (((uint64_t) (node_id) << 48) | ((counter) & NFS4_CLIENTID_COUNTER_MASK))
 
 void
 nfs4_client_table_init(

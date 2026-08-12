@@ -44,6 +44,8 @@
 #include <xxhash.h>     /* XXH_INLINE_ALL set in CMakeLists; header-only */
 
 
+#include "common/platform.h"
+
 #include "common/varint.h"
 
 #include "common/rbtree.h"

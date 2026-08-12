@@ -8,7 +8,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include <sys/random.h>
+#include "common/platform.h"
 #include <pthread.h>
 #include <arpa/inet.h>
 #include <gssapi/gssapi.h>
@@ -84,7 +84,7 @@ chimera_smb_server_guid_init(
         }
     }
 
-    if (getrandom(shared->guid, SMB2_GUID_SIZE, 0) != (ssize_t) SMB2_GUID_SIZE) {
+    if (chimera_getrandom(shared->guid, SMB2_GUID_SIZE) != 0) {
         /* Last-resort fallback: derive from a per-host identity so two distinct
          * hosts still differ even if getrandom is unavailable. */
         XXH128_hash_t h = XXH3_128bits(shared->config.identity,

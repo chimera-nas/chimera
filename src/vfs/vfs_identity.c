@@ -215,12 +215,12 @@ chimera_vfs_identity_nss_handler(
     struct chimera_vfs_user      *out,
     void                         *private_data)
 {
-    struct passwd pw, *res = NULL;
-    char          buf[16384];
-    int           rc;
-    gid_t         grps[CHIMERA_VFS_CRED_MAX_GIDS];
-    int           ng = CHIMERA_VFS_CRED_MAX_GIDS;
-    int           i;
+    struct passwd       pw, *res = NULL;
+    char                buf[16384];
+    int                 rc;
+    chimera_grouplist_t grps[CHIMERA_VFS_CRED_MAX_GIDS];
+    int                 ng = CHIMERA_VFS_CRED_MAX_GIDS;
+    int                 i;
 
     (void) private_data;
 

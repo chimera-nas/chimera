@@ -677,7 +677,8 @@ chimera_s3_copy_open_dir_callback(
             ctx);
     } else {
         ctx->tmp_name_len = snprintf(ctx->tmp_name, sizeof(ctx->tmp_name),
-                                     "._chimera_cp_%lx%lx", (uint64_t) request,
+                                     "._chimera_cp_%" PRIx64 "%" PRIx64,
+                                     (uint64_t) request,
                                      (uint64_t) request->start_time.tv_nsec);
         chimera_vfs_open_at(
             thread->vfs, &thread->shared->cred,

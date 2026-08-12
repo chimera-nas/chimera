@@ -4,7 +4,7 @@
 
 #pragma once
 
-#include <sys/sysmacros.h>
+#include "common/platform.h"
 
 #include "client_internal.h"
 

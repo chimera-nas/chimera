@@ -10,10 +10,10 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
-#include <sys/vfs.h>
 #include <sys/uio.h>
 #include <unistd.h>
 
+#include "common/platform.h"
 #include "vfs/vfs_cred.h"
 
 struct chimera_posix_client;

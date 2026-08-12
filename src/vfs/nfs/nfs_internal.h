@@ -9,7 +9,7 @@
 #include <string.h>
 #include <pthread.h>
 #include <sys/stat.h>
-#include <endian.h>
+#include "common/platform.h"
 #include <utlist.h>
 #include "vfs/vfs.h"
 #include "vfs/vfs_pnfs.h"

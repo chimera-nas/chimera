@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <stdint.h>
+#include <inttypes.h>
 #include <string.h>
 #include <signal.h>
 #include <limits.h>
@@ -23,6 +24,7 @@
 
 #include "common/macros.h"
 #include "common/logging.h"
+#include "common/platform.h"
 #include "common/pthread_util.h"
 #include "common/snprintf.h"
 
@@ -39,6 +41,13 @@ static const unsigned short int __mon_yday[2][13] =
 
 #define DIV(a, b)            ((a) / (b) - ((a) % (b) < 0))
 #define LEAPS_THRU_END_OF(y) (DIV(y, 4) - DIV(y, 100) + DIV(y, 400))
+
+/* glibc's <time.h> exposes __isleap(); other libcs (Darwin) do not.  Same
+ * definition, and it belongs with the __mon_yday table above -- both come
+ * from glibc's offtime.c, which chimera_timet2tmZ() below is derived from. */
+#ifndef __isleap
+#define __isleap(year)       ((year) % 4 == 0 && ((year) % 100 != 0 || (year) % 400 == 0))
+#endif /* ifndef __isleap */
 
 static void
 chimera_crash_handler(
@@ -343,7 +352,7 @@ chimera_vlog(
     chimera_timet2tmZ(ts.tv_sec, &tm_info);
 
     pid = getpid();
-    tid = gettid();
+    tid = chimera_gettid();
 
     pthread_mutex_lock(&ChimeraLogBufLock);
 
@@ -384,7 +393,8 @@ chimera_vlog(
 
     ChimeraLogBufPtr += chimera_snprintf(ChimeraLogBufPtr,
                                          1024,
-                                         "\" process=%lu thread=%lu level=%s module=%s source=\"%s:%d\"\n",
+                                         "\" process=%" PRIu64 " thread=%" PRIu64
+                                         " level=%s module=%s source=\"%s:%d\"\n",
                                          pid, tid, level, mod, file, line);
 
     pthread_mutex_unlock(&ChimeraLogBufLock);

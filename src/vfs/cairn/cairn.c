@@ -9,7 +9,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <sys/stat.h>
-#include <endian.h>
+#include "common/platform.h"
 #include <rocksdb/c.h>
 #include "rocksdb_compat.h"
 
@@ -3312,7 +3312,7 @@ cairn_read(
         }
 
         uint64_t extent_start = be64toh(extent_key->offset);
-        uint64_t extent_length;
+        size_t   extent_length;
         rocksdb_iter_value(iter, &extent_length);
         uint64_t extent_end = extent_start + extent_length;
 
@@ -3445,7 +3445,7 @@ cairn_punch_hole(
 
     while (rocksdb_iter_valid(iter)) {
         extent_key = (struct cairn_extent_key *) rocksdb_iter_key(iter, &klen);
-        uint64_t    extent_length;
+        size_t      extent_length;
         const char *extent_data = rocksdb_iter_value(iter, &extent_length);
 
         // Stop if we've moved past this inode

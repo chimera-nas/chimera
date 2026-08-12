@@ -95,6 +95,7 @@ nfs4_cb_addr_reachable(
     struct sockaddr_in sin;
     int                fd;
     int                rc;
+    int                flags;
     bool               ok = false;
 
     memset(&sin, 0, sizeof(sin));
@@ -104,8 +105,17 @@ nfs4_cb_addr_reachable(
         return false;
     }
 
-    fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
+        return false;
+    }
+
+    /* Non-blocking so the probe below never stalls the caller.  SOCK_NONBLOCK
+     * as a socket() type flag is a Linux extension, so set O_NONBLOCK
+     * explicitly instead. */
+    flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        close(fd);
         return false;
     }
 

@@ -1,15 +1,53 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include <errno.h>
 #include <string.h>
 #include <sys/statvfs.h>
-#include <sys/vfs.h>
 
+#include "common/platform.h"
 #include "posix_internal.h"
 #include "../client/client_statfs.h"
 #include "../client/client_fstatfs.h"
+
+/*
+ * Project a chimera_statvfs onto the host's struct statfs.
+ *
+ * The two platforms disagree on more than spelling: glibc's statfs carries
+ * f_frsize/f_namelen and a fsid whose array member is __val[], while Darwin's
+ * has neither of those fields, names the fsid array val[], and adds f_iosize
+ * (the optimal transfer size, which chimera reports as the block size).
+ * Fields with no source in chimera_statvfs are left zeroed by the caller.
+ */
+static void
+chimera_posix_fill_statfs(
+    struct statfs                *buf,
+    const struct chimera_statvfs *st)
+{
+    memset(buf, 0, sizeof(*buf));
+
+    buf->f_type   = 0; // Chimera filesystem
+    buf->f_bsize  = st->f_bsize;
+    buf->f_blocks = st->f_blocks;
+    buf->f_bfree  = st->f_bfree;
+    buf->f_bavail = st->f_bavail;
+    buf->f_files  = st->f_files;
+    buf->f_ffree  = st->f_ffree;
+
+#ifdef __APPLE__
+    buf->f_iosize      = st->f_bsize;
+    buf->f_flags       = st->f_flag;
+    buf->f_fsid.val[0] = (int32_t) (st->f_fsid & 0xFFFFFFFF);
+    buf->f_fsid.val[1] = (int32_t) (st->f_fsid >> 32);
+#else  /* ifdef __APPLE__ */
+    buf->f_frsize        = st->f_frsize;
+    buf->f_namelen       = st->f_namemax;
+    buf->f_flags         = st->f_flag;
+    buf->f_fsid.__val[0] = (int) (st->f_fsid & 0xFFFFFFFF);
+    buf->f_fsid.__val[1] = (int) (st->f_fsid >> 32);
+#endif /* ifdef __APPLE__ */
+} /* chimera_posix_fill_statfs */
 
 static void
 chimera_posix_statfs_callback(
@@ -63,18 +101,7 @@ chimera_posix_statfs(
     int err = chimera_posix_wait(&comp);
 
     if (!err) {
-        buf->f_type          = 0; // Chimera filesystem
-        buf->f_bsize         = req.sync_statvfs.f_bsize;
-        buf->f_blocks        = req.sync_statvfs.f_blocks;
-        buf->f_bfree         = req.sync_statvfs.f_bfree;
-        buf->f_bavail        = req.sync_statvfs.f_bavail;
-        buf->f_files         = req.sync_statvfs.f_files;
-        buf->f_ffree         = req.sync_statvfs.f_ffree;
-        buf->f_fsid.__val[0] = (int) (req.sync_statvfs.f_fsid & 0xFFFFFFFF);
-        buf->f_fsid.__val[1] = (int) (req.sync_statvfs.f_fsid >> 32);
-        buf->f_namelen       = req.sync_statvfs.f_namemax;
-        buf->f_frsize        = req.sync_statvfs.f_frsize;
-        buf->f_flags         = req.sync_statvfs.f_flag;
+        chimera_posix_fill_statfs(buf, &req.sync_statvfs);
     }
 
     chimera_posix_completion_destroy(&comp);
@@ -143,18 +170,7 @@ chimera_posix_fstatfs(
     chimera_posix_fd_release(entry, 0);
 
     if (!err) {
-        buf->f_type          = 0; // Chimera filesystem
-        buf->f_bsize         = req.sync_statvfs.f_bsize;
-        buf->f_blocks        = req.sync_statvfs.f_blocks;
-        buf->f_bfree         = req.sync_statvfs.f_bfree;
-        buf->f_bavail        = req.sync_statvfs.f_bavail;
-        buf->f_files         = req.sync_statvfs.f_files;
-        buf->f_ffree         = req.sync_statvfs.f_ffree;
-        buf->f_fsid.__val[0] = (int) (req.sync_statvfs.f_fsid & 0xFFFFFFFF);
-        buf->f_fsid.__val[1] = (int) (req.sync_statvfs.f_fsid >> 32);
-        buf->f_namelen       = req.sync_statvfs.f_namemax;
-        buf->f_frsize        = req.sync_statvfs.f_frsize;
-        buf->f_flags         = req.sync_statvfs.f_flag;
+        chimera_posix_fill_statfs(buf, &req.sync_statvfs);
     }
 
     chimera_posix_completion_destroy(&comp);

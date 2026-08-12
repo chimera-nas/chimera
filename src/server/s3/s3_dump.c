@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -18,7 +18,8 @@ chimera_s3_dump_request(struct chimera_s3_request *request)
 
     switch (evpl_http_request_type(request->http_request)) {
         case EVPL_HTTP_REQUEST_TYPE_GET:
-            snprintf(extra, sizeof(extra), "offset %lu length %lu", request->file_offset, request->file_left);
+            snprintf(extra, sizeof(extra), "offset %" PRId64 " length %" PRId64,
+                     request->file_offset, request->file_left);
             break;
         default:
             break;

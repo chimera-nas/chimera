@@ -125,14 +125,47 @@ chimera_posix_get_global(void)
     return chimera_posix_global;
 } // chimera_posix_get_global
 
+/* chimera_vfs_error values are a protocol enum whose numbers happen to follow
+ * the Linux errno layout; the host's errno numbering differs on other
+ * platforms (Darwin: ENAMETOOLONG is 63, 36 is EINPROGRESS), so map through
+ * the host macros rather than casting the raw value. */
 static FORCE_INLINE int
 chimera_posix_errno_from_status(enum chimera_vfs_error status)
 {
-    if (status == CHIMERA_VFS_OK) {
-        return 0;
+    switch (status) {
+        case CHIMERA_VFS_OK:           return 0;
+        case CHIMERA_VFS_EPERM:        return EPERM;
+        case CHIMERA_VFS_ENOENT:       return ENOENT;
+        case CHIMERA_VFS_EIO:          return EIO;
+        case CHIMERA_VFS_ENXIO:        return ENXIO;
+        case CHIMERA_VFS_EAGAIN:       return EAGAIN;
+        case CHIMERA_VFS_EACCES:       return EACCES;
+        case CHIMERA_VFS_EFAULT:       return EFAULT;
+        case CHIMERA_VFS_EEXIST:       return EEXIST;
+        case CHIMERA_VFS_EXDEV:        return EXDEV;
+        case CHIMERA_VFS_ENOTDIR:      return ENOTDIR;
+        case CHIMERA_VFS_EISDIR:       return EISDIR;
+        case CHIMERA_VFS_EINVAL:       return EINVAL;
+        case CHIMERA_VFS_EMFILE:       return EMFILE;
+        case CHIMERA_VFS_EFBIG:        return EFBIG;
+        case CHIMERA_VFS_ENOSPC:       return ENOSPC;
+        case CHIMERA_VFS_EROFS:        return EROFS;
+        case CHIMERA_VFS_EMLINK:       return EMLINK;
+        case CHIMERA_VFS_ENAMETOOLONG: return ENAMETOOLONG;
+        case CHIMERA_VFS_ENOTEMPTY:    return ENOTEMPTY;
+        case CHIMERA_VFS_ELOOP:        return ELOOP;
+        case CHIMERA_VFS_EOVERFLOW:    return EOVERFLOW;
+        case CHIMERA_VFS_EBADF:        return EBADF;
+        case CHIMERA_VFS_ENOTSUP:      return ENOTSUP;
+        case CHIMERA_VFS_EDQUOT:       return EDQUOT;
+        case CHIMERA_VFS_ESTALE:       return ESTALE;
+        case CHIMERA_VFS_ENODATA:      return ENODATA;
+        case CHIMERA_VFS_ERANGE:       return ERANGE;
+        /* Internal statuses with no host errno equivalent. */
+        case CHIMERA_VFS_ESYMLINK:     return ELOOP;
+        case CHIMERA_VFS_EBADCOOKIE:   return EINVAL;
+        default:                       return EIO;
     }
-
-    return (int) status;
 } // chimera_posix_errno_from_status
 
 static FORCE_INLINE void
@@ -222,19 +255,21 @@ chimera_posix_fill_stat(
     struct stat               *dst,
     const struct chimera_stat *src)
 {
-    dst->st_dev     = src->st_dev;
-    dst->st_ino     = src->st_ino;
-    dst->st_mode    = src->st_mode;
-    dst->st_nlink   = src->st_nlink;
-    dst->st_uid     = src->st_uid;
-    dst->st_gid     = src->st_gid;
-    dst->st_rdev    = src->st_rdev;
-    dst->st_size    = src->st_size;
-    dst->st_atim    = src->st_atim;
-    dst->st_mtim    = src->st_mtim;
-    dst->st_ctim    = src->st_ctim;
-    dst->st_blksize = 4096;
-    dst->st_blocks  = (src->st_size + 511) / 512;
+    dst->st_dev   = src->st_dev;
+    dst->st_ino   = src->st_ino;
+    dst->st_mode  = src->st_mode;
+    dst->st_nlink = src->st_nlink;
+    dst->st_uid   = src->st_uid;
+    dst->st_gid   = src->st_gid;
+    dst->st_rdev  = src->st_rdev;
+    dst->st_size  = src->st_size;
+    /* dst is the host struct stat, whose nanosecond timestamps are not spelled
+     * the same on every platform; src is chimera's own. */
+    CHIMERA_STAT_ATIM(*dst) = src->st_atim;
+    CHIMERA_STAT_MTIM(*dst) = src->st_mtim;
+    CHIMERA_STAT_CTIM(*dst) = src->st_ctim;
+    dst->st_blksize         = 4096;
+    dst->st_blocks          = (src->st_size + 511) / 512;
 } // chimera_posix_fill_stat
 
 static FORCE_INLINE void

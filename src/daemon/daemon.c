@@ -1055,7 +1055,7 @@ main(
             /* "create": create the backend directory path (and any missing
              * parents) before mounting, for backends initialized empty.  May be
              * `true` (mode 0755) or an object `{ "mode": "0755" }` -- the mode
-             * is an octal string; created dirs are owned 0/0. */
+             * is an octal string; created dirs are owned by the server identity. */
             json_t  *create_val  = json_object_get(mount, "create");
             int      do_create   = 0;
             uint32_t create_mode = 0755;

@@ -5,7 +5,7 @@
 #define _GNU_SOURCE 1
 #include <errno.h>
 #include <fcntl.h>
-#include <linux/falloc.h>
+#include "common/platform.h"
 #include <string.h>
 
 #include "posix_internal.h"

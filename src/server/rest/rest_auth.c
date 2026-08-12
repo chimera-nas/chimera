@@ -6,7 +6,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#if defined(__linux__) || defined(CHIMERA_HAVE_XCRYPT)
 #include <crypt.h>
+#else  /* __linux__ || CHIMERA_HAVE_XCRYPT */
+#include <pthread.h>
+#include <unistd.h>    /* crypt(3) */
+#endif /* __linux__ || CHIMERA_HAVE_XCRYPT */
 
 #include <openssl/evp.h>
 #include <openssl/rand.h>
@@ -194,6 +199,42 @@ chimera_rest_auth_init_secret(struct chimera_rest_server *rest)
 
 /* ========== Credential validation ========== */
 
+/*
+ * Hash `password` with the salt embedded in `hash` and report whether the two
+ * match.  glibc and libxcrypt supply the reentrant crypt_r(); Darwin's libc
+ * has only crypt(3), which returns a pointer into a static buffer, so there
+ * serialize the call and compare before releasing the lock (nothing else in
+ * the process calls crypt(3), so the mutex is sufficient).  Note bare Darwin
+ * crypt(3) is DES-only: without libxcrypt the $-scheme hashes ($6$ SHA-512
+ * etc.) never match.
+ */
+static int
+chimera_rest_crypt_match(
+    const char *password,
+    const char *hash)
+{
+#if defined(__linux__) || defined(CHIMERA_HAVE_XCRYPT)
+    struct crypt_data      cdata;
+    char                  *result;
+
+    memset(&cdata, 0, sizeof(cdata));
+    result = crypt_r(password, hash, &cdata);
+
+    return result && strcmp(result, hash) == 0;
+#else  /* __linux__ || CHIMERA_HAVE_XCRYPT */
+    static pthread_mutex_t crypt_lock = PTHREAD_MUTEX_INITIALIZER;
+    char                  *result;
+    int                    match;
+
+    pthread_mutex_lock(&crypt_lock);
+    result = crypt(password, hash);
+    match  = result && strcmp(result, hash) == 0;
+    pthread_mutex_unlock(&crypt_lock);
+
+    return match;
+#endif /* __linux__ || CHIMERA_HAVE_XCRYPT */
+} /* chimera_rest_crypt_match */
+
 int
 chimera_rest_auth_validate_credentials(
     struct chimera_rest_server     *rest,
@@ -208,13 +249,7 @@ chimera_rest_auth_validate_credentials(
     user = chimera_server_get_user(rest->server, username);
 
     if (user && user->password[0]) {
-        struct crypt_data cdata;
-        char             *result;
-
-        memset(&cdata, 0, sizeof(cdata));
-        result = crypt_r(password, user->password, &cdata);
-
-        if (result && strcmp(result, user->password) == 0) {
+        if (chimera_rest_crypt_match(password, user->password)) {
             now = time(NULL);
             strncpy(claims->sub, username, sizeof(claims->sub) - 1);
             claims->sub[sizeof(claims->sub) - 1] = '\0';

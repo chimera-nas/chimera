@@ -7,6 +7,7 @@
 #include <stdint.h>
 #include <time.h>
 
+#include "common/platform.h"
 #include "evpl/evpl.h"
 
 /*
