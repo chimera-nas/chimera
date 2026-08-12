@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <inttypes.h>
+
 #include "common/misc.h"
 
 /* XXX */
@@ -330,7 +332,7 @@ chimera_nfs4_attr_append_utf8str_from_uint64(
     char str[21];
     int  len;
 
-    len = snprintf(str, sizeof(str), "%lu", value);
+    len = snprintf(str, sizeof(str), "%" PRIu64, value);
 
     chimera_nfs4_attr_append_utf8str(attrs, str, len);
 

@@ -5,8 +5,8 @@
 #pragma once
 
 #include <stdint.h>
-#include <sys/random.h>
 #include "common/logging.h"
+#include "common/platform.h"
 #ifndef likely
 #define likely(x)   __builtin_expect(!!(x), 1)
 #endif /* ifndef likely */
@@ -20,11 +20,11 @@ static inline uint64_t
 chimera_rand64(void)
 {
     uint64_t v;
-    ssize_t  rc;
+    int      rc;
 
-    rc = getrandom(&v, sizeof v, 0);
+    rc = chimera_getrandom(&v, sizeof v);
 
-    chimera_abort_if(rc != sizeof v, "common", __FILE__, __LINE__, "getrandom failed");
+    chimera_abort_if(rc != 0, "common", __FILE__, __LINE__, "getrandom failed");
 
     return v;
 } /* chimera_rand64 */

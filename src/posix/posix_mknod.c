@@ -4,7 +4,7 @@
 
 #include <errno.h>
 #include <string.h>
-#include <sys/sysmacros.h>
+#include "common/platform.h"
 
 #include "posix_internal.h"
 #include "../client/client_mknod.h"

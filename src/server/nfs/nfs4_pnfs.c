@@ -12,6 +12,7 @@
  * hand-encoded here; flex-files XDR is not in the generated nfs4.x.
  */
 
+#include <inttypes.h>
 #include <string.h>
 #include <sys/stat.h>
 
@@ -715,7 +716,7 @@ ff_lg_dsroot_cb(
     ctx->ds_root_handle = handle;
 
     /* One backing file per MDS file, named by its fileid (flat on the DS). */
-    snprintf(ctx->backing_name, sizeof(ctx->backing_name), "%016lx", ctx->fileid);
+    snprintf(ctx->backing_name, sizeof(ctx->backing_name), "%016" PRIx64, ctx->fileid);
 
     /* Backing files are internal data containers; real access control is the
      * client's OPEN against the MDS metadata file.  flex-files steers DS I/O

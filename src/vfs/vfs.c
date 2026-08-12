@@ -13,6 +13,7 @@
 #include <unistd.h>
 #include <utlist.h>
 
+#include "common/platform.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_internal.h"
 #include "vfs/vfs_open_cache.h"

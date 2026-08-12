@@ -1,8 +1,10 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include <stdio.h>
+#include <inttypes.h>
+
 #include "smb_dump.h"
 #include "smb_internal.h"
 #include "common/format.h"
@@ -1155,7 +1157,7 @@ _smb_dump_request(
     *hdrp = '\0';
 
     if (request->smb2_hdr.session_id) {
-        hdrp += sprintf(hdrp, " session %lx", request->smb2_hdr.session_id);
+        hdrp += sprintf(hdrp, " session %" PRIx64, request->smb2_hdr.session_id);
     }
 
     if (request->smb2_hdr.sync.tree_id) {
@@ -1188,34 +1190,35 @@ _smb_dump_request(
             break;
         case SMB2_CLOSE:
             if (request->close.file_id.pid != UINT64_MAX) {
-                sprintf(argstr, " file_id %lx.%lx", request->close.file_id.pid, request->close.file_id.vid);
+                sprintf(argstr, " file_id %" PRIx64 ".%" PRIx64,
+                        request->close.file_id.pid, request->close.file_id.vid);
             }
             break;
         case SMB2_WRITE:
-            sprintf(argstr, " file_id %lx.%lx offset %lu length %u write_through %d",
+            sprintf(argstr, " file_id %" PRIx64 ".%" PRIx64 " offset %" PRIu64 " length %u write_through %d",
                     request->write.file_id.pid, request->write.file_id.vid,
                     request->write.offset, request->write.length,
                     !!(request->write.flags & SMB2_WRITEFLAG_WRITE_THROUGH));
             break;
         case SMB2_READ:
-            sprintf(argstr, " file_id %lx.%lx offset %lu length %u",
+            sprintf(argstr, " file_id %" PRIx64 ".%" PRIx64 " offset %" PRIu64 " length %u",
                     request->read.file_id.pid, request->read.file_id.vid,
                     request->read.offset, request->read.length);
             break;
         case SMB2_IOCTL:
-            sprintf(argstr, " file_id %lx.%lx ctl_code %s count %u",
+            sprintf(argstr, " file_id %" PRIx64 ".%" PRIx64 " ctl_code %s count %u",
                     request->ioctl.file_id.pid, request->ioctl.file_id.vid,
                     smb_ioctl_ctl_code_name(request->ioctl.ctl_code),
                     request->ioctl.input_count);
             break;
         case SMB2_SET_INFO:
-            sprintf(argstr, " file_id %lx.%lx info_type %u info_class %u addl_info %u",
+            sprintf(argstr, " file_id %" PRIx64 ".%" PRIx64 " info_type %u info_class %u addl_info %u",
                     request->set_info.file_id.pid, request->set_info.file_id.vid,
                     request->set_info.info_type, request->set_info.info_class,
                     request->set_info.addl_info);
             break;
         case SMB2_QUERY_INFO:
-            sprintf(argstr, " file_id %lx.%lx info_type %u info_class %u addl_info %u flags %u",
+            sprintf(argstr, " file_id %" PRIx64 ".%" PRIx64 " info_type %u info_class %u addl_info %u flags %u",
                     request->query_info.file_id.pid, request->query_info.file_id.vid,
                     request->query_info.info_type, request->query_info.info_class,
                     request->query_info.addl_info, request->query_info.flags);
@@ -1223,7 +1226,8 @@ _smb_dump_request(
         case SMB2_QUERY_DIRECTORY:
             format_safe_name(safe_pattern, sizeof(safe_pattern), request->query_directory.pattern, request->
                              query_directory.pattern_length);
-            snprintf(argstr, sizeof(argstr), " file_id %lx.%lx flags %x info_class %u file_index %u pattern %s",
+            snprintf(argstr, sizeof(argstr), " file_id %" PRIx64 ".%" PRIx64
+                     " flags %x info_class %u file_index %u pattern %s",
                      request->query_directory.file_id.pid, request->query_directory.file_id.vid,
                      request->query_directory.flags, request->query_directory.info_class,
                      request->query_directory.file_index,
@@ -1258,7 +1262,7 @@ _smb_dump_reply(
             break;
         case SMB2_CREATE:
             if (request->status == SMB2_STATUS_SUCCESS) {
-                sprintf(argstr, " file_id %lx.%lx",
+                sprintf(argstr, " file_id %" PRIx64 ".%" PRIx64,
                         request->create.r_open_file->file_id.pid,
                         request->create.r_open_file->file_id.vid);
             }
@@ -1270,7 +1274,7 @@ _smb_dump_reply(
     *hdrp = '\0';
 
     if (request->session_handle && request->session_handle->session) {
-        hdrp += sprintf(hdrp, " sessiond %lx", request->session_handle->session->session_id);
+        hdrp += sprintf(hdrp, " sessiond %" PRIx64, request->session_handle->session->session_id);
     }
 
     if (request->tree) {

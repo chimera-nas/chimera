@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <inttypes.h>
 
 #include "vfs_dump.h"
 #include "vfs.h"
@@ -318,7 +319,7 @@ __chimera_vfs_dump_request(struct chimera_vfs_request *req)
 
     switch (req->opcode) {
         case CHIMERA_VFS_OP_MOUNT:
-            chimera_snprintf(argstr, sizeof(argstr), "path %s:%s@%s attrmask %lx",
+            chimera_snprintf(argstr, sizeof(argstr), "path %s:%s@%s attrmask %" PRIx64,
                              req->mount.module->name,
                              req->mount.path,
                              req->mount.mount_path,
@@ -331,21 +332,21 @@ __chimera_vfs_dump_request(struct chimera_vfs_request *req)
         case CHIMERA_VFS_OP_LOOKUP_AT:
             format_safe_name(namestr, sizeof(namestr),
                              req->lookup_at.component, req->lookup_at.component_len);
-            chimera_snprintf(argstr, sizeof(argstr), "name %s attrmask %lx dir_attr_mask %lx",
+            chimera_snprintf(argstr, sizeof(argstr), "name %s attrmask %" PRIx64 " dir_attr_mask %" PRIx64,
                              namestr,
                              req->lookup_at.r_attr.va_req_mask,
                              req->lookup_at.r_dir_attr.va_req_mask);
             break;
         case CHIMERA_VFS_OP_GETATTR:
-            chimera_snprintf(argstr, sizeof(argstr), "attrmask %lx",
+            chimera_snprintf(argstr, sizeof(argstr), "attrmask %" PRIx64,
                              req->getattr.r_attr.va_req_mask);
             break;
         case CHIMERA_VFS_OP_SETATTR:
-            chimera_snprintf(argstr, sizeof(argstr), "set_mask %lx",
+            chimera_snprintf(argstr, sizeof(argstr), "set_mask %" PRIx64,
                              req->setattr.set_attr->va_set_mask);
             break;
         case CHIMERA_VFS_OP_READDIR:
-            chimera_snprintf(argstr, sizeof(argstr), "cookie %lu attrmask %lx",
+            chimera_snprintf(argstr, sizeof(argstr), "cookie %" PRIu64 " attrmask %" PRIx64,
                              req->readdir.cookie,
                              req->readdir.attr_mask);
             break;
@@ -357,19 +358,19 @@ __chimera_vfs_dump_request(struct chimera_vfs_request *req)
                              req->open_at.flags);
             break;
         case CHIMERA_VFS_OP_CLOSE:
-            chimera_snprintf(argstr, sizeof(argstr), "hdl %lx",
+            chimera_snprintf(argstr, sizeof(argstr), "hdl %" PRIx64,
                              req->close.vfs_private);
             break;
         case CHIMERA_VFS_OP_READ:
             chimera_snprintf(argstr, sizeof(argstr),
-                             "hdl %lx offset %lu len %u",
+                             "hdl %" PRIx64 " offset %" PRIu64 " len %u",
                              req->read.handle->vfs_private,
                              req->read.offset,
                              req->read.length);
             break;
         case CHIMERA_VFS_OP_WRITE:
             chimera_snprintf(argstr, sizeof(argstr),
-                             "hdl %lx offset %lu len %u sync %d",
+                             "hdl %" PRIx64 " offset %" PRIu64 " len %u sync %d",
                              req->write.handle->vfs_private,
                              req->write.offset,
                              req->write.length,
@@ -388,12 +389,12 @@ __chimera_vfs_dump_request(struct chimera_vfs_request *req)
                              namestr);
             break;
         case CHIMERA_VFS_OP_COMMIT:
-            chimera_snprintf(argstr, sizeof(argstr), "hdl %lx",
+            chimera_snprintf(argstr, sizeof(argstr), "hdl %" PRIx64,
                              req->commit.handle->vfs_private);
             break;
         case CHIMERA_VFS_OP_ALLOCATE:
             chimera_snprintf(argstr, sizeof(argstr),
-                             "hdl %lx offset %lu len %lu flags %u",
+                             "hdl %" PRIx64 " offset %" PRIu64 " len %" PRIu64 " flags %u",
                              req->allocate.handle->vfs_private,
                              req->allocate.offset,
                              req->allocate.length,
@@ -401,7 +402,8 @@ __chimera_vfs_dump_request(struct chimera_vfs_request *req)
             break;
         case CHIMERA_VFS_OP_COPY_RANGE:
             chimera_snprintf(argstr, sizeof(argstr),
-                             "src_hdl %lx src_off %lu dst_hdl %lx dst_off %lu len %lu",
+                             "src_hdl %" PRIx64 " src_off %" PRIu64 " dst_hdl %" PRIx64 " dst_off %" PRIu64
+                             " len %" PRIu64,
                              req->copy_range.src_handle->vfs_private,
                              req->copy_range.src_offset,
                              req->copy_range.dst_handle->vfs_private,
@@ -410,7 +412,8 @@ __chimera_vfs_dump_request(struct chimera_vfs_request *req)
             break;
         case CHIMERA_VFS_OP_CLONE_RANGE:
             chimera_snprintf(argstr, sizeof(argstr),
-                             "src_hdl %lx src_off %lu dst_hdl %lx dst_off %lu len %lu",
+                             "src_hdl %" PRIx64 " src_off %" PRIu64 " dst_hdl %" PRIx64 " dst_off %" PRIu64
+                             " len %" PRIu64,
                              req->clone_range.src_handle->vfs_private,
                              req->clone_range.src_offset,
                              req->clone_range.dst_handle->vfs_private,
@@ -419,7 +422,8 @@ __chimera_vfs_dump_request(struct chimera_vfs_request *req)
             break;
         case CHIMERA_VFS_OP_MOVE_RANGE:
             chimera_snprintf(argstr, sizeof(argstr),
-                             "src_hdl %lx src_off %lu dst_hdl %lx dst_off %lu len %lu",
+                             "src_hdl %" PRIx64 " src_off %" PRIu64 " dst_hdl %" PRIx64 " dst_off %" PRIu64
+                             " len %" PRIu64,
                              req->move_range.src_handle->vfs_private,
                              req->move_range.src_offset,
                              req->move_range.dst_handle->vfs_private,
@@ -507,7 +511,7 @@ __chimera_vfs_dump_reply(struct chimera_vfs_request *req)
                              fhstr_ptr);
             break;
         case CHIMERA_VFS_OP_GETATTR:
-            chimera_snprintf(argstr, sizeof(argstr), "r_attr %lx", req->getattr.r_attr.va_set_mask);
+            chimera_snprintf(argstr, sizeof(argstr), "r_attr %" PRIx64, req->getattr.r_attr.va_set_mask);
             break;
         case CHIMERA_VFS_OP_OPEN_AT:
             if (req->open_at.r_attr.va_set_mask & CHIMERA_VFS_ATTR_FH) {
@@ -547,7 +551,7 @@ __chimera_vfs_dump_reply(struct chimera_vfs_request *req)
             break;
         case CHIMERA_VFS_OP_READDIR:
             if (req->status == CHIMERA_VFS_OK) {
-                chimera_snprintf(argstr, sizeof(argstr), "cookie %lu eof %u",
+                chimera_snprintf(argstr, sizeof(argstr), "cookie %" PRIu64 " eof %u",
                                  req->readdir.r_cookie,
                                  req->readdir.r_eof);
             }
@@ -562,7 +566,7 @@ __chimera_vfs_dump_reply(struct chimera_vfs_request *req)
                              req->write.r_length);
             break;
         case CHIMERA_VFS_OP_COPY_RANGE:
-            chimera_snprintf(argstr, sizeof(argstr), "r_len %lu",
+            chimera_snprintf(argstr, sizeof(argstr), "r_len %" PRIu64,
                              req->copy_range.r_length);
             break;
         default:
@@ -571,7 +575,7 @@ __chimera_vfs_dump_reply(struct chimera_vfs_request *req)
 
     format_hex(fhstr, sizeof(fhstr), req->fh, req->fh_len);
 
-    chimera_vfs_debug("VFS  Reply   %p: %s %s%s%s status %d (%s) elapsed %lu ns",
+    chimera_vfs_debug("VFS  Reply   %p: %s %s%s%s status %d (%s) elapsed %" PRIu64 " ns",
                       req,
                       chimera_vfs_op_name(req->opcode),
                       fhstr,

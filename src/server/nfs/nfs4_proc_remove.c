@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include <inttypes.h>
 #include <xxhash.h>
 
 #include "nfs4_procs.h"
@@ -87,7 +88,7 @@ nfs4_remove_ds_root_opened(
 
     ctx->ds_root_handle = handle;
 
-    snprintf(ctx->backing_name, sizeof(ctx->backing_name), "%016lx", ctx->fileid);
+    snprintf(ctx->backing_name, sizeof(ctx->backing_name), "%016" PRIx64, ctx->fileid);
 
     chimera_nfs_info("pNFS: deleting data-server backing file %s for removed file",
                      ctx->backing_name);

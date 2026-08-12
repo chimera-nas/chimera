@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <inttypes.h>
 #include <time.h>
 #include <utlist.h>
 

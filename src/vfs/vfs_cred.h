@@ -8,8 +8,10 @@
 #include <string.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#ifdef __linux__
 #include <sys/fsuid.h>
 #include <sys/syscall.h>
+#endif /* ifdef __linux__ */
 #include <unistd.h>
 #include <errno.h>
 #include "vfs_attrs.h"
@@ -224,6 +226,7 @@ chimera_setup_credential(
                 (cred->gid == sc->gid)) {
                 return 0;
             }
+#ifdef __linux__
             /* Per-thread supplementary groups: the raw syscall sets only this
              * thread (glibc setgroups() would broadcast to all threads). */
             if (syscall(SYS_setgroups, (size_t) cred->ngids,
@@ -242,6 +245,14 @@ chimera_setup_credential(
                 syscall(SYS_setgroups, (size_t) 0, NULL);
                 return EPERM;
             }
+#else  /* ifdef __linux__ */
+            /* No per-thread fsuid/fsgid outside Linux, so a passthrough backend
+             * cannot impersonate the client here.  Fail closed rather than
+             * silently performing the access as the server identity.  Only the
+             * linux and io_uring backends call this, and neither is built off
+             * Linux, so this is unreachable in practice. */
+            return EPERM;
+#endif /* ifdef __linux__ */
             break;
         case CHIMERA_VFS_AUTH_ATTR:
             if (set_attrs != NULL) {
@@ -283,11 +294,17 @@ chimera_restore_privilege(const struct chimera_vfs_cred *cred)
             (cred->gid == sc->gid)) {
             return 0;
         }
+#ifdef __linux__
         setfsuid(sc->uid);
         setfsgid(sc->gid);
         if (syscall(SYS_setgroups, (size_t) 0, NULL) < 0) {
             return errno;
         }
+#else  /* ifdef __linux__ */
+        /* chimera_setup_credential() never impersonated here (it returned
+         * EPERM), so there is nothing to restore. */
+        return 0;
+#endif /* ifdef __linux__ */
     }
     return 0;
 } // chimera_restore_privilege

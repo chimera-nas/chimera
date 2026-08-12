@@ -9,7 +9,7 @@
 #include <string.h>
 #include <errno.h>
 #include <sys/stat.h>
-#include <sys/random.h>
+#include "common/platform.h"
 
 #include "nfs.h"
 #include "server/protocol.h"
@@ -121,8 +121,7 @@ nfs_fh_key_init(
         chimera_nfs_error("Short read of FH key %s; regenerating", path);
     }
 
-    if (getrandom(shared->fh_key, sizeof(shared->fh_key), 0) !=
-        (ssize_t) sizeof(shared->fh_key)) {
+    if (chimera_getrandom(shared->fh_key, sizeof(shared->fh_key)) != 0) {
         chimera_nfs_error("getrandom failed for FH key; disabling FH signing");
         shared->fh_sign = 0;
         return;

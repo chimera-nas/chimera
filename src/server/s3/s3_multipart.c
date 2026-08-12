@@ -2598,7 +2598,7 @@ chimera_s3_complete_open_dir_callback(
         request->multipart.tmp_name_len = snprintf(
             request->multipart.tmp_name,
             sizeof(request->multipart.tmp_name),
-            "._chimera_mpufinal_%lx%lx",
+            "._chimera_mpufinal_%" PRIx64 "%" PRIx64,
             (uint64_t) request,
             (uint64_t) request->start_time.tv_nsec);
 
