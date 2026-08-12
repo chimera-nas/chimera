@@ -416,6 +416,7 @@ main(
 
     /* Initialize server configuration */
     config = chimera_server_config_init();
+    chimera_server_config_set_smb_enabled(config, 1);
     chimera_server_config_set_rest_http_port(config, REST_PORT);
 
     /* Initialize server */

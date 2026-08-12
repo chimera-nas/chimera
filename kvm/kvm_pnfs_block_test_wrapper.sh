@@ -176,6 +176,7 @@ generate_mds_config() {
         "rcu_reclaim_threads": 4
     },
     "server": {
+        "nfs_enabled": true,
         "threads": 4,
         "external_portmap": false,
         "vfs": {

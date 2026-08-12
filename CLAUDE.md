@@ -124,6 +124,11 @@ Chimera uses JSON configuration files. Example:
 
 ```json
 {
+    "server": {
+        "nfs_enabled": true,
+        "smb_enabled": true,
+        "s3_enabled": true
+    },
     "shares": {
         "share_name": {
             "module": "linux",
@@ -138,6 +143,11 @@ Chimera uses JSON configuration files. Example:
     "enable_rdma": false
 }
 ```
+
+Protocols are opt-in: each of NFS, SMB, and S3 serves only when its
+`*_enabled` flag is set (all default to false); the `nfs_port` / `smb_port` /
+`s3_port` settings keep the customary defaults and matter only once the
+protocol is enabled.
 
 ## Development Guidelines
 

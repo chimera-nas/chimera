@@ -75,6 +75,9 @@ def chimera_server():
     config = {
         "server": {
             "threads": 2,
+            "nfs_enabled": True,
+            "smb_enabled": True,
+            "s3_enabled": True,
             "sync_delegation_threads": 4,
             "rest_http_port": rest_port,
             "rest_auth_enabled": False,

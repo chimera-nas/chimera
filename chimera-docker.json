@@ -5,6 +5,9 @@
         "async_delegation_threads": 8
     },
     "server": {
+        "nfs_enabled": true,
+        "smb_enabled": true,
+        "s3_enabled": true,
         "threads": 4,
         "rest_http_port": 8080
     },

@@ -736,6 +736,7 @@ main(
 
     /* Initialize server configuration */
     config = chimera_server_config_init();
+    chimera_server_config_set_smb_enabled(config, 1);
 
     /* Configure authentication based on environment */
     const char *keytab = getenv("KRB5_KTNAME");

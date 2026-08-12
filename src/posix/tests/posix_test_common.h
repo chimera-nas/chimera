@@ -498,6 +498,10 @@ posix_test_start_nfs_server(struct posix_test_env *env)
                                          ? CHIMERA_TCP_FLAVOR_INPROC
                                          : CHIMERA_TCP_FLAVOR_PLAIN);
 
+    /* The posix suite only talks NFS; the other protocols stay at their
+     * default of disabled. */
+    chimera_server_config_set_nfs_enabled(server_config, 1);
+
     if (posix_test_is_diskfs(nfs_backend_name)) {
         posix_test_configure_diskfs(env->session_dir,
                                     posix_test_diskfs_device_type(nfs_backend_name),

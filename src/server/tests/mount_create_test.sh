@@ -30,6 +30,7 @@ trap cleanup EXIT
 cat > "$CFG" <<'EOF'
 {
     "server": {
+        "nfs_enabled": true,
         "threads": 2,
         "nfs_port": 21049,
         "data_server": true,

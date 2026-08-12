@@ -66,6 +66,7 @@ class ChimeraServer:
         """Create a JSON configuration for the test server."""
         config = {
             "server": {
+                "s3_enabled": True,
                 "s3_port": 5000,
             },
             "s3_access_keys": [

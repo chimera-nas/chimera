@@ -56,6 +56,10 @@ struct chimera_server_config {
     int                                   nfs_nsm_port;
     int                                   nfs_port;
     int                                   s3_port;
+    int                                   smb_port;
+    int                                   nfs_enabled;
+    int                                   smb_enabled;
+    int                                   s3_enabled;
     int                                   nfs_data_server;
     uint64_t                              nfs_server_scope;
     int                                   external_portmap;
@@ -259,10 +263,20 @@ chimera_server_config_init(void)
     config->pnfs_enabled = 0;
     config->pnfs_num_ds  = 0;
 
+    /* Every protocol is opt-in: a server serves nothing until its config
+     * explicitly enables a protocol, so an instance brought up for one
+     * purpose (a test fixture, a data server, an admin-only daemon) never
+     * surprise-binds the others' well-known ports.  The port fields keep the
+     * customary defaults and take effect only once the protocol is enabled. */
+    config->nfs_enabled = 0;
+    config->smb_enabled = 0;
+    config->s3_enabled  = 0;
+
     /* NFS service port (default 2049); data-server mode binds only the NFSv4
      * service so a pNFS data server can coexist with an MDS on one host. */
     config->nfs_port        = 2049;
     config->s3_port         = 5000;
+    config->smb_port        = 445;
     config->nfs_data_server = 0;
 
     /* NFSv4.1 server identity (EXCHANGE_ID eir_server_scope).  Clients treat two
@@ -844,6 +858,62 @@ chimera_server_config_get_s3_port(const struct chimera_server_config *config)
 } /* chimera_server_config_get_s3_port */
 
 SYMBOL_EXPORT void
+chimera_server_config_set_smb_port(
+    struct chimera_server_config *config,
+    int                           port)
+{
+    config->smb_port = port;
+} /* chimera_server_config_set_smb_port */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_smb_port(const struct chimera_server_config *config)
+{
+    return config->smb_port;
+} /* chimera_server_config_get_smb_port */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_nfs_enabled(
+    struct chimera_server_config *config,
+    int                           enabled)
+{
+    config->nfs_enabled = enabled;
+} /* chimera_server_config_set_nfs_enabled */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_nfs_enabled(const struct chimera_server_config *config)
+{
+    return config->nfs_enabled;
+} /* chimera_server_config_get_nfs_enabled */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_smb_enabled(
+    struct chimera_server_config *config,
+    int                           enabled)
+{
+    config->smb_enabled = enabled;
+} /* chimera_server_config_set_smb_enabled */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_smb_enabled(const struct chimera_server_config *config)
+{
+    return config->smb_enabled;
+} /* chimera_server_config_get_smb_enabled */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_s3_enabled(
+    struct chimera_server_config *config,
+    int                           enabled)
+{
+    config->s3_enabled = enabled;
+} /* chimera_server_config_set_s3_enabled */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_s3_enabled(const struct chimera_server_config *config)
+{
+    return config->s3_enabled;
+} /* chimera_server_config_get_s3_enabled */
+
+SYMBOL_EXPORT void
 chimera_server_config_set_nfs_data_server(
     struct chimera_server_config *config,
     int                           enable)
@@ -1343,6 +1413,11 @@ chimera_server_thread_init(
     chimera_tracing_thread_register();
 
     for (int i = 0; i < server->num_protocols; i++) {
+        /* A protocol whose init returned NULL is disabled. */
+        if (!server->protocol_private[i]) {
+            thread->protocol_private[i] = NULL;
+            continue;
+        }
         thread->protocol_private[i] = server->protocols[i]->thread_init(evpl,
                                                                         thread->vfs_thread,
                                                                         server->
@@ -2301,6 +2376,9 @@ chimera_server_thread_shutdown(
     chimera_vfs_thread_drain(thread->vfs_thread);
 
     for (i = 0; i < server->num_protocols; i++) {
+        if (!thread->protocol_private[i]) {
+            continue;
+        }
         server->protocols[i]->thread_destroy(thread->protocol_private[i]);
     }
 
@@ -2459,6 +2537,9 @@ chimera_server_start(struct chimera_server *server)
     pthread_mutex_unlock(&server->lock);
 
     for (i = 0; i < server->num_protocols; i++) {
+        if (!server->protocol_private[i]) {
+            continue;
+        }
         server->protocols[i]->start(server->protocol_private[i]);
     }
 
@@ -2473,6 +2554,9 @@ chimera_server_destroy(struct chimera_server *server)
     int i;
 
     for (i = 0; i < server->num_protocols; i++) {
+        if (!server->protocol_private[i]) {
+            continue;
+        }
         server->protocols[i]->stop(server->protocol_private[i]);
     }
 
@@ -2482,6 +2566,9 @@ chimera_server_destroy(struct chimera_server *server)
 
     /* Destroy protocols before VFS so they can release any open handles */
     for (i = 0; i < server->num_protocols; i++) {
+        if (!server->protocol_private[i]) {
+            continue;
+        }
         server->protocols[i]->destroy(server->protocol_private[i]);
     }
 

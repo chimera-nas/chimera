@@ -394,6 +394,7 @@ main(
 
     /* Initialize server configuration */
     config = chimera_server_config_init();
+    chimera_server_config_set_smb_enabled(config, 1);
 
     /* Exercise the real SMB3 durable/persistent-handle path (as the WPTS
      * harness does via CHIMERA_SMB_PERSISTENT).  Without it the server refuses

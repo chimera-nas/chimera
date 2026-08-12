@@ -675,6 +675,31 @@ main(
         chimera_server_config_set_s3_port(server_config, int_value);
     }
 
+    json_value = json_object_get(server_params, "smb_port");
+    if (json_is_integer(json_value)) {
+        int_value = json_integer_value(json_value);
+        chimera_server_config_set_smb_port(server_config, int_value);
+    }
+
+    /* Protocols are opt-in: nothing serves until the config enables it, so an
+     * instance brought up for one purpose never surprise-binds the other
+     * protocols' well-known ports.  The *_port settings above keep their
+     * customary defaults and matter only once the protocol is enabled. */
+    json_value = json_object_get(server_params, "nfs_enabled");
+    if (json_is_boolean(json_value)) {
+        chimera_server_config_set_nfs_enabled(server_config, json_is_true(json_value));
+    }
+
+    json_value = json_object_get(server_params, "smb_enabled");
+    if (json_is_boolean(json_value)) {
+        chimera_server_config_set_smb_enabled(server_config, json_is_true(json_value));
+    }
+
+    json_value = json_object_get(server_params, "s3_enabled");
+    if (json_is_boolean(json_value)) {
+        chimera_server_config_set_s3_enabled(server_config, json_is_true(json_value));
+    }
+
     /* NFSv4.1 server identity (EXCHANGE_ID server scope).  Set a distinct value
      * on independent servers that do not share state -- e.g. a pNFS data server
      * co-deployed with its MDS -- so v4.1 clients do not coalesce them. */
@@ -1053,6 +1078,15 @@ main(
 
     shares = json_object_get(config, "shares");
 
+    /* A share/export/bucket section whose protocol is not enabled is a
+     * contradiction: nothing would ever serve it.  Fail hard like the
+     * malformed-export errors below rather than silently not serving. */
+    if (shares && json_object_size(shares) > 0 &&
+        !chimera_server_config_get_smb_enabled(server_config)) {
+        chimera_server_error("Config declares SMB shares but smb_enabled is false");
+        exit(1);
+    }
+
     if (shares) {
         json_object_foreach(shares, name, share)
         {
@@ -1104,6 +1138,12 @@ main(
     }
 
     exports = json_object_get(config, "exports");
+
+    if (exports && json_object_size(exports) > 0 &&
+        !chimera_server_config_get_nfs_enabled(server_config)) {
+        chimera_server_error("Config declares NFS exports but nfs_enabled is false");
+        exit(1);
+    }
 
     /* Two passes over the exports object: entries pinning an explicit
      * export_id are created first so auto-assignment for the remaining
@@ -1348,6 +1388,12 @@ main(
     }
 
     buckets = json_object_get(config, "buckets");
+
+    if (buckets && json_object_size(buckets) > 0 &&
+        !chimera_server_config_get_s3_enabled(server_config)) {
+        chimera_server_error("Config declares S3 buckets but s3_enabled is false");
+        exit(1);
+    }
 
     if (buckets) {
         json_object_foreach(buckets, name, bucket)

@@ -69,6 +69,7 @@ write_config() {
 {
     "server": {
         "threads": 2,
+        "nfs_enabled": true,
         "rest_http_port": ${REST_PORT},
         "rest_auth_enabled": false,
         "state_dir": "${TMPDIR}/state"${extra_server}
