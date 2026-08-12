@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: LGPL-2.1-only
 
 add_executable(vfs_user_cache_test vfs_user_cache_test.c)
-target_link_libraries(vfs_user_cache_test chimera_vfs urcu-qsbr)
+target_link_libraries(vfs_user_cache_test chimera_vfs)
 add_test(chimera/vfs/user_cache_test vfs_user_cache_test)
 
 add_executable(vfs_kv_test vfs_kv_test.c)
@@ -29,7 +29,7 @@ if(CAIRN_ENABLED)
 endif()
 
 add_executable(vfs_notify_test vfs_notify_test.c)
-target_link_libraries(vfs_notify_test chimera_vfs urcu-qsbr)
+target_link_libraries(vfs_notify_test chimera_vfs)
 add_test(chimera/vfs/notify_test vfs_notify_test)
 
 add_executable(vfs_state_test vfs_state_test.c)
@@ -57,11 +57,11 @@ target_link_libraries(vfs_idmap_test chimera_vfs)
 add_test(chimera/vfs/idmap_test vfs_idmap_test)
 
 add_executable(vfs_identity_test vfs_identity_test.c)
-target_link_libraries(vfs_identity_test chimera_vfs chimera_vfs_memfs evpl urcu-qsbr)
+target_link_libraries(vfs_identity_test chimera_vfs chimera_vfs_memfs evpl)
 add_test(chimera/vfs/identity_test vfs_identity_test)
 
 add_executable(vfs_statfs_mask_test vfs_statfs_mask_test.c)
-target_link_libraries(vfs_statfs_mask_test chimera_vfs chimera_vfs_memfs chimera_vfs_memkv evpl urcu-qsbr)
+target_link_libraries(vfs_statfs_mask_test chimera_vfs chimera_vfs_memfs chimera_vfs_memkv evpl)
 add_test(chimera/vfs/statfs_mask_test vfs_statfs_mask_test)
 
 # zero_range reproducer / regression: VFS zero_range (DEALLOCATE+ALLOCATE) data
@@ -69,7 +69,10 @@ add_test(chimera/vfs/statfs_mask_test vfs_statfs_mask_test)
 # (and that the model checker is sound); the diskfs cases reproduce the bug.
 add_executable(vfs_zerorange_test vfs_zerorange_test.c)
 target_link_libraries(vfs_zerorange_test chimera_vfs chimera_vfs_memfs
-    chimera_vfs_linux chimera_vfs_diskfs chimera_vfs_memkv evpl urcu-qsbr)
+    chimera_vfs_diskfs chimera_vfs_memkv evpl)
+if(CHIMERA_LINUX)
+    target_link_libraries(vfs_zerorange_test chimera_vfs_linux)
+endif()
 # Engine-managed backends only: deterministic and host-fs-independent.  memfs
 # and cairn confirm the invariant holds; the diskfs cases reproduce the bug.
 # The linux / io_uring passthrough backends are also valid CLI args for manual
@@ -77,7 +80,12 @@ target_link_libraries(vfs_zerorange_test chimera_vfs chimera_vfs_memfs
 # fallocate behavior is the host kernel's and is unreliable under the
 # container / CI filesystems.
 add_test(NAME chimera/vfs/zerorange_memfs COMMAND vfs_zerorange_test memfs)
-add_test(NAME chimera/vfs/zerorange_diskfs_aio COMMAND vfs_zerorange_test diskfs_aio)
+# The diskfs_aio case drives libevpl's libaio block backend, which only exists
+# where libaio does (Linux); elsewhere opening the device fails.  Gate it the
+# same way the posix suite gates its diskfs_aio variants.
+if(HAVE_LIBAIO)
+    add_test(NAME chimera/vfs/zerorange_diskfs_aio COMMAND vfs_zerorange_test diskfs_aio)
+endif()
 if(CHIMERA_VFS_IO_URING)
     target_link_libraries(vfs_zerorange_test chimera_vfs_io_uring)
     add_test(NAME chimera/vfs/zerorange_diskfs_io_uring COMMAND vfs_zerorange_test diskfs_io_uring)

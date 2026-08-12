@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -199,7 +199,7 @@ test_preadv_pwritev(int fd)
     off_t amt = chimera_posix_preadv(fd, iov, 2, 20);
 
     if (amt != 6) {
-        fprintf(stderr, "preadv failed: expected 6, got %zd\n", amt);
+        fprintf(stderr, "preadv failed: expected 6, got %lld\n", (long long) amt);
         exit(1);
     }
 

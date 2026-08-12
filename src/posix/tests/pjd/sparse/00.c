@@ -18,7 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <fcntl.h>
-#include <linux/falloc.h>
+#include "common/platform.h"
 
 #include "../../pjd_common.h"
 

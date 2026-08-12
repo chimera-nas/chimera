@@ -29,6 +29,9 @@ fi
 # environment that grants neither, which is precisely the case this wrapper
 # exists to support.
 ulimit -l unlimited 2>/dev/null || true
-echo 16777216 > /proc/sys/fs/aio-max-nr 2>/dev/null || true
+# The braces matter: a failed redirection is reported by the shell before the
+# command's own 2>/dev/null takes effect, so the suppression must wrap the
+# whole command to keep hosts without /proc (macOS) quiet.
+{ echo 16777216 > /proc/sys/fs/aio-max-nr; } 2>/dev/null || true
 
 exec "$@"

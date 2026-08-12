@@ -65,8 +65,17 @@ case "$BACKEND" in
     *) echo "Error: Unknown backend '$BACKEND'"; usage ;;
 esac
 
-# Create session directory
-SESSION_DIR="/build/test/fsx_session_$$_$(date +%s)"
+# Create session directory.  Same root resolution as posix_test_common.h:
+# explicit override, else the devcontainer's /build/test, else a temp root for
+# hosts (e.g. macOS) that have no /build.
+if [ -n "$CHIMERA_TEST_ROOT" ]; then
+    TEST_ROOT="$CHIMERA_TEST_ROOT"
+elif [ -d /build ]; then
+    TEST_ROOT="/build/test"
+else
+    TEST_ROOT="/tmp/chimera_test"
+fi
+SESSION_DIR="${TEST_ROOT}/fsx_session_$$_$(date +%s)"
 mkdir -p "$SESSION_DIR"
 CONFIG_FILE="${SESSION_DIR}/fsx_config.json"
 TEST_FILE="/fsx/testfile"
