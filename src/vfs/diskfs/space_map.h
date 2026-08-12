@@ -862,6 +862,64 @@ sm_inum_valid(
 } // sm_inum_valid
 
 /*
+ * Load gate for a by-fh resolution: returns nonzero if the inode SHOULD be
+ * faulted from disk, zero only if the inum's home block is definitively free
+ * (so the handle is stale).  Beyond sm_inum_valid's range check, it consults
+ * the in-memory free map: a dinode's home block address is fixed by its inum
+ * (dinodes never relocate), so an in-use home block means a live inode lives
+ * there and an on-disk read can be trusted, whereas a home block returned to
+ * its AG free pool means the inode is gone.  This is what makes a reclaimed
+ * inode read as stale the moment its home block is freed (at the retire txn's
+ * apply, microseconds after the remove commits) instead of only once the
+ * tombstone dinode is pushed home to that block (the checkpoint/trim lag, many
+ * milliseconds) -- until then the raw home block still reads the pre-tombstone
+ * nlink and would spuriously resolve a removed handle.  The free tree tracks
+ * COMMITTED state (the reservation allocator leaves an allocated-but-not-yet-
+ * durable block in the tree until its txn retires), and a by-fh load only runs
+ * for an inode whose create/remove is durable, so a live inode never reads free.
+ *
+ * ag->lock is otherwise a LEAF lock (the allocator and the intent-log apply
+ * thread take it alone, and the allocator may take it and then evict an inode,
+ * i.e. ag -> shard).  A by-fh resolution reaches here holding the op's inode
+ * locks, so a blocking acquire here (shard/inode -> ag) would invert that order
+ * and can deadlock the apply thread against the allocator.  Use trylock and, on
+ * contention, fall back to loading (the pre-existing behaviour) -- never worse
+ * than before, and the stale window this closes only matters right after a
+ * remove, when this AG is quiescent (the single-threaded probe that exercises
+ * it has no competing op), so the trylock succeeds exactly when it counts.
+ */
+static inline int
+sm_inum_allocated(
+    struct space_map *sm,
+    uint64_t          inum)
+{
+    uint32_t          disk, ag_idx, block_idx;
+    struct sm_ag     *ag;
+    struct sm_extent *fext = NULL;
+    uint64_t          off;
+    int               allocated;
+
+    if (!sm_inum_valid(sm, inum)) {
+        return 0;
+    }
+
+    sm_inum_decode(inum, &disk, &ag_idx, &block_idx);
+    ag  = &sm->devices[disk].ags[ag_idx];
+    off = ag->log_offset + ag->log_size + (uint64_t) (block_idx - 1) * SM_BLOCK_SIZE;
+
+    if (pthread_mutex_trylock(&ag->lock) != 0) {
+        return 1;   /* contended -> assume live, load as before (no deadlock) */
+    }
+    /* Floor extent has offset <= off; the block is free iff that extent also
+     * extends past off (i.e. covers it). */
+    rb_tree_query_floor(&ag->free_by_offset, off, offset, fext);
+    allocated = !(fext && fext->offset + fext->length > off);
+    pthread_mutex_unlock(&ag->lock);
+
+    return allocated;
+} // sm_inum_allocated
+
+/*
  * Inverse of sm_inum_to_device_offset: given a freshly-allocated block at
  * (disk, offset), compute the inum that addresses it.
  */

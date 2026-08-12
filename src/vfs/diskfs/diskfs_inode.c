@@ -337,13 +337,25 @@ diskfs_inode_acquire(
     if (unlikely(!inode)) {
         /* Not resident: either evicted (its dinode is durably home -- eviction
          * only drops CLEAN inodes) or genuinely absent.  Fault it in from disk
-         * whenever the inum is within allocated space; the on-disk dinode read
-         * validates inum/gen/nlink and yields ENOENT if it isn't really there.
-         * (This must not gate on `mounted` -- a freshly-formatted FS evicts
-         * too, so a miss is not necessarily ENOENT.) */
+         * only when the inum's home block is still ALLOCATED; the on-disk dinode
+         * read then validates inum/gen/nlink and yields ENOENT if it isn't
+         * really there.
+         *
+         * The allocation check (not a bare range check) is what closes the
+         * reclaim window: a removed-and-reclaimed inode has its resident struct
+         * dropped when the retire txn commits, but its tombstone dinode is not
+         * pushed home to the raw block until a later checkpoint/trim.  A range
+         * gate would fault the stale home block in that gap and read the
+         * pre-tombstone nlink, spuriously resolving the dead handle.  The home
+         * block is returned to the free map at the retire txn's apply (right
+         * after commit), so gating on allocation reads the inode as gone from
+         * then on.  A block reused for a new inode reads as allocated again, but
+         * its bumped generation fails the gen check below.  (This must not gate
+         * on `mounted` -- a freshly-formatted FS evicts too, so a miss is not
+         * necessarily ENOENT.) */
         diskfs_metric_inode_cache(thread, DISKFS_METRIC_INODE_CACHE_MISS);
         pthread_mutex_unlock(&shard->lock);
-        if (sm_inum_valid(thread->shared->space_map, inum)) {
+        if (sm_inum_allocated(thread->shared->space_map, inum)) {
             diskfs_inode_load(thread, txn, inum, gen, mode, cb, private_data);
         } else {
             cb(NULL, CHIMERA_VFS_ENOENT, private_data);
