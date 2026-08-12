@@ -49,18 +49,28 @@ chimera_client_config_init(void)
     config->modules[2].config_data[0] = '\0';
     config->modules[2].module_path[0] = '\0';
 
-    strncpy(config->modules[3].module_name, "linux", sizeof(config->modules[3].module_name));
-    config->modules[3].config_data[0] = '\0';
-    config->modules[3].module_path[0] = '\0';
+    config->num_modules = 3;
 
-    config->num_modules = 4;
+    /* The passthrough backends below are Linux-only (see src/vfs/CMakeLists.txt)
+     * and are not built elsewhere, so do not ask the VFS to load them there --
+     * a missing module symbol is fatal at init.  Indices follow num_modules so
+     * the list stays contiguous whichever ones are present. */
+#ifdef __linux__
+    strncpy(config->modules[config->num_modules].module_name, "linux",
+            sizeof(config->modules[config->num_modules].module_name));
+    config->modules[config->num_modules].config_data[0] = '\0';
+    config->modules[config->num_modules].module_path[0] = '\0';
+
+    config->num_modules++;
+#endif /* ifdef __linux__ */
 
 #ifdef HAVE_IO_URING
-    strncpy(config->modules[4].module_name, "io_uring", sizeof(config->modules[4].module_name));
-    config->modules[4].config_data[0] = '\0';
-    config->modules[4].module_path[0] = '\0';
+    strncpy(config->modules[config->num_modules].module_name, "io_uring",
+            sizeof(config->modules[config->num_modules].module_name));
+    config->modules[config->num_modules].config_data[0] = '\0';
+    config->modules[config->num_modules].module_path[0] = '\0';
 
-    config->num_modules = 5;
+    config->num_modules++;
 #endif /* ifdef HAVE_IO_URING */
 
     return config;
