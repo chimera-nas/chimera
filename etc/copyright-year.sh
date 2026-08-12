@@ -67,7 +67,14 @@ CURRENT_YEAR=$(date +%Y)
         # Handle: "2025" -> "2025-2026" (single year to range)
         # Handle: "2024-2025" -> "2024-2026" (extend range)
         # Handle: "2024 - 2025" -> "2024-2026" (normalize and extend)
-        sed -i -E "/${PATTERN}/s/([0-9]{4}) *- *[0-9]{4}/\1-${CURRENT_YEAR}/g; /${PATTERN}/{ /[0-9]{4}-/!s/([0-9]{4})/\1-${CURRENT_YEAR}/; }" "$file"
+        # Written through a temp file rather than `sed -i`: BSD sed (macOS)
+        # takes the backup suffix as -i's argument, so `sed -i -E` there
+        # silently means "back up as .-E, and don't enable EREs".  Redirecting
+        # with cat also keeps the original file's mode and inode.
+        TMP=$(mktemp)
+        sed -E "/${PATTERN}/s/([0-9]{4}) *- *[0-9]{4}/\1-${CURRENT_YEAR}/g; /${PATTERN}/{ /[0-9]{4}-/!s/([0-9]{4})/\1-${CURRENT_YEAR}/; }" "$file" > "$TMP"
+        cat "$TMP" > "$file"
+        rm -f "$TMP"
         echo "Updated: $file"
     fi
 done

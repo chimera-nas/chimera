@@ -17,7 +17,8 @@ CMAKE_ARGS_RELEASE := -DCMAKE_BUILD_TYPE=Release
 CMAKE_ARGS_DEBUG := -DCMAKE_BUILD_TYPE=Debug
 # Coverage uses clang's source-based coverage, so force the clang toolchain.
 CMAKE_ARGS_COVERAGE := -DCMAKE_BUILD_TYPE=Coverage -DCMAKE_C_COMPILER=clang
-CTEST_PARALLEL := $(shell n=$$(nproc); echo $$(( n < 64 ? n : 64 )))
+# nproc is coreutils (Linux); macOS provides the same count via sysctl.
+CTEST_PARALLEL := $(shell n=$$(nproc 2>/dev/null || sysctl -n hw.ncpu); echo $$(( n < 64 ? n : 64 )))
 CTEST_ARGS := --output-on-failure --timeout 30 -j $(CTEST_PARALLEL)
 
 # Plain `make` produces a debug build only. Use `make debug`/`make release`

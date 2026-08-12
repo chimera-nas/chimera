@@ -19,8 +19,33 @@ add_library(chimera_rest SHARED
     rest_auth.c
 )
 target_include_directories(chimera_rest PRIVATE ${JANSSON_INCLUDE_DIRS})
-target_link_libraries(chimera_rest chimera_vfs evpl_http evpl ${JANSSON_LIBRARIES}
-                      OpenSSL::Crypto crypt)
+# crypt(3) is a separate library only on Linux (libcrypt/libxcrypt); on Darwin
+# it lives in libSystem but supports only DES, so users.json password hashes
+# in the crypt(5) $-schemes ($6$ SHA-512 etc.) cannot verify with it.  Use
+# libxcrypt when present (brew install libxcrypt; keg-only, hence the explicit
+# paths) for full scheme support plus the reentrant crypt_r().
+if (CHIMERA_LINUX)
+    set(CHIMERA_CRYPT_LIB crypt)
+else()
+    find_library(CHIMERA_XCRYPT_LIB crypt
+                 PATHS /opt/homebrew/opt/libxcrypt/lib /usr/local/opt/libxcrypt/lib
+                 NO_DEFAULT_PATH)
+    find_path(CHIMERA_XCRYPT_INCLUDE crypt.h
+              PATHS /opt/homebrew/opt/libxcrypt/include /usr/local/opt/libxcrypt/include
+              NO_DEFAULT_PATH)
+    if (CHIMERA_XCRYPT_LIB AND CHIMERA_XCRYPT_INCLUDE)
+        message(STATUS "libxcrypt found (${CHIMERA_XCRYPT_LIB}); full crypt(5) scheme support")
+        set(CHIMERA_CRYPT_LIB ${CHIMERA_XCRYPT_LIB})
+        target_include_directories(chimera_rest PRIVATE ${CHIMERA_XCRYPT_INCLUDE})
+        target_compile_definitions(chimera_rest PRIVATE CHIMERA_HAVE_XCRYPT=1)
+    else()
+        message(STATUS "libxcrypt not found; REST auth limited to DES password hashes")
+        set(CHIMERA_CRYPT_LIB "")
+    endif()
+endif()
+
+target_link_libraries(chimera_rest chimera_vfs evpl_http evpl
+                      OpenSSL::Crypto ${CHIMERA_CRYPT_LIB})
 
 # Embed Swagger UI files at build time
 set(SWAGGER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/swagger)

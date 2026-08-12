@@ -4,12 +4,6 @@
 
 cmake_minimum_required(VERSION 3.22)
 
-option(IO_URING_ENABLED "Enable io_uring support" ON)
-option(CAIRN_ENABLED "Enable cairn support" ON)
-option(CHIMERA_VFS_IO_URING "Enable chimera VFS io_uring backend" ON)
-option(REQUIRE_NETNS_TESTS "Fail configure if network namespace tests cannot be enabled" OFF)
-option(EVPL_IOVEC_PROFILE "Enable libevpl retained-iovec stack profiling" OFF)
-
 if (EXISTS "/usr/local/cuda")
     set(CUDA_ENABLED true)
     set(CMAKE_CUDA_COMPILER /usr/local/cuda/bin/nvcc)
@@ -35,6 +29,77 @@ if (CUDA_ENABLED)
 else()
     project(chimera LANGUAGES C)
 endif()
+
+# Platform gate.  Chimera is developed on Linux and a good deal of the stack --
+# io_uring, the cairn/linux VFS backends' Linux-only syscalls, netns-isolated
+# tests, KVM guest suites -- has no macOS equivalent.  Darwin is supported as a
+# development/CI platform for the portable core (VFS framework, memfs, the NFS
+# and S3 protocol servers, the unit tests), so everything Linux-only defaults
+# off there rather than hard-failing configure.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(CHIMERA_LINUX TRUE)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    set(CHIMERA_LINUX FALSE)
+
+    # Homebrew keeps its libraries (and keg-only ones such as openssl@3 and
+    # krb5) outside the default search paths.  Mirror what libevpl does so
+    # find_library/find_path and the compiler locate them.
+    if(EXISTS /opt/homebrew)
+        set(HOMEBREW_PREFIX /opt/homebrew)
+    else()
+        set(HOMEBREW_PREFIX /usr/local)
+    endif()
+
+    list(APPEND CMAKE_PREFIX_PATH
+        ${HOMEBREW_PREFIX}
+        ${HOMEBREW_PREFIX}/opt/openssl@3
+        ${HOMEBREW_PREFIX}/opt/krb5
+        ${HOMEBREW_PREFIX}/opt/nghttp2)
+
+    list(APPEND CMAKE_LIBRARY_PATH ${HOMEBREW_PREFIX}/lib ${HOMEBREW_PREFIX}/opt/krb5/lib)
+    list(APPEND CMAKE_INCLUDE_PATH ${HOMEBREW_PREFIX}/include ${HOMEBREW_PREFIX}/opt/krb5/include)
+
+    # Apple ships bison 2.3 (2006) in /usr/bin; the ndrzcc grammar needs the
+    # %code directive, which is bison 3.  Prefer Homebrew's keg-only bison.
+    list(APPEND CMAKE_PROGRAM_PATH ${HOMEBREW_PREFIX}/opt/bison/bin ${HOMEBREW_PREFIX}/opt/flex/bin)
+
+    # pkg-config needs to be pointed at the keg-only .pc files explicitly.
+    set(ENV{PKG_CONFIG_PATH}
+        "${HOMEBREW_PREFIX}/opt/krb5/lib/pkgconfig:${HOMEBREW_PREFIX}/opt/openssl@3/lib/pkgconfig:$ENV{PKG_CONFIG_PATH}")
+
+    include_directories(SYSTEM ${HOMEBREW_PREFIX}/include ${HOMEBREW_PREFIX}/opt/krb5/include)
+    link_directories(${HOMEBREW_PREFIX}/lib ${HOMEBREW_PREFIX}/opt/krb5/lib)
+
+    # chimera_vfs links its backend modules and the backends call back into the
+    # VFS core, so the shared-library graph is deliberately cyclic; the same is
+    # true of the protocol servers against chimera_server.  ELF resolves that at
+    # load time, but ld64 requires every symbol to bind at link time.  Allow
+    # shared libraries (only -- executables keep full link checking) to leave
+    # those references to the dynamic loader, matching the ELF behaviour.
+    string(APPEND CMAKE_SHARED_LINKER_FLAGS " -Wl,-undefined,dynamic_lookup")
+else()
+    message(FATAL_ERROR "Unsupported build platform ${CMAKE_SYSTEM_NAME}")
+endif()
+
+# Platform-dependent system libraries.  On Linux dlopen() lives in libdl, the
+# unwinder in libunwind and uuid_generate() in util-linux's libuuid; Darwin
+# ships all three inside libSystem, where they need no -l flag (and there is no
+# libunwind.tbd to link against in the first place).
+if(CHIMERA_LINUX)
+    set(CHIMERA_DL_LIB dl)
+    set(CHIMERA_UNWIND_LIB unwind)
+    set(CHIMERA_UUID_LIB uuid)
+else()
+    set(CHIMERA_DL_LIB "")
+    set(CHIMERA_UNWIND_LIB "")
+    set(CHIMERA_UUID_LIB "")
+endif()
+
+option(IO_URING_ENABLED "Enable io_uring support" ${CHIMERA_LINUX})
+option(CAIRN_ENABLED "Enable cairn support" ON)
+option(CHIMERA_VFS_IO_URING "Enable chimera VFS io_uring backend" ${CHIMERA_LINUX})
+option(REQUIRE_NETNS_TESTS "Fail configure if network namespace tests cannot be enabled" OFF)
+option(EVPL_IOVEC_PROFILE "Enable libevpl retained-iovec stack profiling" OFF)
 
 # Use ccache as the compiler launcher when it is installed.  The cache location
 # is left to ccache's own CCACHE_DIR env var (not hardcoded here): the
@@ -123,12 +188,26 @@ add_definitions(-fno-omit-frame-pointer)
 add_definitions(-g -Wall -Werror -Wno-unused-function)
 add_definitions(-fvisibility=hidden)
 
+# CMAKE_SYSTEM_PROCESSOR spells 64-bit ARM "aarch64" on Linux and "arm64" on
+# Darwin, so match on the family rather than a single string.  CHIMERA_ARCH_ARM64
+# is consumed further down to pick the xxhash SIMD dispatch.
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm.*|ARM.*|aarch64.*)")
+    set(CHIMERA_ARCH_ARM64 TRUE)
     set(MARCH_FLAG "-march=armv8-a")
+else()
+    set(CHIMERA_ARCH_ARM64 FALSE)
 endif()
 
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64)")
     set(MARCH_FLAG "-march=x86-64-v3")
+endif()
+
+# xxhash is used header-only (XXH_INLINE_ALL) by the VFS core and diskfs; pin
+# its SIMD dispatch to what MARCH_FLAG above actually guarantees.
+if(CHIMERA_ARCH_ARM64)
+    set(CHIMERA_XXH_VECTOR XXH_NEON)
+else()
+    set(CHIMERA_XXH_VECTOR XXH_AVX2)
 endif()
 
 add_definitions(${MARCH_FLAG})
@@ -153,6 +232,16 @@ if(CMAKE_C_COMPILER_ID MATCHES "Clang")
     # an unsigned abs() in fsx.c).
     add_definitions(-Wno-c23-extensions -Wno-gnu
                     -Wno-unknown-warning-option -Wno-absolute-value)
+endif()
+
+if(NOT CHIMERA_LINUX)
+    # Apple's <stdio.h> marks sprintf(3)/vsprintf(3) __deprecated, which -Werror
+    # turns into ~90 hard errors across the S3 and SMB dump paths.  glibc does
+    # not, so the Linux build never sees it.  Demote it here rather than let the
+    # platform dictate a mass snprintf() migration; converting those call sites
+    # is worth doing on its own terms, not as a side effect of the macOS port.
+    # (This does not weaken -Wdeprecated-declarations on Linux.)
+    add_definitions(-Wno-deprecated-declarations)
 endif()
 
 if (CUDA_ENABLED)
@@ -234,6 +323,13 @@ string(TOUPPER "${KVM_TESTING}" KVM_TESTING)
 
 if(KVM_TESTING STREQUAL "OFF")
     message(STATUS "KVM testing disabled (KVM_TESTING=OFF)")
+elseif(NOT CHIMERA_LINUX)
+    # No /dev/kvm and no guest images for non-Linux hosts; leave ON fatal so a
+    # CI job that demands KVM still fails loudly if pointed at the wrong host.
+    if(KVM_TESTING STREQUAL "ON")
+        message(FATAL_ERROR "KVM_TESTING=ON but the host is ${CMAKE_SYSTEM_NAME}, not Linux.")
+    endif()
+    message(STATUS "KVM testing disabled (host is ${CMAKE_SYSTEM_NAME}, not Linux)")
 else()
     # Probe the prerequisites and collect any that are missing.
     find_program(ORAS_EXECUTABLE oras)
@@ -288,14 +384,21 @@ endif()
 # ports without colliding with each other or the host. Creating a netns
 # requires CAP_NET_ADMIN, so a non-privileged build/test run would see a
 # pile of failures. Probe whether we can create one; if not, the
-# netns-using tests are silently skipped unless REQUIRE_NETNS_TESTS is ON
-# (which CI should set to prevent accidental coverage loss).
-execute_process(
-    COMMAND bash -c "set -e; n=chimera_netns_probe_$$; ip netns add \"$n\"; ip netns delete \"$n\""
-    RESULT_VARIABLE NETNS_PROBE_RESULT
-    OUTPUT_QUIET
-    ERROR_QUIET
-)
+# netns-using tests fall back to running on the shared host network,
+# serialized under a ctest RESOURCE_LOCK (see chimera_add_netns_test below --
+# the same scheme libevpl uses).
+# `ip netns` is Linux-only, so on other platforms (macOS) skip the probe and
+# fall back to serialized, non-isolated test execution.
+if(CHIMERA_LINUX)
+    execute_process(
+        COMMAND bash -c "set -e; n=chimera_netns_probe_$$; ip netns add \"$n\"; ip netns delete \"$n\""
+        RESULT_VARIABLE NETNS_PROBE_RESULT
+        OUTPUT_QUIET
+        ERROR_QUIET
+    )
+else()
+    set(NETNS_PROBE_RESULT 1)
+endif()
 
 if(NETNS_PROBE_RESULT EQUAL 0)
     set(CHIMERA_NETNS_TESTING TRUE)
@@ -309,8 +412,8 @@ else()
             "capability, or omit -DREQUIRE_NETNS_TESTS=ON.")
     endif()
     message(STATUS "Network namespace testing disabled "
-        "(no privileges to create netns; netns-requiring tests will be skipped). "
-        "Pass -DREQUIRE_NETNS_TESTS=ON to make this fatal.")
+        "(no privileges to create netns; network tests run serialized on the "
+        "host network). Pass -DREQUIRE_NETNS_TESTS=ON to make this fatal.")
 endif()
 
 # Forward result to libevpl so it doesn't probe again.
@@ -335,7 +438,15 @@ execute_process(
     ERROR_QUIET
 )
 
-if(LIMITS_PROBE_RESULT EQUAL 0)
+if(NOT CHIMERA_LINUX)
+    # The limits are Linux concepts backing Linux-only modules (io_uring
+    # queues, libaio contexts), and no backend that needs them builds here, so
+    # there is nothing to raise: the gate passes vacuously and the wrapper
+    # degrades to a plain exec.  This is what lets the in-process suites run
+    # on macOS.
+    set(CHIMERA_LIMITS_TESTING TRUE)
+    message(STATUS "Raised-limit testing enabled (no limit-needing backends on this platform)")
+elseif(LIMITS_PROBE_RESULT EQUAL 0)
     set(CHIMERA_LIMITS_TESTING TRUE)
     message(STATUS "Raised-limit testing enabled")
 else()
@@ -343,6 +454,29 @@ else()
     message(STATUS "Raised-limit testing disabled "
         "(cannot raise memlock / aio-max-nr; backends needing them are skipped)")
 endif()
+
+# Register a test whose command needs loopback networking.  With netns
+# available the command runs wrapped in an isolated namespace, so tests can
+# bind well-known ports in parallel.  Without netns (macOS, or an unprivileged
+# container) the test runs on the shared host network instead, serialized
+# against every other such test through a ctest RESOURCE_LOCK -- the same
+# fallback scheme libevpl uses for its tests (chimera_net here, evpl_net
+# there).  Accepts an optional trailing WORKING_DIRECTORY <dir>.
+function(chimera_add_netns_test name)
+    cmake_parse_arguments(_netns "" "WORKING_DIRECTORY" "" ${ARGN})
+    set(_wd "")
+    if(_netns_WORKING_DIRECTORY)
+        set(_wd WORKING_DIRECTORY ${_netns_WORKING_DIRECTORY})
+    endif()
+    if(CHIMERA_NETNS_TESTING)
+        add_test(NAME ${name}
+                 COMMAND ${CMAKE_SOURCE_DIR}/scripts/netns_test_wrapper.sh
+                         ${_netns_UNPARSED_ARGUMENTS} ${_wd})
+    else()
+        add_test(NAME ${name} COMMAND ${_netns_UNPARSED_ARGUMENTS} ${_wd})
+        set_tests_properties(${name} PROPERTIES RESOURCE_LOCK chimera_net)
+    endif()
+endfunction()
 
 # PyNFS testing.  Every suite is registered, but only the combinations known
 # to pass are actually run; the rest are marked DISABLED (see

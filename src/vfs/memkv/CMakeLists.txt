@@ -8,8 +8,7 @@ add_library(chimera_vfs_memkv SHARED
 
 target_compile_definitions(chimera_vfs_memkv PRIVATE
     XXH_INLINE_ALL
-    $<$<STREQUAL:${CMAKE_SYSTEM_PROCESSOR},aarch64>:XXH_VECTOR=XXH_NEON>
-    $<$<NOT:$<STREQUAL:${CMAKE_SYSTEM_PROCESSOR},aarch64>>:XXH_VECTOR=XXH_AVX2>
+    XXH_VECTOR=${CHIMERA_XXH_VECTOR}
 )
 
 target_link_libraries(chimera_vfs_memkv jansson)
