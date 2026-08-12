@@ -3,7 +3,18 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include <stdio.h>
+#include <string.h>
+#include <unistd.h>
 #include <pthread.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+
+/* portmap_xdr.h (pulled in via nfs_common.h below) #defines these RPC
+ * protocol constants, colliding with <netinet/in.h>'s IPPROTO_* enum-macros.
+ * This file does not use them, so drop the system macros before the XDR
+ * headers redefine them. */
+#undef IPPROTO_TCP
+#undef IPPROTO_UDP
 
 #include "nfs_internal.h"
 #include "nfs_common.h"
@@ -71,12 +82,45 @@ portmap_unset_callback(
     }
 } /* portmap_unset_callback */
 
+/* evpl treats a synchronously refused connect() as fatal, so handing an
+ * absent rpcbind to evpl_rpc2_client_connect would take the whole server
+ * down before the error paths below ever ran.  Probe with a throwaway
+ * socket first so "no portmapper" surfaces as a failed init instead --
+ * hosts without rpcbind (macOS by default) then run unregistered rather
+ * than not at all. */
+static int
+portmap_reachable(void)
+{
+    struct sockaddr_in sin;
+    int                fd, rc;
+
+    fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return 0;
+    }
+
+    memset(&sin, 0, sizeof(sin));
+    sin.sin_family      = AF_INET;
+    sin.sin_port        = htons(111);
+    sin.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+    rc = connect(fd, (struct sockaddr *) &sin, sizeof(sin));
+    close(fd);
+
+    return rc == 0;
+} /* portmap_reachable */
+
 static int
 portmap_init_context(struct portmap_reg_ctx *ctx)
 {
     struct evpl_rpc2_program *programs[1];
 
     memset(ctx, 0, sizeof(*ctx));
+
+    if (!portmap_reachable()) {
+        chimera_nfs_error("External portmap at 127.0.0.1:111 is not reachable");
+        return -1;
+    }
 
     ctx->evpl = evpl_create(NULL);
     if (!ctx->evpl) {
@@ -198,7 +242,8 @@ register_nfs_rpc_services(
     struct portmap_reg_ctx ctx;
 
     if (portmap_init_context(&ctx) != 0) {
-        chimera_nfs_fatal("Failed to initialize portmap registration context");
+        chimera_nfs_error("Continuing without external portmap registration; "
+                          "clients must use the fixed NFS/MOUNT ports");
         return;
     }
 
