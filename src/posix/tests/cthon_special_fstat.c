@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -6,7 +6,7 @@
 // Based on cthon/special/fstat.c from Connectathon 2004
 
 #include "cthon_common.h"
-#include <sys/vfs.h>
+#include "common/platform.h"
 #include <sys/statvfs.h>
 
 int

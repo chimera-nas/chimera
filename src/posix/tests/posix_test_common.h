@@ -298,15 +298,26 @@ posix_test_is_ext_module(const char *backend)
     return ext && strcmp(backend, ext) == 0;
 } // posix_test_is_ext_module
 
-/* Session-dir root: CHIMERA_TEST_ROOT when set, else /build/test.  Used by
+/* Session-dir root: CHIMERA_TEST_ROOT when set, else /build/test (the
+ * CI/devcontainer layout), else /tmp/chimera_test for hosts without a /build
+ * (e.g. the serialized unprivileged fallback on macOS).  Used by
  * posix_test_init and by the lock-family tests that do their own pre-fork
  * setup. */
 static inline const char *
 posix_test_session_root(void)
 {
     const char *root = getenv("CHIMERA_TEST_ROOT");
+    struct stat st;
 
-    return root ? root : "/build/test";
+    if (root) {
+        return root;
+    }
+
+    if (stat("/build", &st) == 0 && S_ISDIR(st.st_mode)) {
+        return "/build/test";
+    }
+
+    return "/tmp/chimera_test";
 } // posix_test_session_root
 
 /* Emit the external-module client config into a posix.json "config" object:
@@ -835,10 +846,17 @@ posix_test_init(
     (void) mkdir(session_root, 0755);
     (void) mkdir(env->session_dir, 0755);
 
-    rc = chown(env->session_dir, env->cred.uid, env->cred.gid);
-    if (rc < 0) {
-        fprintf(stderr, "Failed to set session_dir uid/gid: %s\n", strerror(errno));
-        exit(EXIT_FAILURE);
+    /* Ownership by the test identity matters for the passthrough (linux)
+     * backend, whose server side writes into the dir as cred.uid; chown needs
+     * privilege.  Unprivileged (serialized-fallback) runs only use
+     * engine-managed backends, where ownership by the invoking user is
+     * already right. */
+    if (geteuid() == 0) {
+        rc = chown(env->session_dir, env->cred.uid, env->cred.gid);
+        if (rc < 0) {
+            fprintf(stderr, "Failed to set session_dir uid/gid: %s\n", strerror(errno));
+            exit(EXIT_FAILURE);
+        }
     }
 
     if (is_nfs) {

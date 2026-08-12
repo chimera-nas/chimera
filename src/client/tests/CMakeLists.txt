@@ -4,7 +4,7 @@
 
 macro(add_client_testprog name)
     add_executable(${name} ${name}.c)
-    target_link_libraries(${name} chimera_client chimera_server jansson)
+    target_link_libraries(${name} chimera_client chimera_server)
     set_target_properties(${name} PROPERTIES
         TEST_FILE "${CMAKE_CURRENT_SOURCE_DIR}/${name}.c")
 endmacro()
@@ -100,7 +100,7 @@ if(HAVE_LIBAIO)
     generate_backend_tests(diskfs_aio "")
 endif()
 generate_backend_tests(cairn CAIRN_ENABLED)
-generate_backend_tests(linux "")
+generate_backend_tests(linux CHIMERA_LINUX)
 generate_backend_tests(io_uring CHIMERA_VFS_IO_URING)
 
 # SMB client tests: drive the vfs_smb client against an in-process SMB server

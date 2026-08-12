@@ -5,7 +5,7 @@
 
 # SMB authentication test program
 add_executable(smb_auth_test smb_auth_test.c)
-target_link_libraries(smb_auth_test chimera_vfs urcu-qsbr urcu-cds)
+target_link_libraries(smb_auth_test chimera_vfs urcu-cds)
 target_include_directories(smb_auth_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
 add_test(NAME chimera/server/smb/auth_test
@@ -13,14 +13,12 @@ add_test(NAME chimera/server/smb/auth_test
 
 # SMB smbclient authentication test
 add_executable(smbclient_auth_test smbclient_auth_test.c)
-target_link_libraries(smbclient_auth_test chimera_server chimera_metrics jansson)
+target_link_libraries(smbclient_auth_test chimera_server chimera_metrics)
 target_include_directories(smbclient_auth_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
-if(CHIMERA_NETNS_TESTING)
-    add_test(NAME chimera/server/smb/smbclient_ntlm
-        COMMAND ${CMAKE_SOURCE_DIR}/scripts/netns_test_wrapper.sh
-                ${CMAKE_CURRENT_BINARY_DIR}/smbclient_auth_test --mode=ntlm)
-endif()
+chimera_add_netns_test(chimera/server/smb/smbclient_ntlm ${CMAKE_CURRENT_BINARY_DIR}/smbclient_auth_test --mode=ntlm)
+set_tests_properties(chimera/server/smb/smbclient_ntlm PROPERTIES
+    SKIP_RETURN_CODE 77)
 
 # kerberos_test_wrapper.sh and ad_test_wrapper.sh both set up an isolated
 # netns internally, so they need the same privilege as the netns wrapper.
@@ -83,14 +81,12 @@ add_test(NAME chimera/server/smb/smb_compress_test
 
 # REST API user/share manipulation test
 add_executable(rest_user_manip_test rest_user_manip_test.c)
-target_link_libraries(rest_user_manip_test chimera_server chimera_metrics jansson)
+target_link_libraries(rest_user_manip_test chimera_server chimera_metrics)
 target_include_directories(rest_user_manip_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
-if(CHIMERA_NETNS_TESTING)
-    add_test(NAME chimera/server/smb/rest_user_manip
-        COMMAND ${CMAKE_SOURCE_DIR}/scripts/netns_test_wrapper.sh
-                ${CMAKE_CURRENT_BINARY_DIR}/rest_user_manip_test)
-endif()
+chimera_add_netns_test(chimera/server/smb/rest_user_manip ${CMAKE_CURRENT_BINARY_DIR}/rest_user_manip_test)
+set_tests_properties(chimera/server/smb/rest_user_manip PROPERTIES
+    SKIP_RETURN_CODE 77)
 
 # ---------------------------------------------------------------------------
 # Microsoft Windows Protocol Test Suites (WPTS) -- MS-SMB2 server conformance
@@ -502,7 +498,7 @@ endif()
 
 # SMB smbtorture integration tests
 add_executable(smbtorture_test smbtorture_test.c)
-target_link_libraries(smbtorture_test chimera_server chimera_metrics jansson)
+target_link_libraries(smbtorture_test chimera_server chimera_metrics)
 target_include_directories(smbtorture_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
 set(SMBTORTURE_LSAN "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/suppressions.txt")
@@ -513,9 +509,7 @@ set(SMBTORTURE_CMD ${CMAKE_CURRENT_BINARY_DIR}/smbtorture_test)
 # Independent-client smoke test: drive Samba's rpcclient against the chimera
 # LSARPC pipe (in serve mode) and assert an implemented op decodes.  This is the
 # green gate for the DCE/RPC bind + FSCTL transceive + NDR marshalling path.
-add_test(NAME chimera/server/smb/rpcclient_lsa
-    COMMAND ${CMAKE_SOURCE_DIR}/scripts/netns_test_wrapper.sh
-            ${CMAKE_SOURCE_DIR}/scripts/smb_rpcclient_test.sh ${SMBTORTURE_CMD} memfs)
+chimera_add_netns_test(chimera/server/smb/rpcclient_lsa ${CMAKE_SOURCE_DIR}/scripts/smb_rpcclient_test.sh ${SMBTORTURE_CMD} memfs)
 set_tests_properties(chimera/server/smb/rpcclient_lsa PROPERTIES
     ENVIRONMENT "${SMBTORTURE_LSAN}"
     SKIP_RETURN_CODE 77
@@ -549,9 +543,7 @@ set(SMBTORTURE_RPC_SUITES_ENABLED
 foreach(SUITE ${SMBTORTURE_RPC_SUITES_ENABLED})
     string(REGEX REPLACE "[^A-Za-z0-9]" "_" SUITE_ID ${SUITE})
     set(TEST_NAME chimera/server/smb/smbtorture_${SUITE_ID}_memfs)
-    add_test(NAME ${TEST_NAME}
-        COMMAND ${CMAKE_SOURCE_DIR}/scripts/netns_test_wrapper.sh
-                ${SMBTORTURE_CMD} -b memfs ${SUITE})
+    chimera_add_netns_test(${TEST_NAME} ${SMBTORTURE_CMD} -b memfs ${SUITE})
     set_tests_properties(${TEST_NAME} PROPERTIES
         ENVIRONMENT "${SMBTORTURE_LSAN}"
         SKIP_RETURN_CODE 77
@@ -569,9 +561,7 @@ set(SMBTORTURE_RPC_SUITES_DISABLED
 foreach(SUITE ${SMBTORTURE_RPC_SUITES_DISABLED})
     string(REGEX REPLACE "[^A-Za-z0-9]" "_" SUITE_ID ${SUITE})
     set(TEST_NAME chimera/server/smb/smbtorture_${SUITE_ID}_memfs)
-    add_test(NAME ${TEST_NAME}
-        COMMAND ${CMAKE_SOURCE_DIR}/scripts/netns_test_wrapper.sh
-                ${SMBTORTURE_CMD} -b memfs ${SUITE})
+    chimera_add_netns_test(${TEST_NAME} ${SMBTORTURE_CMD} -b memfs ${SUITE})
     set_tests_properties(${TEST_NAME} PROPERTIES
         ENVIRONMENT "${SMBTORTURE_LSAN}"
         SKIP_RETURN_CODE 77

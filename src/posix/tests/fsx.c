@@ -25,13 +25,15 @@
 #include <assert.h>
 #include <libgen.h>
 #include <fcntl.h>
-#include <linux/falloc.h>
+#include "common/platform.h"
 #include <sys/stat.h>
 #include <time.h>
 #include <strings.h>
 #include <sys/file.h>
 #include <sys/mman.h>
+#ifdef __linux__
 #include <linux/mman.h>
+#endif /* ifdef __linux__ */
 #include <sys/uio.h>
 #include <stdbool.h>
 #ifdef HAVE_ERR_H
@@ -64,6 +66,15 @@
 #ifndef MAP_FILE
 # define MAP_FILE     0
 #endif /* ifndef MAP_FILE */
+
+#ifndef __linux__
+/* fsx drives the file through chimera's POSIX shim, whose Linux-shaped
+ * fallocate-with-mode entry point stands in for the fallocate(2) that only
+ * Linux declares; loff_t likewise. */
+typedef off_t loff_t;
+#define fallocate(fd, mode, offset, length) \
+        chimera_posix_fallocate_mode(fd, mode, offset, length)
+#endif /* ifndef __linux__ */
 
 #ifndef RWF_DONTCACHE
 #define RWF_DONTCACHE 0x80
@@ -940,9 +951,11 @@ doflush(
     unsigned map_size;
     char    *p;
 
+#ifdef O_DIRECT
     if (o_direct == O_DIRECT) {
         return;
     }
+#endif /* ifdef O_DIRECT */
 
     pg_offset = offset & mmap_mask;
     map_size  = pg_offset + size;
@@ -2336,7 +2349,7 @@ test_dontcache_io(void)
     struct iovec iov = { .iov_base = buf, .iov_len = sizeof(buf) };
     int          ret, e;
 
-    ret = preadv2(fd, &iov, 1, 0, RWF_DONTCACHE);
+    ret = chimera_posix_preadv2(fd, &iov, 1, 0, RWF_DONTCACHE);
     e   = ret < 0 ? errno : 0;
     if (e == EOPNOTSUPP) {
         if (!quiet) {
@@ -3788,10 +3801,15 @@ main(
                 check_file = 1;
                 break;
             case 'Z':
+#ifdef O_DIRECT
                 o_direct     = O_DIRECT;
                 o_flags     |= O_DIRECT;
                 dontcache_io = 0;
                 break;
+#else  /* ifdef O_DIRECT */
+                fprintf(stderr, "-Z (O_DIRECT) is not supported here\n");
+                exit(88);
+#endif /* ifdef O_DIRECT */
             case 254:      /* --duration */
                 if (!optarg) {
                     fprintf(stderr, "Specify time with --duration=\n");
@@ -3934,10 +3952,20 @@ main(
             chimera_nfs_backend = NULL;
         }
 
-        /* Create session directory */
+        /* Create session directory.  Same root resolution as
+         * posix_test_session_root() in posix_test_common.h (which fsx does
+         * not include): explicit override, else the devcontainer's
+         * /build/test, else a temp root for hosts without a /build. */
+        const char *test_root = getenv("CHIMERA_TEST_ROOT");
+        if (test_root == NULL) {
+            struct stat root_st;
+            test_root = (stat("/build", &root_st) == 0 &&
+                         S_ISDIR(root_st.st_mode)) ? "/build/test"
+                                                   : "/tmp/chimera_test";
+        }
         snprintf(chimera_session_dir, sizeof(chimera_session_dir),
-                 "/build/test/fsx_%d_%ld", getpid(), (long) time(NULL));
-        (void) mkdir("/build/test", 0755);
+                 "%s/fsx_%d_%ld", test_root, getpid(), (long) time(NULL));
+        (void) mkdir(test_root, 0755);
         if (mkdir(chimera_session_dir, 0755) != 0 && errno != EEXIST) {
             fprintf(stderr, "Failed to create session directory %s: %s\n",
                     chimera_session_dir, strerror(errno));
@@ -4336,21 +4364,37 @@ main(
     if (keep_size_calls) {
         keep_size_calls = test_fallocate(FALLOC_FL_KEEP_SIZE);
     }
+#ifdef FALLOC_FL_UNSHARE_RANGE
     if (unshare_range_calls) {
         unshare_range_calls = test_fallocate(FALLOC_FL_UNSHARE_RANGE);
     }
+#else  /* ifdef FALLOC_FL_UNSHARE_RANGE */
+    unshare_range_calls = 0;
+#endif /* ifdef FALLOC_FL_UNSHARE_RANGE */
     if (punch_hole_calls) {
         punch_hole_calls = test_fallocate(FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE);
     }
+#ifdef FALLOC_FL_ZERO_RANGE
     if (zero_range_calls) {
         zero_range_calls = test_fallocate(FALLOC_FL_ZERO_RANGE);
     }
+#else  /* ifdef FALLOC_FL_ZERO_RANGE */
+    zero_range_calls = 0;
+#endif /* ifdef FALLOC_FL_ZERO_RANGE */
+#ifdef FALLOC_FL_COLLAPSE_RANGE
     if (collapse_range_calls) {
         collapse_range_calls = test_fallocate(FALLOC_FL_COLLAPSE_RANGE);
     }
+#else  /* ifdef FALLOC_FL_COLLAPSE_RANGE */
+    collapse_range_calls = 0;
+#endif /* ifdef FALLOC_FL_COLLAPSE_RANGE */
+#ifdef FALLOC_FL_INSERT_RANGE
     if (insert_range_calls) {
         insert_range_calls = test_fallocate(FALLOC_FL_INSERT_RANGE);
     }
+#else  /* ifdef FALLOC_FL_INSERT_RANGE */
+    insert_range_calls = 0;
+#endif /* ifdef FALLOC_FL_INSERT_RANGE */
     if (clone_range_calls) {
         clone_range_calls = test_clone_range();
     }

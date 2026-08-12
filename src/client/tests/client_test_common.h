@@ -103,18 +103,35 @@ client_test_init(
 
     evpl_set_log_fn(chimera_vlog, chimera_log_flush);
 
+    /* Session-dir root: CHIMERA_TEST_ROOT when set, else /build/test (the
+     * CI/devcontainer layout), else /tmp/chimera_test for hosts without a
+     * /build (e.g. macOS) -- the same resolution as posix_test_common.h. */
+    const char *test_root = getenv("CHIMERA_TEST_ROOT");
+    if (test_root == NULL) {
+        struct stat root_st;
+        test_root = (stat("/build", &root_st) == 0 &&
+                     S_ISDIR(root_st.st_mode)) ? "/build/test"
+                                               : "/tmp/chimera_test";
+    }
     snprintf(env->session_dir, sizeof(env->session_dir),
-             "/build/test/session_%d_%lu_%lu",
+             "%s/session_%d_%lu_%lu", test_root,
              getpid(), tv.tv_sec, tv.tv_nsec);
 
     fprintf(stderr, "Creating session directory %s\n", env->session_dir);
 
-    (void) mkdir("/build/test", 0755);
+    (void) mkdir(test_root, 0755);
     (void) mkdir(env->session_dir, 0755);
-    rc = chown(env->session_dir, env->cred.uid, env->cred.gid);
-    if (rc < 0) {
-        fprintf(stderr, "to set session_dir uid/gid: %s\n", strerror(errno));
-        exit(EXIT_FAILURE);
+    /* Hand the dir to the test credential so the linux-passthrough backend,
+     * where the server acts on the host fs as that uid, can create in it.
+     * Needs CAP_CHOWN, which only the privileged CI runs have; everywhere
+     * else the backends in play are virtual and access the dir as the
+     * invoking user, so ownership does not matter. */
+    if (geteuid() == 0) {
+        rc = chown(env->session_dir, env->cred.uid, env->cred.gid);
+        if (rc < 0) {
+            fprintf(stderr, "to set session_dir uid/gid: %s\n", strerror(errno));
+            exit(EXIT_FAILURE);
+        }
     }
     if (env->use_nfs || env->use_smb) {
         server_config = chimera_server_config_init();

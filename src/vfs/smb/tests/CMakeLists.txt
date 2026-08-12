@@ -8,7 +8,7 @@
 # reaches the server over the in-process transport, so it binds no port and
 # needs no namespace; the wrapper is only there for the resource limits.
 add_executable(smb_mount_test smb_mount_test.c)
-target_link_libraries(smb_mount_test chimera_server chimera_metrics jansson)
+target_link_libraries(smb_mount_test chimera_server chimera_metrics)
 target_include_directories(smb_mount_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
 if(CHIMERA_LIMITS_TESTING)

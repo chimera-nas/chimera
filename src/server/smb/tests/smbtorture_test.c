@@ -251,6 +251,7 @@ run_smbtorture(
 static int
 fs_supports_file_handles(const char *dir)
 {
+#ifdef __linux__
     struct {
         struct file_handle fh;
         unsigned char      buf[MAX_HANDLE_SZ];
@@ -260,6 +261,12 @@ fs_supports_file_handles(const char *dir)
     h.fh.handle_bytes = MAX_HANDLE_SZ;
 
     return name_to_handle_at(AT_FDCWD, dir, &h.fh, &mount_id, 0) == 0;
+#else  /* ifdef __linux__ */
+    /* name_to_handle_at(2) is Linux-only, and so are the passthrough backends
+     * that need it, so no directory qualifies here. */
+    (void) dir;
+    return 0;
+#endif /* ifdef __linux__ */
 } /* fs_supports_file_handles */
 
 /* Pick a base directory for the session.  Passthrough backends require one

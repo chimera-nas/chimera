@@ -14,11 +14,9 @@ if(NOT S3TESTS_DIR)
     set(S3TESTS_DIR "/opt/s3-tests")
 endif()
 
-if(CHIMERA_NETNS_TESTING AND EXISTS "${S3TESTS_DIR}/.venv")
-    add_test(
-        NAME chimera/server/s3/ceph_s3tests
-        COMMAND ${CMAKE_SOURCE_DIR}/scripts/netns_test_wrapper.sh
-                ${CMAKE_CURRENT_SOURCE_DIR}/run_ceph_s3tests.sh
+if(EXISTS "${S3TESTS_DIR}/.venv")
+    chimera_add_netns_test(chimera/server/s3/ceph_s3tests
+        ${CMAKE_CURRENT_SOURCE_DIR}/run_ceph_s3tests.sh
                 --chimera ${CMAKE_BINARY_DIR}/src/daemon/chimera
                 --suite-dir ${S3TESTS_DIR}
                 --backend memfs

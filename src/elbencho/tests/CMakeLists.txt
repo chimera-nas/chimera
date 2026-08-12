@@ -12,32 +12,28 @@ find_program(ELBENCHO_BIN elbencho PATHS /elbencho/bin /usr/local/bin)
 # up the io_uring module, whose queue allocation needs an unlimited RLIMIT_MEMLOCK
 # (and a raised fs.aio-max-nr); the wrapper provides those and handles the ASan
 # LD_PRELOAD for the test process. Mirrors src/fio/tests.
-set(NETNS_WRAPPER "${CMAKE_SOURCE_DIR}/scripts/netns_test_wrapper.sh")
 
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/memfs_basic.json
                ${CMAKE_CURRENT_BINARY_DIR}/memfs_basic.json)
 
-if(ELBENCHO_BIN AND CHIMERA_NETNS_TESTING)
+if(ELBENCHO_BIN)
     # Sequential write -> read with integrity verification (--verify), which proves
     # byte correctness through the plugin. iodepth 1 exercises the synchronous
     # pread/pwrite path; iodepth 8 exercises the async aio_submit/aio_reap path.
-    add_test(NAME chimera/elbencho/memfs_seq_verify_iodepth1
-        COMMAND ${NETNS_WRAPPER} ${ELBENCHO_BIN}
+    chimera_add_netns_test(chimera/elbencho/memfs_seq_verify_iodepth1 ${ELBENCHO_BIN}
             --backend-plugin ${ELBENCHO_PLUGIN_PATH}
             --backend-plugin-config ${CMAKE_CURRENT_BINARY_DIR}/memfs_basic.json
             -w -r -t 1 -b 128k -s 4m --iodepth 1 --verify 12345
             /memfs/elbencho_seq1)
 
-    add_test(NAME chimera/elbencho/memfs_seq_verify_iodepth8
-        COMMAND ${NETNS_WRAPPER} ${ELBENCHO_BIN}
+    chimera_add_netns_test(chimera/elbencho/memfs_seq_verify_iodepth8 ${ELBENCHO_BIN}
             --backend-plugin ${ELBENCHO_PLUGIN_PATH}
             --backend-plugin-config ${CMAKE_CURRENT_BINARY_DIR}/memfs_basic.json
             -w -r -t 1 -b 128k -s 8m --iodepth 8 --verify 12345
             /memfs/elbencho_seq2)
 
     # Random-offset file mode (the classic iodepth workload), multi-thread.
-    add_test(NAME chimera/elbencho/memfs_rand_iodepth8
-        COMMAND ${NETNS_WRAPPER} ${ELBENCHO_BIN}
+    chimera_add_netns_test(chimera/elbencho/memfs_rand_iodepth8 ${ELBENCHO_BIN}
             --backend-plugin ${ELBENCHO_PLUGIN_PATH}
             --backend-plugin-config ${CMAKE_CURRENT_BINARY_DIR}/memfs_basic.json
             -w -r --rand -t 2 -b 128k -s 4m --iodepth 8
@@ -45,8 +41,7 @@ if(ELBENCHO_BIN AND CHIMERA_NETNS_TESTING)
 
     # Dir mode (many files): mkdirs -> write -> stat -> read -> delete files+dirs,
     # with integrity verification, exercising the plugin metadata ops + data path.
-    add_test(NAME chimera/elbencho/memfs_dirmode_verify
-        COMMAND ${NETNS_WRAPPER} ${ELBENCHO_BIN}
+    chimera_add_netns_test(chimera/elbencho/memfs_dirmode_verify ${ELBENCHO_BIN}
             --backend-plugin ${ELBENCHO_PLUGIN_PATH}
             --backend-plugin-config ${CMAKE_CURRENT_BINARY_DIR}/memfs_basic.json
             -d -w -r --stat --delfiles --deldirs -t 4 -n 4 -N 16 -s 128k -b 16k
@@ -55,8 +50,7 @@ if(ELBENCHO_BIN AND CHIMERA_NETNS_TESTING)
 
     # Exercise the size/preallocate ops (--trunctosize -> op_ftruncate,
     # --preallocfile -> op_fallocate), with integrity verification.
-    add_test(NAME chimera/elbencho/memfs_prealloc_verify
-        COMMAND ${NETNS_WRAPPER} ${ELBENCHO_BIN}
+    chimera_add_netns_test(chimera/elbencho/memfs_prealloc_verify ${ELBENCHO_BIN}
             --backend-plugin ${ELBENCHO_PLUGIN_PATH}
             --backend-plugin-config ${CMAKE_CURRENT_BINARY_DIR}/memfs_basic.json
             -d -w -r --trunctosize --preallocfile -t 2 -n 2 -N 8 -s 128k -b 16k
@@ -79,16 +73,14 @@ if(ELBENCHO_BIN AND CHIMERA_NETNS_TESTING)
                        ${CMAKE_CURRENT_BINARY_DIR}/diskfs_io_uring.json)
 
         # iodepth 16 random workload: require peak concurrency >= 8 (fully async proof).
-        add_test(NAME chimera/elbencho/diskfs_async_concurrency
-            COMMAND ${NETNS_WRAPPER} bash ${CMAKE_CURRENT_SOURCE_DIR}/verify_async.sh 8 ${ELBENCHO_BIN}
+        chimera_add_netns_test(chimera/elbencho/diskfs_async_concurrency bash ${CMAKE_CURRENT_SOURCE_DIR}/verify_async.sh 8 ${ELBENCHO_BIN}
                 --backend-plugin ${ELBENCHO_PLUGIN_PATH}
                 --backend-plugin-config ${CMAKE_CURRENT_BINARY_DIR}/diskfs_io_uring.json
                 -w -r --rand -t 1 -b 64k -s 64m --iodepth 16
                 /diskfs/elbencho_async)
 
         # integrity verification on the async backend (correctness + peak >= 4).
-        add_test(NAME chimera/elbencho/diskfs_verify
-            COMMAND ${NETNS_WRAPPER} bash ${CMAKE_CURRENT_SOURCE_DIR}/verify_async.sh 4 ${ELBENCHO_BIN}
+        chimera_add_netns_test(chimera/elbencho/diskfs_verify bash ${CMAKE_CURRENT_SOURCE_DIR}/verify_async.sh 4 ${ELBENCHO_BIN}
                 --backend-plugin ${ELBENCHO_PLUGIN_PATH}
                 --backend-plugin-config ${CMAKE_CURRENT_BINARY_DIR}/diskfs_io_uring.json
                 -w -r -t 2 -b 128k -s 32m --iodepth 8 --verify 4242
@@ -96,10 +88,10 @@ if(ELBENCHO_BIN AND CHIMERA_NETNS_TESTING)
 
         # both diskfs tests share one device image (reformatted on each run), so don't
         # let ctest run them concurrently.
-        set_tests_properties(
+        set_property(TEST
             chimera/elbencho/diskfs_async_concurrency
             chimera/elbencho/diskfs_verify
-            PROPERTIES RESOURCE_LOCK "elbencho_diskfs_image")
+            APPEND PROPERTY RESOURCE_LOCK "elbencho_diskfs_image")
 
         list(APPEND ELBENCHO_TEST_NAMES
             chimera/elbencho/diskfs_async_concurrency

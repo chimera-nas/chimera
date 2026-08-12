@@ -32,7 +32,7 @@
 
 #include <stdarg.h>
 #include <limits.h>
-#include <sys/sysmacros.h>
+#include "common/platform.h"
 #include "posix_test_common.h"
 #include "vfs/vfs_acl.h"
 
@@ -647,7 +647,7 @@ pjd_lstat_ctime(
     if (chimera_posix_lstat(pjd_resolve(name, p, sizeof(p)), &st) != 0) {
         return -1;
     }
-    *ts = st.st_ctim;
+    *ts = CHIMERA_STAT_CTIM(st);
     return 0;
 } /* pjd_lstat_ctime */
 
@@ -662,7 +662,7 @@ pjd_lstat_mtime(
     if (chimera_posix_lstat(pjd_resolve(name, p, sizeof(p)), &st) != 0) {
         return -1;
     }
-    *ts = st.st_mtim;
+    *ts = CHIMERA_STAT_MTIM(st);
     return 0;
 } /* pjd_lstat_mtime */
 
@@ -750,7 +750,7 @@ pjd_stat_ctime(
     if (chimera_posix_stat(pjd_resolve(name, p, sizeof(p)), &st) != 0) {
         return -1;
     }
-    *ts = st.st_ctim;
+    *ts = CHIMERA_STAT_CTIM(st);
     return 0;
 } /* pjd_stat_ctime */
 
@@ -765,7 +765,7 @@ pjd_stat_mtime(
     if (chimera_posix_stat(pjd_resolve(name, p, sizeof(p)), &st) != 0) {
         return -1;
     }
-    *ts = st.st_mtim;
+    *ts = CHIMERA_STAT_MTIM(st);
     return 0;
 } /* pjd_stat_mtime */
 
@@ -803,7 +803,7 @@ pjd_lstat_atime(const char *name)
     if (chimera_posix_lstat(pjd_resolve(name, p, sizeof(p)), &st) != 0) {
         return -1;
     }
-    return (long) st.st_atim.tv_sec;
+    return (long) CHIMERA_STAT_ATIM(st).tv_sec;
 } /* pjd_lstat_atime */
 
 static inline long
@@ -815,7 +815,7 @@ pjd_lstat_mtime_sec(const char *name)
     if (chimera_posix_lstat(pjd_resolve(name, p, sizeof(p)), &st) != 0) {
         return -1;
     }
-    return (long) st.st_mtim.tv_sec;
+    return (long) CHIMERA_STAT_MTIM(st).tv_sec;
 } /* pjd_lstat_mtime_sec */
 
 /* Full atime/mtime timespec via lstat; 0 on success. */
@@ -831,8 +831,8 @@ pjd_lstat_times(
     if (chimera_posix_lstat(pjd_resolve(name, p, sizeof(p)), &st) != 0) {
         return -1;
     }
-    *atime = st.st_atim;
-    *mtime = st.st_mtim;
+    *atime = CHIMERA_STAT_ATIM(st);
+    *mtime = CHIMERA_STAT_MTIM(st);
     return 0;
 } /* pjd_lstat_times */
 

@@ -16,7 +16,9 @@
  * (park -> snapshot -> slot flip -> resume) many times over.
  */
 
-#include <sys/vfs.h>
+#include <inttypes.h>
+
+#include "common/platform.h"
 
 #include "posix_test_common.h"
 
@@ -54,15 +56,15 @@ expect_convergence(
     for (i = 0; i < 600; i++) {
         now_free = free_bytes(env);
         if (now_free + RECLAIM_SLACK >= baseline) {
-            fprintf(stderr, "%s: converged (baseline=%lu free=%lu)\n",
+            fprintf(stderr, "%s: converged (baseline=%" PRIu64 " free=%" PRIu64 ")\n",
                     phase, baseline, now_free);
             return;
         }
         usleep(100000);
     }
 
-    fprintf(stderr, "%s: space did not converge: baseline=%lu free=%lu "
-            "(leaked ~%lu bytes)\n",
+    fprintf(stderr, "%s: space did not converge: baseline=%" PRIu64 " free=%" PRIu64 " "
+            "(leaked ~%" PRIu64 " bytes)\n",
             phase, baseline, now_free, baseline - now_free);
     posix_test_fail(env);
 } /* expect_convergence */
@@ -151,7 +153,7 @@ main(
     sleep(3);
 
     baseline = free_bytes(&env);
-    fprintf(stderr, "baseline free: %lu bytes\n", baseline);
+    fprintf(stderr, "baseline free: %" PRIu64 " bytes\n", baseline);
 
     /* Phase 1: create+write+delete churn must not bleed space.  This also
      * recycles inums (home blocks return to the allocator), so stale-handle

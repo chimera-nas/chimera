@@ -27,7 +27,7 @@
  */
 
 #define _GNU_SOURCE 1
-#include <sys/sysmacros.h>
+#include "common/platform.h"
 #include "posix_test_common.h"
 
 static int test_num   = 0;
