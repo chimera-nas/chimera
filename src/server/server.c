@@ -1672,8 +1672,8 @@ chimera_mkpath_lookup_cb(
          * as CI does).  Hardcoding 0/0 would make the next component's
          * ADD_SUBDIRECTORY gate deny an unprivileged server its own
          * freshly-created parent. */
-        ctx->set_attr.va_uid  = chimera_vfs_get_server_cred()->uid;
-        ctx->set_attr.va_gid  = chimera_vfs_get_server_cred()->gid;
+        ctx->set_attr.va_uid = chimera_vfs_get_server_cred()->uid;
+        ctx->set_attr.va_gid = chimera_vfs_get_server_cred()->gid;
 
         chimera_vfs_mkdir_at(ctx->thread, chimera_vfs_get_server_cred(), ctx->oh,
                              ctx->comp, ctx->complen, &ctx->set_attr,

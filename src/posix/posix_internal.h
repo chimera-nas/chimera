@@ -165,7 +165,7 @@ chimera_posix_errno_from_status(enum chimera_vfs_error status)
         case CHIMERA_VFS_ESYMLINK:     return ELOOP;
         case CHIMERA_VFS_EBADCOOKIE:   return EINVAL;
         default:                       return EIO;
-    }
+    } // switch
 } // chimera_posix_errno_from_status
 
 static FORCE_INLINE void

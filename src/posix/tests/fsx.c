@@ -64,7 +64,7 @@
 #include "prometheus-c.h"
 
 #ifndef MAP_FILE
-# define MAP_FILE     0
+# define MAP_FILE 0
 #endif /* ifndef MAP_FILE */
 
 #ifndef __linux__
