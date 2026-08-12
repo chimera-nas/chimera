@@ -374,18 +374,28 @@ chimera_server_config_init(void)
     config->modules[2].config_data[0] = '\0';
     config->modules[2].module_path[0] = '\0';
 
-    strncpy(config->modules[3].module_name, "linux", sizeof(config->modules[3].module_name));
-    config->modules[3].config_data[0] = '\0';
-    config->modules[3].module_path[0] = '\0';
+    config->num_modules = 3;
 
-    config->num_modules = 4;
+    /* The passthrough backends below are Linux-only (see src/vfs/CMakeLists.txt)
+     * and are not built elsewhere, so do not ask the VFS to load them there --
+     * a missing module symbol is fatal at init.  Indices follow num_modules so
+     * the list stays contiguous whichever ones are present. */
+#ifdef __linux__
+    strncpy(config->modules[config->num_modules].module_name, "linux",
+            sizeof(config->modules[config->num_modules].module_name));
+    config->modules[config->num_modules].config_data[0] = '\0';
+    config->modules[config->num_modules].module_path[0] = '\0';
+
+    config->num_modules++;
+#endif /* ifdef __linux__ */
 
 #ifdef HAVE_IO_URING
-    strncpy(config->modules[4].module_name, "io_uring", sizeof(config->modules[4].module_name));
-    config->modules[4].config_data[0] = '\0';
-    config->modules[4].module_path[0] = '\0';
+    strncpy(config->modules[config->num_modules].module_name, "io_uring",
+            sizeof(config->modules[config->num_modules].module_name));
+    config->modules[config->num_modules].config_data[0] = '\0';
+    config->modules[config->num_modules].module_path[0] = '\0';
 
-    config->num_modules = 5;
+    config->num_modules++;
 #endif /* ifdef HAVE_IO_URING */
 
     /* The default KV module (memkv) is auto-registered by chimera_vfs_init; it
@@ -1658,8 +1668,12 @@ chimera_mkpath_lookup_cb(
         ctx->set_attr.va_set_mask = CHIMERA_VFS_ATTR_MODE |
             CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID;
         ctx->set_attr.va_mode = S_IFDIR | (ctx->mode & 07777);
-        ctx->set_attr.va_uid  = 0;
-        ctx->set_attr.va_gid  = 0;
+        /* Own created dirs as the server identity (0/0 when running as root,
+         * as CI does).  Hardcoding 0/0 would make the next component's
+         * ADD_SUBDIRECTORY gate deny an unprivileged server its own
+         * freshly-created parent. */
+        ctx->set_attr.va_uid  = chimera_vfs_get_server_cred()->uid;
+        ctx->set_attr.va_gid  = chimera_vfs_get_server_cred()->gid;
 
         chimera_vfs_mkdir_at(ctx->thread, chimera_vfs_get_server_cred(), ctx->oh,
                              ctx->comp, ctx->complen, &ctx->set_attr,

@@ -190,7 +190,8 @@ s3_server_respond(
 
         if (request->file_offset != 0 || request->file_length != request->file_real_length) {
 
-            snprintf(range_header, sizeof(range_header), "bytes %ld-%ld/%ld",
+            snprintf(range_header, sizeof(range_header),
+                     "bytes %" PRId64 "-%" PRId64 "/%" PRId64,
                      request->file_offset, request->file_offset + request->file_length - 1,
                      request->file_real_length);
 
@@ -209,7 +210,7 @@ s3_server_respond(
         if (request->status == CHIMERA_S3_STATUS_INVALID_RANGE) {
             /* S3 echoes the object size on a 416 so the client can re-request a
              * satisfiable range. */
-            snprintf(range_header, sizeof(range_header), "bytes */%ld",
+            snprintf(range_header, sizeof(range_header), "bytes */%" PRId64,
                      request->file_real_length);
             evpl_http_request_add_header(request->http_request, "Content-Range", range_header);
         }
@@ -1192,7 +1193,7 @@ s3_server_init(
     chimera_vfs_get_root_fh(shared->root_fh, &shared->root_fh_len);
 
     return shared;
-} /* s3_server_init */ /* s3_server_init */
+} /* s3_server_init */
 
 static void
 s3_server_stop(void *data)
