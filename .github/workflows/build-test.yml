@@ -625,7 +625,7 @@ jobs:
   # reports) and never fails the build: the test jobs stay the source of truth.
   publish-test-results:
     name: Report
-    needs: [test, test-dev]
+    needs: [test, test-dev, macos]
     if: ${{ always() && github.event_name != 'pull_request' }}
     runs-on: arc-small
     permissions:
@@ -888,11 +888,101 @@ jobs:
           path: flaky-rescued.log
           retention-days: 14
 
+  # ---------------------------------------------------------------------------
+  # macOS: compile + ctest on a GitHub-hosted arm64 runner, modeled on
+  # libevpl's macos job.  Nothing here is containerised and none of the
+  # Linux-only pieces exist (io_uring, libaio, KVM, netns, RDMA, the linux
+  # passthrough backend), so this covers the kqueue event core, the in-process
+  # test transport, and every portable path above them -- the combination the
+  # Linux matrix never exercises.  Like the rest of the matrix it runs only in
+  # the merge queue; ci-complete aggregates it for branch protection.
+  #
+  # No netns and no raised limits on a hosted runner: the in-process suites
+  # run gate-free (CHIMERA_LIMITS_TESTING passes vacuously off Linux) and the
+  # genuinely networked suites serialize under the chimera_net lock.  Flake
+  # rescue mirrors test-dev so a rescued flake still routes through the
+  # flake-review gate.
+  # ---------------------------------------------------------------------------
+  macos:
+    name: Test macOS ${{ matrix.build_type }}
+    if: ${{ github.event_name != 'pull_request' }}
+    runs-on: macos-14
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [Release, Debug]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          brew update
+          # bison: Apple ships 2.3 and the ndrzcc grammar needs 3.x; the
+          # top-level CMakeLists already adds the keg-only Homebrew path.
+          # libxcrypt: Darwin libc crypt(3) is DES-only, and REST auth needs
+          # full crypt(5) $-scheme verification.
+          brew install cmake ninja bison jansson userspace-rcu rocksdb krb5 \
+                       xxhash libxcrypt uthash openssl@3 libnghttp2
+
+      - name: Configure and build
+        run: |
+          cmake -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+                -S "${{ github.workspace }}" -B "${{ runner.temp }}/build"
+          ninja -C "${{ runner.temp }}/build"
+
+      - name: Test
+        run: |
+          cd "${{ runner.temp }}/build"
+          mkdir -p "${{ github.workspace }}/ctest-results"
+          rm -f "${{ github.workspace }}/flaky-rescued.log"
+          start=$(date +%s)
+          rc=0
+          "${{ github.workspace }}/scripts/cap_ctest_output.sh" \
+            ctest --output-on-failure --test-output-size-failed 65536 \
+                  --timeout 300 -j "$(sysctl -n hw.ncpu)" \
+                  --output-junit "${{ github.workspace }}/ctest-results/results.xml" || rc=$?
+          echo "$(( $(date +%s) - start ))" > "${{ github.workspace }}/ctest-results/duration_seconds"
+          if [ "$rc" -ne 0 ]; then
+            echo "ctest reported failures; rerunning previously-failed tests to distinguish flakes from real failures"
+            cp Testing/Temporary/LastTestsFailed.log "${{ github.workspace }}/flaky-candidates.log"
+            if "${{ github.workspace }}/scripts/cap_ctest_output.sh" \
+                 ctest --rerun-failed --output-on-failure --test-output-size-failed 65536 --timeout 300; then
+              echo "rerun of previously-failed tests passed: treating as flaky (gated for human review)"
+              cp "${{ github.workspace }}/flaky-candidates.log" "${{ github.workspace }}/flaky-rescued.log"
+              rc=0
+            else
+              echo "rerun still failing: real failure"
+            fi
+          fi
+          exit $rc
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: ctest-junit-macos-${{ matrix.build_type }}
+          path: ctest-results/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload flaky-test marker
+        if: ${{ hashFiles('flaky-rescued.log') != '' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: flaky-marker-macos-${{ matrix.build_type }}
+          path: flaky-rescued.log
+          retention-days: 14
+
   # Gather the per-matrix flaky-test markers (uploaded only when a test failed
   # on its first run but passed on --rerun-failed) into a single yes/no signal.
   collect-flakes:
     name: Collect flaky-test markers
-    needs: [test, test-dev]
+    needs: [test, test-dev, macos]
     if: ${{ always() }}
     runs-on: arc-small
     permissions:
@@ -994,6 +1084,7 @@ jobs:
       - build-dev
       - test-dev
       - static-analysis
+      - macos
     if: ${{ always() }}
     runs-on: arc-small
     permissions:
