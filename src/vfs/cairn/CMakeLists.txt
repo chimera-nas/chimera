@@ -37,8 +37,7 @@ endif()
 
 target_compile_definitions(chimera_vfs_cairn PRIVATE
     XXH_INLINE_ALL
-    $<$<STREQUAL:${CMAKE_SYSTEM_PROCESSOR},aarch64>:XXH_VECTOR=XXH_NEON>
-    $<$<NOT:$<STREQUAL:${CMAKE_SYSTEM_PROCESSOR},aarch64>>:XXH_VECTOR=XXH_AVX2>
+    XXH_VECTOR=${CHIMERA_XXH_VECTOR}
 )
 
 install(TARGETS chimera_vfs_cairn DESTINATION lib)

@@ -41,8 +41,7 @@ add_library(chimera_vfs SHARED vfs.c vfs_lsan.c
 
 target_compile_definitions(chimera_vfs PRIVATE
     XXH_INLINE_ALL
-    $<$<STREQUAL:${CMAKE_SYSTEM_PROCESSOR},aarch64>:XXH_VECTOR=XXH_NEON>
-    $<$<NOT:$<STREQUAL:${CMAKE_SYSTEM_PROCESSOR},aarch64>>:XXH_VECTOR=XXH_AVX2>
+    XXH_VECTOR=${CHIMERA_XXH_VECTOR}
 )
 
 install(TARGETS chimera_vfs DESTINATION lib)
@@ -50,7 +49,14 @@ install(TARGETS chimera_vfs DESTINATION lib)
 add_subdirectory(root)
 add_subdirectory(memfs)
 add_subdirectory(memkv)
-add_subdirectory(linux)
+
+# The linux passthrough backend is built on Linux-only interfaces (openat2,
+# statx, per-thread setfsuid/setfsgid impersonation, sysmacros), so it is not
+# available on other platforms.
+if (CHIMERA_LINUX)
+    add_subdirectory(linux)
+endif()
+
 add_subdirectory(nfs)
 add_subdirectory(smb)
 
@@ -77,9 +83,13 @@ else ()
 endif()
 
 target_link_libraries(chimera_vfs
-    chimera_vfs_root chimera_vfs_memfs chimera_vfs_memkv chimera_vfs_linux chimera_vfs_diskfs
+    chimera_vfs_root chimera_vfs_memfs chimera_vfs_memkv chimera_vfs_diskfs
     chimera_vfs_nfs chimera_vfs_smb
-    chimera_common prometheus-c xxhash dl urcu-qsbr)
+    chimera_common prometheus-c xxhash ${CHIMERA_DL_LIB} urcu-qsbr)
+
+if (CHIMERA_LINUX)
+    target_link_libraries(chimera_vfs chimera_vfs_linux)
+endif()
 
 if (CHIMERA_VFS_IO_URING)
     target_link_libraries(chimera_vfs chimera_vfs_io_uring)

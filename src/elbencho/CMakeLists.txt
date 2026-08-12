@@ -6,7 +6,7 @@ include_directories(/elbencho/source/backend)
 
 add_library(elbencho_chimera SHARED elbencho_chimera.c)
 
-target_link_libraries(elbencho_chimera chimera_client chimera_metrics jansson)
+target_link_libraries(elbencho_chimera chimera_client chimera_metrics)
 
 install(TARGETS elbencho_chimera DESTINATION lib)
 

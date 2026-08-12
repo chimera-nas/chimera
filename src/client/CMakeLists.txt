@@ -9,7 +9,7 @@ add_library(chimera_client SHARED client.c client_dispatch.c
             client_readlink.c client_stat.c client_fstat.c client_readdir.c client_statfs.c
             client_fstatfs.c client_commit.c client_ftruncate.c
             client_copy_range.c client_clone_range.c)
-target_link_libraries(chimera_client chimera_vfs evpl prometheus-c jansson)
+target_link_libraries(chimera_client chimera_vfs evpl prometheus-c)
 
 install(TARGETS chimera_client DESTINATION lib)
 

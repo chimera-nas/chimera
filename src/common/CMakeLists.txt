@@ -6,7 +6,7 @@ add_library(chimera_common SHARED
     logging.c snprintf.c pthread_create_interpose.c chimera_tracing.c
 )
 
-target_link_libraries(chimera_common unwind pthread dl evpl jansson ${CHIMERA_OTEL_LIBS})
+target_link_libraries(chimera_common ${CHIMERA_UNWIND_LIB} ${CHIMERA_DL_LIB} evpl jansson ${CHIMERA_OTEL_LIBS})
 
 add_subdirectory(tests)
 

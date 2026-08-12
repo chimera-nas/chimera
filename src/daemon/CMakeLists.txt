@@ -4,7 +4,7 @@
 
 add_executable(chimera daemon.c)
 
-target_link_libraries(chimera chimera_server chimera_common chimera_metrics jansson ${CHIMERA_OTEL_LIBS})
+target_link_libraries(chimera chimera_server chimera_common chimera_metrics ${CHIMERA_OTEL_LIBS})
 
 install(TARGETS chimera DESTINATION sbin)
 install(FILES chimera.json DESTINATION etc)

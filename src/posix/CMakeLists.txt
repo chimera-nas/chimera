@@ -78,7 +78,7 @@ add_library(chimera_posix SHARED
             posix_copy_file_range.c
             posix_clone_file_range.c)
 
-target_link_libraries(chimera_posix chimera_client evpl pthread)
+target_link_libraries(chimera_posix chimera_client evpl)
 
 
 install(TARGETS chimera_posix DESTINATION lib)
