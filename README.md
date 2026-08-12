@@ -106,6 +106,7 @@ A minimal example that exports a single in-memory filesystem over NFS at
 ```json
 {
     "server": {
+        "nfs_enabled": true,
         "threads": 32,
         "sync_delegation_threads": 32,
         "async_delegation": false,
@@ -141,6 +142,9 @@ Chimera uses JSON configuration files to define shares and runtime parameters:
 ```json
 {
     "server": {
+        "nfs_enabled": true,
+        "smb_enabled": true,
+        "s3_enabled": true,
         "threads": 16,
         "sync_delegation_threads": 64,
         "async_delegation": false,

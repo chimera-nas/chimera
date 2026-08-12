@@ -161,6 +161,7 @@ generate_ds_config() {
         "rcu_reclaim_threads": 4
     },
     "server": {
+        "nfs_enabled": true,
         "threads": 2,
         "nfs_port": ${DS_PORT},
         "data_server": true,
@@ -209,6 +210,7 @@ generate_mds_config() {
         "rcu_reclaim_threads": 4
     },
     "server": {
+        "nfs_enabled": true,
         "threads": 4,
         "external_portmap": false,
         ${vfs_section}
@@ -261,6 +263,7 @@ generate_combined_config() {
         "rcu_reclaim_threads": 4
     },
     "server": {
+        "nfs_enabled": true,
         "threads": 4,
         "external_portmap": false,
         ${vfs_section}

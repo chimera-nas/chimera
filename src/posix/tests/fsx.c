@@ -3948,6 +3948,8 @@ main(
             /* NFS backend: Start server with the actual backend */
             chimera_server_config = chimera_server_config_init();
 
+            chimera_server_config_set_nfs_enabled(chimera_server_config, 1);
+
             /* fsx builds its own server and client rather than going through
              * posix_test_common.h, so it needs the same transport set here:
              * the in-process one, so that concurrent fsx runs do not contend

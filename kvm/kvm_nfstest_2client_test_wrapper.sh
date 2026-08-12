@@ -123,6 +123,7 @@ generate_config() {
 {
     "common": { "rcu_reclaim_threads": 4 },
     "server": {
+        "nfs_enabled": true,
         "threads": 4,
         "delegation_threads": 4,
         "nfs4_delegations": ${KVM_NFS4_DELEGATIONS:-$deleg_default},

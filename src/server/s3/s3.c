@@ -1155,6 +1155,11 @@ s3_server_init(
 {
     struct chimera_server_s3_shared *shared;
 
+    if (!chimera_server_config_get_s3_enabled(config)) {
+        chimera_s3_info("S3 server disabled (not enabled in config)");
+        return NULL;
+    }
+
     shared = calloc(1, sizeof(*shared));
 
     shared->config = calloc(1, sizeof(*shared->config));

@@ -148,6 +148,7 @@ generate_config() {
         "rcu_reclaim_threads": 4
     },
     "server": {
+        "smb_enabled": true,
         "threads": 4,
         "delegation_threads": 4,
         $vfs_section

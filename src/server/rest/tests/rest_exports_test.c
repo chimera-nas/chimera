@@ -288,6 +288,10 @@ main(
     }
 
     config = chimera_server_config_init();
+
+    /* The export table these endpoints manipulate is owned by the NFS
+     * protocol, so it must be enabled for exports to exist at all. */
+    chimera_server_config_set_nfs_enabled(config, 1);
     chimera_server_config_set_rest_http_port(config, REST_PORT);
     /* Disable auth so the export endpoints can be exercised directly,
      * mirroring the admin pytest setup. */

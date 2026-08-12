@@ -60,7 +60,7 @@ trap cleanup EXIT
 
 cat > "$WORK/chimera.conf" <<EOF
 {
-  "server": { "s3_port": $PORT },
+  "server": { "s3_enabled": true, "s3_port": $PORT },
   "s3_access_keys": [
     { "access_key": "mainaccesskey0001", "secret_key": "mainsecretkey0001" },
     { "access_key": "altaccesskey0002",  "secret_key": "altsecretkey0002" },

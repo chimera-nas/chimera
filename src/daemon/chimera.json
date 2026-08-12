@@ -13,6 +13,8 @@
 	}
     },
     "server": {
+	"nfs_enabled": true,
+	"smb_enabled": true,
 	"threads": 16
     },
     "mounts": {

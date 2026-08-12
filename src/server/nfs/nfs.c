@@ -165,6 +165,11 @@ nfs_server_init(
     const char                       *portmap_hostname;
     enum chimera_tcp_flavor           tcp_flavor;
 
+    if (!chimera_server_config_get_nfs_enabled(config)) {
+        chimera_nfs_info("NFS server disabled (not enabled in config)");
+        return NULL;
+    }
+
     nfs_port          = chimera_server_config_get_nfs_port(config);
     data_server       = chimera_server_config_get_nfs_data_server(config);
     nfs_rdma          = chimera_server_config_get_nfs_rdma(config);

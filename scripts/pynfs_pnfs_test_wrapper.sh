@@ -67,7 +67,7 @@ trap cleanup EXIT
 cat > "$DS_CONFIG" << EOF
 {
     "common": { "rcu_reclaim_threads": 4 },
-    "server": { "threads": 2, "nfs_port": ${DS_PORT}, "data_server": true,
+    "server": { "nfs_enabled": true, "threads": 2, "nfs_port": ${DS_PORT}, "data_server": true,
                 "nfs4_lease_time": ${PYNFS_NFS4_LEASE_TIME},
                 "nfs4_grace_time": ${PYNFS_NFS4_GRACE_TIME},
                 "external_portmap": true, "metrics_port": 9001 },
@@ -80,6 +80,7 @@ cat > "$MDS_CONFIG" << EOF
 {
     "common": { "rcu_reclaim_threads": 4 },
     "server": {
+        "nfs_enabled": true,
         "threads": 4, "external_portmap": false,
         "nfs4_lease_time": ${PYNFS_NFS4_LEASE_TIME},
         "nfs4_grace_time": ${PYNFS_NFS4_GRACE_TIME},

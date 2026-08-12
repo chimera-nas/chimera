@@ -139,6 +139,7 @@ generate_config() {
         "rcu_reclaim_threads": 4
     },
     "server": {
+        "smb_enabled": true,
         ${persistent_line}
         ${encryption_line}
         ${multichannel_line}

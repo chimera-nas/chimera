@@ -119,6 +119,14 @@ client_test_init(
     if (env->use_nfs || env->use_smb) {
         server_config = chimera_server_config_init();
 
+        /* Protocols are opt-in; serve only what this test will mount. */
+        if (env->use_nfs) {
+            chimera_server_config_set_nfs_enabled(server_config, 1);
+        }
+        if (env->use_smb) {
+            chimera_server_config_set_smb_enabled(server_config, 1);
+        }
+
         /* Serve over the in-process transport: the client below lives in this
          * same process, so there is no reason to bind a port, and an inproc
          * name is private to the process -- so concurrent copies of this test

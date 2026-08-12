@@ -133,10 +133,16 @@ chimera_smb_server_init(
         return NULL;
     }
 
+    if (!chimera_server_config_get_smb_enabled(config)) {
+        chimera_smb_info("SMB server disabled (not enabled in config)");
+        free(shared);
+        return NULL;
+    }
+
     shared->tcp_flavor   = chimera_server_config_get_tcp_flavor(config);
     shared->tcp_protocol = chimera_tcp_flavor_to_protocol(shared->tcp_flavor);
 
-    shared->config.port      = 445;
+    shared->config.port      = chimera_server_config_get_smb_port(config);
     shared->config.rdma_port = 445;
 
     shared->config.capabilities = SMB2_GLOBAL_CAP_LARGE_MTU | SMB2_GLOBAL_CAP_MULTI_CHANNEL |

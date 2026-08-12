@@ -231,6 +231,7 @@ generate_config() {
     cat > "$CONFIG_FILE" << EOF
 {
     "server": {
+        "smb_enabled": true,
         ${persistent_line}
         ${compression_line}
         ${multichannel_line}

@@ -90,6 +90,7 @@ main(
      * 445, which is what previously forced this test into a namespace of its
      * own to keep it off the host's port. */
     chimera_server_config_set_tcp_flavor(config, CHIMERA_TCP_FLAVOR_INPROC);
+    chimera_server_config_set_smb_enabled(config, 1);
     /* Register the SMB2 client VFS module (statically linked into chimera_vfs;
      * empty path => resolve the vfs_smb symbol, do not dlopen). */
     chimera_server_config_add_module(config, "smb", NULL, "");
