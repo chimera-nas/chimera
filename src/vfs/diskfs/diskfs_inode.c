@@ -454,6 +454,7 @@ diskfs_inode_load_sync(
         inode->rdev           = di->rdev;
         inode->size           = di->size;
         inode->space_used     = di->space_used;
+        inode->alloc_size     = di->alloc_size;
         inode->atime_sec      = di->atime_sec;
         inode->atime_nsec     = di->atime_nsec;
         inode->mtime_sec      = di->mtime_sec;
