@@ -789,6 +789,7 @@ diskfs_mkdir_at_alloc_cb(
 
     inode->size       = 4096;
     inode->space_used = 4096;
+    inode->alloc_size = 0;
     inode->uid        = request->cred->uid;
     inode->gid        = request->cred->gid;
     inode->nlink      = 2;
@@ -976,6 +977,7 @@ diskfs_mknod_at_alloc_cb(
 
     inode->size       = 0;
     inode->space_used = 0;
+    inode->alloc_size = 0;
     inode->uid        = request->cred->uid;
     inode->gid        = request->cred->gid;
     inode->nlink      = 1;
@@ -1880,6 +1882,7 @@ diskfs_open_at_alloc_cb(
 
     inode->size       = 0;
     inode->space_used = 0;
+    inode->alloc_size = 0;
     inode->uid        = request->cred->uid;
     inode->gid        = request->cred->gid;
     inode->nlink      = 1;
@@ -2065,6 +2068,7 @@ diskfs_create_unlinked_alloc_cb(
 
     inode->size       = 0;
     inode->space_used = 0;
+    inode->alloc_size = 0;
     inode->uid        = request->cred->uid;
     inode->gid        = request->cred->gid;
     inode->nlink      = 0;         /* anonymous; orphan-recorded below */
@@ -2263,6 +2267,7 @@ diskfs_symlink_at_alloc_cb(
 
     inode->size       = request->symlink_at.targetlen;
     inode->space_used = request->symlink_at.targetlen;
+    inode->alloc_size = 0;
     inode->uid        = request->cred->uid;
     inode->gid        = request->cred->gid;
     inode->nlink      = 1;

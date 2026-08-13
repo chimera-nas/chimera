@@ -1218,6 +1218,7 @@ cairn_init(
         inode.gen         = 1;
         inode.size        = 4096;
         inode.space_used  = 4096;
+        inode.alloc_size  = 0;
         inode.refcnt      = 1;
         inode.uid         = 0;
         inode.gid         = 0;
@@ -1683,6 +1684,9 @@ cairn_alloc_inum(
     inode->inum   = (id << 8) + thread->thread_id;
     inode->gen    = 1;
     inode->change = 0;
+    /* Creation sites initialize the remaining fields individually; a fresh
+     * inode starts with no AllocationSize reservation. */
+    inode->alloc_size = 0;
 } /* cairn_alloc_inum */
 
 static inline void
