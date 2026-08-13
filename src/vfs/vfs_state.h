@@ -44,13 +44,31 @@ struct chimera_vfs_request;
 /* The per-file state table anchors one entry per *cached open handle* that has
  * done I/O (the handle holds the ref; see chimera_vfs_io_lease_acquire), so its
  * live population tracks the open-handle cache capacity (open_file_cache =
- * 128K handles), NOT the small set of protocol-open files.  Sized at 16384 the
- * chains ran ~8 deep, and since each chain node is a separately-allocated
- * struct, the bucket walk in chimera_vfs_state_get was a serialized cache-miss
+ * 128K handles), NOT the small set of protocol-open files.
+ *
+ * The table is sharded: a fixed, small set of shards, each with its own lock,
+ * an entry count, and a privately-growable hash table.  Two earlier designs
+ * inform this one.  A flat 16K-bucket table ran chains ~8 deep at the 128K
+ * population, and since each chain node is a separately-allocated struct, the
+ * chain walk in chimera_vfs_state_get was a serialized cache-miss
  * pointer-chase that dominated write-path CPU (~72% self under SWBUILD INIT).
- * Size to comfortably exceed the handle-cache capacity (load factor ~0.13) so
- * lookups touch 0-1 nodes.  Must stay a power of two (used as a mask). */
-#define CHIMERA_VFS_STATE_NUM_BUCKETS (1 << 20)
+ * Curing that with a flat 2^20-bucket table restored O(1) lookups but cost
+ * 56MB of per-bucket mutexes in EVERY chimera process (client and server), a
+ * million mutex init/destroy calls at startup/teardown, and a reaper that had
+ * to visit every bucket.  Sharding keeps the O(1) lookup (inner tables double
+ * when a shard's load factor reaches 1, locally, under that shard's own lock)
+ * while the footprint tracks the actual population: empty shards hold no slot
+ * array at all, and the per-shard count lets the idle reaper skip them with
+ * one uncontended lock acquire.
+ *
+ * Shard index and inner slot index take disjoint bits of fh_hash (bits 32+
+ * for the shard, low bits for the slot) so they never correlate.  This
+ * relies on fh_hash carrying entropy across the full word, as
+ * chimera_vfs_hash() does today (XXH3-64 with only bit 63 masked off); a
+ * future hash with only 32 significant bits would collapse every entry into
+ * one shard.  Both counts must stay powers of two (used as masks). */
+#define CHIMERA_VFS_STATE_NUM_SHARDS    1024
+#define CHIMERA_VFS_STATE_INITIAL_SLOTS 16
 
 struct chimera_vfs_file_state {
     uint8_t                             fh[CHIMERA_VFS_FH_SIZE];
@@ -108,19 +126,26 @@ struct chimera_vfs_file_state {
     struct chimera_vfs_file_state      *bucket_next;
 };
 
-struct chimera_vfs_state_bucket {
-    struct chimera_vfs_file_state *files;
-    pthread_mutex_t                lock;
+struct chimera_vfs_state_shard {
+    pthread_mutex_t                 lock;
+    /* Entries currently anchored in this shard; the idle reaper skips a
+     * shard whose count is zero without touching its slots. */
+    uint32_t                        count;
+    /* Inner hash table: allocated lazily on first insert (empty shards own
+     * no slot array), doubled in place under the shard lock when count
+     * reaches nslots.  Entries chain through file->bucket_next. */
+    uint32_t                        nslots;
+    struct chimera_vfs_file_state **slots;
 };
 
 struct chimera_vfs_state {
-    struct chimera_vfs_state_bucket buckets[CHIMERA_VFS_STATE_NUM_BUCKETS];
+    struct chimera_vfs_state_shard shards[CHIMERA_VFS_STATE_NUM_SHARDS];
     /* Default deadline applied by chimera_vfs_lease_begin_break() when the
      * caller passes 0.  Matches SMB2 lease-break timeout convention. */
-    uint32_t                        default_break_deadline_ms;
+    uint32_t                       default_break_deadline_ms;
     /* Implicit leases held this long without any I/O are dropped by
      * chimera_vfs_state_reap_idle(). */
-    uint32_t                        implicit_idle_ms;
+    uint32_t                       implicit_idle_ms;
 };
 
 /* -------------------------------------------------------------------- */

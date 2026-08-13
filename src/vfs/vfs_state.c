@@ -90,9 +90,10 @@ chimera_vfs_state_init(void)
         return NULL;
     }
 
-    for (i = 0; i < CHIMERA_VFS_STATE_NUM_BUCKETS; i++) {
-        pthread_mutex_init(&state->buckets[i].lock, NULL);
-        state->buckets[i].files = NULL;
+    /* calloc zeroed count/nslots/slots: empty shards own no slot array
+     * until their first insert. */
+    for (i = 0; i < CHIMERA_VFS_STATE_NUM_SHARDS; i++) {
+        pthread_mutex_init(&state->shards[i].lock, NULL);
     }
 
     state->default_break_deadline_ms = CHIMERA_VFS_STATE_DEFAULT_BREAK_DEADLINE_MS;
@@ -111,19 +112,25 @@ chimera_vfs_state_destroy(struct chimera_vfs_state *state)
         return;
     }
 
-    for (i = 0; i < CHIMERA_VFS_STATE_NUM_BUCKETS; i++) {
-        file = state->buckets[i].files;
-        while (file) {
-            next = file->bucket_next;
-            /* In Stage A there is no protocol caller, so we should never
-             * leak per-file state.  Asserts here would be too strict for
-             * test code that exits without releasing; instead we just
-             * tear down whatever remains. */
-            pthread_mutex_destroy(&file->lock);
-            free(file);
-            file = next;
+    for (i = 0; i < CHIMERA_VFS_STATE_NUM_SHARDS; i++) {
+        struct chimera_vfs_state_shard *shard = &state->shards[i];
+        uint32_t                        s;
+
+        for (s = 0; s < shard->nslots; s++) {
+            file = shard->slots[s];
+            while (file) {
+                next = file->bucket_next;
+                /* In Stage A there is no protocol caller, so we should never
+                 * leak per-file state.  Asserts here would be too strict for
+                 * test code that exits without releasing; instead we just
+                 * tear down whatever remains. */
+                pthread_mutex_destroy(&file->lock);
+                free(file);
+                file = next;
+            }
         }
-        pthread_mutex_destroy(&state->buckets[i].lock);
+        free(shard->slots);
+        pthread_mutex_destroy(&shard->lock);
     }
 
     free(state);
@@ -133,13 +140,58 @@ chimera_vfs_state_destroy(struct chimera_vfs_state *state)
 /* Per-file state lookup                                                */
 /* -------------------------------------------------------------------- */
 
-static inline struct chimera_vfs_state_bucket *
-chimera_vfs_state_bucket_for(
+/* Shard index takes the HIGH bits of fh_hash; the inner slot index (below)
+ * takes the low bits, so the two never correlate. */
+static inline struct chimera_vfs_state_shard *
+chimera_vfs_state_shard_for(
     struct chimera_vfs_state *state,
     uint64_t                  fh_hash)
 {
-    return &state->buckets[fh_hash & (CHIMERA_VFS_STATE_NUM_BUCKETS - 1)];
-} /* chimera_vfs_state_bucket_for */
+    return &state->shards[(fh_hash >> 32) & (CHIMERA_VFS_STATE_NUM_SHARDS - 1)];
+} /* chimera_vfs_state_shard_for */
+
+/* Caller MUST hold shard->lock and the shard must have a slot array. */
+static inline struct chimera_vfs_file_state **
+chimera_vfs_state_slot_for(
+    struct chimera_vfs_state_shard *shard,
+    uint64_t                        fh_hash)
+{
+    return &shard->slots[fh_hash & (shard->nslots - 1)];
+} /* chimera_vfs_state_slot_for */
+
+/* Double the shard's inner table (or create it at the initial size), moving
+ * every chained entry onto the new slots.  Caller MUST hold shard->lock.
+ * Allocation failure is tolerated: the shard keeps its old table and chains
+ * simply run longer -- correctness does not depend on the growth. */
+static void
+chimera_vfs_state_shard_grow(struct chimera_vfs_state_shard *shard)
+{
+    struct chimera_vfs_file_state **nslots_arr;
+    struct chimera_vfs_file_state  *file, *next;
+    uint32_t                        nnew;
+    uint32_t                        s;
+
+    nnew = shard->nslots ? shard->nslots * 2 : CHIMERA_VFS_STATE_INITIAL_SLOTS;
+
+    nslots_arr = calloc(nnew, sizeof(*nslots_arr));
+    if (!nslots_arr) {
+        return;
+    }
+
+    for (s = 0; s < shard->nslots; s++) {
+        file = shard->slots[s];
+        while (file) {
+            next                                   = file->bucket_next;
+            file->bucket_next                      = nslots_arr[file->fh_hash & (nnew - 1)];
+            nslots_arr[file->fh_hash & (nnew - 1)] = file;
+            file                                   = next;
+        }
+    }
+
+    free(shard->slots);
+    shard->slots  = nslots_arr;
+    shard->nslots = nnew;
+} /* chimera_vfs_state_shard_grow */
 
 static inline int
 chimera_vfs_file_state_match(
@@ -161,29 +213,44 @@ chimera_vfs_state_get(
     uint64_t                  fh_hash,
     bool                      create)
 {
-    struct chimera_vfs_state_bucket *bucket;
-    struct chimera_vfs_file_state   *file;
+    struct chimera_vfs_state_shard *shard;
+    struct chimera_vfs_file_state  *file;
+    struct chimera_vfs_file_state **slot;
 
-    bucket = chimera_vfs_state_bucket_for(state, fh_hash);
+    shard = chimera_vfs_state_shard_for(state, fh_hash);
 
-    pthread_mutex_lock(&bucket->lock);
+    pthread_mutex_lock(&shard->lock);
 
-    for (file = bucket->files; file; file = file->bucket_next) {
-        if (chimera_vfs_file_state_match(file, fh, fh_len, fh_hash)) {
-            file->refcount++;
-            pthread_mutex_unlock(&bucket->lock);
-            return file;
+    if (shard->nslots) {
+        for (file = *chimera_vfs_state_slot_for(shard, fh_hash);
+             file;
+             file = file->bucket_next) {
+            if (chimera_vfs_file_state_match(file, fh, fh_len, fh_hash)) {
+                file->refcount++;
+                pthread_mutex_unlock(&shard->lock);
+                return file;
+            }
         }
     }
 
     if (!create) {
-        pthread_mutex_unlock(&bucket->lock);
+        pthread_mutex_unlock(&shard->lock);
         return NULL;
+    }
+
+    /* Grow (or create) the inner table before the load factor reaches 1 so
+     * lookups stay 0-1 probes; a failed grow just leaves longer chains. */
+    if (shard->count + 1 > shard->nslots) {
+        chimera_vfs_state_shard_grow(shard);
+        if (!shard->nslots) {
+            pthread_mutex_unlock(&shard->lock);
+            return NULL;
+        }
     }
 
     file = calloc(1, sizeof(*file));
     if (!file) {
-        pthread_mutex_unlock(&bucket->lock);
+        pthread_mutex_unlock(&shard->lock);
         return NULL;
     }
 
@@ -194,10 +261,12 @@ chimera_vfs_state_get(
     file->state    = state;
     pthread_mutex_init(&file->lock, NULL);
 
-    file->bucket_next = bucket->files;
-    bucket->files     = file;
+    slot              = chimera_vfs_state_slot_for(shard, fh_hash);
+    file->bucket_next = *slot;
+    *slot = file;
+    shard->count++;
 
-    pthread_mutex_unlock(&bucket->lock);
+    pthread_mutex_unlock(&shard->lock);
     return file;
 } /* chimera_vfs_state_get */
 
@@ -206,23 +275,23 @@ chimera_vfs_state_put(
     struct chimera_vfs_state      *state,
     struct chimera_vfs_file_state *file)
 {
-    struct chimera_vfs_state_bucket *bucket;
-    struct chimera_vfs_file_state  **link;
-    bool                             empty;
+    struct chimera_vfs_state_shard *shard;
+    struct chimera_vfs_file_state **link;
+    bool                            empty;
 
     if (!file) {
         return;
     }
 
-    bucket = chimera_vfs_state_bucket_for(state, file->fh_hash);
+    shard = chimera_vfs_state_shard_for(state, file->fh_hash);
 
-    pthread_mutex_lock(&bucket->lock);
+    pthread_mutex_lock(&shard->lock);
 
     chimera_vfs_abort_if(file->refcount == 0, "double put on vfs_state file");
 
     file->refcount--;
     if (file->refcount != 0) {
-        pthread_mutex_unlock(&bucket->lock);
+        pthread_mutex_unlock(&shard->lock);
         return;
     }
 
@@ -239,19 +308,22 @@ chimera_vfs_state_put(
     if (!empty) {
         /* Restore the implicit reference held by the lease(s). */
         file->refcount = 1;
-        pthread_mutex_unlock(&bucket->lock);
+        pthread_mutex_unlock(&shard->lock);
         return;
     }
 
-    /* Unlink from bucket and free. */
-    for (link = &bucket->files; *link; link = &(*link)->bucket_next) {
+    /* Unlink from the shard and free. */
+    for (link = chimera_vfs_state_slot_for(shard, file->fh_hash);
+         *link;
+         link = &(*link)->bucket_next) {
         if (*link == file) {
             *link = file->bucket_next;
+            shard->count--;
             break;
         }
     }
 
-    pthread_mutex_unlock(&bucket->lock);
+    pthread_mutex_unlock(&shard->lock);
 
     pthread_mutex_destroy(&file->lock);
     free(file);
@@ -3748,7 +3820,7 @@ chimera_vfs_io_lease_acquire(
     /* Fast path: a cached open handle anchors the per-file state for its whole
      * lifetime, so we attach it once (lazily, racing other first-I/O threads via
      * an acquire/release CAS) and thereafter borrow the handle's reference per
-     * I/O -- skipping the bucket-locked state_get/put entirely.  The handle's
+     * I/O -- skipping the shard-locked state_get/put entirely.  The handle's
      * long-lived ref plus opencnt>0 for the duration of this op (the protocol
      * drops opencnt only after the read/write callback returns, strictly after
      * io_lease_release) keep `file` alive.  io_owns_lease_ref stays 0 so release
@@ -3946,33 +4018,51 @@ chimera_vfs_state_reap_idle(
     struct chimera_vfs_state *state,
     uint64_t                  idle_ms)
 {
-#define CHIMERA_VFS_STATE_REAP_BATCH 64
+/* Per-shard candidate cap per pass.  With the old flat table the per-bucket
+ * cap was effectively unreachable (avg 0.13 entries/bucket), so every
+ * candidate was visited every pass; sized here at 2x the average per-shard
+ * population at the table's design load (128K entries / 1024 shards) so the
+ * same holds, with skewed shards catching up on the next 100ms pass. */
+#define CHIMERA_VFS_STATE_REAP_BATCH 256
     uint64_t now = chimera_vfs_now_ticks();
     int      b;
 
-    for (b = 0; b < CHIMERA_VFS_STATE_NUM_BUCKETS; b++) {
-        struct chimera_vfs_state_bucket *bucket = &state->buckets[b];
-        struct chimera_vfs_file_state   *cand[CHIMERA_VFS_STATE_REAP_BATCH];
-        struct chimera_vfs_file_state   *file;
-        int                              n = 0;
-        int                              i;
+    for (b = 0; b < CHIMERA_VFS_STATE_NUM_SHARDS; b++) {
+        struct chimera_vfs_state_shard *shard = &state->shards[b];
+        struct chimera_vfs_file_state  *cand[CHIMERA_VFS_STATE_REAP_BATCH];
+        struct chimera_vfs_file_state  *file;
+        uint32_t                        s;
+        int                             n = 0;
+        int                             i;
 
-        pthread_mutex_lock(&bucket->lock);
-        for (file = bucket->files;
-             file && n < CHIMERA_VFS_STATE_REAP_BATCH;
-             file = file->bucket_next) {
-            /* Candidates: files holding an implicit lease (reapable when idle),
-             * with parked I/O waiters (re-pumped so an unresponsive holder is
-             * revoked at its recall deadline and the waiter makes progress), or
-             * holding any caching lease (an oplock/lease/delegation may be stuck
-             * BREAKING past its deadline with NO waiter behind it -- #1030). */
-            if (file->implicit_active || file->io_wait_head ||
-                file->caching_leases) {
-                file->refcount++;
-                cand[n++] = file;
+        pthread_mutex_lock(&shard->lock);
+
+        /* The common case: nothing anchored in this shard.  The count makes
+         * the whole sweep proportional to live state rather than table
+         * size. */
+        if (shard->count == 0) {
+            pthread_mutex_unlock(&shard->lock);
+            continue;
+        }
+
+        for (s = 0; s < shard->nslots && n < CHIMERA_VFS_STATE_REAP_BATCH; s++) {
+            for (file = shard->slots[s];
+                 file && n < CHIMERA_VFS_STATE_REAP_BATCH;
+                 file = file->bucket_next) {
+                /* Candidates: files holding an implicit lease (reapable when
+                 * idle), with parked I/O waiters (re-pumped so an unresponsive
+                 * holder is revoked at its recall deadline and the waiter makes
+                 * progress), or holding any caching lease (an oplock/lease/
+                 * delegation may be stuck BREAKING past its deadline with NO
+                 * waiter behind it -- #1030). */
+                if (file->implicit_active || file->io_wait_head ||
+                    file->caching_leases) {
+                    file->refcount++;
+                    cand[n++] = file;
+                }
             }
         }
-        pthread_mutex_unlock(&bucket->lock);
+        pthread_mutex_unlock(&shard->lock);
 
         for (i = 0; i < n; i++) {
             bool reapable;
