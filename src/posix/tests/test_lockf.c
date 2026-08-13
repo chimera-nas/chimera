@@ -199,21 +199,34 @@ main(
     env.server      = NULL;
     clock_gettime(CLOCK_MONOTONIC, &tv);
 
-    /* Pick up the -b backend option. */
+    /* Pick up the -b backend option, the -U user spec, and the child-mode
+     * options a re-exec'ed child receives (-C sync-pipe fds, -J posix.json
+     * path, -S session dir; see posix_test_fork_exec). */
+    const char *user_spec     = NULL;
+    const char *child_fds     = NULL;
+    const char *child_json    = NULL;
+    const char *child_session = NULL;
     {
         int saved_opterr = opterr;
 
         opterr = 0;
         optind = 1;
-        while ((opt = getopt(argc, argv, "+b:U:")) != -1) {
+        while ((opt = getopt(argc, argv, "+b:U:C:J:S:")) != -1) {
             if (opt == 'b') {
                 env.backend = optarg;
             } else if (opt == 'U') {
+                user_spec = optarg;
                 if (!chimera_test_parse_user(optarg, &env.cred)) {
                     fprintf(stderr, "Unknown user spec '%s'. "
                             "Use: root, johndoe, myuser, or uid:gid\n", optarg);
                     exit(EXIT_FAILURE);
                 }
+            } else if (opt == 'C') {
+                child_fds = optarg;
+            } else if (opt == 'J') {
+                child_json = optarg;
+            } else if (opt == 'S') {
+                child_session = optarg;
             }
         }
         opterr = saved_opterr;
@@ -229,6 +242,26 @@ main(
 
     chimera_log_init();
     ChimeraLogLevel = CHIMERA_LOG_DEBUG;
+
+    if (child_fds) {
+        /* Re-exec'ed child: reconstruct the pre-fork state from argv and run
+         * the child side.  The parent created the session dir and config and
+         * marked its own pipe ends close-on-exec, so only the child's two fds
+         * arrive here. */
+        if (!child_json || !child_session ||
+            sscanf(child_fds, "%d,%d", &p2c[0], &c2p[1]) != 2) {
+            fprintf(stderr, "tlock: bad child-mode arguments\n");
+            exit(1);
+        }
+        p2c[1] = -1;
+        c2p[0] = -1;
+        snprintf(env.session_dir, sizeof(env.session_dir), "%s", child_session);
+        chimera_vfs_cred_init_unix(&env.cred,
+                                   CHIMERA_TEST_USER_ROOT_UID,
+                                   CHIMERA_TEST_USER_ROOT_GID,
+                                   0, NULL);
+        exit(child_main(&env, child_json, &env.cred));
+    }
 
     snprintf(env.session_dir, sizeof(env.session_dir),
              "%s/posix_session_%d_%lu_%lu",
@@ -273,10 +306,41 @@ main(
         exit(1);
     }
 
-    child = fork();
+    /* Spawn the child by re-exec'ing this binary rather than plain fork():
+     * exec resets the address space, so nothing any parent thread holds at
+     * fork time (sanitizer allocator locks included) can be inherited
+     * mid-flight.  The parent-only pipe ends are close-on-exec so the
+     * child's EOF semantics match the plain-fork arrangement. */
+    posix_test_cloexec(p2c[1]);
+    posix_test_cloexec(c2p[0]);
 
-    if (child == 0) {
-        exit(child_main(&env, posix_json_path, &env.cred));
+    {
+        char  fds[32];
+        char *cargv[12];
+        int   n = 0;
+
+        snprintf(fds, sizeof(fds), "%d,%d", p2c[0], c2p[1]);
+        cargv[n++] = argv[0];
+        cargv[n++] = "-b";
+        cargv[n++] = (char *) env.backend;
+        if (user_spec) {
+            cargv[n++] = "-U";
+            cargv[n++] = (char *) user_spec;
+        }
+        cargv[n++] = "-C";
+        cargv[n++] = fds;
+        cargv[n++] = "-J";
+        cargv[n++] = posix_json_path;
+        cargv[n++] = "-S";
+        cargv[n++] = env.session_dir;
+        cargv[n]   = NULL;
+
+        child = posix_test_fork_exec(cargv);
+    }
+
+    if (child < 0) {
+        perror("tlock: fork");
+        exit(1);
     }
 
     /* ---- parent ---- */

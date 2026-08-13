@@ -1810,6 +1810,7 @@ diskfs_inode_flush(struct diskfs_inode *inode)
     di->rdev           = inode->rdev;
     di->size           = inode->size;
     di->space_used     = inode->space_used;
+    di->alloc_size     = inode->alloc_size;
     di->atime_sec      = inode->atime_sec;
     di->mtime_sec      = inode->mtime_sec;
     di->ctime_sec      = inode->ctime_sec;

@@ -271,6 +271,31 @@ chimera_vfs_close_thread_wake_timer(
 
 } /* chimera_vfs_close_thread_wake */
 
+static uint64_t
+chimera_vfs_close_sweep_interval_us(void)
+{
+    static uint64_t cached_us = 0;
+
+    if (cached_us) {
+        return cached_us;
+    }
+
+    const char     *env = getenv("CHIMERA_CLOSE_SWEEP_INTERVAL_MS");
+    if (env && *env) {
+        char              *endp = NULL;
+        unsigned long long ms   = strtoull(env, &endp, 10);
+        if (endp && endp != env && *endp == '\0' && ms >= 10 && ms <= 60000) {
+            cached_us = (uint64_t) ms * 1000ULL;
+            return cached_us;
+        }
+        /* Malformed / out-of-range value: fall through to default rather
+         * than crash the daemon at boot on a typo. */
+    }
+
+    cached_us = CHIMERA_CLOSE_SWEEP_INTERVAL_US_DEFAULT;
+    return cached_us;
+} /* chimera_vfs_close_sweep_interval_us */
+
 static void *
 chimera_vfs_close_thread_init(
     struct evpl *evpl,
@@ -286,7 +311,7 @@ chimera_vfs_close_thread_init(
 
     evpl_add_timer(evpl, &close_thread->timer,
                    chimera_vfs_close_thread_wake_timer,
-                   100000UL);
+                   chimera_vfs_close_sweep_interval_us());
 
     return private_data;
 } /* chimera_vfs_close_thread_init */

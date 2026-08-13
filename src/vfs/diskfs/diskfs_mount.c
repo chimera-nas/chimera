@@ -1385,6 +1385,7 @@ diskfs_bootstrap(struct diskfs_thread *thread)
 
     inode->size       = 4096;
     inode->space_used = 4096;
+    inode->alloc_size = 0;
     inode->uid        = 0;
     inode->gid        = 0;
     inode->nlink      = 2;
@@ -1441,6 +1442,7 @@ diskfs_bootstrap(struct diskfs_thread *thread)
 
         oin->size       = 4096;
         oin->space_used = 4096;
+        oin->alloc_size = 0;
         oin->nlink      = 1;
         oin->mode       = S_IFDIR | 0700;
         oin->atime_sec  = now.tv_sec;

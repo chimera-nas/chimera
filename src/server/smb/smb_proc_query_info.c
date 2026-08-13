@@ -504,6 +504,76 @@ chimera_smb_query_info(struct chimera_smb_request *request)
         return;
     }
 
+    /* Named-pipe FIDs on IPC$ (srvsvc / lsarpc / samr / wkssvc) carry
+     * open_file->handle == NULL -- see chimera_smb_create_gen_open_file_pipe.
+     * Dispatching chimera_vfs_getattr through the normal path would deref that
+     * NULL and crash the server (Windows Explorer hits this when browsing a
+     * share: after TREE_CONNECT it opens srvsvc and issues
+     * FILE_STANDARD_INFO / FILE_BASIC_INFO on it before starting RPC).
+     *
+     * Serve QUERY_INFO on a pipe FID synthetically: reasonable regular-file
+     * defaults are enough for the info classes Windows queries on named
+     * pipes (STANDARD_INFO, BASIC_INFO, NETWORK_OPEN_INFO, ALL_INFO).  Route
+     * through the existing getattr callback so all supported info classes
+     * marshal uniformly; unsupported classes still hit the callback's abort
+     * as before (no regression). */
+    if (request->query_info.open_file->type == CHIMERA_SMB_OPEN_FILE_TYPE_PIPE) {
+        struct chimera_vfs_attrs pipe_attrs;
+
+        memset(&pipe_attrs, 0, sizeof(pipe_attrs));
+        pipe_attrs.va_mode  = S_IFREG | 0666;
+        pipe_attrs.va_nlink = 1;
+        /* FileInternalInformation (and FileAllInformation) marshal
+         * IndexNumber directly from va_ino (smb_attr.h); leaving it 0 would
+         * report every pipe FID with the same all-zero index number.  There
+         * is no real inode backing a pipe FID, so use the open's persistent
+         * id (unique and stable for the life of this open) as a synthetic
+         * one instead. */
+        pipe_attrs.va_ino      = request->query_info.open_file->file_id.pid;
+        pipe_attrs.va_set_mask = CHIMERA_VFS_ATTR_MASK_STAT;
+
+        /* Set output_length based on info class before completing (the reply
+         * path reads it verbatim into the wire header). */
+        switch (request->query_info.info_type) {
+            case SMB2_INFO_FILE:
+                switch (request->query_info.info_class) {
+                    case SMB2_FILE_BASIC_INFO:
+                        request->query_info.output_length = SMB2_FILE_BASIC_INFO_SIZE;
+                        break;
+                    case SMB2_FILE_STANDARD_INFO:
+                        request->query_info.output_length = SMB2_FILE_STANDARD_INFO_SIZE;
+                        break;
+                    case SMB2_FILE_INTERNAL_INFO:
+                        request->query_info.output_length = SMB2_FILE_INTERNAL_INFO_SIZE;
+                        break;
+                    case SMB2_FILE_EA_INFO:
+                        request->query_info.output_length = SMB2_FILE_EA_INFO_SIZE;
+                        break;
+                    case SMB2_FILE_NETWORK_OPEN_INFO:
+                        request->query_info.output_length = SMB2_FILE_NETWORK_OPEN_INFO_SIZE;
+                        break;
+                    case SMB2_FILE_ATTRIBUTE_TAG_INFO:
+                        request->query_info.output_length = SMB2_FILE_ATTRIBUTE_TAG_INFO_SIZE;
+                        break;
+                    default:
+                        /* Info classes we don't synthesize for pipes: fail
+                         * cleanly rather than falling through to the VFS path. */
+                        chimera_smb_open_file_release(request, request->query_info.open_file);
+                        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_INFO_CLASS);
+                        return;
+                } /* switch */
+                break;
+            default:
+                /* FILESYSTEM / SECURITY info on a pipe FID: not supported. */
+                chimera_smb_open_file_release(request, request->query_info.open_file);
+                chimera_smb_complete_request(request, SMB2_STATUS_INVALID_DEVICE_REQUEST);
+                return;
+        } /* switch */
+
+        chimera_smb_query_info_getattr_callback(CHIMERA_VFS_OK, &pipe_attrs, request);
+        return;
+    }
+
     /* min_length is the info level's fixed minimum size: a request whose
      * OutputBufferLength is smaller than this must fail INFO_LENGTH_MISMATCH
      * (MS-SMB2 3.3.5.20.1 / smb2.getinfo.q*_buffercheck).  For fixed-size
@@ -728,7 +798,8 @@ chimera_smb_query_info_reply(
     struct evpl_iovec_cursor   *reply_cursor,
     struct chimera_smb_request *request)
 {
-    uint16_t namebuf[8];
+    struct chimera_server_smb_thread *thread = request->compound->thread;
+    uint16_t                          namebuf[8];
 
     if (request->query_info.info_type == SMB2_INFO_SECURITY) {
         chimera_smb_query_security_reply(reply_cursor, request);
@@ -920,10 +991,10 @@ chimera_smb_query_info_reply(
                 case SMB2_FILE_FS_SECTOR_SIZE_INFO:
                     /* MS-FSCC 2.5.7 FileFsSectorSizeInformation. */
                     evpl_iovec_cursor_append_uint32(reply_cursor, 512); /* LogicalBytesPerSector */
-                    evpl_iovec_cursor_append_uint32(reply_cursor, 512); /* PhysicalBytesPerSectorForAtomicity */
-                    evpl_iovec_cursor_append_uint32(reply_cursor, 512); /* PhysicalBytesPerSectorForPerformance */
-                    evpl_iovec_cursor_append_uint32(reply_cursor, 512); /* FSEffPhysicalBytesPerSectorForAtomicity */
-                    evpl_iovec_cursor_append_uint32(reply_cursor, 0); /* Flags */
+                    evpl_iovec_cursor_append_uint32(reply_cursor, thread->shared->config.fs_physical_bytes_per_sector); /* PhysicalBytesPerSectorForAtomicity */
+                    evpl_iovec_cursor_append_uint32(reply_cursor, thread->shared->config.fs_physical_bytes_per_sector); /* PhysicalBytesPerSectorForPerformance */
+                    evpl_iovec_cursor_append_uint32(reply_cursor, thread->shared->config.fs_physical_bytes_per_sector); /* FSEffPhysicalBytesPerSectorForAtomicity */
+                    evpl_iovec_cursor_append_uint32(reply_cursor, thread->shared->config.fs_sector_size_flags); /* Flags: aligned + partition aligned */
                     evpl_iovec_cursor_append_uint32(reply_cursor, 0); /* ByteOffsetForSectorAlignment */
                     evpl_iovec_cursor_append_uint32(reply_cursor, 0); /* ByteOffsetForPartitionAlignment */
                     break;

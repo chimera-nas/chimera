@@ -22,7 +22,17 @@
 
 /* Size of the per-request scratch buffer used by VFS modules.
  * Must be large enough for the largest operation (symlink: name + target + 2 NULs). */
-#define CHIMERA_VFS_PLUGIN_DATA_SIZE 8192
+#define CHIMERA_VFS_PLUGIN_DATA_SIZE            8192
+
+/* Default period between close-thread cache sweeps (open-path/open-file
+ * cache LRU tick + NFSv4 idle-state reap). Every wake the timer walks the
+ * caches unconditionally, so on an otherwise idle pod this is the dominant
+ * source of baseline CPU (~180m/pod at 100ms). 1s keeps the deferred-close
+ * / idle-state reap latency well inside a typical NFS lease/DRC window
+ * while cutting idle CPU by ~10x. Callers who need aggressive close
+ * reclamation can override via the CHIMERA_CLOSE_SWEEP_INTERVAL_MS env
+ * var (units: milliseconds; clamped to [10, 60000]). */
+#define CHIMERA_CLOSE_SWEEP_INTERVAL_US_DEFAULT 1000000UL
 
 #ifndef container_of
 #define container_of(ptr, type, member) ({            \

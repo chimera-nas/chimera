@@ -40,9 +40,17 @@
  * userspace lock or its holder -- the decisive datum for a post-fork
  * lock-family wedge), then abort().  The SIGABRT unblocks the parent's
  * waitpid, so the test fails fast WITH diagnostics instead of timing out
- * silently.  The handler knowingly calls async-signal-unsafe functions: the
- * process is wedged and about to abort, so a lost dump costs nothing over
- * the status quo.
+ * silently.
+ *
+ * The handler must not allocate: it can interrupt a thread that is holding
+ * the sanitizer allocator lock (observed in practice with the main thread
+ * inside LSan's exit-time stop-the-world), and a dprintf/fprintf here
+ * mallocs a stdio buffer, spinning forever on that lock -- which converts a
+ * transient stall into a permanent wedge that ctest only clears at its
+ * 300s timeout, losing every diagnostic.  So: re-arm SIGALRM with the
+ * default (fatal) action FIRST as a dead-man switch, write() preformatted
+ * buffers instead of using stdio, and pre-warm backtrace() at arm time so
+ * its one-time dlopen/malloc happens outside the handler.
  */
 static void
 posix_test_child_watchdog_fire(int sig)
@@ -50,12 +58,23 @@ posix_test_child_watchdog_fire(int sig)
     void *frames[64];
     int   nframes;
     DIR  *taskdir;
+    char  buf[512];
+    int   len;
 
     (void) sig;
 
-    dprintf(STDERR_FILENO,
-            "child-watchdog: pid %d stuck; dumping thread states\n",
-            (int) getpid());
+    /* Dead-man switch: even if the dump below wedges, the next SIGALRM
+     * kills the process outright (12s keeps 45+12 under the smallest 60s
+     * ctest timeout in the lock family). */
+    signal(SIGALRM, SIG_DFL);
+    alarm(12);
+
+    len = snprintf(buf, sizeof(buf),
+                   "child-watchdog: pid %d stuck; dumping thread states\n",
+                   (int) getpid());
+    if (len > 0 && write(STDERR_FILENO, buf, (size_t) len) < 0) {
+        /* nothing actionable */
+    }
 
     taskdir = opendir("/proc/self/task");
     if (taskdir) {
@@ -77,13 +96,19 @@ posix_test_child_watchdog_fire(int sig)
                 close(wfd);
             }
             wchan[m > 0 ? m : 0] = '\0';
-            dprintf(STDERR_FILENO, "child-watchdog: tid %s wchan %s\n",
-                    de->d_name, wchan);
+            len                  = snprintf(buf, sizeof(buf), "child-watchdog: tid %s wchan %s\n",
+                                            de->d_name, wchan);
+            if (len > 0 && write(STDERR_FILENO, buf, (size_t) len) < 0) {
+                /* nothing actionable */
+            }
         }
         closedir(taskdir);
     }
 
-    dprintf(STDERR_FILENO, "child-watchdog: signaled thread backtrace:\n");
+    len = snprintf(buf, sizeof(buf), "child-watchdog: signaled thread backtrace:\n");
+    if (len > 0 && write(STDERR_FILENO, buf, (size_t) len) < 0) {
+        /* nothing actionable */
+    }
     nframes = backtrace(frames, 64);
     backtrace_symbols_fd(frames, nframes, STDERR_FILENO);
 
@@ -96,11 +121,15 @@ posix_test_child_watchdog_fire(int sig)
          * identifies the offending lock and its holder.  Best-effort: gstack
          * (gdb) may be unavailable, in which case the wchan dump above stands. */
         char cmd[160];
+        int  clen;
 
         snprintf(cmd, sizeof(cmd),
                  "command -v gstack >/dev/null 2>&1 && gstack %d 1>&2",
                  (int) getpid());
-        dprintf(STDERR_FILENO, "child-watchdog: gstack all threads:\n");
+        clen = snprintf(buf, sizeof(buf), "child-watchdog: gstack all threads:\n");
+        if (clen > 0 && write(STDERR_FILENO, buf, (size_t) clen) < 0) {
+            /* nothing actionable */
+        }
         /* Best-effort: the watchdog is already aborting, so a failed dump is
          * harmless.  A plain (void) cast does not silence glibc's
          * warn_unused_result on system(), so consume the result explicitly. */
@@ -117,6 +146,7 @@ static inline void
 posix_test_child_watchdog(unsigned int seconds)
 {
     struct sigaction sa;
+    void            *warm[4];
 
     const char      *ovr = getenv("CHIMERA_TEST_WATCHDOG_SECONDS");
 
@@ -127,11 +157,63 @@ posix_test_child_watchdog(unsigned int seconds)
         }
     }
 
+    /* backtrace()'s first call dlopens libgcc and allocates; do that now so
+     * the signal handler's call is allocation-free. */
+    (void) backtrace(warm, 4);
+
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = posix_test_child_watchdog_fire;
     sigaction(SIGALRM, &sa, NULL);
     alarm(seconds);
 } /* posix_test_child_watchdog */
+
+/* Mark a parent-only pipe end close-on-exec so a re-exec'ed child never
+ * inherits it (keeps the EOF semantics of the sync pipes identical to the
+ * plain-fork arrangement without the child having to know the fd numbers). */
+static inline void
+posix_test_cloexec(int fd)
+{
+    int flags = fcntl(fd, F_GETFD, 0);
+
+    if (flags >= 0) {
+        (void) fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
+    }
+} /* posix_test_cloexec */
+
+/*
+ * Spawn the cross-process test child by re-exec'ing this same binary.
+ *
+ * A plain fork() hands the child a copy of the parent's address space,
+ * including every lock any parent thread happens to hold at that instant.
+ * The visible ones (the chimera log flusher's) are handled by atfork
+ * handlers, but locks inside opaque runtimes are not: gcc-13's ASan takes a
+ * per-size-class allocator region mutex inside the malloc/free that glibc
+ * stdio performs under the flusher's locks and does not force-unlock it
+ * across fork, so a child forked at the wrong instant inherits it held and
+ * every thread it creates wedges inside AsanThread::Init (the lock-family
+ * flakes in #733).  exec() resets the address space, so the child starts
+ * with no inherited lock state at all, from any runtime, forever.
+ *
+ * The child re-enters main() with argv crafted by the caller (a -C child
+ * mode flag plus the sync-pipe fds and session paths); pipe fds survive
+ * exec unless marked FD_CLOEXEC.  Only async-signal-safe work happens
+ * between fork and exec.
+ */
+static inline pid_t
+posix_test_fork_exec(char *const cargv[])
+{
+    pid_t pid = fork();
+
+    if (pid == 0) {
+        execv("/proc/self/exe", cargv);
+        /* exec failed; this address space is still the parent's copy, so
+         * exit without running atexit handlers. */
+        perror("posix_test_fork_exec: execv");
+        _exit(127);
+    }
+
+    return pid;
+} /* posix_test_fork_exec */
 
 struct posix_test_env {
     struct chimera_posix_client *posix;

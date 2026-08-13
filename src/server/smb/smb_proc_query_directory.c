@@ -82,6 +82,8 @@ chimera_smb_query_directory_readdir_callback(
     uint16_t                         *namebuf;
     uint16_t                          namelen_padded;
     uint32_t                          file_index, expected_length;
+    uint32_t                         *fname_len_field;
+    int                               name_utf16_len;
     struct evpl_iovec_cursor          entry_cursor;
     struct chimera_smb_attrs          smb_attrs;
 
@@ -117,12 +119,19 @@ chimera_smb_query_directory_readdir_callback(
 
     namelen_padded += (8 - (namelen_padded & 7)) & 7;
 
-    if ((request->query_directory.flags & SMB2_INDEX_SPECIFIED) &&
-        (file_index != request->query_directory.file_index)) {
-        return -1;
+    if (request->query_directory.flags & SMB2_INDEX_SPECIFIED) {
+        if (file_index != request->query_directory.file_index) {
+            /* Not the target entry -- skip it but keep iterating.
+             * Return 0 because any non-zero return value means "stop" to the VFS
+             * readdir layer, which would halt the scan prematurely. */
+            return 0;
+        }
+        /* Found the matching entry.  Clear the flag so subsequent entries
+         * are accepted normally, but skip this entry itself -- it was
+         * already returned in the previous response. */
+        request->query_directory.flags &= ~SMB2_INDEX_SPECIFIED;
+        return 0;
     }
-
-    request->query_directory.flags &= ~SMB2_INDEX_SPECIFIED;
 
     switch (request->query_directory.info_class) {
         case SMB2_FILE_DIRECTORY_INFORMATION:
@@ -185,12 +194,18 @@ chimera_smb_query_directory_readdir_callback(
             evpl_iovec_cursor_append_uint64(&entry_cursor, smb_attrs.smb_size);
             evpl_iovec_cursor_append_uint64(&entry_cursor, smb_attrs.smb_alloc_size);
             evpl_iovec_cursor_append_uint32(&entry_cursor, smb_attrs.smb_attributes);
-            evpl_iovec_cursor_append_uint32(&entry_cursor, namelen * 2);
+            fname_len_field = (uint32_t *) evpl_iovec_cursor_data(&entry_cursor);
+            evpl_iovec_cursor_append_uint32(&entry_cursor, 0);
 
             namebuf = evpl_iovec_cursor_data(&entry_cursor);
-            chimera_smb_utf8_to_utf16le(&thread->iconv_ctx,
-                                        name, namelen,
-                                        namebuf, SMB_FILENAME_MAX);
+            memset(namebuf, 0, namelen_padded);
+            name_utf16_len = chimera_smb_utf8_to_utf16le(&thread->iconv_ctx,
+                                                         name, namelen,
+                                                         namebuf, namelen_padded);
+            if (name_utf16_len < 0) {
+                return 0;
+            }
+            *fname_len_field = (uint32_t) name_utf16_len;
 
             evpl_iovec_cursor_skip(&entry_cursor, namelen_padded);
 
@@ -204,15 +219,20 @@ chimera_smb_query_directory_readdir_callback(
             evpl_iovec_cursor_append_uint64(&entry_cursor, smb_attrs.smb_size);
             evpl_iovec_cursor_append_uint64(&entry_cursor, smb_attrs.smb_alloc_size);
             evpl_iovec_cursor_append_uint32(&entry_cursor, smb_attrs.smb_attributes);
-            evpl_iovec_cursor_append_uint32(&entry_cursor, namelen * 2);
+            fname_len_field = (uint32_t *) evpl_iovec_cursor_data(&entry_cursor);
+            evpl_iovec_cursor_append_uint32(&entry_cursor, 0);
             evpl_iovec_cursor_append_uint32(&entry_cursor, smb_attrs.smb_ea_size);
             evpl_iovec_cursor_zero(&entry_cursor, 26); /* short name */
 
-
             namebuf = evpl_iovec_cursor_data(&entry_cursor);
-            chimera_smb_utf8_to_utf16le(&thread->iconv_ctx,
-                                        name, namelen,
-                                        namebuf, SMB_FILENAME_MAX);
+            memset(namebuf, 0, namelen_padded);
+            name_utf16_len = chimera_smb_utf8_to_utf16le(&thread->iconv_ctx,
+                                                         name, namelen,
+                                                         namebuf, namelen_padded);
+            if (name_utf16_len < 0) {
+                return 0;
+            }
+            *fname_len_field = (uint32_t) name_utf16_len;
 
             evpl_iovec_cursor_skip(&entry_cursor, namelen_padded);
 
@@ -221,12 +241,18 @@ chimera_smb_query_directory_readdir_callback(
             /* FileIndex (0 = unspecified per MS-FSCC) + FileNameLength + name.
              * NextEntryOffset was already written at the top of the entry. */
             evpl_iovec_cursor_append_uint32(&entry_cursor, file_index);
-            evpl_iovec_cursor_append_uint32(&entry_cursor, namelen * 2);
+            fname_len_field = (uint32_t *) evpl_iovec_cursor_data(&entry_cursor);
+            evpl_iovec_cursor_append_uint32(&entry_cursor, 0);
 
             namebuf = evpl_iovec_cursor_data(&entry_cursor);
-            chimera_smb_utf8_to_utf16le(&thread->iconv_ctx,
-                                        name, namelen,
-                                        namebuf, SMB_FILENAME_MAX);
+            memset(namebuf, 0, namelen_padded);
+            name_utf16_len = chimera_smb_utf8_to_utf16le(&thread->iconv_ctx,
+                                                         name, namelen,
+                                                         namebuf, namelen_padded);
+            if (name_utf16_len < 0) {
+                return 0;
+            }
+            *fname_len_field = (uint32_t) name_utf16_len;
 
             evpl_iovec_cursor_skip(&entry_cursor, namelen_padded);
             break;
@@ -239,13 +265,19 @@ chimera_smb_query_directory_readdir_callback(
             evpl_iovec_cursor_append_uint64(&entry_cursor, smb_attrs.smb_size);
             evpl_iovec_cursor_append_uint64(&entry_cursor, smb_attrs.smb_alloc_size);
             evpl_iovec_cursor_append_uint32(&entry_cursor, smb_attrs.smb_attributes);
-            evpl_iovec_cursor_append_uint32(&entry_cursor, namelen * 2);
+            fname_len_field = (uint32_t *) evpl_iovec_cursor_data(&entry_cursor);
+            evpl_iovec_cursor_append_uint32(&entry_cursor, 0);
 
             evpl_iovec_cursor_append_uint32(&entry_cursor, smb_attrs.smb_ea_size);
             namebuf = evpl_iovec_cursor_data(&entry_cursor);
-            chimera_smb_utf8_to_utf16le(&thread->iconv_ctx,
-                                        name, namelen,
-                                        namebuf, SMB_FILENAME_MAX);
+            memset(namebuf, 0, namelen_padded);
+            name_utf16_len = chimera_smb_utf8_to_utf16le(&thread->iconv_ctx,
+                                                         name, namelen,
+                                                         namebuf, namelen_padded);
+            if (name_utf16_len < 0) {
+                return 0;
+            }
+            *fname_len_field = (uint32_t) name_utf16_len;
 
             evpl_iovec_cursor_skip(&entry_cursor, namelen_padded);
 
@@ -260,15 +292,21 @@ chimera_smb_query_directory_readdir_callback(
             evpl_iovec_cursor_append_uint64(&entry_cursor, smb_attrs.smb_size);
             evpl_iovec_cursor_append_uint64(&entry_cursor, smb_attrs.smb_alloc_size);
             evpl_iovec_cursor_append_uint32(&entry_cursor, smb_attrs.smb_attributes);
-            evpl_iovec_cursor_append_uint32(&entry_cursor, namelen * 2);
+            fname_len_field = (uint32_t *) evpl_iovec_cursor_data(&entry_cursor);
+            evpl_iovec_cursor_append_uint32(&entry_cursor, 0);
             evpl_iovec_cursor_append_uint32(&entry_cursor, smb_attrs.smb_ea_size);
             evpl_iovec_cursor_zero(&entry_cursor, 28); /* short name */
             evpl_iovec_cursor_append_uint64(&entry_cursor, attrs->va_ino);
 
             namebuf = evpl_iovec_cursor_data(&entry_cursor);
-            chimera_smb_utf8_to_utf16le(&thread->iconv_ctx,
-                                        name, namelen,
-                                        namebuf, SMB_FILENAME_MAX);
+            memset(namebuf, 0, namelen_padded);
+            name_utf16_len = chimera_smb_utf8_to_utf16le(&thread->iconv_ctx,
+                                                         name, namelen,
+                                                         namebuf, namelen_padded);
+            if (name_utf16_len < 0) {
+                return 0;
+            }
+            *fname_len_field = (uint32_t) name_utf16_len;
 
             evpl_iovec_cursor_skip(&entry_cursor, namelen_padded);
 
@@ -282,15 +320,20 @@ chimera_smb_query_directory_readdir_callback(
             evpl_iovec_cursor_append_uint64(&entry_cursor, smb_attrs.smb_size);
             evpl_iovec_cursor_append_uint64(&entry_cursor, smb_attrs.smb_alloc_size);
             evpl_iovec_cursor_append_uint32(&entry_cursor, smb_attrs.smb_attributes);
-            evpl_iovec_cursor_append_uint32(&entry_cursor, namelen * 2);
+            fname_len_field = (uint32_t *) evpl_iovec_cursor_data(&entry_cursor);
+            evpl_iovec_cursor_append_uint32(&entry_cursor, 0);
             evpl_iovec_cursor_append_uint32(&entry_cursor, smb_attrs.smb_ea_size);
             evpl_iovec_cursor_append_uint64(&entry_cursor, attrs->va_ino);
 
             namebuf = evpl_iovec_cursor_data(&entry_cursor);
-
-            chimera_smb_utf8_to_utf16le(&thread->iconv_ctx,
-                                        name, namelen,
-                                        namebuf, SMB_FILENAME_MAX);
+            memset(namebuf, 0, namelen_padded);
+            name_utf16_len = chimera_smb_utf8_to_utf16le(&thread->iconv_ctx,
+                                                         name, namelen,
+                                                         namebuf, namelen_padded);
+            if (name_utf16_len < 0) {
+                return 0;
+            }
+            *fname_len_field = (uint32_t) name_utf16_len;
 
             evpl_iovec_cursor_skip(&entry_cursor, namelen_padded);
 
@@ -341,6 +384,30 @@ chimera_smb_query_directory(struct chimera_smb_request *request)
 
     if (request->query_directory.flags & SMB2_REOPEN) {
         request->query_directory.open_file->position = 0;
+    }
+
+    /* MS-SMB2 §3.3.5.18: when SMB2_INDEX_SPECIFIED is set, the client
+     * supplies a FileIndex from a previous response and expects the server
+     * to resume from the entry matching that index.  Reset position to the
+     * beginning so the readdir callback can scan for the matching entry;
+     * the callback itself (INDEX_SPECIFIED check) skips entries until the
+     * file_index matches and then clears the flag. */
+    if (request->query_directory.flags & SMB2_INDEX_SPECIFIED) {
+        request->query_directory.open_file->position = 0;
+    }
+
+    /* UINT64_MAX marks a fully-enumerated directory.  SMB2 clients always issue
+     * one trailing QUERY_DIRECTORY after the last real entry to receive
+     * STATUS_NO_MORE_FILES; short-circuiting here avoids a redundant backend
+     * round-trip.  MS-SMB2 §3.3.5.18 permits this early response. */
+    if (request->query_directory.open_file->position == UINT64_MAX) {
+        /* Release the resolve ref -- this early return never enters the
+         * async readdir, so leaking it would pin the open_file's share
+         * reservation and cause later deletes to fail with
+         * SHARING_VIOLATION. */
+        chimera_smb_open_file_release(request, request->query_directory.open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_NO_MORE_FILES);
+        return;
     }
 
     /* The reply buffer is allocated below as a single contiguous iovec

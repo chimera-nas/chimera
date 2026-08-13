@@ -229,18 +229,20 @@ chimera_smb_server_init(
     smb_ntlm_resolve_server_identity(&shared->config.auth,
                                      &shared->config.auth.server_identity);
 
-    shared->config.soft_fail_bad_req          = chimera_server_config_get_soft_fail_bad_req(config);
-    shared->config.persistent_handles         = chimera_server_config_get_smb_persistent_handles(config);
-    shared->config.directory_leases           = chimera_server_config_get_smb_directory_leases(config);
-    shared->config.named_streams              = chimera_server_config_get_smb_named_streams(config);
-    shared->config.signing_required           = chimera_server_config_get_smb_signing_required(config);
-    shared->config.encryption                 = chimera_server_config_get_smb_encryption(config);
-    shared->config.compression                = chimera_server_config_get_smb_compression(config);
-    shared->config.leases                     = chimera_server_config_get_smb_leases(config);
-    shared->config.oplocks                    = chimera_server_config_get_smb_oplocks(config);
-    shared->config.notify_disabled            = chimera_server_config_get_smb_notify_disabled(config);
-    shared->config.acl_inherited_canonicalize = chimera_server_config_get_smb_acl_inherited_canonicalize(config);
-    shared->config.smb2_max_async_credits     = chimera_server_config_get_smb2_max_async_credits(config);
+    shared->config.soft_fail_bad_req            = chimera_server_config_get_soft_fail_bad_req(config);
+    shared->config.persistent_handles           = chimera_server_config_get_smb_persistent_handles(config);
+    shared->config.directory_leases             = chimera_server_config_get_smb_directory_leases(config);
+    shared->config.named_streams                = chimera_server_config_get_smb_named_streams(config);
+    shared->config.signing_required             = chimera_server_config_get_smb_signing_required(config);
+    shared->config.encryption                   = chimera_server_config_get_smb_encryption(config);
+    shared->config.compression                  = chimera_server_config_get_smb_compression(config);
+    shared->config.leases                       = chimera_server_config_get_smb_leases(config);
+    shared->config.oplocks                      = chimera_server_config_get_smb_oplocks(config);
+    shared->config.notify_disabled              = chimera_server_config_get_smb_notify_disabled(config);
+    shared->config.acl_inherited_canonicalize   = chimera_server_config_get_smb_acl_inherited_canonicalize(config);
+    shared->config.smb2_max_async_credits       = chimera_server_config_get_smb2_max_async_credits(config);
+    shared->config.fs_physical_bytes_per_sector = chimera_server_config_get_smb_fs_physical_bytes_per_sector(config);
+    shared->config.fs_sector_size_flags         = chimera_server_config_get_smb_fs_sector_size_flags(config);
 
     if (shared->config.persistent_handles) {
         chimera_smb_info("SMB3 durable/persistent handles enabled (in-memory state)");
@@ -439,7 +441,10 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
      * stream from the first message (seen as a fresh smbtorture connection
      * failing NEGOTIATE with NT_STATUS_INVALID_NETWORK_RESPONSE).  The client
      * this reply was for is gone; drop it and just release the compound. */
-    if (unlikely(conn->generation != compound->conn_generation)) {
+    if (unlikely(conn->generation != compound->conn_generation ||
+                 conn->disconnecting ||
+                 !conn->bind ||
+                 evpl_bind_is_closing(conn->bind))) {
         chimera_smb_compound_free(thread, compound);
         return;
     }

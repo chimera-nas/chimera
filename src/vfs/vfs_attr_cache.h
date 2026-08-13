@@ -181,9 +181,24 @@ chimera_vfs_attr_cache_lookup(
         return -1;
     }
 
+    /* Historic bug: the shard index used the low `num_shards_bits` of the
+     * hash and the slot index used the low `num_slots_bits`.  Because
+     * `num_slots_bits <= num_shards_bits`, the slot mask was a strict
+     * subset of the shard mask, so every file that landed in a given shard
+     * ALSO landed in the same slot within that shard -- effectively
+     * collapsing the 4-way associative cache down to a 4-entry direct-
+     * mapped one per shard.  With 3200 unique files in a 32-job random
+     * read the resulting eviction thrash pushed the cache hit rate to
+     * ~24% and the insert:skip ratio to ~98:1, generating hundreds of
+     * thousands of backend getattrs per second just for the read
+     * typecheck.
+     *
+     * Derive the slot index from the *upper* bits of the hash so slot
+     * and shard bit windows are disjoint; both stay small integers so
+     * the compiler still lowers this to two `and` + a shift. */
     shard = &cache->shards[fh_hash & cache->num_shards_mask];
 
-    slot = &shard->entries[(fh_hash & cache->num_slots_mask) << cache->num_entries_bits];
+    slot = &shard->entries[((fh_hash >> cache->num_shards_bits) & cache->num_slots_mask) << cache->num_entries_bits];
 
     slot_end = slot + cache->num_entries;
 
@@ -238,7 +253,8 @@ chimera_vfs_attr_cache_insert(
 
     shard = &cache->shards[fh_hash & cache->num_shards_mask];
 
-    slot = &shard->entries[(fh_hash & cache->num_slots_mask) << cache->num_entries_bits];
+    /* See lookup for the disjoint slot/shard bit rationale. */
+    slot = &shard->entries[((fh_hash >> cache->num_shards_bits) & cache->num_slots_mask) << cache->num_entries_bits];
 
     slot_end = slot + cache->num_entries;
 
@@ -359,7 +375,8 @@ chimera_vfs_attr_cache_refresh(
 
     shard = &cache->shards[fh_hash & cache->num_shards_mask];
 
-    slot = &shard->entries[(fh_hash & cache->num_slots_mask) << cache->num_entries_bits];
+    /* See lookup for the disjoint slot/shard bit rationale. */
+    slot = &shard->entries[((fh_hash >> cache->num_shards_bits) & cache->num_slots_mask) << cache->num_entries_bits];
 
     slot_end = slot + cache->num_entries;
 

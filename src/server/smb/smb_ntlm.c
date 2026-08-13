@@ -932,12 +932,24 @@ validate_authenticate(
         }
     }
 
-    /* Anonymous (null-session) AUTHENTICATE (MS-NLMP 3.2.5.1.2): the
-    * NTLMSSP_NEGOTIATE_ANONYMOUS flag is set and the NtChallengeResponse is
-    * empty (the LmChallengeResponse is a single zero byte or empty).  No
-    * password proof to validate and no usable session key; the SMB layer
-    * decides whether an anonymous logon is acceptable in context. */
-    if ((negotiate_flags & NTLMSSP_NEGOTIATE_ANONYMOUS) && nt_response_len == 0) {
+    /* Anonymous (null-session) AUTHENTICATE (MS-NLMP 3.2.5.1.2).  Two client
+     * conventions signal an anonymous logon and both are honoured here:
+     *
+     *   1. The explicit NTLMSSP_NEGOTIATE_ANONYMOUS flag is set with an empty
+     *      NtChallengeResponse (Samba's smbclient -N, Windows Explorer guest).
+     *   2. An empty UserName with a zero-length NtChallengeResponse and an
+     *      absent/single-zero-byte LmChallengeResponse, WITHOUT the flag set.
+     *      The Linux kernel cifs client (mount -o sec=none) and other legacy
+     *      clients signal anonymous this way -- by omitting all credential
+     *      material rather than setting the flag -- and Windows/Samba servers
+     *      treat it as anonymous.  Requiring the flag alone rejected these
+     *      clients with STATUS_LOGON_FAILURE.
+     *
+     * Either form carries no password proof and yields no usable session key;
+     * the SMB layer decides whether an anonymous logon is acceptable in
+     * context. */
+    if (((negotiate_flags & NTLMSSP_NEGOTIATE_ANONYMOUS) && nt_response_len == 0) ||
+        (username[0] == '\0' && nt_response_len == 0 && lm_response_len <= 1)) {
         ctx->username[0] = '\0';
         ctx->domain[0]   = '\0';
         ctx->sid[0]      = '\0';

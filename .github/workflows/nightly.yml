@@ -502,11 +502,9 @@ jobs:
 
       # KVM guest images are pulled from GHCR with oras (see build-test.yml).
       - name: Fetch oras CLI
-        run: |
-          ORAS_VERSION=1.2.0
-          curl -sSL "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_${{ matrix.arch }}.tar.gz" \
-            | tar -xz -C "${{ github.workspace }}" oras
-          chmod +x "${{ github.workspace }}/oras"
+        uses: ./.github/actions/fetch-oras
+        with:
+          arch: ${{ matrix.arch }}
 
       - name: Configure, build, and test inside the container
         run: |

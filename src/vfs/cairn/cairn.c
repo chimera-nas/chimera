@@ -183,6 +183,10 @@ struct cairn_inode {
     struct timespec btime;
     uint32_t        dos_attributes;
     uint64_t        change;       /* native monotonic change counter */
+    /* SMB AllocationSize reservation (see cairn_apply_attrs).  Extends the
+     * stored record; the format is unversioned and pre-existing databases are
+     * not migrated. */
+    uint64_t        alloc_size;
 };
 
 struct cairn_inode_handle {
@@ -1214,6 +1218,7 @@ cairn_init(
         inode.gen         = 1;
         inode.size        = 4096;
         inode.space_used  = 4096;
+        inode.alloc_size  = 0;
         inode.refcnt      = 1;
         inode.uid         = 0;
         inode.gid         = 0;
@@ -1679,6 +1684,9 @@ cairn_alloc_inum(
     inode->inum   = (id << 8) + thread->thread_id;
     inode->gen    = 1;
     inode->change = 0;
+    /* Creation sites initialize the remaining fields individually; a fresh
+     * inode starts with no AllocationSize reservation. */
+    inode->alloc_size = 0;
 } /* cairn_alloc_inum */
 
 static inline void
@@ -1696,19 +1704,23 @@ cairn_map_attrs(
     }
 
     if (attr->va_req_mask & CHIMERA_VFS_ATTR_MASK_STAT) {
-        attr->va_set_mask  |= CHIMERA_VFS_ATTR_MASK_STAT;
-        attr->va_mode       = inode->mode;
-        attr->va_nlink      = inode->nlink;
-        attr->va_uid        = inode->uid;
-        attr->va_gid        = inode->gid;
-        attr->va_size       = inode->size;
-        attr->va_space_used = inode->space_used;
-        attr->va_atime      = inode->atime;
-        attr->va_mtime      = inode->mtime;
-        attr->va_ctime      = inode->ctime;
-        attr->va_ino        = inode->inum;
-        attr->va_dev        = (42UL << 32) | 42;
-        attr->va_rdev       = inode->rdev;
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_MASK_STAT;
+        attr->va_mode      = inode->mode;
+        attr->va_nlink     = inode->nlink;
+        attr->va_uid       = inode->uid;
+        attr->va_gid       = inode->gid;
+        attr->va_size      = inode->size;
+        /* An SMB AllocationSize reservation is reported as space consumed
+         * (smb_alloc_size derives from va_space_used) even before writes
+         * materialize it, matching memfs. */
+        attr->va_space_used = inode->space_used > inode->alloc_size ?
+            inode->space_used : inode->alloc_size;
+        attr->va_atime = inode->atime;
+        attr->va_mtime = inode->mtime;
+        attr->va_ctime = inode->ctime;
+        attr->va_ino   = inode->inum;
+        attr->va_dev   = (42UL << 32) | 42;
+        attr->va_rdev  = inode->rdev;
 
         /* cairn persists DOS attributes natively, so report them alongside
          * stat (matching memfs). */
@@ -1841,6 +1853,19 @@ cairn_apply_attrs(
     if (set_mask & CHIMERA_VFS_ATTR_SIZE) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_SIZE;
         inode->size        = attr->va_size;
+        /* A reservation only holds while it exceeds the live data; once EOF is
+         * set at/above it the reservation is subsumed and no longer separate. */
+        if (inode->alloc_size <= inode->size) {
+            inode->alloc_size = 0;
+        }
+    }
+
+    if (set_mask & CHIMERA_VFS_ATTR_ALLOC_SIZE) {
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_ALLOC_SIZE;
+        /* Reserve only the part of the allocation beyond the current EOF; a
+         * request at/below EOF is already satisfied by real usage. */
+        inode->alloc_size = attr->va_alloc_size > inode->size ?
+            attr->va_alloc_size : 0;
     }
 
     if (set_mask & CHIMERA_VFS_ATTR_ATIME) {

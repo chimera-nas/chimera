@@ -414,11 +414,9 @@ jobs:
       # Fetch the static oras binary on the runner and mount it into the
       # build container.
       - name: Fetch oras CLI
-        run: |
-          ORAS_VERSION=1.2.0
-          curl -sSL "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_${{ matrix.arch }}.tar.gz" \
-            | tar -xz -C "${{ github.workspace }}" oras
-          chmod +x "${{ github.workspace }}/oras"
+        uses: ./.github/actions/fetch-oras
+        with:
+          arch: ${{ matrix.arch }}
 
       - name: Configure and build inside the container
         run: |
@@ -689,11 +687,9 @@ jobs:
 
       # oras is needed at configure time: KVM_TESTING=ON probes for it.
       - name: Fetch oras CLI
-        run: |
-          ORAS_VERSION=1.2.0
-          curl -sSL "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_${{ matrix.arch }}.tar.gz" \
-            | tar -xz -C "${{ github.workspace }}" oras
-          chmod +x "${{ github.workspace }}/oras"
+        uses: ./.github/actions/fetch-oras
+        with:
+          arch: ${{ matrix.arch }}
 
       - name: Configure and build inside the container
         run: |
@@ -791,11 +787,9 @@ jobs:
           submodules: recursive
 
       - name: Fetch oras CLI
-        run: |
-          ORAS_VERSION=1.2.0
-          curl -sSL "https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_${{ matrix.arch }}.tar.gz" \
-            | tar -xz -C "${{ github.workspace }}" oras
-          chmod +x "${{ github.workspace }}/oras"
+        uses: ./.github/actions/fetch-oras
+        with:
+          arch: ${{ matrix.arch }}
 
       - name: Download build tree from Nexus scratch
         env:

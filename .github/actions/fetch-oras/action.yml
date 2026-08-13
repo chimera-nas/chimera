@@ -1,0 +1,58 @@
+# SPDX-FileCopyrightText: 2026 Chimera-NAS Project Contributors
+#
+# SPDX-License-Identifier: Unlicense
+
+name: Fetch oras CLI
+description: >
+  Download the static oras binary onto the runner and leave it at
+  <workspace>/oras, ready to be mounted into a build container.  The download
+  is retried on transient failures, so a truncated body or an HTTP error page
+  fails loudly here instead of surfacing as a confusing error further down the
+  job.
+
+inputs:
+  arch:
+    description: >
+      Architecture as named in the oras release assets: amd64 or arm64.
+    required: true
+  version:
+    description: oras release version.
+    required: false
+    default: "1.2.0"
+
+runs:
+  using: composite
+  steps:
+    - name: Download oras
+      shell: bash
+      env:
+        ORAS_VERSION: ${{ inputs.version }}
+        ORAS_ARCH: ${{ inputs.arch }}
+        ORAS_DEST: ${{ github.workspace }}
+      run: |
+        set -euo pipefail
+
+        url="https://github.com/oras-project/oras/releases/download/v${ORAS_VERSION}"
+        url="${url}/oras_${ORAS_VERSION}_linux_${ORAS_ARCH}.tar.gz"
+
+        tarball="$(mktemp)"
+        trap 'rm -f "${tarball}"' EXIT
+
+        # Download to a file rather than piping into tar: a rate-limit page or a
+        # half-delivered body otherwise reaches tar as its input, which reports
+        # the misleading "stdin: not in gzip format" instead of a fetch error.
+        # --fail turns an HTTP error into a curl error, and --retry-all-errors
+        # covers both those and a connection dropped mid-transfer.
+        if ! curl --fail --location --silent --show-error \
+                  --connect-timeout 20 --max-time 180 \
+                  --retry 5 --retry-delay 2 --retry-all-errors --retry-connrefused \
+                  --output "${tarball}" "${url}"; then
+          echo "::error::could not download ${url}"
+          exit 1
+        fi
+
+        tar -xzf "${tarball}" -C "${ORAS_DEST}" oras
+        chmod +x "${ORAS_DEST}/oras"
+
+        # Prove the binary actually runs before the job depends on it.
+        "${ORAS_DEST}/oras" version
