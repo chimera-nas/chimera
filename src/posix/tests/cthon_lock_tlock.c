@@ -523,9 +523,16 @@ main(
 
     passcnt = 1;
 
-    /* Parse all options before fork so both processes share the same settings. */
+    /* Parse all options before fork so both processes share the same
+     * settings.  -C/-S/-P are the child-mode options a re-exec'ed child
+     * receives (sync-pipe fds, session dir, parent pid; see
+     * posix_test_fork_exec). */
+    const char *child_fds     = NULL;
+    const char *child_session = NULL;
+    const char *child_ppid    = NULL;
+
     optind = 1;
-    while ((opt = getopt(argc, argv, "hb:p:t:w:")) != -1) {
+    while ((opt = getopt(argc, argv, "hb:p:t:w:U:C:S:P:")) != -1) {
         switch (opt) {
             case 'b': break;
             case 'p':
@@ -536,6 +543,15 @@ main(
                 break;
             case 'w':
                 wait_time = atoi(optarg);
+                break;
+            case 'C':
+                child_fds = optarg;
+                break;
+            case 'S':
+                child_session = optarg;
+                break;
+            case 'P':
+                child_ppid = optarg;
                 break;
             default: break;
         } /* switch */
@@ -554,6 +570,7 @@ main(
     env.server      = NULL;
 
     /* Pick up the -b backend option */
+    const char *user_spec = NULL;
     {
         int saved_optind = optind;
         int saved_opterr = opterr;
@@ -563,6 +580,7 @@ main(
             if (opt == 'b') {
                 env.backend = optarg;
             } else if (opt == 'U') {
+                user_spec = optarg;
                 if (!chimera_test_parse_user(optarg, &env.cred)) {
                     fprintf(stderr, "Unknown user spec '%s'. "
                             "Use: root, johndoe, myuser, or uid:gid\n", optarg);
@@ -581,65 +599,138 @@ main(
     chimera_log_init();
     ChimeraLogLevel = CHIMERA_LOG_DEBUG;
 
-    clock_gettime(CLOCK_MONOTONIC, &tv);
-    snprintf(env.session_dir, sizeof(env.session_dir),
-             "%s/posix_session_%d_%lu_%lu",
-             posix_test_session_root(),
-             getpid(), (unsigned long) tv.tv_sec, (unsigned long) tv.tv_nsec);
-
-    fprintf(stderr, "Creating session directory %s\n", env.session_dir);
-    (void) mkdir(posix_test_session_root(), 0755);
-    (void) mkdir(env.session_dir, 0755);
-
-    rc = chown(env.session_dir, env.cred.uid, env.cred.gid);
-    if (rc < 0) {
-        fprintf(stderr, "Failed to set session_dir uid/gid: %s\n", strerror(errno));
-        exit(EXIT_FAILURE);
-    }
-
-    /* Write posix.json config (built-in backends need no VFS-specific
-     * section; external-module backends get their vfs entry emitted here
-     * since posix_test_init is bypassed). */
-    posix_json_root = json_object();
-    {
-        json_t *posix_json_config = json_object();
-
-        posix_test_emit_ext_module_config(env.backend, posix_json_config);
-        json_object_set_new(posix_json_root, "config", posix_json_config);
-    }
-    chimera_test_write_users_json(posix_json_root);
-    snprintf(posix_json_path, sizeof(posix_json_path), "%s/posix.json", env.session_dir);
-    json_dump_file(posix_json_root, posix_json_path, 0);
-    json_decref(posix_json_root);
-
-    chimera_vfs_cred_init_unix(&env.cred,
-                               CHIMERA_TEST_USER_ROOT_UID,
-                               CHIMERA_TEST_USER_ROOT_GID,
-                               0, NULL);
-
     fprintf(stdout, "%s: record locking test\n", cthon_Myname);
 
-    /*
-     * initialize() only sets up parentpid, testfile path, and pipes -
-     * no chimera calls.  Call it before fork so both processes share
-     * the same testfile path and pipe endpoints.
-     */
-    initialize("/test/nfstestdir");
+    if (child_fds) {
+        /* Re-exec'ed child: reconstruct the pre-fork state from argv and
+        * fall through to the common client init below as CHILD.  The
+        * parent created the session dir and config and marked its own pipe
+        * ends close-on-exec, so only the child's two fds arrive here. */
+        if (!child_session || !child_ppid ||
+            sscanf(child_fds, "%d,%d", &parentpipe[0], &childpipe[1]) != 2) {
+            fprintf(stderr, "tlock: bad child-mode arguments\n");
+            exit(1);
+        }
+        parentpipe[1] = -1;
+        childpipe[0]  = -1;
 
-    /* Fork BEFORE starting chimera client threads. */
-    if ((childpid = fork()) == 0) {
+        snprintf(env.session_dir, sizeof(env.session_dir), "%s", child_session);
+        snprintf(posix_json_path, sizeof(posix_json_path), "%s/posix.json",
+                 env.session_dir);
+        chimera_vfs_cred_init_unix(&env.cred,
+                                   CHIMERA_TEST_USER_ROOT_UID,
+                                   CHIMERA_TEST_USER_ROOT_GID,
+                                   0, NULL);
+
+        /* What initialize() computes, minus the pipes (passed via argv):
+         * maxeof and the shared testfile name keyed by the PARENT's pid. */
+        maxeof    = (off_t) 1 << (sizeof(off_t) * 8 - 2);
+        maxeof   += maxeof - 1;
+        parentpid = atoi(child_ppid);
+        snprintf(testfile, sizeof(testfile), "/test/nfstestdir/lockfile%d",
+                 parentpid);
+
         who = CHILD;
         signal(SIGINT, childsig);
+        posix_test_child_watchdog(45);
+    } else {
+        clock_gettime(CLOCK_MONOTONIC, &tv);
+        snprintf(env.session_dir, sizeof(env.session_dir),
+                 "%s/posix_session_%d_%lu_%lu",
+                 posix_test_session_root(),
+                 getpid(), (unsigned long) tv.tv_sec, (unsigned long) tv.tv_nsec);
+
+        fprintf(stderr, "Creating session directory %s\n", env.session_dir);
+        (void) mkdir(posix_test_session_root(), 0755);
+        (void) mkdir(env.session_dir, 0755);
+
+        rc = chown(env.session_dir, env.cred.uid, env.cred.gid);
+        if (rc < 0) {
+            fprintf(stderr, "Failed to set session_dir uid/gid: %s\n", strerror(errno));
+            exit(EXIT_FAILURE);
+        }
+
+        /* Write posix.json config (built-in backends need no VFS-specific
+         * section; external-module backends get their vfs entry emitted here
+         * since posix_test_init is bypassed). */
+        posix_json_root = json_object();
+        {
+            json_t *posix_json_config = json_object();
+
+            posix_test_emit_ext_module_config(env.backend, posix_json_config);
+            json_object_set_new(posix_json_root, "config", posix_json_config);
+        }
+        chimera_test_write_users_json(posix_json_root);
+        snprintf(posix_json_path, sizeof(posix_json_path), "%s/posix.json", env.session_dir);
+        json_dump_file(posix_json_root, posix_json_path, 0);
+        json_decref(posix_json_root);
+
+        chimera_vfs_cred_init_unix(&env.cred,
+                                   CHIMERA_TEST_USER_ROOT_UID,
+                                   CHIMERA_TEST_USER_ROOT_GID,
+                                   0, NULL);
+
+        /*
+         * initialize() only sets up parentpid, testfile path, and pipes -
+         * no chimera calls.
+         */
+        initialize("/test/nfstestdir");
+
+        /* Spawn the child by re-exec'ing this binary rather than plain
+         * fork(): exec resets the address space, so nothing any parent
+         * thread holds at fork time (sanitizer allocator locks included)
+         * can be inherited mid-flight.  The parent-only pipe ends are
+         * close-on-exec so the child never sees them. */
+        posix_test_cloexec(parentpipe[1]);
+        posix_test_cloexec(childpipe[0]);
+
+        {
+            char  fds[32], pstr[16], tstr[16], wstr[16], ppidstr[16];
+            char *cargv[20];
+            int   n = 0;
+
+            snprintf(fds, sizeof(fds), "%d,%d", parentpipe[0], childpipe[1]);
+            snprintf(pstr, sizeof(pstr), "%d", passcnt);
+            snprintf(tstr, sizeof(tstr), "%d", testnum);
+            snprintf(wstr, sizeof(wstr), "%d", wait_time);
+            snprintf(ppidstr, sizeof(ppidstr), "%d", parentpid);
+            cargv[n++] = argv[0];
+            cargv[n++] = "-b";
+            cargv[n++] = (char *) env.backend;
+            if (user_spec) {
+                cargv[n++] = "-U";
+                cargv[n++] = (char *) user_spec;
+            }
+            cargv[n++] = "-p";
+            cargv[n++] = pstr;
+            cargv[n++] = "-t";
+            cargv[n++] = tstr;
+            cargv[n++] = "-w";
+            cargv[n++] = wstr;
+            cargv[n++] = "-C";
+            cargv[n++] = fds;
+            cargv[n++] = "-S";
+            cargv[n++] = env.session_dir;
+            cargv[n++] = "-P";
+            cargv[n++] = ppidstr;
+            cargv[n]   = NULL;
+
+            childpid = posix_test_fork_exec(cargv);
+        }
+
+        if (childpid < 0) {
+            perror("tlock: fork");
+            exit(1);
+        }
+
+        who = PARENT;
+        signal(SIGINT, parentsig);
+        signal(SIGCHLD, SIG_DFL);
         /* Fail fast with a stack if either side wedges (the recurring
          * lock-family hang).  45 s beats the shortest ctest timeout this binary
          * runs under while leaving room for the gstack dump; normal runtime is
          * <2 s so it never false-fires.  Armed on both sides so a parent-side
          * wedge is captured too. */
-        posix_test_child_watchdog(45);
-    } else {
-        who = PARENT;
-        signal(SIGINT, parentsig);
-        signal(SIGCHLD, SIG_DFL);
         posix_test_child_watchdog(45);
     }
 

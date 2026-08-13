@@ -167,6 +167,54 @@ posix_test_child_watchdog(unsigned int seconds)
     alarm(seconds);
 } /* posix_test_child_watchdog */
 
+/* Mark a parent-only pipe end close-on-exec so a re-exec'ed child never
+ * inherits it (keeps the EOF semantics of the sync pipes identical to the
+ * plain-fork arrangement without the child having to know the fd numbers). */
+static inline void
+posix_test_cloexec(int fd)
+{
+    int flags = fcntl(fd, F_GETFD, 0);
+
+    if (flags >= 0) {
+        (void) fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
+    }
+} /* posix_test_cloexec */
+
+/*
+ * Spawn the cross-process test child by re-exec'ing this same binary.
+ *
+ * A plain fork() hands the child a copy of the parent's address space,
+ * including every lock any parent thread happens to hold at that instant.
+ * The visible ones (the chimera log flusher's) are handled by atfork
+ * handlers, but locks inside opaque runtimes are not: gcc-13's ASan takes a
+ * per-size-class allocator region mutex inside the malloc/free that glibc
+ * stdio performs under the flusher's locks and does not force-unlock it
+ * across fork, so a child forked at the wrong instant inherits it held and
+ * every thread it creates wedges inside AsanThread::Init (the lock-family
+ * flakes in #733).  exec() resets the address space, so the child starts
+ * with no inherited lock state at all, from any runtime, forever.
+ *
+ * The child re-enters main() with argv crafted by the caller (a -C child
+ * mode flag plus the sync-pipe fds and session paths); pipe fds survive
+ * exec unless marked FD_CLOEXEC.  Only async-signal-safe work happens
+ * between fork and exec.
+ */
+static inline pid_t
+posix_test_fork_exec(char *const cargv[])
+{
+    pid_t pid = fork();
+
+    if (pid == 0) {
+        execv("/proc/self/exe", cargv);
+        /* exec failed; this address space is still the parent's copy, so
+         * exit without running atexit handlers. */
+        perror("posix_test_fork_exec: execv");
+        _exit(127);
+    }
+
+    return pid;
+} /* posix_test_fork_exec */
+
 struct posix_test_env {
     struct chimera_posix_client *posix;
     struct chimera_server       *server;       // For NFS backend tests
