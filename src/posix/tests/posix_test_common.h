@@ -407,12 +407,12 @@ static int posix_test_ro_access_export __attribute__ ((unused)) = 0;
 
 /* Name of the subdirectory (relative to the backend root) that the read-only
  * export is mounted at; the read-write export sees it as "/share/ro". */
-#define POSIX_TEST_RO_SUBDIR             "ro"
+#define POSIX_TEST_RO_SUBDIR "ro"
 
 /* Explicit export id above the default nfs_max_exports count cap (4096),
  * so tests cover pinned-id file-handle attribution across the whole 16-bit
  * id space rather than only small auto-assigned ids. */
-#define POSIX_TEST_EXPORT_ID             4242
+#define POSIX_TEST_EXPORT_ID 4242
 
 /* When non-zero (set before posix_test_init), posix_test_start_nfs_server
  * creates this many EXTRA exports alongside "/share", each its own mount of
@@ -429,6 +429,16 @@ static int posix_test_ro_access_export __attribute__ ((unused)) = 0;
  * string prefix of another: chimera_nfs_find_export_path matches export names
  * by prefix, the same collision the "roshare" note below avoids. */
 static int posix_test_extra_exports __attribute__ ((unused)) = 0;
+
+/* When non-zero (set before posix_test_init), posix_test_start_nfs_server
+ * also creates a root export "/" backed by the same "/share" mount.  The
+ * NFSv4 namespace root is then the share's real backend directory rather
+ * than the synthetic pseudo-root, and the other exports remain reachable as
+ * junctions grafted over it at LOOKUP (see nfs4_root_junction_check). */
+static int posix_test_root_export __attribute__ ((unused)) = 0;
+
+/* Pinned id for the root export, clear of the other pinned ids here. */
+#define POSIX_TEST_ROOT_EXPORT_ID        (POSIX_TEST_EXPORT_ID + 3)
 
 /* Name of the i'th extra export and its mount (fixed width, see above). */
 #define POSIX_TEST_EXTRA_EXPORT_NAME_FMT "page%02d"
@@ -698,6 +708,18 @@ posix_test_start_nfs_server(struct posix_test_env *env)
                                      POSIX_TEST_EXPORT_ID, NULL) != 0) {
         fprintf(stderr, "Failed to create /share export\n");
         exit(EXIT_FAILURE);
+    }
+
+    if (posix_test_root_export) {
+        /* Root export backed by the same "/share" mount: the NFSv4 namespace
+         * root becomes the share's real backend directory, with the other
+         * exports reachable as junctions grafted over it. */
+        if (chimera_server_create_export(env->server, "/", "/share",
+                                         POSIX_TEST_ROOT_EXPORT_ID,
+                                         NULL) != 0) {
+            fprintf(stderr, "Failed to create / export\n");
+            exit(EXIT_FAILURE);
+        }
     }
 
     if (posix_test_ro_access_export) {

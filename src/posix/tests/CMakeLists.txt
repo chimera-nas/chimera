@@ -415,6 +415,40 @@ if(CHIMERA_LINUX)
 endif()
 
 # ============================================================================
+# NFSv4 root ("/") export test
+# Configures a "/" export so the NFSv4 namespace root is the share's real
+# backend directory, then exercises I/O at the mount root, junction grafting
+# of sibling exports over it (including a runtime-added junction-only export),
+# knfsd-style subdirectory mounts over NFSv4 and NFSv3, and the sec-policy
+# gate on the root.  Registered explicitly because the standard harness always
+# mounts the "/share" export.
+# ============================================================================
+add_posix_testprog(test_root_export)
+
+# Leak detection is disabled for this test only: it performs ~10 NFS client
+# mounts in one process, and every v4 mount past the worker-thread count
+# trips a PRE-EXISTING client leak -- chimera_nfs4_mount unconditionally
+# overwrites thread->server_threads[server->index] with a freshly allocated
+# server_thread, orphaning the previous one along with its claimed slot
+# table (src/vfs/nfs/nfs4_mount.c).  No prior test mounted often enough to
+# hit it.  Remove the override once that mount-path lifecycle is fixed.
+macro(add_posix_root_export_test nfs_backend)
+    if(CHIMERA_LIMITS_TESTING)
+        add_test(NAME chimera/posix/root_export_nfs4_${nfs_backend}
+            COMMAND ${LIMITS_WRAPPER} ${CMAKE_CURRENT_BINARY_DIR}/posix_test_root_export -b nfs4_${nfs_backend}
+        )
+        get_target_property(test_file posix_test_root_export TEST_FILE)
+        set_tests_properties(chimera/posix/root_export_nfs4_${nfs_backend} PROPERTIES
+            ENVIRONMENT "TEST_FILE=${test_file};ASAN_OPTIONS=detect_leaks=0"
+            TIMEOUT 60
+        )
+    endif()
+endmacro()
+
+add_posix_root_export_test(memfs)
+add_posix_root_export_test(linux)
+
+# ============================================================================
 # NFS3 over TCP-RDMA Backend Tests
 # These tests run the POSIX tests through the Chimera NFS client using TCP-RDMA,
 # connecting to a Chimera NFS server in the same process.
