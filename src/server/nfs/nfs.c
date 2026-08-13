@@ -1237,8 +1237,9 @@ chimera_nfs_find_export_path(
     const struct chimera_nfs_export **out_export)
 {
     struct chimera_server_nfs_shared *shared = nfs_shared;
-    struct chimera_nfs_export        *export = NULL, *cur_export;
-    const char                       *suffix = NULL;
+    struct chimera_nfs_export        *export      = NULL, *cur_export;
+    struct chimera_nfs_export        *root_export = NULL;
+    const char                       *suffix      = NULL;
     size_t                            export_name_len, suffix_offset, pos;
     char                             *full_path, *export_name, *export_path;
     size_t                            fullpath_len, suffix_len, export_path_len;
@@ -1254,6 +1255,18 @@ chimera_nfs_find_export_path(
     pthread_mutex_lock(&shared->exports_lock);
     LL_FOREACH(shared->exports, cur_export)
     {
+        /* The root ("/") export matches every path with the entire path as the
+         * suffix, so it can never win the prefix scan below (its name is empty
+         * once the slash handling is applied).  Record it as the fallback and
+         * keep scanning: any more specific export takes precedence, mirroring
+         * longest-prefix routing. */
+        if (strcmp(cur_export->name, "/") == 0) {
+            if (!root_export) {
+                root_export = cur_export;
+            }
+            continue;
+        }
+
         export_name     = cur_export->name;
         export_name_len = strlen(export_name);
         if (missing_leading_slash) {
@@ -1269,15 +1282,16 @@ chimera_nfs_find_export_path(
         /* NFSv4 component names are case-sensitive and the synthetic pseudo-fs
          * has no case-insensitive backend; match export names exactly. */
         if (strncmp(export_name, path, export_name_len) == 0) {
-            export = cur_export;
             // Check if this is a valid prefix match (at path boundary)
             if (path_len == export_name_len) {
                 // Exact match, no suffix
+                export = cur_export;
                 suffix = NULL;
                 break;
             }
             if (path[export_name_len] == '/') {
                 // Valid match - determine suffix after export name
+                export        = cur_export;
                 suffix_offset = export_name_len;
                 if (path[suffix_offset] == '/') {
                     suffix_offset++;
@@ -1289,7 +1303,22 @@ chimera_nfs_find_export_path(
                 }
                 break;
             }
+            /* The export name matches only as a string prefix, not at a path
+             * component boundary ("/backupextra" vs export "/backup"): not a
+             * match.  (This used to leave the export dangling as a bogus
+             * suffix-less match if nothing later in the list matched.) */
         }
+    }
+
+    if (!export && root_export) {
+        /* No specific export matched; the whole path is a suffix under the
+         * root export. */
+        export        = root_export;
+        suffix_offset = 0;
+        while (suffix_offset < path_len && path[suffix_offset] == '/') {
+            suffix_offset++;
+        }
+        suffix = suffix_offset < path_len ? path + suffix_offset : NULL;
     }
     pthread_mutex_unlock(&shared->exports_lock);
     if (!export) {
