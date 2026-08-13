@@ -90,6 +90,54 @@ nfs4_root_lookup_complete(
 } /* nfs4_root_lookup_complete */
 
 SYMBOL_EXPORT void
+nfs4_root_lookup_export(
+    struct chimera_server_nfs_thread *nfs_thread,
+    struct nfs_request               *req,
+    const struct chimera_nfs_export  *export,
+    const char                       *full_path)
+{
+    struct LOOKUP4res *res = &req->res_compound.resarray[req->index].oplookup;
+    uint8_t            root_fh[CHIMERA_VFS_FH_SIZE];
+    uint32_t           root_fh_len;
+
+    /* Enforce the export's security-flavor policy at the namespace-root
+     * boundary: a client traversing into the export under a disallowed flavor
+     * gets NFS4ERR_WRONGSEC and renegotiates via SECINFO. */
+    if (!chimera_nfs_export_sec_ok(export, req->sec_bit)) {
+        res->status = NFS4ERR_WRONGSEC;
+        chimera_nfs4_compound_complete(req, NFS4ERR_WRONGSEC);
+        return;
+    }
+
+    /* Entering an export: adopt its id (so the handle minted for the client
+     * carries it) and apply its squash policy. */
+    chimera_nfs_set_export(req, export);
+
+    while (full_path[0] == '/') {
+        full_path++;
+    }
+
+    if (full_path[0] == '\0') {
+        res->status = NFS4ERR_NOENT;
+        chimera_nfs4_compound_complete(req, NFS4ERR_NOENT);
+        return;
+    }
+
+    req->handle = NULL; // Ensure handle is NULL so that the lookup callback does not attempt to release it
+    chimera_vfs_get_root_fh(root_fh, &root_fh_len);
+    chimera_vfs_lookup(nfs_thread->vfs_thread,
+                       &req->cred,
+                       root_fh,
+                       root_fh_len,
+                       full_path,
+                       strlen(full_path),
+                       CHIMERA_VFS_ATTR_FH,
+                       0,
+                       nfs4_root_lookup_complete,
+                       req);
+} /* nfs4_root_lookup_export */
+
+SYMBOL_EXPORT void
 nfs4_root_lookup(
     struct chimera_server_nfs_thread *nfs_thread,
     struct nfs_request               *req)
@@ -99,8 +147,6 @@ nfs4_root_lookup(
     struct LOOKUP4res                *res    = &req->res_compound.resarray[req->index].oplookup;
     int                               rc;
     char                             *full_path = NULL;
-    uint8_t                           root_fh[CHIMERA_VFS_FH_SIZE];
-    uint32_t                          root_fh_len;
 
     /**
      * We are doing a lookup on the export path. The path
@@ -121,35 +167,218 @@ nfs4_root_lookup(
         return;
     }
 
-    /* Enforce the export's security-flavor policy at the pseudo-fs boundary:
-     * a client traversing into the export under a disallowed flavor gets
-     * NFS4ERR_WRONGSEC and renegotiates via SECINFO. */
-    if (!chimera_nfs_export_sec_ok(export, req->sec_bit)) {
-        res->status = NFS4ERR_WRONGSEC;
-        chimera_nfs4_compound_complete(req, NFS4ERR_WRONGSEC);
+    nfs4_root_lookup_export(nfs_thread, req, export, full_path);
+    free(full_path);
+} /* nfs4_root_lookup */
+
+/*
+ * "/" (root) export FH resolution.
+ *
+ * When a "/" export exists the NFSv4 namespace root is that export's real
+ * backend directory.  Its FH is needed in two places: PUTROOTFH installs it
+ * as the current FH, and LOOKUP/LOOKUPP/SECINFO must recognize "the current
+ * FH is the namespace root" to graft sibling exports over it as junctions.
+ * The resolved FH is cached in shared state (root_export_fh, guarded by
+ * exports_lock) keyed by the export's id, so the recognizers are a memcmp in
+ * the steady state; the cache is primed by whichever caller needs it first
+ * and is invalidated by removal of the "/" export (id mismatch covers
+ * re-addition, which assigns a fresh id).
+ *
+ * Resolution runs with the requesting client's (squashed) credential, the
+ * same choice the v3 MOUNT path makes, and follows symlinks in the export
+ * path as v3 MOUNT does.
+ */
+
+struct nfs4_root_export_fh_ctx {
+    struct chimera_server_nfs_thread *thread;
+    struct nfs_request               *req;
+    nfs4_root_export_fh_callback_t    callback;
+    uint16_t                          export_id;
+};
+
+static void
+nfs4_root_export_fh_resolve_complete(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct nfs4_root_export_fh_ctx   *ctx    = private_data;
+    struct chimera_server_nfs_shared *shared = ctx->thread->shared;
+
+    if (error_code == CHIMERA_VFS_OK &&
+        (!attr || !(attr->va_set_mask & CHIMERA_VFS_ATTR_FH))) {
+        error_code = CHIMERA_VFS_EIO;
+    }
+
+    if (error_code != CHIMERA_VFS_OK) {
+        ctx->callback(error_code, NULL, 0, ctx->thread, ctx->req);
+        free(ctx);
         return;
     }
 
-    /* Entering an export from the pseudo-fs: adopt its id (so the handle minted
-     * for the client carries it) and apply its squash policy. */
-    chimera_nfs_set_export(req, export);
+    pthread_mutex_lock(&shared->exports_lock);
+    /* Prime the cache unless the "/" export changed while the resolve was in
+     * flight; a stale prime would mis-recognize the old root. */
+    if (shared->root_export_id == ctx->export_id) {
+        memcpy(shared->root_export_fh, attr->va_fh, attr->va_fh_len);
+        shared->root_export_fh_len = attr->va_fh_len;
+        shared->root_export_fh_id  = ctx->export_id;
+    }
+    pthread_mutex_unlock(&shared->exports_lock);
 
-    req->handle = NULL; // Ensure handle is NULL so that the lookup callback does not attempt to release it
-    chimera_vfs_get_root_fh(root_fh, &root_fh_len);
-    chimera_vfs_lookup(nfs_thread->vfs_thread,
+    ctx->callback(CHIMERA_VFS_OK, attr->va_fh, attr->va_fh_len,
+                  ctx->thread, ctx->req);
+    free(ctx);
+} /* nfs4_root_export_fh_resolve_complete */
+
+SYMBOL_EXPORT void
+nfs4_root_export_fh_resolve(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    nfs4_root_export_fh_callback_t    callback)
+{
+    struct chimera_server_nfs_shared *shared = thread->shared;
+    struct chimera_nfs_export        *cur, root_export;
+    struct nfs4_root_export_fh_ctx   *ctx;
+    uint8_t                           fh[CHIMERA_VFS_FH_SIZE];
+    uint32_t                          fh_len;
+    uint16_t                          root_id;
+    int                               found = 0;
+    const char                       *path;
+
+    pthread_mutex_lock(&shared->exports_lock);
+    root_id = shared->root_export_id;
+
+    if (root_id != 0) {
+        LL_FOREACH(shared->exports, cur)
+        {
+            if (cur->id == root_id) {
+                root_export = *cur;
+                found       = 1;
+                break;
+            }
+        }
+    }
+    pthread_mutex_unlock(&shared->exports_lock);
+
+    if (!found) {
+        callback(CHIMERA_VFS_ENOENT, NULL, 0, thread, req);
+        return;
+    }
+
+    path = root_export.path;
+    while (path[0] == '/') {
+        path++;
+    }
+
+    chimera_vfs_get_root_fh(fh, &fh_len);
+
+    if (path[0] == '\0') {
+        /* The "/" export's path is the VFS root itself; nothing to resolve. */
+        pthread_mutex_lock(&shared->exports_lock);
+        if (shared->root_export_id == root_id) {
+            memcpy(shared->root_export_fh, fh, fh_len);
+            shared->root_export_fh_len = fh_len;
+            shared->root_export_fh_id  = root_id;
+        }
+        pthread_mutex_unlock(&shared->exports_lock);
+        callback(CHIMERA_VFS_OK, fh, fh_len, thread, req);
+        return;
+    }
+
+    ctx = calloc(1, sizeof(*ctx));
+    chimera_nfs_abort_if(ctx == NULL, "Failed to allocate root export fh context");
+
+    ctx->thread    = thread;
+    ctx->req       = req;
+    ctx->callback  = callback;
+    ctx->export_id = root_id;
+
+    chimera_vfs_lookup(thread->vfs_thread,
                        &req->cred,
-                       root_fh,
-                       root_fh_len,
-                       full_path,
-                       strlen(full_path),
+                       fh,
+                       fh_len,
+                       path,
+                       strlen(path),
                        CHIMERA_VFS_ATTR_FH,
-                       0,
-                       nfs4_root_lookup_complete,
-                       req);
-    free(full_path);
-    return;
+                       CHIMERA_VFS_LOOKUP_FOLLOW,
+                       nfs4_root_export_fh_resolve_complete,
+                       ctx);
+} /* nfs4_root_export_fh_resolve */
 
-} /* nfs4_root_lookup */
+SYMBOL_EXPORT void
+nfs4_root_export_fh_get(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    nfs4_root_export_fh_callback_t    callback)
+{
+    struct chimera_server_nfs_shared *shared = thread->shared;
+    uint8_t                           fh[CHIMERA_VFS_FH_SIZE];
+    uint32_t                          fh_len = 0;
+    uint16_t                          root_id;
+
+    pthread_mutex_lock(&shared->exports_lock);
+    root_id = shared->root_export_id;
+
+    if (root_id != 0 && shared->root_export_fh_id == root_id) {
+        memcpy(fh, shared->root_export_fh, shared->root_export_fh_len);
+        fh_len = shared->root_export_fh_len;
+    }
+    pthread_mutex_unlock(&shared->exports_lock);
+
+    if (root_id == 0) {
+        callback(CHIMERA_VFS_ENOENT, NULL, 0, thread, req);
+        return;
+    }
+
+    if (fh_len) {
+        callback(CHIMERA_VFS_OK, fh, fh_len, thread, req);
+        return;
+    }
+
+    nfs4_root_export_fh_resolve(thread, req, callback);
+} /* nfs4_root_export_fh_get */
+
+static void
+nfs4_root_junction_check_fh_ready(
+    enum chimera_vfs_error            error_code,
+    const uint8_t                    *fh,
+    uint32_t                          fh_len,
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req)
+{
+    nfs4_root_junction_resume_t resume = req->root_junction_resume;
+    int                         at_root;
+
+    req->root_junction_resume = NULL;
+
+    /* A root FH that cannot be resolved just means the junction view is
+     * unavailable; the op proceeds as an ordinary VFS operation. */
+    at_root = (error_code == CHIMERA_VFS_OK &&
+               fh_len == (uint32_t) req->fhlen &&
+               memcmp(fh, req->fh, fh_len) == 0);
+
+    resume(thread, req, at_root);
+} /* nfs4_root_junction_check_fh_ready */
+
+SYMBOL_EXPORT void
+nfs4_root_junction_check(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    nfs4_root_junction_resume_t       resume)
+{
+    /* Lockless gate, same publication rules as exports_by_id: the current FH
+     * can only be the namespace root if it was minted under the "/" export. */
+    uint16_t root_id = thread->shared->root_export_id;
+
+    if (root_id == 0 || req->export_id != root_id) {
+        resume(thread, req, 0);
+        return;
+    }
+
+    req->root_junction_resume = resume;
+    nfs4_root_export_fh_get(thread, req, nfs4_root_junction_check_fh_ready);
+} /* nfs4_root_junction_check */
 
 /*
  * Pseudo-fs root READDIR.
@@ -220,6 +449,14 @@ nfs4_root_readdir_snap_cb(
     struct nfs4_root_readdir_snap   *snap = private_data;
     struct nfs4_root_readdir_export *e;
     const char                      *export_name = export->name;
+
+    /* The "/" export is the namespace root itself, not an entry within it,
+     * so it is never listed.  (Only reachable mid-transition: while a "/"
+     * export exists PUTROOTFH serves its real backend root and this walk
+     * does not run.) */
+    if (strcmp(export_name, "/") == 0) {
+        return 0;
+    }
 
     // remove leading '/' from export name if present
     while (export_name[0] == '/') {

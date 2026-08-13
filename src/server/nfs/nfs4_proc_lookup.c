@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include "nfs.h"
 #include "nfs4_procs.h"
 #include "nfs4_status.h"
 #include "vfs/vfs_procs.h"
@@ -61,6 +62,38 @@ chimera_nfs4_lookup_open_callback(
     }
 } /* chimera_nfs4_lookup_open_callback */
 
+static void
+chimera_nfs4_lookup_resume(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    int                               at_root_export)
+{
+    struct LOOKUP4args       *args =
+        &req->args_compound->argarray[req->index].oplookup;
+    struct chimera_nfs_export sibling;
+
+    /* At the "/" export's root, sibling exports are grafted over the real
+     * directory as junctions: a name matching a sibling export enters that
+     * export (shadowing any real entry of the same name), exactly as the
+     * synthetic pseudo-root routes into exports. */
+    if (at_root_export &&
+        chimera_nfs_get_export_by_component(thread->shared,
+                                            args->objname.data,
+                                            args->objname.len,
+                                            &sibling) == 0) {
+        nfs4_root_lookup_export(thread, req, &sibling, sibling.path);
+        return;
+    }
+
+    // For non-root lookups, we can just open the directory and let the VFS handle the lookup
+    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+                        req->fh,
+                        req->fhlen,
+                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
+                        chimera_nfs4_lookup_open_callback,
+                        req);
+} /* chimera_nfs4_lookup_resume */
+
 void
 chimera_nfs4_lookup(
     struct chimera_server_nfs_thread *thread,
@@ -89,11 +122,5 @@ chimera_nfs4_lookup(
         return;
     }
 
-    // For non-root lookups, we can just open the directory and let the VFS handle the lookup
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
-                        req->fh,
-                        req->fhlen,
-                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
-                        chimera_nfs4_lookup_open_callback,
-                        req);
+    nfs4_root_junction_check(thread, req, chimera_nfs4_lookup_resume);
 } /* chimera_nfs4_lookup */

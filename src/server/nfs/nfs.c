@@ -1109,6 +1109,13 @@ chimera_nfs_add_export(
 
     LL_PREPEND(shared->exports, export);
     shared->num_exports++;
+
+    /* Publish the root ("/") export's id for the lockless fast-path gate on
+     * the NFSv4 junction checks (see root_export_id in nfs_common.h). */
+    if (strcmp(export->name, "/") == 0) {
+        shared->root_export_id = export->id;
+    }
+
     pthread_mutex_unlock(&shared->exports_lock);
 
     return 0;
@@ -1201,6 +1208,10 @@ chimera_nfs_remove_export(
         if (strcmp(export->name, name) == 0) {
             if (export->id != 0) {
                 shared->exports_by_id[export->id] = NULL;
+            }
+            if (export->id == shared->root_export_id) {
+                shared->root_export_id    = 0;
+                shared->root_export_fh_id = 0;
             }
             LL_DELETE(shared->exports, export);
             shared->num_exports--;
@@ -1388,6 +1399,71 @@ chimera_nfs_get_export(
 
     return NULL;
 } /* chimera_nfs_get_export */
+
+SYMBOL_EXPORT int
+chimera_nfs_get_export_copy(
+    void                      *nfs_shared,
+    const char                *name,
+    struct chimera_nfs_export *out)
+{
+    struct chimera_server_nfs_shared *shared = nfs_shared;
+    struct chimera_nfs_export        *export;
+
+    pthread_mutex_lock(&shared->exports_lock);
+    LL_FOREACH(shared->exports, export)
+    {
+        if (strcmp(export->name, name) == 0) {
+            *out      = *export;
+            out->prev = NULL;
+            out->next = NULL;
+            pthread_mutex_unlock(&shared->exports_lock);
+            return 0;
+        }
+    }
+    pthread_mutex_unlock(&shared->exports_lock);
+
+    return -1;
+} /* chimera_nfs_get_export_copy */
+
+SYMBOL_EXPORT int
+chimera_nfs_get_export_by_component(
+    void                      *nfs_shared,
+    const char                *name,
+    uint32_t                   name_len,
+    struct chimera_nfs_export *out)
+{
+    struct chimera_server_nfs_shared *shared = nfs_shared;
+    struct chimera_nfs_export        *export;
+    const char                       *export_name;
+
+    pthread_mutex_lock(&shared->exports_lock);
+    LL_FOREACH(shared->exports, export)
+    {
+        export_name = export->name;
+        while (export_name[0] == '/') {
+            export_name++;
+        }
+
+        /* Only exports whose name is a single non-empty path component are
+         * addressable as one directory entry; this also excludes the root
+         * ("/") export itself, whose name strips to empty. */
+        if (export_name[0] == '\0' || strchr(export_name, '/')) {
+            continue;
+        }
+
+        if (strlen(export_name) == name_len &&
+            memcmp(export_name, name, name_len) == 0) {
+            *out      = *export;
+            out->prev = NULL;
+            out->next = NULL;
+            pthread_mutex_unlock(&shared->exports_lock);
+            return 0;
+        }
+    }
+    pthread_mutex_unlock(&shared->exports_lock);
+
+    return -1;
+} /* chimera_nfs_get_export_by_component */
 
 SYMBOL_EXPORT void
 chimera_nfs_iterate_exports(

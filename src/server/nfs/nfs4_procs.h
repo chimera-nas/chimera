@@ -111,6 +111,84 @@ nfs4_root_lookup(
     struct nfs_request               *req);
 
 /**
+ * Enter an export from the namespace root: enforce the export's security
+ * policy (NFS4ERR_WRONGSEC on violation), adopt its identity and squash
+ * policy, and resolve full_path from the VFS root into the LOOKUP result
+ * handle.  Completes the current LOOKUP op.
+ *
+ * @param nfs_thread Pointer to the NFS server thread context.
+ * @param req        Pointer to the NFS request structure.
+ * @param export     Export being entered (caller-owned snapshot or live).
+ * @param full_path  VFS path to resolve (leading slashes ignored);
+ *                   caller-owned, not retained after return.
+ */
+void
+nfs4_root_lookup_export(
+    struct chimera_server_nfs_thread *nfs_thread,
+    struct nfs_request               *req,
+    const struct chimera_nfs_export *export,
+    const char                       *full_path);
+
+/**
+ * Callback for nfs4_root_export_fh_get.  On success fh/fh_len hold the "/"
+ * export's resolved backend root FH; on failure fh is NULL.
+ */
+typedef void (*nfs4_root_export_fh_callback_t)(
+    enum chimera_vfs_error            error_code,
+    const uint8_t                    *fh,
+    uint32_t                          fh_len,
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req);
+
+/**
+ * Obtain the "/" export's backend root FH, from the shared cache when warm or
+ * by resolving the export's path (priming the cache) when not.  The callback
+ * may run synchronously.  Fails with CHIMERA_VFS_ENOENT when no "/" export is
+ * configured.
+ */
+void
+nfs4_root_export_fh_get(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    nfs4_root_export_fh_callback_t    callback);
+
+/**
+ * As nfs4_root_export_fh_get, but always resolves the export's path afresh
+ * (re-priming the cache) instead of serving the cached FH.  Used by PUTROOTFH
+ * so a backend whose root FH changed (e.g. a remount under a live export)
+ * heals on the next mount rather than serving a stale handle forever.
+ */
+void
+nfs4_root_export_fh_resolve(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    nfs4_root_export_fh_callback_t    callback);
+
+/**
+ * Decide whether the request's current filehandle is the root of the "/"
+ * export, and continue the operation via resume(thread, req, at_root_export).
+ * The decision is immediate (and resume runs synchronously) unless the root
+ * FH cache is cold and req's handle was minted under the "/" export, in which
+ * case the export path is resolved first.  With no "/" export configured this
+ * is a cheap lockless check that always resumes with at_root_export == 0.
+ */
+void
+nfs4_root_junction_check(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    nfs4_root_junction_resume_t       resume);
+
+/**
+ * Shared PUTROOTFH/PUTPUBFH implementation: install the NFSv4 namespace root
+ * (the "/" export's real backend root when one is configured, the synthetic
+ * pseudo-root otherwise) as the current filehandle and complete the op.
+ */
+void
+chimera_nfs4_putrootfh_common(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req);
+
+/**
  * Populate directory entries for the NFSv4 pseudo-root directory.
  *
  * @param thread Pointer to the NFS server thread context.

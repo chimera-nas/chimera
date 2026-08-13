@@ -91,8 +91,19 @@ chimera_nfs4_putfh(
     /* The synthetic NFSv4 pseudo-root handle is not a wrapped VFS handle (it is
      * resolved by the server's fh_is_nfs4_root fast path), so accept it
      * explicitly; the kernel client PUTFHs it during mount.  It belongs to no
-     * export, so clear the current export and drop any squash. */
+     * export, so clear the current export and drop any squash.
+     *
+     * When a "/" export exists the namespace root is that export's real
+     * backend directory and the synthetic handle is never minted; a client
+     * presenting one holds it from a configuration that no longer exists
+     * (the "/" export was added at runtime), so it is stale and the client
+     * must remount. */
     if (fh_is_nfs4_root(args->object.data, args->object.len)) {
+        if (thread->shared->root_export_id != 0) {
+            res->status = NFS4ERR_STALE;
+            chimera_nfs4_compound_complete(req, res->status);
+            return;
+        }
         memcpy(req->fh, args->object.data, args->object.len);
         req->fhlen     = args->object.len;
         req->export_id = 0;

@@ -78,6 +78,49 @@ chimera_nfs4_secinfo_open_callback(
                           req);
 } /* chimera_nfs4_secinfo_open_callback */
 
+static void
+chimera_nfs4_secinfo_resume(
+    struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
+    int                               at_root_export)
+{
+    struct SECINFO4args      *args =
+        &req->args_compound->argarray[req->index].opsecinfo;
+    struct SECINFO4res       *res =
+        &req->res_compound.resarray[req->index].opsecinfo;
+    struct chimera_nfs_export sibling;
+
+    /* At the "/" export's root, a name matching a sibling export is a
+     * junction: advertise that export's flavors directly, the same
+     * renegotiation path the synthetic pseudo-root provides after
+     * NFS4ERR_WRONGSEC at the junction boundary. */
+    if (at_root_export &&
+        chimera_nfs_get_export_by_component(thread->shared,
+                                            args->name.data,
+                                            args->name.len,
+                                            &sibling) == 0) {
+        res->resok4 = xdr_dbuf_alloc_space(4 * sizeof(struct secinfo4),
+                                           req->encoding->dbuf);
+        chimera_nfs_abort_if(res->resok4 == NULL, "Failed to allocate space");
+        res->num_resok4 = chimera_nfs_fill_secinfo(res->resok4,
+                                                   sibling.sec_allowed);
+        /* Consume the current filehandle on success (see above). */
+        req->fhlen  = 0;
+        res->status = NFS4_OK;
+        chimera_nfs4_compound_complete(req, NFS4_OK);
+        return;
+    }
+
+    /* Opening the current FH as a directory yields NFS4ERR_NOTDIR when it is
+     * not one; the subsequent lookup yields NFS4ERR_NOENT for a missing name. */
+    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
+                        req->fh,
+                        req->fhlen,
+                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
+                        chimera_nfs4_secinfo_open_callback,
+                        req);
+} /* chimera_nfs4_secinfo_resume */
+
 void
 chimera_nfs4_secinfo(
     struct chimera_server_nfs_thread *thread,
@@ -130,12 +173,5 @@ chimera_nfs4_secinfo(
         return;
     }
 
-    /* Opening the current FH as a directory yields NFS4ERR_NOTDIR when it is
-     * not one; the subsequent lookup yields NFS4ERR_NOENT for a missing name. */
-    chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
-                        req->fh,
-                        req->fhlen,
-                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_DIRECTORY,
-                        chimera_nfs4_secinfo_open_callback,
-                        req);
+    nfs4_root_junction_check(thread, req, chimera_nfs4_secinfo_resume);
 } /* chimera_nfs4_secinfo */

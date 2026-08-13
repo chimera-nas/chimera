@@ -3,11 +3,11 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "nfs4_procs.h"
-#include "vfs/vfs.h"
 
 /* RFC 7530 §16.21: PUTPUBFH sets the current FH to the server's "public"
  * filehandle. Chimera does not distinguish a separate public namespace from
- * the root namespace, so PUTPUBFH is a synonym for PUTROOTFH. */
+ * the root namespace, so PUTPUBFH is a synonym for PUTROOTFH (including the
+ * "/" export resolution; see nfs4_proc_putrootfh.c). */
 void
 chimera_nfs4_putpubfh(
     struct chimera_server_nfs_thread *thread,
@@ -15,15 +15,8 @@ chimera_nfs4_putpubfh(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop)
 {
-    struct PUTPUBFH4res *res = &resop->opputpubfh;
-    uint32_t             fhlen;
+    (void) argop;
+    (void) resop;
 
-    nfs4_root_get_fh(req->fh, &fhlen);
-    req->fhlen     = fhlen;
-    req->export_id = 0;          /* pseudo root: no export, no squash */
-    req->cred      = req->orig_cred;
-
-    res->status = NFS4_OK;
-
-    chimera_nfs4_compound_complete(req, NFS4_OK);
+    chimera_nfs4_putrootfh_common(thread, req);
 } /* chimera_nfs4_putpubfh */
