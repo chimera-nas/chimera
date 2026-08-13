@@ -136,8 +136,6 @@ chimera_metrics_thread_init(
 
     metrics->metrics = prometheus_metrics_create(NULL, NULL, 0);
 
-    metrics->endpoint = evpl_endpoint_create("0.0.0.0", metrics->port);
-
     metrics->agent = evpl_http_init(evpl);
 
     metrics->endpoint = evpl_endpoint_create("0.0.0.0", metrics->port);
