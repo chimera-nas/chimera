@@ -14,8 +14,8 @@
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 #include "vfs/vfs_claim.h"
-#include "vfs/vfs_access.h"
-#include "vfs/vfs_acl.h"
+#include "vfs/sdk/vfs_access.h"
+#include "vfs/sdk/vfs_acl.h"
 
 /*
  * Acquire a cross-protocol SHARE reservation in the claim core for a freshly

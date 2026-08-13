@@ -21,8 +21,7 @@
 
 #include "common/rbtree.h"
 
-#include "vfs/vfs.h"
-#include "vfs/vfs_internal.h"
+#include "vfs/sdk/chimera_vfs_sdk.h"
 #include "memkv.h"
 #include "common/logging.h"
 #include "common/macros.h"
@@ -505,6 +504,7 @@ memkv_dispatch(
 } /* memkv_dispatch */
 
 SYMBOL_EXPORT struct chimera_vfs_module vfs_memkv = {
+    .sdk_version    = CHIMERA_VFS_SDK_VERSION,
     .name           = "memkv",
     .fh_magic       = CHIMERA_VFS_FH_MAGIC_MEMKV,
     .capabilities   = CHIMERA_VFS_CAP_KV,

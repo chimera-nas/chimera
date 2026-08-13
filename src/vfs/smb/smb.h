@@ -4,7 +4,7 @@
 
 #pragma once
 
-#include "vfs/vfs.h"
+#include "vfs/sdk/chimera_vfs_sdk.h"
 
 /* SMB2 client VFS module.  Proxies VFS operations to a remote SMB2 server,
  * mirroring the NFS client (src/vfs/nfs).  This first increment supports only

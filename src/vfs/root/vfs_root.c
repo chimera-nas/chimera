@@ -11,7 +11,7 @@
 #include "common/logging.h"
 #include "common/macros.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_fh.h"
+#include "vfs/sdk/vfs_fh.h"
 #include "vfs/vfs_internal.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
@@ -590,6 +590,7 @@ chimera_vfs_root_dispatch(
 } /* vfs_root_dispatch */
 
 SYMBOL_EXPORT struct chimera_vfs_module vfs_root = {
+    .sdk_version    = CHIMERA_VFS_SDK_VERSION,
     .fh_magic       = CHIMERA_VFS_FH_MAGIC_ROOT,
     .name           = "root",
     .capabilities   = CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_FS_RELATIVE_OP,

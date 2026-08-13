@@ -8,8 +8,8 @@
 #include "nfs4_access.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
-#include "vfs/vfs_acl.h"
-#include "vfs/vfs_access.h"
+#include "vfs/sdk/vfs_acl.h"
+#include "vfs/sdk/vfs_access.h"
 
 static void
 chimera_nfs4_access_complete(

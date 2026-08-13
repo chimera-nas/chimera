@@ -4,7 +4,7 @@
 
 #include "nfs4_procs.h"
 #include "nfs4_status.h"
-#include "vfs/vfs_xattr_name.h"
+#include "vfs/sdk/vfs_xattr_name.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 

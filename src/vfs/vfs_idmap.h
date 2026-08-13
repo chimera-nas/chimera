@@ -23,7 +23,7 @@
  */
 
 #include <stdint.h>
-#include "vfs_acl.h"
+#include "sdk/vfs_acl.h"
 
 /* Max length of an NFSv4 who string or a SID string (with NUL). */
 #define CHIMERA_IDMAP_WHO_MAX 256

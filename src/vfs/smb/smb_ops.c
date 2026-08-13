@@ -8,7 +8,7 @@
 #include <xxhash.h>
 
 #include "smb_internal.h"
-#include "vfs/vfs_attrs.h"
+#include "vfs/sdk/vfs_attrs.h"
 #include "evpl/evpl.h"
 #include "common/misc.h"
 

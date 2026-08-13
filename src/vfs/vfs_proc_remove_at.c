@@ -11,8 +11,8 @@
 #include "vfs/vfs_name_cache.h"
 #include "vfs/vfs_attr_cache.h"
 #include "vfs/vfs_notify.h"
-#include "vfs/vfs_access.h"
-#include "vfs/vfs_acl.h"
+#include "vfs/sdk/vfs_access.h"
+#include "vfs/sdk/vfs_acl.h"
 #include "common/macros.h"
 
 static void

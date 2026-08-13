@@ -8,9 +8,10 @@
 #include <sys/xattr.h>
 #include <fcntl.h>
 
-#include "common/varint.h"
-#include "vfs/vfs_fh.h"
-#include "vfs/vfs_xattr_name.h"
+#include "common/logging.h"
+#include "vfs/sdk/vfs_varint.h"
+#include "vfs/sdk/vfs_fh.h"
+#include "vfs/sdk/vfs_xattr_name.h"
 #include "vfs/vfs_fsid.h"
 
 #define chimera_linux_debug(...) chimera_debug("linux", \

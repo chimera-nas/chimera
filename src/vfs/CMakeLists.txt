@@ -13,7 +13,7 @@
 # the top-level CMakeLists.txt.)
 add_compile_definitions(_LGPL_SOURCE)
 
-add_library(chimera_vfs SHARED vfs.c vfs_lsan.c
+add_library(chimera_vfs SHARED vfs.c vfs_lsan.c vfs_cred.c vfs_sdk_utils.c
             vfs_acl.c vfs_acl_serialize.c vfs_access.c vfs_idmap.c vfs_identity.c
             vfs_proc_mount.c vfs_proc_umount.c
             vfs_proc_mkfs.c vfs_proc_rmfs.c
@@ -48,6 +48,21 @@ target_compile_definitions(chimera_vfs PRIVATE
 )
 
 install(TARGETS chimera_vfs DESTINATION lib)
+
+# Install the module SDK so an out-of-tree backend can build against the
+# installed tree with -I<prefix>/include/chimera (resolving the same
+# '#include "vfs/sdk/chimera_vfs_sdk.h"' form used in-tree) plus
+# -I<prefix>/include for libevpl, which installs its own evpl/ headers.
+# prometheus-c and oteltracing-c do not install theirs, so the three
+# headers the SDK includes are co-installed here at the include forms the
+# SDK uses; xxhash is a system dependency and is not shipped.
+install(DIRECTORY sdk/ DESTINATION include/chimera/vfs/sdk
+        FILES_MATCHING PATTERN "*.h")
+install(FILES
+        ${CMAKE_SOURCE_DIR}/ext/libevpl/ext/prometheus-c/prometheus-c.h
+        ${CMAKE_SOURCE_DIR}/ext/libevpl/ext/prometheus-c/ext/stopwatch/stopwatch.h
+        ${CMAKE_SOURCE_DIR}/ext/libevpl/ext/oteltracing-c/oteltracing.h
+        DESTINATION include/chimera)
 
 add_subdirectory(root)
 add_subdirectory(memfs)

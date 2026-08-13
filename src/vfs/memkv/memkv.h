@@ -4,6 +4,6 @@
 
 #pragma once
 
-#include "vfs/vfs.h"
+#include "vfs/sdk/chimera_vfs_sdk.h"
 
 extern struct chimera_vfs_module vfs_memkv;

@@ -23,9 +23,9 @@
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
-#include "vfs/vfs_attrs.h"
-#include "vfs/vfs_cred.h"
-#include "vfs/vfs_error.h"
+#include "vfs/sdk/vfs_attrs.h"
+#include "vfs/sdk/vfs_cred.h"
+#include "vfs/sdk/vfs_error.h"
 #include "common/logging.h"
 #include "prometheus-c.h"
 

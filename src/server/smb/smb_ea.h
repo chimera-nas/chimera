@@ -9,8 +9,8 @@
 #include <ctype.h>
 
 #include "smb2.h"
-#include "vfs/vfs_error.h"
-#include "vfs/vfs_xattr_name.h"
+#include "vfs/sdk/vfs_error.h"
+#include "vfs/sdk/vfs_xattr_name.h"
 
 /*
  * SMB2 Extended Attributes (MS-FSCC 2.4.15 FILE_FULL_EA_INFORMATION and 2.4.15.1

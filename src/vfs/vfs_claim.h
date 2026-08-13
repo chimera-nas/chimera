@@ -9,7 +9,7 @@
 #include <pthread.h>
 
 #include "vfs/vfs.h"
-#include "vfs/vfs_fh.h"
+#include "vfs/sdk/vfs_fh.h"
 #include "vfs/vfs_claim_types.h"
 
 struct chimera_vfs_request;

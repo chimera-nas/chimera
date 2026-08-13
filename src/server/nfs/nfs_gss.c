@@ -10,7 +10,7 @@
 
 #include "nfs_gss.h"
 #include "nfs_internal.h"
-#include "vfs/vfs_cred.h"
+#include "vfs/sdk/vfs_cred.h"
 
 /*
  * Feed one leg of the context-establishment token exchange into

@@ -25,7 +25,7 @@
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_pnfs.h"
 #include "vfs/vfs_mount_table.h"
-#include "vfs/vfs_cred.h"
+#include "vfs/sdk/vfs_cred.h"
 #include "vfs/vfs_release.h"
 #include "common/macros.h"
 #include "common/chimera_tracing.h"

@@ -7,7 +7,7 @@
 
 #include "posix_internal.h"
 #include "../client/client_getacl.h"
-#include "vfs/vfs_acl.h"
+#include "vfs/sdk/vfs_acl.h"
 
 /*
  * Read the canonical NFSv4/Windows ACL of `path` into the caller-owned `buf`

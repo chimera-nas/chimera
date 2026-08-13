@@ -7,7 +7,7 @@
 #include <stdint.h>
 
 #include "nfs4_xdr.h"
-#include "vfs/vfs_acl.h"
+#include "vfs/sdk/vfs_acl.h"
 
 /*
  * Pure ACCESS-bit decision logic, factored out of the ACCESS handler so it can

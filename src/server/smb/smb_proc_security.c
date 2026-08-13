@@ -19,7 +19,7 @@
 #include "smb_procs.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_identity.h"
-#include "vfs/vfs_acl.h"
+#include "vfs/sdk/vfs_acl.h"
 
 /* Security information flags (addl_info) */
 #define OWNER_SECURITY_INFORMATION 0x00000001

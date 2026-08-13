@@ -34,7 +34,7 @@
 #include <limits.h>
 #include "common/platform.h"
 #include "posix_test_common.h"
-#include "vfs/vfs_acl.h"
+#include "vfs/sdk/vfs_acl.h"
 
 /* ---- lifecycle / global state ------------------------------------------- */
 

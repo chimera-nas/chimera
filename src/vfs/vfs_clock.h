@@ -104,20 +104,6 @@ chimera_vfs_wall_ns(void)
            __atomic_load_n(&chimera_vfs_clock.delta_ns, __ATOMIC_RELAXED);
 } /* chimera_vfs_wall_ns */
 
-/* Fill ts with the current wall-clock time. Equivalent to
- * clock_gettime(CLOCK_REALTIME, ts) but without the per-call syscall/read;
- * falls back to clock_gettime if the clock has not been initialized yet. */
-static inline void
-chimera_vfs_realtime(struct timespec *ts)
-{
-    uint64_t ns;
-
-    if (unlikely(!chimera_vfs_clock.initialized)) {
-        clock_gettime(CLOCK_REALTIME, ts);
-        return;
-    }
-
-    ns          = chimera_vfs_wall_ns();
-    ts->tv_sec  = ns / 1000000000ULL;
-    ts->tv_nsec = ns % 1000000000ULL;
-} /* chimera_vfs_realtime */
+/* chimera_vfs_realtime (wall-clock reads for file timestamps) is part of
+ * the module-facing SDK: declared in sdk/vfs_utils.h, compiled in
+ * vfs_sdk_utils.c on top of the clock state above. */

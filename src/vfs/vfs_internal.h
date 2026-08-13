@@ -13,13 +13,29 @@
 #include <utlist.h>
 
 #include "vfs/vfs.h"
-#include "vfs/vfs_fh.h"
-#include "vfs/vfs_acl.h"
+#include "vfs/sdk/vfs_fh.h"
+#include "vfs/sdk/vfs_acl.h"
 #include "vfs/vfs_mount_table.h"
 #include "common/logging.h"
 #include "common/misc.h"
 #include "metrics/metrics.h"
 #include "vfs/vfs_dump.h"
+
+/* Default period between close-thread cache sweeps (open-path/open-file
+ * cache LRU tick + NFSv4 idle-state reap). Every wake the timer walks the
+ * caches unconditionally, so on an otherwise idle pod this is the dominant
+ * source of baseline CPU (~180m/pod at 100ms). 1s keeps the deferred-close
+ * / idle-state reap latency well inside a typical NFS lease/DRC window
+ * while cutting idle CPU by ~10x. Callers who need aggressive close
+ * reclamation can override via the CHIMERA_CLOSE_SWEEP_INTERVAL_MS env
+ * var (units: milliseconds; clamped to [10, 60000]). */
+#define CHIMERA_CLOSE_SWEEP_INTERVAL_US_DEFAULT 1000000UL
+
+#ifndef container_of
+#define container_of(ptr, type, member) ({            \
+        typeof(((type *) 0)->member) * __mptr = (ptr); \
+        (type *) ((char *) __mptr - offsetof(type, member)); })
+#endif // ifndef container_of
 
 /* Canonical access bits an open with the given flags requires against
  * the target file. */
@@ -65,64 +81,14 @@ chimera_vfs_handle_stamp_access(
     }
 } /* chimera_vfs_handle_stamp_access */
 
-/* Size of the per-request scratch buffer used by VFS modules.
- * Must be large enough for the largest operation (symlink: name + target + 2 NULs). */
-#define CHIMERA_VFS_PLUGIN_DATA_SIZE            8192
-
-/* Default period between close-thread cache sweeps (open-path/open-file
- * cache LRU tick + NFSv4 idle-state reap). Every wake the timer walks the
- * caches unconditionally, so on an otherwise idle pod this is the dominant
- * source of baseline CPU (~180m/pod at 100ms). 1s keeps the deferred-close
- * / idle-state reap latency well inside a typical NFS lease/DRC window
- * while cutting idle CPU by ~10x. Callers who need aggressive close
- * reclamation can override via the CHIMERA_CLOSE_SWEEP_INTERVAL_MS env
- * var (units: milliseconds; clamped to [10, 60000]). */
-#define CHIMERA_CLOSE_SWEEP_INTERVAL_US_DEFAULT 1000000UL
-
-#ifndef container_of
-#define container_of(ptr, type, member) ({            \
-        typeof(((type *) 0)->member) * __mptr = (ptr); \
-        (type *) ((char *) __mptr - offsetof(type, member)); })
-#endif // ifndef container_of
-
-#define chimera_vfs_debug(...)          chimera_debug("vfs", \
-                                                      __FILE__, \
-                                                      __LINE__, \
-                                                      __VA_ARGS__)
-#define chimera_vfs_info(...)           chimera_info("vfs", \
-                                                     __FILE__, \
-                                                     __LINE__, \
-                                                     __VA_ARGS__)
-#define chimera_vfs_error(...)          chimera_error("vfs", \
-                                                      __FILE__, \
-                                                      __LINE__, \
-                                                      __VA_ARGS__)
-#define chimera_vfs_fatal(...)          chimera_fatal("vfs", \
-                                                      __FILE__, \
-                                                      __LINE__, \
-                                                      __VA_ARGS__)
-#define chimera_vfs_abort(...)          chimera_abort("vfs", \
-                                                      __FILE__, \
-                                                      __LINE__, \
-                                                      __VA_ARGS__)
-
-#define chimera_vfs_fatal_if(cond, ...) \
-        chimera_fatal_if(cond, "vfs", \
-                         __FILE__, \
-                         __LINE__, \
-                         __VA_ARGS__)
-
-#define chimera_vfs_abort_if(cond, ...) \
-        chimera_abort_if(cond, "vfs", \
-                         __FILE__, \
-                         __LINE__, \
-                         __VA_ARGS__)
+/* chimera_vfs_debug/info/error/fatal/abort and the *_if variants come from
+ * sdk/vfs_log.h (via vfs.h): they are part of the module-facing SDK. */
 
 /* ERR_PTR style error handling for request allocation */
 #define CHIMERA_VFS_MAX_ERRNO 4095
-#define CHIMERA_VFS_ERR_PTR(err)        ((void *) (long) (-(err)))
-#define CHIMERA_VFS_PTR_ERR(ptr)        ((int) (-(long) (ptr)))
-#define CHIMERA_VFS_IS_ERR(ptr)         ((unsigned long) (ptr) > (unsigned long) -CHIMERA_VFS_MAX_ERRNO)
+#define CHIMERA_VFS_ERR_PTR(err) ((void *) (long) (-(err)))
+#define CHIMERA_VFS_PTR_ERR(ptr) ((int) (-(long) (ptr)))
+#define CHIMERA_VFS_IS_ERR(ptr)  ((unsigned long) (ptr) > (unsigned long) -CHIMERA_VFS_MAX_ERRNO)
 
 /* Parse a comma-separated key[=value] options string into mount_options,
  * copying keys/values into the caller's buffer.  Shared by the mount and
@@ -145,17 +111,8 @@ struct chimera_vfs_readdir_entry {
     /* Name follows immediately after this struct */
 };
 
-static inline uint64_t
-chimera_vfs_hash(
-    const void *data,
-    int         len)
-{
-    /* Mask the MSB to ensure the result is non-negative when interpreted as
-     * a signed 64-bit value.  NFS readdir cookies are derived from this hash
-     * and the Linux kernel rejects negative loff_t values in nfs_llseek_dir(),
-     * which breaks seekdir()/telldir() for cookies with bit 63 set. */
-    return XXH3_64bits(data, len) & INT64_MAX;
-} /* chimera_vfs_hash */
+/* chimera_vfs_hash comes from sdk/vfs_utils.h (via vfs.h): it is part of
+ * the module-facing SDK, compiled in vfs_sdk_utils.c. */
 
 static inline struct chimera_vfs_find_result *
 chimera_vfs_find_result_alloc(struct chimera_vfs_thread *thread)

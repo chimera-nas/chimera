@@ -155,22 +155,11 @@ struct chimera_acl;
  * no-op.  This is the single source of truth for that three-way decision; the
  * native-storage backends (memfs/cairn/diskfs) all route through it.
  */
-static inline int
+int
 chimera_vfs_resolve_set_time(
     const struct timespec *in,
     const struct timespec *now,
-    struct timespec       *out)
-{
-    if (in->tv_nsec == CHIMERA_VFS_TIME_NOW) {
-        *out = *now;
-        return 1;
-    } else if (in->tv_nsec != CHIMERA_VFS_TIME_OMIT) {
-        *out = *in;
-        return 1;
-    }
-
-    return 0;
-} /* chimera_vfs_resolve_set_time */
+    struct timespec       *out);
 
 struct chimera_vfs_attrs {
     uint64_t            va_req_mask;
@@ -256,21 +245,9 @@ chimera_vfs_timespec_ge(
  * relatime_need_update.  The resulting bump must touch atime ONLY -- never ctime
  * -- so that after a bump conditions 1 and 2 are false until the next write.
  */
-static inline int
+int
 chimera_vfs_relatime_needs_update(
     const struct timespec *atime,
     const struct timespec *mtime,
     const struct timespec *ctime,
-    const struct timespec *now)
-{
-    if (chimera_vfs_timespec_ge(mtime, atime)) {
-        return 1;
-    }
-    if (chimera_vfs_timespec_ge(ctime, atime)) {
-        return 1;
-    }
-    if (now->tv_sec - atime->tv_sec >= CHIMERA_VFS_RELATIME_PERIOD_SEC) {
-        return 1;
-    }
-    return 0;
-} /* chimera_vfs_relatime_needs_update */
+    const struct timespec *now);

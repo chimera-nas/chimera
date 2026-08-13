@@ -5,7 +5,7 @@
 #include "nfs_internal.h"
 #include "nfs4_open_state.h"
 #include "nfs4_pnfs.h"
-#include "vfs/vfs_error.h"
+#include "vfs/sdk/vfs_error.h"
 
 struct chimera_nfs4_write_ctx {
     struct chimera_nfs_thread        *thread;

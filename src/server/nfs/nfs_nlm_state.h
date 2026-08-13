@@ -16,7 +16,7 @@
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_claim.h"
-#include "vfs/vfs_cred.h"
+#include "vfs/sdk/vfs_cred.h"
 
 /* Magic number stored in nlm_client.magic to distinguish it from nfs4_session *
  * when reading connection private_data in the disconnect handler. */

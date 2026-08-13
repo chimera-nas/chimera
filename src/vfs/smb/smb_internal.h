@@ -10,11 +10,11 @@
 #include <pthread.h>
 #include <sys/stat.h>
 
-#include "vfs/vfs.h"
+#include "vfs/sdk/chimera_vfs_sdk.h"
 #include "common/tcp_flavor.h"
-#include "vfs/vfs_fh.h"
-#include "vfs/vfs_error.h"
-#include "vfs/vfs_attrs.h"
+#include "vfs/sdk/vfs_fh.h"
+#include "vfs/sdk/vfs_error.h"
+#include "vfs/sdk/vfs_attrs.h"
 #include "evpl/evpl.h"
 #include "common/logging.h"
 #include "common/evpl_iovec_cursor.h"

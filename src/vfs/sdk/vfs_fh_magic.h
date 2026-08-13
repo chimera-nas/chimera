@@ -8,9 +8,21 @@
  * that can never be changed.  They can be reserved
  * here.
  *
- * The 1-byte magic must be the first byte of all
- * file handles returned by the plugin to ensure
- * uniqueness across plugins.
+ * The magic identifies the module, not the bytes of a file handle.  It is
+ * stamped into struct chimera_vfs_module.fh_magic and core uses it to:
+ *
+ *   - index the process-wide module tables (chimera_vfs.modules and the
+ *     per-thread module_private), which is why it must be unique and
+ *     stable across releases;
+ *   - namespace keys when an fh-routed KV operation falls back to the
+ *     shared default KV module (see chimera_vfs_kv_route_fh), so keys from
+ *     different backends cannot collide there;
+ *   - stand in as a one-byte synthetic handle for the bootstrap operations
+ *     that run before any mount exists (mount, getrootfh).
+ *
+ * It is NOT a prefix of the handles a module returns.  Handles are routed
+ * on their leading 16-byte mount_id; the contract a module has to satisfy
+ * is documented at the top of vfs_fh.h.
  *
  * This header is MIT licensed, unlike the rest of chimera, so that
  * out-of-tree VFS modules under any license may modify it if desired

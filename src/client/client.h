@@ -8,7 +8,7 @@
 #include <sys/uio.h>
 
 #include "vfs/vfs.h"
-#include "vfs/vfs_cred.h"
+#include "vfs/sdk/vfs_cred.h"
 
 #define CHIMERA_CLIENT_IOV_MAX 260
 

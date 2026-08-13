@@ -21,7 +21,7 @@
 #include "evpl/evpl.h"
 
 #include "server/server.h"
-#include "vfs/vfs_cred.h"
+#include "vfs/sdk/vfs_cred.h"
 #include "vfs/vfs_pnfs.h"
 #include "server/server_internal.h"
 #include "common/logging.h"
