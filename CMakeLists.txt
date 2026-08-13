@@ -217,20 +217,20 @@ if(CMAKE_C_COMPILER_ID MATCHES "GNU")
 endif()
 
 if(CMAKE_C_COMPILER_ID MATCHES "Clang")
-    # The codebase (and the xdrzcc-generated XDR sources) is written for gcc's
-    # GNU C dialect, which clang flags under -Werror where gcc -- the default
-    # toolchain for Release/Debug -- stays silent: a declaration immediately
-    # after a label (-Wc23-extensions) and a variable-sized struct member that
-    # is not the last field (-Wgnu-...). Accept the same GNU/C23 extensions gcc
-    # does so the clang-only Coverage build isn't tripped. Added after -Werror
-    # above so these are not re-promoted.
+    # GNU C constructs clang flags under -Werror where gcc -- the default
+    # toolchain for Release/Debug -- stays silent.  The one customer is
+    # pjd_acl_buf (pjd_common.h), which embeds the flexible-array-member
+    # struct chimera_acl ahead of its backing storage, so the variable-sized
+    # field is deliberately not last.  Waive that one diagnostic rather than
+    # the whole -Wgnu group.  Added after -Werror above so it is not
+    # re-promoted.
     #
     # Likewise tolerate clang/gcc warning-tooling differences in the test
     # sources: gcc-only `#pragma GCC diagnostic ignored` names clang doesn't
     # know (-Wunknown-warning-option, e.g. -Wstringop-truncation in
     # cthon_common.c) and clang-only diagnostics gcc lacks (-Wabsolute-value on
     # an unsigned abs() in fsx.c).
-    add_definitions(-Wno-c23-extensions -Wno-gnu
+    add_definitions(-Wno-gnu-variable-sized-type-not-at-end
                     -Wno-unknown-warning-option -Wno-absolute-value)
 endif()
 
