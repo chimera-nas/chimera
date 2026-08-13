@@ -22,7 +22,7 @@
 
 /* Size of the per-request scratch buffer used by VFS modules.
  * Must be large enough for the largest operation (symlink: name + target + 2 NULs). */
-#define CHIMERA_VFS_PLUGIN_DATA_SIZE 8192
+#define CHIMERA_VFS_PLUGIN_DATA_SIZE            8192
 
 /* Default period between close-thread cache sweeps (open-path/open-file
  * cache LRU tick + NFSv4 idle-state reap). Every wake the timer walks the
