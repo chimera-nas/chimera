@@ -194,7 +194,7 @@ chimera_smb_query_directory_readdir_callback(
             evpl_iovec_cursor_append_uint64(&entry_cursor, smb_attrs.smb_size);
             evpl_iovec_cursor_append_uint64(&entry_cursor, smb_attrs.smb_alloc_size);
             evpl_iovec_cursor_append_uint32(&entry_cursor, smb_attrs.smb_attributes);
-            fname_len_field = (uint32_t *)evpl_iovec_cursor_data(&entry_cursor);
+            fname_len_field = (uint32_t *) evpl_iovec_cursor_data(&entry_cursor);
             evpl_iovec_cursor_append_uint32(&entry_cursor, 0);
 
             namebuf = evpl_iovec_cursor_data(&entry_cursor);
@@ -205,7 +205,7 @@ chimera_smb_query_directory_readdir_callback(
             if (name_utf16_len < 0) {
                 return 0;
             }
-            *fname_len_field = (uint32_t)name_utf16_len;
+            *fname_len_field = (uint32_t) name_utf16_len;
 
             evpl_iovec_cursor_skip(&entry_cursor, namelen_padded);
 
@@ -219,7 +219,7 @@ chimera_smb_query_directory_readdir_callback(
             evpl_iovec_cursor_append_uint64(&entry_cursor, smb_attrs.smb_size);
             evpl_iovec_cursor_append_uint64(&entry_cursor, smb_attrs.smb_alloc_size);
             evpl_iovec_cursor_append_uint32(&entry_cursor, smb_attrs.smb_attributes);
-            fname_len_field = (uint32_t *)evpl_iovec_cursor_data(&entry_cursor);
+            fname_len_field = (uint32_t *) evpl_iovec_cursor_data(&entry_cursor);
             evpl_iovec_cursor_append_uint32(&entry_cursor, 0);
             evpl_iovec_cursor_append_uint32(&entry_cursor, smb_attrs.smb_ea_size);
             evpl_iovec_cursor_zero(&entry_cursor, 26); /* short name */
@@ -232,7 +232,7 @@ chimera_smb_query_directory_readdir_callback(
             if (name_utf16_len < 0) {
                 return 0;
             }
-            *fname_len_field = (uint32_t)name_utf16_len;
+            *fname_len_field = (uint32_t) name_utf16_len;
 
             evpl_iovec_cursor_skip(&entry_cursor, namelen_padded);
 
@@ -241,7 +241,7 @@ chimera_smb_query_directory_readdir_callback(
             /* FileIndex (0 = unspecified per MS-FSCC) + FileNameLength + name.
              * NextEntryOffset was already written at the top of the entry. */
             evpl_iovec_cursor_append_uint32(&entry_cursor, file_index);
-            fname_len_field = (uint32_t *)evpl_iovec_cursor_data(&entry_cursor);
+            fname_len_field = (uint32_t *) evpl_iovec_cursor_data(&entry_cursor);
             evpl_iovec_cursor_append_uint32(&entry_cursor, 0);
 
             namebuf = evpl_iovec_cursor_data(&entry_cursor);
@@ -252,7 +252,7 @@ chimera_smb_query_directory_readdir_callback(
             if (name_utf16_len < 0) {
                 return 0;
             }
-            *fname_len_field = (uint32_t)name_utf16_len;
+            *fname_len_field = (uint32_t) name_utf16_len;
 
             evpl_iovec_cursor_skip(&entry_cursor, namelen_padded);
             break;
@@ -265,7 +265,7 @@ chimera_smb_query_directory_readdir_callback(
             evpl_iovec_cursor_append_uint64(&entry_cursor, smb_attrs.smb_size);
             evpl_iovec_cursor_append_uint64(&entry_cursor, smb_attrs.smb_alloc_size);
             evpl_iovec_cursor_append_uint32(&entry_cursor, smb_attrs.smb_attributes);
-            fname_len_field = (uint32_t *)evpl_iovec_cursor_data(&entry_cursor);
+            fname_len_field = (uint32_t *) evpl_iovec_cursor_data(&entry_cursor);
             evpl_iovec_cursor_append_uint32(&entry_cursor, 0);
 
             evpl_iovec_cursor_append_uint32(&entry_cursor, smb_attrs.smb_ea_size);
@@ -277,7 +277,7 @@ chimera_smb_query_directory_readdir_callback(
             if (name_utf16_len < 0) {
                 return 0;
             }
-            *fname_len_field = (uint32_t)name_utf16_len;
+            *fname_len_field = (uint32_t) name_utf16_len;
 
             evpl_iovec_cursor_skip(&entry_cursor, namelen_padded);
 
@@ -292,7 +292,7 @@ chimera_smb_query_directory_readdir_callback(
             evpl_iovec_cursor_append_uint64(&entry_cursor, smb_attrs.smb_size);
             evpl_iovec_cursor_append_uint64(&entry_cursor, smb_attrs.smb_alloc_size);
             evpl_iovec_cursor_append_uint32(&entry_cursor, smb_attrs.smb_attributes);
-            fname_len_field = (uint32_t *)evpl_iovec_cursor_data(&entry_cursor);
+            fname_len_field = (uint32_t *) evpl_iovec_cursor_data(&entry_cursor);
             evpl_iovec_cursor_append_uint32(&entry_cursor, 0);
             evpl_iovec_cursor_append_uint32(&entry_cursor, smb_attrs.smb_ea_size);
             evpl_iovec_cursor_zero(&entry_cursor, 28); /* short name */
@@ -306,7 +306,7 @@ chimera_smb_query_directory_readdir_callback(
             if (name_utf16_len < 0) {
                 return 0;
             }
-            *fname_len_field = (uint32_t)name_utf16_len;
+            *fname_len_field = (uint32_t) name_utf16_len;
 
             evpl_iovec_cursor_skip(&entry_cursor, namelen_padded);
 
@@ -320,7 +320,7 @@ chimera_smb_query_directory_readdir_callback(
             evpl_iovec_cursor_append_uint64(&entry_cursor, smb_attrs.smb_size);
             evpl_iovec_cursor_append_uint64(&entry_cursor, smb_attrs.smb_alloc_size);
             evpl_iovec_cursor_append_uint32(&entry_cursor, smb_attrs.smb_attributes);
-            fname_len_field = (uint32_t *)evpl_iovec_cursor_data(&entry_cursor);
+            fname_len_field = (uint32_t *) evpl_iovec_cursor_data(&entry_cursor);
             evpl_iovec_cursor_append_uint32(&entry_cursor, 0);
             evpl_iovec_cursor_append_uint32(&entry_cursor, smb_attrs.smb_ea_size);
             evpl_iovec_cursor_append_uint64(&entry_cursor, attrs->va_ino);
@@ -333,7 +333,7 @@ chimera_smb_query_directory_readdir_callback(
             if (name_utf16_len < 0) {
                 return 0;
             }
-            *fname_len_field = (uint32_t)name_utf16_len;
+            *fname_len_field = (uint32_t) name_utf16_len;
 
             evpl_iovec_cursor_skip(&entry_cursor, namelen_padded);
 

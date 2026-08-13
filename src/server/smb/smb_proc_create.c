@@ -2649,9 +2649,9 @@ chimera_smb_create_open_at_callback(
      * r_created covers newly created files; the disposition checks cover
      * truncated/replaced cases where the file existed but content was reset. */
     bool alsi_applies = request->create.r_created ||
-                        request->create.create_disposition == SMB2_FILE_OVERWRITE ||
-                        request->create.create_disposition == SMB2_FILE_OVERWRITE_IF ||
-                        request->create.create_disposition == SMB2_FILE_SUPERSEDE;
+        request->create.create_disposition == SMB2_FILE_OVERWRITE ||
+        request->create.create_disposition == SMB2_FILE_OVERWRITE_IF ||
+        request->create.create_disposition == SMB2_FILE_SUPERSEDE;
 
     if (request->create.alsi_alloc_size > 0 &&
         !request->create.r_is_directory && alsi_applies &&

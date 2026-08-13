@@ -520,8 +520,8 @@ chimera_smb_query_info(struct chimera_smb_request *request)
         struct chimera_vfs_attrs pipe_attrs;
 
         memset(&pipe_attrs, 0, sizeof(pipe_attrs));
-        pipe_attrs.va_mode     = S_IFREG | 0666;
-        pipe_attrs.va_nlink    = 1;
+        pipe_attrs.va_mode  = S_IFREG | 0666;
+        pipe_attrs.va_nlink = 1;
         /* FileInternalInformation (and FileAllInformation) marshal
          * IndexNumber directly from va_ino (smb_attr.h); leaving it 0 would
          * report every pipe FID with the same all-zero index number.  There
@@ -798,7 +798,7 @@ chimera_smb_query_info_reply(
     struct chimera_smb_request *request)
 {
     struct chimera_server_smb_thread *thread = request->compound->thread;
-    uint16_t namebuf[8];
+    uint16_t                          namebuf[8];
 
     if (request->query_info.info_type == SMB2_INFO_SECURITY) {
         chimera_smb_query_security_reply(reply_cursor, request);

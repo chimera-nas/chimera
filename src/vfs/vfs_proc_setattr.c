@@ -335,17 +335,17 @@ chimera_vfs_setattr_gate_complete(
      * owner's own touch was denied (STATUS_INTERNAL_ERROR over SMB).  NFS
      * never sets BTIME on a touch, which is why it was unaffected. */
     {
-        uint64_t m     = gate->set_attr->va_set_mask;
-        int      owner = (gate->cred->uid == 0) ||
+        uint64_t       m     = gate->set_attr->va_set_mask;
+        int            owner = (gate->cred->uid == 0) ||
             ((attr->va_set_mask & CHIMERA_VFS_ATTR_UID) &&
              (uint64_t) gate->cred->uid == attr->va_uid);
 
-        const uint64_t time_trigger  = CHIMERA_VFS_ATTR_ATIME |
-                                       CHIMERA_VFS_ATTR_MTIME |
-                                       CHIMERA_VFS_ATTR_BTIME;
-        const uint64_t owner_exempt  = time_trigger |
-                                       CHIMERA_VFS_ATTR_CTIME |
-                                       CHIMERA_VFS_ATTR_DOS_ATTRIBUTES;
+        const uint64_t time_trigger = CHIMERA_VFS_ATTR_ATIME |
+            CHIMERA_VFS_ATTR_MTIME |
+            CHIMERA_VFS_ATTR_BTIME;
+        const uint64_t owner_exempt = time_trigger |
+            CHIMERA_VFS_ATTR_CTIME |
+            CHIMERA_VFS_ATTR_DOS_ATTRIBUTES;
 
         /* Owner setting only timestamps (+ benign SMB sentinels): skip ACL. */
         if (owner && (m & time_trigger) && !(m & ~owner_exempt)) {
