@@ -7,7 +7,7 @@
 #include <sys/stat.h>
 
 #include "nfs_internal.h"
-#include "vfs/vfs_error.h"
+#include "vfs/sdk/vfs_error.h"
 
 static inline nfsstat4
 chimera_nfs4_errno_to_nfsstat4(enum chimera_vfs_error err)

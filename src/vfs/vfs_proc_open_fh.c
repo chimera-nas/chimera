@@ -7,7 +7,7 @@
 #include "vfs_internal.h"
 #include "common/misc.h"
 #include "vfs_open_cache.h"
-#include "vfs_access.h"
+#include "sdk/vfs_access.h"
 #include "vfs_release.h"
 #include "common/macros.h"
 static void

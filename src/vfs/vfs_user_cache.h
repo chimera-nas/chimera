@@ -11,7 +11,7 @@
 #include <time.h>
 #include <urcu/urcu-qsbr.h>
 
-#include "vfs_cred.h"
+#include "sdk/vfs_cred.h"
 #include "vfs_internal.h"
 
 // Maximum length for a Windows SID string (S-1-5-21-xxx-xxx-xxx-rid format)

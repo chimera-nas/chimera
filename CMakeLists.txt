@@ -633,3 +633,4 @@ add_definitions(-DXDR_CUSTOM_DUMP=1)
 
 add_subdirectory(src)
 add_subdirectory(tools)
+add_subdirectory(examples/vfs_module)

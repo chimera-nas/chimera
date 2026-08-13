@@ -22,8 +22,7 @@
 #include <sqlite3.h>
 #include <jansson.h>
 
-#include "vfs/vfs.h"
-#include "vfs/vfs_internal.h"
+#include "vfs/sdk/chimera_vfs_sdk.h"
 #include "sqlite.h"
 #include "common/logging.h"
 #include "common/macros.h"
@@ -383,6 +382,7 @@ sqlite_dispatch(
 } /* sqlite_dispatch */
 
 SYMBOL_EXPORT struct chimera_vfs_module vfs_sqlite = {
+    .sdk_version    = CHIMERA_VFS_SDK_VERSION,
     .name           = "sqlite",
     .fh_magic       = CHIMERA_VFS_FH_MAGIC_SQLITE,
     .capabilities   = CHIMERA_VFS_CAP_KV | CHIMERA_VFS_CAP_BLOCKING,

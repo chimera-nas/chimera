@@ -4,8 +4,8 @@
 
 #pragma once
 
-#include "vfs/vfs_attrs.h"
-#include "vfs/vfs_fh.h"
+#include "vfs/sdk/vfs_attrs.h"
+#include "vfs/sdk/vfs_fh.h"
 
 /*
  * How large an upstream file handle the NFS proxy client can re-encode.

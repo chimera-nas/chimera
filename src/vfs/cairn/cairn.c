@@ -27,14 +27,14 @@ void rocksdb_flush_wal(
 #include <utlist.h>
 
 
-#include "common/varint.h"
+#include "vfs/sdk/vfs_varint.h"
 
-#include "vfs/vfs.h"
-#include "vfs/vfs_internal.h"
-#include "vfs/vfs_acl.h"
-#include "vfs/vfs_acl_serialize.h"
-#include "vfs/vfs_access.h"
-#include "vfs/vfs_xattr_name.h"
+#include "vfs/sdk/chimera_vfs_sdk.h"
+#include "vfs/sdk/vfs_fh.h"
+#include "vfs/sdk/vfs_acl.h"
+#include "vfs/sdk/vfs_acl_serialize.h"
+#include "vfs/sdk/vfs_access.h"
+#include "vfs/sdk/vfs_xattr_name.h"
 #include "cairn.h"
 #include "common/logging.h"
 #include "common/misc.h"
@@ -574,10 +574,13 @@ cairn_data_iterator(struct cairn_thread *thread)
 static inline int
 cairn_dirent_scan(
     struct cairn_thread *thread,
-    uint64_t inum,
-    uint64_t start_hash,
-    int ( *callback )(struct cairn_dirent_key *key, struct cairn_dirent_value *dirent, void *private_data),
-    void *private_data)
+    uint64_t             inum,
+    uint64_t             start_hash,
+    int (               *callback )(
+        struct cairn_dirent_key   *key,
+        struct cairn_dirent_value *dirent,
+        void                      *private_data),
+    void                *private_data)
 {
     rocksdb_iterator_t        *iter;
     struct cairn_dirent_key    start_key, *dirent_key;
@@ -5228,8 +5231,9 @@ cairn_dispatch(
 } /* cairn_dispatch */
 
 SYMBOL_EXPORT struct chimera_vfs_module vfs_cairn = {
-    .name     = "cairn",
-    .fh_magic = CHIMERA_VFS_FH_MAGIC_CAIRN,
+    .sdk_version = CHIMERA_VFS_SDK_VERSION,
+    .name        = "cairn",
+    .fh_magic    = CHIMERA_VFS_FH_MAGIC_CAIRN,
     /* CAP_READ_PROVIDES_BUFFERS: cairn_read fills a single contiguous buffer it
      * allocates itself (SHARED, so the CAP_BLOCKING worker->connection-thread
      * release is safe).  TODO: drop this cap and convert cairn_read to scatter

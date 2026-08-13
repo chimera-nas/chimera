@@ -11,7 +11,7 @@
 #include "evpl/evpl_rpc2.h"
 #include "portmap_xdr.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_cred.h"
+#include "vfs/sdk/vfs_cred.h"
 #include "nfs_gss.h"
 #include "nfs_mount_xdr.h"
 #include "nfs3_xdr.h"

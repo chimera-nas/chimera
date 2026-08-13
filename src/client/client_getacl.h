@@ -7,7 +7,7 @@
 #include <string.h>
 
 #include "client_internal.h"
-#include "vfs/vfs_acl.h"
+#include "vfs/sdk/vfs_acl.h"
 
 /*
  * GETACL dispatch: resolve a path, open an O_PATH handle, getattr the canonical

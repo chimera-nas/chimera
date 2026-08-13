@@ -22,9 +22,8 @@
 #include <uthash.h>
 #include <jansson.h>
 #include <linux/version.h>
-#include "vfs/vfs_error.h"
-#include "vfs/vfs_internal.h"
-#include "vfs/vfs_acl.h"
+#include "vfs/sdk/vfs_error.h"
+#include "vfs/sdk/vfs_acl.h"
 
 // fchmodat support for AT_SYMLINK_NOFOLLOW was added in Linux 6.6
 #if defined(LINUX_VERSION_CODE) && defined(KERNEL_VERSION)
@@ -1996,6 +1995,7 @@ chimera_linux_dispatch(
 } /* linux_dispatch */
 
 SYMBOL_EXPORT struct chimera_vfs_module vfs_linux = {
+    .sdk_version  = CHIMERA_VFS_SDK_VERSION,
     .name         = "linux",
     .fh_magic     = CHIMERA_VFS_FH_MAGIC_LINUX,
     .capabilities = CHIMERA_VFS_CAP_BLOCKING | CHIMERA_VFS_CAP_OPEN_PATH_REQUIRED | CHIMERA_VFS_CAP_OPEN_FILE_REQUIRED |

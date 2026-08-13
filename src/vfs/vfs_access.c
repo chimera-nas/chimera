@@ -5,10 +5,10 @@
 #include <sys/stat.h>
 
 #include "vfs.h"
-#include "vfs_access.h"
-#include "vfs_attrs.h"
-#include "vfs_acl.h"
-#include "vfs_cred.h"
+#include "sdk/vfs_access.h"
+#include "sdk/vfs_attrs.h"
+#include "sdk/vfs_acl.h"
+#include "sdk/vfs_cred.h"
 #include "common/macros.h"
 
 SYMBOL_EXPORT uint32_t

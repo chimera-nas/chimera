@@ -2,9 +2,13 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
-#pragma once
+/*
+ * Compiled implementations of the credential helpers declared in
+ * sdk/vfs_cred.h.  These live in the VFS core (rather than as header
+ * inlines) so that backend modules incorporate no VFS code at build
+ * time; see the SDK boundary rules in sdk/chimera_vfs_sdk.h.
+ */
 
-#include <stdint.h>
 #include <string.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -14,47 +18,9 @@
 #endif /* ifdef __linux__ */
 #include <unistd.h>
 #include <errno.h>
-#include "vfs_attrs.h"
 
-/*
- * Maximum number of supplementary groups in VFS credentials.
- * This matches the NFS AUTH_SYS limit per RFC 1831.
- */
-#define CHIMERA_VFS_CRED_MAX_GIDS 16
-
-/*
- * Default anonymous UID/GID values.
- * These match the Linux kernel NFS server defaults (nfsnobody).
- */
-#define CHIMERA_VFS_ANON_UID      65534
-#define CHIMERA_VFS_ANON_GID      65534
-
-/*
- * VFS credential flavor enumeration.
- * Currently only UNIX credentials are supported, but this allows
- * for future extension to other authentication mechanisms.
- */
-enum chimera_vfs_cred_flavor {
-    CHIMERA_VFS_AUTH_NONE = 0,
-    CHIMERA_VFS_AUTH_UNIX = 1,
-    CHIMERA_VFS_AUTH_ATTR = 2
-};
-
-/*
- * VFS credential structure.
- *
- * This is the generic credential representation used throughout
- * the VFS layer, independent of the protocol that provided it.
- * It contains the essential identity information needed for
- * access control decisions.
- */
-struct chimera_vfs_cred {
-    enum chimera_vfs_cred_flavor flavor;
-    uint32_t                     uid;
-    uint32_t                     gid;
-    uint32_t                     ngids;
-    uint32_t                     gids[CHIMERA_VFS_CRED_MAX_GIDS];
-};
+#include "sdk/vfs_cred.h"
+#include "common/macros.h"
 
 /*
  * Compact identity hash for a credential, used to key the open-handle cache so
@@ -64,7 +30,7 @@ struct chimera_vfs_cred {
  * would at worst share a handle (no security boundary under AUTH_SYS, which the
  * client asserts anyway), so a 64-bit mix is ample.
  */
-static inline uint64_t
+SYMBOL_EXPORT uint64_t
 chimera_vfs_cred_hash(const struct chimera_vfs_cred *cred)
 {
     uint64_t h = 1469598103934665603ULL; /* FNV-1a offset basis */
@@ -96,10 +62,10 @@ chimera_vfs_cred_hash(const struct chimera_vfs_cred *cred)
  * Return a pointer to the cached server process credentials.
  *
  * Captures the UID and GID of the running server process on first call so
- * they can be restored after impersonating a client credential. Safe to call
- * multiple times; the static is initialized exactly once per translation unit.
+ * they can be restored after impersonating a client credential.  Safe to call
+ * from multiple threads: racing initializations write identical values.
  */
-static inline struct chimera_vfs_cred *
+SYMBOL_EXPORT struct chimera_vfs_cred *
 chimera_vfs_get_server_cred(void)
 {
     static struct chimera_vfs_cred cred = { 0 };
@@ -111,37 +77,9 @@ chimera_vfs_get_server_cred(void)
         cred.ngids  = 0;
     }
     return &cred;
-} // chimera_vfs_get_server_cred
+} /* chimera_vfs_get_server_cred */
 
-/*
- * Initialize a VFS credential as anonymous.
- *
- * @param cred     The credential to initialize
- * @param anonuid  Anonymous UID value
- * @param anongid  Anonymous GID value
- */
-static inline void
-chimera_vfs_cred_init_anonymous(
-    struct chimera_vfs_cred *cred,
-    uint32_t                 anonuid,
-    uint32_t                 anongid)
-{
-    cred->flavor = CHIMERA_VFS_AUTH_UNIX;
-    cred->uid    = anonuid;
-    cred->gid    = anongid;
-    cred->ngids  = 0;
-} // chimera_vfs_cred_init_anonymous
-
-/*
- * Initialize a VFS credential with UNIX identity.
- *
- * @param cred   The credential to initialize
- * @param uid    User ID
- * @param gid    Primary group ID
- * @param ngids  Number of supplementary group IDs
- * @param gids   Array of supplementary group IDs (may be NULL if ngids == 0)
- */
-static inline void
+SYMBOL_EXPORT void
 chimera_vfs_cred_init_unix(
     struct chimera_vfs_cred *cred,
     uint32_t                 uid,
@@ -161,21 +99,9 @@ chimera_vfs_cred_init_unix(
     if (ngids > 0 && gids) {
         memcpy(cred->gids, gids, ngids * sizeof(uint32_t));
     }
-} // chimera_vfs_cred_init_unix
+} /* chimera_vfs_cred_init_unix */
 
-/*
- * Initialize a VFS credential for attribute-based access control.
- *
- * With ATTR flavor, the UID and GID are applied to newly created file
- * attributes rather than changing the process identity.
- *
- * @param cred   The credential to initialize
- * @param uid    User ID to assign to created files
- * @param gid    Group ID to assign to created files
- * @param ngids  Unused; reserved for future use
- * @param gids   Unused; reserved for future use
- */
-static inline void
+SYMBOL_EXPORT void
 chimera_vfs_cred_init_attr(
     struct chimera_vfs_cred *cred,
     uint32_t                 uid,
@@ -183,34 +109,16 @@ chimera_vfs_cred_init_attr(
     uint32_t                 ngids,
     const uint32_t          *gids)
 {
+    (void) ngids;
+    (void) gids;
+
     cred->flavor = CHIMERA_VFS_AUTH_ATTR;
     cred->uid    = uid;
     cred->gid    = gid;
     cred->ngids  = 0;
-} // chimera_vfs_cred_init_unix
+} /* chimera_vfs_cred_init_attr */
 
-
-/*
- * Apply a client credential to the *calling thread* for filesystem access.
- *
- * For UNIX credentials this impersonates the client with setfsuid/setfsgid and
- * a raw setgroups syscall.  These are deliberately per-thread: glibc's
- * seteuid/setegid/setgroups broadcast the change to every thread in the process
- * (POSIX setxid semantics), which would let concurrent delegation threads
- * impersonating different users clobber each other's identity mid-syscall.
- * setfsuid/setfsgid set only the filesystem ids the kernel checks for file
- * access (which is all a passthrough backend needs) and the raw setgroups
- * syscall touches only the calling task's credentials.
- *
- * If the client identity matches the server identity, the call is a no-op.
- * For ATTR credentials, injects UID/GID into set_attrs if not already set.
- *
- * @param cred       The client credential to apply
- * @param set_attrs  Attribute set to inject UID/GID into (ATTR flavor only,
- *                   may be NULL)
- * @return 0 on success, errno value on failure
- */
-static inline int
+SYMBOL_EXPORT int
 chimera_setup_credential(
     const struct chimera_vfs_cred *cred,
     struct chimera_vfs_attrs      *set_attrs)
@@ -273,17 +181,7 @@ chimera_setup_credential(
     return 0;
 } /* chimera_setup_credential */
 
-/*
- * Restore the calling thread's filesystem credentials after impersonation.
- *
- * Reverses chimera_setup_credential() by restoring the server's fsuid/fsgid and
- * clearing the supplementary groups for this thread.  If the client credential
- * matched the server identity, the call is a no-op.
- *
- * @param cred  The client credential that was previously applied
- * @return 0 on success, errno value on failure
- */
-static inline int
+SYMBOL_EXPORT int
 chimera_restore_privilege(const struct chimera_vfs_cred *cred)
 {
     const struct chimera_vfs_cred *sc = chimera_vfs_get_server_cred();
@@ -307,24 +205,9 @@ chimera_restore_privilege(const struct chimera_vfs_cred *cred)
 #endif /* ifdef __linux__ */
     }
     return 0;
-} // chimera_restore_privilege
+} /* chimera_restore_privilege */
 
-/*
- * POSIX/Linux "kill-priv" on write: when a process *without appropriate
- * privilege* modifies the contents of a regular file (write or truncate), the
- * set-user-ID bit is cleared, and the set-group-ID bit is cleared if the file
- * is group-executable.  (A set-group-ID file with no group-execute bit denotes
- * mandatory locking, not a privileged execution, so that bit is preserved --
- * this mirrors the kernel's should_remove_suid()/setattr_should_drop_suidgid()
- * logic.)
- *
- * `cred` is the writer's credential (NULL or AUTH_NONE means an internal/server
- * write, which is privileged and exempt); `mode` is the file's current mode.
- * Returns the (possibly unchanged) mode with the offending bits removed.  Only
- * a non-privileged (non-root) UNIX writer triggers the clear, and only for a
- * regular file that actually carries S_ISUID/S_ISGID.
- */
-static inline uint32_t
+SYMBOL_EXPORT uint32_t
 chimera_vfs_killpriv_mode(
     const struct chimera_vfs_cred *cred,
     uint32_t                       mode)
@@ -346,4 +229,4 @@ chimera_vfs_killpriv_mode(
     }
 
     return mode;
-} // chimera_vfs_killpriv_mode
+} /* chimera_vfs_killpriv_mode */

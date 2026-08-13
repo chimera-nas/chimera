@@ -2,11 +2,12 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include <sys/stat.h>
 #include <string.h>
 #include "vfs_procs.h"
 #include "vfs_internal.h"
 #include "vfs_release.h"
-#include "vfs_access.h"
+#include "sdk/vfs_access.h"
 #include "common/misc.h"
 #include "vfs_open_cache.h"
 #include "vfs_name_cache.h"

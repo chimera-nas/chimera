@@ -4,8 +4,8 @@
 
 #include <sys/stat.h>
 
-#include "vfs_acl.h"
-#include "vfs_cred.h"
+#include "sdk/vfs_acl.h"
+#include "sdk/vfs_cred.h"
 #include "common/macros.h"
 
 /* Bits everyone is granted regardless of rwx (attribute and ACL reads).

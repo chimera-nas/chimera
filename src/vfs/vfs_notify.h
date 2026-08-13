@@ -8,7 +8,7 @@
 #include <pthread.h>
 #include <uthash.h>
 #include "vfs/vfs.h"
-#include "vfs_fh.h"
+#include "sdk/vfs_fh.h"
 
 /* Event types matching SMB2 CompletionFilter categories */
 #define CHIMERA_VFS_NOTIFY_FILE_ADDED    0x0001

@@ -21,7 +21,7 @@
 #include "uthash.h"
 #include "common/misc.h"
 #include "common/tcp_flavor.h"
-#include "vfs/vfs_fh.h"
+#include "vfs/sdk/vfs_fh.h"
 #include "nfs_common/nfs_fh_limits.h"
 #include "evpl/evpl_rpc2.h"
 #include "nlm4_xdr.h"

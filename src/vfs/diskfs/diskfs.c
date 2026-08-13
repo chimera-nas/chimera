@@ -135,6 +135,7 @@ diskfs_dispatch(
 
 
 SYMBOL_EXPORT struct chimera_vfs_module vfs_diskfs = {
+    .sdk_version  = CHIMERA_VFS_SDK_VERSION,
     .name         = "diskfs",
     .fh_magic     = CHIMERA_VFS_FH_MAGIC_DISKFS,
     .capabilities = CHIMERA_VFS_CAP_CREATE_UNLINKED | CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_KV |

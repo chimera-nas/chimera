@@ -8,7 +8,7 @@
 
 #include "nfs3_xdr.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_fh.h"
+#include "vfs/sdk/vfs_fh.h"
 #include "nfs_common/nfs_fh_limits.h"
 
 #define CHIMERA_NFS3_ATTR_MASK     ( \

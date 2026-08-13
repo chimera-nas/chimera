@@ -14,8 +14,8 @@
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 #include "vfs/vfs_state.h"
-#include "vfs/vfs_access.h"
-#include "vfs/vfs_acl.h"
+#include "vfs/sdk/vfs_access.h"
+#include "vfs/sdk/vfs_acl.h"
 
 /*
  * Acquire a cross-protocol SHARE reservation in vfs_state for a freshly
