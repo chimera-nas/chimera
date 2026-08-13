@@ -9,7 +9,7 @@
 #include <pthread.h>
 #include <urcu/urcu-qsbr.h>
 #include "vfs/vfs.h"
-#include "vfs/vfs_fh.h"
+#include "vfs/sdk/vfs_fh.h"
 
 #ifndef container_of
 #define container_of(ptr, type, member) ({            \

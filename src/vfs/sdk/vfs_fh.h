@@ -7,9 +7,41 @@
 #include <stdint.h>
 #include <string.h>
 #include <xxhash.h>
-#include "common/varint.h"
-#include "vfs/vfs_attrs.h"     /* CHIMERA_VFS_FH_SIZE */
+#include "vfs_varint.h"
+#include "vfs_attrs.h"     /* CHIMERA_VFS_FH_SIZE */
 
+/*
+ * FILE HANDLE ROUTING CONTRACT
+ *
+ * Core routes every handle-addressed operation by looking the handle up in
+ * the mount table (chimera_vfs_get_module): the lookup key is the leading
+ * CHIMERA_VFS_MOUNT_ID_SIZE bytes, and the mount's entry is registered from
+ * the root handle the backend returned out of its mount op.  A backend that
+ * does not satisfy the invariant below is unroutable -- core resolves no
+ * module for its handles and every operation fails ESTALE/BADHANDLE.
+ *
+ * A backend must therefore guarantee:
+ *
+ *   1. Every handle it emits for an object in a mount begins with the same
+ *      16 bytes as that mount's root handle.
+ *   2. Those 16 bytes are unique across all mounts live in the process --
+ *      including mounts served by other backends.  A collision misroutes
+ *      operations to the wrong mount.
+ *   3. CHIMERA_VFS_MOUNT_ID_SIZE <= va_fh_len <= CHIMERA_VFS_FH_SIZE.
+ *
+ * Everything after the mount_id is the backend's own fh_fragment: core never
+ * interprets it, so its layout, and whether it is stable across restarts, is
+ * the backend's business.  (Note that NFS clients expect handles to survive a
+ * server restart; a backend that mints volatile fragments will hand out stale
+ * handles across one.)
+ *
+ * The encoders below are the supported way to satisfy 1 and 2:
+ * chimera_vfs_encode_fh_mount derives the mount_id as
+ * XXH3_128(fsid || fh_fragment), which gets uniqueness from the 16-byte fsid,
+ * and chimera_vfs_encode_fh_parent copies a parent's mount_id onto a child.
+ * A backend may compute the 16 bytes some other way, but then it owns the
+ * uniqueness argument in 2.
+ */
 #define CHIMERA_VFS_MOUNT_ID_SIZE 16
 #define CHIMERA_VFS_FSID_SIZE     16
 
@@ -212,6 +244,8 @@ chimera_vfs_decode_fh_inum(
 {
     const uint8_t *ptr = (const uint8_t *) fh + CHIMERA_VFS_MOUNT_ID_SIZE;
 
+    (void) fhlen;
+
     ptr += chimera_decode_uint64(ptr, inum);
     chimera_decode_uint32(ptr, gen);
 } /* chimera_vfs_decode_fh_inum */
@@ -228,6 +262,8 @@ chimera_vfs_fh_fragment(
     const void *fh,
     int         fhlen)
 {
+    (void) fhlen;
+
     return (const uint8_t *) fh + CHIMERA_VFS_MOUNT_ID_SIZE;
 } /* chimera_vfs_fh_fragment */
 

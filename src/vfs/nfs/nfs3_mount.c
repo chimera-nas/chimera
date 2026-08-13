@@ -11,7 +11,7 @@
 #include "nfs_internal.h"
 #include "evpl/evpl_rpc2.h"
 #include "vfs/vfs_internal.h"
-#include "vfs/vfs_fh.h"
+#include "vfs/sdk/vfs_fh.h"
 
 #define CHIMERA_NFS_RDMA_PORT 20049
 

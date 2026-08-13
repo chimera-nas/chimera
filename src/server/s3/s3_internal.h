@@ -13,7 +13,7 @@
 #include "s3_status.h"
 #include "vfs/vfs.h"
 #include "common/tcp_flavor.h"
-#include "vfs/vfs_cred.h"
+#include "vfs/sdk/vfs_cred.h"
 #include "s3_cred_cache.h"
 #include "s3_chunk.h"
 

@@ -7,7 +7,7 @@
 
 #include "posix_internal.h"
 #include "../client/client_setattr.h"
-#include "vfs/vfs_acl.h"
+#include "vfs/sdk/vfs_acl.h"
 
 /*
  * Set the canonical NFSv4/Windows ACL on `path`.  This is a Chimera-specific

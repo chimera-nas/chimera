@@ -32,8 +32,8 @@
 #include "server/server.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
-#include "vfs/vfs_attrs.h"
-#include "vfs/vfs_cred.h"
+#include "vfs/sdk/vfs_attrs.h"
+#include "vfs/sdk/vfs_cred.h"
 #include "vfs/vfs_release.h"
 #include "rest_internal.h"
 

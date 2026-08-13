@@ -20,7 +20,7 @@
 #include "prometheus-c.h"
 #include "server/server.h"
 #include "common/test_users.h"
-#include "vfs/vfs.h"
+#include "vfs/sdk/chimera_vfs_sdk.h"
 #include "vfs/vfs_procs.h"
 #include "evpl/evpl.h"
 #include "common/tcp_flavor.h"

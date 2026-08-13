@@ -25,16 +25,17 @@ void rocksdb_flush_wal(
 #include <jansson.h>
 #include <limits.h>
 #include <utlist.h>
+#include <urcu/urcu-qsbr.h>
 
 
-#include "common/varint.h"
+#include "vfs/sdk/vfs_varint.h"
 
-#include "vfs/vfs.h"
-#include "vfs/vfs_internal.h"
-#include "vfs/vfs_acl.h"
-#include "vfs/vfs_acl_serialize.h"
-#include "vfs/vfs_access.h"
-#include "vfs/vfs_xattr_name.h"
+#include "vfs/sdk/chimera_vfs_sdk.h"
+#include "vfs/sdk/vfs_fh.h"
+#include "vfs/sdk/vfs_acl.h"
+#include "vfs/sdk/vfs_acl_serialize.h"
+#include "vfs/sdk/vfs_access.h"
+#include "vfs/sdk/vfs_xattr_name.h"
 #include "cairn.h"
 #include "common/logging.h"
 #include "common/misc.h"
@@ -5763,8 +5764,9 @@ cairn_dispatch(
 } /* cairn_dispatch */
 
 SYMBOL_EXPORT struct chimera_vfs_module vfs_cairn = {
-    .name     = "cairn",
-    .fh_magic = CHIMERA_VFS_FH_MAGIC_CAIRN,
+    .sdk_version = CHIMERA_VFS_SDK_VERSION,
+    .name        = "cairn",
+    .fh_magic    = CHIMERA_VFS_FH_MAGIC_CAIRN,
     /* CAP_READ_PROVIDES_BUFFERS: cairn_read fills a single contiguous buffer it
      * allocates itself (SHARED, so the CAP_BLOCKING worker->connection-thread
      * release is safe).  TODO: drop this cap and convert cairn_read to scatter

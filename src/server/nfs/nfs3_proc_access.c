@@ -7,8 +7,8 @@
 #include "nfs_common/nfs3_attr.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
-#include "vfs/vfs_acl.h"
-#include "vfs/vfs_access.h"
+#include "vfs/sdk/vfs_acl.h"
+#include "vfs/sdk/vfs_access.h"
 #include "nfs3_dump.h"
 #include "nfs3_trace.h"
 

@@ -26,8 +26,7 @@
 #include <jansson.h>
 #include <linux/version.h>
 
-#include "vfs/vfs_error.h"
-#include "vfs/vfs_internal.h"
+#include "vfs/sdk/vfs_error.h"
 
 #include "evpl/evpl.h"
 
@@ -2612,6 +2611,7 @@ chimera_io_uring_dispatch(
 } /* io_uring_dispatch */
 
 SYMBOL_EXPORT struct chimera_vfs_module vfs_io_uring = {
+    .sdk_version  = CHIMERA_VFS_SDK_VERSION,
     .name         = "io_uring",
     .fh_magic     = CHIMERA_VFS_FH_MAGIC_IO_URING,
     .capabilities = CHIMERA_VFS_CAP_OPEN_PATH_REQUIRED | CHIMERA_VFS_CAP_OPEN_FILE_REQUIRED | CHIMERA_VFS_CAP_FS |

@@ -14,7 +14,7 @@
 #include <unistd.h>
 
 #include "common/platform.h"
-#include "vfs/vfs_cred.h"
+#include "vfs/sdk/vfs_cred.h"
 
 struct chimera_posix_client;
 struct chimera_client_config;

@@ -324,7 +324,7 @@ chimera_nfs_dispatch(
     if (request->opcode == CHIMERA_VFS_OP_MOUNT) {
         /* Resolve the common TCP flavor for outbound connections from the
          * VFS once we have a thread/vfs in hand. Constant per process. */
-        shared->tcp_flavor   = request->thread->vfs->tcp_flavor;
+        shared->tcp_flavor   = (enum chimera_tcp_flavor) chimera_vfs_request_tcp_flavor(request);
         shared->tcp_protocol = chimera_tcp_flavor_to_protocol(shared->tcp_flavor);
 
         nfsvers = chimera_nfs_get_mount_version(&request->mount.options);
@@ -389,8 +389,9 @@ chimera_nfs_dispatch(
 } /* chimera_nfs_dispatch */
 
 SYMBOL_EXPORT struct chimera_vfs_module vfs_nfs = {
-    .name     = "nfs",
-    .fh_magic = CHIMERA_VFS_FH_MAGIC_NFS,
+    .sdk_version = CHIMERA_VFS_SDK_VERSION,
+    .name        = "nfs",
+    .fh_magic    = CHIMERA_VFS_FH_MAGIC_NFS,
     /* CAP_READ_PROVIDES_BUFFERS: the proxy returns the data buffers handed up
      * by its upstream RPC reply (it reassigns request->read.iov), so the VFS
      * core must not pre-allocate buffers for it. */

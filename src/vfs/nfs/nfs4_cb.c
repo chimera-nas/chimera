@@ -21,6 +21,7 @@
  * client overrides chimera_nfs4_cb_layoutrecall() to find and return the layout.
  */
 
+#include <errno.h>
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>

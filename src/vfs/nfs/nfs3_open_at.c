@@ -6,7 +6,7 @@
 #include "nfs3_open_state.h"
 #include "nfs_common/nfs3_status.h"
 #include "nfs_common/nfs3_attr.h"
-#include "vfs/vfs_error.h"
+#include "vfs/sdk/vfs_error.h"
 
 struct chimera_nfs3_open_at_ctx {
     struct chimera_nfs_thread        *thread;

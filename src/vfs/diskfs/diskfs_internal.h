@@ -13,6 +13,7 @@
 
 #define _GNU_SOURCE
 
+#include "vfs/sdk/vfs_fh.h"
 #include <stdint.h>
 
 #include <stdlib.h>
@@ -46,7 +47,7 @@
 
 #include "common/platform.h"
 
-#include "common/varint.h"
+#include "vfs/sdk/vfs_varint.h"
 
 #include "common/rbtree.h"
 
@@ -59,18 +60,16 @@
 #include "prometheus-c.h"
 
 
-#include "vfs/vfs.h"
-
-#include "vfs/vfs_internal.h"
+#include "vfs/sdk/chimera_vfs_sdk.h"
 
 
-#include "vfs/vfs_acl.h"
+#include "vfs/sdk/vfs_acl.h"
 
-#include "vfs/vfs_access.h"
+#include "vfs/sdk/vfs_access.h"
 
-#include "vfs/vfs_acl_serialize.h"
+#include "vfs/sdk/vfs_acl_serialize.h"
 
-#include "vfs/vfs_xattr_name.h"
+#include "vfs/sdk/vfs_xattr_name.h"
 
 #include "diskfs.h"
 

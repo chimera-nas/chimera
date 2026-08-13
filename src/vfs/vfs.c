@@ -1310,6 +1310,14 @@ chimera_vfs_register(
     struct chimera_vfs_module *module,
     const char                *cfgdata)
 {
+    /* A module built against a different SDK contract would misinterpret the
+     * request/module structures; refuse it at load time rather than corrupt
+     * memory.  Out-of-tree modules arrive via dlopen (module_path), so this
+     * is their only compatibility gate. */
+    chimera_vfs_abort_if(module->sdk_version != CHIMERA_VFS_SDK_VERSION,
+                         "module %s was built against VFS SDK version %u; this chimera provides version %u",
+                         module->name, module->sdk_version, CHIMERA_VFS_SDK_VERSION);
+
     vfs->modules[module->fh_magic] = module;
 
     vfs->module_private[module->fh_magic] = module->init(cfgdata, vfs->metrics.metrics);

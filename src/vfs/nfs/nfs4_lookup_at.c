@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "nfs_internal.h"
-#include "vfs/vfs_error.h"
+#include "vfs/sdk/vfs_error.h"
 
 enum chimera_nfs4_lookup_op_type {
     LOOKUP_OP_NORMAL,
