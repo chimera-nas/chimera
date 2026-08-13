@@ -594,7 +594,7 @@ chimera_vfs_init(
 
     /* Find the KV module among those already registered. */
     vfs->kv_module = NULL;
-    for (int i = 0; i < CHIMERA_VFS_FH_MAGIC_MAX; i++) {
+    for (int i = 0; i < CHIMERA_VFS_MAX_MODULES; i++) {
         if (vfs->modules[i] && strcmp(vfs->modules[i]->name, effective_kv_module) == 0) {
             vfs->kv_module = vfs->modules[i];
             break;
@@ -893,7 +893,7 @@ chimera_vfs_destroy(struct chimera_vfs *vfs)
 
     chimera_vfs_pnfs_destroy(vfs->pnfs);
 
-    for (i = 0; i < CHIMERA_VFS_FH_MAGIC_MAX; i++) {
+    for (i = 0; i < CHIMERA_VFS_MAX_MODULES; i++) {
         module = vfs->modules[i];
 
         if (!module) {
@@ -1154,7 +1154,7 @@ chimera_vfs_thread_init(
 
     evpl_add_doorbell(evpl, &thread->doorbell, chimera_vfs_process_completion);
 
-    for (i = 0; i < CHIMERA_VFS_FH_MAGIC_MAX; i++) {
+    for (i = 0; i < CHIMERA_VFS_MAX_MODULES; i++) {
         module = vfs->modules[i];
 
         if (!module) {
@@ -1183,7 +1183,7 @@ chimera_vfs_thread_destroy(struct chimera_vfs_thread *thread)
 
     evpl_remove_doorbell(thread->evpl, &thread->doorbell);
 
-    for (i = 0; i < CHIMERA_VFS_FH_MAGIC_MAX; i++) {
+    for (i = 0; i < CHIMERA_VFS_MAX_MODULES; i++) {
         module = thread->vfs->modules[i];
 
         if (!module) {

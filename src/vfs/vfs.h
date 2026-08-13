@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <sys/time.h>
 #include <uthash.h>
+#include "vfs_fh_magic.h"
 #include "vfs_attrs.h"
 #include "vfs_dump.h"
 #include "vfs_error.h"
@@ -18,8 +19,12 @@
 #include "common/tcp_flavor.h"
 #include "oteltracing.h"
 
-#define CHIMERA_VFS_PATH_MAX 4096
-#define CHIMERA_VFS_NAME_MAX 256
+#define CHIMERA_VFS_PATH_MAX    4096
+#define CHIMERA_VFS_NAME_MAX    256
+
+/* Module tables are indexed by the one-byte fh_magic, so they span the
+ * full 8-bit range (see vfs_fh_magic.h for reserved values). */
+#define CHIMERA_VFS_MAX_MODULES 256
 struct evpl;
 
 struct chimera_vfs;
@@ -1168,34 +1173,6 @@ struct chimera_vfs_request {
 
 
 
-/* Each module must have a unique FH_MAGIC value
- * that can never be changed.  They can be reserved
- * here.
- *
- * The 1-byte magic must be the first byte of all
- * file handles returned by the plugin to ensure
- * uniqueness across plugins.
- *
- */
-
-enum CHIMERA_FS_FH_MAGIC {
-    /* Reserved for internal use by chimera */
-    CHIMERA_VFS_FH_MAGIC_ROOT     = 0,
-    CHIMERA_VFS_FH_MAGIC_MEMFS    = 1,
-    CHIMERA_VFS_FH_MAGIC_LINUX    = 2,
-    CHIMERA_VFS_FH_MAGIC_IO_URING = 3,
-    CHIMERA_VFS_FH_MAGIC_CAIRN    = 4,
-    CHIMERA_VFS_FH_MAGIC_DISKFS   = 5,
-    CHIMERA_VFS_FH_MAGIC_NFS      = 6,
-    /* KV-only backends (no filesystem; never serve a file handle, but occupy a
-     * module slot so they can be selected as the default KV module). */
-    CHIMERA_VFS_FH_MAGIC_MEMKV    = 7,
-    CHIMERA_VFS_FH_MAGIC_SQLITE   = 8,
-    CHIMERA_VFS_FH_MAGIC_SMB      = 9,
-    CHIMERA_VFS_FH_MAGIC_MAX      = 10
-
-};
-
 /* If set, module requires open handles for path operations
  * such as mkdir, remove, open_at, etc.  Equivalent to POSIX open
  * with O_PATH flag.
@@ -1397,7 +1374,7 @@ struct chimera_vfs_module {
     const char *name;
 
     /* Required
-     * Set to CHIMERA_FS_FH_MAGIC value reserved above
+     * Set to CHIMERA_FS_FH_MAGIC value reserved in vfs_fh_magic.h
      */
 
     uint8_t     fh_magic;
@@ -1550,8 +1527,8 @@ struct chimera_vfs_state;
 struct chimera_vfs_pnfs;
 
 struct chimera_vfs {
-    struct chimera_vfs_module            *modules[CHIMERA_VFS_FH_MAGIC_MAX];
-    void                                 *module_private[CHIMERA_VFS_FH_MAGIC_MAX];
+    struct chimera_vfs_module            *modules[CHIMERA_VFS_MAX_MODULES];
+    void                                 *module_private[CHIMERA_VFS_MAX_MODULES];
     struct chimera_vfs_module            *kv_module;
     struct vfs_open_cache                *vfs_open_path_cache;
     struct vfs_open_cache                *vfs_open_file_cache;
@@ -1583,7 +1560,7 @@ struct chimera_vfs {
 struct chimera_vfs_thread {
     struct evpl                         *evpl;
     struct chimera_vfs                  *vfs;
-    void                                *module_private[CHIMERA_VFS_FH_MAGIC_MAX];
+    void                                *module_private[CHIMERA_VFS_MAX_MODULES];
     /* Thread-local recycle magazines for the fungible RCU caches. */
     struct chimera_rcu_magazine          rcu_magazines[CHIMERA_RCU_POOL_COUNT];
     struct chimera_vfs_find_result      *free_find_results;

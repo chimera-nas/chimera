@@ -207,7 +207,7 @@ chimera_vfs_mount(
         mount_path++;
     }
 
-    for (i = 0; i < CHIMERA_VFS_FH_MAGIC_MAX; i++) {
+    for (i = 0; i < CHIMERA_VFS_MAX_MODULES; i++) {
         module = vfs->modules[i];
 
         if (!module) {
@@ -219,7 +219,7 @@ chimera_vfs_mount(
         }
     }
 
-    if (i == CHIMERA_VFS_FH_MAGIC_MAX) {
+    if (i == CHIMERA_VFS_MAX_MODULES) {
         chimera_vfs_error("chimera_vfs_mount: module %s not found",
                           module_name);
         callback(thread, CHIMERA_VFS_ENOENT, private_data);
