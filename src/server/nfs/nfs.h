@@ -152,6 +152,47 @@ chimera_nfs_get_export(
 
 
 /**
+ * @brief Copies an NFS export by name into caller-owned storage.
+ *
+ * Unlike chimera_nfs_get_export, the snapshot stays valid after a concurrent
+ * export removal frees the live record, so it is safe to use across
+ * asynchronous work.
+ *
+ * @param nfs_shared Pointer to the NFS shared context.
+ * @param name       Name of the export.
+ * @param out        Receives a by-value copy of the export.
+ * @return 0 on success, -1 if no export has that name.
+ */
+int
+chimera_nfs_get_export_copy(
+    void                      *nfs_shared,
+    const char                *name,
+    struct chimera_nfs_export *out);
+
+
+/**
+ * @brief Copies the NFS export whose name is the given single path component.
+ *
+ * Matches export names by their single component with any leading slashes
+ * ignored ("/backup" matches the component "backup").  Exports whose names are
+ * not a single non-empty component -- including the root ("/") export -- never
+ * match.  Used to resolve junction entries in the NFSv4 namespace root.
+ *
+ * @param nfs_shared Pointer to the NFS shared context.
+ * @param name       Component name (not NUL-terminated).
+ * @param name_len   Length of the component name.
+ * @param out        Receives a by-value copy of the export.
+ * @return 0 on success, -1 if no export matches the component.
+ */
+int
+chimera_nfs_get_export_by_component(
+    void                      *nfs_shared,
+    const char                *name,
+    uint32_t                   name_len,
+    struct chimera_nfs_export *out);
+
+
+/**
  * @brief Callback type for iterating over NFS exports.
  *
  * @param export Pointer to the current export.
