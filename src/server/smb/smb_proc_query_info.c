@@ -216,11 +216,12 @@ chimera_smb_query_stream_info(struct chimera_smb_request *request)
     uint32_t                          base_fh_len;
 
     /* Gate: named streams must be enabled and the backend must support them;
-     * otherwise behave as before (class not implemented). */
+     * otherwise MS-FSA says FileStreamInformation is not a valid info class
+     * for this object store. */
     if (!thread->shared->config.named_streams ||
         !(open_file->handle->vfs_module->capabilities & CHIMERA_VFS_CAP_NAMED_STREAMS)) {
         chimera_smb_open_file_release(request, open_file);
-        chimera_smb_complete_request(request, SMB2_STATUS_NOT_IMPLEMENTED);
+        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_INFO_CLASS);
         return;
     }
 
