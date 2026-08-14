@@ -139,6 +139,80 @@ chimera_smb_emit_stream_info(
     return out;
 } /* chimera_smb_emit_stream_info */
 
+/* Finish a FileStreamInformation query from `count` packed stream records held
+ * in request->query_info.stream_records: measure the wire form, apply the
+ * MS-SMB2 3.3.5.20.1 buffer-length rules, and complete.  The records stay put
+ * for the reply builder to emit. */
+static void
+chimera_smb_query_stream_info_complete(
+    struct chimera_smb_request *request,
+    uint32_t                    records_len,
+    uint32_t                    count)
+{
+    uint32_t status = SMB2_STATUS_SUCCESS;
+
+    request->query_info.stream_record_len   = records_len;
+    request->query_info.stream_record_count = count;
+
+    request->query_info.output_length = chimera_smb_emit_stream_info(
+        &request->compound->thread->iconv_ctx,
+        request->query_info.stream_records,
+        records_len,
+        count,
+        NULL);
+
+    if (request->query_info.max_response_size < SMB2_FILE_STREAM_INFO_FIXED_SIZE) {
+        status = SMB2_STATUS_INFO_LENGTH_MISMATCH;
+    } else if (request->query_info.max_response_size < request->query_info.output_length) {
+        status                            = SMB2_STATUS_BUFFER_OVERFLOW;
+        request->query_info.output_length = request->query_info.max_response_size;
+    }
+
+    chimera_smb_open_file_release(request, request->query_info.open_file);
+    chimera_smb_complete_request(request, status);
+} /* chimera_smb_query_stream_info_complete */
+
+/* A backend without named-stream support still has the file's unnamed data
+ * fork, and MS-FSCC 2.4.43 counts that fork as a stream: Windows on NTFS and
+ * Samba on a plain filesystem (vfswrap_fstreaminfo, the default VFS op used
+ * when no vfs_streams_* module is loaded) both answer FileStreamInformation
+ * with a single synthesized "::$DATA" entry describing the file itself rather
+ * than failing the level.  Synthesize the same entry from the file's size so a
+ * client probing for streams gets the conformant answer instead of an error.
+ * A directory has no data fork and yields an empty list, as on both. */
+static void
+chimera_smb_query_stream_info_default_callback(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct chimera_smb_request     *request = private_data;
+    struct chimera_vfs_stream_entry entry;
+    uint32_t                        records_len = 0;
+    uint32_t                        count       = 0;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_smb_open_file_release(request, request->query_info.open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_INTERNAL_ERROR);
+        return;
+    }
+
+    if ((attr->va_mode & S_IFMT) != S_IFDIR) {
+        /* A zero-length name is what makes the emitter spell the default fork
+         * ":" + "" + ":$DATA". */
+        entry.size     = attr->va_size;
+        entry.alloc    = attr->va_space_used;
+        entry.name_len = 0;
+
+        memcpy(request->query_info.stream_records, &entry, sizeof(entry));
+
+        records_len = sizeof(entry);
+        count       = 1;
+    }
+
+    chimera_smb_query_stream_info_complete(request, records_len, count);
+} /* chimera_smb_query_stream_info_default_callback */
+
 static void
 chimera_smb_query_stream_info_list_callback(
     enum chimera_vfs_error error_code,
@@ -165,18 +239,8 @@ chimera_smb_query_stream_info_list_callback(
     }
 
     memcpy(request->query_info.stream_records, records, records_len);
-    request->query_info.stream_record_len   = records_len;
-    request->query_info.stream_record_count = count;
 
-    request->query_info.output_length = chimera_smb_emit_stream_info(
-        &request->compound->thread->iconv_ctx,
-        request->query_info.stream_records,
-        records_len,
-        count,
-        NULL);
-
-    chimera_smb_open_file_release(request, request->query_info.open_file);
-    chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
+    chimera_smb_query_stream_info_complete(request, records_len, count);
 } /* chimera_smb_query_stream_info_list_callback */
 
 static void
@@ -215,13 +279,17 @@ chimera_smb_query_stream_info(struct chimera_smb_request *request)
     const uint8_t                    *base_fh;
     uint32_t                          base_fh_len;
 
-    /* Gate: named streams must be enabled and the backend must support them;
-     * otherwise MS-FSA says FileStreamInformation is not a valid info class
-     * for this object store. */
+    /* Gate: named streams must be enabled and the backend must support them.
+     * Without them the object still has its default data fork, so report that
+     * one synthesized "::$DATA" stream instead of failing the level. */
     if (!thread->shared->config.named_streams ||
         !(open_file->handle->vfs_module->capabilities & CHIMERA_VFS_CAP_NAMED_STREAMS)) {
-        chimera_smb_open_file_release(request, open_file);
-        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_INFO_CLASS);
+        chimera_vfs_getattr(thread->vfs_thread,
+                            &request->session_handle->session->cred,
+                            open_file->handle,
+                            CHIMERA_VFS_ATTR_MASK_STAT,
+                            chimera_smb_query_stream_info_default_callback,
+                            request);
         return;
     }
 

@@ -1183,6 +1183,16 @@ typedef uint8_t smb2_guid[SMB2_GUID_SIZE];
  */
 #define SMB2_FILE_ALL_INFO_FIXED_SIZE               100
 
+/*
+ * FileStreamInformation's per-entry fixed portion is NextEntryOffset(4) +
+ * StreamNameLength(4) + StreamSize(8) + StreamAllocationSize(8) = 24 bytes,
+ * followed by the variable-length StreamName.  A client must nonetheless offer
+ * at least 32 bytes of OutputBufferLength before the level is answered at all:
+ * that is the minimum Windows enforces, what Samba's marshall_stream_info
+ * checks, and the value smbtorture's smb2.getinfo.qfile_buffercheck asserts.
+ */
+#define SMB2_FILE_STREAM_INFO_FIXED_SIZE            32
+
 
 struct smb2_file_directory_information {
     uint32_t next_entry_offset;
