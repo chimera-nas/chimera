@@ -188,6 +188,8 @@ chimera_vfs_close_thread_sweep(
 
             chimera_vfs_close(thread,
                               handle->vfs_module,
+                              handle->fh,
+                              handle->fh_len,
                               handle->vfs_private,
                               handle->fh_hash,
                               chimera_vfs_close_thread_callback,

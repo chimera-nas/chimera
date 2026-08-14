@@ -97,12 +97,8 @@ chimera_smb_close_doc_remove_callback(
     chimera_vfs_release(vfs_thread, request->close.parent_handle);
 
     /* Close the backend VFS module handle that was detached from the cache */
-    chimera_vfs_close(vfs_thread,
-                      request->close.doc_info.close_module,
-                      request->close.doc_info.close_private,
-                      request->close.doc_info.close_hash,
-                      NULL,
-                      NULL);
+    chimera_vfs_close_ref_dispatch(vfs_thread, &request->close.doc_info.close_ref,
+                                   NULL, NULL);
 
     chimera_smb_open_file_release(request, request->close.open_file);
 
@@ -125,12 +121,8 @@ chimera_smb_close_doc_open_parent_callback(
                           request->close.doc_info.name,
                           error_code);
 
-        chimera_vfs_close(vfs_thread,
-                          request->close.doc_info.close_module,
-                          request->close.doc_info.close_private,
-                          request->close.doc_info.close_hash,
-                          NULL,
-                          NULL);
+        chimera_vfs_close_ref_dispatch(vfs_thread, &request->close.doc_info.close_ref,
+                                       NULL, NULL);
 
         chimera_smb_open_file_release(request, request->close.open_file);
         chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
@@ -194,12 +186,8 @@ struct chimera_smb_teardown_doc_ctx {
 static void
 chimera_smb_teardown_doc_close_backend(struct chimera_smb_teardown_doc_ctx *ctx)
 {
-    chimera_vfs_close(ctx->vfs_thread,
-                      ctx->doc_info.close_module,
-                      ctx->doc_info.close_private,
-                      ctx->doc_info.close_hash,
-                      NULL,
-                      NULL);
+    chimera_vfs_close_ref_dispatch(ctx->vfs_thread, &ctx->doc_info.close_ref,
+                                   NULL, NULL);
     free(ctx);
 } /* chimera_smb_teardown_doc_close_backend */
 
@@ -281,12 +269,8 @@ chimera_smb_teardown_doc_unlink(
     if (doc_info->parent_fh_len == 0) {
         /* No parent fh recorded — cannot unlink, just close the backend
          * handle that release_doc detached from the cache. */
-        chimera_vfs_close(thread->vfs_thread,
-                          doc_info->close_module,
-                          doc_info->close_private,
-                          doc_info->close_hash,
-                          NULL,
-                          NULL);
+        chimera_vfs_close_ref_dispatch(thread->vfs_thread, &doc_info->close_ref,
+                                       NULL, NULL);
         return;
     }
 
@@ -497,12 +481,8 @@ chimera_smb_close_release(struct chimera_smb_request *request)
     if (need_doc && open_file->share_file_state &&
         chimera_vfs_state_stream_holders(open_file->share_file_state) > 0) {
         chimera_vfs_state_set_delete_pending(open_file->share_file_state);
-        chimera_vfs_close(vfs_thread,
-                          request->close.doc_info.close_module,
-                          request->close.doc_info.close_private,
-                          request->close.doc_info.close_hash,
-                          NULL,
-                          NULL);
+        chimera_vfs_close_ref_dispatch(vfs_thread, &request->close.doc_info.close_ref,
+                                       NULL, NULL);
         chimera_smb_open_file_release(request, open_file);
         chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
         return;
@@ -520,12 +500,8 @@ chimera_smb_close_release(struct chimera_smb_request *request)
     } else {
         if (need_doc) {
             /* DOC set but no parent fh — close backend handle directly */
-            chimera_vfs_close(vfs_thread,
-                              request->close.doc_info.close_module,
-                              request->close.doc_info.close_private,
-                              request->close.doc_info.close_hash,
-                              NULL,
-                              NULL);
+            chimera_vfs_close_ref_dispatch(vfs_thread, &request->close.doc_info.close_ref,
+                                           NULL, NULL);
         }
         chimera_smb_open_file_release(request, open_file);
         chimera_smb_complete_request(request, SMB2_STATUS_SUCCESS);
