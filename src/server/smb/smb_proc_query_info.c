@@ -127,12 +127,21 @@ chimera_smb_emit_stream_info(
             if (name16_len > 0) {
                 evpl_iovec_cursor_append_blob_unaligned(cursor, name16, name16_len);
             }
-            for (p = entry_size; p < aligned; p++) {
-                evpl_iovec_cursor_append_uint8(cursor, 0);
+            /* Only an entry that is followed by another carries the pad that
+             * 8-byte-aligns its successor. */
+            if (next) {
+                for (p = entry_size; p < aligned; p++) {
+                    evpl_iovec_cursor_append_uint8(cursor, 0);
+                }
             }
         }
 
-        out += aligned;
+        /* The last entry ends after its name: padding it would overstate the
+         * reply against clients that size their buffer to the exact Windows
+         * length (MS-FSA BVT_AlternateDataStream_ListStreams_File offers 150
+         * bytes for a default fork plus two 8-character streams, which is what
+         * Windows and Samba's marshall_stream_info return to the byte). */
+        out += next ? aligned : entry_size;
         in  += (sizeof(entry) + entry.name_len + 7) & ~7u;
     }
 
