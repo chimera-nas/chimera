@@ -194,8 +194,8 @@ chimera_smb_durable_doc_remove_cb(
                           ctx->doc_info.name_len, ctx->doc_info.name, error_code);
     }
     chimera_vfs_release(ctx->vfs_thread, ctx->parent_handle);
-    chimera_vfs_close(ctx->vfs_thread, ctx->doc_info.close_module,
-                      ctx->doc_info.close_private, ctx->doc_info.close_hash, NULL, NULL);
+    chimera_vfs_close_ref_dispatch(ctx->vfs_thread, &ctx->doc_info.close_ref,
+                                   NULL, NULL);
     free(ctx);
 } /* chimera_smb_durable_doc_remove_cb */
 
@@ -210,8 +210,8 @@ chimera_smb_durable_doc_open_parent_cb(
     if (error_code != CHIMERA_VFS_OK) {
         chimera_smb_debug("durable delete-on-close: open parent failed for '%.*s' (error %d)",
                           ctx->doc_info.name_len, ctx->doc_info.name, error_code);
-        chimera_vfs_close(ctx->vfs_thread, ctx->doc_info.close_module,
-                          ctx->doc_info.close_private, ctx->doc_info.close_hash, NULL, NULL);
+        chimera_vfs_close_ref_dispatch(ctx->vfs_thread, &ctx->doc_info.close_ref,
+                                       NULL, NULL);
         free(ctx);
         return;
     }

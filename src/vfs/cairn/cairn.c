@@ -3155,13 +3155,10 @@ cairn_close(
     struct cairn_inode       *inode;
     int                       rc;
 
-    /* Close names an open instance, not a path: chimera_vfs_close builds its
-     * request with no file handle at all (fh = NULL, fh_len = 0) and passes
-     * only the vfs_private cookie this backend returned from open -- for
-     * cairn, the inode number.  Reading request->fh here instead decoded
-     * whatever bytes the recycled request struct happened to hold, so the
-     * lookup missed, every close returned ENOENT without dropping the refcnt,
-     * and a file unlinked while open was never reclaimed.
+    /* Close names an open instance, not a path, so resolve it through the
+     * vfs_private cookie this backend returned from open -- for cairn, the
+     * inode number -- rather than through request->fh, which names the object
+     * the handle was opened on.
      *
      * Resolving by inum alone (no generation check) is sound because an open
      * handle holds a refcnt and the branch below only removes an inode once

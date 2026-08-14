@@ -414,10 +414,18 @@ typedef void (*chimera_vfs_close_callback_t)(
     enum chimera_vfs_error error_code,
     void                  *private_data);
 
+/* Close the open instance named by vfs_private -- the cookie the backend
+ * returned from open.  That cookie, not fh, is what identifies the instance;
+ * fh names the object it was opened on and is carried so a backend can tell
+ * which of its filesystems (or which mount) the close belongs to, and so the
+ * op appears in traces with the handle it applies to.  Both are supplied by
+ * the open-handle cache, which owns them for the handle's lifetime. */
 void
 chimera_vfs_close(
     struct chimera_vfs_thread   *thread,
     struct chimera_vfs_module   *vfs_module,
+    const void                  *fh,
+    int                          fhlen,
     uint64_t                     vfs_private,
     uint64_t                     fh_hash,
     chimera_vfs_close_callback_t callback,

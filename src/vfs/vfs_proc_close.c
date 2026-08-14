@@ -42,6 +42,8 @@ SYMBOL_EXPORT void
 chimera_vfs_close(
     struct chimera_vfs_thread   *thread,
     struct chimera_vfs_module   *vfs_module,
+    const void                  *fh,
+    int                          fhlen,
     uint64_t                     vfs_private,
     uint64_t                     fh_hash,
     chimera_vfs_close_callback_t callback,
@@ -51,8 +53,8 @@ chimera_vfs_close(
 
     request = chimera_vfs_request_alloc_with_module(thread,
                                                     NULL,
-                                                    NULL,
-                                                    0,
+                                                    fh,
+                                                    fhlen,
                                                     fh_hash,
                                                     vfs_module);
 
