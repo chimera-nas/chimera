@@ -16,6 +16,21 @@ chimera_vfs_close_complete(struct chimera_vfs_request *request)
 
     chimera_vfs_complete(request);
 
+    /* A failed close is never routine: whatever the handle pinned in the
+     * backend (a descriptor, an inode reference, a deferred unlink) stays
+     * pinned, so the effect is a silent leak rather than a returned error.
+     * Most closes originate in the open-handle cache -- idle eviction, the
+     * shutdown sweep, a detached-handle drop -- and pass no callback at all,
+     * and the close thread's callback only decrements its pending count, so
+     * without this the status has no reader anywhere.  Report it here, where
+     * every caller funnels through. */
+    if (unlikely(request->status != CHIMERA_VFS_OK)) {
+        chimera_vfs_error("close failed on %s handle %lx: error %d",
+                          request->module ? request->module->name : "(none)",
+                          request->close.vfs_private,
+                          request->status);
+    }
+
     if (callback) {
         callback(request->status, request->proto_private_data);
     }
