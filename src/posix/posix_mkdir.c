@@ -83,9 +83,46 @@ chimera_posix_mkdir(
              * errno. */
             struct stat st;
 
-            if (chimera_posix_stat(path, &st) < 0 &&
-                (errno == ENOTDIR || errno == ELOOP)) {
-                return -1;
+            if (chimera_posix_stat(path, &st) < 0) {
+                if (errno == ENOTDIR || errno == ELOOP) {
+                    return -1;
+                }
+                if (errno == ENOENT) {
+                    /* The final component is a symbolic link whose target does
+                     * not exist.  The trailing slash resolves through the link
+                     * (XBD 4.16), so mkdir(2) must create the link's *target*,
+                     * not fail EEXIST on the link itself.  Read the link and
+                     * retry the create on the resolved path. */
+                    char    link[CHIMERA_VFS_PATH_MAX];
+                    char    tgt[CHIMERA_VFS_PATH_MAX];
+                    char    full[CHIMERA_VFS_PATH_MAX];
+                    ssize_t n;
+                    int     llen = path_len;
+
+                    while (llen > 1 && path[llen - 1] == '/') {
+                        llen--;
+                    }
+                    memcpy(link, path, llen);
+                    link[llen] = '\0';
+
+                    n = chimera_posix_readlink(link, tgt, sizeof(tgt) - 1);
+                    if (n > 0) {
+                        tgt[n] = '\0';
+                        if (tgt[0] == '/') {
+                            return chimera_posix_mkdir(tgt, mode);
+                        } else {
+                            const char *ls   = rindex(link, '/');
+                            int         dlen = ls ? (int) (ls - link) : 0;
+
+                            if (snprintf(full, sizeof(full), "%.*s/%s", dlen,
+                                         link, tgt) >= (int) sizeof(full)) {
+                                errno = ENAMETOOLONG;
+                                return -1;
+                            }
+                            return chimera_posix_mkdir(full, mode);
+                        }
+                    }
+                }
             }
         }
         errno = err;
