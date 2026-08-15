@@ -3953,8 +3953,32 @@ memfs_copy_range(
         return;
     }
 
-    src_inode = (struct memfs_inode *) request->copy_range.src_handle->vfs_private;
-    dst_inode = (struct memfs_inode *) request->copy_range.dst_handle->vfs_private;
+    /* The handle's vfs_private points at the inode for a real backend open, but
+    * memfs advertises no OPEN_FILE_REQUIRED, so a caller that only needs to
+    * read (e.g. an O_RDONLY copy_file_range source) can hold a no-backend-open
+    * handle whose vfs_private is 0.  Fall back to resolving the inode from the
+    * handle's file handle, exactly as memfs_resolve_io does for read/write;
+    * without this the source resolves to NULL and a valid copy fails EINVAL. */
+    src_inode = (struct memfs_inode *) (uintptr_t) request->copy_range.src_handle->vfs_private;
+    if (!src_inode) {
+        /* memfs_inode_get_fh returns the inode locked and gen-validated, but
+         * copy_range takes both inode locks itself in address order below (to
+         * avoid AB/BA deadlock), so drop the lock and let that path re-take it. */
+        src_inode = memfs_inode_get_fh(shared, request->copy_range.src_handle->fh,
+                                       request->copy_range.src_handle->fh_len);
+        if (src_inode) {
+            pthread_mutex_unlock(&src_inode->lock);
+        }
+    }
+
+    dst_inode = (struct memfs_inode *) (uintptr_t) request->copy_range.dst_handle->vfs_private;
+    if (!dst_inode) {
+        dst_inode = memfs_inode_get_fh(shared, request->copy_range.dst_handle->fh,
+                                       request->copy_range.dst_handle->fh_len);
+        if (dst_inode) {
+            pthread_mutex_unlock(&dst_inode->lock);
+        }
+    }
 
     if (!src_inode || !dst_inode) {
         request->status = CHIMERA_VFS_EINVAL;
