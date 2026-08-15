@@ -98,7 +98,10 @@ chimera_posix_lseek_hole_data(
     chimera_posix_completion_destroy(&ctx.comp);
 
     if (err) {
-        errno = err;
+        /* POSIX/Linux: SEEK_DATA/SEEK_HOLE on a file system that does not
+         * implement them fail with EINVAL, not ENOTSUP (e.g. the NFSv3
+         * backend, which has no SEEK operation). */
+        errno = (err == ENOTSUP) ? EINVAL : err;
         return -1;
     }
 
