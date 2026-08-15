@@ -446,7 +446,9 @@ macro(add_posix_root_export_test nfs_backend)
 endmacro()
 
 add_posix_root_export_test(memfs)
-add_posix_root_export_test(linux)
+if(CHIMERA_LINUX)
+    add_posix_root_export_test(linux)
+endif()
 
 # ============================================================================
 # NFS3 over TCP-RDMA Backend Tests
