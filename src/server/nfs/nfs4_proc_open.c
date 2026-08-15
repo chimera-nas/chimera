@@ -855,10 +855,23 @@ chimera_nfs4_open_unchecked_lookup_complete(
     struct OPEN4res                *res           = &req->res_compound.resarray[req->index].opopen;
     struct chimera_vfs_open_handle *parent_handle = req->handle;
 
-    (void) existing_attr;
     (void) dir_attr;
 
     if (error_code == CHIMERA_VFS_OK) {
+        /* The object already exists.  Classify special objects by type before
+         * the backend tries to open them -- a native open of a FIFO, socket,
+         * or device can block or report a backend-specific errno (ENXIO on a
+         * FIFO with no peer), where RFC 7530 §16.16.6 / RFC 8881 §18.16.4
+         * require the protocol-level type error.  Mirrors the NOCREATE path. */
+        if ((existing_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
+            !S_ISREG(existing_attr->va_mode)) {
+            res->status = chimera_nfs4_open_nonreg_status(req->minorversion,
+                                                          existing_attr->va_mode);
+            chimera_vfs_release(req->thread->vfs_thread, parent_handle);
+            chimera_nfs4_open_complete(req, res->status);
+            return;
+        }
+
         /* RFC 7530 OPEN/UNCHECKED recreate: create attrs are ignored for an
          * existing object, except size=0 truncates the file. */
         if ((ctx->attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) &&
@@ -1123,7 +1136,7 @@ chimera_nfs4_open_parent_complete(
                                       parent_handle,
                                       args->claim.file.data,
                                       args->claim.file.len,
-                                      0,
+                                      CHIMERA_VFS_ATTR_MODE,
                                       0,
                                       chimera_nfs4_open_unchecked_lookup_complete,
                                       ctx);
