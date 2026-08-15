@@ -145,14 +145,21 @@ chimera_vfs_remove_at_dispatch(
         return;
     }
 
-    request->opcode                   = CHIMERA_VFS_OP_REMOVE_AT;
-    request->complete                 = chimera_vfs_remove_at_complete;
-    request->remove_at.handle         = handle;
-    request->remove_at.name           = name;
-    request->remove_at.namelen        = namelen;
-    request->remove_at.name_hash      = chimera_vfs_hash(name, namelen);
-    request->remove_at.flags          = flags;
-    request->remove_at.child_fh       = child_fh;
+    request->opcode              = CHIMERA_VFS_OP_REMOVE_AT;
+    request->complete            = chimera_vfs_remove_at_complete;
+    request->remove_at.handle    = handle;
+    request->remove_at.name      = name;
+    request->remove_at.namelen   = namelen;
+    request->remove_at.name_hash = chimera_vfs_hash(name, namelen);
+    request->remove_at.flags     = flags;
+    /* Copy the child FH into request-owned storage: the caller's or
+     * gate-resolved source may be freed before this async op completes. */
+    if (child_fh && child_fh_len > 0) {
+        memcpy(request->remove_at.child_fh_store, child_fh, child_fh_len);
+        request->remove_at.child_fh = request->remove_at.child_fh_store;
+    } else {
+        request->remove_at.child_fh = NULL;
+    }
     request->remove_at.child_fh_len   = child_fh_len;
     request->remove_at.match_child_fh = match_child_fh ? 1 : 0;
     request->remove_at.r_unmatched    = 0;
@@ -203,7 +210,51 @@ struct chimera_vfs_remove_at_gate {
     uint8_t                          parent_lease_skip_valid;
     chimera_vfs_remove_at_callback_t callback;
     void                            *private_data;
+    /* Storage for a child FH resolved by name (sticky-dir owner check) when
+     * the caller did not supply one. */
+    uint8_t                          child_fh_buf[CHIMERA_VFS_FH_SIZE];
+    /* The child FH was resolved by our sticky-lookup, not supplied by the
+     * caller.  It authorizes the delete gate, but must NOT be handed to the
+     * dispatch's io_recall: a name-based delete (the caller passed no FH --
+     * e.g. SMB delete-on-close) recalls via the post-unlink FILE_REMOVED
+     * notify, and also recalling the resolved FH pre-unlink would break the
+     * holder's lease twice (smbtorture smb2.lease.unlink: count 0x2 vs 0x1). */
+    uint8_t                          child_fh_resolved;
 };
+
+static void chimera_vfs_remove_at_gate_complete(
+    enum chimera_vfs_error status,
+    void                  *private_data);
+
+/* When a gate is needed but the caller gave no child FH (e.g. an NFS
+ * name-based REMOVE), resolve the child by name so the sticky-directory owner
+ * rule and any per-object DELETE grant can be evaluated -- otherwise a sticky
+ * directory's owner check is silently skipped. */
+static void
+chimera_vfs_remove_at_sticky_lookup(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct chimera_vfs_remove_at_gate *gate = private_data;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        /* Name absent/unreadable: surface the natural removal error (ENOENT). */
+        gate->callback(error_code, NULL, NULL, gate->private_data);
+        free(gate);
+        return;
+    }
+
+    memcpy(gate->child_fh_buf, attr->va_fh, attr->va_fh_len);
+    gate->child_fh          = gate->child_fh_buf;
+    gate->child_fh_len      = attr->va_fh_len;
+    gate->child_fh_resolved = 1;
+
+    chimera_vfs_gate_delete(gate->thread, gate->cred,
+                            gate->handle->fh, gate->handle->fh_len,
+                            gate->child_fh, gate->child_fh_len,
+                            chimera_vfs_remove_at_gate_complete, gate);
+} /* chimera_vfs_remove_at_sticky_lookup */
 
 static void
 chimera_vfs_remove_at_gate_complete(
@@ -218,8 +269,15 @@ chimera_vfs_remove_at_gate_complete(
         return;
     }
 
+    /* Only a caller-supplied FH drives the dispatch's io_recall.  A
+     * sticky-resolved FH authorized the gate above but is withheld here so the
+     * name-based delete recalls once (via the post-unlink notify), matching the
+     * pre-sticky-lookup behavior. */
     chimera_vfs_remove_at_dispatch(gate->thread, gate->cred, gate->handle,
-                                   gate->name, gate->namelen, gate->child_fh,
+                                   gate->name, gate->namelen,
+                                   gate->child_fh_resolved ? NULL :
+                                   gate->child_fh,
+                                   gate->child_fh_resolved ? 0 :
                                    gate->child_fh_len, gate->match_child_fh,
                                    gate->flags,
                                    gate->pre_attr_mask,
@@ -267,18 +325,19 @@ chimera_vfs_remove_at_common(
     }
 
     if (chimera_vfs_gate_needed(handle->vfs_module->capabilities, cred)) {
-        gate                 = malloc(sizeof(*gate));
-        gate->thread         = thread;
-        gate->cred           = cred;
-        gate->handle         = handle;
-        gate->name           = name;
-        gate->namelen        = namelen;
-        gate->child_fh       = child_fh;
-        gate->child_fh_len   = child_fh_len;
-        gate->match_child_fh = match_child_fh;
-        gate->flags          = flags;
-        gate->pre_attr_mask  = pre_attr_mask;
-        gate->post_attr_mask = post_attr_mask;
+        gate                    = malloc(sizeof(*gate));
+        gate->thread            = thread;
+        gate->cred              = cred;
+        gate->handle            = handle;
+        gate->name              = name;
+        gate->namelen           = namelen;
+        gate->child_fh          = child_fh;
+        gate->child_fh_len      = child_fh_len;
+        gate->child_fh_resolved = 0;
+        gate->match_child_fh    = match_child_fh;
+        gate->flags             = flags;
+        gate->pre_attr_mask     = pre_attr_mask;
+        gate->post_attr_mask    = post_attr_mask;
         if (parent_lease_skip) {
             memcpy(gate->parent_lease_skip, parent_lease_skip, 16);
             gate->parent_lease_skip_valid = 1;
@@ -293,12 +352,12 @@ chimera_vfs_remove_at_common(
                                     child_fh, child_fh_len,
                                     chimera_vfs_remove_at_gate_complete, gate);
         } else {
-            /* No child FH available: authorize on the parent's DELETE_CHILD
-             * grant alone (the per-object DELETE and sticky owner checks need
-             * the child's attrs). */
-            chimera_vfs_gate_fh(thread, cred, handle->fh, handle->fh_len,
-                                CHIMERA_ACE_DELETE_CHILD,
-                                chimera_vfs_remove_at_gate_complete, gate);
+            /* No child FH from the caller (e.g. an NFS name-based REMOVE):
+            * resolve it by name so the sticky-directory owner rule and any
+            * per-object DELETE grant are honored, not silently skipped. */
+            chimera_vfs_lookup(thread, cred, handle->fh, handle->fh_len,
+                               name, namelen, CHIMERA_VFS_ATTR_FH, 0,
+                               chimera_vfs_remove_at_sticky_lookup, gate);
         }
         return;
     }
