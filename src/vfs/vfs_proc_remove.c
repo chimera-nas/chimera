@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include <string.h>
+#include <sys/stat.h>
 #include "vfs_procs.h"
 #include "vfs_internal.h"
 #include "vfs_release.h"
@@ -93,6 +94,27 @@ chimera_vfs_remove_child_lookup_complete(
     if (error_code == CHIMERA_VFS_OK) {
         memcpy(request->remove.child_fh, attr->va_fh, attr->va_fh_len);
         request->remove.child_fh_len = attr->va_fh_len;
+
+        /* Enforce the caller's type assertion (rmdir vs unlink) here, once, for
+         * every backend.  Engine backends re-check it themselves, but the NFS
+         * proxy backends cannot: NFSv4 REMOVE is type-agnostic on the wire, and
+         * an NFSv3 unlink of an *open* directory would otherwise be silly-
+         * renamed (a legal RENAME) instead of failing.  We already hold the
+         * child's mode from the resolve above, so this adds no round trip. */
+        if (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
+            int is_dir = S_ISDIR(attr->va_mode);
+
+            if (((request->remove.flags & CHIMERA_VFS_REMOVE_ISDIR) && !is_dir) ||
+                ((request->remove.flags & CHIMERA_VFS_REMOVE_ISNOTDIR) && is_dir)) {
+                chimera_vfs_remove_callback_t callback = request->remove.callback;
+                void                         *priv     = request->remove.private_data;
+
+                chimera_vfs_release(thread, request->remove.parent_handle);
+                chimera_vfs_request_free(thread, request);
+                callback(is_dir ? CHIMERA_VFS_EISDIR : CHIMERA_VFS_ENOTDIR, priv);
+                return;
+            }
+        }
     } else if (error_code == CHIMERA_VFS_ENOENT) {
         /* Child doesn't exist - proceed with no child FH, remove_at will
          * return the appropriate error */
@@ -170,7 +192,7 @@ chimera_vfs_remove_parent_open_complete(
         oh,
         request->remove.path + request->remove.name_offset,
         request->remove.pathlen - request->remove.name_offset,
-        CHIMERA_VFS_ATTR_FH,
+        CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MODE,
         0,
         chimera_vfs_remove_child_lookup_complete,
         request);

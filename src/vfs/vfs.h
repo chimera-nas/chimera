@@ -890,6 +890,13 @@ struct chimera_vfs_request {
             uint32_t                        flags;        /* CHIMERA_VFS_REMOVE_* type assertion */
             const uint8_t                  *child_fh;     /* Optional: child FH if known */
             int                             child_fh_len; /* 0 if child_fh not provided */
+            /* Owned copy of the child FH.  The source pointer may not outlive
+             * this async op -- a name-resolved sticky FH lives in a gate struct
+             * that is freed the moment dispatch returns -- so dispatch copies
+             * the FH here and points child_fh at it.  (The completion path
+             * hashes child_fh for the FILE_DELETE notify, well after the gate
+             * is gone.) */
+            uint8_t                         child_fh_store[CHIMERA_VFS_FH_SIZE];
             /* Inode-scoped removal: when set (with child_fh), the backend MUST
              * only unlink the name while it still resolves to child_fh -- if the
              * original object was removed and a new one created with the same
