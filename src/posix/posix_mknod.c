@@ -41,6 +41,22 @@ chimera_posix_mknod(
     const char                     *slash;
     int                             path_len;
 
+    /* POSIX permits mknod() to create a regular file (type S_IFREG, or an
+     * unspecified type which defaults to regular).  NFS has no wire form for
+     * this via MKNOD -- NFS3 MKNOD and NFS4 CREATE cover special files only,
+     * regular files are made with CREATE3 / OPEN -- so route it through the
+     * ordinary create path, which every backend supports.  O_EXCL preserves
+     * mknod's EEXIST-on-existing-name semantics. */
+    if (S_ISREG(mode) || (mode & S_IFMT) == 0) {
+        int fd = chimera_posix_open(path, O_CREAT | O_EXCL | O_WRONLY, mode);
+
+        if (fd < 0) {
+            return -1;
+        }
+        chimera_posix_close(fd);
+        return 0;
+    }
+
     path_len = chimera_posix_check_path(path);
     if (path_len < 0) {
         return -1;
