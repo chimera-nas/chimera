@@ -391,8 +391,8 @@ chimera_s3_mp_send_response(
     evpl_iovec_set_length(&request->multipart.response,
                           body_end - body_start);
 
-    evpl_http_request_add_datav(request->http_request,
-                                &request->multipart.response, 1);
+    chimera_s3_response_add_datav(evpl, request,
+                                  &request->multipart.response, 1);
 
     request->file_length      = body_end - body_start;
     request->file_real_length = request->file_length;
@@ -603,7 +603,7 @@ chimera_s3_upload_part_finish(struct chimera_s3_request *request)
     }
 
     /* Plain UploadPart: attach ETag header, empty body. */
-    evpl_http_request_add_header(request->http_request, "ETag", etag_hex);
+    chimera_s3_response_add_header(request, "ETag", etag_hex);
 
     request->vfs_state = CHIMERA_S3_VFS_STATE_SEND;
 
@@ -758,6 +758,7 @@ chimera_s3_upload_part_create_unlinked_callback(
     struct chimera_vfs_attrs       *attr,
     void                           *private_data)
 {
+    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
     struct evpl                     *evpl    = thread->evpl;
@@ -788,6 +789,7 @@ chimera_s3_upload_part_create_callback(
     struct chimera_vfs_attrs       *dir_post_attr,
     void                           *private_data)
 {
+    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
     struct evpl                     *evpl    = thread->evpl;
@@ -814,6 +816,7 @@ chimera_s3_upload_part_open_dir_callback(
     struct chimera_vfs_open_handle *oh,
     void                           *private_data)
 {
+    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
     struct chimera_vfs_module       *module;
@@ -836,6 +839,8 @@ chimera_s3_upload_part_open_dir_callback(
     if (module->capabilities & CHIMERA_VFS_CAP_CREATE_UNLINKED) {
         request->multipart.tmp_name_len = 0;
 
+        chimera_s3_request_get(request);
+
         chimera_vfs_create_unlinked(
             thread->vfs, &thread->shared->cred,
             oh->fh,
@@ -851,6 +856,8 @@ chimera_s3_upload_part_open_dir_callback(
             "._chimera_mpu_%.16s_%d",
             request->multipart.upload_id,
             request->multipart.part_number);
+
+        chimera_s3_request_get(request);
 
         chimera_vfs_open_at(
             thread->vfs, &thread->shared->cred,
@@ -873,6 +880,7 @@ chimera_s3_upload_part_lookup_callback(
     struct chimera_vfs_attrs *attr,
     void                     *private_data)
 {
+    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
 
@@ -883,6 +891,8 @@ chimera_s3_upload_part_lookup_callback(
         request->vfs_state        = CHIMERA_S3_VFS_STATE_COMPLETE;
         return;
     }
+
+    chimera_s3_request_get(request);
 
     chimera_vfs_open_fh(
         thread->vfs, &thread->shared->cred,
@@ -955,6 +965,8 @@ chimera_s3_upload_part(
 
     /* Use chimera_vfs_create so the parent directory chain is materialized
      * lazily (mirrors PUT behavior). */
+    chimera_s3_request_get(request);
+
     chimera_vfs_create(
         thread->vfs, &thread->shared->cred,
         request->bucket_fh,
@@ -1150,6 +1162,7 @@ chimera_s3_upc_fail(
         request->multipart.upload = NULL;
     }
 
+    chimera_s3_request_drop(ctx->request);
     free(ctx);
 
     request->status    = status;
@@ -1176,6 +1189,7 @@ chimera_s3_upc_done(struct chimera_s3_upload_copy_ctx *ctx)
 
     request->file_cur_offset = ctx->length;
 
+    chimera_s3_request_drop(ctx->request);
     free(ctx);
 
     chimera_s3_upload_part_finish(request);
@@ -1608,6 +1622,7 @@ chimera_s3_upload_part_copy(
 
     ctx          = calloc(1, sizeof(*ctx));
     ctx->request = request;
+    chimera_s3_request_get(request);
 
     request->dir_handle        = NULL;
     request->file_handle       = NULL;
@@ -2368,6 +2383,7 @@ chimera_s3_complete_finish_common(
     }
 
     free(ctx->client_parts);
+    chimera_s3_request_drop(ctx->request);
     free(ctx);
 
     free(request->multipart.body_buf);
@@ -2860,6 +2876,7 @@ chimera_s3_complete_retry_lookup_callback(
         }
     }
 
+    chimera_s3_request_drop(rctx->request);
     free(rctx);
 } /* chimera_s3_complete_retry_lookup_callback */
 
@@ -2933,8 +2950,9 @@ chimera_s3_complete_multipart_upload_body_done(
         if (n_client > 0 &&
             chimera_s3_mp_combined_etag_from_manifest(client_parts, n_client,
                                                       combined) == 0) {
-            rctx                   = calloc(1, sizeof(*rctx));
-            rctx->request          = request;
+            rctx          = calloc(1, sizeof(*rctx));
+            rctx->request = request;
+            chimera_s3_request_get(request);
             rctx->part_count       = n_client;
             rctx->combined_etag[0] = combined[0];
             rctx->combined_etag[1] = combined[1];
@@ -3020,8 +3038,9 @@ chimera_s3_complete_multipart_upload_body_done(
 
     /* Build ctx. Combined ETag = XXH3_128 over the etags of the parts the
      * client selected (in client order), formatted "<hex>-<count>". */
-    ctx                   = calloc(1, sizeof(*ctx));
-    ctx->request          = request;
+    ctx          = calloc(1, sizeof(*ctx));
+    ctx->request = request;
+    chimera_s3_request_get(request);
     ctx->upload           = upload;
     ctx->part_count       = n_client;
     ctx->client_parts     = server_parts;

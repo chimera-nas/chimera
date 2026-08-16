@@ -132,16 +132,39 @@ chimera_s3_request_alloc(struct chimera_server_s3_thread *thread)
         request->thread = thread;
     }
 
+    /* The HTTP layer's reference, held until libevpl reports the request over
+     * one way or the other.  Everything else that outlives the call it was
+     * made from takes its own; see chimera_s3_request_get. */
+    request->refcount  = 1;
+    request->abandoned = 0;
+
     return request;
 } /* chimera_s3_request_alloc */
 
-static inline void
-chimera_s3_request_free(
+/*
+ * Drop a reference, and tear the request down when the last one goes.
+ *
+ * VFS handles the request may still hold are deliberately not released here.
+ * Several handler paths drop their reference without clearing the pointer (see
+ * the note in s3_server_dispatch), so a handle pointer at teardown may already
+ * be dead -- releasing it again would be the use-after-free this is meant to
+ * prevent.  They are released where they are acquired, as before.
+ */
+void
+chimera_s3_request_put(
     struct chimera_server_s3_thread *thread,
     struct chimera_s3_request       *request)
 {
+    if (--request->refcount > 0) {
+        return;
+    }
+
+    chimera_s3_tagging_request_cleanup(request);
+
+    otel_span_end(&request->otel);
+
     DL_PREPEND(thread->free_requests, request);
-} /* chimera_s3_request_free */
+} /* chimera_s3_request_put */
 
 void
 s3_server_respond(
@@ -164,6 +187,14 @@ s3_server_respond(
      * connection, so dispatch the status line + headers only on the first
      * call. (GET streams its body via later WANT_DATA notifications, which is
      * why we cannot key this off vfs_state.) */
+    /* Nobody to answer.  Marked responded all the same, so the several paths
+     * that can race to respond all take this exit rather than the first one
+     * taking it and the rest walking into a NULL http_request. */
+    if (request->abandoned) {
+        request->responded = 1;
+        return;
+    }
+
     if (request->responded) {
         return;
     }
@@ -376,9 +407,32 @@ s3_server_notify(
 
             chimera_s3_dump_response(s3_request);
 
-            chimera_s3_tagging_request_cleanup(s3_request);
+            /* The HTTP layer is done with the request.  Any VFS work still in
+             * flight holds its own reference, so this only tears the request
+             * down when there is none. */
+            chimera_s3_request_put(thread, s3_request);
+            break;
+        case EVPL_HTTP_NOTIFY_FAILED:
+            /*
+             * The connection went away, so there is no response to send and no
+             * peer to send it to.  libevpl frees the evpl_http_request as soon
+             * as this returns, so the pointer to it goes now: a VFS completion
+             * still in flight would otherwise reach s3_server_respond and
+             * write into freed memory.
+             *
+             * The request itself cannot be released here -- that same
+             * completion is still holding it -- so this only drops the HTTP
+             * layer's reference.  Whichever callback lands last tears it down,
+             * finding it abandoned and unwinding without a response.
+             */
+            s3_request->abandoned    = 1;
+            s3_request->http_request = NULL;
 
-            chimera_s3_request_free(thread, s3_request);
+            otel_span_set_status(&s3_request->otel, OTEL_STATUS_ERROR,
+                                 "connection lost");
+            thread->vfs->otel_parent = NULL;
+
+            chimera_s3_request_put(thread, s3_request);
             break;
         default:
             /* no action required */
@@ -393,6 +447,7 @@ chimera_s3_dispatch_callback(
     struct chimera_vfs_attrs *attr,
     void                     *private_data)
 {
+    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *s3_request = private_data;
     struct chimera_server_s3_thread *thread     = s3_request->thread;
     struct evpl                     *evpl       = thread->evpl;
@@ -1022,6 +1077,8 @@ s3_server_dispatch(
         /* Parent the bucket lookup (and, via propagation, every VFS op this
          * request issues) under the S3 span. */
         thread->vfs->otel_parent = &s3_request->otel;
+
+        chimera_s3_request_get(s3_request);
 
         chimera_vfs_lookup(thread->vfs,
                            &thread->shared->cred,

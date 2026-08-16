@@ -627,6 +627,7 @@ chimera_s3_list_find_complete(
     enum chimera_vfs_error error_code,
     void                  *private_data)
 {
+    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
     struct evpl                     *evpl    = thread->evpl;
@@ -852,7 +853,7 @@ chimera_s3_list_find_complete(
     }
 
     if (out.niov > 0) {
-        evpl_http_request_add_datav(request->http_request, out.iov, out.niov);
+        chimera_s3_response_add_datav(evpl, request, out.iov, out.niov);
     }
 
     request->file_length      = total;
@@ -881,6 +882,11 @@ chimera_s3_list(
     struct chimera_server_s3_thread *thread,
     struct chimera_s3_request       *request)
 {
+    /* One reference for the whole find: the per-entry callback runs many
+     * times, the completion exactly once, so the completion is what drops
+     * it. */
+    chimera_s3_request_get(request);
+
     chimera_vfs_find(thread->vfs, &thread->shared->cred,
                      request->bucket_fh,
                      request->bucket_fhlen,
