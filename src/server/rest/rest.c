@@ -197,6 +197,15 @@ chimera_rest_notify(
         return;
     }
 
+    /* The request is over and no body is coming.  This is the only other end a
+     * dispatched request has, so it is where the context allocated for it is
+     * released -- returning here as if it were an uninteresting notification
+     * would leak one per connection dropped mid-POST. */
+    if (notify_type == EVPL_HTTP_NOTIFY_FAILED) {
+        free(ctx);
+        return;
+    }
+
     if (notify_type != EVPL_HTTP_NOTIFY_RECEIVE_COMPLETE) {
         return;
     }
