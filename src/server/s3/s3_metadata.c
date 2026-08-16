@@ -203,6 +203,7 @@ chimera_s3_meta_store_finish(struct chimera_s3_meta_store_ctx *ctx)
         free(ctx->kv[i].name);
         free(ctx->kv[i].value);
     }
+    chimera_s3_request_drop(ctx->request);
     free(ctx);
 
     done(request, error, pd);
@@ -260,8 +261,9 @@ chimera_s3_metadata_store_from_headers(
 {
     struct chimera_s3_meta_store_ctx *ctx;
 
-    ctx               = calloc(1, sizeof(*ctx));
-    ctx->request      = request;
+    ctx          = calloc(1, sizeof(*ctx));
+    ctx->request = request;
+    chimera_s3_request_get(request);
     ctx->handle       = handle;
     ctx->done         = done;
     ctx->private_data = private_data;
@@ -287,6 +289,7 @@ chimera_s3_meta_attach_finish(struct chimera_s3_meta_attach_ctx *ctx)
     for (i = 0; i < ctx->count; i++) {
         free(ctx->names[i]);
     }
+    chimera_s3_request_drop(ctx->request);
     free(ctx);
 
     done(request, 0, pd);
@@ -318,7 +321,7 @@ chimera_s3_meta_emit_header(
 
         suffix = name + CHIMERA_S3_XATTR_META_LEN;
         snprintf(hdr, sizeof(hdr), "x-amz-meta-%s", suffix);
-        evpl_http_request_add_header(request->http_request, hdr, value);
+        chimera_s3_response_add_header(request, hdr, value);
         return;
     }
 
@@ -327,9 +330,9 @@ chimera_s3_meta_emit_header(
 
     for (i = 0; i < CHIMERA_S3_META_SYS_COUNT; i++) {
         if (strcmp(suffix, chimera_s3_meta_sys_headers[i].suffix) == 0) {
-            evpl_http_request_add_header(request->http_request,
-                                         chimera_s3_meta_sys_headers[i].header,
-                                         value);
+            chimera_s3_response_add_header(request,
+                                           chimera_s3_meta_sys_headers[i].header,
+                                           value);
             if (strcmp(chimera_s3_meta_sys_headers[i].suffix,
                        "content-type") == 0) {
                 request->have_content_type = 1;
@@ -430,8 +433,9 @@ chimera_s3_metadata_attach_headers(
     struct chimera_s3_meta_attach_ctx *ctx;
     struct chimera_server_s3_thread   *thread = request->thread;
 
-    ctx               = calloc(1, sizeof(*ctx));
-    ctx->request      = request;
+    ctx          = calloc(1, sizeof(*ctx));
+    ctx->request = request;
+    chimera_s3_request_get(request);
     ctx->handle       = handle;
     ctx->done         = done;
     ctx->private_data = private_data;
@@ -478,6 +482,7 @@ chimera_s3_meta_copy_finish(struct chimera_s3_meta_copy_ctx *ctx)
     for (i = 0; i < ctx->count; i++) {
         free(ctx->names[i]);
     }
+    chimera_s3_request_drop(ctx->request);
     free(ctx);
 
     done(request, error, pd);
@@ -597,8 +602,9 @@ chimera_s3_metadata_copy(
     struct chimera_s3_meta_copy_ctx *ctx;
     struct chimera_server_s3_thread *thread = request->thread;
 
-    ctx               = calloc(1, sizeof(*ctx));
-    ctx->request      = request;
+    ctx          = calloc(1, sizeof(*ctx));
+    ctx->request = request;
+    chimera_s3_request_get(request);
     ctx->src_handle   = src_handle;
     ctx->dst_handle   = dst_handle;
     ctx->done         = done;

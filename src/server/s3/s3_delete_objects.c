@@ -328,7 +328,7 @@ chimera_s3_del_finalize(
     evpl_iovec_alloc(evpl, request->del.resp_len, 0, 1, 0, &iov);
     memcpy(evpl_iovec_data(&iov), request->del.resp_buf, request->del.resp_len);
     evpl_iovec_set_length(&iov, request->del.resp_len);
-    evpl_http_request_add_datav(request->http_request, &iov, 1);
+    chimera_s3_response_add_datav(evpl, request, &iov, 1);
 
     request->file_length      = request->del.resp_len;
     request->file_real_length = request->del.resp_len;
@@ -384,6 +384,7 @@ chimera_s3_del_remove_cb(
     struct chimera_vfs_attrs *post_attr,
     void                     *private_data)
 {
+    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
 
@@ -406,6 +407,7 @@ chimera_s3_del_open_cb(
     struct chimera_vfs_open_handle *oh,
     void                           *private_data)
 {
+    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
 
@@ -416,6 +418,8 @@ chimera_s3_del_open_cb(
     }
 
     request->dir_handle = oh;
+
+    chimera_s3_request_get(request);
 
     chimera_vfs_remove_at(thread->vfs, &thread->shared->cred,
                           oh,
@@ -433,6 +437,7 @@ chimera_s3_del_lookup_cb(
     struct chimera_vfs_attrs *attr,
     void                     *private_data)
 {
+    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
 
@@ -441,6 +446,8 @@ chimera_s3_del_lookup_cb(
         chimera_s3_del_record(request, 1, NULL, NULL);
         return;
     }
+
+    chimera_s3_request_get(request);
 
     chimera_vfs_open_fh(thread->vfs, &thread->shared->cred,
                         attr->va_fh,
@@ -498,6 +505,8 @@ chimera_s3_del_drive(struct chimera_s3_request *request)
 
         request->del.synchronous = 1;
         request->del.pending     = 1;
+
+        chimera_s3_request_get(request);
 
         chimera_vfs_lookup(thread->vfs, &thread->shared->cred,
                            request->bucket_fh,

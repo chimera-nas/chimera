@@ -206,8 +206,8 @@ chimera_s3_copy_finish(
         bp += sprintf(bp, "</CopyObjectResult>\n");
 
         evpl_iovec_set_length(&request->multipart.response, bp - body_start);
-        evpl_http_request_add_datav(request->http_request,
-                                    &request->multipart.response, 1);
+        chimera_s3_response_add_datav(evpl, request,
+                                      &request->multipart.response, 1);
 
         request->status           = CHIMERA_S3_STATUS_OK;
         request->file_length      = bp - body_start;
@@ -218,6 +218,7 @@ chimera_s3_copy_finish(
 
     request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
 
+    chimera_s3_request_drop(ctx->request);
     free(ctx);
 
     if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
@@ -856,6 +857,7 @@ chimera_s3_copy(
 
     ctx          = calloc(1, sizeof(*ctx));
     ctx->request = request;
+    chimera_s3_request_get(request);
 
     /* x-amz-metadata-directive defaults to COPY (inherit source metadata). */
     directive = evpl_http_request_header(request->http_request,

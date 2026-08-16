@@ -88,6 +88,26 @@ struct chimera_s3_request {
     int                              bucket_namelen;
     int                              bucket_fhlen;
     int                              io_pending;
+    /*
+     * How many things still hold this request.  One reference belongs to the
+     * HTTP layer, from the moment the request is dispatched until libevpl
+     * reports it over -- with a response (RESPONSE_COMPLETE) or without one
+     * (FAILED).  Every asynchronous handoff to the VFS takes another, because
+     * its completion callback dereferences the request and there is nothing
+     * else keeping it alive: a connection dropped mid-operation ends the HTTP
+     * reference while the VFS work is still in flight.
+     *
+     * The request is torn down when the count reaches zero, which is the only
+     * point at which nothing can reach it.
+     */
+    int                              refcount;
+    /*
+     * The peer is gone: http_request has been freed by libevpl and is NULL, so
+     * nothing may be written in reply.  The VFS work already in flight still
+     * runs to completion -- there is no way to recall it -- and unwinds
+     * through the same paths, which check this before touching the response.
+     */
+    int                              abandoned;
     int                              name_len;
     int                              path_len;
     int                              is_list;
@@ -259,6 +279,65 @@ struct chimera_server_s3_shared {
     char                               bucket_root_path[256];
 };
 
+/*
+ * Take a reference for an asynchronous handoff.
+ *
+ * Every VFS call whose completion callback dereferences the request needs one,
+ * and so does every context object that outlives the call which created it.
+ * Without it, a connection dropped while the operation is in flight ends the
+ * HTTP layer's reference and the callback lands on a recycled request.
+ */
+static inline void
+chimera_s3_request_get(struct chimera_s3_request *request)
+{
+    request->refcount++;
+} /* chimera_s3_request_get */
+
+/*
+ * Drop a reference, tearing the request down at zero: releasing any VFS handle
+ * it still holds, ending its span, and returning it to the thread's free list.
+ * Nothing may touch the request afterwards.
+ */
+void
+chimera_s3_request_put(
+    struct chimera_server_s3_thread *thread,
+    struct chimera_s3_request       *request);
+
+/* Drop a reference without the caller needing the thread to hand. */
+static inline void
+chimera_s3_request_drop(struct chimera_s3_request *request)
+{
+    chimera_s3_request_put(request->thread, request);
+} /* chimera_s3_request_drop */
+
+static inline void
+chimera_s3_request_unref(struct chimera_s3_request **requestp)
+{
+    struct chimera_s3_request *request = *requestp;
+
+    chimera_s3_request_put(request->thread, request);
+} /* chimera_s3_request_unref */
+
+/*
+ * Hold the reference an asynchronous handoff took, and drop it when the
+ * callback returns -- by whichever of its exits it takes.
+ *
+ * Declared first in the body so that its cleanup runs last, after everything
+ * the callback does with the request.  The alternative is a put before every
+ * return in every completion callback, of which there are dozens: the one that
+ * gets missed is a leak, and the one that gets duplicated is the
+ * use-after-free this exists to prevent.  cleanup is a GNU extension, which
+ * both compilers chimera builds with have long supported, and it makes neither
+ * mistake expressible.
+ *
+ * The variable exists only for its cleanup, so it is never read; `unused`
+ * keeps that from tripping -Wunused-variable, which Apple clang raises for
+ * cleanup variables even though gcc does not.
+ */
+#define CHIMERA_S3_HOLD_REQUEST(pd) \
+        struct chimera_s3_request *_s3_held \
+        __attribute__((cleanup(chimera_s3_request_unref), unused)) = (pd)
+
 static inline struct chimera_s3_io *
 chimera_s3_io_alloc(
     struct chimera_server_s3_thread *thread,
@@ -274,6 +353,10 @@ chimera_s3_io_alloc(
 
     io->request = request;
 
+    /* The io outlives the call that created it: its completion callback
+     * dereferences the request, so it holds a reference of its own. */
+    chimera_s3_request_get(request);
+
     return io;
 } /* chimera_s3_io_alloc */
 
@@ -282,7 +365,11 @@ chimera_s3_io_free(
     struct chimera_server_s3_thread *thread,
     struct chimera_s3_io            *io)
 {
+    struct chimera_s3_request *request = io->request;
+
     LL_PREPEND(thread->free_ios, io);
+
+    chimera_s3_request_put(thread, request);
 } /* chimera_s3_io_free */
 
 static inline int
@@ -320,6 +407,10 @@ chimera_s3_attach_last_modified(
         return;
     }
 
+    if (!request) {
+        return;
+    }
+
     gmtime_r(&attr->va_mtime.tv_sec, &tm);
     strftime(buf, sizeof(buf), "%a, %d %b %Y %H:%M:%S GMT", &tm);
     evpl_http_request_add_header(request, "Last-Modified", buf);
@@ -329,6 +420,45 @@ void
 s3_server_respond(
     struct evpl               *evpl,
     struct chimera_s3_request *request);
+
+/*
+ * Add to the response, unless there is nobody to send it to.
+ *
+ * A connection dropped mid-operation ends the request's HTTP side while its
+ * VFS work is still in flight, and that work unwinds through the same response
+ * builders it always does.  They go through these so that "the peer is gone"
+ * is handled once, here, rather than at every place that writes a header or a
+ * payload -- and so that content already staged for a response nobody will
+ * read is released rather than leaked.
+ */
+static inline void
+chimera_s3_response_add_header(
+    struct chimera_s3_request *request,
+    const char                *name,
+    const char                *value)
+{
+    if (request->abandoned) {
+        return;
+    }
+
+    evpl_http_request_add_header(request->http_request, name, value);
+} /* chimera_s3_response_add_header */
+
+static inline void
+chimera_s3_response_add_datav(
+    struct evpl               *evpl,
+    struct chimera_s3_request *request,
+    struct evpl_iovec         *iov,
+    int                        niov)
+{
+    if (request->abandoned) {
+        evpl_iovecs_release(evpl, iov, niov);
+        return;
+    }
+
+    evpl_http_request_add_datav(request->http_request, iov, niov);
+} /* chimera_s3_response_add_datav */
+
 
 #define chimera_s3_debug(...) chimera_debug("s3", \
                                             __FILE__, \

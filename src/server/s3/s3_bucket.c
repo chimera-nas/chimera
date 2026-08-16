@@ -76,7 +76,7 @@ chimera_s3_list_buckets(
     ctx.bp += sprintf(ctx.bp, "</ListAllMyBucketsResult>\n");
 
     evpl_iovec_set_length(&iov, ctx.bp - start);
-    evpl_http_request_add_datav(request->http_request, &iov, 1);
+    chimera_s3_response_add_datav(evpl, request, &iov, 1);
 
     request->is_list          = 1;
     request->file_length      = ctx.bp - start;
@@ -98,6 +98,7 @@ chimera_s3_create_bucket_mkdir_cb(
     struct chimera_vfs_attrs *attr,
     void                     *private_data)
 {
+    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
     struct evpl                     *evpl    = thread->evpl;
@@ -124,7 +125,7 @@ chimera_s3_create_bucket_mkdir_cb(
     chimera_s3_add_bucket(shared, name, path);
 
     snprintf(location, sizeof(location), "/%s", name);
-    evpl_http_request_add_header(request->http_request, "Location", location);
+    chimera_s3_response_add_header(request, "Location", location);
 
     request->status           = CHIMERA_S3_STATUS_OK;
     request->file_length      = 0;
@@ -143,6 +144,7 @@ chimera_s3_create_bucket_lookup_cb(
     struct chimera_vfs_attrs *attr,
     void                     *private_data)
 {
+    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
     struct evpl                     *evpl    = thread->evpl;
@@ -168,6 +170,8 @@ chimera_s3_create_bucket_lookup_cb(
     request->set_attr.va_uid  = 0;
     request->set_attr.va_gid  = 0;
 
+    chimera_s3_request_get(request);
+
     chimera_vfs_mkdir(thread->vfs, &thread->shared->cred,
                       request->bucket_fh, request->bucket_fhlen,
                       request->bucket_name, request->bucket_namelen,
@@ -189,6 +193,8 @@ chimera_s3_create_bucket(
         request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
         return;
     }
+
+    chimera_s3_request_get(request);
 
     chimera_vfs_lookup(thread->vfs, &shared->cred,
                        shared->root_fh, shared->root_fh_len,
@@ -422,7 +428,7 @@ chimera_s3_delbucket_finish(
     if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
         s3_server_respond(evpl, request);
     }
-
+    chimera_s3_request_drop(ctx->request);
     free(ctx);
 } /* chimera_s3_delbucket_finish */
 
@@ -443,6 +449,7 @@ chimera_s3_delete_bucket(
 
     ctx          = calloc(1, sizeof(*ctx));
     ctx->request = request;
+    chimera_s3_request_get(request);
 
     ctx->bucket_path_len = snprintf(ctx->bucket_path, sizeof(ctx->bucket_path),
                                     "%.*s/%.*s",

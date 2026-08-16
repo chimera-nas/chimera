@@ -32,6 +32,7 @@ chimera_s3_put_getattr_callback(
     struct chimera_vfs_attrs *attr,
     void                     *private_data)
 {
+    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
     struct evpl                     *evpl    = thread->evpl;
@@ -93,6 +94,8 @@ chimera_s3_put_finish_common(
     /* Fetch the object's final attributes to build the response ETag, then
      * release the file handle and respond (storing x-amz-tagging xattrs first,
      * if present) from the getattr callback. */
+    chimera_s3_request_get(request);
+
     chimera_vfs_getattr(thread->vfs,
                         &thread->shared->cred,
                         request->file_handle,
@@ -111,6 +114,7 @@ chimera_s3_put_rename_callback(
     struct chimera_vfs_attrs *todir_post_attr,
     void                     *private_data)
 {
+    CHIMERA_S3_HOLD_REQUEST(private_data);
     chimera_s3_put_finish_common(error_code, private_data);
 } /* chimera_s3_put_rename_callback */
 
@@ -122,6 +126,7 @@ chimera_s3_put_link_callback(
     struct chimera_vfs_attrs *r_dir_post_attr,
     void                     *private_data)
 {
+    CHIMERA_S3_HOLD_REQUEST(private_data);
     chimera_s3_put_finish_common(error_code, private_data);
 } /* chimera_s3_put_link_callback */
 
@@ -131,6 +136,8 @@ chimera_s3_put_rename(struct chimera_s3_request *request)
     struct chimera_server_s3_thread *thread = request->thread;
 
     if (request->put.tmp_name_len) {
+        chimera_s3_request_get(request);
+
         chimera_vfs_rename_at(
             thread->vfs,
             &thread->shared->cred,
@@ -152,6 +159,8 @@ chimera_s3_put_rename(struct chimera_s3_request *request)
             chimera_s3_put_rename_callback,
             request);
     } else {
+        chimera_s3_request_get(request);
+
         chimera_vfs_link_at(
             thread->vfs,
             &thread->shared->cred,
@@ -349,6 +358,7 @@ chimera_s3_put_create_unlinked_callback(
     struct chimera_vfs_attrs       *attr,
     void                           *private_data)
 {
+    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
 
@@ -380,6 +390,7 @@ chimera_s3_put_create_callback(
     struct chimera_vfs_attrs       *dir_post_attr,
     void                           *private_data)
 {
+    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
 
@@ -407,6 +418,7 @@ chimera_s3_put_open_dir_callback(
     struct chimera_vfs_open_handle *oh,
     void                           *private_data)
 {
+    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
     struct chimera_vfs_module       *module;
@@ -428,6 +440,8 @@ chimera_s3_put_open_dir_callback(
 
         request->put.tmp_name_len = 0;
 
+        chimera_s3_request_get(request);
+
         chimera_vfs_create_unlinked(thread->vfs, &thread->shared->cred,
                                     oh->fh,
                                     oh->fh_len,
@@ -441,6 +455,9 @@ chimera_s3_put_open_dir_callback(
                                              (uint64_t) request,
                                              (uint64_t) request->start_time.tv_sec,
                                              (uint64_t) request->start_time.tv_nsec);
+
+        chimera_s3_request_get(request);
+
         chimera_vfs_open_at(thread->vfs, &thread->shared->cred,
                             oh,
                             request->put.tmp_name,
@@ -462,6 +479,7 @@ chimera_s3_put_lookup_callback(
     struct chimera_vfs_attrs *attr,
     void                     *private_data)
 {
+    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
 
@@ -472,6 +490,8 @@ chimera_s3_put_lookup_callback(
     }
 
     chimera_s3_abort_if(!(attr->va_set_mask & CHIMERA_VFS_ATTR_FH), "put lookup callback: no fh");
+
+    chimera_s3_request_get(request);
 
     chimera_vfs_open_fh(thread->vfs, &thread->shared->cred,
                         attr->va_fh,
@@ -538,6 +558,8 @@ chimera_s3_put(
     request->set_attr.va_set_mask = 0;
 
     request->io_pending = 0;
+
+    chimera_s3_request_get(request);
 
     chimera_vfs_create(thread->vfs, &thread->shared->cred,
                        request->bucket_fh,

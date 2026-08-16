@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -64,6 +64,10 @@ chimera_s3_attach_etag(
     const struct chimera_vfs_attrs *attr)
 {
     char hex[80];
+
+    if (!request) {
+        return;
+    }
 
     chimera_s3_etag_hex(hex, sizeof(hex), attr);
 

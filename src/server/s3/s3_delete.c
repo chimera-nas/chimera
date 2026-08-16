@@ -16,6 +16,7 @@ chimera_s3_delete_remove_callback(
     struct chimera_vfs_attrs *post_attr,
     void                     *private_data)
 {
+    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
     struct evpl                     *evpl    = thread->evpl;
@@ -40,6 +41,7 @@ chimera_s3_delete_open_callback(
     struct chimera_vfs_open_handle *oh,
     void                           *private_data)
 {
+    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
 
@@ -51,6 +53,8 @@ chimera_s3_delete_open_callback(
     }
 
     request->dir_handle = oh;
+
+    chimera_s3_request_get(request);
 
     chimera_vfs_remove_at(thread->vfs, &thread->shared->cred,
                           oh,
@@ -73,6 +77,7 @@ chimera_s3_get_lookup_callback(
     struct chimera_vfs_attrs *attr,
     void                     *private_data)
 {
+    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
 
@@ -83,6 +88,8 @@ chimera_s3_get_lookup_callback(
     }
 
     chimera_s3_abort_if(!(attr->va_set_mask & CHIMERA_VFS_ATTR_FH), "put lookup callback: no fh");
+
+    chimera_s3_request_get(request);
 
     chimera_vfs_open_fh(thread->vfs, &thread->shared->cred,
                         attr->va_fh,
@@ -125,6 +132,8 @@ chimera_s3_delete(
     request->set_attr.va_req_mask = 0;
     request->set_attr.va_set_mask = 0;
 
+
+    chimera_s3_request_get(request);
 
     chimera_vfs_lookup(thread->vfs, &thread->shared->cred,
                        request->bucket_fh,

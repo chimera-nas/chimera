@@ -63,15 +63,18 @@ chimera_s3_get_send_callback(
     struct chimera_s3_io            *io      = private_data;
     struct chimera_s3_request       *request = io->request;
     struct chimera_server_s3_thread *thread  = request->thread;
+    struct evpl                     *evpl    = thread->evpl;
 
     if (error_code) {
         request->status    = CHIMERA_S3_STATUS_INTERNAL_ERROR;
         request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
+        chimera_s3_io_free(thread, io);
+        request->io_pending--;
         return;
     }
 
     if (niov) {
-        evpl_http_request_add_datav(request->http_request, iov, niov);
+        chimera_s3_response_add_datav(evpl, request, iov, niov);
     }
 
     chimera_s3_io_free(thread, io);
@@ -183,6 +186,7 @@ chimera_s3_get_open_callback(
     struct chimera_vfs_open_handle *oh,
     void                           *private_data)
 {
+    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
     struct evpl                     *evpl    = thread->evpl;
@@ -210,6 +214,7 @@ chimera_s3_get_lookup_callback(
     struct chimera_vfs_attrs *attr,
     void                     *private_data)
 {
+    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
     struct evpl                     *evpl    = thread->evpl;
@@ -317,6 +322,8 @@ chimera_s3_get_lookup_callback(
      * be read and re-emitted as response headers before the response is
      * dispatched. For HEAD the x-amz-tagging-count header is also attached once
      * the object is open. The body is only streamed for GET. */
+    chimera_s3_request_get(request);
+
     chimera_vfs_open_fh(thread->vfs, &thread->shared->cred,
                         attr->va_fh,
                         attr->va_fh_len,
@@ -332,6 +339,8 @@ chimera_s3_get(
     struct chimera_s3_request       *request)
 {
     request->io_pending = 0;
+
+    chimera_s3_request_get(request);
 
     chimera_vfs_lookup(thread->vfs, &thread->shared->cred,
                        request->bucket_fh,
@@ -358,6 +367,7 @@ chimera_s3_get_object_attributes_lookup_callback(
     struct chimera_vfs_attrs *attr,
     void                     *private_data)
 {
+    CHIMERA_S3_HOLD_REQUEST(private_data);
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
     struct evpl                     *evpl    = thread->evpl;
@@ -411,8 +421,8 @@ chimera_s3_get_object_attributes_lookup_callback(
     bp += sprintf(bp, "</GetObjectAttributesOutput>\n");
 
     evpl_iovec_set_length(&request->multipart.response, bp - body_start);
-    evpl_http_request_add_datav(request->http_request,
-                                &request->multipart.response, 1);
+    chimera_s3_response_add_datav(evpl, request,
+                                  &request->multipart.response, 1);
 
     request->file_length      = bp - body_start;
     request->file_real_length = request->file_length;
@@ -433,6 +443,8 @@ chimera_s3_get_object_attributes(
     struct chimera_s3_request       *request)
 {
     request->io_pending = 0;
+
+    chimera_s3_request_get(request);
 
     chimera_vfs_lookup(thread->vfs, &thread->shared->cred,
                        request->bucket_fh,
