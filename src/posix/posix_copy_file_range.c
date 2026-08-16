@@ -84,6 +84,22 @@ chimera_posix_copy_file_range(
     src_off = off_in ? *off_in : (off_t) in_entry->ofd->offset;
     dst_off = off_out ? *off_out : (off_t) out_entry->ofd->offset;
 
+    /* copy_file_range(2): overlapping source and destination ranges within one
+     * file are EINVAL.  This is a POSIX rule -- SMB copychunk, NFS4 COPY and S3
+     * copy permit overlap -- so the check lives here in the POSIX layer, keyed
+     * on file-handle identity so every backend agrees.  len == 0 already
+     * returned above. */
+    if (in_entry->handle->fh_len == out_entry->handle->fh_len &&
+        memcmp(in_entry->handle->fh, out_entry->handle->fh,
+               in_entry->handle->fh_len) == 0 &&
+        src_off < dst_off + (off_t) len &&
+        dst_off < src_off + (off_t) len) {
+        chimera_posix_fd_release(out_entry, 0);
+        chimera_posix_fd_release(in_entry, 0);
+        errno = EINVAL;
+        return -1;
+    }
+
     chimera_posix_completion_init(&st.comp, &req);
     st.bytes_copied = 0;
 
