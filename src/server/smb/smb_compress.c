@@ -134,7 +134,13 @@ chimera_smb_lz77_decompress(
 
         /* Match. */
         uint16_t mb;
-        int      length, offset;
+        int      offset;
+        /* The 32-bit length escape below is attacker-controlled and can reach
+         * ~4 GB.  Decode and bound-check it in 64-bit so neither the length
+         * fix-ups nor the `outpos + length` comparison can overflow a signed
+         * int (CWE-190): a wrapped-negative bound once let a ~2 GB match slip
+         * past the check and overrun `out`. */
+        int64_t  length;
 
         if (inpos + 2 > in_len) {
             return -1;
@@ -176,7 +182,7 @@ chimera_smb_lz77_decompress(
                         if (inpos + 4 > in_len) {
                             return -1;
                         }
-                        length = (int) rd32(in + inpos);
+                        length = (int64_t) rd32(in + inpos);
                         inpos += 4;
                     }
                     length -= (15 + 7);
@@ -187,7 +193,10 @@ chimera_smb_lz77_decompress(
         }
         length += SMB_LZ77_MIN_MATCH;
 
-        if (offset > outpos || outpos + length > out_len) {
+        /* `out_len - outpos` is the remaining output space (>= 1 here, since the
+         * loop runs only while outpos < out_len); comparing against it keeps both
+         * sides non-negative and avoids the signed overflow of outpos + length. */
+        if (offset > outpos || length > (int64_t) (out_len - outpos)) {
             return -1;
         }
         /* Overlapping copy: byte-by-byte (offset may be < length). */
