@@ -79,6 +79,8 @@ nfs3_client_status_to_chimera_vfs_error(int status)
     switch (status) {
         case NFS3_OK:
             return CHIMERA_VFS_OK;
+        case NFS3ERR_PERM:
+            return CHIMERA_VFS_EPERM;
         case NFS3ERR_NOENT:
             return CHIMERA_VFS_ENOENT;
         case NFS3ERR_IO:
