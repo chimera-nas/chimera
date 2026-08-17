@@ -195,6 +195,7 @@ chimera_vfs_remove_at_dispatch(
  * parent alone.
  */
 struct chimera_vfs_remove_at_gate {
+    struct chimera_vfs_gate_ctx      gate_ctx;
     struct chimera_vfs_thread       *thread;
     const struct chimera_vfs_cred   *cred;
     struct chimera_vfs_open_handle  *handle;
@@ -250,7 +251,7 @@ chimera_vfs_remove_at_sticky_lookup(
     gate->child_fh_len      = attr->va_fh_len;
     gate->child_fh_resolved = 1;
 
-    chimera_vfs_gate_delete(gate->thread, gate->cred,
+    chimera_vfs_gate_delete(&gate->gate_ctx, gate->thread, gate->cred,
                             gate->handle->fh, gate->handle->fh_len,
                             gate->child_fh, gate->child_fh_len,
                             chimera_vfs_remove_at_gate_complete, gate);
@@ -348,7 +349,8 @@ chimera_vfs_remove_at_common(
         gate->private_data = private_data;
 
         if (child_fh && child_fh_len > 0) {
-            chimera_vfs_gate_delete(thread, cred, handle->fh, handle->fh_len,
+            chimera_vfs_gate_delete(&gate->gate_ctx, thread, cred,
+                                    handle->fh, handle->fh_len,
                                     child_fh, child_fh_len,
                                     chimera_vfs_remove_at_gate_complete, gate);
         } else {

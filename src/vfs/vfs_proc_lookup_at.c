@@ -169,6 +169,7 @@ chimera_vfs_lookup_at_dispatch(
  * name-cache fast path in the dispatch is only reached once search is granted.
  */
 struct chimera_vfs_lookup_at_gate {
+    struct chimera_vfs_gate_ctx      gate_ctx;
     struct chimera_vfs_thread       *thread;
     const struct chimera_vfs_cred   *cred;
     struct chimera_vfs_open_handle  *handle;
@@ -242,7 +243,8 @@ chimera_vfs_lookup_at(
         gate->callback      = callback;
         gate->private_data  = private_data;
 
-        chimera_vfs_gate_fh_dac(thread, cred, handle->fh, handle->fh_len,
+        chimera_vfs_gate_fh_dac(&gate->gate_ctx, thread, cred,
+                                handle->fh, handle->fh_len,
                                 CHIMERA_ACE_EXECUTE,
                                 chimera_vfs_lookup_at_gate_complete, gate);
         return;
