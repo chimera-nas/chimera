@@ -208,6 +208,38 @@ test_decode_short_match(void)
     }
 } /* test_decode_short_match */
 
+/* Regression: a match whose 32-bit length escape is near INT_MAX must be
+ * rejected, not wrapped past the bound check.  Wire layout: one literal (so
+ * outpos > 0 and offset 1 is valid), then a match token with length code 7
+ * (escape) and offset 1, a half-byte nibble of 15, an extended byte of 255, a
+ * 16-bit 0 (escape to 32-bit), and a 32-bit length of 0x7FFFFFFC (decoded
+ * length 0x7FFFFFFF).  With the old signed `outpos + length` test this wrapped
+ * negative and drove a ~2 GB overlapping copy off the 64-byte output; the codec
+ * must now return -1. */
+static void
+test_decode_length_overflow(void)
+{
+    uint8_t in[15];
+    uint8_t out[64];
+    int     dlen;
+
+    in[0]  = 0x00; in[1] = 0x00; in[2] = 0x00; in[3] = 0x40; /* literal, then match */
+    in[4]  = 'A';                                            /* literal */
+    in[5]  = 0x07; in[6] = 0x00;                             /* match: len-code 7, offset 1 */
+    in[7]  = 0x0F;                                           /* half-byte nibble = 15 */
+    in[8]  = 0xFF;                                           /* extended byte = 255 */
+    in[9]  = 0x00; in[10] = 0x00;                            /* 16-bit 0 => 32-bit escape */
+    in[11] = 0xFC; in[12] = 0xFF; in[13] = 0xFF; in[14] = 0x7F; /* 32-bit len 0x7FFFFFFC */
+
+    dlen = chimera_smb_lz77_decompress(in, sizeof(in), out, sizeof(out));
+    if (dlen == -1) {
+        TEST_PASS("decode: 32-bit length escape overflow rejected");
+    } else {
+        TEST_FAIL("decode: 32-bit length escape overflow rejected");
+        fprintf(stderr, "    expected -1, got %d\n", dlen);
+    }
+} /* test_decode_length_overflow */
+
 /* LZNT1 compress -> decompress round-trip over the same payload shapes. */
 static void
 roundtrip_lznt1(
@@ -469,6 +501,7 @@ main(
     fprintf(stderr, "=== SMB3 compression: Plain LZ77 decode vectors ===\n");
     test_decode_literals();
     test_decode_short_match();
+    test_decode_length_overflow();
 
     fprintf(stderr, "\nTotal: %d passed, %d failed\n", passed, failed);
     return failed == 0 ? 0 : 1;
