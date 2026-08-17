@@ -174,6 +174,7 @@ chimera_vfs_mkdir_at_dispatch(
  * parent's attrs+ACL and authorizes before the real mkdir is dispatched.
  */
 struct chimera_vfs_mkdir_at_gate {
+    struct chimera_vfs_gate_ctx     gate_ctx;
     struct chimera_vfs_thread      *thread;
     const struct chimera_vfs_cred  *cred;
     struct chimera_vfs_open_handle *handle;
@@ -245,7 +246,8 @@ chimera_vfs_mkdir_at(
 
         /* Creating an entry in a directory requires both the right to add a
          * subdirectory (APPEND_DATA) and search permission (EXECUTE) on it. */
-        chimera_vfs_gate_fh(thread, cred, handle->fh, handle->fh_len,
+        chimera_vfs_gate_fh(&gate->gate_ctx, thread, cred,
+                            handle->fh, handle->fh_len,
                             CHIMERA_ACE_APPEND_DATA | CHIMERA_ACE_EXECUTE,
                             chimera_vfs_mkdir_at_gate_complete, gate);
         return;

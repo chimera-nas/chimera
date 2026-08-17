@@ -22,6 +22,7 @@
 struct chimera_vfs_attrs;
 struct chimera_vfs_cred;
 struct chimera_vfs_thread;
+struct chimera_vfs_open_handle;
 
 /*
  * Return the subset of `requested` (canonical CHIMERA_ACE_* mask bits) that is
@@ -106,8 +107,36 @@ typedef void (*chimera_vfs_gate_callback_t)(
     enum chimera_vfs_error status,
     void                  *private_data);
 
+/*
+ * Scratch the gate helpers use to carry their own state across the async
+ * open -> getattr -> evaluate -> release steps.  It is supplied by the caller
+ * rather than allocated internally: every gated operation already allocates a
+ * context to resume itself from, so embedding one of these in it makes a gated
+ * op cost a single allocation instead of two.
+ *
+ * The caller owns the storage and must keep it alive until the gate callback
+ * fires.  A caller that chains several gates in sequence (rename_at) may reuse
+ * one instance, since the helpers never run concurrently on the same context.
+ */
+struct chimera_vfs_gate_ctx {
+    struct chimera_vfs_thread      *thread;
+    const struct chimera_vfs_cred  *cred;
+    chimera_vfs_gate_callback_t     callback;
+    void                           *private_data;
+    struct chimera_vfs_open_handle *handle;  /* currently-open object */
+    uint32_t                        required;
+    /* gate_delete: the child is only fetched when the parent's DELETE_CHILD
+     * grant is absent or the parent is sticky. */
+    const void                     *child_fh;
+    int                             child_fhlen;
+    int                             dc;      /* parent grants DELETE_CHILD */
+    int                             sticky;
+    uint64_t                        parent_uid;
+};
+
 /* Require `required` (CHIMERA_ACE_* mask) on the object named by `fh`. */
 void chimera_vfs_gate_fh(
+    struct chimera_vfs_gate_ctx   *ctx,
     struct chimera_vfs_thread     *thread,
     const struct chimera_vfs_cred *cred,
     const void                    *fh,
@@ -120,6 +149,7 @@ void chimera_vfs_gate_fh(
  * backends -- for DAC the kernel cannot see on handle-based lookups (path-prefix
  * search, link/rename destination-directory write). */
 void chimera_vfs_gate_fh_dac(
+    struct chimera_vfs_gate_ctx   *ctx,
     struct chimera_vfs_thread     *thread,
     const struct chimera_vfs_cred *cred,
     const void                    *fh,
@@ -130,6 +160,7 @@ void chimera_vfs_gate_fh_dac(
 
 /* Authorize deleting `child_fh` from directory `parent_fh` (delete_allowed). */
 void chimera_vfs_gate_delete(
+    struct chimera_vfs_gate_ctx   *ctx,
     struct chimera_vfs_thread     *thread,
     const struct chimera_vfs_cred *cred,
     const void                    *parent_fh,

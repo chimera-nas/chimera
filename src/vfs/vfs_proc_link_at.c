@@ -160,6 +160,7 @@ chimera_vfs_link_at_dispatch(
  * directory requires ADD_FILE on that directory.
  */
 struct chimera_vfs_link_at_gate {
+    struct chimera_vfs_gate_ctx     gate_ctx;
     struct chimera_vfs_thread      *thread;
     const struct chimera_vfs_cred  *cred;
     const void                     *fh;
@@ -272,7 +273,8 @@ chimera_vfs_link_at(
         gate->callback     = callback;
         gate->private_data = private_data;
 
-        chimera_vfs_gate_fh_dac(thread, cred, dir_fh, dir_fhlen,
+        chimera_vfs_gate_fh_dac(&gate->gate_ctx, thread, cred,
+                                dir_fh, dir_fhlen,
                                 CHIMERA_ACE_WRITE_DATA | CHIMERA_ACE_EXECUTE,
                                 chimera_vfs_link_at_gate_complete, gate);
         return;

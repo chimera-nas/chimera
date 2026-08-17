@@ -375,6 +375,7 @@ chimera_vfs_rename_at_dispatch(
  * distinguishing APPEND_DATA on the destination.
  */
 struct chimera_vfs_rename_at_gate {
+    struct chimera_vfs_gate_ctx      gate_ctx;
     struct chimera_vfs_thread       *thread;
     const struct chimera_vfs_cred   *cred;
     const void                      *fh;
@@ -469,7 +470,7 @@ chimera_vfs_rename_at_gate_dst_lookup(
         memcpy(gate->dst_target_fh, attr->va_fh, attr->va_fh_len);
         gate->dst_target_fh_len = attr->va_fh_len;
 
-        chimera_vfs_gate_delete(gate->thread, gate->cred,
+        chimera_vfs_gate_delete(&gate->gate_ctx, gate->thread, gate->cred,
                                 gate->new_fh, gate->new_fhlen,
                                 gate->dst_target_fh, gate->dst_target_fh_len,
                                 chimera_vfs_rename_at_gate_target, gate);
@@ -495,7 +496,7 @@ chimera_vfs_rename_at_gate_dst(
     }
 
     if (gate->target_fh && gate->target_fh_len > 0) {
-        chimera_vfs_gate_delete(gate->thread, gate->cred,
+        chimera_vfs_gate_delete(&gate->gate_ctx, gate->thread, gate->cred,
                                 gate->new_fh, gate->new_fhlen,
                                 gate->target_fh, gate->target_fh_len,
                                 chimera_vfs_rename_at_gate_target, gate);
@@ -525,7 +526,8 @@ chimera_vfs_rename_at_gate_src(
         return;
     }
 
-    chimera_vfs_gate_fh(gate->thread, gate->cred, gate->new_fh, gate->new_fhlen,
+    chimera_vfs_gate_fh(&gate->gate_ctx, gate->thread, gate->cred,
+                        gate->new_fh, gate->new_fhlen,
                         CHIMERA_ACE_WRITE_DATA,
                         chimera_vfs_rename_at_gate_dst, gate);
 } /* chimera_vfs_rename_at_gate_src */
@@ -550,7 +552,7 @@ chimera_vfs_rename_at_gate_lookup(
         memcpy(gate->src_child_fh, attr->va_fh, attr->va_fh_len);
         gate->src_child_fh_len = attr->va_fh_len;
 
-        chimera_vfs_gate_delete(gate->thread, gate->cred,
+        chimera_vfs_gate_delete(&gate->gate_ctx, gate->thread, gate->cred,
                                 gate->fh, gate->fhlen,
                                 gate->src_child_fh, gate->src_child_fh_len,
                                 chimera_vfs_rename_at_gate_src, gate);
@@ -559,7 +561,8 @@ chimera_vfs_rename_at_gate_lookup(
 
     /* No FH resolved: fall back to DELETE_CHILD on the source directory alone
      * (sticky owner check needs the object's attrs). */
-    chimera_vfs_gate_fh(gate->thread, gate->cred, gate->fh, gate->fhlen,
+    chimera_vfs_gate_fh(&gate->gate_ctx, gate->thread, gate->cred,
+                        gate->fh, gate->fhlen,
                         CHIMERA_ACE_DELETE_CHILD,
                         chimera_vfs_rename_at_gate_src, gate);
 } /* chimera_vfs_rename_at_gate_lookup */
