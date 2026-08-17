@@ -159,7 +159,10 @@ chimera_nfs4_compound_process(
         nfs4_release_write_args(thread, req->args_compound);
         rc = nfs4_send_cached_reply(thread, req);
         chimera_nfs_abort_if(rc, "Failed to send cached RPC2 reply");
-        req->replay_slot = NULL;
+        /* Release the slot the retransmit path claimed (IN_PROGRESS) back to
+        * CACHED now that the pinned buffer has been sent; this re-arms the
+        * slot for further retransmits and lets a waiting advance proceed. */
+        nfs4_replay_slot_replay_done(req);
         nfs_request_free(thread, req);
         return;
     }

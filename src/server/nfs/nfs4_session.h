@@ -52,7 +52,11 @@ enum nfs4_slot_state {
  * another connection/thread; it is arbitrated by the CAS in
  * nfs4_replay_slot_acquire.  cached_buf/cached_len are written by the (rare)
  * cachethis capture path on the owning thread and published via the release
- * store in nfs4_replay_slot_finalize.
+ * store in nfs4_replay_slot_finalize.  A retransmit that replays those bytes
+ * first claims the slot CACHED -> IN_PROGRESS with that same CAS (restored by
+ * nfs4_replay_slot_replay_done after the send): holding IN_PROGRESS excludes a
+ * concurrent advance (seqid+1) from freeing cached_buf mid-replay, so the
+ * buffer is only ever read or freed by the single thread that owns the slot.
  */
 struct nfs4_replay_slot {
     _Atomic uint64_t state_word;       /* (seqid << NFS4_SLOT_SEQID_SHIFT) | state */
@@ -538,6 +542,14 @@ nfsstat4 nfs4_replay_slot_acquire(
  * Phase 1 this advances IN_PROGRESS -> COMPLETED.  Phase 2 will optionally
  * capture the encoded reply bytes and transition to CACHED. */
 void nfs4_replay_slot_finalize(
+    struct nfs_request *req);
+
+/* Called by the compound dispatcher after a cached reply has been replayed for
+ * a retransmit.  Releases the slot the retransmit path claimed (CACHED ->
+ * IN_PROGRESS) back to CACHED, keeping its seqid and cached buffer so the
+ * buffer stays pinned for the whole replay and no concurrent advance can free
+ * it mid-send. */
+void nfs4_replay_slot_replay_done(
     struct nfs_request *req);
 
 /* Record the delegation callback path on a client's unified state record.

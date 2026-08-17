@@ -1645,15 +1645,34 @@ nfs4_replay_slot_acquire(
                     nfs4_replay_arm_capture(req);
                 }
             } else if (seqid == cseq) {
-                /* Retransmit. */
-                if (state == NFS4_SLOT_CACHED && slot->cached_buf) {
-                    req->replay_slot    = slot;
-                    req->replay_slot_id = slotid;
-                    req->replay_action  = NFS4_REPLAY_ACTION_FROM_CACHE;
-                    *out_is_replay      = true;
+                /* Retransmit.  A CACHED slot always has a live cached_buf
+                 * (finalize promotes to CACHED only when bytes were captured),
+                 * so claim it CACHED -> IN_PROGRESS with the *same* CAS the
+                 * advance path uses to win the right to free that buffer.
+                 * Winning here excludes a concurrent advance (seqid+1) on
+                 * another connection from freeing cached_buf out from under the
+                 * replay read in nfs4_send_cached_reply -- the use-after-free
+                 * the old lock-free reader path allowed.  The compound
+                 * dispatcher restores the slot to CACHED via
+                 * nfs4_replay_slot_replay_done once the bytes are on the wire.
+                 * Reading cached_buf only after the CAS also keeps that plain
+                 * field free of a concurrent free/read data race. */
+                if (state == NFS4_SLOT_CACHED) {
+                    if (!atomic_compare_exchange_weak_explicit(
+                            &slot->state_word, &cur,
+                            nfs4_slot_word(cseq, NFS4_SLOT_IN_PROGRESS),
+                            memory_order_acq_rel, memory_order_acquire)) {
+                        continue;  /* lost the race; re-read and re-evaluate */
+                    }
+                    req->replay_slot        = slot;
+                    req->replay_slot_id     = slotid;
+                    req->replay_action      = NFS4_REPLAY_ACTION_FROM_CACHE;
+                    *out_is_replay          = true;
+                    slot->in_progress_since = nfs4_slot_now();
+                    slot->last_stuck_report = 0;
                 } else {
-                    /* Original ran with cachethis=false (or was demoted
-                     * for size).  We cannot replay the bytes. */
+                    /* COMPLETED: original ran with cachethis=false (or was
+                     * demoted for size).  We cannot replay the bytes. */
                     status = NFS4ERR_RETRY_UNCACHED_REP;
                 }
             } else {
@@ -1763,6 +1782,31 @@ nfs4_replay_slot_finalize(struct nfs_request *req)
 
     req->replay_slot = NULL;
 } /* nfs4_replay_slot_finalize */
+
+void
+nfs4_replay_slot_replay_done(struct nfs_request *req)
+{
+    struct nfs4_replay_slot *slot = req->replay_slot;
+    uint64_t                 cur;
+
+    if (!slot) {
+        return;
+    }
+
+    /* Release a slot claimed by the retransmit path (nfs4_replay_slot_acquire
+     * moved it CACHED -> IN_PROGRESS to pin cached_buf across the replay send)
+     * back to CACHED, preserving its seqid and cached buffer and re-publishing
+     * them with a release store for the next reader.  The slot has been
+     * IN_PROGRESS and owned by this request for the whole replay, so no other
+     * thread has advanced the word -- a plain load of the seqid bits is safe. */
+    cur = atomic_load_explicit(&slot->state_word, memory_order_relaxed);
+    atomic_store_explicit(&slot->state_word,
+                          nfs4_slot_word((uint32_t) (cur >> NFS4_SLOT_SEQID_SHIFT),
+                                         NFS4_SLOT_CACHED),
+                          memory_order_release);
+
+    req->replay_slot = NULL;
+} /* nfs4_replay_slot_replay_done */
 
 /*
  * Record the delegation callback path for a client onto its unified state

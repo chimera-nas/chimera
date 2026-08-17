@@ -321,6 +321,74 @@ test_advance_frees_cache(void)
     destroy_session_table(&table, session);
 } /* test_advance_frees_cache */
 
+/* Case 7b (regression): while a retransmit is replaying a CACHED slot, a
+ * concurrent advance (seqid+1) on another connection must not free the cached
+ * buffer out from under the replay read.  The retransmit path now claims the
+ * slot CACHED -> IN_PROGRESS; an advance that lands in that window is deferred
+ * instead of freeing, and the buffer survives until nfs4_replay_slot_replay_done
+ * restores the slot to CACHED. */
+static void
+test_retransmit_pins_cache_against_advance(void)
+{
+    struct nfs4_client_table table;
+    struct nfs4_session     *session = make_session(&table, TEST_SLOTS, TEST_MAXRESP);
+    struct nfs_request       req_replay, req_adv;
+    bool                     is_replay;
+    nfsstat4                 status;
+    char                    *fake_reply;
+
+    /* Get slot 0 into CACHED with simulated captured bytes. */
+    reset_request(&req_replay);
+    req_replay.session = session;
+    status             = nfs4_replay_slot_acquire(session, 0, 1, true, &req_replay, &is_replay);
+    CHECK(status == NFS4_OK);
+    fake_reply = malloc(96);
+    memset(fake_reply, 'z', 96);
+    session->replay_slots[0].cached_buf = fake_reply;
+    session->replay_slots[0].cached_len = 96;
+    session->replay_bytes_in_use       += 96;
+    nfs4_replay_slot_finalize(&req_replay);
+    CHECK(nfs4_slot_state(&session->replay_slots[0]) == NFS4_SLOT_CACHED);
+
+    /* Retransmit (same seqid) claims the slot for replay: IN_PROGRESS, with the
+     * buffer still present and pinned. */
+    reset_request(&req_replay);
+    req_replay.session = session;
+    status             = nfs4_replay_slot_acquire(session, 0, 1, true, &req_replay, &is_replay);
+    CHECK(status == NFS4_OK);
+    CHECK(is_replay);
+    CHECK(req_replay.replay_action == NFS4_REPLAY_ACTION_FROM_CACHE);
+    CHECK(nfs4_slot_state(&session->replay_slots[0]) == NFS4_SLOT_IN_PROGRESS);
+    CHECK(session->replay_slots[0].cached_buf == fake_reply);
+
+    /* An advance arriving during the replay window must NOT free the buffer. */
+    reset_request(&req_adv);
+    req_adv.session = session;
+    status          = nfs4_replay_slot_acquire(session, 0, 2, false, &req_adv, &is_replay);
+    CHECK(status == NFS4ERR_SEQ_MISORDERED);
+    CHECK(session->replay_slots[0].cached_buf == fake_reply);   /* still alive */
+    CHECK(session->replay_bytes_in_use == 96);
+
+    /* Replay done: slot restored to CACHED with buffer and seqid intact. */
+    nfs4_replay_slot_replay_done(&req_replay);
+    CHECK(nfs4_slot_state(&session->replay_slots[0]) == NFS4_SLOT_CACHED);
+    CHECK(nfs4_slot_seqid(&session->replay_slots[0]) == 1);
+    CHECK(session->replay_slots[0].cached_buf == fake_reply);
+
+    /* Now the advance succeeds and frees the buffer as usual. */
+    reset_request(&req_adv);
+    req_adv.session = session;
+    status          = nfs4_replay_slot_acquire(session, 0, 2, false, &req_adv, &is_replay);
+    CHECK(status == NFS4_OK);
+    CHECK(!is_replay);
+    CHECK(nfs4_slot_state(&session->replay_slots[0]) == NFS4_SLOT_IN_PROGRESS);
+    CHECK(session->replay_slots[0].cached_buf == NULL);
+    CHECK(session->replay_bytes_in_use == 0);
+    nfs4_replay_slot_finalize(&req_adv);
+
+    destroy_session_table(&table, session);
+} /* test_retransmit_pins_cache_against_advance */
+
 /* Case 8: misordered seqid on a completed slot. */
 static void
 test_misordered_after_completed(void)
@@ -432,6 +500,7 @@ main(
     test_completed_retry_uncached();
     test_cached_retry_replay();
     test_advance_frees_cache();
+    test_retransmit_pins_cache_against_advance();
     test_misordered_after_completed();
     test_slots_independent();
     test_implicit_session_no_slots();
