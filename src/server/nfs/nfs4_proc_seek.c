@@ -5,6 +5,7 @@
 #include "nfs4_procs.h"
 #include "nfs4_status.h"
 #include "nfs4_state.h"
+#include "nfs4_session.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
 
@@ -105,6 +106,23 @@ chimera_nfs4_seek(
     if (nfs4_stateid_is_special(&args->sa_stateid)) {
         if (req->fhlen == 0) {
             res->sa_status = NFS4ERR_NOFILEHANDLE;
+            chimera_nfs4_compound_complete(req, res->sa_status);
+            return;
+        }
+
+        /* A special-stateid read op must still honor share-reservation
+         * deny-READ modes held by any owner of any client (RFC 8881
+         * §9.7): SEEK reports the file's data/hole structure, so a
+         * conflicting deny-READ open makes it NFS4ERR_LOCKED, exactly as
+         * READ (and as DEALLOCATE does for deny-WRITE).  Without this the
+         * offset check below runs first and reports NFS4ERR_NXIO for a
+         * file the caller was never entitled to inspect. */
+        nfsstat4 dstatus = nfs4_clients_check_io_denied(
+            &thread->shared->nfs4_shared_clients,
+            req->fh, req->fhlen, OPEN4_SHARE_ACCESS_READ);
+
+        if (dstatus != NFS4_OK) {
+            res->sa_status = dstatus;
             chimera_nfs4_compound_complete(req, res->sa_status);
             return;
         }

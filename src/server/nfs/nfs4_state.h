@@ -909,6 +909,14 @@ nfs_client_has_open_state_for_fh(
     const uint8_t     *fh,
     uint16_t           fh_len);
 
+/* True if `client` holds any leased state -- opens, locks, delegations or
+ * layouts.  DESTROY_CLIENTID must return NFS4ERR_CLIENTID_BUSY while it does
+ * (RFC 8881 §18.50.3).  Note this looks past the open/lock-owner hashes to the
+ * state they contain: an owner record outlives its last CLOSE. */
+SYMBOL_EXPORT bool
+nfs_client_has_leased_state(
+    struct nfs_client *client);
+
 /* One bit identifying a (share_access, share_deny) OPEN event for
  * nfs_open_state.share_combos.  access and deny are each 2-bit masks. */
 static inline uint16_t

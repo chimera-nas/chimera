@@ -1201,6 +1201,59 @@ nfs_client_has_open_state_for_fh(
     return found;
 } /* nfs_client_has_open_state_for_fh */
 
+/* Does this client hold any leased state at all -- opens, locks, delegations
+ * or layouts?  DESTROY_CLIENTID (RFC 8881 §18.50.3) must answer
+ * NFS4ERR_CLIENTID_BUSY while any of it remains.
+ *
+ * The owner hashes are deliberately NOT the test: an open/lock owner record
+ * outlives its last CLOSE/LOCKU (it caches the 4.0 seqid and replay slot), so
+ * a non-empty owner hash does not mean the client still holds state.  Walk
+ * down to the per-owner state containers instead.
+ *
+ * Lock order is client->lock then owner->lock, matching
+ * nfs_client_has_open_state_for_fh; callers may hold nfs4_ct_lock, as
+ * nfs4_clients_check_io_denied already does. */
+bool
+nfs_client_has_leased_state(struct nfs_client *client)
+{
+    struct nfs_open_owner *oo, *oo_tmp;
+    struct nfs_lock_owner *lo, *lo_tmp;
+    bool                   found;
+
+    pthread_mutex_lock(&client->lock);
+
+    found = (client->delegations != NULL) || (client->layouts_by_fh != NULL);
+
+    if (!found) {
+        HASH_ITER(hh, client->open_owners_by_str, oo, oo_tmp)
+        {
+            pthread_mutex_lock(&oo->lock);
+            found = (oo->states_by_fh != NULL);
+            pthread_mutex_unlock(&oo->lock);
+
+            if (found) {
+                break;
+            }
+        }
+    }
+
+    if (!found) {
+        HASH_ITER(hh, client->lock_owners_by_str, lo, lo_tmp)
+        {
+            pthread_mutex_lock(&lo->lock);
+            found = (lo->states != NULL);
+            pthread_mutex_unlock(&lo->lock);
+
+            if (found) {
+                break;
+            }
+        }
+    }
+
+    pthread_mutex_unlock(&client->lock);
+    return found;
+} /* nfs_client_has_leased_state */
+
 nfsstat4
 nfs_open_state_check_io_denied(
     struct nfs_open_state *requesting_state,

@@ -531,6 +531,22 @@ nfs4_client_has_state(const struct nfs4_client *c)
             c->unified->lock_owners_by_str != NULL);
 } /* nfs4_client_has_state */
 
+/* Does the client hold any *leased* state?  DESTROY_CLIENTID (RFC 8881
+ * §18.50.3) must refuse while any opens, locks, delegations or layouts remain,
+ * which is a wider set than nfs4_client_has_state() tests -- that one serves
+ * the SETCLIENTID CLID_INUSE rule (RFC 7530 §16.33.5) and deliberately looks
+ * only at open/lock owners, which is the right test there.
+ *
+ * The owner hashes are not usable as the leased-state test: an owner record
+ * outlives its last CLOSE/LOCKU (it caches the 4.0 seqid and replay slot), so
+ * testing them reports BUSY for a client that has already released everything.
+ * nfs_client_has_leased_state walks down to the actual state containers. */
+static int
+nfs4_client_has_leased_state(const struct nfs4_client *c)
+{
+    return c->unified && nfs_client_has_leased_state(c->unified);
+} /* nfs4_client_has_leased_state */
+
 void
 nfs4_client_setclientid(
     struct nfs4_client_table           *table,
@@ -894,6 +910,18 @@ nfs4_client_destroy_clientid(
     /* RFC 8881 §18.50.3: a client that still owns sessions cannot be
      * destroyed -- the client must DESTROY_SESSION them first. */
     if (nfs4_client_has_session_locked(table, client_id)) {
+        pthread_mutex_unlock(&table->nfs4_ct_lock);
+        return NFS4ERR_CLIENTID_BUSY;
+    }
+
+    /* Sessions are only half the rule: §18.50.3 makes CLIENTID_BUSY a MUST
+     * while opens, locks, delegations, layouts and/or wants remain on the
+     * clientid's unexpired lease, not merely while sessions do.  Destroying
+     * the record here would tear that leased state down underneath its
+     * holder, which is exactly what the error exists to prevent -- a client
+     * that DESTROY_SESSIONs and then DESTROY_CLIENTIDs must be refused while
+     * it still holds opens. */
+    if (nfs4_client_has_leased_state(c)) {
         pthread_mutex_unlock(&table->nfs4_ct_lock);
         return NFS4ERR_CLIENTID_BUSY;
     }
