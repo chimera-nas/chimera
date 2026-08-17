@@ -2359,20 +2359,17 @@ chimera_io_uring_get_xattr(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct chimera_io_uring_thread *thread = private_data;
-    int                             fd     = (int) request->get_xattr.handle->vfs_private;
-    char                           *name;
+    struct chimera_io_uring_thread *thread  = private_data;
+    int                             fd      = (int) request->get_xattr.handle->vfs_private;
+    char                           *scratch = (char *) request->plugin_data;
     ssize_t                         rc;
 
     --thread->inflight;
 
-    name = malloc(request->get_xattr.namelen + 1);
-    memcpy(name, request->get_xattr.name, request->get_xattr.namelen);
-    name[request->get_xattr.namelen] = '\0';
+    TERM_STR(name, request->get_xattr.name, request->get_xattr.namelen, scratch);
 
     rc = fgetxattr(fd, name, request->get_xattr.value,
                    request->get_xattr.value_maxlen);
-    free(name);
 
     if (rc < 0) {
         request->status = chimera_linux_errno_to_status(errno);
@@ -2389,10 +2386,10 @@ chimera_io_uring_set_xattr(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct chimera_io_uring_thread *thread = private_data;
-    int                             fd     = (int) request->set_xattr.handle->vfs_private;
-    char                           *name;
-    int                             flags = 0;
+    struct chimera_io_uring_thread *thread  = private_data;
+    int                             fd      = (int) request->set_xattr.handle->vfs_private;
+    char                           *scratch = (char *) request->plugin_data;
+    int                             flags   = 0;
     int                             rc;
     struct stat                     st;
 
@@ -2411,13 +2408,10 @@ chimera_io_uring_set_xattr(
     }
     chimera_linux_stat_to_attr(&request->set_xattr.r_pre_attr, &st);
 
-    name = malloc(request->set_xattr.namelen + 1);
-    memcpy(name, request->set_xattr.name, request->set_xattr.namelen);
-    name[request->set_xattr.namelen] = '\0';
+    TERM_STR(name, request->set_xattr.name, request->set_xattr.namelen, scratch);
 
     rc = fsetxattr(fd, name, request->set_xattr.value,
                    request->set_xattr.value_len, flags);
-    free(name);
 
     if (rc < 0) {
         request->status = chimera_linux_errno_to_status(errno);
@@ -2476,9 +2470,9 @@ chimera_io_uring_remove_xattr(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct chimera_io_uring_thread *thread = private_data;
-    int                             fd     = (int) request->remove_xattr.handle->vfs_private;
-    char                           *name;
+    struct chimera_io_uring_thread *thread  = private_data;
+    int                             fd      = (int) request->remove_xattr.handle->vfs_private;
+    char                           *scratch = (char *) request->plugin_data;
     int                             rc;
     struct stat                     st;
 
@@ -2491,12 +2485,9 @@ chimera_io_uring_remove_xattr(
     }
     chimera_linux_stat_to_attr(&request->remove_xattr.r_pre_attr, &st);
 
-    name = malloc(request->remove_xattr.namelen + 1);
-    memcpy(name, request->remove_xattr.name, request->remove_xattr.namelen);
-    name[request->remove_xattr.namelen] = '\0';
+    TERM_STR(name, request->remove_xattr.name, request->remove_xattr.namelen, scratch);
 
     rc = fremovexattr(fd, name);
-    free(name);
 
     if (rc < 0) {
         request->status = chimera_linux_errno_to_status(errno);
