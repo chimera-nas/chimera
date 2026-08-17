@@ -390,7 +390,7 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_nfs = {
      * by its upstream RPC reply (it reassigns request->read.iov), so the VFS
      * core must not pre-allocate buffers for it. */
     .capabilities   = CHIMERA_VFS_CAP_OPEN_FILE_REQUIRED | CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_FS_RELATIVE_OP |
-        CHIMERA_VFS_CAP_FS_LOCK | CHIMERA_VFS_CAP_READ_PROVIDES_BUFFERS,
+        CHIMERA_VFS_CAP_FS_LOCK | CHIMERA_VFS_CAP_READ_PROVIDES_BUFFERS | CHIMERA_VFS_CAP_DELEGATES_DAC,
     .init           = chimera_nfs_init,
     .destroy        = chimera_nfs_destroy,
     .thread_init    = chimera_nfs_thread_init,
