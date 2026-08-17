@@ -505,6 +505,20 @@ main(
         kid_fh_len = ctx.fh_len;
         TEST_PASS("lookup: non-owner denied, owner allowed (0700 dir)");
 
+        /* A component longer than {NAME_MAX} is rejected with ENAMETOOLONG
+         * before dispatch -- lookup_at was the sole _at proc missing this bound,
+         * letting an attacker-sized NFSv3 LOOKUP name overrun a passthrough
+         * backend's fixed request buffer. */
+        {
+            char longname[CHIMERA_VFS_NAME_MAX + 32];
+
+            memset(longname, 'a', sizeof(longname) - 1);
+            longname[sizeof(longname) - 1] = '\0';
+            assert(lookup_as(&ctx, &owner, dir_handle, longname) ==
+                   CHIMERA_VFS_ENAMETOOLONG);
+        }
+        TEST_PASS("lookup: over-long component rejected (ENAMETOOLONG)");
+
         assert(remove_as(&ctx, &other, dir_handle, "kid", kid_fh, kid_fh_len) ==
                CHIMERA_VFS_EACCES);
         assert(remove_as(&ctx, &owner, dir_handle, "kid", kid_fh, kid_fh_len) ==

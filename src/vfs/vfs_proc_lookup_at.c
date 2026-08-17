@@ -214,6 +214,17 @@ chimera_vfs_lookup_at(
 {
     struct chimera_vfs_lookup_at_gate *gate;
 
+    /* A single component may not exceed {NAME_MAX}.  Every other _at proc
+     * (mkdir_at, remove_at, open_at, ...) rejects an over-long name here; lookup
+     * was the sole gap, letting an attacker-sized NFSv3 LOOKUP component (bounded
+     * only by the ~4 MB RPC limit) reach a passthrough backend that copies it
+     * into a fixed CHIMERA_VFS_PLUGIN_DATA_SIZE (8 KB) request buffer and overrun
+     * the heap.  Bound it before dispatch. */
+    if (namelen >= CHIMERA_VFS_NAME_MAX) {
+        callback(CHIMERA_VFS_ENAMETOOLONG, NULL, NULL, private_data);
+        return;
+    }
+
     /* Path-prefix search (EXECUTE) is enforced by the engine even for
      * DELEGATES_DAC (passthrough) backends when the caller is a POSIX (AUTH_UNIX)
      * client: they resolve each component by file handle (open_by_handle_at),
