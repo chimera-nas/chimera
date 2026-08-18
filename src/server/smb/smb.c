@@ -2114,7 +2114,16 @@ chimera_smb_server_handle_smb1(
 
     request = chimera_smb_request_alloc(thread);
 
-    evpl_iovec_cursor_copy(&request_cursor, &request->smb1_hdr, sizeof(request->smb1_hdr));
+    /* Every field below is parsed from an untrusted, attacker-framed message;
+     * the unchecked cursor readers abort() the whole shared process on a short
+     * read, so use the checked variants and reject a malformed frame cleanly. */
+    if (evpl_iovec_cursor_try_copy(&request_cursor, &request->smb1_hdr,
+                                   sizeof(request->smb1_hdr))) {
+        chimera_smb_error("Received truncated SMB1 header; closing connection");
+        chimera_smb_request_free(thread, request);
+        evpl_close(evpl, conn->bind);
+        return;
+    }
 
     if (request->smb1_hdr.command != SMB1_NEGOTIATE) {
         chimera_smb_error("Received SMB1 message with invalid command");
@@ -2123,13 +2132,32 @@ chimera_smb_server_handle_smb1(
         return;
     } /* switch */
 
-    evpl_iovec_cursor_get_uint8(&request_cursor, &wct);
+    if (evpl_iovec_cursor_try_get_uint8(&request_cursor, &wct)) {
+        chimera_smb_error("Received truncated SMB1 NEGOTIATE (word count); closing connection");
+        chimera_smb_request_free(thread, request);
+        evpl_close(evpl, conn->bind);
+        return;
+    }
     evpl_iovec_cursor_reset_consumed(&request_cursor);
-    evpl_iovec_cursor_get_uint16(&request_cursor, &bcc);
+    if (evpl_iovec_cursor_try_get_uint16(&request_cursor, &bcc)) {
+        chimera_smb_error("Received truncated SMB1 NEGOTIATE (byte count); closing connection");
+        chimera_smb_request_free(thread, request);
+        evpl_close(evpl, conn->bind);
+        return;
+    }
 
     dialects = alloca(bcc + 1);
 
-    evpl_iovec_cursor_copy(&request_cursor, dialects, bcc);
+    /* bcc is a client-declared byte count.  The unchecked copy that used to live
+     * here aborted the whole shared process when the frame carried fewer bytes
+     * than declared; fence the copy to what the frame actually holds. */
+    if (evpl_iovec_cursor_try_copy(&request_cursor, dialects, bcc)) {
+        chimera_smb_error("SMB1 NEGOTIATE byte count %u exceeds frame; closing connection",
+                          (unsigned int) bcc);
+        chimera_smb_request_free(thread, request);
+        evpl_close(evpl, conn->bind);
+        return;
+    }
 
     dialects[bcc] = 0;
 
