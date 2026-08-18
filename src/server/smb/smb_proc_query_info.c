@@ -632,6 +632,20 @@ chimera_smb_query_info(struct chimera_smb_request *request)
                     case SMB2_FILE_ATTRIBUTE_TAG_INFO:
                         request->query_info.output_length = SMB2_FILE_ATTRIBUTE_TAG_INFO_SIZE;
                         break;
+                    case SMB2_FILE_ALL_INFO:
+                        /* Windows queries FileAllInformation on a pipe FID, and
+                         * this branch's comment above already counts it among
+                         * the classes it serves -- but the case was missing, so
+                         * it fell through to INVALID_INFO_CLASS.  Size it the
+                         * same way the VFS path does: the fixed 100 bytes plus
+                         * the share-relative name as UTF-16LE.  A pipe open
+                         * carries the pipe name in full_path (set by
+                         * chimera_smb_create_gen_open_file), so the reply names
+                         * the pipe, as Windows reports it. */
+                        request->query_info.output_length = SMB2_FILE_ALL_INFO_FIXED_SIZE +
+                            (request->query_info.open_file->full_path_len
+                             ? request->query_info.open_file->full_path_len * 2 : 2);
+                        break;
                     default:
                         /* Info classes we don't synthesize for pipes: fail
                          * cleanly rather than falling through to the VFS path. */
