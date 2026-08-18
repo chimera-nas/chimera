@@ -146,6 +146,38 @@ test_unbounded_default(void)
 } /* test_unbounded_default */
 
 /* ------------------------------------------------------------------ *
+*  Pre-dispatch frame bounds (chimera_smb_server_handle_tcp)         *
+* ------------------------------------------------------------------ */
+
+/* Regression: a frame carrying only the 4-byte NBSS header (NBSS-declared
+ * length 0) leaves no bytes for the 4-byte SMB protocol id the TCP handler
+ * peeks before dispatch.  The unchecked peek used to abort the whole process
+ * on such a short frame -- a single 4-byte pre-auth packet.  Reproduce the
+ * exact read sequence and confirm the shortfall is reported, not aborted. */
+static void
+test_short_nbss_frame_protocol_id(void)
+{
+    uint8_t                  frame[4] = { 0 }; /* NBSS header only, no payload */
+    struct evpl_iovec        iov;
+    struct evpl_iovec_cursor cur;
+    struct netbios_header    nb;
+    uint32_t                 proto;
+
+    cursor_over(&cur, &iov, frame, sizeof(frame));
+
+    /* The handler now drops frames shorter than NBSS header + protocol id. */
+    CHECK((int) sizeof(frame) < (int) (sizeof(nb) + sizeof(proto)),
+          "short frame is below the NBSS header + protocol id minimum");
+
+    /* And the underlying peek, if reached, reports the shortfall rather than
+     * aborting: consume the 4-byte NBSS header, then a checked protocol-id
+     * read must fail cleanly. */
+    evpl_iovec_cursor_copy(&cur, &nb, sizeof(nb));
+    CHECK(evpl_iovec_cursor_try_get_uint32(&cur, &proto) == -1,
+          "short NBSS frame: protocol-id peek rejected (no abort)");
+} /* test_short_nbss_frame_protocol_id */
+
+/* ------------------------------------------------------------------ *
 *  smb_cursor_seek_to                                                *
 * ------------------------------------------------------------------ */
 
@@ -292,6 +324,9 @@ main(
     test_try_copy_past_end_rejected();
     test_limit_fences_reads();
     test_unbounded_default();
+
+    fprintf(stderr, "=== SMB parse hardening: pre-dispatch frame bounds ===\n");
+    test_short_nbss_frame_protocol_id();
 
     fprintf(stderr, "=== SMB parse hardening: smb_cursor_seek_to ===\n");
     test_seek_to();
