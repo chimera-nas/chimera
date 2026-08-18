@@ -1257,6 +1257,15 @@ struct chimera_smb_conn {
      * is gone, it will yield -- retry briefly" from "a genuinely-live durable
      * holder -- real SHARING_VIOLATION".  Cleared on reuse in conn_alloc. */
     uint8_t                            disconnecting;
+    /* Set when the SERVER half-closes this connection itself (evpl_finish on
+     * the unparseable-request path).  That is a flush-then-close: replies
+     * already in flight must still reach the client.  evpl_bind_is_closing()
+     * cannot distinguish our own half-close from a peer FIN -- it reports
+     * EVPL_BIND_FINISH, EVPL_BIND_PENDING_CLOSED and EVPL_BIND_CLOSED alike --
+     * so the reply-drop guard consults this to keep the peer-initiated cases
+     * dropping while letting our own graceful close flush.  Cleared on reuse in
+     * conn_alloc. */
+    uint8_t                            finishing;
     /* Count of compounds in flight on THIS connection (guarded by the owning
     * thread's lease_break_lock).  A dir-lease break whose holder connection is
     * mid-compound is a self-break: the same connection's reply must precede the
@@ -2423,6 +2432,7 @@ chimera_smb_conn_alloc(struct chimera_server_smb_thread *thread)
         LL_DELETE(thread->free_conns, conn);
         conn->lease_break_tearing_down = 0;
         conn->disconnecting            = 0;
+        conn->finishing                = 0;
         conn->in_compound              = 0;
     } else {
         conn = calloc(1, sizeof(*conn));
