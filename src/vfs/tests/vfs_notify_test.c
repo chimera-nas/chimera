@@ -496,6 +496,89 @@ test_rpl_cache_cross_shard_invalidate(void)
 } /* test_rpl_cache_cross_shard_invalidate */
 
 /* ------------------------------------------------------------------ */
+/* Test 10b: the forward index uses every slot, not one slot per shard */
+/* ------------------------------------------------------------------ */
+/*
+ * The shard index takes the low `num_shards_bits` of the child-FH hash.  If
+ * the slot index is masked off the same low bits, it becomes a pure function
+ * of the shard: every child in a shard lands in that shard's single slot and
+ * the forward index degenerates from 64x16x4 = 4096 entries to 64x4 = 256.
+ *
+ * Insert more distinct children than the degenerate capacity and count how
+ * many survive.  Collapsed, at most 256 of the 1024 can be resident.  Healthy,
+ * 1024 keys spread over 1024 four-way slots lose only the handful that pile
+ * more than four deep on one slot (Poisson(1) tail, ~5 entries), so the count
+ * lands just under 1024.  The 900 threshold sits far from both.
+ */
+#define RPL_CAPACITY_KEYS 1024
+#define RPL_COLLAPSED_CAP 256   /* num_shards * entries_per_slot */
+
+static void
+test_rpl_cache_slot_distribution(void)
+{
+    struct chimera_vfs_rpl_cache *cache;
+    struct chimera_vfs_thread     thread = { 0 }; /* zeroed magazines */
+    uint8_t                       child_fh[CHIMERA_VFS_FH_SIZE];
+    uint8_t                       parent_fh[CHIMERA_VFS_FH_SIZE];
+    char                          name[32];
+    uint8_t                       r_pfh[CHIMERA_VFS_FH_SIZE];
+    uint16_t                      r_pfh_len   = 0;
+    char                          r_name[256] = { 0 };
+    uint16_t                      r_name_len  = 0;
+    int                           name_len;
+    int                           i, hits = 0;
+
+    fprintf(stderr, "\ntest_rpl_cache_slot_distribution\n");
+
+    /* 64 shards, 16 slots, 4 entries per slot, 30s ttl — the same geometry
+     * vfs_notify_init() uses. */
+    cache = chimera_vfs_rpl_cache_create(6, 4, 2, 30);
+
+    make_fh(parent_fh, 0xFE);
+
+    for (i = 0; i < RPL_CAPACITY_KEYS; i++) {
+        memset(child_fh, 0, sizeof(child_fh));
+        child_fh[0] = 0xAA; /* fake magic, as make_fh() uses */
+        child_fh[1] = (uint8_t) i;
+        child_fh[2] = (uint8_t) (i >> 8);
+
+        name_len = snprintf(name, sizeof(name), "f%d", i);
+
+        chimera_vfs_rpl_cache_insert(&thread, cache,
+                                     chimera_vfs_hash(child_fh, sizeof(child_fh)),
+                                     child_fh, sizeof(child_fh),
+                                     parent_fh, sizeof(parent_fh),
+                                     chimera_vfs_hash(parent_fh, sizeof(parent_fh)),
+                                     chimera_vfs_hash(name, name_len),
+                                     name, name_len);
+    }
+
+    for (i = 0; i < RPL_CAPACITY_KEYS; i++) {
+        memset(child_fh, 0, sizeof(child_fh));
+        child_fh[0] = 0xAA;
+        child_fh[1] = (uint8_t) i;
+        child_fh[2] = (uint8_t) (i >> 8);
+
+        if (chimera_vfs_rpl_cache_lookup(cache,
+                                         chimera_vfs_hash(child_fh, sizeof(child_fh)),
+                                         child_fh, sizeof(child_fh),
+                                         r_pfh, &r_pfh_len,
+                                         r_name, &r_name_len) == 0) {
+            hits++;
+        }
+    }
+
+    fprintf(stderr, "  %d/%d entries resident (collapsed ceiling is %d)\n",
+            hits, RPL_CAPACITY_KEYS, RPL_COLLAPSED_CAP);
+
+    CHECK(hits > RPL_COLLAPSED_CAP,
+          "forward index holds more than one slot per shard");
+    CHECK(hits >= 900, "forward index retains nearly all 1024 keys");
+
+    chimera_vfs_rpl_cache_destroy(cache);
+} /* test_rpl_cache_slot_distribution */
+
+/* ------------------------------------------------------------------ */
 /* Test 11: oversized name_len is clamped, ring entry does not overflow */
 /* ------------------------------------------------------------------ */
 static void
@@ -1077,6 +1160,7 @@ main(
     test_callback_fires();
     test_watch_update_filter();
     test_rpl_cache_cross_shard_invalidate();
+    test_rpl_cache_slot_distribution();
     test_oversize_name_clamp();
     test_watch_tree_transition_clears_ring();
     test_watch_tree_transition_tree_to_nontree();
