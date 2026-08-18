@@ -136,6 +136,35 @@ chimera_vfs_rpl_cache_destroy(struct chimera_vfs_rpl_cache *cache)
 } /* chimera_vfs_rpl_cache_destroy */
 
 /*
+ * Base index of the forward-index slot a child-FH hash maps to.
+ *
+ * The shard index consumes the low `num_shards_bits` of the hash, so the slot
+ * index must come from the bits *above* those.  Masking the low bits again
+ * would make the slot a pure function of the shard -- `num_slots_bits <=
+ * num_shards_bits` in every configuration the tree builds (vfs_notify.c uses
+ * 6 and 4), so every child landing in a given shard would also land in that
+ * shard's single slot, collapsing the 16x4 forward index to one 4-entry
+ * direct-mapped bucket per shard and cutting usable capacity from 4096
+ * entries to 256.  The attr and name caches carried the same bug.
+ *
+ * Every forward-index site -- lookup, insert, and the forward removal inside
+ * invalidate -- must derive the slot through this helper; a site computing it
+ * differently would strand entries the others can no longer find or evict.
+ *
+ * The reverse index needs no such shift: its shard comes from the entry's
+ * fwd_key and its slot from the independent rev_key, so the two bit windows
+ * are already uncorrelated.
+ */
+static inline uint64_t
+chimera_vfs_rpl_cache_fwd_slot(
+    const struct chimera_vfs_rpl_cache *cache,
+    uint64_t                            fwd_key)
+{
+    return ((fwd_key >> cache->num_shards_bits) & cache->num_slots_mask) <<
+           cache->num_entries_bits;
+} /* chimera_vfs_rpl_cache_fwd_slot */
+
+/*
  * Forward lookup: child_fh -> (parent_fh, name)
  * Returns 0 on hit, -1 on miss.
  */
@@ -158,7 +187,7 @@ chimera_vfs_rpl_cache_lookup(
 
     shard = &cache->shards[key & cache->num_shards_mask];
 
-    slot     = &shard->fwd_entries[(key & cache->num_slots_mask) << cache->num_entries_bits];
+    slot     = &shard->fwd_entries[chimera_vfs_rpl_cache_fwd_slot(cache, key)];
     slot_end = slot + cache->num_entries;
 
     urcu_qsbr_read_lock();
@@ -308,7 +337,7 @@ chimera_vfs_rpl_cache_insert(
     urcu_qsbr_read_lock();
     pthread_mutex_lock(&shard->entry_lock);
 
-    slot     = &shard->fwd_entries[(fwd_key & cache->num_slots_mask) << cache->num_entries_bits];
+    slot     = &shard->fwd_entries[chimera_vfs_rpl_cache_fwd_slot(cache, fwd_key)];
     slot_end = slot + cache->num_entries;
 
     slot_best  = slot;
@@ -424,7 +453,7 @@ chimera_vfs_rpl_cache_invalidate(
                     struct chimera_vfs_rpl_cache_entry **fwd_slot, **fwd_end;
 
                     fwd_slot = &shard->fwd_entries[
-                        (entry->fwd_key & cache->num_slots_mask) << cache->num_entries_bits];
+                        chimera_vfs_rpl_cache_fwd_slot(cache, entry->fwd_key)];
                     fwd_end = fwd_slot + cache->num_entries;
 
                     while (fwd_slot < fwd_end) {
