@@ -114,6 +114,27 @@ chimera_vfs_rename_at_complete(struct chimera_vfs_request *request)
                                       request->rename_at.new_fhlen,
                                       &request->rename_at.r_todir_post_attr);
 
+        /* A rename that replaced an existing destination changed that inode's
+         * link count -- a hard-link survivor drops to nlink-1, or it was the
+         * last link and is now gone.  Its file handle is stable across the
+         * rename, so an attr-cache entry keyed by it now holds a stale nlink.
+         * Invalidate it by inserting a STAT-less entry for its FH, which evicts
+         * the prior one (same mechanism the unlink path uses in
+         * vfs_proc_remove_at for hard-link survivors). */
+        if (request->rename_at.target_fh_len > 0) {
+            struct chimera_vfs_attrs inval;
+
+            inval.va_req_mask = 0;
+            inval.va_set_mask = 0;
+            chimera_vfs_attr_cache_insert(
+                thread, attr_cache,
+                chimera_vfs_hash(request->rename_at.target_fh,
+                                 request->rename_at.target_fh_len),
+                request->rename_at.target_fh,
+                request->rename_at.target_fh_len,
+                &inval);
+        }
+
         /* A cross-directory move of a directory re-homes its ".." entry to the
          * new parent.  The name cache keys ".." under the moved directory's own
          * FH (unchanged by the rename), so a ".." lookup cached before the move
@@ -300,20 +321,30 @@ chimera_vfs_rename_at_dispatch(
         return;
     }
 
-    request->opcode                                    = CHIMERA_VFS_OP_RENAME_AT;
-    request->complete                                  = chimera_vfs_rename_at_complete;
-    request->rename_at.name                            = name;
-    request->rename_at.namelen                         = namelen;
-    request->rename_at.name_hash                       = chimera_vfs_hash(name, namelen);
-    request->rename_at.new_fh                          = new_fh;
-    request->rename_at.new_fhlen                       = new_fhlen;
-    request->rename_at.new_fh_hash                     = chimera_vfs_hash(new_fh, new_fhlen);
-    request->rename_at.new_name                        = new_name;
-    request->rename_at.new_namelen                     = new_namelen;
-    request->rename_at.new_name_hash                   = chimera_vfs_hash(new_name, new_namelen);
-    request->rename_at.flags                           = flags;
-    request->rename_at.target_fh                       = target_fh;
-    request->rename_at.target_fh_len                   = target_fh_len;
+    request->opcode                  = CHIMERA_VFS_OP_RENAME_AT;
+    request->complete                = chimera_vfs_rename_at_complete;
+    request->rename_at.name          = name;
+    request->rename_at.namelen       = namelen;
+    request->rename_at.name_hash     = chimera_vfs_hash(name, namelen);
+    request->rename_at.new_fh        = new_fh;
+    request->rename_at.new_fhlen     = new_fhlen;
+    request->rename_at.new_fh_hash   = chimera_vfs_hash(new_fh, new_fhlen);
+    request->rename_at.new_name      = new_name;
+    request->rename_at.new_namelen   = new_namelen;
+    request->rename_at.new_name_hash = chimera_vfs_hash(new_name, new_namelen);
+    request->rename_at.flags         = flags;
+    /* Copy any supplied/resolved clobbered-target FH into request-owned storage:
+     * the gate that resolved it frees itself right after this dispatch, so the
+     * completion (which invalidates the clobbered inode's attr cache) cannot
+     * borrow the gate's buffer. */
+    if (target_fh && target_fh_len > 0) {
+        memcpy(request->rename_at.resolved_target_fh, target_fh, target_fh_len);
+        request->rename_at.target_fh     = request->rename_at.resolved_target_fh;
+        request->rename_at.target_fh_len = target_fh_len;
+    } else {
+        request->rename_at.target_fh     = NULL;
+        request->rename_at.target_fh_len = 0;
+    }
     request->rename_at.r_fromdir_pre_attr.va_req_mask  = pre_attr_mask;
     request->rename_at.r_fromdir_pre_attr.va_set_mask  = 0;
     request->rename_at.r_fromdir_post_attr.va_req_mask = post_attr_mask | CHIMERA_VFS_ATTR_MASK_CACHEABLE;
@@ -421,7 +452,10 @@ chimera_vfs_rename_at_gate_dispatch(struct chimera_vfs_rename_at_gate *gate)
                                    gate->fhlen, gate->name, gate->namelen,
                                    gate->new_fh, gate->new_fhlen,
                                    gate->new_name, gate->new_namelen,
-                                   gate->target_fh, gate->target_fh_len,
+                                   gate->dst_target_fh_len ?
+                                   gate->dst_target_fh : gate->target_fh,
+                                   gate->dst_target_fh_len ?
+                                   gate->dst_target_fh_len : gate->target_fh_len,
                                    gate->flags,
                                    gate->pre_attr_mask, gate->post_attr_mask,
                                    gate->parent_lease_skip_valid ?
