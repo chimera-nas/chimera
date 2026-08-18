@@ -72,6 +72,34 @@ chimera_smb_query_info_getattr_callback(
     }
 } /* chimera_smb_query_info_getattr_callback */
 
+/*
+ * MS-SMB2 3.3.5.20 OutputBufferLength validation, shared by the synthetic
+ * named-pipe branch and the regular VFS path.
+ *
+ * min_length is the info level's fixed minimum; levels that did not set one
+ * inherit their own output_length.  A buffer below that minimum is
+ * INFO_LENGTH_MISMATCH; a buffer that merely cannot hold the whole reply gets
+ * the reply truncated and BUFFER_OVERFLOW.
+ */
+static inline unsigned int
+chimera_smb_query_info_check_length(struct chimera_smb_request *request)
+{
+    if (request->query_info.min_length == 0) {
+        request->query_info.min_length = request->query_info.output_length;
+    }
+
+    if (request->query_info.max_response_size < request->query_info.min_length) {
+        return SMB2_STATUS_INFO_LENGTH_MISMATCH;
+    }
+
+    if (request->query_info.max_response_size < request->query_info.output_length) {
+        request->query_info.output_length = request->query_info.max_response_size;
+        return SMB2_STATUS_BUFFER_OVERFLOW;
+    }
+
+    return SMB2_STATUS_SUCCESS;
+} /* chimera_smb_query_info_check_length */
+
 /* Walk the packed VFS list_streams records and either measure (cursor == NULL)
  * or emit MS-FSCC 2.4.43 FILE_STREAM_INFORMATION entries.  Each entry is
  *   NextEntryOffset(4) StreamNameLength(4) StreamSize(8) StreamAllocationSize(8)
@@ -597,6 +625,11 @@ chimera_smb_query_info(struct chimera_smb_request *request)
     if (request->query_info.open_file->type == CHIMERA_SMB_OPEN_FILE_TYPE_PIPE) {
         struct chimera_vfs_attrs pipe_attrs;
 
+        /* Requests are recycled, so seed min_length here rather than relying on
+         * the regular path's initialization further down -- the fixed-size
+         * levels below inherit output_length from it, ALL_INFO overrides it. */
+        request->query_info.min_length = 0;
+
         memset(&pipe_attrs, 0, sizeof(pipe_attrs));
         pipe_attrs.va_mode  = S_IFREG | 0666;
         pipe_attrs.va_nlink = 1;
@@ -645,6 +678,10 @@ chimera_smb_query_info(struct chimera_smb_request *request)
                         request->query_info.output_length = SMB2_FILE_ALL_INFO_FIXED_SIZE +
                             (request->query_info.open_file->full_path_len
                              ? request->query_info.open_file->full_path_len * 2 : 2);
+                        /* Variable-length level: the fixed portion ends after
+                         * the FileNameLength field, so that -- not the whole
+                         * reply -- is the buffer minimum. */
+                        request->query_info.min_length = SMB2_FILE_ALL_INFO_FIXED_SIZE + 4;
                         break;
                     default:
                         /* Info classes we don't synthesize for pipes: fail
@@ -660,6 +697,19 @@ chimera_smb_query_info(struct chimera_smb_request *request)
                 chimera_smb_complete_request(request, SMB2_STATUS_INVALID_DEVICE_REQUEST);
                 return;
         } /* switch */
+
+        /* The pipe branch answers without touching the VFS, so it has to run
+         * the same OutputBufferLength validation the regular path runs below.
+         * Without it a QUERY_INFO on a pipe FID with OutputBufferLength=2
+         * returned STATUS_SUCCESS carrying a full fixed-size payload, which
+         * MS-SMB2 3.3.5.20.1 requires to be INFO_LENGTH_MISMATCH. */
+        status = chimera_smb_query_info_check_length(request);
+
+        if (status != SMB2_STATUS_SUCCESS) {
+            chimera_smb_open_file_release(request, request->query_info.open_file);
+            chimera_smb_complete_request(request, status);
+            return;
+        }
 
         chimera_smb_query_info_getattr_callback(CHIMERA_VFS_OK, &pipe_attrs, request);
         return;
@@ -852,15 +902,7 @@ chimera_smb_query_info(struct chimera_smb_request *request)
     /* Buffer-length validation (MS-SMB2 3.3.5.20).  Only for levels we accept;
      * NOT_IMPLEMENTED levels keep their status. */
     if (status == SMB2_STATUS_SUCCESS) {
-        if (request->query_info.min_length == 0) {
-            request->query_info.min_length = request->query_info.output_length;
-        }
-        if (request->query_info.max_response_size < request->query_info.min_length) {
-            status = SMB2_STATUS_INFO_LENGTH_MISMATCH;
-        } else if (request->query_info.max_response_size < request->query_info.output_length) {
-            status                            = SMB2_STATUS_BUFFER_OVERFLOW;
-            request->query_info.output_length = request->query_info.max_response_size;
-        }
+        status = chimera_smb_query_info_check_length(request);
     }
 
     if (status != SMB2_STATUS_SUCCESS) {
