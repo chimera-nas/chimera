@@ -2479,6 +2479,19 @@ chimera_smb_server_handle_tcp(
     struct netbios_header    netbios_hdr;
     uint32_t                 smb_hdr;
 
+    /* The segment layer delivers exactly 4 (the NBSS header) + the NBSS-declared
+     * length, enforcing no minimum, but the protocol-id peek below reads a
+     * 4-byte SMB id unconditionally.  A frame declaring 0..3 payload bytes would
+     * leave that read short and abort the whole (shared) process -- a single
+     * pre-auth packet DoS.  Drop any frame too short to contain both the NBSS
+     * header and the protocol id. */
+    if (length < (int) (sizeof(netbios_hdr) + sizeof(smb_hdr))) {
+        chimera_smb_error("Received short SMB frame (%d bytes); closing connection",
+                          length);
+        evpl_close(evpl, conn->bind);
+        return;
+    }
+
     evpl_iovec_cursor_init(&request_cursor, iov, niov);
     evpl_iovec_cursor_copy(&request_cursor, &netbios_hdr, sizeof(netbios_hdr));
 
