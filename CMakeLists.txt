@@ -4,14 +4,6 @@
 
 cmake_minimum_required(VERSION 3.22)
 
-if (EXISTS "/usr/local/cuda")
-    set(CUDA_ENABLED true)
-    set(CMAKE_CUDA_COMPILER /usr/local/cuda/bin/nvcc)
-    set(CMAKE_CUDA_ARCHITECTURES 80)
-else()
-    set(CUDA_ENABLED false) 
-endif()
-
 if (EXISTS "/fio")
     set(FIO_ENABLED true)
 else()
@@ -24,11 +16,9 @@ else()
     set(ELBENCHO_ENABLED false)
 endif()
 
-if (CUDA_ENABLED)
-    project(chimera LANGUAGES C CUDA)
-else()
-    project(chimera LANGUAGES C)
-endif()
+# CUDA is enabled later with enable_language(), once the platform gate below
+# has run and the toolkit probe has decided whether there is one to enable.
+project(chimera LANGUAGES C)
 
 # Platform gate.  Chimera is developed on Linux and a good deal of the stack --
 # io_uring, the cairn/linux VFS backends' Linux-only syscalls, netns-isolated
@@ -101,6 +91,99 @@ option(CHIMERA_VFS_IO_URING "Enable chimera VFS io_uring backend" ${CHIMERA_LINU
 option(REQUIRE_NETNS_TESTS "Fail configure if network namespace tests cannot be enabled" OFF)
 option(EVPL_IOVEC_PROFILE "Enable libevpl retained-iovec stack profiling" OFF)
 
+# CUDA / GPUDirect Storage support.
+#
+# The only CUDA-dependent part of the tree is src/cufile: a cuFile-compatible
+# shim over the chimera client plus a .cu test that drives it.  Building it
+# needs a full toolkit -- nvcc for the device sources, and the CUDA runtime and
+# cuFile headers/libraries to link against -- so a host carrying just the
+# driver, or a partial toolkit, is not enough.
+#
+# CUDA_SUPPORT is tri-state, matching KVM_TESTING further down:
+#   AUTO (default) - enable iff a usable toolkit is present, else skip
+#   ON             - require CUDA; hard fail if the toolkit is incomplete
+#   OFF            - never build the CUDA bits
+#
+# This replaces a bare `if (EXISTS "/usr/local/cuda")`, which gave a host with
+# an incomplete toolkit a confusing failure partway through the build and gave
+# a host with a complete one no way to opt out.
+set(CUDA_SUPPORT "AUTO" CACHE STRING "CUDA support: AUTO (enable iff available), ON (require), or OFF")
+set_property(CACHE CUDA_SUPPORT PROPERTY STRINGS AUTO ON OFF)
+string(TOUPPER "${CUDA_SUPPORT}" CUDA_SUPPORT)
+
+set(CUDA_TOOLKIT_ROOT "/usr/local/cuda" CACHE PATH
+    "CUDA toolkit installation to build against")
+
+if(NOT CUDA_SUPPORT MATCHES "^(AUTO|ON|OFF)$")
+    message(FATAL_ERROR "CUDA_SUPPORT must be AUTO, ON or OFF (got \"${CUDA_SUPPORT}\").")
+endif()
+
+set(CUDA_ENABLED FALSE)
+
+if(CUDA_SUPPORT STREQUAL "OFF")
+    message(STATUS "CUDA disabled (CUDA_SUPPORT=OFF)")
+elseif(NOT CHIMERA_LINUX)
+    # cuFile/GPUDirect Storage is Linux-only, so there is no toolkit to look
+    # for here; leave ON fatal so a CI job that demands CUDA still fails loudly
+    # if it is pointed at the wrong host.
+    if(CUDA_SUPPORT STREQUAL "ON")
+        message(FATAL_ERROR "CUDA_SUPPORT=ON but the host is ${CMAKE_SYSTEM_NAME}, not Linux.")
+    endif()
+    message(STATUS "CUDA disabled (host is ${CMAKE_SYSTEM_NAME}, not Linux)")
+else()
+    # Probe exactly the pieces src/cufile consumes, collecting whatever is
+    # missing so the AUTO/ON message below can name it.  NO_DEFAULT_PATH keeps
+    # the probe honest: a stray nvcc on PATH must not make us build against a
+    # toolkit whose headers and libraries we then fail to find.
+    find_program(CUDA_NVCC_EXECUTABLE nvcc
+        HINTS ${CUDA_TOOLKIT_ROOT}/bin NO_DEFAULT_PATH)
+    find_path(CUDA_CUFILE_INCLUDE_DIR cufile.h
+        HINTS ${CUDA_TOOLKIT_ROOT}/include NO_DEFAULT_PATH)
+    find_library(CUDA_CUFILE_LIBRARY cufile
+        HINTS ${CUDA_TOOLKIT_ROOT}/lib64 ${CUDA_TOOLKIT_ROOT}/lib NO_DEFAULT_PATH)
+    find_library(CUDA_CUDART_LIBRARY cudart
+        HINTS ${CUDA_TOOLKIT_ROOT}/lib64 ${CUDA_TOOLKIT_ROOT}/lib NO_DEFAULT_PATH)
+
+    set(CUDA_AVAILABLE TRUE)
+    set(CUDA_UNAVAILABLE_REASON "")
+
+    if(NOT CUDA_NVCC_EXECUTABLE)
+        set(CUDA_AVAILABLE FALSE)
+        string(APPEND CUDA_UNAVAILABLE_REASON " nvcc not found;")
+    endif()
+
+    if(NOT CUDA_CUFILE_INCLUDE_DIR)
+        set(CUDA_AVAILABLE FALSE)
+        string(APPEND CUDA_UNAVAILABLE_REASON " cufile.h not found;")
+    endif()
+
+    if(NOT CUDA_CUFILE_LIBRARY)
+        set(CUDA_AVAILABLE FALSE)
+        string(APPEND CUDA_UNAVAILABLE_REASON " libcufile not found;")
+    endif()
+
+    if(NOT CUDA_CUDART_LIBRARY)
+        set(CUDA_AVAILABLE FALSE)
+        string(APPEND CUDA_UNAVAILABLE_REASON " libcudart not found;")
+    endif()
+
+    if(CUDA_AVAILABLE)
+        set(CUDA_ENABLED TRUE)
+        set(CMAKE_CUDA_COMPILER ${CUDA_NVCC_EXECUTABLE})
+        set(CMAKE_CUDA_ARCHITECTURES 80)
+        message(STATUS "CUDA enabled (${CUDA_TOOLKIT_ROOT})")
+    elseif(CUDA_SUPPORT STREQUAL "ON")
+        message(FATAL_ERROR
+            "CUDA_SUPPORT=ON but the CUDA toolkit at ${CUDA_TOOLKIT_ROOT} is "
+            "incomplete:${CUDA_UNAVAILABLE_REASON} Install the missing pieces, point "
+            "-DCUDA_TOOLKIT_ROOT at a complete toolkit, or re-run with "
+            "-DCUDA_SUPPORT=AUTO/OFF.")
+    else()
+        message(STATUS "CUDA disabled (CUDA_SUPPORT=AUTO;${CUDA_UNAVAILABLE_REASON}). "
+            "Pass -DCUDA_SUPPORT=ON to make missing prerequisites fatal.")
+    endif()
+endif()
+
 # Use ccache as the compiler launcher when it is installed.  The cache location
 # is left to ccache's own CCACHE_DIR env var (not hardcoded here): the
 # devcontainer points it at the persistent /build/ccache volume so all worktrees
@@ -116,6 +199,13 @@ if(CCACHE_PROGRAM)
     message(STATUS "ccache enabled (${CCACHE_PROGRAM})")
 else()
     message(STATUS "ccache not found; building without compiler cache")
+endif()
+
+# Turn CUDA on now that the toolkit has been probed and its compiler launcher
+# picked.  Deferred to here rather than named in project() so that AUTO can
+# decline gracefully instead of failing configure on a host with no toolkit.
+if(CUDA_ENABLED)
+    enable_language(CUDA)
 endif()
 
 set(CHIMERA_VERSION "0.1.0")
@@ -242,14 +332,6 @@ if(NOT CHIMERA_LINUX)
     # is worth doing on its own terms, not as a side effect of the macOS port.
     # (This does not weaken -Wdeprecated-declarations on Linux.)
     add_definitions(-Wno-deprecated-declarations)
-endif()
-
-if (CUDA_ENABLED)
-    message(STATUS "CUDA enabled")
-    #include_directories(${CUDA_INCLUDE_DIRS})
-    #link_directories(${CUDA_LIBRARIES})
-else()
-    message(STATUS "CUDA disabled")
 endif()
 
 if (FIO_ENABLED)
