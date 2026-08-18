@@ -12,4 +12,6 @@ install(TARGETS chimera_fio DESTINATION lib)
 set(PLUGIN_PATH ${CMAKE_CURRENT_BINARY_DIR}/libchimera_fio.so)
 
 
-add_subdirectory(tests)
+if (NOT DISABLE_TESTS)
+    add_subdirectory(tests)
+endif()

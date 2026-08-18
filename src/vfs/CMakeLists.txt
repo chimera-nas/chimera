@@ -107,4 +107,6 @@ if (CAIRN_ENABLED)
     target_link_libraries(chimera_vfs chimera_vfs_cairn)
 endif()
 
-add_subdirectory(tests)
+if (NOT DISABLE_TESTS)
+    add_subdirectory(tests)
+endif()

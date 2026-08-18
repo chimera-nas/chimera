@@ -58,5 +58,7 @@ target_link_libraries(chimera_vfs_nfs chimera_nfs_common evpl evpl_rpc2)
 
 install(TARGETS chimera_vfs_nfs DESTINATION lib)
 
-add_subdirectory(tests)
+if (NOT DISABLE_TESTS)
+    add_subdirectory(tests)
+endif()
 

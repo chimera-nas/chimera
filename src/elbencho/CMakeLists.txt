@@ -12,4 +12,6 @@ install(TARGETS elbencho_chimera DESTINATION lib)
 
 set(ELBENCHO_PLUGIN_PATH ${CMAKE_CURRENT_BINARY_DIR}/libelbencho_chimera.so)
 
-add_subdirectory(tests)
+if (NOT DISABLE_TESTS)
+    add_subdirectory(tests)
+endif()

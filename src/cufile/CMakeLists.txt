@@ -15,4 +15,6 @@ target_link_libraries(chimera_cufile chimera_client chimera_common)
 
 install(TARGETS chimera_cufile DESTINATION lib)
 
-add_subdirectory(tests)
+if (NOT DISABLE_TESTS)
+    add_subdirectory(tests)
+endif()

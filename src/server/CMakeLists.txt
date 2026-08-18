@@ -21,4 +21,6 @@ add_subdirectory(smb)
 
 add_subdirectory(rest)
 
-add_subdirectory(tests)
+if (NOT DISABLE_TESTS)
+    add_subdirectory(tests)
+endif()

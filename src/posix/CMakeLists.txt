@@ -83,4 +83,6 @@ target_link_libraries(chimera_posix chimera_client evpl)
 
 install(TARGETS chimera_posix DESTINATION lib)
 
-add_subdirectory(tests)
+if (NOT DISABLE_TESTS)
+    add_subdirectory(tests)
+endif()

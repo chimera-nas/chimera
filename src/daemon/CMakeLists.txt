@@ -15,4 +15,6 @@ configure_file(
 )
 include_directories(${CMAKE_CURRENT_BINARY_DIR})
 
-add_subdirectory(tests)
+if (NOT DISABLE_TESTS)
+    add_subdirectory(tests)
+endif()
