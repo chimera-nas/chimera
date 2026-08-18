@@ -259,6 +259,55 @@ chimera_vfs_kv_route_fh(
 } /* chimera_vfs_kv_route_fh */
 
 /*
+ * Take a request off the thread's free list purely as storage for a gated
+ * operation's resume context (the `gate` arm of chimera_vfs_request).
+ *
+ * This deliberately bypasses chimera_vfs_request_alloc_common: a gate-scratch
+ * request is never dispatched, so it wants none of the per-operation
+ * accounting -- no opcode, no module or capability check, no trace span, no
+ * latency stopwatch, and no place on thread->active_requests (where it would
+ * show up as an operation in flight that no backend is working on).  It is
+ * bookkeeping-free storage that happens to be pooled, which is the whole
+ * point: a gated operation now allocates nothing.
+ *
+ * Alloc and free must run on the same thread, which they do: the free list is
+ * per-thread and unlocked, and a gate's completion is delivered on the thread
+ * that started it (chimera_vfs_process_completion drains onto the owning
+ * thread), exactly as chimera_vfs_request_free already relies on.
+ *
+ * Returns the scratch area itself; chimera_vfs_gate_scratch_free() recovers
+ * the request from it.
+ */
+static inline void *
+chimera_vfs_gate_scratch_alloc(struct chimera_vfs_thread *thread)
+{
+    struct chimera_vfs_request *request;
+
+    if (thread->free_requests) {
+        request = thread->free_requests;
+        LL_DELETE(thread->free_requests, request);
+    } else {
+        request              = calloc(1, sizeof(struct chimera_vfs_request));
+        request->thread      = thread;
+        request->plugin_data = malloc(CHIMERA_VFS_PLUGIN_DATA_SIZE);
+    }
+
+    return request->gate.data;
+} /* chimera_vfs_gate_scratch_alloc */
+
+static inline void
+chimera_vfs_gate_scratch_free(
+    struct chimera_vfs_thread *thread,
+    void                      *scratch)
+{
+    struct chimera_vfs_request *request;
+
+    request = container_of(scratch, struct chimera_vfs_request, gate.data);
+
+    LL_PREPEND(thread->free_requests, request);
+} /* chimera_vfs_gate_scratch_free */
+
+/*
  * Common request allocation helper with capability enforcement.
  * Returns ERR_PTR on failure:
  *   - CHIMERA_VFS_ESTALE if module is NULL

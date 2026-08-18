@@ -419,6 +419,13 @@ struct chimera_vfs_request_handle {
  * and the child + parent statx. */
 #define CHIMERA_VFS_REQUEST_MAX_HANDLES 4
 
+/* Size of the gate resume area carved out of a pooled request (see the `gate`
+ * arm of chimera_vfs_request).  Each gated wrapper static-asserts its own
+ * resume struct against this; raise it if one legitimately outgrows it.  It is
+ * a union member, so it costs nothing until it is the largest arm -- and the
+ * request union is already an order of magnitude bigger than this. */
+#define CHIMERA_VFS_GATE_SCRATCH_SIZE   384
+
 /* One enumerated named stream, packed back-to-back in the list_streams reply
  * buffer.  `name_len` bytes of (un-terminated) stream name follow this header;
  * the next record begins at the following 8-byte-aligned offset. */
@@ -539,6 +546,28 @@ struct chimera_vfs_request {
         struct chimera_vfs_open_handle *handle);
 
     union {
+        /*
+         * Resume state for an asynchronous access gate.
+         *
+         * A gated operation has to park its arguments somewhere while the
+         * gate's own nested requests (open, getattr) run, and it cannot use
+         * either of them: those come and go underneath it, and the real
+         * operation's request does not exist yet.  It can, however, have a
+         * request of its own.  A request holding this arm is never dispatched
+         * and never joins the active list -- chimera_vfs_gate_scratch_alloc()
+         * takes it straight off the thread's free list and
+         * chimera_vfs_gate_scratch_free() returns it -- which is what keeps a
+         * gated operation off the heap entirely.
+         *
+         * Each gated wrapper defines its own resume layout in its own
+         * translation unit and asserts that it fits; the union member gives the
+         * storage its alignment.
+         */
+        union {
+            uint64_t align;
+            uint8_t  data[CHIMERA_VFS_GATE_SCRATCH_SIZE];
+        } gate;
+
         struct {
             char                           *path;
             char                           *pathc;
