@@ -1159,6 +1159,13 @@ typedef uint8_t smb2_guid[SMB2_GUID_SIZE];
 #define SMB2_FILE_FS_OBJECTID_INFO_SIZE             64
 #define SMB2_FILE_FS_SECTOR_SIZE_INFO_SIZE          28
 
+/* FileFsSectorSizeInformation Flags (MS-FSCC 2.5.8) */
+#define SMB2_SSINFO_FLAGS_ALIGNED_DEVICE            0x00000001
+#define SMB2_SSINFO_FLAGS_PARTITION_ALIGNED_ON_DEVICE \
+        0x00000002
+#define SMB2_SSINFO_FLAGS_NO_SEEK_PENALTY           0x00000004
+#define SMB2_SSINFO_FLAGS_TRIM_ENABLED              0x00000008
+
 /* FileFsAttributeInformation FileSystemAttributes flags */
 #define SMB2_FS_ATTR_CASE_SENSITIVE_SEARCH          0x00000001
 #define SMB2_FS_ATTR_CASE_PRESERVED_NAMES           0x00000002

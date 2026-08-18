@@ -240,9 +240,11 @@ chimera_server_config_init(void)
     config->smb2_max_async_credits = 512;
 
     /* FileFsSectorSizeInformation defaults: report 4KiB physical sectors and
-     * aligned + partition-aligned flags for modern storage. */
+     * aligned + partition-aligned flags for modern storage.  Per MS-FSCC
+     * 2.5.8 those two flags are bits 0 and 1; every higher bit is reserved. */
     config->smb_fs_physical_bytes_per_sector = 4096;
-    config->smb_fs_sector_size_flags         = 0x300;
+    config->smb_fs_sector_size_flags         = SMB2_SSINFO_FLAGS_ALIGNED_DEVICE |
+        SMB2_SSINFO_FLAGS_PARTITION_ALIGNED_ON_DEVICE;
 
     // SMB auth config defaults - local NTLM only
     config->smb_auth.winbind_enabled    = 0;
