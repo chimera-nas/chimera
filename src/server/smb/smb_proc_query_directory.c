@@ -378,6 +378,21 @@ chimera_smb_query_directory(struct chimera_smb_request *request)
         return;
     }
 
+    /* Named-pipe FIDs on IPC$ (srvsvc / lsarpc / samr / wkssvc) carry
+     * open_file->handle == NULL -- see chimera_smb_create_gen_open_file_pipe.
+     * The dup_handle below dereferences that handle unconditionally and would
+     * crash the server on a QUERY_DIRECTORY against a pipe FID, the same crash
+     * class already closed on QUERY_INFO and SET_INFO.
+     *
+     * A pipe is not a DirectoryFile, so MS-FSA 2.1.5.5.3 fails the enumeration
+     * with STATUS_INVALID_PARAMETER.  Check before the position resets below so
+     * a rejected query leaves the open's enumeration state untouched. */
+    if (unlikely(request->query_directory.open_file->type == CHIMERA_SMB_OPEN_FILE_TYPE_PIPE)) {
+        chimera_smb_open_file_release(request, request->query_directory.open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
+        return;
+    }
+
     if (request->query_directory.flags & SMB2_RESTART_SCANS) {
         request->query_directory.open_file->position = 0;
     }
