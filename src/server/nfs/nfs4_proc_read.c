@@ -129,7 +129,7 @@ chimera_nfs4_read_typecheck_complete(
 
     if ((attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
         !S_ISREG(attr->va_mode)) {
-        res->status = S_ISDIR(attr->va_mode) ? NFS4ERR_ISDIR : NFS4ERR_INVAL;
+        res->status = chimera_nfs4_data_nonreg_status(attr->va_mode);
         chimera_vfs_release(req->thread->vfs_thread, req->handle);
         req->handle = NULL;
         chimera_nfs4_compound_complete(req, res->status);
