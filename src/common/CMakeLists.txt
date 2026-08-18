@@ -8,6 +8,8 @@ add_library(chimera_common SHARED
 
 target_link_libraries(chimera_common ${CHIMERA_UNWIND_LIB} ${CHIMERA_DL_LIB} evpl jansson ${CHIMERA_OTEL_LIBS})
 
-add_subdirectory(tests)
+if (NOT DISABLE_TESTS)
+    add_subdirectory(tests)
+endif()
 
 install(TARGETS chimera_common DESTINATION lib)

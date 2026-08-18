@@ -91,6 +91,12 @@ option(CHIMERA_VFS_IO_URING "Enable chimera VFS io_uring backend" ${CHIMERA_LINU
 option(REQUIRE_NETNS_TESTS "Fail configure if network namespace tests cannot be enabled" OFF)
 option(EVPL_IOVEC_PROFILE "Enable libevpl retained-iovec stack profiling" OFF)
 
+# Build the product only: no test executables are compiled and no ctests are
+# registered, here or in the bundled libevpl (which reads the same variable).
+# Declared as a cache option so it shows up in ccmake/cmake-gui alongside the
+# rest; it has always been settable with -DDISABLE_TESTS=ON.
+option(DISABLE_TESTS "Do not build or register any tests" OFF)
+
 # CUDA / GPUDirect Storage support.
 #
 # The only CUDA-dependent part of the tree is src/cufile: a cuFile-compatible
@@ -403,7 +409,12 @@ set(KVM_TESTING "AUTO" CACHE STRING "KVM test suites: AUTO (enable iff available
 set_property(CACHE KVM_TESTING PROPERTY STRINGS AUTO ON OFF)
 string(TOUPPER "${KVM_TESTING}" KVM_TESTING)
 
-if(KVM_TESTING STREQUAL "OFF")
+if(DISABLE_TESTS)
+    # DISABLE_TESTS wins over an explicit KVM_TESTING=ON: the caller asked for
+    # no tests at all, which is not the "KVM is missing" failure ON guards
+    # against.
+    message(STATUS "KVM testing disabled (DISABLE_TESTS=ON)")
+elseif(KVM_TESTING STREQUAL "OFF")
     message(STATUS "KVM testing disabled (KVM_TESTING=OFF)")
 elseif(NOT CHIMERA_LINUX)
     # No /dev/kvm and no guest images for non-Linux hosts; leave ON fatal so a
@@ -567,7 +578,8 @@ endfunction()
 # so builds without the pynfs checkout (most non-devcontainer images) skip it.
 option(CHIMERA_ENABLE_PYNFS_TESTS "Register PyNFS test suite ctests" ON)
 find_package(Python3 COMPONENTS Interpreter QUIET)
-if(CHIMERA_ENABLE_PYNFS_TESTS
+if(NOT DISABLE_TESTS
+    AND CHIMERA_ENABLE_PYNFS_TESTS
     AND Python3_FOUND
     AND EXISTS "/opt/pynfs/nfs4.0/testserver.py")
     message(STATUS "PyNFS testing enabled")
