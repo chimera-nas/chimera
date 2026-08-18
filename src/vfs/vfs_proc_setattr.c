@@ -328,15 +328,30 @@ chimera_vfs_setattr_gate_complete(
      * permission.  For a setattr that changes only timestamps, the owner is
      * therefore unconditionally authorized.
      *
-     * The exempt set includes BTIME and DOS_ATTRIBUTES: the SMB
+     * The exempt set includes BTIME and CTIME: the SMB
      * SetInfo(FileBasicInformation) path always carries all four timestamps
-     * plus DOS attributes (the extras typically as TIME_OMIT / no-op
-     * sentinels), so an owner's plain `touch` arrives with BTIME and
-     * DOS_ATTRIBUTES in set_mask.  Excluding them made the exemption miss,
-     * leaving required=WRITE_ATTRIBUTES -- a right the mode-only owner is not
-     * granted (mode_access_check withholds it, Windows-style) -- so the
-     * owner's own touch was denied (STATUS_INTERNAL_ERROR over SMB).  NFS
-     * never sets BTIME on a touch, which is why it was unaffected. */
+     * (the untouched ones as TIME_OMIT sentinels), so an owner's plain `touch`
+     * arrives with BTIME and CTIME in set_mask.  Excluding them made the
+     * exemption miss, leaving required=WRITE_ATTRIBUTES -- a right the
+     * mode-only owner is not granted (mode_access_check withholds it,
+     * Windows-style) -- so the owner's own touch was denied
+     * (STATUS_INTERNAL_ERROR over SMB).  NFS never sets BTIME on a touch,
+     * which is why it was unaffected.
+     *
+     * DOS_ATTRIBUTES is exempt only when it is genuinely a no-op.  Unlike the
+     * timestamps it is not always present: MS-FSCC 2.4.7 gives FileAttributes
+     * == 0 the meaning "no change" and chimera_smb_unmarshal_basic_info sets
+     * the bit only for a non-zero value, so its presence signals either a real
+     * attribute change or a client restating the attributes it already sees.
+     * Exempting it unconditionally let the first case ride in on the timestamp
+     * exemption: an owner's `attrib +h` matched "only timestamps" and skipped
+     * the ACL gate, succeeding past an explicit Deny FILE_WRITE_ATTRIBUTES ACE.
+     * Compare against the current value instead -- a restate stays a sentinel,
+     * a real change faces the gate.  Backends store exactly the settable bits
+     * the SMB layer masked on the way in (SPARSE and friends are added by the
+     * SMB marshaller, not persisted), so the comparison is exact; a backend
+     * that does not report DOS attributes at all leaves the bit unexempt,
+     * which errs toward gating. */
     {
         uint64_t       m     = gate->set_attr->va_set_mask;
         int            owner = (gate->cred->uid == 0) ||
@@ -346,9 +361,14 @@ chimera_vfs_setattr_gate_complete(
         const uint64_t time_trigger = CHIMERA_VFS_ATTR_ATIME |
             CHIMERA_VFS_ATTR_MTIME |
             CHIMERA_VFS_ATTR_BTIME;
-        const uint64_t owner_exempt = time_trigger |
-            CHIMERA_VFS_ATTR_CTIME |
-            CHIMERA_VFS_ATTR_DOS_ATTRIBUTES;
+        uint64_t       owner_exempt = time_trigger |
+            CHIMERA_VFS_ATTR_CTIME;
+
+        if ((m & CHIMERA_VFS_ATTR_DOS_ATTRIBUTES) &&
+            (attr->va_set_mask & CHIMERA_VFS_ATTR_DOS_ATTRIBUTES) &&
+            attr->va_dos_attributes == gate->set_attr->va_dos_attributes) {
+            owner_exempt |= CHIMERA_VFS_ATTR_DOS_ATTRIBUTES;
+        }
 
         /* Owner setting only timestamps (+ benign SMB sentinels): skip ACL. */
         if (owner && (m & time_trigger) && !(m & ~owner_exempt)) {
