@@ -2,6 +2,8 @@
 #
 # SPDX-License-Identifier: LGPL-2.1-only
 
+add_subdirectory(quint)
+
 # FSX - File System Exerciser ported to Chimera POSIX API
 add_executable(posix_fsx fsx.c)
 target_link_libraries(posix_fsx chimera_posix chimera_client chimera_server)
