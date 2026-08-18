@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <sys/stat.h>
+
 #include "nfs_internal.h"
 #include "vfs/vfs_error.h"
 
@@ -72,3 +74,28 @@ chimera_nfs4_errno_to_nfsstat4(enum chimera_vfs_error err)
             return NFS4ERR_SERVERFAULT;
     } /* switch */
 } /* chimera_nfs4_errno_to_nfsstat4 */
+
+/*
+ * Status for a data-path op -- READ, WRITE, COMMIT, LOCKT, SETATTR(size) and
+ * the RFC 7862 sparse ops -- whose current filehandle is not a regular file.
+ *
+ * A directory is NFS4ERR_ISDIR and a symbolic link is NFS4ERR_SYMLINK; every
+ * other non-regular type is NFS4ERR_INVAL.  This is deliberately NOT
+ * chimera_nfs4_open_nonreg_status(): OPEN reports NFS4ERR_WRONG_TYPE for
+ * fifos, sockets and devices under 4.1+, but the data-path ops must keep
+ * answering INVAL for those -- pynfs RD7b/RD7c (st_read.testBlock/testChar)
+ * assert INVAL exactly.  Splitting out the symlink arm is safe because
+ * RFC 7530 Table 7 lists both SYMLINK and INVAL for a symlink cfh and pynfs
+ * RD7a accepts either.
+ */
+static inline nfsstat4
+chimera_nfs4_data_nonreg_status(mode_t mode)
+{
+    if (S_ISDIR(mode)) {
+        return NFS4ERR_ISDIR;
+    }
+    if (S_ISLNK(mode)) {
+        return NFS4ERR_SYMLINK;
+    }
+    return NFS4ERR_INVAL;
+} /* chimera_nfs4_data_nonreg_status */

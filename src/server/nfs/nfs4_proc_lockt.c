@@ -43,7 +43,7 @@ chimera_nfs4_lockt_probe(
      * type is NFS4ERR_INVAL. */
     if ((attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) && !S_ISREG(attr->va_mode)) {
         chimera_vfs_release(req->thread->vfs_thread, handle);
-        res->status = S_ISDIR(attr->va_mode) ? NFS4ERR_ISDIR : NFS4ERR_INVAL;
+        res->status = chimera_nfs4_data_nonreg_status(attr->va_mode);
         chimera_nfs4_compound_complete(req, res->status);
         return;
     }
