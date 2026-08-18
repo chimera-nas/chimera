@@ -188,6 +188,9 @@ struct chimera_vfs_mkdir_at_gate {
     void                           *private_data;
 };
 
+_Static_assert(sizeof(struct chimera_vfs_mkdir_at_gate) <= CHIMERA_VFS_GATE_SCRATCH_SIZE,
+               "mkdir_at gate context outgrew the request gate scratch area");
+
 static void
 chimera_vfs_mkdir_at_gate_complete(
     enum chimera_vfs_error status,
@@ -197,7 +200,7 @@ chimera_vfs_mkdir_at_gate_complete(
 
     if (status != CHIMERA_VFS_OK) {
         gate->callback(status, NULL, NULL, NULL, NULL, gate->private_data);
-        free(gate);
+        chimera_vfs_gate_scratch_free(gate->thread, gate);
         return;
     }
 
@@ -206,7 +209,7 @@ chimera_vfs_mkdir_at_gate_complete(
                                   gate->attr_mask, gate->pre_attr_mask,
                                   gate->post_attr_mask, gate->callback,
                                   gate->private_data);
-    free(gate);
+    chimera_vfs_gate_scratch_free(gate->thread, gate);
 } /* chimera_vfs_mkdir_at_gate_complete */
 
 SYMBOL_EXPORT void
@@ -231,7 +234,7 @@ chimera_vfs_mkdir_at(
     }
 
     if (chimera_vfs_gate_needed(handle->vfs_module->capabilities, cred)) {
-        gate                 = malloc(sizeof(*gate));
+        gate                 = chimera_vfs_gate_scratch_alloc(thread);
         gate->thread         = thread;
         gate->cred           = cred;
         gate->handle         = handle;

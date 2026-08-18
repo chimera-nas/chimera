@@ -402,13 +402,16 @@ struct chimera_vfs_rename_at_gate {
     void                            *private_data;
 };
 
+_Static_assert(sizeof(struct chimera_vfs_rename_at_gate) <= CHIMERA_VFS_GATE_SCRATCH_SIZE,
+               "rename_at gate context outgrew the request gate scratch area");
+
 static void
 chimera_vfs_rename_at_gate_fail(
     struct chimera_vfs_rename_at_gate *gate,
     enum chimera_vfs_error             status)
 {
     gate->callback(status, NULL, NULL, NULL, NULL, gate->private_data);
-    free(gate);
+    chimera_vfs_gate_scratch_free(gate->thread, gate);
 } /* chimera_vfs_rename_at_gate_fail */
 
 static void
@@ -425,7 +428,7 @@ chimera_vfs_rename_at_gate_dispatch(struct chimera_vfs_rename_at_gate *gate)
                                    gate->parent_lease_skip : NULL,
                                    gate->op_handle,
                                    gate->callback, gate->private_data);
-    free(gate);
+    chimera_vfs_gate_scratch_free(gate->thread, gate);
 } /* chimera_vfs_rename_at_gate_dispatch */
 
 /* Step 3 complete: replaced-target delete authorized -> dispatch. */
@@ -620,7 +623,7 @@ chimera_vfs_rename_at(
     module = chimera_vfs_get_module(thread, fh, fhlen);
 
     if (module && chimera_vfs_gate_needed(module->capabilities, cred)) {
-        gate                 = malloc(sizeof(*gate));
+        gate                 = chimera_vfs_gate_scratch_alloc(thread);
         gate->thread         = thread;
         gate->cred           = cred;
         gate->fh             = fh;

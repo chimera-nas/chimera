@@ -301,6 +301,9 @@ struct chimera_vfs_setattr_gate {
     void                           *private_data;
 };
 
+_Static_assert(sizeof(struct chimera_vfs_setattr_gate) <= CHIMERA_VFS_GATE_SCRATCH_SIZE,
+               "setattr gate context outgrew the request gate scratch area");
+
 static void
 chimera_vfs_setattr_gate_complete(
     enum chimera_vfs_error    error_code,
@@ -312,7 +315,7 @@ chimera_vfs_setattr_gate_complete(
 
     if (error_code != CHIMERA_VFS_OK) {
         gate->callback(error_code, NULL, NULL, NULL, gate->private_data);
-        free(gate);
+        chimera_vfs_gate_scratch_free(gate->thread, gate);
         return;
     }
 
@@ -358,7 +361,7 @@ chimera_vfs_setattr_gate_complete(
     if (chimera_vfs_gate(attr, gate->cred, required & ~CHIMERA_ACE_WRITE_OWNER) != CHIMERA_VFS_OK) {
         gate->callback(chimera_vfs_setattr_denied_error(gate->set_attr),
                        NULL, NULL, NULL, gate->private_data);
-        free(gate);
+        chimera_vfs_gate_scratch_free(gate->thread, gate);
         return;
     }
 
@@ -390,7 +393,7 @@ chimera_vfs_setattr_gate_complete(
         if (has_write_owner) {
             if (chimera_vfs_setattr_write_owner_check(gate->cred, gate->set_attr, attr) != CHIMERA_VFS_OK) {
                 gate->callback(CHIMERA_VFS_EPERM, NULL, NULL, NULL, gate->private_data);
-                free(gate);
+                chimera_vfs_gate_scratch_free(gate->thread, gate);
                 return;
             }
         } else {
@@ -403,7 +406,7 @@ chimera_vfs_setattr_gate_complete(
                 ((required & CHIMERA_ACE_WRITE_OWNER) && !is_owner && gate->cred->uid != 0 &&
                  chimera_vfs_gate(attr, gate->cred, CHIMERA_ACE_WRITE_OWNER) != CHIMERA_VFS_OK)) {
                 gate->callback(CHIMERA_VFS_EPERM, NULL, NULL, NULL, gate->private_data);
-                free(gate);
+                chimera_vfs_gate_scratch_free(gate->thread, gate);
                 return;
             }
         }
@@ -448,7 +451,7 @@ chimera_vfs_setattr_gate_complete(
                                  gate->set_attr, gate->pre_attr_mask,
                                  gate->post_attr_mask, gate->callback,
                                  gate->private_data);
-    free(gate);
+    chimera_vfs_gate_scratch_free(gate->thread, gate);
 } /* chimera_vfs_setattr_gate_complete */
 
 static void
@@ -494,7 +497,7 @@ chimera_vfs_setattr_common(
         }
 
         if (required) {
-            gate = malloc(sizeof(*gate));
+            gate = chimera_vfs_gate_scratch_alloc(thread);
 
             gate->thread         = thread;
             gate->cred           = cred;

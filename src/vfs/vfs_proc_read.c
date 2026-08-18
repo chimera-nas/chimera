@@ -276,6 +276,9 @@ struct chimera_vfs_read_gate {
     void                           *private_data;
 };
 
+_Static_assert(sizeof(struct chimera_vfs_read_gate) <= CHIMERA_VFS_GATE_SCRATCH_SIZE,
+               "read gate context outgrew the request gate scratch area");
+
 static void
 chimera_vfs_read_gate_complete(
     enum chimera_vfs_error    error_code,
@@ -286,7 +289,7 @@ chimera_vfs_read_gate_complete(
 
     if (error_code != CHIMERA_VFS_OK) {
         gate->callback(error_code, 0, 0, NULL, 0, NULL, gate->private_data);
-        free(gate);
+        chimera_vfs_gate_scratch_free(gate->thread, gate);
         return;
     }
 
@@ -296,7 +299,7 @@ chimera_vfs_read_gate_complete(
 
     if (!(gate->handle->granted_access & CHIMERA_ACE_READ_DATA)) {
         gate->callback(CHIMERA_VFS_EACCES, 0, 0, NULL, 0, NULL, gate->private_data);
-        free(gate);
+        chimera_vfs_gate_scratch_free(gate->thread, gate);
         return;
     }
 
@@ -307,7 +310,7 @@ chimera_vfs_read_gate_complete(
                               gate->has_io_owner ? &gate->io_owner : NULL,
                               gate->callback,
                               gate->private_data);
-    free(gate);
+    chimera_vfs_gate_scratch_free(gate->thread, gate);
 } /* chimera_vfs_read_gate_complete */
 
 /* Common path for chimera_vfs_read{,_owned,_into}: mediate the read through the
@@ -340,7 +343,7 @@ chimera_vfs_read_submit(
             }
         } else {
             /* First gated I/O on this handle: compute and cache the grant. */
-            gate = malloc(sizeof(*gate));
+            gate = chimera_vfs_gate_scratch_alloc(thread);
 
             gate->thread    = thread;
             gate->cred      = cred;

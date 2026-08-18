@@ -223,6 +223,9 @@ struct chimera_vfs_remove_at_gate {
     uint8_t                          child_fh_resolved;
 };
 
+_Static_assert(sizeof(struct chimera_vfs_remove_at_gate) <= CHIMERA_VFS_GATE_SCRATCH_SIZE,
+               "remove_at gate context outgrew the request gate scratch area");
+
 static void chimera_vfs_remove_at_gate_complete(
     enum chimera_vfs_error status,
     void                  *private_data);
@@ -242,7 +245,7 @@ chimera_vfs_remove_at_sticky_lookup(
     if (error_code != CHIMERA_VFS_OK) {
         /* Name absent/unreadable: surface the natural removal error (ENOENT). */
         gate->callback(error_code, NULL, NULL, gate->private_data);
-        free(gate);
+        chimera_vfs_gate_scratch_free(gate->thread, gate);
         return;
     }
 
@@ -266,7 +269,7 @@ chimera_vfs_remove_at_gate_complete(
 
     if (status != CHIMERA_VFS_OK) {
         gate->callback(status, NULL, NULL, gate->private_data);
-        free(gate);
+        chimera_vfs_gate_scratch_free(gate->thread, gate);
         return;
     }
 
@@ -287,7 +290,7 @@ chimera_vfs_remove_at_gate_complete(
                                    gate->parent_lease_skip : NULL,
                                    gate->callback,
                                    gate->private_data);
-    free(gate);
+    chimera_vfs_gate_scratch_free(gate->thread, gate);
 } /* chimera_vfs_remove_at_gate_complete */
 
 static void
@@ -326,7 +329,7 @@ chimera_vfs_remove_at_common(
     }
 
     if (chimera_vfs_gate_needed(handle->vfs_module->capabilities, cred)) {
-        gate                    = malloc(sizeof(*gate));
+        gate                    = chimera_vfs_gate_scratch_alloc(thread);
         gate->thread            = thread;
         gate->cred              = cred;
         gate->handle            = handle;
@@ -396,6 +399,9 @@ struct chimera_vfs_remove_recall_ctx {
     int                              child_fh_len;
 };
 
+_Static_assert(sizeof(struct chimera_vfs_remove_recall_ctx) <= CHIMERA_VFS_GATE_SCRATCH_SIZE,
+               "remove recall context outgrew the request gate scratch area");
+
 static void
 chimera_vfs_remove_recall_lookup_complete(
     enum chimera_vfs_error    error_code,
@@ -421,7 +427,7 @@ chimera_vfs_remove_recall_lookup_complete(
                                  ctx->pre_attr_mask, ctx->post_attr_mask,
                                  ctx->parent_lease_skip, ctx->callback,
                                  ctx->private_data);
-    free(ctx);
+    chimera_vfs_gate_scratch_free(ctx->thread, ctx);
 } /* chimera_vfs_remove_recall_lookup_complete */
 
 /* Remove a name in a directory (unconditional by-name unlink).  child_fh, when
@@ -454,7 +460,7 @@ chimera_vfs_remove_at(
         !child_fh && namelen >= 1 && namelen < CHIMERA_VFS_NAME_MAX &&
         !(namelen == 1 && name[0] == '.') &&
         !(namelen == 2 && name[0] == '.' && name[1] == '.')) {
-        struct chimera_vfs_remove_recall_ctx *ctx = malloc(sizeof(*ctx));
+        struct chimera_vfs_remove_recall_ctx *ctx = chimera_vfs_gate_scratch_alloc(thread);
 
         ctx->thread            = thread;
         ctx->cred              = cred;

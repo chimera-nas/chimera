@@ -112,6 +112,9 @@ struct chimera_vfs_write_gate {
     void                           *private_data;
 };
 
+_Static_assert(sizeof(struct chimera_vfs_write_gate) <= CHIMERA_VFS_GATE_SCRATCH_SIZE,
+               "write gate context outgrew the request gate scratch area");
+
 static void
 chimera_vfs_write_gate_complete(
     enum chimera_vfs_error    error_code,
@@ -122,7 +125,7 @@ chimera_vfs_write_gate_complete(
 
     if (error_code != CHIMERA_VFS_OK) {
         gate->callback(error_code, 0, 0, NULL, NULL, gate->private_data);
-        free(gate);
+        chimera_vfs_gate_scratch_free(gate->thread, gate);
         return;
     }
 
@@ -132,7 +135,7 @@ chimera_vfs_write_gate_complete(
 
     if (!(gate->handle->granted_access & CHIMERA_ACE_WRITE_DATA)) {
         gate->callback(CHIMERA_VFS_EACCES, 0, 0, NULL, NULL, gate->private_data);
-        free(gate);
+        chimera_vfs_gate_scratch_free(gate->thread, gate);
         return;
     }
 
@@ -142,7 +145,7 @@ chimera_vfs_write_gate_complete(
                                gate->iov, gate->niov,
                                gate->has_io_owner ? &gate->io_owner : NULL,
                                gate->callback, gate->private_data);
-    free(gate);
+    chimera_vfs_gate_scratch_free(gate->thread, gate);
 } /* chimera_vfs_write_gate_complete */
 
 SYMBOL_EXPORT void
@@ -170,7 +173,7 @@ chimera_vfs_write_owned(
                 return;
             }
         } else {
-            gate = malloc(sizeof(*gate));
+            gate = chimera_vfs_gate_scratch_alloc(thread);
 
             gate->thread         = thread;
             gate->cred           = cred;
