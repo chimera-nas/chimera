@@ -2,6 +2,9 @@
 #
 # SPDX-License-Identifier: LGPL-2.1-only
 
+# SMB2/3 model-based tests (Quint spec + build-time self-test).
+add_subdirectory(quint)
+
 
 # SMB authentication test program
 add_executable(smb_auth_test smb_auth_test.c)
