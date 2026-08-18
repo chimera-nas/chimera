@@ -4,6 +4,7 @@
 
 #include <string.h>
 #include <stdlib.h>
+#include <sys/stat.h>   /* S_ISBLK / S_ISCHR for the device gate */
 #include "vfs_procs.h"
 #include "vfs_internal.h"
 #include "vfs_name_cache.h"
@@ -128,6 +129,18 @@ chimera_vfs_mknod_at_dispatch(
                 }
             }
         }
+    }
+
+    /* POSIX: only a privileged process may create a block or character
+     * special file; an unprivileged device mknod is EPERM.  FIFOs and
+     * UNIX-domain sockets need no privilege (mknod(2)).  Checked after the
+     * create gate (EACCES) and the target-exists check (EEXIST), matching
+     * Linux's may_create -> CAP_MKNOD order. */
+    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
+        (S_ISBLK(attr->va_mode) || S_ISCHR(attr->va_mode)) &&
+        cred->uid != 0) {
+        callback(CHIMERA_VFS_EPERM, NULL, NULL, NULL, NULL, private_data);
+        return;
     }
 
     request = chimera_vfs_request_alloc_by_handle(thread, cred, handle);
