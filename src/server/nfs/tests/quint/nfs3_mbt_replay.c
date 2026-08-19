@@ -1304,47 +1304,47 @@ static const struct {
     const char  *tag;
     op_handler_t fn;
 } handlers[] = {
-    { "OLookup",       op_lookup               }
+    { "OLookup",       op_lookup                               }
     ,
-    { "OGetattr",      op_getattr              }
+    { "OGetattr",      op_getattr                              }
     ,
-    { "OStaleGetattr", op_stalegetattr         }
+    { "OStaleGetattr", op_stalegetattr                         }
     ,
-    { "OSetattr",      op_setattr              }
+    { "OSetattr",      op_setattr                              }
     ,
-    { "OAccess",       op_access               }
+    { "OAccess",       op_access                               }
     ,
-    { "OCreate",       op_create               }
+    { "OCreate",       op_create                               }
     ,
-    { "OMkdir",        op_mkdir                }
+    { "OMkdir",        op_mkdir                                }
     ,
-    { "OSymlink",      op_symlink              }
+    { "OSymlink",      op_symlink                              }
     ,
-    { "OReadlink",     op_readlink             }
+    { "OReadlink",     op_readlink                             }
     ,
-    { "OMknod",        op_mknod                }
+    { "OMknod",        op_mknod                                }
     ,
-    { "OWrite",        op_write                }
+    { "OWrite",        op_write                                }
     ,
-    { "ORead",         op_read                 }
+    { "ORead",         op_read                                 }
     ,
-    { "ORemove",       op_remove               }
+    { "ORemove",       op_remove                               }
     ,
-    { "ORmdir",        op_rmdir                }
+    { "ORmdir",        op_rmdir                                }
     ,
-    { "ORename",       op_rename               }
+    { "ORename",       op_rename                               }
     ,
-    { "OLink",         op_link                 }
+    { "OLink",         op_link                                 }
     ,
-    { "OReaddir",      op_readdir              }
+    { "OReaddir",      op_readdir                              }
     ,
-    { "OCommit",       op_commit               }
+    { "OCommit",       op_commit                               }
     ,
-    { "OFsstat",       op_fsstat               }
+    { "OFsstat",       op_fsstat                               }
     ,
-    { "OFsinfo",       op_fsinfo               }
+    { "OFsinfo",       op_fsinfo                               }
     ,
-    { "OPathconf",     op_pathconf             }
+    { "OPathconf",     op_pathconf                             }
     ,
 };
 
@@ -1475,30 +1475,31 @@ report_divergence(
 
 static int
 run_trace(
-    const char *trace_path,
-    int         block_size,
-    double      max_attr_skip_rate,
-    int         verbose,
-    int         dry_run)
+    struct mbt_env *env,
+    const char     *trace_path,
+    const char     *fsname,
+    int             block_size,
+    double          max_attr_skip_rate,
+    int             verbose,
+    int             dry_run)
 {
-    json_error_t    jerr;
+    json_error_t   jerr;
 
-    json_t         *root;
-    json_t         *states;
-    json_t         *state;
-    json_t         *last_op;
-    json_t         *op;
-    json_t         *fs;
-    const char     *tag;
-    op_handler_t    fn;
-    struct mbt_env *env;
-    struct oracle  *o;
-    size_t          idx;
-    size_t          nstates;
-    int             failed = 0;
-    double          rate;
-    int             total;
-    struct mism     m;
+    json_t        *root;
+    json_t        *states;
+    json_t        *state;
+    json_t        *last_op;
+    json_t        *op;
+    json_t        *fs;
+    const char    *tag;
+    op_handler_t   fn;
+    struct oracle *o;
+    size_t         idx;
+    size_t         nstates;
+    int            failed = 0;
+    double         rate;
+    int            total;
+    struct mism    m;
 
     root = json_load_file(trace_path, 0, &jerr);
     if (!root) {
@@ -1526,9 +1527,8 @@ run_trace(
      * disposition kills the test with a nonzero status. */
     alarm(120);
 
-    env = malloc(sizeof(*env));
-    o   = calloc(1, sizeof(*o));
-    mbt_env_start(env);
+    o = calloc(1, sizeof(*o));
+    mbt_env_fs_setup(env, fsname);
 
     o->env          = env;
     o->block_size   = block_size;
@@ -1599,8 +1599,7 @@ run_trace(
            trace_path, nstates - 1, o->attr_checks, o->attr_skips);
 
  out:
-    mbt_env_stop(env);
-    free(env);
+    mbt_env_fs_teardown(env, fsname);
     while (o->nhist) {
         free(o->history[--o->nhist].op_dump);
     }
@@ -1641,6 +1640,7 @@ main(
     int                  failures           = 0;
     int                  c;
     int                  i;
+    struct mbt_env       env;
 
     while ((c = getopt_long(argc, argv, "t:b:r:nv", long_options,
                             NULL)) != -1) {
@@ -1676,9 +1676,24 @@ main(
         return 2;
     }
 
+    /* Open the server + client once and amortize that (dominant) cost across
+     * every trace; each trace gets a fresh, uniquely-named memfs for
+     * isolation.  A single-fs backend (linux/io_uring) would instead clear the
+     * backing directory between traces. */
+    if (!dry_run) {
+        mbt_env_open_opts(&env, NULL);
+    }
+
     for (i = 0; i < ntraces; i++) {
-        failures += run_trace(traces[i], block_size, max_attr_skip_rate,
-                              verbose, dry_run);
+        char fsname[32];
+
+        snprintf(fsname, sizeof(fsname), "fs_%d", i);
+        failures += run_trace(dry_run ? NULL : &env, traces[i], fsname,
+                              block_size, max_attr_skip_rate, verbose, dry_run);
+    }
+
+    if (!dry_run) {
+        mbt_env_stop(&env);
     }
 
     return failures ? 1 : 0;
