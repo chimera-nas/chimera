@@ -198,7 +198,10 @@ chimera_vfs_get_module(
 
     mount = chimera_vfs_mount_table_lookup(vfs->mount_table, fh);
 
-    module = mount ? mount->module : NULL;
+    /* A mount being torn down routes nothing new: umount has already
+     * established that no handle references it and is closing the cached
+     * ones, so admitting another op here would resurrect it. */
+    module = (mount && !mount->unmounting) ? mount->module : NULL;
 
     urcu_qsbr_read_unlock();
 

@@ -4,6 +4,9 @@
 
 #pragma once
 
+/* Default for common.umount_timeout_ms (see below). */
+#define CHIMERA_COMMON_UMOUNT_TIMEOUT_MS_DEFAULT 1000
+
 #include <stdlib.h>
 #include <stdint.h>
 #include <strings.h>
@@ -342,6 +345,39 @@ chimera_common_attr_cache_enabled(json_t *root)
 
     return 1;
 } /* chimera_common_attr_cache_enabled */
+
+/*
+ * How long umount waits for a mount's open handles to be dropped before
+ * giving up with EBUSY, from the shared "common" section's
+ * "umount_timeout_ms" key.  Milliseconds; 0 means do not wait at all.
+ *
+ * The wait covers the sub-millisecond tail of ordinary activity -- a path
+ * walk's reference on the mount root outlives the operation that took it --
+ * so the default is generous against that and still far short of anything a
+ * person would read as a hang.  A client genuinely holding a file open is
+ * meant to hit the timeout and get EBUSY, not wedge the umount forever.
+ */
+static inline int
+chimera_common_umount_timeout_ms(json_t *root)
+{
+    json_t *common, *val;
+
+    if (!root) {
+        return CHIMERA_COMMON_UMOUNT_TIMEOUT_MS_DEFAULT;
+    }
+
+    common = json_object_get(root, "common");
+    if (!json_is_object(common)) {
+        return CHIMERA_COMMON_UMOUNT_TIMEOUT_MS_DEFAULT;
+    }
+
+    val = json_object_get(common, "umount_timeout_ms");
+    if (json_is_integer(val) && json_integer_value(val) >= 0) {
+        return (int) json_integer_value(val);
+    }
+
+    return CHIMERA_COMMON_UMOUNT_TIMEOUT_MS_DEFAULT;
+} /* chimera_common_umount_timeout_ms */
 
 /*
  * Whether the VFS name (lookup) cache is enabled, from the shared "common"

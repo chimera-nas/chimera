@@ -219,6 +219,13 @@ chimera_server_config_set_rcu_reclaim_threads(
     struct chimera_server_config *config,
     int                           threads);
 
+/* Bound on how long umount waits for a mount's open handles to be dropped
+ * before reporting EBUSY (milliseconds). */
+void
+chimera_server_config_set_umount_timeout(
+    struct chimera_server_config *config,
+    int                           timeout_ms);
+
 void
 chimera_server_config_set_attr_cache_enabled(
     struct chimera_server_config *config,

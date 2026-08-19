@@ -30,6 +30,7 @@
 #include "common/macros.h"
 #include "common/chimera_tracing.h"
 #include "server/server.h"
+#include "common/common_config.h"
 #include "smb/smb2.h"
 #include "rest/rest.h"
 
@@ -73,6 +74,7 @@ struct chimera_server_config {
     int                                   async_delegation_threads;
     int                                   cache_ttl;
     int                                   attr_cache_enabled;
+    int                                   umount_timeout_ms;
     int                                   name_cache_enabled;
     int                                   rcu_reclaim_threads;
     int                                   nfs4_session_slots;
@@ -328,6 +330,7 @@ chimera_server_config_init(void)
 
     /* The VFS attribute cache is on by default (common.attr_cache). */
     config->attr_cache_enabled = 1;
+    config->umount_timeout_ms  = CHIMERA_COMMON_UMOUNT_TIMEOUT_MS_DEFAULT;
 
     /* The VFS name (lookup) cache is on by default (common.name_cache). */
     config->name_cache_enabled = 1;
@@ -715,6 +718,14 @@ chimera_server_config_get_cache_ttl(const struct chimera_server_config *config)
 {
     return config->cache_ttl;
 } /* chimera_server_config_get_cache_ttl */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_umount_timeout(
+    struct chimera_server_config *config,
+    int                           timeout_ms)
+{
+    config->umount_timeout_ms = timeout_ms;
+} /* chimera_server_config_set_umount_timeout */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_attr_cache_enabled(
@@ -2560,6 +2571,8 @@ chimera_server_init(
      * remove/rename paths know to resolve a by-name victim's FH and recall a
      * cross-protocol holder before the namespace change (see
      * chimera_vfs_remove_at).  When none are enabled the lookup is skipped. */
+    chimera_vfs_set_umount_timeout(server->vfs, config->umount_timeout_ms);
+
     chimera_vfs_set_caching_enabled(server->vfs,
                                     config->nfs4_delegations ||
                                     config->smb_leases ||

@@ -430,6 +430,7 @@ struct chimera_client_config {
     int                           async_delegation_threads;
     int                           cache_ttl;
     int                           attr_cache_enabled;
+    int                           umount_timeout_ms;
     int                           name_cache_enabled;
     int                           rcu_reclaim_threads;
     int                           max_fds;

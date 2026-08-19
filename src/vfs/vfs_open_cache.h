@@ -820,37 +820,68 @@ chimera_vfs_open_cache_defer_close(
 } /* vfs_open_cache_defer_close */
 
 /*
- * Count handles in the cache that belong to the given mount.
- * mount_id is the first 16 bytes of the file handle.
- * Returns count of handles with opencnt > 0 (actively referenced).
+ * Take this mount's unreferenced handles out of the cache ahead of a umount,
+ * and report how many are still referenced.
+ *
+ * Unreferenced handles are removed and returned via r_purged for the caller
+ * to dispose of: one that holds a backend open needs a close first, one that
+ * does not can simply be freed.  Either way it is gone by the time the caller
+ * is done with the list.
+ *
+ * Referenced handles are counted, not touched -- their holder is still using
+ * them.  umount waits for that count to reach zero, so every handle on the
+ * mount is genuinely gone (and every close that had to run has run) before
+ * the mount goes away.
+ *
+ * The count is transiently non-zero after ordinary activity: a path walk's
+ * reference on the mount root outlives the operation that took it by about a
+ * millisecond.  That is precisely why umount waits on it rather than failing
+ * the moment it sees one.
  */
 static inline uint64_t
-chimera_vfs_open_cache_count_by_mount(
-    struct vfs_open_cache *cache,
-    const uint8_t         *mount_id)
+chimera_vfs_open_cache_purge_by_mount(
+    struct vfs_open_cache           *cache,
+    const uint8_t                   *mount_id,
+    struct chimera_vfs_open_handle **r_purged)
 {
     struct vfs_open_cache_shard    *shard;
-    struct chimera_vfs_open_handle *handle;
-    uint64_t                        count = 0;
+    struct chimera_vfs_open_handle *handle, *next;
+    uint64_t                        referenced = 0;
 
     for (unsigned int i = 0; i < cache->num_shards; i++) {
         shard = &cache->shards[i];
 
         pthread_mutex_lock(&shard->lock);
 
-        for (handle = shard->handles; handle; handle = handle->bucket_next) {
-            if (memcmp(handle->fh, mount_id, CHIMERA_VFS_MOUNT_ID_SIZE) == 0) {
-                if (handle->opencnt > 0) {
-                    count++;
-                }
+        handle = shard->handles;
+
+        while (handle) {
+            next = handle->bucket_next;
+
+            if (memcmp(handle->fh, mount_id, CHIMERA_VFS_MOUNT_ID_SIZE) != 0) {
+                handle = next;
+                continue;
             }
+
+            if (handle->opencnt) {
+                referenced++;
+            } else {
+                /* Unreferenced handles sit on pending_close awaiting the idle
+                 * sweep; umount cannot wait out that timer. */
+                DL_DELETE(shard->pending_close, handle);
+                chimera_vfs_open_cache_shard_remove(shard, handle);
+                shard->open_handles--;
+                LL_PREPEND(*r_purged, handle);
+            }
+
+            handle = next;
         }
 
         pthread_mutex_unlock(&shard->lock);
     }
 
-    return count;
-} /* chimera_vfs_open_cache_count_by_mount */
+    return referenced;
+} /* chimera_vfs_open_cache_purge_by_mount */
 
 /*
  * Mark all handles belonging to the given mount for immediate close.
