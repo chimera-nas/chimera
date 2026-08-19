@@ -106,16 +106,6 @@ function(nfs3_mbt_add_batch flavor steps ntraces seed)
 
     list(APPEND NFS3_MBT_TRACE_FILES ${traces})
     set(NFS3_MBT_TRACE_FILES ${NFS3_MBT_TRACE_FILES} PARENT_SCOPE)
-
-    foreach(trace ${traces})
-        get_filename_component(tname ${trace} NAME_WE)
-        set(name chimera/server/nfs/mbt/${tname}_memfs)
-        add_test(NAME ${name}
-            COMMAND $<TARGET_FILE:nfs3_mbt_replay> --trace ${trace})
-        set_tests_properties(${name} PROPERTIES
-            LABELS "nfs3_mbt;memfs"
-            TIMEOUT 60)
-    endforeach()
 endfunction()
 
 # Coverage-derived blend (see coverage.py): the uniform flavor gives broad
@@ -129,6 +119,23 @@ nfs3_mbt_add_batch(stepDir   128  4 0x1)
 nfs3_mbt_add_batch(stepExcl  128  3 0x1)
 
 add_custom_target(nfs3_mbt_traces ALL DEPENDS ${NFS3_MBT_TRACE_FILES})
+
+# One batched replay: a single nfs3_mbt_replay process opens the server + rpc2
+# client once and replays every trace back-to-back, standing up a fresh,
+# uniquely-named memfs (mkfs) per trace and tearing it down (unmount + rmfs)
+# afterward.  The unique fsname gives each trace a distinct FH mount-id, so the
+# server's attr/name/open caches cannot leak state across traces -- isolation
+# is preserved while the dominant per-process server/client init is amortized
+# over the whole corpus.
+set(NFS3_MBT_BATCH_ARGS)
+foreach(trace ${NFS3_MBT_TRACE_FILES})
+    list(APPEND NFS3_MBT_BATCH_ARGS --trace ${trace})
+endforeach()
+add_test(NAME chimera/server/nfs/mbt/batch_memfs
+    COMMAND $<TARGET_FILE:nfs3_mbt_replay> ${NFS3_MBT_BATCH_ARGS})
+set_tests_properties(chimera/server/nfs/mbt/batch_memfs PROPERTIES
+    LABELS "nfs3_mbt;memfs"
+    TIMEOUT 300)
 
 # Coverage gate: classify every step of the generated corpus into behavior
 # buckets and fail if any bucket is never exercised.  This catches a

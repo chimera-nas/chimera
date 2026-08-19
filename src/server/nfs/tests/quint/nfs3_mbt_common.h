@@ -180,7 +180,7 @@ mbt_fh_eq(
 /* ---- server + client lifecycle ------------------------------------------ */
 
 static inline void
-mbt_env_start_opts(
+mbt_env_open_opts(
     struct mbt_env            *env,
     const struct mbt_env_opts *opts)
 {
@@ -220,21 +220,6 @@ mbt_env_start_opts(
     }
 
     env->server = chimera_server_init(config, env->metrics);
-
-    /* memfs is a named-filesystem backend (CHIMERA_VFS_CAP_MKFS): create the
-     * filesystem before mounting the share onto it. */
-    if (chimera_server_mkfs(env->server, "memfs", "fs0", NULL) != 0) {
-        fprintf(stderr, "failed to create memfs filesystem fs0\n");
-        exit(1);
-    }
-
-    chimera_server_mount(env->server, "share", "memfs", "fs0", NULL);
-
-    if (chimera_server_create_export(env->server, "/share", "/share", 0,
-                                     NULL) != 0) {
-        fprintf(stderr, "failed to create /share export\n");
-        exit(1);
-    }
 
     chimera_server_start(env->server);
 
@@ -285,6 +270,53 @@ mbt_env_start_opts(
     env->cred.authsys.machinename_len = 8;
 
     env->data_buf = malloc(MBT_MAX_DATA);
+} /* mbt_env_open_opts */
+
+/* Per-trace filesystem: create a fresh named memfs (unique fsname => distinct
+ * fsid => distinct FH mount-id, so stale attr/name/open-cache entries from an
+ * earlier trace can never be hit), mount it at "share", and export it.  Runs
+ * on the already-started server -- the trade that lets one process amortize
+ * server/client init across every trace of a batch. */
+static inline void
+mbt_env_fs_setup(
+    struct mbt_env *env,
+    const char     *fsname)
+{
+    if (chimera_server_mkfs(env->server, "memfs", fsname, NULL) != 0) {
+        fprintf(stderr, "failed to create memfs filesystem %s\n", fsname);
+        exit(1);
+    }
+    chimera_server_mount(env->server, "share", "memfs", fsname, NULL);
+    if (chimera_server_create_export(env->server, "/share", "/share", 0,
+                                     NULL) != 0) {
+        fprintf(stderr, "failed to create /share export\n");
+        exit(1);
+    }
+} /* mbt_env_fs_setup */
+
+/* Tear the per-trace filesystem back down.  Order matters: rmfs is EBUSY while
+ * the fs still has a mount, so unmount (and drop the export) first. */
+static inline void
+mbt_env_fs_teardown(
+    struct mbt_env *env,
+    const char     *fsname)
+{
+    chimera_server_remove_export(env->server, "/share");
+    chimera_server_unmount(env->server, "share");
+    if (chimera_server_rmfs(env->server, "memfs", fsname) != 0) {
+        fprintf(stderr, "warning: rmfs %s failed\n", fsname);
+    }
+} /* mbt_env_fs_teardown */
+
+/* Backward-compatible one-shot setup used by the single-trace probes: open the
+ * shared server/client, then create + mount a default fs0. */
+static inline void
+mbt_env_start_opts(
+    struct mbt_env            *env,
+    const struct mbt_env_opts *opts)
+{
+    mbt_env_open_opts(env, opts);
+    mbt_env_fs_setup(env, "fs0");
 } /* mbt_env_start_opts */
 
 static inline void
