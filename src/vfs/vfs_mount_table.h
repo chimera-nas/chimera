@@ -345,6 +345,40 @@ chimera_vfs_mount_table_find_by_path(
 } /* chimera_vfs_mount_table_find_by_path */
 
 /*
+ * Find a mount by exact path match, leaving it in the table.
+ *
+ * umount needs the mount before it is unlinked: its cached handles are closed
+ * while it is still routable, so those closes resolve the mount exactly as any
+ * other op would.  Returns NULL if no mount has that path.
+ */
+static inline struct chimera_vfs_mount *
+chimera_vfs_mount_table_find_exact(
+    struct chimera_vfs_mount_table *table,
+    const char                     *path,
+    int                             pathlen)
+{
+    struct chimera_vfs_mount_table_entry *entry;
+    struct chimera_vfs_mount             *found = NULL;
+    uint32_t                              i;
+
+    pthread_mutex_lock(&table->lock);
+
+    for (i = 0; i < table->num_buckets && !found; i++) {
+        for (entry = table->buckets[i]; entry; entry = entry->next) {
+            if (entry->mount->pathlen == (uint32_t) pathlen &&
+                memcmp(entry->mount->path, path, pathlen) == 0) {
+                found = entry->mount;
+                break;
+            }
+        }
+    }
+
+    pthread_mutex_unlock(&table->lock);
+
+    return found;
+} /* chimera_vfs_mount_table_find_exact */
+
+/*
  * Find and remove a mount by exact path match.
  * Returns the mount pointer if found and removed, NULL if not found.
  * The returned mount pointer is owned by the caller who must free it.

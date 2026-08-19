@@ -14,6 +14,7 @@
 #include <utlist.h>
 
 #include "common/platform.h"
+#include "common/common_config.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_internal.h"
 #include "vfs/vfs_open_cache.h"
@@ -527,6 +528,11 @@ chimera_vfs_init(
 
     vfs = calloc(1, sizeof(*vfs));
 
+    /* Sane default for a VFS brought up without a server or client config
+     * behind it (in-process module tests); chimera_vfs_set_umount_timeout
+     * overrides it from common.umount_timeout_ms. */
+    vfs->umount_timeout_us = (uint64_t) CHIMERA_COMMON_UMOUNT_TIMEOUT_MS_DEFAULT * 1000;
+
     /* Synthesize machine name for identification */
     chimera_vfs_synthesize_machine_name(vfs);
 
@@ -687,6 +693,14 @@ chimera_vfs_set_tcp_flavor(
 {
     vfs->tcp_flavor = flavor;
 } /* chimera_vfs_set_tcp_flavor */
+
+SYMBOL_EXPORT void
+chimera_vfs_set_umount_timeout(
+    struct chimera_vfs *vfs,
+    int                 timeout_ms)
+{
+    vfs->umount_timeout_us = (uint64_t) timeout_ms * 1000;
+} /* chimera_vfs_set_umount_timeout */
 
 SYMBOL_EXPORT void
 chimera_vfs_set_caching_enabled(

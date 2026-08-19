@@ -14,6 +14,7 @@ enum chimera_vfs_error {
     CHIMERA_VFS_EAGAIN       = 11,     /* Try again */
     CHIMERA_VFS_EACCES       = 13,     /* Permission denied */
     CHIMERA_VFS_EFAULT       = 14,         /* Bad address */
+    CHIMERA_VFS_EBUSY        = 16,     /* Device or resource busy */
     CHIMERA_VFS_EEXIST       = 17,     /* File exists */
     CHIMERA_VFS_EXDEV        = 18,     /* Cross-device link */
     CHIMERA_VFS_ENOTDIR      = 20,     /* Not a directory */

@@ -302,6 +302,9 @@ mount_delete_complete(
     if (status == CHIMERA_VFS_ENOENT) {
         chimera_rest_send_error(ctx->evpl, ctx->request, 404, "Not Found",
                                 "Mount does not exist");
+    } else if (status == CHIMERA_VFS_EBUSY) {
+        chimera_rest_send_error(ctx->evpl, ctx->request, 409, "Conflict",
+                                "Mount still has open handles");
     } else if (status != CHIMERA_VFS_OK) {
         chimera_rest_send_error(ctx->evpl, ctx->request, 500,
                                 "Internal Server Error",

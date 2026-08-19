@@ -185,6 +185,7 @@ chimera_posix_errno_from_status(enum chimera_vfs_error status)
         case CHIMERA_VFS_EAGAIN:       return EAGAIN;
         case CHIMERA_VFS_EACCES:       return EACCES;
         case CHIMERA_VFS_EFAULT:       return EFAULT;
+        case CHIMERA_VFS_EBUSY:        return EBUSY;
         case CHIMERA_VFS_EEXIST:       return EEXIST;
         case CHIMERA_VFS_EXDEV:        return EXDEV;
         case CHIMERA_VFS_ENOTDIR:      return ENOTDIR;

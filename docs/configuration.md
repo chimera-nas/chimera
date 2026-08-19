@@ -85,6 +85,7 @@ the canonical place to set them.
 | `preallocate_threads` | int | libevpl default | Threads used to preallocate slabs in parallel. |
 | `rdmacm_tos` | int | `0` | RoCEv2 traffic class stamped on every RDMA QP. ToS = DSCP x 4 (e.g. `104` for DSCP 26) so the fabric's lossless/PFC class carries Chimera traffic. |
 | `metrics_file` | string | - | On shutdown, write a final Prometheus scrape to this file (so short runs keep their metrics). |
+| `umount_timeout_ms` | int | `1000` | How long an unmount waits for the mount's open handles to be closed and released before giving up and returning `EBUSY`. Raise it for backends whose closes are slow; it exists so that unmounting a genuinely busy mount fails rather than hanging. |
 
 ---
 

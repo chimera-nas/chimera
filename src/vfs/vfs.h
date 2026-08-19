@@ -747,6 +747,14 @@ struct chimera_vfs_request {
         struct {
             struct chimera_vfs_mount *mount;
             void                     *mount_private;
+            /* Handle closes still outstanding before the backend UMOUNT may
+             * be dispatched.  Carries a self-reference while a sweep is
+             * issuing them, so a close completing inline cannot finish the
+             * umount mid-sweep. */
+            int                       pending_closes;
+            /* Poll state while waiting for handles still referenced by
+             * someone else to be dropped (chimera_vfs_umount_wait). */
+            void                     *wait;
         } umount;
 
         struct {
@@ -1530,6 +1538,11 @@ struct chimera_vfs_mount {
     uint32_t                       pathlen;
     int                            root_fh_len;
     void                          *mount_private;
+    /* Set once umount has committed to tearing this mount down.  From that
+    * point chimera_vfs_get_module refuses to route new work here, so the
+    * set of handles referencing the mount can only shrink -- without it,
+    * umount could drain the cache and have a fresh open land behind it. */
+    int                            unmounting;
     struct chimera_vfs_mount_attrs attrs;
     struct chimera_vfs_mount      *prev;
     struct chimera_vfs_mount      *next;
@@ -1605,6 +1618,10 @@ struct chimera_vfs {
      * name another protocol caches recalls that holder first.  When clear
      * (single-protocol deployments) the extra lookup is skipped. */
     int                                   caching_enabled;
+    /* How long umount waits for a mount's handles to be dropped before
+     * reporting EBUSY (microseconds).  0 waits only as long as the closes it
+     * issues itself take. */
+    uint64_t                              umount_timeout_us;
     int                                   machine_name_len;
     char                                  machine_name[256];
 };
@@ -1678,6 +1695,14 @@ chimera_vfs_set_tcp_flavor(
  * delegations / SMB2 leases / SMB oplocks enabled).  When set, the VFS
  * remove/rename paths resolve a by-name victim to its FH so a caching holder
  * is recalled before the namespace change; when clear the lookup is skipped. */
+/* Bound on how long umount waits for a mount's open handles to be dropped
+ * before giving up with EBUSY, in milliseconds.  Without a bound a client
+ * holding a file open would wedge the umount indefinitely. */
+void
+chimera_vfs_set_umount_timeout(
+    struct chimera_vfs *vfs,
+    int                 timeout_ms);
+
 void
 chimera_vfs_set_caching_enabled(
     struct chimera_vfs *vfs,
