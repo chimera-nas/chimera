@@ -105,27 +105,13 @@ function(posix_mbt_add_batch instance prefix flavor steps ntraces seed)
         list(FILTER _backends INCLUDE REGEX "^memfs$")
     endif()
 
-    foreach(trace ${traces})
-        get_filename_component(tname ${trace} NAME_WE)
-        foreach(backend ${_backends})
-            set(name chimera/posix/mbt/${tname}_${backend})
-            add_test(NAME ${name}
-                COMMAND ${Python3_EXECUTABLE} ${POSIX_MBT_REPLAY}
-                        --trace ${trace}
-                        --backend ${backend}
-                        --driver $<TARGET_FILE:posix_quint_driver>)
-            # NFS-loopback replays add server spin-up and RPC round trips.
-            if(backend MATCHES "^nfs")
-                set(ttimeout 300)
-            else()
-                set(ttimeout 120)
-            endif()
-            set_tests_properties(${name} PROPERTIES
-                LABELS "posix_mbt;${backend}"
-                ENVIRONMENT "PYTHONUNBUFFERED=1"
-                SKIP_RETURN_CODE 77
-                TIMEOUT ${ttimeout})
-        endforeach()
+    # Accumulate this batch's traces into a per-backend GLOBAL list; a single
+    # batched replay per backend is registered after all batches are collected
+    # (see below), so the whole corpus shares one long-lived driver.
+    foreach(backend ${_backends})
+        set_property(GLOBAL APPEND PROPERTY posix_mbt_backends ${backend})
+        set_property(GLOBAL APPEND PROPERTY
+                     posix_mbt_traces_${backend} ${traces})
     endforeach()
 endfunction()
 
@@ -191,3 +177,38 @@ posix_mbt_add_batch(posixDisk disk_ stepLinks       128  5 0x1   diskfs cairn)
 posix_mbt_add_batch(posixDisk disk_ stepFds         128  5 0x1   diskfs cairn)
 
 add_custom_target(posix_mbt_traces ALL DEPENDS ${POSIX_MBT_TRACE_FILES})
+
+# One batched replay per backend: a single posix_replay.py drives one
+# long-lived posix_quint_driver across the whole corpus, cycling a fresh
+# uniquely-named filesystem per trace (driver "newfs"), so the dominant
+# per-trace cost -- driver server/client init + mount -- is paid once instead
+# of ~237 times.  Replaces the former one-ctest-per-(trace,backend) matrix.
+# Traces whose LInit profile does not match the backend skip individually; the
+# batch reports SKIP (77) only if every trace skips.
+get_property(_posix_mbt_backends GLOBAL PROPERTY posix_mbt_backends)
+if(_posix_mbt_backends)
+    list(REMOVE_DUPLICATES _posix_mbt_backends)
+endif()
+foreach(backend ${_posix_mbt_backends})
+    get_property(_traces GLOBAL PROPERTY posix_mbt_traces_${backend})
+    set(_args)
+    foreach(trace ${_traces})
+        list(APPEND _args --trace ${trace})
+    endforeach()
+    # NFS-loopback replays add server spin-up and RPC round trips per trace.
+    if(backend MATCHES "^nfs")
+        set(ttimeout 600)
+    else()
+        set(ttimeout 300)
+    endif()
+    add_test(NAME chimera/posix/mbt/batch_${backend}
+        COMMAND ${Python3_EXECUTABLE} ${POSIX_MBT_REPLAY}
+                --backend ${backend}
+                --driver $<TARGET_FILE:posix_quint_driver>
+                ${_args})
+    set_tests_properties(chimera/posix/mbt/batch_${backend} PROPERTIES
+        LABELS "posix_mbt;${backend}"
+        ENVIRONMENT "PYTHONUNBUFFERED=1"
+        SKIP_RETURN_CODE 77
+        TIMEOUT ${ttimeout})
+endforeach()

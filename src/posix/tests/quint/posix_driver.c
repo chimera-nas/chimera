@@ -61,6 +61,16 @@ static CHIMERA_DIR            *driver_dirs[MAX_DIRS];
  * by default and would otherwise corrupt the protocol stream. */
 static FILE                   *proto_out;
 
+/* Live filesystem/mount identity.  The batch "newfs" op cycles a fresh,
+ * uniquely-named filesystem per trace (fresh fsid -> fresh FH mount-id) so no
+ * content or cached FH leaks across traces -- the same isolation the NFS/SMB
+ * MBT batches get from a per-trace fsname.  Set once in main(). */
+static const char             *g_module;        /* VFS module (memfs/...)     */
+static int                     g_nfs_version;   /* 0 = direct; 3/4 = loopback */
+static int                     g_fs_counter;    /* bumped per newfs -> fsN     */
+static char                    g_fsname[32] = "fs0";
+static struct chimera_vfs_cred g_root_cred;
+
 /* Decode standard base64 (no whitespace); returns length or -1. */
 static int
 b64_decode(
@@ -208,6 +218,25 @@ apply_pid(json_t *req)
     chimera_posix_set_cred(&driver_creds[pid]);
     (void) chimera_posix_umask(driver_umasks[pid]);
 } /* apply_pid */
+
+/* Reset every model pid to the root credential/umask and normalize the mount
+ * root to the model's fsInit(0777, 0, 0).  Shared by the initial setup and the
+ * per-trace newfs reset. */
+static int
+normalize_root(void)
+{
+    for (int i = 0; i < MAX_PIDS; i++) {
+        driver_creds[i]  = g_root_cred;
+        driver_umasks[i] = 0;
+    }
+    chimera_posix_set_cred(&g_root_cred);
+    (void) chimera_posix_umask(0);
+    if (chimera_posix_chmod("/test", 0777) != 0 ||
+        chimera_posix_chown("/test", 0, 0) != 0) {
+        return -1;
+    }
+    return 0;
+} /* normalize_root */
 
 static json_t *
 res_int(
@@ -880,6 +909,53 @@ handle(json_t *req)
         return res_int(ret, errno);
     }
 
+    if (strcmp(op, "newfs") == 0) {
+        /* Batch isolation: tear the current filesystem down and stand up a
+         * fresh, uniquely-named empty one, so neither content nor a cached FH
+         * leaks into the next trace.  The Python side has already closed this
+         * trace's fds/dirs (Replayer.cleanup); close any stragglers here too. */
+        for (int i = 0; i < MAX_DIRS; i++) {
+            if (driver_dirs[i]) {
+                chimera_posix_closedir(driver_dirs[i]);
+                driver_dirs[i] = NULL;
+            }
+        }
+        if (g_nfs_version) {
+            /* The NFS loopback path keeps the filesystem server-side; only the
+             * direct backends are batched today (POSIX_MBT_MEMFS_ONLY). */
+            return res_int(-1, ENOSYS);
+        }
+        if (chimera_posix_umount("/test") != 0) {
+            fprintf(stderr, "posix_driver: newfs umount failed: %s\n",
+                    strerror(errno));
+            return res_int(-1, errno);
+        }
+        /* Do NOT rmfs the old filesystem: isolation comes from the *new*
+         * fsname (fresh fsid -> fresh FH mount-id, so no cached entry can be
+         * hit), and rmfs would need every open handle drained first -- a trace
+         * can legitimately end with an open fd on an unlinked inode, which
+         * keeps the fs busy.  The unmounted old fs just lingers in memory;
+         * across a bounded corpus that is a few MB, and its handles reference
+         * only valid (never-freed) inodes, so the close thread stays safe. */
+        snprintf(g_fsname, sizeof(g_fsname), "fs%d", ++g_fs_counter);
+        if (chimera_posix_mkfs(g_module, g_fsname, NULL) != 0) {
+            fprintf(stderr, "posix_driver: newfs mkfs %s failed: %s\n",
+                    g_fsname, strerror(errno));
+            return res_int(-1, errno);
+        }
+        if (chimera_posix_mount("/test", g_module, g_fsname) != 0) {
+            fprintf(stderr, "posix_driver: newfs mount %s failed: %s\n",
+                    g_fsname, strerror(errno));
+            return res_int(-1, errno);
+        }
+        if (normalize_root() != 0) {
+            fprintf(stderr, "posix_driver: newfs normalize failed: %s\n",
+                    strerror(errno));
+            return res_int(-1, errno);
+        }
+        return res_int(0, 0);
+    }
+
     if (strcmp(op, "shutdown") == 0) {
         return NULL;
     }
@@ -1066,15 +1142,13 @@ main(
         }
     }
 
+    /* Record the live fs identity so the batch "newfs" op can cycle it. */
+    g_module      = module;
+    g_nfs_version = nfs_version;
+    g_root_cred   = root_cred;
+
     /* Normalize the root to the model's fsInit(0777, 0, 0). */
-    for (int i = 0; i < MAX_PIDS; i++) {
-        driver_creds[i]  = root_cred;
-        driver_umasks[i] = 0;
-    }
-    chimera_posix_set_cred(&root_cred);
-    (void) chimera_posix_umask(0);
-    if (chimera_posix_chmod("/test", 0777) != 0 ||
-        chimera_posix_chown("/test", 0, 0) != 0) {
+    if (normalize_root() != 0) {
         fprintf(stderr, "posix_driver: root normalization failed\n");
         return 1;
     }

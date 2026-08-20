@@ -1461,7 +1461,13 @@ def report_divergence(trace_path, div, replayer, driver):
     print(f"\ndriver stderr tail:\n{driver.stderr_tail()}", file=sys.stderr)
 
 
-def run_trace(trace_path, args):
+def replay_one(driver, trace_path, args):
+    """Replay one trace against an already-running shared driver.
+
+    Returns "ok", "skip", or "fail".  Isolation between traces is the caller's
+    job: it issues a driver "newfs" (fresh uniquely-named filesystem) before
+    every replay after the first, so no content or cached FH leaks across
+    traces.  A skipped trace never touches the filesystem."""
     # diskfs drives a libaio block device, which exists only on Linux; on other
     # platforms the backend aborts at startup ("liburcu: set CPU # out of
     # range").  Skip rather than fail so the suite is meaningful off Linux --
@@ -1469,13 +1475,9 @@ def run_trace(trace_path, args):
     if "diskfs" in args.backend and not sys.platform.startswith("linux"):
         print(f"{trace_path}: SKIP: diskfs requires Linux (libaio); "
               f"unavailable on {sys.platform}")
-        sys.exit(77)
+        return "skip"
 
     states = load_trace(trace_path)
-    if args.dry_run:
-        print(f"{trace_path}: {len(states) - 1} steps, format OK")
-        return True
-
     init = states[0]["lastOp"]
     if init["tag"] != "LInit":
         raise TraceFormatError(f"{trace_path}: first label is not LInit")
@@ -1485,38 +1487,35 @@ def run_trace(trace_path, args):
         if want is not None and caps.get(key) != want:
             print(f"{trace_path}: SKIP: trace profile {key}="
                   f"{caps.get(key)} does not match live profile {want}")
-            sys.exit(77)
+            return "skip"
 
-    driver = Driver(args.driver, args.backend)
+    replayer = Replayer(driver, caps, verbose=args.verbose)
+    audited = 0
     try:
-        replayer = Replayer(driver, caps, verbose=args.verbose)
-        audited = 0
-        try:
-            replayer.replay(states)
-            audited = replayer.final_audit(states[-1], len(states) - 1)
-        except Divergence as div:
-            report_divergence(trace_path, div, replayer, driver)
-            replayer.cleanup()
-            return False
+        replayer.replay(states)
+        audited = replayer.final_audit(states[-1], len(states) - 1)
+    except Divergence as div:
+        report_divergence(trace_path, div, replayer, driver)
         replayer.cleanup()
+        return "fail"
+    replayer.cleanup()
 
-        dev_summary = ""
-        if replayer.deviations_hit:
-            parts = ", ".join(
-                f"{k}x{v}"
-                for k, v in sorted(replayer.deviations_hit.items()))
-            dev_summary = f"; known deviations: {parts}"
-        print(f"{trace_path}: {len(states) - 1} steps replayed, "
-              f"{audited} objects audited{dev_summary}")
-        return True
-    finally:
-        driver.close()
+    dev_summary = ""
+    if replayer.deviations_hit:
+        parts = ", ".join(
+            f"{k}x{v}"
+            for k, v in sorted(replayer.deviations_hit.items()))
+        dev_summary = f"; known deviations: {parts}"
+    print(f"{trace_path}: {len(states) - 1} steps replayed, "
+          f"{audited} objects audited{dev_summary}")
+    return "ok"
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--trace", action="append", default=[],
-                    help="ITF trace file (repeatable; fresh driver per "
+                    help="ITF trace file (repeatable; one shared driver "
+                         "replays them all, cycling a fresh filesystem per "
                          "trace)")
     ap.add_argument("--driver", help="path to the posix_quint_driver binary")
     ap.add_argument("--dry-run", action="store_true",
@@ -1557,11 +1556,46 @@ def main():
     if not args.dry_run and not args.driver:
         ap.error("--driver is required unless --dry-run")
 
-    failures = 0
-    for trace in args.trace:
-        if not run_trace(trace, args):
-            failures += 1
-    sys.exit(1 if failures else 0)
+    if args.dry_run:
+        for trace in args.trace:
+            states = load_trace(trace)
+            print(f"{trace}: {len(states) - 1} steps, format OK")
+        return
+
+    # One driver serves the whole batch: its server/client init and mount are
+    # the dominant per-trace cost, so amortize them and reset just the
+    # filesystem between traces (matches the NFS3/NFS4/SMB2 MBT batches).
+    driver = Driver(args.driver, args.backend)
+    replayed = skipped = failures = ran = 0
+    try:
+        for trace in args.trace:
+            if ran > 0:
+                # Fresh empty filesystem before every replay after the first,
+                # so the previous trace's content and cached FHs cannot leak.
+                reset = driver.request(op="newfs")
+                if reset.get("err"):
+                    print(f"FATAL: newfs reset failed before {trace}: {reset}"
+                          f"\n{driver.stderr_tail()}", file=sys.stderr)
+                    sys.exit(1)
+            status = replay_one(driver, trace, args)
+            if status == "ok":
+                replayed += 1
+                ran += 1
+            elif status == "fail":
+                failures += 1
+                ran += 1
+            else:
+                skipped += 1
+    finally:
+        driver.close()
+
+    print(f"batch: {replayed} replayed, {skipped} skipped, {failures} failed "
+          f"of {len(args.trace)} trace(s)")
+    if failures:
+        sys.exit(1)
+    if replayed == 0:
+        sys.exit(77)   # every trace skipped -> the batch is a SKIP
+    sys.exit(0)
 
 
 if __name__ == "__main__":
