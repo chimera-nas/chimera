@@ -221,17 +221,6 @@ function(nfs4_mbt_add_batch inst flavor steps ntraces seed)
 
     list(APPEND NFS4_MBT_TRACE_FILES ${traces})
     set(NFS4_MBT_TRACE_FILES ${NFS4_MBT_TRACE_FILES} PARENT_SCOPE)
-
-    foreach(trace ${traces})
-        get_filename_component(tname ${trace} NAME_WE)
-        set(name chimera/server/nfs/mbt4/${tname}_memfs)
-        add_test(NAME ${name}
-            COMMAND $<TARGET_FILE:nfs4_mbt_replay> --trace ${trace})
-        set_tests_properties(${name} PROPERTIES
-            LABELS "nfs4_mbt;memfs"
-            SKIP_RETURN_CODE 77
-            TIMEOUT 180)
-    endforeach()
 endfunction()
 
 # Three memfs-tuned instances (minorversion 2/1/0), four step flavors
@@ -256,6 +245,25 @@ foreach(inst nfs4Memfs42Deleg nfs4Memfs41Deleg)
 endforeach()
 
 add_custom_target(nfs4_mbt_traces ALL DEPENDS ${NFS4_MBT_TRACE_FILES})
+
+# One batched replay for the whole NFS4 corpus: a single nfs4_mbt_replay
+# process opens the server (delegations off, block_size pinned) + rpc2 client
+# once and replays every trace, standing up a fresh uniquely-named memfs per
+# trace AND registering a fresh client identity per trace (unique co_ownerid),
+# so neither the filesystem nor the clientid/session/slot state leaks across
+# traces.  Amortizes the dominant per-process init over the corpus.
+# SKIP_RETURN_CODE 77 still applies: if every trace skips the batch reports
+# SKIP; otherwise the runnable (delegation-free) traces gate it.
+set(NFS4_MBT_BATCH_ARGS)
+foreach(trace ${NFS4_MBT_TRACE_FILES})
+    list(APPEND NFS4_MBT_BATCH_ARGS --trace ${trace})
+endforeach()
+add_test(NAME chimera/server/nfs/mbt4/batch_memfs
+    COMMAND $<TARGET_FILE:nfs4_mbt_replay> ${NFS4_MBT_BATCH_ARGS})
+set_tests_properties(chimera/server/nfs/mbt4/batch_memfs PROPERTIES
+    LABELS "nfs4_mbt;memfs"
+    SKIP_RETURN_CODE 77
+    TIMEOUT 300)
 
 # Delegation policy probe: pins the deterministic grant/recall behavior
 # the delegation-enabled instances encode (see nfs4_deleg_probe.c).
