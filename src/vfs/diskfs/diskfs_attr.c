@@ -499,7 +499,7 @@ diskfs_getattr(
     p->thread = thread;
     p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ);
 
-    diskfs_inode_get_fh_async(thread, p->txn,
+    diskfs_inode_get_fh_async(thread, p->txn, p->fs,
                               request->fh, request->fh_len,
                               diskfs_getattr_inode_cb, request);
 } /* diskfs_getattr */
@@ -1034,10 +1034,28 @@ diskfs_setattr(
     p->thread = thread;
     p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
 
-    diskfs_inode_get_fh_async(thread, p->txn,
+    diskfs_inode_get_fh_async(thread, p->txn, p->fs,
                               request->fh, request->fh_len,
                               diskfs_setattr_inode_cb, request);
 } /* diskfs_setattr */
+
+
+/* Fail a mount after the filesystem was resolved: drop the mount count the
+ * entry took before the walk began. */
+static void
+diskfs_mount_fail(
+    struct chimera_vfs_request *request,
+    int                         status)
+{
+    struct diskfs_request_private *p      = request->plugin_data;
+    struct diskfs_shared          *shared = p->thread->shared;
+
+    pthread_mutex_lock(&shared->lock);
+    p->fs->mount_count--;
+    pthread_mutex_unlock(&shared->lock);
+
+    diskfs_op_fail(request, p->txn, status);
+} /* diskfs_mount_fail */
 
 
 static void
@@ -1055,7 +1073,7 @@ diskfs_mount_walk_dirent_cb(
     diskfs_bt_op_free(p->thread, op);
 
     if (result < 0) {
-        diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOENT);
+        diskfs_mount_fail(request, CHIMERA_VFS_ENOENT);
         return;
     }
     child_inum = rec->inum;
@@ -1065,7 +1083,7 @@ diskfs_mount_walk_dirent_cb(
      * the slot, then fetch the child. */
     diskfs_txn_unlock_inode(p->txn, p->inode_stash[0]);
 
-    diskfs_inode_get_inum_async(p->thread, p->txn, child_inum, child_gen,
+    diskfs_inode_get_inum_async(p->thread, p->txn, p->fs, child_inum, child_gen,
                                 diskfs_mount_walk_acquired_cb, request);
 } /* diskfs_mount_walk_dirent_cb */
 
@@ -1087,7 +1105,7 @@ diskfs_mount_walk_acquired_cb(
     struct diskfs_bt_op           *op;
 
     if (unlikely(status != CHIMERA_VFS_OK)) {
-        diskfs_op_fail(request, p->txn, status);
+        diskfs_mount_fail(request, status);
         return;
     }
 
@@ -1099,12 +1117,13 @@ diskfs_mount_walk_acquired_cb(
     if (pathc >= path + pathlen) {
         /* Fully resolved. */
         diskfs_map_attrs(thread, &request->mount.r_attr, inode);
+        request->mount.r_mount_private = p->fs;
         diskfs_op_ok(request, p->txn);
         return;
     }
 
     if (unlikely(!S_ISDIR(inode->mode))) {
-        diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOTDIR);
+        diskfs_mount_fail(request, CHIMERA_VFS_ENOTDIR);
         return;
     }
 
@@ -1133,24 +1152,66 @@ diskfs_mount(
     void                       *private_data)
 {
     struct diskfs_request_private *p = request->plugin_data;
+    struct diskfs_fs              *fs;
+    const char                    *path     = request->mount.path;
+    const char                    *path_end = request->mount.path + request->mount.pathlen;
+    const char                    *name;
+    const char                    *slash;
+    int                            namelen;
     uint64_t                       inum;
     uint32_t                       gen;
 
     (void) private_data;
 
     /* Resume any inode drains left pending by a crash during mount, before
-     * the export becomes usable.  Fresh bootstrap creates an empty orphan list
-     * and marks it scanned. */
+     * the export becomes usable.  Fresh bootstrap creates empty orphan
+     * shards and marks them scanned. */
     if (unlikely(!shared->orphans_scanned)) {
         diskfs_orphan_scan(thread);
     }
+
+    /* The leading path component names the filesystem; the remainder is a
+     * path within it. */
+    while (path < path_end && *path == '/') {
+        path++;
+    }
+
+    name  = path;
+    slash = memchr(path, '/', path_end - path);
+
+    if (slash) {
+        namelen = slash - name;
+        path    = slash;
+    } else {
+        namelen = path_end - name;
+        path    = path_end;
+    }
+
+    pthread_mutex_lock(&shared->lock);
+
+    fs = namelen ? diskfs_fs_find(shared, name, namelen) : NULL;
+
+    /* root_fhlen == 0 marks an MKFS-in-progress placeholder. */
+    if (unlikely(!fs || fs->root_fhlen == 0)) {
+        pthread_mutex_unlock(&shared->lock);
+        request->status = CHIMERA_VFS_ENOENT;
+        request->complete(request);
+        return;
+    }
+
+    fs->mount_count++;
+
+    pthread_mutex_unlock(&shared->lock);
+
+    p->fs         = fs;
     p->thread     = thread;
     p->txn        = diskfs_txn_begin(thread, DISKFS_TXN_READ);
-    p->op_scratch = 0;
+    p->op_scratch = (uint32_t) (path - request->mount.path);
 
-    /* Resolve the mount path asynchronously starting from the root inode. */
-    diskfs_fh_to_inum(&inum, &gen, shared->root_fh, shared->root_fhlen);
-    diskfs_inode_get_inum_async(thread, p->txn, inum, gen,
+    /* Resolve the remainder path asynchronously starting from the
+     * filesystem's root inode. */
+    diskfs_fh_to_inum(&inum, &gen, fs->root_fh, fs->root_fhlen);
+    diskfs_inode_get_inum_async(thread, p->txn, fs, inum, gen,
                                 diskfs_mount_walk_acquired_cb, request);
 } /* diskfs_mount */
 
@@ -1162,15 +1223,481 @@ diskfs_umount(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct diskfs_request_private *p = request->plugin_data;
+    struct diskfs_request_private *p  = request->plugin_data;
+    struct diskfs_fs              *fs = request->umount.mount_private;
 
-    (void) shared;
     (void) private_data;
+
+    if (fs) {
+        pthread_mutex_lock(&shared->lock);
+        fs->mount_count--;
+        pthread_mutex_unlock(&shared->lock);
+    }
 
     p->thread = thread;
     p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ);
     diskfs_op_ok(request, p->txn);
 } /* diskfs_umount */
+
+
+/* ------------------------------------------------------------------ */
+/* MKFS / RMFS: named-filesystem create/remove                         */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Runtime superblock rewrite (fs_table changed), mirroring the generation-
+ * floor extension write: fill an image, write it FUA through this worker's
+ * device-0 queue, run the continuation from the completion.  The caller holds
+ * shared->lock across diskfs_sb_write_prepare so the table snapshot is atomic
+ * with the mutation it just made; the I/O itself runs unlocked.  Concurrent
+ * superblock writes (another mkfs/rmfs, or a generation-floor extension) are
+ * not ordered against each other -- mkfs/rmfs are rare and every write
+ * carries the complete current table, so the last write to land is whole.
+ * The fill doubles as a floor extension (gen_next + reserve, folded into
+ * gen_floor on completion with a monotonic max); a floor-regression window
+ * remains only if a concurrent floor write interleaves between our fill and
+ * landing AND a crash follows before any later superblock write -- accepted
+ * for the rarity of mkfs/rmfs.
+ */
+struct diskfs_sb_write {
+    struct diskfs_thread *thread;
+    struct evpl_iovec     iov;
+    uint64_t              new_floor;
+    void                  (*cb)(
+        struct diskfs_thread *thread,
+        void                 *arg);
+    void                 *arg;
+};
+
+
+static void
+diskfs_sb_write_complete(
+    struct evpl *evpl,
+    int          status,
+    void        *private_data)
+{
+    struct diskfs_sb_write *sw     = private_data;
+    struct diskfs_shared   *shared = sw->thread->shared;
+    uint64_t                floor  = __atomic_load_n(&shared->gen_floor,
+                                                     __ATOMIC_ACQUIRE);
+
+    chimera_diskfs_abort_if(status != 0,
+                            "fs-table superblock write failed: %d", status);
+
+    while (floor < sw->new_floor &&
+           !__atomic_compare_exchange_n(&shared->gen_floor, &floor,
+                                        sw->new_floor, 0,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        /* retry against the freshly-loaded floor */
+    }
+
+    evpl_iovec_release(evpl, &sw->iov);
+    sw->cb(sw->thread, sw->arg);
+    free(sw);
+} /* diskfs_sb_write_complete */
+
+
+/* Caller holds shared->lock (snapshots fs_table). */
+static struct diskfs_sb_write *
+diskfs_sb_write_prepare(
+    struct diskfs_thread *thread,
+    void ( *cb )(struct diskfs_thread *, void *),
+    void *arg)
+{
+    struct diskfs_shared   *shared = thread->shared;
+    struct diskfs_sb_write *sw     = malloc(sizeof(*sw));
+
+    sw->thread    = thread;
+    sw->cb        = cb;
+    sw->arg       = arg;
+    sw->new_floor = __atomic_load_n(&shared->gen_next, __ATOMIC_RELAXED) +
+        DISKFS_GEN_RESERVE;
+
+    evpl_iovec_alloc(thread->evpl, SM_SUPERBLOCK_SIZE, SM_SUPERBLOCK_SIZE, 1,
+                     0, &sw->iov);
+    space_map_fill_superblock(shared->space_map, sw->iov.data, shared->fsid,
+                              0 /* dirty */, 0, 0, 0, sw->new_floor,
+                              shared->fs_table);
+    return sw;
+} /* diskfs_sb_write_prepare */
+
+
+static void
+diskfs_sb_write_submit(
+    struct diskfs_thread   *thread,
+    struct diskfs_sb_write *sw)
+{
+    evpl_block_write(thread->evpl, thread->queue[0], &sw->iov, 1,
+                     SM_SUPERBLOCK_OFFSET, 1 /* sync */,
+                     diskfs_sb_write_complete, sw);
+} /* diskfs_sb_write_submit */
+
+
+static void
+diskfs_mkfs_sb_written(
+    struct diskfs_thread *thread,
+    void                 *arg)
+{
+    struct chimera_vfs_request *request = arg;
+
+    (void) thread;
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* diskfs_mkfs_sb_written */
+
+
+/* The root inode is durable: publish the filesystem (root FH + fs_table slot
+ * + superblock rewrite + mount_id map), completing the request once the
+ * superblock write lands. */
+static void
+diskfs_mkfs_committed_cb(
+    struct diskfs_txn *txn,
+    int                status,
+    void              *priv)
+{
+    struct chimera_vfs_request    *request = priv;
+    struct diskfs_request_private *p       = request->plugin_data;
+    struct diskfs_thread          *thread  = p->thread;
+    struct diskfs_shared          *shared  = thread->shared;
+    struct diskfs_fs              *fs      = p->fs;
+    struct diskfs_sb_write        *sw;
+    struct sm_fs_entry            *e                               = NULL;
+    uint8_t                        fsid_buf[CHIMERA_VFS_FSID_SIZE] = { 0 };
+    int                            i;
+
+    (void) txn;
+    (void) status;     /* write-txn commits report only success */
+
+    memcpy(fsid_buf, &fs->fsid, sizeof(fs->fsid));
+
+    pthread_mutex_lock(&shared->lock);
+
+    fs->root_fhlen = chimera_vfs_encode_fh_inum_mount(fsid_buf,
+                                                      fs->root_inum,
+                                                      fs->root_gen,
+                                                      fs->root_fh);
+
+    for (i = 0; i < SM_FS_TABLE_MAX; i++) {
+        if (shared->fs_table[i].name[0] == '\0') {
+            e = &shared->fs_table[i];
+            break;
+        }
+    }
+    /* The fs_list admission check counts placeholders, so a slot exists. */
+    chimera_diskfs_abort_if(!e, "fs_table full past admission check");
+
+    memset(e, 0, sizeof(*e));
+    memcpy(e->name, fs->name, strlen(fs->name));
+    e->fsid      = fs->fsid;
+    e->root_inum = fs->root_inum;
+    e->root_gen  = fs->root_gen;
+
+    sw = diskfs_sb_write_prepare(thread, diskfs_mkfs_sb_written, request);
+
+    pthread_mutex_unlock(&shared->lock);
+
+    diskfs_sb_write_submit(thread, sw);
+} /* diskfs_mkfs_committed_cb */
+
+
+static void
+diskfs_mkfs_alloc_cb(
+    struct diskfs_inode *inode,
+    int                  status,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+    struct diskfs_thread          *thread  = p->thread;
+    struct diskfs_shared          *shared  = thread->shared;
+    struct diskfs_fs              *fs      = p->fs;
+    struct timespec                now;
+
+    if (unlikely(status != CHIMERA_VFS_OK)) {
+        pthread_mutex_lock(&shared->lock);
+        DL_DELETE(shared->fs_list, fs);
+        pthread_mutex_unlock(&shared->lock);
+        free(fs->name);
+        free(fs);
+        p->fs = NULL;
+        diskfs_op_fail(request, p->txn, status);
+        return;
+    }
+
+    chimera_vfs_realtime(&now);
+
+    inode->size       = 4096;
+    inode->space_used = 4096;
+    inode->uid        = 0;
+    inode->gid        = 0;
+    inode->nlink      = 2;
+    /* World-writable fresh root: with VFS-layer ADD_FILE/ADD_SUBDIRECTORY
+     * enforcement a root-owned 0755 root would refuse all creation by
+     * non-root clients on this engine-authoritative backend (matches
+     * memfs/cairn).  Subdirs are still created owned by their creator. */
+    inode->mode       = S_IFDIR | 0777;
+    inode->atime_sec  = now.tv_sec;
+    inode->atime_nsec = now.tv_nsec;
+    inode->mtime_sec  = now.tv_sec;
+    inode->mtime_nsec = now.tv_nsec;
+    inode->ctime_sec  = now.tv_sec;
+    inode->ctime_nsec = now.tv_nsec;
+    inode->change++;
+    inode->btime_sec      = now.tv_sec;
+    inode->btime_nsec     = now.tv_nsec;
+    inode->dos_attributes = 0;
+
+    /* Root directory's parent is itself for ".." lookup. */
+    inode->parent_inum = inode->inum;
+    inode->parent_gen  = inode->gen;
+
+    fs->root_inum = inode->inum;
+    fs->root_gen  = inode->gen;
+
+    /* The embedded b+tree root was initialized by the freshly-claimed home
+     * block's is_new path (diskfs_inode_finish_write_pin), like mkdir.
+     * Publish the filesystem only once the root inode is durable. */
+    diskfs_txn_commit(p->txn, diskfs_mkfs_committed_cb, request);
+} /* diskfs_mkfs_alloc_cb */
+
+
+void
+diskfs_mkfs(
+    struct diskfs_thread       *thread,
+    struct diskfs_shared       *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    struct diskfs_request_private *p = request->plugin_data;
+    struct diskfs_fs              *fs;
+    uint64_t                       fsid = 0;
+    int                            i, count;
+
+    (void) private_data;
+
+    if (request->mkfs.namelen == 0 ||
+        request->mkfs.namelen >= sizeof(((struct sm_fs_entry *) 0)->name)) {
+        request->status = CHIMERA_VFS_EINVAL;
+        request->complete(request);
+        return;
+    }
+
+    /* Per-filesystem options: "fsid" pins the fsid (else random). */
+    for (i = 0; i < request->mkfs.options.num_options; i++) {
+        const char *key   = request->mkfs.options.options[i].key;
+        const char *value = request->mkfs.options.options[i].value;
+
+        if (strcmp(key, "fsid") == 0 && value) {
+            fsid = strtoull(value, NULL, 0);
+        }
+    }
+
+    if (!fsid) {
+        fsid = chimera_rand64();
+    }
+
+    pthread_mutex_lock(&shared->lock);
+
+    if (diskfs_fs_find(shared, request->mkfs.name, request->mkfs.namelen)) {
+        pthread_mutex_unlock(&shared->lock);
+        request->status = CHIMERA_VFS_EEXIST;
+        request->complete(request);
+        return;
+    }
+
+    count = 0;
+    DL_FOREACH(shared->fs_list, fs)
+    {
+        count++;
+    }
+    if (count >= SM_FS_TABLE_MAX) {
+        pthread_mutex_unlock(&shared->lock);
+        request->status = CHIMERA_VFS_ENOSPC;
+        request->complete(request);
+        return;
+    }
+
+    /* Placeholder (root_fhlen == 0) reserves the name and a table slot
+     * against a concurrent mkfs; published for real (root FH, fs_table,
+     * fs_map) once the root inode commit is durable. */
+    fs         = calloc(1, sizeof(*fs));
+    fs->shared = shared;
+    fs->name   = strndup(request->mkfs.name, request->mkfs.namelen);
+    fs->fsid   = fsid;
+    DL_APPEND(shared->fs_list, fs);
+
+    pthread_mutex_unlock(&shared->lock);
+
+    p->fs     = fs;
+    p->thread = thread;
+    p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+
+    /* Create the root inode exactly like mkdir minus the dirent insert. */
+    diskfs_inode_alloc_async(thread, p->txn, fs, diskfs_mkfs_alloc_cb, request);
+} /* diskfs_mkfs */
+
+
+/* Background burn-down of a removed filesystem's tree: mark the root
+ * orphaned (nlink 0 + durable orphan record) so the ordinary drain machinery
+ * reclaims it; its recursive dirent handling re-queues every child. */
+struct diskfs_rmfs_reclaim {
+    struct diskfs_thread       *thread;
+    struct diskfs_txn          *txn;
+    struct chimera_vfs_request *request;
+    uint64_t                    root_inum;
+    uint32_t                    root_gen;
+};
+
+
+static void
+diskfs_rmfs_root_final_cb(
+    struct diskfs_txn *txn,
+    int                status,
+    void              *priv)
+{
+    (void) txn;
+    (void) status;
+    free(priv);
+} /* diskfs_rmfs_root_final_cb */
+
+
+static void
+diskfs_rmfs_root_recorded(void *priv)
+{
+    struct diskfs_rmfs_reclaim *rc = priv;
+
+    diskfs_txn_commit(rc->txn, diskfs_rmfs_root_final_cb, rc);
+} /* diskfs_rmfs_root_recorded */
+
+
+static void
+diskfs_rmfs_root_cb(
+    struct diskfs_inode *inode,
+    int                  status,
+    void                *priv)
+{
+    struct diskfs_rmfs_reclaim *rc = priv;
+
+    if (status != CHIMERA_VFS_OK || inode->nlink == 0) {
+        /* Already orphaned or gone; nothing to reclaim. */
+        diskfs_txn_abort(rc->txn);
+        free(rc);
+        return;
+    }
+
+    inode->nlink = 0;
+
+    /* Records the root on the durable orphan list, drops its namespace base
+     * reference and queues it for background reclaim (the drain parks on the
+     * write lock this txn holds until it is durable). */
+    diskfs_inode_orphaned(rc->thread, rc->txn, inode,
+                          diskfs_rmfs_root_recorded, rc);
+} /* diskfs_rmfs_root_cb */
+
+
+/* The superblock without the filesystem is durable: complete the request and
+ * kick the background reclaim of the (now unreachable) tree. */
+static void
+diskfs_rmfs_sb_written(
+    struct diskfs_thread *thread,
+    void                 *arg)
+{
+    struct diskfs_rmfs_reclaim *rc      = arg;
+    struct chimera_vfs_request *request = rc->request;
+
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+
+    rc->txn = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
+    diskfs_inode_acquire(thread, rc->txn, NULL, rc->root_inum, rc->root_gen,
+                         DISKFS_INODE_LOCK_WRITE, diskfs_rmfs_root_cb, rc);
+} /* diskfs_rmfs_sb_written */
+
+
+static void
+diskfs_fs_free_rcu(struct rcu_head *head)
+{
+    struct diskfs_fs *fs = caa_container_of(head, struct diskfs_fs, rcu);
+
+    free(fs->name);
+    free(fs);
+} /* diskfs_fs_free_rcu */
+
+
+void
+diskfs_rmfs(
+    struct diskfs_thread       *thread,
+    struct diskfs_shared       *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    struct diskfs_fs           *fs;
+    struct diskfs_rmfs_reclaim *rc;
+    struct diskfs_sb_write     *sw;
+    int                         i;
+
+    (void) private_data;
+
+    if (request->rmfs.namelen == 0 ||
+        request->rmfs.namelen >= sizeof(((struct sm_fs_entry *) 0)->name)) {
+        request->status = CHIMERA_VFS_EINVAL;
+        request->complete(request);
+        return;
+    }
+
+    pthread_mutex_lock(&shared->lock);
+
+    fs = diskfs_fs_find(shared, request->rmfs.name, request->rmfs.namelen);
+
+    /* An MKFS-in-progress placeholder (root_fhlen == 0) is not yet a
+     * filesystem. */
+    if (!fs || fs->root_fhlen == 0) {
+        pthread_mutex_unlock(&shared->lock);
+        request->status = CHIMERA_VFS_ENOENT;
+        request->complete(request);
+        return;
+    }
+
+    if (fs->mount_count > 0) {
+        pthread_mutex_unlock(&shared->lock);
+        request->status = CHIMERA_VFS_EBUSY;
+        request->complete(request);
+        return;
+    }
+
+    DL_DELETE(shared->fs_list, fs);
+
+    for (i = 0; i < SM_FS_TABLE_MAX; i++) {
+        struct sm_fs_entry *e = &shared->fs_table[i];
+
+        if (e->name[0] != '\0' &&
+            strlen(e->name) == strlen(fs->name) &&
+            memcmp(e->name, fs->name, strlen(fs->name)) == 0) {
+            memset(e, 0, sizeof(*e));
+            break;
+        }
+    }
+
+    rc            = malloc(sizeof(*rc));
+    rc->thread    = thread;
+    rc->txn       = NULL;
+    rc->request   = request;
+    rc->root_inum = fs->root_inum;
+    rc->root_gen  = fs->root_gen;
+
+    sw = diskfs_sb_write_prepare(thread, diskfs_rmfs_sb_written, rc);
+
+    pthread_mutex_unlock(&shared->lock);
+
+    /* Defer the in-memory teardown through an RCU grace period.  RMFS
+     * requires that nothing is mounted, and umount does not return until
+     * every handle on the mount is gone, so no new op can reach this
+     * filesystem -- but an op that took mount_private just before its mount
+     * was claimed may still be in flight. */
+    call_rcu(&fs->rcu, diskfs_fs_free_rcu);
+
+    diskfs_sb_write_submit(thread, sw);
+} /* diskfs_rmfs */
 
 
 /* inode_stash[0] = parent dir (locked across child fetch) */
@@ -1591,7 +2118,7 @@ diskfs_get_xattr(
     p->thread = thread;
     p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ);
 
-    diskfs_inode_get_fh_async(thread, p->txn,
+    diskfs_inode_get_fh_async(thread, p->txn, p->fs,
                               request->fh, request->fh_len,
                               diskfs_get_xattr_inode_cb, request);
 } /* diskfs_get_xattr */
@@ -1813,7 +2340,7 @@ diskfs_set_xattr(
     p->thread = thread;
     p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
 
-    diskfs_inode_get_fh_async(thread, p->txn,
+    diskfs_inode_get_fh_async(thread, p->txn, p->fs,
                               request->fh, request->fh_len,
                               diskfs_set_xattr_inode_cb, request);
 } /* diskfs_set_xattr */
@@ -1954,7 +2481,7 @@ diskfs_list_xattrs(
     p->thread = thread;
     p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ);
 
-    diskfs_inode_get_fh_async(thread, p->txn,
+    diskfs_inode_get_fh_async(thread, p->txn, p->fs,
                               request->fh, request->fh_len,
                               diskfs_list_xattrs_inode_cb, request);
 } /* diskfs_list_xattrs */
@@ -2091,7 +2618,7 @@ diskfs_remove_xattr(
     p->thread = thread;
     p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
 
-    diskfs_inode_get_fh_async(thread, p->txn,
+    diskfs_inode_get_fh_async(thread, p->txn, p->fs,
                               request->fh, request->fh_len,
                               diskfs_remove_xattr_inode_cb, request);
 } /* diskfs_remove_xattr */
@@ -2455,6 +2982,6 @@ diskfs_get_layout(
     p->thread = thread;
     p->txn    = diskfs_txn_begin(thread, rw ? DISKFS_TXN_WRITE : DISKFS_TXN_READ);
 
-    diskfs_inode_get_fh_async(thread, p->txn, request->fh, request->fh_len,
+    diskfs_inode_get_fh_async(thread, p->txn, p->fs, request->fh, request->fh_len,
                               diskfs_get_layout_inode_cb, request);
 } /* diskfs_get_layout */

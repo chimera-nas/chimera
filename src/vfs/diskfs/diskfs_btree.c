@@ -1182,7 +1182,8 @@ diskfs_orphan_op_start(
     o->done   = done;
     o->priv   = priv;
 
-    diskfs_inode_acquire(thread, txn, DISKFS_ORPHAN_SHARD_INUM(inum),
+    /* Orphan shards are pool-level (no owning filesystem). */
+    diskfs_inode_acquire(thread, txn, NULL, DISKFS_ORPHAN_SHARD_INUM(inum),
                          DISKFS_ORPHAN_GEN, DISKFS_INODE_LOCK_WRITE,
                          diskfs_orphan_op_acquired_cb, o);
 } /* diskfs_orphan_op_start */

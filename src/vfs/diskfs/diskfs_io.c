@@ -755,7 +755,7 @@ diskfs_inode_load_recs_done(struct diskfs_inode_load_ctx *lc)
 
     diskfs_inode_release_one(thread, inode, DISKFS_INODE_LOCK_WRITE);
 
-    diskfs_inode_acquire(thread, lc->txn, lc->inum, lc->gen, lc->mode,
+    diskfs_inode_acquire(thread, lc->txn, lc->fs, lc->inum, lc->gen, lc->mode,
                          lc->cb, lc->private_data);
     free(lc);
 } /* diskfs_inode_load_recs_done */
@@ -872,6 +872,7 @@ diskfs_inode_load_resume(
     if (!inode) {
         diskfs_inode_cache_recycle_locked(shared, shard);
         inode                 = diskfs_inode_struct_new(lc->inum);
+        inode->fs             = lc->fs;
         inode->gen            = di->gen;
         inode->mode           = di->mode;
         inode->nlink          = di->nlink;
@@ -907,8 +908,8 @@ diskfs_inode_load_resume(
          * does/did its own record loads).  Just re-drive the acquire. */
         pthread_mutex_unlock(&shard->lock);
         diskfs_block_unpin(self, blk, DISKFS_BLOCK_CLEAN);
-        diskfs_inode_acquire(self, lc->txn, lc->inum, lc->gen, lc->mode,
-                             lc->cb, lc->private_data);
+        diskfs_inode_acquire(self, lc->txn, lc->fs, lc->inum, lc->gen,
+                             lc->mode, lc->cb, lc->private_data);
         free(lc);
         return;
     }
@@ -929,6 +930,7 @@ void
 diskfs_inode_load(
     struct diskfs_thread       *thread,
     struct diskfs_txn          *txn,
+    struct diskfs_fs           *fs,
     uint64_t                    inum,
     uint32_t                    gen,
     enum diskfs_inode_lock_mode mode,
@@ -939,6 +941,7 @@ diskfs_inode_load(
 
     lc->thread       = thread;
     lc->txn          = txn;
+    lc->fs           = fs;
     lc->inum         = inum;
     lc->gen          = gen;
     lc->mode         = mode;
@@ -958,7 +961,7 @@ diskfs_inode_alloc_resume(
 
     (void) thread;
     free(arg);
-    diskfs_inode_alloc_async(c.thread, c.txn, c.cb, c.private_data);
+    diskfs_inode_alloc_async(c.thread, c.txn, c.fs, c.cb, c.private_data);
 } /* diskfs_inode_alloc_resume */
 
 
@@ -1421,6 +1424,7 @@ diskfs_read_inode_cb(
                                             diskfs_read_inode_cb, request);
             } else {
                 diskfs_inode_get_fh_async(thread, diskfs_private->txn,
+                                          diskfs_private->fs,
                                           request->fh, request->fh_len,
                                           diskfs_read_inode_cb, request);
             }
@@ -1499,7 +1503,7 @@ diskfs_read(
                                     DISKFS_INODE_MODE_FOR_TXN(p->txn),
                                     diskfs_read_inode_cb, request);
     } else {
-        diskfs_inode_get_fh_async(thread, p->txn,
+        diskfs_inode_get_fh_async(thread, p->txn, p->fs,
                                   request->fh, request->fh_len,
                                   diskfs_read_inode_cb, request);
     }
@@ -3011,7 +3015,7 @@ diskfs_write(
                                     DISKFS_INODE_MODE_FOR_TXN(p->txn),
                                     diskfs_write_inode_cb, request);
     } else {
-        diskfs_inode_get_fh_async(thread, p->txn,
+        diskfs_inode_get_fh_async(thread, p->txn, p->fs,
                                   request->fh, request->fh_len,
                                   diskfs_write_inode_cb, request);
     }
@@ -3806,7 +3810,7 @@ diskfs_allocate(
     p->thread = thread;
     p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
 
-    diskfs_inode_get_fh_async(thread, p->txn,
+    diskfs_inode_get_fh_async(thread, p->txn, p->fs,
                               request->fh, request->fh_len,
                               diskfs_allocate_inode_cb, request);
 } /* diskfs_allocate */
@@ -3987,7 +3991,7 @@ diskfs_seek(
     p->thread = thread;
     p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ);
 
-    diskfs_inode_get_fh_async(thread, p->txn,
+    diskfs_inode_get_fh_async(thread, p->txn, p->fs,
                               request->fh, request->fh_len,
                               diskfs_seek_inode_cb, request);
 } /* diskfs_seek */

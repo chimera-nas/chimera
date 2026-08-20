@@ -27,6 +27,7 @@ static void
 diskfs_drain_complete(
     struct diskfs_drain *d);
 
+
 static void
 diskfs_drain_acquired_cb(
     struct diskfs_inode *inode,
@@ -218,11 +219,14 @@ diskfs_drain_acquired_cb(
 } /* diskfs_drain_acquired_cb */
 
 
+
 static void
 diskfs_drain_begin(struct diskfs_drain *d)
 {
     d->txn = diskfs_txn_begin(d->thread, DISKFS_TXN_WRITE);
-    diskfs_inode_acquire(d->thread, d->txn, d->inum, d->gen,
+    /* Orphaned inodes are pool-level from here on (their filesystem may
+     * already be removed); no fs stamp. */
+    diskfs_inode_acquire(d->thread, d->txn, NULL, d->inum, d->gen,
                          DISKFS_INODE_LOCK_WRITE, diskfs_drain_acquired_cb, d);
 } /* diskfs_drain_begin */
 
@@ -339,6 +343,71 @@ diskfs_drain_removed_cb(
 } /* diskfs_drain_removed_cb */
 
 
+/* Remove the record for the dirent child just handled; the removal's
+ * completion continues the batch (or commits, if the caller forced the batch
+ * closed to release the extra inode locks). */
+static void
+diskfs_drain_child_remove(struct diskfs_drain *d)
+{
+    struct diskfs_bt_op *rop = diskfs_bt_op_alloc(d->thread);
+
+    if (diskfs_bt_remove_async(rop, d->thread, d->txn, d->inode, &d->found_key,
+                               diskfs_drain_removed_cb, d)) {
+        diskfs_drain_removed_cb(rop, rop->result, d);
+    }
+} /* diskfs_drain_child_remove */
+
+
+static void
+diskfs_drain_child_orphaned(void *priv)
+{
+    struct diskfs_drain *d = priv;
+
+    diskfs_drain_child_remove(d);
+} /* diskfs_drain_child_orphaned */
+
+
+/* RMFS tree burn-down: a drained directory still holds dirents.  Orphan the
+ * child (nlink 0 + durable orphan record + reclaim submit) so its own drain
+ * burns it down recursively, then drop the dirent.  A hard-linked file
+ * reached through a second dirent is already nlink 0 under its write lock --
+ * skip re-recording it (a duplicate orphan b+tree insert would abort) and
+ * just drop the dirent. */
+static void
+diskfs_drain_child_cb(
+    struct diskfs_inode *child,
+    int                  status,
+    void                *priv)
+{
+    struct diskfs_drain *d = priv;
+
+    if (status != CHIMERA_VFS_OK) {
+        /* Child already fully reclaimed (stale dirent): just drop the
+         * dirent.  No extra locks were taken. */
+        diskfs_drain_child_remove(d);
+        return;
+    }
+
+    if (child->nlink == 0) {
+        /* Already orphaned via another hard link (or a resumed drain);
+         * release it untouched and drop the dirent. */
+        diskfs_txn_unlock_inode(d->txn, child);
+        diskfs_drain_child_remove(d);
+        return;
+    }
+
+    child->nlink = 0;
+
+    /* The txn now holds the drained dir + the child + the child's orphan
+     * shard; force the batch closed so the removal's completion commits and
+     * releases them (bounding inode locks per txn). */
+    d->batch = DISKFS_DRAIN_BATCH;
+
+    diskfs_inode_orphaned(d->thread, d->txn, child,
+                          diskfs_drain_child_orphaned, d);
+} /* diskfs_drain_child_cb */
+
+
 static void
 diskfs_drain_looked_cb(
     struct diskfs_bt_op *op,
@@ -356,6 +425,20 @@ diskfs_drain_looked_cb(
         diskfs_bt_op_free(d->thread, op);
         diskfs_orphan_op_start(d->thread, d->txn, d->inum, d->gen, 1 /* remove */,
                                diskfs_drain_after_unrecord, d);
+        return;
+    }
+
+    /* A dirent in a drained directory (only RMFS orphans whole trees; rmdir
+     * requires empty): recursively orphan the child, then drop the dirent. */
+    if (d->found_key.type == DISKFS_REC_DIRENT) {
+        struct diskfs_dirent_rec *rec = (struct diskfs_dirent_rec *) d->recbuf;
+
+        d->child_inum = rec->inum;
+        d->child_gen  = rec->gen;
+        diskfs_bt_op_free(d->thread, op);
+        diskfs_inode_acquire(d->thread, d->txn, NULL, d->child_inum,
+                             d->child_gen, DISKFS_INODE_LOCK_WRITE,
+                             diskfs_drain_child_cb, d);
         return;
     }
 
@@ -729,7 +812,6 @@ diskfs_inode_orphaned_recorded_cb(void *priv)
     pthread_mutex_lock(&shard->lock);
     reclaim = (c.inode->refcnt == 0);
     pthread_mutex_unlock(&shard->lock);
-
     if (reclaim) {
         diskfs_reclaim_submit(c.thread->shared, c.inode->inum, c.inode->gen);
     }
@@ -881,13 +963,25 @@ diskfs_orphan_scan(struct diskfs_thread *thread)
      * tree is not dirty at mount, so reading the on-disk image is correct. */
     io = diskfs_mount_io_open(shared);
 
-    /* Remount fault-in: bootstrap (mkfs) seeds the reserved root inode into
-     * cache, but a remount skips bootstrap, so the root lives only on disk.
-     * Seed it synchronously here -- the MOUNT op's own walk would otherwise
-     * fault it in with an async read that the mount-time context never pumps
-     * to completion, hanging the mount.  A freshly bootstrapped FS already has
-     * it resident, so this is a cheap cache hit. */
-    diskfs_inode_load_sync(thread, io, shared->root_inum, shared->root_gen, 0);
+    /* Remount fault-in: a remount's filesystem roots live only on disk.
+     * Seed each one synchronously here -- the MOUNT op's own walk would
+     * otherwise fault it in with an async read that the mount-time context
+     * never pumps to completion, hanging the mount.  Stamps each root with
+     * its filesystem.  Holding shared->lock across the loads keeps the list
+     * stable against a concurrent mkfs/rmfs (both rare at first-mount). */
+    pthread_mutex_lock(&shared->lock);
+    {
+        struct diskfs_fs *fsit;
+
+        DL_FOREACH(shared->fs_list, fsit)
+        {
+            if (fsit->root_fhlen != 0) {
+                diskfs_inode_load_sync(thread, io, fsit,
+                                       fsit->root_inum, fsit->root_gen, 0);
+            }
+        }
+    }
+    pthread_mutex_unlock(&shared->lock);
 
     /* Load each orphan-list shard inode (nlink 1) and read its tree from its
      * home block, collecting every recorded orphan inum + gen. */
@@ -896,7 +990,7 @@ diskfs_orphan_scan(struct diskfs_thread *thread)
     for (i = 0; i < DISKFS_ORPHAN_SHARDS; i++) {
         uint64_t oinum = DISKFS_ORPHAN_INUM_BASE + i;
 
-        odir = diskfs_inode_load_sync(thread, io, oinum, DISKFS_ORPHAN_GEN, 0);
+        odir = diskfs_inode_load_sync(thread, io, NULL, oinum, DISKFS_ORPHAN_GEN, 0);
         if (!odir) {
             continue;     /* not yet created (no orphans possible) */
         }
@@ -911,8 +1005,9 @@ diskfs_orphan_scan(struct diskfs_thread *thread)
 
     for (i = 0; i < n; i++) {
         /* Reload the orphaned (nlink==0) inode into cache, then enqueue it;
-         * the drainer resumes its (possibly partially-drained) tree. */
-        diskfs_inode_load_sync(thread, io, arr[i].inum, arr[i].gen, 1 /* allow_orphan */);
+         * the drainer resumes its (possibly partially-drained) tree.  Its
+         * filesystem may no longer exist: pool-level, no fs stamp. */
+        diskfs_inode_load_sync(thread, io, NULL, arr[i].inum, arr[i].gen, 1 /* allow_orphan */);
         diskfs_reclaim_submit(thread->shared, arr[i].inum, arr[i].gen);
     }
     free(arr);

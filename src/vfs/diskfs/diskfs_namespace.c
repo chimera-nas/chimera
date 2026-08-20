@@ -610,7 +610,7 @@ diskfs_lookup_at_dirent_cb(
         return;
     }
 
-    diskfs_inode_get_inum_async(p->thread, p->txn, rec->inum, rec->gen,
+    diskfs_inode_get_inum_async(p->thread, p->txn, p->fs, rec->inum, rec->gen,
                                 diskfs_lookup_at_child_cb, request);
 } /* diskfs_lookup_at_dirent_cb */
 
@@ -653,7 +653,7 @@ diskfs_lookup_at_parent_cb(
     p->inode_stash[0] = parent;
 
     if (namelen == 2 && name[0] == '.' && name[1] == '.') {
-        diskfs_inode_get_inum_async(thread, p->txn,
+        diskfs_inode_get_inum_async(thread, p->txn, p->fs,
                                     parent->parent_inum,
                                     parent->parent_gen,
                                     diskfs_lookup_at_child_cb, request);
@@ -695,7 +695,7 @@ diskfs_lookup_at(
     request->wait_arg1     = gen;
     request->wait_arg2     = 0;
 
-    diskfs_inode_get_fh_async(thread, p->txn,
+    diskfs_inode_get_fh_async(thread, p->txn, p->fs,
                               request->fh, request->fh_len,
                               diskfs_lookup_at_parent_cb, request);
 } /* diskfs_lookup_at */
@@ -856,12 +856,12 @@ diskfs_mkdir_at_check_cb(
     if (result >= 0) {
         struct diskfs_dirent_rec *rec = (struct diskfs_dirent_rec *) p->rec_scratch;
 
-        diskfs_inode_get_inum_async(thread, p->txn, rec->inum, rec->gen,
+        diskfs_inode_get_inum_async(thread, p->txn, p->fs, rec->inum, rec->gen,
                                     diskfs_mkdir_at_existing_cb, request);
         return;
     }
 
-    diskfs_inode_alloc_async(thread, p->txn, diskfs_mkdir_at_alloc_cb, request);
+    diskfs_inode_alloc_async(thread, p->txn, p->fs, diskfs_mkdir_at_alloc_cb, request);
 } /* diskfs_mkdir_at_check_cb */
 
 
@@ -915,7 +915,7 @@ diskfs_mkdir_at(
     p->thread = thread;
     p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
 
-    diskfs_inode_get_fh_async(thread, p->txn,
+    diskfs_inode_get_fh_async(thread, p->txn, p->fs,
                               request->fh, request->fh_len,
                               diskfs_mkdir_at_parent_cb, request);
 } /* diskfs_mkdir_at */
@@ -1042,12 +1042,12 @@ diskfs_mknod_at_check_cb(
     if (result >= 0) {
         struct diskfs_dirent_rec *rec = (struct diskfs_dirent_rec *) p->rec_scratch;
 
-        diskfs_inode_get_inum_async(thread, p->txn, rec->inum, rec->gen,
+        diskfs_inode_get_inum_async(thread, p->txn, p->fs, rec->inum, rec->gen,
                                     diskfs_mknod_at_existing_cb, request);
         return;
     }
 
-    diskfs_inode_alloc_async(thread, p->txn, diskfs_mknod_at_alloc_cb, request);
+    diskfs_inode_alloc_async(thread, p->txn, p->fs, diskfs_mknod_at_alloc_cb, request);
 } /* diskfs_mknod_at_check_cb */
 
 
@@ -1101,7 +1101,7 @@ diskfs_mknod_at(
     p->thread = thread;
     p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
 
-    diskfs_inode_get_fh_async(thread, p->txn,
+    diskfs_inode_get_fh_async(thread, p->txn, p->fs,
                               request->fh, request->fh_len,
                               diskfs_mknod_at_parent_cb, request);
 } /* diskfs_mknod_at */
@@ -1301,7 +1301,7 @@ diskfs_remove_at_lookup_cb(
         return;
     }
 
-    diskfs_inode_get_inum_async(thread, p->txn, rec->inum, rec->gen,
+    diskfs_inode_get_inum_async(thread, p->txn, p->fs, rec->inum, rec->gen,
                                 diskfs_remove_at_child_cb, request);
 } /* diskfs_remove_at_lookup_cb */
 
@@ -1356,7 +1356,7 @@ diskfs_remove_at(
     p->thread = thread;
     p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
 
-    diskfs_inode_get_fh_async(thread, p->txn,
+    diskfs_inode_get_fh_async(thread, p->txn, p->fs,
                               request->fh, request->fh_len,
                               diskfs_remove_at_parent_cb, request);
 } /* diskfs_remove_at */
@@ -1462,7 +1462,7 @@ diskfs_readdir_next_cb(
 
     diskfs_bt_op_free(thread, op);
 
-    diskfs_inode_get_inum_async(thread, p->txn, p->rd_inum, p->rd_gen,
+    diskfs_inode_get_inum_async(thread, p->txn, p->fs, p->rd_inum, p->rd_gen,
                                 diskfs_readdir_iter_inode_cb, request);
 } /* diskfs_readdir_next_cb */
 
@@ -1626,7 +1626,7 @@ diskfs_readdir_inode_cb(
             diskfs_readdir_emit_dotdot(request, &attr);
             return;
         }
-        diskfs_inode_get_inum_async(thread, p->txn,
+        diskfs_inode_get_inum_async(thread, p->txn, p->fs,
                                     inode->parent_inum,
                                     inode->parent_gen,
                                     diskfs_readdir_dotdot_cb, request);
@@ -1660,7 +1660,7 @@ diskfs_readdir(
     p->rd_advance = 0;
     p->rd_done    = 0;
 
-    diskfs_inode_get_fh_async(thread, p->txn,
+    diskfs_inode_get_fh_async(thread, p->txn, p->fs,
                               request->fh, request->fh_len,
                               diskfs_readdir_inode_cb, request);
 } /* diskfs_readdir */
@@ -1721,7 +1721,7 @@ diskfs_open_fh(
     p->thread = thread;
     p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ);
 
-    diskfs_inode_get_fh_async(thread, p->txn,
+    diskfs_inode_get_fh_async(thread, p->txn, p->fs,
                               request->fh, request->fh_len,
                               diskfs_open_fh_inode_cb, request);
 } /* diskfs_open_fh */
@@ -1969,7 +1969,7 @@ diskfs_open_at_check_cb(
         }
 
         request->wait_reason = "openat:inode_alloc";   /* diag: park-point localization */
-        diskfs_inode_alloc_async(thread, p->txn, diskfs_open_at_alloc_cb, request);
+        diskfs_inode_alloc_async(thread, p->txn, p->fs, diskfs_open_at_alloc_cb, request);
         return;
     }
 
@@ -1981,7 +1981,7 @@ diskfs_open_at_check_cb(
     {
         struct diskfs_dirent_rec *rec = (struct diskfs_dirent_rec *) p->rec_scratch;
 
-        diskfs_inode_get_inum_async(thread, p->txn, rec->inum, rec->gen,
+        diskfs_inode_get_inum_async(thread, p->txn, p->fs, rec->inum, rec->gen,
                                     diskfs_open_at_existing_cb, request);
     }
 } /* diskfs_open_at_check_cb */
@@ -2037,7 +2037,7 @@ diskfs_open_at(
     p->thread = thread;
     p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
 
-    diskfs_inode_get_fh_async(thread, p->txn,
+    diskfs_inode_get_fh_async(thread, p->txn, p->fs,
                               request->fh, request->fh_len,
                               diskfs_open_at_parent_cb, request);
 } /* diskfs_open_at */
@@ -2121,7 +2121,7 @@ diskfs_create_unlinked(
     p->thread = thread;
     p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
 
-    diskfs_inode_alloc_async(thread, p->txn,
+    diskfs_inode_alloc_async(thread, p->txn, p->fs,
                              diskfs_create_unlinked_alloc_cb, request);
 } /* diskfs_create_unlinked */
 
@@ -2333,7 +2333,7 @@ diskfs_symlink_at_check_cb(
     }
 
     diskfs_map_attrs(thread, &request->symlink_at.r_dir_pre_attr, p->inode_stash[0]);
-    diskfs_inode_alloc_async(thread, p->txn, diskfs_symlink_at_alloc_cb, request);
+    diskfs_inode_alloc_async(thread, p->txn, p->fs, diskfs_symlink_at_alloc_cb, request);
 } /* diskfs_symlink_at_check_cb */
 
 
@@ -2394,7 +2394,7 @@ diskfs_symlink_at(
 
     p->txn = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
 
-    diskfs_inode_get_fh_async(thread, p->txn,
+    diskfs_inode_get_fh_async(thread, p->txn, p->fs,
                               request->fh, request->fh_len,
                               diskfs_symlink_at_parent_cb, request);
 } /* diskfs_symlink_at */
@@ -2468,7 +2468,7 @@ diskfs_readlink(
     p->thread = thread;
     p->txn    = diskfs_txn_begin(thread, DISKFS_TXN_READ);
 
-    diskfs_inode_get_fh_async(thread, p->txn,
+    diskfs_inode_get_fh_async(thread, p->txn, p->fs,
                               request->fh, request->fh_len,
                               diskfs_readlink_inode_cb, request);
 } /* diskfs_readlink */
@@ -2766,7 +2766,7 @@ diskfs_rename_at_dest_cb(
         return;
     }
 
-    diskfs_inode_get_inum_async(thread, p->txn, existing_inum, existing_gen,
+    diskfs_inode_get_inum_async(thread, p->txn, p->fs, existing_inum, existing_gen,
                                 diskfs_rename_at_existing_cb, request);
 } /* diskfs_rename_at_dest_cb */
 
@@ -2864,7 +2864,7 @@ diskfs_rename_at_check_descendant_step(struct chimera_vfs_request *request)
         return;
     }
 
-    diskfs_inode_acquire(thread, p->txn, p->anc_inum, p->anc_gen,
+    diskfs_inode_acquire(thread, p->txn, p->fs, p->anc_inum, p->anc_gen,
                          DISKFS_INODE_LOCK_READ,
                          diskfs_rename_at_descendant_cb, request);
 } /* diskfs_rename_at_check_descendant_step */
@@ -2938,7 +2938,7 @@ diskfs_rename_at_source_cb(
     p->rd_inum = rec->inum;
     p->rd_gen  = rec->gen;
 
-    diskfs_inode_get_inum_async(thread, p->txn, rec->inum, rec->gen,
+    diskfs_inode_get_inum_async(thread, p->txn, p->fs, rec->inum, rec->gen,
                                 diskfs_rename_at_child_cb, request);
 } /* diskfs_rename_at_source_cb */
 
@@ -3033,13 +3033,13 @@ diskfs_rename_at_first_cb(
 
     if (cmp < 0) {
         p->inode_stash[0] = inode;
-        diskfs_inode_get_fh_async(thread, p->txn,
+        diskfs_inode_get_fh_async(thread, p->txn, p->fs,
                                   request->rename_at.new_fh,
                                   request->rename_at.new_fhlen,
                                   diskfs_rename_at_second_cb, request);
     } else {
         p->inode_stash[1] = inode;
-        diskfs_inode_get_fh_async(thread, p->txn,
+        diskfs_inode_get_fh_async(thread, p->txn, p->fs,
                                   request->fh, request->fh_len,
                                   diskfs_rename_at_second_cb, request);
     }
@@ -3071,11 +3071,11 @@ diskfs_rename_at(
                             request->rename_at.new_fhlen);
 
     if (cmp <= 0) {
-        diskfs_inode_get_fh_async(thread, p->txn,
+        diskfs_inode_get_fh_async(thread, p->txn, p->fs,
                                   request->fh, request->fh_len,
                                   diskfs_rename_at_first_cb, request);
     } else {
-        diskfs_inode_get_fh_async(thread, p->txn,
+        diskfs_inode_get_fh_async(thread, p->txn, p->fs,
                                   request->rename_at.new_fh,
                                   request->rename_at.new_fhlen,
                                   diskfs_rename_at_first_cb, request);
@@ -3206,7 +3206,7 @@ diskfs_link_at_removed_cb(
 
     (void) result;
     diskfs_bt_op_free(p->thread, op);
-    diskfs_inode_get_inum_async(p->thread, p->txn, p->rd_inum, p->rd_gen,
+    diskfs_inode_get_inum_async(p->thread, p->txn, p->fs, p->rd_inum, p->rd_gen,
                                 diskfs_link_at_existing_cb, request);
 } /* diskfs_link_at_removed_cb */
 
@@ -3311,7 +3311,7 @@ diskfs_link_at_parent_cb(
     }
 
     p->inode_stash[0] = parent;
-    diskfs_inode_get_fh_async(thread, p->txn,
+    diskfs_inode_get_fh_async(thread, p->txn, p->fs,
                               request->fh, request->fh_len,
                               diskfs_link_at_inode_cb, request);
 } /* diskfs_link_at_parent_cb */
@@ -3333,7 +3333,7 @@ diskfs_link_at(
     p->txn        = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
     p->op_scratch = 0;     /* anonymous-source unorphan latch (link_at_finish) */
 
-    diskfs_inode_get_fh_async(thread, p->txn,
+    diskfs_inode_get_fh_async(thread, p->txn, p->fs,
                               request->link_at.dir_fh,
                               request->link_at.dir_fhlen,
                               diskfs_link_at_parent_cb, request);
