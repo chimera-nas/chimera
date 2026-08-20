@@ -13,6 +13,7 @@
 
 #define _GNU_SOURCE
 
+#include "vfs/sdk/vfs_fh.h"
 #include <stdint.h>
 
 #include <stdlib.h>
@@ -46,7 +47,7 @@
 
 #include "common/platform.h"
 
-#include "common/varint.h"
+#include "vfs/sdk/vfs_varint.h"
 
 #include "common/rbtree.h"
 
@@ -59,17 +60,16 @@
 #include "prometheus-c.h"
 
 
-#include "vfs/vfs.h"
+#include "vfs/sdk/chimera_vfs_sdk.h"
 
-#include "vfs/vfs_internal.h"
 
-#include "vfs/vfs_acl.h"
+#include "vfs/sdk/vfs_acl.h"
 
-#include "vfs/vfs_access.h"
+#include "vfs/sdk/vfs_access.h"
 
-#include "vfs/vfs_acl_serialize.h"
+#include "vfs/sdk/vfs_acl_serialize.h"
 
-#include "vfs/vfs_xattr_name.h"
+#include "vfs/sdk/vfs_xattr_name.h"
 
 #include "diskfs.h"
 
@@ -2484,7 +2484,8 @@ diskfs_orphan_op_start(
     uint64_t              inum,
     uint32_t              gen,
     int                   remove,
-    void (               *done )(void *priv),
+    void (               *done )(
+        void *priv),
     void                 *priv);
 
 void
@@ -2511,16 +2512,19 @@ diskfs_gen_extend(
 int
 diskfs_gen_alloc(
     struct diskfs_thread *thread,
-    uint32_t *r_gen,
-    void ( *resume )(struct diskfs_thread *, void *),
-    void *arg);
+    uint32_t             *r_gen,
+    void (               *resume )(
+        struct diskfs_thread *,
+        void *),
+    void                 *arg);
 
 void
 diskfs_inode_orphaned(
     struct diskfs_thread *thread,
     struct diskfs_txn    *txn,
     struct diskfs_inode  *inode,
-    void (               *done )(void *priv),
+    void (               *done )(
+        void *priv),
     void                 *priv);
 
 void
@@ -3400,14 +3404,16 @@ diskfs_kv_entry_alloc(
 static inline int
 diskfs_inode_alloc_space(
     struct diskfs_thread *thread,
-    struct diskfs_txn *txn,
-    struct diskfs_inode *inode,
-    int64_t desired_size,
-    uint64_t floor,
-    uint64_t *r_device_id,
-    uint64_t *r_device_offset,
-    void ( *resume )(struct diskfs_thread *, void *),
-    void *resume_arg);
+    struct diskfs_txn    *txn,
+    struct diskfs_inode  *inode,
+    int64_t               desired_size,
+    uint64_t              floor,
+    uint64_t             *r_device_id,
+    uint64_t             *r_device_offset,
+    void (               *resume )(
+        struct diskfs_thread *,
+        void *),
+    void                 *resume_arg);
 
 static inline void
 diskfs_thread_free_space(
@@ -4575,14 +4581,16 @@ diskfs_kv_entry_alloc(
 static inline int
 diskfs_inode_alloc_space(
     struct diskfs_thread *thread,
-    struct diskfs_txn *txn,
-    struct diskfs_inode *inode,
-    int64_t desired_size,
-    uint64_t floor,
-    uint64_t *r_device_id,
-    uint64_t *r_device_offset,
-    void ( *resume )(struct diskfs_thread *, void *),
-    void *resume_arg)
+    struct diskfs_txn    *txn,
+    struct diskfs_inode  *inode,
+    int64_t               desired_size,
+    uint64_t              floor,
+    uint64_t             *r_device_id,
+    uint64_t             *r_device_offset,
+    void (               *resume )(
+        struct diskfs_thread *,
+        void *),
+    void                 *resume_arg)
 {
     uint32_t          dev_id;
     int               rc;

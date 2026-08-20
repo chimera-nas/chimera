@@ -14,14 +14,14 @@
 #include <jansson.h>
 #include <utlist.h>
 
-#include "common/varint.h"
+#include "vfs/sdk/vfs_varint.h"
 #include "common/rbtree.h"
 
-#include "vfs/vfs.h"
-#include "vfs/vfs_internal.h"
-#include "vfs/vfs_acl.h"
-#include "vfs/vfs_access.h"
-#include "vfs/vfs_xattr_name.h"
+#include "vfs/sdk/chimera_vfs_sdk.h"
+#include "vfs/sdk/vfs_fh.h"
+#include "vfs/sdk/vfs_acl.h"
+#include "vfs/sdk/vfs_access.h"
+#include "vfs/sdk/vfs_xattr_name.h"
 #include "memfs.h"
 #include "common/logging.h"
 #include "common/misc.h"
@@ -5976,6 +5976,7 @@ memfs_dispatch(
 } /* memfs_dispatch */
 
 SYMBOL_EXPORT struct chimera_vfs_module vfs_memfs = {
+    .sdk_version  = CHIMERA_VFS_SDK_VERSION,
     .name         = "memfs",
     .fh_magic     = CHIMERA_VFS_FH_MAGIC_MEMFS,
     .capabilities = CHIMERA_VFS_CAP_CREATE_UNLINKED | CHIMERA_VFS_CAP_FS |

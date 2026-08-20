@@ -20,8 +20,8 @@
 #include "vfs_procs.h"
 #include "vfs_internal.h"
 #include "vfs_release.h"
-#include "vfs_access.h"
-#include "vfs_acl.h"
+#include "sdk/vfs_access.h"
+#include "sdk/vfs_acl.h"
 #include "common/macros.h"
 
 #define CHIMERA_VFS_GATE_ATTR_MASK (CHIMERA_VFS_ATTR_MASK_STAT | CHIMERA_VFS_ATTR_ACL)

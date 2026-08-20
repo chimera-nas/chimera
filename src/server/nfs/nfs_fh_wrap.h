@@ -7,7 +7,7 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "vfs/vfs_attrs.h"
+#include "vfs/sdk/vfs_attrs.h"
 #include "nfs_common/nfs_fh_limits.h"
 #include "nfs_siphash.h"
 

@@ -4,7 +4,7 @@
 
 #pragma once
 
-#include "vfs/vfs_error.h"
+#include "vfs/sdk/vfs_error.h"
 
 static inline nfsstat3
 chimera_vfs_error_to_nfsstat3(enum chimera_vfs_error err)

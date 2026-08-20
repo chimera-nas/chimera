@@ -10,11 +10,11 @@
 #include <assert.h>
 
 #include "vfs/vfs.h"
-#include "vfs/vfs_acl.h"
-#include "vfs/vfs_acl_serialize.h"
-#include "vfs/vfs_access.h"
-#include "vfs/vfs_attrs.h"
-#include "vfs/vfs_cred.h"
+#include "vfs/sdk/vfs_acl.h"
+#include "vfs/sdk/vfs_acl_serialize.h"
+#include "vfs/sdk/vfs_access.h"
+#include "vfs/sdk/vfs_attrs.h"
+#include "vfs/sdk/vfs_cred.h"
 
 #define TEST_PASS(name) fprintf(stderr, "  PASS: %s\n", name)
 

@@ -30,11 +30,11 @@
 #include "smb_notify.h"
 #include "vfs/vfs.h"
 #include "common/tcp_flavor.h"
-#include "vfs/vfs_acl.h"
+#include "vfs/sdk/vfs_acl.h"
 #include "vfs/vfs_idmap.h"
 #include "vfs/vfs_release.h"
 #include "vfs/vfs_notify.h"
-#include "vfs/vfs_xattr_name.h"
+#include "vfs/sdk/vfs_xattr_name.h"
 
 #define SMB2_MAX_DIALECTS           16
 #define SMB2_MAX_NEGOTIATE_CONTEXTS 16

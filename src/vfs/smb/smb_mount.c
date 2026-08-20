@@ -10,7 +10,7 @@
 #include "smb_internal.h"
 #include "smb.h"
 #include "common/tcp_flavor.h"
-#include "vfs/vfs_attrs.h"
+#include "vfs/sdk/vfs_attrs.h"
 #include "evpl/evpl.h"
 
 /* Fold one raw SMB2 message (header+body, no NetBIOS framing, no trailing pad)
@@ -636,7 +636,7 @@ chimera_smb_client_mount(
     int                               host_len;
     uint16_t                          port;
 
-    shared->tcp_flavor   = request->thread->vfs->tcp_flavor;
+    shared->tcp_flavor   = chimera_vfs_request_tcp_flavor(request);
     shared->tcp_protocol = chimera_tcp_flavor_to_protocol(shared->tcp_flavor);
 
     colon = memchr(request->mount.path, ':', request->mount.pathlen);

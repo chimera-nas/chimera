@@ -6,7 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "vfs/vfs_xattr_name.h"
+#include "vfs/sdk/vfs_xattr_name.h"
 
 /*
  * Use an explicit check rather than assert(): the static-analysis build compiles

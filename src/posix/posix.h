@@ -14,7 +14,7 @@
 #include <unistd.h>
 
 #include "common/platform.h"
-#include "vfs/vfs_cred.h"
+#include "vfs/sdk/vfs_cred.h"
 
 struct chimera_posix_client;
 struct chimera_client_config;
@@ -312,10 +312,13 @@ chimera_posix_telldir(
 
 int
 chimera_posix_scandir(
-    const char *dirp,
+    const char      *dirp,
     struct dirent ***namelist,
-    int ( *filter )(const struct dirent *),
-    int ( *compar )(const struct dirent **, const struct dirent **));
+    int (           *filter )(
+        const struct dirent *),
+    int (           *compar )(
+        const struct dirent **,
+        const struct dirent **));
 
 // FILE* operations
 // CHIMERA_FILE is defined in posix_internal.h as a pointer to fd_entry

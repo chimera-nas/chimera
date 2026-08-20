@@ -4,7 +4,7 @@
 
 #include <stdint.h>
 #include <string.h>
-#include "vfs_acl_serialize.h"
+#include "sdk/vfs_acl_serialize.h"
 #include "common/macros.h"
 
 static inline void

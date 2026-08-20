@@ -10,8 +10,8 @@
 #include <time.h>
 
 #include "vfs/vfs.h"
-#include "vfs/vfs_fh.h"
-#include "vfs/vfs_lease_types.h"
+#include "vfs/sdk/vfs_fh.h"
+#include "vfs/sdk/vfs_lease_types.h"
 
 struct chimera_vfs_request;
 
@@ -595,7 +595,8 @@ void
 chimera_vfs_io_lease_acquire(
     struct chimera_vfs_request           *request,
     const struct chimera_vfs_lease_owner *owner,
-    void (                               *next )(struct chimera_vfs_request *request));
+    void (                               *next )(
+        struct chimera_vfs_request *request));
 
 /* Release the in-flight pin taken by chimera_vfs_io_lease_acquire().  Safe
  * to call when no implicit lease was taken (fast path).  Must be called
@@ -630,7 +631,8 @@ chimera_vfs_io_recall(
     uint8_t                     fh_len,
     uint64_t                    fh_hash,
     int                         flush_only,
-    void (                     *next )(struct chimera_vfs_request *request));
+    void (                     *next )(
+        struct chimera_vfs_request *request));
 
 /* Single-step namespace recall: break each OTHER caching holder on (fh, fh_hash)
  * exactly once down to `retain` (sparing request->io_handle) and PARK until the
@@ -643,7 +645,8 @@ chimera_vfs_io_recall_single(
     uint8_t                     fh_len,
     uint64_t                    fh_hash,
     uint8_t                     retain,
-    void (                     *next )(struct chimera_vfs_request *request));
+    void (                     *next )(
+        struct chimera_vfs_request *request));
 
 /* Drop every implicit lease that has been idle (no in-flight I/O) for at
  * least `idle_ms` milliseconds.  Driven by a periodic reaper. */

@@ -7,7 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <jansson.h>
-#include "vfs/vfs_cred.h"
+#include "vfs/sdk/vfs_cred.h"
 
 /* Note: include "server/server.h" before including this header */
 

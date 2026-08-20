@@ -108,7 +108,7 @@ target_include_directories(test_nfs3_rofs PRIVATE
 add_test(NAME chimera/server/nfs/nfs3_rofs
     COMMAND ${CMAKE_CURRENT_BINARY_DIR}/test_nfs3_rofs)
 
-# Unit test for the shared xattr name translation helpers (vfs/vfs_xattr_name.h).
+# Unit test for the shared xattr name translation helpers (vfs/sdk/vfs_xattr_name.h).
 add_executable(test_xattr_name test_xattr_name.c)
 target_include_directories(test_xattr_name PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/..

@@ -13,7 +13,7 @@
 #include <string.h>
 
 #include "vfs/vfs.h"
-#include "vfs/vfs_acl.h"
+#include "vfs/sdk/vfs_acl.h"
 #include "vfs/vfs_idmap.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_pnfs.h"
