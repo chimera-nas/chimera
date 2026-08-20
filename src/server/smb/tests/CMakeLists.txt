@@ -501,6 +501,51 @@ add_executable(smbtorture_test smbtorture_test.c)
 target_link_libraries(smbtorture_test chimera_server chimera_metrics)
 target_include_directories(smbtorture_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
+# Subtests needing named-stream (ADS) support.  Single source of truth, read by
+# both the driver (at run time, to set the config knob) and this file (at
+# configure time, to scope that knob under ctest -- see
+# add_smbtorture_backend_tests).  Editing the list re-runs cmake.
+#
+# The driver opens this by absolute path at run time and treats a failure to
+# read it as EXIT_FAILURE (not the suites' SKIP_RETURN_CODE 77), so the copy it
+# points at must be the one guaranteed to exist wherever ctest runs: the build
+# tree, not the source tree.  configure_file COPYONLY also registers the source
+# as a configure dependency, so editing the list still re-runs cmake.
+set(SMBTORTURE_ADS_LIST_SRC ${CMAKE_CURRENT_SOURCE_DIR}/smbtorture_ads_subtests.txt)
+set(SMBTORTURE_ADS_LIST ${CMAKE_CURRENT_BINARY_DIR}/smbtorture_ads_subtests.txt)
+configure_file(${SMBTORTURE_ADS_LIST_SRC} ${SMBTORTURE_ADS_LIST} COPYONLY)
+target_compile_definitions(smbtorture_test
+    PRIVATE SMBTORTURE_ADS_LIST="${SMBTORTURE_ADS_LIST}")
+
+file(STRINGS ${SMBTORTURE_ADS_LIST_SRC} _ads_lines)
+set(SMBTORTURE_ADS_PATTERNS "")
+foreach(_line ${_ads_lines})
+    string(REGEX REPLACE "#.*$" "" _line "${_line}")
+    string(STRIP "${_line}" _line)
+    if(NOT _line STREQUAL "")
+        list(APPEND SMBTORTURE_ADS_PATTERNS "${_line}")
+    endif()
+endforeach()
+
+# Mirrors ads_entry_matches() in smbtorture_test.c: exact, or parent-suite
+# prefix ("smb2.streams" matches "smb2.streams.io", not
+# "smb2.stream-inherit-perms").  Literal compares only -- entry text contains
+# '.' and '-', so a regex match would be wrong.
+function(_smbtorture_needs_ads subtest out)
+    foreach(_pat ${SMBTORTURE_ADS_PATTERNS})
+        if("${subtest}" STREQUAL "${_pat}")
+            set(${out} TRUE PARENT_SCOPE)
+            return()
+        endif()
+        string(FIND "${subtest}" "${_pat}." _idx)
+        if(_idx EQUAL 0)
+            set(${out} TRUE PARENT_SCOPE)
+            return()
+        endif()
+    endforeach()
+    set(${out} FALSE PARENT_SCOPE)
+endfunction()
+
 set(SMBTORTURE_LSAN "LSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/suppressions.txt")
 set(SMBTORTURE_CMD ${CMAKE_CURRENT_BINARY_DIR}/smbtorture_test)
 
@@ -1501,6 +1546,7 @@ set(SMBTORTURE_ENABLED_memfs
     # smb2.durable-v2-regressions
     smb2.durable-v2-regressions.durable_v2_reconnect_bug15624
     # smb2.fileid
+    smb2.fileid.fileid
     smb2.fileid.unique
     smb2.fileid.unique-dir
     # smb2.getinfo
@@ -1581,7 +1627,10 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.ioctl.trim_simple
     # smb2.kernel-oplocks
     smb2.kernel-oplocks.kernel_oplocks1
+    smb2.kernel-oplocks.kernel_oplocks2
     smb2.kernel-oplocks.kernel_oplocks3
+    smb2.kernel-oplocks.kernel_oplocks4
+    smb2.kernel-oplocks.kernel_oplocks6
     smb2.kernel-oplocks.kernel_oplocks8
     # smb2.lease
     smb2.lease.break
@@ -1885,6 +1934,8 @@ set(SMBTORTURE_ENABLED_memfs
     smb2.sharemode.access-sharemode
     smb2.sharemode.bug14375
     smb2.sharemode.sharemode-access
+    # smb2.stream-inherit-perms
+    smb2.stream-inherit-perms
     # smb2.streams
     smb2.streams.attributes1
     smb2.streams.attributes2
@@ -5041,26 +5092,64 @@ macro(add_smbtorture_explore_tests backend)
     endforeach()
 endmacro()
 
+# Named streams are a per-server-process config knob, but a consolidated suite
+# runs all of its subtests in ONE process -- so registering an ADS-needing
+# subtest alongside siblings that do not need it would turn the feature on for
+# the whole suite.  That silently couples ~43 currently-passing subtests across
+# five suites to a flag they never asked for, and makes ctest disagree with the
+# per-subtest matrix in tools/smbtorture/regen.sh (where the allowlist is exact).
+# So a suite with a MIX of ADS and non-ADS subtests is split: the plain subtests
+# keep their consolidated entry, and each ADS subtest gets its own.  A suite
+# whose enabled subtests ALL need ADS (smb2.streams) stays consolidated -- every
+# member wants the flag, so there is nothing to scope it away from.
 macro(add_smbtorture_backend_tests backend)
     foreach(_parent ${SMBTORTURE_PARENTS})
         set(_pid ${SMBTORTURE_PID_${_parent}})
-        set(_enabled "")
+        set(_plain "")
+        set(_ads "")
         foreach(_sub ${SMBTORTURE_SUBS_${_pid}})
             if("${_sub}" IN_LIST SMBTORTURE_DISABLED_SUBTESTS)
                 continue()
             endif()
-            if("${_sub}" IN_LIST SMBTORTURE_ENABLED_${backend})
-                list(APPEND _enabled "${_sub}")
+            if(NOT "${_sub}" IN_LIST SMBTORTURE_ENABLED_${backend})
+                continue()
+            endif()
+            _smbtorture_needs_ads("${_sub}" _needs_ads)
+            if(_needs_ads)
+                list(APPEND _ads "${_sub}")
+            else()
+                list(APPEND _plain "${_sub}")
             endif()
         endforeach()
-        if(_enabled)
-            if("${_parent}" IN_LIST SMBTORTURE_ISOLATE_SUITES)
-                foreach(_sub ${_enabled})
+        if("${_parent}" IN_LIST SMBTORTURE_ISOLATE_SUITES)
+            foreach(_sub ${_plain} ${_ads})
+                _smbtorture_add_subtest(${backend} "${_sub}")
+            endforeach()
+        elseif(_plain AND _ads)
+            # _smbtorture_add_suite names the ctest entry from the mangled PARENT
+            # and _smbtorture_add_subtest from the mangled SUBTEST, which are the
+            # same string for a bare two-component test.  So if the suite's own
+            # bare name is the ADS member, registering both here would be a
+            # duplicate add_test NAME and cmake would hard-fail.  No parent in
+            # today's catalog has both a bare entry and dotted siblings, but the
+            # three bare ADS entries (smb2.ioctl-on-stream, smb2.sdread,
+            # smb2.stream-inherit-perms) are exactly that shape -- a Samba image
+            # upgrade that adds a subtest under one of them would trip it.  Split
+            # the whole suite in that case; every entry then gets a distinct name.
+            if("${_parent}" IN_LIST _ads)
+                foreach(_sub ${_plain} ${_ads})
                     _smbtorture_add_subtest(${backend} "${_sub}")
                 endforeach()
             else()
-                _smbtorture_add_suite(${backend} "${_parent}" "${_pid}" ${_enabled})
+                _smbtorture_add_suite(${backend} "${_parent}" "${_pid}" ${_plain})
+                foreach(_sub ${_ads})
+                    _smbtorture_add_subtest(${backend} "${_sub}")
+                endforeach()
             endif()
+        elseif(_plain)
+            _smbtorture_add_suite(${backend} "${_parent}" "${_pid}" ${_plain})
+        elseif(_ads)
+            _smbtorture_add_suite(${backend} "${_parent}" "${_pid}" ${_ads})
         endif()
     endforeach()
 endmacro()
