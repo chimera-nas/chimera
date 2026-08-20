@@ -25,6 +25,8 @@
 #include "nfs4_recovery.h"
 #include "nfs4_drc.h"
 #include "nfs3_drc.h"
+#include "nfs4_v40_drc.h"
+#include "nfs4_lease.h"
 #include "nfs4_state.h"
 #include "nfs_kv_keys.h"
 
@@ -459,22 +461,25 @@ test_nfs3_cache_lookup(void)
     nfs3_drc_init(&drc,CHIMERA_KV_TYPE_NFS3_REPLY);
 
     /* Miss on an empty cache. */
-    CHECK(nfs3_drc_cache_lookup(&drc,&k1,&out,&out_len) == 0);
+    CHECK(nfs3_drc_cache_lookup(&drc,&k1,NULL,&out,&out_len) == 0);
 
-    nfs3_drc_cache_insert(&drc,&k1,reply,sizeof(reply),1);
+    /* NULL origin = no owning connection (the hydrate path), so any connection
+     * may replay it.  Entries are age-gated, so stamp them with the same clock
+     * the lookup compares against. */
+    nfs3_drc_cache_insert(&drc,&k1,reply,sizeof(reply),nfs_lease_now_ns(),NULL);
 
     /* Hit returns the exact bytes. */
-    CHECK(nfs3_drc_cache_lookup(&drc,&k1,&out,&out_len) == 1);
+    CHECK(nfs3_drc_cache_lookup(&drc,&k1,NULL,&out,&out_len) == 1);
     CHECK(out_len == sizeof(reply));
     CHECK(memcmp(out,reply,sizeof(reply)) == 0);
     free(out);
 
     /* A different xid (same client/proc) is a distinct identity -> miss. */
-    CHECK(nfs3_drc_cache_lookup(&drc,&k2,&out,&out_len) == 0);
+    CHECK(nfs3_drc_cache_lookup(&drc,&k2,NULL,&out,&out_len) == 0);
 
     /* Re-insert under the same key replaces last-writer-wins. */
-    nfs3_drc_cache_insert(&drc,&k1,"NEW",3,2);
-    CHECK(nfs3_drc_cache_lookup(&drc,&k1,&out,&out_len) == 1);
+    nfs3_drc_cache_insert(&drc,&k1,"NEW",3,nfs_lease_now_ns(),NULL);
+    CHECK(nfs3_drc_cache_lookup(&drc,&k1,NULL,&out,&out_len) == 1);
     CHECK(out_len == 3 && memcmp(out,"NEW",3) == 0);
     free(out);
 
@@ -541,7 +546,11 @@ test_nfs3_cross_reboot(void)
     k_after.cksum    = nfs_kv_le64(kvkey + p);
 
     CHECK(nfs3_drc_value_parse(kvval,kvval_len,&ts,&body,&body_len) == 0);
-    nfs3_drc_cache_insert(&drc,&k_after,body,body_len,ts);
+    /* The hydrate path re-stamps with the local clock rather than the persisted
+     * ts: that value was taken from another boot's CLOCK_MONOTONIC_COARSE and
+     * cannot be compared against this one's.  Mirror that here, or the age gate
+     * would (correctly) reject the record. */
+    nfs3_drc_cache_insert(&drc,&k_after,body,body_len,nfs_lease_now_ns(),NULL);
 
     /* --- retransmit after reboot: the client re-presents an identical call.
      * The independently-recomputed key must hit and return the cached reply. */
@@ -550,7 +559,7 @@ test_nfs3_cross_reboot(void)
     uint8_t               *out;
     uint32_t               out_len;
 
-    CHECK(nfs3_drc_cache_lookup(&drc,&k_retransmit,&out,&out_len) == 1);
+    CHECK(nfs3_drc_cache_lookup(&drc,&k_retransmit,NULL,&out,&out_len) == 1);
     CHECK(out_len == sizeof(reply));
     CHECK(memcmp(out,reply,sizeof(reply)) == 0);
     free(out);
@@ -559,11 +568,282 @@ test_nfs3_cross_reboot(void)
      * the stale entry -- the checksum disambiguates it. */
     struct nfs3_drc_keybuf k_other = nfs3_make_key(addr,proc,xid,
                                                    "different-args",14);
-    CHECK(nfs3_drc_cache_lookup(&drc,&k_other,&out,&out_len) == 0);
+    CHECK(nfs3_drc_cache_lookup(&drc,&k_other,NULL,&out,&out_len) == 0);
 
     nfs3_drc_destroy(&drc);
     printf("ok: nfs3_cross_reboot\n");
 } /* test_nfs3_cross_reboot */
+
+/* ------------------------------------------------------------------ *
+*  Replay is scoped to the originating connection and to an age       *
+*  bound, so one host's clients cannot answer each other's requests.  *
+* ------------------------------------------------------------------ */
+
+/* nfs3_drc_conn_open/_close track connections only on an installed cache (a
+ * disabled DRC should cost nothing per connection), and orig_dispatch is what
+ * marks it installed.  A stub is enough -- these tests never dispatch. */
+static int
+drc_stub_dispatch(
+    struct evpl              *evpl,
+    struct evpl_rpc2_conn    *conn,
+    struct evpl_rpc2_encoding*encoding,
+    uint32_t                  proc,
+    void                     *program_data,
+    struct evpl_rpc2_cred    *cred,
+    xdr_iovec                *iov,
+    int                       niov,
+    int                       length,
+    void                     *private_data)
+{
+    (void) evpl; (void) conn; (void) encoding; (void) proc;
+    (void) program_data; (void) cred; (void) iov; (void) niov;
+    (void) length; (void) private_data;
+    return 0;
+} /* drc_stub_dispatch */
+
+static void
+test_nfs3_drc_conn_origin(void)
+{
+    struct nfs3_drc        drc;
+    /* Stand-ins for two connections from ONE address -- the shape the key
+     * cannot tell apart on its own. */
+    int                    conn_a,conn_b;
+    struct nfs3_drc_keybuf key = nfs3_make_key("10.0.0.7",8 /* CREATE */,2,
+                                               "identical-create-args",21);
+    const uint8_t          reply[] = "CREATE3res NFS3_OK";
+    uint8_t               *out;
+    uint32_t               out_len;
+
+    nfs3_drc_init(&drc,CHIMERA_KV_TYPE_NFS3_REPLY);
+    drc.orig_dispatch = drc_stub_dispatch;
+
+    nfs3_drc_conn_open(&drc,&conn_a);
+    nfs3_drc_conn_open(&drc,&conn_b);
+    /* A connection can be announced twice (accepted, then connected); the second
+     * registration must not re-generation it out from under its own entries. */
+    nfs3_drc_conn_open(&drc,&conn_a);
+
+    nfs3_drc_cache_insert(&drc,&key,reply,sizeof(reply),nfs_lease_now_ns(),
+                          &conn_a);
+
+    /* The connection that produced the reply replays it: a genuine retransmit. */
+    CHECK(nfs3_drc_cache_lookup(&drc,&key,&conn_a,&out,&out_len) == 1);
+    free(out);
+
+    /* A second, concurrently live connection presenting byte-identical args at
+     * the same xid must NOT be answered from the cache -- that is a different
+     * client's first-ever request, and replaying it would acknowledge a mutation
+     * that never executed. */
+    CHECK(nfs3_drc_cache_lookup(&drc,&key,&conn_b,&out,&out_len) == 0);
+
+    /* Once the originating connection is gone, the entry is up for grabs again:
+     * this is the reconnect-and-retransmit case the cache exists for. */
+    nfs3_drc_conn_close(&drc,&conn_a);
+    CHECK(nfs3_drc_cache_lookup(&drc,&key,&conn_b,&out,&out_len) == 1);
+    CHECK(out_len == sizeof(reply));
+    CHECK(memcmp(out,reply,sizeof(reply)) == 0);
+    free(out);
+
+    /* A connection reusing conn_a's address is a NEW connection, not the origin:
+     * the generation differs, so it takes the origin-is-gone path rather than
+     * being mistaken for the entry's owner. */
+    nfs3_drc_conn_open(&drc,&conn_a);
+    CHECK(nfs3_drc_cache_lookup(&drc,&key,&conn_a,&out,&out_len) == 1);
+    free(out);
+
+    nfs3_drc_destroy(&drc);
+    printf("ok: nfs3_drc_conn_origin\n");
+} /* test_nfs3_drc_conn_origin */
+
+static void
+test_nfs3_drc_entry_age(void)
+{
+    struct nfs3_drc        drc;
+    struct nfs3_drc_keybuf key = nfs3_make_key("10.0.0.8",12 /* REMOVE */,5,
+                                               "remove-args",11);
+    const uint8_t          reply[] = "REMOVE3res NFS3_OK";
+    uint64_t               now     = nfs_lease_now_ns();
+    uint8_t               *out;
+    uint32_t               out_len;
+
+    nfs3_drc_init(&drc,CHIMERA_KV_TYPE_NFS3_REPLY);
+
+    /* Just inside the window: still a plausible retransmit. */
+    nfs3_drc_cache_insert(&drc,&key,reply,sizeof(reply),
+                          now - (NFS3_DRC_MAX_AGE_NS - 1000000000ULL),NULL);
+    CHECK(nfs3_drc_cache_lookup(&drc,&key,NULL,&out,&out_len) == 1);
+    free(out);
+
+    /* Past it: a fresh request must never be answered with a reply this old. */
+    nfs3_drc_cache_insert(&drc,&key,reply,sizeof(reply),
+                          now - (NFS3_DRC_MAX_AGE_NS + 1000000000ULL),NULL);
+    CHECK(nfs3_drc_cache_lookup(&drc,&key,NULL,&out,&out_len) == 0);
+
+    nfs3_drc_destroy(&drc);
+    printf("ok: nfs3_drc_entry_age\n");
+} /* test_nfs3_drc_entry_age */
+
+/* The minorversion peek runs on undecoded wire bytes, so tag_len is whatever
+ * the client sent.  In 32-bit arithmetic `4 + tag_len + pad` wraps: tag_len
+ * 0xFFFFFFF5..0xFFFFFFF8 all land on off == 0xFFFFFFFC, whose `off + 4` wraps
+ * to 0 and passes a 32-bit bounds check, reading ~4GB past the buffer.  Every
+ * such tag must be refused instead. */
+static void
+test_nfs4_v40_peek_minorversion(void)
+{
+    uint8_t   buf[32];
+    xdr_iovec iov;
+    uint32_t  mv;
+
+    memset(buf,0,sizeof(buf));
+    xdr_iovec_set_data(&iov,buf);
+    xdr_iovec_set_len(&iov,sizeof(buf));
+
+    /* Well-formed: empty tag, then minorversion 0. */
+    buf[3] = 0;                       /* tag_len = 0 */
+    buf[7] = 0;                       /* minorversion = 0 */
+    CHECK(nfs4_v40_peek_minorversion(&iov,1,&mv) == true);
+    CHECK(mv == 0);
+
+    /* Well-formed: 4-byte tag, then minorversion 1. */
+    buf[3]  = 4;                      /* tag_len = 4 */
+    buf[11] = 1;                      /* minorversion at offset 8 */
+    CHECK(nfs4_v40_peek_minorversion(&iov,1,&mv) == true);
+    CHECK(mv == 1);
+
+    /* A tag that runs past the iovec is refused, not guessed at. */
+    buf[2] = 0xFF; buf[3] = 0xFF;     /* tag_len = 65535 */
+    CHECK(nfs4_v40_peek_minorversion(&iov,1,&mv) == false);
+
+    /* The wrap-critical band: every one of these used to pass the guard and
+     * read from p + 0xFFFFFFFC. */
+    for (uint32_t t = 0xFFFFFFF0u; t != 0; t++) {
+        buf[0] = (uint8_t) (t >> 24);
+        buf[1] = (uint8_t) (t >> 16);
+        buf[2] = (uint8_t) (t >> 8);
+        buf[3] = (uint8_t) t;
+        CHECK(nfs4_v40_peek_minorversion(&iov,1,&mv) == false);
+    }
+
+    /* A short iovec cannot even hold the tag length. */
+    xdr_iovec_set_len(&iov,3);
+    CHECK(nfs4_v40_peek_minorversion(&iov,1,&mv) == false);
+    CHECK(nfs4_v40_peek_minorversion(&iov,0,&mv) == false);
+
+    printf("ok: nfs4_v40_peek_minorversion\n");
+} /* test_nfs4_v40_peek_minorversion */
+
+/* A band loaded from the KV store is claimed by the connection whose request
+ * triggered the load.  Leaving it ownerless would let any connection from the
+ * address replay records that are, by construction, the non-idempotent ones. */
+static void
+test_nfs3_drc_hydrated_band_origin(void)
+{
+    struct nfs3_drc        drc;
+    int                    conn_a,conn_b;
+    struct nfs3_drc_keybuf key = nfs3_make_key("10.0.0.9",8 /* CREATE */,3,
+                                               "create-args",11);
+    const uint8_t          reply[] = "CREATE3res NFS3_OK";
+    uint8_t               *out;
+    uint32_t               out_len;
+
+    nfs3_drc_init(&drc,CHIMERA_KV_TYPE_NFS4_V40_REPLY);
+    drc.orig_dispatch = drc_stub_dispatch;
+
+    nfs3_drc_conn_open(&drc,&conn_a);
+    nfs3_drc_conn_open(&drc,&conn_b);
+
+    /* What nfs3_drc_hydrate_scan_cb does: insert under the triggering conn. */
+    nfs3_drc_cache_insert(&drc,&key,reply,sizeof(reply),nfs_lease_now_ns(),
+                          &conn_a);
+
+    /* The returning client replays its own band... */
+    CHECK(nfs3_drc_cache_lookup(&drc,&key,&conn_a,&out,&out_len) == 1);
+    free(out);
+
+    /* ...and a concurrent peer at the same address does not. */
+    CHECK(nfs3_drc_cache_lookup(&drc,&key,&conn_b,&out,&out_len) == 0);
+
+    /* Once the hydrating connection is gone the band is up for grabs again,
+     * matching how captured entries behave. */
+    nfs3_drc_conn_close(&drc,&conn_a);
+    CHECK(nfs3_drc_cache_lookup(&drc,&key,&conn_b,&out,&out_len) == 1);
+    free(out);
+
+    nfs3_drc_destroy(&drc);
+    printf("ok: nfs3_drc_hydrated_band_origin\n");
+} /* test_nfs3_drc_hydrated_band_origin */
+
+/* Only a COMPOUND carrying an operation that must not be re-executed earns a
+ * cache entry.  Read-only compounds are what made the defect visible: a
+ * byte-identical LOOKUP or READDIR from any client at the same address and xid
+ * was served an arbitrarily old reply. */
+static void
+test_nfs4_v40_compound_cacheable(void)
+{
+    struct nfs_argop4    ops[3];
+    struct COMPOUND4args args = { .argarray = ops };
+
+    memset(ops,0,sizeof(ops));
+
+    /* PUTROOTFH + LOOKUP: idempotent, must not be cached. */
+    args.num_argarray = 2;
+    ops[0].argop      = OP_PUTROOTFH;
+    ops[1].argop      = OP_LOOKUP;
+    CHECK(!nfs4_v40_drc_compound_cacheable(&args));
+
+    /* PUTFH + READDIR: the frozen-listing symptom. */
+    ops[0].argop = OP_PUTFH;
+    ops[1].argop = OP_READDIR;
+    CHECK(!nfs4_v40_drc_compound_cacheable(&args));
+
+    ops[1].argop = OP_GETATTR;
+    CHECK(!nfs4_v40_drc_compound_cacheable(&args));
+
+    /* WRITE re-executes harmlessly, as on the v3 path. */
+    ops[1].argop = OP_WRITE;
+    CHECK(!nfs4_v40_drc_compound_cacheable(&args));
+
+    /* State ops carry their own RFC 7530 9.1.7 per-owner replay cache. */
+    ops[1].argop = OP_OPEN;
+    CHECK(!nfs4_v40_drc_compound_cacheable(&args));
+    ops[1].argop = OP_CLOSE;
+    CHECK(!nfs4_v40_drc_compound_cacheable(&args));
+
+    /* The ops a retransmit must not re-run. */
+    ops[1].argop = OP_CREATE;
+    CHECK(nfs4_v40_drc_compound_cacheable(&args));
+    ops[1].argop = OP_REMOVE;
+    CHECK(nfs4_v40_drc_compound_cacheable(&args));
+    ops[1].argop = OP_RENAME;
+    CHECK(nfs4_v40_drc_compound_cacheable(&args));
+    ops[1].argop = OP_LINK;
+    CHECK(nfs4_v40_drc_compound_cacheable(&args));
+    ops[1].argop = OP_SETATTR;
+    CHECK(nfs4_v40_drc_compound_cacheable(&args));
+    ops[1].argop = OP_SETCLIENTID;
+    CHECK(nfs4_v40_drc_compound_cacheable(&args));
+
+    /* OPENATTR only mutates when it is asked to create the attribute dir. */
+    ops[1].argop                = OP_OPENATTR;
+    ops[1].opopenattr.createdir = 0;
+    CHECK(!nfs4_v40_drc_compound_cacheable(&args));
+    ops[1].opopenattr.createdir = 1;
+    CHECK(nfs4_v40_drc_compound_cacheable(&args));
+
+    /* One cacheable op anywhere in the compound is enough. */
+    args.num_argarray = 3;
+    ops[0].argop      = OP_PUTFH;
+    ops[1].argop      = OP_GETATTR;
+    ops[2].argop      = OP_REMOVE;
+    CHECK(nfs4_v40_drc_compound_cacheable(&args));
+
+    /* An empty compound has nothing to protect. */
+    args.num_argarray = 0;
+    CHECK(!nfs4_v40_drc_compound_cacheable(&args));
+
+    printf("ok: nfs4_v40_compound_cacheable\n");
+} /* test_nfs4_v40_compound_cacheable */
 
 /* ------------------------------------------------------------------ *
 *  Multi-node namespacing (N instances over one shared backing store) *
@@ -664,6 +944,11 @@ main(void)
     test_nfs3_value_roundtrip();
     test_nfs3_cache_lookup();
     test_nfs3_cross_reboot();
+    test_nfs3_drc_conn_origin();
+    test_nfs3_drc_entry_age();
+    test_nfs3_drc_hydrated_band_origin();
+    test_nfs4_v40_compound_cacheable();
+    test_nfs4_v40_peek_minorversion();
 
     test_node_scoped_identifiers();
     test_two_node_key_isolation();

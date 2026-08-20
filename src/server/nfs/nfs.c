@@ -400,10 +400,15 @@ nfs_server_init(
     if (chimera_server_config_get_nfs3_drc(config)) {
         nfs3_drc_install(shared);
     }
-    /* The NFSv4.0 reply cache is always installed (its in-memory cache fixes
-     * replay across a client's reconnect regardless of persistence); KV
-     * persistence is gated by nfs4_drc inside the install. */
-    nfs4_v40_drc_install(shared, chimera_server_config_get_nfs4_drc(config));
+    /* Same for the NFSv4.0 reply cache, gated on nfs4_drc.  It used to install
+     * unconditionally, with the flag gating only KV persistence, so a server
+     * that had opted out still carried the cache and everything that can be
+     * replayed from it.  A 4.0 client's exactly-once needs for the state ops are
+     * met by the RFC 7530 Section 9.1.7 per-owner replay cache either way; this
+     * cache covers the remaining non-idempotent ops and is opt-in. */
+    if (chimera_server_config_get_nfs4_drc(config)) {
+        nfs4_v40_drc_install(shared, 1);
+    }
     pthread_mutex_init(&shared->nfs4_pnfs_devcache.lock, NULL);
     shared->nfs4_pnfs_devcache.count = 0;
 
@@ -803,15 +808,40 @@ chimera_nfs_server_notify(
     char                              local_addr[80], remote_addr[80];
 
     switch (notify->notify_type) {
+        /* The connectionless DRCs key replies by source address, which alone
+         * cannot separate two clients on one host.  Register the connection so
+         * an entry only replays to the connection that produced it, or to anyone
+         * once that connection is gone.
+         *
+         * Both events register, because which one a connection reports depends
+         * on how it arrived: an inbound connection is announced with ACCEPTED
+         * from evpl_rpc2_accept, and the transport separately reports CONNECTED.
+         * Registration keeps the first generation it assigned, so seeing both is
+         * harmless; missing both would silently leave every entry ownerless and
+         * replayable by anyone, which is the bug this guards against.  No-ops
+         * when the DRC in question was not installed. */
+        case EVPL_RPC2_NOTIFY_ACCEPTED:
+            nfs3_drc_conn_open(&shared->nfs3_drc, conn);
+            nfs3_drc_conn_open(&shared->v40_drc, conn);
+            break;
         case EVPL_RPC2_NOTIFY_CONNECTED:
             evpl_rpc2_conn_get_local_address(conn, local_addr, sizeof(local_addr));
             evpl_rpc2_conn_get_remote_address(conn, remote_addr, sizeof(remote_addr));
             chimera_nfs_debug("Client connected from %s to %s", remote_addr, local_addr);
+
+            nfs3_drc_conn_open(&shared->nfs3_drc, conn);
+            nfs3_drc_conn_open(&shared->v40_drc, conn);
             break;
         case EVPL_RPC2_NOTIFY_DISCONNECTED:
             evpl_rpc2_conn_get_local_address(conn, local_addr, sizeof(local_addr));
             evpl_rpc2_conn_get_remote_address(conn, remote_addr, sizeof(remote_addr));
             chimera_nfs_debug("Client disconnected from %s to %s", remote_addr, local_addr);
+
+            /* Before the early-out below: the replies this connection captured
+             * become replayable by the client's next connection, which is the
+             * cross-reconnect retransmit the cache exists for. */
+            nfs3_drc_conn_close(&shared->nfs3_drc, conn);
+            nfs3_drc_conn_close(&shared->v40_drc, conn);
 
             priv = evpl_rpc2_conn_get_private_data(conn);
             if (!priv) {

@@ -4,7 +4,14 @@
 
 #pragma once
 
+#include <stdbool.h>
+#include <stdint.h>
+
+/* nfs3_xdr.h defines xdr_iovec (used by the minorversion peek below). */
+#include "nfs3_xdr.h"
+
 struct chimera_server_nfs_shared;
+struct COMPOUND4args;
 
 /*
  * NFSv4.0 duplicate-request cache.
@@ -17,11 +24,36 @@ struct chimera_server_nfs_shared;
  * after it reconnects to a different node.  4.1+ COMPOUNDs (handled by the
  * session reply cache) and NULL pass straight through.
  *
- * The in-memory cache is always on (it also fixes replay across a client's own
- * reconnect to the same node); persistence to the KV store is gated by
- * server.nfs4_drc + a persistent kv_module, matching the 4.1 reply cache.
+ * Installed only when server.nfs4_drc is set, exactly as the NFSv3 DRC is gated
+ * on server.nfs3_drc; persistence to the KV store additionally requires a
+ * persistent kv_module.
  */
 void
 nfs4_v40_drc_install(
     struct chimera_server_nfs_shared *shared,
     int                               persist);
+
+/*
+ * Is this COMPOUND worth caching -- does it carry an operation that must not be
+ * re-executed on a retransmit?  Read-only compounds are not cached, so they can
+ * never be answered from the cache either; see the comment on the definition.
+ *
+ * Called after the arguments are decoded, from chimera_nfs4_compound.
+ */
+bool
+nfs4_v40_drc_compound_cacheable(
+    const struct COMPOUND4args *args);
+
+/*
+ * Read the COMPOUND4args minorversion straight off the wire, before the request
+ * is decoded.  False when it cannot be determined from the first iovec, which
+ * the caller must treat as "do not cache" rather than as minorversion 0.
+ *
+ * Exposed for unit tests (test_nfs_persist): tag_len is attacker-controlled and
+ * the offset arithmetic has to stay overflow-free.
+ */
+bool
+nfs4_v40_peek_minorversion(
+    const xdr_iovec *iov,
+    int              niov,
+    uint32_t        *out_mv);

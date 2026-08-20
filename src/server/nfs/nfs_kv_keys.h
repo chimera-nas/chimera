@@ -66,8 +66,15 @@ enum chimera_kv_record_type {
     CHIMERA_KV_TYPE_NFS3_REPLY     = 0x05, /* NFSv3 DRC reply entry (by client)  */
     CHIMERA_KV_TYPE_NSM_STATE      = 0x06, /* singleton NSM/statd state number   */
     CHIMERA_KV_TYPE_NSM_MONITOR    = 0x07, /* per-host NSM monitor (nfs_nsm)     */
-    CHIMERA_KV_TYPE_NFS4_V40_REPLY = 0x08, /* NFSv4.0 DRC reply entry (by client)*/
-    /* 0x09 .. 0xFE reserved for future global record types */
+    /* 0x08 was the first NFSv4.0 DRC band.  It was written by builds that
+     * cached every minorversion-0 COMPOUND, read-only ones included, so its
+     * records are not safe to hydrate: replaying one answers a fresh LOOKUP or
+     * READDIR with a stale reply.  There is no way to tell those records from
+     * the non-idempotent ones after the fact, so the band was abandoned rather
+     * than filtered.  Records left in 0x08 by an older build are simply never
+     * scanned; they age out with the store.  Do not reuse this value. */
+    CHIMERA_KV_TYPE_NFS4_V40_REPLY = 0x09, /* NFSv4.0 DRC reply entry (by client)*/
+    /* 0x0A .. 0xFE reserved for future global record types */
 };
 
 /* Longest normalized client address string an NFSv3 DRC key embeds (IPv6

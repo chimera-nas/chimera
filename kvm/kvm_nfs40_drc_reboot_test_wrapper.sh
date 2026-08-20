@@ -209,8 +209,8 @@ if [ "${RC2:-1}" != "0" ]; then
     FAIL=1
 fi
 
-if grep -q "conn DRC (type 0x08): hydrated" "$CHIMERA_LOG"; then
-    RELOADED=$(grep -oP 'conn DRC \(type 0x08\): hydrated \K[0-9]+' "$CHIMERA_LOG" | tail -1)
+if grep -q "conn DRC (type 0x09): hydrated" "$CHIMERA_LOG"; then
+    RELOADED=$(grep -oP 'conn DRC \(type 0x09\): hydrated \K[0-9]+' "$CHIMERA_LOG" | tail -1)
     echo "=== chimera B hydrated ${RELOADED} NFSv4.0 reply record(s) for the returning client ==="
     if [ "${RELOADED:-0}" -lt 1 ]; then
         echo "FAIL: no NFSv4.0 reply records hydrated for the returning client"

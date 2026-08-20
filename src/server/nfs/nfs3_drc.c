@@ -135,6 +135,134 @@ nfs3_drc_client_addr(
 } /* nfs3_drc_client_addr */
 
 /* ------------------------------------------------------------------ *
+*  live connection registry                                          *
+*                                                                    *
+*  {address, xid, checksum} cannot distinguish a retransmit from a    *
+*  different client's first-ever request when both come from one host.*
+*  Recording which connection captured a reply -- and whether that    *
+*  connection is still open -- supplies the missing bit: a concurrent *
+*  peer never replays another connection's reply, while a genuine     *
+*  reconnect (origin gone) still does.                               *
+* ------------------------------------------------------------------ */
+
+/* Caller holds drc->lock.  0 when conn is NULL or was never opened. */
+static uint64_t
+nfs3_drc_conn_gen_locked(
+    struct nfs3_drc *drc,
+    const void      *conn)
+{
+    struct nfs3_drc_conn *c;
+
+    if (!conn) {
+        return 0;
+    }
+    HASH_FIND_PTR(drc->live_conns, &conn, c);
+    return c ? c->gen : 0;
+} /* nfs3_drc_conn_gen_locked */
+
+/* Is a reply captured at `ts` still young enough to be answering a retransmit?
+ * CLOCK_MONOTONIC_COARSE never runs backwards within a boot, but guard the
+ * subtraction anyway so a future-stamped entry reads as fresh rather than
+ * wrapping around to expired. */
+static inline int
+nfs3_drc_entry_fresh(
+    uint64_t now,
+    uint64_t ts)
+{
+    return now < ts || now - ts <= NFS3_DRC_MAX_AGE_NS;
+} /* nfs3_drc_entry_fresh */
+
+/* Caller holds drc->lock.  May this entry be replayed to `conn`? */
+static int
+nfs3_drc_replayable_locked(
+    struct nfs3_drc             *drc,
+    const struct nfs3_drc_entry *e,
+    const void                  *conn)
+{
+    struct nfs3_drc_conn *origin;
+    const void           *origin_conn = e->origin_conn;
+
+    if (!e->origin_gen) {
+        return 1;  /* hydrated from the KV store: no live origin to protect */
+    }
+    if (origin_conn == conn) {
+        return 1;  /* the connection that captured it is asking again */
+    }
+
+    /* A different connection may replay only once the origin is gone -- either
+     * absent from the registry, or its pointer already recycled for a newer
+     * connection (a different generation). */
+    HASH_FIND_PTR(drc->live_conns, &origin_conn, origin);
+    return !origin || origin->gen != e->origin_gen;
+} /* nfs3_drc_replayable_locked */
+
+void
+nfs3_drc_conn_open(
+    struct nfs3_drc *drc,
+    const void      *conn)
+{
+    struct nfs3_drc_conn *c;
+
+    /* orig_dispatch is set only by install; an uninstalled cache tracks
+     * nothing so a disabled DRC costs nothing per connection. */
+    if (!drc->orig_dispatch || !conn) {
+        return;
+    }
+
+    c = malloc(sizeof(*c));
+    if (!c) {
+        return;  /* OOM: the conn reads as not-live, which only loosens replay */
+    }
+    c->conn = conn;
+
+    pthread_mutex_lock(&drc->lock);
+    /* Idempotent: a connection may be announced more than once (accepted, then
+     * connected).  Keep the generation already assigned rather than minting a
+     * new one, or a re-announcement mid-connection would orphan the entries it
+     * had already captured -- they would read as origin-gone and become
+     * replayable by any peer, which is exactly what must not happen.  A conn is
+     * always removed on disconnect, before the rpc2 layer frees it, so a
+     * genuinely recycled pointer never finds a stale record here. */
+    {
+        struct nfs3_drc_conn *old;
+
+        HASH_FIND_PTR(drc->live_conns, &conn, old);
+        if (old) {
+            pthread_mutex_unlock(&drc->lock);
+            free(c);
+            return;
+        }
+    }
+    c->gen = ++drc->next_conn_gen;  /* pre-increment: never hands out 0 */
+    HASH_ADD_PTR(drc->live_conns, conn, c);
+    pthread_mutex_unlock(&drc->lock);
+} /* nfs3_drc_conn_open */
+
+void
+nfs3_drc_conn_close(
+    struct nfs3_drc *drc,
+    const void      *conn)
+{
+    struct nfs3_drc_conn *c;
+
+    if (!drc->orig_dispatch || !conn) {
+        return;
+    }
+
+    pthread_mutex_lock(&drc->lock);
+    HASH_FIND_PTR(drc->live_conns, &conn, c);
+    if (c) {
+        HASH_DEL(drc->live_conns, c);
+    }
+    pthread_mutex_unlock(&drc->lock);
+
+    /* Entries this connection captured are deliberately left in place: with the
+     * origin gone they become replayable by the client's next connection, which
+     * is the cross-reconnect replay the cache exists for. */
+    free(c);
+} /* nfs3_drc_conn_close */
+
+/* ------------------------------------------------------------------ *
 *  reply value (de)serialization                                     *
 * ------------------------------------------------------------------ */
 
@@ -196,11 +324,13 @@ nfs3_drc_cache_insert_locked(
     const void                   *body,
     uint32_t                      body_len,
     uint64_t                      ts,
+    const void                   *origin_conn,
     struct nfs3_drc_keybuf       *evicted,
     int                           max_evicted)
 {
     struct nfs3_drc_entry *e;
-    int                    nev = 0;
+    uint64_t               origin_gen = nfs3_drc_conn_gen_locked(drc, origin_conn);
+    int                    nev        = 0;
 
     HASH_FIND(hh, drc->table, key, sizeof(*key), e);
     if (e) {
@@ -215,9 +345,11 @@ nfs3_drc_cache_insert_locked(
             return 0;
         }
         memcpy(e->buf, body, body_len);
-        e->len      = body_len;
-        e->ts       = ts;
-        drc->bytes += body_len;
+        e->len         = body_len;
+        e->ts          = ts;
+        e->origin_conn = origin_conn;
+        e->origin_gen  = origin_gen;
+        drc->bytes    += body_len;
         return 0;
     }
 
@@ -245,8 +377,10 @@ nfs3_drc_cache_insert_locked(
         return nev;
     }
     memcpy(e->buf, body, body_len);
-    e->len = body_len;
-    e->ts  = ts;
+    e->len         = body_len;
+    e->ts          = ts;
+    e->origin_conn = origin_conn;
+    e->origin_gen  = origin_gen;
     HASH_ADD(hh, drc->table, key, sizeof(e->key), e);
     drc->bytes += body_len;
 
@@ -259,10 +393,12 @@ nfs3_drc_cache_insert(
     const struct nfs3_drc_keybuf *key,
     const void                   *body,
     uint32_t                      body_len,
-    uint64_t                      ts)
+    uint64_t                      ts,
+    const void                   *origin_conn)
 {
     pthread_mutex_lock(&drc->lock);
-    nfs3_drc_cache_insert_locked(drc, key, body, body_len, ts, NULL, 0);
+    nfs3_drc_cache_insert_locked(drc, key, body, body_len, ts, origin_conn,
+                                 NULL, 0);
     pthread_mutex_unlock(&drc->lock);
 } /* nfs3_drc_cache_insert */
 
@@ -270,16 +406,23 @@ int
 nfs3_drc_cache_lookup(
     struct nfs3_drc              *drc,
     const struct nfs3_drc_keybuf *key,
+    const void                   *conn,
     uint8_t                     **out_buf,
     uint32_t                     *out_len)
 {
     struct nfs3_drc_entry *e;
+    uint64_t               now = nfs_lease_now_ns();
     uint8_t               *buf = NULL;
     uint32_t               len = 0;
 
     pthread_mutex_lock(&drc->lock);
     HASH_FIND(hh, drc->table, key, sizeof(*key), e);
-    if (e) {
+    /* An entry only answers when it is this connection's to replay (or its
+     * origin is gone) and is recent enough that it can still plausibly be
+     * answering a retransmit rather than a fresh request. */
+    if (e &&
+        nfs3_drc_replayable_locked(drc, e, conn) &&
+        nfs3_drc_entry_fresh(now, e->ts)) {
         len = e->len;
         buf = malloc(len);
         if (buf) {
@@ -368,6 +511,7 @@ struct nfs3_drc_capture_ctx {
     struct chimera_server_nfs_thread *thread;
     struct nfs3_drc                  *drc;
     struct nfs3_drc_keybuf            key;
+    const void                       *conn;   /* connection being replied to */
 };
 
 static void
@@ -403,7 +547,7 @@ nfs3_drc_capture_reply(
 
     pthread_mutex_lock(&drc->lock);
     nev = nfs3_drc_cache_insert_locked(drc, &ctx->key, buf, total_length, ts,
-                                       evicted, NFS3_DRC_EVICT_MAX);
+                                       ctx->conn, evicted, NFS3_DRC_EVICT_MAX);
     pthread_mutex_unlock(&drc->lock);
 
     if (!drc->persistence_disabled) {
@@ -497,7 +641,7 @@ nfs3_drc_lookup_or_forward(
     uint8_t                     *cached;
     uint32_t                     cached_len;
 
-    if (nfs3_drc_cache_lookup(drc, key, &cached, &cached_len)) {
+    if (nfs3_drc_cache_lookup(drc, key, conn, &cached, &cached_len)) {
         int rc = nfs_drc_send_cached_reply(thread, encoding, cached, cached_len);
 
         free(cached);
@@ -513,6 +657,7 @@ nfs3_drc_lookup_or_forward(
         cctx->thread                    = thread;
         cctx->drc                       = drc;
         cctx->key                       = *key;
+        cctx->conn                      = conn;
         encoding->reply_capture_cb      = nfs3_drc_capture_reply;
         encoding->reply_capture_private = cctx;
     }
@@ -582,7 +727,25 @@ nfs3_drc_hydrate_scan_cb(
     if (nfs3_drc_value_parse(value, value_len, &ts, &body, &body_len) != 0) {
         return 0;  /* skip a corrupt value */
     }
-    nfs3_drc_cache_insert(drc, &kb, body, body_len, ts);
+
+    /* Stamp the hydrated entry with this instance's clock rather than the
+     * persisted one: the record's ts came from a different boot (or a different
+     * node), where CLOCK_MONOTONIC_COARSE counted from a different origin, so it
+     * cannot be compared against ours.  The client has only just reconnected, so
+     * dating the entry from now is both meaningful and what keeps the record
+     * usable -- the point of persisting it.
+     *
+     * The band is claimed by the connection whose request triggered the
+     * hydrate.  Leaving it ownerless instead would hand every record to any
+     * connection from the address, which is precisely the cross-client replay
+     * the origin guard exists to stop -- reintroduced on the persistent path,
+     * where the records are by construction the non-idempotent ones.  The
+     * connection that triggers the hydrate is the returning client (its request
+     * is the one the band may have to answer), and once it closes the records
+     * fall back to being replayable by any of that client's later connections,
+     * exactly as captured entries do. */
+    nfs3_drc_cache_insert(drc, &kb, body, body_len, nfs_lease_now_ns(),
+                          hc->conn);
     hc->loaded++;
     return 0;
 } /* nfs3_drc_hydrate_scan_cb */
@@ -734,6 +897,8 @@ nfs3_drc_init(
     pthread_mutex_init(&drc->lock, NULL);
     drc->table                = NULL;
     drc->hydrated             = NULL;
+    drc->live_conns           = NULL;
+    drc->next_conn_gen        = 0;
     drc->bytes                = 0;
     drc->kv_type              = kv_type;
     drc->persistence_disabled = 0;
@@ -749,6 +914,7 @@ nfs3_drc_destroy(struct nfs3_drc *drc)
 #ifndef __clang_analyzer__
     struct nfs3_drc_entry *e, *tmp;
     struct nfs3_drc_hydra *h, *htmp;
+    struct nfs3_drc_conn  *c, *ctmp;
 
     HASH_ITER(hh, drc->table, e, tmp)
     {
@@ -760,6 +926,11 @@ nfs3_drc_destroy(struct nfs3_drc *drc)
     {
         HASH_DELETE(hh, drc->hydrated, h);
         free(h);
+    }
+    HASH_ITER(hh, drc->live_conns, c, ctmp)
+    {
+        HASH_DELETE(hh, drc->live_conns, c);
+        free(c);
     }
 #endif /* ifndef __clang_analyzer__ */
     pthread_mutex_destroy(&drc->lock);

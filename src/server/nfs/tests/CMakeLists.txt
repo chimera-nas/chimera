@@ -48,6 +48,7 @@ add_executable(test_nfs_persist
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_recovery.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_drc.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs3_drc.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_v40_drc.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs_drc_reply.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_callback.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_cb.c)
@@ -163,6 +164,28 @@ target_include_directories(test_open_owner_lifetime PRIVATE
     ${NFS_COMMON_INCLUDE_DIR})
 add_test(NAME chimera/server/nfs/open_owner_lifetime
     COMMAND ${CMAKE_CURRENT_BINARY_DIR}/test_open_owner_lifetime)
+
+# End-to-end regression: two connections from one address presenting
+# byte-identical NFSv4.0 COMPOUNDs at the same xid must not be served each
+# other's replies -- neither a stale directory listing nor, worse, an
+# acknowledged-but-never-executed CREATE.  Runs against a real daemon with
+# server.nfs4_drc enabled (the cache is opt-in, so a default config would leave
+# the code under test uninstalled), and also asserts the cache still replays a
+# genuine same-connection retransmit.
+#
+# Needs pynfs for its NFSv4.0 client, and a network namespace to own port 2049;
+# the wrapper exits 77 (skip) if pynfs is missing at run time.
+if(CHIMERA_NETNS_TESTING AND EXISTS "/opt/pynfs/nfs4.0/nfs4lib.py")
+    add_test(NAME chimera/server/nfs/v40_drc_replay
+        COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/nfs4_v40_drc_replay_test_wrapper.sh
+                ${CMAKE_BINARY_DIR}/src/daemon/chimera
+                /opt/pynfs
+                ${CMAKE_CURRENT_SOURCE_DIR}/nfs4_v40_drc_replay.py)
+    set_tests_properties(chimera/server/nfs/v40_drc_replay PROPERTIES
+        SKIP_RETURN_CODE 77
+        TIMEOUT 180
+        ENVIRONMENT "PYTHONUNBUFFERED=1")
+endif()
 
 # Tag every test registered above with the 'nfs' label so these NFS server unit
 # tests can be run independently via `ctest -L nfs`.

@@ -14,6 +14,7 @@
 #include "nfs4_op_matrix.h"
 #include "nfs4_rofs.h"
 #include "nfs_drc_reply.h"
+#include "nfs4_v40_drc.h"
 
 static int
 nfs4_send_cached_reply(
@@ -565,7 +566,28 @@ chimera_nfs4_compound(
     req->lock_4_0_lock_owner         = NULL;
 
     /* NFSv4.0 duplicate-request caching is handled before the compound is
-     * decoded, by the dispatcher wrapper in nfs4_v40_drc.c. */
+     * decoded, by the dispatcher wrapper in nfs4_v40_drc.c.  That wrapper cannot
+     * see the operations -- they are still XDR at that point -- so it arms the
+     * reply capture for every 4.0 COMPOUND and we cancel it here, now that the
+     * argarray is decoded, unless the compound actually carries something that
+     * must not be re-executed.
+     *
+     * Cancelling means the reply is never cached, which is also what stops it
+     * ever being replayed: the cache key covers a checksum of the request, so a
+     * read-only COMPOUND can only ever match another read-only COMPOUND's entry,
+     * and those no longer exist.  Without this, a byte-identical LOOKUP or
+     * READDIR from any client at the same address and xid was answered with an
+     * arbitrarily old reply.
+     *
+     * The capture context lives in the encoding's dbuf, so dropping the pointers
+     * is the whole cancellation.  4.1+ arms its own capture from
+     * nfs4_replay_slot_acquire, which runs later, in the SEQUENCE handler. */
+    if (args->minorversion == 0 &&
+        req->encoding->reply_capture_cb &&
+        !nfs4_v40_drc_compound_cacheable(args)) {
+        req->encoding->reply_capture_cb      = NULL;
+        req->encoding->reply_capture_private = NULL;
+    }
 
     /* Chimera implements NFS v4.0, v4.1 and v4.2 (minorversions 0–2).
      * Reject unknown minor versions with NFS4ERR_MINOR_VERS_MISMATCH per

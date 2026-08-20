@@ -89,6 +89,17 @@ case " $FLAG_ARGS " in
         ;;
 esac
 
+# The NFSv4.0 duplicate-request cache is opt-in (server.nfs4_drc), like the
+# NFSv3 one.  pynfs's replay suite (st_replay.py, RPLY*) re-sends a compound at
+# the same xid on one connection and requires the original reply back, so the
+# 4.0 runs have to turn it on -- otherwise the suite is asserting behaviour the
+# server was configured not to provide.  4.1+ replay goes through the session
+# reply cache instead and needs nothing here.
+DRC_ENABLE="false"
+if [ "$NFS_MINOR_VERSION" = "0" ]; then
+    DRC_ENABLE="true"
+fi
+
 # Generate chimera config based on backend
 generate_config() {
     local mount_path="/"
@@ -155,6 +166,7 @@ generate_config() {
         "threads": 4,
         "delegation_threads": 4,
         "nfs4_delegations": $DELEG_ENABLE,
+        "nfs4_drc": $DRC_ENABLE,
         "nfs4_lease_time": $PYNFS_NFS4_LEASE_TIME,
         "nfs4_grace_time": $PYNFS_NFS4_GRACE_TIME,
         $vfs_section
