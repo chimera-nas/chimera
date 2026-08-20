@@ -133,16 +133,6 @@ function(smb2_mbt_add_batch inst flavor steps ntraces seed)
 
     list(APPEND SMB2_MBT_TRACE_FILES ${traces})
     set(SMB2_MBT_TRACE_FILES ${SMB2_MBT_TRACE_FILES} PARENT_SCOPE)
-
-    foreach(trace ${traces})
-        get_filename_component(tname ${trace} NAME_WE)
-        set(name chimera/server/smb/mbt/${tname}_memfs)
-        add_test(NAME ${name}
-            COMMAND $<TARGET_FILE:smb2_mbt_replay> --trace ${trace})
-        set_tests_properties(${name} PROPERTIES
-            LABELS "smb_mbt;memfs"
-            TIMEOUT 90)
-    endforeach()
 endfunction()
 
 # The deterministic filesystem core (no caching, no delete-on-close): the
@@ -150,6 +140,24 @@ endfunction()
 smb2_mbt_add_batch(smb2Base stepCore 60 6 0x7)
 
 add_custom_target(smb2_mbt_traces ALL DEPENDS ${SMB2_MBT_TRACE_FILES})
+
+# One batched replay for the whole SMB2 corpus: a single smb2_mbt_replay
+# process opens the server + client evpl once (capability profile taken from
+# the first trace -- every trace in a batch shares it, since a profile is fixed
+# per generation instance) and replays every trace, standing up a fresh
+# uniquely-named memfs per trace AND opening fresh connections/sessions per
+# trace (smb2_conn_reset drops the prior trace's sessions/opens), so neither
+# the filesystem nor the SMB session/tree/handle state leaks across traces.
+# Amortizes the dominant per-process server init/start over the corpus.
+set(SMB2_MBT_BATCH_ARGS)
+foreach(trace ${SMB2_MBT_TRACE_FILES})
+    list(APPEND SMB2_MBT_BATCH_ARGS --trace ${trace})
+endforeach()
+add_test(NAME chimera/server/smb/mbt/batch_memfs
+    COMMAND $<TARGET_FILE:smb2_mbt_replay> ${SMB2_MBT_BATCH_ARGS})
+set_tests_properties(chimera/server/smb/mbt/batch_memfs PROPERTIES
+    LABELS "smb_mbt;memfs"
+    TIMEOUT 120)
 
 # Behavior-bucket coverage gate: fails if the generated corpus never exercises
 # a CREATE disposition, CreateAction or coherency-relevant status, so uniform
