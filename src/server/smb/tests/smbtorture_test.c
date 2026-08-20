@@ -64,6 +64,148 @@ test_cleanup(
     }
 } /* test_cleanup */
 
+/* Log level for this run.  Defaults to info, as every other test harness here
+ * does; SMBTORTURE_LOG_LEVEL=error|info|debug overrides it.  An unrecognized
+ * value is a hard error rather than a silent fallback: a sweep that asked for
+ * debug and quietly got info would harvest nothing and report success. */
+static int
+smbtorture_log_level(void)
+{
+    const char *env = getenv("SMBTORTURE_LOG_LEVEL");
+
+    if (!env || *env == '\0') {
+        return CHIMERA_LOG_INFO;
+    }
+
+    if (strcmp(env, "debug") == 0) {
+        return CHIMERA_LOG_DEBUG;
+    }
+
+    if (strcmp(env, "info") == 0) {
+        return CHIMERA_LOG_INFO;
+    }
+
+    if (strcmp(env, "error") == 0) {
+        return CHIMERA_LOG_ERROR;
+    }
+
+    fprintf(stderr, "SMBTORTURE_LOG_LEVEL='%s' is not one of error|info|debug\n",
+            env);
+    exit(EXIT_FAILURE);
+} /* smbtorture_log_level */
+
+/* Does `name` match `entry` from the ADS list?  Exact, or as a parent-suite
+ * prefix: "smb2.streams" matches "smb2.streams" and "smb2.streams.io", but not
+ * "smb2.stream-inherit-perms" (the '.' is required).  The old hand-written
+ * chain used strncmp(name, "smb2.streams.", 13), which silently failed to match
+ * smb2.stream-inherit-perms -- there is no 's' before the hyphen. */
+static int
+ads_entry_matches(
+    const char *entry,
+    const char *name)
+{
+    size_t len = strlen(entry);
+
+    if (strcmp(entry, name) == 0) {
+        return 1;
+    }
+
+    return strncmp(entry, name, len) == 0 && name[len] == '.';
+} /* ads_entry_matches */
+
+/* True if any test named on the command line requires named-stream (ADS)
+ * support.  The list is data, not code: see smbtorture_ads_subtests.txt, which
+ * CMakeLists.txt reads as well so ctest can scope the flag to exactly these
+ * subtests.  Returns -1 if the list cannot be read -- failing loudly rather
+ * than silently running with the feature off, which is the failure mode this
+ * whole mechanism exists to prevent. */
+static int
+tests_need_named_streams(
+    int          num_tests,
+    const char **tests)
+{
+    const char *env = getenv("SMBTORTURE_ADS");
+    FILE       *fp;
+    char        line[256];
+    int         need = 0;
+
+    /* Escape hatch for classifying a subtest by hand: run it twice, once forced
+     * off and once forced on, and read whether the outcome changed.  That pair,
+     * not a hit on the gate's log line, is what decides membership -- see the
+     * MAINTAINING section of smbtorture_ads_subtests.txt.  Tri-state rather
+     * than the presence test this replaced: SMBTORTURE_ADS_OFF=0 forced the
+     * feature OFF, which is the opposite of what anyone typing it means, and an
+     * unrecognized value is a hard error for the same reason
+     * SMBTORTURE_LOG_LEVEL makes one -- a run that asked to force the feature
+     * and quietly got the list instead would classify the subtest wrongly. */
+    if (env && *env != '\0') {
+        if (strcmp(env, "off") == 0) {
+            fprintf(stderr, "SMBTORTURE_ADS=off: named streams forced off\n");
+            return 0;
+        }
+
+        if (strcmp(env, "on") == 0) {
+            fprintf(stderr, "SMBTORTURE_ADS=on: named streams forced on\n");
+            return 1;
+        }
+
+        if (strcmp(env, "list") != 0) {
+            fprintf(stderr, "SMBTORTURE_ADS='%s' is not one of off|on|list\n",
+                    env);
+            return -1;
+        }
+    }
+
+    fp = fopen(SMBTORTURE_ADS_LIST, "r");
+
+    if (!fp) {
+        fprintf(stderr, "Failed to open ADS subtest list %s: %s\n",
+                SMBTORTURE_ADS_LIST, strerror(errno));
+        return -1;
+    }
+
+    while (!need && fgets(line, sizeof(line), fp)) {
+        char *entry = line, *end;
+
+        while (*entry == ' ' || *entry == '\t') {
+            entry++;
+        }
+
+        end = entry + strcspn(entry, "#\r\n");
+
+        while (end > entry && (end[-1] == ' ' || end[-1] == '\t')) {
+            end--;
+        }
+        *end = '\0';
+
+        if (*entry == '\0') {
+            continue;
+        }
+
+        for (int i = 0; i < num_tests; i++) {
+            if (ads_entry_matches(entry, tests[i])) {
+                need = 1;
+                break;
+            }
+        }
+    }
+
+    /* A read error stops fgets() exactly like end-of-file does, so without this
+     * a truncated or unreadable list yields need = 0 and the feature silently
+     * stays off -- the failure this function exists to prevent, arrived at by a
+     * different route than the fopen() above already guards. */
+    if (ferror(fp)) {
+        fprintf(stderr, "Failed to read ADS subtest list %s: %s\n",
+                SMBTORTURE_ADS_LIST, strerror(errno));
+        fclose(fp);
+        return -1;
+    }
+
+    fclose(fp);
+
+    return need;
+} /* tests_need_named_streams */
+
 static int
 run_smbtorture(
     int         num_tests,
@@ -365,8 +507,11 @@ main(
         return 77;
     }
 
-    /* Initialize logging */
-    ChimeraLogLevel = CHIMERA_LOG_INFO;
+    /* Initialize logging.  SMBTORTURE_LOG_LEVEL raises (or lowers) the level for
+     * a single run; set it to debug to see the named-streams gate, which logs
+     * at debug because that log is on a client-driven per-request path and so
+     * cannot default to info. */
+    ChimeraLogLevel = smbtorture_log_level();
     evpl_set_log_fn(chimera_vlog, chimera_log_flush);
 
     env.metrics = prometheus_metrics_create(NULL, NULL, 0);
@@ -439,29 +584,21 @@ main(
         chimera_server_config_set_smb_nic_info(config, 2, nics);
     }
 
-    /* CTest invokes this binary once per suite.  Enable named-stream (ADS)
-     * support only for the stream suites, so the negative smb2.create_no_streams
-     * suite still runs with the feature off on the same backend.  Also match
-     * individual smb2.streams.* subtests so the per-subtest harvest variant
-     * (run one stream subtest in its own server process) gets the same
-     * capability the combined smb2.streams suite needs.
-     *
-     * A handful of oplock/lease subtests open named streams (a real Windows
-     * server always exposes the ADS namespace), so they need the same
-     * capability: smb2.oplock.stream1 / smb2.oplock.batch26 take oplocks on a
-     * stream, and smb2.lease.request leases a stream.  Without it the stream
-     * create is refused OBJECT_NAME_INVALID by the named-streams-off gate. */
-    for (i = 0; i < num_tests; i++) {
-        if (strcmp(tests[i], "smb2.streams") == 0 ||
-            strncmp(tests[i], "smb2.streams.", 13) == 0 ||
-            strcmp(tests[i], "smb2.ioctl-on-stream") == 0 ||
-            strcmp(tests[i], "smb2.sdread") == 0 ||
-            strcmp(tests[i], "smb2.oplock.stream1") == 0 ||
-            strcmp(tests[i], "smb2.oplock.batch26") == 0 ||
-            strcmp(tests[i], "smb2.lease.request") == 0) {
-            chimera_server_config_set_smb_named_streams(config, 1);
-            break;
-        }
+    /* Enable named-stream (ADS) support only for the subtests that need it, so
+     * the negative smb2.create_no_streams suite still runs with the feature off
+     * on the same backend.  The list is data shared with CMakeLists.txt --
+     * see smbtorture_ads_subtests.txt.  Without the feature a stream create is
+     * refused OBJECT_NAME_INVALID by the named-streams-off gate, and the
+     * subtest dies in its own setup before asserting anything. */
+    rc = tests_need_named_streams(num_tests, tests);
+
+    if (rc < 0) {
+        test_cleanup(&env, 1);
+        return EXIT_FAILURE;
+    }
+
+    if (rc) {
+        chimera_server_config_set_smb_named_streams(config, 1);
     }
 
     /* The smb2.acls_non_canonical suite asserts Samba's
