@@ -1192,31 +1192,39 @@ diskfs_init(
             ? sb.gen_floor : DISKFS_GEN_FIRST;
         shared->gen_floor = shared->gen_next + DISKFS_GEN_RESERVE;
 
+        /* Remount: load the named-filesystem table and attach each filesystem.
+         * The table is rewritten durably by MKFS/RMFS and a root's generation
+         * never changes while its entry exists (gen bumps only on inode free,
+         * and RMFS clears the entry before the root is reclaimed), so the
+         * stored root_gen is authoritative even after a crash.  The orphan
+         * shards were created at first use on the previous instance. */
         if (mode != 0) {
-            uint8_t              fsid_buf[CHIMERA_VFS_FSID_SIZE] = { 0 };
-            uint64_t             rinum                           = sb.root_inum ? sb.root_inum : 2;
-            uint32_t             rgen                            = sb.root_gen;
-            uint32_t             rdev;
-            uint64_t             roff;
-            struct diskfs_dinode rdi;
+            uint64_t             oinum = DISKFS_ORPHAN_INUM_BASE +
+                DISKFS_ORPHAN_SHARDS - 1;
+            uint32_t             odev;
+            uint64_t             ooff;
+            struct diskfs_dinode odi;
 
-            /* The superblock's root generation is only refreshed at clean
-             * unmount, so after a crash it can be stale (0).  Read the
-             * authoritative generation from the root inode's on-disk dinode
-             * (consistent post-replay) so the mount handle matches. */
-            roff = sm_inum_to_device_offset(shared->space_map, rinum, &rdev);
-            if (diskfs_mount_io_read(mio, rdev, &rdi, sizeof(rdi), roff) == 0 &&
-                rdi.inum == rinum) {
-                rgen = rdi.gen;
+            memcpy(shared->fs_table, sb.fs_table, sizeof(shared->fs_table));
+            for (i = 0; i < SM_FS_TABLE_MAX; i++) {
+                struct sm_fs_entry *e = &shared->fs_table[i];
+
+                if (e->name[0] == '\0') {
+                    continue;
+                }
+                diskfs_fs_attach(shared, e->name, (int) strnlen(e->name, sizeof(e->name)),
+                                 e->fsid, e->root_inum, e->root_gen);
             }
 
-            shared->root_inum = rinum;
-            shared->root_gen  = rgen;
-            memcpy(fsid_buf, &shared->fsid, sizeof(shared->fsid));
-            shared->root_fhlen = chimera_vfs_encode_fh_inum_mount(fsid_buf,
-                                                                  rinum,
-                                                                  rgen,
-                                                                  shared->root_fh);
+            /* The orphan shards are created (all of them, in inum order) on
+             * the first dispatched op; probe the last one so a pool that was
+             * formatted but never used re-creates them instead of faulting
+             * garbage. */
+            ooff = sm_inum_to_device_offset(shared->space_map, oinum, &odev);
+            if (diskfs_mount_io_read(mio, odev, &odi, sizeof(odi), ooff) == 0 &&
+                odi.inum == oinum && odi.gen == DISKFS_ORPHAN_GEN) {
+                shared->orphans_created = 1;
+            }
         }
 
         /* Fresh format: deallocate every device before writing any metadata,
@@ -1245,11 +1253,10 @@ diskfs_init(
          * leaves it clear, so the next mount won't mistake a crash for a
          * clean shutdown. */
         rc = space_map_write_superblock(shared->space_map, &smio,
-                                        shared->fsid, 0,
-                                        mode != 0 ? shared->root_inum : 0,
-                                        mode != 0 ? shared->root_gen : 0,
+                                        shared->fsid, 0, 0, 0,
                                         mode != 0 ? sb.log_seq : 0,
-                                        shared->gen_floor);
+                                        shared->gen_floor,
+                                        shared->fs_table);
         chimera_diskfs_abort_if(rc != 0, "Failed to write superblock");
 
         /* mkfs: write an initial condensed AG-log base so each slot has a valid
@@ -1345,94 +1352,91 @@ diskfs_init(
 } /* diskfs_init */
 
 
+/* Find a filesystem by name.  Caller holds shared->lock (or is single-
+ * threaded init/destroy). */
+struct diskfs_fs *
+diskfs_fs_find(
+    struct diskfs_shared *shared,
+    const char           *name,
+    int                   namelen)
+{
+    struct diskfs_fs *fs;
+
+    DL_FOREACH(shared->fs_list, fs)
+    {
+        if ((int) strlen(fs->name) == namelen &&
+            memcmp(fs->name, name, namelen) == 0) {
+            return fs;
+        }
+    }
+
+    return NULL;
+} /* diskfs_fs_find */
+
+
+/* Build the in-memory filesystem object for an fs_table entry and register
+ * its root mount_id (every FH this filesystem mints carries it). */
+struct diskfs_fs *
+diskfs_fs_attach(
+    struct diskfs_shared *shared,
+    const char           *name,
+    int                   namelen,
+    uint64_t              fsid,
+    uint64_t              root_inum,
+    uint32_t              root_gen)
+{
+    struct diskfs_fs *fs                              = calloc(1, sizeof(*fs));
+    uint8_t           fsid_buf[CHIMERA_VFS_FSID_SIZE] = { 0 };
+
+    fs->shared    = shared;
+    fs->name      = strndup(name, namelen);
+    fs->fsid      = fsid;
+    fs->root_inum = root_inum;
+    fs->root_gen  = root_gen;
+
+    memcpy(fsid_buf, &fs->fsid, sizeof(fs->fsid));
+    fs->root_fhlen = chimera_vfs_encode_fh_inum_mount(fsid_buf,
+                                                      fs->root_inum,
+                                                      fs->root_gen,
+                                                      fs->root_fh);
+
+    DL_APPEND(shared->fs_list, fs);
+
+    return fs;
+} /* diskfs_fs_attach */
+
+
 void
-diskfs_bootstrap(struct diskfs_thread *thread)
+diskfs_bootstrap_orphans(struct diskfs_thread *thread)
 {
     struct diskfs_shared   *shared = thread->shared;
     struct timespec         now;
-    struct diskfs_inode    *inode;
-    uint32_t                device_id;
-    uint64_t                device_offset, inum;
     int                     rc;
     struct diskfs_mount_io *mio;
 
     /* Guard against concurrent first-touch from multiple workers. */
     pthread_mutex_lock(&shared->lock);
-    if (shared->root_fhlen != 0) {
+    if (shared->orphans_created) {
         pthread_mutex_unlock(&shared->lock);
         return;
     }
 
-    /* Bootstrap writes the root + orphan inode blocks to their home locations
-     * synchronously (they must be re-readable from disk before becoming
-     * evictable CLEAN blocks).  All device access goes through evpl_block, so
-     * drive it with a transient mount-time pump rather than this worker's own
-     * event loop (avoids re-entering the dispatch loop mid-request). */
+    /* Bootstrap writes the orphan inode blocks to their home locations
+    * synchronously (they must be re-readable from disk before becoming
+    * evictable CLEAN blocks).  All device access goes through evpl_block, so
+    * drive it with a transient mount-time pump rather than this worker's own
+    * event loop (avoids re-entering the dispatch loop mid-request). */
     mio = diskfs_mount_io_open(shared);
 
     clock_gettime(CLOCK_REALTIME, &now);
-
-    /* The root inode lives at the statically-reserved block_idx 2 of AG 0 /
-     * disk 0 (inum 2).  It is reserved (not allocated through the allocator)
-     * so it is excluded from every condensed free set -- no alloc delta is
-     * needed and it can never be re-handed-out after a crash. */
-    inum          = 2;
-    device_id     = 0;
-    device_offset = sm_inum_to_device_offset(shared->space_map, inum, &device_id);
     (void) rc;
-
-    inode = diskfs_inode_struct_new(inum);
-
-    inode->size       = 4096;
-    inode->space_used = 4096;
-    inode->alloc_size = 0;
-    inode->uid        = 0;
-    inode->gid        = 0;
-    inode->nlink      = 2;
-    /* World-writable fresh root: with VFS-layer ADD_FILE/ADD_SUBDIRECTORY
-     * enforcement a root-owned 0755 root would refuse all creation by non-root
-     * clients on this engine-authoritative backend (matches memfs/cairn).
-     * Subdirs are still created owned by their creator with 0755. */
-    inode->mode       = S_IFDIR | 0777;
-    inode->atime_sec  = now.tv_sec;
-    inode->atime_nsec = now.tv_nsec;
-    inode->mtime_sec  = now.tv_sec;
-    inode->mtime_nsec = now.tv_nsec;
-    inode->ctime_sec  = now.tv_sec;
-    inode->ctime_nsec = now.tv_nsec;
-    inode->change++;
-    inode->btime_sec      = now.tv_sec;
-    inode->btime_nsec     = now.tv_nsec;
-    inode->dos_attributes = 0;
-
-    /* Root directory's parent is itself for ".." lookup */
-    inode->parent_inum = inode->inum;
-    inode->parent_gen  = inode->gen;
-
-    diskfs_inode_cache_insert(shared, inode);
-
-    /* Create the root inode's block: an embedded empty b+tree root plus the
-     * dinode.  Bootstrap is not a transaction, so write the block to its home
-     * location synchronously -- otherwise it would be CLEAN-but-not-home and
-     * eviction could discard it before the first write op logs it (CLEAN
-     * blocks must be re-readable from disk).  Then detach it, evictable. */
-    inode->block = diskfs_block_claim(thread, device_id, device_offset, 1);
-    diskfs_bt_node_init(inode->block->iov.data, DISKFS_BT_ROOT_BASE,
-                        DISKFS_BT_ROOT_CAP, 0);
-    diskfs_inode_flush(inode);
-    rc = diskfs_mount_io_write(mio, device_id, inode->block->iov.data,
-                               DISKFS_BLOCK_SIZE, device_offset);
-    chimera_diskfs_abort_if(rc != 0, "bootstrap root write failed");
-    diskfs_mount_io_flush(mio, device_id);
-    inode->block->state = DISKFS_BLOCK_CLEAN;
-    diskfs_block_unpin(thread, inode->block, DISKFS_BLOCK_CLEAN);
-    inode->block = NULL;
 
     /* Statically-reserved orphan-list shard inodes (inums 3..): empty
      * directories whose b+tree keys are the inums of deleted-but-not-fully-
-     * reclaimed inodes, sharded by deleted inum.  Created at format alongside
-     * root (persist; loaded from disk on remount); the reclaim workers scan
-     * them on mount and empty them. */
+     * reclaimed inodes, sharded by deleted inum.  Pool-level, owned by no
+     * named filesystem (inode->fs stays NULL; they never map attrs).
+     * Created once (persist; loaded from disk on remount); the reclaim
+     * workers scan them on mount and empty them. */
     for (int s = 0; s < DISKFS_ORPHAN_SHARDS; s++) {
         uint64_t             oinum = DISKFS_ORPHAN_INUM_BASE + s;
         uint32_t             odev;
@@ -1473,23 +1477,14 @@ diskfs_bootstrap(struct diskfs_thread *thread)
         oin->block = NULL;
     }
 
-    /* Create 16-byte fsid buffer for root FH encoding (8-byte fsid + 8 bytes padding) */
-    {
-        uint8_t fsid_buf[CHIMERA_VFS_FSID_SIZE] = { 0 };
-        memcpy(fsid_buf, &shared->fsid, sizeof(shared->fsid));
-        shared->root_fhlen = chimera_vfs_encode_fh_inum_mount(fsid_buf,
-                                                              inode->inum,
-                                                              inode->gen,
-                                                              shared->root_fh);
-    }
-    shared->root_inum       = inode->inum;
-    shared->root_gen        = inode->gen;
+    /* Freshly-created shards are empty: nothing to scan. */
     shared->orphans_scanned = 1;
+    shared->orphans_created = 1;
 
     diskfs_mount_io_close(mio);
 
     pthread_mutex_unlock(&shared->lock);
-} /* diskfs_bootstrap */
+} /* diskfs_bootstrap_orphans */
 
 
 static void
@@ -1511,6 +1506,7 @@ void
 diskfs_destroy(void *private_data)
 {
     struct diskfs_shared *shared = private_data;
+    struct diskfs_fs     *fs, *fs_tmp;
     int                   i;
 
     /* Reclaim workers first: their shutdown finishes the queued drains, which
@@ -1590,15 +1586,17 @@ diskfs_destroy(void *private_data)
 
         if (space_map_persist(shared->space_map, &smio, ckpt_seq) != 0) {
             chimera_diskfs_error("space-map persist at unmount failed");
-        } else if (shared->root_fhlen != 0) {
+        } else {
             /* Clean unmount: persist the exact next generation (no reserve
-             * needed -- nothing was issued past gen_next). */
+             * needed -- nothing was issued past gen_next).  The pool is
+             * always formatted by init, so always stamp CLEAN. */
             int rc = space_map_write_superblock(shared->space_map, &smio,
                                                 shared->fsid, SM_SB_CLEAN,
-                                                shared->root_inum, shared->root_gen,
+                                                0, 0,
                                                 shared->intent_log.log_seq,
                                                 __atomic_load_n(&shared->gen_next,
-                                                                __ATOMIC_ACQUIRE));
+                                                                __ATOMIC_ACQUIRE),
+                                                shared->fs_table);
             if (rc != 0) {
                 chimera_diskfs_error("clean-superblock write at unmount failed");
             }
@@ -1622,6 +1620,18 @@ diskfs_destroy(void *private_data)
     free(shared->device_paths);
     free(shared->metrics.block_io_device_ops_series);
     free(shared->metrics.block_io_device_bytes_series);
+
+    /* Tearing the whole module down: detach the list once and walk it,
+     * rather than unlinking node by node -- nothing reads it again. */
+    fs              = shared->fs_list;
+    shared->fs_list = NULL;
+
+    while (fs) {
+        fs_tmp = fs->next;
+        free(fs->name);
+        free(fs);
+        fs = fs_tmp;
+    }
 
     pthread_mutex_destroy(&shared->lock);
     free(shared->devices);

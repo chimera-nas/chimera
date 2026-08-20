@@ -34,14 +34,16 @@
 #define SM_SUPERBLOCK_OFFSET      0
 #define SM_SUPERBLOCK_SIZE        4096
 #define SM_SUPERBLOCK_MAGIC       0x4D5346534B534944ULL     /* "DISKSFSM" */
-#define SM_FORMAT_VERSION         3
+#define SM_FORMAT_VERSION         4
 
 /*
  * Bootstrap inode blocks carved after AG 0's log on device 0 at format time:
- * block_idx 1 is reserved (inum 1 invalid by convention), 2 is the root
- * inode, and the next SM_BOOTSTRAP_ORPHAN_SLOTS blocks (inums 3..) are the
- * sharded orphan-list inodes (diskfs spreads deleted-inode records across
- * them so unlinks don't serialize on one inode's write lock).
+ * block_idx 1 and 2 are reserved (inum 1 invalid by convention; inum 2 was
+ * the pre-named-filesystem static root, kept reserved for layout stability),
+ * and the next SM_BOOTSTRAP_ORPHAN_SLOTS blocks (inums 3..) are the sharded
+ * orphan-list inodes (diskfs spreads deleted-inode records across them so
+ * unlinks don't serialize on one inode's write lock).  Filesystem roots are
+ * ordinary allocated inodes recorded in the superblock fs_table.
  */
 #define SM_BOOTSTRAP_ORPHAN_SLOTS 16
 
@@ -231,40 +233,65 @@ struct sm_io {
 /* superblock flags */
 #define SM_SB_CLEAN                0x1ULL  /* set at clean unmount, cleared at mount */
 
-struct sm_superblock {
-    uint64_t magic;
-    uint32_t version;
-    uint32_t block_size;
-    uint64_t ag_size;
-    uint64_t ag_log_size;
+/*
+ * Named-filesystem table (CHIMERA_VFS_CAP_MKFS): one entry per filesystem in
+ * the pool, persisted in the superblock's zero padding.  An empty (NUL) name
+ * marks a free slot.  Rewritten durably by MKFS/RMFS; the root inode is an
+ * ordinary allocated inode, so root_inum/root_gen here are authoritative
+ * (a root's generation never changes while its entry exists).
+ */
+#define SM_FS_TABLE_MAX            44
+
+struct sm_fs_entry {
+    char     name[56];      /* NUL-terminated; empty = free slot */
     uint64_t fsid;
-    uint32_t num_devices;
-    uint32_t intent_log_device;
-    uint64_t intent_log_offset;
-    uint64_t intent_log_size;
-    uint32_t crc32;
-    /* Mount/recovery state (covered by crc32, which is computed over the
-     * whole 4 KiB block with the crc field zeroed). */
-    uint64_t flags;
     uint64_t root_inum;
     uint32_t root_gen;
-    uint64_t log_seq;           /* next redo seq at clean unmount (for recovery) */
+    uint32_t pad;
+};
+
+struct sm_superblock {
+    uint64_t           magic;
+    uint32_t           version;
+    uint32_t           block_size;
+    uint64_t           ag_size;
+    uint64_t           ag_log_size;
+    uint64_t           fsid;
+    uint32_t           num_devices;
+    uint32_t           intent_log_device;
+    uint64_t           intent_log_offset;
+    uint64_t           intent_log_size;
+    uint32_t           crc32;
+    /* Mount/recovery state (covered by crc32, which is computed over the
+     * whole 4 KiB block with the crc field zeroed). */
+    uint64_t           flags;
+    uint64_t           root_inum;
+    uint32_t           root_gen;
+    uint64_t           log_seq; /* next redo seq at clean unmount (for recovery) */
     /* Block-mode (pNFS) relocated-AG-log region: where the AG logs for remote
      * data devices live on the local metadata device (device 0), recorded so a
      * persistent remount can validate the deterministic (device,ag)->slot map.
      * remote_log_size == 0 means no remote devices (today's layout). */
-    uint32_t num_remote_devices;
-    uint32_t remote_log_device;     /* device holding relocated logs (== 0) */
-    uint64_t remote_log_offset;     /* region base on remote_log_device */
-    uint64_t remote_log_size;       /* total region bytes */
+    uint32_t           num_remote_devices;
+    uint32_t           remote_log_device; /* device holding relocated logs (== 0) */
+    uint64_t           remote_log_offset; /* region base on remote_log_device */
+    uint64_t           remote_log_size; /* total region bytes */
     /* Inode-generation floor: every generation ever issued by this filesystem
      * is below this value, persisted with reserve-ahead so a crash can never
      * re-issue a generation (which would let a stale file handle resolve to a
      * reused inode block).  diskfs owns the semantics; see the gen allocator
      * there. */
-    uint64_t gen_floor;
+    uint64_t           gen_floor;
+    /* Named-filesystem table (must stay the LAST field; it grew into what
+     * was the block's zero padding). */
+    struct sm_fs_entry fs_table[SM_FS_TABLE_MAX];
     /* Remainder of the 4 KiB block is implicit zero padding. */
 };
+
+_Static_assert(sizeof(struct sm_superblock) <= SM_SUPERBLOCK_SIZE,
+               "sm_superblock must fit the 4 KiB superblock");
+_Static_assert(sizeof(struct sm_fs_entry) == 80,
+               "sm_fs_entry layout is part of the on-disk format");
 
 /*
  * IEEE CRC-32 (bitwise; used for the superblock and, later, intent-log redo
@@ -664,14 +691,15 @@ space_map_thread_cache_discard_volatile(
  */
 void
 space_map_fill_superblock(
-    struct space_map *sm,
-    void             *buf,
-    uint64_t          fsid,
-    uint64_t          flags,
-    uint64_t          root_inum,
-    uint32_t          root_gen,
-    uint64_t          log_seq,
-    uint64_t          gen_floor);
+    struct space_map         *sm,
+    void                     *buf,
+    uint64_t                  fsid,
+    uint64_t                  flags,
+    uint64_t                  root_inum,
+    uint32_t                  root_gen,
+    uint64_t                  log_seq,
+    uint64_t                  gen_floor,
+    const struct sm_fs_entry *fs_table);
 
 /*
  * Write a stub superblock to offset 0 of device 0 through the mount-time
@@ -680,14 +708,15 @@ space_map_fill_superblock(
  */
 int
 space_map_write_superblock(
-    struct space_map   *sm,
-    const struct sm_io *io,
-    uint64_t            fsid,
-    uint64_t            flags,
-    uint64_t            root_inum,
-    uint32_t            root_gen,
-    uint64_t            log_seq,
-    uint64_t            gen_floor);
+    struct space_map         *sm,
+    const struct sm_io       *io,
+    uint64_t                  fsid,
+    uint64_t                  flags,
+    uint64_t                  root_inum,
+    uint32_t                  root_gen,
+    uint64_t                  log_seq,
+    uint64_t                  gen_floor,
+    const struct sm_fs_entry *fs_table);
 
 /* Runtime AG-log condensation (see the implementation for the full
  * protocol): prepare snapshots the free set as a new base image for the

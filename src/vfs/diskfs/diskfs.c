@@ -23,12 +23,51 @@ diskfs_dispatch(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct diskfs_thread *thread = private_data;
-    struct diskfs_shared *shared = thread->shared;
+    struct diskfs_thread          *thread = private_data;
+    struct diskfs_shared          *shared = thread->shared;
+    struct diskfs_request_private *p      = request->plugin_data;
+    struct diskfs_fs              *fs     = NULL;
 
-    if (unlikely(shared->root_fhlen == 0)) {
-        diskfs_bootstrap(thread);
+    if (unlikely(!shared->orphans_created)) {
+        diskfs_bootstrap_orphans(thread);
     }
+
+    /* Ops that name a filesystem (or the pool) rather than an object in one:
+     * mount/mkfs/rmfs resolve by name, umount by mount_private, and the KV
+     * ops target the pool-level in-memory KV shards.  CLOSE carries no file
+     * handle at all (chimera_vfs_close allocates its request with fh=NULL)
+     * and works off the pinned inode, so it must not be gated on an
+     * FH-derived filesystem -- failing it here would strand the handle's
+     * inode reference and with it every deleted file's space.  Everything
+     * else resolves its filesystem from the FH mount_id prefix. */
+    switch (request->opcode) {
+        case CHIMERA_VFS_OP_MOUNT:
+        case CHIMERA_VFS_OP_UMOUNT:
+        case CHIMERA_VFS_OP_MKFS:
+        case CHIMERA_VFS_OP_RMFS:
+        case CHIMERA_VFS_OP_PUT_KEY:
+        case CHIMERA_VFS_OP_GET_KEY:
+        case CHIMERA_VFS_OP_DELETE_KEY:
+        case CHIMERA_VFS_OP_SEARCH_KEYS:
+            break;
+        default:
+            /* Every other op targets an object in some named filesystem: the
+             * one belonging to the mount the handle routed through, which the
+             * VFS resolved for us.  Closes included -- umount holds the mount
+             * live until the handles referencing it are gone, so a close
+             * arrives here with its filesystem as firmly identified as any
+             * other operation's. */
+            fs = request->mount_private;
+
+            if (unlikely(!fs)) {
+                request->status = CHIMERA_VFS_ESTALE;
+                request->complete(request);
+                return;
+            }
+            break;
+    } /* switch */
+
+    p->fs = fs;
 
     switch (request->opcode) {
         case CHIMERA_VFS_OP_MOUNT:
@@ -36,6 +75,12 @@ diskfs_dispatch(
             break;
         case CHIMERA_VFS_OP_UMOUNT:
             diskfs_umount(thread, shared, request, private_data);
+            break;
+        case CHIMERA_VFS_OP_MKFS:
+            diskfs_mkfs(thread, shared, request, private_data);
+            break;
+        case CHIMERA_VFS_OP_RMFS:
+            diskfs_rmfs(thread, shared, request, private_data);
             break;
         case CHIMERA_VFS_OP_LOOKUP_AT:
             diskfs_lookup_at(thread, shared, request, private_data);
@@ -143,7 +188,7 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_diskfs = {
          * handle->vfs_private (diskfs_open_fh_inode_cb), which read/write reuse
          * to skip per-I/O inode resolution. */
         CHIMERA_VFS_CAP_OPEN_FILE_REQUIRED | CHIMERA_VFS_CAP_FS_LOCK |
-        CHIMERA_VFS_CAP_CHANGE,
+        CHIMERA_VFS_CAP_CHANGE | CHIMERA_VFS_CAP_MKFS,
     .init           = diskfs_init,
     .destroy        = diskfs_destroy,
     .thread_init    = diskfs_thread_init,

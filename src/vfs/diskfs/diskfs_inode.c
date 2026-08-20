@@ -299,6 +299,7 @@ void
 diskfs_inode_acquire(
     struct diskfs_thread       *thread,
     struct diskfs_txn          *txn,
+    struct diskfs_fs           *fs,
     uint64_t                    inum,
     uint32_t                    gen,
     enum diskfs_inode_lock_mode mode,
@@ -344,7 +345,7 @@ diskfs_inode_acquire(
         diskfs_metric_inode_cache(thread, DISKFS_METRIC_INODE_CACHE_MISS);
         pthread_mutex_unlock(&shard->lock);
         if (sm_inum_valid(thread->shared->space_map, inum)) {
-            diskfs_inode_load(thread, txn, inum, gen, mode, cb, private_data);
+            diskfs_inode_load(thread, txn, fs, inum, gen, mode, cb, private_data);
         } else {
             cb(NULL, CHIMERA_VFS_ENOENT, private_data);
         }
@@ -395,6 +396,7 @@ struct diskfs_inode *
 diskfs_inode_load_sync(
     struct diskfs_thread   *thread,
     struct diskfs_mount_io *io,
+    struct diskfs_fs       *fs,
     uint64_t                inum,
     uint32_t                gen,
     int                     allow_orphan)
@@ -445,6 +447,7 @@ diskfs_inode_load_sync(
         diskfs_inode_cache_recycle_locked(shared, shard);
         inode                 = calloc(1, sizeof(*inode));
         inode->inum           = inum;
+        inode->fs             = fs;
         inode->refcnt         = 1;
         inode->gen            = di->gen;
         inode->mode           = di->mode;
@@ -567,8 +570,8 @@ diskfs_gen_extend(struct diskfs_thread *thread)
     evpl_iovec_alloc(thread->evpl, SM_SUPERBLOCK_SIZE, SM_SUPERBLOCK_SIZE, 1,
                      0, &ge->iov);
     space_map_fill_superblock(shared->space_map, ge->iov.data, shared->fsid,
-                              0 /* dirty */, shared->root_inum,
-                              shared->root_gen, 0, ge->new_floor);
+                              0 /* dirty */, 0, 0, 0, ge->new_floor,
+                              shared->fs_table);
 
     evpl_block_write(thread->evpl, thread->queue[0], &ge->iov, 1,
                      SM_SUPERBLOCK_OFFSET, 1 /* sync */,
