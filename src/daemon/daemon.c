@@ -1051,6 +1051,40 @@ main(
         }
     }
 
+    /* "filesystems": named filesystems to ensure exist inside CAP_MKFS
+     * modules before any mounts reference them.  Declarative: a filesystem
+     * that already exists (EEXIST, e.g. a persistent backend rebooting
+     * against the same store) is not an error. */
+    json_t *filesystems = json_object_get(config, "filesystems");
+
+    if (filesystems) {
+        const char *fsname;
+        json_t     *fs_entry;
+        json_object_foreach(filesystems, fsname, fs_entry)
+        {
+            const char *fs_module  = json_string_value(json_object_get(fs_entry, "module"));
+            const char *fs_options = json_string_value(json_object_get(fs_entry, "options"));
+            int         fs_rc;
+
+            if (!fs_module) {
+                chimera_server_error("Filesystem %s missing module, skipping", fsname);
+                continue;
+            }
+
+            chimera_server_info("Creating filesystem %s in module %s...", fsname, fs_module);
+
+            fs_rc = chimera_server_mkfs(server, fs_module, fsname, fs_options);
+
+            if (fs_rc == CHIMERA_VFS_EEXIST) {
+                chimera_server_info("Filesystem %s already exists in module %s", fsname, fs_module);
+            } else if (fs_rc != 0) {
+                chimera_server_error("Failed to create filesystem %s in module %s",
+                                     fsname, fs_module);
+                exit(1);
+            }
+        }
+    }
+
     mounts = json_object_get(config, "mounts");
 
     if (mounts) {

@@ -73,7 +73,7 @@ chimera_vfs_delete_key_at(
 
     if (route.fallback) {
         request = chimera_vfs_request_alloc_common(thread, NULL, route.module,
-                                                   NULL, 0,
+                                                   NULL, NULL, 0,
                                                    chimera_vfs_hash(key, key_len),
                                                    CHIMERA_VFS_CAP_KV);
     } else {

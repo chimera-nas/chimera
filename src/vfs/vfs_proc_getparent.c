@@ -35,12 +35,13 @@ chimera_vfs_getparent(
     struct chimera_vfs_module  *module;
     struct chimera_vfs_request *request;
     uint64_t                    fh_hash;
+    void                       *mount_private;
 
-    module = chimera_vfs_get_module(thread, fh, fhlen);
+    module = chimera_vfs_resolve_mount(thread, fh, fhlen, 1, &mount_private);
 
     fh_hash = chimera_vfs_hash(fh, fhlen);
 
-    request = chimera_vfs_request_alloc_common(thread, cred, module,
+    request = chimera_vfs_request_alloc_common(thread, cred, module, mount_private,
                                                fh, fhlen, fh_hash,
                                                CHIMERA_VFS_CAP_RPL);
 

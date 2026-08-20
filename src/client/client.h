@@ -110,6 +110,36 @@ chimera_umount(
     chimera_umount_callback_t     callback,
     void                         *private_data);
 
+typedef void (*chimera_mkfs_callback_t)(
+    struct chimera_client_thread *client,
+    enum chimera_vfs_error        status,
+    void                         *private_data);
+
+/* Create a named filesystem inside a CAP_MKFS module (memfs, diskfs, cairn).
+ * The filesystem is then mountable with a module path of "<fsname>[/path]". */
+void
+chimera_mkfs(
+    struct chimera_client_thread *client,
+    const char                   *module_name,
+    const char                   *fsname,
+    const char                   *options,
+    chimera_mkfs_callback_t       callback,
+    void                         *private_data);
+
+typedef void (*chimera_rmfs_callback_t)(
+    struct chimera_client_thread *client,
+    enum chimera_vfs_error        status,
+    void                         *private_data);
+
+/* Remove a named filesystem; fails with CHIMERA_VFS_EBUSY while mounted. */
+void
+chimera_rmfs(
+    struct chimera_client_thread *client,
+    const char                   *module_name,
+    const char                   *fsname,
+    chimera_rmfs_callback_t       callback,
+    void                         *private_data);
+
 
 void
 chimera_drain(

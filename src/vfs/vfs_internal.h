@@ -124,6 +124,18 @@ chimera_vfs_handle_stamp_access(
 #define CHIMERA_VFS_PTR_ERR(ptr)        ((int) (-(long) (ptr)))
 #define CHIMERA_VFS_IS_ERR(ptr)         ((unsigned long) (ptr) > (unsigned long) -CHIMERA_VFS_MAX_ERRNO)
 
+/* Parse a comma-separated key[=value] options string into mount_options,
+ * copying keys/values into the caller's buffer.  Shared by the mount and
+ * mkfs paths.  Defined in vfs_proc_mount.c. */
+int
+chimera_vfs_parse_mount_options(
+    const char                       *options,
+    struct chimera_vfs_mount_options *mount_options,
+    char                             *buffer,
+    int                               buffer_size,
+    char                             *errbuf,
+    size_t                            errbuf_len);
+
 /* Structure for readdir entries stored in bounce buffer */
 struct chimera_vfs_readdir_entry {
     uint64_t                 inum;
@@ -168,15 +180,35 @@ chimera_vfs_find_result_free(
     LL_PREPEND(thread->free_find_results, result);
 } /* chimera_vfs_find_result_free */
 
+/*
+ * Resolve the mount that owns `fh` into the two things a request needs from
+ * it: the module to route to, and the backend's mount_private for the named
+ * filesystem the handle belongs to.
+ *
+ * Both are read under the RCU read lock and copied out.  The mount itself is
+ * deliberately not returned: umount frees it, so a caller holding the pointer
+ * past the read-side critical section would be reading freed memory.
+ *
+ * `gated` separates the two questions the callers ask.  Routing is gated: a
+ * mount that umount has claimed must not accept new work.  Filesystem
+ * resolution is not, because umount's own closes run against exactly such a
+ * mount and still have to find the filesystem their handle belongs to.
+ */
 static inline struct chimera_vfs_module *
-chimera_vfs_get_module(
+chimera_vfs_resolve_mount(
     struct chimera_vfs_thread *thread,
     const void                *fh,
-    int                        fhlen)
+    int                        fhlen,
+    int                        gated,
+    void                     **r_mount_private)
 {
     struct chimera_vfs        *vfs = thread->vfs;
     struct chimera_vfs_mount  *mount;
     struct chimera_vfs_module *module;
+
+    if (r_mount_private) {
+        *r_mount_private = NULL;
+    }
 
     /*
      * Reject implausible handle lengths before they reach any sink.  The lower
@@ -186,9 +218,9 @@ chimera_vfs_get_module(
      * wire `opaque<>` bound (see nfs3_attr.h), so an oversized handle would
      * otherwise be memcpy'd into the fixed CHIMERA_VFS_FH_SIZE handle buffers
      * (e.g. vfs_proc_open_fh.c, vfs_open_cache.h, vfs_state.c) and overflow
-     * them.  This gate is the common chokepoint every fh-routed op funnels
-     * through, so bounding here protects all of them; callers already treat a
-     * NULL module as ESTALE/BADHANDLE.
+     * them.  This is the common chokepoint every fh-routed op funnels through,
+     * so bounding here protects all of them; callers already treat a NULL
+     * module as ESTALE/BADHANDLE.
      */
     if (fhlen < CHIMERA_VFS_MOUNT_ID_SIZE || fhlen > CHIMERA_VFS_FH_SIZE) {
         return NULL;
@@ -198,14 +230,27 @@ chimera_vfs_get_module(
 
     mount = chimera_vfs_mount_table_lookup(vfs->mount_table, fh);
 
-    /* A mount being torn down routes nothing new: umount has already
-     * established that no handle references it and is closing the cached
-     * ones, so admitting another op here would resurrect it. */
-    module = (mount && !mount->unmounting) ? mount->module : NULL;
+    if (mount) {
+        if (r_mount_private) {
+            *r_mount_private = mount->mount_private;
+        }
+        module = (gated && mount->unmounting) ? NULL : mount->module;
+    } else {
+        module = NULL;
+    }
 
     urcu_qsbr_read_unlock();
 
     return module;
+} /* chimera_vfs_resolve_mount */
+
+static inline struct chimera_vfs_module *
+chimera_vfs_get_module(
+    struct chimera_vfs_thread *thread,
+    const void                *fh,
+    int                        fhlen)
+{
+    return chimera_vfs_resolve_mount(thread, fh, fhlen, 1, NULL);
 } /* chimera_vfs_get_module */
 
 /* True when the mount that owns `fh` is served by a path-only module (no
@@ -321,6 +366,7 @@ chimera_vfs_request_alloc_common(
     struct chimera_vfs_thread     *thread,
     const struct chimera_vfs_cred *cred,
     struct chimera_vfs_module     *module,
+    void                          *mount_private,
     const void                    *fh,
     int                            fhlen,
     uint64_t                       fh_hash,
@@ -344,9 +390,10 @@ chimera_vfs_request_alloc_common(
         request->thread      = thread;
         request->plugin_data = malloc(CHIMERA_VFS_PLUGIN_DATA_SIZE);
     }
-    request->status = CHIMERA_VFS_UNSET;
-    request->cred   = cred;
-    request->module = module;
+    request->status        = CHIMERA_VFS_UNSET;
+    request->cred          = cred;
+    request->module        = module;
+    request->mount_private = mount_private;
 
     /* Reset implicit-lease mediation state: requests are pooled and not
      * fully memset on reuse, so a prior op's owner/pin must not leak in. */
@@ -400,10 +447,12 @@ chimera_vfs_request_alloc_by_hash(
     int                            fhlen,
     uint64_t                       fh_hash)
 {
-    struct chimera_vfs_module *module = chimera_vfs_get_module(thread, fh, fhlen);
+    void                      *mount_private;
+    struct chimera_vfs_module *module = chimera_vfs_resolve_mount(thread, fh, fhlen, 1,
+                                                                  &mount_private);
 
-    return chimera_vfs_request_alloc_common(thread, cred, module, fh, fhlen,
-                                            fh_hash, CHIMERA_VFS_CAP_FS);
+    return chimera_vfs_request_alloc_common(thread, cred, module, mount_private,
+                                            fh, fhlen, fh_hash, CHIMERA_VFS_CAP_FS);
 } /* chimera_vfs_request_alloc_by_hash */
 
 
@@ -454,8 +503,16 @@ chimera_vfs_request_alloc_with_module(
     uint64_t                       fh_hash,
     struct chimera_vfs_module     *module)
 {
-    return chimera_vfs_request_alloc_common(thread, cred, module, fh, fhlen,
-                                            fh_hash, CHIMERA_VFS_CAP_FS);
+    void *mount_private;
+
+    /* The caller already knows the module, but the backend still needs to be
+     * told which of its filesystems the handle belongs to.  Resolved ungated:
+     * this path carries umount's own closes, whose mount is by definition
+     * claimed, and refusing them would strand the state they release. */
+    chimera_vfs_resolve_mount(thread, fh, fhlen, 0, &mount_private);
+
+    return chimera_vfs_request_alloc_common(thread, cred, module, mount_private,
+                                            fh, fhlen, fh_hash, CHIMERA_VFS_CAP_FS);
 } /* chimera_vfs_request_alloc_with_module */
 
 /*
@@ -472,7 +529,7 @@ chimera_vfs_request_alloc_kv(
     struct chimera_vfs *vfs      = thread->vfs;
     uint64_t            key_hash = chimera_vfs_hash(key, key_len);
 
-    return chimera_vfs_request_alloc_common(thread, NULL, vfs->kv_module,
+    return chimera_vfs_request_alloc_common(thread, NULL, vfs->kv_module, NULL,
                                             NULL, 0, key_hash, CHIMERA_VFS_CAP_KV);
 } /* chimera_vfs_request_alloc_kv */
 
