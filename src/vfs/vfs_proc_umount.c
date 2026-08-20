@@ -13,6 +13,24 @@
 #include "common/macros.h"
 
 
+/*
+ * Wake this thread's event loop.
+ *
+ * umount is the one VFS operation that can finish from a timer callback rather
+ * than from a backend completion, and evpl_continue() runs due timers and then
+ * waits for an fd event -- indefinitely, since wait_ms defaults to -1.  A
+ * caller driving its own loop (chimera_server_unmount and the other synchronous
+ * wrappers spin on `while (!done) evpl_continue(evpl)`) would therefore set
+ * done inside evpl_continue and then block in it forever, never re-testing.
+ * Ringing the thread's own doorbell leaves an event pending, so evpl_continue
+ * returns and the caller observes the completion.
+ */
+static void
+chimera_vfs_umount_wake(struct chimera_vfs_thread *thread)
+{
+    evpl_ring_doorbell(&thread->doorbell);
+} /* chimera_vfs_umount_wake */
+
 static void
 chimera_vfs_umount_complete(struct chimera_vfs_request *request)
 {
@@ -24,6 +42,8 @@ chimera_vfs_umount_complete(struct chimera_vfs_request *request)
     callback(thread, CHIMERA_VFS_OK, request->proto_private_data);
 
     chimera_vfs_request_free(thread, request);
+
+    chimera_vfs_umount_wake(thread);
 
     free(request->umount.mount->path);
     free(request->umount.mount->module_path);
@@ -50,6 +70,7 @@ struct chimera_vfs_umount_wait {
 
 static void chimera_vfs_umount_progress(
     struct chimera_vfs_request *request);
+
 
 /*
  * Every handle on this mount is gone and every close they needed has run;
@@ -81,6 +102,8 @@ chimera_vfs_umount_abandon(struct chimera_vfs_request *request)
     chimera_vfs_request_free(thread, request);
 
     callback(thread, CHIMERA_VFS_EBUSY, arg);
+
+    chimera_vfs_umount_wake(thread);
 } /* chimera_vfs_umount_abandon */
 
 static void

@@ -64,6 +64,10 @@ add_executable(vfs_statfs_mask_test vfs_statfs_mask_test.c)
 target_link_libraries(vfs_statfs_mask_test chimera_vfs chimera_vfs_memfs chimera_vfs_memkv evpl)
 add_test(chimera/vfs/statfs_mask_test vfs_statfs_mask_test)
 
+add_executable(vfs_umount_wait_test vfs_umount_wait_test.c)
+target_link_libraries(vfs_umount_wait_test chimera_vfs chimera_vfs_memfs chimera_vfs_memkv evpl)
+add_test(chimera/vfs/umount_wait_test vfs_umount_wait_test)
+
 # zero_range reproducer / regression: VFS zero_range (DEALLOCATE+ALLOCATE) data
 # integrity, parameterized by backend.  memfs/linux confirm the invariant holds
 # (and that the model checker is sound); the diskfs cases reproduce the bug.
