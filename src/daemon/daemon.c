@@ -1186,8 +1186,17 @@ main(
      * since no SMB client can create a reparse-point symlink on an empty share. */
     const char *seed_module = getenv("CHIMERA_SMB_SEED_SYMLINKS");
 
+    /* Where on the module the fixtures go.  "/" was the implicit filesystem
+     * every backend used to have; a CAP_MKFS backend has none, so the harness
+     * names the filesystem its shares mount (e.g. "fs0"). */
+    const char *seed_path = getenv("CHIMERA_SMB_SEED_PATH");
+
+    if (!seed_path || !seed_path[0]) {
+        seed_path = "/";
+    }
+
     if (seed_module && seed_module[0]) {
-        if (chimera_server_seed_symlinks(server, seed_module) != 0) {
+        if (chimera_server_seed_symlinks(server, seed_module, seed_path) != 0) {
             chimera_server_error("Failed to seed symlink fixtures on module %s",
                                  seed_module);
         } else {
@@ -1200,7 +1209,7 @@ main(
     const char *seed_fsa_module = getenv("CHIMERA_SMB_SEED_FSA");
 
     if (seed_fsa_module && seed_fsa_module[0]) {
-        if (chimera_server_seed_fsa(server, seed_fsa_module) != 0) {
+        if (chimera_server_seed_fsa(server, seed_fsa_module, seed_path) != 0) {
             chimera_server_error("Failed to seed FSA fixtures on module %s",
                                  seed_fsa_module);
         } else {

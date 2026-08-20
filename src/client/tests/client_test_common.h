@@ -33,6 +33,10 @@ struct test_env {
     int                           use_smb;
     char                          user_spec[64];
     struct chimera_vfs_cred       cred;          // Credential used to initialize the client
+    /* Direct named-filesystem mount tracking, so cleanup can unmount and
+     * remove filesystem "fs0" (see client_test_mount / client_test_cleanup). */
+    const char                   *fs_module;
+    char                          fs_mount_path[256];
 };
 
 static inline void
@@ -48,9 +52,11 @@ client_test_init(
     struct chimera_server_config *server_config;
     struct timespec               tv;
 
-    env->use_nfs = 0;
-    env->nfsvers = 0;
-    env->use_smb = 0;
+    env->use_nfs          = 0;
+    env->nfsvers          = 0;
+    env->use_smb          = 0;
+    env->fs_module        = NULL;
+    env->fs_mount_path[0] = '\0';
     snprintf(env->user_spec, sizeof(env->user_spec), "root");
 
     env->server_metrics = prometheus_metrics_create(NULL, NULL, 0);
@@ -223,15 +229,20 @@ client_test_init(
         } else if (strcmp(backend, "io_uring") == 0) {
             chimera_server_mount(env->server, "share", "io_uring", env->session_dir, NULL);
 
-        } else if (strcmp(backend, "memfs") == 0) {
-            chimera_server_mount(env->server, "share", "memfs", "/", NULL);
+        } else if (strcmp(backend, "memfs") == 0 ||
+                   strcmp(backend, "diskfs_io_uring") == 0 ||
+                   strcmp(backend, "diskfs_aio") == 0 ||
+                   strcmp(backend, "cairn") == 0) {
+            /* Named-filesystem backends: create filesystem "fs0" and mount
+             * it by name (removed again in client_test_cleanup). */
+            const char *module = strncmp(backend, "diskfs", 6) == 0
+                                 ? "diskfs" : backend;
 
-        } else if (strcmp(backend, "diskfs_io_uring") == 0 ||
-                   strcmp(backend, "diskfs_aio") == 0) {
-            chimera_server_mount(env->server, "share", "diskfs", "/", NULL);
-
-        } else if (strcmp(backend, "cairn") == 0) {
-            chimera_server_mount(env->server, "share", "cairn", "/", NULL);
+            if (chimera_server_mkfs(env->server, module, "fs0", NULL) != 0) {
+                fprintf(stderr, "Failed to create %s filesystem fs0\n", module);
+                exit(EXIT_FAILURE);
+            }
+            chimera_server_mount(env->server, "share", module, "fs0", NULL);
         } else {
             fprintf(stderr, "Unknown backend: %s\n", backend);
             exit(EXIT_FAILURE);
@@ -383,6 +394,23 @@ client_test_init(
 
 } /* client_test_init */
 
+struct client_test_sync {
+    int done;
+    enum chimera_vfs_error status;
+};
+
+static void
+client_test_sync_cb(
+    struct chimera_client_thread *thread,
+    enum chimera_vfs_error        status,
+    void                         *private_data)
+{
+    struct client_test_sync *sync = private_data;
+
+    sync->status = status;
+    sync->done   = 1;
+} /* client_test_sync_cb */
+
 static inline void
 client_test_cleanup(
     struct test_env *env,
@@ -400,9 +428,45 @@ client_test_cleanup(
         }
     }
 
+    /* Direct named-filesystem backend: unmount and remove filesystem "fs0"
+     * before the client goes away (best-effort). */
+    if (env->fs_module) {
+        struct client_test_sync sync = { 0 };
+
+        chimera_umount(env->client_thread, env->fs_mount_path,
+                       client_test_sync_cb, &sync);
+        while (!sync.done) {
+            evpl_continue(env->evpl);
+        }
+
+        sync.done = 0;
+        chimera_rmfs(env->client_thread, env->fs_module, "fs0",
+                     client_test_sync_cb, &sync);
+        while (!sync.done) {
+            evpl_continue(env->evpl);
+        }
+        if (sync.status != CHIMERA_VFS_OK) {
+            fprintf(stderr, "warning: failed to remove filesystem fs0 (%d)\n",
+                    sync.status);
+        }
+    }
+
     chimera_client_thread_shutdown(env->evpl, env->client_thread);
     chimera_destroy(env->client);
     if (env->server) {
+        /* Server-side named filesystems: drop the share mount and remove the
+         * filesystem, exercising the full lifecycle. */
+        if (strcmp(env->backend, "memfs") == 0 ||
+            strncmp(env->backend, "diskfs", 6) == 0 ||
+            strcmp(env->backend, "cairn") == 0) {
+            const char *module = strncmp(env->backend, "diskfs", 6) == 0
+                                 ? "diskfs" : env->backend;
+
+            chimera_server_unmount(env->server, "share");
+            if (chimera_server_rmfs(env->server, module, "fs0") != 0) {
+                fprintf(stderr, "warning: failed to remove filesystem fs0\n");
+            }
+        }
         chimera_server_destroy(env->server);
     }
     evpl_destroy(env->evpl);
@@ -426,6 +490,36 @@ client_test_success(struct test_env *env)
 {
     client_test_cleanup(env, 1);
 } /* client_test_success */
+
+/* Direct named-filesystem backends: ensure filesystem "fs0" exists, then
+ * mount it.  EEXIST is fine (an earlier mount in the same test already
+ * created it, or a persistent store carried it over). */
+struct client_test_mount_ctx {
+    struct test_env         *env;
+    char                     mount_path[256];
+    const char              *module_name;
+    chimera_mount_callback_t callback;
+    void                    *private_data;
+};
+
+static void
+client_test_mkfs_complete(
+    struct chimera_client_thread *thread,
+    enum chimera_vfs_error        status,
+    void                         *private_data)
+{
+    struct client_test_mount_ctx *ctx = private_data;
+
+    if (status != CHIMERA_VFS_OK && status != CHIMERA_VFS_EEXIST) {
+        ctx->callback(thread, status, ctx->private_data);
+        free(ctx);
+        return;
+    }
+
+    chimera_mount(ctx->env->client_thread, ctx->mount_path, ctx->module_name,
+                  "fs0", NULL, ctx->callback, ctx->private_data);
+    free(ctx);
+} /* client_test_mkfs_complete */
 
 static inline void
 client_test_mount(
@@ -462,6 +556,29 @@ client_test_mount(
             strcmp(env->backend, "diskfs_aio") == 0) {
             module_name = "diskfs";
         }
+
+        if (strcmp(module_name, "memfs") == 0 ||
+            strcmp(module_name, "diskfs") == 0 ||
+            strcmp(module_name, "cairn") == 0) {
+            struct client_test_mount_ctx *ctx = calloc(1, sizeof(*ctx));
+
+            ctx->env = env;
+            snprintf(ctx->mount_path, sizeof(ctx->mount_path), "%s", mount_path);
+            ctx->module_name  = module_name;
+            ctx->callback     = callback;
+            ctx->private_data = private_data;
+
+            /* Remember the mount so client_test_cleanup can unmount and
+             * remove the filesystem. */
+            env->fs_module = module_name;
+            snprintf(env->fs_mount_path, sizeof(env->fs_mount_path), "%s",
+                     mount_path);
+
+            chimera_mkfs(env->client_thread, module_name, "fs0", NULL,
+                         client_test_mkfs_complete, ctx);
+            return;
+        }
+
         chimera_mount(env->client_thread, mount_path, module_name, module_path, NULL, callback, private_data);
     }
 } /* client_test_mount */

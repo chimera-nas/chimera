@@ -16,6 +16,9 @@
  *   6. A mount created without options omits the "options" key on read
  *   7. Missing required fields return 400; a duplicate name returns 409
  *   8. Delete removes the mount (204) and it is afterwards 404
+ *   9. /api/v1/filesystems lifecycle: create a second filesystem (201),
+ *      duplicate create (409), mount it, delete while mounted (409),
+ *      unmount, delete (204)
  */
 
 #include "common/logging.h"
@@ -259,7 +262,12 @@ main(
         return EXIT_FAILURE;
     }
 
-    chimera_server_mount(server, "share", "memfs", "/", NULL);
+    if (chimera_server_mkfs(server, "memfs", "fs0", NULL) != 0) {
+        fprintf(stderr, "Failed to create fs0 filesystem in memfs\n");
+        prometheus_metrics_destroy(metrics);
+        return EXIT_FAILURE;
+    }
+    chimera_server_mount(server, "share", "memfs", "fs0", NULL);
 
     chimera_server_start(server);
     fprintf(stderr, "Server started (REST on port %d)\n", REST_PORT);
@@ -269,7 +277,7 @@ main(
     fprintf(stderr, "\n  Test: Create mount with options...\n");
     check_code("POST /api/v1/mounts with options returns 201",
                "POST", "/api/v1/mounts",
-               "{\"name\":\"optmount\",\"module\":\"memfs\",\"path\":\"/\","
+               "{\"name\":\"optmount\",\"module\":\"memfs\",\"path\":\"fs0\","
                "\"options\":\"ro,foo=bar\"}",
                201, &failures);
 
@@ -293,20 +301,20 @@ main(
     fprintf(stderr, "\n  Test: Malformed options rejected with 400...\n");
     check_body_contains("Empty option key returns 400 with reason",
                         "POST", "/api/v1/mounts",
-                        "{\"name\":\"bad1\",\"module\":\"memfs\",\"path\":\"/\","
+                        "{\"name\":\"bad1\",\"module\":\"memfs\",\"path\":\"fs0\","
                         "\"options\":\"=noKey\"}",
                         400, "empty option key", 1, &failures);
 
     check_body_contains("Too many options returns 400 with reason",
                         "POST", "/api/v1/mounts",
-                        "{\"name\":\"bad2\",\"module\":\"memfs\",\"path\":\"/\","
+                        "{\"name\":\"bad2\",\"module\":\"memfs\",\"path\":\"fs0\","
                         "\"options\":\"a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q\"}",
                         400, "too many options", 1, &failures);
 
     /* A present-but-non-string options value is rejected too. */
     check_code("Non-string options returns 400",
                "POST", "/api/v1/mounts",
-               "{\"name\":\"bad3\",\"module\":\"memfs\",\"path\":\"/\","
+               "{\"name\":\"bad3\",\"module\":\"memfs\",\"path\":\"fs0\","
                "\"options\":123}",
                400, &failures);
 
@@ -324,7 +332,7 @@ main(
     fprintf(stderr, "\n  Test: Mount without options omits the key...\n");
     check_code("POST /api/v1/mounts without options returns 201",
                "POST", "/api/v1/mounts",
-               "{\"name\":\"plainmount\",\"module\":\"memfs\",\"path\":\"/\"}",
+               "{\"name\":\"plainmount\",\"module\":\"memfs\",\"path\":\"fs0\"}",
                201, &failures);
 
     check_body_contains("GET /api/v1/mounts/plainmount omits options",
@@ -335,12 +343,12 @@ main(
     fprintf(stderr, "\n  Test: Bad requests and conflicts...\n");
     check_code("Missing module returns 400",
                "POST", "/api/v1/mounts",
-               "{\"name\":\"nomodule\",\"path\":\"/\"}",
+               "{\"name\":\"nomodule\",\"path\":\"fs0\"}",
                400, &failures);
 
     check_code("Duplicate mount name returns 409",
                "POST", "/api/v1/mounts",
-               "{\"name\":\"optmount\",\"module\":\"memfs\",\"path\":\"/\"}",
+               "{\"name\":\"optmount\",\"module\":\"memfs\",\"path\":\"fs0\"}",
                409, &failures);
 
     /* ===== Test 8: Delete removes the mount ===== */
@@ -350,6 +358,32 @@ main(
 
     check_code("GET deleted mount returns 404",
                "GET", "/api/v1/mounts/optmount", NULL, 404, &failures);
+
+    /* ===== Test 9: Named filesystems lifecycle ===== */
+    fprintf(stderr, "\n  Test: Filesystems endpoint lifecycle...\n");
+    check_code("POST /api/v1/filesystems creates fs1 (201)",
+               "POST", "/api/v1/filesystems",
+               "{\"module\":\"memfs\",\"name\":\"fs1\"}",
+               201, &failures);
+
+    check_code("Duplicate filesystem create returns 409",
+               "POST", "/api/v1/filesystems",
+               "{\"module\":\"memfs\",\"name\":\"fs1\"}",
+               409, &failures);
+
+    check_code("Mount of fs1 via REST returns 201",
+               "POST", "/api/v1/mounts",
+               "{\"name\":\"fs1mount\",\"module\":\"memfs\",\"path\":\"fs1\"}",
+               201, &failures);
+
+    check_code("DELETE mounted filesystem returns 409",
+               "DELETE", "/api/v1/filesystems/memfs/fs1", NULL, 409, &failures);
+
+    check_code("DELETE /api/v1/mounts/fs1mount returns 204",
+               "DELETE", "/api/v1/mounts/fs1mount", NULL, 204, &failures);
+
+    check_code("DELETE unmounted filesystem returns 204",
+               "DELETE", "/api/v1/filesystems/memfs/fs1", NULL, 204, &failures);
 
     fprintf(stderr, "\n========================================\n");
     fprintf(stderr, "Test Summary\n");

@@ -360,7 +360,7 @@ class TestMountsAPI:
         """Test creating, fetching, and deleting a mount."""
         name = "sdk_test_mount"
         try:
-            client.create_mount(name, module="memfs", path="/")
+            client.create_mount(name, module="memfs", path="fs0")
 
             mount = client.get_mount(name)
             assert mount["name"] == name
@@ -378,7 +378,7 @@ class TestMountsAPI:
         options = "ro,foo=bar"
         try:
             client.create_mount(
-                name, module="memfs", path="/", options=options)
+                name, module="memfs", path="fs0", options=options)
 
             # get_mount echoes the options.
             mount = client.get_mount(name)
@@ -404,10 +404,43 @@ class TestMountsAPI:
                 json={
                     "name": "sdk_test_mount_bad",
                     "module": "memfs",
-                    "path": "/",
+                    "path": "fs0",
                     "options": "=noKey",
                 })
         assert exc_info.value.status_code == 400
+
+
+class TestFilesystemsAPI:
+    """Test the named filesystems API endpoints."""
+
+    def test_create_delete_filesystem(self, client):
+        """Create a filesystem, mount it, and verify delete semantics."""
+        fsname = "sdk_test_fs"
+        mount = "sdk_test_fs_mount"
+
+        client.create_filesystem("memfs", fsname)
+        try:
+            # Duplicate create conflicts.
+            with pytest.raises(ChimeraAdminError) as exc_info:
+                client.create_filesystem("memfs", fsname)
+            assert exc_info.value.status_code == 409
+
+            # The filesystem is mountable; delete is refused while mounted.
+            client.create_mount(mount, module="memfs", path=fsname)
+            try:
+                with pytest.raises(ChimeraAdminError) as exc_info:
+                    client.delete_filesystem("memfs", fsname)
+                assert exc_info.value.status_code == 409
+            finally:
+                client.delete_mount(mount)
+        finally:
+            client.delete_filesystem("memfs", fsname)
+
+    def test_delete_filesystem_not_found(self, client):
+        """Deleting a nonexistent filesystem returns 404."""
+        with pytest.raises(ChimeraAdminError) as exc_info:
+            client.delete_filesystem("memfs", "sdk_test_fs_nonexistent")
+        assert exc_info.value.status_code == 404
 
 
 class TestConfigAPI:

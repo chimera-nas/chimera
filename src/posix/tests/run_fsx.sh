@@ -91,6 +91,7 @@ trap cleanup EXIT
 generate_config() {
     local mount_path="/"
     local modules_section=""
+    local fs_section=""
 
     case "$BACKEND" in
         linux|io_uring)
@@ -99,8 +100,8 @@ generate_config() {
             mkdir -p "$SESSION_DIR/fsx"
             ;;
         memfs)
-            # memfs uses "/" as mount path, no special config needed
-            mount_path="/"
+            # memfs mounts a named filesystem, no special config needed
+            mount_path="fs0"
             ;;
         diskfs_io_uring|diskfs_aio)
             # Create diskfs devices and build inline config
@@ -118,7 +119,7 @@ generate_config() {
                 fi
                 DEVICES_JSON="${DEVICES_JSON}{\"type\":\"$DEVICE_TYPE\",\"size\":1,\"path\":\"$DEVICE_PATH\"}"
             done
-            mount_path="/"
+            mount_path="fs0"
             modules_section="\"modules\": {
         \"diskfs\": {
             \"path\": \"/build/test/diskfs\",
@@ -128,7 +129,7 @@ generate_config() {
             BACKEND="diskfs"
             ;;
         cairn)
-            mount_path="/"
+            mount_path="fs0"
             modules_section="\"modules\": {
         \"cairn\": {
             \"path\": \"/build/test/cairn\",
@@ -138,11 +139,22 @@ generate_config() {
             ;;
     esac
 
+    # memfs/diskfs/cairn mounts reference a named filesystem: declare fs0 so
+    # fsx creates it (ensure-exists) before processing the mounts.
+    case "$BACKEND" in
+        memfs|diskfs|cairn)
+            fs_section="\"filesystems\": {
+        \"fs0\": { \"module\": \"$BACKEND\" }
+    },"
+            ;;
+    esac
+
     # Generate main config file
     # Note: modules section only needed for backends requiring config files
     cat > "$CONFIG_FILE" << EOF
 {
     $modules_section
+    $fs_section
     "mounts": {
         "/fsx": {
             "module": "$BACKEND",

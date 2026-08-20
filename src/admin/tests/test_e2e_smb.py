@@ -76,7 +76,7 @@ class TestSmbPipeline:
             created["user"] = True
 
             # 2. memfs mount; appears in the VFS namespace at /smbmount.
-            client.create_mount(MOUNT, module="memfs", path="/")
+            client.create_mount(MOUNT, module="memfs", path="fs0")
             created["mount"] = True
 
             # 3. SMB share backed by that mount.

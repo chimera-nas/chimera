@@ -117,7 +117,15 @@ main(
     thread = chimera_client_thread_init(evpl, client);
 
     ctx = (struct op_ctx) { 0 };
-    chimera_mount(thread, "/memfs", "memfs", "/", NULL, mount_callback, &ctx);
+    chimera_mkfs(thread, "memfs", "fs0", NULL, mount_callback, &ctx);
+    wait_done(evpl, &ctx);
+    if (ctx.status != 0) {
+        fprintf(stderr, "mkfs failed: %d\n", ctx.status);
+        return 1;
+    }
+
+    ctx = (struct op_ctx) { 0 };
+    chimera_mount(thread, "/memfs", "memfs", "fs0", NULL, mount_callback, &ctx);
     wait_done(evpl, &ctx);
     if (ctx.status != 0) {
         fprintf(stderr, "mount failed: %d\n", ctx.status);

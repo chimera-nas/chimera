@@ -720,7 +720,8 @@ chimera_server_mkpath(
 int
 chimera_server_seed_symlinks(
     struct chimera_server *server,
-    const char            *module_name);
+    const char            *module_name,
+    const char            *module_path);
 
 /* Seed the fixtures the WPTS MS-FSA suite expects to pre-exist on a memfs-backed
  * share: a directory (ExistingFolder) and a regular file (ExistingFile.txt).  A
@@ -728,7 +729,8 @@ chimera_server_seed_symlinks(
 int
 chimera_server_seed_fsa(
     struct chimera_server *server,
-    const char            *module_name);
+    const char            *module_name,
+    const char            *module_path);
 
 int
 chimera_server_unmount(

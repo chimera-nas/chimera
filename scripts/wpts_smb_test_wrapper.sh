@@ -122,12 +122,36 @@ trap cleanup EXIT
 
 generate_config() {
     local mounts="" shares="" sep=""
+
+    # The mkfs-capable backends (memfs/diskfs/cairn) mount a named filesystem
+    # "fs0" (shared by every share, matching the old shared "/" root); declare
+    # it so the daemon ensures it exists before processing the mounts.
+    local filesystems_line=""
+    case "$BACKEND" in
+        memfs|diskfs|cairn)
+            filesystems_line="\"filesystems\": {
+        \"fs0\": {\"module\": \"${BACKEND}\"}
+    },"
+            ;;
+    esac
+
+    # The seeded WPTS fixtures (symlink + MS-FSA) must land on the same
+    # filesystem the shares mount.
+    case "$BACKEND" in
+        memfs|diskfs|cairn)
+            export CHIMERA_SMB_SEED_PATH="fs0"
+            ;;
+    esac
+
     for share in "${SHARES[@]}"; do
         local mpath="/"
         case "$BACKEND" in
             linux|io_uring)
                 mpath="${SESSION_DIR}/data/${share}"
                 mkdir -p "$mpath"
+                ;;
+            memfs|diskfs|cairn)
+                mpath="fs0"
                 ;;
         esac
         mounts="${mounts}${sep}\"${share}\": {\"module\": \"${BACKEND}\", \"path\": \"${mpath}\"}"
@@ -244,6 +268,7 @@ generate_config() {
         "delegation_threads": 4,
         "external_portmap": false
     },
+    ${filesystems_line}
     "mounts": {
         ${mounts}
     },

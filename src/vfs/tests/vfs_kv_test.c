@@ -42,6 +42,18 @@ put_key_callback(
 } /* put_key_callback */
 
 static void
+mount_callback(
+    struct chimera_vfs_thread *thread,
+    enum chimera_vfs_error     status,
+    void                      *private_data)
+{
+    struct test_ctx *ctx = private_data;
+
+    ctx->status = status;
+    ctx->done   = 1;
+} /* mount_callback */
+
+static void
 get_key_callback(
     enum chimera_vfs_error error_code,
     const void            *value,
@@ -452,6 +464,7 @@ run_suite(
 {
     struct test_ctx               ctx = { 0 };
     struct chimera_vfs_module_cfg module_cfgs[1];
+    int                           has_fs;
 
     memset(module_cfgs, 0, sizeof(module_cfgs));
     strncpy(module_cfgs[0].module_name, kv_name, sizeof(module_cfgs[0].module_name) - 1);
@@ -480,6 +493,26 @@ run_suite(
     ctx.vfs_thread = chimera_vfs_thread_init(ctx.evpl, ctx.vfs);
     assert(ctx.vfs_thread != NULL);
 
+    /* A backend with filesystem support (cairn) gets the full symmetric
+     * lifecycle -- mkfs, mount, KV traffic, umount, rmfs -- so the KV
+     * namespace is exercised alongside a live filesystem.  Pure KV backends
+     * (memkv, sqlite) report ENOTSUP and skip the mount. */
+    ctx.done = 0;
+    chimera_vfs_mkfs(ctx.vfs_thread, NULL, kv_name, "fs0", NULL,
+                     mount_callback, &ctx);
+    wait_for_completion(&ctx);
+    assert(ctx.status == CHIMERA_VFS_OK || ctx.status == CHIMERA_VFS_ENOTSUP);
+
+    has_fs = (ctx.status == CHIMERA_VFS_OK);
+
+    if (has_fs) {
+        ctx.done = 0;
+        chimera_vfs_mount(ctx.vfs_thread, NULL, "/test", kv_name, "fs0", NULL,
+                          mount_callback, &ctx);
+        wait_for_completion(&ctx);
+        assert(ctx.status == CHIMERA_VFS_OK);
+    }
+
     fprintf(stderr, "Running KV API tests with %s backend...\n", kv_name);
 
     test_put_get_delete(&ctx);
@@ -487,6 +520,19 @@ run_suite(
     test_search_keys(&ctx);
     test_binary_keys_values(&ctx);
     test_nonexistent_key(&ctx);
+
+    if (has_fs) {
+        ctx.done = 0;
+        chimera_vfs_umount(ctx.vfs_thread, NULL, "/test", mount_callback, &ctx);
+        wait_for_completion(&ctx);
+        assert(ctx.status == CHIMERA_VFS_OK);
+
+        ctx.done = 0;
+        chimera_vfs_rmfs(ctx.vfs_thread, NULL, kv_name, "fs0",
+                         mount_callback, &ctx);
+        wait_for_completion(&ctx);
+        assert(ctx.status == CHIMERA_VFS_OK);
+    }
 
     fprintf(stderr, "All KV tests passed for %s!\n", kv_name);
 

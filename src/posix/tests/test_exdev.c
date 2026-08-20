@@ -46,8 +46,13 @@ main(
         posix_test_fail(&env);
     }
 
-    /* A second, independent memfs instance -> a distinct mount id from /test. */
-    rc = chimera_posix_mount("/test2", "memfs", "/");
+    /* A second, independent memfs filesystem -> a distinct mount id from
+     * /test (EEXIST tolerated in case a persistent store is reused). */
+    if (chimera_posix_mkfs("memfs", "fs_exdev", NULL) != 0 && errno != EEXIST) {
+        fprintf(stderr, "Failed to create second filesystem: %s\n", strerror(errno));
+        posix_test_fail(&env);
+    }
+    rc = chimera_posix_mount("/test2", "memfs", "fs_exdev");
     if (rc != 0) {
         fprintf(stderr, "Failed to mount second module: %s\n", strerror(errno));
         posix_test_fail(&env);

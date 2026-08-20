@@ -58,6 +58,18 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# The mkfs-capable backends (memfs/diskfs/cairn) mount a named filesystem
+# "fs0" that the "filesystems" section ensures exists; other backends keep a
+# host path.
+FS_SECTION=""
+MOUNT_PATH="/"
+case "$BACKEND" in
+    memfs|diskfs|cairn)
+        FS_SECTION="\"filesystems\": { \"fs0\": { \"module\": \"$BACKEND\" } },"
+        MOUNT_PATH="fs0"
+        ;;
+esac
+
 cat > "$WORK/chimera.conf" <<EOF
 {
   "server": { "s3_enabled": true, "s3_port": $PORT },
@@ -66,7 +78,8 @@ cat > "$WORK/chimera.conf" <<EOF
     { "access_key": "altaccesskey0002",  "secret_key": "altsecretkey0002" },
     { "access_key": "tenantaccesskey03", "secret_key": "tenantsecretkey03" }
   ],
-  "mounts": { "share": { "module": "$BACKEND", "path": "/" } },
+  $FS_SECTION
+  "mounts": { "share": { "module": "$BACKEND", "path": "$MOUNT_PATH" } },
   "s3_bucket_root": "/share",
   "buckets": {}
 }

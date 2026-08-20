@@ -6,9 +6,10 @@
 # Exercises the per-mount "create" option: the daemon creates a not-yet-existing
 # backend directory path (and any intermediate directories) before mounting it.
 #
-# memfs initializes empty, so mounting /a/b/c/d only succeeds if mkpath created
-# the path; the second mount of /a/b/e additionally exercises descending into
-# the already-created /a/b.  Both create-mounts are exported, so the daemon only
+# memfs filesystems initialize empty, so mounting fs0/a/b/c/d only succeeds if
+# mkpath created the path; the second mount of fs0/a/b/e additionally exercises
+# descending into the already-created a/b.  Both create-mounts are exported, so
+# the daemon only
 # reaches "Server is ready" with both exports registered if the paths were
 # created and mounted successfully.
 
@@ -37,9 +38,12 @@ cat > "$CFG" <<'EOF'
         "external_portmap": true,
         "metrics_port": 0
     },
+    "filesystems": {
+        "fs0": { "module": "memfs" }
+    },
     "mounts": {
-        "deep":    { "module": "memfs", "path": "/a/b/c/d", "create": { "mode": "0750" } },
-        "sibling": { "module": "memfs", "path": "/a/b/e",   "create": true }
+        "deep":    { "module": "memfs", "path": "fs0/a/b/c/d", "create": { "mode": "0750" } },
+        "sibling": { "module": "memfs", "path": "fs0/a/b/e",   "create": true }
     },
     "exports": {
         "/deep":    { "path": "/deep" },

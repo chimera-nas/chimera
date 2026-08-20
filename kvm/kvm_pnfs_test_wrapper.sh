@@ -169,7 +169,8 @@ generate_ds_config() {
         "nfs_server_scope": 43,
         "metrics_port": 9001
     },
-    "mounts": { "ds_data": { "module": "memfs", "path": "/" } },
+    "filesystems": { "fs0": { "module": "memfs" } },
+    "mounts": { "ds_data": { "module": "memfs", "path": "fs0" } },
     "exports": { "/ds_export": { "path": "/ds_data" } }
 }
 EOF
@@ -221,8 +222,9 @@ generate_mds_config() {
             ]
         }
     },
+    "filesystems": { "fs0": { "module": "${module}" } },
     "mounts": {
-        "share": { "module": "${module}", "path": "/" },
+        "share": { "module": "${module}", "path": "fs0" },
         "ds0": { "module": "nfs", "path": "${DS_IP}:/ds_export", "options": "vers=4,port=${DS_PORT}" }
     },
     "exports": { "/share": { "path": "/share" } }
@@ -274,8 +276,9 @@ generate_combined_config() {
             ]
         }
     },
+    "filesystems": { "fs0": { "module": "${module}" } },
     "mounts": {
-        "share": { "module": "${module}", "path": "/" }
+        "share": { "module": "${module}", "path": "fs0" }
     },
     "exports": { "/share": { "path": "/share" } }
 }

@@ -427,11 +427,16 @@ main(
         return EXIT_FAILURE;
     }
 
-    /* Mount VFS backends:
+    /* Mount VFS backends (both on the shared memfs filesystem "fs0"):
      * - "share" for user tests (pre-existing share)
      * - "testvfs" for share tests (shares created dynamically via REST) */
-    chimera_server_mount(server, "share", "memfs", "/", NULL);
-    chimera_server_mount(server, "testvfs", "memfs", "/", NULL);
+    if (chimera_server_mkfs(server, "memfs", "fs0", NULL) != 0) {
+        fprintf(stderr, "Failed to create fs0 filesystem in memfs\n");
+        prometheus_metrics_destroy(metrics);
+        return EXIT_FAILURE;
+    }
+    chimera_server_mount(server, "share", "memfs", "fs0", NULL);
+    chimera_server_mount(server, "testvfs", "memfs", "fs0", NULL);
 
     /* Create the "share" SMB share for user tests */
     chimera_server_create_share(server, "share", "share", 0);

@@ -84,9 +84,10 @@ class ChimeraServer:
         }
 
         if self.backend == 'memfs':
+            config["filesystems"] = {"fs0": {"module": "memfs"}}
             config["mounts"]["share"] = {
                 "module": "memfs",
-                "path": "/"
+                "path": "fs0"
             }
         elif self.backend == 'linux':
             config["mounts"]["share"] = {
@@ -117,9 +118,10 @@ class ChimeraServer:
                     "config": {"initialize": True, "devices": devices, "unsafe_async": True, "intent_log_size": 67108864}
                 }
             }
+            config["filesystems"] = {"fs0": {"module": "diskfs"}}
             config["mounts"]["share"] = {
                 "module": "diskfs",
-                "path": "/"
+                "path": "fs0"
             }
         elif self.backend == 'cairn':
             # Module config goes under server.vfs, config is an object not string
@@ -132,9 +134,10 @@ class ChimeraServer:
                     }
                 }
             }
+            config["filesystems"] = {"fs0": {"module": "cairn"}}
             config["mounts"]["share"] = {
                 "module": "cairn",
-                "path": "/"
+                "path": "fs0"
             }
         else:
             raise ValueError(f"Unknown backend: {self.backend}")

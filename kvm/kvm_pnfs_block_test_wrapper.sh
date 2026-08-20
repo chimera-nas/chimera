@@ -196,7 +196,8 @@ generate_mds_config() {
         },
         "pnfs": { "enabled": true }
     },
-    "mounts": { "share": { "module": "diskfs", "path": "/" } },
+    "filesystems": { "fs0": { "module": "diskfs" } },
+    "mounts": { "share": { "module": "diskfs", "path": "fs0" } },
     "exports": { "/share": { "path": "/share" } }
 }
 EOF

@@ -61,7 +61,7 @@ class TestSmbEaRoundTrip:
         try:
             client.create_user(USER, uid=1000, gid=1000, smbpasswd=PASSWORD)
             created["user"] = True
-            client.create_mount(MOUNT, module="memfs", path="/")
+            client.create_mount(MOUNT, module="memfs", path="fs0")
             created["mount"] = True
             client.create_share(SHARE, SHARE_PATH)
             created["share"] = True

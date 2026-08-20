@@ -158,14 +158,23 @@ EOF
 }
 
 generate_config() {
-    local mount_path="/" vfs_section=""
+    local mount_path="/" vfs_section="" fs_section=""
     case "$BACKEND" in
         linux | io_uring) mount_path="$SESSION_DIR/data"; mkdir -p "$SESSION_DIR/data" ;;
-        memfs) mount_path="/" ;;
+        memfs) mount_path="fs0" ;;
         cairn)
+            mount_path="fs0"
             vfs_section="\"vfs\": { \"cairn\": { \"config\": {\"initialize\":true,\"path\":\"$SESSION_DIR\"} } },"
             ;;
         *) log "Unsupported backend: $BACKEND"; exit 1 ;;
+    esac
+
+    # memfs/cairn mounts reference a named filesystem: declare fs0 so the
+    # daemon creates it (ensure-exists) before processing the mounts.
+    case "$BACKEND" in
+        memfs | cairn)
+            fs_section="\"filesystems\": { \"fs0\": { \"module\": \"$BACKEND\" } },"
+            ;;
     esac
 
     # Optional per-export security policy: NFS_EXPORT_SEC="krb5,krb5i" restricts
@@ -186,6 +195,7 @@ generate_config() {
         "nfs_auth": { "kerberos_enabled": true, "kerberos_keytab": "${SERVER_KEYTAB}" },
         "external_portmap": false
     },
+    ${fs_section}
     "mounts": { "share": { "module": "$BACKEND", "path": "$mount_path" } },
     "exports": { "/share": { "path": "/share"${export_sec_json} } }
 }

@@ -1,8 +1,14 @@
 {
+    "filesystems": [
+        {
+            "module": "memfs",
+            "name": "fs0"
+        }
+    ],
     "mounts": [
         {
             "module": "memfs",
-            "module_path": "/",
+            "module_path": "fs0",
             "mount_point": "/memfs"
         }
     ]

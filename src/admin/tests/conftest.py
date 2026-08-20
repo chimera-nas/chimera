@@ -82,10 +82,15 @@ def chimera_server():
             "rest_http_port": rest_port,
             "rest_auth_enabled": False,
         },
+        "filesystems": {
+            "fs0": {
+                "module": "memfs",
+            },
+        },
         "mounts": {
             "testshare": {
                 "module": "memfs",
-                "path": "/",
+                "path": "fs0",
             },
         },
     }
@@ -174,10 +179,15 @@ def chimera_server_https():
             "rest_auth_enabled": False,
             # No rest_ssl_cert/rest_ssl_key - will auto-generate
         },
+        "filesystems": {
+            "fs0": {
+                "module": "memfs",
+            },
+        },
         "mounts": {
             "testshare": {
                 "module": "memfs",
-                "path": "/",
+                "path": "fs0",
             },
         },
     }
