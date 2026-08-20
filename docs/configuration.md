@@ -146,6 +146,11 @@ Domain-authentication backends for SMB.
 | `kerberos_keytab` | string | - | Path to the Kerberos keytab. |
 | `kerberos_realm` | string | - | Kerberos realm. |
 
+Winbind and Kerberos both require setup outside chimera (a domain join, a
+keytab, and NSS pointed at winbind). See
+[SMB Domain Authentication](smb-domain-auth) for worked procedures against
+Active Directory and against an OpenLDAP directory with the Samba schema.
+
 #### `server.smb_multichannel`
 
 An **array** of NIC descriptors advertised to SMB clients for multichannel.
