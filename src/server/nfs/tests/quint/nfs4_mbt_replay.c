@@ -607,6 +607,12 @@ check_cinfo(
 
 static struct oracle *g_recall_oracle;
 
+/* Bumped once per trace so every trace's SETCLIENTID/EXCHANGE_ID owner id is
+ * globally distinct: when many traces share one long-lived server (batched
+ * replay), each must register as a brand-new client so it gets a fresh
+ * clientid/session/slot state rather than colliding with a prior trace's. */
+static uint64_t       g_owner_epoch;
+
 static void
 v4_cb_compound(
     struct evpl               *evpl,
@@ -1086,8 +1092,8 @@ encode_op(
         a->argop = OP_SETCLIENTID;
         pack_be64(s->verf, (uint64_t) jf_i64(v, "verfSym"));
         memcpy(a->opsetclientid.client.verifier, s->verf, 8);
-        snprintf(s->owner, sizeof(s->owner), "qmbt-client-%" PRId64,
-                 jf_i64(v, "ownerSym"));
+        snprintf(s->owner, sizeof(s->owner), "qmbt-client-%llu-%" PRId64,
+                 (unsigned long long) g_owner_epoch, jf_i64(v, "ownerSym"));
         a->opsetclientid.client.id.data                      = s->owner;
         a->opsetclientid.client.id.len                       = (uint32_t) strlen(s->owner);
         a->opsetclientid.callback.cb_program                 = 0x40000000;
@@ -1136,8 +1142,8 @@ encode_op(
         a->argop = OP_EXCHANGE_ID;
         pack_be64(s->verf, (uint64_t) jf_i64(v, "verfSym"));
         memcpy(a->opexchange_id.eia_clientowner.co_verifier, s->verf, 8);
-        snprintf(s->owner, sizeof(s->owner), "qmbt-client-%" PRId64,
-                 jf_i64(v, "ownerSym"));
+        snprintf(s->owner, sizeof(s->owner), "qmbt-client-%llu-%" PRId64,
+                 (unsigned long long) g_owner_epoch, jf_i64(v, "ownerSym"));
         a->opexchange_id.eia_clientowner.co_ownerid.data = s->owner;
         a->opexchange_id.eia_clientowner.co_ownerid.len  =
             (uint32_t) strlen(s->owner);
@@ -3036,36 +3042,30 @@ report_divergence(
 
 static int
 run_trace(
-    const char  *trace_path,
-    const char **mandatory,
-    int          nmandatory,
-    int          verbose,
-    int          dry_run)
+    struct mbt_env *env,
+    const char     *fsname,
+    const char     *trace_path,
+    const char    **mandatory,
+    int             nmandatory,
+    int             verbose,
+    int             dry_run)
 {
-    struct mbt_env_opts opts = {
-        .disable_caches = 1,
-        /* Pin memfs's block size to the model's block granularity so
-         * sub-block holes line up with SEEK_HOLE/SEEK_DATA (see
-         * DEVIATIONS-NFS4.md round 8 for the full rationale). */
-        .memfs_config   = "{\"block_size\": 8192}",
-    };
-    json_error_t        jerr;
+    json_error_t   jerr;
 
-    json_t             *root;
-    json_t             *states;
-    json_t             *state;
-    json_t             *lastop;
-    json_t             *init;
-    struct mbt_env     *env;
-    struct oracle      *o;
-    size_t              nstates;
-    size_t              idx;
-    int                 minor;
-    int                 failed = 0;
-    int                 c;
-    struct mism         m;
-    const char         *k;
-    json_t             *jv;
+    json_t        *root;
+    json_t        *states;
+    json_t        *state;
+    json_t        *lastop;
+    json_t        *init;
+    struct oracle *o;
+    size_t         nstates;
+    size_t         idx;
+    int            minor;
+    int            failed = 0;
+    int            c;
+    struct mism    m;
+    const char    *k;
+    json_t        *jv;
 
     root = json_load_file(trace_path, 0, &jerr);
     if (!root) {
@@ -3100,18 +3100,9 @@ run_trace(
     init  = jf_val(lastop);
     minor = (int) jf_i64(init, "minor");
 
-    /* Shape the server to the trace's pinned capability profile: the
-     * corpus is generated against a fixed caps vector (see nfs4_run.qnt),
-     * so delegations are enabled exactly when the model expects grants.
-     * The python harness cannot pin this deterministically -- with
-     * delegations on, whether chimera grants depends on CB_NULL probe
-     * timing, which an in-process backchannel resolves instantly. */
-    {
-        json_t *caps = json_object_get(init, "caps");
-
-        opts.nfs4_delegations = jf_bool(caps, "readDeleg") ||
-            jf_bool(caps, "writeDeleg");
-    }
+    /* Delegations are a server-init setting, so they are fixed once for the
+     * whole batch in main() (off for the memfs corpus; the Deleg instances
+     * skip on the capability mismatch), not toggled per trace here. */
 
     if (dry_run) {
         printf("%s: %zu compounds, minor %d, format OK\n",
@@ -3122,15 +3113,15 @@ run_trace(
 
     alarm(150);
 
-    env = malloc(sizeof(*env));
-    o   = calloc(1, sizeof(*o));
+    o = calloc(1, sizeof(*o));
 
-    mbt_env_start_opts(env, &opts);
+    mbt_env_fs_setup(env, fsname);
 
-    /* Register the backchannel recorder before any per-client
-     * connection exists. */
-    env->nfs_v4_cb.recv_call_CB_COMPOUND = v4_cb_compound;
-    g_recall_oracle                      = o;
+    /* The backchannel recorder (registered once in main) dispatches to the
+     * oracle for the trace currently replaying.  Bump the owner epoch so this
+     * trace's clients register fresh against the long-lived server. */
+    g_recall_oracle = o;
+    g_owner_epoch++;
 
     o->env        = env;
     o->minor      = minor;
@@ -3244,8 +3235,7 @@ run_trace(
             evpl_rpc2_client_disconnect(env->rpc2_thread, o->conns[c]);
         }
     }
-    mbt_env_stop(env);
-    free(env);
+    mbt_env_fs_teardown(env, fsname);
     free(o->arena);
     free(o->scratch);
     free(o);
@@ -3260,11 +3250,16 @@ main(
     char **argv)
 {
     static struct option long_options[] = {
-        { "trace",     required_argument,     0,                     't'                                     },
-        { "mandatory", required_argument,     0,                     'M'                                     },
-        { "dry-run",   no_argument,           0,                     'n'                                     },
-        { "verbose",   no_argument,           0,                     'v'                                     },
-        { 0,           0,                     0,                     0                                       },
+        { "trace",     required_argument,     0,
+          't'                                                                             },
+        { "mandatory", required_argument,     0,
+          'M'                                                                                                  },
+        { "dry-run",   no_argument,           0,
+          'n'                                                                                                                      },
+        { "verbose",   no_argument,           0,
+          'v'                                                                                                                                          },
+        { 0,           0,                     0,                    0
+        },
     };
     const char          *traces[256];
     const char          *mandatory[8];
@@ -3277,6 +3272,15 @@ main(
     int                  skips    = 0;
     int                  c;
     int                  i;
+    struct mbt_env       env;
+    struct mbt_env_opts  opts = {
+        .disable_caches = 1,
+        /* Pin memfs's block size to the model's block granularity so sub-block
+         * holes line up with SEEK_HOLE/SEEK_DATA (DEVIATIONS-NFS4.md round 8).
+         * Delegations stay off: the memfs corpus's Deleg instances skip on the
+         * capability mismatch, and every runnable trace is delegation-free. */
+        .memfs_config   = "{\"block_size\": 8192}",
+    };
 
     while ((c = getopt_long(argc, argv, "t:M:nv", long_options,
                             NULL)) != -1) {
@@ -3311,13 +3315,30 @@ main(
         return 2;
     }
 
+    /* Open the server + client once and amortize that (dominant) cost across
+     * the corpus; each trace gets a fresh, uniquely-named memfs and a fresh
+     * client identity (g_owner_epoch).  The backchannel recorder is registered
+     * once here (it dispatches to the trace-local oracle via g_recall_oracle). */
+    if (!dry_run) {
+        mbt_env_open_opts(&env, &opts);
+        env.nfs_v4_cb.recv_call_CB_COMPOUND = v4_cb_compound;
+    }
+
     for (i = 0; i < ntraces; i++) {
-        rc = run_trace(traces[i], mandatory, nmandatory, verbose, dry_run);
+        char fsname[32];
+
+        snprintf(fsname, sizeof(fsname), "fs_%d", i);
+        rc = run_trace(dry_run ? NULL : &env, fsname, traces[i], mandatory,
+                       nmandatory, verbose, dry_run);
         if (rc == 77) {
             skips++;
         } else if (rc) {
             failures++;
         }
+    }
+
+    if (!dry_run) {
+        mbt_env_stop(&env);
     }
 
     if (failures) {
