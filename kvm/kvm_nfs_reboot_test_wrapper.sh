@@ -90,10 +90,15 @@ generate_config() {
         },
         "external_portmap": false
     },
+    "filesystems": {
+        "fs0": {
+            "module": "cairn"
+        }
+    },
     "mounts": {
         "share": {
             "module": "cairn",
-            "path": "/"
+            "path": "fs0"
         }
     },
     "exports": {

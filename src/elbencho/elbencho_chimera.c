@@ -168,6 +168,22 @@ elb_mount_callback(
     ctx->complete++;
 } /* elb_mount_callback */
 
+static void
+elb_mkfs_callback(
+    struct chimera_client_thread *thread,
+    enum chimera_vfs_error        status,
+    void                         *private_data)
+{
+    struct elb_mount_ctx *ctx = private_data;
+
+    /* Ensure-exists semantics: a filesystem that is already present (e.g. a
+     * persistent backend reused across runs) is not an error. */
+    if (status && status != CHIMERA_VFS_EEXIST) {
+        ctx->status = status;
+    }
+    ctx->complete++;
+} /* elb_mkfs_callback */
+
 /*
  * Load modules + perform mounts from the JSON config file at config_json.
  * Mirrors the config handling in src/fio/fio.c.
@@ -236,6 +252,54 @@ elb_chimera_load_config(const char *config_path)
         fprintf(stderr, "elbencho-chimera: chimera_client_init failed\n");
         json_decref(config);
         return -EINVAL;
+    }
+
+    /* Optional "filesystems" array: named filesystems to ensure exist in
+     * mkfs-capable modules (memfs/diskfs/cairn) before the mounts that
+     * reference them (EEXIST tolerated). */
+    json_t *filesystems = json_object_get(config, "filesystems");
+
+    if (filesystems) {
+        struct evpl                  *evpl          = evpl_create(NULL);
+        struct chimera_client_thread *client_thread = chimera_client_thread_init(evpl, g_client);
+        struct elb_mount_ctx          mkfs_ctx      = { 0 };
+        json_t                       *fs;
+
+        mkfs_ctx.total = json_array_size(filesystems);
+
+        json_array_foreach(filesystems, i, fs)
+        {
+            json_t *fs_module = json_object_get(fs, "module");
+            json_t *fs_name   = json_object_get(fs, "name");
+
+            if (!fs_module || !fs_name) {
+                fprintf(stderr, "elbencho-chimera: invalid filesystem config\n");
+                chimera_client_thread_shutdown(evpl, client_thread);
+                evpl_destroy(evpl);
+                json_decref(config);
+                return -EINVAL;
+            }
+
+            chimera_mkfs(client_thread,
+                         json_string_value(fs_module),
+                         json_string_value(fs_name),
+                         NULL,
+                         elb_mkfs_callback,
+                         &mkfs_ctx);
+        }
+
+        while (mkfs_ctx.complete < mkfs_ctx.total) {
+            evpl_continue(evpl);
+        }
+
+        chimera_client_thread_shutdown(evpl, client_thread);
+        evpl_destroy(evpl);
+
+        if (mkfs_ctx.status != 0) {
+            fprintf(stderr, "elbencho-chimera: mkfs failed (status %d)\n", mkfs_ctx.status);
+            json_decref(config);
+            return -EIO;
+        }
     }
 
     /* perform mounts on a temporary client thread */

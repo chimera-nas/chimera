@@ -280,6 +280,9 @@ struct backend_spec {
     int         ncfg;
     const char *mount_module;
     char        mount_path[300];
+    /* CAP_MKFS backends need a named filesystem created before the mount
+     * (and removed after the umount); mount_path is then the fs name. */
+    int         needs_mkfs;
 };
 
 static void
@@ -297,7 +300,8 @@ backend_configure(
     if (strcmp(backend, "memfs") == 0) {
         strncpy(cfgs[0].module_name, "memfs", sizeof(cfgs[0].module_name) - 1);
         spec->mount_module = "memfs";
-        snprintf(spec->mount_path, sizeof(spec->mount_path), "/");
+        spec->needs_mkfs   = 1;
+        snprintf(spec->mount_path, sizeof(spec->mount_path), "fs0");
     } else if (strcmp(backend, "linux") == 0 ||
                strcmp(backend, "io_uring") == 0) {
         strncpy(cfgs[0].module_name, backend, sizeof(cfgs[0].module_name) - 1);
@@ -309,7 +313,8 @@ backend_configure(
                  "{\"initialize\":true,\"path\":\"%s\"}", session_dir);
         strncpy(cfgs[0].config_data, cfg, sizeof(cfgs[0].config_data) - 1);
         spec->mount_module = "cairn";
-        snprintf(spec->mount_path, sizeof(spec->mount_path), "/");
+        spec->needs_mkfs   = 1;
+        snprintf(spec->mount_path, sizeof(spec->mount_path), "fs0");
     } else if (strcmp(backend, "diskfs_io_uring") == 0 ||
                strcmp(backend, "diskfs_aio") == 0) {
         const char *iotype = (strcmp(backend, "diskfs_aio") == 0) ? "libaio"
@@ -334,7 +339,8 @@ backend_configure(
         strncpy(cfgs[0].module_name, "diskfs", sizeof(cfgs[0].module_name) - 1);
         strncpy(cfgs[0].config_data, cfg, sizeof(cfgs[0].config_data) - 1);
         spec->mount_module = "diskfs";
-        snprintf(spec->mount_path, sizeof(spec->mount_path), "/");
+        spec->needs_mkfs   = 1;
+        snprintf(spec->mount_path, sizeof(spec->mount_path), "fs0");
     } else {
         fprintf(stderr, "unknown backend: %s\n", backend);
         exit(2);
@@ -392,6 +398,13 @@ main(
     ctx.readbuf = malloc(FILE_LEN);
     model       = calloc(1, FILE_LEN);
     assert(ctx.readbuf && model);
+
+    if (spec.needs_mkfs) {
+        chimera_vfs_mkfs(ctx.vfs_thread, NULL, spec.mount_module, "fs0", NULL,
+                         mount_cb, &ctx);
+        wait_done(&ctx);
+        assert(ctx.status == CHIMERA_VFS_OK);
+    }
 
     chimera_vfs_mount(ctx.vfs_thread, NULL, "/test", spec.mount_module,
                       spec.mount_path, NULL, mount_cb, &ctx);
@@ -507,6 +520,27 @@ main(
     }
 
     chimera_vfs_release(ctx.vfs_thread, ctx.fhandle);
+
+    chimera_vfs_umount(ctx.vfs_thread, NULL, "/test", mount_cb, &ctx);
+    wait_done(&ctx);
+    assert(ctx.status == CHIMERA_VFS_OK);
+
+    if (spec.needs_mkfs) {
+        /* umount does not return until every handle on the mount has been
+         * closed and released, so the removal below succeeds immediately.
+         * The retry is kept as a backstop only. */
+        for (int i = 0; i < 50; i++) {
+            chimera_vfs_rmfs(ctx.vfs_thread, NULL, spec.mount_module, "fs0",
+                             mount_cb, &ctx);
+            wait_done(&ctx);
+            if (ctx.status != CHIMERA_VFS_EBUSY) {
+                break;
+            }
+            usleep(100000);
+        }
+        assert(ctx.status == CHIMERA_VFS_OK);
+    }
+
     chimera_vfs_thread_destroy(ctx.vfs_thread);
     chimera_vfs_destroy(ctx.vfs);
     evpl_destroy(ctx.evpl);

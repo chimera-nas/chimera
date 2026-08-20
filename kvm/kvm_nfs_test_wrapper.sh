@@ -94,6 +94,7 @@ trap cleanup EXIT
 generate_config() {
     local mount_path="/"
     local vfs_section=""
+    local fs_section=""
 
     case "$BACKEND" in
         linux|io_uring)
@@ -101,7 +102,7 @@ generate_config() {
             mkdir -p "$SESSION_DIR/data"
             ;;
         memfs)
-            mount_path="/"
+            mount_path="fs0"
             ;;
         diskfs_io_uring|diskfs_aio)
             local device_type="io_uring"
@@ -117,7 +118,7 @@ generate_config() {
                 fi
                 devices_json="${devices_json}{\"type\":\"$device_type\",\"size\":1,\"path\":\"$device_path\"}"
             done
-            mount_path="/"
+            mount_path="fs0"
             BACKEND="diskfs"
             vfs_section="\"vfs\": {
                 \"diskfs\": {
@@ -126,12 +127,22 @@ generate_config() {
             },"
             ;;
         cairn)
-            mount_path="/"
+            mount_path="fs0"
             vfs_section="\"vfs\": {
                 \"cairn\": {
                     \"config\": {\"initialize\":true,\"path\":\"$SESSION_DIR\"}
                 }
             },"
+            ;;
+    esac
+
+    # memfs/diskfs/cairn mounts reference a named filesystem: declare fs0 so
+    # the daemon creates it (ensure-exists) before processing the mounts.
+    case "$BACKEND" in
+        memfs|diskfs|cairn)
+            fs_section="\"filesystems\": {
+        \"fs0\": { \"module\": \"$BACKEND\" }
+    },"
             ;;
     esac
 
@@ -147,6 +158,7 @@ generate_config() {
         $vfs_section
         "external_portmap": false
     },
+    $fs_section
     "mounts": {
         "share": {
             "module": "$BACKEND",

@@ -169,7 +169,12 @@ main(
     ctx.vfs_thread = chimera_vfs_thread_init(ctx.evpl, vfs);
     assert(ctx.vfs_thread != NULL);
 
-    chimera_vfs_mount(ctx.vfs_thread, NULL, "/test", "memfs", "/", NULL,
+    chimera_vfs_mkfs(ctx.vfs_thread, NULL, "memfs", "fs0", NULL,
+                     mount_cb, &ctx);
+    wait_done(&ctx);
+    assert(ctx.status == CHIMERA_VFS_OK);
+
+    chimera_vfs_mount(ctx.vfs_thread, NULL, "/test", "memfs", "fs0", NULL,
                       mount_cb, &ctx);
     wait_done(&ctx);
     assert(ctx.status == CHIMERA_VFS_OK);
@@ -203,6 +208,14 @@ main(
     wait_done(&ctx);
     assert(ctx.status == CHIMERA_VFS_OK);
     TEST_PASS("umount succeeds once the reference is dropped");
+
+    /* A successful umount means every handle on the mount is gone, so the
+     * filesystem is removable right away -- no retry, no waiting on a sweep.
+     * That is the guarantee RMFS's mount-count test relies on. */
+    chimera_vfs_rmfs(ctx.vfs_thread, NULL, "memfs", "fs0", mount_cb, &ctx);
+    wait_done(&ctx);
+    assert(ctx.status == CHIMERA_VFS_OK);
+    TEST_PASS("filesystem is removable immediately after umount returns");
 
     alarm(0);
 

@@ -102,7 +102,12 @@ main(
     }
 
     /* Export a memfs share over SMB. */
-    if (chimera_server_mount(server, "share", "memfs", "/", NULL) != 0) {
+    if (chimera_server_mkfs(server, "memfs", "fs0", NULL) != 0) {
+        fprintf(stderr, "Failed to create memfs filesystem\n");
+        return EXIT_FAILURE;
+    }
+
+    if (chimera_server_mount(server, "share", "memfs", "fs0", NULL) != 0) {
         fprintf(stderr, "Failed to mount memfs share\n");
         return EXIT_FAILURE;
     }

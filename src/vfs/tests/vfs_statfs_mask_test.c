@@ -198,7 +198,12 @@ test_memfs_behaviour(void)
     ctx.vfs_thread = chimera_vfs_thread_init(ctx.evpl, vfs);
     assert(ctx.vfs_thread != NULL);
 
-    chimera_vfs_mount(ctx.vfs_thread, NULL, "/test", "memfs", "/", NULL,
+    chimera_vfs_mkfs(ctx.vfs_thread, NULL, "memfs", "fs0", NULL,
+                     mount_cb, &ctx);
+    wait_done(&ctx);
+    assert(ctx.status == CHIMERA_VFS_OK);
+
+    chimera_vfs_mount(ctx.vfs_thread, NULL, "/test", "memfs", "fs0", NULL,
                       mount_cb, &ctx);
     wait_done(&ctx);
     assert(ctx.status == CHIMERA_VFS_OK);
@@ -236,6 +241,14 @@ test_memfs_behaviour(void)
     TEST_PASS("full statfs request populates the statfs value set");
 
     chimera_vfs_release(ctx.vfs_thread, ctx.handle);
+    chimera_vfs_umount(ctx.vfs_thread, NULL, "/test", mount_cb, &ctx);
+    wait_done(&ctx);
+    assert(ctx.status == CHIMERA_VFS_OK);
+
+    chimera_vfs_rmfs(ctx.vfs_thread, NULL, "memfs", "fs0", mount_cb, &ctx);
+    wait_done(&ctx);
+    assert(ctx.status == CHIMERA_VFS_OK);
+
     chimera_vfs_thread_destroy(ctx.vfs_thread);
     chimera_vfs_destroy(vfs);
     evpl_destroy(ctx.evpl);

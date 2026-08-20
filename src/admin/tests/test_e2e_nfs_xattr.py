@@ -65,7 +65,7 @@ class TestNfsXattrRoundTrip:
         mounted = False
         try:
             # memfs mount in the VFS namespace, exposed as an NFS export.
-            client.create_mount(MOUNT, module="memfs", path="/")
+            client.create_mount(MOUNT, module="memfs", path="fs0")
             created["mount"] = True
             client.create_export(EXPORT, EXPORT_VFS_PATH)
             created["export"] = True

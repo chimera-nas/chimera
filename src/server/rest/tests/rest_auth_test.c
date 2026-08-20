@@ -291,7 +291,12 @@ main(
         return EXIT_FAILURE;
     }
 
-    chimera_server_mount(server, "share", "memfs", "/", NULL);
+    if (chimera_server_mkfs(server, "memfs", "fs0", NULL) != 0) {
+        fprintf(stderr, "Failed to create fs0 filesystem in memfs\n");
+        prometheus_metrics_destroy(metrics);
+        return EXIT_FAILURE;
+    }
+    chimera_server_mount(server, "share", "memfs", "fs0", NULL);
 
     /* Add admin user with known password hash */
     chimera_server_add_user(server, ADMIN_USER, ADMIN_HASH, NULL,

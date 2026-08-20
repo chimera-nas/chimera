@@ -286,6 +286,22 @@ mount_callback(
     ctx->complete++;
 } /* mount_callback */
 
+static void
+mkfs_callback(
+    struct chimera_client_thread *client,
+    enum chimera_vfs_error        status,
+    void                         *private_data)
+{
+    struct mount_ctx *ctx = private_data;
+
+    /* Ensure-exists semantics: a filesystem that is already present (e.g. a
+     * persistent backend reused across runs) is not an error. */
+    if (status && status != CHIMERA_VFS_EEXIST) {
+        ctx->status = status;
+    }
+    ctx->complete++;
+} /* mkfs_callback */
+
 static int
 fio_chimera_init(struct thread_data *td)
 {
@@ -462,6 +478,49 @@ fio_chimera_init(struct thread_data *td)
         client_thread = chimera_client_thread_init(evpl, ChimeraClient);
 
         if (config) {
+
+            /* Optional "filesystems" array: named filesystems to ensure exist
+             * in mkfs-capable modules (memfs/diskfs/cairn) before the mounts
+             * that reference them. */
+            json_t *filesystems = json_object_get(config, "filesystems");
+
+            if (filesystems) {
+                struct mount_ctx mkfs_ctx = { 0 };
+                json_t          *fs;
+
+                mkfs_ctx.total = json_array_size(filesystems);
+
+                json_array_foreach(filesystems, i, fs)
+                {
+                    json_t *fs_module = json_object_get(fs, "module");
+                    json_t *fs_name   = json_object_get(fs, "name");
+
+                    if (!fs_module || !fs_name) {
+                        chimera_fio_error("Invalid filesystem config");
+                        return EINVAL;
+                    }
+
+                    chimera_fio_info("Creating filesystem %s in module %s",
+                                     json_string_value(fs_name),
+                                     json_string_value(fs_module));
+
+                    chimera_mkfs(client_thread,
+                                 json_string_value(fs_module),
+                                 json_string_value(fs_name),
+                                 NULL,
+                                 mkfs_callback,
+                                 &mkfs_ctx);
+                }
+
+                while (mkfs_ctx.complete < mkfs_ctx.total) {
+                    evpl_continue(evpl);
+                }
+
+                if (mkfs_ctx.status != 0) {
+                    chimera_fio_error("Failed to create test filesystem");
+                    return 1;
+                }
+            }
 
             mounts = json_object_get(config, "mounts");
 

@@ -68,10 +68,15 @@ cat > "$CONFIG_FILE" << EOF
         "delegation_threads": 4,
         "external_portmap": false
     },
+    "filesystems": {
+        "fs0": {
+            "module": "memfs"
+        }
+    },
     "mounts": {
         "share": {
             "module": "memfs",
-            "path": "/"
+            "path": "fs0"
         }
     },
     "exports": {

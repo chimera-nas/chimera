@@ -273,6 +273,27 @@ posix_test_is_diskfs(const char *backend)
            strcmp(backend, "diskfs_aio") == 0;
 } // posix_test_is_diskfs
 
+/* Backends that manage named filesystems (CHIMERA_VFS_CAP_MKFS): the harness
+ * creates filesystem POSIX_TEST_FS_NAME before mounting and removes it during
+ * cleanup, and their module paths become "fs0[/subdir]" instead of
+ * "/[subdir]". */
+#define POSIX_TEST_FS_NAME "fs0"
+
+static inline int
+posix_test_backend_has_mkfs(const char *backend)
+{
+    return strcmp(backend, "memfs") == 0 ||
+           strcmp(backend, "cairn") == 0 ||
+           posix_test_is_diskfs(backend);
+} // posix_test_backend_has_mkfs
+
+/* VFS module name for a backend (diskfs variants share the "diskfs" module). */
+static inline const char *
+posix_test_backend_module(const char *backend)
+{
+    return posix_test_is_diskfs(backend) ? "diskfs" : backend;
+} // posix_test_backend_module
+
 /* Generic external-module backend support, driven entirely by environment
  * variables so an out-of-tree VFS module can run the whole posix suite
  * without the tests knowing anything about it.  Active when "-b <name>"
@@ -461,6 +482,8 @@ posix_test_extra_export_module_path(
     if (strcmp(nfs_backend_name, "linux") == 0 ||
         strcmp(nfs_backend_name, "io_uring") == 0) {
         snprintf(out, out_size, "%s/%s", session_dir, name);
+    } else if (posix_test_backend_has_mkfs(nfs_backend_name)) {
+        snprintf(out, out_size, "%s/%s", POSIX_TEST_FS_NAME, name);
     } else {
         snprintf(out, out_size, "/%s", name);
     }
@@ -639,6 +662,18 @@ posix_test_start_nfs_server(struct posix_test_env *env)
         exit(EXIT_FAILURE);
     }
 
+    /* Named-filesystem backends: create the filesystem the share will mount
+     * (removed again in posix_test_cleanup). */
+    if (posix_test_backend_has_mkfs(nfs_backend_name)) {
+        if (chimera_server_mkfs(env->server, share_module, POSIX_TEST_FS_NAME,
+                                NULL) != 0) {
+            fprintf(stderr, "Failed to create %s filesystem %s\n",
+                    share_module, POSIX_TEST_FS_NAME);
+            exit(EXIT_FAILURE);
+        }
+        share_module_path = POSIX_TEST_FS_NAME;
+    }
+
     /* For the read-only test, create the subdirectory the read-only mount will
      * be rooted at BEFORE any other mount exists (chimera_server_mkpath does a
      * transient mount of the backend root, which would otherwise collide in the
@@ -650,6 +685,9 @@ posix_test_start_nfs_server(struct posix_test_env *env)
             strcmp(nfs_backend_name, "io_uring") == 0) {
             snprintf(ro_module_path, sizeof(ro_module_path), "%s/%s",
                      env->session_dir, POSIX_TEST_RO_SUBDIR);
+        } else if (posix_test_backend_has_mkfs(nfs_backend_name)) {
+            snprintf(ro_module_path, sizeof(ro_module_path), "%s/%s",
+                     POSIX_TEST_FS_NAME, POSIX_TEST_RO_SUBDIR);
         } else {
             snprintf(ro_module_path, sizeof(ro_module_path), "/%s",
                      POSIX_TEST_RO_SUBDIR);
@@ -946,6 +984,29 @@ posix_test_init(
     }
 } /* posix_test_init */
 
+/* Umount marks the mount's cached open handles for immediate close, but the
+ * close thread drains them on its own sweep, and a filesystem cannot be
+ * removed while any handle still pins one of its inodes (EBUSY).  Retry
+ * briefly so teardown exercises the removal instead of skipping it. */
+#define POSIX_TEST_RMFS_RETRIES 40
+
+static inline int
+posix_test_rmfs_retry(const char *module)
+{
+    int i;
+
+    for (i = 0; i < POSIX_TEST_RMFS_RETRIES; i++) {
+        if (chimera_posix_rmfs(module, POSIX_TEST_FS_NAME) == 0) {
+            return 0;
+        }
+        if (errno != EBUSY) {
+            return -1;
+        }
+        usleep(100000);
+    }
+    return -1;
+} /* posix_test_rmfs_retry */
+
 static inline void
 posix_test_cleanup(
     struct posix_test_env *env,
@@ -953,10 +1014,54 @@ posix_test_cleanup(
 {
     int rc;
 
+    /* Direct named-filesystem backends: unmount (best-effort; the test may
+     * already have) and remove the filesystem before the client goes away. */
+    if (env->nfs_version == 0 && !env->server &&
+        !posix_test_is_ext_module(env->backend) &&
+        posix_test_backend_has_mkfs(env->backend)) {
+        chimera_posix_umount("/test");
+        if (posix_test_rmfs_retry(posix_test_backend_module(env->backend)) != 0) {
+            fprintf(stderr, "warning: failed to remove filesystem %s: %s\n",
+                    POSIX_TEST_FS_NAME, strerror(errno));
+        }
+    }
+
     chimera_posix_shutdown();
 
     // Destroy the server if it was created (NFS backend)
     if (env->server) {
+        /* Server-side named filesystems: drop every mount referencing the
+         * filesystem, then remove it, exercising the full lifecycle. */
+        if (env->nfs_backend &&
+            posix_test_backend_has_mkfs(env->nfs_backend)) {
+            chimera_server_unmount(env->server, "share");
+            if (posix_test_ro_export) {
+                chimera_server_unmount(env->server, "roshare");
+            }
+            for (int i = 0; i < posix_test_extra_exports; i++) {
+                char name[32];
+                snprintf(name, sizeof(name),
+                         POSIX_TEST_EXTRA_EXPORT_NAME_FMT, i);
+                chimera_server_unmount(env->server, name);
+            }
+            const char *fs_module =
+                posix_test_backend_module(env->nfs_backend);
+            int         i, frc = -1;
+
+            for (i = 0; i < POSIX_TEST_RMFS_RETRIES; i++) {
+                frc = chimera_server_rmfs(env->server, fs_module,
+                                          POSIX_TEST_FS_NAME);
+                if (frc != CHIMERA_VFS_EBUSY) {
+                    break;
+                }
+                usleep(100000);
+            }
+
+            if (frc != 0) {
+                fprintf(stderr, "warning: failed to remove filesystem %s (%d)\n",
+                        POSIX_TEST_FS_NAME, frc);
+            }
+        }
         chimera_server_destroy(env->server);
     }
 
@@ -1026,6 +1131,19 @@ posix_test_mount(struct posix_test_env *env)
         module_name = "diskfs";
     } else if (strcmp(env->backend, "linux") == 0 || strcmp(env->backend, "io_uring") == 0) {
         module_path = env->session_dir;
+    }
+
+    /* Named-filesystem backends: ensure the filesystem exists (EEXIST is the
+     * cold-remount case where the store already holds it) and mount by name. */
+    if (!posix_test_is_ext_module(env->backend) &&
+        posix_test_backend_has_mkfs(env->backend)) {
+        if (chimera_posix_mkfs(module_name, POSIX_TEST_FS_NAME, NULL) != 0 &&
+            errno != EEXIST) {
+            fprintf(stderr, "Failed to create %s filesystem %s: %s\n",
+                    module_name, POSIX_TEST_FS_NAME, strerror(errno));
+            return -1;
+        }
+        module_path = POSIX_TEST_FS_NAME;
     }
 
     return chimera_posix_mount("/test", module_name, module_path);

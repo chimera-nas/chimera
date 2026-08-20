@@ -308,7 +308,12 @@ main(
         return EXIT_FAILURE;
     }
 
-    chimera_server_mount(server, "share", "memfs", "/", NULL);
+    if (chimera_server_mkfs(server, "memfs", "fs0", NULL) != 0) {
+        fprintf(stderr, "Failed to create fs0 filesystem in memfs\n");
+        prometheus_metrics_destroy(metrics);
+        return EXIT_FAILURE;
+    }
+    chimera_server_mount(server, "share", "memfs", "fs0", NULL);
 
     chimera_server_start(server);
     fprintf(stderr, "Server started (REST on port %d)\n", REST_PORT);

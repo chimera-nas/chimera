@@ -74,8 +74,11 @@ write_config() {
         "rest_auth_enabled": false,
         "state_dir": "${TMPDIR}/state"${extra_server}
     },
+    "filesystems": {
+        "fs0": { "module": "memfs" }
+    },
     "mounts": {
-        "data": { "module": "memfs", "path": "/" }
+        "data": { "module": "memfs", "path": "fs0" }
     },
     "exports": ${exports_json}
 }

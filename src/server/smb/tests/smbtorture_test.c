@@ -798,20 +798,30 @@ main(
         return EXIT_FAILURE;
     }
 
-    /* Mount filesystem */
+    /* Mount filesystem.  The mkfs-capable backends (memfs/diskfs/cairn) mount
+     * a named filesystem "fs0" created first; linux/io_uring keep host paths. */
     int mount_rc;
 
-    if (strcmp(backend, "memfs") == 0) {
-        mount_rc = chimera_server_mount(env.server, "share", "memfs", "/", NULL);
+    if (strcmp(backend, "memfs") == 0 ||
+        strcmp(backend, "cairn") == 0 ||
+        strcmp(backend, "diskfs_io_uring") == 0 ||
+        strcmp(backend, "diskfs_aio") == 0) {
+        const char *server_module = "memfs";
+
+        if (strcmp(backend, "cairn") == 0) {
+            server_module = "cairn";
+        } else if (strcmp(backend, "memfs") != 0) {
+            server_module = "diskfs";
+        }
+
+        mount_rc = chimera_server_mkfs(env.server, server_module, "fs0", NULL);
+        if (mount_rc == 0) {
+            mount_rc = chimera_server_mount(env.server, "share", server_module, "fs0", NULL);
+        }
     } else if (strcmp(backend, "linux") == 0) {
         mount_rc = chimera_server_mount(env.server, "share", "linux", env.session_dir, NULL);
     } else if (strcmp(backend, "io_uring") == 0) {
         mount_rc = chimera_server_mount(env.server, "share", "io_uring", env.session_dir, NULL);
-    } else if (strcmp(backend, "diskfs_io_uring") == 0 ||
-               strcmp(backend, "diskfs_aio") == 0) {
-        mount_rc = chimera_server_mount(env.server, "share", "diskfs", "/", NULL);
-    } else if (strcmp(backend, "cairn") == 0) {
-        mount_rc = chimera_server_mount(env.server, "share", "cairn", "/", NULL);
     } else {
         fprintf(stderr, "Unknown backend: %s\n", backend);
         test_cleanup(&env, 0);

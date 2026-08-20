@@ -207,6 +207,7 @@ obtain_ticket() {
 generate_config() {
     local mount_path="/"
     local vfs_section=""
+    local fs_section=""
 
     case "$BACKEND" in
         linux | io_uring)
@@ -214,15 +215,23 @@ generate_config() {
             mkdir -p "$SESSION_DIR/data"
             ;;
         memfs)
-            mount_path="/"
+            mount_path="fs0"
             ;;
         cairn)
-            mount_path="/"
+            mount_path="fs0"
             vfs_section="\"vfs\": { \"cairn\": { \"config\": {\"initialize\":true,\"path\":\"$SESSION_DIR\"} } },"
             ;;
         *)
             log "Unsupported backend for krb5 test: $BACKEND"
             exit 1
+            ;;
+    esac
+
+    # memfs/cairn mounts reference a named filesystem: declare fs0 so the
+    # daemon creates it (ensure-exists) before processing the mounts.
+    case "$BACKEND" in
+        memfs | cairn)
+            fs_section="\"filesystems\": { \"fs0\": { \"module\": \"$BACKEND\" } },"
             ;;
     esac
 
@@ -242,6 +251,7 @@ generate_config() {
         },
         "external_portmap": false
     },
+    ${fs_section}
     "mounts": {
         "share": { "module": "$BACKEND", "path": "$mount_path" }
     },

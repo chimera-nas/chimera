@@ -4048,7 +4048,9 @@ main(
                 exit(100);
             }
 
-            /* Mount the backend on the server as "share" */
+            /* Mount the backend on the server as "share".  The mkfs-capable
+             * backends (memfs/diskfs/cairn) mount a named filesystem "fs0"
+             * created here; linux/io_uring keep host paths. */
             if (strcmp(chimera_nfs_backend, "linux") == 0) {
                 /* Create fsx subdirectory for linux backend */
                 char fsx_dir[512];
@@ -4060,13 +4062,23 @@ main(
                 snprintf(fsx_dir, sizeof(fsx_dir), "%s/fsx", chimera_session_dir);
                 (void) mkdir(fsx_dir, 0755);
                 chimera_server_mount(chimera_server, "share", "io_uring", chimera_session_dir, NULL);
-            } else if (strcmp(chimera_nfs_backend, "memfs") == 0) {
-                chimera_server_mount(chimera_server, "share", "memfs", "/", NULL);
-            } else if (strcmp(chimera_nfs_backend, "diskfs_io_uring") == 0 ||
-                       strcmp(chimera_nfs_backend, "diskfs_aio") == 0) {
-                chimera_server_mount(chimera_server, "share", "diskfs", "/", NULL);
-            } else if (strcmp(chimera_nfs_backend, "cairn") == 0) {
-                chimera_server_mount(chimera_server, "share", "cairn", "/", NULL);
+            } else if (strcmp(chimera_nfs_backend, "memfs") == 0 ||
+                       strcmp(chimera_nfs_backend, "diskfs_io_uring") == 0 ||
+                       strcmp(chimera_nfs_backend, "diskfs_aio") == 0 ||
+                       strcmp(chimera_nfs_backend, "cairn") == 0) {
+                const char *server_module = "memfs";
+
+                if (strcmp(chimera_nfs_backend, "cairn") == 0) {
+                    server_module = "cairn";
+                } else if (strcmp(chimera_nfs_backend, "memfs") != 0) {
+                    server_module = "diskfs";
+                }
+
+                if (chimera_server_mkfs(chimera_server, server_module, "fs0", NULL) != 0) {
+                    fprintf(stderr, "Failed to create fs0 filesystem in %s\n", server_module);
+                    exit(100);
+                }
+                chimera_server_mount(chimera_server, "share", server_module, "fs0", NULL);
             } else {
                 fprintf(stderr, "Unknown NFS backend: %s\n", chimera_nfs_backend);
                 exit(100);
@@ -4130,7 +4142,15 @@ main(
                 snprintf(fsx_dir, sizeof(fsx_dir), "%s/fsx", chimera_session_dir);
                 (void) mkdir(fsx_dir, 0755);
             } else {
-                mount_path = "/";
+                /* mkfs-capable backends mount a named filesystem; create it
+                * first (EEXIST is fine, e.g. a persistent store reused). */
+                if (chimera_posix_mkfs(mount_module, "fs0", NULL) != 0 &&
+                    errno != EEXIST) {
+                    fprintf(stderr, "Failed to create fs0 filesystem in %s: %s\n",
+                            mount_module, strerror(errno));
+                    exit(100);
+                }
+                mount_path = "fs0";
             }
 
             if (chimera_posix_mount("/fsx", mount_module, mount_path) != 0) {
@@ -4194,6 +4214,37 @@ main(
             fprintf(stderr, "Failed to initialize Chimera POSIX client\n");
             json_decref(json_config);
             exit(100);
+        }
+
+        /* Optional "filesystems" object: named filesystems to ensure exist in
+         * mkfs-capable modules before the mounts that reference them (EEXIST
+         * tolerated, e.g. a persistent store reused across runs). */
+        json_t *filesystems = json_object_get(json_config, "filesystems");
+
+        if (filesystems && json_is_object(filesystems)) {
+            const char *fs_name;
+            json_t     *fs_cfg;
+
+            json_object_foreach(filesystems, fs_name, fs_cfg)
+            {
+                const char *fs_module = json_string_value(
+                    json_object_get(fs_cfg, "module"));
+
+                if (fs_module) {
+                    if (chimera_posix_mkfs(fs_module, fs_name, NULL) != 0 &&
+                        errno != EEXIST) {
+                        fprintf(stderr,
+                                "Failed to create filesystem %s in module %s: %s\n",
+                                fs_name, fs_module, strerror(errno));
+                        json_decref(json_config);
+                        exit(100);
+                    }
+                    if (!quiet) {
+                        prt("Chimera: filesystem %s ready in module %s\n",
+                            fs_name, fs_module);
+                    }
+                }
+            }
         }
 
         /* Process mounts from config file */

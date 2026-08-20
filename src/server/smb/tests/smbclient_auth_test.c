@@ -803,7 +803,12 @@ main(
 
     /* Mount filesystem */
     if (strcmp(backend, "memfs") == 0) {
-        chimera_server_mount(env.server, "share", "memfs", "/", NULL);
+        if (chimera_server_mkfs(env.server, "memfs", "fs0", NULL) != 0) {
+            fprintf(stderr, "Failed to create fs0 filesystem in memfs\n");
+            test_cleanup(&env, 0);
+            return EXIT_FAILURE;
+        }
+        chimera_server_mount(env.server, "share", "memfs", "fs0", NULL);
     } else if (strcmp(backend, "linux") == 0) {
         chimera_server_mount(env.server, "share", "linux", env.session_dir, NULL);
     } else {

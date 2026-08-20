@@ -505,6 +505,52 @@ class ChimeraAdminClient:
         """
         self._request_no_content("DELETE", f"/api/v1/mounts/{name}")
 
+    # Named filesystems API
+
+    def create_filesystem(
+        self,
+        module: str,
+        name: str,
+        options: Optional[str] = None,
+    ) -> dict:
+        """Create a named filesystem inside a mkfs-capable VFS module.
+
+        The filesystem is then mountable with a mount path of
+        "<name>[/subdir]".
+
+        Args:
+            module: VFS module hosting the filesystem (e.g. "memfs",
+                "diskfs", "cairn").
+            name: Filesystem name.
+            options: Optional module-specific options string.
+
+        Returns:
+            Response message.
+
+        Raises:
+            ChimeraAdminError: If the request fails (e.g. 400 for a module
+                without filesystem support, 409 if the name is taken).
+        """
+        data = {"module": module, "name": name}
+        if options is not None:
+            data["options"] = options
+        return self._request("POST", "/api/v1/filesystems", json=data)
+
+    def delete_filesystem(self, module: str, name: str) -> None:
+        """Delete a named filesystem.
+
+        Args:
+            module: VFS module hosting the filesystem.
+            name: Filesystem name to delete.
+
+        Raises:
+            ChimeraAdminError: If the request fails, the filesystem is not
+                found (404), or it still has active mounts (409).
+        """
+        self._request_no_content(
+            "DELETE", f"/api/v1/filesystems/{module}/{name}"
+        )
+
     def _request_no_content(
         self,
         method: str,

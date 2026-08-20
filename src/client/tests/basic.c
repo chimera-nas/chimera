@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -91,11 +91,25 @@ main(
 
     thread = chimera_client_thread_init(evpl, client);
 
+    /* memfs no longer has an implicit filesystem; create one to mount. */
+    chimera_mkfs(thread, "memfs", "fs0", NULL, mount_callback, &mount_ctx);
+
+    while (!mount_ctx.done) {
+        evpl_continue(evpl);
+    }
+
+    if (mount_ctx.status != 0) {
+        fprintf(stderr, "Failed to create test filesystem\n");
+        return 1;
+    }
+
+    mount_ctx = (struct mount_ctx) { 0 };
+
     chimera_mount(
         thread,
         "/memfs",
         "memfs",
-        "/",
+        "fs0",
         NULL,
         mount_callback,
         &mount_ctx);
@@ -165,7 +179,7 @@ main(
 
     memset(&mount_ctx, 0, sizeof(mount_ctx));
 
-    chimera_mount(thread, "/newshare", "memfs", "/test", NULL, mount_callback, &mount_ctx);
+    chimera_mount(thread, "/newshare", "memfs", "fs0/test", NULL, mount_callback, &mount_ctx);
 
     while (!mount_ctx.done) {
         evpl_continue(evpl);

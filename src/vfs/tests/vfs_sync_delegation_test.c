@@ -104,6 +104,18 @@ wait_for_completion(struct test_ctx *ctx)
 } /* wait_for_completion */
 
 static void
+mount_callback(
+    struct chimera_vfs_thread *thread,
+    enum chimera_vfs_error     status,
+    void                      *private_data)
+{
+    struct test_ctx *ctx = private_data;
+
+    ctx->status = status;
+    ctx->done   = 1;
+} /* mount_callback */
+
+static void
 put_key(
     struct test_ctx *ctx,
     const char      *key,
@@ -301,7 +313,28 @@ run_phase(
     fprintf(stderr, "Phase: %s (num_sync_delegation_threads=%d)\n",
             label, num_sync_threads);
 
+    /* Full symmetric lifecycle around the KV traffic: mkfs + mount before,
+     * umount + rmfs after (mirroring the memfs/diskfs harnesses). */
+    chimera_vfs_mkfs(ctx.vfs_thread, NULL, "cairn", "fs0", NULL,
+                     mount_callback, &ctx);
+    wait_for_completion(&ctx);
+    assert(ctx.status == CHIMERA_VFS_OK);
+
+    chimera_vfs_mount(ctx.vfs_thread, NULL, "/test", "cairn", "fs0", NULL,
+                      mount_callback, &ctx);
+    wait_for_completion(&ctx);
+    assert(ctx.status == CHIMERA_VFS_OK);
+
     test_fn(&ctx);
+
+    chimera_vfs_umount(ctx.vfs_thread, NULL, "/test", mount_callback, &ctx);
+    wait_for_completion(&ctx);
+    assert(ctx.status == CHIMERA_VFS_OK);
+
+    chimera_vfs_rmfs(ctx.vfs_thread, NULL, "cairn", "fs0",
+                     mount_callback, &ctx);
+    wait_for_completion(&ctx);
+    assert(ctx.status == CHIMERA_VFS_OK);
 
     chimera_vfs_thread_destroy(ctx.vfs_thread);
     chimera_vfs_destroy(ctx.vfs);

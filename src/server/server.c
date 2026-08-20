@@ -2154,7 +2154,8 @@ chimera_seed_mounted_cb(
 SYMBOL_EXPORT int
 chimera_server_seed_symlinks(
     struct chimera_server *server,
-    const char            *module_name)
+    const char            *module_name,
+    const char            *module_path)
 {
     struct evpl            *evpl;
     struct chimera_seed_ctx ctx;
@@ -2171,7 +2172,7 @@ chimera_server_seed_symlinks(
     ctx.status = CHIMERA_VFS_OK;
 
     chimera_vfs_mount(ctx.thread, chimera_vfs_get_server_cred(),
-                      CHIMERA_SEED_TMP_NAME, module_name, "/", NULL,
+                      CHIMERA_SEED_TMP_NAME, module_name, module_path, NULL,
                       chimera_seed_mounted_cb, &ctx);
 
     while (!ctx.done) {
@@ -2304,7 +2305,8 @@ chimera_seed_fsa_mounted_cb(
 SYMBOL_EXPORT int
 chimera_server_seed_fsa(
     struct chimera_server *server,
-    const char            *module_name)
+    const char            *module_name,
+    const char            *module_path)
 {
     struct evpl            *evpl;
     struct chimera_seed_ctx ctx;
@@ -2321,7 +2323,7 @@ chimera_server_seed_fsa(
     ctx.status = CHIMERA_VFS_OK;
 
     chimera_vfs_mount(ctx.thread, chimera_vfs_get_server_cred(),
-                      CHIMERA_SEED_TMP_NAME, module_name, "/", NULL,
+                      CHIMERA_SEED_TMP_NAME, module_name, module_path, NULL,
                       chimera_seed_fsa_mounted_cb, &ctx);
 
     while (!ctx.done) {

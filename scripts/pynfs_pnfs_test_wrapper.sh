@@ -71,7 +71,8 @@ cat > "$DS_CONFIG" << EOF
                 "nfs4_lease_time": ${PYNFS_NFS4_LEASE_TIME},
                 "nfs4_grace_time": ${PYNFS_NFS4_GRACE_TIME},
                 "external_portmap": true, "metrics_port": 9001 },
-    "mounts": { "ds_data": { "module": "memfs", "path": "/" } },
+    "filesystems": { "fs0": { "module": "memfs" } },
+    "mounts": { "ds_data": { "module": "memfs", "path": "fs0" } },
     "exports": { "/ds_export": { "path": "/ds_data" } }
 }
 EOF
@@ -87,8 +88,9 @@ cat > "$MDS_CONFIG" << EOF
         "pnfs": { "enabled": true,
                   "data_servers": [ { "tcp": "127.0.0.1:${DS_PORT}", "backing_path": "/ds0" } ] }
     },
+    "filesystems": { "fs0": { "module": "memfs" } },
     "mounts": {
-        "share": { "module": "memfs", "path": "/" },
+        "share": { "module": "memfs", "path": "fs0" },
         "ds0":   { "module": "nfs", "path": "127.0.0.1:/ds_export", "options": "vers=4,port=${DS_PORT}" }
     },
     "exports": { "/share": { "path": "/share" } }

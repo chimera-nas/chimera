@@ -12,6 +12,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include <string.h>
 #undef NDEBUG
 #include <assert.h>
@@ -239,7 +240,12 @@ main(
     ctx.vfs_thread = chimera_vfs_thread_init(ctx.evpl, ctx.vfs);
     assert(ctx.vfs_thread != NULL);
 
-    chimera_vfs_mount(ctx.vfs_thread, NULL, "/test", "memfs", "/", NULL,
+    chimera_vfs_mkfs(ctx.vfs_thread, NULL, "memfs", "fs0", NULL,
+                     mount_cb, &ctx);
+    wait_done(&ctx);
+    assert(ctx.status == CHIMERA_VFS_OK);
+
+    chimera_vfs_mount(ctx.vfs_thread, NULL, "/test", "memfs", "fs0", NULL,
                       mount_cb, &ctx);
     wait_done(&ctx);
     assert(ctx.status == CHIMERA_VFS_OK);
@@ -287,6 +293,23 @@ main(
     chimera_vfs_release(ctx.vfs_thread, h1);
     chimera_vfs_release(ctx.vfs_thread, h2);
     chimera_vfs_release(ctx.vfs_thread, root_handle);
+
+    chimera_vfs_umount(ctx.vfs_thread, NULL, "/test", mount_cb, &ctx);
+    wait_done(&ctx);
+    assert(ctx.status == CHIMERA_VFS_OK);
+
+    /* umount does not return until every handle on the mount has been
+     * closed and released, so the removal below succeeds immediately.  The
+     * retry is kept as a backstop only. */
+    for (int i = 0; i < 50; i++) {
+        chimera_vfs_rmfs(ctx.vfs_thread, NULL, "memfs", "fs0", mount_cb, &ctx);
+        wait_done(&ctx);
+        if (ctx.status != CHIMERA_VFS_EBUSY) {
+            break;
+        }
+        usleep(100000);
+    }
+    assert(ctx.status == CHIMERA_VFS_OK);
 
     chimera_vfs_thread_destroy(ctx.vfs_thread);
     chimera_vfs_destroy(ctx.vfs);

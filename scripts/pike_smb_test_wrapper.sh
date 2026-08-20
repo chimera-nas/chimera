@@ -98,12 +98,21 @@ trap cleanup EXIT
 
 generate_config() {
     # The single share the tests connect to (PIKE_SHARE=share). For the path
-    # backends each share gets a real on-disk directory; memfs is mounted at "/".
+    # backends each share gets a real on-disk directory; the mkfs-capable
+    # backends (memfs/diskfs/cairn) mount a named filesystem "fs0" that the
+    # "filesystems" section below ensures exists.
     local mpath="/"
+    local fs_section=""
     case "$BACKEND" in
         linux|io_uring)
             mpath="${SESSION_DIR}/data/share"
             mkdir -p "$mpath"
+            ;;
+        memfs|diskfs|cairn)
+            mpath="fs0"
+            fs_section="\"filesystems\": {
+        \"fs0\": {\"module\": \"${BACKEND}\"}
+    },"
             ;;
     esac
 
@@ -150,6 +159,7 @@ generate_config() {
         "delegation_threads": 4,
         "external_portmap": false
     },
+    ${fs_section}
     "mounts": {
         "share": {"module": "${BACKEND}", "path": "${mpath}"}
     },

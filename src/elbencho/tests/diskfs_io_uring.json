@@ -17,10 +17,16 @@
             }
         }
     ],
+    "filesystems": [
+        {
+            "module": "diskfs",
+            "name": "fs0"
+        }
+    ],
     "mounts": [
         {
             "module": "diskfs",
-            "module_path": "/",
+            "module_path": "fs0",
             "mount_point": "/diskfs"
         }
     ]
