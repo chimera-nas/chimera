@@ -478,59 +478,85 @@ find_lastop_key(json_t *state)
     return NULL;
 } /* find_lastop_key */
 
-int
-main(
-    int   argc,
-    char *argv[])
+/* Pull the LInit capability profile from a trace's state 0. */
+static int
+read_caps(
+    const char           *path,
+    struct smb2_env_opts *opts)
 {
-    const char          *path = NULL;
-    struct smb2_env_opts opts = { 0 };
-
-    for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--trace") == 0 && i + 1 < argc) {
-            path = argv[++i];
-        }
-    }
-    if (!path) {
-        fprintf(stderr, "usage: %s --trace <file.itf.json>\n", argv[0]);
-        return 2;
-    }
-    g_trace = path;
-
     json_error_t err;
     json_t      *root = json_load_file(path, 0, &err);
+
     if (!root) {
         fprintf(stderr, "failed to parse %s: %s\n", path, err.text);
-        return 2;
+        return -1;
+    }
+
+    json_t      *states = json_object_get(root, "states");
+    const char  *lokey  = (states && json_array_size(states))
+        ? find_lastop_key(json_array_get(states, 0)) : NULL;
+    if (!lokey) {
+        fprintf(stderr, "no lastOp key in %s\n", path);
+        json_decref(root);
+        return -1;
+    }
+
+    json_t      *init = json_object_get(json_array_get(states, 0), lokey);
+    if (strcmp(jtag(init), "LInit") != 0) {
+        fprintf(stderr, "state 0 of %s is not LInit\n", path);
+        json_decref(root);
+        return -1;
+    }
+
+    json_t      *caps = json_object_get(jval(init), "caps");
+    opts->oplocks            = jbool(caps, "oplocks");
+    opts->leases             = jbool(caps, "leases");
+    opts->directory_leases   = jbool(caps, "dirLeases");
+    opts->persistent_handles = jbool(caps, "durable");
+    json_decref(root);
+    return 0;
+} /* read_caps */
+
+/* Replay one trace against the already-open g_env on a fresh per-trace
+ * filesystem `fsname`.  Returns the trace's mismatch count (0 = clean). */
+static int
+run_trace(
+    const char *fsname,
+    const char *path)
+{
+    json_error_t err;
+    json_t      *root = json_load_file(path, 0, &err);
+
+    if (!root) {
+        fprintf(stderr, "failed to parse %s: %s\n", path, err.text);
+        return 1;
     }
 
     json_t      *states = json_object_get(root, "states");
     size_t       ns     = json_array_size(states);
     if (ns == 0) {
-        fprintf(stderr, "trace has no states\n");
-        return 2;
+        fprintf(stderr, "trace %s has no states\n", path);
+        json_decref(root);
+        return 1;
     }
 
     const char  *lokey = find_lastop_key(json_array_get(states, 0));
     if (!lokey) {
-        fprintf(stderr, "no lastOp key in trace state\n");
-        return 2;
+        fprintf(stderr, "no lastOp key in %s\n", path);
+        json_decref(root);
+        return 1;
     }
 
-    /* State 0 carries LInit with the capability profile: configure the
-     * server to match before it starts. */
-    json_t      *init = json_object_get(json_array_get(states, 0), lokey);
-    if (strcmp(jtag(init), "LInit") != 0) {
-        fprintf(stderr, "state 0 is not LInit\n");
-        return 2;
-    }
-    json_t      *caps = json_object_get(jval(init), "caps");
-    opts.oplocks            = jbool(caps, "oplocks");
-    opts.leases             = jbool(caps, "leases");
-    opts.directory_leases   = jbool(caps, "dirLeases");
-    opts.persistent_handles = jbool(caps, "durable");
+    /* Fresh identity mappings + mismatch tally for this trace: a unique
+     * fsname isolates the filesystem, and zeroing the wire-value maps stops a
+     * stale SessionId/TreeId/FileId from a prior trace being reused. */
+    memset(g_conn_for_sess, 0, sizeof(g_conn_for_sess));
+    memset(g_wire_tree, 0, sizeof(g_wire_tree));
+    memset(g_wire_fid, 0, sizeof(g_wire_fid));
+    g_trace     = path;
+    g_nmismatch = 0;
 
-    smb2_env_start_opts(&g_env, &opts);
+    smb2_env_fs_setup(&g_env, fsname);
 
     for (size_t i = 1; i < ns; i++) {
         json_t *lo = json_object_get(json_array_get(states, i), lokey);
@@ -540,13 +566,66 @@ main(
         do_message(jval(lo));
     }
 
-    smb2_env_stop(&g_env);
-    json_decref(root);
+    smb2_conn_reset(&g_env);
+    smb2_env_fs_teardown(&g_env, fsname);
 
-    if (g_nmismatch) {
-        fprintf(stderr, "%d mismatch(es) in %s\n", g_nmismatch, path);
+    int nm = g_nmismatch;
+    if (nm) {
+        fprintf(stderr, "%d mismatch(es) in %s\n", nm, path);
+    } else {
+        printf("ok: %s replayed with no mismatches\n", path);
+    }
+    json_decref(root);
+    return nm;
+} /* run_trace */
+
+int
+main(
+    int   argc,
+    char *argv[])
+{
+    const char          *traces[512];
+    int                  ntraces = 0;
+    struct smb2_env_opts opts    = { 0 };
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--trace") == 0 && i + 1 < argc) {
+            if (ntraces < (int) (sizeof(traces) / sizeof(traces[0]))) {
+                traces[ntraces++] = argv[++i];
+            } else {
+                i++;
+            }
+        }
+    }
+    if (ntraces == 0) {
+        fprintf(stderr, "usage: %s --trace <file.itf.json> [--trace ...]\n",
+                argv[0]);
+        return 2;
+    }
+
+    /* Every trace in one batch shares a capability profile (one profile per
+     * generation instance -- see smb2_mbt_add_batch in CMakeLists), so the
+     * shared server is configured once from the first trace's LInit. */
+    if (read_caps(traces[0], &opts) != 0) {
+        return 2;
+    }
+
+    smb2_env_open_opts(&g_env, &opts);
+
+    int total = 0;
+    for (int i = 0; i < ntraces; i++) {
+        char fsname[32];
+        snprintf(fsname, sizeof(fsname), "fs_%d", i);
+        total += run_trace(fsname, traces[i]);
+    }
+
+    smb2_env_stop(&g_env);
+
+    if (total) {
+        fprintf(stderr, "%d total mismatch(es) across %d trace(s)\n",
+                total, ntraces);
         return 1;
     }
-    printf("ok: %s replayed with no mismatches\n", path);
+    printf("ok: %d trace(s) replayed with no mismatches\n", ntraces);
     return 0;
 } /* main */

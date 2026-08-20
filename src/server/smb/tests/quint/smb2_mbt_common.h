@@ -426,14 +426,30 @@ smb2c_notify(
 
 /* ---- server + connection lifecycle -------------------------------------- */
 
+/* Bring up the server + client evpl with NO filesystem or share mounted.  The
+ * MBT batch replayer calls this once and then cycles a fresh filesystem per
+ * trace via smb2_env_fs_setup/teardown, amortizing server init/start over the
+ * whole corpus.  smb2_env_start_opts (below) keeps the one-shot
+ * open+fs("fs0") shape the smoke/oplock probes rely on. */
 static inline void
-smb2_env_start_opts(
+smb2_env_open_opts(
     struct smb2_env            *env,
     const struct smb2_env_opts *opts)
 {
     struct chimera_server_config *config;
 
     memset(env, 0, sizeof(*env));
+
+    /* Sweep the VFS open cache aggressively.  When a trace's connections are
+     * disconnected (smb2_conn_reset), the server closes their file handles
+     * asynchronously via the close thread's periodic sweep, and the memfs
+     * filesystem stays EBUSY until that drains -- the batch replayer waits on
+     * it before rmfs.  The production default is 1s per sweep, which would
+     * dominate per-trace teardown (~0.85s each); 10ms shrinks it to ~40ms and
+     * is purely a close-timing knob (handles are already protocol-released, so
+     * this changes no observable behavior).  Respect an external override
+     * (overwrite=0) so CI can tune it. */
+    setenv("CHIMERA_CLOSE_SWEEP_INTERVAL_MS", "10", 0);
 
     snprintf(env->session_dir, sizeof(env->session_dir),
              "/tmp/smb2_mbt_XXXXXX");
@@ -460,17 +476,65 @@ smb2_env_start_opts(
     }
 
     env->server = chimera_server_init(config, env->metrics);
-    /* memfs is a named-filesystem backend (CHIMERA_VFS_CAP_MKFS): create the
-     * filesystem before mounting the share onto it. */
-    if (chimera_server_mkfs(env->server, "memfs", "fs0", NULL) != 0) {
-        fprintf(stderr, "failed to create memfs filesystem fs0\n");
-        exit(1);
-    }
-    chimera_server_mount(env->server, "share", "memfs", "fs0", NULL);
     chimera_server_start(env->server);
-    chimera_server_create_share(env->server, "share", "share", 0);
 
     env->evpl = evpl_create(NULL);
+} /* smb2_env_open_opts */
+
+/* Create a fresh memfs filesystem `fsname` and mount the "share" onto it.  A
+ * unique fsname per trace yields a distinct fsid -> distinct FH mount-id, so
+ * no server-side attr/name/handle cache entry can be hit across traces (memfs
+ * is a named-filesystem backend, CHIMERA_VFS_CAP_MKFS).  Safe on the running
+ * server because no requests are in flight between traces. */
+static inline void
+smb2_env_fs_setup(
+    struct smb2_env *env,
+    const char      *fsname)
+{
+    if (chimera_server_mkfs(env->server, "memfs", fsname, NULL) != 0) {
+        fprintf(stderr, "failed to create memfs filesystem %s\n", fsname);
+        exit(1);
+    }
+    chimera_server_mount(env->server, "share", "memfs", fsname, NULL);
+    chimera_server_create_share(env->server, "share", "share", 0);
+} /* smb2_env_fs_setup */
+
+/* Tear the share/mount/filesystem back down.  rmfs is EBUSY while mounted, so
+ * the order is remove_share -> unmount -> rmfs (mirrors the NFS harness).
+ *
+ * Unlike the stateless NFS3 harness, SMB holds file opens for the life of a
+ * session; smb2_conn_reset disconnects those sessions, but the server closes
+ * their VFS handles asynchronously on its close thread, so the filesystem
+ * stays EBUSY (memfs open_count > 0) for a short window afterward.  Retry rmfs
+ * until that drains rather than racing it -- the same bounded-retry shape the
+ * NFS4 harness uses for NFS4ERR_DELAY. */
+#define SMB2_RMFS_RETRY_MAX 5000            /* * 1ms = 5s ceiling */
+static inline void
+smb2_env_fs_teardown(
+    struct smb2_env *env,
+    const char      *fsname)
+{
+    int tries = 0;
+
+    chimera_server_remove_share(env->server, "share");
+    chimera_server_unmount(env->server, "share");
+    while (chimera_server_rmfs(env->server, "memfs", fsname) != 0) {
+        if (++tries >= SMB2_RMFS_RETRY_MAX) {
+            fprintf(stderr, "failed to remove memfs filesystem %s "
+                    "(still busy after %d retries)\n", fsname, tries);
+            exit(1);
+        }
+        usleep(1000);
+    }
+} /* smb2_env_fs_teardown */
+
+static inline void
+smb2_env_start_opts(
+    struct smb2_env            *env,
+    const struct smb2_env_opts *opts)
+{
+    smb2_env_open_opts(env, opts);
+    smb2_env_fs_setup(env, "fs0");
 } /* smb2_env_start_opts */
 
 static inline void
@@ -512,6 +576,30 @@ smb2_conn_open(struct smb2_env *env)
     env->conns[env->nconns++] = c;
     return c;
 } /* smb2_conn_open */
+
+/* Disconnect and free every connection a trace opened, dropping the
+ * server-side sessions/trees/opens with them, so the next trace starts from a
+ * clean protocol state and the filesystem it held can be unmounted/rmfs'd.
+ * The batch replayer calls this once per trace, before smb2_env_fs_teardown.
+ * env->conns[] is bounded (SMB2C_MAX_CONNS), so resetting nconns to 0 each
+ * trace is also what keeps a whole corpus from overflowing it. */
+static inline void
+smb2_conn_reset(struct smb2_env *env)
+{
+    for (int i = 0; i < env->nconns; i++) {
+        struct smb2_conn *c = env->conns[i];
+        evpl_close(env->evpl, c->bind);
+        while (!c->disconnected) {
+            smb2_pump(env);
+        }
+    }
+    for (int i = 0; i < env->nconns; i++) {
+        free(env->conns[i]->sbuf);
+        free(env->conns[i]->rbuf);
+        free(env->conns[i]);
+    }
+    env->nconns = 0;
+} /* smb2_conn_reset */
 
 static inline void
 smb2_env_stop(struct smb2_env *env)
