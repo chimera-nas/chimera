@@ -6,6 +6,7 @@ add_library(chimera_posix SHARED
             posix.c
             posix_mount.c
             posix_umount.c
+            posix_mkfs.c
             posix_open.c
             posix_close.c
             posix_read.c

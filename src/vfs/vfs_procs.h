@@ -59,6 +59,44 @@ chimera_vfs_umount(
     chimera_vfs_umount_callback_t  callback,
     void                          *private_data);
 
+typedef void (*chimera_vfs_mkfs_callback_t)(
+    struct chimera_vfs_thread *thread,
+    enum chimera_vfs_error     status,
+    void                      *private_data);
+
+/* Create a named filesystem inside a module that advertises
+ * CHIMERA_VFS_CAP_MKFS.  Completes with CHIMERA_VFS_ENOTSUP if the module
+ * does not, CHIMERA_VFS_EEXIST if the name is already in use, and
+ * CHIMERA_VFS_EINVAL if the name is empty or contains '/'.  options is a
+ * comma-separated key[=value] string interpreted by the module (same format
+ * as mount options), or NULL. */
+void
+chimera_vfs_mkfs(
+    struct chimera_vfs_thread     *thread,
+    const struct chimera_vfs_cred *cred,
+    const char                    *module_name,
+    const char                    *fsname,
+    const char                    *options,
+    chimera_vfs_mkfs_callback_t    callback,
+    void                          *private_data);
+
+typedef void (*chimera_vfs_rmfs_callback_t)(
+    struct chimera_vfs_thread *thread,
+    enum chimera_vfs_error     status,
+    void                      *private_data);
+
+/* Remove a named filesystem previously created with chimera_vfs_mkfs.
+* Completes with CHIMERA_VFS_EBUSY while any mount references the
+* filesystem and CHIMERA_VFS_ENOENT if no filesystem has that name. */
+void
+chimera_vfs_rmfs(
+    struct chimera_vfs_thread     *thread,
+    const struct chimera_vfs_cred *cred,
+    const char                    *module_name,
+    const char                    *fsname,
+    chimera_vfs_rmfs_callback_t    callback,
+    void                          *private_data);
+
 typedef void (*chimera_vfs_lookup_at_callback_t)(
     enum chimera_vfs_error    error_code,
     struct chimera_vfs_attrs *attr,

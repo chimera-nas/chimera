@@ -34,6 +34,8 @@ struct chimera_client_fh {
 enum chimera_client_request_opcode {
     CHIMERA_CLIENT_OP_MOUNT,
     CHIMERA_CLIENT_OP_UMOUNT,
+    CHIMERA_CLIENT_OP_MKFS,
+    CHIMERA_CLIENT_OP_RMFS,
     CHIMERA_CLIENT_OP_OPEN,
     CHIMERA_CLIENT_OP_MKDIR,
     CHIMERA_CLIENT_OP_READ,
@@ -108,6 +110,21 @@ struct chimera_client_request {
             void                     *private_data;
             char                      mount_path[CHIMERA_VFS_PATH_MAX];
         } umount;
+
+        struct {
+            chimera_mkfs_callback_t callback;
+            void                   *private_data;
+            char                    module_name[64];
+            char                    fsname[256];
+            char                    options[CHIMERA_VFS_PATH_MAX];
+        } mkfs;
+
+        struct {
+            chimera_rmfs_callback_t callback;
+            void                   *private_data;
+            char                    module_name[64];
+            char                    fsname[256];
+        } rmfs;
 
         struct {
             struct chimera_vfs_open_handle *parent_handle;
@@ -507,5 +524,13 @@ void chimera_dispatch_mount(
     struct chimera_client_request *request);
 
 void chimera_dispatch_umount(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request);
+
+void chimera_dispatch_mkfs(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request);
+
+void chimera_dispatch_rmfs(
     struct chimera_client_thread  *thread,
     struct chimera_client_request *request);

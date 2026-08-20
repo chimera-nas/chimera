@@ -13,7 +13,7 @@
 #include "vfs_mount_table.h"
 #include "common/macros.h"
 
-static int
+int
 chimera_vfs_parse_mount_options(
     const char                       *options,
     struct chimera_vfs_mount_options *mount_options,

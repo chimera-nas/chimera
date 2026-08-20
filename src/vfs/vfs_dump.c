@@ -59,6 +59,8 @@ chimera_vfs_op_name(unsigned int opcode)
         case CHIMERA_VFS_OP_OPEN_STREAM: return "OpenStream";
         case CHIMERA_VFS_OP_LIST_STREAMS: return "ListStreams";
         case CHIMERA_VFS_OP_REMOVE_STREAM: return "RemoveStream";
+        case CHIMERA_VFS_OP_MKFS: return "MkFs";
+        case CHIMERA_VFS_OP_RMFS: return "RmFs";
         default: return "Unknown";
     } /* switch */
 
@@ -328,6 +330,16 @@ __chimera_vfs_dump_request(struct chimera_vfs_request *req)
         case CHIMERA_VFS_OP_UMOUNT:
             chimera_snprintf(argstr, sizeof(argstr), "private %p",
                              req->umount.mount_private);
+            break;
+        case CHIMERA_VFS_OP_MKFS:
+            chimera_snprintf(argstr, sizeof(argstr), "fs %s@%s",
+                             req->mkfs.name,
+                             req->module->name);
+            break;
+        case CHIMERA_VFS_OP_RMFS:
+            chimera_snprintf(argstr, sizeof(argstr), "fs %s@%s",
+                             req->rmfs.name,
+                             req->module->name);
             break;
         case CHIMERA_VFS_OP_LOOKUP_AT:
             format_safe_name(namestr, sizeof(namestr),

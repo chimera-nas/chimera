@@ -117,7 +117,9 @@ struct chimera_vfs_mount_options {
 #define CHIMERA_VFS_OP_OPEN_STREAM      37
 #define CHIMERA_VFS_OP_LIST_STREAMS     38
 #define CHIMERA_VFS_OP_REMOVE_STREAM    39
-#define CHIMERA_VFS_OP_NUM              40
+#define CHIMERA_VFS_OP_MKFS             40
+#define CHIMERA_VFS_OP_RMFS             41
+#define CHIMERA_VFS_OP_NUM              42
 
 #define CHIMERA_VFS_OPEN_CREATE         (1U << 0)
 #define CHIMERA_VFS_OPEN_PATH           (1U << 1)
@@ -483,6 +485,15 @@ struct chimera_vfs_request {
     uint8_t                            token_count;
 
     struct chimera_vfs_module         *module;
+
+    /* The mount_private the backend returned from MOUNT for the mount that
+     * owns this request's file handle -- for a backend hosting several named
+     * filesystems, the one this operation targets.  Resolved from the mount
+     * table at alloc, which is authoritative now that a handle cannot outlive
+     * its mount: umount holds the mount live until every handle referencing
+     * it is gone, so this is set for every operation the backend sees,
+     * including the closes umount itself issues. */
+    void                              *mount_private;
     void                              *proto_callback;
     void                              *proto_private_data;
 
@@ -756,6 +767,19 @@ struct chimera_vfs_request {
              * someone else to be dropped (chimera_vfs_umount_wait). */
             void                     *wait;
         } umount;
+
+        struct {
+            const char                      *name;
+            uint32_t                         namelen;
+            struct chimera_vfs_mount_options options;
+            char                             options_buffer[CHIMERA_VFS_MOUNT_OPT_BUFFER_MAX];
+            const char                      *raw_options;
+        } mkfs;
+
+        struct {
+            const char *name;
+            uint32_t    namelen;
+        } rmfs;
 
         struct {
             struct chimera_vfs_open_handle *handle;
@@ -1425,6 +1449,14 @@ struct chimera_vfs_handle_state {
  * change_attr_type NFS4_CHANGE_TYPE_IS_MONOTONIC_INCR.  Modules that leave this
  * unset have change derived from ctime (change_attr_type TIME_METADATA). */
 #define CHIMERA_VFS_CAP_CHANGE                (1U << 24)
+
+/* If set, the module manages named filesystems via CHIMERA_VFS_OP_MKFS /
+ * CHIMERA_VFS_OP_RMFS.  Filesystems are created by name, mounted with a
+ * module path of "<name>[/subpath]" (the leading path component selects the
+ * filesystem), and removed only while no mount references them (RMFS returns
+ * CHIMERA_VFS_EBUSY otherwise).  Modules without this bit interpret the whole
+ * module path themselves (e.g. as a host path for passthrough backends). */
+#define CHIMERA_VFS_CAP_MKFS                  (1UL << 25)
 
 struct chimera_vfs_module {
     /* Required
