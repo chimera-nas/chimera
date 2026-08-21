@@ -12,7 +12,8 @@ chimera_nfs4_open_fh(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct chimera_nfs4_open_state *state = NULL;
+    struct chimera_nfs_client_server *server;
+    struct chimera_nfs4_open_state   *state = NULL;
 
     /*
      * For inferred opens (internal opens used for path traversal, like
@@ -45,7 +46,15 @@ chimera_nfs4_open_fh(
         return;
     }
 
-    state->server_index            = request->fh[CHIMERA_VFS_MOUNT_ID_SIZE];
+    state->server_index = request->fh[CHIMERA_VFS_MOUNT_ID_SIZE];
+
+    /* No stateid of its own, but this handle can still read and write the file,
+     * so it counts against the file's open: a CLOSE while it is live would
+     * strand it.  Contributes no stateid; whatever open_at recorded stands. */
+    server = shared->servers[state->server_index];
+
+    chimera_nfs4_open_file_get(server, request->fh, request->fh_len, NULL);
+
     request->open_fh.r_vfs_private = (uint64_t) state;
     request->status                = CHIMERA_VFS_OK;
     request->complete(request);

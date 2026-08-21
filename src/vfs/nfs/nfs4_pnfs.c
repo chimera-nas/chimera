@@ -452,6 +452,8 @@ chimera_nfs4_pnfs_register_ds(
     server->rdma_protocol = use_rdma ? rdma_protocol : 0;
     snprintf(server->hostname, sizeof(server->hostname), "%s", host);
 
+    pthread_mutex_init(&server->open_state_lock, NULL);
+
     server->nfs_endpoint = chimera_tcp_flavor_endpoint_create(
         shared->tcp_flavor, server->hostname, server->nfs_port);
 
@@ -1477,11 +1479,15 @@ static void chimera_nfs4_pnfs_layoutreturn(
 static void
 chimera_nfs4_pnfs_close_done(struct chimera_vfs_request *request)
 {
-    struct chimera_nfs4_pnfs_close_ctx *cctx = request->plugin_data;
+    struct chimera_nfs4_pnfs_close_ctx *cctx       = request->plugin_data;
+    struct chimera_nfs_thread          *thread     = cctx->thread;
+    struct chimera_nfs_shared          *shared     = cctx->shared;
+    struct chimera_nfs4_open_state     *open_state = cctx->open_state;
 
-    chimera_nfs4_open_state_free(cctx->open_state);
-    request->status = CHIMERA_VFS_OK;
-    request->complete(request);
+    /* The layout is back with the MDS; now release the open itself.  Read the
+     * context out first -- close_send reuses plugin_data for its own, and it
+     * takes ownership of the open state from here. */
+    chimera_nfs4_close_send(thread, shared, request, open_state);
 } /* chimera_nfs4_pnfs_close_done */
 
 static void
