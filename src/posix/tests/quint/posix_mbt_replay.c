@@ -22,6 +22,7 @@
 
 #define POSIX_DRIVER_ENGINE_ONLY
 #include "posix_driver.c"
+#include "common/mbt_trace_dir.h"
 
 /* ---- small helpers over the raw ITF JSON --------------------------------- */
 
@@ -2768,23 +2769,22 @@ main(
     char **argv)
 {
     const char *backend = "memfs";
-    const char *traces[1024];
     int         ntraces = 0;
     int         i, ran = 0, failures = 0, bad = 0;
 
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--backend") == 0 && i + 1 < argc) {
             backend = argv[++i];
-        } else if (strcmp(argv[i], "--trace") == 0 && i + 1 < argc) {
-            if (ntraces < (int) (sizeof(traces) / sizeof(traces[0]))) {
-                traces[ntraces++] = argv[++i];
-            }
         } else if (strcmp(argv[i], "--driver") == 0 && i + 1 < argc) {
             i++;   /* accepted + ignored (no subprocess) */
         }
     }
+
+    /* --trace/--trace-dir/--exclude-prefix are gathered by the shared helper. */
+    char **traces = mbt_collect_traces(argc, argv, &ntraces);
     if (ntraces == 0) {
-        fprintf(stderr, "usage: %s --backend <b> --trace <f> [--trace ...]\n",
+        fprintf(stderr,
+                "usage: %s --backend <b> [--trace <f> ...] [--trace-dir <d>]\n",
                 argv[0]);
         return 2;
     }

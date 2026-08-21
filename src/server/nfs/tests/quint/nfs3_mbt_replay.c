@@ -33,6 +33,7 @@
 #include <jansson.h>
 
 #include "nfs3_mbt_common.h"
+#include "common/mbt_trace_dir.h"
 
 #define MBT_MAX_FIDS           16384
 #define MBT_MAX_MISM           16
@@ -1300,53 +1301,34 @@ typedef void (*op_handler_t)(
     json_t        *post_fs,
     struct mism   *m);
 
+/* *INDENT-OFF* */
 static const struct {
     const char  *tag;
     op_handler_t fn;
 } handlers[] = {
-    { "OLookup",       op_lookup                               }
-    ,
-    { "OGetattr",      op_getattr                              }
-    ,
-    { "OStaleGetattr", op_stalegetattr                         }
-    ,
-    { "OSetattr",      op_setattr                              }
-    ,
-    { "OAccess",       op_access                               }
-    ,
-    { "OCreate",       op_create                               }
-    ,
-    { "OMkdir",        op_mkdir                                }
-    ,
-    { "OSymlink",      op_symlink                              }
-    ,
-    { "OReadlink",     op_readlink                             }
-    ,
-    { "OMknod",        op_mknod                                }
-    ,
-    { "OWrite",        op_write                                }
-    ,
-    { "ORead",         op_read                                 }
-    ,
-    { "ORemove",       op_remove                               }
-    ,
-    { "ORmdir",        op_rmdir                                }
-    ,
-    { "ORename",       op_rename                               }
-    ,
-    { "OLink",         op_link                                 }
-    ,
-    { "OReaddir",      op_readdir                              }
-    ,
-    { "OCommit",       op_commit                               }
-    ,
-    { "OFsstat",       op_fsstat                               }
-    ,
-    { "OFsinfo",       op_fsinfo                               }
-    ,
-    { "OPathconf",     op_pathconf                             }
-    ,
+    { "OLookup",       op_lookup       },
+    { "OGetattr",      op_getattr      },
+    { "OStaleGetattr", op_stalegetattr },
+    { "OSetattr",      op_setattr      },
+    { "OAccess",       op_access       },
+    { "OCreate",       op_create       },
+    { "OMkdir",        op_mkdir        },
+    { "OSymlink",      op_symlink      },
+    { "OReadlink",     op_readlink     },
+    { "OMknod",        op_mknod        },
+    { "OWrite",        op_write        },
+    { "ORead",         op_read         },
+    { "ORemove",       op_remove       },
+    { "ORmdir",        op_rmdir        },
+    { "ORename",       op_rename       },
+    { "OLink",         op_link         },
+    { "OReaddir",      op_readdir      },
+    { "OCommit",       op_commit       },
+    { "OFsstat",       op_fsstat       },
+    { "OFsinfo",       op_fsinfo       },
+    { "OPathconf",     op_pathconf     },
 };
+/* *INDENT-ON* */
 
 static op_handler_t
 find_handler(const char *tag)
@@ -1621,6 +1603,10 @@ main(
     static struct option long_options[] = {
         { "trace",              required_argument,              0,
           't'                                                                           },
+        { "trace-dir",          required_argument,              0,
+          'D'                                                                           },
+        { "exclude-prefix",     required_argument,              0,
+          'X'                                                                           },
         { "block-size",         required_argument,              0,
           'b'                                                                                                         },
         { "max-attr-skip-rate", required_argument,              0,
@@ -1631,7 +1617,7 @@ main(
           'v'                                                                                                                                                                                                },
         { 0,                    0,                              0,                             0 },
     };
-    const char          *traces[256];
+    char               **traces;
     int                  ntraces            = 0;
     int                  block_size         = 8192;
     double               max_attr_skip_rate = 0.1;
@@ -1642,14 +1628,18 @@ main(
     int                  i;
     struct mbt_env       env;
 
-    while ((c = getopt_long(argc, argv, "t:b:r:nv", long_options,
+    /* --trace/--trace-dir/--exclude-prefix are gathered from the raw argv by
+     * the shared helper; getopt only needs to recognize them so it does not
+     * error, and skips them here (the 't'/'D'/'X' cases). */
+    traces = mbt_collect_traces(argc, argv, &ntraces);
+
+    while ((c = getopt_long(argc, argv, "t:D:X:b:r:nv", long_options,
                             NULL)) != -1) {
         switch (c) {
             case 't':
-                if (ntraces < (int) (sizeof(traces) / sizeof(traces[0]))) {
-                    traces[ntraces++] = optarg;
-                }
-                break;
+            case 'D':
+            case 'X':
+                break;   /* handled by mbt_collect_traces */
             case 'b':
                 block_size = atoi(optarg);
                 break;
@@ -1664,7 +1654,7 @@ main(
                 break;
             default:
                 fprintf(stderr,
-                        "usage: %s --trace FILE [--trace FILE ...] "
+                        "usage: %s [--trace FILE ...] [--trace-dir DIR] "
                         "[--block-size N] [--max-attr-skip-rate F] "
                         "[--dry-run] [--verbose]\n", argv[0]);
                 return 2;
@@ -1672,7 +1662,8 @@ main(
     }
 
     if (ntraces == 0) {
-        fprintf(stderr, "%s: at least one --trace is required\n", argv[0]);
+        fprintf(stderr, "%s: at least one --trace or --trace-dir is required\n",
+                argv[0]);
         return 2;
     }
 
