@@ -651,20 +651,21 @@ test_nfs4_v40_compound_cacheable(void)
     ops[1].argop = OP_WRITE;
     CHECK(!nfs4_v40_drc_compound_cacheable(&args));
 
-    /* The seqid state ops carry their own RFC 7530 9.1.7 per-owner replay
-     * cache, which also answers across a reconnect; this cache does not. */
+    /* The seqid state ops are cached for byte-exact same-connection replay,
+     * layered over the structured (lossy: rflags zeroed on OPEN) RFC 7530
+     * 9.1.7 per-owner cache, which covers the cross-connection case. */
     ops[1].argop = OP_OPEN;
-    CHECK(!nfs4_v40_drc_compound_cacheable(&args));
+    CHECK(nfs4_v40_drc_compound_cacheable(&args));
     ops[1].argop = OP_CLOSE;
-    CHECK(!nfs4_v40_drc_compound_cacheable(&args));
+    CHECK(nfs4_v40_drc_compound_cacheable(&args));
     ops[1].argop = OP_LOCK;
-    CHECK(!nfs4_v40_drc_compound_cacheable(&args));
+    CHECK(nfs4_v40_drc_compound_cacheable(&args));
     ops[1].argop = OP_LOCKU;
-    CHECK(!nfs4_v40_drc_compound_cacheable(&args));
+    CHECK(nfs4_v40_drc_compound_cacheable(&args));
     ops[1].argop = OP_OPEN_CONFIRM;
-    CHECK(!nfs4_v40_drc_compound_cacheable(&args));
+    CHECK(nfs4_v40_drc_compound_cacheable(&args));
     ops[1].argop = OP_OPEN_DOWNGRADE;
-    CHECK(!nfs4_v40_drc_compound_cacheable(&args));
+    CHECK(nfs4_v40_drc_compound_cacheable(&args));
 
     /* OPENATTR mutates only with createdir, but chimera answers NFS4ERR_NOTSUPP
      * for it either way, so caching it would only store errors. */

@@ -1331,7 +1331,14 @@ chimera_nfs4_open(
             /* Return the cached reply.  Simplified replay (status +
              * stateid only); cinfo/attrset/rflags/delegation are
              * reconstructed as zero/none.  Linux clients tolerate this
-             * since they re-fetch attrs via GETATTR after OPEN. */
+             * since they re-fetch attrs via GETATTR after OPEN.
+             *
+             * A retransmit on the SAME connection is normally answered
+             * byte-exact by the v4.0 reply cache before the compound is
+             * even decoded (nfs4_v40_drc.c), so this branch is reached
+             * only when the retransmit arrives on a new connection --
+             * where losing rflags matters least, since a reconnecting
+             * client re-establishes its state anyway. */
             res->status                            = owner->replay.status;
             res->resok4.stateid                    = owner->replay.stateid;
             res->resok4.cinfo.atomic               = 0;
