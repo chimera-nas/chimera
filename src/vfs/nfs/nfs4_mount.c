@@ -716,6 +716,8 @@ chimera_nfs4_mount(
         shared->servers[idx] = server;
         server->index        = idx;
 
+        pthread_mutex_init(&server->open_state_lock, NULL);
+
         need_discover = 1;
 
         DL_APPEND(server->pending_mounts, request);

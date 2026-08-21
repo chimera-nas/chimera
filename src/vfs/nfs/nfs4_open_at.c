@@ -140,6 +140,15 @@ chimera_nfs4_open_at_callback(
         state->server_index = ctx->server->index;
         state->stateid      = open_res->opopen.resok4.stateid;
 
+        /* Count this handle against the file's open on the server, which every
+         * handle on the file shares.  Keyed on the handle OPEN just returned
+         * (unmarshalled into r_attr above), not request->fh, which still names
+         * the parent directory here. */
+        chimera_nfs4_open_file_get(ctx->server,
+                                   request->open_at.r_attr.va_fh,
+                                   request->open_at.r_attr.va_fh_len,
+                                   &state->stateid);
+
         request->open_at.r_vfs_private = (uint64_t) state;
     } else {
         request->open_at.r_vfs_private = 0;

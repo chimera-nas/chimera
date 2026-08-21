@@ -127,6 +127,9 @@ chimera_nfs_destroy(void *private_data)
 
     for (i = 0; i < shared->max_servers; i++) {
         if (shared->servers[i]) {
+            chimera_nfs4_open_file_drain(shared->servers[i]);
+            pthread_mutex_destroy(&shared->servers[i]->open_state_lock);
+
             /* Release the server's reference on any session still published.
              * Reaching here with one means the module is going away with mounts
              * still up, so it was never destroyed on the wire; the memory goes
