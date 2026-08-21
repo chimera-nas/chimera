@@ -25,6 +25,7 @@
  */
 
 #include "smb2_mbt_common.h"
+#include "common/mbt_trace_dir.h"
 
 #include <stdarg.h>
 #include <jansson.h>
@@ -584,21 +585,12 @@ main(
     int   argc,
     char *argv[])
 {
-    const char          *traces[512];
-    int                  ntraces = 0;
     struct smb2_env_opts opts    = { 0 };
+    int                  ntraces = 0;
+    char               **traces  = mbt_collect_traces(argc, argv, &ntraces);
 
-    for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--trace") == 0 && i + 1 < argc) {
-            if (ntraces < (int) (sizeof(traces) / sizeof(traces[0]))) {
-                traces[ntraces++] = argv[++i];
-            } else {
-                i++;
-            }
-        }
-    }
     if (ntraces == 0) {
-        fprintf(stderr, "usage: %s --trace <file.itf.json> [--trace ...]\n",
+        fprintf(stderr, "usage: %s [--trace <f> ...] [--trace-dir <dir>]\n",
                 argv[0]);
         return 2;
     }

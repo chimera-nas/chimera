@@ -35,6 +35,7 @@
 #include <sys/time.h>
 
 #include "nfs3_mbt_common.h"
+#include "common/mbt_trace_dir.h"
 
 #define V4_BLOCK_SIZE       8192
 #define V4_LOCK_BYTES       8
@@ -3250,18 +3251,21 @@ main(
     char **argv)
 {
     static struct option long_options[] = {
-        { "trace",     required_argument,     0,
+        { "trace",          required_argument,          0,
           't'                                                                             },
-        { "mandatory", required_argument,     0,
+        { "trace-dir",      required_argument,          0,
+          'D'                                                                             },
+        { "exclude-prefix", required_argument,          0,
+          'X'                                                                             },
+        { "mandatory",      required_argument,          0,
           'M'                                                                                                  },
-        { "dry-run",   no_argument,           0,
+        { "dry-run",        no_argument,                0,
           'n'                                                                                                                      },
-        { "verbose",   no_argument,           0,
+        { "verbose",        no_argument,                0,
           'v'                                                                                                                                          },
-        { 0,           0,                     0,                    0
-        },
+        { 0,                0,                          0,                         0 },
     };
-    const char          *traces[256];
+    char               **traces;
     const char          *mandatory[8];
     int                  ntraces    = 0;
     int                  nmandatory = 0;
@@ -3282,14 +3286,17 @@ main(
         .memfs_config   = "{\"block_size\": 8192}",
     };
 
-    while ((c = getopt_long(argc, argv, "t:M:nv", long_options,
+    /* --trace/--trace-dir/--exclude-prefix are gathered from raw argv by the
+     * shared helper; getopt only recognizes them so it does not error. */
+    traces = mbt_collect_traces(argc, argv, &ntraces);
+
+    while ((c = getopt_long(argc, argv, "t:D:X:M:nv", long_options,
                             NULL)) != -1) {
         switch (c) {
             case 't':
-                if (ntraces < (int) (sizeof(traces) / sizeof(traces[0]))) {
-                    traces[ntraces++] = optarg;
-                }
-                break;
+            case 'D':
+            case 'X':
+                break;   /* handled by mbt_collect_traces */
             case 'M':
                 if (nmandatory < 8) {
                     mandatory[nmandatory++] = optarg;
@@ -3303,7 +3310,7 @@ main(
                 break;
             default:
                 fprintf(stderr,
-                        "usage: %s --trace FILE [--trace FILE ...] "
+                        "usage: %s [--trace FILE ...] [--trace-dir DIR] "
                         "[--mandatory CAP] [--dry-run] [--verbose]\n",
                         argv[0]);
                 return 2;
@@ -3311,7 +3318,8 @@ main(
     }
 
     if (ntraces == 0) {
-        fprintf(stderr, "%s: at least one --trace is required\n", argv[0]);
+        fprintf(stderr, "%s: at least one --trace or --trace-dir is required\n",
+                argv[0]);
         return 2;
     }
 
