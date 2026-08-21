@@ -59,14 +59,22 @@
 #define CHIMERA_KV_PREFIX_LEN (CHIMERA_KV_HDR_LEN + CHIMERA_KV_NODE_LEN)
 
 enum chimera_kv_record_type {
-    CHIMERA_KV_TYPE_NFS4_RECOVERY  = 0x01, /* confirmed-client identity (node)   */
-    CHIMERA_KV_TYPE_NFS4_EPOCH     = 0x02, /* per-node server boot-epoch (node)  */
-    CHIMERA_KV_TYPE_NFS4_SESSION   = 0x03, /* 4.1 session metadata (by sessionid)*/
-    CHIMERA_KV_TYPE_NFS4_REPLY     = 0x04, /* 4.1 reply slot entry (by sessionid)*/
-    CHIMERA_KV_TYPE_NFS3_REPLY     = 0x05, /* NFSv3 DRC reply entry (by client)  */
-    CHIMERA_KV_TYPE_NSM_STATE      = 0x06, /* singleton NSM/statd state number   */
-    CHIMERA_KV_TYPE_NSM_MONITOR    = 0x07, /* per-host NSM monitor (nfs_nsm)     */
-    CHIMERA_KV_TYPE_NFS4_V40_REPLY = 0x08, /* NFSv4.0 DRC reply entry (by client)*/
+    CHIMERA_KV_TYPE_NFS4_RECOVERY = 0x01,  /* confirmed-client identity (node)   */
+    CHIMERA_KV_TYPE_NFS4_EPOCH    = 0x02,  /* per-node server boot-epoch (node)  */
+    CHIMERA_KV_TYPE_NFS4_SESSION  = 0x03,  /* 4.1 session metadata (by sessionid)*/
+    CHIMERA_KV_TYPE_NFS4_REPLY    = 0x04,  /* 4.1 reply slot entry (by sessionid)*/
+    CHIMERA_KV_TYPE_NFS3_REPLY    = 0x05,  /* NFSv3 DRC reply entry (by client)  */
+    CHIMERA_KV_TYPE_NSM_STATE     = 0x06,  /* singleton NSM/statd state number   */
+    CHIMERA_KV_TYPE_NSM_MONITOR   = 0x07,  /* per-host NSM monitor (nfs_nsm)     */
+    /* 0x08 was the NFSv4.0 DRC reply band, written while that cache was keyed
+     * by client address and persisted for failover.  The cache is now keyed per
+     * connection (nfs4_v40_drc.{c,h}), which nothing can outlive, so there is
+     * no band any more.  Records left in 0x08 by an older build are never
+     * scanned -- and never deleted either: reply records are only removed when
+     * an in-memory entry is evicted, and there is no in-memory entry for them.
+     * They occupy space until the store is discarded.  Do not reuse this
+     * value: a new band here would be prefix-matched by those records, and
+     * they parse cleanly against the shared value magic. */
     /* 0x09 .. 0xFE reserved for future global record types */
 };
 

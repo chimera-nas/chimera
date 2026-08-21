@@ -614,7 +614,7 @@ nfs3_drc_hydrate_complete(
 } /* nfs3_drc_hydrate_complete */
 
 /* ------------------------------------------------------------------ *
-*  shared dispatch core (used by the NFSv3 + NFSv4.0 adapters)        *
+*  dispatch core                                                     *
 * ------------------------------------------------------------------ */
 
 int

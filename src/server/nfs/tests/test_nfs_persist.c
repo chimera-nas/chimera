@@ -25,6 +25,8 @@
 #include "nfs4_recovery.h"
 #include "nfs4_drc.h"
 #include "nfs3_drc.h"
+#include "nfs4_v40_drc.h"
+#include "nfs_drc_reply.h"
 #include "nfs4_state.h"
 #include "nfs_kv_keys.h"
 
@@ -566,6 +568,313 @@ test_nfs3_cross_reboot(void)
 } /* test_nfs3_cross_reboot */
 
 /* ------------------------------------------------------------------ *
+*  NFSv4.0 per-connection reply cache                                *
+* ------------------------------------------------------------------ */
+
+static void
+test_nfs4_v40_peek_minorversion(void)
+{
+    uint8_t   buf[32];
+    xdr_iovec iov;
+    uint32_t  mv;
+
+    memset(buf,0,sizeof(buf));
+    xdr_iovec_set_data(&iov,buf);
+    xdr_iovec_set_len(&iov,sizeof(buf));
+
+    /* Well-formed: empty tag, then minorversion 0. */
+    buf[3] = 0;                       /* tag_len = 0 */
+    buf[7] = 0;                       /* minorversion = 0 */
+    CHECK(nfs4_v40_peek_minorversion(&iov,1,&mv) == true);
+    CHECK(mv == 0);
+
+    /* Well-formed: 4-byte tag, then minorversion 1. */
+    buf[3]  = 4;                      /* tag_len = 4 */
+    buf[11] = 1;                      /* minorversion at offset 8 */
+    CHECK(nfs4_v40_peek_minorversion(&iov,1,&mv) == true);
+    CHECK(mv == 1);
+
+    /* A tag needing padding: tag_len 5 pads to 8, so the minorversion lands at
+     * offset 4 + 8 = 12.  Without this case the pad arithmetic is only ever
+     * exercised with already-aligned lengths, where it contributes zero. */
+    memset(buf,0,sizeof(buf));
+    buf[3]  = 5;                      /* tag_len = 5 -> pad 3 */
+    buf[15] = 2;                      /* minorversion at offset 12 */
+    CHECK(nfs4_v40_peek_minorversion(&iov,1,&mv) == true);
+    CHECK(mv == 2);
+
+    /* A tag that runs past the iovec is refused, not guessed at. */
+    memset(buf,0,sizeof(buf));
+    buf[2] = 0xFF; buf[3] = 0xFF;     /* tag_len = 65535 */
+    CHECK(nfs4_v40_peek_minorversion(&iov,1,&mv) == false);
+
+    /* The wrap-critical band: in 32-bit arithmetic every one of these passes the
+     * bounds check and reads from p + 0xFFFFFFFC, roughly 4GB out. */
+    for (uint32_t t = 0xFFFFFFF0u; t != 0; t++) {
+        buf[0] = (uint8_t) (t >> 24);
+        buf[1] = (uint8_t) (t >> 16);
+        buf[2] = (uint8_t) (t >> 8);
+        buf[3] = (uint8_t) t;
+        CHECK(nfs4_v40_peek_minorversion(&iov,1,&mv) == false);
+    }
+
+    /* A short iovec cannot even hold the tag length. */
+    xdr_iovec_set_len(&iov,3);
+    CHECK(nfs4_v40_peek_minorversion(&iov,1,&mv) == false);
+    CHECK(nfs4_v40_peek_minorversion(&iov,0,&mv) == false);
+
+    printf("ok: nfs4_v40_peek_minorversion\n");
+} /* test_nfs4_v40_peek_minorversion */
+
+static void
+test_nfs4_v40_compound_cacheable(void)
+{
+    struct nfs_argop4    ops[3];
+    struct COMPOUND4args args = { .argarray = ops };
+
+    memset(ops,0,sizeof(ops));
+
+    /* PUTROOTFH + LOOKUP: idempotent, must not be cached. */
+    args.num_argarray = 2;
+    ops[0].argop      = OP_PUTROOTFH;
+    ops[1].argop      = OP_LOOKUP;
+    CHECK(!nfs4_v40_drc_compound_cacheable(&args));
+
+    ops[0].argop = OP_PUTFH;
+    ops[1].argop = OP_READDIR;
+    CHECK(!nfs4_v40_drc_compound_cacheable(&args));
+
+    ops[1].argop = OP_GETATTR;
+    CHECK(!nfs4_v40_drc_compound_cacheable(&args));
+
+    /* WRITE re-executes harmlessly, as on the v3 path. */
+    ops[1].argop = OP_WRITE;
+    CHECK(!nfs4_v40_drc_compound_cacheable(&args));
+
+    /* The seqid state ops carry their own RFC 7530 9.1.7 per-owner replay
+     * cache, which also answers across a reconnect; this cache does not. */
+    ops[1].argop = OP_OPEN;
+    CHECK(!nfs4_v40_drc_compound_cacheable(&args));
+    ops[1].argop = OP_CLOSE;
+    CHECK(!nfs4_v40_drc_compound_cacheable(&args));
+    ops[1].argop = OP_LOCK;
+    CHECK(!nfs4_v40_drc_compound_cacheable(&args));
+    ops[1].argop = OP_LOCKU;
+    CHECK(!nfs4_v40_drc_compound_cacheable(&args));
+    ops[1].argop = OP_OPEN_CONFIRM;
+    CHECK(!nfs4_v40_drc_compound_cacheable(&args));
+    ops[1].argop = OP_OPEN_DOWNGRADE;
+    CHECK(!nfs4_v40_drc_compound_cacheable(&args));
+
+    /* OPENATTR mutates only with createdir, but chimera answers NFS4ERR_NOTSUPP
+     * for it either way, so caching it would only store errors. */
+    ops[1].argop                = OP_OPENATTR;
+    ops[1].opopenattr.createdir = 1;
+    CHECK(!nfs4_v40_drc_compound_cacheable(&args));
+
+    /* The ops a retransmit must not re-run. */
+    ops[1].argop = OP_CREATE;
+    CHECK(nfs4_v40_drc_compound_cacheable(&args));
+    ops[1].argop = OP_REMOVE;
+    CHECK(nfs4_v40_drc_compound_cacheable(&args));
+    ops[1].argop = OP_RENAME;
+    CHECK(nfs4_v40_drc_compound_cacheable(&args));
+    ops[1].argop = OP_LINK;
+    CHECK(nfs4_v40_drc_compound_cacheable(&args));
+    ops[1].argop = OP_SETATTR;
+    CHECK(nfs4_v40_drc_compound_cacheable(&args));
+
+    /* RFC 7530 16.33.5 mints a fresh confirm verifier on every SETCLIENTID, so
+     * a re-executed one invalidates the verifier the client already holds. */
+    ops[1].argop = OP_SETCLIENTID;
+    CHECK(nfs4_v40_drc_compound_cacheable(&args));
+    ops[1].argop = OP_SETCLIENTID_CONFIRM;
+    CHECK(nfs4_v40_drc_compound_cacheable(&args));
+
+    /* DELEGRETURN destroys the delegation, and carries no seqid, so nothing
+     * else covers its retransmit. */
+    ops[1].argop = OP_DELEGRETURN;
+    CHECK(nfs4_v40_drc_compound_cacheable(&args));
+
+    /* One cacheable op anywhere in the compound is enough. */
+    args.num_argarray = 3;
+    ops[0].argop      = OP_PUTFH;
+    ops[1].argop      = OP_GETATTR;
+    ops[2].argop      = OP_REMOVE;
+    CHECK(nfs4_v40_drc_compound_cacheable(&args));
+
+    /* An empty compound has nothing to protect. */
+    args.num_argarray = 0;
+    CHECK(!nfs4_v40_drc_compound_cacheable(&args));
+
+    printf("ok: nfs4_v40_compound_cacheable\n");
+} /* test_nfs4_v40_compound_cacheable */
+
+/* Build a minimal well-formed on-wire reply: record mark, xid, REPLY,
+ * MSG_ACCEPTED, an empty verifier, SUCCESS, then `body`.  This is the shape the
+ * rpc2 capture hook delivers and that nfs_drc_reply_body_offset accepts. */
+static uint32_t
+v40_make_reply(
+    uint8_t   *out,
+    uint32_t   out_size,
+    uint32_t   xid,
+    const char*body,
+    uint32_t   accept_stat)
+{
+    uint32_t body_len = (uint32_t) strlen(body);
+    uint32_t len      = 28 + body_len;
+    uint32_t mark;
+
+    CHECK(out_size >= len);
+    memset(out,0,len);
+
+    mark   = 0x80000000u | (len - 4);
+    out[0] = (uint8_t) (mark >> 24);
+    out[1] = (uint8_t) (mark >> 16);
+    out[2] = (uint8_t) (mark >> 8);
+    out[3] = (uint8_t) mark;
+
+    out[7]  = (uint8_t) xid;    /* xid (low byte is enough for a fixture)     */
+    out[11] = 1;                /* mtype      = REPLY                        */
+    /* [12..15] reply_stat = MSG_ACCEPTED (0), [16..19] verf flavor = AUTH_NONE,
+     * [20..23] verf len   = 0 -- all already zero. */
+    out[27] = (uint8_t) accept_stat;
+    memcpy(out + 28,body,body_len);
+    return len;
+} /* v40_make_reply */
+
+/* The whole point of connection scoping: two connections cannot be served each
+ * other's replies, and an entry cannot outlive the client that produced it. */
+static void
+test_nfs4_v40_conn_cache(void)
+{
+    struct nfs4_v40_drc drc;
+    /* Stand-ins for two connections.  The cache treats a conn as an opaque
+     * identity and never dereferences it, so any two distinct addresses do. */
+    int                 conn_a,conn_b;
+    uint8_t             reply[64];
+    uint32_t            reply_len;
+    uint8_t            *out;
+    uint32_t            out_len;
+    uint32_t            i;
+
+    nfs4_v40_drc_init(&drc);
+
+    reply_len = v40_make_reply(reply,sizeof(reply),7,"CREATE4res NFS4_OK",0);
+
+    /* Cold cache: nothing to replay. */
+    CHECK(nfs4_v40_drc_cache_lookup(&drc,&conn_a,7,0xABCD,&out,&out_len) == 0);
+
+    nfs4_v40_drc_cache_insert(&drc,&conn_a,7,0xABCD,reply,reply_len);
+
+    /* The connection that produced the reply replays it: a real retransmit. */
+    CHECK(nfs4_v40_drc_cache_lookup(&drc,&conn_a,7,0xABCD,&out,&out_len) == 1);
+    CHECK(out_len == reply_len);
+    CHECK(memcmp(out,reply,reply_len) == 0);
+    free(out);
+
+    /* Same xid, different request bytes: a reused xid must not be answered with
+     * the previous request's reply.  This is what the checksum is for. */
+    CHECK(nfs4_v40_drc_cache_lookup(&drc,&conn_a,7,0x1234,&out,&out_len) == 0);
+
+    /* A second connection presenting a byte-identical request at the same xid is
+     * a different client's first-ever request, and must execute for real.  Under
+     * address keying this returned a hit, acknowledging a mutation that never
+     * happened.  Here it cannot: the entry is not reachable from conn_b at
+     * all. */
+    CHECK(nfs4_v40_drc_cache_lookup(&drc,&conn_b,7,0xABCD,&out,&out_len) == 0);
+
+    /* conn_b's own entry at the same key is independent of conn_a's. */
+    nfs4_v40_drc_cache_insert(&drc,&conn_b,7,0xABCD,"B",1);
+    CHECK(nfs4_v40_drc_cache_lookup(&drc,&conn_b,7,0xABCD,&out,&out_len) == 1);
+    CHECK(out_len == 1 && out[0] == 'B');
+    free(out);
+    CHECK(nfs4_v40_drc_cache_lookup(&drc,&conn_a,7,0xABCD,&out,&out_len) == 1);
+    CHECK(out_len == reply_len);
+    free(out);
+
+    /* Closing a connection drops its replies.  A later connection landing on the
+     * same (recycled) address starts empty, which is why this cache needs no
+     * generation counter to tell one incarnation from another. */
+    nfs4_v40_drc_conn_close(&drc,&conn_a);
+    CHECK(nfs4_v40_drc_cache_lookup(&drc,&conn_a,7,0xABCD,&out,&out_len) == 0);
+    CHECK(drc.bytes == 1);   /* only conn_b's entry remains */
+
+    /* Closing a connection that cached nothing is a no-op, not a crash. */
+    nfs4_v40_drc_conn_close(&drc,&conn_a);
+
+    /* Re-inserting the same {xid, cksum} refreshes in place rather than
+     * consuming a second slot. */
+    nfs4_v40_drc_cache_insert(&drc,&conn_b,7,0xABCD,"BB",2);
+    CHECK(nfs4_v40_drc_cache_lookup(&drc,&conn_b,7,0xABCD,&out,&out_len) == 1);
+    CHECK(out_len == 2);
+    free(out);
+    CHECK(drc.bytes == 2);
+
+    /* Fill past the ring: the oldest entry is evicted, the newest is present,
+     * and the byte count stays bounded by what is actually held. */
+    for (i = 0; i < NFS4_V40_DRC_SLOTS + 4; i++) {
+        nfs4_v40_drc_cache_insert(&drc,&conn_b,1000 + i,i,"x",1);
+    }
+    CHECK(nfs4_v40_drc_cache_lookup(&drc,&conn_b,1000,0,&out,&out_len) == 0);
+    CHECK(nfs4_v40_drc_cache_lookup(&drc,&conn_b,
+                                    1000 + NFS4_V40_DRC_SLOTS + 3,
+                                    NFS4_V40_DRC_SLOTS + 3,
+                                    &out,&out_len) == 1);
+    free(out);
+    CHECK(drc.bytes <= NFS4_V40_DRC_SLOTS * NFS4_V40_DRC_MAX_REPLY_SIZE);
+
+    /* An oversized reply is declined outright rather than truncated. */
+    nfs4_v40_drc_cache_insert(&drc,&conn_b,9,9,reply,
+                              NFS4_V40_DRC_MAX_REPLY_SIZE + 1);
+    CHECK(nfs4_v40_drc_cache_lookup(&drc,&conn_b,9,9,&out,&out_len) == 0);
+
+    nfs4_v40_drc_destroy(&drc);
+    printf("ok: nfs4_v40_conn_cache\n");
+} /* test_nfs4_v40_conn_cache */
+
+/* The capture hook gates every insert on nfs_drc_reply_body_offset, so only a
+ * MSG_ACCEPTED/SUCCESS reply is ever cached.  That is what keeps a COMPOUND
+ * which fails XDR decode out of the cache: the generated dispatcher answers
+ * GARBAGE_ARGS without reaching chimera_nfs4_compound, so nothing disarms the
+ * capture, and an unauthenticated peer could otherwise evict real entries. */
+static void
+test_nfs4_v40_reply_filter(void)
+{
+    uint8_t  buf[64];
+    uint32_t len,offset;
+
+    /* SUCCESS: accepted, and the body starts right after the header. */
+    len = v40_make_reply(buf,sizeof(buf),7,"CREATE4res NFS4_OK",0);
+    CHECK(nfs_drc_reply_body_offset(buf,len,&offset) == true);
+    CHECK(offset == 28);
+
+    /* GARBAGE_ARGS (accept_stat 4) is MSG_ACCEPTED but not SUCCESS. */
+    len = v40_make_reply(buf,sizeof(buf),7,"",4);
+    CHECK(nfs_drc_reply_body_offset(buf,len,&offset) == false);
+
+    /* PROG_UNAVAIL (1) likewise. */
+    len = v40_make_reply(buf,sizeof(buf),7,"",1);
+    CHECK(nfs_drc_reply_body_offset(buf,len,&offset) == false);
+
+    /* MSG_DENIED: reply_stat at [12..15] is non-zero. */
+    len     = v40_make_reply(buf,sizeof(buf),7,"body",0);
+    buf[15] = 1;
+    CHECK(nfs_drc_reply_body_offset(buf,len,&offset) == false);
+
+    /* A CALL, not a REPLY. */
+    len     = v40_make_reply(buf,sizeof(buf),7,"body",0);
+    buf[11] = 0;
+    CHECK(nfs_drc_reply_body_offset(buf,len,&offset) == false);
+
+    /* Truncated below a bare header. */
+    len = v40_make_reply(buf,sizeof(buf),7,"",0);
+    CHECK(nfs_drc_reply_body_offset(buf,len - 8,&offset) == false);
+
+    printf("ok: nfs4_v40_reply_filter\n");
+} /* test_nfs4_v40_reply_filter */
+
+/* ------------------------------------------------------------------ *
 *  Multi-node namespacing (N instances over one shared backing store) *
 * ------------------------------------------------------------------ */
 
@@ -664,6 +973,11 @@ main(void)
     test_nfs3_value_roundtrip();
     test_nfs3_cache_lookup();
     test_nfs3_cross_reboot();
+
+    test_nfs4_v40_peek_minorversion();
+    test_nfs4_v40_compound_cacheable();
+    test_nfs4_v40_conn_cache();
+    test_nfs4_v40_reply_filter();
 
     test_node_scoped_identifiers();
     test_two_node_key_isolation();

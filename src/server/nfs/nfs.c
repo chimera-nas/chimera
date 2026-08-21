@@ -392,7 +392,7 @@ nfs_server_init(
     nfs_state_table_init(&shared->nfs4_state_table, shared->node_id);
     nfs_layout_table_init(&shared->nfs4_layout_table);
     nfs3_drc_init(&shared->nfs3_drc, CHIMERA_KV_TYPE_NFS3_REPLY);
-    nfs3_drc_init(&shared->v40_drc, CHIMERA_KV_TYPE_NFS4_V40_REPLY);
+    nfs4_v40_drc_init(&shared->v40_drc);
     nfs4_drc_hydra_init(shared);
     /* The NFSv3 duplicate-request cache wraps the NFS_V3 call dispatcher; only
      * install the wrapper when enabled so a disabled server keeps the direct
@@ -400,10 +400,12 @@ nfs_server_init(
     if (chimera_server_config_get_nfs3_drc(config)) {
         nfs3_drc_install(shared);
     }
-    /* The NFSv4.0 reply cache is always installed (its in-memory cache fixes
-     * replay across a client's reconnect regardless of persistence); KV
-     * persistence is gated by nfs4_drc inside the install. */
-    nfs4_v40_drc_install(shared, chimera_server_config_get_nfs4_drc(config));
+    /* The NFSv4.0 reply cache is always installed.  It is keyed per connection,
+     * so it is bounded by the connections that are open and there is nothing to
+     * opt out of; a server without it would answer a retransmitted CREATE with
+     * NFS4ERR_EXIST.  server.nfs4_drc gates NFSv4.1 reply-cache persistence and
+     * has no bearing here. */
+    nfs4_v40_drc_install(shared);
     pthread_mutex_init(&shared->nfs4_pnfs_devcache.lock, NULL);
     shared->nfs4_pnfs_devcache.count = 0;
 
@@ -780,7 +782,7 @@ nfs_server_destroy(void *data)
         shared->nsm_state.notify_thread = NULL;
     }
     nsm_state_destroy(&shared->nsm_state);
-    nfs3_drc_destroy(&shared->v40_drc);
+    nfs4_v40_drc_destroy(&shared->v40_drc);
     nfs3_drc_destroy(&shared->nfs3_drc);
     nfs4_drc_hydra_destroy(shared);
 
@@ -812,6 +814,14 @@ chimera_nfs_server_notify(
             evpl_rpc2_conn_get_local_address(conn, local_addr, sizeof(local_addr));
             evpl_rpc2_conn_get_remote_address(conn, remote_addr, sizeof(remote_addr));
             chimera_nfs_debug("Client disconnected from %s to %s", remote_addr, local_addr);
+
+            /* Free anything the NFSv4.0 reply cache holds for this connection.
+             * Must precede the early-out below: a 4.0 connection carries no
+             * private_data, so the cache would otherwise leak its entries and
+             * they would outlive the client they belong to.  Runs before the
+             * rpc2 layer frees the connection, so the pointer this cache keys on
+             * cannot be recycled while its entries still exist. */
+            nfs4_v40_drc_conn_close(&shared->v40_drc, conn);
 
             priv = evpl_rpc2_conn_get_private_data(conn);
             if (!priv) {
