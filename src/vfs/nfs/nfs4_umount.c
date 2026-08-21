@@ -186,7 +186,12 @@ chimera_nfs4_umount(
     pthread_mutex_unlock(&shared->lock);
 
     if (session) {
-        server_thread = thread->server_threads[server->index];
+        /* This thread may never have talked to the server -- the umount can
+         * land anywhere -- so get a connection the same way any other op
+         * does, creating one on demand. */
+        server_thread = chimera_nfs_thread_get_server_thread(thread,
+                                                             request->fh,
+                                                             request->fh_len);
 
         if (server_thread && server_thread->nfs_conn) {
             td          = calloc(1, sizeof(*td));
