@@ -341,6 +341,10 @@ chimera_nfs4_slot_table_init(
     st->leased         = 0;
     st->floor          = 0;
     st->cached_target  = atomic_load(&session->target_usable);
+    st->session        = session;
+
+    /* Hold the session for as long as this table holds ids out of its pool. */
+    atomic_fetch_add(&session->refcnt, 1);
 
     pthread_mutex_lock(&session->lock);
 
@@ -418,9 +422,11 @@ chimera_nfs4_slot_table_reset(
 void
 chimera_nfs4_slot_table_destroy(struct chimera_nfs_client_server_thread *server_thread)
 {
-    struct chimera_nfs4_slot_table     *st      = &server_thread->slots;
-    struct chimera_nfs4_client_session *session =
-        server_thread->server ? server_thread->server->nfs4_session : NULL;
+    struct chimera_nfs4_slot_table     *st = &server_thread->slots;
+    /* The session these ids came from, which is not necessarily the server's
+     * current one: a remount after a teardown publishes a new session, and
+     * these ids belong to the old pool. */
+    struct chimera_nfs4_client_session *session = st->session;
     struct chimera_nfs4_compound_ctx   *ctx;
     struct chimera_nfs4_parked         *p;
 
@@ -478,7 +484,34 @@ chimera_nfs4_slot_table_destroy(struct chimera_nfs_client_server_thread *server_
     st->local_free     = NULL;
     st->local_free_top = 0;
     st->initialized    = 0;
+
+    if (session) {
+        st->session = NULL;
+        chimera_nfs4_session_put(session);
+    }
 } /* chimera_nfs4_slot_table_destroy */
+
+/*
+ * Drop a reference to a session.
+ *
+ * The server holds one from CREATE_SESSION until the last mount is unmounted
+ * and the session is destroyed on the wire; each per-thread slot table holds
+ * one for as long as it owns ids out of the pool.  The pool therefore stays
+ * mapped until the last table has let go, which is what lets a thread compare
+ * its table's session against the server's current one without risking a
+ * dereference of freed memory.
+ */
+void
+chimera_nfs4_session_put(struct chimera_nfs4_client_session *session)
+{
+    if (atomic_fetch_sub(&session->refcnt, 1) != 1) {
+        return;
+    }
+
+    chimera_nfs4_session_pool_destroy(session);
+    pthread_mutex_destroy(&session->lock);
+    free(session);
+} /* chimera_nfs4_session_put */
 
 /* ---- the wrapper + reply handler ---------------------------------------- */
 
@@ -595,7 +628,14 @@ chimera_nfs4_compound_call(
     struct chimera_nfs4_compound_ctx   *ctx;
     uint32_t                            id, usable;
 
-    if (unlikely(!st->initialized)) {
+    if (unlikely(!st->initialized || st->session != session)) {
+        if (st->initialized) {
+            /* The session was torn down and replaced while this thread was
+             * idle, so every id and seqid here belongs to the old pool.  Give
+             * them back to it and start again against the new one.  Only this
+             * thread touches this table, so the repair needs no lock. */
+            chimera_nfs4_slot_table_destroy(server_thread);
+        }
         chimera_nfs4_slot_table_init(st, session, shared);
     }
 
