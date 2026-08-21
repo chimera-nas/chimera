@@ -80,15 +80,15 @@ struct nfs3_drc_hydra {
     UT_hash_handle hh;
 };
 
-/* One connectionless duplicate-request cache.  NFSv3 and NFSv4.0 each get an
- * instance; they share all the machinery below and differ only in kv_type (the
- * KV band) and their protocol-specific dispatch wrapper. */
+/* The connectionless duplicate-request cache.  Address keying is inherent to
+ * NFSv3, which has no client identity of its own; NFSv4.0 does have one and
+ * keys its cache per connection instead (nfs4_v40_drc.{c,h}). */
 struct nfs3_drc {
     pthread_mutex_t        lock;
     struct nfs3_drc_entry *table;            /* uthash, FIFO eviction order */
     struct nfs3_drc_hydra *hydrated;         /* uthash: addrs hydrated from KV  */
     uint64_t               bytes;
-    uint8_t                kv_type;          /* CHIMERA_KV_TYPE_NFS{3,4_V40}_REPLY */
+    uint8_t                kv_type;          /* CHIMERA_KV_TYPE_NFS3_REPLY         */
     int                    persistence_disabled;
     /* The generated dispatcher we wrap; NULL until installed. */
     int                    (*orig_dispatch)(
@@ -121,7 +121,8 @@ nfs3_drc_destroy(
     struct nfs3_drc *drc);
 
 /* ----------------------------------------------------------------------- *
-*  Shared connectionless-DRC core, used by the NFSv3 and NFSv4.0 adapters. *
+*  Connectionless-DRC core.  Some of this (the checksum in particular) is   *
+*  protocol-agnostic and reused by the NFSv4.0 per-connection cache.        *
 * ----------------------------------------------------------------------- */
 
 /* Serve one cacheable request through `drc`: replay from cache, or (when this

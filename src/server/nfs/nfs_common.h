@@ -22,6 +22,7 @@
 #include "nfs4_layout_table.h"
 #include "nfs4_recovery.h"
 #include "nfs3_drc.h"
+#include "nfs4_v40_drc.h"
 #include "nfs_nlm_state.h"
 #include "nfs_nsm_state.h"
 #include "sm_inter_xdr.h"
@@ -305,8 +306,9 @@ struct nfs4_replay_metrics {
     struct prometheus_gauge_instance   *bytes_in_use;
 };
 
-/* The NFSv4.0 reply cache is now an instance of the shared connectionless DRC
- * (struct nfs3_drc); see nfs4_v40_drc.{c,h}. */
+/* The NFSv4.0 reply cache is keyed per connection; see nfs4_v40_drc.{c,h}.
+ * The NFSv3 DRC (struct nfs3_drc) is keyed by client address, which is the only
+ * client identity NFSv3 has. */
 
 /* uthash-tracked in-flight 4.1 session hydrate (defined in nfs4_drc.c). */
 struct nfs4_drc_hydra;
@@ -418,7 +420,7 @@ struct chimera_server_nfs_shared {
     struct prometheus_histogram        *op_histogram;
     struct prometheus_metrics          *metrics;
     struct nfs4_replay_metrics          replay_metrics;
-    struct nfs3_drc                     v40_drc;
+    struct nfs4_v40_drc                 v40_drc;
     struct nfs3_drc                     nfs3_drc;
 
     /* Dedup / negative-cache for in-flight lazy 4.1 session hydrates, keyed by
