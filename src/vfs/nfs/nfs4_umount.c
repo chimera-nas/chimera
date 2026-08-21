@@ -31,6 +31,9 @@ struct chimera_nfs4_umount_teardown {
     struct evpl_rpc2_conn              *conn;
 };
 
+static void chimera_nfs4_umount_send_destroy_session(
+    struct chimera_nfs4_umount_teardown *td);
+
 static void
 chimera_nfs4_umount_teardown_done(struct chimera_nfs4_umount_teardown *td)
 {
@@ -94,6 +97,73 @@ chimera_nfs4_umount_send_destroy_clientid(struct chimera_nfs4_umount_teardown *t
         chimera_nfs4_umount_destroy_clientid_callback,
         td);
 } /* chimera_nfs4_umount_send_destroy_clientid */
+
+static void
+chimera_nfs4_umount_bind_conn_callback(
+    struct evpl                 *evpl,
+    const struct evpl_rpc2_verf *verf,
+    struct COMPOUND4res         *res,
+    int                          status,
+    void                        *private_data)
+{
+    struct chimera_nfs4_umount_teardown *td = private_data;
+
+    (void) evpl;
+    (void) verf;
+
+    if (status || !res || res->status != NFS4_OK) {
+        chimera_nfsclient_debug(
+            "NFS4 BIND_CONN_TO_SESSION to %s did not succeed (rpc %d, nfs %d); "
+            "the session cannot be destroyed from here and will lapse with the "
+            "lease",
+            td->server->hostname, status, res ? res->status : -1);
+
+        chimera_nfs4_umount_teardown_done(td);
+        return;
+    }
+
+    chimera_nfs4_umount_send_destroy_session(td);
+} /* chimera_nfs4_umount_bind_conn_callback */
+
+/*
+ * Bind this connection to the session before destroying it.
+ *
+ * The umount can land on any thread, so the connection it gets may be one
+ * created for this teardown and never used for anything else.  A connection
+ * becomes associated with a session by carrying a SEQUENCE, and a fresh one
+ * never has, so the server refuses DESTROY_SESSION on it with
+ * NFS4ERR_CONN_NOT_BOUND_TO_SESSION.  Binding it explicitly is the operation
+ * NFSv4.1 provides for exactly this.  Fore channel only: nothing is going to
+ * arrive on a connection that is about to be closed.
+ */
+static void
+chimera_nfs4_umount_send_bind_conn(struct chimera_nfs4_umount_teardown *td)
+{
+    struct COMPOUND4args args;
+    struct nfs_argop4    argarray[1];
+
+    memset(&args, 0, sizeof(args));
+    args.tag.len      = 0;
+    args.minorversion = 1;
+    args.argarray     = argarray;
+    args.num_argarray = 1;
+
+    argarray[0].argop = OP_BIND_CONN_TO_SESSION;
+    memcpy(argarray[0].opbind_conn_to_session.bctsa_sessid,
+           td->session->sessionid, NFS4_SESSIONID_SIZE);
+    argarray[0].opbind_conn_to_session.bctsa_dir                   = CDFC4_FORE;
+    argarray[0].opbind_conn_to_session.bctsa_use_conn_in_rdma_mode = 0;
+
+    td->shared->nfs_v4.send_call_NFSPROC4_COMPOUND(
+        &td->shared->nfs_v4.rpc2,
+        td->thread->evpl,
+        td->conn,
+        NULL,
+        &args,
+        0, 0, NULL, 0, 0,
+        chimera_nfs4_umount_bind_conn_callback,
+        td);
+} /* chimera_nfs4_umount_send_bind_conn */
 
 static void
 chimera_nfs4_umount_destroy_session_callback(
@@ -202,7 +272,7 @@ chimera_nfs4_umount(
             td->session = session;
             td->conn    = server_thread->nfs_conn;
 
-            chimera_nfs4_umount_send_destroy_session(td);
+            chimera_nfs4_umount_send_bind_conn(td);
             return;
         }
 
