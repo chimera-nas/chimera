@@ -17,6 +17,13 @@ add_executable(posix_quint_driver posix_driver.c)
 target_link_libraries(posix_quint_driver
     chimera_posix chimera_client chimera_server jansson)
 
+# Pure-C replayer: reuses posix_driver.c's op engine in-process (no Python, no
+# line-protocol subprocess) to load ITF traces and run the model oracle.
+add_executable(posix_mbt_replay posix_mbt_replay.c)
+target_include_directories(posix_mbt_replay PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(posix_mbt_replay
+    chimera_posix chimera_client chimera_server jansson)
+
 find_program(QUINT_BIN quint)
 find_package(Python3 COMPONENTS Interpreter)
 
