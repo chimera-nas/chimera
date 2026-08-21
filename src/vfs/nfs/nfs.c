@@ -127,11 +127,13 @@ chimera_nfs_destroy(void *private_data)
 
     for (i = 0; i < shared->max_servers; i++) {
         if (shared->servers[i]) {
-            /* Free NFS4 session if present */
+            /* Release the server's reference on any session still published.
+             * Reaching here with one means the module is going away with mounts
+             * still up, so it was never destroyed on the wire; the memory goes
+             * once the last slot table lets go. */
             if (shared->servers[i]->nfs4_session) {
-                chimera_nfs4_session_pool_destroy(shared->servers[i]->nfs4_session);
-                pthread_mutex_destroy(&shared->servers[i]->nfs4_session->lock);
-                free(shared->servers[i]->nfs4_session);
+                chimera_nfs4_session_put(shared->servers[i]->nfs4_session);
+                shared->servers[i]->nfs4_session = NULL;
             }
             free(shared->servers[i]);
         }

@@ -170,6 +170,12 @@ enum chimera_nfs_client_mount_state {
  * per operation.
  */
 struct chimera_nfs4_client_session {
+    /* References to this session: one for the server that published it, plus
+     * one per per-thread slot table holding ids out of its pool.  The server
+     * drops its reference when the last mount goes away and the session is
+     * destroyed on the wire; the memory outlives that until every table has
+     * noticed and let go, so no thread ever dereferences a freed session. */
+    _Atomic int      refcnt;
     pthread_mutex_t  lock;          /* guards the pool + usable; NOT per-op        */
     uint8_t          sessionid[NFS4_SESSIONID_SIZE];
     uint64_t         clientid;
@@ -202,19 +208,26 @@ struct chimera_nfs4_layout;                   /* per-file pNFS layout (nfs4_pnfs
  * global slot ids (a small stack); per-id seqids live in session->slot_seqid.
  */
 struct chimera_nfs4_slot_table {
-    int                               initialized;
-    uint32_t                         *local_free;    /* [max_slots] owned-free ids */
-    int                               local_free_top; /* top of local_free stack   */
-    uint32_t                          leased; /* ids owned (floor+borrowed) */
-    uint32_t                          floor;  /* reserved ids, never returned *
-                                               * except at teardown          */
-    uint32_t                          cached_target; /* last-seen sr_target+1; cheap *
-                                                      * change detect, no per-op atomic */
-    struct chimera_nfs4_parked       *wait_head;     /* FIFO of parked requests    */
-    struct chimera_nfs4_parked       *wait_tail;
-    struct chimera_nfs4_parked       *parked_freelist;
-    struct chimera_nfs4_compound_ctx *inflight;      /* dll, for disconnect reset  */
-    struct chimera_nfs4_compound_ctx *ctx_freelist;
+    int                                 initialized;
+    /* The session these ids belong to.  Compared against the server's current
+     * session on every acquire: when the two differ the session was torn down
+     * and replaced (a remount), and this table's ids and seqids belong to the
+     * old one.  Comparing rather than dereferencing is what makes that check
+     * safe, and each thread repairs its own table, so no one ever writes
+     * another thread's lock-free state. */
+    struct chimera_nfs4_client_session *session;
+    uint32_t                           *local_free;  /* [max_slots] owned-free ids */
+    int                                 local_free_top; /* top of local_free stack   */
+    uint32_t                            leased; /* ids owned (floor+borrowed) */
+    uint32_t                            floor; /* reserved ids, never returned *
+                                                * except at teardown          */
+    uint32_t                            cached_target; /* last-seen sr_target+1; cheap *
+                                                        * change detect, no per-op atomic */
+    struct chimera_nfs4_parked         *wait_head;   /* FIFO of parked requests    */
+    struct chimera_nfs4_parked         *wait_tail;
+    struct chimera_nfs4_parked         *parked_freelist;
+    struct chimera_nfs4_compound_ctx   *inflight;    /* dll, for disconnect reset  */
+    struct chimera_nfs4_compound_ctx   *ctx_freelist;
 };
 
 struct chimera_nfs_client_server_thread {
@@ -1002,6 +1015,10 @@ void chimera_nfs4_session_pool_destroy(
 
 /* Free a server_thread's slot table (called from thread teardown).  Returns the
  * thread's leased slot ids (floor + borrowed) to the session pool first. */
+/* Drop a reference to a session, destroying it once the last goes. */
+void chimera_nfs4_session_put(
+    struct chimera_nfs4_client_session *session);
+
 void chimera_nfs4_slot_table_destroy(
     struct chimera_nfs_client_server_thread *server_thread);
 
