@@ -33,10 +33,11 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>     /* struct statvfs for statvfs/fstatvfs */
-#include <sys/sysmacros.h>   /* makedev() for block/char device mknod */
 #include <sys/uio.h>         /* struct iovec for the vectored read/write ops */
-#include <sys/vfs.h>         /* struct statfs for statfs/fstatfs */
 #include <unistd.h>
+/* makedev() (block/char device mknod) and struct statfs (statfs/fstatfs) come
+ * from common/platform.h below: <sys/sysmacros.h>+<sys/vfs.h> on glibc,
+ * <sys/types.h>+<sys/mount.h> on Darwin -- so this file builds on both. */
 
 #include <jansson.h>
 
