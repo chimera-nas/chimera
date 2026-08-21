@@ -71,20 +71,34 @@ nfs4_v40_peek_minorversion(
  *
  * The NFSv3 path answers the same question per procedure in
  * nfs3_drc_proc_cacheable(); a COMPOUND has to be judged by the operations it
- * carries, so this is its equivalent.  Deliberate exclusions:
+ * carries, so this is its equivalent.  The one deliberate exclusion:
  *
  *   - Idempotent ops (LOOKUP, READDIR, GETATTR, READ, ACCESS, COMMIT, ...) are
  *     safe to re-execute, so they never justify an entry.  WRITE is excluded for
  *     the same reason and to match the v3 list: replaying the same bytes at the
  *     same offset is harmless, and WRITE replies are the bulk of the traffic
  *     this cache would otherwise hold.
- *   - The seqid-sequenced state operations (OPEN, CLOSE, LOCK, LOCKU,
- *     OPEN_CONFIRM, OPEN_DOWNGRADE) have their own replay cache: RFC 7530
- *     Section 9.1.7 keeps the last response per state-owner, which chimera
- *     implements (struct nfs4_replay_cache).  The RFC calls that "a more reliable
- *     cache of duplicate non-idempotent requests than that of the traditional
- *     cache", and it answers a retransmit that arrives on a new connection,
- *     which this cache deliberately does not.
+ *
+ * The seqid-sequenced state operations (OPEN, CLOSE, LOCK, LOCKU, OPEN_CONFIRM,
+ * OPEN_DOWNGRADE) are included even though they also have the RFC 7530
+ * Section 9.1.7 per-owner replay cache (struct nfs4_replay_cache).  The two
+ * caches layer rather than overlap:
+ *
+ *   - This cache answers a same-connection retransmit BYTE-EXACT, before the
+ *     compound is decoded.  The Section 9.1.7 cache is structured and lossy --
+ *     its OPEN replay reconstructs cinfo/attrset/rflags/delegation as zero
+ *     (nfs4_proc_open.c) -- and the retransmit most likely to happen is the
+ *     first OPEN of a fresh open-owner, exactly the reply that carried
+ *     OPEN4_RESULT_CONFIRM.  A client replayed rflags == 0 skips OPEN_CONFIRM
+ *     and desynchronises its seqid bookkeeping for that owner.
+ *   - The Section 9.1.7 cache still answers a retransmit that arrives on a NEW
+ *     connection, which this cache deliberately does not cover.
+ *
+ * On a hit here the compound never executes, so the owner's seqid is not
+ * advanced twice; that is precisely the Section 9.1.7 rule for r == L (return
+ * the stored response, do not process beyond seqid checking).  An erroneous
+ * state op (e.g. NFS4ERR_BAD_SEQID) is an RPC-level SUCCESS, so its reply is
+ * cached too, and a retransmit sees the same error rather than a re-execution.
  *
  * SETCLIENTID and SETCLIENTID_CONFIRM are here because RFC 7530 Section 16.33.5
  * requires a DRC for them outright: every case in that section mints a fresh
@@ -110,10 +124,18 @@ nfs4_v40_op_cacheable(const struct nfs_argop4 *argop)
         case OP_SETATTR:
         case OP_SETCLIENTID:
         case OP_SETCLIENTID_CONFIRM:
+        /* The seqid-sequenced state ops: byte-exact same-connection replay,
+         * layered over the structured Section 9.1.7 per-owner cache (see the
+         * comment above). */
+        case OP_OPEN:
+        case OP_CLOSE:
+        case OP_LOCK:
+        case OP_LOCKU:
+        case OP_OPEN_CONFIRM:
+        case OP_OPEN_DOWNGRADE:
         /* Destroys the delegation, so a retransmit would answer BAD_STATEID
-        * where the original answered NFS4_OK.  Carries no seqid, so the
-        * Section 9.1.7 cache does not cover it (the list of seqid-advancing
-        * ops is CLOSE, LOCK, LOCKU, OPEN, OPEN_CONFIRM, OPEN_DOWNGRADE). */
+         * where the original answered NFS4_OK.  Carries no seqid, so the
+         * Section 9.1.7 cache does not cover it. */
         case OP_DELEGRETURN:
             return true;
         default:

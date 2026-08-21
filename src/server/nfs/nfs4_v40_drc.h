@@ -52,9 +52,13 @@ struct COMPOUND4args;
  * anyway, and the seqid-sequenced state operations keep their own per-owner
  * replay cache (RFC 7530 Section 9.1.7), which the RFC calls "a more reliable
  * cache of duplicate non-idempotent requests than that of the traditional
- * cache".  Keying on the client's address instead -- to answer a retransmit
- * that arrives on a new connection -- is what made one client's reply
- * answerable to another; see the history note at the end of this comment.
+ * cache" and which follows the owner across connections.  This cache layers
+ * on top of it for the state ops: it answers a same-connection retransmit
+ * byte-exact, where the Section 9.1.7 replay is structured and lossy (see
+ * nfs4_v40_op_cacheable in the .c).  Keying on the client's address instead --
+ * to answer a retransmit that arrives on a new connection -- is what made one
+ * client's reply answerable to another; see the history note at the end of
+ * this comment.
  *
  * 4.1+ COMPOUNDs (covered by the session reply cache), NULL, and RDMA
  * connections pass straight through.  RDMA is excluded because a cached reply
