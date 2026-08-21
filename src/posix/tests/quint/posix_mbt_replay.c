@@ -149,7 +149,7 @@ map_get_pair(
 #define MOUNT    "/test"
 
 static int           g_fdmap[R_MAXPID][R_MAXFD]; /* (pid, model fd) -> real fd     */
-static int           g_sidmap[R_MAXSID];    /* model sid       -> real sid    */
+static CHIMERA_DIR  *g_dirmap[R_MAXSID];    /* model sid -> live DIR*         */
 
 struct ident { int present; long long dev, ino; };
 static struct ident  g_inomap[R_MAXINO];    /* model ino -> (dev, real ino)   */
@@ -177,7 +177,7 @@ state_reset(void)
         }
     }
     for (i = 0; i < R_MAXSID; i++) {
-        g_sidmap[i] = -1;
+        g_dirmap[i] = NULL;
     }
     memset(g_inomap, 0, sizeof(g_inomap));
     memset(g_timemap, 0, sizeof(g_timemap));
@@ -211,11 +211,11 @@ set_fd(
     }
 } /* set_fd */
 
-static int
-rsid(int msid)
+static CHIMERA_DIR *
+rdir(int msid)
 {
-    return (msid >= 0 && msid < R_MAXSID) ? g_sidmap[msid] : -1;
-} /* rsid */
+    return (msid >= 0 && msid < R_MAXSID) ? g_dirmap[msid] : NULL;
+} /* rdir */
 
 static void
 mism(
@@ -493,21 +493,37 @@ real_target(
     }
 } /* real_target */
 
+/* ---- direct chimera_posix dispatch --------------------------------------- */
+
+/* Install the requesting model pid's credential + umask on this thread (the
+ * driver's apply_pid, but called directly rather than off a JSON request). */
+static void
+apply_cred(int pid)
+{
+    if (pid < 0 || pid >= MAX_PIDS) {
+        pid = 0;
+    }
+    chimera_posix_set_cred(&driver_creds[pid]);
+    (void) chimera_posix_umask(driver_umasks[pid]);
+} /* apply_cred */
+
+/* The model reports errno 0 on success; a failed call carries the live errno.
+ * ERRV must be read into a local immediately after the chimera call, before
+ * anything else can clobber errno. */
+#define ERRV(rc) ((rc) < 0 ? errno : 0)
+
 /* ---- oracle -------------------------------------------------------------- */
 
 /* True if the errno matches (proceed with success-path checks). */
 static int
 check_status(
     int64_t expected,
-    json_t *res)
+    int     actual)
 {
-    int64_t actual = tf_field(res, "err");
-
     if (actual == expected) {
         return 1;
     }
-    mism("errno: expected %lld, got %lld", (long long) expected,
-         (long long) actual);
+    mism("errno: expected %lld, got %d", (long long) expected, actual);
     return 0;
 } /* check_status */
 
@@ -549,15 +565,30 @@ xtime(
     *sec  = (v == -1) ? 1000000 : (v == -2) ? 2000000 : -1;
 } /* xtime */
 
+/* Map a host st_mode to the model's ftype string. */
+static const char *
+ftype_from_mode(mode_t m)
+{
+    switch (m & S_IFMT) {
+        case S_IFREG: return "reg";
+        case S_IFDIR: return "dir";
+        case S_IFLNK: return "lnk";
+        case S_IFIFO: return "fifo";
+        case S_IFSOCK: return "sock";
+        case S_IFBLK: return "blk";
+        case S_IFCHR: return "chr";
+        default: return "unk";
+    } /* switch */
+} /* ftype_from_mode */
+
 static void
 check_time(
-    int64_t mino,
-    int     field,           /* 0 atime, 1 mtime, 2 ctime */
-    int64_t abstract,
-    json_t *wire_arr)
+    int64_t   mino,
+    int       field,         /* 0 atime, 1 mtime, 2 ctime */
+    int64_t   abstract,
+    long long wsec,
+    long long wnsec)
 {
-    long long    wsec  = tf_i64(json_array_get(wire_arr, 0));
-    long long    wnsec = tf_i64(json_array_get(wire_arr, 1));
     struct tent *t;
 
     if (field == 0 && !g_strict_atime) {
@@ -608,64 +639,61 @@ check_time(
     }
 } /* check_time */
 
-/* Compare a stat reply against the model's SStatR payload (res_v). */
+/* Compare a live struct stat against the model's SStatR payload (res_v). */
 static void
 check_statres(
-    json_t *rv,      /* model result value */
-    json_t *res)     /* driver reply */
+    json_t            *rv,     /* model result value */
+    const struct stat *st)
 {
-    json_t       *ftype   = json_object_get(rv, "ftype");
-    const char   *ftag    = tf_tag(ftype);
+    const char   *ftag    = tf_tag(json_object_get(rv, "ftype"));
     const char   *want_ft = ftype_of(ftag);
-    const char   *got_ft  = json_string_value(json_object_get(res, "ftype"));
+    const char   *got_ft  = ftype_from_mode(st->st_mode);
     int64_t       mino    = tf_field(rv, "ino");
-    long long     dev, ino;
+    long long     dev     = (long long) st->st_dev;
+    long long     ino     = (long long) st->st_ino;
     struct ident *known;
 
-    if (!got_ft || strcmp(got_ft, want_ft) != 0) {
-        mism("ftype: expected %s, got %s", want_ft, got_ft ? got_ft : "(nil)");
+    if (strcmp(got_ft, want_ft) != 0) {
+        mism("ftype: expected %s, got %s", want_ft, got_ft);
     }
     if (strcmp(ftag, "FLnk") != 0) {
         int64_t wmode = tf_field(rv, "mode");
-        int64_t gmode = tf_field(res, "mode");
-        if (gmode != wmode) {
-            mism("mode: expected %#llo, got %#llo",
-                 (long long) wmode, (long long) gmode);
+        if ((int64_t) (st->st_mode & 07777) != wmode) {
+            mism("mode: expected %#llo, got %#o", (long long) wmode,
+                 st->st_mode & 07777);
         }
     }
-    if (tf_field(res, "uid") != tf_field(rv, "uid")) {
-        mism("uid: expected %lld, got %lld", (long long) tf_field(rv, "uid"),
-             (long long) tf_field(res, "uid"));
+    if ((int64_t) st->st_uid != tf_field(rv, "uid")) {
+        mism("uid: expected %lld, got %u", (long long) tf_field(rv, "uid"),
+             st->st_uid);
     }
-    if (tf_field(res, "gid") != tf_field(rv, "gid")) {
-        mism("gid: expected %lld, got %lld", (long long) tf_field(rv, "gid"),
-             (long long) tf_field(res, "gid"));
+    if ((int64_t) st->st_gid != tf_field(rv, "gid")) {
+        mism("gid: expected %lld, got %u", (long long) tf_field(rv, "gid"),
+             st->st_gid);
     }
-    if (tf_field(res, "nlink") != tf_field(rv, "nlink")) {
-        mism("nlink: expected %lld, got %lld",
+    if ((int64_t) st->st_nlink != tf_field(rv, "nlink")) {
+        mism("nlink: expected %lld, got %llu",
              (long long) tf_field(rv, "nlink"),
-             (long long) tf_field(res, "nlink"));
+             (unsigned long long) st->st_nlink);
     }
     if (strcmp(ftag, "FReg") == 0) {
         int64_t want = tf_field(rv, "sizeB");
-        if (tf_field(res, "size") != want) {
+        if ((int64_t) st->st_size != want) {
             mism("size: expected %lld, got %lld", (long long) want,
-                 (long long) tf_field(res, "size"));
+                 (long long) st->st_size);
         }
     } else if (strcmp(ftag, "FLnk") == 0 && g_cur_fs) {
         json_t *node = map_get_int(json_object_get(g_cur_fs, "inodes"), mino);
         if (node) {
             char want[8192];
             real_target(json_object_get(node, "target"), want, sizeof(want));
-            if (tf_field(res, "size") != (int64_t) strlen(want)) {
+            if ((int64_t) st->st_size != (int64_t) strlen(want)) {
                 mism("symlink size: expected %zu, got %lld", strlen(want),
-                     (long long) tf_field(res, "size"));
+                     (long long) st->st_size);
             }
         }
     }
 
-    dev = tf_field(res, "dev");
-    ino = tf_field(res, "ino");
     if (mino >= 0 && mino < R_MAXINO) {
         known = &g_inomap[mino];
         if (!known->present) {
@@ -678,15 +706,16 @@ check_statres(
         }
     }
 
-    check_time(mino, 0, tf_field(rv, "atime"), json_object_get(res, "atime"));
-    check_time(mino, 1, tf_field(rv, "mtime"), json_object_get(res, "mtime"));
-    check_time(mino, 2, tf_field(rv, "ctime"), json_object_get(res, "ctime"));
+    check_time(mino, 0, tf_field(rv, "atime"),
+               CHIMERA_STAT_ATIM(*st).tv_sec, CHIMERA_STAT_ATIM(*st).tv_nsec);
+    check_time(mino, 1, tf_field(rv, "mtime"),
+               CHIMERA_STAT_MTIM(*st).tv_sec, CHIMERA_STAT_MTIM(*st).tv_nsec);
+    check_time(mino, 2, tf_field(rv, "ctime"),
+               CHIMERA_STAT_CTIM(*st).tv_sec, CHIMERA_STAT_CTIM(*st).tv_nsec);
 } /* check_statres */
 
-/* ---- request building + in-process dispatch ------------------------------ */
+/* ---- newfs/setcred: cold path, still via the JSON engine ----------------- */
 
-/* Call the reused driver engine with a freshly built request object.  Returns
- * the reply (caller decrefs).  `req` is consumed. */
 static json_t *
 call(json_t *req)
 {
@@ -756,22 +785,19 @@ op_open(
     int     flags = open_flags(fl);
     int64_t dfd   = tf_field(rv, "dfd");
     char    path[8192];
-    json_t *req, *res;
+    int     rc, e;
 
+    apply_cred(pid);
     real_path(json_object_get(rv, "pth"), path, sizeof(path));
     if (dfd == -1) {
-        req = req_new("open", pid);
+        rc = chimera_posix_open(path, flags, tf_field(fl, "mode"));
     } else {
-        req = req_new("openat", pid);
-        json_object_set_new(req, "dirfd", json_integer(rfd(pid, dfd)));
+        rc = chimera_posix_openat(rfd(pid, dfd), path, flags,
+                                  tf_field(fl, "mode"));
     }
-    json_object_set_new(req, "path", json_string(path));
-    json_object_set_new(req, "flags", json_integer(flags));
-    json_object_set_new(req, "mode", json_integer(tf_field(fl, "mode")));
-    res = call(req);
-
-    if (check_status(tf_field(res_v, "e"), res) && tf_field(res_v, "e") == 0) {
-        set_fd(pid, tf_field(res_v, "fd"), tf_field(res, "ret"));
+    e = ERRV(rc);
+    if (check_status(tf_field(res_v, "e"), e) && tf_field(res_v, "e") == 0) {
+        set_fd(pid, tf_field(res_v, "fd"), rc);
         if (tf_bool(fl, "trunc")) {
             int64_t ino = model_ino_of_fd(pid, tf_field(res_v, "fd"));
             if (ino >= 0) {
@@ -779,7 +805,6 @@ op_open(
             }
         }
     }
-    json_decref(res);
 } /* op_open */
 
 static void
@@ -788,15 +813,12 @@ op_close(
     json_t *rv,
     json_t *res_v)
 {
-    json_t *req = req_new("close", pid);
-    json_t *res;
+    int rc = chimera_posix_close(rfd(pid, tf_field(rv, "fd")));
+    int e  = ERRV(rc);
 
-    json_object_set_new(req, "fd", json_integer(rfd(pid, tf_field(rv, "fd"))));
-    res = call(req);
-    if (check_status(tf_field(res_v, "e"), res) && tf_field(res_v, "e") == 0) {
+    if (check_status(tf_field(res_v, "e"), e) && tf_field(res_v, "e") == 0) {
         set_fd(pid, tf_field(rv, "fd"), BADFD);
     }
-    json_decref(res);
 } /* op_close */
 
 static void
@@ -805,15 +827,12 @@ op_dup(
     json_t *rv,
     json_t *res_v)
 {
-    json_t *req = req_new("dup", pid);
-    json_t *res;
+    int rc = chimera_posix_dup(rfd(pid, tf_field(rv, "fd")));
+    int e  = ERRV(rc);
 
-    json_object_set_new(req, "fd", json_integer(rfd(pid, tf_field(rv, "fd"))));
-    res = call(req);
-    if (check_status(tf_field(res_v, "e"), res) && tf_field(res_v, "e") == 0) {
-        set_fd(pid, tf_field(res_v, "fd"), tf_field(res, "ret"));
+    if (check_status(tf_field(res_v, "e"), e) && tf_field(res_v, "e") == 0) {
+        set_fd(pid, tf_field(res_v, "fd"), rc);
     }
-    json_decref(res);
 } /* op_dup */
 
 static void
@@ -822,125 +841,120 @@ op_lseek(
     json_t *rv,
     json_t *res_v)
 {
-    const char *whmap[] = { 0 };
-    const char *wh      = tf_tag(json_object_get(rv, "wh"));
-    const char *w       = "set";
-    json_t     *req     = req_new("lseek", pid);
-    json_t     *res;
+    const char *wh     = tf_tag(json_object_get(rv, "wh"));
+    int         whence = SEEK_SET;
+    off_t       rc;
+    int         e;
 
-    (void) whmap;
     if (strcmp(wh, "WCur") == 0) {
-        w = "cur";
+        whence = SEEK_CUR;
     } else if (strcmp(wh, "WEnd") == 0) {
-        w = "end";
+        whence = SEEK_END;
     } else if (strcmp(wh, "WData") == 0) {
-        w = "data";
+        whence = SEEK_DATA;
     } else if (strcmp(wh, "WHole") == 0) {
-        w = "hole";
+        whence = SEEK_HOLE;
     }
-    json_object_set_new(req, "fd", json_integer(rfd(pid, tf_field(rv, "fd"))));
-    json_object_set_new(req, "off", json_integer(tf_field(rv, "off")));
-    json_object_set_new(req, "whence", json_string(w));
-    res = call(req);
-    if (check_status(tf_field(res_v, "e"), res) && tf_field(res_v, "e") == 0) {
-        int64_t want = tf_field(res_v, "off");
-        if (tf_field(res, "ret") != want) {
-            mism("lseek: expected offset %lld, got %lld", (long long) want,
-                 (long long) tf_field(res, "ret"));
+    apply_cred(pid);
+    rc = chimera_posix_lseek(rfd(pid, tf_field(rv, "fd")),
+                             (off_t) tf_field(rv, "off"), whence);
+    e = ERRV(rc);
+    if (check_status(tf_field(res_v, "e"), e) && tf_field(res_v, "e") == 0) {
+        if ((int64_t) rc != tf_field(res_v, "off")) {
+            mism("lseek: expected offset %lld, got %lld",
+                 (long long) tf_field(res_v, "off"), (long long) rc);
         }
     }
-    json_decref(res);
 } /* op_lseek */
 
-/* Shared read verify for read/pread/readv/preadv. */
 static void
-check_read(
+op_read_family(
+    int     pid,
+    json_t *rv,
     json_t *res_v,
-    json_t *res)
+    int     positioned,
+    int     vectored)
 {
-    if (check_status(tf_field(res_v, "e"), res) && tf_field(res_v, "e") == 0) {
-        int64_t        count = tf_field(res_v, "n");
-        const char    *b64   = json_string_value(json_object_get(res, "data"));
-        unsigned char *got   = malloc(count > 0 ? count : 1);
-        unsigned char *exp   = malloc(count > 0 ? count : 1);
-        int            gl    = b64_decode(b64 ? b64 : "", got,
-                                          count > 0 ? count : 1);
+    int64_t        fd  = rfd(pid, tf_field(rv, "fd"));
+    size_t         len = (size_t) tf_field(rv, "len");
+    off_t          off = (off_t) tf_field(rv, "off");
+    unsigned char *buf = malloc(len ? len : 1);
+    ssize_t        n;
+    int            e;
 
-        if (tf_field(res, "ret") != count) {
-            mism("read count: expected %lld, got %lld", (long long) count,
-                 (long long) tf_field(res, "ret"));
+    apply_cred(pid);
+    if (vectored) {
+        struct iovec iov[2];
+        int          niov = split_iovec(iov, buf, len);
+        n = positioned
+            ? chimera_posix_preadv2(fd, iov, niov, off, 0)
+            : chimera_posix_readv(fd, iov, niov);
+    } else {
+        n = positioned
+            ? chimera_posix_pread(fd, buf, len, off)
+            : chimera_posix_read(fd, buf, len);
+    }
+    e = ERRV(n);
+    if (check_status(tf_field(res_v, "e"), e) && tf_field(res_v, "e") == 0) {
+        int64_t        count = tf_field(res_v, "n");
+        unsigned char *exp   = malloc(count ? count : 1);
+        if (n != count) {
+            mism("read count: expected %lld, got %zd", (long long) count, n);
         }
         shadow_read(tf_field(res_v, "ino"), tf_field(res_v, "off"),
                     (size_t) count, exp);
-        if (gl != count || memcmp(got, exp, count) != 0) {
+        if (n != count || (count && memcmp(buf, exp, count) != 0)) {
             mism("read data mismatch at ino %lld off %lld len %lld",
                  (long long) tf_field(res_v, "ino"),
                  (long long) tf_field(res_v, "off"), (long long) count);
         }
-        free(got);
         free(exp);
     }
-} /* check_read */
-
-static void
-op_read_family(
-    int         pid,
-    json_t     *rv,
-    json_t     *res_v,
-    const char *op,
-    int         positioned)
-{
-    json_t *req = req_new(op, pid);
-    json_t *res;
-
-    json_object_set_new(req, "fd", json_integer(rfd(pid, tf_field(rv, "fd"))));
-    json_object_set_new(req, "len", json_integer(tf_field(rv, "len")));
-    if (positioned) {
-        json_object_set_new(req, "off", json_integer(tf_field(rv, "off")));
-    }
-    res = call(req);
-    check_read(res_v, res);
-    json_decref(res);
+    free(buf);
 } /* op_read_family */
 
 static void
 op_write_family(
-    int         pid,
-    json_t     *rv,
-    json_t     *res_v,
-    const char *op,
-    int         positioned)
+    int     pid,
+    json_t *rv,
+    json_t *res_v,
+    int     positioned,
+    int     vectored)
 {
+    int64_t        fd   = rfd(pid, tf_field(rv, "fd"));
     int64_t        off  = tf_field(res_v, "off");
     int64_t        len  = tf_field(rv, "len");
     int64_t        pat  = tf_field(rv, "pat");
-    unsigned char *data = malloc(len > 0 ? len : 1);
-    char          *enc;
-    json_t        *req, *res;
+    off_t          poff = (off_t) tf_field(rv, "off");
+    unsigned char *buf  = malloc(len ? len : 1);
+    ssize_t        n;
     int64_t        i;
+    int            e;
 
     for (i = 0; i < len; i++) {
-        data[i] = pat_byte(pat, off + i);
+        buf[i] = pat_byte(pat, off + i);
     }
-    enc = b64_encode(data, (size_t) len);
-    req = req_new(op, pid);
-    json_object_set_new(req, "fd", json_integer(rfd(pid, tf_field(rv, "fd"))));
-    json_object_set_new(req, "data", json_string(enc ? enc : ""));
-    if (positioned) {
-        json_object_set_new(req, "off", json_integer(tf_field(rv, "off")));
+    apply_cred(pid);
+    if (vectored) {
+        struct iovec iov[2];
+        int          niov = split_iovec(iov, buf, (size_t) len);
+        n = positioned
+            ? chimera_posix_pwritev2(fd, iov, niov, poff, 0)
+            : chimera_posix_writev(fd, iov, niov);
+    } else {
+        n = positioned
+            ? chimera_posix_pwrite(fd, buf, (size_t) len, poff)
+            : chimera_posix_write(fd, buf, (size_t) len);
     }
-    res = call(req);
-    if (check_status(tf_field(res_v, "e"), res) && tf_field(res_v, "e") == 0) {
-        if (tf_field(res, "ret") != tf_field(res_v, "n")) {
-            mism("write count: expected %lld, got %lld",
-                 (long long) tf_field(res_v, "n"),
-                 (long long) tf_field(res, "ret"));
+    e = ERRV(n);
+    if (check_status(tf_field(res_v, "e"), e) && tf_field(res_v, "e") == 0) {
+        if (n != tf_field(res_v, "n")) {
+            mism("write count: expected %lld, got %zd",
+                 (long long) tf_field(res_v, "n"), n);
         }
-        shadow_apply(tf_field(res_v, "ino"), off, data, (size_t) len);
+        shadow_apply(tf_field(res_v, "ino"), off, buf, (size_t) len);
     }
-    free(data);
-    free(enc);
-    json_decref(res);
+    free(buf);
 } /* op_write_family */
 
 static void
@@ -949,15 +963,14 @@ op_truncate(
     json_t *rv,
     json_t *res_v)
 {
-    char    path[8192];
-    json_t *req = req_new("truncate", pid);
-    json_t *res;
+    char path[8192];
+    int  rc, e;
 
+    apply_cred(pid);
     real_path(json_object_get(rv, "pth"), path, sizeof(path));
-    json_object_set_new(req, "path", json_string(path));
-    json_object_set_new(req, "len", json_integer(tf_field(rv, "len")));
-    res = call(req);
-    check_status(tf_field(res_v, "e"), res);
+    rc = chimera_posix_truncate(path, (off_t) tf_field(rv, "len"));
+    e  = ERRV(rc);
+    check_status(tf_field(res_v, "e"), e);
     if (tf_field(res_v, "e") == 0) {
         int64_t ino = path_ino(g_cur_fs, json_object_get(
                                    json_object_get(rv, "pth"), "comps"));
@@ -965,7 +978,6 @@ op_truncate(
             shadow_resize(ino, tf_field(rv, "len"));
         }
     }
-    json_decref(res);
 } /* op_truncate */
 
 static void
@@ -974,20 +986,19 @@ op_ftruncate(
     json_t *rv,
     json_t *res_v)
 {
-    json_t *req = req_new("ftruncate", pid);
-    json_t *res;
+    int rc, e;
 
-    json_object_set_new(req, "fd", json_integer(rfd(pid, tf_field(rv, "fd"))));
-    json_object_set_new(req, "len", json_integer(tf_field(rv, "len")));
-    res = call(req);
-    check_status(tf_field(res_v, "e"), res);
+    apply_cred(pid);
+    rc = chimera_posix_ftruncate(rfd(pid, tf_field(rv, "fd")),
+                                 (off_t) tf_field(rv, "len"));
+    e = ERRV(rc);
+    check_status(tf_field(res_v, "e"), e);
     if (tf_field(res_v, "e") == 0) {
         int64_t ino = model_ino_of_fd(pid, tf_field(rv, "fd"));
         if (ino >= 0) {
             shadow_resize(ino, tf_field(rv, "len"));
         }
     }
-    json_decref(res);
 } /* op_ftruncate */
 
 static void
@@ -996,24 +1007,26 @@ op_stat(
     json_t *rv,
     json_t *res_v)
 {
-    int64_t dfd = tf_field(rv, "dfd");
-    char    path[8192];
-    json_t *req, *res;
+    int64_t     dfd    = tf_field(rv, "dfd");
+    int         follow = tf_bool(rv, "follow");
+    struct stat st;
+    char        path[8192];
+    int         rc, e;
 
+    memset(&st, 0, sizeof(st));
+    apply_cred(pid);
     real_path(json_object_get(rv, "pth"), path, sizeof(path));
     if (dfd == -1) {
-        req = req_new("stat", pid);
+        rc = follow ? chimera_posix_stat(path, &st)
+                    : chimera_posix_lstat(path, &st);
     } else {
-        req = req_new("fstatat", pid);
-        json_object_set_new(req, "dirfd", json_integer(rfd(pid, dfd)));
+        rc = chimera_posix_fstatat(rfd(pid, dfd), path, &st,
+                                   follow ? 0 : AT_SYMLINK_NOFOLLOW);
     }
-    json_object_set_new(req, "path", json_string(path));
-    json_object_set_new(req, "follow", json_boolean(tf_bool(rv, "follow")));
-    res = call(req);
-    if (check_status(tf_field(res_v, "e"), res) && tf_field(res_v, "e") == 0) {
-        check_statres(res_v, res);
+    e = ERRV(rc);
+    if (check_status(tf_field(res_v, "e"), e) && tf_field(res_v, "e") == 0) {
+        check_statres(res_v, &st);
     }
-    json_decref(res);
 } /* op_stat */
 
 static void
@@ -1022,40 +1035,44 @@ op_fstat(
     json_t *rv,
     json_t *res_v)
 {
-    json_t *req = req_new("fstat", pid);
-    json_t *res;
+    struct stat st;
+    int         rc, e;
 
-    json_object_set_new(req, "fd", json_integer(rfd(pid, tf_field(rv, "fd"))));
-    res = call(req);
-    if (check_status(tf_field(res_v, "e"), res) && tf_field(res_v, "e") == 0) {
-        check_statres(res_v, res);
+    memset(&st, 0, sizeof(st));
+    apply_cred(pid);
+    rc = chimera_posix_fstat(rfd(pid, tf_field(rv, "fd")), &st);
+    e  = ERRV(rc);
+    if (check_status(tf_field(res_v, "e"), e) && tf_field(res_v, "e") == 0) {
+        check_statres(res_v, &st);
     }
-    json_decref(res);
 } /* op_fstat */
 
-/* statfs/statvfs/fstatfs/fstatvfs: only the errno is asserted. */
+/* statfs/statvfs/fstatfs/fstatvfs: only the errno is asserted (capacity
+ * fields are backend-specific and untracked). */
 static void
 op_statfs_family(
-    int         pid,
-    json_t     *rv,
-    json_t     *res_v,
-    const char *op,
-    int         byfd)
+    int     pid,
+    json_t *rv,
+    json_t *res_v,
+    int     which)         /* 0 statfs, 1 statvfs, 2 fstatfs, 3 fstatvfs */
 {
-    json_t *req = req_new(op, pid);
-    json_t *res;
+    struct statfs  sf;
+    struct statvfs sv;
+    char           path[8192];
+    int            rc, e;
 
-    if (byfd) {
-        json_object_set_new(req, "fd",
-                            json_integer(rfd(pid, tf_field(rv, "fd"))));
-    } else {
-        char path[8192];
+    apply_cred(pid);
+    if (which < 2) {
         real_path(json_object_get(rv, "pth"), path, sizeof(path));
-        json_object_set_new(req, "path", json_string(path));
+        rc = which == 0 ? chimera_posix_statfs(path, &sf)
+                        : chimera_posix_statvfs(path, &sv);
+    } else {
+        int64_t fd = rfd(pid, tf_field(rv, "fd"));
+        rc = which == 2 ? chimera_posix_fstatfs(fd, &sf)
+                        : chimera_posix_fstatvfs(fd, &sv);
     }
-    res = call(req);
-    check_status(tf_field(res_v, "e"), res);
-    json_decref(res);
+    e = ERRV(rc);
+    check_status(tf_field(res_v, "e"), e);
 } /* op_statfs_family */
 
 static void
@@ -1066,20 +1083,16 @@ op_mkdir(
 {
     int64_t dfd = tf_field(rv, "dfd");
     char    path[8192];
-    json_t *req, *res;
+    int     rc, e;
 
+    apply_cred(pid);
     real_path(json_object_get(rv, "pth"), path, sizeof(path));
-    if (dfd == -1) {
-        req = req_new("mkdir", pid);
-    } else {
-        req = req_new("mkdirat", pid);
-        json_object_set_new(req, "dirfd", json_integer(rfd(pid, dfd)));
-    }
-    json_object_set_new(req, "path", json_string(path));
-    json_object_set_new(req, "mode", json_integer(tf_field(rv, "mode")));
-    res = call(req);
-    check_status(tf_field(res_v, "e"), res);
-    json_decref(res);
+    rc = dfd == -1
+        ? chimera_posix_mkdir(path, (mode_t) tf_field(rv, "mode"))
+        : chimera_posix_mkdirat(rfd(pid, dfd), path,
+                                (mode_t) tf_field(rv, "mode"));
+    e = ERRV(rc);
+    check_status(tf_field(res_v, "e"), e);
 } /* op_mkdir */
 
 static void
@@ -1088,18 +1101,28 @@ op_mknod(
     json_t *rv,
     json_t *res_v)
 {
-    const char *ft = ftype_of(tf_tag(json_object_get(rv, "ft")));
+    const char *ft   = ftype_of(tf_tag(json_object_get(rv, "ft")));
+    mode_t      mode = (mode_t) tf_field(rv, "mode");
+    dev_t       dev  = 0;
     char        path[8192];
-    json_t     *req = req_new("mknod", pid);
-    json_t     *res;
+    int         rc, e;
 
+    if (strcmp(ft, "fifo") == 0) {
+        mode |= S_IFIFO;
+    } else if (strcmp(ft, "blk") == 0) {
+        mode |= S_IFBLK;
+        dev   = makedev(3, 4);
+    } else if (strcmp(ft, "chr") == 0) {
+        mode |= S_IFCHR;
+        dev   = makedev(3, 4);
+    } else {
+        mode |= S_IFREG;
+    }
+    apply_cred(pid);
     real_path(json_object_get(rv, "pth"), path, sizeof(path));
-    json_object_set_new(req, "path", json_string(path));
-    json_object_set_new(req, "mode", json_integer(tf_field(rv, "mode")));
-    json_object_set_new(req, "ftype", json_string(ft));
-    res = call(req);
-    check_status(tf_field(res_v, "e"), res);
-    json_decref(res);
+    rc = chimera_posix_mknod(path, mode, dev);
+    e  = ERRV(rc);
+    check_status(tf_field(res_v, "e"), e);
 } /* op_mknod */
 
 static void
@@ -1108,17 +1131,15 @@ op_symlink(
     json_t *rv,
     json_t *res_v)
 {
-    char    tgt[8192], path[8192];
-    json_t *req = req_new("symlink", pid);
-    json_t *res;
+    char tgt[8192], path[8192];
+    int  rc, e;
 
+    apply_cred(pid);
     real_target(json_object_get(rv, "tgt"), tgt, sizeof(tgt));
     real_path(json_object_get(rv, "pth"), path, sizeof(path));
-    json_object_set_new(req, "target", json_string(tgt));
-    json_object_set_new(req, "path", json_string(path));
-    res = call(req);
-    check_status(tf_field(res_v, "e"), res);
-    json_decref(res);
+    rc = chimera_posix_symlink(tgt, path);
+    e  = ERRV(rc);
+    check_status(tf_field(res_v, "e"), e);
 } /* op_symlink */
 
 static void
@@ -1127,18 +1148,17 @@ op_link(
     json_t *rv,
     json_t *res_v)
 {
-    char    o[8192], n[8192];
-    json_t *req = req_new("link", pid);
-    json_t *res;
+    char o[8192], n[8192];
+    int  rc, e;
 
+    apply_cred(pid);
     real_path(json_object_get(rv, "pthOld"), o, sizeof(o));
     real_path(json_object_get(rv, "pthNew"), n, sizeof(n));
-    json_object_set_new(req, "old", json_string(o));
-    json_object_set_new(req, "new", json_string(n));
-    json_object_set_new(req, "follow", json_boolean(tf_bool(rv, "followOld")));
-    res = call(req);
-    check_status(tf_field(res_v, "e"), res);
-    json_decref(res);
+    rc = tf_bool(rv, "followOld")
+        ? chimera_posix_linkat(AT_FDCWD, o, AT_FDCWD, n, AT_SYMLINK_FOLLOW)
+        : chimera_posix_link(o, n);
+    e = ERRV(rc);
+    check_status(tf_field(res_v, "e"), e);
 } /* op_link */
 
 static void
@@ -1149,20 +1169,14 @@ op_unlink(
 {
     int64_t dfd = tf_field(rv, "dfd");
     char    path[8192];
-    json_t *req, *res;
+    int     rc, e;
 
+    apply_cred(pid);
     real_path(json_object_get(rv, "pth"), path, sizeof(path));
-    if (dfd == -1) {
-        req = req_new("unlink", pid);
-    } else {
-        req = req_new("unlinkat", pid);
-        json_object_set_new(req, "dirfd", json_integer(rfd(pid, dfd)));
-        json_object_set_new(req, "rmdir", json_false());
-    }
-    json_object_set_new(req, "path", json_string(path));
-    res = call(req);
-    check_status(tf_field(res_v, "e"), res);
-    json_decref(res);
+    rc = dfd == -1 ? chimera_posix_unlink(path)
+                   : chimera_posix_unlinkat(rfd(pid, dfd), path, 0);
+    e = ERRV(rc);
+    check_status(tf_field(res_v, "e"), e);
 } /* op_unlink */
 
 static void
@@ -1173,20 +1187,15 @@ op_rmdir(
 {
     int64_t dfd = tf_field(rv, "dfd");
     char    path[8192];
-    json_t *req, *res;
+    int     rc, e;
 
+    apply_cred(pid);
     real_path(json_object_get(rv, "pth"), path, sizeof(path));
-    if (dfd == -1) {
-        req = req_new("rmdir", pid);
-    } else {
-        req = req_new("unlinkat", pid);
-        json_object_set_new(req, "dirfd", json_integer(rfd(pid, dfd)));
-        json_object_set_new(req, "rmdir", json_true());
-    }
-    json_object_set_new(req, "path", json_string(path));
-    res = call(req);
-    check_status(tf_field(res_v, "e"), res);
-    json_decref(res);
+    rc = dfd == -1
+        ? chimera_posix_rmdir(path)
+        : chimera_posix_unlinkat(rfd(pid, dfd), path, AT_REMOVEDIR);
+    e = ERRV(rc);
+    check_status(tf_field(res_v, "e"), e);
 } /* op_rmdir */
 
 static void
@@ -1195,17 +1204,15 @@ op_rename(
     json_t *rv,
     json_t *res_v)
 {
-    char    o[8192], n[8192];
-    json_t *req = req_new("rename", pid);
-    json_t *res;
+    char o[8192], n[8192];
+    int  rc, e;
 
+    apply_cred(pid);
     real_path(json_object_get(rv, "pthOld"), o, sizeof(o));
     real_path(json_object_get(rv, "pthNew"), n, sizeof(n));
-    json_object_set_new(req, "old", json_string(o));
-    json_object_set_new(req, "new", json_string(n));
-    res = call(req);
-    check_status(tf_field(res_v, "e"), res);
-    json_decref(res);
+    rc = chimera_posix_rename(o, n);
+    e  = ERRV(rc);
+    check_status(tf_field(res_v, "e"), e);
 } /* op_rename */
 
 static void
@@ -1214,22 +1221,22 @@ op_readlink(
     json_t *rv,
     json_t *res_v)
 {
-    char    path[8192];
-    json_t *req = req_new("readlink", pid);
-    json_t *res;
+    char    path[8192], buf[8192];
+    ssize_t n;
+    int     e;
 
+    apply_cred(pid);
     real_path(json_object_get(rv, "pth"), path, sizeof(path));
-    json_object_set_new(req, "path", json_string(path));
-    res = call(req);
-    if (check_status(tf_field(res_v, "e"), res) && tf_field(res_v, "e") == 0) {
-        char        want[8192];
-        const char *got = json_string_value(json_object_get(res, "target"));
+    n = chimera_posix_readlink(path, buf, sizeof(buf) - 1);
+    e = ERRV(n);
+    if (check_status(tf_field(res_v, "e"), e) && tf_field(res_v, "e") == 0) {
+        char want[8192];
+        buf[n >= 0 ? n : 0] = '\0';
         real_target(json_object_get(res_v, "tgt"), want, sizeof(want));
-        if (!got || strcmp(got, want) != 0) {
-            mism("readlink: expected '%s', got '%s'", want, got ? got : "(nil)");
+        if (strcmp(buf, want) != 0) {
+            mism("readlink: expected '%s', got '%s'", want, buf);
         }
     }
-    json_decref(res);
 } /* op_readlink */
 
 static void
@@ -1238,20 +1245,24 @@ op_opendir(
     json_t *rv,
     json_t *res_v)
 {
-    char    path[8192];
-    json_t *req = req_new("opendir", pid);
-    json_t *res;
+    CHIMERA_DIR *d;
+    char         path[8192];
+    int          e;
 
+    apply_cred(pid);
     real_path(json_object_get(rv, "pth"), path, sizeof(path));
-    json_object_set_new(req, "path", json_string(path));
-    res = call(req);
-    if (check_status(tf_field(res_v, "e"), res) && tf_field(res_v, "e") == 0) {
+    d = chimera_posix_opendir(path);
+    e = d ? 0 : errno;
+    if (check_status(tf_field(res_v, "e"), e) && tf_field(res_v, "e") == 0) {
         int64_t msid = tf_field(res_v, "sid");
         if (msid >= 0 && msid < R_MAXSID) {
-            g_sidmap[msid] = tf_field(res, "ret");
+            g_dirmap[msid] = d;
+        } else {
+            chimera_posix_closedir(d);
         }
+    } else if (d) {
+        chimera_posix_closedir(d);
     }
-    json_decref(res);
 } /* op_opendir */
 
 static void
@@ -1260,82 +1271,103 @@ op_readdir(
     json_t *rv,
     json_t *res_v)
 {
-    json_t *req = req_new("readdir", pid);
-    json_t *res, *names, *want;
-    size_t  i, j;
+    CHIMERA_DIR   *d = rdir(tf_field(rv, "sid"));
+    struct dirent *de;
+    json_t        *want;
+    char           names[256][256];
+    int            nnames = 0, i;
+    size_t         j;
 
-    json_object_set_new(req, "sid", json_integer(rsid(tf_field(rv, "sid"))));
-    res = call(req);
-    if (check_status(tf_field(res_v, "e"), res) && tf_field(res_v, "e") == 0) {
-        names = json_object_get(res, "names");                 /* got names   */
-        want  = json_object_get(res_v, "names");               /* model #set  */
-        if (json_is_object(want)) {
-            json_t *s = json_object_get(want, "#set");
-            if (s) {
-                want = s;
-            }
-        }
-        /* every model name must be present, and every present name (minus
-         * . / ..) must be in the model set: compare as sets */
-        for (i = 0; want && i < json_array_size(want); i++) {
-            const char *wn    = json_string_value(json_array_get(want, i));
-            int         found = 0;
-            for (j = 0; names && j < json_array_size(names); j++) {
-                const char *gn = json_string_value(json_array_get(names, j));
-                if (gn && wn && strcmp(gn, wn) == 0) {
-                    found = 1;
-                    break;
-                }
-            }
-            if (!found) {
-                mism("readdir: model name '%s' missing", wn ? wn : "?");
-            }
-        }
-        for (j = 0; names && j < json_array_size(names); j++) {
-            const char *gn = json_string_value(json_array_get(names, j));
-            int         ok;
-            if (!gn || strcmp(gn, ".") == 0 || strcmp(gn, "..") == 0) {
-                continue;
-            }
-            ok = 0;
-            for (i = 0; want && i < json_array_size(want); i++) {
-                const char *wn = json_string_value(json_array_get(want, i));
-                if (wn && strcmp(wn, gn) == 0) {
-                    ok = 1;
-                    break;
-                }
-            }
-            if (!ok) {
-                mism("readdir: unexpected name '%s'", gn);
-            }
+    (void) pid;
+    if (!d) {
+        check_status(tf_field(res_v, "e"), EBADF);
+        return;
+    }
+    if (!check_status(tf_field(res_v, "e"), 0) || tf_field(res_v, "e") != 0) {
+        return;
+    }
+    /* One atomic full sweep from a fresh cursor (the model's RReaddir returns
+     * the full current entry set each time). */
+    chimera_posix_rewinddir(d);
+    while ((de = chimera_posix_readdir(d)) != NULL && nnames < 256) {
+        snprintf(names[nnames++], 256, "%s", de->d_name);
+    }
+
+    want = json_object_get(res_v, "names");
+    if (json_is_object(want)) {
+        json_t *sset = json_object_get(want, "#set");
+        if (sset) {
+            want = sset;
         }
     }
-    json_decref(res);
+    /* every model name present, and every live name (minus . / ..) modelled */
+    for (j = 0; want && j < json_array_size(want); j++) {
+        const char *wn    = json_string_value(json_array_get(want, j));
+        int         found = 0;
+        for (i = 0; i < nnames; i++) {
+            if (wn && strcmp(names[i], wn) == 0) {
+                found = 1;
+                break;
+            }
+        }
+        if (!found) {
+            mism("readdir: model name '%s' missing", wn ? wn : "?");
+        }
+    }
+    for (i = 0; i < nnames; i++) {
+        int ok = 0;
+        if (strcmp(names[i], ".") == 0 || strcmp(names[i], "..") == 0) {
+            continue;
+        }
+        for (j = 0; want && j < json_array_size(want); j++) {
+            const char *wn = json_string_value(json_array_get(want, j));
+            if (wn && strcmp(wn, names[i]) == 0) {
+                ok = 1;
+                break;
+            }
+        }
+        if (!ok) {
+            mism("readdir: unexpected name '%s'", names[i]);
+        }
+    }
 } /* op_readdir */
 
 static void
 op_dir_simple(
-    int         pid,
-    json_t     *rv,
-    json_t     *res_v,
-    const char *op)
+    int     pid,
+    json_t *rv,
+    json_t *res_v,
+    int     which)         /* 0 rewinddir, 1 telldir, 2 seekdir, 3 closedir */
 {
-    json_t *req = req_new(op, pid);
-    json_t *res;
+    CHIMERA_DIR *d = rdir(tf_field(rv, "sid"));
+    int          e = 0;
 
-    json_object_set_new(req, "sid", json_integer(rsid(tf_field(rv, "sid"))));
-    if (strcmp(op, "seekdir") == 0) {
-        json_object_set_new(req, "loc", json_integer(tf_field(rv, "loc")));
+    (void) pid;
+    if (!d) {
+        check_status(tf_field(res_v, "e"), EBADF);
+        return;
     }
-    res = call(req);
-    check_status(tf_field(res_v, "e"), res);
-    if (strcmp(op, "closedir") == 0 && tf_field(res_v, "e") == 0) {
+    switch (which) {
+        case 0:
+            chimera_posix_rewinddir(d);
+            break;
+        case 1:
+            e = chimera_posix_telldir(d) < 0 ? errno : 0;
+            break;
+        case 2:
+            chimera_posix_seekdir(d, (long) tf_field(rv, "loc"));
+            break;
+        case 3:
+            e = chimera_posix_closedir(d) < 0 ? errno : 0;
+            break;
+    } /* switch */
+    if (check_status(tf_field(res_v, "e"), e) && which == 3 &&
+        tf_field(res_v, "e") == 0) {
         int64_t msid = tf_field(rv, "sid");
         if (msid >= 0 && msid < R_MAXSID) {
-            g_sidmap[msid] = -1;
+            g_dirmap[msid] = NULL;
         }
     }
-    json_decref(res);
 } /* op_dir_simple */
 
 static void
@@ -1344,22 +1376,20 @@ op_copy_range(
     json_t *rv,
     json_t *res_v)
 {
-    json_t *req = req_new("copy_range", pid);
-    json_t *res;
+    off_t   off_in  = (off_t) tf_field(rv, "offIn");
+    off_t   off_out = (off_t) tf_field(rv, "offOut");
+    ssize_t n;
+    int     e;
 
-    json_object_set_new(req, "fd_in",
-                        json_integer(rfd(pid, tf_field(rv, "fdIn"))));
-    json_object_set_new(req, "off_in", json_integer(tf_field(rv, "offIn")));
-    json_object_set_new(req, "fd_out",
-                        json_integer(rfd(pid, tf_field(rv, "fdOut"))));
-    json_object_set_new(req, "off_out", json_integer(tf_field(rv, "offOut")));
-    json_object_set_new(req, "len", json_integer(tf_field(rv, "len")));
-    res = call(req);
-    if (check_status(tf_field(res_v, "e"), res) && tf_field(res_v, "e") == 0) {
-        int64_t n = tf_field(res_v, "n");
-        if (tf_field(res, "ret") != n) {
-            mism("copy_file_range: expected %lld, got %lld", (long long) n,
-                 (long long) tf_field(res, "ret"));
+    apply_cred(pid);
+    n = chimera_posix_copy_file_range(rfd(pid, tf_field(rv, "fdIn")), &off_in,
+                                      rfd(pid, tf_field(rv, "fdOut")), &off_out,
+                                      (size_t) tf_field(rv, "len"), 0);
+    e = ERRV(n);
+    if (check_status(tf_field(res_v, "e"), e) && tf_field(res_v, "e") == 0) {
+        int64_t want = tf_field(res_v, "n");
+        if (n != want) {
+            mism("copy_file_range: expected %lld, got %zd", (long long) want, n);
         }
         if (n > 0) {
             int64_t si = model_ino_of_fd(pid, tf_field(rv, "fdIn"));
@@ -1372,7 +1402,6 @@ op_copy_range(
             }
         }
     }
-    json_decref(res);
 } /* op_copy_range */
 
 static void
@@ -1381,29 +1410,26 @@ op_clone_range(
     json_t *rv,
     json_t *res_v)
 {
-    json_t *req = req_new("clone_range", pid);
-    json_t *res;
+    int64_t len = tf_field(rv, "len");
+    int     rc, e;
 
-    json_object_set_new(req, "dst_fd",
-                        json_integer(rfd(pid, tf_field(rv, "fdDst"))));
-    json_object_set_new(req, "dst_off", json_integer(tf_field(rv, "offDst")));
-    json_object_set_new(req, "src_fd",
-                        json_integer(rfd(pid, tf_field(rv, "fdSrc"))));
-    json_object_set_new(req, "src_off", json_integer(tf_field(rv, "offSrc")));
-    json_object_set_new(req, "len", json_integer(tf_field(rv, "len")));
-    res = call(req);
-    if (check_status(tf_field(res_v, "e"), res) && tf_field(res_v, "e") == 0) {
-        int64_t si  = model_ino_of_fd(pid, tf_field(rv, "fdSrc"));
-        int64_t di  = model_ino_of_fd(pid, tf_field(rv, "fdDst"));
-        int64_t len = tf_field(rv, "len");
+    apply_cred(pid);
+    rc = chimera_posix_clone_file_range(rfd(pid, tf_field(rv, "fdDst")),
+                                        (off_t) tf_field(rv, "offDst"),
+                                        rfd(pid, tf_field(rv, "fdSrc")),
+                                        (off_t) tf_field(rv, "offSrc"),
+                                        (size_t) len);
+    e = ERRV(rc);
+    if (check_status(tf_field(res_v, "e"), e) && tf_field(res_v, "e") == 0) {
+        int64_t si = model_ino_of_fd(pid, tf_field(rv, "fdSrc"));
+        int64_t di = model_ino_of_fd(pid, tf_field(rv, "fdDst"));
         if (si >= 0 && di >= 0) {
-            unsigned char *tmp = malloc(len > 0 ? len : 1);
+            unsigned char *tmp = malloc(len ? len : 1);
             shadow_read(si, tf_field(rv, "offSrc"), (size_t) len, tmp);
             shadow_apply(di, tf_field(rv, "offDst"), tmp, (size_t) len);
             free(tmp);
         }
     }
-    json_decref(res);
 } /* op_clone_range */
 
 static void
@@ -1413,15 +1439,18 @@ op_fallocate(
     json_t *res_v)
 {
     int64_t mode = tf_field(rv, "mode");
-    json_t *req  = req_new("fallocate", pid);
-    json_t *res;
+    off_t   off  = (off_t) tf_field(rv, "off");
+    off_t   len  = (off_t) tf_field(rv, "len");
+    int     rc, e;
 
-    json_object_set_new(req, "fd", json_integer(rfd(pid, tf_field(rv, "fd"))));
-    json_object_set_new(req, "mode", json_integer(mode));
-    json_object_set_new(req, "off", json_integer(tf_field(rv, "off")));
-    json_object_set_new(req, "len", json_integer(tf_field(rv, "len")));
-    res = call(req);
-    check_status(tf_field(res_v, "e"), res);
+    apply_cred(pid);
+    rc = mode == 0
+        ? chimera_posix_fallocate(rfd(pid, tf_field(rv, "fd")), off, len)
+        : chimera_posix_fallocate_mode(rfd(pid, tf_field(rv, "fd")),
+                                       FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
+                                       off, len);
+    e = ERRV(rc);
+    check_status(tf_field(res_v, "e"), e);
     if (tf_field(res_v, "e") == 0) {
         int64_t ino = model_ino_of_fd(pid, tf_field(rv, "fd"));
         if (ino >= 0) {
@@ -1435,7 +1464,6 @@ op_fallocate(
             }
         }
     }
-    json_decref(res);
 } /* op_fallocate */
 
 static void
@@ -1444,16 +1472,15 @@ op_fsync(
     json_t *rv,
     json_t *res_v)
 {
-    const char *op  = tf_bool(rv, "dataOnly") ? "fdatasync" : "fsync";
-    json_t     *req = req_new(op, pid);
-    json_t     *res;
+    int rc, e;
 
-    json_object_set_new(req, "fd", json_integer(rfd(pid, tf_field(rv, "fd"))));
-    res = call(req);
-    check_status(tf_field(res_v, "e"), res);
-    json_decref(res);
+    apply_cred(pid);
+    rc = tf_bool(rv, "dataOnly")
+        ? chimera_posix_fdatasync(rfd(pid, tf_field(rv, "fd")))
+        : chimera_posix_fsync(rfd(pid, tf_field(rv, "fd")));
+    e = ERRV(rc);
+    check_status(tf_field(res_v, "e"), e);
 } /* op_fsync */
-
 /* ---- dispatch + trace driving -------------------------------------------- */
 
 static int
@@ -1472,21 +1499,21 @@ dispatch(
     } else if (strcmp(tag, "RLseek") == 0) {
         op_lseek(pid, rv, res_v);
     } else if (strcmp(tag, "RRead") == 0) {
-        op_read_family(pid, rv, res_v, "read", 0);
+        op_read_family(pid, rv, res_v, 0, 0);
     } else if (strcmp(tag, "RPread") == 0) {
-        op_read_family(pid, rv, res_v, "pread", 1);
+        op_read_family(pid, rv, res_v, 1, 0);
     } else if (strcmp(tag, "RReadv") == 0) {
-        op_read_family(pid, rv, res_v, "readv", 0);
+        op_read_family(pid, rv, res_v, 0, 1);
     } else if (strcmp(tag, "RPreadv") == 0) {
-        op_read_family(pid, rv, res_v, "preadv", 1);
+        op_read_family(pid, rv, res_v, 1, 1);
     } else if (strcmp(tag, "RWrite") == 0) {
-        op_write_family(pid, rv, res_v, "write", 0);
+        op_write_family(pid, rv, res_v, 0, 0);
     } else if (strcmp(tag, "RPwrite") == 0) {
-        op_write_family(pid, rv, res_v, "pwrite", 1);
+        op_write_family(pid, rv, res_v, 1, 0);
     } else if (strcmp(tag, "RWritev") == 0) {
-        op_write_family(pid, rv, res_v, "writev", 0);
+        op_write_family(pid, rv, res_v, 0, 1);
     } else if (strcmp(tag, "RPwritev") == 0) {
-        op_write_family(pid, rv, res_v, "pwritev", 1);
+        op_write_family(pid, rv, res_v, 1, 1);
     } else if (strcmp(tag, "RTruncate") == 0) {
         op_truncate(pid, rv, res_v);
     } else if (strcmp(tag, "RFtruncate") == 0) {
@@ -1496,13 +1523,13 @@ dispatch(
     } else if (strcmp(tag, "RFstat") == 0) {
         op_fstat(pid, rv, res_v);
     } else if (strcmp(tag, "RStatfs") == 0) {
-        op_statfs_family(pid, rv, res_v, "statfs", 0);
+        op_statfs_family(pid, rv, res_v, 0);
     } else if (strcmp(tag, "RStatvfs") == 0) {
-        op_statfs_family(pid, rv, res_v, "statvfs", 0);
+        op_statfs_family(pid, rv, res_v, 1);
     } else if (strcmp(tag, "RFstatfs") == 0) {
-        op_statfs_family(pid, rv, res_v, "fstatfs", 1);
+        op_statfs_family(pid, rv, res_v, 2);
     } else if (strcmp(tag, "RFstatvfs") == 0) {
-        op_statfs_family(pid, rv, res_v, "fstatvfs", 1);
+        op_statfs_family(pid, rv, res_v, 3);
     } else if (strcmp(tag, "RMkdir") == 0) {
         op_mkdir(pid, rv, res_v);
     } else if (strcmp(tag, "RMknod") == 0) {
@@ -1524,13 +1551,13 @@ dispatch(
     } else if (strcmp(tag, "RReaddir") == 0) {
         op_readdir(pid, rv, res_v);
     } else if (strcmp(tag, "RRewinddir") == 0) {
-        op_dir_simple(pid, rv, res_v, "rewinddir");
+        op_dir_simple(pid, rv, res_v, 0);
     } else if (strcmp(tag, "RTelldir") == 0) {
-        op_dir_simple(pid, rv, res_v, "telldir");
+        op_dir_simple(pid, rv, res_v, 1);
     } else if (strcmp(tag, "RSeekdir") == 0) {
-        op_dir_simple(pid, rv, res_v, "seekdir");
+        op_dir_simple(pid, rv, res_v, 2);
     } else if (strcmp(tag, "RClosedir") == 0) {
-        op_dir_simple(pid, rv, res_v, "closedir");
+        op_dir_simple(pid, rv, res_v, 3);
     } else if (strcmp(tag, "RCopyRange") == 0) {
         op_copy_range(pid, rv, res_v);
     } else if (strcmp(tag, "RCloneRange") == 0) {
@@ -1604,6 +1631,23 @@ newfs(void)
 
 struct auditent { int64_t ino; char path[4096]; };
 
+/* Collect a directory's live entries into names[][]; returns the count. */
+static int
+audit_readdir(
+    CHIMERA_DIR *d,
+    char         names[][256],
+    int          cap)
+{
+    struct dirent *de;
+    int            n = 0;
+
+    chimera_posix_rewinddir(d);
+    while ((de = chimera_posix_readdir(d)) != NULL && n < cap) {
+        snprintf(names[n++], 256, "%s", de->d_name);
+    }
+    return n;
+} /* audit_readdir */
+
 /* Walk the final model tree (out-of-band as root pid 3) and verify identity,
  * attributes, directory contents, link targets and file bytes.  Returns the
  * number of objects audited. */
@@ -1615,7 +1659,8 @@ final_audit(json_t *fs)
     int              sp      = 0;
     int              audited = 0;
 
-    setcred(3, 0, 0, 0, 0);   /* gids ignored; root */
+    setcred(3, 0, 0, 0, 0);   /* root; driver_creds[3] */
+    apply_cred(3);
 
     stack[sp].ino     = 0;
     stack[sp].path[0] = '\0';
@@ -1626,54 +1671,39 @@ final_audit(json_t *fs)
         json_t         *node  = map_get_int(inodes, e.ino);
         json_t         *ents  = node ? json_object_get(node, "ents") : NULL;
         json_t         *pairs = ents ? json_object_get(ents, "#map") : NULL;
-        json_t         *req, *res, *names;
+        CHIMERA_DIR    *d;
         char            dirpath[4160];
-        int             sid;
-        size_t          i, j;
+        char            names[256][256];
+        int             nnames, k;
+        size_t          i;
 
         snprintf(dirpath, sizeof(dirpath), "%s%.4095s", MOUNT, e.path);
-
-        req = req_new("opendir", 3);
-        json_object_set_new(req, "path", json_string(dirpath));
-        res = call(req);
-        if (tf_field(res, "err") != 0) {
-            mism("audit: opendir %s: errno %lld", e.path[0] ? e.path : "/",
-                 (long long) tf_field(res, "err"));
-            json_decref(res);
+        d = chimera_posix_opendir(dirpath);
+        if (!d) {
+            mism("audit: opendir %s: errno %d", e.path[0] ? e.path : "/",
+                 errno);
             continue;
         }
-        sid = tf_field(res, "ret");
-        json_decref(res);
+        nnames = audit_readdir(d, names, 256);
+        chimera_posix_closedir(d);
 
-        req = req_new("readdir", 3);
-        json_object_set_new(req, "sid", json_integer(sid));
-        res   = call(req);
-        names = json_incref(json_object_get(res, "names"));
-        json_decref(res);
-
-        req = req_new("closedir", 3);
-        json_object_set_new(req, "sid", json_integer(sid));
-        json_decref(call(req));
-
-        /* every live entry (minus . / ..) must be in the model, and vice
-         * versa */
-        for (j = 0; names && j < json_array_size(names); j++) {
-            const char *gn = json_string_value(json_array_get(names, j));
-            int         ok = 0;
-            if (!gn || strcmp(gn, ".") == 0 || strcmp(gn, "..") == 0) {
+        /* every live entry (minus . / ..) must be modelled */
+        for (k = 0; k < nnames; k++) {
+            int found = 0;
+            if (strcmp(names[k], ".") == 0 || strcmp(names[k], "..") == 0) {
                 continue;
             }
             for (i = 0; pairs && i < json_array_size(pairs); i++) {
                 const char *wn = json_string_value(
                     json_array_get(json_array_get(pairs, i), 0));
-                if (wn && strcmp(wn, gn) == 0) {
-                    ok = 1;
+                if (wn && strcmp(wn, names[k]) == 0) {
+                    found = 1;
                     break;
                 }
             }
-            if (!ok) {
+            if (!found) {
                 mism("audit: dir %s: unexpected entry '%s'",
-                     e.path[0] ? e.path : "/", gn);
+                     e.path[0] ? e.path : "/", names[k]);
             }
         }
 
@@ -1682,17 +1712,16 @@ final_audit(json_t *fs)
             const char *name  = json_string_value(json_array_get(pair, 0));
             int64_t     cino  = tf_i64(json_array_get(pair, 1));
             json_t     *cnode = map_get_int(inodes, cino);
-            const char *ftag;
-            const char *want_ft, *got_ft;
+            const char *ftag, *want_ft, *got_ft;
             char        cpath[4160], full[4260];
-            int         present = 0;
+            struct stat st;
+            int         present = 0, rc;
 
             if (!name || !cnode) {
                 continue;
             }
-            for (j = 0; names && j < json_array_size(names); j++) {
-                const char *gn = json_string_value(json_array_get(names, j));
-                if (gn && strcmp(gn, name) == 0) {
+            for (k = 0; k < nnames; k++) {
+                if (strcmp(names[k], name) == 0) {
                     present = 1;
                     break;
                 }
@@ -1709,45 +1738,37 @@ final_audit(json_t *fs)
             want_ft = ftype_of(ftag);
             audited++;
 
-            req = req_new("stat", 3);
-            json_object_set_new(req, "path", json_string(full));
-            json_object_set_new(req, "follow", json_false());
-            res = call(req);
-            if (tf_field(res, "err") != 0) {
-                mism("audit: lstat %s: errno %lld", cpath,
-                     (long long) tf_field(res, "err"));
-                json_decref(res);
+            memset(&st, 0, sizeof(st));
+            rc = chimera_posix_lstat(full, &st);
+            if (rc != 0) {
+                mism("audit: lstat %s: errno %d", cpath, errno);
                 continue;
             }
-            got_ft = json_string_value(json_object_get(res, "ftype"));
-            if (!got_ft || strcmp(got_ft, want_ft) != 0) {
-                mism("audit: %s: ftype %s != %s", cpath,
-                     got_ft ? got_ft : "(nil)", want_ft);
-                json_decref(res);
+            got_ft = ftype_from_mode(st.st_mode);
+            if (strcmp(got_ft, want_ft) != 0) {
+                mism("audit: %s: ftype %s != %s", cpath, got_ft, want_ft);
                 continue;
             }
             if (strcmp(ftag, "FLnk") != 0 &&
-                tf_field(res, "mode") != tf_field(cnode, "mode")) {
-                mism("audit: %s: mode %#llo != %#llo", cpath,
-                     (long long) tf_field(res, "mode"),
-                     (long long) tf_field(cnode, "mode"));
+                (int64_t) (st.st_mode & 07777) != tf_field(cnode, "mode")) {
+                mism("audit: %s: mode %#o != %#llo", cpath,
+                     st.st_mode & 07777, (long long) tf_field(cnode, "mode"));
             }
-            if (tf_field(res, "uid") != tf_field(cnode, "uid") ||
-                tf_field(res, "gid") != tf_field(cnode, "gid")) {
-                mism("audit: %s: owner %lld:%lld != %lld:%lld", cpath,
-                     (long long) tf_field(res, "uid"),
-                     (long long) tf_field(res, "gid"),
+            if ((int64_t) st.st_uid != tf_field(cnode, "uid") ||
+                (int64_t) st.st_gid != tf_field(cnode, "gid")) {
+                mism("audit: %s: owner %u:%u != %lld:%lld", cpath,
+                     st.st_uid, st.st_gid,
                      (long long) tf_field(cnode, "uid"),
                      (long long) tf_field(cnode, "gid"));
             }
-            if (tf_field(res, "nlink") != tf_field(cnode, "nlink")) {
-                mism("audit: %s: nlink %lld != %lld", cpath,
-                     (long long) tf_field(res, "nlink"),
+            if ((int64_t) st.st_nlink != tf_field(cnode, "nlink")) {
+                mism("audit: %s: nlink %llu != %lld", cpath,
+                     (unsigned long long) st.st_nlink,
                      (long long) tf_field(cnode, "nlink"));
             }
             if (cino >= 0 && cino < R_MAXINO && g_inomap[cino].present) {
-                if (g_inomap[cino].dev != tf_field(res, "dev") ||
-                    g_inomap[cino].ino != tf_field(res, "ino")) {
+                if (g_inomap[cino].dev != (long long) st.st_dev ||
+                    g_inomap[cino].ino != (long long) st.st_ino) {
                     mism("audit: %s: identity mismatch", cpath);
                 }
             }
@@ -1760,83 +1781,49 @@ final_audit(json_t *fs)
                     sp++;
                 }
             } else if (strcmp(ftag, "FLnk") == 0) {
-                json_t *rl = req_new("readlink", 3);
-                char    want[8192];
-                json_t *rr;
-                json_object_set_new(rl, "path", json_string(full));
-                rr = call(rl);
+                char    tbuf[8192], want[8192];
+                ssize_t tn = chimera_posix_readlink(full, tbuf,
+                                                    sizeof(tbuf) - 1);
+                tbuf[tn >= 0 ? tn : 0] = '\0';
                 real_target(json_object_get(cnode, "target"), want,
                             sizeof(want));
-                {
-                    const char *got = json_string_value(
-                        json_object_get(rr, "target"));
-                    if (tf_field(rr, "err") != 0 || !got ||
-                        strcmp(got, want) != 0) {
-                        mism("audit: readlink %s: '%s' != '%s'", cpath,
-                             got ? got : "(nil)", want);
-                    }
+                if (tn < 0 || strcmp(tbuf, want) != 0) {
+                    mism("audit: readlink %s: '%s' != '%s'", cpath, tbuf, want);
                 }
-                json_decref(rr);
             } else if (strcmp(ftag, "FReg") == 0) {
                 int64_t want_size = tf_field(cnode, "size");
-                if (tf_field(res, "size") != want_size) {
+                if ((int64_t) st.st_size != want_size) {
                     mism("audit: %s: size %lld != %lld", cpath,
-                         (long long) tf_field(res, "size"),
-                         (long long) want_size);
+                         (long long) st.st_size, (long long) want_size);
                 } else if (want_size > 0) {
-                    json_t *of = req_new("open", 3);
-                    json_t *ofr;
-                    json_object_set_new(of, "path", json_string(full));
-                    json_object_set_new(of, "flags", json_integer(O_RDONLY));
-                    json_object_set_new(of, "mode", json_integer(0));
-                    ofr = call(of);
-                    if (tf_field(ofr, "err") != 0) {
-                        mism("audit: open %s: errno %lld", cpath,
-                             (long long) tf_field(ofr, "err"));
+                    int rfdn = chimera_posix_open(full, O_RDONLY, 0);
+                    if (rfdn < 0) {
+                        mism("audit: open %s: errno %d", cpath, errno);
                     } else {
-                        int     rfdn = tf_field(ofr, "ret");
                         int64_t off;
                         for (off = 0; off < want_size; off += 65536) {
-                            int64_t        n = want_size - off < 65536 ?
-                                want_size - off : 65536;
-                            json_t        *pr = req_new("pread", 3);
-                            json_t        *prr;
+                            int64_t        n = want_size - off < 65536
+                                ? want_size - off : 65536;
                             unsigned char *got = malloc(n);
                             unsigned char *exp = malloc(n);
-                            const char    *b64;
-                            int            gl;
-                            json_object_set_new(pr, "fd", json_integer(rfdn));
-                            json_object_set_new(pr, "off", json_integer(off));
-                            json_object_set_new(pr, "len", json_integer(n));
-                            prr = call(pr);
-                            b64 = json_string_value(
-                                json_object_get(prr, "data"));
-                            gl = b64_decode(b64 ? b64 : "", got, n);
+                            ssize_t        gn  = chimera_posix_pread(rfdn, got,
+                                                                     n, off);
                             shadow_read(cino, off, (size_t) n, exp);
-                            if (gl != n || memcmp(got, exp, n) != 0) {
+                            if (gn != n || memcmp(got, exp, n) != 0) {
                                 mism("audit: %s: content mismatch at +%lld",
                                      cpath, (long long) off);
                                 free(got);
                                 free(exp);
-                                json_decref(prr);
                                 break;
                             }
                             free(got);
                             free(exp);
-                            json_decref(prr);
                         }
-                        {
-                            json_t *cl = req_new("close", 3);
-                            json_object_set_new(cl, "fd", json_integer(rfdn));
-                            json_decref(call(cl));
-                        }
+                        chimera_posix_close(rfdn);
                     }
-                    json_decref(ofr);
                 }
             }
-            json_decref(res);
         }
-        json_decref(names);
     }
     free(stack);
     return audited;
