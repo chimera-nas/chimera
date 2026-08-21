@@ -202,20 +202,30 @@ foreach(backend ${_posix_mbt_backends})
     foreach(trace ${_traces})
         list(APPEND _args --trace ${trace})
     endforeach()
-    # NFS-loopback replays add server spin-up and RPC round trips per trace.
     if(backend MATCHES "^nfs")
-        set(ttimeout 600)
+        # NFS-loopback replays keep the filesystem server-side, which the
+        # pure-C replayer's newfs reset does not yet handle: drive them through
+        # the Python replayer + posix_quint_driver (extra server spin-up and
+        # RPC round trips, so a longer timeout).
+        add_test(NAME chimera/posix/mbt/batch_${backend}
+            COMMAND ${Python3_EXECUTABLE} ${POSIX_MBT_REPLAY}
+                    --backend ${backend}
+                    --driver $<TARGET_FILE:posix_quint_driver>
+                    ${_args})
+        set_tests_properties(chimera/posix/mbt/batch_${backend} PROPERTIES
+            ENVIRONMENT "PYTHONUNBUFFERED=1"
+            TIMEOUT 600)
     else()
-        set(ttimeout 300)
+        # Direct backends (memfs/diskfs/cairn): the pure-C replayer runs the
+        # model oracle in-process, no Python and no driver subprocess.
+        add_test(NAME chimera/posix/mbt/batch_${backend}
+            COMMAND $<TARGET_FILE:posix_mbt_replay>
+                    --backend ${backend}
+                    ${_args})
+        set_tests_properties(chimera/posix/mbt/batch_${backend} PROPERTIES
+            TIMEOUT 300)
     endif()
-    add_test(NAME chimera/posix/mbt/batch_${backend}
-        COMMAND ${Python3_EXECUTABLE} ${POSIX_MBT_REPLAY}
-                --backend ${backend}
-                --driver $<TARGET_FILE:posix_quint_driver>
-                ${_args})
     set_tests_properties(chimera/posix/mbt/batch_${backend} PROPERTIES
         LABELS "posix_mbt;${backend}"
-        ENVIRONMENT "PYTHONUNBUFFERED=1"
-        SKIP_RETURN_CODE 77
-        TIMEOUT ${ttimeout})
+        SKIP_RETURN_CODE 77)
 endforeach()

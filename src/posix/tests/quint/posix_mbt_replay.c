@@ -165,6 +165,18 @@ static int           g_nmismatch;           /* per-trace mismatch tally       */
 static const char   *g_trace;               /* current trace path (messages)  */
 static json_t       *g_cur_fs;              /* model post-state fs (this step) */
 static json_t       *g_cur_ps;              /* model protocol state (ps)       */
+static const char   *g_cur_tag;             /* current op tag (for reconcile)  */
+static json_t       *g_cur_rv;              /* current op request value        */
+
+/* Known-deviation tallies for the per-trace summary (PD<id> -> count). */
+struct devhit { char id[12]; int count; };
+static struct devhit g_devhits[64];
+static int           g_ndevhits;
+
+/* Paths chimera created where the model predicted EMFILE (PD24 residue);
+ * excluded from the final audit. */
+static char          g_exempt[64][256];
+static int           g_nexempt;
 
 static void
 state_reset(void)
@@ -187,7 +199,50 @@ state_reset(void)
         g_shadow[i].len = g_shadow[i].cap = 0;
     }
     g_nmismatch = 0;
+    g_ndevhits  = 0;
+    g_nexempt   = 0;
 } /* state_reset */
+
+/* Record a reconciled known deviation for the per-trace summary. */
+static void
+record_dev(const char *id)
+{
+    int i;
+
+    for (i = 0; i < g_ndevhits; i++) {
+        if (strcmp(g_devhits[i].id, id) == 0) {
+            g_devhits[i].count++;
+            return;
+        }
+    }
+    if (g_ndevhits < (int) (sizeof(g_devhits) / sizeof(g_devhits[0]))) {
+        snprintf(g_devhits[g_ndevhits].id, sizeof(g_devhits[0].id), "%s", id);
+        g_devhits[g_ndevhits].count = 1;
+        g_ndevhits++;
+    }
+} /* record_dev */
+
+static void
+exempt_add(const char *path)
+{
+    if (g_nexempt < (int) (sizeof(g_exempt) / sizeof(g_exempt[0]))) {
+        snprintf(g_exempt[g_nexempt++], sizeof(g_exempt[0]), "%.255s",
+                 path);
+    }
+} /* exempt_add */
+
+static int
+is_exempt(const char *path)
+{
+    int i;
+
+    for (i = 0; i < g_nexempt; i++) {
+        if (strcmp(g_exempt[i], path) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+} /* is_exempt */
 
 static int
 rfd(
@@ -366,6 +421,22 @@ model_ino_of_fd(
     return tf_field(node, "ino");
 } /* model_ino_of_fd */
 
+/* True when (pid, model fd) maps to a directory inode in the post-state fs. */
+static int
+fd_is_model_dir(
+    int pid,
+    int mfd)
+{
+    int64_t ino = model_ino_of_fd(pid, mfd);
+    json_t *node;
+
+    if (ino < 0 || !g_cur_fs) {
+        return 0;
+    }
+    node = map_get_int(json_object_get(g_cur_fs, "inodes"), ino);
+    return node && strcmp(tf_tag(json_object_get(node, "ftype")), "FDir") == 0;
+} /* fd_is_model_dir */
+
 /* Resolve a model path (component list) to an ino in the post-state fs. */
 static int64_t
 path_ino(
@@ -507,21 +578,382 @@ apply_cred(int pid)
     (void) chimera_posix_umask(driver_umasks[pid]);
 } /* apply_cred */
 
-/* The model reports errno 0 on success; a failed call carries the live errno.
- * ERRV must be read into a local immediately after the chimera call, before
- * anything else can clobber errno. */
-#define ERRV(rc) ((rc) < 0 ? errno : 0)
+/* The model and the deviation registry encode Linux errno numbers; the host
+ * libc's errno is identical on Linux but diverges on macOS/BSD for the higher
+ * codes (and swaps EAGAIN/EDEADLK).  Translate host -> Linux by name -- the
+ * case labels are host macros, so this is an identity map on Linux and the
+ * correct remap on Darwin.  Mirrors posix_replay.host_errno_to_linux. */
+static int
+host_to_linux(int e)
+{
+    switch (e) {
+        case 0: return 0;
+        case EPERM: return 1;
+        case ENOENT: return 2;
+        case EIO: return 5;
+        case ENXIO: return 6;
+        case EBADF: return 9;
+        case EAGAIN: return 11;
+        case EACCES: return 13;
+        case EBUSY: return 16;
+        case EEXIST: return 17;
+        case EXDEV: return 18;
+        case ENOTDIR: return 20;
+        case EISDIR: return 21;
+        case EINVAL: return 22;
+        case EMFILE: return 24;
+        case EFBIG: return 27;
+        case ENOSPC: return 28;
+        case ESPIPE: return 29;
+        case EROFS: return 30;
+        case EMLINK: return 31;
+        case EDEADLK: return 35;
+        case ENAMETOOLONG: return 36;
+        case ENOSYS: return 38;
+        case ENOTEMPTY: return 39;
+        case ELOOP: return 40;
+        case EOPNOTSUPP: return 95;
+#if defined(ENOTSUP) && ENOTSUP != EOPNOTSUPP
+        case ENOTSUP: return 95;   /* distinct from EOPNOTSUPP on Darwin */
+#endif /* ENOTSUP */
+        default: return e;
+    } /* switch */
+} /* host_to_linux */
+
+/* The model reports errno 0 on success; a failed call carries the live errno,
+ * translated into the model's Linux errno space.  ERRV must be read
+ * immediately after the chimera call, before anything else clobbers errno. */
+#define ERRV(rc) ((rc) < 0 ? host_to_linux(errno) : 0)
+
+/* ---- known-deviation registry (mirror of posix_deviations.py) ------------ */
+
+#define DEV_ANY (-1)
+enum devctx { CTX_ALWAYS, CTX_DFD, CTX_SLASH, CTX_NLONG, CTX_ACCW };
+
+struct deviation {
+    const char *id;
+    const char *ops[12];     /* NULL-terminated; empty first slot = any op    */
+    int         expected;    /* DEV_ANY = wildcard                            */
+    int         actual;
+    enum devctx ctx;
+};
+
+/* Reconcilable entries only, in posix_deviations.py order (reconcile returns
+ * the first match, so order is significant). */
+static const struct deviation KNOWN_DEVIATIONS[] = {
+    { "PD1",
+        {
+            "RFcntlLock",
+            "RLockf",
+            0
+        },
+        DEV_ANY,
+        95,
+        CTX_ALWAYS                                     },
+    { "PD2",
+        {
+            "RFcntlDupfd",
+            "RFcntlGetfl",
+            0
+        },
+        DEV_ANY,
+        22,
+        CTX_ALWAYS                                     },
+    { "PD2b",
+        {
+            "RFcntlSetfl",
+            0
+        },
+        DEV_ANY,
+        22,
+        CTX_ALWAYS    },
+    { "PD3",
+        {
+            "RStat",
+            0
+        },
+        DEV_ANY,
+        38,
+        CTX_DFD },
+    { "PD7r",
+        {
+            "RRead",
+            "RPread",
+            0
+        },
+        9,
+        0,
+        CTX_ALWAYS                                             },
+    { "PD11a",
+        {
+            "RRead",
+            "RPread",
+            0
+        },
+        0,
+        13,      CTX_ALWAYS                                                    },
+    { "PD11b",
+        {
+            "RRead",
+            "RPread",
+            0
+        },
+        9,      13,        CTX_ALWAYS                                                          },
+    { "PD8",
+        {
+            "RRead",
+            "RPread",
+            0
+        },
+        21, 0,  CTX_ALWAYS                                                                                     },
+    { "PD8w",
+        {
+            "RWrite",
+            "RPwrite",
+            0
+        },
+        9,  21, CTX_ALWAYS                                                                                     },
+    { "PD13",
+        {
+            "ROpen",
+            0
+        },
+        6,
+        0,
+        CTX_ALWAYS },
+    { "PD14",
+        {
+            "ROpen",
+            0
+        },
+        21
+        ,
+        0,
+        CTX_ALWAYS },
+    { "PD15",
+        {
+            "RStat",
+            "RMkdir",
+            "ROpen",
+            "RUnlink",
+            "RRmdir",
+            "RTruncate",
+            "RChmod",
+            "RChown",
+            "RUtimens",
+            "RAccess",
+            "RReadlink",
+            0
+        },
+        20
+        ,
+        DEV_ANY,
+        CTX_SLASH }
+    ,
+    { "PD15b",
+        {
+            "RMkdir",
+            0
+        },
+        40
+        ,
+        17,
+        CTX_SLASH },
+    { "PD15c",
+        {
+            "RMkdir",     0
+        },
+        0,
+        17,
+        CTX_SLASH },
+    { "PD17h",
+        {
+            "RRmdir",     0
+        },
+        20
+        ,
+        13,
+        CTX_ALWAYS },
+    { "PD17i",
+        {
+            "RRmdir",      0
+        },
+        39
+        ,
+        13,
+        CTX_ALWAYS },
+    { "PD17a",
+        {
+            "RUnlink",     0
+        },
+        21
+        ,
+        13,
+        CTX_ALWAYS },
+    { "PD17b",
+        {
+            "RMkdir",
+            "RSymlink",
+            "RMknod",
+            "RLink",
+            0
+        },
+        17,     13,     CTX_ALWAYS },
+    { "PD17c",
+        {
+            "RLink",       0
+        },
+        1,
+        13,
+        CTX_ALWAYS },
+    { "PD18",
+        { "RAccess", 0                                                                               },
+        13
+        ,
+        0,
+        CTX_ALWAYS },
+    { "PD17d",
+        { "ROpen",
+        "RMkdir",
+        "RMknod",
+        "RSymlink",
+        0    },
+        13
+        ,        17,       CTX_ALWAYS },
+    { "PD17e",  { "RLink",       0                                                               },
+        1,
+        17,
+        CTX_ALWAYS },
+    { "PD17f",  { "RLink",       0                                                               },
+        2,
+        17,
+        CTX_ALWAYS },
+    { "PD24",   { "ROpen",       "RDup",
+                  "RFcntlDupfd",
+                  "ROpendir", 0 }, 24, 0
+        ,
+        CTX_ALWAYS }
+    ,
+    { "PD20",   { "ROpen",       0                                                               },
+        13
+        ,
+        0,
+        CTX_ALWAYS },
+    { "PD22",   { "RLseek",      0                                                               },
+        6,
+        22,
+        CTX_ALWAYS },
+    { "PD19",   { "RCloneRange", 0                                                               },
+        22
+        ,
+        0,
+        CTX_ALWAYS },
+    { "PD25",   { "RMkdir",
+                  "RMknod",
+                  "RSymlink",
+                  "RChmod", "RChown",
+                  "RUnlink", "RRmdir",
+                  "RTruncate",
+                  "RStat",
+                  0 }
+        ,
+        13, 36, CTX_NLONG },
+    { "PD26",   { "ROpen",       0                                                               },
+        13
+        ,
+        21,
+        CTX_ACCW },
+};
+
+static int
+dev_ctx_ok(
+    enum devctx ctx,
+    json_t     *rv)
+{
+    json_t *pth;
+    size_t  i;
+
+    switch (ctx) {
+        case CTX_ALWAYS:
+            return 1;
+        case CTX_DFD:
+            return tf_field(rv, "dfd") != -1;
+        case CTX_SLASH:
+            return tf_bool(json_object_get(rv, "pth"), "slash");
+        case CTX_NLONG:
+            pth = json_object_get(json_object_get(rv, "pth"), "comps");
+            for (i = 0; pth && i < json_array_size(pth); i++) {
+                const char *c = json_string_value(json_array_get(pth, i));
+                if (c && strcmp(c, "@nlong") == 0) {
+                    return 1;
+                }
+            }
+            return 0;
+        case CTX_ACCW: {
+            const char *a = tf_tag(json_object_get(
+                                       json_object_get(rv, "fl"), "acc"));
+            return a && (strcmp(a, "AccW") == 0 || strcmp(a, "AccRW") == 0);
+        }
+    } /* switch */
+    return 0;
+} /* dev_ctx_ok */
+
+/* Return the id of the first reconcilable deviation matching this divergence,
+ * or NULL.  Called only when actual != expected. */
+static const char *
+reconcile(
+    const char *tag,
+    json_t     *rv,
+    int         expected,
+    int         actual)
+{
+    size_t i, j;
+
+    for (i = 0; i < sizeof(KNOWN_DEVIATIONS) / sizeof(KNOWN_DEVIATIONS[0]);
+         i++) {
+        const struct deviation *d     = &KNOWN_DEVIATIONS[i];
+        int                     op_ok = (d->ops[0] == NULL);
+
+        for (j = 0; d->ops[j]; j++) {
+            if (strcmp(tag, d->ops[j]) == 0) {
+                op_ok = 1;
+                break;
+            }
+        }
+        if (!op_ok) {
+            continue;
+        }
+        if (d->expected != DEV_ANY && d->expected != expected) {
+            continue;
+        }
+        if (d->actual != DEV_ANY && d->actual != actual) {
+            continue;
+        }
+        if (dev_ctx_ok(d->ctx, rv)) {
+            return d->id;
+        }
+    }
+    return NULL;
+} /* reconcile */
 
 /* ---- oracle -------------------------------------------------------------- */
 
-/* True if the errno matches (proceed with success-path checks). */
+/* True if the errno matches (proceed with success-path checks).  A mismatch
+ * that reconciles to a known deviation is recorded and treated as non-fatal. */
 static int
 check_status(
     int64_t expected,
     int     actual)
 {
+    const char *dev;
+
     if (actual == expected) {
         return 1;
+    }
+    dev = reconcile(g_cur_tag, g_cur_rv, (int) expected, actual);
+    if (dev) {
+        record_dev(dev);
+        return 0;
     }
     mism("errno: expected %lld, got %d", (long long) expected, actual);
     return 0;
@@ -804,6 +1236,27 @@ op_open(
                 shadow_resize(ino, 0);
             }
         }
+    } else if (tf_field(res_v, "e") == 24 && e == 0 && rc >= 0) {
+        /* PD24 (EMFILE): the model's 16-slot table was full but chimera's
+         * larger table let the open succeed.  Close the stray descriptor, and
+         * when O_CREAT minted a node the model never created, exempt it from
+         * the final audit. */
+        chimera_posix_close(rc);
+        if (tf_bool(fl, "creat")) {
+            json_t *comps = json_object_get(json_object_get(rv, "pth"),
+                                            "comps");
+            char    mp[4096];
+            size_t  len = 0, k;
+            for (k = 0; comps && k < json_array_size(comps); k++) {
+                const char *c = json_string_value(json_array_get(comps, k));
+                len += (size_t) snprintf(mp + len, sizeof(mp) - len, "/%s",
+                                         c ? c : "");
+            }
+            if (len == 0) {
+                snprintf(mp, sizeof(mp), "/");
+            }
+            exempt_add(mp);
+        }
     }
 } /* op_open */
 
@@ -855,12 +1308,36 @@ op_lseek(
     } else if (strcmp(wh, "WHole") == 0) {
         whence = SEEK_HOLE;
     }
+    int64_t exp_e        = tf_field(res_v, "e");
+    int     is_size_seek = strcmp(wh, "WEnd") == 0 ||
+        strcmp(wh, "WCur") == 0 ||
+        strcmp(wh, "WData") == 0 ||
+        strcmp(wh, "WHole") == 0;
+    int     fail = 0;
+
     apply_cred(pid);
     rc = chimera_posix_lseek(rfd(pid, tf_field(rv, "fd")),
                              (off_t) tf_field(rv, "off"), whence);
     e = ERRV(rc);
-    if (check_status(tf_field(res_v, "e"), e) && tf_field(res_v, "e") == 0) {
-        if ((int64_t) rc != tf_field(res_v, "off")) {
+    if (e != exp_e) {
+        const char *dev = reconcile("RLseek", rv, (int) exp_e, e);
+        if (dev) {              /* e.g. PD22 (ENXIO vs EINVAL) */
+            record_dev(dev);
+            return;
+        }
+        fail = 1;               /* unreconciled errno divergence */
+    } else if (exp_e == 0 && (int64_t) rc != tf_field(res_v, "off")) {
+        fail = 1;               /* offset divergence on success */
+    }
+    if (fail) {
+        /* PD25: a directory's st_size is unspecified; the model abstracts it
+         * as 0 while memfs reports a block, so size-relative seeks (and the
+         * ENXIO boundary at that size) legitimately disagree on dir fds. */
+        if (is_size_seek && fd_is_model_dir(pid, tf_field(rv, "fd"))) {
+            record_dev("PD25");
+        } else if (e != exp_e) {
+            mism("errno: expected %lld, got %d", (long long) exp_e, e);
+        } else {
             mism("lseek: expected offset %lld, got %lld",
                  (long long) tf_field(res_v, "off"), (long long) rc);
         }
@@ -1252,7 +1729,7 @@ op_opendir(
     apply_cred(pid);
     real_path(json_object_get(rv, "pth"), path, sizeof(path));
     d = chimera_posix_opendir(path);
-    e = d ? 0 : errno;
+    e = d ? 0 : host_to_linux(errno);
     if (check_status(tf_field(res_v, "e"), e) && tf_field(res_v, "e") == 0) {
         int64_t msid = tf_field(res_v, "sid");
         if (msid >= 0 && msid < R_MAXSID) {
@@ -1352,13 +1829,13 @@ op_dir_simple(
             chimera_posix_rewinddir(d);
             break;
         case 1:
-            e = chimera_posix_telldir(d) < 0 ? errno : 0;
+            e = chimera_posix_telldir(d) < 0 ? host_to_linux(errno) : 0;
             break;
         case 2:
             chimera_posix_seekdir(d, (long) tf_field(rv, "loc"));
             break;
         case 3:
-            e = chimera_posix_closedir(d) < 0 ? errno : 0;
+            e = chimera_posix_closedir(d) < 0 ? host_to_linux(errno) : 0;
             break;
     } /* switch */
     if (check_status(tf_field(res_v, "e"), e) && which == 3 &&
@@ -1481,6 +1958,331 @@ op_fsync(
     e = ERRV(rc);
     check_status(tf_field(res_v, "e"), e);
 } /* op_fsync */
+
+/* Build a struct timespec from the model's timestamp record (TsNow / TsOmit /
+ * explicit XTIME instant). */
+static void
+ts_build(
+    json_t          *ts,
+    struct timespec *out)
+{
+    const char *tag = tf_tag(ts);
+
+    if (strcmp(tag, "TsOmit") == 0) {
+        out->tv_sec  = 0;
+        out->tv_nsec = UTIME_OMIT;
+    } else if (strcmp(tag, "TsNow") == 0) {
+        out->tv_sec  = 0;
+        out->tv_nsec = UTIME_NOW;
+    } else {
+        long long xs, xn;
+        xtime(tf_i64(tf_val(ts)), &xs, &xn);
+        out->tv_sec  = (time_t) xs;
+        out->tv_nsec = xn;
+    }
+} /* ts_build */
+
+static void
+op_chmod(
+    int     pid,
+    json_t *rv,
+    json_t *res_v)
+{
+    char path[8192];
+    int  rc, e;
+
+    apply_cred(pid);
+    real_path(json_object_get(rv, "pth"), path, sizeof(path));
+    rc = chimera_posix_chmod(path, (mode_t) tf_field(rv, "mode"));
+    e  = ERRV(rc);
+    check_status(tf_field(res_v, "e"), e);
+} /* op_chmod */
+
+static void
+op_fchmod(
+    int     pid,
+    json_t *rv,
+    json_t *res_v)
+{
+    int rc, e;
+
+    apply_cred(pid);
+    rc = chimera_posix_fchmod(rfd(pid, tf_field(rv, "fd")),
+                              (mode_t) tf_field(rv, "mode"));
+    e = ERRV(rc);
+    check_status(tf_field(res_v, "e"), e);
+} /* op_fchmod */
+
+static void
+op_chown(
+    int     pid,
+    json_t *rv,
+    json_t *res_v)
+{
+    char  path[8192];
+    uid_t u = (uid_t) tf_field(rv, "u");
+    gid_t g = (gid_t) tf_field(rv, "g");
+    int   rc, e;
+
+    apply_cred(pid);
+    real_path(json_object_get(rv, "pth"), path, sizeof(path));
+    rc = tf_bool(rv, "follow") ? chimera_posix_chown(path, u, g)
+                               : chimera_posix_lchown(path, u, g);
+    e = ERRV(rc);
+    check_status(tf_field(res_v, "e"), e);
+} /* op_chown */
+
+static void
+op_fchown(
+    int     pid,
+    json_t *rv,
+    json_t *res_v)
+{
+    int rc, e;
+
+    apply_cred(pid);
+    rc = chimera_posix_fchown(rfd(pid, tf_field(rv, "fd")),
+                              (uid_t) tf_field(rv, "u"),
+                              (gid_t) tf_field(rv, "g"));
+    e = ERRV(rc);
+    check_status(tf_field(res_v, "e"), e);
+} /* op_fchown */
+
+static void
+op_utimens(
+    int     pid,
+    json_t *rv,
+    json_t *res_v)
+{
+    struct timespec times[2];
+    int64_t         dfd = tf_field(rv, "dfd");
+    char            path[8192];
+    int             rc, e;
+
+    ts_build(json_object_get(rv, "ta"), &times[0]);
+    ts_build(json_object_get(rv, "tm"), &times[1]);
+    apply_cred(pid);
+    real_path(json_object_get(rv, "pth"), path, sizeof(path));
+    rc = chimera_posix_utimensat(dfd == -1 ? AT_FDCWD : rfd(pid, dfd),
+                                 path, times, 0);
+    e = ERRV(rc);
+    check_status(tf_field(res_v, "e"), e);
+} /* op_utimens */
+
+static void
+op_futimens(
+    int     pid,
+    json_t *rv,
+    json_t *res_v)
+{
+    struct timespec times[2];
+    int             rc, e;
+
+    ts_build(json_object_get(rv, "ta"), &times[0]);
+    ts_build(json_object_get(rv, "tm"), &times[1]);
+    apply_cred(pid);
+    rc = chimera_posix_futimens(rfd(pid, tf_field(rv, "fd")), times);
+    e  = ERRV(rc);
+    check_status(tf_field(res_v, "e"), e);
+} /* op_futimens */
+
+static void
+op_access(
+    int     pid,
+    json_t *rv,
+    json_t *res_v)
+{
+    char path[8192];
+    int  mode = 0, rc, e;
+
+    if (tf_bool(rv, "r")) {
+        mode |= R_OK;
+    }
+    if (tf_bool(rv, "w")) {
+        mode |= W_OK;
+    }
+    if (tf_bool(rv, "x")) {
+        mode |= X_OK;
+    }
+    apply_cred(pid);
+    real_path(json_object_get(rv, "pth"), path, sizeof(path));
+    rc = chimera_posix_faccessat(AT_FDCWD, path, mode,
+                                 tf_bool(rv, "eff") ? AT_EACCESS : 0);
+    e = ERRV(rc);
+    check_status(tf_field(res_v, "e"), e);
+} /* op_access */
+
+static void
+op_umask(
+    int     pid,
+    json_t *rv,
+    json_t *res_v)
+{
+    int old;
+
+    if (pid < 0 || pid >= MAX_PIDS) {
+        pid = 0;
+    }
+    old                = (int) driver_umasks[pid];
+    driver_umasks[pid] = (mode_t) tf_field(rv, "mask");
+    if (old != tf_field(res_v, "old")) {
+        mism("umask bookkeeping: expected old %lld, had %d (harness bug)",
+             (long long) tf_field(res_v, "old"), old);
+    }
+} /* op_umask */
+
+static void
+op_dup2(
+    int     pid,
+    json_t *rv,
+    json_t *res_v)
+{
+    int64_t fd     = tf_field(rv, "fd");
+    int64_t nfd    = tf_field(rv, "nfd");
+    int     target = rfd(pid, nfd);
+    int     rc, e;
+
+    apply_cred(pid);
+    if (fd == nfd || target != BADFD) {
+        rc = chimera_posix_dup2(rfd(pid, fd), target);
+    } else {
+        /* The model's nfd names a free slot; chimera fd numbers are its own,
+         * so a plain dup() is observationally identical here. */
+        rc = chimera_posix_dup(rfd(pid, fd));
+    }
+    e = ERRV(rc);
+    if (check_status(tf_field(res_v, "e"), e) && tf_field(res_v, "e") == 0) {
+        set_fd(pid, nfd, rc);
+    }
+} /* op_dup2 */
+
+static void
+op_fcntl_dupfd(
+    int     pid,
+    json_t *rv,
+    json_t *res_v)
+{
+    int rc, e, ok;
+
+    apply_cred(pid);
+    rc = chimera_posix_fcntl(rfd(pid, tf_field(rv, "fd")), F_DUPFD,
+                             (int) tf_field(rv, "atLeast"));
+    e  = ERRV(rc);
+    ok = check_status(tf_field(res_v, "e"), e);
+    if (tf_field(res_v, "e") == 0) {
+        if (ok) {
+            set_fd(pid, tf_field(res_v, "fd"), rc);
+        } else if (e == 22) {
+            /* PD2: F_DUPFD is unimplemented (EINVAL).  Emulate with dup() so
+             * the model's new descriptor exists on the real side and replay
+             * stays in sync. */
+            int r2 = chimera_posix_dup(rfd(pid, tf_field(rv, "fd")));
+            if (r2 >= 0) {
+                set_fd(pid, tf_field(res_v, "fd"), r2);
+            }
+        }
+    }
+} /* op_fcntl_dupfd */
+
+static void
+op_fcntl_getfl(
+    int     pid,
+    json_t *rv,
+    json_t *res_v)
+{
+    int rc, e;
+
+    apply_cred(pid);
+    rc = chimera_posix_fcntl(rfd(pid, tf_field(rv, "fd")), F_GETFL);
+    e  = ERRV(rc);
+    if (check_status(tf_field(res_v, "e"), e) && tf_field(res_v, "e") == 0) {
+        const char *acc      = tf_tag(json_object_get(res_v, "acc"));
+        int         want_acc = strcmp(acc, "AccW") == 0 ? O_WRONLY
+                             : strcmp(acc, "AccRW") == 0 ? O_RDWR : O_RDONLY;
+        if ((rc & O_ACCMODE) != want_acc) {
+            mism("F_GETFL access mode: expected %d, got %d", want_acc,
+                 rc & O_ACCMODE);
+        }
+        if (!!(rc & O_APPEND) != tf_bool(res_v, "appendF")) {
+            mism("F_GETFL O_APPEND: expected %d, flags %#x",
+                 tf_bool(res_v, "appendF"), rc);
+        }
+    }
+} /* op_fcntl_getfl */
+
+static void
+op_fcntl_setfl(
+    int     pid,
+    json_t *rv,
+    json_t *res_v)
+{
+    int rc, e;
+
+    apply_cred(pid);
+    rc = chimera_posix_fcntl(rfd(pid, tf_field(rv, "fd")), F_SETFL,
+                             tf_bool(rv, "appendF") ? O_APPEND : 0);
+    e = ERRV(rc);
+    check_status(tf_field(res_v, "e"), e);
+} /* op_fcntl_setfl */
+
+static void
+op_fcntl_lock(
+    int     pid,
+    json_t *rv,
+    json_t *res_v)
+{
+    const char  *cmdt = tf_tag(json_object_get(rv, "cmd"));
+    const char  *lkt  = tf_tag(json_object_get(rv, "lk"));
+    struct flock fl;
+    int          cmd = F_SETLK, rc, e;
+
+    memset(&fl, 0, sizeof(fl));
+    if (strcmp(cmdt, "CSetlkw") == 0) {
+        cmd = F_SETLKW;
+    } else if (strcmp(cmdt, "CGetlk") == 0) {
+        cmd = F_GETLK;
+    }
+    fl.l_type = strcmp(lkt, "LkWr") == 0 ? F_WRLCK
+              : strcmp(lkt, "LkUn") == 0 ? F_UNLCK : F_RDLCK;
+    fl.l_whence = SEEK_SET;
+    fl.l_start  = (off_t) tf_field(rv, "lo");
+    fl.l_len    = (off_t) (tf_field(rv, "hi") - tf_field(rv, "lo"));
+
+    apply_cred(pid);
+    rc = chimera_posix_fcntl(rfd(pid, tf_field(rv, "fd")), cmd, &fl);
+    e  = ERRV(rc);
+    if (check_status(tf_field(res_v, "e"), e) && tf_field(res_v, "e") == 0 &&
+        cmd == F_GETLK) {
+        int conflict = fl.l_type != F_UNLCK;
+        if (conflict != tf_bool(res_v, "conflict")) {
+            mism("F_GETLK: expected conflict=%d, got l_type %d",
+                 tf_bool(res_v, "conflict"), fl.l_type);
+        }
+    }
+} /* op_fcntl_lock */
+
+static void
+op_lockf(
+    int     pid,
+    json_t *rv,
+    json_t *res_v)
+{
+    const char *cmdt = tf_tag(json_object_get(rv, "cmd"));
+    int         cmd  = F_LOCK, rc, e;
+
+    if (strcmp(cmdt, "LfTlock") == 0) {
+        cmd = F_TLOCK;
+    } else if (strcmp(cmdt, "LfUlock") == 0) {
+        cmd = F_ULOCK;
+    } else if (strcmp(cmdt, "LfTst") == 0) {
+        cmd = F_TEST;
+    }
+    apply_cred(pid);
+    rc = chimera_posix_lockf(rfd(pid, tf_field(rv, "fd")), cmd,
+                             (off_t) tf_field(rv, "len"));
+    e = ERRV(rc);
+    check_status(tf_field(res_v, "e"), e);
+} /* op_lockf */
 /* ---- dispatch + trace driving -------------------------------------------- */
 
 static int
@@ -1566,8 +2368,36 @@ dispatch(
         op_fallocate(pid, rv, res_v);
     } else if (strcmp(tag, "RFsync") == 0) {
         op_fsync(pid, rv, res_v);
+    } else if (strcmp(tag, "RChmod") == 0) {
+        op_chmod(pid, rv, res_v);
+    } else if (strcmp(tag, "RFchmod") == 0) {
+        op_fchmod(pid, rv, res_v);
+    } else if (strcmp(tag, "RChown") == 0) {
+        op_chown(pid, rv, res_v);
+    } else if (strcmp(tag, "RFchown") == 0) {
+        op_fchown(pid, rv, res_v);
+    } else if (strcmp(tag, "RUtimens") == 0) {
+        op_utimens(pid, rv, res_v);
+    } else if (strcmp(tag, "RFutimens") == 0) {
+        op_futimens(pid, rv, res_v);
+    } else if (strcmp(tag, "RAccess") == 0) {
+        op_access(pid, rv, res_v);
+    } else if (strcmp(tag, "RUmask") == 0) {
+        op_umask(pid, rv, res_v);
+    } else if (strcmp(tag, "RDup2") == 0) {
+        op_dup2(pid, rv, res_v);
+    } else if (strcmp(tag, "RFcntlDupfd") == 0) {
+        op_fcntl_dupfd(pid, rv, res_v);
+    } else if (strcmp(tag, "RFcntlGetfl") == 0) {
+        op_fcntl_getfl(pid, rv, res_v);
+    } else if (strcmp(tag, "RFcntlSetfl") == 0) {
+        op_fcntl_setfl(pid, rv, res_v);
+    } else if (strcmp(tag, "RFcntlLock") == 0) {
+        op_fcntl_lock(pid, rv, res_v);
+    } else if (strcmp(tag, "RLockf") == 0) {
+        op_lockf(pid, rv, res_v);
     } else {
-        return -1;   /* unimplemented op (out of the deviation-free scope) */
+        return -1;   /* unimplemented op */
     }
     return 0;
 } /* dispatch */
@@ -1702,8 +2532,12 @@ final_audit(json_t *fs)
                 }
             }
             if (!found) {
-                mism("audit: dir %s: unexpected entry '%s'",
-                     e.path[0] ? e.path : "/", names[k]);
+                char ep[4400];
+                snprintf(ep, sizeof(ep), "%.4095s/%.255s", e.path, names[k]);
+                if (!is_exempt(ep)) {   /* PD24 residue: chimera-only node */
+                    mism("audit: dir %s: unexpected entry '%s'",
+                         e.path[0] ? e.path : "/", names[k]);
+                }
             }
         }
 
@@ -1885,9 +2719,11 @@ replay_trace(const char *path)
         res = json_object_get(v, "res");
         tag = tf_tag(req);
 
-        g_cur_fs = state_get(st, "fs");
-        g_cur_ps = state_get(st, "ps");
-        last_fs  = g_cur_fs;
+        g_cur_fs  = state_get(st, "fs");
+        g_cur_ps  = state_get(st, "ps");
+        g_cur_tag = tag;
+        g_cur_rv  = tf_val(req);
+        last_fs   = g_cur_fs;
 
         if (dispatch(tag, pid, tf_val(req), tf_val(res)) != 0) {
             fprintf(stderr, "%s: step %zu: unimplemented op %s\n", path, i,
@@ -1902,8 +2738,25 @@ replay_trace(const char *path)
     if (g_nmismatch) {
         fprintf(stderr, "%s: %d mismatch(es)\n", path, g_nmismatch);
     } else {
-        printf("%s: %zu steps replayed, %d objects audited\n", path, ns - 1,
-               audited);
+        char devs[512] = "";
+        int  a, b;
+        /* Insertion sort g_devhits by id (matches Python's sorted() output). */
+        for (a = 1; a < g_ndevhits; a++) {
+            struct devhit t = g_devhits[a];
+            for (b = a - 1; b >= 0 && strcmp(g_devhits[b].id, t.id) > 0; b--) {
+                g_devhits[b + 1] = g_devhits[b];
+            }
+            g_devhits[b + 1] = t;
+        }
+        for (a = 0; a < g_ndevhits; a++) {
+            char one[48];
+            snprintf(one, sizeof(one), "%s%.11sx%d", a ? ", " : "",
+                     g_devhits[a].id, g_devhits[a].count);
+            strncat(devs, one, sizeof(devs) - strlen(devs) - 1);
+        }
+        printf("%s: %zu steps replayed, %d objects audited%s%s\n", path,
+               ns - 1, audited, g_ndevhits ? "; known deviations: " : "",
+               devs);
     }
     json_decref(root);
     return g_nmismatch ? 1 : 0;
