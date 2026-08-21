@@ -53,24 +53,26 @@
 #define MAX_PIDS          4
 #define MAX_DIRS          64
 
-static struct chimera_vfs_cred driver_creds[MAX_PIDS];
-static mode_t                  driver_umasks[MAX_PIDS];
-static CHIMERA_DIR            *driver_dirs[MAX_DIRS];
+static struct chimera_vfs_cred    driver_creds[MAX_PIDS];
+static mode_t                     driver_umasks[MAX_PIDS];
+static CHIMERA_DIR               *driver_dirs[MAX_DIRS];
 
 /* JSON responses go to a private dup of the original stdout; fd 1 itself is
  * redirected to stderr in main() because chimera's logger writes to stdout
  * by default and would otherwise corrupt the protocol stream. */
-static FILE                   *proto_out;
+static FILE                      *proto_out;
 
 /* Live filesystem/mount identity.  The batch "newfs" op cycles a fresh,
  * uniquely-named filesystem per trace (fresh fsid -> fresh FH mount-id) so no
  * content or cached FH leaks across traces -- the same isolation the NFS/SMB
  * MBT batches get from a per-trace fsname.  Set once in main(). */
-static const char             *g_module;        /* VFS module (memfs/...)     */
-static int                     g_nfs_version;   /* 0 = direct; 3/4 = loopback */
-static int                     g_fs_counter;    /* bumped per newfs -> fsN     */
-static char                    g_fsname[32] = "fs0";
-static struct chimera_vfs_cred g_root_cred;
+static const char                *g_module;     /* VFS module (memfs/...)     */
+static int                        g_nfs_version; /* 0 = direct; 3/4 = loopback */
+static int                        g_fs_counter; /* bumped per newfs -> fsN     */
+static char                       g_fsname[32] = "fs0";
+static struct chimera_vfs_cred    g_root_cred;
+static struct chimera_server     *g_server;     /* loopback server (nfs only) */
+static struct prometheus_metrics *g_metrics;
 
 /* Decode standard base64 (no whitespace); returns length or -1. */
 static int
@@ -964,29 +966,24 @@ handle(json_t *req)
     return res_int(-1, ENOSYS);
 } /* handle */
 
-int
-main(
-    int    argc,
-    char **argv)
+/* Bring up the chimera POSIX client (plus an in-process loopback NFS server
+ * for the nfs3_/nfs4_ backends), create and mount fs0, and normalize the root
+ * to the model's fsInit(0777, 0, 0).  Returns 0 on success.  Extracted from
+ * main() so the pure-C MBT replayer (posix_mbt_replay.c, which #includes this
+ * file) reuses the identical environment. */
+static int
+posix_env_setup(
+    const char *backend,
+    const char *storage)
 {
     struct chimera_client_config *config;
     struct chimera_posix_client  *posix;
     struct chimera_server        *server = NULL;
     struct prometheus_metrics    *metrics;
     struct chimera_vfs_cred       root_cred;
-    char                         *line        = NULL;
-    size_t                        cap         = 0;
-    const char                   *backend     = (argc > 1) ? argv[1] : "memfs";
-    const char                   *storage     = (argc > 2) ? argv[2] : NULL;
     const char                   *module      = backend;
     int                           nfs_version = 0;
     char                          module_cfg[4096];
-
-    proto_out = fdopen(dup(STDOUT_FILENO), "w");
-    if (!proto_out || dup2(STDERR_FILENO, STDOUT_FILENO) < 0) {
-        fprintf(stderr, "posix_driver: protocol stream setup failed\n");
-        return 1;
-    }
 
     chimera_log_init();
     ChimeraLogLevel = CHIMERA_LOG_ERROR;
@@ -995,10 +992,10 @@ main(
 
     chimera_vfs_cred_init_unix(&root_cred, 0, 0, 0, NULL);
 
-    /* Backend selection: argv[1] names the VFS module (default memfs), or an
+    /* Backend selection: `backend` names the VFS module (default memfs), or an
      * NFS loopback path nfs3_<module>/nfs4_<module> (an in-process chimera
      * server exports the module and the client mounts it over localhost NFS).
-     * argv[2] is a scratch directory for backends with real storage. */
+     * `storage` is a scratch directory for backends with real storage. */
     if (strncmp(backend, "nfs3_", 5) == 0) {
         nfs_version = 3;
         module      = backend + 5;
@@ -1143,14 +1140,55 @@ main(
         }
     }
 
-    /* Record the live fs identity so the batch "newfs" op can cycle it. */
+    /* Record the live fs identity so the batch "newfs" op can cycle it, and
+     * the server/metrics handles so posix_env_teardown can release them. */
     g_module      = module;
     g_nfs_version = nfs_version;
     g_root_cred   = root_cred;
+    g_server      = server;
+    g_metrics     = metrics;
 
     /* Normalize the root to the model's fsInit(0777, 0, 0). */
     if (normalize_root() != 0) {
         fprintf(stderr, "posix_driver: root normalization failed\n");
+        return 1;
+    }
+    return 0;
+} /* posix_env_setup */
+
+static void
+posix_env_teardown(void)
+{
+    chimera_posix_umount("/test");
+    chimera_posix_shutdown();
+    if (g_server) {
+        chimera_server_destroy(g_server);
+    }
+    prometheus_metrics_destroy(g_metrics);
+} /* posix_env_teardown */
+
+#ifndef POSIX_DRIVER_ENGINE_ONLY
+/* Line-protocol driver: read one JSON request per line, execute it, and write
+ * one JSON reply.  posix_replay.py speaks this.  (The pure-C MBT replayer
+ * defines POSIX_DRIVER_ENGINE_ONLY and supplies its own main that calls
+ * handle() in-process, with no serialization.) */
+int
+main(
+    int    argc,
+    char **argv)
+{
+    const char *backend = (argc > 1) ? argv[1] : "memfs";
+    const char *storage = (argc > 2) ? argv[2] : NULL;
+    char       *line    = NULL;
+    size_t      cap     = 0;
+
+    proto_out = fdopen(dup(STDOUT_FILENO), "w");
+    if (!proto_out || dup2(STDERR_FILENO, STDOUT_FILENO) < 0) {
+        fprintf(stderr, "posix_driver: protocol stream setup failed\n");
+        return 1;
+    }
+
+    if (posix_env_setup(backend, storage) != 0) {
         return 1;
     }
 
@@ -1185,11 +1223,7 @@ main(
     }
 
     free(line);
-    chimera_posix_umount("/test");
-    chimera_posix_shutdown();
-    if (server) {
-        chimera_server_destroy(server);
-    }
-    prometheus_metrics_destroy(metrics);
+    posix_env_teardown();
     return 0;
 } /* main */
+#endif /* POSIX_DRIVER_ENGINE_ONLY */
