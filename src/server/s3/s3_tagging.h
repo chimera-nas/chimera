@@ -89,12 +89,14 @@ chimera_s3_put_tagging_body_done(
  * supplied directly (already resolved by the HEAD lookup). */
 void
 chimera_s3_tagging_count_for_head(
-    struct evpl *evpl,
+    struct evpl                     *evpl,
     struct chimera_server_s3_thread *thread,
-    struct chimera_s3_request *request,
-    const void *fh,
-    int fh_len,
-    void ( *done_cb )(struct evpl *evpl, struct chimera_s3_request *request));
+    struct chimera_s3_request       *request,
+    const void                      *fh,
+    int                              fh_len,
+    void                          ( *done_cb )(
+        struct evpl               *evpl,
+        struct chimera_s3_request *request));
 
 /* Subresource entry points (?tagging on an object). */
 void
@@ -123,7 +125,9 @@ chimera_s3_delete_tagging(
  * already be parsed/validated into request->tagging. */
 void
 chimera_s3_tagging_store_by_path(
-    struct evpl *evpl,
+    struct evpl                     *evpl,
     struct chimera_server_s3_thread *thread,
-    struct chimera_s3_request *request,
-    void ( *done_cb )(struct evpl *evpl, struct chimera_s3_request *request));
+    struct chimera_s3_request       *request,
+    void                          ( *done_cb )(
+        struct evpl               *evpl,
+        struct chimera_s3_request *request));

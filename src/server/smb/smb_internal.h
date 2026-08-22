@@ -29,6 +29,7 @@
 #include "smb_sharemode.h"
 #include "smb_notify.h"
 #include "vfs/vfs.h"
+#include "vfs/vfs_claim.h"
 #include "common/tcp_flavor.h"
 #include "vfs/vfs_acl.h"
 #include "vfs/vfs_idmap.h"
@@ -73,24 +74,25 @@
                          __VA_ARGS__)
 
 /*
- * Canonical mapping between the SMB caching-grant encodings and vfs_state's RWH
- * lease mode -- one source of truth shared by the create grant path and the
- * oplock/lease break-notification builder, which previously re-derived these
- * inline (and could drift).  The SMB2 lease bit layout (R=0x01, H=0x02, W=0x04)
- * differs from vfs_state's CHIMERA_VFS_LEASE_MODE_{R,W,H}, so map field by field.
+ * Canonical mapping between the SMB caching-grant encodings and the claim
+ * core's cache bits -- one source of truth shared by the create grant path and
+ * the oplock/lease break-notification builder, which previously re-derived
+ * these inline (and could drift).  The SMB2 lease bit layout (R=0x01, H=0x02,
+ * W=0x04) differs from the claim vocabulary's CHIMERA_CLAIM_{CR,CW,H}, so map
+ * field by field.
  */
 static inline uint8_t
 chimera_smb_vfs_to_lease_bits(uint8_t vfs_mode)
 {
     uint8_t s = 0;
 
-    if (vfs_mode & CHIMERA_VFS_LEASE_MODE_R) {
+    if (vfs_mode & CHIMERA_CLAIM_CR) {
         s |= SMB2_LEASE_READ_CACHING;
     }
-    if (vfs_mode & CHIMERA_VFS_LEASE_MODE_H) {
+    if (vfs_mode & CHIMERA_CLAIM_H) {
         s |= SMB2_LEASE_HANDLE_CACHING;
     }
-    if (vfs_mode & CHIMERA_VFS_LEASE_MODE_W) {
+    if (vfs_mode & CHIMERA_CLAIM_CW) {
         s |= SMB2_LEASE_WRITE_CACHING;
     }
     return s;
@@ -102,13 +104,13 @@ chimera_smb_lease_bits_to_vfs(uint8_t smb_bits)
     uint8_t v = 0;
 
     if (smb_bits & SMB2_LEASE_READ_CACHING) {
-        v |= CHIMERA_VFS_LEASE_MODE_R;
+        v |= CHIMERA_CLAIM_CR;
     }
     if (smb_bits & SMB2_LEASE_HANDLE_CACHING) {
-        v |= CHIMERA_VFS_LEASE_MODE_H;
+        v |= CHIMERA_CLAIM_H;
     }
     if (smb_bits & SMB2_LEASE_WRITE_CACHING) {
-        v |= CHIMERA_VFS_LEASE_MODE_W;
+        v |= CHIMERA_CLAIM_CW;
     }
     return v;
 } /* chimera_smb_lease_bits_to_vfs */
@@ -134,24 +136,25 @@ chimera_smb_parent_lease_skip(
     return (lo | hi) != 0;
 } /* chimera_smb_parent_lease_skip */
 
-/* Collapse a granted RWH mask to the closest legacy oplock level (used when an
- * open did not request an RqLs lease).  Legacy oplocks have no separate W/H, so
- * RWH -> BATCH, RW (no H) -> EXCLUSIVE, R-only -> LEVEL_II, none -> NONE. */
+/* Collapse a granted cache mask to the closest legacy oplock level (used when
+ * an open did not request an RqLs lease).  Legacy oplocks have no separate W/H,
+ * so CR|CW|H -> BATCH, CR|CW (no H) -> EXCLUSIVE, CR-only -> LEVEL_II,
+ * none -> NONE. */
 static inline uint8_t
 chimera_smb_vfs_to_oplock_level(uint8_t vfs_mode)
 {
-    uint8_t rwh = vfs_mode & (CHIMERA_VFS_LEASE_MODE_R |
-                              CHIMERA_VFS_LEASE_MODE_W |
-                              CHIMERA_VFS_LEASE_MODE_H);
+    uint8_t rwh = vfs_mode & (CHIMERA_CLAIM_CR |
+                              CHIMERA_CLAIM_CW |
+                              CHIMERA_CLAIM_H);
 
-    if (rwh == (CHIMERA_VFS_LEASE_MODE_R | CHIMERA_VFS_LEASE_MODE_W |
-                CHIMERA_VFS_LEASE_MODE_H)) {
+    if (rwh == (CHIMERA_CLAIM_CR | CHIMERA_CLAIM_CW |
+                CHIMERA_CLAIM_H)) {
         return SMB2_OPLOCK_LEVEL_BATCH;
     }
-    if (vfs_mode & CHIMERA_VFS_LEASE_MODE_W) {
+    if (vfs_mode & CHIMERA_CLAIM_CW) {
         return SMB2_OPLOCK_LEVEL_EXCLUSIVE;
     }
-    if (vfs_mode & CHIMERA_VFS_LEASE_MODE_R) {
+    if (vfs_mode & CHIMERA_CLAIM_CR) {
         return SMB2_OPLOCK_LEVEL_II;
     }
     return SMB2_OPLOCK_LEVEL_NONE;
@@ -640,7 +643,7 @@ struct chimera_smb_request {
              * async.park_next, because a share-parked CREATE also emits an
              * async interim and is therefore linked on conn->parked_requests by
              * that field at the same time. */
-            enum chimera_vfs_lease_result      gen_resume_result;
+            enum chimera_vfs_claim_result      gen_resume_result;
             struct chimera_smb_request        *gen_resume_next;
             /* Registration of this deferred DH2Q create on tree->pending_creates
             * (see the comment there): pending_link chains the list, and
@@ -1016,12 +1019,12 @@ struct chimera_smb_request {
             /* Rename information */
             struct chimera_smb_rename_info     rename_info;
             /* Destination-parent directory-lease conflict park (rename into a
-             * leased directory): a transient SHARE probe (denied=D) on the dst
+             * leased directory): a transient deny-only probe (deny=D) on the dst
              * parent triggers the dir-lease HANDLE break (RH->R) via the share
              * conflict path and parks the rename until the holder closes
              * (GRANTED -> rename proceeds) or keeps its handle
              * (DENIED -> SHARING_VIOLATION).  dirlease.rename_dst_parent. */
-            struct chimera_vfs_lease           dp_probe;
+            struct chimera_vfs_claim           dp_probe;
             struct chimera_vfs_file_state     *dp_file_state;
             struct chimera_vfs_pending_acquire dp_ticket;
             uint8_t                            dp_probe_active;
@@ -1849,7 +1852,7 @@ struct chimera_smb_lease_break_msg {
     struct chimera_smb_conn            *conn;
     bool                                is_lease;
     /* FH of the file whose lease is breaking, so the flush can mark the break
-     * delivered (chimera_vfs_state_mark_break_notified) once it is sent -- which
+     * delivered (chimera_vfs_claim_mark_break_notified) once it is sent -- which
      * resumes a delete-on-close open parked waiting for that delivery. */
     uint8_t                             fh[CHIMERA_VFS_FH_SIZE];
     uint8_t                             fh_len;
@@ -1911,7 +1914,7 @@ struct chimera_server_smb_thread {
      * ack handler cannot complete them; instead it rings every other thread's
      * resume doorbell, and each thread re-scans its own connections' parked
      * CREATEs and completes those whose break has now settled
-     * (chimera_vfs_state_caching_breaking() is false).  The re-check makes a
+     * (chimera_vfs_claim_ack_pending() is false).  The re-check makes a
      * parameterless broadcast safe -- only genuinely-settled creates complete. */
     struct evpl_doorbell                lease_resume_doorbell;
 
@@ -2240,7 +2243,7 @@ static inline bool
 chimera_smb_durable_open_break_in_flight(const struct chimera_smb_open_file *open_file)
 {
     return open_file->grant &&
-           open_file->grant->lease.break_state != CHIMERA_VFS_BREAK_IDLE;
+           open_file->grant->claim.break_state != CHIMERA_CLAIM_BREAK_IDLE;
 } /* chimera_smb_durable_open_break_in_flight */
 
 /* Park every durable/persistent open held by `session` for reconnect, leaving
@@ -3095,32 +3098,32 @@ chimera_smb_session_lease_key_conflict(
 } /* chimera_smb_session_lease_key_conflict */
 
 /*
- * Caching-grant membership.  A VFS-owned caching grant (chimera_vfs_caching_grant)
+ * Cache-grant membership.  A VFS-owned cache grant (chimera_vfs_claim_grant)
  * may be shared by several opens under one (client, lease key); each such open is
- * threaded onto grant->holders so a break callback running on an arbitrary thread
+ * threaded onto grant->members so a break callback running on an arbitrary thread
  * can pick a still-connected member to deliver the OPLOCK_BREAK on (and revoke the
  * lease when no member is live).  The list is guarded by the grant's file->lock.
  */
 static inline void
 chimera_smb_grant_add_member(
-    struct chimera_vfs_caching_grant *grant,
-    struct chimera_smb_open_file     *open_file)
+    struct chimera_vfs_claim_grant *grant,
+    struct chimera_smb_open_file   *open_file)
 {
     pthread_mutex_lock(&grant->file->lock);
-    open_file->grant_member_next = grant->holders;
-    grant->holders               = open_file;
+    open_file->grant_member_next = grant->members;
+    grant->members               = open_file;
     pthread_mutex_unlock(&grant->file->lock);
 } /* chimera_smb_grant_add_member */
 
 static inline void
 chimera_smb_grant_remove_member(
-    struct chimera_vfs_caching_grant *grant,
-    struct chimera_smb_open_file     *open_file)
+    struct chimera_vfs_claim_grant *grant,
+    struct chimera_smb_open_file   *open_file)
 {
     struct chimera_smb_open_file **pp;
 
     pthread_mutex_lock(&grant->file->lock);
-    for (pp = (struct chimera_smb_open_file **) &grant->holders; *pp;
+    for (pp = (struct chimera_smb_open_file **) &grant->members; *pp;
          pp = &(*pp)->grant_member_next) {
         if (*pp == open_file) {
             *pp = open_file->grant_member_next;

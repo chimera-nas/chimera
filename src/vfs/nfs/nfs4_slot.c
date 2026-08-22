@@ -606,22 +606,26 @@ chimera_nfs4_compound_call_cb(
 
 void
 chimera_nfs4_compound_call(
-    struct chimera_nfs_thread *thread,
-    struct chimera_nfs_shared *shared,
+    struct chimera_nfs_thread               *thread,
+    struct chimera_nfs_shared               *shared,
     struct chimera_nfs_client_server_thread *server_thread,
-    struct chimera_vfs_request *request,
-    struct COMPOUND4args *args,
-    const struct evpl_rpc2_cred *cred,
-    int ddp,
-    int max_rdma_write_chunk,
-    struct evpl_iovec *write_chunk_iov,
-    int write_chunk_niov,
-    int max_rdma_reply_chunk,
-    void ( *cb )(struct evpl *, const struct evpl_rpc2_verf *,
-                 struct COMPOUND4res *, int, void *),
-    void *cb_private,
-    chimera_nfs4_retry_fn retry_fn,
-    void *retry_ctx)
+    struct chimera_vfs_request              *request,
+    struct COMPOUND4args                    *args,
+    const struct evpl_rpc2_cred             *cred,
+    int                                      ddp,
+    int                                      max_rdma_write_chunk,
+    struct evpl_iovec                       *write_chunk_iov,
+    int                                      write_chunk_niov,
+    int                                      max_rdma_reply_chunk,
+    void                                  ( *cb )(
+        struct evpl *,
+        const struct evpl_rpc2_verf *,
+        struct COMPOUND4res *,
+        int,
+        void *),
+    void                                    *cb_private,
+    chimera_nfs4_retry_fn                    retry_fn,
+    void                                    *retry_ctx)
 {
     struct chimera_nfs4_client_session *session = server_thread->server->nfs4_session;
     struct chimera_nfs4_slot_table     *st      = &server_thread->slots;

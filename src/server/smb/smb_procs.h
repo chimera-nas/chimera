@@ -203,12 +203,14 @@ void chimera_smb_set_info(
  * for the duration; `done` is invoked with the resulting NTSTATUS. */
 void chimera_smb_ea_apply(
     struct chimera_server_smb_thread *thread,
-    const struct chimera_vfs_cred *cred,
-    struct chimera_vfs_open_handle *handle,
-    const uint8_t *ea_buf,
-    uint32_t ea_buf_len,
-    void ( *done )(uint32_t status, void *arg),
-    void *arg);
+    const struct chimera_vfs_cred    *cred,
+    struct chimera_vfs_open_handle   *handle,
+    const uint8_t                    *ea_buf,
+    uint32_t                          ea_buf_len,
+    void                           ( *done )(
+        uint32_t status,
+        void    *arg),
+    void                             *arg);
 
 void chimera_smb_set_security(
     struct chimera_smb_request *request);
@@ -333,11 +335,11 @@ void chimera_smb_open_file_drain_locks(
     struct chimera_server_smb_thread *thread,
     struct chimera_smb_open_file     *open_file);
 
-/* break_cb wired onto SMB CACHING leases at CREATE time.  Sends an
+/* break_cb wired onto SMB cache claims at CREATE time.  Sends an
  * OPLOCK_BREAK Notification on the conn the open was created on, or
  * forcibly revokes if the conn is gone. */
 void chimera_smb_lease_break_cb(
-    struct chimera_vfs_lease *lease,
+    struct chimera_vfs_claim *claim,
     uint8_t                   needed_mode,
     void                     *private_data);
 

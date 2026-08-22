@@ -3845,7 +3845,8 @@ SYMBOL_EXPORT void
 chimera_vfs_io_lease_acquire(
     struct chimera_vfs_request           *request,
     const struct chimera_vfs_lease_owner *owner,
-    void (                               *next )(struct chimera_vfs_request *request))
+    void                               ( *next )(
+        struct chimera_vfs_request *request))
 {
     struct chimera_vfs_state      *state = request->thread->vfs->vfs_state;
     struct chimera_vfs_file_state *file;
@@ -3930,7 +3931,8 @@ chimera_vfs_io_recall(
     uint8_t                     fh_len,
     uint64_t                    fh_hash,
     int                         flush_only,
-    void (                     *next )(struct chimera_vfs_request *request))
+    void                     ( *next )(
+        struct chimera_vfs_request *request))
 {
     struct chimera_vfs_state      *state = request->thread->vfs->vfs_state;
     struct chimera_vfs_file_state *file;
@@ -3963,7 +3965,8 @@ chimera_vfs_io_recall_single(
     uint8_t                     fh_len,
     uint64_t                    fh_hash,
     uint8_t                     retain,
-    void (                     *next )(struct chimera_vfs_request *request))
+    void                     ( *next )(
+        struct chimera_vfs_request *request))
 {
     struct chimera_vfs_state      *state = request->thread->vfs->vfs_state;
     struct chimera_vfs_file_state *file;

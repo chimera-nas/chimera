@@ -609,17 +609,17 @@ chimera_vfs_read(
  * of a leaseless actor (equivalent to chimera_vfs_read()). */
 void
 chimera_vfs_read_owned(
-    struct chimera_vfs_thread            *thread,
-    const struct chimera_vfs_cred        *cred,
-    struct chimera_vfs_open_handle       *handle,
-    uint64_t                              offset,
-    uint32_t                              count,
-    struct evpl_iovec                    *iov,
-    int                                   niov,
-    uint64_t                              attrmask,
-    const struct chimera_vfs_lease_owner *io_owner,
-    chimera_vfs_read_callback_t           callback,
-    void                                 *private_data);
+    struct chimera_vfs_thread        *thread,
+    const struct chimera_vfs_cred    *cred,
+    struct chimera_vfs_open_handle   *handle,
+    uint64_t                          offset,
+    uint32_t                          count,
+    struct evpl_iovec                *iov,
+    int                               niov,
+    uint64_t                          attrmask,
+    const struct chimera_claim_actor *io_owner,
+    chimera_vfs_read_callback_t       callback,
+    void                             *private_data);
 
 /* As chimera_vfs_read(), but the caller supplies its own destination buffers
  * (dest_iov/dest_niov) for the data to land in.  work_iov/work_niov is scratch
@@ -673,19 +673,19 @@ chimera_vfs_write(
  * actor (equivalent to chimera_vfs_write()). */
 void
 chimera_vfs_write_owned(
-    struct chimera_vfs_thread            *thread,
-    const struct chimera_vfs_cred        *cred,
-    struct chimera_vfs_open_handle       *handle,
-    uint64_t                              offset,
-    uint32_t                              count,
-    uint32_t                              sync,
-    uint64_t                              pre_attr_mask,
-    uint64_t                              post_attr_mask,
-    struct evpl_iovec                    *iov,
-    int                                   niov,
-    const struct chimera_vfs_lease_owner *io_owner,
-    chimera_vfs_write_callback_t          callback,
-    void                                 *private_data);
+    struct chimera_vfs_thread        *thread,
+    const struct chimera_vfs_cred    *cred,
+    struct chimera_vfs_open_handle   *handle,
+    uint64_t                          offset,
+    uint32_t                          count,
+    uint32_t                          sync,
+    uint64_t                          pre_attr_mask,
+    uint64_t                          post_attr_mask,
+    struct evpl_iovec                *iov,
+    int                               niov,
+    const struct chimera_claim_actor *io_owner,
+    chimera_vfs_write_callback_t      callback,
+    void                             *private_data);
 
 typedef void (*chimera_vfs_commit_callback_t)(
     enum chimera_vfs_error    error_code,
@@ -1207,3 +1207,53 @@ chimera_vfs_remove_stream(
     uint32_t                             namelen,
     chimera_vfs_remove_stream_callback_t callback,
     void                                *private_data);
+
+/* --------------------------------------------------------------------
+ * Backend lease projection (CHIMERA_VFS_CAP_LEASE)
+ * -------------------------------------------------------------------- */
+
+typedef void (*chimera_vfs_lease_acquire_backend_cb_t)(
+    enum chimera_vfs_error error_code,
+    uint8_t                granted,
+    uint64_t               token,
+    void                  *private_data);
+
+typedef void (*chimera_vfs_lease_release_backend_cb_t)(
+    enum chimera_vfs_error error_code,
+    void                  *private_data);
+
+void
+chimera_vfs_lease_acquire_backend(
+    struct chimera_vfs_thread             *thread,
+    const uint8_t                         *fh,
+    uint8_t                                fh_len,
+    uint64_t                               fh_hash,
+    uint8_t                                klass,
+    uint8_t                                rev_used,
+    uint8_t                                bind_deny,
+    uint8_t                                exclusive,
+    uint64_t                               offset,
+    uint64_t                               length,
+    const struct chimera_claim_owner      *owner,
+    uint64_t                               prev_token,
+    void                                ( *recall_cb )(
+        void          *recall_arg,
+        const uint8_t *fh,
+        uint8_t        fh_len,
+        uint64_t       fh_hash,
+        uint64_t       token,
+        uint8_t        retain),
+    void                                  *recall_arg,
+    chimera_vfs_lease_acquire_backend_cb_t callback,
+    void                                  *private_data);
+
+void
+chimera_vfs_lease_release_backend(
+    struct chimera_vfs_thread             *thread,
+    const uint8_t                         *fh,
+    uint8_t                                fh_len,
+    uint64_t                               fh_hash,
+    uint64_t                               token,
+    uint8_t                                retained,
+    chimera_vfs_lease_release_backend_cb_t callback,
+    void                                  *private_data);

@@ -140,11 +140,16 @@ chimera_posix_fcntl(
     struct chimera_client_request   req;
     struct chimera_posix_completion comp;
     struct flock                   *fl;
+    struct chimera_vfs_open_handle *handle;
+    struct chimera_posix_ofd_lock  *node = NULL;
     uint32_t                        lock_type;
     uint32_t                        flags = 0;
     int32_t                         whence;
     uint64_t                        offset;
     uint64_t                        length;
+    uint64_t                        core_length = 0;
+    bool                            local_arbiter;
+    bool                            backend_locks;
     va_list                         args;
 
     switch (cmd) {
@@ -269,6 +274,143 @@ chimera_posix_fcntl(
         length = (uint64_t) fl->l_len;   /* 0 = lock to EOF (POSIX) */
     }
 
+    /*
+     * Local claim-core arbitration first: the client's embedded VFS core
+     * arbitrates this process's share of the cluster (protocol claims and
+     * other posix threads), then the OP_LOCK backend passthrough projects
+     * the lock into the kernel so cross-PROCESS conflicts keep working
+     * (each process has its own core instance; the kernel is the shared
+     * arbiter).
+     *
+     * SEEK_END ranges stay backend-only: the kernel resolves the offset
+     * relative to EOF atomically (the TOCTOU note above), so the local core
+     * cannot know the absolute range.
+     * CLAIMTODO: SEEK_END locks therefore bypass local arbitration
+     * entirely; resolving EOF locally would reintroduce the TOCTOU race.
+     */
+    handle        = entry->handle;
+    local_arbiter = (whence != SEEK_END);
+    backend_locks = (handle->vfs_module->capabilities &
+                     CHIMERA_VFS_CAP_FS_LOCK) != 0;
+
+    if (local_arbiter) {
+        /* POSIX l_len 0 = to-EOF sentinel; the core spells to-EOF as
+         * UINT64_MAX (its 0 is a genuine zero-byte range). */
+        core_length = (length == 0) ? UINT64_MAX : length;
+    }
+
+    if (local_arbiter && cmd == F_GETLK) {
+        struct chimera_vfs_state         *vstate = posix->client->vfs->vfs_state;
+        struct chimera_vfs_file_state    *file;
+        struct chimera_vfs_claim          probe;
+        struct chimera_vfs_claim_conflict conf;
+        struct chimera_claim_owner        owner;
+        enum chimera_vfs_claim_result     result;
+
+        chimera_posix_lock_owner_init(&owner);
+        chimera_vfs_claim_init_range(&probe,
+                                     lock_type == CHIMERA_VFS_LOCK_WRITE,
+                                     /* smb */ false,
+                                     offset, core_length, &owner);
+
+        file = chimera_vfs_state_get(vstate, handle->fh,
+                                     (uint8_t) handle->fh_len,
+                                     handle->fh_hash, true);
+
+        result = chimera_vfs_claim_test(file, &probe, &conf);
+
+        chimera_vfs_state_put(vstate, file);
+
+        if (result != CHIMERA_CLAIM_GRANTED) {
+            /* Local conflict: report it without consulting the backend.
+             * WRITE_LT iff the holder's used mode carries a write-flavored
+             * bit (a write delegation reports WRITE_LT though it holds no
+             * LW). */
+            fl->l_type = (conf.used & (CHIMERA_CLAIM_W |
+                                       CHIMERA_CLAIM_CW |
+                                       CHIMERA_CLAIM_LW))
+                ? F_WRLCK : F_RDLCK;
+            fl->l_whence = SEEK_SET;
+            fl->l_start  = (off_t) conf.offset;
+            fl->l_len    = (conf.length == UINT64_MAX)
+                ? 0 : (off_t) conf.length;
+            fl->l_pid = (pid_t) conf.owner.owner_lo;
+
+            chimera_posix_fd_release(entry, 0);
+            return 0;
+        }
+        /* No local conflict: fall through to the backend OP_LOCK TEST so
+         * the kernel sees other processes. */
+    }
+
+    if (local_arbiter && cmd != F_GETLK &&
+        lock_type == CHIMERA_VFS_LOCK_UNLOCK) {
+        /* Carve the owner's local coverage of the range (REPLACE geometry);
+         * the backend unlock below is the kernel projection. */
+        chimera_posix_ofd_lock_carve(posix, entry->ofd, handle,
+                                     offset, core_length);
+    }
+
+    if (local_arbiter && cmd != F_GETLK &&
+        lock_type != CHIMERA_VFS_LOCK_UNLOCK) {
+        /* CLAIMTODO: POSIX re-lock of an overlapping range REPLACES the
+         * owner's coverage (including a WRLCK->RDLCK downgrade); this pass
+         * accumulates same-owner fragments instead (self-exempt at the
+         * OWNER circle, so harmless to other owners' arbitration, and
+         * carved correctly on F_UNLCK), pending a carve-then-insert. */
+        struct chimera_vfs_state     *vstate = posix->client->vfs->vfs_state;
+        enum chimera_vfs_claim_result result;
+
+        node = chimera_posix_ofd_lock_alloc(posix, handle,
+                                            lock_type == CHIMERA_VFS_LOCK_WRITE,
+                                            offset, core_length);
+
+        if (!node) {
+            chimera_posix_fd_release(entry, 0);
+            errno = ENOMEM;
+            return -1;
+        }
+
+        if (cmd == F_SETLKW) {
+            /* Blocking acquire: wait on BREAKING and (wait_hard) on a hard
+             * DENIED lock conflict, bridged onto this thread's condvar. */
+            result = chimera_posix_lock_claim_acquire_wait(posix, node);
+        } else {
+            /* F_SETLK: try; BREAKING (recalls kicked, claim not inserted)
+             * maps to EAGAIN for a non-blocking request like DENIED. */
+            result = chimera_vfs_claim_try_acquire(vstate, node->file,
+                                                   &node->claim, NULL);
+        }
+
+        if (result != CHIMERA_CLAIM_GRANTED) {
+            chimera_posix_ofd_lock_free(posix, node);
+            chimera_posix_fd_release(entry, 0);
+            errno = EAGAIN;
+            return -1;
+        }
+
+        chimera_posix_ofd_lock_track(posix, entry->ofd, node);
+    }
+
+    if (!backend_locks) {
+        /* Backend without CAP_FS_LOCK (memfs/cairn/diskfs): the local core
+         * is the arbiter -- skip the projection step instead of failing
+         * ENOTSUP.  SEEK_END ranges had no arbiter at all, so keep the old
+         * ENOTSUP for them. */
+        chimera_posix_fd_release(entry, 0);
+
+        if (!local_arbiter) {
+            errno = ENOTSUP;
+            return -1;
+        }
+
+        if (cmd == F_GETLK) {
+            fl->l_type = F_UNLCK;
+        }
+
+        return 0;
+    }
+
     chimera_posix_completion_init(&comp, &req);
 
     req.opcode            = CHIMERA_CLIENT_OP_LOCK;
@@ -284,6 +426,13 @@ chimera_posix_fcntl(
     chimera_posix_worker_enqueue(worker, &req, chimera_posix_fcntl_lock_exec);
 
     int err = chimera_posix_wait(&comp);
+
+    if (err && node) {
+        /* The kernel projection denied a lock the local core granted:
+         * drop the local claim and surface the backend's error. */
+        chimera_posix_ofd_lock_untrack_release(posix, node);
+        node = NULL;
+    }
 
     if (cmd == F_GETLK && !err) {
         if (req.lock.r_conflict_type == CHIMERA_VFS_LOCK_UNLOCK) {

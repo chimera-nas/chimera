@@ -245,6 +245,61 @@ struct memfs_shared;
  * RMFS, looked up by name at mount time.  Every other op arrives already
  * carrying it: the VFS resolves the handle's mount and hands the backend the
  * mount_private it returned from MOUNT. */
+/* ------------------------------------------------------------------ */
+/* CHIMERA_VFS_CAP_LEASE arbiter                                      */
+/* ------------------------------------------------------------------ */
+
+/* memfs is the native lease arbiter: it evaluates the SAME kindless
+ * used/denied predicate the claim core compiled the request from -- an
+ * aggregate conflicts when (a.rev_used & b.bind_deny) || (b.rev_used &
+ * a.bind_deny) across owners; a range record conflicts on overlap with an
+ * exclusive side across owners.  The registry is module-global and keyed by
+ * fh (fh bytes are unique across named filesystems), so MKFS/RMFS need no
+ * lease bookkeeping.  Test knobs: CHIMERA_MEMFS_LEASE_DENY (letters r/w
+ * mask grants) and CHIMERA_MEMFS_LEASE_RECALL (ms; each aggregate grant is
+ * recalled that long after it lands, exercising the async
+ * backend->core->frontend recall cascade). */
+
+struct memfs_lease_agg {
+    struct chimera_claim_owner owner;
+    uint64_t                   token;
+    uint8_t                    rev_used;
+    uint8_t                    bind_deny;
+    void                       ( *recall_cb )(
+        void          *recall_arg,
+        const uint8_t *fh,
+        uint8_t        fh_len,
+        uint64_t       fh_hash,
+        uint64_t       token,
+        uint8_t        retain);
+    void                      *recall_arg;
+    uint64_t                   recall_due; /* stopwatch ticks; 0 = none */
+    struct memfs_lease_agg    *next;
+};
+
+struct memfs_lease_range {
+    struct chimera_claim_owner owner;
+    uint64_t                   token;
+    uint8_t                    exclusive;
+    uint64_t                   offset;
+    uint64_t                   length;
+    struct memfs_lease_range  *next;
+};
+
+struct memfs_lease_file {
+    uint8_t                   fh[CHIMERA_VFS_FH_SIZE];
+    uint8_t                   fh_len;
+    uint64_t                  fh_hash;
+    struct memfs_lease_agg   *aggs;
+    struct memfs_lease_range *ranges;
+    struct memfs_lease_file  *next;
+};
+
+static void
+memfs_lease_recall_sweep(
+    struct evpl       *evpl,
+    struct evpl_timer *timer);
+
 struct memfs_fs {
     struct memfs_shared     *shared;
     char                    *name;
@@ -279,12 +334,12 @@ struct memfs_shared {
     /* Named filesystems, for by-name lookup (mount/mkfs/rmfs, guarded by
      * lock).  Per-op resolution does not consult this: it comes in on the
      * request as mount_private. */
-    struct memfs_fs *fs_list;
-    int              num_active_threads;
-    uint32_t         block_size;
-    uint32_t         block_shift;
-    uint32_t         block_mask;
-    int              noatime;             /* config: disable atime updates on read */
+    struct memfs_fs         *fs_list;
+    int                      num_active_threads;
+    uint32_t                 block_size;
+    uint32_t                 block_shift;
+    uint32_t                 block_mask;
+    int                      noatime;     /* config: disable atime updates on read */
     /* Pre-op / post-op ("before"/"after") attribute returns on mutating
      * operations.  memfs snapshots the affected object's (or parent
      * directory's) attributes before and after the change, under the inode
@@ -295,13 +350,19 @@ struct memfs_shared {
      * learns the attributes were not provided.  Only these pre/post structs are
      * gated; the object attributes returned by getattr/lookup/create/read are
      * always populated. */
-    int              enable_pre_attr;
-    int              enable_post_attr;
-    uint64_t         fs_size;             /* config "size": default capacity for new filesystems */
+    int                      enable_pre_attr;
+    int                      enable_post_attr;
+    uint64_t                 fs_size;     /* config "size": default capacity for new filesystems */
     /* Config "fsid": deterministic fsid seed.  When non-zero each filesystem
      * gets fsid = seed ^ hash(name); when zero fsids are random. */
-    uint64_t         fsid_seed;
-    pthread_mutex_t  lock;
+    uint64_t                 fsid_seed;
+    /* CAP_LEASE arbiter registry + test knobs (guarded by lease_lock). */
+    pthread_mutex_t          lease_lock;
+    struct memfs_lease_file *lease_files;
+    uint64_t                 lease_next_token;
+    uint8_t                  lease_deny_mask;  /* env-masked grant bits */
+    uint64_t                 lease_recall_us;  /* env recall delay; 0 off */
+    pthread_mutex_t          lock;
 };
 
 struct memfs_thread {
@@ -309,6 +370,8 @@ struct memfs_thread {
     struct memfs_shared         *shared;
     struct evpl_iovec            zero;
     int                          thread_id;
+    int                          lease_timer_armed;
+    struct evpl_timer            lease_timer;
     struct memfs_dirent         *free_dirent;
     struct memfs_symlink_target *free_symlink_target;
     struct memfs_block          *free_block;
@@ -1130,6 +1193,28 @@ memfs_init(
     shared->block_mask  = block_size - 1;
     shared->block_shift = __builtin_ctz(block_size);
 
+
+    pthread_mutex_init(&shared->lease_lock, NULL);
+    {
+        /* Test knobs for the CAP_LEASE arbiter. */
+        const char *deny_env   = getenv("CHIMERA_MEMFS_LEASE_DENY");
+        const char *recall_env = getenv("CHIMERA_MEMFS_LEASE_RECALL");
+
+        if (deny_env) {
+            for (; *deny_env; deny_env++) {
+                if (*deny_env == 'r') {
+                    shared->lease_deny_mask |= CHIMERA_CLAIM_R;
+                } else if (*deny_env == 'w') {
+                    shared->lease_deny_mask |= CHIMERA_CLAIM_W;
+                }
+            }
+        }
+        if (recall_env && *recall_env) {
+            shared->lease_recall_us =
+                strtoull(recall_env, NULL, 10) * 1000ULL;
+        }
+    }
+
     return shared;
 } /* memfs_init */
 
@@ -1377,6 +1462,27 @@ memfs_destroy(void *private_data)
         fs = tmp;
     }
 
+    {
+        struct memfs_lease_file *lf;
+
+        while ((lf = shared->lease_files)) {
+            struct memfs_lease_agg   *agg;
+            struct memfs_lease_range *rng;
+
+            while ((agg = lf->aggs)) {
+                LL_DELETE(lf->aggs, agg);
+                free(agg);
+            }
+            while ((rng = lf->ranges)) {
+                LL_DELETE(lf->ranges, rng);
+                free(rng);
+            }
+            LL_DELETE(shared->lease_files, lf);
+            free(lf);
+        }
+        pthread_mutex_destroy(&shared->lease_lock);
+    }
+
     pthread_mutex_destroy(&shared->lock);
 
     free(shared);
@@ -1399,12 +1505,28 @@ memfs_thread_init(
     thread->thread_id = shared->num_active_threads++;
     pthread_mutex_unlock(&shared->lock);
 
+    /* One thread sweeps the recall knob (async backend->core recalls). */
+    if (shared->lease_recall_us && thread->thread_id == 0) {
+        thread->lease_timer_armed = 1;
+        evpl_add_timer(evpl, &thread->lease_timer,
+                       memfs_lease_recall_sweep, 100000 /* 100ms */);
+    }
+
     return thread;
 } /* memfs_thread_init */
 
 static void
 memfs_thread_destroy(void *private_data)
 {
+    {
+        struct memfs_thread *lt = private_data;
+
+        if (lt->lease_timer_armed) {
+            evpl_remove_timer(lt->evpl, &lt->lease_timer);
+            lt->lease_timer_armed = 0;
+        }
+    }
+
     struct memfs_thread         *thread = private_data;
     struct memfs_dirent         *dirent;
     struct memfs_symlink_target *target;
@@ -6152,6 +6274,243 @@ memfs_remove_stream(
     request->complete(request);
 } /* memfs_remove_stream */
 
+
+/* ------------------------------------------------------------------ */
+/* CAP_LEASE arbiter implementation                                   */
+/* ------------------------------------------------------------------ */
+
+static struct memfs_lease_file *
+memfs_lease_file_get(
+    struct memfs_shared *shared,
+    const uint8_t       *fh,
+    uint8_t              fh_len,
+    uint64_t             fh_hash,
+    int                  create)
+{
+    struct memfs_lease_file *f;
+
+    for (f = shared->lease_files; f; f = f->next) {
+        if (f->fh_hash == fh_hash && f->fh_len == fh_len &&
+            memcmp(f->fh, fh, fh_len) == 0) {
+            return f;
+        }
+    }
+    if (!create) {
+        return NULL;
+    }
+    f = calloc(1, sizeof(*f));
+    memcpy(f->fh, fh, fh_len);
+    f->fh_len  = fh_len;
+    f->fh_hash = fh_hash;
+    LL_PREPEND(shared->lease_files, f);
+    return f;
+} /* memfs_lease_file_get */
+
+static void
+memfs_lease_acquire(
+    struct memfs_thread        *thread,
+    struct memfs_shared        *shared,
+    struct chimera_vfs_request *request)
+{
+    struct memfs_lease_file  *f;
+    struct memfs_lease_agg   *agg, *mine;
+    struct memfs_lease_range *rng;
+    uint8_t                   klass = request->lease_acquire.klass;
+
+    (void) thread;
+
+    pthread_mutex_lock(&shared->lease_lock);
+
+    f = memfs_lease_file_get(shared, request->fh, request->fh_len,
+                             request->fh_hash, 1);
+
+    if (klass == CHIMERA_VFS_LEASE_AGGREGATE) {
+        uint8_t rev     = request->lease_acquire.rev_used;
+        uint8_t deny    = request->lease_acquire.bind_deny;
+        uint8_t granted = rev;
+        int     deny_ok = 1;
+
+        mine = NULL;
+        for (agg = f->aggs; agg; agg = agg->next) {
+            if (chimera_claim_owner_equal(&agg->owner,
+                                          &request->lease_acquire.owner)) {
+                mine = agg;
+                continue;
+            }
+            /* The shared predicate, evaluated on the wire masks. */
+            granted &= (uint8_t) ~(agg->bind_deny);
+            if (deny & agg->rev_used) {
+                deny_ok = 0;
+            }
+        }
+
+        granted &= (uint8_t) ~shared->lease_deny_mask; /* test knob */
+
+        if (!deny_ok) {
+            pthread_mutex_unlock(&shared->lease_lock);
+            request->status = CHIMERA_VFS_EACCES;
+            request->complete(request);
+            return;
+        }
+
+        if (!mine) {
+            mine        = calloc(1, sizeof(*mine));
+            mine->owner = request->lease_acquire.owner;
+            LL_PREPEND(f->aggs, mine);
+        }
+        mine->rev_used   = granted;
+        mine->bind_deny  = deny;
+        mine->token      = ++shared->lease_next_token;
+        mine->recall_cb  = request->lease_acquire.recall_cb;
+        mine->recall_arg = request->lease_acquire.recall_arg;
+        if (shared->lease_recall_us) {
+            mine->recall_due = chimera_vfs_now_ticks() +
+                chimera_vfs_ns_to_ticks(shared->lease_recall_us * 1000ULL);
+        }
+
+        request->lease_acquire.r_token   = mine->token;
+        request->lease_acquire.r_granted = granted;
+        pthread_mutex_unlock(&shared->lease_lock);
+        request->status = CHIMERA_VFS_OK;
+        request->complete(request);
+        return;
+    }
+
+    /* RANGE: binding, all-or-nothing, cross-owner overlap+exclusivity. */
+    for (rng = f->ranges; rng; rng = rng->next) {
+        if (chimera_claim_owner_equal(&rng->owner,
+                                      &request->lease_acquire.owner)) {
+            continue;
+        }
+        if (!(rng->exclusive || request->lease_acquire.exclusive)) {
+            continue;
+        }
+        if (!chimera_vfs_claim_range_overlap_i(rng->offset, rng->length,
+                                               request->lease_acquire.offset,
+                                               request->lease_acquire.length)) {
+            continue;
+        }
+        /* Conflict: refuse (r_granted stays 0). */
+        pthread_mutex_unlock(&shared->lease_lock);
+        request->lease_acquire.r_token   = 0;
+        request->lease_acquire.r_granted = 0;
+        request->status                  = CHIMERA_VFS_OK;
+        request->complete(request);
+        return;
+    }
+
+    rng            = calloc(1, sizeof(*rng));
+    rng->owner     = request->lease_acquire.owner;
+    rng->exclusive = request->lease_acquire.exclusive;
+    rng->offset    = request->lease_acquire.offset;
+    rng->length    = request->lease_acquire.length;
+    rng->token     = ++shared->lease_next_token;
+    LL_PREPEND(f->ranges, rng);
+
+    request->lease_acquire.r_token   = rng->token;
+    request->lease_acquire.r_granted = 1;
+    pthread_mutex_unlock(&shared->lease_lock);
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* memfs_lease_acquire */
+
+static void
+memfs_lease_release(
+    struct memfs_thread        *thread,
+    struct memfs_shared        *shared,
+    struct chimera_vfs_request *request)
+{
+    struct memfs_lease_file  *f;
+    struct memfs_lease_agg   *agg;
+    struct memfs_lease_range *rng;
+    uint64_t                  token = request->lease_release.token;
+
+    (void) thread;
+
+    pthread_mutex_lock(&shared->lease_lock);
+    for (f = shared->lease_files; f; f = f->next) {
+        for (agg = f->aggs; agg; agg = agg->next) {
+            if (agg->token == token) {
+                if (request->lease_release.retained) {
+                    agg->rev_used  &= request->lease_release.retained;
+                    agg->recall_due = 0;
+                } else {
+                    LL_DELETE(f->aggs, agg);
+                    free(agg);
+                }
+                goto out;
+            }
+        }
+        for (rng = f->ranges; rng; rng = rng->next) {
+            if (rng->token == token) {
+                LL_DELETE(f->ranges, rng);
+                free(rng);
+                goto out;
+            }
+        }
+    }
+ out:
+    pthread_mutex_unlock(&shared->lease_lock);
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* memfs_lease_release */
+
+/* Recall-knob sweep (thread 0 only, 100ms): fire the async recall upcall
+ * for due aggregate grants OUTSIDE the registry lock -- the cascade runs
+ * core -> trigger engine -> frontend break callbacks and acks by release. */
+static void
+memfs_lease_recall_sweep(
+    struct evpl       *evpl,
+    struct evpl_timer *timer)
+{
+    struct memfs_thread     *thread =
+        container_of(timer, struct memfs_thread, lease_timer);
+    struct memfs_shared     *shared = thread->shared;
+    struct memfs_lease_file *f;
+    struct memfs_lease_agg  *agg;
+    uint64_t                 now = chimera_vfs_now_ticks();
+
+    struct {
+        void     ( *cb )(
+            void *,
+            const uint8_t *,
+            uint8_t,
+            uint64_t,
+            uint64_t,
+            uint8_t);
+        void    *arg;
+        uint8_t  fh[CHIMERA_VFS_FH_SIZE];
+        uint8_t  fh_len;
+        uint64_t fh_hash;
+        uint64_t token;
+    } due[16];
+    int n = 0, i;
+
+    (void) evpl;
+
+    pthread_mutex_lock(&shared->lease_lock);
+    for (f = shared->lease_files; f && n < 16; f = f->next) {
+        for (agg = f->aggs; agg && n < 16; agg = agg->next) {
+            if (agg->recall_due && now >= agg->recall_due && agg->recall_cb) {
+                due[n].cb  = agg->recall_cb;
+                due[n].arg = agg->recall_arg;
+                memcpy(due[n].fh, f->fh, f->fh_len);
+                due[n].fh_len  = f->fh_len;
+                due[n].fh_hash = f->fh_hash;
+                due[n].token   = agg->token;
+                n++;
+                agg->recall_due = 0;
+            }
+        }
+    }
+    pthread_mutex_unlock(&shared->lease_lock);
+
+    for (i = 0; i < n; i++) {
+        due[i].cb(due[i].arg, due[i].fh, due[i].fh_len, due[i].fh_hash,
+                  due[i].token, 0 /* full recall */);
+    }
+} /* memfs_lease_recall_sweep */
+
 static void
 memfs_dispatch(
     struct chimera_vfs_request *request,
@@ -6285,6 +6644,12 @@ memfs_dispatch(
         case CHIMERA_VFS_OP_REMOVE_STREAM:
             memfs_remove_stream(thread, fs, request, private_data);
             break;
+        case CHIMERA_VFS_OP_LEASE_ACQUIRE:
+            memfs_lease_acquire(thread, shared, request);
+            break;
+        case CHIMERA_VFS_OP_LEASE_RELEASE:
+            memfs_lease_release(thread, shared, request);
+            break;
         default:
             chimera_memfs_error("memfs_dispatch: unknown operation %d",
                                 request->opcode);
@@ -6303,7 +6668,8 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_memfs = {
         CHIMERA_VFS_CAP_ACL_NATIVE | CHIMERA_VFS_CAP_XATTR | CHIMERA_VFS_CAP_LAYOUT |
         CHIMERA_VFS_CAP_READ_PROVIDES_BUFFERS |
         CHIMERA_VFS_CAP_NAMED_STREAMS | CHIMERA_VFS_CAP_RPL | CHIMERA_VFS_CAP_FS_LOCK |
-        CHIMERA_VFS_CAP_CHANGE | CHIMERA_VFS_CAP_MKFS,
+        CHIMERA_VFS_CAP_CHANGE | CHIMERA_VFS_CAP_MKFS |
+        CHIMERA_VFS_CAP_LEASE,
     .init           = memfs_init,
     .destroy        = memfs_destroy,
     .thread_init    = memfs_thread_init,

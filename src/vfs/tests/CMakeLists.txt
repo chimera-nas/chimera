@@ -32,9 +32,9 @@ add_executable(vfs_notify_test vfs_notify_test.c)
 target_link_libraries(vfs_notify_test chimera_vfs)
 add_test(chimera/vfs/notify_test vfs_notify_test)
 
-add_executable(vfs_state_test vfs_state_test.c)
-target_link_libraries(vfs_state_test chimera_vfs)
-add_test(chimera/vfs/state_test vfs_state_test)
+add_executable(vfs_claim_test vfs_claim_test.c)
+target_link_libraries(vfs_claim_test chimera_vfs)
+add_test(chimera/vfs/claim_test vfs_claim_test)
 
 add_executable(vfs_acl_test vfs_acl_test.c)
 target_link_libraries(vfs_acl_test chimera_vfs)

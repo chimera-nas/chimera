@@ -293,12 +293,16 @@ chimera_portmap_dump_v2(
  */
 static void
 portmap_getaddr_common(
-    struct evpl *evpl,
-    struct evpl_rpc2_conn *conn,
-    const char *override_addr,
-    struct rpcb *args,
+    struct evpl               *evpl,
+    struct evpl_rpc2_conn     *conn,
+    const char                *override_addr,
+    struct rpcb               *args,
     struct evpl_rpc2_encoding *encoding,
-    int ( *send_reply )(struct evpl *, const struct evpl_rpc2_verf *, xdr_string *, struct evpl_rpc2_encoding *))
+    int                     ( *send_reply )(
+        struct evpl *,
+        const struct evpl_rpc2_verf *,
+        xdr_string *,
+        struct evpl_rpc2_encoding *))
 {
     xdr_string   addr;
     char         uaddr[64];
@@ -346,11 +350,15 @@ chimera_portmap_getaddr_v3(
  */
 static void
 portmap_dump_common(
-    struct evpl *evpl,
-    struct evpl_rpc2_conn *conn,
-    const char *override_addr,
+    struct evpl               *evpl,
+    struct evpl_rpc2_conn     *conn,
+    const char                *override_addr,
     struct evpl_rpc2_encoding *encoding,
-    int ( *send_reply )(struct evpl *, const struct evpl_rpc2_verf *, struct rp__list *, struct evpl_rpc2_encoding *))
+    int                     ( *send_reply )(
+        struct evpl *,
+        const struct evpl_rpc2_verf *,
+        struct rp__list *,
+        struct evpl_rpc2_encoding *))
 {
     struct rp__list *list;
     int              rc;

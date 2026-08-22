@@ -5,7 +5,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include "vfs_procs.h"
-#include "vfs_state.h"
+#include "vfs_claim.h"
 #include "vfs_internal.h"
 #include "vfs_name_cache.h"
 #include "vfs_attr_cache.h"

@@ -523,9 +523,11 @@ chimera_s3_tagging_list_for_remove_cb(
 /* Clear all existing tag xattrs on ctx->handle, then invoke `after`. */
 static void
 chimera_s3_tagging_clear_existing(
-    struct evpl *evpl,
+    struct evpl               *evpl,
     struct chimera_s3_request *request,
-    void ( *after )(struct evpl *evpl, struct chimera_s3_request *request))
+    void                    ( *after )(
+        struct evpl               *evpl,
+        struct chimera_s3_request *request))
 {
     struct chimera_server_s3_thread *thread = request->thread;
     struct chimera_s3_tagging_ctx   *ctx    = request->tagging;
@@ -1097,10 +1099,12 @@ chimera_s3_tagging_store_lookup_cb(
 
 void
 chimera_s3_tagging_store_by_path(
-    struct evpl *evpl,
+    struct evpl                     *evpl,
     struct chimera_server_s3_thread *thread,
-    struct chimera_s3_request *request,
-    void ( *done_cb )(struct evpl *evpl, struct chimera_s3_request *request))
+    struct chimera_s3_request       *request,
+    void                          ( *done_cb )(
+        struct evpl               *evpl,
+        struct chimera_s3_request *request))
 {
     struct chimera_s3_tagging_ctx *ctx = request->tagging;
 
@@ -1210,12 +1214,14 @@ chimera_s3_tagging_count_open_cb(
 
 void
 chimera_s3_tagging_count_for_head(
-    struct evpl *evpl,
+    struct evpl                     *evpl,
     struct chimera_server_s3_thread *thread,
-    struct chimera_s3_request *request,
-    const void *fh,
-    int fh_len,
-    void ( *done_cb )(struct evpl *evpl, struct chimera_s3_request *request))
+    struct chimera_s3_request       *request,
+    const void                      *fh,
+    int                              fh_len,
+    void                          ( *done_cb )(
+        struct evpl               *evpl,
+        struct chimera_s3_request *request))
 {
     struct chimera_s3_tagging_ctx *ctx = chimera_s3_tagging_ctx_alloc(request);
 

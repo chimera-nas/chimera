@@ -11,7 +11,7 @@
 #include "nfs4_state.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
-#include "vfs/vfs_state.h"
+#include "vfs/vfs_claim.h"
 
 /*
  * RFC 7530 §9.1.7 LOCK completion wrapper.  Advances the owner seqid(s)
@@ -108,10 +108,10 @@ chimera_nfs4_lock_finish(
 
 static void
 chimera_nfs4_lock_complete(
-    enum chimera_vfs_lease_result result,
-    struct chimera_vfs_lease     *granted,
-    struct chimera_vfs_lease     *conflict,
-    void                         *private_data)
+    enum chimera_vfs_claim_result            result,
+    struct chimera_vfs_claim                *granted,
+    const struct chimera_vfs_claim_conflict *conflict,
+    void                                    *private_data)
 {
     struct nfs_request       *req        = private_data;
     struct LOCK4args         *args       = &req->args_compound->argarray[req->index].oplock;
@@ -125,32 +125,32 @@ chimera_nfs4_lock_complete(
 
     req->nfs_inflight_range = NULL;
 
-    if (result == CHIMERA_VFS_LEASE_GRANTED) {
+    if (result == CHIMERA_CLAIM_GRANTED) {
         /* POSIX consolidation (RFC 7530 §16.10.4): coalesce this newly-granted
          * range with any same-mode interval of the same lock-owner that it
          * overlaps or abuts, so a single merged interval is what LOCKT reports
          * and LOCKU operates on.  All entries on this lock_state share one
          * lock-owner, so only the lock mode must match. */
-        uint64_t                  n_start = rl->lease.offset;
-        /* The VFS range layer stores to-EOF as UINT64_MAX; computing the
+        uint64_t                  n_start = rl->claim.offset;
+        /* The claim core stores to-EOF as UINT64_MAX; computing the
          * exclusive end overflow-safe maps a to-EOF (or wrapping) length to
          * UINT64_MAX. */
         uint64_t                  n_end =
-            (rl->lease.offset + rl->lease.length < rl->lease.offset)
-            ? UINT64_MAX : rl->lease.offset + rl->lease.length;
-        uint8_t                   n_mode     = rl->lease.mode.granted;
+            (rl->claim.offset + rl->claim.length < rl->claim.offset)
+            ? UINT64_MAX : rl->claim.offset + rl->claim.length;
+        uint8_t                   n_mode     = rl->claim.used;
         uint64_t                  orig_start = n_start;
         uint64_t                  orig_end   = n_end;
         struct nfs4_range_lease **pp         = &lock_state->range_leases;
 
         while (*pp) {
             struct nfs4_range_lease *e       = *pp;
-            uint64_t                 e_start = e->lease.offset;
+            uint64_t                 e_start = e->claim.offset;
             uint64_t                 e_end   =
-                (e->lease.offset + e->lease.length < e->lease.offset)
-                ? UINT64_MAX : e->lease.offset + e->lease.length;
+                (e->claim.offset + e->claim.length < e->claim.offset)
+                ? UINT64_MAX : e->claim.offset + e->claim.length;
 
-            if (e->lease.mode.granted == n_mode &&
+            if (e->claim.used == n_mode &&
                 e_start <= n_end && n_start <= e_end) {
                 if (e_start < n_start) {
                     n_start = e_start;
@@ -166,15 +166,17 @@ chimera_nfs4_lock_complete(
         }
 
         if (n_start != orig_start || n_end != orig_end) {
-            /* Grew via merge: re-take the lease at the coalesced extent. */
-            chimera_vfs_lease_release(vfs_state, rl->file_state, &rl->lease);
-            rl->lease.offset = n_start;
-            rl->lease.length = (n_end == UINT64_MAX) ? UINT64_MAX : (n_end - n_start);
-            chimera_vfs_state_try_insert(vfs_state, rl->file_state, &rl->lease,
-                                         NULL);
+            /* Grew via merge: re-take the claim at the coalesced extent.
+             * Release+reacquire surgery, result ignored (a later step moves
+             * this to chimera_vfs_claim_range_replace). */
+            chimera_vfs_claim_release(vfs_state, rl->file_state, &rl->claim);
+            rl->claim.offset = n_start;
+            rl->claim.length = (n_end == UINT64_MAX) ? UINT64_MAX : (n_end - n_start);
+            chimera_vfs_claim_try_acquire(vfs_state, rl->file_state, &rl->claim,
+                                          NULL);
         }
 
-        /* Link the granted range lease onto the lock_state so LOCKU /
+        /* Link the granted range claim onto the lock_state so LOCKU /
          * teardown can find and release it. */
         rl->next                 = lock_state->range_leases;
         lock_state->range_leases = rl;
@@ -201,7 +203,7 @@ chimera_nfs4_lock_complete(
         return;
     }
 
-    /* DENIED (or wait=false BREAKING): discard the half-built range lease. */
+    /* DENIED (or wait=false BREAKING): discard the half-built range claim. */
     chimera_vfs_state_put(vfs_state, rl->file_state);
     free(rl);
 
@@ -221,11 +223,16 @@ chimera_nfs4_lock_complete(
     res->status        = NFS4ERR_DENIED;
     res->denied.offset = conflict ? conflict->offset : 0;
     /* conflict->length already uses UINT64_MAX for a to-EOF holder. */
-    res->denied.length   = conflict ? conflict->length : UINT64_MAX;
-    res->denied.locktype = (conflict && (conflict->mode.granted & CHIMERA_VFS_LEASE_MODE_W)) ?
+    res->denied.length = conflict ? conflict->length : UINT64_MAX;
+    /* WRITE_LT iff the holder writes: a write delegation (CW) must report
+     * WRITE_LT though it holds no LW. */
+    res->denied.locktype = (conflict &&
+                            (conflict->used & (CHIMERA_CLAIM_W |
+                                               CHIMERA_CLAIM_CW |
+                                               CHIMERA_CLAIM_LW))) ?
         WRITE_LT : READ_LT;
     /* Name the conflicting holder (RFC 7530 §16.10.5): clientid directly,
-     * owner byte-string reconstructed from the lease's owner hash. */
+     * owner byte-string reconstructed from the claim's owner hash. */
     nfs4_fill_denied_owner(&req->thread->shared->nfs4_shared_clients,
                            conflict, &res->denied.owner,
                            req->encoding->dbuf);
@@ -602,12 +609,12 @@ chimera_nfs4_lock(
         return;
     }
 
-    /* Acquire the byte-range lease through vfs_state for cross-protocol
-     * (NLM / SMB) coordination.  NFS uses UINT64_MAX for "to EOF";
-     * vfs_state uses 0. */
+    /* Acquire the byte-range claim through the claim core for cross-protocol
+     * (NLM / SMB) coordination. */
     {
         struct chimera_vfs_state      *vfs_state = thread->vfs->vfs_state;
         struct chimera_vfs_file_state *file_state;
+        struct chimera_claim_owner     owner;
         struct nfs4_range_lease       *rl;
 
         rl = calloc(1, sizeof(*rl));
@@ -645,33 +652,39 @@ chimera_nfs4_lock(
             return;
         }
 
-        rl->file_state         = file_state;
-        rl->lease.kind         = CHIMERA_VFS_LEASE_RANGE;
-        rl->lease.mode.granted = (lock_type == CHIMERA_VFS_LOCK_READ) ?
-            CHIMERA_VFS_LEASE_MODE_R : CHIMERA_VFS_LEASE_MODE_W;
-        rl->lease.offset = args->offset;
-        /* NFSv4 and the VFS range layer share UINT64_MAX as the to-EOF
-         * sentinel, so the wire length is stored unchanged. */
-        rl->lease.length           = args->length;
-        rl->lease.owner.protocol   = CHIMERA_VFS_LEASE_PROTO_NFSV4;
-        rl->lease.owner.client_key = lock_state->lock_owner->client->client_id;
-        rl->lease.owner.owner_lo   = XXH3_64bits(lock_state->lock_owner->owner,
-                                                 lock_state->lock_owner->owner_len);
-        rl->lease.owner.owner_hi = 0;
+        rl->file_state = file_state;
+
+        memset(&owner, 0, sizeof(owner));
+        owner.proto      = CHIMERA_CLAIM_PROTO_NFSV4;
+        owner.client_key = lock_state->lock_owner->client->client_id;
+        owner.owner_lo   = XXH3_64bits(lock_state->lock_owner->owner,
+                                       lock_state->lock_owner->owner_len);
+        owner.owner_hi = 0;
+
+        /* NFSv4 and the claim core share UINT64_MAX as the to-EOF sentinel,
+         * so the wire length is stored unchanged. */
+        chimera_vfs_claim_init_range(&rl->claim,
+                                     lock_type != CHIMERA_VFS_LOCK_READ,
+                                     /*smb=*/ false,
+                                     args->offset, args->length,
+                                     &owner);
         /* Courteous server: report this lock dead once the owning client's
          * lease lapses, so a conflicting acquire reclaims it; reclaim flags
          * the client for sweep teardown. */
-        rl->lease.owner.is_alive_cb = nfs_client_lease_alive;
-        rl->lease.owner.revoked_cb  = nfs_client_lease_revoked_cb;
-        rl->lease.owner.cb_private  = lock_state->lock_owner->client;
+        rl->claim.is_alive_cb = nfs_client_lease_alive;
+        rl->claim.revoked_cb  = nfs_client_lease_revoked_cb;
+        rl->claim.cb_private  = lock_state->lock_owner->client;
 
         req->nfs_inflight_range = rl;
 
         /* wait=false: NFSv4 LOCK returns DENIED on conflict (matching the
          * prior backend behavior).  A cross-protocol breakable conflict
-         * still kicks off the break inside try_insert. */
-        chimera_vfs_lease_acquire(vfs_state, file_state,
-                                  &rl->lease, &rl->ticket, false,
-                                  chimera_nfs4_lock_complete, req);
+         * still kicks off the break inside the acquire (the NFSv4 LOCK
+         * triple: recall started + synchronous BREAKING result). */
+        chimera_vfs_claim_acquire(req->thread->vfs_thread, vfs_state,
+                                  file_state,
+                                  &rl->claim, &rl->ticket,
+                                  /*wait=*/ false, /*wait_hard=*/ false,
+                                  chimera_nfs4_lock_complete, NULL, req);
     }
 } /* chimera_nfs4_lock */

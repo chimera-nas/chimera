@@ -12,7 +12,7 @@
 
 #include "vfs/vfs.h"
 #include "vfs/vfs_cred.h"
-#include "vfs/vfs_state.h"
+#include "vfs/vfs_claim.h"
 #include "smb2.h"
 
 struct chimera_smb_share;
@@ -141,91 +141,91 @@ struct chimera_smb_notify_state;
 struct chimera_smb_lock_entry;
 
 struct chimera_smb_open_file {
-    enum chimera_smb_open_file_type   type;
-    enum chimera_smb_pipe_magic       pipe_magic;
-    chimera_smb_pipe_transceive_t     pipe_transceive;
+    enum chimera_smb_open_file_type  type;
+    enum chimera_smb_pipe_magic      pipe_magic;
+    chimera_smb_pipe_transceive_t    pipe_transceive;
     /* DCE/RPC-over-named-pipe (ncacn_np) transport via SMB2 WRITE/READ: a WRITE
      * runs the request PDU through pipe_transceive and stashes the response PDU
      * here for one or more following READs to drain.  NULL when no response is
      * pending.  (The IOCTL FSCTL_PIPE_TRANSCEIVE transport does not use this.) */
-    uint8_t                          *rpc_resp;
-    uint32_t                          rpc_resp_len;
-    uint32_t                          rpc_resp_off;
-    struct UT_hash_handle             hh;
-    struct chimera_smb_file_id        file_id;
-    struct chimera_vfs_open_handle   *handle;
-    uint32_t                          desired_access;
+    uint8_t                         *rpc_resp;
+    uint32_t                         rpc_resp_len;
+    uint32_t                         rpc_resp_off;
+    struct UT_hash_handle            hh;
+    struct chimera_smb_file_id       file_id;
+    struct chimera_vfs_open_handle  *handle;
+    uint32_t                         desired_access;
     /* Access mask actually granted on this handle (FileAccessInformation).
      * Resolved from the object ACL at open: equals desired_access for a
      * specific-bits open, or the maximal available set for MAXIMUM_ALLOWED. */
-    uint32_t                          granted_access;
+    uint32_t                         granted_access;
     /* The caller's full effective rights against the object's ACL, regardless
      * of what was requested -- reported in the MxAc create-context response. */
-    uint32_t                          maximal_access;
-    uint32_t                          share_access;
-    uint32_t                          name_len;
-    uint32_t                          flags;
-    uint64_t                          position;
-    uint32_t                          parent_fh_len;
-    uint32_t                          refcnt;
+    uint32_t                         maximal_access;
+    uint32_t                         share_access;
+    uint32_t                         name_len;
+    uint32_t                         flags;
+    uint64_t                         position;
+    uint32_t                         parent_fh_len;
+    uint32_t                         refcnt;
     /* MS-SMB2 §3.3.5.2.10 channel-sequence tracking.  channel_sequence holds
      * the highest ChannelSequence observed on this Open; a mutating op
      * (WRITE/SET_INFO/IOCTL) carrying a stale sequence -- behind by
      * [0x8000..0xFFFF] mod 0x10000 -- is rejected with FILE_NOT_AVAILABLE.
      * READ never rejects but advances the value.  _valid gates the first op. */
-    uint16_t                          channel_sequence;
-    uint8_t                           channel_sequence_valid;
+    uint16_t                         channel_sequence;
+    uint8_t                          channel_sequence_valid;
     /* The CREATE Action reported when this handle was first opened
      * (CREATED/OPENED/...); replayed verbatim on a DH2Q create_guid replay. */
-    uint32_t                          create_action;
+    uint32_t                         create_action;
     /* Phase-0 plumbing: fields populated by later phases. Zeroed on alloc. */
-    uint32_t                          ctx_present_mask;
-    uint8_t                           oplock_level;
+    uint32_t                         ctx_present_mask;
+    uint8_t                          oplock_level;
     /* Set when an outstanding legacy oplock break to this handle expects an
      * acknowledgment (it broke an exclusive/batch oplock).  A break from
      * LEVEL_II to NONE is NOT acknowledged; a client ack for one is a protocol
      * error (MS-SMB2 -> NT_STATUS_INVALID_OPLOCK_PROTOCOL). */
-    uint8_t                           oplock_break_ack_required;
-    uint8_t                           lease_state;
-    uint16_t                          lease_epoch;
-    uint32_t                          lease_flags;
-    uint32_t                          durable_flags;
-    uint64_t                          durable_timeout_ms;
+    uint8_t                          oplock_break_ack_required;
+    uint8_t                          lease_state;
+    uint16_t                         lease_epoch;
+    uint32_t                         lease_flags;
+    uint32_t                         durable_flags;
+    uint64_t                         durable_timeout_ms;
     /* FSCTL_LMR_REQUEST_RESILIENCY (MS-SMB2 2.2.31.3 / 3.3.5.15.9): set once a
      * client has been granted handle resiliency on this open.  resilient_timeout_ms
      * is the (server-capped) duration the open survives a network disconnect for
      * reclaim-by-reconnect. */
-    bool                              resilient;
-    uint64_t                          resilient_timeout_ms;
-    uint8_t                           lease_key[16];
-    uint8_t                           parent_lease_key[16];
-    uint8_t                           create_guid[16];
+    bool                             resilient;
+    uint64_t                         resilient_timeout_ms;
+    uint8_t                          lease_key[16];
+    uint8_t                          parent_lease_key[16];
+    uint8_t                          create_guid[16];
     /* The ClientGuid of the connection that created this open.  Retained so a
      * conflicting CREATE can compare clients even after this open is parked (its
      * create_conn is cleared at disconnect) -- e.g. the AppInstanceId same-client
      * rule must not failover-displace a parked persistent handle of its own
      * client (pike appinstanceid test_appinstanceid_reconnect_same_clientguid). */
-    uint8_t                           client_guid[16];
+    uint8_t                          client_guid[16];
     /* SMB2_CREATE_APP_INSTANCE_ID / *_VERSION (MS-SMB2 2.2.13.2.13/14).
      * Recorded when the open carried an AppInstanceId so a later CREATE on a
      * different connection can match it and apply the version-gated
      * force-close rule (3.3.5.9.7 / 3.3.5.9.16). */
-    uint8_t                           app_instance_id[16];
-    uint64_t                          app_version_high;
-    uint64_t                          app_version_low;
-    uint8_t                           app_version_present;
-    struct chimera_smb_open_file     *next;
-    struct chimera_smb_notify_state  *notify_state;
+    uint8_t                          app_instance_id[16];
+    uint64_t                         app_version_high;
+    uint64_t                         app_version_low;
+    uint8_t                          app_version_present;
+    struct chimera_smb_open_file    *next;
+    struct chimera_smb_notify_state *notify_state;
     /* Byte-range locks (SMB2_LOCK) held against this open.  Allocated
      * and linked on each granted lock op; freed on UNLOCK or on close. */
-    struct chimera_smb_lock_entry    *lock_entries;
+    struct chimera_smb_lock_entry   *lock_entries;
     /* A blocking byte-range LOCK (MS-SMB2 3.3.5.14) parked on this open waiting
      * for a conflicting range to release.  NULL when no lock is pending.  The
      * parked request holds an open_file reference, so the open is not freed while
      * a lock waits; close / tree-disconnect / logoff / connection teardown abort
      * the parked lock (cancel the VFS ticket, complete RANGE_NOT_LOCKED) so the
      * reference is dropped and the open can be reclaimed. */
-    struct chimera_smb_request       *parked_lock_req;
+    struct chimera_smb_request      *parked_lock_req;
     /* MS-SMB2 3.3.5.14 LockSequence replay cache.  A LOCK/UNLOCK carries a
      * 4-bit LockSequenceNumber (bucket, 1..64 valid) + 4-bit LockSequenceIndex.
      * For a durable / persistent / resilient / multichannel handle the server
@@ -235,68 +235,68 @@ struct chimera_smb_open_file {
      * lock_seq_valid[b] is 0 until bucket b (1..64) has been used; the slot then
      * holds the last index and status.  Index 0 is a legal index, so a separate
      * valid flag is required.  Bucket 0 / >64 are never cached. */
-    uint8_t                           lock_seq_valid[64];
-    uint8_t                           lock_seq_index[64];
-    uint32_t                          lock_seq_status[64];
-    /* SHARE lease (whole-file deny mode reservation) held by this open
+    uint8_t                          lock_seq_valid[64];
+    uint8_t                          lock_seq_index[64];
+    uint32_t                         lock_seq_status[64];
+    /* SHARE claim (whole-file access/deny reservation) held by this open
      * once CREATE succeeds.  Released at close. */
-    struct chimera_vfs_lease          share_lease;
-    struct chimera_vfs_file_state    *share_file_state;
-    bool                              share_lease_inserted;
+    struct chimera_vfs_claim         share_lease;
+    struct chimera_vfs_file_state   *share_file_state;
+    bool                             share_lease_inserted;
     /* For a named-stream open only: a second reservation on the BASE file's
      * state carrying just the DELETE dimension.  Stream R/W share modes are
      * per-stream (share_lease, on the stream fh), but DELETE is a file-level
      * property: a stream opened without FILE_SHARE_DELETE must block the base
      * file's deletion, and a base delete with a stream open held must defer
      * (smb2.streams.delete).  Released at close in drain_locks. */
-    struct chimera_vfs_lease          base_share_lease;
-    struct chimera_vfs_file_state    *base_share_file_state;
-    bool                              base_share_lease_inserted;
-    /* CACHING lease (SMB2 lease / oplock) held by this open.  The lease is now a
-     * VFS-owned, owner-keyed, refcounted grant (chimera_vfs_caching_grant) that
+    struct chimera_vfs_claim         base_share_lease;
+    struct chimera_vfs_file_state   *base_share_file_state;
+    bool                             base_share_lease_inserted;
+    /* Cache claim (SMB2 lease / oplock) held by this open.  The lease is a
+     * VFS-owned, owner-keyed, refcounted grant (chimera_vfs_claim_grant) that
      * may be shared by several opens under one lease key; this open holds one
      * reference, dropped at close or on OPLOCK_BREAK ack with mode=0.  NULL if
      * the open holds no caching lease.  caching_file_state holds this open's
      * reference on the per-file state (balanced separately from the grant ref). */
-    struct chimera_vfs_caching_grant *grant;
-    struct chimera_vfs_file_state    *caching_file_state;
-    bool                              caching_lease_inserted;
-    /* Intrusive link on grant->holders: every open referencing a shared caching
+    struct chimera_vfs_claim_grant  *grant;
+    struct chimera_vfs_file_state   *caching_file_state;
+    bool                             caching_lease_inserted;
+    /* Intrusive link on grant->members: every open referencing a shared cache
      * grant is threaded here so a break callback can pick a live member to notify
      * (the grant may outlive the open that created it once opens coalesce).
      * Manipulated under the grant's file->lock. */
-    struct chimera_smb_open_file     *grant_member_next;
+    struct chimera_smb_open_file    *grant_member_next;
     /* Conn on which this open was created — used by the break path to
      * send unsolicited OPLOCK_BREAK Notifications.  Cleared by the
      * disconnect handler before the conn is freed; if NULL when a
      * break is needed, the lease is forcibly revoked instead. */
-    struct chimera_smb_conn          *create_conn;
+    struct chimera_smb_conn         *create_conn;
     /* Tree this open is hashed into (tree->open_files[]).  Lets an
      * AppInstanceId force-close locate and unhash the conflicting open
      * directly from the lease back-reference. */
-    struct chimera_smb_tree          *tree;
-    uint8_t                           parent_fh[CHIMERA_VFS_FH_SIZE];
-    char                              name[SMB_FILENAME_MAX];
+    struct chimera_smb_tree         *tree;
+    uint8_t                          parent_fh[CHIMERA_VFS_FH_SIZE];
+    char                             name[SMB_FILENAME_MAX];
     /* Full path of this open relative to the share root, backslash-separated
      * with no leading separator (e.g. "dir\\sub\\file.txt").  `name` above is
      * only the final component (paired with parent_fh for VFS ops); this is the
      * canonical name reported in FileAllInformation / FileNameInformation
      * (MS-FSCC 2.1.7 / 2.4.2) and FileNormalizedNameInformation. */
-    char                              full_path[SMB_PATH_MAX];
-    uint32_t                          full_path_len;
-    uint16_t                          pattern[SMB_FILENAME_MAX];
+    char                             full_path[SMB_PATH_MAX];
+    uint32_t                         full_path_len;
+    uint16_t                         pattern[SMB_FILENAME_MAX];
     /* Named-stream (ADS) identity, valid when CHIMERA_SMB_OPEN_FILE_FLAG_STREAM
      * is set.  base_fh is the file the stream hangs off (open_file->handle's fh
      * points at the stream itself). */
-    uint16_t                          stream_name_len;
-    char                              stream_name[SMB_FILENAME_MAX];
-    uint16_t                          base_fh_len;
-    uint8_t                           base_fh[CHIMERA_VFS_FH_SIZE];
+    uint16_t                         stream_name_len;
+    char                             stream_name[SMB_FILENAME_MAX];
+    uint16_t                         base_fh_len;
+    uint8_t                          base_fh[CHIMERA_VFS_FH_SIZE];
     /* FSCTL_GET/SET_INTEGRITY_INFORMATION (MS-FSCC 2.3.54/2.3.55): the data
      * integrity (ReFS checksum) attributes round-trip per open.  memfs has no
      * real integrity streams, so we just remember what was set. */
-    uint16_t                          integrity_algo;
-    uint32_t                          integrity_flags;
+    uint16_t                         integrity_algo;
+    uint32_t                         integrity_flags;
 };
 
 #define CHIMERA_SMB_OPEN_FILE_BUCKETS     256
@@ -361,8 +361,8 @@ struct chimera_smb_tree {
 
 struct chimera_smb_session {
     uint64_t                    session_id;
-    /* Stable per-CLIENT identity used as the owner key for CACHING leases,
-     * SHARE reservations and byte-range locks (chimera_vfs_lease_owner.client_key).
+    /* Stable per-CLIENT identity used as the owner key for cache claims,
+     * SHARE reservations and byte-range locks (chimera_claim_owner.client_key).
      * Derived from the connection's ClientGuid, NOT the session id, because
      * MS-SMB2 keys leases by the client (3.3.5.9.8): two sessions of the same
      * client (same ClientGuid, e.g. a reconnect or a second channel) share one

@@ -11,7 +11,7 @@
 #include "vfs_rpl_cache.h"
 #include "vfs_mount_table.h"
 #include "vfs/vfs_procs.h"
-#include "vfs/vfs_state.h"
+#include "vfs/vfs_claim.h"
 #include "common/macros.h"
 
 /* ----------------------------------------------------------------
@@ -1214,10 +1214,12 @@ chimera_vfs_notify_emit_body(
  * that directory so a client caching its enumeration re-reads it — this is the
  * cross-protocol coherency point: an NFS or S3 mutation breaks an SMB client's
  * directory lease exactly as an SMB mutation does.  Run before taking any notify
- * registry lock (the break brackets vfs_state's file lock entirely, so there is
- * no nesting against bucket/mount locks — preserving the lock-order invariant
- * documented above).  `has_skip` spares the lease named by a ParentLeaseKey the
- * mutating client supplied (self-exemption); the no-skip wrapper breaks all. */
+ * registry lock (the break brackets the claim core's file lock entirely, so
+ * there is no nesting against bucket/mount locks — preserving the lock-order
+ * invariant documented above).  `has_skip` spares the lease named by a
+ * ParentLeaseKey the mutating client supplied (self-exemption, via the trigger
+ * engine's KEY circle); the no-skip wrapper (a leaseless mutator) passes a NULL
+ * actor and breaks every directory lease. */
 static inline void
 chimera_vfs_notify_dir_lease_break(
     struct chimera_vfs_notify *notify,
@@ -1227,11 +1229,23 @@ chimera_vfs_notify_dir_lease_break(
     uint64_t                   skip_hi,
     bool                       has_skip)
 {
+    struct chimera_claim_actor actor;
+
     if (notify && notify->vfs && notify->vfs->vfs_state) {
-        chimera_vfs_state_dir_lease_break(notify->vfs->vfs_state,
-                                          dir_fh, dir_fh_len,
-                                          chimera_vfs_hash(dir_fh, dir_fh_len),
-                                          skip_lo, skip_hi, has_skip);
+        if (has_skip) {
+            /* The ParentLeaseKey bytes ride in actor.owner.key; everything
+             * else stays zero (a zero owner matches no real claim, so only
+             * the KEY-circle exemption applies). */
+            memset(&actor, 0, sizeof(actor));
+            memcpy(actor.owner.key, &skip_lo, 8);
+            memcpy(actor.owner.key + 8, &skip_hi, 8);
+        }
+        chimera_vfs_claim_invalidate(notify->vfs->vfs_state,
+                                     dir_fh, dir_fh_len,
+                                     chimera_vfs_hash(dir_fh, dir_fh_len),
+                                     CHIMERA_TRIGGER_DIR_CONTENT,
+                                     has_skip ? &actor : NULL,
+                                     0);
     }
 } /* chimera_vfs_notify_dir_lease_break */
 

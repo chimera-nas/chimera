@@ -4,7 +4,7 @@
 
 #include <stdlib.h>
 #include "vfs_procs.h"
-#include "vfs_state.h"
+#include "vfs_claim.h"
 #include "vfs_internal.h"
 #include "vfs_name_cache.h"
 #include "vfs_attr_cache.h"
@@ -228,7 +228,7 @@ chimera_vfs_rename_at_source_lookup_complete(
                                          request->rename_at.source_fh_len,
                                          chimera_vfs_hash(request->rename_at.source_fh,
                                                           request->rename_at.source_fh_len),
-                                         CHIMERA_VFS_LEASE_MODE_R,
+                                         CHIMERA_CLAIM_CR,
                                          chimera_vfs_rename_at_recall_target);
         } else {
             chimera_vfs_io_recall(request,

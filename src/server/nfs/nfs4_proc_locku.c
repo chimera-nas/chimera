@@ -10,7 +10,7 @@
 #include "nfs4_state.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
-#include "vfs/vfs_state.h"
+#include "vfs/vfs_claim.h"
 
 void
 chimera_nfs4_locku(
@@ -132,10 +132,10 @@ chimera_nfs4_locku(
         /* Detach all intervals overlapping the unlock range. */
         while (*pp) {
             rl = *pp;
-            uint64_t e_start = rl->lease.offset;
+            uint64_t e_start = rl->claim.offset;
             uint64_t e_end   =
-                (rl->lease.offset + rl->lease.length < rl->lease.offset)
-                ? UINT64_MAX : rl->lease.offset + rl->lease.length;
+                (rl->claim.offset + rl->claim.length < rl->claim.offset)
+                ? UINT64_MAX : rl->claim.offset + rl->claim.length;
 
             if (e_end <= u_start || u_end <= e_start) {
                 pp = &rl->next;
@@ -146,27 +146,32 @@ chimera_nfs4_locku(
             hits     = rl;
         }
 
-        /* Re-insert the non-unlocked remainder(s) of each detached interval. */
+        /* Re-insert the non-unlocked remainder(s) of each detached interval.
+         * Release+reacquire surgery with the result ignored (a later step
+         * moves this to chimera_vfs_claim_range_replace). */
         while (hits) {
-            uint64_t                       e_start = hits->lease.offset;
+            uint64_t                       e_start = hits->claim.offset;
             uint64_t                       e_end   =
-                (hits->lease.offset + hits->lease.length < hits->lease.offset)
-                ? UINT64_MAX : hits->lease.offset + hits->lease.length;
-            uint8_t                        mode   = hits->lease.mode.granted;
-            struct chimera_vfs_lease_owner owner  = hits->lease.owner;
-            struct chimera_vfs_file_state *fs     = hits->file_state;
-            bool                           reused = false;
+                (hits->claim.offset + hits->claim.length < hits->claim.offset)
+                ? UINT64_MAX : hits->claim.offset + hits->claim.length;
+            bool                           exclusive =
+                (hits->claim.used & CHIMERA_CLAIM_LW) != 0;
+            struct chimera_claim_owner     owner      = hits->claim.owner;
+            void                          *cb_private = hits->claim.cb_private;
+            struct chimera_vfs_file_state *fs         = hits->file_state;
+            bool                           reused     = false;
 
             match = hits;
             hits  = hits->next;
 
-            chimera_vfs_lease_release(vfs_state, fs, &match->lease);
+            chimera_vfs_claim_release(vfs_state, fs, &match->claim);
 
             if (e_start < u_start) {
                 /* Left remainder [e_start, u_start): reuse this entry. */
-                match->lease.offset = e_start;
-                match->lease.length = u_start - e_start;
-                chimera_vfs_state_try_insert(vfs_state, fs, &match->lease, NULL);
+                match->claim.offset = e_start;
+                match->claim.length = u_start - e_start;
+                chimera_vfs_claim_try_acquire(vfs_state, fs, &match->claim,
+                                              NULL);
                 match->next              = lock_state->range_leases;
                 lock_state->range_leases = match;
                 reused                   = true;
@@ -174,11 +179,11 @@ chimera_nfs4_locku(
             if (e_end > u_end) {
                 if (!reused) {
                     /* Right remainder [u_end, e_end): reuse this entry. */
-                    match->lease.offset = u_end;
-                    match->lease.length = (e_end == UINT64_MAX) ? UINT64_MAX :
+                    match->claim.offset = u_end;
+                    match->claim.length = (e_end == UINT64_MAX) ? UINT64_MAX :
                         e_end - u_end;
-                    chimera_vfs_state_try_insert(vfs_state, fs, &match->lease,
-                                                 NULL);
+                    chimera_vfs_claim_try_acquire(vfs_state, fs, &match->claim,
+                                                  NULL);
                     match->next              = lock_state->range_leases;
                     lock_state->range_leases = match;
                     reused                   = true;
@@ -190,7 +195,8 @@ chimera_nfs4_locku(
                                               fs->fh_hash, true);
                     if (fs2) {
                         nfs4_range_lease_insert(vfs_state, lock_state, fs2,
-                                                &owner, mode, u_end, e_end);
+                                                &owner, exclusive, u_end, e_end,
+                                                cb_private);
                     }
                 }
             }

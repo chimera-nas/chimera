@@ -1301,8 +1301,10 @@ diskfs_sb_write_complete(
 static struct diskfs_sb_write *
 diskfs_sb_write_prepare(
     struct diskfs_thread *thread,
-    void ( *cb )(struct diskfs_thread *, void *),
-    void *arg)
+    void               ( *cb )(
+        struct diskfs_thread *,
+        void *),
+    void                 *arg)
 {
     struct diskfs_shared   *shared = thread->shared;
     struct diskfs_sb_write *sw     = malloc(sizeof(*sw));

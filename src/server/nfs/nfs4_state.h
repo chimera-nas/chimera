@@ -19,14 +19,14 @@
 
 struct nfs_request;
 #include "vfs/vfs.h"
-#include "vfs/vfs_state.h"
+#include "vfs/vfs_claim.h"
 #include "common/macros.h"
 
 /* One held NFSv4 byte-range, tracked so it can be released on LOCKU or
- * cascaded at lock_state teardown.  vfs_state coordinates the range
- * across NLM and SMB; the lease lives here for the lock_state's lifetime. */
+ * cascaded at lock_state teardown.  The claim core coordinates the range
+ * across NLM and SMB; the claim lives here for the lock_state's lifetime. */
 struct nfs4_range_lease {
-    struct chimera_vfs_lease           lease;
+    struct chimera_vfs_claim           claim;
     struct chimera_vfs_pending_acquire ticket;
     struct chimera_vfs_file_state     *file_state;
     struct nfs4_range_lease           *next;
@@ -35,16 +35,18 @@ struct nfs4_range_lease {
 struct nfs_lock_state;
 
 /* Byte-range lock interval management (POSIX merge on LOCK / split on LOCKU).
- * Defined in nfs4_state.c. */
+ * Defined in nfs4_state.c.  `cb_private` is the owning nfs_client, wired onto
+ * the claim's courtesy callbacks (is_alive/revoked). */
 struct nfs4_range_lease *
 nfs4_range_lease_insert(
-    struct chimera_vfs_state             *vfs_state,
-    struct nfs_lock_state                *lock_state,
-    struct chimera_vfs_file_state        *file_state,
-    const struct chimera_vfs_lease_owner *owner,
-    uint8_t                               mode,
-    uint64_t                              start,
-    uint64_t                              end);
+    struct chimera_vfs_state         *vfs_state,
+    struct nfs_lock_state            *lock_state,
+    struct chimera_vfs_file_state    *file_state,
+    const struct chimera_claim_owner *owner,
+    bool                              exclusive,
+    uint64_t                          start,
+    uint64_t                          end,
+    void                             *cb_private);
 
 void
 nfs4_range_lease_free(
@@ -332,12 +334,12 @@ struct nfs_open_state {
     struct nfs_lock_state          *locks;              /* utlist via next_in_open */
     UT_hash_handle                  hh;                 /* by fh in owner->states_by_fh */
 
-    /* vfs_state SHARE reservation for cross-protocol (NLM/SMB) share-mode
-     * coordination.  Held while the open_state is alive; released in
-     * open_state_cleanup. */
-    struct chimera_vfs_lease        share_lease;
+    /* Claim-core ACCESS reservation (NFS4_OPEN construct) for cross-protocol
+     * (NLM/SMB) share-mode coordination.  Held while the open_state is alive;
+     * released in open_state_cleanup. */
+    struct chimera_vfs_claim        share_claim;
     struct chimera_vfs_file_state  *share_file_state;
-    bool                            share_lease_held;
+    bool                            share_claim_held;
 
     /* Lifetime: starts at 1 for the state's slot; each acquire bumps it.
      * destroy() flips `destroyed` and drops the +1.  When refcount reaches
@@ -402,17 +404,17 @@ struct nfs_lock_state {
 #define NFS4_DELEG_RETURNED  2  /* DELEGRETURN'd or revoked; being torn down */
 
 /*
- * An NFSv4 OPEN delegation (RFC 7530 §10).  Modeled as a CACHING lease in
- * vfs_state so conflicting opens/IO from any protocol drive a recall through
- * the shared break machinery.  Created during OPEN when delegations are
- * enabled and the callback path is up; carries its own stateid (slot type
- * NFS4_SLOT_TYPE_DELEG) returned to the client and presented back at
- * DELEGRETURN.
+ * An NFSv4 OPEN delegation (RFC 7530 §10).  Modeled as a cache-class claim
+ * (DELEG_R/DELEG_W construct) so conflicting opens/IO from any protocol drive
+ * a recall through the shared break machinery.  Created during OPEN when
+ * delegations are enabled and the callback path is up; carries its own stateid
+ * (slot type NFS4_SLOT_TYPE_DELEG) returned to the client and presented back
+ * at DELEGRETURN.
  *
  * Lifetime: created with refcount 1 (its slot's lifetime ref).  The break_cb
  * may take a transient ref while a recall is in flight.  destroy() flips
  * `destroyed` and drops the lifetime ref; the last release frees the struct
- * after releasing the vfs_state lease.
+ * after releasing the claim.
  */
 struct nfs_delegation {
     struct nfs_client             *client;        /* borrowed; lists this deleg */
@@ -432,9 +434,11 @@ struct nfs_delegation {
     uint32_t                       generation;
     uint32_t                       seqid;          /* stateid.seqid */
 
-    /* vfs_state CACHING lease that backs the delegation; conflicting
-     * acquirers break it, invoking nfs4_delegation_break_cb. */
-    struct chimera_vfs_lease       lease;
+    /* Claim-core cache claim that backs the delegation (NFSv4 keeps its
+     * hand-rolled one-deleg-per-(client,fh); the grant machinery is not
+     * used).  Conflicting acquirers break it, invoking
+     * nfs4_delegation_break_cb. */
+    struct chimera_vfs_claim       claim;
     struct chimera_vfs_file_state *file_state;
     bool                           lease_held;
 
@@ -1009,9 +1013,9 @@ nfs_lock_state_destroy(
 
 /* Create a delegation for `client` on `fh` of type OPEN_DELEGATE_READ/WRITE.
  * Allocates a NFS4_SLOT_TYPE_DELEG slot, links the deleg onto the client, and
- * writes the encoded stateid to `out_stateid`.  The vfs_state CACHING lease is
+ * writes the encoded stateid to `out_stateid`.  The backing cache claim is
  * the caller's responsibility (so the break_cb closure is wired before the
- * lease becomes visible to conflicting acquirers).  Returns refcount-1. */
+ * claim becomes visible to conflicting acquirers).  Returns refcount-1. */
 SYMBOL_EXPORT struct nfs_delegation *
 nfs_delegation_create(
     struct nfs_client      *client,
@@ -1024,40 +1028,40 @@ nfs_delegation_create(
     struct stateid4        *out_stateid);
 
 /* Mark a delegation destroyed, unlink it from its client, free its slot, and
- * release the backing vfs_state lease on the last ref.  Idempotent. */
+ * release the backing claim on the last ref.  Idempotent. */
 SYMBOL_EXPORT void
 nfs_delegation_destroy(
     struct nfs_delegation     *deleg,
     struct nfs_state_table    *table,
     struct chimera_vfs_thread *vfs_thread);
 
-/* vfs_state revoked_cb for delegation leases; marks the delegation revoked. */
+/* Claim revoked_cb for delegation claims; marks the delegation revoked. */
 SYMBOL_EXPORT void
 nfs_delegation_revoked_cb(
-    struct chimera_vfs_lease *lease,
+    struct chimera_vfs_claim *claim,
     void                     *private_data);
 
-/* vfs_state is_alive_cb for a lease owned by an nfs_client (private_data is the
+/* Claim is_alive_cb for a claim owned by an nfs_client (private_data is the
  * struct nfs_client *).  Reports the client dead while it is in courtesy state
- * (lease lapsed), so a conflicting acquire reclaims the lease on demand. */
+ * (lease lapsed), so a conflicting acquire reclaims the claim on demand. */
 SYMBOL_EXPORT bool
 nfs_client_lease_alive(
-    const struct chimera_vfs_lease *lease,
+    const struct chimera_vfs_claim *claim,
     void                           *private_data);
 
-/* vfs_state revoked_cb for an nfs_client's lock/share leases (private_data is
+/* Claim revoked_cb for an nfs_client's lock/share claims (private_data is
  * the struct nfs_client *).  Flags the courtesy client reclaimed so the lease
  * sweep tears it down (its stateids then report NFS4ERR_EXPIRED). */
 SYMBOL_EXPORT void
 nfs_client_lease_revoked_cb(
-    struct chimera_vfs_lease *lease,
+    struct chimera_vfs_claim *claim,
     void                     *private_data);
 
-/* vfs_state is_alive_cb for delegation leases (private_data is the struct
+/* Claim is_alive_cb for delegation claims (private_data is the struct
  * nfs_delegation *); reports the owning client dead while in courtesy. */
 SYMBOL_EXPORT bool
 nfs_delegation_lease_alive(
-    const struct chimera_vfs_lease *lease,
+    const struct chimera_vfs_claim *claim,
     void                           *private_data);
 
 /* FREE_STATEID: free a force-revoked delegation named by `sid`.  Returns
