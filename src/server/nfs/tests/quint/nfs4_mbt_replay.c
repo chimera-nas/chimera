@@ -632,6 +632,10 @@ v4_cb_compound(
     (void) conn;
     (void) cred;
 
+    if (!o) {
+        return;   /* no oracle bound to this backchannel; cannot reply */
+    }
+
     memset(&res, 0, sizeof(res));
     res.tag.len  = 0;
     res.tag.data = NULL;
@@ -3528,6 +3532,7 @@ main(
                         "usage: %s [--trace FILE ...] [--trace-dir DIR] "
                         "[--mandatory CAP] [--dry-run] [--verbose]\n",
                         argv[0]);
+                mbt_free_traces(traces, ntraces);
                 return 2;
         } /* switch */
     }
@@ -3535,6 +3540,7 @@ main(
     if (ntraces == 0) {
         fprintf(stderr, "%s: at least one --trace or --trace-dir is required\n",
                 argv[0]);
+        mbt_free_traces(traces, ntraces);
         return 2;
     }
 
@@ -3563,6 +3569,8 @@ main(
     if (!dry_run) {
         mbt_env_stop(&env);
     }
+
+    mbt_free_traces(traces, ntraces);
 
     if (failures) {
         return 1;

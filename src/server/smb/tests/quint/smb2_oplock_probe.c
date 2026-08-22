@@ -251,7 +251,9 @@ sec_o3(
 {
     struct smb2_create_out oa, ob;
     struct smb2_oplock_req req;
-    struct smb2_break      b0;
+    struct smb2_break      b0 = { 0 };   /* read only when got_break; zero-init
+                                          * silences a -Wmaybe-uninitialized
+                                          * false positive on gcc/amd64 */
     uint32_t               st, count = 0;
     const char             data[] = "coherent";
     int                    got_break;

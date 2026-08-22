@@ -2817,22 +2817,27 @@ main(
         fprintf(stderr,
                 "usage: %s --backend <b> [--trace <f> ...] [--trace-dir <d>]\n",
                 argv[0]);
+        mbt_free_traces(traces, ntraces);
         return 2;
     }
 
     /* Clean result stream: chimera logs go to stderr (fd 1 -> stderr), our
      * output to the saved stdout, exactly like the driver. */
-    proto_out = fdopen(dup(STDOUT_FILENO), "w");
+    int out_fd = dup(STDOUT_FILENO);
+    proto_out = out_fd >= 0 ? fdopen(out_fd, "w") : NULL;
     if (!proto_out || dup2(STDERR_FILENO, STDOUT_FILENO) < 0) {
         fprintf(stderr, "posix_mbt_replay: stream setup failed\n");
+        mbt_free_traces(traces, ntraces);
         return 1;
     }
     /* Route our printf() to the clean stream. */
     if (dup2(fileno(proto_out), STDOUT_FILENO) < 0) {
+        mbt_free_traces(traces, ntraces);
         return 1;
     }
 
     if (posix_env_setup(backend, NULL) != 0) {
+        mbt_free_traces(traces, ntraces);
         return 1;
     }
 
@@ -2859,5 +2864,6 @@ main(
     printf("batch: %d replayed, %d failed, %d unhandled of %d trace(s)\n",
            ran, failures, bad, ntraces);
     fflush(stdout);
+    mbt_free_traces(traces, ntraces);
     return (failures || bad) ? 1 : 0;
 } /* main */

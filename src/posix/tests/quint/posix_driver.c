@@ -1205,7 +1205,9 @@ main(
     char       *line    = NULL;
     size_t      cap     = 0;
 
-    proto_out = fdopen(dup(STDOUT_FILENO), "w");
+    int         out_fd = dup(STDOUT_FILENO);
+
+    proto_out = out_fd >= 0 ? fdopen(out_fd, "w") : NULL;
     if (!proto_out || dup2(STDERR_FILENO, STDOUT_FILENO) < 0) {
         fprintf(stderr, "posix_driver: protocol stream setup failed\n");
         return 1;
