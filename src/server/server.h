@@ -454,6 +454,15 @@ chimera_server_config_get_s3_enabled(
     const struct chimera_server_config *config);
 
 void
+chimera_server_config_set_fuse_enabled(
+    struct chimera_server_config *config,
+    int                           enabled);
+
+int
+chimera_server_config_get_fuse_enabled(
+    const struct chimera_server_config *config);
+
+void
 chimera_server_config_set_nfs_data_server(
     struct chimera_server_config *config,
     int                           enable);
@@ -772,6 +781,15 @@ chimera_server_create_share(
     const char            *share_name,
     const char            *share_path,
     int                    continuous_availability);
+
+/* Register a FUSE mountpoint (Linux only; the kernel mount happens at server
+ * start).  Returns -1 when FUSE is disabled or unsupported on this build. */
+int
+chimera_server_create_fuse_mount(
+    struct chimera_server *server,
+    const char            *mountpoint,
+    const char            *path,
+    const char            *options);
 
 int
 chimera_server_share_set_access_based_enum(

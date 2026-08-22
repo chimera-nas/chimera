@@ -89,6 +89,7 @@ option(IO_URING_ENABLED "Enable io_uring support" ${CHIMERA_LINUX})
 option(CAIRN_ENABLED "Enable cairn support" ON)
 option(CHIMERA_VFS_IO_URING "Enable chimera VFS io_uring backend" ${CHIMERA_LINUX})
 option(REQUIRE_NETNS_TESTS "Fail configure if network namespace tests cannot be enabled" OFF)
+option(REQUIRE_FUSE_TESTS "Fail FUSE tests instead of skipping when FUSE mounts are unavailable" OFF)
 option(EVPL_IOVEC_PROFILE "Enable libevpl retained-iovec stack profiling" OFF)
 
 # Build the product only: no test executables are compiled and no ctests are
