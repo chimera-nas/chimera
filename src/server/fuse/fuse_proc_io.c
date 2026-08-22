@@ -53,6 +53,7 @@ chimera_fuse_open_callback(
     file->mount  = mount;
 
     chimera_fuse_file_link(mount, file);
+    chimera_fuse_grant_open(thread, mount, req->nodeid, oh);
 
     memset(&out, 0, sizeof(out));
     out.fh = (uint64_t) (uintptr_t) file;
@@ -125,6 +126,9 @@ chimera_fuse_create_callback(
     memset(&out, 0, sizeof(out));
     out.fh = (uint64_t) (uintptr_t) file;
 
+    /* No invalidation grant here: the child's nodeid is assigned inside
+     * reply_entry, and the creator's own writes are self-coherent anyway.
+     * Any other mount's open of the file builds its own grant. */
     if (chimera_fuse_reply_entry(req, attr, &out, sizeof(out)) != 0) {
         chimera_fuse_file_unlink(mount, file);
         chimera_vfs_release(thread->vfs_thread, file->handle);
@@ -223,19 +227,29 @@ chimera_fuse_op_read(
     const void                  *arg,
     uint32_t                     arglen)
 {
-    const struct fuse_read_in *in = arg;
+    const struct fuse_read_in     *in = arg;
+    struct chimera_fuse_open_file *file;
+    struct chimera_vfs_lease_owner owner;
 
     if (arglen < sizeof(*in)) {
         chimera_fuse_reply(req, EINVAL, NULL, 0);
         return;
     }
 
-    chimera_vfs_read(req->thread->vfs_thread, &req->cred,
-                     chimera_fuse_file(in->fh)->handle,
-                     in->offset, in->size,
-                     req->u.read.iov, CHIMERA_FUSE_IOV_MAX,
-                     0,
-                     chimera_fuse_read_complete, req);
+    file = chimera_fuse_file(in->fh);
+
+    /* Attributed to the mount's own lease identity so a read never breaks
+     * this mount's invalidation grant (copied by value downstream). */
+    chimera_fuse_grant_owner(&owner, req->channel->mount,
+                             file->handle->fh_hash);
+
+    chimera_vfs_read_owned(req->thread->vfs_thread, &req->cred,
+                           file->handle,
+                           in->offset, in->size,
+                           req->u.read.iov, CHIMERA_FUSE_IOV_MAX,
+                           0,
+                           &owner,
+                           chimera_fuse_read_complete, req);
 } /* chimera_fuse_op_read */
 
 /* --- WRITE --- */
@@ -293,12 +307,22 @@ chimera_fuse_op_write(
      * not recycled until the request completes. */
     evpl_iovec_clone_segment(&req->u.write.iov, &req->buf, data_off, in->size);
 
-    chimera_vfs_write(req->thread->vfs_thread, &req->cred,
-                      chimera_fuse_file(in->fh)->handle,
-                      in->offset, in->size, sync,
-                      0, 0,
-                      &req->u.write.iov, 1,
-                      chimera_fuse_write_complete, req);
+    struct chimera_fuse_open_file *file = chimera_fuse_file(in->fh);
+    struct chimera_vfs_lease_owner owner;
+
+    /* Attributed to the mount's own lease identity: the kernel wrote
+     * through us, so its cache is current and must not be invalidated;
+     * every OTHER holder's read cache still breaks. */
+    chimera_fuse_grant_owner(&owner, req->channel->mount,
+                             file->handle->fh_hash);
+
+    chimera_vfs_write_owned(req->thread->vfs_thread, &req->cred,
+                            file->handle,
+                            in->offset, in->size, sync,
+                            0, 0,
+                            &req->u.write.iov, 1,
+                            &owner,
+                            chimera_fuse_write_complete, req);
 } /* chimera_fuse_op_write */
 
 /* --- FLUSH / FSYNC --- */
@@ -322,16 +346,24 @@ chimera_fuse_op_flush(
     const void                  *arg,
     uint32_t                     arglen)
 {
-    const struct fuse_flush_in *in = arg;
+    const struct fuse_flush_in    *in = arg;
+    struct chimera_fuse_open_file *file;
 
     if (arglen < sizeof(*in)) {
         chimera_fuse_reply(req, EINVAL, NULL, 0);
         return;
     }
 
+    file = chimera_fuse_file(in->fh);
+
+    /* POSIX: any close by a process drops that process's locks on the
+     * file; the kernel identifies the process via lock_owner. */
+    chimera_fuse_locks_release_owner(req->thread, req->channel->mount,
+                                     file->handle->fh_hash, in->lock_owner);
+
     /* close(2) must surface write errors, so flush commits. */
     chimera_vfs_commit(req->thread->vfs_thread, &req->cred,
-                       chimera_fuse_file(in->fh)->handle,
+                       file->handle,
                        0, 0, 0, 0,
                        chimera_fuse_commit_complete, req);
 } /* chimera_fuse_op_flush */

@@ -265,10 +265,18 @@ Notes:
 - The FUSE request header carries only uid/gid, so backends cannot see
   supplementary groups; the default `default_permissions` mode has the kernel
   do mode-bit checks with the caller's full group list.
-- Kernel attribute/entry caching means FUSE readers may briefly see stale
-  metadata after writes arriving through NFS/SMB/S3 on the same share; set
-  `attr_timeout_ms=0,entry_timeout_ms=0` where cross-protocol coherence
-  matters more than metadata performance.
+- POSIX byte-range locks (`fcntl` `F_GETLK`/`F_SETLK`/`F_SETLKW`) are served
+  remotely through the shared lease layer, so they conflict correctly with
+  NLM, NFSv4, and SMB2 locks on the same files.  A blocked `F_SETLKW` is
+  cancellable by signal.  `flock(2)` stays kernel-local to the mount.
+- Cross-protocol cache invalidation is pushed to the kernel: a write,
+  truncate, remove, or rename arriving through NFS/SMB/S3 (or another FUSE
+  mount of the same share) invalidates the kernel's cached attributes,
+  pages, and directory entries for the affected objects, so the
+  `attr_timeout_ms`/`entry_timeout_ms` caches stay coherent at their
+  configured lifetimes.  Two residual gaps fall back to the timeouts:
+  attribute changes to files the kernel knows only from a `stat` (never
+  opened), and directory-entry rings overflowed by event bursts.
 - If a previous daemon instance crashed and left a disconnected mount on the
   mountpoint, the next start detaches it and mounts fresh.
 - An externally issued `umount` disconnects the mount; the daemon logs it and

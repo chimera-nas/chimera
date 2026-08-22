@@ -247,6 +247,12 @@ chimera_fuse_reply_entry(
         return -1;
     }
 
+    /* The kernel is about to hold a dentry under this directory; keep its
+     * namespace coherent with the other protocols (every entry-shaped op
+     * resolved req->nodeid's handle into req->fh). */
+    chimera_fuse_watch_dir(req->thread, mount, req->nodeid,
+                           req->fh, req->fh_len);
+
     memset(&entry, 0, sizeof(entry));
 
     entry.nodeid = chimera_fuse_node_insert(mount->node_table,
@@ -303,6 +309,41 @@ chimera_fuse_channel_dead(struct chimera_fuse_channel *channel)
                       channel->mount->mountpoint);
 } /* chimera_fuse_channel_dead */
 
+/* Marshal a request completed off-thread home for its reply. */
+void
+chimera_fuse_resume_post(struct chimera_fuse_request *req)
+{
+    struct chimera_fuse_thread *thread = req->thread;
+
+    pthread_mutex_lock(&thread->resume_lock);
+    req->next            = thread->resume_queue;
+    thread->resume_queue = req;
+    pthread_mutex_unlock(&thread->resume_lock);
+
+    evpl_ring_doorbell(&thread->resume_doorbell);
+} /* chimera_fuse_resume_post */
+
+void
+chimera_fuse_resume_doorbell(
+    struct evpl          *evpl,
+    struct evpl_doorbell *doorbell)
+{
+    struct chimera_fuse_thread  *thread = container_of(doorbell, struct chimera_fuse_thread, resume_doorbell);
+    struct chimera_fuse_request *queue, *req;
+
+    pthread_mutex_lock(&thread->resume_lock);
+    queue                = thread->resume_queue;
+    thread->resume_queue = NULL;
+    pthread_mutex_unlock(&thread->resume_lock);
+
+    while (queue) {
+        req   = queue;
+        queue = req->next;
+
+        chimera_fuse_lock_resume(req);
+    }
+} /* chimera_fuse_resume_doorbell */
+
 static void
 chimera_fuse_op_interrupt(
     struct chimera_fuse_request *req,
@@ -310,9 +351,20 @@ chimera_fuse_op_interrupt(
     const void                  *arg,
     uint32_t                     arglen)
 {
-    /* ENOSYS to an INTERRUPT tells the kernel interrupts are unsupported so
-     * it stops sending them; interrupted requests simply complete. */
-    chimera_fuse_reply(req, ENOSYS, NULL, 0);
+    const struct fuse_interrupt_in *in = arg;
+
+    /* Interrupts matter for parked blocking locks; everything else here
+     * completes promptly on its own.  A swallowed interrupt (unknown
+     * unique, or one that raced ahead of its target) just means the
+     * original request completes normally.  No reply either way: an
+     * ENOSYS reply would disable interrupts connection-wide. */
+    if (arglen >= sizeof(*in)) {
+        chimera_fuse_locks_interrupt(req->channel->mount,
+                                     req->thread->vfs_thread->vfs->vfs_state,
+                                     in->unique);
+    }
+
+    chimera_fuse_request_free(req->thread, req);
 } /* chimera_fuse_op_interrupt */
 
 static void
@@ -360,6 +412,9 @@ const chimera_fuse_handler_t chimera_fuse_handlers[CHIMERA_FUSE_OPCODE_MAX] = {
     [FUSE_SETXATTR]     = chimera_fuse_op_setxattr,
     [FUSE_LISTXATTR]    = chimera_fuse_op_listxattr,
     [FUSE_REMOVEXATTR]  = chimera_fuse_op_removexattr,
+    [FUSE_GETLK]        = chimera_fuse_op_getlk,
+    [FUSE_SETLK]        = chimera_fuse_op_setlk,
+    [FUSE_SETLKW]       = chimera_fuse_op_setlk,
     [FUSE_INTERRUPT]    = chimera_fuse_op_interrupt,
     [FUSE_DESTROY]      = chimera_fuse_op_destroy,
 };

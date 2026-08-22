@@ -32,6 +32,8 @@ fuse_server_init(
     shared->metrics = metrics;
 
     pthread_mutex_init(&shared->lock, NULL);
+    pthread_mutex_init(&shared->notifier_lock, NULL);
+    pthread_cond_init(&shared->notifier_cond, NULL);
 
     return shared;
 } /* fuse_server_init */
@@ -52,14 +54,20 @@ fuse_server_destroy(void *data)
             }
         }
 
+        chimera_fuse_coherence_shutdown(shared, mount);
+
         if (mount->node_table) {
             chimera_fuse_node_table_destroy(mount->node_table);
         }
 
         pthread_mutex_destroy(&mount->open_lock);
+        pthread_mutex_destroy(&mount->lock_lock);
+        pthread_mutex_destroy(&mount->grant_lock);
     }
 
     pthread_mutex_destroy(&shared->lock);
+    pthread_mutex_destroy(&shared->notifier_lock);
+    pthread_cond_destroy(&shared->notifier_cond);
 
     free(shared);
 } /* fuse_server_destroy */
@@ -82,6 +90,8 @@ fuse_server_start(void *data)
     for (t = 0; t < shared->num_threads; t++) {
         evpl_ring_doorbell(&shared->threads[t]->attach_doorbell);
     }
+
+    chimera_fuse_notifier_start(shared);
 } /* fuse_server_start */
 
 static void
@@ -93,6 +103,17 @@ fuse_server_stop(void *data)
     for (m = 0; m < shared->num_mounts; m++) {
         chimera_fuse_mount_teardown(&shared->mounts[m]);
     }
+
+    /* The kernel can no longer send anything; cancel parked blocking locks
+     * (their EINTR replies drain on the still-live pool threads) and drop
+     * every granted lock lease. */
+    for (m = 0; m < shared->num_mounts; m++) {
+        chimera_fuse_locks_shutdown(shared, &shared->mounts[m]);
+    }
+
+    /* Drains queued invalidations (their acks matter; the writes are
+     * harmless no-ops on the detached mounts), then exits. */
+    chimera_fuse_notifier_stop(shared);
 } /* fuse_server_stop */
 
 /*
@@ -182,7 +203,10 @@ fuse_server_thread_init(
 
     pthread_mutex_unlock(&shared->lock);
 
+    pthread_mutex_init(&thread->resume_lock, NULL);
+
     evpl_add_doorbell(evpl, &thread->attach_doorbell, chimera_fuse_attach_channels);
+    evpl_add_doorbell(evpl, &thread->resume_doorbell, chimera_fuse_resume_doorbell);
 
     return thread;
 } /* fuse_server_thread_init */
@@ -252,6 +276,9 @@ fuse_server_thread_destroy(void *data)
     }
 
     evpl_remove_doorbell(thread->evpl, &thread->attach_doorbell);
+    evpl_remove_doorbell(thread->evpl, &thread->resume_doorbell);
+
+    pthread_mutex_destroy(&thread->resume_lock);
 
     pthread_mutex_lock(&shared->lock);
     last = (--shared->threads_alive == 0);
@@ -303,6 +330,7 @@ chimera_fuse_add_mount(
     strncpy(mount->mountpoint, mountpoint, sizeof(mount->mountpoint) - 1);
     strncpy(mount->share_path, path, sizeof(mount->share_path) - 1);
 
+    mount->shared              = shared;
     mount->default_permissions = 1;
     mount->attr_timeout_ms     = 1000;
     mount->entry_timeout_ms    = 1000;
@@ -338,6 +366,8 @@ chimera_fuse_add_mount(
     }
 
     pthread_mutex_init(&mount->open_lock, NULL);
+    pthread_mutex_init(&mount->lock_lock, NULL);
+    pthread_mutex_init(&mount->grant_lock, NULL);
 
     shared->num_mounts++;
 

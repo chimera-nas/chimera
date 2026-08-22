@@ -5,9 +5,12 @@
 #pragma once
 
 #include <stdint.h>
+#include <stdatomic.h>
+#include <string.h>
 #include <pthread.h>
 #include <errno.h>
 #include <utlist.h>
+#include <uthash.h>
 #include <linux/fuse.h>
 
 #include "evpl/evpl.h"
@@ -15,7 +18,12 @@
 #include "vfs/vfs.h"
 #include "vfs/sdk/vfs_error.h"
 #include "vfs/sdk/vfs_cred.h"
+#include "vfs/vfs_lease_types.h"
 #include "fuse_node_table.h"
+
+struct chimera_vfs_state;
+struct chimera_vfs_file_state;
+struct chimera_vfs_notify_watch;
 
 #define chimera_fuse_debug(...) chimera_debug("fuse", __FILE__, __LINE__, __VA_ARGS__)
 #define chimera_fuse_info(...)  chimera_info("fuse", __FILE__, __LINE__, __VA_ARGS__)
@@ -61,8 +69,112 @@
 
 struct chimera_fuse_thread;
 struct chimera_fuse_shared;
+struct chimera_fuse_request;
+struct chimera_fuse_mount;
+
+/*
+ * One POSIX byte-range lock held on behalf of a local process.  The embedded
+ * RANGE lease is what the shared vfs_state conflict matrix walks, so these
+ * locks conflict correctly with NLM, NFSv4, and SMB2 locks.  The range is
+ * POSIX-inclusive [start, end]; end == CHIMERA_FUSE_LOCK_EOF means to-EOF.
+ */
+#define CHIMERA_FUSE_LOCK_EOF        0x7fffffffffffffffULL
+
+struct chimera_fuse_lock {
+    struct chimera_fuse_lock_file     *lf;
+    uint64_t                           start;
+    uint64_t                           end;
+    int                                exclusive;
+    struct chimera_vfs_lease           lease;
+    struct chimera_vfs_pending_acquire ticket;
+    struct chimera_fuse_lock          *prev;
+    struct chimera_fuse_lock          *next;
+};
+
+/* Per-(owner, file) lock bookkeeping: the unit FLUSH's lock_owner releases.
+ * Keyed by {owner token, fh_hash} in the mount's lock table; holds a
+ * vfs_state file-state reference for the life of its entries. */
+struct chimera_fuse_lock_key {
+    uint64_t owner;
+    uint64_t fh_hash;
+};
+
+struct chimera_fuse_lock_file {
+    struct chimera_fuse_lock_key   key;
+    uint8_t                        fh[CHIMERA_VFS_FH_SIZE];
+    uint32_t                       fh_len;
+    struct chimera_vfs_file_state *file_state;
+    struct chimera_fuse_lock      *locks;
+    /* Live blocked acquires against this (owner, file); counted so the
+     * bucket outlives a parked SETLKW even with no granted locks. */
+    int                            pending;
+    UT_hash_handle                 hh;
+};
+
+/*
+ * Per-(mount, file) caching lease whose break drives kernel cache
+ * invalidation (FUSE_NOTIFY_INVAL_INODE).  One kernel = one lease owner per
+ * mount.  The NFSv4 delegation shape: a bare CACHING lease inserted with
+ * try_insert, declined on contention.
+ *
+ * Lifetime follows the NODEID, not the open: the kernel serves cached
+ * attributes and pages for as long as it holds the inode -- well past the
+ * last close -- so the grant lives from the first open until the kernel
+ * FORGETs the node (plus a transient notifier reference mid-break).
+ */
+enum chimera_fuse_grant_state {
+    CHIMERA_FUSE_GRANT_ACTIVE   = 0,
+    CHIMERA_FUSE_GRANT_BREAKING = 1, /* break_cb fired; notifier owns resolution */
+    CHIMERA_FUSE_GRANT_BROKEN   = 2, /* lease gone; struct lives on open refs */
+};
+
+struct chimera_fuse_grant {
+    struct chimera_fuse_mount     *mount;
+    uint64_t                       nodeid; /* hash key */
+    uint64_t                       fh_hash;
+    uint8_t                        fh[CHIMERA_VFS_FH_SIZE];
+    uint32_t                       fh_len;
+    struct chimera_vfs_file_state *file_state;
+    struct chimera_vfs_lease       lease;
+    /* Break/revoke callbacks fire on arbitrary threads inside vfs_state and
+     * may touch only these atomics plus the notifier queue. */
+    _Atomic int                    state; /* enum chimera_fuse_grant_state */
+    /* open references + one held by the notifier while a break resolves */
+    _Atomic int                    refcount;
+    _Atomic int                    revoked;
+    UT_hash_handle                 hh;
+};
+
+/* A directory the kernel holds dentries under: a change-notify watch whose
+ * events become FUSE_NOTIFY_INVAL_ENTRY / NOTIFY_DELETE.  Keyed by the
+ * directory's nodeid; dropped when the kernel forgets the directory. */
+struct chimera_fuse_dirwatch {
+    uint64_t                         nodeid;
+    struct chimera_fuse_mount       *mount;
+    struct chimera_vfs_notify_watch *watch;
+    int                              queued; /* on the notifier queue */
+    UT_hash_handle                   hh;
+};
+
+/* Work items for the dedicated notifier thread.  Kernel-cache invalidation
+ * writes to /dev/fuse can block inside the kernel until conflicting pages
+ * settle, so they must never run on an event-loop thread (whose blocked
+ * loop could be the one that must complete the settling I/O). */
+enum chimera_fuse_notice_type {
+    CHIMERA_FUSE_NOTICE_INVAL_FILE = 0, /* lease broke: invalidate + ack */
+    CHIMERA_FUSE_NOTICE_DIR_EVENTS = 1, /* drain a dirwatch into entry invals */
+};
+
+struct chimera_fuse_notice {
+    enum chimera_fuse_notice_type type;
+    struct chimera_fuse_mount  *mount;
+    struct chimera_fuse_grant  *grant;    /* INVAL_FILE */
+    uint64_t                    nodeid;   /* DIR_EVENTS */
+    struct chimera_fuse_notice *next;
+};
 
 struct chimera_fuse_mount {
+    struct chimera_fuse_shared     *shared;
     char                            mountpoint[256];
     char                            share_path[256];
     int                             allow_other;
@@ -80,6 +192,17 @@ struct chimera_fuse_mount {
     * their VFS handles.  Shared across threads (multi-queue delivery). */
     pthread_mutex_t                 open_lock;
     struct chimera_fuse_open_file  *open_files;
+    /* POSIX byte-range lock table: (owner, file) buckets plus the parked
+     * SETLKW requests INTERRUPT may cancel.  All under lock_lock. */
+    pthread_mutex_t                 lock_lock;
+    struct chimera_fuse_lock_file  *lock_files;
+    struct chimera_fuse_request    *parked_locks;
+    /* Kernel-cache coherence: per-file caching grants and per-directory
+     * change watches, both under grant_lock (a leaf: never held while
+     * calling into vfs_state or vfs_notify). */
+    pthread_mutex_t                 grant_lock;
+    struct chimera_fuse_grant      *grants;
+    struct chimera_fuse_dirwatch   *dirwatches;
     uint8_t                         root_fh[CHIMERA_VFS_FH_SIZE];
     uint32_t                        root_fh_len;
 };
@@ -94,6 +217,13 @@ struct chimera_fuse_shared {
     int                         threads_alive;
     struct chimera_fuse_thread *threads[CHIMERA_FUSE_MAX_THREADS];
     int                         started;
+    /* Dedicated invalidation-notifier thread (see chimera_fuse_notice). */
+    pthread_t                   notifier;
+    pthread_mutex_t             notifier_lock;
+    pthread_cond_t              notifier_cond;
+    struct chimera_fuse_notice *notices;
+    int                         notifier_running;
+    int                         notifier_stop;
 };
 
 struct chimera_fuse_channel {
@@ -116,8 +246,6 @@ struct chimera_fuse_open_file {
     struct chimera_fuse_open_file  *next;
 };
 
-struct chimera_fuse_request;
-
 struct chimera_fuse_thread {
     struct evpl                 *evpl;
     struct chimera_vfs_thread   *vfs_thread;
@@ -129,6 +257,11 @@ struct chimera_fuse_thread {
     struct chimera_fuse_request *free_requests;
     int                          num_free_requests;
     int                          active_requests;
+    /* Requests completed off-thread (a blocked lock granted or cancelled)
+     * marshalled home for their reply, the cb_doorbell pattern. */
+    pthread_mutex_t              resume_lock;
+    struct chimera_fuse_request *resume_queue;
+    struct evpl_doorbell         resume_doorbell;
 };
 
 struct chimera_fuse_request {
@@ -177,6 +310,23 @@ struct chimera_fuse_request {
         struct {
             uint32_t size;      /* getxattr/listxattr size probe or limit */
         } xattr;
+        struct {
+            /* Heap entry embedding the lease/ticket; the lease's address
+             * must be stable once inserted, so it never lives here. */
+            struct chimera_fuse_lock      *entry;
+            struct chimera_fuse_lock_file *lf;
+            /* 0 = dispatch in progress, 1 = callback completed inline,
+             * 2 = dispatch returned (a later callback must marshal home) */
+            atomic_int                     phase;
+            int                            result_errno;
+            uint64_t                       start;
+            uint64_t                       end;
+            int                            exclusive;
+            int                            wait;
+            int                            parked; /* on mount->parked_locks */
+            struct chimera_fuse_request   *park_prev;
+            struct chimera_fuse_request   *park_next;
+        } lock;
     } u;
 };
 
@@ -435,6 +585,137 @@ void chimera_fuse_op_removexattr(
     const struct fuse_in_header *hdr,
     const void                  *arg,
     uint32_t                     arglen);
+
+/* fuse_proc_lock.c */
+void chimera_fuse_op_getlk(
+    struct chimera_fuse_request *req,
+    const struct fuse_in_header *hdr,
+    const void                  *arg,
+    uint32_t                     arglen);
+void chimera_fuse_op_setlk(
+    struct chimera_fuse_request *req,
+    const struct fuse_in_header *hdr,
+    const void                  *arg,
+    uint32_t                     arglen);
+
+/* Release every lock the given owner holds on the given file (the FLUSH
+ * lock_owner contract: any close by the owning process drops its locks). */
+void
+chimera_fuse_locks_release_owner(
+    struct chimera_fuse_thread *thread,
+    struct chimera_fuse_mount  *mount,
+    uint64_t                    fh_hash,
+    uint64_t                    owner);
+
+/* Cancel the parked SETLKW with the given unique, if any.  Returns 1 when a
+ * parked lock was found and cancellation initiated (the original request
+ * replies EINTR via its owning thread), 0 when the unique is unknown. */
+int
+chimera_fuse_locks_interrupt(
+    struct chimera_fuse_mount *mount,
+    struct chimera_vfs_state  *state,
+    uint64_t                   unique);
+
+/* Teardown: cancel parked acquires and release every granted lock. */
+void
+chimera_fuse_locks_shutdown(
+    struct chimera_fuse_shared *shared,
+    struct chimera_fuse_mount  *mount);
+
+/* Reply path for a blocked lock resumed on its owning thread. */
+void
+chimera_fuse_lock_resume(
+    struct chimera_fuse_request *req);
+
+/* fuse_dispatch.c: marshal a request home for its reply (any thread). */
+void
+chimera_fuse_resume_post(
+    struct chimera_fuse_request *req);
+
+void
+chimera_fuse_resume_doorbell(
+    struct evpl          *evpl,
+    struct evpl_doorbell *doorbell);
+
+/* fuse_coherence.c */
+void
+chimera_fuse_notifier_start(
+    struct chimera_fuse_shared *shared);
+
+void
+chimera_fuse_notifier_stop(
+    struct chimera_fuse_shared *shared);
+
+/* Ensure the node's invalidation lease exists / is re-armed (best-effort;
+ * called on every OPEN of a regular file). */
+void
+chimera_fuse_grant_open(
+    struct chimera_fuse_thread     *thread,
+    struct chimera_fuse_mount      *mount,
+    uint64_t                        nodeid,
+    struct chimera_vfs_open_handle *handle);
+
+/* The kernel forgot this nodeid: nothing is cached any more, so drop its
+ * invalidation lease. */
+void
+chimera_fuse_grant_forget(
+    struct chimera_fuse_mount *mount,
+    struct chimera_vfs_state  *state,
+    uint64_t                   nodeid);
+
+/* Ensure a change-notify watch exists for a directory the kernel is about
+ * to hold dentries under (best-effort, idempotent). */
+void
+chimera_fuse_watch_dir(
+    struct chimera_fuse_thread *thread,
+    struct chimera_fuse_mount  *mount,
+    uint64_t                    nodeid,
+    const uint8_t              *fh,
+    uint32_t                    fh_len);
+
+/* The kernel forgot this nodeid; drop its directory watch if one exists. */
+void
+chimera_fuse_watch_forget(
+    struct chimera_fuse_mount *mount,
+    struct chimera_vfs        *vfs,
+    uint64_t                   nodeid);
+
+/* Teardown: destroy remaining watches and release remaining grants. */
+void
+chimera_fuse_coherence_shutdown(
+    struct chimera_fuse_shared *shared,
+    struct chimera_fuse_mount  *mount);
+
+/* The lease-owner identity FUSE I/O runs under, matching the mount's
+ * invalidation grants so a mount's own reads and writes never invalidate
+ * its own kernel cache (the kernel wrote through us; its cache is right).
+ * Locks use owner_hi = 1 so a kernel lock-owner token can never collide
+ * with a grant identity. */
+static inline void
+chimera_fuse_grant_owner(
+    struct chimera_vfs_lease_owner *owner,
+    struct chimera_fuse_mount      *mount,
+    uint64_t                        fh_hash)
+{
+    memset(owner, 0, sizeof(*owner));
+    owner->protocol   = CHIMERA_VFS_LEASE_PROTO_FUSE;
+    owner->client_key = (uint64_t) (uintptr_t) mount;
+    owner->owner_lo   = fh_hash;
+    owner->owner_hi   = 0;
+} /* chimera_fuse_grant_owner */
+
+static inline void
+chimera_fuse_lock_owner(
+    struct chimera_vfs_lease_owner *owner,
+    struct chimera_fuse_mount      *mount,
+    uint64_t                        token)
+{
+    memset(owner, 0, sizeof(*owner));
+    owner->protocol   = CHIMERA_VFS_LEASE_PROTO_FUSE;
+    owner->client_key = (uint64_t) (uintptr_t) mount;
+    owner->owner_lo   = token;
+    owner->owner_hi   = 1;
+} /* chimera_fuse_lock_owner */
 
 /* Byte offset into the request buffer where reply payloads are staged.  The
  * incoming request occupies at most a few hundred bytes at the front (WRITE

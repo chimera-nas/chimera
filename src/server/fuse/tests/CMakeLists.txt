@@ -19,6 +19,10 @@ add_executable(fuse_probe fuse_probe.c)
 
 add_executable(fuse_posix_test fuse_posix_test.c)
 
+add_executable(fuse_lock_test fuse_lock_test.c)
+
+add_executable(fuse_coherence_test fuse_coherence_test.c)
+
 if(REQUIRE_FUSE_TESTS)
     set(_fuse_require 1)
 else()
@@ -52,6 +56,20 @@ foreach(backend memfs)
                      $<TARGET_FILE:fuse_posix_test>)
 
     set_tests_properties(chimera/fuse/posix_${backend} PROPERTIES
+        SKIP_RETURN_CODE 77
+        TIMEOUT 120
+        ENVIRONMENT "${_fuse_env}")
+endforeach()
+
+# Locks and cross-mount coherence run against TWO FUSE mounts of one share.
+foreach(tbin fuse_lock_test fuse_coherence_test)
+    add_test(NAME chimera/fuse/${tbin}
+             COMMAND ${_fuse_wrapper} bash
+                     ${CMAKE_CURRENT_SOURCE_DIR}/fuse_multimount_test.sh
+                     $<TARGET_FILE:chimera>
+                     $<TARGET_FILE:${tbin}>)
+
+    set_tests_properties(chimera/fuse/${tbin} PROPERTIES
         SKIP_RETURN_CODE 77
         TIMEOUT 120
         ENVIRONMENT "${_fuse_env}")
