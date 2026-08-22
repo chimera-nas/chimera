@@ -35,6 +35,7 @@ reads the file:
 | `exports` | object | server | NFS exports. |
 | `shares` | object | server | SMB shares. |
 | `buckets` | object | server | S3 buckets. |
+| `fuse_mounts` | object | server | Local kernel FUSE mounts (Linux only). |
 | `users` | array | server + client | Built-in user accounts (uid/gid, passwords). |
 | `s3_access_keys` | array | server | S3 access/secret key pairs. |
 | `config` | object | client | Client-library settings (the client's analogue of `server`). |
@@ -116,6 +117,7 @@ the canonical place to set them.
 | `nfs_server_scope` | int | `42` | NFSv4.1 `EXCHANGE_ID` server scope. Give independent servers (e.g. an MDS and a co-located DS) distinct values so clients don't coalesce them. |
 | `nfs_max_exports` | int | `4096` | Maximum number of NFS exports that may exist at once (1..65535). Distinct from the export id space, which is always 1..65535; creating an export past this cap fails. |
 | `data_server` | bool | `false` | pNFS data-server mode: bind only the NFSv4 service (no portmap/mount/NLM) so a DS can share a host with its MDS. |
+| `fuse_enabled` | bool | `false` | Serve the `fuse_mounts` section as local kernel FUSE mounts. Linux only; the daemon must run as root to issue the mounts. |
 | `kv_module` | string | - | Key-value module used to persist server state. |
 | `state_dir` | string | `<prefix>/share/state` | Directory for persisted NFS/SMB state. |
 | `smb_persistent_handles` | bool | `false` | Enable SMB durable/persistent handles (needed for Continuous Availability). |
@@ -238,6 +240,39 @@ accepts one extra key.
 | `shares` (SMB) | `path` | string | required | VFS path to share. |
 | `shares` (SMB) | `continuous_availability` | bool | `false` | Advertise SMB Continuous Availability (requires `smb_persistent_handles`). |
 | `buckets` (S3) | `path` | string | required | VFS path backing the bucket. |
+
+### `fuse_mounts`
+
+Local kernel mounts of Chimera namespace paths, served by the daemon speaking
+the FUSE protocol directly against `/dev/fuse`. Linux only, requires
+`"fuse_enabled": true` in `server`, and the daemon must run as root (the mount
+syscall is issued directly, without a `fusermount` helper). Keyed by the host
+mountpoint directory, which must exist.
+
+```json
+"server":      { "fuse_enabled": true },
+"mounts":      { "data": { "module": "memfs", "path": "/" } },
+"fuse_mounts": { "/mnt/chimera": { "path": "/data", "options": "allow_other" } }
+```
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `path` | string | required | VFS path to mount (`/<mount-name>[/subdir]`, or `/` for the whole namespace). |
+| `options` | string | - | Comma-separated: `allow_other` (other users may access the mount), `no_default_permissions` (skip kernel mode-bit enforcement), `attr_timeout_ms=<n>` / `entry_timeout_ms=<n>` (kernel attribute/entry cache lifetimes, default `1000`). |
+
+Notes:
+
+- The FUSE request header carries only uid/gid, so backends cannot see
+  supplementary groups; the default `default_permissions` mode has the kernel
+  do mode-bit checks with the caller's full group list.
+- Kernel attribute/entry caching means FUSE readers may briefly see stale
+  metadata after writes arriving through NFS/SMB/S3 on the same share; set
+  `attr_timeout_ms=0,entry_timeout_ms=0` where cross-protocol coherence
+  matters more than metadata performance.
+- If a previous daemon instance crashed and left a disconnected mount on the
+  mountpoint, the next start detaches it and mounts fresh.
+- An externally issued `umount` disconnects the mount; the daemon logs it and
+  does not remount until restart.
 
 ### `users`
 

@@ -21,6 +21,9 @@
 #include "nfs/nfs4_lease.h"
 #include "s3/s3.h"
 #include "smb/smb.h"
+#ifdef __linux__
+#include "fuse/fuse.h"
+#endif /* ifdef __linux__ */
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_pnfs.h"
@@ -34,7 +37,9 @@
 #include "smb/smb2.h"
 #include "rest/rest.h"
 
-#define CHIMERA_SERVER_MAX_MODULES 64
+#define CHIMERA_SERVER_MAX_MODULES   64
+
+#define CHIMERA_SERVER_MAX_PROTOCOLS 4
 
 struct chimera_server_config_smb_auth {
     int  winbind_enabled;
@@ -61,6 +66,7 @@ struct chimera_server_config {
     int                                   nfs_enabled;
     int                                   smb_enabled;
     int                                   s3_enabled;
+    int                                   fuse_enabled;
     int                                   nfs_data_server;
     uint64_t                              nfs_server_scope;
     int                                   external_portmap;
@@ -139,11 +145,12 @@ struct chimera_server {
     const struct chimera_server_config *config;
     struct chimera_vfs                 *vfs;
     struct evpl_threadpool             *pool;
-    struct chimera_server_protocol     *protocols[3];
-    void                               *protocol_private[3];
+    struct chimera_server_protocol     *protocols[CHIMERA_SERVER_MAX_PROTOCOLS];
+    void                               *protocol_private[CHIMERA_SERVER_MAX_PROTOCOLS];
     void                               *s3_shared;
     void                               *smb_shared;
     void                               *nfs_shared;
+    void                               *fuse_shared;
     struct chimera_rest_server         *rest;
     int                                 num_protocols;
     int                                 threads_online;
@@ -154,7 +161,7 @@ struct chimera_server {
 struct chimera_thread {
     struct chimera_server     *server;
     struct chimera_vfs_thread *vfs_thread;
-    void                      *protocol_private[3];
+    void                      *protocol_private[CHIMERA_SERVER_MAX_PROTOCOLS];
     void                      *rest_thread;
     struct evpl_timer          watchdog;
 };
@@ -306,9 +313,10 @@ chimera_server_config_init(void)
      * purpose (a test fixture, a data server, an admin-only daemon) never
      * surprise-binds the others' well-known ports.  The port fields keep the
      * customary defaults and take effect only once the protocol is enabled. */
-    config->nfs_enabled = 0;
-    config->smb_enabled = 0;
-    config->s3_enabled  = 0;
+    config->nfs_enabled  = 0;
+    config->smb_enabled  = 0;
+    config->s3_enabled   = 0;
+    config->fuse_enabled = 0;
 
     /* NFS service port (default 2049); data-server mode binds only the NFSv4
      * service so a pNFS data server can coexist with an MDS on one host. */
@@ -1011,6 +1019,20 @@ chimera_server_config_get_s3_enabled(const struct chimera_server_config *config)
 {
     return config->s3_enabled;
 } /* chimera_server_config_get_s3_enabled */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_fuse_enabled(
+    struct chimera_server_config *config,
+    int                           enabled)
+{
+    config->fuse_enabled = enabled;
+} /* chimera_server_config_set_fuse_enabled */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_fuse_enabled(const struct chimera_server_config *config)
+{
+    return config->fuse_enabled;
+} /* chimera_server_config_get_fuse_enabled */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_nfs_data_server(
@@ -2379,6 +2401,29 @@ chimera_server_create_share(
 } /* chimera_server_create_share */
 
 SYMBOL_EXPORT int
+chimera_server_create_fuse_mount(
+    struct chimera_server *server,
+    const char            *mountpoint,
+    const char            *path,
+    const char            *options)
+{
+#ifdef __linux__
+    if (!server->fuse_shared) {
+        return -1;
+    }
+
+    return chimera_fuse_add_mount(server->fuse_shared, mountpoint, path, options);
+#else  /* ifdef __linux__ */
+    (void) server;
+    (void) mountpoint;
+    (void) path;
+    (void) options;
+
+    return -1;
+#endif /* ifdef __linux__ */
+} /* chimera_server_create_fuse_mount */
+
+SYMBOL_EXPORT int
 chimera_server_share_set_access_based_enum(
     struct chimera_server *server,
     const char            *share_name)
@@ -2606,6 +2651,17 @@ chimera_server_init(
         server->protocols[server->num_protocols++] = &s3_protocol;
     }
 
+    /* FUSE binds no ports, so it registers regardless of data-server mode.
+     * Registered last so the fixed-index shared-pointer assignments below
+     * stay valid; its index is captured because it moves with the branch
+     * above.  Linux-only: the raw /dev/fuse ABI has no counterpart
+     * elsewhere. */
+    int fuse_idx = -1;
+#ifdef __linux__
+    fuse_idx                                   = server->num_protocols;
+    server->protocols[server->num_protocols++] = &fuse_protocol;
+#endif /* ifdef __linux__ */
+
     for (i = 0; i < server->num_protocols; i++) {
         server->protocol_private[i] = server->protocols[i]->init(config, server->vfs, metrics);
     }
@@ -2614,6 +2670,10 @@ chimera_server_init(
     if (!config->nfs_data_server) {
         server->smb_shared = server->protocol_private[1];
         server->s3_shared  = server->protocol_private[2];
+    }
+
+    if (fuse_idx >= 0) {
+        server->fuse_shared = server->protocol_private[fuse_idx];
     }
 
     chimera_server_info("Initializing REST API...");
