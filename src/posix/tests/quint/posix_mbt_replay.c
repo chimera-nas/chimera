@@ -2447,12 +2447,43 @@ state_get(
     return NULL;
 } /* state_get */
 
+/* Close every handle still open from the just-replayed trace -- both the real
+ * fds in the model->fd map and the live directory streams.  A trace can
+ * legitimately end with an open fd or dir (e.g. on an unlinked inode), and the
+ * newfs op unmounts the old filesystem, which upstream's mkfs refuses while any
+ * handle keeps it busy (Device or resource busy).  state_reset() only forgets
+ * the maps, so drop the underlying handles here before the recycle. */
+static void
+close_live_handles(void)
+{
+    int pid, mfd, sid;
+
+    for (pid = 0; pid < R_MAXPID; pid++) {
+        for (mfd = 0; mfd < R_MAXFD; mfd++) {
+            if (g_fdmap[pid][mfd] != BADFD) {
+                chimera_posix_close(g_fdmap[pid][mfd]);
+                g_fdmap[pid][mfd] = BADFD;
+            }
+        }
+    }
+    for (sid = 0; sid < R_MAXSID; sid++) {
+        if (g_dirmap[sid]) {
+            chimera_posix_closedir(g_dirmap[sid]);
+            g_dirmap[sid] = NULL;
+        }
+    }
+} /* close_live_handles */
+
 /* Reset the driver to a fresh empty filesystem (driver "newfs" op). */
 static int
 newfs(void)
 {
-    json_t *res = call(req_new("newfs", 0));
-    int     ok  = res && tf_field(res, "err") == 0;
+    json_t *res;
+    int     ok;
+
+    close_live_handles();
+    res = call(req_new("newfs", 0));
+    ok  = res && tf_field(res, "err") == 0;
 
     json_decref(res);
     return ok;

@@ -928,18 +928,34 @@ handle(json_t *req)
              * direct backends are batched today (POSIX_MBT_MEMFS_ONLY). */
             return res_int(-1, ENOSYS);
         }
-        if (chimera_posix_umount("/test") != 0) {
-            fprintf(stderr, "posix_driver: newfs umount failed: %s\n",
-                    strerror(errno));
-            return res_int(-1, errno);
+        /* The replayer has dropped every open fd/dir, but the VFS releases the
+         * underlying handles on its async sweep thread, so the mount can stay
+         * EBUSY for a short window.  Retry rather than race it -- the same
+         * bounded-retry shape the SMB/NFS4 harness teardown uses (5s ceiling). */
+        int umount_tries = 0;
+        while (chimera_posix_umount("/test") != 0) {
+            if (errno != EBUSY || ++umount_tries >= 5000) {
+                fprintf(stderr, "posix_driver: newfs umount failed: %s\n",
+                        strerror(errno));
+                return res_int(-1, errno);
+            }
+            usleep(1000);
         }
-        /* Do NOT rmfs the old filesystem: isolation comes from the *new*
-         * fsname (fresh fsid -> fresh FH mount-id, so no cached entry can be
-         * hit), and rmfs would need every open handle drained first -- a trace
-         * can legitimately end with an open fd on an unlinked inode, which
-         * keeps the fs busy.  The unmounted old fs just lingers in memory;
-         * across a bounded corpus that is a few MB, and its handles reference
-         * only valid (never-freed) inodes, so the close thread stays safe. */
+        /* Remove the old filesystem rather than leaking it.  The replayer has
+         * dropped every handle and the unmount drained them, so rmfs succeeds
+         * once the async sweep releases the last reference (bounded-retry that
+         * window, as for the unmount).  Leaking the fs instead would accumulate
+         * unmounted-but-live filesystems that the VFS walks on every operation,
+         * making a long corpus quadratic. */
+        int rmfs_tries = 0;
+        while (chimera_posix_rmfs(g_module, g_fsname) != 0) {
+            if (errno != EBUSY || ++rmfs_tries >= 5000) {
+                fprintf(stderr, "posix_driver: newfs rmfs %s failed: %s\n",
+                        g_fsname, strerror(errno));
+                return res_int(-1, errno);
+            }
+            usleep(1000);
+        }
         snprintf(g_fsname, sizeof(g_fsname), "fs%d", ++g_fs_counter);
         if (chimera_posix_mkfs(g_module, g_fsname, NULL) != 0) {
             fprintf(stderr, "posix_driver: newfs mkfs %s failed: %s\n",
@@ -984,6 +1000,13 @@ posix_env_setup(
     const char                   *module      = backend;
     int                           nfs_version = 0;
     char                          module_cfg[4096];
+
+    /* The VFS releases closed handles on an async sweep thread, so a filesystem
+     * stays EBUSY for a window after its last close.  A fast sweep keeps the
+     * between-trace newfs recycle (umount -> mkfs) from stalling; the newfs
+     * umount then only needs a short bounded retry.  Must be set before the
+     * worker/sweep threads start in chimera_posix_init. */
+    setenv("CHIMERA_CLOSE_SWEEP_INTERVAL_MS", "10", 0);
 
     chimera_log_init();
     ChimeraLogLevel = CHIMERA_LOG_ERROR;
