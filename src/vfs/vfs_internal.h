@@ -355,6 +355,10 @@ chimera_vfs_request_alloc_common(
     /* Reset implicit-lease mediation state: requests are pooled and not
      * fully memset on reuse, so a prior op's owner/pin must not leak in. */
     request->io_owner_valid       = 0;
+    request->io_sync_wait         = 0;
+    request->notify_gate          = NULL;
+    request->notify_gate_wrapped  = 0;
+    request->notify_gate_resume   = 0;
     request->io_recall_all        = 0;
     request->io_recall_flush_only = 0;
     request->io_recall_single     = 0;
@@ -677,6 +681,13 @@ chimera_vfs_mount_is_readonly(const struct chimera_vfs_request *request)
     return !!(attrs.flags & CHIMERA_VFS_MOUNT_ATTR_READONLY);
 } /* chimera_vfs_mount_is_readonly */
 
+/* vfs_notify.c: swap in the sync-coherence completion gate on namespace
+ * mutations when sync watchers exist (see vfs_notify.h).  Declared here
+ * rather than pulling vfs_notify.h into every dispatch consumer. */
+void
+chimera_vfs_notify_gate_install(
+    struct chimera_vfs_request *request);
+
 static inline void
 chimera_vfs_dispatch(struct chimera_vfs_request *request)
 {
@@ -687,6 +698,10 @@ chimera_vfs_dispatch(struct chimera_vfs_request *request)
     int                                   thread_id;
 
     chimera_vfs_dump_request(request);
+
+    /* Namespace mutations gate their completion on sync watchers'
+     * invalidation acks; a single relaxed load when none are registered. */
+    chimera_vfs_notify_gate_install(request);
 
     if (!module || !thread->module_private[module->fh_magic]) {
         request->status = CHIMERA_VFS_ESTALE;

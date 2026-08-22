@@ -43,41 +43,85 @@ struct chimera_vfs_notify_event {
 };
 
 struct chimera_vfs_notify_watch;
+struct chimera_vfs_notify_gate;
+struct chimera_vfs_request;
 
 /* Callback: called when events are ready on a watch */
 typedef void (*chimera_vfs_notify_callback_t)(
     struct chimera_vfs_notify_watch *watch,
     void                            *private_data);
 
+/*
+ * A synchronously-delivered namespace event: a mutation whose reply is being
+ * withheld until every sync watcher acknowledges it has invalidated its
+ * caches for the affected name(s).  Delivered on a malloc'd FIFO separate
+ * from the ring so a burst can never drop one (a dropped gated event would
+ * strand its gate until the deadline sweep).  The consumer drains the list
+ * (chimera_vfs_notify_drain_sync), performs its invalidation for each event,
+ * then acks it (chimera_vfs_notify_gate_ack) -- which frees the event and,
+ * on the last outstanding ack, resumes the gated operation's completion.
+ */
+struct chimera_vfs_notify_sync_event {
+    uint32_t                              action; /* CHIMERA_VFS_NOTIFY_* */
+    uint16_t                              name_len;
+    uint16_t                              old_name_len;
+    char                                  name[CHIMERA_VFS_NAME_MAX];
+    char                                  old_name[CHIMERA_VFS_NAME_MAX];
+    struct chimera_vfs_notify_gate       *gate;
+    struct chimera_vfs_notify_sync_event *next;
+};
+
 /* Watch on a directory */
 struct chimera_vfs_notify_watch {
-    uint8_t                          dir_fh[CHIMERA_VFS_FH_SIZE];
-    uint16_t                         dir_fh_len;
-    uint64_t                         dir_fh_hash;
-    uint32_t                         filter_mask;
-    int                              watch_tree;
+    uint8_t                               dir_fh[CHIMERA_VFS_FH_SIZE];
+    uint16_t                              dir_fh_len;
+    uint64_t                              dir_fh_hash;
+    uint32_t                              filter_mask;
+    int                                   watch_tree;
 
     /* Event ring buffer */
-    struct chimera_vfs_notify_event  ring[CHIMERA_VFS_NOTIFY_RING_SIZE];
-    int                              ring_head;  /* next write position */
-    int                              ring_count; /* number of pending events */
-    int                              overflowed;
+    struct chimera_vfs_notify_event       ring[CHIMERA_VFS_NOTIFY_RING_SIZE];
+    int                                   ring_head; /* next write position */
+    int                                   ring_count; /* number of pending events */
+    int                                   overflowed;
     /* Set when the watched object itself was removed.  Drained via
      * chimera_vfs_notify_watch_take_deleted(); the SMB layer maps it to
      * STATUS_DELETE_PENDING on the pending CHANGE_NOTIFY. */
-    int                              deleted;
+    int                                   deleted;
 
-    chimera_vfs_notify_callback_t    callback;
-    void                            *private_data;
+    chimera_vfs_notify_callback_t         callback;
+    void                                 *private_data;
+
+    /* Synchronous-coherence participation (chimera_vfs_notify_watch_set_sync):
+     * namespace mutations under this directory complete only after this
+     * watcher acks the sync events queued here, EXCEPT mutations whose
+     * cred->origin matches `origin` (the watcher's own endpoint is natively
+     * coherent with its own operations and gating on it would deadlock). */
+    int                                   sync;
+    const void                           *origin;
+    struct chimera_vfs_notify_sync_event *sync_events;      /* FIFO, under lock */
+    struct chimera_vfs_notify_sync_event *sync_events_tail;
+    /* Number of gated namespace mutations from this watch's OWN origin
+     * currently in flight under this directory (under the BUCKET lock;
+     * marked at dispatch, cleared at completion, clamped at zero so a
+     * watch recreated mid-operation cannot go negative and mask a later
+     * mark).  While nonzero, PEERS' gates skip this watch: the origin's
+     * kernel holds the directory lock for its own syscall, so a blocking
+     * invalidation into it would deadlock the two mounts against each
+     * other.  The skipped watcher converges through the ordinary async
+     * emit instead -- sync coherence softens to microseconds-async exactly
+     * when both mounts mutate one directory concurrently, where no
+     * cross-mount ordering exists to preserve. */
+    int                                   gated_inflight;
 
     /* Per-watch lock protects ring buffer state */
-    pthread_mutex_t                  lock;
+    pthread_mutex_t                       lock;
 
     /* Linkage within bucket (exact watches) */
-    struct chimera_vfs_notify_watch *next;
+    struct chimera_vfs_notify_watch      *next;
 
     /* Linkage within mount_entry subtree list */
-    struct chimera_vfs_notify_watch *subtree_next;
+    struct chimera_vfs_notify_watch      *subtree_next;
 };
 
 /* Tombstone of a just-removed object's FH.  Recorded by emit_delete so a
@@ -155,6 +199,14 @@ struct chimera_vfs_notify {
     int                                      num_pending;
     int                                      shutdown;     /* set during destroy to block new resolvers */
     pthread_mutex_t                          pending_lock;
+
+    /* Completion gates: namespace mutations parked until every sync watcher
+     * acks its invalidation (or the deadline sweep gives up on it).  The
+     * sync-watch count is the dispatch-path fast gate: zero (no FUSE
+     * coherence=sync mounts) means gate_install is a single atomic load. */
+    pthread_mutex_t                          gates_lock;
+    struct chimera_vfs_notify_gate          *gates;
+    int                                      num_sync_watches; /* atomics */
 
     struct chimera_vfs                      *vfs;
 };
@@ -293,3 +345,63 @@ chimera_vfs_notify_emit_delete(
     struct chimera_vfs_notify *notify,
     const uint8_t             *fh,
     uint16_t                   fh_len);
+
+/* ----------------------------------------------------------------
+ * Synchronous coherence: sync watches and completion gates
+ * ----------------------------------------------------------------
+ *
+ * A namespace mutation (create / remove / rename / link) under a directory
+ * with SYNC watches does not complete back to its caller until every such
+ * watcher (other than the mutation's own origin) has acknowledged the
+ * event: the FUSE server uses this to guarantee that when a mutation
+ * returns anywhere, every peer kernel's dentry for the affected name is
+ * already invalidated.  The gate is installed transparently by
+ * chimera_vfs_dispatch (vfs_notify_gate.c) after the backend completes and
+ * before the protocol callback runs, so cross-protocol ordering holds for
+ * every consumer without per-protocol changes.  A deadline sweep
+ * (chimera_vfs_notify_gate_sweep, driven by the close thread's timer)
+ * bounds the wait if a watcher wedges -- coherence degrades to the TTLs
+ * for that operation rather than hanging it.
+ */
+
+/* How long a gated completion waits for watcher acks before proceeding
+ * anyway.  Acks are normally microseconds (an in-kernel invalidation write);
+ * the deadline exists for wedged consumers and kernel-side lock cycles
+ * between mutually-gated mounts. */
+#define CHIMERA_VFS_NOTIFY_GATE_TIMEOUT_MS 5000
+
+/* Mark a watch as a sync watcher owned by `origin` (may be NULL, though a
+ * NULL-origin sync watch gates even its own endpoint's mutations). */
+void
+chimera_vfs_notify_watch_set_sync(
+    struct chimera_vfs_notify       *notify,
+    struct chimera_vfs_notify_watch *watch,
+    const void                      *origin);
+
+/* Detach and return the watch's queued sync events (FIFO order).  Each
+ * returned event MUST eventually be passed to chimera_vfs_notify_gate_ack
+ * or its gate stalls until the deadline sweep. */
+struct chimera_vfs_notify_sync_event *
+chimera_vfs_notify_drain_sync(
+    struct chimera_vfs_notify_watch *watch);
+
+/* Acknowledge one sync event: the consumer has invalidated its caches for
+ * the event's name(s).  Frees the event; the last outstanding ack resumes
+ * the gated operation's completion on its owning thread. */
+void
+chimera_vfs_notify_gate_ack(
+    struct chimera_vfs_notify            *notify,
+    struct chimera_vfs_notify_sync_event *event);
+
+/* Fire every gate past its deadline (called from the periodic close-thread
+ * sweep). */
+void
+chimera_vfs_notify_gate_sweep(
+    struct chimera_vfs_notify *notify);
+
+/* vfs_notify_gate.c: install the completion gate on a namespace-mutating
+ * request when sync watchers exist.  Called by chimera_vfs_dispatch; cheap
+ * no-op when no sync watches are registered. */
+void
+chimera_vfs_notify_gate_install(
+    struct chimera_vfs_request *request);

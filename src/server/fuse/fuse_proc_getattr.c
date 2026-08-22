@@ -17,13 +17,30 @@ chimera_fuse_attr_out_reply(
     struct chimera_fuse_request    *req,
     const struct chimera_vfs_attrs *attr)
 {
-    struct chimera_fuse_mount *mount = req->channel->mount;
+    struct chimera_fuse_mount *mount   = req->channel->mount;
+    uint32_t                   attr_ms = mount->attr_timeout_ms;
     struct fuse_attr_out       out;
 
     memset(&out, 0, sizeof(out));
 
-    out.attr_valid      = mount->attr_timeout_ms / 1000;
-    out.attr_valid_nsec = (mount->attr_timeout_ms % 1000) * 1000000;
+    /* coherence=sync: attributes get a TTL only when coverage existed at
+     * request ENTRY (req->entry_cover -- so the backend fetch was
+     * protected) AND, for a regular file, the grant is STILL unbroken now
+     * (a break mid-flight means a foreign write raced the fetch).  A
+     * directory's watch never breaks; its mid-flight races resolve through
+     * the queued INVAL_INODE instead.  Everything uncovered -- first
+     * touches, symlinks, contention -- serves uncached. */
+    if (mount->coherence_sync) {
+        if (req->entry_cover == CHIMERA_FUSE_COVER_NONE) {
+            attr_ms = 0;
+        } else if (S_ISREG(attr->va_mode) &&
+                   !chimera_fuse_grant_active(mount, req->nodeid)) {
+            attr_ms = 0;
+        }
+    }
+
+    out.attr_valid      = attr_ms / 1000;
+    out.attr_valid_nsec = (attr_ms % 1000) * 1000000;
 
     chimera_fuse_attr_from_vfs(&out.attr, attr);
 
@@ -100,6 +117,13 @@ chimera_fuse_op_getattr(
         memcpy(req->fh, oh->fh, oh->fh_len);
         req->fh_len = oh->fh_len;
 
+        /* Arm coverage BEFORE the backend fetch so the reply may carry a
+         * TTL (see chimera_fuse_attr_out_reply). */
+        req->entry_cover = chimera_fuse_cover_touch(req->thread,
+                                                    req->channel->mount,
+                                                    req->nodeid,
+                                                    req->fh, req->fh_len);
+
         /* The kernel named an open file; use its handle directly (it stays
          * owned by the open, so req->handle stays NULL). */
         chimera_vfs_getattr(req->thread->vfs_thread, &req->cred, oh,
@@ -112,6 +136,11 @@ chimera_fuse_op_getattr(
         chimera_fuse_reply(req, ESTALE, NULL, 0);
         return;
     }
+
+    req->entry_cover = chimera_fuse_cover_touch(req->thread,
+                                                req->channel->mount,
+                                                req->nodeid,
+                                                req->fh, req->fh_len);
 
     chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
                         req->fh, req->fh_len,

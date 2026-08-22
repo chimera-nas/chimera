@@ -210,9 +210,14 @@ chimera_fuse_init_handshake(
         break;
     }
 
+    /* AUTO_INVAL_DATA is what makes attribute-only invalidations (the
+     * non-blocking kind the grant breaks use, fuse_coherence.c) drop stale
+     * DATA too: the kernel revalidates attributes on the next cached read
+     * and discards its pages itself when mtime/size moved -- in the
+     * reader's own context, where no cross-mount lock cycle is possible. */
     want = FUSE_ASYNC_READ | FUSE_BIG_WRITES | FUSE_PARALLEL_DIROPS |
         FUSE_DO_READDIRPLUS | FUSE_READDIRPLUS_AUTO | FUSE_ASYNC_DIO |
-        FUSE_MAX_PAGES | FUSE_POSIX_LOCKS;
+        FUSE_MAX_PAGES | FUSE_POSIX_LOCKS | FUSE_AUTO_INVAL_DATA;
 
     memset(&out, 0, sizeof(out));
 

@@ -132,6 +132,30 @@ chimera_fuse_inval_inode(
                               &out, sizeof(out), NULL, 0);
 } /* chimera_fuse_inval_inode */
 
+/* Attribute-only invalidation (off = -1): the kernel drops its cached
+ * attributes but its page cache is left to AUTO_INVAL_DATA -- the next
+ * cached read revalidates the (now invalid) attributes and the kernel
+ * discards stale pages itself when mtime/size moved.  This is the ONLY
+ * invalidation a grant break may use: a full-page invalidation blocks
+ * inside the kernel on any in-flight write's page locks, and that write
+ * may itself be parked on the very break being resolved (the cross-mount
+ * write/write cycle) -- with the ack pipeline wedged behind it. */
+static void
+chimera_fuse_inval_attrs(
+    struct chimera_fuse_mount *mount,
+    uint64_t                   nodeid)
+{
+    struct fuse_notify_inval_inode_out out;
+
+    memset(&out, 0, sizeof(out));
+    out.ino = nodeid;
+    out.off = -1;
+    out.len = 0;
+
+    chimera_fuse_notify_write(mount, FUSE_NOTIFY_INVAL_INODE,
+                              &out, sizeof(out), NULL, 0);
+} /* chimera_fuse_inval_attrs */
+
 static void
 chimera_fuse_inval_entry(
     struct chimera_fuse_mount *mount,
@@ -165,7 +189,7 @@ chimera_fuse_grant_resolve(
     struct chimera_vfs_lease_mode none       = { 0, 0 };
     int                           free_grant = 0;
 
-    chimera_fuse_inval_inode(mount, grant->nodeid);
+    chimera_fuse_inval_attrs(mount, grant->nodeid);
 
     if (!atomic_load(&grant->revoked)) {
         chimera_vfs_lease_ack(&grant->lease, none);
@@ -190,17 +214,66 @@ chimera_fuse_grant_resolve(
     }
 } /* chimera_fuse_grant_resolve */
 
-/* Drain one directory watch into per-name entry invalidations. */
+/* Drain one directory watch into per-name entry invalidations.  Sync
+ * events (a gated mutation's completion is parked on our ack) drain
+ * first: their invalidations must be on the wire -- including the
+ * directory's own attribute refresh -- before the ack releases the
+ * mutating caller. */
 static void
 chimera_fuse_dirwatch_drain(
     struct chimera_fuse_shared *shared,
     struct chimera_fuse_mount  *mount,
     uint64_t                    nodeid)
 {
-    struct chimera_fuse_dirwatch   *dw;
-    struct chimera_vfs_notify_event events[16];
-    int                             nevents, overflowed, i;
-    int                             touched = 0;
+    struct chimera_vfs_notify            *notify = shared->vfs->vfs_notify;
+    struct chimera_fuse_dirwatch         *dw;
+    struct chimera_vfs_notify_event       events[16];
+    struct chimera_vfs_notify_sync_event *sev, *sev_next;
+    int                                   nevents, overflowed, i;
+    int                                   touched = 0;
+
+    pthread_mutex_lock(&mount->grant_lock);
+
+    HASH_FIND(hh, mount->dirwatches, &nodeid, sizeof(nodeid), dw);
+
+    if (!dw || !dw->watch) {
+        pthread_mutex_unlock(&mount->grant_lock);
+        return;
+    }
+
+    /* Re-arm BEFORE draining: an event landing after the drain must
+     * queue a fresh notice or it would sit in the queue forever. */
+    pthread_mutex_lock(&mount->dir_notifier_lock);
+    dw->queued = 0;
+    pthread_mutex_unlock(&mount->dir_notifier_lock);
+
+    sev = chimera_vfs_notify_drain_sync(dw->watch);
+
+    pthread_mutex_unlock(&mount->grant_lock);
+
+    if (sev) {
+        touched = 1;
+
+        for (sev_next = sev; sev_next; sev_next = sev_next->next) {
+            chimera_fuse_inval_entry(mount, nodeid,
+                                     sev_next->name, sev_next->name_len);
+            if (sev_next->old_name_len) {
+                chimera_fuse_inval_entry(mount, nodeid,
+                                         sev_next->old_name,
+                                         sev_next->old_name_len);
+            }
+        }
+
+        /* Refresh the directory's own attributes before acking: the gated
+         * caller may stat the directory the moment its op returns. */
+        chimera_fuse_inval_inode(mount, nodeid);
+
+        while (sev) {
+            sev_next = sev->next;
+            chimera_vfs_notify_gate_ack(notify, sev);
+            sev = sev_next;
+        }
+    }
 
     for (;;) {
         pthread_mutex_lock(&mount->grant_lock);
@@ -211,12 +284,6 @@ chimera_fuse_dirwatch_drain(
             pthread_mutex_unlock(&mount->grant_lock);
             return;
         }
-
-        /* Re-arm BEFORE draining: an event landing after the drain must
-         * queue a fresh notice or it would sit in the ring forever. */
-        pthread_mutex_lock(&shared->notifier_lock);
-        dw->queued = 0;
-        pthread_mutex_unlock(&shared->notifier_lock);
 
         nevents = chimera_vfs_notify_drain(dw->watch, events, 16, &overflowed);
 
@@ -282,8 +349,7 @@ chimera_fuse_notifier(void *arg)
                 chimera_fuse_grant_resolve(shared, notice->grant);
                 break;
             case CHIMERA_FUSE_NOTICE_DIR_EVENTS:
-                chimera_fuse_dirwatch_drain(shared, notice->mount,
-                                            notice->nodeid);
+                /* Directory events run on the owning mount's own thread. */
                 break;
         } /* switch */
 
@@ -297,17 +363,91 @@ chimera_fuse_notifier(void *arg)
     return NULL;
 } /* chimera_fuse_notifier */
 
+/* Per-mount directory-event notifier.  An INVAL_ENTRY into this mount's
+ * kernel can block on a directory lock held by one of this mount's own
+ * in-flight namespace syscalls (which completes as soon as its server-side
+ * acks flow).  Running each mount's directory events on the mount's own
+ * thread keeps such a transient block from starving any other mount's
+ * acks -- or the grant lane on the shared notifier, whose attribute-only
+ * invalidations never block at all.  That lane separation is what keeps a
+ * parked operation's ack pipeline live while an entry invalidation waits
+ * out a kernel lock. */
+static void *
+chimera_fuse_dir_notifier(void *arg)
+{
+    struct chimera_fuse_mount  *mount = arg;
+    struct chimera_fuse_notice *notice;
+
+    pthread_mutex_lock(&mount->dir_notifier_lock);
+
+    for (;;) {
+        while (!mount->dir_notices && !mount->dir_notifier_stop) {
+            pthread_cond_wait(&mount->dir_notifier_cond,
+                              &mount->dir_notifier_lock);
+        }
+
+        if (!mount->dir_notices) {
+            break; /* stopping, queue fully drained */
+        }
+
+        notice             = mount->dir_notices;
+        mount->dir_notices = notice->next;
+
+        pthread_mutex_unlock(&mount->dir_notifier_lock);
+
+        chimera_fuse_dirwatch_drain(mount->shared, mount, notice->nodeid);
+
+        free(notice);
+
+        pthread_mutex_lock(&mount->dir_notifier_lock);
+    }
+
+    pthread_mutex_unlock(&mount->dir_notifier_lock);
+
+    return NULL;
+} /* chimera_fuse_dir_notifier */
+
 void
 chimera_fuse_notifier_start(struct chimera_fuse_shared *shared)
 {
+    int m;
+
     shared->notifier_stop = 0;
     pthread_create(&shared->notifier, NULL, chimera_fuse_notifier, shared);
     shared->notifier_running = 1;
+
+    for (m = 0; m < shared->num_mounts; m++) {
+        struct chimera_fuse_mount *mount = &shared->mounts[m];
+
+        mount->dir_notifier_stop = 0;
+        pthread_create(&mount->dir_notifier, NULL,
+                       chimera_fuse_dir_notifier, mount);
+        mount->dir_notifier_running = 1;
+    }
 } /* chimera_fuse_notifier_start */
 
 void
 chimera_fuse_notifier_stop(struct chimera_fuse_shared *shared)
 {
+    int m;
+
+    for (m = 0; m < shared->num_mounts; m++) {
+        struct chimera_fuse_mount *mount = &shared->mounts[m];
+
+        if (!mount->dir_notifier_running) {
+            continue;
+        }
+
+        pthread_mutex_lock(&mount->dir_notifier_lock);
+        mount->dir_notifier_stop = 1;
+        pthread_cond_signal(&mount->dir_notifier_cond);
+        pthread_mutex_unlock(&mount->dir_notifier_lock);
+
+        pthread_join(mount->dir_notifier, NULL);
+
+        mount->dir_notifier_running = 0;
+    }
+
     if (!shared->notifier_running) {
         return;
     }
@@ -393,6 +533,11 @@ chimera_fuse_grant_arm(
     grant->lease.owner.break_cb   = chimera_fuse_grant_break_cb;
     grant->lease.owner.revoked_cb = chimera_fuse_grant_revoked_cb;
     grant->lease.owner.cb_private = grant;
+    /* coherence=sync: a conflicting writer anywhere parks until this grant's
+     * break resolves (INVAL_INODE written and acked), so "the write returned"
+     * implies "this kernel's cache is gone".  The break deadline (revoke)
+     * bounds the wait if the notifier ever wedges. */
+    grant->lease.owner.sync_break = grant->mount->coherence_sync ? 1 : 0;
 
     atomic_store(&grant->revoked, 0);
 
@@ -422,22 +567,27 @@ chimera_fuse_grant_ensure(
 {
     struct chimera_vfs_state  *state = thread->vfs_thread->vfs->vfs_state;
     struct chimera_fuse_grant *grant;
-    int                        active;
+    int                        rc;
 
     pthread_mutex_lock(&mount->grant_lock);
 
     HASH_FIND(hh, mount->grants, &nodeid, sizeof(nodeid), grant);
 
     if (grant) {
-        if (atomic_load(&grant->state) == CHIMERA_FUSE_GRANT_BROKEN) {
-            /* Re-arm a previously broken grant for this fresh touch. */
-            chimera_fuse_grant_arm(state, grant);
+        if (atomic_load(&grant->state) == CHIMERA_FUSE_GRANT_ACTIVE) {
+            pthread_mutex_unlock(&mount->grant_lock);
+            return CHIMERA_FUSE_COVER_HELD;
         }
 
-        active = (atomic_load(&grant->state) == CHIMERA_FUSE_GRANT_ACTIVE);
+        rc = CHIMERA_FUSE_COVER_NONE;
+        if (atomic_load(&grant->state) == CHIMERA_FUSE_GRANT_BROKEN &&
+            chimera_fuse_grant_arm(state, grant) == 0) {
+            /* Re-armed a previously broken grant for this fresh touch. */
+            rc = CHIMERA_FUSE_COVER_FRESH;
+        }
 
         pthread_mutex_unlock(&mount->grant_lock);
-        return active;
+        return rc;
     }
 
     grant = calloc(1, sizeof(*grant));
@@ -458,22 +608,76 @@ chimera_fuse_grant_ensure(
     if (!grant->file_state) {
         pthread_mutex_unlock(&mount->grant_lock);
         free(grant);
-        return 0;
+        return CHIMERA_FUSE_COVER_NONE;
     }
 
     if (chimera_fuse_grant_arm(state, grant) != 0) {
         pthread_mutex_unlock(&mount->grant_lock);
         chimera_vfs_state_put(state, grant->file_state);
         free(grant);
-        return 0;
+        return CHIMERA_FUSE_COVER_NONE;
     }
 
     HASH_ADD(hh, mount->grants, nodeid, sizeof(grant->nodeid), grant);
 
     pthread_mutex_unlock(&mount->grant_lock);
 
-    return 1;
+    return CHIMERA_FUSE_COVER_FRESH;
 } /* chimera_fuse_grant_ensure */
+
+int
+chimera_fuse_cover_touch(
+    struct chimera_fuse_thread *thread,
+    struct chimera_fuse_mount  *mount,
+    uint64_t                    nodeid,
+    const uint8_t              *fh,
+    uint32_t                    fh_len)
+{
+    struct chimera_fuse_dirwatch *dw;
+    struct chimera_fuse_grant    *grant;
+    int                           have_grant;
+
+    pthread_mutex_lock(&mount->grant_lock);
+    HASH_FIND(hh, mount->grants, &nodeid, sizeof(nodeid), grant);
+    have_grant = grant != NULL;
+    if (!have_grant) {
+        HASH_FIND(hh, mount->dirwatches, &nodeid, sizeof(nodeid), dw);
+        if (dw) {
+            pthread_mutex_unlock(&mount->grant_lock);
+            return CHIMERA_FUSE_COVER_HELD;
+        }
+    }
+    pthread_mutex_unlock(&mount->grant_lock);
+
+    if (have_grant) {
+        /* Known regular file: re-arm through the normal path (drops and
+         * retakes grant_lock; the grant cannot vanish -- forgets come from
+         * the kernel, which is mid-request on this node). */
+        return chimera_fuse_grant_ensure(thread, mount, nodeid, fh, fh_len,
+                                         chimera_fuse_fh_hash(fh, fh_len));
+    }
+
+    /* First touch: the node's type is unknown until the backend replies, so
+     * coverage cannot begin yet.  The completion path arms it for next
+     * time. */
+    return CHIMERA_FUSE_COVER_NONE;
+} /* chimera_fuse_cover_touch */
+
+int
+chimera_fuse_grant_active(
+    struct chimera_fuse_mount *mount,
+    uint64_t                   nodeid)
+{
+    struct chimera_fuse_grant *grant;
+    int                        active;
+
+    pthread_mutex_lock(&mount->grant_lock);
+    HASH_FIND(hh, mount->grants, &nodeid, sizeof(nodeid), grant);
+    active = grant && atomic_load(&grant->state) == CHIMERA_FUSE_GRANT_ACTIVE;
+    pthread_mutex_unlock(&mount->grant_lock);
+
+    return active;
+} /* chimera_fuse_grant_active */
 
 int
 chimera_fuse_grant_open(
@@ -534,20 +738,21 @@ chimera_fuse_grant_forget(
             CHIMERA_VFS_NOTIFY_DIR_REMOVED | \
             CHIMERA_VFS_NOTIFY_RENAMED)
 
-/* From any thread, under the notify bucket lock: enqueue-only. */
+/* From any thread, under the notify bucket lock: enqueue-only, onto the
+ * owning mount's directory-event thread. */
 static void
 chimera_fuse_dirwatch_cb(
     struct chimera_vfs_notify_watch *watch,
     void                            *private_data)
 {
-    struct chimera_fuse_dirwatch *dw     = private_data;
-    struct chimera_fuse_shared   *shared = dw->mount->shared;
+    struct chimera_fuse_dirwatch *dw    = private_data;
+    struct chimera_fuse_mount    *mount = dw->mount;
     struct chimera_fuse_notice   *notice;
 
-    pthread_mutex_lock(&shared->notifier_lock);
+    pthread_mutex_lock(&mount->dir_notifier_lock);
 
     if (dw->queued) {
-        pthread_mutex_unlock(&shared->notifier_lock);
+        pthread_mutex_unlock(&mount->dir_notifier_lock);
         return;
     }
 
@@ -556,16 +761,16 @@ chimera_fuse_dirwatch_cb(
     notice = calloc(1, sizeof(*notice));
 
     notice->type   = CHIMERA_FUSE_NOTICE_DIR_EVENTS;
-    notice->mount  = dw->mount;
+    notice->mount  = mount;
     notice->nodeid = dw->nodeid;
 
-    LL_APPEND(shared->notices, notice);
-    pthread_cond_signal(&shared->notifier_cond);
+    LL_APPEND(mount->dir_notices, notice);
+    pthread_cond_signal(&mount->dir_notifier_cond);
 
-    pthread_mutex_unlock(&shared->notifier_lock);
+    pthread_mutex_unlock(&mount->dir_notifier_lock);
 } /* chimera_fuse_dirwatch_cb */
 
-void
+int
 chimera_fuse_watch_dir(
     struct chimera_fuse_thread *thread,
     struct chimera_fuse_mount  *mount,
@@ -573,8 +778,10 @@ chimera_fuse_watch_dir(
     const uint8_t              *fh,
     uint32_t                    fh_len)
 {
-    struct chimera_vfs_notify    *notify = thread->vfs_thread->vfs->vfs_notify;
+    struct chimera_vfs_notify    *notify = mount->shared->vfs->vfs_notify;
     struct chimera_fuse_dirwatch *dw;
+
+    (void) thread;
 
     pthread_mutex_lock(&mount->grant_lock);
 
@@ -582,7 +789,7 @@ chimera_fuse_watch_dir(
 
     if (dw) {
         pthread_mutex_unlock(&mount->grant_lock);
-        return;
+        return CHIMERA_FUSE_COVER_HELD;
     }
 
     dw = calloc(1, sizeof(*dw));
@@ -598,12 +805,22 @@ chimera_fuse_watch_dir(
     if (!dw->watch) {
         pthread_mutex_unlock(&mount->grant_lock);
         free(dw);
-        return;
+        return CHIMERA_FUSE_COVER_NONE;
+    }
+
+    /* coherence=sync: namespace mutations under this directory gate their
+     * completion on our invalidation ack.  The mount is the origin token, so
+     * this kernel's own mutations (stamped in chimera_fuse_map_cred) never
+     * gate on themselves. */
+    if (mount->coherence_sync) {
+        chimera_vfs_notify_watch_set_sync(notify, dw->watch, mount);
     }
 
     HASH_ADD(hh, mount->dirwatches, nodeid, sizeof(dw->nodeid), dw);
 
     pthread_mutex_unlock(&mount->grant_lock);
+
+    return CHIMERA_FUSE_COVER_FRESH;
 } /* chimera_fuse_watch_dir */
 
 void

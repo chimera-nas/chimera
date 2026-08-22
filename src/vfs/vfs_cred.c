@@ -90,6 +90,7 @@ chimera_vfs_cred_init_unix(
     cred->flavor = CHIMERA_VFS_AUTH_UNIX;
     cred->uid    = uid;
     cred->gid    = gid;
+    cred->origin = NULL;
 
     if (ngids > CHIMERA_VFS_CRED_MAX_GIDS) {
         ngids = CHIMERA_VFS_CRED_MAX_GIDS;
@@ -116,6 +117,7 @@ chimera_vfs_cred_init_attr(
     cred->uid    = uid;
     cred->gid    = gid;
     cred->ngids  = 0;
+    cred->origin = NULL;
 } /* chimera_vfs_cred_init_attr */
 
 SYMBOL_EXPORT int

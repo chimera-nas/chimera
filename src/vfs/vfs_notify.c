@@ -5,6 +5,8 @@
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <sys/stat.h>
+#include <utlist.h>
 
 #include "vfs_notify.h"
 #include "vfs_internal.h"
@@ -536,6 +538,7 @@ chimera_vfs_notify_init(struct chimera_vfs *vfs)
 
     pthread_mutex_init(&notify->mount_entries_lock, NULL);
     pthread_mutex_init(&notify->pending_lock, NULL);
+    pthread_mutex_init(&notify->gates_lock, NULL);
 
     /* RPL cache: 64 shards, 16 slots/shard, 4 entries/slot, 30s TTL */
     notify->rpl_cache = chimera_vfs_rpl_cache_create(6, 4, 2, 30);
@@ -587,11 +590,21 @@ chimera_vfs_notify_destroy(struct chimera_vfs_notify *notify)
         }
     }
 
-    /* Free all watches from buckets */
+    /* Free all watches from buckets.  Any sync events still queued are
+     * teardown leftovers (their gated requests were completed or swept
+     * before the frontends stopped); free them without acking. */
     for (i = 0; i < CHIMERA_VFS_NOTIFY_NUM_BUCKETS; i++) {
         watch = notify->buckets[i].watches;
         while (watch) {
+            struct chimera_vfs_notify_sync_event *sev, *sev_tmp;
+
             watch_tmp = watch->next;
+            sev       = watch->sync_events;
+            while (sev) {
+                sev_tmp = sev->next;
+                free(sev);
+                sev = sev_tmp;
+            }
             pthread_mutex_destroy(&watch->lock);
             free(watch);
             watch = watch_tmp;
@@ -623,6 +636,7 @@ chimera_vfs_notify_destroy(struct chimera_vfs_notify *notify)
 
     pthread_mutex_destroy(&notify->mount_entries_lock);
     pthread_mutex_destroy(&notify->pending_lock);
+    pthread_mutex_destroy(&notify->gates_lock);
 
     chimera_vfs_rpl_cache_destroy(notify->rpl_cache);
 
@@ -811,6 +825,7 @@ chimera_vfs_notify_watch_destroy(
     struct chimera_vfs_notify_bucket      *bucket;
     struct chimera_vfs_notify_watch      **pp;
     struct chimera_vfs_notify_mount_entry *me;
+    struct chimera_vfs_notify_sync_event  *sev, *sev_next;
     int                                    bi;
 
     /* Remove from exact-watch bucket */
@@ -827,6 +842,23 @@ chimera_vfs_notify_watch_destroy(
         pp = &(*pp)->next;
     }
     pthread_mutex_unlock(&bucket->lock);
+
+    if (watch->sync) {
+        __atomic_fetch_sub(&notify->num_sync_watches, 1, __ATOMIC_RELAXED);
+
+        /* Ack any events the consumer never drained: the watcher is going
+         * away (its kernel objects with it), so the gated mutations must
+         * not be left stalled on it.  The watch is already unlinked, so no
+         * new events can arrive. */
+        sev                     = watch->sync_events;
+        watch->sync_events      = NULL;
+        watch->sync_events_tail = NULL;
+        while (sev) {
+            sev_next = sev->next;
+            chimera_vfs_notify_gate_ack(notify, sev);
+            sev = sev_next;
+        }
+    }
 
     /* Remove from subtree list if applicable */
     if (watch->watch_tree) {
@@ -1365,3 +1397,551 @@ chimera_vfs_notify_emit_delete(
 
     pthread_mutex_unlock(&bucket->lock);
 } /* chimera_vfs_notify_emit_delete */
+
+/* ----------------------------------------------------------------
+ * Synchronous coherence: sync watches and completion gates
+ * ----------------------------------------------------------------
+ *
+ * See vfs_notify.h for the model.  A gate parks a namespace mutation's
+ * COMPLETION (after the backend applied it, before the protocol callback
+ * replies) until every sync watcher on the affected directory(ies) acks the
+ * per-name invalidation events delivered to it — so when the mutating
+ * caller sees its operation return, every sync watcher's caches for those
+ * names are already gone.  The watcher whose origin matches the mutating
+ * cred's origin is exempt: it is natively coherent with its own operation,
+ * and its ack path can deadlock against the very syscall it would gate
+ * (the kernel holds the parent's lock across the FUSE request while the
+ * invalidation write needs that same lock).
+ *
+ * Gate lifecycle: refs = 1 (creation) + 1 per delivered event; pending =
+ * 1 (the emitter's arm hold) + 1 per delivered event.  pending hitting
+ * zero fires the gate exactly once (guarded by gate->request under
+ * gates_lock); refs hitting zero frees it.  The deadline sweep fires
+ * overdue gates the same way, and late acks then find request == NULL.
+ */
+
+struct chimera_vfs_notify_gate {
+    int                             pending; /* atomics */
+    int                             refs;    /* atomics */
+    struct chimera_vfs_request     *request; /* under gates_lock; NULL = fired */
+    uint64_t                        deadline;
+    struct chimera_vfs_notify_gate *prev;
+    struct chimera_vfs_notify_gate *next;
+};
+
+SYMBOL_EXPORT void
+chimera_vfs_notify_watch_set_sync(
+    struct chimera_vfs_notify       *notify,
+    struct chimera_vfs_notify_watch *watch,
+    const void                      *origin)
+{
+    pthread_mutex_lock(&watch->lock);
+    watch->origin = origin;
+    if (!watch->sync) {
+        watch->sync = 1;
+        __atomic_fetch_add(&notify->num_sync_watches, 1, __ATOMIC_RELAXED);
+    }
+    pthread_mutex_unlock(&watch->lock);
+} /* chimera_vfs_notify_watch_set_sync */
+
+SYMBOL_EXPORT struct chimera_vfs_notify_sync_event *
+chimera_vfs_notify_drain_sync(struct chimera_vfs_notify_watch *watch)
+{
+    struct chimera_vfs_notify_sync_event *head;
+
+    pthread_mutex_lock(&watch->lock);
+    head                    = watch->sync_events;
+    watch->sync_events      = NULL;
+    watch->sync_events_tail = NULL;
+    pthread_mutex_unlock(&watch->lock);
+
+    return head;
+} /* chimera_vfs_notify_drain_sync */
+
+static void
+chimera_vfs_notify_gate_unref(struct chimera_vfs_notify_gate *gate)
+{
+    if (__atomic_sub_fetch(&gate->refs, 1, __ATOMIC_ACQ_REL) == 0) {
+        free(gate);
+    }
+} /* chimera_vfs_notify_gate_unref */
+
+static void
+chimera_vfs_notify_gate_mark(
+    struct chimera_vfs_notify  *notify,
+    struct chimera_vfs_request *request,
+    int                         delta);
+
+/* Detach the gated request, exactly once.  Returns it (for the caller to
+ * resume) or NULL if the gate already fired (a late ack, or the sweep won).
+ * Clears the winner's in-flight mark: the mark must survive the whole gate
+ * wait -- the origin's kernel holds the directory lock until the reply this
+ * fire unblocks, and a peer gating on a still-locked kernel is exactly the
+ * cross-mount cycle the mark exists to break. */
+static struct chimera_vfs_request *
+chimera_vfs_notify_gate_fire(
+    struct chimera_vfs_notify      *notify,
+    struct chimera_vfs_notify_gate *gate)
+{
+    struct chimera_vfs_request *request;
+
+    pthread_mutex_lock(&notify->gates_lock);
+    request       = gate->request;
+    gate->request = NULL;
+    if (request) {
+        DL_DELETE(notify->gates, gate);
+    }
+    pthread_mutex_unlock(&notify->gates_lock);
+
+    if (request) {
+        request->notify_gate = NULL;
+        chimera_vfs_notify_gate_mark(notify, request, -1);
+        /* Release the creation reference. */
+        chimera_vfs_notify_gate_unref(gate);
+    }
+
+    return request;
+} /* chimera_vfs_notify_gate_fire */
+
+SYMBOL_EXPORT void
+chimera_vfs_notify_gate_ack(
+    struct chimera_vfs_notify            *notify,
+    struct chimera_vfs_notify_sync_event *event)
+{
+    struct chimera_vfs_notify_gate *gate = event->gate;
+    struct chimera_vfs_request     *request;
+
+    free(event);
+
+    if (__atomic_sub_fetch(&gate->pending, 1, __ATOMIC_ACQ_REL) == 0) {
+        request = chimera_vfs_notify_gate_fire(notify, gate);
+        if (request) {
+            /* Resume the parked completion on its owning thread; the
+             * drain loop routes notify_gate_resume to request->complete. */
+            request->notify_gate_resume = 1;
+            chimera_vfs_io_resume_post(request);
+        }
+    }
+
+    chimera_vfs_notify_gate_unref(gate);
+} /* chimera_vfs_notify_gate_ack */
+
+SYMBOL_EXPORT void
+chimera_vfs_notify_gate_sweep(struct chimera_vfs_notify *notify)
+{
+    struct chimera_vfs_notify_gate *gate, *next;
+    struct chimera_vfs_request     *expired[16];
+    int                             n = 0;
+    uint64_t                        now;
+    int                             i;
+
+    if (!notify || !notify->gates) { /* unlocked peek: empty is the norm */
+        return;
+    }
+
+    now = chimera_vfs_now_ticks();
+
+    pthread_mutex_lock(&notify->gates_lock);
+    for (gate = notify->gates; gate && n < 16; gate = next) {
+        next = gate->next;
+        if (gate->request && now >= gate->deadline) {
+            expired[n++]  = gate->request;
+            gate->request = NULL;
+            DL_DELETE(notify->gates, gate);
+            expired[n - 1]->notify_gate = NULL;
+            chimera_vfs_notify_gate_unref(gate);
+        }
+    }
+    pthread_mutex_unlock(&notify->gates_lock);
+
+    for (i = 0; i < n; i++) {
+        chimera_vfs_info("notify gate: sync watcher ack overdue; "
+                         "completing gated op without it");
+        chimera_vfs_notify_gate_mark(notify, expired[i], -1);
+        expired[i]->notify_gate_resume = 1;
+        chimera_vfs_io_resume_post(expired[i]);
+    }
+} /* chimera_vfs_notify_gate_sweep */
+
+/* The parent directory(ies) a gated opcode mutates.  Shared by the
+ * in-flight marking (install/completion) and must therefore be a pure
+ * function of request fields that are stable from dispatch to
+ * completion.  Returns the count (0-2). */
+struct chimera_vfs_notify_gate_dir {
+    const uint8_t *fh;
+    uint16_t       fh_len;
+};
+
+static int
+chimera_vfs_notify_gate_dirs(
+    struct chimera_vfs_request         *request,
+    struct chimera_vfs_notify_gate_dir *dirs)
+{
+    switch (request->opcode) {
+        case CHIMERA_VFS_OP_REMOVE_AT:
+            dirs[0].fh     = request->remove_at.handle->fh;
+            dirs[0].fh_len = request->remove_at.handle->fh_len;
+            return 1;
+        case CHIMERA_VFS_OP_RENAME_AT:
+            dirs[0].fh     = request->fh;
+            dirs[0].fh_len = request->fh_len;
+            dirs[1].fh     = request->rename_at.new_fh;
+            dirs[1].fh_len = request->rename_at.new_fhlen;
+            return 2;
+        case CHIMERA_VFS_OP_LINK_AT:
+            dirs[0].fh     = request->link_at.dir_fh;
+            dirs[0].fh_len = request->link_at.dir_fhlen;
+            return 1;
+        case CHIMERA_VFS_OP_MKDIR_AT:
+            dirs[0].fh     = request->mkdir_at.handle->fh;
+            dirs[0].fh_len = request->mkdir_at.handle->fh_len;
+            return 1;
+        case CHIMERA_VFS_OP_MKNOD_AT:
+            dirs[0].fh     = request->mknod_at.handle->fh;
+            dirs[0].fh_len = request->mknod_at.handle->fh_len;
+            return 1;
+        case CHIMERA_VFS_OP_SYMLINK_AT:
+            dirs[0].fh     = request->fh;
+            dirs[0].fh_len = request->fh_len;
+            return 1;
+        case CHIMERA_VFS_OP_OPEN_AT:
+            dirs[0].fh     = request->open_at.handle->fh;
+            dirs[0].fh_len = request->open_at.handle->fh_len;
+            return 1;
+        default:
+            return 0;
+    } /* switch */
+} /* chimera_vfs_notify_gate_dirs */
+
+/* Mark (+1) / clear (-1) the mutating origin's own sync watches on the
+ * affected directories.  See gated_inflight in vfs_notify.h: the mark is
+ * what lets a concurrent peer's gate skip a watcher whose kernel is
+ * holding the directory locked for this very operation. */
+static void
+chimera_vfs_notify_gate_mark(
+    struct chimera_vfs_notify  *notify,
+    struct chimera_vfs_request *request,
+    int                         delta)
+{
+    struct chimera_vfs_notify_gate_dir dirs[2];
+    struct chimera_vfs_notify_bucket  *bucket;
+    struct chimera_vfs_notify_watch   *watch;
+    const void                        *origin =
+        request->cred ? request->cred->origin : NULL;
+    int                                ndirs, i, bi;
+
+    if (!origin) {
+        /* Only origin-bearing endpoints (FUSE mounts) hold kernel locks a
+         * blocking invalidation could deadlock against. */
+        return;
+    }
+
+    ndirs = chimera_vfs_notify_gate_dirs(request, dirs);
+
+    for (i = 0; i < ndirs; i++) {
+        bi = chimera_vfs_notify_bucket_index(
+            chimera_vfs_hash(dirs[i].fh, dirs[i].fh_len));
+        bucket = &notify->buckets[bi];
+
+        pthread_mutex_lock(&bucket->lock);
+        for (watch = bucket->watches; watch; watch = watch->next) {
+            if (watch->sync &&
+                watch->origin == origin &&
+                watch->dir_fh_len == dirs[i].fh_len &&
+                memcmp(watch->dir_fh, dirs[i].fh, dirs[i].fh_len) == 0) {
+                watch->gated_inflight += delta;
+                if (watch->gated_inflight < 0) {
+                    /* This watch was created after the op's install mark
+                     * (the marked watch was destroyed mid-operation);
+                     * absorb the unmatched clear. */
+                    watch->gated_inflight = 0;
+                }
+            }
+        }
+        pthread_mutex_unlock(&bucket->lock);
+    }
+} /* chimera_vfs_notify_gate_mark */
+
+/* Deliver one gated event to every sync watch on dir_fh (except the
+ * mutation's own origin).  Each delivery raises the gate's pending/refs
+ * before the watch callback can possibly ack it. */
+static void
+chimera_vfs_notify_emit_sync(
+    struct chimera_vfs_notify      *notify,
+    struct chimera_vfs_notify_gate *gate,
+    const void                     *origin,
+    const uint8_t                  *dir_fh,
+    uint16_t                        dir_fh_len,
+    uint32_t                        action,
+    const char                     *name,
+    uint16_t                        name_len,
+    const char                     *old_name,
+    uint16_t                        old_name_len)
+{
+    struct chimera_vfs_notify_bucket     *bucket;
+    struct chimera_vfs_notify_watch      *watch;
+    struct chimera_vfs_notify_sync_event *ev;
+    uint64_t                              fh_hash;
+    int                                   bi;
+
+    if (name_len > CHIMERA_VFS_NAME_MAX) {
+        name_len = CHIMERA_VFS_NAME_MAX;
+    }
+    if (old_name_len > CHIMERA_VFS_NAME_MAX) {
+        old_name_len = CHIMERA_VFS_NAME_MAX;
+    }
+
+    fh_hash = chimera_vfs_hash(dir_fh, dir_fh_len);
+    bi      = chimera_vfs_notify_bucket_index(fh_hash);
+    bucket  = &notify->buckets[bi];
+
+    pthread_mutex_lock(&bucket->lock);
+
+    for (watch = bucket->watches; watch; watch = watch->next) {
+        uint32_t mask = __atomic_load_n(&watch->filter_mask, __ATOMIC_RELAXED);
+
+        if (!watch->sync ||
+            watch->dir_fh_len != dir_fh_len ||
+            memcmp(watch->dir_fh, dir_fh, dir_fh_len) != 0 ||
+            !(mask & action)) {
+            continue;
+        }
+        if (origin && watch->origin == origin) {
+            continue;
+        }
+        /* This watcher's kernel is mid-mutation in the same directory: a
+         * blocking invalidation into it would deadlock the two mounts
+         * against each other (each kernel holds its own directory lock
+         * while awaiting its gated reply).  Skip it -- the regular async
+         * emit that follows the completion converges its view.  (Read
+         * under the bucket lock, like the marks.) */
+        if (watch->gated_inflight > 0) {
+            continue;
+        }
+
+        ev = calloc(1, sizeof(*ev));
+        if (!ev) {
+            continue; /* degrade to the async emit for this watcher */
+        }
+
+        ev->action       = action;
+        ev->name_len     = name_len;
+        ev->old_name_len = old_name_len;
+        if (name_len) {
+            memcpy(ev->name, name, name_len);
+        }
+        if (old_name_len && old_name) {
+            memcpy(ev->old_name, old_name, old_name_len);
+        }
+        ev->gate = gate;
+
+        __atomic_fetch_add(&gate->pending, 1, __ATOMIC_ACQ_REL);
+        __atomic_fetch_add(&gate->refs, 1, __ATOMIC_ACQ_REL);
+
+        pthread_mutex_lock(&watch->lock);
+        if (watch->sync_events_tail) {
+            watch->sync_events_tail->next = ev;
+        } else {
+            watch->sync_events = ev;
+        }
+        watch->sync_events_tail = ev;
+        pthread_mutex_unlock(&watch->lock);
+
+        if (watch->callback) {
+            watch->callback(watch, watch->private_data);
+        }
+    }
+
+    pthread_mutex_unlock(&bucket->lock);
+} /* chimera_vfs_notify_emit_sync */
+
+/* The gated completion: runs in place of the proc's own completion handler
+ * (swapped in by gate_install at dispatch), on the request's owning thread.
+ * On success it delivers per-name sync events to the affected directories'
+ * sync watchers and parks the real completion until they ack. */
+static void
+chimera_vfs_notify_gate_completion(struct chimera_vfs_request *request)
+{
+    struct chimera_vfs_notify      *notify = request->thread->vfs->vfs_notify;
+    struct chimera_vfs_notify_gate *gate;
+    const void                     *origin =
+        request->cred ? request->cred->origin : NULL;
+
+    /* Restore the real completion first: every exit below runs it, whether
+     * inline (no watchers / failure) or via the gate resume path.  The
+     * in-flight mark taken at install is cleared by gate_fire (the mark
+     * must outlive the gate wait) or explicitly on the ungated exits. */
+    request->complete = request->notify_saved_complete;
+
+    if (request->status != CHIMERA_VFS_OK) {
+        chimera_vfs_notify_gate_mark(notify, request, -1);
+        request->complete(request);
+        return;
+    }
+
+    gate = calloc(1, sizeof(*gate));
+    if (!gate) {
+        chimera_vfs_notify_gate_mark(notify, request, -1);
+        request->complete(request);
+        return;
+    }
+
+    gate->pending  = 1; /* the arm hold, released below */
+    gate->refs     = 1;
+    gate->request  = request;
+    gate->deadline = chimera_vfs_now_ticks() +
+        chimera_vfs_ns_to_ticks((uint64_t) CHIMERA_VFS_NOTIFY_GATE_TIMEOUT_MS *
+                                1000000ULL);
+
+    request->notify_gate = gate;
+
+    pthread_mutex_lock(&notify->gates_lock);
+    DL_APPEND(notify->gates, gate);
+    pthread_mutex_unlock(&notify->gates_lock);
+
+    switch (request->opcode) {
+        case CHIMERA_VFS_OP_REMOVE_AT:
+            if (!request->remove_at.r_unmatched) {
+                uint32_t action = CHIMERA_VFS_NOTIFY_FILE_REMOVED;
+                if ((request->remove_at.r_removed_attr.va_set_mask &
+                     CHIMERA_VFS_ATTR_MODE) &&
+                    S_ISDIR(request->remove_at.r_removed_attr.va_mode)) {
+                    action = CHIMERA_VFS_NOTIFY_DIR_REMOVED;
+                }
+                chimera_vfs_notify_emit_sync(notify, gate, origin,
+                                             request->remove_at.handle->fh,
+                                             request->remove_at.handle->fh_len,
+                                             action,
+                                             request->remove_at.name,
+                                             request->remove_at.namelen,
+                                             NULL, 0);
+            }
+            break;
+        case CHIMERA_VFS_OP_RENAME_AT:
+        {
+            int cross_dir = (request->fh_len != request->rename_at.new_fhlen) ||
+                memcmp(request->fh, request->rename_at.new_fh,
+                       request->fh_len) != 0;
+
+            if (!cross_dir) {
+                chimera_vfs_notify_emit_sync(notify, gate, origin,
+                                             request->fh, request->fh_len,
+                                             CHIMERA_VFS_NOTIFY_RENAMED,
+                                             request->rename_at.new_name,
+                                             request->rename_at.new_namelen,
+                                             request->rename_at.name,
+                                             request->rename_at.namelen);
+            } else {
+                chimera_vfs_notify_emit_sync(notify, gate, origin,
+                                             request->fh, request->fh_len,
+                                             CHIMERA_VFS_NOTIFY_RENAMED,
+                                             NULL, 0,
+                                             request->rename_at.name,
+                                             request->rename_at.namelen);
+                chimera_vfs_notify_emit_sync(notify, gate, origin,
+                                             request->rename_at.new_fh,
+                                             request->rename_at.new_fhlen,
+                                             CHIMERA_VFS_NOTIFY_RENAMED,
+                                             request->rename_at.new_name,
+                                             request->rename_at.new_namelen,
+                                             NULL, 0);
+            }
+            break;
+        }
+        case CHIMERA_VFS_OP_LINK_AT:
+            chimera_vfs_notify_emit_sync(notify, gate, origin,
+                                         request->link_at.dir_fh,
+                                         request->link_at.dir_fhlen,
+                                         CHIMERA_VFS_NOTIFY_FILE_ADDED,
+                                         request->link_at.name,
+                                         request->link_at.namelen,
+                                         NULL, 0);
+            break;
+        case CHIMERA_VFS_OP_MKDIR_AT:
+            chimera_vfs_notify_emit_sync(notify, gate, origin,
+                                         request->mkdir_at.handle->fh,
+                                         request->mkdir_at.handle->fh_len,
+                                         CHIMERA_VFS_NOTIFY_DIR_ADDED,
+                                         request->mkdir_at.name,
+                                         request->mkdir_at.name_len,
+                                         NULL, 0);
+            break;
+        case CHIMERA_VFS_OP_MKNOD_AT:
+            chimera_vfs_notify_emit_sync(notify, gate, origin,
+                                         request->mknod_at.handle->fh,
+                                         request->mknod_at.handle->fh_len,
+                                         CHIMERA_VFS_NOTIFY_FILE_ADDED,
+                                         request->mknod_at.name,
+                                         request->mknod_at.name_len,
+                                         NULL, 0);
+            break;
+        case CHIMERA_VFS_OP_SYMLINK_AT:
+            chimera_vfs_notify_emit_sync(notify, gate, origin,
+                                         request->fh, request->fh_len,
+                                         CHIMERA_VFS_NOTIFY_FILE_ADDED,
+                                         request->symlink_at.name,
+                                         request->symlink_at.namelen,
+                                         NULL, 0);
+            break;
+        case CHIMERA_VFS_OP_OPEN_AT:
+            if (request->open_at.r_created &&
+                !(request->open_at.flags & CHIMERA_VFS_OPEN_NO_NOTIFY)) {
+                chimera_vfs_notify_emit_sync(notify, gate, origin,
+                                             request->open_at.handle->fh,
+                                             request->open_at.handle->fh_len,
+                                             CHIMERA_VFS_NOTIFY_FILE_ADDED,
+                                             request->open_at.name,
+                                             request->open_at.namelen,
+                                             NULL, 0);
+            }
+            break;
+        default:
+            break;
+    } /* switch */
+
+    /* Release the arm hold; if nothing was delivered (or everything acked
+     * already) the fire is ours and the completion proceeds inline. */
+    if (__atomic_sub_fetch(&gate->pending, 1, __ATOMIC_ACQ_REL) == 0) {
+        struct chimera_vfs_request *fired =
+            chimera_vfs_notify_gate_fire(notify, gate);
+        if (fired) {
+            fired->complete(fired);
+        }
+    }
+} /* chimera_vfs_notify_gate_completion */
+
+SYMBOL_EXPORT void
+chimera_vfs_notify_gate_install(struct chimera_vfs_request *request)
+{
+    struct chimera_vfs_notify *notify = request->thread->vfs->vfs_notify;
+
+    if (!notify ||
+        __atomic_load_n(&notify->num_sync_watches, __ATOMIC_RELAXED) == 0) {
+        return;
+    }
+
+    if (request->notify_gate_wrapped) {
+        return;
+    }
+
+    switch (request->opcode) {
+        case CHIMERA_VFS_OP_REMOVE_AT:
+        case CHIMERA_VFS_OP_RENAME_AT:
+        case CHIMERA_VFS_OP_LINK_AT:
+        case CHIMERA_VFS_OP_MKDIR_AT:
+        case CHIMERA_VFS_OP_MKNOD_AT:
+        case CHIMERA_VFS_OP_SYMLINK_AT:
+        case CHIMERA_VFS_OP_OPEN_AT:
+            break;
+        default:
+            return;
+    } /* switch */
+
+    request->notify_gate_wrapped   = 1;
+    request->notify_saved_complete = request->complete;
+    request->complete              = chimera_vfs_notify_gate_completion;
+
+    /* Mark the origin's own watches on the affected directories for the
+     * request's lifetime (cleared in the completion wrapper). */
+    chimera_vfs_notify_gate_mark(notify, request, 1);
+} /* chimera_vfs_notify_gate_install */

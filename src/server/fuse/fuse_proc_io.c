@@ -57,13 +57,20 @@ chimera_fuse_open_callback(
     memset(&out, 0, sizeof(out));
     out.fh = (uint64_t) (uintptr_t) file;
 
-    /* With an active invalidation grant the kernel's cached pages are
-     * guaranteed to be dropped when any other party changes the file, so
-     * letting them survive across open/close cycles is coherent -- and a
-     * real read-cache win.  No grant (contention) means no coverage, so
-     * the kernel keeps its default invalidate-on-open behavior. */
-    if (chimera_fuse_grant_open(thread, mount, req->nodeid, oh)) {
+    /* With an invalidation grant in force from here on, the kernel's cached
+     * pages are guaranteed to be dropped when any other party changes the
+     * file, so letting them survive across open/close cycles is coherent --
+     * and a real read-cache win.  (Pages, unlike attributes, are only
+     * seeded through us AFTER the arm, so a fresh grant fully covers
+     * them.)  No grant (contention) means no coverage: ttl mode keeps the
+     * kernel's default invalidate-on-open behavior, sync mode goes further
+     * and bypasses the page cache entirely so an uncovered open can never
+     * serve stale data. */
+    if (chimera_fuse_grant_open(thread, mount, req->nodeid, oh) !=
+        CHIMERA_FUSE_COVER_NONE) {
         out.open_flags |= FOPEN_KEEP_CACHE;
+    } else if (mount->coherence_sync) {
+        out.open_flags |= FOPEN_DIRECT_IO;
     }
 
     if (chimera_fuse_reply(req, 0, &out, sizeof(out)) != 0) {
@@ -203,6 +210,12 @@ chimera_fuse_op_create(
         return;
     }
 
+    /* Watch the parent before the backend op: the new entry's dentry may
+     * only carry a TTL when the watch predates the request (reply_entry). */
+    req->entry_cover = chimera_fuse_watch_dir(req->thread, req->channel->mount,
+                                              req->nodeid,
+                                              req->fh, req->fh_len);
+
     chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
                         req->fh, req->fh_len,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH |
@@ -245,6 +258,17 @@ chimera_fuse_op_read(
     }
 
     file = chimera_fuse_file(in->fh);
+
+    /* coherence=sync: pages this read seeds into the kernel's cache must be
+     * covered, so re-arm the grant if a break dropped it.  A break during
+     * the read is still safe: the invalidation write serializes behind the
+     * in-flight read on the kernel's page locks. */
+    if (req->channel->mount->coherence_sync) {
+        chimera_fuse_grant_ensure(req->thread, req->channel->mount,
+                                  req->nodeid,
+                                  file->handle->fh, file->handle->fh_len,
+                                  file->handle->fh_hash);
+    }
 
     /* Attributed to the mount's own lease identity so a read never breaks
      * this mount's invalidation grant (copied by value downstream). */
@@ -317,6 +341,15 @@ chimera_fuse_op_write(
 
     struct chimera_fuse_open_file *file = chimera_fuse_file(in->fh);
     struct chimera_vfs_lease_owner owner;
+
+    /* coherence=sync: the kernel retains the written pages in its cache, so
+     * they need grant coverage exactly like read-seeded pages. */
+    if (req->channel->mount->coherence_sync) {
+        chimera_fuse_grant_ensure(req->thread, req->channel->mount,
+                                  req->nodeid,
+                                  file->handle->fh, file->handle->fh_len,
+                                  file->handle->fh_hash);
+    }
 
     /* Attributed to the mount's own lease identity: the kernel wrote
      * through us, so its cache is current and must not be invalidated;
