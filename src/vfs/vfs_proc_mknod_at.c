@@ -9,6 +9,7 @@
 #include "vfs_internal.h"
 #include "vfs_name_cache.h"
 #include "vfs_attr_cache.h"
+#include "vfs_notify.h"
 #include "sdk/vfs_access.h"
 #include "sdk/vfs_acl.h"
 #include "common/misc.h"
@@ -21,6 +22,16 @@ chimera_vfs_mknod_at_complete(struct chimera_vfs_request *request)
     chimera_vfs_mknod_at_callback_t callback = request->proto_callback;
 
     if (request->status == CHIMERA_VFS_OK) {
+        /* A new node is a directory content change, observable by change
+         * watchers and directory-lease holders like any other create. */
+        chimera_vfs_notify_emit(thread->vfs->vfs_notify,
+                                request->mknod_at.handle->fh,
+                                request->mknod_at.handle->fh_len,
+                                CHIMERA_VFS_NOTIFY_FILE_ADDED,
+                                request->mknod_at.name,
+                                request->mknod_at.name_len,
+                                NULL, 0);
+
         chimera_vfs_name_cache_insert(thread, cache,
                                       request->mknod_at.handle->fh_hash,
                                       request->mknod_at.handle->fh,
