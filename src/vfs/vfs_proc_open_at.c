@@ -12,6 +12,7 @@
 #include "vfs_open_cache.h"
 #include "vfs_name_cache.h"
 #include "vfs_attr_cache.h"
+#include "vfs_notify.h"
 #include "common/macros.h"
 
 /* Whether the engine applies POSIX open semantics (type checks and, for
@@ -40,6 +41,22 @@ chimera_vfs_open_at_hdl_callback(
     chimera_vfs_open_at_callback_t callback = request->proto_callback;
 
     if (request->status == CHIMERA_VFS_OK) {
+        /* A create is a directory content change: raise it for change
+         * watchers and directory-lease holders exactly as mkdir_at does,
+         * whatever protocol it arrived by.  The SMB create path opts out
+         * (CHIMERA_VFS_OPEN_NO_NOTIFY): it emits its own richer event with
+         * disposition policy and directory-lease key sparing. */
+        if (request->open_at.r_created &&
+            !(request->open_at.flags & CHIMERA_VFS_OPEN_NO_NOTIFY)) {
+            chimera_vfs_notify_emit(thread->vfs->vfs_notify,
+                                    request->open_at.handle->fh,
+                                    request->open_at.handle->fh_len,
+                                    CHIMERA_VFS_NOTIFY_FILE_ADDED,
+                                    request->open_at.name,
+                                    request->open_at.namelen,
+                                    NULL, 0);
+        }
+
         /* A path-only open returns an opaque per-open token, not a stable child
          * fh; caching name->token would hand out a dead token, so skip it. */
         if (!chimera_vfs_module_is_path_only(request->module)) {

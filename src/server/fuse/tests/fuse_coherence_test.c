@@ -281,15 +281,27 @@ main(
 
     usleep(20000); /* ensure a distinguishable mtime */
 
-    /* mkdir rather than a plain file create: VFS-core emits namespace
-     * events for mkdir/remove/rename/link, and it is the event that
-     * carries the invalidation. */
     snprintf(b2, sizeof(b2), "%s/coh_dir/inner", argv[1]);
     CHECK(mkdir(b2, 0755) == 0, "A makes a directory inside it");
 
     waited = poll_for_mtime_change(b, &old_mtime);
     CHECK(waited >= 0,
           "B sees the directory's mtime move in %ld ms",
+          waited / 1000);
+
+    /* Same again for a plain open(O_CREAT) file create, which flows through
+     * the VFS core's open_at FILE_ADDED emission rather than mkdir_at's. */
+    CHECK(stat(b, &st) == 0, "B re-primes the directory's attrs");
+    old_mtime = st.st_mtim;
+
+    usleep(20000);
+
+    snprintf(b2, sizeof(b2), "%s/coh_dir/plainfile", argv[1]);
+    CHECK(write_file(b2, "p") == 0, "A creates a plain file inside it");
+
+    waited = poll_for_mtime_change(b, &old_mtime);
+    CHECK(waited >= 0,
+          "B sees the mtime move on a plain create in %ld ms",
           waited / 1000);
 
     printf("\n%s (%d failures)\n", failures ? "FAILED" : "PASSED", failures);
