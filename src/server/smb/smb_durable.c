@@ -423,20 +423,21 @@ chimera_smb_durable_park(
     }
     pthread_mutex_unlock(&shared->durable.lock);
 
-    /* Mark the caching grant's lease AND the share reservation parked so the
-     * vfs_state conflict matrix treats this disconnected holder as
-     * courtesy-held: a compatible new open coexists (keep).  A durable-only
-     * write-cache holder is then evicted by the caching-acquire path (purge,
-     * the MS-SMB2 yield); a resilient/persistent holder within its timeout is
-     * spared by that path (chimera_smb_durable_parked_hold) so a conflicting
-     * open caps its own grant instead.  The share-resv flag stops the
-     * sole-opener rule from capping a new opener's lease to R on account of a
-     * disconnected holder.  Cleared on reconnect. */
+    /* Park the caching grant's claim AND the share reservation so the claim
+     * core treats this disconnected holder as courtesy-held (advertised H and
+     * the H denial are masked while parked): a compatible new open coexists
+     * (keep).  A durable-only write-cache holder is then evicted by the
+     * caching-acquire path (purge, the MS-SMB2 yield); a resilient/persistent
+     * holder within its timeout is spared by that path
+     * (chimera_smb_durable_parked_hold) so a conflicting open caps its own
+     * grant instead.  The parked share reservation stops the sole-opener rule
+     * from capping a new opener's lease to R on account of a disconnected
+     * holder.  Cleared on reconnect (chimera_smb_durable_rehome). */
     if (open_file->grant) {
-        open_file->grant->lease.parked = 1;
+        chimera_vfs_claim_park(&open_file->grant->claim, true);
     }
     if (open_file->share_lease_inserted) {
-        open_file->share_lease.parked = 1;
+        chimera_vfs_claim_park(&open_file->share_lease, true);
     }
 } /* chimera_smb_durable_park */
 
@@ -800,7 +801,7 @@ chimera_smb_durable_sweep(struct chimera_server_smb_thread *thread)
  * wholesale when chimera_vfs_state_destroy frees the per-file state (it never
  * walks the lease lists).
  *
- * The caching grant (oplock / SMB2 lease), however, is a standalone heap object
+ * The cache grant (oplock / SMB2 lease), however, is a standalone heap object
  * the SMB layer owns -- vfs_state_destroy frees the per-file state but never the
  * grant -- so a parked handle's grant must be released here explicitly or it
  * leaks.  Release it with pump=false to free the grant memory (and unlink its
@@ -837,11 +838,11 @@ chimera_smb_durable_drain_all(struct chimera_server_smb_thread *thread)
             chimera_vfs_release(thread->vfs_thread, open_file->handle);
             open_file->handle = NULL;
         }
-        /* Release the standalone caching grant (vfs_state_destroy won't); no
+        /* Release the standalone cache grant (vfs_state_destroy won't); no
          * pump -- there is no live connection left to answer a woken waiter. */
         if (open_file->grant) {
             chimera_smb_grant_remove_member(open_file->grant, open_file);
-            chimera_vfs_caching_grant_release(vfs_state, open_file->grant,
+            chimera_vfs_claim_grant_release(vfs_state, open_file->grant,
                                               false /*pump*/);
             open_file->grant                  = NULL;
             open_file->caching_lease_inserted = false;

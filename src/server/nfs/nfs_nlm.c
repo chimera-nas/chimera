@@ -15,7 +15,7 @@
 #include "nfs_nsm.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
-#include "vfs/vfs_state.h"
+#include "vfs/vfs_claim.h"
 
 /*
  * The FH opens below are internal lock-bookkeeping opens (the client already
@@ -65,19 +65,19 @@ nlm_conn_peer_addr(
 
 /* NLM keeps its internal byte-range length in the POSIX convention (0 == to
  * EOF), but the VFS range layer uses UINT64_MAX for to-EOF (length 0 is a real
- * zero-byte range).  Translate when handing a length to a VFS lease/probe. */
+ * zero-byte range).  Translate when handing a length to a VFS claim/probe. */
 #define NLM_POSIX_LEN_TO_VFS(l) ((l) == 0 ? UINT64_MAX : (l))
 
-/* Map NLM caller_name (hostname) to a vfs_state owner.client_key. */
+/* Map NLM caller_name (hostname) to a claim owner.client_key. */
 static inline uint64_t
 nlm_owner_client_key(const char *hostname)
 {
     return XXH3_64bits(hostname, strlen(hostname));
 } /* nlm_owner_client_key */
 
-/* Map NLM (oh_bytes, svid) to a vfs_state owner.owner_lo.  Two LOCK ops
+/* Map NLM (oh_bytes, svid) to a claim owner.owner_lo.  Two LOCK ops
  * with the same (hostname, oh, svid) tuple will produce the same owner
- * identity and therefore coalesce in the vfs_state conflict matrix. */
+ * identity and therefore coalesce in the claim core's admission predicate. */
 static inline uint64_t
 nlm_owner_owner_lo(
     const uint8_t *oh,
@@ -176,9 +176,10 @@ chimera_nfs_nlm4_test_open_cb(
     struct evpl_rpc2_encoding        *encoding  = ctx->encoding;
     struct chimera_vfs_state         *vfs_state = thread->vfs->vfs_state;
     struct chimera_vfs_file_state    *file_state;
-    struct chimera_vfs_lease          probe;
-    struct chimera_vfs_lease         *conflict = NULL;
-    enum chimera_vfs_lease_result     result;
+    struct chimera_claim_owner        owner;
+    struct chimera_vfs_claim          probe;
+    struct chimera_vfs_claim_conflict conflict;
+    enum chimera_vfs_claim_result     result;
     struct nlm4_testres               res;
     int                               rc;
 
@@ -196,40 +197,44 @@ chimera_nfs_nlm4_test_open_cb(
                                        handle->fh_hash, false);
 
     if (!file_state) {
-        /* No state on this file means no leases held — TEST grants. */
+        /* No state on this file means no claims held — TEST grants. */
         chimera_vfs_release(thread->vfs_thread, handle);
         res.test_stat.stat = NLM4_GRANTED;
         goto send_reply;
     }
 
-    memset(&probe, 0, sizeof(probe));
-    probe.kind         = CHIMERA_VFS_LEASE_RANGE;
-    probe.mode.granted = ctx->exclusive
-                             ? CHIMERA_VFS_LEASE_MODE_W
-                             : CHIMERA_VFS_LEASE_MODE_R;
-    probe.offset           = ctx->offset;
-    probe.length           = NLM_POSIX_LEN_TO_VFS(ctx->length);
-    probe.owner.protocol   = CHIMERA_VFS_LEASE_PROTO_NLM;
-    probe.owner.client_key = nlm_owner_client_key(ctx->caller_name);
-    probe.owner.owner_lo   = nlm_owner_owner_lo(ctx->oh, ctx->oh_len, ctx->svid);
+    memset(&owner, 0, sizeof(owner));
+    owner.proto      = CHIMERA_CLAIM_PROTO_NLM;
+    owner.client_key = nlm_owner_client_key(ctx->caller_name);
+    owner.owner_lo   = nlm_owner_owner_lo(ctx->oh, ctx->oh_len, ctx->svid);
 
-    result = chimera_vfs_lease_test(file_state, &probe, &conflict);
+    chimera_vfs_claim_init_range(&probe, ctx->exclusive, /* smb */ false,
+                                 ctx->offset,
+                                 NLM_POSIX_LEN_TO_VFS(ctx->length),
+                                 &owner);
 
-    if (result == CHIMERA_VFS_LEASE_GRANTED) {
+    memset(&conflict, 0, sizeof(conflict));
+
+    result = chimera_vfs_claim_test(file_state, &probe, &conflict);
+
+    if (result == CHIMERA_CLAIM_GRANTED) {
         res.test_stat.stat = NLM4_GRANTED;
     } else {
-        uint64_t conflict_len;
-        res.test_stat.stat             = NLM4_DENIED;
-        res.test_stat.holder.exclusive = conflict && (conflict->mode.granted &
-                                                      CHIMERA_VFS_LEASE_MODE_W);
-        res.test_stat.holder.svid     = 0;  /* not exposed by vfs_state */
+        res.test_stat.stat = NLM4_DENIED;
+        /* WRITE_LT iff the holder's used bits include a write-implying
+         * capability (a write delegation reports exclusive though it holds
+         * no LW). */
+        res.test_stat.holder.exclusive = (conflict.used &
+                                          (CHIMERA_CLAIM_W |
+                                           CHIMERA_CLAIM_CW |
+                                           CHIMERA_CLAIM_LW)) != 0;
+        res.test_stat.holder.svid     = 0;  /* not exposed by the claim core */
         res.test_stat.holder.oh.len   = 0;
         res.test_stat.holder.oh.data  = NULL;
-        res.test_stat.holder.l_offset = conflict ? conflict->offset : 0;
-        /* conflict->length already uses UINT64_MAX for a to-EOF holder, which
-         * is exactly the NLM to-EOF sentinel. */
-        conflict_len               = conflict ? conflict->length : UINT64_MAX;
-        res.test_stat.holder.l_len = conflict_len;
+        res.test_stat.holder.l_offset = conflict.offset;
+        /* conflict.length already uses UINT64_MAX for a to-EOF/whole-file
+         * holder, which is exactly the NLM to-EOF sentinel. */
+        res.test_stat.holder.l_len = conflict.length;
     }
 
     chimera_vfs_state_put(vfs_state, file_state);
@@ -277,9 +282,9 @@ struct nlm_lock_ctx {
 
 /* Build a self-contained grant job from the now-granted lock entry and hand it
  * to the outbound NLM_GRANTED engine.  Called only for a blocking lock that was
- * deferred (NLM4_BLOCKED already sent); the entry is GRANTED in vfs_state, so
- * the job is a pure value snapshot and does not alias any lock state.  Caller
- * must NOT hold nlm_state.mutex. */
+ * deferred (NLM4_BLOCKED already sent); the entry is GRANTED in the claim core,
+ * so the job is a pure value snapshot and does not alias any lock state.
+ * Caller must NOT hold nlm_state.mutex. */
 static void
 chimera_nfs_nlm4_deliver_grant(struct nlm_lock_ctx *ctx)
 {
@@ -317,10 +322,10 @@ chimera_nfs_nlm4_deliver_grant(struct nlm_lock_ctx *ctx)
     nlm_granter_submit(granter, &req);
 } /* chimera_nfs_nlm4_deliver_grant */
 
-/* Fired (once) synchronously inside chimera_vfs_lease_acquire_blocking when a
- * blocking LOCK queues on a conflict.  Sends the RFC 1813 / XNFS NLM4_BLOCKED
- * interim immediately and records that the eventual grant must be delivered via
- * an out-of-band NLM_GRANTED callback (not on this RPC). */
+/* Fired (once) synchronously inside chimera_vfs_claim_acquire when a blocking
+ * LOCK queues on a conflict.  Sends the RFC 1813 / XNFS NLM4_BLOCKED interim
+ * immediately and records that the eventual grant must be delivered via an
+ * out-of-band NLM_GRANTED callback (not on this RPC). */
 static void
 chimera_nfs_nlm4_lock_blocked_cb(void *private_data)
 {
@@ -357,10 +362,10 @@ chimera_nfs_nlm4_lock_blocked_cb(void *private_data)
 
 static void
 chimera_nfs_nlm4_lock_acquire_cb(
-    enum chimera_vfs_lease_result result,
-    struct chimera_vfs_lease     *granted,
-    struct chimera_vfs_lease     *conflict,
-    void                         *private_data)
+    enum chimera_vfs_claim_result            result,
+    struct chimera_vfs_claim                *granted,
+    const struct chimera_vfs_claim_conflict *conflict,
+    void                                    *private_data)
 {
     struct nlm_lock_ctx              *ctx       = private_data;
     struct chimera_server_nfs_thread *thread    = ctx->thread;
@@ -378,10 +383,10 @@ chimera_nfs_nlm4_lock_acquire_cb(
     res.cookie.len  = ctx->cookie.len;
     res.cookie.data = ctx->cookie.data;
 
-    if (result == CHIMERA_VFS_LEASE_GRANTED) {
+    if (result == CHIMERA_CLAIM_GRANTED) {
         pthread_mutex_lock(&shared->nlm_state.mutex);
         entry->pending        = false;
-        entry->lease_inserted = true;
+        entry->claim_inserted = true;
         pthread_mutex_unlock(&shared->nlm_state.mutex);
         res.stat = NLM4_GRANTED;
 
@@ -461,6 +466,7 @@ chimera_nfs_nlm4_lock_open_cb(
     struct evpl_rpc2_encoding        *encoding  = ctx->encoding;
     struct chimera_vfs_state         *vfs_state = thread->vfs->vfs_state;
     struct nlm_lock_entry            *entry     = ctx->entry;
+    struct chimera_claim_owner        owner;
     struct nlm4_res                   res;
     int                               rc = 0;
 
@@ -525,35 +531,43 @@ chimera_nfs_nlm4_lock_open_cb(
         return;
     }
 
-    entry->lease.kind         = CHIMERA_VFS_LEASE_RANGE;
-    entry->lease.mode.granted = entry->exclusive
-                                    ? CHIMERA_VFS_LEASE_MODE_W
-                                    : CHIMERA_VFS_LEASE_MODE_R;
-    entry->lease.offset           = entry->offset;
-    entry->lease.length           = NLM_POSIX_LEN_TO_VFS(entry->length);
-    entry->lease.owner.protocol   = CHIMERA_VFS_LEASE_PROTO_NLM;
-    entry->lease.owner.client_key = nlm_owner_client_key(ctx->client->hostname);
-    entry->lease.owner.owner_lo   = nlm_owner_owner_lo(entry->oh, entry->oh_len,
-                                                       entry->svid);
+    memset(&owner, 0, sizeof(owner));
+    owner.proto      = CHIMERA_CLAIM_PROTO_NLM;
+    owner.client_key = nlm_owner_client_key(ctx->client->hostname);
+    owner.owner_lo   = nlm_owner_owner_lo(entry->oh, entry->oh_len,
+                                          entry->svid);
 
-    /* wait=ctx->block: a blocking LOCK rides out cross-protocol breaks AND a
-     * same-protocol byte-range conflict (the latter queues as an RFC 1813
-     * blocking lock, exactly like an SMB2 blocking lock); a non-blocking LOCK
-     * returns DENIED on any conflict.  When the acquire queues (defers), the
-     * blocked_cb fires synchronously and sends the immediate NLM4_BLOCKED
-     * interim; the eventual grant is then delivered via an out-of-band
-     * NLM_GRANTED callback from chimera_nfs_nlm4_lock_acquire_cb. */
-    chimera_vfs_lease_acquire_blocking(vfs_state, entry->file_state,
-                                       &entry->lease, &entry->ticket, ctx->block,
-                                       chimera_nfs_nlm4_lock_acquire_cb,
-                                       chimera_nfs_nlm4_lock_blocked_cb, ctx);
+    /* NLM locks are binding, always-alive claims: no key and no
+     * break/alive/revoked callbacks (a claim without break_cb is
+     * unbreakable). */
+    chimera_vfs_claim_init_range(&entry->claim, entry->exclusive,
+                                 /* smb */ false,
+                                 entry->offset,
+                                 NLM_POSIX_LEN_TO_VFS(entry->length),
+                                 &owner);
+
+    /* wait=ctx->block: a blocking LOCK rides out cross-protocol breaks;
+     * wait_hard=ctx->block additionally keeps the ticket queued on a hard
+     * DENIED byte-range conflict (the RFC 1813 blocking lock, exactly like
+     * an SMB2 blocking lock -- this replaces the old RANGE-hard-DENIED
+     * queueing rule).  A non-blocking LOCK returns DENIED on any conflict.
+     * When the acquire queues (defers), the blocked_cb fires synchronously
+     * and sends the immediate NLM4_BLOCKED interim; the eventual grant is
+     * then delivered via an out-of-band NLM_GRANTED callback from
+     * chimera_nfs_nlm4_lock_acquire_cb. */
+    chimera_vfs_claim_acquire(vfs_state, entry->file_state,
+                              &entry->claim, &entry->ticket,
+                              /* wait      */ ctx->block,
+                              /* wait_hard */ ctx->block,
+                              chimera_nfs_nlm4_lock_acquire_cb,
+                              chimera_nfs_nlm4_lock_blocked_cb, ctx);
 } /* chimera_nfs_nlm4_lock_open_cb */
 
 /* -------------------------------------------------------------------------
  * UNLOCK procedure callbacks
  * ---------------------------------------------------------------------- */
 
-/* UNLOCK is fully synchronous in vfs_state mode — lease_release and
+/* UNLOCK is fully synchronous in claim-core mode — claim_release and
  * chimera_vfs_release are both sync — so no separate ctx/cb is needed. */
 
 /* =========================================================================
@@ -975,11 +989,11 @@ chimera_nfs_nlm4_cancel(
     pthread_mutex_unlock(&shared->nlm_state.mutex);
 
     if (match && match->file_state) {
-        /* The entry is queued inside vfs_state waiting on a break.  Try
+        /* The entry is queued inside the claim core waiting on a break.  Try
          * to dequeue it; if we win the race against the in-flight cb,
          * synthesize a DENIED completion so the original LOCK reply is
          * still sent (the protocol layer's cb tears down the entry). */
-        cancelled       = chimera_vfs_lease_acquire_cancel(vfs_state, &match->ticket);
+        cancelled       = chimera_vfs_claim_cancel(vfs_state, &match->ticket);
         ctx_for_lock_cb = match->ticket.private_data;
     }
 
@@ -987,7 +1001,7 @@ chimera_nfs_nlm4_cancel(
     chimera_nfs_abort_if(rc, "Failed to send NLM CANCEL reply");
 
     if (cancelled && ctx_for_lock_cb) {
-        chimera_nfs_nlm4_lock_acquire_cb(CHIMERA_VFS_LEASE_DENIED, NULL, NULL,
+        chimera_nfs_nlm4_lock_acquire_cb(CHIMERA_CLAIM_DENIED, NULL, NULL,
                                          ctx_for_lock_cb);
     }
 } /* chimera_nfs_nlm4_cancel */
@@ -1076,11 +1090,11 @@ chimera_nfs_nlm4_do_unlock(
     DL_DELETE(client->locks, entry);
     pthread_mutex_unlock(&shared->nlm_state.mutex);
 
-    /* Release the vfs_state lease (sync), put the file_state ref (sync),
+    /* Release the claim (sync), put the file_state ref (sync),
      * and close the handle (sync).  RFC 1813 requires NLM4_GRANTED. */
-    if (entry->lease_inserted) {
-        chimera_vfs_lease_release(vfs_state, entry->file_state, &entry->lease);
-        entry->lease_inserted = false;
+    if (entry->claim_inserted) {
+        chimera_vfs_claim_release(vfs_state, entry->file_state, &entry->claim);
+        entry->claim_inserted = false;
     }
     if (entry->file_state) {
         chimera_vfs_state_put(vfs_state, entry->file_state);

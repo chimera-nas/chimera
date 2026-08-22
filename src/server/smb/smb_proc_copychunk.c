@@ -8,7 +8,7 @@
 #include "smb_session.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
-#include "vfs/vfs_state.h"
+#include "vfs/vfs_claim.h"
 
 /*
  * Server-side copy: FSCTL_SRV_REQUEST_RESUME_KEY + FSCTL_SRV_COPYCHUNK.
@@ -151,33 +151,34 @@ chimera_smb_copychunk_error_with_body(
     chimera_smb_copychunk_done(request, status);
 } /* chimera_smb_copychunk_error_with_body */
 
-/* Build the byte-range-lock owner identity for an open exactly as the WRITE/READ
+/* Build the byte-range-lock actor identity for an open exactly as the WRITE/READ
  * paths do, so a copy-chunk's own locks don't conflict with its I/O. */
 static inline void
 chimera_smb_copychunk_io_owner(
-    struct chimera_smb_request     *request,
-    struct chimera_smb_open_file   *open_file,
-    struct chimera_vfs_lease_owner *owner)
+    struct chimera_smb_request   *request,
+    struct chimera_smb_open_file *open_file,
+    struct chimera_claim_actor   *actor)
 {
-    owner->protocol   = CHIMERA_VFS_LEASE_PROTO_SMB2;
-    owner->client_key = request->session_handle->session->client_key;
+    memset(actor, 0, sizeof(*actor));
+    actor->owner.proto      = CHIMERA_CLAIM_PROTO_SMB2;
+    actor->owner.client_key = request->session_handle->session->client_key;
     if (open_file->grant) {
-        owner->owner_lo = open_file->grant->lease.owner.owner_lo;
-        owner->owner_hi = open_file->grant->lease.owner.owner_hi;
+        actor->owner = open_file->grant->claim.owner;
     } else {
-        owner->owner_lo = open_file->file_id.pid;
-        owner->owner_hi = open_file->file_id.vid;
+        actor->owner.owner_lo = open_file->file_id.pid;
+        actor->owner.owner_hi = open_file->file_id.vid;
     }
+    actor->op_handle = open_file->handle;
 } /* chimera_smb_copychunk_io_owner */
 
 /* Issue the next pending chunk, or finish if all are done. */
 static void
 chimera_smb_copychunk_next(struct chimera_smb_request *request)
 {
-    struct chimera_vfs_thread     *vfs_thread = request->compound->thread->vfs_thread;
-    struct chimera_vfs_state      *vfs_state  = vfs_thread->vfs->vfs_state;
-    uint32_t                       i          = request->ioctl.cc_chunk_idx;
-    struct chimera_vfs_lease_owner io_owner;
+    struct chimera_vfs_thread *vfs_thread = request->compound->thread->vfs_thread;
+    struct chimera_vfs_state  *vfs_state  = vfs_thread->vfs->vfs_state;
+    uint32_t                   i          = request->ioctl.cc_chunk_idx;
+    struct chimera_claim_actor io_owner;
 
     if (i >= request->ioctl.cc_chunk_count) {
         chimera_smb_copychunk_done(request, SMB2_STATUS_SUCCESS);
@@ -201,7 +202,7 @@ chimera_smb_copychunk_next(struct chimera_smb_request *request)
      * reports zero chunks written. */
     chimera_smb_copychunk_io_owner(request, request->ioctl.cc_src_open_file,
                                    &io_owner);
-    if (chimera_vfs_state_range_io_conflict(
+    if (chimera_vfs_claim_io_denied(
             vfs_state,
             request->ioctl.cc_src_open_file->handle->fh,
             request->ioctl.cc_src_open_file->handle->fh_len,
@@ -216,7 +217,7 @@ chimera_smb_copychunk_next(struct chimera_smb_request *request)
 
     chimera_smb_copychunk_io_owner(request, request->ioctl.cc_dst_open_file,
                                    &io_owner);
-    if (chimera_vfs_state_range_io_conflict(
+    if (chimera_vfs_claim_io_denied(
             vfs_state,
             request->ioctl.cc_dst_open_file->handle->fh,
             request->ioctl.cc_dst_open_file->handle->fh_len,

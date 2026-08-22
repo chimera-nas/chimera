@@ -123,7 +123,7 @@ chimera_smb_set_info_rename_dp_release(struct chimera_smb_request *request)
     struct chimera_vfs_state  *vfs_state  = vfs_thread->vfs->vfs_state;
 
     if (request->set_info.dp_probe_active) {
-        chimera_vfs_lease_release(vfs_state, request->set_info.dp_file_state,
+        chimera_vfs_claim_release(vfs_state, request->set_info.dp_file_state,
                                   &request->set_info.dp_probe);
         request->set_info.dp_probe_active = 0;
     }
@@ -177,19 +177,19 @@ chimera_smb_set_info_rename_emit(struct chimera_smb_request *request)
  * kept its handle open -> SHARING_VIOLATION (MS-SMB2 dirlease.rename_dst_parent). */
 static void
 chimera_smb_set_info_rename_dp_cb(
-    enum chimera_vfs_lease_result result,
-    struct chimera_vfs_lease     *lease,
-    struct chimera_vfs_lease     *conflict,
-    void                         *private_data)
+    enum chimera_vfs_claim_result            result,
+    struct chimera_vfs_claim                *claim,
+    const struct chimera_vfs_claim_conflict *conflict,
+    void                                    *private_data)
 {
     struct chimera_smb_request *request    = private_data;
     struct chimera_vfs_thread  *vfs_thread = request->compound->thread->vfs_thread;
 
-    (void) lease;
+    (void) claim;
     (void) conflict;
 
-    if (result == CHIMERA_VFS_LEASE_GRANTED) {
-        /* lease_acquire inserted the probe; drop it (its only purpose was to
+    if (result == CHIMERA_CLAIM_GRANTED) {
+        /* claim_acquire inserted the probe; drop it (its only purpose was to
          * break the dir lease / detect the conflict) and rename. */
         request->set_info.dp_probe_active = 1;
         chimera_smb_set_info_rename_dp_release(request);
@@ -222,8 +222,7 @@ chimera_smb_set_info_rename_do_rename(struct chimera_smb_request *request)
                                                      ? request->set_info.rename_info.new_parent_handle
                                                      : request->set_info.parent_handle;
     struct chimera_vfs_file_state  *fs;
-    uint64_t                        skip_lo, skip_hi;
-    bool                            has_skip;
+    struct chimera_claim_owner      dp_owner;
 
     request->set_info.dp_probe_active = 0;
     request->set_info.dp_file_state   = NULL;
@@ -232,7 +231,7 @@ chimera_smb_set_info_rename_do_rename(struct chimera_smb_request *request)
      * (RH->R): a conflicting handle-leased opener (one holding the dst parent
      * open with DELETE access) may close in response and free the rename, else
      * the rename fails SHARING_VIOLATION (MS-SMB2; dirlease.rename_dst_parent).
-     * Model it as a transient SHARE probe (denied=D) on the dst parent: it
+     * Model it as a transient deny-only probe (deny=D) on the dst parent: it
      * conflicts ONLY with a DELETE-access holder, so it is inert for ordinary
      * renames into a leased directory (dirlease.rename holders take no DELETE
      * access).  No dst-parent state => no lease => rename directly. */
@@ -250,28 +249,26 @@ chimera_smb_set_info_rename_do_rename(struct chimera_smb_request *request)
 
     /* Self-exempt the directory lease named by the operating open's
      * ParentLeaseKey: a rename issued under the dst parent's own lease must not
-     * break (and then deny against) that lease. */
-    has_skip = chimera_smb_parent_lease_skip(open_file->parent_lease_key,
-                                             &skip_lo, &skip_hi);
+     * break (and then deny against) that lease.  The 16-byte key rides in
+     * owner.key (the KEY circle replaces the old break-skip fields; an all-zero
+     * key means no exemption -- every dir lease breaks). */
+    memset(&dp_owner, 0, sizeof(dp_owner));
+    dp_owner.proto      = CHIMERA_CLAIM_PROTO_SMB2;
+    dp_owner.client_key = request->session_handle->session->client_key;
+    dp_owner.owner_lo   = open_file->file_id.pid;
+    dp_owner.owner_hi   = open_file->file_id.vid;
+    memcpy(dp_owner.key, open_file->parent_lease_key, 16);
 
-    memset(&request->set_info.dp_probe, 0, sizeof(request->set_info.dp_probe));
-    request->set_info.dp_probe.kind             = CHIMERA_VFS_LEASE_SHARE;
-    request->set_info.dp_probe.mode.denied      = CHIMERA_VFS_LEASE_MODE_D;
-    request->set_info.dp_probe.owner.protocol   = CHIMERA_VFS_LEASE_PROTO_SMB2;
-    request->set_info.dp_probe.owner.client_key = request->session_handle->session->client_key;
-    request->set_info.dp_probe.owner.owner_lo   = open_file->file_id.pid;
-    request->set_info.dp_probe.owner.owner_hi   = open_file->file_id.vid;
-    if (has_skip) {
-        request->set_info.dp_probe.has_break_skip_key = 1;
-        request->set_info.dp_probe.break_skip_lo      = skip_lo;
-        request->set_info.dp_probe.break_skip_hi      = skip_hi;
-    }
+    chimera_vfs_claim_init_deny_probe(&request->set_info.dp_probe,
+                                      CHIMERA_CLAIM_D, &dp_owner);
+    request->set_info.dp_probe.policy_tag = open_file->file_id.pid;
 
     struct chimera_server_smb_thread *thread = request->compound->thread;
 
-    chimera_vfs_lease_acquire(vfs_state, fs, &request->set_info.dp_probe,
+    chimera_vfs_claim_acquire(vfs_state, fs, &request->set_info.dp_probe,
                               &request->set_info.dp_ticket, true,
-                              chimera_smb_set_info_rename_dp_cb, request);
+                              false /* wait_hard */,
+                              chimera_smb_set_info_rename_dp_cb, NULL, request);
 
     /* If the probe parked on a dir-lease break, that break targets the dst
      * parent's holder on THIS connection (the rename's own conn is mid-compound,

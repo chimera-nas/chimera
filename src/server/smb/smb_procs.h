@@ -333,11 +333,11 @@ void chimera_smb_open_file_drain_locks(
     struct chimera_server_smb_thread *thread,
     struct chimera_smb_open_file     *open_file);
 
-/* break_cb wired onto SMB CACHING leases at CREATE time.  Sends an
+/* break_cb wired onto SMB cache claims at CREATE time.  Sends an
  * OPLOCK_BREAK Notification on the conn the open was created on, or
  * forcibly revokes if the conn is gone. */
 void chimera_smb_lease_break_cb(
-    struct chimera_vfs_lease *lease,
+    struct chimera_vfs_claim *claim,
     uint8_t                   needed_mode,
     void                     *private_data);
 

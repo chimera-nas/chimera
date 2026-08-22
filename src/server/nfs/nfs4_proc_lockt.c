@@ -12,7 +12,7 @@
 #include "nfs4_session.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
-#include "vfs/vfs_state.h"
+#include "vfs/vfs_claim.h"
 
 static void
 chimera_nfs4_lockt_probe(
@@ -23,13 +23,14 @@ chimera_nfs4_lockt_probe(
     struct nfs_request             *req       = private_data;
     struct LOCKT4args              *args      = &req->args_compound->argarray[req->index].oplockt;
     struct LOCKT4res               *res       = &req->res_compound.resarray[req->index].oplockt;
-    struct chimera_vfs_open_handle *handle    = req->handle;
-    struct chimera_vfs_state       *vfs_state = req->thread->vfs->vfs_state;
-    struct chimera_vfs_file_state  *file_state;
-    struct chimera_vfs_lease        probe;
-    struct chimera_vfs_lease       *conflict = NULL;
-    enum chimera_vfs_lease_result   result;
-    uint64_t                        vfs_length;
+    struct chimera_vfs_open_handle   *handle    = req->handle;
+    struct chimera_vfs_state         *vfs_state = req->thread->vfs->vfs_state;
+    struct chimera_vfs_file_state    *file_state;
+    struct chimera_vfs_claim          probe;
+    struct chimera_claim_owner        owner;
+    struct chimera_vfs_claim_conflict conflict;
+    enum chimera_vfs_claim_result     result;
+    uint64_t                          vfs_length;
 
     if (error_code != CHIMERA_VFS_OK) {
         chimera_vfs_release(req->thread->vfs_thread, handle);
@@ -48,7 +49,7 @@ chimera_nfs4_lockt_probe(
         return;
     }
 
-    /* NFSv4 and the VFS range layer both use UINT64_MAX as the "to EOF"
+    /* NFSv4 and the claim core both use UINT64_MAX as the "to EOF"
      * sentinel, so the wire length passes through unchanged. */
     vfs_length = args->length;
 
@@ -64,32 +65,41 @@ chimera_nfs4_lockt_probe(
         return;
     }
 
-    memset(&probe, 0, sizeof(probe));
-    probe.kind         = CHIMERA_VFS_LEASE_RANGE;
-    probe.mode.granted = (args->locktype == READ_LT || args->locktype == READW_LT)
-                         ? CHIMERA_VFS_LEASE_MODE_R : CHIMERA_VFS_LEASE_MODE_W;
-    probe.offset           = args->offset;
-    probe.length           = vfs_length;
-    probe.owner.protocol   = CHIMERA_VFS_LEASE_PROTO_NFSV4;
-    probe.owner.client_key = args->owner.clientid;
-    probe.owner.owner_lo   = XXH3_64bits(args->owner.owner.data,
-                                         args->owner.owner.len);
-    probe.owner.owner_hi = 0;
+    memset(&owner, 0, sizeof(owner));
+    owner.proto      = CHIMERA_CLAIM_PROTO_NFSV4;
+    owner.client_key = args->owner.clientid;
+    owner.owner_lo   = XXH3_64bits(args->owner.owner.data,
+                                   args->owner.owner.len);
+    owner.owner_hi = 0;
 
-    result = chimera_vfs_lease_test(file_state, &probe, &conflict);
+    chimera_vfs_claim_init_range(&probe,
+                                 !(args->locktype == READ_LT ||
+                                   args->locktype == READW_LT),
+                                 /*smb=*/ false,
+                                 args->offset, vfs_length,
+                                 &owner);
 
-    if (result == CHIMERA_VFS_LEASE_GRANTED) {
+    memset(&conflict, 0, sizeof(conflict));
+    conflict.length = UINT64_MAX;
+
+    result = chimera_vfs_claim_test(file_state, &probe, &conflict);
+
+    if (result == CHIMERA_CLAIM_GRANTED) {
         res->status = NFS4_OK;
     } else {
         res->status        = NFS4ERR_DENIED;
-        res->denied.offset = conflict ? conflict->offset : 0;
-        /* conflict->length already uses UINT64_MAX for a to-EOF holder, so it
+        res->denied.offset = conflict.offset;
+        /* conflict.length already uses UINT64_MAX for a to-EOF holder, so it
          * maps directly to the NFSv4 denied length. */
-        res->denied.length   = conflict ? conflict->length : UINT64_MAX;
-        res->denied.locktype = (conflict && (conflict->mode.granted & CHIMERA_VFS_LEASE_MODE_W))
+        res->denied.length = conflict.length;
+        /* WRITE_LT iff the holder writes: a write delegation (CW) must report
+         * WRITE_LT though it holds no LW. */
+        res->denied.locktype = (conflict.used & (CHIMERA_CLAIM_W |
+                                                 CHIMERA_CLAIM_CW |
+                                                 CHIMERA_CLAIM_LW))
                                ? WRITE_LT : READ_LT;
         nfs4_fill_denied_owner(&req->thread->shared->nfs4_shared_clients,
-                               conflict, &res->denied.owner,
+                               &conflict, &res->denied.owner,
                                req->encoding->dbuf);
     }
 

@@ -88,16 +88,18 @@ chimera_nfs4_write_open_callback(
 
     if (req->io_owner_from_deleg) {
         /* A delegation-authorized write: present the delegation holder's own
-         * lease owner (same protocol/client/fh as the CACHING lease created at
+         * claim actor (same protocol/client/fh as the cache claim created at
          * OPEN) so the VFS I/O path recognises the writer as the delegation
          * holder and does not recall the client's own delegation.  Other
          * (anonymous-stateid / pNFS-DS) on-the-fly writes keep the implicit
-         * lease so they still recall *other* clients' conflicting leases. */
-        struct chimera_vfs_lease_owner io_owner = {
-            .protocol   = CHIMERA_VFS_LEASE_PROTO_NFSV4,
-            .client_key = req->session->client_unified->client_id,
-            .owner_lo   = handle->fh_hash,
-            .owner_hi   = 0,
+         * claim so they still recall *other* clients' conflicting claims. */
+        struct chimera_claim_actor io_owner = {
+            .owner = {
+                .proto      = CHIMERA_CLAIM_PROTO_NFSV4,
+                .client_key = req->session->client_unified->client_id,
+                .owner_lo   = handle->fh_hash,
+                .owner_hi   = 0,
+            },
         };
 
         chimera_vfs_write_owned(req->thread->vfs_thread, &req->cred,
@@ -393,11 +395,13 @@ chimera_nfs4_write(
         return;
     }
 
-    struct chimera_vfs_lease_owner io_owner = {
-        .protocol   = CHIMERA_VFS_LEASE_PROTO_NFSV4,
-        .client_key = open_state->owner->client->client_id,
-        .owner_lo   = state_handle->fh_hash,
-        .owner_hi   = 0,
+    struct chimera_claim_actor io_owner = {
+        .owner = {
+            .proto      = CHIMERA_CLAIM_PROTO_NFSV4,
+            .client_key = open_state->owner->client->client_id,
+            .owner_lo   = state_handle->fh_hash,
+            .owner_hi   = 0,
+        },
     };
 
     chimera_vfs_write_owned(thread->vfs_thread, &req->cred,

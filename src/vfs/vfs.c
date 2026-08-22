@@ -25,7 +25,7 @@
 #include "vfs/vfs_user_cache.h"
 #include "vfs/vfs_identity.h"
 #include "vfs/vfs_notify.h"
-#include "vfs/vfs_state.h"
+#include "vfs/vfs_claim.h"
 #include "vfs/vfs_pnfs.h"
 #include "vfs/vfs_mount_table.h"
 #include "vfs/memfs/memfs.h"

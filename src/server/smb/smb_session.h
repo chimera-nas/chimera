@@ -12,7 +12,7 @@
 
 #include "vfs/vfs.h"
 #include "vfs/vfs_cred.h"
-#include "vfs/vfs_state.h"
+#include "vfs/vfs_claim.h"
 #include "smb2.h"
 
 struct chimera_smb_share;
@@ -238,9 +238,9 @@ struct chimera_smb_open_file {
     uint8_t                           lock_seq_valid[64];
     uint8_t                           lock_seq_index[64];
     uint32_t                          lock_seq_status[64];
-    /* SHARE lease (whole-file deny mode reservation) held by this open
+    /* SHARE claim (whole-file access/deny reservation) held by this open
      * once CREATE succeeds.  Released at close. */
-    struct chimera_vfs_lease          share_lease;
+    struct chimera_vfs_claim          share_lease;
     struct chimera_vfs_file_state    *share_file_state;
     bool                              share_lease_inserted;
     /* For a named-stream open only: a second reservation on the BASE file's
@@ -249,19 +249,19 @@ struct chimera_smb_open_file {
      * property: a stream opened without FILE_SHARE_DELETE must block the base
      * file's deletion, and a base delete with a stream open held must defer
      * (smb2.streams.delete).  Released at close in drain_locks. */
-    struct chimera_vfs_lease          base_share_lease;
+    struct chimera_vfs_claim          base_share_lease;
     struct chimera_vfs_file_state    *base_share_file_state;
     bool                              base_share_lease_inserted;
-    /* CACHING lease (SMB2 lease / oplock) held by this open.  The lease is now a
-     * VFS-owned, owner-keyed, refcounted grant (chimera_vfs_caching_grant) that
+    /* Cache claim (SMB2 lease / oplock) held by this open.  The lease is a
+     * VFS-owned, owner-keyed, refcounted grant (chimera_vfs_claim_grant) that
      * may be shared by several opens under one lease key; this open holds one
      * reference, dropped at close or on OPLOCK_BREAK ack with mode=0.  NULL if
      * the open holds no caching lease.  caching_file_state holds this open's
      * reference on the per-file state (balanced separately from the grant ref). */
-    struct chimera_vfs_caching_grant *grant;
+    struct chimera_vfs_claim_grant   *grant;
     struct chimera_vfs_file_state    *caching_file_state;
     bool                              caching_lease_inserted;
-    /* Intrusive link on grant->holders: every open referencing a shared caching
+    /* Intrusive link on grant->members: every open referencing a shared cache
      * grant is threaded here so a break callback can pick a live member to notify
      * (the grant may outlive the open that created it once opens coalesce).
      * Manipulated under the grant's file->lock. */
@@ -361,8 +361,8 @@ struct chimera_smb_tree {
 
 struct chimera_smb_session {
     uint64_t                    session_id;
-    /* Stable per-CLIENT identity used as the owner key for CACHING leases,
-     * SHARE reservations and byte-range locks (chimera_vfs_lease_owner.client_key).
+    /* Stable per-CLIENT identity used as the owner key for cache claims,
+     * SHARE reservations and byte-range locks (chimera_claim_owner.client_key).
      * Derived from the connection's ClientGuid, NOT the session id, because
      * MS-SMB2 keys leases by the client (3.3.5.9.8): two sessions of the same
      * client (same ClientGuid, e.g. a reconnect or a second channel) share one

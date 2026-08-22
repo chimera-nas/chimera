@@ -4,7 +4,7 @@
 
 #include <stdlib.h>
 #include "vfs/vfs_procs.h"
-#include "vfs/vfs_state.h"
+#include "vfs/vfs_claim.h"
 #include "vfs_internal.h"
 #include "vfs_open_cache.h"
 #include "vfs_attr_cache.h"
@@ -108,9 +108,9 @@ chimera_vfs_read_complete(struct chimera_vfs_request *request)
 {
     chimera_vfs_read_callback_t callback = request->proto_callback;
 
-    /* Release the implicit-lease pin taken before dispatch (no-op when none
+    /* Release the implicit-claim pin taken before dispatch (no-op when none
      * was taken). */
-    chimera_vfs_io_lease_release(request);
+    chimera_vfs_io_claim_release(request);
 
     /* Account for buffers the VFS core allocated on behalf of a backend that
      * does not provide its own read memory.  On success, trim them to the
@@ -188,7 +188,7 @@ chimera_vfs_read_dispatch(
     struct evpl_iovec                    *dest_iov,
     int                                   dest_niov,
     uint64_t                              attr_mask,
-    const struct chimera_vfs_lease_owner *io_owner,
+    const struct chimera_claim_actor     *io_owner,
     chimera_vfs_read_callback_t           callback,
     void                                 *private_data)
 {
@@ -204,7 +204,7 @@ chimera_vfs_read_dispatch(
     request->opcode      = CHIMERA_VFS_OP_READ;
     request->complete    = chimera_vfs_read_complete;
     request->read.handle = handle;
-    /* Anchor the implicit lease on the cached handle (chimera_vfs_io_lease_acquire). */
+    /* Anchor the implicit claim on the cached handle (chimera_vfs_io_claim_acquire). */
     request->io_handle               = handle;
     request->read.offset             = offset;
     request->read.length             = count;
@@ -249,10 +249,18 @@ chimera_vfs_read_dispatch(
         request->read.aligned_prefix   = (uint32_t) (offset - aligned_offset);
     }
 
-    /* Mediate the read through the lease layer (acquire/hold the implicit
-     * lease for a leaseless actor, recalling another holder's conflicting
-     * write cache), then dispatch. */
-    chimera_vfs_io_lease_acquire(request, io_owner, chimera_vfs_dispatch);
+    /* Mediate the read through the claim layer (acquire/hold the implicit
+     * claim for a leaseless actor, recalling another holder's conflicting
+     * write cache), then dispatch.  The caller's actor is copied onto the
+     * request so the claim layer sees a stable address. */
+    if (io_owner) {
+        request->io_owner       = *io_owner;
+        request->io_owner_valid = 1;
+    }
+
+    chimera_vfs_io_claim_acquire(request,
+                                 io_owner ? &request->io_owner : NULL,
+                                 chimera_vfs_dispatch);
 } /* chimera_vfs_read_dispatch */
 
 /* Continuation for the first gated read on a handle: a getattr+ACL computes the
@@ -271,7 +279,7 @@ struct chimera_vfs_read_gate {
     /* io_owner is copied by value (not by pointer): the gate's async getattr
      * callback fires after the caller's stack frame is gone. */
     bool                            has_io_owner;
-    struct chimera_vfs_lease_owner  io_owner;
+    struct chimera_claim_actor      io_owner;
     chimera_vfs_read_callback_t     callback;
     void                           *private_data;
 };
@@ -328,7 +336,7 @@ chimera_vfs_read_submit(
     struct evpl_iovec                    *dest_iov,
     int                                   dest_niov,
     uint64_t                              attr_mask,
-    const struct chimera_vfs_lease_owner *io_owner,
+    const struct chimera_claim_actor     *io_owner,
     chimera_vfs_read_callback_t           callback,
     void                                 *private_data)
 {
@@ -387,7 +395,7 @@ chimera_vfs_read_owned(
     struct evpl_iovec                    *iov,
     int                                   niov,
     uint64_t                              attr_mask,
-    const struct chimera_vfs_lease_owner *io_owner,
+    const struct chimera_claim_actor     *io_owner,
     chimera_vfs_read_callback_t           callback,
     void                                 *private_data)
 {

@@ -6,12 +6,12 @@
 #include "nfs4_status.h"
 #include "nfs4_session.h"
 #include "nfs4_state.h"
-#include "vfs/vfs_state.h"
+#include "vfs/vfs_claim.h"
 
 /*
  * DELEGRETURN (RFC 7530 §16.6 / RFC 8881 §18.5).  The client returns a
  * delegation -- voluntarily or in response to a CB_RECALL.  We release the
- * backing vfs_state CACHING lease (which lets any conflicting acquirer that
+ * backing cache claim (which lets any conflicting acquirer that
  * triggered a recall make progress) and tear the delegation state down.
  */
 void
@@ -44,12 +44,12 @@ chimera_nfs4_delegreturn(
 
     deleg = state_void;
 
-    /* Release the lease now so a conflicting open/IO awaiting the recall can
+    /* Release the claim now so a conflicting open/IO awaiting the recall can
      * proceed on its next attempt.  Clearing lease_held first keeps the
      * delegation cleanup (and any racing recall completion) from touching it
      * again.  All of these run on this client's connection thread. */
     if (deleg->lease_held) {
-        chimera_vfs_lease_release(vfs_state, deleg->file_state, &deleg->lease);
+        chimera_vfs_claim_release(vfs_state, deleg->file_state, &deleg->claim);
         deleg->lease_held = false;
     }
     atomic_store_explicit(&deleg->cb_recall_state, NFS4_DELEG_RETURNED,

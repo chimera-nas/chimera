@@ -12,7 +12,7 @@
 #include "nfs_internal.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
-#include "vfs/vfs_state.h"
+#include "vfs/vfs_claim.h"
 #include "vfs/vfs_pnfs.h"
 
 /*
@@ -174,7 +174,7 @@ nfs4_remove_lookup_complete(
         (attr->va_set_mask & CHIMERA_VFS_ATTR_FH)) {
         uint64_t fh_hash = XXH3_64bits(attr->va_fh, attr->va_fh_len) & INT64_MAX;
 
-        if (chimera_vfs_state_break_caching(req->thread->vfs->vfs_state,
+        if (chimera_vfs_claim_break_caching(req->thread->vfs->vfs_state,
                                             attr->va_fh, attr->va_fh_len,
                                             fh_hash)) {
             nfs4_remove_finish(ctx, NFS4ERR_DELAY);

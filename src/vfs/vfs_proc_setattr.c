@@ -6,7 +6,7 @@
 #include <stdlib.h>
 #include <sys/stat.h>
 #include "vfs_procs.h"
-#include "vfs_state.h"
+#include "vfs_claim.h"
 #include "vfs_internal.h"
 #include "vfs_attr_cache.h"
 #include "vfs_access.h"
@@ -252,9 +252,9 @@ chimera_vfs_setattr_dispatch(
     request->opcode         = CHIMERA_VFS_OP_SETATTR;
     request->complete       = chimera_vfs_setattr_complete;
     request->setattr.handle = handle;
-    /* Identify the mutating handle so the caching-lease recall below skips a
-     * lease anchored to this same handle (the holder is coherent with its own
-     * setattr -- see chimera_vfs_break_caching_file). */
+    /* Identify the mutating handle so the caching recall below skips a
+     * claim anchored to this same handle (the holder is coherent with its own
+     * setattr -- the trigger engine's HOLDER-circle op_handle exemption). */
     request->io_handle                       = handle;
     request->setattr.set_attr                = set_attr;
     request->setattr.r_pre_attr.va_req_mask  = pre_attr_mask;

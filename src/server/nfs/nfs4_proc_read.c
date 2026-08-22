@@ -74,16 +74,18 @@ chimera_nfs4_read_open_callback(
 
     if (req->io_owner_from_deleg) {
         /* A delegation-authorized read: present the delegation holder's own
-        * lease owner (same protocol/client/fh as the CACHING lease created at
+        * claim actor (same protocol/client/fh as the cache claim created at
         * OPEN) so the VFS I/O path recognises the reader as the delegation
         * holder and does not recall the client's own delegation.  Other
         * (anonymous-stateid / pNFS-DS) on-the-fly reads keep the implicit
-        * lease so they still recall *other* clients' conflicting leases. */
-        struct chimera_vfs_lease_owner io_owner = {
-            .protocol   = CHIMERA_VFS_LEASE_PROTO_NFSV4,
-            .client_key = req->session->client_unified->client_id,
-            .owner_lo   = handle->fh_hash,
-            .owner_hi   = 0,
+        * claim so they still recall *other* clients' conflicting claims. */
+        struct chimera_claim_actor io_owner = {
+            .owner = {
+                .proto      = CHIMERA_CLAIM_PROTO_NFSV4,
+                .client_key = req->session->client_unified->client_id,
+                .owner_lo   = handle->fh_hash,
+                .owner_hi   = 0,
+            },
         };
 
         chimera_vfs_read_owned(req->thread->vfs_thread, &req->cred,
@@ -342,14 +344,16 @@ chimera_nfs4_read(
     req->nfs_state_ref  = state_void;
     req->nfs_state_type = state_type;
 
-    struct chimera_vfs_lease_owner io_owner = {
-        .protocol   = CHIMERA_VFS_LEASE_PROTO_NFSV4,
-        .client_key = open_state->owner->client->client_id,
-        .owner_lo   = state_handle->fh_hash,
-        .owner_hi   = 0,
+    struct chimera_claim_actor io_owner = {
+        .owner = {
+            .proto      = CHIMERA_CLAIM_PROTO_NFSV4,
+            .client_key = open_state->owner->client->client_id,
+            .owner_lo   = state_handle->fh_hash,
+            .owner_hi   = 0,
+        },
     };
-    struct evpl_iovec             *iov = xdr_dbuf_alloc_space(sizeof(*iov) * 256,
-                                                              req->encoding->dbuf);
+    struct evpl_iovec         *iov = xdr_dbuf_alloc_space(sizeof(*iov) * 256,
+                                                          req->encoding->dbuf);
     chimera_nfs_abort_if(iov == NULL, "Failed to allocate space");
 
     chimera_vfs_read_owned(thread->vfs_thread, &req->cred,

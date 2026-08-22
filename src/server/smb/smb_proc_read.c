@@ -8,7 +8,7 @@
 #include "smb_procs.h"
 #include "smb_session.h"
 #include "vfs/vfs.h"
-#include "vfs/vfs_state.h"
+#include "vfs/vfs_claim.h"
 
 /*
  * Completion for one SMB2_CHANNEL_RDMA_V1 read transfer (RDMA Write to a client
@@ -271,20 +271,30 @@ chimera_smb_read(struct chimera_smb_request *request)
     chimera_smb_channel_sequence_stale(request->read.open_file,
                                        request->channel_sequence, 0);
 
-    struct chimera_vfs_lease_owner io_owner = {
-        .protocol   = CHIMERA_VFS_LEASE_PROTO_SMB2,
-        .client_key = request->session_handle->session->client_key,
-        .owner_lo   = request->read.open_file->file_id.pid,
-        .owner_hi   = request->read.open_file->file_id.vid,
+    struct chimera_claim_actor io_owner = {
+        .owner     = {
+            .proto      = CHIMERA_CLAIM_PROTO_SMB2,
+            .client_key = request->session_handle->session->client_key,
+            .owner_lo   = request->read.open_file->file_id.pid,
+            .owner_hi   = request->read.open_file->file_id.vid,
+        },
+        .op_handle = request->read.open_file->handle,
     };
+
+    /* Carry the open's grant LeaseKey (when it holds one) so the actor
+     * self-exempts against its own (or a coalesced peer's) cache. */
+    if (request->read.open_file->grant) {
+        memcpy(io_owner.owner.key,
+               request->read.open_file->grant->claim.owner.key, 16);
+    }
 
     /* Mandatory byte-range lock enforcement: an exclusive lock held by a
      * different open denies reads of the locked range.  A zero-length read
      * touches no bytes, so it can conflict with no lock and is exempt
-     * (MS-SMB2 zerobyteread); it also avoids the length==0 => to-EOF
-     * convention in the range-overlap test wrongly matching every lock. */
+     * (MS-SMB2 zerobyteread; the core also exempts zero-length reads before
+     * the MAND walk). */
     if (request->read.length != 0 &&
-        chimera_vfs_state_range_io_conflict(
+        chimera_vfs_claim_io_denied(
             thread->vfs_thread->vfs->vfs_state,
             request->read.open_file->handle->fh,
             request->read.open_file->handle->fh_len,

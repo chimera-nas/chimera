@@ -259,12 +259,12 @@ chimera_vfs_claim_cancel(
     struct chimera_vfs_pending_acquire *ticket);
 
 /* Atomic same-owner REPLACE carve for POSIX-geometry range sets: remove the
- * owner's coverage of [offset, offset+length) and, when new_mask != 0,
- * insert it at new_mask (LR or LR|LW).  claims_in/claims_out let the caller
- * keep ownership of the per-fragment memory: the core consumes fresh claim
- * structs from `spare` (caller-provided, may be NULL when shrinking) and
- * hands back released fragments via the release callback.  Used by NFSv4
- * LOCKU/LOCK-merge and the POSIX client; SMB stays exact-stack. */
+ * owner's coverage of [offset, offset+length).  v1 is carve-only —
+ * new_mask MUST be 0 (aborts otherwise); the replacement extent, when any,
+ * is the caller's subsequent acquire.  The core consumes fresh claim
+ * structs from `spare` (caller-provided, up to two) for split remainders
+ * and hands released fragments back via the release callback.  Used by the
+ * POSIX client (and later NFSv4 LOCKU); SMB stays exact-stack. */
 void
 chimera_vfs_claim_range_replace(
     struct chimera_vfs_state         *state,
@@ -364,11 +364,20 @@ chimera_vfs_claim_revoke(
     struct chimera_vfs_claim *claim);
 
 /* Durable park/unpark: masks the claim's advertised H and H denial while
- * parked (R48). */
+ * parked (R48).  Takes file->lock; use the _locked form from a context that
+ * already holds it (e.g. a grant member walk). */
 void
 chimera_vfs_claim_park(
     struct chimera_vfs_claim *claim,
     bool                      parked);
+
+static inline void
+chimera_vfs_claim_park_locked(
+    struct chimera_vfs_claim *claim,
+    bool                      parked)
+{
+    claim->parked = parked ? 1 : 0;
+} /* chimera_vfs_claim_park_locked */
 
 /* True while an ack-required break by another grant is outstanding (the
  * conflicting-CREATE park predicate, R39). */

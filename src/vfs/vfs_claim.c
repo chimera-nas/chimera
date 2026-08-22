@@ -1039,6 +1039,13 @@ chimera_vfs_claim_contended_floor(
         return 0;
     }
 
+    /* The implicit INTERNAL claim drains whole (its break is a drain, not a
+     * downgrade); a partial floor would leave step == used, begin_break
+     * would no-op, and the acquirer would spin on an IDLE conflict. */
+    if (holder->construct == CHIMERA_CONSTRUCT_IMPLICIT) {
+        return 0;
+    }
+
     /* A byte-range lock is incompatible with any caching on the stream
      * (MS-FSA 2.1.5.18): floor 0. */
     if (probe->klass == CHIMERA_CLAIM_CLASS_RANGE &&
