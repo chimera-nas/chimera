@@ -4,6 +4,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "fuse_internal.h"
 #include "fuse_attr.h"
@@ -110,6 +111,18 @@ chimera_fuse_readdir_entry(
             plus->entry_out.attr_valid       = mount->attr_timeout_ms / 1000;
             plus->entry_out.attr_valid_nsec  = (mount->attr_timeout_ms % 1000) * 1000000;
             chimera_fuse_attr_from_vfs(&plus->entry_out.attr, attrs);
+
+            /* An `ls -l` primes the kernel's attribute cache for every
+             * listed file; give each one invalidation coverage.  Listed
+             * directories wait for LOOKUP (a watch per merely-listed
+             * directory buys little). */
+            if (S_ISREG(attrs->va_mode)) {
+                chimera_fuse_grant_ensure(req->thread, mount,
+                                          plus->entry_out.nodeid,
+                                          attrs->va_fh, attrs->va_fh_len,
+                                          chimera_fuse_fh_hash(attrs->va_fh,
+                                                               attrs->va_fh_len));
+            }
         } else {
             plus->entry_out.attr.ino = inum;
         }
@@ -161,9 +174,15 @@ chimera_fuse_readdirplus_unwind(struct chimera_fuse_request *req)
     while (off < req->u.readdir.used) {
         plus = (struct fuse_direntplus *) (base + off);
 
-        if (plus->entry_out.nodeid) {
+        if (plus->entry_out.nodeid &&
             chimera_fuse_node_forget(mount->node_table,
-                                     plus->entry_out.nodeid, 1);
+                                     plus->entry_out.nodeid, 1)) {
+            /* The undo retired the node: drop its coverage too. */
+            chimera_fuse_watch_forget(mount, req->thread->vfs_thread->vfs,
+                                      plus->entry_out.nodeid);
+            chimera_fuse_grant_forget(mount,
+                                      req->thread->vfs_thread->vfs->vfs_state,
+                                      plus->entry_out.nodeid);
         }
 
         off += FUSE_DIRENT_ALIGN(FUSE_NAME_OFFSET_DIRENTPLUS +

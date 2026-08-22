@@ -200,6 +200,7 @@ chimera_fuse_dirwatch_drain(
     struct chimera_fuse_dirwatch   *dw;
     struct chimera_vfs_notify_event events[16];
     int                             nevents, overflowed, i;
+    int                             touched = 0;
 
     for (;;) {
         pthread_mutex_lock(&mount->grant_lock);
@@ -221,6 +222,10 @@ chimera_fuse_dirwatch_drain(
 
         pthread_mutex_unlock(&mount->grant_lock);
 
+        if (nevents > 0 || overflowed) {
+            touched = 1;
+        }
+
         for (i = 0; i < nevents; i++) {
             chimera_fuse_inval_entry(mount, nodeid,
                                      events[i].name, events[i].name_len);
@@ -237,8 +242,15 @@ chimera_fuse_dirwatch_drain(
          * backstop for whatever was dropped. */
 
         if (nevents < 16) {
-            return;
+            break;
         }
+    }
+
+    /* The namespace change moved the directory's own mtime/size, and an
+    * overflowed ring may have dropped names the entry timeout must now
+    * cover -- either way, refresh the directory's cached attributes. */
+    if (touched) {
+        chimera_fuse_inval_inode(mount, nodeid);
     }
 } /* chimera_fuse_dirwatch_drain */
 
@@ -399,15 +411,18 @@ chimera_fuse_grant_arm(
     return 0;
 } /* chimera_fuse_grant_arm */
 
-void
-chimera_fuse_grant_open(
-    struct chimera_fuse_thread     *thread,
-    struct chimera_fuse_mount      *mount,
-    uint64_t                        nodeid,
-    struct chimera_vfs_open_handle *oh)
+int
+chimera_fuse_grant_ensure(
+    struct chimera_fuse_thread *thread,
+    struct chimera_fuse_mount  *mount,
+    uint64_t                    nodeid,
+    const uint8_t              *fh,
+    uint32_t                    fh_len,
+    uint64_t                    fh_hash)
 {
     struct chimera_vfs_state  *state = thread->vfs_thread->vfs->vfs_state;
     struct chimera_fuse_grant *grant;
+    int                        active;
 
     pthread_mutex_lock(&mount->grant_lock);
 
@@ -415,21 +430,23 @@ chimera_fuse_grant_open(
 
     if (grant) {
         if (atomic_load(&grant->state) == CHIMERA_FUSE_GRANT_BROKEN) {
-            /* Try to re-arm a previously broken grant for this new open. */
+            /* Re-arm a previously broken grant for this fresh touch. */
             chimera_fuse_grant_arm(state, grant);
         }
 
+        active = (atomic_load(&grant->state) == CHIMERA_FUSE_GRANT_ACTIVE);
+
         pthread_mutex_unlock(&mount->grant_lock);
-        return;
+        return active;
     }
 
     grant = calloc(1, sizeof(*grant));
 
     grant->mount   = mount;
     grant->nodeid  = nodeid;
-    grant->fh_hash = oh->fh_hash;
-    grant->fh_len  = oh->fh_len;
-    memcpy(grant->fh, oh->fh, oh->fh_len);
+    grant->fh_hash = fh_hash;
+    grant->fh_len  = fh_len;
+    memcpy(grant->fh, fh, fh_len);
     /* The single long-lived reference belongs to the nodeid: it drops when
      * the kernel FORGETs the node and its caches are gone with it. */
     atomic_store(&grant->refcount, 1);
@@ -441,19 +458,32 @@ chimera_fuse_grant_open(
     if (!grant->file_state) {
         pthread_mutex_unlock(&mount->grant_lock);
         free(grant);
-        return;
+        return 0;
     }
 
     if (chimera_fuse_grant_arm(state, grant) != 0) {
         pthread_mutex_unlock(&mount->grant_lock);
         chimera_vfs_state_put(state, grant->file_state);
         free(grant);
-        return;
+        return 0;
     }
 
     HASH_ADD(hh, mount->grants, nodeid, sizeof(grant->nodeid), grant);
 
     pthread_mutex_unlock(&mount->grant_lock);
+
+    return 1;
+} /* chimera_fuse_grant_ensure */
+
+int
+chimera_fuse_grant_open(
+    struct chimera_fuse_thread     *thread,
+    struct chimera_fuse_mount      *mount,
+    uint64_t                        nodeid,
+    struct chimera_vfs_open_handle *oh)
+{
+    return chimera_fuse_grant_ensure(thread, mount, nodeid,
+                                     oh->fh, oh->fh_len, oh->fh_hash);
 } /* chimera_fuse_grant_open */
 
 void

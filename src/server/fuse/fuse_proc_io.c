@@ -53,10 +53,18 @@ chimera_fuse_open_callback(
     file->mount  = mount;
 
     chimera_fuse_file_link(mount, file);
-    chimera_fuse_grant_open(thread, mount, req->nodeid, oh);
 
     memset(&out, 0, sizeof(out));
     out.fh = (uint64_t) (uintptr_t) file;
+
+    /* With an active invalidation grant the kernel's cached pages are
+     * guaranteed to be dropped when any other party changes the file, so
+     * letting them survive across open/close cycles is coherent -- and a
+     * real read-cache win.  No grant (contention) means no coverage, so
+     * the kernel keeps its default invalidate-on-open behavior. */
+    if (chimera_fuse_grant_open(thread, mount, req->nodeid, oh)) {
+        out.open_flags |= FOPEN_KEEP_CACHE;
+    }
 
     if (chimera_fuse_reply(req, 0, &out, sizeof(out)) != 0) {
         /* The kernel never learned this fh, so no RELEASE will come. */
