@@ -103,13 +103,13 @@ chimera_fuse_readdir_entry(
         /* The kernel instantiates an inode per entry; "." and ".." are
          * skipped by it and carry nodeid 0 (no lookup count). */
         if (!dot && (attrs->va_set_mask & CHIMERA_VFS_ATTR_FH)) {
+            uint32_t entry_ms = mount->entry_timeout_ms;
+            uint32_t attr_ms  = mount->attr_timeout_ms;
+            int      cover    = CHIMERA_FUSE_COVER_NONE;
+
             plus->entry_out.nodeid = chimera_fuse_node_insert(
                 mount->node_table, attrs->va_fh, attrs->va_fh_len);
-            plus->entry_out.generation       = 1;
-            plus->entry_out.entry_valid      = mount->entry_timeout_ms / 1000;
-            plus->entry_out.entry_valid_nsec = (mount->entry_timeout_ms % 1000) * 1000000;
-            plus->entry_out.attr_valid       = mount->attr_timeout_ms / 1000;
-            plus->entry_out.attr_valid_nsec  = (mount->attr_timeout_ms % 1000) * 1000000;
+            plus->entry_out.generation = 1;
             chimera_fuse_attr_from_vfs(&plus->entry_out.attr, attrs);
 
             /* An `ls -l` primes the kernel's attribute cache for every
@@ -117,12 +117,31 @@ chimera_fuse_readdir_entry(
              * directories wait for LOOKUP (a watch per merely-listed
              * directory buys little). */
             if (S_ISREG(attrs->va_mode)) {
-                chimera_fuse_grant_ensure(req->thread, mount,
-                                          plus->entry_out.nodeid,
-                                          attrs->va_fh, attrs->va_fh_len,
-                                          chimera_fuse_fh_hash(attrs->va_fh,
-                                                               attrs->va_fh_len));
+                cover = chimera_fuse_grant_ensure(req->thread, mount,
+                                                  plus->entry_out.nodeid,
+                                                  attrs->va_fh, attrs->va_fh_len,
+                                                  chimera_fuse_fh_hash(attrs->va_fh,
+                                                                       attrs->va_fh_len));
             }
+
+            /* coherence=sync: these attrs came out of the backend's readdir
+             * BEFORE any fresh grant existed, so only a grant that predates
+             * the request protects them.  The dentry is safe under the
+             * directory's own watch, which predates the request whenever the
+             * kernel could ask us to list it (opendir/getattr armed it). */
+            if (mount->coherence_sync) {
+                if (cover != CHIMERA_FUSE_COVER_HELD) {
+                    attr_ms = 0;
+                }
+                if (req->entry_cover != CHIMERA_FUSE_COVER_HELD) {
+                    entry_ms = 0;
+                }
+            }
+
+            plus->entry_out.entry_valid      = entry_ms / 1000;
+            plus->entry_out.entry_valid_nsec = (entry_ms % 1000) * 1000000;
+            plus->entry_out.attr_valid       = attr_ms / 1000;
+            plus->entry_out.attr_valid_nsec  = (attr_ms % 1000) * 1000000;
         } else {
             plus->entry_out.attr.ino = inum;
         }
@@ -242,9 +261,13 @@ chimera_fuse_op_readdir(
     req->u.readdir.plus = (req->opcode == FUSE_READDIRPLUS);
 
     if (req->u.readdir.plus) {
-        /* Entries returned here become kernel dentries under this dir. */
-        chimera_fuse_watch_dir(req->thread, req->channel->mount, req->nodeid,
-                               file->handle->fh, file->handle->fh_len);
+        /* Entries returned here become kernel dentries under this dir; the
+         * captured coverage conditions their TTLs (per-entry pack above). */
+        req->entry_cover = chimera_fuse_watch_dir(req->thread,
+                                                  req->channel->mount,
+                                                  req->nodeid,
+                                                  file->handle->fh,
+                                                  file->handle->fh_len);
     }
     req->u.readdir.used = 0;
     req->u.readdir.size = in->size;

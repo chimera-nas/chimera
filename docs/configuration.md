@@ -258,7 +258,7 @@ mountpoint directory, which must exist.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `path` | string | required | VFS path to mount (`/<mount-name>[/subdir]`, or `/` for the whole namespace). |
-| `options` | string | - | Comma-separated: `allow_other` (other users may access the mount), `no_default_permissions` (skip kernel mode-bit enforcement), `attr_timeout_ms=<n>` / `entry_timeout_ms=<n>` (kernel attribute/entry cache lifetimes, default `1000`). |
+| `options` | string | - | Comma-separated: `allow_other` (other users may access the mount), `no_default_permissions` (skip kernel mode-bit enforcement), `attr_timeout_ms=<n>` / `entry_timeout_ms=<n>` (kernel attribute/entry cache lifetimes, default `1000`), `negative_timeout_ms=<n>` (kernel negative-dentry lifetime; defaults to `entry_timeout_ms` under `coherence=sync` and `0` under `coherence=ttl`), `coherence=sync\|ttl` (default `sync`). |
 
 Notes:
 
@@ -274,12 +274,29 @@ Notes:
   NFS/SMB/S3 (or another FUSE mount of the same share) invalidates the
   kernel's cached attributes, pages, and directory entries for the affected
   objects — including files the kernel knows only from a `stat`, and the
-  changed directory's own attributes — so the
-  `attr_timeout_ms`/`entry_timeout_ms` caches stay coherent at their
-  configured lifetimes.  With coverage in force, cached pages also survive
-  close/open cycles (`FOPEN_KEEP_CACHE`).  One residual falls back to the
-  entry timeout: directory-entry names dropped by an overflowed event ring
-  (the directory's attributes are still refreshed).
+  changed directory's own attributes.  With coverage in force, cached pages
+  also survive close/open cycles (`FOPEN_KEEP_CACHE`).
+- `coherence=sync` (the default) makes that invalidation **synchronous and
+  ordered**: a conflicting write elsewhere does not complete until this
+  kernel's caches are invalidated, a foreign namespace mutation (create,
+  remove, rename, link) does not return to its caller until this kernel's
+  dentries for the affected names are dropped, and replies carry cache
+  lifetimes only while backed by a live invalidation grant or directory
+  watch.  Once one operation returns anywhere, the very next syscall on any
+  FUSE mount of the share sees its effect — which is also what makes
+  negative-dentry caching safe to enable by default.  Two narrow softenings
+  keep concurrent cross-mount activity off the multi-second recovery
+  deadlines, both arising only when two kernels race mutations on the *same*
+  directory or file (where no cross-mount ordering exists to preserve): the
+  raced mount converges asynchronously (microseconds) instead of blocking.
+  Recovery deadlines bound the wait if a mount stops acknowledging
+  invalidations (~5s for namespace gates, the lease break deadline for
+  data).
+- `coherence=ttl` restores the purely asynchronous model: invalidations are
+  still pushed, but mutations never wait for peer acknowledgments and the
+  `attr/entry` timeouts alone bound staleness.  One extra residual there
+  falls back to the entry timeout: directory-entry names dropped by an
+  overflowed event ring (the directory's attributes are still refreshed).
 - If a previous daemon instance crashed and left a disconnected mount on the
   mountpoint, the next start detaches it and mounts fresh.
 - An externally issued `umount` disconnects the mount; the daemon logs it and

@@ -46,6 +46,14 @@ struct chimera_vfs_cred {
     uint32_t                     gid;
     uint32_t                     ngids;
     uint32_t                     gids[CHIMERA_VFS_CRED_MAX_GIDS];
+    /* Opaque identity of the protocol endpoint the operation arrived through
+     * (the FUSE server stamps its mount here).  The synchronous notify gate
+     * uses it to exempt the originator's own sync watches from a completion
+     * gate: that kernel is natively coherent with its own operation, and
+     * blocking its reply on its own invalidation ack would deadlock inside
+     * the kernel (the syscall holds the very lock the invalidation needs).
+     * NULL everywhere else; not part of the credential identity hash. */
+    const void                  *origin;
 };
 
 /*
@@ -88,6 +96,7 @@ chimera_vfs_cred_init_anonymous(
     cred->uid    = anonuid;
     cred->gid    = anongid;
     cred->ngids  = 0;
+    cred->origin = NULL;
 } // chimera_vfs_cred_init_anonymous
 
 /*

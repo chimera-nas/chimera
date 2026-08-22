@@ -241,6 +241,9 @@ chimera_fuse_reply_entry(
     struct chimera_fuse_mount *mount = req->channel->mount;
     struct fuse_entry_out      entry;
     uint8_t                    payload[sizeof(entry) + 64];
+    uint32_t                   entry_ms    = mount->entry_timeout_ms;
+    uint32_t                   attr_ms     = mount->attr_timeout_ms;
+    int                        child_cover = CHIMERA_FUSE_COVER_NONE;
     int                        rc;
 
     if (!(attr->va_set_mask & CHIMERA_VFS_ATTR_FH)) {
@@ -250,7 +253,8 @@ chimera_fuse_reply_entry(
 
     /* The kernel is about to hold a dentry under this directory; keep its
      * namespace coherent with the other protocols (every entry-shaped op
-     * resolved req->nodeid's handle into req->fh). */
+     * resolved req->nodeid's handle into req->fh).  Normally already done
+     * at request entry (req->entry_cover) -- this is the backstop. */
     chimera_fuse_watch_dir(req->thread, mount, req->nodeid,
                            req->fh, req->fh_len);
 
@@ -258,11 +262,7 @@ chimera_fuse_reply_entry(
 
     entry.nodeid = chimera_fuse_node_insert(mount->node_table,
                                             attr->va_fh, attr->va_fh_len);
-    entry.generation       = 1;
-    entry.entry_valid      = mount->entry_timeout_ms / 1000;
-    entry.entry_valid_nsec = (mount->entry_timeout_ms % 1000) * 1000000;
-    entry.attr_valid       = mount->attr_timeout_ms / 1000;
-    entry.attr_valid_nsec  = (mount->attr_timeout_ms % 1000) * 1000000;
+    entry.generation = 1;
 
     chimera_fuse_attr_from_vfs(&entry.attr, attr);
 
@@ -271,14 +271,41 @@ chimera_fuse_reply_entry(
      * grant, a directory gets a change watch so its dentries and its own
      * attributes track foreign namespace ops. */
     if (S_ISREG(attr->va_mode)) {
-        chimera_fuse_grant_ensure(req->thread, mount, entry.nodeid,
-                                  attr->va_fh, attr->va_fh_len,
-                                  chimera_fuse_fh_hash(attr->va_fh,
-                                                       attr->va_fh_len));
+        child_cover = chimera_fuse_grant_ensure(req->thread, mount,
+                                                entry.nodeid,
+                                                attr->va_fh, attr->va_fh_len,
+                                                chimera_fuse_fh_hash(attr->va_fh,
+                                                                     attr->va_fh_len));
     } else if (S_ISDIR(attr->va_mode)) {
-        chimera_fuse_watch_dir(req->thread, mount, entry.nodeid,
-                               attr->va_fh, attr->va_fh_len);
+        child_cover = chimera_fuse_watch_dir(req->thread, mount, entry.nodeid,
+                                             attr->va_fh, attr->va_fh_len);
     }
+
+    /* coherence=sync: the kernel may cache only what a live grant/watch
+     * protects.  The DENTRY is safe when the parent watch predates this
+     * request (req->entry_cover, captured at entry): a foreign namespace
+     * op completing mid-flight then gates on our watch, and its
+     * INVAL_ENTRY serializes behind the in-flight operation on the
+     * parent's kernel lock, so it lands after -- and kills -- the entry
+     * we are about to reply.  A watch born only now missed any such gate.
+     * The ATTRIBUTES were fetched from the backend before the child's
+     * grant existed, so they get a TTL only when the grant was ALREADY
+     * held (a prior touch armed it and nothing broke it since).  A fresh
+     * grant still pays off: it covers the pages and attrs of every
+     * operation after this one. */
+    if (mount->coherence_sync) {
+        if (req->entry_cover != CHIMERA_FUSE_COVER_HELD) {
+            entry_ms = 0;
+        }
+        if (child_cover != CHIMERA_FUSE_COVER_HELD) {
+            attr_ms = 0;
+        }
+    }
+
+    entry.entry_valid      = entry_ms / 1000;
+    entry.entry_valid_nsec = (entry_ms % 1000) * 1000000;
+    entry.attr_valid       = attr_ms / 1000;
+    entry.attr_valid_nsec  = (attr_ms % 1000) * 1000000;
 
     chimera_fuse_abort_if(extra_len > 64, "fuse entry reply extra too large");
 
@@ -286,6 +313,22 @@ chimera_fuse_reply_entry(
 
     if (extra_len) {
         memcpy(payload + sizeof(entry), extra, extra_len);
+    }
+
+    /* CREATE's combined reply: the open flags depend on the child grant
+     * armed above (the child nodeid did not exist when the caller built the
+     * fuse_open_out), so patch them in here.  Pages are only seeded through
+     * us after the arm, so a FRESH grant fully covers KEEP_CACHE. */
+    if (req->opcode == FUSE_CREATE &&
+        extra_len == sizeof(struct fuse_open_out)) {
+        struct fuse_open_out *oo =
+            (struct fuse_open_out *) (payload + sizeof(entry));
+
+        if (child_cover != CHIMERA_FUSE_COVER_NONE) {
+            oo->open_flags |= FOPEN_KEEP_CACHE;
+        } else if (mount->coherence_sync) {
+            oo->open_flags |= FOPEN_DIRECT_IO;
+        }
     }
 
     rc = chimera_fuse_send(req, 0, payload, sizeof(entry) + extra_len,
@@ -455,12 +498,13 @@ chimera_fuse_dispatch(
         return;
     }
 
-    req->unique  = hdr->unique;
-    req->opcode  = hdr->opcode;
-    req->nodeid  = hdr->nodeid;
-    req->buf_len = len;
+    req->unique      = hdr->unique;
+    req->opcode      = hdr->opcode;
+    req->nodeid      = hdr->nodeid;
+    req->buf_len     = len;
+    req->entry_cover = CHIMERA_FUSE_COVER_NONE;
 
-    chimera_fuse_map_cred(&req->cred, hdr);
+    chimera_fuse_map_cred(&req->cred, hdr, req->channel->mount);
 
     handler = hdr->opcode < CHIMERA_FUSE_OPCODE_MAX ?
         chimera_fuse_handlers[hdr->opcode] : NULL;

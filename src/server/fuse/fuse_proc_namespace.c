@@ -77,6 +77,12 @@ chimera_fuse_op_mkdir(
         return;
     }
 
+    /* Watch the parent before the backend op: the new entry's dentry may
+     * only carry a TTL when the watch predates the request (reply_entry). */
+    req->entry_cover = chimera_fuse_watch_dir(req->thread, req->channel->mount,
+                                              req->nodeid,
+                                              req->fh, req->fh_len);
+
     chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
                         req->fh, req->fh_len,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH |
@@ -153,6 +159,12 @@ chimera_fuse_op_mknod(
         return;
     }
 
+    /* Watch the parent before the backend op: the new entry's dentry may
+     * only carry a TTL when the watch predates the request (reply_entry). */
+    req->entry_cover = chimera_fuse_watch_dir(req->thread, req->channel->mount,
+                                              req->nodeid,
+                                              req->fh, req->fh_len);
+
     chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
                         req->fh, req->fh_len,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH |
@@ -223,6 +235,12 @@ chimera_fuse_op_symlink(
         return;
     }
 
+    /* Watch the parent before the backend op: the new entry's dentry may
+     * only carry a TTL when the watch predates the request (reply_entry). */
+    req->entry_cover = chimera_fuse_watch_dir(req->thread, req->channel->mount,
+                                              req->nodeid,
+                                              req->fh, req->fh_len);
+
     chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
                         req->fh, req->fh_len,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH |
@@ -271,6 +289,12 @@ chimera_fuse_op_link(
         chimera_fuse_reply(req, ESTALE, NULL, 0);
         return;
     }
+
+    /* Watch the parent before the backend op: the new entry's dentry may
+     * only carry a TTL when the watch predates the request (reply_entry). */
+    req->entry_cover = chimera_fuse_watch_dir(req->thread, req->channel->mount,
+                                              req->nodeid,
+                                              req->fh, req->fh_len);
 
     chimera_vfs_link_at(req->thread->vfs_thread, &req->cred,
                         req->fh2, req->fh2_len,

@@ -23,6 +23,8 @@ add_executable(fuse_lock_test fuse_lock_test.c)
 
 add_executable(fuse_coherence_test fuse_coherence_test.c)
 
+add_executable(fuse_sync_test fuse_sync_test.c)
+
 if(REQUIRE_FUSE_TESTS)
     set(_fuse_require 1)
 else()
@@ -62,7 +64,9 @@ foreach(backend memfs)
 endforeach()
 
 # Locks and cross-mount coherence run against TWO FUSE mounts of one share.
-foreach(tbin fuse_lock_test fuse_coherence_test)
+# fuse_coherence_test polls (proving the async invalidation pushes);
+# fuse_sync_test never polls (proving the coherence=sync completion gates).
+foreach(tbin fuse_lock_test fuse_coherence_test fuse_sync_test)
     add_test(NAME chimera/fuse/${tbin}
              COMMAND ${_fuse_wrapper} bash
                      ${CMAKE_CURRENT_SOURCE_DIR}/fuse_multimount_test.sh

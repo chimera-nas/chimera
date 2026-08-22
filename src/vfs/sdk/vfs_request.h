@@ -442,6 +442,8 @@ struct chimera_vfs_stream_entry {
 #define CHIMERA_VFS_WRITE_DATASYNC 1
 #define CHIMERA_VFS_WRITE_FILESYNC 2
 
+struct chimera_vfs_notify_gate;
+
 struct chimera_vfs_request {
     struct chimera_vfs_thread         *thread;
     const struct chimera_vfs_cred     *cred;
@@ -511,6 +513,24 @@ struct chimera_vfs_request {
      * (NULL on the fast path where nothing was pinned). */
     struct chimera_claim_actor         io_owner;
     uint8_t                            io_owner_valid;
+    /* Set when a lease-holding writer must wait out sync_break read caches:
+     * the request is parked on the file's io-wait queue until every such
+     * holder's break acks (chimera_vfs_sync_read_pending_locked), then
+     * proceeds without taking the implicit lease. */
+    uint8_t                            io_sync_wait;
+
+    /* Synchronous notify gating (vfs_notify.c): a namespace mutation's
+     * completion is swapped for the gate wrapper at dispatch
+     * (notify_gate_wrapped), which parks the real completion
+     * (notify_saved_complete) until every sync watcher acks its
+     * invalidation.  notify_gate_resume routes the parked request's resume
+     * (an ack or the deadline sweep) to request->complete in the owning
+     * thread's drain loop. */
+    struct chimera_vfs_notify_gate    *notify_gate;
+    void                               ( *notify_saved_complete )(
+        struct chimera_vfs_request *request);
+    uint8_t                            notify_gate_wrapped;
+    uint8_t                            notify_gate_resume;
     /* Set by chimera_vfs_io_recall(): this request is a namespace/metadata
      * mutation that must recall every caching lease on a target file (regardless
      * of owner) rather than hold an implicit lease. */

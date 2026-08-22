@@ -334,6 +334,12 @@ chimera_fuse_add_mount(
     mount->default_permissions = 1;
     mount->attr_timeout_ms     = 1000;
     mount->entry_timeout_ms    = 1000;
+    /* Fully coherent by default: kernel caches are only trusted while covered
+     * by a live grant/watch, and a conflicting mutation elsewhere completes
+     * only after this kernel's caches are invalidated.  coherence=ttl opts
+     * into the async model where the timeouts alone bound staleness. */
+    mount->coherence_sync      = 1;
+    mount->negative_timeout_ms = UINT32_MAX; /* default resolved below */
 
     if (options && *options) {
         opts = strdup(options);
@@ -350,6 +356,12 @@ chimera_fuse_add_mount(
                 mount->attr_timeout_ms = strtoul(opt + 16, NULL, 10);
             } else if (strncmp(opt, "entry_timeout_ms=", 17) == 0) {
                 mount->entry_timeout_ms = strtoul(opt + 17, NULL, 10);
+            } else if (strncmp(opt, "negative_timeout_ms=", 20) == 0) {
+                mount->negative_timeout_ms = strtoul(opt + 20, NULL, 10);
+            } else if (strcmp(opt, "coherence=sync") == 0) {
+                mount->coherence_sync = 1;
+            } else if (strcmp(opt, "coherence=ttl") == 0) {
+                mount->coherence_sync = 0;
             } else {
                 chimera_fuse_error("FUSE mount %s: unknown option '%s'",
                                    mountpoint, opt);
@@ -365,7 +377,18 @@ chimera_fuse_add_mount(
         }
     }
 
+    /* Negative dentries are safe to cache when namespace mutations complete
+     * synchronously against our watches (coherence=sync); without that
+     * interlock a cached ENOENT could outlive a foreign create, so ttl mode
+     * defaults them off unless explicitly enabled. */
+    if (mount->negative_timeout_ms == UINT32_MAX) {
+        mount->negative_timeout_ms =
+            mount->coherence_sync ? mount->entry_timeout_ms : 0;
+    }
+
     pthread_mutex_init(&mount->open_lock, NULL);
+    pthread_mutex_init(&mount->dir_notifier_lock, NULL);
+    pthread_cond_init(&mount->dir_notifier_cond, NULL);
     pthread_mutex_init(&mount->lock_lock, NULL);
     pthread_mutex_init(&mount->grant_lock, NULL);
 

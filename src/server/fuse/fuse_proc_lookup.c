@@ -15,7 +15,28 @@ chimera_fuse_lookup_complete(
     struct chimera_vfs_attrs *dir_attr,
     void                     *private_data)
 {
-    struct chimera_fuse_request *req = private_data;
+    struct chimera_fuse_request *req   = private_data;
+    struct chimera_fuse_mount   *mount = req->channel->mount;
+
+    if (error_code == CHIMERA_VFS_ENOENT &&
+        mount->negative_timeout_ms > 0 &&
+        (!mount->coherence_sync ||
+         req->entry_cover == CHIMERA_FUSE_COVER_HELD)) {
+        /* Cache the miss: nodeid 0 with a validity makes the kernel hold a
+         * NEGATIVE dentry, saving a round trip per repeated miss.  Safe in
+         * coherence=sync because a foreign create of this name gates on the
+         * parent watch (held since before this request), and its
+         * INVAL_ENTRY serializes behind us on the parent's kernel lock.
+         * In ttl mode this is the opt-in negative_timeout_ms bound. */
+        struct fuse_entry_out entry;
+
+        memset(&entry, 0, sizeof(entry));
+        entry.entry_valid      = mount->negative_timeout_ms / 1000;
+        entry.entry_valid_nsec = (mount->negative_timeout_ms % 1000) * 1000000;
+
+        chimera_fuse_reply(req, 0, &entry, sizeof(entry));
+        return;
+    }
 
     if (error_code != CHIMERA_VFS_OK) {
         chimera_fuse_reply(req, chimera_fuse_errno(error_code), NULL, 0);
@@ -59,6 +80,13 @@ chimera_fuse_op_lookup(
         chimera_fuse_reply(req, ESTALE, NULL, 0);
         return;
     }
+
+    /* Watch the parent BEFORE the backend resolve: a dentry (positive or
+     * negative) may only carry a TTL when the watch predates the request,
+     * so a racing foreign mutation is guaranteed to gate on it. */
+    req->entry_cover = chimera_fuse_watch_dir(req->thread, req->channel->mount,
+                                              req->nodeid,
+                                              req->fh, req->fh_len);
 
     chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
                         req->fh, req->fh_len,

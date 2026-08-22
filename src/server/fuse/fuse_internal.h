@@ -182,6 +182,12 @@ struct chimera_fuse_mount {
     int                             default_permissions;
     uint32_t                        attr_timeout_ms;
     uint32_t                        entry_timeout_ms;
+    uint32_t                        negative_timeout_ms;
+    /* coherence=sync (default): replies carry cache TTLs only under a live
+     * grant/watch, grants demand synchronous breaks (owner.sync_break), and
+     * namespace mutations elsewhere gate on this kernel's invalidation acks.
+     * coherence=ttl: the async model; timeouts alone bound staleness. */
+    int                             coherence_sync;
     uint32_t                        max_write;   /* negotiated */
     uint32_t                        proto_minor; /* negotiated */
     int                             mounted;
@@ -204,6 +210,18 @@ struct chimera_fuse_mount {
     pthread_mutex_t                 grant_lock;
     struct chimera_fuse_grant      *grants;
     struct chimera_fuse_dirwatch   *dirwatches;
+    /* Per-mount directory-event notifier: INVAL_ENTRY writes can block on
+     * THIS kernel's directory locks (a namespace syscall in flight), so
+     * each mount drains its own directory events on its own thread --
+     * one mount's blocked entry invalidation must never sit ahead of
+     * another mount's acks, or of the never-blocking grant lane on the
+     * shared notifier (see chimera_fuse_dir_notifier). */
+    pthread_t                       dir_notifier;
+    pthread_mutex_t                 dir_notifier_lock;
+    pthread_cond_t                  dir_notifier_cond;
+    struct chimera_fuse_notice     *dir_notices;
+    int                             dir_notifier_running;
+    int                             dir_notifier_stop;
     uint8_t                         root_fh[CHIMERA_VFS_FH_SIZE];
     uint32_t                        root_fh_len;
 };
@@ -288,6 +306,12 @@ struct chimera_fuse_request {
     struct evpl_iovec               buf;
     int                             buf_allocated;
     uint32_t                        buf_len;
+
+    /* Coverage captured at request ENTRY (before the backend op) by ops that
+     * condition reply TTLs on it -- a CHIMERA_FUSE_COVER_* value.  See the
+     * COVER_* comment: only pre-existing coverage protects state the backend
+     * fetched before the call. */
+    int                             entry_cover;
 
     union {
         struct {
@@ -647,12 +671,23 @@ void
 chimera_fuse_notifier_stop(
     struct chimera_fuse_shared *shared);
 
+/* Coverage state reported by grant_ensure / watch_dir.  HELD means the
+ * grant/watch was already in force before this call -- data fetched from
+ * the backend BEFORE the call is protected (a conflicting foreign mutation
+ * would have broken it / been gated on it).  FRESH means coverage begins
+ * NOW: caches seeded through us from here on are protected, but state
+ * fetched before the call raced an uncovered window and must not be
+ * cached with a TTL. */
+#define CHIMERA_FUSE_COVER_NONE  0
+#define CHIMERA_FUSE_COVER_FRESH 1
+#define CHIMERA_FUSE_COVER_HELD  2
+
 /* Ensure a node's invalidation lease exists / is re-armed (best-effort,
  * idempotent; callers gate on S_ISREG).  These are the rearm-on-demand
  * sites: every kernel-driven touch of a file -- LOOKUP, READDIRPLUS,
- * GETATTR, OPEN -- re-arms a previously broken grant, which self-throttles
- * against a remote write burst (at most one break per kernel re-touch).
- * Returns 1 when the grant is ACTIVE (invalidation coverage in force). */
+ * GETATTR, OPEN, READ, WRITE -- re-arms a previously broken grant, which
+ * self-throttles against a remote write burst (at most one break per
+ * kernel re-touch). */
 int
 chimera_fuse_grant_ensure(
     struct chimera_fuse_thread *thread,
@@ -661,6 +696,26 @@ chimera_fuse_grant_ensure(
     const uint8_t              *fh,
     uint32_t                    fh_len,
     uint64_t                    fh_hash);
+
+/* True while the node's grant is ACTIVE right now.  The reply-time check
+ * behind sync-mode attribute TTLs: armed before the backend op AND still
+ * unbroken at reply time means no foreign write raced the fetch. */
+int
+chimera_fuse_grant_active(
+    struct chimera_fuse_mount *mount,
+    uint64_t                   nodeid);
+
+/* Request-ENTRY coverage for a node whose type is not yet known (GETATTR):
+ * an existing grant is re-armed (COVER_FRESH/HELD), an existing dirwatch
+ * reports HELD, and an unknown node reports NONE -- coverage then begins at
+ * the completion's arm, protecting the NEXT fetch. */
+int
+chimera_fuse_cover_touch(
+    struct chimera_fuse_thread *thread,
+    struct chimera_fuse_mount  *mount,
+    uint64_t                    nodeid,
+    const uint8_t              *fh,
+    uint32_t                    fh_len);
 
 int
 chimera_fuse_grant_open(
@@ -678,8 +733,10 @@ chimera_fuse_grant_forget(
     uint64_t                   nodeid);
 
 /* Ensure a change-notify watch exists for a directory the kernel is about
- * to hold dentries under (best-effort, idempotent). */
-void
+ * to hold dentries under (best-effort, idempotent).  Returns the COVER_*
+ * state; in coherence=sync the watch also gates foreign namespace
+ * mutations on our invalidation ack. */
+int
 chimera_fuse_watch_dir(
     struct chimera_fuse_thread *thread,
     struct chimera_fuse_mount  *mount,
@@ -838,11 +895,15 @@ chimera_fuse_errno(enum chimera_vfs_error error_code)
 
 /* The FUSE header carries only uid/gid (no supplementary groups); mounting
  * with default_permissions makes the kernel do mode-bit checks with the
- * caller's full group list against the attrs we return. */
+ * caller's full group list against the attrs we return.  The mount is
+ * stamped as the credential's origin so the synchronous notify gate never
+ * blocks this kernel's own mutation on its own invalidation ack. */
 static inline void
 chimera_fuse_map_cred(
     struct chimera_vfs_cred     *cred,
-    const struct fuse_in_header *hdr)
+    const struct fuse_in_header *hdr,
+    struct chimera_fuse_mount   *mnt)
 {
     chimera_vfs_cred_init_unix(cred, hdr->uid, hdr->gid, 0, NULL);
+    cred->origin = mnt;
 } /* chimera_fuse_map_cred */
