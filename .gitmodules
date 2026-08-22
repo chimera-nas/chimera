@@ -11,3 +11,6 @@
 [submodule "ext/ndrzcc"]
 	path = ext/ndrzcc
 	url = https://github.com/chimera-nas/ndrzcc.git
+[submodule "ext/specs"]
+	path = ext/specs
+	url = https://github.com/chimera-nas/specs

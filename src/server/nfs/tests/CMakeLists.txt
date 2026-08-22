@@ -2,6 +2,9 @@
 #
 # SPDX-License-Identifier: LGPL-2.1-only
 
+# NFS3 model-based (Quint) wire-protocol tests.
+add_subdirectory(quint)
+
 # Unit test for the unified NFSv4 state model (Phases 1-4).
 add_executable(test_state_table test_state_table.c)
 target_link_libraries(test_state_table chimera_nfs chimera_server chimera_vfs chimera_nfs_common chimera_common evpl evpl_rpc2 ${CHIMERA_UUID_LIB})
