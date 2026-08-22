@@ -555,7 +555,8 @@ chimera_nfs_nlm4_lock_open_cb(
      * and sends the immediate NLM4_BLOCKED interim; the eventual grant is
      * then delivered via an out-of-band NLM_GRANTED callback from
      * chimera_nfs_nlm4_lock_acquire_cb. */
-    chimera_vfs_claim_acquire(vfs_state, entry->file_state,
+    chimera_vfs_claim_acquire(thread->vfs_thread, vfs_state,
+                              entry->file_state,
                               &entry->claim, &entry->ticket,
                               /* wait      */ ctx->block,
                               /* wait_hard */ ctx->block,

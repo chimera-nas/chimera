@@ -1225,7 +1225,9 @@ chimera_smb_create_gen_open_file(
              * its vfs ticket, NOT the parked-CREATE break sweep -- see the
              * gen_parked guard in chimera_smb_create_resume_parked_conn. */
             chimera_smb_async_interim_begin(request);
-            chimera_vfs_claim_acquire(vfs_state, file_state,
+            /* SHARE claims never project (range-only at the backend);
+             * NULL skips the projection probe. */
+            chimera_vfs_claim_acquire(NULL, vfs_state, file_state,
                                       &open_file->share_lease,
                                       &request->create.gen_ticket,
                                       true /* wait */, false /* wait_hard */,

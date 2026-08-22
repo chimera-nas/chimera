@@ -171,6 +171,40 @@ chimera_vfs_claim_trigger_ns_unlink(
     uint8_t                               retain);
 
 /* ------------------------------------------------------------------ */
+/* Backend projection internals                                       */
+/* ------------------------------------------------------------------ */
+
+/* Confirm a locally-granted RANGE claim with the backend before its ticket
+ * callback fires; `thread` must be the CALLING vfs thread (its request pool
+ * is per-thread and unlocked). */
+void
+chimera_vfs_claim_backend_project_range(
+    struct chimera_vfs_thread          *thread,
+    struct chimera_vfs_state           *state,
+    struct chimera_vfs_pending_acquire *ticket);
+
+bool
+chimera_vfs_claim_backend_range_projects(
+    struct chimera_vfs_state      *state,
+    struct chimera_vfs_file_state *file,
+    struct chimera_vfs_thread     *thread);
+
+/* Queue a projected RANGE token for release on the service thread (safe
+ * from any thread; fire-and-forget). */
+void
+chimera_vfs_claim_backend_release_token(
+    struct chimera_vfs_state      *state,
+    struct chimera_vfs_file_state *file,
+    uint64_t                       token);
+
+/* Hand a pump-granted projectable ticket to the service thread (the pump
+ * has no vfs thread of its own to dispatch from). */
+void
+chimera_vfs_claim_backend_defer_ticket(
+    struct chimera_vfs_state           *state,
+    struct chimera_vfs_pending_acquire *ticket);
+
+/* ------------------------------------------------------------------ */
 /* Pumps                                                              */
 /* ------------------------------------------------------------------ */
 

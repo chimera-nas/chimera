@@ -749,7 +749,7 @@ test_async_acquire_immediate(void)
     init_owner(&owner, CHIMERA_CLAIM_PROTO_NFSV4, 0xA, 1);
     chimera_vfs_claim_init_range(&claim, true, false, 0, 100, &owner);
 
-    chimera_vfs_claim_acquire(state, file, &claim, &ticket, false, false,
+    chimera_vfs_claim_acquire(NULL, state, file, &claim, &ticket, false, false,
                               recording_acquire_cb, NULL, &rec);
     CHECK(rec.fired == 1, "cb fires synchronously on first acquire");
     CHECK(rec.last_result == CHIMERA_CLAIM_GRANTED, "result is GRANTED");
@@ -788,7 +788,7 @@ test_async_acquire_wait_then_ack(void)
     init_owner(&owner, CHIMERA_CLAIM_PROTO_NLM, 0xB, 2);
     chimera_vfs_claim_init_range(&range, false, false, 0, 100, &owner);
 
-    chimera_vfs_claim_acquire(state, file, &range, &ticket, true, false,
+    chimera_vfs_claim_acquire(NULL, state, file, &range, &ticket, true, false,
                               recording_acquire_cb, NULL, &rec);
     CHECK(rec.fired == 0, "wait acquire does not fire cb yet");
     CHECK(brec.fired == 1, "break_cb fired on conflicting holder");
@@ -834,7 +834,7 @@ test_async_acquire_cancel(void)
     init_owner(&owner, CHIMERA_CLAIM_PROTO_NLM, 0xB, 2);
     chimera_vfs_claim_init_range(&range, false, false, 0, 100, &owner);
 
-    chimera_vfs_claim_acquire(state, file, &range, &ticket, true, false,
+    chimera_vfs_claim_acquire(NULL, state, file, &range, &ticket, true, false,
                               recording_acquire_cb, NULL, &rec);
     CHECK(ticket.queued == true, "ticket queued while waiting");
 
@@ -883,7 +883,7 @@ test_release_pumps_pending(void)
     init_owner(&owner, CHIMERA_CLAIM_PROTO_NLM, 0xB, 2);
     chimera_vfs_claim_init_range(&range, false, false, 0, 100, &owner);
 
-    chimera_vfs_claim_acquire(state, file, &range, &ticket, true, false,
+    chimera_vfs_claim_acquire(NULL, state, file, &range, &ticket, true, false,
                               recording_acquire_cb, NULL, &rec);
     CHECK(rec.fired == 0, "wait acquire queued");
 

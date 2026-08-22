@@ -552,7 +552,8 @@ chimera_smb_lock_take_one(
     entry->lease.op_handle  = open_file->handle;
     entry->lease.policy_tag = open_file->file_id.pid;
 
-    chimera_vfs_claim_acquire(vfs_state, entry->file_state, &entry->lease,
+    chimera_vfs_claim_acquire(thread->vfs_thread, vfs_state,
+                              entry->file_state, &entry->lease,
                               &entry->ticket, false /* no wait */,
                               false /* wait_hard */,
                               chimera_smb_lock_sync_cb, NULL, &result);
@@ -983,7 +984,8 @@ chimera_smb_lock(struct chimera_smb_request *request)
     /* wait_hard keeps the ticket queued on a HARD (lock-vs-lock) DENIED too --
      * the SMB2 blocking lock (MS-SMB2 3.3.5.14) must complete only once the
      * conflicting range is released, not bounce back DENIED. */
-    chimera_vfs_claim_acquire(vfs_state, entry->file_state,
+    chimera_vfs_claim_acquire(thread->vfs_thread, vfs_state,
+                              entry->file_state,
                               &entry->lease, &entry->ticket, wait,
                               wait /* wait_hard */,
                               chimera_smb_lock_acquire_cb, NULL, entry);

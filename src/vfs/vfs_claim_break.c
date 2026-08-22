@@ -192,6 +192,7 @@ chimera_vfs_claim_ack(
     if (mutated && file && file->state) {
         chimera_vfs_claim_pump_pending(file->state, file);
         chimera_vfs_claim_pump_io(file->state, file);
+        chimera_vfs_claim_backend_reeval(file->state, file);
     }
 } /* chimera_vfs_claim_ack */
 
@@ -226,6 +227,7 @@ chimera_vfs_claim_revoke(struct chimera_vfs_claim *claim)
     if (file && file->state) {
         chimera_vfs_claim_pump_pending(file->state, file);
         chimera_vfs_claim_pump_io(file->state, file);
+        chimera_vfs_claim_backend_reeval(file->state, file);
     }
 } /* chimera_vfs_claim_revoke */
 

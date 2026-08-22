@@ -273,7 +273,10 @@ chimera_posix_lock_claim_acquire_wait(
      * DENIED lock conflict -- the F_SETLKW contract.  GRANTED/DENIED fire
      * the callback synchronously inside the call; a queued ticket fires it
      * later from whichever thread pumps the release. */
-    chimera_vfs_claim_acquire(state, node->file, &node->claim, &ticket,
+    /* CLAIMTODO: pass the worker's vfs thread once plumbed so posix locks
+     * project to CAP_LEASE backends; the kernel OP_LOCK passthrough covers
+     * cross-process arbitration meanwhile. */
+    chimera_vfs_claim_acquire(NULL, state, node->file, &node->claim, &ticket,
                               /* wait */ true, /* wait_hard */ true,
                               chimera_posix_lock_acquire_cb, NULL, &waiter);
 

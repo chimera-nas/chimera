@@ -84,6 +84,28 @@ struct chimera_vfs_state;
  * session_id fallback); such owners never coalesce across nodes. */
 #define CHIMERA_CLAIM_OWNER_UNSTABLE 0x01
 
+/* 128-bit-safe half-open range overlap shared by the core and CAP_LEASE
+ * arbiters (UINT64_MAX = to-EOF, 0 = genuine zero-byte range). */
+static inline bool
+chimera_vfs_claim_range_overlap_i(
+    uint64_t a_off,
+    uint64_t a_len,
+    uint64_t b_off,
+    uint64_t b_len)
+{
+    __uint128_t a_end = (a_len == UINT64_MAX)
+        ? ((__uint128_t) 1 << 64) : (__uint128_t) a_off + a_len;
+    __uint128_t b_end = (b_len == UINT64_MAX)
+        ? ((__uint128_t) 1 << 64) : (__uint128_t) b_off + b_len;
+
+    return a_off < b_end && b_off < a_end;
+} /* chimera_vfs_claim_range_overlap_i */
+
+/* Backend lease wire shapes (CHIMERA_VFS_OP_LEASE_ACQUIRE/_RELEASE): the
+ * revocable per-node AGGREGATE token vs a binding per-owner RANGE record. */
+#define CHIMERA_VFS_LEASE_AGGREGATE  1
+#define CHIMERA_VFS_LEASE_RANGE      2
+
 /* Identity block.  client_key is the node-local fast compare; the canonical
  * cluster-stable bytes (co_ownerid, ClientGuid, caller_name) are registered
  * separately by the protocol layer for projection serialization.  key[16] is
@@ -284,6 +306,11 @@ struct chimera_vfs_claim {
      * the SMB open's pid for the durable-purge loop); copied by value into
      * chimera_vfs_claim_conflict.policy_tag. */
     uint64_t                        policy_tag;
+
+    /* Backend projection: the CAP_LEASE token behind this claim (RANGE
+     * records; 0 = not projected).  Written by the projection layer under
+     * file->lock; released fire-and-forget on claim release. */
+    uint64_t                        backend_token;
 
     struct chimera_vfs_file_state  *file;
 

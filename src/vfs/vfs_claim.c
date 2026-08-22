@@ -40,6 +40,8 @@ chimera_vfs_state_init(void)
     state->default_break_deadline_ms = CHIMERA_VFS_CLAIM_DEFAULT_BREAK_DEADLINE_MS;
     state->implicit_idle_ms          = CHIMERA_VFS_CLAIM_DEFAULT_IMPLICIT_IDLE_MS;
 
+    pthread_mutex_init(&state->service_lock, NULL);
+
     return state;
 } /* chimera_vfs_state_init */
 
@@ -1163,6 +1165,9 @@ chimera_vfs_claim_try_acquire(
                     state, file, CHIMERA_TRIGGER_RANGE_LOCK, &actor,
                     (claim->used & CHIMERA_CLAIM_LW) ? 1 : 0);
             }
+            /* Single entrance: every admission funnels the backend cover
+             * re-evaluation (cheap no-op absent a CAP_LEASE module). */
+            chimera_vfs_claim_backend_reeval(state, file);
             return CHIMERA_CLAIM_GRANTED;
         }
 
@@ -1341,6 +1346,17 @@ chimera_vfs_claim_pump_pending(
             continue;
         }
 
+        /* A pump-granted projectable lock is confirmed by the service
+         * thread (the pump runs on whatever thread released the blocker
+         * and has no dispatch context of its own); the callback fires from
+         * there after confirmation. */
+        if (result == CHIMERA_CLAIM_GRANTED &&
+            t->claim->klass == CHIMERA_CLAIM_CLASS_RANGE &&
+            state->lease_capable && !file->bl_disabled) {
+            chimera_vfs_claim_backend_defer_ticket(state, t);
+            continue;
+        }
+
         t->cb(result,
               result == CHIMERA_CLAIM_GRANTED ? t->claim : NULL,
               result == CHIMERA_CLAIM_GRANTED ? NULL : &conflict,
@@ -1350,6 +1366,7 @@ chimera_vfs_claim_pump_pending(
 
 SYMBOL_EXPORT void
 chimera_vfs_claim_acquire(
+    struct chimera_vfs_thread          *thread,
     struct chimera_vfs_state           *state,
     struct chimera_vfs_file_state      *file,
     struct chimera_vfs_claim           *claim,
@@ -1388,6 +1405,17 @@ chimera_vfs_claim_acquire(
         return;
     }
 
+    /* A locally-granted byte-range lock on a CAP_LEASE file is confirmed
+     * with the backend BEFORE the callback fires: optimistic local insert,
+     * rollback + DENIED on refusal (binding claims are all-or-nothing at
+     * the arbiter, never recallable). */
+    if (result == CHIMERA_CLAIM_GRANTED &&
+        claim->klass == CHIMERA_CLAIM_CLASS_RANGE &&
+        chimera_vfs_claim_backend_range_projects(state, file, thread)) {
+        chimera_vfs_claim_backend_project_range(thread, state, ticket);
+        return;
+    }
+
     cb(result,
        result == CHIMERA_CLAIM_GRANTED ? claim : NULL,
        result == CHIMERA_CLAIM_GRANTED ? NULL : &conflict,
@@ -1400,14 +1428,23 @@ chimera_vfs_claim_release(
     struct chimera_vfs_file_state *file,
     struct chimera_vfs_claim      *claim)
 {
+    uint64_t token;
+
     pthread_mutex_lock(&file->lock);
     if (claim->file == file) {
         chimera_vfs_claim_unlink_locked(file, claim);
     }
+    token                = claim->backend_token;
+    claim->backend_token = 0;
     pthread_mutex_unlock(&file->lock);
+
+    if (token) {
+        chimera_vfs_claim_backend_release_token(state, file, token);
+    }
 
     chimera_vfs_claim_pump_pending(state, file);
     chimera_vfs_claim_pump_io(state, file);
+    chimera_vfs_claim_backend_reeval(state, file);
 } /* chimera_vfs_claim_release */
 
 SYMBOL_EXPORT void
@@ -1426,6 +1463,7 @@ chimera_vfs_claim_shrink(
     if (file->state) {
         chimera_vfs_claim_pump_pending(file->state, file);
         chimera_vfs_claim_pump_io(file->state, file);
+        chimera_vfs_claim_backend_reeval(file->state, file);
     }
 } /* chimera_vfs_claim_shrink */
 
@@ -1563,6 +1601,14 @@ chimera_vfs_claim_range_replace(
 
     pthread_mutex_unlock(&file->lock);
 
+    for (i = 0; i < n_released; i++) {
+        if (released[i]->backend_token) {
+            chimera_vfs_claim_backend_release_token(
+                state, file, released[i]->backend_token);
+            released[i]->backend_token = 0;
+        }
+    }
+
     if (spare_used) {
         *spare_used = n_spare;
     }
@@ -1575,6 +1621,7 @@ chimera_vfs_claim_range_replace(
 
     chimera_vfs_claim_pump_pending(state, file);
     chimera_vfs_claim_pump_io(state, file);
+    chimera_vfs_claim_backend_reeval(state, file);
 } /* chimera_vfs_claim_range_replace */
 
 /* -------------------------------------------------------------------- */
@@ -1862,6 +1909,7 @@ chimera_vfs_claim_grant_release(
             chimera_vfs_claim_pump_pending(state, file);
             chimera_vfs_claim_pump_io(state, file);
         }
+        chimera_vfs_claim_backend_reeval(state, file);
         free(grant);
     }
 } /* chimera_vfs_claim_grant_release */

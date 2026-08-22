@@ -681,7 +681,8 @@ chimera_nfs4_lock(
          * prior backend behavior).  A cross-protocol breakable conflict
          * still kicks off the break inside the acquire (the NFSv4 LOCK
          * triple: recall started + synchronous BREAKING result). */
-        chimera_vfs_claim_acquire(vfs_state, file_state,
+        chimera_vfs_claim_acquire(req->thread->vfs_thread, vfs_state,
+                                  file_state,
                                   &rl->claim, &rl->ticket,
                                   /*wait=*/ false, /*wait_hard=*/ false,
                                   chimera_nfs4_lock_complete, NULL, req);

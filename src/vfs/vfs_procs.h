@@ -1207,3 +1207,52 @@ chimera_vfs_remove_stream(
     uint32_t                             namelen,
     chimera_vfs_remove_stream_callback_t callback,
     void                                *private_data);
+
+/* --------------------------------------------------------------------
+ * Backend lease projection (CHIMERA_VFS_CAP_LEASE)
+ * -------------------------------------------------------------------- */
+
+typedef void (*chimera_vfs_lease_acquire_backend_cb_t)(
+    enum chimera_vfs_error error_code,
+    uint8_t                granted,
+    uint64_t               token,
+    void                  *private_data);
+
+typedef void (*chimera_vfs_lease_release_backend_cb_t)(
+    enum chimera_vfs_error error_code,
+    void                  *private_data);
+
+void
+chimera_vfs_lease_acquire_backend(
+    struct chimera_vfs_thread             *thread,
+    const uint8_t                         *fh,
+    uint8_t                                fh_len,
+    uint64_t                               fh_hash,
+    uint8_t                                klass,
+    uint8_t                                rev_used,
+    uint8_t                                bind_deny,
+    uint8_t                                exclusive,
+    uint64_t                               offset,
+    uint64_t                               length,
+    const struct chimera_claim_owner      *owner,
+    uint64_t                               prev_token,
+    void                                   ( *recall_cb )(void          *recall_arg,
+                                                          const uint8_t *fh,
+                                                          uint8_t        fh_len,
+                                                          uint64_t       fh_hash,
+                                                          uint64_t       token,
+                                                          uint8_t        retain),
+    void                                  *recall_arg,
+    chimera_vfs_lease_acquire_backend_cb_t callback,
+    void                                  *private_data);
+
+void
+chimera_vfs_lease_release_backend(
+    struct chimera_vfs_thread             *thread,
+    const uint8_t                         *fh,
+    uint8_t                                fh_len,
+    uint64_t                               fh_hash,
+    uint64_t                               token,
+    uint8_t                                retained,
+    chimera_vfs_lease_release_backend_cb_t callback,
+    void                                  *private_data);

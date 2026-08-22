@@ -97,6 +97,7 @@ chimera_vfs_implicit_finish_drain(
     if (removed) {
         chimera_vfs_claim_pump_pending(state, file);
         chimera_vfs_claim_pump_io(state, file);
+        chimera_vfs_claim_backend_reeval(state, file);
         chimera_vfs_state_put(state, file);
     }
 } /* chimera_vfs_implicit_finish_drain */
@@ -293,6 +294,31 @@ chimera_vfs_io_try(
     }
 
     if (result == CHIMERA_CLAIM_GRANTED) {
+        /* Backend cover gate (CAP_LEASE): the implicit claim's bits must be
+         * inside the node's aggregate token before the I/O proceeds.  Not
+         * covered: park (want recorded so the union in flight includes it)
+         * unless the backend already refused the bit -- then fail EACCES. */
+        if (state->lease_capable && !file->bl_disabled &&
+            (need & (uint8_t) ~file->bl_held_used)) {
+            if (file->bl_state == CHIMERA_VFS_BL_HELD &&
+                (file->bl_refused & need)) {
+                pthread_mutex_unlock(&file->lock);
+                request->io_lease_file = NULL;
+                if (request->io_owns_lease_ref) {
+                    chimera_vfs_state_put(state, file);
+                }
+                request->status = CHIMERA_VFS_EACCES;
+                request->complete(request);
+                return;
+            }
+            file->bl_want_used |= need;
+            chimera_vfs_io_park_locked(file, request);
+            request->io_lease_file = file;
+            pthread_mutex_unlock(&file->lock);
+            chimera_vfs_claim_backend_reeval(state, file);
+            return;
+        }
+
         if (!was_active) {
             file->implicit_claim = probe;
             chimera_vfs_claim_link_locked(file, &file->implicit_claim);
@@ -304,6 +330,8 @@ chimera_vfs_io_try(
         }
         file->implicit_inflight++;
         file->implicit_last_used = chimera_vfs_now_ticks();
+        file->bl_want_used      &= (uint8_t) ~need;
+        file->bl_last_used       = chimera_vfs_now_ticks();
         pthread_mutex_unlock(&file->lock);
 
         if (activated) {
@@ -647,7 +675,8 @@ chimera_vfs_state_reap_idle(
                  file && n < CHIMERA_VFS_CLAIM_REAP_BATCH;
                  file = file->bucket_next) {
                 if (file->implicit_active || file->io_wait_head ||
-                    file->claims[CHIMERA_CLAIM_CLASS_CACHE]) {
+                    file->claims[CHIMERA_CLAIM_CLASS_CACHE] ||
+                    file->bl_state != CHIMERA_VFS_BL_NONE) {
                     file->refcount++;
                     cand[n++] = file;
                 }
@@ -683,6 +712,19 @@ chimera_vfs_state_reap_idle(
                 chimera_vfs_implicit_finish_drain(state, file);
             } else if (has_waiters) {
                 chimera_vfs_claim_pump_io(state, file);
+            }
+
+            /* An idle backend cover is released lazily: post the file so
+             * the service step re-derives the union and drops an empty,
+             * idle token (escalate-or-reuse keeps a live one). */
+            pthread_mutex_lock(&file->lock);
+            if (file->bl_state == CHIMERA_VFS_BL_HELD &&
+                chimera_vfs_claim_elapsed_ms(file->bl_last_used, now) >=
+                idle_ms) {
+                pthread_mutex_unlock(&file->lock);
+                chimera_vfs_claim_backend_reeval(state, file);
+            } else {
+                pthread_mutex_unlock(&file->lock);
             }
 
             chimera_vfs_state_put(state, file);

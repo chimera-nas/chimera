@@ -1,0 +1,59 @@
+// SPDX-FileCopyrightText: 2026 Chimera-NAS Project Contributors
+//
+// SPDX-License-Identifier: LGPL-2.1-only
+
+#include "vfs/vfs_procs.h"
+#include "vfs_internal.h"
+#include "common/macros.h"
+
+/* Backend lease release/downgrade.  For an AGGREGATE token under recall the
+ * release with the retained mask IS the recall acknowledgment. */
+
+static void
+chimera_vfs_lease_release_backend_complete(struct chimera_vfs_request *request)
+{
+    chimera_vfs_lease_release_backend_cb_t callback = request->proto_callback;
+
+    chimera_vfs_complete(request);
+
+    if (callback) {
+        callback(request->status, request->proto_private_data);
+    }
+
+    chimera_vfs_request_free(request->thread, request);
+} /* chimera_vfs_lease_release_backend_complete */
+
+SYMBOL_EXPORT void
+chimera_vfs_lease_release_backend(
+    struct chimera_vfs_thread             *thread,
+    const uint8_t                         *fh,
+    uint8_t                                fh_len,
+    uint64_t                               fh_hash,
+    uint64_t                               token,
+    uint8_t                                retained,
+    chimera_vfs_lease_release_backend_cb_t callback,
+    void                                  *private_data)
+{
+    struct chimera_vfs_module  *module = chimera_vfs_get_module(thread, fh, fh_len);
+    struct chimera_vfs_request *request;
+
+    request = chimera_vfs_request_alloc_common(thread, NULL, module,
+                                               fh, fh_len, fh_hash,
+                                               CHIMERA_VFS_CAP_LEASE);
+
+    if (CHIMERA_VFS_IS_ERR(request)) {
+        if (callback) {
+            callback(CHIMERA_VFS_PTR_ERR(request), private_data);
+        }
+        return;
+    }
+
+    request->opcode                 = CHIMERA_VFS_OP_LEASE_RELEASE;
+    request->complete               = chimera_vfs_lease_release_backend_complete;
+    request->lease_release.token    = token;
+    request->lease_release.retained = retained;
+    request->proto_callback         = callback;
+    request->proto_private_data     = private_data;
+
+    chimera_vfs_dispatch(request);
+} /* chimera_vfs_lease_release_backend */
