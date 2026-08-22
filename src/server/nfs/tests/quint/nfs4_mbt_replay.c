@@ -2905,7 +2905,13 @@ run_compound(
         check_result(o, json_array_get(results, i),
                      i < (size_t) nops ? json_array_get(ops, i) : NULL,
                      &rep.res[i], &ctx, m);
-        if (ctx.abort || o->skip) {
+        /* A capability mismatch (o->skip) abandons the trace, but keep
+         * consuming this compound's remaining results so their filehandles and
+         * stateids are still learned -- the teardown sweep needs the GETFH of
+         * an OPEN that skipped on a missing delegation to close that (validly
+         * opened) file.  run_trace honours o->skip before any mismatch, so the
+         * comparisons below are ignored.  A hard abort still stops. */
+        if (ctx.abort) {
             break;
         }
     }
@@ -3041,6 +3047,205 @@ report_divergence(
     }
 } /* report_divergence */
 
+/* ---- teardown: replay the closes a trace left implicit ------------------- */
+
+/* Send one already-encoded compound and wait for the reply; the teardown is
+ * best-effort (the fs is about to be torn down), so the result is ignored. */
+static void
+v4_send_raw(
+    struct oracle         *o,
+    struct evpl_rpc2_conn *conn,
+    struct nfs_argop4     *argarray,
+    int                    nops)
+{
+    struct v4_reply      rep  = { 0 };
+    struct v4_call_ctx   cctx = { .o = o, .rep = &rep };
+    struct COMPOUND4args args = { 0 };
+
+    args.tag.data     = "teardown";
+    args.tag.len      = 8;
+    args.minorversion = (uint32_t) o->minor;
+    args.argarray     = argarray;
+    args.num_argarray = (uint32_t) nops;
+
+    o->arena_used = 0;
+    o->env->nfs_v4.send_call_NFSPROC4_COMPOUND(&o->env->nfs_v4.rpc2,
+                                               o->env->evpl, conn,
+                                               &o->env->cred, &args,
+                                               0, 0, NULL, 0, 0,
+                                               v4_compound_cb, &cctx);
+    while (!rep.done) {
+        evpl_continue(o->env->evpl);
+    }
+} /* v4_send_raw */
+
+/* Locate the sdb map field of a state (its key may be module-qualified). */
+static json_t *
+v4_sdb_field(
+    json_t     *sdb,
+    const char *name)
+{
+    return json_object_get(json_object_get(sdb, name), "#map");
+} /* v4_sdb_field */
+
+/* A trace can stop with opens still live.  Upstream's rmfs -- and the umount
+ * that precedes it -- refuse a filesystem whose VFS handles are still
+ * referenced, and the server is RFC 8881 §18.50.3 strict: DESTROY_CLIENTID
+ * returns NFS4ERR_CLIENTID_BUSY while a clientid holds any leased state.  So,
+ * exactly as a real client does before it tears its mount down, replay the
+ * closes the trace left implicit: for every open still live in the final model
+ * state, PUTFH its file and CLOSE it.  4.1+ wraps each batch in a SEQUENCE on
+ * an otherwise-unused slot (seq 1), which needs no slot-sequence bookkeeping;
+ * 4.0 carries the open-owner's next seqid.  Once the opens are gone the
+ * filesystem is unreferenced and the recycle (and, for a real client,
+ * DESTROY_CLIENTID) succeeds.  Locks ride on their open and go with it; the
+ * memfs corpus grants no delegations. */
+static void
+v4_close_dangling_opens(
+    struct oracle *o,
+    json_t        *final_state)
+{
+    json_t     *sdb = NULL;
+    json_t     *opens;
+    json_t     *oo40;
+    const char *k;
+    json_t     *v;
+    int         client;
+    uint32_t    oseq_next[V4_MAX_SIDS];   /* 4.0 open-owner -> next seqid */
+    int         oi;
+
+    json_object_foreach(final_state, k, v)
+    {
+        const char *base = strrchr(k, ':');
+
+        if (strcmp(base ? base + 1 : k, "sdb") == 0) {
+            sdb = v;
+            break;
+        }
+    }
+    if (!sdb) {
+        return;
+    }
+    opens = v4_sdb_field(sdb, "opens");
+    if (!opens || json_array_size(opens) == 0) {
+        return;
+    }
+    json_t *sessions = v4_sdb_field(sdb, "sessions");
+
+    oo40 = v4_sdb_field(sdb, "oo40");   /* 4.0 open-owner seqids; seeded per client */
+    (void) oi;
+
+    for (client = 0; client < V4_MAX_CLIENTS; client++) {
+        struct nfs_argop4 arg[V4_MAX_OPS];
+        int               n    = 0;
+        int               sess = -1;
+        size_t            i;
+        json_t           *pair;
+
+        if (!o->clientid_known[client]) {
+            continue;
+        }
+        if (o->minor >= 1) {
+            /* Use the client's *live* session from the final state -- the trace
+             * may have churned sessions, and the oracle keeps destroyed ones
+             * mapped (a stale one would make SEQUENCE fail NFS4ERR_BADSESSION). */
+            size_t  si;
+            json_t *spair;
+
+            sess = -1;
+            json_array_foreach(sessions, si, spair)
+            {
+                if (jf_i64(json_array_get(spair, 1), "client") == client) {
+                    sess = (int) itf_i64(json_array_get(spair, 0));
+                    break;
+                }
+            }
+            if (sess < 0 || sess >= V4_MAX_SESS || !o->sess_known[sess]) {
+                continue;   /* no live session to carry the compound */
+            }
+        } else {
+            /* Seed this client's open-owner seqids: oo40's key is the
+             * (client, owner) tuple and its record carries the last seqid. */
+            size_t  oi2;
+            json_t *op40;
+
+            for (oi = 0; oi < V4_MAX_SIDS; oi++) {
+                oseq_next[oi] = 1;
+            }
+            json_array_foreach(oo40, oi2, op40)
+            {
+                json_t *tup = json_object_get(json_array_get(op40, 0), "#tup");
+                int64_t oc, ow;
+
+                if (!tup) {
+                    continue;
+                }
+                oc = itf_i64(json_array_get(tup, 0));
+                ow = itf_i64(json_array_get(tup, 1));
+                if (oc == client && ow >= 0 && ow < V4_MAX_SIDS) {
+                    oseq_next[ow] = (uint32_t)
+                        (jf_i64(json_array_get(op40, 1), "seqid") + 1);
+                }
+            }
+        }
+
+        json_array_foreach(opens, i, pair)
+        {
+            json_t              *rec = json_array_get(pair, 1);
+            int64_t              sid = itf_i64(json_array_get(pair, 0));
+            int64_t              file;
+            int64_t              seq;
+            int64_t              owner;
+            const struct mbt_fh *fh;
+            uint8_t              other[12];
+            struct mism          m = { 0 };
+
+            if (jf_i64(rec, "client") != client) {
+                continue;
+            }
+            file  = jf_i64(rec, "file");
+            seq   = jf_i64(rec, "seq");
+            owner = jf_i64(rec, "owner");
+            fh    = real_fh(o, file, &m);
+            if (!fh || sid_of(o, sid, other, &m) < 0) {
+                continue;
+            }
+
+            /* Flush and restart the batch (with a fresh SEQUENCE) if a
+             * PUTFH+CLOSE pair would overflow the compound op cap. */
+            if (n + 2 > V4_MAX_OPS) {
+                v4_send_raw(o, conn_for(o, client), arg, n);
+                n = 0;
+            }
+            if (o->minor >= 1 && n == 0) {
+                arg[n].argop = OP_SEQUENCE;
+                memcpy(arg[n].opsequence.sa_sessionid, o->sess[sess], 16);
+                arg[n].opsequence.sa_sequenceid     = 1;
+                arg[n].opsequence.sa_slotid         = 1;
+                arg[n].opsequence.sa_highest_slotid = 1;
+                arg[n].opsequence.sa_cachethis      = 0;
+                n++;
+            }
+
+            arg[n].argop               = OP_PUTFH;
+            arg[n].opputfh.object.data = (void *) fh->data;
+            arg[n].opputfh.object.len  = fh->len;
+            n++;
+
+            arg[n].argop         = OP_CLOSE;
+            arg[n].opclose.seqid = (o->minor >= 1 || owner < 0 ||
+                                    owner >= V4_MAX_SIDS)
+                ? 0 : oseq_next[owner]++;
+            set_stateid(&arg[n].opclose.open_stateid, (uint32_t) seq, other);
+            n++;
+        }
+
+        if (n > (o->minor >= 1 ? 1 : 0)) {
+            v4_send_raw(o, conn_for(o, client), arg, n);
+        }
+    }
+} /* v4_close_dangling_opens */
+
 static int
 run_trace(
     struct mbt_env *env,
@@ -3061,6 +3266,7 @@ run_trace(
     struct oracle *o;
     size_t         nstates;
     size_t         idx;
+    size_t         sweep_idx = 0;   /* state to close opens from (stop point) */
     int            minor;
     int            failed = 0;
     int            c;
@@ -3173,6 +3379,7 @@ run_trace(
         o->fh[0] = rep.res[2].fh;
     }
 
+    sweep_idx = nstates - 1;
     for (idx = 1; idx < nstates; idx++) {
         json_t *lab;
 
@@ -3200,12 +3407,14 @@ run_trace(
             printf("%s: SKIP (not applicable): capability mismatch "
                    "[%s]: %s\n", trace_path, o->skip_feature,
                    o->skip_detail);
-            failed = 77;
+            failed    = 77;
+            sweep_idx = idx;   /* replay stopped here; close from this state */
             goto out;
         }
         if (m.n) {
             report_divergence(trace_path, o, (int) idx, lab, &m);
-            failed = 1;
+            failed    = 1;
+            sweep_idx = idx;
             goto out;
         }
     }
@@ -3231,6 +3440,12 @@ run_trace(
     }
 
  out:
+    /* Replay the closes the trace left implicit (a bounded random walk can stop
+     * mid-open) so the filesystem is unreferenced when it is recycled; do it
+     * while the client connections are still up. */
+    if (states && nstates > 0) {
+        v4_close_dangling_opens(o, json_array_get(states, sweep_idx));
+    }
     for (c = 0; c < V4_MAX_CLIENTS; c++) {
         if (o->conns[c]) {
             evpl_rpc2_client_disconnect(env->rpc2_thread, o->conns[c]);

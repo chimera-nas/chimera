@@ -200,6 +200,12 @@ mbt_env_open_opts(
 
     env->metrics = prometheus_metrics_create(NULL, NULL, 0);
 
+    /* The VFS releases closed handles on an async sweep thread, so a filesystem
+     * stays busy for a window after the last close.  A fast sweep keeps the
+     * per-trace rmfs recycle from stalling once the client's opens are dropped;
+     * set before the server's threads start below. */
+    setenv("CHIMERA_CLOSE_SWEEP_INTERVAL_MS", "10", 0);
+
     config = chimera_server_config_init();
     chimera_server_config_set_state_dir(config, env->session_dir);
     chimera_server_config_set_tcp_flavor(config, CHIMERA_TCP_FLAVOR_INPROC);
@@ -301,10 +307,23 @@ mbt_env_fs_teardown(
     struct mbt_env *env,
     const char     *fsname)
 {
+    int tries = 0;
+
     chimera_server_remove_export(env->server, "/share");
     chimera_server_unmount(env->server, "share");
-    if (chimera_server_rmfs(env->server, "memfs", fsname) != 0) {
-        fprintf(stderr, "warning: rmfs %s failed\n", fsname);
+
+    /* nfs3 is stateless, so rmfs is free once the mount is gone.  nfs4 leaves
+     * the just-closed opens (v4_close_dangling_opens) draining on the server's
+     * async close thread, so the fs can stay busy for a short window; retry
+     * until it drains rather than leaking the filesystem (which would slow a
+     * long corpus quadratically).  5s ceiling, matching the SMB harness. */
+    while (chimera_server_rmfs(env->server, "memfs", fsname) != 0) {
+        if (++tries >= 5000) {
+            fprintf(stderr, "warning: rmfs %s still failed after %d retries\n",
+                    fsname, tries);
+            break;
+        }
+        usleep(1000);
     }
 } /* mbt_env_fs_teardown */
 
