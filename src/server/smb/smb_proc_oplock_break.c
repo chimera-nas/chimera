@@ -172,8 +172,8 @@ chimera_smb_lease_break_cb(
     /* Resolve the grant from the claim's own back-pointer: the core stamps
      * claim->grant under the file lock at allocation, so it is always valid
      * here. */
-    struct chimera_vfs_claim_grant *grant = claim->grant;
-    struct chimera_vfs_file_state  *file  = grant->file;
+    struct chimera_vfs_claim_grant   *grant = claim->grant;
+    struct chimera_vfs_file_state    *file  = grant->file;
 
     (void) private_data;
     struct chimera_smb_open_file     *open_file;
@@ -250,7 +250,7 @@ chimera_smb_lease_break_cb(
              * idempotent with the park it would otherwise do. */
             if (member->share_lease_inserted) {
                 /* Runs under file->lock (the member walk): the locked-context
-                 * park variant, which is exactly the old direct-flag store. */
+                * park variant, which is exactly the old direct-flag store. */
                 chimera_vfs_claim_park_locked(&member->share_lease, true);
             }
         }
@@ -619,11 +619,11 @@ chimera_smb_oplock_break(struct chimera_smb_request *request)
                 }
 
                 /* The acknowledged state may only DROP bits the break asked the
-                * holder to give up -- it must be a subset of the retained mask
-                * (break_needed_mode, carried in the NEW cache bits).  An ack that
-                * tries to keep a bit being broken (e.g. acking RWH to a W->RH
-                * break) is rejected with STATUS_REQUEST_NOT_ACCEPTED and the
-                * lease is left BREAKING. */
+                 * holder to give up -- it must be a subset of the retained mask
+                 * (break_needed_mode, carried in the NEW cache bits).  An ack that
+                 * tries to keep a bit being broken (e.g. acking RWH to a W->RH
+                 * break) is rejected with STATUS_REQUEST_NOT_ACCEPTED and the
+                 * lease is left BREAKING. */
                 if (kept_vfs & ~claim->break_needed_mode) {
                     chimera_smb_open_file_release(request, open_file);
                     chimera_smb_complete_request(request,

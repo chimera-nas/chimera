@@ -43,19 +43,19 @@ chimera_vfs_write_complete(struct chimera_vfs_request *request)
 
 static void
 chimera_vfs_write_dispatch(
-    struct chimera_vfs_thread            *thread,
-    const struct chimera_vfs_cred        *cred,
-    struct chimera_vfs_open_handle       *handle,
-    uint64_t                              offset,
-    uint32_t                              count,
-    uint32_t                              sync,
-    uint64_t                              pre_attr_mask,
-    uint64_t                              post_attr_mask,
-    struct evpl_iovec                    *iov,
-    int                                   niov,
-    const struct chimera_claim_actor     *io_owner,
-    chimera_vfs_write_callback_t          callback,
-    void                                 *private_data)
+    struct chimera_vfs_thread        *thread,
+    const struct chimera_vfs_cred    *cred,
+    struct chimera_vfs_open_handle   *handle,
+    uint64_t                          offset,
+    uint32_t                          count,
+    uint32_t                          sync,
+    uint64_t                          pre_attr_mask,
+    uint64_t                          post_attr_mask,
+    struct evpl_iovec                *iov,
+    int                               niov,
+    const struct chimera_claim_actor *io_owner,
+    chimera_vfs_write_callback_t      callback,
+    void                             *private_data)
 {
     struct chimera_vfs_request *request;
 
@@ -158,19 +158,19 @@ chimera_vfs_write_gate_complete(
 
 SYMBOL_EXPORT void
 chimera_vfs_write_owned(
-    struct chimera_vfs_thread            *thread,
-    const struct chimera_vfs_cred        *cred,
-    struct chimera_vfs_open_handle       *handle,
-    uint64_t                              offset,
-    uint32_t                              count,
-    uint32_t                              sync,
-    uint64_t                              pre_attr_mask,
-    uint64_t                              post_attr_mask,
-    struct evpl_iovec                    *iov,
-    int                                   niov,
-    const struct chimera_claim_actor     *io_owner,
-    chimera_vfs_write_callback_t          callback,
-    void                                 *private_data)
+    struct chimera_vfs_thread        *thread,
+    const struct chimera_vfs_cred    *cred,
+    struct chimera_vfs_open_handle   *handle,
+    uint64_t                          offset,
+    uint32_t                          count,
+    uint32_t                          sync,
+    uint64_t                          pre_attr_mask,
+    uint64_t                          post_attr_mask,
+    struct evpl_iovec                *iov,
+    int                               niov,
+    const struct chimera_claim_actor *io_owner,
+    chimera_vfs_write_callback_t      callback,
+    void                             *private_data)
 {
     struct chimera_vfs_write_gate *gate;
 

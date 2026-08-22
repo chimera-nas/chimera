@@ -843,7 +843,7 @@ chimera_smb_durable_drain_all(struct chimera_server_smb_thread *thread)
         if (open_file->grant) {
             chimera_smb_grant_remove_member(open_file->grant, open_file);
             chimera_vfs_claim_grant_release(vfs_state, open_file->grant,
-                                              false /*pump*/);
+                                            false /*pump*/);
             open_file->grant                  = NULL;
             open_file->caching_lease_inserted = false;
         }

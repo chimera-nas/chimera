@@ -621,10 +621,13 @@ cairn_data_iterator(struct cairn_thread *thread)
 static inline int
 cairn_dirent_scan(
     struct cairn_thread *thread,
-    uint64_t inum,
-    uint64_t start_hash,
-    int ( *callback )(struct cairn_dirent_key *key, struct cairn_dirent_value *dirent, void *private_data),
-    void *private_data)
+    uint64_t             inum,
+    uint64_t             start_hash,
+    int               ( *callback )(
+        struct cairn_dirent_key   *key,
+        struct cairn_dirent_value *dirent,
+        void                      *private_data),
+    void                *private_data)
 {
     rocksdb_iterator_t        *iter;
     struct cairn_dirent_key    start_key, *dirent_key;

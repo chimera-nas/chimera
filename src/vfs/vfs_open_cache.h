@@ -545,8 +545,9 @@ chimera_vfs_open_cache_acquire(
     uint64_t                    vfs_private_data,
     unsigned int                open_flags,
     int                         exclusive,
-    void (                     *callback )(struct chimera_vfs_request     *request,
-                                           struct chimera_vfs_open_handle *handle))
+    void                     ( *callback )(
+        struct chimera_vfs_request     *request,
+        struct chimera_vfs_open_handle *handle))
 {
     struct vfs_open_cache_shard    *shard;
     struct chimera_vfs_open_handle *handle, *existing;
@@ -671,8 +672,9 @@ chimera_vfs_open_cache_insert(
     uint64_t                    fh_hash,
     uint64_t                    vfs_private_data,
     unsigned int                open_flags,
-    void (                     *callback )(struct chimera_vfs_request     *request,
-                                           struct chimera_vfs_open_handle *handle))
+    void                     ( *callback )(
+        struct chimera_vfs_request     *request,
+        struct chimera_vfs_open_handle *handle))
 {
     struct vfs_open_cache_shard    *shard;
     struct chimera_vfs_open_handle *handle, *existing;

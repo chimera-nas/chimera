@@ -54,19 +54,19 @@ struct chimera_vfs_state;
  * data-access bits (R/W): an SMB R-lease survives a foreign W-open until the
  * first actual write, while an NFSv4 R-delegation (which carries real I/O
  * rights) is recalled at open admission -- inexpressible with one R bit. */
-#define CHIMERA_CLAIM_R    0x01u  /* read file data through the server      */
-#define CHIMERA_CLAIM_W    0x02u  /* write file data through the server     */
-#define CHIMERA_CLAIM_D    0x04u  /* delete/rename the name (SMB share dim) */
-#define CHIMERA_CLAIM_CR   0x08u  /* cache reads (serve reads locally)      */
-#define CHIMERA_CLAIM_CW   0x10u  /* cache writes (absorb writes locally)   */
-#define CHIMERA_CLAIM_H    0x20u  /* retain handle across close             */
-#define CHIMERA_CLAIM_LR   0x40u  /* hold a shared byte-range lock          */
-#define CHIMERA_CLAIM_LW   0x80u  /* hold an exclusive byte-range lock      */
+#define CHIMERA_CLAIM_R              0x01u /* read file data through the server      */
+#define CHIMERA_CLAIM_W              0x02u /* write file data through the server     */
+#define CHIMERA_CLAIM_D              0x04u /* delete/rename the name (SMB share dim) */
+#define CHIMERA_CLAIM_CR             0x08u /* cache reads (serve reads locally)      */
+#define CHIMERA_CLAIM_CW             0x10u /* cache writes (absorb writes locally)   */
+#define CHIMERA_CLAIM_H              0x20u /* retain handle across close             */
+#define CHIMERA_CLAIM_LR             0x40u /* hold a shared byte-range lock          */
+#define CHIMERA_CLAIM_LW             0x80u /* hold an exclusive byte-range lock      */
 
-#define CHIMERA_CLAIM_CACHE_BITS (CHIMERA_CLAIM_CR | CHIMERA_CLAIM_CW | \
-                                  CHIMERA_CLAIM_H)
-#define CHIMERA_CLAIM_LOCK_BITS  (CHIMERA_CLAIM_LR | CHIMERA_CLAIM_LW)
-#define CHIMERA_CLAIM_DATA_BITS  (CHIMERA_CLAIM_R | CHIMERA_CLAIM_W)
+#define CHIMERA_CLAIM_CACHE_BITS     (CHIMERA_CLAIM_CR | CHIMERA_CLAIM_CW | \
+                                      CHIMERA_CLAIM_H)
+#define CHIMERA_CLAIM_LOCK_BITS      (CHIMERA_CLAIM_LR | CHIMERA_CLAIM_LW)
+#define CHIMERA_CLAIM_DATA_BITS      (CHIMERA_CLAIM_R | CHIMERA_CLAIM_W)
 
 /* -------------------------------------------------------------------- */
 /* Protocols and owner identity                                         */
@@ -196,12 +196,12 @@ enum chimera_claim_break_state {
 };
 
 /* When policy drops the claim's advertised mode during a break:
- *   AT_BEGIN -- at break-begin, under file->lock, atomically with
- *     {break_state, ack_required} (SMB: a mid-break holder scores at its
- *     retained target so a coexisting acquirer proceeds immediately).
- *   NEVER -- advertised holds until release/revoke (NFSv4 delegations: a
- *     conflicting OPEN keeps getting BREAKING -> NFS4ERR_DELAY until
- *     DELEGRETURN).  This policy choice IS the R11 guarantee. */
+*   AT_BEGIN -- at break-begin, under file->lock, atomically with
+*     {break_state, ack_required} (SMB: a mid-break holder scores at its
+*     retained target so a coexisting acquirer proceeds immediately).
+*   NEVER -- advertised holds until release/revoke (NFSv4 delegations: a
+*     conflicting OPEN keeps getting BREAKING -> NFS4ERR_DELAY until
+*     DELEGRETURN).  This policy choice IS the R11 guarantee. */
 enum chimera_claim_advertise_drop {
     CHIMERA_CLAIM_ADVERTISE_AT_BEGIN = 0,
     CHIMERA_CLAIM_ADVERTISE_NEVER    = 1,
@@ -235,22 +235,22 @@ typedef void (*chimera_vfs_claim_revoked_cb_t)(
 /* -------------------------------------------------------------------- */
 
 struct chimera_vfs_claim {
-    enum chimera_claim_construct    construct;
-    enum chimera_claim_class        klass;
+    enum chimera_claim_construct construct;
+    enum chimera_claim_class klass;
 
     uint8_t                         used;       /* raw granted mode         */
     uint8_t                         advertised; /* what admission sees; see
-                                                   chimera_claim_advertise_drop */
+                                                 * chimera_claim_advertise_drop */
     uint8_t                         denied;     /* ACCESS only: explicit
-                                                   share-deny bits (R/W/D)  */
+                                                 * share-deny bits (R/W/D)  */
 
     uint64_t                        offset;     /* RANGE only; others 0     */
     uint64_t                        length;     /* UINT64_MAX = to-EOF,
-                                                   0 = genuine zero-byte    */
+                                                 * 0 = genuine zero-byte    */
 
     struct chimera_claim_owner      owner;
     struct chimera_vfs_open_handle *op_handle;  /* HOLDER-circle anchor for
-                                                   own-handle self-ops      */
+                                                 *  own-handle self-ops      */
 
     /* Holder-lite: the same open's cache grant, when this ACCESS claim's
      * open also holds one.  Replaces the old own_lease_key / cb_private
@@ -305,11 +305,11 @@ struct chimera_vfs_claim_grant {
     struct chimera_vfs_file_state  *file;
     uint32_t                        refcount;   /* members + transient pins */
     uint32_t                        epoch;      /* v2 leases; one bump per
-                                                   break EVENT (R37)        */
+                                                 * break EVENT (R37)        */
     uint8_t                         is_v2;
     uint8_t                         break_ack_required; /* published under
-                                                   file->lock atomically
-                                                   with break_state (R38)   */
+                                                         * file->lock atomically
+                                                         * with break_state (R38)   */
     /* Protocol member list -- opaque to the core; manipulated under
      * file->lock (the SMB open_file holder chain). */
     void                           *members;
@@ -331,14 +331,14 @@ enum chimera_vfs_claim_result {
  * used & (W|CW|LW) -- a write delegation must report WRITE_LT though it
  * holds no LW.  Whole-file conflicts report offset 0, length UINT64_MAX. */
 struct chimera_vfs_claim_conflict {
-    struct chimera_claim_owner   owner;
+    struct chimera_claim_owner owner;
     enum chimera_claim_construct construct;
-    uint8_t                      used;
-    uint8_t                      breaking;   /* holder is mid-break         */
-    uint8_t                      revocable;  /* holder could be recalled    */
-    uint64_t                     offset;
-    uint64_t                     length;
-    uint64_t                     policy_tag; /* node-local consumer stamp   */
+    uint8_t                    used;
+    uint8_t                    breaking;     /* holder is mid-break         */
+    uint8_t                    revocable;    /* holder could be recalled    */
+    uint64_t                   offset;
+    uint64_t                   length;
+    uint64_t                   policy_tag;   /* node-local consumer stamp   */
 };
 
 typedef void (*chimera_vfs_claim_acquire_cb_t)(

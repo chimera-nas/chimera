@@ -272,13 +272,13 @@ chimera_smb_read(struct chimera_smb_request *request)
                                        request->channel_sequence, 0);
 
     struct chimera_claim_actor io_owner = {
-        .owner     = {
+        .owner          = {
             .proto      = CHIMERA_CLAIM_PROTO_SMB2,
             .client_key = request->session_handle->session->client_key,
             .owner_lo   = request->read.open_file->file_id.pid,
             .owner_hi   = request->read.open_file->file_id.vid,
         },
-        .op_handle = request->read.open_file->handle,
+        .op_handle      = request->read.open_file->handle,
     };
 
     /* Carry the open's grant LeaseKey (when it holds one) so the actor

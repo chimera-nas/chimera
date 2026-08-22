@@ -141,13 +141,13 @@ chimera_smb_rdma_read_callback(
         }
 
         struct chimera_claim_actor io_owner = {
-            .owner     = {
+            .owner          = {
                 .proto      = CHIMERA_CLAIM_PROTO_SMB2,
                 .client_key = request->session_handle->session->client_key,
                 .owner_lo   = request->write.open_file->file_id.pid,
                 .owner_hi   = request->write.open_file->file_id.vid,
             },
-            .op_handle = request->write.open_file->handle,
+            .op_handle      = request->write.open_file->handle,
         };
 
         if (request->write.open_file->grant) {

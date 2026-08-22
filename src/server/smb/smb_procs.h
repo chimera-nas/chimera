@@ -203,12 +203,14 @@ void chimera_smb_set_info(
  * for the duration; `done` is invoked with the resulting NTSTATUS. */
 void chimera_smb_ea_apply(
     struct chimera_server_smb_thread *thread,
-    const struct chimera_vfs_cred *cred,
-    struct chimera_vfs_open_handle *handle,
-    const uint8_t *ea_buf,
-    uint32_t ea_buf_len,
-    void ( *done )(uint32_t status, void *arg),
-    void *arg);
+    const struct chimera_vfs_cred    *cred,
+    struct chimera_vfs_open_handle   *handle,
+    const uint8_t                    *ea_buf,
+    uint32_t                          ea_buf_len,
+    void                           ( *done )(
+        uint32_t status,
+        void    *arg),
+    void                             *arg);
 
 void chimera_smb_set_security(
     struct chimera_smb_request *request);

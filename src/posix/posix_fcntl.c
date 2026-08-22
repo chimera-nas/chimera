@@ -300,12 +300,12 @@ chimera_posix_fcntl(
     }
 
     if (local_arbiter && cmd == F_GETLK) {
-        struct chimera_vfs_state          *vstate = posix->client->vfs->vfs_state;
-        struct chimera_vfs_file_state     *file;
-        struct chimera_vfs_claim           probe;
-        struct chimera_vfs_claim_conflict  conf;
-        struct chimera_claim_owner         owner;
-        enum chimera_vfs_claim_result      result;
+        struct chimera_vfs_state         *vstate = posix->client->vfs->vfs_state;
+        struct chimera_vfs_file_state    *file;
+        struct chimera_vfs_claim          probe;
+        struct chimera_vfs_claim_conflict conf;
+        struct chimera_claim_owner        owner;
+        enum chimera_vfs_claim_result     result;
 
         chimera_posix_lock_owner_init(&owner);
         chimera_vfs_claim_init_range(&probe,

@@ -24,13 +24,13 @@ chimera_smb_break_caching_for_namespace(
     struct chimera_vfs_state       *vfs_state = vfs_thread->vfs->vfs_state;
     struct chimera_vfs_open_handle *oh        = open_file->handle;
     struct chimera_claim_actor      actor     = {
-        .owner     = {
+        .owner          = {
             .proto      = CHIMERA_CLAIM_PROTO_SMB2,
             .client_key = request->session_handle->session->client_key,
             .owner_lo   = open_file->file_id.pid,
             .owner_hi   = open_file->file_id.vid,
         },
-        .op_handle = open_file->handle,
+        .op_handle      = open_file->handle,
     };
 
     if (!oh) {

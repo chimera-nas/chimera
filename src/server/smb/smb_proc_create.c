@@ -716,13 +716,13 @@ chimera_smb_create_break_for_open(
         truncates;
     struct chimera_vfs_state  *vfs_state = thread->vfs_thread->vfs->vfs_state;
     struct chimera_claim_actor actor     = {
-        .owner     = {
+        .owner          = {
             .proto      = CHIMERA_CLAIM_PROTO_SMB2,
             .client_key = request->session_handle->session->client_key,
             .owner_lo   = open_file->file_id.pid,
             .owner_hi   = open_file->file_id.vid,
         },
-        .op_handle = oh,
+        .op_handle      = oh,
     };
 
     if (!break_trigger) {
@@ -1544,26 +1544,28 @@ chimera_smb_create_after_share(
                      * derived from the used bits, so the constructor is re-run on
                      * every mode change. */
                     #define CHIMERA_SMB_CREATE_TMPL_INIT(mode)                      \
-                        do {                                                        \
-                            if (is_directory) {                                     \
-                                chimera_vfs_claim_init_dir_lease(&tmpl, (mode),     \
-                                                                 &owner);           \
-                            } else if (via_rqls) {                                  \
-                                chimera_vfs_claim_init_rqls(&tmpl, (mode), &owner); \
-                            } else {                                                \
-                                chimera_vfs_claim_init_oplock(&tmpl, (mode),        \
-                                                              &owner);              \
-                            }                                                       \
-                            /* The break cb resolves the grant from claim->grant   \
-                             * and picks a live member to deliver the OPLOCK_BREAK \
-                             * on.  Anchor to THIS open's VFS handle so a setattr  \
-                             * through the same handle does not recall the lease   \
-                             * against itself. */                                   \
-                            tmpl.break_cb   = chimera_smb_lease_break_cb;           \
-                            tmpl.op_handle  = oh;                                   \
-                            tmpl.cb_private = NULL;                                 \
-                            tmpl.policy_tag = open_file->file_id.pid;               \
-                        } while (0)
+                            do {                                                        \
+                                if (is_directory) {                                     \
+                                    chimera_vfs_claim_init_dir_lease(&tmpl, (mode),     \
+                                                                     &owner);           \
+                                } \
+                                else if (via_rqls) {                                  \
+                                    chimera_vfs_claim_init_rqls(&tmpl, (mode), &owner); \
+                                } else {                                                \
+                                    chimera_vfs_claim_init_oplock(&tmpl, (mode),        \
+                                                                  &owner);              \
+                                }                                                       \
+                                /* The break cb resolves the grant from claim->grant \
+                                 * and picks a live member to deliver the OPLOCK_BREAK \
+                                 * on.  Anchor to THIS open's VFS handle so a setattr \
+                                 * through the same handle does not recall the lease \
+                                 * against itself. */                               \
+                                tmpl.break_cb   = chimera_smb_lease_break_cb;           \
+                                tmpl.op_handle  = oh;                                   \
+                                tmpl.cb_private = NULL;                                 \
+                                tmpl.policy_tag = open_file->file_id.pid;               \
+                            } \
+                            while (0)
 
                     CHIMERA_SMB_CREATE_TMPL_INIT(want_used);
 
@@ -1598,10 +1600,19 @@ chimera_smb_create_after_share(
 
                     CHIMERA_SMB_CREATE_TMPL_INIT(want_used);
 
+                    /* Seed the fresh grant's member head under the core's
+                     * insert so a break can never observe a memberless
+                     * grant (the old pre-registered-member discipline).
+                     * The seed must be walk-ready: no stale next link. */
+                    open_file->grant_member_next = NULL;
+
+                    bool member_seeded = false;
+
                     memset(&conflict, 0, sizeof(conflict));
                     result = chimera_vfs_claim_grant_acquire(
                         vfs_state, file_state, &tmpl, 0 /* upgrade_ok */,
                         grant_is_v2, CHIMERA_CLAIM_GRANT_EXACT,
+                        open_file, &member_seeded,
                         &grant, &conflict);
                     while (result != CHIMERA_CLAIM_GRANTED &&
                            settle_guard-- > 0) {
@@ -1624,18 +1635,18 @@ chimera_smb_create_after_share(
                         result = chimera_vfs_claim_grant_acquire(
                             vfs_state, file_state, &tmpl, 0 /* upgrade_ok */,
                             grant_is_v2, CHIMERA_CLAIM_GRANT_EXACT,
+                            open_file, &member_seeded,
                             &grant, &conflict);
                     }
                     #undef CHIMERA_SMB_CREATE_TMPL_INIT
 
                     if (result == CHIMERA_CLAIM_GRANTED && grant) {
-                        /* CLAIMTODO: the member is registered only after
-                         * grant_acquire returns (the core allocates the grant),
-                         * so a conflicting acquirer could observe a memberless
-                         * grant in that window; the old code pre-registered the
-                         * member before try_insert.  Assumed the core tolerates
-                         * a memberless mid-insert grant. */
-                        chimera_smb_grant_add_member(grant, open_file);
+                        /* A fresh grant consumed the member seed inside the
+                         * core's insert; a coalesce hit or racing-create
+                         * collapse returns an existing grant we join here. */
+                        if (!member_seeded) {
+                            chimera_smb_grant_add_member(grant, open_file);
+                        }
                         /* The grant owns the epoch so coalesced opens and breaks
                          * share one counter; a v2 lease is granted at the
                          * client's epoch + 1 (1 for a brand-new lease,

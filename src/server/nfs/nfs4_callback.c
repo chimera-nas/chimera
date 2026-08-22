@@ -775,13 +775,15 @@ nfs4_cb_layoutrecall_complete(
 bool
 nfs4_cb_layoutrecall(
     struct chimera_server_nfs_thread *thread,
-    struct nfs_client *client,
-    const uint8_t *fh,
-    uint32_t fh_len,
-    uint16_t export_id,
-    const struct stateid4 *layout_stateid,
-    void ( *done )(int cb_status, void *arg),
-    void *arg)
+    struct nfs_client                *client,
+    const uint8_t                    *fh,
+    uint32_t                          fh_len,
+    uint16_t                          export_id,
+    const struct stateid4            *layout_stateid,
+    void                           ( *done )(
+        int   cb_status,
+        void *arg),
+    void                             *arg)
 {
     struct nfs4_cb_client           *chan = client->cb_path.cb_client;
     struct evpl_rpc2_conn           *conn = chan ? nfs4_cb_chan_conn(chan) : NULL;

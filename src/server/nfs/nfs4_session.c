@@ -23,8 +23,9 @@
  * thread/shared are not set up (e.g. in the unit test). */
 static inline void
 nfs4_replay_metric_inc(
-    struct nfs_request *req,
-    struct prometheus_counter_instance *(*field)(struct nfs4_replay_metrics *))
+    struct nfs_request                   *req,
+    struct prometheus_counter_instance *(*field)(
+        struct nfs4_replay_metrics *))
 {
     struct nfs4_replay_metrics         *rm;
     struct prometheus_counter_instance *inst;

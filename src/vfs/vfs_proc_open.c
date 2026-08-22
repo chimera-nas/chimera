@@ -120,7 +120,7 @@ chimera_vfs_open_root_complete(
 
 #define CHIMERA_VFS_OPEN_HOPS_SHIFT 24
 #define CHIMERA_VFS_OPEN_HOPS_MASK  (0xffu << CHIMERA_VFS_OPEN_HOPS_SHIFT)
-#define CHIMERA_VFS_OPEN_HOPS(f) (((f)&CHIMERA_VFS_OPEN_HOPS_MASK) >> \
+#define CHIMERA_VFS_OPEN_HOPS(f) (((f) & CHIMERA_VFS_OPEN_HOPS_MASK) >> \
                                   CHIMERA_VFS_OPEN_HOPS_SHIFT)
 #define CHIMERA_VFS_OPEN_SYMLOOP    8
 

@@ -752,7 +752,9 @@ test_nfs4_v40_conn_cache(void)
     struct nfs4_v40_drc drc;
     /* Stand-ins for two connections.  The cache treats a conn as an opaque
      * identity and never dereferences it, so any two distinct addresses do. */
-    int                 conn_a,conn_b;
+    /* Initialized only to satisfy -Wuninitialized-const-pointer: the values
+     * are never read, the addresses are the identities. */
+    int                 conn_a = 0,conn_b = 0;
     uint8_t             reply[64];
     uint32_t            reply_len;
     uint8_t            *out;

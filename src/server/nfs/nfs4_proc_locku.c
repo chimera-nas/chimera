@@ -154,7 +154,7 @@ chimera_nfs4_locku(
             uint64_t                       e_end   =
                 (hits->claim.offset + hits->claim.length < hits->claim.offset)
                 ? UINT64_MAX : hits->claim.offset + hits->claim.length;
-            bool                           exclusive  =
+            bool                           exclusive =
                 (hits->claim.used & CHIMERA_CLAIM_LW) != 0;
             struct chimera_claim_owner     owner      = hits->claim.owner;
             void                          *cb_private = hits->claim.cb_private;

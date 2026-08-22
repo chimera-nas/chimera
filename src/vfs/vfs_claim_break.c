@@ -22,7 +22,7 @@
 /* -------------------------------------------------------------------- */
 
 /* Only an SMB2 RqLs FILE lease cascades one bit per ack; oplocks, dir
- * leases, delegations, and the implicit claim break one-shot (R35). */
+* leases, delegations, and the implicit claim break one-shot (R35). */
 static inline bool
 chimera_vfs_claim_cascades(const struct chimera_vfs_claim *claim)
 {
@@ -207,13 +207,13 @@ chimera_vfs_claim_revoke(struct chimera_vfs_claim *claim)
         pthread_mutex_lock(&file->lock);
     }
 
-    newly_revoked     = (claim->break_state != CHIMERA_CLAIM_BREAK_REVOKED);
-    claim->used       = 0;
-    claim->advertised = 0;
-    claim->denied     = 0;
+    newly_revoked      = (claim->break_state != CHIMERA_CLAIM_BREAK_REVOKED);
+    claim->used        = 0;
+    claim->advertised  = 0;
+    claim->denied      = 0;
     claim->break_state = CHIMERA_CLAIM_BREAK_REVOKED;
-    revoked_cb  = claim->revoked_cb;
-    cb_private  = claim->cb_private;
+    revoked_cb         = claim->revoked_cb;
+    cb_private         = claim->cb_private;
 
     if (file) {
         pthread_mutex_unlock(&file->lock);
@@ -398,9 +398,9 @@ chimera_vfs_claim_revoke_breaks(
 
 /* One trigger row, resolved per (trigger, victim, actor). */
 struct chimera_claim_trigger_row {
-    bool    selects;   /* is this claim a victim?                        */
-    uint8_t floor;
-    bool    one_shot;
+    bool     selects;  /* is this claim a victim?                        */
+    uint8_t  floor;
+    bool     one_shot;
     uint32_t deadline_ms;
 };
 
@@ -414,13 +414,13 @@ chimera_vfs_claim_trigger_row(
     uint8_t                           retain,
     struct chimera_claim_trigger_row *row)
 {
-    bool legacy_ii   = (victim->construct == CHIMERA_CONSTRUCT_OPLOCK_II);
-    bool is_dir      = (victim->construct == CHIMERA_CONSTRUCT_DIR_LEASE);
-    bool is_deleg    = (victim->construct == CHIMERA_CONSTRUCT_DELEG_R ||
-                        victim->construct == CHIMERA_CONSTRUCT_DELEG_W);
-    bool same_owner  = actor &&
+    bool legacy_ii = (victim->construct == CHIMERA_CONSTRUCT_OPLOCK_II);
+    bool is_dir    = (victim->construct == CHIMERA_CONSTRUCT_DIR_LEASE);
+    bool is_deleg  = (victim->construct == CHIMERA_CONSTRUCT_DELEG_R ||
+                      victim->construct == CHIMERA_CONSTRUCT_DELEG_W);
+    bool same_owner = actor &&
         chimera_claim_owner_equal(&victim->owner, &actor->owner);
-    bool same_key    = actor &&
+    bool same_key = actor &&
         chimera_claim_owner_same_key(&victim->owner, &actor->owner);
     bool same_handle = actor && actor->op_handle &&
         victim->op_handle == actor->op_handle;
@@ -555,7 +555,7 @@ chimera_vfs_claim_trigger_row(
             row->selects     = true;
             row->floor       = 0;
             row->one_shot    = false; /* cascades: RENAME's RH->R and
-                                         UNLINK's ->NONE share the path */
+                                       * UNLINK's ->NONE share the path */
             row->deadline_ms = CHIMERA_VFS_NFS_DELEG_METAOP_MS;
             break;
 
@@ -612,12 +612,12 @@ chimera_vfs_claim_trigger_fire(
     const struct chimera_claim_actor *actor,
     uint8_t                           retain)
 {
-    struct chimera_vfs_claim         *cur;
-    struct chimera_vfs_claim         *to_break[CHIMERA_VFS_CLAIM_MAX_BREAK_BATCH];
-    struct chimera_vfs_claim_grant   *break_pin[CHIMERA_VFS_CLAIM_MAX_BREAK_BATCH];
-    struct chimera_claim_trigger_row  rowv[CHIMERA_VFS_CLAIM_MAX_BREAK_BATCH];
-    int                               n = 0;
-    int                               i;
+    struct chimera_vfs_claim        *cur;
+    struct chimera_vfs_claim        *to_break[CHIMERA_VFS_CLAIM_MAX_BREAK_BATCH];
+    struct chimera_vfs_claim_grant  *break_pin[CHIMERA_VFS_CLAIM_MAX_BREAK_BATCH];
+    struct chimera_claim_trigger_row rowv[CHIMERA_VFS_CLAIM_MAX_BREAK_BATCH];
+    int                              n = 0;
+    int                              i;
 
     pthread_mutex_lock(&file->lock);
     for (cur = file->claims[CHIMERA_CLAIM_CLASS_CACHE]; cur; cur = cur->next) {

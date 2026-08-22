@@ -270,7 +270,8 @@ static void
 run_phase(
     int         num_sync_threads,
     const char *label,
-    void (     *test_fn )(struct test_ctx *))
+    void     ( *test_fn )(
+        struct test_ctx *))
 {
     struct test_ctx               ctx = { 0 };
     struct chimera_vfs_module_cfg module_cfgs[1];

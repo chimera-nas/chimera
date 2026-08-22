@@ -212,10 +212,12 @@ nfs4_find_conflicting_write_deleg(
 bool
 nfs4_cb_layoutrecall(
     struct chimera_server_nfs_thread *thread,
-    struct nfs_client *client,
-    const uint8_t *fh,
-    uint32_t fh_len,
-    uint16_t export_id,
-    const struct stateid4 *layout_stateid,
-    void ( *done )(int cb_status, void *arg),
-    void *arg);
+    struct nfs_client                *client,
+    const uint8_t                    *fh,
+    uint32_t                          fh_len,
+    uint16_t                          export_id,
+    const struct stateid4            *layout_stateid,
+    void                           ( *done )(
+        int   cb_status,
+        void *arg),
+    void                             *arg);

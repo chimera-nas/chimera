@@ -148,7 +148,7 @@ rb_tree_empty(const struct rb_tree *tree)
 static void
 rb_tree_destroy(
     struct rb_tree *tree,
-    void (         *free_payload )(
+    void         ( *free_payload )(
         struct rb_node *node,
         void           *private_data),
     void           *private_data)

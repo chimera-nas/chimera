@@ -20,9 +20,9 @@ chimera_nfs4_lockt_probe(
     struct chimera_vfs_attrs *attr,
     void                     *private_data)
 {
-    struct nfs_request             *req       = private_data;
-    struct LOCKT4args              *args      = &req->args_compound->argarray[req->index].oplockt;
-    struct LOCKT4res               *res       = &req->res_compound.resarray[req->index].oplockt;
+    struct nfs_request               *req       = private_data;
+    struct LOCKT4args                *args      = &req->args_compound->argarray[req->index].oplockt;
+    struct LOCKT4res                 *res       = &req->res_compound.resarray[req->index].oplockt;
     struct chimera_vfs_open_handle   *handle    = req->handle;
     struct chimera_vfs_state         *vfs_state = req->thread->vfs->vfs_state;
     struct chimera_vfs_file_state    *file_state;

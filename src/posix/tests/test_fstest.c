@@ -211,7 +211,8 @@ check_file(
 static void
 traverse(
     const char *dir,
-    int (      *fn )(const char *))
+    int      ( *fn )(
+        const char *))
 {
     CHIMERA_DIR   *d;
     struct dirent *de;

@@ -231,9 +231,9 @@ chimera_posix_ofd_lock_carve(
 /* -------------------------------------------------------------------- */
 
 struct chimera_posix_lock_waiter {
-    pthread_mutex_t               mutex;
-    pthread_cond_t                cond;
-    int                           done;
+    pthread_mutex_t mutex;
+    pthread_cond_t  cond;
+    int             done;
     enum chimera_vfs_claim_result result;
 };
 

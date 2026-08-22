@@ -187,7 +187,7 @@ chimera_vfs_state_get(
 
     slot              = chimera_vfs_state_slot_for(shard, fh_hash);
     file->bucket_next = *slot;
-    *slot             = file;
+    *slot = file;
     shard->count++;
 
     pthread_mutex_unlock(&shard->lock);
@@ -649,10 +649,10 @@ chimera_vfs_claim_deny_rows(
              * untouched by design. */
             if (claim->denied) {
                 rows[n++] = (struct chimera_claim_deny_row) {
-                    .mask       = claim->denied,
-                    .circle     = CHIMERA_CIRCLE_OWNER,
-                    .targets    = CHIMERA_CLAIM_TARGET_ACCESS |
-                                  CHIMERA_CLAIM_TARGET_CACHE,
+                    .mask    = claim->denied,
+                    .circle  = CHIMERA_CIRCLE_OWNER,
+                    .targets = CHIMERA_CLAIM_TARGET_ACCESS |
+                        CHIMERA_CLAIM_TARGET_CACHE,
                     .admit_only = 0,
                     .raw        = 0,
                 };
@@ -664,8 +664,8 @@ chimera_vfs_claim_deny_rows(
              * (SameLeaseKey spans clients, R32). */
             if (adv & CHIMERA_CLAIM_CW) {
                 rows[n++] = (struct chimera_claim_deny_row) {
-                    .mask    = CHIMERA_CLAIM_R | CHIMERA_CLAIM_W |
-                               CHIMERA_CLAIM_CR | CHIMERA_CLAIM_CW,
+                    .mask = CHIMERA_CLAIM_R | CHIMERA_CLAIM_W |
+                        CHIMERA_CLAIM_CR | CHIMERA_CLAIM_CW,
                     .circle  = CHIMERA_CIRCLE_KEY,
                     .targets = CHIMERA_CLAIM_TARGET_CACHE,
                 };
@@ -687,8 +687,8 @@ chimera_vfs_claim_deny_rows(
         case CHIMERA_CONSTRUCT_OPLOCK_BATCH:
             if (adv & CHIMERA_CLAIM_CW) {
                 rows[n++] = (struct chimera_claim_deny_row) {
-                    .mask    = CHIMERA_CLAIM_R | CHIMERA_CLAIM_W |
-                               CHIMERA_CLAIM_CR | CHIMERA_CLAIM_CW,
+                    .mask = CHIMERA_CLAIM_R | CHIMERA_CLAIM_W |
+                        CHIMERA_CLAIM_CR | CHIMERA_CLAIM_CW,
                     .circle  = CHIMERA_CIRCLE_OWNER,
                     .targets = CHIMERA_CLAIM_TARGET_CACHE,
                 };
@@ -718,7 +718,7 @@ chimera_vfs_claim_deny_rows(
                 .mask    = CHIMERA_CLAIM_W | CHIMERA_CLAIM_CW,
                 .circle  = CHIMERA_CIRCLE_CLIENT,
                 .targets = CHIMERA_CLAIM_TARGET_ACCESS |
-                           CHIMERA_CLAIM_TARGET_CACHE,
+                    CHIMERA_CLAIM_TARGET_CACHE,
             };
             rows[n++] = (struct chimera_claim_deny_row) {
                 .mask    = CHIMERA_CLAIM_LW,
@@ -729,11 +729,11 @@ chimera_vfs_claim_deny_rows(
 
         case CHIMERA_CONSTRUCT_DELEG_W:
             rows[n++] = (struct chimera_claim_deny_row) {
-                .mask    = CHIMERA_CLAIM_R | CHIMERA_CLAIM_W |
-                           CHIMERA_CLAIM_CR | CHIMERA_CLAIM_CW,
+                .mask = CHIMERA_CLAIM_R | CHIMERA_CLAIM_W |
+                    CHIMERA_CLAIM_CR | CHIMERA_CLAIM_CW,
                 .circle  = CHIMERA_CIRCLE_CLIENT,
                 .targets = CHIMERA_CLAIM_TARGET_ACCESS |
-                           CHIMERA_CLAIM_TARGET_CACHE,
+                    CHIMERA_CLAIM_TARGET_CACHE,
             };
             rows[n++] = (struct chimera_claim_deny_row) {
                 .mask    = CHIMERA_CLAIM_LR | CHIMERA_CLAIM_LW,
@@ -801,7 +801,7 @@ chimera_vfs_claim_deny_against(
     bool                            for_displace)
 {
     struct chimera_claim_deny_row rows[CHIMERA_CLAIM_MAX_DENY_ROWS];
-    int                           n = chimera_vfs_claim_deny_rows(hc, rows);
+    int                           n    = chimera_vfs_claim_deny_rows(hc, rows);
     uint8_t                       mask = 0;
     int                           i;
 
@@ -921,7 +921,7 @@ chimera_vfs_claim_admit_locked(
     struct chimera_vfs_claim *idle_break    = NULL;
     struct chimera_vfs_claim *expired_break = NULL;
     struct chimera_vfs_claim *waiting_on    = NULL;
-    int                       k;
+    int k;
 
     if (conflict_claim) {
         *conflict_claim = NULL;
@@ -1200,7 +1200,7 @@ chimera_vfs_claim_try_acquire(
                 uint32_t deadline_ms =
                     (conflict->owner.proto == CHIMERA_CLAIM_PROTO_NFSV4)
                     ? CHIMERA_VFS_NFS_DELEG_RECALL_MS : 0;
-                uint8_t  floor =
+                uint8_t floor =
                     chimera_vfs_claim_contended_floor(claim, conflict);
 
                 chimera_vfs_claim_begin_break_ex(
@@ -1485,8 +1485,9 @@ chimera_vfs_claim_range_replace(
     uint8_t                           new_mask,
     struct chimera_vfs_claim         *spare[2],
     int                              *spare_used,
-    void (                           *released_cb )(struct chimera_vfs_claim *claim,
-                                                    void                     *arg),
+    void                           ( *released_cb )(
+        struct chimera_vfs_claim *claim,
+        void                     *arg),
     void                             *released_arg)
 {
     struct chimera_vfs_claim *cur, *next;
@@ -1515,11 +1516,11 @@ chimera_vfs_claim_range_replace(
 
         /* Compute left/right remainders of `cur` outside [offset, end). */
         {
-            uint64_t cur_off = cur->offset;
-            uint64_t cur_len = cur->length;
-            bool     has_left  = cur_off < offset;
+            uint64_t cur_off          = cur->offset;
+            uint64_t cur_len          = cur->length;
+            bool     has_left         = cur_off < offset;
             uint64_t carve_end_is_eof = (length == UINT64_MAX);
-            uint64_t carve_end = carve_end_is_eof ? UINT64_MAX
+            uint64_t carve_end        = carve_end_is_eof ? UINT64_MAX
                 : offset + length;
             bool     has_right;
 
@@ -1544,12 +1545,12 @@ chimera_vfs_claim_range_replace(
             if (has_right && n_spare < 2 && spare && spare[n_spare]) {
                 struct chimera_vfs_claim *right = spare[n_spare++];
 
-                *right         = *cur;
-                right->offset  = carve_end;
-                right->length  = (cur_len == UINT64_MAX) ? UINT64_MAX
+                *right        = *cur;
+                right->offset = carve_end;
+                right->length = (cur_len == UINT64_MAX) ? UINT64_MAX
                     : (cur_off + cur_len) - carve_end;
-                right->prev    = NULL;
-                right->next    = NULL;
+                right->prev = NULL;
+                right->next = NULL;
                 chimera_vfs_claim_link_locked(file, right);
             }
         }
@@ -1625,7 +1626,7 @@ chimera_vfs_claim_grant_coalesce(
             grant->claim.break_state == CHIMERA_CLAIM_BREAK_ACKED &&
             grant->claim.used == 0 &&
             want != 0) {
-            struct chimera_vfs_claim  probe = grant->claim;
+            struct chimera_vfs_claim  probe    = grant->claim;
             struct chimera_vfs_claim *conflict = NULL;
 
             probe.used        = want;
@@ -1655,7 +1656,7 @@ chimera_vfs_claim_grant_coalesce(
             uint8_t cur = grant->claim.used;
 
             if (want != cur && (want & cur) == cur) {
-                struct chimera_vfs_claim  probe = grant->claim;
+                struct chimera_vfs_claim  probe    = grant->claim;
                 struct chimera_vfs_claim *conflict = NULL;
 
                 probe.used        = want;
@@ -1695,7 +1696,7 @@ chimera_vfs_claim_grant_try_upgrade(
         (want_used & granted) == granted &&
         file->claims[CHIMERA_CLAIM_CLASS_CACHE] == &grant->claim &&
         grant->claim.next == NULL) {
-        struct chimera_vfs_claim  probe = grant->claim;
+        struct chimera_vfs_claim  probe    = grant->claim;
         struct chimera_vfs_claim *conflict = NULL;
 
         probe.used       = want_used;
@@ -1719,9 +1720,9 @@ chimera_vfs_claim_grant_cap_mode(
     const struct chimera_vfs_claim *template_claim,
     bool                            strict)
 {
-    struct chimera_vfs_claim  probe = *template_claim;
+    struct chimera_vfs_claim  probe    = *template_claim;
     struct chimera_vfs_claim *conflict = NULL;
-    uint8_t                   mode = template_claim->used;
+    uint8_t                   mode     = template_claim->used;
 
     pthread_mutex_lock(&file->lock);
     for ( ; ; ) {
@@ -1755,6 +1756,8 @@ chimera_vfs_claim_grant_acquire(
     int                                 upgrade_ok,
     uint8_t                             is_v2,
     enum chimera_vfs_claim_grant_flavor flavor,
+    void                               *member_seed,
+    bool                               *member_seeded,
     struct chimera_vfs_claim_grant    **grant_out,
     struct chimera_vfs_claim_conflict  *conflict_out)
 {
@@ -1764,6 +1767,9 @@ chimera_vfs_claim_grant_acquire(
     (void) flavor;
 
     *grant_out = NULL;
+    if (member_seeded) {
+        *member_seeded = false;
+    }
     if (conflict_out) {
         memset(conflict_out, 0, sizeof(*conflict_out));
     }
@@ -1785,6 +1791,11 @@ chimera_vfs_claim_grant_acquire(
     grant->refcount    = 1;
     grant->epoch       = 1;
     grant->is_v2       = is_v2;
+    /* Seed the member head BEFORE the claim becomes visible to the conflict
+     * matrix, so a break callback fired against the mid-insert grant finds a
+     * live member instead of revoking a memberless grant (the old
+     * pre-registered-member discipline). */
+    grant->members = member_seed;
 
     result = chimera_vfs_claim_try_acquire(state, file, &grant->claim,
                                            conflict_out);
@@ -1808,6 +1819,9 @@ chimera_vfs_claim_grant_acquire(
     file->grants      = grant;
     pthread_mutex_unlock(&file->lock);
 
+    if (member_seeded) {
+        *member_seeded = (member_seed != NULL);
+    }
     *grant_out = grant;
     return CHIMERA_CLAIM_GRANTED;
 } /* chimera_vfs_claim_grant_acquire */

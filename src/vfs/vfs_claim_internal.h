@@ -63,10 +63,12 @@ chimera_vfs_claim_circle_exempt(
 
 /* Effective advertised mode (REVOKED contributes nothing; parked masks H). */
 uint8_t
-chimera_vfs_claim_advertised(const struct chimera_vfs_claim *claim);
+chimera_vfs_claim_advertised(
+    const struct chimera_vfs_claim *claim);
 
 bool
-chimera_vfs_claim_revocable(const struct chimera_vfs_claim *claim);
+chimera_vfs_claim_revocable(
+    const struct chimera_vfs_claim *claim);
 
 /* 128-bit-safe half-open overlap; UINT64_MAX = to-EOF, 0 = zero-byte. */
 bool
@@ -128,10 +130,12 @@ chimera_vfs_claim_begin_break_ex(
 /* Pin a cache claim's grant across an unlocked begin_break; caller holds
  * file->lock.  Returns NULL for grant-less claims. */
 struct chimera_vfs_claim_grant *
-chimera_vfs_claim_pin_grant(struct chimera_vfs_claim *claim);
+chimera_vfs_claim_pin_grant(
+    struct chimera_vfs_claim *claim);
 
 bool
-chimera_vfs_claim_deadline_passed(const struct chimera_vfs_claim *claim);
+chimera_vfs_claim_deadline_passed(
+    const struct chimera_vfs_claim *claim);
 
 /* Courtesy reclaim (R13): holder's client is dead AND differs from the
  * probe's client. */

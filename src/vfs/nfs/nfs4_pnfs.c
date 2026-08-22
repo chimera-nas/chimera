@@ -1033,7 +1033,7 @@ chimera_nfs4_layout_acquire(
     void                                    *private_data,
     struct chimera_nfs_client_server_thread *mds_thread,
     struct chimera_nfs4_open_state          *open_state,
-    void (                                  *redispatch )(
+    void                                  ( *redispatch )(
         struct chimera_nfs_thread *,
         struct chimera_nfs_shared *,
         struct chimera_vfs_request *,

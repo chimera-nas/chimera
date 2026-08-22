@@ -94,7 +94,7 @@ chimera_nfs4_write_open_callback(
          * (anonymous-stateid / pNFS-DS) on-the-fly writes keep the implicit
          * claim so they still recall *other* clients' conflicting claims. */
         struct chimera_claim_actor io_owner = {
-            .owner = {
+            .owner          = {
                 .proto      = CHIMERA_CLAIM_PROTO_NFSV4,
                 .client_key = req->session->client_unified->client_id,
                 .owner_lo   = handle->fh_hash,
@@ -396,7 +396,7 @@ chimera_nfs4_write(
     }
 
     struct chimera_claim_actor io_owner = {
-        .owner = {
+        .owner          = {
             .proto      = CHIMERA_CLAIM_PROTO_NFSV4,
             .client_key = open_state->owner->client->client_id,
             .owner_lo   = state_handle->fh_hash,

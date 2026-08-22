@@ -24,7 +24,8 @@ static inline int
 chimera_pthread_create(
     pthread_t            *thread,
     const pthread_attr_t *attr,
-    void *(*start_routine )(void *),
+    void *              (*start_routine )(
+        void *),
     void                 *arg)
 {
     useconds_t delay = 1000;

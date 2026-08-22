@@ -1169,7 +1169,8 @@ diskfs_orphan_op_start(
     uint64_t              inum,
     uint32_t              gen,
     int                   remove,
-    void (               *done )(void *priv),
+    void               ( *done )(
+        void *priv),
     void                 *priv)
 {
     struct diskfs_orphan_op *o = malloc(sizeof(*o));

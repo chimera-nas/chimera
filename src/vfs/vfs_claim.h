@@ -126,8 +126,8 @@ chimera_vfs_state_put(
 /* -------------------------------------------------------------------- */
 
 /* Consumers build claims ONLY through these; each stamps the construct that
- * drives the deny/MAND/revocability derivation in vfs_claim.c.  Bits use
- * the CHIMERA_CLAIM_* vocabulary (data R/W/D; cache CR/CW/H; lock LR/LW). */
+* drives the deny/MAND/revocability derivation in vfs_claim.c.  Bits use
+* the CHIMERA_CLAIM_* vocabulary (data R/W/D; cache CR/CW/H; lock LR/LW). */
 
 /* SMB share reservation: access ⊆ R|W|D, deny ⊆ R|W|D.  A zero/zero pair
  * builds the inert attribute-only registration (query-visible, conflicts
@@ -179,8 +179,8 @@ chimera_vfs_claim_init_delegation(
     const struct chimera_claim_owner *owner);
 
 /* Byte-range lock.  smb selects the mandatory (LOCK_SMB) construct; the
- * owner's key should carry the open's grant LeaseKey when it holds one so
- * the fresh-cache denial self-exempts at KEY (brl2 across two opens). */
+* owner's key should carry the open's grant LeaseKey when it holds one so
+* the fresh-cache denial self-exempts at KEY (brl2 across two opens). */
 void
 chimera_vfs_claim_init_range(
     struct chimera_vfs_claim         *claim,
@@ -275,8 +275,9 @@ chimera_vfs_claim_range_replace(
     uint8_t                           new_mask,
     struct chimera_vfs_claim         *spare[2],
     int                              *spare_used,
-    void (                           *released_cb )(struct chimera_vfs_claim *claim,
-                                                    void                     *arg),
+    void                           ( *released_cb )(
+        struct chimera_vfs_claim *claim,
+        void                     *arg),
     void                             *released_arg);
 
 /* -------------------------------------------------------------------- */
@@ -294,17 +295,28 @@ enum chimera_vfs_claim_grant_flavor {
  * callbacks.  is_v2 selects epoch semantics.  R31's four sub-rules
  * (strict-superset upgrade; never mid-break + BREAK_IN_PROGRESS re-open;
  * ACKED-at-0 / dir re-arm with epoch bump; rescue only at refcount-1 +
- * sole cache) are implemented here verbatim. */
+ * sole cache) are implemented here verbatim.
+ *
+ * member_seed (optional): stored as a FRESH grant's members head BEFORE the
+ * embedded claim is inserted, so a break callback can never observe a
+ * memberless mid-insert grant (the old pre-registered-member discipline).
+ * The seed must be walk-ready: its protocol next-link NULL, its state
+ * consistent for a break callback's live-member scan.  *member_seeded (may
+ * be NULL) reports whether the seed was consumed — false on a coalesce hit
+ * or a racing-create collapse, where the caller registers its member on the
+ * returned grant itself. */
 enum chimera_vfs_claim_result
 chimera_vfs_claim_grant_acquire(
-    struct chimera_vfs_state              *state,
-    struct chimera_vfs_file_state         *file,
-    const struct chimera_vfs_claim        *template_claim,
-    int                                    upgrade_ok,
-    uint8_t                                is_v2,
-    enum chimera_vfs_claim_grant_flavor    flavor,
-    struct chimera_vfs_claim_grant       **grant_out,
-    struct chimera_vfs_claim_conflict     *conflict_out);
+    struct chimera_vfs_state           *state,
+    struct chimera_vfs_file_state      *file,
+    const struct chimera_vfs_claim     *template_claim,
+    int                                 upgrade_ok,
+    uint8_t                             is_v2,
+    enum chimera_vfs_claim_grant_flavor flavor,
+    void                               *member_seed,
+    bool                               *member_seeded,
+    struct chimera_vfs_claim_grant    **grant_out,
+    struct chimera_vfs_claim_conflict  *conflict_out);
 
 /* Coalesce-only: returns an existing same-owner / same-LeaseKey grant with
  * its refcount bumped (upgrading per R31 when upgrade_ok), or NULL. */
@@ -455,7 +467,8 @@ void
 chimera_vfs_io_claim_acquire(
     struct chimera_vfs_request       *request,
     const struct chimera_claim_actor *actor,
-    void (                           *next )(struct chimera_vfs_request *request));
+    void                           ( *next )(
+        struct chimera_vfs_request *request));
 
 void
 chimera_vfs_io_claim_release(
@@ -473,7 +486,8 @@ chimera_vfs_io_recall(
     uint8_t                     fh_len,
     uint64_t                    fh_hash,
     int                         flush_only,
-    void (                     *next )(struct chimera_vfs_request *request));
+    void                     ( *next )(
+        struct chimera_vfs_request *request));
 
 void
 chimera_vfs_io_recall_single(
@@ -482,7 +496,8 @@ chimera_vfs_io_recall_single(
     uint8_t                     fh_len,
     uint64_t                    fh_hash,
     uint8_t                     retain,
-    void (                     *next )(struct chimera_vfs_request *request));
+    void                     ( *next )(
+        struct chimera_vfs_request *request));
 
 /* Mandatory-lock I/O predicate (SMB data path only; inline local bool).
  * Zero-length reads are exempt before the walk.  MAND rows are stamped on

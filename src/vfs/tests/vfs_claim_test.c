@@ -662,7 +662,7 @@ test_nfs4_lock_vs_own_delegation(void)
     file  = get_file(state, 1);
 
     /* Client 0xA holds a WRITE delegation.  A delegation is keyed by the
-    * file-handle hash, so its owner_lo differs from any lock. */
+     * file-handle hash, so its owner_lo differs from any lock. */
     init_owner(&owner, CHIMERA_CLAIM_PROTO_NFSV4, 0xA, 0xF11E);
     chimera_vfs_claim_init_delegation(&deleg, true, &owner);
     deleg.break_cb   = recording_break_cb;
@@ -706,7 +706,7 @@ test_nfs4_lock_vs_own_delegation(void)
  * argument is only valid inside the callback, so it is copied by value. */
 struct acquire_recorder {
     int                               fired;
-    enum chimera_vfs_claim_result     last_result;
+    enum chimera_vfs_claim_result last_result;
     struct chimera_vfs_claim         *last_granted;
     int                               has_conflict;
     struct chimera_vfs_claim_conflict last_conflict;
@@ -1009,7 +1009,7 @@ test_breakable_share_recall(void)
 } /* test_breakable_share_recall */
 
 /* Test 18: a non-breakable ACCESS holder (an ordinary client open) still
- * hard-denies a conflicting acquire. --------------------------------- */
+* hard-denies a conflicting acquire. --------------------------------- */
 static void
 test_nonbreakable_share_denies(void)
 {
@@ -1090,6 +1090,7 @@ test_share_escape_skips_own_lease(void)
     r = chimera_vfs_claim_grant_acquire(state, file, &template_claim, 0,
                                         /* is_v2 */ 0,
                                         CHIMERA_CLAIM_GRANT_EXACT,
+                                        /* member_seed */ NULL, NULL,
                                         &grant, &conflict);
     CHECK(r == CHIMERA_CLAIM_GRANTED && grant, "holder RWH lease granted");
 
