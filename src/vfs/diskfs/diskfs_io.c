@@ -93,10 +93,9 @@ diskfs_inode_load_recs(
     struct diskfs_inode_load_ctx *lc);
 
 static void
-diskfs_inode_load_complete(
-    struct evpl *evpl,
-    int          status,
-    void        *private_data);
+diskfs_inode_load_resume(
+    struct diskfs_thread *thread,
+    void                 *arg);
 
 static void
 diskfs_dirent_release(
@@ -811,23 +810,58 @@ diskfs_inode_load_recs(struct diskfs_inode_load_ctx *lc)
 } /* diskfs_inode_load_recs */
 
 
+/*
+ * Fault an inode's home block THROUGH the block cache -- never the device
+ * directly -- and materialize the inode from it.
+ *
+ * The cache is the coherence point for metadata: a dinode's latest bytes live
+ * as a dirty block (pinned until pushed home) from the commit that logged them
+ * until the push thread writes them out, and only then does the device catch
+ * up.  A direct device read in that window returns the previous life of the
+ * block: an inode re-faulted while its last change (or its retirement
+ * tombstone) is still un-pushed materializes from stale bytes.  In the drain
+ * path that is not just stale data -- a straggling lookup of a retired inode
+ * could see the pre-retire dinode, believe the file live, and free its blocks
+ * a second time.  Reading through the cache makes the fault see whatever is
+ * true right now -- the tombstone, a live dinode, or a reallocated block's
+ * fresh contents, which the inum/gen check below rejects.
+ *
+ * This also replaces the old scheme of seeding the cache from the disk image
+ * (claim is_new + memcpy + mark CLEAN), which could clobber a newer dirty
+ * block with stale bytes -- the same incoherence from the write side.
+ */
 static void
-diskfs_inode_load_complete(
-    struct evpl *evpl,
-    int          status,
-    void        *private_data)
+diskfs_inode_load_resume(
+    struct diskfs_thread *thread,
+    void                 *arg)
 {
-    struct diskfs_inode_load_ctx *lc     = private_data;
-    struct diskfs_thread         *thread = lc->thread;
-    struct diskfs_shared         *shared = thread->shared;
-    struct diskfs_dinode         *di     = (struct diskfs_dinode *) lc->iov.data;
+    struct diskfs_inode_load_ctx *lc     = arg;
+    struct diskfs_thread         *self   = lc->thread;
+    struct diskfs_shared         *shared = self->shared;
     struct diskfs_inode_shard    *shard  = diskfs_inode_shard(shared, lc->inum);
+    struct diskfs_block          *blk;
+    struct diskfs_dinode         *di;
     struct diskfs_inode          *inode;
+    uint32_t                      dev;
+    uint64_t                      off;
 
-    if (status != 0 || di->inum != lc->inum || di->gen != lc->gen ||
-        di->nlink == 0) {
-        /* No such inode on disk (or stale generation). */
-        evpl_iovec_release(thread->evpl, &lc->iov);
+    (void) thread;
+
+    off = sm_inum_to_device_offset(shared->space_map, lc->inum, &dev);
+
+    blk = diskfs_block_claim_async(self, dev, off, 0,
+                                   diskfs_inode_load_resume, lc);
+
+    if (!blk) {
+        return;     /* parked (read in flight or pin cap); re-runs when ready */
+    }
+
+    di = (struct diskfs_dinode *) blk->iov.data;
+
+    if (di->inum != lc->inum || di->gen != lc->gen || di->nlink == 0) {
+        /* No such inode (stale generation, tombstone, or the block has been
+         * reallocated to something else entirely). */
+        diskfs_block_unpin(self, blk, DISKFS_BLOCK_CLEAN);
         lc->cb(NULL, CHIMERA_VFS_ENOENT, lc->private_data);
         free(lc);
         return;
@@ -867,43 +901,28 @@ diskfs_inode_load_complete(
         inode->writer = 1;
         rb_tree_insert(&shard->inodes, inum, inode);
         shard->ninodes++;
-        diskfs_metric_inode_cache(thread, DISKFS_METRIC_INODE_CACHE_LOAD);
+        diskfs_metric_inode_cache(self, DISKFS_METRIC_INODE_CACHE_LOAD);
     } else {
         /* Lost a concurrent fault race: the winner published the inode (and
          * does/did its own record loads).  Just re-drive the acquire. */
         pthread_mutex_unlock(&shard->lock);
-        evpl_iovec_release(thread->evpl, &lc->iov);
-        diskfs_inode_acquire(thread, lc->txn, lc->inum, lc->gen, lc->mode,
+        diskfs_block_unpin(self, blk, DISKFS_BLOCK_CLEAN);
+        diskfs_inode_acquire(self, lc->txn, lc->inum, lc->gen, lc->mode,
                              lc->cb, lc->private_data);
         free(lc);
         return;
     }
     pthread_mutex_unlock(&shard->lock);
 
-    /* Seed the inode's home block (dinode + embedded b+tree root) into the
-     * block cache from the disk image, so the b+tree traversal and inode-block
-     * pin find the real contents instead of a zero-created block.  No writer
-     * can be modifying it yet -- we hold the inode exclusively.  Claim is_new
-     * (no disk read): we already hold the freshly-read image in lc->iov and
-     * overwrite the whole block below, so reading it back would be redundant
-     * -- and a synchronous read here cannot reach a VFIO device anyway. */
-    {
-        uint32_t             dev;
-        uint64_t             off = sm_inum_to_device_offset(shared->space_map,
-                                                            lc->inum, &dev);
-        struct diskfs_block *blk = diskfs_block_claim(thread, dev, off, 1);
-
-        memcpy(blk->iov.data, lc->iov.data, DISKFS_BLOCK_SIZE);
-        diskfs_block_unpin(thread, blk, DISKFS_BLOCK_CLEAN);
-    }
-
-    evpl_iovec_release(thread->evpl, &lc->iov);
+    /* The fields are copied out; the record loads below re-claim the block
+     * from the cache themselves (resident, since we just loaded it). */
+    diskfs_block_unpin(self, blk, DISKFS_BLOCK_CLEAN);
 
     /* Load the ACL/pNFS record mirrors, then release the hold and re-drive
      * the acquire to grant the lock as usual. */
     lc->inode = inode;
     diskfs_inode_load_recs(lc);
-} /* diskfs_inode_load_complete */
+} /* diskfs_inode_load_resume */
 
 
 void
@@ -917,10 +936,7 @@ diskfs_inode_load(
     void                       *private_data)
 {
     struct diskfs_inode_load_ctx *lc = malloc(sizeof(*lc));
-    uint32_t                      dev;
-    uint64_t                      off;
 
-    off              = sm_inum_to_device_offset(thread->shared->space_map, inum, &dev);
     lc->thread       = thread;
     lc->txn          = txn;
     lc->inum         = inum;
@@ -929,13 +945,7 @@ diskfs_inode_load(
     lc->cb           = cb;
     lc->private_data = private_data;
 
-    evpl_iovec_alloc(thread->evpl, DISKFS_BLOCK_SIZE, DISKFS_BLOCK_SIZE, 1, 0, &lc->iov);
-    diskfs_metric_block_io(thread, DISKFS_METRIC_IO_READ,
-                           DISKFS_METRIC_IO_INODE, DISKFS_BLOCK_SIZE);
-    diskfs_metric_block_io_device(thread, dev, DISKFS_METRIC_IO_READ,
-                                  DISKFS_METRIC_IO_INODE, DISKFS_BLOCK_SIZE);
-    evpl_block_read(thread->evpl, thread->queue[dev], &lc->iov, 1, off,
-                    diskfs_inode_load_complete, lc);
+    diskfs_inode_load_resume(thread, lc);
 } /* diskfs_inode_load */
 
 
