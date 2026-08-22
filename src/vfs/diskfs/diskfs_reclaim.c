@@ -258,8 +258,12 @@ diskfs_drain_final_cb(
     /* The retire txn is durable and its locks are released; drop the dead
      * struct from the cache so it neither accumulates nor lingers to collide
      * with a reallocation of the inum.  Straggling lookups by the old (or
-     * any) generation fault from disk and get ENOENT from the tombstone /
-     * inum check there. */
+     * any) generation fault through the block cache -- where the tombstone
+     * just logged is still current however far behind the device is -- and
+     * get ENOENT from the tombstone / inum check there.  (A straggler that
+     * re-faulted while the tombstone was un-pushed used to read the device
+     * directly, see the pre-retire dinode, and could re-orphan the inode,
+     * double-freeing its blocks.) */
     pthread_mutex_lock(&shard->lock);
     rb_tree_query_exact(&shard->inodes, d->inum, inum, inode);
     if (inode && inode->nlink == 0 && inode->refcnt == 0 &&

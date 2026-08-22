@@ -1990,7 +1990,6 @@ struct diskfs_inode_load_ctx {
     enum diskfs_inode_lock_mode mode;
     diskfs_inode_cb_t           cb;
     void                       *private_data;
-    struct evpl_iovec           iov;
     /* Record-load chain state (valid once the inode is published). */
     struct diskfs_inode        *inode;
     int                         acl_len;
@@ -2285,6 +2284,20 @@ diskfs_block_claim(
     uint32_t              device_id,
     uint64_t              device_offset,
     int                   is_new);
+
+/* As diskfs_block_claim (returns the block pinned; is_new starts from a zeroed
+ * buffer) but never reads or waits synchronously: on a miss, an in-flight read,
+ * or pin-cap backpressure it parks resume(thread, arg) -- dispatched back on the
+ * claiming thread -- and returns NULL.  The resume re-invokes the claim, which
+ * then returns the resident block inline. */
+struct diskfs_block *
+diskfs_block_claim_async(
+    struct diskfs_thread *thread,
+    uint32_t device_id,
+    uint64_t device_offset,
+    int is_new,
+    void ( *resume )(struct diskfs_thread *, void *),
+    void *arg);
 
 void
 diskfs_block_buf_release(

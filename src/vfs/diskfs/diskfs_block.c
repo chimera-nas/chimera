@@ -232,15 +232,6 @@ diskfs_bt_op_pin(
     struct diskfs_block_shard *shard,
     struct diskfs_block       *blk);
 
-static struct diskfs_block *
-diskfs_block_claim_async(
-    struct diskfs_thread *thread,
-    uint32_t device_id,
-    uint64_t device_offset,
-    int is_new,
-    void ( *resume )(struct diskfs_thread *, void *),
-    void *arg);
-
 static void
 diskfs_pin_cont_resume(
     struct diskfs_thread *thread,
@@ -1500,7 +1491,7 @@ diskfs_bt_block_get(
  * the async evpl_block path.  The caller's continuation re-invokes this once
  * the block has loaded, when it returns the now-resident block inline.
  */
-static struct diskfs_block *
+struct diskfs_block *
 diskfs_block_claim_async(
     struct diskfs_thread *thread,
     uint32_t device_id,
