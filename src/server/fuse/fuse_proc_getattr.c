@@ -4,6 +4,7 @@
 
 #include <string.h>
 #include <unistd.h>
+#include <sys/stat.h>
 
 #include "fuse_internal.h"
 #include "fuse_attr.h"
@@ -37,11 +38,27 @@ chimera_fuse_getattr_complete(
     struct chimera_vfs_attrs *attr,
     void                     *private_data)
 {
-    struct chimera_fuse_request *req = private_data;
+    struct chimera_fuse_request *req   = private_data;
+    struct chimera_fuse_mount   *mount = req->channel->mount;
 
     if (error_code != CHIMERA_VFS_OK) {
         chimera_fuse_reply(req, chimera_fuse_errno(error_code), NULL, 0);
         return;
+    }
+
+    /* The kernel re-fetches attributes exactly when its cache went stale
+     * (or was invalidated), which makes this the natural rearm point for a
+     * broken grant -- and for stat-only files, the point coverage begins. */
+    if (req->fh_len) {
+        if (S_ISREG(attr->va_mode)) {
+            chimera_fuse_grant_ensure(req->thread, mount, req->nodeid,
+                                      req->fh, req->fh_len,
+                                      chimera_fuse_fh_hash(req->fh,
+                                                           req->fh_len));
+        } else if (S_ISDIR(attr->va_mode)) {
+            chimera_fuse_watch_dir(req->thread, mount, req->nodeid,
+                                   req->fh, req->fh_len);
+        }
     }
 
     chimera_fuse_attr_out_reply(req, attr);
@@ -77,10 +94,15 @@ chimera_fuse_op_getattr(
     const struct fuse_getattr_in *in = arg;
 
     if (arglen >= sizeof(*in) && (in->getattr_flags & FUSE_GETATTR_FH)) {
+        struct chimera_vfs_open_handle *oh = chimera_fuse_file(in->fh)->handle;
+
+        /* The completion's grant rearm reads the handle from req->fh. */
+        memcpy(req->fh, oh->fh, oh->fh_len);
+        req->fh_len = oh->fh_len;
+
         /* The kernel named an open file; use its handle directly (it stays
          * owned by the open, so req->handle stays NULL). */
-        chimera_vfs_getattr(req->thread->vfs_thread, &req->cred,
-                            chimera_fuse_file(in->fh)->handle,
+        chimera_vfs_getattr(req->thread->vfs_thread, &req->cred, oh,
                             CHIMERA_VFS_ATTR_MASK_STAT,
                             chimera_fuse_getattr_complete, req);
         return;

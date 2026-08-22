@@ -6,6 +6,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+#include <sys/stat.h>
 #include <sys/uio.h>
 
 #include "fuse_internal.h"
@@ -265,6 +266,20 @@ chimera_fuse_reply_entry(
 
     chimera_fuse_attr_from_vfs(&entry.attr, attr);
 
+    /* The kernel is about to cache this entry's attributes for
+     * attr_timeout: a regular file gets (or re-arms) an invalidation
+     * grant, a directory gets a change watch so its dentries and its own
+     * attributes track foreign namespace ops. */
+    if (S_ISREG(attr->va_mode)) {
+        chimera_fuse_grant_ensure(req->thread, mount, entry.nodeid,
+                                  attr->va_fh, attr->va_fh_len,
+                                  chimera_fuse_fh_hash(attr->va_fh,
+                                                       attr->va_fh_len));
+    } else if (S_ISDIR(attr->va_mode)) {
+        chimera_fuse_watch_dir(req->thread, mount, entry.nodeid,
+                               attr->va_fh, attr->va_fh_len);
+    }
+
     chimera_fuse_abort_if(extra_len > 64, "fuse entry reply extra too large");
 
     memcpy(payload, &entry, sizeof(entry));
@@ -276,8 +291,14 @@ chimera_fuse_reply_entry(
     rc = chimera_fuse_send(req, 0, payload, sizeof(entry) + extra_len,
                            NULL, 0, 0);
 
-    if (rc != 0) {
-        chimera_fuse_node_forget(mount->node_table, entry.nodeid, 1);
+    if (rc != 0 &&
+        chimera_fuse_node_forget(mount->node_table, entry.nodeid, 1)) {
+        /* The undo retired the node: drop the coverage taken above. */
+        chimera_fuse_watch_forget(mount, req->thread->vfs_thread->vfs,
+                                  entry.nodeid);
+        chimera_fuse_grant_forget(mount,
+                                  req->thread->vfs_thread->vfs->vfs_state,
+                                  entry.nodeid);
     }
 
     chimera_fuse_request_finish(req);

@@ -98,6 +98,52 @@ poll_for_enoent(const char *path)
     }
 } /* poll_for_enoent */
 
+static long
+poll_for_mode(
+    const char *path,
+    mode_t      want)
+{
+    struct stat st;
+    long        waited = 0;
+
+    for (;;) {
+        if (stat(path, &st) == 0 && (st.st_mode & 07777) == want) {
+            return waited;
+        }
+
+        if (waited >= POLL_LIMIT_US) {
+            return -1;
+        }
+
+        usleep(POLL_STEP_US);
+        waited += POLL_STEP_US;
+    }
+} /* poll_for_mode */
+
+static long
+poll_for_mtime_change(
+    const char            *path,
+    const struct timespec *old)
+{
+    struct stat st;
+    long        waited = 0;
+
+    for (;;) {
+        if (stat(path, &st) == 0 &&
+            (st.st_mtim.tv_sec != old->tv_sec ||
+             st.st_mtim.tv_nsec != old->tv_nsec)) {
+            return waited;
+        }
+
+        if (waited >= POLL_LIMIT_US) {
+            return -1;
+        }
+
+        usleep(POLL_STEP_US);
+        waited += POLL_STEP_US;
+    }
+} /* poll_for_mtime_change */
+
 int
 main(
     int   argc,
@@ -175,6 +221,76 @@ main(
     CHECK(stat(b2, &st) == 0 && st.st_size == 7, "B resolves the new name");
 
     CHECK(unlink(b2) == 0, "cleanup via B");
+
+    /* --- metadata-only change: chmod via A seen by B (open-primed) --- */
+
+    snprintf(a, sizeof(a), "%s/coh_meta", argv[1]);
+    snprintf(b, sizeof(b), "%s/coh_meta", argv[2]);
+
+    CHECK(write_file(a, "m") == 0 && chmod(a, 0644) == 0,
+          "A creates the metadata file");
+
+    fd = open(b, O_RDONLY);
+    CHECK(fd >= 0 && fstat(fd, &st) == 0 && (st.st_mode & 07777) == 0644,
+          "B opens and caches mode 644");
+    if (fd >= 0) {
+        close(fd);
+    }
+
+    CHECK(chmod(a, 0640) == 0, "A chmods to 640");
+
+    waited = poll_for_mode(b, 0640);
+    CHECK(waited >= 0,
+          "B sees the new mode in %ld ms despite a 60s attr TTL",
+          waited / 1000);
+
+    /* --- stat-only file: B never opens it --- */
+
+    snprintf(a, sizeof(a), "%s/coh_statonly", argv[1]);
+    snprintf(b, sizeof(b), "%s/coh_statonly", argv[2]);
+
+    CHECK(write_file(a, "s") == 0, "A creates the stat-only file");
+
+    CHECK(stat(b, &st) == 0 && st.st_size == 1,
+          "B primes its attr cache with a bare stat");
+
+    CHECK(write_file(a, "sss") == 0, "A rewrites it");
+
+    waited = poll_for_size(b, 3);
+    CHECK(waited >= 0,
+          "B's bare stat sees the new size in %ld ms",
+          waited / 1000);
+
+    CHECK(chmod(a, 0600) == 0, "A chmods the stat-only file");
+
+    waited = poll_for_mode(b, 0600);
+    CHECK(waited >= 0,
+          "B's bare stat sees the new mode in %ld ms",
+          waited / 1000);
+
+    /* --- directory attributes track foreign namespace changes --- */
+
+    snprintf(a, sizeof(a), "%s/coh_dir", argv[1]);
+    snprintf(b, sizeof(b), "%s/coh_dir", argv[2]);
+
+    CHECK(mkdir(a, 0755) == 0, "A makes a directory");
+
+    CHECK(stat(b, &st) == 0, "B primes the directory's attrs");
+
+    struct timespec old_mtime = st.st_mtim;
+
+    usleep(20000); /* ensure a distinguishable mtime */
+
+    /* mkdir rather than a plain file create: VFS-core emits namespace
+     * events for mkdir/remove/rename/link, and it is the event that
+     * carries the invalidation. */
+    snprintf(b2, sizeof(b2), "%s/coh_dir/inner", argv[1]);
+    CHECK(mkdir(b2, 0755) == 0, "A makes a directory inside it");
+
+    waited = poll_for_mtime_change(b, &old_mtime);
+    CHECK(waited >= 0,
+          "B sees the directory's mtime move in %ld ms",
+          waited / 1000);
 
     printf("\n%s (%d failures)\n", failures ? "FAILED" : "PASSED", failures);
 

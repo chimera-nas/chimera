@@ -11,6 +11,7 @@
 #include <errno.h>
 #include <utlist.h>
 #include <uthash.h>
+#include <xxhash.h>
 #include <linux/fuse.h>
 
 #include "evpl/evpl.h"
@@ -646,9 +647,22 @@ void
 chimera_fuse_notifier_stop(
     struct chimera_fuse_shared *shared);
 
-/* Ensure the node's invalidation lease exists / is re-armed (best-effort;
- * called on every OPEN of a regular file). */
-void
+/* Ensure a node's invalidation lease exists / is re-armed (best-effort,
+ * idempotent; callers gate on S_ISREG).  These are the rearm-on-demand
+ * sites: every kernel-driven touch of a file -- LOOKUP, READDIRPLUS,
+ * GETATTR, OPEN -- re-arms a previously broken grant, which self-throttles
+ * against a remote write burst (at most one break per kernel re-touch).
+ * Returns 1 when the grant is ACTIVE (invalidation coverage in force). */
+int
+chimera_fuse_grant_ensure(
+    struct chimera_fuse_thread *thread,
+    struct chimera_fuse_mount  *mount,
+    uint64_t                    nodeid,
+    const uint8_t              *fh,
+    uint32_t                    fh_len,
+    uint64_t                    fh_hash);
+
+int
 chimera_fuse_grant_open(
     struct chimera_fuse_thread     *thread,
     struct chimera_fuse_mount      *mount,
@@ -685,6 +699,18 @@ void
 chimera_fuse_coherence_shutdown(
     struct chimera_fuse_shared *shared,
     struct chimera_fuse_mount  *mount);
+
+/* File-handle hash for vfs_state keying.  Must match the open-cache hashing
+ * (chimera_vfs_hash in vfs_internal.h: XXH3 masked non-negative) so a grant
+ * taken from a bare handle lands on the same file_state as the leases taken
+ * through open handles. */
+static inline uint64_t
+chimera_fuse_fh_hash(
+    const uint8_t *fh,
+    uint32_t       fh_len)
+{
+    return XXH3_64bits(fh, fh_len) & INT64_MAX;
+} /* chimera_fuse_fh_hash */
 
 /* The lease-owner identity FUSE I/O runs under, matching the mount's
  * invalidation grants so a mount's own reads and writes never invalidate

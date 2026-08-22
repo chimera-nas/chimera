@@ -270,13 +270,16 @@ Notes:
   NLM, NFSv4, and SMB2 locks on the same files.  A blocked `F_SETLKW` is
   cancellable by signal.  `flock(2)` stays kernel-local to the mount.
 - Cross-protocol cache invalidation is pushed to the kernel: a write,
-  truncate, remove, or rename arriving through NFS/SMB/S3 (or another FUSE
-  mount of the same share) invalidates the kernel's cached attributes,
-  pages, and directory entries for the affected objects, so the
+  truncate, chmod/chown/utimens, remove, or rename arriving through
+  NFS/SMB/S3 (or another FUSE mount of the same share) invalidates the
+  kernel's cached attributes, pages, and directory entries for the affected
+  objects — including files the kernel knows only from a `stat`, and the
+  changed directory's own attributes — so the
   `attr_timeout_ms`/`entry_timeout_ms` caches stay coherent at their
-  configured lifetimes.  Two residual gaps fall back to the timeouts:
-  attribute changes to files the kernel knows only from a `stat` (never
-  opened), and directory-entry rings overflowed by event bursts.
+  configured lifetimes.  With coverage in force, cached pages also survive
+  close/open cycles (`FOPEN_KEEP_CACHE`).  One residual falls back to the
+  entry timeout: directory-entry names dropped by an overflowed event ring
+  (the directory's attributes are still refreshed).
 - If a previous daemon instance crashed and left a disconnected mount on the
   mountpoint, the next start detaches it and mounts fresh.
 - An externally issued `umount` disconnects the mount; the daemon logs it and
