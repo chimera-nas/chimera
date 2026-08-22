@@ -212,7 +212,7 @@ chimera_fuse_init_handshake(
 
     want = FUSE_ASYNC_READ | FUSE_BIG_WRITES | FUSE_PARALLEL_DIROPS |
         FUSE_DO_READDIRPLUS | FUSE_READDIRPLUS_AUTO | FUSE_ASYNC_DIO |
-        FUSE_MAX_PAGES;
+        FUSE_MAX_PAGES | FUSE_POSIX_LOCKS;
 
     memset(&out, 0, sizeof(out));
 

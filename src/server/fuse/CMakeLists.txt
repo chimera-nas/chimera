@@ -7,10 +7,12 @@ add_library(chimera_fuse SHARED
     fuse_mount.c
     fuse_node_table.c
     fuse_dispatch.c
+    fuse_coherence.c
     fuse_proc_lookup.c
     fuse_proc_getattr.c
     fuse_proc_dir.c
     fuse_proc_io.c
+    fuse_proc_lock.c
     fuse_proc_namespace.c
     fuse_proc_xattr.c)
 

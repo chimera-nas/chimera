@@ -61,8 +61,24 @@ chimera_fuse_node_get_fh(
     uint8_t                        *fh_out,
     uint32_t                       *fh_len_out);
 
-void
+/* Returns 1 when the forget drained the lookup count and retired the
+ * entry, 0 when the kernel still holds references. */
+int
 chimera_fuse_node_forget(
     struct chimera_fuse_node_table *table,
     uint64_t                        nodeid,
     uint64_t                        nlookup);
+
+/*
+ * Reverse lookup: the nodeid a handle currently maps to, WITHOUT touching
+ * the lookup count.  Returns 0 on success, -1 when the kernel holds no
+ * reference to this handle (nothing to invalidate).  Used by the cache-
+ * invalidation path to translate a broken lease's handle into the nodeid a
+ * FUSE_NOTIFY_INVAL_INODE must carry.
+ */
+int
+chimera_fuse_node_lookup(
+    struct chimera_fuse_node_table *table,
+    const uint8_t                  *fh,
+    uint32_t                        fh_len,
+    uint64_t                       *nodeid_out);

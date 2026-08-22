@@ -77,8 +77,15 @@ chimera_fuse_op_forget(
     const struct fuse_forget_in *in = arg;
 
     if (arglen >= sizeof(*in) && req->nodeid != FUSE_ROOT_ID) {
-        chimera_fuse_node_forget(req->channel->mount->node_table,
-                                 req->nodeid, in->nlookup);
+        if (chimera_fuse_node_forget(req->channel->mount->node_table,
+                                     req->nodeid, in->nlookup)) {
+            chimera_fuse_watch_forget(req->channel->mount,
+                                      req->thread->vfs_thread->vfs,
+                                      req->nodeid);
+            chimera_fuse_grant_forget(req->channel->mount,
+                                      req->thread->vfs_thread->vfs->vfs_state,
+                                      req->nodeid);
+        }
     }
 
     /* FORGET has no reply. */
@@ -107,8 +114,15 @@ chimera_fuse_op_batch_forget(
             if (one[i].nodeid == FUSE_ROOT_ID) {
                 continue;
             }
-            chimera_fuse_node_forget(req->channel->mount->node_table,
-                                     one[i].nodeid, one[i].nlookup);
+            if (chimera_fuse_node_forget(req->channel->mount->node_table,
+                                         one[i].nodeid, one[i].nlookup)) {
+                chimera_fuse_watch_forget(req->channel->mount,
+                                          req->thread->vfs_thread->vfs,
+                                          one[i].nodeid);
+                chimera_fuse_grant_forget(req->channel->mount,
+                                          req->thread->vfs_thread->vfs->vfs_state,
+                                          one[i].nodeid);
+            }
         }
     }
 

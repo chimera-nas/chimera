@@ -125,13 +125,39 @@ chimera_fuse_node_get_fh(
     return 0;
 } /* chimera_fuse_node_get_fh */
 
-void
+int
+chimera_fuse_node_lookup(
+    struct chimera_fuse_node_table *table,
+    const uint8_t                  *fh,
+    uint32_t                        fh_len,
+    uint64_t                       *nodeid_out)
+{
+    struct chimera_fuse_node *node;
+
+    pthread_mutex_lock(&table->lock);
+
+    HASH_FIND(hh_fh, table->by_fh, fh, fh_len, node);
+
+    if (!node) {
+        pthread_mutex_unlock(&table->lock);
+        return -1;
+    }
+
+    *nodeid_out = node->nodeid;
+
+    pthread_mutex_unlock(&table->lock);
+
+    return 0;
+} /* chimera_fuse_node_lookup */
+
+int
 chimera_fuse_node_forget(
     struct chimera_fuse_node_table *table,
     uint64_t                        nodeid,
     uint64_t                        nlookup)
 {
     struct chimera_fuse_node *node;
+    int                       retired = 0;
 
     pthread_mutex_lock(&table->lock);
 
@@ -144,16 +170,19 @@ chimera_fuse_node_forget(
         chimera_error("fuse", __FILE__, __LINE__,
                       "fuse forget for unknown nodeid %llu",
                       (unsigned long long) nodeid);
-        return;
+        return 1;
     }
 
     if (nlookup >= node->lookup_count) {
         HASH_DELETE(hh_id, table->by_id, node);
         HASH_DELETE(hh_fh, table->by_fh, node);
         free(node);
+        retired = 1;
     } else {
         node->lookup_count -= nlookup;
     }
 
     pthread_mutex_unlock(&table->lock);
+
+    return retired;
 } /* chimera_fuse_node_forget */

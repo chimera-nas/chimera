@@ -221,6 +221,12 @@ chimera_fuse_op_readdir(
     req->file = file;
 
     req->u.readdir.plus = (req->opcode == FUSE_READDIRPLUS);
+
+    if (req->u.readdir.plus) {
+        /* Entries returned here become kernel dentries under this dir. */
+        chimera_fuse_watch_dir(req->thread, req->channel->mount, req->nodeid,
+                               file->handle->fh, file->handle->fh_len);
+    }
     req->u.readdir.used = 0;
     req->u.readdir.size = in->size;
 
