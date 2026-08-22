@@ -265,12 +265,13 @@ struct memfs_lease_agg {
     uint64_t                   token;
     uint8_t                    rev_used;
     uint8_t                    bind_deny;
-    void                       ( *recall_cb )(void          *recall_arg,
-                                              const uint8_t *fh,
-                                              uint8_t        fh_len,
-                                              uint64_t       fh_hash,
-                                              uint64_t       token,
-                                              uint8_t        retain);
+    void                       ( *recall_cb )(
+        void          *recall_arg,
+        const uint8_t *fh,
+        uint8_t        fh_len,
+        uint64_t       fh_hash,
+        uint64_t       token,
+        uint8_t        retain);
     void                      *recall_arg;
     uint64_t                   recall_due; /* stopwatch ticks; 0 = none */
     struct memfs_lease_agg    *next;
@@ -333,12 +334,12 @@ struct memfs_shared {
     /* Named filesystems, for by-name lookup (mount/mkfs/rmfs, guarded by
      * lock).  Per-op resolution does not consult this: it comes in on the
      * request as mount_private. */
-    struct memfs_fs *fs_list;
-    int              num_active_threads;
-    uint32_t         block_size;
-    uint32_t         block_shift;
-    uint32_t         block_mask;
-    int              noatime;             /* config: disable atime updates on read */
+    struct memfs_fs         *fs_list;
+    int                      num_active_threads;
+    uint32_t                 block_size;
+    uint32_t                 block_shift;
+    uint32_t                 block_mask;
+    int                      noatime;     /* config: disable atime updates on read */
     /* Pre-op / post-op ("before"/"after") attribute returns on mutating
      * operations.  memfs snapshots the affected object's (or parent
      * directory's) attributes before and after the change, under the inode
@@ -349,19 +350,19 @@ struct memfs_shared {
      * learns the attributes were not provided.  Only these pre/post structs are
      * gated; the object attributes returned by getattr/lookup/create/read are
      * always populated. */
-    int              enable_pre_attr;
-    int              enable_post_attr;
-    uint64_t         fs_size;             /* config "size": default capacity for new filesystems */
+    int                      enable_pre_attr;
+    int                      enable_post_attr;
+    uint64_t                 fs_size;     /* config "size": default capacity for new filesystems */
     /* Config "fsid": deterministic fsid seed.  When non-zero each filesystem
      * gets fsid = seed ^ hash(name); when zero fsids are random. */
-    uint64_t         fsid_seed;
+    uint64_t                 fsid_seed;
     /* CAP_LEASE arbiter registry + test knobs (guarded by lease_lock). */
     pthread_mutex_t          lease_lock;
     struct memfs_lease_file *lease_files;
     uint64_t                 lease_next_token;
     uint8_t                  lease_deny_mask;  /* env-masked grant bits */
     uint64_t                 lease_recall_us;  /* env recall delay; 0 off */
-    pthread_mutex_t  lock;
+    pthread_mutex_t          lock;
 };
 
 struct memfs_thread {
@@ -6393,7 +6394,7 @@ memfs_lease_acquire(
         pthread_mutex_unlock(&shared->lease_lock);
         request->lease_acquire.r_token   = 0;
         request->lease_acquire.r_granted = 0;
-        request->status = CHIMERA_VFS_OK;
+        request->status                  = CHIMERA_VFS_OK;
         request->complete(request);
         return;
     }
@@ -6468,9 +6469,15 @@ memfs_lease_recall_sweep(
     struct memfs_lease_file *f;
     struct memfs_lease_agg  *agg;
     uint64_t                 now = chimera_vfs_now_ticks();
+
     struct {
-        void     ( *cb )(void *, const uint8_t *, uint8_t, uint64_t,
-                         uint64_t, uint8_t);
+        void     ( *cb )(
+            void *,
+            const uint8_t *,
+            uint8_t,
+            uint64_t,
+            uint64_t,
+            uint8_t);
         void    *arg;
         uint8_t  fh[CHIMERA_VFS_FH_SIZE];
         uint8_t  fh_len;
@@ -6488,9 +6495,9 @@ memfs_lease_recall_sweep(
                 due[n].cb  = agg->recall_cb;
                 due[n].arg = agg->recall_arg;
                 memcpy(due[n].fh, f->fh, f->fh_len);
-                due[n].fh_len   = f->fh_len;
-                due[n].fh_hash  = f->fh_hash;
-                due[n].token    = agg->token;
+                due[n].fh_len  = f->fh_len;
+                due[n].fh_hash = f->fh_hash;
+                due[n].token   = agg->token;
                 n++;
                 agg->recall_due = 0;
             }

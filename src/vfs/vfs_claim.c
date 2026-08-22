@@ -1352,7 +1352,8 @@ chimera_vfs_claim_pump_pending(
          * there after confirmation. */
         if (result == CHIMERA_CLAIM_GRANTED &&
             t->claim->klass == CHIMERA_CLAIM_CLASS_RANGE &&
-            state->lease_capable && !file->bl_disabled) {
+            !file->bl_disabled &&
+            chimera_vfs_claim_backend_capable(state)) {
             chimera_vfs_claim_backend_defer_ticket(state, t);
             continue;
         }

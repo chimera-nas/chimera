@@ -174,6 +174,12 @@ chimera_vfs_claim_trigger_ns_unlink(
 /* Backend projection internals                                       */
 /* ------------------------------------------------------------------ */
 
+/* Lazy CAP_LEASE capability probe (modules register after the service
+ * attaches; scans once, caches).  Safe from any thread post-registration. */
+bool
+chimera_vfs_claim_backend_capable(
+    struct chimera_vfs_state *state);
+
 /* Confirm a locally-granted RANGE claim with the backend before its ticket
  * callback fires; `thread` must be the CALLING vfs thread (its request pool
  * is per-thread and unlocked). */

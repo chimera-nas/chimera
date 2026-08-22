@@ -295,11 +295,12 @@ chimera_vfs_io_try(
 
     if (result == CHIMERA_CLAIM_GRANTED) {
         /* Backend cover gate (CAP_LEASE): the implicit claim's bits must be
-         * inside the node's aggregate token before the I/O proceeds.  Not
-         * covered: park (want recorded so the union in flight includes it)
-         * unless the backend already refused the bit -- then fail EACCES. */
-        if (state->lease_capable && !file->bl_disabled &&
-            (need & (uint8_t) ~file->bl_held_used)) {
+        * inside the node's aggregate token before the I/O proceeds.  Not
+        * covered: park (want recorded so the union in flight includes it)
+        * unless the backend already refused the bit -- then fail EACCES. */
+        if (!file->bl_disabled &&
+            (need & (uint8_t) ~file->bl_held_used) &&
+            chimera_vfs_claim_backend_capable(state)) {
             if (file->bl_state == CHIMERA_VFS_BL_HELD &&
                 (file->bl_refused & need)) {
                 pthread_mutex_unlock(&file->lock);

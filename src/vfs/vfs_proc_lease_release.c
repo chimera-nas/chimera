@@ -34,10 +34,13 @@ chimera_vfs_lease_release_backend(
     chimera_vfs_lease_release_backend_cb_t callback,
     void                                  *private_data)
 {
-    struct chimera_vfs_module  *module = chimera_vfs_get_module(thread, fh, fh_len);
+    void                       *mount_private;
+    struct chimera_vfs_module  *module =
+        chimera_vfs_resolve_mount(thread, fh, fh_len, 1, &mount_private);
     struct chimera_vfs_request *request;
 
     request = chimera_vfs_request_alloc_common(thread, NULL, module,
+                                               mount_private,
                                                fh, fh_len, fh_hash,
                                                CHIMERA_VFS_CAP_LEASE);
 

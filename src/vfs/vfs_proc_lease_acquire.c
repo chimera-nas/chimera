@@ -39,20 +39,24 @@ chimera_vfs_lease_acquire_backend(
     uint64_t                               length,
     const struct chimera_claim_owner      *owner,
     uint64_t                               prev_token,
-    void                                   ( *recall_cb )(void          *recall_arg,
-                                                          const uint8_t *fh,
-                                                          uint8_t        fh_len,
-                                                          uint64_t       fh_hash,
-                                                          uint64_t       token,
-                                                          uint8_t        retain),
+    void                                ( *recall_cb )(
+        void          *recall_arg,
+        const uint8_t *fh,
+        uint8_t        fh_len,
+        uint64_t       fh_hash,
+        uint64_t       token,
+        uint8_t        retain),
     void                                  *recall_arg,
     chimera_vfs_lease_acquire_backend_cb_t callback,
     void                                  *private_data)
 {
-    struct chimera_vfs_module  *module = chimera_vfs_get_module(thread, fh, fh_len);
+    void                       *mount_private;
+    struct chimera_vfs_module  *module =
+        chimera_vfs_resolve_mount(thread, fh, fh_len, 1, &mount_private);
     struct chimera_vfs_request *request;
 
     request = chimera_vfs_request_alloc_common(thread, NULL, module,
+                                               mount_private,
                                                fh, fh_len, fh_hash,
                                                CHIMERA_VFS_CAP_LEASE);
 

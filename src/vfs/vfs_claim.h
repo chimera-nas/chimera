@@ -87,11 +87,11 @@ struct chimera_vfs_file_state {
     uint8_t                             bl_held_deny;
     uint8_t                             bl_want_used;
     uint8_t                             bl_refused;    /* bits the backend
-                                                          denied; cleared on
-                                                          any state change    */
+                                                        * denied; cleared on
+                                                        * any state change    */
     uint8_t                             bl_recall_retain;
     uint8_t                             bl_ref_held;   /* token holds a file
-                                                          self-reference      */
+                                                        * self-reference      */
     uint64_t                            bl_token;
     uint64_t                            bl_last_used;  /* stopwatch ticks     */
     uint8_t                             bl_work_queued;
@@ -123,29 +123,29 @@ enum chimera_vfs_backend_lease_state {
 };
 
 struct chimera_vfs_state {
-    struct chimera_vfs_state_shard shards[CHIMERA_VFS_STATE_NUM_SHARDS];
-    uint32_t                       default_break_deadline_ms;
-    uint32_t                       implicit_idle_ms;
+    struct chimera_vfs_state_shard       shards[CHIMERA_VFS_STATE_NUM_SHARDS];
+    uint32_t                             default_break_deadline_ms;
+    uint32_t                             implicit_idle_ms;
 
     /* Backend lease projection service: work is posted here from any thread
      * and drained on the service thread (the VFS close thread), which owns
      * every backend lease dispatch for AGGREGATE tokens.  lease_capable is
      * false when no registered module declares CHIMERA_VFS_CAP_LEASE, making
      * every projection hook a cheap no-op. */
-    uint8_t                        lease_capable;
-    uint8_t                        lease_probed; /* modules scanned (lazy: the
-                                                    close thread attaches
-                                                    before modules register) */
-    struct chimera_vfs            *vfs;
-    struct chimera_claim_owner     node_owner;   /* this node's wire identity */
-    pthread_mutex_t                service_lock;
-    struct chimera_vfs_file_state *service_head;
-    struct chimera_vfs_file_state *service_tail;
-    struct chimera_vfs_thread     *service_thread;
-    struct evpl_doorbell          *service_doorbell;
+    uint8_t                              lease_capable;
+    uint8_t                              lease_probed; /* modules scanned (lazy: the
+                                                       * close thread attaches
+                                                       * before modules register) */
+    struct chimera_vfs                  *vfs;
+    struct chimera_claim_owner           node_owner; /* this node's wire identity */
+    pthread_mutex_t                      service_lock;
+    struct chimera_vfs_file_state       *service_head;
+    struct chimera_vfs_file_state       *service_tail;
+    struct chimera_vfs_thread           *service_thread;
+    struct evpl_doorbell                *service_doorbell;
     /* Deferred RANGE-projection tickets handed to the service thread by the
      * pending-queue pump (the pump has no vfs thread of its own). */
-    struct chimera_vfs_pending_acquire *service_tickets;
+    struct chimera_vfs_pending_acquire  *service_tickets;
     /* Projected RANGE tokens awaiting fire-and-forget release on the
      * service thread (claim teardown may run on any thread). */
     struct chimera_vfs_bl_token_release *token_releases;

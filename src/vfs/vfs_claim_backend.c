@@ -124,8 +124,8 @@ chimera_vfs_bl_post(
 /* Lazy module scan: the close thread attaches before backends register, so
  * the CAP_LEASE probe happens on first use.  The modules array is stable
  * once serving begins. */
-static inline bool
-chimera_vfs_bl_capable(struct chimera_vfs_state *state)
+bool
+chimera_vfs_claim_backend_capable(struct chimera_vfs_state *state)
 {
     int i;
 
@@ -155,7 +155,7 @@ chimera_vfs_claim_backend_reeval(
     bool    post = false;
 
     if (!state || !file || file->bl_disabled ||
-        !chimera_vfs_bl_capable(state)) {
+        !chimera_vfs_claim_backend_capable(state)) {
         return;
     }
 
@@ -172,11 +172,11 @@ chimera_vfs_claim_backend_reeval(
              * empty idle token).  A refused bit is not re-requested until
              * something changes remotely (a recall clears bl_refused). */
             post = ((rev & ~file->bl_held_used) & ~file->bl_refused) != 0 ||
-                   (deny & ~file->bl_held_deny) != 0 ||
-                   ((rev | deny) == 0 &&
-                    chimera_vfs_claim_elapsed_ms(file->bl_last_used,
-                                                 chimera_vfs_now_ticks()) >=
-                    state->implicit_idle_ms);
+                (deny & ~file->bl_held_deny) != 0 ||
+                ((rev | deny) == 0 &&
+                 chimera_vfs_claim_elapsed_ms(file->bl_last_used,
+                                              chimera_vfs_now_ticks()) >=
+                 state->implicit_idle_ms);
             break;
         case CHIMERA_VFS_BL_RECALLING:
             /* Completion check: the drain is done when the union fits the
@@ -212,9 +212,9 @@ chimera_vfs_bl_acquire_complete(
     uint64_t               token,
     void                  *private_data)
 {
-    struct chimera_vfs_bl_op      *op    = private_data;
-    struct chimera_vfs_state      *state = op->state;
-    struct chimera_vfs_file_state *file  = op->file;
+    struct chimera_vfs_bl_op      *op       = private_data;
+    struct chimera_vfs_state      *state    = op->state;
+    struct chimera_vfs_file_state *file     = op->file;
     bool                           take_ref = false;
 
     pthread_mutex_lock(&file->lock);
@@ -295,9 +295,9 @@ chimera_vfs_bl_step(
 {
     struct chimera_vfs_bl_op *op;
     uint8_t                   rev, deny;
-    uint8_t                   action = 0; /* 1=acquire, 2=release(ack) */
-    uint64_t                  token  = 0;
-    uint8_t                   retained = 0;
+    uint8_t                   action     = 0; /* 1=acquire, 2=release(ack) */
+    uint64_t                  token      = 0;
+    uint8_t                   retained   = 0;
     uint64_t                  prev_token = 0;
 
     /* Resolve the module once: a non-CAP_LEASE file disables projection. */
@@ -368,7 +368,7 @@ chimera_vfs_bl_step(
         return;
     }
 
-    op = calloc(1, sizeof(*op));
+    op           = calloc(1, sizeof(*op));
     op->state    = state;
     op->file     = file;
     op->req_used = rev;
@@ -447,7 +447,7 @@ chimera_vfs_bl_recall_drive(
     struct chimera_vfs_state      *state,
     struct chimera_vfs_file_state *file)
 {
-    uint8_t retain = file->bl_recall_retain;
+    uint8_t retain     = file->bl_recall_retain;
     bool    flush_only = (retain & CHIMERA_CLAIM_R) != 0;
 
     /* Recall the cache-class holders (delegations, oplocks, leases) via the
@@ -479,7 +479,7 @@ chimera_vfs_claim_backend_service(struct chimera_vfs_state *state)
     struct chimera_vfs_file_state      *head, *file, *next;
     struct chimera_vfs_pending_acquire *tickets, *t, *tnext;
 
-    if (!state || !chimera_vfs_bl_capable(state)) {
+    if (!state || !chimera_vfs_claim_backend_capable(state)) {
         return;
     }
 
@@ -495,7 +495,7 @@ chimera_vfs_claim_backend_service(struct chimera_vfs_state *state)
     pthread_mutex_unlock(&state->service_lock);
 
     for (file = head; file; file = next) {
-        next = file->bl_work_next;
+        next               = file->bl_work_next;
         file->bl_work_next = NULL;
 
         if (file->bl_state == CHIMERA_VFS_BL_RECALLING) {
@@ -620,7 +620,7 @@ chimera_vfs_claim_backend_project_range(
     struct chimera_vfs_file_state  *file  = ticket->file;
     struct chimera_vfs_bl_range_op *op;
 
-    op = calloc(1, sizeof(*op));
+    op         = calloc(1, sizeof(*op));
     op->state  = state;
     op->file   = file;
     op->ticket = ticket;
@@ -647,7 +647,7 @@ chimera_vfs_claim_backend_range_projects(
     struct chimera_vfs_thread     *thread)
 {
     if (!state || !thread || file->bl_disabled ||
-        !chimera_vfs_bl_capable(state)) {
+        !chimera_vfs_claim_backend_capable(state)) {
         return false;
     }
     if (!file->bl_probed) {
@@ -675,7 +675,7 @@ chimera_vfs_claim_backend_release_token(
 {
     struct chimera_vfs_bl_token_release *rel;
 
-    if (!state || !token || !chimera_vfs_bl_capable(state)) {
+    if (!state || !token || !chimera_vfs_claim_backend_capable(state)) {
         return;
     }
 

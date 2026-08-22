@@ -103,8 +103,8 @@ chimera_vfs_claim_range_overlap_i(
 
 /* Backend lease wire shapes (CHIMERA_VFS_OP_LEASE_ACQUIRE/_RELEASE): the
  * revocable per-node AGGREGATE token vs a binding per-owner RANGE record. */
-#define CHIMERA_VFS_LEASE_AGGREGATE  1
-#define CHIMERA_VFS_LEASE_RANGE      2
+#define CHIMERA_VFS_LEASE_AGGREGATE 1
+#define CHIMERA_VFS_LEASE_RANGE     2
 
 /* Identity block.  client_key is the node-local fast compare; the canonical
  * cluster-stable bytes (co_ownerid, ClientGuid, caller_name) are registered

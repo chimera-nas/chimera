@@ -1171,39 +1171,40 @@ struct chimera_vfs_request {
              * wire: masks + a cluster-meaningful owner, never a protocol
              * construct.  klass selects the claim shape. */
             uint8_t                    klass;      /* CHIMERA_VFS_LEASE_AGGREGATE
-                                                      / CHIMERA_VFS_LEASE_RANGE  */
+                                                    * / CHIMERA_VFS_LEASE_RANGE  */
             uint8_t                    rev_used;   /* AGGREGATE: revocable use
-                                                      union (CHIMERA_CLAIM_R|W)  */
+                                                    * union (CHIMERA_CLAIM_R|W)  */
             uint8_t                    bind_deny;  /* AGGREGATE: binding deny
-                                                      union (R|W|D)              */
+                                                    * union (R|W|D)              */
             uint8_t                    exclusive;  /* RANGE only                 */
             uint64_t                   offset;     /* RANGE only                 */
             uint64_t                   length;     /* RANGE only; UINT64_MAX =
-                                                      to-EOF, 0 = zero-byte      */
+                                                    * to-EOF, 0 = zero-byte      */
             struct chimera_claim_owner owner;      /* AGGREGATE: the node owner;
-                                                      RANGE: the lock's cluster-
-                                                      stable owner identity      */
+                                                    *  RANGE: the lock's cluster-
+                                                    *  stable owner identity      */
             uint64_t                   prev_token; /* AGGREGATE escalate: the
-                                                      currently held token (0 =
-                                                      fresh); the backend
-                                                      replaces it atomically     */
+                                                    * currently held token (0 =
+                                                    * fresh); the backend
+                                                    * replaces it atomically     */
             /* Recall path, captured at grant: the backend invokes recall_cb
-             * (any thread) to demand the token back down to `retain`; the
-             * node's eventual LEASE_RELEASE with that token is the ack.  The
-             * core marshals internally; backends store the pair verbatim. */
-            void                       ( *recall_cb )(void          *recall_arg,
-                                                      const uint8_t *fh,
-                                                      uint8_t        fh_len,
-                                                      uint64_t       fh_hash,
-                                                      uint64_t       token,
-                                                      uint8_t        retain);
+            * (any thread) to demand the token back down to `retain`; the
+            * node's eventual LEASE_RELEASE with that token is the ack.  The
+            * core marshals internally; backends store the pair verbatim. */
+            void                       ( *recall_cb )(
+                void          *recall_arg,
+                const uint8_t *fh,
+                uint8_t        fh_len,
+                uint64_t       fh_hash,
+                uint64_t       token,
+                uint8_t        retain);
             void                      *recall_arg;
             uint64_t                   r_token;    /* backend-opaque, 0 = none  */
             uint8_t                    r_granted;  /* AGGREGATE: granted subset
-                                                      of rev_used (deny bits are
-                                                      all-or-nothing with the
-                                                      grant); RANGE: nonzero =
-                                                      granted (all-or-nothing)  */
+                                                    *  of rev_used (deny bits are
+                                                    *  all-or-nothing with the
+                                                    *  grant); RANGE: nonzero =
+                                                    *  granted (all-or-nothing)  */
         } lease_acquire;
 
         struct {
