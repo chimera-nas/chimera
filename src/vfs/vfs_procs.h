@@ -617,7 +617,7 @@ chimera_vfs_read_owned(
     struct evpl_iovec                    *iov,
     int                                   niov,
     uint64_t                              attrmask,
-    const struct chimera_vfs_lease_owner *io_owner,
+    const struct chimera_claim_actor     *io_owner,
     chimera_vfs_read_callback_t           callback,
     void                                 *private_data);
 
@@ -683,7 +683,7 @@ chimera_vfs_write_owned(
     uint64_t                              post_attr_mask,
     struct evpl_iovec                    *iov,
     int                                   niov,
-    const struct chimera_vfs_lease_owner *io_owner,
+    const struct chimera_claim_actor     *io_owner,
     chimera_vfs_write_callback_t          callback,
     void                                 *private_data);
 

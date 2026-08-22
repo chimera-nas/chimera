@@ -12,7 +12,7 @@
 #include "vfs_error.h"
 #include "vfs_cred.h"
 #include "vfs_pnfs.h"
-#include "vfs_lease_types.h"
+#include "vfs_claim_types.h"
 #include "evpl/evpl.h"
 #include "prometheus-c.h"
 #include "vfs_clock.h"
@@ -516,7 +516,7 @@ struct chimera_vfs_request {
      * once the lease is held (normally chimera_vfs_dispatch); io_lease_file
      * is the per-file state whose implicit lease this request has pinned
      * (NULL on the fast path where nothing was pinned). */
-    struct chimera_vfs_lease_owner     io_owner;
+    struct chimera_claim_actor         io_owner;
     uint8_t                            io_owner_valid;
     /* Set by chimera_vfs_io_recall(): this request is a namespace/metadata
      * mutation that must recall every caching lease on a target file (regardless
