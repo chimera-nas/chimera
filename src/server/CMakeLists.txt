@@ -21,6 +21,14 @@ add_subdirectory(smb)
 
 add_subdirectory(rest)
 
+# The FUSE protocol server drives the raw /dev/fuse kernel ABI
+# (<linux/fuse.h>), which exists only on Linux.  server.c guards its
+# registration with #ifdef __linux__.
+if (CHIMERA_LINUX)
+    add_subdirectory(fuse)
+    target_link_libraries(chimera_server chimera_fuse)
+endif()
+
 if (NOT DISABLE_TESTS)
     add_subdirectory(tests)
 endif()
