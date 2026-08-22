@@ -592,6 +592,7 @@ main(
     if (ntraces == 0) {
         fprintf(stderr, "usage: %s [--trace <f> ...] [--trace-dir <dir>]\n",
                 argv[0]);
+        mbt_free_traces(traces, ntraces);
         return 2;
     }
 
@@ -599,6 +600,7 @@ main(
      * generation instance -- see smb2_mbt_add_batch in CMakeLists), so the
      * shared server is configured once from the first trace's LInit. */
     if (read_caps(traces[0], &opts) != 0) {
+        mbt_free_traces(traces, ntraces);
         return 2;
     }
 
@@ -612,6 +614,7 @@ main(
     }
 
     smb2_env_stop(&g_env);
+    mbt_free_traces(traces, ntraces);
 
     if (total) {
         fprintf(stderr, "%d total mismatch(es) across %d trace(s)\n",

@@ -1657,6 +1657,7 @@ main(
                         "usage: %s [--trace FILE ...] [--trace-dir DIR] "
                         "[--block-size N] [--max-attr-skip-rate F] "
                         "[--dry-run] [--verbose]\n", argv[0]);
+                mbt_free_traces(traces, ntraces);
                 return 2;
         } /* switch */
     }
@@ -1664,6 +1665,7 @@ main(
     if (ntraces == 0) {
         fprintf(stderr, "%s: at least one --trace or --trace-dir is required\n",
                 argv[0]);
+        mbt_free_traces(traces, ntraces);
         return 2;
     }
 
@@ -1687,5 +1689,6 @@ main(
         mbt_env_stop(&env);
     }
 
+    mbt_free_traces(traces, ntraces);
     return failures ? 1 : 0;
 } /* main */

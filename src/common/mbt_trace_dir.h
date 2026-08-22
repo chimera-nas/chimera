@@ -99,7 +99,9 @@ mbt_collect_traces(
                 loc[ln++] = strdup(path);
             }
             closedir(d);
-            qsort(loc, ln, sizeof(*loc), mbt_pathcmp);
+            if (ln > 0) {
+                qsort(loc, ln, sizeof(*loc), mbt_pathcmp);
+            }
             for (j = 0; j < ln; j++) {
                 if (n == cap) {
                     cap   = cap ? cap * 2 : 64;
@@ -114,5 +116,20 @@ mbt_collect_traces(
     *count = (int) n;
     return paths;
 } /* mbt_collect_traces */
+
+/* Frees an array (and the strings it owns) returned by mbt_collect_traces.
+ * static inline so a TU that never calls it does not trip -Wunused-function. */
+static inline void
+mbt_free_traces(
+    char **traces,
+    int    count)
+{
+    int i;
+
+    for (i = 0; i < count; i++) {
+        free(traces[i]);
+    }
+    free(traces);
+} /* mbt_free_traces */
 
 #endif /* CHIMERA_MBT_TRACE_DIR_H */
