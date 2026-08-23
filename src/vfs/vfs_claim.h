@@ -259,6 +259,14 @@ chimera_vfs_claim_init_delegation(
 /* Byte-range lock.  smb selects the mandatory (LOCK_SMB) construct; the
 * owner's key should carry the open's grant LeaseKey when it holds one so
 * the fresh-cache denial self-exempts at KEY (brl2 across two opens). */
+/* FUSE kernel read-cache grant (one per mount+file; owner.client_key =
+ * mount identity): DELEG_R-shaped rows and awaited-class breaks, but
+ * sweep-revocable at the break deadline (the liveness backstop). */
+void
+chimera_vfs_claim_init_fuse_grant(
+    struct chimera_vfs_claim         *claim,
+    const struct chimera_claim_owner *owner);
+
 void
 chimera_vfs_claim_init_range(
     struct chimera_vfs_claim         *claim,
