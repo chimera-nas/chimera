@@ -1602,6 +1602,14 @@ struct diskfs_thread {
     struct diskfs_drain         *drain_head, *drain_tail;
     int                          draining;
 
+    /* Background transactions started on this thread AFTER their request
+    * completed (currently only the RMFS root burn-down kickoff).  They hold
+    * inode locks (the fs root + an orphan shard) that no other teardown
+    * accounting covers, so diskfs_thread_destroy pumps the event loop until
+    * this reaches zero; destroying the thread mid-flight would leak those
+    * locks and wedge the reclaim workers' drains on the orphan shard. */
+    int                          bg_txns;
+
     /* Deferred-mtime flusher: this worker owns inode-cache shards where
      * (shard % num_active_threads) == thread_id.  The periodic timer kicks the
      * driver, which flushes eligible dirty inodes one txn at a time (drain
@@ -2341,11 +2349,13 @@ diskfs_block_claim(
 struct diskfs_block *
 diskfs_block_claim_async(
     struct diskfs_thread *thread,
-    uint32_t device_id,
-    uint64_t device_offset,
-    int is_new,
-    void ( *resume )(struct diskfs_thread *, void *),
-    void *arg);
+    uint32_t              device_id,
+    uint64_t              device_offset,
+    int                   is_new,
+    void (               *resume )(
+        struct diskfs_thread *,
+        void *),
+    void                 *arg);
 
 void
 diskfs_block_buf_release(
@@ -2545,7 +2555,8 @@ diskfs_orphan_op_start(
     uint64_t              inum,
     uint32_t              gen,
     int                   remove,
-    void (               *done )(void *priv),
+    void (               *done )(
+        void *priv),
     void                 *priv);
 
 void
@@ -2572,16 +2583,19 @@ diskfs_gen_extend(
 int
 diskfs_gen_alloc(
     struct diskfs_thread *thread,
-    uint32_t *r_gen,
-    void ( *resume )(struct diskfs_thread *, void *),
-    void *arg);
+    uint32_t             *r_gen,
+    void (               *resume )(
+        struct diskfs_thread *,
+        void *),
+    void                 *arg);
 
 void
 diskfs_inode_orphaned(
     struct diskfs_thread *thread,
     struct diskfs_txn    *txn,
     struct diskfs_inode  *inode,
-    void (               *done )(void *priv),
+    void (               *done )(
+        void *priv),
     void                 *priv);
 
 void
@@ -3498,14 +3512,16 @@ diskfs_kv_entry_alloc(
 static inline int
 diskfs_inode_alloc_space(
     struct diskfs_thread *thread,
-    struct diskfs_txn *txn,
-    struct diskfs_inode *inode,
-    int64_t desired_size,
-    uint64_t floor,
-    uint64_t *r_device_id,
-    uint64_t *r_device_offset,
-    void ( *resume )(struct diskfs_thread *, void *),
-    void *resume_arg);
+    struct diskfs_txn    *txn,
+    struct diskfs_inode  *inode,
+    int64_t               desired_size,
+    uint64_t              floor,
+    uint64_t             *r_device_id,
+    uint64_t             *r_device_offset,
+    void (               *resume )(
+        struct diskfs_thread *,
+        void *),
+    void                 *resume_arg);
 
 static inline void
 diskfs_thread_free_space(
@@ -4679,14 +4695,16 @@ diskfs_kv_entry_alloc(
 static inline int
 diskfs_inode_alloc_space(
     struct diskfs_thread *thread,
-    struct diskfs_txn *txn,
-    struct diskfs_inode *inode,
-    int64_t desired_size,
-    uint64_t floor,
-    uint64_t *r_device_id,
-    uint64_t *r_device_offset,
-    void ( *resume )(struct diskfs_thread *, void *),
-    void *resume_arg)
+    struct diskfs_txn    *txn,
+    struct diskfs_inode  *inode,
+    int64_t               desired_size,
+    uint64_t              floor,
+    uint64_t             *r_device_id,
+    uint64_t             *r_device_offset,
+    void (               *resume )(
+        struct diskfs_thread *,
+        void *),
+    void                 *resume_arg)
 {
     uint32_t          dev_id;
     int               rc;
