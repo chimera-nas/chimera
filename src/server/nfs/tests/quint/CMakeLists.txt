@@ -81,6 +81,31 @@ set_tests_properties(chimera/server/nfs/mbt/batch_memfs PROPERTIES
     LABELS "nfs3_mbt;memfs"
     TIMEOUT 300)
 
+# The same NFS3 corpus replayed against the on-disk backends.  The corpus is
+# protocol-level (RFC 1813) and backend-agnostic, so a divergence here is a
+# genuine backend deviation from the model memfs already satisfies.  Each
+# replay process self-provisions its scratch (device image / rocksdb dir) under
+# its own mkdtemp session dir, so the batches still run fully parallel and clean
+# up with the temp dir.  Gated on the storage each backend needs: diskfs on
+# libaio (its device type), cairn on rocksdb.
+if(HAVE_LIBAIO)
+    add_test(NAME chimera/server/nfs/mbt/batch_diskfs
+        COMMAND $<TARGET_FILE:nfs3_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/nfs3
+                --backend diskfs)
+    set_tests_properties(chimera/server/nfs/mbt/batch_diskfs PROPERTIES
+        LABELS "nfs3_mbt;diskfs"
+        TIMEOUT 300)
+endif()
+
+if(CAIRN_ENABLED)
+    add_test(NAME chimera/server/nfs/mbt/batch_cairn
+        COMMAND $<TARGET_FILE:nfs3_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/nfs3
+                --backend cairn)
+    set_tests_properties(chimera/server/nfs/mbt/batch_cairn PROPERTIES
+        LABELS "nfs3_mbt;cairn"
+        TIMEOUT 300)
+endif()
+
 # SKIP_RETURN_CODE 77 still applies to NFS4: a trace whose capability profile
 # does not match the live server exits 77 individually; the batch reports SKIP
 # only if every trace skips, otherwise the runnable traces gate it.
