@@ -301,6 +301,23 @@ struct smb2_env_opts {
     int continuous_availability;
 };
 
+/* Do the two profiles configure the server identically?  Compared field by
+ * field rather than with memcmp: the struct has padding, and a bytewise
+ * compare would silently start reporting spurious differences the moment a
+ * field of another width is added. */
+static inline int
+smb2_env_opts_eq(
+    const struct smb2_env_opts *a,
+    const struct smb2_env_opts *b)
+{
+    return a->oplocks == b->oplocks &&
+           a->leases == b->leases &&
+           a->directory_leases == b->directory_leases &&
+           a->persistent_handles == b->persistent_handles &&
+           a->force_level2 == b->force_level2 &&
+           a->continuous_availability == b->continuous_availability;
+} /* smb2_env_opts_eq */
+
 /* Connections are never recycled: a transport drop RETIRES a connection (it
  * keeps its slot so its struct outlives evpl_destroy) and the reconnect takes a
  * fresh one, so a long durable/replay walk consumes one slot per drop.
@@ -920,6 +937,22 @@ smb2c_set_context(const char *ctx)
 /* Build the 4-byte NetBIOS header + 64-byte SMB2 header into c->sbuf for
  * `command`; zero a generous body region so all Reserved bytes are clean;
  * returns the offset of the body (== 4 + SMB2_HDR_SIZE). */
+/* Report a request built with no connection and die.  Marked noreturn so both
+ * the reader and the static analyzer know the dereference below it is
+ * unreachable with a NULL connection -- otherwise every builder that touches
+ * c->sbuf after calling smb2c_begin looks like a null dereference. */
+__attribute__((noreturn))
+static inline void
+smb2c_no_conn(uint16_t command)
+{
+    fprintf(stderr,
+            "smb2 harness: BUG -- request 0x%04x built with no connection"
+            "%s%s\n", command,
+            smb2c_context_str ? "\n  while replaying: " : "",
+            smb2c_context_str ? smb2c_context_str : "");
+    exit(5);
+} /* smb2c_no_conn */
+
 static inline int
 smb2c_begin(
     struct smb2_conn *c,
@@ -936,12 +969,7 @@ smb2c_begin(
     * crash and is not one.  Fail here instead, naming the command and the
     * replay context, so the caller's bookkeeping bug is the diagnosis. */
     if (!c) {
-        fprintf(stderr,
-                "smb2 harness: BUG -- request 0x%04x built with no connection"
-                "%s%s\n", command,
-                smb2c_context_str ? "\n  while replaying: " : "",
-                smb2c_context_str ? smb2c_context_str : "");
-        exit(5);
+        smb2c_no_conn(command);
     }
 
     h = c->sbuf + 4;            /* SMB2 header start */
@@ -2118,8 +2146,15 @@ smb2_set_info(
     const void       *buf,
     uint32_t          buf_len)
 {
-    int      b       = smb2c_begin(c, SMB2_SET_INFO, 0);
-    uint8_t *body    = c->sbuf + b;
+    int      b;
+    uint8_t *body;
+
+    if (!c) {
+        smb2c_no_conn(SMB2_SET_INFO);
+    }
+
+    b    = smb2c_begin(c, SMB2_SET_INFO, 0);
+    body = c->sbuf + b;
     int      buf_off = SMB2_HDR_SIZE + 32;
 
     p16(body, 0, 33);                  /* StructureSize */
