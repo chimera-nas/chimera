@@ -173,6 +173,12 @@ struct nfs_request {
      * owner seqid + caches the reply iff this is non-NULL and the status
      * is in nfs4_seqid_should_advance(). */
     struct nfs_open_owner            *open_4_0_owner;
+    /* An OPEN/UNCHECKED of an existing file asked for size 0.  The truncate
+     * is held back until the share reservation is granted (see
+     * chimera_nfs4_open_complete) so a denied OPEN cannot destroy the
+     * file's contents. */
+    bool                              open_trunc_pending;
+    struct chimera_vfs_attrs          open_trunc_attr;
     /* Per-owner seqid bookkeeping for the 4.0 LOCK flow.  For
      * new_lock_owner=true both open_owner (open_seqid) and lock_owner
      * (lock_seqid) advance; for new_lock_owner=false only the lock_owner
