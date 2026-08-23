@@ -174,7 +174,13 @@ chimera_vfs_write_owned(
 {
     struct chimera_vfs_write_gate *gate;
 
-    if (chimera_vfs_gate_needed(handle->vfs_module->capabilities, cred)) {
+    /* gate_needed_dac, not gate_needed: a DELEGATES_DAC passthrough backend
+     * resolves the object with open_by_handle_at (privileged) and caches the
+     * resulting fd, so the kernel never checks WRITE under the caller's fsuid --
+     * the "kernel enforces the leaf" assumption does not hold for cached handle
+     * opens.  The engine must enforce write access itself against the real
+     * on-disk attrs, exactly as it already does for the path prefix. */
+    if (chimera_vfs_gate_needed_dac(handle->vfs_module->capabilities, cred)) {
         if (handle->granted_valid) {
             if (!(handle->granted_access & CHIMERA_ACE_WRITE_DATA)) {
                 callback(CHIMERA_VFS_EACCES, 0, 0, NULL, NULL, private_data);
