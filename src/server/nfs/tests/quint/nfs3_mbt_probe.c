@@ -121,7 +121,7 @@ main(
 
     printf("backend: %s\n", backend);
 
-    res = mbt_mnt(env, "/share");
+    res = mbt_mnt(env, "/fs0");
     if (res->rpc_err || res->status != MNT3_OK) {
         fprintf(stderr, "MNT /share failed: %u\n", res->status);
         return 1;

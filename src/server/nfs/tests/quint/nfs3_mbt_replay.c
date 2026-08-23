@@ -1599,11 +1599,15 @@ run_trace(
     o->fileid_known = calloc(MBT_MAX_FIDS, sizeof(*o->fileid_known));
     o->scratch      = malloc(MBT_MAX_DATA);
 
-    struct mbt_result *res = mbt_mnt(env, "/share");
+    char               mntpath[80];
+
+    snprintf(mntpath, sizeof(mntpath), "/%s", fsname);
+
+    struct mbt_result *res = mbt_mnt(env, mntpath);
 
     if (res->rpc_err != 0 || res->status != MNT3_OK || !res->obj_fh.has) {
-        fprintf(stderr, "%s: MNT /share failed: rpc_err=%d status=%u\n",
-                trace_path, res->rpc_err, res->status);
+        fprintf(stderr, "%s: MNT %s failed: rpc_err=%d status=%u\n",
+                trace_path, mntpath, res->rpc_err, res->status);
         failed = 1;
         goto out;
     }

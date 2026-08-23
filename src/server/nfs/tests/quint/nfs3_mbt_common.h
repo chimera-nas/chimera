@@ -263,6 +263,17 @@ mbt_env_open_opts(
 
     env->module = (opts && opts->module) ? opts->module : "memfs";
 
+    /* Deliberately NOT raising common.umount_timeout_ms here.
+     *
+     * chimera_vfs_umount already purges the mount's cached opens and dispatches
+     * their closes immediately -- it never waits out the open cache's idle
+     * sweep (see chimera_vfs_open_cache_purge_by_mount).  So the only thing it
+     * can be waiting on is a handle with opencnt > 0, i.e. one that is still
+     * genuinely open.  The harness closes every open the trace left behind
+     * (v4_close_dangling_opens) before tearing the filesystem down, so it
+     * should never have to wait at all.  A longer timeout would just hide a
+     * leaked handle behind a slower test. */
+
     if (opts) {
         if (opts->nfs4_delegations) {
             chimera_server_config_set_nfs4_delegations(config, 1);
@@ -462,6 +473,27 @@ mbt_env_fs_setup(
     struct mbt_env *env,
     const char     *fsname)
 {
+    char path[80];
+
+    snprintf(path, sizeof(path), "/%s", fsname);
+
+    /* Mount and export under the *filesystem's own* name rather than a shared
+     * "share", and check every call.
+     *
+     * A trace that diverges stops mid-replay, and from that point the model's
+     * view of the server is by definition wrong -- so the dangling-open sweep,
+     * which closes what the model believes is open, cannot close what the
+     * server actually has.  The leftover handle keeps the filesystem
+     * referenced, umount reports EBUSY and (correctly) leaves the mount
+     * registered.  With one shared mount name that poisoned the entire rest of
+     * the batch: every later trace mounted its own filesystem under the same
+     * name, silently got the stuck one instead, and reported its predecessor's
+     * leftovers as divergences.  One genuine failure turned into dozens of
+     * phantom ones.
+     *
+     * Per-trace names make a stuck mount inert: it keeps its own name, the
+     * next trace's mount cannot collide with it, and the batch goes on
+     * reporting only real divergences. */
     if (mbt_module_is_passthrough(env->module)) {
         char dir[300];
         int  mrc;
@@ -475,7 +507,7 @@ mbt_env_fs_setup(
                     env->module, dir, strerror(errno));
             exit(1);
         }
-        mrc = chimera_server_mount(env->server, "share", env->module, dir,
+        mrc = chimera_server_mount(env->server, path + 1, env->module, dir,
                                    NULL);
         if (mrc == CHIMERA_VFS_ENOTSUP) {
             /* The backing filesystem cannot produce file handles
@@ -500,11 +532,15 @@ mbt_env_fs_setup(
                     fsname);
             exit(1);
         }
-        chimera_server_mount(env->server, "share", env->module, fsname, NULL);
+        if (chimera_server_mount(env->server, path + 1, env->module, fsname,
+                                 NULL) != 0) {
+            fprintf(stderr, "failed to mount %s filesystem %s\n", env->module,
+                    fsname);
+            exit(1);
+        }
     }
-    if (chimera_server_create_export(env->server, "/share", "/share", 0,
-                                     NULL) != 0) {
-        fprintf(stderr, "failed to create /share export\n");
+    if (chimera_server_create_export(env->server, path, path, 0, NULL) != 0) {
+        fprintf(stderr, "failed to create %s export\n", path);
         exit(1);
     }
 } /* mbt_env_fs_setup */
@@ -516,10 +552,38 @@ mbt_env_fs_teardown(
     struct mbt_env *env,
     const char     *fsname)
 {
-    int tries = 0;
+    int  tries = 0;
+    int  rc;
 
-    chimera_server_remove_export(env->server, "/share");
-    chimera_server_unmount(env->server, "share");
+    char path[80];
+
+    snprintf(path, sizeof(path), "/%s", fsname);
+
+    chimera_server_remove_export(env->server, path);
+
+    /* The unmount status was previously discarded, and that is what made a
+     * batch run nondeterministic.  Every trace mounts its filesystem under the
+     * same name, so an unmount that reports EBUSY -- which also leaves the
+     * mount in the table -- means the next trace gets its predecessor's
+     * filesystem and reports the leftovers as divergences, attributed to
+     * whichever trace happened to follow a slow drain.  Across five identical
+     * runs that produced 0, 16, 42, 42 and 48 divergences.
+     *
+     * umount blocks until the mount is genuinely idle (it purges the cached
+     * opens and issues the backend closes itself), so a failure here is a real
+     * leak, not a timing hiccup to retry around: something still holds a
+     * reference after the configured 30s.  Fail loudly -- a hard stop is
+     * debuggable, a corpus silently replayed against the wrong filesystem is
+     * not. */
+    rc = chimera_server_unmount(env->server, path + 1);
+    if (rc != 0) {
+        fprintf(stderr,
+                "warning: unmount of %s returned %d -- a handle is still "
+                "open, most likely because a diverging trace stopped before "
+                "the model knew what to close.  The mount keeps its own name, "
+                "so later traces are unaffected.\n", fsname, rc);
+        return;
+    }
 
     /* Passthrough backends have no filesystem to remove; the unmounted host
      * dir is intentionally left in place (its inode must not be reused
@@ -534,12 +598,19 @@ mbt_env_fs_teardown(
      * the just-closed opens (v4_close_dangling_opens) draining on the server's
      * async close thread, so the fs can stay busy for a short window; retry
      * until it drains rather than leaking the filesystem (which would slow a
-     * long corpus quadratically).  5s ceiling, matching the SMB harness. */
+     * long corpus quadratically).
+     *
+     * Giving up here used to be a warning that carried on with the filesystem
+     * still alive, which is how a slow drain turned into unexplained
+     * divergences in some *later* trace.  A leaked fs makes every subsequent
+     * result unreliable, so fail loudly instead: a hard stop is debuggable, a
+     * corrupted corpus is not. */
     while (chimera_server_rmfs(env->server, env->module, fsname) != 0) {
-        if (++tries >= 5000) {
-            fprintf(stderr, "warning: rmfs %s still failed after %d retries\n",
+        if (++tries >= 30000) {
+            fprintf(stderr,
+                    "fatal: rmfs %s never drained after %d retries\n",
                     fsname, tries);
-            break;
+            exit(1);
         }
         usleep(1000);
     }
