@@ -317,6 +317,34 @@ reconcile(
     return NULL;
 } /* reconcile */
 
+/* RFC 1813 does not mandate error precedence when more than one error condition
+ * applies to a single request.  The model commits to one choice (which the
+ * mkfs backends mirror); the linux/io_uring passthrough backends follow the
+ * host kernel's order, which is equally valid.  Accept those standard-permitted
+ * alternatives so a legitimate precedence difference is not a divergence.  This
+ * is distinct from a chimera deviation (reconcile above): neither answer is
+ * wrong. */
+static int
+status_precedence_ok(
+    const char *tag,
+    uint32_t    expected,
+    uint32_t    actual)
+{
+    /* LINK whose source is a directory onto an already-existing name: the
+     * model reports ISDIR (21, source is a directory); Linux reports EXIST
+     * (17), having checked target existence first. */
+    if (strcmp(tag, "OLink") == 0 && expected == 21 && actual == 17) {
+        return 1;
+    }
+    /* RENAME onto a non-empty directory: the model reports ISDIR (21, target
+     * type conflict); Linux reports NOTEMPTY (66), having checked emptiness
+     * first. */
+    if (strcmp(tag, "ORename") == 0 && expected == 21 && actual == 66) {
+        return 1;
+    }
+    return 0;
+} /* status_precedence_ok */
+
 /* ---- oracle checks (ports of the Replayer methods) ----------------------- */
 
 static void
@@ -417,8 +445,17 @@ check_attrs(
                  what, wire_type, ftype, attrs->a.type);
     }
 
+    /* The standard leaves two modes unspecified, so conformant backends
+     * legitimately differ and the mode must not be asserted:
+     *   - Symlink permission bits (POSIX): Linux forces 0777, memfs keeps 0755.
+     *   - An exclusive-created regular file (RFC 1813 3.3.8): its mode is
+     *     undefined until the client's follow-up SETATTR, which the model marks
+     *     by a non-zero exclusive verifier (xverf); memfs defaults 0644, the
+     *     linux/io_uring backends 0600.
+     * The model keeps a concrete mode for its own DAC evaluation either way. */
     expect = op_i64(node, "mode");
-    if ((attrs->a.mode & 07777) != (uint32_t) expect) {
+    if (strcmp(ftype, "TLnk") != 0 && op_i64(node, "xverf") == 0 &&
+        (attrs->a.mode & 07777) != (uint32_t) expect) {
         mism_add(m, "%s: mode: expected %#o, got %#o",
                  what, (unsigned) expect, attrs->a.mode & 07777);
     }
@@ -482,6 +519,9 @@ check_status(
     (void) o;
     if (actual == expected) {
         return 1;
+    }
+    if (status_precedence_ok(tag, expected, actual)) {
+        return 0;
     }
     if (reconcile(tag, expected, actual) != NULL) {
         return 0;
@@ -1636,6 +1676,11 @@ main(
     int                  c;
     int                  i;
     struct mbt_env       env;
+
+    /* Neutralize the host umask so passthrough backends (linux/io_uring) apply
+     * client-sent modes verbatim and the export root keeps its 0777.  The mkfs
+     * backends store modes directly and are unaffected. */
+    umask(0);
 
     /* --trace/--trace-dir/--exclude-prefix are gathered from the raw argv by
      * the shared helper; getopt only needs to recognize them so it does not
