@@ -46,7 +46,31 @@ struct chimera_vfs_notify_watch;
 
 /* A /dev/fuse read must always offer room for max_write plus the request
  * headers, or the kernel fails the read with EINVAL. */
-#define CHIMERA_FUSE_BUFSZ           (CHIMERA_FUSE_MAX_WRITE + 4096)
+#define CHIMERA_FUSE_READ_LEN        (CHIMERA_FUSE_MAX_WRITE + 4096)
+
+/*
+ * Where the request is placed inside the buffer.
+ *
+ * The kernel lays a WRITE out contiguously as
+ * [fuse_in_header][fuse_write_in][payload], so the payload always begins
+ * exactly sizeof(fuse_in_header) + sizeof(fuse_write_in) == 80 bytes into
+ * the request.  Reading at that many bytes BELOW a page boundary puts the
+ * payload ON the boundary, which is what lets a backend DMA straight out of
+ * this buffer instead of bouncing it through an aligned staging copy --
+ * diskfs's zero-copy device write requires a single 4 KiB-aligned segment
+ * (its fast path additionally wants a 4 KiB-aligned file offset, which is
+ * the workload's business, not ours).  Costs one page of address space per
+ * request buffer and nothing else.
+ */
+#define CHIMERA_FUSE_REQ_OFF \
+        (4096 - (int) (sizeof(struct fuse_in_header) + sizeof(struct fuse_write_in)))
+
+#define CHIMERA_FUSE_BUFSZ           (CHIMERA_FUSE_REQ_OFF + CHIMERA_FUSE_READ_LEN)
+
+/* The invariant the offset above exists to create. */
+_Static_assert((CHIMERA_FUSE_REQ_OFF + sizeof(struct fuse_in_header) +
+                sizeof(struct fuse_write_in)) % 4096 == 0,
+               "FUSE write payload must land on a page boundary");
 
 /* Scratch iovec array for VFS reads: enough for max_write in 4KB pieces. */
 #define CHIMERA_FUSE_IOV_MAX         260
@@ -175,19 +199,42 @@ struct chimera_fuse_notice {
 };
 
 struct chimera_fuse_mount {
-    struct chimera_fuse_shared     *shared;
-    char                            mountpoint[256];
-    char                            share_path[256];
-    int                             allow_other;
-    int                             default_permissions;
-    uint32_t                        attr_timeout_ms;
-    uint32_t                        entry_timeout_ms;
-    uint32_t                        negative_timeout_ms;
+    struct chimera_fuse_shared *shared;
+    char                        mountpoint[256];
+    char                        share_path[256];
+    int                         allow_other;
+    int                         default_permissions;
+    uint32_t                    attr_timeout_ms;
+    uint32_t                    entry_timeout_ms;
+    uint32_t                    negative_timeout_ms;
     /* coherence=sync (default): replies carry cache TTLs only under a live
      * grant/watch, grants demand synchronous breaks (owner.sync_break), and
      * namespace mutations elsewhere gate on this kernel's invalidation acks.
      * coherence=ttl: the async model; timeouts alone bound staleness. */
-    int                             coherence_sync;
+    int                         coherence_sync;
+    /* direct_io: reply FOPEN_DIRECT_IO on every open, so the kernel never
+     * stages this mount's file data in its page cache -- reads and writes
+     * become exact (offset, length) requests built straight from the
+     * caller's pinned pages.  This is OUR choice, not the application's:
+     * it applies to a plain open() and imposes none of O_DIRECT's alignment
+     * requirements on the caller.  It removes one copy per operation in
+     * each direction and, for a page-aligned writer, is what lets a write
+     * reach the backend's DMA path; it also removes readahead, read
+     * caching, and write batching, which is far more expensive for small
+     * or repeated I/O.  Off by default; for bulk streaming workloads only.
+     *
+     * parallel_direct_writes additionally sets FOPEN_PARALLEL_DIRECT_WRITES
+     * so concurrent writers to one file are not serialized on the inode
+     * lock (the kernel's default under direct I/O).  It relaxes write
+     * atomicity between overlapping concurrent writes, so it is separately
+     * opt-in -- but without it a multi-threaded write benchmark measures
+     * the inode lock rather than the data path. */
+    int                             direct_io;
+    int                             parallel_direct_writes;
+    /* Negotiated: the kernel permits shared mmap on FOPEN_DIRECT_IO opens
+     * (FUSE_DIRECT_IO_ALLOW_MMAP, ABI 7.39+).  Without it, mmap of a file on
+     * a direct_io mount fails. */
+    int                             direct_io_mmap;
     uint32_t                        max_write;   /* negotiated */
     uint32_t                        proto_minor; /* negotiated */
     int                             mounted;
@@ -800,17 +847,67 @@ chimera_fuse_lock_owner(
     owner->owner_hi   = 1;
 } /* chimera_fuse_lock_owner */
 
-/* Byte offset into the request buffer where reply payloads are staged.  The
- * incoming request occupies at most a few hundred bytes at the front (WRITE
- * payloads are consumed before any reply is built), so the same buffer
- * doubles as readdir/xattr/readlink reply space. */
-#define CHIMERA_FUSE_REPLY_OFF 4096
+/*
+ * The kernel-cache policy bits for an open reply, given the invalidation
+ * coverage the open ended up with.  One function so OPEN and CREATE cannot
+ * drift apart.
+ *
+ * direct_io wins outright and is mutually exclusive with KEEP_CACHE: the
+ * mount has asked that the kernel never stage its file data, so there are no
+ * cached pages for coverage to protect.  Otherwise coverage decides -- a
+ * grant in force makes cached pages safe across open/close cycles, and no
+ * coverage under sync coherence falls back to uncached rather than risk
+ * serving pages we could not invalidate.
+ */
+static inline uint32_t
+chimera_fuse_open_cache_flags(
+    struct chimera_fuse_mount *mount,
+    int                        cover)
+{
+    if (mount->direct_io) {
+        uint32_t flags = FOPEN_DIRECT_IO;
+
+#ifdef FOPEN_PARALLEL_DIRECT_WRITES
+        if (mount->parallel_direct_writes) {
+            flags |= FOPEN_PARALLEL_DIRECT_WRITES;
+        }
+#endif /* ifdef FOPEN_PARALLEL_DIRECT_WRITES */
+        return flags;
+    }
+
+    if (cover != CHIMERA_FUSE_COVER_NONE) {
+        return FOPEN_KEEP_CACHE;
+    }
+
+    if (mount->coherence_sync) {
+        return FOPEN_DIRECT_IO;
+    }
+
+    return 0;
+} /* chimera_fuse_open_cache_flags */
+
+/* Byte offset into the request buffer where reply payloads are staged.  It
+ * sits one page past the request start so no reply-staging opcode's request
+ * can reach it: the ops that stage (READDIR, GETXATTR, LISTXATTR, READLINK)
+ * all carry bodies of at most a header plus one name.  The opcodes with
+ * genuinely large bodies -- WRITE and SETXATTR -- stage no reply at all, so
+ * their payloads may run past this offset freely. */
+#define CHIMERA_FUSE_REPLY_OFF (CHIMERA_FUSE_REQ_OFF + 4096)
 
 static inline uint8_t *
 chimera_fuse_reply_space(struct chimera_fuse_request *req)
 {
     return (uint8_t *) evpl_iovec_data(&req->buf) + CHIMERA_FUSE_REPLY_OFF;
 } /* chimera_fuse_reply_space */
+
+/* The request header, which does NOT sit at the buffer base (see
+ * CHIMERA_FUSE_REQ_OFF).  Callbacks re-derive their request body from here. */
+static inline const struct fuse_in_header *
+chimera_fuse_request_hdr(struct chimera_fuse_request *req)
+{
+    return (const struct fuse_in_header *)
+           ((uint8_t *) evpl_iovec_data(&req->buf) + CHIMERA_FUSE_REQ_OFF);
+} /* chimera_fuse_request_hdr */
 
 static inline struct chimera_fuse_open_file *
 chimera_fuse_file(uint64_t fh)

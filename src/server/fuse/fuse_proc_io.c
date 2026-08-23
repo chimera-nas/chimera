@@ -66,12 +66,8 @@ chimera_fuse_open_callback(
      * kernel's default invalidate-on-open behavior, sync mode goes further
      * and bypasses the page cache entirely so an uncovered open can never
      * serve stale data. */
-    if (chimera_fuse_grant_open(thread, mount, req->nodeid, oh) !=
-        CHIMERA_FUSE_COVER_NONE) {
-        out.open_flags |= FOPEN_KEEP_CACHE;
-    } else if (mount->coherence_sync) {
-        out.open_flags |= FOPEN_DIRECT_IO;
-    }
+    out.open_flags |= chimera_fuse_open_cache_flags(
+        mount, chimera_fuse_grant_open(thread, mount, req->nodeid, oh));
 
     if (chimera_fuse_reply(req, 0, &out, sizeof(out)) != 0) {
         /* The kernel never learned this fh, so no RELEASE will come. */
@@ -158,7 +154,7 @@ chimera_fuse_create_open_callback(
     void                           *private_data)
 {
     struct chimera_fuse_request *req  = private_data;
-    const struct fuse_in_header *hdr  = evpl_iovec_data(&req->buf);
+    const struct fuse_in_header *hdr  = chimera_fuse_request_hdr(req);
     const struct fuse_create_in *in   = (const struct fuse_create_in *) (hdr + 1);
     const char                  *name = (const char *) (in + 1);
     unsigned int                 flags;
@@ -333,7 +329,11 @@ chimera_fuse_op_write(
         sync = 1;
     }
 
-    data_off = sizeof(struct fuse_in_header) + sizeof(*in);
+    /* Page-aligned by construction (see CHIMERA_FUSE_REQ_OFF): the borrowed
+     * segment below is what a backend DMAs from, and diskfs's zero-copy
+     * device write rejects an unaligned source. */
+    data_off = CHIMERA_FUSE_REQ_OFF + sizeof(struct fuse_in_header) +
+        sizeof(*in);
 
     /* Borrow the payload straight out of the request buffer; the buffer is
      * not recycled until the request completes. */
@@ -512,7 +512,7 @@ chimera_fuse_lseek_complete(
     void                  *private_data)
 {
     struct chimera_fuse_request *req = private_data;
-    const struct fuse_in_header *hdr = evpl_iovec_data(&req->buf);
+    const struct fuse_in_header *hdr = chimera_fuse_request_hdr(req);
     const struct fuse_lseek_in  *in  = (const struct fuse_lseek_in *) (hdr + 1);
     struct fuse_lseek_out        out;
 

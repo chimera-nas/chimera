@@ -362,6 +362,10 @@ chimera_fuse_add_mount(
                 mount->coherence_sync = 1;
             } else if (strcmp(opt, "coherence=ttl") == 0) {
                 mount->coherence_sync = 0;
+            } else if (strcmp(opt, "direct_io") == 0) {
+                mount->direct_io = 1;
+            } else if (strcmp(opt, "parallel_direct_writes") == 0) {
+                mount->parallel_direct_writes = 1;
             } else {
                 chimera_fuse_error("FUSE mount %s: unknown option '%s'",
                                    mountpoint, opt);

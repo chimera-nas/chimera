@@ -324,11 +324,7 @@ chimera_fuse_reply_entry(
         struct fuse_open_out *oo =
             (struct fuse_open_out *) (payload + sizeof(entry));
 
-        if (child_cover != CHIMERA_FUSE_COVER_NONE) {
-            oo->open_flags |= FOPEN_KEEP_CACHE;
-        } else if (mount->coherence_sync) {
-            oo->open_flags |= FOPEN_DIRECT_IO;
-        }
+        oo->open_flags |= chimera_fuse_open_cache_flags(mount, child_cover);
     }
 
     rc = chimera_fuse_send(req, 0, payload, sizeof(entry) + extra_len,
@@ -488,7 +484,7 @@ chimera_fuse_dispatch(
     struct chimera_fuse_request *req,
     uint32_t                     len)
 {
-    const struct fuse_in_header *hdr = evpl_iovec_data(&req->buf);
+    const struct fuse_in_header *hdr = chimera_fuse_request_hdr(req);
     chimera_fuse_handler_t       handler;
 
     if (len < sizeof(*hdr) || hdr->len != len) {
@@ -532,7 +528,9 @@ chimera_fuse_channel_readable(
 
         req = chimera_fuse_request_alloc(thread, channel);
 
-        len = read(channel->fd, evpl_iovec_data(&req->buf), CHIMERA_FUSE_BUFSZ);
+        len = read(channel->fd,
+                   (uint8_t *) evpl_iovec_data(&req->buf) + CHIMERA_FUSE_REQ_OFF,
+                   CHIMERA_FUSE_READ_LEN);
 
         if (len < 0) {
             chimera_fuse_request_free(thread, req);

@@ -352,7 +352,7 @@ chimera_fuse_access_complete(
     void                     *private_data)
 {
     struct chimera_fuse_request *req       = private_data;
-    const struct fuse_in_header *hdr       = evpl_iovec_data(&req->buf);
+    const struct fuse_in_header *hdr       = chimera_fuse_request_hdr(req);
     const struct fuse_access_in *in        = (const struct fuse_access_in *) (hdr + 1);
     uint32_t                     requested = 0;
 

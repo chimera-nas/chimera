@@ -37,7 +37,7 @@ chimera_fuse_mkdir_open_callback(
     void                           *private_data)
 {
     struct chimera_fuse_request *req  = private_data;
-    const struct fuse_in_header *hdr  = evpl_iovec_data(&req->buf);
+    const struct fuse_in_header *hdr  = chimera_fuse_request_hdr(req);
     const struct fuse_mkdir_in  *in   = (const struct fuse_mkdir_in *) (hdr + 1);
     const char                  *name = (const char *) (in + 1);
 
@@ -116,7 +116,7 @@ chimera_fuse_mknod_open_callback(
     void                           *private_data)
 {
     struct chimera_fuse_request *req  = private_data;
-    const struct fuse_in_header *hdr  = evpl_iovec_data(&req->buf);
+    const struct fuse_in_header *hdr  = chimera_fuse_request_hdr(req);
     const struct fuse_mknod_in  *in   = (const struct fuse_mknod_in *) (hdr + 1);
     const char                  *name = (const char *) (in + 1);
 
@@ -199,7 +199,7 @@ chimera_fuse_symlink_open_callback(
     void                           *private_data)
 {
     struct chimera_fuse_request *req    = private_data;
-    const struct fuse_in_header *hdr    = evpl_iovec_data(&req->buf);
+    const struct fuse_in_header *hdr    = chimera_fuse_request_hdr(req);
     const char                  *name   = (const char *) (hdr + 1);
     const char                  *target = name + strlen(name) + 1;
 
@@ -328,7 +328,7 @@ chimera_fuse_remove_open_callback(
     void                           *private_data)
 {
     struct chimera_fuse_request *req  = private_data;
-    const struct fuse_in_header *hdr  = evpl_iovec_data(&req->buf);
+    const struct fuse_in_header *hdr  = chimera_fuse_request_hdr(req);
     const char                  *name = (const char *) (hdr + 1);
     unsigned int                 flags;
 

@@ -258,7 +258,7 @@ mountpoint directory, which must exist.
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `path` | string | required | VFS path to mount (`/<mount-name>[/subdir]`, or `/` for the whole namespace). |
-| `options` | string | - | Comma-separated: `allow_other` (other users may access the mount), `no_default_permissions` (skip kernel mode-bit enforcement), `attr_timeout_ms=<n>` / `entry_timeout_ms=<n>` (kernel attribute/entry cache lifetimes, default `1000`), `negative_timeout_ms=<n>` (kernel negative-dentry lifetime; defaults to `entry_timeout_ms` under `coherence=sync` and `0` under `coherence=ttl`), `coherence=sync\|ttl` (default `sync`). |
+| `options` | string | - | Comma-separated: `allow_other` (other users may access the mount), `no_default_permissions` (skip kernel mode-bit enforcement), `attr_timeout_ms=<n>` / `entry_timeout_ms=<n>` (kernel attribute/entry cache lifetimes, default `1000`), `negative_timeout_ms=<n>` (kernel negative-dentry lifetime; defaults to `entry_timeout_ms` under `coherence=sync` and `0` under `coherence=ttl`), `coherence=sync\|ttl` (default `sync`), `direct_io` and `parallel_direct_writes` (default off; see below). |
 
 Notes:
 
@@ -292,6 +292,24 @@ Notes:
   Recovery deadlines bound the wait if a mount stops acknowledging
   invalidations (~5s for namespace gates, the lease break deadline for
   data).
+- `direct_io` makes the daemon reply `FOPEN_DIRECT_IO` on every open, so the
+  kernel never stages this mount's file data in its page cache: reads and
+  writes reach the VFS as exact `(offset, length)` requests built straight
+  from the calling process's pinned pages.  This is the server's choice, not
+  the application's — it applies to a plain `open()` and imposes none of
+  `O_DIRECT`'s alignment requirements on the caller.  It removes one memory
+  copy per operation in each direction, and for a page-aligned writer it is
+  what lets a write reach a backend's zero-copy device path.  It also removes
+  readahead, read caching, and write batching, so small or repeated I/O gets
+  dramatically slower — this is a switch for bulk streaming workloads, which
+  is why it is off by default.  `parallel_direct_writes` additionally allows
+  concurrent writers to one file instead of serializing them on the kernel's
+  inode lock; it relaxes write atomicity between overlapping concurrent
+  writes, so it is separately opt-in, but without it a multi-threaded write
+  benchmark measures the inode lock rather than the data path.  Shared `mmap`
+  of a file on a `direct_io` mount needs `FUSE_DIRECT_IO_ALLOW_MMAP`
+  (kernel 6.6 / ABI 7.39 and later), which the daemon negotiates when
+  offered and logs as `(no mmap)` when it is not.
 - `coherence=ttl` restores the purely asynchronous model: invalidations are
   still pushed, but mutations never wait for peer acknowledgments and the
   `attr/entry` timeouts alone bound staleness.  One extra residual there

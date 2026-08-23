@@ -29,11 +29,15 @@ fail() {
     exit 1
 }
 
-# fuse_test_start <chimera-binary> <backend-module> [backend-path]
+# fuse_test_start <chimera-binary> <backend-module> [backend-path] [mount-options]
 fuse_test_start() {
     local bin=$1
     local module=$2
     local backend_path=${3:-/}
+    local options=${4:-}
+    local options_json=""
+
+    [ -n "$options" ] && options_json=", \"options\": \"$options\""
 
     SESSION=$(mktemp -d)
     CFG="$SESSION/config.json"
@@ -58,7 +62,7 @@ fuse_test_start() {
         "data": { "module": "$module", "path": "$backend_path" }
     },
     "fuse_mounts": {
-        "$MNT": { "path": "/data" }
+        "$MNT": { "path": "/data"$options_json }
     }
 }
 EOF

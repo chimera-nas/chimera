@@ -61,6 +61,22 @@ foreach(backend memfs)
         SKIP_RETURN_CODE 77
         TIMEOUT 120
         ENVIRONMENT "${_fuse_env}")
+
+    # The same POSIX assertions with the kernel's page cache taken out of the
+    # path entirely (direct_io), so forced direct I/O cannot quietly change
+    # read/write/truncate semantics.  parallel_direct_writes rides along: it
+    # is the combination a throughput deployment would actually run.
+    add_test(NAME chimera/fuse/posix_directio_${backend}
+             COMMAND ${_fuse_wrapper} bash
+                     ${CMAKE_CURRENT_SOURCE_DIR}/fuse_posix_test.sh
+                     $<TARGET_FILE:chimera> ${backend}
+                     $<TARGET_FILE:fuse_posix_test>
+                     "direct_io,parallel_direct_writes")
+
+    set_tests_properties(chimera/fuse/posix_directio_${backend} PROPERTIES
+        SKIP_RETURN_CODE 77
+        TIMEOUT 120
+        ENVIRONMENT "${_fuse_env}")
 endforeach()
 
 # Locks and cross-mount coherence run against TWO FUSE mounts of one share.
