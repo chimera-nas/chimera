@@ -5802,7 +5802,7 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_cairn = {
         CHIMERA_VFS_CAP_FS_RELATIVE_OP | CHIMERA_VFS_CAP_ACL_NATIVE |
         CHIMERA_VFS_CAP_ATOMIC_HANDLE_STATE |
         CHIMERA_VFS_CAP_XATTR | CHIMERA_VFS_CAP_READ_PROVIDES_BUFFERS |
-        CHIMERA_VFS_CAP_FS_LOCK | CHIMERA_VFS_CAP_CHANGE | CHIMERA_VFS_CAP_MKFS,
+        CHIMERA_VFS_CAP_CHANGE | CHIMERA_VFS_CAP_MKFS,
     .init           = cairn_init,
     .destroy        = cairn_destroy,
     .thread_init    = cairn_thread_init,

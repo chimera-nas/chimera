@@ -61,24 +61,6 @@ class Deviation:
 
 KNOWN_DEVIATIONS = [
     Deviation(
-        id="PD1",
-        posix="fcntl() F_SETLK/F_SETLKW/F_GETLK (System Interfaces)",
-        summary="memfs advertises CHIMERA_VFS_CAP_FS_LOCK but implements no "
-                "CHIMERA_VFS_OP_LOCK; every record-lock operation fails "
-                "EOPNOTSUPP (and logs 'unknown operation 27')",
-        root_cause="src/vfs/memfs/memfs.c memfs_dispatch (no OP_LOCK case) "
-                   "vs vfs_memfs.capabilities CHIMERA_VFS_CAP_FS_LOCK",
-        candidate_fix="implement byte-range locks in memfs (or stop "
-                      "advertising CAP_FS_LOCK so the VFS returns a "
-                      "deliberate ENOTSUP)",
-        ops=("RFcntlLock", "RLockf"),
-        expected_status=None,
-        actual_status=EOPNOTSUPP,
-        # Lock state is only observable through lock calls, which this
-        # entry also covers, so replay stays in sync.
-        reconcilable=True,
-    ),
-    Deviation(
         id="PD2",
         posix="fcntl() F_DUPFD/F_GETFL/F_SETFL (System Interfaces)",
         summary="chimera_posix_fcntl implements only the record-lock "

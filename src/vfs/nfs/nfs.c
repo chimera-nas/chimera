@@ -90,6 +90,7 @@ chimera_nfs_init(
     pthread_mutex_init(&shared->cb_lock, NULL);
     pthread_mutex_init(&shared->pnfs_devcache.lock, NULL);
     pthread_mutex_init(&shared->pnfs_layout_lock, NULL);
+    pthread_mutex_init(&shared->nlm_range_lock, NULL);
 
     shared->max_servers = 64;
     shared->servers     = calloc(shared->max_servers, sizeof(*shared->servers));
@@ -155,6 +156,17 @@ chimera_nfs_destroy(void *private_data)
 
     free(shared->servers);
 
+    /* Any range still listed here belongs to a mount going away with locks
+     * outstanding; the server drops them when the client is monitored down, so
+     * only the bookkeeping is ours to free. */
+    while (shared->nlm_ranges) {
+        struct chimera_nfs3_range *range = shared->nlm_ranges;
+
+        DL_DELETE(shared->nlm_ranges, range);
+        free(range);
+    }
+
+    pthread_mutex_destroy(&shared->nlm_range_lock);
     pthread_mutex_destroy(&shared->pnfs_devcache.lock);
     pthread_mutex_destroy(&shared->pnfs_layout_lock);
 
@@ -404,9 +416,15 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_nfs = {
     .fh_magic    = CHIMERA_VFS_FH_MAGIC_NFS,
     /* CAP_READ_PROVIDES_BUFFERS: the proxy returns the data buffers handed up
      * by its upstream RPC reply (it reassigns request->read.iov), so the VFS
-     * core must not pre-allocate buffers for it. */
+     * core must not pre-allocate buffers for it.
+     *
+     * CAP_CLAIM_RANGE: byte ranges are genuinely arbitrated, by taking the lock
+     * on the upstream server over NLM (nfs3_lock.c), which is what makes a
+     * conflict with another client of that server visible to the claim core.
+     * CAP_CLAIM_AGGREGATE is deliberately absent: nothing here holds a
+     * revocable per-node cache token upstream. */
     .capabilities   = CHIMERA_VFS_CAP_OPEN_FILE_REQUIRED | CHIMERA_VFS_CAP_FS | CHIMERA_VFS_CAP_FS_RELATIVE_OP |
-        CHIMERA_VFS_CAP_FS_LOCK | CHIMERA_VFS_CAP_READ_PROVIDES_BUFFERS | CHIMERA_VFS_CAP_DELEGATES_DAC |
+        CHIMERA_VFS_CAP_CLAIM_RANGE | CHIMERA_VFS_CAP_READ_PROVIDES_BUFFERS | CHIMERA_VFS_CAP_DELEGATES_DAC |
         CHIMERA_VFS_CAP_REMOTE_DAC,
     .init           = chimera_nfs_init,
     .destroy        = chimera_nfs_destroy,

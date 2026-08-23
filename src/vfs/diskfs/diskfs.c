@@ -197,7 +197,7 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_diskfs = {
         /* Require a real open so every file op carries a pinned inode in
          * handle->vfs_private (diskfs_open_fh_inode_cb), which read/write reuse
          * to skip per-I/O inode resolution. */
-        CHIMERA_VFS_CAP_OPEN_FILE_REQUIRED | CHIMERA_VFS_CAP_FS_LOCK |
+        CHIMERA_VFS_CAP_OPEN_FILE_REQUIRED |
         CHIMERA_VFS_CAP_CHANGE | CHIMERA_VFS_CAP_MKFS |
         CHIMERA_VFS_CAP_READ_PLUS | CHIMERA_VFS_CAP_WRITE_SAME |
         CHIMERA_VFS_CAP_CLONE_RANGE,

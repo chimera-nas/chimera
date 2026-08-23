@@ -97,8 +97,10 @@ struct chimera_vfs_request;
  */
 #define CHIMERA_VFS_CAP_FS_PATH_OP          (1U << 7)
 
-/* If set, module supports byte-range file locking via chimera_vfs_lock(). */
-#define CHIMERA_VFS_CAP_FS_LOCK             (1U << 8)
+/* (1U << 8) was CHIMERA_VFS_CAP_FS_LOCK, a second, POSIX-shaped lock wire
+ * (CHIMERA_VFS_OP_LOCK) that existed alongside the claim projection.  Byte
+ * ranges now travel the claim wire like every other claim; a backend that
+ * arbitrates them declares CHIMERA_VFS_CAP_CLAIM_RANGE below. */
 
 /* If set, module supports reverse path lookup: given a directory FH,
  * resolve (parent_fh, name_in_parent).  Enables precise subtree
@@ -240,12 +242,14 @@ struct chimera_vfs_handle_state {
  * module path themselves (e.g. as a host path for passthrough backends). */
 #define CHIMERA_VFS_CAP_MKFS                  (1UL << 25)
 
-/* Backend lease arbitration (the claim-core projection boundary).
+/* Backend claim arbitration (the claim-core projection boundary).
  *
- * A backend declaring CHIMERA_VFS_CAP_LEASE is the lease ARBITER for its
- * files: the claim core routes cross-node visibility through it instead of
- * deciding purely node-locally.  The wire is kindless -- masks, never
- * protocol constructs -- and carries exactly two claim shapes:
+ * A backend declaring either bit below is the ARBITER for that shape of
+ * claim on its files: the claim core routes cross-node visibility through
+ * it instead of deciding purely node-locally.  The wire is kindless --
+ * masks, never protocol constructs -- and carries exactly two claim
+ * shapes, one per capability bit, because they are arbitrated on entirely
+ * different paths and a backend may serve one without the other:
  *
  *   AGGREGATE: one revocable per-node token per file covering the union of
  *     the node's local holders -- rev_used (R|W: data the node reads/writes
@@ -259,12 +263,22 @@ struct chimera_vfs_handle_state {
  *   RANGE: one binding, non-recallable record per byte-range lock, keyed by
  *     the cluster-stable owner identity (never a node id -- POSIX same-owner
  *     coalescing must survive a client landing on two nodes).  Confirmed
- *     before the local grant completes; all-or-nothing.
+ *     before the local grant completes; all-or-nothing.  This is the wire a
+ *     passthrough backend implements by taking a real lock on the file it
+ *     is fronting, which is how cross-PROCESS conflicts (a host kernel, a
+ *     remote NFS server) reach the arbitration the claim core is doing.
  *
- * A backend that sets this bit must implement BOTH lease ops and invoke the
- * recall callback from whatever context it likes (the core marshals).  There
- * is no partial mode. */
-#define CHIMERA_VFS_CAP_LEASE                 (1U << 26)
+ * The bits are separate because AGGREGATE rides the DATA path -- the core
+ * re-evaluates the per-file union whenever local holders change, including
+ * on first I/O -- while RANGE is only touched by byte-range locks.  A
+ * passthrough backend wants ranges without paying a backend round trip per
+ * file just to open one.
+ *
+ * A backend implements the same two ops (CHIMERA_VFS_OP_CLAIM_ACQUIRE /
+ * _RELEASE) for whichever bits it sets, and invokes the recall callback --
+ * AGGREGATE only -- from whatever context it likes (the core marshals). */
+#define CHIMERA_VFS_CAP_CLAIM_AGGREGATE       (1U << 26)
+#define CHIMERA_VFS_CAP_CLAIM_RANGE           (1U << 8)
 
 /* If set, the module can natively answer a sparse READ_PLUS (RFC 7862 15.10):
  * given an offset it classifies the leading byte-run as DATA or HOLE from its

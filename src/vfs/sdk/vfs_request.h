@@ -96,7 +96,7 @@ struct chimera_vfs_mount_options {
 #define CHIMERA_VFS_OP_SEARCH_KEYS              24
 #define CHIMERA_VFS_OP_ALLOCATE                 25
 #define CHIMERA_VFS_OP_SEEK                     26
-#define CHIMERA_VFS_OP_LOCK                     27
+/* 27 was CHIMERA_VFS_OP_LOCK; byte ranges now ride the claim wire. */
 #define CHIMERA_VFS_OP_GETPARENT                28
 #define CHIMERA_VFS_OP_COPY_RANGE               29
 #define CHIMERA_VFS_OP_CLONE_RANGE              30
@@ -111,8 +111,8 @@ struct chimera_vfs_mount_options {
 #define CHIMERA_VFS_OP_REMOVE_STREAM            39
 #define CHIMERA_VFS_OP_MKFS                     40
 #define CHIMERA_VFS_OP_RMFS                     41
-#define CHIMERA_VFS_OP_LEASE_ACQUIRE            42
-#define CHIMERA_VFS_OP_LEASE_RELEASE            43
+#define CHIMERA_VFS_OP_CLAIM_ACQUIRE            42
+#define CHIMERA_VFS_OP_CLAIM_RELEASE            43
 #define CHIMERA_VFS_OP_READ_PLUS                44
 #define CHIMERA_VFS_OP_WRITE_SAME               45
 #define CHIMERA_VFS_OP_NUM                      46
@@ -187,14 +187,16 @@ struct chimera_vfs_mount_options {
  * conformance suites expect. */
 #define CHIMERA_VFS_COPY_PRESERVE_HOLES         0x01
 
-/* Lock types */
+/* Lock types.  These survive the fold of the old OP_LOCK wire into the
+ * claim wire as the vocabulary for DESCRIBING a conflicting range back to a
+ * caller (F_GETLK); a claim itself says what it wants with `exclusive`. */
 #define CHIMERA_VFS_LOCK_READ                   0 /* shared / read lock */
 #define CHIMERA_VFS_LOCK_WRITE                  1 /* exclusive / write lock */
-#define CHIMERA_VFS_LOCK_UNLOCK                 2 /* release lock */
+#define CHIMERA_VFS_LOCK_UNLOCK                 2 /* no lock / release lock */
 
-/* Lock flags */
-#define CHIMERA_VFS_LOCK_WAIT                   (1U << 0) /* block until lock is acquired (F_SETLKW) */
-#define CHIMERA_VFS_LOCK_TEST                   (1U << 1) /* probe only, do not acquire (F_GETLK) */
+/* RANGE claim flags (claim_acquire.flags) */
+#define CHIMERA_VFS_CLAIM_WAIT                  (1U << 0) /* block until grantable (F_SETLKW) */
+#define CHIMERA_VFS_CLAIM_TEST                  (1U << 1) /* probe only, do not acquire (F_GETLK) */
 
 /* Readdir flags */
 #define CHIMERA_VFS_READDIR_EMIT_DOT            (1U << 0) /* Emit "." and ".." entries */
@@ -1196,20 +1198,6 @@ struct chimera_vfs_request {
         } seek;
 
         struct {
-            struct chimera_vfs_open_handle *handle;
-            uint64_t                        offset;      /* first byte of range (raw l_start for SEEK_END) */
-            uint64_t                        length;      /* 0 = to EOF (raw l_len for SEEK_END) */
-            uint32_t                        lock_type;   /* CHIMERA_VFS_LOCK_{READ,WRITE,UNLOCK} */
-            uint32_t                        flags;       /* CHIMERA_VFS_LOCK_{WAIT,TEST} */
-            int32_t                         whence;      /* SEEK_SET or SEEK_END */
-            /* Result fields: populated when CHIMERA_VFS_LOCK_TEST is set */
-            uint32_t                        r_conflict_type;
-            uint64_t                        r_conflict_offset;
-            uint64_t                        r_conflict_length;
-            pid_t                           r_conflict_pid;
-        } lock;
-
-        struct {
             uint8_t  r_parent_fh[CHIMERA_VFS_FH_SIZE];
             uint16_t r_parent_fh_len;
             char     r_name[CHIMERA_VFS_NAME_MAX];
@@ -1226,16 +1214,35 @@ struct chimera_vfs_request {
         } get_xattr;
 
         struct {
-            /* Backend lease acquire (CHIMERA_VFS_OP_LEASE_ACQUIRE).  Kindless
+            /* Backend lease acquire (CHIMERA_VFS_OP_CLAIM_ACQUIRE).  Kindless
              * wire: masks + a cluster-meaningful owner, never a protocol
              * construct.  klass selects the claim shape. */
-            uint8_t                    klass;      /* CHIMERA_VFS_LEASE_AGGREGATE
-                                                    * / CHIMERA_VFS_LEASE_RANGE  */
+            uint8_t                    klass;      /* CHIMERA_VFS_CLAIM_KLASS_AGGREGATE
+                                                    * / CHIMERA_VFS_CLAIM_KLASS_RANGE  */
             uint8_t                    rev_used;   /* AGGREGATE: revocable use
                                                     * union (CHIMERA_CLAIM_R|W)  */
             uint8_t                    bind_deny;  /* AGGREGATE: binding deny
                                                     * union (R|W|D)              */
             uint8_t                    exclusive;  /* RANGE only                 */
+            /* RANGE only.  CHIMERA_VFS_CLAIM_WAIT: block until grantable
+             * (F_SETLKW); the backend may complete asynchronously, and only
+             * callers that can wait ask for it.  CHIMERA_VFS_CLAIM_TEST:
+             * probe without acquiring (F_GETLK), answered in the r_conflict_*
+             * fields. */
+            uint8_t                    flags;
+            /* RANGE only.  SEEK_END is passed through rather than resolved
+             * here so the backend resolves EOF atomically with the lock --
+             * resolving it locally would reintroduce the fstat TOCTOU.
+             *
+             * With SEEK_END, offset and length are bit-casts of the caller's
+             * SIGNED l_start/l_len, and length keeps the POSIX spelling
+             * where 0 means to-EOF and a negative length extends backwards.
+             * With SEEK_SET they are the claim spelling: absolute, with
+             * UINT64_MAX for to-EOF and 0 for a genuine zero-byte range.
+             * The two disagree about 0 precisely because one is POSIX's
+             * vocabulary and the other is the core's; a backend translating
+             * between them must key on whence. */
+            int32_t                    whence;
             uint64_t                   offset;     /* RANGE only                 */
             uint64_t                   length;     /* RANGE only; UINT64_MAX =
                                                     * to-EOF, 0 = zero-byte      */
@@ -1264,16 +1271,27 @@ struct chimera_vfs_request {
                                                     *  all-or-nothing with the
                                                     *  grant); RANGE: nonzero =
                                                     *  granted (all-or-nothing)  */
-        } lease_acquire;
+            /* RANGE refusal detail: who holds the conflicting range, so
+             * F_GETLK can describe it.  Filled on TEST, and on a refused
+             * acquire when the backend knows; r_conflict_type
+             * CHIMERA_VFS_LOCK_UNLOCK means "no conflict". */
+            uint8_t                    r_conflict_type;
+            uint64_t                   r_conflict_offset;
+            uint64_t                   r_conflict_length;
+            uint32_t                   r_conflict_pid;
+        } claim_acquire;
 
         struct {
-            /* Backend lease release (CHIMERA_VFS_OP_LEASE_RELEASE): drop or
+            /* Backend lease release (CHIMERA_VFS_OP_CLAIM_RELEASE): drop or
              * downgrade the record behind `token`.  retained == 0 releases
              * outright; for an AGGREGATE under recall, the release with the
-             * retained mask IS the recall acknowledgment. */
+             * retained mask IS the recall acknowledgment.  `klass` says
+             * which capability this release is addressed to, since a
+             * backend may arbitrate ranges without aggregates. */
             uint64_t token;
             uint8_t  retained;
-        } lease_release;
+            uint8_t  klass;
+        } claim_release;
 
         struct {
             struct chimera_vfs_open_handle *handle;

@@ -720,7 +720,6 @@ chimera_nfs4_open_exclusive_verify(
     struct chimera_vfs_open_handle *parent_handle = req->handle;
     const uint8_t                  *verf;
     uint32_t                        verf_atime, verf_mtime;
-    uint32_t                        lock_caps;
     nfsstat4                        status;
 
     if (error_code != CHIMERA_VFS_OK) {
@@ -754,7 +753,6 @@ chimera_nfs4_open_exclusive_verify(
      * lock capabilities before install_state may release the handle. */
     {
         uint32_t install_rflags = 0;
-        lock_caps = handle->vfs_module->capabilities;
         memcpy(req->fh, handle->fh, handle->fh_len);
         req->fhlen = handle->fh_len;
 
@@ -775,9 +773,11 @@ chimera_nfs4_open_exclusive_verify(
          * attribute rather than a bare zero, which a revalidating client would
          * otherwise mistake for the directory changing. */
         chimera_nfs4_set_changeinfo(&res->resok4.cinfo, dir_pre_attr, dir_post_attr);
-        res->resok4.rflags = install_rflags |
-            ((lock_caps & CHIMERA_VFS_CAP_FS_LOCK) ?
-             OPEN4_RESULT_LOCKTYPE_POSIX : 0);
+        /* The claim core arbitrates byte ranges with POSIX semantics for
+         * every backend now -- a CHIMERA_VFS_CAP_CLAIM_RANGE backend only
+         * widens that arbitration past this node -- so the advertisement no
+         * longer depends on the backend having a lock passthrough. */
+        res->resok4.rflags = install_rflags | OPEN4_RESULT_LOCKTYPE_POSIX;
     }
     res->resok4.num_attrset = 0;
 
@@ -846,7 +846,6 @@ chimera_nfs4_open_at_complete(
     }
 
     {
-        uint32_t lock_caps      = handle->vfs_module->capabilities;
         uint32_t install_rflags = 0;
         nfsstat4 status;
 
@@ -870,8 +869,7 @@ chimera_nfs4_open_at_complete(
         res->resok4.cinfo.before = 0;
         res->resok4.cinfo.after  = 0;
         res->resok4.rflags       = install_rflags |
-            ((lock_caps & CHIMERA_VFS_CAP_FS_LOCK) ?
-             OPEN4_RESULT_LOCKTYPE_POSIX : 0);
+            OPEN4_RESULT_LOCKTYPE_POSIX;
     }
     res->resok4.num_attrset = 0;
 
@@ -1047,7 +1045,6 @@ chimera_nfs4_open_claim_fh_complete(
     struct nfs_request             *req           = private_data;
     struct OPEN4res                *res           = &req->res_compound.resarray[req->index].opopen;
     struct chimera_vfs_open_handle *parent_handle = req->handle;
-    uint32_t                        lock_caps;
     nfsstat4                        status;
 
     if (error_code != CHIMERA_VFS_OK) {
@@ -1062,7 +1059,6 @@ chimera_nfs4_open_claim_fh_complete(
      * before install_state may release the handle. */
     {
         uint32_t install_rflags = 0;
-        lock_caps = handle->vfs_module->capabilities;
 
         status = chimera_nfs4_open_install_state(req, handle, NULL, false,
                                                  &res->resok4.stateid,
@@ -1079,8 +1075,7 @@ chimera_nfs4_open_claim_fh_complete(
         res->resok4.cinfo.before = 0;
         res->resok4.cinfo.after  = 0;
         res->resok4.rflags       = install_rflags |
-            ((lock_caps & CHIMERA_VFS_CAP_FS_LOCK) ?
-             OPEN4_RESULT_LOCKTYPE_POSIX : 0);
+            OPEN4_RESULT_LOCKTYPE_POSIX;
     }
     res->resok4.num_attrset = 0;
 

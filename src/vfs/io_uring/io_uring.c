@@ -80,11 +80,76 @@ chimera_io_uring_dispatch(
 #define chimera_io_uring_abort_if(cond, ...) \
         chimera_abort_if(cond, "io_uring", __FILE__, __LINE__, __VA_ARGS__)
 
-#define CHIMERA_IO_URING_STATX_MASK        STATX_BASIC_STATS
+#define CHIMERA_IO_URING_STATX_MASK STATX_BASIC_STATS
+
+/*
+ * CHIMERA_VFS_CAP_CLAIM_RANGE registry, mirroring the linux backend's.
+ *
+ * A byte-range claim reaches this backend only after the claim core has
+ * arbitrated it against every other claim on this node; the real fcntl() adds
+ * exactly one thing, visibility to holders OUTSIDE this process (a local
+ * application, or another chimera node sharing the same filesystem).
+ *
+ * The claim wire is file-handle based and carries no open handle, so the
+ * projection owns its own descriptors: one per (file handle, claim owner),
+ * refcounted by the records standing on it and closed once the last one goes
+ * away.  Keying the descriptor on the owner is what makes same-owner upgrades
+ * coalesce the way POSIX expects while still letting two distinct owners
+ * conflict with each other in the kernel.
+ *
+ * Open file description locks (F_OFD_*) are used where the host provides them:
+ * they belong to the descriptor we hold rather than to the process, so an
+ * unrelated close() of the same file elsewhere in the server cannot silently
+ * drop them, and each owner's descriptor is a distinct lock owner.  A kernel
+ * without them falls back to process-wide record locks, where neither property
+ * holds.
+ *
+ * io_uring has no lock opcode, so this is plain fcntl() on the calling thread
+ * exactly as the old CHIMERA_VFS_OP_LOCK path was.
+ */
+
+#ifdef F_OFD_SETLK
+#define CHIMERA_IO_URING_LOCK_GET   F_OFD_GETLK
+#define CHIMERA_IO_URING_LOCK_SET   F_OFD_SETLK
+#define CHIMERA_IO_URING_LOCK_SETW  F_OFD_SETLKW
+#else /* ifdef F_OFD_SETLK */
+#define CHIMERA_IO_URING_LOCK_GET   F_GETLK
+#define CHIMERA_IO_URING_LOCK_SET   F_SETLK
+#define CHIMERA_IO_URING_LOCK_SETW  F_SETLKW
+#endif /* ifdef F_OFD_SETLK */
+
+struct chimera_io_uring_range_file {
+    uint8_t                             fh[CHIMERA_VFS_FH_SIZE];
+    uint32_t                            fh_len;
+    uint64_t                            fh_hash;
+    struct chimera_claim_owner          owner;
+    int                                 fd;
+    uint32_t                            refcnt;
+    struct chimera_io_uring_range_file *next;
+};
+
+/* One granted range record, named by the token the core hands back to us on
+ * CHIMERA_VFS_OP_CLAIM_RELEASE.  offset/length are absolute (SEEK_SET) so the
+ * unlock reproduces exactly the bytes that were locked; length 0 means to-EOF
+ * in the fcntl spelling.  projected == 0 marks a record the host cannot
+ * express, which the release must not try to undo. */
+struct chimera_io_uring_range {
+    uint64_t                            token;
+    struct chimera_io_uring_range_file *file;
+    uint64_t                            offset;
+    uint64_t                            length;
+    uint8_t                             projected;
+    struct chimera_io_uring_range      *next;
+};
 
 struct chimera_io_uring_shared {
-    struct io_uring ring;
-    int             readdir_verifier;
+    struct io_uring                     ring;
+    int                                 readdir_verifier;
+
+    pthread_mutex_t                     range_lock;
+    struct chimera_io_uring_range_file *range_files;
+    struct chimera_io_uring_range      *ranges;
+    uint64_t                            range_next_token;
 };
 
 /*
@@ -108,6 +173,7 @@ struct chimera_io_uring_personality {
 
 struct chimera_io_uring_thread {
     struct evpl                        *evpl;
+    struct chimera_io_uring_shared     *shared;
     struct evpl_doorbell                doorbell;
     struct evpl_poll                   *poll;
     struct evpl_deferral                deferral;
@@ -207,6 +273,8 @@ chimera_io_uring_init(
         return NULL;
     }
 
+    pthread_mutex_init(&shared->range_lock, NULL);
+
     if (cfgdata && cfgdata[0] != '\0') {
         json_error_t json_error;
         json_t      *cfg = json_loads(cfgdata, 0, &json_error);
@@ -228,7 +296,22 @@ chimera_io_uring_init(
 static void
 chimera_io_uring_destroy(void *private_data)
 {
-    struct chimera_io_uring_shared *shared = private_data;
+    struct chimera_io_uring_shared     *shared = private_data;
+    struct chimera_io_uring_range_file *file;
+    struct chimera_io_uring_range      *range;
+
+    while ((range = shared->ranges)) {
+        LL_DELETE(shared->ranges, range);
+        free(range);
+    }
+
+    while ((file = shared->range_files)) {
+        LL_DELETE(shared->range_files, file);
+        close(file->fd);
+        free(file);
+    }
+
+    pthread_mutex_destroy(&shared->range_lock);
 
     io_uring_queue_exit(&shared->ring);
     free(shared);
@@ -937,6 +1020,7 @@ chimera_io_uring_thread_init(
     thread = calloc(1, sizeof(*thread));
 
     thread->evpl             = evpl;
+    thread->shared           = shared;
     thread->readdir_verifier = shared->readdir_verifier;
 
     /* Neutralise the process umask for create paths.  mkdirat/openat/mknodat
@@ -2511,48 +2595,211 @@ chimera_io_uring_link_at(
 
 } /* chimera_io_uring_link_at */
 
+/* Find (or open) the descriptor this (file handle, owner) pair locks through
+ * and take a reference on it.  Called with range_lock held. */
+static struct chimera_io_uring_range_file *
+chimera_io_uring_range_file_get(
+    struct chimera_io_uring_thread   *thread,
+    const uint8_t                    *fh,
+    uint32_t                          fh_len,
+    uint64_t                          fh_hash,
+    const struct chimera_claim_owner *owner)
+{
+    struct chimera_io_uring_shared     *shared = thread->shared;
+    struct chimera_io_uring_range_file *file;
+    int                                 fd;
+
+    for (file = shared->range_files; file; file = file->next) {
+        if (file->fh_hash == fh_hash && file->fh_len == fh_len &&
+            memcmp(file->fh, fh, fh_len) == 0 &&
+            chimera_claim_owner_equal(&file->owner, owner)) {
+            file->refcnt++;
+            return file;
+        }
+    }
+
+    /* A read lock needs a readable descriptor and a write lock a writable one,
+     * so ask for both and settle for read-only on a read-only file. */
+    fd = linux_open_by_handle(&thread->mount_table, fh, fh_len, O_RDWR);
+
+    if (fd < 0) {
+        fd = linux_open_by_handle(&thread->mount_table, fh, fh_len, O_RDONLY);
+    }
+
+    if (fd < 0) {
+        return NULL;
+    }
+
+    file = calloc(1, sizeof(*file));
+
+    memcpy(file->fh, fh, fh_len);
+    file->fh_len  = fh_len;
+    file->fh_hash = fh_hash;
+    file->owner   = *owner;
+    file->fd      = fd;
+    file->refcnt  = 1;
+
+    LL_PREPEND(shared->range_files, file);
+
+    return file;
+} /* chimera_io_uring_range_file_get */
+
+/* Drop a reference; the last one closes the descriptor.  No record of ours can
+ * still be standing on it at that point, so nothing is unlocked by surprise.
+ * Called with range_lock held. */
 static void
-chimera_io_uring_lock(
+chimera_io_uring_range_file_put(
+    struct chimera_io_uring_shared     *shared,
+    struct chimera_io_uring_range_file *file)
+{
+    if (--file->refcnt) {
+        return;
+    }
+
+    LL_DELETE(shared->range_files, file);
+    close(file->fd);
+    free(file);
+} /* chimera_io_uring_range_file_put */
+
+/* Translate a RANGE claim into the flock the host understands.  Returns 0 if
+ * the range is projectable, or -1 if it is one the kernel cannot express (a
+ * genuine zero-byte range, or one starting past the largest representable
+ * offset) and the caller should grant it unprojected. */
+static int
+chimera_io_uring_range_to_flock(
+    const struct chimera_vfs_request *request,
+    struct flock                     *fl)
+{
+    uint64_t offset = request->claim_acquire.offset;
+    uint64_t length = request->claim_acquire.length;
+
+    fl->l_type = request->claim_acquire.exclusive ? F_WRLCK : F_RDLCK;
+    fl->l_pid  = 0;
+
+    if (request->claim_acquire.whence == SEEK_END) {
+        /* Handed to the kernel untouched so EOF is resolved atomically with
+         * the lock.  offset and length are bit-casts of signed values and keep
+         * the POSIX flock conventions intact -- l_len 0 is to-EOF here, and a
+         * negative l_len runs backwards from l_start. */
+        fl->l_whence = SEEK_END;
+        fl->l_start  = (off_t) (int64_t) offset;
+        fl->l_len    = (off_t) (int64_t) length;
+        return 0;
+    }
+
+    fl->l_whence = SEEK_SET;
+    fl->l_start  = (off_t) offset;
+
+    if (length == UINT64_MAX) {
+        fl->l_len = 0;                 /* to-EOF, which fcntl spells as 0 */
+    } else if (length == 0) {
+        /* A genuine zero-byte range, which fcntl cannot express at all since
+         * l_len 0 already means to-EOF.  The core has arbitrated it locally;
+         * granting it unprojected beats refusing an SMB zero-byte lock. */
+        return -1;
+    } else if (offset > (uint64_t) INT64_MAX) {
+        return -1;
+    } else if (length > (uint64_t) INT64_MAX - offset) {
+        fl->l_len = 0;                 /* runs past the last byte an off_t has */
+    } else {
+        fl->l_len = (off_t) length;
+    }
+
+    return 0;
+} /* chimera_io_uring_range_to_flock */
+
+/* Record the absolute bytes a granted lock covers, so the release can undo
+ * exactly them.  A SEEK_END lock was resolved by the kernel against the size
+ * it saw; re-resolving it at release time -- arbitrarily much later -- would
+ * unlock the wrong bytes, so resolve it here instead, while the size is still
+ * the one the lock was placed against. */
+static void
+chimera_io_uring_range_resolve(
+    const struct flock *fl,
+    int                 fd,
+    uint64_t           *r_offset,
+    uint64_t           *r_length)
+{
+    struct stat st;
+    int64_t     base;
+
+    if (fl->l_whence != SEEK_END || fstat(fd, &st) < 0) {
+        *r_offset = (uint64_t) fl->l_start;
+        *r_length = (uint64_t) fl->l_len;
+        return;
+    }
+
+    base = (int64_t) st.st_size + (int64_t) fl->l_start;
+
+    if (fl->l_len < 0) {
+        base += (int64_t) fl->l_len;
+    }
+
+    if (base < 0) {
+        base = 0;
+    }
+
+    *r_offset = (uint64_t) base;
+    *r_length = (fl->l_len < 0)
+        ? 0 - (uint64_t) fl->l_len
+        : (uint64_t) fl->l_len;
+} /* chimera_io_uring_range_resolve */
+
+/* Describe the holder an F_GETLK found back to the caller.  F_GETLK returns
+ * the conflict in SEEK_SET terms whatever whence was asked about. */
+static void
+chimera_io_uring_range_report_conflict(
+    struct chimera_vfs_request *request,
+    const struct flock         *fl)
+{
+    if (fl->l_type == F_UNLCK) {
+        return;
+    }
+
+    request->claim_acquire.r_conflict_type = (fl->l_type == F_RDLCK)
+        ? CHIMERA_VFS_LOCK_READ
+        : CHIMERA_VFS_LOCK_WRITE;
+    request->claim_acquire.r_conflict_offset = (uint64_t) fl->l_start;
+    /* fcntl reports to-EOF as 0; the claim wire spells it UINT64_MAX. */
+    request->claim_acquire.r_conflict_length = (fl->l_len == 0)
+        ? UINT64_MAX
+        : (uint64_t) fl->l_len;
+    /* An OFD holder reports l_pid -1, meaning "no process owns this". */
+    request->claim_acquire.r_conflict_pid = (fl->l_pid > 0)
+        ? (uint32_t) fl->l_pid
+        : 0;
+} /* chimera_io_uring_range_report_conflict */
+
+static void
+chimera_io_uring_claim_acquire(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    struct chimera_io_uring_thread *thread = private_data;
-    int                             fd     = (int) request->lock.handle->vfs_private;
-    int                             cmd;
-    struct flock                    fl = { 0 };
-    int                             rc;
+    struct chimera_io_uring_thread     *thread = private_data;
+    struct chimera_io_uring_shared     *shared = thread->shared;
+    struct chimera_io_uring_range_file *file;
+    struct chimera_io_uring_range      *range     = NULL;
+    struct flock                        fl        = { 0 };
+    int                                 projected = 1;
+    int                                 cmd, rc;
 
     --thread->inflight;
 
-    switch (request->lock.lock_type) {
-        case CHIMERA_VFS_LOCK_READ:
-            fl.l_type = F_RDLCK;
-            break;
-        case CHIMERA_VFS_LOCK_WRITE:
-            fl.l_type = F_WRLCK;
-            break;
-        case CHIMERA_VFS_LOCK_UNLOCK:
-            fl.l_type = F_UNLCK;
-            break;
-        default:
-            request->status = chimera_linux_errno_to_status(EINVAL);
-            request->complete(request);
-            return;
-    } /* switch */
-
-    fl.l_whence = request->lock.whence;
-    if (request->lock.whence == SEEK_END) {
-        fl.l_start = (off_t) (int64_t) request->lock.offset;
-        fl.l_len   = (off_t) (int64_t) request->lock.length;
-    } else {
-        fl.l_start = (off_t) request->lock.offset;
-        fl.l_len   = (off_t) request->lock.length; /* 0 = to EOF */
+    if (request->claim_acquire.klass != CHIMERA_VFS_CLAIM_KLASS_RANGE) {
+        /* This module arbitrates ranges only; it does not declare
+         * CHIMERA_VFS_CAP_CLAIM_AGGREGATE. */
+        request->status = CHIMERA_VFS_ENOTSUP;
+        request->complete(request);
+        return;
     }
-    fl.l_pid = 0;
 
-    if (request->lock.flags & CHIMERA_VFS_LOCK_TEST) {
-        cmd = F_GETLK;
-    } else if (request->lock.flags & CHIMERA_VFS_LOCK_WAIT) {
+    if (chimera_io_uring_range_to_flock(request, &fl) < 0) {
+        projected = 0;
+    }
+
+    if (request->claim_acquire.flags & CHIMERA_VFS_CLAIM_TEST) {
+        cmd = CHIMERA_IO_URING_LOCK_GET;
+    } else if (request->claim_acquire.flags & CHIMERA_VFS_CLAIM_WAIT) {
         /*
          * NOTE: F_SETLKW is a blocking syscall.  Unlike lseek or fallocate,
          * which complete quickly, this call can block indefinitely until the
@@ -2561,38 +2808,145 @@ chimera_io_uring_lock(
          * offload the wait to a dedicated thread and deliver the completion
          * via the evpl doorbell.
          */
-        cmd = F_SETLKW;
+        cmd = CHIMERA_IO_URING_LOCK_SETW;
     } else {
-        cmd = F_SETLK;
+        cmd = CHIMERA_IO_URING_LOCK_SET;
     }
 
-    rc = fcntl(fd, cmd, &fl);
+    if (!projected) {
+        /* Nothing to ask the host about.  A probe sees no conflict; an acquire
+         * gets a record that releases as a no-op. */
+        if (!(request->claim_acquire.flags & CHIMERA_VFS_CLAIM_TEST)) {
+            range = calloc(1, sizeof(*range));
 
-    if (rc < 0) {
-        request->status = chimera_linux_errno_to_status(errno);
+            pthread_mutex_lock(&shared->range_lock);
+            range->token = ++shared->range_next_token;
+            LL_PREPEND(shared->ranges, range);
+            pthread_mutex_unlock(&shared->range_lock);
+
+            request->claim_acquire.r_token   = range->token;
+            request->claim_acquire.r_granted = 1;
+        }
+
+        request->status = CHIMERA_VFS_OK;
         request->complete(request);
         return;
     }
 
-    if (request->lock.flags & CHIMERA_VFS_LOCK_TEST) {
-        if (fl.l_type == F_UNLCK) {
-            request->lock.r_conflict_type   = CHIMERA_VFS_LOCK_UNLOCK;
-            request->lock.r_conflict_offset = 0;
-            request->lock.r_conflict_length = 0;
-            request->lock.r_conflict_pid    = 0;
+    pthread_mutex_lock(&shared->range_lock);
+
+    file = chimera_io_uring_range_file_get(thread,
+                                           request->fh,
+                                           request->fh_len,
+                                           request->fh_hash,
+                                           &request->claim_acquire.owner);
+
+    rc = file ? 0 : errno;
+
+    pthread_mutex_unlock(&shared->range_lock);
+
+    if (!file) {
+        request->status = chimera_linux_errno_to_status(rc);
+        request->complete(request);
+        return;
+    }
+
+    /* Outside the registry lock: F_SETLKW blocks until the contending lock
+     * goes away, and every other claim on this module would be stuck behind it
+     * -- including the release that would let it through.  The reference taken
+     * above keeps file->fd alive meanwhile. */
+    rc = fcntl(file->fd, cmd, &fl);
+
+    if (rc < 0) {
+        int err = errno;
+
+        if (err == EACCES || err == EAGAIN) {
+            /* Held by somebody else: a refusal, not a failure.  Ask who, so
+             * the caller can describe the denial. */
+            if (chimera_io_uring_range_to_flock(request, &fl) == 0 &&
+                fcntl(file->fd, CHIMERA_IO_URING_LOCK_GET, &fl) == 0) {
+                chimera_io_uring_range_report_conflict(request, &fl);
+            }
+            request->status = CHIMERA_VFS_OK;
         } else {
-            request->lock.r_conflict_type = (fl.l_type == F_RDLCK)
-                ? CHIMERA_VFS_LOCK_READ
-                : CHIMERA_VFS_LOCK_WRITE;
-            request->lock.r_conflict_offset = fl.l_start;
-            request->lock.r_conflict_length = fl.l_len;
-            request->lock.r_conflict_pid    = fl.l_pid;
+            request->status = chimera_linux_errno_to_status(err);
+        }
+    } else if (request->claim_acquire.flags & CHIMERA_VFS_CLAIM_TEST) {
+        /* A probe acquires nothing: the answer is the conflict block. */
+        chimera_io_uring_range_report_conflict(request, &fl);
+        request->status = CHIMERA_VFS_OK;
+    } else {
+        range            = calloc(1, sizeof(*range));
+        range->file      = file;
+        range->projected = 1;
+
+        chimera_io_uring_range_resolve(&fl, file->fd, &range->offset, &range->length);
+    }
+
+    pthread_mutex_lock(&shared->range_lock);
+
+    if (range) {
+        range->token = ++shared->range_next_token;
+        LL_PREPEND(shared->ranges, range);
+
+        request->claim_acquire.r_token   = range->token;
+        request->claim_acquire.r_granted = 1;
+        request->status                  = CHIMERA_VFS_OK;
+    } else {
+        /* Nothing standing on the descriptor from this request. */
+        chimera_io_uring_range_file_put(shared, file);
+    }
+
+    pthread_mutex_unlock(&shared->range_lock);
+
+    request->complete(request);
+} /* chimera_io_uring_claim_acquire */
+
+static void
+chimera_io_uring_claim_release(
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    struct chimera_io_uring_thread *thread = private_data;
+    struct chimera_io_uring_shared *shared = thread->shared;
+    struct chimera_io_uring_range  *range;
+    struct flock                    fl = { 0 };
+
+    --thread->inflight;
+
+    /* claim_release.retained is an AGGREGATE downgrade mask; a RANGE record is
+     * binding and all-or-nothing, so the release simply drops it. */
+
+    pthread_mutex_lock(&shared->range_lock);
+
+    for (range = shared->ranges; range; range = range->next) {
+        if (range->token == request->claim_release.token) {
+            LL_DELETE(shared->ranges, range);
+            break;
         }
     }
 
+    pthread_mutex_unlock(&shared->range_lock);
+
+    if (range && range->projected) {
+        fl.l_type   = F_UNLCK;
+        fl.l_whence = SEEK_SET;
+        fl.l_start  = (off_t) range->offset;
+        fl.l_len    = (off_t) range->length;
+        fl.l_pid    = 0;
+
+        fcntl(range->file->fd, CHIMERA_IO_URING_LOCK_SET, &fl);
+
+        pthread_mutex_lock(&shared->range_lock);
+        chimera_io_uring_range_file_put(shared, range->file);
+        pthread_mutex_unlock(&shared->range_lock);
+    }
+
+    free(range);
+
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
-} /* chimera_io_uring_lock */
+} /* chimera_io_uring_claim_release */
 
 static void
 chimera_io_uring_get_xattr(
@@ -2826,8 +3180,11 @@ chimera_io_uring_dispatch(
         case CHIMERA_VFS_OP_SEEK:
             chimera_io_uring_seek(request, private_data);
             break;
-        case CHIMERA_VFS_OP_LOCK:
-            chimera_io_uring_lock(request, private_data);
+        case CHIMERA_VFS_OP_CLAIM_ACQUIRE:
+            chimera_io_uring_claim_acquire(request, private_data);
+            break;
+        case CHIMERA_VFS_OP_CLAIM_RELEASE:
+            chimera_io_uring_claim_release(request, private_data);
             break;
         case CHIMERA_VFS_OP_GET_XATTR:
             chimera_io_uring_get_xattr(request, private_data);
@@ -2856,7 +3213,7 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_io_uring = {
     .name         = "io_uring",
     .fh_magic     = CHIMERA_VFS_FH_MAGIC_IO_URING,
     .capabilities = CHIMERA_VFS_CAP_OPEN_PATH_REQUIRED | CHIMERA_VFS_CAP_OPEN_FILE_REQUIRED | CHIMERA_VFS_CAP_FS |
-        CHIMERA_VFS_CAP_FS_RELATIVE_OP | CHIMERA_VFS_CAP_FS_PATH_OP | CHIMERA_VFS_CAP_FS_LOCK |
+        CHIMERA_VFS_CAP_FS_RELATIVE_OP | CHIMERA_VFS_CAP_FS_PATH_OP | CHIMERA_VFS_CAP_CLAIM_RANGE |
         CHIMERA_VFS_CAP_COPY_RANGE | CHIMERA_VFS_CAP_CLONE_RANGE |
         CHIMERA_VFS_CAP_DELEGATES_DAC | CHIMERA_VFS_CAP_XATTR,
     .init           = chimera_io_uring_init,

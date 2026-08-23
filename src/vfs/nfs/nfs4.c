@@ -76,6 +76,15 @@ chimera_nfs4_dispatch(
         case CHIMERA_VFS_OP_LINK_AT:
             chimera_nfs4_link_at(thread, shared, request, private_data);
             break;
+        case CHIMERA_VFS_OP_CLAIM_ACQUIRE:
+        case CHIMERA_VFS_OP_CLAIM_RELEASE:
+            /* The module advertises CHIMERA_VFS_CAP_CLAIM_RANGE for its NLM
+             * proxy, which is an NFSv3 facility; a v4 mount arbitrates
+             * node-locally instead.  A deliberate, quiet ENOTSUP -- not an
+             * unknown opcode to shout about on every lock. */
+            request->status = CHIMERA_VFS_ENOTSUP;
+            request->complete(request);
+            break;
         default:
             chimera_error("nfs4", __FILE__, __LINE__,
                           "chimera_nfs4_dispatch: unknown operation %d",

@@ -13,14 +13,14 @@
  * see is here:
  *
  *   - the claim capability masks, which are the wire vocabulary of the
- *     CAP_LEASE backend arbitration ops (lease_acquire.rev_used/bind_deny);
- *   - the two backend lease wire shapes (AGGREGATE / RANGE);
+ *     backend arbitration ops (claim_acquire.rev_used/bind_deny);
+ *   - the two backend claim wire shapes (AGGREGATE / RANGE);
  *   - the owner/actor identity blocks, embedded by value in
- *     struct chimera_vfs_request and its lease_acquire payload;
+ *     struct chimera_vfs_request and its claim_acquire payload;
  *   - the pending-acquire ticket, embedded by value in the request so the
  *     I/O lease path never touches the heap (backends treat it as opaque
  *     storage);
- *   - the range-overlap helper shared by the core and CAP_LEASE arbiters.
+ *   - the range-overlap helper shared by the core and CAP_CLAIM_* arbiters.
  *
  * struct chimera_vfs_claim and struct chimera_vfs_claim_conflict remain
  * opaque to modules: forward declarations only.
@@ -90,10 +90,22 @@ chimera_vfs_claim_range_overlap_i(
     return a_off < b_end && b_off < a_end;
 } /* chimera_vfs_claim_range_overlap_i */
 
-/* Backend lease wire shapes (CHIMERA_VFS_OP_LEASE_ACQUIRE/_RELEASE): the
+/* Backend claim wire shapes (CHIMERA_VFS_OP_CLAIM_ACQUIRE/_RELEASE): the
  * revocable per-node AGGREGATE token vs a binding per-owner RANGE record. */
-#define CHIMERA_VFS_LEASE_AGGREGATE 1
-#define CHIMERA_VFS_LEASE_RANGE     2
+#define CHIMERA_VFS_CLAIM_KLASS_AGGREGATE 1
+#define CHIMERA_VFS_CLAIM_KLASS_RANGE     2
+
+/* A conflicting byte range as a backend describes it: the answer to a TEST
+ * (F_GETLK), and the detail a refused RANGE acquire carries when the
+ * backend knows who won.  `type` is CHIMERA_VFS_LOCK_{READ,WRITE,UNLOCK},
+ * where UNLOCK means "no conflict"; `pid` is meaningful only for a backend
+ * fronting a real OS lock, and is 0 otherwise. */
+struct chimera_claim_range_conflict {
+    uint8_t  type;
+    uint64_t offset;
+    uint64_t length;
+    uint32_t pid;
+};
 
 /* Identity block.  client_key is the node-local fast compare; the canonical
  * cluster-stable bytes (co_ownerid, ClientGuid, caller_name) are registered

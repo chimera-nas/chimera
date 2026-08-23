@@ -232,6 +232,31 @@ chimera_posix_lock_claim_acquire(
     struct chimera_posix_ofd_lock *node,
     bool                           wait);
 
+/* F_GETLK's backend half: ask a range-arbitrating backend whether anything
+ * outside this process holds the probed range.  Returns false when nothing
+ * arbitrates ranges or the range is free; true fills *conflict. */
+bool
+chimera_posix_lock_claim_test(
+    struct chimera_posix_client       *posix,
+    struct chimera_vfs_open_handle    *handle,
+    const struct chimera_vfs_claim    *probe,
+    struct chimera_vfs_claim_conflict *conflict);
+
+/* SEEK_END ranges: the offset is resolved by the backend, atomically with
+ * the operation, so the local core cannot arbitrate them at all and the
+ * whole fcntl is answered by the backend.  Returns the fcntl return value
+ * and sets errno on failure. */
+int
+chimera_posix_lock_claim_seek_end(
+    struct chimera_posix_client    *posix,
+    struct chimera_vfs_open_handle *handle,
+    int                             cmd,
+    struct flock                   *fl,
+    uint32_t                        lock_type,
+    int32_t                         whence,
+    uint64_t                        offset,
+    uint64_t                        length);
+
 /* Release every lock claim the description still holds.  Caller holds
  * fd_lock. */
 void chimera_posix_ofd_locks_release(
