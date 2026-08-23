@@ -847,6 +847,11 @@ smb2_conn_reset(struct smb2_env *env)
     for (int i = 0; i < env->nconns; i++) {
         free(env->conns[i]->sbuf);
         free(env->conns[i]->rbuf);
+        /* xbuf too -- smb2_conn_open allocates three buffers per connection.
+         * Missing it leaks SMB2C_BUFSZ per connection, which a batched run
+         * that resets its connections once per trace turns into hundreds of
+         * megabytes. */
+        free(env->conns[i]->xbuf);
         free(env->conns[i]);
     }
     env->nconns = 0;
