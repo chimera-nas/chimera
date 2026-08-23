@@ -47,6 +47,13 @@ chimera_smb_tree_connect(struct chimera_smb_request *request)
             }
         }
 
+        /* Take the tree's reference while still holding shares_lock, so it
+         * cannot race chimera_smb_remove_share unlinking and releasing the
+         * share between the lookup and the store into tree->share. */
+        if (share) {
+            __atomic_fetch_add(&share->refcnt, 1, __ATOMIC_RELAXED);
+        }
+
         pthread_mutex_unlock(&shared->shares_lock);
 
         if (!share) {
