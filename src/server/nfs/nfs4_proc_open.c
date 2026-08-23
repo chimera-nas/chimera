@@ -13,18 +13,18 @@
 #include "server/server.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
-#include "vfs/vfs_state.h"
+#include "vfs/vfs_claim.h"
 #include "vfs/vfs_access.h"
 #include "vfs/vfs_acl.h"
 
 /*
- * Acquire a cross-protocol SHARE reservation in vfs_state for a freshly
+ * Acquire a cross-protocol SHARE reservation in the claim core for a freshly
  * created open_state.  Upstream's nfs_client_check_share_conflict already
  * enforces share-mode conflicts *among NFSv4 owners of the same client*;
  * this adds the NLM/SMB dimension so an NFSv4 OPEN that denies read/write
  * collides with an SMB open holding that access (and vice versa).
  *
- * Returns NFS4_OK on success (lease stored on the state, released at
+ * Returns NFS4_OK on success (claim stored on the state, released at
  * open_state_cleanup), NFS4ERR_SHARE_DENIED on cross-protocol conflict.
  */
 static nfsstat4
@@ -36,8 +36,8 @@ chimera_nfs4_open_acquire_share(
     struct chimera_vfs_state       *vfs_state = req->thread->vfs->vfs_state;
     struct chimera_vfs_open_handle *handle    = state->handle;
     struct chimera_vfs_file_state  *file_state;
-    struct chimera_vfs_lease       *conflict = NULL;
-    enum chimera_vfs_lease_result   result;
+    struct chimera_claim_owner      owner;
+    enum chimera_vfs_claim_result   result;
     uint8_t                         granted = 0;
     uint8_t                         denied  = 0;
 
@@ -49,16 +49,16 @@ chimera_nfs4_open_acquire_share(
     }
 
     if (args->share_access & OPEN4_SHARE_ACCESS_READ) {
-        granted |= CHIMERA_VFS_LEASE_MODE_R;
+        granted |= CHIMERA_CLAIM_R;
     }
     if (args->share_access & OPEN4_SHARE_ACCESS_WRITE) {
-        granted |= CHIMERA_VFS_LEASE_MODE_W;
+        granted |= CHIMERA_CLAIM_W;
     }
     if (args->share_deny & OPEN4_SHARE_DENY_READ) {
-        denied |= CHIMERA_VFS_LEASE_MODE_R;
+        denied |= CHIMERA_CLAIM_R;
     }
     if (args->share_deny & OPEN4_SHARE_DENY_WRITE) {
-        denied |= CHIMERA_VFS_LEASE_MODE_W;
+        denied |= CHIMERA_CLAIM_W;
     }
 
     if (granted == 0 && denied == 0) {
@@ -72,42 +72,40 @@ chimera_nfs4_open_acquire_share(
         return NFS4ERR_SERVERFAULT;
     }
 
-    state->share_lease.kind             = CHIMERA_VFS_LEASE_SHARE;
-    state->share_lease.mode.granted     = granted;
-    state->share_lease.mode.denied      = denied;
-    state->share_lease.owner.protocol   = CHIMERA_VFS_LEASE_PROTO_NFSV4;
-    state->share_lease.owner.client_key = state->owner->client->client_id;
-    state->share_lease.owner.owner_lo   = XXH3_64bits(state->owner->owner,
-                                                      state->owner->owner_len);
-    state->share_lease.owner.owner_hi = 0;
+    memset(&owner, 0, sizeof(owner));
+    owner.proto      = CHIMERA_CLAIM_PROTO_NFSV4;
+    owner.client_key = state->owner->client->client_id;
+    owner.owner_lo   = XXH3_64bits(state->owner->owner,
+                                   state->owner->owner_len);
+    owner.owner_hi = 0;
+
+    chimera_vfs_claim_init_nfs4_open(&state->share_claim, granted, denied,
+                                     &owner);
     /* Courteous server: report this share reservation dead once the owning
      * client's lease lapses, so a conflicting open reclaims it; reclaim flags
      * the client for sweep teardown. */
-    state->share_lease.owner.is_alive_cb = nfs_client_lease_alive;
-    state->share_lease.owner.revoked_cb  = nfs_client_lease_revoked_cb;
-    state->share_lease.owner.cb_private  = state->owner->client;
+    state->share_claim.is_alive_cb = nfs_client_lease_alive;
+    state->share_claim.revoked_cb  = nfs_client_lease_revoked_cb;
+    state->share_claim.cb_private  = state->owner->client;
 
-    result = chimera_vfs_state_try_insert(vfs_state, file_state,
-                                          &state->share_lease, &conflict);
-    /* This path does not dereference `conflict`; drop the pin try_insert may hold
-     * on it (no-op for a non-grant conflict). */
-    chimera_vfs_state_conflict_unref(vfs_state, conflict);
-    if (result == CHIMERA_VFS_LEASE_BREAKING) {
+    result = chimera_vfs_claim_try_acquire(vfs_state, file_state,
+                                           &state->share_claim, NULL);
+    if (result == CHIMERA_CLAIM_BREAKING) {
         /* The conflict is a breakable holder -- an NFSv4 delegation being
-         * recalled (try_insert already kicked the break).  Tell the client to
+         * recalled (try_acquire already kicked the break).  Tell the client to
          * retry; by the next attempt the delegation's DELEGRETURN should have
-         * released the lease and the SHARE will be granted (RFC 7530 §10.4.5
+         * released the claim and the SHARE will be granted (RFC 7530 §10.4.5
          * recommends NFS4ERR_DELAY while a recall is outstanding). */
         chimera_vfs_state_put(vfs_state, file_state);
         return NFS4ERR_DELAY;
     }
-    if (result != CHIMERA_VFS_LEASE_GRANTED) {
+    if (result != CHIMERA_CLAIM_GRANTED) {
         chimera_vfs_state_put(vfs_state, file_state);
         return NFS4ERR_SHARE_DENIED;
     }
 
     state->share_file_state = file_state;
-    state->share_lease_held = true;
+    state->share_claim_held = true;
     return NFS4_OK;
 } /* chimera_nfs4_open_acquire_share */
 
@@ -146,13 +144,12 @@ chimera_nfs4_open_grant_delegation(
     struct nfs_delegation            *deleg;
     struct nfs_delegation            *d;
     struct chimera_vfs_file_state    *file_state;
-    struct chimera_vfs_lease         *conflict = NULL;
-    enum chimera_vfs_lease_result     result;
+    struct chimera_claim_owner        owner;
+    enum chimera_vfs_claim_result     result;
     struct stateid4                   deleg_stateid;
     uint64_t                          fh_hash;
     bool                              exists = false;
     uint8_t                           deleg_type;
-    uint8_t                           lease_mode;
     struct nfsace4                   *perms;
     static const char                 everyone[] = "EVERYONE@";
 
@@ -184,10 +181,8 @@ chimera_nfs4_open_grant_delegation(
      * a read delegation. */
     if (args->share_access & OPEN4_SHARE_ACCESS_WRITE) {
         deleg_type = OPEN_DELEGATE_WRITE;
-        lease_mode = CHIMERA_VFS_LEASE_MODE_W;
     } else if (args->share_access & OPEN4_SHARE_ACCESS_READ) {
         deleg_type = OPEN_DELEGATE_READ;
-        lease_mode = CHIMERA_VFS_LEASE_MODE_R;
     } else {
         return false;
     }
@@ -235,20 +230,22 @@ chimera_nfs4_open_grant_delegation(
                                   &thread->shared->nfs4_state_table,
                                   &deleg_stateid);
 
-    deleg->lease.kind             = CHIMERA_VFS_LEASE_CACHING;
-    deleg->lease.mode.granted     = lease_mode;
-    deleg->lease.mode.denied      = 0;
-    deleg->lease.owner.protocol   = CHIMERA_VFS_LEASE_PROTO_NFSV4;
-    deleg->lease.owner.client_key = client->client_id;
-    deleg->lease.owner.owner_lo   = fh_hash;
-    deleg->lease.owner.owner_hi   = 0;
-    deleg->lease.owner.break_cb   = nfs4_delegation_break_cb;
+    memset(&owner, 0, sizeof(owner));
+    owner.proto      = CHIMERA_CLAIM_PROTO_NFSV4;
+    owner.client_key = client->client_id;
+    owner.owner_lo   = fh_hash;
+    owner.owner_hi   = 0;
+
+    chimera_vfs_claim_init_delegation(&deleg->claim,
+                                      deleg_type == OPEN_DELEGATE_WRITE,
+                                      &owner);
+    deleg->claim.break_cb = nfs4_delegation_break_cb;
     /* Courteous server: report the delegation dead once the owning client's
      * lease lapses, so a conflicting open revokes it outright rather than
      * attempting a CB_RECALL to a client that is gone. */
-    deleg->lease.owner.is_alive_cb = nfs_delegation_lease_alive;
-    deleg->lease.owner.revoked_cb  = nfs_delegation_revoked_cb;
-    deleg->lease.owner.cb_private  = deleg;
+    deleg->claim.is_alive_cb = nfs_delegation_lease_alive;
+    deleg->claim.revoked_cb  = nfs_delegation_revoked_cb;
+    deleg->claim.cb_private  = deleg;
 
     file_state = chimera_vfs_state_get(vfs_state, req->fh, req->fhlen,
                                        fh_hash, true);
@@ -259,13 +256,10 @@ chimera_nfs4_open_grant_delegation(
     }
     deleg->file_state = file_state;
 
-    result = chimera_vfs_state_try_insert(vfs_state, file_state,
-                                          &deleg->lease, &conflict);
-    /* This path does not dereference `conflict`; drop the pin try_insert may hold
-     * on it (no-op for a non-grant conflict). */
-    chimera_vfs_state_conflict_unref(vfs_state, conflict);
-    if (result != CHIMERA_VFS_LEASE_GRANTED) {
-        /* Contention (another open / lease): just decline to delegate. */
+    result = chimera_vfs_claim_try_acquire(vfs_state, file_state,
+                                           &deleg->claim, NULL);
+    if (result != CHIMERA_CLAIM_GRANTED) {
+        /* Contention (another open / claim): just decline to delegate. */
         chimera_vfs_state_put(vfs_state, file_state);
         deleg->file_state = NULL;
         nfs_delegation_destroy(deleg, &thread->shared->nfs4_state_table,

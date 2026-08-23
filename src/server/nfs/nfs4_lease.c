@@ -39,8 +39,8 @@ nfs_deleg_recall_timeout_check(struct nfs_client *uc)
     LL_FOREACH2(uc->delegations, deleg, next_in_client)
     {
         if (deleg->lease_held &&
-            deleg->lease.break_state == CHIMERA_VFS_BREAK_BREAKING &&
-            nfs_deleg_deadline_passed(deleg->lease.break_deadline)) {
+            deleg->claim.break_state == CHIMERA_CLAIM_BREAK_BREAKING &&
+            nfs_deleg_deadline_passed(deleg->claim.break_deadline)) {
             timed_out = true;
             break;
         }

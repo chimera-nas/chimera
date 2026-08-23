@@ -17,14 +17,15 @@
 #include "nfs_common.h"
 #include "evpl/evpl_rpc2.h"
 #include "vfs/vfs_release.h"
-#include "vfs/vfs_state.h"
+#include "vfs/vfs_claim.h"
 
 /* Bump a replay-cache counter on the shared struct.  Safe when the
  * thread/shared are not set up (e.g. in the unit test). */
 static inline void
 nfs4_replay_metric_inc(
     struct nfs_request *req,
-    struct prometheus_counter_instance *(*field)(struct nfs4_replay_metrics *))
+    struct prometheus_counter_instance *(*field)(
+        struct nfs4_replay_metrics *))
 {
     struct nfs4_replay_metrics         *rm;
     struct prometheus_counter_instance *inst;
@@ -1125,10 +1126,10 @@ nfs4_client_lookup_lock_owner(
 
 void
 nfs4_fill_denied_owner(
-    struct nfs4_client_table       *table,
-    const struct chimera_vfs_lease *conflict,
-    struct state_owner4            *denied_owner,
-    struct xdr_dbuf                *dbuf)
+    struct nfs4_client_table                *table,
+    const struct chimera_vfs_claim_conflict *conflict,
+    struct state_owner4                     *denied_owner,
+    struct xdr_dbuf                         *dbuf)
 {
     uint8_t  owner_buf[NFS4_OPAQUE_LIMIT];
     uint32_t owner_len = 0;
@@ -1145,7 +1146,7 @@ nfs4_fill_denied_owner(
      * byte-string is reconstructed from its hash. */
     denied_owner->clientid = conflict->owner.client_key;
 
-    if (conflict->owner.protocol == CHIMERA_VFS_LEASE_PROTO_NFSV4 &&
+    if (conflict->owner.proto == CHIMERA_CLAIM_PROTO_NFSV4 &&
         nfs4_client_lookup_lock_owner(table,
                                       conflict->owner.client_key,
                                       conflict->owner.owner_lo,

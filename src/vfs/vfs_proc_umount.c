@@ -9,7 +9,7 @@
 #include "evpl/evpl_timer.h"
 #include "vfs_mount_table.h"
 #include "vfs_open_cache.h"
-#include "vfs_state.h"
+#include "vfs_claim.h"
 #include "common/macros.h"
 
 

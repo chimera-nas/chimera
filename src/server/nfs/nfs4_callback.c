@@ -31,7 +31,7 @@
 #include "nfs4_procs.h"
 #include "nfs_common.h"
 #include "nfs_internal.h"
-#include "vfs/vfs_state.h"
+#include "vfs/vfs_claim.h"
 
 /*
  * Parse an RFC 1833 universal address "h1.h2.h3.h4.p1.p2" into a host string
@@ -581,7 +581,7 @@ nfs4_cb_recall_complete(
             memory_order_acq_rel, memory_order_acquire);
 
         if (badsession && same_chan && deleg->lease_held &&
-            deleg->lease.break_state == CHIMERA_VFS_BREAK_BREAKING &&
+            deleg->claim.break_state == CHIMERA_CLAIM_BREAK_BREAKING &&
             atomic_fetch_add_explicit(&deleg->cb_recall_retries, 1,
                                       memory_order_acq_rel) <
             NFS4_CB_RECALL_RETRY_MAX) {
@@ -775,13 +775,15 @@ nfs4_cb_layoutrecall_complete(
 bool
 nfs4_cb_layoutrecall(
     struct chimera_server_nfs_thread *thread,
-    struct nfs_client *client,
-    const uint8_t *fh,
-    uint32_t fh_len,
-    uint16_t export_id,
-    const struct stateid4 *layout_stateid,
-    void ( *done )(int cb_status, void *arg),
-    void *arg)
+    struct nfs_client                *client,
+    const uint8_t                    *fh,
+    uint32_t                          fh_len,
+    uint16_t                          export_id,
+    const struct stateid4            *layout_stateid,
+    void (                           *done )(
+        int   cb_status,
+        void *arg),
+    void                             *arg)
 {
     struct nfs4_cb_client           *chan = client->cb_path.cb_client;
     struct evpl_rpc2_conn           *conn = chan ? nfs4_cb_chan_conn(chan) : NULL;
@@ -1130,7 +1132,7 @@ nfs4_find_conflicting_write_deleg(
     struct chimera_vfs_state      *vfs_state = thread->vfs->vfs_state;
     uint64_t                       fh_hash;
     struct chimera_vfs_file_state *file;
-    struct chimera_vfs_lease      *cur;
+    struct chimera_vfs_claim      *cur;
     struct nfs_delegation         *deleg = NULL;
 
     fh_hash = XXH3_64bits(fh, fh_len) & INT64_MAX;
@@ -1141,19 +1143,19 @@ nfs4_find_conflicting_write_deleg(
     }
 
     pthread_mutex_lock(&file->lock);
-    for (cur = file->caching_leases; cur; cur = cur->next) {
+    for (cur = file->claims[CHIMERA_CLAIM_CLASS_CACHE]; cur; cur = cur->next) {
         struct nfs_delegation *d;
 
-        if (cur->owner.protocol != CHIMERA_VFS_LEASE_PROTO_NFSV4) {
+        if (cur->owner.proto != CHIMERA_CLAIM_PROTO_NFSV4) {
             continue;
         }
-        if (!(cur->mode.granted & CHIMERA_VFS_LEASE_MODE_W)) {
-            continue;
+        if (!(cur->used & CHIMERA_CLAIM_CW)) {
+            continue; /* not a write delegation */
         }
         if (cur->owner.client_key == querying_client_id) {
             continue; /* the querying client's own delegation */
         }
-        d = cur->owner.cb_private;
+        d = cur->cb_private;
         if (!d || atomic_load_explicit(&d->destroyed, memory_order_acquire)) {
             continue;
         }
@@ -1283,19 +1285,19 @@ nfs4_cb_doorbell_drain(
     }
 } /* nfs4_cb_doorbell_drain */
 
-/* vfs_state break callback, wired onto every delegation's CACHING lease.
+/* Claim break callback, wired onto every delegation's cache claim.
  * Invoked (under file->lock release) when a conflicting acquirer needs the
- * delegation dropped.  Kicks the CB_RECALL; the lease stays BREAKING until
+ * delegation dropped.  Kicks the CB_RECALL; the claim stays BREAKING until
  * the client's DELEGRETURN releases it (or the recall fails and we revoke). */
 void
 nfs4_delegation_break_cb(
-    struct chimera_vfs_lease *lease,
+    struct chimera_vfs_claim *claim,
     uint8_t                   needed_mode,
     void                     *private_data)
 {
     struct nfs_delegation *deleg = private_data;
 
-    (void) lease;
+    (void) claim;
     (void) needed_mode;
 
     nfs4_cb_recall(deleg);
@@ -1345,7 +1347,7 @@ nfs4_cb_recall(struct nfs_delegation *deleg)
         /* No channel was ever established (delegation should not have been
          * granted, but be defensive): revoke so the breaker proceeds. */
         if (deleg->lease_held) {
-            chimera_vfs_lease_revoke(&deleg->lease);
+            chimera_vfs_claim_revoke(&deleg->claim);
         }
         return;
     }
@@ -1369,15 +1371,15 @@ nfs4_cb_resend_recalls_on_rebind(
     }
 
     /* Fast path: collect delegations with an outstanding recall -- a still-
-     * BREAKING backing lease that has not been returned.  In the common case --
+     * BREAKING backing claim that has not been returned.  In the common case --
      * and always when delegations are disabled -- there are none, so this is a
      * cheap scan-and-return.  Pin each survivor with a transient ref so it
      * cannot be freed once we drop client->lock.  We deliberately do NOT filter
      * on cb_recall_state: the prior recall's completion (which moves the deleg
      * back to ACTIVE) runs asynchronously on the channel owner thread and races
      * this CREATE_SESSION, so the deleg may still read RECALLING here -- keying
-     * off the lease's BREAK state instead makes the resend independent of that
-     * race.  (Reading lease.break_state under client->lock, without the file
+     * off the claim's BREAK state instead makes the resend independent of that
+     * race.  (Reading claim.break_state under client->lock, without the file
      * lock, matches the existing nfs_deleg_recall_timeout_check pattern -- a
      * benign racy read of an enum used only to decide whether to retry.) */
     pthread_mutex_lock(&client->lock);
@@ -1388,7 +1390,7 @@ nfs4_cb_resend_recalls_on_rebind(
             continue;
         }
         if (!deleg->lease_held ||
-            deleg->lease.break_state != CHIMERA_VFS_BREAK_BREAKING) {
+            deleg->claim.break_state != CHIMERA_CLAIM_BREAK_BREAKING) {
             continue;
         }
 

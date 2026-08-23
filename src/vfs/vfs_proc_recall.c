@@ -5,7 +5,7 @@
 #include <stdlib.h>
 
 #include "vfs/vfs_procs.h"
-#include "vfs/vfs_state.h"
+#include "vfs/vfs_claim.h"
 #include "vfs/vfs_internal.h"
 #include "common/macros.h"
 
@@ -56,7 +56,7 @@ chimera_vfs_recall_handle_lease(
      * (RH -> R), sparing the operating open (io_handle), and park until the
      * client's break ack arrives. */
     chimera_vfs_io_recall_single(request, handle->fh, handle->fh_len,
-                                 handle->fh_hash, CHIMERA_VFS_LEASE_MODE_R,
+                                 handle->fh_hash, CHIMERA_CLAIM_CR,
                                  chimera_vfs_recall_complete);
 } /* chimera_vfs_recall_handle_lease */
 
@@ -134,6 +134,6 @@ chimera_vfs_recall_caching_fh(
     request->proto_private_data = private_data;
 
     chimera_vfs_io_recall_single(request, fh, fh_len, request->fh_hash,
-                                 CHIMERA_VFS_LEASE_MODE_R | CHIMERA_VFS_LEASE_MODE_W,
+                                 CHIMERA_CLAIM_CR | CHIMERA_CLAIM_CW,
                                  chimera_vfs_recall_caching_fh_complete);
 } /* chimera_vfs_recall_caching_fh */

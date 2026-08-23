@@ -13,7 +13,7 @@
 #include "common/misc.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
-#include "vfs/vfs_state.h"
+#include "vfs/vfs_claim.h"
 
 #define SMB2_LOCK_REQUEST_SIZE    48   /* fixed; LockCount==1 in this build */
 #define SMB2_LOCK_REPLY_SIZE      4
@@ -21,7 +21,7 @@
 /* Sentinel stored in request->lock.resume_status before a (possibly blocking)
  * single-element acquire: chimera_smb_lock_acquire_cb overwrites it with the
  * real status if it fires synchronously, so a value still equal to this after
- * chimera_vfs_lease_acquire returns means the acquire parked on the VFS pending
+ * chimera_vfs_claim_acquire returns means the acquire parked on the VFS pending
  * queue and the callback will fire later. */
 #define CHIMERA_SMB_LOCK_PENDING  0xFFFFFFFFu
 
@@ -129,7 +129,7 @@ smb_lock_ranges_overlap(
 /* One held byte-range, owned by the open_file.  Released on UNLOCK or
  * at close via chimera_smb_open_file_drain_locks. */
 struct chimera_smb_lock_entry {
-    struct chimera_vfs_lease           lease;
+    struct chimera_vfs_claim           lease;
     struct chimera_vfs_pending_acquire ticket;
     struct chimera_vfs_file_state     *file_state;
     struct chimera_smb_open_file      *open_file;
@@ -151,7 +151,7 @@ chimera_smb_open_file_drain_locks(
     /* Drop the SHARE-mode reservation first.  Release any byte-range
      * locks after — they may share the same file_state. */
     if (open_file->share_lease_inserted) {
-        chimera_vfs_lease_release(vfs_state, open_file->share_file_state,
+        chimera_vfs_claim_release(vfs_state, open_file->share_file_state,
                                   &open_file->share_lease);
         open_file->share_lease_inserted = false;
     }
@@ -163,7 +163,7 @@ chimera_smb_open_file_drain_locks(
     /* A named stream's file-level DELETE reservation on the base file's state
      * (smb2.streams.delete). */
     if (open_file->base_share_lease_inserted) {
-        chimera_vfs_lease_release(vfs_state, open_file->base_share_file_state,
+        chimera_vfs_claim_release(vfs_state, open_file->base_share_file_state,
                                   &open_file->base_share_lease);
         chimera_vfs_state_stream_holder_dec(open_file->base_share_file_state);
         open_file->base_share_lease_inserted = false;
@@ -182,7 +182,7 @@ chimera_smb_open_file_drain_locks(
          * reference: once removed, the break callback will not try to notify a
          * closing open, and on the grant's last reference the lease is freed. */
         chimera_smb_grant_remove_member(open_file->grant, open_file);
-        chimera_vfs_caching_grant_release(vfs_state, open_file->grant, true /*pump*/);
+        chimera_vfs_claim_grant_release(vfs_state, open_file->grant, true /*pump*/);
         open_file->grant                  = NULL;
         open_file->caching_lease_inserted = false;
     }
@@ -204,7 +204,8 @@ chimera_smb_open_file_drain_locks(
     while (entry) {
         tmp = entry->next;
         if (entry->lease_inserted) {
-            chimera_vfs_lease_release(vfs_state, entry->file_state, &entry->lease);
+            chimera_vfs_claim_release_ranged(thread->vfs_thread, vfs_state,
+                                             entry->file_state, &entry->lease);
         }
         if (entry->file_state) {
             chimera_vfs_state_put(vfs_state, entry->file_state);
@@ -297,9 +298,9 @@ chimera_smb_lock_settle_entry(
     struct chimera_smb_request    *request,
     struct chimera_smb_open_file  *open_file,
     struct chimera_smb_lock_entry *entry,
-    enum chimera_vfs_lease_result  result)
+    enum chimera_vfs_claim_result  result)
 {
-    if (result == CHIMERA_VFS_LEASE_GRANTED) {
+    if (result == CHIMERA_CLAIM_GRANTED) {
         entry->lease_inserted = true;
         DL_APPEND(open_file->lock_entries, entry);
         return SMB2_STATUS_SUCCESS;
@@ -312,7 +313,9 @@ chimera_smb_lock_settle_entry(
      * here with lease_inserted set — release the inserted lease so it is not
      * leaked into the VFS range table. */
     if (entry->lease_inserted) {
-        chimera_vfs_lease_release(vfs_state, entry->file_state, &entry->lease);
+        /* Teardown path with no request thread: the queued release lane is
+         * fine here — no immediately-following same-bytes acquire races it. */
+        chimera_vfs_claim_release(vfs_state, entry->file_state, &entry->lease);
     }
     chimera_vfs_state_put(vfs_state, entry->file_state);
     free(entry);
@@ -353,11 +356,11 @@ chimera_smb_lock_park_finish(
         entry->pending_req = NULL;
         if (status == SMB2_STATUS_SUCCESS) {
             status = chimera_smb_lock_settle_entry(vfs_state, request, open_file,
-                                                   entry, CHIMERA_VFS_LEASE_GRANTED);
+                                                   entry, CHIMERA_CLAIM_GRANTED);
         } else {
             /* Aborted/cancelled before grant: tear the entry down. */
             chimera_smb_lock_settle_entry(vfs_state, request, open_file,
-                                          entry, CHIMERA_VFS_LEASE_DENIED);
+                                          entry, CHIMERA_CLAIM_DENIED);
         }
     }
 
@@ -394,7 +397,7 @@ chimera_smb_lock_abort_parked(
      * thread's lock_resume_head.  Both this abort and the resume drain run on the
      * owning thread, so unlink it from lock_resume_head here and abort it rather
      * than letting the drain complete it (the open is being torn down). */
-    if (entry && !chimera_vfs_lease_acquire_cancel(vfs_state, &entry->ticket)) {
+    if (entry && !chimera_vfs_claim_cancel(vfs_state, &entry->ticket)) {
         struct chimera_smb_request **pp = &thread->lock_resume_head;
 
         pthread_mutex_lock(&thread->lease_break_lock);
@@ -427,10 +430,10 @@ chimera_smb_lock_abort_parked(
 
 static void
 chimera_smb_lock_acquire_cb(
-    enum chimera_vfs_lease_result result,
-    struct chimera_vfs_lease     *granted,
-    struct chimera_vfs_lease     *conflict,
-    void                         *private_data)
+    enum chimera_vfs_claim_result            result,
+    struct chimera_vfs_claim                *granted,
+    const struct chimera_vfs_claim_conflict *conflict,
+    void                                    *private_data)
 {
     struct chimera_smb_lock_entry    *entry   = private_data;
     struct chimera_smb_request       *request = entry->pending_req;
@@ -440,7 +443,7 @@ chimera_smb_lock_acquire_cb(
     (void) granted;
     (void) conflict;
 
-    status = (result == CHIMERA_VFS_LEASE_GRANTED)
+    status = (result == CHIMERA_CLAIM_GRANTED)
         ? SMB2_STATUS_SUCCESS : SMB2_STATUS_LOCK_NOT_GRANTED;
 
     if (!request->lock.parked) {
@@ -467,19 +470,19 @@ chimera_smb_lock_acquire_cb(
     evpl_ring_doorbell(&thread->lease_resume_doorbell);
 } /* chimera_smb_lock_acquire_cb */
 
-/* Records a synchronous lease-acquire outcome.  chimera_vfs_lease_acquire fires
- * the callback inline when wait==false, so the result is readable right after
- * the call returns. */
+/* Records a synchronous claim-acquire outcome.  chimera_vfs_claim_acquire fires
+ * the callback inline when wait==false (FAIL_IMMEDIATELY keeps the synchronous
+ * contract), so the result is readable right after the call returns. */
 static void
 chimera_smb_lock_sync_cb(
-    enum chimera_vfs_lease_result result,
-    struct chimera_vfs_lease     *granted,
-    struct chimera_vfs_lease     *conflict,
-    void                         *private_data)
+    enum chimera_vfs_claim_result            result,
+    struct chimera_vfs_claim                *granted,
+    const struct chimera_vfs_claim_conflict *conflict,
+    void                                    *private_data)
 {
     (void) granted;
     (void) conflict;
-    *(enum chimera_vfs_lease_result *) private_data = result;
+    *(enum chimera_vfs_claim_result *) private_data = result;
 } /* chimera_smb_lock_sync_cb */
 
 /* Take one byte-range lock for this open synchronously.  Returns the held entry
@@ -496,7 +499,8 @@ chimera_smb_lock_take_one(
 {
     struct chimera_vfs_state      *vfs_state = thread->vfs_thread->vfs->vfs_state;
     struct chimera_smb_lock_entry *entry, *held;
-    enum chimera_vfs_lease_result  result = CHIMERA_VFS_LEASE_DENIED;
+    struct chimera_claim_owner     owner;
+    enum chimera_vfs_claim_result  result = CHIMERA_CLAIM_DENIED;
 
     /* The only caller (chimera_smb_lock_multi) is reached from chimera_smb_lock
      * after open_file has been resolved and null-checked, so open_file is an
@@ -528,30 +532,36 @@ chimera_smb_lock_take_one(
         free(entry);
         return NULL;
     }
-    entry->open_file          = open_file;
-    entry->lease.kind         = CHIMERA_VFS_LEASE_RANGE;
-    entry->lease.mode.granted = exclusive ? CHIMERA_VFS_LEASE_MODE_W
-                                              : CHIMERA_VFS_LEASE_MODE_R;
-    entry->lease.offset           = offset;
-    entry->lease.length           = length;
-    entry->lease.owner.protocol   = CHIMERA_VFS_LEASE_PROTO_SMB2;
-    entry->lease.owner.client_key = request->session_handle->session->session_id;
-    entry->lease.owner.owner_lo   = open_file->file_id.pid;
-    entry->lease.owner.owner_hi   = open_file->file_id.vid;
-    /* Point at the open's caching grant (NULL if it holds no oplock/lease), not
-     * the open_file, so the range-vs-caching conflict check sees that this
-     * byte-range lock and the same open's (or a coalesced peer's) caching lease
-     * -- whose owner identity is the lease key, not the file id -- share one
-     * grant and must not break each other (vfs_state.c same-cb_private
-     * exemption; smb2.oplock.brl2).  The grant's lease carries the same pointer.
-     * Mirrors the single-element path. */
-    entry->lease.owner.cb_private = open_file->grant;
+    entry->open_file = open_file;
 
-    chimera_vfs_lease_acquire(vfs_state, entry->file_state, &entry->lease,
+    memset(&owner, 0, sizeof(owner));
+    owner.proto      = CHIMERA_CLAIM_PROTO_SMB2;
+    owner.client_key = request->session_handle->session->session_id;
+    owner.owner_lo   = open_file->file_id.pid;
+    owner.owner_hi   = open_file->file_id.vid;
+    /* Carry the open's grant LeaseKey (when it holds one) so the fresh-cache
+     * denial self-exempts at the KEY circle: this byte-range lock and the same
+     * open's (or a coalesced peer's) caching lease -- whose owner identity is
+     * the lease key, not the file id -- must not break each other (brl2 across
+     * two opens).  Mirrors the single-element path. */
+    if (open_file->grant) {
+        memcpy(owner.key, open_file->grant->claim.owner.key, 16);
+    }
+
+    chimera_vfs_claim_init_range(&entry->lease, exclusive, true /* smb */,
+                                 offset, length, &owner);
+    /* HOLDER-circle anchor: feeds the brl2 exemptions and the MAND
+     * holder-exempt row. */
+    entry->lease.op_handle  = open_file->handle;
+    entry->lease.policy_tag = open_file->file_id.pid;
+
+    chimera_vfs_claim_acquire(thread->vfs_thread, vfs_state,
+                              entry->file_state, &entry->lease,
                               &entry->ticket, false /* no wait */,
-                              chimera_smb_lock_sync_cb, &result);
+                              false /* wait_hard */,
+                              chimera_smb_lock_sync_cb, NULL, &result);
 
-    if (result != CHIMERA_VFS_LEASE_GRANTED) {
+    if (result != CHIMERA_CLAIM_GRANTED) {
         chimera_vfs_state_put(vfs_state, entry->file_state);
         free(entry);
         return NULL;
@@ -569,7 +579,8 @@ chimera_smb_lock_entry_drop(
 {
     DL_DELETE(open_file->lock_entries, e);
     if (e->lease_inserted) {
-        chimera_vfs_lease_release(vfs_state, e->file_state, &e->lease);
+        /* Rollback helper with no thread in scope: queued release lane. */
+        chimera_vfs_claim_release(vfs_state, e->file_state, &e->lease);
     }
     if (e->file_state) {
         chimera_vfs_state_put(vfs_state, e->file_state);
@@ -634,8 +645,9 @@ chimera_smb_lock_multi(
              * chimera_smb_open_file_drain_locks frees from a detached list. */
             DL_DELETE(open_file->lock_entries, match);
             if (match->lease_inserted) {
-                chimera_vfs_lease_release(vfs_state, match->file_state,
-                                          &match->lease);
+                chimera_vfs_claim_release_ranged(thread->vfs_thread, vfs_state,
+                                                 match->file_state,
+                                                 &match->lease);
             }
             if (match->file_state) {
                 chimera_vfs_state_put(vfs_state, match->file_state);
@@ -839,7 +851,8 @@ chimera_smb_lock(struct chimera_smb_request *request)
 
         DL_DELETE(open_file->lock_entries, match);
         if (match->lease_inserted) {
-            chimera_vfs_lease_release(vfs_state, match->file_state, &match->lease);
+            chimera_vfs_claim_release_ranged(thread->vfs_thread, vfs_state,
+                                             match->file_state, &match->lease);
         }
         if (match->file_state) {
             chimera_vfs_state_put(vfs_state, match->file_state);
@@ -888,23 +901,23 @@ chimera_smb_lock(struct chimera_smb_request *request)
      * (WPTS MS-SMB2Model BreakRead*HandleLease: after the handle break settles the
      * holder to R, a peer RANGE_LOCK must then break that R lease to NONE.) */
     {
-        struct chimera_vfs_lease_owner brk_owner;
-        memset(&brk_owner, 0, sizeof(brk_owner));
-        brk_owner.protocol   = CHIMERA_VFS_LEASE_PROTO_SMB2;
-        brk_owner.client_key = request->session_handle->session->client_key;
+        struct chimera_claim_actor brk_actor;
+        memset(&brk_actor, 0, sizeof(brk_actor));
+        brk_actor.owner.proto      = CHIMERA_CLAIM_PROTO_SMB2;
+        brk_actor.owner.client_key = request->session_handle->session->client_key;
         if (open_file->grant) {
-            brk_owner.owner_lo = open_file->grant->lease.owner.owner_lo;
-            brk_owner.owner_hi = open_file->grant->lease.owner.owner_hi;
-            brk_owner.is_lease = open_file->grant->lease.owner.is_lease;
+            brk_actor.owner = open_file->grant->claim.owner;
         } else {
-            brk_owner.owner_lo = open_file->file_id.pid;
-            brk_owner.owner_hi = open_file->file_id.vid;
+            brk_actor.owner.owner_lo = open_file->file_id.pid;
+            brk_actor.owner.owner_hi = open_file->file_id.vid;
         }
-        chimera_vfs_state_break_on_write(vfs_state,
-                                         open_file->handle->fh,
-                                         open_file->handle->fh_len,
-                                         open_file->handle->fh_hash,
-                                         &brk_owner);
+        brk_actor.op_handle = open_file->handle;
+        chimera_vfs_claim_invalidate(vfs_state,
+                                     open_file->handle->fh,
+                                     open_file->handle->fh_len,
+                                     open_file->handle->fh_hash,
+                                     CHIMERA_TRIGGER_SMB_LOCK,
+                                     &brk_actor, 0);
     }
 
     /* LOCK acquire. */
@@ -926,27 +939,39 @@ chimera_smb_lock(struct chimera_smb_request *request)
         return;
     }
 
-    entry->open_file          = open_file;
-    entry->pending_req        = request;
-    entry->lease.kind         = CHIMERA_VFS_LEASE_RANGE;
-    entry->lease.mode.granted = (kind == SMB2_LOCKFLAG_EXCLUSIVE)
-                                    ? CHIMERA_VFS_LEASE_MODE_W
-                                    : CHIMERA_VFS_LEASE_MODE_R;
-    entry->lease.offset           = request->lock.l_offset;
-    entry->lease.length           = want_length;
-    entry->lease.owner.protocol   = CHIMERA_VFS_LEASE_PROTO_SMB2;
-    entry->lease.owner.client_key = request->session_handle->session->client_key;
-    /* The owner identity is the open — different opens (even by the
-     * same client) get different owner_lo/owner_hi and lock
-     * independently, matching Windows handle-based lock semantics. */
-    entry->lease.owner.owner_lo = open_file->file_id.pid;
-    entry->lease.owner.owner_hi = open_file->file_id.vid;
-    /* Point at the open's caching grant (NULL if it holds no oplock/lease) so the
-     * range-vs-caching conflict check can tell that a byte-range lock and the same
-     * open's -- or a coalesced peer's -- caching lease (whose owner identity is the
-     * lease key, not the file id) belong to one grant and must not break each
-     * other.  The grant's lease carries the same pointer in cb_private. */
-    entry->lease.owner.cb_private = open_file->grant;
+    entry->open_file   = open_file;
+    entry->pending_req = request;
+
+    {
+        struct chimera_claim_owner owner;
+
+        memset(&owner, 0, sizeof(owner));
+        owner.proto      = CHIMERA_CLAIM_PROTO_SMB2;
+        owner.client_key = request->session_handle->session->client_key;
+        /* The owner identity is the open — different opens (even by the
+         * same client) get different owner_lo/owner_hi and lock
+         * independently, matching Windows handle-based lock semantics. */
+        owner.owner_lo = open_file->file_id.pid;
+        owner.owner_hi = open_file->file_id.vid;
+        /* Carry the open's grant LeaseKey (when it holds one) so the
+         * range-vs-caching displacement can tell that a byte-range lock and the
+         * same open's -- or a coalesced peer's -- caching lease (whose owner
+         * identity is the lease key, not the file id) belong to one grant and
+         * must not break each other (smb2.oplock.brl2). */
+        if (open_file->grant) {
+            memcpy(owner.key, open_file->grant->claim.owner.key, 16);
+        }
+
+        chimera_vfs_claim_init_range(&entry->lease,
+                                     kind == SMB2_LOCKFLAG_EXCLUSIVE,
+                                     true /* smb */,
+                                     request->lock.l_offset, want_length,
+                                     &owner);
+        /* HOLDER-circle anchor for the brl2 exemptions and the MAND
+         * holder-exempt row. */
+        entry->lease.op_handle  = open_file->handle;
+        entry->lease.policy_tag = open_file->file_id.pid;
+    }
 
     request->lock.entry         = entry;
     request->lock.resume_status = CHIMERA_SMB_LOCK_PENDING;
@@ -962,9 +987,14 @@ chimera_smb_lock(struct chimera_smb_request *request)
      * its callback always fires inline; leave it on the synchronous path. */
     request->lock.parked = wait ? 1 : 0;
 
-    chimera_vfs_lease_acquire(vfs_state, entry->file_state,
+    /* wait_hard keeps the ticket queued on a HARD (lock-vs-lock) DENIED too --
+     * the SMB2 blocking lock (MS-SMB2 3.3.5.14) must complete only once the
+     * conflicting range is released, not bounce back DENIED. */
+    chimera_vfs_claim_acquire(thread->vfs_thread, vfs_state,
+                              entry->file_state,
                               &entry->lease, &entry->ticket, wait,
-                              chimera_smb_lock_acquire_cb, entry);
+                              wait /* wait_hard */,
+                              chimera_smb_lock_acquire_cb, NULL, entry);
 
     if (request->lock.parked && request->lock.resume_status == CHIMERA_SMB_LOCK_PENDING) {
         /* The acquire genuinely queued (a conflicting range held by another
@@ -998,7 +1028,7 @@ chimera_smb_lock(struct chimera_smb_request *request)
         status             = chimera_smb_lock_settle_entry(
             vfs_state, request, open_file, entry,
             request->lock.resume_status == SMB2_STATUS_SUCCESS
-            ? CHIMERA_VFS_LEASE_GRANTED : CHIMERA_VFS_LEASE_DENIED);
+            ? CHIMERA_CLAIM_GRANTED : CHIMERA_CLAIM_DENIED);
 
         chimera_smb_lock_seq_record(request, open_file, status);
         chimera_smb_open_file_release(request, open_file);

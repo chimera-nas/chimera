@@ -328,10 +328,13 @@ chimera_posix_telldir(
 
 int
 chimera_posix_scandir(
-    const char *dirp,
+    const char      *dirp,
     struct dirent ***namelist,
-    int ( *filter )(const struct dirent *),
-    int ( *compar )(const struct dirent **, const struct dirent **));
+    int (           *filter )(
+        const struct dirent *),
+    int (           *compar )(
+        const struct dirent **,
+        const struct dirent **));
 
 // FILE* operations
 // CHIMERA_FILE is defined in posix_internal.h as a pointer to fd_entry
