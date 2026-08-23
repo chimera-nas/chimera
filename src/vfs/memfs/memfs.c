@@ -3483,6 +3483,21 @@ memfs_open_at(
             return;
         }
 
+        /* CHIMERA_VFS_OPEN_CREATE_REGULAR (NFS3 UNCHECKED create): the create
+         * must yield a regular file, so an existing non-regular object at the
+         * name is not opened -- a directory gives EISDIR, any other type
+         * (symlink/socket/fifo) gives EEXIST.  Answered from the inode we
+         * already hold, no data open. */
+        if ((flags & CHIMERA_VFS_OPEN_CREATE_REGULAR) && !S_ISREG(inode->mode)) {
+            enum chimera_vfs_error e = S_ISDIR(inode->mode) ?
+                CHIMERA_VFS_EISDIR : CHIMERA_VFS_EEXIST;
+            pthread_mutex_unlock(&inode->lock);
+            pthread_mutex_unlock(&parent_inode->lock);
+            request->status = e;
+            request->complete(request);
+            return;
+        }
+
         /* A symlink as the final component under O_NOFOLLOW: a *data* open
          * (POSIX open(O_NOFOLLOW)) must fail with ELOOP, but an O_PATH-style
          * open (SMB FILE_OPEN_REPARSE_POINT, i.e. O_PATH|O_NOFOLLOW) wants a

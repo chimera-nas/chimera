@@ -1781,6 +1781,17 @@ diskfs_open_at_existing_cb(
         return;
     }
 
+    /* CHIMERA_VFS_OPEN_CREATE_REGULAR (NFS3 UNCHECKED create): the create must
+    * yield a regular file, so an existing non-regular object is not opened --
+    * a directory gives EISDIR, any other type EEXIST.  From inode metadata. */
+    if ((request->open_at.flags & CHIMERA_VFS_OPEN_CREATE_REGULAR) &&
+        !S_ISREG(inode->mode)) {
+        diskfs_op_fail(request, p->txn,
+                       S_ISDIR(inode->mode) ? CHIMERA_VFS_EISDIR
+                       : CHIMERA_VFS_EEXIST);
+        return;
+    }
+
     if ((request->open_at.flags & CHIMERA_VFS_OPEN_DIRECTORY) &&
         !S_ISDIR(inode->mode)) {
         diskfs_op_fail(request, p->txn,
