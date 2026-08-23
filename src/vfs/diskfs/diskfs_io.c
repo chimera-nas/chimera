@@ -120,7 +120,8 @@ static int
 diskfs_io_gate(
     struct diskfs_thread       *thread,
     struct chimera_vfs_request *request,
-    void (                     *resume )(struct chimera_vfs_request *));
+    void (                     *resume )(
+        struct chimera_vfs_request *));
 
 static inline void
 diskfs_io_callback(
@@ -1046,7 +1047,8 @@ static int
 diskfs_io_gate(
     struct diskfs_thread       *thread,
     struct chimera_vfs_request *request,
-    void (                     *resume )(struct chimera_vfs_request *))
+    void (                     *resume )(
+        struct chimera_vfs_request *))
 {
     struct diskfs_request_private *p = request->plugin_data;
 

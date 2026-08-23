@@ -837,7 +837,8 @@ diskfs_inode_orphaned(
     struct diskfs_thread *thread,
     struct diskfs_txn    *txn,
     struct diskfs_inode  *inode,
-    void (               *done )(void *priv),
+    void (               *done )(
+        void *priv),
     void                 *priv)
 {
     struct diskfs_inode_orphaned_ctx *c     = malloc(sizeof(*c));

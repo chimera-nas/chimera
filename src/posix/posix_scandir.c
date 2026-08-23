@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -6,10 +6,13 @@
 
 SYMBOL_EXPORT int
 chimera_posix_scandir(
-    const char *path,
+    const char      *path,
     struct dirent ***namelist,
-    int ( *filter )(const struct dirent *),
-    int ( *compar )(const struct dirent **, const struct dirent **))
+    int (           *filter )(
+        const struct dirent *),
+    int (           *compar )(
+        const struct dirent **,
+        const struct dirent **))
 {
     CHIMERA_DIR    *dirp;
     struct dirent  *entry;

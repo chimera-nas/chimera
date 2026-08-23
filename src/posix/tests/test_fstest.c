@@ -1,5 +1,5 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
-// SPDX-FileCopyrightText: 2002 tridge@samba.org
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2002-2026 tridge@samba.org
 //
 // SPDX-License-Identifier: GPL-2.0-only
 
@@ -211,7 +211,8 @@ check_file(
 static void
 traverse(
     const char *dir,
-    int (      *fn )(const char *))
+    int (      *fn )(
+        const char *))
 {
     CHIMERA_DIR   *d;
     struct dirent *de;
