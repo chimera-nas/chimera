@@ -4038,8 +4038,11 @@ run_trace(
         memset(argarray, 0, sizeof(argarray));
         argarray[0].argop                 = OP_PUTROOTFH;
         argarray[1].argop                 = OP_LOOKUP;
-        argarray[1].oplookup.objname.data = "share";
-        argarray[1].oplookup.objname.len  = 5;
+        /* The export is named after this trace's filesystem (see
+         * mbt_env_fs_setup), so a mount left stuck by an earlier diverging
+         * trace cannot be picked up here by mistake. */
+        argarray[1].oplookup.objname.data = (void *) fsname;
+        argarray[1].oplookup.objname.len  = (uint32_t) strlen(fsname);
         argarray[2].argop                 = OP_GETFH;
         args.minorversion                 = 0;
         args.argarray                     = argarray;

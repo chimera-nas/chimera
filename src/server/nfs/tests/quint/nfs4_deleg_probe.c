@@ -521,8 +521,8 @@ main(void)
         memset(&ops, 0, sizeof(ops));
         ops[0].argop                 = OP_PUTROOTFH;
         ops[1].argop                 = OP_LOOKUP;
-        ops[1].oplookup.objname.data = "share";
-        ops[1].oplookup.objname.len  = 5;
+        ops[1].oplookup.objname.data = "fs0";
+        ops[1].oplookup.objname.len  = 3;
         ops[2].argop                 = OP_GETFH;
         /* minorversion 0 compound: reuse pc_compound without SEQUENCE but
          * with minorversion 1 is invalid; send raw. */
@@ -882,7 +882,7 @@ main(void)
 
         /* M0: FH identity -- the NFS3 MOUNT root vs the NFS4 export
          * root, and a file's handle via both protocols. */
-        r3 = mbt_mnt(env, "/share");
+        r3 = mbt_mnt(env, "/fs0");
         expect("NFS3 MOUNT of the shared export",
                r3->status == MNT3_OK && r3->obj_fh.has, "mnt");
         root3 = r3->obj_fh;
