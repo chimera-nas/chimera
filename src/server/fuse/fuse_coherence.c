@@ -8,9 +8,9 @@
  *
  * Two mechanisms, one per kernel cache:
  *
- *  - Every open regular file holds a per-(mount, file) R-mode CACHING lease
- *    (the NFSv4 read-delegation shape: a bare lease inserted with
- *    try_insert, declined on contention).  A write, setattr, remove,
+ *  - Every open regular file holds a per-(mount, file) FUSE_GRANT claim
+ *    (the claim core's revocable kernel read-cache construct, declined on
+ *    contention rather than breaking a peer).  A write, setattr, remove,
  *    rename, or link from any other protocol -- or another FUSE mount --
  *    breaks it, and the break becomes a FUSE_NOTIFY_INVAL_INODE that drops
  *    the kernel's cached attributes and pages.  The mount's own I/O runs
@@ -28,11 +28,11 @@
  * request reply; break callbacks and watch callbacks only enqueue.
  *
  * Locking: mount->grant_lock guards the grant and dirwatch tables and may
- * be held across vfs_state/vfs_notify calls (it is never taken inside
- * them).  Break/revoke callbacks fire from arbitrary threads inside
- * vfs_state and touch ONLY atomics + the notifier queue -- never
+ * be held across claim-core/vfs_notify calls (it is never taken inside
+ * them).  Break/revoke callbacks fire from arbitrary threads inside the
+ * claim core and touch ONLY atomics + the notifier queue -- never
  * grant_lock -- which is what makes two mounts breaking each other's
- * leases deadlock-free.  The notifier's queue reference is counted in
+ * grants deadlock-free.  The notifier's queue reference is counted in
  * grant->refcount, so a grant mid-break outlives its last RELEASE.
  */
 
@@ -43,7 +43,7 @@
 #include <sys/uio.h>
 
 #include "fuse_internal.h"
-#include "vfs/vfs_state.h"
+#include "vfs/vfs_claim.h"
 #include "vfs/vfs_notify.h"
 
 /* ------------------------------------------------------------------ */
@@ -178,24 +178,23 @@ chimera_fuse_inval_entry(
 } /* chimera_fuse_inval_entry */
 
 /* Resolve a broken grant: invalidate the kernel's view of the file, settle
- * the lease with vfs_state, and drop the notifier's reference. */
+ * the claim with the claim core, and drop the notifier's reference. */
 static void
 chimera_fuse_grant_resolve(
     struct chimera_fuse_shared *shared,
     struct chimera_fuse_grant  *grant)
 {
-    struct chimera_vfs_state     *state      = shared->vfs->vfs_state;
-    struct chimera_fuse_mount    *mount      = grant->mount;
-    struct chimera_vfs_lease_mode none       = { 0, 0 };
-    int                           free_grant = 0;
+    struct chimera_vfs_state  *state      = shared->vfs->vfs_state;
+    struct chimera_fuse_mount *mount      = grant->mount;
+    int                        free_grant = 0;
 
     chimera_fuse_inval_attrs(mount, grant->nodeid);
 
     if (!atomic_load(&grant->revoked)) {
-        chimera_vfs_lease_ack(&grant->lease, none);
+        chimera_vfs_claim_ack(&grant->claim, 0);
     }
 
-    chimera_vfs_state_remove(state, grant->file_state, &grant->lease);
+    chimera_vfs_claim_release(state, grant->file_state, &grant->claim);
 
     atomic_store(&grant->state, CHIMERA_FUSE_GRANT_BROKEN);
 
@@ -466,8 +465,8 @@ chimera_fuse_notifier_stop(struct chimera_fuse_shared *shared)
 /* Invalidation grants                                                 */
 /* ------------------------------------------------------------------ */
 
-/* Fires on the breaking protocol's thread, inside vfs_state: atomics and
- * the notifier queue only. */
+/* Fires on the breaking protocol's thread, inside the claim core: atomics
+ * and the notifier queue only. */
 static void
 chimera_fuse_grant_break_common(
     struct chimera_fuse_grant *grant,
@@ -499,7 +498,7 @@ chimera_fuse_grant_break_common(
 
 static void
 chimera_fuse_grant_break_cb(
-    struct chimera_vfs_lease *lease,
+    struct chimera_vfs_claim *claim,
     uint8_t                   needed_mode,
     void                     *private_data)
 {
@@ -508,44 +507,41 @@ chimera_fuse_grant_break_cb(
 
 static void
 chimera_fuse_grant_revoked_cb(
-    struct chimera_vfs_lease *lease,
+    struct chimera_vfs_claim *claim,
     void                     *private_data)
 {
     chimera_fuse_grant_break_common(private_data, 1);
 } /* chimera_fuse_grant_revoked_cb */
 
-/* Insert (or re-insert) the grant's R lease.  Caller holds grant_lock. */
+/* Insert (or re-insert) the grant's claim.  Caller holds grant_lock. */
 static int
 chimera_fuse_grant_arm(
     struct chimera_vfs_state  *state,
     struct chimera_fuse_grant *grant)
 {
-    struct chimera_vfs_lease     *conflict = NULL;
-    enum chimera_vfs_lease_result result;
+    struct chimera_claim_owner    owner;
+    enum chimera_vfs_claim_result result;
 
-    memset(&grant->lease, 0, sizeof(grant->lease));
+    /* CHIMERA_CONSTRUCT_FUSE_GRANT carries the DELEG_R-shaped deny rows and
+     * the awaited-class break semantics coherence=sync needs: a conflicting
+     * writer parks until this grant's break is ACKED (its advertised mode
+     * survives break-begin), so "the write returned" implies "this kernel's
+     * cache is gone".  Unlike a delegation it stays sweep-revocable at the
+     * break deadline, which bounds the wait if the notifier ever wedges. */
+    chimera_fuse_grant_owner(&owner, grant->mount, grant->fh_hash);
 
-    grant->lease.kind         = CHIMERA_VFS_LEASE_CACHING;
-    grant->lease.mode.granted = CHIMERA_VFS_LEASE_MODE_R;
+    chimera_vfs_claim_init_fuse_grant(&grant->claim, &owner);
 
-    chimera_fuse_grant_owner(&grant->lease.owner, grant->mount, grant->fh_hash);
-
-    grant->lease.owner.break_cb   = chimera_fuse_grant_break_cb;
-    grant->lease.owner.revoked_cb = chimera_fuse_grant_revoked_cb;
-    grant->lease.owner.cb_private = grant;
-    /* coherence=sync: a conflicting writer anywhere parks until this grant's
-     * break resolves (INVAL_INODE written and acked), so "the write returned"
-     * implies "this kernel's cache is gone".  The break deadline (revoke)
-     * bounds the wait if the notifier ever wedges. */
-    grant->lease.owner.sync_break = grant->mount->coherence_sync ? 1 : 0;
+    grant->claim.break_cb   = chimera_fuse_grant_break_cb;
+    grant->claim.revoked_cb = chimera_fuse_grant_revoked_cb;
+    grant->claim.cb_private = grant;
 
     atomic_store(&grant->revoked, 0);
 
-    result = chimera_vfs_state_try_insert(state, grant->file_state,
-                                          &grant->lease, &conflict);
-    chimera_vfs_state_conflict_unref(state, conflict);
+    result = chimera_vfs_claim_try_acquire(state, grant->file_state,
+                                           &grant->claim, NULL);
 
-    if (result != CHIMERA_VFS_LEASE_GRANTED) {
+    if (result != CHIMERA_CLAIM_GRANTED) {
         /* Contention: decline to cache-track, like a declined delegation.
          * The kernel's attr/entry timeouts remain the backstop. */
         return -1;
@@ -712,7 +708,7 @@ chimera_fuse_grant_forget(
         /* A BREAKING grant cannot get here: the notifier holds its own
          * reference until it resolves. */
         if (atomic_load(&grant->state) == CHIMERA_FUSE_GRANT_ACTIVE) {
-            chimera_vfs_lease_release(state, grant->file_state, &grant->lease);
+            chimera_vfs_claim_release(state, grant->file_state, &grant->claim);
         }
 
         HASH_DELETE(hh, mount->grants, grant);
@@ -882,7 +878,7 @@ chimera_fuse_coherence_shutdown(
         HASH_DELETE(hh, mount->grants, grant);
 
         if (atomic_load(&grant->state) == CHIMERA_FUSE_GRANT_ACTIVE) {
-            chimera_vfs_state_remove(state, grant->file_state, &grant->lease);
+            chimera_vfs_claim_release(state, grant->file_state, &grant->claim);
         }
 
         chimera_vfs_state_put(state, grant->file_state);

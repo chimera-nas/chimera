@@ -5,7 +5,7 @@
 /*
  * POSIX byte-range locks (FUSE_GETLK / FUSE_SETLK / FUSE_SETLKW).
  *
- * Locks live in the shared vfs_state RANGE-lease layer -- the same conflict
+ * Locks live in the shared claim core as RANGE claims -- the same conflict
  * matrix NLM, NFSv4, and SMB2 use -- so a FUSE lock genuinely conflicts
  * with locks taken over the other protocols, on every backend.  The lease
  * owner identity is (mount, kernel lock-owner token), which is exactly the
@@ -16,13 +16,13 @@
  * POSIX range surgery is done here (the NFSv4 LOCK/LOCKU precedent): a new
  * lock or unlock trims every overlapping range the same owner holds,
  * re-inserting the kept sub-ranges.  A same-owner re-insert can never fail:
- * the owner held the covering range throughout, so no conflicting lease can
+ * the owner held the covering range throughout, so no conflicting claim can
  * have appeared inside it.
  *
  * A blocking SETLKW parks in vfs_state's pending queue with the request
  * held open; the grant callback can fire on any thread, so completion is
  * marshalled home through the per-thread resume doorbell.  FUSE_INTERRUPT
- * cancels a parked lock through chimera_vfs_lease_acquire_cancel, whose
+ * cancels a parked lock through chimera_vfs_claim_cancel, whose
  * return value decides exactly one of the two racers (grant vs cancel)
  * completes the request.
  */
@@ -32,11 +32,21 @@
 #include <fcntl.h>
 
 #include "fuse_internal.h"
-#include "vfs/vfs_state.h"
+#include "vfs/vfs_claim.h"
 #include "vfs/vfs_procs.h"
 
 #define CHIMERA_FUSE_LOCK_LEN(start, end) \
         ((end) >= CHIMERA_FUSE_LOCK_EOF ? UINT64_MAX : (end) - (start) + 1)
+
+/* True when a reported conflict is an actual byte-range lock rather than a
+ * cache claim.  A cache claim breaks transparently when a lock is taken, so
+ * GETLK must not report it and SETLK must not fail on it. */
+static inline bool
+chimera_fuse_conflict_is_lock(const struct chimera_vfs_claim_conflict *c)
+{
+    return c->construct == CHIMERA_CONSTRUCT_LOCK_ADVISORY ||
+           c->construct == CHIMERA_CONSTRUCT_LOCK_SMB;
+} /* chimera_fuse_conflict_is_lock */
 
 static inline struct chimera_vfs_state *
 chimera_fuse_vfs_state(struct chimera_fuse_request *req)
@@ -46,22 +56,22 @@ chimera_fuse_vfs_state(struct chimera_fuse_request *req)
 
 static void
 chimera_fuse_lock_lease_init(
-    struct chimera_vfs_lease  *lease,
+    struct chimera_vfs_claim  *lease,
     struct chimera_fuse_mount *mount,
     uint64_t                   token,
     uint64_t                   start,
     uint64_t                   end,
     int                        exclusive)
 {
-    memset(lease, 0, sizeof(*lease));
+    struct chimera_claim_owner owner;
 
-    lease->kind         = CHIMERA_VFS_LEASE_RANGE;
-    lease->mode.granted = exclusive ? CHIMERA_VFS_LEASE_MODE_W
-                                    : CHIMERA_VFS_LEASE_MODE_R;
-    lease->offset = start;
-    lease->length = CHIMERA_FUSE_LOCK_LEN(start, end);
+    chimera_fuse_lock_owner(&owner, mount, token);
 
-    chimera_fuse_lock_owner(&lease->owner, mount, token);
+    /* Advisory (not LOCK_SMB): FUSE byte-range locks are POSIX locks, so
+     * they carry no mandatory-I/O rows.  The claim core's half-open range
+     * uses UINT64_MAX for to-EOF, which is what LOCK_LEN already yields. */
+    chimera_vfs_claim_init_range(lease, exclusive, false, start,
+                                 CHIMERA_FUSE_LOCK_LEN(start, end), &owner);
 } /* chimera_fuse_lock_lease_init */
 
 /* Find or create the (owner, file) bucket.  Caller holds mount->lock_lock. */
@@ -135,8 +145,7 @@ chimera_fuse_lock_trim(
     struct chimera_fuse_lock      *skip)
 {
     struct chimera_fuse_lock     *lock, *tmp, *piece;
-    struct chimera_vfs_lease     *conflict;
-    enum chimera_vfs_lease_result result;
+    enum chimera_vfs_claim_result result;
     uint64_t                      keep_start[2], keep_end[2];
     int                           npiece, i;
 
@@ -170,28 +179,27 @@ chimera_fuse_lock_trim(
 
             /* Rebuild precisely from the surviving range: same owner and
              * mode as the lock being trimmed. */
-            piece->lease             = lock->lease;
-            piece->lease.offset      = piece->start;
-            piece->lease.length      = CHIMERA_FUSE_LOCK_LEN(piece->start, piece->end);
-            piece->lease.prev        = NULL;
-            piece->lease.next        = NULL;
-            piece->lease.file        = NULL;
-            piece->lease.break_state = CHIMERA_VFS_BREAK_IDLE;
+            piece->claim             = lock->claim;
+            piece->claim.offset      = piece->start;
+            piece->claim.length      = CHIMERA_FUSE_LOCK_LEN(piece->start, piece->end);
+            piece->claim.prev        = NULL;
+            piece->claim.next        = NULL;
+            piece->claim.file        = NULL;
+            piece->claim.break_state = CHIMERA_CLAIM_BREAK_IDLE;
 
-            result = chimera_vfs_state_try_insert(state, lf->file_state,
-                                                  &piece->lease, &conflict);
-            chimera_vfs_state_conflict_unref(state, conflict);
+            result = chimera_vfs_claim_try_acquire(state, lf->file_state,
+                                                   &piece->claim, NULL);
 
             /* The owner held the covering range for the whole time, so no
              * other owner can hold anything conflicting inside it. */
-            chimera_fuse_abort_if(result != CHIMERA_VFS_LEASE_GRANTED,
+            chimera_fuse_abort_if(result != CHIMERA_CLAIM_GRANTED,
                                   "same-owner lock trim re-insert failed (%d)",
                                   result);
 
             DL_APPEND(lf->locks, piece);
         }
 
-        chimera_vfs_lease_release(state, lf->file_state, &lock->lease);
+        chimera_vfs_claim_release(state, lf->file_state, &lock->claim);
 
         DL_DELETE(lf->locks, lock);
         free(lock);
@@ -207,15 +215,15 @@ chimera_fuse_op_getlk(
     const void                  *arg,
     uint32_t                     arglen)
 {
-    const struct fuse_lk_in       *in    = arg;
-    struct chimera_fuse_mount     *mount = req->channel->mount;
-    struct chimera_vfs_state      *state = chimera_fuse_vfs_state(req);
-    struct chimera_fuse_open_file *file;
-    struct chimera_vfs_file_state *file_state;
-    struct chimera_vfs_lease       probe;
-    struct chimera_vfs_lease      *conflict = NULL;
-    enum chimera_vfs_lease_result  result;
-    struct fuse_lk_out             out;
+    const struct fuse_lk_in          *in    = arg;
+    struct chimera_fuse_mount        *mount = req->channel->mount;
+    struct chimera_vfs_state         *state = chimera_fuse_vfs_state(req);
+    struct chimera_fuse_open_file    *file;
+    struct chimera_vfs_file_state    *file_state;
+    struct chimera_vfs_claim          probe;
+    struct chimera_vfs_claim_conflict conflict;
+    enum chimera_vfs_claim_result     result;
+    struct fuse_lk_out                out;
 
     if (arglen < sizeof(*in)) {
         chimera_fuse_reply(req, EINVAL, NULL, 0);
@@ -246,24 +254,25 @@ chimera_fuse_op_getlk(
                                  in->lk.start, in->lk.end,
                                  in->lk.type == F_WRLCK);
 
-    result = chimera_vfs_lease_test(file_state, &probe, &conflict);
+    memset(&conflict, 0, sizeof(conflict));
 
-    /* Only a byte-range lock is a lock: a conflicting CACHING lease (some
+    result = chimera_vfs_claim_test(file_state, &probe, &conflict);
+
+    /* Only a byte-range lock is a lock: a conflicting cache claim (some
      * client's read cache, possibly this mount's own) breaks transparently
      * when a real lock is taken and must not be reported as one. */
-    if (result != CHIMERA_VFS_LEASE_GRANTED && conflict &&
-        conflict->kind == CHIMERA_VFS_LEASE_RANGE) {
-        out.lk.type = (conflict->mode.granted & CHIMERA_VFS_LEASE_MODE_W) ?
-            F_WRLCK : F_RDLCK;
-        out.lk.start = conflict->offset;
-        if (conflict->length == UINT64_MAX ||
-            conflict->offset + conflict->length - 1 >= CHIMERA_FUSE_LOCK_EOF) {
+    if (result != CHIMERA_CLAIM_GRANTED &&
+        chimera_fuse_conflict_is_lock(&conflict)) {
+        out.lk.type  = (conflict.used & CHIMERA_CLAIM_LW) ? F_WRLCK : F_RDLCK;
+        out.lk.start = conflict.offset;
+        if (conflict.length == UINT64_MAX ||
+            conflict.offset + conflict.length - 1 >= CHIMERA_FUSE_LOCK_EOF) {
             out.lk.end = CHIMERA_FUSE_LOCK_EOF;
         } else {
-            out.lk.end = conflict->offset + conflict->length - 1;
+            out.lk.end = conflict.offset + conflict.length - 1;
         }
-        /* vfs_state does not expose the holder's identity; NFS clients give
-         * the same answer for remote holders. */
+        /* The claim core reports conflicts by value without a pid; NFS
+         * clients give the same answer for remote holders. */
         out.lk.pid = 0;
     }
 
@@ -316,24 +325,24 @@ chimera_fuse_lock_resume(struct chimera_fuse_request *req)
 
 static void
 chimera_fuse_setlk_acquire_cb(
-    enum chimera_vfs_lease_result result,
-    struct chimera_vfs_lease     *granted_lease,
-    struct chimera_vfs_lease     *conflict,
-    void                         *private_data)
+    enum chimera_vfs_claim_result            result,
+    struct chimera_vfs_claim                *granted_claim,
+    const struct chimera_vfs_claim_conflict *conflict,
+    void                                    *private_data)
 {
     struct chimera_fuse_request *req      = private_data;
     int                          expected = 0;
 
     switch (result) {
-        case CHIMERA_VFS_LEASE_GRANTED:
+        case CHIMERA_CLAIM_GRANTED:
             req->u.lock.result_errno = 0;
             break;
-        case CHIMERA_VFS_LEASE_BREAKING:
+        case CHIMERA_CLAIM_BREAKING:
             /* Non-blocking lock against a breakable caching holder: the
              * break has been kicked; report unavailable-now. */
             req->u.lock.result_errno = EAGAIN;
             break;
-        case CHIMERA_VFS_LEASE_DENIED:
+        case CHIMERA_CLAIM_DENIED:
         default:
             req->u.lock.result_errno = EAGAIN;
             break;
@@ -417,7 +426,7 @@ chimera_fuse_op_setlk(
     entry->end       = in->lk.end;
     entry->exclusive = (in->lk.type == F_WRLCK);
 
-    chimera_fuse_lock_lease_init(&entry->lease, mount, in->owner,
+    chimera_fuse_lock_lease_init(&entry->claim, mount, in->owner,
                                  entry->start, entry->end, entry->exclusive);
 
     pthread_mutex_lock(&mount->lock_lock);
@@ -448,15 +457,17 @@ chimera_fuse_op_setlk(
      * delayed success is more faithful than a spurious failure.
      */
     if (!wait) {
-        struct chimera_vfs_lease     *conflict = NULL;
-        enum chimera_vfs_lease_result probe;
+        struct chimera_vfs_claim_conflict conflict;
+        enum chimera_vfs_claim_result     probe;
 
-        probe = chimera_vfs_lease_test(lf->file_state, &entry->lease,
+        memset(&conflict, 0, sizeof(conflict));
+
+        probe = chimera_vfs_claim_test(lf->file_state, &entry->claim,
                                        &conflict);
 
-        if (probe == CHIMERA_VFS_LEASE_DENIED ||
-            (probe == CHIMERA_VFS_LEASE_BREAKING && conflict &&
-             conflict->kind == CHIMERA_VFS_LEASE_RANGE)) {
+        if (probe == CHIMERA_CLAIM_DENIED ||
+            (probe == CHIMERA_CLAIM_BREAKING &&
+             chimera_fuse_conflict_is_lock(&conflict))) {
             lf->pending--;
             chimera_fuse_lock_file_maybe_free(mount, state, lf);
             pthread_mutex_unlock(&mount->lock_lock);
@@ -482,12 +493,15 @@ chimera_fuse_op_setlk(
 
     pthread_mutex_unlock(&mount->lock_lock);
 
-    chimera_vfs_lease_acquire_blocking(state, lf->file_state,
-                                       &entry->lease, &entry->ticket,
-                                       true,
-                                       chimera_fuse_setlk_acquire_cb,
-                                       NULL,
-                                       req);
+    /* wait=true so breakable cache holders are recalled and waited through;
+     * wait_hard=false so a genuine lock conflict still completes rather than
+     * queueing forever (SETLKW's blocking is the caller's own retry). */
+    chimera_vfs_claim_acquire(req->thread->vfs_thread, state, lf->file_state,
+                              &entry->claim, &entry->ticket,
+                              true, wait,
+                              chimera_fuse_setlk_acquire_cb,
+                              NULL,
+                              req);
 
     expected = 0;
 
@@ -525,7 +539,7 @@ chimera_fuse_locks_release_owner(
 
     DL_FOREACH_SAFE(lf->locks, lock, tmp)
     {
-        chimera_vfs_lease_release(state, lf->file_state, &lock->lease);
+        chimera_vfs_claim_release(state, lf->file_state, &lock->claim);
         DL_DELETE(lf->locks, lock);
         free(lock);
     }
@@ -558,8 +572,8 @@ chimera_fuse_locks_interrupt(
         return 0;
     }
 
-    cancelled = chimera_vfs_lease_acquire_cancel(state,
-                                                 &parked->u.lock.entry->ticket);
+    cancelled = chimera_vfs_claim_cancel(state,
+                                         &parked->u.lock.entry->ticket);
 
     if (cancelled) {
         parked->u.lock.result_errno = EINTR;
@@ -595,8 +609,8 @@ chimera_fuse_locks_shutdown(
 
     DL_FOREACH_SAFE2(mount->parked_locks, parked, ptmp, u.lock.park_next)
     {
-        if (chimera_vfs_lease_acquire_cancel(state,
-                                             &parked->u.lock.entry->ticket)) {
+        if (chimera_vfs_claim_cancel(state,
+                                     &parked->u.lock.entry->ticket)) {
             parked->u.lock.result_errno = EINTR;
             pthread_mutex_unlock(&mount->lock_lock);
             chimera_fuse_resume_post(parked);
@@ -608,7 +622,7 @@ chimera_fuse_locks_shutdown(
     {
         DL_FOREACH_SAFE(lf->locks, lock, ltmp)
         {
-            chimera_vfs_lease_release(state, lf->file_state, &lock->lease);
+            chimera_vfs_claim_release(state, lf->file_state, &lock->claim);
             DL_DELETE(lf->locks, lock);
             free(lock);
         }

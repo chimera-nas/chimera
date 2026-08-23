@@ -36,8 +36,19 @@ fuse_test_start() {
     local backend_path=${3:-/}
     local options=${4:-}
     local options_json=""
+    local filesystems_json=""
 
     [ -n "$options" ] && options_json=", \"options\": \"$options\""
+
+    # The named-filesystem backends come up empty and must have a filesystem
+    # created before anything can mount it; linux and io_uring keep host paths.
+    case "$module" in
+        linux | io_uring) ;;
+        *)
+            filesystems_json="\"filesystems\": { \"fs0\": { \"module\": \"$module\" } },"
+            backend_path="fs0"
+            ;;
+    esac
 
     SESSION=$(mktemp -d)
     CFG="$SESSION/config.json"
@@ -58,6 +69,7 @@ fuse_test_start() {
         "threads": 2,
         "metrics_port": 0
     },
+    $filesystems_json
     "mounts": {
         "data": { "module": "$module", "path": "$backend_path" }
     },

@@ -46,8 +46,11 @@ cat > "$CFG" <<EOF
         "threads": 2,
         "metrics_port": 0
     },
+    "filesystems": {
+        "fs0": { "module": "memfs" }
+    },
     "mounts": {
-        "data": { "module": "memfs", "path": "/" }
+        "data": { "module": "memfs", "path": "fs0" }
     },
     "fuse_mounts": {
         "$MNT_A": { "path": "/data", "options": "attr_timeout_ms=60000,entry_timeout_ms=60000" },

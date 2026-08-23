@@ -19,7 +19,7 @@
 #include "vfs/vfs.h"
 #include "vfs/sdk/vfs_error.h"
 #include "vfs/sdk/vfs_cred.h"
-#include "vfs/vfs_lease_types.h"
+#include "vfs/vfs_claim_types.h"
 #include "fuse_node_table.h"
 
 struct chimera_vfs_state;
@@ -110,7 +110,7 @@ struct chimera_fuse_lock {
     uint64_t                           start;
     uint64_t                           end;
     int                                exclusive;
-    struct chimera_vfs_lease           lease;
+    struct chimera_vfs_claim           claim;
     struct chimera_vfs_pending_acquire ticket;
     struct chimera_fuse_lock          *prev;
     struct chimera_fuse_lock          *next;
@@ -160,7 +160,7 @@ struct chimera_fuse_grant {
     uint8_t                        fh[CHIMERA_VFS_FH_SIZE];
     uint32_t                       fh_len;
     struct chimera_vfs_file_state *file_state;
-    struct chimera_vfs_lease       lease;
+    struct chimera_vfs_claim       claim;
     /* Break/revoke callbacks fire on arbitrary threads inside vfs_state and
      * may touch only these atomics plus the notifier queue. */
     _Atomic int                    state; /* enum chimera_fuse_grant_state */
@@ -823,12 +823,12 @@ chimera_fuse_fh_hash(
  * with a grant identity. */
 static inline void
 chimera_fuse_grant_owner(
-    struct chimera_vfs_lease_owner *owner,
-    struct chimera_fuse_mount      *mount,
-    uint64_t                        fh_hash)
+    struct chimera_claim_owner *owner,
+    struct chimera_fuse_mount  *mount,
+    uint64_t                    fh_hash)
 {
     memset(owner, 0, sizeof(*owner));
-    owner->protocol   = CHIMERA_VFS_LEASE_PROTO_FUSE;
+    owner->proto      = CHIMERA_CLAIM_PROTO_FUSE;
     owner->client_key = (uint64_t) (uintptr_t) mount;
     owner->owner_lo   = fh_hash;
     owner->owner_hi   = 0;
@@ -836,12 +836,12 @@ chimera_fuse_grant_owner(
 
 static inline void
 chimera_fuse_lock_owner(
-    struct chimera_vfs_lease_owner *owner,
-    struct chimera_fuse_mount      *mount,
-    uint64_t                        token)
+    struct chimera_claim_owner *owner,
+    struct chimera_fuse_mount  *mount,
+    uint64_t                    token)
 {
     memset(owner, 0, sizeof(*owner));
-    owner->protocol   = CHIMERA_VFS_LEASE_PROTO_FUSE;
+    owner->proto      = CHIMERA_CLAIM_PROTO_FUSE;
     owner->client_key = (uint64_t) (uintptr_t) mount;
     owner->owner_lo   = token;
     owner->owner_hi   = 1;
