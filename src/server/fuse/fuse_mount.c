@@ -156,6 +156,7 @@ chimera_fuse_init_handshake(
     struct fuse_init_out         out;
     struct iovec                 iov[2];
     uint32_t                     want;
+    uint64_t                     want2, kernel_flags, agreed;
     ssize_t                      len;
 
     for (;;) {
@@ -219,12 +220,41 @@ chimera_fuse_init_handshake(
         FUSE_DO_READDIRPLUS | FUSE_READDIRPLUS_AUTO | FUSE_ASYNC_DIO |
         FUSE_MAX_PAGES | FUSE_POSIX_LOCKS | FUSE_AUTO_INVAL_DATA;
 
+    /* Flags above bit 31 travel in the separate flags2 word, which only
+     * exists from ABI 7.36 and only carries meaning when the kernel set
+     * FUSE_INIT_EXT; our reply must echo that bit or the kernel ignores
+     * flags2 entirely.  We ask for exactly one high flag: without it, mmap
+     * of a file opened FOPEN_DIRECT_IO fails, which would make the
+     * direct_io mount option a functional regression rather than a
+     * performance trade. */
+    want2 = 0;
+#ifdef FUSE_DIRECT_IO_ALLOW_MMAP
+    want2 |= FUSE_DIRECT_IO_ALLOW_MMAP;
+#endif /* ifdef FUSE_DIRECT_IO_ALLOW_MMAP */
+
+    kernel_flags = in->flags;
+
+    if (in->minor >= 36 && (in->flags & FUSE_INIT_EXT)) {
+        kernel_flags |= (uint64_t) in->flags2 << 32;
+    }
+
+    agreed = kernel_flags & (want | want2);
+
     memset(&out, 0, sizeof(out));
 
     out.major         = FUSE_KERNEL_VERSION;
     out.minor         = FUSE_KERNEL_MINOR_VERSION;
-    out.flags         = in->flags & want;
+    out.flags         = (uint32_t) agreed;
+    out.flags2        = (uint32_t) (agreed >> 32);
     out.max_readahead = in->max_readahead;
+
+    if (agreed >> 32) {
+        out.flags |= FUSE_INIT_EXT;
+    }
+
+#ifdef FUSE_DIRECT_IO_ALLOW_MMAP
+    mount->direct_io_mmap = (agreed & FUSE_DIRECT_IO_ALLOW_MMAP) ? 1 : 0;
+#endif /* ifdef FUSE_DIRECT_IO_ALLOW_MMAP */
 
     if (out.flags & FUSE_MAX_PAGES) {
         mount->max_write = CHIMERA_FUSE_MAX_WRITE;
@@ -256,9 +286,12 @@ chimera_fuse_init_handshake(
         return -1;
     }
 
-    chimera_fuse_info("fuse mount %s: negotiated ABI 7.%u max_write %u flags 0x%x",
-                      mount->mountpoint, mount->proto_minor,
-                      mount->max_write, out.flags);
+    chimera_fuse_info(
+        "fuse mount %s: negotiated ABI 7.%u max_write %u flags 0x%llx%s%s",
+        mount->mountpoint, mount->proto_minor,
+        mount->max_write, (unsigned long long) agreed,
+        mount->direct_io ? " direct_io" : "",
+        (mount->direct_io && !mount->direct_io_mmap) ? " (no mmap)" : "");
 
     return 0;
 } /* chimera_fuse_init_handshake */

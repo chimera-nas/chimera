@@ -53,7 +53,7 @@ chimera_fuse_lookup_open_callback(
     void                           *private_data)
 {
     struct chimera_fuse_request *req  = private_data;
-    const struct fuse_in_header *hdr  = evpl_iovec_data(&req->buf);
+    const struct fuse_in_header *hdr  = chimera_fuse_request_hdr(req);
     const char                  *name = (const char *) (hdr + 1);
 
     if (error_code != CHIMERA_VFS_OK) {
