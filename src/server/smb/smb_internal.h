@@ -268,6 +268,15 @@ struct netbios_header {
 } __attribute__((packed));
 
 struct chimera_smb_share {
+    /* References keeping this share alive: one for its place on
+     * shared->shares (dropped by chimera_smb_remove_share) plus one per tree
+     * connected to it.  A tree outlives the share's removal -- the connection
+     * teardown that frees it runs asynchronously, and its open files release
+     * their sharemode reservations from &share->sharemode as they go -- so the
+     * share must not be freed while any tree still points at it.  Freeing it
+     * regardless was a heap-use-after-free in
+     * chimera_smb_sharemode_release(). */
+    int                                refcnt;
     char                               name[81];
     char                               path[CHIMERA_VFS_PATH_MAX];
     /* Access-based directory enumeration: hide directory entries the caller
@@ -297,6 +306,23 @@ struct chimera_smb_share {
      * records at first use (best-effort, idempotent recovery). */
     bool                               durable_recovered;
 };
+
+/* Drop one share reference; the last one out destroys the sharemode table and
+ * frees the share.  Safe to call with no lock held: the share is already
+ * unlinked from shared->shares before its list reference is dropped, so no new
+ * tree can find it, and every remaining reference is a tree's. */
+static inline void
+chimera_smb_share_release(struct chimera_smb_share *share)
+{
+    if (!share) {
+        return;
+    }
+
+    if (__atomic_sub_fetch(&share->refcnt, 1, __ATOMIC_ACQ_REL) == 0) {
+        chimera_smb_sharemode_destroy(&share->sharemode);
+        free(share);
+    }
+} /* chimera_smb_share_release */
 
 struct chimera_smb_conn;
 
@@ -2843,6 +2869,16 @@ chimera_smb_tree_free(
         pcreate->create.pending_linked = 0;
     }
     pthread_mutex_unlock(&tree->pending_creates_lock);
+
+    /* Every open on this tree has now released its sharemode reservation, so
+     * the tree is done with the share: drop the reference taken at
+     * TREE_CONNECT.  This may be the last one (the share was removed while the
+     * connection was still tearing down), in which case the sharemode table is
+     * destroyed here rather than under the client's feet. */
+    if (tree->share) {
+        chimera_smb_share_release(tree->share);
+        tree->share = NULL;
+    }
 
     pthread_mutex_lock(&shared->trees_lock);
 

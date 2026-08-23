@@ -2937,6 +2937,10 @@ chimera_smb_add_share(
     share->continuous_availability = shared->config.persistent_handles &&
         continuous_availability;
 
+    /* One reference for the shares list itself; each TREE_CONNECT adds its
+     * own (see chimera_smb_share_release). */
+    share->refcnt = 1;
+
     pthread_mutex_lock(&shared->shares_lock);
     LL_PREPEND(shared->shares, share);
     pthread_mutex_unlock(&shared->shares_lock);
@@ -3027,14 +3031,23 @@ chimera_smb_remove_share(
     LL_FOREACH(shared->shares, share)
     {
         if (strcmp(share->name, name) == 0) {
+            /* Unlink first, so no further TREE_CONNECT can find it, then drop
+             * the list reference OUTSIDE the lock.  The share is only actually
+             * freed once the last tree connected to it has gone away: a
+             * connection teardown runs asynchronously and its open files
+             * release their sharemode reservations through &share->sharemode
+             * on the way out, so freeing here regardless was a
+             * heap-use-after-free. */
             LL_DELETE(shared->shares, share);
-            chimera_smb_sharemode_destroy(&share->sharemode);
-            free(share);
             found = 1;
             break;
         }
     }
     pthread_mutex_unlock(&shared->shares_lock);
+
+    if (found) {
+        chimera_smb_share_release(share);
+    }
 
     return found ? 0 : -1;
 } /* chimera_smb_remove_share */
