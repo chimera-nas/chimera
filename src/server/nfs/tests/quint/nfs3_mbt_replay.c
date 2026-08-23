@@ -53,8 +53,6 @@
 #define MBT_FSINFO_PROPERTIES  0x1b
 #define MBT_PATHCONF_LINKMAX   0xffffffffU
 #define MBT_PATHCONF_NAME_MAX  255
-#define MBT_FSSTAT_BYTES       UINT64_C(107374182400)
-#define MBT_FSSTAT_FILES       UINT64_C(1048576)
 
 struct mism {
     int  n;
@@ -1018,17 +1016,25 @@ op_fsstat(
         expected != NFS3_OK) {
         return;
     }
-    if (res->tbytes != MBT_FSSTAT_BYTES || res->fbytes != MBT_FSSTAT_BYTES ||
-        res->abytes != MBT_FSSTAT_BYTES) {
-        mism_add(m, "fsstat bytes: expected %" PRIu64 ", got "
-                 "t=%" PRIu64 " f=%" PRIu64 " a=%" PRIu64,
-                 MBT_FSSTAT_BYTES, res->tbytes, res->fbytes, res->abytes);
+    /* The model explicitly does not model space-used (nfs3.qnt: "space-used
+     * are not modeled"), and RFC 1813 leaves the FSSTAT totals
+     * implementation-defined -- different backends legitimately report
+     * different capacities (memfs/cairn a fixed synthetic size, diskfs its
+     * real device geometry, and free/avail shift as data is written).  Assert
+     * only the ordering invariant the protocol guarantees, not a size. */
+    if (res->tbytes == 0 || res->fbytes > res->tbytes ||
+        res->abytes > res->fbytes) {
+        mism_add(m, "fsstat bytes invariant (avail<=free<=total, total>0) "
+                 "violated: t=%" PRIu64 " f=%" PRIu64 " a=%" PRIu64,
+                 res->tbytes, res->fbytes, res->abytes);
     }
-    if (res->tfiles != MBT_FSSTAT_FILES || res->ffiles != MBT_FSSTAT_FILES ||
-        res->afiles != MBT_FSSTAT_FILES) {
-        mism_add(m, "fsstat files: expected %" PRIu64 ", got "
+    /* Likewise the file-slot counts are implementation-defined and unmodeled;
+     * RFC 1813 even lets a server report 0 for "unknown", so assert only the
+     * ordering (no total>0 requirement, unlike bytes). */
+    if (res->ffiles > res->tfiles || res->afiles > res->ffiles) {
+        mism_add(m, "fsstat files invariant (avail<=free<=total) violated: "
                  "t=%" PRIu64 " f=%" PRIu64 " a=%" PRIu64,
-                 MBT_FSSTAT_FILES, res->tfiles, res->ffiles, res->afiles);
+                 res->tfiles, res->ffiles, res->afiles);
     }
     if (res->invarsec != 0) {
         mism_add(m, "invarsec: expected 0, got %u", res->invarsec);
@@ -1615,6 +1621,8 @@ main(
           'n'                                                                                                                                                                   },
         { "verbose",            no_argument,                    0,
           'v'                                                                                                                                                                                                },
+        { "backend",            required_argument,              0,
+          'B'                                                                           },
         { 0,                    0,                              0,                             0 },
     };
     char               **traces;
@@ -1623,6 +1631,7 @@ main(
     double               max_attr_skip_rate = 0.1;
     int                  dry_run            = 0;
     int                  verbose            = 0;
+    const char          *backend            = "memfs";
     int                  failures           = 0;
     int                  c;
     int                  i;
@@ -1633,7 +1642,7 @@ main(
      * error, and skips them here (the 't'/'D'/'X' cases). */
     traces = mbt_collect_traces(argc, argv, &ntraces);
 
-    while ((c = getopt_long(argc, argv, "t:D:X:b:r:nv", long_options,
+    while ((c = getopt_long(argc, argv, "t:D:X:b:r:nvB:", long_options,
                             NULL)) != -1) {
         switch (c) {
             case 't':
@@ -1652,10 +1661,14 @@ main(
             case 'v':
                 verbose = 1;
                 break;
+            case 'B':
+                backend = optarg;
+                break;
             default:
                 fprintf(stderr,
                         "usage: %s [--trace FILE ...] [--trace-dir DIR] "
                         "[--block-size N] [--max-attr-skip-rate F] "
+                        "[--backend memfs|diskfs|cairn] "
                         "[--dry-run] [--verbose]\n", argv[0]);
                 mbt_free_traces(traces, ntraces);
                 return 2;
@@ -1674,7 +1687,8 @@ main(
      * isolation.  A single-fs backend (linux/io_uring) would instead clear the
      * backing directory between traces. */
     if (!dry_run) {
-        mbt_env_open_opts(&env, NULL);
+        struct mbt_env_opts opts = { .module = backend };
+        mbt_env_open_opts(&env, &opts);
     }
 
     for (i = 0; i < ntraces; i++) {

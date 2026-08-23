@@ -25,6 +25,9 @@
 #include <string.h>
 #include <unistd.h>
 #include <inttypes.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <sys/stat.h>
 
 #include "server/server.h"
 #include "common/tcp_flavor.h"
@@ -114,11 +117,15 @@ struct mbt_env_opts {
     int         disable_caches;   /* VFS attr+name caches: exact attr
                                    * comparison cannot tolerate staleness */
     const char *memfs_config;     /* module config JSON, e.g. block_size */
+    const char *module;           /* VFS backend: NULL/"memfs", "diskfs",
+                                   * "cairn".  diskfs/cairn self-provision
+                                   * scratch under the env's session_dir. */
 };
 
 struct mbt_env {
     struct chimera_server     *server;
     struct prometheus_metrics *metrics;
+    const char                *module;   /* backend for mkfs/mount/rmfs */
 
     struct evpl               *evpl;
     struct evpl_rpc2_thread   *rpc2_thread;
@@ -211,6 +218,8 @@ mbt_env_open_opts(
     chimera_server_config_set_tcp_flavor(config, CHIMERA_TCP_FLAVOR_INPROC);
     chimera_server_config_set_nfs_enabled(config, 1);
 
+    env->module = (opts && opts->module) ? opts->module : "memfs";
+
     if (opts) {
         if (opts->nfs4_delegations) {
             chimera_server_config_set_nfs4_delegations(config, 1);
@@ -219,10 +228,46 @@ mbt_env_open_opts(
             chimera_server_config_set_attr_cache_enabled(config, 0);
             chimera_server_config_set_name_cache_enabled(config, 0);
         }
-        if (opts->memfs_config) {
-            chimera_server_config_add_module(config, "memfs", NULL,
-                                             opts->memfs_config);
+    }
+
+    /* Backend module registration.  memfs is a default module (only its
+     * optional block_size config is applied); diskfs and cairn are not
+     * default-registered and need a config pointing at scratch storage, which
+     * we self-provision under the per-process session_dir so every replay
+     * process is isolated and is cleaned up with its temp dir. */
+    if (strcmp(env->module, "diskfs") == 0) {
+        char img[300], cfg[512];
+        int  fd;
+
+        snprintf(img, sizeof(img), "%s/device-0.img", env->session_dir);
+        fd = open(img, O_CREAT | O_TRUNC | O_RDWR, 0644);
+        if (fd < 0 || ftruncate(fd, 1024LL * 1024 * 1024) != 0) {
+            fprintf(stderr, "diskfs device image %s: %s\n", img,
+                    strerror(errno));
+            exit(1);
         }
+        close(fd);
+        /* 1 GiB sparse device + a 64 MiB intent log, matching the posix
+         * driver's diskfs profile. */
+        snprintf(cfg, sizeof(cfg),
+                 "{\"initialize\":true,\"unsafe_async\":true,"
+                 "\"intent_log_size\":67108864,"
+                 "\"devices\":[{\"type\":\"libaio\",\"size\":1,\"path\":\"%s\"}]}",
+                 img);
+        chimera_server_config_add_module(config, "diskfs", NULL, cfg);
+    } else if (strcmp(env->module, "cairn") == 0) {
+        char dir[300], cfg[512];
+
+        snprintf(dir, sizeof(dir), "%s/cairn", env->session_dir);
+        if (mkdir(dir, 0755) != 0 && errno != EEXIST) {
+            fprintf(stderr, "cairn dir %s: %s\n", dir, strerror(errno));
+            exit(1);
+        }
+        snprintf(cfg, sizeof(cfg), "{\"initialize\":true,\"path\":\"%s\"}", dir);
+        chimera_server_config_add_module(config, "cairn", NULL, cfg);
+    } else if (opts && opts->memfs_config) {
+        chimera_server_config_add_module(config, "memfs", NULL,
+                                         opts->memfs_config);
     }
 
     env->server = chimera_server_init(config, env->metrics);
@@ -278,21 +323,22 @@ mbt_env_open_opts(
     env->data_buf = malloc(MBT_MAX_DATA);
 } /* mbt_env_open_opts */
 
-/* Per-trace filesystem: create a fresh named memfs (unique fsname => distinct
- * fsid => distinct FH mount-id, so stale attr/name/open-cache entries from an
- * earlier trace can never be hit), mount it at "share", and export it.  Runs
- * on the already-started server -- the trade that lets one process amortize
- * server/client init across every trace of a batch. */
+/* Per-trace filesystem: create a fresh named filesystem (unique fsname =>
+ * distinct fsid => distinct FH mount-id, so stale attr/name/open-cache entries
+ * from an earlier trace can never be hit), mount it at "share", and export it.
+ * Runs on the already-started server -- the trade that lets one process
+ * amortize server/client init across every trace of a batch. */
 static inline void
 mbt_env_fs_setup(
     struct mbt_env *env,
     const char     *fsname)
 {
-    if (chimera_server_mkfs(env->server, "memfs", fsname, NULL) != 0) {
-        fprintf(stderr, "failed to create memfs filesystem %s\n", fsname);
+    if (chimera_server_mkfs(env->server, env->module, fsname, NULL) != 0) {
+        fprintf(stderr, "failed to create %s filesystem %s\n", env->module,
+                fsname);
         exit(1);
     }
-    chimera_server_mount(env->server, "share", "memfs", fsname, NULL);
+    chimera_server_mount(env->server, "share", env->module, fsname, NULL);
     if (chimera_server_create_export(env->server, "/share", "/share", 0,
                                      NULL) != 0) {
         fprintf(stderr, "failed to create /share export\n");
@@ -317,7 +363,7 @@ mbt_env_fs_teardown(
      * async close thread, so the fs can stay busy for a short window; retry
      * until it drains rather than leaking the filesystem (which would slow a
      * long corpus quadratically).  5s ceiling, matching the SMB harness. */
-    while (chimera_server_rmfs(env->server, "memfs", fsname) != 0) {
+    while (chimera_server_rmfs(env->server, env->module, fsname) != 0) {
         if (++tries >= 5000) {
             fprintf(stderr, "warning: rmfs %s still failed after %d retries\n",
                     fsname, tries);
