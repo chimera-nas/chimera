@@ -60,14 +60,30 @@ struct chimera_posix_completion {
  * concurrent I/O through two duplicates of one description is not
  * additionally serialized here. */
 struct chimera_posix_ofd {
-    uint64_t                       offset;
-    unsigned int                   oflags; // Raw open(2) flags (for O_ACCMODE checks)
-    int                            refcnt;
+    uint64_t                        offset;
+    unsigned int                    oflags; // Raw open(2) flags (for O_ACCMODE checks)
+    int                             refcnt;
     /* Byte-range lock claims this description holds in the local claim core
      * (heap chimera_posix_ofd_lock nodes, claim embedded first).  Guarded by
      * the client's fd_lock, like the description refcount.  Released when the
      * last duplicate of the description closes. */
-    struct chimera_posix_ofd_lock *locks;
+    struct chimera_posix_ofd_lock  *locks;
+    /* Backend range records this description holds that the local core does
+     * NOT track: a SEEK_END lock, whose absolute range only the backend
+     * resolved.  The old lock wire took these on the file's own descriptor,
+     * so closing the file dropped them; the claim wire records them against
+     * a descriptor of the backend's own, so they have to be released
+     * explicitly.  Released by token at last close, same as `locks`. */
+    struct chimera_posix_ofd_token *backend_tokens;
+};
+
+/* A backend range record held without a local claim (see backend_tokens). */
+struct chimera_posix_ofd_token {
+    uint8_t                         fh[CHIMERA_VFS_FH_SIZE];
+    uint8_t                         fh_len;
+    uint64_t                        fh_hash;
+    uint64_t                        token;
+    struct chimera_posix_ofd_token *next;
 };
 
 /* One byte-range lock claim held by an open file description in the local
@@ -232,6 +248,15 @@ chimera_posix_lock_claim_acquire(
     struct chimera_posix_ofd_lock *node,
     bool                           wait);
 
+/* Record a backend range token this description holds without a local
+ * claim (a SEEK_END grant), so last close can release it. */
+void
+chimera_posix_ofd_track_token(
+    struct chimera_posix_client    *posix,
+    struct chimera_posix_ofd       *ofd,
+    struct chimera_vfs_open_handle *handle,
+    uint64_t                        token);
+
 /* F_UNLCK: carve the local coverage and wait for any backend releases it
 * produced to complete, so the range really is free when this returns. */
 void
@@ -259,6 +284,7 @@ chimera_posix_lock_claim_test(
 int
 chimera_posix_lock_claim_seek_end(
     struct chimera_posix_client    *posix,
+    struct chimera_posix_ofd       *ofd,
     struct chimera_vfs_open_handle *handle,
     int                             cmd,
     struct flock                   *fl,

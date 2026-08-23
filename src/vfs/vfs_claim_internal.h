@@ -256,15 +256,10 @@ chimera_vfs_claim_backend_drain_releases(
     struct chimera_vfs_state      *state,
     struct chimera_vfs_file_state *file);
 
-/* Queue a projected RANGE token for release on the service thread (safe
- * from any thread; fire-and-forget).  May be called with file->lock HELD —
- * the enqueue takes only service_lock (ordering: file->lock before
- * service_lock, matching reeval->bl_post). */
-void
-chimera_vfs_claim_backend_release_token(
-    struct chimera_vfs_state      *state,
-    struct chimera_vfs_file_state *file,
-    uint64_t                       token);
+/* chimera_vfs_claim_backend_release_token() is declared in vfs_claim.h:
+ * holders outside the core (the posix client's SEEK_END records) release
+ * by token too. */
+
 
 /* Hand a pump-granted projectable ticket to the service thread (the pump
  * has no vfs thread of its own to dispatch from). */
