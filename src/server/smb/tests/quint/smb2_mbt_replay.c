@@ -725,7 +725,16 @@ do_create(
     struct smb2_durable_req        dreq;
     const struct smb2_durable_req *durp =
         durable_req_of(json_object_get(v, "durable"), &dreq);
-    int                            interim0 = c->ninterim;
+    int                            interim0;
+
+    if (!c) {
+        /* dispatch_cmd rejects a connectionless command before it gets here;
+         * this is the belt to that braces, and keeps the deref below provably
+         * safe rather than safe-by-inspection. */
+        smb2c_no_conn(SMB2_CREATE);
+    }
+
+    interim0 = c->ninterim;
 
     if (doc) {
         opts |= FILE_DELETE_ON_CLOSE;
@@ -1468,6 +1477,14 @@ dispatch_cmd(
 
     /* Any handle a previous drop left mid-park is settled before this command
      * can race it (see park_barrier_flush). */
+    /* A trace whose command carries no tag is malformed.  Every use below is a
+     * strcmp, so report it as a mismatch rather than dereferencing NULL --
+     * a corrupt corpus should fail the trace, not the process. */
+    if (!tag) {
+        mism("command with no tag for session %lld", (long long) sess);
+        return;
+    }
+
     park_barrier_flush(c);
 
     /* A command that needs a connection and has none cannot be replayed, and
@@ -1842,7 +1859,7 @@ main(
                 mbt_free_traces(traces, ntraces);
                 return 2;
             }
-        } while (memcmp(&opts, &group, sizeof(opts)) == 0);
+        } while (smb2_env_opts_eq(&opts, &group));
 
         smb2_env_stop(&g_env);
 
