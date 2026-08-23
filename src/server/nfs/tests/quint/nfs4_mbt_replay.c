@@ -304,6 +304,7 @@ struct v4_res {
     uint8_t         confirm[8];
     uint32_t        sequenceid, flags; /* EXCHANGE_ID */
     uint8_t         sessionid[16];    /* CREATE_SESSION */
+    uint32_t        fore_slots;       /* CREATE_SESSION: ca_maxrequests */
 
     int             has_sid;          /* OPEN/LOCK/LOCKU/... result stateid */
     struct stateid4 sid;
@@ -407,6 +408,11 @@ struct oracle {
     uint8_t                sess[V4_MAX_SESS][16];
     uint8_t                sess_known[V4_MAX_SESS];
     int                    sess_client[V4_MAX_SESS]; /* model sess -> client */
+
+    /* Fore-channel slots the server granted, and a private sequence id on
+     * the retry slot (see the DELAY retry in run_compound). */
+    uint32_t               sess_slots[V4_MAX_SESS];
+    uint32_t               retry_seq[V4_MAX_SESS];
 
     uint8_t                sid_other[V4_MAX_SIDS][12];
     uint8_t                sid_known[V4_MAX_SIDS];
@@ -915,41 +921,41 @@ v4_expand_name(
     /* *INDENT-OFF* */
     struct { const char *tag; const char *bytes; uint32_t len; } map[] = {
         /* --- rejected by chimera_nfs4_validate_name ------------------ */
-        { "NEMPTY",  "",                             0 },
-        { "NDOT",    ".",                            1 },
-        { "NDOTDOT", "..",                           2 },
-        { "NSLASH",  "a/b",                          3 },
-        { "NNUL",    "a\0b",                         3 },
+        { "NEMPTY",  "",                                          0                             },
+        { "NDOT",    ".",                                         1                             },
+        { "NDOTDOT", "..",                                        2                             },
+        { "NSLASH",  "a/b",                                       3                             },
+        { "NNUL",    "a\0b",                                      3                             },
         /* --- rejected by chimera_nfs4_utf8_valid, one per branch ----- */
-        { "NUTF8",   "\x80",                         1 },  /* stray continuation */
-        { "NUTF8B",  "\xC0" "\x80",                  2 },  /* overlong 2-byte    */
-        { "NUTF8C",  "\xE0" "\x80" "\x80",           3 },  /* overlong 3-byte    */
-        { "NUSUR",   "\xED" "\xA0" "\x80",           3 },  /* surrogate U+D800   */
-        { "NUNCH",   "\xEF" "\xBF" "\xBF",           3 },  /* non-char U+FFFF    */
-        { "NU4OV",   "\xF0" "\x8F" "\xBF" "\xBF",    4 },  /* overlong 4-byte    */
-        { "NU4HI",   "\xF4" "\x90" "\x80" "\x80",    4 },  /* above U+10FFFF     */
-        { "NUF5",    "\xF5" "\x80" "\x80" "\x80",    4 },  /* c > 0xF4           */
-        { "NUTRUNC", "\xE6" "\x97",                  2 },  /* truncated 3-byte   */
-        { "NUBADC",  "\xC3" "A",                     2 },  /* bad continuation   */
+        { "NUTF8",   "\x80",                                      1                             }, /* stray continuation */
+        { "NUTF8B",  "\xC0" "\x80",                               2                             }, /* overlong 2-byte    */
+        { "NUTF8C",  "\xE0" "\x80" "\x80",                        3                             }, /* overlong 3-byte    */
+        { "NUSUR",   "\xED" "\xA0" "\x80",                        3                             }, /* surrogate U+D800   */
+        { "NUNCH",   "\xEF" "\xBF" "\xBF",                        3                             }, /* non-char U+FFFF    */
+        { "NU4OV",   "\xF0" "\x8F" "\xBF" "\xBF",                 4                             }, /* overlong 4-byte    */
+        { "NU4HI",   "\xF4" "\x90" "\x80" "\x80",                 4                             }, /* above U+10FFFF     */
+        { "NUF5",    "\xF5" "\x80" "\x80" "\x80",                 4                             }, /* c > 0xF4           */
+        { "NUTRUNC", "\xE6" "\x97",                               2                             }, /* truncated 3-byte   */
+        { "NUBADC",  "\xC3" "A",                                  2                             }, /* bad continuation   */
         /* --- multi-character names.  Every sentinel above is a single
          * character, so the validator's loop (for i < len, with the inner
          * continuation-byte while) only ever ran one iteration and never a
          * transition between widths.  These do. --- */
-        { "NUMIXB",  "a" "\xC3" "\xA9" "\x80",     4 },  /* ok,ok,stray cont  */
-        { "NUMIXT",  "a" "\xE6" "\x97",             3 },  /* ok, then truncated*/
-        { "NUMIXS",  "\xC3" "\xA9" "\xED" "\xA0" "\x80", 5 }, /* ok, surrogate */
+        { "NUMIXB",  "a" "\xC3" "\xA9" "\x80",                    4                             }, /* ok,ok,stray cont  */
+        { "NUMIXT",  "a" "\xE6" "\x97",                           3                             }, /* ok, then truncated*/
+        { "NUMIXS",  "\xC3" "\xA9" "\xED" "\xA0" "\x80",          5                             }, /* ok, surrogate */
         /* --- ACCEPTED: the multi-byte success paths, which every name
          * the model generated until now (pure ASCII) skipped entirely --- */
         { "NUMIX",   "a" "\xC3" "\xA9" "\xE6" "\x97" "\xA5"
-                     "\xF0" "\x9D" "\x84" "\x9E",  10 }, /* 1+2+3+4 widths  */
-        { "NUREP",   "\xC3" "\xA9" "\xC3" "\xA9" "\xC3" "\xA9", 6 }, /* loop x3 */
-        { "NU2",     "\xC3" "\xA9",                  2 },  /* U+00E9  e-acute    */
-        { "NU3",     "\xE6" "\x97" "\xA5",           3 },  /* U+65E5  CJK        */
-        { "NU4",     "\xF0" "\x9D" "\x84" "\x9E",    4 },  /* U+1D11E clef       */
-        { "NU3E",    "\xE0" "\xA0" "\x80",           3 },  /* U+0800  3-byte min */
-        { "NU3S",    "\xED" "\x9F" "\xBF",           3 },  /* U+D7FF just below
-                                                            * the surrogates    */
-        { "NU4M",    "\xF4" "\x8F" "\xBF" "\xBF",    4 },  /* U+10FFFF max       */
+          "\xF0" "\x9D" "\x84" "\x9E",  10 },            /* 1+2+3+4 widths  */
+        { "NUREP",   "\xC3" "\xA9" "\xC3" "\xA9" "\xC3" "\xA9",   6                             }, /* loop x3 */
+        { "NU2",     "\xC3" "\xA9",                               2                             }, /* U+00E9  e-acute    */
+        { "NU3",     "\xE6" "\x97" "\xA5",                        3                             }, /* U+65E5  CJK        */
+        { "NU4",     "\xF0" "\x9D" "\x84" "\x9E",                 4                             }, /* U+1D11E clef       */
+        { "NU3E",    "\xE0" "\xA0" "\x80",                        3                             }, /* U+0800  3-byte min */
+        { "NU3S",    "\xED" "\x9F" "\xBF",                        3                             }, /* U+D7FF just below
+                                                                                                    * the surrogates    */
+        { "NU4M",    "\xF4" "\x8F" "\xBF" "\xBF",                 4                             }, /* U+10FFFF max       */
     };
     /* *INDENT-ON* */
     unsigned i;
@@ -978,7 +984,9 @@ v4_expand_name(
  * materialized before comparing -- the server returns the real bytes, e.g. the
  * two bytes of U+00E9 rather than the string "NU2". */
 static int
-v4_name_eq(const char *wire, const char *model_name)
+v4_name_eq(
+    const char *wire,
+    const char *model_name)
 {
     char        buf[300];
     const char *want;
@@ -1073,12 +1081,12 @@ pack_fattr_wide(
      * 4-byte boundary.  chimera converts the text with strtoul(). */
     for (i = 0; i < 2; i++) {
         pack_be32(s->blob + len, 1);
-        len         += 4;
-        s->blob[len] = '0';
+        len             += 4;
+        s->blob[len]     = '0';
         s->blob[len + 1] = 0;
         s->blob[len + 2] = 0;
         s->blob[len + 3] = 0;
-        len         += 4;
+        len             += 4;
     }
 
     /* settime4 x2: SET_TO_SERVER_TIME4 carries no timestamp. */
@@ -1234,14 +1242,14 @@ encode_op(
         return 0;
     }
     if (strcmp(tag, "RLookup") == 0) {
-        a->argop                 = OP_LOOKUP;
+        a->argop = OP_LOOKUP;
         v4_expand_name(json_string_value(v), s->nbuf[0],
                        (const char **) &a->oplookup.objname.data,
                        &a->oplookup.objname.len);
         return 0;
     }
     if (strcmp(tag, "RSecinfo") == 0) {
-        a->argop                  = OP_SECINFO;
+        a->argop = OP_SECINFO;
         v4_expand_name(json_string_value(v), s->nbuf[0],
                        (const char **) &a->opsecinfo.name.data,
                        &a->opsecinfo.name.len);
@@ -1284,8 +1292,8 @@ encode_op(
         a->argop            = OP_READDIR;
         a->opreaddir.cookie = 0;
         memset(a->opreaddir.cookieverf, 0, sizeof(a->opreaddir.cookieverf));
-        a->opreaddir.dircount         = 65536;
-        a->opreaddir.maxcount         = 1048576;
+        a->opreaddir.dircount = 65536;
+        a->opreaddir.maxcount = 1048576;
         /* Ask for the server's whole attribute vocabulary, not just FILEID:
          * READDIR compiles its own copy of chimera_nfs4_marshall_attrs and
          * marshals it per directory entry, and the harness compares only
@@ -1316,14 +1324,14 @@ encode_op(
         return 0;
     }
     if (strcmp(tag, "RRemove") == 0) {
-        a->argop                = OP_REMOVE;
+        a->argop = OP_REMOVE;
         v4_expand_name(json_string_value(v), s->nbuf[0],
                        (const char **) &a->opremove.target.data,
                        &a->opremove.target.len);
         return 0;
     }
     if (strcmp(tag, "RRename") == 0) {
-        a->argop                 = OP_RENAME;
+        a->argop = OP_RENAME;
         v4_expand_name(jf_str(v, "oldname"), s->nbuf[0],
                        (const char **) &a->oprename.oldname.data,
                        &a->oprename.oldname.len);
@@ -1333,7 +1341,7 @@ encode_op(
         return 0;
     }
     if (strcmp(tag, "RLink") == 0) {
-        a->argop               = OP_LINK;
+        a->argop = OP_LINK;
         v4_expand_name(json_string_value(v), s->nbuf[0],
                        (const char **) &a->oplink.newname.data,
                        &a->oplink.newname.len);
@@ -1378,7 +1386,7 @@ encode_op(
          * finding in DEVIATIONS-NFS4.md.  Requesting it here would answer
          * NFS4ERR_ATTRNOTSUPP before the marshaller ever runs, defeating the
          * point of the op, so drop the bit until chimera is fixed. */
-        s->bitmap[1] &= ~(1U << (FATTR4_RAWDEV - 32));
+        s->bitmap[1]     &= ~(1U << (FATTR4_RAWDEV - 32));
         f->attrmask       = s->bitmap;
         f->num_attrmask   = 2;
         f->attr_vals.data = s->blob;
@@ -1597,7 +1605,7 @@ encode_op(
         if (strcmp(jf_tag(claim), "OCNull") == 0) {
             const char *name = json_string_value(jf_val(claim));
 
-            a->opopen.claim.claim     = CLAIM_NULL;
+            a->opopen.claim.claim = CLAIM_NULL;
             v4_expand_name(name, s->nbuf[0],
                            (const char **) &a->opopen.claim.file.data,
                            &a->opopen.claim.file.len);
@@ -2339,6 +2347,8 @@ decode_resop(
             if (st == NFS4_OK) {
                 memcpy(r->sessionid,
                        rop->opcreate_session.csr_resok4.csr_sessionid, 16);
+                r->fore_slots = rop->opcreate_session.csr_resok4.
+                    csr_fore_chan_attrs.ca_maxrequests;
             }
             break;
         case OP_BIND_CONN_TO_SESSION:
@@ -2669,9 +2679,9 @@ check_deleg(
               "deleg.stateid");
 } /* check_deleg */
 
-#define SPARSE_TAG(t) (strcmp(t, "SAllocate") == 0 || \
-                       strcmp(t, "SDeallocate") == 0 || \
-                       strcmp(t, "SSeek") == 0)
+#define SPARSE_TAG(t)   (strcmp(t, "SAllocate") == 0 || \
+                         strcmp(t, "SDeallocate") == 0 || \
+                         strcmp(t, "SSeek") == 0)
 /* Ops that run the shared regular-file type gate (see D4-15). */
 /* ...of which these four now answer the per-type split directly
  * (chimera_nfs4_data_nonreg_status), so their symlink arm must match
@@ -2686,14 +2696,14 @@ check_deleg(
                          strcmp(t, "SLockt") == 0 || \
                          strcmp(t, "SSetattr") == 0 || \
                          SPARSE_TAG(t))
-#define XATTR_TAG(t)  (strcmp(t, "SGetxattr") == 0 || \
-                       strcmp(t, "SSetxattr") == 0 || \
-                       strcmp(t, "SListxattrs") == 0 || \
-                       strcmp(t, "SRemovexattr") == 0)
-#define PNFS_TAG(t)   (strcmp(t, "SLayoutget") == 0 || \
-                       strcmp(t, "SLayoutreturn") == 0 || \
-                       strcmp(t, "SLayoutcommit") == 0 || \
-                       strcmp(t, "SGetdeviceinfo") == 0)
+#define XATTR_TAG(t)    (strcmp(t, "SGetxattr") == 0 || \
+                         strcmp(t, "SSetxattr") == 0 || \
+                         strcmp(t, "SListxattrs") == 0 || \
+                         strcmp(t, "SRemovexattr") == 0)
+#define PNFS_TAG(t)     (strcmp(t, "SLayoutget") == 0 || \
+                         strcmp(t, "SLayoutreturn") == 0 || \
+                         strcmp(t, "SLayoutcommit") == 0 || \
+                         strcmp(t, "SGetdeviceinfo") == 0)
 
 /* Divergence in status: capability reconciliation or mismatch.  Mirrors
  * Replayer.classify_status_mismatch. */
@@ -2754,13 +2764,13 @@ classify_status_mismatch(
         return;
     }
     /* D4-7: wherever a path operation meets a symlink where a directory was
-     * required, chimera answers the more specific NFS4ERR_SYMLINK and the
-     * model predicts the generic NFS4ERR_NOTDIR.  RFC 7530 Table 7 lists both
-     * for every op that can hit it -- LOOKUPP and READDIR on a symlink cfh,
-     * and OPEN/CREATE/REMOVE/RENAME/LINK on a symlink *parent* -- so either is
-     * conformant.  Matched on the (NOTDIR, SYMLINK) status pair rather than an
-     * op list: the pair itself is the deviation, and enumerating tags would
-     * silently miss each new op the generator learns to aim at a symlink. */
+    * required, chimera answers the more specific NFS4ERR_SYMLINK and the
+    * model predicts the generic NFS4ERR_NOTDIR.  RFC 7530 Table 7 lists both
+    * for every op that can hit it -- LOOKUPP and READDIR on a symlink cfh,
+    * and OPEN/CREATE/REMOVE/RENAME/LINK on a symlink *parent* -- so either is
+    * conformant.  Matched on the (NOTDIR, SYMLINK) status pair rather than an
+    * op list: the pair itself is the deviation, and enumerating tags would
+    * silently miss each new op the generator learns to aim at a symlink. */
     if (est == NFS4ERR_NOTDIR && ast == V4_ERR_SYMLINK) {
         o->dev_hits[DEV_LOOKUPP_SYMLINK]++;
         o->status_dev = ast;
@@ -2793,14 +2803,14 @@ classify_status_mismatch(
      * INVAL (R-ATTR-25 marks the exact choice server-specific).  The model
      * stays RFC-first and reconciles here, exactly as D4-7 does. */
     /* D4-16: READLINK on a *directory* answers NFS4ERR_INVAL where the model
-     * predicts NFS4ERR_ISDIR.  Here the model is right and chimera is not --
-     * RFC 7530 §16.25.4/.5 Table 7 (rfc-notes R-CORE-86) and RFC 8881
-     * §18.24.3 both make a directory cfh ISDIR, with INVAL reserved for the
-     * other non-symlink types.  It is registered rather than fixed because
-     * pynfs RDLK2d (st_readlink.testDir) asserts INVAL for a directory, so the
-     * RFC-correct answer fails the legacy suite: chimera stays bug-compatible
-     * with pynfs on purpose and the model tolerates it here.  Retire this row
-     * and restore the split in nfs4_proc_readlink.c if pynfs is corrected. */
+    * predicts NFS4ERR_ISDIR.  Here the model is right and chimera is not --
+    * RFC 7530 §16.25.4/.5 Table 7 (rfc-notes R-CORE-86) and RFC 8881
+    * §18.24.3 both make a directory cfh ISDIR, with INVAL reserved for the
+    * other non-symlink types.  It is registered rather than fixed because
+    * pynfs RDLK2d (st_readlink.testDir) asserts INVAL for a directory, so the
+    * RFC-correct answer fails the legacy suite: chimera stays bug-compatible
+    * with pynfs on purpose and the model tolerates it here.  Retire this row
+    * and restore the split in nfs4_proc_readlink.c if pynfs is corrected. */
     if (strcmp(tag, "SReadlink") == 0 && est == NFS4ERR_ISDIR &&
         ast == NFS4ERR_INVAL) {
         o->dev_hits[DEV_READLINK_DIR_INVAL]++;
@@ -3036,6 +3046,10 @@ check_result(
         if (sess >= 0 && sess < V4_MAX_SESS) {
             memcpy(o->sess[sess], r->sessionid, 16);
             o->sess_known[sess] = 1;
+            o->sess_slots[sess] = r->fore_slots;
+            /* A brand-new session's slots are all unused, and an unused
+             * slot's first request must carry sequence id 1. */
+            o->retry_seq[sess] = 0;
             if (req && strcmp(jf_tag(req), "RCreateSession") == 0) {
                 o->sess_client[sess] =
                     (int) jf_i64(jf_val(req), "client");
@@ -3415,7 +3429,8 @@ run_compound(
     struct nfs_argop4    argarray[V4_MAX_OPS];
     struct v4_argscratch scratch[V4_MAX_OPS];
     struct v4_reply      rep;
-    struct v4_call_ctx   cctx = { .o = o, .rep = &rep };
+    struct v4_reply      first = { 0 };
+    struct v4_call_ctx   cctx  = { .o = o, .rep = &rep };
     struct COMPOUND4args args;
     struct v4_ctx        ctx = { .cur = -1, .saved = -1, .abort = 0 };
     char                 tagbuf[32];
@@ -3426,6 +3441,9 @@ run_compound(
     size_t               i;
     int                  attempt;
     int                  n;
+    uint32_t             retry_slot = 0;
+    int                  retry_sess = 0;
+    int                  has_seq    = 0;
 
     o->status_dev              = 0;
     o->cur_open_clientid_known = 0;
@@ -3488,10 +3506,46 @@ run_compound(
     struct evpl_rpc2_conn *conn =
         conn_for(o, compound_client(o, ops, results));
 
+    /* A 4.1+ compound leads with SEQUENCE.  Pick the session's highest
+     * granted slot for DELAY retries: the model only ever drives slot 0, so
+     * anything above it is ours to use.  Slot 0 means "no safe retry slot"
+     * (a 4.0 compound, or a session that granted a single slot). */
+    if (nops > 0 && strcmp(jf_tag(json_array_get(ops, 0)), "RSequence") == 0) {
+        int64_t rsess = jf_i64(jf_val(json_array_get(ops, 0)), "sess");
+
+        has_seq = 1;
+        if (rsess >= 0 && rsess < V4_MAX_SESS && o->sess_known[rsess] &&
+            o->sess_slots[rsess] >= 2) {
+            retry_sess = (int) rsess;
+            retry_slot = o->sess_slots[rsess] - 1;
+        }
+    }
+
     /* Send; retry when the server reports transient DELAY the model did
-     * not predict. */
+     * not predict.
+     *
+     * A 4.1+ retry may not reuse the model's (slot, sequence id).  That pair
+     * names a slot in the session reply cache, and RFC 8881 2.10.6.2 reserves
+     * reusing it for retransmitting a request whose reply was lost -- so the
+     * server answers a verbatim resend from the cache, which is exactly what
+     * it is required to do.  Resending the same compound therefore replays
+     * the cached DELAY forever instead of re-running the operation: the retry
+     * loop could never make progress, and every DELAY became a divergence
+     * after the retry budget ran out.
+     *
+     * Retry on a slot the model never uses, with a sequence id of our own, so
+     * the retry actually executes and the model's slot keeps the sequence the
+     * trace assigned it.  The model's slot still holds the first attempt's
+     * reply on the server, so the reply-cache bookkeeping below records that
+     * one rather than the retry's. */
     for (attempt = 0; attempt < V4_RETRY_DELAY_MAX; attempt++) {
         int unexpected_delay = 0;
+
+        if (attempt > 0 && has_seq && retry_slot > 0) {
+            argarray[0].opsequence.sa_slotid     = retry_slot;
+            argarray[0].opsequence.sa_sequenceid = ++o->retry_seq[retry_sess];
+            argarray[0].opsequence.sa_cachethis  = 0;
+        }
 
         memset(&rep, 0, sizeof(rep));
         o->arena_used = 0;
@@ -3517,7 +3571,16 @@ run_compound(
                 unexpected_delay = 1;
             }
         }
+        if (attempt == 0) {
+            first = rep;
+        }
         if (!unexpected_delay) {
+            break;
+        }
+        if (has_seq && retry_slot == 0) {
+            /* A 4.1+ compound with nowhere safe to retry: resending it
+             * verbatim would only replay the cached reply.  A 4.0 compound
+             * has no reply cache, so resending it re-runs the work. */
             break;
         }
         usleep(100000);
@@ -3615,7 +3678,7 @@ run_compound(
 
     /* Record the reply summary for future SEQUENCE replays of this
      * slot. */
-    if (seq_req && rep.nres > 0 && rep.res[0].status == NFS4_OK) {
+    if (seq_req && first.nres > 0 && first.res[0].status == NFS4_OK) {
         int64_t sess = jf_i64(seq_req, "sess");
         int64_t slot = jf_i64(seq_req, "slot");
 
@@ -3623,12 +3686,14 @@ run_compound(
             slot < V4_MAX_SLOTS) {
             struct v4_cached *c = &o->cache[sess][slot];
 
+            /* The first attempt is what the server cached against the
+             * model's slot: a retry runs on a different one. */
             c->valid  = 1;
-            c->status = rep.status;
-            c->nres   = rep.nres;
-            for (n = 0; n < rep.nres; n++) {
-                c->op[n].status = rep.res[n].status;
-                c->op[n].fnv    = rep.res[n].fnv;
+            c->status = first.status;
+            c->nres   = first.nres;
+            for (n = 0; n < first.nres; n++) {
+                c->op[n].status = first.res[n].status;
+                c->op[n].fnv    = first.res[n].fnv;
             }
         }
     }
@@ -4036,8 +4101,8 @@ run_trace(
         memset(&rep, 0, sizeof(rep));
         memset(&args, 0, sizeof(args));
         memset(argarray, 0, sizeof(argarray));
-        argarray[0].argop                 = OP_PUTROOTFH;
-        argarray[1].argop                 = OP_LOOKUP;
+        argarray[0].argop = OP_PUTROOTFH;
+        argarray[1].argop = OP_LOOKUP;
         /* The export is named after this trace's filesystem (see
          * mbt_env_fs_setup), so a mount left stuck by an earlier diverging
          * trace cannot be picked up here by mistake. */
