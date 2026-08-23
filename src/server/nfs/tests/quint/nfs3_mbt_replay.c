@@ -277,13 +277,20 @@ ftype_wire(const char *tag)
 
 /* ---- known-deviation registry -------------------------------------------- */
 
-/* Registry of known chimera deviations from RFC 1813 (see
- * DEVIATIONS.md): the model always encodes the RFC-correct reply; a
- * *status-only* divergence listed here is recorded and tolerated instead
- * of failing the replay.  Currently empty -- every deviation found by this
- * effort has been fixed (see DEVIATIONS.md).  New entries take the shape
- * { .id, .op_tag, .expected_status, .actual_status }; document each in
- * DEVIATIONS.md. */
+/* Registry of known chimera deviations from RFC 1813 (see DEVIATIONS.md):
+ * the model always encodes the RFC-correct reply; a *status-only* divergence
+ * listed here is recorded and tolerated instead of failing the replay.  A
+ * tolerated deviation skips the OK-path checks (learn_fh/check_attrs), so it
+ * cannot desync a stateful replay: the model leaves fs unchanged on the error
+ * it asserts, and chimera's differing status is not accompanied by a state
+ * change the model would miss.  New entries take the shape
+ * { .id, .op_tag, .expected_status, .actual_status }.
+ *
+ * The entries below are backend-conditioned in practice by being self-selecting
+ * on the actual status: the backend that answers RFC-correctly matches
+ * `expected` exactly (reconcile is never consulted), and only the deviating
+ * backend hits the tolerated pair.  Each is annotated with which backend
+ * family deviates. */
 struct deviation {
     const char *id;
     const char *op_tag;
@@ -291,9 +298,35 @@ struct deviation {
     uint32_t    actual_status;
 };
 
+/* *INDENT-OFF* */
+/* uncrustify 0.78.1 oscillates on the aligned initializer columns below; pin a
+ * stable manual alignment. */
 static const struct deviation known_deviations[] = {
-    /* none */
+    /* EXCLUSIVE-create same-verifier retry (RFC 1813 3.3.8): the model asserts
+     * the idempotent OK the RFC recommends.  chimera stores the create verifier
+     * in the file's atime/mtime (the RFC's own agreed-upon mechanism); on the
+     * passthrough backends (linux/io_uring) an intervening READ of the file
+     * bumps atime in the kernel, so a later same-verifier retry no longer
+     * matches and returns EXIST.  RFC idempotency is only guaranteed for a true
+     * retransmit, so this is permitted; the mkfs backends do not touch atime on
+     * read and return the OK the model asserts. */
+    { "exclusive-create-retry-exist", "OCreate",  0, 17 },
+
+    /* CREATE over an existing name in a directory the caller cannot SEARCH
+     * (execute): the model requires search permission to resolve the name at
+     * all and asserts ACCES ahead of any existence/type result (POSIX path
+     * resolution).  The passthrough backends enforce this in the kernel and
+     * match ACCES directly.  The mkfs backends (memfs/diskfs/cairn) omit the
+     * search check on the existing-entry path -- chimera bug #1771 -- and leak
+     * the entry by returning its type-based reply instead: EISDIR over a
+     * directory, EXIST over another non-regular object, or OK (the existing
+     * regular file) for an UNCHECKED create.  Tracked for fix in #1771; when
+     * fixed, delete these three entries. */
+    { "create-search-perm-1771",      "OCreate", 13, 21 },
+    { "create-search-perm-1771",      "OCreate", 13, 17 },
+    { "create-search-perm-1771",      "OCreate", 13,  0 },
 };
+/* *INDENT-ON* */
 
 static const struct deviation *
 reconcile(
