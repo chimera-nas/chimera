@@ -138,9 +138,11 @@ generate_posix_backend_tests(io_uring CHIMERA_VFS_IO_URING)
 # knobs exist only there, so these stay out of the all-backend matrix)
 add_posix_testprog(test_lease_deny)
 add_posix_testprog(test_lease_recall)
+add_posix_testprog(test_lock_project)
 if(CHIMERA_LIMITS_TESTING)
     add_posix_test(lease_deny_memfs test_lease_deny memfs)
     add_posix_test(lease_recall_memfs test_lease_recall memfs)
+    add_posix_test(lock_project_memfs test_lock_project memfs)
 endif()
 
 # diskfs-only cache-eviction / cold-remount stress (not part of the

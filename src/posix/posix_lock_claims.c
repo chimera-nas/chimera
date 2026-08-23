@@ -364,41 +364,96 @@ chimera_posix_lock_acquire_cb(
     pthread_mutex_unlock(&waiter->mutex);
 } /* chimera_posix_lock_acquire_cb */
 
-enum chimera_vfs_claim_result
-chimera_posix_lock_claim_acquire_wait(
-    struct chimera_posix_client   *posix,
-    struct chimera_posix_ofd_lock *node)
-{
-    struct chimera_vfs_state          *state = chimera_posix_vfs_state(posix);
+/* Everything the acquire needs, on the calling thread's stack: the ticket
+ * lives here because the core may queue it and fire the callback later, and
+ * the request is the vehicle for reaching a worker.  The caller blocks until
+ * the callback fires, and the completion path touches no part of this once
+ * it has, so stack storage is safe for both. */
+struct chimera_posix_lock_claim_ctx {
+    struct chimera_client_request      request;
+    struct chimera_posix_client       *posix;
+    struct chimera_posix_ofd_lock     *node;
     struct chimera_vfs_pending_acquire ticket;
     struct chimera_posix_lock_waiter   waiter;
+    bool                               wait;
+};
 
-    pthread_mutex_init(&waiter.mutex, NULL);
-    pthread_cond_init(&waiter.cond, NULL);
-    waiter.done   = 0;
-    waiter.result = CHIMERA_CLAIM_DENIED;
+/*
+ * Run the acquire on a worker's VFS thread.  A byte-range claim on a
+ * CAP_LEASE backend is confirmed with that backend before its grant is
+ * reported, and that confirm is dispatched from the acquiring thread's own
+ * request pool -- which fcntl, running on the application's thread, does not
+ * have.  Nothing may touch the context after chimera_vfs_claim_acquire()
+ * returns: the callback it fires releases the waiting thread, which owns
+ * this storage.
+ */
+static void
+chimera_posix_lock_claim_exec(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request)
+{
+    struct chimera_posix_lock_claim_ctx *ctx = request->lock.private_data;
 
-    memset(&ticket, 0, sizeof(ticket));
+    chimera_vfs_claim_acquire(thread->vfs_thread,
+                              chimera_posix_vfs_state(ctx->posix),
+                              ctx->node->file, &ctx->node->claim, &ctx->ticket,
+                              ctx->wait, ctx->wait,
+                              chimera_posix_lock_acquire_cb, NULL,
+                              &ctx->waiter);
+} /* chimera_posix_lock_claim_exec */
 
-    /* wait queues on BREAKING; wait_hard additionally queues on a hard
-     * DENIED lock conflict -- the F_SETLKW contract.  GRANTED/DENIED fire
-     * the callback synchronously inside the call; a queued ticket fires it
-     * later from whichever thread pumps the release. */
-    /* CLAIMTODO: pass the worker's vfs thread once plumbed so posix locks
-     * project to CAP_LEASE backends; the kernel OP_LOCK passthrough covers
-     * cross-process arbitration meanwhile. */
-    chimera_vfs_claim_acquire(NULL, state, node->file, &node->claim, &ticket,
-                              /* wait */ true, /* wait_hard */ true,
-                              chimera_posix_lock_acquire_cb, NULL, &waiter);
+enum chimera_vfs_claim_result
+chimera_posix_lock_claim_acquire(
+    struct chimera_posix_client   *posix,
+    struct chimera_posix_ofd_lock *node,
+    bool                           wait)
+{
+    struct chimera_vfs_state           *state = chimera_posix_vfs_state(posix);
+    struct chimera_posix_lock_claim_ctx ctx;
 
-    pthread_mutex_lock(&waiter.mutex);
-    while (!waiter.done) {
-        pthread_cond_wait(&waiter.cond, &waiter.mutex);
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.posix = posix;
+    ctx.node  = node;
+    ctx.wait  = wait;
+
+    pthread_mutex_init(&ctx.waiter.mutex, NULL);
+    pthread_cond_init(&ctx.waiter.cond, NULL);
+    ctx.waiter.done   = 0;
+    ctx.waiter.result = CHIMERA_CLAIM_DENIED;
+
+    /* `wait` queues on BREAKING and (as wait_hard) on a hard DENIED lock
+     * conflict -- the F_SETLKW contract.  Without it the call is a try:
+     * GRANTED/DENIED/BREAKING all resolve inside it.  Either way GRANTED and
+     * DENIED fire the callback synchronously; a queued ticket fires it later
+     * from whichever thread pumps the release, and a queued RANGE grant has
+     * its backend confirm deferred to the projection service thread. */
+    if (chimera_vfs_claim_backend_capable(state)) {
+        /* A grant here may need confirming with the backend, which requires
+         * a VFS thread: marshal onto a worker and wait for it there. */
+        ctx.request.opcode            = CHIMERA_CLIENT_OP_LOCK;
+        ctx.request.heap_allocated    = 0;
+        ctx.request.lock.private_data = &ctx;
+
+        chimera_posix_worker_enqueue(chimera_posix_choose_worker(posix),
+                                     &ctx.request,
+                                     chimera_posix_lock_claim_exec);
+    } else {
+        /* No CAP_LEASE module: the local core is the whole arbiter and
+         * nothing projects, so skip the worker round trip. */
+        chimera_vfs_claim_acquire(NULL, state, node->file, &node->claim,
+                                  &ctx.ticket, wait, wait,
+                                  chimera_posix_lock_acquire_cb, NULL,
+                                  &ctx.waiter);
     }
-    pthread_mutex_unlock(&waiter.mutex);
 
-    pthread_mutex_destroy(&waiter.mutex);
-    pthread_cond_destroy(&waiter.cond);
+    pthread_mutex_lock(&ctx.waiter.mutex);
+    while (!ctx.waiter.done) {
+        pthread_cond_wait(&ctx.waiter.cond, &ctx.waiter.mutex);
+    }
+    pthread_mutex_unlock(&ctx.waiter.mutex);
 
-    return waiter.result;
-} /* chimera_posix_lock_claim_acquire_wait */
+    pthread_mutex_destroy(&ctx.waiter.mutex);
+    pthread_cond_destroy(&ctx.waiter.cond);
+
+    return ctx.waiter.result;
+} /* chimera_posix_lock_claim_acquire */

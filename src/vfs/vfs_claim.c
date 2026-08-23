@@ -1856,14 +1856,23 @@ chimera_vfs_claim_range_replace(
                 has_right = (cur_off + cur_len) > carve_end;
             }
 
+            /* A remainder is a NEW claim with the carved geometry, not the
+             * record the backend knows: the parent's token is released
+             * below, so a remainder that inherited it would name a freed
+             * record and re-release it later -- onto whatever record has
+             * since reused the id.  Clear it.  CLAIMTODO: the remainder is
+             * consequently held locally but unprojected until it is
+             * re-locked; projecting it needs a vfs thread here, which the
+             * carve path does not have. */
             if (has_left && n_spare < 2 && spare && spare[n_spare]) {
                 struct chimera_vfs_claim *left = spare[n_spare++];
 
-                *left        = *cur;
-                left->offset = cur_off;
-                left->length = offset - cur_off;
-                left->prev   = NULL;
-                left->next   = NULL;
+                *left               = *cur;
+                left->offset        = cur_off;
+                left->length        = offset - cur_off;
+                left->backend_token = 0;
+                left->prev          = NULL;
+                left->next          = NULL;
                 chimera_vfs_claim_link_locked(file, left);
             }
             if (has_right && n_spare < 2 && spare && spare[n_spare]) {
@@ -1873,8 +1882,9 @@ chimera_vfs_claim_range_replace(
                 right->offset = carve_end;
                 right->length = (cur_len == UINT64_MAX) ? UINT64_MAX
                     : (cur_off + cur_len) - carve_end;
-                right->prev = NULL;
-                right->next = NULL;
+                right->backend_token = 0;
+                right->prev          = NULL;
+                right->next          = NULL;
                 chimera_vfs_claim_link_locked(file, right);
             }
         }

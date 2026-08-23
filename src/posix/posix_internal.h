@@ -221,12 +221,16 @@ void chimera_posix_ofd_lock_carve(
     uint64_t                        offset,
     uint64_t                        length);
 
-/* F_SETLKW: blocking local acquire (wait + wait_hard) bridged onto the
- * calling app thread's condvar. */
+/* Acquire the local claim, bridged onto the calling app thread's condvar.
+ * `wait` is the F_SETLKW contract (queue on BREAKING and on a hard DENIED
+ * conflict); without it the call is a try.  On a CAP_LEASE backend the
+ * acquire runs on a worker's VFS thread so a granted range is confirmed
+ * with the backend before it is reported. */
 enum chimera_vfs_claim_result
-chimera_posix_lock_claim_acquire_wait(
+chimera_posix_lock_claim_acquire(
     struct chimera_posix_client   *posix,
-    struct chimera_posix_ofd_lock *node);
+    struct chimera_posix_ofd_lock *node,
+    bool                           wait);
 
 /* Release every lock claim the description still holds.  Caller holds
  * fd_lock. */

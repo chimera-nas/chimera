@@ -6,6 +6,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdatomic.h>
 #include <pthread.h>
 
 #include "vfs/vfs.h"
@@ -132,8 +133,13 @@ struct chimera_vfs_state {
      * every backend lease dispatch for AGGREGATE tokens.  lease_capable is
      * false when no registered module declares CHIMERA_VFS_CAP_LEASE, making
      * every projection hook a cheap no-op. */
-    uint8_t                        lease_capable;
-    uint8_t                        lease_probed;       /* modules scanned (lazy: the
+    /* Atomic: the probe is resolved lazily on first use and is read from
+     * any thread, including callers outside the VFS threads (posix fcntl
+     * decides on the app's own thread whether an acquire has to marshal
+     * onto a VFS thread at all).  Two racing probes reach the same answer,
+     * so the pair needs release/acquire ordering, not a lock. */
+    _Atomic uint8_t                     lease_capable;
+    _Atomic uint8_t                     lease_probed;  /* modules scanned (lazy: the
                                                        * close thread attaches
                                                        * before modules register) */
     struct chimera_vfs            *vfs;
@@ -677,6 +683,16 @@ chimera_vfs_state_reap_idle(
 /* -------------------------------------------------------------------- */
 /* Backend lease projection (CHIMERA_VFS_CAP_LEASE)                     */
 /* -------------------------------------------------------------------- */
+
+/* True when any registered module declares CHIMERA_VFS_CAP_LEASE, i.e. a
+* claim could have to be confirmed with a backend.  Resolved lazily on
+* first use (modules register after the service attaches) and safe to call
+* from any thread.  Callers outside the VFS threads use this to decide
+* whether an acquire has to marshal onto a VFS thread at all: with no such
+* module every projection hook is a no-op, so nothing is gained by it. */
+bool
+chimera_vfs_claim_backend_capable(
+    struct chimera_vfs_state *state);
 
 /* Attach the projection service (called once from the close-thread setup):
  * scans the registered modules for CAP_LEASE, mints the node owner, and
