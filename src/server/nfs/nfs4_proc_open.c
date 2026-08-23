@@ -510,7 +510,7 @@ chimera_nfs4_open_nonreg_status(
 } /* chimera_nfs4_open_nonreg_status */
 
 static void
-chimera_nfs4_open_complete(
+chimera_nfs4_open_finish(
     struct nfs_request *req,
     nfsstat4            status)
 {
@@ -548,6 +548,123 @@ chimera_nfs4_open_complete(
     }
 
     chimera_nfs4_compound_complete(req, status);
+} /* chimera_nfs4_open_finish */
+
+/*
+ * Tear the open state this OPEN just installed back down.  Used when the
+ * deferred truncate fails: the OPEN reports the error, so it must not leave a
+ * stateid behind that the client was never told about.
+ */
+static void
+chimera_nfs4_open_unwind_state(struct nfs_request *req)
+{
+    struct nfs_state_table *table = &req->thread->shared->nfs4_state_table;
+    struct OPEN4res        *res   =
+        &req->res_compound.resarray[req->index].opopen;
+    void                   *state_void;
+    uint8_t                 state_type;
+
+    if (nfs_state_table_acquire(table, &res->resok4.stateid,
+                                NFS4_SLOT_TYPE_OPEN,
+                                &state_void, &state_type) != NFS4_OK) {
+        return;
+    }
+
+    nfs_open_state_destroy(state_void, table, req->thread->vfs_thread);
+    nfs_state_table_release(table, state_void, NFS4_SLOT_TYPE_OPEN,
+                            req->thread->vfs_thread);
+} /* chimera_nfs4_open_unwind_state */
+
+static void
+chimera_nfs4_open_trunc_complete(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *pre_attr,
+    struct chimera_vfs_attrs *set_attr,
+    struct chimera_vfs_attrs *post_attr,
+    void                     *private_data)
+{
+    struct nfs_request     *req   = private_data;
+    struct nfs_state_table *table = &req->thread->shared->nfs4_state_table;
+    struct OPEN4res        *res   =
+        &req->res_compound.resarray[req->index].opopen;
+
+    (void) pre_attr;
+    (void) set_attr;
+    (void) post_attr;
+
+    nfs_state_table_release(table, req->nfs_state_ref, NFS4_SLOT_TYPE_OPEN,
+                            req->thread->vfs_thread);
+    req->nfs_state_ref = NULL;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
+        chimera_nfs4_open_unwind_state(req);
+        chimera_nfs4_open_finish(req, res->status);
+        return;
+    }
+
+    chimera_nfs4_open_finish(req, NFS4_OK);
+} /* chimera_nfs4_open_trunc_complete */
+
+/*
+ * Every OPEN outcome funnels through here, including the one that parks on the
+ * 4.0 CB_NULL probe -- so this is the one place that sees "the OPEN has
+ * succeeded and its share reservation is held".  An UNCHECKED4 truncate of an
+ * existing file is applied here rather than as part of the open, so an OPEN
+ * that fails (share reservation, type, permission) leaves the file's contents
+ * alone.
+ *
+ * The truncate runs through the just-installed open state's handle and the
+ * descriptor-originated fsetattr, so it is authorized by the access this OPEN
+ * was granted rather than re-checked against the file's mode -- the ftruncate
+ * rule, and the same grant the client would use for a WRITE.
+ */
+static void
+chimera_nfs4_open_complete(
+    struct nfs_request *req,
+    nfsstat4            status)
+{
+    struct nfs_state_table *table = &req->thread->shared->nfs4_state_table;
+    struct OPEN4res        *res   =
+        &req->res_compound.resarray[req->index].opopen;
+    struct nfs_open_state  *open_state;
+    void                   *state_void;
+    uint8_t                 state_type;
+
+    if (status == NFS4_OK && req->open_trunc_pending) {
+        req->open_trunc_pending = false;
+
+        if (nfs_state_table_acquire(table, &res->resok4.stateid,
+                                    NFS4_SLOT_TYPE_OPEN,
+                                    &state_void, &state_type) == NFS4_OK) {
+            open_state          = state_void;
+            req->nfs_state_ref  = state_void;
+            req->nfs_state_type = NFS4_SLOT_TYPE_OPEN;
+
+            memset(&req->open_trunc_attr, 0, sizeof(req->open_trunc_attr));
+            req->open_trunc_attr.va_set_mask = CHIMERA_VFS_ATTR_SIZE;
+            req->open_trunc_attr.va_req_mask = CHIMERA_VFS_ATTR_SIZE;
+            req->open_trunc_attr.va_size     = 0;
+
+            chimera_vfs_fsetattr(req->thread->vfs_thread, &req->cred,
+                                 open_state->handle,
+                                 &req->open_trunc_attr,
+                                 0,
+                                 0,
+                                 chimera_nfs4_open_trunc_complete,
+                                 req);
+            return;
+        }
+        /* The state was reaped before the truncate could run (a lease sweep
+         * racing this OPEN); the stateid is already dead, so report it as
+         * such rather than truncating on its behalf. */
+        res->status = NFS4ERR_BAD_STATEID;
+        chimera_nfs4_open_finish(req, res->status);
+        return;
+    }
+
+    req->open_trunc_pending = false;
+    chimera_nfs4_open_finish(req, status);
 } /* chimera_nfs4_open_complete */
 
 /*
@@ -867,15 +984,22 @@ chimera_nfs4_open_unchecked_lookup_complete(
         }
 
         /* RFC 7530 OPEN/UNCHECKED recreate: create attrs are ignored for an
-         * existing object, except size=0 truncates the file. */
+         * existing object, except size=0 truncates the file.
+         *
+         * The truncate is deliberately NOT handed to the open below.  That
+         * call opens and applies attributes in one step, while the share
+         * reservation is not admitted until chimera_nfs4_open_acquire_share()
+         * runs on the completion -- so an OPEN destined to fail
+         * NFS4ERR_SHARE_DENIED emptied the file on its way to failing.  A
+         * failed OPEN must leave the object alone; note it here and let
+         * chimera_nfs4_open_complete() apply it once the reservation is
+         * actually held. */
         if ((ctx->attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) &&
             ctx->attr->va_size == 0) {
-            ctx->attr->va_set_mask = CHIMERA_VFS_ATTR_SIZE;
-            ctx->attr->va_req_mask = CHIMERA_VFS_ATTR_SIZE;
-        } else {
-            ctx->attr->va_set_mask = 0;
-            ctx->attr->va_req_mask = 0;
+            req->open_trunc_pending = true;
         }
+        ctx->attr->va_set_mask = 0;
+        ctx->attr->va_req_mask = 0;
     } else if (error_code != CHIMERA_VFS_ENOENT) {
         res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
         chimera_vfs_release(req->thread->vfs_thread, parent_handle);
@@ -1265,6 +1389,8 @@ chimera_nfs4_open(
 {
     struct OPEN4args *args = &argop->opopen;
     struct OPEN4res  *res  = &resop->opopen;
+
+    req->open_trunc_pending = false;
 
     if (req->fhlen == 0) {
         res->status = NFS4ERR_NOFILEHANDLE;
