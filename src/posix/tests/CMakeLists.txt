@@ -139,10 +139,12 @@ generate_posix_backend_tests(io_uring CHIMERA_VFS_IO_URING)
 add_posix_testprog(test_lease_deny)
 add_posix_testprog(test_lease_recall)
 add_posix_testprog(test_lock_project)
+add_posix_testprog(test_lock_seek_end)
 if(CHIMERA_LIMITS_TESTING)
     add_posix_test(lease_deny_memfs test_lease_deny memfs)
     add_posix_test(lease_recall_memfs test_lease_recall memfs)
     add_posix_test(lock_project_memfs test_lock_project memfs)
+    add_posix_test(lock_seek_end_memfs test_lock_seek_end memfs)
 endif()
 
 # diskfs-only cache-eviction / cold-remount stress (not part of the

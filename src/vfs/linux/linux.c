@@ -1716,6 +1716,29 @@ chimera_linux_link_at(
 
 } /* chimera_linux_link_at */
 
+/* Look up the descriptor this (file handle, owner) pair locks through, without
+ * opening one.  Called with range_lock held; takes no reference. */
+static struct chimera_linux_range_file *
+chimera_linux_range_file_find(
+    struct chimera_linux_shared      *shared,
+    const uint8_t                    *fh,
+    uint32_t                          fh_len,
+    uint64_t                          fh_hash,
+    const struct chimera_claim_owner *owner)
+{
+    struct chimera_linux_range_file *file;
+
+    for (file = shared->range_files; file; file = file->next) {
+        if (file->fh_hash == fh_hash && file->fh_len == fh_len &&
+            memcmp(file->fh, fh, fh_len) == 0 &&
+            chimera_claim_owner_equal(&file->owner, owner)) {
+            return file;
+        }
+    }
+
+    return NULL;
+} /* chimera_linux_range_file_find */
+
 /* Find (or open) the descriptor this (file handle, owner) pair locks through
  * and take a reference on it.  Called with range_lock held. */
 static struct chimera_linux_range_file *
@@ -1730,13 +1753,11 @@ chimera_linux_range_file_get(
     struct chimera_linux_range_file *file;
     int                              fd;
 
-    for (file = shared->range_files; file; file = file->next) {
-        if (file->fh_hash == fh_hash && file->fh_len == fh_len &&
-            memcmp(file->fh, fh, fh_len) == 0 &&
-            chimera_claim_owner_equal(&file->owner, owner)) {
-            file->refcnt++;
-            return file;
-        }
+    file = chimera_linux_range_file_find(shared, fh, fh_len, fh_hash, owner);
+
+    if (file) {
+        file->refcnt++;
+        return file;
     }
 
     /* A read lock needs a readable descriptor and a write lock a writable one,
@@ -2013,6 +2034,143 @@ chimera_linux_claim_acquire(
     request->complete(request);
 } /* chimera_linux_claim_acquire */
 
+/* Release by GEOMETRY (claim_release.token == 0): the caller never learned the
+ * absolute bytes it holds -- a SEEK_END lock is resolved down here and the
+ * resolution is never reported back -- so it names the range to drop in exactly
+ * the spelling it named the lock, and this side resolves EOF again.  Every
+ * record of this owner's that overlaps the resolved range goes, each unlocked
+ * over its own bytes so the kernel is left holding precisely what the registry
+ * still describes.  Matching nothing is success. */
+static void
+chimera_linux_claim_release_ranged(
+    struct chimera_vfs_request  *request,
+    struct chimera_linux_thread *thread)
+{
+    struct chimera_linux_shared     *shared = thread->shared;
+    struct chimera_linux_range_file *file;
+    struct chimera_linux_range      *range, *tmp, *matched = NULL;
+    struct flock                     fl     = { 0 };
+    uint64_t                         offset = request->claim_release.offset;
+    uint64_t                         length = request->claim_release.length;
+    int                              err    = 0;
+
+    pthread_mutex_lock(&shared->range_lock);
+
+    file = chimera_linux_range_file_find(shared,
+                                         request->fh,
+                                         request->fh_len,
+                                         request->fh_hash,
+                                         &request->claim_release.owner);
+
+    if (file) {
+        /* Pin it across the syscalls below, which run unlocked. */
+        file->refcnt++;
+    }
+
+    pthread_mutex_unlock(&shared->range_lock);
+
+    if (!file) {
+        /* This owner locks nothing on this file, so there is nothing of ours
+         * to drop and no size worth resolving against. */
+        request->status = CHIMERA_VFS_OK;
+        request->complete(request);
+        return;
+    }
+
+    if (request->claim_release.whence == SEEK_END) {
+        /* offset and length are bit-casts of the caller's signed l_start and
+         * l_len and keep POSIX's conventions: l_len 0 is to-EOF and a negative
+         * l_len runs backwards from l_start.  The descriptor is the one the
+         * locks were taken through, so its size is the one the kernel would
+         * resolve an F_UNLCK against. */
+        struct stat st;
+        int64_t     start = (int64_t) offset;
+        int64_t     len   = (int64_t) length;
+
+        if (fstat(file->fd, &st) < 0) {
+            err = errno;
+        } else {
+            start += (int64_t) st.st_size;
+
+            if (len < 0) {
+                start += len;
+                len    = -len;
+            }
+
+            if (start < 0) {
+                err = EINVAL;
+            } else {
+                offset = (uint64_t) start;
+                length = (len == 0) ? UINT64_MAX : (uint64_t) len;
+            }
+        }
+    }
+
+    if (err) {
+        pthread_mutex_lock(&shared->range_lock);
+        chimera_linux_range_file_put(shared, file);
+        pthread_mutex_unlock(&shared->range_lock);
+
+        request->status = chimera_linux_errno_to_status(err);
+        request->complete(request);
+        return;
+    }
+
+    pthread_mutex_lock(&shared->range_lock);
+
+    LL_FOREACH_SAFE(shared->ranges, range, tmp)
+    {
+        /* One descriptor per (file handle, owner), so having been taken through
+         * this one is the fh and chimera_claim_owner_equal() test already. */
+        if (range->file != file) {
+            continue;
+        }
+
+        /* The record keeps fcntl's spelling, where a length of 0 is to-EOF;
+         * the overlap test speaks the claim wire's, where UINT64_MAX is. */
+        if (!chimera_vfs_claim_range_overlap_i(range->offset,
+                                               range->length ? range->length : UINT64_MAX,
+                                               offset, length)) {
+            continue;
+        }
+
+        LL_DELETE(shared->ranges, range);
+        LL_PREPEND(matched, range);
+    }
+
+    pthread_mutex_unlock(&shared->range_lock);
+
+    /* Outside the registry lock, as every other lock syscall on this module is.
+     * F_UNLCK does not block, but the descriptor put below wants the lock and
+     * there is no reason to hold it across a syscall at all. */
+    LL_FOREACH(matched, range)
+    {
+        fl.l_type   = F_UNLCK;
+        fl.l_whence = SEEK_SET;
+        fl.l_start  = (off_t) range->offset;
+        fl.l_len    = (off_t) range->length;
+        fl.l_pid    = 0;
+
+        fcntl(file->fd, CHIMERA_LINUX_LOCK_SET, &fl);
+    }
+
+    pthread_mutex_lock(&shared->range_lock);
+
+    while (matched) {
+        range = matched;
+        LL_DELETE(matched, range);
+        chimera_linux_range_file_put(shared, range->file);
+        free(range);
+    }
+
+    chimera_linux_range_file_put(shared, file);
+
+    pthread_mutex_unlock(&shared->range_lock);
+
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* chimera_linux_claim_release_ranged */
+
 static void
 chimera_linux_claim_release(
     struct chimera_vfs_request *request,
@@ -2025,6 +2183,12 @@ chimera_linux_claim_release(
 
     /* claim_release.retained is an AGGREGATE downgrade mask; a RANGE record is
      * binding and all-or-nothing, so the release simply drops it. */
+
+    if (request->claim_release.token == 0 &&
+        request->claim_release.klass == CHIMERA_VFS_CLAIM_KLASS_RANGE) {
+        chimera_linux_claim_release_ranged(request, thread);
+        return;
+    }
 
     pthread_mutex_lock(&shared->range_lock);
 

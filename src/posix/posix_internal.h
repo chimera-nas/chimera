@@ -267,6 +267,16 @@ chimera_posix_lock_claim_unlock(
     uint64_t                        offset,
     uint64_t                        length);
 
+/* SEEK_END unlock: release the backend record by geometry, since this node
+ * never learned the absolute range. */
+int
+chimera_posix_lock_claim_unlock_ranged(
+    struct chimera_posix_client    *posix,
+    struct chimera_vfs_open_handle *handle,
+    int32_t                         whence,
+    uint64_t                        offset,
+    uint64_t                        length);
+
 /* F_GETLK's backend half: ask a range-arbitrating backend whether anything
  * outside this process holds the probed range.  Returns false when nothing
  * arbitrates ranges or the range is free; true fills *conflict. */

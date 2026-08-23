@@ -6988,15 +6988,79 @@ memfs_claim_acquire(
 static void
 memfs_claim_release(
     struct memfs_thread        *thread,
+    struct memfs_fs            *fs,
     struct memfs_shared        *shared,
     struct chimera_vfs_request *request)
 {
     struct memfs_claim_file  *f;
     struct memfs_claim_agg   *agg;
-    struct memfs_claim_range *rng;
+    struct memfs_claim_range *rng, *tmp;
     uint64_t                  token = request->claim_release.token;
 
     (void) thread;
+
+    /* Release by GEOMETRY: the caller never learned the absolute range
+     * (a SEEK_END unlock), so it names the range the way it named the
+     * lock and this side resolves EOF -- atomically with the unlock, for
+     * the same reason the acquire does. */
+    if (token == 0 &&
+        request->claim_release.klass == CHIMERA_VFS_CLAIM_KLASS_RANGE) {
+        uint64_t offset = request->claim_release.offset;
+        uint64_t length = request->claim_release.length;
+
+        if (request->claim_release.whence == SEEK_END) {
+            struct memfs_inode *inode;
+            int64_t             start = (int64_t) offset;
+            int64_t             len   = (int64_t) length;
+            int64_t             size;
+
+            inode = memfs_inode_get_fh(fs, request->fh, request->fh_len);
+
+            if (!inode) {
+                request->status = CHIMERA_VFS_ESTALE;
+                request->complete(request);
+                return;
+            }
+            size = (int64_t) inode->size;
+            pthread_mutex_unlock(&inode->lock);
+
+            start += size;
+            if (len < 0) {
+                start += len;
+                len    = -len;
+            }
+            if (start < 0) {
+                request->status = CHIMERA_VFS_EINVAL;
+                request->complete(request);
+                return;
+            }
+            offset = (uint64_t) start;
+            length = (len == 0) ? UINT64_MAX : (uint64_t) len;
+        }
+
+        pthread_mutex_lock(&shared->lease_lock);
+        f = memfs_claim_file_get(shared, request->fh, request->fh_len,
+                                 request->fh_hash, 0);
+        if (f) {
+            LL_FOREACH_SAFE(f->ranges, rng, tmp)
+            {
+                if (!chimera_claim_owner_equal(&rng->owner,
+                                               &request->claim_release.owner)) {
+                    continue;
+                }
+                if (!chimera_vfs_claim_range_overlap_i(rng->offset, rng->length,
+                                                       offset, length)) {
+                    continue;
+                }
+                LL_DELETE(f->ranges, rng);
+                free(rng);
+            }
+        }
+        pthread_mutex_unlock(&shared->lease_lock);
+        request->status = CHIMERA_VFS_OK;
+        request->complete(request);
+        return;
+    }
 
     pthread_mutex_lock(&shared->lease_lock);
     for (f = shared->lease_files; f; f = f->next) {
@@ -7225,7 +7289,7 @@ memfs_dispatch(
             memfs_claim_acquire(thread, fs, shared, request);
             break;
         case CHIMERA_VFS_OP_CLAIM_RELEASE:
-            memfs_claim_release(thread, shared, request);
+            memfs_claim_release(thread, fs, shared, request);
             break;
         default:
             chimera_memfs_error("memfs_dispatch: unknown operation %d",

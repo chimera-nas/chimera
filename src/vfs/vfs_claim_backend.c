@@ -427,6 +427,7 @@ chimera_vfs_bl_step(
                                           file->fh, file->fh_len, file->fh_hash,
                                           CHIMERA_VFS_CLAIM_KLASS_AGGREGATE,
                                           token, retained,
+                                          SEEK_SET, 0, 0, NULL,
                                           chimera_vfs_bl_release_complete, op);
     }
 } /* chimera_vfs_bl_step */
@@ -629,7 +630,9 @@ chimera_vfs_claim_backend_service(struct chimera_vfs_state *state)
                 chimera_vfs_claim_release_backend(state->service_thread,
                                                   w->fh, w->fh_len, w->fh_hash,
                                                   CHIMERA_VFS_CLAIM_KLASS_RANGE,
-                                                  w->token, 0, NULL, NULL);
+                                                  w->token, 0,
+                                                  SEEK_SET, 0, 0, NULL,
+                                                  NULL, NULL);
                 pthread_mutex_unlock(&state->bl_dispatch_lock);
                 break;
         } /* switch */
@@ -926,7 +929,9 @@ chimera_vfs_claim_backend_drain_releases(
         mine = w->next;
         chimera_vfs_claim_release_backend(thread, w->fh, w->fh_len, w->fh_hash,
                                           CHIMERA_VFS_CLAIM_KLASS_RANGE,
-                                          w->token, 0, NULL, NULL);
+                                          w->token, 0,
+                                          SEEK_SET, 0, 0, NULL,
+                                          NULL, NULL);
         free(w);
     }
 
@@ -1021,6 +1026,7 @@ chimera_vfs_claim_backend_flush_releases(
         chimera_vfs_claim_release_backend(thread, w->fh, w->fh_len, w->fh_hash,
                                           CHIMERA_VFS_CLAIM_KLASS_RANGE,
                                           w->token, 0,
+                                          SEEK_SET, 0, 0, NULL,
                                           chimera_vfs_bl_flush_complete, fl);
         free(w);
     }

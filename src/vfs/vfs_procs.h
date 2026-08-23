@@ -1280,5 +1280,10 @@ chimera_vfs_claim_release_backend(
     uint8_t                                klass,
     uint64_t                               token,
     uint8_t                                retained,
+    /* Only read when token == 0 (release a RANGE by geometry). */
+    int32_t                                whence,
+    uint64_t                               offset,
+    uint64_t                               length,
+    const struct chimera_claim_owner      *owner,
     chimera_vfs_claim_release_backend_cb_t callback,
     void                                  *private_data);
