@@ -70,6 +70,40 @@ bool
 chimera_vfs_claim_revocable(
     const struct chimera_vfs_claim *claim);
 
+/* Advertise-drop policy is a CONSTRUCT property (see
+ * chimera_claim_advertise_drop): the SMB constructs drop advertised at
+ * break-begin (a coexisting acquirer settles immediately, R29); every
+ * other construct -- NFSv4 delegations (R11), the INTERNAL implicit
+ * claim, FUSE sync grants -- holds advertised until ack/revoke, so a
+ * conflicting acquirer keeps waiting for the real invalidation. */
+static inline enum chimera_claim_advertise_drop
+chimera_vfs_claim_advertise_policy(enum chimera_claim_construct construct)
+{
+    switch (construct) {
+        case CHIMERA_CONSTRUCT_SMB_OPEN:
+        case CHIMERA_CONSTRUCT_SMB_OPEN_INERT:
+        case CHIMERA_CONSTRUCT_RQLS:
+        case CHIMERA_CONSTRUCT_OPLOCK_II:
+        case CHIMERA_CONSTRUCT_OPLOCK_EX:
+        case CHIMERA_CONSTRUCT_OPLOCK_BATCH:
+        case CHIMERA_CONSTRUCT_DIR_LEASE:
+        case CHIMERA_CONSTRUCT_LOCK_SMB:
+            return CHIMERA_CLAIM_ADVERTISE_AT_BEGIN;
+        default:
+            return CHIMERA_CLAIM_ADVERTISE_NEVER;
+    } // switch
+} /* chimera_vfs_claim_advertise_policy */
+
+/* Awaited-class break victims: conflicting actors wait for the ACK, not
+ * merely for break-begin (NFSv4 delegations; FUSE coherence=sync grants). */
+static inline bool
+chimera_vfs_claim_awaited(const struct chimera_vfs_claim *claim)
+{
+    return claim->construct == CHIMERA_CONSTRUCT_DELEG_R ||
+           claim->construct == CHIMERA_CONSTRUCT_DELEG_W ||
+           claim->construct == CHIMERA_CONSTRUCT_FUSE_GRANT;
+} /* chimera_vfs_claim_awaited */
+
 /* 128-bit-safe half-open overlap; UINT64_MAX = to-EOF, 0 = zero-byte. */
 bool
 chimera_vfs_claim_range_overlap(

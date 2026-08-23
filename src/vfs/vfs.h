@@ -539,6 +539,10 @@ struct chimera_vfs_request {
      * floor handed to begin_break for this flavor. */
     uint8_t                            io_recall_single;
     uint8_t                            io_recall_retain;
+    /* Owned write parked until every awaited-class sync grant (FUSE
+     * coherence=sync) it invalidated has acked; the pump resume re-fires
+     * the write trigger before re-checking (rearm-on-demand races). */
+    uint8_t                            io_sync_write;
     void                               ( *io_next )(
         struct chimera_vfs_request *request);
     struct chimera_vfs_file_state     *io_lease_file;

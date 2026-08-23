@@ -119,7 +119,8 @@ chimera_vfs_claim_begin_break_ex(
                 ((claim->used & (uint8_t) ~step) &
                  (CHIMERA_CLAIM_CW | CHIMERA_CLAIM_H)) != 0;
         }
-        if (claim->owner.proto == CHIMERA_CLAIM_PROTO_SMB2) {
+        if (chimera_vfs_claim_advertise_policy(claim->construct) ==
+            CHIMERA_CLAIM_ADVERTISE_AT_BEGIN) {
             claim->advertised = step;
         }
 
@@ -439,6 +440,7 @@ chimera_vfs_claim_trigger_row(
     bool is_dir   = (victim->construct == CHIMERA_CONSTRUCT_DIR_LEASE);
     bool is_deleg = (victim->construct == CHIMERA_CONSTRUCT_DELEG_R ||
                      victim->construct == CHIMERA_CONSTRUCT_DELEG_W);
+    bool awaited    = chimera_vfs_claim_awaited(victim);
     bool same_owner = actor &&
         chimera_claim_owner_equal(&victim->owner, &actor->owner);
     bool same_key = actor &&
@@ -472,8 +474,14 @@ chimera_vfs_claim_trigger_row(
             if (is_dir) {
                 return; /* dir caches break via DIR_CONTENT only */
             }
-            if ((same_owner || same_key) &&
+            if ((same_owner || same_key ||
+                 (awaited && actor &&
+                  chimera_claim_owner_same_client(&victim->owner,
+                                                  &actor->owner))) &&
                 !(legacy_oplock && !(victim->used & CHIMERA_CLAIM_CW))) {
+                /* Awaited-class holders self-exempt at the CLIENT circle:
+                 * a client's own write never recalls its own delegation /
+                 * a mount's own write never invalidates its own grant. */
                 return;
             }
             row->selects = true;
@@ -498,7 +506,7 @@ chimera_vfs_claim_trigger_row(
             bool pure_read = (victim->used & CHIMERA_CLAIM_CR) &&
                 !(victim->used & (CHIMERA_CLAIM_CW | CHIMERA_CLAIM_H));
 
-            if (!pure_read || is_deleg || is_dir) {
+            if (!pure_read || awaited || is_dir) {
                 return;
             }
             if (victim->owner.proto == CHIMERA_CLAIM_PROTO_NFSV4 && actor &&
@@ -588,12 +596,13 @@ chimera_vfs_claim_trigger_row(
             break;
 
         case CHIMERA_TRIGGER_FLUSH:
-            /* Attr-only setattr: CW holders flush; NFSv4 delegations are
-             * always recalled (attribute stability, DELEG20). */
+            /* Attr-only setattr: CW holders flush; awaited-class holders
+             * (NFSv4 delegations -- attribute stability, DELEG20; FUSE sync
+             * grants -- attr invalidation) are always recalled. */
             if (same_handle) {
                 return;
             }
-            if (!(victim->used & CHIMERA_CLAIM_CW) && !is_deleg) {
+            if (!(victim->used & CHIMERA_CLAIM_CW) && !awaited) {
                 return;
             }
             row->selects     = true;
@@ -620,12 +629,14 @@ chimera_vfs_claim_trigger_row(
             break;
     } /* switch */
 
-    if (is_deleg) {
-        /* Delegation victims always floor 0 (CB_RECALL is all-or-nothing)
-         * and never cascade. */
+    if (awaited) {
+        /* Awaited-class victims always floor 0 and never cascade
+         * (CB_RECALL / FUSE_NOTIFY_INVAL_INODE are all-or-nothing).  The
+         * NFSv4 recall deadline is delegation-specific; a FUSE grant keeps
+         * the default break deadline as its force-revoke backstop. */
         row->floor    = 0;
         row->one_shot = true;
-        if (row->deadline_ms == 0) {
+        if (is_deleg && row->deadline_ms == 0) {
             row->deadline_ms = CHIMERA_VFS_NFS_DELEG_RECALL_MS;
         }
     }
@@ -765,8 +776,7 @@ chimera_vfs_claim_trigger_ns_full(
             if (skip_handle && cur->op_handle == skip_handle) {
                 continue;
             }
-            is_deleg = (cur->construct == CHIMERA_CONSTRUCT_DELEG_R ||
-                        cur->construct == CHIMERA_CONSTRUCT_DELEG_W);
+            is_deleg = chimera_vfs_claim_awaited(cur);
             if (flush_only && !(cur->used & CHIMERA_CLAIM_CW) && !is_deleg) {
                 continue;
             }
@@ -824,8 +834,7 @@ chimera_vfs_claim_trigger_ns_full(
             if (skip_handle && cur->op_handle == skip_handle) {
                 continue;
             }
-            if (cur->construct == CHIMERA_CONSTRUCT_DELEG_R ||
-                cur->construct == CHIMERA_CONSTRUCT_DELEG_W) {
+            if (chimera_vfs_claim_awaited(cur)) {
                 mask = 0xFF;
             }
             if (chimera_vfs_claim_advertised(cur) & mask) {

@@ -605,6 +605,23 @@ chimera_vfs_claim_init_delegation(
 } /* chimera_vfs_claim_init_delegation */
 
 SYMBOL_EXPORT void
+chimera_vfs_claim_init_fuse_grant(
+    struct chimera_vfs_claim         *claim,
+    const struct chimera_claim_owner *owner)
+{
+    /* A FUSE grant is a revocable read-cache claim held on the kernel's
+     * behalf (one per mount+file; owner.client_key = mount identity).  It
+     * shares DELEG_R's deny rows and awaited-class break semantics: a
+     * conflicting writer waits for the break ACK (coherence=sync), the
+     * CLIENT circle self-exempts the mount's own opens and locks, and --
+     * unlike an NFSv4 delegation -- the sweep may force-revoke it at the
+     * break deadline (the liveness backstop if a mount's notifier wedges). */
+    chimera_vfs_claim_init_common(claim, CHIMERA_CONSTRUCT_FUSE_GRANT,
+                                  CHIMERA_CLAIM_CLASS_CACHE,
+                                  CHIMERA_CLAIM_CR, 0, owner);
+} /* chimera_vfs_claim_init_fuse_grant */
+
+SYMBOL_EXPORT void
 chimera_vfs_claim_init_range(
     struct chimera_vfs_claim         *claim,
     bool                              exclusive,
@@ -724,6 +741,31 @@ chimera_vfs_claim_deny_rows(
                     .targets = CHIMERA_CLAIM_TARGET_CACHE,
                 };
             }
+            break;
+
+        case CHIMERA_CONSTRUCT_FUSE_GRANT:
+            /* DELEG_R's rows -- deny W|CW and LW outside the holder's
+             * CLIENT circle, so writers and exclusive lockers park until
+             * the kernel invalidation acks (coherence=sync) -- but gated
+             * on the EFFECTIVE mode: unlike a delegation (released right
+             * after its recall acks), an invalidated grant stays linked at
+             * settled-0 for rearm-on-demand and must deny nothing until a
+             * fresh acquire re-arms it.  ADVERTISE_NEVER keeps adv nonzero
+             * for the whole break, which is what makes the writer wait. */
+            if (!(adv & CHIMERA_CLAIM_CR)) {
+                break;
+            }
+            rows[n++] = (struct chimera_claim_deny_row) {
+                .mask    = CHIMERA_CLAIM_W | CHIMERA_CLAIM_CW,
+                .circle  = CHIMERA_CIRCLE_CLIENT,
+                .targets = CHIMERA_CLAIM_TARGET_ACCESS |
+                    CHIMERA_CLAIM_TARGET_CACHE,
+            };
+            rows[n++] = (struct chimera_claim_deny_row) {
+                .mask    = CHIMERA_CLAIM_LW,
+                .circle  = CHIMERA_CIRCLE_CLIENT,
+                .targets = CHIMERA_CLAIM_TARGET_RANGE,
+            };
             break;
 
         case CHIMERA_CONSTRUCT_DELEG_R:

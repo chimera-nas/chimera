@@ -1586,6 +1586,98 @@ test_midbreak_deepen_one_epoch(void)
     chimera_vfs_state_destroy(state);
 } /* test_midbreak_deepen_one_epoch */
 
+/* FUSE sync grant: DELEG_R-shaped admission, ADVERTISE_NEVER at
+ * break-begin (a conflicting writer keeps waiting for the real ack, the
+ * coherence=sync contract), CLIENT-circle self-exemption, and WRITE
+ * trigger selection with same-client exemption. */
+static void
+test_fuse_grant_sync_semantics(void)
+{
+    struct chimera_vfs_state         *state;
+    struct chimera_vfs_file_state    *file;
+    struct chimera_vfs_claim          g, w, own;
+    struct chimera_claim_owner        owner;
+    struct chimera_claim_actor        actor;
+    enum chimera_vfs_claim_result     r;
+    struct chimera_vfs_claim_conflict conflict;
+    struct break_recorder             rec = { 0 };
+
+    fprintf(stderr, "\ntest_fuse_grant_sync_semantics\n");
+
+    state = chimera_vfs_state_init();
+    file  = get_file(state, 1);
+
+    /* Mount 0xA holds the kernel read-cache grant. */
+    init_owner(&owner, CHIMERA_CLAIM_PROTO_FUSE, 0xA, 1);
+    chimera_vfs_claim_init_fuse_grant(&g, &owner);
+    g.break_cb   = recording_break_cb;
+    g.cb_private = &rec;
+
+    r = chimera_vfs_claim_try_acquire(state, file, &g, &conflict);
+    CHECK(r == CHIMERA_CLAIM_GRANTED, "fuse grant granted");
+
+    /* The mount's OWN write-mode open coexists (CLIENT circle). */
+    init_owner(&owner, CHIMERA_CLAIM_PROTO_FUSE, 0xA, 7);
+    chimera_vfs_claim_init_nfs4_open(&own, CHIMERA_CLAIM_W, 0, &owner);
+    r = chimera_vfs_claim_try_acquire(state, file, &own, &conflict);
+    CHECK(r == CHIMERA_CLAIM_GRANTED, "own-mount W open self-exempts");
+    chimera_vfs_claim_release(state, file, &own);
+
+    /* A FOREIGN writer's open conflicts and starts the break... */
+    init_owner(&owner, CHIMERA_CLAIM_PROTO_NFSV4, 0xB, 2);
+    chimera_vfs_claim_init_nfs4_open(&w, CHIMERA_CLAIM_W, 0, &owner);
+
+    r = chimera_vfs_claim_try_acquire(state, file, &w, &conflict);
+    CHECK(r == CHIMERA_CLAIM_BREAKING, "foreign W open starts the break");
+    CHECK(rec.fired == 1 && rec.last_needed_mode == 0, "one all-or-nothing recall");
+
+    /* ...and KEEPS conflicting until the ack lands: advertised survives
+     * break-begin (ADVERTISE_NEVER), unlike an SMB holder. */
+    r = chimera_vfs_claim_try_acquire(state, file, &w, &conflict);
+    CHECK(r == CHIMERA_CLAIM_BREAKING,
+          "writer still waits mid-break (advertised held)");
+
+    chimera_vfs_claim_ack(&g, 0);
+
+    r = chimera_vfs_claim_try_acquire(state, file, &w, &conflict);
+    CHECK(r == CHIMERA_CLAIM_GRANTED, "writer proceeds after the ack");
+    chimera_vfs_claim_release(state, file, &w);
+    chimera_vfs_claim_release(state, file, &g);
+
+    /* WRITE trigger: a fresh grant is invalidated by a foreign actor's
+     * write but NOT by a same-client (same-mount) actor's write. */
+    init_owner(&owner, CHIMERA_CLAIM_PROTO_FUSE, 0xA, 1);
+    chimera_vfs_claim_init_fuse_grant(&g, &owner);
+    g.break_cb   = recording_break_cb;
+    g.cb_private = &rec;
+    rec.fired    = 0;
+    r            = chimera_vfs_claim_try_acquire(state, file, &g, &conflict);
+    CHECK(r == CHIMERA_CLAIM_GRANTED, "fuse grant re-granted");
+
+    memset(&actor, 0, sizeof(actor));
+    init_owner(&actor.owner, CHIMERA_CLAIM_PROTO_FUSE, 0xA, 9);
+    chimera_vfs_claim_invalidate(state, file->fh, file->fh_len,
+                                 file->fh_hash,
+                                 CHIMERA_TRIGGER_WRITE, &actor, 0);
+    CHECK(rec.fired == 0, "same-mount write does not invalidate own grant");
+
+    init_owner(&actor.owner, CHIMERA_CLAIM_PROTO_SMB2, 0xB, 2);
+    chimera_vfs_claim_invalidate(state, file->fh, file->fh_len,
+                                 file->fh_hash,
+                                 CHIMERA_TRIGGER_WRITE, &actor, 0);
+    CHECK(rec.fired == 1 && rec.last_needed_mode == 0,
+          "foreign write invalidates the grant to 0");
+    CHECK(g.advertised != 0,
+          "advertised held until the kernel invalidation acks");
+
+    chimera_vfs_claim_ack(&g, 0);
+    CHECK(g.advertised == 0, "ack settles at 0");
+
+    chimera_vfs_claim_release(state, file, &g);
+    chimera_vfs_state_put(state, file);
+    chimera_vfs_state_destroy(state);
+} /* test_fuse_grant_sync_semantics */
+
 /* Main ---------------------------------------------------------------- */
 int
 main(
@@ -1623,6 +1715,7 @@ main(
     test_sole_opener_beats_breakable();
     test_write_trigger_legacy_self_break();
     test_midbreak_deepen_one_epoch();
+    test_fuse_grant_sync_semantics();
 
     fprintf(stderr, "\n========================================\n");
     fprintf(stderr, "Results: %d passed, %d failed\n", passed, failed);

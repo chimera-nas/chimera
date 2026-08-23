@@ -219,6 +219,75 @@ chimera_vfs_io_unpark_locked(
     return true;
 } /* chimera_vfs_io_unpark_locked */
 
+/* Scan for an awaited-class sync grant (FUSE coherence=sync) still
+ * advertising for a foreign client.  Caller holds file->lock.  Advertised
+ * survives break-begin for these constructs (ADVERTISE_NEVER), so the scan
+ * clears exactly when every victim has acked or been revoked. */
+static struct chimera_vfs_claim *
+chimera_vfs_io_sync_victim_locked(
+    struct chimera_vfs_file_state    *file,
+    const struct chimera_claim_actor *actor)
+{
+    struct chimera_vfs_claim *cur;
+
+    for (cur = file->claims[CHIMERA_CLAIM_CLASS_CACHE]; cur;
+         cur = cur->next) {
+        if (cur->construct != CHIMERA_CONSTRUCT_FUSE_GRANT) {
+            continue;
+        }
+        if (chimera_vfs_claim_advertised(cur) == 0) {
+            continue;
+        }
+        if (chimera_claim_owner_same_client(&cur->owner, &actor->owner)) {
+            continue;
+        }
+        return cur;
+    }
+    return NULL;
+} /* chimera_vfs_io_sync_victim_locked */
+
+/* Park an owned write until every awaited sync-grant victim of its
+ * invalidation acks.  Returns true when parked (the pump resumes into
+ * io_try's io_sync_write branch, which RE-FIRES the trigger each retry --
+ * a peer's rearm-on-demand can install a fresh grant while the writer is
+ * parked, and nothing else will ever break it). */
+static bool
+chimera_vfs_io_sync_gate(
+    struct chimera_vfs_state         *state,
+    struct chimera_vfs_request       *request,
+    const struct chimera_claim_actor *actor,
+    void (                           *next )(
+        struct chimera_vfs_request *request))
+{
+    struct chimera_vfs_file_state *file;
+
+    if (!state || request->fh_len == 0) {
+        return false;
+    }
+
+    file = chimera_vfs_state_get(state, request->fh, request->fh_len,
+                                 request->fh_hash, false);
+    if (!file) {
+        return false;
+    }
+
+    pthread_mutex_lock(&file->lock);
+    if (!chimera_vfs_io_sync_victim_locked(file, actor)) {
+        pthread_mutex_unlock(&file->lock);
+        chimera_vfs_state_put(state, file);
+        return false;
+    }
+
+    request->io_next           = next;
+    request->io_sync_write     = 1;
+    request->io_owns_lease_ref = 1;
+    chimera_vfs_io_park_locked(file, request);
+    request->io_lease_file = file;
+    pthread_mutex_unlock(&file->lock);
+
+    return true;
+} /* chimera_vfs_io_sync_gate */
+
 /* Retry every parked I/O request, marshaled back to its owning thread
  * (thread-local connection iovecs — the R63 arbiter contract).  Tickets
  * REMAIN queued (the submission-order barrier above): the wait flag marks
@@ -284,6 +353,36 @@ chimera_vfs_io_try(
     bool                          activated = false;
     bool                          repump    = false;
     struct chimera_claim_owner    iowner;
+
+    /* Sync-gated owned write: re-drive the invalidation (rearm-on-demand
+     * can install a fresh grant while we were parked), then proceed only
+     * when no awaited victim still advertises. */
+    if (request->io_sync_write) {
+        const struct chimera_claim_actor *actor = &request->io_owner;
+
+        chimera_vfs_claim_trigger_fire(state, file, CHIMERA_TRIGGER_WRITE,
+                                       actor, 0);
+        pthread_mutex_lock(&file->lock);
+        if (chimera_vfs_io_sync_victim_locked(file, actor)) {
+            chimera_vfs_io_park_locked(file, request); /* re-park in place */
+            request->io_lease_file = file;
+            pthread_mutex_unlock(&file->lock);
+            return;
+        }
+        repump = chimera_vfs_io_unpark_locked(file, request);
+        pthread_mutex_unlock(&file->lock);
+        if (repump) {
+            chimera_vfs_claim_pump_io(state, file);
+        }
+        request->io_lease_file = NULL;
+        request->io_sync_write = 0;
+        if (request->io_owns_lease_ref) {
+            request->io_owns_lease_ref = 0;
+            chimera_vfs_state_put(state, file);
+        }
+        request->io_next(request);
+        return;
+    }
 
     /* Single-step namespace recall (NS_UNLINK): exactly one break per peer
      * down to retain, await the real acks (smb2.lease.unlink). */
@@ -483,12 +582,18 @@ chimera_vfs_io_claim_acquire(
     request->io_lease_file = NULL;
 
     /* A claim-holding client supplies its own actor: no implicit claim is
-     * held; a write fires read-cache invalidation for other holders (R61). */
+     * held; a write fires read-cache invalidation for other holders (R61).
+     * When an awaited-class sync grant (FUSE coherence=sync) is among the
+     * victims, the writer PARKS until its break acks -- the invalidation
+     * must be visible before the write returns, not merely begun. */
     if (actor) {
         if (request->opcode == CHIMERA_VFS_OP_WRITE) {
             chimera_vfs_claim_invalidate(state, request->fh, request->fh_len,
                                          request->fh_hash,
                                          CHIMERA_TRIGGER_WRITE, actor, 0);
+            if (chimera_vfs_io_sync_gate(state, request, actor, next)) {
+                return;
+            }
         }
         next(request);
         return;
