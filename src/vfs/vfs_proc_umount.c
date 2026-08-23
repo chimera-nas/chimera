@@ -234,14 +234,31 @@ chimera_vfs_umount_progress(struct chimera_vfs_request *request)
         return;
     }
 
-    /* Someone else still holds a handle.  Wait for them to drop it. */
+    /* Someone else still holds a handle.  Wait for them to drop it.
+     *
+     * Note what reaching here means: the sweeps above already pulled every
+     * *unreferenced* handle off pending_close and dispatched its close, so a
+     * non-zero count is handles with opencnt > 0 -- genuinely still open by
+     * someone.  Waiting cannot help unless that someone is about to close
+     * them, so say so rather than silently polling: a caller that unmounts
+     * after closing its own opens is looking at a leak. */
     wait = request->umount.wait;
 
     if (!wait) {
+        chimera_vfs_info(
+            "umount %s: %lu handle(s) still open after purging the cache; "
+            "waiting up to %lu ms for the holder(s) to close them",
+            request->umount.mount->path, referenced,
+            vfs->umount_timeout_us / 1000);
         wait                 = calloc(1, sizeof(*wait));
         wait->request        = request;
         request->umount.wait = wait;
     } else if (wait->waited_us >= vfs->umount_timeout_us) {
+        chimera_vfs_error(
+            "umount %s: giving up with %lu handle(s) still open after %lu ms "
+            "-- the mount stays registered and callers will see EBUSY",
+            request->umount.mount->path, referenced,
+            wait->waited_us / 1000);
         chimera_vfs_umount_wait_stop(request);
         chimera_vfs_umount_abandon(request);
         return;
