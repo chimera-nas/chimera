@@ -340,9 +340,9 @@ chimera_posix_fcntl(
          * resolving EOF here would reintroduce the fstat TOCTOU the whence
          * passthrough exists to avoid.  The claim wire carries whence, so
          * this is answerable by a range-arbitrating backend and only by it. */
-        int rc = chimera_posix_lock_claim_seek_end(posix, handle, cmd, fl,
-                                                   lock_type, whence,
-                                                   offset, length);
+        int rc = chimera_posix_lock_claim_seek_end(posix, entry->ofd, handle,
+                                                   cmd, fl, lock_type,
+                                                   whence, offset, length);
 
         chimera_posix_fd_release(entry, 0);
         return rc;

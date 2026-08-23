@@ -1104,7 +1104,7 @@ chimera_vfs_bl_work_enqueue(
 /* Fire-and-forget release of a projected RANGE token.  Ordered behind every
  * previously queued backend op: a subsequent acquire of the freed range must
  * not overtake this release at the backend. */
-void
+SYMBOL_EXPORT void
 chimera_vfs_claim_backend_release_token(
     struct chimera_vfs_state      *state,
     struct chimera_vfs_file_state *file,
@@ -1112,7 +1112,11 @@ chimera_vfs_claim_backend_release_token(
 {
     struct chimera_vfs_bl_work *work;
 
-    if (!state || !token || !chimera_vfs_claim_backend_capable(state)) {
+    /* RANGE tokens: ask about ranges.  Gating this on the aggregate
+     * capability would silently drop the release on a node whose only
+     * arbitrating backend does ranges -- leaking the record and leaving a
+     * range locked against everyone. */
+    if (!state || !token || !chimera_vfs_claim_backend_range_capable(state)) {
         return;
     }
 

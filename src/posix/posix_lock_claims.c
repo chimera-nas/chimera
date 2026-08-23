@@ -124,6 +124,24 @@ chimera_posix_ofd_locks_release(
         chimera_vfs_state_put(state, node->file);
         free(node);
     }
+
+    /* Backend records with no local claim behind them (SEEK_END grants):
+     * released by token.  Queued rather than waited on -- this runs under
+     * the client's fd_lock, and the projection service drains it. */
+    while (ofd->backend_tokens) {
+        struct chimera_posix_ofd_token *t = ofd->backend_tokens;
+        struct chimera_vfs_file_state  *file;
+
+        ofd->backend_tokens = t->next;
+
+        file = chimera_vfs_state_get(state, t->fh, t->fh_len, t->fh_hash,
+                                     true);
+        if (file) {
+            chimera_vfs_claim_backend_release_token(state, file, t->token);
+            chimera_vfs_state_put(state, file);
+        }
+        free(t);
+    }
 } /* chimera_posix_ofd_locks_release */
 
 static void
@@ -152,7 +170,7 @@ chimera_posix_project_unlock_exec(
 /*
  * Dropping an open file description's last descriptor releases its
  * byte-range locks.  The local claims go in chimera_posix_ofd_locks_release,
- * but a backend that arbitrates locks itself (CAP_FS_LOCK: the nfs/smb
+ * but a backend that arbitrates locks itself (CAP_CLAIM_RANGE: the nfs/smb
  * proxies projecting to a real lock manager) holds its own state -- and the
  * NLM server pins the file's open handle for as long as the lock lives, so
  * an untold backend leaks both.  Project one whole-file unlock for this
@@ -176,7 +194,7 @@ chimera_posix_project_ofd_unlock(
     int                             project;
 
     if (!handle ||
-        !(handle->vfs_module->capabilities & CHIMERA_VFS_CAP_FS_LOCK)) {
+        !(handle->vfs_module->capabilities & CHIMERA_VFS_CAP_CLAIM_RANGE)) {
         return;
     }
 
@@ -206,6 +224,35 @@ chimera_posix_project_ofd_unlock(
     (void) chimera_posix_wait(&comp);
     chimera_posix_completion_destroy(&comp);
 } /* chimera_posix_project_ofd_unlock */
+void
+chimera_posix_ofd_track_token(
+    struct chimera_posix_client    *posix,
+    struct chimera_posix_ofd       *ofd,
+    struct chimera_vfs_open_handle *handle,
+    uint64_t                        token)
+{
+    struct chimera_posix_ofd_token *t;
+
+    if (!token) {
+        return;
+    }
+
+    t = calloc(1, sizeof(*t));
+
+    if (!t) {
+        return;
+    }
+
+    memcpy(t->fh, handle->fh, handle->fh_len);
+    t->fh_len  = (uint8_t) handle->fh_len;
+    t->fh_hash = handle->fh_hash;
+    t->token   = token;
+
+    pthread_mutex_lock(&posix->fd_lock);
+    t->next             = ofd->backend_tokens;
+    ofd->backend_tokens = t;
+    pthread_mutex_unlock(&posix->fd_lock);
+} /* chimera_posix_ofd_track_token */
 
 /* -------------------------------------------------------------------- */
 /* F_UNLCK carve                                                        */
@@ -597,6 +644,7 @@ chimera_posix_lock_claim_test(
 int
 chimera_posix_lock_claim_seek_end(
     struct chimera_posix_client    *posix,
+    struct chimera_posix_ofd       *ofd,
     struct chimera_vfs_open_handle *handle,
     int                             cmd,
     struct flock                   *fl,
@@ -657,10 +705,10 @@ chimera_posix_lock_claim_seek_end(
         return -1;
     }
 
-    /* CLAIMTODO: the granted SEEK_END token is not tracked against the open
-     * file description, so it is released only when the backend drops it
-     * (handle close).  Tracking needs the resolved absolute range, which is
-     * exactly what the backend did not tell us. */
+    /* Tracked by TOKEN rather than by range: the absolute geometry is the
+     * backend's answer and it does not report it back, but a token is all a
+     * release needs. */
+    chimera_posix_ofd_track_token(posix, ofd, handle, ctx.token);
     return 0;
 } /* chimera_posix_lock_claim_seek_end */
 

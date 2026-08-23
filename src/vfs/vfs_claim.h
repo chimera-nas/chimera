@@ -726,6 +726,16 @@ void
 chimera_vfs_claim_backend_detach(
     struct chimera_vfs_state *state);
 
+/* Queue a fire-and-forget release of a projected RANGE token, ordered
+ * behind every previously queued backend op so a later acquire of the same
+ * range cannot overtake it.  For holders the core does not track as claims
+ * (a SEEK_END grant, whose absolute range only the backend knows). */
+void
+chimera_vfs_claim_backend_release_token(
+    struct chimera_vfs_state      *state,
+    struct chimera_vfs_file_state *file,
+    uint64_t                       token);
+
 /* Dispatch every queued backend release for `file` on `thread` and invoke
 * `cb` once the backend has completed all of them (immediately when there
 * are none).  An unlock path must wait for this before reporting success:
