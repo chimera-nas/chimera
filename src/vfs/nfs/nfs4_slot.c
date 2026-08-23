@@ -515,6 +515,17 @@ chimera_nfs4_session_put(struct chimera_nfs4_client_session *session)
 
 /* ---- the wrapper + reply handler ---------------------------------------- */
 
+/*
+ * The session this reply accounts against is the one the slot table borrowed
+ * its ids from (st->session) -- NOT whatever the server publishes now.
+ * chimera_nfs4_umount unpublishes server->nfs4_session the moment the last
+ * mount goes away, and a remount publishes a different one, either of which
+ * can land while this call is in flight.  The table's own reference is what
+ * keeps the borrowed-from session mapped until every reply has been accounted
+ * for, so reading it from the table is both crash-free and correct; reading
+ * the server's pointer here raced an unmount into a NULL dereference and a
+ * remount into advancing a seqid / returning an id on the wrong pool.
+ */
 static void
 chimera_nfs4_compound_call_cb(
     struct evpl                 *evpl,
@@ -526,7 +537,7 @@ chimera_nfs4_compound_call_cb(
     struct chimera_nfs4_compound_ctx        *ctx           = private_data;
     struct chimera_nfs_client_server_thread *server_thread = ctx->server_thread;
     struct chimera_nfs4_slot_table          *st            = &server_thread->slots;
-    struct chimera_nfs4_client_session      *session       = server_thread->server->nfs4_session;
+    struct chimera_nfs4_client_session      *session       = st->session;
     struct chimera_nfs4_parked              *p;
 
     void                                     (*real_cb)(
