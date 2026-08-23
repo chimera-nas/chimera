@@ -298,6 +298,19 @@ chimera_smb_marshal_standard_info(
 
     /* Only include standard attributes */
     chimera_smb_marshal_standard_attrs(attr, smb_attr);
+
+    /* FileStandardInformation's Directory byte (MS-FSCC 2.4.41) is derived
+     * from smb_attributes, which marshal_standard_attrs does not set and
+     * SMB_ATTR_MASK_STANDARD does not require -- so the append-time assert
+     * could not catch it and a STANDALONE FileStandardInformation query
+     * reported whatever the reused request memory happened to hold in that
+     * field (FileAllInformation was correct, because it marshals every
+     * attribute).  Fill the attribute word the same way FileBasicInformation
+     * does and then drop the timestamp mask bits this class does not carry,
+     * exactly as marshal_attribute_tag_info does. */
+    chimera_smb_marshal_basic_attrs(attr, smb_attr);
+    smb_attr->smb_attr_mask &= ~(SMB_ATTR_CRTTIME | SMB_ATTR_ATIME |
+                                 SMB_ATTR_MTIME | SMB_ATTR_CTIME);
 } /* chimera_smb_marshal_standard_info */
 
 /* Marshal for FileInternalInformation (0x06) */
