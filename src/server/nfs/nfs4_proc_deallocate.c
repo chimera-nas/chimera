@@ -69,6 +69,72 @@ chimera_nfs4_deallocate_open_callback(
                          req);
 } /* chimera_nfs4_deallocate_open_callback */
 
+static void
+chimera_nfs4_deallocate_typecheck_complete(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct nfs_request    *req = private_data;
+    struct DEALLOCATE4res *res = &req->res_compound.resarray[req->index].opdeallocate;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        res->dr_status = chimera_nfs4_errno_to_nfsstat4(error_code);
+        chimera_vfs_release(req->thread->vfs_thread, req->handle);
+        req->handle = NULL;
+        chimera_nfs4_compound_complete(req, res->dr_status);
+        return;
+    }
+
+    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
+        !S_ISREG(attr->va_mode)) {
+        res->dr_status = chimera_nfs4_data_nonreg_status(attr->va_mode);
+        chimera_vfs_release(req->thread->vfs_thread, req->handle);
+        req->handle = NULL;
+        chimera_nfs4_compound_complete(req, res->dr_status);
+        return;
+    }
+
+    chimera_vfs_release(req->thread->vfs_thread, req->handle);
+    req->handle = NULL;
+
+    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
+                        req->fh,
+                        req->fhlen,
+                        CHIMERA_VFS_OPEN_INFERRED,
+                        chimera_nfs4_deallocate_open_callback,
+                        req);
+} /* chimera_nfs4_deallocate_typecheck_complete */
+
+/*
+ * The current filehandle of a special-stateid DEALLOCATE is not guaranteed to be
+ * a regular file: nothing has OPENed it, so no earlier op rejected the type.
+ * RFC 7862 §11.9: DEALLOCATE operates on a regular file, so a
+ * directory cfh is NFS4ERR_ISDIR rather than a backend-level success.
+ */
+static void
+chimera_nfs4_deallocate_typecheck_open_callback(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *handle,
+    void                           *private_data)
+{
+    struct nfs_request    *req = private_data;
+    struct DEALLOCATE4res *res = &req->res_compound.resarray[req->index].opdeallocate;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        res->dr_status = chimera_nfs4_errno_to_nfsstat4(error_code);
+        chimera_nfs4_compound_complete(req, res->dr_status);
+        return;
+    }
+
+    req->handle = handle;
+    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred,
+                        handle,
+                        CHIMERA_VFS_ATTR_MODE,
+                        chimera_nfs4_deallocate_typecheck_complete,
+                        req);
+} /* chimera_nfs4_deallocate_typecheck_open_callback */
+
 void
 chimera_nfs4_deallocate(
     struct chimera_server_nfs_thread *thread,
@@ -120,8 +186,9 @@ chimera_nfs4_deallocate(
         chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
                             req->fh,
                             req->fhlen,
-                            CHIMERA_VFS_OPEN_INFERRED,
-                            chimera_nfs4_deallocate_open_callback,
+                            CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH |
+                            CHIMERA_VFS_OPEN_NOFOLLOW,
+                            chimera_nfs4_deallocate_typecheck_open_callback,
                             req);
         return;
     }
