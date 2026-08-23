@@ -667,13 +667,12 @@ chimera_posix_lock_claim_seek_end(
         ctx.flags = CHIMERA_VFS_CLAIM_WAIT;
     }
 
-    /* An unlock is spelled as a release, but a SEEK_END range is not one
-     * this node ever recorded a token for -- the backend resolved it.  The
-     * wire has no "unlock by range", so a SEEK_END unlock cannot be
-     * expressed and keeps the ENOTSUP it has always returned. */
+    /* An unlock names the range rather than a token: this node never
+     * learned the absolute geometry, so it hands the backend the same
+     * EOF-relative range it locked with and lets it resolve. */
     if (lock_type == CHIMERA_VFS_LOCK_UNLOCK) {
-        errno = ENOTSUP;
-        return -1;
+        return chimera_posix_lock_claim_unlock_ranged(posix, handle, whence,
+                                                      offset, length);
     }
 
     if (!chimera_posix_lock_probe(posix, handle, &ctx)) {
@@ -809,3 +808,101 @@ chimera_posix_lock_claim_unlock(
     pthread_mutex_destroy(&ctx.mutex);
     pthread_cond_destroy(&ctx.cond);
 } /* chimera_posix_lock_claim_unlock */
+
+/* Release a backend range this node holds without a local claim, by
+ * geometry rather than by token (a SEEK_END unlock).  Waits, like every
+ * other unlock, so the range really is free when fcntl returns. */
+struct chimera_posix_unlock_ranged_ctx {
+    struct chimera_client_request   request;
+    struct chimera_posix_client    *posix;
+    struct chimera_vfs_open_handle *handle;
+    int32_t                         whence;
+    uint64_t                        offset;
+    uint64_t                        length;
+    struct chimera_claim_owner      owner;
+    enum chimera_vfs_error status;
+    pthread_mutex_t                 mutex;
+    pthread_cond_t                  cond;
+    int                             done;
+};
+
+static void
+chimera_posix_unlock_ranged_cb(
+    enum chimera_vfs_error status,
+    void                  *private_data)
+{
+    struct chimera_posix_unlock_ranged_ctx *ctx = private_data;
+
+    pthread_mutex_lock(&ctx->mutex);
+    ctx->status = status;
+    ctx->done   = 1;
+    pthread_cond_signal(&ctx->cond);
+    pthread_mutex_unlock(&ctx->mutex);
+} /* chimera_posix_unlock_ranged_cb */
+
+static void
+chimera_posix_unlock_ranged_exec(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request)
+{
+    struct chimera_posix_unlock_ranged_ctx *ctx = request->lock_probe_private;
+
+    chimera_vfs_claim_release_backend(thread->vfs_thread,
+                                      ctx->handle->fh,
+                                      (uint8_t) ctx->handle->fh_len,
+                                      ctx->handle->fh_hash,
+                                      CHIMERA_VFS_CLAIM_KLASS_RANGE,
+                                      /* token */ 0, /* retained */ 0,
+                                      ctx->whence, ctx->offset, ctx->length,
+                                      &ctx->owner,
+                                      chimera_posix_unlock_ranged_cb, ctx);
+} /* chimera_posix_unlock_ranged_exec */
+
+int
+chimera_posix_lock_claim_unlock_ranged(
+    struct chimera_posix_client    *posix,
+    struct chimera_vfs_open_handle *handle,
+    int32_t                         whence,
+    uint64_t                        offset,
+    uint64_t                        length)
+{
+    struct chimera_vfs_state              *state = chimera_posix_vfs_state(posix);
+    struct chimera_posix_unlock_ranged_ctx ctx;
+
+    if (!chimera_vfs_claim_backend_range_capable(state)) {
+        /* Nothing arbitrates ranges, so nothing was ever taken. */
+        return 0;
+    }
+
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.posix  = posix;
+    ctx.handle = handle;
+    ctx.whence = whence;
+    ctx.offset = offset;
+    ctx.length = length;
+    chimera_posix_lock_owner_init(&ctx.owner);
+    pthread_mutex_init(&ctx.mutex, NULL);
+    pthread_cond_init(&ctx.cond, NULL);
+
+    ctx.request.heap_allocated     = 0;
+    ctx.request.lock_probe_private = &ctx;
+
+    chimera_posix_worker_enqueue(chimera_posix_choose_worker(posix),
+                                 &ctx.request, chimera_posix_unlock_ranged_exec);
+
+    pthread_mutex_lock(&ctx.mutex);
+    while (!ctx.done) {
+        pthread_cond_wait(&ctx.cond, &ctx.mutex);
+    }
+    pthread_mutex_unlock(&ctx.mutex);
+
+    pthread_mutex_destroy(&ctx.mutex);
+    pthread_cond_destroy(&ctx.cond);
+
+    if (ctx.status != CHIMERA_VFS_OK && ctx.status != CHIMERA_VFS_ENOTSUP) {
+        errno = chimera_posix_errno_from_status(ctx.status);
+        return -1;
+    }
+
+    return 0;
+} /* chimera_posix_lock_claim_unlock_ranged */

@@ -1288,9 +1288,20 @@ struct chimera_vfs_request {
              * retained mask IS the recall acknowledgment.  `klass` says
              * which capability this release is addressed to, since a
              * backend may arbitrate ranges without aggregates. */
-            uint64_t token;
-            uint8_t  retained;
-            uint8_t  klass;
+            uint64_t                   token;
+            uint8_t                    retained;
+            uint8_t                    klass;
+            /* RANGE releases may instead name a range: token == 0 means
+             * "release whatever this owner holds over this geometry",
+             * which is how an unlock whose geometry only the backend can
+             * resolve (whence == SEEK_END) is expressed.  A caller that
+             * holds a token uses the token; one that never learned the
+             * absolute range uses this, and the backend resolves EOF for
+             * the unlock exactly as it did for the lock. */
+            int32_t                    whence;
+            uint64_t                   offset;
+            uint64_t                   length;
+            struct chimera_claim_owner owner;
         } claim_release;
 
         struct {

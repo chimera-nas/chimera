@@ -32,6 +32,10 @@ chimera_vfs_claim_release_backend(
     uint8_t                                klass,
     uint64_t                               token,
     uint8_t                                retained,
+    int32_t                                whence,
+    uint64_t                               offset,
+    uint64_t                               length,
+    const struct chimera_claim_owner      *owner,
     chimera_vfs_claim_release_backend_cb_t callback,
     void                                  *private_data)
 {
@@ -59,8 +63,17 @@ chimera_vfs_claim_release_backend(
     request->claim_release.token    = token;
     request->claim_release.retained = retained;
     request->claim_release.klass    = klass;
-    request->proto_callback         = callback;
-    request->proto_private_data     = private_data;
+    request->claim_release.whence   = whence;
+    request->claim_release.offset   = offset;
+    request->claim_release.length   = length;
+    if (owner) {
+        request->claim_release.owner = *owner;
+    } else {
+        memset(&request->claim_release.owner, 0,
+               sizeof(request->claim_release.owner));
+    }
+    request->proto_callback     = callback;
+    request->proto_private_data = private_data;
 
     chimera_vfs_dispatch(request);
 } /* chimera_vfs_claim_release_backend */
