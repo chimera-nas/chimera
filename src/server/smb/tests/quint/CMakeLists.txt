@@ -95,6 +95,10 @@ endif()
 
 add_test(NAME chimera/server/smb/mbt/batch_memfs
     COMMAND $<TARGET_FILE:smb2_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/smb2)
+# 40 traces at depth 500 against an ASAN build, each standing up and tearing
+# down its own filesystem: measured at 55-105 s on a loaded container, so 120 s
+# was close enough to the ceiling to flake.  This is a batch of 40 tests in one
+# ctest, not a single case.
 set_tests_properties(chimera/server/smb/mbt/batch_memfs PROPERTIES
     LABELS "smb_mbt;memfs"
-    TIMEOUT 120)
+    TIMEOUT 600)
