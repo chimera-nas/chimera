@@ -1734,8 +1734,20 @@ run_trace(
      * fsname isolates the filesystem, and zeroing the wire-value maps stops a
      * stale SessionId/TreeId/FileId from a prior trace being reused. */
     memset(g_conn_for_sess, 0, sizeof(g_conn_for_sess));
+    memset(g_conn_hist, 0, sizeof(g_conn_hist));
     memset(g_wire_tree, 0, sizeof(g_wire_tree));
     memset(g_wire_fid, 0, sizeof(g_wire_fid));
+    /* EVERY wire-identity map has to be cleared here, not just the three the
+     * single-trace harness needed.  A batched run replays many traces in one
+     * process, and a model fid is a small dense integer that every trace
+     * reuses from 0 -- so a residual g_fid_known entry makes the next trace's
+     * first CREATE look like a replay or reclaim of an open that belonged to
+     * the previous trace ("model answered from open N ... the wire returned a
+     * DIFFERENT FileId").  Keep this list in step with the globals above. */
+    memset(g_fid_known, 0, sizeof(g_fid_known));
+    memset(g_conn_for_fid, 0, sizeof(g_conn_for_fid));
+    memset(g_park_barriered, 0, sizeof(g_park_barriered));
+    memset(g_park_pending, 0, sizeof(g_park_pending));
     g_trace     = path;
     g_nmismatch = 0;
 

@@ -1180,8 +1180,15 @@ sec_o12(
           O12_L_LEASE, O12_S_RH },
         { O12_P_LEAS_S, O12_R_RH,
           O12_L_LEASE, O12_S_RH },
+        /* Re-pinned on the claim core: a BATCH request behind the SAME
+         * client's RH lease used to be refused outright (NONE); it is now
+         * downgraded to a LEVEL_II read cache, which coexists with the peer's
+         * R lease and breaks no one (the probe observes 0 break
+         * notifications).  Both answers are permitted -- this row is a policy
+         * pin under MS-SMB2 3.3.5.9's grant-a-lesser-level discretion, not a
+         * mandate -- and II is the more useful of the two. */
         { O12_P_LEAS_S, O12_R_BATCH,
-          O12_L_NONE, 0 },
+          O12_L_II, 0 },
         { O12_P_LEAS_S, O12_R_II,
           O12_L_NONE, 0 },
     };
