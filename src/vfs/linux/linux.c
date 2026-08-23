@@ -688,7 +688,14 @@ chimera_linux_open_at(
          * executed.  The ACL cannot be stored here anyway, so drop it. */
         request->open_at.set_attr->va_set_mask &= ~CHIMERA_VFS_ATTR_ACL;
     } else {
-        mode = 0600;
+        /* No mode supplied -- an NFS3 EXCLUSIVE create defers the mode to the
+         * client's follow-up SETATTR.  Use 0644, matching the memfs/cairn
+         * backends (and the model): with per-op DAC now enforced, a divergent
+         * initial mode (0600) would spuriously deny another user the read/write
+         * access the reference backends grant on the same object before its
+         * mode is set.  (Security note: this is a brief, pre-SETATTR window,
+         * consistent with memfs's long-standing behavior.) */
+        mode = 0644;
     }
 
     flags = chimera_linux_set_open_flags(request->open_at.flags);
