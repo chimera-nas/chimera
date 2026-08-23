@@ -726,6 +726,19 @@ void
 chimera_vfs_claim_backend_detach(
     struct chimera_vfs_state *state);
 
+/* Dispatch every queued backend release for `file` on `thread` and invoke
+* `cb` once the backend has completed all of them (immediately when there
+* are none).  An unlock path must wait for this before reporting success:
+* ordering alone only settles the node's own view, while another process
+* asking the same shared arbiter has no way to wait for our work queue. */
+void
+chimera_vfs_claim_backend_flush_releases(
+    struct chimera_vfs_thread     *thread,
+    struct chimera_vfs_state      *state,
+    struct chimera_vfs_file_state *file,
+    void (                        *cb )(void *private_data),
+    void                          *private_data);
+
 /* Drain the projection work queue; runs ONLY on the service thread (wired
  * into the close thread's timer and doorbell). */
 void

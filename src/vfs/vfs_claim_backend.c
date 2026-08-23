@@ -847,6 +847,20 @@ chimera_vfs_claim_backend_range_projects(
         return false;
     }
 
+    /* An unlock must be observable to other PROCESSES the instant it
+     * returns, so whoever releases a projected range has to wait for the
+     * backend to actually drop it (chimera_vfs_claim_backend_flush_releases).
+     * The POSIX client can wait -- it is a synchronous API on an application
+     * thread.  The NLM and NFSv4 handlers cannot: they run on protocol
+     * threads that must not block, so making them wait means restructuring
+     * their unlock paths into continuations that reply from the release
+     * completion.  Until that is done they keep arbitrating node-locally,
+     * exactly as they did before ranges projected at all, rather than
+     * reporting an unlock the backend has not performed yet. */
+    if (claim && claim->owner.proto != CHIMERA_CLAIM_PROTO_POSIX) {
+        return false;
+    }
+
     return true;
 } /* chimera_vfs_claim_backend_range_projects */
 
@@ -903,6 +917,101 @@ chimera_vfs_claim_backend_drain_releases(
 
     pthread_mutex_unlock(&state->bl_dispatch_lock);
 } /* chimera_vfs_claim_backend_drain_releases */
+
+/* The same drain, but tells the caller when the backend has actually let
+ * the ranges go.
+ *
+ * Ordering the releases is enough WITHIN a node -- a later acquire drains
+ * them first -- but an unlock has to be observable OUTSIDE it too: POSIX
+ * says that when the unlock call returns, the range is free, and another
+ * process asking the shared arbiter cannot be made to wait on this node's
+ * work queue.  So an unlock path dispatches its releases here and waits for
+ * `cb`, which fires once every one of them has completed (immediately, if
+ * there were none). */
+struct chimera_vfs_bl_flush {
+    void        (*cb)(
+        void *private_data);
+    void       *private_data;
+    _Atomic int outstanding;
+};
+
+static void
+chimera_vfs_bl_flush_complete(
+    enum chimera_vfs_error error_code,
+    void                  *private_data)
+{
+    struct chimera_vfs_bl_flush *fl = private_data;
+
+    (void) error_code;
+
+    if (atomic_fetch_sub(&fl->outstanding, 1) == 1) {
+        fl->cb(fl->private_data);
+        free(fl);
+    }
+} /* chimera_vfs_bl_flush_complete */
+
+SYMBOL_EXPORT void
+chimera_vfs_claim_backend_flush_releases(
+    struct chimera_vfs_thread     *thread,
+    struct chimera_vfs_state      *state,
+    struct chimera_vfs_file_state *file,
+    void (                        *cb )(void *private_data),
+    void                          *private_data)
+{
+    struct chimera_vfs_bl_work  *w, **pp;
+    struct chimera_vfs_bl_work  *mine = NULL, **mtail = &mine;
+    struct chimera_vfs_bl_flush *fl;
+    int                          n = 0;
+
+    pthread_mutex_lock(&state->service_lock);
+    pp = &state->work_head;
+    while ((w = *pp)) {
+        if (w->type == CHIMERA_VFS_BL_WORK_RELEASE &&
+            w->fh_hash == file->fh_hash &&
+            w->fh_len == file->fh_len &&
+            memcmp(w->fh, file->fh, w->fh_len) == 0) {
+            *pp = w->next;
+            if (state->work_tail == w) {
+                state->work_tail = NULL; /* recomputed below */
+            }
+            w->next = NULL;
+            *mtail  = w;
+            mtail   = &w->next;
+            n++;
+            continue;
+        }
+        pp = &w->next;
+    }
+    if (!state->work_tail) {
+        for (w = state->work_head; w; w = w->next) {
+            state->work_tail = w;
+        }
+    }
+    pthread_mutex_unlock(&state->service_lock);
+
+    if (n == 0) {
+        cb(private_data);
+        return;
+    }
+
+    fl               = calloc(1, sizeof(*fl));
+    fl->cb           = cb;
+    fl->private_data = private_data;
+    /* Seeded one above the dispatch count so an early completion cannot
+     * fire the callback before the last release has been issued. */
+    atomic_store(&fl->outstanding, n + 1);
+
+    while ((w = mine)) {
+        mine = w->next;
+        chimera_vfs_claim_release_backend(thread, w->fh, w->fh_len, w->fh_hash,
+                                          CHIMERA_VFS_CLAIM_KLASS_RANGE,
+                                          w->token, 0,
+                                          chimera_vfs_bl_flush_complete, fl);
+        free(w);
+    }
+
+    chimera_vfs_bl_flush_complete(CHIMERA_VFS_OK, fl);
+} /* chimera_vfs_claim_backend_flush_releases */
 
 /* Cancel a RANGE acquire confirm that is still QUEUED on the work FIFO --
  * the confirm has not started, so yanking the entry means the callback will

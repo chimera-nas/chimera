@@ -6804,15 +6804,60 @@ memfs_claim_file_get(
 static void
 memfs_claim_acquire(
     struct memfs_thread        *thread,
+    struct memfs_fs            *fs,
     struct memfs_shared        *shared,
     struct chimera_vfs_request *request)
 {
     struct memfs_claim_file  *f;
     struct memfs_claim_agg   *agg, *mine;
     struct memfs_claim_range *rng;
-    uint8_t                   klass = request->claim_acquire.klass;
+    uint8_t                   klass  = request->claim_acquire.klass;
+    uint64_t                  offset = request->claim_acquire.offset;
+    uint64_t                  length = request->claim_acquire.length;
 
     (void) thread;
+
+    /* Resolve a SEEK_END range against the file's current size.  The claim
+     * wire hands EOF-relative geometry to the arbiter precisely so the
+     * resolution happens where the size is authoritative; here that means
+     * before the claim lock is taken, since the inode lookup returns the
+     * inode LOCKED and the two locks must not nest. */
+    if (klass == CHIMERA_VFS_CLAIM_KLASS_RANGE &&
+        request->claim_acquire.whence == SEEK_END) {
+        struct memfs_inode *inode;
+        int64_t             start = (int64_t) offset;
+        int64_t             len   = (int64_t) length;
+        int64_t             size;
+
+        inode = memfs_inode_get_fh(fs, request->fh, request->fh_len);
+
+        if (!inode) {
+            request->status = CHIMERA_VFS_ESTALE;
+            request->complete(request);
+            return;
+        }
+        size = (int64_t) inode->size;
+        pthread_mutex_unlock(&inode->lock);
+
+        start += size;
+
+        /* A negative length means the range extends BACKWARDS from start
+         * (POSIX l_len < 0), and 0 still means to-EOF in this spelling. */
+        if (len < 0) {
+            start += len;
+            len    = -len;
+        }
+
+        if (start < 0) {
+            /* The range would begin before byte 0. */
+            request->status = CHIMERA_VFS_EINVAL;
+            request->complete(request);
+            return;
+        }
+
+        offset = (uint64_t) start;
+        length = (len == 0) ? UINT64_MAX : (uint64_t) len;
+    }
 
     pthread_mutex_lock(&shared->lease_lock);
 
@@ -6896,8 +6941,7 @@ memfs_claim_acquire(
             continue;
         }
         if (!chimera_vfs_claim_range_overlap_i(rng->offset, rng->length,
-                                               request->claim_acquire.offset,
-                                               request->claim_acquire.length)) {
+                                               offset, length)) {
             continue;
         }
         /* Conflict: refuse (r_granted stays 0), and describe the winner so
@@ -6929,8 +6973,8 @@ memfs_claim_acquire(
     rng            = calloc(1, sizeof(*rng));
     rng->owner     = request->claim_acquire.owner;
     rng->exclusive = request->claim_acquire.exclusive;
-    rng->offset    = request->claim_acquire.offset;
-    rng->length    = request->claim_acquire.length;
+    rng->offset    = offset;
+    rng->length    = length;
     rng->token     = ++shared->lease_next_token;
     LL_PREPEND(f->ranges, rng);
 
@@ -7178,7 +7222,7 @@ memfs_dispatch(
             memfs_remove_stream(thread, fs, request, private_data);
             break;
         case CHIMERA_VFS_OP_CLAIM_ACQUIRE:
-            memfs_claim_acquire(thread, shared, request);
+            memfs_claim_acquire(thread, fs, shared, request);
             break;
         case CHIMERA_VFS_OP_CLAIM_RELEASE:
             memfs_claim_release(thread, shared, request);

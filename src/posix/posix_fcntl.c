@@ -350,10 +350,11 @@ chimera_posix_fcntl(
 
     if (local_arbiter && cmd != F_GETLK &&
         lock_type == CHIMERA_VFS_LOCK_UNLOCK) {
-        /* Carve the owner's local coverage of the range (REPLACE geometry);
-         * the backend unlock below is the kernel projection. */
-        chimera_posix_ofd_lock_carve(posix, entry->ofd, handle,
-                                     offset, core_length);
+        /* Carve the owner's local coverage of the range (REPLACE geometry)
+         * and wait for the backend to drop what it held, so the range is
+         * free to every other process by the time this call returns. */
+        chimera_posix_lock_claim_unlock(posix, entry->ofd, handle,
+                                        offset, core_length);
     }
 
     if (local_arbiter && cmd != F_GETLK &&
