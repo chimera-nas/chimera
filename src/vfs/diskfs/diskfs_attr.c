@@ -1301,8 +1301,10 @@ diskfs_sb_write_complete(
 static struct diskfs_sb_write *
 diskfs_sb_write_prepare(
     struct diskfs_thread *thread,
-    void ( *cb )(struct diskfs_thread *, void *),
-    void *arg)
+    void (               *cb )(
+        struct diskfs_thread *,
+        void *),
+    void                 *arg)
 {
     struct diskfs_shared   *shared = thread->shared;
     struct diskfs_sb_write *sw     = malloc(sizeof(*sw));
@@ -1555,9 +1557,12 @@ diskfs_rmfs_root_final_cb(
     int                status,
     void              *priv)
 {
+    struct diskfs_rmfs_reclaim *rc = priv;
+
     (void) txn;
     (void) status;
-    free(priv);
+    rc->thread->bg_txns--;
+    free(rc);
 } /* diskfs_rmfs_root_final_cb */
 
 
@@ -1581,6 +1586,7 @@ diskfs_rmfs_root_cb(
     if (status != CHIMERA_VFS_OK || inode->nlink == 0) {
         /* Already orphaned or gone; nothing to reclaim. */
         diskfs_txn_abort(rc->txn);
+        rc->thread->bg_txns--;
         free(rc);
         return;
     }
@@ -1607,6 +1613,14 @@ diskfs_rmfs_sb_written(
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
+
+    /* This txn outlives the request it came from: it write-locks the fs root
+     * and an orphan-shard inode, and nothing else tracks it.  Count it so
+     * diskfs_thread_destroy pumps it to completion -- tearing the thread down
+     * mid-flight leaks those inode locks, and the reclaim workers' drains
+     * then park on the orphan shard forever (teardown hang in
+     * diskfs_destroy; cthon nfsidem CI timeout). */
+    thread->bg_txns++;
 
     rc->txn = diskfs_txn_begin(thread, DISKFS_TXN_WRITE);
     diskfs_inode_acquire(thread, rc->txn, NULL, rc->root_inum, rc->root_gen,

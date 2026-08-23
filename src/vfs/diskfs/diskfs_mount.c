@@ -1745,6 +1745,19 @@ diskfs_thread_destroy(void *private_data)
     struct diskfs_thread *thread = private_data;
     struct diskfs_shared *shared = thread->shared;
 
+    /* Finish fire-and-forget background transactions first (the RMFS root
+     * burn-down kickoff runs on this thread after its request completed).
+     * They hold inode locks -- the removed filesystem's root plus an
+     * orphan-shard inode -- that none of the drains below account for;
+     * destroying the thread mid-flight leaks those locks, the reclaim
+     * workers' orphan drains park on the shard forever, and unmount hangs
+     * in diskfs_destroy (the cthon nfsidem teardown timeout).  The intent
+     * log and the other workers are still alive here, so pumping our loop
+     * lets a parked lock acquire be granted and the commit complete. */
+    while (thread->bg_txns > 0) {
+        evpl_continue(thread->evpl);
+    }
+
     /* Flush every deferred-mtime inode this worker owns so the latest timestamps
      * are durable before teardown (clean unmount => no replay).  The intent-log
      * thread is still alive to complete the flush txns.  Stop the periodic timer
