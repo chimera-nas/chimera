@@ -265,7 +265,9 @@ struct memfs_shared;
  * exclusive side across owners.  The registry is module-global and keyed by
  * fh (fh bytes are unique across named filesystems), so MKFS/RMFS need no
  * lease bookkeeping.  Test knobs: CHIMERA_MEMFS_LEASE_DENY (letters r/w
- * mask grants) and CHIMERA_MEMFS_LEASE_RECALL (ms; each aggregate grant is
+ * mask grants), CHIMERA_MEMFS_LEASE_RANGE_DENY (refuse every byte-range
+ * grant, so a caller's locks fail iff they are really being projected)
+ * and CHIMERA_MEMFS_LEASE_RECALL (ms; each aggregate grant is
  * recalled that long after it lands, exercising the async
  * backend->core->frontend recall cascade). */
 
@@ -370,6 +372,7 @@ struct memfs_shared {
     struct memfs_lease_file *lease_files;
     uint64_t                 lease_next_token;
     uint8_t                  lease_deny_mask;  /* env-masked grant bits */
+    uint8_t                  lease_range_deny; /* env: refuse RANGE grants */
     uint64_t                 lease_recall_us;  /* env recall delay; 0 off */
     pthread_mutex_t          lock;
 };
@@ -1215,7 +1218,11 @@ memfs_init(
         /* Test knobs for the CAP_LEASE arbiter. */
         const char *deny_env   = getenv("CHIMERA_MEMFS_LEASE_DENY");
         const char *recall_env = getenv("CHIMERA_MEMFS_LEASE_RECALL");
+        const char *rdeny_env  = getenv("CHIMERA_MEMFS_LEASE_RANGE_DENY");
 
+        if (rdeny_env && *rdeny_env && *rdeny_env != '0') {
+            shared->lease_range_deny = 1;
+        }
         if (deny_env) {
             for (; *deny_env; deny_env++) {
                 if (*deny_env == 'r') {
@@ -6865,6 +6872,15 @@ memfs_lease_acquire(
     }
 
     /* RANGE: binding, all-or-nothing, cross-owner overlap+exclusivity. */
+    if (shared->lease_range_deny) { /* test knob: refuse every range */
+        pthread_mutex_unlock(&shared->lease_lock);
+        request->lease_acquire.r_token   = 0;
+        request->lease_acquire.r_granted = 0;
+        request->status                  = CHIMERA_VFS_OK;
+        request->complete(request);
+        return;
+    }
+
     for (rng = f->ranges; rng; rng = rng->next) {
         if (chimera_claim_owner_equal(&rng->owner,
                                       &request->lease_acquire.owner)) {

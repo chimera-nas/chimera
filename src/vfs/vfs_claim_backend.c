@@ -131,13 +131,15 @@ chimera_vfs_bl_post(
 /* Lazy module scan: the close thread attaches before backends register, so
  * the CAP_LEASE probe happens on first use.  The modules array is stable
  * once serving begins. */
-bool
+SYMBOL_EXPORT bool
 chimera_vfs_claim_backend_capable(struct chimera_vfs_state *state)
 {
-    int i;
+    uint8_t capable = 0;
+    int     i;
 
-    if (state->lease_probed) {
-        return state->lease_capable;
+    if (atomic_load_explicit(&state->lease_probed, memory_order_acquire)) {
+        return atomic_load_explicit(&state->lease_capable,
+                                    memory_order_relaxed);
     }
     if (!state->vfs) {
         return false;
@@ -145,13 +147,17 @@ chimera_vfs_claim_backend_capable(struct chimera_vfs_state *state)
     for (i = 0; i < CHIMERA_VFS_MAX_MODULES; i++) {
         if (state->vfs->modules[i] &&
             (state->vfs->modules[i]->capabilities & CHIMERA_VFS_CAP_LEASE)) {
-            state->lease_capable = 1;
+            capable = 1;
             break;
         }
     }
-    state->lease_probed = 1;
-    return state->lease_capable;
-} /* chimera_vfs_bl_capable */
+    /* Publish the answer before the probed flag, so a reader that sees
+     * probed also sees the capability it was resolved to. */
+    atomic_store_explicit(&state->lease_capable, capable,
+                          memory_order_relaxed);
+    atomic_store_explicit(&state->lease_probed, 1, memory_order_release);
+    return capable;
+} /* chimera_vfs_claim_backend_capable */
 
 SYMBOL_EXPORT void
 chimera_vfs_claim_backend_reeval(

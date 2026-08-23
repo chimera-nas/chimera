@@ -371,7 +371,6 @@ chimera_posix_fcntl(
          * accumulates same-owner fragments instead (self-exempt at the
          * OWNER circle, so harmless to other owners' arbitration, and
          * carved correctly on F_UNLCK), pending a carve-then-insert. */
-        struct chimera_vfs_state     *vstate = posix->client->vfs->vfs_state;
         enum chimera_vfs_claim_result result;
 
         node = chimera_posix_ofd_lock_alloc(posix, handle,
@@ -384,16 +383,16 @@ chimera_posix_fcntl(
             return -1;
         }
 
-        if (cmd == F_SETLKW) {
-            /* Blocking acquire: wait on BREAKING and (wait_hard) on a hard
-             * DENIED lock conflict, bridged onto this thread's condvar. */
-            result = chimera_posix_lock_claim_acquire_wait(posix, node);
-        } else {
-            /* F_SETLK: try; BREAKING (recalls kicked, claim not inserted)
-             * maps to EAGAIN for a non-blocking request like DENIED. */
-            result = chimera_vfs_claim_try_acquire(vstate, node->file,
-                                                   &node->claim, NULL);
-        }
+        /* F_SETLKW waits on BREAKING and on a hard DENIED lock conflict;
+         * F_SETLK is a try, where BREAKING (recalls kicked, claim not
+         * inserted) maps to EAGAIN just as DENIED does.  Both arbitrate
+         * locally first and, on a CAP_LEASE backend, confirm the granted
+         * range with it before returning -- so a lock this process is told
+         * it holds is one the backend has agreed to.  A backend refusal
+         * arrives as DENIED with the optimistic local insert already rolled
+         * back. */
+        result = chimera_posix_lock_claim_acquire(posix, node,
+                                                  /* wait */ cmd == F_SETLKW);
 
         if (result != CHIMERA_CLAIM_GRANTED) {
             chimera_posix_ofd_lock_free(posix, node);
