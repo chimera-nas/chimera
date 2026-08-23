@@ -437,6 +437,36 @@ chimera_nfs4_lock(
             nfs_open_owner_get(oo);
             req->lock_4_0_open_owner = oo;
             req->lock_4_0_lock_owner = lock_owner;
+        } else if (!created) {
+            /* 4.1+ has neither lock seqids nor an open_to_lock_owner replay
+             * cache, so the arm above does not apply to it -- but the stateid
+             * identity rule does.  RFC 8881 9.1.4.2: a stateid's "other" is
+             * stable for the life of the state, and a (lock-owner, file) pair
+             * has exactly one lock stateid.  A new_lock_owner LOCK naming a
+             * lock-owner that already has one must therefore re-establish
+             * that stateid, not mint a second one for the same pair.
+             *
+             * It matters most after LOCKU: 4.1 keeps a lock stateid alive
+             * with no ranges until FREE_STATEID (RFC 8881 18.12), so a client
+             * that unlocks every range and then locks again must get the same
+             * "other" back with its seqid continuing.  Until now it got a
+             * fresh stateid whose seqid restarted at 1, orphaning the old
+             * one.  The reuse was only ever wired into the 4.0 path. */
+            struct nfs_lock_state *ls;
+
+            pthread_mutex_lock(&lock_owner->lock);
+            for (ls = lock_owner->states; ls; ls = ls->next_in_owner) {
+                if (ls->open_state &&
+                    ls->open_state->fh_len == req->fhlen &&
+                    memcmp(ls->open_state->fh, req->fh, req->fhlen) == 0) {
+                    have_reuse  = true;
+                    reuse_shard = ls->shard;
+                    reuse_slot  = ls->slot_idx;
+                    reuse_gen   = ls->generation;
+                    break;
+                }
+            }
+            pthread_mutex_unlock(&lock_owner->lock);
         }
         /* Re-establish an emptied stateid in place: re-acquire it by its slot
          * (the lookup checks shard/slot/generation, not the stateid seqid) and
@@ -461,6 +491,14 @@ chimera_nfs4_lock(
                 req->nfs_state_type = NFS4_SLOT_TYPE_LOCK;
                 nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
                                         thread->vfs_thread);
+                if (req->minorversion != 0) {
+                    /* 4.1+ transfers no owner ref onto the request (only the
+                     * 4.0 arm above does), and the create path below -- which
+                     * normally drops this borrow -- is skipped when the
+                     * stateid is reused.  Drop it here: the reused state
+                     * carries its own pin on the owner. */
+                    nfs_lock_owner_put(lock_owner);
+                }
             } else {
                 have_reuse = false;
             }
