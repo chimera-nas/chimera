@@ -168,6 +168,11 @@ chimera_nfs3_create_open_at_parent_complete(
     switch (args->how.mode) {
         case UNCHECKED:
             chimera_nfs3_sattr3_to_va(attr, &args->how.obj_attributes);
+            /* CREATE materializes a regular file: an existing directory at the
+             * name gives NFS3ERR_ISDIR and any other non-regular object gives
+             * NFS3ERR_EXIST.  (GUARDED/EXCLUSIVE below already collide on any
+             * existing object via OPEN_EXCLUSIVE.) */
+            flags |= CHIMERA_VFS_OPEN_CREATE_REGULAR;
             break;
         case GUARDED:
             chimera_nfs3_sattr3_to_va(attr, &args->how.obj_attributes);

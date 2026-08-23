@@ -713,12 +713,32 @@ chimera_linux_open_at(
      * so for a non-exclusive create probe with O_EXCL first: success means we
      * created the file, EEXIST means it already existed and we re-open without
      * O_EXCL (the original flags still carry O_TRUNC for OVERWRITE_IF/SUPERSEDE). */
-    int created = 0;
+    int created  = 0;
+    int reopened = 0;
 
     if ((flags & O_CREAT) && !(flags & O_EXCL)) {
         fd = openat(parent_fd, fullname, flags | O_EXCL, mode);
         if (fd >= 0) {
             created = 1;
+        } else if (errno == EEXIST &&
+                   (request->open_at.flags & CHIMERA_VFS_OPEN_CREATE_REGULAR)) {
+            /* NFS3 UNCHECKED create must yield a regular file.  Resolve the
+             * leaf type without a data open: a non-regular object is not opened
+             * (directory -> EISDIR, symlink/socket/fifo -> EEXIST), and an
+             * existing regular file is returned by handle only (O_PATH: no
+             * follow, no write, attributes untouched). */
+            struct stat est;
+
+            if (fstatat(parent_fd, fullname, &est, AT_SYMLINK_NOFOLLOW) == 0 &&
+                !S_ISREG(est.st_mode)) {
+                chimera_restore_privilege(request->cred);
+                request->status = S_ISDIR(est.st_mode) ? CHIMERA_VFS_EISDIR
+                                  : CHIMERA_VFS_EEXIST;
+                request->complete(request);
+                return;
+            }
+            fd       = openat(parent_fd, fullname, O_PATH | O_NOFOLLOW, 0);
+            reopened = 1;
         } else if (errno == EEXIST) {
             fd = openat(parent_fd, fullname, flags, mode);
         }
@@ -747,7 +767,10 @@ chimera_linux_open_at(
         return;
     }
 
-    rc = chimera_linux_set_attrs(fd, "", request->open_at.set_attr);
+    /* An UNCHECKED create that re-opened an existing regular file (O_PATH)
+     * leaves its attributes untouched and cannot fchmod an O_PATH fd. */
+    rc = reopened ? 0 :
+        chimera_linux_set_attrs(fd, "", request->open_at.set_attr);
 
     /* openat() applies the requested mode through the process umask, so a
      * freshly created file may be missing bits the client asked for (the
@@ -756,7 +779,7 @@ chimera_linux_open_at(
      * create, fchmod() it to the exact value -- this also restores the
      * set-user-ID/set-group-ID bits, which openat()'s mode argument does not
      * reliably carry. */
-    if (rc >= 0 && have_mode && (flags & O_CREAT)) {
+    if (rc >= 0 && have_mode && (flags & O_CREAT) && !reopened) {
         if (fchmod(fd, mode & 07777) < 0) {
             rc = -errno;
         }

@@ -138,6 +138,15 @@ struct chimera_vfs_mount_options {
  * 3.3.5.9).  POSIX/NFS callers leave it clear and keep their existing
  * symlink-leaf semantics. */
 #define CHIMERA_VFS_OPEN_STOP_SYMLINK           (1U << 9)
+/* The create must yield a *regular* file (POSIX/NFS3 CREATE semantics): if the
+ * name already exists as a non-regular object, the backend returns an error
+ * instead of opening it -- a directory gives CHIMERA_VFS_EISDIR, any other
+ * non-regular type (symlink/socket/fifo/...) gives CHIMERA_VFS_EEXIST.  Set by
+ * the NFS3 UNCHECKED create path (GUARDED/EXCLUSIVE already collide via
+ * OPEN_EXCLUSIVE).  Native backends answer from the inode metadata they already
+ * hold; passthrough resolves the leaf type without a data open.  SMB leaves it
+ * clear and keeps its open-any-type disposition. */
+#define CHIMERA_VFS_OPEN_CREATE_REGULAR         (1U << 10)
 
 /* remove_at flags: an optional assertion about the target's type, letting the
  * single VFS remove op express the rmdir(2)/RMDIR vs unlink(2)/REMOVE
