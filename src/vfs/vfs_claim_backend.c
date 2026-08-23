@@ -13,9 +13,9 @@
 #include "common/macros.h"
 
 /*
- * vfs_claim_backend.c — the CHIMERA_VFS_CAP_LEASE projection.
+ * vfs_claim_backend.c — the CHIMERA_VFS_CAP_CLAIM_AGGREGATE projection.
  *
- * Two claim shapes cross the boundary (see vfs.h at CHIMERA_VFS_CAP_LEASE):
+ * Two claim shapes cross the boundary (see vfs.h at CHIMERA_VFS_CAP_CLAIM_AGGREGATE):
  *
  *   AGGREGATE: one revocable per-node token per file covering the union of
  *   local holders — rev_used (R|W) + bind_deny (R|W|D).  Held lazily with
@@ -129,35 +129,51 @@ chimera_vfs_bl_post(
 } /* chimera_vfs_bl_post */
 
 /* Lazy module scan: the close thread attaches before backends register, so
- * the CAP_LEASE probe happens on first use.  The modules array is stable
- * once serving begins. */
-SYMBOL_EXPORT bool
-chimera_vfs_claim_backend_capable(struct chimera_vfs_state *state)
+ * the capability probe happens on first use.  The modules array is stable
+ * once serving begins.  Two racing probes reach the same answer, so the
+ * pair only needs release/acquire ordering -- the answer is published
+ * before the probed flag, so a reader that sees probed sees the answer. */
+static bool
+chimera_vfs_bl_probe(
+    struct chimera_vfs_state *state,
+    uint32_t                  cap,
+    _Atomic uint8_t          *probed,
+    _Atomic uint8_t          *answer)
 {
     uint8_t capable = 0;
     int     i;
 
-    if (atomic_load_explicit(&state->lease_probed, memory_order_acquire)) {
-        return atomic_load_explicit(&state->lease_capable,
-                                    memory_order_relaxed);
+    if (atomic_load_explicit(probed, memory_order_acquire)) {
+        return atomic_load_explicit(answer, memory_order_relaxed);
     }
     if (!state->vfs) {
         return false;
     }
     for (i = 0; i < CHIMERA_VFS_MAX_MODULES; i++) {
         if (state->vfs->modules[i] &&
-            (state->vfs->modules[i]->capabilities & CHIMERA_VFS_CAP_LEASE)) {
+            (state->vfs->modules[i]->capabilities & cap)) {
             capable = 1;
             break;
         }
     }
-    /* Publish the answer before the probed flag, so a reader that sees
-     * probed also sees the capability it was resolved to. */
-    atomic_store_explicit(&state->lease_capable, capable,
-                          memory_order_relaxed);
-    atomic_store_explicit(&state->lease_probed, 1, memory_order_release);
+    atomic_store_explicit(answer, capable, memory_order_relaxed);
+    atomic_store_explicit(probed, 1, memory_order_release);
     return capable;
+} /* chimera_vfs_bl_probe */
+
+SYMBOL_EXPORT bool
+chimera_vfs_claim_backend_capable(struct chimera_vfs_state *state)
+{
+    return chimera_vfs_bl_probe(state, CHIMERA_VFS_CAP_CLAIM_AGGREGATE,
+                                &state->lease_probed, &state->lease_capable);
 } /* chimera_vfs_claim_backend_capable */
+
+SYMBOL_EXPORT bool
+chimera_vfs_claim_backend_range_capable(struct chimera_vfs_state *state)
+{
+    return chimera_vfs_bl_probe(state, CHIMERA_VFS_CAP_CLAIM_RANGE,
+                                &state->range_probed, &state->range_capable);
+} /* chimera_vfs_claim_backend_range_capable */
 
 SYMBOL_EXPORT void
 chimera_vfs_claim_backend_reeval(
@@ -221,15 +237,18 @@ struct chimera_vfs_bl_op {
 
 static void
 chimera_vfs_bl_acquire_complete(
-    enum chimera_vfs_error error_code,
-    uint8_t                granted,
-    uint64_t               token,
-    void                  *private_data)
+    enum chimera_vfs_error                     error_code,
+    uint8_t                                    granted,
+    uint64_t                                   token,
+    const struct chimera_claim_range_conflict *conflict,
+    void                                      *private_data)
 {
     struct chimera_vfs_bl_op      *op       = private_data;
     struct chimera_vfs_state      *state    = op->state;
     struct chimera_vfs_file_state *file     = op->file;
     bool                           take_ref = false;
+
+    (void) conflict; /* an AGGREGATE grant is a mask, never a range */
 
     pthread_mutex_lock(&file->lock);
     if (error_code != CHIMERA_VFS_OK) {
@@ -322,7 +341,7 @@ chimera_vfs_bl_step(
 
         pthread_mutex_lock(&file->lock);
         file->bl_probed = 1;
-        if (!module || !(module->capabilities & CHIMERA_VFS_CAP_LEASE)) {
+        if (!module || !(module->capabilities & CHIMERA_VFS_CAP_CLAIM_AGGREGATE)) {
             file->bl_disabled = 1;
         }
         pthread_mutex_unlock(&file->lock);
@@ -395,17 +414,20 @@ chimera_vfs_bl_step(
     chimera_vfs_state_get(state, file->fh, file->fh_len, file->fh_hash, false);
 
     if (action == 1) {
-        chimera_vfs_lease_acquire_backend(
+        chimera_vfs_claim_acquire_backend(
             state->service_thread, file->fh, file->fh_len, file->fh_hash,
-            CHIMERA_VFS_LEASE_AGGREGATE, rev, deny,
-            0, 0, 0, &state->node_owner, prev_token,
-            chimera_vfs_lease_backend_recall, state,
+            CHIMERA_VFS_CLAIM_KLASS_AGGREGATE, rev, deny,
+            /* exclusive */ 0, /* flags */ 0, SEEK_SET,
+            /* offset */ 0, /* length */ 0,
+            &state->node_owner, prev_token,
+            chimera_vfs_claim_backend_recall, state,
             chimera_vfs_bl_acquire_complete, op);
     } else {
-        chimera_vfs_lease_release_backend(
-            state->service_thread, file->fh, file->fh_len, file->fh_hash,
-            token, retained,
-            chimera_vfs_bl_release_complete, op);
+        chimera_vfs_claim_release_backend(state->service_thread,
+                                          file->fh, file->fh_len, file->fh_hash,
+                                          CHIMERA_VFS_CLAIM_KLASS_AGGREGATE,
+                                          token, retained,
+                                          chimera_vfs_bl_release_complete, op);
     }
 } /* chimera_vfs_bl_step */
 
@@ -414,7 +436,7 @@ chimera_vfs_bl_step(
 /* ------------------------------------------------------------------ */
 
 SYMBOL_EXPORT void
-chimera_vfs_lease_backend_recall(
+chimera_vfs_claim_backend_recall(
     void          *recall_arg,
     const uint8_t *fh,
     uint8_t        fh_len,
@@ -456,7 +478,7 @@ chimera_vfs_lease_backend_recall(
     }
 
     chimera_vfs_state_put(state, file);
-} /* chimera_vfs_lease_backend_recall */
+} /* chimera_vfs_claim_backend_recall */
 
 /* Drive the local drain for a RECALLING file (service thread). */
 static void
@@ -604,10 +626,10 @@ chimera_vfs_claim_backend_service(struct chimera_vfs_state *state)
                                                         state, w->ticket, true);
                 break;
             case CHIMERA_VFS_BL_WORK_RELEASE:
-                chimera_vfs_lease_release_backend(state->service_thread,
-                                                  w->fh, w->fh_len,
-                                                  w->fh_hash, w->token, 0,
-                                                  NULL, NULL);
+                chimera_vfs_claim_release_backend(state->service_thread,
+                                                  w->fh, w->fh_len, w->fh_hash,
+                                                  CHIMERA_VFS_CLAIM_KLASS_RANGE,
+                                                  w->token, 0, NULL, NULL);
                 pthread_mutex_unlock(&state->bl_dispatch_lock);
                 break;
         } /* switch */
@@ -670,10 +692,11 @@ struct chimera_vfs_bl_range_op {
 
 static void
 chimera_vfs_bl_range_complete(
-    enum chimera_vfs_error error_code,
-    uint8_t                granted,
-    uint64_t               token,
-    void                  *private_data)
+    enum chimera_vfs_error                     error_code,
+    uint8_t                                    granted,
+    uint64_t                                   token,
+    const struct chimera_claim_range_conflict *bconflict,
+    void                                      *private_data)
 {
     struct chimera_vfs_bl_range_op *op          = private_data;
     struct chimera_vfs_state       *state       = op->state;
@@ -710,9 +733,22 @@ chimera_vfs_bl_range_complete(
          * reported empty (whole-file, no local holder to describe). */
         chimera_vfs_claim_release(state, file, claim);
 
+        /* Describe the winner as precisely as the backend could: a
+         * passthrough arbiter knows the real holder's range and pid, and a
+         * caller answering F_GETLK needs them.  Backends that cannot say
+         * report no conflict type, and the record degrades to the honest
+         * whole-file "somewhere remote". */
         memset(&conflict, 0, sizeof(conflict));
-        conflict.offset = 0;
-        conflict.length = UINT64_MAX;
+        if (bconflict && bconflict->type != CHIMERA_VFS_LOCK_UNLOCK) {
+            conflict.offset = bconflict->offset;
+            conflict.length = bconflict->length;
+            conflict.used   = (bconflict->type == CHIMERA_VFS_LOCK_WRITE)
+                ? (CHIMERA_CLAIM_LR | CHIMERA_CLAIM_LW) : CHIMERA_CLAIM_LR;
+            conflict.owner.owner_lo = bconflict->pid;
+        } else {
+            conflict.offset = 0;
+            conflict.length = UINT64_MAX;
+        }
         cb(CHIMERA_CLAIM_DENIED, NULL, &conflict, cb_private);
     }
 
@@ -752,41 +788,66 @@ chimera_vfs_claim_backend_project_range(
 
     chimera_vfs_state_get(state, file->fh, file->fh_len, file->fh_hash, false);
 
-    chimera_vfs_lease_acquire_backend(
+    chimera_vfs_claim_acquire_backend(
         thread, file->fh, file->fh_len, file->fh_hash,
-        CHIMERA_VFS_LEASE_RANGE, 0, 0,
+        CHIMERA_VFS_CLAIM_KLASS_RANGE, 0, 0,
         (claim->used & CHIMERA_CLAIM_LW) ? 1 : 0,
+        ticket->wait ? CHIMERA_VFS_CLAIM_WAIT : 0, SEEK_SET,
         claim->offset, claim->length,
         &claim->owner, 0,
-        chimera_vfs_lease_backend_recall, state,
+        chimera_vfs_claim_backend_recall, state,
         chimera_vfs_bl_range_complete, op);
 } /* chimera_vfs_claim_backend_project_range */
 
 /* True when a RANGE claim on `file` must be confirmed with a backend before
- * its grant completes.  Resolves/caches the module probe via the service
- * machinery's flags. */
+ * its grant completes.  Resolves/caches the module's RANGE capability per
+ * file, separately from the AGGREGATE probe: a backend commonly arbitrates
+ * one and not the other.
+ *
+ * The construct check is the synchrony gate.  A backend confirm reaches a
+ * CHIMERA_VFS_CAP_BLOCKING module through a delegation thread, so its
+ * callback lands on another thread later; callers that can wait (POSIX
+ * fcntl on its condvar, NLM and NFSv4 on their ticket queues) are fine with
+ * that, but the SMB byte-range path resolves a whole multi-element request
+ * synchronously and rolls earlier elements back on a later failure, which a
+ * deferred answer would break.  SMB locks therefore stay node-local against
+ * a blocking arbiter -- exactly what they did before ranges projected at
+ * all -- rather than being made to wait for an answer they cannot wait
+ * for.  An inline arbiter (memfs) serves everyone. */
 bool
 chimera_vfs_claim_backend_range_projects(
-    struct chimera_vfs_state      *state,
-    struct chimera_vfs_file_state *file,
-    struct chimera_vfs_thread     *thread)
+    struct chimera_vfs_state       *state,
+    struct chimera_vfs_file_state  *file,
+    struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_claim *claim)
 {
-    if (!state || !thread || file->bl_disabled ||
-        !chimera_vfs_claim_backend_capable(state)) {
+    struct chimera_vfs_module *module;
+
+    if (!state || !thread || file->bl_range_disabled ||
+        !chimera_vfs_claim_backend_range_capable(state)) {
         return false;
     }
-    if (!file->bl_probed) {
-        struct chimera_vfs_module *module =
-            chimera_vfs_get_module(thread, file->fh, file->fh_len);
 
+    module = chimera_vfs_get_module(thread, file->fh, file->fh_len);
+
+    if (!file->bl_range_probed) {
         pthread_mutex_lock(&file->lock);
-        file->bl_probed = 1;
-        if (!module || !(module->capabilities & CHIMERA_VFS_CAP_LEASE)) {
-            file->bl_disabled = 1;
+        file->bl_range_probed = 1;
+        if (!module || !(module->capabilities & CHIMERA_VFS_CAP_CLAIM_RANGE)) {
+            file->bl_range_disabled = 1;
         }
         pthread_mutex_unlock(&file->lock);
     }
-    return !file->bl_disabled;
+    if (file->bl_range_disabled) {
+        return false;
+    }
+
+    if (claim && claim->construct == CHIMERA_CONSTRUCT_LOCK_SMB && module &&
+        (module->capabilities & CHIMERA_VFS_CAP_BLOCKING)) {
+        return false;
+    }
+
+    return true;
 } /* chimera_vfs_claim_backend_range_projects */
 
 /* Drain queued RELEASE entries matching `file` and dispatch them inline on
@@ -834,9 +895,9 @@ chimera_vfs_claim_backend_drain_releases(
 
     while ((w = mine)) {
         mine = w->next;
-        chimera_vfs_lease_release_backend(thread, w->fh, w->fh_len,
-                                          w->fh_hash, w->token, 0,
-                                          NULL, NULL);
+        chimera_vfs_claim_release_backend(thread, w->fh, w->fh_len, w->fh_hash,
+                                          CHIMERA_VFS_CLAIM_KLASS_RANGE,
+                                          w->token, 0, NULL, NULL);
         free(w);
     }
 

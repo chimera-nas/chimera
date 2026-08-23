@@ -75,7 +75,7 @@ struct chimera_vfs_file_state {
 
     struct chimera_vfs_state           *state;
 
-    /* Backend lease projection (CHIMERA_VFS_CAP_LEASE).  One revocable
+    /* Backend lease projection (CHIMERA_VFS_CAP_CLAIM_AGGREGATE).  One revocable
      * AGGREGATE token per file covering the union of local holders, held
      * lazily with escalate-or-reuse; state guarded by file->lock, the work
      * linkage by state->service_lock.  bl_want_used carries an implicit-I/O
@@ -84,6 +84,8 @@ struct chimera_vfs_file_state {
     uint8_t                             bl_state;      /* NONE/ACQUIRING/... */
     uint8_t                             bl_probed;     /* module resolved     */
     uint8_t                             bl_disabled;   /* module lacks CAP    */
+    uint8_t                             bl_range_probed;   /* ditto, for the  */
+    uint8_t                             bl_range_disabled; /* RANGE capability */
     uint8_t                             bl_held_used;
     uint8_t                             bl_held_deny;
     uint8_t                             bl_want_used;
@@ -131,17 +133,22 @@ struct chimera_vfs_state {
     /* Backend lease projection service: work is posted here from any thread
      * and drained on the service thread (the VFS close thread), which owns
      * every backend lease dispatch for AGGREGATE tokens.  lease_capable is
-     * false when no registered module declares CHIMERA_VFS_CAP_LEASE, making
+     * false when no registered module declares CHIMERA_VFS_CAP_CLAIM_AGGREGATE, making
      * every projection hook a cheap no-op. */
     /* Atomic: the probe is resolved lazily on first use and is read from
      * any thread, including callers outside the VFS threads (posix fcntl
      * decides on the app's own thread whether an acquire has to marshal
      * onto a VFS thread at all).  Two racing probes reach the same answer,
      * so the pair needs release/acquire ordering, not a lock. */
-    _Atomic uint8_t                     lease_capable;
-    _Atomic uint8_t                     lease_probed;  /* modules scanned (lazy: the
+    _Atomic uint8_t                lease_capable;
+    _Atomic uint8_t                lease_probed;       /* modules scanned (lazy: the
                                                        * close thread attaches
                                                        * before modules register) */
+    /* The same probe for CHIMERA_VFS_CAP_CLAIM_RANGE, kept separate because
+     * a backend commonly arbitrates byte ranges without arbitrating the
+     * cache aggregate (a passthrough backend fronting a real OS lock). */
+    _Atomic uint8_t                range_capable;
+    _Atomic uint8_t                range_probed;
     struct chimera_vfs            *vfs;
     struct chimera_claim_owner     node_owner;       /* this node's wire identity */
     pthread_mutex_t                service_lock;
@@ -681,17 +688,24 @@ chimera_vfs_state_reap_idle(
     uint64_t                  idle_ms);
 
 /* -------------------------------------------------------------------- */
-/* Backend lease projection (CHIMERA_VFS_CAP_LEASE)                     */
+/* Backend lease projection (CHIMERA_VFS_CAP_CLAIM_AGGREGATE)                     */
 /* -------------------------------------------------------------------- */
 
-/* True when any registered module declares CHIMERA_VFS_CAP_LEASE, i.e. a
-* claim could have to be confirmed with a backend.  Resolved lazily on
-* first use (modules register after the service attaches) and safe to call
-* from any thread.  Callers outside the VFS threads use this to decide
-* whether an acquire has to marshal onto a VFS thread at all: with no such
-* module every projection hook is a no-op, so nothing is gained by it. */
+/* True when any registered module declares CHIMERA_VFS_CAP_CLAIM_AGGREGATE, i.e. a
+ * claim could have to be confirmed with a backend.  Resolved lazily on
+ * first use (modules register after the service attaches) and safe to call
+ * from any thread.  Callers outside the VFS threads use this to decide
+ * whether an acquire has to marshal onto a VFS thread at all: with no such
+ * module every projection hook is a no-op, so nothing is gained by it. */
 bool
 chimera_vfs_claim_backend_capable(
+    struct chimera_vfs_state *state);
+
+/* The same question for byte ranges: is any registered module a RANGE
+ * arbiter?  Callers outside the VFS threads use this to decide whether a
+ * lock acquire has to marshal onto a VFS thread at all. */
+bool
+chimera_vfs_claim_backend_range_capable(
     struct chimera_vfs_state *state);
 
 /* Attach the projection service (called once from the close-thread setup):
@@ -732,7 +746,7 @@ chimera_vfs_claim_backend_reeval(
  * recall_arg = the chimera_vfs_state).  Any thread; marshals internally;
  * tolerates an unknown file or stale token as a no-op. */
 void
-chimera_vfs_lease_backend_recall(
+chimera_vfs_claim_backend_recall(
     void          *recall_arg,
     const uint8_t *fh,
     uint8_t        fh_len,

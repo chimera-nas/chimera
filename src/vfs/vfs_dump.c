@@ -46,7 +46,8 @@ chimera_vfs_op_name(unsigned int opcode)
         case CHIMERA_VFS_OP_SEARCH_KEYS: return "SearchKeys";
         case CHIMERA_VFS_OP_ALLOCATE: return "Allocate";
         case CHIMERA_VFS_OP_SEEK: return "Seek";
-        case CHIMERA_VFS_OP_LOCK: return "Lock";
+        case CHIMERA_VFS_OP_CLAIM_ACQUIRE: return "ClaimAcquire";
+        case CHIMERA_VFS_OP_CLAIM_RELEASE: return "ClaimRelease";
         case CHIMERA_VFS_OP_GETPARENT: return "GetParent";
         case CHIMERA_VFS_OP_COPY_RANGE: return "CopyRange";
         case CHIMERA_VFS_OP_CLONE_RANGE: return "CloneRange";
@@ -248,10 +249,12 @@ _chimera_vfs_trace_complete(struct chimera_vfs_request *request)
             otel_span_attr_u64(s, "vfs.r_offset", request->seek.r_offset);
             otel_span_attr_bool(s, "vfs.eof", request->seek.r_eof);
             break;
-        case CHIMERA_VFS_OP_LOCK:
-            otel_span_attr_u64(s, "vfs.offset", request->lock.offset);
-            otel_span_attr_u64(s, "vfs.length", request->lock.length);
-            otel_span_attr_u64(s, "vfs.lock_type", request->lock.lock_type);
+        case CHIMERA_VFS_OP_CLAIM_ACQUIRE:
+            otel_span_attr_u64(s, "vfs.klass", request->claim_acquire.klass);
+            otel_span_attr_u64(s, "vfs.offset", request->claim_acquire.offset);
+            otel_span_attr_u64(s, "vfs.length", request->claim_acquire.length);
+            otel_span_attr_bool(s, "vfs.exclusive",
+                                request->claim_acquire.exclusive);
             break;
         case CHIMERA_VFS_OP_COPY_RANGE:
             otel_span_attr_u64(s, "vfs.src_offset", request->copy_range.src_offset);

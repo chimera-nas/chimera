@@ -8,7 +8,6 @@
 #include <unistd.h>
 
 #include "posix_internal.h"
-#include "../client/client_lock.h"
 #include "../client/client_dup.h"
 
 /* Status flags F_SETFL may change; everything else in the argument is
@@ -105,29 +104,6 @@ chimera_posix_fcntl_setfl(
     return 0;
 } /* chimera_posix_fcntl_setfl */
 
-static void
-chimera_posix_fcntl_lock_callback(
-    struct chimera_client_thread *thread,
-    enum chimera_vfs_error        status,
-    uint32_t                      conflict_type,
-    uint64_t                      conflict_offset,
-    uint64_t                      conflict_length,
-    pid_t                         conflict_pid,
-    void                         *private_data)
-{
-    struct chimera_posix_completion *comp = private_data;
-
-    chimera_posix_complete(comp, status);
-} /* chimera_posix_fcntl_lock_callback */
-
-static void
-chimera_posix_fcntl_lock_exec(
-    struct chimera_client_thread  *thread,
-    struct chimera_client_request *request)
-{
-    chimera_dispatch_lock(thread, request);
-} /* chimera_posix_fcntl_lock_exec */
-
 SYMBOL_EXPORT int
 chimera_posix_fcntl(
     int fd,
@@ -137,19 +113,15 @@ chimera_posix_fcntl(
     struct chimera_posix_client    *posix  = chimera_posix_get_global();
     struct chimera_posix_worker    *worker = chimera_posix_choose_worker(posix);
     struct chimera_posix_fd_entry  *entry;
-    struct chimera_client_request   req;
-    struct chimera_posix_completion comp;
     struct flock                   *fl;
     struct chimera_vfs_open_handle *handle;
     struct chimera_posix_ofd_lock  *node = NULL;
     uint32_t                        lock_type;
-    uint32_t                        flags = 0;
     int32_t                         whence;
     uint64_t                        offset;
     uint64_t                        length;
     uint64_t                        core_length = 0;
     bool                            local_arbiter;
-    bool                            backend_locks;
     va_list                         args;
 
     switch (cmd) {
@@ -172,13 +144,8 @@ chimera_posix_fcntl(
             return chimera_posix_fcntl_setfl(posix, fd, arg);
         }
         case F_GETLK:
-            flags |= CHIMERA_VFS_LOCK_TEST;
-        /* fall through */
         case F_SETLK:
         case F_SETLKW:
-            if (cmd == F_SETLKW) {
-                flags |= CHIMERA_VFS_LOCK_WAIT;
-            }
             va_start(args, cmd);
             fl = va_arg(args, struct flock *);
             va_end(args);
@@ -303,8 +270,6 @@ chimera_posix_fcntl(
      */
     handle        = entry->handle;
     local_arbiter = (whence != SEEK_END);
-    backend_locks = (handle->vfs_module->capabilities &
-                     CHIMERA_VFS_CAP_FS_LOCK) != 0;
 
     if (local_arbiter) {
         /* POSIX l_len 0 = to-EOF sentinel; the core spells to-EOF as
@@ -335,7 +300,7 @@ chimera_posix_fcntl(
         chimera_vfs_state_put(vstate, file);
 
         if (result != CHIMERA_CLAIM_GRANTED) {
-            /* Local conflict: report it without consulting the backend.
+            /* Local conflict: report it without asking the backend.
              * WRITE_LT iff the holder's used mode carries a write-flavored
              * bit (a write delegation reports WRITE_LT though it holds no
              * LW). */
@@ -352,8 +317,35 @@ chimera_posix_fcntl(
             chimera_posix_fd_release(entry, 0);
             return 0;
         }
-        /* No local conflict: fall through to the backend OP_LOCK TEST so
-         * the kernel sees other processes. */
+        /* No local conflict.  Ask the backend, if it arbitrates ranges, so
+         * holders outside this process are seen; otherwise the local core
+         * is the whole answer and the range is free. */
+        if (chimera_posix_lock_claim_test(posix, handle, &probe, &conf)) {
+            fl->l_type   = (conf.used & CHIMERA_CLAIM_LW) ? F_WRLCK : F_RDLCK;
+            fl->l_whence = SEEK_SET;
+            fl->l_start  = (off_t) conf.offset;
+            fl->l_len    = (conf.length == UINT64_MAX)
+                ? 0 : (off_t) conf.length;
+            fl->l_pid = (pid_t) conf.owner.owner_lo;
+        } else {
+            fl->l_type = F_UNLCK;
+        }
+
+        chimera_posix_fd_release(entry, 0);
+        return 0;
+    }
+
+    if (!local_arbiter) {
+        /* A SEEK_END range: the core cannot know the absolute range, and
+         * resolving EOF here would reintroduce the fstat TOCTOU the whence
+         * passthrough exists to avoid.  The claim wire carries whence, so
+         * this is answerable by a range-arbitrating backend and only by it. */
+        int rc = chimera_posix_lock_claim_seek_end(posix, handle, cmd, fl,
+                                                   lock_type, whence,
+                                                   offset, length);
+
+        chimera_posix_fd_release(entry, 0);
+        return rc;
     }
 
     if (local_arbiter && cmd != F_GETLK &&
@@ -404,68 +396,10 @@ chimera_posix_fcntl(
         chimera_posix_ofd_lock_track(posix, entry->ofd, node);
     }
 
-    if (!backend_locks) {
-        /* Backend without CAP_FS_LOCK (memfs/cairn/diskfs): the local core
-         * is the arbiter -- skip the projection step instead of failing
-         * ENOTSUP.  SEEK_END ranges had no arbiter at all, so keep the old
-         * ENOTSUP for them. */
-        chimera_posix_fd_release(entry, 0);
-
-        if (!local_arbiter) {
-            errno = ENOTSUP;
-            return -1;
-        }
-
-        if (cmd == F_GETLK) {
-            fl->l_type = F_UNLCK;
-        }
-
-        return 0;
-    }
-
-    chimera_posix_completion_init(&comp, &req);
-
-    req.opcode            = CHIMERA_CLIENT_OP_LOCK;
-    req.lock.handle       = entry->handle;
-    req.lock.whence       = whence;
-    req.lock.offset       = offset;
-    req.lock.length       = length;
-    req.lock.lock_type    = lock_type;
-    req.lock.flags        = flags;
-    req.lock.callback     = chimera_posix_fcntl_lock_callback;
-    req.lock.private_data = &comp;
-
-    chimera_posix_worker_enqueue(worker, &req, chimera_posix_fcntl_lock_exec);
-
-    int err = chimera_posix_wait(&comp);
-
-    if (err && node) {
-        /* The kernel projection denied a lock the local core granted:
-         * drop the local claim and surface the backend's error. */
-        chimera_posix_ofd_lock_untrack_release(posix, node);
-        node = NULL;
-    }
-
-    if (cmd == F_GETLK && !err) {
-        if (req.lock.r_conflict_type == CHIMERA_VFS_LOCK_UNLOCK) {
-            fl->l_type = F_UNLCK;
-        } else {
-            fl->l_type = (req.lock.r_conflict_type == CHIMERA_VFS_LOCK_READ)
-                ? F_RDLCK : F_WRLCK;
-            fl->l_whence = SEEK_SET;
-            fl->l_start  = (off_t) req.lock.r_conflict_offset;
-            fl->l_len    = (off_t) req.lock.r_conflict_length;
-            fl->l_pid    = req.lock.r_conflict_pid;
-        }
-    }
-
     chimera_posix_fd_release(entry, 0);
 
-    chimera_posix_completion_destroy(&comp);
-
-    if (err) {
-        errno = err;
-        return -1;
+    if (cmd == F_GETLK) {
+        fl->l_type = F_UNLCK;
     }
 
     return 0;

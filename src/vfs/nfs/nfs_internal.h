@@ -364,6 +364,33 @@ struct chimera_nfs4_client_devcache {
     struct chimera_nfs4_client_devcache_entry entries[CHIMERA_NFS4_CLIENT_DEVCACHE_MAX];
 };
 
+/*
+ * CHIMERA_VFS_CAP_CLAIM_RANGE bookkeeping (nfs3_lock.c).
+ *
+ * The proxy arbitrates byte ranges by taking a real NLM lock on the upstream
+ * server, which is how a conflict with any other client of that server reaches
+ * the claim core.  NLM has no token concept, though: an unlock is identified by
+ * (fh, owner handle, offset, length), while CHIMERA_VFS_OP_CLAIM_RELEASE hands
+ * us nothing but the token we minted at grant time.  Every granted range is
+ * therefore remembered here so the NLM UNLOCK can be rebuilt from its token.
+ *
+ * The owner handle is derived from the claim's cluster-stable owner identity
+ * rather than from a node-local pointer, so the same POSIX owner coalesces on
+ * the server even if its requests arrive through two different chimera nodes.
+ */
+#define CHIMERA_NFS3_LOCK_OH_SIZE 25
+
+struct chimera_nfs3_range {
+    uint64_t                   token;
+    uint8_t                    fh[CHIMERA_VFS_FH_SIZE];
+    int                        fh_len;
+    uint64_t                   offset;
+    uint64_t                   length;  /* UINT64_MAX = to-EOF */
+    uint8_t                    oh[CHIMERA_NFS3_LOCK_OH_SIZE];
+    struct chimera_nfs3_range *prev;
+    struct chimera_nfs3_range *next;
+};
+
 struct chimera_nfs_shared {
     struct chimera_nfs_client_mount    *mounts;
 
@@ -385,6 +412,12 @@ struct chimera_nfs_shared {
      * layout->reg_next under pnfs_layout_lock. */
     pthread_mutex_t                     pnfs_layout_lock;
     struct chimera_nfs4_layout         *pnfs_layouts;
+
+    /* Granted byte-range claims, keyed by the token we minted for them (see
+     * struct chimera_nfs3_range above). */
+    pthread_mutex_t                     nlm_range_lock;
+    struct chimera_nfs3_range          *nlm_ranges;
+    uint64_t                            nlm_next_token;
 
     struct PORTMAP_V2                   portmap_v2;
     struct NFS_MOUNT_V3                 mount_v3;
@@ -1153,7 +1186,12 @@ void chimera_nfs3_link_at(
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
-void chimera_nfs3_lock(
+void chimera_nfs3_claim_acquire(
+    struct chimera_nfs_thread *,
+    struct chimera_nfs_shared *,
+    struct chimera_vfs_request *,
+    void *);
+void chimera_nfs3_claim_release(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,

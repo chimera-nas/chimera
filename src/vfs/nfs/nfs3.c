@@ -73,8 +73,11 @@ chimera_nfs3_dispatch(
         case CHIMERA_VFS_OP_ALLOCATE:
             chimera_nfs3_allocate(thread, shared, request, private_data);
             break;
-        case CHIMERA_VFS_OP_LOCK:
-            chimera_nfs3_lock(thread, shared, request, private_data);
+        case CHIMERA_VFS_OP_CLAIM_ACQUIRE:
+            chimera_nfs3_claim_acquire(thread, shared, request, private_data);
+            break;
+        case CHIMERA_VFS_OP_CLAIM_RELEASE:
+            chimera_nfs3_claim_release(thread, shared, request, private_data);
             break;
         default:
             chimera_error("nfs3", __FILE__, __LINE__,

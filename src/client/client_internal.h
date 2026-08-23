@@ -91,6 +91,8 @@ struct chimera_client_request {
     int                                sync_target_len;
 
     chimera_client_request_callback    sync_callback;
+    /* Opaque context for a caller-driven sync_callback (posix lock probes). */
+    void                              *lock_probe_private;
 
     uint32_t                           fh_len;
 

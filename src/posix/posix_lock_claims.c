@@ -427,7 +427,7 @@ chimera_posix_lock_claim_acquire(
      * DENIED fire the callback synchronously; a queued ticket fires it later
      * from whichever thread pumps the release, and a queued RANGE grant has
      * its backend confirm deferred to the projection service thread. */
-    if (chimera_vfs_claim_backend_capable(state)) {
+    if (chimera_vfs_claim_backend_range_capable(state)) {
         /* A grant here may need confirming with the backend, which requires
          * a VFS thread: marshal onto a worker and wait for it there. */
         ctx.request.opcode            = CHIMERA_CLIENT_OP_LOCK;
@@ -438,8 +438,8 @@ chimera_posix_lock_claim_acquire(
                                      &ctx.request,
                                      chimera_posix_lock_claim_exec);
     } else {
-        /* No CAP_LEASE module: the local core is the whole arbiter and
-         * nothing projects, so skip the worker round trip. */
+        /* No range-arbitrating module: the local core is the whole arbiter
+         * and nothing projects, so skip the worker round trip. */
         chimera_vfs_claim_acquire(NULL, state, node->file, &node->claim,
                                   &ctx.ticket, wait, wait,
                                   chimera_posix_lock_acquire_cb, NULL,
@@ -457,3 +457,209 @@ chimera_posix_lock_claim_acquire(
 
     return ctx.waiter.result;
 } /* chimera_posix_lock_claim_acquire */
+
+/* -------------------------------------------------------------------- */
+/* Backend probes: F_GETLK and the SEEK_END passthrough                 */
+/* -------------------------------------------------------------------- */
+
+struct chimera_posix_lock_probe_ctx {
+    struct chimera_client_request       request;
+    struct chimera_posix_client        *posix;
+    struct chimera_vfs_open_handle     *handle;
+    uint8_t                             exclusive;
+    uint8_t                             flags;
+    int32_t                             whence;
+    uint64_t                            offset;
+    uint64_t                            length;
+    struct chimera_claim_owner          owner;
+    /* Results. */
+    enum chimera_vfs_error status;
+    uint8_t                             granted;
+    uint64_t                            token;
+    struct chimera_claim_range_conflict conflict;
+    pthread_mutex_t                     mutex;
+    pthread_cond_t                      cond;
+    int                                 done;
+};
+
+static void
+chimera_posix_lock_probe_cb(
+    enum chimera_vfs_error                     status,
+    uint8_t                                    granted,
+    uint64_t                                   token,
+    const struct chimera_claim_range_conflict *conflict,
+    void                                      *private_data)
+{
+    struct chimera_posix_lock_probe_ctx *ctx = private_data;
+
+    pthread_mutex_lock(&ctx->mutex);
+    ctx->status  = status;
+    ctx->granted = granted;
+    ctx->token   = token;
+    if (conflict) {
+        ctx->conflict = *conflict;
+    }
+    ctx->done = 1;
+    pthread_cond_signal(&ctx->cond);
+    pthread_mutex_unlock(&ctx->mutex);
+} /* chimera_posix_lock_probe_cb */
+
+static void
+chimera_posix_lock_probe_exec(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request)
+{
+    struct chimera_posix_lock_probe_ctx *ctx = request->lock_probe_private;
+
+    chimera_vfs_claim_acquire_backend(
+        thread->vfs_thread,
+        ctx->handle->fh, (uint8_t) ctx->handle->fh_len, ctx->handle->fh_hash,
+        CHIMERA_VFS_CLAIM_KLASS_RANGE, 0, 0,
+        ctx->exclusive, ctx->flags, ctx->whence, ctx->offset, ctx->length,
+        &ctx->owner, 0, NULL, NULL,
+        chimera_posix_lock_probe_cb, ctx);
+} /* chimera_posix_lock_probe_exec */
+
+/* Run one RANGE op against the backend on a worker's vfs thread and wait.
+ * Returns false without dispatching when no backend arbitrates ranges. */
+static bool
+chimera_posix_lock_probe(
+    struct chimera_posix_client         *posix,
+    struct chimera_vfs_open_handle      *handle,
+    struct chimera_posix_lock_probe_ctx *ctx)
+{
+    struct chimera_vfs_state *state = chimera_posix_vfs_state(posix);
+
+    if (!chimera_vfs_claim_backend_range_capable(state)) {
+        return false;
+    }
+
+    ctx->posix  = posix;
+    ctx->handle = handle;
+    ctx->status = CHIMERA_VFS_OK;
+    ctx->done   = 0;
+    chimera_posix_lock_owner_init(&ctx->owner);
+    pthread_mutex_init(&ctx->mutex, NULL);
+    pthread_cond_init(&ctx->cond, NULL);
+
+    ctx->request.heap_allocated     = 0;
+    ctx->request.lock_probe_private = ctx;
+
+    chimera_posix_worker_enqueue(chimera_posix_choose_worker(posix),
+                                 &ctx->request,
+                                 chimera_posix_lock_probe_exec);
+
+    pthread_mutex_lock(&ctx->mutex);
+    while (!ctx->done) {
+        pthread_cond_wait(&ctx->cond, &ctx->mutex);
+    }
+    pthread_mutex_unlock(&ctx->mutex);
+
+    pthread_mutex_destroy(&ctx->mutex);
+    pthread_cond_destroy(&ctx->cond);
+    return true;
+} /* chimera_posix_lock_probe */
+
+bool
+chimera_posix_lock_claim_test(
+    struct chimera_posix_client       *posix,
+    struct chimera_vfs_open_handle    *handle,
+    const struct chimera_vfs_claim    *probe,
+    struct chimera_vfs_claim_conflict *conflict)
+{
+    struct chimera_posix_lock_probe_ctx ctx;
+
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.exclusive = (probe->used & CHIMERA_CLAIM_LW) ? 1 : 0;
+    ctx.flags     = CHIMERA_VFS_CLAIM_TEST;
+    ctx.whence    = SEEK_SET;
+    ctx.offset    = probe->offset;
+    ctx.length    = probe->length;
+
+    if (!chimera_posix_lock_probe(posix, handle, &ctx)) {
+        return false;
+    }
+
+    if (ctx.status != CHIMERA_VFS_OK ||
+        ctx.conflict.type == CHIMERA_VFS_LOCK_UNLOCK) {
+        return false;
+    }
+
+    memset(conflict, 0, sizeof(*conflict));
+    conflict->used = (ctx.conflict.type == CHIMERA_VFS_LOCK_WRITE)
+        ? (CHIMERA_CLAIM_LR | CHIMERA_CLAIM_LW) : CHIMERA_CLAIM_LR;
+    conflict->offset         = ctx.conflict.offset;
+    conflict->length         = ctx.conflict.length;
+    conflict->owner.owner_lo = ctx.conflict.pid;
+    return true;
+} /* chimera_posix_lock_claim_test */
+
+int
+chimera_posix_lock_claim_seek_end(
+    struct chimera_posix_client    *posix,
+    struct chimera_vfs_open_handle *handle,
+    int                             cmd,
+    struct flock                   *fl,
+    uint32_t                        lock_type,
+    int32_t                         whence,
+    uint64_t                        offset,
+    uint64_t                        length)
+{
+    struct chimera_posix_lock_probe_ctx ctx;
+
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.exclusive = (lock_type == CHIMERA_VFS_LOCK_WRITE) ? 1 : 0;
+    ctx.whence    = whence;
+    ctx.offset    = offset;
+    ctx.length    = length;
+
+    if (cmd == F_GETLK) {
+        ctx.flags = CHIMERA_VFS_CLAIM_TEST;
+    } else if (cmd == F_SETLKW) {
+        ctx.flags = CHIMERA_VFS_CLAIM_WAIT;
+    }
+
+    /* An unlock is spelled as a release, but a SEEK_END range is not one
+     * this node ever recorded a token for -- the backend resolved it.  The
+     * wire has no "unlock by range", so a SEEK_END unlock cannot be
+     * expressed and keeps the ENOTSUP it has always returned. */
+    if (lock_type == CHIMERA_VFS_LOCK_UNLOCK) {
+        errno = ENOTSUP;
+        return -1;
+    }
+
+    if (!chimera_posix_lock_probe(posix, handle, &ctx)) {
+        errno = ENOTSUP;
+        return -1;
+    }
+
+    if (ctx.status != CHIMERA_VFS_OK) {
+        errno = chimera_posix_errno_from_status(ctx.status);
+        return -1;
+    }
+
+    if (cmd == F_GETLK) {
+        if (ctx.conflict.type == CHIMERA_VFS_LOCK_UNLOCK) {
+            fl->l_type = F_UNLCK;
+        } else {
+            fl->l_type = (ctx.conflict.type == CHIMERA_VFS_LOCK_READ)
+                ? F_RDLCK : F_WRLCK;
+            fl->l_whence = SEEK_SET;
+            fl->l_start  = (off_t) ctx.conflict.offset;
+            fl->l_len    = (off_t) ctx.conflict.length;
+            fl->l_pid    = (pid_t) ctx.conflict.pid;
+        }
+        return 0;
+    }
+
+    if (!ctx.granted) {
+        errno = EAGAIN;
+        return -1;
+    }
+
+    /* CLAIMTODO: the granted SEEK_END token is not tracked against the open
+     * file description, so it is released only when the backend drops it
+     * (handle close).  Tracking needs the resolved absolute range, which is
+     * exactly what the backend did not tell us. */
+    return 0;
+} /* chimera_posix_lock_claim_seek_end */

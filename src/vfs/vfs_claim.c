@@ -1666,7 +1666,7 @@ chimera_vfs_claim_acquire(
      * only threadless teardown releases ride the queued lane. */
     if (result == CHIMERA_CLAIM_GRANTED &&
         claim->klass == CHIMERA_CLAIM_CLASS_RANGE &&
-        chimera_vfs_claim_backend_range_projects(state, file, thread)) {
+        chimera_vfs_claim_backend_range_projects(state, file, thread, claim)) {
         chimera_vfs_claim_backend_project_range(thread, state, ticket, false);
         return;
     }

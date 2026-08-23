@@ -235,9 +235,10 @@ chimera_vfs_claim_backend_project_range(
 
 bool
 chimera_vfs_claim_backend_range_projects(
-    struct chimera_vfs_state      *state,
-    struct chimera_vfs_file_state *file,
-    struct chimera_vfs_thread     *thread);
+    struct chimera_vfs_state       *state,
+    struct chimera_vfs_file_state  *file,
+    struct chimera_vfs_thread      *thread,
+    const struct chimera_vfs_claim *claim);
 
 /* Cancel a pump-deferred RANGE confirm TICKET: true = yanked from the work
  * FIFO (cb will never fire; caller rolls back the local grant); false only
