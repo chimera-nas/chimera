@@ -487,6 +487,18 @@ chimera_nfs4_copy(
         return;
     }
 
+    /* RFC 7862 §15.2.3: COPY moves data between two files.  Naming one file
+     * as both source and destination is NFS4ERR_INVAL whatever the ranges --
+     * the overlap qualifier belongs to CLONE (§15.13.3), not here.  The Linux
+     * client knows it: nfs4_copy_file_range() refuses when the two inodes
+     * match rather than send a COPY the server has to reject. */
+    if (req->saved_fhlen == req->fhlen &&
+        memcmp(req->saved_fh, req->fh, req->fhlen) == 0) {
+        res->cr_status = NFS4ERR_INVAL;
+        chimera_nfs4_compound_complete(req, res->cr_status);
+        return;
+    }
+
     chimera_nfs4_resolve_current_stateid(req, &args->ca_src_stateid);
     chimera_nfs4_resolve_current_stateid(req, &args->ca_dst_stateid);
 
