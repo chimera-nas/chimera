@@ -342,7 +342,12 @@ chimera_vfs_read_submit(
 {
     struct chimera_vfs_read_gate *gate;
 
-    if (chimera_vfs_gate_needed(handle->vfs_module->capabilities, cred)) {
+    /* gate_needed_dac, not gate_needed: a DELEGATES_DAC passthrough backend
+     * caches an fd opened privileged via open_by_handle_at, so the kernel never
+     * checks READ under the caller's fsuid.  The engine enforces read access
+     * itself against the real on-disk attrs, as it already does for the path
+     * prefix. */
+    if (chimera_vfs_gate_needed_dac(handle->vfs_module->capabilities, cred)) {
         if (handle->granted_valid) {
             /* Fast path: the caller's grant is cached on the handle. */
             if (!(handle->granted_access & CHIMERA_ACE_READ_DATA)) {
