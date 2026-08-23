@@ -345,13 +345,17 @@ chimera_io_uring_set_open_attrs(
 /* Finish a successful open_at: record the fd and whether the open created the
  * file (for the SMB create_action), apply the create-time attributes, and chain
  * the child/parent statx that populate the returned attributes.  Shared by the
- * initial open and the EEXIST re-open of the create-probe. */
+ * initial open and the EEXIST re-open of the create-probe.  skip_attrs leaves
+ * the object's attributes untouched -- used for the CREATE_REGULAR re-open of an
+ * existing regular file, which returns an O_PATH handle that cannot be fchmod'd
+ * and whose attributes an UNCHECKED create must not modify. */
 static void
 chimera_io_uring_open_at_finish(
     struct chimera_io_uring_thread *thread,
     struct chimera_vfs_request     *request,
     int                             fd,
-    int                             created)
+    int                             created,
+    int                             skip_attrs)
 {
     struct io_uring_sqe *sqe;
     struct statx        *dir_stx, *stx;
@@ -368,7 +372,8 @@ chimera_io_uring_open_at_finish(
 
     parent_fd = request->open_at.handle->vfs_private;
 
-    rc = chimera_io_uring_set_open_attrs(fd, request->open_at.set_attr);
+    rc = skip_attrs ? 0 :
+        chimera_io_uring_set_open_attrs(fd, request->open_at.set_attr);
     if (rc != 0) {
         request->status = chimera_linux_errno_to_status(rc);
         return;
@@ -476,32 +481,42 @@ chimera_io_uring_reap(
                         !(request->open_at.flags & CHIMERA_VFS_OPEN_EXCLUSIVE);
 
                     if (nonexcl_create && cqe->res == -EEXIST) {
-                        /* The O_EXCL create-probe found an existing file: re-open
-                         * it without O_EXCL (the base flags still carry O_TRUNC
-                         * for OVERWRITE_IF/SUPERSEDE).  r_created stays 0. */
-                        int         rflags = chimera_io_uring_open_at_flags(request);
-                        uint32_t    rmode;
-                        int         rpers;
-                        const char *rname;
+                        /* The O_EXCL create-probe found an existing file. */
+                        uint32_t rmode;
+                        int      rflags, rpers;
 
                         dir_stx   = (struct statx *) request->plugin_data;
                         stx       = (struct statx *) (dir_stx + 1);
-                        rname     = (char *) (stx + 1);
+                        name      = (char *) (stx + 1);
                         parent_fd = request->open_at.handle->vfs_private;
 
-                        /* No mode supplied (NFS3 EXCLUSIVE create defers it to
-                         * SETATTR): default 0644 to match memfs/cairn and the
-                         * linux backend, so per-op DAC does not diverge on the
-                         * pre-SETATTR object.  See linux.c open_at. */
-                        rmode = (request->open_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE)
-                                ? request->open_at.set_attr->va_mode : 0644;
+                        if (request->open_at.flags & CHIMERA_VFS_OPEN_CREATE_REGULAR) {
+                            /* NFS3 UNCHECKED create must yield a regular file and
+                             * must not truncate or re-permission an existing one.
+                             * Re-open by handle only (O_PATH|O_NOFOLLOW: no I/O
+                             * open, no follow, attributes untouched); the child
+                             * statx below classifies the leaf and a non-regular
+                             * object is rejected (directory -> EISDIR, symlink/
+                             * socket/fifo/... -> EEXIST).  Mirrors linux.c. */
+                            sqe = chimera_io_uring_get_sqe(thread, request, 3, 0);
+                            io_uring_prep_openat(sqe, parent_fd, name,
+                                                 O_PATH | O_NOFOLLOW, 0);
+                        } else {
+                            /* Re-open without O_EXCL (the base flags still carry
+                             * O_TRUNC for OVERWRITE_IF/SUPERSEDE).  r_created
+                             * stays 0.  No mode supplied -> 0644 to match the
+                             * memfs/cairn/linux backends on the pre-SETATTR
+                             * object.  See linux.c open_at. */
+                            rflags = chimera_io_uring_open_at_flags(request);
+                            rmode  = (request->open_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE)
+                                     ? request->open_at.set_attr->va_mode : 0644;
+                            rpers = chimera_io_uring_get_personality(thread, request->cred);
 
-                        rpers = chimera_io_uring_get_personality(thread, request->cred);
-
-                        sqe = chimera_io_uring_get_sqe(thread, request, 3, 0);
-                        io_uring_prep_openat(sqe, parent_fd, rname, rflags, rmode);
-                        if (rpers > 0) {
-                            sqe->personality = rpers;
+                            sqe = chimera_io_uring_get_sqe(thread, request, 3, 0);
+                            io_uring_prep_openat(sqe, parent_fd, name, rflags, rmode);
+                            if (rpers > 0) {
+                                sqe->personality = rpers;
+                            }
                         }
 
                         evpl_defer(thread->evpl, &thread->deferral);
@@ -512,14 +527,19 @@ chimera_io_uring_reap(
                          * for an exclusive create the create itself succeeded. */
                         chimera_io_uring_open_at_finish(
                             thread, request, cqe->res,
-                            (request->open_at.flags & CHIMERA_VFS_OPEN_CREATE) ? 1 : 0);
+                            (request->open_at.flags & CHIMERA_VFS_OPEN_CREATE) ? 1 : 0,
+                            0);
                     } else {
                         request->status = chimera_linux_errno_to_status(-cqe->res);
                     }
                 } else if (handle->slot == 3) {
-                    /* The non-exclusive-create re-open of an existing file. */
+                    /* The non-exclusive-create re-open of an existing file.  For a
+                     * CREATE_REGULAR re-open this is the O_PATH handle on an
+                     * existing regular file: leave its attributes untouched. */
                     if (cqe->res >= 0) {
-                        chimera_io_uring_open_at_finish(thread, request, cqe->res, 0);
+                        chimera_io_uring_open_at_finish(
+                            thread, request, cqe->res, 0,
+                            (request->open_at.flags & CHIMERA_VFS_OPEN_CREATE_REGULAR) ? 1 : 0);
                     } else {
                         request->status = chimera_linux_errno_to_status(-cqe->res);
                     }
@@ -529,6 +549,19 @@ chimera_io_uring_reap(
 
                         dir_stx = (struct statx *) request->plugin_data;
                         stx     = (struct statx *) (dir_stx + 1);
+
+                        if ((request->open_at.flags & CHIMERA_VFS_OPEN_CREATE_REGULAR) &&
+                            !S_ISREG(stx->stx_mode)) {
+                            /* CREATE_REGULAR re-opened an existing non-regular
+                             * object by O_PATH handle only to classify it; reject
+                             * it now (directory -> EISDIR, else EEXIST) and drop
+                             * the metadata handle so no fh is returned. */
+                            close(request->open_at.r_vfs_private);
+                            request->open_at.r_vfs_private = -1;
+                            request->status                = S_ISDIR(stx->stx_mode) ?
+                                CHIMERA_VFS_EISDIR : CHIMERA_VFS_EEXIST;
+                            break;
+                        }
 
                         /* Resolve the returned fh from the open fd itself
                          * (AT_EMPTY_PATH) rather than by name under parent_fd.
