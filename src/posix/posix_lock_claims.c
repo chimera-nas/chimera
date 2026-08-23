@@ -663,3 +663,101 @@ chimera_posix_lock_claim_seek_end(
      * exactly what the backend did not tell us. */
     return 0;
 } /* chimera_posix_lock_claim_seek_end */
+
+/* -------------------------------------------------------------------- */
+/* Unlock: carve locally, then wait for the backend to let go            */
+/* -------------------------------------------------------------------- */
+
+/*
+ * F_UNLCK has to be observable the moment it returns, including to another
+ * PROCESS asking the shared arbiter -- which cannot wait on this node's
+ * projection work queue.  So the carve runs on a worker's vfs thread and
+ * this call blocks until every backend release it produced has completed.
+ * Without a range-arbitrating backend there is nothing to wait for and the
+ * carve happens in place.
+ */
+struct chimera_posix_unlock_ctx {
+    struct chimera_client_request   request;
+    struct chimera_posix_client    *posix;
+    struct chimera_posix_ofd       *ofd;
+    struct chimera_vfs_open_handle *handle;
+    uint64_t                        offset;
+    uint64_t                        length;
+    pthread_mutex_t                 mutex;
+    pthread_cond_t                  cond;
+    int                             done;
+};
+
+static void
+chimera_posix_unlock_flushed(void *private_data)
+{
+    struct chimera_posix_unlock_ctx *ctx = private_data;
+
+    pthread_mutex_lock(&ctx->mutex);
+    ctx->done = 1;
+    pthread_cond_signal(&ctx->cond);
+    pthread_mutex_unlock(&ctx->mutex);
+} /* chimera_posix_unlock_flushed */
+
+static void
+chimera_posix_unlock_exec(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request)
+{
+    struct chimera_posix_unlock_ctx *ctx   = request->lock_probe_private;
+    struct chimera_vfs_state        *state = chimera_posix_vfs_state(ctx->posix);
+    struct chimera_vfs_file_state   *file;
+
+    chimera_posix_ofd_lock_carve(ctx->posix, ctx->ofd, ctx->handle,
+                                 ctx->offset, ctx->length);
+
+    file = chimera_vfs_state_get(state, ctx->handle->fh,
+                                 (uint8_t) ctx->handle->fh_len,
+                                 ctx->handle->fh_hash, true);
+
+    chimera_vfs_claim_backend_flush_releases(thread->vfs_thread, state, file,
+                                             chimera_posix_unlock_flushed, ctx);
+
+    chimera_vfs_state_put(state, file);
+} /* chimera_posix_unlock_exec */
+
+void
+chimera_posix_lock_claim_unlock(
+    struct chimera_posix_client    *posix,
+    struct chimera_posix_ofd       *ofd,
+    struct chimera_vfs_open_handle *handle,
+    uint64_t                        offset,
+    uint64_t                        length)
+{
+    struct chimera_vfs_state       *state = chimera_posix_vfs_state(posix);
+    struct chimera_posix_unlock_ctx ctx;
+
+    if (!chimera_vfs_claim_backend_range_capable(state)) {
+        chimera_posix_ofd_lock_carve(posix, ofd, handle, offset, length);
+        return;
+    }
+
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.posix  = posix;
+    ctx.ofd    = ofd;
+    ctx.handle = handle;
+    ctx.offset = offset;
+    ctx.length = length;
+    pthread_mutex_init(&ctx.mutex, NULL);
+    pthread_cond_init(&ctx.cond, NULL);
+
+    ctx.request.heap_allocated     = 0;
+    ctx.request.lock_probe_private = &ctx;
+
+    chimera_posix_worker_enqueue(chimera_posix_choose_worker(posix),
+                                 &ctx.request, chimera_posix_unlock_exec);
+
+    pthread_mutex_lock(&ctx.mutex);
+    while (!ctx.done) {
+        pthread_cond_wait(&ctx.cond, &ctx.mutex);
+    }
+    pthread_mutex_unlock(&ctx.mutex);
+
+    pthread_mutex_destroy(&ctx.mutex);
+    pthread_cond_destroy(&ctx.cond);
+} /* chimera_posix_lock_claim_unlock */

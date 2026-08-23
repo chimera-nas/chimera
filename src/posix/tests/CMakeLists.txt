@@ -736,10 +736,11 @@ generate_cthon_backend_tests(cairn CAIRN_ENABLED)
 generate_cthon_backend_tests(linux CHIMERA_LINUX)
 generate_cthon_backend_tests(io_uring CHIMERA_VFS_IO_URING)
 
-# Cthon lock test programs.  Locking no longer needs a backend that fronts a
-# real OS lock: the claim core arbitrates within the node for every backend,
-# and a CHIMERA_VFS_CAP_CLAIM_RANGE backend additionally arbitrates outside
-# it.  memfs is included to keep the in-node path covered.
+# Cthon lock test programs.  These fork and assert that a SECOND PROCESS
+# sees the lock, so they need a backend whose files are shared between
+# processes -- not memfs, whose storage is per-process (the child does not
+# even find the file).  In-process lock semantics are covered by the quint
+# posix model and by test_lock_project.
 set(CTHON_LOCK_TEST_PROGRAMS
     cthon_lock_tlock
 )
@@ -753,15 +754,12 @@ endif()
 if(CHIMERA_VFS_IO_URING)
     add_cthon_test(cthon_lock_tlock_io_uring cthon_lock_tlock io_uring)
 endif()
-add_cthon_test(cthon_lock_tlock_memfs cthon_lock_tlock memfs)
 
-# Independent POSIX fcntl/lockf tests.  memfs runs them on the claim core
-# alone (deviation PD1 retired: it no longer advertises a lock passthrough it
-# never implemented); linux and io_uring additionally project to the host.
+# Independent POSIX fcntl/lockf tests.  Cross-process, like the cthon lock
+# tests above, so they run on the backends that front shared storage.
 foreach(prog test_fcntl test_lockf)
     add_posix_testprog(${prog})
     string(REGEX REPLACE "^test_" "" test_name ${prog})
-    add_posix_test(${test_name}_memfs ${prog} memfs)
     if(CHIMERA_LINUX)
         add_posix_test(${test_name}_linux ${prog} linux)
         add_posix_nfs3_test(${test_name} ${prog} linux)

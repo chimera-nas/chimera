@@ -232,6 +232,16 @@ chimera_posix_lock_claim_acquire(
     struct chimera_posix_ofd_lock *node,
     bool                           wait);
 
+/* F_UNLCK: carve the local coverage and wait for any backend releases it
+* produced to complete, so the range really is free when this returns. */
+void
+chimera_posix_lock_claim_unlock(
+    struct chimera_posix_client    *posix,
+    struct chimera_posix_ofd       *ofd,
+    struct chimera_vfs_open_handle *handle,
+    uint64_t                        offset,
+    uint64_t                        length);
+
 /* F_GETLK's backend half: ask a range-arbitrating backend whether anything
  * outside this process holds the probed range.  Returns false when nothing
  * arbitrates ranges or the range is free; true fills *conflict. */
