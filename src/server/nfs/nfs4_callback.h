@@ -19,7 +19,7 @@ struct nfs4_cb_path;
 struct evpl;
 struct evpl_doorbell;
 struct evpl_rpc2_conn;
-struct chimera_vfs_lease;
+struct chimera_vfs_claim;
 
 /* Marker stored at offset 0 of struct nfs4_cb_client and set as the
  * private_data of a 4.0 outbound callback connection, so the shared rpc2
@@ -143,7 +143,7 @@ void nfs4_cb_probe_park(
  * Begin recalling `deleg` by sending CB_RECALL to its client.  Safe to call
  * from any thread; the work is marshalled to the channel's owner thread.
  * Takes a transient ref on `deleg` for the in-flight recall.  If no usable
- * callback path exists, the delegation's lease is revoked so the conflicting
+ * callback path exists, the delegation's claim is revoked so the conflicting
  * acquirer can proceed.
  */
 void nfs4_cb_recall(
@@ -164,9 +164,9 @@ void nfs4_cb_resend_recalls_on_rebind(
     struct nfs_client                *client,
     struct nfs_request               *req);
 
-/* vfs_state break_cb wired onto every delegation's CACHING lease. */
+/* Claim break_cb wired onto every delegation's cache claim. */
 void nfs4_delegation_break_cb(
-    struct chimera_vfs_lease *lease,
+    struct chimera_vfs_claim *claim,
     uint8_t                   needed_mode,
     void                     *private_data);
 
@@ -212,10 +212,12 @@ nfs4_find_conflicting_write_deleg(
 bool
 nfs4_cb_layoutrecall(
     struct chimera_server_nfs_thread *thread,
-    struct nfs_client *client,
-    const uint8_t *fh,
-    uint32_t fh_len,
-    uint16_t export_id,
-    const struct stateid4 *layout_stateid,
-    void ( *done )(int cb_status, void *arg),
-    void *arg);
+    struct nfs_client                *client,
+    const uint8_t                    *fh,
+    uint32_t                          fh_len,
+    uint16_t                          export_id,
+    const struct stateid4            *layout_stateid,
+    void (                           *done )(
+        int   cb_status,
+        void *arg),
+    void                             *arg);

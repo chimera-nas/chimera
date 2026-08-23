@@ -15,7 +15,7 @@
 #include "nlm4_xdr.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
-#include "vfs/vfs_state.h"
+#include "vfs/vfs_claim.h"
 #include "vfs/vfs_cred.h"
 
 /* Magic number stored in nlm_client.magic to distinguish it from nfs4_session *
@@ -46,14 +46,15 @@ struct nlm_lock_entry {
     bool                               exclusive;
     bool                               pending; /* true while VFS open/acquire in flight */
     struct chimera_vfs_open_handle    *handle; /* kept open while lock held */
-    /* vfs_state coordination — populated once the open completes and the
-     * acquire is dispatched.  `lease` is inserted into vfs_state on
-     * GRANTED; `ticket` is the queue entry for breakable conflicts; CANCEL
-     * uses chimera_vfs_lease_acquire_cancel on the ticket. */
-    struct chimera_vfs_lease           lease;
+    /* Claim-core coordination — populated once the open completes and the
+     * acquire is dispatched.  `claim` is inserted into the claim core on
+     * GRANTED; `ticket` is the queue entry for breakable (and blocking
+     * hard-DENIED) conflicts; CANCEL uses chimera_vfs_claim_cancel on the
+     * ticket. */
+    struct chimera_vfs_claim           claim;
     struct chimera_vfs_pending_acquire ticket;
     struct chimera_vfs_file_state     *file_state;
-    bool                               lease_inserted; /* lease present in vfs_state */
+    bool                               claim_inserted; /* claim present in claim core */
     struct nlm_lock_entry             *next;
     struct nlm_lock_entry             *prev;
 };

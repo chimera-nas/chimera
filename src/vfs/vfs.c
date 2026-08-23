@@ -25,7 +25,7 @@
 #include "vfs/vfs_user_cache.h"
 #include "vfs/vfs_identity.h"
 #include "vfs/vfs_notify.h"
-#include "vfs/vfs_state.h"
+#include "vfs/vfs_claim.h"
 #include "vfs/vfs_pnfs.h"
 #include "vfs/vfs_mount_table.h"
 #include "vfs/memfs/memfs.h"
@@ -230,6 +230,11 @@ chimera_vfs_close_thread_wake_shutdown(
     count  = chimera_vfs_close_thread_sweep(evpl, close_thread, close_thread->vfs->vfs_open_path_cache, min_age);
     count += chimera_vfs_close_thread_sweep(evpl, close_thread, close_thread->vfs->vfs_open_file_cache, min_age);
 
+    /* Backend-lease service work rides this doorbell too. */
+    if (close_thread->vfs->vfs_state) {
+        chimera_vfs_claim_backend_service(close_thread->vfs->vfs_state);
+    }
+
     if (!shutdown) {
         return;
     }
@@ -267,8 +272,10 @@ chimera_vfs_close_thread_wake_timer(
     chimera_vfs_close_thread_sweep(evpl, close_thread, close_thread->vfs->vfs_open_file_cache, min_age);
 
     /* Drop implicit I/O leases that have gone idle, bounding resident
-     * per-file state for write-once / read-once workloads. */
+     * per-file state for write-once / read-once workloads; drain any
+     * posted backend-lease service work on the same cadence. */
     if (close_thread->vfs->vfs_state) {
+        chimera_vfs_claim_backend_service(close_thread->vfs->vfs_state);
         chimera_vfs_state_reap_idle(close_thread->vfs->vfs_state,
                                     close_thread->vfs->vfs_state->implicit_idle_ms);
     }
@@ -310,6 +317,15 @@ chimera_vfs_close_thread_init(
     close_thread->evpl       = evpl;
     close_thread->vfs_thread = chimera_vfs_thread_init(evpl, close_thread->vfs);
 
+    /* The close thread doubles as the claim core's backend-lease service
+     * thread: aggregate CAP_LEASE dispatches and recall drains run here. */
+    if (close_thread->vfs->vfs_state) {
+        chimera_vfs_claim_backend_attach(close_thread->vfs->vfs_state,
+                                         close_thread->vfs,
+                                         close_thread->vfs_thread,
+                                         &close_thread->doorbell);
+    }
+
     evpl_add_doorbell(evpl, &close_thread->doorbell,
                       chimera_vfs_close_thread_wake_shutdown);
 
@@ -326,6 +342,14 @@ chimera_vfs_close_thread_shutdown(
     void        *private_data)
 {
     struct chimera_vfs_close_thread *close_thread = private_data;
+
+    /* Umount/RmFs teardown traffic on other vfs threads can still release
+     * claims and post service work; detach first so those posts stop ringing
+     * the doorbell we are about to destroy, then drain what already landed. */
+    if (close_thread->vfs->vfs_state) {
+        chimera_vfs_claim_backend_detach(close_thread->vfs->vfs_state);
+        chimera_vfs_claim_backend_service(close_thread->vfs->vfs_state);
+    }
 
     evpl_remove_doorbell(evpl, &close_thread->doorbell);
     evpl_remove_timer(evpl, &close_thread->timer);

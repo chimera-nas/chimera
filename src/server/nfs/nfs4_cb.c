@@ -163,7 +163,8 @@ chimera_nfs4_cb_recall_and_wait(
     struct chimera_server_nfs_thread *thread,
     const uint8_t                    *fh,
     uint32_t                          fhlen,
-    void (                           *resume )(void *arg),
+    void (                           *resume )(
+        void *arg),
     void                             *resume_arg)
 {
     struct nfs_layout_recall_waiter *waiter;

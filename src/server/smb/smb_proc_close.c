@@ -23,11 +23,14 @@ chimera_smb_break_caching_for_namespace(
         request->compound->thread->vfs_thread;
     struct chimera_vfs_state       *vfs_state = vfs_thread->vfs->vfs_state;
     struct chimera_vfs_open_handle *oh        = open_file->handle;
-    struct chimera_vfs_lease_owner  owner     = {
-        .protocol   = CHIMERA_VFS_LEASE_PROTO_SMB2,
-        .client_key = request->session_handle->session->client_key,
-        .owner_lo   = open_file->file_id.pid,
-        .owner_hi   = open_file->file_id.vid,
+    struct chimera_claim_actor      actor     = {
+        .owner          = {
+            .proto      = CHIMERA_CLAIM_PROTO_SMB2,
+            .client_key = request->session_handle->session->client_key,
+            .owner_lo   = open_file->file_id.pid,
+            .owner_hi   = open_file->file_id.vid,
+        },
+        .op_handle      = open_file->handle,
     };
 
     if (!oh) {
@@ -37,14 +40,15 @@ chimera_smb_break_caching_for_namespace(
     /* An RqLs open is owned by its lease key, not its file_id: identify the
     * operating open by the key so its OWN lease is spared by the recall. */
     if (open_file->oplock_level == SMB2_OPLOCK_LEVEL_LEASE) {
-        memcpy(&owner.owner_lo, open_file->lease_key, 8);
-        memcpy(&owner.owner_hi, open_file->lease_key + 8, 8);
-        owner.is_lease = 1;
+        memcpy(actor.owner.key, open_file->lease_key, 16);
+        memcpy(&actor.owner.owner_lo, open_file->lease_key, 8);
+        memcpy(&actor.owner.owner_hi, open_file->lease_key + 8, 8);
     }
 
-    chimera_vfs_state_break_caching_for_namespace(
-        vfs_state, oh->fh, oh->fh_len, oh->fh_hash, &owner,
-        CHIMERA_VFS_LEASE_MODE_R);
+    chimera_vfs_claim_invalidate(
+        vfs_state, oh->fh, oh->fh_len, oh->fh_hash,
+        CHIMERA_TRIGGER_NS_UNLINK, &actor,
+        CHIMERA_CLAIM_CR /* strip beyond-R holders to a read cache */);
 } /* chimera_smb_break_caching_for_namespace */
 
 /* Fire-and-forget completion for the persistent-handle record delete. */

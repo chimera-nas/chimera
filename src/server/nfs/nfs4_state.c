@@ -1296,10 +1296,10 @@ open_state_cleanup(
     (void) table;
 
     /* Release the cross-protocol SHARE reservation, if held. */
-    if (vfs_state && state->share_lease_held) {
-        chimera_vfs_lease_release(vfs_state, state->share_file_state,
-                                  &state->share_lease);
-        state->share_lease_held = false;
+    if (vfs_state && state->share_claim_held) {
+        chimera_vfs_claim_release(vfs_state, state->share_file_state,
+                                  &state->share_claim);
+        state->share_claim_held = false;
     }
     if (vfs_state && state->share_file_state) {
         chimera_vfs_state_put(vfs_state, state->share_file_state);
@@ -1642,19 +1642,20 @@ nfs_lock_state_create(
 } /* nfs_lock_state_create */
 
 /* Insert a byte-range lock interval [start, end) (end == UINT64_MAX => to EOF)
- * of `mode` for `owner` on `file_state` (the ref's ownership transfers to the
+ * for `owner` on `file_state` (the ref's ownership transfers to the
  * returned entry), and link it onto lock_state->range_leases.  The interval is
  * always a sub-region or coalesced union of locks this owner already
- * coordinated, so the synchronous insert grants without conflict. */
+ * coordinated, so the synchronous acquire grants without conflict. */
 struct nfs4_range_lease *
 nfs4_range_lease_insert(
-    struct chimera_vfs_state             *vfs_state,
-    struct nfs_lock_state                *lock_state,
-    struct chimera_vfs_file_state        *file_state,
-    const struct chimera_vfs_lease_owner *owner,
-    uint8_t                               mode,
-    uint64_t                              start,
-    uint64_t                              end)
+    struct chimera_vfs_state         *vfs_state,
+    struct nfs_lock_state            *lock_state,
+    struct chimera_vfs_file_state    *file_state,
+    const struct chimera_claim_owner *owner,
+    bool                              exclusive,
+    uint64_t                          start,
+    uint64_t                          end,
+    void                             *cb_private)
 {
     struct nfs4_range_lease *rl = calloc(1, sizeof(*rl));
 
@@ -1663,31 +1664,34 @@ nfs4_range_lease_insert(
         return NULL;
     }
 
-    rl->file_state         = file_state;
-    rl->lease.kind         = CHIMERA_VFS_LEASE_RANGE;
-    rl->lease.mode.granted = mode;
-    rl->lease.mode.denied  = 0;
-    rl->lease.owner        = *owner;
-    rl->lease.offset       = start;
-    /* The VFS range layer represents to-EOF as UINT64_MAX (length 0 is a
+    rl->file_state = file_state;
+    /* The claim core represents to-EOF as UINT64_MAX (length 0 is a
      * genuine zero-byte range), matching the [start, end) sentinel here. */
-    rl->lease.length = (end == UINT64_MAX) ? UINT64_MAX : (end - start);
+    chimera_vfs_claim_init_range(&rl->claim, exclusive, /*smb=*/ false,
+                                 start,
+                                 (end == UINT64_MAX) ? UINT64_MAX : (end - start),
+                                 owner);
+    /* Courteous server: report this lock dead once the owning client's lease
+     * lapses, so a conflicting acquire reclaims it. */
+    rl->claim.is_alive_cb = nfs_client_lease_alive;
+    rl->claim.revoked_cb  = nfs_client_lease_revoked_cb;
+    rl->claim.cb_private  = cb_private;
 
-    chimera_vfs_state_try_insert(vfs_state, file_state, &rl->lease, NULL);
+    chimera_vfs_claim_try_acquire(vfs_state, file_state, &rl->claim, NULL);
 
     rl->next                 = lock_state->range_leases;
     lock_state->range_leases = rl;
     return rl;
 } /* nfs4_range_lease_insert */
 
-/* Release the vfs_state lease backing `rl` and free it.  Caller has already
+/* Release the claim backing `rl` and free it.  Caller has already
  * unlinked it from lock_state->range_leases. */
 void
 nfs4_range_lease_free(
     struct chimera_vfs_state *vfs_state,
     struct nfs4_range_lease  *rl)
 {
-    chimera_vfs_lease_release(vfs_state, rl->file_state, &rl->lease);
+    chimera_vfs_claim_release(vfs_state, rl->file_state, &rl->claim);
     chimera_vfs_state_put(vfs_state, rl->file_state);
     free(rl);
 } /* nfs4_range_lease_free */
@@ -1701,14 +1705,14 @@ lock_state_cleanup(
     struct chimera_vfs_state *vfs_state = vfs_thread ? vfs_thread->vfs->vfs_state : NULL;
     struct nfs4_range_lease  *rl, *tmp;
 
-    /* Drain any byte-range leases still held (ranges not explicitly
+    /* Drain any byte-range claims still held (ranges not explicitly
      * released by LOCKU before CLOSE / lock-owner teardown). */
     rl                  = state->range_leases;
     state->range_leases = NULL;
     while (rl) {
         tmp = rl->next;
         if (vfs_state) {
-            chimera_vfs_lease_release(vfs_state, rl->file_state, &rl->lease);
+            chimera_vfs_claim_release(vfs_state, rl->file_state, &rl->claim);
             chimera_vfs_state_put(vfs_state, rl->file_state);
         }
         free(rl);
@@ -1847,7 +1851,7 @@ delegation_cleanup(
         vfs_thread ? vfs_thread->vfs->vfs_state : NULL;
 
     if (vfs_state && deleg->lease_held) {
-        chimera_vfs_lease_release(vfs_state, deleg->file_state, &deleg->lease);
+        chimera_vfs_claim_release(vfs_state, deleg->file_state, &deleg->claim);
         deleg->lease_held = false;
     }
     if (vfs_state && deleg->file_state) {
@@ -1914,19 +1918,19 @@ nfs_delegation_destroy(
     delegation_destroy_common(deleg, table, vfs_thread, false, true);
 } /* nfs_delegation_destroy */
 
-/* vfs_state revoked_cb (wired onto every delegation lease).  Marks the
+/* Claim revoked_cb (wired onto every delegation claim).  Marks the
  * delegation revoked so its stateid reports NFS4ERR_DELEG_REVOKED, and bumps
  * the owning client's revoked count (drives SEQ4_STATUS_RECALLABLE_STATE_
  * REVOKED).  Idempotent. */
 SYMBOL_EXPORT void
 nfs_delegation_revoked_cb(
-    struct chimera_vfs_lease *lease,
+    struct chimera_vfs_claim *claim,
     void                     *private_data)
 {
     struct nfs_delegation *deleg    = private_data;
     uint8_t                expected = 0;
 
-    (void) lease;
+    (void) claim;
 
     if (atomic_load_explicit(&deleg->destroyed, memory_order_acquire)) {
         return;
@@ -1941,12 +1945,12 @@ nfs_delegation_revoked_cb(
 
 SYMBOL_EXPORT bool
 nfs_client_lease_alive(
-    const struct chimera_vfs_lease *lease,
+    const struct chimera_vfs_claim *claim,
     void                           *private_data)
 {
     const struct nfs_client *client = private_data;
 
-    (void) lease;
+    (void) claim;
 
     /* Dead (reclaimable) once the lease has lapsed into courtesy state. */
     return !atomic_load_explicit(&client->courtesy, memory_order_relaxed);
@@ -1954,27 +1958,27 @@ nfs_client_lease_alive(
 
 SYMBOL_EXPORT void
 nfs_client_lease_revoked_cb(
-    struct chimera_vfs_lease *lease,
+    struct chimera_vfs_claim *claim,
     void                     *private_data)
 {
     struct nfs_client *client = private_data;
 
-    (void) lease;
+    (void) claim;
 
-    /* A conflicting acquirer reclaimed a lease this courtesy client still
+    /* A conflicting acquirer reclaimed a claim this courtesy client still
      * held.  Flag it so the next lease sweep tears the client down; until
-     * then its other leases stay reclaimable (still in courtesy). */
+     * then its other claims stay reclaimable (still in courtesy). */
     atomic_store_explicit(&client->reclaim_pending, 1, memory_order_release);
 } /* nfs_client_lease_revoked_cb */
 
 SYMBOL_EXPORT bool
 nfs_delegation_lease_alive(
-    const struct chimera_vfs_lease *lease,
+    const struct chimera_vfs_claim *claim,
     void                           *private_data)
 {
     const struct nfs_delegation *deleg = private_data;
 
-    (void) lease;
+    (void) claim;
 
     return !atomic_load_explicit(&deleg->client->courtesy, memory_order_relaxed);
 } /* nfs_delegation_lease_alive */
