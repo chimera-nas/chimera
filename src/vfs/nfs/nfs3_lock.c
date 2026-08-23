@@ -194,7 +194,10 @@ chimera_nfs3_range_take_overlapping(
     uint64_t                   offset,
     uint64_t                   length)
 {
-    struct chimera_nfs3_range *range, *tmp, *matched = NULL;
+    struct chimera_nfs3_range *range, *tmp;
+    /* A plain next-chain: this list is private to the caller and only ever
+     * consumed from the head, so it needs no tail or prev links. */
+    struct chimera_nfs3_range *matched = NULL;
 
     pthread_mutex_lock(&shared->nlm_range_lock);
 
@@ -211,8 +214,16 @@ chimera_nfs3_range_take_overlapping(
             continue;
         }
 
-        DL_DELETE(shared->nlm_ranges, range);
-        DL_APPEND(matched, range);
+        /* The head is necessarily non-null inside its own iteration; the
+         * test is for the static analyzer, which cannot see that across a
+         * loop that removes several elements and otherwise reads
+         * DL_DELETE's `head->prev` as a null dereference. */
+        if (shared->nlm_ranges) {
+            DL_DELETE(shared->nlm_ranges, range);
+        }
+        range->next = matched;
+        range->prev = NULL;
+        matched     = range;
     }
 
     pthread_mutex_unlock(&shared->nlm_range_lock);
@@ -587,9 +598,9 @@ chimera_nfs3_unlock_ranged_send(struct chimera_vfs_request *request)
         return;
     }
 
-    range = ctx->pending;
-    DL_DELETE(ctx->pending, range);
-    ctx->range = range;
+    range        = ctx->pending;
+    ctx->pending = range->next;
+    ctx->range   = range;
 
     chimera_nfs3_map_fh(range->fh, range->fh_len, &fh, &fhlen);
 
@@ -731,11 +742,13 @@ chimera_nfs3_claim_release_ranged(
                                                            (int) request->fh_len,
                                                            oh, 0, UINT64_MAX);
 
-        DL_FOREACH_SAFE(ctx->pending, range, tmp)
-        {
-            DL_DELETE(ctx->pending, range);
+        range = ctx->pending;
+        while (range) {
+            tmp = range->next;
             free(range);
+            range = tmp;
         }
+        ctx->pending = NULL;
 
         request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
