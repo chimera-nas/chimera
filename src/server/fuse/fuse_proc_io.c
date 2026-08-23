@@ -246,7 +246,7 @@ chimera_fuse_op_read(
 {
     const struct fuse_read_in     *in = arg;
     struct chimera_fuse_open_file *file;
-    struct chimera_vfs_lease_owner owner;
+    struct chimera_claim_actor     actor;
 
     if (arglen < sizeof(*in)) {
         chimera_fuse_reply(req, EINVAL, NULL, 0);
@@ -266,9 +266,12 @@ chimera_fuse_op_read(
                                   file->handle->fh_hash);
     }
 
-    /* Attributed to the mount's own lease identity so a read never breaks
-     * this mount's invalidation grant (copied by value downstream). */
-    chimera_fuse_grant_owner(&owner, req->channel->mount,
+    /* Attributed to the mount's own claim identity so a read never breaks
+     * this mount's invalidation grant (copied by value downstream).  The
+     * actor's op_handle stays NULL: a FUSE grant self-exempts at the CLIENT
+     * circle, which the shared mount client_key already provides. */
+    memset(&actor, 0, sizeof(actor));
+    chimera_fuse_grant_owner(&actor.owner, req->channel->mount,
                              file->handle->fh_hash);
 
     chimera_vfs_read_owned(req->thread->vfs_thread, &req->cred,
@@ -276,7 +279,7 @@ chimera_fuse_op_read(
                            in->offset, in->size,
                            req->u.read.iov, CHIMERA_FUSE_IOV_MAX,
                            0,
-                           &owner,
+                           &actor,
                            chimera_fuse_read_complete, req);
 } /* chimera_fuse_op_read */
 
@@ -340,7 +343,7 @@ chimera_fuse_op_write(
     evpl_iovec_clone_segment(&req->u.write.iov, &req->buf, data_off, in->size);
 
     struct chimera_fuse_open_file *file = chimera_fuse_file(in->fh);
-    struct chimera_vfs_lease_owner owner;
+    struct chimera_claim_actor     actor;
 
     /* coherence=sync: the kernel retains the written pages in its cache, so
      * they need grant coverage exactly like read-seeded pages. */
@@ -351,10 +354,12 @@ chimera_fuse_op_write(
                                   file->handle->fh_hash);
     }
 
-    /* Attributed to the mount's own lease identity: the kernel wrote
+    /* Attributed to the mount's own claim identity: the kernel wrote
      * through us, so its cache is current and must not be invalidated;
-     * every OTHER holder's read cache still breaks. */
-    chimera_fuse_grant_owner(&owner, req->channel->mount,
+     * every OTHER holder's read cache still breaks -- and under sync
+     * coherence the write parks until those breaks ack. */
+    memset(&actor, 0, sizeof(actor));
+    chimera_fuse_grant_owner(&actor.owner, req->channel->mount,
                              file->handle->fh_hash);
 
     chimera_vfs_write_owned(req->thread->vfs_thread, &req->cred,
@@ -362,7 +367,7 @@ chimera_fuse_op_write(
                             in->offset, in->size, sync,
                             0, 0,
                             &req->u.write.iov, 1,
-                            &owner,
+                            &actor,
                             chimera_fuse_write_complete, req);
 } /* chimera_fuse_op_write */
 
