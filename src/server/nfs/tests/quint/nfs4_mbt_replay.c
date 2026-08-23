@@ -248,7 +248,6 @@ enum v4_dev {
     DEV_ACCESS_NO_EXECUTE,        /* D4-2 */
     DEV_SYMLINK_MODE_0755,        /* D4-4 */
     DEV_LOOKUPP_SYMLINK,          /* D4-7 */
-    DEV_COPY_SPECIAL_STATEID,     /* D4-14 */
     DEV_COARSE_TYPE_ERR,          /* D4-15 */
     DEV_READLINK_DIR_INVAL,       /* D4-16 */
     DEV_COUNT,
@@ -259,7 +258,6 @@ static const char *v4_dev_ids[DEV_COUNT] = {
     "D4-2-access-no-execute",
     "D4-4-symlink-mode-0755",
     "D4-7-lookupp-symlink",
-    "D4-14-copy-special-stateid",
     "D4-15-coarse-type-error",
     "D4-16-readlink-dir-inval",
 };
@@ -921,41 +919,66 @@ v4_expand_name(
     /* *INDENT-OFF* */
     struct { const char *tag; const char *bytes; uint32_t len; } map[] = {
         /* --- rejected by chimera_nfs4_validate_name ------------------ */
-        { "NEMPTY",  "",                                          0                             },
-        { "NDOT",    ".",                                         1                             },
-        { "NDOTDOT", "..",                                        2                             },
-        { "NSLASH",  "a/b",                                       3                             },
-        { "NNUL",    "a\0b",                                      3                             },
+        { "NEMPTY",  "",                                          0
+        },
+        { "NDOT",    ".",                                         1
+        },
+        { "NDOTDOT", "..",                                        2
+        },
+        { "NSLASH",  "a/b",                                       3
+        },
+        { "NNUL",    "a\0b",                                      3
+        },
         /* --- rejected by chimera_nfs4_utf8_valid, one per branch ----- */
-        { "NUTF8",   "\x80",                                      1                             }, /* stray continuation */
-        { "NUTF8B",  "\xC0" "\x80",                               2                             }, /* overlong 2-byte    */
-        { "NUTF8C",  "\xE0" "\x80" "\x80",                        3                             }, /* overlong 3-byte    */
-        { "NUSUR",   "\xED" "\xA0" "\x80",                        3                             }, /* surrogate U+D800   */
-        { "NUNCH",   "\xEF" "\xBF" "\xBF",                        3                             }, /* non-char U+FFFF    */
-        { "NU4OV",   "\xF0" "\x8F" "\xBF" "\xBF",                 4                             }, /* overlong 4-byte    */
-        { "NU4HI",   "\xF4" "\x90" "\x80" "\x80",                 4                             }, /* above U+10FFFF     */
-        { "NUF5",    "\xF5" "\x80" "\x80" "\x80",                 4                             }, /* c > 0xF4           */
-        { "NUTRUNC", "\xE6" "\x97",                               2                             }, /* truncated 3-byte   */
-        { "NUBADC",  "\xC3" "A",                                  2                             }, /* bad continuation   */
+        { "NUTF8",   "\x80",                                      1
+        },                                                                                         /* stray continuation */
+        { "NUTF8B",  "\xC0" "\x80",                               2
+        },                                                                                         /* overlong 2-byte    */
+        { "NUTF8C",  "\xE0" "\x80" "\x80",                        3
+        },                                                                                         /* overlong 3-byte    */
+        { "NUSUR",   "\xED" "\xA0" "\x80",                        3
+        },                                                                                         /* surrogate U+D800   */
+        { "NUNCH",   "\xEF" "\xBF" "\xBF",                        3
+        },                                                                                         /* non-char U+FFFF    */
+        { "NU4OV",   "\xF0" "\x8F" "\xBF" "\xBF",                 4
+        },                                                                                         /* overlong 4-byte    */
+        { "NU4HI",   "\xF4" "\x90" "\x80" "\x80",                 4
+        },                                                                                         /* above U+10FFFF     */
+        { "NUF5",    "\xF5" "\x80" "\x80" "\x80",                 4
+        },                                                                                         /* c > 0xF4           */
+        { "NUTRUNC", "\xE6" "\x97",                               2
+        },                                                                                         /* truncated 3-byte   */
+        { "NUBADC",  "\xC3" "A",                                  2
+        },                                                                                         /* bad continuation   */
         /* --- multi-character names.  Every sentinel above is a single
          * character, so the validator's loop (for i < len, with the inner
          * continuation-byte while) only ever ran one iteration and never a
          * transition between widths.  These do. --- */
-        { "NUMIXB",  "a" "\xC3" "\xA9" "\x80",                    4                             }, /* ok,ok,stray cont  */
-        { "NUMIXT",  "a" "\xE6" "\x97",                           3                             }, /* ok, then truncated*/
-        { "NUMIXS",  "\xC3" "\xA9" "\xED" "\xA0" "\x80",          5                             }, /* ok, surrogate */
+        { "NUMIXB",  "a" "\xC3" "\xA9" "\x80",                    4
+        },                                                                                         /* ok,ok,stray cont  */
+        { "NUMIXT",  "a" "\xE6" "\x97",                           3
+        },                                                                                         /* ok, then truncated*/
+        { "NUMIXS",  "\xC3" "\xA9" "\xED" "\xA0" "\x80",          5
+        },                                                                                         /* ok, surrogate */
         /* --- ACCEPTED: the multi-byte success paths, which every name
          * the model generated until now (pure ASCII) skipped entirely --- */
         { "NUMIX",   "a" "\xC3" "\xA9" "\xE6" "\x97" "\xA5"
           "\xF0" "\x9D" "\x84" "\x9E",  10 },            /* 1+2+3+4 widths  */
-        { "NUREP",   "\xC3" "\xA9" "\xC3" "\xA9" "\xC3" "\xA9",   6                             }, /* loop x3 */
-        { "NU2",     "\xC3" "\xA9",                               2                             }, /* U+00E9  e-acute    */
-        { "NU3",     "\xE6" "\x97" "\xA5",                        3                             }, /* U+65E5  CJK        */
-        { "NU4",     "\xF0" "\x9D" "\x84" "\x9E",                 4                             }, /* U+1D11E clef       */
-        { "NU3E",    "\xE0" "\xA0" "\x80",                        3                             }, /* U+0800  3-byte min */
-        { "NU3S",    "\xED" "\x9F" "\xBF",                        3                             }, /* U+D7FF just below
+        { "NUREP",   "\xC3" "\xA9" "\xC3" "\xA9" "\xC3" "\xA9",   6
+        },                                                                                         /* loop x3 */
+        { "NU2",     "\xC3" "\xA9",                               2
+        },                                                                                         /* U+00E9  e-acute    */
+        { "NU3",     "\xE6" "\x97" "\xA5",                        3
+        },                                                                                         /* U+65E5  CJK        */
+        { "NU4",     "\xF0" "\x9D" "\x84" "\x9E",                 4
+        },                                                                                         /* U+1D11E clef       */
+        { "NU3E",    "\xE0" "\xA0" "\x80",                        3
+        },                                                                                         /* U+0800  3-byte min */
+        { "NU3S",    "\xED" "\x9F" "\xBF",                        3
+        },                                                                                         /* U+D7FF just below
                                                                                                     * the surrogates    */
-        { "NU4M",    "\xF4" "\x8F" "\xBF" "\xBF",                 4                             }, /* U+10FFFF max       */
+        { "NU4M",    "\xF4" "\x8F" "\xBF" "\xBF",                 4
+        },                                                                                         /* U+10FFFF max       */
     };
     /* *INDENT-ON* */
     unsigned i;
@@ -2773,22 +2796,6 @@ classify_status_mismatch(
     * silently miss each new op the generator learns to aim at a symlink. */
     if (est == NFS4ERR_NOTDIR && ast == V4_ERR_SYMLINK) {
         o->dev_hits[DEV_LOOKUPP_SYMLINK]++;
-        o->status_dev = ast;
-        return;
-    }
-    /* D4-14: chimera's COPY has no special-stateid path at all --
-     * chimera_nfs4_copy_state_handle() resolves the anonymous/bypass stateid
-     * to a NULL handle and the op answers NFS4ERR_BAD_STATEID.  RFC 7862
-     * §15.2.3 (R-42-43) only requires ca_src_stateid to be READ-valid and
-     * ca_dst_stateid WRITE-valid, and RFC 5661 §8.2.3 makes the anonymous
-     * stateid exactly that (subject to share reservations), so the model is
-     * right and this is a chimera gap, not RFC discretion.  Accepted here so
-     * the corpus keeps running past COPY; retire once COPY learns to open the
-     * FH on the fly the way SEEK and DEALLOCATE do.  Narrow on purpose: a
-     * BAD_STATEID the model itself predicted still compares normally. */
-    if (strcmp(tag, "SCopy") == 0 && ast == NFS4ERR_BAD_STATEID &&
-        est != NFS4ERR_BAD_STATEID) {
-        o->dev_hits[DEV_COPY_SPECIAL_STATEID]++;
         o->status_dev = ast;
         return;
     }
