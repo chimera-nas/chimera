@@ -720,6 +720,21 @@ chimera_vfs_bl_range_complete(
         pthread_mutex_unlock(&state->service_lock);
     }
 
+    if (error_code == CHIMERA_VFS_ENOTSUP) {
+        /* The backend does not arbitrate ranges (the capability gate in
+         * chimera_vfs_claim_acquire_backend answered for it).  That is not a
+         * refusal -- nobody outside this node has an opinion -- so the local
+         * grant stands, and the file is marked so we stop asking. */
+        pthread_mutex_lock(&file->lock);
+        file->bl_range_disabled = 1;
+        file->bl_range_probed   = 1;
+        pthread_mutex_unlock(&file->lock);
+
+        cb(CHIMERA_CLAIM_GRANTED, claim, NULL, cb_private);
+        chimera_vfs_state_put(state, file);
+        return;
+    }
+
     if (error_code == CHIMERA_VFS_OK && granted) {
         pthread_mutex_lock(&file->lock);
         claim->backend_token = token;

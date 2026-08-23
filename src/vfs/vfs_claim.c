@@ -1595,11 +1595,21 @@ chimera_vfs_claim_pump_pending(
         /* A pump-granted projectable lock is confirmed by the service
          * thread (the pump runs on whatever thread released the blocker
          * and has no dispatch context of its own); the callback fires from
-         * there after confirmation. */
+         * there after confirmation.
+         *
+         * The test is the RANGE capability and the RANGE per-file flag --
+         * not the aggregate ones, which say nothing about whether this
+         * backend arbitrates byte ranges.  The per-file flag may still be
+         * unresolved here (resolving it needs a thread to identify the
+         * module), in which case the service thread discovers the answer
+         * and a backend that does not arbitrate ranges reports ENOTSUP,
+         * which chimera_vfs_bl_range_complete turns back into the local
+         * grant rather than a denial. */
         if (result == CHIMERA_CLAIM_GRANTED &&
             t->claim->klass == CHIMERA_CLAIM_CLASS_RANGE &&
-            !file->bl_disabled &&
-            chimera_vfs_claim_backend_capable(state)) {
+            !file->bl_range_disabled &&
+            t->claim->owner.proto == CHIMERA_CLAIM_PROTO_POSIX &&
+            chimera_vfs_claim_backend_range_capable(state)) {
             chimera_vfs_claim_backend_defer_ticket(state, t);
             continue;
         }
