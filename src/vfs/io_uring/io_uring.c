@@ -489,8 +489,12 @@ chimera_io_uring_reap(
                         rname     = (char *) (stx + 1);
                         parent_fd = request->open_at.handle->vfs_private;
 
+                        /* No mode supplied (NFS3 EXCLUSIVE create defers it to
+                         * SETATTR): default 0644 to match memfs/cairn and the
+                         * linux backend, so per-op DAC does not diverge on the
+                         * pre-SETATTR object.  See linux.c open_at. */
                         rmode = (request->open_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE)
-                                ? request->open_at.set_attr->va_mode : 0600;
+                                ? request->open_at.set_attr->va_mode : 0644;
 
                         rpers = chimera_io_uring_get_personality(thread, request->cred);
 
@@ -1498,7 +1502,10 @@ chimera_io_uring_open_at(
             request->open_at.set_attr->va_set_mask &= ~CHIMERA_VFS_ATTR_MODE;
         }
     } else {
-        mode = 0600;
+        /* No mode supplied (NFS3 EXCLUSIVE create defers it): 0644 to match the
+         * memfs/cairn/linux backends and the model, so per-op DAC does not
+         * diverge on the pre-SETATTR object.  See linux.c open_at. */
+        mode = 0644;
     }
 
     io_uring_prep_openat(sqe, parent_fd, fullname, flags, mode);
