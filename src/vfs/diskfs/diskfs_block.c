@@ -1230,10 +1230,12 @@ diskfs_block_waiter_dispatch(
  */
 static inline struct diskfs_block *
 diskfs_block_defer_retry(
-    struct diskfs_thread *thread,
+    struct diskfs_thread      *thread,
     struct diskfs_block_shard *shard,
-    void ( *resume )(struct diskfs_thread *, void *),
-    void *arg)
+    void (                    *resume )(
+        struct diskfs_thread *,
+        void *),
+    void                      *arg)
 {
     struct diskfs_block_waiter *w = diskfs_block_waiter_alloc(thread);
 
@@ -1494,11 +1496,13 @@ diskfs_bt_block_get(
 struct diskfs_block *
 diskfs_block_claim_async(
     struct diskfs_thread *thread,
-    uint32_t device_id,
-    uint64_t device_offset,
-    int is_new,
-    void ( *resume )(struct diskfs_thread *, void *),
-    void *arg)
+    uint32_t              device_id,
+    uint64_t              device_offset,
+    int                   is_new,
+    void (               *resume )(
+        struct diskfs_thread *,
+        void *),
+    void                 *arg)
 {
     struct diskfs_block_cache  *cache  = thread->shared->block_cache;
     uint64_t                    hash   = diskfs_block_hash(device_id, device_offset);

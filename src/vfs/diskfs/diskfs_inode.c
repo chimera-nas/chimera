@@ -589,9 +589,11 @@ diskfs_gen_extend(struct diskfs_thread *thread)
 int
 diskfs_gen_alloc(
     struct diskfs_thread *thread,
-    uint32_t *r_gen,
-    void ( *resume )(struct diskfs_thread *, void *),
-    void *arg)
+    uint32_t             *r_gen,
+    void (               *resume )(
+        struct diskfs_thread *,
+        void *),
+    void                 *arg)
 {
     struct diskfs_shared *shared = thread->shared;
     uint64_t              g      = __atomic_fetch_add(&shared->gen_next, 1,
