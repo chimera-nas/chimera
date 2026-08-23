@@ -45,11 +45,41 @@ set_tests_properties(chimera/server/smb/mbt/oplock_probe_memfs PROPERTIES
     LABELS "smb_mbt;memfs"
     TIMEOUT 90)
 
+# Durable/persistent-handle ground-truth probe: pins the durable grant matrix,
+# the granted Timeout policy, park/reclaim across a transport drop, the reclaim
+# denial matrix, v1 (DHnQ/DHnC) handling, expiry, replay eligibility,
+# FSCTL_LMR_REQUEST_RESILIENCY and persistent handles on a CA share.
+add_executable(smb2_durable_probe smb2_durable_probe.c)
+target_include_directories(smb2_durable_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(smb2_durable_probe chimera_server chimera_metrics)
+
+add_test(NAME chimera/server/smb/mbt/durable_probe_memfs
+    COMMAND $<TARGET_FILE:smb2_durable_probe>)
+set_tests_properties(chimera/server/smb/mbt/durable_probe_memfs PROPERTIES
+    LABELS "smb_mbt;memfs"
+    TIMEOUT 120)
+
+# Replay / ChannelSequence ground-truth probe: pins the exactly-once layer --
+# the command-sequence window, what makes a CREATE replayable, the four
+# create_guid classification outcomes, and the ChannelSequence accept/reject
+# window at every checked operation.  Every exactly-once claim is asserted on
+# the EFFECT (file content, size, open count), never on the status alone.
+add_executable(smb2_replay_probe smb2_replay_probe.c)
+target_include_directories(smb2_replay_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(smb2_replay_probe chimera_server chimera_metrics)
+
+add_test(NAME chimera/server/smb/mbt/replay_probe_memfs
+    COMMAND $<TARGET_FILE:smb2_replay_probe>)
+set_tests_properties(chimera/server/smb/mbt/replay_probe_memfs PROPERTIES
+    LABELS "smb_mbt;memfs"
+    TIMEOUT 120)
+
 # ---------------------------------------------------------------------------
 # Trace replay (ROADMAP-SMB.md Increment 3).  A single smb2_mbt_replay process
-# opens the server + client evpl once (capability profile taken from the first
-# trace -- every trace in a batch shares it, since a profile is fixed per
-# generation instance) and replays every trace in the corpus, standing up a
+# opens the server + client evpl once per CAPABILITY PROFILE (the corpus spans
+# several generation instances -- smb2Base has leases off, smb2Durable has
+# durable on -- so the replayer groups adjacent traces by profile and restarts
+# the server when it changes) and replays every trace in the corpus, standing up a
 # fresh uniquely-named memfs per trace AND opening fresh connections/sessions
 # per trace (smb2_conn_reset drops the prior trace's sessions/opens), so neither
 # the filesystem nor the SMB session/tree/handle state leaks across traces.

@@ -17,11 +17,27 @@
  * block index i is a BS-byte block of byte value s (0 = a hole, reads zero).
  *
  * This replayer builds session/tree bootstrap, the file CREATE
- * disposition/share matrix, CLOSE, READ, WRITE and compounds on the wire.
- * The generated base corpus uses the `stepCore` flavor (delete-on-close
- * excluded until a ground-truth probe pins its removal timing -- see
- * DEVIATIONS-SMB.md Q-1).  Locks, set/query-info, rename and the oplock/lease
- * break lifecycle extend the replayer in a later pass.
+ * disposition/share matrix, CLOSE, READ, WRITE, compounds and the oplock/lease
+ * caching lifecycle on the wire.  The generated base corpus uses the
+ * `stepCore` flavor (delete-on-close excluded until a ground-truth probe pins
+ * its removal timing -- see DEVIATIONS-SMB.md Q-1).  Locks, set/query-info and
+ * rename extend the replayer in a later pass.
+ *
+ * Caching lifecycle (what makes the oplock/lease surface reachable at all):
+ *   - a CREATE carries the model's oplock/lease REQUEST (this used to be
+ *     hard-NULL, so no generated trace ever asked for a caching grant);
+ *   - the granted level / lease state / v2 epoch is compared against the exact
+ *     grant the model computed, not merely "some cache or none";
+ *   - the async interim (STATUS_PENDING) the server emits when the open must
+ *     wait behind a peer's ack-required break is a first-class assertion: the
+ *     model's `parked` flag must match whether an interim went out;
+ *   - every break NOTIFICATION is matched to the model's prediction on the
+ *     holder's own connection -- wire shape (lease vs legacy), current/new
+ *     state, acknowledgment requirement and epoch -- and any notification the
+ *     model did not predict fails the replay;
+ *   - OPLOCK_BREAK / LEASE_BREAK acknowledgments are sent in the wire form the
+ *     model chose (StructureSize 24 vs 36) and their status compared, which is
+ *     what reaches the ack handler's rejection arms.
  */
 
 #include "smb2_mbt_common.h"
@@ -31,16 +47,80 @@
 #include <jansson.h>
 
 #define BS       64              /* bytes per model block symbol */
-#define MAX_SESS 16
-#define MAX_TREE 16
-#define MAX_FID  1024
+
+/* The model's session, tree and FileId numbers are allocated from monotonic
+ * counters (StateDB.nextSess / nextTree / nextFile) and are NEVER recycled, so
+ * these tables are indexed by an id that only grows: a walk that drops and
+ * remakes sessions burns a slot per drop.  They are therefore sized for the
+ * deepest registered batch rather than for the model's LIVE limits (which are
+ * MAX_SESSIONS = 2, MAX_TREES = 3, MAX_OPENS = 6), and an id past the end is a
+ * HARNESS limit, reported as such and fatal -- never silently mapped to a NULL
+ * connection, which is what the durable flavors used to do. */
+#define MAX_SESS 512
+#define MAX_TREE 512
+#define MAX_FID  4096
 
 static struct smb2_env   g_env;
+/* The connection a live model session is bound to, NULL once a modeled
+ * transport drop has taken it away. */
 static struct smb2_conn *g_conn_for_sess[MAX_SESS];
+/* Every connection a session was EVER bound to, kept after the drop: a
+ * reconnect must present the dropped session's ClientGuid (MS-SMB2 3.3.5.9.7 --
+ * chimera refuses a leased or persistent reclaim from a different client), and
+ * the model names the client by the session it is reconnecting FOR. */
+static struct smb2_conn *g_conn_hist[MAX_SESS];
 static uint32_t          g_wire_tree[MAX_TREE];
 static uint8_t           g_wire_fid[MAX_FID][16];
+/* Has this model FileId ever been learned from the wire?  A model fid is never
+ * reused, so a SECOND reply carrying one the replayer already knows is the
+ * model asserting "this is the same open" -- a replayed CREATE answered from
+ * the reply cache, or a reclaim of a parked handle.  The wire FileId must then
+ * be byte-identical, which is the exactly-once oracle MS-SMB2 3.3.5.9.10 asks
+ * for stated as an assertion rather than a status comparison. */
+static int               g_fid_known[MAX_FID];
+/* Which connection owns each model FileId: a break notification for a handle
+ * is pushed to the HOLDER's connection, and the acknowledgment must go back on
+ * that same connection, so the fid -> conn binding is as load-bearing as the
+ * fid -> wire FileId one. */
+static struct smb2_conn *g_conn_for_fid[MAX_FID];
+/* The model lease key (a small int) each handle's grant carries, or -1.  A
+ * LEASE_BREAK acknowledgment is keyed by the 16-byte lease key, not by FileId. */
+static int               g_lease_key_for_fid[MAX_FID];
+/* Which parked handles the replayer has already waited for (see park_barrier). */
+static int               g_park_barriered[MAX_FID];
+/* The model state AFTER the message being replayed -- the `parked` map of which
+ * is what tells the disconnect handler which handles the server still owes a
+ * park. */
+static json_t           *g_post_sdb;
 static const char       *g_trace;
 static int               g_nmismatch;
+
+/* Settle every server thread so the break notifications a command owes have
+ * been delivered -- and so that "no break was sent" is a fact rather than a
+ * guess about how long to wait.
+ *
+ * A break is queued, and the holder's thread doorbell rung, by the thread that
+ * ran the conflicting operation, BEFORE that operation's reply goes out.  So by
+ * the time the command's reply has been parsed the notification exists; what is
+ * still outstanding is the holder thread flushing it, and the holder may be any
+ * connection on any thread.  smb2_quiesce() drives an ECHO barrier over every
+ * connection, repeatedly, until a whole pass produces no new break, interim or
+ * reply (see smb2_mbt_common.h) -- costing a couple of round trips, not a
+ * couple of milliseconds of sleeping, and costing exactly one pass when the
+ * command provoked nothing.
+ *
+ * This replaces two wall-clock waits: a 2 s budget for the predicted count to
+ * arrive, and -- far more expensively -- an unconditional 2 ms spin after every
+ * single command that predicted NO break, whose only purpose was to give an
+ * unpredicted break a chance to show up before a later command was blamed for
+ * it.  At the registered corpus size (24 traces x 240-500 commands) that spin
+ * alone was several seconds of pure sleeping per batch, and neither wait made
+ * the verdict any more sound: a slower machine simply got a longer window. */
+static void
+settle_breaks(void)
+{
+    smb2_quiesce(&g_env);
+} /* settle_breaks */
 
 /* ---- ITF helpers -------------------------------------------------------- */
 
@@ -102,6 +182,67 @@ mism(
     printf("\n");
     g_nmismatch++;
 } /* mism */
+
+/* A model id that has run off the end of one of the tables above is a HARNESS
+ * limit, not a divergence: the trace is fine and the replayer cannot represent
+ * it.  Say so and stop, rather than returning a slot that does not exist. */
+static void
+slot_overflow(
+    const char *what,
+    int64_t     id,
+    int         limit)
+{
+    fprintf(stderr,
+            "smb2 harness: model %s id %lld exceeds the replayer's table "
+            "(%d slots).\n  Raise MAX_%s in smb2_mbt_replay.c, or generate "
+            "this batch at a shallower depth.\n  Trace: %s\n",
+            what, (long long) id, limit,
+            strcmp(what, "session") == 0 ? "SESS"
+            : strcmp(what, "tree") == 0 ? "TREE" : "FID",
+            g_trace ? g_trace : "?");
+    exit(3);
+} /* slot_overflow */
+
+/* The live connection a model session is bound to.
+ *
+ * Returns NULL only when the session has no connection at all, which for a
+ * generated trace is a HARNESS bug and not a model one: every action in
+ * smb2.qnt draws its session from `sessions`, and a modeled transport drop
+ * removes the session (and its trees and non-durable opens) from that map in
+ * the same step -- so the model never drives a session it has disconnected.
+ * Callers therefore report a missing connection as a mismatch and refuse to
+ * run the command; nothing hands NULL onward to a PDU builder (which asserts
+ * loudly on one anyway -- smb2c_begin). */
+static struct smb2_conn *
+conn_for_sess(int64_t sess)
+{
+    if (sess < 0) {
+        return NULL;
+    }
+    if (sess >= MAX_SESS) {
+        slot_overflow("session", sess, MAX_SESS);
+    }
+    return g_conn_for_sess[sess];
+} /* conn_for_sess */
+
+/* Bind a model session id to the connection that carries it.  `hist` remembers
+ * the binding past the drop, for the reconnect's ClientGuid. */
+static void
+bind_sess(
+    int64_t           sess,
+    struct smb2_conn *c)
+{
+    if (sess < 0) {
+        return;
+    }
+    if (sess >= MAX_SESS) {
+        slot_overflow("session", sess, MAX_SESS);
+    }
+    g_conn_for_sess[sess] = c;
+    if (c) {
+        g_conn_hist[sess] = c;
+    }
+} /* bind_sess */
 
 /* ---- model -> wire field maps ------------------------------------------- */
 
@@ -171,6 +312,311 @@ sym_byte(int64_t s)
     return (uint8_t) (s == 0 ? 0 : s);
 } /* sym_byte */
 
+/* An ITF set is {"#set": [...]}; a list is a plain array. */
+static json_t *
+jset(json_t *o)
+{
+    if (json_is_object(o)) {
+        json_t *s = json_object_get(o, "#set");
+        if (s) {
+            return s;
+        }
+    }
+    return o;
+} /* jset */
+
+/* Model lease key (a small int) -> the 16-byte wire LeaseKey.  Any injective
+ * map will do; the server only ever compares keys for equality. */
+static void
+lease_key_wire(
+    int64_t  k,
+    uint8_t *out)
+{
+    memset(out, 0, 16);
+    out[0] = 'L';
+    out[1] = 'K';
+    out[2] = (uint8_t) k;
+} /* lease_key_wire */
+
+/* Model LeaseState record -> wire lease bits (R=0x01, H=0x02, W=0x04). */
+static uint32_t
+lease_bits_wire(json_t *st)
+{
+    uint32_t m = 0;
+
+    if (jbool(st, "r")) {
+        m |= SMB2_LEASE_READ;
+    }
+    if (jbool(st, "h")) {
+        m |= SMB2_LEASE_HANDLE;
+    }
+    if (jbool(st, "w")) {
+        m |= SMB2_LEASE_WRITE;
+    }
+    return m;
+} /* lease_bits_wire */
+
+static uint8_t
+oplock_level_wire(const char *tag)
+{
+    if (strcmp(tag, "OpLevelII") == 0) {
+        return SMB2_OPLOCK_LEVEL_II;
+    }
+    if (strcmp(tag, "OpExclusive") == 0) {
+        return SMB2_OPLOCK_LEVEL_EXCLUSIVE;
+    }
+    if (strcmp(tag, "OpBatch") == 0) {
+        return SMB2_OPLOCK_LEVEL_BATCH;
+    }
+    return SMB2_OPLOCK_LEVEL_NONE;
+} /* oplock_level_wire */
+
+/* Build the CREATE's oplock/lease request from the model's OplockReq.  Until
+ * now the replayer passed NULL here, so no generated trace ever asked for a
+ * caching grant and the whole oplock/lease surface was unreachable from the
+ * corpus. */
+static const struct smb2_oplock_req *
+oplock_req_of(
+    json_t                 *opl,
+    struct smb2_oplock_req *req)
+{
+    const char *tag = jtag(opl);
+
+    memset(req, 0, sizeof(*req));
+    if (strcmp(tag, "OrNone") == 0) {
+        return NULL;
+    }
+    if (strcmp(tag, "OrLease") == 0) {
+        json_t *v = jval(opl);
+
+        req->is_lease = 1;
+        lease_key_wire(jfield(v, "key"), req->lease_key);
+        req->lease_state = (jbool(v, "r") ? SMB2_LEASE_READ : 0) |
+            (jbool(v, "h") ? SMB2_LEASE_HANDLE : 0) |
+            (jbool(v, "w") ? SMB2_LEASE_WRITE : 0);
+        req->lease_epoch = (uint16_t) jfield(v, "epoch");
+        req->force_v1    = !jbool(v, "v2");
+        return req;
+    }
+    /* The REQUEST tags (OrLevelII/OrExclusive/OrBatch) are distinct from the
+     * GRANT tags (OpLevelII/...), so they are mapped here rather than through
+     * oplock_level_wire. */
+    if (strcmp(tag, "OrLevelII") == 0) {
+        req->level = SMB2_OPLOCK_LEVEL_II;
+    } else if (strcmp(tag, "OrExclusive") == 0) {
+        req->level = SMB2_OPLOCK_LEVEL_EXCLUSIVE;
+    } else if (strcmp(tag, "OrBatch") == 0) {
+        req->level = SMB2_OPLOCK_LEVEL_BATCH;
+    } else {
+        mism("unknown OplockReq tag '%s'", tag);
+        return NULL;
+    }
+    return req;
+} /* oplock_req_of */
+
+/* ---- durable-handle create contexts ------------------------------------- */
+
+/* The model names a CreateGuid by a small integer (smb2.qnt DUR_GUIDS); the
+ * wire needs 16 bytes.  The map has to be stable for the whole trace, because
+ * the CreateGuid is the identity MS-SMB2 3.3.5.9.10 keys the durable registry
+ * and the CREATE reply cache on: two creates carrying the same symbol MUST
+ * collide on the wire exactly where the model says they collide.
+ *
+ * It is deliberately NOT mixed with the connection's ClientGuid: chimera scopes
+ * the registry scan by ClientGuid, so two clients drawing the same symbol are
+ * two different durable opens -- which is what the model's per-clientTag
+ * durGuidCollision says too, and would be untestable if the harness made the
+ * guids differ by client. */
+static void
+create_guid_wire(
+    int64_t  g,
+    uint8_t *out)
+{
+    memset(out, 0, 16);
+    out[0]  = 0xC0;
+    out[1]  = 0x1D;
+    out[15] = (uint8_t) g;
+} /* create_guid_wire */
+
+/* Build the CREATE's durable contexts from the model's DurableReq.
+ *
+ * DurQ -> a durable REQUEST (DHnQ when v1, DH2Q when v2); DurC -> a
+ * RECONNECT naming the parked handle by the wire FileId the replayer learned
+ * when it was created, optionally with the matching REQUEST alongside
+ * (`alsoQ`, which is legal for v1 and INVALID_PARAMETER for v2 -- probe D4e)
+ * and optionally with SMB2_DHANDLE_FLAG_PERSISTENT set. */
+static const struct smb2_durable_req *
+durable_req_of(
+    json_t                  *dur,
+    struct smb2_durable_req *d)
+{
+    const char *tag = jtag(dur);
+    json_t     *v   = jval(dur);
+
+    memset(d, 0, sizeof(*d));
+    if (strcmp(tag, "DurNone") == 0) {
+        return NULL;
+    }
+    if (strcmp(tag, "DurQ") == 0) {
+        int v2 = jbool(v, "v2");
+
+        if (v2) {
+            d->dh2q = 1;
+            create_guid_wire(jfield(v, "guid"), d->create_guid);
+        } else {
+            d->dhnq = 1;
+        }
+        d->timeout_ms = 0;           /* 0 = the server default, 60000 ms (C-14) */
+        d->flags      = jbool(v, "persistent") ? SMB2_DHANDLE_FLAG_PERSISTENT : 0;
+        return d;
+    }
+    if (strcmp(tag, "DurC") == 0) {
+        int     v2  = jbool(v, "v2");
+        int64_t fid = jfield(v, "fid");
+
+        if (fid < 0 || fid >= MAX_FID) {
+            slot_overflow("fid", fid, MAX_FID);
+        }
+        /* An unknown fid (smbReclaimUnknown draws FileIds that were never
+         * created, or were closed) keeps the zeroed table entry, which matches
+         * no open -- exactly the OBJECT_NAME_NOT_FOUND case the model
+         * predicts. */
+        memcpy(d->file_id, g_wire_fid[fid], 16);
+        create_guid_wire(jfield(v, "guid"), d->create_guid);
+        if (v2) {
+            d->dh2c = 1;
+            d->dh2q = jbool(v, "alsoQ");
+        } else {
+            d->dhnc = 1;
+            d->dhnq = jbool(v, "alsoQ");
+        }
+        d->reconnect_flags =
+            jbool(v, "persistent") ? SMB2_DHANDLE_FLAG_PERSISTENT : 0;
+        return d;
+    }
+    mism("unknown DurableReq tag '%s'", tag);
+    return NULL;
+} /* durable_req_of */
+
+/* ---- break notifications ------------------------------------------------ */
+
+/* Assert that the break notifications the server pushed are EXACTLY the ones
+ * the model predicted for this command: same holder connection, same wire
+ * shape (lease vs legacy), same current/new state, same acknowledgment
+ * requirement and epoch.  Matched notifications are consumed; anything left
+ * over is an unpredicted break and fails the replay. */
+static void
+check_breaks(
+    json_t     *breaks,
+    const char *what)
+{
+    json_t *arr = jset(breaks);
+    size_t  n   = json_array_size(arr);
+
+    /* A break is delivered through a cross-thread doorbell, so it lands a few
+     * loop iterations after the op that triggered it.  Settle every thread
+     * first, so that both directions are decided by an event: a predicted
+     * break that has not arrived really is missing, and an UNPREDICTED break is
+     * seen HERE rather than blamed on a later command. */
+    settle_breaks();
+
+    for (size_t i = 0; i < n; i++) {
+        json_t           *b        = json_array_get(arr, i);
+        int64_t           fid      = jfield(b, "fid");
+        int               is_lease = jbool(b, "isLease");
+        struct smb2_conn *hc       =
+            (fid >= 0 && fid < MAX_FID) ? g_conn_for_fid[fid] : NULL;
+        uint8_t           key[16];
+        int               found = -1;
+
+        if (!hc) {
+            mism("%s: predicted break for fid %lld with no holder connection",
+                 what, (long long) fid);
+            continue;
+        }
+        lease_key_wire(jfield(b, "key"), key);
+
+        for (int k = 0; k < hc->nbrk; k++) {
+            struct smb2_break *q = &hc->brk[k];
+
+            if (!!q->is_lease != !!is_lease) {
+                continue;
+            }
+            if (is_lease) {
+                if (memcmp(q->lease_key, key, 16) != 0) {
+                    continue;
+                }
+            } else if (memcmp(q->file_id, g_wire_fid[fid], 16) != 0) {
+                continue;
+            }
+            found = k;
+            break;
+        }
+
+        if (found < 0) {
+            mism("%s: model predicted a %s break for fid %lld, the wire sent "
+                 "none", what, is_lease ? "LEASE" : "OPLOCK", (long long) fid);
+            continue;
+        }
+
+        struct smb2_break q = hc->brk[found];
+        for (int k = found + 1; k < hc->nbrk; k++) {
+            hc->brk[k - 1] = hc->brk[k];
+        }
+        hc->nbrk--;
+
+        if (is_lease) {
+            uint32_t exp_cur = (uint32_t) jfield(b, "curState");
+            uint32_t exp_new = (uint32_t) jfield(b, "newState");
+            int      exp_ack = jbool(b, "ackReq");
+            uint32_t exp_ep  = (uint32_t) jfield(b, "epoch");
+
+            if (q.cur_state != exp_cur || q.new_state != exp_new) {
+                mism("%s: LEASE break fid %lld state: model 0x%02x->0x%02x "
+                     "wire 0x%02x->0x%02x", what, (long long) fid, exp_cur,
+                     exp_new, q.cur_state, q.new_state);
+            }
+            if (!!q.ack_required != !!exp_ack) {
+                mism("%s: LEASE break fid %lld ack_required: model %d wire %d",
+                     what, (long long) fid, exp_ack, q.ack_required);
+            }
+            if (q.new_epoch != exp_ep) {
+                mism("%s: LEASE break fid %lld epoch: model %u wire %u", what,
+                     (long long) fid, exp_ep, q.new_epoch);
+            }
+        } else {
+            uint32_t exp_lvl = (uint32_t) jfield(b, "newLevel");
+
+            /* A legacy OPLOCK_BREAK notification carries no ack flag on the
+             * wire (MS-SMB2 2.2.23.1), so the model's ackReq is asserted
+             * indirectly instead: an acknowledgment of a break that needed
+             * none is rejected, which the CBreakAck status check covers. */
+            if (q.oplock_level != exp_lvl) {
+                mism("%s: OPLOCK break fid %lld level: model 0x%02x wire 0x%02x",
+                     what, (long long) fid, exp_lvl, q.oplock_level);
+            }
+        }
+    }
+} /* check_breaks */
+
+/* No connection may hold a break the model did not predict. */
+static void
+check_no_stray_breaks(const char *what)
+{
+    for (int i = 0; i < g_env.nconns; i++) {
+        struct smb2_conn *c = g_env.conns[i];
+
+        while (c->nbrk > 0) {
+            mism("%s: unpredicted %s break notification on connection %d", what,
+                 c->brk[0].is_lease ? "LEASE" : "OPLOCK", i);
+            for (int k = 1; k < c->nbrk; k++) {
+                c->brk[k - 1] = c->brk[k];
+            }
+            c->nbrk--;
+        }
+    }
+} /* check_no_stray_breaks */
+
 /* ---- per-command replay + compare --------------------------------------- */
 
 /* Resolve a FidSel (FidRelated -> the current compound's CREATE fid; FidRef k
@@ -204,56 +650,226 @@ wire_caches(const struct smb2_create_out *o)
     return 1;   /* II / exclusive / batch all cache */
 } /* wire_caches */
 
+/* Compare the caching grant the wire handed out against the exact grant the
+* model computed: the oplock level for a legacy grant, and the granted lease
+* state plus (for a v2 lease) the epoch for an RqLs grant.  A grant the model
+* did not predict -- or a level above the predicted one -- is a mismatch. */
+static void
+check_caching(
+    const char                   *name,
+    json_t                       *caching,
+    const struct smb2_create_out *out)
+{
+    const char *ctag = jtag(caching);
+
+    if (strcmp(ctag, "CNone") == 0) {
+        if (wire_caches(out)) {
+            mism("CREATE '%s' caching: model CNone but wire granted oplock "
+                 "0x%02x lease 0x%02x", name, out->oplock, out->lease_state);
+        }
+        return;
+    }
+    if (strcmp(ctag, "COplock") == 0) {
+        uint8_t exp = oplock_level_wire(jtag(jval(caching)));
+
+        if (out->oplock != exp) {
+            mism("CREATE '%s' oplock level: model 0x%02x wire 0x%02x", name,
+                 exp, out->oplock);
+        }
+        return;
+    }
+    /* CLease */
+    json_t  *lv     = jval(caching);
+    uint32_t exp_st = lease_bits_wire(json_object_get(lv, "st"));
+    int      exp_v2 = jbool(lv, "v2");
+    uint32_t exp_ep = (uint32_t) jfield(lv, "epoch");
+
+    if (out->oplock != SMB2_OPLOCK_LEVEL_LEASE) {
+        mism("CREATE '%s' caching: model granted a lease, wire reported "
+             "OplockLevel 0x%02x", name, out->oplock);
+        return;
+    }
+    if (!out->has_lease) {
+        mism("CREATE '%s' caching: model granted a lease but the reply carried "
+             "no RqLs response context", name);
+        return;
+    }
+    if (out->lease_state != exp_st) {
+        mism("CREATE '%s' lease state: model 0x%02x wire 0x%02x", name, exp_st,
+             out->lease_state);
+    }
+    if (exp_v2 && out->lease_epoch != exp_ep) {
+        mism("CREATE '%s' lease epoch: model %u wire %u", name, exp_ep,
+             out->lease_epoch);
+    }
+} /* check_caching */
+
 static void
 do_create(
     struct smb2_conn *c,
     json_t           *v,
     json_t           *res)
 {
-    const char            *name  = json_string_value(json_object_get(v, "name"));
-    uint32_t               disp  = disp_wire(jtag(json_object_get(v, "disp")));
-    uint32_t               acc   = access_wire(json_object_get(v, "access"));
-    uint32_t               shr   = share_wire(json_object_get(v, "share"));
-    int                    doc   = jbool(v, "delOnClose");
-    int                    isdir = jbool(v, "isDir");
-    uint32_t               opts  = isdir ? FILE_DIRECTORY_FILE
+    const char                    *name  = json_string_value(json_object_get(v, "name"));
+    uint32_t                       disp  = disp_wire(jtag(json_object_get(v, "disp")));
+    uint32_t                       acc   = access_wire(json_object_get(v, "access"));
+    uint32_t                       shr   = share_wire(json_object_get(v, "share"));
+    int                            doc   = jbool(v, "delOnClose");
+    int                            isdir = jbool(v, "isDir");
+    uint32_t                       opts  = isdir ? FILE_DIRECTORY_FILE
                                         : FILE_NON_DIRECTORY_FILE;
-    struct smb2_create_out out;
+    struct smb2_create_out         out;
+    struct smb2_oplock_req         oreq;
+    const struct smb2_oplock_req  *reqp =
+        oplock_req_of(json_object_get(v, "oplock"), &oreq);
+    struct smb2_durable_req        dreq;
+    const struct smb2_durable_req *durp =
+        durable_req_of(json_object_get(v, "durable"), &dreq);
+    int                            interim0 = c->ninterim;
 
     if (doc) {
         opts |= FILE_DELETE_ON_CLOSE;
     }
 
-    smb2_create_opts(c, name, disp, acc, shr, opts, NULL, &out);
+    smb2_create_dur_opts(c, name, disp, acc, shr, opts, reqp, durp, &out);
+    if (getenv("SMB2_MBT_DEBUG")) {
+        fprintf(stderr, "DBG create '%s' disp=%u acc=%08x shr=%u opts=%08x "
+                "reqp=%p lvl=%u lease=%d -> st=%08x opl=%02x lease=%02x\n",
+                name, disp, acc, shr, opts, (void *) reqp,
+                reqp ? reqp->level : 0, reqp ? reqp->is_lease : 0,
+                out.status, out.oplock, out.lease_state);
+    }
 
-    json_t                *rv     = jval(res);
-    uint32_t               exp_st = (uint32_t) jfield(rv, "st");
+    json_t  *rv     = jval(res);
+    uint32_t exp_st = (uint32_t) jfield(rv, "st");
 
     if (out.status != exp_st) {
         mism("CREATE '%s' status: model 0x%08x wire 0x%08x", name, exp_st,
              out.status);
         return;
     }
+
+    /* An async interim means the open was granted but held behind a peer's
+     * ack-required break (smb_async_interim.c).  The model predicts exactly
+     * that condition, so assert it rather than tolerating either shape. */
+    int exp_parked = jbool(rv, "parked");
+    int got_parked = (c->ninterim > interim0);
+    if (exp_parked != got_parked) {
+        mism("CREATE '%s' park: model %s an async interim, wire %s one", name,
+             exp_parked ? "expected" : "expected no",
+             got_parked ? "sent" : "sent none");
+    }
+
     if (out.status != ST_SUCCESS) {
         return;
     }
 
-    uint32_t    exp_act = (uint32_t) jfield(rv, "act");
+    uint32_t exp_act = (uint32_t) jfield(rv, "act");
     if (out.action != exp_act) {
         mism("CREATE '%s' action: model %u wire %u", name, exp_act, out.action);
     }
-    /* The base instance grants no caching; the wire must agree. */
-    const char *ctag = jtag(json_object_get(rv, "caching"));
-    if (strcmp(ctag, "CNone") == 0 && wire_caches(&out)) {
-        mism("CREATE '%s' caching: model CNone but wire granted oplock 0x%02x "
-             "lease 0x%02x", name, out.oplock, out.lease_state);
+    check_caching(name, json_object_get(rv, "caching"), &out);
+
+    /* The durable grant.  A DHnQ / DH2Q RESPONSE context is the grant signal
+    * on the wire -- chimera emits one only when it granted (C-13) -- so the
+    * model's boolean is asserted against its presence, not against the status.
+    * A reconnect grants nothing new and answers false (C-15/D3); a
+    * replay-driven reclaim DOES carry one, because the replayed request is a
+    * full DH2Q create (C-46).  Both directions are therefore live checks. */
+    int exp_dur = jbool(rv, "durable");
+    int got_dur = out.has_dh2q || out.has_dhnq;
+    if (exp_dur != got_dur) {
+        mism("CREATE '%s' durable: model %s a durable grant, wire %s one",
+             name, exp_dur ? "expected" : "expected no",
+             got_dur ? "reported" : "reported none");
     }
-    /* Learn the FileId for the model fid this CREATE produced. */
-    int64_t     fid = jfield(rv, "fid");
-    if (fid >= 0 && fid < MAX_FID) {
+    /* No modeled instance serves a continuously-available share, so nothing in
+     * a generated corpus may come back PERSISTENT (MS-SMB2 3.3.5.9.10; probe
+     * D11 pins the share that does grant it). */
+    if (out.has_dh2q && (out.dh2q_flags & SMB2_DHANDLE_FLAG_PERSISTENT)) {
+        mism("CREATE '%s' durable: wire granted a PERSISTENT handle on a share "
+             "with no continuous availability (flags 0x%08x)", name,
+             out.dh2q_flags);
+    }
+
+    /* Learn the FileId, the owning connection and the lease key for the model
+     * fid this CREATE produced. */
+    int64_t fid = jfield(rv, "fid");
+    if (fid >= MAX_FID) {
+        slot_overflow("fid", fid, MAX_FID);
+    }
+    if (fid >= 0) {
+        json_t *caching = json_object_get(rv, "caching");
+
+        /* A model fid is allocated from a monotonic counter and never reused,
+        * so the model returning one it has already handed out means THIS
+        * REPLY IS THE SAME OPEN: a replayed CREATE answered from the reply
+        * cache, or a reclaim of a parked handle.  MS-SMB2 3.3.5.9.10's
+        * exactly-once guarantee is precisely that the wire FileId comes back
+        * unchanged, so compare rather than overwrite -- overwriting is how a
+        * server that quietly made a SECOND open would have gone unnoticed. */
+        if (g_fid_known[fid] &&
+            memcmp(g_wire_fid[fid], out.file_id, 16) != 0) {
+            mism("CREATE '%s': model answered from open %lld (a replay or a "
+                 "reclaim) but the wire returned a DIFFERENT FileId", name,
+                 (long long) fid);
+        }
         memcpy(g_wire_fid[fid], out.file_id, 16);
+        g_fid_known[fid]         = 1;
+        g_conn_for_fid[fid]      = c;
+        g_lease_key_for_fid[fid] =
+            strcmp(jtag(caching), "CLease") == 0
+            ? (int) jfield(jval(caching), "key") : -1;
     }
 } /* do_create */
+
+/* OPLOCK_BREAK (StructureSize 24) / LEASE_BREAK (StructureSize 36)
+ * acknowledgment.  The model resolves the target handle; the wire form is
+ * chosen by the model's `asLease`, which is what the server discriminates on.
+ * Every rejection arm the server distinguishes -- FILE_CLOSED, UNSUCCESSFUL,
+ * INVALID_DEVICE_STATE / INVALID_OPLOCK_PROTOCOL, REQUEST_NOT_ACCEPTED -- is a
+ * status the model predicts here. */
+static void
+do_break_ack(
+    struct smb2_conn *c,
+    json_t           *v,
+    json_t           *res,
+    const uint8_t    *related_fid,
+    int               have_related)
+{
+    json_t  *sel      = json_object_get(v, "fid");
+    int      as_lease = jbool(v, "asLease");
+    uint32_t exp_st   = (uint32_t) jfield(jval(res), "st");
+    int64_t  k        = -1;
+    uint32_t st;
+
+    if (strcmp(jtag(sel), "FidRef") == 0) {
+        k = jint(jval(sel));
+    }
+    if (k < 0 || k >= MAX_FID) {
+        mism("BREAK_ACK: unresolved FileId");
+        return;
+    }
+    (void) related_fid;
+    (void) have_related;
+
+    if (as_lease) {
+        uint8_t key[16];
+
+        lease_key_wire(g_lease_key_for_fid[k], key);
+        st = smb2_lease_break_ack(c, key,
+                                  lease_bits_wire(json_object_get(v,
+                                                                  "ackState")));
+    } else {
+        st = smb2_oplock_break_ack(c, g_wire_fid[k],
+                                   oplock_level_wire(jtag(json_object_get(v,
+                                                                          "ackLevel"))));
+    }
+    if (st != exp_st) {
+        mism("BREAK_ACK (%s, fid %lld) status: model 0x%08x wire 0x%08x",
+             as_lease ? "lease" : "oplock", (long long) k, exp_st, st);
+    }
+} /* do_break_ack */
 
 static void
 do_close(
@@ -367,6 +983,457 @@ do_read(
     (void) exp_eof;   /* eof already implied by count vs request length */
 } /* do_read */
 
+/* ---- the transport drop, the park barrier, and the reconnect ------------ */
+
+/* Handles the server still owes a PARK, indexed by model FileId. */
+static int g_park_pending[MAX_FID];
+
+/* Wait until the server has finished parking every handle a modeled drop left
+ * behind.
+ *
+ * A client-initiated disconnect returns as soon as the DISCONNECTED
+ * notification reaches the CLIENT bind; the server's teardown -- which is what
+ * parks the durable opens (chimera_smb_durable_conn_disconnecting) -- runs
+ * afterwards, on the dropped connection's own server thread, and smb2_quiesce()
+ * cannot order against a thread that has no connection left to echo on.  So
+ * anything that touches the file before that teardown lands is racing it: a
+ * conflicting CREATE that should purge a parked holder (probe D7) instead
+ * meets a LIVE one and is refused, or breaks it.
+ *
+ * The barrier is the durable probe's (wait_parked): a DH2C reconnect carrying
+ * a deliberately WRONG CreateGuid.  chimera_smb_durable_claim answers a
+ * not-yet-parked entry with *r_retry and chimera_smb_durable_reconnect retries
+ * on a timer until it parks, so the reply cannot come back before the park has
+ * happened; once parked, the guid mismatch answers OBJECT_NAME_NOT_FOUND and
+ * leaves the entry untouched (a refused reconnect consumes nothing -- D4j).
+ *
+ * It needs SOME live connection with a tree to send on, and a drop can leave
+ * the replayer with none, so pending handles are flushed at the top of the next
+ * command that has one.  Nothing can race the park in between: the only steps
+ * the model can take with no session are a session setup and a reconnect, and
+ * a reconnect's own reclaim is self-ordering through the same retry. */
+static void
+park_barrier_flush(struct smb2_conn *c)
+{
+    if (!smb2c_check_live(c) || c->tree_id == 0) {
+        return;
+    }
+    for (int fid = 0; fid < MAX_FID; fid++) {
+        struct smb2_durable_req dur;
+        struct smb2_create_out  r;
+        uint32_t                st;
+
+        if (!g_park_pending[fid]) {
+            continue;
+        }
+        g_park_pending[fid] = 0;
+
+        memset(&dur, 0, sizeof(dur));
+        dur.dh2c = 1;
+        memcpy(dur.file_id, g_wire_fid[fid], 16);
+        memset(dur.create_guid, 0xFE, 16);   /* cannot match any real create */
+        st = smb2_create_dur(c, "", FILE_OPEN, FILE_ALL_ACCESS, FILE_SHARE_RWD,
+                             NULL, &dur, &r);
+        if (st != ST_OBJECT_NAME_NOT_FOUND) {
+            mism("park barrier for fid %d: a wrong-CreateGuid DH2C answered "
+                 "0x%08x, expected OBJECT_NAME_NOT_FOUND", fid, st);
+        }
+    }
+} /* park_barrier_flush */
+
+/* The modeled transport drop (MS-SMB2 3.3.7.1).  The model has already decided
+ * which of the session's opens park and which close; the replayer drops the
+ * connection for real and then waits for the park to land. */
+static void
+do_disconnect(
+    struct smb2_conn *c,
+    int64_t           sess)
+{
+    json_t *parked  = g_post_sdb ? json_object_get(g_post_sdb, "parked") : NULL;
+    json_t *entries = parked ? json_object_get(parked, "#map") : NULL;
+
+    smb2_conn_disconnect(c);
+    bind_sess(sess, NULL);
+
+    /* The fid -> connection bindings this connection owned are dead.  A parked
+     * handle acquires a new one when it is reclaimed (do_create); until then
+     * any use of one is a harness bug and must say so rather than write to a
+     * closed connection. */
+    for (int i = 0; i < MAX_FID; i++) {
+        if (g_conn_for_fid[i] == c) {
+            g_conn_for_fid[i] = NULL;
+        }
+    }
+
+    /* Which handles the model says are parked NOW -- read from the post-state
+     * rather than recomputed, so the barrier waits for exactly the set the
+     * oracle believes in. */
+    for (size_t i = 0; i < json_array_size(entries); i++) {
+        json_t *kv  = json_array_get(entries, i);
+        int64_t fid = jint(json_array_get(kv, 0));
+
+        if (fid < 0 || fid >= MAX_FID) {
+            continue;
+        }
+        if (!g_park_barriered[fid]) {
+            g_park_barriered[fid] = 1;
+            g_park_pending[fid]   = 1;
+        }
+    }
+} /* do_disconnect */
+
+/* SET_INFO / FileEndOfFileInformation.  The exactly-once flavor needs it for
+ * one reason above all: its ChannelSequence gate sits in the OPPOSITE place to
+ * WRITE's -- before the info-class check rather than after the access check
+ * (probe R12, C-44) -- so a corpus with only WRITEs cannot tell a server that
+ * put the gate in one place from one that put it in both. */
+static void
+do_set_eof(
+    struct smb2_conn *c,
+    json_t           *v,
+    json_t           *res,
+    const uint8_t    *related_fid,
+    int               have_related)
+{
+    const uint8_t *fid = resolve_fid(json_object_get(v, "fid"), related_fid,
+                                     have_related);
+    int64_t        sz     = jfield(v, "sizeBlocks");
+    uint32_t       exp_st = (uint32_t) jfield(jval(res), "st");
+    uint32_t       st;
+
+    if (!fid) {
+        mism("SET_EOF: unresolved FileId");
+        return;
+    }
+    st = smb2_set_eof(c, fid, (uint64_t) sz * BS);
+    if (st != exp_st) {
+        mism("SET_EOF status: model 0x%08x wire 0x%08x", exp_st, st);
+    }
+} /* do_set_eof */
+
+/* ---- SET_INFO / FileDispositionInformation ------------------------------
+ *
+ * MS-FSCC 2.4.11.  This is the SMB spelling of "unlink": there is no
+ * path-based REMOVE, so the whole delete lifecycle -- mark, unmark, and the
+ * removal that happens at last close -- runs through this one byte.  The
+ * status is asserted here; the EFFECT is asserted by the rest of the trace,
+ * because the model threads `deletePending` into every later QUERY_INFO and
+ * the name's disappearance into every later CREATE. */
+static void
+do_set_disposition(
+    struct smb2_conn *c,
+    json_t           *v,
+    json_t           *res,
+    const uint8_t    *related_fid,
+    int               have_related)
+{
+    const uint8_t *fid = resolve_fid(json_object_get(v, "fid"), related_fid,
+                                     have_related);
+    int            del    = jbool(v, "del");
+    uint32_t       exp_st = (uint32_t) jfield(jval(res), "st");
+    uint32_t       st;
+
+    if (!fid) {
+        mism("SET_DISPOSITION: unresolved FileId");
+        return;
+    }
+    st = smb2_set_disposition(c, fid, del);
+    if (st != exp_st) {
+        mism("SET_DISPOSITION(%s) status: model 0x%08x wire 0x%08x",
+             del ? "delete" : "undelete", exp_st, st);
+    }
+} /* do_set_disposition */
+
+/* ---- SET_INFO / FileRenameInformation -----------------------------------
+ *
+ * MS-FSCC 2.4.37, ReplaceIfExists = FALSE (which is what the model encodes:
+ * doCmdSetRename answers OBJECT_NAME_COLLISION for an occupied target rather
+ * than replacing it).  The rename is by HANDLE, so every open of the inode
+ * follows it -- an expectation the rest of the trace exercises, because the
+ * model re-points every open's (dir,name) and a later delete-on-close or
+ * rename through any of them must therefore target the NEW name. */
+static void
+do_set_rename(
+    struct smb2_conn *c,
+    json_t           *v,
+    json_t           *res,
+    const uint8_t    *related_fid,
+    int               have_related)
+{
+    const uint8_t *fid = resolve_fid(json_object_get(v, "fid"), related_fid,
+                                     have_related);
+    const char    *nn     = json_string_value(json_object_get(v, "newname"));
+    uint32_t       exp_st = (uint32_t) jfield(jval(res), "st");
+    uint32_t       st;
+
+    if (!fid) {
+        mism("SET_RENAME: unresolved FileId");
+        return;
+    }
+    st = smb2_rename(c, fid, nn ? nn : "", 0);
+    if (st != exp_st) {
+        mism("SET_RENAME -> '%s' status: model 0x%08x wire 0x%08x",
+             nn ? nn : "?", exp_st, st);
+    }
+} /* do_set_rename */
+
+/* ---- FLUSH -------------------------------------------------------------- */
+static void
+do_flush(
+    struct smb2_conn *c,
+    json_t           *v,
+    json_t           *res,
+    const uint8_t    *related_fid,
+    int               have_related)
+{
+    const uint8_t *fid    = resolve_fid(v, related_fid, have_related);
+    uint32_t       exp_st = (uint32_t) jfield(jval(res), "st");
+    uint32_t       st;
+
+    if (!fid) {
+        mism("FLUSH: unresolved FileId");
+        return;
+    }
+    st = smb2_flush(c, fid);
+    if (st != exp_st) {
+        mism("FLUSH status: model 0x%08x wire 0x%08x", exp_st, st);
+    }
+} /* do_flush */
+
+/* ---- LOCK ---------------------------------------------------------------
+ *
+ * MS-SMB2 2.2.26.  The model's lock space is measured in the same units as
+ * its I/O offsets (one model block), so a lock over [lo,hi) is the byte range
+ * [lo*BS, hi*BS) on the wire -- the same scaling READ and WRITE use.  Getting
+ * that wrong would make every lock disjoint from every I/O and the mandatory-
+ * lock rule (MS-FSA 2.1.4.2/2.1.4.3) would go untested while every status
+ * still matched. */
+static void
+do_lock(
+    struct smb2_conn *c,
+    json_t           *v,
+    json_t           *res,
+    const uint8_t    *related_fid,
+    int               have_related)
+{
+    const uint8_t *fid = resolve_fid(json_object_get(v, "fid"), related_fid,
+                                     have_related);
+    int64_t        lo     = jfield(v, "lo");
+    int64_t        hi     = jfield(v, "hi");
+    int            unlock = jbool(v, "unlock");
+    int            wr     = jbool(v, "wr");
+    int            fail   = jbool(v, "failImmediately");
+    uint32_t       exp_st = (uint32_t) jfield(jval(res), "st");
+    uint32_t       flags, st;
+
+    if (!fid) {
+        mism("LOCK: unresolved FileId");
+        return;
+    }
+    /* MS-SMB2 2.2.26.1: UNLOCK is exclusive of the other flags -- it must not
+     * carry SHARED/EXCLUSIVE/FAIL_IMMEDIATELY, and a server is entitled to
+     * reject the combination with INVALID_PARAMETER. */
+    if (unlock) {
+        flags = SMB2_LOCKFLAG_UNLOCK;
+    } else {
+        flags = (wr ? SMB2_LOCKFLAG_EXCLUSIVE : SMB2_LOCKFLAG_SHARED) |
+            (fail ? SMB2_LOCKFLAG_FAIL_IMMEDIATELY : 0);
+    }
+    st = smb2_lock(c, fid, (uint64_t) lo * BS, (uint64_t) (hi - lo) * BS,
+                   flags);
+    if (st != exp_st) {
+        mism("%s [%lld,%lld) %s status: model 0x%08x wire 0x%08x",
+             unlock ? "UNLOCK" : "LOCK", (long long) lo, (long long) hi,
+             unlock ? "" : (wr ? "excl" : "shared"), exp_st, st);
+    }
+} /* do_lock */
+
+/* ---- QUERY_INFO ---------------------------------------------------------
+ *
+ * The model's CQueryBasic carries a full attribute prediction -- type, link
+ * count, size and delete-pending -- so the oracle is the CONTENT of the
+ * reply, not just its status.  Three info classes are driven per model
+ * command, each answered by a different marshaller in smb_proc_query_info.c
+ * and each checked against the SAME prediction, so a class that disagrees
+ * with its siblings is caught as well as one that disagrees with the model:
+ *
+ *   FileStandardInformation  (MS-FSCC 2.4.41) -- size, links, delete-pending,
+ *                                                directory flag;
+ *   FileBasicInformation     (MS-FSCC 2.4.7)  -- the FILE_ATTRIBUTE_DIRECTORY
+ *                                                bit, and the READ_ATTRIBUTES
+ *                                                gate that guards this class;
+ *   FileAllInformation       (MS-FSCC 2.4.2)  -- the same four fields again,
+ *                                                marshalled by a different
+ *                                                path at different offsets.
+ *
+ * The model's `change` counter is deliberately NOT compared: it is an
+ * abstract version stamp with no wire spelling (chimera reports real
+ * timestamps), and asserting it against anything would be inventing an
+ * expectation.  Everything else the model predicts is checked. */
+static void
+do_query(
+    struct smb2_conn *c,
+    json_t           *v,
+    json_t           *res,
+    const uint8_t    *related_fid,
+    int               have_related)
+{
+    const uint8_t *fid    = resolve_fid(v, related_fid, have_related);
+    json_t        *rv     = jval(res);
+    uint32_t       exp_st = (uint32_t) jfield(rv, "st");
+    json_t        *attrs  = json_object_get(rv, "attrs");
+    uint8_t        buf[512];
+    uint32_t       blen = 0, st;
+    int            exp_dir;
+    int64_t        exp_nlink, exp_size;
+    int            exp_delpend;
+
+    if (!fid) {
+        mism("QUERY_INFO: unresolved FileId");
+        return;
+    }
+
+    st = smb2_query_info(c, SMB2_INFO_FILE_T, SMB2_FILE_STANDARD_INFO_T, fid,
+                         0, buf, sizeof(buf), &blen);
+    if (st != exp_st) {
+        mism("QUERY_INFO(FileStandardInformation) status: model 0x%08x "
+             "wire 0x%08x", exp_st, st);
+        return;
+    }
+    if (st != ST_SUCCESS) {
+        return;
+    }
+
+    exp_dir     = strcmp(jtag(json_object_get(attrs, "ftype")), "FDir") == 0;
+    exp_nlink   = jfield(attrs, "nlink");
+    exp_size    = jfield(attrs, "sizeBlocks") * BS;
+    exp_delpend = jbool(attrs, "deletePending");
+
+    if (blen < 24) {
+        mism("QUERY_INFO(FileStandardInformation): reply carried %u bytes, "
+             "MS-FSCC 2.4.41 is 24", blen);
+        return;
+    }
+    {
+        uint64_t eof    = g64(buf, 8);
+        uint32_t nlink  = g32(buf, 16);
+        int      delpen = buf[20] != 0;
+        int      isdir  = buf[21] != 0;
+
+        if ((int64_t) eof != exp_size) {
+            mism("QUERY_INFO EndOfFile: model %lld wire %llu",
+                 (long long) exp_size, (unsigned long long) eof);
+        }
+        if ((int64_t) nlink != exp_nlink) {
+            mism("QUERY_INFO NumberOfLinks: model %lld wire %u",
+                 (long long) exp_nlink, nlink);
+        }
+        if (delpen != exp_delpend) {
+            mism("QUERY_INFO DeletePending: model %d wire %d", exp_delpend,
+                 delpen);
+        }
+        if (isdir != exp_dir) {
+            mism("QUERY_INFO Directory: model %d wire %d", exp_dir, isdir);
+        }
+    }
+
+    /* FileBasicInformation: the attribute word.  Every open the model makes
+     * carries FILE_READ_ATTRIBUTES (access_wire sets it unconditionally), so
+     * this class must never be refused -- a refusal here would mean the
+     * gate has moved, which is worth failing on. */
+    st = smb2_query_info(c, SMB2_INFO_FILE_T, SMB2_FILE_BASIC_INFO_T, fid, 0,
+                         buf, sizeof(buf), &blen);
+    if (st != ST_SUCCESS) {
+        mism("QUERY_INFO(FileBasicInformation) status: wire 0x%08x on a handle "
+             "that holds FILE_READ_ATTRIBUTES", st);
+    } else if (blen < 40) {
+        mism("QUERY_INFO(FileBasicInformation): reply carried %u bytes, "
+             "MS-FSCC 2.4.7 is 40", blen);
+    } else {
+        uint32_t fattr = g32(buf, 32);
+        int      isdir = (fattr & SMB2_FILE_ATTRIBUTE_DIRECTORY) != 0;
+
+        if (isdir != exp_dir) {
+            mism("QUERY_INFO FileAttributes: model %s wire 0x%08x",
+                 exp_dir ? "a directory" : "a file", fattr);
+        }
+    }
+
+    /* FileAllInformation: the same four facts, a different marshaller.
+     * MS-FSCC 2.4.2 lays Basic(40) | Standard(24) | Internal(8) | Ea(4) |
+     * Access(4) | Position(8) | Mode(4) | Alignment(4) | Name(...), so the
+     * standard block starts at 40. */
+    st = smb2_query_info(c, SMB2_INFO_FILE_T, SMB2_FILE_ALL_INFO_T, fid, 0,
+                         buf, sizeof(buf), &blen);
+    if (st != ST_SUCCESS) {
+        mism("QUERY_INFO(FileAllInformation) status: wire 0x%08x on a handle "
+             "that holds FILE_READ_ATTRIBUTES", st);
+    } else if (blen < 64) {
+        mism("QUERY_INFO(FileAllInformation): reply carried %u bytes, the "
+             "Basic+Standard prefix alone is 64", blen);
+    } else {
+        uint64_t eof    = g64(buf, 40 + 8);
+        uint32_t nlink  = g32(buf, 40 + 16);
+        int      delpen = buf[40 + 20] != 0;
+        int      isdir  = buf[40 + 21] != 0;
+
+        if ((int64_t) eof != exp_size || (int64_t) nlink != exp_nlink ||
+            delpen != exp_delpend || isdir != exp_dir) {
+            mism("QUERY_INFO(FileAllInformation) disagrees: model "
+                 "(size %lld, links %lld, delpend %d, dir %d) wire "
+                 "(size %llu, links %u, delpend %d, dir %d)",
+                 (long long) exp_size, (long long) exp_nlink, exp_delpend,
+                 exp_dir, (unsigned long long) eof, nlink, delpen, isdir);
+        }
+    }
+} /* do_query */
+
+/* ---- LOGOFF / TREE_DISCONNECT -------------------------------------------
+ *
+ * Session and tree teardown (MS-SMB2 3.3.5.6 / 3.3.5.8).  Both close every
+ * open underneath them, which the model encodes and the rest of the trace
+ * then checks: a handle the teardown destroyed can only be met again as a
+ * fresh CREATE, and the objects those opens pinned become removable. */
+static void
+do_logoff(
+    struct smb2_conn *c,
+    json_t           *res,
+    int64_t           sess)
+{
+    uint32_t exp_st = (uint32_t) jfield(jval(res), "st");
+    uint32_t st     = smb2_logoff(c);
+
+    if (st != exp_st) {
+        mism("LOGOFF status: model 0x%08x wire 0x%08x", exp_st, st);
+    }
+    if (st == ST_SUCCESS) {
+        /* The session id is dead.  Unbind it so a later command that names it
+         * is reported as a harness bookkeeping bug rather than being sent on a
+         * connection whose session the server has already destroyed.  The
+         * connection itself stays in the history: a reconnect may still want
+         * its ClientGuid. */
+        bind_sess(sess, NULL);
+        for (int i = 0; i < MAX_FID; i++) {
+            if (g_conn_for_fid[i] == c) {
+                g_conn_for_fid[i] = NULL;
+            }
+        }
+    }
+} /* do_logoff */
+
+static void
+do_tree_disconnect(
+    struct smb2_conn *c,
+    json_t           *res)
+{
+    uint32_t exp_st = (uint32_t) jfield(jval(res), "st");
+    uint32_t st     = smb2_tree_disconnect(c);
+
+    if (st != exp_st) {
+        mism("TREE_DISCONNECT status: model 0x%08x wire 0x%08x", exp_st, st);
+    }
+} /* do_tree_disconnect */
+
 /* Dispatch one command; returns its wire status so a related compound can
  * stop on the first error (SMB2 first-error-stops). */
 static void
@@ -375,16 +1442,60 @@ dispatch_cmd(
     json_t  *res,
     int64_t  sess,
     int64_t  tree,
+    int64_t  cs,
+    int      replay,
     uint8_t *related_fid,
     int     *have_related)
 {
     const char       *tag = jtag(cmd);
     json_t           *v   = jval(cmd);
-    struct smb2_conn *c   =
-        (sess >= 0 && sess < MAX_SESS) ? g_conn_for_sess[sess] : NULL;
+    struct smb2_conn *c   = conn_for_sess(sess);
+    static char       ctx[192];
 
-    if (c && tree >= 0 && tree < MAX_TREE) {
+    /* Name the step for the wedge diagnostic: a replay that parks forever must
+     * say WHICH command of WHICH trace parked, not just that something did. */
+    snprintf(ctx, sizeof(ctx), "%s command %s (session %lld, tree %lld)",
+             g_trace ? g_trace : "?", tag ? tag : "?", (long long) sess,
+             (long long) tree);
+    smb2c_set_context(ctx);
+
+    if (tree >= MAX_TREE) {
+        slot_overflow("tree", tree, MAX_TREE);
+    }
+    if (c && tree >= 0) {
         c->tree_id = g_wire_tree[tree];
+    }
+
+    /* Any handle a previous drop left mid-park is settled before this command
+     * can race it (see park_barrier_flush). */
+    park_barrier_flush(c);
+
+    /* A command that needs a connection and has none cannot be replayed, and
+     * -- this is the point -- must not be handed to a PDU builder either.  The
+     * model never drives a session it has disconnected (every action draws its
+     * session from the live `sessions` map, which a drop empties in the same
+     * step), so this is always a HARNESS bookkeeping failure and is reported
+     * as a mismatch rather than papered over: a silent skip would leave the
+     * rest of the trace testing a state neither side believes in. */
+    if (!c &&
+        strcmp(tag, "CSessionSetup") != 0 && strcmp(tag, "CReconnect") != 0) {
+        mism("%s: no connection for session %lld (harness bookkeeping bug -- "
+             "the model does not drive a disconnected session)", tag,
+             (long long) sess);
+        return;
+    }
+
+    /* The two exactly-once header fields (MS-SMB2 2.2.1.2) belong to the
+     * MESSAGE, so every request the message expands into carries them.  They
+     * are one-shot arms in the harness, consumed by the send, so they are
+     * re-armed here per command rather than once per message. */
+    if (c) {
+        if (cs != 0) {
+            smb2c_set_next_channel_sequence(c, (uint16_t) cs);
+        }
+        if (replay) {
+            smb2c_set_next_flags(c, SMB2_FLAGS_REPLAY_OPERATION);
+        }
     }
 
     if (strcmp(tag, "CSessionSetup") == 0) {
@@ -396,35 +1507,65 @@ dispatch_cmd(
         if (st != exp_st) {
             mism("SESSION_SETUP status: model 0x%08x wire 0x%08x", exp_st, st);
         }
-        int64_t           rs = jfield(jval(res), "sess");
-        if (rs >= 0 && rs < MAX_SESS) {
-            g_conn_for_sess[rs] = nc;
+        bind_sess(jfield(jval(res), "sess"), nc);
+    } else if (strcmp(tag, "CReconnect") == 0) {
+        /* A fresh connection presenting the SAME ClientGuid as `prev`.  That
+         * identity is the whole point: chimera refuses a leased or persistent
+         * reclaim whose ClientGuid does not match the parked open's, so a
+         * reconnect that quietly took a new guid would turn every reclaim in
+         * the corpus into the cross-client denial (C-17) and the batch would
+         * "pass" while testing nothing.  `prev` is usually a session the drop
+         * already destroyed, which is why the connection history outlives the
+         * binding. */
+        int64_t           prev   = jfield(v, "prev");
+        uint32_t          exp_st = (uint32_t) jfield(jval(res), "st");
+        struct smb2_conn *old    = NULL;
+        struct smb2_conn *nc;
+        uint32_t          st;
+
+        if (prev >= MAX_SESS) {
+            slot_overflow("session", prev, MAX_SESS);
         }
+        if (prev >= 0) {
+            old = g_conn_hist[prev];
+        }
+        if (!old) {
+            mism("RECONNECT: no connection history for session %lld -- the "
+                 "reconnect would present a fresh ClientGuid and could not "
+                 "reclaim anything", (long long) prev);
+            return;
+        }
+        nc = smb2_conn_reopen_raw(&g_env, old);
+        smb2_negotiate(nc);
+        st = smb2_session_setup(nc);
+        if (st != exp_st) {
+            mism("RECONNECT status: model 0x%08x wire 0x%08x", exp_st, st);
+        }
+        bind_sess(jfield(jval(res), "sess"), nc);
+    } else if (strcmp(tag, "CDisconnect") == 0) {
+        do_disconnect(c, sess);
     } else if (strcmp(tag, "CTreeConnect") == 0) {
         uint32_t exp_st = (uint32_t) jfield(jval(res), "st");
         uint32_t st;
-        if (!c) {
-            mism("TREE_CONNECT: no connection for session %lld",
-                 (long long) sess);
-            return;
-        }
         st = smb2_tree_connect(c, "\\\\server\\share");
         if (st != exp_st) {
             mism("TREE_CONNECT status: model 0x%08x wire 0x%08x", exp_st, st);
         }
-        int64_t rt = jfield(jval(res), "tree");
-        if (rt >= 0 && rt < MAX_TREE) {
+        int64_t  rt = jfield(jval(res), "tree");
+        if (rt >= MAX_TREE) {
+            slot_overflow("tree", rt, MAX_TREE);
+        }
+        if (rt >= 0) {
             g_wire_tree[rt] = c->tree_id;
         }
     } else if (strcmp(tag, "CCreate") == 0) {
-        if (!c) {
-            mism("CREATE: no connection for session %lld", (long long) sess);
-            return;
-        }
         do_create(c, v, res);
         /* thread the FileId to the rest of a related compound */
         int64_t fid = jfield(jval(res), "fid");
-        if (fid >= 0 && fid < MAX_FID &&
+        if (fid >= MAX_FID) {
+            slot_overflow("fid", fid, MAX_FID);
+        }
+        if (fid >= 0 &&
             (uint32_t) jfield(jval(res), "st") == ST_SUCCESS) {
             memcpy(related_fid, g_wire_fid[fid], 16);
             *have_related = 1;
@@ -435,8 +1576,45 @@ dispatch_cmd(
         do_write(c, v, res, related_fid, *have_related);
     } else if (strcmp(tag, "CRead") == 0) {
         do_read(c, v, res, related_fid, *have_related);
+    } else if (strcmp(tag, "CSetEof") == 0) {
+        do_set_eof(c, v, res, related_fid, *have_related);
+    } else if (strcmp(tag, "CSetDisposition") == 0) {
+        do_set_disposition(c, v, res, related_fid, *have_related);
+    } else if (strcmp(tag, "CSetRename") == 0) {
+        do_set_rename(c, v, res, related_fid, *have_related);
+    } else if (strcmp(tag, "CFlush") == 0) {
+        do_flush(c, v, res, related_fid, *have_related);
+    } else if (strcmp(tag, "CLock") == 0) {
+        do_lock(c, v, res, related_fid, *have_related);
+    } else if (strcmp(tag, "CQueryBasic") == 0) {
+        do_query(c, v, res, related_fid, *have_related);
+    } else if (strcmp(tag, "CLogoff") == 0) {
+        do_logoff(c, res, sess);
+    } else if (strcmp(tag, "CTreeDisconnect") == 0) {
+        do_tree_disconnect(c, res);
+    } else if (strcmp(tag, "CBreakAck") == 0) {
+        do_break_ack(c, v, res, related_fid, *have_related);
     } else {
         mism("unhandled command tag '%s' (extend the replayer)", tag);
+    }
+
+    /* Nothing may leave a one-shot header modifier armed: it would land on
+     * whatever request went out next -- an ECHO barrier, the next trace step --
+     * and silently move a handle's ChannelSequence mark. */
+    if (c) {
+        smb2c_clear_next(c);
+    }
+
+    /* Every command that can recall a peer's caching grant carries the set of
+     * break notifications the model says the server must push.  Assert them
+     * before moving on, so a missing, extra or misshapen break fails here
+     * rather than surfacing as an unrelated status divergence later. */
+    json_t *rv = jval(res);
+    if (rv && json_is_object(rv)) {
+        json_t *breaks = json_object_get(rv, "breaks");
+        if (breaks) {
+            check_breaks(breaks, tag);
+        }
     }
 } /* dispatch_cmd */
 
@@ -448,6 +1626,8 @@ do_message(json_t *lmsg_value)
     json_t *cmds    = json_object_get(msg, "cmds");
     int64_t sess    = jfield(msg, "sess");
     int64_t tree    = jfield(msg, "tree");
+    int64_t cs      = jfield(msg, "cs");
+    int     replay  = jbool(msg, "replay");
     uint8_t related_fid[16];
     int     have_related = 0;
 
@@ -458,8 +1638,9 @@ do_message(json_t *lmsg_value)
 
     for (size_t i = 0; i < n && i < json_array_size(cmds); i++) {
         dispatch_cmd(json_array_get(cmds, i), json_array_get(results, i),
-                     sess, tree, related_fid, &have_related);
+                     sess, tree, cs, replay, related_fid, &have_related);
     }
+    check_no_stray_breaks("message");
 } /* do_message */
 
 /* ---- trace driver ------------------------------------------------------- */
@@ -514,6 +1695,7 @@ read_caps(
     opts->leases             = jbool(caps, "leases");
     opts->directory_leases   = jbool(caps, "dirLeases");
     opts->persistent_handles = jbool(caps, "durable");
+    opts->force_level2       = jbool(caps, "forceLevel2");
     json_decref(root);
     return 0;
 } /* read_caps */
@@ -557,15 +1739,32 @@ run_trace(
     g_trace     = path;
     g_nmismatch = 0;
 
+    /* Per-trace too: a fid's lease key must not survive into the next trace.
+     * -1 means 'no lease key bound to this fid'. */
+    for (int i = 0; i < MAX_FID; i++) {
+        g_lease_key_for_fid[i] = -1;
+    }
+
     smb2_env_fs_setup(&g_env, fsname);
 
+    /* The state variable holding the whole protocol state, named the same way
+     * lastOp is (`<instance>::smb2::sdb`).  The disconnect handler reads its
+     * `parked` map to learn which handles the server still owes a park. */
+    char        sdbkey[256];
+    const char *sep = strstr(lokey, "::lastOp");
+    snprintf(sdbkey, sizeof(sdbkey), "%.*s::sdb",
+             (int) (sep ? (size_t) (sep - lokey) : strlen(lokey)), lokey);
+
     for (size_t i = 1; i < ns; i++) {
-        json_t *lo = json_object_get(json_array_get(states, i), lokey);
+        json_t *st_i = json_array_get(states, i);
+        json_t *lo   = json_object_get(st_i, lokey);
         if (!lo || strcmp(jtag(lo), "LMsg") != 0) {
             continue;
         }
+        g_post_sdb = json_object_get(st_i, sdbkey);
         do_message(jval(lo));
     }
+    g_post_sdb = NULL;
 
     smb2_conn_reset(&g_env);
     smb2_env_fs_teardown(&g_env, fsname);
@@ -596,24 +1795,51 @@ main(
         return 2;
     }
 
-    /* Every trace in one batch shares a capability profile (one profile per
-     * generation instance -- see smb2_mbt_add_batch in CMakeLists), so the
-     * shared server is configured once from the first trace's LInit. */
-    if (read_caps(traces[0], &opts) != 0) {
-        mbt_free_traces(traces, ntraces);
-        return 2;
-    }
-
-    smb2_env_open_opts(&g_env, &opts);
-
+    /* A trace's capability profile configures the SERVER, which is shared
+     * across the batch -- so traces may only share a server if their profiles
+     * agree.  One --trace-dir now spans several generation instances
+     * (smb2Base has leases off, smb2Durable has durable on), so rather than
+     * assuming one profile per batch, walk the traces in order and restart the
+     * server whenever the profile changes.  Traces from one instance are
+     * generated with a common basename prefix and so arrive adjacent, making
+     * this one server start per instance rather than per trace. */
     int total = 0;
-    for (int i = 0; i < ntraces; i++) {
-        char fsname[32];
-        snprintf(fsname, sizeof(fsname), "fs_%d", i);
-        total += run_trace(fsname, traces[i]);
+    int i     = 0;
+
+    while (i < ntraces) {
+        struct smb2_env_opts group = { 0 };
+
+        if (read_caps(traces[i], &group) != 0) {
+            mbt_free_traces(traces, ntraces);
+            return 2;
+        }
+
+        smb2_env_open_opts(&g_env, &group);
+
+        int first = i;
+        do {
+            char fsname[32];
+            snprintf(fsname, sizeof(fsname), "fs_%d", i);
+            total += run_trace(fsname, traces[i]);
+            i++;
+            if (i >= ntraces) {
+                break;
+            }
+            if (read_caps(traces[i], &opts) != 0) {
+                smb2_env_stop(&g_env);
+                mbt_free_traces(traces, ntraces);
+                return 2;
+            }
+        } while (memcmp(&opts, &group, sizeof(opts)) == 0);
+
+        smb2_env_stop(&g_env);
+
+        if (getenv("SMB2_MBT_VERBOSE")) {
+            fprintf(stderr, "profile group: %d trace(s) from %s\n",
+                    i - first, traces[first]);
+        }
     }
 
-    smb2_env_stop(&g_env);
     mbt_free_traces(traces, ntraces);
 
     if (total) {
