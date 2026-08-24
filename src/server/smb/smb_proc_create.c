@@ -4883,38 +4883,18 @@ chimera_smb_create(struct chimera_smb_request *request)
         return;
     }
 
-    /* Handle stream-name syntax (file:stream[:$DATA]).  When named streams are
-     * disabled (config off, or the backend lacks the capability) the legacy
-     * behavior is preserved: reject any ':' name with OBJECT_NAME_INVALID.
-     * Done here rather than in parse so the response is returned to the client
-     * instead of triggering a parse-error disconnect. */
+    /* Handle stream-name syntax (file:stream[:$DATA]).  "file::$DATA" (empty
+     * stream name, $DATA type) names the object's DEFAULT data fork, not an
+     * alternate stream (MS-FSCC 2.1.5.1.1), so it must open the base file even
+     * when named streams are disabled; the legacy behavior of rejecting any
+     * other ':' name with OBJECT_NAME_INVALID when named streams are disabled
+     * (config off, or the backend lacks the capability) is unchanged.  Parsing
+     * runs unconditionally so that distinction (explicit_data_fork) is known
+     * before the named_streams check.  Done here rather than in parse so the
+     * response is returned to the client instead of triggering a parse-error
+     * disconnect. */
     if (request->create.name_len > 0 &&
         memchr(request->create.name, ':', request->create.name_len)) {
-
-        if (!request->compound->thread->shared->config.named_streams) {
-            /* Gate 1: the feature is off in config, so the name is refused
-             * before any backend is consulted.  Indistinguishable on the wire
-             * from gate 2 in chimera_smb_create_open_stream_chain() ("backend
-             * cannot do this") -- both are OBJECT_NAME_INVALID, which is correct
-             * but hid a cluster of misconfigured smbtorture subtests.  Log
-             * which one fired: it is where investigating such a subtest starts.
-             * What decides whether that subtest belongs in
-             * smbtorture_ads_subtests.txt is the off/on outcome pair described
-             * there, not this line -- a subtest can trip this gate and pass
-             * BECAUSE it does.
-             *
-             * Debug level, not info: named_streams is off by default, and macOS
-             * clients probe ':AFP_AfpInfo' / ':com.apple.ResourceFork' while
-             * Windows probes ':Zone.Identifier' on essentially every file, so at
-             * info a directory browse would emit a line per file -- unbounded,
-             * client-driven log volume carrying a client-controlled path.  The
-             * sweep raises the level itself via SMBTORTURE_LOG_LEVEL. */
-            chimera_smb_debug(
-                "named streams: disabled by config; rejecting stream CREATE '%.*s'",
-                request->create.name_len, request->create.name);
-            chimera_smb_complete_request(request, SMB2_STATUS_OBJECT_NAME_INVALID);
-            return;
-        }
 
         const char *sname               = NULL;
         uint16_t    base_len            = request->create.name_len;
@@ -4929,6 +4909,34 @@ chimera_smb_create(struct chimera_smb_request *request)
 
         if (pstatus != SMB2_STATUS_SUCCESS) {
             chimera_smb_complete_request(request, pstatus);
+            return;
+        }
+
+        /* Gate 1: the feature is off in config, so a genuine (non-empty)
+         * stream name is refused before any backend is consulted.  The
+         * empty-name default-fork form (explicit_data_fork) is exempt -- it is
+         * not an alternate stream at all (see the comment above) and must
+         * always be openable.  Indistinguishable on the wire from gate 2 in
+         * chimera_smb_create_open_stream_chain() ("backend cannot do this")
+         * -- both are OBJECT_NAME_INVALID, which is correct but hid a cluster
+         * of misconfigured smbtorture subtests.  Log which one fired: it is
+         * where investigating such a subtest starts.  What decides whether
+         * that subtest belongs in smbtorture_ads_subtests.txt is the off/on
+         * outcome pair described there, not this line -- a subtest can trip
+         * this gate and pass BECAUSE it does.
+         *
+         * Debug level, not info: named_streams is off by default, and macOS
+         * clients probe ':AFP_AfpInfo' / ':com.apple.ResourceFork' while
+         * Windows probes ':Zone.Identifier' on essentially every file, so at
+         * info a directory browse would emit a line per file -- unbounded,
+         * client-driven log volume carrying a client-controlled path.  The
+         * sweep raises the level itself via SMBTORTURE_LOG_LEVEL. */
+        if (!explicit_data_fork &&
+            !request->compound->thread->shared->config.named_streams) {
+            chimera_smb_debug(
+                "named streams: disabled by config; rejecting stream CREATE '%.*s'",
+                request->create.name_len, request->create.name);
+            chimera_smb_complete_request(request, SMB2_STATUS_OBJECT_NAME_INVALID);
             return;
         }
 
