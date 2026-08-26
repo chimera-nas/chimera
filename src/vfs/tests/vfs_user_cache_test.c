@@ -320,6 +320,174 @@ test_sid_index(void)
     TEST_PASS("SID index round-trips uid<->real SID and unindexes on remove");
 } /* test_sid_index */
 
+/*
+ * Group records: gid<->SID round trip, dedup by gid, TTL expiry.
+ */
+static void
+test_group_index(void)
+{
+    struct chimera_vfs_user_cache  *cache;
+    const struct chimera_vfs_group *group;
+
+    cache = chimera_vfs_user_cache_create(64, 600);
+
+    chimera_vfs_group_cache_add(cache, "Domain Users",
+                                "S-1-5-21-111-222-333-513", 513, 0);
+
+    urcu_qsbr_read_lock();
+
+    group = chimera_vfs_group_cache_lookup_by_gid(cache, 513);
+    assert(group != NULL);
+    assert(group->gid == 513);
+    assert(strcmp(group->groupname, "Domain Users") == 0);
+    assert(strcmp(group->sid, "S-1-5-21-111-222-333-513") == 0);
+
+    group = chimera_vfs_group_cache_lookup_by_sid(cache,
+                                                  "S-1-5-21-111-222-333-513");
+    assert(group != NULL);
+    assert(group->gid == 513);
+
+    /* Unknown / SID-less lookups miss. */
+    assert(chimera_vfs_group_cache_lookup_by_gid(cache, 9999) == NULL);
+    assert(chimera_vfs_group_cache_lookup_by_sid(cache, "S-1-5-21-9-9-9-9") == NULL);
+    assert(chimera_vfs_group_cache_lookup_by_sid(cache, "") == NULL);
+    assert(chimera_vfs_group_cache_lookup_by_sid(cache, NULL) == NULL);
+
+    urcu_qsbr_read_unlock();
+
+    /* A group with no SID resolves by gid but is not SID-indexed. */
+    chimera_vfs_group_cache_add(cache, "localgrp", NULL, 27, 0);
+    urcu_qsbr_read_lock();
+    group = chimera_vfs_group_cache_lookup_by_gid(cache, 27);
+    assert(group != NULL && group->sid[0] == '\0');
+    urcu_qsbr_read_unlock();
+
+    /* Re-adding the same gid replaces the record and unindexes the old SID. */
+    chimera_vfs_group_cache_add(cache, "Domain Users",
+                                "S-1-5-21-999-888-777-513", 513, 0);
+    urcu_qsbr_synchronize_rcu();
+    urcu_qsbr_read_lock();
+    assert(chimera_vfs_group_cache_lookup_by_sid(cache,
+                                                 "S-1-5-21-111-222-333-513") == NULL);
+    group = chimera_vfs_group_cache_lookup_by_sid(cache,
+                                                  "S-1-5-21-999-888-777-513");
+    assert(group != NULL && group->gid == 513);
+    /* Exactly one record per gid. */
+    group = chimera_vfs_group_cache_lookup_by_gid(cache, 513);
+    assert(group != NULL);
+    assert(strcmp(group->sid, "S-1-5-21-999-888-777-513") == 0);
+    urcu_qsbr_read_unlock();
+
+    chimera_vfs_user_cache_destroy(cache);
+
+    TEST_PASS("group index round-trips gid<->real SID and dedups by gid");
+} /* test_group_index */
+
+/*
+ * The reason groups are a distinct record type: a group must be invisible to
+ * every user-side lookup, and must not disturb a user that shares its name.
+ */
+static void
+test_group_user_isolation(void)
+{
+    struct chimera_vfs_user_cache *cache;
+    const struct chimera_vfs_user *user;
+
+    cache = chimera_vfs_user_cache_create(64, 600);
+
+    chimera_vfs_user_cache_add(cache, "shared", NULL, NULL,
+                               "S-1-5-21-111-222-333-1105",
+                               1000, 1000, 0, NULL, 0);
+
+    /* Same name, and a gid numerically equal to the user's uid -- the two
+     * collisions that a single shared record would get wrong. */
+    chimera_vfs_group_cache_add(cache, "shared",
+                                "S-1-5-21-111-222-333-513", 1000, 0);
+
+    urcu_qsbr_read_lock();
+
+    /* The user survives intact: no eviction by the group's name, no clobber. */
+    user = chimera_vfs_user_cache_lookup_by_name(cache, "shared");
+    assert(user != NULL);
+    assert(user->uid == 1000);
+    assert(strcmp(user->sid, "S-1-5-21-111-222-333-1105") == 0);
+
+    /* uid 1000 still resolves to the user, not the gid-1000 group. */
+    user = chimera_vfs_user_cache_lookup_by_uid(cache, 1000);
+    assert(user != NULL);
+    assert(strcmp(user->sid, "S-1-5-21-111-222-333-1105") == 0);
+
+    /* The group SID is not reachable through the user SID index (this is what
+     * used to make sid_to_uid hand back a meaningless uid). */
+    assert(chimera_vfs_user_cache_lookup_by_sid(cache,
+                                                "S-1-5-21-111-222-333-513") == NULL);
+
+    /* ...and the user SID is not reachable through the group SID index. */
+    assert(chimera_vfs_group_cache_lookup_by_sid(cache,
+                                                 "S-1-5-21-111-222-333-1105") == NULL);
+
+    urcu_qsbr_read_unlock();
+
+    chimera_vfs_user_cache_destroy(cache);
+
+    TEST_PASS("group records stay out of every user index");
+} /* test_group_user_isolation */
+
+static void
+test_group_ttl_expiration(void)
+{
+    struct chimera_vfs_user_cache *cache;
+
+    /* ttl 0: the entry is already expired when the sweeper next runs. */
+    cache = chimera_vfs_user_cache_create(64, 0);
+
+    chimera_vfs_group_cache_add(cache, "ephemeral",
+                                "S-1-5-21-111-222-333-514", 514, 0);
+    chimera_vfs_group_cache_add(cache, "permanent",
+                                "S-1-5-21-111-222-333-515", 515, 1);
+
+    urcu_qsbr_read_lock();
+    assert(chimera_vfs_group_cache_lookup_by_gid(cache, 514) != NULL);
+    urcu_qsbr_read_unlock();
+
+    /* Drive the sweep directly rather than waiting out its 60s period. */
+    pthread_mutex_lock(&cache->write_lock);
+    {
+        struct chimera_vfs_group *group, *next;
+        struct timespec           ts;
+        int                       i;
+
+        clock_gettime(CLOCK_REALTIME, &ts);
+        for (i = 0; i < cache->num_buckets; i++) {
+            group = cache->group_gid_buckets[i].head;
+            while (group) {
+                next = group->next_by_gid;
+                if (!group->pinned &&
+                    (ts.tv_sec > group->expiration.tv_sec ||
+                     (ts.tv_sec == group->expiration.tv_sec &&
+                      ts.tv_nsec >= group->expiration.tv_nsec))) {
+                    chimera_vfs_group_cache_remove_locked(cache, group);
+                }
+                group = next;
+            }
+        }
+    }
+    pthread_mutex_unlock(&cache->write_lock);
+
+    urcu_qsbr_synchronize_rcu();
+    urcu_qsbr_read_lock();
+    assert(chimera_vfs_group_cache_lookup_by_gid(cache, 514) == NULL);
+    assert(chimera_vfs_group_cache_lookup_by_sid(cache,
+                                                 "S-1-5-21-111-222-333-514") == NULL);
+    /* Pinned groups survive the sweep. */
+    assert(chimera_vfs_group_cache_lookup_by_gid(cache, 515) != NULL);
+    urcu_qsbr_read_unlock();
+
+    chimera_vfs_user_cache_destroy(cache);
+
+    TEST_PASS("expired groups are swept, pinned groups survive");
+} /* test_group_ttl_expiration */
+
 int
 main(void)
 {
@@ -335,6 +503,9 @@ main(void)
     test_pinned_no_expire();
     test_is_member();
     test_sid_index();
+    test_group_index();
+    test_group_user_isolation();
+    test_group_ttl_expiration();
 
     fprintf(stderr, "All tests passed.\n");
 

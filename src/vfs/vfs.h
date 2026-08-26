@@ -321,8 +321,10 @@ chimera_vfs_user_is_member(
  * the cached SID for `uid` into `buf` and returns its length, or -1 when the
  * user has no known real SID (the caller then falls back to the algorithmic
  * idmap SID).  sid_to_uid resolves a SID string to its cached uid (0 on
- * success, -1 on miss).  Both are RCU-safe and must be called from a
- * VFS-registered thread.
+ * success, -1 on miss).  The gid pair is the exact group-side counterpart,
+ * backed by the group chains of the same cache, and follows the same return
+ * conventions.  All four are RCU-safe and must be called from a VFS-registered
+ * thread.
  */
 int
 chimera_vfs_identity_uid_to_sid(
@@ -336,6 +338,19 @@ chimera_vfs_identity_sid_to_uid(
     struct chimera_vfs *vfs,
     const char         *sid,
     uint32_t           *uid);
+
+int
+chimera_vfs_identity_gid_to_sid(
+    struct chimera_vfs *vfs,
+    uint32_t            gid,
+    char               *buf,
+    int                 buflen);
+
+int
+chimera_vfs_identity_sid_to_gid(
+    struct chimera_vfs *vfs,
+    const char         *sid,
+    uint32_t           *gid);
 
 
 typedef int (*chimera_vfs_user_iterate_cb)(

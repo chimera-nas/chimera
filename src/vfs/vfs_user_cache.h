@@ -51,22 +51,48 @@ struct chimera_vfs_user {
     char                     sid[CHIMERA_VFS_SID_MAX_LEN];
 };
 
+/*
+ * A group record.  Deliberately a distinct type from chimera_vfs_user rather
+ * than a flag on it: a group is not a user, and sharing the record would put
+ * group entries in the name/uid/sid chains where lookup_by_uid, sid_to_uid and
+ * the username dedup in _add would return or clobber them.  Groups live in
+ * their own two chains below, sharing this cache's write_lock and expiry
+ * thread.
+ */
+struct chimera_vfs_group {
+    uint32_t                  gid;
+    int                       groupname_len;
+    struct timespec           expiration;
+    int                       pinned;
+    struct rcu_head           rcu;
+    struct chimera_vfs_group *next_by_gid;
+    struct chimera_vfs_group *next_by_sid;
+    char                      groupname[256];
+    char                      sid[CHIMERA_VFS_SID_MAX_LEN];
+};
+
 struct chimera_vfs_user_cache_bucket {
     struct chimera_vfs_user *head;
 };
 
+struct chimera_vfs_group_cache_bucket {
+    struct chimera_vfs_group *head;
+};
+
 struct chimera_vfs_user_cache {
-    int                                   num_buckets;
-    int                                   ttl;
-    struct chimera_vfs_user_cache_bucket *name_buckets;
-    struct chimera_vfs_user_cache_bucket *uid_buckets;
-    struct chimera_vfs_user_cache_bucket *sid_buckets;
-    struct chimera_vfs_user              *builtin_users;
-    pthread_mutex_t                       write_lock;
-    pthread_t                             expiry_thread;
-    pthread_mutex_t                       expiry_lock;
-    pthread_cond_t                        expiry_cond;
-    int                                   shutdown;
+    int                                    num_buckets;
+    int                                    ttl;
+    struct chimera_vfs_user_cache_bucket  *name_buckets;
+    struct chimera_vfs_user_cache_bucket  *uid_buckets;
+    struct chimera_vfs_user_cache_bucket  *sid_buckets;
+    struct chimera_vfs_group_cache_bucket *group_gid_buckets;
+    struct chimera_vfs_group_cache_bucket *group_sid_buckets;
+    struct chimera_vfs_user               *builtin_users;
+    pthread_mutex_t                        write_lock;
+    pthread_t                              expiry_thread;
+    pthread_mutex_t                        expiry_lock;
+    pthread_cond_t                         expiry_cond;
+    int                                    shutdown;
 };
 
 static inline unsigned int
@@ -94,6 +120,14 @@ chimera_vfs_user_cache_hash_sid(
     return chimera_vfs_hash(sid, strlen(sid)) % num_buckets;
 } // chimera_vfs_user_cache_hash_sid
 
+static inline unsigned int
+chimera_vfs_group_cache_hash_gid(
+    uint32_t gid,
+    int      num_buckets)
+{
+    return gid % num_buckets;
+} // chimera_vfs_group_cache_hash_gid
+
 static void
 chimera_vfs_user_cache_rcu_free(struct rcu_head *head)
 {
@@ -102,6 +136,55 @@ chimera_vfs_user_cache_rcu_free(struct rcu_head *head)
 
     free(user);
 } // chimera_vfs_user_cache_rcu_free
+
+static void
+chimera_vfs_group_cache_rcu_free(struct rcu_head *head)
+{
+    struct chimera_vfs_group *group = caa_container_of(
+        head, struct chimera_vfs_group, rcu);
+
+    free(group);
+} // chimera_vfs_group_cache_rcu_free
+
+/*
+ * Unlink `group` from the gid and sid chains and schedule it for RCU-deferred
+ * free.  Caller must hold cache->write_lock.
+ */
+static inline void
+chimera_vfs_group_cache_remove_locked(
+    struct chimera_vfs_user_cache *cache,
+    struct chimera_vfs_group      *group)
+{
+    unsigned int               gid_idx, sid_idx;
+    struct chimera_vfs_group **pp;
+
+    gid_idx = chimera_vfs_group_cache_hash_gid(group->gid, cache->num_buckets);
+
+    pp = &cache->group_gid_buckets[gid_idx].head;
+    while (*pp) {
+        if (*pp == group) {
+            rcu_assign_pointer(*pp, group->next_by_gid);
+            break;
+        }
+        pp = &(*pp)->next_by_gid;
+    }
+
+    /* Only indexed by SID when one is known (NSS supplies none). */
+    if (group->sid[0]) {
+        sid_idx = chimera_vfs_user_cache_hash_sid(group->sid,
+                                                  cache->num_buckets);
+        pp = &cache->group_sid_buckets[sid_idx].head;
+        while (*pp) {
+            if (*pp == group) {
+                rcu_assign_pointer(*pp, group->next_by_sid);
+                break;
+            }
+            pp = &(*pp)->next_by_sid;
+        }
+    }
+
+    call_rcu(&group->rcu, chimera_vfs_group_cache_rcu_free);
+} // chimera_vfs_group_cache_remove_locked
 
 /*
  * Unlink `user` from all three index chains and schedule it for RCU-deferred
@@ -163,6 +246,7 @@ chimera_vfs_user_cache_expiry_thread(void *arg)
 {
     struct chimera_vfs_user_cache *cache = arg;
     struct chimera_vfs_user       *user, *next;
+    struct chimera_vfs_group      *group, *group_next;
     struct timespec                ts;
     int                            i;
 
@@ -204,6 +288,21 @@ chimera_vfs_user_cache_expiry_thread(void *arg)
             }
         }
 
+        /* Same sweep, same lock, for the group chains. */
+        for (i = 0; i < cache->num_buckets; i++) {
+            group = cache->group_gid_buckets[i].head;
+            while (group) {
+                group_next = group->next_by_gid;
+                if (!group->pinned &&
+                    (ts.tv_sec > group->expiration.tv_sec ||
+                     (ts.tv_sec == group->expiration.tv_sec &&
+                      ts.tv_nsec >= group->expiration.tv_nsec))) {
+                    chimera_vfs_group_cache_remove_locked(cache, group);
+                }
+                group = group_next;
+            }
+        }
+
         pthread_mutex_unlock(&cache->write_lock);
 
         pthread_mutex_lock(&cache->expiry_lock);
@@ -233,6 +332,11 @@ chimera_vfs_user_cache_create(
     cache->sid_buckets = calloc(num_buckets,
                                 sizeof(struct chimera_vfs_user_cache_bucket));
 
+    cache->group_gid_buckets = calloc(num_buckets,
+                                      sizeof(struct chimera_vfs_group_cache_bucket));
+    cache->group_sid_buckets = calloc(num_buckets,
+                                      sizeof(struct chimera_vfs_group_cache_bucket));
+
     cache->builtin_users = NULL;
 
     pthread_mutex_init(&cache->write_lock, NULL);
@@ -248,8 +352,9 @@ chimera_vfs_user_cache_create(
 static inline void
 chimera_vfs_user_cache_destroy(struct chimera_vfs_user_cache *cache)
 {
-    struct chimera_vfs_user *user, *next;
-    int                      i;
+    struct chimera_vfs_user  *user, *next;
+    struct chimera_vfs_group *group, *group_next;
+    int                       i;
 
     pthread_mutex_lock(&cache->expiry_lock);
     cache->shutdown = 1;
@@ -269,9 +374,20 @@ chimera_vfs_user_cache_destroy(struct chimera_vfs_user_cache *cache)
         }
     }
 
+    for (i = 0; i < cache->num_buckets; i++) {
+        group = cache->group_gid_buckets[i].head;
+        while (group) {
+            group_next = group->next_by_gid;
+            free(group);
+            group = group_next;
+        }
+    }
+
     free(cache->name_buckets);
     free(cache->uid_buckets);
     free(cache->sid_buckets);
+    free(cache->group_gid_buckets);
+    free(cache->group_sid_buckets);
 
     pthread_mutex_destroy(&cache->write_lock);
     pthread_mutex_destroy(&cache->expiry_lock);
@@ -503,6 +619,133 @@ chimera_vfs_user_cache_lookup_by_sid(
     return NULL;
 } // chimera_vfs_user_cache_lookup_by_sid
 
+/*
+ * Add (or refresh) a group record.  Dedup is by gid, not by name: unlike
+ * usernames there is no unique-name guarantee across domains, and gid is the
+ * primary lookup key.  `sid` may be NULL (NSS resolves a gid to a name but
+ * supplies no SID), in which case the record is not indexed by SID and
+ * gid_to_sid will keep missing -- callers then fall back to the algorithmic
+ * idmap SID.
+ */
+static inline int
+chimera_vfs_group_cache_add(
+    struct chimera_vfs_user_cache *cache,
+    const char                    *groupname,
+    const char                    *sid,
+    uint32_t                       gid,
+    int                            pinned)
+{
+    struct chimera_vfs_group *group, *existing;
+    unsigned int              gid_idx, sid_idx;
+    struct timespec           now;
+
+    group = calloc(1, sizeof(*group));
+    snprintf(group->groupname, sizeof(group->groupname), "%s",
+             groupname ? groupname : "");
+    group->groupname_len = (int) strlen(group->groupname);
+    if (sid) {
+        snprintf(group->sid, sizeof(group->sid), "%s", sid);
+    }
+    group->gid    = gid;
+    group->pinned = pinned;
+
+    if (!pinned) {
+        clock_gettime(CLOCK_REALTIME, &now);
+        group->expiration.tv_sec  = now.tv_sec + cache->ttl;
+        group->expiration.tv_nsec = now.tv_nsec;
+    }
+
+    gid_idx = chimera_vfs_group_cache_hash_gid(gid, cache->num_buckets);
+
+    pthread_mutex_lock(&cache->write_lock);
+
+    /* Replace any existing record for this gid. */
+    existing = cache->group_gid_buckets[gid_idx].head;
+    while (existing) {
+        if (existing->gid == gid) {
+            chimera_vfs_group_cache_remove_locked(cache, existing);
+            break;
+        }
+        existing = existing->next_by_gid;
+    }
+
+    group->next_by_gid = cache->group_gid_buckets[gid_idx].head;
+    rcu_assign_pointer(cache->group_gid_buckets[gid_idx].head, group);
+
+    if (group->sid[0]) {
+        sid_idx = chimera_vfs_user_cache_hash_sid(group->sid,
+                                                  cache->num_buckets);
+        group->next_by_sid = cache->group_sid_buckets[sid_idx].head;
+        rcu_assign_pointer(cache->group_sid_buckets[sid_idx].head, group);
+    }
+
+    pthread_mutex_unlock(&cache->write_lock);
+
+    return 0;
+} // chimera_vfs_group_cache_add
+
+/*
+ * Resolve a gid to its cached group record (RCU read-side).
+ *
+ * Note this is NOT chimera_vfs_user_cache_lookup_by_gid below, which despite
+ * the similar name answers a different question: which *users* are members of
+ * a gid.
+ */
+static inline const struct chimera_vfs_group *
+chimera_vfs_group_cache_lookup_by_gid(
+    struct chimera_vfs_user_cache *cache,
+    uint32_t                       gid)
+{
+    unsigned int              gid_idx;
+    struct chimera_vfs_group *group;
+
+    gid_idx = chimera_vfs_group_cache_hash_gid(gid, cache->num_buckets);
+
+    group = rcu_dereference(cache->group_gid_buckets[gid_idx].head);
+    while (group) {
+        if (group->gid == gid) {
+            return group;
+        }
+        group = rcu_dereference(group->next_by_gid);
+    }
+
+    return NULL;
+} // chimera_vfs_group_cache_lookup_by_gid
+
+/*
+ * Resolve a Windows group SID string to its cached group (RCU read-side).
+ * Only groups added with a non-empty SID are indexed here.
+ */
+static inline const struct chimera_vfs_group *
+chimera_vfs_group_cache_lookup_by_sid(
+    struct chimera_vfs_user_cache *cache,
+    const char                    *sid)
+{
+    unsigned int              sid_idx;
+    struct chimera_vfs_group *group;
+
+    if (!sid || !sid[0]) {
+        return NULL;
+    }
+
+    sid_idx = chimera_vfs_user_cache_hash_sid(sid, cache->num_buckets);
+
+    group = rcu_dereference(cache->group_sid_buckets[sid_idx].head);
+    while (group) {
+        if (strcmp(group->sid, sid) == 0) {
+            return group;
+        }
+        group = rcu_dereference(group->next_by_sid);
+    }
+
+    return NULL;
+} // chimera_vfs_group_cache_lookup_by_sid
+
+/*
+ * Which *users* are members of `gid` (primary or supplementary).  Unrelated to
+ * chimera_vfs_group_cache_lookup_by_gid above, which resolves the gid itself to
+ * a group record.
+ */
 static inline int
 chimera_vfs_user_cache_lookup_by_gid(
     struct chimera_vfs_user_cache  *cache,
