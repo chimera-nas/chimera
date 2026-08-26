@@ -98,16 +98,17 @@ int smb_wbclient_netbios_identity(
     char  *dns_domain,
     size_t dns_domain_len);
 
-// Identity-resolver miss handler backed by winbind.  Resolves BY_UID / BY_SID /
-// BY_NAME to a full user record (uid/gid/groups/name/real SID) via libwbclient.
+// Identity-resolver miss handler backed by winbind.  Resolves BY_UID / BY_NAME
+// to a full user record (uid/gid/groups/name/real SID), BY_GID to a group
+// record (gid/name/real SID), and BY_SID to whichever of the two the SID names.
 // Registered with the VFS identity authority at SMB server init when winbind is
 // enabled.  Matches the chimera_vfs_identity_handler signature.
 int smb_wbclient_identity_handler(
-    enum chimera_vfs_identity_key key,
-    uint32_t                      id,
-    const char                   *name,
-    struct chimera_vfs_user      *out,
-    void                         *private_data);
+    enum chimera_vfs_identity_key       key,
+    uint32_t                            id,
+    const char                         *name,
+    struct chimera_vfs_identity_result *out,
+    void                               *private_data);
 
 // Authenticate a user via winbind using plaintext password
 // Returns: 0 on success, -1 on failure

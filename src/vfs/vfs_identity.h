@@ -17,9 +17,10 @@
 
 #include <stdint.h>
 
+#include "vfs_user_cache.h"
+
 struct chimera_vfs;
 struct chimera_vfs_thread;
-struct chimera_vfs_user;
 struct chimera_vfs_identity;
 
 enum chimera_vfs_identity_key {
@@ -30,26 +31,39 @@ enum chimera_vfs_identity_key {
 };
 
 /*
- * Delivered to the resolve callback.  `user` is NULL when the identity could
+ * A resolved identity.  An identity is either a user or a group, and the two
+ * are not interchangeable -- a SID in particular is ambiguous until resolved,
+ * so the resolver tags which kind came back rather than forcing a group through
+ * a user-shaped record.
+ */
+struct chimera_vfs_identity_result {
+    int                      is_group;
+    struct chimera_vfs_user  user;  /* valid when !is_group */
+    struct chimera_vfs_group group; /* valid when  is_group */
+};
+
+/*
+ * Delivered to the resolve callback.  `result` is NULL when the identity could
  * not be resolved; otherwise it points to a transient copy valid only for the
  * duration of the callback (copy out what you need).
  */
 typedef void (*chimera_vfs_identity_callback)(
-    const struct chimera_vfs_user *user,
-    void                          *private_data);
+    const struct chimera_vfs_identity_result *result,
+    void                                     *private_data);
 
 /*
  * A miss handler performs a (possibly blocking) lookup on a resolver worker
- * thread and fills `*out` (uid/gid/ngids/gids/username/sid).  Returns 0 on
+ * thread and fills `*out`: either out->user (uid/gid/ngids/gids/username/sid)
+ * or out->group (gid/groupname/sid) with out->is_group set.  Returns 0 on
  * success, -1 if it cannot resolve the key.  Handlers are tried in registration
  * order until one succeeds.
  */
 typedef int (*chimera_vfs_identity_handler)(
-    enum chimera_vfs_identity_key key,
-    uint32_t                      id,
-    const char                   *name,
-    struct chimera_vfs_user      *out,
-    void                         *private_data);
+    enum chimera_vfs_identity_key       key,
+    uint32_t                            id,
+    const char                         *name,
+    struct chimera_vfs_identity_result *out,
+    void                               *private_data);
 
 struct chimera_vfs_identity *
 chimera_vfs_identity_create(
