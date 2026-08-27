@@ -113,6 +113,8 @@ smb_wbclient_auth_ntlm(
     struct wbcDomainSid     *groups_sids = NULL;
     uint32_t                 num_groups  = 0;
     uint32_t                 i;
+    const uint8_t           *lm_data;
+    uint32_t                 lm_len;
 
     memset(&params, 0, sizeof(params));
 
@@ -129,8 +131,10 @@ smb_wbclient_auth_ntlm(
     // Set up challenge/response authentication
     memcpy(params.password.response.challenge, challenge, 8);
 
-    params.password.response.lm_length = lm_response_len;
-    params.password.response.lm_data   = (uint8_t *) lm_response;
+    smb_wbclient_lm_response(lm_response, lm_response_len, &lm_data, &lm_len);
+
+    params.password.response.lm_length = lm_len;
+    params.password.response.lm_data   = (uint8_t *) lm_data;
 
     params.password.response.nt_length = nt_response_len;
     params.password.response.nt_data   = (uint8_t *) nt_response;
@@ -138,7 +142,7 @@ smb_wbclient_auth_ntlm(
     wbc_err = wbcAuthenticateUserEx(&params, &info, &error);
 
     if (wbc_err != WBC_ERR_SUCCESS) {
-        chimera_smb_debug("wbcAuthenticateUserEx failed: %s",
+        chimera_smb_error("wbcAuthenticateUserEx failed: %s",
                           error ? error->display_string : wbcErrorString(wbc_err));
         if (error) {
             wbcFreeMemory(error);
@@ -466,7 +470,7 @@ smb_wbclient_auth_password(
     wbc_err = wbcAuthenticateUserEx(&params, &info, &error);
 
     if (wbc_err != WBC_ERR_SUCCESS) {
-        chimera_smb_debug("wbcAuthenticateUserEx (plain) failed: %s",
+        chimera_smb_error("wbcAuthenticateUserEx (plain) failed: %s",
                           error ? error->display_string : wbcErrorString(
                               wbc_err));
         if (error) {
