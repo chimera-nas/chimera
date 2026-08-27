@@ -221,9 +221,17 @@ jobs:
           CI_COMMENT_MARKER: "<!-- quint-coverage-report -->"
         run: |
           cat coverage-report.md >> "$GITHUB_STEP_SUMMARY"
+          # Carried in the artifact for pr-coverage-comment.yml: a workflow_run
+          # event has an empty `pull_requests` for a fork PR, so the number has
+          # to travel with the report rather than be looked up there.
+          printf '%s\n' "${PR_NUMBER:-}" > pr-number.txt
+          # A fork PR's token is read-only however the permissions block is
+          # written, so this call fails there by design; the relay posts it
+          # instead.  On a same-repo PR it lands immediately, and the relay's
+          # later update is a no-op PATCH of the same marker.
           if [ -n "${PR_NUMBER:-}" ]; then
             python3 scripts/ci_pr_comment.py "$GH_REPO" "$PR_NUMBER" coverage-report.md \
-              || echo "::warning::failed to post the coverage comment (it is in the run summary)"
+              || echo "::warning::could not post the coverage comment directly (expected on a fork PR; pr-coverage-comment.yml relays it)"
           fi
 
       - name: Upload the coverage export and report
@@ -234,6 +242,7 @@ jobs:
           path: |
             coverage-export.json
             coverage-report.md
+            pr-number.txt
           if-no-files-found: warn
           retention-days: 30
 
