@@ -69,6 +69,39 @@ chimera_vfs_mknod_at_complete(struct chimera_vfs_request *request)
     chimera_vfs_request_free(request->thread, request);
 } /* chimera_vfs_mknod_at_complete */
 
+/*
+ * A device mknod by an unprivileged caller is refused -- but only once the
+ * name is known to be free.  Linux builds the new dentry first
+ * (filename_create, which is where EEXIST comes from) and reaches the
+ * CAP_MKNOD test only afterwards, so an unprivileged mknod over a name that
+ * already exists reports EEXIST, not EPERM.  The fast path above answers
+ * EEXIST straight from the caches; when they miss there is nothing to answer
+ * from, so resolve the name before deciding.  This costs a lookup only on a
+ * call that was going to fail either way.
+ */
+struct chimera_vfs_mknod_at_priv {
+    struct chimera_vfs_thread      *thread;
+    chimera_vfs_mknod_at_callback_t callback;
+    void                           *private_data;
+};
+
+_Static_assert(sizeof(struct chimera_vfs_mknod_at_priv) <= CHIMERA_VFS_GATE_SCRATCH_SIZE,
+               "mknod_at privilege context outgrew the request gate scratch area");
+
+static void
+chimera_vfs_mknod_at_priv_complete(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct chimera_vfs_mknod_at_priv *ctx = private_data;
+
+    ctx->callback(error_code == CHIMERA_VFS_OK ?
+                  CHIMERA_VFS_EEXIST : CHIMERA_VFS_EPERM,
+                  NULL, NULL, NULL, NULL, ctx->private_data);
+    chimera_vfs_gate_scratch_free(ctx->thread, ctx);
+} /* chimera_vfs_mknod_at_priv_complete */
+
 static void
 chimera_vfs_mknod_at_dispatch(
     struct chimera_vfs_thread      *thread,
@@ -146,11 +179,21 @@ chimera_vfs_mknod_at_dispatch(
      * special file; an unprivileged device mknod is EPERM.  FIFOs and
      * UNIX-domain sockets need no privilege (mknod(2)).  Checked after the
      * create gate (EACCES) and the target-exists check (EEXIST), matching
-     * Linux's may_create -> CAP_MKNOD order. */
+     * Linux's may_create -> CAP_MKNOD order -- which is why the denial goes
+     * through a lookup when the caches could not settle EEXIST above. */
     if ((attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
         (S_ISBLK(attr->va_mode) || S_ISCHR(attr->va_mode)) &&
         cred->uid != 0) {
-        callback(CHIMERA_VFS_EPERM, NULL, NULL, NULL, NULL, private_data);
+        struct chimera_vfs_mknod_at_priv *ctx;
+
+        ctx               = chimera_vfs_gate_scratch_alloc(thread);
+        ctx->thread       = thread;
+        ctx->callback     = callback;
+        ctx->private_data = private_data;
+
+        chimera_vfs_lookup(thread, cred, handle->fh, handle->fh_len,
+                           name, namelen, CHIMERA_VFS_ATTR_FH, 0,
+                           chimera_vfs_mknod_at_priv_complete, ctx);
         return;
     }
 

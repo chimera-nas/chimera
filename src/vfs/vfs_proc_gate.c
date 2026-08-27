@@ -40,7 +40,8 @@ chimera_vfs_gate_fh_getattr(
 
     if (error_code != CHIMERA_VFS_OK) {
         status = error_code;
-    } else if ((attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
+    } else if (!ctx->any_type &&
+               (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
                !S_ISDIR(attr->va_mode)) {
         /* Every gate_fh caller gates a directory (the parent of a create/
          * remove, a rename/link destination, a lookup dir); reaching a
@@ -108,6 +109,33 @@ chimera_vfs_gate_fh_impl(
 } /* chimera_vfs_gate_fh_impl */
 
 SYMBOL_EXPORT void
+chimera_vfs_gate_fh_obj(
+    struct chimera_vfs_gate_ctx   *ctx,
+    struct chimera_vfs_thread     *thread,
+    const struct chimera_vfs_cred *cred,
+    const void                    *fh,
+    int                            fhlen,
+    uint32_t                       required,
+    chimera_vfs_gate_callback_t    callback,
+    void                          *private_data)
+{
+    struct chimera_vfs_module *module;
+
+    module = chimera_vfs_get_module(thread, fh, fhlen);
+
+    if (!module) {
+        callback(CHIMERA_VFS_ESTALE, private_data);
+        return;
+    }
+
+    ctx->any_type = 1;
+
+    chimera_vfs_gate_fh_impl(ctx, thread, cred, fh, fhlen, required,
+                             chimera_vfs_gate_needed(module->capabilities, cred),
+                             callback, private_data);
+} /* chimera_vfs_gate_fh_obj */
+
+SYMBOL_EXPORT void
 chimera_vfs_gate_fh(
     struct chimera_vfs_gate_ctx   *ctx,
     struct chimera_vfs_thread     *thread,
@@ -126,6 +154,10 @@ chimera_vfs_gate_fh(
         callback(CHIMERA_VFS_ESTALE, private_data);
         return;
     }
+
+    /* The caller owns this context and may be reusing storage; the directory
+    * assertion is the default and must not be inherited from a prior use. */
+    ctx->any_type = 0;
 
     chimera_vfs_gate_fh_impl(ctx, thread, cred, fh, fhlen, required,
                              chimera_vfs_gate_needed(module->capabilities, cred),
@@ -156,6 +188,8 @@ chimera_vfs_gate_fh_dac(
         callback(CHIMERA_VFS_ESTALE, private_data);
         return;
     }
+
+    ctx->any_type = 0;
 
     chimera_vfs_gate_fh_impl(ctx, thread, cred, fh, fhlen, required,
                              chimera_vfs_gate_needed_dac(module->capabilities, cred),

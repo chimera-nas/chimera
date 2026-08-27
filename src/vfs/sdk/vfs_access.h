@@ -132,10 +132,28 @@ struct chimera_vfs_gate_ctx {
     int                             dc;      /* parent grants DELETE_CHILD */
     int                             sticky;
     uint64_t                        parent_uid;
+    /* gate_fh asserts the target is a directory (its callers all gate one).
+     * chimera_vfs_gate_fh_obj() clears that assertion for callers gating an
+     * object of any type, such as an open(2) access-mode check. */
+    int                             any_type;
 };
 
 /* Require `required` (CHIMERA_ACE_* mask) on the object named by `fh`. */
 void chimera_vfs_gate_fh(
+    struct chimera_vfs_gate_ctx   *ctx,
+    struct chimera_vfs_thread     *thread,
+    const struct chimera_vfs_cred *cred,
+    const void                    *fh,
+    int                            fhlen,
+    uint32_t                       required,
+    chimera_vfs_gate_callback_t    callback,
+    void                          *private_data);
+
+/* As chimera_vfs_gate_fh(), but for an object of ANY type: the directory
+ * assertion is dropped.  For callers authorizing access to the object itself
+ * rather than traversing it -- an open(2) access-mode check, which must be
+ * able to say EACCES about a regular file. */
+void chimera_vfs_gate_fh_obj(
     struct chimera_vfs_gate_ctx   *ctx,
     struct chimera_vfs_thread     *thread,
     const struct chimera_vfs_cred *cred,
