@@ -63,12 +63,31 @@
 #define V4_IA_MAX_HINTS     8
 #define V4_RETRY_DELAY_MAX  40
 
+/* layouttype4 values the harness can ask for.  The generated XDR names only
+ * the NFSv4.1-files type (RFC 8881 12.2.5), which chimera does not serve; the
+ * two it does are RFC 8435 flex-files and RFC 5663 block, spelled out here the
+ * same way src/server/nfs/nfs4_pnfs.c spells them. */
+#define V4_LAYOUT_FILES     0x1
+#define V4_LAYOUT_BLOCK     0x3
+#define V4_LAYOUT_FLEX      0x4
+#define V4_LAYOUT_SCSI      0x5
+
+/* Offset of ffds_deviceid inside an ff_layout4 loc_body (RFC 8435 5.1):
+ * ffl_stripe_unit (8) + ffl_mirrors<> count (4) + ffm_data_servers<> count (4). */
+#define V4_FF_DEVICEID_OFF  16
+
 #define E_DELAY             10008
 #define E_DENIED            10010
 #define E_NOTSUPP           10004
 #define E_LOCKS_HELD        10037
 #define E_LAYOUTUNAVAILABLE 10059
+#define E_NOMATCHING_LAYOUT 10060
 #define V4_ERR_SYMLINK      10029
+
+/* The layout type this run drives.  Fixed for the process: which one a server
+ * serves is a property of the MDS backend (flex-files for the orchestrated
+ * backends, block/SCSI for a layout-sourcing one), not of a trace. */
+static uint32_t g_layout_type = V4_LAYOUT_FLEX;
 
 /* ---- mismatch accumulator ------------------------------------------------ */
 
@@ -695,6 +714,36 @@ static struct oracle *g_recall_oracle;
  * clientid/session/slot state rather than colliding with a prior trace's. */
 static uint64_t       g_owner_epoch;
 
+/*
+ * CB_NULL.  The server probes a client's callback path with one before it will
+ * use the path (nfs4_cb_ensure_probe), and it holds a reference on the channel
+ * until the probe completes -- so a harness that never answers leaves the
+ * channel pinned for the life of the process.  pNFS is the first MBT profile to
+ * open a callback path at all (LAYOUTGET opens one so the layout can later be
+ * recalled), which is why this went unnoticed while delegations stayed off.
+ */
+static void
+v4_cb_null(
+    struct evpl               *evpl,
+    struct evpl_rpc2_conn     *conn,
+    struct evpl_rpc2_cred     *cred,
+    struct evpl_rpc2_encoding *encoding,
+    void                      *private_data)
+{
+    struct oracle *o = private_data ? private_data : g_recall_oracle;
+    int            rc;
+
+    (void) conn;
+    (void) cred;
+
+    if (!o) {
+        return;
+    }
+
+    rc = o->env->nfs_v4_cb.send_reply_CB_NULL(evpl, NULL, encoding);
+    (void) rc;
+} /* v4_cb_null */
+
 static void
 v4_cb_compound(
     struct evpl               *evpl,
@@ -709,6 +758,7 @@ v4_cb_compound(
     struct nfs_cb_resop4  *resarray;
     uint32_t               i;
     int                    rc;
+    nfsstat4               cb_status = NFS4_OK;
 
     (void) conn;
     (void) cred;
@@ -761,13 +811,35 @@ v4_cb_compound(
                 }
                 resop->opcbrecall.status = NFS4_OK;
                 break;
+            case OP_CB_LAYOUTRECALL:
+                /* Decline the recall.  NFS4_OK would promise a LAYOUTRETURN,
+                 * and there is nobody here to send one: the trace is fixed and
+                 * this thread is blocked inside the very compound whose
+                 * SETATTR triggered the recall, so the server would wait for a
+                 * return that can never arrive.  NFS4ERR_NOMATCHING_LAYOUT is
+                 * also the honest answer -- a replayer holds no layout state
+                 * of its own -- and it makes the server revoke the layout and
+                 * resume the deferred op (RFC 8881 12.5.5), which is what the
+                 * pNFS model profiles encode.  Both the op status and the
+                 * compound status carry it; the server reads the latter. */
+                if (o && o->nrecalls <
+                    (int) (sizeof(o->recalls) / sizeof(o->recalls[0]))) {
+                    memcpy(o->recalls[o->nrecalls++],
+                           argop->opcblayoutrecall.clora_recall.lor_layout.
+                           lor_stateid.other, 12);
+                }
+                resop->opcblayoutrecall.clorr_status =
+                    E_NOMATCHING_LAYOUT;
+                cb_status = E_NOMATCHING_LAYOUT;
+                break;
             default:
                 resop->opcbrecall.status = NFS4ERR_NOTSUPP;
+                cb_status                = NFS4ERR_NOTSUPP;
                 break;
         } /* switch */
     }
 
-    res.status       = NFS4_OK;
+    res.status       = cb_status;
     res.num_resarray = args->num_argarray;
     res.resarray     = resarray;
 
@@ -1970,7 +2042,7 @@ encode_op(
     if (strcmp(tag, "RLayoutget") == 0) {
         a->argop                                = OP_LAYOUTGET;
         a->oplayoutget.loga_signal_layout_avail = 0;
-        a->oplayoutget.loga_layout_type         = LAYOUT4_NFSV4_1_FILES;
+        a->oplayoutget.loga_layout_type         = g_layout_type;
         a->oplayoutget.loga_iomode              = jf_bool(v, "rw")
             ? LAYOUTIOMODE4_RW : LAYOUTIOMODE4_READ;
         a->oplayoutget.loga_offset = (uint64_t) jf_i64(v, "lo") *
@@ -1992,7 +2064,7 @@ encode_op(
         }
         a->argop                                          = OP_LAYOUTRETURN;
         a->oplayoutreturn.lora_reclaim                    = 0;
-        a->oplayoutreturn.lora_layout_type                = LAYOUT4_NFSV4_1_FILES;
+        a->oplayoutreturn.lora_layout_type                = g_layout_type;
         a->oplayoutreturn.lora_iomode                     = LAYOUTIOMODE4_ANY;
         a->oplayoutreturn.lora_layoutreturn.lr_returntype =
             LAYOUTRETURN4_FILE;
@@ -2021,9 +2093,8 @@ encode_op(
         a->oplayoutcommit.loca_last_write_offset.no_offset    =
             (uint64_t) jf_i64(v, "hi") * V4_BLOCK_SIZE - 1;
         a->oplayoutcommit.loca_time_modify.nt_timechanged = 0;
-        a->oplayoutcommit.loca_layoutupdate.lou_type      =
-            LAYOUT4_NFSV4_1_FILES;
-        a->oplayoutcommit.loca_layoutupdate.lou_body.len = 0;
+        a->oplayoutcommit.loca_layoutupdate.lou_type      = g_layout_type;
+        a->oplayoutcommit.loca_layoutupdate.lou_body.len  = 0;
         return 0;
     }
     if (strcmp(tag, "RGetdeviceinfo") == 0) {
@@ -2031,7 +2102,7 @@ encode_op(
         memcpy(a->opgetdeviceinfo.gdia_device_id,
                o->has_deviceid ? o->deviceid : (const uint8_t[16]) { 0 },
                16);
-        a->opgetdeviceinfo.gdia_layout_type      = LAYOUT4_NFSV4_1_FILES;
+        a->opgetdeviceinfo.gdia_layout_type      = g_layout_type;
         a->opgetdeviceinfo.gdia_maxcount         = 1048576;
         a->opgetdeviceinfo.num_gdia_notify_types = 0;
         return 0;
@@ -2531,11 +2602,22 @@ decode_resop(
                     r->segs[r->nsegs].length = ok->logr_layout[j].lo_length;
                     r->nsegs++;
                 }
-                if (ok->num_logr_layout > 0 &&
-                    ok->logr_layout[0].lo_content.loc_body.len >= 16) {
-                    memcpy(r->deviceid,
-                           ok->logr_layout[0].lo_content.loc_body.data, 16);
-                    r->has_deviceid = 1;
+                if (ok->num_logr_layout > 0) {
+                    const xdr_opaque *body =
+                        &ok->logr_layout[0].lo_content.loc_body;
+                    /* Where the deviceid sits in the body depends on the
+                     * layout type: an ff_layout4 carries it inside its first
+                     * ff_data_server4 (RFC 8435 5.1); a pnfs_block_layout4
+                     * opens with the extent count and then bex_vol_id
+                     * (RFC 5663 2.3.1).  A client has to parse it out either
+                     * way to have anything to hand GETDEVICEINFO. */
+                    uint32_t          off = (g_layout_type == V4_LAYOUT_FLEX)
+                        ? V4_FF_DEVICEID_OFF : 4;
+
+                    if (body->len >= off + 16) {
+                        memcpy(r->deviceid, body->data + off, 16);
+                        r->has_deviceid = 1;
+                    }
                 }
             }
             break;
@@ -4229,37 +4311,36 @@ main(
     int    argc,
     char **argv)
 {
+    /* *INDENT-OFF* */
+    /* uncrustify's column alignment does not converge on this initializer --
+     * each pass widens the trailing brace column of the entry it just moved --
+     * so the table is aligned by hand and left alone. */
     static struct option long_options[] = {
-        { "trace",          required_argument,          0,
-          't'                                                                             },
-        { "trace-dir",      required_argument,          0,
-          'D'                                                                             },
-        { "exclude-prefix", required_argument,          0,
-          'X'                                                                             },
-        { "mandatory",      required_argument,          0,
-          'M'                                                                                                  },
-        { "backend",        required_argument,          0,
-          'b'                                                                                                  },
-        { "dry-run",        no_argument,                0,
-          'n'                                                                                                                      },
-        { "verbose",        no_argument,                0,
-          'v'                                                                                                                                          },
-        { 0,                0,                          0,                         0 },
+        { "trace",          required_argument, 0, 't' },
+        { "trace-dir",      required_argument, 0, 'D' },
+        { "exclude-prefix", required_argument, 0, 'X' },
+        { "mandatory",      required_argument, 0, 'M' },
+        { "backend",        required_argument, 0, 'b' },
+        { "pnfs",           required_argument, 0, 'p' },
+        { "dry-run",        no_argument,       0, 'n' },
+        { "verbose",        no_argument,       0, 'v' },
+        { 0,                0,                 0, 0   },
     };
-    char               **traces;
-    const char          *mandatory[8];
-    int                  ntraces    = 0;
-    int                  nmandatory = 0;
-    int                  dry_run    = 0;
-    int                  verbose    = 0;
-    int                  rc;
-    int                  failures = 0;
-    int                  skips    = 0;
-    int                  c;
-    int                  i;
-    struct mbt_env       env;
-    const char          *backend = "memfs";
-    struct mbt_env_opts  opts    = {
+    /* *INDENT-ON* */
+    char              **traces;
+    const char         *mandatory[8];
+    int                 ntraces    = 0;
+    int                 nmandatory = 0;
+    int                 dry_run    = 0;
+    int                 verbose    = 0;
+    int                 rc;
+    int                 failures = 0;
+    int                 skips    = 0;
+    int                 c;
+    int                 i;
+    struct mbt_env      env;
+    const char         *backend = "memfs";
+    struct mbt_env_opts opts    = {
         .disable_caches = 1,
         /* Pin memfs's block size to the model's block granularity so sub-block
          * holes line up with SEEK_HOLE/SEEK_DATA (DEVIATIONS-NFS4.md round 8).
@@ -4272,7 +4353,7 @@ main(
      * shared helper; getopt only recognizes them so it does not error. */
     traces = mbt_collect_traces(argc, argv, &ntraces);
 
-    while ((c = getopt_long(argc, argv, "t:D:X:M:b:nv", long_options,
+    while ((c = getopt_long(argc, argv, "t:D:X:M:b:p:nv", long_options,
                             NULL)) != -1) {
         switch (c) {
             case 't':
@@ -4293,10 +4374,22 @@ main(
             case 'v':
                 verbose = 1;
                 break;
+            case 'p':
+                /* Run the server as a pNFS metadata server with this many
+                 * in-process data servers.  0 (the default) leaves pNFS off,
+                 * which is what the plain corpus expects. */
+                opts.pnfs_num_ds = atoi(optarg);
+                if (opts.pnfs_num_ds < 0 || opts.pnfs_num_ds > MBT_MAX_DS) {
+                    fprintf(stderr, "%s: --pnfs takes 0..%d data servers\n",
+                            argv[0], MBT_MAX_DS);
+                    mbt_free_traces(traces, ntraces);
+                    return 2;
+                }
+                break;
             default:
                 fprintf(stderr,
                         "usage: %s [--trace FILE ...] [--trace-dir DIR] "
-                        "[--backend memfs|diskfs|cairn] "
+                        "[--backend memfs|diskfs|cairn] [--pnfs N] "
                         "[--mandatory CAP] [--dry-run] [--verbose]\n",
                         argv[0]);
                 mbt_free_traces(traces, ntraces);
@@ -4322,6 +4415,7 @@ main(
     if (!dry_run) {
         mbt_env_open_opts(&env, &opts);
         env.nfs_v4_cb.recv_call_CB_COMPOUND = v4_cb_compound;
+        env.nfs_v4_cb.recv_call_CB_NULL     = v4_cb_null;
     }
 
     for (i = 0; i < ntraces; i++) {

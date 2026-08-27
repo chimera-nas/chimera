@@ -58,6 +58,14 @@
 #define MBT_NLM_PORT     32803
 #define MBT_NSM_PORT     32765
 
+/* pNFS topology (see mbt_env_opts.pnfs_num_ds): the data servers are
+ * additional chimera servers in THIS process, each on its own inproc
+ * service name, so the whole MDS+DS cluster is one test binary with no
+ * ports, namespaces or daemons.  Their port numbers only have to avoid
+ * the MDS's own services above. */
+#define MBT_MAX_DS       4
+#define MBT_DS_PORT_BASE 12050
+
 struct mbt_fh {
     int      has;
     uint32_t len;
@@ -138,6 +146,9 @@ struct mbt_env_opts {
      * aux suite uses it to make the uaddr predictable (the inproc local
      * address is not an IP). */
     const char *portmap_hostname;
+    int         pnfs_num_ds;      /* >0: run as a pNFS metadata server with
+                                   * this many in-process data servers */
+    const char *pnfs_ds_module;   /* DS backend (default "memfs") */
 };
 
 struct mbt_env {
@@ -174,6 +185,13 @@ struct mbt_env {
     char                       pt_root[256]; /* passthrough backing root
                                               * (linux/io_uring); empty otherwise */
     uint8_t                   *data_buf;   /* READ copy-out scratch */
+
+    /* pNFS data servers: separate chimera servers in this same process,
+    * reached by the MDS over the inproc transport through the nfs client
+    * module (mounted at /ds<i>).  Empty unless opts.pnfs_num_ds > 0. */
+    int                        num_ds;
+    struct chimera_server     *ds_server[MBT_MAX_DS];
+    struct prometheus_metrics *ds_metrics[MBT_MAX_DS];
 
     struct mbt_result          res;
 };
@@ -229,6 +247,77 @@ mbt_module_is_passthrough(const char *module)
     return strcmp(module, "linux") == 0 || strcmp(module, "io_uring") == 0;
 } /* mbt_module_is_passthrough */
 
+/*
+ * Bring up one in-process pNFS data server.
+ *
+ * A DS is a whole second chimera server living in this process: nfs_enabled,
+ * inproc, and in data_server mode so it binds only the NFSv4 service (no
+ * mountd/portmap/NLM) and can therefore share the process with the MDS -- the
+ * inproc registry keys services by port, exactly as a host does, so the MDS's
+ * 2049/20048 and each DS's 12050+i coexist.  nfs_server_scope is distinct from
+ * the MDS's for the same reason the split KVM topology gives its DS a distinct
+ * scope: a real client keys server identity on it.
+ *
+ * The DS exports "/ds_export"; the MDS mounts that through the nfs client
+ * module and creates one backing file per pNFS file under it.
+ */
+static inline void
+mbt_pnfs_ds_start(
+    struct mbt_env *env,
+    int             idx,
+    const char     *module)
+{
+    struct chimera_server_config *config;
+    char                          dir[300];
+    char                          fsname[32];
+
+    snprintf(dir, sizeof(dir), "%s/ds%d", env->session_dir, idx);
+    if (mkdir(dir, 0755) != 0 && errno != EEXIST) {
+        fprintf(stderr, "pnfs ds%d state dir %s: %s\n", idx, dir,
+                strerror(errno));
+        exit(1);
+    }
+
+    env->ds_metrics[idx] = prometheus_metrics_create(NULL, NULL, 0);
+
+    config = chimera_server_config_init();
+    chimera_server_config_set_state_dir(config, dir);
+    chimera_server_config_set_tcp_flavor(config, CHIMERA_TCP_FLAVOR_INPROC);
+    chimera_server_config_set_nfs_enabled(config, 1);
+    chimera_server_config_set_nfs_port(config, MBT_DS_PORT_BASE + idx);
+    chimera_server_config_set_nfs_data_server(config, 1);
+    chimera_server_config_set_nfs_server_scope(config, 43 + idx);
+
+    env->ds_server[idx] = chimera_server_init(config, env->ds_metrics[idx]);
+    chimera_server_start(env->ds_server[idx]);
+
+    snprintf(fsname, sizeof(fsname), "dsfs%d", idx);
+    if (chimera_server_mkfs(env->ds_server[idx], module, fsname, NULL) != 0) {
+        fprintf(stderr, "pnfs ds%d: mkfs %s/%s failed\n", idx, module, fsname);
+        exit(1);
+    }
+    chimera_server_mount(env->ds_server[idx], "ds_data", module, fsname, NULL);
+    if (chimera_server_create_export(env->ds_server[idx], "/ds_export",
+                                     "/ds_data", 0, NULL) != 0) {
+        fprintf(stderr, "pnfs ds%d: export /ds_export failed\n", idx);
+        exit(1);
+    }
+} /* mbt_pnfs_ds_start */
+
+/* The RFC 5665 universal address the MDS advertises for a DS: the "tcp" netid
+ * form h.h.h.h.p_hi.p_lo.  Only the port distinguishes our data servers -- an
+ * inproc endpoint's name is derived from it (see chimera_tcp_flavor_endpoint_
+ * create), and a real client would dial the same pair. */
+static inline void
+mbt_pnfs_ds_uaddr(
+    char  *out,
+    size_t out_size,
+    int    port)
+{
+    snprintf(out, out_size, "127.0.0.1.%u.%u",
+             (unsigned) ((port >> 8) & 0xff), (unsigned) (port & 0xff));
+} /* mbt_pnfs_ds_uaddr */
+
 static inline void
 mbt_env_open_opts(
     struct mbt_env            *env,
@@ -239,6 +328,8 @@ mbt_env_open_opts(
     struct evpl_endpoint         *nfs_ep;
     struct evpl_endpoint         *mount_ep;
     int                           aux = opts && opts->aux;
+    const char                   *ds_module;
+    int                           i;
 
     mbt_debug_log_start();
 
@@ -259,6 +350,16 @@ mbt_env_open_opts(
      * set before the server's threads start below. */
     setenv("CHIMERA_CLOSE_SWEEP_INTERVAL_MS", "10", 0);
 
+    /* pNFS: stand the data servers up first -- the MDS mounts their exports
+     * during its own bring-up below, so they have to be serving by then. */
+    env->num_ds = (opts && opts->pnfs_num_ds > MBT_MAX_DS)
+        ? MBT_MAX_DS : (opts ? opts->pnfs_num_ds : 0);
+    ds_module = (opts && opts->pnfs_ds_module) ? opts->pnfs_ds_module : "memfs";
+
+    for (i = 0; i < env->num_ds; i++) {
+        mbt_pnfs_ds_start(env, i, ds_module);
+    }
+
     config = chimera_server_config_init();
     chimera_server_config_set_state_dir(config, env->session_dir);
     chimera_server_config_set_tcp_flavor(config, CHIMERA_TCP_FLAVOR_INPROC);
@@ -276,6 +377,25 @@ mbt_env_open_opts(
      * (v4_close_dangling_opens) before tearing the filesystem down, so it
      * should never have to wait at all.  A longer timeout would just hide a
      * leaked handle behind a slower test. */
+
+    /* Register each data server with the MDS.  version alternates 3 / 4.1 so
+     * both arms of the flex-files device encoder (ffda_versions) are exercised;
+     * it only says which NFS version a *client* would use for the direct data
+     * path, and is independent of the MDS's own control-path mount below. */
+    if (env->num_ds > 0) {
+        chimera_server_config_set_pnfs_enabled(config, 1);
+
+        for (i = 0; i < env->num_ds; i++) {
+            char uaddr[64], backing[32];
+
+            mbt_pnfs_ds_uaddr(uaddr, sizeof(uaddr), MBT_DS_PORT_BASE + i);
+            snprintf(backing, sizeof(backing), "/ds%d", i);
+            chimera_server_config_add_pnfs_ds(config, "tcp", uaddr, NULL,
+                                              backing,
+                                              (i & 1) ? 4 : 3,
+                                              (i & 1) ? 1 : 0);
+        }
+    }
 
     if (opts) {
         if (opts->nfs4_delegations) {
@@ -366,6 +486,28 @@ mbt_env_open_opts(
     env->server = chimera_server_init(config, env->metrics);
 
     chimera_server_start(env->server);
+
+    /* The MDS reaches each DS through the nfs client module.  vers=4 keeps the
+     * control path off portmap/mountd (which a data_server does not run), and
+     * the module inherits the inproc flavor from the VFS at mount time, so this
+     * whole control path stays in-process. */
+    for (i = 0; i < env->num_ds; i++) {
+        char name[32], path[64], mopts[64];
+
+        snprintf(name, sizeof(name), "ds%d", i);
+        snprintf(path, sizeof(path), "127.0.0.1:/ds_export");
+        snprintf(mopts, sizeof(mopts), "vers=4,port=%d", MBT_DS_PORT_BASE + i);
+
+        if (chimera_server_mount(env->server, name, "nfs", path, mopts) != 0) {
+            fprintf(stderr, "pnfs: MDS failed to mount data server %d\n", i);
+            exit(1);
+        }
+    }
+
+    if (env->num_ds > 0 && chimera_server_pnfs_resolve(env->server) != 0) {
+        fprintf(stderr, "pnfs: MDS failed to resolve a data-server backing root\n");
+        exit(1);
+    }
 
     /* Client half: its own evpl loop; the reply callbacks run inside
      * evpl_continue() on this (the only) test thread. */
@@ -660,6 +802,7 @@ static inline void
 mbt_env_stop(struct mbt_env *env)
 {
     char cmd[300];
+    int  i;
 
     if (env->portmap_conn) {
         evpl_rpc2_client_disconnect(env->rpc2_thread, env->portmap_conn);
@@ -678,6 +821,12 @@ mbt_env_stop(struct mbt_env *env)
     chimera_server_destroy(env->server);
     mbt_metrics_dump(env->metrics);
     prometheus_metrics_destroy(env->metrics);
+
+    /* The MDS is gone, so nothing holds the data servers' exports any more. */
+    for (i = 0; i < env->num_ds; i++) {
+        chimera_server_destroy(env->ds_server[i]);
+        prometheus_metrics_destroy(env->ds_metrics[i]);
+    }
 
     free(env->data_buf);
 
