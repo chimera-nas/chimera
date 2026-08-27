@@ -4368,6 +4368,10 @@ diskfs_write_same_finalize(struct chimera_vfs_request *request)
     inode->mtime_nsec = now.tv_nsec;
     inode->ctime_sec  = now.tv_sec;
     inode->ctime_nsec = now.tv_nsec;
+    /* WRITE_SAME changes file data, so it advances the change attribute like
+     * WRITE does (diskfs_write_finish_map); a client validating its cache
+     * against change would otherwise never notice the write. */
+    inode->change++;
 
     request->write_same.r_count = total;
     request->write_same.r_sync  = CHIMERA_VFS_WRITE_FILESYNC;
