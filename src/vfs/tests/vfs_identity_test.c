@@ -59,6 +59,39 @@ resolve_cb(
     p->done = 1;
 } /* resolve_cb */
 
+/*
+ * Stands in for the winbind handler: registered AFTER the built-in NSS one and,
+ * unlike NSS, able to supply a real SID for a numeric key.  `private_data`
+ * points at the one gid it claims to know, which the test picks to be a gid NSS
+ * can ALSO resolve -- that overlap is the whole point, since first-wins would
+ * hand the answer to NSS and lose the SID.
+ */
+#define TEST_WB_GID_SID "S-1-5-21-777-888-999-513"
+
+static int
+sid_bearing_handler(
+    enum chimera_vfs_identity_key       key,
+    uint32_t                            id,
+    const char                         *name,
+    struct chimera_vfs_identity_result *out,
+    void                               *private_data)
+{
+    uint32_t target = *(const uint32_t *) private_data;
+
+    (void) name;
+
+    if (key == CHIMERA_VFS_IDENTITY_BY_GID && id == target) {
+        out->is_group  = 1;
+        out->group.gid = id;
+        snprintf(out->group.groupname, sizeof(out->group.groupname), "wbgroup");
+        out->group.groupname_len = (int) strlen(out->group.groupname);
+        snprintf(out->group.sid, sizeof(out->group.sid), TEST_WB_GID_SID);
+        return 0;
+    }
+
+    return -1;
+} /* sid_bearing_handler */
+
 int
 main(
     int    argc,
@@ -74,6 +107,8 @@ main(
     struct group                 *root_gr;
     char                          sidbuf[CHIMERA_VFS_SID_MAX_LEN];
     uint32_t                      scratch_id;
+    uint32_t                      wb_gid;
+    uint32_t                      g;
 
     chimera_log_init();
 
@@ -177,7 +212,50 @@ main(
                                            &scratch_id) < 0);
     TEST_PASS("group and user chains stay disjoint");
 
-    /* --- 4. unresolvable keys complete (async) with no identity --- */
+    /* --- 4. a SID-bearing handler beats a SID-less one on a numeric key ---
+     *
+     * The field regression: NSS is registered first and, where
+     * nsswitch routes group through winbind, it resolves the gid itself and
+     * returns a name with no SID.  First-wins would stop there, cache the group
+     * SID-less, and -- because the cache hit suppresses any further resolve --
+     * pin the marshaller to the algorithmic S-1-5-88 SID permanently.  Pick a
+     * gid NSS definitely CAN resolve, so the two handlers genuinely overlap. */
+    wb_gid = 0;
+    for (g = 1; g < 100; g++) {
+        if (getgrgid(g)) {
+            wb_gid = g;
+            break;
+        }
+    }
+    assert(wb_gid != 0); /* some low non-root group exists on any host */
+    assert(getgrgid(wb_gid) != NULL);
+
+    chimera_vfs_identity_register_handler(vfs, sid_bearing_handler, &wb_gid);
+
+    memset(&p, 0, sizeof(p));
+    chimera_vfs_identity_resolve(thread, CHIMERA_VFS_IDENTITY_BY_GID, wb_gid,
+                                 NULL, resolve_cb, &p);
+    assert(p.done == 0);
+    while (!p.done) {
+        evpl_continue(evpl);
+    }
+    assert(p.found == 1);
+    assert(p.is_group == 1);
+    assert(p.gid == wb_gid);
+    /* NSS answered too, but without a SID -- the SID-bearing answer must win. */
+    assert(strcmp(p.sid, TEST_WB_GID_SID) == 0);
+    TEST_PASS("a SID-bearing handler wins over an earlier SID-less one");
+
+    /* And the SID actually reached the cache, so marshalling can find it. */
+    assert(chimera_vfs_identity_gid_to_sid(vfs, wb_gid, sidbuf,
+                                           sizeof(sidbuf)) > 0);
+    assert(strcmp(sidbuf, TEST_WB_GID_SID) == 0);
+    assert(chimera_vfs_identity_sid_to_gid(vfs, TEST_WB_GID_SID,
+                                           &scratch_id) == 0);
+    assert(scratch_id == wb_gid);
+    TEST_PASS("the winning SID is what gid_to_sid returns");
+
+    /* --- 5. unresolvable keys complete (async) with no identity --- */
     memset(&p, 0, sizeof(p));
     chimera_vfs_identity_resolve(thread, CHIMERA_VFS_IDENTITY_BY_SID, 0,
                                  "S-1-5-21-9-9-9-9", resolve_cb, &p);
