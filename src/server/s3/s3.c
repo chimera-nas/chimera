@@ -698,7 +698,18 @@ s3_server_dispatch(
             urlp++;
         }
 
+        /* Split bucket from key on the first '/' BEFORE the query string: a
+         * legal unencoded '/' in a query value (?delimiter=/, ?prefix=d/)
+         * must not be mistaken for the bucket/key separator.  (Most SDKs
+         * percent-encode query values, which masked this.) */
         slash = strchr(urlp, '/');
+        {
+            const char *query0 = strchr(urlp, '?');
+
+            if (slash && query0 && slash > query0) {
+                slash = NULL;
+            }
+        }
 
         if (slash) {
             s3_request->bucket_name    = urlp;
