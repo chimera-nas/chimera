@@ -158,6 +158,26 @@ chimera_nfs4_write_same(
             return;
         }
 
+        /* RFC 7530 9.1.4.3 / RFC 8881 9.7: a special-stateid write against a
+         * deny-WRITE share reservation held by ANY owner of ANY client is
+         * NFS4ERR_LOCKED.  WRITE_SAME is a write, so it owes the same answer
+         * as WRITE -- the open-state path below already checks its own
+         * reservation, but the special-stateid path names no state and must
+         * consult the shared client table. */
+        if (!chimera_server_config_get_nfs_data_server(
+                thread->shared->config)) {
+            status = nfs4_clients_check_io_denied(
+                &thread->shared->nfs4_shared_clients,
+                req->fh,
+                req->fhlen,
+                OPEN4_SHARE_ACCESS_WRITE);
+            if (status != NFS4_OK) {
+                res->wsr_status = status;
+                chimera_nfs4_compound_complete(req, res->wsr_status);
+                return;
+            }
+        }
+
         chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
                             req->fh, req->fhlen,
                             CHIMERA_VFS_OPEN_INFERRED,

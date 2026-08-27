@@ -5526,6 +5526,10 @@ memfs_write_same(
 
     inode->mtime = now;
     inode->ctime = now;
+    /* WRITE_SAME changes file data, so it must advance the change attribute
+     * like WRITE does -- a client that validates its cache against change
+     * would otherwise never notice the write. */
+    inode->change++;
 
     memfs_map_attrs_fork(fs, &request->write_same.r_post_attr, inode, stream, request->fh);
 

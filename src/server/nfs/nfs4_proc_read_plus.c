@@ -297,10 +297,19 @@ chimera_nfs4_read_plus(
             return;
         }
 
-        if (req->session && req->session->client_unified) {
-            status = nfs_client_check_io_denied(req->session->client_unified,
-                                                NULL, req->fh, req->fhlen,
-                                                OPEN4_SHARE_ACCESS_READ);
+        /* RFC 7530 9.1.4.3 / RFC 8881 9.7: a special-stateid read against a
+        * deny-READ share reservation held by ANY owner of ANY client is
+        * NFS4ERR_LOCKED.  READ_PLUS is a READ, so it owes the same answer --
+        * check the shared client table, not just this client's own opens,
+        * and do it whether or not the request carries a session (4.0 has
+        * none).  A pNFS data server is authorized by the layout instead. */
+        if (!chimera_server_config_get_nfs_data_server(
+                thread->shared->config)) {
+            status = nfs4_clients_check_io_denied(
+                &thread->shared->nfs4_shared_clients,
+                req->fh,
+                req->fhlen,
+                OPEN4_SHARE_ACCESS_READ);
             if (status != NFS4_OK) {
                 res->rp_status = status;
                 chimera_nfs4_compound_complete(req, res->rp_status);
