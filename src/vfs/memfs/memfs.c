@@ -2817,6 +2817,22 @@ memfs_mkdir_at(
         return;
     }
 
+    /* A directory that has been removed is an orphan: it survives only as
+     * long as a descriptor pins it, and POSIX lets nothing be created in or
+     * resolved through it any more (Linux returns ENOENT for every *at() call
+     * made against such a dirfd).  memfs zeroes a directory's link count when
+     * it is removed, so that is the test.  It follows the type check, matching
+     * the order the standard's *at() resolution uses: what the descriptor
+     * names first, whether it still exists second. */
+    if (parent_inode->nlink == 0) {
+        pthread_mutex_unlock(&parent_inode->lock);
+        request->status = CHIMERA_VFS_ENOENT;
+        request->complete(request);
+        memfs_inode_free(thread, inode);
+        memfs_dirent_free(thread, dirent);
+        return;
+    }
+
     /* Set parent pointer for .. lookup support */
     inode->dir.parent_inum = parent_inode->inum;
     inode->dir.parent_gen  = parent_inode->gen;
@@ -2907,6 +2923,17 @@ memfs_mknod_at(
     inode->change++;
     inode->btime = now;
 
+    /* Inodes come off a free list and memfs_inode_alloc does not reset the
+    * type-specific union, so a recycled inode still holds the previous
+    * occupant's block array pointer.  POSIX lets mknod(2) create a regular
+    * file (S_IFREG, or an unspecified type), and for that inode
+    * memfs_inode_free takes the S_ISREG branch and frees inode->file.blocks
+    * -- freeing the stale pointer and corrupting the heap.  The create and
+    * open-with-create paths clear these explicitly for the same reason. */
+    inode->file.blocks     = NULL;
+    inode->file.num_blocks = 0;
+    inode->file.max_blocks = 0;
+
     /* The mode (including file type bits S_IFCHR/S_IFBLK/S_IFSOCK/S_IFIFO)
      * and rdev are set via set_attr by the caller */
     if (request->mknod_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
@@ -2944,6 +2971,22 @@ memfs_mknod_at(
     if (!S_ISDIR(parent_inode->mode)) {
         pthread_mutex_unlock(&parent_inode->lock);
         request->status = CHIMERA_VFS_ENOTDIR;
+        request->complete(request);
+        memfs_inode_free(thread, inode);
+        memfs_dirent_free(thread, dirent);
+        return;
+    }
+
+    /* A directory that has been removed is an orphan: it survives only as
+     * long as a descriptor pins it, and POSIX lets nothing be created in or
+     * resolved through it any more (Linux returns ENOENT for every *at() call
+     * made against such a dirfd).  memfs zeroes a directory's link count when
+     * it is removed, so that is the test.  It follows the type check, matching
+     * the order the standard's *at() resolution uses: what the descriptor
+     * names first, whether it still exists second. */
+    if (parent_inode->nlink == 0) {
+        pthread_mutex_unlock(&parent_inode->lock);
+        request->status = CHIMERA_VFS_ENOENT;
         request->complete(request);
         memfs_inode_free(thread, inode);
         memfs_dirent_free(thread, dirent);
@@ -3028,6 +3071,20 @@ memfs_remove_at(
         return;
     }
 
+    /* A directory that has been removed is an orphan: it survives only as
+     * long as a descriptor pins it, and POSIX lets nothing be created in or
+     * resolved through it any more (Linux returns ENOENT for every *at() call
+     * made against such a dirfd).  memfs zeroes a directory's link count when
+     * it is removed, so that is the test.  It follows the type check, matching
+     * the order the standard's *at() resolution uses: what the descriptor
+     * names first, whether it still exists second. */
+    if (parent_inode->nlink == 0) {
+        pthread_mutex_unlock(&parent_inode->lock);
+        request->status = CHIMERA_VFS_ENOENT;
+        request->complete(request);
+        return;
+    }
+
     rb_tree_query_exact(&parent_inode->dir.dirents, hash, hash, dirent);
 
     if (!dirent) {
@@ -3105,11 +3162,13 @@ memfs_remove_at(
         inode->nlink = 0;
     } else {
         inode->nlink--;
-        /* Removing one of several hard links changes the surviving inode's
-         * link count, which is a status change: bump its ctime. */
+        /* The link count changed, so the change attribute advances whether or
+         * not a link survives.  ctime is the narrower POSIX rule: marked only
+         * "if the file's link count is not 0" (XSH unlink()), which is also
+         * what the rename-over path applies to the target it clobbers. */
+        inode->change++;
         if (inode->nlink > 0) {
             inode->ctime = now;
-            inode->change++;
         }
     }
 
@@ -3359,6 +3418,20 @@ memfs_open_at(
     if (!S_ISDIR(parent_inode->mode)) {
         pthread_mutex_unlock(&parent_inode->lock);
         request->status = CHIMERA_VFS_ENOTDIR;
+        request->complete(request);
+        return;
+    }
+
+    /* A directory that has been removed is an orphan: it survives only as
+     * long as a descriptor pins it, and POSIX lets nothing be created in or
+     * resolved through it any more (Linux returns ENOENT for every *at() call
+     * made against such a dirfd).  memfs zeroes a directory's link count when
+     * it is removed, so that is the test.  It follows the type check, matching
+     * the order the standard's *at() resolution uses: what the descriptor
+     * names first, whether it still exists second. */
+    if (parent_inode->nlink == 0) {
+        pthread_mutex_unlock(&parent_inode->lock);
+        request->status = CHIMERA_VFS_ENOENT;
         request->complete(request);
         return;
     }
@@ -5223,6 +5296,22 @@ memfs_symlink_at(
         return;
     }
 
+    /* A directory that has been removed is an orphan: it survives only as
+     * long as a descriptor pins it, and POSIX lets nothing be created in or
+     * resolved through it any more (Linux returns ENOENT for every *at() call
+     * made against such a dirfd).  memfs zeroes a directory's link count when
+     * it is removed, so that is the test.  It follows the type check, matching
+     * the order the standard's *at() resolution uses: what the descriptor
+     * names first, whether it still exists second. */
+    if (parent_inode->nlink == 0) {
+        pthread_mutex_unlock(&parent_inode->lock);
+        request->status = CHIMERA_VFS_ENOENT;
+        request->complete(request);
+        memfs_inode_free(thread, inode);
+        memfs_dirent_free(thread, dirent);
+        return;
+    }
+
     /* POSIX: a set-group-ID parent directory forces the new node's group. */
     if (parent_inode->mode & S_ISGID) {
         inode->gid = parent_inode->gid;
@@ -5598,13 +5687,22 @@ memfs_rename_at(
                     existing_freed = 1;
                 }
             }
-            /* POSIX: dropping a link is a status change on the clobbered
-             * inode.  If it survives (a remaining hard link, or unlinked but
-             * still open) its ctime/change must advance so a handle that still
-             * resolves to it observes the update. */
+            /* POSIX (XSH unlink(), which rename()'s removal of the target
+             * follows): dropping a link marks the file's ctime "if the file's
+             * link count is not 0".  A surviving hard link therefore records
+             * the status change; the last link going away does not, and an fd
+             * held across the rename sees the ctime it had before.  This is
+             * the same condition memfs_remove_at applies -- the two paths
+             * remove a link for the same reason and must age the inode the
+             * same way. */
             if (!existing_freed) {
-                existing_inode->ctime = now;
+                /* The change attribute tracks any mutation of the object,
+                 * link count included (RFC 7530 change), so it advances even
+                 * for the last link; ctime does not. */
                 existing_inode->change++;
+                if (existing_inode->nlink > 0) {
+                    existing_inode->ctime = now;
+                }
             }
             pthread_mutex_unlock(&existing_inode->lock);
             memfs_dirent_free(thread, existing_dirent);
@@ -5694,6 +5792,20 @@ memfs_link_at(
     if (!S_ISDIR(parent_inode->mode)) {
         pthread_mutex_unlock(&parent_inode->lock);
         request->status = CHIMERA_VFS_ENOTDIR;
+        request->complete(request);
+        return;
+    }
+
+    /* A directory that has been removed is an orphan: it survives only as
+     * long as a descriptor pins it, and POSIX lets nothing be created in or
+     * resolved through it any more (Linux returns ENOENT for every *at() call
+     * made against such a dirfd).  memfs zeroes a directory's link count when
+     * it is removed, so that is the test.  It follows the type check, matching
+     * the order the standard's *at() resolution uses: what the descriptor
+     * names first, whether it still exists second. */
+    if (parent_inode->nlink == 0) {
+        pthread_mutex_unlock(&parent_inode->lock);
+        request->status = CHIMERA_VFS_ENOENT;
         request->complete(request);
         return;
     }
