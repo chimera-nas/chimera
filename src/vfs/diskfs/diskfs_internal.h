@@ -365,6 +365,13 @@ struct diskfs_request_private {
     /* CLONE: source/destination base offsets for translating extent keys. */
     uint64_t                    clone_src_base;
     uint64_t                    clone_dst_base;
+    /* Destination sub-range being cleared before this step's shared extent is
+     * recorded there (diskfs_clone_dst_clear).  The clear pass keeps its own
+     * extent cursor: p->ext_iter holds the SOURCE extent that the walk, the
+     * refcount bump and the advance all still need. */
+    uint64_t                    clone_dst_clear_start;
+    uint64_t                    clone_dst_clear_end;
+    struct diskfs_extent        clone_dst_ext;
     /* Whole-extent CoW privatize: the shared extent being copied to private
      * blocks, the freshly-allocated destination, and the bytes copied so far. */
     struct diskfs_extent        cow_ext;

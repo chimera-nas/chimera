@@ -357,6 +357,201 @@ test_clone_content(void)
     fprintf(stderr, "  clone content + COW passed\n");
 } /* test_clone_content */
 
+/* Clone onto a destination that ALREADY has data in the target range.  The
+ * backend must release what is there before recording the shared extent;
+ * diskfs inserted over the live key and the request never completed, which is
+ * what every smbtorture smb2.ioctl.dup_extents_* case does (they write the
+ * destination first) and what hung them for 600s. */
+static void
+test_clone_over_existing(void)
+{
+    char   *src_buf;
+    char   *dst_buf;
+    char   *verify;
+    int     src_fd, dst_fd, rc;
+    ssize_t n;
+
+    fprintf(stderr, "Testing clone_file_range over existing destination data...\n");
+
+    src_buf = malloc(CLONE_PROBE_LEN);
+    dst_buf = malloc(CLONE_PROBE_LEN);
+    verify  = malloc(CLONE_PROBE_LEN);
+    if (!src_buf || !dst_buf || !verify) {
+        die("clone over malloc", -1);
+    }
+
+    fill_pattern(src_buf, CLONE_PROBE_LEN, 'p');
+    fill_pattern(dst_buf, CLONE_PROBE_LEN, 'q');
+
+    src_fd = chimera_posix_open("/test/clone_ov_src", O_CREAT | O_RDWR | O_TRUNC, 0644);
+    dst_fd = chimera_posix_open("/test/clone_ov_dst", O_CREAT | O_RDWR | O_TRUNC, 0644);
+    if (src_fd < 0 || dst_fd < 0) {
+        die("clone over open", -1);
+    }
+
+    if (chimera_posix_pwrite(src_fd, src_buf, CLONE_PROBE_LEN, 0) != CLONE_PROBE_LEN ||
+        chimera_posix_pwrite(dst_fd, dst_buf, CLONE_PROBE_LEN, 0) != CLONE_PROBE_LEN) {
+        die("clone over seed", -1);
+    }
+
+    rc = chimera_posix_clone_file_range(dst_fd, 0, src_fd, 0, CLONE_PROBE_LEN);
+    if (rc != 0) {
+        die("clone over clone_file_range", rc);
+    }
+
+    n = chimera_posix_pread(dst_fd, verify, CLONE_PROBE_LEN, 0);
+    if (n != CLONE_PROBE_LEN || memcmp(src_buf, verify, CLONE_PROBE_LEN) != 0) {
+        die("clone over content mismatch", n);
+    }
+
+    /* The displaced destination data is gone, and CoW still isolates the two. */
+    n = chimera_posix_pwrite(dst_fd, dst_buf, CLONE_PROBE_LEN, 0);
+    if (n != CLONE_PROBE_LEN) {
+        die("clone over rewrite dst", n);
+    }
+
+    n = chimera_posix_pread(src_fd, verify, CLONE_PROBE_LEN, 0);
+    if (n != CLONE_PROBE_LEN || memcmp(src_buf, verify, CLONE_PROBE_LEN) != 0) {
+        die("clone over src disturbed", n);
+    }
+
+    chimera_posix_close(src_fd);
+    chimera_posix_close(dst_fd);
+    free(src_buf);
+    free(dst_buf);
+    free(verify);
+
+    /* Spans case: one destination extent strictly larger than the clone range
+     * on BOTH sides.  Clearing must reinsert the head AND the tail -- dropping
+     * either silently loses that data. */
+    {
+        int   big_fd;
+        char *big = malloc(CLONE_PROBE_LEN * 3);
+        char *chk = malloc(CLONE_PROBE_LEN * 3);
+
+        if (!big || !chk) {
+            die("clone spans malloc", -1);
+        }
+        fill_pattern(big, CLONE_PROBE_LEN * 3, 'r');
+
+        big_fd = chimera_posix_open("/test/clone_spans", O_CREAT | O_RDWR | O_TRUNC, 0644);
+        src_fd = chimera_posix_open("/test/clone_spans_src", O_CREAT | O_RDWR | O_TRUNC, 0644);
+        if (big_fd < 0 || src_fd < 0) {
+            die("clone spans open", -1);
+        }
+
+        src_buf = malloc(CLONE_PROBE_LEN);
+        if (!src_buf) {
+            die("clone spans malloc2", -1);
+        }
+        fill_pattern(src_buf, CLONE_PROBE_LEN, 's');
+
+        if (chimera_posix_pwrite(big_fd, big, CLONE_PROBE_LEN * 3, 0) != CLONE_PROBE_LEN * 3 ||
+            chimera_posix_pwrite(src_fd, src_buf, CLONE_PROBE_LEN, 0) != CLONE_PROBE_LEN) {
+            die("clone spans seed", -1);
+        }
+
+        /* Clone into the MIDDLE third. */
+        if (chimera_posix_clone_file_range(big_fd, CLONE_PROBE_LEN, src_fd, 0,
+                                           CLONE_PROBE_LEN) != 0) {
+            die("clone spans clone_file_range", -1);
+        }
+
+        if (chimera_posix_pread(big_fd, chk, CLONE_PROBE_LEN * 3, 0) != CLONE_PROBE_LEN * 3) {
+            die("clone spans pread", -1);
+        }
+        /* Head and tail thirds must survive untouched; the middle is the clone. */
+        if (memcmp(chk, big, CLONE_PROBE_LEN) != 0) {
+            die("clone spans head lost", -1);
+        }
+        if (memcmp(chk + CLONE_PROBE_LEN, src_buf, CLONE_PROBE_LEN) != 0) {
+            die("clone spans middle wrong", -1);
+        }
+        if (memcmp(chk + 2 * CLONE_PROBE_LEN, big, CLONE_PROBE_LEN) != 0) {
+            die("clone spans tail lost", -1);
+        }
+
+        chimera_posix_close(big_fd);
+        chimera_posix_close(src_fd);
+        free(big);
+        free(chk);
+        free(src_buf);
+        fprintf(stderr, "  clone spanning an existing extent passed\n");
+    }
+
+    fprintf(stderr, "  clone over existing destination passed\n");
+} /* test_clone_over_existing */
+
+/* Clone a range of a file onto a DISJOINT range of the SAME file.  One inode
+ * on both ends, which the backend must handle without taking that inode's lock
+ * twice -- diskfs deadlocked here and the request never completed, surfacing
+ * as a 600s timeout in smb2.ioctl.dup_extents_src_is_dest (SMB2's
+ * FSCTL_DUPLICATE_EXTENTS_TO_FILE permits a self-clone as long as the ranges
+ * do not overlap). */
+static void
+test_clone_self(void)
+{
+    char   *src_buf;
+    char   *verify;
+    int     fd;
+    ssize_t n;
+    int     rc;
+
+    fprintf(stderr, "Testing clone_file_range onto the same file...\n");
+
+    src_buf = malloc(CLONE_PROBE_LEN);
+    verify  = malloc(CLONE_PROBE_LEN);
+    if (!src_buf || !verify) {
+        die("clone self malloc", -1);
+    }
+
+    fill_pattern(src_buf, CLONE_PROBE_LEN, 'k');
+
+    fd = chimera_posix_open("/test/clone_self", O_CREAT | O_RDWR | O_TRUNC, 0644);
+    if (fd < 0) {
+        die("clone self open", -1);
+    }
+
+    /* Seed [0, LEN) and reserve [LEN, 2*LEN) so the destination range exists. */
+    n = chimera_posix_pwrite(fd, src_buf, CLONE_PROBE_LEN, 0);
+    if (n != CLONE_PROBE_LEN) {
+        die("clone self pwrite", n);
+    }
+
+    /* Seed the destination range too, so the clone lands ON an existing
+     * extent: the destination must be cleared before the shared extent is
+     * recorded there. */
+    fill_pattern(verify, CLONE_PROBE_LEN, 'm');
+    n = chimera_posix_pwrite(fd, verify, CLONE_PROBE_LEN, CLONE_PROBE_LEN);
+    if (n != CLONE_PROBE_LEN) {
+        die("clone self pwrite tail", n);
+    }
+
+    /* [0, LEN) -> [LEN, 2*LEN): disjoint, same inode.  Must not hang. */
+    rc = chimera_posix_clone_file_range(fd, CLONE_PROBE_LEN, fd, 0,
+                                        CLONE_PROBE_LEN);
+    if (rc != 0) {
+        die("clone self clone_file_range", rc);
+    }
+
+    n = chimera_posix_pread(fd, verify, CLONE_PROBE_LEN, CLONE_PROBE_LEN);
+    if (n != CLONE_PROBE_LEN || memcmp(src_buf, verify, CLONE_PROBE_LEN) != 0) {
+        die("clone self content mismatch", n);
+    }
+
+    /* The source half is untouched. */
+    n = chimera_posix_pread(fd, verify, CLONE_PROBE_LEN, 0);
+    if (n != CLONE_PROBE_LEN || memcmp(src_buf, verify, CLONE_PROBE_LEN) != 0) {
+        die("clone self source disturbed", n);
+    }
+
+    chimera_posix_close(fd);
+    free(src_buf);
+    free(verify);
+
+    fprintf(stderr, "  clone onto the same file passed\n");
+} /* test_clone_self */
+
 /* Clone, then unlink the source: the destination must keep the (now sole-owned)
  * data, and a write to it must still succeed.  Exercises the refcount-decrement
  * free path on the unlinked source's shared extents. */
@@ -490,6 +685,8 @@ main(
         fprintf(stderr, "Backend '%s' supports clone_file_range - validating content\n",
                 env.backend);
         test_clone_content();
+        test_clone_self();
+        test_clone_over_existing();
         test_clone_unlink();
     } else {
         fprintf(stderr, "Backend '%s' does not advertise CAP_CLONE_RANGE - "

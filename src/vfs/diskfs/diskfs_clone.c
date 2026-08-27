@@ -635,8 +635,10 @@ diskfs_clone_dst_inserted_cb(
     diskfs_clone_share_refcount(request);
 } /* diskfs_clone_dst_inserted_cb */
 
+/* Record the shared extent at the destination.  The range is clear by now
+ * (diskfs_clone_dst_clear), so this insert can never collide with a live key. */
 static void
-diskfs_clone_insert_dst(struct chimera_vfs_request *request)
+diskfs_clone_insert_dst_record(struct chimera_vfs_request *request)
 {
     struct diskfs_request_private *p      = request->plugin_data;
     struct diskfs_thread          *thread = p->thread;
@@ -655,6 +657,276 @@ diskfs_clone_insert_dst(struct chimera_vfs_request *request)
                                 diskfs_clone_dst_inserted_cb, request)) {
         diskfs_clone_dst_inserted_cb(op, op->result, request);
     }
+} /* diskfs_clone_insert_dst_record */
+
+/* ------------------------------------------------- destination range clearing
+ *
+ * A clone overwrites its destination range, so whatever the destination already
+ * has there must go before the shared extent is recorded -- otherwise the
+ * insert collides with a live key and the request never completes.  This is the
+ * clone-side counterpart of the write path's CoW scan plus trim, and it makes
+ * the same two distinctions:
+ *
+ *   - a shared extent covered ENTIRELY by the range is released through
+ *     diskfs_ext_release, which decrements its refcount and frees the device
+ *     range only at the last owner (no data copy: it is all being replaced);
+ *
+ *   - a shared extent covered only PARTIALLY is privatized first
+ *     (diskfs_cow_privatize).  A refcount record is keyed by the device offset
+ *     of the whole shared extent, so splitting one would leave a piece whose
+ *     key names no record -- releasing that piece later would free device
+ *     blocks the surviving piece still points at.  Privatizing keeps the
+ *     "a shared extent is never split" invariant the refcount keying relies on.
+ *
+ * Once nothing shared overlaps, every remaining extent is solely owned and is
+ * freed and split exactly as diskfs_write_trim_process does.
+ */
+
+static void diskfs_clone_dst_clear(
+    struct chimera_vfs_request *request);
+
+static void
+diskfs_clone_dst_clear_step_cb(
+    struct diskfs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+
+    (void) result;
+    diskfs_bt_op_free(p->thread, op);
+    diskfs_clone_dst_clear(request);
+} /* diskfs_clone_dst_clear_step_cb */
+
+/* Re-scan from the range start after a release/privatize/split. */
+static void
+diskfs_clone_dst_clear_resume(struct chimera_vfs_request *request)
+{
+    diskfs_clone_dst_clear(request);
+} /* diskfs_clone_dst_clear_resume */
+
+/* Reinsert the piece that survives past the cleared range, then re-scan. */
+static void
+diskfs_clone_dst_clear_tail_cb(
+    struct diskfs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+
+    (void) result;
+    diskfs_bt_op_free(p->thread, op);
+    diskfs_clone_dst_clear(request);
+} /* diskfs_clone_dst_clear_tail_cb */
+
+static void
+diskfs_clone_dst_clear_insert_tail(struct chimera_vfs_request *request)
+{
+    struct diskfs_request_private *p      = request->plugin_data;
+    struct diskfs_thread          *thread = p->thread;
+    struct diskfs_extent          *e      = &p->clone_dst_ext;
+    uint64_t                       dend   = p->clone_dst_clear_end;
+    uint64_t                       es     = e->file_offset;
+    uint64_t                       ee     = es + e->length;
+    struct diskfs_bt_op           *op;
+
+    if (ee > dend) {
+        op = diskfs_bt_op_alloc(thread);
+        if (diskfs_ext_insert_async(op, thread, p->txn, p->inode_stash[0], dend,
+                                    ee - dend, e->device_id,
+                                    e->device_offset + (dend - es), e->flags,
+                                    diskfs_clone_dst_clear_tail_cb, request)) {
+            diskfs_clone_dst_clear_tail_cb(op, op->result, request);
+        }
+        return;
+    }
+
+    diskfs_clone_dst_clear(request);
+} /* diskfs_clone_dst_clear_insert_tail */
+
+static void
+diskfs_clone_dst_clear_head_cb(
+    struct diskfs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+
+    (void) result;
+    diskfs_bt_op_free(p->thread, op);
+    diskfs_clone_dst_clear_insert_tail(request);
+} /* diskfs_clone_dst_clear_head_cb */
+
+static void
+diskfs_clone_dst_clear_removed_cb(
+    struct diskfs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+    struct diskfs_thread          *thread  = p->thread;
+    struct diskfs_extent          *e       = &p->clone_dst_ext;
+    uint64_t                       dstart  = p->clone_dst_clear_start;
+    uint64_t                       es      = e->file_offset;
+
+    (void) result;
+    diskfs_bt_op_free(thread, op);
+
+    /* Head first, then tail: an extent that SPANS the cleared range leaves a
+     * survivor on both sides, so neither may be skipped.  (Re-scanning after
+     * only the head would lose the tail outright -- the removal took the whole
+     * record with it.) */
+    if (es < dstart) {
+        op = diskfs_bt_op_alloc(thread);
+        if (diskfs_ext_insert_async(op, thread, p->txn, p->inode_stash[0], es,
+                                    dstart - es, e->device_id, e->device_offset,
+                                    e->flags, diskfs_clone_dst_clear_head_cb,
+                                    request)) {
+            diskfs_clone_dst_clear_head_cb(op, op->result, request);
+        }
+        return;
+    }
+
+    diskfs_clone_dst_clear_insert_tail(request);
+} /* diskfs_clone_dst_clear_removed_cb */
+
+/* The extent is gone from the tree; free the device blocks the cleared range
+ * covered (solely-owned extents only -- shared ones took the release path). */
+static void
+diskfs_clone_dst_clear_owned(struct chimera_vfs_request *request)
+{
+    struct diskfs_request_private *p      = request->plugin_data;
+    struct diskfs_thread          *thread = p->thread;
+    struct diskfs_extent          *e      = &p->clone_dst_ext;
+    uint64_t                       dstart = p->clone_dst_clear_start;
+    uint64_t                       dend   = p->clone_dst_clear_end;
+    uint64_t                       es     = e->file_offset;
+    uint64_t                       ee     = es + e->length;
+    uint64_t                       cs     = es > dstart ? es : dstart;
+    uint64_t                       ce     = ee < dend ? ee : dend;
+    struct diskfs_bt_op           *op;
+
+    /* UNWRITTEN is reserved space (fallocate), not a hole: it has device
+     * blocks behind it that reads simply answer as zeros, so dropping the
+     * record without freeing them would leak.  diskfs_write_trim_process
+     * frees the same way. */
+    if (ce > cs) {
+        diskfs_thread_free_space(thread, p->txn, e->device_id,
+                                 e->device_offset + (cs - es), ce - cs);
+    }
+
+    op = diskfs_bt_op_alloc(thread);
+    if (diskfs_ext_remove_async(op, thread, p->txn, p->inode_stash[0], es,
+                                diskfs_clone_dst_clear_removed_cb, request)) {
+        diskfs_clone_dst_clear_removed_cb(op, op->result, request);
+    }
+} /* diskfs_clone_dst_clear_owned */
+
+/* A wholly-covered shared extent: its backing is released (refcount-aware) and
+ * the record removed outright. */
+static void
+diskfs_clone_dst_clear_released(struct chimera_vfs_request *request)
+{
+    struct diskfs_request_private *p      = request->plugin_data;
+    struct diskfs_thread          *thread = p->thread;
+    struct diskfs_bt_op           *op     = diskfs_bt_op_alloc(thread);
+
+    if (diskfs_ext_remove_async(op, thread, p->txn, p->inode_stash[0],
+                                p->clone_dst_ext.file_offset,
+                                diskfs_clone_dst_clear_step_cb, request)) {
+        diskfs_clone_dst_clear_step_cb(op, op->result, request);
+    }
+} /* diskfs_clone_dst_clear_released */
+
+static void
+diskfs_clone_dst_clear_cb(
+    struct diskfs_bt_op *op,
+    int                  result,
+    void                *private_data)
+{
+    struct chimera_vfs_request    *request = private_data;
+    struct diskfs_request_private *p       = request->plugin_data;
+    struct diskfs_thread          *thread  = p->thread;
+    uint64_t                       dstart  = p->clone_dst_clear_start;
+    uint64_t                       dend    = p->clone_dst_clear_end;
+    uint64_t                       es, ee;
+    int                            have;
+
+    have = diskfs_ext_from_op(op, result, &p->clone_dst_ext);
+    diskfs_bt_op_free(thread, op);
+
+    if (!have || p->clone_dst_ext.file_offset >= dend) {
+        /* Nothing (left) overlapping: the range is clear. */
+        diskfs_clone_insert_dst_record(request);
+        return;
+    }
+
+    es = p->clone_dst_ext.file_offset;
+    ee = es + p->clone_dst_ext.length;
+
+    if (ee <= dstart) {
+        /* Entirely before the range: step past it. */
+        op = diskfs_bt_op_alloc(thread);
+        if (diskfs_ext_next_async(op, thread, p->inode_stash[0], es,
+                                  p->rec_scratch, sizeof(p->rec_scratch),
+                                  diskfs_clone_dst_clear_cb, request)) {
+            diskfs_clone_dst_clear_cb(op, op->result, request);
+        }
+        return;
+    }
+
+    if (p->clone_dst_ext.flags & DISKFS_EXT_SHARED) {
+        if (es >= dstart && ee <= dend) {
+            /* Wholly covered: decrement rather than copy. */
+            diskfs_ext_release(request, &p->clone_dst_ext,
+                               diskfs_clone_dst_clear_released);
+            return;
+        }
+        /* Partially covered: privatize, then re-scan as a solely-owned extent
+         * (a shared extent must never be split -- see the block comment). */
+        diskfs_cow_privatize(request, &p->clone_dst_ext,
+                             diskfs_clone_dst_clear_resume);
+        return;
+    }
+
+    diskfs_clone_dst_clear_owned(request);
+} /* diskfs_clone_dst_clear_cb */
+
+static void
+diskfs_clone_dst_clear(struct chimera_vfs_request *request)
+{
+    struct diskfs_request_private *p      = request->plugin_data;
+    struct diskfs_thread          *thread = p->thread;
+    struct diskfs_bt_op           *op     = diskfs_bt_op_alloc(thread);
+
+    if (diskfs_ext_floor_async(op, thread, p->inode_stash[0],
+                               p->clone_dst_clear_start, p->rec_scratch,
+                               sizeof(p->rec_scratch),
+                               diskfs_clone_dst_clear_cb, request)) {
+        diskfs_clone_dst_clear_cb(op, op->result, request);
+    }
+} /* diskfs_clone_dst_clear */
+
+static void
+diskfs_clone_insert_dst(struct chimera_vfs_request *request)
+{
+    struct diskfs_request_private *p      = request->plugin_data;
+    struct diskfs_extent          *e      = &p->ext_iter;
+    uint64_t                       ostart = e->file_offset > p->clone_src_base ?
+        e->file_offset : p->clone_src_base;
+    uint64_t                       oend = (e->file_offset + e->length) < p->loop_pos ?
+        (e->file_offset + e->length) : p->loop_pos;
+
+    /* Clear whatever the destination already holds across this step's range
+     * before recording the shared extent there. */
+    p->clone_dst_clear_start = p->clone_dst_base + (ostart - p->clone_src_base);
+    p->clone_dst_clear_end   = p->clone_dst_clear_start + (oend - ostart);
+
+    diskfs_clone_dst_clear(request);
 } /* diskfs_clone_insert_dst */
 
 /* Source-side: rewrite e as [head][overlap=SHARED][tail] so the shared piece is
@@ -694,6 +966,7 @@ diskfs_clone_src_step(
     struct diskfs_bt_op           *op;
 
     p->op_scratch = stage + 1;
+
 
     switch (stage) {
         case 0:     /* remove the original source extent */
@@ -905,6 +1178,21 @@ diskfs_clone_range(
         diskfs_map_attrs(thread, &request->clone_range.r_pre_attr, dst);
         diskfs_map_attrs(thread, &request->clone_range.r_post_attr, dst);
         diskfs_op_ok(request, p->txn);
+        return;
+    }
+
+    /* A self-clone -- one inode, disjoint ranges -- must take that inode's
+     * write lock exactly ONCE.  Both ascending-inum selectors below pick the
+     * same inode when the inums are equal, so the second acquire would block
+     * on the lock the first one already holds and the request would never
+     * complete.  FSCTL_DUPLICATE_EXTENTS_TO_FILE permits this (the SMB layer
+     * rejects only *overlapping* same-file ranges) and
+     * smb2.ioctl.dup_extents_src_is_dest exercises it; memfs_clone_range
+     * makes the same distinction.  The walk re-looks-up the source extent by
+     * offset on every step, so mutating the one b+tree between steps is safe. */
+    if (src->inum == dst->inum && src->gen == dst->gen) {
+        diskfs_inode_acquire_pinned(thread, p->txn, src, DISKFS_INODE_LOCK_WRITE,
+                                    diskfs_clone_second_cb, request);
         return;
     }
 
