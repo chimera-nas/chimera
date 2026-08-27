@@ -9,13 +9,17 @@ Usage: ci_pr_comment.py <owner/repo> <pr_number> <body_file>
 Uses stdlib urllib only (the self-hosted CI runners have no `gh` CLI).  Auth
 token comes from $GH_TOKEN.  The comment is identified/updated by the MARKER on
 its first line, so re-runs replace the prior report instead of stacking.
+
+$CI_COMMENT_MARKER overrides that marker, which is what lets a second kind of
+report (e.g. the quint coverage summary) keep its own sticky comment instead of
+overwriting the ctest one.  The body file must begin with the same marker.
 """
 import json
 import os
 import sys
 import urllib.request
 
-MARKER = "<!-- ctest-report -->"
+MARKER = os.environ.get("CI_COMMENT_MARKER", "<!-- ctest-report -->")
 
 
 def api(method, url, data=None):
