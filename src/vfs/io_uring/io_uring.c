@@ -347,8 +347,8 @@ chimera_io_uring_set_open_attrs(
  * the child/parent statx that populate the returned attributes.  Shared by the
  * initial open and the EEXIST re-open of the create-probe.  skip_attrs leaves
  * the object's attributes untouched -- used for the CREATE_REGULAR re-open of an
- * existing regular file, which returns an O_PATH handle that cannot be fchmod'd
- * and whose attributes an UNCHECKED create must not modify. */
+ * existing regular file, whose attributes an UNCHECKED create must not modify
+ * because it found the object rather than making it. */
 static void
 chimera_io_uring_open_at_finish(
     struct chimera_io_uring_thread *thread,
@@ -495,9 +495,11 @@ chimera_io_uring_reap(
                              * must not truncate or re-permission an existing one.
                              * Re-open by handle only (O_PATH|O_NOFOLLOW: no I/O
                              * open, no follow, attributes untouched); the child
-                             * statx below classifies the leaf and a non-regular
-                             * object is rejected (directory -> EISDIR, symlink/
-                             * socket/fifo/... -> EEXIST).  Mirrors linux.c. */
+                             * statx below classifies the leaf, rejecting a
+                             * non-regular object (directory -> EISDIR, symlink/
+                             * socket/fifo/... -> EEXIST) and upgrading the
+                             * descriptor to a usable one otherwise.  linux.c can
+                             * fstatat before opening and so opens once. */
                             sqe = chimera_io_uring_get_sqe(thread, request, 3, 0);
                             io_uring_prep_openat(sqe, parent_fd, name,
                                                  O_PATH | O_NOFOLLOW, 0);
@@ -561,6 +563,40 @@ chimera_io_uring_reap(
                             request->status                = S_ISDIR(stx->stx_mode) ?
                                 CHIMERA_VFS_EISDIR : CHIMERA_VFS_EEXIST;
                             break;
+                        }
+
+                        if (request->open_at.flags & CHIMERA_VFS_OPEN_CREATE_REGULAR) {
+                            /* The O_PATH descriptor was only ever a safe way to
+                             * classify the leaf without a data open.  It is also
+                             * the handle the VFS caches, and the client's later
+                             * READ/WRITE run against it -- which an O_PATH fd
+                             * cannot serve.  Now that the object is known to be
+                             * a regular file, upgrade it in place, via /proc
+                             * (the only way to re-open an O_PATH descriptor; no
+                             * O_NOFOLLOW, because that path *is* a symlink and
+                             * following it is the entire mechanism).  Dropping
+                             * the create and truncate bits keeps an UNCHECKED
+                             * create from modifying an object it merely found.
+                             * Keeping the metadata handle when the upgrade fails
+                             * matches linux.c: a stateless CREATE does not
+                             * require access on what it finds, and the engine's
+                             * own DAC check refuses the I/O that follows. */
+                            char procpath[64];
+                            int  upgraded, uflags;
+
+                            uflags = chimera_io_uring_open_at_flags(request) &
+                                ~(O_CREAT | O_EXCL | O_TRUNC);
+
+                            snprintf(procpath, sizeof(procpath),
+                                     "/proc/self/fd/%d",
+                                     (int) request->open_at.r_vfs_private);
+
+                            upgraded = open(procpath, uflags);
+
+                            if (upgraded >= 0) {
+                                close(request->open_at.r_vfs_private);
+                                request->open_at.r_vfs_private = upgraded;
+                            }
                         }
 
                         /* Resolve the returned fh from the open fd itself

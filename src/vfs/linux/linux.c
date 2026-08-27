@@ -723,10 +723,9 @@ chimera_linux_open_at(
         } else if (errno == EEXIST &&
                    (request->open_at.flags & CHIMERA_VFS_OPEN_CREATE_REGULAR)) {
             /* NFS3 UNCHECKED create must yield a regular file.  Resolve the
-             * leaf type without a data open: a non-regular object is not opened
-             * (directory -> EISDIR, symlink/socket/fifo -> EEXIST), and an
-             * existing regular file is returned by handle only (O_PATH: no
-             * follow, no write, attributes untouched). */
+             * leaf type without a data open first: a non-regular object is
+             * never opened (directory -> EISDIR, symlink/socket/fifo ->
+             * EEXIST). */
             struct stat est;
 
             if (fstatat(parent_fd, fullname, &est, AT_SYMLINK_NOFOLLOW) == 0 &&
@@ -737,7 +736,25 @@ chimera_linux_open_at(
                 request->complete(request);
                 return;
             }
-            fd       = openat(parent_fd, fullname, O_PATH | O_NOFOLLOW, 0);
+
+            /* The descriptor this returns is the handle the VFS caches, and
+             * the client's later READ/WRITE run against it -- an O_PATH one
+             * cannot serve those at all, which reads back as a write failing
+             * on a file that was just created.  fstatat has established the
+             * leaf is a regular file, so open it for the access asked for,
+             * minus the create and truncate bits an UNCHECKED create must not
+             * apply to an object it merely found.  A stateless CREATE does not
+             * require write on that object, so a caller without it still gets
+             * a metadata-only handle rather than a failed create; the engine's
+             * own DAC check is what refuses the write that follows. */
+            fd = openat(parent_fd, fullname,
+                        (flags & ~(O_CREAT | O_EXCL | O_TRUNC)) | O_NOFOLLOW,
+                        0);
+
+            if (fd < 0 && (errno == EACCES || errno == EPERM ||
+                           errno == EROFS)) {
+                fd = openat(parent_fd, fullname, O_PATH | O_NOFOLLOW, 0);
+            }
             reopened = 1;
         } else if (errno == EEXIST) {
             fd = openat(parent_fd, fullname, flags, mode);
@@ -767,8 +784,8 @@ chimera_linux_open_at(
         return;
     }
 
-    /* An UNCHECKED create that re-opened an existing regular file (O_PATH)
-     * leaves its attributes untouched and cannot fchmod an O_PATH fd. */
+    /* An UNCHECKED create that re-opened an existing regular file leaves its
+     * attributes untouched -- it found the object, it did not make it. */
     rc = reopened ? 0 :
         chimera_linux_set_attrs(fd, "", request->open_at.set_attr);
 
