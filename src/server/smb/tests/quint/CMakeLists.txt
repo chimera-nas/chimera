@@ -28,7 +28,7 @@ target_link_libraries(smb2_smoke_probe chimera_server chimera_metrics)
 add_test(NAME chimera/server/smb/mbt/smoke_probe_memfs
     COMMAND $<TARGET_FILE:smb2_smoke_probe>)
 set_tests_properties(chimera/server/smb/mbt/smoke_probe_memfs PROPERTIES
-    LABELS "smb_mbt;memfs"
+    LABELS "quint;smb_mbt;memfs"
     TIMEOUT 60)
 
 # Oplock/lease ground-truth probe (Increment 1): pins chimera's grant ->
@@ -42,7 +42,7 @@ target_link_libraries(smb2_oplock_probe chimera_server chimera_metrics)
 add_test(NAME chimera/server/smb/mbt/oplock_probe_memfs
     COMMAND $<TARGET_FILE:smb2_oplock_probe>)
 set_tests_properties(chimera/server/smb/mbt/oplock_probe_memfs PROPERTIES
-    LABELS "smb_mbt;memfs"
+    LABELS "quint;smb_mbt;memfs"
     TIMEOUT 90)
 
 # Durable/persistent-handle ground-truth probe: pins the durable grant matrix,
@@ -56,7 +56,7 @@ target_link_libraries(smb2_durable_probe chimera_server chimera_metrics)
 add_test(NAME chimera/server/smb/mbt/durable_probe_memfs
     COMMAND $<TARGET_FILE:smb2_durable_probe>)
 set_tests_properties(chimera/server/smb/mbt/durable_probe_memfs PROPERTIES
-    LABELS "smb_mbt;memfs"
+    LABELS "quint;smb_mbt;memfs"
     TIMEOUT 120)
 
 # Replay / ChannelSequence ground-truth probe: pins the exactly-once layer --
@@ -71,7 +71,7 @@ target_link_libraries(smb2_replay_probe chimera_server chimera_metrics)
 add_test(NAME chimera/server/smb/mbt/replay_probe_memfs
     COMMAND $<TARGET_FILE:smb2_replay_probe>)
 set_tests_properties(chimera/server/smb/mbt/replay_probe_memfs PROPERTIES
-    LABELS "smb_mbt;memfs"
+    LABELS "quint;smb_mbt;memfs"
     TIMEOUT 120)
 
 # ---------------------------------------------------------------------------
@@ -100,5 +100,5 @@ add_test(NAME chimera/server/smb/mbt/batch_memfs
 # was close enough to the ceiling to flake.  This is a batch of 40 tests in one
 # ctest, not a single case.
 set_tests_properties(chimera/server/smb/mbt/batch_memfs PROPERTIES
-    LABELS "smb_mbt;memfs"
+    LABELS "quint;smb_mbt;memfs"
     TIMEOUT 600)
