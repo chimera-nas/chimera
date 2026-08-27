@@ -145,3 +145,6 @@ if(BOTO3_FOUND)
     # in s3_auth.c learns to append the AWS V2 subresource list.
 
 endif()
+
+# S3 model-based tests (quint): in-process replay harness, no python/boto3.
+add_subdirectory(quint)
