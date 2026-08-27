@@ -261,7 +261,19 @@ chimera_fuse_link_complete(
     struct chimera_fuse_request *req = private_data;
 
     if (error_code != CHIMERA_VFS_OK) {
-        chimera_fuse_reply(req, chimera_fuse_errno(error_code), NULL, 0);
+        int err = chimera_fuse_errno(error_code);
+
+        /* link(2) reports a directory source as EPERM.  The VFS deliberately
+         * surfaces the physical condition as EISDIR instead, for NFS4
+         * (NFS4ERR_ISDIR) and SMB (STATUS_FILE_IS_A_DIRECTORY) fidelity, and
+         * leaves the POSIX spelling to the caller -- which is what
+         * chimera_posix_link does.  FUSE speaks POSIX to the kernel, so it
+         * owes the same mapping. */
+        if (err == EISDIR) {
+            err = EPERM;
+        }
+
+        chimera_fuse_reply(req, err, NULL, 0);
         return;
     }
 
@@ -449,13 +461,24 @@ chimera_fuse_op_rename(
         return;
     }
 
+    /*
+     * CHIMERA_VFS_REMOVE_RECALL: a rename that replaces an existing
+     * destination unlinks that inode, which changes its link count while its
+     * file handle stays valid -- an fd held across the rename keeps naming
+     * it.  The VFS only recalls delegations on the doomed target and
+     * invalidates its cached attributes when it knows which inode is being
+     * clobbered, and a by-name caller either resolves that itself or asks the
+     * VFS to (NFSv3 RENAME takes the same route).  Without it a later
+     * GETATTR through the surviving open handle is answered from the attr
+     * cache and still reports the pre-rename nlink.
+     */
     chimera_vfs_rename_at(req->thread->vfs_thread, &req->cred,
                           req->fh, req->fh_len,
                           oldname, strlen(oldname),
                           req->fh2, req->fh2_len,
                           newname, strlen(newname),
                           NULL, 0,
-                          0,
+                          CHIMERA_VFS_REMOVE_RECALL,
                           0, 0,
                           NULL, NULL,
                           chimera_fuse_rename_complete, req);

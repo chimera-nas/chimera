@@ -27,3 +27,17 @@ chimera_fuse_add_mount(
     const char *mountpoint,
     const char *path,
     const char *options);
+
+/*
+ * Register a mount served over a caller-supplied descriptor instead of
+ * /dev/fuse -- one end of an AF_UNIX SOCK_SEQPACKET socketpair, with a test
+ * harness playing the kernel on the other.  SEQPACKET is the point: it
+ * preserves message boundaries, which is what makes it interchangeable with
+ * /dev/fuse's one-read-one-request contract.  The server takes no notice of
+ * the difference; only mount setup does.  Test-only.
+ */
+int
+chimera_fuse_add_synthetic_mount(
+    void       *fuse_shared,
+    const char *path,
+    int         fd);

@@ -206,11 +206,18 @@ chimera_fuse_op_setattr(
     chimera_fuse_setattr_to_vfs(&req->u.setattr.set_attr, in);
 
     if (in->valid & FATTR_FH) {
-        chimera_vfs_setattr(req->thread->vfs_thread, &req->cred,
-                            chimera_fuse_file(in->fh)->handle,
-                            &req->u.setattr.set_attr,
-                            0, CHIMERA_VFS_ATTR_MASK_STAT,
-                            chimera_fuse_setattr_complete, req);
+        /* A setattr through an open descriptor is descriptor-originated, so
+         * it gets POSIX rights retention: chimera_vfs_fsetattr authorizes a
+         * size change from the handle's open-time grant instead of the
+         * file's current mode, which is what makes ftruncate through a
+         * writable descriptor survive an intervening chmod.  The path-based
+         * form (truncate(2)) deliberately does not, and still uses
+         * chimera_vfs_setattr below. */
+        chimera_vfs_fsetattr(req->thread->vfs_thread, &req->cred,
+                             chimera_fuse_file(in->fh)->handle,
+                             &req->u.setattr.set_attr,
+                             0, CHIMERA_VFS_ATTR_MASK_STAT,
+                             chimera_fuse_setattr_complete, req);
         return;
     }
 

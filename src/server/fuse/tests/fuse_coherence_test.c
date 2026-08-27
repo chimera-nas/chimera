@@ -173,7 +173,7 @@ main(
 
     n = read(fd, buf, sizeof(buf));
     CHECK(n == 3 && memcmp(buf, "one", 3) == 0, "B reads the original data");
-    CHECK(fstat(fd, &st) == 0 && st.st_size == 3, "B caches size 3");
+    CHECK(fd >= 0 && fstat(fd, &st) == 0 && st.st_size == 3, "B caches size 3");
     close(fd);
 
     CHECK(write_file(a, "two-is-longer") == 0, "A rewrites with a new size");

@@ -48,6 +48,25 @@ chimera_fuse_opendir_callback(
     }
 } /* chimera_fuse_opendir_callback */
 
+static void
+chimera_fuse_opendir_gated(
+    enum chimera_vfs_error error_code,
+    void                  *private_data)
+{
+    struct chimera_fuse_request *req = private_data;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_fuse_reply(req, chimera_fuse_errno(error_code), NULL, 0);
+        return;
+    }
+
+    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
+                        req->fh, req->fh_len,
+                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH |
+                        CHIMERA_VFS_OPEN_DIRECTORY,
+                        chimera_fuse_opendir_callback, req);
+} /* chimera_fuse_opendir_gated */
+
 void
 chimera_fuse_op_opendir(
     struct chimera_fuse_request *req,
@@ -60,11 +79,19 @@ chimera_fuse_op_opendir(
         return;
     }
 
-    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
+    /*
+     * opendir(3) requires read permission on the directory, and nothing below
+     * this point checks it: chimera_vfs_open_fh opens by handle without a DAC
+     * gate, so an unreadable directory opened successfully and READDIR then
+     * listed it.  A default mount hides this because default_permissions has
+     * the kernel check the mode bits first -- but no_default_permissions is a
+     * supported option, and there the server is the only thing standing in
+     * the way.  Gate it here, the same way the other servers do.
+     */
+    chimera_vfs_gate_fh(&req->u.gate, req->thread->vfs_thread, &req->cred,
                         req->fh, req->fh_len,
-                        CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH |
-                        CHIMERA_VFS_OPEN_DIRECTORY,
-                        chimera_fuse_opendir_callback, req);
+                        CHIMERA_ACE_READ_DATA,
+                        chimera_fuse_opendir_gated, req);
 } /* chimera_fuse_op_opendir */
 
 /* --- READDIR / READDIRPLUS --- */

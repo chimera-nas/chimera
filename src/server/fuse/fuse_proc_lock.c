@@ -84,10 +84,14 @@ chimera_fuse_lock_file_get(
     int                             create)
 {
     struct chimera_fuse_lock_file *lf;
-    struct chimera_fuse_lock_key   key = {
-        .owner   = token,
-        .fh_hash = handle->fh_hash,
-    };
+    struct chimera_fuse_lock_key   key;
+
+    /* Zero the whole key before filling it: uthash hashes the raw bytes, so
+     * any padding must be defined -- and the analyser cannot otherwise prove
+     * it is. */
+    memset(&key, 0, sizeof(key));
+    key.owner   = token;
+    key.fh_hash = handle->fh_hash;
 
     HASH_FIND(hh, mount->lock_files, &key, sizeof(key), lf);
 
@@ -201,6 +205,10 @@ chimera_fuse_lock_trim(
 
         chimera_vfs_claim_release(state, lf->file_state, &lock->claim);
 
+#ifdef __clang_analyzer__
+        chimera_fuse_abort_if(lf->locks == NULL,
+                              "clang static analysis thinks this can happen");
+#endif /* ifdef __clang_analyzer__ */
         DL_DELETE(lf->locks, lock);
         free(lock);
     }
@@ -523,10 +531,11 @@ chimera_fuse_locks_release_owner(
     struct chimera_vfs_state      *state = thread->vfs_thread->vfs->vfs_state;
     struct chimera_fuse_lock_file *lf;
     struct chimera_fuse_lock      *lock, *tmp;
-    struct chimera_fuse_lock_key   key = {
-        .owner   = owner,
-        .fh_hash = fh_hash,
-    };
+    struct chimera_fuse_lock_key   key;
+
+    memset(&key, 0, sizeof(key));
+    key.owner   = owner;
+    key.fh_hash = fh_hash;
 
     pthread_mutex_lock(&mount->lock_lock);
 
@@ -537,11 +546,18 @@ chimera_fuse_locks_release_owner(
         return;
     }
 
-    DL_FOREACH_SAFE(lf->locks, lock, tmp)
-    {
+    /* Every lock this owner holds on this file goes away together, so detach
+     * the list in one step and walk the detached chain: splicing each node out
+     * of a list that is about to be empty anyway only gives the head pointer
+     * intermediate states to reason about. */
+    lock      = lf->locks;
+    lf->locks = NULL;
+
+    while (lock) {
+        tmp = lock->next;
         chimera_vfs_claim_release(state, lf->file_state, &lock->claim);
-        DL_DELETE(lf->locks, lock);
         free(lock);
+        lock = tmp;
     }
 
     chimera_fuse_lock_file_maybe_free(mount, state, lf);
@@ -623,6 +639,10 @@ chimera_fuse_locks_shutdown(
         DL_FOREACH_SAFE(lf->locks, lock, ltmp)
         {
             chimera_vfs_claim_release(state, lf->file_state, &lock->claim);
+#ifdef __clang_analyzer__
+            chimera_fuse_abort_if(lf->locks == NULL,
+                                  "clang static analysis thinks this can happen");
+#endif /* ifdef __clang_analyzer__ */
             DL_DELETE(lf->locks, lock);
             free(lock);
         }

@@ -69,7 +69,7 @@ main(
     n = pwrite(fd, "XY", 2, 100);
     CHECK(n == 2, "overwrite at offset");
 
-    rc = fstat(fd, &st);
+    rc = fd >= 0 ? fstat(fd, &st) : -1;
     CHECK(rc == 0 && st.st_size == sizeof(buf), "fstat size after writes");
 
     n = pread(fd, buf2, 4, 99);
@@ -84,18 +84,18 @@ main(
     n = write(fd2, "tail", 4);
     CHECK(n == 4, "append write");
 
-    rc = fstat(fd2, &st);
+    rc = fd2 >= 0 ? fstat(fd2, &st) : -1;
     CHECK(rc == 0 && st.st_size == sizeof(buf) + 4, "append landed at EOF");
 
     close(fd2);
 
     /* --- ftruncate both directions --- */
 
-    rc = ftruncate(fd, 1000);
+    rc = fd >= 0 ? ftruncate(fd, 1000) : -1;
     CHECK(rc == 0 && fstat(fd, &st) == 0 && st.st_size == 1000,
           "ftruncate down");
 
-    rc = ftruncate(fd, 100000);
+    rc = fd >= 0 ? ftruncate(fd, 100000) : -1;
     CHECK(rc == 0 && fstat(fd, &st) == 0 && st.st_size == 100000,
           "ftruncate up");
 
@@ -105,8 +105,8 @@ main(
 
     /* --- fsync / fdatasync --- */
 
-    CHECK(fsync(fd) == 0, "fsync");
-    CHECK(fdatasync(fd) == 0, "fdatasync");
+    CHECK(fd >= 0 && fsync(fd) == 0, "fsync");
+    CHECK(fd >= 0 && fdatasync(fd) == 0, "fdatasync");
 
     /* --- unlink while open --- */
 
@@ -139,6 +139,18 @@ main(
     n = pread(fd, buf2, 3, 0);
     CHECK(n == 3 && memcmp(buf2, "old", 3) == 0,
           "open fd still reads the replaced file");
+
+    /*
+     * The rename unlinked the target, so the inode this descriptor still
+     * names has no links left.  Its file handle does not change, which is
+     * what makes this worth asserting: a cached attribute keyed by that
+     * handle survives the rename and keeps reporting the pre-rename link
+     * count unless the rename invalidates it.
+     */
+    rc = fd >= 0 ? fstat(fd, &st) : -1;
+    CHECK(rc == 0 && st.st_nlink == 0,
+          "replaced inode reports nlink 0 through the surviving fd (%lu)",
+          rc == 0 ? (unsigned long) st.st_nlink : 0UL);
 
     close(fd);
     unlink("target");
@@ -261,14 +273,49 @@ main(
     int            count = 0;
     struct dirent *de;
 
-    while ((de = readdir(dirp)) != NULL) {
+    while (dirp && (de = readdir(dirp)) != NULL) {
         if (de->d_name[0] != '.') {
             count++;
         }
     }
-    closedir(dirp);
+    if (dirp) {
+        closedir(dirp);
+    }
 
     CHECK(count == 2000, "readdir returned all entries (%d)", count);
+
+    /*
+     * POSIX rights retention: I/O rights bind when the file is OPENED, so a
+     * descriptor already open for writing keeps working across a chmod that
+     * would deny a fresh open.  Path-based truncate(2) is the contrast case
+     * -- it re-checks and must fail.  Nothing in the tree covered this pair,
+     * which is how a FUSE descriptor came to lose its write right to a later
+     * chmod (the grant was re-derived at first I/O from the current mode).
+     * Runs only as an unprivileged user: root bypasses the check entirely,
+     * so as root this would pass no matter what the server did.
+     */
+    if (geteuid() != 0) {
+        int rfd = open("retain", O_CREAT | O_RDWR, 0644);
+
+        CHECK(rfd >= 0, "rights retention: create");
+
+        if (rfd >= 0) {
+            CHECK(chmod("retain", 0444) == 0, "rights retention: chmod 0444");
+
+            CHECK(ftruncate(rfd, 4096) == 0,
+                  "ftruncate through a writable fd survives chmod");
+            CHECK(pwrite(rfd, "z", 1, 0) == 1,
+                  "write through a writable fd survives chmod");
+
+            CHECK(truncate("retain", 0) < 0 && errno == EACCES,
+                  "truncate(path) still denied after chmod");
+
+            close(rfd);
+        }
+        CHECK(unlink("retain") == 0, "rights retention: cleanup");
+    } else {
+        printf("skip: rights retention (running as root, DAC bypassed)\n");
+    }
 
     printf("\n%s (%d failures)\n", failures ? "FAILED" : "PASSED", failures);
 
