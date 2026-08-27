@@ -602,6 +602,71 @@ main(
         simple(&env, EVPL_HTTP_REQUEST_TYPE_DELETE, "/bk0/mp");
     }
 
+    /* ---- synthetic clock: credential TTL --------------------------------- */
+
+    /* Credential expiry is driven by ticking the cred cache's synthetic
+     * clock (chimera_server_advance_s3_cred_clock advances it and sweeps
+     * synchronously) -- never by waiting out the sweeper thread's wall
+     * cadence.  The server's default TTL is 3600s. */
+    {
+        struct s3_mbt_req req = { .method     = EVPL_HTTP_REQUEST_TYPE_GET,
+                                  .path       = "/bk0/a",
+                                  .access_key = "tempaccess",
+                                  .secret_key = "tempsecret" };
+
+        CHECK(chimera_server_add_s3_cred(env.server, "tempaccess",
+                                         "tempsecret", 0) == 0,
+              "add unpinned cred failed");
+
+        r = s3_mbt_call(&env, &req);
+        CHECK(r->status == 200, "unpinned-cred GET: got %d want 200",
+              r->status);
+
+        /* re-adding the same key replaces the entry (fresh TTL stamp) */
+        CHECK(chimera_server_add_s3_cred(env.server, "tempaccess",
+                                         "tempsecret", 0) == 0,
+              "re-add unpinned cred failed");
+        r = s3_mbt_call(&env, &req);
+        CHECK(r->status == 200, "replaced-cred GET: got %d want 200",
+              r->status);
+
+        /* an advance short of the TTL leaves the cred alive... */
+        chimera_server_advance_s3_cred_clock(env.server, 3599);
+        r = s3_mbt_call(&env, &req);
+        CHECK(r->status == 200, "pre-TTL GET: got %d want 200", r->status);
+
+        /* ...and ticking past it sweeps the cred: same request now fails
+         * with an unknown access key */
+        chimera_server_advance_s3_cred_clock(env.server, 2);
+        r = s3_mbt_call(&env, &req);
+        CHECK(r->status == 403 &&
+              body_has(r, "<Code>InvalidAccessKeyId</Code>"),
+              "post-TTL GET: got %d, want 403 InvalidAccessKeyId", r->status);
+
+        /* the pinned harness credential is immune to the clock */
+        r = simple(&env, EVPL_HTTP_REQUEST_TYPE_GET, "/bk0/a");
+        CHECK(r->status == 200, "pinned cred after advance: got %d want 200",
+              r->status);
+
+        /* a pinned extra credential survives any advance, and explicit
+         * removal (not expiry) is what retires it */
+        CHECK(chimera_server_add_s3_cred(env.server, "tempaccess",
+                                         "tempsecret", 1) == 0,
+              "add pinned cred failed");
+        chimera_server_advance_s3_cred_clock(env.server, 100000);
+        r = s3_mbt_call(&env, &req);
+        CHECK(r->status == 200, "pinned temp cred GET: got %d want 200",
+              r->status);
+
+        CHECK(chimera_server_remove_s3_cred(env.server, "tempaccess") == 0,
+              "remove cred failed");
+        r = s3_mbt_call(&env, &req);
+        CHECK(r->status == 403, "removed-cred GET: got %d want 403",
+              r->status);
+        CHECK(chimera_server_remove_s3_cred(env.server, "tempaccess") == -1,
+              "double remove should report absence");
+    }
+
     /* ---- teardown -------------------------------------------------------- */
 
     s3_mbt_env_fs_teardown(&env, "fs0");
