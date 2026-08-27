@@ -48,14 +48,43 @@ if(NOT SPECS_BUNDLE_AVAILABLE)
     return()
 endif()
 
-# One batched replay: a single replayer process opens the server + HTTP
-# client once and replays every trace in the corpus back-to-back, standing
-# up a fresh, uniquely-named memfs (mkfs) per trace -- and dropping the
-# bucket-map entries the trace created -- so no server-side state can leak
-# across traces while the per-process server/client init is amortized over
-# the whole corpus.
+# Batched replays: a single replayer process opens the server + HTTP client
+# once and replays every trace in the corpus back-to-back, standing up a
+# fresh, uniquely-named memfs (mkfs) per trace -- and dropping the
+# bucket-map entries and aborting the in-flight uploads the trace created
+# -- so no server-side state can leak across traces while the per-process
+# server/client init is amortized over the whole corpus.
+#
+# stepMultipart traces carry multipart uploads and are replayed separately
+# with a 5 MiB block size: AWS's minimum part size makes every non-empty
+# part legal at that scale, which is the contract the model's EntityTooSmall
+# encoding assumes.  They are excluded from the normal-block-size batches by
+# filename prefix (there is no include-prefix, so the multipart batch
+# excludes every OTHER flavor instead).
 add_test(NAME chimera/server/s3/mbt/batch_memfs
-    COMMAND $<TARGET_FILE:s3_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/s3)
+    COMMAND $<TARGET_FILE:s3_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/s3
+            --exclude-prefix stepMultipart_)
 set_tests_properties(chimera/server/s3/mbt/batch_memfs PROPERTIES
+    LABELS "quint;s3_mbt;memfs"
+    TIMEOUT 300)
+
+add_test(NAME chimera/server/s3/mbt/batch_multipart_memfs
+    COMMAND $<TARGET_FILE:s3_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/s3
+            --block-size 5242880
+            --exclude-prefix step_ --exclude-prefix stepData_
+            --exclude-prefix stepList_ --exclude-prefix stepBucket_
+            --exclude-prefix stepTag_)
+set_tests_properties(chimera/server/s3/mbt/batch_multipart_memfs PROPERTIES
+    LABELS "quint;s3_mbt;memfs"
+    TIMEOUT 300)
+
+# The same corpus signed with AWS Signature V2 ("AWS <key>:<hmac-sha1>"),
+# exercising the server's V2 verifier end to end.  Multipart is excluded
+# only for the block-size reason above -- V2 signing itself covers every
+# op (the server's V2 canonical resource carries no subresources).
+add_test(NAME chimera/server/s3/mbt/batch_sigv2_memfs
+    COMMAND $<TARGET_FILE:s3_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/s3
+            --sigv2 --exclude-prefix stepMultipart_)
+set_tests_properties(chimera/server/s3/mbt/batch_sigv2_memfs PROPERTIES
     LABELS "quint;s3_mbt;memfs"
     TIMEOUT 300)

@@ -212,36 +212,158 @@ blocks_of(
     return n;
 } /* blocks_of */
 
-/* Model post-state lookup: the size in blocks of (bucket, key) in the ITF
- * `bkts` map, or -1 if absent.  bkts = {#map:[[name, {#map:[[comps, blocks]]}]]} */
+/* Model post-state navigation.  bkts = {#map:[[name, Bkt]]} where Bkt =
+ * { objs: {#map:[[comps, Obj]]}, btags: {#set}, mpu: {#map:[[id, Mpu]]} },
+ * Obj = { data: [...], mtag, tags: {#set} }, Mpu = { key, parts: {#map} }. */
+
+static json_t *
+model_bucket(
+    json_t     *post_bkts,
+    const char *bucket)
+{
+    json_t *outer = json_object_get(post_bkts, "#map");
+    size_t  i;
+
+    for (i = 0; i < json_array_size(outer); i++) {
+        json_t *pair = json_array_get(outer, i);
+
+        if (strcmp(json_string_value(json_array_get(pair, 0)), bucket) == 0) {
+            return json_array_get(pair, 1);
+        }
+    }
+    return NULL;
+} /* model_bucket */
+
+/* The post-state Obj record of (bucket, key), or NULL. */
+static json_t *
+model_obj(
+    json_t     *post_bkts,
+    const char *bucket,
+    const char *key)
+{
+    json_t *bk = model_bucket(post_bkts, bucket);
+    json_t *inner;
+    size_t  j;
+
+    if (!bk) {
+        return NULL;
+    }
+    inner = json_object_get(json_object_get(bk, "objs"), "#map");
+    for (j = 0; j < json_array_size(inner); j++) {
+        json_t *kv = json_array_get(inner, j);
+        char    kstr[MBT_MAX_KEYLEN];
+
+        key_str(json_array_get(kv, 0), kstr, sizeof(kstr));
+        if (strcmp(kstr, key) == 0) {
+            return json_array_get(kv, 1);
+        }
+    }
+    return NULL;
+} /* model_obj */
+
 static int
 model_size_blocks(
     json_t     *post_bkts,
     const char *bucket,
     const char *key)
 {
-    json_t *outer = json_object_get(post_bkts, "#map");
-    size_t  i, j;
+    json_t *o = model_obj(post_bkts, bucket, key);
 
-    for (i = 0; i < json_array_size(outer); i++) {
-        json_t *pair = json_array_get(outer, i);
+    if (!o) {
+        return -1;
+    }
+    return (int) json_array_size(json_object_get(o, "data"));
+} /* model_size_blocks */
 
-        if (strcmp(json_string_value(json_array_get(pair, 0)), bucket) != 0) {
-            continue;
+/* The post-state Mpu record of (bucket, uplid), or NULL. */
+static json_t *
+model_mpu(
+    json_t     *post_bkts,
+    const char *bucket,
+    int64_t     uplid)
+{
+    json_t *bk = model_bucket(post_bkts, bucket);
+    json_t *inner;
+    size_t  j;
+
+    if (!bk) {
+        return NULL;
+    }
+    inner = json_object_get(json_object_get(bk, "mpu"), "#map");
+    for (j = 0; j < json_array_size(inner); j++) {
+        json_t *kv = json_array_get(inner, j);
+
+        if (itf_i64(json_array_get(kv, 0)) == uplid) {
+            return json_array_get(kv, 1);
         }
-        json_t *inner = json_object_get(json_array_get(pair, 1), "#map");
-        for (j = 0; j < json_array_size(inner); j++) {
-            json_t *kv = json_array_get(inner, j);
-            char    kstr[MBT_MAX_KEYLEN];
+    }
+    return NULL;
+} /* model_mpu */
 
-            key_str(json_array_get(kv, 0), kstr, sizeof(kstr));
-            if (strcmp(kstr, key) == 0) {
-                return (int) json_array_size(json_array_get(kv, 1));
-            }
+/* The size in blocks of one uploaded part in the post-state, or -1. */
+static int
+model_part_blocks(
+    json_t     *post_bkts,
+    const char *bucket,
+    int64_t     uplid,
+    int64_t     pn)
+{
+    json_t *m = model_mpu(post_bkts, bucket, uplid);
+    json_t *parts;
+    size_t  j;
+
+    if (!m) {
+        return -1;
+    }
+    parts = json_object_get(json_object_get(m, "parts"), "#map");
+    for (j = 0; j < json_array_size(parts); j++) {
+        json_t *kv = json_array_get(parts, j);
+
+        if (itf_i64(json_array_get(kv, 0)) == pn) {
+            return (int) json_array_size(json_array_get(kv, 1));
         }
     }
     return -1;
-} /* model_size_blocks */
+} /* model_part_blocks */
+
+/* The model mtag -> (Content-Type, x-amz-meta-m) mapping the harness sends
+ * on PUT and expects echoed on GET/HEAD; mtag 0 sends neither and the
+ * response Content-Type falls back to application/octet-stream. */
+static const char *
+mtag_content_type(int mtag)
+{
+    return mtag == 1 ? "text/plain"
+         : mtag == 2 ? "application/json" : NULL;
+} /* mtag_content_type */
+
+static const char *
+mtag_meta(int mtag)
+{
+    return mtag == 1 ? "v1" : mtag == 2 ? "v2" : NULL;
+} /* mtag_meta */
+
+/* A tag id set as its sorted id array; the harness maps id i to the
+ * ("tk<i>", "tv<i>") pair. */
+static int
+tagset_of(
+    json_t *tags,
+    int    *ids,
+    int     max)
+{
+    json_t *arr = json_object_get(tags, "#set");
+    int     n   = 0;
+    int     want;
+    size_t  i;
+
+    for (want = 1; want <= 9 && n < max; want++) {
+        for (i = 0; i < json_array_size(arr); i++) {
+            if (itf_i64(json_array_get(arr, i)) == want) {
+                ids[n++] = want;
+            }
+        }
+    }
+    return n;
+} /* tagset_of */
 
 /* ---- deviation registry -------------------------------------------------- */
 
@@ -284,18 +406,23 @@ dev_copy_is_self(json_t *op)
 static const struct deviation known_deviations[] = {
     /* AWS DeleteObject returns 204 No Content; chimera returns 200 for an
      * existing key... */
-    { "delete-object-200",          "ODeleteObject",            204,    200, NULL              },
+    { "delete-object-200",          "ODeleteObject",            204,               200,               NULL
+    },
     /* ...and 404 NoSuchKey for a missing one (AWS is idempotent). */
-    { "delete-object-missing-404",  "ODeleteObject",            204,    404, NULL              },
+    { "delete-object-missing-404",  "ODeleteObject",            204,               404,               NULL
+    },
     /* AWS answers DELETE on a non-empty bucket with 409 BucketNotEmpty;
      * chimera maps BUCKET_NOT_EMPTY through its default 500 InternalError. */
-    { "delete-bucket-nonempty-500", "ODeleteBucket",            409,    500, NULL              },
+    { "delete-bucket-nonempty-500", "ODeleteBucket",            409,               500,               NULL
+    },
     /* AWS rejects a copy of an object onto itself (no metadata directive)
      * with 400 InvalidRequest; chimera performs it and returns 200. */
-    { "copy-self-200",              "OCopyObject",              400,    200, dev_copy_is_self  },
+    { "copy-self-200",              "OCopyObject",              400,               200,               dev_copy_is_self
+    },
     /* AWS returns 206 for every satisfiable Range, including one resolving
     * to the whole object; chimera collapses whole-object ranges to 200. */
-    { "range-full-200",             "OGetObject",               206,    200, dev_range_is_full },
+    { "range-full-200",             "OGetObject",               206,               200,               dev_range_is_full
+    },
 };
 
 static const struct deviation *
@@ -335,16 +462,165 @@ struct hist_ent {
     char op_dump[512];
 };
 
-struct oracle {
-    struct s3_mbt_env *env;
-    int                block_size;
-    int                verbose;
-    struct etag_ent    etags[MBT_MAX_ETAGS];
-    struct hist_ent    history[MBT_HIST];
-    int                hist_len;
-    uint8_t           *expect_buf;   /* expected-body scratch */
-    char              *xml_buf;      /* NUL-terminated response body copy */
+/* One live multipart upload: the model's abstract id, the wire's 32-hex
+ * UploadId learned from the Initiate response, and enough context to abort
+ * it at trace teardown (an in-flight upload holds VFS handles that would
+ * otherwise pin the per-trace filesystem forever). */
+struct upl_ent {
+    int  used;
+    long uplid;
+    char bucket[80];
+    char key[MBT_MAX_KEYLEN];
+    char wire[40];
 };
+
+#define MBT_MAX_UPLOADS 64
+
+/* Per-part ETag learned from UploadPart/UploadPartCopy, keyed by the model
+ * upload id + part number; replayed into the Complete manifest and checked
+ * against ListParts. */
+struct part_etag_ent {
+    int  used;
+    long uplid;
+    long pn;
+    char etag[160];
+};
+
+#define MBT_MAX_PART_ETAGS  256
+
+/* A syntactically valid (32 hex chars) upload id no Initiate ever minted,
+ * for the model's UNKNOWN_UPLOAD requests. */
+#define MBT_UNKNOWN_WIRE_ID "ffffffffffffffffffffffffffffffff"
+
+struct oracle {
+    struct s3_mbt_env   *env;
+    int                  block_size;
+    int                  verbose;
+    struct etag_ent      etags[MBT_MAX_ETAGS];
+    struct upl_ent       upls[MBT_MAX_UPLOADS];
+    struct part_etag_ent petags[MBT_MAX_PART_ETAGS];
+    struct hist_ent      history[MBT_HIST];
+    int                  hist_len;
+    uint8_t             *expect_buf; /* expected-body scratch */
+    char                *xml_buf;    /* NUL-terminated response body copy */
+};
+
+static struct upl_ent *
+upl_find(
+    struct oracle *o,
+    long           uplid)
+{
+    int i;
+
+    for (i = 0; i < MBT_MAX_UPLOADS; i++) {
+        if (o->upls[i].used && o->upls[i].uplid == uplid) {
+            return &o->upls[i];
+        }
+    }
+    return NULL;
+} /* upl_find */
+
+/* The wire UploadId a model id maps to; the unknown sentinel otherwise. */
+static const char *
+upl_wire(
+    struct oracle *o,
+    long           uplid)
+{
+    struct upl_ent *e = upl_find(o, uplid);
+
+    return e ? e->wire : MBT_UNKNOWN_WIRE_ID;
+} /* upl_wire */
+
+static void
+upl_learn(
+    struct oracle *o,
+    long           uplid,
+    const char    *bucket,
+    const char    *key,
+    const char    *wire)
+{
+    int i;
+
+    for (i = 0; i < MBT_MAX_UPLOADS; i++) {
+        if (!o->upls[i].used) {
+            o->upls[i].used  = 1;
+            o->upls[i].uplid = uplid;
+            snprintf(o->upls[i].bucket, sizeof(o->upls[i].bucket), "%s", bucket);
+            snprintf(o->upls[i].key, sizeof(o->upls[i].key), "%s", key);
+            snprintf(o->upls[i].wire, sizeof(o->upls[i].wire), "%s", wire);
+            return;
+        }
+    }
+    fprintf(stderr, "harness limit: more than %d uploads; raise "
+            "MBT_MAX_UPLOADS\n", MBT_MAX_UPLOADS);
+    exit(3);
+} /* upl_learn */
+
+static void
+petag_set(
+    struct oracle *o,
+    long           uplid,
+    long           pn,
+    const char    *etag)
+{
+    int i, free_i = -1;
+
+    for (i = 0; i < MBT_MAX_PART_ETAGS; i++) {
+        if (o->petags[i].used && o->petags[i].uplid == uplid &&
+            o->petags[i].pn == pn) {
+            snprintf(o->petags[i].etag, sizeof(o->petags[i].etag), "%s", etag);
+            return;
+        }
+        if (!o->petags[i].used && free_i < 0) {
+            free_i = i;
+        }
+    }
+    if (free_i < 0) {
+        fprintf(stderr, "harness limit: more than %d part etags; raise "
+                "MBT_MAX_PART_ETAGS\n", MBT_MAX_PART_ETAGS);
+        exit(3);
+    }
+    o->petags[free_i].used  = 1;
+    o->petags[free_i].uplid = uplid;
+    o->petags[free_i].pn    = pn;
+    snprintf(o->petags[free_i].etag, sizeof(o->petags[free_i].etag), "%s", etag);
+} /* petag_set */
+
+static const char *
+petag_get(
+    struct oracle *o,
+    long           uplid,
+    long           pn)
+{
+    int i;
+
+    for (i = 0; i < MBT_MAX_PART_ETAGS; i++) {
+        if (o->petags[i].used && o->petags[i].uplid == uplid &&
+            o->petags[i].pn == pn) {
+            return o->petags[i].etag;
+        }
+    }
+    return NULL;
+} /* petag_get */
+
+/* Drop an upload's map entry and its part ETags (Complete/Abort consumed it). */
+static void
+upl_forget(
+    struct oracle *o,
+    long           uplid)
+{
+    struct upl_ent *e = upl_find(o, uplid);
+    int             i;
+
+    if (e) {
+        e->used = 0;
+    }
+    for (i = 0; i < MBT_MAX_PART_ETAGS; i++) {
+        if (o->petags[i].used && o->petags[i].uplid == uplid) {
+            o->petags[i].used = 0;
+        }
+    }
+} /* upl_forget */
 
 static struct etag_ent *
 etag_find(
@@ -777,9 +1053,11 @@ op_put_object(
     n = blocks_of(op_field(op, "data"), syms, 64);
     s3_mbt_expand_blocks(syms, n, o->block_size, o->expect_buf);
 
-    req.path     = path;
-    req.body     = o->expect_buf;
-    req.body_len = (size_t) n * o->block_size;
+    req.path         = path;
+    req.body         = o->expect_buf;
+    req.body_len     = (size_t) n * o->block_size;
+    req.content_type = mtag_content_type((int) op_i64(op, "mtag"));
+    req.meta         = mtag_meta((int) op_i64(op, "mtag"));
 
     res = s3_mbt_call(o->env, &req);
 
@@ -794,6 +1072,46 @@ op_put_object(
         check_error_code(o, res, op, m);
     }
 } /* op_put_object */
+
+/* GET/HEAD metadata echo: the stored Content-Type (or the
+ * application/octet-stream fallback) and the x-amz-meta-m value, both from
+ * the post-state object's mtag. */
+static void
+check_meta_echo(
+    struct oracle            *o,
+    const struct s3_mbt_resp *res,
+    json_t                   *post_bkts,
+    const char               *bucket,
+    const char               *key,
+    const char               *what,
+    struct mism              *m)
+{
+    json_t     *obj = model_obj(post_bkts, bucket, key);
+    int         mtag;
+    const char *want_ct;
+    const char *want_meta;
+
+    (void) o;
+    if (!obj) {
+        mism_add(m, "%s: %s/%s missing from model post-state", what, bucket,
+                 key);
+        return;
+    }
+    mtag      = (int) itf_i64(json_object_get(obj, "mtag"));
+    want_ct   = mtag_content_type(mtag);
+    want_meta = mtag_meta(mtag);
+
+    if (strcmp(res->content_type,
+               want_ct ? want_ct : "application/octet-stream") != 0) {
+        mism_add(m, "%s: Content-Type '%s', expected '%s'", what,
+                 res->content_type,
+                 want_ct ? want_ct : "application/octet-stream");
+    }
+    if (strcmp(res->meta, want_meta ? want_meta : "") != 0) {
+        mism_add(m, "%s: x-amz-meta-m '%s', expected '%s'", what, res->meta,
+                 want_meta ? want_meta : "");
+    }
+} /* check_meta_echo */
 
 static void
 op_get_object(
@@ -852,6 +1170,7 @@ op_get_object(
                      res->content_length, got_len);
         }
         etag_check(o, bucket, key, res->etag, "GetObject", m);
+        check_meta_echo(o, res, post_bkts, bucket, key, "GetObject", m);
         /* On a tolerated whole-object 200 (range-full-200) there is no
         * Content-Range; only an exact 206 must carry the right one. */
         if (st == ST_MATCH && expected == 206) {
@@ -915,6 +1234,30 @@ op_head_object(
                      res->has_content_length ? res->content_length : -1);
         }
         etag_check(o, bucket, key, res->etag, "HeadObject", m);
+        check_meta_echo(o, res, post_bkts, bucket, key, "HeadObject", m);
+
+        /* x-amz-tagging-count must report the object's tag count; with no
+         * tags AWS omits the header while the server under test sends "0",
+         * so the zero case accepts either. */
+        {
+            json_t *obj = model_obj(post_bkts, bucket, key);
+
+            if (obj) {
+                int ntags = (int) json_array_size(
+                    json_object_get(json_object_get(obj, "tags"), "#set"));
+
+                if (ntags > 0) {
+                    if (atoi(res->tag_count) != ntags) {
+                        mism_add(m, "HeadObject x-amz-tagging-count '%s', "
+                                 "expected %d", res->tag_count, ntags);
+                    }
+                } else if (res->tag_count[0] &&
+                           strcmp(res->tag_count, "0") != 0) {
+                    mism_add(m, "HeadObject x-amz-tagging-count '%s', "
+                             "expected 0/absent", res->tag_count);
+                }
+            }
+        }
     }
 } /* op_head_object */
 
@@ -1040,6 +1383,9 @@ op_list_objects(
     struct s3_mbt_resp *res;
     unsigned            expected  = (unsigned) op_i64(op, "status");
     int                 delim     = op_bool(op, "delim");
+    int                 mode      = (int) op_i64(op, "mode");
+    const char         *ctag      = mode == 3 ? "<Version>" : "<Contents>";
+    const char         *ctag_end  = mode == 3 ? "</Version>" : "</Contents>";
     json_t             *want_keys = op_field(op, "keys");
     json_t             *want_pfxs = op_field(op, "prefixes");
     size_t              off       = 0;
@@ -1054,24 +1400,39 @@ op_list_objects(
     key_str(op_field(op, "startAfter"), sa, sizeof(sa));
 
     /* params in byte order, values percent-encoded the way the SDKs send
-     * them, matching the harness's sign-what-you-send contract */
+     * them, matching the harness's sign-what-you-send contract.  The three
+     * modes dress the same walk differently: V1 uses marker, V2 list-type=2
+     * + start-after, Versions the bare versions subresource + key-marker. */
     if (delim) {
         off += snprintf(query + off, sizeof(query) - off, "delimiter=%%2F&");
     }
-    off += snprintf(query + off, sizeof(query) - off, "list-type=2&max-keys=%"
-                    PRId64, op_i64(op, "maxKeys"));
+    if (sa[0] && mode != 2) {
+        char enc[2 * MBT_MAX_KEYLEN];
+
+        qenc(sa, enc, sizeof(enc));
+        off += snprintf(query + off, sizeof(query) - off, "%s=%s&",
+                        mode == 1 ? "marker" : "key-marker", enc);
+    }
+    if (mode == 2) {
+        off += snprintf(query + off, sizeof(query) - off, "list-type=2&");
+    }
+    off += snprintf(query + off, sizeof(query) - off, "max-keys=%" PRId64,
+                    op_i64(op, "maxKeys"));
     if (pfx[0]) {
         char enc[2 * MBT_MAX_KEYLEN];
 
         qenc(pfx, enc, sizeof(enc));
         off += snprintf(query + off, sizeof(query) - off, "&prefix=%s", enc);
     }
-    if (sa[0]) {
+    if (sa[0] && mode == 2) {
         char enc[2 * MBT_MAX_KEYLEN];
 
         qenc(sa, enc, sizeof(enc));
         off += snprintf(query + off, sizeof(query) - off, "&start-after=%s",
                         enc);
+    }
+    if (mode == 3) {
+        off += snprintf(query + off, sizeof(query) - off, "&versions=");
     }
 
     req.path  = path;
@@ -1088,16 +1449,17 @@ op_list_objects(
         return;
     }
 
-    /* Walk the <Contents> blocks in order: keys, sizes, ETags. */
+    /* Walk the <Contents> (or <Version>) blocks in order: keys, sizes,
+     * ETags. */
     cur = resp_xml(o, res);
-    while ((cur = strstr(cur, "<Contents>")) != NULL) {
-        const char *blk_end = strstr(cur, "</Contents>");
+    while ((cur = strstr(cur, ctag)) != NULL) {
+        const char *blk_end = strstr(cur, ctag_end);
         const char *p;
         char        size_txt[32];
         char        etag_txt[160];
 
         p = xml_text_after(cur, "Key", text, sizeof(text));
-        if (!p || (blk_end && p > blk_end + strlen("</Contents>"))) {
+        if (!p || (blk_end && p > blk_end + strlen(ctag_end))) {
             mism_add(m, "ListObjects: malformed <Contents> block");
             break;
         }
@@ -1126,7 +1488,7 @@ op_list_objects(
             etag_check(o, bucket, text, etag_txt, "ListObjects", m);
         }
         nkeys++;
-        cur += strlen("<Contents>");
+        cur += strlen(ctag);
     }
 
     /* Then the <CommonPrefixes> blocks, in order. */
@@ -1167,18 +1529,822 @@ op_list_objects(
         mism_add(m, "ListObjects: IsTruncated '%s', expected '%s'", itrunc,
                  op_bool(op, "truncated") ? "true" : "false");
     }
-    kcount[0] = '\0';
-    if (xml_text_after(o->xml_buf, "KeyCount", kcount, sizeof(kcount))) {
-        int want = (int) (json_array_size(want_keys) +
-                          json_array_size(want_pfxs));
+    /* KeyCount is a V2-only element. */
+    if (mode == 2) {
+        kcount[0] = '\0';
+        if (xml_text_after(o->xml_buf, "KeyCount", kcount, sizeof(kcount))) {
+            int want = (int) (json_array_size(want_keys) +
+                              json_array_size(want_pfxs));
 
-        if (atoi(kcount) != want) {
-            mism_add(m, "ListObjects: KeyCount %s, expected %d", kcount, want);
+            if (atoi(kcount) != want) {
+                mism_add(m, "ListObjects: KeyCount %s, expected %d", kcount,
+                         want);
+            }
+        } else {
+            mism_add(m, "ListObjects: response lacks <KeyCount>");
         }
-    } else {
-        mism_add(m, "ListObjects: response lacks <KeyCount>");
     }
 } /* op_list_objects */
+
+/* ---- DeleteObjects batch ------------------------------------------------- */
+
+static void
+op_delete_objects(
+    struct oracle *o,
+    json_t        *op,
+    json_t        *post_bkts,
+    struct mism   *m)
+{
+    char                path[128];
+    char                bucket[80];
+    char                body[4096];
+    size_t              blen = 0;
+    struct s3_mbt_req   req  = { .method = EVPL_HTTP_REQUEST_TYPE_POST };
+    struct s3_mbt_resp *res;
+    unsigned            expected = (unsigned) op_i64(op, "status");
+    int                 quiet    = op_bool(op, "quiet");
+    json_t             *keys     = op_field(op, "keys");
+    size_t              i;
+    const char         *cur;
+    char                text[MBT_MAX_KEYLEN];
+    int                 ndel = 0;
+
+    (void) post_bkts;
+    snprintf(bucket, sizeof(bucket), "%s", op_str(op, "bucket"));
+    build_path(op, "bucket", NULL, path, sizeof(path));
+
+    blen += snprintf(body + blen, sizeof(body) - blen, "<Delete>");
+    if (quiet) {
+        blen += snprintf(body + blen, sizeof(body) - blen,
+                         "<Quiet>true</Quiet>");
+    }
+    for (i = 0; i < json_array_size(keys); i++) {
+        char kstr[MBT_MAX_KEYLEN];
+
+        key_str(json_array_get(keys, i), kstr, sizeof(kstr));
+        blen += snprintf(body + blen, sizeof(body) - blen,
+                         "<Object><Key>%s</Key></Object>", kstr);
+    }
+    blen += snprintf(body + blen, sizeof(body) - blen, "</Delete>");
+
+    req.path     = path;
+    req.query    = "delete=";
+    req.body     = (const uint8_t *) body;
+    req.body_len = blen;
+
+    res = s3_mbt_call(o->env, &req);
+
+    if (check_status(o, "ODeleteObjects", op, expected,
+                     (unsigned) res->status, m) != ST_MATCH) {
+        return;
+    }
+    if (expected != 200) {
+        check_error_code(o, res, op, m);
+        return;
+    }
+
+    /* every named key is gone; drop the learned ETags */
+    for (i = 0; i < json_array_size(keys); i++) {
+        char kstr[MBT_MAX_KEYLEN];
+
+        key_str(json_array_get(keys, i), kstr, sizeof(kstr));
+        etag_forget(o, bucket, kstr);
+    }
+
+    /* non-quiet: one <Deleted><Key> per named key, in request order;
+     * quiet: none.  Never an <Error> (every key is deletable as root). */
+    cur = resp_xml(o, res);
+    while ((cur = strstr(cur, "<Deleted>")) != NULL) {
+        if (!xml_text_after(cur, "Key", text, sizeof(text))) {
+            mism_add(m, "DeleteObjects: malformed <Deleted> block");
+            break;
+        }
+        if (!quiet && ndel < (int) json_array_size(keys)) {
+            char want[MBT_MAX_KEYLEN];
+
+            key_str(json_array_get(keys, ndel), want, sizeof(want));
+            if (strcmp(want, text) != 0) {
+                mism_add(m, "DeleteObjects: Deleted[%d] = '%s', expected '%s'",
+                         ndel, text, want);
+            }
+        }
+        ndel++;
+        cur += strlen("<Deleted>");
+    }
+    if (quiet && ndel != 0) {
+        mism_add(m, "DeleteObjects: %d <Deleted> entries in Quiet mode", ndel);
+    }
+    if (!quiet && ndel != (int) json_array_size(keys)) {
+        mism_add(m, "DeleteObjects: %d <Deleted> entries, expected %zu", ndel,
+                 json_array_size(keys));
+    }
+    if (strstr(o->xml_buf, "<Error>")) {
+        mism_add(m, "DeleteObjects: unexpected <Error> entry");
+    }
+} /* op_delete_objects */
+
+/* ---- GetObjectAttributes ------------------------------------------------- */
+
+static void
+op_get_attrs(
+    struct oracle *o,
+    json_t        *op,
+    json_t        *post_bkts,
+    struct mism   *m)
+{
+    char                path[MBT_MAX_KEYLEN + 96];
+    char                bucket[80], key[MBT_MAX_KEYLEN];
+    char                text[160];
+    struct s3_mbt_req   req = { .method = EVPL_HTTP_REQUEST_TYPE_GET };
+    struct s3_mbt_resp *res;
+    unsigned            expected = (unsigned) op_i64(op, "status");
+
+    (void) post_bkts;
+    snprintf(bucket, sizeof(bucket), "%s", op_str(op, "bucket"));
+    key_str(op_field(op, "key"), key, sizeof(key));
+    build_path(op, "bucket", "key", path, sizeof(path));
+
+    /* The x-amz-object-attributes header is deliberately not sent: the
+     * server ignores it and always reports the filesystem-suppliable fixed
+     * set (ETag, StorageClass, ObjectSize) this handler checks.  (AWS would
+     * 400 without the header; that strictness is not modeled.) */
+    req.path  = path;
+    req.query = "attributes=";
+
+    res = s3_mbt_call(o->env, &req);
+
+    if (check_status(o, "OGetAttrs", op, expected, (unsigned) res->status,
+                     m) != ST_MATCH) {
+        return;
+    }
+    if (expected != 200) {
+        check_error_code(o, res, op, m);
+        return;
+    }
+
+    if (xml_text_after(resp_xml(o, res), "ObjectSize", text, sizeof(text))) {
+        int64_t want = op_i64(op, "sizeBlocks") * o->block_size;
+
+        if (strtoll(text, NULL, 10) != want) {
+            mism_add(m, "GetAttrs: ObjectSize %s, expected %" PRId64, text,
+                     want);
+        }
+    } else {
+        mism_add(m, "GetAttrs: response lacks <ObjectSize>");
+    }
+    if (!xml_text_after(o->xml_buf, "StorageClass", text, sizeof(text)) ||
+        strcmp(text, "STANDARD") != 0) {
+        mism_add(m, "GetAttrs: StorageClass missing or not STANDARD");
+    }
+    /* the attributes ETag is the same value GET/HEAD report, unquoted */
+    if (xml_text_after(o->xml_buf, "ETag", text, sizeof(text))) {
+        char quoted[164];
+
+        snprintf(quoted, sizeof(quoted), "\"%s\"", text);
+        etag_check(o, bucket, key, quoted, "GetAttrs", m);
+    } else {
+        mism_add(m, "GetAttrs: response lacks <ETag>");
+    }
+} /* op_get_attrs */
+
+/* ---- tagging ------------------------------------------------------------- */
+
+/* <Tagging><TagSet><Tag><Key>tk<i></Key><Value>tv<i></Value></Tag>... */
+static size_t
+tagging_body(
+    const int *ids,
+    int        n,
+    char      *out,
+    size_t     outlen)
+{
+    size_t off = 0;
+    int    i;
+
+    off += snprintf(out + off, outlen - off, "<Tagging><TagSet>");
+    for (i = 0; i < n; i++) {
+        off += snprintf(out + off, outlen - off,
+                        "<Tag><Key>tk%d</Key><Value>tv%d</Value></Tag>",
+                        ids[i], ids[i]);
+    }
+    off += snprintf(out + off, outlen - off, "</TagSet></Tagging>");
+    return off;
+} /* tagging_body */
+
+/* Collect the tag ids of a <Tagging> response (tags named tk<i> carrying
+ * value tv<i>). */
+static int
+parse_tagset(
+    struct oracle            *o,
+    const struct s3_mbt_resp *res,
+    int                      *ids,
+    int                       max,
+    struct mism              *m)
+{
+    const char *cur = resp_xml(o, res);
+    char        ktext[64], vtext[64];
+    int         n = 0;
+
+    while ((cur = strstr(cur, "<Tag>")) != NULL) {
+        if (!xml_text_after(cur, "Key", ktext, sizeof(ktext)) ||
+            !xml_text_after(cur, "Value", vtext, sizeof(vtext))) {
+            mism_add(m, "tagging: malformed <Tag> block");
+            break;
+        }
+        if (strncmp(ktext, "tk", 2) != 0) {
+            mism_add(m, "tagging: unexpected tag key '%s'", ktext);
+        } else if (n < max) {
+            ids[n] = atoi(ktext + 2);
+            if (strncmp(vtext, "tv", 2) != 0 || atoi(vtext + 2) != ids[n]) {
+                mism_add(m, "tagging: tag %s has value '%s'", ktext, vtext);
+            }
+        }
+        n++;
+        cur += strlen("<Tag>");
+    }
+    return n;
+} /* parse_tagset */
+
+/* Compare a parsed tag-id list against the label's tag set. */
+static void
+check_tagset(
+    json_t      *want_tags,
+    const int   *ids,
+    int          n,
+    const char  *what,
+    struct mism *m)
+{
+    int want_ids[16];
+    int wn = tagset_of(want_tags, want_ids, 16);
+    int i, j, found;
+
+    if (n != wn) {
+        mism_add(m, "%s: %d tags, expected %d", what, n, wn);
+        return;
+    }
+    for (i = 0; i < wn; i++) {
+        found = 0;
+        for (j = 0; j < n; j++) {
+            if (ids[j] == want_ids[i]) {
+                found = 1;
+                break;
+            }
+        }
+        if (!found) {
+            mism_add(m, "%s: tag id %d missing", what, want_ids[i]);
+        }
+    }
+} /* check_tagset */
+
+/* One handler serves the object- and bucket-level variants of each tagging
+ * verb; the object one has a key. */
+static void
+tagging_common(
+    struct oracle              *o,
+    json_t                     *op,
+    struct mism                *m,
+    const char                 *tag,
+    enum evpl_http_request_type method,
+    int                         has_key,
+    int                         send_tags)
+{
+    char                path[MBT_MAX_KEYLEN + 96];
+    char                body[2048];
+    struct s3_mbt_req   req = { .method = method };
+    struct s3_mbt_resp *res;
+    unsigned            expected = (unsigned) op_i64(op, "status");
+    int                 ids[16];
+    int                 n;
+
+    build_path(op, "bucket", has_key ? "key" : NULL, path, sizeof(path));
+    req.path  = path;
+    req.query = "tagging=";
+
+    if (send_tags) {
+        n            = tagset_of(op_field(op, "tags"), ids, 16);
+        req.body     = (const uint8_t *) body;
+        req.body_len = tagging_body(ids, n, body, sizeof(body));
+    }
+
+    res = s3_mbt_call(o->env, &req);
+
+    if (check_status(o, tag, op, expected, (unsigned) res->status, m)
+        != ST_MATCH) {
+        return;
+    }
+    if (expected != 200 && expected != 204) {
+        check_error_code(o, res, op, m);
+        return;
+    }
+    if (method == EVPL_HTTP_REQUEST_TYPE_GET && expected == 200) {
+        n = parse_tagset(o, res, ids, 16, m);
+        check_tagset(op_field(op, "tags"), ids, n, tag, m);
+    }
+} /* tagging_common */
+
+static void
+op_put_obj_tagging(
+    struct oracle *o,
+    json_t        *op,
+    json_t        *post_bkts,
+    struct mism   *m)
+{
+    (void) post_bkts;
+    tagging_common(o, op, m, "OPutObjTagging", EVPL_HTTP_REQUEST_TYPE_PUT,
+                   1, 1);
+} /* op_put_obj_tagging */
+
+static void
+op_get_obj_tagging(
+    struct oracle *o,
+    json_t        *op,
+    json_t        *post_bkts,
+    struct mism   *m)
+{
+    (void) post_bkts;
+    tagging_common(o, op, m, "OGetObjTagging", EVPL_HTTP_REQUEST_TYPE_GET,
+                   1, 0);
+} /* op_get_obj_tagging */
+
+static void
+op_del_obj_tagging(
+    struct oracle *o,
+    json_t        *op,
+    json_t        *post_bkts,
+    struct mism   *m)
+{
+    (void) post_bkts;
+    tagging_common(o, op, m, "ODelObjTagging", EVPL_HTTP_REQUEST_TYPE_DELETE,
+                   1, 0);
+} /* op_del_obj_tagging */
+
+static void
+op_put_bkt_tagging(
+    struct oracle *o,
+    json_t        *op,
+    json_t        *post_bkts,
+    struct mism   *m)
+{
+    (void) post_bkts;
+    tagging_common(o, op, m, "OPutBktTagging", EVPL_HTTP_REQUEST_TYPE_PUT,
+                   0, 1);
+} /* op_put_bkt_tagging */
+
+static void
+op_get_bkt_tagging(
+    struct oracle *o,
+    json_t        *op,
+    json_t        *post_bkts,
+    struct mism   *m)
+{
+    (void) post_bkts;
+    tagging_common(o, op, m, "OGetBktTagging", EVPL_HTTP_REQUEST_TYPE_GET,
+                   0, 0);
+} /* op_get_bkt_tagging */
+
+static void
+op_del_bkt_tagging(
+    struct oracle *o,
+    json_t        *op,
+    json_t        *post_bkts,
+    struct mism   *m)
+{
+    (void) post_bkts;
+    tagging_common(o, op, m, "ODelBktTagging", EVPL_HTTP_REQUEST_TYPE_DELETE,
+                   0, 0);
+} /* op_del_bkt_tagging */
+
+/* ---- multipart ----------------------------------------------------------- */
+
+static void
+op_create_mpu(
+    struct oracle *o,
+    json_t        *op,
+    json_t        *post_bkts,
+    struct mism   *m)
+{
+    char                path[MBT_MAX_KEYLEN + 96];
+    char                bucket[80], key[MBT_MAX_KEYLEN];
+    char                text[64];
+    struct s3_mbt_req   req = { .method = EVPL_HTTP_REQUEST_TYPE_POST };
+    struct s3_mbt_resp *res;
+    unsigned            expected = (unsigned) op_i64(op, "status");
+
+    (void) post_bkts;
+    snprintf(bucket, sizeof(bucket), "%s", op_str(op, "bucket"));
+    key_str(op_field(op, "key"), key, sizeof(key));
+    build_path(op, "bucket", "key", path, sizeof(path));
+    req.path  = path;
+    req.query = "uploads=";
+
+    res = s3_mbt_call(o->env, &req);
+
+    if (check_status(o, "OCreateMpu", op, expected, (unsigned) res->status,
+                     m) != ST_MATCH) {
+        return;
+    }
+    if (expected != 200) {
+        check_error_code(o, res, op, m);
+        return;
+    }
+    if (!xml_text_after(resp_xml(o, res), "UploadId", text, sizeof(text)) ||
+        strlen(text) != 32) {
+        mism_add(m, "CreateMpu: missing/malformed <UploadId> ('%s')", text);
+        return;
+    }
+    upl_learn(o, (long) op_i64(op, "uplid"), bucket, key, text);
+
+    if (!xml_text_after(o->xml_buf, "Key", text, sizeof(text)) ||
+        strcmp(text, key) != 0) {
+        mism_add(m, "CreateMpu: <Key> mismatch");
+    }
+} /* op_create_mpu */
+
+static void
+op_upload_part(
+    struct oracle *o,
+    json_t        *op,
+    json_t        *post_bkts,
+    struct mism   *m)
+{
+    char                path[MBT_MAX_KEYLEN + 96];
+    char                query[96];
+    int                 syms[64];
+    int                 n;
+    struct s3_mbt_req   req = { .method = EVPL_HTTP_REQUEST_TYPE_PUT };
+    struct s3_mbt_resp *res;
+    unsigned            expected = (unsigned) op_i64(op, "status");
+    long                uplid    = (long) op_i64(op, "uplid");
+    long                pn       = (long) op_i64(op, "partNum");
+
+    (void) post_bkts;
+    build_path(op, "bucket", "key", path, sizeof(path));
+    snprintf(query, sizeof(query), "partNumber=%ld&uploadId=%s", pn,
+             upl_wire(o, uplid));
+
+    n = blocks_of(op_field(op, "data"), syms, 64);
+    s3_mbt_expand_blocks(syms, n, o->block_size, o->expect_buf);
+
+    req.path     = path;
+    req.query    = query;
+    req.body     = o->expect_buf;
+    req.body_len = (size_t) n * o->block_size;
+
+    res = s3_mbt_call(o->env, &req);
+
+    if (check_status(o, "OUploadPart", op, expected, (unsigned) res->status,
+                     m) != ST_MATCH) {
+        return;
+    }
+    if (expected != 200) {
+        check_error_code(o, res, op, m);
+        return;
+    }
+    if (res->etag[0] != '"') {
+        mism_add(m, "UploadPart: ETag missing/unquoted ('%s')", res->etag);
+        return;
+    }
+    petag_set(o, uplid, pn, res->etag);
+} /* op_upload_part */
+
+static void
+op_upload_part_copy(
+    struct oracle *o,
+    json_t        *op,
+    json_t        *post_bkts,
+    struct mism   *m)
+{
+    char                path[MBT_MAX_KEYLEN + 96];
+    char                query[96];
+    char                src[MBT_MAX_KEYLEN + 96];
+    char                range_hdr[80];
+    char                text[160];
+    char                sk[MBT_MAX_KEYLEN];
+    struct s3_mbt_req   req = { .method = EVPL_HTTP_REQUEST_TYPE_PUT };
+    struct s3_mbt_resp *res;
+    unsigned            expected = (unsigned) op_i64(op, "status");
+    long                uplid    = (long) op_i64(op, "uplid");
+    long                pn       = (long) op_i64(op, "partNum");
+    const char         *rtag     = op_tag(op, "range");
+    json_t             *rval     = json_object_get(op_field(op, "range"), "value");
+    int64_t             bs       = o->block_size;
+
+    (void) post_bkts;
+    build_path(op, "bucket", "key", path, sizeof(path));
+    key_str(op_field(op, "srcKey"), sk, sizeof(sk));
+    snprintf(src, sizeof(src), "/%s/%s", op_str(op, "srcBucket"), sk);
+    snprintf(query, sizeof(query), "partNumber=%ld&uploadId=%s", pn,
+             upl_wire(o, uplid));
+
+    req.path        = path;
+    req.query       = query;
+    req.copy_source = src;
+
+    if (strcmp(rtag, "RClosed") == 0) {
+        snprintf(range_hdr, sizeof(range_hdr),
+                 "bytes=%" PRId64 "-%" PRId64,
+                 itf_i64(json_object_get(rval, "first")) * bs,
+                 (itf_i64(json_object_get(rval, "last")) + 1) * bs - 1);
+        req.copy_range = range_hdr;
+    }
+
+    res = s3_mbt_call(o->env, &req);
+
+    if (check_status(o, "OUploadPartCopy", op, expected,
+                     (unsigned) res->status, m) != ST_MATCH) {
+        return;
+    }
+    if (expected != 200) {
+        check_error_code(o, res, op, m);
+        return;
+    }
+    /* the part's ETag arrives in the <CopyPartResult> body, not a header */
+    if (!strstr(resp_xml(o, res), "<CopyPartResult")) {
+        mism_add(m, "UploadPartCopy: response lacks <CopyPartResult>");
+        return;
+    }
+    if (!xml_text_after(o->xml_buf, "ETag", text, sizeof(text))) {
+        mism_add(m, "UploadPartCopy: response lacks <ETag>");
+        return;
+    }
+    petag_set(o, uplid, pn, text);
+} /* op_upload_part_copy */
+
+static void
+op_complete_mpu(
+    struct oracle *o,
+    json_t        *op,
+    json_t        *post_bkts,
+    struct mism   *m)
+{
+    char                path[MBT_MAX_KEYLEN + 96];
+    char                query[96];
+    char                bucket[80], key[MBT_MAX_KEYLEN];
+    char                body[4096];
+    char                text[160];
+    size_t              blen = 0;
+    struct s3_mbt_req   req  = { .method = EVPL_HTTP_REQUEST_TYPE_POST };
+    struct s3_mbt_resp *res;
+    unsigned            expected = (unsigned) op_i64(op, "status");
+    long                uplid    = (long) op_i64(op, "uplid");
+    json_t             *manifest = op_field(op, "manifest");
+    size_t              i;
+
+    (void) post_bkts;
+    snprintf(bucket, sizeof(bucket), "%s", op_str(op, "bucket"));
+    key_str(op_field(op, "key"), key, sizeof(key));
+    build_path(op, "bucket", "key", path, sizeof(path));
+    snprintf(query, sizeof(query), "uploadId=%s", upl_wire(o, uplid));
+
+    blen += snprintf(body + blen, sizeof(body) - blen,
+                     "<CompleteMultipartUpload>");
+    for (i = 0; i < json_array_size(manifest); i++) {
+        long        pn = (long) itf_i64(json_array_get(manifest, i));
+        const char *pe = petag_get(o, uplid, pn);
+
+        /* a never-uploaded part still needs a syntactically valid ETag --
+         * the parser requires one per <Part> */
+        blen += snprintf(body + blen, sizeof(body) - blen,
+                         "<Part><PartNumber>%ld</PartNumber><ETag>%s</ETag>"
+                         "</Part>", pn,
+                         pe ? pe : "\"00000000000000000000000000000000\"");
+    }
+    blen += snprintf(body + blen, sizeof(body) - blen,
+                     "</CompleteMultipartUpload>");
+
+    req.path     = path;
+    req.query    = query;
+    req.body     = (const uint8_t *) body;
+    req.body_len = blen;
+
+    res = s3_mbt_call(o->env, &req);
+
+    if (check_status(o, "OCompleteMpu", op, expected, (unsigned) res->status,
+                     m) != ST_MATCH) {
+        return;
+    }
+    if (expected != 200) {
+        check_error_code(o, res, op, m);
+        return;
+    }
+
+    /* the upload is consumed and the key now holds the assembled object;
+     * its ETag will be learned from the next read -- the Complete
+     * response's own "<hex>-<N>" ETag is a digest over the part ETags and
+     * is NOT the value later GET/HEAD report (deviation
+     * mpu-complete-etag-detached; AWS reports one consistent value) */
+    upl_forget(o, uplid);
+    etag_forget(o, bucket, key);
+
+    if (!strstr(resp_xml(o, res), "<CompleteMultipartUploadResult")) {
+        mism_add(m, "CompleteMpu: response lacks result element");
+        return;
+    }
+    if (xml_text_after(o->xml_buf, "ETag", text, sizeof(text))) {
+        char want_suffix[16];
+
+        snprintf(want_suffix, sizeof(want_suffix), "-%zu\"",
+                 json_array_size(manifest));
+        if (strlen(text) < strlen(want_suffix) ||
+            strcmp(text + strlen(text) - strlen(want_suffix),
+                   want_suffix) != 0) {
+            mism_add(m, "CompleteMpu: ETag '%s' lacks part-count suffix %s",
+                     text, want_suffix);
+        }
+    } else {
+        mism_add(m, "CompleteMpu: response lacks <ETag>");
+    }
+} /* op_complete_mpu */
+
+static void
+op_abort_mpu(
+    struct oracle *o,
+    json_t        *op,
+    json_t        *post_bkts,
+    struct mism   *m)
+{
+    char                path[MBT_MAX_KEYLEN + 96];
+    char                query[96];
+    struct s3_mbt_req   req = { .method = EVPL_HTTP_REQUEST_TYPE_DELETE };
+    struct s3_mbt_resp *res;
+    unsigned            expected = (unsigned) op_i64(op, "status");
+    long                uplid    = (long) op_i64(op, "uplid");
+
+    (void) post_bkts;
+    build_path(op, "bucket", "key", path, sizeof(path));
+    snprintf(query, sizeof(query), "uploadId=%s", upl_wire(o, uplid));
+    req.path  = path;
+    req.query = query;
+
+    res = s3_mbt_call(o->env, &req);
+
+    if (check_status(o, "OAbortMpu", op, expected, (unsigned) res->status,
+                     m) != ST_MATCH) {
+        return;
+    }
+    if (expected == 204) {
+        upl_forget(o, uplid);
+    } else {
+        check_error_code(o, res, op, m);
+    }
+} /* op_abort_mpu */
+
+static void
+op_list_parts(
+    struct oracle *o,
+    json_t        *op,
+    json_t        *post_bkts,
+    struct mism   *m)
+{
+    char                path[MBT_MAX_KEYLEN + 96];
+    char                query[96];
+    char                bucket[80];
+    char                text[160];
+    struct s3_mbt_req   req = { .method = EVPL_HTTP_REQUEST_TYPE_GET };
+    struct s3_mbt_resp *res;
+    unsigned            expected = (unsigned) op_i64(op, "status");
+    long                uplid    = (long) op_i64(op, "uplid");
+    json_t             *want     = op_field(op, "partNums");
+    const char         *cur;
+    int                 np = 0;
+
+    snprintf(bucket, sizeof(bucket), "%s", op_str(op, "bucket"));
+    build_path(op, "bucket", "key", path, sizeof(path));
+    snprintf(query, sizeof(query), "uploadId=%s", upl_wire(o, uplid));
+    req.path  = path;
+    req.query = query;
+
+    res = s3_mbt_call(o->env, &req);
+
+    if (check_status(o, "OListParts", op, expected, (unsigned) res->status,
+                     m) != ST_MATCH) {
+        return;
+    }
+    if (expected != 200) {
+        check_error_code(o, res, op, m);
+        return;
+    }
+
+    cur = resp_xml(o, res);
+    while ((cur = strstr(cur, "<Part>")) != NULL) {
+        long pn;
+
+        if (!xml_text_after(cur, "PartNumber", text, sizeof(text))) {
+            mism_add(m, "ListParts: malformed <Part> block");
+            break;
+        }
+        pn = atol(text);
+        if (np < (int) json_array_size(want) &&
+            pn != itf_i64(json_array_get(want, np))) {
+            mism_add(m, "ListParts: part[%d] = %ld, expected %" PRId64, np,
+                     pn, itf_i64(json_array_get(want, np)));
+        }
+        if (xml_text_after(cur, "Size", text, sizeof(text))) {
+            int mb = model_part_blocks(post_bkts, bucket, uplid, pn);
+
+            if (mb >= 0 &&
+                strtoll(text, NULL, 10) != (int64_t) mb * o->block_size) {
+                mism_add(m, "ListParts: part %ld Size %s, model %d blocks",
+                         pn, text, mb);
+            }
+        }
+        if (xml_text_after(cur, "ETag", text, sizeof(text))) {
+            const char *pe = petag_get(o, uplid, pn);
+
+            if (pe && strcmp(pe, text) != 0) {
+                mism_add(m, "ListParts: part %ld ETag '%s', learned '%s'",
+                         pn, text, pe);
+            }
+        }
+        np++;
+        cur += strlen("<Part>");
+    }
+    if (np != (int) json_array_size(want)) {
+        mism_add(m, "ListParts: %d parts, expected %zu", np,
+                 json_array_size(want));
+    }
+} /* op_list_parts */
+
+static void
+op_list_mpu(
+    struct oracle *o,
+    json_t        *op,
+    json_t        *post_bkts,
+    struct mism   *m)
+{
+    char                path[128];
+    char                ktext[MBT_MAX_KEYLEN], utext[64];
+    struct s3_mbt_req   req = { .method = EVPL_HTTP_REQUEST_TYPE_GET };
+    struct s3_mbt_resp *res;
+    unsigned            expected = (unsigned) op_i64(op, "status");
+    json_t             *want     = json_object_get(op_field(op, "uploads"), "#set");
+    const char         *cur;
+    int                 nup = 0;
+
+    (void) post_bkts;
+    build_path(op, "bucket", NULL, path, sizeof(path));
+    req.path  = path;
+    req.query = "uploads=";
+
+    res = s3_mbt_call(o->env, &req);
+
+    if (check_status(o, "OListMpu", op, expected, (unsigned) res->status,
+                     m) != ST_MATCH) {
+        return;
+    }
+    if (expected != 200) {
+        check_error_code(o, res, op, m);
+        return;
+    }
+
+    /* Compared as a set: each response row's UploadId must map (via the
+     * learned wire ids) to a model upload whose {key, uplid} the label
+     * carries; the counts must agree. */
+    cur = resp_xml(o, res);
+    while ((cur = strstr(cur, "<Upload>")) != NULL) {
+        struct upl_ent *e;
+        int             found = 0;
+        size_t          i;
+
+        if (!xml_text_after(cur, "Key", ktext, sizeof(ktext)) ||
+            !xml_text_after(cur, "UploadId", utext, sizeof(utext))) {
+            mism_add(m, "ListMpu: malformed <Upload> block");
+            break;
+        }
+        e = NULL;
+        for (i = 0; i < MBT_MAX_UPLOADS; i++) {
+            if (o->upls[i].used && strcmp(o->upls[i].wire, utext) == 0) {
+                e = &o->upls[i];
+                break;
+            }
+        }
+        if (!e) {
+            mism_add(m, "ListMpu: unknown UploadId '%s' (key '%s')", utext,
+                     ktext);
+        } else {
+            for (i = 0; i < json_array_size(want); i++) {
+                json_t *row = json_array_get(want, i);
+                char    wk[MBT_MAX_KEYLEN];
+
+                key_str(json_object_get(row, "key"), wk, sizeof(wk));
+                if (itf_i64(json_object_get(row, "uplid")) == e->uplid &&
+                    strcmp(wk, ktext) == 0) {
+                    found = 1;
+                    break;
+                }
+            }
+            if (!found) {
+                mism_add(m, "ListMpu: upload %ld ('%s') not in the model set",
+                         e->uplid, ktext);
+            }
+        }
+        nup++;
+        cur += strlen("<Upload>");
+    }
+    if (nup != (int) json_array_size(want)) {
+        mism_add(m, "ListMpu: %d uploads, expected %zu", nup,
+                 json_array_size(want));
+    }
+} /* op_list_mpu */
 
 /* ---- dispatch ------------------------------------------------------------ */
 
@@ -1186,16 +2352,33 @@ static const struct {
     const char  *tag;
     op_handler_t fn;
 } handlers[] = {
-    { "OCreateBucket", op_create_bucket       },
-    { "OHeadBucket",   op_head_bucket         },
-    { "ODeleteBucket", op_delete_bucket       },
-    { "OListBuckets",  op_list_buckets        },
-    { "OPutObject",    op_put_object          },
-    { "OGetObject",    op_get_object          },
-    { "OHeadObject",   op_head_object         },
-    { "ODeleteObject", op_delete_object       },
-    { "OCopyObject",   op_copy_object         },
-    { "OListObjects",  op_list_objects        },
+/* *INDENT-OFF* */
+    { "OCreateBucket",   op_create_bucket    },
+    { "OHeadBucket",     op_head_bucket      },
+    { "ODeleteBucket",   op_delete_bucket    },
+    { "OListBuckets",    op_list_buckets     },
+    { "OPutObject",      op_put_object       },
+    { "OGetObject",      op_get_object       },
+    { "OHeadObject",     op_head_object      },
+    { "ODeleteObject",   op_delete_object    },
+    { "ODeleteObjects",  op_delete_objects   },
+    { "OCopyObject",     op_copy_object      },
+    { "OGetAttrs",       op_get_attrs        },
+    { "OListObjects",    op_list_objects     },
+    { "OPutObjTagging",  op_put_obj_tagging  },
+    { "OGetObjTagging",  op_get_obj_tagging  },
+    { "ODelObjTagging",  op_del_obj_tagging  },
+    { "OPutBktTagging",  op_put_bkt_tagging  },
+    { "OGetBktTagging",  op_get_bkt_tagging  },
+    { "ODelBktTagging",  op_del_bkt_tagging  },
+    { "OCreateMpu",      op_create_mpu       },
+    { "OUploadPart",     op_upload_part      },
+    { "OUploadPartCopy", op_upload_part_copy },
+    { "OCompleteMpu",    op_complete_mpu     },
+    { "OAbortMpu",       op_abort_mpu        },
+    { "OListParts",      op_list_parts       },
+    { "OListMpu",        op_list_mpu         },
+/* *INDENT-ON* */
 };
 
 static op_handler_t
@@ -1360,6 +2543,31 @@ run_trace(
         }
     }
 
+    /* Abort any upload the trace left in flight: an in-flight upload holds
+     * open VFS handles (pinning the per-trace filesystem so rmfs never
+     * drains), and its record lives in a process-global table keyed only by
+     * id and bucket NAME -- unaborted, it would resurface in the next
+     * trace's same-named bucket's ListMultipartUploads. */
+    {
+        int u;
+
+        for (u = 0; u < MBT_MAX_UPLOADS; u++) {
+            struct s3_mbt_req areq = { .method = EVPL_HTTP_REQUEST_TYPE_DELETE };
+            char              apath[MBT_MAX_KEYLEN + 96];
+            char              aquery[96];
+
+            if (!o->upls[u].used) {
+                continue;
+            }
+            snprintf(apath, sizeof(apath), "/%s/%s", o->upls[u].bucket,
+                     o->upls[u].key);
+            snprintf(aquery, sizeof(aquery), "uploadId=%s", o->upls[u].wire);
+            areq.path  = apath;
+            areq.query = aquery;
+            s3_mbt_call(env, &areq);
+        }
+    }
+
     s3_mbt_env_fs_teardown(env, fsname);
 
     free(o->expect_buf);
@@ -1377,19 +2585,34 @@ main(
     char **argv)
 {
     static struct option long_options[] = {
-        { "trace",          required_argument,          0,                          't'       },
-        { "trace-dir",      required_argument,          0,                          'D'       },
-        { "exclude-prefix", required_argument,          0,                          'X'       },
-        { "block-size",     required_argument,          0,                          'b'       },
-        { "verbose",        no_argument,                0,                          'v'       },
-        { "dry-run",        no_argument,                0,                          'n'       },
-        { 0,                0,                          0,                          0         }
+        { "trace",          required_argument,          0,
+          't'                                                                                                                                                                                      }
+        ,
+        { "trace-dir",      required_argument,          0,
+          'D'                                                                                                                                                                                      }
+        ,
+        { "exclude-prefix", required_argument,          0,
+          'X'                                                                                                                                                                                      }
+        ,
+        { "block-size",     required_argument,          0,
+          'b'                                                                                                                                                                                      }
+        ,
+        { "verbose",        no_argument,                0,
+          'v'                                                                                                                                                                                      }
+        ,
+        { "dry-run",        no_argument,                0,
+          'n'                                                                                                                                                                                      }
+        ,
+        { "sigv2",          no_argument,                0,
+          '2'                                                                                                                                                                                      }
+        ,
+        { 0,                0,                          0,                         0 }
     };
     struct s3_mbt_env    env;
     char               **traces;
     int                  ntraces;
     int                  block_size = 8192;
-    int                  verbose = 0, dry_run = 0;
+    int                  verbose = 0, dry_run = 0, sigv2 = 0;
     int                  failures = 0;
     int                  i, c;
 
@@ -1397,7 +2620,7 @@ main(
      * only needs to recognize the rest. */
     traces = mbt_collect_traces(argc, argv, &ntraces);
 
-    while ((c = getopt_long(argc, argv, "t:D:X:b:vn", long_options,
+    while ((c = getopt_long(argc, argv, "t:D:X:b:vn2", long_options,
                             NULL)) != -1) {
         switch (c) {
             case 't':
@@ -1413,11 +2636,14 @@ main(
             case 'n':
                 dry_run = 1;
                 break;
+            case '2':
+                sigv2 = 1;
+                break;
             default:
                 fprintf(stderr,
                         "usage: %s [--trace f.itf.json | --trace-dir dir]\n"
                         "          [--exclude-prefix p] [--block-size n]\n"
-                        "          [--verbose] [--dry-run]\n", argv[0]);
+                        "          [--sigv2] [--verbose] [--dry-run]\n", argv[0]);
                 return 2;
         } /* switch */
     }
@@ -1428,6 +2654,7 @@ main(
     }
 
     s3_mbt_env_open(&env);
+    env.sigv2 = sigv2;
 
     for (i = 0; i < ntraces; i++) {
         char fsname[32];
