@@ -227,7 +227,10 @@ chimera_fuse_init_handshake(
     /* Flags above bit 31 travel in the separate flags2 word, which only
      * exists from ABI 7.36 and only carries meaning when the kernel set
      * FUSE_INIT_EXT; our reply must echo that bit or the kernel ignores
-     * flags2 entirely.  We ask for exactly one high flag: without it, mmap
+     * flags2 entirely.  Build hosts older than that (ubuntu22's headers, for
+     * one) have neither the flag nor the struct members, so the whole
+     * high-word exchange is compiled out there and the session negotiates on
+     * the 32-bit word alone.  We ask for exactly one high flag: without it, mmap
      * of a file opened FOPEN_DIRECT_IO fails, which would make the
      * direct_io mount option a functional regression rather than a
      * performance trade. */
@@ -238,9 +241,11 @@ chimera_fuse_init_handshake(
 
     kernel_flags = in->flags;
 
+#ifdef FUSE_INIT_EXT
     if (in->minor >= 36 && (in->flags & FUSE_INIT_EXT)) {
         kernel_flags |= (uint64_t) in->flags2 << 32;
     }
+#endif /* ifdef FUSE_INIT_EXT */
 
     agreed = kernel_flags & (want | want2);
 
@@ -249,12 +254,15 @@ chimera_fuse_init_handshake(
     out.major         = FUSE_KERNEL_VERSION;
     out.minor         = FUSE_KERNEL_MINOR_VERSION;
     out.flags         = (uint32_t) agreed;
-    out.flags2        = (uint32_t) (agreed >> 32);
     out.max_readahead = in->max_readahead;
+
+#ifdef FUSE_INIT_EXT
+    out.flags2 = (uint32_t) (agreed >> 32);
 
     if (agreed >> 32) {
         out.flags |= FUSE_INIT_EXT;
     }
+#endif /* ifdef FUSE_INIT_EXT */
 
 #ifdef FUSE_DIRECT_IO_ALLOW_MMAP
     mount->direct_io_mmap = (agreed & FUSE_DIRECT_IO_ALLOW_MMAP) ? 1 : 0;
