@@ -135,7 +135,7 @@ jobs:
             -w /build \
             ${{ env.DEV_IMAGE_TAG_PREFIX }}:${{ github.sha }}-amd64 \
             bash -euxc '\
-              scan-build --status-bugs -o /scan-report \
+              scan-build --status-bugs --exclude /workspace/ext -o /scan-report \
               sh -c "cmake -D CMAKE_BUILD_TYPE=Release -D IO_URING_NVME_ENABLED=OFF -B /build -S /workspace -G Ninja && ninja -C /build"' \
             2>&1 | tee "${{ github.workspace }}/scan-report/scan-build-output.txt"
 
@@ -264,7 +264,11 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p "$GITHUB_WORKSPACE/scan-report"
+          # --exclude ext: the vendored submodules are analysed in their own
+          # repos and cannot be fixed from a chimera PR.  etc/coverage-report.sh
+          # draws the same line for the same reason.
           "$(brew --prefix llvm)/bin/scan-build" --status-bugs \
+              --exclude "$GITHUB_WORKSPACE/ext" \
               -o "$GITHUB_WORKSPACE/scan-report" \
               sh -c "cmake -D CMAKE_BUILD_TYPE=Release \
                            -B \"$BUILD_DIR\" -S \"$GITHUB_WORKSPACE\" -G Ninja \
