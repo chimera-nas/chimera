@@ -14,6 +14,7 @@ ARG ENABLE_CODEX=1
 ARG ENABLE_UV=1
 ARG ENABLE_WPTS=1
 ARG ENABLE_PIKE=1
+ARG ENABLE_QUINT=1
 # Pinned to an exact chimera-nas/pynfs commit (on branch chimera-fast-ci).  Using
 # a SHA rather than a moving branch makes the image reproducible and, critically,
 # busts the Docker layer cache whenever pynfs is bumped -- otherwise the cached
@@ -27,6 +28,14 @@ ARG PIKE_REF=bcbb343c5bfb7dd3198d2d79d7381dfdad0f0873
 # Pinned Microsoft Windows Protocol Test Suites (WPTS) FileServer release.
 ARG WPTS_VERSION=4.26.3.0
 ARG ELBENCHO_REF=96b1bf29c35e437715c0527194e69e4c96ed9922
+# Pinned quint release, used to generate the model-based-test trace corpus
+# from ext/specs when no prebuilt bundle is fetched.  Trace generation is
+# seeded and so reproducible for a given release, but different releases may
+# sample the state space differently, which is why ext/specs records the exact
+# version it generated against and warns on a mismatch.  KEEP IN SYNC with
+# ext/specs/.quint-version (ext/libevpl/.devcontainer/Dockerfile pins the
+# same release for libevpl's own conformance tests).
+ARG QUINT_VERSION=0.32.0
 ARG ENABLE_S3TESTS=1
 # Pinned ceph/s3-tests commit. Bump to pull in new compliance cases; a SHA
 # (not a branch) keeps the image reproducible and busts the layer cache on bump.
@@ -164,4 +173,28 @@ RUN if [ "$ENABLE_WPTS" = "1" ] ; then \
     curl -sSL "https://github.com/microsoft/WindowsProtocolTestSuites/releases/download/${WPTS_VERSION}/FileServer-TestSuite-ServerEP.tar.gz" -o /tmp/wpts.tar.gz && \
     tar -C /opt/wpts -xzf /tmp/wpts.tar.gz && \
     rm -f /tmp/wpts.tar.gz ; \
+    fi
+
+# quint drives the model-based tests: the specs submodule (ext/specs) generates
+# the ITF trace corpus from its models at build time, and cmake/SpecsBundle.cmake
+# falls back to that local build whenever the prebuilt bundle cannot be fetched.
+# Without quint in the image every MBT replay ctest silently disables itself, so
+# the nfs3/nfs4/smb2/posix model suites never run in CI.  It also re-enables
+# libevpl's own Core/HTTP/RPC2 conformance tests, which detect quint the same way.
+#
+# quint downloads its Rust evaluator on first simulate, into ~/.quint.  CI
+# runners reach the network through internal mirrors only, so that download
+# arrives truncated and every generation fails.  Warm the cache here, where the
+# network is available and the result is baked into the image.  Double quotes,
+# so quint's prime operator (n') needs no escaping: inside single quotes a
+# backslash is literal and would end the string early.  The closing ls is the
+# check: if the evaluator did not land, fail here where it is fixable rather
+# than in every downstream build job.
+RUN if [ "$ENABLE_QUINT" = "1" ] ; then \
+    npm install -g @informalsystems/quint@${QUINT_VERSION} && \
+    printf "module warm {\n  var n: int\n  action init = n' = 0\n  action step = n' = n + 1\n}\n" \
+        > /tmp/warm.qnt && \
+    { quint run /tmp/warm.qnt --max-steps=1 --max-samples=1 > /dev/null 2>&1 || true ; } && \
+    rm -f /tmp/warm.qnt && \
+    ls -d /root/.quint/rust-evaluator-*/quint_evaluator ; \
     fi
