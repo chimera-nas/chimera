@@ -12,11 +12,25 @@ name: PR checks
 # before it can be added to the queue.  This workflow satisfies them with
 # instant no-op placeholders; the real checks of the same names run in the queue
 # (where the actual matrix / image builds / flake review happen).
+#
+# It also carries the pre-merge signal that is cheap enough to be worth having
+# before the queue: clang static analysis on devcontainer and macOS, and the
+# quint model-based test suite (ctest label "quint") on devcontainer.  The MBT
+# suites are the fastest broad-coverage tests in the tree -- the whole label
+# runs in well under a minute -- and they are the ones a spec or harness change
+# breaks, so catching that here rather than in the queue is worth one image
+# build.  macOS runs the quint suite post-merge, in build-test.yml's macOS job,
+# rather than twice.
 on:
   pull_request:
 
 permissions:
   contents: read
+
+env:
+  DEV_IMAGE_TAG_PREFIX: repository.mdh.quantum.com:5004/cache/chimera-dev
+  APT_MIRROR: http://repository.mdh.quantum.com/repository/pkgs/ubuntu
+  DOCKER_MIRROR: repository.mdh.quantum.com/
 
 jobs:
   ci-complete:
@@ -42,3 +56,166 @@ jobs:
     steps:
       - name: PR placeholder
         run: echo "PR placeholder -- docker image builds run in the merge queue (merge_group)."
+
+  # ---------------------------------------------------------------------------
+  # Pre-merge signal.  The devcontainer image is built once here and consumed by
+  # both container jobs below, mirroring the merge queue's
+  # build-devcontainer -> {static-analysis, test-dev} shape.  It is tagged with
+  # github.sha, which on a pull_request event is the PR's merge commit and so
+  # never collides with the queue's own tags.
+  # ---------------------------------------------------------------------------
+  build-devcontainer:
+    name: Build devcontainer amd64 (pre-merge)
+    runs-on: arc-amd64
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+        with:
+          driver: docker-container
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["repository.mdh.quantum.com:5001"]
+
+      # cache-from only (no cache-to): the merge queue owns that cache, and a PR
+      # must not be able to poison it.  An unchanged Dockerfile is therefore a
+      # layer pull rather than a rebuild.
+      - name: Build and push the dev container image
+        uses: docker/build-push-action@v7
+        with:
+          context: .devcontainer
+          file: .devcontainer/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.DEV_IMAGE_TAG_PREFIX }}:${{ github.sha }}-amd64
+          cache-from: type=registry,ref=repository.mdh.quantum.com:5004/cache/chimera-dev:amd64
+          build-args: |
+            APT_MIRROR=${{ env.APT_MIRROR }}
+            DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
+
+  analyze-dev:
+    name: Analyze devcontainer amd64 Release (pre-merge)
+    needs: [build-devcontainer]
+    runs-on: arc-amd64
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Perform clang static analysis
+        id: static-analysis
+        run: |
+          set -o pipefail
+          mkdir -p "${{ github.workspace }}/scan-report"
+          docker run --rm --privileged \
+            -e DOCKER_MIRROR=${{ env.DOCKER_MIRROR }} \
+            -e APT_MIRROR=${{ env.APT_MIRROR }} \
+            -v "${{ github.workspace }}:/workspace" \
+            -v "${{ github.workspace }}/scan-report:/scan-report" \
+            -v /build \
+            -w /build \
+            ${{ env.DEV_IMAGE_TAG_PREFIX }}:${{ github.sha }}-amd64 \
+            bash -euxc '\
+              scan-build --status-bugs -o /scan-report \
+              sh -c "cmake -D CMAKE_BUILD_TYPE=Release -D IO_URING_NVME_ENABLED=OFF -B /build -S /workspace -G Ninja && ninja -C /build"' \
+            2>&1 | tee "${{ github.workspace }}/scan-report/scan-build-output.txt"
+
+      - name: Upload static analysis report
+        if: ${{ failure() && steps.static-analysis.outcome == 'failure' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: scan-report-pr-devcontainer-amd64-Release
+          path: scan-report/
+          if-no-files-found: warn
+          retention-days: 30
+
+  quint-dev:
+    name: Quint devcontainer amd64 Debug
+    needs: [build-devcontainer]
+    runs-on: arc-amd64
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      # oras lets cmake fetch the prebuilt trace bundle for the pinned
+      # ext/specs commit instead of regenerating it with quint; the image
+      # carries quint either way, so this is a speedup, not a requirement.
+      - name: Fetch oras CLI
+        uses: ./.github/actions/fetch-oras
+        with:
+          arch: amd64
+
+      # --no-tests=error is the point of the label: a configuration that
+      # silently loses its MBT suites (no quint, no bundle) must fail here
+      # rather than report a vacuous pass.
+      - name: Build and run the quint suite
+        run: |
+          docker run --rm --privileged \
+            -e DOCKER_MIRROR=${{ env.DOCKER_MIRROR }} \
+            -e APT_MIRROR=${{ env.APT_MIRROR }} \
+            -v "${{ github.workspace }}:/workspace" \
+            -v "${{ github.workspace }}/oras:/usr/local/bin/oras:ro" \
+            -v /build \
+            -w /build \
+            ${{ env.DEV_IMAGE_TAG_PREFIX }}:${{ github.sha }}-amd64 \
+            bash -euxc '
+              cmake -G Ninja -DCMAKE_BUILD_TYPE=Debug -DKVM_TESTING=OFF /workspace
+              ninja
+              ctest -L quint --output-on-failure --no-tests=error \
+                    --test-output-size-failed 65536 --timeout 300 -j "$(nproc)"'
+
+  analyze-macos:
+    name: Analyze macOS Release (pre-merge)
+    runs-on: macos-14
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          brew update
+          # llvm carries scan-build -- Apple's clang does not ship the analyzer
+          # driver.  The rest mirrors the merge queue's macOS job: bison 3.x for
+          # the ndrzcc grammar, libxcrypt for full crypt(5) verification.
+          brew install llvm cmake ninja bison jansson userspace-rcu rocksdb krb5 \
+                       xxhash libxcrypt uthash openssl@3 libnghttp2
+
+      - name: Perform clang static analysis
+        id: static-analysis
+        env:
+          BUILD_DIR: ${{ runner.temp }}/build
+        run: |
+          set -o pipefail
+          mkdir -p "$GITHUB_WORKSPACE/scan-report"
+          "$(brew --prefix llvm)/bin/scan-build" --status-bugs \
+              -o "$GITHUB_WORKSPACE/scan-report" \
+              sh -c "cmake -D CMAKE_BUILD_TYPE=Release \
+                           -B \"$BUILD_DIR\" -S \"$GITHUB_WORKSPACE\" -G Ninja \
+                     && ninja -C \"$BUILD_DIR\"" \
+              2>&1 | tee "$GITHUB_WORKSPACE/scan-report/scan-build-output.txt"
+
+      - name: Upload static analysis report
+        if: ${{ failure() && steps.static-analysis.outcome == 'failure' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: scan-report-pr-macos-Release
+          path: scan-report/
+          if-no-files-found: warn
+          retention-days: 30
