@@ -14,7 +14,6 @@ ARG ENABLE_CODEX=1
 ARG ENABLE_UV=1
 ARG ENABLE_WPTS=1
 ARG ENABLE_PIKE=1
-ARG ENABLE_QUINT=1
 # Pinned to an exact chimera-nas/pynfs commit (on branch chimera-fast-ci).  Using
 # a SHA rather than a moving branch makes the image reproducible and, critically,
 # busts the Docker layer cache whenever pynfs is bumped -- otherwise the cached
@@ -28,14 +27,6 @@ ARG PIKE_REF=bcbb343c5bfb7dd3198d2d79d7381dfdad0f0873
 # Pinned Microsoft Windows Protocol Test Suites (WPTS) FileServer release.
 ARG WPTS_VERSION=4.26.3.0
 ARG ELBENCHO_REF=96b1bf29c35e437715c0527194e69e4c96ed9922
-# Pinned quint release, used to generate the model-based-test trace corpus
-# from ext/specs when no prebuilt bundle is fetched.  Trace generation is
-# seeded and so reproducible for a given release, but different releases may
-# sample the state space differently, which is why ext/specs records the exact
-# version it generated against and warns on a mismatch.  KEEP IN SYNC with
-# ext/specs/.quint-version (ext/libevpl/.devcontainer/Dockerfile pins the
-# same release for libevpl's own conformance tests).
-ARG QUINT_VERSION=0.32.0
 ARG ENABLE_S3TESTS=1
 # Pinned ceph/s3-tests commit. Bump to pull in new compliance cases; a SHA
 # (not a branch) keeps the image reproducible and busts the layer cache on bump.
@@ -174,6 +165,20 @@ RUN if [ "$ENABLE_WPTS" = "1" ] ; then \
     tar -C /opt/wpts -xzf /tmp/wpts.tar.gz && \
     rm -f /tmp/wpts.tar.gz ; \
     fi
+
+# Declared here rather than up with the other ARGs: an ARG inserted above a
+# layer takes part in that layer's cache key, so putting these at the top
+# invalidated every cached layer below them -- a 7-minute rebuild of an
+# image that had been rebuilding in seconds.
+ARG ENABLE_QUINT=1
+# Pinned quint release, used to generate the model-based-test trace corpus
+# from ext/specs when no prebuilt bundle is fetched.  Trace generation is
+# seeded and so reproducible for a given release, but different releases may
+# sample the state space differently, which is why ext/specs records the exact
+# version it generated against and warns on a mismatch.  KEEP IN SYNC with
+# ext/specs/.quint-version (ext/libevpl/.devcontainer/Dockerfile pins the
+# same release for libevpl's own conformance tests).
+ARG QUINT_VERSION=0.32.0
 
 # quint drives the model-based tests: the specs submodule (ext/specs) generates
 # the ITF trace corpus from its models at build time, and cmake/SpecsBundle.cmake
