@@ -94,7 +94,7 @@ chimera_nfs4_open_acquire_share(
         /* The conflict is a breakable holder -- an NFSv4 delegation being
          * recalled (try_acquire already kicked the break).  Tell the client to
          * retry; by the next attempt the delegation's DELEGRETURN should have
-         * released the claim and the SHARE will be granted (RFC 7530 §10.4.5
+         * released the claim and the SHARE will be granted (RFC 7530 §10.2
          * recommends NFS4ERR_DELAY while a recall is outstanding). */
         chimera_vfs_state_put(vfs_state, file_state);
         return NFS4ERR_DELAY;

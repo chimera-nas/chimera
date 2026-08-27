@@ -919,7 +919,7 @@ nfs_client_check_io_denied(
 
 /* True if `client` holds any open state keyed by `fh` (i.e. it has this file
  * open).  Used to keep a filehandle valid after its last link is removed
- * while an open still references the inode (RFC 7530 §16.2.5). */
+ * while an open still references the inode (RFC 7530 §16.26.5). */
 SYMBOL_EXPORT bool
 nfs_client_has_open_state_for_fh(
     struct nfs_client *client,

@@ -1375,7 +1375,7 @@ chimera_nfs4_set_changeinfo(
      * when the backend filled the change attribute (native counter, or its
      * ctime fallback) in both snapshots: not every backend populates the
      * rename/link pre/post directory attrs, and reading an unset field is
-     * uninitialized memory -- which a self-rename (RFC 7530 §10.4.5: a
+     * uninitialized memory -- which a self-rename (RFC 7530 §16.27.4: a
      * no-op) would then report as a spurious change, failing pynfs
      * RNM18/19/20.  Without both, report a non-atomic, no-change cinfo. */
     uint64_t change_mask = CHIMERA_VFS_ATTR_CHANGE | CHIMERA_VFS_ATTR_CTIME;

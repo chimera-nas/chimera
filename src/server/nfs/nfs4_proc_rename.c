@@ -99,7 +99,7 @@ chimera_nfs4_rename_delay(struct nfs_request *req)
     chimera_nfs4_compound_complete(req, NFS4ERR_DELAY);
 } /* chimera_nfs4_rename_delay */
 
-/* RFC 7530 §10.4.5: a RENAME must recall a delegation on the file being
+/* RFC 7530 §10.4.4: a RENAME must recall a delegation on the file being
  * renamed over (the target name), if one exists, before proceeding. */
 static void
 chimera_nfs4_rename_recall_target(

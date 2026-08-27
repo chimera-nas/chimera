@@ -1048,7 +1048,7 @@ nfs4_clients_check_io_denied(
 /* Cross-client analogue of nfs_client_has_open_state_for_fh: true if ANY
  * client holds this file open.  A removed-but-open file keeps its filehandle
  * valid until the last CLOSE regardless of which client opened it (RFC 7530
- * §16.2.5), so PUTFH must consult every client's open state, not just the one
+ * §16.26.5), so PUTFH must consult every client's open state, not just the one
  * bound to the querying connection. */
 SYMBOL_EXPORT bool
 nfs4_clients_have_open_state(
