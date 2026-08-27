@@ -177,7 +177,14 @@ struct memfs_inode {
     struct memfs_fs           *fs;
     uint64_t                   inum;
     uint32_t                   gen;
+    /* refcnt counts the references that keep this inode alive: one for its
+     * presence in the namespace, plus one per open handle.  link_ref records
+     * whether the namespace reference is currently held, which nlink alone
+     * cannot tell: an inode with nlink 0 either lost its last name (reference
+     * already dropped) or was born anonymous via create_unlinked and is
+     * waiting to be linked (reference still held). */
     uint32_t                   refcnt;
+    uint8_t                    link_ref;
     uint64_t                   size;
     uint64_t                   space_used;
     uint64_t                   alloc_size;   /* SMB AllocationSize reservation */
@@ -795,6 +802,7 @@ memfs_inode_alloc(
 
     inode->gen++;
     inode->refcnt         = 1;
+    inode->link_ref       = 1;
     inode->mode           = 0;
     inode->change         = 0;
     inode->dos_attributes = 0;
@@ -1311,6 +1319,7 @@ memfs_fs_create(
     inode->space_used = 4096;
     inode->gen        = 1;
     inode->refcnt     = 1;
+    inode->link_ref   = 1;
     inode->uid        = 0;
     inode->gid        = 0;
     inode->nlink      = 2;
@@ -3187,6 +3196,7 @@ memfs_remove_at(
     memfs_map_attrs(fs, &request->remove_at.r_removed_attr, inode, request->fh);
 
     if (inode->nlink == 0) {
+        inode->link_ref = 0;
         --inode->refcnt;
 
         if (inode->refcnt == 0) {
@@ -6002,6 +6012,7 @@ memfs_rename_at(
             }
             int existing_freed = 0;
             if (existing_inode->nlink == 0) {
+                existing_inode->link_ref = 0;
                 --existing_inode->refcnt;
                 if (existing_inode->refcnt == 0) {
                     memfs_inode_free(thread, existing_inode);
@@ -6222,8 +6233,11 @@ memfs_link_at(
 
         if (existing_inode) {
             existing_inode->nlink--;
-            if (existing_inode->nlink == 0 && --existing_inode->refcnt == 0) {
-                memfs_inode_free(thread, existing_inode);
+            if (existing_inode->nlink == 0) {
+                existing_inode->link_ref = 0;
+                if (--existing_inode->refcnt == 0) {
+                    memfs_inode_free(thread, existing_inode);
+                }
             }
             pthread_mutex_unlock(&existing_inode->lock);
         }
@@ -6239,6 +6253,18 @@ memfs_link_at(
                                 request->link_at.namelen);
 
     rb_tree_insert(&parent_inode->dir.dirents, hash, dirent);
+
+    /* Re-entering the namespace re-takes the reference that stands for it.
+     * Without this an inode that was unlinked while open (its namespace
+     * reference dropped, kept alive by the open) and then linked again would
+     * have the same reference dropped a second time by the next unlink,
+     * freeing the inode out from under handles that still point at it.
+     * A create_unlinked inode has never given the reference up, so link_ref
+     * is still set and nothing is taken here. */
+    if (!inode->link_ref) {
+        inode->link_ref = 1;
+        inode->refcnt++;
+    }
 
     inode->nlink++;
 

@@ -4988,6 +4988,17 @@ cairn_link_at(
      * pre-link value. */
     cairn_map_attrs(fs, &request->link_at.r_dir_pre_attr, parent_inode);
 
+    /* Re-entering the namespace re-takes the reference that stands for it:
+     * refcnt holds one reference for the inode's presence in the namespace
+     * plus one per open handle, and cairn_remove_at drops the namespace one
+     * as nlink reaches 0.  An inode unlinked while open and then linked again
+     * would otherwise have that same reference dropped twice, removing the
+     * inode while open handles still refer to it.  (cairn has no
+     * create_unlinked, so nlink 0 here always means "lost its last name".) */
+    if (target_inode->nlink == 0) {
+        target_inode->refcnt++;
+    }
+
     target_inode->nlink++;
     target_inode->ctime = now;
     target_inode->change++;
