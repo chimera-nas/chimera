@@ -14,7 +14,9 @@
 # and prints a per-file llvm-cov report covering the chimera source tree.
 #
 # Set COVERAGE_HTML=1 to additionally emit a browsable HTML report under
-# BUILD_DIR/coverage/html.
+# BUILD_DIR/coverage/html, or COVERAGE_JSON=<path> to additionally write
+# llvm-cov's machine-readable per-file summary there (what CI renders its
+# coverage report from).
 
 set -euo pipefail
 
@@ -91,6 +93,18 @@ echo
     -instr-profile="${PROFDATA}" \
     -ignore-filename-regex="${IGNORE_REGEX}" \
     -show-region-summary=false
+
+# Machine-readable per-file summary for CI to render.  -summary-only drops the
+# per-segment detail, which is what makes the export a few hundred KB instead of
+# a few hundred MB over a whole-tree instrumented build.
+if [[ -n "${COVERAGE_JSON:-}" ]]; then
+    echo
+    echo "coverage: exporting per-file summary to ${COVERAGE_JSON} ..."
+    "${COV_TOOL}" export "${objs[0]}" "${object_args[@]}" \
+        -instr-profile="${PROFDATA}" \
+        -ignore-filename-regex="${IGNORE_REGEX}" \
+        -summary-only > "${COVERAGE_JSON}"
+fi
 
 if [[ "${COVERAGE_HTML:-0}" == "1" ]]; then
     HTML_DIR="${COV_DIR}/html"
