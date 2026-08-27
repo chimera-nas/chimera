@@ -500,7 +500,10 @@ diskfs_ext_release_after_dec(struct chimera_vfs_request *request)
         diskfs_thread_free_space(p->thread, p->txn, p->rc_devid, p->rc_devoff,
                                  SM_ALIGN_UP(p->rc_length));
     }
-    p->rc_cont(request);
+    /* rel_cont, not rc_cont: diskfs_refcount_dec overwrote rc_cont with its
+     * own completion (this function), so calling that here would recurse
+     * until the stack ran out. */
+    p->rel_cont(request);
 } /* diskfs_ext_release_after_dec */
 
 /* Lazily acquired the refcount inode for a free of a shared extent; retry. */
@@ -540,7 +543,7 @@ diskfs_ext_release(
                                  diskfs_ext_release_acquired_cb, request);
             return;
         }
-        p->rc_cont   = cont;
+        p->rel_cont  = cont;
         p->rc_length = ext->length;
         diskfs_refcount_dec(request, ext->device_id, ext->device_offset,
                             diskfs_ext_release_after_dec);
