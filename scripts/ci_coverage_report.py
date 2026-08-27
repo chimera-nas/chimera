@@ -11,6 +11,17 @@ Usage: ci_coverage_report.py <export.json> <repo_root> [<run_url>] [<build_root>
 scripts/ci_pr_comment.py (CI_COMMENT_MARKER must match MARKER below) and doubles
 as a run-summary fragment.
 
+The report is a table and the command that reproduces it, and nothing else.  It
+appears on every PR, usually read by someone checking whether their change moved
+the number, and prose does not survive that kind of repetition.
+
+Three metrics rather than one, because where they disagree is the useful part.
+Lines say how much of the code ran; functions say how much of the API surface was
+entered at all; branches say how many of the decisions inside the code that did
+run were taken both ways.  A component high on lines and low on branches has been
+walked down its happy path and never off it -- which is the gap a model-based
+suite exists to close.
+
 What counts is first-party, hand-written, non-test source.  Test sources are out
 because a suite cannot meaningfully cover the other suites; generated marshallers
 and the bundled ext/ projects are out because neither is code this repository is
@@ -30,9 +41,14 @@ import sys
 
 MARKER = "<!-- quint-coverage-report -->"
 
-# How many "biggest gap" files to name.  Enough to aim the next round of model
-# work at, short enough to stay a comment rather than a document.
-TOP_GAPS = 12
+# The selection this report measures, as something to paste.  The make target
+# builds Coverage, runs the label with LLVM_PROFILE_FILE set, and then runs
+# etc/coverage-report.sh over the result -- exactly what CI does.
+REPRO = 'make coverage CTEST_ARGS="-L quint --output-on-failure"'
+
+METRICS = ("functions", "lines", "branches")
+
+BAR_WIDTH = 10
 
 
 def component(rel):
@@ -54,15 +70,6 @@ def is_test_source(rel):
     return rel.startswith("tests/") or "/tests/" in rel
 
 
-def pct(covered, count):
-    return 100.0 * covered / count if count else 0.0
-
-
-def bar(percent, width=20):
-    filled = int(round(percent / 100.0 * width))
-    return "█" * filled + "░" * (width - filled)
-
-
 def relative(path, roots):
     """Path relative to whichever root contains it, or None if none does.
 
@@ -77,6 +84,21 @@ def relative(path, roots):
     return None
 
 
+def cell(covered, count):
+    """One metric as a bar, a percentage and the raw pair.
+
+    Two lines rather than one: three of these per row on a single line forces a
+    horizontal scrollbar onto the comment, which is where a wide table stops
+    being read at all.
+    """
+    if not count:
+        return "—"
+    percent = 100.0 * covered / count
+    filled = int(round(percent / 100.0 * BAR_WIDTH))
+    bar = "█" * filled + "░" * (BAR_WIDTH - filled)
+    return f"`{bar}` {percent:.0f}%<br>{covered:,}/{count:,}"
+
+
 def main():
     export_path, root = sys.argv[1], os.path.realpath(sys.argv[2])
     run_url = sys.argv[3] if len(sys.argv) > 3 else ""
@@ -86,80 +108,53 @@ def main():
         data = json.load(f)
 
     comps = {}
-    files = []
-    skipped = 0
-    foreign = 0
-
     for entry in data.get("data", [{}])[0].get("files", []):
         rel = relative(os.path.realpath(entry["filename"]), (root, build_root))
-        if rel is None:
-            # Compiled from outside the checkout entirely -- the container's own
-            # /fio clone, say.  Not code this repository can be measured on.
-            foreign += 1
+        # None: compiled from outside the checkout entirely -- the container's
+        # own /fio clone, say.  Not code this repository can be measured on.
+        if rel is None or is_test_source(rel):
             continue
-        if is_test_source(rel):
-            skipped += 1
+        summary = entry.get("summary", {})
+        if summary.get("lines", {}).get("count", 0) == 0:
             continue
-        lines = entry.get("summary", {}).get("lines", {})
-        count, covered = lines.get("count", 0), lines.get("covered", 0)
-        if count == 0:
-            continue
-        c = comps.setdefault(component(rel), [0, 0])
-        c[0] += count
-        c[1] += covered
-        files.append((rel, count, covered))
+        totals = comps.setdefault(component(rel),
+                                  {m: [0, 0] for m in METRICS})
+        for metric in METRICS:
+            got = summary.get(metric, {})
+            totals[metric][0] += got.get("count", 0)
+            totals[metric][1] += got.get("covered", 0)
 
-    total_count = sum(c[0] for c in comps.values())
-    total_covered = sum(c[1] for c in comps.values())
+    title = "Quint model-based test coverage"
+    out = [MARKER, "",
+           f"## [{title}]({run_url})" if run_url else f"## {title}", ""]
 
-    out = [MARKER, "", "## Quint model-based test coverage", ""]
-    if total_count == 0:
-        out += ["No instrumented chimera source in the coverage export — "
-                "the report step ran, but nothing it measured belongs to this "
-                "tree. Treat this as a broken report, not as 0% coverage."]
+    if not comps:
+        out += ["No instrumented chimera source in the coverage export — the "
+                "report step ran, but nothing it measured belongs to this tree. "
+                "Treat this as a broken report, not as 0% coverage.",
+                "", "```sh", REPRO, "```"]
         print("\n".join(out))
         return
 
-    out += [
-        f"`ctest -L quint` alone covers **{pct(total_covered, total_count):.1f}%** "
-        f"of chimera ({total_covered:,} / {total_count:,} lines).",
-        "",
-        "This is the model-based suites on their own — not the full ctest run. "
-        "The number going up is the point: the more the models reach, the less "
-        "the expensive merge-queue suites are the only thing standing between a "
-        "regression and main.",
-        "",
-        "| Component | Lines | Covered | % | |",
-        "|---|---:|---:|---:|---|",
-    ]
+    out += ["| Component | Functions | Lines | Branches |",
+            "|---|---|---|---|"]
 
-    for name, (count, covered) in sorted(comps.items(),
-                                         key=lambda kv: -kv[1][0]):
-        p = pct(covered, count)
-        out.append(f"| `{name}` | {count:,} | {covered:,} | {p:.1f}% | "
-                   f"`{bar(p)}` |")
+    grand = {m: [0, 0] for m in METRICS}
+    for name, totals in sorted(comps.items(),
+                               key=lambda kv: -kv[1]["lines"][0]):
+        cells = []
+        for metric in METRICS:
+            count, covered = totals[metric]
+            grand[metric][0] += count
+            grand[metric][1] += covered
+            cells.append(cell(covered, count))
+        out.append(f"| `{name}` | " + " | ".join(cells) + " |")
 
-    p = pct(total_covered, total_count)
-    out.append(f"| **Total** | **{total_count:,}** | **{total_covered:,}** | "
-               f"**{p:.1f}%** | `{bar(p)}` |")
+    out.append("| **Total** | "
+               + " | ".join(cell(grand[m][1], grand[m][0]) for m in METRICS)
+               + " |")
 
-    gaps = sorted(files, key=lambda f: -(f[1] - f[2]))[:TOP_GAPS]
-    if gaps:
-        out += ["", "<details><summary>Biggest gaps — the files with the most "
-                "lines the models never reach</summary>", "",
-                "| File | Uncovered | Lines | % |", "|---|---:|---:|---:|"]
-        for rel, count, covered in gaps:
-            out.append(f"| `{rel}` | {count - covered:,} | {count:,} | "
-                       f"{pct(covered, count):.1f}% |")
-        out += ["", "</details>"]
-
-    note = f"{skipped} test source(s) excluded"
-    if foreign:
-        note += f", {foreign} compiled from outside the checkout"
-    if run_url:
-        note += f" · [run]({run_url})"
-    out += ["", f"<sub>{note}</sub>"]
-
+    out += ["", "```sh", REPRO, "```"]
     print("\n".join(out))
 
 
