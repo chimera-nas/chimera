@@ -1005,6 +1005,14 @@ s3_server_dispatch(
 
     s3_request->file_left       = s3_request->file_length;
     s3_request->file_cur_offset = s3_request->file_offset;
+
+    /* Requests are recycled without being zeroed, and only the handlers that
+     * serve object bytes (GET/List/Copy/...) set file_real_length.  A handler
+     * that never touches it (PutObject, DeleteObject, UploadPart) would
+     * otherwise inherit the previous request's value and trip the
+     * file_length != file_real_length test in s3_server_respond, turning its
+     * 200/204 into a 206 with a fabricated Content-Range. */
+    s3_request->file_real_length = 0;
     chimera_s3_dump_request(s3_request);
 
     {
