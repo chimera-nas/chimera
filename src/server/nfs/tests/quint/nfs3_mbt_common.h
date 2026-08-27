@@ -36,18 +36,26 @@
 #include "nfs3_xdr.h"
 #include "nfs4_xdr.h"
 #include "nfs_mount_xdr.h"
+#include "portmap_xdr.h"
+#include "nlm4_xdr.h"
+#include "sm_inter_xdr.h"
 
 #include "evpl/evpl.h"
 #include "evpl/evpl_rpc2.h"
 
-#define MBT_MAX_ENTRIES 512     /* readdir entries copied out per reply */
-#define MBT_NAME_MAX    256
-#define MBT_MAX_DATA    (4 << 20) /* read payload copy-out bound */
+#define MBT_MAX_ENTRIES  512    /* readdir entries copied out per reply */
+#define MBT_NAME_MAX     256
+#define MBT_MAX_DATA     (4 << 20) /* read payload copy-out bound */
 
 /* Must match NFS_MOUNT_PORT in nfs_external_portmap.h: under inproc the
  * port number is only a service name ("chimera-inproc-20048"), but it
- * still has to be the name the server registered. */
-#define MBT_MOUNT_PORT  20048
+ * still has to be the name the server registered.  The auxiliary services
+ * follow the same rule: 111 is hardwired in nfs.c, the other two are the
+ * nfs_lockmgr_port / nfs_nsm_port defaults (server.c). */
+#define MBT_MOUNT_PORT   20048
+#define MBT_PORTMAP_PORT 111
+#define MBT_NLM_PORT     32803
+#define MBT_NSM_PORT     32765
 
 struct mbt_fh {
     int      has;
@@ -120,6 +128,15 @@ struct mbt_env_opts {
     const char *module;           /* VFS backend: NULL/"memfs", "diskfs",
                                    * "cairn".  diskfs/cairn self-provision
                                    * scratch under the env's session_dir. */
+    /* Auxiliary NFS services (portmap/rpcbind, NLM, NSM).  Off by default:
+     * the NFS3/NFS4 suites never touch them, and connecting three more
+     * inproc services per replay process is pure overhead there. */
+    int         aux;
+    /* server.portmap_hostname: when set, portmap universal addresses are
+     * built from this host instead of the connection's local address.  The
+     * aux suite uses it to make the uaddr predictable (the inproc local
+     * address is not an IP). */
+    const char *portmap_hostname;
 };
 
 struct mbt_env {
@@ -136,6 +153,21 @@ struct mbt_env {
     struct NFS_V4              nfs_v4;
     struct NFS_V4_CB           nfs_v4_cb;
     struct evpl_rpc2_cred      cred;
+
+    /* Auxiliary services, connected only when mbt_env_opts.aux is set.  The
+     * programs are registered on the client rpc2 thread either way, which
+     * costs nothing and lets the server call back into this process (NLM's
+     * *_RES messages ride the same connection the *_MSG arrived on). */
+    struct evpl_rpc2_conn     *portmap_conn;
+    struct evpl_rpc2_conn     *nlm_conn;
+    struct evpl_rpc2_conn     *nsm_conn;
+    struct PORTMAP_V2          pm_v2;
+    struct PORTMAP_V3          pm_v3;
+    struct PORTMAP_V4          pm_v4;
+    struct NLM_V4              nlm_v4;
+    struct SM_INTER_V1         nsm_v1;
+    /* struct mbt_aux_result *, owned by nfs_aux_mbt_common.h. */
+    void                      *aux;
 
     char                       session_dir[256];
     char                       pt_root[256]; /* passthrough backing root
@@ -202,9 +234,10 @@ mbt_env_open_opts(
     const struct mbt_env_opts *opts)
 {
     struct chimera_server_config *config;
-    struct evpl_rpc2_program     *programs[4];
+    struct evpl_rpc2_program     *programs[9];
     struct evpl_endpoint         *nfs_ep;
     struct evpl_endpoint         *mount_ep;
+    int                           aux = opts && opts->aux;
 
     memset(env, 0, sizeof(*env));
 
@@ -233,6 +266,10 @@ mbt_env_open_opts(
     if (opts) {
         if (opts->nfs4_delegations) {
             chimera_server_config_set_nfs4_delegations(config, 1);
+        }
+        if (opts->portmap_hostname) {
+            chimera_server_config_set_portmap_hostname(config,
+                                                       opts->portmap_hostname);
         }
         if (opts->disable_caches) {
             chimera_server_config_set_attr_cache_enabled(config, 0);
@@ -324,13 +361,23 @@ mbt_env_open_opts(
     NFS_MOUNT_V3_init(&env->mount_v3);
     NFS_V4_init(&env->nfs_v4);
     NFS_V4_CB_init(&env->nfs_v4_cb);
+    PORTMAP_V2_init(&env->pm_v2);
+    PORTMAP_V3_init(&env->pm_v3);
+    PORTMAP_V4_init(&env->pm_v4);
+    NLM_V4_init(&env->nlm_v4);
+    SM_INTER_V1_init(&env->nsm_v1);
 
     programs[0] = &env->nfs_v3.rpc2;
     programs[1] = &env->mount_v3.rpc2;
     programs[2] = &env->nfs_v4.rpc2;
     programs[3] = &env->nfs_v4_cb.rpc2;
+    programs[4] = &env->pm_v2.rpc2;
+    programs[5] = &env->pm_v3.rpc2;
+    programs[6] = &env->pm_v4.rpc2;
+    programs[7] = &env->nlm_v4.rpc2;
+    programs[8] = &env->nsm_v1.rpc2;
 
-    env->rpc2_thread = evpl_rpc2_thread_init(env->evpl, programs, 4,
+    env->rpc2_thread = evpl_rpc2_thread_init(env->evpl, programs, 9,
                                              NULL, NULL);
 
     /* Endpoint names must match what the server derived from its ports
@@ -350,6 +397,40 @@ mbt_env_open_opts(
     if (!env->nfs_conn || !env->mount_conn) {
         fprintf(stderr, "failed to connect to in-process server\n");
         exit(1);
+    }
+
+    if (aux) {
+        /* The NLM connection also SERVES NLM_V4: the asynchronous half of the
+         * protocol (NLMPROC4_*_MSG) is answered by the server calling
+         * NLMPROC4_*_RES back on this very connection, so the client end has
+         * to export the program to receive them.  env rides along as the
+         * dispatch private_data. */
+        static struct evpl_rpc2_program *nlm_srv[1];
+        struct evpl_endpoint            *pm_ep, *nlm_ep, *nsm_ep;
+
+        pm_ep = chimera_tcp_flavor_endpoint_create(CHIMERA_TCP_FLAVOR_INPROC,
+                                                   "127.0.0.1",
+                                                   MBT_PORTMAP_PORT);
+        nlm_ep = chimera_tcp_flavor_endpoint_create(CHIMERA_TCP_FLAVOR_INPROC,
+                                                    "127.0.0.1", MBT_NLM_PORT);
+        nsm_ep = chimera_tcp_flavor_endpoint_create(CHIMERA_TCP_FLAVOR_INPROC,
+                                                    "127.0.0.1", MBT_NSM_PORT);
+
+        env->portmap_conn = evpl_rpc2_client_connect(env->rpc2_thread,
+                                                     EVPL_STREAM_INPROC,
+                                                     pm_ep, NULL, 0, NULL);
+        nlm_srv[0]    = &env->nlm_v4.rpc2;
+        env->nlm_conn = evpl_rpc2_client_connect(env->rpc2_thread,
+                                                 EVPL_STREAM_INPROC,
+                                                 nlm_ep, nlm_srv, 1, env);
+        env->nsm_conn = evpl_rpc2_client_connect(env->rpc2_thread,
+                                                 EVPL_STREAM_INPROC,
+                                                 nsm_ep, NULL, 0, NULL);
+
+        if (!env->portmap_conn || !env->nlm_conn || !env->nsm_conn) {
+            fprintf(stderr, "failed to connect to in-process aux services\n");
+            exit(1);
+        }
     }
 
     /* AUTH_SYS root credential (uid 0, gid 0) so access
@@ -486,6 +567,15 @@ mbt_env_stop(struct mbt_env *env)
 {
     char cmd[300];
 
+    if (env->portmap_conn) {
+        evpl_rpc2_client_disconnect(env->rpc2_thread, env->portmap_conn);
+    }
+    if (env->nlm_conn) {
+        evpl_rpc2_client_disconnect(env->rpc2_thread, env->nlm_conn);
+    }
+    if (env->nsm_conn) {
+        evpl_rpc2_client_disconnect(env->rpc2_thread, env->nsm_conn);
+    }
     evpl_rpc2_client_disconnect(env->rpc2_thread, env->nfs_conn);
     evpl_rpc2_client_disconnect(env->rpc2_thread, env->mount_conn);
     evpl_rpc2_thread_destroy(env->rpc2_thread);
@@ -526,6 +616,23 @@ mbt_call_wait(struct mbt_env *env)
         exit(3);
     }
 } /* mbt_call_wait */
+
+/* Same pump, but an RPC-level refusal is a modeled outcome rather than a
+ * harness bug: the auxiliary suite deliberately calls procedures chimera
+ * does not implement and expects PROC_UNAVAIL (accept_stat 3) back.  A
+ * negative status still means the transport itself failed (see
+ * EVPL_RPC2_REPLY_* in evpl_rpc2_program.h) and is fatal here too. */
+static inline void
+mbt_call_wait_soft(struct mbt_env *env)
+{
+    while (!env->res.done) {
+        evpl_continue(env->evpl);
+    }
+    if (env->res.rpc_err < 0) {
+        fprintf(stderr, "rpc2 transport error %d\n", env->res.rpc_err);
+        exit(3);
+    }
+} /* mbt_call_wait_soft */
 
 /* ---- MOUNT --------------------------------------------------------------- */
 
