@@ -389,6 +389,219 @@ main(
     CHECK(body_has(r, "<Code>NoSuchBucket</Code>"),
           "DeleteBucket missing: body lacks NoSuchBucket");
 
+    /* ---- authentication -------------------------------------------------- */
+
+    {
+        struct s3_mbt_req req = { .method = EVPL_HTTP_REQUEST_TYPE_GET,
+                                  .path   = "/bk0/a" };
+
+        /* recreate state: bucket + object for the auth round-trips */
+        simple(&env, EVPL_HTTP_REQUEST_TYPE_PUT, "/bk0");
+        put_blocks(&env, "/bk0/a", s12, 2);
+
+        req.auth = S3_MBT_AUTH_NONE;
+        r        = s3_mbt_call(&env, &req);
+        CHECK(r->status == 400, "no-auth GET: got %d want 400", r->status);
+        CHECK(body_has(r, "<Code>MissingSecurityHeader</Code>"),
+              "no-auth GET: body lacks MissingSecurityHeader");
+
+        req.auth = S3_MBT_AUTH_V4_BADSIG;
+        r        = s3_mbt_call(&env, &req);
+        CHECK(r->status == 403, "bad-sig GET: got %d want 403", r->status);
+        CHECK(body_has(r, "<Code>SignatureDoesNotMatch</Code>"),
+              "bad-sig GET: body lacks SignatureDoesNotMatch");
+
+        req.auth = S3_MBT_AUTH_V4_BADKEY;
+        r        = s3_mbt_call(&env, &req);
+        CHECK(r->status == 403, "bad-key GET: got %d want 403", r->status);
+        CHECK(body_has(r, "<Code>InvalidAccessKeyId</Code>"),
+              "bad-key GET: body lacks InvalidAccessKeyId");
+
+        /* SigV2 round-trip: GET, ranged GET, PUT, and a bad V2 signature */
+        req.auth = S3_MBT_AUTH_V2;
+        r        = s3_mbt_call(&env, &req);
+        CHECK(r->status == 200 && body_is_blocks(r, s12, 2),
+              "V2 GET failed (%d)", r->status);
+
+        req.range = "bytes=8192-";
+        r         = s3_mbt_call(&env, &req);
+        CHECK(r->status == 206, "V2 ranged GET: got %d want 206", r->status);
+        req.range = NULL;
+
+        req.auth = S3_MBT_AUTH_V2_BADSIG;
+        r        = s3_mbt_call(&env, &req);
+        CHECK(r->status == 403, "V2 bad-sig GET: got %d want 403", r->status);
+    }
+
+    {
+        struct s3_mbt_req req = { .method       = EVPL_HTTP_REQUEST_TYPE_PUT,
+                                  .path         = "/bk0/v2put",
+                                  .auth         = S3_MBT_AUTH_V2,
+                                  .content_type = "text/plain" };
+        static uint8_t    pb[BS];
+
+        s3_mbt_expand_blocks(s1, 1, BS, pb);
+        req.body     = pb;
+        req.body_len = BS;
+        r            = s3_mbt_call(&env, &req);
+        CHECK(r->status == 200, "V2 PUT: got %d want 200", r->status);
+
+        r = simple(&env, EVPL_HTTP_REQUEST_TYPE_GET, "/bk0/v2put");
+        CHECK(r->status == 200 && body_is_blocks(r, s1, 1),
+              "V2-put object GET failed");
+        CHECK(strcmp(r->content_type, "text/plain") == 0,
+              "stored Content-Type not echoed: '%s'", r->content_type);
+        simple(&env, EVPL_HTTP_REQUEST_TYPE_DELETE, "/bk0/v2put");
+    }
+
+    /* ---- virtual-host addressing ----------------------------------------- */
+
+    {
+        struct s3_mbt_req req = { .method = EVPL_HTTP_REQUEST_TYPE_GET,
+                                  .path   = "/a",
+                                  .host   = "bk0.chimera" };
+
+        r = s3_mbt_call(&env, &req);
+        CHECK(r->status == 200 && body_is_blocks(r, s12, 2),
+              "virtual-host GET failed (%d)", r->status);
+    }
+
+    /* ---- aws-chunked upload ---------------------------------------------- */
+
+    {
+        static uint8_t    raw[2 * BS];
+        static uint8_t    framed[2 * BS + 512];
+        struct s3_mbt_req req = { .method      = EVPL_HTTP_REQUEST_TYPE_PUT,
+                                  .path        = "/bk0/chunked",
+                                  .content_sha =
+                                      "STREAMING-AWS4-HMAC-SHA256-PAYLOAD" };
+
+        s3_mbt_expand_blocks(s23, 2, BS, raw);
+        req.body     = framed;
+        req.body_len = s3_mbt_aws_chunkify(raw, sizeof(raw), 5000, framed);
+
+        r = s3_mbt_call(&env, &req);
+        CHECK(r->status == 200, "aws-chunked PUT: got %d want 200", r->status);
+
+        r = simple(&env, EVPL_HTTP_REQUEST_TYPE_GET, "/bk0/chunked");
+        CHECK(r->status == 200 && body_is_blocks(r, s23, 2),
+              "aws-chunked object GET failed (%d, %zu bytes)", r->status,
+              r->body_len);
+        simple(&env, EVPL_HTTP_REQUEST_TYPE_DELETE, "/bk0/chunked");
+    }
+
+    /* ---- tagging ---------------------------------------------------------- */
+
+    {
+        struct s3_mbt_req req = { .method = EVPL_HTTP_REQUEST_TYPE_PUT,
+                                  .path   = "/bk0/a",                  .query = "tagging=" };
+        static const char tags[] =
+            "<Tagging><TagSet><Tag><Key>tk1</Key><Value>tv1</Value></Tag>"
+            "</TagSet></Tagging>";
+
+        req.body     = (const uint8_t *) tags;
+        req.body_len = sizeof(tags) - 1;
+        r            = s3_mbt_call(&env, &req);
+        CHECK(r->status == 200, "PutObjectTagging: got %d want 200",
+              r->status);
+
+        req.method   = EVPL_HTTP_REQUEST_TYPE_GET;
+        req.body     = NULL;
+        req.body_len = 0;
+        r            = s3_mbt_call(&env, &req);
+        CHECK(r->status == 200 && body_has(r, "<Key>tk1</Key>"),
+              "GetObjectTagging lacks tk1 (%d)", r->status);
+
+        r = simple(&env, EVPL_HTTP_REQUEST_TYPE_HEAD, "/bk0/a");
+        CHECK(strcmp(r->tag_count, "1") == 0,
+              "x-amz-tagging-count '%s', want 1", r->tag_count);
+
+        req.method = EVPL_HTTP_REQUEST_TYPE_DELETE;
+        r          = s3_mbt_call(&env, &req);
+        CHECK(r->status == 204, "DeleteObjectTagging: got %d want 204",
+              r->status);
+
+        /* bucket-level: no tags stored -> 404 NoSuchTagSet */
+        req.method = EVPL_HTTP_REQUEST_TYPE_GET;
+        req.path   = "/bk0";
+        r          = s3_mbt_call(&env, &req);
+        CHECK(r->status == 404 && body_has(r, "<Code>NoSuchTagSet</Code>"),
+              "empty GetBucketTagging: got %d, want 404 NoSuchTagSet",
+              r->status);
+    }
+
+    /* ---- multipart smoke -------------------------------------------------- */
+
+    {
+        struct s3_mbt_req req = { .method = EVPL_HTTP_REQUEST_TYPE_POST,
+                                  .path   = "/bk0/mp",                  .query = "uploads=" };
+        char              uploadid[64];
+        char              etag1[160], etag2[160];
+        char              q[128];
+        char              cbody[1024];
+        static uint8_t    pb[BS];
+
+        r = s3_mbt_call(&env, &req);
+        CHECK(r->status == 200, "CreateMultipartUpload: got %d", r->status);
+        CHECK(body_has(r, "<UploadId>"), "initiate lacks UploadId");
+        {
+            const char *b = strstr((const char *) r->body, "<UploadId>");
+
+            memcpy(uploadid, b + 10, 32);
+            uploadid[32] = '\0';
+        }
+
+        s3_mbt_expand_blocks(s3, 1, BS, pb);
+        req.method   = EVPL_HTTP_REQUEST_TYPE_PUT;
+        req.body     = pb;
+        req.body_len = BS;
+
+        snprintf(q, sizeof(q), "partNumber=1&uploadId=%s", uploadid);
+        req.query = q;
+        r         = s3_mbt_call(&env, &req);
+        CHECK(r->status == 200 && r->etag[0] == '"',
+              "UploadPart 1: got %d etag '%s'", r->status, r->etag);
+        snprintf(etag1, sizeof(etag1), "%s", r->etag);
+
+        snprintf(q, sizeof(q), "partNumber=2&uploadId=%s", uploadid);
+        r = s3_mbt_call(&env, &req);
+        CHECK(r->status == 200, "UploadPart 2: got %d", r->status);
+        snprintf(etag2, sizeof(etag2), "%s", r->etag);
+
+        /* a NON-final part under the 5 MiB minimum fails the Complete */
+        snprintf(cbody, sizeof(cbody),
+                 "<CompleteMultipartUpload>"
+                 "<Part><PartNumber>1</PartNumber><ETag>%s</ETag></Part>"
+                 "<Part><PartNumber>2</PartNumber><ETag>%s</ETag></Part>"
+                 "</CompleteMultipartUpload>", etag1, etag2);
+        snprintf(q, sizeof(q), "uploadId=%s", uploadid);
+        req.method   = EVPL_HTTP_REQUEST_TYPE_POST;
+        req.query    = q;
+        req.body     = (const uint8_t *) cbody;
+        req.body_len = strlen(cbody);
+        r            = s3_mbt_call(&env, &req);
+        CHECK(r->status == 400 && body_has(r, "<Code>EntityTooSmall</Code>"),
+              "undersized non-final part: got %d, want 400 EntityTooSmall",
+              r->status);
+
+        /* an ascending SUBSET manifest is legal: complete with part 1 only
+         * (any size is fine for the final part), orphaning part 2 */
+        snprintf(cbody, sizeof(cbody),
+                 "<CompleteMultipartUpload>"
+                 "<Part><PartNumber>1</PartNumber><ETag>%s</ETag></Part>"
+                 "</CompleteMultipartUpload>", etag1);
+        req.body_len = strlen(cbody);
+        r            = s3_mbt_call(&env, &req);
+        CHECK(r->status == 200 && body_has(r, "-1\"</ETag>"),
+              "CompleteMultipartUpload: got %d (want 200, ETag ...-1)",
+              r->status);
+
+        r = simple(&env, EVPL_HTTP_REQUEST_TYPE_GET, "/bk0/mp");
+        CHECK(r->status == 200 && body_is_blocks(r, s3, 1),
+              "assembled object GET failed (%d)", r->status);
+        simple(&env, EVPL_HTTP_REQUEST_TYPE_DELETE, "/bk0/mp");
+    }
+
     /* ---- teardown -------------------------------------------------------- */
 
     s3_mbt_env_fs_teardown(&env, "fs0");

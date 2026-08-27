@@ -43,7 +43,9 @@
 #include "prometheus-c.h"
 
 #define S3_MBT_PORT        5000
-#define S3_MBT_BODY_MAX    (1024 * 1024)
+/* Multipart traces replay with 5 MiB blocks; whole-object GETs of an
+ * assembled upload run tens of MiB. */
+#define S3_MBT_BODY_MAX    (64 * 1024 * 1024)
 
 #define S3_MBT_ACCESS_KEY  "quintaccess"
 #define S3_MBT_SECRET_KEY  "quintsecret"
@@ -69,6 +71,8 @@ struct s3_mbt_resp {
     char     content_range[160];
     char     location[256];
     char     content_type[128];
+    char     meta[64];          /* x-amz-meta-m */
+    char     tag_count[16];     /* x-amz-tagging-count */
     size_t   body_len;
     uint8_t *body;              /* borrows env->body_buf */
 };
@@ -81,17 +85,38 @@ struct s3_mbt_env {
     struct evpl_http_conn     *conn;
     struct evpl_endpoint      *ep;
     char                       session_dir[256];
+    int                        sigv2; /* sign with SigV2 by default */
     uint8_t                   *body_buf;
     struct s3_mbt_resp         res;
 };
 
-/* One request, declaratively.  query/range/copy_source may be NULL. */
+/* How to authenticate one request.  DEFAULT follows the environment (V4, or
+ * V2 when env->sigv2 is set); the explicit modes let the probe exercise the
+ * V2 verifier and each authentication failure path. */
+enum s3_mbt_auth {
+    S3_MBT_AUTH_DEFAULT = 0,
+    S3_MBT_AUTH_V4,
+    S3_MBT_AUTH_V2,
+    S3_MBT_AUTH_NONE,      /* no Authorization header -> 400 MissingSecurityHeader */
+    S3_MBT_AUTH_V4_BADSIG, /* corrupted V4 signature  -> 403 SignatureDoesNotMatch */
+    S3_MBT_AUTH_V4_BADKEY, /* unknown access key      -> 403 InvalidAccessKeyId */
+    S3_MBT_AUTH_V2_BADSIG, /* corrupted V2 signature  -> 403 SignatureDoesNotMatch */
+};
+
+/* One request, declaratively.  Pointer fields may be NULL. */
 struct s3_mbt_req {
     enum evpl_http_request_type method;
     const char    *path;                     /* "/bucket/key", starts with '/' */
     const char    *query;                    /* pre-sorted, no leading '?' */
     const char    *range;                    /* "bytes=0-8191" */
     const char    *copy_source;              /* "/srcbucket/srckey" */
+    const char    *copy_range;               /* x-amz-copy-source-range */
+    const char    *host;                     /* Host override (virtual-host) */
+    const char    *content_type;             /* Content-Type header */
+    const char    *meta;                     /* value for the x-amz-meta-m header */
+    const char    *content_sha;              /* x-amz-content-sha256 override
+                                              * (aws-chunked: STREAMING-...) */
+    enum s3_mbt_auth auth;
     const uint8_t *body;
     size_t         body_len;
 };
@@ -133,11 +158,13 @@ s3_mbt_hmac256(
 
 /* AWS SigV4 Authorization header for one request as the harness sends it:
  * fixed signed-header set (host, x-amz-content-sha256, x-amz-date), unsigned
- * payload.  Any extra headers (Range, x-amz-copy-source) are deliberately
- * left out of SignedHeaders, which SigV4 permits. */
+ * payload (or the aws-chunked STREAMING- marker).  Any extra headers (Range,
+ * x-amz-copy-source, Content-Type, x-amz-meta-*) are deliberately left out
+ * of SignedHeaders, which SigV4 permits. */
 static inline void
 s3_mbt_sign(
     const struct s3_mbt_req *req,
+    const char              *access_key,
     char                    *authorization,
     size_t                   authorization_len)
 {
@@ -170,8 +197,10 @@ s3_mbt_sign(
              "%s\n"
              "%s",
              method, req->path, req->query ? req->query : "",
-             S3_MBT_HOST, S3_MBT_PAYLOAD, S3_MBT_AMZ_DATE,
-             S3_MBT_SIGNED_HDRS, S3_MBT_PAYLOAD);
+             req->host ? req->host : S3_MBT_HOST,
+             req->content_sha ? req->content_sha : S3_MBT_PAYLOAD,
+             S3_MBT_AMZ_DATE, S3_MBT_SIGNED_HDRS,
+             req->content_sha ? req->content_sha : S3_MBT_PAYLOAD);
 
     s3_mbt_sha256_hex(canonical, strlen(canonical), cr_hash);
 
@@ -192,8 +221,78 @@ s3_mbt_sign(
 
     snprintf(authorization, authorization_len,
              "AWS4-HMAC-SHA256 Credential=%s/%s, SignedHeaders=%s, Signature=%s",
-             S3_MBT_ACCESS_KEY, S3_MBT_SCOPE, S3_MBT_SIGNED_HDRS, sig_hex);
+             access_key, S3_MBT_SCOPE, S3_MBT_SIGNED_HDRS, sig_hex);
 } /* s3_mbt_sign */
+
+/* AWS SigV2 Authorization header ("AWS <key>:<base64 hmac-sha1>").  The
+ * string-to-sign mirrors the server's verifier: Content-MD5 is never sent,
+ * the Date line is empty because x-amz-date is always sent, the
+ * CanonicalizedAmzHeaders are exactly the x-amz-* headers this harness emits
+ * (sorted), and the CanonicalizedResource is the URI path only -- with the
+ * bucket-level trailing-slash quirk the server expects. */
+static inline void
+s3_mbt_sign_v2(
+    const struct s3_mbt_req *req,
+    char                    *authorization,
+    size_t                   authorization_len)
+{
+    char          sts[4096];
+    unsigned char sig[20];
+    unsigned char sig_b64[64];
+    unsigned int  siglen = sizeof(sig);
+    size_t        off    = 0;
+    size_t        plen;
+    const char   *method;
+
+    switch (req->method) {
+        case EVPL_HTTP_REQUEST_TYPE_GET:    method = "GET";    break;
+        case EVPL_HTTP_REQUEST_TYPE_HEAD:   method = "HEAD";   break;
+        case EVPL_HTTP_REQUEST_TYPE_PUT:    method = "PUT";    break;
+        case EVPL_HTTP_REQUEST_TYPE_POST:   method = "POST";   break;
+        case EVPL_HTTP_REQUEST_TYPE_DELETE: method = "DELETE"; break;
+        default:
+            fprintf(stderr, "s3_mbt_sign_v2: unsupported method %d\n",
+                    req->method);
+            exit(3);
+    } /* switch */
+
+    /* METHOD \n Content-MD5 \n Content-Type \n Date(empty; x-amz-date) \n */
+    off += snprintf(sts + off, sizeof(sts) - off, "%s\n\n%s\n\n",
+                    method, req->content_type ? req->content_type : "");
+
+    /* CanonicalizedAmzHeaders: the x-amz-* headers s3_mbt_call sends, in
+     * lexicographic name order (copy-source < date < meta-m). */
+    if (req->copy_source) {
+        off += snprintf(sts + off, sizeof(sts) - off,
+                        "x-amz-copy-source:%s\n", req->copy_source);
+    }
+    if (req->copy_range) {
+        off += snprintf(sts + off, sizeof(sts) - off,
+                        "x-amz-copy-source-range:%s\n", req->copy_range);
+    }
+    off += snprintf(sts + off, sizeof(sts) - off, "x-amz-date:%s\n",
+                    S3_MBT_AMZ_DATE);
+    if (req->meta) {
+        off += snprintf(sts + off, sizeof(sts) - off, "x-amz-meta-m:%s\n",
+                        req->meta);
+    }
+
+    /* CanonicalizedResource: the path, sans query; a bucket-level path
+     * (/bucket, no key) takes a trailing slash. */
+    off += snprintf(sts + off, sizeof(sts) - off, "%s", req->path);
+    plen = strlen(req->path);
+    if (plen > 1 && req->path[plen - 1] != '/' &&
+        strchr(req->path + 1, '/') == NULL) {
+        off += snprintf(sts + off, sizeof(sts) - off, "/");
+    }
+
+    HMAC(EVP_sha1(), S3_MBT_SECRET_KEY, (int) strlen(S3_MBT_SECRET_KEY),
+         (const unsigned char *) sts, off, sig, &siglen);
+    EVP_EncodeBlock(sig_b64, sig, (int) siglen);
+
+    snprintf(authorization, authorization_len, "AWS %s:%s", S3_MBT_ACCESS_KEY,
+             sig_b64);
+} /* s3_mbt_sign_v2 */
 
 /* ---- response capture --------------------------------------------------- */
 
@@ -219,14 +318,19 @@ s3_mbt_drain(
     struct evpl_http_request *request,
     struct s3_mbt_resp       *res)
 {
-    struct evpl_iovec iov[64];
+    struct evpl_iovec iov[256];
     uint64_t          avail;
+    uint64_t          take;
     int               niov, i;
 
     avail = evpl_http_request_get_data_avail(request);
 
     while (avail > 0) {
-        niov = evpl_http_request_get_datav(evpl, request, iov, (int) avail);
+        /* get_datav's last argument is a byte count and it emits as many
+         * iovecs as the ring needs for it -- bound each bite so a
+         * multipart-scale body cannot overrun the scatter array. */
+        take = avail < 256 * 1024 ? avail : 256 * 1024;
+        niov = evpl_http_request_get_datav(evpl, request, iov, (int) take);
 
         for (i = 0; i < niov; i++) {
             if (res->body_len + iov[i].length > S3_MBT_BODY_MAX) {
@@ -272,6 +376,10 @@ s3_mbt_notify(
                                sizeof(res->location));
             s3_mbt_copy_header(request, "Content-Type", res->content_type,
                                sizeof(res->content_type));
+            s3_mbt_copy_header(request, "x-amz-meta-m", res->meta,
+                               sizeof(res->meta));
+            s3_mbt_copy_header(request, "x-amz-tagging-count", res->tag_count,
+                               sizeof(res->tag_count));
             cl = evpl_http_response_header(request, "Content-Length");
             if (cl) {
                 res->has_content_length = 1;
@@ -305,7 +413,6 @@ s3_mbt_call(
     const struct s3_mbt_req *req)
 {
     struct evpl_http_request *request;
-    struct evpl_iovec         iov;
     char                      url[4096];
     char                      authorization[512];
 
@@ -326,13 +433,23 @@ s3_mbt_call(
         exit(3);
     }
 
-    s3_mbt_sign(req, authorization, sizeof(authorization));
+    enum s3_mbt_auth auth = req->auth;
 
-    evpl_http_request_add_header(request, "Host", S3_MBT_HOST);
+    if (auth == S3_MBT_AUTH_DEFAULT) {
+        auth = env->sigv2 ? S3_MBT_AUTH_V2 : S3_MBT_AUTH_V4;
+    }
+
+    evpl_http_request_add_header(request, "Host",
+                                 req->host ? req->host : S3_MBT_HOST);
     evpl_http_request_add_header(request, "x-amz-date", S3_MBT_AMZ_DATE);
-    evpl_http_request_add_header(request, "x-amz-content-sha256", S3_MBT_PAYLOAD);
-    evpl_http_request_add_header(request, "Authorization", authorization);
 
+    if (req->content_type) {
+        evpl_http_request_add_header(request, "Content-Type",
+                                     req->content_type);
+    }
+    if (req->meta) {
+        evpl_http_request_add_header(request, "x-amz-meta-m", req->meta);
+    }
     if (req->range) {
         evpl_http_request_add_header(request, "Range", req->range);
     }
@@ -340,16 +457,80 @@ s3_mbt_call(
         evpl_http_request_add_header(request, "x-amz-copy-source",
                                      req->copy_source);
     }
+    if (req->copy_range) {
+        evpl_http_request_add_header(request, "x-amz-copy-source-range",
+                                     req->copy_range);
+    }
 
-    /* Stage the whole request body up front; no WANT_DATA handling needed. */
+    switch (auth) {
+        case S3_MBT_AUTH_V4:
+        case S3_MBT_AUTH_V4_BADSIG:
+        case S3_MBT_AUTH_V4_BADKEY:
+            /* V2 requests deliberately omit x-amz-content-sha256: the server
+             * canonicalizes every x-amz-* header it receives, so any header
+             * sent must also be in the harness's V2 string-to-sign. */
+            evpl_http_request_add_header(request, "x-amz-content-sha256",
+                                         req->content_sha ? req->content_sha
+                                                          : S3_MBT_PAYLOAD);
+            s3_mbt_sign(req,
+                        auth == S3_MBT_AUTH_V4_BADKEY ? "nosuchaccesskey"
+                                                      : S3_MBT_ACCESS_KEY,
+                        authorization, sizeof(authorization));
+            if (auth == S3_MBT_AUTH_V4_BADSIG) {
+                /* corrupt the last hex digit of the signature */
+                size_t n = strlen(authorization);
+                authorization[n - 1] = authorization[n - 1] == '0' ? '1' : '0';
+            }
+            evpl_http_request_add_header(request, "Authorization",
+                                         authorization);
+            break;
+        case S3_MBT_AUTH_V2:
+        case S3_MBT_AUTH_V2_BADSIG:
+            s3_mbt_sign_v2(req, authorization, sizeof(authorization));
+            if (auth == S3_MBT_AUTH_V2_BADSIG) {
+                /* corrupt the first character of the base64 signature */
+                char *colon = strrchr(authorization, ':');
+                colon[1] = colon[1] == 'A' ? 'B' : 'A';
+            }
+            evpl_http_request_add_header(request, "Authorization",
+                                         authorization);
+            break;
+        case S3_MBT_AUTH_NONE:
+            break;
+        default:
+            fprintf(stderr, "s3_mbt_call: bad auth mode %d\n", auth);
+            exit(3);
+    } /* switch */
+
+    /* Stage the whole request body up front; no WANT_DATA handling needed.
+     * A multipart-scale body (5+ MiB blocks) spans several evpl buffer
+     * slabs, so allocate a scatter list and honor the returned count. */
     if (req->method == EVPL_HTTP_REQUEST_TYPE_PUT ||
         req->method == EVPL_HTTP_REQUEST_TYPE_POST) {
         evpl_http_client_set_request_length(request, req->body_len);
         if (req->body_len) {
-            evpl_iovec_alloc(env->evpl, req->body_len, 0, 1, 0, &iov);
-            memcpy(evpl_iovec_data(&iov), req->body, req->body_len);
-            evpl_iovec_set_length(&iov, req->body_len);
-            evpl_http_request_add_datav(request, &iov, 1);
+            struct evpl_iovec iov[64];
+            int               niov;
+            size_t            off = 0;
+            int               i;
+
+            niov = evpl_iovec_alloc(env->evpl, req->body_len, 0, 64, 0, iov);
+            if (niov <= 0) {
+                fprintf(stderr, "s3_mbt: evpl_iovec_alloc(%zu) failed (%d)\n",
+                        req->body_len, niov);
+                exit(3);
+            }
+            for (i = 0; i < niov; i++) {
+                size_t n = iov[i].length;
+
+                if (n > req->body_len - off) {
+                    n = req->body_len - off;
+                    evpl_iovec_set_length(&iov[i], n);
+                }
+                memcpy(evpl_iovec_data(&iov[i]), req->body + off, n);
+                off += n;
+            }
+            evpl_http_request_add_datav(request, iov, niov);
         }
     }
 
@@ -523,3 +704,35 @@ s3_mbt_expand_blocks(
         memset(out + (size_t) i * block_size, 0x40 + syms[i], block_size);
     }
 } /* s3_mbt_expand_blocks */
+
+/* Frame a payload as aws-chunked (SigV4 streaming upload) content: chunks of
+ * `chunk_size` as "<hex-size>;chunk-signature=<64 zeros>\r\n<data>\r\n",
+ * terminated by the zero-length chunk.  The server decodes the framing and
+ * never verifies the per-chunk signatures, so a fixed dummy signature keeps
+ * the request deterministic.  Returns the framed length. */
+static inline size_t
+s3_mbt_aws_chunkify(
+    const uint8_t *in,
+    size_t         in_len,
+    size_t         chunk_size,
+    uint8_t       *out)
+{
+    static const char dummy_sig[] =
+        "0000000000000000000000000000000000000000000000000000000000000000";
+    size_t            off = 0, pos = 0;
+
+    while (pos < in_len) {
+        size_t n = in_len - pos < chunk_size ? in_len - pos : chunk_size;
+
+        off += sprintf((char *) out + off, "%zx;chunk-signature=%s\r\n", n,
+                       dummy_sig);
+        memcpy(out + off, in + pos, n);
+        off       += n;
+        out[off++] = '\r';
+        out[off++] = '\n';
+        pos       += n;
+    }
+    off += sprintf((char *) out + off, "0;chunk-signature=%s\r\n\r\n",
+                   dummy_sig);
+    return off;
+} /* s3_mbt_aws_chunkify */
