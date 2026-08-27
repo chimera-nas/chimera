@@ -28,25 +28,36 @@ PROFDATA="${COV_DIR}/coverage.profdata"
 PROFDATA_TOOL="${LLVM_PROFDATA:-llvm-profdata}"
 COV_TOOL="${LLVM_COV:-llvm-cov}"
 
-# Drop everything that isn't first-party chimera source from the report.
-IGNORE_REGEX='(/ext/|/usr/|/3rdparty/|/CMakeFiles/)'
+# System headers and vendored third-party trees are never anybody's code here,
+# so they are always out.  Generated sources and the bundled ext/ projects are
+# out by default -- the local `make coverage` report is about the code you are
+# editing -- and each has a switch to fold it back in.  CI's quint report sets
+# both: its question is how much of everything that ships the models reach, and
+# generated marshallers and libevpl ship.
+ignore_parts=('/usr/' '/3rdparty/' '/CMakeFiles/')
 
-# By default, also exclude generated code so it doesn't distort the totals.
 # Generated sources (the xdrzcc/ndrzcc XDR/NDR marshallers, embedded asset
 # blobs, etc.) are emitted into the build tree, whereas hand-written sources
 # live under the source tree -- so "compiled from under BUILD_DIR" is a reliable,
-# generator-agnostic way to spot generated code. Set COVERAGE_INCLUDE_GENERATED=1
-# to fold it back into the report.
-INCLUDE_GENERATED="${COVERAGE_INCLUDE_GENERATED:-0}"
-if [[ "${INCLUDE_GENERATED}" == "1" ]]; then
+# generator-agnostic way to spot generated code.
+if [[ "${COVERAGE_INCLUDE_GENERATED:-0}" == "1" ]]; then
     echo "coverage: including generated code (COVERAGE_INCLUDE_GENERATED=1)"
 else
     abs_build=$(readlink -f "${BUILD_DIR}")
     # Escape regex metacharacters so the path is matched literally.
     esc_build=$(printf '%s' "${abs_build}" | sed 's/[.[\*^$()+?{|/]/\\&/g')
-    IGNORE_REGEX="(${esc_build}/|/ext/|/usr/|/3rdparty/|/CMakeFiles/)"
+    ignore_parts+=("${esc_build}/")
     echo "coverage: excluding generated code under ${abs_build} (set COVERAGE_INCLUDE_GENERATED=1 to include)"
 fi
+
+if [[ "${COVERAGE_INCLUDE_EXT:-0}" == "1" ]]; then
+    echo "coverage: including the bundled ext/ projects (COVERAGE_INCLUDE_EXT=1)"
+else
+    ignore_parts+=('/ext/')
+    echo "coverage: excluding the bundled ext/ projects (set COVERAGE_INCLUDE_EXT=1 to include)"
+fi
+
+IGNORE_REGEX="($(IFS='|'; echo "${ignore_parts[*]}"))"
 
 # A full suite run produces hundreds of thousands of .profraw files (one per
 # test process / spawned daemon), which overflows ARG_MAX if globbed onto the
