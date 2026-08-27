@@ -1208,6 +1208,26 @@ open_flags(json_t *fl)
     return f;
 } /* open_flags */
 
+/*
+ * PD24 (EMFILE) leaves us holding a descriptor the model never learned about:
+ * its 16-slot table was full, chimera's larger one let the call through.  The
+ * model's fd is not set, so the descriptor never reaches g_fdmap and
+ * close_live_handles() cannot reach it either -- and one descriptor still open
+ * on the mount wedges the newfs() recycle between traces, whose unmount then
+ * returns EBUSY for as long as the harness is willing to retry.  Drop it at the
+ * op that minted it.  (op_open does its own, because it must also exempt any
+ * node O_CREAT minted from the final audit.)
+ */
+static void
+pd24_drop_stray_fd(
+    int64_t model_err,
+    int     rc)
+{
+    if (model_err == 24 && rc >= 0) {
+        chimera_posix_close(rc);
+    }
+} /* pd24_drop_stray_fd */
+
 static void
 op_open(
     int     pid,
@@ -1286,6 +1306,8 @@ op_dup(
 
     if (check_status(tf_field(res_v, "e"), e) && tf_field(res_v, "e") == 0) {
         set_fd(pid, tf_field(res_v, "fd"), rc);
+    } else {
+        pd24_drop_stray_fd(tf_field(res_v, "e"), rc);
     }
 } /* op_dup */
 
@@ -2141,19 +2163,25 @@ op_dup2(
     int64_t fd     = tf_field(rv, "fd");
     int64_t nfd    = tf_field(rv, "nfd");
     int     target = rfd(pid, nfd);
-    int     rc, e;
+    int     rc, e, minted;
 
     apply_cred(pid);
     if (fd == nfd || target != BADFD) {
-        rc = chimera_posix_dup2(rfd(pid, fd), target);
+        rc     = chimera_posix_dup2(rfd(pid, fd), target);
+        minted = 0;
     } else {
         /* The model's nfd names a free slot; chimera fd numbers are its own,
          * so a plain dup() is observationally identical here. */
-        rc = chimera_posix_dup(rfd(pid, fd));
+        rc     = chimera_posix_dup(rfd(pid, fd));
+        minted = 1;
     }
     e = ERRV(rc);
     if (check_status(tf_field(res_v, "e"), e) && tf_field(res_v, "e") == 0) {
         set_fd(pid, nfd, rc);
+    } else if (minted) {
+        /* Only the dup() arm mints a descriptor of its own; the dup2() arm
+         * returns one g_fdmap already names, which close_live_handles() owns. */
+        pd24_drop_stray_fd(tf_field(res_v, "e"), rc);
     }
 } /* op_dup2 */
 
@@ -2182,6 +2210,8 @@ op_fcntl_dupfd(
                 set_fd(pid, tf_field(res_v, "fd"), r2);
             }
         }
+    } else {
+        pd24_drop_stray_fd(tf_field(res_v, "e"), rc);
     }
 } /* op_fcntl_dupfd */
 
