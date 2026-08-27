@@ -1,5 +1,6 @@
 /*
  * SPDX-FileCopyrightText: IETF Trust and the persons identified
+ * SPDX-FileCopyrightText: 2026 Chimera-NAS Project Contributors
  * SPDX-License-Identifier: BSD-3-Clause
  */
 
@@ -40,6 +41,23 @@ struct rpcb {
 struct rp__list {
     rpcb rpcb_map;
     rp__list *next;
+};
+
+/*
+ * RFC 1833 declares the rpcbind DUMP procedures as returning a bare
+ * "rp__list *" (an optional pointer chain).  xdrzcc emits an asymmetric
+ * codec for a procedure whose result is a recursive type used directly:
+ * the marshaller writes the RFC encoding (value-follows boolean + body,
+ * repeated, terminated by a zero boolean) but the generated *client*
+ * unmarshaller decodes a single bare body and consumes no booleans, so
+ * every reply fails to decode.  Wrapping the chain in a one-field struct
+ * makes the two symmetric; the wire encoding of an optional pointer inside
+ * a struct is byte-for-byte the RFC's list, so this is not a protocol
+ * change.  mount.x carries the same wrapper (mountdumpres) for
+ * MOUNTPROC3_DUMP, for the same reason.
+ */
+struct rpcbdumpres {
+    rp__list *maps;
 };
 
 /*
@@ -162,6 +180,11 @@ struct pmaplist {
     pmaplist *next;
 };
 
+/* The PMAP v2 counterpart of rpcbdumpres; see the note there. */
+struct pmapdumpres {
+    pmaplist *maps;
+};
+
 /* Arguments to callit */
 struct call_args {
     unsigned int prog;
@@ -183,7 +206,7 @@ program PORTMAP {
         bool PMAPPROC_SET(mapping) = 1;
         bool PMAPPROC_UNSET(mapping) = 2;
         unsigned int PMAPPROC_GETPORT(mapping) = 3;
-        pmaplist PMAPPROC_DUMP(void) = 4;
+        pmapdumpres PMAPPROC_DUMP(void) = 4;
         call_result PMAPPROC_CALLIT(call_args) = 5;
     } = 2;
 
@@ -191,7 +214,7 @@ program PORTMAP {
         bool rpcbproc_set(rpcb) = 1;
         bool rpcbproc_unset(rpcb) = 2;
         string rpcbproc_getaddr(rpcb) = 3;
-        rp__list *rpcbproc_dump(void) = 4;
+        rpcbdumpres rpcbproc_dump(void) = 4;
         rpcb_rmtcallres rpcbproc_callit(rpcb_rmtcallargs) = 5;
         unsigned int rpcbproc_gettime(void) = 6;
         netbuf rpcbproc_uaddr2taddr(string) = 7;
@@ -202,7 +225,7 @@ program PORTMAP {
         bool RPCBPROC_SET(rpcb) = 1;
         bool RPCBPROC_UNSET(rpcb) = 2;
         string RPCBPROC_GETADDR(rpcb) = 3;
-        rp__list *RPCBPROC_DUMP(void) = 4;
+        rpcbdumpres RPCBPROC_DUMP(void) = 4;
 
         /*
          * NOTE: RPCBPROC_BCAST has the same functionality as CALLIT.

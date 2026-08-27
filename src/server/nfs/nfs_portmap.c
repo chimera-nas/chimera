@@ -278,12 +278,12 @@ chimera_portmap_dump_v2(
 {
     struct chimera_server_nfs_thread *thread = private_data;
     struct chimera_server_nfs_shared *shared = thread->shared;
-    struct pmaplist                  *list;
+    struct pmapdumpres                res;
     int                               rc;
 
-    list = portmap_build_pmaplist(encoding->dbuf);
+    res.maps = portmap_build_pmaplist(encoding->dbuf);
 
-    rc = shared->portmap_v2.send_reply_PMAPPROC_DUMP(evpl, NULL, list, encoding);
+    rc = shared->portmap_v2.send_reply_PMAPPROC_DUMP(evpl, NULL, &res, encoding);
     chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 } /* chimera_portmap_dump */
 
@@ -357,15 +357,15 @@ portmap_dump_common(
     int (                     *send_reply )(
         struct evpl *,
         const struct evpl_rpc2_verf *,
-        struct rp__list *,
+        struct rpcbdumpres *,
         struct evpl_rpc2_encoding *))
 {
-    struct rp__list *list;
-    int              rc;
+    struct rpcbdumpres res;
+    int                rc;
 
-    list = portmap_build_rpcblist(conn, override_addr, encoding->dbuf);
+    res.maps = portmap_build_rpcblist(conn, override_addr, encoding->dbuf);
 
-    rc = send_reply(evpl, NULL, list, encoding);
+    rc = send_reply(evpl, NULL, &res, encoding);
     chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
 } /* portmap_dump_common */
 
