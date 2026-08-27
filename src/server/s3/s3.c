@@ -363,6 +363,21 @@ s3_server_notify(
             if (s3_request->vfs_state == CHIMERA_S3_VFS_STATE_SEND ||
                 s3_request->vfs_state == CHIMERA_S3_VFS_STATE_COMPLETE) {
                 s3_server_respond(evpl, s3_request);
+
+                if (request_type == EVPL_HTTP_REQUEST_TYPE_GET &&
+                    s3_request->vfs_state == CHIMERA_S3_VFS_STATE_SEND &&
+                    s3_request->file_left == 0) {
+                    /* A zero-length GET body produces no WANT_DATA
+                     * notification, so nothing else would ever drive the
+                     * send path: run it here.  With nothing left to read it
+                     * finishes immediately, releasing the object handle --
+                     * otherwise the handle leaks and pins the filesystem.
+                     * (Reached when the VFS lookup/open chain completed
+                     * inline -- synchronous backends like memfs -- before
+                     * this RECEIVE_COMPLETE; the opposite ordering runs the
+                     * send path from chimera_s3_get_metadata_done.) */
+                    chimera_s3_get_send(evpl, s3_request);
+                }
             }
             break;
         case EVPL_HTTP_NOTIFY_WANT_DATA:
