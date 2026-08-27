@@ -2911,8 +2911,12 @@ chimera_s3_complete_multipart_upload_body_done(
     int                                 i;
 
     if (request->multipart.body_len == CHIMERA_S3_MP_BODY_OVERFLOW) {
-        request->status    = CHIMERA_S3_STATUS_MALFORMED_XML;
-        request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
+        free(request->multipart.body_buf);
+        request->multipart.body_buf = NULL;
+        request->multipart.body_len = 0;
+        request->multipart.body_cap = 0;
+        request->status             = CHIMERA_S3_STATUS_MALFORMED_XML;
+        request->vfs_state          = CHIMERA_S3_VFS_STATE_COMPLETE;
         if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
             s3_server_respond(evpl, request);
         }
@@ -2924,8 +2928,12 @@ chimera_s3_complete_multipart_upload_body_done(
                                          request->multipart.body_len,
                                          &client_parts, &n_client);
     if (err != CHIMERA_S3_STATUS_OK) {
-        request->status    = err;
-        request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
+        free(request->multipart.body_buf);
+        request->multipart.body_buf = NULL;
+        request->multipart.body_len = 0;
+        request->multipart.body_cap = 0;
+        request->status             = err;
+        request->vfs_state          = CHIMERA_S3_VFS_STATE_COMPLETE;
         if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
             s3_server_respond(evpl, request);
         }
@@ -3024,8 +3032,12 @@ chimera_s3_complete_multipart_upload_body_done(
         /* Drop our lookup ref; upload remains in the table. */
         free(server_parts);
         chimera_s3_multipart_upload_release(thread, upload);
-        request->status    = err;
-        request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
+        free(request->multipart.body_buf);
+        request->multipart.body_buf = NULL;
+        request->multipart.body_len = 0;
+        request->multipart.body_cap = 0;
+        request->status             = err;
+        request->vfs_state          = CHIMERA_S3_VFS_STATE_COMPLETE;
         if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
             s3_server_respond(evpl, request);
         }
