@@ -969,6 +969,19 @@ chimera_server_add_s3_cred(
     const char            *secret_key,
     int                    pinned);
 
+int
+chimera_server_remove_s3_cred(
+    struct chimera_server *server,
+    const char            *access_key);
+
+/* Advance the S3 credential cache's synthetic clock and sweep expired
+ * credentials synchronously (test instrumentation; see
+ * chimera_s3_advance_cred_clock). */
+void
+chimera_server_advance_s3_cred_clock(
+    struct chimera_server *server,
+    int64_t                seconds);
+
 void
 chimera_server_config_set_smb_winbind_enabled(
     struct chimera_server_config *config,
