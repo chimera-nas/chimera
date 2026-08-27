@@ -114,6 +114,7 @@ PROFILE = {
     "renameCtime": True,
     "strictAtime": False,
     "stickyWriteArm": False,
+    "chownSuppGroup": True,
     "errNotempty": True,
     "errStickyAcces": True,
     "errUnlinkDirIsdir": True,
@@ -134,8 +135,24 @@ NFS3_PROFILE = dict(PROFILE, copyRange=False, cloneRange=False,
 NFS4_PROFILE = dict(PROFILE, copyRange=False, cloneRange=False,
                     seekHole=True, strictAtime=False)
 
+# The FUSE server, probed 2026-08-26 through the in-process harness
+# (fuse_quint_driver: the server driven over a socketpair standing in for
+# /dev/fuse, no mount and no privileges).  All three drifts from the memfs
+# profile it serves are properties of the FUSE transport rather than of memfs:
+# FICLONERANGE is an ioctl with no FUSE request behind it and fuse's
+# file_operations has no ->remap_file_range, so the kernel answers EOPNOTSUPP
+# on its own; every read reaches the server, so memfs's relatime update is
+# observed instead of hidden behind a stale cached attribute; and
+# fuse_in_header carries a single gid, so a chgrp to a supplementary group is
+# refused EPERM (confirmed on a live mount: uid 200 gid 20 groups 20,30 can
+# chgrp to 20 but not to 30).  Trace generation uses posix_run.qnt's posixFuse
+# instance, which pins the same three, so their traces never skip.
+FUSE_PROFILE = dict(PROFILE, cloneRange=False, strictAtime=True,
+                    chownSuppGroup=False)
+
 PROFILES = {
     "memfs": PROFILE,
+    "fuse_memfs": FUSE_PROFILE,
     "diskfs": DISK_PROFILE,
     "cairn": DISK_PROFILE,
     "nfs3_memfs": NFS3_PROFILE,
@@ -529,13 +546,25 @@ class Replayer:
                     self.shadow_resize(ino, 0)
         elif res_v["e"] == 24 and r["err"] == 0 and r["ret"] >= 0:
             # PD24 (EMFILE): the model's 16-slot table was full but
-            # chimera's larger table let the open succeed.  Close the
-            # stray descriptor to restore parity, and when O_CREAT minted
-            # a node the model never created, exempt it from the final
-            # audit (the state divergence is the accepted PD24 residue).
+            # chimera's larger table let the open succeed.  Close the stray
+            # descriptor to restore descriptor parity.
             self.drv.request(op="close", pid=pid, fd=r["ret"])
             if fl["creat"]:
-                self.audit_exempt.add("/" + "/".join(rv["pth"]["comps"]))
+                # O_CREAT may also have minted a file the model does not
+                # have, and that residue is not inert: a later op on the
+                # same name meets an object the model has never heard of and
+                # diverges for reasons that have nothing to do with the
+                # descriptor table (an open for writing hitting the 0444
+                # mode this create chose, say).  Remove it and the namespaces
+                # agree again.  Only when the model really lacks the path --
+                # an O_CREAT over a file that already existed created
+                # nothing, and unlinking it would invent a divergence.
+                if self.path_ino(post_fs, rv["pth"]["comps"]) is None:
+                    self.drv.request(op="unlink", pid=pid,
+                                     path=real_path(rv["pth"]))
+                else:
+                    self.audit_exempt.add(
+                        "/" + "/".join(rv["pth"]["comps"]))
         return r
 
     def op_close(self, pid, rv, res_v, post_fs, mism):
@@ -550,6 +579,13 @@ class Replayer:
         if self.check_status(res_v["e"], r["err"], mism) \
                 and res_v["e"] == 0:
             self.fdmap[(pid, res_v["fd"])] = r["ret"]
+        elif r["err"] == 0 and r["ret"] >= 0:
+            # The model failed but chimera did not -- PD24 (EMFILE) whenever
+            # the model's 16-slot table is full and chimera's larger one is
+            # not.  The descriptor is real and belongs to no model fd, so
+            # cleanup() will never find it; left open it holds a handle on
+            # the mount and the per-trace newfs then cannot unmount.
+            self.drv.request(op="close", pid=pid, fd=r["ret"])
         return r
 
     def op_dup2(self, pid, rv, res_v, post_fs, mism):
@@ -963,6 +999,10 @@ class Replayer:
                                       fd=self.rfd(pid, rv["fd"]))
                 if r2["err"] == 0:
                     self.fdmap[(pid, res_v["fd"])] = r2["ret"]
+        elif r["err"] == 0 and r["ret"] >= 0:
+            # Model failed, chimera succeeded (PD24): close the stray, or it
+            # outlives the trace and holds the mount busy -- see op_dup.
+            self.drv.request(op="close", pid=pid, fd=r["ret"])
         return r
 
     def op_fcntl_getfl(self, pid, rv, res_v, post_fs, mism):
@@ -1421,6 +1461,16 @@ def probe(driver_path, backend="memfs"):
     out["stickyDenyErrno"] = r["err"]
     out["errStickyAcces"] = r["err"] == 13 if r["ret"] < 0 else None
 
+    # chownSuppGroup: an owner chgrps their own file to a group they are in
+    # only by way of the supplementary list (user2 is uid 200, egid 20, and
+    # additionally in 30).  A transport that carries no group list cannot see
+    # the membership and refuses with EPERM.
+    touch("/test/p_chgrp", pid=1, mode=0o600)
+    r = drv.request(op="chown", pid=1, path="/test/p_chgrp", uid=-1, gid=30,
+                    follow=True)
+    out["chownSuppGroup"] = r["ret"] == 0
+    out["chownSuppGroupErrno"] = r["err"]
+
     # errNotempty / errUnlinkDirIsdir
     mk("/test/p_ne")
     mk("/test/p_ne/x")
@@ -1517,6 +1567,19 @@ def main():
                     help="ITF trace file (repeatable; one shared driver "
                          "replays them all, cycling a fresh filesystem per "
                          "trace)")
+    ap.add_argument("--trace-dir", action="append", default=[],
+                    help="directory of ITF traces to replay (repeatable).  "
+                         "The specs corpus puts every backend profile in one "
+                         "directory and distinguishes them by filename "
+                         "prefix, so this pairs with --include-prefix / "
+                         "--exclude-prefix; the files need not exist at "
+                         "configure time, only when the test runs.")
+    ap.add_argument("--include-prefix", action="append", default=[],
+                    help="with --trace-dir, take only basenames starting "
+                         "with one of these (default: all *.itf.json)")
+    ap.add_argument("--exclude-prefix", action="append", default=[],
+                    help="with --trace-dir, drop basenames starting with "
+                         "one of these")
     ap.add_argument("--driver", help="path to the posix_quint_driver binary")
     ap.add_argument("--dry-run", action="store_true",
                     help="parse and validate traces without a driver")
@@ -1530,6 +1593,17 @@ def main():
                          "pinned PROFILE")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
+
+    for d in args.trace_dir:
+        for name in sorted(os.listdir(d)):
+            if not name.endswith(".itf.json"):
+                continue
+            if args.include_prefix and \
+                    not any(name.startswith(p) for p in args.include_prefix):
+                continue
+            if any(name.startswith(p) for p in args.exclude_prefix):
+                continue
+            args.trace.append(os.path.join(d, name))
 
     def on_alarm(sig, frame):
         print("FATAL: driver request timed out (possible deadlock)",
@@ -1552,7 +1626,8 @@ def main():
         return
 
     if not args.trace:
-        ap.error("--trace is required unless --probe")
+        ap.error("--trace or a non-empty --trace-dir is required "
+                 "unless --probe")
     if not args.dry_run and not args.driver:
         ap.error("--driver is required unless --dry-run")
 
