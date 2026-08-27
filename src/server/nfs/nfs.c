@@ -682,6 +682,14 @@ nfs_server_destroy(void *data)
 
     if (shared->portmap_server) {
         evpl_rpc2_server_destroy(shared->portmap_server);
+    }
+
+    /* The portmap programs' per-proc metrics are allocated whenever an internal
+     * portmap was configured, which is not the same as ending up with a portmap
+     * *server*: a data server initializes the programs and then discards the
+     * server, because it binds only the NFS service.  Free on the condition
+     * they were allocated under, not on the server pointer. */
+    if (!chimera_server_config_get_external_portmap(shared->config)) {
         free(shared->portmap_v2.rpc2.metrics);
         free(shared->portmap_v3.rpc2.metrics);
         free(shared->portmap_v4.rpc2.metrics);

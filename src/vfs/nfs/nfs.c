@@ -142,7 +142,17 @@ chimera_nfs_destroy(void *private_data)
         }
     }
 
-    free(shared->mounts);
+    /* shared->mounts is a DL list head, not an array: freeing the head alone
+     * leaks every other mount.  Invisible with a single mount, which is why it
+     * stood -- a server that mounts two exports (e.g. an MDS with two pNFS data
+     * servers) leaks all but one. */
+    while (shared->mounts) {
+        struct chimera_nfs_client_mount *mount = shared->mounts;
+
+        DL_DELETE(shared->mounts, mount);
+        free(mount);
+    }
+
     free(shared->servers);
 
     pthread_mutex_destroy(&shared->pnfs_devcache.lock);
