@@ -192,3 +192,38 @@ set_tests_properties(chimera/server/nfs/mbt4/batch_memfs PROPERTIES
     LABELS "quint;nfs4_mbt;memfs"
     SKIP_RETURN_CODE 77
     TIMEOUT 300)
+
+# pNFS.  --pnfs N makes the replayer stand up a whole metadata-server cluster
+# inside the test process: the server it already ran becomes the MDS, plus N
+# more chimera servers as flex-files data servers, each on its own inproc
+# service name and in data_server mode so they can share the process.  The MDS
+# reaches them through the nfs client module, also over inproc -- so a LAYOUTGET
+# exercises the real steer / backing-file-create / blob-persist path with no
+# ports, namespaces, daemons or VMs, unlike the KVM pNFS matrix.  Two data
+# servers, so round-robin steering and both arms of the flex-files device
+# encoder (an NFSv3 DS and an NFSv4.1 one) are covered.
+#
+# The corpus is its own suite (specs traces/nfs4pnfs): its profiles require the
+# server to advertise itself as a metadata server, which the plain nfs4 batches
+# above require it not to.
+add_test(NAME chimera/server/nfs/mbt4/batch_pnfs_memfs
+    COMMAND $<TARGET_FILE:nfs4_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/nfs4pnfs
+            --pnfs 2)
+set_tests_properties(chimera/server/nfs/mbt4/batch_pnfs_memfs PROPERTIES
+    LABELS "quint;nfs4_mbt;pnfs;memfs"
+    SKIP_RETURN_CODE 77
+    TIMEOUT 300)
+
+# The same cluster with an on-disk metadata server: diskfs persists the pNFS
+# layout blob as its own b+tree record, so this is the only test that covers
+# that record's write/read-back path.  The data servers stay memfs -- what is
+# under test here is the MDS.  Gated on libaio, diskfs's device type.
+if(HAVE_LIBAIO)
+    add_test(NAME chimera/server/nfs/mbt4/batch_pnfs_diskfs
+        COMMAND $<TARGET_FILE:nfs4_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/nfs4pnfs
+                --pnfs 2 --backend diskfs)
+    set_tests_properties(chimera/server/nfs/mbt4/batch_pnfs_diskfs PROPERTIES
+        LABELS "quint;nfs4_mbt;pnfs;diskfs"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 300)
+endif()
