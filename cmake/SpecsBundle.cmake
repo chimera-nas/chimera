@@ -57,16 +57,30 @@ endif()
 find_package(Git QUIET)
 set(_specs_sha "")
 set(_specs_clean FALSE)
+set(_specs_git_err "")
 if(Git_FOUND)
+    # -c safe.directory: CI configures inside a container whose root user does
+    # not own the bind-mounted checkout, so git rejects the repository with
+    # "detected dubious ownership" and both commands below fail.  That used to
+    # be invisible (ERROR_QUIET) and left the sha empty, which skipped the
+    # availability probe and disabled every MBT suite without saying why.
+    set(_specs_git ${GIT_EXECUTABLE} -c safe.directory=*)
     execute_process(
-        COMMAND ${GIT_EXECUTABLE} -C ${_specs_src} rev-parse HEAD
-        OUTPUT_VARIABLE _specs_sha OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+        COMMAND ${_specs_git} -C ${_specs_src} rev-parse HEAD
+        OUTPUT_VARIABLE _specs_sha OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_VARIABLE _specs_git_err ERROR_STRIP_TRAILING_WHITESPACE
+        RESULT_VARIABLE _specs_rc)
+    if(NOT _specs_rc EQUAL 0)
+        set(_specs_sha "")
+    endif()
     execute_process(
-        COMMAND ${GIT_EXECUTABLE} -C ${_specs_src} status --porcelain
+        COMMAND ${_specs_git} -C ${_specs_src} status --porcelain
         OUTPUT_VARIABLE _specs_dirty OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
     if(_specs_sha AND NOT _specs_dirty)
         set(_specs_clean TRUE)
     endif()
+else()
+    set(_specs_git_err "git not found")
 endif()
 
 set(_specs_ref "${SPECS_REGISTRY}:${_specs_sha}")
@@ -108,6 +122,22 @@ elseif(SPECS_BUNDLE STREQUAL "AUTO")
         else()
             message(STATUS
                 "specs: no published bundle for ${_specs_sha}; building locally")
+        endif()
+    else()
+        # Not reaching the probe at all is the failure that hid this for months:
+        # it looks identical to "no bundle published" from the outside.  Name
+        # the reason so a CI job that quietly loses its MBT suites says so.
+        if(NOT ORAS_BIN)
+            message(STATUS
+                "specs: oras not on PATH; cannot fetch a prebuilt bundle")
+        elseif(NOT _specs_sha)
+            message(STATUS
+                "specs: cannot read ext/specs HEAD, so no bundle can be "
+                "resolved (${_specs_git_err})")
+        elseif(NOT _specs_clean)
+            message(STATUS
+                "specs: ext/specs has local edits; no published bundle matches, "
+                "building locally")
         endif()
     endif()
 endif()
