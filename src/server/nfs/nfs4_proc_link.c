@@ -108,7 +108,7 @@ chimera_nfs4_link(
         return;
     }
 
-    /* RFC 7530 §10.4.5 (hard link to a delegated file must recall the
+    /* RFC 8881 §18.9.4 (hard link to a delegated file must recall the
      * delegation) is now enforced centrally by chimera_vfs_link_at(), which
      * recalls any caching lease on the SAVEFH source before linking. */
     chimera_vfs_open_fh(thread->vfs_thread,

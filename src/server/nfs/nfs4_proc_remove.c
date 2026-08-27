@@ -165,7 +165,7 @@ nfs4_remove_lookup_complete(
     struct nfs4_remove_ctx *ctx = private_data;
     struct nfs_request     *req = ctx->req;
 
-    /* RFC 7530 §10.4.5: a REMOVE of a delegated file must recall the
+    /* RFC 7530 §10.4.4: a REMOVE of a delegated file must recall the
      * delegation first.  We looked the target up to learn its FH; if a caching
      * lease is held, kick the recall and tell the client to retry
      * (NFS4ERR_DELAY).  The retry finds no lease and the remove proceeds. */
@@ -214,7 +214,7 @@ chimera_nfs4_remove_open_callback(
     ctx->parent_handle = parent_handle;
 
     /* Look the victim up first when delegations OR pNFS are in play: the FH lets
-     * us recall a delegation (RFC 7530 §10.4.5) before the remove, and the pNFS
+     * us recall a delegation (RFC 7530 §10.4.4) before the remove, and the pNFS
      * attrs let us delete its data-server backing file afterwards.  Skip the
      * extra LOOKUP entirely otherwise (have_layout stays 0). */
     if (chimera_server_config_get_nfs4_delegations(req->thread->shared->config) ||
