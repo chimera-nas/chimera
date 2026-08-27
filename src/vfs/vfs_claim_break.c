@@ -631,13 +631,18 @@ chimera_vfs_claim_trigger_row(
 
     if (awaited) {
         /* Awaited-class victims always floor 0 and never cascade
-         * (CB_RECALL / FUSE_NOTIFY_INVAL_INODE are all-or-nothing).  The
-         * NFSv4 recall deadline is delegation-specific; a FUSE grant keeps
-         * the default break deadline as its force-revoke backstop. */
+         * (CB_RECALL / FUSE_NOTIFY_INVAL_INODE are all-or-nothing).  Both
+         * recall deadlines are construct-specific: an NFSv4 delegation is
+         * recalled over the network, a FUSE grant by a local write to the
+         * mount's own channel, so they are orders of magnitude apart. */
         row->floor    = 0;
         row->one_shot = true;
-        if (is_deleg && row->deadline_ms == 0) {
-            row->deadline_ms = CHIMERA_VFS_NFS_DELEG_RECALL_MS;
+        if (row->deadline_ms == 0) {
+            if (is_deleg) {
+                row->deadline_ms = CHIMERA_VFS_NFS_DELEG_RECALL_MS;
+            } else if (victim->construct == CHIMERA_CONSTRUCT_FUSE_GRANT) {
+                row->deadline_ms = CHIMERA_VFS_FUSE_GRANT_BREAK_MS;
+            }
         }
     }
 } /* chimera_vfs_claim_trigger_row */

@@ -527,7 +527,10 @@ chimera_fuse_grant_arm(
      * writer parks until this grant's break is ACKED (its advertised mode
      * survives break-begin), so "the write returned" implies "this kernel's
      * cache is gone".  Unlike a delegation it stays sweep-revocable at the
-     * break deadline, which bounds the wait if the notifier ever wedges. */
+     * break deadline, which bounds the wait if the notifier ever wedges --
+     * CHIMERA_VFS_FUSE_GRANT_BREAK_MS, sized for a local channel write rather
+     * than a network callback, so a missed ack costs the parked writer that
+     * and not the generic 30s default. */
     chimera_fuse_grant_owner(&owner, grant->mount, grant->fh_hash);
 
     chimera_vfs_claim_init_fuse_grant(&grant->claim, &owner);
