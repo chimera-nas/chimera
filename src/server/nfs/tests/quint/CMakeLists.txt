@@ -51,7 +51,7 @@ target_link_libraries(nfs4_mbt_replay
 add_test(NAME chimera/server/nfs/mbt/deviation_probe_memfs
     COMMAND $<TARGET_FILE:nfs3_mbt_probe>)
 set_tests_properties(chimera/server/nfs/mbt/deviation_probe_memfs PROPERTIES
-    LABELS "nfs3_mbt;memfs"
+    LABELS "quint;nfs3_mbt;memfs"
     TIMEOUT 60)
 
 # Delegation policy probe: pins the deterministic grant/recall behavior the
@@ -59,7 +59,7 @@ set_tests_properties(chimera/server/nfs/mbt/deviation_probe_memfs PROPERTIES
 add_test(NAME chimera/server/nfs/mbt4/deleg_probe_memfs
     COMMAND $<TARGET_FILE:nfs4_deleg_probe>)
 set_tests_properties(chimera/server/nfs/mbt4/deleg_probe_memfs PROPERTIES
-    LABELS "nfs4_mbt;multiproto;memfs"
+    LABELS "quint;nfs4_mbt;multiproto;memfs"
     TIMEOUT 90)
 
 if(NOT SPECS_BUNDLE_AVAILABLE)
@@ -78,7 +78,7 @@ endif()
 add_test(NAME chimera/server/nfs/mbt/batch_memfs
     COMMAND $<TARGET_FILE:nfs3_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/nfs3)
 set_tests_properties(chimera/server/nfs/mbt/batch_memfs PROPERTIES
-    LABELS "nfs3_mbt;memfs"
+    LABELS "quint;nfs3_mbt;memfs"
     TIMEOUT 300)
 
 # The same NFS3 corpus replayed against the on-disk backends.  The corpus is
@@ -93,7 +93,7 @@ if(HAVE_LIBAIO)
         COMMAND $<TARGET_FILE:nfs3_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/nfs3
                 --backend diskfs)
     set_tests_properties(chimera/server/nfs/mbt/batch_diskfs PROPERTIES
-        LABELS "nfs3_mbt;diskfs"
+        LABELS "quint;nfs3_mbt;diskfs"
         TIMEOUT 300)
 endif()
 
@@ -102,7 +102,7 @@ if(CAIRN_ENABLED)
         COMMAND $<TARGET_FILE:nfs3_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/nfs3
                 --backend cairn)
     set_tests_properties(chimera/server/nfs/mbt/batch_cairn PROPERTIES
-        LABELS "nfs3_mbt;cairn"
+        LABELS "quint;nfs3_mbt;cairn"
         TIMEOUT 300)
 endif()
 
@@ -112,6 +112,6 @@ endif()
 add_test(NAME chimera/server/nfs/mbt4/batch_memfs
     COMMAND $<TARGET_FILE:nfs4_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/nfs4)
 set_tests_properties(chimera/server/nfs/mbt4/batch_memfs PROPERTIES
-    LABELS "nfs4_mbt;memfs"
+    LABELS "quint;nfs4_mbt;memfs"
     SKIP_RETURN_CODE 77
     TIMEOUT 300)

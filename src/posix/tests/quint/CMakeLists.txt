@@ -52,6 +52,6 @@ add_test(NAME chimera/posix/mbt/batch_memfs
             --trace-dir ${SPECS_BUNDLE_DIR}/posix
             --exclude-prefix nfs3_ --exclude-prefix nfs4_ --exclude-prefix disk_)
 set_tests_properties(chimera/posix/mbt/batch_memfs PROPERTIES
-    LABELS "posix_mbt;memfs"
+    LABELS "quint;posix_mbt;memfs"
     SKIP_RETURN_CODE 77
     TIMEOUT 300)
