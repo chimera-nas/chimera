@@ -313,11 +313,23 @@ s3_server_notify(
                     chimera_s3_put_recv(evpl, s3_request);
                 }
             } else if (is_complete_mpu) {
-                /* Accumulate the client's part manifest. */
-                chimera_s3_complete_multipart_upload_recv(evpl, s3_request);
+                /* Accumulate the client's part manifest.  A request routing
+                 * already failed (e.g. NoSuchBucket) never reached the
+                 * handler that initializes the accumulation state -- drain
+                 * the body instead of touching it. */
+                if (s3_request->vfs_state == CHIMERA_S3_VFS_STATE_COMPLETE) {
+                    s3_server_drain_body(evpl, s3_request);
+                } else {
+                    chimera_s3_complete_multipart_upload_recv(evpl, s3_request);
+                }
             } else if (is_delete_objects) {
-                /* Accumulate the <Delete> document. */
-                chimera_s3_delete_objects_recv(evpl, s3_request);
+                /* Accumulate the <Delete> document (same failed-routing
+                 * guard as above). */
+                if (s3_request->vfs_state == CHIMERA_S3_VFS_STATE_COMPLETE) {
+                    s3_server_drain_body(evpl, s3_request);
+                } else {
+                    chimera_s3_delete_objects_recv(evpl, s3_request);
+                }
             } else if (request_type == EVPL_HTTP_REQUEST_TYPE_POST) {
                 /* CreateMultipartUpload: body is empty in practice. */
                 s3_server_drain_body(evpl, s3_request);
@@ -349,13 +361,26 @@ s3_server_notify(
                     chimera_s3_put_recv(evpl, s3_request);
                 }
             } else if (is_complete_mpu) {
-                chimera_s3_complete_multipart_upload_recv(evpl, s3_request);
-                /* Body fully in hand: parse + validate + assemble. */
-                chimera_s3_complete_multipart_upload_body_done(evpl, s3_request);
+                /* A request routing already failed (e.g. NoSuchBucket) must
+                 * keep its error: running the handler here would operate on
+                 * never-initialized body state and overwrite the status
+                 * with a fabricated success. */
+                if (s3_request->vfs_state == CHIMERA_S3_VFS_STATE_COMPLETE) {
+                    s3_server_drain_body(evpl, s3_request);
+                } else {
+                    chimera_s3_complete_multipart_upload_recv(evpl, s3_request);
+                    /* Body fully in hand: parse + validate + assemble. */
+                    chimera_s3_complete_multipart_upload_body_done(evpl,
+                                                                   s3_request);
+                }
             } else if (is_delete_objects) {
-                chimera_s3_delete_objects_recv(evpl, s3_request);
-                /* Body fully in hand: parse keys + remove them. */
-                chimera_s3_delete_objects_body_done(evpl, s3_request);
+                if (s3_request->vfs_state == CHIMERA_S3_VFS_STATE_COMPLETE) {
+                    s3_server_drain_body(evpl, s3_request);
+                } else {
+                    chimera_s3_delete_objects_recv(evpl, s3_request);
+                    /* Body fully in hand: parse keys + remove them. */
+                    chimera_s3_delete_objects_body_done(evpl, s3_request);
+                }
             } else if (request_type == EVPL_HTTP_REQUEST_TYPE_POST) {
                 s3_server_drain_body(evpl, s3_request);
             }
