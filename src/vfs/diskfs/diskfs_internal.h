@@ -380,6 +380,11 @@ struct diskfs_request_private {
     uint64_t                    cow_copied;
     void                        (*cow_cont)(
         struct chimera_vfs_request *);
+    /* diskfs_ext_release's caller continuation.  It cannot live in rc_cont:
+     * diskfs_refcount_dec takes that slot for its own completion, so sharing
+     * it makes diskfs_ext_release_after_dec call itself. */
+    void                        (*rel_cont)(
+        struct chimera_vfs_request *);
 };
 
 
