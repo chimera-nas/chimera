@@ -182,7 +182,9 @@ chimera_vfs_setattr_write_owner_check(
 } /* chimera_vfs_setattr_write_owner_check */
 
 static enum chimera_vfs_error
-chimera_vfs_setattr_denied_error(const struct chimera_vfs_attrs *set_attr)
+chimera_vfs_setattr_denied_error(
+    const struct chimera_vfs_attrs *set_attr,
+    const struct chimera_vfs_attrs *cur)
 {
     uint64_t m = set_attr->va_set_mask;
 
@@ -199,6 +201,21 @@ chimera_vfs_setattr_denied_error(const struct chimera_vfs_attrs *set_attr)
     if ((m & CHIMERA_VFS_ATTR_MTIME) &&
         set_attr->va_mtime.tv_nsec != CHIMERA_VFS_TIME_NOW) {
         return CHIMERA_VFS_EPERM;
+    }
+
+    /* A size change on something that cannot hold one fails on type grounds
+     * before permission is ever considered -- Linux vfs_truncate() takes
+     * EISDIR/EINVAL first, and the backend applies the same rule once it is
+     * reached (memfs_setattr).  Reporting the denial as EACCES here would
+     * shadow that with a different, less informative error purely because the
+     * caller also lacked write permission.  Only the errno of an
+     * already-failing setattr changes: an authorized resize never reaches
+     * this path, so a named stream on a directory -- which is sizeable, and
+     * whose attributes report the base object's mode -- is unaffected. */
+    if ((m & CHIMERA_VFS_ATTR_SIZE) && cur &&
+        (cur->va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
+        !S_ISREG(cur->va_mode)) {
+        return S_ISDIR(cur->va_mode) ? CHIMERA_VFS_EISDIR : CHIMERA_VFS_EINVAL;
     }
 
     return CHIMERA_VFS_EACCES;
@@ -379,7 +396,7 @@ chimera_vfs_setattr_gate_complete(
     /* WRITE_OWNER (the chown/chgrp right) is authorized separately below; gate
      * the remaining rights (chmod/ACL/size/timestamp) here. */
     if (chimera_vfs_gate(attr, gate->cred, required & ~CHIMERA_ACE_WRITE_OWNER) != CHIMERA_VFS_OK) {
-        gate->callback(chimera_vfs_setattr_denied_error(gate->set_attr),
+        gate->callback(chimera_vfs_setattr_denied_error(gate->set_attr, attr),
                        NULL, NULL, NULL, gate->private_data);
         chimera_vfs_gate_scratch_free(gate->thread, gate);
         return;
