@@ -116,6 +116,8 @@ struct s3_mbt_req {
     const char    *meta;                     /* value for the x-amz-meta-m header */
     const char    *content_sha;              /* x-amz-content-sha256 override
                                               * (aws-chunked: STREAMING-...) */
+    const char    *access_key;               /* credential override */
+    const char    *secret_key;
     enum s3_mbt_auth auth;
     const uint8_t *body;
     size_t         body_len;
@@ -165,9 +167,11 @@ static inline void
 s3_mbt_sign(
     const struct s3_mbt_req *req,
     const char              *access_key,
+    const char              *secret_key,
     char                    *authorization,
     size_t                   authorization_len)
 {
+    char          k0[264];
     char          canonical[4096];
     char          to_sign[512];
     char          cr_hash[65];
@@ -208,7 +212,8 @@ s3_mbt_sign(
              "AWS4-HMAC-SHA256\n%s\n%s\n%s",
              S3_MBT_AMZ_DATE, S3_MBT_SCOPE, cr_hash);
 
-    s3_mbt_hmac256("AWS4" S3_MBT_SECRET_KEY, strlen("AWS4" S3_MBT_SECRET_KEY),
+    snprintf(k0, sizeof(k0), "AWS4%s", secret_key);
+    s3_mbt_hmac256(k0, strlen(k0),
                    S3_MBT_DATESTAMP, strlen(S3_MBT_DATESTAMP), k);
     s3_mbt_hmac256(k, 32, "us-east-1", strlen("us-east-1"), k);
     s3_mbt_hmac256(k, 32, "s3", strlen("s3"), k);
@@ -233,6 +238,8 @@ s3_mbt_sign(
 static inline void
 s3_mbt_sign_v2(
     const struct s3_mbt_req *req,
+    const char              *access_key,
+    const char              *secret_key,
     char                    *authorization,
     size_t                   authorization_len)
 {
@@ -286,11 +293,11 @@ s3_mbt_sign_v2(
         off += snprintf(sts + off, sizeof(sts) - off, "/");
     }
 
-    HMAC(EVP_sha1(), S3_MBT_SECRET_KEY, (int) strlen(S3_MBT_SECRET_KEY),
+    HMAC(EVP_sha1(), secret_key, (int) strlen(secret_key),
          (const unsigned char *) sts, off, sig, &siglen);
     EVP_EncodeBlock(sig_b64, sig, (int) siglen);
 
-    snprintf(authorization, authorization_len, "AWS %s:%s", S3_MBT_ACCESS_KEY,
+    snprintf(authorization, authorization_len, "AWS %s:%s", access_key,
              sig_b64);
 } /* s3_mbt_sign_v2 */
 
@@ -434,6 +441,8 @@ s3_mbt_call(
     }
 
     enum s3_mbt_auth auth = req->auth;
+    const char      *ak   = req->access_key ? req->access_key : S3_MBT_ACCESS_KEY;
+    const char      *sk   = req->secret_key ? req->secret_key : S3_MBT_SECRET_KEY;
 
     if (auth == S3_MBT_AUTH_DEFAULT) {
         auth = env->sigv2 ? S3_MBT_AUTH_V2 : S3_MBT_AUTH_V4;
@@ -473,9 +482,8 @@ s3_mbt_call(
                                          req->content_sha ? req->content_sha
                                                           : S3_MBT_PAYLOAD);
             s3_mbt_sign(req,
-                        auth == S3_MBT_AUTH_V4_BADKEY ? "nosuchaccesskey"
-                                                      : S3_MBT_ACCESS_KEY,
-                        authorization, sizeof(authorization));
+                        auth == S3_MBT_AUTH_V4_BADKEY ? "nosuchaccesskey" : ak,
+                        sk, authorization, sizeof(authorization));
             if (auth == S3_MBT_AUTH_V4_BADSIG) {
                 /* corrupt the last hex digit of the signature */
                 size_t n = strlen(authorization);
@@ -486,7 +494,7 @@ s3_mbt_call(
             break;
         case S3_MBT_AUTH_V2:
         case S3_MBT_AUTH_V2_BADSIG:
-            s3_mbt_sign_v2(req, authorization, sizeof(authorization));
+            s3_mbt_sign_v2(req, ak, sk, authorization, sizeof(authorization));
             if (auth == S3_MBT_AUTH_V2_BADSIG) {
                 /* corrupt the first character of the base64 signature */
                 char *colon = strrchr(authorization, ':');
