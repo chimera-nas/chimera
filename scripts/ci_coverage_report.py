@@ -4,16 +4,25 @@
 # SPDX-License-Identifier: Unlicense
 """Render llvm-cov's per-file summary as a markdown coverage report.
 
-Usage: ci_coverage_report.py <export.json> <repo_root> [<run_url>]
+Usage: ci_coverage_report.py <export.json> <repo_root> [<run_url>] [<build_root>]
 
 <export.json> is what `COVERAGE_JSON=... etc/coverage-report.sh` writes, i.e.
 `llvm-cov export -summary-only`.  The output is a sticky-comment body for
 scripts/ci_pr_comment.py (CI_COMMENT_MARKER must match MARKER below) and doubles
 as a run-summary fragment.
 
-Test sources are excluded from the totals.  The harness that drives a suite is
-covered by definition, and folding it in would flatter every number here; what
-this report is for is how much of the *product* the model-based suites reach.
+What counts is first-party, hand-written, non-test source.  Test sources are out
+because a suite cannot meaningfully cover the other suites; generated marshallers
+and the bundled ext/ projects are out because neither is code this repository is
+asking the models to reach -- one is emitted from a .x file and the other has its
+own repository and its own tests.  etc/coverage-report.sh applies the latter two
+(COVERAGE_INCLUDE_GENERATED / COVERAGE_INCLUDE_EXT fold them back in); this only
+has to drop the tests.
+
+<build_root> is optional, and only useful alongside COVERAGE_INCLUDE_GENERATED:
+generated sources are compiled from under the build tree, which mirrors the
+source layout, so naming it puts a generated marshaller in the same component as
+the hand-written code it belongs to instead of dropping it as foreign.
 """
 import json
 import os
@@ -54,9 +63,24 @@ def bar(percent, width=20):
     return "█" * filled + "░" * (width - filled)
 
 
+def relative(path, roots):
+    """Path relative to whichever root contains it, or None if none does.
+
+    Longest root wins, so an in-tree build directory (build/ inside the
+    checkout) attributes its generated sources to the build tree rather than
+    to a "build/..." component of the source tree.
+    """
+    for root in sorted((r for r in roots if r), key=len, reverse=True):
+        rel = os.path.relpath(path, root)
+        if not rel.startswith(".."):
+            return rel
+    return None
+
+
 def main():
     export_path, root = sys.argv[1], os.path.realpath(sys.argv[2])
     run_url = sys.argv[3] if len(sys.argv) > 3 else ""
+    build_root = os.path.realpath(sys.argv[4]) if len(sys.argv) > 4 else ""
 
     with open(export_path) as f:
         data = json.load(f)
@@ -64,10 +88,14 @@ def main():
     comps = {}
     files = []
     skipped = 0
+    foreign = 0
 
     for entry in data.get("data", [{}])[0].get("files", []):
-        rel = os.path.relpath(os.path.realpath(entry["filename"]), root)
-        if rel.startswith(".."):
+        rel = relative(os.path.realpath(entry["filename"]), (root, build_root))
+        if rel is None:
+            # Compiled from outside the checkout entirely -- the container's own
+            # /fio clone, say.  Not code this repository can be measured on.
+            foreign += 1
             continue
         if is_test_source(rel):
             skipped += 1
@@ -126,6 +154,8 @@ def main():
         out += ["", "</details>"]
 
     note = f"{skipped} test source(s) excluded"
+    if foreign:
+        note += f", {foreign} compiled from outside the checkout"
     if run_url:
         note += f" · [run]({run_url})"
     out += ["", f"<sub>{note}</sub>"]
