@@ -1259,9 +1259,7 @@ op_open(
         }
     } else if (tf_field(res_v, "e") == 24 && e == 0 && rc >= 0) {
         /* PD24 (EMFILE): the model's 16-slot table was full but chimera's
-         * larger table let the open succeed.  Close the stray descriptor, and
-         * when O_CREAT minted a node the model never created, exempt it from
-         * the final audit. */
+         * larger table let the open succeed.  Close the stray descriptor. */
         chimera_posix_close(rc);
         if (tf_bool(fl, "creat")) {
             json_t *comps = json_object_get(json_object_get(rv, "pth"),
@@ -1276,7 +1274,20 @@ op_open(
             if (len == 0) {
                 snprintf(mp, sizeof(mp), "/");
             }
-            exempt_add(mp);
+            /* O_CREAT may also have minted a file the model does not have,
+             * and that residue is not inert: a later op on the same name
+             * meets an object the model has never heard of and diverges for
+             * reasons unrelated to the descriptor table.  Remove it and the
+             * namespaces agree again -- but only when the model really lacks
+             * the path, since an O_CREAT over a file that already existed
+             * created nothing and unlinking it would invent a divergence. */
+            if (path_ino(g_cur_fs, comps) < 0) {
+                char rp[4096];
+                real_path(json_object_get(rv, "pth"), rp, sizeof(rp));
+                chimera_posix_unlink(rp);
+            } else {
+                exempt_add(mp);
+            }
         }
     }
 } /* op_open */
