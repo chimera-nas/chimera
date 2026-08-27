@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <stdint.h>
+
 struct s3_bucket;
 
 void
@@ -57,5 +59,19 @@ chimera_s3_add_cred(
     const char *access_key,
     const char *secret_key,
     int         pinned);
+
+int
+chimera_s3_remove_cred(
+    void       *s3_shared,
+    const char *access_key);
+
+/* Advance the S3 credential cache's synthetic clock by `seconds` and sweep
+ * expired credentials synchronously.  Test instrumentation: lets a harness
+ * exercise TTL expiry by ticking time deterministically instead of waiting
+ * out the sweeper's wall-clock cadence. */
+void
+chimera_s3_advance_cred_clock(
+    void   *s3_shared,
+    int64_t seconds);
 
 extern struct chimera_server_protocol s3_protocol;

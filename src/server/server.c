@@ -3169,6 +3169,22 @@ chimera_server_add_s3_cred(
     return chimera_s3_add_cred(server->s3_shared, access_key, secret_key, pinned);
 } /* chimera_server_add_s3_cred */
 
+SYMBOL_EXPORT int
+chimera_server_remove_s3_cred(
+    struct chimera_server *server,
+    const char            *access_key)
+{
+    return chimera_s3_remove_cred(server->s3_shared, access_key);
+} /* chimera_server_remove_s3_cred */
+
+SYMBOL_EXPORT void
+chimera_server_advance_s3_cred_clock(
+    struct chimera_server *server,
+    int64_t                seconds)
+{
+    chimera_s3_advance_cred_clock(server->s3_shared, seconds);
+} /* chimera_server_advance_s3_cred_clock */
+
 SYMBOL_EXPORT void
 chimera_server_config_set_smb_winbind_enabled(
     struct chimera_server_config *config,

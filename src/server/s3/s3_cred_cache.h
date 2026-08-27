@@ -38,7 +38,23 @@ struct chimera_s3_cred_cache {
     pthread_mutex_t                      expiry_lock;
     pthread_cond_t                       expiry_cond;
     int                                  shutdown;
+    /* Synthetic addition to CLOCK_REALTIME, applied to every expiry
+     * decision (stamping at add, comparing at sweep).  Zero in production;
+     * a test harness advances it -- and runs a sweep synchronously -- via
+     * chimera_s3_cred_cache_advance(), so TTL behavior is exercised by
+     * ticking a clock rather than waiting on one. */
+    int64_t                              clock_offset_sec;
 };
+
+/* The cache's notion of now: the real clock plus the synthetic offset. */
+static inline void
+chimera_s3_cred_cache_now(
+    struct chimera_s3_cred_cache *cache,
+    struct timespec              *ts)
+{
+    clock_gettime(CLOCK_REALTIME, ts);
+    ts->tv_sec += __atomic_load_n(&cache->clock_offset_sec, __ATOMIC_RELAXED);
+} // chimera_s3_cred_cache_now
 
 static inline unsigned int
 chimera_s3_cred_cache_hash(
@@ -79,18 +95,59 @@ chimera_s3_cred_cache_remove_locked(
     call_rcu(&cred->rcu, chimera_s3_cred_cache_rcu_free);
 } // chimera_s3_cred_cache_remove_locked
 
+/* One sweep pass: remove every unpinned cred whose expiration is at or
+ * before the cache's (synthetic-offset-aware) now.  Pure writer
+ * (rcu_assign + call_rcu) under the per-bucket locks; callable from the
+ * expiry thread or synchronously from chimera_s3_cred_cache_advance(). */
+static inline void
+chimera_s3_cred_cache_sweep(struct chimera_s3_cred_cache *cache)
+{
+    struct chimera_s3_cred *cred, *next;
+    struct timespec         ts;
+    int                     i;
+
+    chimera_s3_cred_cache_now(cache, &ts);
+
+    for (i = 0; i < cache->num_buckets; i++) {
+        pthread_mutex_lock(&cache->buckets[i].lock);
+
+        cred = cache->buckets[i].head;
+        while (cred) {
+            next = cred->next;
+            if (!cred->pinned &&
+                (ts.tv_sec > cred->expiration.tv_sec ||
+                 (ts.tv_sec == cred->expiration.tv_sec &&
+                  ts.tv_nsec >= cred->expiration.tv_nsec))) {
+
+                chimera_s3_cred_cache_remove_locked(cache, cred, i);
+            }
+            cred = next;
+        }
+
+        pthread_mutex_unlock(&cache->buckets[i].lock);
+    }
+} // chimera_s3_cred_cache_sweep
+
+/* Advance the cache's synthetic clock and sweep synchronously.  A test
+ * exercises credential expiry by ticking time forward deterministically --
+ * never by waiting out the sweeper thread's cadence. */
+static inline void
+chimera_s3_cred_cache_advance(
+    struct chimera_s3_cred_cache *cache,
+    int64_t                       seconds)
+{
+    __atomic_add_fetch(&cache->clock_offset_sec, seconds, __ATOMIC_RELAXED);
+    chimera_s3_cred_cache_sweep(cache);
+} // chimera_s3_cred_cache_advance
+
 static void *
 chimera_s3_cred_cache_expiry_thread(void *arg)
 {
     struct chimera_s3_cred_cache *cache = arg;
-    struct chimera_s3_cred       *cred, *next;
     struct timespec               ts;
-    int                           i;
 
-    /* Pure writer: sweeps expired creds (rcu_assign + call_rcu) under the
-     * per-bucket locks, never takes an RCU read lock.  Not registered as a
-     * QSBR reader -- a thread parked in cond_timedwait must not sit in the
-     * grace-period quorum. */
+    /* Not registered as a QSBR reader -- a thread parked in cond_timedwait
+     * must not sit in the grace-period quorum. */
     pthread_mutex_lock(&cache->expiry_lock);
 
     while (!cache->shutdown) {
@@ -103,26 +160,7 @@ chimera_s3_cred_cache_expiry_thread(void *arg)
             break;
         }
 
-        clock_gettime(CLOCK_REALTIME, &ts);
-
-        for (i = 0; i < cache->num_buckets; i++) {
-            pthread_mutex_lock(&cache->buckets[i].lock);
-
-            cred = cache->buckets[i].head;
-            while (cred) {
-                next = cred->next;
-                if (!cred->pinned &&
-                    (ts.tv_sec > cred->expiration.tv_sec ||
-                     (ts.tv_sec == cred->expiration.tv_sec &&
-                      ts.tv_nsec >= cred->expiration.tv_nsec))) {
-
-                    chimera_s3_cred_cache_remove_locked(cache, cred, i);
-                }
-                cred = next;
-            }
-
-            pthread_mutex_unlock(&cache->buckets[i].lock);
-        }
+        chimera_s3_cred_cache_sweep(cache);
     }
 
     pthread_mutex_unlock(&cache->expiry_lock);
@@ -215,7 +253,7 @@ chimera_s3_cred_cache_add(
     cred->pinned         = pinned;
 
     if (!pinned) {
-        clock_gettime(CLOCK_REALTIME, &now);
+        chimera_s3_cred_cache_now(cache, &now);
         cred->expiration.tv_sec  = now.tv_sec + cache->ttl;
         cred->expiration.tv_nsec = now.tv_nsec;
     }

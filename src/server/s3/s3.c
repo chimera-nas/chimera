@@ -1264,6 +1264,26 @@ chimera_s3_add_cred(
     return chimera_s3_cred_cache_add(shared->cred_cache, access_key, secret_key, pinned);
 } /* chimera_s3_add_cred */
 
+SYMBOL_EXPORT int
+chimera_s3_remove_cred(
+    void       *s3_shared,
+    const char *access_key)
+{
+    struct chimera_server_s3_shared *shared = s3_shared;
+
+    return chimera_s3_cred_cache_remove(shared->cred_cache, access_key);
+} /* chimera_s3_remove_cred */
+
+SYMBOL_EXPORT void
+chimera_s3_advance_cred_clock(
+    void   *s3_shared,
+    int64_t seconds)
+{
+    struct chimera_server_s3_shared *shared = s3_shared;
+
+    chimera_s3_cred_cache_advance(shared->cred_cache, seconds);
+} /* chimera_s3_advance_cred_clock */
+
 static void *
 s3_server_init(
     const struct chimera_server_config *config,
