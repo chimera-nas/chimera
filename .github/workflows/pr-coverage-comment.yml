@@ -1,0 +1,113 @@
+# SPDX-FileCopyrightText: 2026 Chimera-NAS Project Contributors
+#
+# SPDX-License-Identifier: Unlicense
+
+name: PR coverage comment
+
+# A PR from a fork gets a read-only GITHUB_TOKEN no matter what the workflow's
+# `permissions:` block asks for, and no secrets -- so the job that measures
+# coverage cannot post its own comment.  This is the standard relay for that:
+# the measuring job (in "PR checks") uploads the rendered report as an artifact,
+# and this workflow runs afterwards in the *base repository's* context, where
+# the token can write, and posts it.
+#
+# Trust boundary.  Everything this workflow touches from the triggering run is
+# data, never code:
+#
+#   * it checks out the default branch -- ci_pr_comment.py comes from main, not
+#     from the pull request,
+#   * it never checks out, builds, or executes the PR's tree,
+#   * the PR number arrives in the artifact (workflow_run.pull_requests is empty
+#     for fork PRs), so it is validated as a number *and* checked to actually
+#     name a PR whose head is the commit that produced the report -- otherwise a
+#     PR could aim its comment at somebody else's.
+#
+# What remains is that a PR controls the text of a comment attributed to a bot,
+# on its own PR.  That is inherent to reporting on untrusted branches at all.
+#
+# Note this only ever fires from the copy of the file on the default branch, so
+# it cannot work on the PR that introduces it -- the first comment it posts will
+# be on the next PR after this one merges.
+on:
+  workflow_run:
+    workflows: ["PR checks"]
+    types: [completed]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+# Keyed on the branch under test, so a rapid series of pushes cannot have two
+# relays racing to update the same comment.
+concurrency:
+  group: pr-coverage-comment-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+
+jobs:
+  comment:
+    name: Publish coverage comment
+    # Cancelled runs (superseded by a re-push) have nothing to report, and the
+    # artifact guard below covers a run that failed before rendering.
+    if: ${{ github.event.workflow_run.event == 'pull_request'
+            && github.event.workflow_run.conclusion != 'cancelled' }}
+    runs-on: arc-small
+    steps:
+      - name: Checkout the default branch
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Download the coverage report
+        id: download
+        continue-on-error: true
+        uses: actions/download-artifact@v6
+        with:
+          name: quint-coverage
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+          path: quint-coverage
+
+      - name: Post the report
+        if: ${{ steps.download.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          CI_COMMENT_MARKER: "<!-- quint-coverage-report -->"
+        run: |
+          set -euo pipefail
+          if [ ! -s quint-coverage/coverage-report.md ] || \
+             [ ! -s quint-coverage/pr-number.txt ]; then
+            echo "::notice::no coverage report in the artifact; nothing to post"
+            exit 0
+          fi
+
+          pr="$(tr -dc '0-9' < quint-coverage/pr-number.txt)"
+          if [ -z "$pr" ]; then
+            echo "::warning::artifact carried no usable PR number"
+            exit 0
+          fi
+
+          # The PR named by the artifact must be the one that produced it.
+          # stdlib urllib, not `gh` -- the self-hosted runners have no gh CLI
+          # (which is why ci_pr_comment.py speaks to the API directly too).
+          pr_head="$(PR="$pr" python3 - <<'PY'
+          import json, os, urllib.request
+          req = urllib.request.Request(
+              f"https://api.github.com/repos/{os.environ['GH_REPO']}"
+              f"/pulls/{os.environ['PR']}",
+              headers={"Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+                       "Accept": "application/vnd.github+json",
+                       "User-Agent": "chimera-ci-report"})
+          with urllib.request.urlopen(req) as r:
+              print(json.load(r)["head"]["sha"])
+          PY
+          )"
+          if [ "$pr_head" != "$HEAD_SHA" ]; then
+            echo "::warning::PR #$pr is at $pr_head, not the reported $HEAD_SHA; refusing to comment"
+            exit 0
+          fi
+
+          python3 scripts/ci_pr_comment.py "$GH_REPO" "$pr" \
+                  quint-coverage/coverage-report.md
