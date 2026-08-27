@@ -168,7 +168,6 @@ struct chimera_s3_request {
             int                           versions;      /* emit ListVersionsResult */
             int                           prefix_len;
             int                           delimiter_len;
-            int                           enumdir_len;   /* prefix up to last delimiter */
             int                           has_start;     /* skip past 'start' (exclusive) */
             int                           start_len;
             int                           marker_len;     /* V1 marker echo */
@@ -180,7 +179,6 @@ struct chimera_s3_request {
             struct chimera_s3_list_entry *entries;
             char                          delimiter[CHIMERA_S3_DELIM_MAX];
             char                          prefix[CHIMERA_S3_KEY_MAX];
-            char                          enumdir[CHIMERA_S3_KEY_MAX];
             char                          start[CHIMERA_S3_KEY_MAX];
             char                          marker[CHIMERA_S3_KEY_MAX];
             char                          ctoken[CHIMERA_S3_KEY_MAX];
