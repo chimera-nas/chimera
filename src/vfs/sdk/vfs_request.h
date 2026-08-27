@@ -154,7 +154,7 @@ struct chimera_vfs_mount_options {
  * key sparing) and would otherwise deliver duplicate CHANGE_NOTIFY events.
  * Every other caller leaves it clear so a create is observable by change
  * watchers and directory-lease holders regardless of arrival protocol. */
-#define CHIMERA_VFS_OPEN_NO_NOTIFY              (1U << 10)
+#define CHIMERA_VFS_OPEN_NO_NOTIFY              (1U << 11)
 
 /* remove_at flags: an optional assertion about the target's type, letting the
  * single VFS remove op express the rmdir(2)/RMDIR vs unlink(2)/REMOVE
