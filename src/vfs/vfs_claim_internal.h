@@ -16,6 +16,16 @@
 #define CHIMERA_VFS_NFS_DELEG_RECALL_MS             15000
 #define CHIMERA_VFS_NFS_DELEG_METAOP_MS             5000
 
+/* Force-revoke backstop for a FUSE cache grant.  Breaking one is a single
+ * non-reply write to the mount's own /dev/fuse channel answered by a local
+ * kernel, not a callback to a client across a network, so the deadlines above
+ * are the wrong order of magnitude: a conflicting writer parks until the break
+ * is acked, and inheriting the 30s default meant one missed ack stalled that
+ * writer for thirty seconds.  Two seconds is still several orders of magnitude
+ * more than the notification costs and keeps the sweep a backstop rather than
+ * something a caller ever waits out. */
+#define CHIMERA_VFS_FUSE_GRANT_BREAK_MS             2000
+
 /* ------------------------------------------------------------------ */
 /* Deny rows (derived, never stored)                                  */
 /* ------------------------------------------------------------------ */
