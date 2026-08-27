@@ -55,6 +55,11 @@
 #define V4_NAME_LEN         128
 #define V4_HISTORY          6
 #define V4_DATA_ARENA       (4 << 20)
+
+/* READ_PLUS: the model asks for at most a handful of blocks, and a
+ * conforming server returns at most one segment per block. */
+#define V4_RP_MAX_SEGS      16
+#define V4_IA_MAX_HINTS     8
 #define V4_RETRY_DELAY_MAX  40
 
 #define E_DELAY             10008
@@ -113,6 +118,16 @@ itf_i64(json_t *v)
     fprintf(stderr, "trace format error: expected integer\n");
     exit(2);
 } /* itf_i64 */
+
+static int
+itf_bool(json_t *v)
+{
+    if (!v || !json_is_boolean(v)) {
+        fprintf(stderr, "trace format error: expected bool\n");
+        exit(2);
+    }
+    return json_is_true(v);
+} /* itf_bool */
 
 static json_t *
 itf_seq(json_t *v)
@@ -265,6 +280,25 @@ struct v4_res {
     uint32_t        data_len;
 
     uint64_t        offset;           /* SEEK */
+
+    /* READ_PLUS segments, as returned.  The server may legally answer with
+     * fewer segments than cover the request (the client re-issues from the
+     * last byte returned), so the SReadPlus arm checks them as a prefix of
+     * the model's classification rather than for equality.  DATA bytes are
+     * copied into the compound arena: the reply buffers do not outlive the
+     * decode. */
+    int             rp_present;
+    int             rp_nsegs;
+    int             rp_bad;           /* unusable segment list */
+    struct {
+        int      is_data;
+        uint64_t offset;
+        uint64_t length;
+        uint8_t *data;                /* arena copy; DATA segments only */
+    }        rp_segs[V4_RP_MAX_SEGS];
+
+    uint32_t        ia_nhints;        /* IO_ADVISE hints the server honored */
+    uint32_t        ia_hints[V4_IA_MAX_HINTS];
 
     char            xvalue[V4_NAME_LEN]; /* GETXATTR */
     uint32_t        xvalue_len;
@@ -800,6 +834,8 @@ struct v4_argscratch {
     struct evpl_iovec wiov;
     int               wiov_used;
     char              xval[64];
+    uint32_t          ia_hint;               /* IO_ADVISE request hint */
+    uint8_t           ws_pattern[V4_BLOCK_SIZE]; /* WRITE_SAME ADB pattern */
 };
 
 static void
@@ -1513,6 +1549,76 @@ encode_op(
         a->opcopy.num_ca_source_server = 0;
         return 0;
     }
+    if (strcmp(tag, "RReadPlus") == 0) {
+        a->argop = OP_READ_PLUS;
+        if (resolve_sel(o, json_object_get(v, "sel"),
+                        &a->opread_plus.rpa_stateid, m) < 0) {
+            return -1;
+        }
+        a->opread_plus.rpa_offset = (uint64_t) jf_i64(v, "off") *
+            V4_BLOCK_SIZE;
+        a->opread_plus.rpa_count = (uint32_t) (jf_i64(v, "len") *
+                                               V4_BLOCK_SIZE);
+        return 0;
+    }
+    if (strcmp(tag, "RIoAdvise") == 0) {
+        a->argop = OP_IO_ADVISE;
+        if (resolve_sel(o, json_object_get(v, "sel"),
+                        &a->opio_advise.iaa_stateid, m) < 0) {
+            return -1;
+        }
+        a->opio_advise.iaa_offset = (uint64_t) jf_i64(v, "off") *
+            V4_BLOCK_SIZE;
+        a->opio_advise.iaa_count = (uint64_t) jf_i64(v, "len") *
+            V4_BLOCK_SIZE;
+        /* One hint per request: the model draws an io_advise_type4 bit
+         * number and the server may honor any subset (here, none). */
+        s->ia_hint                   = (uint32_t) jf_i64(v, "hint");
+        a->opio_advise.num_iaa_hints = 1;
+        a->opio_advise.iaa_hints     = &s->ia_hint;
+        return 0;
+    }
+    if (strcmp(tag, "RWriteSame") == 0) {
+        int64_t nblk = jf_i64(v, "blocks");
+
+        a->argop = OP_WRITE_SAME;
+        if (resolve_sel(o, json_object_get(v, "sel"),
+                        &a->opwrite_same.wsa_stateid, m) < 0) {
+            return -1;
+        }
+        a->opwrite_same.wsa_stable = FILE_SYNC4;
+        /* One ADB block == one model block, so the pattern is a whole block
+         * and the model's block count is the ADB block count. */
+        block_fill(jf_i64(v, "pat"), s->ws_pattern);
+        a->opwrite_same.wsa_adb.adb_offset = (uint64_t)
+            jf_i64(v, "off") * V4_BLOCK_SIZE;
+        a->opwrite_same.wsa_adb.adb_block_size  = V4_BLOCK_SIZE;
+        a->opwrite_same.wsa_adb.adb_block_count = (uint64_t) nblk;
+        /* NFS4_UINT64_MAX == "no per-block-number stamping"; anything else
+         * selects the union arm the server rejects with UNION_NOTSUPP. */
+        a->opwrite_same.wsa_adb.adb_reloff_blocknum =
+            jf_bool(v, "blocknum") ? 0 : NFS4_UINT64_MAX;
+        a->opwrite_same.wsa_adb.adb_block_num      = 0;
+        a->opwrite_same.wsa_adb.adb_reloff_pattern = 0;
+        a->opwrite_same.wsa_adb.adb_pattern.data   = s->ws_pattern;
+        a->opwrite_same.wsa_adb.adb_pattern.len    = V4_BLOCK_SIZE;
+        return 0;
+    }
+    if (strcmp(tag, "RClone") == 0) {
+        a->argop = OP_CLONE;
+        if (resolve_sel(o, json_object_get(v, "srcSel"),
+                        &a->opclone.cl_src_stateid, m) < 0 ||
+            resolve_sel(o, json_object_get(v, "dstSel"),
+                        &a->opclone.cl_dst_stateid, m) < 0) {
+            return -1;
+        }
+        a->opclone.cl_src_offset = (uint64_t) jf_i64(v, "srcOff") *
+            V4_BLOCK_SIZE;
+        a->opclone.cl_dst_offset = (uint64_t) jf_i64(v, "dstOff") *
+            V4_BLOCK_SIZE;
+        a->opclone.cl_count = (uint64_t) jf_i64(v, "cnt") * V4_BLOCK_SIZE;
+        return 0;
+    }
     if (strcmp(tag, "RGetxattr") == 0) {
         a->argop                    = OP_GETXATTR;
         a->opgetxattr.gxa_name.data = (void *) json_string_value(v);
@@ -1979,6 +2085,70 @@ decode_resop(
                 r->offset = rop->opseek.resok4.sr_offset;
             }
             break;
+        case OP_READ_PLUS:
+            st = rop->opread_plus.rp_status;
+            if (st == NFS4_OK) {
+                uint32_t nc = rop->opread_plus.rp_resok4.num_rpr_contents;
+                uint32_t ci;
+
+                r->rp_present = 1;
+                r->eof        = rop->opread_plus.rp_resok4.rpr_eof != 0;
+                if (nc > V4_RP_MAX_SEGS) {
+                    r->rp_bad = 1;
+                    break;
+                }
+                for (ci = 0; ci < nc; ci++) {
+                    struct read_plus_content *c =
+                        &rop->opread_plus.rp_resok4.rpr_contents[ci];
+                    int                       j = r->rp_nsegs;
+
+                    if (c->rpc_content == NFS4_CONTENT_DATA) {
+                        uint32_t n = c->rpc_data.d_data.len;
+
+                        if (o->arena_used + n > V4_DATA_ARENA) {
+                            r->rp_bad = 1;
+                            break;
+                        }
+                        r->rp_segs[j].is_data = 1;
+                        r->rp_segs[j].offset  = c->rpc_data.d_offset;
+                        r->rp_segs[j].length  = n;
+                        r->rp_segs[j].data    = o->arena + o->arena_used;
+                        memcpy(r->rp_segs[j].data, c->rpc_data.d_data.data, n);
+                        o->arena_used += n;
+                    } else if (c->rpc_content == NFS4_CONTENT_HOLE) {
+                        r->rp_segs[j].is_data = 0;
+                        r->rp_segs[j].offset  = c->rpc_hole.di_offset;
+                        r->rp_segs[j].length  = c->rpc_hole.di_length;
+                        r->rp_segs[j].data    = NULL;
+                    } else {
+                        r->rp_bad = 1;
+                        break;
+                    }
+                    r->rp_nsegs++;
+                }
+            }
+            break;
+        case OP_IO_ADVISE:
+            st = rop->opio_advise.ior_status;
+            if (st == NFS4_OK) {
+                uint32_t hi;
+
+                r->ia_nhints = rop->opio_advise.resok4.num_ior_hints;
+                for (hi = 0; hi < r->ia_nhints &&
+                     hi < V4_IA_MAX_HINTS; hi++) {
+                    r->ia_hints[hi] = rop->opio_advise.resok4.ior_hints[hi];
+                }
+            }
+            break;
+        case OP_WRITE_SAME:
+            st = rop->opwrite_same.wsr_status;
+            if (st == NFS4_OK) {
+                r->count = (uint32_t) rop->opwrite_same.resok4.wr_count;
+            }
+            break;
+        case OP_CLONE:
+            st = rop->opclone.cl_status;
+            break;
         case OP_COPY:
             st = rop->opcopy.cr_status;
             if (st == NFS4_OK) {
@@ -2243,6 +2413,30 @@ classify_status_mismatch(
     }
     if (strcmp(tag, "SCopy") == 0 && has_notsupp) {
         caps_mismatch(o, m, "copy", "%s: expected %u, got %u",
+                      tag, est, ast);
+        return;
+    }
+    /* The RFC 7862 data ops are per-backend capabilities (CAP_READ_PLUS,
+     * CAP_WRITE_SAME, CAP_CLONE_RANGE): a backend without one answers
+     * NFS4ERR_NOTSUPP, which is a profile mismatch rather than a defect
+     * unless the instance pinned the feature FeatMandatory. */
+    if (strcmp(tag, "SReadPlus") == 0 && has_notsupp) {
+        caps_mismatch(o, m, "readPlus", "%s: expected %u, got %u",
+                      tag, est, ast);
+        return;
+    }
+    if (strcmp(tag, "SIoAdvise") == 0 && has_notsupp) {
+        caps_mismatch(o, m, "ioAdvise", "%s: expected %u, got %u",
+                      tag, est, ast);
+        return;
+    }
+    if (strcmp(tag, "SWriteSame") == 0 && has_notsupp) {
+        caps_mismatch(o, m, "writeSame", "%s: expected %u, got %u",
+                      tag, est, ast);
+        return;
+    }
+    if (strcmp(tag, "SClone") == 0 && has_notsupp) {
+        caps_mismatch(o, m, "clone", "%s: expected %u, got %u",
                       tag, est, ast);
         return;
     }
@@ -2550,6 +2744,111 @@ check_result(
                 }
             }
         }
+    } else if (strcmp(tag, "SReadPlus") == 0) {
+        /* The model predicts the DATA/HOLE classification and contents of the
+         * whole requested range.  A server may legally return a shorter
+         * prefix -- rpr_contents is an array and the client re-issues from
+         * the last byte returned -- so the segments are validated as a
+         * contiguous, block-aligned prefix starting at the requested offset,
+         * and only the blocks actually returned are compared. */
+        json_t  *blocks  = itf_seq(json_object_get(v, "blocks"));
+        json_t  *isdata  = itf_seq(json_object_get(v, "isData"));
+        uint64_t req_off = req ? (uint64_t) jf_i64(jf_val(req), "off") *
+            V4_BLOCK_SIZE : 0;
+        uint64_t want   = req_off;
+        int      nmodel = (int) json_array_size(blocks);
+        int      got    = 0;
+        int      i;
+
+        if (r->rp_bad) {
+            mism_add(m, "read_plus: unusable segment list");
+        }
+        for (i = 0; i < r->rp_nsegs && !r->rp_bad; i++) {
+            uint64_t soff = r->rp_segs[i].offset;
+            uint64_t slen = r->rp_segs[i].length;
+            uint64_t b;
+
+            if (soff != want) {
+                mism_add(m, "read_plus seg %d: offset %llu, expected %llu "
+                         "(segments must tile the range from the requested "
+                         "offset)", i, (unsigned long long) soff,
+                         (unsigned long long) want);
+                break;
+            }
+            if (slen == 0 || (slen % V4_BLOCK_SIZE) != 0) {
+                mism_add(m, "read_plus seg %d: length %llu is not a whole "
+                         "number of %u-byte blocks", i,
+                         (unsigned long long) slen, V4_BLOCK_SIZE);
+                break;
+            }
+            for (b = 0; b < slen / V4_BLOCK_SIZE; b++) {
+                int is_data;
+
+                if (got >= nmodel) {
+                    mism_add(m, "read_plus: returned %d blocks, model "
+                             "predicts only %d", got + 1, nmodel);
+                    break;
+                }
+                is_data = itf_bool(json_array_get(isdata, (size_t) got));
+                if (r->rp_segs[i].is_data != is_data) {
+                    mism_add(m, "read_plus block %d: expected %s, got %s",
+                             got, is_data ? "DATA" : "HOLE",
+                             r->rp_segs[i].is_data ? "DATA" : "HOLE");
+                } else if (r->rp_segs[i].is_data) {
+                    block_fill(itf_i64(json_array_get(blocks, (size_t) got)),
+                               o->scratch);
+                    if (memcmp(r->rp_segs[i].data + b * V4_BLOCK_SIZE,
+                               o->scratch, V4_BLOCK_SIZE) != 0) {
+                        mism_add(m, "read_plus block %d: data mismatch "
+                                 "(expected byte %#x, got byte %#x)", got,
+                                 o->scratch[0],
+                                 r->rp_segs[i].data[b * V4_BLOCK_SIZE]);
+                    }
+                }
+                got++;
+            }
+            want += slen;
+        }
+        /* A short answer is legal, but it must make progress: returning no
+        * segment at all while the model still has blocks to report, without
+        * claiming EOF, leaves the client with nowhere to re-issue from. */
+        if (!r->rp_bad && got == 0 && nmodel > 0 && !r->eof) {
+            mism_add(m, "read_plus: no segment returned for %d predicted "
+                     "blocks and eof is unset", nmodel);
+        }
+        if (!r->rp_bad && got < nmodel && r->eof) {
+            mism_add(m, "read_plus: eof set after %d of %d predicted blocks",
+                     got, nmodel);
+        }
+        if (!r->rp_bad && got == nmodel && r->eof != jf_bool(v, "eof")) {
+            mism_add(m, "read_plus.eof: expected %d, got %d",
+                     jf_bool(v, "eof"), r->eof);
+        }
+    } else if (strcmp(tag, "SIoAdvise") == 0) {
+        /* IO_ADVISE is advisory: the server may honor none of the hints, but
+         * it must not invent one the client did not ask for (RFC 7862
+         * 15.5). */
+        uint32_t asked = req ? (uint32_t) jf_i64(jf_val(req), "hint") : 0;
+        uint32_t hi;
+
+        for (hi = 0; hi < r->ia_nhints && hi < V4_IA_MAX_HINTS; hi++) {
+            if (r->ia_hints[hi] != 0 && r->ia_hints[hi] != asked) {
+                mism_add(m, "io_advise: honored hint %u was not requested "
+                         "(asked for %u)", r->ia_hints[hi], asked);
+            }
+        }
+    } else if (strcmp(tag, "SWriteSame") == 0) {
+        uint32_t want = (uint32_t) (jf_i64(v, "count") * V4_BLOCK_SIZE);
+
+        if (r->count != want) {
+            mism_add(m, "write_same.count: expected %u, got %u", want,
+                     r->count);
+        }
+    } else if (strcmp(tag, "SClone") == 0) {
+        /* CLONE reports status only; its data effect is checked by the
+         * subsequent READ/READ_PLUS the generator emits against the model's
+         * updated filesystem. */
+        (void) 0;
     } else if (strcmp(tag, "SWrite") == 0) {
         uint32_t want = (uint32_t) (jf_i64(v, "count") * V4_BLOCK_SIZE);
 
@@ -3478,6 +3777,8 @@ main(
           'X'                                                                             },
         { "mandatory",      required_argument,          0,
           'M'                                                                                                  },
+        { "backend",        required_argument,          0,
+          'b'                                                                                                  },
         { "dry-run",        no_argument,                0,
           'n'                                                                                                                      },
         { "verbose",        no_argument,                0,
@@ -3496,7 +3797,8 @@ main(
     int                  c;
     int                  i;
     struct mbt_env       env;
-    struct mbt_env_opts  opts = {
+    const char          *backend = "memfs";
+    struct mbt_env_opts  opts    = {
         .disable_caches = 1,
         /* Pin memfs's block size to the model's block granularity so sub-block
          * holes line up with SEEK_HOLE/SEEK_DATA (DEVIATIONS-NFS4.md round 8).
@@ -3509,7 +3811,7 @@ main(
      * shared helper; getopt only recognizes them so it does not error. */
     traces = mbt_collect_traces(argc, argv, &ntraces);
 
-    while ((c = getopt_long(argc, argv, "t:D:X:M:nv", long_options,
+    while ((c = getopt_long(argc, argv, "t:D:X:M:b:nv", long_options,
                             NULL)) != -1) {
         switch (c) {
             case 't':
@@ -3521,6 +3823,9 @@ main(
                     mandatory[nmandatory++] = optarg;
                 }
                 break;
+            case 'b':
+                backend = optarg;
+                break;
             case 'n':
                 dry_run = 1;
                 break;
@@ -3530,6 +3835,7 @@ main(
             default:
                 fprintf(stderr,
                         "usage: %s [--trace FILE ...] [--trace-dir DIR] "
+                        "[--backend memfs|diskfs|cairn] "
                         "[--mandatory CAP] [--dry-run] [--verbose]\n",
                         argv[0]);
                 mbt_free_traces(traces, ntraces);
@@ -3548,6 +3854,10 @@ main(
      * the corpus; each trace gets a fresh, uniquely-named memfs and a fresh
      * client identity (g_owner_epoch).  The backchannel recorder is registered
      * once here (it dispatches to the trace-local oracle via g_recall_oracle). */
+    /* memfs_config only reaches the memfs module; diskfs and cairn
+     * self-provision their scratch under the env's session dir. */
+    opts.module = backend;
+
     if (!dry_run) {
         mbt_env_open_opts(&env, &opts);
         env.nfs_v4_cb.recv_call_CB_COMPOUND = v4_cb_compound;
