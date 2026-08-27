@@ -314,7 +314,6 @@ chimera_s3_list_setup(
     const char                *startafter,
     int                        startafter_len)
 {
-    const char *slash;
     const char *sk  = NULL;
     int         skl = 0;
 
@@ -352,20 +351,6 @@ chimera_s3_list_setup(
     request->list.delimiter[delimiter_len] = '\0';
     request->list.delimiter_len            = delimiter_len;
 
-    /* For the common '/' delimiter we can prune the VFS walk to the directory
-     * containing the prefix and never descend below it. enumdir is the prefix
-     * truncated at its last '/' (the directory whose children we enumerate). */
-    request->list.enumdir[0]  = '\0';
-    request->list.enumdir_len = 0;
-    if (delimiter_len == 1 && delimiter[0] == '/') {
-        slash = rindex(request->list.prefix, '/');
-        if (slash) {
-            int el = slash - request->list.prefix;
-            memcpy(request->list.enumdir, request->list.prefix, el);
-            request->list.enumdir[el] = '\0';
-            request->list.enumdir_len = el;
-        }
-    }
 
     if (marker_len > CHIMERA_S3_KEY_MAX - 1) {
         marker_len = CHIMERA_S3_KEY_MAX - 1;
@@ -502,28 +487,23 @@ chimera_s3_list_filter(
     int                        klen;
     const char                *k = chimera_s3_list_key(path, pathlen, &klen);
 
-    if (request->list.delimiter_len == 1 && request->list.delimiter[0] == '/') {
-        /* Folder-style: only descend ancestors-or-equal of enumdir so we read
-        * exactly one level and roll subdirectories up into CommonPrefixes. */
-        const char *e  = request->list.enumdir;
-        int         el = request->list.enumdir_len;
+    /* Descend any directory that is on the path to the prefix or wholly
+     * inside the prefix subtree.  Delimiter rollup -- '/' included -- is
+     * resolved over FILE keys in the find callback, never from directories:
+     * a directory with no objects under it (an empty husk left behind by
+     * DeleteObject, or a directory created over NFS/SMB) must not surface
+     * as a phantom CommonPrefix, and whether a group appears past a start
+     * key depends on it having a member key past that key.  AWS defines
+     * CommonPrefixes over keys, so the walk must see the keys; the old
+     * one-level '/' pruning could not tell a populated group from an empty
+     * husk. */
+    const char *p  = request->list.prefix;
+    int         pl = request->list.prefix_len;
 
-        if (el >= klen && memcmp(e, k, klen) == 0 &&
-            (el == klen || e[klen] == '/')) {
-            return 0;
-        }
-        return 1;
-    } else {
-        /* Flat or arbitrary-delimiter: descend any directory that is on the
-         * path to the prefix or wholly inside the prefix subtree. */
-        const char *p  = request->list.prefix;
-        int         pl = request->list.prefix_len;
-
-        if (klen >= pl) {
-            return memcmp(k, p, pl) == 0 ? 0 : 1;
-        }
-        return (memcmp(k, p, klen) == 0 && p[klen] == '/') ? 0 : 1;
+    if (klen >= pl) {
+        return memcmp(k, p, pl) == 0 ? 0 : 1;
     }
+    return (memcmp(k, p, klen) == 0 && p[klen] == '/') ? 0 : 1;
 } /* chimera_s3_list_filter */
 
 static int
@@ -557,26 +537,9 @@ chimera_s3_list_find_callback(
     }
 
     if (isdir) {
-        /* Only '/' subdirectories collapse to CommonPrefixes here; other
-         * delimiters are resolved over file keys below, so directories are
-         * pure traversal. */
-        if (!(dl == 1 && request->list.delimiter[0] == '/')) {
-            return 0;
-        }
-        /* The subdirectory itself is the CommonPrefix "<key>/". A directory
-         * shorter than the prefix (e.g. the enumdir we descended through) is
-         * traversal only, not a result. */
-        if (klen < pl || memcmp(k, p, pl) != 0) {
-            return 0;
-        }
-        {
-            char cp[CHIMERA_S3_KEY_MAX + 2];
-            int  n = klen < CHIMERA_S3_KEY_MAX ? klen : CHIMERA_S3_KEY_MAX;
-            memcpy(cp, k, n);
-            cp[n]     = '/';
-            cp[n + 1] = '\0';
-            chimera_s3_list_add_prefix(request, cp, n + 1);
-        }
+        /* Directories are pure traversal: every CommonPrefix is derived
+         * from the file keys rolled up in the branch below (see the descent
+         * filter), so an empty directory contributes nothing. */
         return 0;
     } else {
         /* File key: roll up at the first delimiter past the prefix, else it is
@@ -595,6 +558,35 @@ chimera_s3_list_find_callback(
             if (memcmp(rest + i, request->list.delimiter, dl) == 0) {
                 idx = i;
                 break;
+            }
+        }
+
+        if (request->list.has_start) {
+            /* Exclusive start key, applied per file key: a key at or before
+             * it contributes nothing.  A key past it is a Contents entry --
+             * or keeps its rollup group alive: AWS still lists a
+             * CommonPrefix whose string sorts at or before the start key
+             * while the group has members past it.  The one exception is a
+             * start key naming the group exactly (a continuation token
+             * minted at the group): that group is fully consumed. */
+            const char *st  = request->list.start;
+            int         stl = (int) strlen(st);
+            int         cmpl, c;
+
+            cmpl = klen < stl ? klen : stl;
+            c    = memcmp(k, st, cmpl);
+            if (c == 0) {
+                c = klen - stl;
+            }
+            if (c <= 0) {
+                return 0;
+            }
+            if (idx >= 0) {
+                int elen = pl + idx + dl;
+
+                if (elen == stl && memcmp(k, st, elen) == 0) {
+                    return 0;
+                }
             }
         }
 
@@ -660,11 +652,24 @@ chimera_s3_list_find_complete(
     }
     n = w;
 
-    /* Page window: skip everything at or before the caller's start key. */
+    /* Page window: skip everything at or before the caller's start key --
+     * except a CommonPrefix the start key falls strictly inside, which the
+     * collection phase (above) has already vetted for members past the
+     * start key. */
     start_idx = 0;
     if (request->list.has_start) {
-        while (start_idx < n &&
-               strcmp(ents[start_idx].key, request->list.start) <= 0) {
+        while (start_idx < n) {
+            const char *ek   = ents[start_idx].key;
+            size_t      elen = strlen(ek);
+
+            if (strcmp(ek, request->list.start) > 0) {
+                break;
+            }
+            if (ents[start_idx].is_prefix &&
+                strlen(request->list.start) > elen &&
+                memcmp(request->list.start, ek, elen) == 0) {
+                break;
+            }
             start_idx++;
         }
     }
