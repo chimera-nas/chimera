@@ -99,3 +99,6 @@ get_property(_fuse_tests DIRECTORY PROPERTY TESTS)
 if(_fuse_tests)
     set_property(TEST ${_fuse_tests} APPEND PROPERTY LABELS fuse)
 endif()
+
+# In-process harness (no /dev/fuse, no mount, no privileges).
+add_subdirectory(quint)

@@ -19,6 +19,8 @@
 #include "vfs/vfs.h"
 #include "vfs/sdk/vfs_error.h"
 #include "vfs/sdk/vfs_cred.h"
+#include "vfs/sdk/vfs_acl.h"
+#include "vfs/sdk/vfs_access.h"
 #include "vfs/vfs_claim_types.h"
 #include "fuse_node_table.h"
 
@@ -239,6 +241,12 @@ struct chimera_fuse_mount {
     uint32_t                        proto_minor; /* negotiated */
     int                             mounted;
     int                             dead;
+    /* Test transport (chimera_fuse_add_synthetic_mount): when >= 0, setup
+     * adopts this descriptor as the mount's sole channel instead of opening
+     * /dev/fuse and issuing mount(2).  Everything downstream is unchanged --
+     * the channel is an int fd either way -- so the server cannot tell a
+     * simulated kernel from a real one.  -1 for every real mount. */
+    int                             synthetic_fd;
     int                             num_channels;
     int                             channel_fds[CHIMERA_FUSE_MAX_THREADS];
     struct chimera_fuse_node_table *node_table;
@@ -399,6 +407,17 @@ struct chimera_fuse_request {
             struct chimera_fuse_request   *park_prev;
             struct chimera_fuse_request   *park_next;
         } lock;
+        /* DAC pre-check context for ops that must authorize before opening.
+         * Lives until the gate's callback fires, so it cannot share storage
+         * with the op's own scratch. */
+        struct chimera_vfs_gate_ctx gate;
+        struct {
+            struct chimera_vfs_gate_ctx gate;
+            unsigned int                vfs_flags;
+            /* Access mask the gate authorized, bound onto the handle so
+             * later I/O does not re-derive it from a since-changed mode. */
+            uint32_t                    granted;
+        } open;
     } u;
 };
 
@@ -594,6 +613,11 @@ void chimera_fuse_op_fallocate(
     const void                  *arg,
     uint32_t                     arglen);
 void chimera_fuse_op_lseek(
+    struct chimera_fuse_request *req,
+    const struct fuse_in_header *hdr,
+    const void                  *arg,
+    uint32_t                     arglen);
+void chimera_fuse_op_copy_file_range(
     struct chimera_fuse_request *req,
     const struct fuse_in_header *hdr,
     const void                  *arg,

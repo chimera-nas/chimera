@@ -2515,6 +2515,27 @@ chimera_server_create_fuse_mount(
 } /* chimera_server_create_fuse_mount */
 
 SYMBOL_EXPORT int
+chimera_server_create_fuse_synthetic_mount(
+    struct chimera_server *server,
+    const char            *path,
+    int                    fd)
+{
+#ifdef __linux__
+    if (!server->fuse_shared) {
+        return -1;
+    }
+
+    return chimera_fuse_add_synthetic_mount(server->fuse_shared, path, fd);
+#else  /* ifdef __linux__ */
+    (void) server;
+    (void) path;
+    (void) fd;
+
+    return -1;
+#endif /* ifdef __linux__ */
+} /* chimera_server_create_fuse_synthetic_mount */
+
+SYMBOL_EXPORT int
 chimera_server_share_set_access_based_enum(
     struct chimera_server *server,
     const char            *share_name)
@@ -2706,13 +2727,18 @@ chimera_server_init(
     /* Tell the VFS whether any caching protocol is enabled, so its
      * remove/rename paths know to resolve a by-name victim's FH and recall a
      * cross-protocol holder before the namespace change (see
-     * chimera_vfs_remove_at).  When none are enabled the lookup is skipped. */
+     * chimera_vfs_remove_at).  When none are enabled the lookup is skipped.
+     * FUSE counts: the kernel caches dentries and attributes on its own, and
+     * the victim FH is also what invalidates the clobbered inode's cached
+     * attributes -- without it an fd held across a rename-over keeps reading
+     * the pre-rename link count. */
     chimera_vfs_set_umount_timeout(server->vfs, config->umount_timeout_ms);
 
     chimera_vfs_set_caching_enabled(server->vfs,
                                     config->nfs4_delegations ||
                                     config->smb_leases ||
-                                    config->smb_oplocks);
+                                    config->smb_oplocks ||
+                                    config->fuse_enabled);
 
     /* Enable the pNFS feature whenever configured.  Orchestrated flex-files
      * needs a data-server table (below); a layout-sourcing backend (e.g. diskfs

@@ -18,11 +18,19 @@
 static unsigned int
 chimera_fuse_open_flags(uint32_t flags)
 {
+    /* The VFS signals access intent positively and treats the two bits as
+     * independent, so O_RDWR is BOTH -- not neither.  Returning 0 here left
+     * an O_RDWR open requesting no access at all, which meant
+     * chimera_vfs_open_required_access() found nothing to require: the open
+     * was never gated and no grant was ever recorded for the commonest
+     * read-write descriptor there is. */
     switch (flags & O_ACCMODE) {
         case O_RDONLY:
             return CHIMERA_VFS_OPEN_READ_ONLY;
         case O_WRONLY:
             return CHIMERA_VFS_OPEN_WRITE_ONLY;
+        case O_RDWR:
+            return CHIMERA_VFS_OPEN_READ_ONLY | CHIMERA_VFS_OPEN_WRITE_ONLY;
         default:
             return 0;
     } /* switch */
@@ -45,6 +53,17 @@ chimera_fuse_open_callback(
     if (error_code != CHIMERA_VFS_OK) {
         chimera_fuse_reply(req, chimera_fuse_errno(error_code), NULL, 0);
         return;
+    }
+
+    /* Bind what the open-time gate authorized onto the handle.  Without this
+     * the first write or ftruncate re-derives the grant from the file's
+     * current mode (chimera_vfs_write_gate_complete), which is how a chmod
+     * after open used to revoke an already-open descriptor's write right.
+     * The open cache is credential-keyed when gating is in force, so the
+     * grant recorded here belongs to this caller alone. */
+    if (req->u.open.granted) {
+        oh->granted_access |= req->u.open.granted;
+        oh->granted_valid   = 1;
     }
 
     file = calloc(1, sizeof(*file));
@@ -77,6 +96,26 @@ chimera_fuse_open_callback(
     }
 } /* chimera_fuse_open_callback */
 
+static void
+chimera_fuse_open_gated(
+    enum chimera_vfs_error error_code,
+    void                  *private_data)
+{
+    struct chimera_fuse_request *req = private_data;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_fuse_reply(req, chimera_fuse_errno(error_code), NULL, 0);
+        return;
+    }
+
+    /* O_TRUNC arrives as a separate SETATTR(size=0) because we do not
+     * advertise FUSE_ATOMIC_O_TRUNC. */
+    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
+                        req->fh, req->fh_len,
+                        req->u.open.vfs_flags,
+                        chimera_fuse_open_callback, req);
+} /* chimera_fuse_open_gated */
+
 void
 chimera_fuse_op_open(
     struct chimera_fuse_request *req,
@@ -85,6 +124,7 @@ chimera_fuse_op_open(
     uint32_t                     arglen)
 {
     const struct fuse_open_in *in = arg;
+    uint32_t                   required;
 
     if (arglen < sizeof(*in)) {
         chimera_fuse_reply(req, EINVAL, NULL, 0);
@@ -96,12 +136,39 @@ chimera_fuse_op_open(
         return;
     }
 
-    /* O_TRUNC arrives as a separate SETATTR(size=0) because we do not
-     * advertise FUSE_ATOMIC_O_TRUNC. */
-    chimera_vfs_open_fh(req->thread->vfs_thread, &req->cred,
-                        req->fh, req->fh_len,
-                        chimera_fuse_open_flags(in->flags),
-                        chimera_fuse_open_callback, req);
+    req->u.open.vfs_flags = chimera_fuse_open_flags(in->flags);
+
+    /*
+     * Authorize the access mode at OPEN, and remember what was granted.
+     *
+     * POSIX binds I/O rights when a file is opened: a descriptor opened for
+     * writing stays writable across a later chmod.  Opening by file handle
+     * skips the DAC gate entirely, so nothing was checked here and nothing
+     * was recorded -- and the first write or ftruncate then fell into the
+     * VFS's lazy grant derivation, which re-derives from the file's CURRENT
+     * mode.  A chmod between open and first write therefore revoked a right
+     * POSIX says is already bound, and an unreadable file opened fine on a
+     * no_default_permissions mount.  Gate once here and stamp the outcome so
+     * neither happens.
+     */
+    required = 0;
+    if (req->u.open.vfs_flags & CHIMERA_VFS_OPEN_READ_ONLY) {
+        required |= CHIMERA_ACE_READ_DATA;
+    }
+    if (req->u.open.vfs_flags & CHIMERA_VFS_OPEN_WRITE_ONLY) {
+        required |= CHIMERA_ACE_WRITE_DATA;
+    }
+
+    req->u.open.granted = required;
+
+    if (required == 0) {
+        chimera_fuse_open_gated(CHIMERA_VFS_OK, req);
+        return;
+    }
+
+    chimera_vfs_gate_fh_obj(&req->u.open.gate, req->thread->vfs_thread,
+                            &req->cred, req->fh, req->fh_len, required,
+                            chimera_fuse_open_gated, req);
 } /* chimera_fuse_op_open */
 
 /* --- CREATE --- */
@@ -569,3 +636,70 @@ chimera_fuse_op_lseek(
                      in->offset, what,
                      chimera_fuse_lseek_complete, req);
 } /* chimera_fuse_op_lseek */
+
+/* --- COPY_FILE_RANGE --- */
+
+static void
+chimera_fuse_copy_range_complete(
+    enum chimera_vfs_error    error_code,
+    uint64_t                  length,
+    struct chimera_vfs_attrs *pre_attr,
+    struct chimera_vfs_attrs *post_attr,
+    void                     *private_data)
+{
+    struct chimera_fuse_request *req = private_data;
+    struct fuse_write_out        out;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_fuse_reply(req, chimera_fuse_errno(error_code), NULL, 0);
+        return;
+    }
+
+    memset(&out, 0, sizeof(out));
+    out.size = (uint32_t) length;
+
+    chimera_fuse_reply(req, 0, &out, sizeof(out));
+} /* chimera_fuse_copy_range_complete */
+
+/*
+ * Server-side copy between two already-open descriptors.  Answering ENOSYS
+ * is safe -- the kernel falls back to read+write and the copy still happens
+ * -- but it moves every byte through the kernel and back, which is exactly
+ * what the operation exists to avoid on a backend that can copy internally.
+ * A backend without the capability still reports ENOTSUP from the VFS, so
+ * the fallback remains available where it is genuinely needed.
+ */
+void
+chimera_fuse_op_copy_file_range(
+    struct chimera_fuse_request *req,
+    const struct fuse_in_header *hdr,
+    const void                  *arg,
+    uint32_t                     arglen)
+{
+    const struct fuse_copy_file_range_in *in = arg;
+    struct chimera_fuse_open_file        *src, *dst;
+
+    if (arglen < sizeof(*in)) {
+        chimera_fuse_reply(req, EINVAL, NULL, 0);
+        return;
+    }
+
+    src = chimera_fuse_file(in->fh_in);
+    dst = chimera_fuse_file(in->fh_out);
+
+    if (!src || !dst) {
+        chimera_fuse_reply(req, EBADF, NULL, 0);
+        return;
+    }
+
+    /* The destination's pages change underneath any kernel that has them
+     * cached, including this one; the write triggers the usual claim break,
+     * and this mount is exempt from its own invalidation through the
+     * credential's origin stamp. */
+    chimera_vfs_copy_range(req->thread->vfs_thread, &req->cred,
+                           src->handle, in->off_in,
+                           dst->handle, in->off_out,
+                           in->len, 0,
+                           0, 0,
+                           chimera_fuse_copy_range_complete, req);
+} /* chimera_fuse_op_copy_file_range */

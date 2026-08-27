@@ -120,6 +120,10 @@ chimera_fuse_kernel_mount(
         n += snprintf(opts + n, sizeof(opts) - n, ",allow_other");
     }
 
+    /* n is accumulated so further options can be appended without reordering;
+     * nothing reads it past the last one. */
+    (void) n;
+
  again:
     rc = mount("chimera", mnt->mountpoint, "fuse.chimera",
                MS_NOSUID | MS_NODEV, opts);
@@ -308,22 +312,32 @@ chimera_fuse_mount_setup(
         return -1;
     }
 
-    fd = open("/dev/fuse", O_RDWR | O_CLOEXEC);
+    if (mount->synthetic_fd >= 0) {
+        /* Simulated kernel: the caller supplied one end of a socketpair in
+         * place of /dev/fuse.  No device to open, nothing to mount -- but the
+         * INIT handshake below is byte-identical, because the peer plays the
+         * kernel's half of it. */
+        fd = mount->synthetic_fd;
+    } else {
+        fd = open("/dev/fuse", O_RDWR | O_CLOEXEC);
 
-    if (fd < 0) {
-        chimera_fuse_error("fuse mount %s: cannot open /dev/fuse: %s",
-                           mount->mountpoint, strerror(errno));
-        return -1;
-    }
+        if (fd < 0) {
+            chimera_fuse_error("fuse mount %s: cannot open /dev/fuse: %s",
+                               mount->mountpoint, strerror(errno));
+            return -1;
+        }
 
-    if (chimera_fuse_kernel_mount(mount, fd) != 0) {
-        close(fd);
-        return -1;
+        if (chimera_fuse_kernel_mount(mount, fd) != 0) {
+            close(fd);
+            return -1;
+        }
     }
 
     if (chimera_fuse_init_handshake(mount, fd) != 0) {
-        umount2(mount->mountpoint, MNT_DETACH);
-        close(fd);
+        if (mount->synthetic_fd < 0) {
+            umount2(mount->mountpoint, MNT_DETACH);
+            close(fd);
+        }
         return -1;
     }
 
@@ -334,6 +348,13 @@ chimera_fuse_mount_setup(
 #else  /* if CHIMERA_FUSE_MULTIQUEUE */
     num_channels = 1;
 #endif /* if CHIMERA_FUSE_MULTIQUEUE */
+
+    /* A socketpair has no FUSE_DEV_IOC_CLONE equivalent, so a simulated
+     * kernel is single-channel.  That also keeps a simulated session
+     * deterministic: every request arrives in submission order. */
+    if (mount->synthetic_fd >= 0) {
+        num_channels = 1;
+    }
 
     for (slot = 0; slot < CHIMERA_FUSE_MAX_THREADS; slot++) {
         mount->channel_fds[slot] = -1;
@@ -379,6 +400,13 @@ void
 chimera_fuse_mount_teardown(struct chimera_fuse_mount *mount)
 {
     if (!mount->mounted) {
+        return;
+    }
+
+    if (mount->synthetic_fd >= 0) {
+        /* Nothing is mounted; closing our end is what tells the simulated
+         * kernel the session is over. */
+        mount->dead = 1;
         return;
     }
 

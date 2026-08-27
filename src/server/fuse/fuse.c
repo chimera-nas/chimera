@@ -331,6 +331,7 @@ chimera_fuse_add_mount(
     strncpy(mount->share_path, path, sizeof(mount->share_path) - 1);
 
     mount->shared              = shared;
+    mount->synthetic_fd        = -1;
     mount->default_permissions = 1;
     mount->attr_timeout_ms     = 1000;
     mount->entry_timeout_ms    = 1000;
@@ -400,6 +401,28 @@ chimera_fuse_add_mount(
 
     return 0;
 } /* chimera_fuse_add_mount */
+
+SYMBOL_EXPORT int
+chimera_fuse_add_synthetic_mount(
+    void       *fuse_shared,
+    const char *path,
+    int         fd)
+{
+    struct chimera_fuse_shared *shared = fuse_shared;
+    struct chimera_fuse_mount  *mount;
+    int                         rc;
+
+    rc = chimera_fuse_add_mount(fuse_shared, "(simulated)", path, NULL);
+
+    if (rc != 0) {
+        return rc;
+    }
+
+    mount               = &shared->mounts[shared->num_mounts - 1];
+    mount->synthetic_fd = fd;
+
+    return 0;
+} /* chimera_fuse_add_synthetic_mount */
 
 SYMBOL_EXPORT struct chimera_server_protocol fuse_protocol = {
     .init           = fuse_server_init,

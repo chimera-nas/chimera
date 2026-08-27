@@ -860,12 +860,14 @@ chimera_fuse_coherence_shutdown(
     struct chimera_fuse_shared *shared,
     struct chimera_fuse_mount  *mount)
 {
-    struct chimera_vfs_state     *state = shared->vfs->vfs_state;
     struct chimera_fuse_grant    *grant, *gtmp;
     struct chimera_fuse_dirwatch *dw, *dwtmp;
 
 #ifndef __clang_analyzer__
-    /* uthash blows clangs mind */
+    /* uthash blows clangs mind.  `state` lives inside the guard too: with the
+     * body compiled out the analyser sees only a dead initialisation. */
+    struct chimera_vfs_state     *state = shared->vfs->vfs_state;
+
     HASH_ITER(hh, mount->dirwatches, dw, dwtmp)
     {
         HASH_DELETE(hh, mount->dirwatches, dw);

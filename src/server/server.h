@@ -791,6 +791,14 @@ chimera_server_create_fuse_mount(
     const char            *path,
     const char            *options);
 
+/* Serve a FUSE session over a caller-supplied descriptor rather than a real
+ * kernel mount (see chimera_fuse_add_synthetic_mount).  Test-only. */
+int
+chimera_server_create_fuse_synthetic_mount(
+    struct chimera_server *server,
+    const char            *path,
+    int                    fd);
+
 int
 chimera_server_share_set_access_based_enum(
     struct chimera_server *server,
