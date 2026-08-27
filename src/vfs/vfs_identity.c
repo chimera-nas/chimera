@@ -143,14 +143,48 @@ chimera_vfs_identity_cache_probe(
     return found;
 } /* chimera_vfs_identity_cache_probe */
 
-/* Run the registered miss handlers in order until one resolves the key. */
+static inline int
+chimera_vfs_identity_result_has_sid(const struct chimera_vfs_identity_result *result)
+{
+    return result->is_group ? result->group.sid[0] != '\0'
+           : result->user.sid[0] != '\0';
+} /* chimera_vfs_identity_result_has_sid */
+
+/*
+ * Run the registered miss handlers in order until one resolves the key.
+ *
+ * For the numeric keys (BY_UID / BY_GID) a plain first-wins walk is not enough.
+ * NSS is registered first and, on a host whose nsswitch routes passwd/group
+ * through winbind, it answers those keys itself -- with a name but never a SID,
+ * because NSS has no notion of one.  That would short-circuit the winbind
+ * handler, which is the only one that can supply the real SID, and the identity
+ * would be cached SID-less; the cache hit then suppresses any further resolve,
+ * so the SID never arrives and the marshaller falls back to the algorithmic
+ * S-1-5-88 form for good.
+ *
+ * So for those two keys a SID-less success is only provisional: keep walking in
+ * case a later handler can name the same identity properly, and settle for the
+ * provisional answer only if none can.  This is safe precisely because the key
+ * is numeric -- every handler is being asked about the same uid/gid, so they
+ * can only disagree about the SID, never about which identity it is.  BY_NAME
+ * and BY_SID stay first-wins: there the key is a string that two handlers could
+ * legitimately resolve to different identities (a local "alice" and a domain
+ * "alice"), and preferring the SID-bearing answer would silently change which
+ * account wins.
+ */
 static int
 chimera_vfs_identity_run_handlers(
     struct chimera_vfs_identity         *identity,
     struct chimera_vfs_identity_request *req)
 {
     struct chimera_vfs_identity_handler_entry *entry;
+    struct chimera_vfs_identity_result         provisional;
+    int                                        have_provisional = 0;
+    int                                        prefer_sid;
     int                                        rc = -1;
+
+    prefer_sid = (req->key == CHIMERA_VFS_IDENTITY_BY_UID ||
+                  req->key == CHIMERA_VFS_IDENTITY_BY_GID);
 
     pthread_mutex_lock(&identity->handler_lock);
     entry = identity->handlers;
@@ -162,10 +196,23 @@ chimera_vfs_identity_run_handlers(
         memset(&req->result, 0, sizeof(req->result));
         if (entry->handler(req->key, req->id, req->name, &req->result,
                            entry->private_data) == 0) {
-            rc = 0;
-            break;
+            if (!prefer_sid ||
+                chimera_vfs_identity_result_has_sid(&req->result)) {
+                rc = 0;
+                break;
+            }
+            /* Resolved, but with no SID.  Hold it and keep looking. */
+            if (!have_provisional) {
+                provisional      = req->result;
+                have_provisional = 1;
+            }
         }
         entry = entry->next;
+    }
+
+    if (rc != 0 && have_provisional) {
+        req->result = provisional;
+        rc          = 0;
     }
 
     return rc;
