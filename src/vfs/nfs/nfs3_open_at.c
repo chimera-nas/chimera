@@ -13,6 +13,62 @@ struct chimera_nfs3_open_at_ctx {
     struct chimera_nfs_client_server *server;
 };
 
+static void chimera_nfs3_open_at_lookup_callback(
+    struct evpl                 *evpl,
+    const struct evpl_rpc2_verf *verf,
+    struct LOOKUP3res           *res,
+    int                          status,
+    void                        *private_data);
+
+/*
+ * Resolve the name with LOOKUP and complete the open from what it finds.
+ *
+ * Used for a plain open, and to recover the object behind an UNCHECKED
+ * CREATE that the server answered NFS3ERR_EXIST: the POSIX rules the layer
+ * above applies -- ELOOP on a symlink under O_NOFOLLOW, EISDIR on a
+ * directory, restarting resolution on a symlink it must follow -- all need
+ * the object's type, and NFS3ERR_EXIST does not carry it.
+ */
+static void
+chimera_nfs3_open_at_send_lookup(
+    struct chimera_nfs_thread  *thread,
+    struct chimera_vfs_request *request)
+{
+    struct chimera_nfs_client_server_thread *server_thread =
+        chimera_nfs_thread_get_server_thread(thread, request->fh,
+                                             request->fh_len);
+    struct chimera_nfs_shared               *shared = thread->shared;
+    struct LOOKUP3args                       lookup_args;
+    struct evpl_rpc2_cred                    rpc2_cred;
+    uint8_t                                 *fh;
+    int                                      fhlen;
+
+    if (!server_thread) {
+        request->status = CHIMERA_VFS_ESTALE;
+        request->complete(request);
+        return;
+    }
+
+    chimera_nfs3_map_fh(request->fh, request->fh_len, &fh, &fhlen);
+
+    chimera_nfs_init_rpc2_cred(&rpc2_cred, request->cred,
+                               request->thread->vfs->machine_name,
+                               request->thread->vfs->machine_name_len);
+
+    lookup_args.what.dir.data.data = fh;
+    lookup_args.what.dir.data.len  = fhlen;
+    lookup_args.what.name.str      = (char *) request->open_at.name;
+    lookup_args.what.name.len      = request->open_at.namelen;
+
+    shared->nfs_v3.send_call_NFSPROC3_LOOKUP(&shared->nfs_v3.rpc2,
+                                             thread->evpl,
+                                             server_thread->nfs_conn,
+                                             &rpc2_cred, &lookup_args,
+                                             0, 0, NULL, 0, 0,
+                                             chimera_nfs3_open_at_lookup_callback,
+                                             request);
+} /* chimera_nfs3_open_at_send_lookup */
+
 static void
 chimera_nfs3_open_at_lookup_callback(
     struct evpl                 *evpl,
@@ -105,6 +161,23 @@ chimera_nfs3_open_at_create_callback(
                                   &request->open_at.r_dir_post_attr,
                                   &res->resfail.dir_wcc);
 
+        /* An UNCHECKED create over a name already held by a non-regular
+         * object is NFS3ERR_EXIST on the wire (RFC 1813 3.3.8: CREATE
+         * materializes a regular file and neither follows a symlink nor
+         * unlinks what is there).  That is the right answer to send, but it
+         * is not the answer POSIX gives the caller: open(O_CREAT) on a
+         * symlink follows it, or fails ELOOP under O_NOFOLLOW.  The type the
+         * decision needs is exactly what the error dropped, so go and get it
+         * -- one LOOKUP, only on this path, and the checks above the VFS then
+         * see the same object a create-on-existing used to hand them.
+         *
+         * Not for GUARDED (O_EXCL), where EEXIST is the caller's answer. */
+        if (res->status == NFS3ERR_EXIST &&
+            !(request->open_at.flags & CHIMERA_VFS_OPEN_EXCLUSIVE)) {
+            chimera_nfs3_open_at_send_lookup(ctx->thread, request);
+            return;
+        }
+
         request->status = nfs3_client_status_to_chimera_vfs_error(res->status);
         request->complete(request);
         return;
@@ -170,7 +243,6 @@ chimera_nfs3_open_at(
     struct chimera_nfs_client_server_thread *server_thread = chimera_nfs_thread_get_server_thread(thread, request->fh,
                                                                                                   request->fh_len);
     struct chimera_nfs3_open_at_ctx         *ctx;
-    struct LOOKUP3args                       lookup_args;
     struct CREATE3args                       create_args;
     struct evpl_rpc2_cred                    rpc2_cred;
     uint8_t                                 *fh;
@@ -208,19 +280,7 @@ chimera_nfs3_open_at(
                                                  &create_args, 0, 0, NULL, 0, 0, chimera_nfs3_open_at_create_callback,
                                                  request);
     } else {
-        chimera_nfs3_map_fh(request->fh, request->fh_len, &fh, &fhlen);
-
-        lookup_args.what.dir.data.data = fh;
-        lookup_args.what.dir.data.len  = fhlen;
-        lookup_args.what.name.str      = (char *) request->open_at.name;
-        lookup_args.what.name.len      = request->open_at.namelen;
-
-        shared->nfs_v3.send_call_NFSPROC3_LOOKUP(&shared->nfs_v3.rpc2, thread->evpl, server_thread->nfs_conn, &rpc2_cred
-                                                 ,
-                                                 &lookup_args,
-                                                 0, 0, NULL, 0, 0,
-                                                 chimera_nfs3_open_at_lookup_callback, request);
-
+        chimera_nfs3_open_at_send_lookup(thread, request);
     }
 } /* chimera_nfs3_open_at */
 
