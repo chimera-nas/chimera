@@ -52,10 +52,16 @@ chimera_posix_clone_file_range(
         return -1;
     }
 
-    /* FICLONERANGE: the source must be open for reading and the
-     * destination for writing (EBADF otherwise). */
+    /* FICLONERANGE: the source must be open for reading and the destination
+     * for writing, and the destination must not be in append mode -- all
+     * EBADF.  do_clone_file_range() runs the same generic_file_rw_checks()
+     * copy_file_range does, and runs it before ->remap_file_range, so this
+     * holds even on a filesystem that cannot reflink at all.  Measured on
+     * Linux 6.x over a non-reflink filesystem: two sane descriptors give
+     * EOPNOTSUPP, an O_APPEND destination gives EBADF. */
     if (!chimera_posix_fd_may_read(src_entry) ||
-        !chimera_posix_fd_may_write(dst_entry)) {
+        !chimera_posix_fd_may_write(dst_entry) ||
+        (dst_entry->ofd->oflags & O_APPEND)) {
         chimera_posix_fd_release(dst_entry, 0);
         chimera_posix_fd_release(src_entry, 0);
         errno = EBADF;
