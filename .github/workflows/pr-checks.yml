@@ -24,6 +24,16 @@ name: PR checks
 on:
   pull_request:
 
+# A re-push (including an amend/force-push) is a `synchronize` event, so it
+# starts a fresh run.  Cancel the one it supersedes: without this both would run
+# to completion and race to update the same sticky comment, and the loser could
+# be the older run -- leaving a report that describes commits that are no longer
+# on the branch.  The reports themselves are keyed by marker and updated in
+# place, so a rerun replaces its comment rather than stacking a second one.
+concurrency:
+  group: pr-checks-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -138,12 +148,13 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
-  quint-dev:
-    name: Quint devcontainer amd64 Debug
+  quint-coverage:
+    name: Quint coverage devcontainer amd64
     needs: [build-devcontainer]
     runs-on: arc-amd64
     permissions:
       contents: read
+      pull-requests: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -158,24 +169,73 @@ jobs:
         with:
           arch: amd64
 
+      # A Coverage build (clang source-based instrumentation, -O0) rather than
+      # Debug: the suite still reports pass/fail, and the same run answers the
+      # question this job exists for -- how much of chimera the models actually
+      # reach.  ASan coverage of these suites comes from the merge queue's Debug
+      # jobs, which now have a trace corpus too.
+      #
       # --no-tests=error is the point of the label: a configuration that
       # silently loses its MBT suites (no quint, no bundle) must fail here
       # rather than report a vacuous pass.
-      - name: Build and run the quint suite
+      - name: Build instrumented and run the quint suite
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           docker run --rm --privileged \
             -e DOCKER_MIRROR=${{ env.DOCKER_MIRROR }} \
             -e APT_MIRROR=${{ env.APT_MIRROR }} \
+            -e RUN_URL="$RUN_URL" \
             -v "${{ github.workspace }}:/workspace" \
             -v "${{ github.workspace }}/oras:/usr/local/bin/oras:ro" \
             -v /build \
             -w /build \
             ${{ env.DEV_IMAGE_TAG_PREFIX }}:${{ github.sha }}-amd64 \
             bash -euxc '
-              cmake -G Ninja -DCMAKE_BUILD_TYPE=Debug -DKVM_TESTING=OFF /workspace
+              # Ubuntu ships these versioned; the unversioned names are not
+              # always on PATH, and coverage-report.sh honours the overrides.
+              export LLVM_PROFDATA="$(command -v llvm-profdata || ls /usr/lib/llvm-*/bin/llvm-profdata | tail -n1)"
+              export LLVM_COV="$(command -v llvm-cov || ls /usr/lib/llvm-*/bin/llvm-cov | tail -n1)"
+              cmake -G Ninja -DCMAKE_BUILD_TYPE=Coverage -DCMAKE_C_COMPILER=clang \
+                    -DKVM_TESTING=OFF /workspace
               ninja
-              ctest -L quint --output-on-failure --no-tests=error \
-                    --test-output-size-failed 65536 --timeout 300 -j "$(nproc)"'
+              mkdir -p /build/coverage/profraw
+              LLVM_PROFILE_FILE=/build/coverage/profraw/%m-%p.profraw \
+                ctest -L quint --output-on-failure --no-tests=error \
+                      --test-output-size-failed 65536 --timeout 600 -j "$(nproc)"
+              COVERAGE_JSON=/workspace/coverage-export.json \
+                bash /workspace/etc/coverage-report.sh /build
+              # Rendered in here, where the paths in the export still resolve.
+              python3 /workspace/scripts/ci_coverage_report.py \
+                      /workspace/coverage-export.json /workspace "$RUN_URL" \
+                      > /workspace/coverage-report.md'
+
+      # Best-effort: a report that cannot be posted is still in the run summary,
+      # and a comment API hiccup should not fail an otherwise-green job.
+      - name: Publish the coverage report
+        if: ${{ always() && hashFiles('coverage-report.md') != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          CI_COMMENT_MARKER: "<!-- quint-coverage-report -->"
+        run: |
+          cat coverage-report.md >> "$GITHUB_STEP_SUMMARY"
+          if [ -n "${PR_NUMBER:-}" ]; then
+            python3 scripts/ci_pr_comment.py "$GH_REPO" "$PR_NUMBER" coverage-report.md \
+              || echo "::warning::failed to post the coverage comment (it is in the run summary)"
+          fi
+
+      - name: Upload the coverage export and report
+        if: ${{ always() && hashFiles('coverage-export.json') != '' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: quint-coverage
+          path: |
+            coverage-export.json
+            coverage-report.md
+          if-no-files-found: warn
+          retention-days: 30
 
   analyze-macos:
     name: Analyze macOS Release (pre-merge)
