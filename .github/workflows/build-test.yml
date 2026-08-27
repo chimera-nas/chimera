@@ -928,10 +928,18 @@ jobs:
           # full crypt(5) $-scheme verification.
           brew install cmake ninja bison jansson userspace-rcu rocksdb krb5 \
                        xxhash libxcrypt uthash openssl@3 libnghttp2
+          # oras, not quint: this job has never had a model-based-test trace
+          # corpus, so every MBT replay ctest disabled itself here.  A CI
+          # checkout never has local edits to ext/specs, so the bundle the specs
+          # CI published for the pinned commit always applies -- pulling it is
+          # both lighter than regenerating the corpus with quint and free of
+          # quint's parallel-generator download race.
+          brew install oras
 
       - name: Configure and build
         run: |
           cmake -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+                -DSPECS_BUNDLE=ON \
                 -S "${{ github.workspace }}" -B "${{ runner.temp }}/build"
           ninja -C "${{ runner.temp }}/build"
 
