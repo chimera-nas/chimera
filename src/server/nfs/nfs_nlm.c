@@ -96,20 +96,53 @@ nlm_owner_owner_lo(
     return XXH3_64bits(buf, oh_len + sizeof(svid));
 } /* nlm_owner_owner_lo */
 
+/*
+ * The *_RES half of NLM is fire-and-forget: the server reports the result of
+ * an asynchronous (*_MSG) request and has no use for whatever the client
+ * answers.  It still has to hand the generated stub a reply callback, because
+ * the reply dispatcher invokes it unconditionally -- passing NULL there
+ * crashes the server the moment a client acknowledges the call, which every
+ * conforming RPC client does.
+ */
+static void
+nlm4_res_sent_cb(
+    struct evpl                 *evpl,
+    const struct evpl_rpc2_verf *verf,
+    int                          status,
+    void                        *private_data)
+{
+    (void) evpl;
+    (void) verf;
+    (void) private_data;
+
+    if (status) {
+        chimera_nfs_debug("NLM asynchronous result was not acknowledged: %d",
+                          status);
+    }
+} /* nlm4_res_sent_cb */
+
 /* -------------------------------------------------------------------------
- * Helper: send a simple nlm4_res reply
+ * Helper: deliver an nlm4_res outcome for whichever procedure asked for it.
+ *
+ * The synchronous procedures answer on their own RPC.  The asynchronous ones
+ * have already acknowledged the request with a void reply, so their outcome
+ * travels as a *_RES CALL back to the client -- which is why this needs the
+ * connection as well as the encoding.  An unhandled proc here would drop the
+ * outcome silently and leave the client waiting forever, so the default arm
+ * is loud rather than a no-op.
  * ---------------------------------------------------------------------- */
 static void
 nlm4_send_res(
     struct chimera_server_nfs_shared *shared,
     struct evpl                      *evpl,
+    struct evpl_rpc2_conn            *conn,
     struct evpl_rpc2_encoding        *encoding,
     const xdr_opaque                 *cookie,
     nlm4_stats                        stat,
     int                               proc)
 {
     struct nlm4_res res;
-    int             rc;
+    int             rc = 0;
 
     res.cookie.len  = cookie ? cookie->len : 0;
     res.cookie.data = cookie ? cookie->data : NULL;
@@ -128,11 +161,23 @@ nlm4_send_res(
         case 5:
             rc = shared->nlm_v4.send_reply_NLMPROC4_GRANTED(evpl, NULL, &res, encoding);
             break;
+        case 17:   /* NLMPROC4_LOCK_MSG   -> NLMPROC4_LOCK_RES   */
+            shared->nlm_v4.send_call_NLMPROC4_LOCK_RES(&shared->nlm_v4.rpc2, evpl, conn, NULL, &res, 0, 0, NULL, 0, 0,
+                                                       nlm4_res_sent_cb, NULL);
+            break;
+        case 18:   /* NLMPROC4_UNLOCK_MSG -> NLMPROC4_UNLOCK_RES */
+            shared->nlm_v4.send_call_NLMPROC4_UNLOCK_RES(&shared->nlm_v4.rpc2, evpl, conn, NULL, &res, 0, 0, NULL, 0, 0,
+                                                         nlm4_res_sent_cb, NULL);
+            break;
+        case 19:   /* NLMPROC4_CANCEL_MSG -> NLMPROC4_CANCEL_RES */
+            shared->nlm_v4.send_call_NLMPROC4_CANCEL_RES(&shared->nlm_v4.rpc2, evpl, conn, NULL, &res, 0, 0, NULL, 0, 0,
+                                                         nlm4_res_sent_cb, NULL);
+            break;
         case 22:
             rc = shared->nlm_v4.send_reply_NLMPROC4_NM_LOCK(evpl, NULL, &res, encoding);
             break;
         default:
-            rc = 0;
+            chimera_nfs_abort_if(1, "No NLM result delivery for proc %d", proc);
             break;
     } /* switch */
     chimera_nfs_abort_if(rc, "Failed to send NLM res reply");
@@ -246,7 +291,7 @@ chimera_nfs_nlm4_test_open_cb(
     if (ctx->proc == 16) {
         shared->nlm_v4.send_call_NLMPROC4_TEST_RES(&shared->nlm_v4.rpc2, evpl,
                                                    ctx->conn, NULL, &res, 0, 0, NULL, 0, 0,
-                                                   NULL, NULL);
+                                                   nlm4_res_sent_cb, NULL);
     } else {
         rc = shared->nlm_v4.send_reply_NLMPROC4_TEST(evpl, NULL, &res, encoding);
         chimera_nfs_abort_if(rc, "Failed to send NLM TEST reply");
@@ -353,7 +398,7 @@ chimera_nfs_nlm4_lock_blocked_cb(void *private_data)
     if (ctx->proc == 17) {
         shared->nlm_v4.send_call_NLMPROC4_LOCK_RES(&shared->nlm_v4.rpc2, evpl,
                                                    ctx->conn, NULL, &res, 0, 0,
-                                                   NULL, 0, 0, NULL, NULL);
+                                                   NULL, 0, 0, nlm4_res_sent_cb, NULL);
     } else {
         rc = shared->nlm_v4.send_reply_NLMPROC4_LOCK(evpl, NULL, &res, encoding);
         chimera_nfs_abort_if(rc, "Failed to send NLM4_BLOCKED reply");
@@ -441,7 +486,7 @@ chimera_nfs_nlm4_lock_acquire_cb(
             break;
         case 17:
             shared->nlm_v4.send_call_NLMPROC4_LOCK_RES(&shared->nlm_v4.rpc2, evpl, ctx->conn, NULL, &res, 0, 0, NULL, 0,
-                                                       0, NULL,
+                                                       0, nlm4_res_sent_cb,
                                                        NULL);
             break;
         default:
@@ -487,7 +532,7 @@ chimera_nfs_nlm4_lock_open_cb(
             case 17:
                 shared->nlm_v4.send_call_NLMPROC4_LOCK_RES(&shared->nlm_v4.rpc2, evpl, ctx->conn, NULL, &res, 0, 0, NULL
                                                            , 0, 0,
-                                                           NULL, NULL);
+                                                           nlm4_res_sent_cb, NULL);
                 break;
             default:
                 rc = shared->nlm_v4.send_reply_NLMPROC4_NM_LOCK(evpl, NULL, &res, encoding);
@@ -520,7 +565,7 @@ chimera_nfs_nlm4_lock_open_cb(
             case 17:
                 shared->nlm_v4.send_call_NLMPROC4_LOCK_RES(&shared->nlm_v4.rpc2, evpl, ctx->conn, NULL, &res, 0, 0, NULL
                                                            , 0, 0,
-                                                           NULL, NULL);
+                                                           nlm4_res_sent_cb, NULL);
                 break;
             default:
                 rc = shared->nlm_v4.send_reply_NLMPROC4_NM_LOCK(evpl, NULL, &res, encoding);
@@ -629,7 +674,7 @@ chimera_nfs_nlm4_do_test(
         err_res.test_stat.stat = NLM4_STALE_FH;
         if (proc == 16) {
             shared->nlm_v4.send_call_NLMPROC4_TEST_RES(&shared->nlm_v4.rpc2, evpl, conn, NULL, &err_res, 0, 0, NULL, 0,
-                                                       0, NULL,
+                                                       0, nlm4_res_sent_cb,
                                                        NULL);
         } else {
             int rc = shared->nlm_v4.send_reply_NLMPROC4_TEST(evpl, NULL, &err_res, encoding);
@@ -646,7 +691,7 @@ chimera_nfs_nlm4_do_test(
         err_res.test_stat.stat = NLM4_DENIED_NOLOCKS;
         if (proc == 16) {
             shared->nlm_v4.send_call_NLMPROC4_TEST_RES(&shared->nlm_v4.rpc2, evpl, conn, NULL, &err_res, 0, 0, NULL, 0,
-                                                       0, NULL,
+                                                       0, nlm4_res_sent_cb,
                                                        NULL);
         } else {
             int oom_rc = shared->nlm_v4.send_reply_NLMPROC4_TEST(evpl, NULL, &err_res, encoding);
@@ -756,14 +801,14 @@ chimera_nfs_nlm4_do_lock(
     if (chimera_nfs_fh_unwrap(args->alock.fh.data, args->alock.fh.len, &vexp,
                               vfh, &vfh_len, shared->fh_key, shared->fh_sign) !=
         CHIMERA_NFS_FH_OK) {
-        nlm4_send_res(shared, evpl, encoding, &args->cookie, NLM4_STALE_FH, proc);
+        nlm4_send_res(shared, evpl, conn, encoding, &args->cookie, NLM4_STALE_FH, proc);
         return;
     }
 
     /* Build the in-flight lock entry (handle filled in by open callback) */
     entry = nlm_lock_entry_alloc();
     if (!entry) {
-        nlm4_send_res(shared, evpl, encoding, &args->cookie, NLM4_DENIED_NOLOCKS, proc);
+        nlm4_send_res(shared, evpl, conn, encoding, &args->cookie, NLM4_DENIED_NOLOCKS, proc);
         return;
     }
     entry->fh_len = args->alock.fh.len < NFS4_FHSIZE ? args->alock.fh.len : NFS4_FHSIZE;
@@ -780,7 +825,7 @@ chimera_nfs_nlm4_do_lock(
     ctx = calloc(1, sizeof(*ctx));
     if (!ctx) {
         nlm_lock_entry_free(entry);
-        nlm4_send_res(shared, evpl, encoding, &args->cookie, NLM4_DENIED_NOLOCKS, proc);
+        nlm4_send_res(shared, evpl, conn, encoding, &args->cookie, NLM4_DENIED_NOLOCKS, proc);
         return;
     }
     ctx->thread   = thread;
@@ -822,7 +867,7 @@ chimera_nfs_nlm4_do_lock(
                 break;
             case 17:
                 shared->nlm_v4.send_call_NLMPROC4_LOCK_RES(&shared->nlm_v4.rpc2, evpl, conn, NULL, &res, 0, 0, NULL, 0,
-                                                           0, NULL,
+                                                           0, nlm4_res_sent_cb,
                                                            NULL);
                 break;
             default:
@@ -841,7 +886,7 @@ chimera_nfs_nlm4_do_lock(
         pthread_mutex_unlock(&shared->nlm_state.mutex);
         nlm_lock_entry_free(entry);
         free(ctx);
-        nlm4_send_res(shared, evpl, encoding, &args->cookie, NLM4_DENIED_NOLOCKS, proc);
+        nlm4_send_res(shared, evpl, conn, encoding, &args->cookie, NLM4_DENIED_NOLOCKS, proc);
         return;
     }
     ctx->client = client;
@@ -871,7 +916,7 @@ chimera_nfs_nlm4_do_lock(
             case 17:
                 shared->nlm_v4.send_call_NLMPROC4_LOCK_RES(&shared->nlm_v4.rpc2, evpl, ctx->conn, NULL, &res, 0, 0, NULL
                                                            , 0, 0,
-                                                           NULL, NULL);
+                                                           nlm4_res_sent_cb, NULL);
                 break;
             default:
                 rc = shared->nlm_v4.send_reply_NLMPROC4_NM_LOCK(evpl, NULL, &res, encoding);
@@ -919,37 +964,32 @@ chimera_nfs_nlm4_lock(
                              false, 2);
 } /* chimera_nfs_nlm4_lock */
 
-void
-chimera_nfs_nlm4_cancel(
+static void
+chimera_nfs_nlm4_do_cancel(
     struct evpl               *evpl,
     struct evpl_rpc2_conn     *conn,
     struct evpl_rpc2_cred     *cred,
     struct nlm4_cancargs      *args,
     struct evpl_rpc2_encoding *encoding,
-    void                      *private_data)
+    void                      *private_data,
+    int                        proc)
 {
     struct chimera_server_nfs_thread *thread    = private_data;
     struct chimera_server_nfs_shared *shared    = thread->shared;
     struct chimera_vfs_state         *vfs_state = thread->vfs->vfs_state;
     struct nlm_client                *client;
     struct nlm_lock_entry            *entry, *match;
-    struct nlm4_res                   res;
     char                              safe_hostname[LM_MAXSTRLEN + 1];
     size_t                            hn_len;
     uint64_t                          want_length;
     bool                              cancelled       = false;
     void                             *ctx_for_lock_cb = NULL;
-    int                               rc;
 
     chimera_nfs_debug("NLM CANCEL: caller='%.*s' fh_len=%u offset=%lu len=%lu",
                       (int) args->alock.caller_name.len, args->alock.caller_name.str,
                       (unsigned) args->alock.fh.len,
                       (unsigned long) args->alock.l_offset,
                       (unsigned long) args->alock.l_len);
-
-    res.cookie.len  = args->cookie.len;
-    res.cookie.data = args->cookie.data;
-    res.stat        = NLM4_GRANTED;
 
     hn_len = args->alock.caller_name.len < LM_MAXSTRLEN
              ? args->alock.caller_name.len : LM_MAXSTRLEN;
@@ -998,13 +1038,26 @@ chimera_nfs_nlm4_cancel(
         ctx_for_lock_cb = match->ticket.private_data;
     }
 
-    rc = shared->nlm_v4.send_reply_NLMPROC4_CANCEL(evpl, NULL, &res, encoding);
-    chimera_nfs_abort_if(rc, "Failed to send NLM CANCEL reply");
+    nlm4_send_res(shared, evpl, conn, encoding, &args->cookie, NLM4_GRANTED,
+                  proc);
 
     if (cancelled && ctx_for_lock_cb) {
         chimera_nfs_nlm4_lock_acquire_cb(CHIMERA_CLAIM_DENIED, NULL, NULL,
                                          ctx_for_lock_cb);
     }
+} /* chimera_nfs_nlm4_do_cancel */
+
+void
+chimera_nfs_nlm4_cancel(
+    struct evpl               *evpl,
+    struct evpl_rpc2_conn     *conn,
+    struct evpl_rpc2_cred     *cred,
+    struct nlm4_cancargs      *args,
+    struct evpl_rpc2_encoding *encoding,
+    void                      *private_data)
+{
+    chimera_nfs_nlm4_do_cancel(evpl, conn, cred, args, encoding, private_data,
+                               3);
 } /* chimera_nfs_nlm4_cancel */
 
 static void
@@ -1050,7 +1103,7 @@ chimera_nfs_nlm4_do_unlock(
         res.stat        = NLM4_GRANTED;
         if (proc == 18) {
             shared->nlm_v4.send_call_NLMPROC4_UNLOCK_RES(&shared->nlm_v4.rpc2, evpl, conn, NULL, &res, 0, 0, NULL, 0, 0,
-                                                         NULL,
+                                                         nlm4_res_sent_cb,
                                                          NULL);
         } else {
             rc = shared->nlm_v4.send_reply_NLMPROC4_UNLOCK(evpl, NULL, &res, encoding);
@@ -1076,7 +1129,7 @@ chimera_nfs_nlm4_do_unlock(
         res.stat        = NLM4_GRANTED;
         if (proc == 18) {
             shared->nlm_v4.send_call_NLMPROC4_UNLOCK_RES(&shared->nlm_v4.rpc2, evpl, conn, NULL, &res, 0, 0, NULL, 0, 0,
-                                                         NULL,
+                                                         nlm4_res_sent_cb,
                                                          NULL);
         } else {
             rc = shared->nlm_v4.send_reply_NLMPROC4_UNLOCK(evpl, NULL, &res, encoding);
@@ -1113,7 +1166,7 @@ chimera_nfs_nlm4_do_unlock(
 
     if (proc == 18) {
         shared->nlm_v4.send_call_NLMPROC4_UNLOCK_RES(&shared->nlm_v4.rpc2, evpl, conn, NULL, &res, 0, 0, NULL, 0, 0,
-                                                     NULL,
+                                                     nlm4_res_sent_cb,
                                                      NULL);
     } else {
         rc = shared->nlm_v4.send_reply_NLMPROC4_UNLOCK(evpl, NULL, &res, encoding);
@@ -1212,18 +1265,17 @@ chimera_nfs_nlm4_cancel_msg(
     struct chimera_server_nfs_shared *shared = thread->shared;
     int                               rc;
 
-    struct nlm4_res                   res;
-
     chimera_nfs_debug("NLM CANCEL_MSG received");
 
     rc = shared->nlm_v4.send_reply_NLMPROC4_CANCEL_MSG(evpl, NULL, encoding);
     chimera_nfs_abort_if(rc, "Failed to send NLM CANCEL_MSG reply");
-    /* No pending-lock queue, so there is nothing to cancel.  Reply granted. */
-    res.cookie.len  = args->cookie.len;
-    res.cookie.data = args->cookie.data;
-    res.stat        = NLM4_GRANTED;
-    shared->nlm_v4.send_call_NLMPROC4_CANCEL_RES(&shared->nlm_v4.rpc2, evpl, conn, NULL, &res, 0, 0, NULL, 0, 0, NULL,
-                                                 NULL);
+
+    /* RFC 1813 gives the asynchronous form the same meaning as the
+     * synchronous one, so it does the same work -- withdrawing a queued
+     * blocking LOCK -- and reports the outcome through NLMPROC4_CANCEL_RES.
+     * Acknowledging without cancelling would leave the client's blocking
+     * LOCK queued for a range it has given up on. */
+    chimera_nfs_nlm4_do_cancel(evpl, conn, cred, args, NULL, private_data, 19);
 } /* chimera_nfs_nlm4_cancel_msg */
 
 void

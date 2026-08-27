@@ -420,13 +420,19 @@ nlm_granter_thread_init(
     return ctx;
 } /* nlm_granter_thread_init */
 
+/*
+ * Note the private_data this receives: evpl_thread_function REPLACES the
+ * thread's private_data with whatever the init callback returned, so what
+ * arrives here is the nlm_grant_ctx, not the nlm_granter that was handed to
+ * evpl_thread_create.  The granter is reached through the ctx.
+ */
 static void
 nlm_granter_thread_shutdown(
     struct evpl *evpl,
     void        *private_data)
 {
-    struct nlm_granter      *granter = private_data;
-    struct nlm_grant_ctx    *ctx     = nlm_grant_tls_ctx;
+    struct nlm_grant_ctx    *ctx     = private_data;
+    struct nlm_granter      *granter = ctx ? ctx->granter : NULL;
     struct nlm_grant_job    *job, *tmp;
     struct nlm_grant_intake *head, *node, *next;
 
@@ -437,6 +443,11 @@ nlm_granter_thread_shutdown(
             nlm_grant_job_finish(job);
         }
         evpl_rpc2_thread_destroy(ctx->rpc2_thread);
+    }
+
+    if (!granter) {
+        nlm_grant_tls_ctx = NULL;
+        return;
     }
 
     evpl_remove_doorbell(evpl, &granter->doorbell);
