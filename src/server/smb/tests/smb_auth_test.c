@@ -26,6 +26,7 @@
 
 #include "vfs/vfs.h"
 #include "vfs/vfs_user_cache.h"
+#include "server/smb/smb_wbclient.h"
 
 #define TEST_PASS(name) do { fprintf(stderr, "  PASS: %s\n", name); passed++; } while (0)
 #define TEST_FAIL(name) do { fprintf(stderr, "  FAIL: %s\n", name); failed++; } while (0)
@@ -578,6 +579,75 @@ test_cache_capacity(void)
     chimera_vfs_user_cache_destroy(cache);
 } /* test_cache_capacity */
 
+/*
+ * Test the LmChallengeResponse normalization the winbind logon path applies.
+ *
+ * MS-NLMP 3.2.5.1.2 lets a client that authenticates with NTLMv2 alone send a
+ * zero-length LmChallengeResponse, which the server must read as the implied
+ * Z(24).  winbind's auth_crap interface refuses length 0 outright -- even when
+ * the NTLMv2 proof verifies -- so smb_wbclient_lm_response() materializes those
+ * 24 zero bytes; without it every mount.cifs logon against a winbind-backed
+ * server fails with STATUS_LOGON_FAILURE.  A client that did send a real LM
+ * field must be forwarded untouched, and a single-byte field must stay
+ * single-byte: validate_authenticate() keys anonymous-logon detection off
+ * `lm_response_len <= 1` and must keep seeing the length as sent.
+ */
+static void
+test_wbclient_lm_implied_zeros(void)
+{
+    const uint8_t  real_lm[24] = { 0xAA, 0xBB, 0xCC, 0xDD };
+    const uint8_t  one_byte[1] = { 0x00 };
+    const uint8_t *data;
+    uint32_t       len;
+    int            all_zero;
+
+    fprintf(stderr, "\nTesting winbind LM response normalization...\n");
+
+    /* Zero length -> the implied Z(24).  Passed a NULL buffer on purpose: the
+     * normalizer must not dereference a field the client omitted. */
+    data = NULL;
+    len  = 0xFFFFFFFF;
+    smb_wbclient_lm_response(NULL, 0, &data, &len);
+
+    if (len == 24) {
+        TEST_PASS("Zero-length LM response becomes 24 bytes");
+    } else {
+        TEST_FAIL("Zero-length LM response becomes 24 bytes");
+    }
+
+    all_zero = (data != NULL);
+    for (uint32_t i = 0; data && i < len; i++) {
+        if (data[i] != 0) {
+            all_zero = 0;
+        }
+    }
+
+    if (all_zero) {
+        TEST_PASS("Implied LM response is 24 zero bytes");
+    } else {
+        TEST_FAIL("Implied LM response is 24 zero bytes");
+    }
+
+    /* A real 24-byte LM field (what smbclient and Windows send) is forwarded
+     * verbatim. */
+    smb_wbclient_lm_response(real_lm, sizeof(real_lm), &data, &len);
+
+    if (len == sizeof(real_lm) && data == real_lm) {
+        TEST_PASS("24-byte LM response passes through unchanged");
+    } else {
+        TEST_FAIL("24-byte LM response passes through unchanged");
+    }
+
+    /* A single byte must NOT be padded, or the anonymous logon signal breaks. */
+    smb_wbclient_lm_response(one_byte, sizeof(one_byte), &data, &len);
+
+    if (len == 1 && data == one_byte) {
+        TEST_PASS("Single-byte LM response is not padded");
+    } else {
+        TEST_FAIL("Single-byte LM response is not padded");
+    }
+} /* test_wbclient_lm_implied_zeros */
+
 static void
 usage(const char *prog)
 {
@@ -643,6 +713,7 @@ main(
         test_user_full_fields();
         test_user_update();
         test_cache_capacity();
+        test_wbclient_lm_implied_zeros();
     }
 
     if (test_mode == TEST_MODE_ALL || test_mode == TEST_MODE_NTLM_WINBIND) {
