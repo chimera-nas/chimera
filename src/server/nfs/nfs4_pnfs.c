@@ -600,6 +600,13 @@ ff_lg_emit(struct ff_layoutget_ctx *ctx)
 
     layout = nfs_layout_state_find(client, req->fh, req->fhlen);
     if (layout) {
+        /* One layout per (client, file), so a later RW LAYOUTGET over a
+         * layout first taken for READ widens that layout rather than making a
+         * second one -- otherwise the RW access the client just acquired is
+         * invisible to LAYOUTCOMMIT, which requires it. */
+        if (args->loga_iomode == LAYOUTIOMODE4_RW) {
+            layout->iomode = LAYOUTIOMODE4_RW;
+        }
         nfs_layout_state_bump(layout, client_short_id, &res->logr_resok4.logr_stateid);
     } else {
         nfs_layout_state_create(client, req->fh, req->fhlen, req->export_id, args->loga_iomode,
@@ -832,6 +839,10 @@ lg_sourced_cb(
     client_short_id = (uint32_t) client->client_id;
     layout          = nfs_layout_state_find(client, req->fh, req->fhlen);
     if (layout) {
+        /* See ff_lg_emit(): widen an existing READ layout to RW. */
+        if (args->loga_iomode == LAYOUTIOMODE4_RW) {
+            layout->iomode = LAYOUTIOMODE4_RW;
+        }
         nfs_layout_state_bump(layout, client_short_id, &res->logr_resok4.logr_stateid);
     } else {
         nfs_layout_state_create(client, req->fh, req->fhlen, req->export_id, args->loga_iomode,
@@ -1205,6 +1216,72 @@ chimera_nfs4_layoutcommit_setattr_complete(
     chimera_nfs4_compound_complete(req, NFS4_OK);
 } /* chimera_nfs4_layoutcommit_setattr_complete */
 
+/*
+ * The client's reported high-water byte is in hand and the file is open: apply
+ * it iff it extends the file.  loca_last_write_offset says how far the client
+ * wrote THROUGH THE LAYOUT (RFC 8881 18.42.3); it is not a truncate request, so
+ * a smaller value than the MDS already knows about -- a client that only
+ * rewrote the front of a file, or raced a concurrent extension -- must leave
+ * the size alone, and ns_sizechanged reports that honestly.
+ */
+static void
+chimera_nfs4_layoutcommit_getattr_complete(
+    enum chimera_vfs_error    error_code,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct nfs_request       *req  = private_data;
+    struct LAYOUTCOMMIT4args *args = &req->args_compound->argarray[req->index].oplayoutcommit;
+    struct LAYOUTCOMMIT4res  *res  = &req->res_compound.resarray[req->index].oplayoutcommit;
+    struct chimera_vfs_attrs *set_attr;
+    uint64_t                  cur, want;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        chimera_vfs_release(req->thread->vfs_thread, req->handle);
+        req->handle      = NULL;
+        res->locr_status = chimera_nfs4_errno_to_nfsstat4(error_code);
+        chimera_nfs4_compound_complete(req, res->locr_status);
+        return;
+    }
+
+    cur  = (attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) ? attr->va_size : 0;
+    want = args->loca_last_write_offset.no_offset + 1;
+
+    if (want <= cur && !args->loca_time_modify.nt_timechanged) {
+        chimera_vfs_release(req->thread->vfs_thread, req->handle);
+        req->handle                                  = NULL;
+        res->locr_resok4.locr_newsize.ns_sizechanged = 0;
+        res->locr_status                             = NFS4_OK;
+        chimera_nfs4_compound_complete(req, NFS4_OK);
+        return;
+    }
+
+    /* Compound-lifetime storage so it outlives this async setattr. */
+    set_attr = xdr_dbuf_alloc_space(sizeof(*set_attr), req->encoding->dbuf);
+    chimera_nfs_abort_if(set_attr == NULL, "Failed to allocate space");
+
+    set_attr->va_req_mask = 0;
+    set_attr->va_set_mask = 0;
+
+    if (want > cur) {
+        set_attr->va_set_mask |= CHIMERA_VFS_ATTR_SIZE;
+        set_attr->va_size      = want;
+    }
+
+    if (args->loca_time_modify.nt_timechanged) {
+        set_attr->va_set_mask     |= CHIMERA_VFS_ATTR_MTIME;
+        set_attr->va_mtime.tv_sec  = args->loca_time_modify.nt_time.seconds;
+        set_attr->va_mtime.tv_nsec = args->loca_time_modify.nt_time.nseconds;
+    }
+
+    chimera_nfs_info("LAYOUTCOMMIT req=%p size %llu -> %llu mtime_chg=%d",
+                     req, (unsigned long long) cur, (unsigned long long) want,
+                     args->loca_time_modify.nt_timechanged);
+    chimera_vfs_setattr(req->thread->vfs_thread, &req->cred, req->handle,
+                        set_attr, 0, CHIMERA_VFS_ATTR_SIZE,
+                        chimera_nfs4_layoutcommit_setattr_complete, req);
+} /* chimera_nfs4_layoutcommit_getattr_complete */
+
 static void
 chimera_nfs4_layoutcommit_open_callback(
     enum chimera_vfs_error          error_code,
@@ -1214,7 +1291,6 @@ chimera_nfs4_layoutcommit_open_callback(
     struct nfs_request       *req  = private_data;
     struct LAYOUTCOMMIT4args *args = &req->args_compound->argarray[req->index].oplayoutcommit;
     struct LAYOUTCOMMIT4res  *res  = &req->res_compound.resarray[req->index].oplayoutcommit;
-    struct chimera_vfs_attrs *set_attr;
 
     if (error_code != CHIMERA_VFS_OK) {
         res->locr_status = chimera_nfs4_errno_to_nfsstat4(error_code);
@@ -1236,26 +1312,11 @@ chimera_nfs4_layoutcommit_open_callback(
         return;
     }
 
-    /* Compound-lifetime storage so it outlives this async setattr. */
-    set_attr = xdr_dbuf_alloc_space(sizeof(*set_attr), req->encoding->dbuf);
-    chimera_nfs_abort_if(set_attr == NULL, "Failed to allocate space");
-
-    set_attr->va_req_mask = 0;
-    set_attr->va_set_mask = CHIMERA_VFS_ATTR_SIZE;
-    set_attr->va_size     = args->loca_last_write_offset.no_offset + 1;
-
-    if (args->loca_time_modify.nt_timechanged) {
-        set_attr->va_set_mask     |= CHIMERA_VFS_ATTR_MTIME;
-        set_attr->va_mtime.tv_sec  = args->loca_time_modify.nt_time.seconds;
-        set_attr->va_mtime.tv_nsec = args->loca_time_modify.nt_time.nseconds;
-    }
-
-    chimera_nfs_info("LAYOUTCOMMIT req=%p open ok -> setattr size=%llu mtime_chg=%d",
-                     req, (unsigned long long) set_attr->va_size,
-                     args->loca_time_modify.nt_timechanged);
-    chimera_vfs_setattr(req->thread->vfs_thread, &req->cred, handle,
-                        set_attr, 0, CHIMERA_VFS_ATTR_SIZE,
-                        chimera_nfs4_layoutcommit_setattr_complete, req);
+    /* Read the size the MDS holds before deciding: the commit extends the file,
+     * it never shrinks it. */
+    chimera_vfs_getattr(req->thread->vfs_thread, &req->cred, req->handle,
+                        CHIMERA_VFS_ATTR_SIZE,
+                        chimera_nfs4_layoutcommit_getattr_complete, req);
 } /* chimera_nfs4_layoutcommit_open_callback */
 
 void
@@ -1265,7 +1326,10 @@ chimera_nfs4_layoutcommit(
     struct nfs_argop4                *argop,
     struct nfs_resop4                *resop)
 {
-    struct LAYOUTCOMMIT4res *res = &resop->oplayoutcommit;
+    struct LAYOUTCOMMIT4args *args = &argop->oplayoutcommit;
+    struct LAYOUTCOMMIT4res  *res  = &resop->oplayoutcommit;
+    struct nfs_client        *client;
+    struct nfs_layout_state  *layout;
 
     req->handle = NULL;
 
@@ -1277,6 +1341,43 @@ chimera_nfs4_layoutcommit(
 
     if (req->fhlen == 0) {
         res->locr_status = NFS4ERR_NOFILEHANDLE;
+        chimera_nfs4_compound_complete(req, res->locr_status);
+        return;
+    }
+
+    /* LAYOUTCOMMIT commits writes the client made THROUGH a layout it holds
+     * (RFC 8881 18.42.3), and the size it reports is trusted on that basis.
+     * Without that layout there is nothing to commit and no reason to trust
+     * the size: a stateid naming a layout this client no longer holds for this
+     * file is NFS4ERR_BAD_STATEID, and a layout held only for reading is
+     * NFS4ERR_BADLAYOUT.  (Before this check any client could set any file's
+     * size with a LAYOUTCOMMIT, including shrinking it.) */
+    client = req->session ? req->session->client_unified : NULL;
+    layout = client ? nfs_layout_state_find(client, req->fh, req->fhlen) : NULL;
+
+    if (!layout) {
+        res->locr_status = NFS4ERR_BAD_STATEID;
+        chimera_nfs4_compound_complete(req, res->locr_status);
+        return;
+    }
+
+    /* RFC 8881 8.2.2: a zero seqid in an argument stateid means "the current
+     * one".  A non-zero one has to match, exactly as for LAYOUTRETURN. */
+    if (args->loca_stateid.seqid != 0) {
+        if (args->loca_stateid.seqid < layout->seqid) {
+            res->locr_status = NFS4ERR_OLD_STATEID;
+            chimera_nfs4_compound_complete(req, res->locr_status);
+            return;
+        }
+        if (args->loca_stateid.seqid > layout->seqid) {
+            res->locr_status = NFS4ERR_BAD_STATEID;
+            chimera_nfs4_compound_complete(req, res->locr_status);
+            return;
+        }
+    }
+
+    if (layout->iomode != LAYOUTIOMODE4_RW) {
+        res->locr_status = NFS4ERR_BADLAYOUT;
         chimera_nfs4_compound_complete(req, res->locr_status);
         return;
     }
