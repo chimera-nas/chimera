@@ -928,8 +928,15 @@ diskfs_setattr_inode_cb(
     /* Persist the opaque pNFS layout blob as this inode's single PNFS record,
      * replacing any previous one (the insert aborts on a duplicate key).  The
      * in-memory mirror is installed up front; the chain replays it into the
-     * tree. */
-    if (request->setattr.set_attr->va_set_mask & CHIMERA_VFS_ATTR_PNFS_LAYOUT) {
+     * tree.
+     *
+     * orig_mask, not set_attr->va_set_mask: diskfs_apply_attrs() has already
+     * rewritten the latter to what it applied, and it does not know about the
+     * pNFS blob -- so testing it silently dropped every blob a metadata server
+     * ever wrote.  A diskfs MDS then re-steered on each LAYOUTGET and handed
+     * the client a brand-new (empty) backing file, orphaning the data behind
+     * the previous one. */
+    if (orig_mask & CHIMERA_VFS_ATTR_PNFS_LAYOUT) {
         uint32_t blob_len = request->setattr.set_attr->va_pnfs_len;
         int      had_old  = inode->pnfs_blob != NULL;
 
