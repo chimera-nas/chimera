@@ -1432,7 +1432,7 @@ op_list_objects(
                         enc);
     }
     if (mode == 3) {
-        off += snprintf(query + off, sizeof(query) - off, "&versions=");
+        snprintf(query + off, sizeof(query) - off, "&versions=");
     }
 
     req.path  = path;
@@ -1749,6 +1749,11 @@ parse_tagset(
             !xml_text_after(cur, "Value", vtext, sizeof(vtext))) {
             mism_add(m, "tagging: malformed <Tag> block");
             break;
+        }
+        if (n < max) {
+            /* an unexpected tag key still fills its slot (with a sentinel
+            * no model tag id uses), so every returned index is defined */
+            ids[n] = -1;
         }
         if (strncmp(ktext, "tk", 2) != 0) {
             mism_add(m, "tagging: unexpected tag key '%s'", ktext);
@@ -2644,12 +2649,14 @@ main(
                         "usage: %s [--trace f.itf.json | --trace-dir dir]\n"
                         "          [--exclude-prefix p] [--block-size n]\n"
                         "          [--sigv2] [--verbose] [--dry-run]\n", argv[0]);
+                mbt_free_traces(traces, ntraces);
                 return 2;
         } /* switch */
     }
 
     if (ntraces == 0) {
         fprintf(stderr, "no traces given (--trace / --trace-dir)\n");
+        mbt_free_traces(traces, ntraces);
         return 2;
     }
 
