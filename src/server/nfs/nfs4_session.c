@@ -1582,6 +1582,58 @@ nfs4_replay_arm_capture(struct nfs_request *req)
     }
 } /* nfs4_replay_arm_capture */
 
+/*
+ * A 64-bit FNV-1a over the identity a request was made under.
+ *
+ * The fields are the ones chimera_nfs4_compound already decodes onto the
+ * request: the auth flavor, the AUTH_SYS uid/gid and machine name, or the
+ * RPCSEC_GSS principal (which arrives in the same machinename slot).  Not the
+ * raw credential bytes -- the AUTH_SYS stamp is free to differ between a call
+ * and its own retransmission, so folding it in would make every retry look
+ * false.
+ */
+static uint64_t
+nfs4_replay_fold(
+    uint64_t    h,
+    const void *data,
+    uint32_t    len)
+{
+    const uint8_t *p = data;
+    uint32_t       i;
+
+    for (i = 0; i < len; i++) {
+        h ^= p[i];
+        h *= 1099511628211ULL;   /* FNV-1a prime */
+    }
+    return h;
+} /* nfs4_replay_fold */
+
+/*
+ * A 64-bit FNV-1a over the identity a request was made under.
+ *
+ * The fields are the ones chimera_nfs4_compound already decodes onto the
+ * request: the auth flavor, the AUTH_SYS uid/gid and machine name, or the
+ * RPCSEC_GSS principal (which arrives in the same machinename slot).  Not the
+ * raw credential bytes -- the AUTH_SYS stamp is free to differ between a call
+ * and its own retransmission, so folding it in would make every retry look
+ * false.
+ */
+uint64_t
+nfs4_replay_principal_digest(const struct nfs_request *req)
+{
+    uint64_t h = 1469598103934665603ULL;   /* FNV-1a offset basis */
+
+    h = nfs4_replay_fold(h, &req->principal_flavor,
+                         sizeof(req->principal_flavor));
+    h = nfs4_replay_fold(h, &req->principal_uid, sizeof(req->principal_uid));
+    h = nfs4_replay_fold(h, &req->principal_gid, sizeof(req->principal_gid));
+    if (req->principal_machinename && req->principal_machinename_len) {
+        h = nfs4_replay_fold(h, req->principal_machinename,
+                             req->principal_machinename_len);
+    }
+    return h;
+} /* nfs4_replay_principal_digest */
+
 nfsstat4
 nfs4_replay_slot_acquire(
     struct nfs4_session *session,
@@ -1633,6 +1685,7 @@ nfs4_replay_slot_acquire(
             req->replay_action      = NFS4_REPLAY_ACTION_NEW;
             slot->in_progress_since = nfs4_slot_now();
             slot->last_stuck_report = 0;
+            slot->principal         = nfs4_replay_principal_digest(req);
             if (cachethis) {
                 nfs4_replay_arm_capture(req);
             }
@@ -1670,10 +1723,39 @@ nfs4_replay_slot_acquire(
                 req->replay_action      = NFS4_REPLAY_ACTION_NEW;
                 slot->in_progress_since = nfs4_slot_now();
                 slot->last_stuck_report = 0;
+                slot->principal         = nfs4_replay_principal_digest(req);
                 if (cachethis) {
                     nfs4_replay_arm_capture(req);
                 }
             } else if (seqid == cseq) {
+                /*
+                 * A retry.  Before anything else, is it the same user?
+                 *
+                 * RFC 8881 Section 2.10.6.1.3.1: a retry that "uses a
+                 * different principal in the RPC request's credential field
+                 * that translates to a different user" is a false retry, and
+                 * "if the replier determines the users are different between
+                 * the original request and a retry, then the replier MUST
+                 * return NFS4ERR_SEQ_FALSE_RETRY".  Answering it from the
+                 * cache instead hands one user another user's reply and
+                 * silently drops the operation the second one asked for.
+                 *
+                 * The MUST is conditioned on the replier DETERMINING that the
+                 * users differ, and there is one slot that cannot: one
+                 * reconstructed from the KV store after a restart
+                 * (nfs4_drc_repopulate_slot), whose principal was never
+                 * persisted and reads as zero.  Erroring there would answer
+                 * the rightful owner NFS4ERR_SEQ_FALSE_RETRY on the first
+                 * retransmit after every failover, which is the case the
+                 * persistence exists to serve.  Persisting the digest with
+                 * the reply would close the gap and is a change to the record
+                 * format.
+                 */
+                if (slot->principal &&
+                    slot->principal != nfs4_replay_principal_digest(req)) {
+                    status = NFS4ERR_SEQ_FALSE_RETRY;
+                    break;
+                }
                 /* Retransmit.  A CACHED slot always has a live cached_buf
                  * (finalize promotes to CACHED only when bytes were captured),
                  * so claim it CACHED -> IN_PROGRESS with the *same* CAS the
@@ -1713,10 +1795,24 @@ nfs4_replay_slot_acquire(
              * (true retry) or not (client jumped ahead), we cannot
              * produce a reply yet.  Both paths return errors. */
             if (seqid == cseq) {
-                status = NFS4ERR_RETRY_UNCACHED_REP;
+                /*
+                 * RFC 8881 Section 2.10.6.2: "A retry might be sent while the
+                 * original request is still in progress on the replier.  The
+                 * replier SHOULD deal with the issue by returning NFS4ERR_DELAY
+                 * as the reply to SEQUENCE or CB_SEQUENCE operation, but
+                 * implementations MAY return NFS4ERR_MISORDERED."
+                 *
+                 * NFS4ERR_RETRY_UNCACHED_REP, which this used to answer, is
+                 * neither -- and Section 2.10.6.1.3 forbids it outright as the
+                 * result of a Sequence operation in the first position, which
+                 * SEQUENCE always is.  It is also what made a wedged slot
+                 * invisible: a client retries RETRY_UNCACHED_REP silently
+                 * forever, where NFS4ERR_DELAY makes it back off and retry the
+                 * way the protocol intends.
+                 */
+                status = NFS4ERR_DELAY;
                 /* A retry landing on a slot that has been IN_PROGRESS for many
-                 * seconds means the original compound is wedged server-side;
-                 * the client will retry RETRY_UNCACHED_REP silently forever
+                 * seconds means the original compound is wedged server-side
                  * (observed as fsstress writeback hanging in CI with 14k
                  * errored WRITE RPCs and nothing in the server log).  Make the
                  * wedge visible, rate-limited per slot. */
@@ -1729,7 +1825,7 @@ nfs4_replay_slot_acquire(
                         slot->last_stuck_report = now;
                         chimera_nfs_error(
                             "nfs4 session slot %u seqid %u stuck IN_PROGRESS "
-                            "for %ld sec; replying RETRY_UNCACHED_REP "
+                            "for %ld sec; replying NFS4ERR_DELAY "
                             "(original compound has not completed)",
                             slotid, seqid,
                             (long) (now - slot->in_progress_since));
@@ -1751,7 +1847,11 @@ nfs4_replay_slot_acquire(
         nfs4_replay_metric_inc(req, replay_field_hit);
     } else if (status == NFS4ERR_SEQ_MISORDERED) {
         nfs4_replay_metric_inc(req, replay_field_seq_misordered);
-    } else if (status == NFS4ERR_RETRY_UNCACHED_REP) {
+    } else if (status == NFS4ERR_RETRY_UNCACHED_REP ||
+               status == NFS4ERR_DELAY ||
+               status == NFS4ERR_SEQ_FALSE_RETRY) {
+        /* One counter for "a retry this slot could not replay", whichever of
+         * the three the reason turned out to be. */
         nfs4_replay_metric_inc(req, replay_field_retry_uncached);
     }
     return status;

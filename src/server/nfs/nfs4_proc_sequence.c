@@ -7,6 +7,43 @@
 #include "nfs4_state.h"
 #include "nfs4_drc.h"
 
+/*
+ * The SEQUENCE result of a successful slot acquisition.
+ *
+ * RFC 8881 Section 2.10.6.1.1 requires this reply to be cached, and permits a
+ * replier to recompute the slot-usage fields rather than store them; that is
+ * what this does, which is also why the uncached-retry path can call it to
+ * reconstruct the reply the client should have received.
+ */
+static void
+nfs4_sequence_fill_resok(
+    struct SEQUENCE4res  *res,
+    struct nfs4_session  *session,
+    struct SEQUENCE4args *args)
+{
+    res->sr_status = NFS4_OK;
+    memcpy(res->sr_resok4.sr_sessionid, session->nfs4_session_id,
+           NFS4_SESSIONID_SIZE);
+    res->sr_resok4.sr_sequenceid = args->sa_sequenceid;
+    res->sr_resok4.sr_slotid     = args->sa_slotid;
+    /* RFC 5661 18.46.3: sr_highest_slotid is the *maximum slot id*, not
+     * the count.  Linux nfsd returns max_slots - 1. */
+    res->sr_resok4.sr_highest_slotid =
+        session->replay_max_slots ? session->replay_max_slots - 1 : 0;
+    res->sr_resok4.sr_target_highest_slotid = res->sr_resok4.sr_highest_slotid;
+    res->sr_resok4.sr_status_flags          = 0;
+
+    /* RFC 8881 §2.10.6.3 / §18.46.3: signal the client that one or more of its
+     * recallable objects (delegations) have been revoked, so it issues
+     * TEST_STATEID / FREE_STATEID to recover.  Cleared once the client has
+     * freed every revoked delegation. */
+    if (session->client_unified &&
+        atomic_load_explicit(&session->client_unified->revoked_deleg_count,
+                             memory_order_acquire) > 0) {
+        res->sr_resok4.sr_status_flags |= SEQ4_STATUS_RECALLABLE_STATE_REVOKED;
+    }
+} /* nfs4_sequence_fill_resok */
+
 void
 chimera_nfs4_sequence(
     struct chimera_server_nfs_thread *thread,
@@ -53,6 +90,40 @@ chimera_nfs4_sequence(
                                       req,
                                       &is_replay);
 
+    /*
+     * A retry of a request whose reply was not cached.
+     *
+     * RFC 8881 Section 2.10.6.1.1: "When a SEQUENCE or CB_SEQUENCE operation is
+     * successfully executed, its reply MUST always be cached" -- even when the
+     * client did not ask for the rest of the COMPOUND to be.  So a retry has a
+     * SEQUENCE reply to be answered from, and Section 2.10.6.1.3 says what the
+     * rest of the COMPOUND gets: the replier "enters into its reply cache a
+     * reply consisting of the original results to the SEQUENCE ... operation,
+     * and with the next operation in COMPOUND ... having the error
+     * NFS4ERR_RETRY_UNCACHED_REP", and it "MUST NOT return
+     * NFS4ERR_RETRY_UNCACHED_REP in reply to a Sequence operation if the
+     * Sequence operation is the first operation" -- which it always is, since
+     * a COMPOUND that does not begin with SEQUENCE is refused earlier.
+     *
+     * A lone SEQUENCE has no next operation, and nothing but the SEQUENCE reply
+     * to cache, so the cached success is the whole answer.
+     */
+    if (status == NFS4ERR_RETRY_UNCACHED_REP) {
+        nfs4_sequence_fill_resok(res, session, args);
+
+        if (req->args_compound->num_argarray > 1) {
+            req->index = 1;
+            nfs4_fail_undispatched_op(thread,
+                                      &req->args_compound->argarray[1],
+                                      &req->res_compound.resarray[1],
+                                      NFS4ERR_RETRY_UNCACHED_REP);
+            chimera_nfs4_compound_complete(req, NFS4ERR_RETRY_UNCACHED_REP);
+        } else {
+            chimera_nfs4_compound_complete(req, NFS4_OK);
+        }
+        return;
+    }
+
     if (status != NFS4_OK) {
         res->sr_status = status;
         chimera_nfs4_compound_complete(req, status);
@@ -88,27 +159,7 @@ chimera_nfs4_sequence(
         return;
     }
 
-    res->sr_status = NFS4_OK;
-    memcpy(res->sr_resok4.sr_sessionid, session->nfs4_session_id,
-           NFS4_SESSIONID_SIZE);
-    res->sr_resok4.sr_sequenceid = args->sa_sequenceid;
-    res->sr_resok4.sr_slotid     = args->sa_slotid;
-    /* RFC 5661 18.46.3: sr_highest_slotid is the *maximum slot id*, not
-     * the count.  Linux nfsd returns max_slots - 1. */
-    res->sr_resok4.sr_highest_slotid =
-        session->replay_max_slots ? session->replay_max_slots - 1 : 0;
-    res->sr_resok4.sr_target_highest_slotid = res->sr_resok4.sr_highest_slotid;
-    res->sr_resok4.sr_status_flags          = 0;
-
-    /* RFC 8881 §2.10.6.3 / §18.46.3: signal the client that one or more of its
-     * recallable objects (delegations) have been revoked, so it issues
-     * TEST_STATEID / FREE_STATEID to recover.  Cleared once the client has
-     * freed every revoked delegation. */
-    if (session->client_unified &&
-        atomic_load_explicit(&session->client_unified->revoked_deleg_count,
-                             memory_order_acquire) > 0) {
-        res->sr_resok4.sr_status_flags |= SEQ4_STATUS_RECALLABLE_STATE_REVOKED;
-    }
+    nfs4_sequence_fill_resok(res, session, args);
 
     if (args->sa_cachethis &&
         session->nfs4_session_fore_attrs.ca_maxresponsesize_cached &&
