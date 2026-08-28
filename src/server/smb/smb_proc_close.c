@@ -76,7 +76,11 @@ chimera_smb_close_doc_status(enum chimera_vfs_error error_code)
         case CHIMERA_VFS_ENOTEMPTY: return SMB2_STATUS_DIRECTORY_NOT_EMPTY;
         case CHIMERA_VFS_EACCES:
         case CHIMERA_VFS_EPERM:     return SMB2_STATUS_ACCESS_DENIED;
-        case CHIMERA_VFS_ENOENT:    return SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
+        case CHIMERA_VFS_ENOENT:
+        /* A handle whose object is gone reports ESTALE now that the backends
+         * distinguish it from a name that was never there; SMB has one status
+         * for both. */
+        case CHIMERA_VFS_ESTALE:    return SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
         default:                    return SMB2_STATUS_INTERNAL_ERROR;
     } /* switch */
 } /* chimera_smb_close_doc_status */

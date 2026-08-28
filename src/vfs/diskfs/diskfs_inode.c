@@ -173,14 +173,15 @@ diskfs_inode_release_one(
         w = inode->wait_head;
 
         if (w->gen != inode->gen) {
-            /* The inode this waiter referenced was freed/replaced.  Fail
-             * it with ENOENT rather than handing back a stale inode. */
+            /* The inode this waiter referenced was freed/replaced, so the
+             * handle it came from no longer names anything: ESTALE rather
+             * than handing back a stale inode. */
             inode->wait_head = w->next;
             if (!inode->wait_head) {
                 inode->wait_tail = NULL;
             }
             inode->wait_count--;
-            w->status = CHIMERA_VFS_ENOENT;
+            w->status = CHIMERA_VFS_ESTALE;
             w->next   = granted;
             granted   = w;
             continue;
@@ -314,7 +315,7 @@ diskfs_inode_acquire(
         inode = txn->inodes[i].inode;
         if (inode->inum == inum) {
             if (unlikely(inode->gen != gen)) {
-                cb(NULL, CHIMERA_VFS_ENOENT, private_data);
+                cb(NULL, CHIMERA_VFS_ESTALE, private_data);
             } else {
                 cb(inode, CHIMERA_VFS_OK, private_data);
             }
@@ -331,7 +332,7 @@ diskfs_inode_acquire(
         /* Cached under a different generation: the handle is stale. */
         diskfs_metric_inode_cache(thread, DISKFS_METRIC_INODE_CACHE_STALE);
         pthread_mutex_unlock(&shard->lock);
-        cb(NULL, CHIMERA_VFS_ENOENT, private_data);
+        cb(NULL, CHIMERA_VFS_ESTALE, private_data);
         return;
     }
 
@@ -347,7 +348,7 @@ diskfs_inode_acquire(
         if (sm_inum_valid(thread->shared->space_map, inum)) {
             diskfs_inode_load(thread, txn, fs, inum, gen, mode, cb, private_data);
         } else {
-            cb(NULL, CHIMERA_VFS_ENOENT, private_data);
+            cb(NULL, CHIMERA_VFS_ESTALE, private_data);
         }
         return;
     }
