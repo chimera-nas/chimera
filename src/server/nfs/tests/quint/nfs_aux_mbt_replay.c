@@ -1620,7 +1620,11 @@ run_trace(
     alarm(180);
 
     o = calloc(1, sizeof(*o));
-    mbt_env_fs_setup(env, fsname);
+    /* The aux harness asserts against a fixed "/share" export -- its MNT
+     * cases include deliberate near-misses like "/shareXX" -- so it mounts
+     * under that name rather than the per-trace one the batch replayers
+     * use.  The filesystem itself is still per-trace. */
+    mbt_env_fs_setup_as(env, fsname, "share");
 
     o->env       = env;
     o->verbose   = verbose;
@@ -1673,7 +1677,7 @@ run_trace(
 
  out:
     trace_teardown(o);
-    mbt_env_fs_teardown(env, fsname);
+    mbt_env_fs_teardown_as(env, fsname, "share");
     while (o->nhist) {
         free(o->history[--o->nhist].op_dump);
     }
