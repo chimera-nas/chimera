@@ -444,6 +444,9 @@ chimera_s3_delete_bucket(
     if (shared->bucket_root_pathlen == 0) {
         request->status    = CHIMERA_S3_STATUS_NOT_IMPLEMENTED;
         request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
+        if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
+            s3_server_respond(thread->evpl, request);
+        }
         return;
     }
 

@@ -770,6 +770,9 @@ chimera_s3_upload_part_create_unlinked_callback(
         request->multipart.upload = NULL;
         request->status           = CHIMERA_S3_STATUS_INTERNAL_ERROR;
         request->vfs_state        = CHIMERA_S3_VFS_STATE_COMPLETE;
+        if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
+            s3_server_respond(thread->evpl, request);
+        }
         return;
     }
 
@@ -801,6 +804,9 @@ chimera_s3_upload_part_create_callback(
         request->multipart.upload = NULL;
         request->status           = CHIMERA_S3_STATUS_INTERNAL_ERROR;
         request->vfs_state        = CHIMERA_S3_VFS_STATE_COMPLETE;
+        if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
+            s3_server_respond(thread->evpl, request);
+        }
         return;
     }
 
@@ -826,6 +832,9 @@ chimera_s3_upload_part_open_dir_callback(
         request->multipart.upload = NULL;
         request->status           = CHIMERA_S3_STATUS_INTERNAL_ERROR;
         request->vfs_state        = CHIMERA_S3_VFS_STATE_COMPLETE;
+        if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
+            s3_server_respond(thread->evpl, request);
+        }
         return;
     }
 
@@ -889,6 +898,9 @@ chimera_s3_upload_part_lookup_callback(
         request->multipart.upload = NULL;
         request->status           = CHIMERA_S3_STATUS_NO_SUCH_KEY;
         request->vfs_state        = CHIMERA_S3_VFS_STATE_COMPLETE;
+        if (request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
+            s3_server_respond(thread->evpl, request);
+        }
         return;
     }
 
