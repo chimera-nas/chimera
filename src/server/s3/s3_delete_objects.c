@@ -412,8 +412,11 @@ chimera_s3_del_open_cb(
     struct chimera_server_s3_thread *thread  = request->thread;
 
     if (error_code) {
-        /* Parent directory could not be opened: object is effectively gone. */
-        chimera_s3_del_record(request, 1, NULL, NULL);
+        /* The parent existed a moment ago (its lookup succeeded); any
+        * failure to open it is a real error, not an absent object. */
+        chimera_s3_del_record(request, 0, "InternalError",
+                              "We encountered an internal error. "
+                              "Please try again.");
         return;
     }
 
@@ -441,9 +444,16 @@ chimera_s3_del_lookup_cb(
     struct chimera_s3_request       *request = private_data;
     struct chimera_server_s3_thread *thread  = request->thread;
 
-    if (error_code) {
+    if (error_code == CHIMERA_VFS_ENOENT || error_code == CHIMERA_VFS_ENOTDIR) {
         /* Parent path does not exist: object is effectively gone. */
         chimera_s3_del_record(request, 1, NULL, NULL);
+        return;
+    } else if (error_code) {
+        /* Any other lookup failure (ESTALE, EIO, ...) must not masquerade
+         * as a successful delete: the object may well still exist. */
+        chimera_s3_del_record(request, 0, "InternalError",
+                              "We encountered an internal error. "
+                              "Please try again.");
         return;
     }
 
