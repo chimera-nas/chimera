@@ -103,6 +103,84 @@ nfs3_drc_checksum_iov(
     return h;
 } /* nfs3_drc_checksum_iov */
 
+/*
+ * Fold the caller's identity into a request checksum.
+ *
+ * The iovecs a dispatcher is handed begin after the RPC header, so they do not
+ * cover the credential: two users sending byte-identical procedure arguments
+ * produce the same checksum.  With the address (NFSv3) or the connection
+ * (NFSv4.0) as the only other scope, that is enough for one user's request to
+ * be answered from another's entry -- and the second user is told its
+ * non-idempotent operation succeeded when nothing of the sort ran.  Two users
+ * on one machine, or on one container host behind a NAT, are all it takes.
+ *
+ * RFC 8881 Section 2.10.6.1.3.1 states the rule for the NFSv4.1 reply cache: a
+ * retry "that uses a different principal in the RPC request's credential field
+ * that translates to a different user" is a false retry, and if the replier
+ * determines the users differ it MUST NOT answer from the cache.  Neither
+ * RFC 1813 nor RFC 7530 discusses a reply cache at all, so neither says
+ * anything either way -- but the hazard is the same one, and the fix is to make
+ * the identity part of what the key compares.
+ *
+ * The decoded credential is folded rather than the raw bytes, because the
+ * AUTH_SYS stamp is free to vary between a call and its own retransmission and
+ * folding it would mean nothing ever matched.  Squashing is deliberately not
+ * applied first: it happens later, per export, and two credentials that would
+ * squash together simply miss and re-execute, which costs work but is never
+ * wrong.
+ */
+uint64_t
+nfs3_drc_checksum_cred(
+    uint64_t                     h,
+    const struct evpl_rpc2_cred *cred)
+{
+    uint32_t flavor = cred ? cred->flavor : 0;
+    uint32_t i;
+
+    h = nfs3_drc_fnv_accum(h, (const uint8_t *) &flavor, sizeof(flavor));
+
+    if (!cred) {
+        return h;
+    }
+
+    switch (cred->flavor) {
+        case EVPL_RPC2_AUTH_SYS:
+            h = nfs3_drc_fnv_accum(h, (const uint8_t *) &cred->authsys.uid,
+                                   sizeof(cred->authsys.uid));
+            h = nfs3_drc_fnv_accum(h, (const uint8_t *) &cred->authsys.gid,
+                                   sizeof(cred->authsys.gid));
+            for (i = 0; i < cred->authsys.num_gids && cred->authsys.gids; i++) {
+                h = nfs3_drc_fnv_accum(h,
+                                       (const uint8_t *) &cred->authsys.gids[i],
+                                       sizeof(cred->authsys.gids[i]));
+            }
+            /* The machine name is part of the identity an AUTH_SYS credential
+             * asserts: the same uid on two hosts is two users. */
+            if (cred->authsys.machinename && cred->authsys.machinename_len > 0) {
+                h = nfs3_drc_fnv_accum(h,
+                                       (const uint8_t *) cred->authsys.machinename,
+                                       (uint32_t) cred->authsys.machinename_len);
+            }
+            break;
+
+        case EVPL_RPC2_AUTH_RPCSEC_GSS:
+            h = nfs3_drc_fnv_accum(h, (const uint8_t *) &cred->gss.service,
+                                   sizeof(cred->gss.service));
+            if (cred->gss.principal) {
+                h = nfs3_drc_fnv_accum(h, (const uint8_t *) cred->gss.principal,
+                                       (uint32_t) strlen(cred->gss.principal));
+            }
+            break;
+
+        default:
+            /* AUTH_NONE and anything unrecognised assert no identity beyond
+             * the flavor, which is already folded in. */
+            break;
+    } /* switch */
+
+    return h;
+} /* nfs3_drc_checksum_cred */
+
 /* Source IP with the ephemeral port stripped (stable across the reconnect a
  * retransmit rides in on).  Returns the address length written into out. */
 uint8_t
@@ -716,7 +794,8 @@ nfs3_drc_dispatch(
     key.addr_len = nfs3_drc_client_addr(conn, key.addr);
     key.proc     = proc;
     key.xid      = encoding->xid;
-    key.cksum    = nfs3_drc_checksum_iov(iov, niov);
+    key.cksum    = nfs3_drc_checksum_cred(nfs3_drc_checksum_iov(iov, niov),
+                                          cred);
 
     return nfs3_drc_serve(drc, &key, evpl, conn, encoding, proc, program_data,
                           cred, iov, niov, length, private_data);

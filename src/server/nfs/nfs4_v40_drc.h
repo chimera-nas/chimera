@@ -45,7 +45,11 @@ struct COMPOUND4args;
  *     than a stale one, so no generation counter is needed either.
  *
  * The checksum guards against a client reusing an xid on one connection for a
- * genuinely different request: same xid, different bytes reads as a miss.
+ * genuinely different request: same xid, different bytes reads as a miss.  It
+ * covers the caller's credential as well as the request body
+ * (nfs3_drc_checksum_cred): a connection can carry more than one user -- a
+ * container host, or any client multiplexing its users over one mount -- and
+ * two users' byte-identical COMPOUNDs are two requests, not a retransmission.
  *
  * Cross-connection replay is deliberately not attempted.  A 4.0 client that
  * reconnects must re-establish through SETCLIENTID / SETCLIENTID_CONFIRM
