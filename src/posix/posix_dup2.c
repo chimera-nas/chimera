@@ -79,9 +79,11 @@ chimera_posix_dup2(
         new_entry->flags |= CHIMERA_POSIX_FD_CLOSED;
         pthread_mutex_unlock(&new_entry->lock);
 
-        /* This implicit close can be the description's last: release its
-         * backend byte-range locks first, exactly as close(2) does. */
-        chimera_posix_project_ofd_unlock(posix, worker, old_handle, old_ofd);
+        /* This implicit close is a POSIX release point exactly as close(2)
+         * is: drop every byte-range lock the process holds on the file,
+         * local records and backend records alike, while the handle is still
+         * live to name it with. */
+        chimera_posix_locks_release_file(posix, old_ofd, old_handle);
 
         /* Close the old handle */
         chimera_posix_close_on_worker(worker, old_handle);

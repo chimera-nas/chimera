@@ -372,6 +372,21 @@ chimera_vfs_claim_shrink(
     uint8_t                        new_used,
     uint8_t                        new_denied);
 
+/* Does `owner` hold a range claim other than `except` overlapping
+ * [offset, offset+length) on this file?  A cheap membership test, not an
+ * arbitration: callers use it to skip work they would otherwise pay for
+ * unconditionally -- a POSIX close has to release the process's locks on
+ * the file, and a re-lock has to replace the owner's older coverage, but
+ * neither should pay for the release machinery when there is nothing to
+ * release. */
+bool
+chimera_vfs_claim_range_owner_holds(
+    struct chimera_vfs_file_state    *file,
+    const struct chimera_claim_owner *owner,
+    const struct chimera_vfs_claim   *except,
+    uint64_t                          offset,
+    uint64_t                          length);
+
 /* Pure probe (LOCKT / NLM TEST / F_GETLK / FAIL_IMMEDIATELY pre-check). */
 enum chimera_vfs_claim_result
 chimera_vfs_claim_test(
@@ -410,12 +425,17 @@ chimera_vfs_claim_cancel(
  * is the caller's subsequent acquire.  The core consumes fresh claim
  * structs from `spare` (caller-provided, up to two) for split remainders
  * and hands released fragments back via the release callback.  Used by the
- * POSIX client (and later NFSv4 LOCKU); SMB stays exact-stack. */
+ * POSIX client (and later NFSv4 LOCKU); SMB stays exact-stack.
+ *
+ * `except`, when non-NULL, is left alone: it is how a re-lock expresses
+ * POSIX's replace rule, having already inserted the new claim, without
+ * carving the very claim it just took. */
 void
 chimera_vfs_claim_range_replace(
     struct chimera_vfs_state         *state,
     struct chimera_vfs_file_state    *file,
     const struct chimera_claim_owner *owner,
+    const struct chimera_vfs_claim   *except,
     uint64_t                          offset,
     uint64_t                          length,
     uint8_t                           new_mask,
