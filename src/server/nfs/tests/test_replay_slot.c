@@ -172,7 +172,15 @@ test_out_of_range_slot(void)
     destroy_session_table(&table, session);
 } /* test_out_of_range_slot */
 
-/* Case 4: in-progress retry (same seqid) -> RETRY_UNCACHED_REP. */
+/*
+ * Case 4: a retry that arrives while the original is still running.
+ *
+ * RFC 8881 Section 2.10.6.2: "The replier SHOULD deal with the issue by
+ * returning NFS4ERR_DELAY as the reply to SEQUENCE or CB_SEQUENCE operation,
+ * but implementations MAY return NFS4ERR_MISORDERED."  This used to answer
+ * NFS4ERR_RETRY_UNCACHED_REP, which is neither -- and which a client retries
+ * silently forever rather than backing off.
+ */
 static void
 test_in_progress_retry(void)
 {
@@ -194,7 +202,7 @@ test_in_progress_retry(void)
     /* Without calling finalize, a second SEQUENCE on the same slot with
      * the same seqid arrives -- libevpl has no DRC, so this hits us. */
     status = nfs4_replay_slot_acquire(session, 0, 1, true, &req2, &is_replay);
-    CHECK(status == NFS4ERR_RETRY_UNCACHED_REP);
+    CHECK(status == NFS4ERR_DELAY);
     CHECK(!is_replay);
 
     /* And a jump-ahead seqid -> MISORDERED. */
@@ -206,7 +214,14 @@ test_in_progress_retry(void)
     destroy_session_table(&table, session);
 } /* test_in_progress_retry */
 
-/* Case 5: COMPLETED retry (cachethis was false) -> RETRY_UNCACHED_REP. */
+/*
+ * Case 5: a retry of a request whose reply was not cached.
+ *
+ * The slot machinery reports NFS4ERR_RETRY_UNCACHED_REP; where that error ends
+ * up on the wire is the SEQUENCE handler's business, and RFC 8881 Section
+ * 2.10.6.1.3 puts it on the operation AFTER Sequence rather than on Sequence
+ * itself (chimera_nfs4_sequence).
+ */
 static void
 test_completed_retry_uncached(void)
 {
@@ -481,6 +496,103 @@ test_implicit_session_no_slots(void)
     destroy_session_table(&table, session);
 } /* test_implicit_session_no_slots */
 
+/*
+ * Case 11: a retry under a different principal is a false retry.
+ *
+ * RFC 8881 Section 2.10.6.1.3.1: a retry "that uses a different principal in
+ * the RPC request's credential field that translates to a different user" is a
+ * false retry, and "if the replier determines the users are different between
+ * the original request and a retry, then the replier MUST return
+ * NFS4ERR_SEQ_FALSE_RETRY".  Answering it from the cache hands one user
+ * another user's reply and silently drops the operation the second one asked
+ * for -- the same failure a reply cache exists to prevent, aimed at a
+ * different victim.
+ */
+static void
+test_false_retry_other_principal(void)
+{
+    struct nfs4_client_table table;
+    struct nfs4_session     *session = make_session(&table, TEST_SLOTS,
+                                                    TEST_MAXRESP);
+    struct nfs_request       req;
+    bool                     is_replay;
+    nfsstat4                 status;
+    char                     buf[8] = "cached";
+
+    reset_request(&req);
+    req.session                   = session;
+    req.principal_flavor          = 1;    /* AUTH_SYS */
+    req.principal_uid             = 1000;
+    req.principal_gid             = 1000;
+    req.principal_machinename     = "host";
+    req.principal_machinename_len = 4;
+
+    status = nfs4_replay_slot_acquire(session, 0, 1, true, &req, &is_replay);
+    CHECK(status == NFS4_OK);
+    nfs4_replay_slot_finalize(&req);
+
+    /* Give the slot a cached reply, so that a same-user retry would replay and
+     * the difference is attributable to the principal alone. */
+    session->replay_slots[0].cached_buf = malloc(sizeof(buf));
+    memcpy(session->replay_slots[0].cached_buf, buf, sizeof(buf));
+    session->replay_slots[0].cached_len = sizeof(buf);
+    atomic_store(&session->replay_slots[0].state_word,
+                 nfs4_slot_word(1, NFS4_SLOT_CACHED));
+
+    /* The same user retries: replayed. */
+    reset_request(&req);
+    req.session                   = session;
+    req.principal_flavor          = 1;
+    req.principal_uid             = 1000;
+    req.principal_gid             = 1000;
+    req.principal_machinename     = "host";
+    req.principal_machinename_len = 4;
+    status                        = nfs4_replay_slot_acquire(session, 0, 1, true, &req, &is_replay);
+    CHECK(status == NFS4_OK);
+    CHECK(is_replay);
+    nfs4_replay_slot_replay_done(&req);
+
+    /* A different uid on the same host: a false retry. */
+    reset_request(&req);
+    req.session                   = session;
+    req.principal_flavor          = 1;
+    req.principal_uid             = 1001;
+    req.principal_gid             = 1001;
+    req.principal_machinename     = "host";
+    req.principal_machinename_len = 4;
+    status                        = nfs4_replay_slot_acquire(session, 0, 1, true, &req, &is_replay);
+    CHECK(status == NFS4ERR_SEQ_FALSE_RETRY);
+    CHECK(!is_replay);
+
+    /* The same uid from a different machine is also a different user. */
+    reset_request(&req);
+    req.session                   = session;
+    req.principal_flavor          = 1;
+    req.principal_uid             = 1000;
+    req.principal_gid             = 1000;
+    req.principal_machinename     = "other";
+    req.principal_machinename_len = 5;
+    status                        = nfs4_replay_slot_acquire(session, 0, 1, true, &req, &is_replay);
+    CHECK(status == NFS4ERR_SEQ_FALSE_RETRY);
+    CHECK(!is_replay);
+
+    /* An error from SEQUENCE must leave the slot alone (RFC 8881
+     * Section 2.10.6.1.2), so the rightful owner can still replay. */
+    reset_request(&req);
+    req.session                   = session;
+    req.principal_flavor          = 1;
+    req.principal_uid             = 1000;
+    req.principal_gid             = 1000;
+    req.principal_machinename     = "host";
+    req.principal_machinename_len = 4;
+    status                        = nfs4_replay_slot_acquire(session, 0, 1, true, &req, &is_replay);
+    CHECK(status == NFS4_OK);
+    CHECK(is_replay);
+    nfs4_replay_slot_replay_done(&req);
+
+    destroy_session_table(&table, session);
+} /* test_false_retry_other_principal */
+
 int
 main(
     int   argc,
@@ -504,6 +616,7 @@ main(
     test_misordered_after_completed();
     test_slots_independent();
     test_implicit_session_no_slots();
+    test_false_retry_other_principal();
 
     printf("nfs4_replay_slot: all tests passed\n");
     return 0;

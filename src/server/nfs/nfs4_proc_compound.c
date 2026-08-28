@@ -108,7 +108,7 @@ nfs4_rofs_gate(
  * WRITE4args.data, while SETXATTR, SETATTR and CREATE payloads are xdr_opaque
  * in dbuf memory freed with the encoding.
  */
-static void
+void
 nfs4_fail_undispatched_op(
     struct chimera_server_nfs_thread *thread,
     struct nfs_argop4                *argop,
