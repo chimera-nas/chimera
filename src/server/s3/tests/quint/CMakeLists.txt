@@ -78,6 +78,60 @@ set_tests_properties(chimera/server/s3/mbt/batch_multipart_memfs PROPERTIES
     LABELS "quint;s3_mbt;memfs"
     TIMEOUT 300)
 
+# The same corpora replayed against the on-disk backends.  The corpus is
+# protocol-level and backend-agnostic, so a divergence here is a genuine
+# backend deviation from the model memfs already satisfies.  Each replay
+# self-provisions its scratch (device image / rocksdb dir) under its own
+# mkdtemp session dir.  Gated on the storage each backend needs.
+#
+# Withheld batches, and why:
+#  - diskfs multipart: PutObject's create_unlinked+link_at publish at
+#    multipart scale intermittently SEGVs -- the link_at completion is
+#    delivered on the diskfs IQ/txn thread and the follow-on getattr races
+#    the owning thread (chimera_s3_put_finish_common -> chimera_vfs_getattr,
+#    ~1-in-2 on stepMultipart_64_0x11_1).  Re-enable when the diskfs
+#    completion threading is settled.
+#  - linux/io_uring (passthrough): need a name_to_handle_at-capable scratch
+#    filesystem ($CHIMERA_MBT_SCRATCH; overlayfs/tmpfs skip 77) and an
+#    io_uring-capable environment, and both exhibit intermittent ESTALE
+#    path lookups for directories that demonstrably exist (deterministic on
+#    e.g. stepList_128_0x1_3 step 13: DeleteObjects' parent lookup ESTALEs,
+#    the object survives on disk).  Until the batch-delete masking fix,
+#    that surfaced as ghost objects "resurrecting" after a reported
+#    <Deleted>; it now surfaces as honest InternalError entries.  With the
+#    caches disabled (S3_MBT_DISABLE_CACHES=1) the failure moves earlier (a
+#    PUT's final getattr loses its attributes), so the fault is in the
+#    passthrough module, not the cache layer.  Run manually with
+#    --backend linux/io_uring; S3_MBT_KEEP_SCRATCH=1 preserves the backing
+#    tree for post-mortem.
+if(HAVE_LIBAIO)
+    add_test(NAME chimera/server/s3/mbt/batch_diskfs
+        COMMAND $<TARGET_FILE:s3_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/s3
+                --backend diskfs --exclude-prefix stepMultipart_)
+    set_tests_properties(chimera/server/s3/mbt/batch_diskfs PROPERTIES
+        LABELS "quint;s3_mbt;diskfs"
+        TIMEOUT 300)
+endif()
+
+if(CAIRN_ENABLED)
+    add_test(NAME chimera/server/s3/mbt/batch_cairn
+        COMMAND $<TARGET_FILE:s3_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/s3
+                --backend cairn --exclude-prefix stepMultipart_)
+    set_tests_properties(chimera/server/s3/mbt/batch_cairn PROPERTIES
+        LABELS "quint;s3_mbt;cairn"
+        TIMEOUT 300)
+
+    add_test(NAME chimera/server/s3/mbt/batch_multipart_cairn
+        COMMAND $<TARGET_FILE:s3_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/s3
+                --backend cairn --block-size 5242880
+                --exclude-prefix step_ --exclude-prefix stepData_
+                --exclude-prefix stepList_ --exclude-prefix stepBucket_
+                --exclude-prefix stepTag_)
+    set_tests_properties(chimera/server/s3/mbt/batch_multipart_cairn PROPERTIES
+        LABELS "quint;s3_mbt;cairn"
+        TIMEOUT 300)
+endif()
+
 # The same corpus signed with AWS Signature V2 ("AWS <key>:<hmac-sha1>"),
 # exercising the server's V2 verifier end to end.  Multipart is excluded
 # only for the block-size reason above -- V2 signing itself covers every

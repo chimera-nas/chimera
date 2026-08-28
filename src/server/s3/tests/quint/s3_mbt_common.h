@@ -31,6 +31,9 @@
 #include <unistd.h>
 #include <stdint.h>
 #include <inttypes.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <sys/stat.h>
 
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
@@ -85,6 +88,8 @@ struct s3_mbt_env {
     struct evpl_http_conn     *conn;
     struct evpl_endpoint      *ep;
     char                       session_dir[256];
+    const char                *module;      /* VFS backend under test */
+    char                       pt_root[300]; /* passthrough backing root */
     int                        sigv2; /* sign with SigV2 by default */
     uint8_t                   *body_buf;
     struct s3_mbt_resp         res;
@@ -553,8 +558,18 @@ s3_mbt_call(
 
 /* ---- server + client lifecycle ------------------------------------------ */
 
+/* memfs/diskfs/cairn create named filesystems (mkfs); linux and io_uring are
+ * passthrough backends that mount a host directory and have no mkfs. */
+static inline int
+s3_mbt_module_is_passthrough(const char *module)
+{
+    return strcmp(module, "linux") == 0 || strcmp(module, "io_uring") == 0;
+} /* s3_mbt_module_is_passthrough */
+
 static inline void
-s3_mbt_env_open(struct s3_mbt_env *env)
+s3_mbt_env_open_module(
+    struct s3_mbt_env *env,
+    const char        *module)
 {
     struct chimera_server_config *config;
     struct evpl_thread_config    *tcfg;
@@ -580,6 +595,79 @@ s3_mbt_env_open(struct s3_mbt_env *env)
     chimera_server_config_set_tcp_flavor(config, CHIMERA_TCP_FLAVOR_INPROC);
     chimera_server_config_set_s3_enabled(config, 1);
     chimera_server_config_set_s3_port(config, S3_MBT_PORT);
+
+    /* Debug aid, mirroring the NFS3 harness's disable_caches option: run
+     * with the VFS attr/name caches off to separate cache-coherence
+     * suspects from backend behavior. */
+    if (getenv("S3_MBT_DISABLE_CACHES")) {
+        chimera_server_config_set_attr_cache_enabled(config, 0);
+        chimera_server_config_set_name_cache_enabled(config, 0);
+    }
+
+    env->module = module ? module : "memfs";
+
+    /* Backend module registration, mirroring nfs3_mbt_common.h: memfs is a
+    * default module; diskfs and cairn are self-provisioned under the
+    * per-process session_dir (1 GiB sparse libaio image / rocksdb dir) so
+    * every replay process is isolated and cleaned up with its temp dir. */
+    if (strcmp(env->module, "diskfs") == 0) {
+        char img[300], cfg[512];
+        int  fd;
+
+        snprintf(img, sizeof(img), "%s/device-0.img", env->session_dir);
+        fd = open(img, O_CREAT | O_TRUNC | O_RDWR, 0644);
+        if (fd < 0 || ftruncate(fd, 1024LL * 1024 * 1024) != 0) {
+            fprintf(stderr, "diskfs device image %s: %s\n", img,
+                    strerror(errno));
+            exit(1);
+        }
+        close(fd);
+        snprintf(cfg, sizeof(cfg),
+                 "{\"initialize\":true,\"unsafe_async\":true,"
+                 "\"intent_log_size\":67108864,"
+                 "\"devices\":[{\"type\":\"libaio\",\"size\":1,\"path\":\"%s\"}]}",
+                 img);
+        chimera_server_config_add_module(config, "diskfs", NULL, cfg);
+    } else if (strcmp(env->module, "cairn") == 0) {
+        char dir[300], cfg[512];
+
+        snprintf(dir, sizeof(dir), "%s/cairn", env->session_dir);
+        if (mkdir(dir, 0755) != 0 && errno != EEXIST) {
+            fprintf(stderr, "cairn dir %s: %s\n", dir, strerror(errno));
+            exit(1);
+        }
+        snprintf(cfg, sizeof(cfg), "{\"initialize\":true,\"path\":\"%s\"}",
+                 dir);
+        chimera_server_config_add_module(config, "cairn", NULL, cfg);
+    }
+
+    /* Passthrough backends store their trees on a real host filesystem that
+     * must support name_to_handle_at (tmpfs and overlayfs do not).  Root the
+     * backing store at $CHIMERA_MBT_SCRATCH (default: the current directory);
+     * an unsupported filesystem surfaces as an ENOTSUP mount that fs_setup
+     * turns into a clean 77 skip. */
+    if (s3_mbt_module_is_passthrough(env->module)) {
+        const char *scratch = getenv("CHIMERA_MBT_SCRATCH");
+        char       *abs_scratch;
+
+        if (!scratch || !scratch[0]) {
+            scratch = ".";
+        }
+        abs_scratch = realpath(scratch, NULL);
+        if (!abs_scratch) {
+            fprintf(stderr, "realpath(%s) failed: %s\n", scratch,
+                    strerror(errno));
+            exit(1);
+        }
+        snprintf(env->pt_root, sizeof(env->pt_root),
+                 "%s/s3_mbt_pt_XXXXXX", abs_scratch);
+        free(abs_scratch);
+        if (!mkdtemp(env->pt_root)) {
+            fprintf(stderr, "mkdtemp(%s) failed: %s\n", env->pt_root,
+                    strerror(errno));
+            exit(1);
+        }
+    }
 
     env->server = chimera_server_init(config, env->metrics);
 
@@ -609,22 +697,61 @@ s3_mbt_env_open(struct s3_mbt_env *env)
                                          NULL);
 
     env->body_buf = malloc(S3_MBT_BODY_MAX);
+} /* s3_mbt_env_open_module */
+
+static inline void
+s3_mbt_env_open(struct s3_mbt_env *env)
+{
+    s3_mbt_env_open_module(env, "memfs");
 } /* s3_mbt_env_open */
 
-/* Per-trace filesystem: a fresh named memfs mounted at /share (unique fsname
- * => distinct fsid, so no stale cache entry can be hit across traces).
- * Buckets are NOT pre-created -- CreateBucket is part of the modeled surface
- * and traces create what they use. */
+/* Per-trace filesystem mounted at /share.  mkfs backends get a fresh named
+ * filesystem (unique fsname => distinct fsid, so no stale cache entry can be
+ * hit across traces); passthrough backends get a fresh host subdirectory (a
+ * brand-new inode is the passthrough analogue of a fresh fsid).  Buckets are
+ * NOT pre-created -- CreateBucket is part of the modeled surface and traces
+ * create what they use. */
 static inline void
 s3_mbt_env_fs_setup(
     struct s3_mbt_env *env,
     const char        *fsname)
 {
-    if (chimera_server_mkfs(env->server, "memfs", fsname, NULL) != 0) {
-        fprintf(stderr, "failed to create memfs filesystem %s\n", fsname);
+    if (s3_mbt_module_is_passthrough(env->module)) {
+        char dir[340];
+        int  mrc;
+
+        snprintf(dir, sizeof(dir), "%s/%s", env->pt_root, fsname);
+        if (mkdir(dir, 0777) != 0 && errno != EEXIST) {
+            fprintf(stderr, "failed to create %s backing dir %s: %s\n",
+                    env->module, dir, strerror(errno));
+            exit(1);
+        }
+        mrc = chimera_server_mount(env->server, "share", env->module, dir,
+                                   NULL);
+        if (mrc == CHIMERA_VFS_ENOTSUP) {
+            /* The backing filesystem cannot produce file handles
+             * (name_to_handle_at): point CHIMERA_MBT_SCRATCH at an
+             * ext4/xfs/btrfs path to exercise this backend.  _exit() to
+             * bypass evpl's atexit leak-check. */
+            fprintf(stderr, "SKIP: %s backend needs a name_to_handle_at-"
+                    "capable scratch fs; %s is not one (set "
+                    "CHIMERA_MBT_SCRATCH)\n", env->module, dir);
+            _exit(77);
+        }
+        if (mrc != 0) {
+            fprintf(stderr, "mount %s at %s failed: status=%d\n",
+                    env->module, dir, mrc);
+            _exit(1);
+        }
+        return;
+    }
+
+    if (chimera_server_mkfs(env->server, env->module, fsname, NULL) != 0) {
+        fprintf(stderr, "failed to create %s filesystem %s\n", env->module,
+                fsname);
         exit(1);
     }
-    chimera_server_mount(env->server, "share", "memfs", fsname, NULL);
+    chimera_server_mount(env->server, "share", env->module, fsname, NULL);
 } /* s3_mbt_env_fs_setup */
 
 static int
@@ -665,7 +792,14 @@ s3_mbt_env_fs_teardown(
 
     chimera_server_unmount(env->server, "share");
 
-    while (chimera_server_rmfs(env->server, "memfs", fsname) != 0) {
+    /* Passthrough backends have no filesystem to remove; the unmounted host
+     * dir is intentionally left in place (its inode must not be reused
+     * mid-run) and is reaped with the scratch dir. */
+    if (s3_mbt_module_is_passthrough(env->module)) {
+        return;
+    }
+
+    while (chimera_server_rmfs(env->server, env->module, fsname) != 0) {
         if (++tries >= 5000) {
             fprintf(stderr, "warning: rmfs %s still failed after %d retries\n",
                     fsname, tries);
@@ -678,7 +812,7 @@ s3_mbt_env_fs_teardown(
 static inline void
 s3_mbt_env_stop(struct s3_mbt_env *env)
 {
-    char cmd[300];
+    char cmd[340];
 
     evpl_http_client_close(env->agent, env->conn);
     evpl_http_destroy(env->agent);
@@ -692,6 +826,19 @@ s3_mbt_env_stop(struct s3_mbt_env *env)
     snprintf(cmd, sizeof(cmd), "rm -rf %s", env->session_dir);
     if (system(cmd) != 0) {
         fprintf(stderr, "warning: failed to remove %s\n", env->session_dir);
+    }
+    if (env->pt_root[0]) {
+        /* Debug aid: keep the passthrough backing tree for post-mortem
+         * inspection of what the server actually left on disk. */
+        if (getenv("S3_MBT_KEEP_SCRATCH")) {
+            fprintf(stderr, "keeping passthrough scratch %s\n", env->pt_root);
+        } else {
+            snprintf(cmd, sizeof(cmd), "rm -rf %s", env->pt_root);
+            if (system(cmd) != 0) {
+                fprintf(stderr, "warning: failed to remove %s\n",
+                        env->pt_root);
+            }
+        }
     }
 } /* s3_mbt_env_stop */
 

@@ -1514,8 +1514,11 @@ op_list_objects(
     }
 
     if (nkeys != (int) json_array_size(want_keys)) {
-        mism_add(m, "ListObjects: %d keys, expected %zu", nkeys,
-                 json_array_size(want_keys));
+        /* name the tail keys the model did not predict -- the first
+         * unexpected one is usually the story (a phantom entry, a stale
+         * cache hit, an internal temp name) */
+        mism_add(m, "ListObjects: %d keys, expected %zu (last parsed: '%s')",
+                 nkeys, json_array_size(want_keys), text);
     }
     if (npfx != (int) json_array_size(want_pfxs)) {
         mism_add(m, "ListObjects: %d common prefixes, expected %zu", npfx,
@@ -2590,34 +2593,24 @@ main(
     char **argv)
 {
     static struct option long_options[] = {
-        { "trace",          required_argument,          0,
-          't'                                                                                                                                                                                      }
-        ,
-        { "trace-dir",      required_argument,          0,
-          'D'                                                                                                                                                                                      }
-        ,
-        { "exclude-prefix", required_argument,          0,
-          'X'                                                                                                                                                                                      }
-        ,
-        { "block-size",     required_argument,          0,
-          'b'                                                                                                                                                                                      }
-        ,
-        { "verbose",        no_argument,                0,
-          'v'                                                                                                                                                                                      }
-        ,
-        { "dry-run",        no_argument,                0,
-          'n'                                                                                                                                                                                      }
-        ,
-        { "sigv2",          no_argument,                0,
-          '2'                                                                                                                                                                                      }
-        ,
-        { 0,                0,                          0,                         0 }
+/* *INDENT-OFF* */
+        { "trace",          required_argument, 0, 't' },
+        { "trace-dir",      required_argument, 0, 'D' },
+        { "exclude-prefix", required_argument, 0, 'X' },
+        { "block-size",     required_argument, 0, 'b' },
+        { "verbose",        no_argument,       0, 'v' },
+        { "dry-run",        no_argument,       0, 'n' },
+        { "sigv2",          no_argument,       0, '2' },
+        { "backend",        required_argument, 0, 'B' },
+        { 0, 0, 0, 0 }
+/* *INDENT-ON* */
     };
     struct s3_mbt_env    env;
     char               **traces;
     int                  ntraces;
     int                  block_size = 8192;
     int                  verbose = 0, dry_run = 0, sigv2 = 0;
+    const char          *backend  = "memfs";
     int                  failures = 0;
     int                  i, c;
 
@@ -2625,7 +2618,7 @@ main(
      * only needs to recognize the rest. */
     traces = mbt_collect_traces(argc, argv, &ntraces);
 
-    while ((c = getopt_long(argc, argv, "t:D:X:b:vn2", long_options,
+    while ((c = getopt_long(argc, argv, "t:D:X:b:vn2B:", long_options,
                             NULL)) != -1) {
         switch (c) {
             case 't':
@@ -2644,11 +2637,14 @@ main(
             case '2':
                 sigv2 = 1;
                 break;
+            case 'B':
+                backend = optarg;
+                break;
             default:
                 fprintf(stderr,
                         "usage: %s [--trace f.itf.json | --trace-dir dir]\n"
                         "          [--exclude-prefix p] [--block-size n]\n"
-                        "          [--sigv2] [--verbose] [--dry-run]\n", argv[0]);
+                        "          [--sigv2] [--backend m] [--verbose] [--dry-run]\n", argv[0]);
                 mbt_free_traces(traces, ntraces);
                 return 2;
         } /* switch */
@@ -2660,7 +2656,7 @@ main(
         return 2;
     }
 
-    s3_mbt_env_open(&env);
+    s3_mbt_env_open_module(&env, backend);
     env.sigv2 = sigv2;
 
     for (i = 0; i < ntraces; i++) {
