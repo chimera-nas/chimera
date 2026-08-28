@@ -100,7 +100,7 @@ endif()
 add_test(NAME chimera/server/nfs/mbtaux/probe_memfs
     COMMAND $<TARGET_FILE:nfs_aux_probe>)
 set_tests_properties(chimera/server/nfs/mbtaux/probe_memfs PROPERTIES
-    LABELS "nfsaux_mbt;memfs"
+    LABELS "quint;nfsaux_mbt;memfs"
     TIMEOUT 120)
 
 # Delegation policy probe: pins the deterministic grant/recall behavior the
@@ -172,7 +172,7 @@ add_test(NAME chimera/server/nfs/mbtaux/batch_memfs
     COMMAND $<TARGET_FILE:nfs_aux_mbt_replay> --paranoid
             --trace-dir ${SPECS_BUNDLE_DIR}/nfsaux)
 set_tests_properties(chimera/server/nfs/mbtaux/batch_memfs PROPERTIES
-    LABELS "nfsaux_mbt;memfs"
+    LABELS "quint;nfsaux_mbt;memfs"
     TIMEOUT 600)
 
 # SKIP_RETURN_CODE 77 still applies to NFS4: a trace whose capability profile

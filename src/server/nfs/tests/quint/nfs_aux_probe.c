@@ -753,14 +753,18 @@ main(
     alarm(180);
 
     mbt_aux_env_open(&env, &opts);
-    mbt_env_fs_setup(&env, "fs0");
+    /* The aux harness asserts against a fixed "/share" export -- its MNT
+     * cases include deliberate near-misses like "/shareXX" -- so it mounts
+     * under that name rather than the per-trace one the batch replayers
+     * use.  The filesystem itself is still per-trace. */
+    mbt_env_fs_setup_as(&env, "fs0", "share");
     if (chimera_server_create_export(env.server, PROBE_EXPORT2, "/share", 0,
                                      NULL) != 0) {
         fprintf(stderr, "probe: failed to create the %s export\n",
                 PROBE_EXPORT2);
         /* Unwind what mbt_aux_env_open built; returning straight out leaks the
          * environment's READ scratch buffer. */
-        mbt_env_fs_teardown(&env, "fs0");
+        mbt_env_fs_teardown_as(&env, "fs0", "share");
         mbt_env_stop(&env);
         return 1;
     }
@@ -776,7 +780,7 @@ main(
     probe_nsm(&env);
 
     chimera_server_remove_export(env.server, PROBE_EXPORT2);
-    mbt_env_fs_teardown(&env, "fs0");
+    mbt_env_fs_teardown_as(&env, "fs0", "share");
     mbt_env_stop(&env);
     alarm(0);
 

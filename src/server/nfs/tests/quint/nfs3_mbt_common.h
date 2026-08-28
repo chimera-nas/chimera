@@ -469,13 +469,14 @@ mbt_env_open_opts(
  * is never reused mid-run, so cached FHs likewise cannot collide across
  * traces.  The whole session_dir is reaped at process exit. */
 static inline void
-mbt_env_fs_setup(
+mbt_env_fs_setup_as(
     struct mbt_env *env,
-    const char     *fsname)
+    const char     *fsname,
+    const char     *mntname)
 {
     char path[80];
 
-    snprintf(path, sizeof(path), "/%s", fsname);
+    snprintf(path, sizeof(path), "/%s", mntname);
 
     /* Mount and export under the *filesystem's own* name rather than a shared
      * "share", and check every call.
@@ -543,21 +544,32 @@ mbt_env_fs_setup(
         fprintf(stderr, "failed to create %s export\n", path);
         exit(1);
     }
+} /* mbt_env_fs_setup_as */
+
+/* The common case: mount and export the filesystem under its own name, so a
+ * batch gets one mount per trace. */
+static inline void
+mbt_env_fs_setup(
+    struct mbt_env *env,
+    const char     *fsname)
+{
+    mbt_env_fs_setup_as(env, fsname, fsname);
 } /* mbt_env_fs_setup */
 
 /* Tear the per-trace filesystem back down.  Order matters: rmfs is EBUSY while
  * the fs still has a mount, so unmount (and drop the export) first. */
 static inline void
-mbt_env_fs_teardown(
+mbt_env_fs_teardown_as(
     struct mbt_env *env,
-    const char     *fsname)
+    const char     *fsname,
+    const char     *mntname)
 {
     int  tries = 0;
     int  rc;
 
     char path[80];
 
-    snprintf(path, sizeof(path), "/%s", fsname);
+    snprintf(path, sizeof(path), "/%s", mntname);
 
     chimera_server_remove_export(env->server, path);
 
@@ -614,6 +626,14 @@ mbt_env_fs_teardown(
         }
         usleep(1000);
     }
+} /* mbt_env_fs_teardown_as */
+
+static inline void
+mbt_env_fs_teardown(
+    struct mbt_env *env,
+    const char     *fsname)
+{
+    mbt_env_fs_teardown_as(env, fsname, fsname);
 } /* mbt_env_fs_teardown */
 
 /* Backward-compatible one-shot setup used by the single-trace probes: open the
