@@ -158,6 +158,8 @@ extern struct chimera_posix_client *chimera_posix_global;
 extern __thread int                     chimera_posix_tls_has_cred;
 extern __thread struct chimera_vfs_cred chimera_posix_tls_cred;
 extern __thread int                     chimera_posix_tls_has_umask;
+extern __thread int                     chimera_posix_tls_has_lock_owner;
+extern __thread uint64_t                chimera_posix_tls_lock_owner;
 extern __thread mode_t                  chimera_posix_tls_umask;
 
 static FORCE_INLINE const struct chimera_vfs_cred *
@@ -189,14 +191,20 @@ chimera_posix_get_global(void)
  * -------------------------------------------------------------------- */
 
 /* The POSIX lock owner: per-process identity (classic fcntl lock scope).
- * No key and no callbacks -- posix claims are binding (unbreakable). */
+ * No key and no callbacks -- posix claims are binding (unbreakable).
+ * chimera_posix_set_lock_owner() overrides the identity for an embedder
+ * that runs several logical processes on one address space. */
 static FORCE_INLINE void
 chimera_posix_lock_owner_init(struct chimera_claim_owner *owner)
 {
+    uint64_t id = chimera_posix_tls_has_lock_owner
+        ? chimera_posix_tls_lock_owner
+        : (uint64_t) getpid();
+
     memset(owner, 0, sizeof(*owner));
     owner->proto      = CHIMERA_CLAIM_PROTO_POSIX;
-    owner->client_key = (uint64_t) getpid();
-    owner->owner_lo   = (uint64_t) getpid();
+    owner->client_key = id;
+    owner->owner_lo   = id;
     owner->owner_hi   = 0;
 } // chimera_posix_lock_owner_init
 

@@ -14,6 +14,8 @@ __thread int                     chimera_posix_tls_has_cred;
 __thread struct chimera_vfs_cred chimera_posix_tls_cred;
 __thread int                     chimera_posix_tls_has_umask;
 __thread mode_t                  chimera_posix_tls_umask;
+__thread int                     chimera_posix_tls_has_lock_owner;
+__thread uint64_t                chimera_posix_tls_lock_owner;
 
 SYMBOL_EXPORT void
 chimera_posix_set_cred(const struct chimera_vfs_cred *cred)
@@ -25,6 +27,17 @@ chimera_posix_set_cred(const struct chimera_vfs_cred *cred)
         chimera_posix_tls_has_cred = 0;
     }
 } /* chimera_posix_set_cred */
+
+SYMBOL_EXPORT void
+chimera_posix_set_lock_owner(const uint64_t *owner)
+{
+    if (owner) {
+        chimera_posix_tls_lock_owner     = *owner;
+        chimera_posix_tls_has_lock_owner = 1;
+    } else {
+        chimera_posix_tls_has_lock_owner = 0;
+    }
+} /* chimera_posix_set_lock_owner */
 
 SYMBOL_EXPORT void
 chimera_posix_clear_cred(void)

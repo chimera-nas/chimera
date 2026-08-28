@@ -49,6 +49,17 @@ void
 chimera_posix_clear_cred(
     void);
 
+/* Override the byte-range lock OWNER identity for subsequent lock operations
+ * on the calling thread.  POSIX record locks are owned by the process, and
+ * the default identity is this process -- correct for an application linked
+ * against the client, wrong for an embedder that multiplexes several logical
+ * processes onto one address space (the model-based test harnesses do
+ * exactly that, and without this every simulated process would share one
+ * owner and never conflict with itself).  Pass NULL to restore the default. */
+void
+chimera_posix_set_lock_owner(
+    const uint64_t *owner);
+
 /* Set the calling thread's file-mode creation mask (mirrors umask(2)); returns
  * the previous mask.  Applied to mode in the create paths (open O_CREAT, mkdir,
  * mknod, ...).  Until first set, no umask is applied. */
