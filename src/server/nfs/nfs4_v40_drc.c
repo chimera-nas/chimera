@@ -448,8 +448,12 @@ nfs4_v40_drc_dispatch(
      * nfs4_v40_drc_compound_cacheable), and the key covers a checksum of the
      * whole request, so a read-only COMPOUND's bytes cannot match a cached
      * mutating one's.  A read-only request therefore always misses and executes
-     * for real. */
-    cksum = nfs3_drc_checksum_iov(iov, niov);
+     * for real.
+     *
+     * The checksum covers the credential as well as the body: a connection is
+     * one client but not necessarily one user, and two users' byte-identical
+     * COMPOUNDs are two requests. */
+    cksum = nfs3_drc_checksum_cred(nfs3_drc_checksum_iov(iov, niov), cred);
 
     if (nfs4_v40_drc_cache_lookup(drc, conn, encoding->xid, cksum,
                                   &cached, &cached_len)) {

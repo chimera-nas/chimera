@@ -29,7 +29,10 @@ struct evpl_rpc2_cred;
  * request checksum}.  The address has its ephemeral port stripped so it stays
  * stable across the reconnect a retransmit rides in on; the checksum guards
  * against a reused xid mapping to a different call (a hit then means the same
- * client re-presenting a byte-identical request).
+ * client re-presenting a byte-identical request).  The checksum covers the
+ * caller's credential too, because the address is shared by everything behind
+ * a NAT or on a multi-user host and two users' identical requests would
+ * otherwise be one key.
  *
  * Only non-idempotent procedures are cached (CREATE/MKDIR/REMOVE/RENAME/...);
  * re-executing an idempotent op is harmless, so those bypass the cache.
@@ -150,6 +153,15 @@ uint64_t
 nfs3_drc_checksum_iov(
     const xdr_iovec *iov,
     int              niov);
+
+/* Fold the caller's identity into a checksum.  The iovecs above begin after the
+ * RPC header and so exclude the credential; without this, two users' identical
+ * requests share a key and one is answered from the other's entry.  Shared with
+ * the NFSv4.0 cache, which has the same gap for the same reason. */
+uint64_t
+nfs3_drc_checksum_cred(
+    uint64_t                     h,
+    const struct evpl_rpc2_cred *cred);
 
 /* Source IP with the ephemeral port stripped; writes addr, returns its len. */
 uint8_t
