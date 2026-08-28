@@ -164,6 +164,7 @@ static struct shadow g_shadow[R_MAXINO];    /* model ino -> byte content      */
 static int           g_strict_atime;        /* from the trace LInit caps      */
 static int           g_nmismatch;           /* per-trace mismatch tally       */
 static const char   *g_trace;               /* current trace path (messages)  */
+static int           g_step;                /* current trace step (messages)  */
 static json_t       *g_cur_fs;              /* model post-state fs (this step) */
 static json_t       *g_cur_ps;              /* model protocol state (ps)       */
 static const char   *g_cur_tag;             /* current op tag (for reconcile)  */
@@ -696,6 +697,10 @@ real_target(
 
 /* ---- direct chimera_posix dispatch --------------------------------------- */
 
+/* A per-model-process lock owner, disjoint from any real pid. */
+#define CHIMERA_POSIX_MODEL_LOCK_OWNER(pid) \
+        (((uint64_t) 0x9105ULL << 32) | (uint32_t) (pid))
+
 /* Install the requesting model pid's credential + umask on this thread (the
  * driver's apply_pid, but called directly rather than off a JSON request). */
 static void
@@ -706,6 +711,15 @@ apply_cred(int pid)
     }
     chimera_posix_set_cred(&driver_creds[pid]);
     (void) chimera_posix_umask(driver_umasks[pid]);
+    /* Byte-range locks are owned by the PROCESS, and the model's processes
+     * are simulated on one thread.  Without a distinct owner per model pid
+     * they would all share this process's identity and never conflict, so
+     * every lock the model expects to be refused would be granted. */
+    {
+        uint64_t owner = CHIMERA_POSIX_MODEL_LOCK_OWNER(pid);
+
+        chimera_posix_set_lock_owner(&owner);
+    }
 } /* apply_cred */
 
 /* ---- root redo for reconciled DAC denials -------------------------------- */
@@ -1776,8 +1790,14 @@ op_close(
 {
     int mfd  = tf_field(rv, "fd");
     int lost = fd_lost(pid, mfd);
-    int rc   = chimera_posix_close(rfd(pid, mfd));
-    int e    = ERRV(rc);
+    int rc, e;
+
+    /* close() runs as the closing process: it releases that process's byte
+     * range locks on the file, so the lock owner has to be its own. */
+    apply_cred(pid);
+
+    rc = chimera_posix_close(rfd(pid, mfd));
+    e  = ERRV(rc);
 
     if ((check_status(tf_field(res_v, "e"), e) || lost) &&
         tf_field(res_v, "e") == 0) {
@@ -2978,6 +2998,42 @@ op_fcntl_setfl(
     check_status(tf_field(res_v, "e"), e);
 } /* op_fcntl_setfl */
 
+/* Membership in an ITF Set[int] field (serialized as {"#set": [...]}). */
+static int
+itf_set_has_int(
+    json_t     *rec,
+    const char *field,
+    int64_t     n)
+{
+    json_t *v = json_object_get(rec, field);
+    json_t *a;
+    size_t  i;
+
+    if (json_is_object(v)) {
+        json_t *sset = json_object_get(v, "#set");
+
+        if (sset) {
+            v = sset;
+        }
+    }
+    a = v;
+    for (i = 0; a && i < json_array_size(a); i++) {
+        json_t *e = json_array_get(a, i);
+
+        if (json_is_object(e)) {
+            json_t *b = json_object_get(e, "#bigint");
+
+            if (b && json_is_string(b) &&
+                strtoll(json_string_value(b), NULL, 10) == n) {
+                return 1;
+            }
+        } else if (json_is_integer(e) && json_integer_value(e) == n) {
+            return 1;
+        }
+    }
+    return 0;
+} /* itf_set_has_int */
+
 static void
 op_fcntl_lock(
     int     pid,
@@ -3010,6 +3066,27 @@ op_fcntl_lock(
         if (conflict != tf_bool(res_v, "conflict")) {
             mism("F_GETLK: expected conflict=%d, got l_type %d",
                  tf_bool(res_v, "conflict"), fl.l_type);
+        } else if (conflict) {
+            /* Describe the blocking lock, not merely its existence.  POSIX
+             * lets the server name ANY of the blocking locks, so the model
+             * exports the SET of blocking owners (cowners) and the subset
+             * whose blocking bytes include a write lock (cwowners) -- the
+             * checkable facts.  cpid/cw are the model's own lowest-pid pick
+             * and are deliberately not asserted against.
+             *
+             * l_pid is 32-bit and the claim core fills it from the owner's
+             * low word, which CHIMERA_POSIX_MODEL_LOCK_OWNER makes the model
+             * pid exactly, so it is directly comparable. */
+            int lpid = (int) (uint32_t) fl.l_pid;
+
+            if (!itf_set_has_int(res_v, "cowners", lpid)) {
+                mism("F_GETLK: l_pid %d is not a blocking owner", lpid);
+            } else if (!itf_set_has_int(res_v,
+                                        fl.l_type == F_WRLCK ? "cwowners"
+                                        : "crowners", lpid)) {
+                mism("F_GETLK: owner %d does not block with a %s lock",
+                     lpid, fl.l_type == F_WRLCK ? "write" : "read");
+            }
         }
     }
 } /* op_fcntl_lock */
@@ -3213,11 +3290,23 @@ close_live_handles(void)
     for (pid = 0; pid < R_MAXPID; pid++) {
         for (mfd = 0; mfd < R_MAXFD; mfd++) {
             if (g_fdmap[pid][mfd] != BADFD) {
+                /* Close AS the owning pid.  close(2) releases the byte-range
+                 * locks the CALLING process holds on the file, and the client
+                 * takes that identity from thread-local state (apply_cred sets
+                 * it per model pid; see chimera_posix_lock_owner_init).  Closing
+                 * whatever is left over from the last op releases only that
+                 * pid's locks and silently strands every other pid's -- which
+                 * over the NFS loopback leaves the lock held server-side, along
+                 * with the open handle it pins, and the next trace's recycle
+                 * cannot unmount the share. */
+                apply_cred(pid);
                 chimera_posix_close(g_fdmap[pid][mfd]);
                 g_fdmap[pid][mfd] = BADFD;
             }
         }
     }
+    /* The recycle that follows runs as root. */
+    apply_root_cred();
     for (sid = 0; sid < R_MAXSID; sid++) {
         if (g_dirmap[sid]) {
             chimera_posix_closedir(g_dirmap[sid]);
@@ -3519,6 +3608,8 @@ replay_trace(const char *path)
     for (i = 1; i < ns; i++) {
         json_t     *st = json_array_get(states, i);
         json_t     *lo = state_get(st, "lastOp");
+
+        g_step = i;
         json_t     *v, *req, *res;
         const char *tag;
         int         pid;
