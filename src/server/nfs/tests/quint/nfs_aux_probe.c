@@ -758,6 +758,10 @@ main(
                                      NULL) != 0) {
         fprintf(stderr, "probe: failed to create the %s export\n",
                 PROBE_EXPORT2);
+        /* Unwind what mbt_aux_env_open built; returning straight out leaks the
+         * environment's READ scratch buffer. */
+        mbt_env_fs_teardown(&env, "fs0");
+        mbt_env_stop(&env);
         return 1;
     }
 

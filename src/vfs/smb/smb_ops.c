@@ -37,6 +37,14 @@ smb_utf16le_encode(
 {
     int i;
 
+    /* A negative length must not reach the cast below: the loop would write
+     * nothing while (size_t) len * 2 wrapped to an enormous value, and every
+     * caller uses the return as the length of the buffer it just filled --
+     * appending that to a cursor would read far past the end of it. */
+    if (len <= 0) {
+        return 0;
+    }
+
     for (i = 0; i < len; i++) {
         /* SMB path separators are backslashes. */
         uint8_t c = (uint8_t) (s[i] == '/' ? '\\' : s[i]);
@@ -131,7 +139,7 @@ smb_send_create_ex(
     size_t                   name16_len;
     uint32_t                 name_end, ctx_off = 0, pad = 0;
 
-    if (path_len > CHIMERA_SMB_PATH_MAX) {
+    if (path_len < 0 || path_len > CHIMERA_SMB_PATH_MAX) {
         request->status = CHIMERA_VFS_ENAMETOOLONG;
         request->complete(request);
         return;
@@ -618,10 +626,16 @@ chimera_smb_client_open_at(
      * (the next increment), and the client acks any later break.  Directory
      * opens skip it. */
     if (!(request->open_at.flags & CHIMERA_VFS_OPEN_DIRECTORY)) {
-        uint64_t *k = (uint64_t *) lease_key;
+        /* Build the key in uint64 units and copy it in, rather than writing
+         * through a uint64_t alias of the byte array: the array has no
+         * guaranteed alignment for a 64-bit store and the aliasing is
+         * undefined behaviour.  It also leaves lease_key visibly initialized,
+         * which the type pun did not -- the analyzer reported the bytes as
+         * undefined here and again where the finished context is appended to
+         * the send cursor. */
+        uint64_t k[2] = { chimera_rand64(), chimera_rand64() };
 
-        k[0]    = chimera_rand64();
-        k[1]    = chimera_rand64();
+        memcpy(lease_key, k, sizeof(lease_key));
         ctx_len = smb_build_lease_ctx(lease_ctx, lease_key,
                                       SMB2_LEASE_READ_CACHING | SMB2_LEASE_HANDLE_CACHING);
         ctx = lease_ctx;
