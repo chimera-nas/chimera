@@ -580,7 +580,6 @@ chimera_s3_tagging_set_next(
     struct chimera_server_s3_thread *thread = request->thread;
     struct chimera_s3_tagging_ctx   *ctx    = request->tagging;
     struct chimera_s3_tag           *t;
-    char                             name[CHIMERA_S3_TAG_PREFIX_LEN + CHIMERA_S3_TAG_MAX_KEY_LEN + 1];
     int                              namelen;
 
     if (ctx->cur >= ctx->n_tags) {
@@ -590,13 +589,14 @@ chimera_s3_tagging_set_next(
     }
 
     t       = &ctx->tags[ctx->cur];
-    namelen = snprintf(name, sizeof(name), CHIMERA_S3_TAG_PREFIX "%s", t->key);
+    namelen = snprintf(ctx->set_name, sizeof(ctx->set_name),
+                       CHIMERA_S3_TAG_PREFIX "%s", t->key);
 
     chimera_s3_request_get(request);
 
     chimera_vfs_set_xattr(thread->vfs, &thread->shared->cred,
                           ctx->handle, 0 /* create-or-replace */,
-                          name, namelen,
+                          ctx->set_name, namelen,
                           t->val, strlen(t->val),
                           chimera_s3_tagging_set_cb, request);
 } /* chimera_s3_tagging_set_next */
@@ -1011,7 +1011,6 @@ chimera_s3_tagging_store_set_next(
     struct chimera_server_s3_thread *thread = request->thread;
     struct chimera_s3_tagging_ctx   *ctx    = request->tagging;
     struct chimera_s3_tag           *t;
-    char                             name[CHIMERA_S3_TAG_PREFIX_LEN + CHIMERA_S3_TAG_MAX_KEY_LEN + 1];
     int                              namelen;
 
     if (ctx->cur >= ctx->n_tags) {
@@ -1020,13 +1019,14 @@ chimera_s3_tagging_store_set_next(
     }
 
     t       = &ctx->tags[ctx->cur];
-    namelen = snprintf(name, sizeof(name), CHIMERA_S3_TAG_PREFIX "%s", t->key);
+    namelen = snprintf(ctx->set_name, sizeof(ctx->set_name),
+                       CHIMERA_S3_TAG_PREFIX "%s", t->key);
 
     chimera_s3_request_get(request);
 
     chimera_vfs_set_xattr(thread->vfs, &thread->shared->cred,
                           ctx->handle, 0,
-                          name, namelen,
+                          ctx->set_name, namelen,
                           t->val, strlen(t->val),
                           chimera_s3_tagging_store_set_cb, request);
 } /* chimera_s3_tagging_store_set_next */
