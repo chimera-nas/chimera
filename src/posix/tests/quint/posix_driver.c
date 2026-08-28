@@ -220,6 +220,13 @@ apply_pid(json_t *req)
         pid = 0;
     }
     chimera_posix_set_cred(&driver_creds[pid]);
+    /* See posix_mbt_replay.c: one owner per model process, so locks taken by
+     * different model processes genuinely conflict. */
+    {
+        uint64_t owner = (((uint64_t) 0x9105ULL << 32) | (uint32_t) pid);
+
+        chimera_posix_set_lock_owner(&owner);
+    }
     (void) chimera_posix_umask(driver_umasks[pid]);
 } /* apply_pid */
 
