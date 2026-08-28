@@ -255,14 +255,35 @@ chimera_posix_fcntl(
     }
 
     /*
+     * POSIX (fcntl, System Interfaces): F_SETLK/F_SETLKW are EBADF when the
+     * lock type is not permitted by the descriptor's access mode -- a shared
+     * lock needs a descriptor open for reading, an exclusive lock one open
+     * for writing.  F_GETLK only asks a question, and F_UNLCK only gives
+     * something back, so neither is constrained; the kernel draws the line
+     * in the same place.
+     */
+    if ((cmd == F_SETLK || cmd == F_SETLKW) &&
+        lock_type != CHIMERA_VFS_LOCK_UNLOCK) {
+        unsigned int acc = entry->ofd->oflags & O_ACCMODE;
+        int          ok  = (lock_type == CHIMERA_VFS_LOCK_READ)
+            ? (acc == O_RDONLY || acc == O_RDWR)
+            : (acc == O_WRONLY || acc == O_RDWR);
+
+        if (!ok) {
+            chimera_posix_fd_release(entry, 0);
+            errno = EBADF;
+            return -1;
+        }
+    }
+
+    /*
      * Local claim-core arbitration first: the client's embedded VFS core
      * arbitrates this process's share of the cluster (protocol claims and
-     * other posix threads), then the OP_LOCK backend passthrough projects
-     * the lock into the kernel so cross-PROCESS conflicts keep working
-     * (each process has its own core instance; the kernel is the shared
-     * arbiter).
+     * other posix threads), then a CHIMERA_VFS_CAP_CLAIM_RANGE backend
+     * confirms the range so cross-PROCESS conflicts keep working (each
+     * process has its own core instance; the backend is the shared arbiter).
      *
-     * SEEK_END ranges stay backend-only: the kernel resolves the offset
+     * SEEK_END ranges stay backend-only: the backend resolves the offset
      * relative to EOF atomically (the TOCTOU note above), so the local core
      * cannot know the absolute range.
      * CLAIMTODO: SEEK_END locks therefore bypass local arbitration
@@ -359,11 +380,6 @@ chimera_posix_fcntl(
 
     if (local_arbiter && cmd != F_GETLK &&
         lock_type != CHIMERA_VFS_LOCK_UNLOCK) {
-        /* CLAIMTODO: POSIX re-lock of an overlapping range REPLACES the
-         * owner's coverage (including a WRLCK->RDLCK downgrade); this pass
-         * accumulates same-owner fragments instead (self-exempt at the
-         * OWNER circle, so harmless to other owners' arbitration, and
-         * carved correctly on F_UNLCK), pending a carve-then-insert. */
         enum chimera_vfs_claim_result result;
 
         node = chimera_posix_ofd_lock_alloc(posix, handle,

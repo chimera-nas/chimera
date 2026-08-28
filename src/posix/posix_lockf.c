@@ -9,6 +9,30 @@
 #include "posix.h"
 #include "posix_internal.h"
 
+/* lockf() takes exclusive locks only, so POSIX requires the descriptor be
+ * open for writing ("the file shall be opened with write-only permission or
+ * with read/write permission") and names EBADF for it.  fcntl() cannot make
+ * this check on our behalf: F_ULOCK reaches it as F_UNLCK and F_TEST as
+ * F_GETLK, and neither of those is access-constrained there. */
+static int
+chimera_posix_lockf_writable(int fd)
+{
+    struct chimera_posix_fd_entry *entry;
+    unsigned int                   acc;
+
+    entry = chimera_posix_fd_acquire(chimera_posix_get_global(), fd, 0);
+
+    if (!entry) {
+        return 0;
+    }
+
+    acc = entry->ofd->oflags & O_ACCMODE;
+
+    chimera_posix_fd_release(entry, 0);
+
+    return acc == O_WRONLY || acc == O_RDWR;
+} /* chimera_posix_lockf_writable */
+
 SYMBOL_EXPORT int
 chimera_posix_lockf(
     int   fd,
@@ -63,6 +87,11 @@ chimera_posix_lockf(
             errno = EINVAL;
             return -1;
     } /* switch */
+
+    if (!chimera_posix_lockf_writable(fd)) {
+        errno = EBADF;
+        return -1;
+    }
 
     rc = chimera_posix_fcntl(fd, fcntl_cmd, &fl);
 
