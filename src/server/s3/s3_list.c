@@ -545,9 +545,24 @@ chimera_s3_list_find_callback(
         /* File key: roll up at the first delimiter past the prefix, else it is
          * an object directly under the prefix. */
         const char *rest;
+        const char *base;
         int         restlen, i, idx = -1;
 
         if (klen < pl || memcmp(k, p, pl) != 0) {
+            return 0;
+        }
+
+        /* Internal in-flight artifacts are not objects: on a backend without
+         * CREATE_UNLINKED, multipart parts ("._chimera_mpu_*"), the Complete
+         * scratch file and PutObject temp files are real named files in the
+         * key's directory until they are consumed -- AWS never lists an
+         * in-flight upload's parts as objects. */
+        base = k + klen;
+        while (base > k && base[-1] != '/') {
+            base--;
+        }
+        if ((size_t) (klen - (base - k)) >= strlen("._chimera_") &&
+            memcmp(base, "._chimera_", strlen("._chimera_")) == 0) {
             return 0;
         }
 
