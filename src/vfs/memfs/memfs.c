@@ -555,7 +555,8 @@ memfs_inode_get_fh(
  * points at a struct memfs_stream_open (carrying base inode + named stream);
  * an untagged non-zero value is a plain base-inode pointer; zero falls back to
  * decoding the file handle (which may itself carry a stream id).  Returns the
- * locked inode or NULL (caller maps to ENOENT).  *out_stream is the target
+ * locked inode or NULL, which means the handle no longer names anything and
+ * the caller reports ESTALE.  *out_stream is the target
  * named fork, or NULL for the default/unnamed fork. */
 static inline struct memfs_inode *
 memfs_resolve_io(
@@ -1048,7 +1049,12 @@ memfs_inode_free(
         inode->remote = NULL;
     }
 
-    /* Increment generation so stale file handles return ESTALE */
+    /* Bump the generation so a handle taken before this inode was freed no
+     * longer resolves.  memfs_inode_get_fh then returns NULL for it and every
+     * caller reports ESTALE, which is what RFC 1813 section 3.3 asks for --
+     * "the file referred to by that file handle no longer exists".  An inode
+     * with open handles is not freed here at all, so an unlinked-but-open file
+     * keeps resolving, as it must. */
     inode->gen++;
 
     pthread_mutex_lock(&inode_list->lock);
@@ -2010,7 +2016,7 @@ memfs_getattr(
                              request->fh, request->fh_len, &stream);
 
     if (unlikely(!inode)) {
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
     }
@@ -2039,7 +2045,7 @@ memfs_commit(
     inode = memfs_inode_get_fh(fs, request->fh, request->fh_len);
 
     if (unlikely(!inode)) {
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
     }
@@ -2070,7 +2076,7 @@ memfs_setattr(
                              request->fh, request->fh_len, &stream);
 
     if (unlikely(!inode)) {
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
     }
@@ -2577,7 +2583,7 @@ memfs_getparent(
     inode = memfs_inode_get_fh(fs, request->fh, request->fh_len);
 
     if (unlikely(!inode)) {
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
     }
@@ -2664,7 +2670,7 @@ memfs_lookup_at(
     inode = memfs_inode_get_fh(fs, request->fh, request->fh_len);
 
     if (unlikely(!inode)) {
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
     }
@@ -2801,7 +2807,7 @@ memfs_mkdir_at(
     parent_inode = memfs_inode_get_fh(fs, request->fh, request->fh_len);
 
     if (unlikely(!parent_inode)) {
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         memfs_inode_free(thread, inode);
         memfs_dirent_free(thread, dirent);
@@ -2961,7 +2967,7 @@ memfs_mknod_at(
     parent_inode = memfs_inode_get_fh(fs, request->fh, request->fh_len);
 
     if (unlikely(!parent_inode)) {
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         memfs_inode_free(thread, inode);
         memfs_dirent_free(thread, dirent);
@@ -3057,7 +3063,7 @@ memfs_remove_at(
     parent_inode = memfs_inode_get_fh(fs, request->fh, request->fh_len);
 
     if (unlikely(!parent_inode)) {
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
     }
@@ -3226,7 +3232,7 @@ memfs_readdir(
     inode = memfs_inode_get_fh(fs, request->fh, request->fh_len);
 
     if (!inode) {
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
     }
@@ -3376,7 +3382,7 @@ memfs_open_fh(
     inode = memfs_inode_get_fh(fs, request->fh, request->fh_len);
 
     if (!inode) {
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
     }
@@ -3410,7 +3416,7 @@ memfs_open_at(
     parent_inode = memfs_inode_get_fh(fs, request->fh, request->fh_len);
 
     if (unlikely(!parent_inode)) {
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
     }
@@ -3804,7 +3810,7 @@ memfs_read(
                              request->fh, request->fh_len, &stream);
 
     if (unlikely(!inode)) {
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
     }
@@ -3961,7 +3967,7 @@ memfs_write(
                              request->fh, request->fh_len, &stream);
 
     if (unlikely(!inode)) {
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
     }
@@ -4157,7 +4163,7 @@ memfs_allocate(
                              request->fh, request->fh_len, &stream);
 
     if (unlikely(!inode)) {
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
     }
@@ -5139,7 +5145,7 @@ memfs_seek(
                              request->fh, request->fh_len, &stream);
 
     if (unlikely(!inode)) {
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
     }
@@ -5258,7 +5264,7 @@ memfs_read_plus(
                              request->fh, request->fh_len, &stream);
 
     if (unlikely(!inode)) {
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
     }
@@ -5377,7 +5383,7 @@ memfs_write_same(
         inode = memfs_resolve_io(fs, request->write_same.handle,
                                  request->fh, request->fh_len, &stream);
         if (unlikely(!inode)) {
-            request->status = CHIMERA_VFS_ENOENT;
+            request->status = CHIMERA_VFS_ESTALE;
             request->complete(request);
             return;
         }
@@ -5414,7 +5420,7 @@ memfs_write_same(
 
     if (unlikely(!inode)) {
         free(tmpl);
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
     }
@@ -5595,7 +5601,7 @@ memfs_symlink_at(
     parent_inode = memfs_inode_get_fh(fs, request->fh, request->fh_len);
 
     if (!parent_inode) {
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         memfs_inode_free(thread, inode);
         memfs_dirent_free(thread, dirent);
@@ -5672,7 +5678,7 @@ memfs_readlink(
     inode = memfs_inode_get_fh(fs, request->fh, request->fh_len);
 
     if (!inode) {
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
     }
@@ -5749,7 +5755,7 @@ memfs_rename_at(
                                               request->fh_len);
 
         if (!old_parent_inode) {
-            request->status = CHIMERA_VFS_ENOENT;
+            request->status = CHIMERA_VFS_ESTALE;
             request->complete(request);
             return;
         }
@@ -5805,7 +5811,7 @@ memfs_rename_at(
 
         if (!new_parent_inode) {
             pthread_mutex_unlock(&old_parent_inode->lock);
-            request->status = CHIMERA_VFS_ENOENT;
+            request->status = CHIMERA_VFS_ESTALE;
             request->complete(request);
             return;
         }
@@ -6097,7 +6103,7 @@ memfs_link_at(
                                       request->link_at.dir_fhlen);
 
     if (!parent_inode) {
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
     }
@@ -6143,7 +6149,7 @@ memfs_link_at(
 
     if (!inode) {
         pthread_mutex_unlock(&parent_inode->lock);
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
     }
@@ -6285,7 +6291,7 @@ memfs_get_xattr(
     inode = memfs_inode_get_fh(fs, request->fh, request->fh_len);
 
     if (unlikely(!inode)) {
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
     }
@@ -6323,7 +6329,7 @@ memfs_set_xattr(
     inode = memfs_inode_get_fh(fs, request->fh, request->fh_len);
 
     if (unlikely(!inode)) {
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
     }
@@ -6393,7 +6399,7 @@ memfs_list_xattrs(
     inode = memfs_inode_get_fh(fs, request->fh, request->fh_len);
 
     if (unlikely(!inode)) {
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
     }
@@ -6436,7 +6442,7 @@ memfs_remove_xattr(
     inode = memfs_inode_get_fh(fs, request->fh, request->fh_len);
 
     if (unlikely(!inode)) {
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
     }
@@ -6495,7 +6501,7 @@ memfs_open_stream(
     inode = memfs_inode_get_fh(fs, request->fh, request->fh_len);
 
     if (unlikely(!inode)) {
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
     }
@@ -6599,7 +6605,7 @@ memfs_list_streams(
     inode = memfs_inode_get_fh(fs, request->fh, request->fh_len);
 
     if (unlikely(!inode)) {
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
     }
@@ -6669,7 +6675,7 @@ memfs_remove_stream(
     inode = memfs_inode_get_fh(fs, request->fh, request->fh_len);
 
     if (unlikely(!inode)) {
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
     }

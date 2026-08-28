@@ -68,10 +68,31 @@ target_link_libraries(nfs4_mbt_replay
 # do not hang.  Goes red when chimera is fixed -- the signal to retire a
 # deviation -- or if a deadlock regresses.  Needs no trace corpus.
 add_test(NAME chimera/server/nfs/mbt/deviation_probe_memfs
-    COMMAND $<TARGET_FILE:nfs3_mbt_probe>)
+    COMMAND $<TARGET_FILE:nfs3_mbt_probe> -b memfs)
 set_tests_properties(chimera/server/nfs/mbt/deviation_probe_memfs PROPERTIES
     LABELS "quint;nfs3_mbt;memfs"
     TIMEOUT 60)
+
+# The same probe against the on-disk backends.  Most of what it guards is in
+# the NFS3 layer and backend-independent, but the stale-filehandle case (F6) is
+# each backend's own: they each resolve a handle themselves, and each had to
+# learn to tell a handle that no longer names anything from a name that was
+# never there.
+if(HAVE_LIBAIO)
+    add_test(NAME chimera/server/nfs/mbt/deviation_probe_diskfs
+        COMMAND $<TARGET_FILE:nfs3_mbt_probe> -b diskfs)
+    set_tests_properties(chimera/server/nfs/mbt/deviation_probe_diskfs PROPERTIES
+        LABELS "quint;nfs3_mbt;diskfs"
+        TIMEOUT 60)
+endif()
+
+if(CAIRN_ENABLED)
+    add_test(NAME chimera/server/nfs/mbt/deviation_probe_cairn
+        COMMAND $<TARGET_FILE:nfs3_mbt_probe> -b cairn)
+    set_tests_properties(chimera/server/nfs/mbt/deviation_probe_cairn PROPERTIES
+        LABELS "quint;nfs3_mbt;cairn"
+        TIMEOUT 60)
+endif()
 
 # Auxiliary-protocol ground truth: pins which portmap/rpcbind, MOUNT, NLM and
 # NSM procedures chimera registers, and the constants their replies carry --

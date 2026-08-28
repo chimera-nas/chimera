@@ -1984,7 +1984,7 @@ cairn_getattr(
     rc = cairn_inode_get_fh(thread, request->fh, request->fh_len, &ih);
 
     if (unlikely(rc)) {
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
     }
@@ -2016,7 +2016,7 @@ cairn_setattr(
     rc = cairn_inode_get_fh(thread, request->fh, request->fh_len, &ih);
 
     if (unlikely(rc)) {
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
     }
@@ -2709,7 +2709,7 @@ cairn_lookup_at(
     rc = cairn_inode_get_fh(thread, request->fh, request->fh_len, &ih);
 
     if (unlikely(rc)) {
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
     }
@@ -2816,7 +2816,7 @@ cairn_mkdir_at(
     rc = cairn_inode_get_fh(thread, request->fh, request->fh_len, &parent_ih);
 
     if (unlikely(rc)) {
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
     }
@@ -2934,7 +2934,7 @@ cairn_mknod_at(
     rc = cairn_inode_get_fh(thread, request->fh, request->fh_len, &parent_ih);
 
     if (unlikely(rc)) {
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
     }
@@ -3048,7 +3048,7 @@ cairn_remove_at(
     rc = cairn_inode_get_fh(thread, request->fh, request->fh_len, &parent_ih);
 
     if (unlikely(rc)) {
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
     }
@@ -3211,7 +3211,7 @@ cairn_readdir(
     rc = cairn_inode_get_fh(thread, request->fh, request->fh_len, &ih);
 
     if (rc) {
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
     }
@@ -3386,7 +3386,7 @@ cairn_open_fh(
     rc = cairn_inode_get_fh(thread, request->fh, request->fh_len, &ih);
 
     if (rc) {
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
     }
@@ -3464,7 +3464,7 @@ cairn_open_at(
     rc = cairn_inode_get_fh(thread, request->fh, request->fh_len, &parent_ih);
 
     if (unlikely(rc)) {
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
     }
@@ -3778,7 +3778,7 @@ cairn_read(
 
     if (rc) {
         cairn_read_end(thread);
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
     }
@@ -4072,7 +4072,7 @@ cairn_write(
          * server thread and must be released there. The server's write completion
          * callback handles the release after this request completes via doorbell.
          */
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
     }
@@ -4170,7 +4170,7 @@ cairn_allocate(
     rc = cairn_inode_get_fh(thread, request->fh, request->fh_len, &ih);
 
     if (rc) {
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
     }
@@ -4224,7 +4224,7 @@ cairn_seek(
     rc = cairn_inode_get_fh(thread, request->fh, request->fh_len, &ih);
 
     if (rc) {
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
     }
@@ -4412,7 +4412,7 @@ cairn_symlink_at(
     rc = cairn_inode_get_fh(thread, request->fh, request->fh_len, &parent_ih);
 
     if (unlikely(rc)) {
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
     }
@@ -4512,7 +4512,7 @@ cairn_readlink(
     rc = cairn_inode_get_fh(thread, request->fh, request->fh_len, &ih);
 
     if (rc) {
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
     }
@@ -4613,7 +4613,7 @@ cairn_rename_at(
         rc = cairn_inode_get_fh(thread, request->fh, request->fh_len, &old_parent_ih);
 
         if (unlikely(rc)) {
-            request->status = CHIMERA_VFS_ENOENT;
+            request->status = CHIMERA_VFS_ESTALE;
             request->complete(request);
             return;
         }
@@ -4634,7 +4634,7 @@ cairn_rename_at(
         if (cmp < 0) {
             rc = cairn_inode_get_fh(thread, request->fh, request->fh_len, &old_parent_ih);
             if (rc) {
-                request->status = CHIMERA_VFS_ENOENT;
+                request->status = CHIMERA_VFS_ESTALE;
                 request->complete(request);
                 return;
             }
@@ -4643,7 +4643,7 @@ cairn_rename_at(
                                     new_parent_ih);
             if (rc) {
                 cairn_inode_handle_release(&old_parent_ih);
-                request->status = CHIMERA_VFS_ENOENT;
+                request->status = CHIMERA_VFS_ESTALE;
                 request->complete(request);
                 return;
             }
@@ -4651,7 +4651,7 @@ cairn_rename_at(
             rc = cairn_inode_get_fh(thread, request->rename_at.new_fh, request->rename_at.new_fhlen, &
                                     new_parent_ih);
             if (rc) {
-                request->status = CHIMERA_VFS_ENOENT;
+                request->status = CHIMERA_VFS_ESTALE;
                 request->complete(request);
                 return;
             }
@@ -4659,7 +4659,7 @@ cairn_rename_at(
             rc = cairn_inode_get_fh(thread, request->fh, request->fh_len, &old_parent_ih);
             if (rc) {
                 cairn_inode_handle_release(&new_parent_ih);
-                request->status = CHIMERA_VFS_ENOENT;
+                request->status = CHIMERA_VFS_ESTALE;
                 request->complete(request);
                 return;
             }
@@ -4932,7 +4932,7 @@ cairn_link_at(
     rc = cairn_inode_get_fh(thread, request->link_at.dir_fh, request->link_at.dir_fhlen, &parent_ih);
 
     if (unlikely(rc)) {
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
     }
@@ -4950,7 +4950,7 @@ cairn_link_at(
 
     if (rc) {
         cairn_inode_handle_release(&parent_ih);
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
     }
@@ -5047,7 +5047,7 @@ cairn_commit_op(
      * to reject a stale handle). */
     rc = cairn_inode_get_fh(thread, request->fh, request->fh_len, &ih);
     if (unlikely(rc)) {
-        request->status = CHIMERA_VFS_ENOENT;
+        request->status = CHIMERA_VFS_ESTALE;
         request->complete(request);
         return;
     }

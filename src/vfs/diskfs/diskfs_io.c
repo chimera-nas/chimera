@@ -867,7 +867,7 @@ diskfs_inode_load_resume(
         /* No such inode (stale generation, tombstone, or the block has been
          * reallocated to something else entirely). */
         diskfs_block_unpin(self, blk, DISKFS_BLOCK_CLEAN);
-        lc->cb(NULL, CHIMERA_VFS_ENOENT, lc->private_data);
+        lc->cb(NULL, CHIMERA_VFS_ESTALE, lc->private_data);
         free(lc);
         return;
     }

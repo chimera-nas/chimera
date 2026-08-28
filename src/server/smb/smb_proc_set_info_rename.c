@@ -104,7 +104,8 @@ chimera_smb_set_info_rename_callback(
         case CHIMERA_VFS_EACCES:
         case CHIMERA_VFS_EPERM:     status = SMB2_STATUS_ACCESS_DENIED; break;
         case CHIMERA_VFS_EEXIST:    status = SMB2_STATUS_OBJECT_NAME_COLLISION; break;
-        case CHIMERA_VFS_ENOENT:    status = SMB2_STATUS_OBJECT_NAME_NOT_FOUND; break;
+        case CHIMERA_VFS_ENOENT:
+        case CHIMERA_VFS_ESTALE:    status = SMB2_STATUS_OBJECT_NAME_NOT_FOUND; break;
         case CHIMERA_VFS_ENOTEMPTY: status = SMB2_STATUS_DIRECTORY_NOT_EMPTY; break;
         case CHIMERA_VFS_EISDIR:    status = SMB2_STATUS_FILE_IS_A_DIRECTORY; break;
         case CHIMERA_VFS_ENOTDIR:   status = SMB2_STATUS_NOT_A_DIRECTORY; break;

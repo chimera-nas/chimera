@@ -59,6 +59,7 @@ chimera_smb_ea_status(enum chimera_vfs_error err)
         case CHIMERA_VFS_EEXIST:
             return SMB2_STATUS_OBJECT_NAME_COLLISION;
         case CHIMERA_VFS_ENOENT:
+        case CHIMERA_VFS_ESTALE:
             return SMB2_STATUS_OBJECT_NAME_NOT_FOUND;
         default:
             return SMB2_STATUS_INTERNAL_ERROR;
