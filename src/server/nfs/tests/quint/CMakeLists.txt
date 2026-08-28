@@ -9,12 +9,14 @@ set(CHIMERA_TEST_TIER quick)
 # NFS model-based tests: the Quint specifications and their trace generation
 # live in the chimera-nas/specs repo (submodule ext/specs); this directory owns
 # only the C replay harnesses that drive that corpus against the live chimera
-# server.  Three suites:
+# server.  Four suites:
 #
 #   nfs3_mbt_replay.c     NFSv3           (specs corpus nfs3/)
 #   nfs4_mbt_replay.c     NFSv4.0/4.1/4.2 (specs corpus nfs4/)
 #   nfs_aux_mbt_replay.c  the four protocols around NFSv3 -- portmap/rpcbind,
 #                         MOUNT, NLM and NSM (specs corpus nfsaux/)
+#   nfs_drc_mbt_replay.c  the duplicate-request caches of NFSv3 and NFSv4.0
+#                         (specs corpus nfsdrc/)
 #
 # Each embeds the chimera server (memfs backend) in the test process and replays
 # every trace over libevpl's inproc transport, failing on any divergence.  No
@@ -59,10 +61,22 @@ target_include_directories(nfs_aux_probe PRIVATE
 target_link_libraries(nfs_aux_probe
     chimera_server chimera_nfs_common chimera_metrics jansson)
 
+add_executable(nfs_drc_probe nfs_drc_probe.c)
+target_include_directories(nfs_drc_probe PRIVATE
+    ${CMAKE_BINARY_DIR}/src/nfs_common)
+target_link_libraries(nfs_drc_probe
+    chimera_server chimera_nfs_common chimera_metrics jansson)
+
 add_executable(nfs_aux_mbt_replay nfs_aux_mbt_replay.c)
 target_include_directories(nfs_aux_mbt_replay PRIVATE
     ${CMAKE_BINARY_DIR}/src/nfs_common)
 target_link_libraries(nfs_aux_mbt_replay
+    chimera_server chimera_nfs_common chimera_metrics jansson)
+
+add_executable(nfs_drc_mbt_replay nfs_drc_mbt_replay.c)
+target_include_directories(nfs_drc_mbt_replay PRIVATE
+    ${CMAKE_BINARY_DIR}/src/nfs_common)
+target_link_libraries(nfs_drc_mbt_replay
     chimera_server chimera_nfs_common chimera_metrics jansson)
 
 add_executable(nfs4_mbt_replay nfs4_mbt_replay.c)
@@ -140,6 +154,19 @@ add_test(NAME chimera/server/nfs/mbtaux/probe_memfs
 set_tests_properties(chimera/server/nfs/mbtaux/probe_memfs PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsaux_probe_memfs"
     LABELS "quint;nfsaux_mbt;memfs"
+    TIMEOUT 120)
+
+# Duplicate-request-cache ground truth: pins the properties the nfsdrc model
+# turns into a corpus -- that a retransmit replays, that a different XID,
+# procedure, connection or principal does not, what a reconnect does to each of
+# the two caches, and the transport facts the model's constants record (one
+# address for every in-process peer, a new filehandle per incarnation).  Needs
+# no corpus.
+add_test(NAME chimera/server/nfs/mbtdrc/probe_memfs
+    COMMAND $<TARGET_FILE:nfs_drc_probe>)
+set_tests_properties(chimera/server/nfs/mbtdrc/probe_memfs PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsdrc_probe_memfs"
+    LABELS "quint;nfsdrc_mbt;memfs"
     TIMEOUT 120)
 
 # Delegation policy probe: pins the deterministic grant/recall behavior the
@@ -244,6 +271,35 @@ add_test(NAME chimera/server/nfs/mbtaux/batch_memfs
 set_tests_properties(chimera/server/nfs/mbtaux/batch_memfs PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsaux_batch_memfs"
     LABELS "quint;nfsaux_mbt;memfs"
+    TIMEOUT 600)
+
+# The duplicate-request caches, replayed from the nfsdrc corpus.  Two batches
+# because there are two servers: the NFSv3 cache is off by default and on in the
+# other, and "the switch does nothing" and "the switch works" are
+# indistinguishable without a corpus for each.  The NFSv4.0 cache has no switch
+# and is under test in both.
+#
+# --paranoid is on for the same reason the auxiliary suite has it on.  Comparing
+# replies alone cannot see a cache misbehaving for every operation: a replayed
+# SETATTR and a re-executed one both answer NFS3_OK, and the difference is a
+# size in the directory.  The flag re-reads the working directory after every
+# step and compares it against the model's own.
+add_test(NAME chimera/server/nfs/mbtdrc/batch_memfs
+    COMMAND $<TARGET_FILE:nfs_drc_mbt_replay> --paranoid
+            --trace-dir ${SPECS_BUNDLE_DIR}/nfsdrc
+            --exclude-prefix nfsdrcNoV3)
+set_tests_properties(chimera/server/nfs/mbtdrc/batch_memfs PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsdrc_batch_memfs"
+    LABELS "quint;nfsdrc_mbt;memfs"
+    TIMEOUT 600)
+
+add_test(NAME chimera/server/nfs/mbtdrc/batch_nodrc_memfs
+    COMMAND $<TARGET_FILE:nfs_drc_mbt_replay> --paranoid --no-nfs3-drc
+            --trace-dir ${SPECS_BUNDLE_DIR}/nfsdrc
+            --exclude-prefix nfsdrcRef)
+set_tests_properties(chimera/server/nfs/mbtdrc/batch_nodrc_memfs PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsdrc_batch_nodrc_memfs"
+    LABELS "quint;nfsdrc_mbt;memfs"
     TIMEOUT 600)
 
 # SKIP_RETURN_CODE 77 still applies to NFS4: a trace whose capability profile

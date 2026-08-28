@@ -170,6 +170,10 @@ struct mbt_env_opts {
      * (1s).  A suite that unmounts often wants this short, because the wait
      * is per attempt and the handles are dropped by an asynchronous sweep. */
     int         umount_timeout_ms;
+    /* server.nfs3_drc: the NFSv3 duplicate-request cache.  Off by default in
+     * the server and here; the DRC suite is the only caller that turns it on.
+     * The NFSv4.0 cache needs no flag -- it is always installed. */
+    int         nfs3_drc;
 };
 
 struct mbt_env {
@@ -485,6 +489,9 @@ mbt_env_open_opts(
         if (opts->disable_caches) {
             chimera_server_config_set_attr_cache_enabled(config, 0);
             chimera_server_config_set_name_cache_enabled(config, 0);
+        }
+        if (opts->nfs3_drc) {
+            chimera_server_config_set_nfs3_drc(config, 1);
         }
     }
 
