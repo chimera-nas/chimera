@@ -39,6 +39,13 @@ struct chimera_s3_tagging_ctx {
     int                             total;
     /* Which subresource operation is in flight (enum chimera_s3_tagging_op). */
     int                             op;
+    /* The composed xattr name of the set currently in flight.  It must
+     * live here, not on a caller's stack: chimera_vfs_set_xattr keeps the
+     * caller's pointer until the completion callback, and an asynchronous
+     * backend (cairn's delegation thread) reads it after the caller has
+     * returned. */
+    char                            set_name[CHIMERA_S3_TAG_PREFIX_LEN +
+                                             CHIMERA_S3_TAG_MAX_KEY_LEN + 1];
     /* Names returned by list_xattrs (for GET/DELETE), staged here. */
     char                           *names;
     int                             names_len;
