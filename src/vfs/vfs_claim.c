@@ -1767,6 +1767,33 @@ chimera_vfs_claim_test(
 } /* chimera_vfs_claim_test */
 
 SYMBOL_EXPORT bool
+chimera_vfs_claim_range_owner_holds(
+    struct chimera_vfs_file_state    *file,
+    const struct chimera_claim_owner *owner,
+    const struct chimera_vfs_claim   *except,
+    uint64_t                          offset,
+    uint64_t                          length)
+{
+    struct chimera_vfs_claim *cur;
+    bool                      held = false;
+
+    pthread_mutex_lock(&file->lock);
+    for (cur = file->claims[CHIMERA_CLAIM_CLASS_RANGE]; cur; cur = cur->next) {
+        if (cur == except ||
+            !chimera_claim_owner_equal(&cur->owner, owner) ||
+            !chimera_vfs_claim_range_overlap(cur->offset, cur->length,
+                                             offset, length)) {
+            continue;
+        }
+        held = true;
+        break;
+    }
+    pthread_mutex_unlock(&file->lock);
+
+    return held;
+} /* chimera_vfs_claim_range_owner_holds */
+
+SYMBOL_EXPORT bool
 chimera_vfs_claim_cancel(
     struct chimera_vfs_state           *state,
     struct chimera_vfs_pending_acquire *ticket)
@@ -1814,6 +1841,7 @@ chimera_vfs_claim_range_replace(
     struct chimera_vfs_state         *state,
     struct chimera_vfs_file_state    *file,
     const struct chimera_claim_owner *owner,
+    const struct chimera_vfs_claim   *except,
     uint64_t                          offset,
     uint64_t                          length,
     uint8_t                           new_mask,
@@ -1840,6 +1868,9 @@ chimera_vfs_claim_range_replace(
     for (cur = file->claims[CHIMERA_CLAIM_CLASS_RANGE]; cur; cur = next) {
         next = cur->next;
 
+        if (cur == except) {
+            continue;
+        }
         if (!chimera_claim_owner_equal(&cur->owner, owner)) {
             continue;
         }

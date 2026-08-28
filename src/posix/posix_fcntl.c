@@ -411,6 +411,15 @@ chimera_posix_fcntl(
         }
 
         chimera_posix_ofd_lock_track(posix, entry->ofd, node);
+
+        /* POSIX: the new lock REPLACES the owner's coverage of the bytes it
+         * spans, so a WRLCK->RDLCK downgrade really downgrades.  Same-owner
+         * claims are self-exempt at the OWNER circle, so leaving the older
+         * fragments in place looked harmless -- it is not: a stale WRITE
+         * fragment under a downgraded range still denies another owner's
+         * READ lock, and under F_SETLKW that waits forever. */
+        chimera_posix_ofd_lock_replace(posix, entry->ofd, handle, node,
+                                       offset, core_length);
     }
 
     chimera_posix_fd_release(entry, 0);

@@ -21,7 +21,6 @@
 
 #include "posix_internal.h"
 #include "vfs/sdk/vfs_module.h"
-#include "../client/client_lock.h"
 
 /* A mid-range carve splits one claim into head and tail fragments, so two
  * spares.  The claim core's interface fixes this: vfs_claim.h declares
@@ -88,6 +87,7 @@ chimera_posix_ofd_lock_track(
     pthread_mutex_lock(&posix->fd_lock);
     node->ofd = ofd;
     DL_APPEND(ofd->locks, node);
+    atomic_fetch_add(&posix->n_range_locks, 1);
     pthread_mutex_unlock(&posix->fd_lock);
 } /* chimera_posix_ofd_lock_track */
 
@@ -102,6 +102,7 @@ chimera_posix_ofd_lock_untrack_release(
     if (node->ofd) {
         DL_DELETE(node->ofd->locks, node);
         node->ofd = NULL;
+        atomic_fetch_sub(&posix->n_range_locks, 1);
     }
     pthread_mutex_unlock(&posix->fd_lock);
 
@@ -120,6 +121,7 @@ chimera_posix_ofd_locks_release(
 
     while ((node = ofd->locks)) {
         DL_DELETE(ofd->locks, node);
+        atomic_fetch_sub(&posix->n_range_locks, 1);
         chimera_vfs_claim_release(state, node->file, &node->claim);
         chimera_vfs_state_put(state, node->file);
         free(node);
@@ -143,87 +145,6 @@ chimera_posix_ofd_locks_release(
         free(t);
     }
 } /* chimera_posix_ofd_locks_release */
-
-static void
-chimera_posix_project_unlock_callback(
-    struct chimera_client_thread *thread,
-    enum chimera_vfs_error        status,
-    uint32_t                      conflict_type,
-    uint64_t                      conflict_offset,
-    uint64_t                      conflict_length,
-    pid_t                         conflict_pid,
-    void                         *private_data)
-{
-    struct chimera_posix_completion *comp = private_data;
-
-    chimera_posix_complete(comp, status);
-} /* chimera_posix_project_unlock_callback */
-
-static void
-chimera_posix_project_unlock_exec(
-    struct chimera_client_thread  *thread,
-    struct chimera_client_request *request)
-{
-    chimera_dispatch_lock(thread, request);
-} /* chimera_posix_project_unlock_exec */
-
-/*
- * Dropping an open file description's last descriptor releases its
- * byte-range locks.  The local claims go in chimera_posix_ofd_locks_release,
- * but a backend that arbitrates locks itself (CAP_CLAIM_RANGE: the nfs/smb
- * proxies projecting to a real lock manager) holds its own state -- and the
- * NLM server pins the file's open handle for as long as the lock lives, so
- * an untold backend leaks both.  Project one whole-file unlock for this
- * owner (the owner IS the open handle) while the handle is still live.
- * Called from every path that implicitly drops a description's last
- * reference with the handle still open: close(2) and dup2(2)'s implicit
- * close of its target.  Best-effort: the caller's close succeeds regardless,
- * so a failed projection only risks the server holding the lock until the
- * connection drops.  (OFD-granularity, matching the local release -- see the
- * CLAIMTODO in chimera_posix_ofd_release_locked.)
- */
-void
-chimera_posix_project_ofd_unlock(
-    struct chimera_posix_client    *posix,
-    struct chimera_posix_worker    *worker,
-    struct chimera_vfs_open_handle *handle,
-    struct chimera_posix_ofd       *ofd)
-{
-    struct chimera_client_request   req;
-    struct chimera_posix_completion comp;
-    int                             project;
-
-    if (!handle ||
-        !(handle->vfs_module->capabilities & CHIMERA_VFS_CAP_CLAIM_RANGE)) {
-        return;
-    }
-
-    pthread_mutex_lock(&posix->fd_lock);
-    project = ofd && ofd->refcnt == 1 && ofd->locks != NULL;
-    pthread_mutex_unlock(&posix->fd_lock);
-
-    if (!project) {
-        return;
-    }
-
-    chimera_posix_completion_init(&comp, &req);
-
-    req.opcode            = CHIMERA_CLIENT_OP_LOCK;
-    req.lock.handle       = handle;
-    req.lock.whence       = SEEK_SET;
-    req.lock.offset       = 0;
-    req.lock.length       = 0;   /* 0 = to EOF (whole file) */
-    req.lock.lock_type    = CHIMERA_VFS_LOCK_UNLOCK;
-    req.lock.flags        = 0;
-    req.lock.callback     = chimera_posix_project_unlock_callback;
-    req.lock.private_data = &comp;
-
-    chimera_posix_worker_enqueue(worker, &req,
-                                 chimera_posix_project_unlock_exec);
-
-    (void) chimera_posix_wait(&comp);
-    chimera_posix_completion_destroy(&comp);
-} /* chimera_posix_project_ofd_unlock */
 void
 chimera_posix_ofd_track_token(
     struct chimera_posix_client    *posix,
@@ -259,6 +180,7 @@ chimera_posix_ofd_track_token(
 /* -------------------------------------------------------------------- */
 
 struct chimera_posix_lock_carve_ctx {
+    struct chimera_posix_client   *posix;
     struct chimera_posix_ofd_lock *freed; /* chained via ->next */
 };
 
@@ -278,6 +200,7 @@ chimera_posix_lock_carve_released(
     if (node->ofd) {
         DL_DELETE(node->ofd->locks, node);
         node->ofd = NULL;
+        atomic_fetch_sub(&ctx->posix->n_range_locks, 1);
     }
     /* CLAIMTODO: a node granted by the core but not yet tracked (the window
      * between a blocking grant and track) would arrive here with ofd NULL
@@ -290,23 +213,23 @@ chimera_posix_lock_carve_released(
 
 void
 chimera_posix_ofd_lock_carve(
-    struct chimera_posix_client    *posix,
-    struct chimera_posix_ofd       *ofd,
-    struct chimera_vfs_open_handle *handle,
-    uint64_t                        offset,
-    uint64_t                        length)
+    struct chimera_posix_client      *posix,
+    struct chimera_posix_ofd         *ofd,
+    struct chimera_vfs_open_handle   *handle,
+    const struct chimera_claim_owner *owner,
+    const struct chimera_vfs_claim   *except,
+    uint64_t                          offset,
+    uint64_t                          length)
 {
     struct chimera_vfs_state           *state = chimera_posix_vfs_state(posix);
     struct chimera_posix_ofd_lock      *spare_nodes[POSIX_LOCK_CARVE_SPARES];
     struct chimera_vfs_claim           *spare[POSIX_LOCK_CARVE_SPARES];
-    struct chimera_posix_lock_carve_ctx ctx        = { .freed = NULL };
+    struct chimera_posix_lock_carve_ctx ctx = { .posix = posix,
+                                                .freed = NULL };
     int                                 spare_used = 0;
     struct chimera_vfs_file_state      *file;
-    struct chimera_claim_owner          owner;
     struct chimera_posix_ofd_lock      *node;
     int                                 i;
-
-    chimera_posix_lock_owner_init(&owner);
 
     file = chimera_vfs_state_get(state,
                                  handle->fh,
@@ -344,7 +267,7 @@ chimera_posix_ofd_lock_carve(
 
     pthread_mutex_lock(&posix->fd_lock);
 
-    chimera_vfs_claim_range_replace(state, file, &owner, offset, length,
+    chimera_vfs_claim_range_replace(state, file, owner, except, offset, length,
                                     /* new_mask */ 0,
                                     spare, &spare_used,
                                     chimera_posix_lock_carve_released, &ctx);
@@ -365,6 +288,7 @@ chimera_posix_ofd_lock_carve(
     for (i = 0; i < spare_used; i++) {
         spare_nodes[i]->ofd = ofd;
         DL_APPEND(ofd->locks, spare_nodes[i]);
+        atomic_fetch_add(&posix->n_range_locks, 1);
     }
 
     pthread_mutex_unlock(&posix->fd_lock);
@@ -728,6 +652,8 @@ struct chimera_posix_unlock_ctx {
     struct chimera_posix_client    *posix;
     struct chimera_posix_ofd       *ofd;
     struct chimera_vfs_open_handle *handle;
+    struct chimera_claim_owner      owner;
+    const struct chimera_vfs_claim *except;
     uint64_t                        offset;
     uint64_t                        length;
     pthread_mutex_t                 mutex;
@@ -756,7 +682,8 @@ chimera_posix_unlock_exec(
     struct chimera_vfs_file_state   *file;
 
     chimera_posix_ofd_lock_carve(ctx->posix, ctx->ofd, ctx->handle,
-                                 ctx->offset, ctx->length);
+                                 &ctx->owner, ctx->except, ctx->offset,
+                                 ctx->length);
 
     file = chimera_vfs_state_get(state, ctx->handle->fh,
                                  (uint8_t) ctx->handle->fh_len,
@@ -768,19 +695,26 @@ chimera_posix_unlock_exec(
     chimera_vfs_state_put(state, file);
 } /* chimera_posix_unlock_exec */
 
-void
-chimera_posix_lock_claim_unlock(
+static void
+chimera_posix_lock_claim_carve_wait(
     struct chimera_posix_client    *posix,
     struct chimera_posix_ofd       *ofd,
     struct chimera_vfs_open_handle *handle,
+    const struct chimera_vfs_claim *except,
     uint64_t                        offset,
     uint64_t                        length)
 {
     struct chimera_vfs_state       *state = chimera_posix_vfs_state(posix);
     struct chimera_posix_unlock_ctx ctx;
+    struct chimera_claim_owner      owner;
+
+    /* Capture the owner HERE, on the application thread: the identity is a
+     * property of the caller, and the carve below runs on a worker. */
+    chimera_posix_lock_owner_init(&owner);
 
     if (!chimera_vfs_claim_backend_range_capable(state)) {
-        chimera_posix_ofd_lock_carve(posix, ofd, handle, offset, length);
+        chimera_posix_ofd_lock_carve(posix, ofd, handle, &owner, except,
+                                     offset, length);
         return;
     }
 
@@ -788,6 +722,8 @@ chimera_posix_lock_claim_unlock(
     ctx.posix  = posix;
     ctx.ofd    = ofd;
     ctx.handle = handle;
+    ctx.owner  = owner;
+    ctx.except = except;
     ctx.offset = offset;
     ctx.length = length;
     pthread_mutex_init(&ctx.mutex, NULL);
@@ -807,6 +743,18 @@ chimera_posix_lock_claim_unlock(
 
     pthread_mutex_destroy(&ctx.mutex);
     pthread_cond_destroy(&ctx.cond);
+} /* chimera_posix_lock_claim_carve_wait */
+
+void
+chimera_posix_lock_claim_unlock(
+    struct chimera_posix_client    *posix,
+    struct chimera_posix_ofd       *ofd,
+    struct chimera_vfs_open_handle *handle,
+    uint64_t                        offset,
+    uint64_t                        length)
+{
+    chimera_posix_lock_claim_carve_wait(posix, ofd, handle, NULL,
+                                        offset, length);
 } /* chimera_posix_lock_claim_unlock */
 
 /* Release a backend range this node holds without a local claim, by
@@ -906,3 +854,100 @@ chimera_posix_lock_claim_unlock_ranged(
 
     return 0;
 } /* chimera_posix_lock_claim_unlock_ranged */
+
+/*
+ * POSIX close() semantics.  XSH fcntl: "All locks associated with a file for
+ * a given process shall be removed when a file descriptor for that file is
+ * closed by that process."  ANY descriptor -- not merely the last one, and
+ * not merely the description the lock was taken through -- so this carves
+ * the whole address space for this owner rather than walking one list.
+ *
+ * The claim core is the authority on which claims that owner holds, so a
+ * lock taken through a sibling description is released here even though
+ * this description never tracked it; the carve's released callback unlinks
+ * each node from whichever description does track it.
+ */
+void
+chimera_posix_locks_release_file(
+    struct chimera_posix_client    *posix,
+    struct chimera_posix_ofd       *ofd,
+    struct chimera_vfs_open_handle *handle)
+{
+    struct chimera_vfs_state      *state = chimera_posix_vfs_state(posix);
+    struct chimera_vfs_file_state *file;
+    struct chimera_claim_owner     owner;
+    bool                           held;
+
+    /* Two fast paths, because close() is hot and the release below is not:
+     * it marshals onto a worker and blocks.  First, the client may hold no
+     * byte-range locks at all, which is the overwhelmingly common case and
+     * costs one atomic read. */
+    if (atomic_load(&posix->n_range_locks) == 0) {
+        return;
+    }
+
+    /* Second, it may hold locks but none on THIS file.  Answering that is a
+     * short walk of one claim list, entirely local. */
+    file = chimera_vfs_state_get(state, handle->fh, (uint8_t) handle->fh_len,
+                                 handle->fh_hash, /* create */ false);
+
+    if (!file) {
+        return;
+    }
+
+    chimera_posix_lock_owner_init(&owner);
+    held = chimera_vfs_claim_range_owner_holds(file, &owner, NULL,
+                                               0, UINT64_MAX);
+    chimera_vfs_state_put(state, file);
+
+    if (!held) {
+        return;
+    }
+
+    /* The whole address space, through the ordinary unlock path -- so the
+     * backend records go too, and are WAITED for.  POSIX makes close() a
+     * release point, and another process asking the same backend cannot
+     * wait on our projection queue any more than it could for F_UNLCK. */
+    chimera_posix_lock_claim_unlock(posix, ofd, handle, 0, UINT64_MAX);
+} /* chimera_posix_locks_release_file */
+
+void
+chimera_posix_ofd_lock_replace(
+    struct chimera_posix_client    *posix,
+    struct chimera_posix_ofd       *ofd,
+    struct chimera_vfs_open_handle *handle,
+    struct chimera_posix_ofd_lock  *node,
+    uint64_t                        offset,
+    uint64_t                        length)
+{
+    struct chimera_vfs_state      *state = chimera_posix_vfs_state(posix);
+    struct chimera_vfs_file_state *file;
+    struct chimera_claim_owner     owner;
+    bool                           held;
+
+    /* A first lock on a range has nothing to replace, which is the common
+     * case; answering that is one short walk of a local claim list, versus
+     * a worker round trip and a backend flush. */
+    file = chimera_vfs_state_get(state, handle->fh, (uint8_t) handle->fh_len,
+                                 handle->fh_hash, /* create */ false);
+
+    if (!file) {
+        return;
+    }
+
+    chimera_posix_lock_owner_init(&owner);
+    held = chimera_vfs_claim_range_owner_holds(file, &owner, &node->claim,
+                                               offset, length);
+    chimera_vfs_state_put(state, file);
+
+    if (!held) {
+        return;
+    }
+
+    /* Waited, like an unlock: until the backend has dropped the older,
+     * possibly STRONGER record, it still answers for this range, and a
+     * F_GETLK from another owner would be told the downgrade never
+     * happened. */
+    chimera_posix_lock_claim_carve_wait(posix, ofd, handle, &node->claim,
+                                        offset, length);
+} /* chimera_posix_ofd_lock_replace */

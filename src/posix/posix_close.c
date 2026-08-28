@@ -22,7 +22,11 @@ chimera_posix_close(int fd)
 
     handle = entry->handle;
 
-    chimera_posix_project_ofd_unlock(posix, worker, handle, entry->ofd);
+    /* POSIX: closing ANY descriptor for a file releases every lock this
+     * process holds on that file, including ones taken through other
+     * descriptions.  Must run before the description is dropped, so the
+     * carve still has a handle to name the file with. */
+    chimera_posix_locks_release_file(posix, entry->ofd, handle);
 
     chimera_close(worker->client_thread, handle);
 

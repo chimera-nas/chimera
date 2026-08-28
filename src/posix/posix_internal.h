@@ -141,6 +141,12 @@ struct chimera_posix_client {
     int                            max_fds;
     atomic_int                     init_cursor;
     int                            owns_config;
+    /* Number of byte-range lock claims this client currently tracks, across
+     * every open file description.  Maintained under fd_lock alongside the
+     * per-description lists.  close() consults it to skip the POSIX
+     * whole-file lock release entirely on the overwhelmingly common path
+     * where the process holds no locks at all. */
+    atomic_int                     n_range_locks;
 } __attribute__((aligned(64)));
 
 extern struct chimera_posix_client *chimera_posix_global;
@@ -185,9 +191,9 @@ chimera_posix_get_global(void)
  *
  * The posix client's byte-range locks go through the embedded VFS's claim
  * core FIRST (arbitrating against protocol claims and other posix threads
- * in this process), with the OP_LOCK backend passthrough retained as the
- * kernel projection so cross-PROCESS conflicts keep working (each process
- * has its own core instance; the kernel is the shared arbiter).
+ * in this process), then confirmed with a CHIMERA_VFS_CAP_CLAIM_RANGE
+ * backend so cross-PROCESS conflicts keep working (each process has its own
+ * core instance; the backend is the shared arbiter).
  * -------------------------------------------------------------------- */
 
 /* The POSIX lock owner: per-process identity (classic fcntl lock scope).
@@ -236,12 +242,31 @@ void chimera_posix_ofd_lock_untrack_release(
     struct chimera_posix_client   *posix,
     struct chimera_posix_ofd_lock *node);
 
-/* F_UNLCK: carve the owner's local coverage of [offset, offset+length)
- * out of the claim core (REPLACE geometry, new_mask 0). */
+/* F_UNLCK: carve `owner`'s local coverage of [offset, offset+length) out of
+ * the claim core (REPLACE geometry, new_mask 0).  The owner is a parameter
+ * rather than something this function derives: the unlock path runs it on a
+ * worker thread, and the identity belongs to the application thread that
+ * called fcntl(). */
 void chimera_posix_ofd_lock_carve(
+    struct chimera_posix_client      *posix,
+    struct chimera_posix_ofd         *ofd,
+    struct chimera_vfs_open_handle   *handle,
+    const struct chimera_claim_owner *owner,
+    const struct chimera_vfs_claim   *except,
+    uint64_t                          offset,
+    uint64_t                          length);
+
+/* POSIX re-lock: a new lock REPLACES the owner's coverage of the range it
+ * covers, including a WRLCK->RDLCK downgrade.  Called with `node` already
+ * granted and tracked, it carves away the owner's older overlapping claims
+ * and leaves `node` standing.  Doing it in this order rather than
+ * carve-then-insert is what makes a refused upgrade leave the old lock
+ * intact, and leaves no window in which the range is unheld. */
+void chimera_posix_ofd_lock_replace(
     struct chimera_posix_client    *posix,
     struct chimera_posix_ofd       *ofd,
     struct chimera_vfs_open_handle *handle,
+    struct chimera_posix_ofd_lock  *node,
     uint64_t                        offset,
     uint64_t                        length);
 
@@ -317,13 +342,15 @@ void chimera_posix_ofd_locks_release(
     struct chimera_posix_client *posix,
     struct chimera_posix_ofd    *ofd);
 
-/* Project a whole-file backend unlock before a description's last close on a
- * CAP_FS_LOCK backend (see posix_lock_claims.c). */
-void chimera_posix_project_ofd_unlock(
+/* POSIX close(): drop every byte-range lock this PROCESS holds on the file
+ * `handle` refers to -- including locks taken through other descriptions of
+ * the same file, which is what makes it POSIX record-lock semantics rather
+ * than OFD-lock semantics.  A no-op when the client tracks no locks.  Caller
+ * must NOT hold fd_lock. */
+void chimera_posix_locks_release_file(
     struct chimera_posix_client    *posix,
-    struct chimera_posix_worker    *worker,
-    struct chimera_vfs_open_handle *handle,
-    struct chimera_posix_ofd       *ofd);
+    struct chimera_posix_ofd       *ofd,
+    struct chimera_vfs_open_handle *handle);
 
 /* Drop an fd entry's reference on its open file description, freeing the
  * description when the last duplicate goes.  Caller holds fd_lock. */
@@ -331,11 +358,12 @@ static FORCE_INLINE void
 chimera_posix_ofd_release_locked(struct chimera_posix_fd_entry *entry)
 {
     if (entry->ofd && --entry->ofd->refcnt == 0) {
-        /* Last posix close of the description: release its lock claims from
-         * the local core (fixes the shipped leak of claims surviving close).
-         * CLAIMTODO: POSIX drops a process's locks on ANY close of any fd
-         * referring to the file; we release on the LAST close of the OFD
-         * (OFD-lock/BSD-style), a deliberate divergence. */
+        /* Last posix close of the description: release whatever lock claims
+        * it still tracks.  POSIX's own rule -- any close of any descriptor
+        * for the file drops all of the process's locks on it -- is applied
+        * earlier, by chimera_posix_locks_release_file() in
+        * chimera_posix_close(); this is the backstop for a description torn
+        * down by another path, and for its backend-only SEEK_END tokens. */
         chimera_posix_ofd_locks_release(chimera_posix_get_global(), entry->ofd);
         free(entry->ofd);
     }
