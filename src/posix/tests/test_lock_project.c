@@ -98,15 +98,11 @@ main(
         posix_test_fail(&env);
     }
 
-    /* Deliberately no F_UNLCK / granted-lock assertions here: memfs claims
-     * CHIMERA_VFS_CAP_FS_LOCK without implementing CHIMERA_VFS_OP_LOCK
-     * (deviation PD1 in quint/posix_deviations.py), so on this backend
-     * every fcntl that reaches the kernel passthrough -- which a granted
-     * lock and any unlock both do -- ends in EOPNOTSUPP regardless of the
-     * projection.  A refusal is observable because it is decided before
-     * that passthrough, which is what makes it the honest probe here.  The
-     * granted path is covered on the backends that do implement OP_LOCK.
-     */
+    /* Only refusals are asserted here, and deliberately so: this backend is
+     * configured to refuse every range, so there is no granted lock to
+     * observe.  The granted and unlock paths are covered by
+     * test_lock_posix_semantics and by the quint posix model's stepLocks
+     * flavor, both of which run against an ordinary memfs arbiter. */
 
     chimera_posix_close(fd);
 
