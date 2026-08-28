@@ -495,6 +495,12 @@ chimera_s3_dispatch_callback(
     if (error_code) {
         s3_request->status    = CHIMERA_S3_STATUS_NO_SUCH_KEY;
         s3_request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
+        /* This is a VFS completion callback: on an asynchronous backend the
+         * RECEIVE_COMPLETE notification may already have passed, so an error
+         * completed here must answer the request itself or nothing will. */
+        if (s3_request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
+            s3_server_respond(evpl, s3_request);
+        }
         return;
     }
 
@@ -525,6 +531,10 @@ chimera_s3_dispatch_callback(
                 s3_request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
                 break;
         } /* switch */
+        if (s3_request->vfs_state == CHIMERA_S3_VFS_STATE_COMPLETE &&
+            s3_request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
+            s3_server_respond(evpl, s3_request);
+        }
         return;
     }
 
@@ -589,6 +599,14 @@ chimera_s3_dispatch_callback(
             s3_request->vfs_state = CHIMERA_S3_VFS_STATE_COMPLETE;
             break;
     } /* switch */
+
+    /* Routing that completed the request in this VFS-callback context (the
+    * unimplemented-method arms above) must answer it: on an asynchronous
+    * backend the RECEIVE_COMPLETE notification may already have passed. */
+    if (s3_request->vfs_state == CHIMERA_S3_VFS_STATE_COMPLETE &&
+        s3_request->http_state == CHIMERA_S3_HTTP_STATE_RECVED) {
+        s3_server_respond(evpl, s3_request);
+    }
 
 } /* chimera_s3_dispatch_callback */
 
