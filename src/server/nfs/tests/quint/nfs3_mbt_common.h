@@ -32,6 +32,7 @@
 #include "server/server.h"
 #include "common/tcp_flavor.h"
 #include "prometheus-c.h"
+#include "common/mbt_artifacts.h"
 
 #include "nfs3_xdr.h"
 #include "nfs4_xdr.h"
@@ -238,6 +239,8 @@ mbt_env_open_opts(
     struct evpl_endpoint         *nfs_ep;
     struct evpl_endpoint         *mount_ep;
     int                           aux = opts && opts->aux;
+
+    mbt_debug_log_start();
 
     memset(env, 0, sizeof(*env));
 
@@ -673,6 +676,7 @@ mbt_env_stop(struct mbt_env *env)
     evpl_destroy(env->evpl);
 
     chimera_server_destroy(env->server);
+    mbt_metrics_dump(env->metrics);
     prometheus_metrics_destroy(env->metrics);
 
     free(env->data_buf);

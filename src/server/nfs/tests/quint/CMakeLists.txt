@@ -31,37 +31,37 @@ add_executable(nfs3_mbt_replay nfs3_mbt_replay.c)
 target_include_directories(nfs3_mbt_replay PRIVATE
     ${CMAKE_BINARY_DIR}/src/nfs_common)
 target_link_libraries(nfs3_mbt_replay
-    chimera_server chimera_nfs_common jansson)
+    chimera_server chimera_nfs_common chimera_metrics jansson)
 
 add_executable(nfs3_mbt_probe nfs3_mbt_probe.c)
 target_include_directories(nfs3_mbt_probe PRIVATE
     ${CMAKE_BINARY_DIR}/src/nfs_common)
 target_link_libraries(nfs3_mbt_probe
-    chimera_server chimera_nfs_common jansson)
+    chimera_server chimera_nfs_common chimera_metrics jansson)
 
 add_executable(nfs4_deleg_probe nfs4_deleg_probe.c)
 target_include_directories(nfs4_deleg_probe PRIVATE
     ${CMAKE_BINARY_DIR}/src/nfs_common)
 target_link_libraries(nfs4_deleg_probe
-    chimera_server chimera_nfs_common jansson)
+    chimera_server chimera_nfs_common chimera_metrics jansson)
 
 add_executable(nfs_aux_probe nfs_aux_probe.c)
 target_include_directories(nfs_aux_probe PRIVATE
     ${CMAKE_BINARY_DIR}/src/nfs_common)
 target_link_libraries(nfs_aux_probe
-    chimera_server chimera_nfs_common jansson)
+    chimera_server chimera_nfs_common chimera_metrics jansson)
 
 add_executable(nfs_aux_mbt_replay nfs_aux_mbt_replay.c)
 target_include_directories(nfs_aux_mbt_replay PRIVATE
     ${CMAKE_BINARY_DIR}/src/nfs_common)
 target_link_libraries(nfs_aux_mbt_replay
-    chimera_server chimera_nfs_common jansson)
+    chimera_server chimera_nfs_common chimera_metrics jansson)
 
 add_executable(nfs4_mbt_replay nfs4_mbt_replay.c)
 target_include_directories(nfs4_mbt_replay PRIVATE
     ${CMAKE_BINARY_DIR}/src/nfs_common)
 target_link_libraries(nfs4_mbt_replay
-    chimera_server chimera_nfs_common jansson)
+    chimera_server chimera_nfs_common chimera_metrics jansson)
 
 # Deviation probe: asserts each documented chimera deviation (DEVIATIONS.md)
 # still reproduces, and that the two fixed deadlocks (LINK/RENAME self-alias)
@@ -70,6 +70,7 @@ target_link_libraries(nfs4_mbt_replay
 add_test(NAME chimera/server/nfs/mbt/deviation_probe_memfs
     COMMAND $<TARGET_FILE:nfs3_mbt_probe> -b memfs)
 set_tests_properties(chimera/server/nfs/mbt/deviation_probe_memfs PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs3_deviation_probe_memfs"
     LABELS "quint;nfs3_mbt;memfs"
     TIMEOUT 60)
 
@@ -100,6 +101,7 @@ endif()
 add_test(NAME chimera/server/nfs/mbtaux/probe_memfs
     COMMAND $<TARGET_FILE:nfs_aux_probe>)
 set_tests_properties(chimera/server/nfs/mbtaux/probe_memfs PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsaux_probe_memfs"
     LABELS "quint;nfsaux_mbt;memfs"
     TIMEOUT 120)
 
@@ -108,6 +110,7 @@ set_tests_properties(chimera/server/nfs/mbtaux/probe_memfs PROPERTIES
 add_test(NAME chimera/server/nfs/mbt4/deleg_probe_memfs
     COMMAND $<TARGET_FILE:nfs4_deleg_probe>)
 set_tests_properties(chimera/server/nfs/mbt4/deleg_probe_memfs PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_deleg_probe_memfs"
     LABELS "quint;nfs4_mbt;multiproto;memfs"
     TIMEOUT 90)
 
@@ -127,6 +130,7 @@ endif()
 add_test(NAME chimera/server/nfs/mbt/batch_memfs
     COMMAND $<TARGET_FILE:nfs3_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/nfs3)
 set_tests_properties(chimera/server/nfs/mbt/batch_memfs PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs3_batch_memfs"
     LABELS "quint;nfs3_mbt;memfs"
     TIMEOUT 300)
 
@@ -142,6 +146,7 @@ if(HAVE_LIBAIO)
         COMMAND $<TARGET_FILE:nfs3_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/nfs3
                 --backend diskfs)
     set_tests_properties(chimera/server/nfs/mbt/batch_diskfs PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs3_batch_diskfs"
         LABELS "quint;nfs3_mbt;diskfs"
         TIMEOUT 300)
 endif()
@@ -151,6 +156,7 @@ if(CAIRN_ENABLED)
         COMMAND $<TARGET_FILE:nfs3_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/nfs3
                 --backend cairn)
     set_tests_properties(chimera/server/nfs/mbt/batch_cairn PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs3_batch_cairn"
         LABELS "quint;nfs3_mbt;cairn"
         TIMEOUT 300)
 endif()
@@ -172,6 +178,7 @@ add_test(NAME chimera/server/nfs/mbtaux/batch_memfs
     COMMAND $<TARGET_FILE:nfs_aux_mbt_replay> --paranoid
             --trace-dir ${SPECS_BUNDLE_DIR}/nfsaux)
 set_tests_properties(chimera/server/nfs/mbtaux/batch_memfs PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsaux_batch_memfs"
     LABELS "quint;nfsaux_mbt;memfs"
     TIMEOUT 600)
 
@@ -181,6 +188,7 @@ set_tests_properties(chimera/server/nfs/mbtaux/batch_memfs PROPERTIES
 add_test(NAME chimera/server/nfs/mbt4/batch_memfs
     COMMAND $<TARGET_FILE:nfs4_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/nfs4)
 set_tests_properties(chimera/server/nfs/mbt4/batch_memfs PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_batch_memfs"
     LABELS "quint;nfs4_mbt;memfs"
     SKIP_RETURN_CODE 77
     TIMEOUT 300)

@@ -28,6 +28,7 @@ target_link_libraries(smb2_smoke_probe chimera_server chimera_metrics)
 add_test(NAME chimera/server/smb/mbt/smoke_probe_memfs
     COMMAND $<TARGET_FILE:smb2_smoke_probe>)
 set_tests_properties(chimera/server/smb/mbt/smoke_probe_memfs PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_smoke_probe_memfs"
     LABELS "quint;smb_mbt;memfs"
     TIMEOUT 60)
 
@@ -42,6 +43,7 @@ target_link_libraries(smb2_oplock_probe chimera_server chimera_metrics)
 add_test(NAME chimera/server/smb/mbt/oplock_probe_memfs
     COMMAND $<TARGET_FILE:smb2_oplock_probe>)
 set_tests_properties(chimera/server/smb/mbt/oplock_probe_memfs PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_oplock_probe_memfs"
     LABELS "quint;smb_mbt;memfs"
     TIMEOUT 90)
 
@@ -56,6 +58,7 @@ target_link_libraries(smb2_durable_probe chimera_server chimera_metrics)
 add_test(NAME chimera/server/smb/mbt/durable_probe_memfs
     COMMAND $<TARGET_FILE:smb2_durable_probe>)
 set_tests_properties(chimera/server/smb/mbt/durable_probe_memfs PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_durable_probe_memfs"
     LABELS "quint;smb_mbt;memfs"
     TIMEOUT 120)
 
@@ -71,6 +74,7 @@ target_link_libraries(smb2_replay_probe chimera_server chimera_metrics)
 add_test(NAME chimera/server/smb/mbt/replay_probe_memfs
     COMMAND $<TARGET_FILE:smb2_replay_probe>)
 set_tests_properties(chimera/server/smb/mbt/replay_probe_memfs PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_replay_probe_memfs"
     LABELS "quint;smb_mbt;memfs"
     TIMEOUT 120)
 
@@ -100,5 +104,6 @@ add_test(NAME chimera/server/smb/mbt/batch_memfs
 # was close enough to the ceiling to flake.  This is a batch of 40 tests in one
 # ctest, not a single case.
 set_tests_properties(chimera/server/smb/mbt/batch_memfs PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_batch_memfs"
     LABELS "quint;smb_mbt;memfs"
     TIMEOUT 600)

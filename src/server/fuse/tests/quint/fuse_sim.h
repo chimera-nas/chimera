@@ -54,6 +54,7 @@
 #include "server/server.h"
 #include "server/fuse/fuse.h"
 #include "prometheus-c.h"
+#include "common/mbt_artifacts.h"
 
 /* Room for a max_write payload plus headers, matching what the server asks
  * the kernel for. */
@@ -374,6 +375,8 @@ fuse_sim_open(
     sim->fd        = sv[0];
     sim->server_fd = sv[1];
 
+    mbt_debug_log_start();
+
     sim->metrics = prometheus_metrics_create(NULL, NULL, 0);
 
     config = chimera_server_config_init();
@@ -427,6 +430,7 @@ fuse_sim_close(struct fuse_sim *sim)
 {
     chimera_server_destroy(sim->server);
     close(sim->fd);
+    mbt_metrics_dump(sim->metrics);
     prometheus_metrics_destroy(sim->metrics);
 } /* fuse_sim_close */
 

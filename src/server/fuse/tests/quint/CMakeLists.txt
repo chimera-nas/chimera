@@ -6,11 +6,12 @@
 # in for /dev/fuse, so it needs no device, no mount, and no privileges and
 # runs unconditionally rather than behind the fuse_probe capability gate.
 add_executable(fuse_sim_probe fuse_sim_probe.c)
-target_link_libraries(fuse_sim_probe chimera_server chimera_vfs chimera_common)
+target_link_libraries(fuse_sim_probe chimera_server chimera_vfs chimera_common chimera_metrics)
 
 add_test(NAME chimera/fuse/sim/probe COMMAND fuse_sim_probe)
 
 set_tests_properties(chimera/fuse/sim/probe PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=fuse_sim_probe"
     TIMEOUT 60
     LABELS "fuse")
 
@@ -20,7 +21,7 @@ set_tests_properties(chimera/fuse/sim/probe PROPERTIES
 # FUSE server -- coverage no existing corpus reaches.
 add_executable(fuse_quint_driver fuse_quint_driver.c)
 target_link_libraries(fuse_quint_driver
-    chimera_server chimera_vfs chimera_common jansson)
+    chimera_server chimera_vfs chimera_common chimera_metrics jansson)
 
 if(NOT SPECS_BUNDLE_AVAILABLE)
     message(STATUS "fuse MBT replay ctest skipped (no specs trace corpus)")
@@ -47,6 +48,7 @@ add_test(NAME chimera/fuse/mbt/batch_memfs
             --trace-dir ${SPECS_BUNDLE_DIR}/posix
             --include-prefix fuse_)
 set_tests_properties(chimera/fuse/mbt/batch_memfs PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=fuse_batch_memfs"
     LABELS "quint;fuse;posix_mbt;memfs"
     SKIP_RETURN_CODE 77
     TIMEOUT 600)

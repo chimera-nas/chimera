@@ -19,14 +19,14 @@
 
 add_executable(posix_quint_driver posix_driver.c)
 target_link_libraries(posix_quint_driver
-    chimera_posix chimera_client chimera_server jansson)
+    chimera_posix chimera_client chimera_server chimera_metrics jansson)
 
 # Pure-C replayer: reuses posix_driver.c's op engine in-process (no Python, no
 # line-protocol subprocess) to load ITF traces and run the model oracle.
 add_executable(posix_mbt_replay posix_mbt_replay.c)
 target_include_directories(posix_mbt_replay PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(posix_mbt_replay
-    chimera_posix chimera_client chimera_server jansson)
+    chimera_posix chimera_client chimera_server chimera_metrics jansson)
 
 if(NOT SPECS_BUNDLE_AVAILABLE)
     message(STATUS "posix MBT replay ctest skipped (no specs trace corpus)")
@@ -53,6 +53,7 @@ add_test(NAME chimera/posix/mbt/batch_memfs
             --exclude-prefix nfs3_ --exclude-prefix nfs4_ --exclude-prefix disk_
             --exclude-prefix fuse_)
 set_tests_properties(chimera/posix/mbt/batch_memfs PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=posix_batch_memfs"
     LABELS "quint;posix_mbt;memfs"
     SKIP_RETURN_CODE 77
     TIMEOUT 300)
