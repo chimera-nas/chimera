@@ -37,6 +37,7 @@
 #include <jansson.h>
 
 #include "nfs_aux_mbt_common.h"
+#include "common/mbt_watchdog.h"
 #include "common/mbt_trace_dir.h"
 
 #define AUX_MAX_MISM     16
@@ -1615,9 +1616,11 @@ run_trace(
     }
 
     /* Backstop for a server deadlock: with everything in one process a hung
-     * reply spins in mbt_call_wait forever; SIGALRM's default disposition
-     * kills the test with a nonzero status. */
-    alarm(180);
+     * reply spins in mbt_call_wait forever.  The watchdog names the trace and
+     * step it caught before letting SIGALRM kill the test, so a hang in CI
+     * arrives with the position attached rather than as a bare signal. */
+    mbt_watchdog_arm(180);
+    mbt_watchdog_at(trace_path, -1, "setup");
 
     o = calloc(1, sizeof(*o));
     /* The aux harness asserts against a fixed "/share" export -- its MNT
@@ -1657,6 +1660,7 @@ run_trace(
         /* The asynchronous log is cleared once per step, here rather than in
          * each handler, so every op is judged only on what its own call
          * provoked. */
+        mbt_watchdog_at(trace_path, (int) idx, tag);
         mbt_aux_async_reset(env);
         fn(o, op, &m);
         if (!m.n && paranoid) {
@@ -1683,7 +1687,7 @@ run_trace(
     }
     free(o);
     json_decref(root);
-    alarm(0);
+    mbt_watchdog_disarm();
     return failed;
 } /* run_trace */
 

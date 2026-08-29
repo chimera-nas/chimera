@@ -11,6 +11,7 @@
  * if a deviation's shape drifts.  Needs no trace corpus. */
 
 #include "s3_mbt_common.h"
+#include "common/mbt_watchdog.h"
 
 static int failures;
 
@@ -100,7 +101,7 @@ main(
     (void) argc;
     (void) argv;
 
-    alarm(120);
+    mbt_watchdog_arm(120);
 
     s3_mbt_env_open(&env);
     s3_mbt_env_fs_setup(&env, "fs0");
