@@ -70,6 +70,9 @@ chimera_nfs3_dispatch(
         case CHIMERA_VFS_OP_LINK_AT:
             chimera_nfs3_link_at(thread, shared, request, private_data);
             break;
+        case CHIMERA_VFS_OP_ALLOCATE:
+            chimera_nfs3_allocate(thread, shared, request, private_data);
+            break;
         case CHIMERA_VFS_OP_LOCK:
             chimera_nfs3_lock(thread, shared, request, private_data);
             break;

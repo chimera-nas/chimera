@@ -8,6 +8,7 @@ add_library(chimera_vfs_nfs SHARED
     nfs.c
     nfs3.c
     nfs4.c
+    nfs3_allocate.c
     nfs3_close.c
     nfs3_commit.c
     nfs3_getattr.c
