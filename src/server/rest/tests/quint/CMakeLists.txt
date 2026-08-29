@@ -87,8 +87,33 @@ target_link_libraries(ctl_mbt_replay
 find_program(QUINT_BIN quint)
 find_package(Python3 COMPONENTS Interpreter QUIET)
 
+# The probes above need no corpus and always run.  Only the replay and the
+# coverage gate depend on quint, so a host without it keeps most of the suite
+# -- but it loses the part that replays a generated corpus, which is the part
+# that finds things.  Say so by name: a job that quietly stops running two of
+# its tests looks identical to one that never had them, and that is precisely
+# the failure the specs bundle mechanism was introduced to stop (see
+# cmake/SpecsBundle.cmake).  Set -DREQUIRE_CTL_MBT=ON where the suite is
+# expected to run, so its absence is a configure error rather than a shorter
+# test list nobody notices.
 if(NOT QUINT_BIN OR NOT Python3_Interpreter_FOUND)
-    message(STATUS "ctl MBT replay skipped (needs quint and python3)")
+    if(NOT QUINT_BIN)
+        set(_ctl_why "quint is not on PATH")
+    else()
+        set(_ctl_why "python3 was not found")
+    endif()
+    if(REQUIRE_CTL_MBT)
+        message(FATAL_ERROR
+            "REQUIRE_CTL_MBT=ON but ${_ctl_why}.  The control-plane model "
+            "lives in this repo rather than ext/specs, so there is no "
+            "prebuilt bundle for it and its corpus must be generated here: "
+            "install quint (the version in ext/specs/.quint-version), or "
+            "omit -DREQUIRE_CTL_MBT=ON.")
+    endif()
+    message(STATUS
+        "ctl MBT: ${_ctl_why}; chimera/server/rest/ctl/batch_memfs and "
+        "chimera/server/rest/ctl/coverage will NOT run "
+        "(-DREQUIRE_CTL_MBT=ON makes this fatal)")
     return()
 endif()
 

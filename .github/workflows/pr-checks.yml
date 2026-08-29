@@ -218,7 +218,9 @@ jobs:
       #
       # --no-tests=error is the point of the label: a configuration that
       # silently loses its MBT suites (no quint, no bundle) must fail here
-      # rather than report a vacuous pass.
+      # rather than report a vacuous pass.  It only catches losing the label
+      # ENTIRELY, though, so REQUIRE_CTL_MBT=ON covers the narrower case of
+      # the in-tree control-plane corpus alone going missing.
       - name: Build instrumented and run the quint suite
         env:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -245,7 +247,7 @@ jobs:
               export LLVM_PROFDATA="$(command -v llvm-profdata || ls /usr/lib/llvm-*/bin/llvm-profdata | tail -n1)"
               export LLVM_COV="$(command -v llvm-cov || ls /usr/lib/llvm-*/bin/llvm-cov | tail -n1)"
               cmake -G Ninja -DCMAKE_BUILD_TYPE=Coverage -DCMAKE_C_COMPILER=clang \
-                    -DKVM_TESTING=OFF /workspace
+                    -DKVM_TESTING=OFF -DREQUIRE_CTL_MBT=ON /workspace
               ninja
               mkdir -p /build/coverage/profraw
               LLVM_PROFILE_FILE=/build/coverage/profraw/%m-%p.profraw \
