@@ -5267,6 +5267,9 @@ diskfs_apply_attrs(
 {
     struct timespec now;
     uint64_t        set_mask = attr->va_set_mask;
+    /* See memfs_apply_attrs() for why a layout-blob-only setattr is exempt
+     * from the ctime and change-attribute bumps below. */
+    int             layout_only = (set_mask == CHIMERA_VFS_ATTR_PNFS_LAYOUT);
 
     clock_gettime(CLOCK_REALTIME, &now);
     attr->va_set_mask = CHIMERA_VFS_ATTR_ATOMIC;
@@ -5360,12 +5363,14 @@ diskfs_apply_attrs(
             inode->ctime_sec  = t.tv_sec;
             inode->ctime_nsec = t.tv_nsec;
         }
-    } else {
+    } else if (!layout_only) {
         inode->ctime_sec  = now.tv_sec;
         inode->ctime_nsec = now.tv_nsec;
     }
 
     /* Any setattr is a metadata change; advance the native change counter. */
-    inode->change++;
+    if (!layout_only) {
+        inode->change++;
+    }
 
 } /* diskfs_apply_attrs */

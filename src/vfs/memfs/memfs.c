@@ -1812,7 +1812,8 @@ memfs_apply_attrs(
     struct chimera_vfs_attrs *attr)
 {
     struct timespec now;
-    uint64_t        set_mask = attr->va_set_mask;
+    uint64_t        set_mask    = attr->va_set_mask;
+    int             layout_only = (set_mask == CHIMERA_VFS_ATTR_PNFS_LAYOUT);
 
     chimera_vfs_realtime(&now);
 
@@ -1931,12 +1932,23 @@ memfs_apply_attrs(
     if (set_mask & CHIMERA_VFS_ATTR_CTIME) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_CTIME;
         chimera_vfs_resolve_set_time(&attr->va_ctime, &now, &inode->ctime);
-    } else {
+    } else if (!layout_only) {
         inode->ctime = now;
     }
 
-    /* Any setattr is a metadata change; advance the native change counter. */
-    inode->change++;
+    /* Any setattr is a metadata change; advance the native change counter.
+     *
+     * The exception is a setattr carrying the pNFS layout blob and nothing
+     * else.  That blob is the metadata server's own bookkeeping, not a
+     * client-visible attribute, and the LAYOUTGET that stores it does not
+     * modify the file (RFC 8881 18.43) -- bumping change (and ctime, above)
+     * made the first LAYOUTGET on a file invalidate every client's cached
+     * attributes for a write nobody asked for.  The test is for the layout
+     * bit ALONE: memfs_setattr() masks SIZE off before calling here, so an
+     * empty mask still means a real metadata change. */
+    if (!layout_only) {
+        inode->change++;
+    }
 
 } /* memfs_apply_attrs */
 
