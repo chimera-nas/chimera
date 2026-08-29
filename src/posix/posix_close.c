@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2025 Chimera-NAS Project Contributors
+// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
@@ -21,6 +21,8 @@ chimera_posix_close(int fd)
     }
 
     handle = entry->handle;
+
+    chimera_posix_project_ofd_unlock(posix, worker, handle, entry->ofd);
 
     chimera_close(worker->client_thread, handle);
 

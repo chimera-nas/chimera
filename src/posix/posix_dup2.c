@@ -73,10 +73,15 @@ chimera_posix_dup2(
     /* If newfd is open, we need to close it silently */
     if (new_entry->handle && !(new_entry->flags & CHIMERA_POSIX_FD_CLOSED)) {
         struct chimera_vfs_open_handle *old_handle = new_entry->handle;
+        struct chimera_posix_ofd       *old_ofd    = new_entry->ofd;
 
         /* Mark as closed */
         new_entry->flags |= CHIMERA_POSIX_FD_CLOSED;
         pthread_mutex_unlock(&new_entry->lock);
+
+        /* This implicit close can be the description's last: release its
+         * backend byte-range locks first, exactly as close(2) does. */
+        chimera_posix_project_ofd_unlock(posix, worker, old_handle, old_ofd);
 
         /* Close the old handle */
         chimera_close(worker->client_thread, old_handle);
