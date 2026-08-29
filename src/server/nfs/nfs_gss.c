@@ -7,7 +7,17 @@
 #include <pwd.h>
 #include <gssapi/gssapi.h>
 #include <gssapi/gssapi_krb5.h>
+/* The IOV extension carries gss_verify_mic_iov, which lets krb5i check the
+ * integrity databody where it already lies in the receive buffers instead of
+ * gathering the whole call -- WRITE payload included -- into one block.
+ * Absent it, the provider leaves verify_mic_iov NULL and rpc2 gathers. */
+#if defined(__has_include)
+#if __has_include(<gssapi/gssapi_ext.h>)
+#include <gssapi/gssapi_ext.h>
+#endif /* __has_include(<gssapi/gssapi_ext.h>) */
+#endif /* defined(__has_include) */
 
+#include "evpl/evpl.h"          /* struct evpl_iovec, for verify_mic_iov */
 #include "nfs_gss.h"
 #include "nfs_internal.h"
 #include "vfs/sdk/vfs_cred.h"
@@ -148,6 +158,57 @@ chimera_nfs_gss_verify_mic(
     return GSS_ERROR(major) ? -1 : 0;
 } /* chimera_nfs_gss_verify_mic */
 
+#ifdef GSS_IOV_BUFFER_TYPE_MIC_TOKEN
+/* Number of iovecs verified without touching the heap.  A received RPC is a
+ * handful of segments; the malloc path is there for correctness, not speed. */
+#define CHIMERA_GSS_IOV_STACK 16
+
+static int
+chimera_nfs_gss_verify_mic_iov(
+    void                    *arg,
+    void                    *gss_ctx,
+    const struct evpl_iovec *iov,
+    int                      niov,
+    const void              *mic,
+    size_t                   mic_len)
+{
+    OM_uint32            major, minor;
+    gss_qop_t            qop;
+    gss_iov_buffer_desc  stack_biov[CHIMERA_GSS_IOV_STACK];
+    gss_iov_buffer_desc *biov = stack_biov;
+    int                  i, n  = niov + 1;
+    int                  rc;
+
+    (void) arg;
+
+    if (n > CHIMERA_GSS_IOV_STACK) {
+        biov = calloc(n, sizeof(*biov));
+        if (!biov) {
+            return -1;
+        }
+    }
+
+    for (i = 0; i < niov; i++) {
+        biov[i].type          = GSS_IOV_BUFFER_TYPE_DATA;
+        biov[i].buffer.length = iov[i].length;
+        biov[i].buffer.value  = iov[i].data;
+    }
+
+    biov[niov].type          = GSS_IOV_BUFFER_TYPE_MIC_TOKEN;
+    biov[niov].buffer.length = mic_len;
+    biov[niov].buffer.value  = (void *) mic;
+
+    major = gss_verify_mic_iov(&minor, (gss_ctx_id_t) gss_ctx, &qop, biov, n);
+    rc    = GSS_ERROR(major) ? -1 : 0;
+
+    if (biov != stack_biov) {
+        free(biov);
+    }
+
+    return rc;
+} /* chimera_nfs_gss_verify_mic_iov */
+#endif /* GSS_IOV_BUFFER_TYPE_MIC_TOKEN */
+
 static int
 chimera_nfs_gss_wrap(
     void       *arg,
@@ -238,9 +299,12 @@ const struct evpl_rpc2_gss_provider chimera_nfs_gss_provider = {
     .accept     = chimera_nfs_gss_accept,
     .get_mic    = chimera_nfs_gss_get_mic,
     .verify_mic = chimera_nfs_gss_verify_mic,
-    .wrap       = chimera_nfs_gss_wrap,
-    .unwrap     = chimera_nfs_gss_unwrap,
-    .destroy    = chimera_nfs_gss_destroy,
+#ifdef GSS_IOV_BUFFER_TYPE_MIC_TOKEN
+    .verify_mic_iov = chimera_nfs_gss_verify_mic_iov,
+#endif /* GSS_IOV_BUFFER_TYPE_MIC_TOKEN */
+    .wrap    = chimera_nfs_gss_wrap,
+    .unwrap  = chimera_nfs_gss_unwrap,
+    .destroy = chimera_nfs_gss_destroy,
 };
 
 int
