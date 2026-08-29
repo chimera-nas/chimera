@@ -751,6 +751,19 @@ chimera_smb_lock(struct chimera_smb_request *request)
         return;
     }
 
+    /* MS-SMB2 3.3.5.14: a byte-range lock is a data operation, so the handle
+     * must carry FILE_READ_DATA or FILE_WRITE_DATA.  A DELETE-only or
+     * attribute-only handle has no business locking a range and is refused
+     * ACCESS_DENIED.  Samba refuses these too (it answers INVALID_HANDLE, which
+     * the spec does not sanction); chimera had no access check here at all and
+     * granted the lock. */
+    if (unlikely(!(open_file->granted_access &
+                   (SMB2_FILE_READ_DATA | SMB2_FILE_WRITE_DATA)))) {
+        chimera_smb_open_file_release(request, open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_ACCESS_DENIED);
+        return;
+    }
+
     /* LockCount==0 is illegal, and more than CHIMERA_SMB_LOCK_MAX_ELEMENTS is
      * rejected rather than parsed; both reply INVALID_PARAMETER without dropping
      * the connection. */
