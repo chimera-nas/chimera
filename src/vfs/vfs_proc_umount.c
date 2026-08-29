@@ -194,6 +194,53 @@ chimera_vfs_umount_sweep_cache(
     return referenced;
 } /* chimera_vfs_umount_sweep_cache */
 
+
+/* Name the handles that keep an umount from completing: walk both caches and
+ * log each still-referenced handle on the mount, with the identity a reader
+ * needs to find the holder.  Diagnostic only -- by the time this runs the
+ * umount has already given up, and "N handle(s) still open" with no identity
+ * cannot be debugged from the log alone. */
+static void
+chimera_vfs_umount_dump_referenced(
+    struct chimera_vfs       *vfs,
+    struct chimera_vfs_mount *mount)
+{
+    struct vfs_open_cache *caches[2];
+    const char            *names[2] = { "file", "path" };
+
+    caches[0] = vfs->vfs_open_file_cache;
+    caches[1] = vfs->vfs_open_path_cache;
+
+    for (int c = 0; c < 2; c++) {
+        struct vfs_open_cache *cache = caches[c];
+
+        for (unsigned int i = 0; i < cache->num_shards; i++) {
+            struct vfs_open_cache_shard    *shard = &cache->shards[i];
+            struct chimera_vfs_open_handle *handle;
+
+            pthread_mutex_lock(&shard->lock);
+            for (handle = shard->handles; handle;
+                 handle = handle->bucket_next) {
+                char fhhex[CHIMERA_VFS_FH_SIZE * 2 + 1];
+
+                if (memcmp(handle->fh, mount->root_fh,
+                           CHIMERA_VFS_MOUNT_ID_SIZE) != 0 ||
+                    !handle->opencnt) {
+                    continue;
+                }
+                format_hex(fhhex, sizeof(fhhex), handle->fh, handle->fh_len);
+                chimera_vfs_error(
+                    "umount %s: still-open handle fh %s (%s cache, "
+                    "opencnt %u, access_mode %u, cred_hash %llx)",
+                    mount->path, fhhex, names[c], handle->opencnt,
+                    handle->access_mode,
+                    (unsigned long long) handle->cred_hash);
+            }
+            pthread_mutex_unlock(&shard->lock);
+        }
+    }
+} /* chimera_vfs_umount_dump_referenced */
+
 /*
  * Drive the umount forward: sweep both caches, and finish once nothing on the
  * mount remains.  Re-entered from a close completion or the poll timer, so it
@@ -259,6 +306,7 @@ chimera_vfs_umount_progress(struct chimera_vfs_request *request)
             "-- the mount stays registered and callers will see EBUSY",
             request->umount.mount->path, referenced,
             wait->waited_us / 1000);
+        chimera_vfs_umount_dump_referenced(vfs, request->umount.mount);
         chimera_vfs_umount_wait_stop(request);
         chimera_vfs_umount_abandon(request);
         return;
