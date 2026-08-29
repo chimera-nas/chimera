@@ -19,10 +19,17 @@ CMAKE_ARGS_DEBUG := -DCMAKE_BUILD_TYPE=Debug
 CMAKE_ARGS_COVERAGE := -DCMAKE_BUILD_TYPE=Coverage -DCMAKE_C_COMPILER=clang
 # nproc is coreutils (Linux); macOS provides the same count via sysctl.
 CTEST_PARALLEL := $(shell n=$$(nproc 2>/dev/null || sysctl -n hw.ncpu); echo $$(( n < 64 ? n : 64 )))
-CTEST_ARGS := --output-on-failure --timeout 30 -j $(CTEST_PARALLEL)
+# Which tier the test targets run.  Empty selects the default (quick) tier --
+# the quint model-based tests -- matching a bare `ctest`.  `make check_extended`
+# sets this to `-C extended` for the full suite.  Overriding CTEST_ARGS wholesale
+# still works and drops the tier, which is what the coverage repro command in
+# scripts/ci_coverage_report.py relies on.
+CTEST_TIER ?=
+CTEST_ARGS := $(CTEST_TIER) --output-on-failure --timeout 30 -j $(CTEST_PARALLEL)
 
 # Plain `make` produces a debug build only. Use `make debug`/`make release`
-# to also run the test suite, or `make check` for the full CI sweep.
+# to also run the test suite, `make check` for the CI sweep over the quick test
+# tier, or `make check_extended` for the same sweep over the full suite.
 .DEFAULT_GOAL := build_debug
 
 .PHONY: build_release
@@ -124,7 +131,14 @@ sdk-include-check:
 
 .PHONY: check
 check: syntax-check sdk-include-check build_release test_release build_debug test_debug build_clang reuse-lint copyright-check
-	@echo "All checks passed!"
+	@echo "All checks passed! (test tier: $(if $(CTEST_TIER),extended,quick))"
+
+# The same sweep as `check` over the full test suite.  Recursive rather than a
+# target-specific variable so the tier reaches every test target unambiguously,
+# and so `make check check_extended` still means what it looks like.
+.PHONY: check_extended
+check_extended:
+	@$(MAKE) CTEST_TIER="-C extended" check
 
 .PHONY: docs
 docs:

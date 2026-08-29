@@ -2,6 +2,10 @@
 #
 # SPDX-License-Identifier: LGPL-2.1-only
 
+# These are the model-based tests, so they make up the quick tier that plain
+# `ctest` runs.  See the test-tier block in the top-level CMakeLists.txt.
+set(CHIMERA_TEST_TIER quick)
+
 # S3 model-based tests: the Quint specification and its trace generation live
 # in the chimera-nas/specs repo (submodule ext/specs, quint/s3); this
 # directory owns only the C replay harness that drives that corpus against

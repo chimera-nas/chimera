@@ -2,6 +2,10 @@
 #
 # SPDX-License-Identifier: LGPL-2.1-only
 
+# These are the model-based tests, so they make up the quick tier that plain
+# `ctest` runs.  See the test-tier block in the top-level CMakeLists.txt.
+set(CHIMERA_TEST_TIER quick)
+
 # POSIX model-based tests: the Quint specification (posix.qnt and friends) and
 # its trace generation live in the chimera-nas/specs repo (submodule ext/specs).
 # This directory owns the replay harness -- posix_mbt_replay.c (a pure-C

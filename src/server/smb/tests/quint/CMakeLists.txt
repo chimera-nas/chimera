@@ -2,6 +2,10 @@
 #
 # SPDX-License-Identifier: LGPL-2.1-only
 
+# These are the model-based tests, so they make up the quick tier that plain
+# `ctest` runs.  See the test-tier block in the top-level CMakeLists.txt.
+set(CHIMERA_TEST_TIER quick)
+
 # SMB2/3 model-based tests: the Quint specification (smb2.qnt and its pure
 # smb2_state.qnt / smb2_ops.qnt modules, on top of the protocol-neutral
 # filesystem core the NFSv4 model shares) and its trace generation live in the

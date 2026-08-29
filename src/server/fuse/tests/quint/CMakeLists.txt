@@ -2,6 +2,10 @@
 #
 # SPDX-License-Identifier: LGPL-2.1-only
 
+# These are the model-based tests, so they make up the quick tier that plain
+# `ctest` runs.  See the test-tier block in the top-level CMakeLists.txt.
+set(CHIMERA_TEST_TIER quick)
+
 # In-process FUSE harness: drives the FUSE server over a socketpair standing
 # in for /dev/fuse, so it needs no device, no mount, and no privileges and
 # runs unconditionally rather than behind the fuse_probe capability gate.
