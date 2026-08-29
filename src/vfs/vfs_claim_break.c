@@ -203,16 +203,19 @@ chimera_vfs_claim_ack(
 } /* chimera_vfs_claim_ack */
 
 SYMBOL_EXPORT void
-chimera_vfs_claim_revoke(struct chimera_vfs_claim *claim)
+chimera_vfs_claim_revoke_locked(
+    struct chimera_vfs_file_state  *file,
+    struct chimera_vfs_claim       *claim,
+    chimera_vfs_claim_revoked_cb_t *out_cb,
+    void                          **out_private)
 {
-    struct chimera_vfs_file_state *file = claim->file;
-    chimera_vfs_claim_revoked_cb_t revoked_cb;
-    void                          *cb_private;
-    bool                           newly_revoked;
-    uint64_t                       token = 0;
+    bool     newly_revoked;
+    uint64_t token;
+
+    *out_cb      = NULL;
+    *out_private = NULL;
 
     if (file) {
-        pthread_mutex_lock(&file->lock);
         /* A revoked claim's backend record must not outlive it: a courtesy
          * reclaim that leaves the token behind blocks every other client at
          * the arbiter forever (pynfs COUR2).  Enqueued under file->lock so
@@ -221,7 +224,6 @@ chimera_vfs_claim_revoke(struct chimera_vfs_claim *claim)
         claim->backend_token = 0;
         if (token && file->state) {
             chimera_vfs_claim_backend_release_token(file->state, file, token);
-            token = 0;
         }
     }
 
@@ -230,19 +232,35 @@ chimera_vfs_claim_revoke(struct chimera_vfs_claim *claim)
     claim->advertised  = 0;
     claim->denied      = 0;
     claim->break_state = CHIMERA_CLAIM_BREAK_REVOKED;
-    revoked_cb         = claim->revoked_cb;
-    cb_private         = claim->cb_private;
+
+    if (newly_revoked) {
+        *out_cb      = claim->revoked_cb;
+        *out_private = claim->cb_private;
+    }
+} /* chimera_vfs_claim_revoke_locked */
+
+SYMBOL_EXPORT void
+chimera_vfs_claim_revoke(struct chimera_vfs_claim *claim)
+{
+    struct chimera_vfs_file_state *file = claim->file;
+    chimera_vfs_claim_revoked_cb_t revoked_cb;
+    void                          *cb_private;
+
+    if (file) {
+        pthread_mutex_lock(&file->lock);
+    }
+
+    chimera_vfs_claim_revoke_locked(file, claim, &revoked_cb, &cb_private);
 
     if (file) {
         pthread_mutex_unlock(&file->lock);
     }
 
-    if (newly_revoked && revoked_cb) {
+    if (revoked_cb) {
         revoked_cb(claim, cb_private);
     }
 
     if (file && file->state) {
-        (void) token;
         chimera_vfs_claim_pump_pending(file->state, file);
         chimera_vfs_claim_pump_io(file->state, file);
         chimera_vfs_claim_backend_reeval(file->state, file);

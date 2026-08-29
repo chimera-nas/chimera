@@ -472,6 +472,27 @@ chimera_vfs_claim_ack(
     struct chimera_vfs_claim *claim,
     uint8_t                   resulting_used);
 
+/* Revoke `claim` with the caller already holding file->lock, handing back the
+ * revoked callback instead of firing it.
+ *
+ * An acquirer only ever borrows a conflicting claim: ACCESS and RANGE claims
+ * carry no refcount (their `grant` is NULL), so the lock admission found the
+ * conflict under is the only thing keeping it alive.  A caller that drops the
+ * lock and then revokes races the holder's owner tearing it down -- the NFSv4
+ * lease sweeper frees a lock-owner's range leases outright -- so the mutation
+ * has to happen while the lock is still held.  Fire the returned callback
+ * after unlocking; it must not dereference the claim, which may be gone by
+ * then (all implementations take their state from cb_private).
+ *
+ * *out_cb is set only when this call is what newly revoked the claim.  The
+ * caller owns the post-revoke pumps that chimera_vfs_claim_revoke() does. */
+void
+chimera_vfs_claim_revoke_locked(
+    struct chimera_vfs_file_state  *file,
+    struct chimera_vfs_claim       *claim,
+    chimera_vfs_claim_revoked_cb_t *out_cb,
+    void                          **out_private);
+
 void
 chimera_vfs_claim_revoke(
     struct chimera_vfs_claim *claim);
