@@ -160,6 +160,20 @@ jobs:
         uses: actions/checkout@v5
         with:
           submodules: recursive
+          # A pull_request checkout is the refs/pull/N/merge commit, whose
+          # first parent is the merge base -- so `git diff HEAD^1 HEAD` is
+          # exactly this PR's diff, and depth 2 is all it takes to have it.
+          # The default depth 1 has no parent at all.
+          fetch-depth: 2
+
+      # Captured on the runner rather than in the container below: the
+      # bind-mounted checkout is not owned by the container's root, so git
+      # there refuses the repository as dubiously owned (the same trap
+      # cmake/SpecsBundle.cmake documents).  -U0 keeps hunk headers to exactly
+      # the changed runs, with no context lines to subtract back out.
+      - name: Capture the pull request diff
+        if: ${{ github.event_name == 'pull_request' }}
+        run: git diff -U0 HEAD^1 HEAD > pr.diff
 
       # oras lets cmake fetch the prebuilt trace bundle for the pinned
       # ext/specs commit instead of regenerating it with quint; the image
@@ -181,11 +195,18 @@ jobs:
       - name: Build instrumented and run the quint suite
         env:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          GH_REPO: ${{ github.repository }}
+          # The PR head, not the merge commit: a link to a merge ref's blob
+          # dies with the ref.  Empty on a non-PR run, which only costs the
+          # uncovered lines their hyperlinks.
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           docker run --rm --privileged \
             -e DOCKER_MIRROR=${{ env.DOCKER_MIRROR }} \
             -e APT_MIRROR=${{ env.APT_MIRROR }} \
             -e RUN_URL="$RUN_URL" \
+            -e GH_REPO="$GH_REPO" \
+            -e PR_HEAD_SHA="$PR_HEAD_SHA" \
             -v "${{ github.workspace }}:/workspace" \
             -v "${{ github.workspace }}/oras:/usr/local/bin/oras:ro" \
             -v /build \
@@ -203,12 +224,28 @@ jobs:
               LLVM_PROFILE_FILE=/build/coverage/profraw/%m-%p.profraw \
                 ctest -L quint --output-on-failure --no-tests=error \
                       --test-output-size-failed 65536 --timeout 600 -j "$(nproc)"
+              # Which of the changed files are worth an lcov export; empty
+              # (or absent, on a non-PR run) means the export is skipped.
+              : > /workspace/pr-sources.txt
+              if [ -f /workspace/pr.diff ]; then
+                python3 /workspace/scripts/ci_patch_coverage.py \
+                        --sources /workspace/pr.diff \
+                        > /workspace/pr-sources.txt
+              fi
               COVERAGE_JSON=/workspace/coverage-export.json \
+              COVERAGE_LCOV=/workspace/patch-coverage.lcov \
+              COVERAGE_LCOV_SOURCES=/workspace/pr-sources.txt \
                 bash /workspace/etc/coverage-report.sh /build
               # Rendered in here, where the paths in the export still resolve.
               python3 /workspace/scripts/ci_coverage_report.py \
                       /workspace/coverage-export.json /workspace "$RUN_URL" \
-                      > /workspace/coverage-report.md'
+                      > /workspace/coverage-report.md
+              if [ -f /workspace/pr.diff ]; then
+                python3 /workspace/scripts/ci_patch_coverage.py \
+                        /workspace/pr.diff /workspace/patch-coverage.lcov \
+                        /workspace "$GH_REPO" "$PR_HEAD_SHA" \
+                        >> /workspace/coverage-report.md
+              fi'
 
       # Best-effort: a report that cannot be posted is still in the run summary,
       # and a comment API hiccup should not fail an otherwise-green job.
