@@ -157,6 +157,15 @@ struct chimera_s3_request {
     union {
         struct {
             int                      tmp_name_len;
+            /* The publish (rename/link of the staged file into place) must
+             * fire exactly once, when the body is fully written AND the
+             * metadata xattr chain is done.  Body drain and the xattr chain
+             * run concurrently on async backends, so both the last write
+             * completion and the metadata-done callback can observe the
+             * finished state: meta_pending gates the publish until the
+             * xattrs land and published latches the first fire. */
+            int                      meta_pending;
+            int                      published;
             struct chimera_vfs_attrs set_attr;
             char                     tmp_name[64];
         } put;
