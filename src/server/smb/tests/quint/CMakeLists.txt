@@ -99,11 +99,18 @@ endif()
 
 add_test(NAME chimera/server/smb/mbt/batch_memfs
     COMMAND $<TARGET_FILE:smb2_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/smb2)
-# 40 traces at depth 500 against an ASAN build, each standing up and tearing
-# down its own filesystem: measured at 55-105 s on a loaded container, so 120 s
-# was close enough to the ceiling to flake.  This is a batch of 40 tests in one
-# ctest, not a single case.
+# The whole generated corpus in one ctest, not a single case.  ext/specs
+# generates every instance and flavor unconditionally -- nothing is withheld on
+# account of what chimera does with it -- so this runs ~70 traces at depth
+# 300-500, each standing up and tearing down its own filesystem, against an
+# ASAN build on a loaded container.
+#
+# The batches chimera cannot drive yet are declined BY NAME in
+# smb2_mbt_deviations.h (smb2_mbt_trace_limits), each with the chimera bug that
+# would retire the entry, and reported as SKIP lines.  SKIP_RETURN_CODE turns a
+# run where nothing was drivable into a ctest SKIP rather than a false pass.
 set_tests_properties(chimera/server/smb/mbt/batch_memfs PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_batch_memfs"
     LABELS "quint;smb_mbt;memfs"
-    TIMEOUT 600)
+    TIMEOUT 1800
+    SKIP_RETURN_CODE 77)

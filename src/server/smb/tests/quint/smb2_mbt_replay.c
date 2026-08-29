@@ -41,6 +41,7 @@
  */
 
 #include "smb2_mbt_common.h"
+#include "smb2_mbt_deviations.h"
 #include "common/mbt_trace_dir.h"
 
 #include <stdarg.h>
@@ -60,40 +61,50 @@
 #define MAX_TREE 512
 #define MAX_FID  4096
 
-static struct smb2_env   g_env;
+static struct smb2_env                  g_env;
 /* The connection a live model session is bound to, NULL once a modeled
  * transport drop has taken it away. */
-static struct smb2_conn *g_conn_for_sess[MAX_SESS];
+static struct smb2_conn                *g_conn_for_sess[MAX_SESS];
 /* Every connection a session was EVER bound to, kept after the drop: a
  * reconnect must present the dropped session's ClientGuid (MS-SMB2 3.3.5.9.7 --
  * chimera refuses a leased or persistent reclaim from a different client), and
  * the model names the client by the session it is reconnecting FOR. */
-static struct smb2_conn *g_conn_hist[MAX_SESS];
-static uint32_t          g_wire_tree[MAX_TREE];
-static uint8_t           g_wire_fid[MAX_FID][16];
+static struct smb2_conn                *g_conn_hist[MAX_SESS];
+static uint32_t                         g_wire_tree[MAX_TREE];
+static uint8_t                          g_wire_fid[MAX_FID][16];
 /* Has this model FileId ever been learned from the wire?  A model fid is never
  * reused, so a SECOND reply carrying one the replayer already knows is the
  * model asserting "this is the same open" -- a replayed CREATE answered from
  * the reply cache, or a reclaim of a parked handle.  The wire FileId must then
  * be byte-identical, which is the exactly-once oracle MS-SMB2 3.3.5.9.10 asks
  * for stated as an assertion rather than a status comparison. */
-static int               g_fid_known[MAX_FID];
+static int                              g_fid_known[MAX_FID];
 /* Which connection owns each model FileId: a break notification for a handle
  * is pushed to the HOLDER's connection, and the acknowledgment must go back on
  * that same connection, so the fid -> conn binding is as load-bearing as the
  * fid -> wire FileId one. */
-static struct smb2_conn *g_conn_for_fid[MAX_FID];
+static struct smb2_conn                *g_conn_for_fid[MAX_FID];
 /* The model lease key (a small int) each handle's grant carries, or -1.  A
  * LEASE_BREAK acknowledgment is keyed by the 16-byte lease key, not by FileId. */
-static int               g_lease_key_for_fid[MAX_FID];
+static int                              g_lease_key_for_fid[MAX_FID];
 /* Which parked handles the replayer has already waited for (see park_barrier). */
-static int               g_park_barriered[MAX_FID];
+static int                              g_park_barriered[MAX_FID];
 /* The model state AFTER the message being replayed -- the `parked` map of which
  * is what tells the disconnect handler which handles the server still owes a
  * park. */
-static json_t           *g_post_sdb;
-static const char       *g_trace;
-static int               g_nmismatch;
+static json_t                          *g_post_sdb;
+static const char                      *g_trace;
+static int                              g_nmismatch;
+/* Divergences that matched the registry: reported, counted, not fatal. */
+static int                              g_ndeviation;
+/* Set when a non-reconcilable deviation fired: the model and chimera now hold
+ * different state, so the rest of the trace would report consequences. */
+static const struct smb2_mbt_deviation *g_abort_dev;
+/* Traces this replayer declined to drive, and why (smb2_mbt_trace_limits). */
+static int                              g_nskipped;
+/* Set when the model and chimera have parted ways and the rest of this trace
+ * would report consequences rather than findings. */
+static int                              g_abort_trace;
 
 /* Settle every server thread so the break notifications a command owes have
  * been delivered -- and so that "no break was sent" is a fact rather than a
@@ -182,6 +193,159 @@ mism(
     printf("\n");
     g_nmismatch++;
 } /* mism */
+
+/* Compare one status against the model's.  Returns 1 when the divergence is a
+ * RECORDED deviation -- reported and counted, but not a failure -- and 0 when
+ * the caller should report it as a mismatch.  Every status comparison in this
+ * file goes through here, so a divergence can only be excused by an entry in
+ * smb2_mbt_deviations.h, never by silence. */
+static int
+dev_status(
+    const char *op,
+    uint32_t    expected,
+    uint32_t    actual,
+    const char *what)
+{
+    const struct smb2_mbt_deviation *d =
+        smb2_mbt_deviation_find(op, expected, actual);
+
+    if (!d) {
+        return 0;
+    }
+
+    printf("DEVIATION %s [%s] %s status: model 0x%08x wire 0x%08x -- %s\n",
+           d->id, g_trace, what, expected, actual, d->summary);
+    g_ndeviation++;
+
+    if (!d->reconcilable) {
+        g_abort_dev = d;
+    }
+    return 1;
+} /* dev_status */
+
+/* Look one key up in an ITF map ({"#map": [[k, v], ...]}). */
+static json_t *
+itf_map_get(
+    json_t     *map,
+    const char *skey,
+    int64_t     ikey)
+{
+    json_t *entries = map ? json_object_get(map, "#map") : NULL;
+    size_t  n       = json_array_size(entries);
+
+    for (size_t i = 0; i < n; i++) {
+        json_t *pair = json_array_get(entries, i);
+        json_t *k    = json_array_get(pair, 0);
+
+        if (skey) {
+            const char *ks = json_string_value(k);
+            if (ks && strcmp(ks, skey) == 0) {
+                return json_array_get(pair, 1);
+            }
+        } else if (jint(k) == ikey) {
+            return json_array_get(pair, 1);
+        }
+    }
+    return NULL;
+} /* itf_map_get */
+
+/* The model's own belief about a file's size, read out of the trace's
+ * post-state.  Returns -1 when the name does not exist in the model. */
+static long long
+model_size_blocks(const char *name)
+{
+    json_t *fs, *inodes, *root, *ents, *ino, *node;
+
+    if (!g_post_sdb) {
+        return -1;
+    }
+    fs = json_object_get(g_post_sdb, "fs");
+    if (!fs) {
+        return -1;
+    }
+    inodes = json_object_get(fs, "inodes");
+    root   = itf_map_get(inodes, NULL, 0);
+    ents   = root ? json_object_get(root, "ents") : NULL;
+    ino    = ents ? itf_map_get(ents, name, 0) : NULL;
+    if (!ino) {
+        return -1;
+    }
+    node = itf_map_get(inodes, NULL, jint(ino));
+    if (!node) {
+        return -1;
+    }
+    return (long long) jint(json_object_get(node, "sizeBlocks"));
+} /* model_size_blocks */
+
+/* A divergence both sides report identically.
+ *
+ * A CREATE that is REFUSED must leave the file exactly as it found it.  When
+ * the model and the wire agree on the refusal, the status comparison sees
+ * nothing -- and if one of them truncated anyway, the damage surfaces dozens
+ * of steps later as a read that should have returned data.  So compare the
+ * model's post-state size against the server's, at the step that causes it,
+ * and only when it is observable (a file already empty cannot be emptied
+ * again).  Returns 1 if the trace should be abandoned.
+ *
+ * The probe open is attribute-only and non-truncating, so it takes no part in
+ * share arbitration in either direction and cannot change what the next
+ * modeled command sees. */
+static int
+check_refused_create_side_effect(
+    struct smb2_conn *c,
+    const char       *name,
+    uint32_t          disp,
+    uint32_t          status)
+{
+    const struct smb2_mbt_deviation *d;
+    struct smb2_create_out           out;
+    long long                        want, got;
+
+    if (status != ST_SHARING_VIOLATION) {
+        return 0;
+    }
+    if (disp != FILE_SUPERSEDE && disp != FILE_OVERWRITE &&
+        disp != FILE_OVERWRITE_IF) {
+        return 0;
+    }
+
+    want = model_size_blocks(name);
+    if (want < 0) {
+        return 0;
+    }
+
+    smb2_create(c, name, FILE_OPEN, FILE_READ_ATTRIBUTES,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                NULL, &out);
+    if (out.status != ST_SUCCESS) {
+        return 0;
+    }
+    /* The CREATE reply carries EndOfFile, so the size costs no extra round
+     * trip beyond the probe open itself. */
+    smb2_close(c, out.file_id);
+
+    if (out.end_of_file % BS) {
+        return 0;
+    }
+    got = (long long) (out.end_of_file / BS);
+    if (want == got) {
+        return 0;
+    }
+
+    d = smb2_mbt_deviation_find("RCreateSideEffect", SMB2_MBT_ANY,
+                                SMB2_MBT_ANY);
+    if (!d) {
+        mism("CREATE '%s' was refused by both, but the file is %lld block(s) "
+             "in the model and %lld on the wire -- a refused CREATE modified "
+             "something", name, want, got);
+        return 1;
+    }
+    printf("DEVIATION %s [%s] CREATE '%s': refused open left %lld block(s) in "
+           "the model and %lld on the wire -- %s\n",
+           d->id, g_trace, name, want, got, d->summary);
+    g_ndeviation++;
+    return !d->reconcilable;
+} /* check_refused_create_side_effect */
 
 /* A model id that has run off the end of one of the tables above is a HARNESS
  * limit, not a divergence: the trace is fine and the replayer cannot represent
@@ -753,8 +917,10 @@ do_create(
     uint32_t exp_st = (uint32_t) jfield(rv, "st");
 
     if (out.status != exp_st) {
-        mism("CREATE '%s' status: model 0x%08x wire 0x%08x", name, exp_st,
-             out.status);
+        if (!dev_status("RCreate", exp_st, out.status, name)) {
+            mism("CREATE '%s' status: model 0x%08x wire 0x%08x", name, exp_st,
+                 out.status);
+        }
         return;
     }
 
@@ -770,6 +936,11 @@ do_create(
     }
 
     if (out.status != ST_SUCCESS) {
+        /* Both sides refused.  That agreement can still hide a divergence:
+         * a refused CREATE must not have modified the file. */
+        if (check_refused_create_side_effect(c, name, disp, out.status)) {
+            g_abort_trace = 1;
+        }
         return;
     }
 
@@ -898,7 +1069,9 @@ do_close(
     }
     st = smb2_close(c, fid);
     if (st != exp_st) {
-        mism("CLOSE status: model 0x%08x wire 0x%08x", exp_st, st);
+        if (!dev_status("RClose", exp_st, st, "CLOSE")) {
+            mism("CLOSE status: model 0x%08x wire 0x%08x", exp_st, st);
+        }
     }
 } /* do_close */
 
@@ -927,7 +1100,9 @@ do_write(
     st = smb2_write(c, fid, (uint64_t) off * BS, buf, (uint32_t) (len * BS),
                     &count);
     if (st != exp_st) {
-        mism("WRITE status: model 0x%08x wire 0x%08x", exp_st, st);
+        if (!dev_status("RWrite", exp_st, st, "WRITE")) {
+            mism("WRITE status: model 0x%08x wire 0x%08x", exp_st, st);
+        }
         return;
     }
     if (st == ST_SUCCESS) {
@@ -963,7 +1138,9 @@ do_read(
     st = smb2_read(c, fid, (uint64_t) off * BS, (uint32_t) (len * BS), buf,
                    &rlen);
     if (st != exp_st) {
-        mism("READ status: model 0x%08x wire 0x%08x", exp_st, st);
+        if (!dev_status("RRead", exp_st, st, "READ")) {
+            mism("READ status: model 0x%08x wire 0x%08x", exp_st, st);
+        }
         return;
     }
     if (st != ST_SUCCESS) {
@@ -1116,7 +1293,9 @@ do_set_eof(
     }
     st = smb2_set_eof(c, fid, (uint64_t) sz * BS);
     if (st != exp_st) {
-        mism("SET_EOF status: model 0x%08x wire 0x%08x", exp_st, st);
+        if (!dev_status("RSetEof", exp_st, st, "SET_EOF")) {
+            mism("SET_EOF status: model 0x%08x wire 0x%08x", exp_st, st);
+        }
     }
 } /* do_set_eof */
 
@@ -1205,7 +1384,9 @@ do_flush(
     }
     st = smb2_flush(c, fid);
     if (st != exp_st) {
-        mism("FLUSH status: model 0x%08x wire 0x%08x", exp_st, st);
+        if (!dev_status("RFlush", exp_st, st, "FLUSH")) {
+            mism("FLUSH status: model 0x%08x wire 0x%08x", exp_st, st);
+        }
     }
 } /* do_flush */
 
@@ -1413,7 +1594,9 @@ do_logoff(
     uint32_t st     = smb2_logoff(c);
 
     if (st != exp_st) {
-        mism("LOGOFF status: model 0x%08x wire 0x%08x", exp_st, st);
+        if (!dev_status("RLogoff", exp_st, st, "LOGOFF")) {
+            mism("LOGOFF status: model 0x%08x wire 0x%08x", exp_st, st);
+        }
     }
     if (st == ST_SUCCESS) {
         /* The session id is dead.  Unbind it so a later command that names it
@@ -1439,7 +1622,10 @@ do_tree_disconnect(
     uint32_t st     = smb2_tree_disconnect(c);
 
     if (st != exp_st) {
-        mism("TREE_DISCONNECT status: model 0x%08x wire 0x%08x", exp_st, st);
+        if (!dev_status("RTreeDisconnect", exp_st, st, "TREE_DISCONNECT")) {
+            mism("TREE_DISCONNECT status: model 0x%08x wire 0x%08x", exp_st,
+                 st);
+        }
     }
 } /* do_tree_disconnect */
 
@@ -1724,6 +1910,22 @@ run_trace(
     const char *fsname,
     const char *path)
 {
+    /* The corpus is generated unconditionally, so it contains batches this
+     * replayer cannot drive against chimera.  Declining them HERE -- by name,
+     * with the chimera bug that would retire the entry -- keeps the gap
+     * visible and attributable, where declining to generate them made it
+     * invisible. */
+    const char                        *base = strrchr(path, '/');
+    const struct smb2_mbt_trace_limit *lim  =
+        smb2_mbt_trace_limit_find(base ? base + 1 : path);
+
+    if (lim) {
+        printf("SKIP %s [%s] %s\n", lim->id, base ? base + 1 : path,
+               lim->summary);
+        g_nskipped++;
+        return 0;
+    }
+
     json_error_t err;
     json_t      *root = json_load_file(path, 0, &err);
 
@@ -1765,8 +1967,9 @@ run_trace(
     memset(g_conn_for_fid, 0, sizeof(g_conn_for_fid));
     memset(g_park_barriered, 0, sizeof(g_park_barriered));
     memset(g_park_pending, 0, sizeof(g_park_pending));
-    g_trace     = path;
-    g_nmismatch = 0;
+    g_trace       = path;
+    g_nmismatch   = 0;
+    g_abort_trace = 0;
 
     /* Per-trace too: a fid's lease key must not survive into the next trace.
      * -1 means 'no lease key bound to this fid'. */
@@ -1792,6 +1995,15 @@ run_trace(
         }
         g_post_sdb = json_object_get(st_i, sdbkey);
         do_message(jval(lo));
+        if (g_abort_trace) {
+            /* A non-reconcilable deviation fired: the model and chimera now
+             * hold different state, so every later command would report the
+             * consequence rather than a finding.  Stop here and say so. */
+            printf("ABANDONED [%s] at state %zu: a non-reconcilable deviation "
+                   "left the model and the server holding different state\n",
+                   path, i);
+            break;
+        }
     }
     g_post_sdb = NULL;
 
@@ -1871,11 +2083,27 @@ main(
 
     mbt_free_traces(traces, ntraces);
 
+    if (g_nskipped) {
+        printf("# %d of %d trace(s) skipped -- see smb2_mbt_deviations.h "
+               "(smb2_mbt_trace_limits)\n", g_nskipped, ntraces);
+    }
+    if (g_ndeviation) {
+        printf("# %d recorded deviation(s) -- known, cited chimera "
+               "divergences from the model (smb2_mbt_deviations.h)\n",
+               g_ndeviation);
+    }
     if (total) {
         fprintf(stderr, "%d total mismatch(es) across %d trace(s)\n",
                 total, ntraces);
         return 1;
     }
-    printf("ok: %d trace(s) replayed with no mismatches\n", ntraces);
+    if (g_nskipped == ntraces) {
+        /* Nothing was driven.  That is a ctest SKIP, not a pass: a batch this
+        * replayer cannot drive must not read as evidence about the server. */
+        printf("# nothing in this batch is replayable against chimera yet\n");
+        return 77;
+    }
+    printf("ok: %d trace(s) replayed with no unrecorded divergence\n",
+           ntraces - g_nskipped);
     return 0;
 } /* main */

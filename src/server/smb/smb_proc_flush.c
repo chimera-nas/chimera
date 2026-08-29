@@ -54,6 +54,18 @@ chimera_smb_flush(struct chimera_smb_request *request)
         return;
     }
 
+    /* MS-SMB2 3.3.5.13: FLUSH is a write-side operation.  A handle that holds
+     * neither FILE_WRITE_DATA nor FILE_APPEND_DATA may not flush, exactly as it
+     * may not write -- Windows fails FlushFileBuffers on a read-only handle
+     * with ERROR_ACCESS_DENIED, and so does Samba.  Checked before the pipe
+     * shortcut below so a read-only pipe handle is refused too. */
+    if (!(request->flush.open_file->granted_access &
+          (SMB2_FILE_WRITE_DATA | SMB2_FILE_APPEND_DATA))) {
+        chimera_smb_open_file_release(request, request->flush.open_file);
+        chimera_smb_complete_request(request, SMB2_STATUS_ACCESS_DENIED);
+        return;
+    }
+
     if (!request->flush.open_file->handle) {
         /* Named-pipe FIDs carry no VFS handle; FLUSH on a pipe completes
          * immediately with success (MS-SMB2 3.3.5.15) -- do not deref NULL. */

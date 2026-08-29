@@ -653,6 +653,7 @@ struct chimera_smb_request {
             struct chimera_vfs_file_state     *gen_parked_fs;
             struct chimera_vfs_pending_acquire gen_ticket;
             uint8_t                            gen_held_granted;
+            uint8_t                            gen_held_denied;
             uint8_t                            gen_parked;
             /* Set by chimera_smb_create_gen_open_file_normal when the share
              * conflict it could not resolve is against a durable holder that will

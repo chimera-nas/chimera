@@ -481,7 +481,8 @@ static inline void
 chimera_smb_create_finish_share_grant(
     struct chimera_smb_open_file  *open_file,
     struct chimera_vfs_file_state *file_state,
-    uint8_t                        held_granted);
+    uint8_t                        held_granted,
+    uint8_t                        held_denied);
 
 /* Resume a parked share acquire once the conflicting batch oplock has been
  * relinquished (GRANTED -> finish the open) or kept (DENIED -> SHARING_VIOLATION). */
@@ -1044,7 +1045,7 @@ chimera_smb_create_gen_open_file(
         uint32_t                          da = open_file->desired_access;
         uint32_t                          sa = open_file->share_access;
         uint8_t                           granted = 0, denied = 0;
-        uint8_t                           held_granted = 0;
+        uint8_t                           held_granted = 0, held_denied = 0;
         struct chimera_claim_owner        share_owner;
         struct chimera_vfs_claim_conflict conflict;
         enum chimera_vfs_claim_result     result;
@@ -1090,9 +1091,14 @@ chimera_smb_create_gen_open_file(
          * transiently for the conflict check, then shrink the held grant
          * once the claim is inserted (chimera_vfs_claim_shrink). */
         held_granted = granted;
-        if (request->create.create_disposition == SMB2_FILE_SUPERSEDE ||
+        held_denied  = denied;
+
+        bool truncating =
+            request->create.create_disposition == SMB2_FILE_SUPERSEDE ||
             request->create.create_disposition == SMB2_FILE_OVERWRITE ||
-            request->create.create_disposition == SMB2_FILE_OVERWRITE_IF) {
+            request->create.create_disposition == SMB2_FILE_OVERWRITE_IF;
+
+        if (truncating) {
             granted |= CHIMERA_CLAIM_W;
         }
 
@@ -1104,9 +1110,24 @@ chimera_smb_create_gen_open_file(
          * changing any conflict outcome (chimera_vfs_share_conflict and the
          * CACHING sole-access loop both treat a (0,0) entry as absent). */
         if (!(da & SMB2_SHAREMODE_ACCESS_MASK)) {
-            granted      = 0;
-            denied       = 0;
+            /* Whatever it asserted while opening, an attribute-only handle
+             * RETAINS nothing: the truncate's write was transient, so the
+             * handle blocks nobody afterwards. */
             held_granted = 0;
+            held_denied  = 0;
+
+            /* But only a true STAT open -- attribute-only AND non-truncating
+             * -- is exempt from arbitration in the first place.  A truncating
+             * open is going to modify the file, so it asserts the write it
+             * just took AND its ShareAccess, in both directions, exactly like
+             * an ordinary writer.  Zeroing them here discarded the very write
+             * bit added just above, which is the one case where the truncate
+             * is the ONLY source of it (MS-FSA 2.1.5.1.2; found by replaying
+             * the spec corpus against Samba, which refuses these). */
+            if (!truncating) {
+                granted = 0;
+                denied  = 0;
+            }
         }
 
         file_state = chimera_vfs_state_get(vfs_state,
@@ -1207,6 +1228,7 @@ chimera_smb_create_gen_open_file(
             request->create.gen_parked_open  = open_file;
             request->create.gen_parked_fs    = file_state;
             request->create.gen_held_granted = held_granted;
+            request->create.gen_held_denied  = held_denied;
             request->create.gen_parked       = 1;
             /* Publish this create's create_guid before the park: while it waits,
              * it is not in tree->open_files[], so only tree->pending_creates lets
@@ -1268,7 +1290,8 @@ chimera_smb_create_gen_open_file(
         }
 
         chimera_smb_create_finish_share_grant(open_file, file_state,
-                                              held_granted);
+                                              held_granted,
+                                              held_denied);
     }
 
     return chimera_smb_create_after_share(request, open_file);
@@ -1886,15 +1909,19 @@ static inline void
 chimera_smb_create_finish_share_grant(
     struct chimera_smb_open_file  *open_file,
     struct chimera_vfs_file_state *file_state,
-    uint8_t                        held_granted)
+    uint8_t                        held_granted,
+    uint8_t                        held_denied)
 {
-    /* Drop the transient truncate-write grant: the handle holds only the
-     * access it requested, so it must not block a later reader.  Shrink is
-     * the core's in-place downgrade verb (never conflicts; pumps waiters). */
-    if (held_granted != open_file->share_lease.used) {
+    /* Drop the transient truncate-write grant, and with it the ShareAccess an
+     * attribute-only truncating open asserted only to be arbitrated: the
+     * handle holds only the access it requested and denies only what such a
+     * handle may deny, so it must not block a later reader.  Shrink is the
+     * core's in-place downgrade verb (never conflicts; pumps waiters). */
+    if (held_granted != open_file->share_lease.used ||
+        held_denied != open_file->share_lease.denied) {
         chimera_vfs_claim_shrink(file_state, &open_file->share_lease,
                                  held_granted,
-                                 open_file->share_lease.denied);
+                                 held_denied);
     }
 
     open_file->share_file_state     = file_state;
@@ -1959,7 +1986,8 @@ chimera_smb_create_share_park_finish(
     if (result == CHIMERA_CLAIM_GRANTED) {
         /* The holder closed; the share reservation is now held. */
         chimera_smb_create_finish_share_grant(open_file, file_state,
-                                              request->create.gen_held_granted);
+                                              request->create.gen_held_granted,
+                                              request->create.gen_held_denied);
         chimera_smb_create_after_share(request, open_file);
         /* after_share hashed the open, so drop the in-flight registration only
          * now: a replay is covered by open_files[] from here on, with no window
@@ -2046,7 +2074,15 @@ chimera_smb_create_mkdir_open_callback(
      * client opening a directory under a lease key already held on another file
      * would slip past the check (smb2.lease.request opens fname2 as a directory
      * under LEASE1 and expects STATUS_INVALID_PARAMETER). */
-    if ((request->create.ctx_present_mask & CHIMERA_SMB_CREATE_CTX_RQLS) &&
+    /* Gated on leasing actually being advertised: MS-SMB2 3.3.5.9.8 conditions
+     * RqLs processing -- and with it the lease-key binding -- on the server
+     * supporting leases.  With smb_leases off the context is answered with a
+     * bare, cacheless RqLs reply and binds nothing, so enforcing the binding
+     * would refuse an open no lease was ever granted for.  (Found by replaying
+     * the spec corpus: the model made the same mistake, and Samba with
+     * `leases = no` ignores the context outright.) */
+    if (request->compound->thread->shared->config.leases &&
+        (request->create.ctx_present_mask & CHIMERA_SMB_CREATE_CTX_RQLS) &&
         chimera_smb_session_lease_key_conflict(request->session_handle->session,
                                                request->create.rqls.key,
                                                oh->fh, oh->fh_len)) {
@@ -2711,7 +2747,15 @@ chimera_smb_create_open_at_callback(
      * reject the open with STATUS_INVALID_PARAMETER (smb2.lease.request /
      * duplicate_create / duplicate_open).  A re-open of the same file under the
      * key coalesces and is not a conflict. */
-    if ((request->create.ctx_present_mask & CHIMERA_SMB_CREATE_CTX_RQLS) &&
+    /* Gated on leasing actually being advertised: MS-SMB2 3.3.5.9.8 conditions
+     * RqLs processing -- and with it the lease-key binding -- on the server
+     * supporting leases.  With smb_leases off the context is answered with a
+     * bare, cacheless RqLs reply and binds nothing, so enforcing the binding
+     * would refuse an open no lease was ever granted for.  (Found by replaying
+     * the spec corpus: the model made the same mistake, and Samba with
+     * `leases = no` ignores the context outright.) */
+    if (request->compound->thread->shared->config.leases &&
+        (request->create.ctx_present_mask & CHIMERA_SMB_CREATE_CTX_RQLS) &&
         chimera_smb_session_lease_key_conflict(request->session_handle->session,
                                                request->create.rqls.key,
                                                oh->fh, oh->fh_len)) {
