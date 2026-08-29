@@ -204,6 +204,18 @@ struct chimera_vfs_handle_state {
  * enforce; linux/io_uring enforce in-kernel but do not store the rich ACL). */
 #define CHIMERA_VFS_CAP_DELEGATES_DAC         (1U << 21)
 
+/* Refinement of CHIMERA_VFS_CAP_DELEGATES_DAC for PROXY modules (nfs, smb):
+ * the real enforcer is a remote server that authorizes every operation with
+ * the credential each RPC carries -- there is no open_by_handle_at-style
+ * bypass for the engine to compensate for.  The engine therefore skips the
+ * per-operation I/O and path-prefix gates entirely (they would re-evaluate
+ * DAC with the per-call credential, breaking POSIX's rights-bind-at-open),
+ * and instead runs the OPEN-time access gate, which the remote server cannot
+ * provide (NFS3 has no open on the wire) -- the client-side equivalent of a
+ * kernel NFS client's ACCESS check at open(2).  Meaningful only alongside
+ * DELEGATES_DAC. */
+#define CHIMERA_VFS_CAP_REMOTE_DAC            (1U << 29)
+
 /* If set, the module supports named streams (SMB Alternate Data Streams) on
  * regular files via chimera_vfs_open_stream / list_streams / remove_stream.
  * A named stream is an independent data fork addressed by name; it shares the

@@ -130,8 +130,8 @@ chimera_vfs_open_at_hdl_callback(
                    (f & (CHIMERA_VFS_OPEN_READ_ONLY |
                          CHIMERA_VFS_OPEN_WRITE_ONLY))) {
             status = CHIMERA_VFS_ENXIO;
-        } else if (chimera_vfs_gate_needed(request->module->capabilities,
-                                           request->cred)) {
+        } else if (chimera_vfs_open_gate_needed(request->module->capabilities,
+                                                request->cred)) {
             uint32_t required = chimera_vfs_open_required_access(f);
             uint32_t granted  =
                 chimera_vfs_access_check(&request->open_at.r_attr,
