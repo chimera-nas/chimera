@@ -210,6 +210,19 @@ chimera_posix_fcntl(
         return -1;
     }
 
+    /* fcntl(2) SETLK/SETLKW: a read lock requires a descriptor open for
+     * reading and a write lock one open for writing, else EBADF.  F_GETLK
+     * only queries and F_UNLCK only releases; neither is access-gated. */
+    if (cmd != F_GETLK &&
+        ((lock_type == CHIMERA_VFS_LOCK_READ &&
+          !chimera_posix_fd_may_read(entry)) ||
+         (lock_type == CHIMERA_VFS_LOCK_WRITE &&
+          !chimera_posix_fd_may_write(entry)))) {
+        chimera_posix_fd_release(entry, 0);
+        errno = EBADF;
+        return -1;
+    }
+
     switch (fl->l_whence) {
         case SEEK_SET: {
             if (fl->l_start < 0) {
