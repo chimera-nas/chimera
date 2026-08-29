@@ -644,6 +644,11 @@ pjd_lstat_ctime(
     char        p[PJD_PATHBUF];
     struct stat st;
 
+    /* Leave the output defined even when the stat fails: the pjd cases
+     * use non-fatal expectations and keep running, so a caller can
+     * still read this. */
+    *ts = (struct timespec) { 0, 0 };
+
     if (chimera_posix_lstat(pjd_resolve(name, p, sizeof(p)), &st) != 0) {
         return -1;
     }
@@ -658,6 +663,11 @@ pjd_lstat_mtime(
 {
     char        p[PJD_PATHBUF];
     struct stat st;
+
+    /* Leave the output defined even when the stat fails: the pjd cases
+     * use non-fatal expectations and keep running, so a caller can
+     * still read this. */
+    *ts = (struct timespec) { 0, 0 };
 
     if (chimera_posix_lstat(pjd_resolve(name, p, sizeof(p)), &st) != 0) {
         return -1;
@@ -747,6 +757,11 @@ pjd_stat_ctime(
     char        p[PJD_PATHBUF];
     struct stat st;
 
+    /* Leave the output defined even when the stat fails: the pjd cases
+     * use non-fatal expectations and keep running, so a caller can
+     * still read this. */
+    *ts = (struct timespec) { 0, 0 };
+
     if (chimera_posix_stat(pjd_resolve(name, p, sizeof(p)), &st) != 0) {
         return -1;
     }
@@ -761,6 +776,11 @@ pjd_stat_mtime(
 {
     char        p[PJD_PATHBUF];
     struct stat st;
+
+    /* Leave the output defined even when the stat fails: the pjd cases
+     * use non-fatal expectations and keep running, so a caller can
+     * still read this. */
+    *ts = (struct timespec) { 0, 0 };
 
     if (chimera_posix_stat(pjd_resolve(name, p, sizeof(p)), &st) != 0) {
         return -1;
@@ -827,6 +847,12 @@ pjd_lstat_times(
 {
     char        p[PJD_PATHBUF];
     struct stat st;
+
+    /* Leave the outputs defined even when the stat fails: the pjd cases
+     * use non-fatal expectations and keep running, so a caller can still
+     * read these. */
+    *atime = (struct timespec) { 0, 0 };
+    *mtime = (struct timespec) { 0, 0 };
 
     if (chimera_posix_lstat(pjd_resolve(name, p, sizeof(p)), &st) != 0) {
         return -1;
