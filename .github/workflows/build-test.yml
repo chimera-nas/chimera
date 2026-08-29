@@ -12,11 +12,21 @@ on:
   merge_group:
   workflow_dispatch:   # allow manual runs
 
-# The full cross-OS, cross-arch test and static-analysis matrix runs nightly
-# from .github/workflows/nightly.yml. On PRs we run a reduced matrix:
+# What gates a merge is the QUICK test tier plus static analysis, run on every
+# supported OS rather than on a chosen few:
 #   - all OS images built for amd64 (devcontainer also for arm64)
-#   - tests on all OS images amd64; arm64 only on devcontainer
-#   - static analysis only on devcontainer
+#   - quick-tier ctest on every image, and on macOS
+#   - static analysis on every image, and on macOS
+#
+# The extended tier -- pynfs, pjdfstest, cthon, ltp, pike, smbtorture, wpts,
+# KVM -- runs in .github/workflows/nightly.yml, one job per platform.  It is
+# too slow to sit in front of a merge, and the queue is the wrong place to
+# discover that a KVM guest image moved.
+#
+# There is no flaky-test rescue.  A test that fails, fails: no re-run, no
+# marker artifact, no review gate.  A retry that turns red into green hides
+# exactly the race a merge queue exists to catch, and the rescued-flake path
+# was where a real failure could reach main behind an approval click.
 #
 # The run is three phases, fanned out as wide as possible within each, and
 # the job display names follow the phase ("Build X" = container image,
@@ -498,22 +508,10 @@ jobs:
             bash -euxc '
               tar -C /build -xzf /workspace/build-os.tar.gz
               mkdir -p /workspace/ctest-results
-              rm -f /workspace/flaky-rescued.log
               start=$(date +%s)
               rc=0
               /workspace/scripts/cap_ctest_output.sh ctest --output-on-failure --test-output-size-failed 65536 --timeout 300 -j 32 --output-junit /workspace/ctest-results/results.xml || rc=$?
               echo "$(( $(date +%s) - start ))" > /workspace/ctest-results/duration_seconds
-              if [ "$rc" -ne 0 ]; then
-                echo "ctest reported failures; rerunning previously-failed tests to distinguish flakes from real failures"
-                cp /build/Testing/Temporary/LastTestsFailed.log /workspace/flaky-candidates.log
-                if /workspace/scripts/cap_ctest_output.sh ctest --rerun-failed --output-on-failure --test-output-size-failed 65536 --timeout 300 -j 32; then
-                  echo "rerun of previously-failed tests passed: treating as flaky (gated for human review)"
-                  cp /workspace/flaky-candidates.log /workspace/flaky-rescued.log
-                  rc=0
-                else
-                  echo "rerun still failing: real failure"
-                fi
-              fi
               exit $rc'
 
       # Per-test results for the report: ctest --output-junit (one <testcase>
@@ -529,14 +527,6 @@ jobs:
           path: ctest-results/
           if-no-files-found: warn
           retention-days: 30
-
-      - name: Upload flaky-test marker
-        if: ${{ hashFiles('flaky-rescued.log') != '' }}
-        uses: actions/upload-artifact@v6
-        with:
-          name: flaky-marker-${{ matrix.image_name }}-${{ matrix.arch }}-${{ matrix.build_type }}
-          path: flaky-rescued.log
-          retention-days: 14
 
   # Phase 3 alongside the test jobs: scan-build does its own instrumented
   # compile (it cannot reuse the Nexus build tree), but it is gated on the
@@ -555,7 +545,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # devcontainer only on PR; full matrix runs in nightly
+          # Every supported OS image.  The distro images are built amd64-only
+          # here (see build-os); the devcontainer is the one built for both
+          # arches, so it is the only one analysed on arm64 too.
           - platform: linux/amd64
             runner: arc-amd64
             arch: amd64
@@ -583,6 +575,76 @@ jobs:
             build_type: Debug
             image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-dev
             image_name: devcontainer
+            cmake_extra: ""
+          - platform: linux/amd64
+            runner: arc-amd64
+            arch: amd64
+            build_type: Release
+            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu26
+            image_name: ubuntu26
+            cmake_extra: ""
+          - platform: linux/amd64
+            runner: arc-amd64
+            arch: amd64
+            build_type: Debug
+            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu26
+            image_name: ubuntu26
+            cmake_extra: ""
+          - platform: linux/amd64
+            runner: arc-amd64
+            arch: amd64
+            build_type: Release
+            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu24
+            image_name: ubuntu24
+            cmake_extra: ""
+          - platform: linux/amd64
+            runner: arc-amd64
+            arch: amd64
+            build_type: Debug
+            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu24
+            image_name: ubuntu24
+            cmake_extra: ""
+          - platform: linux/amd64
+            runner: arc-amd64
+            arch: amd64
+            build_type: Release
+            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu22
+            image_name: ubuntu22
+            cmake_extra: "-DIO_URING_ENABLED=OFF"
+          - platform: linux/amd64
+            runner: arc-amd64
+            arch: amd64
+            build_type: Debug
+            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu22
+            image_name: ubuntu22
+            cmake_extra: "-DIO_URING_ENABLED=OFF"
+          - platform: linux/amd64
+            runner: arc-amd64
+            arch: amd64
+            build_type: Release
+            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-rocky9
+            image_name: rocky9
+            cmake_extra: "-DIO_URING_ENABLED=OFF"
+          - platform: linux/amd64
+            runner: arc-amd64
+            arch: amd64
+            build_type: Debug
+            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-rocky9
+            image_name: rocky9
+            cmake_extra: "-DIO_URING_ENABLED=OFF"
+          - platform: linux/amd64
+            runner: arc-amd64
+            arch: amd64
+            build_type: Release
+            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-rocky10
+            image_name: rocky10
+            cmake_extra: ""
+          - platform: linux/amd64
+            runner: arc-amd64
+            arch: amd64
+            build_type: Debug
+            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-rocky10
+            image_name: rocky10
             cmake_extra: ""
 
     steps:
@@ -750,7 +812,7 @@ jobs:
   # amd64 only (the devcontainer's qemu is x86-only) and fetch guest images on
   # demand before running.
   test-dev:
-    name: Test devcontainer ${{ matrix.arch }} ${{ matrix.build_type }} ${{ matrix.category }}
+    name: Test devcontainer ${{ matrix.arch }} ${{ matrix.build_type }}
     needs: [build-complete]
     if: ${{ github.event_name != 'pull_request' }}
     runs-on: ${{ matrix.runner }}
@@ -761,25 +823,9 @@ jobs:
       matrix:
         arch: [amd64, arm64]
         build_type: [Release, Debug]
-        category: [pynfs, smbtorture, pike, wpts-smb2, wpts-smb2model, wpts-fsa, wpts-fsamodel, posix-client, pjdfstest, s3, ceph-s3, client, unit, kvm-cthon, kvm-xfsprogs, kvm-pnfs, kvm-nfstest-lock, kvm-nfstest-dio, kvm-nfstest-rest, kvm-ltp]
         include:
           - { arch: amd64, runner: arc-amd64 }
           - { arch: arm64, runner: arc-arm64 }
-        exclude:
-          # KVM is x86-only in the devcontainer, so it never runs on arm64.
-          - { arch: arm64, category: kvm-cthon }
-          - { arch: arm64, category: kvm-xfsprogs }
-          - { arch: arm64, category: kvm-pnfs }
-          - { arch: arm64, category: kvm-nfstest-lock }
-          - { arch: arm64, category: kvm-nfstest-dio }
-          - { arch: arm64, category: kvm-nfstest-rest }
-          - { arch: arm64, category: kvm-ltp }
-          # WPTS (Microsoft Protocol Test Suite) is not supported on arm64 —
-          # the shard would only skip every test, so don't run it at all.
-          - { arch: arm64, category: wpts-smb2 }
-          - { arch: arm64, category: wpts-smb2model }
-          - { arch: arm64, category: wpts-fsa }
-          - { arch: arm64, category: wpts-fsamodel }
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -801,13 +847,11 @@ jobs:
             -o build-dev.tar.gz \
             "${{ env.NEXUS_SCRATCH_URL }}/chimera/build-dev-${{ github.run_id }}-${{ matrix.arch }}-${{ matrix.build_type }}.tar.gz"
 
-      - name: Unpack, fetch images if needed, and run the category
+      - name: Unpack and test inside the container
         run: |
           docker run --rm --privileged \
             -e DOCKER_MIRROR=${{ env.DOCKER_MIRROR }} \
             -e APT_MIRROR=${{ env.APT_MIRROR }} \
-            -e KVM_IMAGE_REGISTRY=${{ env.KVM_IMAGE_REGISTRY }} \
-            -e CATEGORY=${{ matrix.category }} \
             -v "${{ github.workspace }}:/workspace" \
             -v "${{ github.workspace }}/oras:/usr/local/bin/oras:ro" \
             -v /build \
@@ -815,78 +859,21 @@ jobs:
             ${{ env.DEV_IMAGE_TAG_PREFIX }}:${{ github.sha }}-${{ matrix.arch }} \
             bash -euxc '
               tar -C /build -xzf /workspace/build-dev.tar.gz
-              NEED_KVM=
-              case "$CATEGORY" in
-                pynfs)        SEL="-L pynfs" ;;
-                smbtorture)   SEL="-L smbtorture" ;;
-                pike)         SEL="-L pike" ;;
-                # Anchor wpts-smb2$ so it does NOT also match the wpts-smb2model
-                # label (ctest -L is a substring regex; "wpts-smb2" is a prefix
-                # of "wpts-smb2model").
-                wpts-smb2)    SEL="-L wpts-smb2$" ;;
-                wpts-smb2model) SEL="-L wpts-smb2model" ;;
-                # Anchor wpts-fsa$ so it does NOT also match the wpts-fsamodel
-                # label (ctest -L is a substring regex; "wpts-fsa" is a prefix of
-                # "wpts-fsamodel").
-                wpts-fsa)     SEL="-L wpts-fsa$" ;;
-                wpts-fsamodel) SEL="-L wpts-fsamodel" ;;
-                posix-client) SEL="-L posix" ;;
-                pjdfstest)    SEL="-L pjdfstest" ;;
-                s3)           SEL="-L s3 -LE ceph-s3" ;;
-                ceph-s3)      SEL="-L ceph-s3" ;;
-                client)       SEL="-L client" ;;
-                unit)         SEL="-LE pynfs|smbtorture|pike|wpts|posix|pjdfstest|s3|client|kvm" ;;
-                kvm-cthon)    SEL="-L kvm -R /cthon/";    NEED_KVM=1 ;;
-                kvm-xfsprogs) SEL="-L kvm -R /xfstests/"; NEED_KVM=1 ;;
-                kvm-pnfs)     SEL="-L pnfs";              NEED_KVM=1 ;;
-                # nfstest is the test long-pole; split by suite so each shard
-                # lands on its own runner.  lock isolates the single longest
-                # test (nfstest_lock_*_linux), dio the next-heaviest family, and
-                # rest is everything else.  Keep these three collectively exact
-                # to "-L kvm -R /nfstest/" so no nfstest test is dropped.
-                kvm-nfstest-lock) SEL="-L kvm -R nfstest_lock_";                    NEED_KVM=1 ;;
-                kvm-nfstest-dio)  SEL="-L kvm -R nfstest_dio_";                     NEED_KVM=1 ;;
-                kvm-nfstest-rest) SEL="-L kvm -R /nfstest/ -E nfstest_(lock|dio)_"; NEED_KVM=1 ;;
-                kvm-ltp)      SEL="-L kvm -R /ltp/";      NEED_KVM=1 ;;
-              esac
-              if [ -n "$NEED_KVM" ]; then
-                ninja kvm_ubuntu2404_image kvm_ubuntu2404_hwe_image kvm_ubuntu2204_hwe_image kvm_ubuntu2604_image
-              fi
               mkdir -p /workspace/ctest-results
-              rm -f /workspace/flaky-rescued.log
               start=$(date +%s)
               rc=0
-              /workspace/scripts/cap_ctest_output.sh ctest $SEL --output-on-failure --test-output-size-failed 65536 --timeout 300 -j 32 --output-junit /workspace/ctest-results/results.xml || rc=$?
+              /workspace/scripts/cap_ctest_output.sh ctest --output-on-failure --test-output-size-failed 65536 --timeout 300 -j 32 --output-junit /workspace/ctest-results/results.xml || rc=$?
               echo "$(( $(date +%s) - start ))" > /workspace/ctest-results/duration_seconds
-              if [ "$rc" -ne 0 ]; then
-                echo "ctest reported failures; rerunning previously-failed tests to distinguish flakes from real failures"
-                cp /build/Testing/Temporary/LastTestsFailed.log /workspace/flaky-candidates.log
-                if /workspace/scripts/cap_ctest_output.sh ctest --rerun-failed --output-on-failure --test-output-size-failed 65536 --timeout 300 -j 32; then
-                  echo "rerun of previously-failed tests passed: treating as flaky (gated for human review)"
-                  cp /workspace/flaky-candidates.log /workspace/flaky-rescued.log
-                  rc=0
-                else
-                  echo "rerun still failing: real failure"
-                fi
-              fi
               exit $rc'
 
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: ctest-junit-devcontainer-${{ matrix.arch }}-${{ matrix.build_type }}-${{ matrix.category }}
+          name: ctest-junit-devcontainer-${{ matrix.arch }}-${{ matrix.build_type }}
           path: ctest-results/
           if-no-files-found: warn
           retention-days: 30
-
-      - name: Upload flaky-test marker
-        if: ${{ hashFiles('flaky-rescued.log') != '' }}
-        uses: actions/upload-artifact@v6
-        with:
-          name: flaky-marker-devcontainer-${{ matrix.arch }}-${{ matrix.build_type }}-${{ matrix.category }}
-          path: flaky-rescued.log
-          retention-days: 14
 
   # ---------------------------------------------------------------------------
   # macOS: compile + ctest on a GitHub-hosted arm64 runner, modeled on
@@ -899,9 +886,7 @@ jobs:
   #
   # No netns and no raised limits on a hosted runner: the in-process suites
   # run gate-free (CHIMERA_LIMITS_TESTING passes vacuously off Linux) and the
-  # genuinely networked suites serialize under the chimera_net lock.  Flake
-  # rescue mirrors test-dev so a rescued flake still routes through the
-  # flake-review gate.
+  # genuinely networked suites serialize under the chimera_net lock.
   # ---------------------------------------------------------------------------
   macos:
     name: Test macOS ${{ matrix.build_type }}
@@ -947,7 +932,6 @@ jobs:
         run: |
           cd "${{ runner.temp }}/build"
           mkdir -p "${{ github.workspace }}/ctest-results"
-          rm -f "${{ github.workspace }}/flaky-rescued.log"
           start=$(date +%s)
           rc=0
           "${{ github.workspace }}/scripts/cap_ctest_output.sh" \
@@ -955,18 +939,6 @@ jobs:
                   --timeout 300 -j "$(sysctl -n hw.ncpu)" \
                   --output-junit "${{ github.workspace }}/ctest-results/results.xml" || rc=$?
           echo "$(( $(date +%s) - start ))" > "${{ github.workspace }}/ctest-results/duration_seconds"
-          if [ "$rc" -ne 0 ]; then
-            echo "ctest reported failures; rerunning previously-failed tests to distinguish flakes from real failures"
-            cp Testing/Temporary/LastTestsFailed.log "${{ github.workspace }}/flaky-candidates.log"
-            if "${{ github.workspace }}/scripts/cap_ctest_output.sh" \
-                 ctest --rerun-failed --output-on-failure --test-output-size-failed 65536 --timeout 300; then
-              echo "rerun of previously-failed tests passed: treating as flaky (gated for human review)"
-              cp "${{ github.workspace }}/flaky-candidates.log" "${{ github.workspace }}/flaky-rescued.log"
-              rc=0
-            else
-              echo "rerun still failing: real failure"
-            fi
-          fi
           exit $rc
 
       - name: Upload test results
@@ -978,102 +950,59 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
-      - name: Upload flaky-test marker
-        if: ${{ hashFiles('flaky-rescued.log') != '' }}
+  # macOS static analysis.  scan-build does its own instrumented compile, so
+  # unlike the Linux analyzers this shares nothing with the macos test job and
+  # runs independently of the build barrier.
+  analyze-macos:
+    name: Analyze macOS ${{ matrix.build_type }}
+    if: ${{ github.event_name != 'pull_request' }}
+    runs-on: macos-14
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [Release, Debug]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          brew update
+          # llvm carries scan-build -- Apple's clang does not ship the analyzer
+          # driver.  The rest mirrors the macos test job: bison 3.x for the
+          # ndrzcc grammar, libxcrypt for full crypt(5) verification.
+          brew install llvm cmake ninja bison jansson userspace-rcu rocksdb krb5 \
+                       xxhash libxcrypt uthash openssl@3 libnghttp2
+
+      - name: Perform clang static analysis
+        id: static-analysis
+        env:
+          BUILD_DIR: ${{ runner.temp }}/build-analyze
+        run: |
+          set -o pipefail
+          mkdir -p "$GITHUB_WORKSPACE/scan-report"
+          # --exclude ext: the vendored submodules are analysed in their own
+          # repos and cannot be fixed from a chimera PR.
+          "$(brew --prefix llvm)/bin/scan-build" --status-bugs \
+              --exclude "$GITHUB_WORKSPACE/ext" \
+              -o "$GITHUB_WORKSPACE/scan-report" \
+              sh -c "cmake -D CMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+                           -B \"$BUILD_DIR\" -S \"$GITHUB_WORKSPACE\" -G Ninja \
+                     && ninja -C \"$BUILD_DIR\"" \
+              2>&1 | tee "$GITHUB_WORKSPACE/scan-report/scan-build-output.txt"
+
+      - name: Upload static analysis report
+        if: ${{ failure() && steps.static-analysis.outcome == 'failure' }}
         uses: actions/upload-artifact@v6
         with:
-          name: flaky-marker-macos-${{ matrix.build_type }}
-          path: flaky-rescued.log
-          retention-days: 14
-
-  # Gather the per-matrix flaky-test markers (uploaded only when a test failed
-  # on its first run but passed on --rerun-failed) into a single yes/no signal.
-  collect-flakes:
-    name: Collect flaky-test markers
-    needs: [test, test-dev, macos]
-    if: ${{ always() }}
-    runs-on: arc-small
-    permissions:
-      contents: read
-      issues: write
-    outputs:
-      flaky: ${{ steps.detect.outputs.flaky }}
-    steps:
-      - name: Download flaky markers
-        uses: actions/download-artifact@v6
-        continue-on-error: true
-        with:
-          path: flaky-markers
-          pattern: flaky-marker-*
-
-      - name: Detect whether any test was flaky
-        id: detect
-        run: |
-          if compgen -G "flaky-markers/flaky-marker-*/*" > /dev/null; then
-            echo "flaky=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "flaky=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Record flaky tests on the tracking issue
-        if: ${{ steps.detect.outputs.flaky == 'true' }}
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const path = require('path');
-            const dir = 'flaky-markers';
-            let details = '';
-            for (const sub of fs.readdirSync(dir)) {
-              const f = path.join(dir, sub, 'flaky-rescued.log');
-              if (fs.existsSync(f)) {
-                const matrix = sub.replace(/^flaky-marker-/, '');
-                details += `\n**${matrix}**\n\n\`\`\`\n${fs.readFileSync(f, 'utf8')}\n\`\`\`\n`;
-              }
-            }
-            const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
-            const body = `Tests below failed once but passed on \`--rerun-failed\` in a merge_group run for \`${context.sha}\`. `
-              + `The merge was gated on human approval (\`flake-gate\`); please root-cause and fix these flakes.\n\n`
-              + `Run: ${runUrl}\n${details}`;
-            const title = 'Flaky tests observed in CI';
-            const label = 'flaky-test';
-            const { owner, repo } = context.repo;
-            try {
-              await github.rest.issues.createLabel({ owner, repo, name: label, color: 'd73a4a',
-                description: 'Test that needed a CI retry to pass' });
-            } catch (e) { /* label already exists */ }
-            const open = await github.rest.issues.listForRepo({ owner, repo, state: 'open', labels: label });
-            let number;
-            if (open.data.length > 0) {
-              number = open.data[0].number;
-            } else {
-              const created = await github.rest.issues.create({ owner, repo, title, labels: [label],
-                body: 'Rolling tracker for tests that needed a CI retry to pass. Each comment below is one observation from the merge queue.' });
-              number = created.data.number;
-            }
-            await github.rest.issues.createComment({ owner, repo, issue_number: number, body });
-
-  # Human-approval choke point for the merge queue: when a flake was rescued by
-  # retry, this job routes through the 'flake-review' environment (configured
-  # with required reviewers) and PAUSES the merge_group run until a reviewer
-  # approves. When no flake occurred, the environment expression is empty and
-  # the job passes immediately. Mark this job as a required status check.
-  flake-gate:
-    name: Flake review gate
-    needs: collect-flakes
-    if: ${{ always() }}
-    runs-on: arc-small
-    permissions:
-      contents: read
-    environment: ${{ needs.collect-flakes.outputs.flaky == 'true' && 'flake-review' || '' }}
-    steps:
-      - name: Report gate outcome
-        run: |
-          if [ "${{ needs.collect-flakes.outputs.flaky }}" = "true" ]; then
-            echo "Flaky tests were rescued by retry and a reviewer approved this merge."
-          else
-            echo "No flaky tests detected; nothing to review."
-          fi
+          name: scan-report-macos-${{ matrix.build_type }}
+          path: scan-report/
+          if-no-files-found: warn
+          retention-days: 30
 
   # Single stable aggregate of the whole build/test matrix, so the merge
   # queue's required-checks list is one name instead of every matrix cell
@@ -1093,6 +1022,7 @@ jobs:
       - test-dev
       - static-analysis
       - macos
+      - analyze-macos
     if: ${{ always() }}
     runs-on: arc-small
     permissions:
