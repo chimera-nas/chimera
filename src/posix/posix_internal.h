@@ -234,6 +234,14 @@ void chimera_posix_ofd_locks_release(
     struct chimera_posix_client *posix,
     struct chimera_posix_ofd    *ofd);
 
+/* Project a whole-file backend unlock before a description's last close on a
+ * CAP_FS_LOCK backend (see posix_lock_claims.c). */
+void chimera_posix_project_ofd_unlock(
+    struct chimera_posix_client    *posix,
+    struct chimera_posix_worker    *worker,
+    struct chimera_vfs_open_handle *handle,
+    struct chimera_posix_ofd       *ofd);
+
 /* Drop an fd entry's reference on its open file description, freeing the
  * description when the last duplicate goes.  Caller holds fd_lock. */
 static FORCE_INLINE void
