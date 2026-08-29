@@ -64,8 +64,19 @@ chimera_rest_handle_buckets_get(
     const struct s3_bucket *bucket;
     json_t                 *obj;
 
+    /* chimera_server_get_bucket takes the bucket-map READ LOCK and leaves it
+     * held -- including when it finds nothing, because the lock is what makes
+     * the returned pointer safe to dereference, and the caller cannot know
+     * which case it is until it looks.  So it must be released on BOTH paths.
+     *
+     * Missing it on the not-found path is not a leak that costs memory: the
+     * lock is never dropped, so the next writer -- any bucket create or
+     * delete -- blocks forever, and one GET of a name that does not exist
+     * permanently disables bucket administration for the life of the process.
+     * The create handler below releases unconditionally for the same reason. */
     bucket = chimera_server_get_bucket(thread->shared->server, name);
     if (!bucket) {
+        chimera_server_release_bucket(thread->shared->server);
         chimera_rest_send_error(evpl, request, 404, "Not Found",
                                 "Bucket does not exist");
         return;
