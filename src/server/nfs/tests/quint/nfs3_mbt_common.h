@@ -31,6 +31,7 @@
 
 #include "server/server.h"
 #include "common/tcp_flavor.h"
+#include "metrics/metrics.h"
 #include "prometheus-c.h"
 #include "common/mbt_artifacts.h"
 
@@ -149,11 +150,41 @@ struct mbt_env_opts {
     int         pnfs_num_ds;      /* >0: run as a pNFS metadata server with
                                    * this many in-process data servers */
     const char *pnfs_ds_module;   /* DS backend (default "memfs") */
+    /* REST API and Prometheus scrape endpoint, for the control-plane suite:
+     * both follow the server's transport flavor, so under inproc these are
+     * endpoint names rather than bound ports, reachable from this process by
+     * an http agent on env->evpl (see server/rest/tests/quint/ctl_http.h).
+     * 0 leaves the endpoint off, which is what every other suite wants. */
+    int         rest_port;
+    int         metrics_port;
+    /* REST bearer/basic authentication.  Only meaningful with rest_port. */
+    int         rest_auth;
+    /* The other two protocol servers.  Off by default (the NFS suites want
+     * nothing else listening); the control-plane suite turns them on because
+     * shares and buckets cannot be created on a server whose SMB or S3
+     * protocol was never initialized. */
+    int         smb_enabled;
+    int         s3_enabled;
+    /* common.umount_timeout_ms: how long umount waits for a mount's open
+     * handles to drain before reporting EBUSY.  0 keeps the server default
+     * (1s).  A suite that unmounts often wants this short, because the wait
+     * is per attempt and the handles are dropped by an asynchronous sweep. */
+    int         umount_timeout_ms;
 };
 
 struct mbt_env {
     struct chimera_server     *server;
     struct prometheus_metrics *metrics;
+    /* The scrape endpoint, when mbt_env_opts.metrics_port asks for one.  It
+     * owns the registry in that case (chimera_metrics_init creates one on its
+     * own thread), so the server must be handed THAT registry or every metric
+     * would read zero over HTTP. */
+    struct chimera_metrics    *metrics_server;
+    /* HTTP agent for the control-plane suite's REST client, created by that
+     * harness on this env's evpl (see server/rest/tests/quint/ctl_http.h) and
+     * kept here so a replayer can open connections from anywhere.  NULL for
+     * every other suite. */
+    struct evpl_http_agent    *rest_agent;
     const char                *module;   /* backend for mkfs/mount/rmfs */
 
     struct evpl               *evpl;
@@ -195,6 +226,19 @@ struct mbt_env {
 
     struct mbt_result          res;
 };
+
+/* Set the uid (and gid) every subsequent call is made under.  The AUTH_SYS
+ * credential is otherwise fixed at root for the whole run; the control-plane
+ * suite varies it because that is the only way to tell an export's three
+ * squash modes apart -- root_squash maps uid 0 and nobody else. */
+static inline void
+mbt_cred_set_uid(
+    struct mbt_env *env,
+    uint32_t        uid)
+{
+    env->cred.authsys.uid = uid;
+    env->cred.authsys.gid = uid;
+} /* mbt_cred_set_uid */
 
 /* ---- reply field copy helpers (called from rpc2 callbacks only) --------- */
 
@@ -342,7 +386,13 @@ mbt_env_open_opts(
         exit(1);
     }
 
-    env->metrics = prometheus_metrics_create(NULL, NULL, 0);
+    if (opts && opts->metrics_port) {
+        env->metrics_server = chimera_metrics_init(opts->metrics_port,
+                                                   CHIMERA_TCP_FLAVOR_INPROC);
+        env->metrics = chimera_metrics_get(env->metrics_server);
+    } else {
+        env->metrics = prometheus_metrics_create(NULL, NULL, 0);
+    }
 
     /* The VFS releases closed handles on an async sweep thread, so a filesystem
      * stays busy for a window after the last close.  A fast sweep keeps the
@@ -404,6 +454,22 @@ mbt_env_open_opts(
         if (opts->portmap_hostname) {
             chimera_server_config_set_portmap_hostname(config,
                                                        opts->portmap_hostname);
+        }
+        if (opts->umount_timeout_ms) {
+            chimera_server_config_set_umount_timeout(config,
+                                                     opts->umount_timeout_ms);
+        }
+        if (opts->smb_enabled) {
+            chimera_server_config_set_smb_enabled(config, 1);
+            chimera_server_config_set_smb_signing_required(config, 0);
+        }
+        if (opts->s3_enabled) {
+            chimera_server_config_set_s3_enabled(config, 1);
+        }
+        if (opts->rest_port) {
+            chimera_server_config_set_rest_http_port(config, opts->rest_port);
+            chimera_server_config_set_rest_auth_enabled(config,
+                                                        opts->rest_auth);
         }
         if (opts->disable_caches) {
             chimera_server_config_set_attr_cache_enabled(config, 0);
@@ -819,8 +885,16 @@ mbt_env_stop(struct mbt_env *env)
     evpl_destroy(env->evpl);
 
     chimera_server_destroy(env->server);
+    /* Dump before destroying, and outside the branch: env->metrics is the
+     * registry the server counted into either way, and when the scrape
+     * endpoint owns it (metrics_port), destroying the endpoint destroys the
+     * registry with it on its own thread. */
     mbt_metrics_dump(env->metrics);
-    prometheus_metrics_destroy(env->metrics);
+    if (env->metrics_server) {
+        chimera_metrics_destroy(env->metrics_server);
+    } else {
+        prometheus_metrics_destroy(env->metrics);
+    }
 
     /* The MDS is gone, so nothing holds the data servers' exports any more. */
     for (i = 0; i < env->num_ds; i++) {

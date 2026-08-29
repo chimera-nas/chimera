@@ -28,3 +28,6 @@ target_include_directories(rest_exports_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 chimera_add_netns_test(chimera/server/rest/exports_test ${CMAKE_CURRENT_BINARY_DIR}/rest_exports_test)
 set_tests_properties(chimera/server/rest/exports_test PROPERTIES
     ENVIRONMENT "LSAN_OPTIONS=suppressions=${CMAKE_SOURCE_DIR}/src/server/smb/tests/suppressions.txt")
+
+# Control-plane (REST + metrics) tests, driven in-process over inproc.
+add_subdirectory(quint)

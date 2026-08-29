@@ -10,6 +10,7 @@
 #include "evpl/evpl_http.h"
 #include "common/logging.h"
 #include "common/macros.h"
+#include "common/tcp_flavor.h"
 #include "prometheus-c.h"
 
 #define chimera_metrics_debug(...) chimera_debug("metrics", __FILE__, __LINE__, __VA_ARGS__)
@@ -26,6 +27,7 @@
 
 struct chimera_metrics {
     int                        port;
+    enum chimera_tcp_flavor flavor;
     struct prometheus_metrics *metrics;
     struct evpl               *evpl;
     struct evpl_thread        *thread;
@@ -138,12 +140,16 @@ chimera_metrics_thread_init(
 
     metrics->agent = evpl_http_init(evpl);
 
-    metrics->endpoint = evpl_endpoint_create("0.0.0.0", metrics->port);
+    metrics->endpoint = chimera_tcp_flavor_endpoint_create(metrics->flavor,
+                                                           "0.0.0.0",
+                                                           metrics->port);
     metrics->listener = evpl_listener_create();
 
     metrics->server = evpl_http_attach(metrics->agent, metrics->listener, chimera_metrics_dispatch, metrics);
 
-    rc = evpl_listen(metrics->listener, EVPL_STREAM_SOCKET_TCP, metrics->endpoint);
+    rc = evpl_listen(metrics->listener,
+                     chimera_tcp_flavor_to_protocol(metrics->flavor),
+                     metrics->endpoint);
     chimera_metrics_abort_if(rc, "failed to listen for prometheus metrics on port %d",
                              metrics->port);
 
@@ -168,11 +174,14 @@ chimera_metrics_thread_shutdown(
 } /* chimera_metrics_thread_shutdown */
 
 SYMBOL_EXPORT struct chimera_metrics *
-chimera_metrics_init(int port)
+chimera_metrics_init(
+    int                     port,
+    enum chimera_tcp_flavor flavor)
 {
     struct chimera_metrics *metrics = calloc(1, sizeof(*metrics));
 
-    metrics->port = port;
+    metrics->port   = port;
+    metrics->flavor = flavor;
 
     metrics->thread = evpl_thread_create(NULL,
                                          chimera_metrics_thread_init,

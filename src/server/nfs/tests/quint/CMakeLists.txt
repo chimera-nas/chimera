@@ -27,6 +27,10 @@ set(CHIMERA_TEST_TIER quick)
 # ${SPECS_BUNDLE_DIR}/nfs3 and /nfs4; the pure-C deviation/delegation probes need
 # no corpus and always run.
 
+# chimera_metrics is linked by every target here because nfs3_mbt_common.h can
+# stand up the Prometheus scrape endpoint on request (mbt_env_opts.metrics_port),
+# which the control-plane suite uses to watch protocol counters move.
+#
 # The C replayers + probes: chimera server + rpc2 client in one process over the
 # inproc transport (see nfs3_mbt_common.h, and nfs_aux_mbt_common.h for the
 # auxiliary protocols' client half).  They build regardless of whether a trace
