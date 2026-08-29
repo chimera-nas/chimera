@@ -51,18 +51,41 @@ ninja -C build/Release
 
 ## Running Tests
 
-All testing is done via ctest:
+All testing is done via ctest. Tests are split into two tiers:
+
+- **quick** (the default) - the quint model-based tests. This is what a plain
+  `ctest` runs.
+- **extended** - the quick tier plus everything else: pynfs, pjdfstest, cthon,
+  ltp, pike, smbtorture, wpts, the KVM suites, and the unit tests. Selected
+  with `ctest -C extended`, and what the nightly job runs.
 
 ```bash
-# Run all tests in a build directory
+# Quick tier: the model-based tests (default)
 cd build/Debug && ctest --output-on-failure
 
-# Run specific test
+# Extended tier: everything
+cd build/Debug && ctest -C extended --output-on-failure
+
+# Run specific test (add -C extended if it is not a model-based test)
 cd build/Debug && ctest -R <test_name> --output-on-failure
 
 # Run tests with parallel execution
 cd build/Release && ctest --output-on-failure -j 8
 ```
+
+`make check` runs the CI sweep over the quick tier; `make check_extended` runs
+the same sweep over the extended tier.
+
+The merge queue runs the quick tier and static analysis on every supported OS,
+so the quick tier is what gates a merge. The extended tier runs nightly. Run it
+locally as needed - in particular when proving out a fix to one of those tests,
+because a break there will not surface until the next night.
+
+The model-based tests are meant to be a cheap proxy for the full suite, so an
+extended-tier failure that the model tests did not catch should be read as a
+suggestion to improve the model: consider whether the quint specification or its
+trace corpus can be extended to cover that case, so the next such regression is
+caught by the quick tier.
 
 ## Pre-Completion Verification
 
@@ -85,7 +108,11 @@ This runs:
 - `build_clang` - Clang static analysis (scan-build)
 - `reuse-lint` - SPDX license header compliance
 
-All of these checks are verified by CI, so running `make check` locally ensures your changes will pass CI.
+`make check` runs the tests at the quick tier, which is what the merge queue
+gates on. `make check_extended` runs the identical sweep with the full test
+suite; only the nightly job runs that, so use it when a change reaches beyond
+what the model-based tests cover, or when proving out a fix to an extended
+test.
 
 ## Architecture Overview
 
