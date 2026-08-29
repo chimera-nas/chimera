@@ -1010,7 +1010,7 @@ void chimera_nfs4_compound_call(
     struct evpl_iovec                       *write_chunk_iov,
     int                                      write_chunk_niov,
     int                                      max_rdma_reply_chunk,
-    void (                                  *cb )(
+    void                                  ( *cb )(
         struct evpl *,
         const struct evpl_rpc2_verf *,
         struct COMPOUND4res *,
@@ -1112,6 +1112,12 @@ void chimera_nfs3_read(
     struct chimera_nfs_shared *,
     struct chimera_vfs_request *,
     void *);
+void chimera_nfs3_allocate(
+    struct chimera_nfs_thread  *thread,
+    struct chimera_nfs_shared  *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data);
+
 void chimera_nfs3_write(
     struct chimera_nfs_thread *,
     struct chimera_nfs_shared *,
