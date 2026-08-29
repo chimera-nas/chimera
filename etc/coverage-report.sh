@@ -80,7 +80,14 @@ echo "coverage: merging ${raw_count} raw profile(s) ..."
 # handed an object with no coverage mapping, so we must filter rather than glob.
 objs=()
 while IFS= read -r f; do
-    if readelf -SW "$f" 2>/dev/null | grep -q '__llvm_covmap'; then
+    # Deliberately not `readelf | grep -q`.  grep -q exits at its first match,
+    # readelf then dies of SIGPIPE, and `set -o pipefail` reports the pipeline
+    # as failed -- so the object is silently dropped.  Whether that happens is
+    # a race on how much readelf has already written, so the object set, and
+    # every number derived from it, varied run to run: this tree reported 3,
+    # 14 and 423 instrumented binaries on three consecutive runs.  No pipe,
+    # no race.
+    if [[ "$(readelf -SW "$f" 2>/dev/null)" == *__llvm_covmap* ]]; then
         objs+=("$f")
     fi
 done < <(find "${BUILD_DIR}" -type f \
