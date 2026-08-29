@@ -32,6 +32,7 @@
  */
 
 #include "nfs3_mbt_common.h"
+#include "common/mbt_watchdog.h"
 
 #define P_DELAY      10008
 #define P_BLOCK      8192
@@ -508,7 +509,7 @@ main(void)
     int                 i;
 
     setvbuf(stdout, NULL, _IONBF, 0);
-    alarm(60);
+    mbt_watchdog_arm(60);
     mbt_env_start_opts(env, &opts);
     env->nfs_v4_cb.recv_call_CB_COMPOUND = pc_cb_compound;
 

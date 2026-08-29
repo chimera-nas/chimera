@@ -36,6 +36,7 @@
 
 #include "nfs3_mbt_common.h"
 #include "common/mbt_trace_dir.h"
+#include "common/mbt_watchdog.h"
 
 #define V4_BLOCK_SIZE       8192
 #define V4_LOCK_BYTES       8
@@ -4075,7 +4076,7 @@ run_trace(
         return 0;
     }
 
-    alarm(150);
+    mbt_watchdog_arm(150);
 
     o = calloc(1, sizeof(*o));
 
@@ -4161,6 +4162,9 @@ run_trace(
         }
         lab = jf_val(lastop);
 
+        /* The v4 step label is the whole compound object, not a tag, so
+         * the trace and step index are what name the position. */
+        mbt_watchdog_at(trace_path, (int) idx, "compound");
         memset(&m, 0, sizeof(m));
         run_compound(o, (int) idx, lab, &m);
         if (o->skip) {
@@ -4216,7 +4220,7 @@ run_trace(
     free(o->scratch);
     free(o);
     json_decref(root);
-    alarm(0);
+    mbt_watchdog_disarm();
     return failed;
 } /* run_trace */
 

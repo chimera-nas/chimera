@@ -29,6 +29,7 @@
  */
 
 #include "nfs3_mbt_common.h"
+#include "common/mbt_watchdog.h"
 
 static int failures = 0;
 
@@ -113,7 +114,7 @@ main(
     }
 
     /* A deadlock regression would hang a call forever; die loudly. */
-    alarm(60);
+    mbt_watchdog_arm(60);
 
     memset(&opts, 0, sizeof(opts));
     opts.module = backend;

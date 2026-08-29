@@ -34,6 +34,7 @@
 
 #include "nfs3_mbt_common.h"
 #include "common/mbt_trace_dir.h"
+#include "common/mbt_watchdog.h"
 
 #define MBT_MAX_FIDS           16384
 #define MBT_MAX_MISM           16
@@ -1586,7 +1587,7 @@ run_trace(
     /* Backstop for a server deadlock: with everything in one process a
      * hung reply spins in mbt_call_wait forever; SIGALRM's default
      * disposition kills the test with a nonzero status. */
-    alarm(120);
+    mbt_watchdog_arm(120);
 
     o = calloc(1, sizeof(*o));
     mbt_env_fs_setup(env, fsname);
@@ -1636,6 +1637,7 @@ run_trace(
         }
 
         memset(&m, 0, sizeof(m));
+        mbt_watchdog_at(trace_path, (int) idx, tag);
         mbt_set_cred(env, op);
         fn(o, op, fs, &m);
         history_push(o, (int) idx, tag, op, env->res.status);
@@ -1674,7 +1676,7 @@ run_trace(
     free(o->scratch);
     free(o);
     json_decref(root);
-    alarm(0);
+    mbt_watchdog_disarm();
     return failed;
 } /* run_trace */
 

@@ -27,6 +27,7 @@
 #include <getopt.h>
 
 #include "nfs_aux_mbt_common.h"
+#include "common/mbt_watchdog.h"
 
 #define PROBE_EXPORT     "/share"
 #define PROBE_EXPORT2    "/share2"
@@ -750,7 +751,7 @@ main(
 
     /* A hung reply spins forever inside mbt_call_wait with everything in one
      * process; SIGALRM's default disposition turns that into a test failure. */
-    alarm(180);
+    mbt_watchdog_arm(180);
 
     mbt_aux_env_open(&env, &opts);
     /* The aux harness asserts against a fixed "/share" export -- its MNT
@@ -782,7 +783,7 @@ main(
     chimera_server_remove_export(env.server, PROBE_EXPORT2);
     mbt_env_fs_teardown_as(&env, "fs0", "share");
     mbt_env_stop(&env);
-    alarm(0);
+    mbt_watchdog_disarm();
 
     if (failures) {
         fprintf(stderr, "\n%d aux probe expectation(s) failed\n", failures);

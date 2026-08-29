@@ -36,6 +36,7 @@
 
 #include "s3_mbt_common.h"
 #include "common/mbt_trace_dir.h"
+#include "common/mbt_watchdog.h"
 
 #define MBT_MAX_MISM   16
 #define MBT_MISM_LEN   512
@@ -2499,7 +2500,7 @@ run_trace(
     /* Everything runs in one process, so a request the server never answers
      * would spin in s3_mbt_call forever; SIGALRM's default disposition kills
      * the test with the trace name already printed. */
-    alarm(120);
+    mbt_watchdog_arm(120);
 
     if (verbose) {
         printf("%s: %zu steps\n", trace_path, nstates - 1);
@@ -2540,6 +2541,7 @@ run_trace(
             break;
         }
 
+        mbt_watchdog_at(trace_path, (int) idx, tag);
         memset(&m, 0, sizeof(m));
         fn(o, op, post_bkts, &m);
         history_push(o, (int) idx, tag, env->res.status, op);
@@ -2582,7 +2584,7 @@ run_trace(
     free(o->xml_buf);
     free(o);
     json_decref(trace);
-    alarm(0);
+    mbt_watchdog_disarm();
 
     return rc;
 } /* run_trace */
