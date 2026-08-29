@@ -240,6 +240,76 @@ if (NOT DISABLE_TESTS)
     enable_testing()
 endif()
 
+# Test tiers.  Plain `ctest` runs the *quick* tier: the quint model-based
+# tests.  They are cheap and are meant to be a pre-flight proxy for the full
+# suite, so they are what you get when you ask for nothing.  `ctest -C
+# extended` runs the quick tier plus everything else; that is the tier the
+# merge queue and the nightly job use.
+#
+# CTest can only withhold a test from the default run through the
+# CONFIGURATIONS keyword of add_test().  The CONFIGURATIONS *test property* is
+# inert -- ctest never consults it -- and there is no directory-level default,
+# so the tag has to be present at the point of registration.  With ~230
+# add_test() call sites across this tree and its submodules, tagging each by
+# hand would be unmaintainable and would rot silently as tests are added, so
+# add_test() is wrapped once here instead.
+#
+# A directory that sets CHIMERA_TEST_TIER to "quick" registers its tests, and
+# those of its subdirectories, in the quick tier.  Tests registered by
+# submodules we do not edit are matched by name instead.
+set(CHIMERA_TEST_TIER "extended")
+set(CHIMERA_QUICK_TEST_REGEX "^libevpl/.*quint"
+    CACHE STRING "Test-name regex forced into the quick tier")
+
+function(add_test)
+    # Forward every argument verbatim.  A CMake list is semicolon-separated, so
+    # an argument that itself contains a semicolon -- a shell fragment like
+    # ": MARK; mkdir -p ..." handed to `sh -c`, for instance -- would be split
+    # into two arguments when ${_args} is re-expanded.  Escaping each one keeps
+    # it a single argument.
+    set(_args "")
+    math(EXPR _last "${ARGC} - 1")
+    foreach(_i RANGE ${_last})
+        string(REPLACE ";" "\;" _a "${ARGV${_i}}")
+        list(APPEND _args "${_a}")
+    endforeach()
+
+    list(GET _args 0 _first)
+    if(NOT _first STREQUAL "NAME")
+        # Legacy add_test(<name> <command> [<arg>...]).  That form cannot
+        # carry CONFIGURATIONS, so re-express it in the NAME form, which also
+        # resolves an executable target name to the built binary.
+        list(POP_FRONT _args _name)
+        set(_args NAME "${_name}" COMMAND ${_args})
+    else()
+        list(GET _args 1 _name)
+    endif()
+
+    set(_quick FALSE)
+    if(CHIMERA_TEST_TIER STREQUAL "quick")
+        set(_quick TRUE)
+    elseif(CHIMERA_QUICK_TEST_REGEX AND _name MATCHES "${CHIMERA_QUICK_TEST_REGEX}")
+        set(_quick TRUE)
+    endif()
+
+    if(_quick)
+        _add_test(${_args})
+    else()
+        _add_test(${_args} CONFIGURATIONS extended)
+    endif()
+endfunction()
+
+# Overriding a built-in command leaves the original reachable under a leading
+# underscore.  That behaviour is long-standing but undocumented, so assert it
+# rather than let a future CMake silently collapse every test into the quick
+# tier.
+if(NOT COMMAND _add_test)
+    message(FATAL_ERROR
+        "The add_test() override did not expose the built-in as _add_test(); "
+        "every test would land in the quick tier and the extended tier would "
+        "be empty.  See the test-tier block in the top-level CMakeLists.txt.")
+endif()
+
 include_directories(3rdparty)
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
