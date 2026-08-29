@@ -9,6 +9,7 @@
 #include "evpl/evpl.h"
 #include "evpl/evpl_http.h"
 #include "common/macros.h"
+#include "common/tcp_flavor.h"
 #include "server/server.h"
 #include "rest.h"
 #include "rest_internal.h"
@@ -768,6 +769,7 @@ chimera_rest_init(
 
     rest->http_port    = http_port;
     rest->https_port   = https_port;
+    rest->flavor       = chimera_server_config_get_tcp_flavor(config);
     rest->server       = server;
     rest->debug_fsops  = chimera_server_config_get_rest_debug_fsops(config);
     rest->auth_enabled = chimera_server_config_get_rest_auth_enabled(config);
@@ -787,7 +789,13 @@ chimera_rest_init(
     }
 
     if (http_port != 0) {
-        rest->http_endpoint = evpl_endpoint_create("0.0.0.0", http_port);
+        /* The plain-HTTP listener follows the server's configured transport
+         * flavor, so an in-process deployment (tests) reaches the whole REST
+         * API over inproc without binding a port.  TLS has no inproc form, so
+         * the HTTPS listener below stays a real socket regardless. */
+        rest->http_endpoint = chimera_tcp_flavor_endpoint_create(rest->flavor,
+                                                                 "0.0.0.0",
+                                                                 http_port);
         rest->http_listener = evpl_listener_create();
         chimera_rest_info("REST API HTTP initialized on port %d", http_port);
     }
@@ -811,7 +819,8 @@ chimera_rest_start(struct chimera_rest_server *rest)
     }
 
     if (rest->http_listener) {
-        rc = evpl_listen(rest->http_listener, EVPL_STREAM_SOCKET_TCP,
+        rc = evpl_listen(rest->http_listener,
+                         chimera_tcp_flavor_to_protocol(rest->flavor),
                          rest->http_endpoint);
         chimera_rest_abort_if(rc, "failed to listen for REST HTTP on port %d",
                               rest->http_port);

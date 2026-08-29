@@ -397,7 +397,11 @@ main(
         }
     }
 
-    metrics = chimera_metrics_init(metrics_port);
+    /* The scrape endpoint follows the same transport flavor as the rest of
+     * the server (common.tcp_flavor), read straight from the parsed config --
+     * server_config does not exist yet at this point. */
+    metrics = chimera_metrics_init(metrics_port,
+                                   chimera_common_tcp_flavor(config));
 
     server_config = chimera_server_config_init();
 

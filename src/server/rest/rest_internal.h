@@ -7,6 +7,7 @@
 #include <jansson.h>
 
 #include "common/logging.h"
+#include "vfs/sdk/vfs_tcp_flavor.h"
 
 struct chimera_vfs_thread;
 struct chimera_nfs_export;
@@ -25,18 +26,21 @@ struct evpl_http_request;
                          __VA_ARGS__)
 
 struct chimera_rest_server {
-    int                    http_port;
-    int                    https_port;
-    struct evpl_endpoint  *http_endpoint;
-    struct evpl_endpoint  *https_endpoint;
-    struct evpl_listener  *http_listener;
-    struct evpl_listener  *https_listener;
-    struct chimera_server *server;
-    int                    debug_fsops;
-    int                    auth_enabled;
-    unsigned char          jwt_secret[32];
-    int                    winbind_enabled;
-    char                   winbind_domain[256];
+    int                     http_port;
+    int                     https_port;
+    /* Transport flavor for the plain-HTTP listener (server.tcp_flavor).
+     * inproc lets a test drive the API with no port bound. */
+    enum chimera_tcp_flavor flavor;
+    struct evpl_endpoint   *http_endpoint;
+    struct evpl_endpoint   *https_endpoint;
+    struct evpl_listener   *http_listener;
+    struct evpl_listener   *https_listener;
+    struct chimera_server  *server;
+    int                     debug_fsops;
+    int                     auth_enabled;
+    unsigned char           jwt_secret[32];
+    int                     winbind_enabled;
+    char                    winbind_domain[256];
 };
 
 struct evpl;
