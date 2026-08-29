@@ -120,7 +120,7 @@ chimera_vfs_open_root_complete(
 
 #define CHIMERA_VFS_OPEN_HOPS_SHIFT 24
 #define CHIMERA_VFS_OPEN_HOPS_MASK  (0xffu << CHIMERA_VFS_OPEN_HOPS_SHIFT)
-#define CHIMERA_VFS_OPEN_HOPS(f) (((f)&CHIMERA_VFS_OPEN_HOPS_MASK) >> \
+#define CHIMERA_VFS_OPEN_HOPS(f) (((f) & CHIMERA_VFS_OPEN_HOPS_MASK) >> \
                                   CHIMERA_VFS_OPEN_HOPS_SHIFT)
 #define CHIMERA_VFS_OPEN_SYMLOOP    8
 
@@ -401,7 +401,8 @@ chimera_vfs_open_lookup_complete(
         }
 
         /* Authorize the requested read/write access against the file. */
-        if (chimera_vfs_gate_needed(request->module->capabilities, request->cred)) {
+        if (chimera_vfs_open_gate_needed(request->module->capabilities,
+                                         request->cred)) {
             if (chimera_vfs_gate(attr, request->cred,
                                  chimera_vfs_open_required_access(f)) != CHIMERA_VFS_OK) {
                 chimera_vfs_request_free(thread, request);

@@ -126,7 +126,11 @@ chimera_nfs3_open_at_lookup_callback(
             return;
         }
 
-        state->server_index            = ctx->server->index;
+        state->server_index = ctx->server->index;
+        if (request->cred) {
+            state->open_cred       = *request->cred;
+            state->open_cred_valid = 1;
+        }
         request->open_at.r_vfs_private = (uint64_t) state;
     } else {
         request->open_at.r_vfs_private = 0;
@@ -161,8 +165,9 @@ chimera_nfs3_open_at_create_callback(
                                   &request->open_at.r_dir_post_attr,
                                   &res->resfail.dir_wcc);
 
-        /* An UNCHECKED create over a name already held by a non-regular
-         * object is NFS3ERR_EXIST on the wire (RFC 1813 3.3.8: CREATE
+        /* A create over a name already held by another object is
+         * NFS3ERR_EXIST on the wire (all creates go out GUARDED; for a
+         * non-regular name RFC 1813 3.3.8's UNCHECKED would say the same: CREATE
          * materializes a regular file and neither follows a symlink nor
          * unlinks what is there).  That is the right answer to send, but it
          * is not the answer POSIX gives the caller: open(O_CREAT) on a
@@ -210,6 +215,12 @@ chimera_nfs3_open_at_create_callback(
 
     chimera_nfs3_get_wcc_data(&request->open_at.r_dir_pre_attr, &request->open_at.r_dir_post_attr, &res->resok.dir_wcc);
 
+    /* A GUARDED success proves the object was created by this call (all
+     * creates go out GUARDED -- see chimera_nfs3_open_at); the engine's open
+     * gate then grants the requested access unconditionally, per POSIX (a
+     * creating open is not subject to the new file's own mode). */
+    request->open_at.r_created = 1;
+
     /* Allocate open state for dirty tracking and silly rename support.
      * Skip for inferred opens (use synthetic handles which don't call close).
      * Always allocate for non-inferred opens since open_at always inserts fresh. */
@@ -222,7 +233,11 @@ chimera_nfs3_open_at_create_callback(
             return;
         }
 
-        state->server_index            = ctx->server->index;
+        state->server_index = ctx->server->index;
+        if (request->cred) {
+            state->open_cred       = *request->cred;
+            state->open_cred_valid = 1;
+        }
         request->open_at.r_vfs_private = (uint64_t) state;
     } else {
         request->open_at.r_vfs_private = 0;
@@ -271,7 +286,15 @@ chimera_nfs3_open_at(
         create_args.where.dir.data.len  = fhlen;
         create_args.where.name.str      = (char *) request->open_at.name;
         create_args.where.name.len      = request->open_at.namelen;
-        create_args.how.mode            = (request->open_at.flags & CHIMERA_VFS_OPEN_EXCLUSIVE) ? GUARDED : UNCHECKED;
+        /* Always GUARDED, even without O_EXCL: a GUARDED success PROVES this
+         * call created the object, which the engine's open gate needs to know
+         * -- POSIX exempts a creating open from the new file's own mode.  An
+         * EXIST answer falls to the LOOKUP recovery below and opens what is
+         * there (the O_CREAT-on-existing half), with the gate then evaluating
+         * the real attributes.  UNCHECKED could not tell the halves apart --
+         * and would also let the server apply our creation sattr to a file we
+         * did not create. */
+        create_args.how.mode = GUARDED;
 
         chimera_nfs_va_to_sattr3(&create_args.how.obj_attributes, request->open_at.set_attr);
 
