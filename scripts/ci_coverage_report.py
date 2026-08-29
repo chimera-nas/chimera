@@ -26,9 +26,11 @@ What counts is first-party, hand-written, non-test source.  Test sources are out
 because a suite cannot meaningfully cover the other suites; generated marshallers
 and the bundled ext/ projects are out because neither is code this repository is
 asking the models to reach -- one is emitted from a .x file and the other has its
-own repository and its own tests.  etc/coverage-report.sh applies the latter two
-(COVERAGE_INCLUDE_GENERATED / COVERAGE_INCLUDE_EXT fold them back in); this only
-has to drop the tests.
+own repository and its own tests.  The benchmark plugins (src/fio, src/elbencho)
+are out for the same reason: they are driven by fio/elbencho, not by anything a
+protocol model can emit.  etc/coverage-report.sh applies the generated and
+ext/ exclusions (COVERAGE_INCLUDE_GENERATED / COVERAGE_INCLUDE_EXT fold them
+back in); this drops the tests and the benchmark plugins.
 
 <build_root> is optional, and only useful alongside COVERAGE_INCLUDE_GENERATED:
 generated sources are compiled from under the build tree, which mirrors the
@@ -54,16 +56,29 @@ BAR_WIDTH = 10
 def component(rel):
     """Bucket a repo-relative path into the unit we report on.
 
-    src/server/ is split one level deeper than everything else: "the NFS server"
-    and "the SMB server" are the units someone actually reasons about, whereas
-    "src/server" as a whole is not.
+    src/server/ and src/vfs/ are split one level deeper than everything else:
+    "the NFS server" and "the memfs backend" are the units someone actually
+    reasons about, whereas "src/server" or "src/vfs" as a whole is not.
+    Files directly under src/vfs (the dispatch/procedure core every backend
+    sits behind) stay together as their own src/vfs row.
     """
     parts = rel.split("/")
-    if len(parts) >= 4 and parts[0] == "src" and parts[1] == "server":
+    if len(parts) >= 4 and parts[0] == "src" and parts[1] in ("server", "vfs"):
         return "/".join(parts[:3])
     if len(parts) >= 3:
         return "/".join(parts[:2])
     return parts[0]
+
+
+# Benchmark plugins (chimera's fio and elbencho engines): first-party, but not
+# core chimera -- nothing a protocol model emits can reach them, so carrying
+# them as permanent 0% rows would only obscure the components the suite is
+# accountable for.
+BENCH_PLUGINS = ("src/fio", "src/elbencho")
+
+
+def is_bench_plugin(rel):
+    return any(rel == p or rel.startswith(p + "/") for p in BENCH_PLUGINS)
 
 
 def is_test_source(rel):
@@ -112,7 +127,7 @@ def main():
         rel = relative(os.path.realpath(entry["filename"]), (root, build_root))
         # None: compiled from outside the checkout entirely -- the container's
         # own /fio clone, say.  Not code this repository can be measured on.
-        if rel is None or is_test_source(rel):
+        if rel is None or is_test_source(rel) or is_bench_plugin(rel):
             continue
         summary = entry.get("summary", {})
         if summary.get("lines", {}).get("count", 0) == 0:
