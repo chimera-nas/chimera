@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "nfs_internal.h"
+#include "nfs3_open_state.h"
 #include "nfs_common/nfs3_status.h"
 #include "nfs_common/nfs3_attr.h"
 
@@ -72,9 +73,21 @@ chimera_nfs3_read(
     args.offset         = request->read.offset;
     args.count          = request->read.length;
 
-    chimera_nfs_init_rpc2_cred(&rpc2_cred, request->cred,
-                               request->thread->vfs->machine_name,
-                               request->thread->vfs->machine_name_len);
+    {
+        /* I/O goes out with the opening credential when there is one: POSIX
+         * binds I/O rights at open(2), and the stateless server would
+         * otherwise re-check DAC against the per-call credential (see
+         * nfs3_open_state.h). */
+        struct chimera_nfs3_open_state *dac_state =
+            (struct chimera_nfs3_open_state *) request->read.handle->vfs_private;
+        const struct chimera_vfs_cred  *io_cred =
+            (dac_state && dac_state->open_cred_valid) ?
+            &dac_state->open_cred : request->cred;
+
+        chimera_nfs_init_rpc2_cred(&rpc2_cred, io_cred,
+                                   request->thread->vfs->machine_name,
+                                   request->thread->vfs->machine_name_len);
+    }
 
     /* read_into over RDMA: have the server RDMA-write the reply data straight
      * into the caller's destination buffer (the RPC write chunk) instead of an
