@@ -179,6 +179,22 @@ static int           g_ndevhits;
 static char          g_exempt[64][256];
 static int           g_nexempt;
 
+/* NFS-loopback divergence containment (ND3/ND4).  When a reconciled
+ * divergence makes chimera fail an op the model completed (today: EACCES
+ * from the server's directory-search enforcement, which neither the model
+ * nor chimera's own resolution -- issue #1771 -- implements), the two sides
+ * fall out of sync: a descriptor, stream, or whole file exists on one side
+ * only.  Rather than drown the trace in follow-on mismatches, the harness
+ * marks what was lost and reconciles exactly the consequences: EBADF on a
+ * lost descriptor, ENOENT on a lost file, and attribute/content checks on an
+ * inode the model mutated through a lost descriptor.  All tallied, so the
+ * masking stays visible per trace; the whole family retires when the specs
+ * model grows search-permission semantics. */
+static int g_lost_fd[R_MAXPID][R_MAXFD];
+static int g_lost_sid[R_MAXSID];
+static int g_lost_ino[R_MAXINO];
+static int g_cur_pid;
+
 static void
 state_reset(void)
 {
@@ -199,6 +215,9 @@ state_reset(void)
         g_shadow[i].buf = NULL;
         g_shadow[i].len = g_shadow[i].cap = 0;
     }
+    memset(g_lost_fd, 0, sizeof(g_lost_fd));
+    memset(g_lost_sid, 0, sizeof(g_lost_sid));
+    memset(g_lost_ino, 0, sizeof(g_lost_ino));
     g_nmismatch = 0;
     g_ndevhits  = 0;
     g_nexempt   = 0;
@@ -222,6 +241,32 @@ record_dev(const char *id)
         g_ndevhits++;
     }
 } /* record_dev */
+
+/* NFS-client deviation (ND1/ND2): the loopback's nfs proxy, like every NFS
+ * client, implements unlink-of-an-open-file as a silly rename (".nfs" + hex
+ * of the file handle) that lingers in the directory until the last close.
+ * The model implements the POSIX reading -- the name is gone, the file lives
+ * on anonymously -- so the artifact name is invisible to it: filter it from
+ * readdir and audit listings (ND1) and accept the link count the lingering
+ * name keeps, 1 where the model says 0 (ND2).  Gated on the nfs3_/nfs4_
+ * backends: a direct backend producing a .nfs* name would be a real
+ * divergence and still flags. */
+static int
+is_nfs_silly_name(const char *name)
+{
+    int i;
+
+    if (!g_nfs_version || strncmp(name, ".nfs", 4) != 0 || name[4] == '\0') {
+        return 0;
+    }
+    for (i = 4; name[i]; i++) {
+        char c = name[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
+            return 0;
+        }
+    }
+    return 1;
+} /* is_nfs_silly_name */
 
 static void
 exempt_add(const char *path)
@@ -263,7 +308,8 @@ set_fd(
     int real)
 {
     if (pid >= 0 && pid < R_MAXPID && mfd >= 0 && mfd < R_MAXFD) {
-        g_fdmap[pid][mfd] = real;
+        g_fdmap[pid][mfd]   = real;
+        g_lost_fd[pid][mfd] = 0;
     }
 } /* set_fd */
 
@@ -422,6 +468,39 @@ model_ino_of_fd(
     return tf_field(node, "ino");
 } /* model_ino_of_fd */
 
+static int
+fd_lost(
+    int pid,
+    int mfd)
+{
+    return pid >= 0 && pid < R_MAXPID && mfd >= 0 && mfd < R_MAXFD &&
+           g_lost_fd[pid][mfd];
+} /* fd_lost */
+
+static int
+ino_lost(int64_t ino)
+{
+    return ino >= 0 && ino < R_MAXINO && g_lost_ino[ino];
+} /* ino_lost */
+
+/* Mark a model descriptor chimera never obtained (or lost), along with the
+ * inode the model reaches through it -- everything the model does via this
+ * descriptor is invisible to chimera from here on. */
+static void
+lose_fd(
+    int pid,
+    int mfd)
+{
+    int64_t ino = model_ino_of_fd(pid, mfd);
+
+    if (pid >= 0 && pid < R_MAXPID && mfd >= 0 && mfd < R_MAXFD) {
+        g_lost_fd[pid][mfd] = 1;
+    }
+    if (ino >= 0 && ino < R_MAXINO) {
+        g_lost_ino[ino] = 1;
+    }
+} /* lose_fd */
+
 /* True when (pid, model fd) maps to a directory inode in the post-state fs. */
 static int
 fd_is_model_dir(
@@ -467,6 +546,43 @@ path_ino(
     }
     return ino;
 } /* path_ino */
+
+/* True when the model path (component list) resolves through or to a lost
+ * inode in the post-state fs: the leaf, or any directory on the way, exists
+ * only model-side (or has honestly diverged) behind a reconciled divergence. */
+static int
+path_touches_lost(
+    json_t *fs,
+    json_t *comps)
+{
+    json_t *inodes = json_object_get(fs, "inodes");
+    int64_t ino    = 0;   /* ROOT */
+    size_t  i;
+
+    if (!json_is_array(comps)) {
+        return 0;
+    }
+    if (ino_lost(ino)) {
+        return 1;
+    }
+    for (i = 0; i < json_array_size(comps); i++) {
+        json_t     *node = map_get_int(inodes, ino);
+        const char *name = json_string_value(json_array_get(comps, i));
+        json_t     *nx;
+        if (!node || !name) {
+            return 0;
+        }
+        nx = map_get_str(json_object_get(node, "ents"), name);
+        if (!nx) {
+            return 0;
+        }
+        ino = tf_i64(nx);
+        if (ino_lost(ino)) {
+            return 1;
+        }
+    }
+    return 0;
+} /* path_touches_lost */
 
 /* ---- path materialization ------------------------------------------------ */
 
@@ -956,6 +1072,35 @@ check_status(
         record_dev(dev);
         return 0;
     }
+    if (g_nfs_version) {
+        /* ND3: EACCES from the server's directory-search enforcement on the
+         * loopback's component-by-component resolution.  Neither the posix
+         * model nor chimera's own resolution (issue #1771) implements search
+         * permission, so any path-taking op can draw an EACCES the model maps
+         * to another outcome.  Retires when the model grows search-perm
+         * semantics (which also unblocks the nfs3 passthrough batches). */
+        if (actual == 13 && expected != 13 &&
+            json_object_get(g_cur_rv, "pth")) {
+            record_dev("ND3");
+            return 0;
+        }
+        /* ND4 consequences of a lost descriptor / lost file (see the g_lost_*
+         * block comment): EBADF where the model still holds the descriptor,
+         * ENOENT where the model still has the file. */
+        if (actual == 9 && expected != 9 &&
+            fd_lost(g_cur_pid, (int) tf_field(g_cur_rv, "fd"))) {
+            record_dev("ND4");
+            return 0;
+        }
+        if (actual == 2 && expected != 2 && g_cur_fs) {
+            json_t *comps = json_object_get(json_object_get(g_cur_rv, "pth"),
+                                            "comps");
+            if (comps && path_touches_lost(g_cur_fs, comps)) {
+                record_dev("ND4");
+                return 0;
+            }
+        }
+    }
     mism("errno: expected %lld, got %d", (long long) expected, actual);
     return 0;
 } /* check_status */
@@ -1082,8 +1227,16 @@ check_statres(
     const char   *want_ft = ftype_of(ftag);
     const char   *got_ft  = ftype_from_mode(st->st_mode);
     int64_t       mino    = tf_field(rv, "ino");
-    long long     dev     = (long long) st->st_dev;
-    long long     ino     = (long long) st->st_ino;
+
+    if (ino_lost(mino)) {
+        /* The model mutated this inode through a descriptor chimera never
+         * had (or created it behind a reconciled divergence); its attributes
+         * have honestly diverged. */
+        record_dev("ND4");
+        return;
+    }
+    long long     dev = (long long) st->st_dev;
+    long long     ino = (long long) st->st_ino;
     struct ident *known;
 
     if (strcmp(got_ft, want_ft) != 0) {
@@ -1105,9 +1258,16 @@ check_statres(
              st->st_gid);
     }
     if ((int64_t) st->st_nlink != tf_field(rv, "nlink")) {
-        mism("nlink: expected %lld, got %llu",
-             (long long) tf_field(rv, "nlink"),
-             (unsigned long long) st->st_nlink);
+        if (g_nfs_version && tf_field(rv, "nlink") == 0 &&
+            st->st_nlink == 1) {
+            /* Unlinked-while-open: the silly-renamed name keeps one link
+             * alive until the last close (ND2). */
+            record_dev("ND2");
+        } else {
+            mism("nlink: expected %lld, got %llu",
+                 (long long) tf_field(rv, "nlink"),
+                 (unsigned long long) st->st_nlink);
+        }
     }
     if (strcmp(ftag, "FReg") == 0) {
         int64_t want = tf_field(rv, "sizeB");
@@ -1209,24 +1369,26 @@ open_flags(json_t *fl)
 } /* open_flags */
 
 /*
- * PD24 (EMFILE) leaves us holding a descriptor the model never learned about:
- * its 16-slot table was full, chimera's larger one let the call through.  The
- * model's fd is not set, so the descriptor never reaches g_fdmap and
- * close_live_handles() cannot reach it either -- and one descriptor still open
- * on the mount wedges the newfs() recycle between traces, whose unmount then
- * returns EBUSY for as long as the harness is willing to retry.  Drop it at the
- * op that minted it.  (op_open does its own, because it must also exempt any
- * node O_CREAT minted from the final audit.)
+ * A call the model expected to FAIL that chimera let through leaves us holding
+ * a descriptor the model never learned about (PD24's EMFILE with chimera's
+ * larger fd table; over the NFS loopback also expected-EACCES opens the
+ * server's DAC reading permits).  The model's fd is not set, so the descriptor
+ * never reaches g_fdmap and close_live_handles() cannot reach it either -- and
+ * one descriptor still open on the mount wedges the newfs() recycle between
+ * traces, whose unmount then returns EBUSY for as long as the harness is
+ * willing to retry.  Drop it at the op that minted it, for every
+ * expected-failure flavor.  (op_open does its own, because it must also exempt
+ * any node O_CREAT minted from the final audit.)
  */
 static void
-pd24_drop_stray_fd(
+drop_stray_fd(
     int64_t model_err,
     int     rc)
 {
-    if (model_err == 24 && rc >= 0) {
+    if (model_err != 0 && rc >= 0) {
         chimera_posix_close(rc);
     }
-} /* pd24_drop_stray_fd */
+} /* drop_stray_fd */
 
 static void
 op_open(
@@ -1257,9 +1419,17 @@ op_open(
                 shadow_resize(ino, 0);
             }
         }
-    } else if (tf_field(res_v, "e") == 24 && e == 0 && rc >= 0) {
-        /* PD24 (EMFILE): the model's 16-slot table was full but chimera's
-         * larger table let the open succeed.  Close the stray descriptor. */
+    } else if (tf_field(res_v, "e") == 0 && rc < 0) {
+        /* The model holds a descriptor chimera never obtained (a reconciled
+        * divergence failed the open on our side): mark it and the file it
+        * names lost, so the consequences reconcile instead of cascading. */
+        lose_fd(pid, tf_field(res_v, "fd"));
+    } else if (tf_field(res_v, "e") != 0 && e == 0 && rc >= 0) {
+        /* The model expected this open to fail but chimera minted a
+         * descriptor (PD24's EMFILE; over the NFS loopback also opens whose
+         * expected EACCES the server's DAC reading does not share).  Close
+         * the stray descriptor -- the model never learned of it, so nothing
+         * downstream ever would. */
         chimera_posix_close(rc);
         if (tf_bool(fl, "creat")) {
             json_t *comps = json_object_get(json_object_get(rv, "pth"),
@@ -1298,11 +1468,16 @@ op_close(
     json_t *rv,
     json_t *res_v)
 {
-    int rc = chimera_posix_close(rfd(pid, tf_field(rv, "fd")));
-    int e  = ERRV(rc);
+    int mfd  = tf_field(rv, "fd");
+    int lost = fd_lost(pid, mfd);
+    int rc   = chimera_posix_close(rfd(pid, mfd));
+    int e    = ERRV(rc);
 
-    if (check_status(tf_field(res_v, "e"), e) && tf_field(res_v, "e") == 0) {
-        set_fd(pid, tf_field(rv, "fd"), BADFD);
+    if ((check_status(tf_field(res_v, "e"), e) || lost) &&
+        tf_field(res_v, "e") == 0) {
+        /* set_fd also clears the lost mark: the model no longer holds the
+         * descriptor, so a later model open reusing the number starts clean. */
+        set_fd(pid, mfd, BADFD);
     }
 } /* op_close */
 
@@ -1317,8 +1492,10 @@ op_dup(
 
     if (check_status(tf_field(res_v, "e"), e) && tf_field(res_v, "e") == 0) {
         set_fd(pid, tf_field(res_v, "fd"), rc);
+    } else if (tf_field(res_v, "e") == 0 && rc < 0) {
+        lose_fd(pid, tf_field(res_v, "fd"));
     } else {
-        pd24_drop_stray_fd(tf_field(res_v, "e"), rc);
+        drop_stray_fd(tf_field(res_v, "e"), rc);
     }
 } /* op_dup */
 
@@ -1409,15 +1586,22 @@ op_read_family(
     if (check_status(tf_field(res_v, "e"), e) && tf_field(res_v, "e") == 0) {
         int64_t        count = tf_field(res_v, "n");
         unsigned char *exp   = malloc(count ? count : 1);
-        if (n != count) {
-            mism("read count: expected %lld, got %zd", (long long) count, n);
-        }
-        shadow_read(tf_field(res_v, "ino"), tf_field(res_v, "off"),
-                    (size_t) count, exp);
-        if (n != count || (count && memcmp(buf, exp, count) != 0)) {
-            mism("read data mismatch at ino %lld off %lld len %lld",
-                 (long long) tf_field(res_v, "ino"),
-                 (long long) tf_field(res_v, "off"), (long long) count);
+        if (ino_lost(tf_field(res_v, "ino"))) {
+            /* The model mutated this inode through a descriptor chimera never
+             * had; its size and content have honestly diverged. */
+            record_dev("ND4");
+        } else {
+            if (n != count) {
+                mism("read count: expected %lld, got %zd", (long long) count,
+                     n);
+            }
+            shadow_read(tf_field(res_v, "ino"), tf_field(res_v, "off"),
+                        (size_t) count, exp);
+            if (n != count || (count && memcmp(buf, exp, count) != 0)) {
+                mism("read data mismatch at ino %lld off %lld len %lld",
+                     (long long) tf_field(res_v, "ino"),
+                     (long long) tf_field(res_v, "off"), (long long) count);
+            }
         }
         free(exp);
     }
@@ -1508,6 +1692,11 @@ op_ftruncate(
         int64_t ino = model_ino_of_fd(pid, tf_field(rv, "fd"));
         if (ino >= 0) {
             shadow_resize(ino, tf_field(rv, "len"));
+        }
+        if (rc < 0 && ino >= 0 && ino < R_MAXINO) {
+            /* The model truncated, chimera did not (a reconciled
+             * divergence): size and content have honestly diverged. */
+            g_lost_ino[ino] = 1;
         }
     }
 } /* op_ftruncate */
@@ -1603,7 +1792,16 @@ op_mkdir(
         : chimera_posix_mkdirat(rfd(pid, dfd), path,
                                 (mode_t) tf_field(rv, "mode"));
     e = ERRV(rc);
-    check_status(tf_field(res_v, "e"), e);
+    if (!check_status(tf_field(res_v, "e"), e) &&
+        tf_field(res_v, "e") == 0 && rc < 0 && g_cur_fs) {
+        /* The model created this directory behind a reconciled divergence;
+         * chimera did not.  Everything at or under it is lost. */
+        int64_t ino = path_ino(g_cur_fs, json_object_get(
+                                   json_object_get(rv, "pth"), "comps"));
+        if (ino >= 0 && ino < R_MAXINO) {
+            g_lost_ino[ino] = 1;
+        }
+    }
 } /* op_mkdir */
 
 static void
@@ -1633,7 +1831,14 @@ op_mknod(
     real_path(json_object_get(rv, "pth"), path, sizeof(path));
     rc = chimera_posix_mknod(path, mode, dev);
     e  = ERRV(rc);
-    check_status(tf_field(res_v, "e"), e);
+    if (!check_status(tf_field(res_v, "e"), e) &&
+        tf_field(res_v, "e") == 0 && rc < 0 && g_cur_fs) {
+        int64_t lost_ino = path_ino(g_cur_fs, json_object_get(
+                                        json_object_get(rv, "pth"), "comps"));
+        if (lost_ino >= 0 && lost_ino < R_MAXINO) {
+            g_lost_ino[lost_ino] = 1;
+        }
+    }
 } /* op_mknod */
 
 static void
@@ -1650,7 +1855,14 @@ op_symlink(
     real_path(json_object_get(rv, "pth"), path, sizeof(path));
     rc = chimera_posix_symlink(tgt, path);
     e  = ERRV(rc);
-    check_status(tf_field(res_v, "e"), e);
+    if (!check_status(tf_field(res_v, "e"), e) &&
+        tf_field(res_v, "e") == 0 && rc < 0 && g_cur_fs) {
+        int64_t lost_ino = path_ino(g_cur_fs, json_object_get(
+                                        json_object_get(rv, "pth"), "comps"));
+        if (lost_ino >= 0 && lost_ino < R_MAXINO) {
+            g_lost_ino[lost_ino] = 1;
+        }
+    }
 } /* op_symlink */
 
 static void
@@ -1706,6 +1918,29 @@ op_rmdir(
         ? chimera_posix_rmdir(path)
         : chimera_posix_unlinkat(rfd(pid, dfd), path, AT_REMOVEDIR);
     e = ERRV(rc);
+    if (g_nfs_version && e == 39 && tf_field(res_v, "e") == 0) {
+        /* ND5: the directory holds .nfs* silly-rename residue for files
+         * still open, so the server honestly refuses ENOTEMPTY where the
+         * model (whose unlinks truly removed the names) sees empty.  The
+         * model forgets the directory; chimera keeps it until the last
+         * close -- exempt the path so the audit tolerates the leftover. */
+        record_dev("ND5");
+        {
+            json_t *comps = json_object_get(json_object_get(rv, "pth"),
+                                            "comps");
+            char    mp[4096];
+            size_t  len = 0, k;
+            for (k = 0; comps && k < json_array_size(comps); k++) {
+                const char *c = json_string_value(json_array_get(comps, k));
+                len += (size_t) snprintf(mp + len, sizeof(mp) - len, "/%s",
+                                         c ? c : "");
+            }
+            if (len > 0) {
+                exempt_add(mp);
+            }
+        }
+        return;
+    }
     check_status(tf_field(res_v, "e"), e);
 } /* op_rmdir */
 
@@ -1767,9 +2002,15 @@ op_opendir(
     if (check_status(tf_field(res_v, "e"), e) && tf_field(res_v, "e") == 0) {
         int64_t msid = tf_field(res_v, "sid");
         if (msid >= 0 && msid < R_MAXSID) {
-            g_dirmap[msid] = d;
+            g_dirmap[msid]   = d;
+            g_lost_sid[msid] = 0;
         } else {
             chimera_posix_closedir(d);
+        }
+    } else if (tf_field(res_v, "e") == 0 && !d) {
+        int64_t msid = tf_field(res_v, "sid");
+        if (msid >= 0 && msid < R_MAXSID) {
+            g_lost_sid[msid] = 1;
         }
     } else if (d) {
         chimera_posix_closedir(d);
@@ -1791,7 +2032,13 @@ op_readdir(
 
     (void) pid;
     if (!d) {
-        check_status(tf_field(res_v, "e"), EBADF);
+        int64_t msid = tf_field(rv, "sid");
+        if (g_nfs_version && msid >= 0 && msid < R_MAXSID &&
+            g_lost_sid[msid]) {
+            record_dev("ND4");
+        } else {
+            check_status(tf_field(res_v, "e"), EBADF);
+        }
         return;
     }
     if (!check_status(tf_field(res_v, "e"), 0) || tf_field(res_v, "e") != 0) {
@@ -1838,7 +2085,11 @@ op_readdir(
             }
         }
         if (!ok) {
-            mism("readdir: unexpected name '%s'", names[i]);
+            if (is_nfs_silly_name(names[i])) {
+                record_dev("ND1");
+            } else {
+                mism("readdir: unexpected name '%s'", names[i]);
+            }
         }
     }
 } /* op_readdir */
@@ -1855,7 +2106,13 @@ op_dir_simple(
 
     (void) pid;
     if (!d) {
-        check_status(tf_field(res_v, "e"), EBADF);
+        int64_t msid = tf_field(rv, "sid");
+        if (g_nfs_version && msid >= 0 && msid < R_MAXSID &&
+            g_lost_sid[msid]) {
+            record_dev("ND4");
+        } else {
+            check_status(tf_field(res_v, "e"), EBADF);
+        }
         return;
     }
     switch (which) {
@@ -2189,10 +2446,12 @@ op_dup2(
     e = ERRV(rc);
     if (check_status(tf_field(res_v, "e"), e) && tf_field(res_v, "e") == 0) {
         set_fd(pid, nfd, rc);
+    } else if (tf_field(res_v, "e") == 0 && rc < 0) {
+        lose_fd(pid, nfd);
     } else if (minted) {
         /* Only the dup() arm mints a descriptor of its own; the dup2() arm
          * returns one g_fdmap already names, which close_live_handles() owns. */
-        pd24_drop_stray_fd(tf_field(res_v, "e"), rc);
+        drop_stray_fd(tf_field(res_v, "e"), rc);
     }
 } /* op_dup2 */
 
@@ -2222,7 +2481,7 @@ op_fcntl_dupfd(
             }
         }
     } else {
-        pd24_drop_stray_fd(tf_field(res_v, "e"), rc);
+        drop_stray_fd(tf_field(res_v, "e"), rc);
     }
 } /* op_fcntl_dupfd */
 
@@ -2607,7 +2866,9 @@ final_audit(json_t *fs)
             if (!found) {
                 char ep[4400];
                 snprintf(ep, sizeof(ep), "%.4095s/%.255s", e.path, names[k]);
-                if (!is_exempt(ep)) {   /* PD24 residue: chimera-only node */
+                if (is_nfs_silly_name(names[k])) {
+                    record_dev("ND1");
+                } else if (!is_exempt(ep)) {   /* PD24 residue */
                     mism("audit: dir %s: unexpected entry '%s'",
                          e.path[0] ? e.path : "/", names[k]);
                 }
@@ -2634,8 +2895,12 @@ final_audit(json_t *fs)
                 }
             }
             if (!present) {
-                mism("audit: dir %s: model entry '%s' missing",
-                     e.path[0] ? e.path : "/", name);
+                if (ino_lost(cino)) {
+                    record_dev("ND4");
+                } else {
+                    mism("audit: dir %s: model entry '%s' missing",
+                         e.path[0] ? e.path : "/", name);
+                }
                 continue;
             }
 
@@ -2647,6 +2912,21 @@ final_audit(json_t *fs)
 
             memset(&st, 0, sizeof(st));
             rc = chimera_posix_lstat(full, &st);
+            if (ino_lost(cino)) {
+                /* Mutated or created behind a reconciled divergence: its
+                 * attributes and content have honestly diverged (see the
+                 * g_lost_* block comment).  Still descend a directory that
+                 * exists on both sides, so unaffected children get audited. */
+                record_dev("ND4");
+                if (rc == 0 && S_ISDIR(st.st_mode) &&
+                    strcmp(ftag, "FDir") == 0 && sp < 4096) {
+                    stack[sp].ino = cino;
+                    snprintf(stack[sp].path, sizeof(stack[sp].path),
+                             "%.4095s", cpath);
+                    sp++;
+                }
+                continue;
+            }
             if (rc != 0) {
                 mism("audit: lstat %s: errno %d", cpath, errno);
                 continue;
@@ -2796,6 +3076,7 @@ replay_trace(const char *path)
         g_cur_ps  = state_get(st, "ps");
         g_cur_tag = tag;
         g_cur_rv  = tf_val(req);
+        g_cur_pid = pid;
         last_fs   = g_cur_fs;
 
         if (dispatch(tag, pid, tf_val(req), tf_val(res)) != 0) {

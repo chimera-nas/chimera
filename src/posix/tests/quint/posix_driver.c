@@ -925,9 +925,83 @@ handle(json_t *req)
             }
         }
         if (g_nfs_version) {
-            /* The NFS loopback path keeps the filesystem server-side; only the
-             * direct backends are batched today (POSIX_MBT_MEMFS_ONLY). */
-            return res_int(-1, ENOSYS);
+            /* Loopback recycle: the filesystem lives server-side, so cycle it
+             * there while the server, client, and RPC connection stay up.
+             * Unmount the client (the proxy's UMNT/session teardown), re-point
+             * the server-side share at a fresh uniquely-named fs, and remount:
+             * the fresh MOUNT/PUTROOTFH hands back a new root FH, so neither
+             * content nor a cached handle can cross traces.  The client umount
+             * races the async close sweep exactly like the direct path below,
+             * and the server-side rmfs races the NFS server's own cached open
+             * handles, so both get the same bounded retry (5s ceiling). */
+            char mount_options[64];
+            int  rc;
+            int  tries = 0;
+
+            /* Unlike the direct path's 1ms spins, each EBUSY attempt here
+             * already waited out the VFS umount's own holder timeout (~1s),
+             * so a small ceiling is already a long real wait -- and on a true
+             * leak every attempt logs the still-open handles at error level,
+             * so a low ceiling keeps the log readable. */
+            while (chimera_posix_umount("/test") != 0) {
+                if (errno != EBUSY || ++tries >= 15) {
+                    fprintf(stderr,
+                            "posix_driver: newfs client umount failed: %s\n",
+                            strerror(errno));
+                    return res_int(-1, errno);
+                }
+                usleep(1000);
+            }
+            tries = 0;
+            while ((rc = chimera_server_unmount(g_server, "share")) != 0) {
+                if (rc != CHIMERA_VFS_EBUSY || ++tries >= 15) {
+                    fprintf(stderr,
+                            "posix_driver: newfs share unmount failed: %d\n",
+                            rc);
+                    return res_int(-1, chimera_posix_errno_from_status(rc));
+                }
+                usleep(1000);
+            }
+            tries = 0;
+            while ((rc = chimera_server_rmfs(g_server, g_module,
+                                             g_fsname)) != 0) {
+                if (rc != CHIMERA_VFS_EBUSY || ++tries >= 15) {
+                    fprintf(stderr,
+                            "posix_driver: newfs server rmfs %s failed: %d\n",
+                            g_fsname, rc);
+                    return res_int(-1, chimera_posix_errno_from_status(rc));
+                }
+                usleep(1000);
+            }
+            snprintf(g_fsname, sizeof(g_fsname), "fs%d", ++g_fs_counter);
+            rc = chimera_server_mkfs(g_server, g_module, g_fsname, NULL);
+            if (rc != 0) {
+                fprintf(stderr, "posix_driver: newfs server mkfs %s failed: %d\n",
+                        g_fsname, rc);
+                return res_int(-1, chimera_posix_errno_from_status(rc));
+            }
+            rc = chimera_server_mount(g_server, "share", g_module, g_fsname,
+                                      NULL);
+            if (rc != 0) {
+                fprintf(stderr, "posix_driver: newfs share mount %s failed: %d\n",
+                        g_fsname, rc);
+                return res_int(-1, chimera_posix_errno_from_status(rc));
+            }
+            snprintf(mount_options, sizeof(mount_options), "vers=%d",
+                     g_nfs_version);
+            if (chimera_posix_mount_with_options("/test", "nfs",
+                                                 "127.0.0.1:/share",
+                                                 mount_options) != 0) {
+                fprintf(stderr, "posix_driver: newfs nfs%d remount failed: %s\n",
+                        g_nfs_version, strerror(errno));
+                return res_int(-1, errno);
+            }
+            if (normalize_root() != 0) {
+                fprintf(stderr, "posix_driver: newfs normalize failed: %s\n",
+                        strerror(errno));
+                return res_int(-1, errno);
+            }
+            return res_int(0, 0);
         }
         /* The replayer has dropped every open fd/dir, but the VFS releases the
          * underlying handles on its async sweep thread, so the mount can stay
