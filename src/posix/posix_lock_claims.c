@@ -19,6 +19,11 @@
 
 #include "posix_internal.h"
 
+/* A mid-range carve splits one claim into head and tail fragments, so two
+ * spares.  The claim core's interface fixes this: vfs_claim.h declares
+ * spare[2]. */
+#define POSIX_LOCK_CARVE_SPARES 2
+
 static FORCE_INLINE struct chimera_vfs_state *
 chimera_posix_vfs_state(struct chimera_posix_client *posix)
 {
@@ -160,8 +165,8 @@ chimera_posix_ofd_lock_carve(
     uint64_t                        length)
 {
     struct chimera_vfs_state           *state = chimera_posix_vfs_state(posix);
-    struct chimera_posix_ofd_lock      *spare_nodes[2];
-    struct chimera_vfs_claim           *spare[2];
+    struct chimera_posix_ofd_lock      *spare_nodes[POSIX_LOCK_CARVE_SPARES];
+    struct chimera_vfs_claim           *spare[POSIX_LOCK_CARVE_SPARES];
     struct chimera_posix_lock_carve_ctx ctx        = { .freed = NULL };
     int                                 spare_used = 0;
     struct chimera_vfs_file_state      *file;
@@ -182,8 +187,21 @@ chimera_posix_ofd_lock_carve(
      * spare (offset/length rewritten) and links it, so the claim needs no
      * init here; each spare carries its own anchor reference in case it is
      * inserted. */
-    for (i = 0; i < 2; i++) {
-        spare_nodes[i]       = calloc(1, sizeof(*spare_nodes[i]));
+    for (i = 0; i < POSIX_LOCK_CARVE_SPARES; i++) {
+        spare_nodes[i] = calloc(1, sizeof(*spare_nodes[i]));
+
+        if (!spare_nodes[i]) {
+            /* Drop the spares already built and skip the carve.  Leaving the
+             * claim unsplit holds more of the range than was asked for, which
+             * is a far better failure than dereferencing NULL. */
+            while (i-- > 0) {
+                chimera_vfs_state_put(state, spare_nodes[i]->file);
+                free(spare_nodes[i]);
+            }
+            chimera_vfs_state_put(state, file);
+            return;
+        }
+
         spare_nodes[i]->file = chimera_vfs_state_get(state,
                                                      handle->fh,
                                                      (uint8_t) handle->fh_len,
@@ -199,6 +217,14 @@ chimera_posix_ofd_lock_carve(
                                     spare, &spare_used,
                                     chimera_posix_lock_carve_released, &ctx);
 
+    /* The core takes at most the spares it was handed -- vfs_claim.h fixes the
+     * array at spare[2] and vfs_claim.c guards with n_spare < 2 -- but it lives
+     * in another translation unit, so bound the count here to keep both loops
+     * below inside spare_nodes[]. */
+    if (spare_used > POSIX_LOCK_CARVE_SPARES) {
+        spare_used = POSIX_LOCK_CARVE_SPARES;
+    }
+
     /* Consumed spares are now inserted head/tail fragments: track them.
      * CLAIMTODO: fragments attribute to the UNLOCKING description even when
      * the split lock was taken through a different description of the same
@@ -211,7 +237,7 @@ chimera_posix_ofd_lock_carve(
 
     pthread_mutex_unlock(&posix->fd_lock);
 
-    for (i = spare_used; i < 2; i++) {
+    for (i = spare_used; i < POSIX_LOCK_CARVE_SPARES; i++) {
         chimera_vfs_state_put(state, spare_nodes[i]->file);
         free(spare_nodes[i]);
     }
