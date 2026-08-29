@@ -10,6 +10,7 @@
 #include "nfs_common.h"
 #include "nfs_internal.h"
 #include "nfs_nlm.h"
+#include "common/format.h"
 #include "nfs_nlm_state.h"
 #include "nfs_nlm_granted.h"
 #include "nfs_nsm.h"
@@ -990,6 +991,12 @@ chimera_nfs_nlm4_do_lock(
                       (unsigned long) args->alock.l_offset,
                       (unsigned long) args->alock.l_len,
                       (int) args->exclusive, (int) args->block, (int) args->reclaim, (int) nm_lock);
+    {
+        char ohhex[2 * 64 + 1];
+        format_hex(ohhex, sizeof(ohhex), args->alock.oh.data,
+                   args->alock.oh.len > 64 ? 64 : args->alock.oh.len);
+        chimera_nfs_debug("NLM LOCK: oh=%s svid=%d", ohhex, args->alock.svid);
+    }
 
     /* Recover the inner VFS handle from the wrapped wire handle for the open
     * below (lock identity keeps the client's wrapped bytes in entry->fh). */
@@ -1286,6 +1293,16 @@ chimera_nfs_nlm4_do_unlock(
                       (unsigned) args->alock.fh.len,
                       (unsigned long) args->alock.l_offset,
                       (unsigned long) args->alock.l_len);
+    {
+        char ohhex[2 * 64 + 1];
+        format_hex(ohhex, sizeof(ohhex), args->alock.oh.data,
+                   args->alock.oh.len > 64 ? 64 : args->alock.oh.len);
+        char argfh[2 * 64 + 1];
+        format_hex(argfh, sizeof(argfh), args->alock.fh.data,
+                   args->alock.fh.len > 64 ? 64 : args->alock.fh.len);
+        chimera_nfs_debug("NLM UNLOCK: oh=%s svid=%d fh=%s", ohhex,
+                          args->alock.svid, argfh);
+    }
 
     pthread_mutex_lock(&shared->nlm_state.mutex);
     HASH_FIND_STR(shared->nlm_state.clients, safe_hostname, client);
@@ -1307,15 +1324,30 @@ chimera_nfs_nlm4_do_unlock(
         return;
     }
 
-    entry = nlm_client_find_lock(client,
-                                 args->alock.oh.data,
-                                 args->alock.oh.len,
-                                 args->alock.svid,
-                                 args->alock.fh.data,
-                                 args->alock.fh.len,
-                                 args->alock.l_offset,
-                                 NLM_TO_POSIX_LEN(args->alock.l_len));
-    if (!entry) {
+    /* Sweep every lock this owner holds within the range: UNLOCK releases
+     * the covered locks (RFC 1813), and clients routinely unlock [0, ~0) at
+     * close(2) to drop everything they still hold on the file.  Exact-match
+     * lookup alone left those locks -- and the open handles pinning their
+     * files -- held forever.  Entries are unhooked under the mutex, chained,
+     * and released outside it (same ownership discipline as the single-entry
+     * path replaced here). */
+    struct nlm_lock_entry *sweep = NULL;
+
+    while ((entry = nlm_client_find_lock_in_range(
+                client,
+                args->alock.oh.data,
+                args->alock.oh.len,
+                args->alock.svid,
+                args->alock.fh.data,
+                args->alock.fh.len,
+                args->alock.l_offset,
+                NLM_TO_POSIX_LEN(args->alock.l_len))) != NULL) {
+        DL_DELETE(client->locks, entry);
+        entry->next = sweep;
+        sweep       = entry;
+    }
+
+    if (!sweep) {
         pthread_mutex_unlock(&shared->nlm_state.mutex);
         chimera_nfs_debug("NLM UNLOCK: lock entry not found -> NLM4_GRANTED");
         /* Lock not found -- treat as already unlocked */
@@ -1333,27 +1365,29 @@ chimera_nfs_nlm4_do_unlock(
         return;
     }
 
-    /* Take exclusive ownership of the entry by removing it from the list
-     * while still holding the mutex, preventing concurrent FREE_ALL or
-     * disconnect handlers from freeing it before the release path runs. */
-    DL_DELETE(client->locks, entry);
     pthread_mutex_unlock(&shared->nlm_state.mutex);
 
-    /* Release the claim (sync), put the file_state ref (sync),
-     * and close the handle (sync).  RFC 1813 requires NLM4_GRANTED. */
-    if (entry->claim_inserted) {
-        chimera_vfs_claim_release_ranged(thread->vfs_thread, vfs_state,
-                                         entry->file_state, &entry->claim);
-        entry->claim_inserted = false;
+    /* Release each swept lock: the claim (sync), the file_state ref (sync),
+     * and the open handle that was held for the lock's lifetime.  RFC 1813
+     * requires NLM4_GRANTED. */
+    while (sweep) {
+        entry = sweep;
+        sweep = entry->next;
+
+        if (entry->claim_inserted) {
+            chimera_vfs_claim_release_ranged(thread->vfs_thread, vfs_state,
+                                             entry->file_state, &entry->claim);
+            entry->claim_inserted = false;
+        }
+        if (entry->file_state) {
+            chimera_vfs_state_put(vfs_state, entry->file_state);
+            entry->file_state = NULL;
+        }
+        if (entry->handle) {
+            chimera_vfs_release(thread->vfs_thread, entry->handle);
+        }
+        nlm_lock_entry_free(entry);
     }
-    if (entry->file_state) {
-        chimera_vfs_state_put(vfs_state, entry->file_state);
-        entry->file_state = NULL;
-    }
-    if (entry->handle) {
-        chimera_vfs_release(thread->vfs_thread, entry->handle);
-    }
-    nlm_lock_entry_free(entry);
 
     res.cookie.len  = args->cookie.len;
     res.cookie.data = args->cookie.data;

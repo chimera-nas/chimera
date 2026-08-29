@@ -317,6 +317,58 @@ nlm_client_find_lock(
     return NULL;
 } /* nlm_client_find_lock */
 
+/*
+ * Find a lock entry held by (owner handle, svid) on fh that lies WITHIN the
+ * byte range [offset, offset+length).  UNLOCK per RFC 1813 releases the
+ * owner's locks covered by the range, not only an exactly-equal one -- in
+ * particular every real client unlocks [0, ~0) at close(2) to drop whatever
+ * it still holds on the file.  Containment only: a lock partially straddling
+ * the range would need a carve (split), which no chimera-side caller emits
+ * today.  Callers loop until NULL to sweep multi-lock owners.
+ */
+static inline struct nlm_lock_entry *
+nlm_client_find_lock_in_range(
+    struct nlm_client *client,
+    const uint8_t     *oh,
+    uint32_t           oh_len,
+    int32_t            svid,
+    const uint8_t     *fh,
+    uint32_t           fh_len,
+    uint64_t           offset,
+    uint64_t           length)
+{
+    struct nlm_lock_entry *entry;
+    uint64_t               end;
+
+    /* Lengths here are in NLM's internal POSIX convention: 0 = to EOF
+     * (see NLM_TO_POSIX_LEN). */
+    end = (length == 0 || offset + length < offset)
+        ? UINT64_MAX : offset + length;
+
+    DL_FOREACH(client->locks, entry)
+    {
+        uint64_t entry_end;
+
+        if (entry->pending) {
+            continue;
+        }
+        entry_end = (entry->length == 0 ||
+                     entry->offset + entry->length < entry->offset)
+            ? UINT64_MAX : entry->offset + entry->length;
+
+        if (entry->oh_len == oh_len &&
+            entry->svid == svid &&
+            entry->fh_len == fh_len &&
+            entry->offset >= offset &&
+            entry_end <= end &&
+            memcmp(entry->oh, oh, oh_len) == 0 &&
+            memcmp(entry->fh, fh, fh_len) == 0) {
+            return entry;
+        }
+    }
+    return NULL;
+} /* nlm_client_find_lock_in_range */
+
 /* -------------------------------------------------------------------------
  * Functions implemented in nfs_nlm_state.c
  * ---------------------------------------------------------------------- */
