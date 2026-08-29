@@ -44,6 +44,7 @@
 #include "server/s3/s3.h"
 #include "common/tcp_flavor.h"
 #include "prometheus-c.h"
+#include "common/mbt_artifacts.h"
 
 #define S3_MBT_PORT        5000
 /* Multipart traces replay with 5 MiB blocks; whole-object GETs of an
@@ -574,6 +575,8 @@ s3_mbt_env_open_module(
     struct chimera_server_config *config;
     struct evpl_thread_config    *tcfg;
 
+    mbt_debug_log_start();
+
     memset(env, 0, sizeof(*env));
 
     snprintf(env->session_dir, sizeof(env->session_dir), "/tmp/s3_mbt_XXXXXX");
@@ -819,6 +822,7 @@ s3_mbt_env_stop(struct s3_mbt_env *env)
     evpl_destroy(env->evpl);
 
     chimera_server_destroy(env->server);
+    mbt_metrics_dump(env->metrics);
     prometheus_metrics_destroy(env->metrics);
 
     free(env->body_buf);

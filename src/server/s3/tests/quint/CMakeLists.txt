@@ -40,6 +40,7 @@ target_link_libraries(s3_mbt_replay chimera_server chimera_metrics OpenSSL::Cryp
 add_test(NAME chimera/server/s3/mbt/probe_memfs
     COMMAND $<TARGET_FILE:s3_mbt_probe>)
 set_tests_properties(chimera/server/s3/mbt/probe_memfs PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=s3_probe_memfs"
     LABELS "quint;s3_mbt;memfs"
     TIMEOUT 60)
 
@@ -65,6 +66,7 @@ add_test(NAME chimera/server/s3/mbt/batch_memfs
     COMMAND $<TARGET_FILE:s3_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/s3
             --exclude-prefix stepMultipart_)
 set_tests_properties(chimera/server/s3/mbt/batch_memfs PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=s3_batch_memfs"
     LABELS "quint;s3_mbt;memfs"
     TIMEOUT 300)
 
@@ -75,6 +77,7 @@ add_test(NAME chimera/server/s3/mbt/batch_multipart_memfs
             --exclude-prefix stepList_ --exclude-prefix stepBucket_
             --exclude-prefix stepTag_)
 set_tests_properties(chimera/server/s3/mbt/batch_multipart_memfs PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=s3_batch_multipart_memfs"
     LABELS "quint;s3_mbt;memfs"
     TIMEOUT 300)
 
@@ -85,12 +88,6 @@ set_tests_properties(chimera/server/s3/mbt/batch_multipart_memfs PROPERTIES
 # mkdtemp session dir.  Gated on the storage each backend needs.
 #
 # Withheld batches, and why:
-#  - diskfs multipart: PutObject's create_unlinked+link_at publish at
-#    multipart scale intermittently SEGVs -- the link_at completion is
-#    delivered on the diskfs IQ/txn thread and the follow-on getattr races
-#    the owning thread (chimera_s3_put_finish_common -> chimera_vfs_getattr,
-#    ~1-in-2 on stepMultipart_64_0x11_1).  Re-enable when the diskfs
-#    completion threading is settled.
 #  - linux/io_uring (passthrough): need a name_to_handle_at-capable scratch
 #    filesystem ($CHIMERA_MBT_SCRATCH; overlayfs/tmpfs skip 77) and an
 #    io_uring-capable environment, and both exhibit intermittent ESTALE
@@ -109,6 +106,26 @@ if(HAVE_LIBAIO)
         COMMAND $<TARGET_FILE:s3_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/s3
                 --backend diskfs --exclude-prefix stepMultipart_)
     set_tests_properties(chimera/server/s3/mbt/batch_diskfs PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=s3_batch_diskfs"
+        LABELS "quint;s3_mbt;diskfs"
+        TIMEOUT 300)
+
+    # Previously withheld: PutObject's publish could double-fire when the
+    # body drain outran the async metadata xattr chain (or vice versa), and
+    # at multipart scale on diskfs the second link_at's failure path crashed
+    # into the first's completion (~1-in-2 on stepMultipart_64_0x11_1).
+    # Fixed by the exactly-once publish handshake in s3_put.c (meta_pending
+    # gate + published latch); debug-level replay made the window wide
+    # enough to pin the real cause, which was never diskfs's completion
+    # threading.
+    add_test(NAME chimera/server/s3/mbt/batch_multipart_diskfs
+        COMMAND $<TARGET_FILE:s3_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/s3
+                --backend diskfs --block-size 5242880
+                --exclude-prefix step_ --exclude-prefix stepData_
+                --exclude-prefix stepList_ --exclude-prefix stepBucket_
+                --exclude-prefix stepTag_)
+    set_tests_properties(chimera/server/s3/mbt/batch_multipart_diskfs PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=s3_batch_multipart_diskfs"
         LABELS "quint;s3_mbt;diskfs"
         TIMEOUT 300)
 endif()
@@ -118,6 +135,7 @@ if(CAIRN_ENABLED)
         COMMAND $<TARGET_FILE:s3_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/s3
                 --backend cairn --exclude-prefix stepMultipart_)
     set_tests_properties(chimera/server/s3/mbt/batch_cairn PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=s3_batch_cairn"
         LABELS "quint;s3_mbt;cairn"
         TIMEOUT 300)
 
@@ -128,6 +146,7 @@ if(CAIRN_ENABLED)
                 --exclude-prefix stepList_ --exclude-prefix stepBucket_
                 --exclude-prefix stepTag_)
     set_tests_properties(chimera/server/s3/mbt/batch_multipart_cairn PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=s3_batch_multipart_cairn"
         LABELS "quint;s3_mbt;cairn"
         TIMEOUT 300)
 endif()
@@ -140,5 +159,6 @@ add_test(NAME chimera/server/s3/mbt/batch_sigv2_memfs
     COMMAND $<TARGET_FILE:s3_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/s3
             --sigv2 --exclude-prefix stepMultipart_)
 set_tests_properties(chimera/server/s3/mbt/batch_sigv2_memfs PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=s3_batch_sigv2_memfs"
     LABELS "quint;s3_mbt;memfs"
     TIMEOUT 300)

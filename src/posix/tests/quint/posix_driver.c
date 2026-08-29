@@ -48,6 +48,7 @@
 #include "common/platform.h"
 #include "common/tcp_flavor.h"
 #include "prometheus-c.h"
+#include "common/mbt_artifacts.h"
 
 #define DRIVER_BLOCK_SIZE 4096
 #define MAX_PIDS          4
@@ -1008,8 +1009,7 @@ posix_env_setup(
      * worker/sweep threads start in chimera_posix_init. */
     setenv("CHIMERA_CLOSE_SWEEP_INTERVAL_MS", "10", 0);
 
-    chimera_log_init();
-    ChimeraLogLevel = CHIMERA_LOG_ERROR;
+    mbt_debug_log_start();
 
     metrics = prometheus_metrics_create(NULL, NULL, 0);
 
@@ -1187,6 +1187,7 @@ posix_env_teardown(void)
     if (g_server) {
         chimera_server_destroy(g_server);
     }
+    mbt_metrics_dump(g_metrics);
     prometheus_metrics_destroy(g_metrics);
 } /* posix_env_teardown */
 

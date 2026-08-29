@@ -57,6 +57,7 @@
 #include "server/server.h"
 #include "common/tcp_flavor.h"
 #include "prometheus-c.h"
+#include "common/mbt_artifacts.h"
 
 #include "evpl/evpl.h"
 
@@ -657,6 +658,8 @@ smb2_env_open_opts(
 {
     struct chimera_server_config *config;
 
+    mbt_debug_log_start();
+
     memset(env, 0, sizeof(*env));
 
     /* Sweep the VFS open cache aggressively.  When a trace's connections are
@@ -889,6 +892,7 @@ smb2_env_stop(struct smb2_env *env)
         free(env->conns[i]);
     }
     chimera_server_destroy(env->server);
+    mbt_metrics_dump(env->metrics);
     prometheus_metrics_destroy(env->metrics);
 
     snprintf(cmd, sizeof(cmd), "rm -rf %s", env->session_dir);
