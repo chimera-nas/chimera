@@ -135,6 +135,15 @@ chimera_s3_put_rename(struct chimera_s3_request *request)
 {
     struct chimera_server_s3_thread *thread = request->thread;
 
+    /* Both the last write completion and the metadata-done resume can reach
+     * here believing the request is finished (see the field comments in
+     * s3_internal.h); publish only once, and never before the metadata
+     * xattrs are in place -- metadata_done re-drives this via put_recv. */
+    if (request->put.meta_pending || request->put.published) {
+        return;
+    }
+    request->put.published = 1;
+
     if (request->put.tmp_name_len) {
         chimera_s3_request_get(request);
 
@@ -347,6 +356,8 @@ chimera_s3_put_metadata_done(
         return;
     }
 
+    request->put.meta_pending = 0;
+
     chimera_s3_put_recv(evpl, request);
 } /* chimera_s3_put_metadata_done */
 
@@ -372,8 +383,9 @@ chimera_s3_put_create_unlinked_callback(
         return;
     }
 
-    request->file_handle = oh;
-    request->vfs_state   = CHIMERA_S3_VFS_STATE_RECV;
+    request->file_handle      = oh;
+    request->put.meta_pending = 1;
+    request->vfs_state        = CHIMERA_S3_VFS_STATE_RECV;
 
     /* The response ETag is attached after the body is written, from the
      * object's final attributes (see chimera_s3_put_getattr_callback). */
@@ -407,8 +419,9 @@ chimera_s3_put_create_callback(
         return;
     }
 
-    request->file_handle = oh;
-    request->vfs_state   = CHIMERA_S3_VFS_STATE_RECV;
+    request->file_handle      = oh;
+    request->put.meta_pending = 1;
+    request->vfs_state        = CHIMERA_S3_VFS_STATE_RECV;
 
     /* The response ETag is attached after the body is written, from the
      * object's final attributes (see chimera_s3_put_getattr_callback). */
@@ -523,6 +536,9 @@ chimera_s3_put(
     const char *dirpath = request->path;
     int         dirpathlen;
     const char *tagging_hdr;
+
+    request->put.meta_pending = 0;
+    request->put.published    = 0;
 
     /* x-amz-tagging: parse + validate the tag set now so a violation is
      * reported as 400 InvalidTag before any object bytes are written. The tags
