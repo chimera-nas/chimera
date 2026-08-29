@@ -180,15 +180,40 @@ mount_create_complete(
     struct mount_create_ctx *ctx = private_data;
     json_t                  *obj;
 
-    if (status == CHIMERA_VFS_OK) {
-        obj = json_object();
-        json_object_set_new(obj, "message", json_string("Mount created"));
-        chimera_rest_send_json(ctx->evpl, ctx->request, 201, obj);
-    } else {
-        chimera_rest_send_error(ctx->evpl, ctx->request, 500,
-                                "Internal Server Error",
-                                "Failed to create mount");
-    }
+    /* Map the VFS status the way the filesystems endpoint does
+     * (rest_filesystems.c).  Reporting 500 for every failure would claim the
+     * server broke at something it never attempted: a module or filesystem
+     * name that does not exist is entirely the caller's error, and a caller
+     * that cannot tell a typo from an outage cannot decide whether retrying
+     * is pointless. */
+    switch (status) {
+        case CHIMERA_VFS_OK:
+            obj = json_object();
+            json_object_set_new(obj, "message", json_string("Mount created"));
+            chimera_rest_send_json(ctx->evpl, ctx->request, 201, obj);
+            break;
+        case CHIMERA_VFS_ENOENT:
+            chimera_rest_send_error(ctx->evpl, ctx->request, 404, "Not Found",
+                                    "Module or filesystem does not exist");
+            break;
+        case CHIMERA_VFS_EEXIST:
+            chimera_rest_send_error(ctx->evpl, ctx->request, 409, "Conflict",
+                                    "Mount with that name already exists");
+            break;
+        case CHIMERA_VFS_EINVAL:
+            chimera_rest_send_error(ctx->evpl, ctx->request, 400, "Bad Request",
+                                    "Invalid mount name, path or options");
+            break;
+        case CHIMERA_VFS_ENOTSUP:
+            chimera_rest_send_error(ctx->evpl, ctx->request, 400, "Bad Request",
+                                    "Module does not support this mount");
+            break;
+        default:
+            chimera_rest_send_error(ctx->evpl, ctx->request, 500,
+                                    "Internal Server Error",
+                                    "Failed to create mount");
+            break;
+    } /* switch */
 
     json_decref(ctx->root);
     free(ctx);

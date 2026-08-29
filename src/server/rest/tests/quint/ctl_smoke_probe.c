@@ -186,6 +186,24 @@ main(
              "{\"name\":\"m0\",\"module\":\"memfs\",\"path\":\"fs0\"}", &res);
     ck_status(&res, 409, "mount/create-duplicate-is-409");
 
+    /* A target that does not exist is the caller's error, so it is reported
+     * as one.  500 would claim the server broke at something it never
+     * attempted, and would leave a caller unable to tell a typo from an
+     * outage -- which is the difference between fixing the request and
+     * retrying it. */
+    ctl_post(api, "/api/v1/mounts",
+             "{\"name\":\"m9\",\"module\":\"memfs\",\"path\":\"nosuchfs\"}",
+             &res);
+    ck_status(&res, 404, "mount/create-unknown-fs-is-404");
+
+    ctl_post(api, "/api/v1/mounts",
+             "{\"name\":\"m9\",\"module\":\"nosuchmodule\",\"path\":\"fs0\"}",
+             &res);
+    ck_status(&res, 404, "mount/create-unknown-module-is-404");
+
+    ctl_get(api, "/api/v1/mounts/m9", &res);
+    ck_status(&res, 404, "mount/failed-create-registered-nothing");
+
     ctl_get(api, "/api/v1/mounts", &res);
     ck_status(&res, 200, "mount/list");
     ck(array_has_name(&res, "m0"), "mount/list-contains-m0");
@@ -223,6 +241,27 @@ main(
 
     ctl_get(api, "/api/v1/buckets/b0", &res);
     ck_status(&res, 200, "bucket/get");
+
+    /*
+     * A GET of a bucket that does not exist, followed by a write to the
+     * bucket table.
+     *
+     * chimera_server_get_bucket takes the bucket-map read lock and leaves it
+     * held for the caller, on the not-found path as much as the found one.
+     * A handler that returned 404 without releasing it would never drop it,
+     * and the next writer -- this create -- would block forever: one GET of a
+     * misspelled name would permanently disable bucket administration.  The
+     * create is the assertion; the 404 alone cannot see the leak.
+     */
+    ctl_get(api, "/api/v1/buckets/nosuchbucket", &res);
+    ck_status(&res, 404, "bucket/get-missing-is-404");
+
+    ctl_post(api, "/api/v1/buckets",
+             "{\"name\":\"b1\",\"path\":\"/m0\"}", &res);
+    ck_status(&res, 201, "bucket/create-after-missing-get-does-not-deadlock");
+
+    ctl_delete(api, "/api/v1/buckets/b1", &res);
+    ck_status(&res, 204, "bucket/delete-after-missing-get-does-not-deadlock");
 
     ctl_post(api, "/api/v1/users",
              "{\"username\":\"alice\",\"uid\":1000,\"gid\":1000,"

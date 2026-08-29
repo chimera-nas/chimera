@@ -466,6 +466,17 @@ mbt_env_open_opts(
         if (opts->s3_enabled) {
             chimera_server_config_set_s3_enabled(config, 1);
         }
+        if (opts->umount_timeout_ms) {
+            chimera_server_config_set_umount_timeout(config,
+                                                     opts->umount_timeout_ms);
+        }
+        if (opts->smb_enabled) {
+            chimera_server_config_set_smb_enabled(config, 1);
+            chimera_server_config_set_smb_signing_required(config, 0);
+        }
+        if (opts->s3_enabled) {
+            chimera_server_config_set_s3_enabled(config, 1);
+        }
         if (opts->rest_port) {
             chimera_server_config_set_rest_http_port(config, opts->rest_port);
             chimera_server_config_set_rest_auth_enabled(config,
