@@ -869,7 +869,15 @@ chimera_vfs_open_cache_purge_by_mount(
                 referenced++;
             } else {
                 /* Unreferenced handles sit on pending_close awaiting the idle
-                 * sweep; umount cannot wait out that timer. */
+                 * sweep; umount cannot wait out that timer.  Both detach sites
+                 * unlink from shard->handles before setting DETACHED, so
+                 * anything still walked here is attached and every attached
+                 * handle that reaches opencnt 0 was appended to pending_close.
+                 * utlist's own assert on that is compiled out under NDEBUG,
+                 * which leaves DL_DELETE dereferencing a null head -- say so
+                 * here instead, in every build. */
+                chimera_vfs_abort_if(!shard->pending_close,
+                                     "purge_by_mount: unreferenced handle absent from pending_close");
                 DL_DELETE(shard->pending_close, handle);
                 chimera_vfs_open_cache_shard_remove(shard, handle);
                 shard->open_handles--;
