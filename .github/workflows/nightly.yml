@@ -520,7 +520,63 @@ jobs:
               cmake -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DREQUIRE_NETNS_TESTS=ON -DKVM_IMAGE_REGISTRY=${{ env.KVM_IMAGE_REGISTRY }} ${{ matrix.cmake_extra }} /workspace && \
               ninja && \
               /workspace/scripts/cap_ctest_output.sh \
-              ctest --output-on-failure --test-output-size-failed 65536 --timeout 300 -j 32'
+              ctest -C extended --output-on-failure --test-output-size-failed 65536 --timeout 300 -j 32'
+
+  # macOS: the extended tier on a GitHub-hosted arm64 runner.  Nothing here is
+  # containerised and none of the Linux-only pieces exist (io_uring, libaio,
+  # KVM, netns, RDMA, the linux passthrough backend), so this covers the kqueue
+  # event core, the in-process test transport, and every portable path above
+  # them -- the combination the Linux matrix never exercises.
+  #
+  # The merge queue runs the quick tier here; this is the only place the rest
+  # of the suite meets macOS.
+  #
+  # No netns and no raised limits on a hosted runner: the in-process suites run
+  # gate-free (CHIMERA_LIMITS_TESTING passes vacuously off Linux) and the
+  # genuinely networked suites serialize under the chimera_net lock.
+  macos:
+    name: Test macOS ${{ matrix.build_type }}
+    runs-on: macos-14
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [Release, Debug]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          brew update
+          # bison: Apple ships 2.3 and the ndrzcc grammar needs 3.x; the
+          # top-level CMakeLists already adds the keg-only Homebrew path.
+          # libxcrypt: Darwin libc crypt(3) is DES-only, and REST auth needs
+          # full crypt(5) $-scheme verification.
+          brew install cmake ninja bison jansson userspace-rcu rocksdb krb5 \
+                       xxhash libxcrypt uthash openssl@3 libnghttp2
+          # oras, not quint: this job has never had a model-based-test trace
+          # corpus, so every MBT replay ctest disabled itself here.  A CI
+          # checkout never has local edits to ext/specs, so the bundle the specs
+          # CI published for the pinned commit always applies.
+          brew install oras
+
+      - name: Configure and build
+        run: |
+          cmake -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+                -DSPECS_BUNDLE=ON \
+                -S "${{ github.workspace }}" -B "${{ runner.temp }}/build"
+          ninja -C "${{ runner.temp }}/build"
+
+      - name: Test
+        run: |
+          cd "${{ runner.temp }}/build"
+          "${{ github.workspace }}/scripts/cap_ctest_output.sh" \
+            ctest -C extended --output-on-failure --test-output-size-failed 65536 \
+                  --timeout 300 -j "$(sysctl -n hw.ncpu)"
 
   # Informational measurement of the full smbtorture smb2 matrix (655 subtests x
   # 6 VFS backends).  The gating suite only registers the subtests in the
