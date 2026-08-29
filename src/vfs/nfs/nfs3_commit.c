@@ -80,9 +80,21 @@ chimera_nfs3_commit(
     args.file.data.data = fh;
     args.file.data.len  = fhlen;
 
-    chimera_nfs_init_rpc2_cred(&rpc2_cred, request->cred,
-                               request->thread->vfs->machine_name,
-                               request->thread->vfs->machine_name_len);
+    {
+        /* I/O goes out with the opening credential when there is one: POSIX
+         * binds I/O rights at open(2), and the stateless server would
+         * otherwise re-check DAC against the per-call credential (see
+         * nfs3_open_state.h). */
+        struct chimera_nfs3_open_state *dac_state =
+            (struct chimera_nfs3_open_state *) request->commit.handle->vfs_private;
+        const struct chimera_vfs_cred  *io_cred =
+            (dac_state && dac_state->open_cred_valid) ?
+            &dac_state->open_cred : request->cred;
+
+        chimera_nfs_init_rpc2_cred(&rpc2_cred, io_cred,
+                                   request->thread->vfs->machine_name,
+                                   request->thread->vfs->machine_name_len);
+    }
 
     shared->nfs_v3.send_call_NFSPROC3_COMMIT(&shared->nfs_v3.rpc2, thread->evpl, server_thread->nfs_conn, &rpc2_cred,
                                              &args, 0, 0, NULL, 0, 0, chimera_nfs3_commit_callback, request);

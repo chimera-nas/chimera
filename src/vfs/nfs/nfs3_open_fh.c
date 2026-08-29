@@ -24,6 +24,10 @@ chimera_nfs3_open_fh(
     }
 
     state->server_index = request->fh[CHIMERA_VFS_MOUNT_ID_SIZE];
+    if (request->cred) {
+        state->open_cred       = *request->cred;
+        state->open_cred_valid = 1;
+    }
 
     /* Store open state pointer for direct access on write/close */
     request->open_fh.r_vfs_private = (uint64_t) state;

@@ -37,6 +37,17 @@ struct chimera_nfs3_open_state {
      * when the file is finally closed.
      */
     struct chimera_vfs_cred silly_remove_cred;
+
+    /*
+     * The credential that opened this handle.  POSIX binds I/O rights at
+     * open(2); NFS3 is stateless and the server re-checks DAC on every READ /
+     * WRITE with whatever credential the RPC carries.  Issuing I/O with the
+     * opening credential (exactly what the Linux kernel client's open context
+     * does) keeps a descriptor usable by the process that legitimately opened
+     * it, regardless of who calls or what chmod happened since.
+     */
+    int                     open_cred_valid;
+    struct chimera_vfs_cred open_cred;
 };
 
 /*
