@@ -31,6 +31,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <time.h>
 
 #include "common/tcp_flavor.h"
 
@@ -49,11 +50,26 @@
  * scrapes into a 2 MiB buffer, so match it and refuse to truncate silently. */
 #define CTL_BODY_MAX     (2 << 20)
 
+/* How long a single in-process request may take before the harness calls it
+ * wedged rather than slow.  Generous next to the microseconds these actually
+ * take, and well inside the ctest timeout so the failure names the request
+ * instead of arriving as an anonymous kill. */
+#define CTL_HANG_MS      20000
+
+static inline uint64_t
+ctl_now_ms(void)
+{
+    struct timespec ts;
+
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t) ts.tv_sec * 1000 + (uint64_t) ts.tv_nsec / 1000000;
+} /* ctl_now_ms */
+
 /* evpl_http_request_get_datav takes a BYTE count and fills as many iovecs as
  * that spans, so a request larger than the array can overrun it.  Clamp each
  * call to the array size: an iovec is at least one byte, so that bound cannot
  * be exceeded.  (rest.c's own POST body reader clamps the same way.) */
-#define CTL_MAX_IOV      256
+#define CTL_MAX_IOV 256
 
 /* One HTTP exchange's result. */
 struct ctl_res {
@@ -210,8 +226,28 @@ ctl_http(
 
     evpl_http_request_dispatch(request, ctl_client_notify, res);
 
-    while (!res->done) {
-        evpl_continue(c->evpl);
+    /* Bounded, like the SMB harness's SMB2C_HANG_MS: a response that never
+     * lands is a finding, and without a deadline it surfaces as a bare ctest
+     * timeout that says nothing about which request wedged.  The budget is a
+     * wedge guard, not a latency knob -- every request here is answered by a
+     * server in this same process, so any of them taking seconds is already
+     * the bug. */
+    {
+        uint64_t deadline = ctl_now_ms() + CTL_HANG_MS;
+
+        while (!res->done) {
+            evpl_continue(c->evpl);
+            if (ctl_now_ms() >= deadline) {
+                fprintf(stderr,
+                        "ctl: WEDGED waiting for %s %s after %d ms -- "
+                        "no response from the server in this process\n",
+                        method == EVPL_HTTP_REQUEST_TYPE_GET ? "GET"
+                        : method == EVPL_HTTP_REQUEST_TYPE_POST ? "POST"
+                        : method == EVPL_HTTP_REQUEST_TYPE_PUT ? "PUT"
+                        : "DELETE", url, CTL_HANG_MS);
+                exit(4);
+            }
+        }
     }
 
     res->body[res->body_len] = '\0';
