@@ -89,20 +89,23 @@ chimera_vfs_gate_needed_dac(
         return 1;
     }
 
-    /* A remote-DAC proxy has no bypass to compensate for: the server it
-     * forwards to authorizes every operation itself, with the credential the
-     * proxy chooses to send (the opening credential for I/O -- see
-     * nfs3_open_state.h).  Engine-side per-op gating on top would re-check
-     * with the per-call credential and break rights-bind-at-open. */
-    if (module_capabilities & CHIMERA_VFS_CAP_REMOTE_DAC) {
-        return 0;
-    }
-
     if (cred->flavor != CHIMERA_VFS_AUTH_UNIX || cred->uid == 0) {
         return 0;
     }
 
-    return (module_capabilities & CHIMERA_VFS_CAP_DELEGATES_DAC) ? 1 : 0;
+    /* A remote-DAC proxy defers per-op authorization to its server -- but the
+     * prefix is different.  The engine resolves components through the name
+     * and attribute caches, so a repeated traversal never reaches the server
+     * at all, and the follow-on operation arrives there parent-BY-HANDLE with
+     * no prefix for the server to check either.  Nobody but the engine can
+     * evaluate path-prefix search once resolution is cache-served, so the
+     * proxy takes the same engine-side prefix gate as a DELEGATES_DAC
+     * passthrough.  (This is only the lookup/destination-directory gate; the
+     * per-op data gates stay deferred, preserving rights-bind-at-open --
+     * see nfs3_open_state.h.) */
+    return (module_capabilities &
+            (CHIMERA_VFS_CAP_DELEGATES_DAC | CHIMERA_VFS_CAP_REMOTE_DAC)) ?
+           1 : 0;
 } /* chimera_vfs_gate_needed_dac */
 
 SYMBOL_EXPORT int
