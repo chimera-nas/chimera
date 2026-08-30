@@ -1693,9 +1693,17 @@ diskfs_open_fh_inode_cb(
 
     /* A deleted, unreferenced inode is dead (queued for or under background
      * reclaim); a stale handle must not resurrect it mid-burn-down.  One that
-     * still has open handles (deleted-while-open / anonymous) stays openable. */
+     * still has open handles (deleted-while-open / anonymous) stays openable.
+     *
+     * ESTALE, not ENOENT: this resolves a FILEHANDLE, so there is no name to
+     * be absent -- the handle is well-formed and names nothing, which is the
+     * definition of stale.  It also has to agree with what the very same
+     * handle answers a moment later, once reclaim has freed the inode and
+     * diskfs_inode_acquire stops finding it at all; that path has always
+     * said ESTALE, so answering ENOENT here made a dead handle report NOENT
+     * or STALE depending on how far the background reclaim had got. */
     if (unlikely(inode->nlink == 0 && inode->refcnt == 0)) {
-        diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOENT);
+        diskfs_op_fail(request, p->txn, CHIMERA_VFS_ESTALE);
         return;
     }
 
@@ -3282,9 +3290,14 @@ diskfs_link_at_inode_cb(
     /* A deleted, unreferenced inode is dead -- it is queued for (or already
      * under) background reclaim, so it must not re-enter the namespace.  An
      * nlink==0 inode with open handles is a live anonymous file
-     * (create_unlinked) and may be linked. */
+     * (create_unlinked) and may be linked.
+     *
+     * ESTALE for the same reason as diskfs_open_fh_inode_cb: the dead object
+     * is named by the SOURCE HANDLE, not by a name (RFC 1813 does not list
+     * NFS3ERR_NOENT for LINK at all), and it must not depend on how far
+     * reclaim has got. */
     if (unlikely(inode->nlink == 0 && inode->refcnt == 0)) {
-        diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOENT);
+        diskfs_op_fail(request, p->txn, CHIMERA_VFS_ESTALE);
         return;
     }
 
