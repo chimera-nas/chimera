@@ -197,6 +197,33 @@ chimera_nfs3_rename_at(
     ctx->shared = shared;
     ctx->server = server_thread->server;
 
+    /* POSIX rename(2): when old and new resolve to the SAME existing file,
+     * rename does nothing and succeeds.  Without this, the silly-target
+     * dance below dismantles the source: the open target -- which IS the
+     * source -- gets silly-renamed aside and the wire rename re-links it,
+     * leaving an undead name and link count.  Catch the literal self-rename
+     * (same directory, same name) and, when the VFS resolved both, the
+     * same-file-through-different-names case. */
+    if (request->fh_len == request->rename_at.new_fhlen &&
+        memcmp(request->fh, request->rename_at.new_fh,
+               request->fh_len) == 0 &&
+        request->rename_at.namelen == request->rename_at.new_namelen &&
+        memcmp(request->rename_at.name, request->rename_at.new_name,
+               request->rename_at.namelen) == 0) {
+        request->status = CHIMERA_VFS_OK;
+        request->complete(request);
+        return;
+    }
+    if (request->rename_at.source_fh_len && request->rename_at.target_fh &&
+        request->rename_at.target_fh_len ==
+        request->rename_at.source_fh_len &&
+        memcmp(request->rename_at.source_fh, request->rename_at.target_fh,
+               request->rename_at.source_fh_len) == 0) {
+        request->status = CHIMERA_VFS_OK;
+        request->complete(request);
+        return;
+    }
+
     /*
      * If no target FH provided, skip silly rename handling entirely.
      * This happens when:
