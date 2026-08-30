@@ -105,34 +105,32 @@ set_tests_properties(chimera/server/s3/mbt/batch_multipart_memfs PROPERTIES
 #    passthrough module, not the cache layer.  Run manually with
 #    --backend linux/io_uring; S3_MBT_KEEP_SCRATCH=1 preserves the backing
 #    tree for post-mortem.
-if(HAVE_LIBAIO)
-    add_test(NAME chimera/server/s3/mbt/batch_diskfs
-        COMMAND $<TARGET_FILE:s3_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/s3
-                --backend diskfs --exclude-prefix stepMultipart_)
-    set_tests_properties(chimera/server/s3/mbt/batch_diskfs PROPERTIES
-        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=s3_batch_diskfs"
-        LABELS "quint;s3_mbt;diskfs"
-        TIMEOUT 300)
+add_test(NAME chimera/server/s3/mbt/batch_diskfs
+    COMMAND $<TARGET_FILE:s3_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/s3
+            --backend diskfs --exclude-prefix stepMultipart_)
+set_tests_properties(chimera/server/s3/mbt/batch_diskfs PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=s3_batch_diskfs"
+    LABELS "quint;s3_mbt;diskfs"
+    TIMEOUT 300)
 
-    # Previously withheld: PutObject's publish could double-fire when the
-    # body drain outran the async metadata xattr chain (or vice versa), and
-    # at multipart scale on diskfs the second link_at's failure path crashed
-    # into the first's completion (~1-in-2 on stepMultipart_64_0x11_1).
-    # Fixed by the exactly-once publish handshake in s3_put.c (meta_pending
-    # gate + published latch); debug-level replay made the window wide
-    # enough to pin the real cause, which was never diskfs's completion
-    # threading.
-    add_test(NAME chimera/server/s3/mbt/batch_multipart_diskfs
-        COMMAND $<TARGET_FILE:s3_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/s3
-                --backend diskfs --block-size 5242880
-                --exclude-prefix step_ --exclude-prefix stepData_
-                --exclude-prefix stepList_ --exclude-prefix stepBucket_
-                --exclude-prefix stepTag_)
-    set_tests_properties(chimera/server/s3/mbt/batch_multipart_diskfs PROPERTIES
-        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=s3_batch_multipart_diskfs"
-        LABELS "quint;s3_mbt;diskfs"
-        TIMEOUT 300)
-endif()
+# Previously withheld: PutObject's publish could double-fire when the
+# body drain outran the async metadata xattr chain (or vice versa), and
+# at multipart scale on diskfs the second link_at's failure path crashed
+# into the first's completion (~1-in-2 on stepMultipart_64_0x11_1).
+# Fixed by the exactly-once publish handshake in s3_put.c (meta_pending
+# gate + published latch); debug-level replay made the window wide
+# enough to pin the real cause, which was never diskfs's completion
+# threading.
+add_test(NAME chimera/server/s3/mbt/batch_multipart_diskfs
+    COMMAND $<TARGET_FILE:s3_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/s3
+            --backend diskfs --block-size 5242880
+            --exclude-prefix step_ --exclude-prefix stepData_
+            --exclude-prefix stepList_ --exclude-prefix stepBucket_
+            --exclude-prefix stepTag_)
+set_tests_properties(chimera/server/s3/mbt/batch_multipart_diskfs PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=s3_batch_multipart_diskfs"
+    LABELS "quint;s3_mbt;diskfs"
+    TIMEOUT 300)
 
 if(CAIRN_ENABLED)
     add_test(NAME chimera/server/s3/mbt/batch_cairn

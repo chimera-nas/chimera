@@ -984,6 +984,11 @@ diskfs_init(
             protocol_id = EVPL_BLOCK_PROTOCOL_LIBAIO;
         } else if (strcmp(protocol_name, "vfio") == 0) {
             protocol_id = EVPL_BLOCK_PROTOCOL_VFIO;
+        } else if (strcmp(protocol_name, "pread") == 0) {
+            /* Blocking pread/pwrite on a libevpl-owned service thread per
+             * device.  Slower than the async backends and the only one that
+             * exists off Linux, so it is what diskfs runs on there. */
+            protocol_id = EVPL_BLOCK_PROTOCOL_PREAD;
         } else {
             chimera_diskfs_abort("Unsupported protocol: %s", protocol_name);
         }
