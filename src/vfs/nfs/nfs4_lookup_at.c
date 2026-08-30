@@ -180,6 +180,19 @@ chimera_nfs4_lookup_at(
 
     chimera_nfs4_map_fh(request->fh, request->fh_len, &fh, &fhlen);
 
+    /* ".." at the mount root resolves to the root itself.  The server-side
+     * parent is the pseudo-fs node above the export, which this client must
+     * not surface (the kernel NFS client likewise never crosses its mount
+     * root); a self-lookup is exactly the LOOKUP_OP_DOT compound. */
+    if (op_type == LOOKUP_OP_DOTDOT) {
+        struct chimera_nfs_client_mount *cm = request->mount_private;
+
+        if (cm && cm->root_fh_len == fhlen &&
+            memcmp(cm->root_fh, fh, fhlen) == 0) {
+            op_type = LOOKUP_OP_DOT;
+        }
+    }
+
     ctx->op_type = op_type;
 
     memset(&args, 0, sizeof(args));
