@@ -1010,7 +1010,7 @@ void chimera_nfs4_compound_call(
     struct evpl_iovec                       *write_chunk_iov,
     int                                      write_chunk_niov,
     int                                      max_rdma_reply_chunk,
-    void                                  ( *cb )(
+    void (                                  *cb )(
         struct evpl *,
         const struct evpl_rpc2_verf *,
         struct COMPOUND4res *,
