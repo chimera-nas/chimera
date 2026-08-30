@@ -54,7 +54,20 @@ struct chimera_vfs_cred {
      * the kernel (the syscall holds the very lock the invalidation needs).
      * NULL everywhere else; not part of the credential identity hash. */
     const void                  *origin;
+
+    /* Behavioral flags the protocol server stamps on the credential; like
+     * origin, NOT part of the credential identity hash. */
+    uint32_t                     flags;
 };
+
+/* The caller is a stateless remote-filesystem client (the NFS server stamps
+ * this): the engine's per-operation data gates apply the owner override
+ * Linux nfsd calls NFSD_MAY_OWNER_OVERRIDE -- the file's owner keeps
+ * READ/WRITE and size-setattr through descriptors whose rights were bound at
+ * an open(2) this server never saw, regardless of the current mode bits.
+ * Local callers (the posix client, the FUSE server) do NOT set it: their
+ * opens are visible, so strict POSIX evaluation stands. */
+#define CHIMERA_VFS_CRED_FLAG_OWNER_OVERRIDE (1U << 0)
 
 /*
  * Compact identity hash for a credential, used to key the open-handle cache so

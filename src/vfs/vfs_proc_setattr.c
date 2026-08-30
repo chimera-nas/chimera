@@ -399,7 +399,9 @@ chimera_vfs_setattr_gate_complete(
          * lose the ability to resize through a descriptor they legitimately
          * opened.  AUTH_UNIX only, as in the I/O gates -- an SMB caller's
          * rights come from the security descriptor. */
-        if (owner && gate->cred->flavor == CHIMERA_VFS_AUTH_UNIX &&
+        if (owner &&
+            (gate->cred->flags & CHIMERA_VFS_CRED_FLAG_OWNER_OVERRIDE) &&
+            gate->cred->flavor == CHIMERA_VFS_AUTH_UNIX &&
             (m & CHIMERA_VFS_ATTR_SIZE)) {
             required &= ~CHIMERA_ACE_WRITE_DATA;
         }

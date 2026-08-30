@@ -584,6 +584,12 @@ chimera_nfs_map_cred(
                                         CHIMERA_VFS_ANON_UID,
                                         CHIMERA_VFS_ANON_GID);
     }
+
+    /* NFS callers are stateless remote clients: their open(2)s happened on
+     * machines this server never saw, so the engine's per-op data gates
+     * apply the nfsd-style owner override for them (see the flag's comment
+     * in vfs_cred.h). */
+    vfs_cred->flags |= CHIMERA_VFS_CRED_FLAG_OWNER_OVERRIDE;
 } /* chimera_nfs_map_cred */
 
 /*

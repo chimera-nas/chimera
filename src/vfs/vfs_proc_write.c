@@ -144,10 +144,14 @@ chimera_vfs_write_gate_complete(
      * OVERRIDE): a POSIX caller who OWNS the file may move its data through
      * an already-open descriptor regardless of the current mode bits --
      * POSIX binds I/O rights at open(2), and stateless per-op re-checking
-     * would otherwise break every open-then-chmod sequence.  AUTH_UNIX only:
-     * an SMB caller's rights come from the NT security descriptor, where
+     * would otherwise break every open-then-chmod sequence.  Only for
+     * credentials the protocol server stamped as stateless remote callers
+     * (the NFS server; see CHIMERA_VFS_CRED_FLAG_OWNER_OVERRIDE): a local
+     * caller's opens are visible, so strict POSIX evaluation stands, and an
+     * SMB caller's rights come from the NT security descriptor, where
      * ownership does not imply data access. */
-    if (gate->cred->flavor == CHIMERA_VFS_AUTH_UNIX &&
+    if ((gate->cred->flags & CHIMERA_VFS_CRED_FLAG_OWNER_OVERRIDE) &&
+        gate->cred->flavor == CHIMERA_VFS_AUTH_UNIX &&
         (attr->va_set_mask & CHIMERA_VFS_ATTR_UID) &&
         gate->cred->uid == attr->va_uid) {
         gate->handle->granted_access |= CHIMERA_ACE_READ_DATA |
