@@ -429,10 +429,41 @@ chimera_nfs_nlm4_lock_acquire_cb(
     res.cookie.data = ctx->cookie.data;
 
     if (result == CHIMERA_CLAIM_GRANTED) {
+        bool reaped;
+
         pthread_mutex_lock(&shared->nlm_state.mutex);
-        entry->pending        = false;
-        entry->claim_inserted = true;
+        reaped = entry->reaped;
+        if (reaped) {
+            /* The client was reaped (FREE_ALL, SM_NOTIFY, or its last
+             * connection dropped) while this acquire was in flight, and the
+             * reaper could not claim the ticket, so it left the entry to us.
+             * Granting now would hand a lock to a client we have already
+             * told holds none -- drop it instead.  Still linked, so unlink
+             * under the same mutex the reaper used. */
+            DL_DELETE(ctx->client->locks, entry);
+        } else {
+            entry->pending        = false;
+            entry->claim_inserted = true;
+        }
         pthread_mutex_unlock(&shared->nlm_state.mutex);
+
+        if (reaped) {
+            chimera_nfs_debug(
+                "NLM LOCK: grant landed for reaped client '%s'; releasing",
+                ctx->client->hostname);
+            chimera_vfs_claim_release(vfs_state, entry->file_state,
+                                      &entry->claim);
+            chimera_vfs_state_put(vfs_state, entry->file_state);
+            entry->file_state = NULL;
+            chimera_vfs_release(thread->vfs_thread, entry->handle);
+            nlm_lock_entry_free(entry);
+            /* The original LOCK RPC was already answered with NLM4_BLOCKED
+             * (only blocked entries can still be pending here), so no reply
+             * is owed and no NLM_GRANTED callback is wanted. */
+            free(ctx);
+            return;
+        }
+
         res.stat = NLM4_GRANTED;
 
         /* Monitor the lock holder so we can SM_NOTIFY it to reclaim if we
