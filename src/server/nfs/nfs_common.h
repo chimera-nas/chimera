@@ -438,6 +438,8 @@ struct chimera_server_nfs_shared {
 /* Forward decl for the per-thread lease sweeper (defined in nfs4_lease.h). */
 struct nfs_lease_sweeper;
 
+struct nlm_lock_resume;
+
 struct chimera_server_nfs_thread {
     struct evpl_rpc2_thread          *rpc2_thread;
     struct chimera_server_nfs_shared *shared;
@@ -481,6 +483,18 @@ struct chimera_server_nfs_thread {
      * protected by cb_recall_lock.  See nfs4_callback.c. */
     struct nfs4_cb_client            *cb_teardown_queue;
     uint8_t                           cb_doorbell_armed;
+
+    /* NLM deferred lock-acquire completions bounced back to their home
+     * thread.  A blocking LOCK's grant lands on whichever thread released
+     * the conflict (or on the claim core's service thread), but the reply
+     * rides the connection's evpl and the teardown uses this thread's VFS
+     * thread -- neither is cross-thread safe.  Its own doorbell rather than
+     * cb_doorbell, so NLM does not pull the NFSv4 callback machinery into
+     * targets that link one without the other.  See nfs_nlm.c. */
+    struct evpl_doorbell              nlm_doorbell;
+    pthread_mutex_t                   nlm_resume_lock;
+    struct nlm_lock_resume           *nlm_resume_queue;
+    uint8_t                           nlm_doorbell_armed;
 };
 
 static inline struct nfs_request *

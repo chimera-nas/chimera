@@ -924,6 +924,9 @@ nfs_server_thread_init(
     /* Delegation callback recall doorbell + queue. */
     nfs4_cb_thread_init(thread);
 
+    /* NLM deferred lock-acquire resume doorbell + queue. */
+    chimera_nfs_nlm4_thread_init(thread);
+
     /* Run-once cold-start: reload the persisted NSM state + monitor list and
      * notify monitored hosts that we restarted (so they reclaim during the NLM
      * grace window).  Idempotent across threads; no-op on a non-persistent
@@ -948,6 +951,7 @@ nfs_server_thread_destroy(void *data)
     }
 
     nfs4_cb_thread_destroy(thread);
+    chimera_nfs_nlm4_thread_destroy(thread);
 
     if (thread->shared->mount_server) {
         evpl_rpc2_server_detach(thread->rpc2_thread, thread->shared->mount_server);
