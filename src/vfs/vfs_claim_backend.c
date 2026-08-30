@@ -489,6 +489,7 @@ chimera_vfs_claim_backend_service(struct chimera_vfs_state *state)
 {
     struct chimera_vfs_file_state *head, *file, *next;
     struct chimera_vfs_bl_work    *w;
+    bool                           is_rel;
 
     if (!state || !chimera_vfs_claim_backend_capable(state)) {
         return;
@@ -543,13 +544,35 @@ chimera_vfs_claim_backend_service(struct chimera_vfs_state *state)
      * the gate before project_range returns, so this loop keeps draining
      * without a doorbell round trip. */
     for (;;) {
+        /* Peek the head's type before committing.  A RELEASE has to be
+         * selected AND dispatched under bl_dispatch_lock, so that an inline
+         * confirm's drain cannot slip between the two and miss it; a TICKET
+         * must NOT hold that lock, because its project_range takes it. */
         pthread_mutex_lock(&state->service_lock);
         if (state->work_confirming) {
             /* A confirm is in flight; its completion resumes the drain. */
             pthread_mutex_unlock(&state->service_lock);
             break;
         }
+        w      = state->work_head;
+        is_rel = w && w->type == CHIMERA_VFS_BL_WORK_RELEASE;
+        pthread_mutex_unlock(&state->service_lock);
+
+        if (!w) {
+            break;
+        }
+
+        if (is_rel) {
+            pthread_mutex_lock(&state->bl_dispatch_lock);
+        }
+
+        /* Re-read: the head may have changed while the lock was not held.
+         * Only take it if it still matches what we prepared for. */
+        pthread_mutex_lock(&state->service_lock);
         w = state->work_head;
+        if (w && (w->type == CHIMERA_VFS_BL_WORK_RELEASE) != is_rel) {
+            w = NULL;
+        }
         if (w) {
             state->work_head = w->next;
             if (!state->work_head) {
@@ -563,7 +586,10 @@ chimera_vfs_claim_backend_service(struct chimera_vfs_state *state)
         pthread_mutex_unlock(&state->service_lock);
 
         if (!w) {
-            break;
+            if (is_rel) {
+                pthread_mutex_unlock(&state->bl_dispatch_lock);
+            }
+            continue;
         }
 
         switch (w->type) {
@@ -576,6 +602,7 @@ chimera_vfs_claim_backend_service(struct chimera_vfs_state *state)
                                                   w->fh, w->fh_len,
                                                   w->fh_hash, w->token, 0,
                                                   NULL, NULL);
+                pthread_mutex_unlock(&state->bl_dispatch_lock);
                 break;
         } /* switch */
         free(w);
@@ -770,6 +797,9 @@ chimera_vfs_claim_backend_drain_releases(
     struct chimera_vfs_bl_work *w, **pp;
     struct chimera_vfs_bl_work *mine = NULL, **mtail = &mine;
 
+    /* Selection and dispatch together: see bl_dispatch_lock in vfs_claim.h. */
+    pthread_mutex_lock(&state->bl_dispatch_lock);
+
     pthread_mutex_lock(&state->service_lock);
     pp = &state->work_head;
     while ((w = *pp)) {
@@ -803,6 +833,8 @@ chimera_vfs_claim_backend_drain_releases(
                                           NULL, NULL);
         free(w);
     }
+
+    pthread_mutex_unlock(&state->bl_dispatch_lock);
 } /* chimera_vfs_claim_backend_drain_releases */
 
 /* Cancel a RANGE acquire confirm that is still QUEUED on the work FIFO --
