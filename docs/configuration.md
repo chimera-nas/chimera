@@ -490,7 +490,7 @@ Each entry of `devices`:
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `type` | string | required | `"io_uring"`, `"libaio"`, or `"vfio"`. |
+| `type` | string | required | `"io_uring"`, `"libaio"`, `"vfio"`, or `"pread"`.  The first three are Linux-only; `"pread"` runs the device from a libevpl service thread with blocking pread/pwrite and works anywhere. |
 | `path` | string | required | Device path, file path, or PCI BDF (e.g. `"01:00.0"` for VFIO). |
 | `size` | int | auto | Device size in bytes (auto-detected for file-backed if omitted). |
 | `role` | string | `"local"` | `"local"`, or `"remote"` for a pNFS-only data device. |

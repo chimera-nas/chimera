@@ -628,8 +628,8 @@ s3_mbt_env_open_module(
         snprintf(cfg, sizeof(cfg),
                  "{\"initialize\":true,\"unsafe_async\":true,"
                  "\"intent_log_size\":67108864,"
-                 "\"devices\":[{\"type\":\"libaio\",\"size\":1,\"path\":\"%s\"}]}",
-                 img);
+                 "\"devices\":[{\"type\":\"%s\",\"size\":1,\"path\":\"%s\"}]}",
+                 CHIMERA_DISKFS_DEVICE_TYPE, img);
         chimera_server_config_add_module(config, "diskfs", NULL, cfg);
     } else if (strcmp(env->module, "cairn") == 0) {
         char dir[300], cfg[512];

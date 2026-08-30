@@ -83,13 +83,11 @@ set_tests_properties(chimera/server/nfs/mbt/deviation_probe_memfs PROPERTIES
 # each backend's own: they each resolve a handle themselves, and each had to
 # learn to tell a handle that no longer names anything from a name that was
 # never there.
-if(HAVE_LIBAIO)
-    add_test(NAME chimera/server/nfs/mbt/deviation_probe_diskfs
-        COMMAND $<TARGET_FILE:nfs3_mbt_probe> -b diskfs)
-    set_tests_properties(chimera/server/nfs/mbt/deviation_probe_diskfs PROPERTIES
-        LABELS "quint;nfs3_mbt;diskfs"
-        TIMEOUT 60)
-endif()
+add_test(NAME chimera/server/nfs/mbt/deviation_probe_diskfs
+    COMMAND $<TARGET_FILE:nfs3_mbt_probe> -b diskfs)
+set_tests_properties(chimera/server/nfs/mbt/deviation_probe_diskfs PROPERTIES
+    LABELS "quint;nfs3_mbt;diskfs"
+    TIMEOUT 60)
 
 if(CAIRN_ENABLED)
     add_test(NAME chimera/server/nfs/mbt/deviation_probe_cairn
@@ -143,17 +141,15 @@ set_tests_properties(chimera/server/nfs/mbt/batch_memfs PROPERTIES
 # genuine backend deviation from the model memfs already satisfies.  Each
 # replay process self-provisions its scratch (device image / rocksdb dir) under
 # its own mkdtemp session dir, so the batches still run fully parallel and clean
-# up with the temp dir.  Gated on the storage each backend needs: diskfs on
-# libaio (its device type), cairn on rocksdb.
-if(HAVE_LIBAIO)
-    add_test(NAME chimera/server/nfs/mbt/batch_diskfs
-        COMMAND $<TARGET_FILE:nfs3_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/nfs3
-                --backend diskfs)
-    set_tests_properties(chimera/server/nfs/mbt/batch_diskfs PROPERTIES
-        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs3_batch_diskfs"
-        LABELS "quint;nfs3_mbt;diskfs"
-        TIMEOUT 300)
-endif()
+# up with the temp dir.  diskfs takes whichever libevpl block backend the
+# platform has (CHIMERA_DISKFS_DEVICE_TYPE); cairn is gated on rocksdb.
+add_test(NAME chimera/server/nfs/mbt/batch_diskfs
+    COMMAND $<TARGET_FILE:nfs3_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/nfs3
+            --backend diskfs)
+set_tests_properties(chimera/server/nfs/mbt/batch_diskfs PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs3_batch_diskfs"
+    LABELS "quint;nfs3_mbt;diskfs"
+    TIMEOUT 300)
 
 if(CAIRN_ENABLED)
     add_test(NAME chimera/server/nfs/mbt/batch_cairn

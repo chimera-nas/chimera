@@ -452,6 +452,20 @@ else()
     message(STATUS "LIBAIO not found")
 endif()
 
+# Which libevpl block backend diskfs's test harnesses put in their device
+# config.  io_uring and libaio are Linux-only; libevpl's pread backend drives a
+# device from its own service thread and needs nothing beyond POSIX, so it is
+# what is left on macOS -- or on a Linux host without libaio.  A diskfs device
+# is therefore available everywhere chimera builds, which is why the diskfs
+# test variants are no longer gated on HAVE_LIBAIO.
+if (HAVE_LIBAIO)
+    set(CHIMERA_DISKFS_DEVICE_TYPE "libaio")
+else()
+    set(CHIMERA_DISKFS_DEVICE_TYPE "pread")
+endif()
+message(STATUS "diskfs device type: ${CHIMERA_DISKFS_DEVICE_TYPE}")
+add_definitions(-DCHIMERA_DISKFS_DEVICE_TYPE="${CHIMERA_DISKFS_DEVICE_TYPE}")
+
 if (CAIRN_ENABLED)
     message(STATUS "CAIRN enabled")
     add_definitions(-DHAVE_CAIRN=1)

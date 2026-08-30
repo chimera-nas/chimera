@@ -1057,8 +1057,8 @@ posix_env_setup(
         snprintf(module_cfg, sizeof(module_cfg),
                  "{\"initialize\":true,\"unsafe_async\":true,"
                  "\"intent_log_size\":67108864,"
-                 "\"devices\":[{\"type\":\"libaio\",\"size\":1,\"path\":\"%s\"}]}",
-                 img);
+                 "\"devices\":[{\"type\":\"%s\",\"size\":1,\"path\":\"%s\"}]}",
+                 CHIMERA_DISKFS_DEVICE_TYPE, img);
     } else if (strcmp(module, "cairn") == 0) {
         if (!storage) {
             fprintf(stderr, "posix_driver: cairn needs a storage dir\n");
