@@ -798,9 +798,16 @@ exempt_remove(const char *path)
 
     for (i = 0; i < g_nexempt; i++) {
         if (strcmp(g_exempt[i], path) == 0) {
-            g_exempt[i][0] = '\0';
-            snprintf(g_exempt[i], sizeof(g_exempt[i]), "%s",
-                     g_exempt[--g_nexempt]);
+            /* Swap-with-last.  memmove, not snprintf: removing the LAST
+             * entry makes source and destination the same slot, which is
+             * fine for memmove and a -Werror=restrict violation for the
+             * string functions (gcc flags it; clang does not). */
+            g_nexempt--;
+            if (i != g_nexempt) {
+                memmove(g_exempt[i], g_exempt[g_nexempt],
+                        sizeof(g_exempt[i]));
+            }
+            g_exempt[g_nexempt][0] = '\0';
             return;
         }
     }
