@@ -1324,10 +1324,24 @@ chimera_io_uring_readdir(
     dup_fd = openat(fd, ".", O_RDONLY | O_DIRECTORY);
 
     if (dup_fd < 0) {
+        struct stat dead_st;
+        int         open_errno = errno;
+
+        /* A handle names an object, not a path: when the directory behind
+         * this handle is gone (removed since the handle was minted), the
+         * answer is ESTALE whatever errno the kernel chose for the re-open
+         * -- kernels disagree across versions (ENOENT historically; newer
+         * ones answer differently, which surfaced as SERVERFAULT from the
+         * unmapped-errno fallback on ubuntu26).  The portable test is the
+         * fd itself: it stays fstat-able on a deleted directory, with a
+         * zero link count. */
+        if (fstat(fd, &dead_st) == 0 && dead_st.st_nlink == 0) {
+            open_errno = ESTALE;
+        }
         chimera_io_uring_error("io_uring_readdir: openat() failed: %s",
-                               strerror(errno));
+                               strerror(open_errno));
         chimera_restore_privilege(request->cred);
-        request->status = chimera_linux_errno_to_status(errno);
+        request->status = chimera_linux_errno_to_status(open_errno);
         request->complete(request);
         return;
     }
