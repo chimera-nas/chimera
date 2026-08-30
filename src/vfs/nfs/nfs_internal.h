@@ -337,6 +337,14 @@ struct chimera_nfs_client_mount {
     struct chimera_nfs_client_mount  *next;
     struct chimera_vfs_request       *mount_request;
     char                              path[CHIMERA_VFS_PATH_MAX];
+
+    /* The export root's wire handle (NFS4 mounts).  A ".." at the mount root
+     * must resolve to the root itself: the real parent on the server is the
+     * pseudo-fs node above the export, which a mounted client must never see
+     * (the kernel client likewise never sends LOOKUPP across its mount root).
+     * chimera_nfs4_lookup_at compares against this to clamp. */
+    uint8_t                           root_fh[CHIMERA_NFS_PROXY_REMOTE_FH_MAX];
+    int                               root_fh_len;
 };
 
 struct chimera_nfs_client_open_handle {

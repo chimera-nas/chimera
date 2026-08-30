@@ -331,6 +331,11 @@ chimera_nfs4_mount_get_root_fh_callback(
     memcpy(fh_fragment + 1, remote_fh->data, remote_fh->len);
     fh_fragment_len = 1 + remote_fh->len;
 
+    /* Remember the export root's wire handle so lookups can clamp ".." at the
+     * mount root (see chimera_nfs_client_mount). */
+    memcpy(mount->root_fh, remote_fh->data, remote_fh->len);
+    mount->root_fh_len = remote_fh->len;
+
     /* Compute FSID by hashing server hostname + remote root FH */
     hostname_len = strlen(mount->server->hostname);
     memcpy(hash_input, mount->server->hostname, hostname_len);
