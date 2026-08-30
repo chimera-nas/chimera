@@ -2,6 +2,19 @@
 #
 # SPDX-License-Identifier: Unlicense
 
+# Current ccache, mirrored into GHCR by .github/workflows/mirror-ccache.yml.
+# CI overrides CCACHE_REGISTRY to the internal pull-through proxy so an image
+# build never reaches out to ghcr.io -- the same public-default/internal-override
+# split the KVM guest images use (see kvm/CMakeLists.txt).
+#
+# Not the distro package: CCACHE_REMOTE_STORAGE arrived in ccache 4.7, and
+# rocky9 and ubuntu22 ship 4.6, which reads the pre-rename name and so silently
+# ignored the shared cache -- those cells compiled everything cold, every run.
+# One pinned upstream binary everywhere retires that whole class of skew.
+ARG CCACHE_REGISTRY=ghcr.io/chimera-nas/ccache
+ARG CCACHE_VERSION=4.14
+FROM ${CCACHE_REGISTRY}:${CCACHE_VERSION} AS ccache
+
 ARG DOCKER_MIRROR
 FROM ${DOCKER_MIRROR}ubuntu:26.04
 ARG APT_MIRROR
@@ -34,6 +47,9 @@ ARG S3TESTS_REF=5522d1c351f75bc00ae0f64f742f3f095f5939d9
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# The mirrored ccache, ahead of anything the distro might provide on PATH.
+COPY --from=ccache /ccache /usr/local/bin/ccache
+
 RUN if [ -n "$APT_MIRROR" ]; then \
     echo "deb $APT_MIRROR resolute main universe" > /etc/apt/sources.list.d/local-mirror.list && \
     echo "deb $APT_MIRROR resolute-updates main universe" >> /etc/apt/sources.list.d/local-mirror.list && \
@@ -45,7 +61,7 @@ RUN apt-get -y update && \
     apt-get -y --no-install-recommends upgrade && \
     apt-get -y --no-install-recommends install unminimize apt-utils && \
     yes | unminimize && \
-    apt-get -y --no-install-recommends install clang clang-tools cmake ninja-build ccache git flex bison lldb gdb less vim psmisc uncrustify \
+    apt-get -y --no-install-recommends install clang clang-tools cmake ninja-build git flex bison lldb gdb less vim psmisc uncrustify \
     net-tools tshark tcpdump uuid-dev iproute2 man-db manpages-dev ca-certificates ssh libjansson-dev libclang-rt-21-dev llvm wget \
     libxxhash-dev liburcu-dev librdmacm-dev liburing-dev libaio-dev libunwind-dev librocksdb-dev libcurl4-openssl-dev clangd uthash-dev libnuma-dev \
     libboost-dev libboost-program-options-dev libboost-thread-dev libboost-system-dev \

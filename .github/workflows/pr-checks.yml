@@ -51,6 +51,9 @@ permissions:
 
 env:
   DEV_IMAGE_TAG_PREFIX: repository.mdh.quantum.com:5004/cache/chimera-dev
+  # Internal pull-through cache for the mirrored ccache image (mirrors
+  # ghcr.io/chimera-nas/ccache).  Public default lives in the Dockerfiles.
+  CCACHE_IMAGE_REGISTRY: repository.mdh.quantum.com:5009/chimera-nas/ccache
   APT_MIRROR: http://repository.mdh.quantum.com/repository/pkgs/ubuntu
   DOCKER_MIRROR: repository.mdh.quantum.com/
 
@@ -123,6 +126,7 @@ jobs:
           build-args: |
             APT_MIRROR=${{ env.APT_MIRROR }}
             DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
+            CCACHE_REGISTRY=${{ env.CCACHE_IMAGE_REGISTRY }}
 
   analyze-dev:
     name: Analyze devcontainer amd64 Release (pre-merge)
@@ -136,7 +140,11 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Perform clang static analysis
+      # Same cached-analyzer driver as the queue; see build-test.yml for why
+      # scan-build cannot be cached.  No bundle restore here: a PR-time job on a
+      # fork-able ref has no credentials for the scratch repo, so this one runs
+      # cold and is simply the earliest signal rather than the cheapest.
+      - name: Run the clang static analyzer
         id: static-analysis
         run: |
           set -o pipefail
@@ -144,15 +152,19 @@ jobs:
           docker run --rm --privileged \
             -e DOCKER_MIRROR=${{ env.DOCKER_MIRROR }} \
             -e APT_MIRROR=${{ env.APT_MIRROR }} \
+            -e CCACHE_DIR=/build/ccache \
             -v "${{ github.workspace }}:/workspace" \
             -v "${{ github.workspace }}/scan-report:/scan-report" \
             -v /build \
             -w /build \
             ${{ env.DEV_IMAGE_TAG_PREFIX }}:${{ github.sha }}-amd64 \
-            bash -euxc '\
-              scan-build --status-bugs --exclude /workspace/ext -o /scan-report \
-              sh -c "cmake -D CMAKE_BUILD_TYPE=Release -D IO_URING_NVME_ENABLED=OFF -B /build -S /workspace -G Ninja && ninja -C /build"' \
-            2>&1 | tee "${{ github.workspace }}/scan-report/scan-build-output.txt"
+            bash -euxc '
+              cmake -D CMAKE_BUILD_TYPE=Release -D CMAKE_C_COMPILER=clang -D CMAKE_EXPORT_COMPILE_COMMANDS=ON -D IO_URING_NVME_ENABLED=OFF -B /build -S /workspace -G Ninja
+              ninja -C /build
+              python3 /workspace/scripts/analyze_cached.py \
+                      --build-dir /build --report-dir /scan-report \
+                      --exclude /workspace/ext/ -j "$(nproc)"' \
+            2>&1 | tee "${{ github.workspace }}/scan-report/analyzer-output.txt"
 
       - name: Upload static analysis report
         if: ${{ failure() && steps.static-analysis.outcome == 'failure' }}

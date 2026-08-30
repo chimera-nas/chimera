@@ -49,17 +49,31 @@ env:
   U22_IMAGE_TAG_PREFIX: repository.mdh.quantum.com:5004/cache/chimera-ubuntu22
   R9_IMAGE_TAG_PREFIX: repository.mdh.quantum.com:5004/cache/chimera-rocky9
   R10_IMAGE_TAG_PREFIX: repository.mdh.quantum.com:5004/cache/chimera-rocky10
+  # Internal pull-through cache for the mirrored ccache image (mirrors
+  # ghcr.io/chimera-nas/ccache, republished from upstream by
+  # .github/workflows/mirror-ccache.yml).  Public default lives in the
+  # Dockerfiles, so an image still builds outside this infrastructure.
+  CCACHE_IMAGE_REGISTRY: repository.mdh.quantum.com:5009/chimera-nas/ccache
   # Internal pull-through cache for the prebuilt KVM guest images (mirrors
   # ghcr.io/chimera-nas/kvm-test-base). Public default lives in CMake.
   KVM_IMAGE_REGISTRY: repository.mdh.quantum.com:5009/chimera-nas/kvm-test-base
   APT_MIRROR: http://repository.mdh.quantum.com/repository/pkgs/ubuntu
   DOCKER_MIRROR: repository.mdh.quantum.com/
-  # Shared compiler cache: the build step backs its local ccache with an HTTP
-  # remote (Nexus raw repo, ccache http backend) so objects persist across CI
-  # runs.  The full URL -- including the upload credentials -- is kept in the
-  # CCACHE_REMOTE_STORAGE *repository secret* (never in this public repo) and
-  # injected into the build container below.  merge_group runs receive secrets;
-  # a context without it (e.g. a fork) just builds local-only.
+  # Shared compiler cache.  Every job here uses a purely *local* ccache, primed
+  # before the build from a bundle the nightly run published for that cell.
+  #
+  # This replaces ccache's HTTP remote backend, which fetched each object over
+  # the network as the build asked for it.  That put ~950 round trips per job on
+  # the critical path -- against a Nexus being hit by a dozen jobs at once --
+  # and its 100ms default connect timeout turned the tail of that into misses:
+  # on run 33270040519, ubuntu24 Debug lost 358 of its 410 misses to timeouts
+  # and finished at 57% while its Release twin sat at 91%.
+  #
+  # One bundle fetch per job costs one round trip and leaves the build reading a
+  # local directory, which cannot time out.  Same shape macOS uses with
+  # actions/cache, and the same division of labour: the scheduled nightly run
+  # writes, everything else only reads.
+  NEXUS_SCRATCH_URL: http://repository.mdh.quantum.com/repository/scratch
 
 jobs:
   build-devcontainer:
@@ -105,6 +119,7 @@ jobs:
           build-args: |
             APT_MIRROR=${{ env.APT_MIRROR }}
             DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
+            CCACHE_REGISTRY=${{ env.CCACHE_IMAGE_REGISTRY }}
 
   build-ubuntu26:
     name: Build ubuntu26 ${{ matrix.arch }}
@@ -146,6 +161,7 @@ jobs:
           build-args: |
             APT_MIRROR=${{ env.APT_MIRROR }}
             DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
+            CCACHE_REGISTRY=${{ env.CCACHE_IMAGE_REGISTRY }}
 
   build-ubuntu24:
     name: Build ubuntu24 ${{ matrix.arch }}
@@ -187,6 +203,7 @@ jobs:
           build-args: |
             APT_MIRROR=${{ env.APT_MIRROR }}
             DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
+            CCACHE_REGISTRY=${{ env.CCACHE_IMAGE_REGISTRY }}
 
   build-ubuntu22:
     name: Build ubuntu22 ${{ matrix.arch }}
@@ -228,6 +245,7 @@ jobs:
           build-args: |
             APT_MIRROR=${{ env.APT_MIRROR }}
             DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
+            CCACHE_REGISTRY=${{ env.CCACHE_IMAGE_REGISTRY }}
 
   build-rocky9:
     name: Build rocky9 ${{ matrix.arch }}
@@ -268,6 +286,7 @@ jobs:
           cache-to: type=registry,ref=repository.mdh.quantum.com:5004/cache/chimera-rocky9:${{ matrix.arch }},mode=max
           build-args: |
             DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
+            CCACHE_REGISTRY=${{ env.CCACHE_IMAGE_REGISTRY }}
 
   build-rocky10:
     name: Build rocky10 ${{ matrix.arch }}
@@ -308,6 +327,7 @@ jobs:
           cache-to: type=registry,ref=repository.mdh.quantum.com:5004/cache/chimera-rocky10:${{ matrix.arch }},mode=max
           build-args: |
             DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
+            CCACHE_REGISTRY=${{ env.CCACHE_IMAGE_REGISTRY }}
 
   # Distro compile + test: configure, build, and run this image's quick-tier
   # ctest, all in one container.  needs is the container images alone -- there
@@ -416,20 +436,37 @@ jobs:
         with:
           arch: ${{ matrix.arch }}
 
+      # Best-effort: a missing bundle (a new cell, an object aged out of scratch,
+      # the first run after a key change) means a cold build, never a failed job.
+      - name: Restore the ccache bundle
+        env:
+          NEXUS_USER: ${{ secrets.NEXUS_SCRATCH_USER }}
+          NEXUS_PASSWORD: ${{ secrets.NEXUS_SCRATCH_PASSWORD }}
+        run: |
+          key="${{ matrix.image_name }}-${{ matrix.arch }}-${{ matrix.build_type }}"
+          curl -fsS --retry 3 --retry-all-errors --retry-delay 5 \
+            -u "${NEXUS_USER}:${NEXUS_PASSWORD}" \
+            -o ccache-bundle.tar.gz \
+            "${{ env.NEXUS_SCRATCH_URL }}/chimera/ccache/${key}.tar.gz" \
+            || echo "no ccache bundle for ${key}; this build starts cold"
+
       - name: Configure, build, and test inside the container
         run: |
           docker run --rm --privileged \
             -e DOCKER_MIRROR=${{ env.DOCKER_MIRROR }} \
             -e APT_MIRROR=${{ env.APT_MIRROR }} \
             -e CCACHE_DIR=/build/ccache \
-            -e CCACHE_REMOTE_STORAGE="${{ secrets.CCACHE_REMOTE_STORAGE }}" \
+            -e CCACHE_MAXSIZE=2G \
             -v "${{ github.workspace }}:/workspace" \
             -v "${{ github.workspace }}/oras:/usr/local/bin/oras:ro" \
             -v /build \
             -w /build \
             ${{ matrix.image_tag_prefix }}:${{ github.sha }}-${{ matrix.arch }} \
             bash -euxc '
-              mkdir -p /workspace/ctest-results
+              mkdir -p /workspace/ctest-results /build/ccache
+              if [ -f /workspace/ccache-bundle.tar.gz ]; then
+                tar -C /build/ccache -xzf /workspace/ccache-bundle.tar.gz
+              fi
               cmake -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DREQUIRE_NETNS_TESTS=ON -DKVM_IMAGE_REGISTRY=${{ env.KVM_IMAGE_REGISTRY }} -DPYNFS_JUNIT_DIR=/workspace/ctest-results/pynfs-junit -DSMBTORTURE_JUNIT_DIR=/workspace/ctest-results/smbtorture-junit -DWPTS_JUNIT_DIR=/workspace/ctest-results/wpts-junit -DPIKE_JUNIT_DIR=/workspace/ctest-results/pike-junit ${{ matrix.cmake_extra }} /workspace
               ninja
               ccache --show-stats || true
@@ -454,10 +491,25 @@ jobs:
           retention-days: 30
 
   # Static analysis, running alongside the tests from the moment the container
-  # images exist rather than behind them: scan-build does its own instrumented
-  # compile, so it shares nothing with a test job and has nothing to wait for.
-  # A scan-build finding never blocks a test from starting; it still gates
-  # ci-complete.
+  # images exist rather than behind them.  A finding never blocks a test from
+  # starting; it still gates ci-complete.
+  #
+  # This drives the analyzer directly rather than through scan-build, because
+  # scan-build cannot be cached.  It sets CC to ccc-analyzer, which compiles the
+  # TU *and*, as a side effect, writes a report into a directory named by an
+  # environment variable.  ccache caches the object and the stderr and knows
+  # nothing about that side effect, so a hit replays a compile that looks
+  # identical while producing no report -- and --status-bugs then sees a clean
+  # run.  Verified: identical source goes from "1 bug found" to "No bugs found"
+  # on a warm cache, warning text still printed.  So scan-build has to run with
+  # ccache off, which meant a full cold build of the tree in all 14 cells --
+  # and these were the 13 slowest jobs in the queue.
+  #
+  # `clang --analyze -o report.plist` makes the report the primary output, which
+  # is exactly what ccache already knows how to cache: a hit restores the plist
+  # with its findings intact, and a real source change invalidates it.  Findings
+  # were checked against scan-build on a sample covering leak, use-after-free,
+  # null deref and divide-by-zero: identical set, identical locations.
   static-analysis:
     name: Analyze ${{ matrix.image_name }} ${{ matrix.arch }} ${{ matrix.build_type }}
     needs: [build-devcontainer, build-ubuntu26, build-ubuntu24, build-ubuntu22, build-rocky9, build-rocky10]
@@ -478,24 +530,10 @@ jobs:
             image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-dev
             image_name: devcontainer
             cmake_extra: ""
-          - platform: linux/amd64
-            runner: arc-amd64
-            arch: amd64
-            build_type: Debug
-            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-dev
-            image_name: devcontainer
-            cmake_extra: ""
           - platform: linux/arm64
             runner: arc-arm64
             arch: arm64
             build_type: Release
-            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-dev
-            image_name: devcontainer
-            cmake_extra: ""
-          - platform: linux/arm64
-            runner: arc-arm64
-            arch: arm64
-            build_type: Debug
             image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-dev
             image_name: devcontainer
             cmake_extra: ""
@@ -509,21 +547,7 @@ jobs:
           - platform: linux/amd64
             runner: arc-amd64
             arch: amd64
-            build_type: Debug
-            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu26
-            image_name: ubuntu26
-            cmake_extra: ""
-          - platform: linux/amd64
-            runner: arc-amd64
-            arch: amd64
             build_type: Release
-            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu24
-            image_name: ubuntu24
-            cmake_extra: ""
-          - platform: linux/amd64
-            runner: arc-amd64
-            arch: amd64
-            build_type: Debug
             image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu24
             image_name: ubuntu24
             cmake_extra: ""
@@ -537,21 +561,7 @@ jobs:
           - platform: linux/amd64
             runner: arc-amd64
             arch: amd64
-            build_type: Debug
-            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu22
-            image_name: ubuntu22
-            cmake_extra: "-DIO_URING_ENABLED=OFF"
-          - platform: linux/amd64
-            runner: arc-amd64
-            arch: amd64
             build_type: Release
-            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-rocky9
-            image_name: rocky9
-            cmake_extra: "-DIO_URING_ENABLED=OFF"
-          - platform: linux/amd64
-            runner: arc-amd64
-            arch: amd64
-            build_type: Debug
             image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-rocky9
             image_name: rocky9
             cmake_extra: "-DIO_URING_ENABLED=OFF"
@@ -562,21 +572,26 @@ jobs:
             image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-rocky10
             image_name: rocky10
             cmake_extra: ""
-          - platform: linux/amd64
-            runner: arc-amd64
-            arch: amd64
-            build_type: Debug
-            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-rocky10
-            image_name: rocky10
-            cmake_extra: ""
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
         with:
           submodules: recursive
 
-      - name: Perform clang static analysis
+      # Best-effort, as elsewhere; a miss just means a cold analysis.
+      - name: Restore the ccache bundle
+        env:
+          NEXUS_USER: ${{ secrets.NEXUS_SCRATCH_USER }}
+          NEXUS_PASSWORD: ${{ secrets.NEXUS_SCRATCH_PASSWORD }}
+        run: |
+          key="analyze-${{ matrix.image_name }}-${{ matrix.arch }}-${{ matrix.build_type }}"
+          curl -fsS --retry 3 --retry-all-errors --retry-delay 5 \
+            -u "${NEXUS_USER}:${NEXUS_PASSWORD}" \
+            -o ccache-bundle.tar.gz \
+            "${{ env.NEXUS_SCRATCH_URL }}/chimera/ccache/${key}.tar.gz" \
+            || echo "no ccache bundle for ${key}; this analysis starts cold"
+
+      - name: Run the clang static analyzer
         id: static-analysis
         run: |
           set -o pipefail
@@ -584,21 +599,35 @@ jobs:
           docker run --rm --privileged \
             -e DOCKER_MIRROR=${{ env.DOCKER_MIRROR }} \
             -e APT_MIRROR=${{ env.APT_MIRROR }} \
+            -e CCACHE_DIR=/build/ccache \
+            -e CCACHE_MAXSIZE=2G \
             -v "${{ github.workspace }}:/workspace" \
             -v "${{ github.workspace }}/scan-report:/scan-report" \
             -v /build \
             -w /build \
             ${{ matrix.image_tag_prefix }}:${{ github.sha }}-${{ matrix.arch }} \
-            bash -euxc '\
-              scan-build --status-bugs -o /scan-report \
-              sh -c "cmake -D CMAKE_BUILD_TYPE=${{ matrix.build_type }} -D IO_URING_NVME_ENABLED=OFF ${{ matrix.cmake_extra }} -B /build -S /workspace -G Ninja && ninja -C /build"' \
-            2>&1 | tee "${{ github.workspace }}/scan-report/scan-build-output.txt"
+            bash -euxc '
+              mkdir -p /build/ccache
+              if [ -f /workspace/ccache-bundle.tar.gz ]; then
+                tar -C /build/ccache -xzf /workspace/ccache-bundle.tar.gz
+              fi
+              cmake -D CMAKE_BUILD_TYPE=${{ matrix.build_type }} -D CMAKE_C_COMPILER=clang -D CMAKE_EXPORT_COMPILE_COMMANDS=ON -D IO_URING_NVME_ENABLED=OFF ${{ matrix.cmake_extra }} -B /build -S /workspace -G Ninja
+              # The analyzer reads compile_commands.json, and several entries
+              # include generated headers (xdrzcc, ndrzcc, flex, bison), so the
+              # tree has to be built before it can run.  Against a primed cache
+              # that is close to free.
+              ninja -C /build
+              python3 /workspace/scripts/analyze_cached.py \
+                      --build-dir /build --report-dir /scan-report \
+                      --exclude /workspace/ext/ -j "$(nproc)"
+              ccache --show-stats || true' \
+            2>&1 | tee "${{ github.workspace }}/scan-report/analyzer-output.txt"
 
       - name: Upload static analysis report
         if: ${{ failure() && steps.static-analysis.outcome == 'failure' }}
         uses: actions/upload-artifact@v6
         with:
-          name: scan-report-${{ matrix.image_name }}-${{ matrix.arch }}-${{ matrix.build_type }}
+          name: analyzer-report-${{ matrix.image_name }}-${{ matrix.arch }}-${{ matrix.build_type }}
           path: scan-report/
           if-no-files-found: warn
           retention-days: 30
@@ -677,20 +706,37 @@ jobs:
         with:
           arch: ${{ matrix.arch }}
 
+      # Best-effort: a missing bundle (a new cell, an object aged out of scratch,
+      # the first run after a key change) means a cold build, never a failed job.
+      - name: Restore the ccache bundle
+        env:
+          NEXUS_USER: ${{ secrets.NEXUS_SCRATCH_USER }}
+          NEXUS_PASSWORD: ${{ secrets.NEXUS_SCRATCH_PASSWORD }}
+        run: |
+          key="devcontainer-${{ matrix.arch }}-${{ matrix.build_type }}"
+          curl -fsS --retry 3 --retry-all-errors --retry-delay 5 \
+            -u "${NEXUS_USER}:${NEXUS_PASSWORD}" \
+            -o ccache-bundle.tar.gz \
+            "${{ env.NEXUS_SCRATCH_URL }}/chimera/ccache/${key}.tar.gz" \
+            || echo "no ccache bundle for ${key}; this build starts cold"
+
       - name: Configure, build, and test inside the container
         run: |
           docker run --rm --privileged \
             -e DOCKER_MIRROR=${{ env.DOCKER_MIRROR }} \
             -e APT_MIRROR=${{ env.APT_MIRROR }} \
             -e CCACHE_DIR=/build/ccache \
-            -e CCACHE_REMOTE_STORAGE="${{ secrets.CCACHE_REMOTE_STORAGE }}" \
+            -e CCACHE_MAXSIZE=2G \
             -v "${{ github.workspace }}:/workspace" \
             -v "${{ github.workspace }}/oras:/usr/local/bin/oras:ro" \
             -v /build \
             -w /build \
             ${{ env.DEV_IMAGE_TAG_PREFIX }}:${{ github.sha }}-${{ matrix.arch }} \
             bash -euxc '
-              mkdir -p /workspace/ctest-results
+              mkdir -p /workspace/ctest-results /build/ccache
+              if [ -f /workspace/ccache-bundle.tar.gz ]; then
+                tar -C /build/ccache -xzf /workspace/ccache-bundle.tar.gz
+              fi
               cmake -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DREQUIRE_NETNS_TESTS=ON -DKVM_IMAGE_REGISTRY=${{ env.KVM_IMAGE_REGISTRY }} -DPYNFS_JUNIT_DIR=/workspace/ctest-results/pynfs-junit -DSMBTORTURE_JUNIT_DIR=/workspace/ctest-results/smbtorture-junit -DWPTS_JUNIT_DIR=/workspace/ctest-results/wpts-junit -DPIKE_JUNIT_DIR=/workspace/ctest-results/pike-junit ${{ matrix.kvm_cmake }} /workspace
               ninja
               ccache --show-stats || true
@@ -738,6 +784,10 @@ jobs:
           submodules: recursive
 
       - name: Install dependencies
+        env:
+          # Public GHCR: a GitHub-hosted runner cannot reach the internal
+          # pull-through proxy the ARC runners use.
+          CCACHE_REF: ghcr.io/chimera-nas/ccache:4.14-darwin
         run: |
           brew update
           # bison: Apple ships 2.3 and the ndrzcc grammar needs 3.x; the
@@ -754,12 +804,43 @@ jobs:
           # quint's parallel-generator download race.
           brew install oras
 
+          # ccache from the same mirror the Linux images use, so every platform
+          # in the matrix runs one pinned upstream build rather than whatever
+          # its packager happened to ship.  Upstream's darwin asset is a single
+          # universal binary, so this covers both Intel and Apple Silicon.
+          oras pull "${CCACHE_REF}" --output "${RUNNER_TEMP}"
+          install -m 0755 "${RUNNER_TEMP}/ccache-darwin" /usr/local/bin/ccache
+          ccache --version | head -1
+
+      # The Nexus cache the Linux cells share is unreachable from a
+      # GitHub-hosted runner, so macOS uses GitHub's own cache for the ccache
+      # directory instead.
+      #
+      # Note where the writes come from.  Actions caches are branch-scoped: a
+      # run reads its own ref and the default branch's.  This workflow only ever
+      # runs on merge_group, and that gh-readonly-queue/... ref is discarded, so
+      # nothing it saves is ever seen again.  The entry that matters is the one
+      # nightly.yml writes on main; this restores that.  Worst case it is a day
+      # stale, which for ccache means a slightly lower hit rate and nothing
+      # worse.
+      - name: Restore the ccache directory
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: ccache-macos-${{ matrix.build_type }}-${{ github.sha }}
+          restore-keys: |
+            ccache-macos-${{ matrix.build_type }}-
+
       - name: Configure and build
+        env:
+          CCACHE_DIR: ${{ runner.temp }}/ccache
+          CCACHE_MAXSIZE: 2G
         run: |
           cmake -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
                 -DSPECS_BUNDLE=ON \
                 -S "${{ github.workspace }}" -B "${{ runner.temp }}/build"
           ninja -C "${{ runner.temp }}/build"
+          ccache --show-stats || true
 
       - name: Test
         run: |
@@ -783,9 +864,16 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
-  # macOS static analysis.  scan-build does its own instrumented compile, so
-  # like the Linux analyzers it shares nothing with the test job -- and with no
-  # container image to wait on, it has no dependencies at all.
+  # macOS static analysis.  Same cached-analyzer driver as the Linux cells; see
+  # the static-analysis job above for why scan-build cannot be cached.
+  #
+  # This was the single most expensive job in the queue -- 611s to 646s of
+  # analysis on a three-core hosted runner, on top of everything else -- because
+  # scan-build had to do a full uncached instrumented build every time.
+  #
+  # llvm is still installed: dropping it would silently switch the analyzer to
+  # Apple's clang, and keeping the same analyzer the queue has always used is
+  # worth 70s of brew.  ccache comes from the same mirror as everywhere else.
   analyze-macos:
     name: Analyze macOS ${{ matrix.build_type }}
     runs-on: macos-14
@@ -794,7 +882,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        build_type: [Release, Debug]
+        build_type: [Release]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -802,36 +890,66 @@ jobs:
           submodules: recursive
 
       - name: Install dependencies
+        env:
+          CCACHE_REF: ghcr.io/chimera-nas/ccache:4.14-darwin
         run: |
           brew update
-          # llvm carries scan-build -- Apple's clang does not ship the analyzer
-          # driver.  The rest mirrors the macos test job: bison 3.x for the
+          # llvm: the analyzer this job has always run.  bison 3.x for the
           # ndrzcc grammar, libxcrypt for full crypt(5) verification.
-          brew install llvm cmake ninja bison jansson userspace-rcu rocksdb krb5 \
-                       xxhash libxcrypt uthash openssl@3 libnghttp2
+          # No llvm: scan-build needed it for the analyzer *driver*, but driving
+          # `clang --analyze` directly does not.  Dropping it also keeps this
+          # job on Apple's clang -- the compiler ccc-analyzer was always
+          # actually compiling with, since it invokes whatever `clang` resolves
+          # to on PATH and only used brew's LLVM for the analysis pass.  Pinning
+          # brew's clang for the whole build instead surfaced a warning Apple's
+          # does not have (-Wunused-but-set-global) straight into -Werror.
+          brew install cmake ninja bison jansson userspace-rcu rocksdb krb5 \
+                       xxhash libxcrypt uthash openssl@3 libnghttp2 oras
+          oras pull "${CCACHE_REF}" --output "${RUNNER_TEMP}"
+          install -m 0755 "${RUNNER_TEMP}/ccache-darwin" /usr/local/bin/ccache
+          ccache --version | head -1
 
-      - name: Perform clang static analysis
+      # Written by nightly.yml, which runs on main; a merge_group ref is thrown
+      # away, so the queue restores but never usefully saves.
+      - name: Restore the ccache directory
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: ccache-macos-analyze-${{ matrix.build_type }}-${{ github.sha }}
+          restore-keys: |
+            ccache-macos-analyze-${{ matrix.build_type }}-
+
+      - name: Run the clang static analyzer
         id: static-analysis
         env:
+          CCACHE_DIR: ${{ runner.temp }}/ccache
+          CCACHE_MAXSIZE: 2G
           BUILD_DIR: ${{ runner.temp }}/build-analyze
         run: |
           set -o pipefail
           mkdir -p "$GITHUB_WORKSPACE/scan-report"
+          cmake -G Ninja -D CMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+                \
+                -D CMAKE_EXPORT_COMPILE_COMMANDS=ON \
+                -S "$GITHUB_WORKSPACE" -B "$BUILD_DIR"
+          # compile_commands.json is not enough on its own: several entries
+          # include generated headers, so the tree has to be built first.
+          ninja -C "$BUILD_DIR"
           # --exclude ext: the vendored submodules are analysed in their own
           # repos and cannot be fixed from a chimera PR.
-          "$(brew --prefix llvm)/bin/scan-build" --status-bugs \
-              --exclude "$GITHUB_WORKSPACE/ext" \
-              -o "$GITHUB_WORKSPACE/scan-report" \
-              sh -c "cmake -D CMAKE_BUILD_TYPE=${{ matrix.build_type }} \
-                           -B \"$BUILD_DIR\" -S \"$GITHUB_WORKSPACE\" -G Ninja \
-                     && ninja -C \"$BUILD_DIR\"" \
-              2>&1 | tee "$GITHUB_WORKSPACE/scan-report/scan-build-output.txt"
+          python3 "$GITHUB_WORKSPACE/scripts/analyze_cached.py" \
+                  --build-dir "$BUILD_DIR" \
+                  --report-dir "$GITHUB_WORKSPACE/scan-report" \
+                  --exclude "$GITHUB_WORKSPACE/ext/" \
+                  -j "$(sysctl -n hw.ncpu)" \
+            2>&1 | tee "$GITHUB_WORKSPACE/scan-report/analyzer-output.txt"
+          ccache --show-stats || true
 
       - name: Upload static analysis report
         if: ${{ failure() && steps.static-analysis.outcome == 'failure' }}
         uses: actions/upload-artifact@v6
         with:
-          name: scan-report-macos-${{ matrix.build_type }}
+          name: analyzer-report-macos-${{ matrix.build_type }}
           path: scan-report/
           if-no-files-found: warn
           retention-days: 30
