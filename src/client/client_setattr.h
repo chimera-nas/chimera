@@ -85,10 +85,16 @@ chimera_dispatch_setattr(
 
     /*
      * Use a real file handle instead of OPEN_PATH when setting size, because
-     * ftruncate() requires a real file descriptor, not an O_PATH handle.
+     * ftruncate() requires a real file descriptor, not an O_PATH handle --
+     * and open it with WRITE intent: truncate(2) by path requires write
+     * permission on the file (unlike ftruncate, whose rights were bound at
+     * its own open), and the open gate is where every backend -- engine-
+     * gated and remote-DAC proxy alike -- enforces exactly that.  The wire
+     * SETATTR cannot make the distinction (which is why servers owner-
+     * override size changes, as nfsd does); the client must.
      */
     if (request->setattr.set_attr.va_set_mask & CHIMERA_VFS_ATTR_SIZE) {
-        open_flags = CHIMERA_VFS_OPEN_INFERRED;
+        open_flags = CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_WRITE_ONLY;
     } else {
         open_flags = CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED;
     }
@@ -120,7 +126,8 @@ chimera_dispatch_lsetattr(
     unsigned int open_flags;
 
     if (request->setattr.set_attr.va_set_mask & CHIMERA_VFS_ATTR_SIZE) {
-        open_flags = CHIMERA_VFS_OPEN_INFERRED;
+        /* Write intent for a size change; see chimera_dispatch_setattr. */
+        open_flags = CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_WRITE_ONLY;
     } else {
         open_flags = CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED;
     }
