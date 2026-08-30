@@ -114,12 +114,7 @@ chimera_nfs4_getattr(
 
     /* Op 2: GETATTR - get attributes */
     argarray[2].argop = OP_GETATTR;
-    attr_request[0]   = (1 << FATTR4_TYPE) | (1 << FATTR4_SIZE) | (1 << FATTR4_FILEID);
-    attr_request[1]   = (1 << (FATTR4_MODE - 32)) | (1 << (FATTR4_NUMLINKS - 32)) |
-        (1 << (FATTR4_OWNER - 32)) | (1 << (FATTR4_OWNER_GROUP - 32)) |
-        (1 << (FATTR4_RAWDEV - 32)) |
-        (1 << (FATTR4_TIME_ACCESS - 32)) | (1 << (FATTR4_TIME_METADATA - 32)) |
-        (1 << (FATTR4_TIME_MODIFY - 32));
+    chimera_nfs4_attr_request_stat(attr_request);
     argarray[2].opgetattr.attr_request     = attr_request;
     argarray[2].opgetattr.num_attr_request = 2;
 

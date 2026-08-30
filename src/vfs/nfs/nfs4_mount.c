@@ -414,8 +414,7 @@ chimera_nfs4_mount_get_root_fh(
 
     /* GETATTR - request basic attributes */
     argarray[op].argop                      = OP_GETATTR;
-    attr_request[0]                         = (1 << FATTR4_TYPE) | (1 << FATTR4_SIZE) | (1 << FATTR4_FILEID);
-    attr_request[1]                         = (1 << (FATTR4_MODE - 32)) | (1 << (FATTR4_NUMLINKS - 32));
+    chimera_nfs4_attr_request_stat(attr_request);
     argarray[op].opgetattr.attr_request     = attr_request;
     argarray[op].opgetattr.num_attr_request = 2;
     op++;

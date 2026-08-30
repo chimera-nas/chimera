@@ -179,9 +179,7 @@ chimera_nfs4_mkdir_at(
 
     /* Op 4: GETATTR - get attributes for created directory */
     argarray[4].argop = OP_GETATTR;
-    attr_request[0]   = (1 << FATTR4_TYPE) | (1 << FATTR4_SIZE) | (1 << FATTR4_FILEID);
-    attr_request[1]   = (1 << (FATTR4_MODE - 32)) | (1 << (FATTR4_NUMLINKS - 32)) |
-        (1 << (FATTR4_TIME_ACCESS - 32)) | (1 << (FATTR4_TIME_MODIFY - 32));
+    chimera_nfs4_attr_request_stat(attr_request);
     argarray[4].opgetattr.attr_request     = attr_request;
     argarray[4].opgetattr.num_attr_request = 2;
 
