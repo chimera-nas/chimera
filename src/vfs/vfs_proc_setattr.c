@@ -391,6 +391,18 @@ chimera_vfs_setattr_gate_complete(
         if (owner && (m & time_trigger) && !(m & ~owner_exempt)) {
             required = 0;
         }
+
+        /* Owner override for a SIZE change, as Linux nfsd applies to
+         * truncates (NFSD_MAY_OWNER_OVERRIDE covers them like READ/WRITE):
+         * ftruncate(2)/posix_fallocate(2) bound their rights at open, the
+         * stateless wire re-checks per operation, and an owner must not
+         * lose the ability to resize through a descriptor they legitimately
+         * opened.  AUTH_UNIX only, as in the I/O gates -- an SMB caller's
+         * rights come from the security descriptor. */
+        if (owner && gate->cred->flavor == CHIMERA_VFS_AUTH_UNIX &&
+            (m & CHIMERA_VFS_ATTR_SIZE)) {
+            required &= ~CHIMERA_ACE_WRITE_DATA;
+        }
     }
 
     /* WRITE_OWNER (the chown/chgrp right) is authorized separately below; gate
