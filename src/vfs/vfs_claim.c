@@ -42,6 +42,7 @@ chimera_vfs_state_init(void)
     state->implicit_idle_ms          = CHIMERA_VFS_CLAIM_DEFAULT_IMPLICIT_IDLE_MS;
 
     pthread_mutex_init(&state->service_lock, NULL);
+    pthread_mutex_init(&state->bl_dispatch_lock, NULL);
 
     return state;
 } /* chimera_vfs_state_init */

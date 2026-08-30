@@ -139,6 +139,19 @@ struct chimera_vfs_state {
     struct chimera_vfs            *vfs;
     struct chimera_claim_owner     node_owner;       /* this node's wire identity */
     pthread_mutex_t                service_lock;
+    /* Serializes SELECTION+DISPATCH of backend RANGE ops.  Without it the
+     * service drain and an inline confirm's chimera_vfs_claim_backend_
+     * drain_releases race: the drain can only find a release still ON the
+     * FIFO, so once the service thread has popped one, an acquire for the
+     * same range reaches the backend while that release is still in flight
+     * and the arbiter refuses it -- an NLM LOCK that should be GRANTED
+     * comes back DENIED.  Both hold this across the release dispatch, so
+     * whichever loses the race observes the other's release delivered.
+     *
+     * Order: bl_dispatch_lock BEFORE service_lock, and never held across an
+     * acquire confirm -- that runs protocol code and must not sit under a
+     * core lock. */
+    pthread_mutex_t                bl_dispatch_lock;
     struct chimera_vfs_file_state *service_head;
     struct chimera_vfs_file_state *service_tail;
     struct chimera_vfs_thread     *service_thread;
