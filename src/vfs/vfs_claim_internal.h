@@ -227,11 +227,30 @@ chimera_vfs_claim_backend_capable(
 /* Confirm a locally-granted RANGE claim with the backend before its ticket
  * callback fires; `thread` must be the CALLING vfs thread (its request pool
  * is per-thread and unlocked). */
+/* One in-flight backend RANGE confirm.  Core-owned, linked on
+ * state->confirm_head for the duration, and carrying a SNAPSHOT of
+ * everything the completion needs out of the ticket: once a cancel claims
+ * this op the ticket may be freed under us, so nothing here dereferences
+ * it afterwards -- `ticket` is an identity key compared only under
+ * service_lock while the op is still linked. */
+struct chimera_vfs_bl_range_op {
+    struct chimera_vfs_state           *state;
+    struct chimera_vfs_file_state      *file;
+    struct chimera_vfs_pending_acquire *ticket; /* identity only           */
+    struct chimera_vfs_claim           *claim;
+    chimera_vfs_claim_acquire_cb_t      cb;
+    void                               *cb_private;
+    bool                                serial_lane;
+    bool                                cancelled;
+    struct chimera_vfs_bl_range_op     *next;
+};
+
 void
 chimera_vfs_claim_backend_project_range(
     struct chimera_vfs_thread          *thread,
     struct chimera_vfs_state           *state,
-    struct chimera_vfs_pending_acquire *ticket);
+    struct chimera_vfs_pending_acquire *ticket,
+    bool                                serial_lane);
 
 bool
 chimera_vfs_claim_backend_range_projects(
@@ -261,6 +280,14 @@ chimera_vfs_claim_backend_drain_releases(
  * service_lock, matching reeval->bl_post). */
 void
 chimera_vfs_claim_backend_release_token(
+    struct chimera_vfs_state      *state,
+    struct chimera_vfs_file_state *file,
+    uint64_t                       token);
+
+/* As above, but placed at the FRONT of the FIFO: the rollback of a confirm
+ * that a cancel claimed mid-flight, whose local release already happened. */
+void
+chimera_vfs_claim_backend_release_token_front(
     struct chimera_vfs_state      *state,
     struct chimera_vfs_file_state *file,
     uint64_t                       token);
