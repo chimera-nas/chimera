@@ -122,6 +122,29 @@ chimera_linux_errno_to_status(int err)
     } /* switch */
 } /* chimera_linux_errno_to_status */
 
+/*
+ * Status for a FAILED open-by-handle.  A file handle names an object, not a
+ * path: when the kernel refuses to re-open one, the handle is STALE unless
+ * the errno names a specific, still-meaningful condition.  Kernels vary in
+ * their choice for a deleted object -- ESTALE, ENOENT, or newer inventions
+ * the errno table does not carry -- and neither a name-flavored NOENT nor
+ * the unmapped-errno fallback (which surfaces as SERVERFAULT on the wire)
+ * is a correct answer for a handle.
+ */
+static inline enum chimera_vfs_error
+chimera_linux_handle_open_status(int err)
+{
+    enum chimera_vfs_error status = chimera_linux_errno_to_status(err);
+
+    switch (status) {
+        case CHIMERA_VFS_ENOENT:
+        case CHIMERA_VFS_UNSET:
+            return CHIMERA_VFS_ESTALE;
+        default:
+            return status;
+    } /* switch */
+} /* chimera_linux_handle_open_status */
+
 static inline void
 chimera_linux_stat_to_attr(
     struct chimera_vfs_attrs *attr,
