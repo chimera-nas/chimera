@@ -58,11 +58,14 @@ jobs:
             docker_arch="${pair%%:*}"
             rel_arch="${pair##*:}"
             name="ccache-${V}-linux-${rel_arch}-musl-static"
+            # .tar.gz, not the .tar.xz upstream also publishes: the ARC
+            # runners are minimal hosts and carry no xz, so `tar xJf` dies with
+            # "xz: Cannot exec". gzip is always there, and upstream ships both.
             curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 \
-                 -o "${name}.tar.xz" "${base}/${name}.tar.xz"
-            tar xJf "${name}.tar.xz"
+                 -o "${name}.tar.gz" "${base}/${name}.tar.gz"
+            tar xzf "${name}.tar.gz"
             install -m 0755 "${name}/ccache" "ccache-${docker_arch}"
-            rm -rf "${name}" "${name}.tar.xz"
+            rm -rf "${name}" "${name}.tar.gz"
           done
           # macOS ships one universal binary covering both Intel and Apple
           # Silicon, so there is no per-arch split to make here.  It cannot ride
