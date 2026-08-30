@@ -388,16 +388,23 @@ nlm_client_release_all_locks(
          * core (an NLM blocking LOCK not yet granted) must have its ticket
          * cancelled before we free it -- otherwise the pending pump would later
          * fire the acquire callback on freed memory.  chimera_vfs_claim_cancel
-         * is the atomic arbiter: true exactly once if it dequeued the ticket
-         * before the pump claimed it.
+         * is the atomic arbiter: true exactly once if it claimed the ticket
+         * before the callback was invoked.
          *
          *   - cancel == true : the callback will NOT fire; WE own the entry.
          *     Its original LOCK RPC already received NLM4_BLOCKED, so no reply is
          *     owed; free the acquire ctx the callback would have freed.
-         *   - cancel == false: the acquire callback is firing concurrently and
-         *     will DL_DELETE + free this entry itself -- leave it linked, skip. */
+         *   - cancel == false: the acquire callback has been invoked and may be
+         *     RUNNING right now, blocked on the mutex we hold.  It will
+         *     DL_DELETE + free this entry itself, so leave it linked and skip --
+         *     but mark it reaped first, so that when it does get the mutex it
+         *     tears the lock down instead of granting a lock to a client we have
+         *     just declared lock-free.  The flag is the whole hand-off: cancel
+         *     must not block here (it once spun until the callback returned,
+         *     deadlocking against the very mutex we hold). */
         if (entry->pending && !entry->claim_inserted && entry->file_state) {
             if (!chimera_vfs_claim_cancel(vfs_state, &entry->ticket)) {
+                entry->reaped = true;
                 continue;
             }
             free(entry->ticket.private_data);
