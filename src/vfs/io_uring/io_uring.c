@@ -1456,7 +1456,7 @@ chimera_io_uring_open_fh(
                 request->status = CHIMERA_VFS_ENOTDIR;
             }
         } else {
-            request->status = chimera_linux_errno_to_status(errno);
+            request->status = chimera_linux_handle_open_status(errno);
         }
         request->complete(request);
         return;
@@ -2258,7 +2258,7 @@ chimera_io_uring_rename_at(
                                   O_PATH | O_RDONLY | O_NOFOLLOW);
 
     if (old_fd < 0) {
-        request->status = chimera_linux_errno_to_status(errno);
+        request->status = chimera_linux_handle_open_status(errno);
         request->complete(request);
         return;
     }
@@ -2270,7 +2270,7 @@ chimera_io_uring_rename_at(
 
     if (new_fd < 0) {
         close(old_fd);
-        request->status = chimera_linux_errno_to_status(errno);
+        request->status = chimera_linux_handle_open_status(errno);
         request->complete(request);
         return;
     }
@@ -2318,7 +2318,7 @@ chimera_io_uring_link_at(
                               O_PATH | O_RDONLY | O_NOFOLLOW);
 
     if (fd < 0) {
-        request->status = chimera_linux_errno_to_status(errno);
+        request->status = chimera_linux_handle_open_status(errno);
         request->complete(request);
         return;
     }
@@ -2330,7 +2330,7 @@ chimera_io_uring_link_at(
 
     if (dir_fd < 0) {
         close(fd);
-        request->status = chimera_linux_errno_to_status(errno);
+        request->status = chimera_linux_handle_open_status(errno);
         request->complete(request);
         return;
     }
