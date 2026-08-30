@@ -287,7 +287,19 @@ chimera_vfs_mknod_at(
         return;
     }
 
-    if (chimera_vfs_gate_needed(handle->vfs_module->capabilities, cred)) {
+    /* The engine's create gate normally runs only where the engine is the
+     * DAC authority.  One remote-DAC exception: a DEVICE mknod by an
+     * unprivileged caller is answered EPERM by the engine itself (the
+     * dispatch path below) -- but POSIX/Linux order the parent-write EACCES
+     * first (may_create before CAP_MKNOD), and the remote server can only
+     * deliver that EACCES for an operation we would actually send.  Run the
+     * engine's own create gate for exactly this case so the denials come
+     * out in the right order. */
+    if (chimera_vfs_gate_needed(handle->vfs_module->capabilities, cred) ||
+        (chimera_vfs_open_gate_needed(handle->vfs_module->capabilities,
+                                      cred) &&
+         (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) &&
+         (S_ISBLK(attr->va_mode) || S_ISCHR(attr->va_mode)))) {
         gate                 = chimera_vfs_gate_scratch_alloc(thread);
         gate->thread         = thread;
         gate->cred           = cred;
@@ -301,10 +313,14 @@ chimera_vfs_mknod_at(
         gate->callback       = callback;
         gate->private_data   = private_data;
 
-        chimera_vfs_gate_fh(&gate->gate_ctx, thread, cred,
-                            handle->fh, handle->fh_len,
-                            CHIMERA_ACE_WRITE_DATA | CHIMERA_ACE_EXECUTE,
-                            chimera_vfs_mknod_at_gate_complete, gate);
+        /* _always: on a remote-DAC proxy gate_fh would defer to a backend
+         * that will never see this op (the engine denies it below); the
+         * engine must evaluate the parent access itself. */
+        chimera_vfs_gate_fh_always(&gate->gate_ctx, thread, cred,
+                                   handle->fh, handle->fh_len,
+                                   CHIMERA_ACE_WRITE_DATA |
+                                   CHIMERA_ACE_EXECUTE,
+                                   chimera_vfs_mknod_at_gate_complete, gate);
         return;
     }
 
