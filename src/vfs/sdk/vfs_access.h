@@ -159,6 +159,21 @@ void chimera_vfs_gate_fh(
     chimera_vfs_gate_callback_t    callback,
     void                          *private_data);
 
+/* As chimera_vfs_gate_fh(), but evaluated even where gate_needed() would
+ * defer to the backend -- for the few spots where the ENGINE is about to
+ * deny an operation itself and POSIX orders an access denial ahead of it,
+ * on a backend that will never see the op (see the unprivileged
+ * device-mknod EPERM in vfs_proc_mknod_at.c). */
+void chimera_vfs_gate_fh_always(
+    struct chimera_vfs_gate_ctx   *ctx,
+    struct chimera_vfs_thread     *thread,
+    const struct chimera_vfs_cred *cred,
+    const void                    *fh,
+    int                            fhlen,
+    uint32_t                       required,
+    chimera_vfs_gate_callback_t    callback,
+    void                          *private_data);
+
 /* As chimera_vfs_gate_fh(), but for an object of ANY type: the directory
  * assertion is dropped.  For callers authorizing access to the object itself
  * rather than traversing it -- an open(2) access-mode check, which must be

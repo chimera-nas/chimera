@@ -165,6 +165,40 @@ chimera_vfs_gate_fh(
 } /* chimera_vfs_gate_fh */
 
 /*
+ * chimera_vfs_gate_fh, but unconditionally: evaluate the mask even where
+ * chimera_vfs_gate_needed() would defer to the backend.  For the few spots
+ * where the ENGINE is about to deny something itself (the unprivileged
+ * device-mknod EPERM) and POSIX orders the parent-access EACCES first: on a
+ * remote-DAC proxy the server never sees the operation, so the engine must
+ * evaluate the parent access from the (faithfully reported) attributes.
+ */
+SYMBOL_EXPORT void
+chimera_vfs_gate_fh_always(
+    struct chimera_vfs_gate_ctx   *ctx,
+    struct chimera_vfs_thread     *thread,
+    const struct chimera_vfs_cred *cred,
+    const void                    *fh,
+    int                            fhlen,
+    uint32_t                       required,
+    chimera_vfs_gate_callback_t    callback,
+    void                          *private_data)
+{
+    struct chimera_vfs_module *module;
+
+    module = chimera_vfs_get_module(thread, fh, fhlen);
+
+    if (!module) {
+        callback(CHIMERA_VFS_ESTALE, private_data);
+        return;
+    }
+
+    ctx->any_type = 0;
+
+    chimera_vfs_gate_fh_impl(ctx, thread, cred, fh, fhlen, required, 1,
+                             callback, private_data);
+} /* chimera_vfs_gate_fh_always */
+
+/*
  * Variant of chimera_vfs_gate_fh() that also enforces DAC the kernel cannot see
  * on a handle-based passthrough backend for POSIX callers (path-prefix search,
  * link/rename destination-directory write).  See chimera_vfs_gate_needed_dac().
