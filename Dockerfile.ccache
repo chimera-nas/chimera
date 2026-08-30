@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: 2026 Chimera-NAS Project Contributors
+#
+# SPDX-License-Identifier: Unlicense
+#
+# The ccache binary, packaged as a tiny multi-arch image so every other
+# Dockerfile here can COPY --from it.
+#
+# Not FROM scratch with a plain COPY of one file, because the build context is
+# assembled per-architecture by .github/workflows/mirror-ccache.yml: it drops
+# ccache-amd64 and ccache-arm64 beside this file, and TARGETARCH picks the
+# right one for each leg of the manifest list.  A consumer then references one
+# tag and buildkit resolves the architecture for it.
+
+FROM scratch
+ARG TARGETARCH
+COPY ccache-${TARGETARCH} /ccache

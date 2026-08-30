@@ -1,0 +1,124 @@
+# SPDX-FileCopyrightText: 2026 Chimera-NAS Project Contributors
+#
+# SPDX-License-Identifier: Unlicense
+
+name: Mirror ccache
+
+# Republish an upstream ccache release into GHCR so the CI images can install a
+# current ccache without any build reaching ccache.dev or the ccache GitHub
+# releases -- exactly the arrangement the KVM guest images already use
+# (chimera-nas/kvm-test-base, pulled from GHCR, proxied inside ARC by the
+# repository.mdh.quantum.com:5009 pull-through).
+#
+# Why not the distro package: the remote cache is unusable on the older ones.
+# CCACHE_REMOTE_STORAGE arrived in ccache 4.7; rocky9 and ubuntu22 ship 4.6,
+# which reads the pre-rename CCACHE_SECONDARY_STORAGE and therefore silently
+# ignored the setting -- those four build cells were compiling every one of
+# their ~940 translation units cold on every merge.  Pinning one upstream
+# binary across every image removes the whole class of problem rather than
+# papering over this instance of it.
+#
+# Three artifacts come out of one run: a two-architecture linux image the
+# Dockerfiles COPY --from, and the darwin universal binary as an OCI artifact
+# for the GitHub-hosted macOS runners, which are not containerised.
+#
+# Manual, not on push: mirroring is a deliberate act tied to a version bump.
+# Nothing consumes this image yet -- the Dockerfile changes that install from it
+# land in a follow-up, once a tag exists to install from.  Consumers will pin
+# CCACHE_VERSION, so an upstream release can never move under CI on its own.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: ccache release to mirror (e.g. 4.14)
+        required: true
+        default: "4.14"
+
+jobs:
+  mirror:
+    name: Mirror ccache ${{ inputs.version }} to GHCR
+    runs-on: arc-amd64
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      # musl-static: one binary that runs unchanged on every image here --
+      # ubuntu 22/24/26, rocky 9/10 and the devcontainer -- with no glibc
+      # version floor and nothing to install alongside it.
+      - name: Download the release binaries
+        env:
+          V: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          base="https://github.com/ccache/ccache/releases/download/v${V}"
+          for pair in amd64:x86_64 arm64:aarch64; do
+            docker_arch="${pair%%:*}"
+            rel_arch="${pair##*:}"
+            name="ccache-${V}-linux-${rel_arch}-musl-static"
+            curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 \
+                 -o "${name}.tar.xz" "${base}/${name}.tar.xz"
+            tar xJf "${name}.tar.xz"
+            install -m 0755 "${name}/ccache" "ccache-${docker_arch}"
+            rm -rf "${name}" "${name}.tar.xz"
+          done
+          # macOS ships one universal binary covering both Intel and Apple
+          # Silicon, so there is no per-arch split to make here.  It cannot ride
+          # in the manifest list below -- buildkit has no darwin worker -- so it
+          # is pushed separately as an OCI artifact.
+          dname="ccache-${V}-darwin"
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 \
+               -o "${dname}.tar.gz" "${base}/${dname}.tar.gz"
+          tar xzf "${dname}.tar.gz"
+          install -m 0755 "${dname}/ccache" ccache-darwin
+          rm -rf "${dname}" "${dname}.tar.gz"
+
+          # Recorded in the log so the mirrored bytes can be tied back to the
+          # upstream release if the provenance is ever questioned.
+          sha256sum ccache-amd64 ccache-arm64 ccache-darwin
+          ./ccache-amd64 --version | head -1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+        with:
+          driver: docker-container
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # One tag, two architectures: consumers name ghcr.io/chimera-nas/ccache
+      # :<version> and buildkit resolves the leg matching the image they are
+      # building.
+      - name: Build and push the multi-arch ccache image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.ccache
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ghcr.io/chimera-nas/ccache:${{ inputs.version }}
+          annotations: |
+            index:org.opencontainers.image.source=https://github.com/chimera-nas/chimera
+            index:org.opencontainers.image.description=Upstream ccache ${{ inputs.version }} musl-static binaries, mirrored for CI
+
+      # macOS is not containerised, so there is no image to COPY --from and no
+      # darwin leg the manifest list could carry.  The macOS jobs already put
+      # oras on PATH, so the binary goes up as a plain OCI artifact instead --
+      # the same shape the KVM guest images use, with the variant in the tag to
+      # stay friendly to a registry proxy.
+      - name: Install oras
+        uses: oras-project/setup-oras@v1
+
+      - name: Push the darwin binary as an OCI artifact
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | \
+            oras login ghcr.io -u "${{ github.actor }}" --password-stdin
+          oras push "ghcr.io/chimera-nas/ccache:${{ inputs.version }}-darwin" \
+              --annotation "org.opencontainers.image.source=https://github.com/chimera-nas/chimera" \
+              ccache-darwin:application/octet-stream
