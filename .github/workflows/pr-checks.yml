@@ -7,11 +7,19 @@ name: PR checks
 # The heavy build/test matrix (build-test.yml) and docker image builds
 # (docker-build.yml) run ONLY in the merge queue (merge_group), not on pull
 # requests -- so a PR's check list isn't cluttered with a wall of skipped
-# matrix jobs.  But the branch-protection ruleset still requires the
-# "CI complete" and "Docker build complete" checks on a PR before it can be
-# added to the queue.  This workflow satisfies them with instant no-op
-# placeholders; the real checks of the same names run in the queue (where the
-# actual matrix and image builds happen).
+# matrix jobs.  The branch-protection ruleset requires "CI complete" and
+# "Docker build complete" on a PR before it can be added to the queue, and the
+# jobs of those names here are what report them at PR time; the real checks of
+# the same names run in the queue.
+#
+# "CI complete" is a real gate, not a placeholder: it depends on every
+# pre-merge job below, so a PR cannot enter the queue until all of them are
+# green.  It used to be a bare echo, which meant the required set went green in
+# about a second and the pre-merge signal -- ten minutes of static analysis and
+# model-based tests -- gated nothing at all.  Queueing early simply skipped it.
+#
+# "Docker build complete" stays a no-op here, because no docker image is built
+# at PR time; that check only carries meaning in the queue.
 #
 # It also carries the pre-merge signal that is cheap enough to be worth having
 # before the queue: clang static analysis on devcontainer and macOS, and the
@@ -49,17 +57,30 @@ env:
 jobs:
   ci-complete:
     name: CI complete
+    needs: [build-devcontainer, analyze-dev, quint-coverage, analyze-macos]
+    if: ${{ always() }}
     runs-on: arc-small
     steps:
-      - name: PR placeholder
-        run: echo "PR placeholder -- the full build/test matrix runs in the merge queue (merge_group)."
+      - name: Verify every pre-merge job succeeded
+        run: |
+          # Every dependency must be `success`.  Checking results rather than
+          # using success() means a job that was skipped -- never actually run --
+          # cannot pass this for the wrong reason.
+          results='${{ join(needs.*.result, ' ') }}'
+          echo "dependency results: ${results}"
+          for r in ${results}; do
+            if [ "$r" != "success" ]; then
+              echo "a required job did not succeed"
+              exit 1
+            fi
+          done
 
   docker-build-complete:
     name: Docker build complete
     runs-on: arc-small
     steps:
       - name: PR placeholder
-        run: echo "PR placeholder -- docker image builds run in the merge queue (merge_group)."
+        run: echo "No docker image is built at PR time; the real check runs in the merge queue."
 
   # ---------------------------------------------------------------------------
   # Pre-merge signal.  The devcontainer image is built once here and consumed by

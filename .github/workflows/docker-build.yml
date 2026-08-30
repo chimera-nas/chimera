@@ -24,7 +24,6 @@ env:
 jobs:
   build-and-push:
     name: Build ${{ matrix.os }} ${{ matrix.platform }} ${{ matrix.build_type }}
-    if: ${{ github.event_name != 'pull_request' }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -150,12 +149,14 @@ jobs:
     steps:
       - name: Verify docker build jobs passed
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            echo "PR placeholder — docker image builds run in the merge queue (merge_group)."
-            exit 0
-          fi
-          if ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}; then
-            echo "One or more docker build jobs did not pass."
-            exit 1
-          fi
-          echo "All docker build jobs passed."
+          # Every dependency must be `success`.  Checking results rather than
+          # using success() means a job that was skipped -- never actually run --
+          # cannot pass this for the wrong reason.
+          results='${{ join(needs.*.result, ' ') }}'
+          echo "dependency results: ${results}"
+          for r in ${results}; do
+            if [ "$r" != "success" ]; then
+              echo "a required job did not succeed"
+              exit 1
+            fi
+          done

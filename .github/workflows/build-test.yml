@@ -5,10 +5,10 @@
 name: CI
 
 on:
-  # The full build/test matrix runs ONLY in the merge queue, never on raw PRs
-  # (PR-time required-check placeholders live in pr-checks.yml).  The job-level
-  # `if: github.event_name != 'pull_request'` guards below are now redundant but
-  # left in place as a harmless backstop.
+  # The full build/test matrix runs ONLY in the merge queue, never on raw PRs;
+  # the PR-time half of the gate lives in pr-checks.yml.  There is no
+  # pull_request trigger here, so the jobs below carry no event guards: every
+  # job in this file runs on every event that reaches it.
   merge_group:
   workflow_dispatch:   # allow manual runs
 
@@ -64,7 +64,6 @@ env:
 jobs:
   build-devcontainer:
     name: Build devcontainer ${{ matrix.arch }}
-    if: ${{ github.event_name != 'pull_request' }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -109,7 +108,6 @@ jobs:
 
   build-ubuntu26:
     name: Build ubuntu26 ${{ matrix.arch }}
-    if: ${{ github.event_name != 'pull_request' }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -151,7 +149,6 @@ jobs:
 
   build-ubuntu24:
     name: Build ubuntu24 ${{ matrix.arch }}
-    if: ${{ github.event_name != 'pull_request' }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -193,7 +190,6 @@ jobs:
 
   build-ubuntu22:
     name: Build ubuntu22 ${{ matrix.arch }}
-    if: ${{ github.event_name != 'pull_request' }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -235,7 +231,6 @@ jobs:
 
   build-rocky9:
     name: Build rocky9 ${{ matrix.arch }}
-    if: ${{ github.event_name != 'pull_request' }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -276,7 +271,6 @@ jobs:
 
   build-rocky10:
     name: Build rocky10 ${{ matrix.arch }}
-    if: ${{ github.event_name != 'pull_request' }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -322,7 +316,6 @@ jobs:
   test:
     name: Test ${{ matrix.image_name }} ${{ matrix.arch }} ${{ matrix.build_type }}
     needs: [build-ubuntu26, build-ubuntu24, build-ubuntu22, build-rocky9, build-rocky10]
-    if: ${{ github.event_name != 'pull_request' }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -468,7 +461,6 @@ jobs:
   static-analysis:
     name: Analyze ${{ matrix.image_name }} ${{ matrix.arch }} ${{ matrix.build_type }}
     needs: [build-devcontainer, build-ubuntu26, build-ubuntu24, build-ubuntu22, build-rocky9, build-rocky10]
-    if: ${{ github.event_name != 'pull_request' }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -619,7 +611,7 @@ jobs:
   publish-test-results:
     name: Report
     needs: [test, test-dev, macos]
-    if: ${{ always() && github.event_name != 'pull_request' }}
+    if: ${{ always() }}
     runs-on: arc-small
     permissions:
       pull-requests: write
@@ -662,7 +654,6 @@ jobs:
   test-dev:
     name: Test devcontainer ${{ matrix.arch }} ${{ matrix.build_type }}
     needs: [build-devcontainer]
-    if: ${{ github.event_name != 'pull_request' }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -733,7 +724,6 @@ jobs:
   # ---------------------------------------------------------------------------
   macos:
     name: Test macOS ${{ matrix.build_type }}
-    if: ${{ github.event_name != 'pull_request' }}
     runs-on: macos-14
     permissions:
       contents: read
@@ -798,7 +788,6 @@ jobs:
   # container image to wait on, it has no dependencies at all.
   analyze-macos:
     name: Analyze macOS ${{ matrix.build_type }}
-    if: ${{ github.event_name != 'pull_request' }}
     runs-on: macos-14
     permissions:
       contents: read
@@ -871,12 +860,14 @@ jobs:
     steps:
       - name: Verify all build/test jobs passed
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            echo "PR placeholder — the full build/test matrix runs in the merge queue (merge_group)."
-            exit 0
-          fi
-          if ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}; then
-            echo "One or more build/test jobs did not pass."
-            exit 1
-          fi
-          echo "All build/test jobs passed."
+          # Every dependency must be `success`.  Checking results rather than
+          # using success() means a job that was skipped -- never actually run --
+          # cannot pass this for the wrong reason.
+          results='${{ join(needs.*.result, ' ') }}'
+          echo "dependency results: ${results}"
+          for r in ${results}; do
+            if [ "$r" != "success" ]; then
+              echo "a required job did not succeed"
+              exit 1
+            fi
+          done
