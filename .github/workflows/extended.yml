@@ -2,11 +2,19 @@
 #
 # SPDX-License-Identifier: Unlicense
 
-name: Nightly
+name: Extended
 
 on:
   schedule:
-    - cron: '0 7 * * *'  # 07:00 UTC daily
+    # Every six hours rather than once a day.  This workflow is the sole writer
+    # of every shared ccache, and a bundle is only as useful as it is fresh: a
+    # PR builds the merge of its branch with current main, so once main has
+    # moved past what the bundle was built from, every translation unit that
+    # includes a changed header misses.  Measured on the same macOS analysis
+    # job either side of four merges to main, two of them touching headers:
+    # 100% hits and 113s against 60% and 464s.  Running four times a day keeps
+    # the caches within a few hours of the tip instead of up to a day behind.
+    - cron: '0 1,7,13,19 * * *'  # 01:00, 07:00, 13:00, 19:00 UTC
   workflow_dispatch:     # allow manual runs
     # Scope the smbtorture matrix for a manual run.  All three default to the
     # full matrix, so the scheduled run is unaffected; they exist so the job can

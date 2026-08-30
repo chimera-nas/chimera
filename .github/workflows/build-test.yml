@@ -19,7 +19,7 @@ on:
 #   - static analysis on every image, and on macOS
 #
 # The extended tier -- pynfs, pjdfstest, cthon, ltp, pike, smbtorture, wpts,
-# KVM -- runs in .github/workflows/nightly.yml, one job per platform.  It is
+# KVM -- runs in .github/workflows/extended.yml, one job per platform.  It is
 # too slow to sit in front of a merge, and the queue is the wrong place to
 # discover that a KVM guest image moved.
 #
@@ -60,7 +60,7 @@ env:
   APT_MIRROR: http://repository.mdh.quantum.com/repository/pkgs/ubuntu
   DOCKER_MIRROR: repository.mdh.quantum.com/
   # Shared compiler cache.  Every job here uses a purely *local* ccache, primed
-  # before the build from a bundle the nightly run published for that cell.
+  # before the build from a bundle the Extended workflow published for that cell.
   #
   # This replaces ccache's HTTP remote backend, which fetched each object over
   # the network as the build asked for it.  That put ~950 round trips per job on
@@ -71,7 +71,7 @@ env:
   #
   # One bundle fetch per job costs one round trip and leaves the build reading a
   # local directory, which cannot time out.  Same shape macOS uses with
-  # actions/cache, and the same division of labour: the scheduled nightly run
+  # actions/cache, and the same division of labour: the scheduled Extended run
   # writes, everything else only reads.
   NEXUS_SCRATCH_URL: http://repository.mdh.quantum.com/repository/scratch
 
@@ -346,7 +346,7 @@ jobs:
           # NOTE: the devcontainer has its own test-dev job below -- it is the
           # one image built for both arches, and it configures KVM on; it is
           # not part of this distro matrix.
-          # ubuntu 26 (amd64 only on PR; arm64 runs in nightly)
+          # ubuntu 26 (amd64 only on PR; arm64 runs in the extended workflow)
           - platform: linux/amd64
             runner: arc-amd64
             arch: amd64
@@ -361,7 +361,7 @@ jobs:
             image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu26
             image_name: ubuntu26
             cmake_extra: "-DKVM_TESTING=OFF"
-          # ubuntu 24 (amd64 only on PR; arm64 runs in nightly)
+          # ubuntu 24 (amd64 only on PR; arm64 runs in the extended workflow)
           - platform: linux/amd64
             runner: arc-amd64
             arch: amd64
@@ -376,7 +376,7 @@ jobs:
             image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu24
             image_name: ubuntu24
             cmake_extra: "-DKVM_TESTING=OFF"
-          # ubuntu 22 (amd64 only on PR; arm64 runs in nightly)
+          # ubuntu 22 (amd64 only on PR; arm64 runs in the extended workflow)
           - platform: linux/amd64
             runner: arc-amd64
             arch: amd64
@@ -406,7 +406,7 @@ jobs:
             image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-rocky9
             image_name: rocky9
             cmake_extra: "-DIO_URING_ENABLED=OFF -DKVM_TESTING=OFF"
-          # rocky 10 (amd64 only on PR; arm64 runs in nightly)
+          # rocky 10 (amd64 only on PR; arm64 runs in the extended workflow)
           - platform: linux/amd64
             runner: arc-amd64
             arch: amd64
@@ -691,7 +691,7 @@ jobs:
   # `test` job above, on the one image built for both arches.
   #
   # KVM guest images are not fetched (KVM_FETCH_IMAGES=OFF): the KVM suites are
-  # extended-tier and run in the nightly, so the queue wants the KVM CMake path
+  # extended-tier and run in the extended workflow, so the queue wants the KVM CMake path
   # configured but not the multi-gigabyte guest images behind it.  KVM is
   # x86-only in the devcontainer, so arm64 configures with it off entirely.
   test-dev:
@@ -841,7 +841,7 @@ jobs:
       # run reads its own ref and the default branch's.  This workflow only ever
       # runs on merge_group, and that gh-readonly-queue/... ref is discarded, so
       # nothing it saves is ever seen again.  The entry that matters is the one
-      # nightly.yml writes on main; this restores that.  Worst case it is a day
+      # extended.yml writes on main; this restores that.  Worst case it is a few
       # stale, which for ccache means a slightly lower hit rate and nothing
       # worse.
       - name: Restore the ccache directory
@@ -1001,7 +1001,7 @@ jobs:
           install -m 0755 "${RUNNER_TEMP}/ccache-darwin" /usr/local/bin/ccache
           ccache --version | head -1
 
-      # Written by nightly.yml, which runs on main; a merge_group ref is thrown
+      # Written by extended.yml, which runs on main; a merge_group ref is thrown
       # away, so the queue restores but never usefully saves.
       - name: Restore the ccache directory
         uses: actions/cache@v4
