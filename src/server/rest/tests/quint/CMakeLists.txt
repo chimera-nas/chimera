@@ -2,6 +2,11 @@
 #
 # SPDX-License-Identifier: LGPL-2.1-only
 
+# These are model-based tests, so they belong to the quick tier that plain
+# `ctest` runs and the merge queue gates on.  See the test-tier block in the
+# top-level CMakeLists.txt.
+set(CHIMERA_TEST_TIER quick)
+
 # Control-plane model-based tests: the REST API, the Prometheus scrape
 # endpoint, and their effect on the data protocols, all driven in-process over
 # libevpl's inproc transport (ctl_http.h).
