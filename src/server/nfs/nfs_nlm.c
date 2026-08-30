@@ -325,19 +325,21 @@ struct nlm_lock_ctx {
     char                              client_addr[80];
 };
 
-/* Build a self-contained grant job from the now-granted lock entry and hand it
- * to the outbound NLM_GRANTED engine.  Called only for a blocking lock that was
- * deferred (NLM4_BLOCKED already sent); the entry is GRANTED in the claim core,
- * so the job is a pure value snapshot and does not alias any lock state.
- * Caller must NOT hold nlm_state.mutex. */
+/* Snapshot a self-contained grant job from the now-granted lock entry.
+ *
+ * CALLER MUST HOLD nlm_state.mutex.  The entry is only guaranteed to exist
+ * while it is held: a client reap (FREE_ALL, SM_NOTIFY, or the last
+ * connection dropping) takes every entry off client->locks under the mutex
+ * and frees them as soon as it drops it, so reading the entry afterwards is
+ * a use-after-free.  The job is a pure value copy, so once it is filled in
+ * nothing downstream aliases lock state. */
 static void
-chimera_nfs_nlm4_deliver_grant(struct nlm_lock_ctx *ctx)
+chimera_nfs_nlm4_build_grant_locked(
+    struct nlm_lock_ctx      *ctx,
+    struct nlm_grant_request *reqp)
 {
-    struct chimera_server_nfs_thread *thread = ctx->thread;
-    struct chimera_server_nfs_shared *shared = thread->shared;
-    struct nlm_lock_entry            *entry  = ctx->entry;
-    struct nlm_granter               *granter;
-    struct nlm_grant_request          req;
+    struct nlm_lock_entry   *entry = ctx->entry;
+    struct nlm_grant_request req;
 
     memset(&req, 0, sizeof(req));
     snprintf(req.client_addr, sizeof(req.client_addr), "%s", ctx->client_addr);
@@ -358,14 +360,27 @@ chimera_nfs_nlm4_deliver_grant(struct nlm_lock_ctx *ctx)
     req.length    = NLM_POSIX_LEN_TO_VFS(entry->length);
     req.exclusive = entry->exclusive ? 1 : 0;
 
+    *reqp = req;
+} /* chimera_nfs_nlm4_build_grant_locked */
+
+/* Hand a snapshot built above to the outbound NLM_GRANTED engine.  Caller
+ * must NOT hold nlm_state.mutex. */
+static void
+chimera_nfs_nlm4_submit_grant(
+    struct nlm_lock_ctx      *ctx,
+    struct nlm_grant_request *req)
+{
+    struct chimera_server_nfs_shared *shared = ctx->thread->shared;
+    struct nlm_granter               *granter;
+
     /* Lazily create the granter (idempotent).  Done under nlm_state.mutex so two
      * threads cannot both create one. */
     pthread_mutex_lock(&shared->nlm_state.mutex);
     granter = nlm_granter_get_or_create(shared);
     pthread_mutex_unlock(&shared->nlm_state.mutex);
 
-    nlm_granter_submit(granter, &req);
-} /* chimera_nfs_nlm4_deliver_grant */
+    nlm_granter_submit(granter, req);
+} /* chimera_nfs_nlm4_submit_grant */
 
 /* Fired (once) synchronously inside chimera_vfs_claim_acquire when a blocking
  * LOCK queues on a conflict.  Sends the RFC 1813 / XNFS NLM4_BLOCKED interim
@@ -429,7 +444,9 @@ chimera_nfs_nlm4_lock_acquire_cb(
     res.cookie.data = ctx->cookie.data;
 
     if (result == CHIMERA_CLAIM_GRANTED) {
-        bool reaped;
+        struct nlm_grant_request grant_req;
+        bool                     reaped;
+        bool                     deliver = false;
 
         pthread_mutex_lock(&shared->nlm_state.mutex);
         reaped = entry->reaped;
@@ -444,6 +461,15 @@ chimera_nfs_nlm4_lock_acquire_cb(
         } else {
             entry->pending        = false;
             entry->claim_inserted = true;
+
+            /* Snapshot the out-of-band grant HERE, under the mutex.  Once it
+             * is dropped this entry is fair game for a concurrent client
+             * reap, which frees it -- and the deferred-grant path used to
+             * read it afterwards. */
+            if (ctx->was_blocked) {
+                chimera_nfs_nlm4_build_grant_locked(ctx, &grant_req);
+                deliver = true;
+            }
         }
         pthread_mutex_unlock(&shared->nlm_state.mutex);
 
@@ -479,9 +505,9 @@ chimera_nfs_nlm4_lock_acquire_cb(
          * original RPC), the grant must now be delivered to the waiting client
          * via an out-of-band NLM_GRANTED callback -- the original RPC is closed.
          * Submit the grant job and return without touching the RPC reply path. */
-        if (ctx->was_blocked) {
+        if (deliver) {
             chimera_nfs_debug("NLM LOCK: deferred lock granted -> NLM_GRANTED callback");
-            chimera_nfs_nlm4_deliver_grant(ctx);
+            chimera_nfs_nlm4_submit_grant(ctx, &grant_req);
             free(ctx);
             return;
         }
