@@ -242,16 +242,34 @@ LOG=$(mktemp "$SMBT_OUTDIR/smbt.XXXXXX.log")
 # too -- upload happens even when the matrix never finished.
 chmod 644 "$LOG"
 cd "$SMBT_REPO"
-timeout --signal=KILL 300 \
+# Most cells finish in seconds.  smb2.maxfid opens 65520 files and then closes
+# them all, which cairn takes about 341s to do -- inside the budget on every
+# other backend, and just over it on that one, so it flapped as a regression
+# while smbtorture itself reported success.  Give that one subtest room rather
+# than raising the default: four subtests (hold-oplock, hold-sharemode,
+# lease.breaking4, aio_delay.aio_cancel) block on purpose and time out on every
+# backend by design, and a larger default would only make them wait longer.
+case "$SUITE" in
+    smb2.maxfid) CELL_TIMEOUT=600;;
+    *)           CELL_TIMEOUT=300;;
+esac
+
+timeout --signal=KILL "$CELL_TIMEOUT" \
     scripts/netns_test_wrapper.sh \
     "$SMBT_TESTBIN" \
     -b "$BACKEND" "$SUITE" > "$LOG" 2>&1
 RC=$?
+# 124 is what GNU timeout reports when the command timed out; 137 is the child
+# seen as killed by the SIGKILL it was sent.  Which of the two surfaces depends
+# on the coreutils version and on what the wrapper does with the signal, and
+# only 137 was handled -- so in practice every timeout was landing in the FAIL
+# arm and being reported as a functional failure.  Of the 25 timeouts in the
+# 2026-08-30 nightly, not one was classified TIME.
 case $RC in
-    0)   STATUS="PASS|$BACKEND|$SUITE";;
-    77)  STATUS="SKIP|$BACKEND|$SUITE";;
-    137) STATUS="TIME|$BACKEND|$SUITE";;
-    *)   STATUS="FAIL|$BACKEND|$SUITE|rc=$RC";;
+    0)        STATUS="PASS|$BACKEND|$SUITE";;
+    77)       STATUS="SKIP|$BACKEND|$SUITE";;
+    124|137)  STATUS="TIME|$BACKEND|$SUITE";;
+    *)        STATUS="FAIL|$BACKEND|$SUITE|rc=$RC";;
 esac
 { flock -x 9; echo "$STATUS" >> "$SMBT_RESULTS"; } 9>"$SMBT_RESULTS.lock"
 if [ "$RC" -ne 0 ] && [ "$RC" -ne 77 ]; then
