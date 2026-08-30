@@ -101,6 +101,37 @@ if(CAIRN_ENABLED)
         TIMEOUT 60)
 endif()
 
+# The passthrough backends (linux, io_uring) mount a host directory instead of
+# a named filesystem, and their trees must live on a filesystem that supports
+# name_to_handle_at -- tmpfs and overlayfs do not.  The harness roots its
+# backing store at $CHIMERA_MBT_SCRATCH (default: the working directory) and
+# turns an incapable filesystem into a clean SKIP, so these register
+# unconditionally on capable platforms: in CI the ctest working directory is
+# a docker volume on the runner's ext4, and a local overlayfs build tree
+# skips rather than fails.  The probe additionally guards the
+# exclusive-create-retry-exist deviation, which only a passthrough backend
+# (whose host filesystem touches the atime the exclusive verifier is stashed
+# in) can reproduce.
+if(CHIMERA_LINUX)
+    add_test(NAME chimera/server/nfs/mbt/deviation_probe_linux
+        COMMAND $<TARGET_FILE:nfs3_mbt_probe> -b linux)
+    set_tests_properties(chimera/server/nfs/mbt/deviation_probe_linux PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs3_probe_linux"
+        LABELS "quint;nfs3_mbt;linux"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 60)
+endif()
+
+if(CHIMERA_VFS_IO_URING)
+    add_test(NAME chimera/server/nfs/mbt/deviation_probe_io_uring
+        COMMAND $<TARGET_FILE:nfs3_mbt_probe> -b io_uring)
+    set_tests_properties(chimera/server/nfs/mbt/deviation_probe_io_uring PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs3_probe_io_uring"
+        LABELS "quint;nfs3_mbt;io_uring"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 60)
+endif()
+
 # Auxiliary-protocol ground truth: pins which portmap/rpcbind, MOUNT, NLM and
 # NSM procedures chimera registers, and the constants their replies carry --
 # the facts the nfsaux model's configuration gate encodes.  Needs no corpus.
@@ -162,6 +193,35 @@ if(CAIRN_ENABLED)
     set_tests_properties(chimera/server/nfs/mbt/batch_cairn PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs3_batch_cairn"
         LABELS "quint;nfs3_mbt;cairn"
+        TIMEOUT 300)
+endif()
+
+# The corpus against the passthrough backends (scratch/skip semantics as for
+# the deviation probes above).  --max-attr-skip-rate is raised: NFS3 post-op
+# attributes are RFC-optional, and the passthrough backends omit them where
+# fetching would cost an extra host round trip -- measured up to ~25% of
+# replies on the step flavors, against ~0% for the in-engine backends.  The
+# model tolerates an omitted optional attribute; the cap only bounds how much
+# of the corpus may go unchecked before the replay is judged vacuous.
+if(CHIMERA_LINUX)
+    add_test(NAME chimera/server/nfs/mbt/batch_linux
+        COMMAND $<TARGET_FILE:nfs3_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/nfs3
+                --backend linux --max-attr-skip-rate 0.5)
+    set_tests_properties(chimera/server/nfs/mbt/batch_linux PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs3_batch_linux"
+        LABELS "quint;nfs3_mbt;linux"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 300)
+endif()
+
+if(CHIMERA_VFS_IO_URING)
+    add_test(NAME chimera/server/nfs/mbt/batch_io_uring
+        COMMAND $<TARGET_FILE:nfs3_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/nfs3
+                --backend io_uring --max-attr-skip-rate 0.5)
+    set_tests_properties(chimera/server/nfs/mbt/batch_io_uring PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs3_batch_io_uring"
+        LABELS "quint;nfs3_mbt;io_uring"
+        SKIP_RETURN_CODE 77
         TIMEOUT 300)
 endif()
 

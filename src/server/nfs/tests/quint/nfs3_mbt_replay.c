@@ -1752,7 +1752,7 @@ main(
                 fprintf(stderr,
                         "usage: %s [--trace FILE ...] [--trace-dir DIR] "
                         "[--block-size N] [--max-attr-skip-rate F] "
-                        "[--backend memfs|diskfs|cairn] "
+                        "[--backend memfs|diskfs|cairn|linux|io_uring] "
                         "[--dry-run] [--verbose]\n", argv[0]);
                 mbt_free_traces(traces, ntraces);
                 return 2;

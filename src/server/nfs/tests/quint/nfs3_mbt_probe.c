@@ -202,9 +202,16 @@ main(
         fprintf(stderr, "MKNOD pd/f failed: %u\n", res->status);
         return 1;
     }
+    /* The engine backends answer ISDIR (a non-directory moved onto a
+     * directory); the passthrough backends surface the host kernel's
+     * reading, which reports the non-empty target first (NOTEMPTY).  Both
+     * are status-only precedence choices on the same refusal -- what F2
+     * actually guards is that the parent-alias case answers at all instead
+     * of deadlocking. */
     expect("RENAME child onto a name resolving to its parent",
            mbt_rename(env, &pd, "f", 1, &root, "pd", 2)->status,
-           NFS3ERR_ISDIR);
+           mbt_module_is_passthrough(env->module) ? NFS3ERR_NOTEMPTY
+                                                  : NFS3ERR_ISDIR);
 
     printf("F6 a filehandle whose object is gone -> STALE:\n");
     {
