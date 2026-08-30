@@ -18,6 +18,9 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  # Internal pull-through cache for the mirrored ccache image (mirrors
+  # ghcr.io/chimera-nas/ccache).  Public default lives in the Dockerfiles.
+  CCACHE_IMAGE_REGISTRY: repository.mdh.quantum.com:5009/chimera-nas/ccache
   APT_MIRROR: http://repository.mdh.quantum.com/repository/pkgs/ubuntu
   DOCKER_MIRROR: repository.mdh.quantum.com/
 
@@ -111,6 +114,7 @@ jobs:
             BUILD_TYPE=${{ matrix.build_type }}
             APT_MIRROR=${{ env.APT_MIRROR }}
             DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
+            CCACHE_REGISTRY=${{ env.CCACHE_IMAGE_REGISTRY }}
 
   merge-manifests:
     if: github.event_name == 'push'

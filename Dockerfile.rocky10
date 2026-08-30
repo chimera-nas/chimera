@@ -2,16 +2,32 @@
 #
 # SPDX-License-Identifier: Unlicense
 
+# Current ccache, mirrored into GHCR by .github/workflows/mirror-ccache.yml.
+# CI overrides CCACHE_REGISTRY to the internal pull-through proxy so an image
+# build never reaches out to ghcr.io -- the same public-default/internal-override
+# split the KVM guest images use (see kvm/CMakeLists.txt).
+#
+# Not the distro package: CCACHE_REMOTE_STORAGE arrived in ccache 4.7, and
+# rocky9 and ubuntu22 ship 4.6, which reads the pre-rename name and so silently
+# ignored the shared cache -- those cells compiled everything cold, every run.
+# One pinned upstream binary everywhere retires that whole class of skew.
+ARG CCACHE_REGISTRY=ghcr.io/chimera-nas/ccache
+ARG CCACHE_VERSION=4.14
+FROM ${CCACHE_REGISTRY}:${CCACHE_VERSION} AS ccache
+
 ARG DOCKER_MIRROR=""
 FROM ${DOCKER_MIRROR}rockylinux/rockylinux:10
 ARG ENABLE_XLIO=1
 ARG ENABLE_FIO=1
 
+# The mirrored ccache, ahead of anything the distro might provide on PATH.
+COPY --from=ccache /ccache /usr/local/bin/ccache
+
 RUN dnf install -y epel-release && \
     dnf config-manager --set-enabled crb
 
 RUN dnf -y update && \
-    dnf -y install gcc gcc-c++ clang clang-tools-extra cmake ninja-build ccache git flex bison llvm \
+    dnf -y install gcc gcc-c++ clang clang-tools-extra cmake ninja-build git flex bison llvm \
     libuuid-devel uthash-devel krb5-devel krb5-libs \
     rdma-core-devel jansson-devel xxhash-devel userspace-rcu-devel liburing-devel libunwind-devel libasan \
     rocksdb-devel openssl-devel openssl numactl-devel libcurl-devel libaio-devel libxcrypt-devel \
