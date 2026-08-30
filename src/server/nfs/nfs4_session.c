@@ -1883,16 +1883,6 @@ nfs4_client_set_cb_path(
 
     pthread_mutex_lock(&u->lock);
 
-    /* Detect a genuine callback-address change: the client re-registered a new
-     * callback server (SETCLIENTID with the same verifier, RFC 7530 §16.33).
-     * An existing channel points at the OLD server, so it must be torn down --
-     * otherwise a pending recall would be delivered to the address the client
-     * just abandoned.  The new channel is rebuilt lazily (next delegation grant)
-     * or eagerly at SETCLIENTID_CONFIRM when delegations are already held. */
-    bool addr_changed = cb->cb_program != cb_program ||
-        (int) strlen(cb->cb_addr) != addr_len ||
-        (addr_len > 0 && memcmp(cb->cb_addr, addr, addr_len) != 0);
-
     cb->cb_program      = cb_program;
     cb->cb_ident        = cb_ident;
     cb->cb_minorversion = minorversion;
@@ -1913,7 +1903,21 @@ nfs4_client_set_cb_path(
     /* New addressing: force re-probe before the next delegation grant. */
     atomic_store_explicit(&cb->cb_state, NFS4_CB_UNINIT, memory_order_relaxed);
 
-    if (addr_changed && cb->cb_client) {
+    /* Any channel already on the path goes with it.  This used to be
+     * conditional on the callback address having actually changed -- a channel
+     * pointing at the OLD server must go, or a pending recall is delivered to
+     * an address the client just abandoned (SETCLIENTID with the same
+     * verifier, RFC 7530 16.33).  But the state reset above is unconditional,
+     * so a re-registration that keeps the same address left a live channel on
+     * a path marked UNINIT: the next probe wins the UNINIT->PROBING CAS and
+     * nfs4_cb_channel_open overwrites cb->cb_client, and the channel it
+     * replaced is unreachable from that moment -- leaked along with its
+     * backchannel session reference and that session's cached replies.  A
+     * client that re-runs CREATE_SESSION with unchanged addressing (which the
+     * model corpus does routinely) leaked one channel per repeat.  The rebuild
+     * is lazy either way, so tearing down unconditionally costs a re-probe on
+     * the next delegation grant or LAYOUTGET, not correctness. */
+    if (cb->cb_client) {
         nfs4_cb_path_teardown(cb, false);
     }
 
