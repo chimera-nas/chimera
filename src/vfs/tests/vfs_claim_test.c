@@ -26,7 +26,6 @@
 #include <assert.h>
 
 #include "vfs/vfs_claim.h"
-#include "vfs/vfs_claim_internal.h"
 #include "vfs/vfs_internal.h"
 #include "common/logging.h"
 
@@ -861,15 +860,16 @@ test_async_acquire_cancel(void)
 /* Test 14b: the backend RANGE confirm lane ------------------------- */
 
 /* A projectable RANGE grant does not complete when the pump runs: its
- * ticket rides the service work FIFO awaiting the backend confirm.  Both
- * points at which a cancel can still claim such a ticket are tested here,
- * and BOTH must answer without blocking -- chimera_vfs_claim_cancel used
- * to spin until the confirm's callback returned, which deadlocked any
- * caller holding a lock that callback also takes (NLM client teardown
- * cancelling under nlm_state.mutex against the confirm's NLM4_GRANTED
- * callback).  There is no backend here: forcing lease_capable is what puts
- * the core on the projecting path, which is otherwise reachable only with
- * a real CAP_LEASE module attached. */
+ * ticket rides the service work FIFO awaiting the backend confirm.  While
+ * it is queued a cancel claims it outright; once the confirm is dispatched
+ * the callback owns the completion and the cancel says so -- promptly.  It
+ * used to spin until that callback returned, which deadlocked any caller
+ * holding a lock the callback also takes (an NLM client teardown cancelling
+ * under nlm_state.mutex against the confirm's NLM4_GRANTED callback).
+ *
+ * There is no backend here: forcing lease_capable is what puts the core on
+ * the projecting path, which is otherwise reachable only with a real
+ * CAP_LEASE module attached, and is why this lane had no unit coverage. */
 static void
 test_backend_confirm_lane_cancel(void)
 {
@@ -878,7 +878,6 @@ test_backend_confirm_lane_cancel(void)
     struct chimera_vfs_claim           held, want;
     struct chimera_claim_owner         owner;
     struct chimera_vfs_pending_acquire ticket;
-    struct chimera_vfs_bl_range_op     op;
     struct acquire_recorder            rec = { 0 };
     bool                               cancelled;
 
@@ -909,34 +908,15 @@ test_backend_confirm_lane_cancel(void)
     CHECK(rec.fired == 0, "pump defers a projectable grant to the lane");
     CHECK(state->work_head != NULL, "ticket is queued on the work FIFO");
 
-    /* Still on the FIFO: the cancel yanks it outright. */
+    /* Still queued: the cancel yanks it and the callback never fires. */
     cancelled = chimera_vfs_claim_cancel(state, &ticket);
     CHECK(cancelled == true, "cancel claims a ticket queued for confirm");
     CHECK(state->work_head == NULL, "cancel removed the FIFO entry");
     CHECK(rec.fired == 0, "cancelled ticket never fires its callback");
 
-    /* Already dispatched: the confirm is in flight and its op is linked,
-     * so the cancel claims the op instead and the completion will skip the
-     * callback.  It must decide immediately rather than wait the confirm
-     * out. */
-    memset(&op, 0, sizeof(op));
-    op.state               = state;
-    op.file                = file;
-    op.ticket              = &ticket;
-    op.serial_lane         = true;
-    state->confirm_head    = &op;
-    state->work_confirming = true;
-
-    cancelled = chimera_vfs_claim_cancel(state, &ticket);
-    CHECK(cancelled == true, "cancel claims a confirm already in flight");
-    CHECK(op.cancelled == true, "the in-flight confirm is marked cancelled");
-
-    /* Once the completion has unlinked its op -- which it does before
-     * invoking the callback -- the callback owns the ticket and the cancel
-     * must say so instead of blocking. */
-    state->confirm_head    = NULL;
-    state->work_confirming = false;
-
+    /* Dispatched (nothing left on the FIFO): the callback owns the
+     * completion, so the cancel yields -- and returns rather than waiting
+     * for that callback, which is what closed the deadlock. */
     cancelled = chimera_vfs_claim_cancel(state, &ticket);
     CHECK(cancelled == false, "cancel yields once the callback owns the ticket");
 

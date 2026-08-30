@@ -122,52 +122,42 @@ enum chimera_vfs_backend_lease_state {
     CHIMERA_VFS_BL_RELEASING,
 };
 
-struct chimera_vfs_bl_range_op;
-
 struct chimera_vfs_state {
-    struct chimera_vfs_state_shard  shards[CHIMERA_VFS_STATE_NUM_SHARDS];
-    uint32_t                        default_break_deadline_ms;
-    uint32_t                        implicit_idle_ms;
+    struct chimera_vfs_state_shard shards[CHIMERA_VFS_STATE_NUM_SHARDS];
+    uint32_t                       default_break_deadline_ms;
+    uint32_t                       implicit_idle_ms;
 
     /* Backend lease projection service: work is posted here from any thread
      * and drained on the service thread (the VFS close thread), which owns
      * every backend lease dispatch for AGGREGATE tokens.  lease_capable is
      * false when no registered module declares CHIMERA_VFS_CAP_LEASE, making
      * every projection hook a cheap no-op. */
-    uint8_t                         lease_capable;
-    uint8_t                         lease_probed;      /* modules scanned (lazy: the
+    uint8_t                        lease_capable;
+    uint8_t                        lease_probed;       /* modules scanned (lazy: the
                                                        * close thread attaches
                                                        * before modules register) */
-    struct chimera_vfs             *vfs;
-    struct chimera_claim_owner      node_owner;      /* this node's wire identity */
-    pthread_mutex_t                 service_lock;
-    struct chimera_vfs_file_state  *service_head;
-    struct chimera_vfs_file_state  *service_tail;
-    struct chimera_vfs_thread      *service_thread;
-    struct evpl_doorbell           *service_doorbell;
+    struct chimera_vfs            *vfs;
+    struct chimera_claim_owner     node_owner;       /* this node's wire identity */
+    pthread_mutex_t                service_lock;
+    struct chimera_vfs_file_state *service_head;
+    struct chimera_vfs_file_state *service_tail;
+    struct chimera_vfs_thread     *service_thread;
+    struct evpl_doorbell          *service_doorbell;
     /* ONE ordered FIFO for every backend RANGE operation (acquire confirms
      * and token releases alike), drained in arrival order on the service
      * thread.  Ordering is load-bearing: an unlock's token release queued
      * before a subsequent lock's confirm MUST reach the backend first, or
      * the confirm collides with the stale record (smb2.lock.stacking /
      * unlock / zerobytelength, pynfs LOCK13). */
-    struct chimera_vfs_bl_work     *work_head;
-    struct chimera_vfs_bl_work     *work_tail;
+    struct chimera_vfs_bl_work    *work_head;
+    struct chimera_vfs_bl_work    *work_tail;
     /* Set while a TICKET popped from the FIFO has a backend confirm in
      * flight; guarded by service_lock.  The lane is strictly serial: the
      * drain stops here and is resumed by the confirm's completion, so an
      * unlock's queued token release can never overtake -- or be overtaken
      * by -- the confirm ahead of it, whether the backend answers inline or
      * from a delegation thread. */
-    bool                            work_confirming;
-    /* Every backend RANGE confirm currently in flight, lane-dispatched or
-     * inline.  chimera_vfs_claim_cancel arbitrates against these instead of
-     * waiting for one to finish: the op is CORE-owned memory, so a cancel
-     * that claims one can return immediately and let its caller free the
-     * ticket, and the completion learns it lost without ever dereferencing
-     * a ticket the caller may already have freed.  Guarded by service_lock;
-     * opaque here (defined in vfs_claim_backend.c). */
-    struct chimera_vfs_bl_range_op *confirm_head;
+    bool                           work_confirming;
 };
 
 enum chimera_vfs_bl_work_type {
@@ -363,21 +353,26 @@ chimera_vfs_claim_test(
     const struct chimera_vfs_claim    *probe,
     struct chimera_vfs_claim_conflict *conflict_out);
 
-/* Exactly-once cancel of a pending or backend-confirming ticket.  Never
+/* Exactly-once cancel of a ticket whose acquire has not completed.  Never
  * blocks, and never re-enters the caller: safe to call with the caller's
  * own state lock held.
  *
  *   true  -- WE own the ticket.  The acquire callback will NEVER be
  *            invoked; the optimistic local grant has been rolled back and
  *            the caller may free the ticket's containing memory.
- *   false -- the acquire CALLBACK owns the completion.  It has been
- *            invoked and may still be RUNNING on another thread, so the
- *            caller must neither free what the callback uses nor assume
- *            the callback's side effects are visible yet: arbitrate with
- *            the callback through the caller's own lock (both sides take
- *            it), never by waiting here.
+ *   false -- the acquire CALLBACK owns the completion.  It is running, or
+ *            about to run, on this or another thread, so the caller must
+ *            neither free what the callback uses nor assume the callback's
+ *            side effects are visible yet: arbitrate with the callback
+ *            through the caller's own lock (both sides take it), never by
+ *            waiting here.
  *
- * The core itself reads nothing from the ticket once false is returned. */
+ * A ticket stops being claimable once its backend confirm is DISPATCHED.
+ * It cannot be taken back at that point: the claim is caller-owned, so the
+ * local rollback has to happen before this returns, while the backend
+ * record can only be dropped once the confirm completes -- and in that gap
+ * a new acquire of the same range would be granted locally and then
+ * refused by an arbiter still holding the old record. */
 bool
 chimera_vfs_claim_cancel(
     struct chimera_vfs_state           *state,
