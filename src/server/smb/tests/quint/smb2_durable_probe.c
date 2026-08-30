@@ -785,6 +785,57 @@ sec_d5(struct smb2_env *env)
     smb2_quiesce(env);
 } /* sec_d5 */
 
+/* A dropped connection's non-durable open dies with it (MS-SMB2 3.3.7.1), but
+ * the spec does not say WHEN, relative to a request already on its way in on
+ * another connection -- and here the client has nothing to wait on.
+ *
+ * The teardown runs on the dropped connection's own server thread.
+ * smb2_conn_disconnect returns once THIS side has seen the close, which is not
+ * proof the server has run it (that helper says so itself).  smb2_quiesce
+ * cannot cover the gap either: its fixpoint is over CLIENT-OBSERVABLE events,
+ * and a teardown that no live connection is bound to produces none, so its
+ * first pass reports quiet before the teardown has even begun.
+ *
+ * The durable families have wire-observable barriers instead -- wait_parked
+ * above, and server-side, chimera_smb_durable_conn_disconnecting, which makes
+ * a conflicting CREATE retry briefly rather than deny while a durable holder's
+ * connection is on its way out.  Neither reaches a NON-durable holder: it is
+ * in no registry, so the server answers SHARING_VIOLATION at once and the
+ * client has nothing to synchronise against.
+ *
+ * So retry the assertion rather than weaken it.  What is being tested -- that
+ * the open dies with its connection -- is unchanged; what is dropped is the
+ * unstated extra that it dies before the next request from somewhere else.
+ * Same shape as the nfs3 probe's await_stale for diskfs's background inode
+ * reclaim.  The attempt count is reported so a regression here shows up as a
+ * rising number rather than a silent pass, and the cap is a wedge guard, not
+ * a tuning knob: one extra pass has always been enough. */
+#define D6_TEARDOWN_PASSES 64
+
+static uint32_t
+create_await_conn_teardown(
+    struct smb2_env        *env,
+    struct smb2_conn       *c,
+    const char             *name,
+    struct smb2_create_out *out,
+    int                    *passes_out)
+{
+    uint32_t st;
+    int      passes = 0;
+
+    for (;;) {
+        st = smb2_create(c, name, FILE_OPEN, FILE_ALL_ACCESS, 0, NULL, out);
+        if (st != ST_SHARING_VIOLATION || passes >= D6_TEARDOWN_PASSES) {
+            break;
+        }
+        passes++;
+        smb2_quiesce(env);
+    }
+
+    *passes_out = passes;
+    return st;
+} /* create_await_conn_teardown */
+
 /* ------------------------------------------------------------------------
  * D6 -- an open with NO durable request does not survive its connection.
  *
@@ -819,10 +870,18 @@ sec_d6(struct smb2_env *env)
     smb2_conn_disconnect(a);
     smb2_quiesce(env);
 
-    st = smb2_create(b, "d6", FILE_OPEN, FILE_ALL_ACCESS, 0, NULL, &r);
-    EXPECT(st == ST_SUCCESS,
-           "D6 the same open succeeds once the connection is gone (0x%08x)",
-           st);
+    {
+        int passes;
+
+        st = create_await_conn_teardown(env, b, "d6", &r, &passes);
+        if (passes) {
+            NOTE("D6 the reservation cleared after %d extra settle pass(es)",
+                 passes);
+        }
+        EXPECT(st == ST_SUCCESS,
+               "D6 the same open succeeds once the connection is gone (0x%08x)",
+               st);
+    }
     if (st == ST_SUCCESS) {
         smb2_close(b, r.file_id);
     }
