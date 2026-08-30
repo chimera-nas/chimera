@@ -54,6 +54,9 @@ env:
   # Internal pull-through cache for the mirrored ccache image (mirrors
   # ghcr.io/chimera-nas/ccache).  Public default lives in the Dockerfiles.
   CCACHE_IMAGE_REGISTRY: repository.mdh.quantum.com:5009/chimera-nas/ccache
+  # Where the nightly publishes ccache bundles.  Not a secret -- the same
+  # literal is in build-test.yml -- so a fork PR can at least attempt a read.
+  NEXUS_SCRATCH_URL: http://repository.mdh.quantum.com/repository/scratch
   APT_MIRROR: http://repository.mdh.quantum.com/repository/pkgs/ubuntu
   DOCKER_MIRROR: repository.mdh.quantum.com/
 
@@ -140,10 +143,39 @@ jobs:
         with:
           submodules: recursive
 
-      # Same cached-analyzer driver as the queue; see build-test.yml for why
-      # scan-build cannot be cached.  No bundle restore here: a PR-time job on a
-      # fork-able ref has no credentials for the scratch repo, so this one runs
-      # cold and is simply the earliest signal rather than the cheapest.
+      # Try to prime from the same bundle the queue uses.  Whether this can
+      # work is an open question and the point of trying: org secrets are
+      # withheld from a fork's pull_request run, so NEXUS_SCRATCH_USER is empty
+      # here and the request goes out unauthenticated.  If the scratch repo
+      # allows anonymous reads -- as the internal registry on :5004 evidently
+      # does, since pr-checks pushes images to it with no credentials at all --
+      # this lands a warm cache on every PR.  If it refuses, the step says so
+      # and the build runs cold exactly as it does today.
+      #
+      # -u is passed only when a user actually exists: `-u ":"` sends an empty
+      # Authorization header, which a server can reject outright even where it
+      # would have served the object anonymously.
+      - name: Restore the ccache bundle
+        env:
+          NEXUS_USER: ${{ secrets.NEXUS_SCRATCH_USER }}
+          NEXUS_PASSWORD: ${{ secrets.NEXUS_SCRATCH_PASSWORD }}
+        run: |
+          key="analyze-devcontainer-amd64-Release"
+          auth=()
+          if [ -n "${NEXUS_USER:-}" ]; then
+            auth=(-u "${NEXUS_USER}:${NEXUS_PASSWORD}")
+            echo "restoring ${key} with credentials"
+          else
+            echo "no scratch credentials (expected on a fork PR); trying anonymously"
+          fi
+          if curl -fsS --retry 3 --retry-all-errors --retry-delay 5 \
+               "${auth[@]}" -o ccache-bundle.tar.gz \
+               "${{ env.NEXUS_SCRATCH_URL }}/chimera/ccache/${key}.tar.gz"; then
+            echo "restored $(stat -c%s ccache-bundle.tar.gz) bytes"
+          else
+            echo "no ccache bundle for ${key}; this analysis starts cold"
+          fi
+
       - name: Run the clang static analyzer
         id: static-analysis
         run: |
@@ -159,11 +191,20 @@ jobs:
             -w /build \
             ${{ env.DEV_IMAGE_TAG_PREFIX }}:${{ github.sha }}-amd64 \
             bash -euxc '
+              mkdir -p /build/ccache
+              if [ -f /workspace/ccache-bundle.tar.gz ]; then
+                tar -C /build/ccache -xzf /workspace/ccache-bundle.tar.gz
+              fi
+              # Zero the counters the bundle brought with it, so --show-stats
+              # below describes this run rather than this run plus the nightly
+              # that produced the cache.
+              ccache -z > /dev/null
               cmake -D CMAKE_BUILD_TYPE=Release -D CMAKE_C_COMPILER=clang -D CMAKE_EXPORT_COMPILE_COMMANDS=ON -D IO_URING_NVME_ENABLED=OFF -B /build -S /workspace -G Ninja
               ninja -C /build
               python3 /workspace/scripts/analyze_cached.py \
                       --build-dir /build --report-dir /scan-report \
-                      --exclude /workspace/ext/ -j "$(nproc)"' \
+                      --exclude /workspace/ext/ -j "$(nproc)"
+              ccache --show-stats || true' \
             2>&1 | tee "${{ github.workspace }}/scan-report/analyzer-output.txt"
 
       - name: Upload static analysis report
@@ -324,37 +365,73 @@ jobs:
           submodules: recursive
 
       - name: Install dependencies
+        env:
+          CCACHE_REF: ghcr.io/chimera-nas/ccache:4.14-darwin
         run: |
           brew update
-          # llvm carries scan-build -- Apple's clang does not ship the analyzer
-          # driver.  The rest mirrors the merge queue's macOS job: bison 3.x for
-          # the ndrzcc grammar, libxcrypt for full crypt(5) verification.
-          brew install llvm cmake ninja bison jansson userspace-rcu rocksdb krb5 \
-                       xxhash libxcrypt uthash openssl@3 libnghttp2
+          # No llvm: it was only ever here to supply the scan-build driver, and
+          # driving `clang --analyze` directly does not need it.  Dropping it
+          # also keeps this job on Apple's clang -- the compiler ccc-analyzer
+          # was always actually compiling with -- which is what the merge queue
+          # settled on after pinning brew's LLVM turned a warning it alone emits
+          # into a -Werror failure.
+          brew install cmake ninja bison jansson userspace-rcu rocksdb krb5 \
+                       xxhash libxcrypt uthash openssl@3 libnghttp2 oras
+          oras pull "${CCACHE_REF}" --output "${RUNNER_TEMP}"
+          install -m 0755 "${RUNNER_TEMP}/ccache-darwin" /usr/local/bin/ccache
+          ccache --version | head -1
 
-      - name: Perform clang static analysis
+      # Unlike the Linux half of this workflow, this needs no secrets: the
+      # Actions cache is available to a fork's pull_request run, and a run can
+      # read the default branch's scope.  nightly.yml writes that scope on main,
+      # so this restores a cache a PR could never reach through Nexus.
+      - name: Restore the ccache directory
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: ccache-macos-analyze-Release-${{ github.sha }}
+          restore-keys: |
+            ccache-macos-analyze-Release-
+
+      - name: Run the clang static analyzer
         id: static-analysis
         env:
-          BUILD_DIR: ${{ runner.temp }}/build
+          # Must match the directory nightly.yml's analyze-macos builds in.
+          # The producer and the consumer of a ccache have to agree on it:
+          # generated headers are reached through -I<build-dir>/... paths, which
+          # are part of the command line ccache hashes, so building somewhere
+          # else misses on every translation unit that includes one -- which is
+          # most of them.
+          BUILD_DIR: ${{ runner.temp }}/build-analyze
+          CCACHE_DIR: ${{ runner.temp }}/ccache
+          CCACHE_MAXSIZE: 2G
         run: |
           set -o pipefail
           mkdir -p "$GITHUB_WORKSPACE/scan-report"
+          # Zero the counters restored with the cache, so the stats below
+          # describe this run and not the nightly that filled it.
+          ccache -z > /dev/null
+          cmake -G Ninja -D CMAKE_BUILD_TYPE=Release \
+                -D CMAKE_EXPORT_COMPILE_COMMANDS=ON \
+                -S "$GITHUB_WORKSPACE" -B "$BUILD_DIR"
+          # compile_commands.json is not sufficient alone: several entries
+          # include generated headers, so the tree has to be built first.
+          ninja -C "$BUILD_DIR"
           # --exclude ext: the vendored submodules are analysed in their own
-          # repos and cannot be fixed from a chimera PR.  etc/coverage-report.sh
-          # draws the same line for the same reason.
-          "$(brew --prefix llvm)/bin/scan-build" --status-bugs \
-              --exclude "$GITHUB_WORKSPACE/ext" \
-              -o "$GITHUB_WORKSPACE/scan-report" \
-              sh -c "cmake -D CMAKE_BUILD_TYPE=Release \
-                           -B \"$BUILD_DIR\" -S \"$GITHUB_WORKSPACE\" -G Ninja \
-                     && ninja -C \"$BUILD_DIR\"" \
-              2>&1 | tee "$GITHUB_WORKSPACE/scan-report/scan-build-output.txt"
+          # repos and cannot be fixed from a chimera PR.
+          python3 "$GITHUB_WORKSPACE/scripts/analyze_cached.py" \
+                  --build-dir "$BUILD_DIR" \
+                  --report-dir "$GITHUB_WORKSPACE/scan-report" \
+                  --exclude "$GITHUB_WORKSPACE/ext/" \
+                  -j "$(sysctl -n hw.ncpu)" \
+            2>&1 | tee "$GITHUB_WORKSPACE/scan-report/analyzer-output.txt"
+          ccache --show-stats || true
 
       - name: Upload static analysis report
         if: ${{ failure() && steps.static-analysis.outcome == 'failure' }}
         uses: actions/upload-artifact@v6
         with:
-          name: scan-report-pr-macos-Release
+          name: analyzer-report-pr-macos-Release
           path: scan-report/
           if-no-files-found: warn
           retention-days: 30

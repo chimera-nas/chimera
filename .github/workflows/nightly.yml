@@ -549,6 +549,13 @@ jobs:
               if [ -f /workspace/ccache-bundle.tar.gz ]; then
                 tar -C /build/ccache -xzf /workspace/ccache-bundle.tar.gz
               fi
+              # ccache keeps its counters inside the cache directory, so a
+              # restored bundle carries the statistics of the run that made it.
+              # Left alone, --show-stats reports both runs summed: the first
+              # consumer read showed "945/1894 (49.89%)" for a build that was
+              # really 945 of 947, 99.8%.  Zero them so the number means what it
+              # looks like it means.
+              ccache -z > /dev/null
               cmake -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DREQUIRE_NETNS_TESTS=ON -DKVM_IMAGE_REGISTRY=${{ env.KVM_IMAGE_REGISTRY }} ${{ matrix.cmake_extra }} /workspace
               ninja
               ccache --show-stats || true
@@ -641,6 +648,9 @@ jobs:
           CCACHE_DIR: ${{ runner.temp }}/ccache
           CCACHE_MAXSIZE: 2G
         run: |
+          # Counters ride along in the restored cache; zero them so the stats
+          # below describe this run alone.
+          ccache -z > /dev/null
           cmake -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
                 -DSPECS_BUNDLE=ON \
                 -S "${{ github.workspace }}" -B "${{ runner.temp }}/build"
@@ -721,6 +731,9 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p "$GITHUB_WORKSPACE/scan-report"
+          # Counters ride along in the restored cache; zero them so the stats
+          # below describe this run alone.
+          ccache -z > /dev/null
           cmake -G Ninja -D CMAKE_BUILD_TYPE=${{ matrix.build_type }} \
                 \
                 -D CMAKE_EXPORT_COMPILE_COMMANDS=ON \
@@ -1021,14 +1034,27 @@ jobs:
               if [ -f /workspace/ccache-bundle.tar.gz ]; then
                 tar -C /build/ccache -xzf /workspace/ccache-bundle.tar.gz
               fi
+              # ccache keeps its counters inside the cache directory, so a
+              # restored bundle carries the statistics of the run that made it.
+              # Left alone, --show-stats reports both runs summed: the first
+              # consumer read showed "945/1894 (49.89%)" for a build that was
+              # really 945 of 947, 99.8%.  Zero them so the number means what it
+              # looks like it means.
+              ccache -z > /dev/null
               cmake -D CMAKE_BUILD_TYPE=${{ matrix.build_type }} -D CMAKE_C_COMPILER=clang -D CMAKE_EXPORT_COMPILE_COMMANDS=ON -D IO_URING_NVME_ENABLED=OFF ${{ matrix.cmake_extra }} -B /build -S /workspace -G Ninja
               ninja -C /build
-              ccache --trim-max-size 2G || true
-              tar -C /build/ccache -czf /workspace/ccache-bundle.tar.gz .
               python3 /workspace/scripts/analyze_cached.py \
                       --build-dir /build --report-dir /scan-report \
                       --exclude /workspace/ext/ -j "$(nproc)"
-              ccache --show-stats || true' \
+              ccache --show-stats || true
+              # Pack AFTER the analyzer, not between the build and it.  Packing
+              # early published a bundle holding only the compile entries, so a
+              # consumer hit on every compile and missed on every --analyze --
+              # which is the half that costs anything.  Measured on the first PR
+              # that restored one: 963 hits, 838 misses, and the 838 were the
+              # analyses.  || true on the trim because it is best-effort.
+              ccache --trim-max-size 2G || true
+              tar -C /build/ccache -czf /workspace/ccache-bundle.tar.gz .' \
             2>&1 | tee "${{ github.workspace }}/scan-report/analyzer-output.txt"
 
       - name: Publish the ccache bundle
