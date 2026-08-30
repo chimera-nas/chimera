@@ -325,6 +325,25 @@ struct nlm_lock_ctx {
     char                              client_addr[80];
 };
 
+/* Work owed by a completed lock acquire that MUST run on ctx->thread: an
+ * RPC send uses that thread's evpl, and a VFS release uses its request pool.
+ * Everything else -- the nlm_state bookkeeping and the claim-core calls,
+ * all of which take their own locks -- is done by the completing thread
+ * before this is handed over, because deferring it would let an UNLOCK
+ * arriving in between miss the lock (it releases only when claim_inserted
+ * is already set) and free the entry underneath us. */
+struct nlm_lock_resume {
+    struct nlm_lock_ctx            *ctx;
+    struct nlm_lock_entry          *entry;  /* free after its handle    */
+    struct chimera_vfs_open_handle *handle; /* release on ctx->thread   */
+    struct nlm_grant_request        grant;  /* when deliver             */
+    bool                            deliver;
+    bool                            monitor;
+    bool                            reply;
+    uint32_t                        stat;
+    struct nlm_lock_resume         *next;
+};
+
 /* Snapshot a self-contained grant job from the now-granted lock entry.
  *
  * CALLER MUST HOLD nlm_state.mutex.  The entry is only guaranteed to exist
@@ -420,6 +439,150 @@ chimera_nfs_nlm4_lock_blocked_cb(void *private_data)
     }
 } /* chimera_nfs_nlm4_lock_blocked_cb */
 
+/* Run the part of a completed acquire that belongs to ctx->thread.  Called
+ * inline when the claim core decided on that thread, and from the resume
+ * doorbell otherwise. */
+static void
+chimera_nfs_nlm4_lock_resume_run(
+    struct chimera_server_nfs_thread *thread,
+    struct nlm_lock_resume           *r)
+{
+    struct nlm_lock_ctx              *ctx    = r->ctx;
+    struct chimera_server_nfs_shared *shared = thread->shared;
+    struct nlm4_res                   res;
+    int                               rc = 0;
+
+    if (r->handle) {
+        chimera_vfs_release(thread->vfs_thread, r->handle);
+    }
+    if (r->entry) {
+        nlm_lock_entry_free(r->entry);
+    }
+
+    /* Monitor the lock holder so we can SM_NOTIFY it to reclaim if we
+    * reboot.  NM_LOCK is explicitly non-monitored, so it opts out. */
+    if (r->monitor) {
+        char addr[80];
+
+        nlm_conn_peer_addr(ctx->conn, addr, sizeof(addr));
+        nsm_monitor(thread, ctx->client->hostname, addr);
+    }
+
+    /* A blocked lock already had its original RPC answered with
+     * NLM4_BLOCKED, so its grant goes out of band via NLM_GRANTED. */
+    if (r->deliver) {
+        chimera_nfs_debug("NLM LOCK: deferred lock granted -> NLM_GRANTED callback");
+        chimera_nfs_nlm4_submit_grant(ctx, &r->grant);
+        free(ctx);
+        return;
+    }
+
+    if (!r->reply) {
+        free(ctx);
+        return;
+    }
+
+    res.cookie.len  = ctx->cookie.len;
+    res.cookie.data = ctx->cookie.data;
+    res.stat        = r->stat;
+
+    chimera_nfs_debug("NLM LOCK cb: stat=%d block=%d", res.stat, ctx->block);
+
+    switch (ctx->proc) {
+        case 2:
+            rc = shared->nlm_v4.send_reply_NLMPROC4_LOCK(ctx->evpl, NULL, &res,
+                                                         ctx->encoding);
+            break;
+        case 17:
+            shared->nlm_v4.send_call_NLMPROC4_LOCK_RES(&shared->nlm_v4.rpc2,
+                                                       ctx->evpl, ctx->conn,
+                                                       NULL, &res, 0, 0, NULL,
+                                                       0, 0, nlm4_res_sent_cb,
+                                                       NULL);
+            break;
+        default:
+            rc = shared->nlm_v4.send_reply_NLMPROC4_NM_LOCK(ctx->evpl, NULL,
+                                                            &res, ctx->encoding);
+            break;
+    } /* switch */
+    chimera_nfs_abort_if(rc, "Failed to send NLM LOCK reply");
+
+    free(ctx);
+} /* chimera_nfs_nlm4_lock_resume_run */
+
+/* Drain completions bounced here by chimera_nfs_nlm4_lock_acquire_cb.  Runs
+ * from this thread's own doorbell, so this IS the home thread. */
+static void
+chimera_nfs_nlm4_resume_drain(
+    struct evpl          *evpl,
+    struct evpl_doorbell *doorbell)
+{
+    struct chimera_server_nfs_thread *thread =
+        (struct chimera_server_nfs_thread *) ((char *) doorbell -
+                                              offsetof(struct chimera_server_nfs_thread, nlm_doorbell));
+    struct nlm_lock_resume           *q, *r;
+
+    (void) evpl;
+
+    pthread_mutex_lock(&thread->nlm_resume_lock);
+    q                        = thread->nlm_resume_queue;
+    thread->nlm_resume_queue = NULL;
+    pthread_mutex_unlock(&thread->nlm_resume_lock);
+
+    /* Reverse: the queue is push-front, and a client's completions should
+     * reach it in the order the claim core decided them. */
+    {
+        struct nlm_lock_resume *ordered = NULL;
+
+        while (q) {
+            r       = q;
+            q       = r->next;
+            r->next = ordered;
+            ordered = r;
+        }
+        q = ordered;
+    }
+
+    while (q) {
+        r = q;
+        q = r->next;
+        chimera_nfs_nlm4_lock_resume_run(thread, r);
+        free(r);
+    }
+} /* chimera_nfs_nlm4_resume_drain */
+
+void
+chimera_nfs_nlm4_thread_init(struct chimera_server_nfs_thread *thread)
+{
+    pthread_mutex_init(&thread->nlm_resume_lock, NULL);
+    thread->nlm_resume_queue = NULL;
+    evpl_add_doorbell(thread->evpl, &thread->nlm_doorbell,
+                      chimera_nfs_nlm4_resume_drain);
+    thread->nlm_doorbell_armed = 1;
+} /* chimera_nfs_nlm4_thread_init */
+
+void
+chimera_nfs_nlm4_thread_destroy(struct chimera_server_nfs_thread *thread)
+{
+    if (thread->nlm_doorbell_armed) {
+        evpl_remove_doorbell(thread->evpl, &thread->nlm_doorbell);
+        thread->nlm_doorbell_armed = 0;
+    }
+    pthread_mutex_destroy(&thread->nlm_resume_lock);
+} /* chimera_nfs_nlm4_thread_destroy */
+
+/* Claim-core completion for a lock acquire.  Fires on the acquiring thread
+ * when the lock is decided immediately, but a BLOCKING lock parks in the
+ * claim core and its ticket is completed by whoever releases the conflict --
+ * another connection's thread, or the core's service thread.
+ *
+ * Settle the lock state HERE, whatever thread that is: every call below
+ * takes its own lock, and deferring them would leave the entry looking
+ * un-granted to a concurrent UNLOCK, which then frees it without releasing
+ * the claim.  Only the RPC send and the VFS handle release are marshalled
+ * home, because an evpl send and a VFS request pool both belong to one
+ * thread -- doing either from a foreign one corrupts the pool or trips
+ * libevpl's LOCAL-iovec owner check. */
 static void
 chimera_nfs_nlm4_lock_acquire_cb(
     enum chimera_vfs_claim_result            result,
@@ -430,23 +593,19 @@ chimera_nfs_nlm4_lock_acquire_cb(
     struct nlm_lock_ctx              *ctx       = private_data;
     struct chimera_server_nfs_thread *thread    = ctx->thread;
     struct chimera_server_nfs_shared *shared    = thread->shared;
-    struct evpl                      *evpl      = ctx->evpl;
-    struct evpl_rpc2_encoding        *encoding  = ctx->encoding;
     struct chimera_vfs_state         *vfs_state = thread->vfs->vfs_state;
     struct nlm_lock_entry            *entry     = ctx->entry;
-    struct nlm4_res                   res;
-    int                               rc = 0;
+    struct nlm_lock_resume            work;
+    struct nlm_lock_resume           *r;
 
     (void) conflict;
     (void) granted;
 
-    res.cookie.len  = ctx->cookie.len;
-    res.cookie.data = ctx->cookie.data;
+    memset(&work, 0, sizeof(work));
+    work.ctx = ctx;
 
     if (result == CHIMERA_CLAIM_GRANTED) {
-        struct nlm_grant_request grant_req;
-        bool                     reaped;
-        bool                     deliver = false;
+        bool reaped;
 
         pthread_mutex_lock(&shared->nlm_state.mutex);
         reaped = entry->reaped;
@@ -464,11 +623,10 @@ chimera_nfs_nlm4_lock_acquire_cb(
 
             /* Snapshot the out-of-band grant HERE, under the mutex.  Once it
              * is dropped this entry is fair game for a concurrent client
-             * reap, which frees it -- and the deferred-grant path used to
-             * read it afterwards. */
+             * reap, which frees it. */
             if (ctx->was_blocked) {
-                chimera_nfs_nlm4_build_grant_locked(ctx, &grant_req);
-                deliver = true;
+                chimera_nfs_nlm4_build_grant_locked(ctx, &work.grant);
+                work.deliver = true;
             }
         }
         pthread_mutex_unlock(&shared->nlm_state.mutex);
@@ -481,35 +639,17 @@ chimera_nfs_nlm4_lock_acquire_cb(
                                       &entry->claim);
             chimera_vfs_state_put(vfs_state, entry->file_state);
             entry->file_state = NULL;
-            chimera_vfs_release(thread->vfs_thread, entry->handle);
-            nlm_lock_entry_free(entry);
+            work.handle       = entry->handle;
+            work.entry        = entry;
             /* The original LOCK RPC was already answered with NLM4_BLOCKED
              * (only blocked entries can still be pending here), so no reply
              * is owed and no NLM_GRANTED callback is wanted. */
-            free(ctx);
-            return;
-        }
-
-        res.stat = NLM4_GRANTED;
-
-        /* Monitor the lock holder so we can SM_NOTIFY it to reclaim if we
-        * reboot.  NM_LOCK is explicitly non-monitored, so it opts out. */
-        if (!ctx->nm_lock) {
-            char addr[80];
-
-            nlm_conn_peer_addr(ctx->conn, addr, sizeof(addr));
-            nsm_monitor(thread, ctx->client->hostname, addr);
-        }
-
-        /* If this lock was blocked (we already replied NLM4_BLOCKED on the
-         * original RPC), the grant must now be delivered to the waiting client
-         * via an out-of-band NLM_GRANTED callback -- the original RPC is closed.
-         * Submit the grant job and return without touching the RPC reply path. */
-        if (deliver) {
-            chimera_nfs_debug("NLM LOCK: deferred lock granted -> NLM_GRANTED callback");
-            chimera_nfs_nlm4_submit_grant(ctx, &grant_req);
-            free(ctx);
-            return;
+        } else {
+            work.monitor = !ctx->nm_lock;
+            if (!work.deliver) {
+                work.reply = true;
+                work.stat  = NLM4_GRANTED;
+            }
         }
     } else {
         /* DENIED or wait=false-with-BREAKING: drop the entry. */
@@ -518,41 +658,39 @@ chimera_nfs_nlm4_lock_acquire_cb(
         pthread_mutex_unlock(&shared->nlm_state.mutex);
         chimera_vfs_state_put(vfs_state, entry->file_state);
         entry->file_state = NULL;
-        chimera_vfs_release(thread->vfs_thread, entry->handle);
-        nlm_lock_entry_free(entry);
-        res.stat = NLM4_DENIED;
+        work.handle       = entry->handle;
+        work.entry        = entry;
 
-        /* A blocked proc-2 LOCK whose queued ticket was DENIED (a CANCEL won the
-         * race against the grant) has already had its original RPC completed
-         * with NLM4_BLOCKED -- do not send a second reply on the closed
-         * encoding.  The client learns the lock is gone from its CANCEL reply.
-         * For proc 17 (LOCK_MSG) the async flow legitimately delivers a final
-         * DENIED via LOCK_RES, so fall through. */
+        /* A blocked proc-2 LOCK whose queued ticket was DENIED (a CANCEL won
+         * the race against the grant) has already had its original RPC
+         * completed with NLM4_BLOCKED -- do not send a second reply on the
+         * closed encoding.  The client learns the lock is gone from its
+         * CANCEL reply.  For proc 17 (LOCK_MSG) the async flow legitimately
+         * delivers a final DENIED via LOCK_RES, so it still replies. */
         if (ctx->was_blocked && ctx->proc == 2) {
             chimera_nfs_debug("NLM LOCK: blocked lock cancelled; no second reply");
-            free(ctx);
-            return;
+        } else {
+            work.reply = true;
+            work.stat  = NLM4_DENIED;
         }
     }
 
-    chimera_nfs_debug("NLM LOCK cb: result=%d stat=%d block=%d", result, res.stat, ctx->block);
+    /* Not blocked => the claim core decided inside chimera_vfs_claim_acquire,
+     * so we are already on ctx->thread and can finish inline. */
+    if (!ctx->was_blocked) {
+        chimera_nfs_nlm4_lock_resume_run(thread, &work);
+        return;
+    }
 
-    switch (ctx->proc) {
-        case 2:
-            rc = shared->nlm_v4.send_reply_NLMPROC4_LOCK(evpl, NULL, &res, encoding);
-            break;
-        case 17:
-            shared->nlm_v4.send_call_NLMPROC4_LOCK_RES(&shared->nlm_v4.rpc2, evpl, ctx->conn, NULL, &res, 0, 0, NULL, 0,
-                                                       0, nlm4_res_sent_cb,
-                                                       NULL);
-            break;
-        default:
-            rc = shared->nlm_v4.send_reply_NLMPROC4_NM_LOCK(evpl, NULL, &res, encoding);
-            break;
-    } /* switch */
-    chimera_nfs_abort_if(rc, "Failed to send NLM LOCK reply");
+    r  = malloc(sizeof(*r));
+    *r = work;
 
-    free(ctx);
+    pthread_mutex_lock(&thread->nlm_resume_lock);
+    r->next                  = thread->nlm_resume_queue;
+    thread->nlm_resume_queue = r;
+    pthread_mutex_unlock(&thread->nlm_resume_lock);
+
+    evpl_ring_doorbell(&thread->nlm_doorbell);
 } /* chimera_nfs_nlm4_lock_acquire_cb */
 
 static void
