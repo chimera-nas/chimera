@@ -15,9 +15,28 @@ chimera_posix_lockf(
     int   cmd,
     off_t len)
 {
-    struct flock fl;
-    int          fcntl_cmd;
-    int          rc;
+    struct chimera_posix_client   *posix = chimera_posix_get_global();
+    struct chimera_posix_fd_entry *entry;
+    struct flock                   fl;
+    int                            fcntl_cmd;
+    int                            rc;
+
+    /* lockf(3): "The fildes argument is an open file descriptor ... open for
+     * writing"; every command -- F_ULOCK and F_TEST included -- fails EBADF
+     * on a descriptor without write access.  fcntl below cannot enforce this
+     * (its rules differ: read locks want readability, F_GETLK/F_UNLCK are
+     * ungated), so gate here. */
+    entry = chimera_posix_fd_acquire(posix, fd, 0);
+    if (!entry) {
+        errno = EBADF;
+        return -1;
+    }
+    if (!chimera_posix_fd_may_write(entry)) {
+        chimera_posix_fd_release(entry, 0);
+        errno = EBADF;
+        return -1;
+    }
+    chimera_posix_fd_release(entry, 0);
 
     fl.l_whence = SEEK_CUR;
     fl.l_start  = 0;
