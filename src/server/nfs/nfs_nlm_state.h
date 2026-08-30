@@ -55,6 +55,11 @@ struct nlm_lock_entry {
     struct chimera_vfs_pending_acquire ticket;
     struct chimera_vfs_file_state     *file_state;
     bool                               claim_inserted; /* claim present in claim core */
+    /* Set under nlm_state.mutex by nlm_client_release_all_locks when it
+     * could not claim a still-in-flight acquire: the client is gone, so the
+     * acquire callback must tear the entry down instead of completing it.
+     * Exactly one of the reaper and the callback frees the entry. */
+    bool                               reaped;
     struct nlm_lock_entry             *next;
     struct nlm_lock_entry             *prev;
 };
