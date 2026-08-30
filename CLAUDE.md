@@ -57,7 +57,7 @@ All testing is done via ctest. Tests are split into two tiers:
   `ctest` runs.
 - **extended** - the quick tier plus everything else: pynfs, pjdfstest, cthon,
   ltp, pike, smbtorture, wpts, the KVM suites, and the unit tests. Selected
-  with `ctest -C extended`, and what the nightly job runs.
+  with `ctest -C extended`, and what the extended workflow runs.
 
 ```bash
 # Quick tier: the model-based tests (default)
@@ -77,7 +77,7 @@ cd build/Release && ctest --output-on-failure -j 8
 the same sweep over the extended tier.
 
 The merge queue runs the quick tier and static analysis on every supported OS,
-so the quick tier is what gates a merge. The extended tier runs nightly. Run it
+so the quick tier is what gates a merge. The extended tier runs in the Extended workflow, four times a day. Run it
 locally as needed - in particular when proving out a fix to one of those tests,
 because a break there will not surface until the next night.
 
@@ -110,7 +110,7 @@ This runs:
 
 `make check` runs the tests at the quick tier, which is what the merge queue
 gates on. `make check_extended` runs the identical sweep with the full test
-suite; only the nightly job runs that, so use it when a change reaches beyond
+suite; only the Extended workflow runs that, so use it when a change reaches beyond
 what the model-based tests cover, or when proving out a fix to an extended
 test.
 

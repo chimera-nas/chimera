@@ -54,7 +54,7 @@ env:
   # Internal pull-through cache for the mirrored ccache image (mirrors
   # ghcr.io/chimera-nas/ccache).  Public default lives in the Dockerfiles.
   CCACHE_IMAGE_REGISTRY: repository.mdh.quantum.com:5009/chimera-nas/ccache
-  # Where the nightly publishes ccache bundles.  Not a secret -- the same
+  # Where the Extended workflow publishes ccache bundles.  Not a secret -- the same
   # literal is in build-test.yml -- so a fork PR can at least attempt a read.
   NEXUS_SCRATCH_URL: http://repository.mdh.quantum.com/repository/scratch
   APT_MIRROR: http://repository.mdh.quantum.com/repository/pkgs/ubuntu
@@ -196,7 +196,7 @@ jobs:
                 tar -C /build/ccache -xzf /workspace/ccache-bundle.tar.gz
               fi
               # Zero the counters the bundle brought with it, so --show-stats
-              # below describes this run rather than this run plus the nightly
+              # below describes this run rather than this run plus the Extended run
               # that produced the cache.
               ccache -z > /dev/null
               cmake -D CMAKE_BUILD_TYPE=Release -D CMAKE_C_COMPILER=clang -D CMAKE_EXPORT_COMPILE_COMMANDS=ON -D IO_URING_NVME_ENABLED=OFF -B /build -S /workspace -G Ninja
@@ -383,7 +383,7 @@ jobs:
 
       # Unlike the Linux half of this workflow, this needs no secrets: the
       # Actions cache is available to a fork's pull_request run, and a run can
-      # read the default branch's scope.  nightly.yml writes that scope on main,
+      # read the default branch's scope.  extended.yml writes that scope on main,
       # so this restores a cache a PR could never reach through Nexus.
       - name: Restore the ccache directory
         uses: actions/cache@v4
@@ -396,7 +396,7 @@ jobs:
       - name: Run the clang static analyzer
         id: static-analysis
         env:
-          # Must match the directory nightly.yml's analyze-macos builds in.
+          # Must match the directory extended.yml builds analyze-macos in.
           # The producer and the consumer of a ccache have to agree on it:
           # generated headers are reached through -I<build-dir>/... paths, which
           # are part of the command line ccache hashes, so building somewhere
@@ -409,7 +409,7 @@ jobs:
           set -o pipefail
           mkdir -p "$GITHUB_WORKSPACE/scan-report"
           # Zero the counters restored with the cache, so the stats below
-          # describe this run and not the nightly that filled it.
+          # describe this run and not the Extended run that filled it.
           ccache -z > /dev/null
           cmake -G Ninja -D CMAKE_BUILD_TYPE=Release \
                 -D CMAKE_EXPORT_COMPILE_COMMANDS=ON \

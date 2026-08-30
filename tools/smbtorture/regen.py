@@ -331,7 +331,7 @@ def main():
     c.add_argument("--subs", help="restrict the catalog to this list")
     c.add_argument("--format", choices=("text","markdown"), default="text")
     c.add_argument("--fail-on-newly-failing", action="store_true",
-                   help="exit 1 if a gated test regressed (nightly gate)")
+                   help="exit 1 if a gated test regressed (extended-workflow gate)")
     c.add_argument("--quiet-buckets", default="", type=lambda s: set(filter(None, s.split(","))),
                    help="comma separated bucket names to summarize but not list")
     c.set_defaults(func=do_compare)
