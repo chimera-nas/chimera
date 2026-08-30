@@ -85,6 +85,17 @@ target_link_libraries(ctl_mbt_replay
 # Trace corpus
 # ---------------------------------------------------------------------------
 #
+# --backend=typescript on every quint invocation here, deliberately.  The
+# default `rust` backend downloads its evaluator from GitHub on first use, so
+# a build depends on an anonymous release fetch -- which is rate-limited, and
+# when it fails quint aborts rather than falling back (a macOS merge-queue run
+# died on exactly that, in `quint test`, 176 build steps in).  This model is
+# small enough that the interpreter costs nothing: measured here the self-test
+# is FASTER under typescript (8.6s vs 12.4s) and generation is a wash, because
+# the evaluator's startup dominates at this size.  The traces are what the
+# replay and the coverage gate consume, and both are generated and consumed
+# within one build, so the backend only has to be self-consistent.
+#
 # Generated at build time by quint.  When quint is not installed the probes
 # above still build and run -- they need no corpus -- and only the replay
 # ctest is skipped, with a message rather than in silence.
@@ -133,7 +144,8 @@ set(CTL_QNT
 # at its source instead of producing traces that assert the wrong thing.
 set(CTL_SELFTEST ${CMAKE_CURRENT_BINARY_DIR}/ctlTest.stamp)
 add_custom_command(OUTPUT ${CTL_SELFTEST}
-    COMMAND ${QUINT_BIN} test --main=ctlTestRef ${CTL_Q}/ctlTest.qnt > /dev/null
+    COMMAND ${QUINT_BIN} test --backend=typescript
+            --main=ctlTestRef ${CTL_Q}/ctlTest.qnt > /dev/null
     COMMAND ${CMAKE_COMMAND} -E touch ${CTL_SELFTEST}
     DEPENDS ${CTL_QNT} ${CTL_Q}/ctlTest.qnt
     COMMENT "model self-test: ctlTest"
@@ -174,7 +186,8 @@ foreach(b ${CTL_BATCHES})
 
     add_custom_command(OUTPUT ${batch}
         COMMAND ${CMAKE_COMMAND} -E make_directory ${CTL_T}
-        COMMAND ${QUINT_BIN} run ${CTL_Q}/ctl_run.qnt --main=${prof}
+        COMMAND ${QUINT_BIN} run --backend=typescript
+                ${CTL_Q}/ctl_run.qnt --main=${prof}
                 --step=${flavor} --max-steps=${steps}
                 --max-samples=${ntraces} --n-traces=${ntraces} --seed=${seed}
                 --invariant=inv

@@ -844,20 +844,15 @@ jobs:
       # changes which traces you get but not whether they are valid -- the
       # corpus is generated and consumed within the same build and is never
       # compared against a published one.
+      #
+      # Nothing downloads a quint evaluator here: the control-plane targets
+      # pass --backend=typescript for exactly that reason (see
+      # src/server/rest/tests/quint/CMakeLists.txt).  quint --version is the
+      # gate, so an unusable install fails in this step rather than partway
+      # through the build.
       - name: Install quint for the in-tree control-plane model
         run: |
           npm install -g "@informalsystems/quint@$(tr -d '[:space:]' < ext/specs/.quint-version)"
-          # quint fetches its Rust evaluator on first run.  Do it here, so the
-          # download happens once in a step that is about quint rather than
-          # partway through a build.  Not fatal: quint falls back to its JS
-          # evaluator, so a missing one is slower, not broken -- but report it,
-          # because it is the first thing to look at if generation later fails.
-          printf "module warm {\n  var n: int\n  action init = n' = 0\n  action step = n' = n + 1\n}\n" > /tmp/warm.qnt
-          quint run /tmp/warm.qnt --max-steps=1 --max-samples=1 > /dev/null 2>&1 || true
-          rm -f /tmp/warm.qnt
-          ls -d "$HOME"/.quint/rust-evaluator-*/quint_evaluator \
-            || echo "note: rust evaluator not cached; quint will use the JS evaluator"
-          # The real gate: an unusable quint fails the job here, not later.
           quint --version
 
       - name: Configure and build
