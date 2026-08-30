@@ -28,15 +28,19 @@ on:
 # exactly the race a merge queue exists to catch, and the rescued-flake path
 # was where a real failure could reach main behind an approval click.
 #
-# The run is three phases, fanned out as wide as possible within each, and
-# the job display names follow the phase ("Build X" = container image,
-# "Compile X" = the source tree, "Test X" / "Analyze X" = phase 3) so the CI
-# details view reads unambiguously:
-#   1. Build    container images       (build-devcontainer, build-<os>)
-#   2. Compile  the source tree        (build-dev, build-os), build trees
-#               pushed to the local Nexus scratch repo
-#   3. Test     tests + static analysis (test, test-dev, static-analysis),
-#               all in parallel behind the Compiles-complete barrier
+# The run is two phases, fanned out as wide as possible within each, and the
+# job display names follow the phase ("Build X" = container image, "Test X" /
+# "Analyze X" = the source tree) so the CI details view reads unambiguously:
+#   1. Build   container images              (build-devcontainer, build-<os>)
+#   2. Test    compile + ctest, with static  (test, test-dev,
+#              analysis running alongside     static-analysis)
+#
+# Phase 2 has no internal barrier: compile and test are a single job, and the
+# analysis starts beside them rather than behind them.  There is exactly one
+# test job per compile now, so handing a build tree between two jobs bought
+# nothing and cost a tar, a Nexus round trip, and a second checkout -- and
+# scan-build does its own instrumented compile, so it never wanted that build
+# tree at all.  Everything downstream of the container images starts at once.
 
 env:
   DEV_IMAGE_TAG_PREFIX: repository.mdh.quantum.com:5004/cache/chimera-dev
@@ -50,12 +54,6 @@ env:
   KVM_IMAGE_REGISTRY: repository.mdh.quantum.com:5009/chimera-nas/kvm-test-base
   APT_MIRROR: http://repository.mdh.quantum.com/repository/pkgs/ubuntu
   DOCKER_MIRROR: repository.mdh.quantum.com/
-  # Local Nexus raw repository for transient intra-run artifacts (the build
-  # tree handed from build-dev to the test-dev shards).  Keeps that traffic
-  # inside the self-hosted runner infra instead of GitHub's Azure-blob artifact
-  # storage; objects age out server-side, so jobs never delete.  Credentials
-  # come from the NEXUS_SCRATCH_USER / NEXUS_SCRATCH_PASSWORD secrets.
-  NEXUS_SCRATCH_URL: http://repository.mdh.quantum.com/repository/scratch
   # Shared compiler cache: the build step backs its local ccache with an HTTP
   # remote (Nexus raw repo, ccache http backend) so objects persist across CI
   # runs.  The full URL -- including the upload credentials -- is kept in the
@@ -317,15 +315,13 @@ jobs:
           build-args: |
             DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
 
-  # Distro build half (phase 2): compile the tree once per (image, build_type)
-  # and publish it to the local Nexus scratch repo for the matching `test` job
-  # to consume -- the same build/test split the devcontainer uses (build-dev /
-  # test-dev below).  Phase 3 (all test jobs + static analysis, in parallel)
-  # starts only once every phase-2 compile has finished (the build-complete
-  # barrier).
-  build-os:
-    name: Compile ${{ matrix.image_name }} ${{ matrix.arch }} ${{ matrix.build_type }}
-    needs: [build-devcontainer, build-ubuntu26, build-ubuntu24, build-ubuntu22, build-rocky9, build-rocky10]
+  # Distro compile + test: configure, build, and run this image's quick-tier
+  # ctest, all in one container.  needs is the container images alone -- there
+  # is no compile barrier, so a cell starts the moment its image exists and
+  # its tests are not held back by the slowest compile in the matrix.
+  test:
+    name: Test ${{ matrix.image_name }} ${{ matrix.arch }} ${{ matrix.build_type }}
+    needs: [build-ubuntu26, build-ubuntu24, build-ubuntu22, build-rocky9, build-rocky10]
     if: ${{ github.event_name != 'pull_request' }}
     runs-on: ${{ matrix.runner }}
     permissions:
@@ -334,9 +330,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # NOTE: the devcontainer is built and tested by the dedicated
-          # build-dev / test-dev jobs below (build once, then shard the tests by
-          # category); it is no longer part of this distro matrix.
+          # NOTE: the devcontainer has its own test-dev job below -- it is the
+          # one image built for both arches, and it configures KVM on; it is
+          # not part of this distro matrix.
           # ubuntu 26 (amd64 only on PR; arm64 runs in nightly)
           - platform: linux/amd64
             runner: arc-amd64
@@ -419,16 +415,15 @@ jobs:
         with:
           submodules: recursive
 
-      # KVM guest images are now pulled from GHCR (chimera-nas/kvm-test-base)
-      # with oras during the build, instead of being built via inner dind.
-      # Fetch the static oras binary on the runner and mount it into the
-      # build container.
+      # KVM guest images are pulled from GHCR (chimera-nas/kvm-test-base) with
+      # oras at configure time, instead of being built via inner dind.  Fetch
+      # the static oras binary on the runner and mount it into the container.
       - name: Fetch oras CLI
         uses: ./.github/actions/fetch-oras
         with:
           arch: ${{ matrix.arch }}
 
-      - name: Configure and build inside the container
+      - name: Configure, build, and test inside the container
         run: |
           docker run --rm --privileged \
             -e DOCKER_MIRROR=${{ env.DOCKER_MIRROR }} \
@@ -441,73 +436,10 @@ jobs:
             -w /build \
             ${{ matrix.image_tag_prefix }}:${{ github.sha }}-${{ matrix.arch }} \
             bash -euxc '
+              mkdir -p /workspace/ctest-results
               cmake -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DREQUIRE_NETNS_TESTS=ON -DKVM_IMAGE_REGISTRY=${{ env.KVM_IMAGE_REGISTRY }} -DPYNFS_JUNIT_DIR=/workspace/ctest-results/pynfs-junit -DSMBTORTURE_JUNIT_DIR=/workspace/ctest-results/smbtorture-junit -DWPTS_JUNIT_DIR=/workspace/ctest-results/wpts-junit -DPIKE_JUNIT_DIR=/workspace/ctest-results/pike-junit ${{ matrix.cmake_extra }} /workspace
               ninja
               ccache --show-stats || true
-              tar -C /build --exclude=./ccache -czf /workspace/build-os.tar.gz .'
-
-      - name: Upload build tree to Nexus scratch
-        env:
-          NEXUS_USER: ${{ secrets.NEXUS_SCRATCH_USER }}
-          NEXUS_PASSWORD: ${{ secrets.NEXUS_SCRATCH_PASSWORD }}
-        run: |
-          curl -sfS --retry 5 --retry-all-errors --retry-delay 5 \
-            -u "${NEXUS_USER}:${NEXUS_PASSWORD}" \
-            -T build-os.tar.gz \
-            "${{ env.NEXUS_SCRATCH_URL }}/chimera/build-${{ matrix.image_name }}-${{ github.run_id }}-${{ matrix.arch }}-${{ matrix.build_type }}.tar.gz"
-
-  # Distro test half (phase 3): pull the build tree from Nexus scratch and run
-  # this image's full ctest suite.  Gated on the build-complete barrier, so all
-  # test jobs (distro + devcontainer shards) and static analysis start together
-  # once every compile has finished.
-  test:
-    name: Test ${{ matrix.image_name }} ${{ matrix.arch }} ${{ matrix.build_type }}
-    needs: [build-complete]
-    if: ${{ github.event_name != 'pull_request' }}
-    runs-on: ${{ matrix.runner }}
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [amd64]
-        build_type: [Release, Debug]
-        image_name: [ubuntu26, ubuntu24, ubuntu22, rocky9, rocky10]
-        include:
-          - { arch: amd64, runner: arc-amd64 }
-          - { image_name: ubuntu26, image_tag_prefix: "repository.mdh.quantum.com:5004/cache/chimera-ubuntu26" }
-          - { image_name: ubuntu24, image_tag_prefix: "repository.mdh.quantum.com:5004/cache/chimera-ubuntu24" }
-          - { image_name: ubuntu22, image_tag_prefix: "repository.mdh.quantum.com:5004/cache/chimera-ubuntu22" }
-          - { image_name: rocky9,   image_tag_prefix: "repository.mdh.quantum.com:5004/cache/chimera-rocky9" }
-          - { image_name: rocky10,  image_tag_prefix: "repository.mdh.quantum.com:5004/cache/chimera-rocky10" }
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v5
-        with:
-          submodules: recursive
-
-      - name: Download build tree from Nexus scratch
-        env:
-          NEXUS_USER: ${{ secrets.NEXUS_SCRATCH_USER }}
-          NEXUS_PASSWORD: ${{ secrets.NEXUS_SCRATCH_PASSWORD }}
-        run: |
-          curl -sfS --retry 5 --retry-all-errors --retry-delay 5 \
-            -u "${NEXUS_USER}:${NEXUS_PASSWORD}" \
-            -o build-os.tar.gz \
-            "${{ env.NEXUS_SCRATCH_URL }}/chimera/build-${{ matrix.image_name }}-${{ github.run_id }}-${{ matrix.arch }}-${{ matrix.build_type }}.tar.gz"
-
-      - name: Unpack and test inside the container
-        run: |
-          docker run --rm --privileged \
-            -e DOCKER_MIRROR=${{ env.DOCKER_MIRROR }} \
-            -e APT_MIRROR=${{ env.APT_MIRROR }} \
-            -v "${{ github.workspace }}:/workspace" \
-            -v /build \
-            -w /build \
-            ${{ matrix.image_tag_prefix }}:${{ github.sha }}-${{ matrix.arch }} \
-            bash -euxc '
-              tar -C /build -xzf /workspace/build-os.tar.gz
-              mkdir -p /workspace/ctest-results
               start=$(date +%s)
               rc=0
               /workspace/scripts/cap_ctest_output.sh ctest --output-on-failure --test-output-size-failed 65536 --timeout 300 -j 32 --output-junit /workspace/ctest-results/results.xml || rc=$?
@@ -528,15 +460,14 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
-  # Phase 3 alongside the test jobs: scan-build does its own instrumented
-  # compile (it cannot reuse the Nexus build tree), but it is gated on the
-  # build-complete barrier so the analysis fleet spins up together with the
-  # tests instead of competing with the phase-2 compiles -- and so a
-  # scan-build finding never blocks tests from starting (it still gates
-  # ci-complete).
+  # Static analysis, running alongside the tests from the moment the container
+  # images exist rather than behind them: scan-build does its own instrumented
+  # compile, so it shares nothing with a test job and has nothing to wait for.
+  # A scan-build finding never blocks a test from starting; it still gates
+  # ci-complete.
   static-analysis:
     name: Analyze ${{ matrix.image_name }} ${{ matrix.arch }} ${{ matrix.build_type }}
-    needs: [build-complete]
+    needs: [build-devcontainer, build-ubuntu26, build-ubuntu24, build-ubuntu22, build-rocky9, build-rocky10]
     if: ${{ github.event_name != 'pull_request' }}
     runs-on: ${{ matrix.runner }}
     permissions:
@@ -546,7 +477,7 @@ jobs:
       matrix:
         include:
           # Every supported OS image.  The distro images are built amd64-only
-          # here (see build-os); the devcontainer is the one built for both
+          # here (see the test job); the devcontainer is the one built for both
           # arches, so it is the only one analysed on arm64 too.
           - platform: linux/amd64
             runner: arc-amd64
@@ -721,13 +652,15 @@ jobs:
               || echo "::warning::failed to post PR comment (report is in the run summary)"
           fi
 
-  # Devcontainer build half: build the tree once per (arch, build_type) and
-  # publish it to the local Nexus scratch repo for the test-dev shards.  KVM guest
-  # images are NOT fetched here (KVM_FETCH_IMAGES=OFF, amd64 only) -- the kvm-*
-  # test shards fetch them on demand.  KVM is x86-only in the devcontainer, so
-  # arm64 builds with KVM off.
-  build-dev:
-    name: Compile devcontainer ${{ matrix.arch }} ${{ matrix.build_type }}
+  # Devcontainer compile + test: the same one-container shape as the distro
+  # `test` job above, on the one image built for both arches.
+  #
+  # KVM guest images are not fetched (KVM_FETCH_IMAGES=OFF): the KVM suites are
+  # extended-tier and run in the nightly, so the queue wants the KVM CMake path
+  # configured but not the multi-gigabyte guest images behind it.  KVM is
+  # x86-only in the devcontainer, so arm64 configures with it off entirely.
+  test-dev:
+    name: Test devcontainer ${{ matrix.arch }} ${{ matrix.build_type }}
     needs: [build-devcontainer]
     if: ${{ github.event_name != 'pull_request' }}
     runs-on: ${{ matrix.runner }}
@@ -753,7 +686,7 @@ jobs:
         with:
           arch: ${{ matrix.arch }}
 
-      - name: Configure and build inside the container
+      - name: Configure, build, and test inside the container
         run: |
           docker run --rm --privileged \
             -e DOCKER_MIRROR=${{ env.DOCKER_MIRROR }} \
@@ -766,100 +699,10 @@ jobs:
             -w /build \
             ${{ env.DEV_IMAGE_TAG_PREFIX }}:${{ github.sha }}-${{ matrix.arch }} \
             bash -euxc '
+              mkdir -p /workspace/ctest-results
               cmake -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DREQUIRE_NETNS_TESTS=ON -DKVM_IMAGE_REGISTRY=${{ env.KVM_IMAGE_REGISTRY }} -DPYNFS_JUNIT_DIR=/workspace/ctest-results/pynfs-junit -DSMBTORTURE_JUNIT_DIR=/workspace/ctest-results/smbtorture-junit -DWPTS_JUNIT_DIR=/workspace/ctest-results/wpts-junit -DPIKE_JUNIT_DIR=/workspace/ctest-results/pike-junit ${{ matrix.kvm_cmake }} /workspace
               ninja
               ccache --show-stats || true
-              # Ship the build tree to the test shards (minus the local ccache;
-              # KVM guest images live under /kvm, outside /build, so they are
-              # already excluded).
-              tar -C /build --exclude=./ccache -czf /workspace/build-dev.tar.gz .'
-
-      # The build tree stays inside the self-hosted runner infra: push it to the
-      # local Nexus scratch repository rather than GitHub's artifact storage
-      # (whose Azure-blob upload leaves the network and has produced transient
-      # DNS failures that evict merge-queue runs).  run_id alone names the
-      # object -- unique per run, and shared across job re-run attempts so a
-      # re-run test shard still finds the original build (matching the old
-      # download-artifact semantics).  scratch ages objects out automatically,
-      # so nothing is deleted here.
-      - name: Upload build tree to Nexus scratch
-        env:
-          NEXUS_USER: ${{ secrets.NEXUS_SCRATCH_USER }}
-          NEXUS_PASSWORD: ${{ secrets.NEXUS_SCRATCH_PASSWORD }}
-        run: |
-          curl -sfS --retry 5 --retry-all-errors --retry-delay 5 \
-            -u "${NEXUS_USER}:${NEXUS_PASSWORD}" \
-            -T build-dev.tar.gz \
-            "${{ env.NEXUS_SCRATCH_URL }}/chimera/build-dev-${{ github.run_id }}-${{ matrix.arch }}-${{ matrix.build_type }}.tar.gz"
-
-  # Phase-2 -> phase-3 barrier: every compile (devcontainer + distro) must
-  # finish before any test job or the static analysis starts.  Default
-  # needs-success semantics mean a failed build skips this, which in turn
-  # skips phase 3 entirely.
-  build-complete:
-    name: Compiles complete
-    needs: [build-dev, build-os]
-    if: ${{ github.event_name != 'pull_request' }}
-    runs-on: arc-small
-    permissions:
-      contents: read
-    steps:
-      - name: Builds done
-        run: echo "All compile jobs passed; releasing test + analysis jobs."
-
-  # Devcontainer test half: one shard per category, each consuming the build
-  # artifact.  netns categories run on both arches; the kvm-* categories run on
-  # amd64 only (the devcontainer's qemu is x86-only) and fetch guest images on
-  # demand before running.
-  test-dev:
-    name: Test devcontainer ${{ matrix.arch }} ${{ matrix.build_type }}
-    needs: [build-complete]
-    if: ${{ github.event_name != 'pull_request' }}
-    runs-on: ${{ matrix.runner }}
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [amd64, arm64]
-        build_type: [Release, Debug]
-        include:
-          - { arch: amd64, runner: arc-amd64 }
-          - { arch: arm64, runner: arc-arm64 }
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v5
-        with:
-          submodules: recursive
-
-      - name: Fetch oras CLI
-        uses: ./.github/actions/fetch-oras
-        with:
-          arch: ${{ matrix.arch }}
-
-      - name: Download build tree from Nexus scratch
-        env:
-          NEXUS_USER: ${{ secrets.NEXUS_SCRATCH_USER }}
-          NEXUS_PASSWORD: ${{ secrets.NEXUS_SCRATCH_PASSWORD }}
-        run: |
-          curl -sfS --retry 5 --retry-all-errors --retry-delay 5 \
-            -u "${NEXUS_USER}:${NEXUS_PASSWORD}" \
-            -o build-dev.tar.gz \
-            "${{ env.NEXUS_SCRATCH_URL }}/chimera/build-dev-${{ github.run_id }}-${{ matrix.arch }}-${{ matrix.build_type }}.tar.gz"
-
-      - name: Unpack and test inside the container
-        run: |
-          docker run --rm --privileged \
-            -e DOCKER_MIRROR=${{ env.DOCKER_MIRROR }} \
-            -e APT_MIRROR=${{ env.APT_MIRROR }} \
-            -v "${{ github.workspace }}:/workspace" \
-            -v "${{ github.workspace }}/oras:/usr/local/bin/oras:ro" \
-            -v /build \
-            -w /build \
-            ${{ env.DEV_IMAGE_TAG_PREFIX }}:${{ github.sha }}-${{ matrix.arch }} \
-            bash -euxc '
-              tar -C /build -xzf /workspace/build-dev.tar.gz
-              mkdir -p /workspace/ctest-results
               start=$(date +%s)
               rc=0
               /workspace/scripts/cap_ctest_output.sh ctest --output-on-failure --test-output-size-failed 65536 --timeout 300 -j 32 --output-junit /workspace/ctest-results/results.xml || rc=$?
@@ -951,8 +794,8 @@ jobs:
           retention-days: 30
 
   # macOS static analysis.  scan-build does its own instrumented compile, so
-  # unlike the Linux analyzers this shares nothing with the macos test job and
-  # runs independently of the build barrier.
+  # like the Linux analyzers it shares nothing with the test job -- and with no
+  # container image to wait on, it has no dependencies at all.
   analyze-macos:
     name: Analyze macOS ${{ matrix.build_type }}
     if: ${{ github.event_name != 'pull_request' }}
@@ -1016,9 +859,7 @@ jobs:
       - build-ubuntu22
       - build-rocky9
       - build-rocky10
-      - build-os
       - test
-      - build-dev
       - test-dev
       - static-analysis
       - macos
