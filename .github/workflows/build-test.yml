@@ -855,6 +855,50 @@ jobs:
           npm install -g "@informalsystems/quint@$(tr -d '[:space:]' < ext/specs/.quint-version)"
           quint --version
 
+      # Installing quint switches on EVERY quint target on this runner, not
+      # just ours -- ext/libevpl's core/http/rpc2 conformance generators come
+      # with it, and those use quint's default `rust` backend.  That backend
+      # fetches its evaluator from the GitHub RELEASES API on first use, which
+      # is anonymous and rate-limited: one merge-queue run died on "rate limit
+      # exceeded", and the next found a half-written ~/.quint (version
+      # directory created, binary never extracted) and died in chmod.  quint
+      # does not fall back to its interpreter when that happens; it aborts.
+      #
+      # So place the binary ourselves, from the release DOWNLOAD url -- a
+      # plain asset fetch, not an API call, so it does not share that limit.
+      # binaryManager.js returns early when the executable is already present,
+      # which makes every quint invocation on this runner skip the fetch,
+      # including the ext/libevpl ones this repo does not edit.
+      #
+      # This is a gate, not a diagnostic.  The previous attempt at covering
+      # this warmed the download and merely NOTED a miss, on the mistaken
+      # belief that quint would fall back; the note duly appeared in the log
+      # immediately before the build it had failed to prevent.
+      - name: Pre-place the quint Rust evaluator
+        run: |
+          root=$(npm root -g)
+          ver=$(node -e "console.log(require('$root/@informalsystems/quint/dist/src/rust/binaryManager').QUINT_EVALUATOR_VERSION)")
+          case "$(uname -m)" in
+            arm64|aarch64) asset=quint_evaluator-aarch64-apple-darwin.tar.gz ;;
+            x86_64)        asset=quint_evaluator-x86_64-apple-darwin.tar.gz ;;
+            *) echo "no quint evaluator asset for $(uname -m)"; exit 1 ;;
+          esac
+          dir="$HOME/.quint/rust-evaluator-$ver"
+          mkdir -p "$dir"
+          curl --fail --location --retry 5 --retry-all-errors \
+               --silent --show-error -o "$RUNNER_TEMP/quint_evaluator.tar.gz" \
+               "https://github.com/informalsystems/quint/releases/download/evaluator/$ver/$asset"
+          tar -xzf "$RUNNER_TEMP/quint_evaluator.tar.gz" -C "$dir"
+          rm -f "$RUNNER_TEMP/quint_evaluator.tar.gz"
+          chmod +x "$dir/quint_evaluator"
+          # Fail here if it is missing or unrunnable, rather than 200 build
+          # steps later inside somebody else's generator.  --help, not
+          # --version: the evaluator rejects the latter and exits 1, which
+          # would fail this step on a perfectly good binary.
+          test -x "$dir/quint_evaluator"
+          "$dir/quint_evaluator" --help > /dev/null
+          echo "quint rust evaluator $ver ready at $dir"
+
       - name: Configure and build
         env:
           CCACHE_DIR: ${{ runner.temp }}/ccache
