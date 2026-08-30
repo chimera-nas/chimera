@@ -26,6 +26,7 @@
 #include <assert.h>
 
 #include "vfs/vfs_claim.h"
+#include "vfs/vfs_claim_internal.h"
 #include "vfs/vfs_internal.h"
 #include "common/logging.h"
 
@@ -856,6 +857,92 @@ test_async_acquire_cancel(void)
     chimera_vfs_state_put(state, file);
     chimera_vfs_state_destroy(state);
 } /* test_async_acquire_cancel */
+
+/* Test 14b: the backend RANGE confirm lane ------------------------- */
+
+/* A projectable RANGE grant does not complete when the pump runs: its
+ * ticket rides the service work FIFO awaiting the backend confirm.  Both
+ * points at which a cancel can still claim such a ticket are tested here,
+ * and BOTH must answer without blocking -- chimera_vfs_claim_cancel used
+ * to spin until the confirm's callback returned, which deadlocked any
+ * caller holding a lock that callback also takes (NLM client teardown
+ * cancelling under nlm_state.mutex against the confirm's NLM4_GRANTED
+ * callback).  There is no backend here: forcing lease_capable is what puts
+ * the core on the projecting path, which is otherwise reachable only with
+ * a real CAP_LEASE module attached. */
+static void
+test_backend_confirm_lane_cancel(void)
+{
+    struct chimera_vfs_state          *state;
+    struct chimera_vfs_file_state     *file;
+    struct chimera_vfs_claim           held, want;
+    struct chimera_claim_owner         owner;
+    struct chimera_vfs_pending_acquire ticket;
+    struct chimera_vfs_bl_range_op     op;
+    struct acquire_recorder            rec = { 0 };
+    bool                               cancelled;
+
+    fprintf(stderr, "\ntest_backend_confirm_lane_cancel\n");
+
+    state = chimera_vfs_state_init();
+    /* Pretend a CAP_LEASE backend is attached (short-circuits the lazy
+     * module probe, which needs a real vfs). */
+    state->lease_probed  = 1;
+    state->lease_capable = 1;
+
+    file = get_file(state, 2);
+
+    /* A holds [0,100) exclusively; B blocks behind it. */
+    init_owner(&owner, CHIMERA_CLAIM_PROTO_NLM, 0xC, 1);
+    chimera_vfs_claim_init_range(&held, true, false, 0, 100, &owner);
+    chimera_vfs_claim_try_acquire(state, file, &held, NULL);
+
+    init_owner(&owner, CHIMERA_CLAIM_PROTO_NLM, 0xD, 2);
+    chimera_vfs_claim_init_range(&want, true, false, 0, 100, &owner);
+    chimera_vfs_claim_acquire(NULL, state, file, &want, &ticket, true, true,
+                              recording_acquire_cb, NULL, &rec);
+    CHECK(ticket.queued == true, "blocking range ticket queues");
+
+    /* Releasing A pumps B.  B is granted locally but, being projectable,
+     * is handed to the service lane instead of completing. */
+    chimera_vfs_claim_release(state, file, &held);
+    CHECK(rec.fired == 0, "pump defers a projectable grant to the lane");
+    CHECK(state->work_head != NULL, "ticket is queued on the work FIFO");
+
+    /* Still on the FIFO: the cancel yanks it outright. */
+    cancelled = chimera_vfs_claim_cancel(state, &ticket);
+    CHECK(cancelled == true, "cancel claims a ticket queued for confirm");
+    CHECK(state->work_head == NULL, "cancel removed the FIFO entry");
+    CHECK(rec.fired == 0, "cancelled ticket never fires its callback");
+
+    /* Already dispatched: the confirm is in flight and its op is linked,
+     * so the cancel claims the op instead and the completion will skip the
+     * callback.  It must decide immediately rather than wait the confirm
+     * out. */
+    memset(&op, 0, sizeof(op));
+    op.state               = state;
+    op.file                = file;
+    op.ticket              = &ticket;
+    op.serial_lane         = true;
+    state->confirm_head    = &op;
+    state->work_confirming = true;
+
+    cancelled = chimera_vfs_claim_cancel(state, &ticket);
+    CHECK(cancelled == true, "cancel claims a confirm already in flight");
+    CHECK(op.cancelled == true, "the in-flight confirm is marked cancelled");
+
+    /* Once the completion has unlinked its op -- which it does before
+     * invoking the callback -- the callback owns the ticket and the cancel
+     * must say so instead of blocking. */
+    state->confirm_head    = NULL;
+    state->work_confirming = false;
+
+    cancelled = chimera_vfs_claim_cancel(state, &ticket);
+    CHECK(cancelled == false, "cancel yields once the callback owns the ticket");
+
+    chimera_vfs_state_put(state, file);
+    chimera_vfs_state_destroy(state);
+} /* test_backend_confirm_lane_cancel */
 
 /* Test 15: release pumps pending queue ----------------------------- */
 static void
@@ -1705,6 +1792,7 @@ main(
     test_async_acquire_immediate();
     test_async_acquire_wait_then_ack();
     test_async_acquire_cancel();
+    test_backend_confirm_lane_cancel();
     test_release_pumps_pending();
     test_lease_test();
     test_breakable_share_recall();

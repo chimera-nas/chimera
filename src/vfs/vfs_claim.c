@@ -1654,18 +1654,19 @@ chimera_vfs_claim_acquire(
     /* A locally-granted byte-range lock on a CAP_LEASE file is confirmed
      * with the backend BEFORE the callback fires: optimistic local insert,
      * rollback + DENIED on refusal (binding claims are all-or-nothing at
-     * the arbiter, never recallable).  Dispatched on the CALLER's thread:
-     * a CAP_LEASE arbiter completes lease ops inline (it must not be
-     * CAP_BLOCKING-delegated), so the callback still fires synchronously
-     * for FAIL_IMMEDIATELY-style callers.  Unlock-then-relock ordering is
-     * preserved by program order because the release paths with a thread
-     * dispatch their backend release synchronously too
-     * (chimera_vfs_claim_release_ranged); only threadless teardown
-     * releases ride the queued lane. */
+     * the arbiter, never recallable).  Dispatched on the CALLER's thread,
+     * so the callback fires synchronously for FAIL_IMMEDIATELY-style
+     * callers whenever the backend answers inline -- which is the common
+     * case but NOT guaranteed (async delegation, and eventually a
+     * clustered arbiter, both answer later), so this is not something a
+     * caller may depend on.  Unlock-then-relock ordering is preserved by
+     * program order because the release paths with a thread dispatch their
+     * backend release synchronously too (chimera_vfs_claim_release_ranged);
+     * only threadless teardown releases ride the queued lane. */
     if (result == CHIMERA_CLAIM_GRANTED &&
         claim->klass == CHIMERA_CLAIM_CLASS_RANGE &&
         chimera_vfs_claim_backend_range_projects(state, file, thread)) {
-        chimera_vfs_claim_backend_project_range(thread, state, ticket);
+        chimera_vfs_claim_backend_project_range(thread, state, ticket, false);
         return;
     }
 
@@ -1777,15 +1778,14 @@ chimera_vfs_claim_cancel(
         return true;
     }
 
-    /* Not on the pending queue.  A pump-granted projectable lock is NOT
-     * complete yet: its ticket sits in the service work FIFO awaiting the
-     * backend confirm (chimera_vfs_claim_backend_defer_ticket), callback
-     * unfired.  Yank it so the service thread never touches a ticket whose
-     * owner is tearing it down -- and roll back the pump's optimistic local
-     * insert, releasing the range for other waiters.  When the yank misses
-     * because the confirm is executing right now, ticket_cancel waits it
-     * out, so false keeps its contract: the callback HAS fired (smbtorture
-     * smb2.lock cancel-by-teardown vs deferred-grant UAF). */
+    /* Not on the pending queue.  A projectable lock granted locally is NOT
+     * complete yet: its ticket is either queued for the backend confirm
+     * (chimera_vfs_claim_backend_defer_ticket) or has one in flight, with
+     * the callback unfired either way.  Claim it so nothing ever completes
+     * a ticket whose owner is tearing it down, and roll back the optimistic
+     * local insert, releasing the range for other waiters.  ticket_cancel
+     * never blocks: when it cannot claim the ticket the callback has
+     * already been invoked, and false hands ownership to that callback. */
     if (state && chimera_vfs_claim_backend_ticket_cancel(state, ticket)) {
         chimera_vfs_claim_release(state, file, ticket->claim);
         return true;
