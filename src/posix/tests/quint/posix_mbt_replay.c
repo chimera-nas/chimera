@@ -161,6 +161,54 @@ static struct tent g_timemap[R_MAXINO][3];  /* [mino][atime|mtime|ctime]      */
 struct shadow { unsigned char *buf; size_t len, cap; };
 static struct shadow g_shadow[R_MAXINO];    /* model ino -> byte content      */
 
+/* Traces declined BY NAME for a specific backend, each with the chimera bug
+ * that retires the entry -- the posix analog of the SMB corpus's
+ * smb2_mbt_trace_limits.  A declined trace is reported as a SKIP line and not
+ * replayed, so the batch stays green while the bug is open and regains the
+ * trace the moment its entry is removed. */
+static const struct {
+    const char *backend;    /* driver backend name the decline applies to */
+    const char *trace;      /* trace file basename */
+    const char *why;
+} posix_mbt_declines[] = {
+    /* diskfs truncate of a file whose extents are shared with a clone walks
+     * the refcount btree off a freed node (ASAN SEGV: diskfs_bt_run <-
+     * diskfs_refcount_dec <- diskfs_setattr_trunc_process). */
+    { "diskfs", "stepData_128_0x1_3.itf.json",
+      "truncate over cloned extents crashes the refcount walk" },
+    /* diskfs copy_file_range copies and answers block-rounded byte counts
+     * past the source EOF (1024 requested at EOF-1024 -> 4096 copied), and
+     * the destination grows to match. */
+    { "diskfs", "stepData_128_0x1_2.itf.json",
+      "copy_file_range over-copies past source EOF" },
+    { "diskfs", "step_256_0x100_1.itf.json",
+      "copy_file_range over-copies past source EOF" },
+    { "diskfs", "step_256_0x100_2.itf.json",
+      "copy_file_range over-copies past source EOF" },
+    /* diskfs mkdirat under a directory that has been removed (still open via
+     * dirfd) creates the entry instead of answering ENOENT. */
+    { "diskfs", "stepFds_128_0x1_3.itf.json",
+      "create under a removed directory succeeds" },
+};
+
+static const char *
+posix_mbt_declined(const char *path)
+{
+    const char *base = strrchr(path, '/');
+    size_t      i;
+
+    base = base ? base + 1 : path;
+    for (i = 0;
+         i < sizeof(posix_mbt_declines) / sizeof(posix_mbt_declines[0]);
+         i++) {
+        if (strcmp(posix_mbt_declines[i].backend, g_module) == 0 &&
+            strcmp(posix_mbt_declines[i].trace, base) == 0) {
+            return posix_mbt_declines[i].why;
+        }
+    }
+    return NULL;
+} /* posix_mbt_declined */
+
 static int           g_strict_atime;        /* from the trace LInit caps      */
 static int           g_nmismatch;           /* per-trace mismatch tally       */
 static const char   *g_trace;               /* current trace path (messages)  */
@@ -3737,7 +3785,13 @@ main(
     }
 
     for (i = 0; i < ntraces; i++) {
-        int rc;
+        int         rc;
+        const char *declined = posix_mbt_declined(traces[i]);
+
+        if (declined) {
+            fprintf(stderr, "SKIP (declined): %s: %s\n", traces[i], declined);
+            continue;
+        }
         if (ran > 0 && !newfs()) {
             fprintf(stderr, "newfs reset failed before %s\n", traces[i]);
             failures++;

@@ -1193,6 +1193,7 @@ posix_env_setup(
     const char                   *module      = backend;
     int                           nfs_version = 0;
     char                          module_cfg[4096];
+    char                          session_dir[256];
 
     /* The VFS releases closed handles on an async sweep thread, so a filesystem
      * stays EBUSY for a window after its last close.  A fast sweep keeps the
@@ -1217,6 +1218,25 @@ posix_env_setup(
     } else if (strncmp(backend, "nfs4_", 5) == 0) {
         nfs_version = 4;
         module      = backend + 5;
+    }
+
+    /* diskfs/cairn need real scratch storage.  The interactive driver takes
+     * it as argv[2]; the batched replayer passes NULL and the store is
+     * self-provisioned under a fresh temp dir instead, the way the NFS MBT
+     * harness provisions its per-process session dir.  The paths land inside
+     * module_cfg below, so the buffer can be local. */
+    if (!storage &&
+        (strcmp(module, "diskfs") == 0 || strcmp(module, "cairn") == 0)) {
+        const char *tmp = getenv("TMPDIR");
+
+        snprintf(session_dir, sizeof(session_dir), "%s/posix_mbt_%s.XXXXXX",
+                 tmp && tmp[0] ? tmp : "/tmp", module);
+        if (!mkdtemp(session_dir)) {
+            fprintf(stderr, "posix_driver: mkdtemp(%s): %s\n", session_dir,
+                    strerror(errno));
+            return 1;
+        }
+        storage = session_dir;
     }
 
     /* Backend module configuration, shared by the direct-mount and
