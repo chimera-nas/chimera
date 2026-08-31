@@ -84,3 +84,19 @@ set_tests_properties(chimera/posix/mbt/batch_nfs3_memfs PROPERTIES
     LABELS "quint;posix_mbt;memfs;nfs3_mbt"
     SKIP_RETURN_CODE 77
     TIMEOUT 600)
+
+# The same POSIX surface through the NFSv4.1 loopback: stateful opens,
+# sessions/slots, and the pseudo-fs export junction all sit on the path.
+# The nfs4_ trace profile models search permissions, so the DAC answers
+# are asserted directly rather than reconciled.
+add_test(NAME chimera/posix/mbt/batch_nfs4_memfs
+    COMMAND $<TARGET_FILE:posix_mbt_replay>
+            --backend nfs4_memfs
+            --trace-dir ${SPECS_BUNDLE_DIR}/posix
+            --exclude-prefix step --exclude-prefix disk_
+            --exclude-prefix fuse_ --exclude-prefix nfs3_)
+set_tests_properties(chimera/posix/mbt/batch_nfs4_memfs PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=posix_batch_nfs4_memfs"
+    LABELS "quint;posix_mbt;memfs;nfs4_mbt"
+    SKIP_RETURN_CODE 77
+    TIMEOUT 600)
