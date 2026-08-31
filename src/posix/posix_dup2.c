@@ -84,7 +84,7 @@ chimera_posix_dup2(
         chimera_posix_project_ofd_unlock(posix, worker, old_handle, old_ofd);
 
         /* Close the old handle */
-        chimera_close(worker->client_thread, old_handle);
+        chimera_posix_close_on_worker(worker, old_handle);
     } else {
         pthread_mutex_unlock(&new_entry->lock);
 
