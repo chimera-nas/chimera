@@ -60,6 +60,34 @@ set_tests_properties(chimera/posix/mbt/batch_memfs PROPERTIES
     SKIP_RETURN_CODE 77
     TIMEOUT 300)
 
+# The memfs-profile corpus against diskfs: a chimera-native backend
+# (model-conformant DAC, no host-kernel deviations), so it replays the memfs
+# profile rather than the disk_ one, and the per-trace newfs recycle
+# mkfs-cycles it exactly like memfs.  The replay process self-provisions its
+# scratch device image under its own mkdtemp session dir (posix_env_setup) and
+# takes whichever libevpl block backend the platform has
+# (CHIMERA_DISKFS_DEVICE_TYPE).  Five traces are declined BY NAME in
+# posix_mbt_declines (posix_mbt_replay.c), each naming the diskfs bug that
+# retires the entry.
+#
+# cairn is deliberately NOT registered yet: the same corpus fails ~12 traces
+# across most flavors there (SEEK_DATA/SEEK_HOLE at rocksdb block granularity,
+# clone_file_range unsupported, dup'd-fd shared-offset drift, and the same
+# removed-directory create gate diskfs misses), which is a backend work list,
+# not a decline list.  The driver already speaks cairn (--backend cairn), so
+# registering it later is this same block again.
+add_test(NAME chimera/posix/mbt/batch_diskfs
+    COMMAND $<TARGET_FILE:posix_mbt_replay>
+            --backend diskfs
+            --trace-dir ${SPECS_BUNDLE_DIR}/posix
+            --exclude-prefix nfs3_ --exclude-prefix nfs4_ --exclude-prefix disk_
+            --exclude-prefix fuse_)
+set_tests_properties(chimera/posix/mbt/batch_diskfs PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=posix_batch_diskfs"
+    LABELS "quint;posix_mbt;diskfs"
+    SKIP_RETURN_CODE 77
+    TIMEOUT 600)
+
 # The same corpus replayed through the NFS loopback: an in-process chimera
 # server exports a memfs filesystem over the inproc transport and the posix
 # client mounts it through the nfs proxy module (src/vfs/nfs) with vers=3 --
