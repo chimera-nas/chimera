@@ -179,8 +179,14 @@ chimera_nfs3_create_open_at_parent_complete(
             flags |= CHIMERA_VFS_OPEN_EXCLUSIVE;
             break;
         case EXCLUSIVE:
-            flags            |= CHIMERA_VFS_OPEN_EXCLUSIVE;
-            attr->va_set_mask = CHIMERA_VFS_ATTR_ATIME | CHIMERA_VFS_ATTR_MTIME;
+            flags |= CHIMERA_VFS_OPEN_EXCLUSIVE;
+            /* EXCLUSIVE create carries the verifier in the sattr slot, not a
+             * mode, so the file's permissions are undefined until the client's
+             * follow-up SETATTR (RFC 1813 3.3.8).  Create it owner-only (0600),
+             * matching Linux nfsd, NFS-Ganesha and the quint model. */
+            attr->va_set_mask = CHIMERA_VFS_ATTR_ATIME | CHIMERA_VFS_ATTR_MTIME |
+                CHIMERA_VFS_ATTR_MODE;
+            attr->va_mode = 0600;
             /* Zero-extend the two 32-bit verifier halves into the 64-bit tv_sec
              * via uint32 temporaries; a bare 4-byte memcpy leaves the high bytes
              * as stale dbuf data, which breaks EXCLUSIVE-create retransmit
