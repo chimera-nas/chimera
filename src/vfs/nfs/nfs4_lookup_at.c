@@ -175,8 +175,8 @@ chimera_nfs4_lookup_at(
         op_type = LOOKUP_OP_NORMAL;
     }
 
-    ctx          = request->plugin_data;
-    ctx->server  = server;
+    ctx         = request->plugin_data;
+    ctx->server = server;
 
     chimera_nfs4_map_fh(request->fh, request->fh_len, &fh, &fhlen);
 

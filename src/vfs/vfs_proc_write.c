@@ -137,8 +137,8 @@ chimera_vfs_write_gate_complete(
         return;
     }
 
-    uint32_t granted = chimera_vfs_access_check(attr, gate->cred,
-                                                CHIMERA_ACE_MASK_ALL);
+    uint32_t                       granted = chimera_vfs_access_check(attr, gate->cred,
+                                                                      CHIMERA_ACE_MASK_ALL);
 
     /* Owner override, as Linux nfsd applies to READ/WRITE (NFSD_MAY_OWNER_
      * OVERRIDE): a POSIX caller who OWNS the file may move its data through
