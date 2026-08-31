@@ -1007,30 +1007,63 @@ handle(json_t *req)
                 }
                 usleep(1000);
             }
-            tries = 0;
-            while ((rc = chimera_server_rmfs(g_server, g_module,
-                                             g_fsname)) != 0) {
-                if (rc != CHIMERA_VFS_EBUSY || ++tries >= 15) {
+            if (posix_module_is_passthrough(g_module)) {
+                /* Passthrough recycle under the loopback: a fresh
+                 * uniquely-named backing directory is the fresh filesystem
+                 * (see the direct-path recycle below for the rationale). */
+                char old_dir[340], new_dir[340];
+
+                pt_tree_path(old_dir, sizeof(old_dir));
+                if (pt_remove_tree(old_dir) != 0) {
                     fprintf(stderr,
-                            "posix_driver: newfs server rmfs %s failed: %d\n",
+                            "posix_driver: newfs remove %s failed: %s\n",
+                            old_dir, strerror(errno));
+                    return res_int(-1, errno);
+                }
+                snprintf(g_fsname, sizeof(g_fsname), "fs%d", ++g_fs_counter);
+                pt_tree_path(new_dir, sizeof(new_dir));
+                if (mkdir(new_dir, 0777) != 0) {
+                    fprintf(stderr,
+                            "posix_driver: newfs mkdir %s failed: %s\n",
+                            new_dir, strerror(errno));
+                    return res_int(-1, errno);
+                }
+                rc = chimera_server_mount(g_server, "share", g_module,
+                                          new_dir, NULL);
+                if (rc != 0) {
+                    fprintf(stderr,
+                            "posix_driver: newfs share mount %s failed: %d\n",
+                            new_dir, rc);
+                    return res_int(-1, chimera_posix_errno_from_status(rc));
+                }
+            } else {
+                tries = 0;
+                while ((rc = chimera_server_rmfs(g_server, g_module,
+                                                 g_fsname)) != 0) {
+                    if (rc != CHIMERA_VFS_EBUSY || ++tries >= 15) {
+                        fprintf(stderr,
+                                "posix_driver: newfs server rmfs %s failed: %d\n",
+                                g_fsname, rc);
+                        return res_int(-1, chimera_posix_errno_from_status(rc));
+                    }
+                    usleep(1000);
+                }
+                snprintf(g_fsname, sizeof(g_fsname), "fs%d", ++g_fs_counter);
+                rc = chimera_server_mkfs(g_server, g_module, g_fsname, NULL);
+                if (rc != 0) {
+                    fprintf(stderr,
+                            "posix_driver: newfs server mkfs %s failed: %d\n",
                             g_fsname, rc);
                     return res_int(-1, chimera_posix_errno_from_status(rc));
                 }
-                usleep(1000);
-            }
-            snprintf(g_fsname, sizeof(g_fsname), "fs%d", ++g_fs_counter);
-            rc = chimera_server_mkfs(g_server, g_module, g_fsname, NULL);
-            if (rc != 0) {
-                fprintf(stderr, "posix_driver: newfs server mkfs %s failed: %d\n",
-                        g_fsname, rc);
-                return res_int(-1, chimera_posix_errno_from_status(rc));
-            }
-            rc = chimera_server_mount(g_server, "share", g_module, g_fsname,
-                                      NULL);
-            if (rc != 0) {
-                fprintf(stderr, "posix_driver: newfs share mount %s failed: %d\n",
-                        g_fsname, rc);
-                return res_int(-1, chimera_posix_errno_from_status(rc));
+                rc = chimera_server_mount(g_server, "share", g_module,
+                                          g_fsname, NULL);
+                if (rc != 0) {
+                    fprintf(stderr,
+                            "posix_driver: newfs share mount %s failed: %d\n",
+                            g_fsname, rc);
+                    return res_int(-1, chimera_posix_errno_from_status(rc));
+                }
             }
             snprintf(mount_options, sizeof(mount_options), "vers=%d",
                      g_nfs_version);
@@ -1274,8 +1307,12 @@ posix_env_setup(
         /* Protocols are opt-in (default off): the loopback path needs the NFS
          * server, or chimera_server_create_export has no nfs_shared to add to. */
         chimera_server_config_set_nfs_enabled(server_config, 1);
-        chimera_server_config_add_module(server_config, module, NULL,
-                                         module_cfg);
+        if (!posix_module_is_passthrough(module)) {
+            /* linux/io_uring are already in the server's default module set
+             * (Linux builds); adding them again would double-register. */
+            chimera_server_config_add_module(server_config, module, NULL,
+                                             module_cfg);
+        }
 
         server = chimera_server_init(server_config, metrics);
         if (!server) {
@@ -1283,13 +1320,43 @@ posix_env_setup(
             return 1;
         }
 
-        /* Named-filesystem backend (memfs/diskfs/cairn): create the fs first. */
-        if (chimera_server_mkfs(server, module, "fs0", NULL) != 0) {
-            fprintf(stderr, "posix_driver: mkfs %s fs0 failed\n", module);
-            return 1;
-        }
+        if (posix_module_is_passthrough(module)) {
+            /* Passthrough under the loopback: the share's backing directory
+             * is the filesystem (no mkfs).  ENOTSUP from the mount means the
+             * scratch filesystem cannot produce file handles
+             * (name_to_handle_at) -- skip, as on the direct path. */
+            char dir[340];
+            int  mrc;
 
-        chimera_server_mount(server, "share", module, "fs0", NULL);
+            snprintf(dir, sizeof(dir), "%s/fs0", g_pt_root);
+            if (mkdir(dir, 0777) != 0) {
+                fprintf(stderr, "posix_driver: mkdir %s: %s\n", dir,
+                        strerror(errno));
+                return 1;
+            }
+            mrc = chimera_server_mount(server, "share", module, dir, NULL);
+            if (mrc == CHIMERA_VFS_ENOTSUP) {
+                fprintf(stderr,
+                        "SKIP: %s backend needs a name_to_handle_at-capable "
+                        "scratch fs; %s is not one (set CHIMERA_MBT_SCRATCH)\n",
+                        module, dir);
+                exit(77);
+            }
+            if (mrc != 0) {
+                fprintf(stderr, "posix_driver: share mount %s failed: %d\n",
+                        dir, mrc);
+                return 1;
+            }
+        } else {
+            /* Named-filesystem backend (memfs/diskfs/cairn): create the fs
+             * first. */
+            if (chimera_server_mkfs(server, module, "fs0", NULL) != 0) {
+                fprintf(stderr, "posix_driver: mkfs %s fs0 failed\n", module);
+                return 1;
+            }
+
+            chimera_server_mount(server, "share", module, "fs0", NULL);
+        }
 
         if (chimera_server_create_export(server, "/share", "/share",
                                          4242, NULL) != 0) {
