@@ -1056,11 +1056,15 @@ smb2_conn_reset(struct smb2_env *env)
     for (int i = 0; i < env->nconns; i++) {
         free(env->conns[i]->sbuf);
         free(env->conns[i]->rbuf);
-        /* xbuf too -- smb2_conn_open allocates three buffers per connection.
-         * Missing it leaks SMB2C_BUFSZ per connection, which a batched run
-         * that resets its connections once per trace turns into hundreds of
-         * megabytes. */
+        /* xbuf too -- smb2_conn_open allocates three buffers per connection,
+         * plus ebuf/dbuf for an encrypting profile.  Missing one leaks
+         * SMB2C_BUFSZ per connection, which a batched run that resets its
+         * connections once per trace turns into hundreds of megabytes.  The
+         * encryption pair is NULL on an unprotected profile and free(NULL) is
+         * a no-op, so no guard is needed. */
         free(env->conns[i]->xbuf);
+        free(env->conns[i]->ebuf);
+        free(env->conns[i]->dbuf);
         free(env->conns[i]);
     }
     env->nconns = 0;
@@ -1078,6 +1082,8 @@ smb2_env_stop(struct smb2_env *env)
         free(env->conns[i]->sbuf);
         free(env->conns[i]->rbuf);
         free(env->conns[i]->xbuf);
+        free(env->conns[i]->ebuf);
+        free(env->conns[i]->dbuf);
         free(env->conns[i]);
     }
     chimera_server_destroy(env->server);
