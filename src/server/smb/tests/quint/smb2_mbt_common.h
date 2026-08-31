@@ -61,228 +61,196 @@
 
 #include "evpl/evpl.h"
 
+/* Little-endian field access, UTF-16LE conversion, and the wire-protection
+ * cryptography (NTLMv2, SMB3 key derivation, signing, transport encryption)
+ * a protected connection profile needs. */
+#include "smb2_mbt_wire.h"
+
 /* ---- SMB2 wire constants (values verified in smb2.h) ------------------- */
 
-#define SMB2_HDR_SIZE                     64
+#define SMB2_HDR_SIZE                           64
 
 /* smb2_command (smb2.h:683) */
-#define SMB2_NEGOTIATE                    0x0000
-#define SMB2_SESSION_SETUP                0x0001
-#define SMB2_LOGOFF                       0x0002
-#define SMB2_TREE_CONNECT                 0x0003
-#define SMB2_TREE_DISCONNECT              0x0004
-#define SMB2_CREATE                       0x0005
-#define SMB2_CLOSE                        0x0006
-#define SMB2_FLUSH                        0x0007
-#define SMB2_READ                         0x0008
-#define SMB2_WRITE                        0x0009
-#define SMB2_IOCTL                        0x000B
-#define SMB2_CANCEL                       0x000C
-#define SMB2_LOCK                         0x000A
-#define SMB2_QUERY_INFO                   0x0010
-#define SMB2_SET_INFO                     0x0011
-#define SMB2_ECHO                         0x000D
-#define SMB2_OPLOCK_BREAK                 0x0012
+#define SMB2_NEGOTIATE                          0x0000
+#define SMB2_SESSION_SETUP                      0x0001
+#define SMB2_LOGOFF                             0x0002
+#define SMB2_TREE_CONNECT                       0x0003
+#define SMB2_TREE_DISCONNECT                    0x0004
+#define SMB2_CREATE                             0x0005
+#define SMB2_CLOSE                              0x0006
+#define SMB2_FLUSH                              0x0007
+#define SMB2_READ                               0x0008
+#define SMB2_WRITE                              0x0009
+#define SMB2_IOCTL                              0x000B
+#define SMB2_CANCEL                             0x000C
+#define SMB2_LOCK                               0x000A
+#define SMB2_QUERY_INFO                         0x0010
+#define SMB2_SET_INFO                           0x0011
+#define SMB2_ECHO                               0x000D
+#define SMB2_OPLOCK_BREAK                       0x0012
+#define SMB2_QUERY_DIRECTORY                    0x000E
+
+/* QUERY_DIRECTORY information classes (MS-FSCC 2.4) */
+#define SMB2_FILE_DIRECTORY_INFO_T              0x01
+#define SMB2_FILE_FULL_DIR_INFO_T               0x02
+#define SMB2_FILE_BOTH_DIR_INFO_T               0x03
+#define SMB2_FILE_NAMES_INFO_T                  0x0C
+#define SMB2_FILE_ID_BOTH_DIR_INFO_T            0x25
+#define SMB2_FILE_ID_FULL_DIR_INFO_T            0x26
 
 /* smb2 header flags (smb2.h:789) */
-#define SMB2_FLAGS_SERVER_TO_REDIR        0x00000001
-#define SMB2_FLAGS_ASYNC_COMMAND          0x00000002
-#define SMB2_FLAGS_RELATED_OPERATIONS     0x00000004
+#define SMB2_FLAGS_SERVER_TO_REDIR              0x00000001
+#define SMB2_FLAGS_ASYNC_COMMAND                0x00000002
+#define SMB2_FLAGS_RELATED_OPERATIONS           0x00000004
+#define SMB2_FLAGS_SIGNED                       0x00000008
 /* MS-SMB2 2.2.1.2: the client sets this on a request it is RE-SENDING after a
  * channel/transport failure, so the server can apply exactly-once semantics.
  * Note the value: 0x20000000, NOT 0x00000020 (smb2.h:795). */
-#define SMB2_FLAGS_REPLAY_OPERATION       0x20000000
+#define SMB2_FLAGS_REPLAY_OPERATION             0x20000000
 
 /* NTSTATUS (MS-ERREF) */
-#define ST_SUCCESS                        0x00000000u
-#define ST_PENDING                        0x00000103u
-#define ST_MORE_PROCESSING_REQUIRED       0xC0000016u
-#define ST_UNSUCCESSFUL                   0xC0000001u
-#define ST_INVALID_PARAMETER              0xC000000Du
-#define ST_SHARING_VIOLATION              0xC0000043u
-#define ST_INVALID_DEVICE_STATE           0xC0000184u
-#define ST_INVALID_OPLOCK_PROTOCOL        0xC00000E3u
-#define ST_REQUEST_NOT_ACCEPTED           0xC00000D0u
-#define ST_END_OF_FILE                    0xC0000011u
-#define ST_ACCESS_DENIED                  0xC0000022u
-#define ST_OBJECT_NAME_NOT_FOUND          0xC0000034u
-#define ST_OBJECT_NAME_COLLISION          0xC0000035u
-#define ST_OBJECT_PATH_NOT_FOUND          0xC000003Au
-#define ST_NOT_SUPPORTED                  0xC00000BBu
-#define ST_CANCELLED                      0xC0000120u
-#define ST_FILE_CLOSED                    0xC0000128u
+#define ST_SUCCESS                              0x00000000u
+#define ST_PENDING                              0x00000103u
+#define ST_MORE_PROCESSING_REQUIRED             0xC0000016u
+#define ST_UNSUCCESSFUL                         0xC0000001u
+#define ST_INVALID_PARAMETER                    0xC000000Du
+#define ST_SHARING_VIOLATION                    0xC0000043u
+#define ST_INVALID_DEVICE_STATE                 0xC0000184u
+#define ST_INVALID_OPLOCK_PROTOCOL              0xC00000E3u
+#define ST_REQUEST_NOT_ACCEPTED                 0xC00000D0u
+#define ST_END_OF_FILE                          0xC0000011u
+#define ST_ACCESS_DENIED                        0xC0000022u
+#define ST_OBJECT_NAME_NOT_FOUND                0xC0000034u
+#define ST_OBJECT_NAME_COLLISION                0xC0000035u
+#define ST_OBJECT_PATH_NOT_FOUND                0xC000003Au
+#define ST_NOT_SUPPORTED                        0xC00000BBu
+#define ST_CANCELLED                            0xC0000120u
+#define ST_FILE_CLOSED                          0xC0000128u
+#define ST_BUFFER_OVERFLOW                      0x80000005u
+#define ST_NOT_A_REPARSE_POINT                  0xC0000275u
+#define ST_NO_MORE_FILES                        0x80000006u
+#define ST_INVALID_INFO_CLASS                   0xC0000003u
+#define ST_BUFFER_TOO_SMALL                     0xC0000023u
 /* 0xC000022A, STATUS_DUPLICATE_OBJECTID -- the reply to a NON-replay CREATE
 * whose DH2Q CreateGuid collides with a live durable open of the same client
 * (MS-SMB2 3.3.5.9.10).  It is NOT 0xC000021B (STATUS_DATA_NOT_ACCEPTED). */
-#define ST_DUPLICATE_OBJECTID             0xC000022Au
+#define ST_DUPLICATE_OBJECTID                   0xC000022Au
 /* 0xC0000467, STATUS_FILE_NOT_AVAILABLE -- a stale ChannelSequence on a
  * mutating op (MS-SMB2 3.3.5.2.10), and a replayed create whose original is
  * still pending (3.3.5.9.10). */
-#define ST_FILE_NOT_AVAILABLE             0xC0000467u
+#define ST_FILE_NOT_AVAILABLE                   0xC0000467u
 
 /* Dialects (smb2.h:20) */
-#define SMB2_DIALECT_0210                 0x0210
-#define SMB2_DIALECT_0300                 0x0300
+#define SMB2_DIALECT_0210                       0x0210
+#define SMB2_DIALECT_0300                       0x0300
+#define SMB2_DIALECT_0302                       0x0302
+#define SMB2_DIALECT_0311                       0x0311
+
+/* NEGOTIATE Capabilities bits (MS-SMB2 2.2.3) */
+#define SMB2_GLOBAL_CAP_ENCRYPTION              0x00000040u
 
 /* Oplock levels (smb2.h:858) */
-#define SMB2_OPLOCK_LEVEL_NONE            0x00
-#define SMB2_OPLOCK_LEVEL_II              0x01
-#define SMB2_OPLOCK_LEVEL_EXCLUSIVE       0x08
-#define SMB2_OPLOCK_LEVEL_BATCH           0x09
-#define SMB2_OPLOCK_LEVEL_LEASE           0xFF
+#define SMB2_OPLOCK_LEVEL_NONE                  0x00
+#define SMB2_OPLOCK_LEVEL_II                    0x01
+#define SMB2_OPLOCK_LEVEL_EXCLUSIVE             0x08
+#define SMB2_OPLOCK_LEVEL_BATCH                 0x09
+#define SMB2_OPLOCK_LEVEL_LEASE                 0xFF
 
 /* Lease state bits ON THE WIRE (smb2.h:867): note H=0x02, W=0x04. */
-#define SMB2_LEASE_NONE                   0x00
-#define SMB2_LEASE_READ                   0x01
-#define SMB2_LEASE_HANDLE                 0x02
-#define SMB2_LEASE_WRITE                  0x04
-#define SMB2_LEASE_RWH                    (SMB2_LEASE_READ | SMB2_LEASE_HANDLE | \
-                                           SMB2_LEASE_WRITE)
-#define SMB2_LEASE_RH                     (SMB2_LEASE_READ | SMB2_LEASE_HANDLE)
+#define SMB2_LEASE_NONE                         0x00
+#define SMB2_LEASE_READ                         0x01
+#define SMB2_LEASE_HANDLE                       0x02
+#define SMB2_LEASE_WRITE                        0x04
+#define SMB2_LEASE_RWH                          (SMB2_LEASE_READ | SMB2_LEASE_HANDLE | \
+                                                 SMB2_LEASE_WRITE)
+#define SMB2_LEASE_RH                           (SMB2_LEASE_READ | SMB2_LEASE_HANDLE)
 
 /* Lease flags (smb2.h:874) */
-#define SMB2_LEASE_FLAG_BREAK_IN_PROGRESS 0x00000002
+#define SMB2_LEASE_FLAG_BREAK_IN_PROGRESS       0x00000002
 
 /* NTLMSSP negotiate flags (smb_ntlm.h) */
-#define NTLMSSP_NEGOTIATE_ANONYMOUS       0x00000800u
-#define NTLMSSP_NEGOTIATE_NTLM            0x00000200u
-#define NTLMSSP_REQUEST_TARGET            0x00000004u
-#define NTLMSSP_NEGOTIATE_UNICODE         0x00000001u
+#define NTLMSSP_NEGOTIATE_ANONYMOUS             0x00000800u
+#define NTLMSSP_NEGOTIATE_NTLM                  0x00000200u
+#define NTLMSSP_REQUEST_TARGET                  0x00000004u
+#define NTLMSSP_NEGOTIATE_UNICODE               0x00000001u
 
 /* CREATE dispositions / access / options (MS-SMB2 2.2.13) */
-#define FILE_SUPERSEDE                    0x00000000u
-#define FILE_OPEN                         0x00000001u
-#define FILE_CREATE                       0x00000002u
-#define FILE_OPEN_IF                      0x00000003u
-#define FILE_OVERWRITE                    0x00000004u
-#define FILE_OVERWRITE_IF                 0x00000005u
-#define FILE_ALL_ACCESS                   0x001F01FFu
-#define FILE_READ_ATTRIBUTES              0x00000080u /* attribute-only access */
-#define FILE_READ_ACCESS                  0x00120089u /* R data/attr/EA + SYNC */
-#define FILE_WRITE_ACCESS                 0x00120116u /* W data/attr/EA + SYNC */
-#define FILE_ATTRIBUTE_NORMAL             0x00000080u
-#define FILE_DIRECTORY_FILE               0x00000001u
-#define FILE_DELETE_ON_CLOSE              0x00001000u
-#define FILE_NON_DIRECTORY_FILE           0x00000040u
-#define FILE_SHARE_READ                   0x00000001u
-#define FILE_SHARE_WRITE                  0x00000002u
-#define FILE_SHARE_DELETE                 0x00000004u
-#define FILE_SHARE_RWD                    0x00000007u
+#define FILE_SUPERSEDE                          0x00000000u
+#define FILE_OPEN                               0x00000001u
+#define FILE_CREATE                             0x00000002u
+#define FILE_OPEN_IF                            0x00000003u
+#define FILE_OVERWRITE                          0x00000004u
+#define FILE_OVERWRITE_IF                       0x00000005u
+#define FILE_ALL_ACCESS                         0x001F01FFu
+#define FILE_READ_ATTRIBUTES                    0x00000080u /* attribute-only access */
+#define FILE_READ_ACCESS                        0x00120089u /* R data/attr/EA + SYNC */
+#define FILE_WRITE_ACCESS                       0x00120116u /* W data/attr/EA + SYNC */
+#define FILE_ATTRIBUTE_NORMAL                   0x00000080u
+#define FILE_DIRECTORY_FILE                     0x00000001u
+#define FILE_DELETE_ON_CLOSE                    0x00001000u
+#define FILE_NON_DIRECTORY_FILE                 0x00000040u
+#define FILE_SHARE_READ                         0x00000001u
+#define FILE_SHARE_WRITE                        0x00000002u
+#define FILE_SHARE_DELETE                       0x00000004u
+#define FILE_SHARE_RWD                          0x00000007u
 
 /* CreateAction (smb2.h) */
-#define FILE_ACT_SUPERSEDED               0
-#define FILE_ACT_OPENED                   1
-#define FILE_ACT_CREATED                  2
-#define FILE_ACT_OVERWRITTEN              3
+#define FILE_ACT_SUPERSEDED                     0
+#define FILE_ACT_OPENED                         1
+#define FILE_ACT_CREATED                        2
+#define FILE_ACT_OVERWRITTEN                    3
 
 /* Durable-handle context Flags (MS-SMB2 2.2.13.2.11). */
-#define SMB2_DHANDLE_FLAG_PERSISTENT      0x00000002u
+#define SMB2_DHANDLE_FLAG_PERSISTENT            0x00000002u
 
 /* FSCTL codes + the IOCTL IsFsctl flag (MS-SMB2 2.2.31). */
 /* SMB2_LOCK_ELEMENT Flags (MS-SMB2 2.2.26.1). */
-#define SMB2_LOCKFLAG_SHARED              0x00000001u
-#define SMB2_LOCKFLAG_EXCLUSIVE           0x00000002u
-#define SMB2_LOCKFLAG_UNLOCK              0x00000004u
-#define SMB2_LOCKFLAG_FAIL_IMMEDIATELY    0x00000010u
+#define SMB2_LOCKFLAG_SHARED                    0x00000001u
+#define SMB2_LOCKFLAG_EXCLUSIVE                 0x00000002u
+#define SMB2_LOCKFLAG_UNLOCK                    0x00000004u
+#define SMB2_LOCKFLAG_FAIL_IMMEDIATELY          0x00000010u
 
-#define ST_LOCK_NOT_GRANTED               0xC0000055u
-#define ST_FILE_LOCK_CONFLICT             0xC0000054u
+#define ST_LOCK_NOT_GRANTED                     0xC0000055u
+#define ST_FILE_LOCK_CONFLICT                   0xC0000054u
 
-#define SMB2_FSCTL_SET_SPARSE             0x000900C4u
-#define SMB2_FSCTL_LMR_REQUEST_RESILIENCY 0x001401D4u
-#define SMB2C_IOCTL_IS_FSCTL              1u
+#define SMB2_FSCTL_SET_SPARSE                   0x000900C4u
+#define SMB2_FSCTL_LMR_REQUEST_RESILIENCY       0x001401D4u
+#define SMB2_FSCTL_SET_REPARSE_POINT            0x000900A4u
+#define SMB2_FSCTL_GET_REPARSE_POINT            0x000900A8u
+#define SMB2_FSCTL_SET_ZERO_DATA                0x000980C8u
+#define SMB2_FSCTL_QUERY_ALLOCATED_RANGES       0x000940CFu
+#define SMB2_FSCTL_SRV_REQUEST_RESUME_KEY       0x00140078u
+#define SMB2_FSCTL_SRV_COPYCHUNK                0x001440F2u
+#define SMB2_FSCTL_SRV_COPYCHUNK_WRITE          0x001480F2u
+#define SMB2_FSCTL_DUPLICATE_EXTENTS            0x00098344u
+#define SMB2_FSCTL_OFFLOAD_READ                 0x00094264u
+#define SMB2_FSCTL_OFFLOAD_WRITE                0x00098268u
+#define SMB2_FSCTL_FILE_LEVEL_TRIM              0x00098208u
+#define SMB2_FSCTL_GET_INTEGRITY_INFO           0x0009027Cu
+#define SMB2_FSCTL_SET_INTEGRITY_INFO           0x0009C280u
+#define SMB2_FSCTL_CREATE_OR_GET_OBJECT_ID      0x000900C0u
+#define SMB2_FSCTL_SRV_ENUMERATE_SNAPSHOTS      0x00144064u
+#define SMB2_FSCTL_VALIDATE_NEGOTIATE_INFO      0x00140204u
+#define SMB2_FSCTL_QUERY_NETWORK_INTERFACE_INFO 0x001401FCu
+
+/* IO_REPARSE_TAG values (MS-FSCC 2.1.2) the server can round-trip. */
+#define SMB2_IO_REPARSE_TAG_SYMLINK             0xA000000Cu
+#define SMB2C_IOCTL_IS_FSCTL                    1u
 
 /* chimera's own resiliency/durable policy constants, mirrored here so a probe
  * asserts against a NAMED policy rather than a magic number (smb2.h:1073,
  * smb_proc_create.c).  A probe that disagrees with these is a finding. */
-#define SMB2C_RESILIENCY_DEFAULT_MS       120000u
-#define SMB2C_RESILIENCY_MAX_MS           300000u
-#define SMB2C_RESILIENCY_MIN_MS           1000u
-#define SMB2C_DURABLE_TIMEOUT_DEFAULT_MS  60000u
-#define SMB2C_DURABLE_TIMEOUT_MAX_MS      300000u
+#define SMB2C_RESILIENCY_DEFAULT_MS             120000u
+#define SMB2C_RESILIENCY_MAX_MS                 300000u
+#define SMB2C_RESILIENCY_MIN_MS                 1000u
+#define SMB2C_DURABLE_TIMEOUT_DEFAULT_MS        60000u
+#define SMB2C_DURABLE_TIMEOUT_MAX_MS            300000u
 
-#define SMB2C_BUFSZ                       (1 << 20) /* per-connection scratch */
-#define SMB2C_MAX_BREAKS                  16
+#define SMB2C_BUFSZ                             (1 << 20) /* per-connection scratch */
+#define SMB2C_MAX_BREAKS                        16
 
-/* ---- little-endian field put/get --------------------------------------- */
-
-static inline void
-p16(
-    uint8_t *b,
-    int      off,
-    uint16_t v)
-{
-    b[off]     = (uint8_t) v;
-    b[off + 1] = (uint8_t) (v >> 8);
-} /* p16 */
-
-static inline void
-p32(
-    uint8_t *b,
-    int      off,
-    uint32_t v)
-{
-    b[off]     = (uint8_t) v;
-    b[off + 1] = (uint8_t) (v >> 8);
-    b[off + 2] = (uint8_t) (v >> 16);
-    b[off + 3] = (uint8_t) (v >> 24);
-} /* p32 */
-
-static inline void
-p64(
-    uint8_t *b,
-    int      off,
-    uint64_t v)
-{
-    for (int i = 0; i < 8; i++) {
-        b[off + i] = (uint8_t) (v >> (8 * i));
-    }
-} /* p64 */
-
-static inline uint16_t
-g16(
-    const uint8_t *b,
-    int            off)
-{
-    return (uint16_t) (b[off] | (b[off + 1] << 8));
-} /* g16 */
-
-static inline uint32_t
-g32(
-    const uint8_t *b,
-    int            off)
-{
-    return (uint32_t) b[off] | ((uint32_t) b[off + 1] << 8) |
-           ((uint32_t) b[off + 2] << 16) | ((uint32_t) b[off + 3] << 24);
-} /* g32 */
-
-static inline uint64_t
-g64(
-    const uint8_t *b,
-    int            off)
-{
-    uint64_t v = 0;
-
-    for (int i = 0; i < 8; i++) {
-        v |= (uint64_t) b[off + i] << (8 * i);
-    }
-    return v;
-} /* g64 */
-
-/* ASCII -> UTF-16LE; returns byte length written. */
-static inline int
-utf16le(
-    const char *s,
-    uint8_t    *out)
-{
-    int n = 0;
-
-    for (; *s; s++) {
-        out[n++] = (uint8_t) *s;
-        out[n++] = 0;
-    }
-    return n;
-} /* utf16le */
+/* Little-endian field access (p16/p32/p64, g16/g32/g64) and utf16le live in
+ * smb2_mbt_wire.h alongside the protection cryptography that uses them. */
 
 /* ---- harness types ------------------------------------------------------ */
 
@@ -300,6 +268,10 @@ struct smb2_env_opts {
      * grantable at all (MS-SMB2 3.3.5.9.10); on a non-CA share the server
      * grants an ordinary durable handle instead. */
     int continuous_availability;
+    /* Advertise named streams (SMB2_FILE_ATTRIBUTE_* / the "file:stream" create
+     * syntax).  Off by default in the server, and only meaningful on a backend
+     * that implements the stream ops -- memfs does. */
+    int named_streams;
 };
 
 /* Do the two profiles configure the server identically?  Compared field by
@@ -316,8 +288,80 @@ smb2_env_opts_eq(
            a->directory_leases == b->directory_leases &&
            a->persistent_handles == b->persistent_handles &&
            a->force_level2 == b->force_level2 &&
-           a->continuous_availability == b->continuous_availability;
+           a->continuous_availability == b->continuous_availability &&
+           a->named_streams == b->named_streams;
 } /* smb2_env_opts_eq */
+
+/* How a connection is negotiated, authenticated and protected.
+ *
+ * The corpus does not model any of this -- it is the same SMB2 conversation
+ * either way -- so a profile is a property of the CONNECTION, chosen by the
+ * test that opens it, and the same traces replay unchanged over any of them.
+ * That is the whole point: the protection layer gets exercised on every packet
+ * of every trace without a single new model step.
+ *
+ * A NULL profile is the harness default the probes and the plain corpus batch
+ * have always run: 2.1 + 3.0 offered, anonymous logon, no signing, no
+ * encryption. */
+struct smb2_wire_profile {
+    const char *name;
+    /* Highest dialect to offer.  0 keeps the harness default (2.1 + 3.0). */
+    uint16_t    max_dialect;
+    /* Authenticate as a real local user instead of taking a null session.
+    * Signing and encryption both need a session key, so both imply it. */
+    int         ntlmv2;
+    int         sign;
+    int         encrypt;
+    /* 3.1.1 preferences, offered in the negotiate contexts. */
+    uint16_t    signing_alg;
+    uint16_t    cipher;
+};
+
+/* Look up a wire profile by name, so a ctest command line can select one
+* without restating the matrix.  NULL for an unknown name; "plain" resolves to
+* NULL too, since the unprotected default IS the absence of a profile. */
+static inline const struct smb2_wire_profile *
+smb2_wire_profile_find(const char *name)
+{
+    /* *INDENT-OFF* */
+    /* uncrustify 0.78.1 does not converge on aligned designated initializers --
+     * each pass widens the '=' column -- so this table is guarded. */
+    static const struct smb2_wire_profile table[] = {
+        { .name = "ntlmv2",
+          .max_dialect = 0x0300, .ntlmv2 = 1 },
+        { .name = "signed30",
+          .max_dialect = 0x0300, .ntlmv2 = 1, .sign = 1 },
+        { .name = "signed311",
+          .max_dialect = 0x0311, .ntlmv2 = 1, .sign = 1,
+          .signing_alg = SMB2W_SIGN_AES_GMAC },
+        { .name = "encrypted311",
+          .max_dialect = 0x0311, .ntlmv2 = 1, .encrypt = 1,
+          .cipher = SMB2W_CIPHER_AES128_GCM,
+          .signing_alg = SMB2W_SIGN_AES_GMAC },
+    };
+    /* *INDENT-ON* */
+    unsigned int i;
+
+    if (!name || strcmp(name, "plain") == 0) {
+        return NULL;
+    }
+    for (i = 0; i < sizeof(table) / sizeof(table[0]); i++) {
+        if (strcmp(table[i].name, name) == 0) {
+            return &table[i];
+        }
+    }
+    fprintf(stderr, "smb2 harness: unknown wire profile '%s'\n", name);
+    exit(2);
+} /* smb2_wire_profile_find */
+
+/* The credentials smb2_env_open_opts registers when a profile authenticates.
+ * Any local user will do -- what is under test is the NTLMv2 exchange and the
+ * keys it yields, not the identity. */
+#define SMB2W_USER      "smbtest"
+#define SMB2W_PASSWORD  "Chimera!MBT1"
+#define SMB2W_DOMAIN    "CHIMERA"
+#define SMB2W_UID       1000u
+#define SMB2W_GID       1000u
 
 /* Connections are never recycled: a transport drop RETIRES a connection (it
  * keeps its slot so its struct outlives evpl_destroy) and the reconnect takes a
@@ -331,20 +375,23 @@ smb2_env_opts_eq(
 struct smb2_conn;
 
 struct smb2_env {
-    struct chimera_server     *server;
-    struct prometheus_metrics *metrics;
-    struct evpl               *evpl;
-    char                       session_dir[256];
+    struct chimera_server          *server;
+    struct prometheus_metrics      *metrics;
+    struct evpl                    *evpl;
+    char                            session_dir[256];
     /* Every connection stays owned by the env and is freed only AFTER
      * evpl_destroy: evpl dispatches a final DISCONNECTED to each bind during
      * teardown, and that notify dereferences the conn -- freeing earlier is a
      * use-after-free. */
-    struct smb2_conn          *conns[SMB2C_MAX_CONNS];
-    int                        nconns;
+    struct smb2_conn               *conns[SMB2C_MAX_CONNS];
+    int                             nconns;
     /* Copied at open time so smb2_env_fs_setup(), which the batch replayer
      * calls once per trace with only (env, fsname), can still apply the
      * share-level feature options. */
-    struct smb2_env_opts       opts;
+    struct smb2_env_opts            opts;
+    /* Default wire profile for connections opened on this env.  NULL means
+     * the harness default: 2.1 + 3.0, anonymous logon, unprotected. */
+    const struct smb2_wire_profile *wire;
 };
 
 /* A break notification the server pushed to this connection (the holder). */
@@ -363,8 +410,8 @@ struct smb2_break {
 };
 
 struct smb2_conn {
-    struct smb2_env  *env;
-    int               conn_index;   /* stable per-env index (ClientGuid seed) */
+    struct smb2_env                *env;
+    int                             conn_index; /* stable per-env index (ClientGuid seed) */
     /* ClientGuid seed actually put on the wire by smb2_negotiate.  Defaults to
      * conn_index (one client per connection).  Set it equal to another
      * connection's guid_tag BEFORE the handshake to make the two connections
@@ -372,38 +419,38 @@ struct smb2_conn {
      * the ClientGuid (chimera_smb_lease_client_key), so this is the only way
      * for the harness to present two connections of a single client, which is
      * what the same-OplockKey / same-client arbitration rules turn on. */
-    int               guid_tag;
-    struct evpl_bind *bind;
-    int               connected;
-    int               disconnected;
+    int                             guid_tag;
+    struct evpl_bind               *bind;
+    int                             connected;
+    int                             disconnected;
     /* Set by smb2_conn_disconnect: THIS side closed the transport.  Without it
      * `disconnected` conflates "the server hung up on us" (a finding) with "we
      * dropped the link on purpose" (the premise of every durable/replay test),
      * and the pump loops would report the former for the latter. */
-    int               closed_by_client;
+    int                             closed_by_client;
 
-    uint64_t          session_id;
-    uint32_t          tree_id;
-    uint64_t          msg_id;
-    uint16_t          dialect;
+    uint64_t                        session_id;
+    uint32_t                        tree_id;
+    uint64_t                        msg_id;
+    uint16_t                        dialect;
 
-    uint8_t          *sbuf;       /* request scratch */
-    uint8_t          *rbuf;       /* last reply (framed, NetBIOS included) */
-    uint8_t          *xbuf;       /* receive scratch (breaks land here) */
-    int               rlen;
-    int               reply_ready;
+    uint8_t                        *sbuf; /* request scratch */
+    uint8_t                        *rbuf; /* last reply (framed, NetBIOS included) */
+    uint8_t                        *xbuf; /* receive scratch (breaks land here) */
+    int                             rlen;
+    int                             reply_ready;
     /* Identity and count of FINAL replies (not interims, not breaks) promoted
      * into rbuf.  smb2_echo_barrier() needs both: it waits for the reply that
      * carries ITS MessageId, and reports how many other final replies -- i.e.
      * previously parked requests completing -- landed while it was
      * outstanding. */
-    uint64_t          reply_mid;
-    int               nreply;
+    uint64_t                        reply_mid;
+    int                             nreply;
     /* Final replies EXCLUDING the harness's own ECHO barrier round trips, so
      * a caller can sample it before posting a request and ask afterwards
      * "did anything of mine complete?" without having to subtract the
      * barrier's own traffic. */
-    int               nreply_app;
+    int                             nreply_app;
 
     /* Async interim (STATUS_PENDING) accounting.  An interim tells the caller
      * the request PARKED server-side (smb_async_interim.c: the interim is sent
@@ -411,26 +458,66 @@ struct smb2_conn {
      * threshold), so observing one is a first-class fact -- the model's
      * ST_PENDING maps onto exactly this.  The final response carries the same
      * AsyncId, which is the original MessageId. */
-    int               ninterim;   /* interims seen on this connection */
-    uint64_t          last_async_id;
-    int               interim_pending; /* an interim arrived, final not yet */
+    int                             ninterim; /* interims seen on this connection */
+    uint64_t                        last_async_id;
+    int                             interim_pending; /* an interim arrived, final not yet */
 
     /* One-shot request-header modifiers, armed by the smb2c_set_next_* /
      * smb2c_pin_msg_id helpers and CONSUMED (cleared) by the next smb2c_send.
      * They are one-shot on purpose: a replay test arms exactly one request and
      * must not silently taint every request that follows it. */
-    uint32_t          next_flags;         /* OR'd into the header Flags */
-    int               next_flags_armed;
-    uint16_t          next_cs;            /* header offset 8: ChannelSequence */
-    int               next_cs_armed;
-    uint64_t          pin_msg_id;         /* send with THIS MessageId ... */
-    int               pin_armed;          /* ... and do not advance msg_id */
-    uint64_t          last_msg_id;        /* MessageId actually stamped */
+    uint32_t                        next_flags;  /* OR'd into the header Flags */
+    int                             next_flags_armed;
+    uint16_t                        next_cs;     /* header offset 8: ChannelSequence */
+    int                             next_cs_armed;
+    uint64_t                        pin_msg_id;  /* send with THIS MessageId ... */
+    int                             pin_armed;   /* ... and do not advance msg_id */
+    uint64_t                        last_msg_id; /* MessageId actually stamped */
 
     /* unsolicited oplock/lease break notifications, oldest first */
-    struct smb2_break brk[SMB2C_MAX_BREAKS];
-    int               nbrk;
+    struct smb2_break               brk[SMB2C_MAX_BREAKS];
+    int                             nbrk;
+
+    /* ---- wire protection (see smb2_mbt_wire.h) --------------------------
+     *
+     * The profile is the env's, copied per connection so a probe can hand one
+     * connection a different profile than its peer.  Everything below is
+     * derived during the handshake and inert under the default (unprotected)
+     * profile, which is what every existing probe and the plain corpus batch
+     * run with. */
+    const struct smb2_wire_profile *wire;
+    uint16_t                        signing_alg;   /* SMB2W_SIGN_* (3.1.1) */
+    uint16_t                        cipher;        /* SMB2W_CIPHER_* */
+    uint8_t                         session_key[16];
+    uint8_t                         signing_key[16];
+    uint8_t                         send_key[32];  /* client -> server */
+    uint8_t                         recv_key[32];  /* server -> client */
+    size_t                          enc_key_len;
+    uint8_t                         preauth[SMB2W_PREAUTH_HASH_SIZE];
+    /* Post-NEGOTIATE preauth baseline: each SESSION_SETUP exchange restarts
+     * the running hash from here (MS-SMB2 3.3.5.5.3), mirroring the server's
+     * conn->negotiate_preauth_hash. */
+    uint8_t                         preauth_base[SMB2W_PREAUTH_HASH_SIZE];
+    /* Snapshot taken before folding a SESSION_SETUP request, so a leg that
+     * fails authentication can be rolled back: the client folds an exchange
+     * only when the response is SUCCESS or MORE_PROCESSING_REQUIRED, and
+     * folding a hard error would desynchronize both sides' hashes. */
+    uint8_t                         preauth_presession[SMB2W_PREAUTH_HASH_SIZE];
+    /* Mirrors the server's conn->session_setup_in_progress: set while a
+     * SESSION_SETUP exchange is mid-flight (MORE_PROCESSING_REQUIRED), which
+     * is what distinguishes a continuation leg from the start of a new
+     * session for preauth-hash purposes. */
+    int                             ss_in_progress;
+    int                             signing_on;    /* sign + verify traffic */
+    int                             encrypt_on;    /* wrap in TRANSFORM */
+    uint64_t                        nonce_counter;
+    /* Scratch for the encrypted form of the request being sent, and for the
+     * decrypted form of a reply.  Separate from sbuf/rbuf so the plaintext a
+     * caller built (and the plaintext a caller parses) is never disturbed. */
+    uint8_t                        *ebuf;
+    uint8_t                        *dbuf;
 };
+
 
 /* One CREATE context to serialize onto a request (MS-SMB2 2.2.13.2).  `name`
  * is the raw context-name bytes: a 4-byte tag ("RqLs", "DH2Q", ...) or a
@@ -601,6 +688,26 @@ smb2c_notify(
             for (unsigned int i = 0; i < notify->recv_msg.niov; i++) {
                 evpl_iovec_release(evpl, &notify->recv_msg.iovec[i]);
             }
+            /* Unwrap before anything reads the message.  A TRANSFORM-framed
+             * reply carries no SMB2 header until it is decrypted, so every
+             * classification below (break? interim? which MessageId?) would
+             * otherwise be reading ciphertext.  Breaks arrive encrypted too
+             * once the session is protected, which is why this sits ahead of
+             * the break check rather than in the reply path. */
+            if (c->encrypt_on && off >= 4 + SMB2W_XFORM_SIZE &&
+                c->xbuf[4] == 0xFD && c->xbuf[5] == 'S' &&
+                c->xbuf[6] == 'M' && c->xbuf[7] == 'B') {
+                int plen = smb2w_decrypt(c->cipher, c->recv_key, c->enc_key_len,
+                                         c->xbuf + 4, off - 4, c->dbuf);
+
+                if (plen < 0) {
+                    fprintf(stderr, "smb2 harness: failed to decrypt a "
+                            "TRANSFORM-framed reply (%d bytes)\n", off - 4);
+                    exit(6);
+                }
+                memcpy(c->xbuf + 4, c->dbuf, (size_t) plen);
+                off = 4 + plen;
+            }
             if (off >= 4 + SMB2_HDR_SIZE) {
                 uint16_t cmd    = g16(c->xbuf + 4, 12);
                 uint64_t mid    = g64(c->xbuf + 4, 24);
@@ -628,6 +735,36 @@ smb2c_notify(
                     break;
                 }
             }
+            /* Fold the NEGOTIATE / SESSION_SETUP response into the preauth
+             * hash.  A SESSION_SETUP that failed outright contributes nothing
+             * (MS-SMB2 3.3.5.5.3), so roll back to the snapshot taken when its
+             * request was folded; NEGOTIATE always succeeds to here, and its
+             * folded value becomes the baseline every later session restarts
+             * from. */
+            if (c->wire && c->wire->max_dialect == 0x0311 &&
+                off >= 4 + SMB2_HDR_SIZE) {
+                uint16_t cmd  = g16(c->xbuf + 4, 12);
+                uint32_t stat = g32(c->xbuf + 4, 8);
+
+                if (cmd == SMB2_NEGOTIATE || cmd == SMB2_SESSION_SETUP) {
+                    if (cmd == SMB2_SESSION_SETUP &&
+                        stat != ST_SUCCESS && stat != ST_MORE_PROCESSING_REQUIRED) {
+                        memcpy(c->preauth, c->preauth_presession,
+                               sizeof(c->preauth));
+                    } else {
+                        smb2w_preauth_extend(c->preauth, c->xbuf + 4,
+                                             (uint32_t) (off - 4));
+                        if (cmd == SMB2_NEGOTIATE) {
+                            memcpy(c->preauth_base, c->preauth,
+                                   sizeof(c->preauth_base));
+                        }
+                    }
+                    if (cmd == SMB2_SESSION_SETUP) {
+                        c->ss_in_progress =
+                            (stat == ST_MORE_PROCESSING_REQUIRED);
+                    }
+                }
+            }
             memcpy(c->rbuf, c->xbuf, (size_t) (off <= SMB2C_BUFSZ
                                                ? off : SMB2C_BUFSZ));
             c->rlen        = off;
@@ -652,15 +789,17 @@ smb2c_notify(
  * whole corpus.  smb2_env_start_opts (below) keeps the one-shot
  * open+fs("fs0") shape the smoke/oplock probes rely on. */
 static inline void
-smb2_env_open_opts(
-    struct smb2_env            *env,
-    const struct smb2_env_opts *opts)
+smb2_env_open_wire(
+    struct smb2_env                *env,
+    const struct smb2_env_opts     *opts,
+    const struct smb2_wire_profile *wire)
 {
     struct chimera_server_config *config;
 
     mbt_debug_log_start();
 
     memset(env, 0, sizeof(*env));
+    env->wire = wire;
 
     /* Sweep the VFS open cache aggressively.  When a trace's connections are
      * disconnected (smb2_conn_reset), the server closes their file handles
@@ -686,7 +825,24 @@ smb2_env_open_opts(
     chimera_server_config_set_state_dir(config, env->session_dir);
     chimera_server_config_set_tcp_flavor(config, CHIMERA_TCP_FLAVOR_INPROC);
     chimera_server_config_set_smb_enabled(config, 1);
-    chimera_server_config_set_smb_signing_required(config, 0);
+
+    /* Wire protection is demanded of the SERVER, not just offered by the
+     * client: requiring it is what makes an unprotected request a protocol
+     * violation, so a harness bug that silently stopped signing shows up as a
+     * dropped connection instead of passing quietly. */
+    if (env->wire && env->wire->sign) {
+        chimera_server_config_set_smb_signing_required(config, 1);
+    } else {
+        chimera_server_config_set_smb_signing_required(config, 0);
+    }
+    if (env->wire && env->wire->encrypt) {
+        chimera_server_config_set_smb_encryption(config, 2);   /* required */
+    }
+    if (env->wire && env->wire->max_dialect == 0x0311) {
+        /* The floor, not the ceiling: the server offers everything at or above
+         * it, and the client's own offer picks the dialect. */
+        chimera_server_config_set_smb_min_dialect(config, 0x0210);
+    }
 
     if (opts) {
         chimera_server_config_set_smb_oplocks(config, opts->oplocks);
@@ -695,6 +851,8 @@ smb2_env_open_opts(
                                                        opts->directory_leases);
         chimera_server_config_set_smb_persistent_handles(config,
                                                          opts->persistent_handles);
+        chimera_server_config_set_smb_named_streams(config,
+                                                    opts->named_streams);
     }
 
     if (opts) {
@@ -703,6 +861,21 @@ smb2_env_open_opts(
 
     env->server = chimera_server_init(config, env->metrics);
     chimera_server_start(env->server);
+
+    /* A profile that authenticates needs an account to authenticate AS.  The
+     * password is handed over in the clear because chimera stores it that way
+     * (smb_ntlm.c derives the NT hash from user->smbpasswd at validation
+     * time); it never crosses the wire. */
+    if (env->wire && env->wire->ntlmv2) {
+        const uint32_t gids[1] = { SMB2W_GID };
+
+        if (chimera_server_add_user(env->server, SMB2W_USER, SMB2W_PASSWORD,
+                                    SMB2W_PASSWORD, NULL,
+                                    SMB2W_UID, SMB2W_GID, 1, gids, 1) != 0) {
+            fprintf(stderr, "failed to register SMB test user %s\n", SMB2W_USER);
+            exit(1);
+        }
+    }
 
     /* The CLIENT loop's idle poll interval.  Not a test deadline: every wait
      * here is a `while (!condition) { pump; }`, so the value only trades pump
@@ -717,6 +890,14 @@ smb2_env_open_opts(
 
     evpl_thread_config_set_wait_ms(tcfg, 1);
     env->evpl = evpl_create(tcfg);
+} /* smb2_env_open_wire */
+
+static inline void
+smb2_env_open_opts(
+    struct smb2_env            *env,
+    const struct smb2_env_opts *opts)
+{
+    smb2_env_open_wire(env, opts, NULL);
 } /* smb2_env_open_opts */
 
 /* Create a fresh memfs filesystem `fsname` and mount the "share" onto it.  A
@@ -822,9 +1003,17 @@ smb2_conn_open(struct smb2_env *env)
     c->env        = env;
     c->conn_index = env->nconns;
     c->guid_tag   = env->nconns;
+    c->wire       = env->wire;
     c->sbuf       = malloc(SMB2C_BUFSZ);
     c->rbuf       = malloc(SMB2C_BUFSZ);
     c->xbuf       = malloc(SMB2C_BUFSZ);
+    /* Only a protected profile ever wraps or unwraps a message; leaving these
+     * NULL otherwise keeps the unprotected path allocation-identical to what
+     * it was before profiles existed. */
+    if (c->wire && c->wire->encrypt) {
+        c->ebuf = malloc(SMB2C_BUFSZ);
+        c->dbuf = malloc(SMB2C_BUFSZ);
+    }
 
     c->bind = evpl_connect(env->evpl, EVPL_STREAM_INPROC, NULL, ep,
                            smb2c_notify, smb2c_segment, c);
@@ -1031,7 +1220,58 @@ smb2c_send(
 
     c->reply_ready     = 0;
     c->interim_pending = 0;
-    evpl_send(c->env->evpl, c->bind, c->sbuf, 4 + payload);
+
+    /* Protection is applied here, after every builder and one-shot modifier has
+     * finished with the header, because both operations cover the FINAL bytes:
+     * a signature computed before a modifier patched the header would not
+     * verify, and encryption must wrap whatever is ultimately sent.  Signing
+     * before encrypting matches MS-SMB2 3.1.4.3 (and is what the server undoes
+     * in the opposite order). */
+    if (c->signing_on) {
+        uint8_t sig[16];
+
+        p32(h, 16, g32(h, 16) | SMB2_FLAGS_SIGNED);
+        memset(h + 48, 0, 16);
+        smb2w_sign(c->dialect, c->signing_alg, c->signing_key,
+                   h, (int) payload, sig);
+        memcpy(h + 48, sig, 16);
+    }
+
+    /* SMB 3.1.1 preauth-integrity: fold NEGOTIATE and SESSION_SETUP into the
+     * running hash, AFTER signing (the server folds the bytes it received, so
+     * the signature is part of them) and BEFORE encryption (it folds the
+     * decrypted plaintext).  A SESSION_SETUP that starts a new session restarts
+     * from the post-NEGOTIATE baseline, and is snapshotted so a failed leg can
+     * be rolled back -- both mirroring smb.c's request-fold path. */
+    if (c->wire && c->wire->max_dialect == 0x0311) {
+        uint16_t cmd = g16(h, 12);
+
+        if (cmd == SMB2_NEGOTIATE || cmd == SMB2_SESSION_SETUP) {
+            if (cmd == SMB2_SESSION_SETUP) {
+                if (g64(h, 40) == 0 || !c->ss_in_progress) {
+                    memcpy(c->preauth, c->preauth_base, sizeof(c->preauth));
+                }
+                memcpy(c->preauth_presession, c->preauth,
+                       sizeof(c->preauth_presession));
+            }
+            smb2w_preauth_extend(c->preauth, h, payload);
+        }
+    }
+
+    if (c->encrypt_on) {
+        int elen = smb2w_encrypt(c->cipher, c->send_key, c->enc_key_len,
+                                 c->nonce_counter++, c->session_id,
+                                 h, (int) payload, c->ebuf + 4);
+
+        c->ebuf[0] = 0;
+        c->ebuf[1] = (uint8_t) (elen >> 16);
+        c->ebuf[2] = (uint8_t) (elen >> 8);
+        c->ebuf[3] = (uint8_t) elen;
+        evpl_send(c->env->evpl, c->bind, c->ebuf, 4 + elen);
+    } else {
+        evpl_send(c->env->evpl, c->bind, c->sbuf, 4 + payload);
+    }
+
     if (!c->pin_armed) {
         c->msg_id++;
     }
@@ -1402,16 +1642,63 @@ smb2c_xfer(
 
 /* ---- NEGOTIATE ---------------------------------------------------------- */
 
+/* Append one negotiate context (MS-SMB2 2.2.3.1) at `n` within `cx`, returning
+ * the offset just past its data.  Contexts are 8-byte aligned relative to the
+ * start of the list, so the CALLER aligns before each one but must not pad
+ * after the last: the message ends at the final context's data, which is the
+ * canonical form the preauth hash is computed over. */
+static inline int
+smb2c_neg_ctx(
+    uint8_t       *cx,
+    int            n,
+    uint16_t       type,
+    const uint8_t *data,
+    int            data_len)
+{
+    p16(cx, n, type);
+    p16(cx, n + 2, (uint16_t) data_len);
+    p32(cx, n + 4, 0);                /* Reserved */
+    memcpy(cx + n + 8, data, data_len);
+    return n + 8 + data_len;
+} /* smb2c_neg_ctx */
+
 static inline uint32_t
 smb2_negotiate(struct smb2_conn *c)
 {
-    int      b    = smb2c_begin(c, SMB2_NEGOTIATE, 0);
-    uint8_t *body = c->sbuf + b;
-    uint32_t st;
+    int                             b       = smb2c_begin(c, SMB2_NEGOTIATE, 0);
+    uint8_t                        *body    = c->sbuf + b;
+    const struct smb2_wire_profile *w       = c->wire;
+    int                             want311 = (w && w->max_dialect == 0x0311);
+    uint16_t                        dialects[4];
+    int                             nd = 0, blen, i;
+    uint32_t                        st;
+
+    /* Offer 2.1 + 3.0 by default: 3.0 unlocks lease v2 (epochs) needed for the
+     * cascade test, and stops short of 3.1.1's mandatory negotiate contexts.
+     * A profile's max_dialect is a CEILING on that offer: 2.1 alone pins the
+     * pre-3.x signing algorithm, and 3.1.1 offers the full ladder and sends
+     * the negotiate contexts. */
+    dialects[nd++] = SMB2_DIALECT_0210;
+    if (!w || w->max_dialect != SMB2_DIALECT_0210) {
+        dialects[nd++] = SMB2_DIALECT_0300;
+    }
+    if (want311) {
+        dialects[nd++] = SMB2_DIALECT_0302;
+        dialects[nd++] = SMB2_DIALECT_0311;
+    }
 
     p16(body, 0, 36);                 /* StructureSize */
-    p16(body, 2, 2);                  /* DialectCount */
+    p16(body, 2, (uint16_t) nd);      /* DialectCount */
     p16(body, 4, 1);                  /* SecurityMode = SIGNING_ENABLED */
+    /* SMB 3.0/3.0.2 gate encryption on the client having advertised the
+     * capability -- the server echoes SMB2_GLOBAL_CAP_ENCRYPTION only if the
+     * request carried it (MS-SMB2 3.3.5.4), and without it an encrypted
+     * request on a 3.0 connection is simply unexpected.  3.1.1 negotiates the
+     * cipher through a context instead, but advertising here is harmless and
+     * is what a real client does. */
+    if (w && w->encrypt) {
+        p32(body, 8, SMB2_GLOBAL_CAP_ENCRYPTION);
+    }
     /* ClientGuid: DISTINCT per connection.  The server derives the lease owner
      * key from it (chimera_smb_lease_client_key, FNV-1a over the guid), so a
      * shared guid would make every connection ONE client -- silently coalescing
@@ -1422,14 +1709,81 @@ smb2_negotiate(struct smb2_conn *c)
      * c->guid_tag to the peer's before the handshake. */
     memset(body + 12, 0x11, 16);      /* ClientGuid */
     body[12] = (uint8_t) (0x40 + c->guid_tag);
-    /* Offer 2.1 + 3.0: 3.0 unlocks lease v2 (epochs) needed for the cascade
-     * test, and avoids the mandatory 3.1.1 negotiate contexts. */
-    p16(body, 36, SMB2_DIALECT_0210);
-    p16(body, 38, SMB2_DIALECT_0300);
+    for (i = 0; i < nd; i++) {
+        p16(body, 36 + 2 * i, dialects[i]);
+    }
+    blen = 36 + 2 * nd;
 
-    st = smb2c_xfer(c, 40);
+    if (want311) {
+        int      abs_off = SMB2_HDR_SIZE + blen;
+        int      pad     = (8 - (abs_off & 7)) & 7;
+        uint8_t *cx      = body + blen + pad;
+        uint8_t  data[64];
+        int      n = 0, count = 0;
+
+        memset(body + blen, 0, pad);
+
+        /* PREAUTH_INTEGRITY_CAPABILITIES: SHA-512 with a 32-byte salt.  The
+         * salt is never hashed by either side -- only the message bytes are --
+         * so a fixed value keeps the handshake reproducible. */
+        p16(data, 0, 1);                        /* HashAlgorithmCount */
+        p16(data, 2, 32);                       /* SaltLength */
+        p16(data, 4, SMB2W_PREAUTH_SHA_512);
+        memset(data + 6, 0xA5, 32);
+        n = smb2c_neg_ctx(cx, n, SMB2W_CTX_PREAUTH, data, 38);
+        count++;
+
+        n = (n + 7) & ~7;
+        p16(data, 0, 1);                        /* CipherCount */
+        p16(data, 2, w->cipher ? w->cipher : SMB2W_CIPHER_AES128_GCM);
+        n = smb2c_neg_ctx(cx, n, SMB2W_CTX_ENCRYPTION, data, 4);
+        count++;
+
+        n = (n + 7) & ~7;
+        p16(data, 0, 1);                        /* SigningAlgorithmCount */
+        p16(data, 2, w->signing_alg);
+        n = smb2c_neg_ctx(cx, n, SMB2W_CTX_SIGNING, data, 4);
+        count++;
+
+        p32(body, 28, (uint32_t) (abs_off + pad));  /* NegotiateContextOffset */
+        p16(body, 32, (uint16_t) count);        /* NegotiateContextCount */
+        blen += pad + n;
+    }
+
+    st = smb2c_xfer(c, blen);
     if (st == ST_SUCCESS) {
-        c->dialect = g16(c->rbuf + 4 + SMB2_HDR_SIZE, 4);   /* DialectRevision */
+        const uint8_t *rb = c->rbuf + 4 + SMB2_HDR_SIZE;
+
+        c->dialect = g16(rb, 4);                    /* DialectRevision */
+
+        /* Defaults for a dialect that carries no algorithm contexts: 2.x signs
+         * with HMAC-SHA256, 3.0/3.0.2 with AES-CMAC (both implied by the
+         * dialect alone), and 3.x encryption before 3.1.1 is AES-128-CCM. */
+        c->signing_alg = SMB2W_SIGN_HMAC_SHA256;
+        c->cipher      = SMB2W_CIPHER_AES128_CCM;
+
+        if (c->dialect == 0x0311) {
+            uint16_t ncx  = g16(rb, 6);
+            uint32_t coff = g32(rb, 60);
+            /* NegotiateContextOffset is absolute from the SMB2 header; `rb`
+             * already points past it, so rebase onto the body. */
+            int      pos = (int) coff - SMB2_HDR_SIZE;
+
+            /* The server echoes back exactly one algorithm per context; read
+             * them rather than assuming our own preference was honoured. */
+            for (i = 0; i < ncx && pos + 8 <= c->rlen - 4 - SMB2_HDR_SIZE; i++) {
+                const uint8_t *ctx  = rb + pos;
+                uint16_t       type = g16(ctx, 0);
+                uint16_t       dlen = g16(ctx, 2);
+
+                if (type == SMB2W_CTX_ENCRYPTION && dlen >= 4) {
+                    c->cipher = g16(ctx, 10);
+                } else if (type == SMB2W_CTX_SIGNING && dlen >= 4) {
+                    c->signing_alg = g16(ctx, 10);
+                }
+                pos = (pos + 8 + dlen + 7) & ~7;
+            }
+        }
     }
     return st;
 } /* smb2_negotiate */
@@ -1462,11 +1816,16 @@ ntlm_type3_anon(uint8_t *o)
     return 88;
 } /* ntlm_type3_anon */
 
+/* One SESSION_SETUP round trip.  `preauth_out`, when given, receives the
+ * preauth-integrity hash as it stands with this leg's REQUEST folded in but
+ * not its response -- the value SMB 3.1.1 binds the session keys to, and the
+ * reason send and wait are split here rather than going through smb2c_xfer. */
 static inline uint32_t
-smb2c_session_setup_leg(
+smb2c_session_setup_leg_capture(
     struct smb2_conn *c,
     const uint8_t    *blob,
-    int               blob_len)
+    int               blob_len,
+    uint8_t          *preauth_out)
 {
     int      b       = smb2c_begin(c, SMB2_SESSION_SETUP, 0);
     uint8_t *body    = c->sbuf + b;
@@ -1475,28 +1834,102 @@ smb2c_session_setup_leg(
     p16(body, 0, 25);                 /* StructureSize */
     body[3] = 1;                      /* SecurityMode = SIGNING_ENABLED */
     p16(body, 12, sec_off);           /* SecurityBufferOffset */
-    p16(body, 14, blob_len);          /* SecurityBufferLength */
+    p16(body, 14, (uint16_t) blob_len); /* SecurityBufferLength */
     memcpy(body + 24, blob, blob_len);
 
-    return smb2c_xfer(c, 24 + blob_len);
+    smb2c_send(c, 24 + blob_len);
+    if (preauth_out) {
+        memcpy(preauth_out, c->preauth, SMB2W_PREAUTH_HASH_SIZE);
+    }
+    return smb2c_wait(c);
+} /* smb2c_session_setup_leg_capture */
+
+static inline uint32_t
+smb2c_session_setup_leg(
+    struct smb2_conn *c,
+    const uint8_t    *blob,
+    int               blob_len)
+{
+    return smb2c_session_setup_leg_capture(c, blob, blob_len, NULL);
 } /* smb2c_session_setup_leg */
+
+/* Derive the session's protection keys and arm signing/encryption.
+ *
+ * Ordering matters and is the whole subtlety of the 3.1.1 case: the keys bind
+ * to the preauth hash as it stands after the FINAL SESSION_SETUP *request* is
+ * folded but before its response is -- so this runs between the two, from
+ * inside the last leg, using the snapshot taken there. */
+static inline void
+smb2c_arm_protection(
+    struct smb2_conn *c,
+    const uint8_t    *preauth_at_auth)
+{
+    const struct smb2_wire_profile *w = c->wire;
+
+    if (!w || (!w->sign && !w->encrypt)) {
+        return;
+    }
+
+    smb2w_derive_signing_key(c->dialect, c->session_key, preauth_at_auth,
+                             c->signing_key);
+
+    if (w->encrypt) {
+        smb2w_derive_encryption_keys(c->dialect, c->cipher, c->session_key,
+                                     preauth_at_auth, c->send_key, c->recv_key,
+                                     &c->enc_key_len);
+    }
+
+    /* An encrypted request is not additionally signed (MS-SMB2 3.1.4.3: the
+     * AEAD tag is the integrity check), which is also what the server expects
+     * -- it strips SMB2_FLAGS_SIGNED off anything it decrypted. */
+    c->signing_on    = w->sign && !w->encrypt;
+    c->encrypt_on    = w->encrypt;
+    c->nonce_counter = 1;
+} /* smb2c_arm_protection */
 
 static inline uint32_t
 smb2_session_setup(struct smb2_conn *c)
 {
-    uint8_t  blob[128];
-    int      n;
-    uint32_t st;
+    const struct smb2_wire_profile *w = c->wire;
+    uint8_t                         blob[2048];
+    uint8_t                         preauth_at_auth[SMB2W_PREAUTH_HASH_SIZE];
+    int                             n;
+    uint32_t                        st;
 
-    n  = ntlm_type1(blob);
+    n  = w ? smb2w_ntlm_negotiate(blob, !w->ntlmv2) : ntlm_type1(blob);
     st = smb2c_session_setup_leg(c, blob, n);
     if (st != ST_MORE_PROCESSING_REQUIRED) {
         return st;
     }
     c->session_id = g64(c->rbuf + 4, 40);
 
-    n = ntlm_type3_anon(blob);
-    return smb2c_session_setup_leg(c, blob, n);
+    if (!w || !w->ntlmv2) {
+        n = ntlm_type3_anon(blob);
+        return smb2c_session_setup_leg(c, blob, n);
+    }
+
+    /* Real NTLMv2: answer the server's CHALLENGE and keep the session key the
+     * exchange yields.  The security buffer sits at SecurityBufferOffset /
+     * Length in the SESSION_SETUP response body. */
+    {
+        const uint8_t *rbody = c->rbuf + 4 + SMB2_HDR_SIZE;
+        uint16_t       soff  = g16(rbody, 4);
+        uint16_t       slen  = g16(rbody, 6);
+        const uint8_t *chal  = c->rbuf + 4 + soff;
+
+        n = smb2w_ntlm_auth_ntlmv2(chal, slen, SMB2W_USER, SMB2W_PASSWORD,
+                                   SMB2W_DOMAIN, blob, c->session_key);
+    }
+
+    /* The final leg's request is folded into the preauth hash by smb2c_send,
+     * and the session keys bind to the hash at exactly that point -- after the
+     * request, before the response.  smb2c_session_setup_leg_capture hands
+     * back that intermediate value. */
+    st = smb2c_session_setup_leg_capture(c, blob, n, preauth_at_auth);
+    if (st == ST_SUCCESS) {
+        smb2c_arm_protection(c, preauth_at_auth);
+    }
+    return st;
 } /* smb2_session_setup */
 
 /* ---- TREE_CONNECT ------------------------------------------------------- */
@@ -2134,19 +2567,44 @@ smb2_lock(
 #define SMB2_FILE_DISPOSITION_T       0x0D
 #define SMB2_FILE_ENDOFFILE_INFO_T    0x14
 #define SMB2_FILE_ALL_INFO_T          0x12
+#define SMB2_INFO_SECURITY_T          0x03
+#define SMB2_INFO_QUOTA_T             0x04
+#define SMB2_FILE_EA_INFO_T           0x07
+#define SMB2_FILE_ACCESS_INFO_T       0x08
+#define SMB2_FILE_LINK_INFO_T         0x0B
+#define SMB2_FILE_COMPRESSION_INFO_T  0x0C
+#define SMB2_FILE_POSITION_INFO_T     0x0E
+#define SMB2_FILE_FULL_EA_INFO_T      0x0F
+#define SMB2_FILE_MODE_INFO_T         0x10
+#define SMB2_FILE_ALIGNMENT_INFO_T    0x11
+#define SMB2_FILE_ALLOCATION_INFO_T   0x13
+#define SMB2_FILE_ALTERNATE_NAME_T    0x15
+#define SMB2_FILE_STREAM_INFO_T       0x16
+#define SMB2_FILE_ATTRIBUTE_TAG_T     0x23
+#define SMB2_FILE_NORMALIZED_NAME_T   0x30
+
+/* InfoType FILESYSTEM classes (MS-FSCC 2.5) */
+#define SMB2_FS_VOLUME_INFO_T         1
+#define SMB2_FS_SIZE_INFO_T           3
+#define SMB2_FS_DEVICE_INFO_T         4
+#define SMB2_FS_ATTRIBUTE_INFO_T      5
+#define SMB2_FS_CONTROL_INFO_T        6
+#define SMB2_FS_FULL_SIZE_INFO_T      7
+#define SMB2_FS_OBJECTID_INFO_T       8
+#define SMB2_FS_SECTOR_SIZE_INFO_T    11
 #define SMB2_FILE_NETWORK_OPEN_T      0x22
-#define SMB2_FS_SIZE_INFO_T           0x03
 
 /* FILE_ATTRIBUTE_DIRECTORY (MS-FSCC 2.6): the one attribute bit the model
  * constrains, because it is the wire spelling of `ftype == FDir`. */
 #define SMB2_FILE_ATTRIBUTE_DIRECTORY 0x00000010u
 
 static inline uint32_t
-smb2_set_info(
+smb2_set_info_addl(
     struct smb2_conn *c,
     uint8_t           info_type,
     uint8_t           info_class,
     const uint8_t     file_id[16],
+    uint32_t          addl_info,
     const void       *buf,
     uint32_t          buf_len)
 {
@@ -2167,12 +2625,28 @@ smb2_set_info(
     p32(body, 4, buf_len);             /* BufferLength */
     p16(body, 8, (uint16_t) buf_off);  /* BufferOffset */
     p16(body, 10, 0);                  /* Reserved */
-    p32(body, 12, 0);                  /* AdditionalInformation */
+    /* AdditionalInformation is what selects which parts of a SECURITY
+     * descriptor are applied -- and what the access gate is evaluated
+     * against -- so a security SET needs it set. */
+    p32(body, 12, addl_info);
     memcpy(body + 16, file_id, 16);    /* FileId */
     if (buf_len > 0) {
         memcpy(body + 32, buf, buf_len);
     }
     return smb2c_xfer(c, 32 + (int) buf_len);
+} /* smb2_set_info_addl */
+
+static inline uint32_t
+smb2_set_info(
+    struct smb2_conn *c,
+    uint8_t           info_type,
+    uint8_t           info_class,
+    const uint8_t     file_id[16],
+    const void       *buf,
+    uint32_t          buf_len)
+{
+    return smb2_set_info_addl(c, info_type, info_class, file_id, 0, buf,
+                              buf_len);
 } /* smb2_set_info */
 
 /* FILE_END_OF_FILE_INFORMATION (MS-FSCC 2.4.13): a single EndOfFile LONGLONG.
@@ -2242,12 +2716,13 @@ smb2_set_disposition(
  * (MS-SMB2 3.3.5.20.1), which is a different behavior from the one the model
  * predicts and must not be reached by accident. */
 static inline uint32_t
-smb2_query_info(
+smb2_query_info_len(
     struct smb2_conn *c,
     uint8_t           info_type,
     uint8_t           info_class,
     const uint8_t     file_id[16],
     uint32_t          addl_info,
+    uint32_t          out_buf_len,
     uint8_t          *out,
     uint32_t          out_cap,
     uint32_t         *out_len)
@@ -2259,7 +2734,10 @@ smb2_query_info(
     p16(body, 0, 41);                  /* StructureSize */
     body[2] = info_type;               /* InfoType */
     body[3] = info_class;              /* FileInfoClass */
-    p32(body, 4, 65536);               /* OutputBufferLength */
+    /* OutputBufferLength is a PRECONDITION for most classes, not a truncation
+     * hint: a class whose fixed-size output would not fit is refused outright,
+     * so a test that wants to see that refusal has to be able to set it. */
+    p32(body, 4, out_buf_len);
     p16(body, 8, 0);                   /* InputBufferOffset */
     p16(body, 10, 0);                  /* Reserved */
     p32(body, 12, 0);                  /* InputBufferLength */
@@ -2287,7 +2765,87 @@ smb2_query_info(
         }
     }
     return st;
+} /* smb2_query_info_len */
+
+/* The common case: ask for a generous output buffer so the class's own size is
+ * what determines the reply. */
+static inline uint32_t
+smb2_query_info(
+    struct smb2_conn *c,
+    uint8_t           info_type,
+    uint8_t           info_class,
+    const uint8_t     file_id[16],
+    uint32_t          addl_info,
+    uint8_t          *out,
+    uint32_t          out_cap,
+    uint32_t         *out_len)
+{
+    return smb2_query_info_len(c, info_type, info_class, file_id, addl_info,
+                               65536, out, out_cap, out_len);
 } /* smb2_query_info */
+
+/* ---- QUERY_DIRECTORY ----------------------------------------------------
+ *
+ * MS-SMB2 2.2.33: StructureSize 33, FileInformationClass(1), Flags(1),
+ * FileIndex(4), FileId(16), FileNameOffset(2), FileNameLength(2),
+ * OutputBufferLength(4), then the search pattern as UTF-16LE.
+ *
+ * Enumeration is STATEFUL: the directory handle carries the resume position,
+ * so a second call continues where the first stopped and eventually answers
+ * STATUS_NO_MORE_FILES.  SMB2_RESTART_SCANS rewinds it. */
+#define SMB2_RESTART_SCANS       0x01u
+#define SMB2_RETURN_SINGLE_ENTRY 0x02u
+#define SMB2_INDEX_SPECIFIED     0x04u
+#define SMB2_REOPEN              0x10u
+
+static inline uint32_t
+smb2_query_directory(
+    struct smb2_conn *c,
+    uint8_t           info_class,
+    uint8_t           flags,
+    const uint8_t     file_id[16],
+    const char       *pattern,
+    uint32_t          max_output,
+    uint8_t          *out,
+    uint32_t          out_cap,
+    uint32_t         *out_len)
+{
+    int      b        = smb2c_begin(c, SMB2_QUERY_DIRECTORY, 0);
+    uint8_t *body     = c->sbuf + b;
+    int      name_off = SMB2_HDR_SIZE + 32;
+    int      plen     = pattern ? utf16le(pattern, body + 32) : 0;
+    uint32_t st;
+
+    p16(body, 0, 33);                  /* StructureSize */
+    body[2] = info_class;
+    body[3] = flags;
+    p32(body, 4, 0);                   /* FileIndex */
+    memcpy(body + 8, file_id, 16);
+    p16(body, 24, (uint16_t) name_off);
+    p16(body, 26, (uint16_t) plen);
+    p32(body, 28, max_output);
+
+    st = smb2c_xfer(c, 32 + plen);
+    if (out_len) {
+        *out_len = 0;
+    }
+    if (st == ST_SUCCESS) {
+        const uint8_t *rb   = c->rbuf + 4 + SMB2_HDR_SIZE;
+        uint16_t       doff = g16(rb, 2);
+        uint32_t       dlen = g32(rb, 4);
+
+        if (dlen > out_cap) {
+            dlen = out_cap;
+        }
+        if (out && dlen) {
+            memcpy(out, c->rbuf + 4 + doff, dlen);
+        }
+        if (out_len) {
+            *out_len = dlen;
+        }
+    }
+    return st;
+} /* smb2_query_directory */
 
 /* ---- FLUSH --------------------------------------------------------------
  *
@@ -2366,6 +2924,84 @@ smb2_ioctl(
     }
     return smb2c_xfer(c, 56 + (int) in_len);
 } /* smb2_ioctl */
+
+/* An IOCTL whose OUTPUT buffer the caller wants.
+ *
+ * `max_out` becomes MaxOutputResponse, which several FSCTLs check before they
+ * will do any work at all (an output that would not fit is refused rather than
+ * truncated), so it is a parameter rather than a fixed 4096.  On SUCCESS
+ * *out_len receives the OutputCount and the return value points into the reply
+ * buffer at OutputOffset -- valid until the next request on this connection.
+ * Returns NULL and leaves *status set for any non-success reply. */
+static inline const uint8_t *
+smb2_ioctl_out(
+    struct smb2_conn *c,
+    uint32_t          ctl_code,
+    const uint8_t     file_id[16],
+    const void       *in,
+    uint32_t          in_len,
+    uint32_t          max_out,
+    uint32_t         *status,
+    uint32_t         *out_len)
+{
+    int      b      = smb2c_begin(c, SMB2_IOCTL, 0);
+    uint8_t *body   = c->sbuf + b;
+    int      in_off = SMB2_HDR_SIZE + 56;
+    uint32_t st, off, len;
+
+    p16(body, 0, 57);                 /* StructureSize */
+    p32(body, 4, ctl_code);           /* CtlCode */
+    memcpy(body + 8, file_id, 16);    /* FileId */
+    p32(body, 24, (uint32_t) in_off); /* InputOffset */
+    p32(body, 28, in_len);            /* InputCount */
+    p32(body, 32, 0);                 /* MaxInputResponse */
+    p32(body, 36, (uint32_t) in_off); /* OutputOffset */
+    p32(body, 40, 0);                 /* OutputCount */
+    p32(body, 44, max_out);           /* MaxOutputResponse */
+    p32(body, 48, SMB2C_IOCTL_IS_FSCTL);
+    if (in_len > 0) {
+        memcpy(body + 56, in, in_len);
+    }
+
+    st = smb2c_xfer(c, 56 + (int) in_len);
+    if (status) {
+        *status = st;
+    }
+    /* STATUS_BUFFER_OVERFLOW is a WARNING, not a failure: the reply carries as
+     * much output as fit, and refusing to parse it here would make the partial
+     * result unobservable -- which is exactly the case worth checking. */
+    if (st != ST_SUCCESS && st != ST_BUFFER_OVERFLOW) {
+        return NULL;
+    }
+
+    /* A status-carrying reply is not necessarily an IOCTL reply: the SMB2 error
+     * response (MS-SMB2 2.2.2) is 9 bytes, so its body has no OutputOffset to
+     * read.  Reading one anyway would return whatever the PREVIOUS reply left
+     * in rbuf, which reads as a plausible length and silently invents output
+     * that was never sent.  Require a full IOCTL response body first. */
+    if (out_len) {
+        *out_len = 0;
+    }
+    if (c->rlen < 4 + SMB2_HDR_SIZE + 48 ||
+        g16(c->rbuf + 4 + SMB2_HDR_SIZE, 0) != 49) {
+        return NULL;
+    }
+
+    /* OutputOffset is absolute from the start of the SMB2 header; rbuf also
+     * carries the 4-byte NetBIOS framing ahead of it. */
+    off = g32(c->rbuf + 4 + SMB2_HDR_SIZE, 32);
+    len = g32(c->rbuf + 4 + SMB2_HDR_SIZE, 36);
+    if ((int) (4 + off + len) > c->rlen) {
+        return NULL;
+    }
+    if (out_len) {
+        *out_len = len;
+    }
+    if (len == 0) {
+        return NULL;
+    }
+    return c->rbuf + 4 + off;
+} /* smb2_ioctl_out */
 
 /* FSCTL_LMR_REQUEST_RESILIENCY (MS-SMB2 2.2.31.3): a NETWORK_RESILIENCY_REQUEST
  * of Timeout(4) | Reserved(4).  A resilient handle survives a transport drop
