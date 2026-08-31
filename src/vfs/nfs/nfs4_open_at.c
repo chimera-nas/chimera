@@ -188,6 +188,23 @@ chimera_nfs4_open_at_callback(
      * (synthetic handles which don't call close) and for path opens (resolved
      * via LOOKUP, so there is no OPEN stateid). */
     if (!(request->open_at.flags & CHIMERA_VFS_OPEN_INFERRED) && !path_open) {
+        /* Count this handle against the file's open on the server, which every
+         * handle on the file shares.  Keyed on the handle OPEN just returned
+         * (unmarshalled into r_attr above), not request->fh, which still names
+         * the parent directory here.  A refusal means this OPEN raced an
+         * in-flight CLOSE of the same file and coalesced into the state that
+         * CLOSE destroys (see chimera_nfs4_open_file_get) -- the returned
+         * stateid is dead on arrival, so re-send the OPEN; once the CLOSE has
+         * landed the retry receives a fresh state. */
+        if (chimera_nfs4_open_file_get(ctx->server,
+                                       request->open_at.r_attr.va_fh,
+                                       request->open_at.r_attr.va_fh_len,
+                                       &open_res->opopen.resok4.stateid) != 0) {
+            chimera_nfs4_open_at_send(ctx->thread, ctx->shared, request,
+                                      ctx->dispatch_private);
+            return;
+        }
+
         state = chimera_nfs4_open_state_alloc();
 
         if (!state) {
@@ -199,15 +216,6 @@ chimera_nfs4_open_at_callback(
         /* Store the stateid from OPEN response */
         state->server_index = ctx->server->index;
         state->stateid      = open_res->opopen.resok4.stateid;
-
-        /* Count this handle against the file's open on the server, which every
-         * handle on the file shares.  Keyed on the handle OPEN just returned
-         * (unmarshalled into r_attr above), not request->fh, which still names
-         * the parent directory here. */
-        chimera_nfs4_open_file_get(ctx->server,
-                                   request->open_at.r_attr.va_fh,
-                                   request->open_at.r_attr.va_fh_len,
-                                   &state->stateid);
 
         request->open_at.r_vfs_private = (uint64_t) state;
     } else {

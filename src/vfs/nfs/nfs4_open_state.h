@@ -80,6 +80,13 @@ struct chimera_nfs4_open_file {
     * reaching zero and the unhashing that retires the entry have to be one
     * step, or a concurrent open could revive one already bound for a CLOSE. */
     int             refcnt;
+    /* Wire CLOSEs in flight for this file.  The entry stays hashed while one
+     * is outstanding so a concurrent OPEN of the same file can see it: the
+     * server keys state on (owner, fh) and this client uses one owner, so an
+     * OPEN that lands before an in-flight CLOSE coalesces into the very
+     * state that CLOSE then destroys.  chimera_nfs4_open_file_get detects
+     * that (see the seqid rule there) and the opener re-sends. */
+    int             closing;
     struct stateid4 stateid;
     uint8_t         fh_len;
     uint8_t         fh[CHIMERA_VFS_FH_SIZE];
