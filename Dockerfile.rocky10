@@ -16,8 +16,16 @@ ARG DOCKER_MIRROR=""
 # rocky9 and ubuntu22 ship 4.6, which reads the pre-rename name and so silently
 # ignored the shared cache -- those cells compiled everything cold, every run.
 # One pinned upstream binary everywhere retires that whole class of skew.
+# Every ARG a FROM interpolates has to be declared before the FIRST FROM.
+# An ARG below one is scoped to that stage, so a later FROM sees it empty
+# and buildkit fails with `failed to parse stage name ":"`.
+ARG QUINT_REGISTRY=ghcr.io/chimera-nas/quint
+ARG QUINT_VERSION=0.32.0
 ARG CCACHE_REGISTRY=ghcr.io/chimera-nas/ccache
 ARG CCACHE_VERSION=4.14
+
+FROM ${QUINT_REGISTRY}:${QUINT_VERSION} AS quint
+
 FROM ${CCACHE_REGISTRY}:${CCACHE_VERSION} AS ccache
 
 FROM ${DOCKER_MIRROR}rockylinux/rockylinux:10
@@ -26,6 +34,15 @@ ARG ENABLE_FIO=1
 
 # The mirrored ccache, ahead of anything the distro might provide on PATH.
 COPY --from=ccache /ccache /usr/local/bin/ccache
+
+# node + quint + the warmed Rust evaluator, from the mirrored toolchain image.
+# Without quint on PATH libevpl's Core/HTTP/RPC2 conformance suites and its
+# quint_model checks disable themselves, which is why they had only ever run in
+# the devcontainer.  chimera's own MBT suites do not need it -- they replay the
+# prebuilt specs bundle.
+COPY --from=quint /opt/quint   /opt/quint
+COPY --from=quint /quint-home  /root/.quint
+ENV PATH=/opt/quint/bin:${PATH}
 
 RUN dnf install -y epel-release && \
     dnf config-manager --set-enabled crb

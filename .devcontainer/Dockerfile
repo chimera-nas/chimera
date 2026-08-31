@@ -16,8 +16,16 @@ ARG DOCKER_MIRROR
 # rocky9 and ubuntu22 ship 4.6, which reads the pre-rename name and so silently
 # ignored the shared cache -- those cells compiled everything cold, every run.
 # One pinned upstream binary everywhere retires that whole class of skew.
+# Every ARG a FROM interpolates has to be declared before the FIRST FROM.
+# An ARG below one is scoped to that stage, so a later FROM sees it empty and
+# buildkit fails with `failed to parse stage name ":"`.
+ARG QUINT_REGISTRY=ghcr.io/chimera-nas/quint
+ARG QUINT_VERSION=0.32.0
 ARG CCACHE_REGISTRY=ghcr.io/chimera-nas/ccache
 ARG CCACHE_VERSION=4.14
+
+FROM ${QUINT_REGISTRY}:${QUINT_VERSION} AS quint
+
 FROM ${CCACHE_REGISTRY}:${CCACHE_VERSION} AS ccache
 
 FROM ${DOCKER_MIRROR}ubuntu:26.04
@@ -190,36 +198,11 @@ RUN if [ "$ENABLE_WPTS" = "1" ] ; then \
 # layer takes part in that layer's cache key, so putting these at the top
 # invalidated every cached layer below them -- a 7-minute rebuild of an
 # image that had been rebuilding in seconds.
-ARG ENABLE_QUINT=1
-# Pinned quint release, used to generate the model-based-test trace corpus
-# from ext/specs when no prebuilt bundle is fetched.  Trace generation is
-# seeded and so reproducible for a given release, but different releases may
-# sample the state space differently, which is why ext/specs records the exact
-# version it generated against and warns on a mismatch.  KEEP IN SYNC with
-# ext/specs/.quint-version (ext/libevpl/.devcontainer/Dockerfile pins the
-# same release for libevpl's own conformance tests).
-ARG QUINT_VERSION=0.32.0
-
-# quint drives the model-based tests: the specs submodule (ext/specs) generates
-# the ITF trace corpus from its models at build time, and cmake/SpecsBundle.cmake
-# falls back to that local build whenever the prebuilt bundle cannot be fetched.
-# Without quint in the image every MBT replay ctest silently disables itself, so
-# the nfs3/nfs4/smb2/posix model suites never run in CI.  It also re-enables
-# libevpl's own Core/HTTP/RPC2 conformance tests, which detect quint the same way.
-#
-# quint downloads its Rust evaluator on first simulate, into ~/.quint.  CI
-# runners reach the network through internal mirrors only, so that download
-# arrives truncated and every generation fails.  Warm the cache here, where the
-# network is available and the result is baked into the image.  Double quotes,
-# so quint's prime operator (n') needs no escaping: inside single quotes a
-# backslash is literal and would end the string early.  The closing ls is the
-# check: if the evaluator did not land, fail here where it is fixable rather
-# than in every downstream build job.
-RUN if [ "$ENABLE_QUINT" = "1" ] ; then \
-    npm install -g @informalsystems/quint@${QUINT_VERSION} && \
-    printf "module warm {\n  var n: int\n  action init = n' = 0\n  action step = n' = n + 1\n}\n" \
-        > /tmp/warm.qnt && \
-    { quint run /tmp/warm.qnt --max-steps=1 --max-samples=1 > /dev/null 2>&1 || true ; } && \
-    rm -f /tmp/warm.qnt && \
-    ls -d /root/.quint/rust-evaluator-*/quint_evaluator ; \
-    fi
+# node + quint + the warmed Rust evaluator come from the mirrored toolchain
+# image now (Dockerfile.quint, published by .github/workflows/mirror-quint.yml)
+# rather than an npm install here.  That removes the second copy of the version
+# pin, and removes a layer whose invalidation used to turn a seconds-long
+# rebuild into a seven-minute one.
+COPY --from=quint /opt/quint   /opt/quint
+COPY --from=quint /quint-home  /root/.quint
+ENV PATH=/opt/quint/bin:${PATH}
