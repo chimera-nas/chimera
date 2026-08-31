@@ -1237,13 +1237,15 @@ check_status(
         g_last_recon = dev;
         return 0;
     }
-    if (g_nfs_version) {
-        /* ND3: EACCES from the server's directory-search enforcement on the
-         * loopback's component-by-component resolution.  Neither the posix
-         * model nor chimera's own resolution (issue #1771) implements search
-         * permission, so any path-taking op can draw an EACCES the model maps
-         * to another outcome.  Retires when the model grows search-perm
-         * semantics (which also unblocks the nfs3 passthrough batches). */
+    if (g_strict_dac) {
+        /* ND3: EACCES from directory-search enforcement the model does not
+         * share.  On the NFS loopback the server denies the
+         * component-by-component resolution; on a passthrough backend the
+         * engine's own prefix gate does (chimera_vfs_gate_needed_prefix) --
+         * either way chimera implements search permission where this trace
+         * profile's model does not, so any path-taking op can draw an EACCES
+         * the model maps to another outcome.  Retires when the model grows
+         * search-perm semantics. */
         if (actual == 13 && expected != 13 &&
             json_object_get(g_cur_rv, "pth")) {
             record_dev("ND3");
@@ -1251,15 +1253,34 @@ check_status(
             return 0;
         }
         /* The same gap in the other direction: the model's EACCES masks
-         * what lies behind an unsearchable directory, while chimera (whose
-         * resolution has no search-perm concept) reports the true state --
-         * typically ENOENT for a name that is not there. */
+         * what lies behind an unsearchable directory, while chimera reports
+         * the true state -- typically ENOENT for a name that is not there. */
         if (expected == 13 && actual == 2 &&
             json_object_get(g_cur_rv, "pth")) {
             record_dev("ND3");
             g_last_recon = "ND3";
             return 0;
         }
+        /* ND4 consequences of a lost descriptor / lost file (see the g_lost_*
+         * block comment): EBADF where the model still holds the descriptor,
+         * ENOENT where the model still has the file. */
+        if (actual == 9 && expected != 9 &&
+            fd_lost(g_cur_pid, (int) tf_field(g_cur_rv, "fd"))) {
+            record_dev("ND4");
+            g_last_recon = "ND4";
+            return 0;
+        }
+        if (actual == 2 && expected != 2 && g_cur_fs) {
+            json_t *comps = json_object_get(json_object_get(g_cur_rv, "pth"),
+                                            "comps");
+            if (comps && path_touches_lost(g_cur_fs, comps)) {
+                record_dev("ND4");
+                g_last_recon = "ND4";
+                return 0;
+            }
+        }
+    }
+    if (g_nfs_version) {
         /* ND6: EACCES on descriptor I/O the model completed.  NFS3 is
          * stateless, so the server re-checks DAC per READ/WRITE with the
          * credential the RPC carries; the proxy sends the OPENING
@@ -1298,24 +1319,6 @@ check_status(
             record_dev("ND9");
             g_last_recon = "ND9";
             return 0;
-        }
-        /* ND4 consequences of a lost descriptor / lost file (see the g_lost_*
-         * block comment): EBADF where the model still holds the descriptor,
-         * ENOENT where the model still has the file. */
-        if (actual == 9 && expected != 9 &&
-            fd_lost(g_cur_pid, (int) tf_field(g_cur_rv, "fd"))) {
-            record_dev("ND4");
-            g_last_recon = "ND4";
-            return 0;
-        }
-        if (actual == 2 && expected != 2 && g_cur_fs) {
-            json_t *comps = json_object_get(json_object_get(g_cur_rv, "pth"),
-                                            "comps");
-            if (comps && path_touches_lost(g_cur_fs, comps)) {
-                record_dev("ND4");
-                g_last_recon = "ND4";
-                return 0;
-            }
         }
     }
     mism("errno: expected %lld, got %d", (long long) expected, actual);
@@ -2392,7 +2395,7 @@ op_readdir(
     (void) pid;
     if (!d) {
         int64_t msid = tf_field(rv, "sid");
-        if (g_nfs_version && msid >= 0 && msid < R_MAXSID &&
+        if (g_strict_dac && msid >= 0 && msid < R_MAXSID &&
             g_lost_sid[msid]) {
             record_dev("ND4");
         } else {
@@ -2474,7 +2477,7 @@ op_dir_simple(
     (void) pid;
     if (!d) {
         int64_t msid = tf_field(rv, "sid");
-        if (g_nfs_version && msid >= 0 && msid < R_MAXSID &&
+        if (g_strict_dac && msid >= 0 && msid < R_MAXSID &&
             g_lost_sid[msid]) {
             record_dev("ND4");
         } else {
@@ -3472,6 +3475,7 @@ replay_trace(const char *path)
         g_cur_pid  = pid;
         g_cur_step = (int) i;
         last_fs    = g_cur_fs;
+
 
 
         if (dispatch(tag, pid, tf_val(req), tf_val(res)) != 0) {

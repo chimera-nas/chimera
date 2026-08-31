@@ -143,8 +143,18 @@ chimera_vfs_open_gate_needed(
     /* Remote-DAC proxy: the server enforces per-op but has no open on the
      * wire to enforce open(2) access against, so the engine gates the open
      * itself from the looked-up attributes -- what a kernel NFS client's
-     * ACCESS call at open does.  Root and AUTH_NONE stay exempt. */
-    if (!(module_capabilities & CHIMERA_VFS_CAP_REMOTE_DAC)) {
+     * ACCESS call at open does.  Root and AUTH_NONE stay exempt.
+     *
+     * A DELEGATES_DAC passthrough needs the same gate for a POSIX caller:
+     * the module opens by handle under a privileged process, so the kernel
+     * never evaluates open(2) access for the caller -- and the grant this
+     * gate stamps on the handle is what binds I/O rights at open time.
+     * Without it the first per-op READ/WRITE gate evaluates the file's
+     * CURRENT mode instead, denying a creator its own descriptor on a
+     * mode-restricted create (the created-file exemption lives in the open
+     * gate) and revoking descriptors on a later chmod. */
+    if (!(module_capabilities &
+          (CHIMERA_VFS_CAP_REMOTE_DAC | CHIMERA_VFS_CAP_DELEGATES_DAC))) {
         return 0;
     }
 

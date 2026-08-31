@@ -367,6 +367,35 @@ linux_mount_table_destroy(struct chimera_linux_mount_table *mount_table)
 
 } /* linux_mount_table_destroy */
 
+/* Identity of a chimera mount's backing (root) directory, allocated at MOUNT
+ * and handed back as mount_private, so per-op code can recognize the mount
+ * root without holding an fd. */
+struct chimera_linux_mount_root {
+    dev_t dev;
+    ino_t ino;
+};
+
+/* True when `name` is ".." and `parent_fd` is the mount's root directory:
+ * resolution must not escape the mount.  POSIX resolves the root's ".." to
+ * the root itself; without the clamp a passthrough walks into the backing
+ * store's parent (the scratch directory and its siblings). */
+static inline int
+linux_lookup_escapes_root(
+    const void *mount_private,
+    int         parent_fd,
+    const char *name)
+{
+    const struct chimera_linux_mount_root *root = mount_private;
+    struct stat                            pst;
+
+    if (!root || strcmp(name, "..") != 0) {
+        return 0;
+    }
+
+    return fstat(parent_fd, &pst) == 0 &&
+           pst.st_dev == root->dev && pst.st_ino == root->ino;
+} /* linux_lookup_escapes_root */
+
 static inline int
 linux_open_by_handle(
     struct chimera_linux_mount_table *mount_table,
