@@ -1198,10 +1198,25 @@ chimera_nfs4_open_parent_complete(
                 memcpy(&verf_part, args->openhow.how.ch_createboth.cva_verf + 4, 4);
                 attr->va_mtime.tv_sec  = verf_part;
                 attr->va_mtime.tv_nsec = 0;
+                /* When the client's cva_attrs left the mode unset, default to
+                 * owner-only (0600) -- the same undefined-until-SETATTR safe
+                 * default as EXCLUSIVE4 above. */
+                if (!(attr->va_set_mask & CHIMERA_VFS_ATTR_MODE)) {
+                    attr->va_set_mask |= CHIMERA_VFS_ATTR_MODE;
+                    attr->va_mode      = 0600;
+                }
                 break;
             case EXCLUSIVE4:
-                flags            |= CHIMERA_VFS_OPEN_EXCLUSIVE;
-                attr->va_set_mask = CHIMERA_VFS_ATTR_ATIME | CHIMERA_VFS_ATTR_MTIME;
+                flags |= CHIMERA_VFS_OPEN_EXCLUSIVE;
+                /* EXCLUSIVE4 carries no attributes -- the createverf occupies
+                 * the sattr slot -- so the file's mode is undefined until the
+                 * client's follow-up SETATTR (RFC 7530 16.16.5).  Create it
+                 * owner-only (0600), the safe default a file whose permissions
+                 * are not yet set should have; this matches Linux nfsd and
+                 * NFS-Ganesha (and the quint model). */
+                attr->va_set_mask = CHIMERA_VFS_ATTR_ATIME | CHIMERA_VFS_ATTR_MTIME |
+                    CHIMERA_VFS_ATTR_MODE;
+                attr->va_mode = 0600;
                 memcpy(&verf_part, args->openhow.how.createverf, 4);
                 attr->va_atime.tv_sec  = verf_part;
                 attr->va_atime.tv_nsec = 0;
