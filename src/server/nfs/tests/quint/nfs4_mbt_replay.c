@@ -271,6 +271,7 @@ enum v4_dev {
     DEV_COARSE_TYPE_ERR,          /* D4-15 */
     DEV_READLINK_DIR_INVAL,       /* D4-16 */
     DEV_REAL_HOLES,               /* D4-17 */
+    DEV_CREATE_TYPE_BEFORE_PARENT, /* D4-18 */
     DEV_COUNT,
 };
 
@@ -282,6 +283,7 @@ static const char *v4_dev_ids[DEV_COUNT] = {
     "D4-15-coarse-type-error",
     "D4-16-readlink-dir-inval",
     "D4-17-real-holes",
+    "D4-18-create-type-before-parent",
 };
 
 /* Set when the backend tracks holes for real (every backend but memfs, whose
@@ -2891,6 +2893,24 @@ classify_status_mismatch(
     * silently miss each new op the generator learns to aim at a symlink. */
     if (est == NFS4ERR_NOTDIR && ast == V4_ERR_SYMLINK) {
         o->dev_hits[DEV_LOOKUPP_SYMLINK]++;
+        o->status_dev = ast;
+        return;
+    }
+    /* D4-18: CREATE into a bad parent.  The model reports the parent first,
+     * and distinguishes a symlink parent (NFS4ERR_SYMLINK) from any other
+     * non-directory (NFS4ERR_NOTDIR), matching NFS-Ganesha and the Linux
+     * server.  chimera answers differently on two axes, both conformant
+     * (RFC 7530 16.4.4 / RFC 8881 18.4 order neither, and 16.4.4 does not list
+     * SYMLINK for CREATE): it reports the illegal object type first
+     * (NFS4ERR_BADTYPE) for a type CREATE cannot make, and it uses the generic
+     * NFS4ERR_NOTDIR for a symlink parent.  So reconcile the model's
+     * NOTDIR/SYMLINK against chimera's BADTYPE, and the model's SYMLINK
+     * against chimera's NOTDIR.  Nothing is created either way. */
+    if (strcmp(tag, "SCreate") == 0 &&
+        (((est == NFS4ERR_NOTDIR || est == V4_ERR_SYMLINK) &&
+          ast == NFS4ERR_BADTYPE) ||
+         (est == V4_ERR_SYMLINK && ast == NFS4ERR_NOTDIR))) {
+        o->dev_hits[DEV_CREATE_TYPE_BEFORE_PARENT]++;
         o->status_dev = ast;
         return;
     }
