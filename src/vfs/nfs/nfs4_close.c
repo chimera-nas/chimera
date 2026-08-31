@@ -10,8 +10,9 @@
  * and shared handles the retry path needs arrive as its arguments, so they are
  * deliberately not kept here. */
 struct chimera_nfs4_close_ctx {
-    struct chimera_nfs4_open_state *open_state;
-    struct stateid4                 stateid;    /* extracted by close_send */
+    struct chimera_nfs4_open_state   *open_state;
+    struct chimera_nfs_client_server *server;   /* for open-file close_done */
+    struct stateid4                   stateid;  /* extracted by close_send */
 };
 
 /*
@@ -44,7 +45,8 @@ chimera_nfs4_close_callback(
     int                          status,
     void                        *private_data)
 {
-    struct chimera_vfs_request *request = private_data;
+    struct chimera_vfs_request    *request = private_data;
+    struct chimera_nfs4_close_ctx *ctx     = request->plugin_data;
 
     if (unlikely(status)) {
         chimera_nfsclient_error("CLOSE failed with transport error %d; "
@@ -57,6 +59,9 @@ chimera_nfs4_close_callback(
         chimera_nfsclient_error("CLOSE rejected with NFS status %d",
                                 res->resarray[2].opclose.status);
     }
+
+    chimera_nfs4_open_file_close_done(ctx->server, request->fh,
+                                      request->fh_len);
 
     chimera_nfs4_close_done(request);
 } /* chimera_nfs4_close_callback */
@@ -115,6 +120,8 @@ chimera_nfs4_close_transmit(
     if (!server_thread || !server_thread->server->nfs4_session) {
         chimera_nfsclient_error("CLOSE: no session for open stateid; "
                                 "leaked until lease expiry");
+        chimera_nfs4_open_file_close_done(ctx->server, request->fh,
+                                          request->fh_len);
         chimera_nfs4_close_done(request);
         return;
     }
@@ -169,13 +176,14 @@ chimera_nfs4_close_send(
     * open_state arrives as a parameter precisely so it survives the reuse. */
     ctx             = request->plugin_data;
     ctx->open_state = open_state;
+    ctx->server     = shared->servers[open_state->server_index];
 
     /* This handle is done with the file.  The open on the server is not this
      * handle's to end, though: every handle on the file shares it, so the CLOSE
      * goes only when the last one lets go.  This consumes the handle's
      * reference, so it must run exactly once per close -- the slot layer's
      * park replay re-enters chimera_nfs4_close_transmit, never here. */
-    if (!chimera_nfs4_open_file_put(shared->servers[open_state->server_index],
+    if (!chimera_nfs4_open_file_put(ctx->server,
                                     request->fh, request->fh_len,
                                     &ctx->stateid)) {
         chimera_nfs4_close_done(request);
@@ -184,6 +192,8 @@ chimera_nfs4_close_send(
 
     /* Nothing was opened on the server, so there is no stateid to release. */
     if (!chimera_nfs4_stateid_is_open(&ctx->stateid)) {
+        chimera_nfs4_open_file_close_done(ctx->server, request->fh,
+                                          request->fh_len);
         chimera_nfs4_close_done(request);
         return;
     }

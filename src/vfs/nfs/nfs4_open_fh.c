@@ -6,7 +6,10 @@
 #include "nfs4_open_state.h"
 
 struct chimera_nfs4_open_fh_ctx {
+    struct chimera_nfs_thread        *thread;
+    struct chimera_nfs_shared        *shared;
     struct chimera_nfs_client_server *server;
+    void                             *dispatch_private;
 };
 
 static void
@@ -50,6 +53,19 @@ chimera_nfs4_open_fh_callback(
         return;
     }
 
+    /* Count this handle against the file's open on the server, which every
+     * handle on the file shares (see nfs4_open_state.h).  A refusal means
+     * this OPEN raced an in-flight CLOSE of the same file and coalesced into
+     * the state that CLOSE destroys -- the returned stateid is dead on
+     * arrival, so re-send the OPEN; once the CLOSE has landed the retry
+     * receives a fresh state. */
+    if (chimera_nfs4_open_file_get(server, request->fh, request->fh_len,
+                                   &open_res->opopen.resok4.stateid) != 0) {
+        chimera_nfs4_open_fh(ctx->thread, ctx->shared, request,
+                             ctx->dispatch_private);
+        return;
+    }
+
     state = chimera_nfs4_open_state_alloc();
 
     if (!state) {
@@ -60,11 +76,6 @@ chimera_nfs4_open_fh_callback(
 
     state->server_index = server->index;
     state->stateid      = open_res->opopen.resok4.stateid;
-
-    /* Count this handle against the file's open on the server, which every
-     * handle on the file shares (see nfs4_open_state.h). */
-    chimera_nfs4_open_file_get(server, request->fh, request->fh_len,
-                               &state->stateid);
 
     request->open_fh.r_vfs_private = (uint64_t) state;
     request->status                = CHIMERA_VFS_OK;
@@ -124,7 +135,10 @@ chimera_nfs4_open_fh(
     {
         struct chimera_nfs4_open_fh_ctx *ctx = request->plugin_data;
 
-        ctx->server = server;
+        ctx->thread           = thread;
+        ctx->shared           = shared;
+        ctx->server           = server;
+        ctx->dispatch_private = private_data;
     }
 
     chimera_nfs4_map_fh(request->fh, request->fh_len, &fh, &fhlen);

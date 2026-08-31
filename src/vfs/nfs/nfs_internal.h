@@ -1286,7 +1286,7 @@ void chimera_nfs4_close_send(
  * to open the file.  `stateid` is the one OPEN returned, or NULL for a caller
  * that has none.  See nfs4_open_state.h for why this is counted apart from the
  * per-handle open state. */
-void chimera_nfs4_open_file_get(
+int chimera_nfs4_open_file_get(
     struct chimera_nfs_client_server *server,
     const uint8_t                    *fh,
     int                               fh_len,
@@ -1299,6 +1299,11 @@ int chimera_nfs4_open_file_put(
     const uint8_t                    *fh,
     int                               fh_len,
     struct stateid4                  *r_stateid);
+
+void chimera_nfs4_open_file_close_done(
+    struct chimera_nfs_client_server *server,
+    const uint8_t                    *fh,
+    int                               fh_len);
 
 /* Free any entries left on a server at module teardown. */
 void chimera_nfs4_open_file_drain(
