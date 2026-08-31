@@ -590,11 +590,22 @@ chimera_smb_compound_reply(struct chimera_smb_compound *compound)
          * STATUS_INVALID_PARAMETER, but the reply is still a full IOCTL Response
          * whose 12-byte output buffer carries a SRV_COPYCHUNK_RESPONSE
          * advertising the server limits, so the client resubmits within them
-         * (MS-SMB2 2.2.32.1 / 3.3.5.15.6).  All other errors get the generic
-         * SMB2 ERROR Response. */
+         * (MS-SMB2 2.2.32.1 / 3.3.5.15.6).
+         *
+         * STATUS_BUFFER_OVERFLOW on an IOCTL is the same shape: it is a WARNING
+         * (0x8...), not an error, and MS-SMB2 3.3.4.4 has the server return the
+         * output that DID fit alongside it -- which is the whole point of the
+         * status, since the client uses the partial result and asks for the
+         * rest.  Without this exception the generic ERROR Response replaces the
+         * body, and a handler that carefully truncated its output to
+         * MaxOutputResponse (chimera_smb_qar_finalize does exactly that for
+         * FSCTL_QUERY_ALLOCATED_RANGES) has that work silently discarded.
+         *
+         * All other errors get the generic SMB2 ERROR Response. */
         if (chimera_smb_is_error_status(request->status) &&
             !(request->smb2_hdr.command == SMB2_IOCTL &&
-              request->ioctl.cc_limit_response)) {
+              (request->ioctl.cc_limit_response ||
+               request->status == SMB2_STATUS_BUFFER_OVERFLOW))) {
             if (request->status == SMB2_STATUS_BUFFER_TOO_SMALL &&
                 request->smb2_hdr.command == SMB2_QUERY_INFO) {
                 /* MS-SMB2 2.2.2 / 3.3.4.4: a QUERY_INFO that fails
