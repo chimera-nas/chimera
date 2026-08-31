@@ -153,7 +153,11 @@ chimera_linux_stat_to_attr(
 
     attr->va_set_mask |= CHIMERA_VFS_ATTR_MASK_STAT;
 
-    attr->va_dev   = st->st_dev;
+    /* Compose the device id as major<<32|minor (the same convention as
+     * va_rdev and the statx mapper below) rather than exposing the glibc
+     * dev_t bit layout: the two mappers back the same handles, and object
+     * identity checks compare va_dev across operations. */
+    attr->va_dev   = ((uint64_t) major(st->st_dev) << 32) | minor(st->st_dev);
     attr->va_ino   = st->st_ino;
     attr->va_mode  = st->st_mode;
     attr->va_nlink = st->st_nlink;
@@ -672,3 +676,68 @@ chimera_linux_mtime_to_verifier(const struct stat *st)
     return ((uint64_t) st->st_mtim.tv_sec << 32) |
            ((uint64_t) st->st_mtim.tv_nsec & 0xFFFFFFFF);
 } /* chimera_linux_mtime_to_verifier */
+
+/* True when a setattr is exactly the utimensat(2) pattern Linux handles
+ * differently from POSIX: one timestamp set to "now", the other omitted, and
+ * nothing else in the request.  POSIX 2008 grants that change to any process
+ * with write access (it is equivalent to a NULL times after an I/O), but
+ * Linux treats it as an explicit set and insists on ownership, failing a
+ * mere writer with EPERM (see utimensat(2) BUGS). */
+static inline int
+chimera_linux_times_now_omit(const struct chimera_vfs_attrs *attr)
+{
+    uint64_t tmask = attr->va_set_mask &
+        (CHIMERA_VFS_ATTR_ATIME | CHIMERA_VFS_ATTR_MTIME);
+
+    if (attr->va_set_mask != tmask || tmask == 0) {
+        return 0;
+    }
+
+    if ((attr->va_set_mask & CHIMERA_VFS_ATTR_ATIME) &&
+        (attr->va_set_mask & CHIMERA_VFS_ATTR_MTIME)) {
+        return (attr->va_atime.tv_nsec == CHIMERA_VFS_TIME_NOW &&
+                attr->va_mtime.tv_nsec == CHIMERA_VFS_TIME_OMIT) ||
+               (attr->va_atime.tv_nsec == CHIMERA_VFS_TIME_OMIT &&
+                attr->va_mtime.tv_nsec == CHIMERA_VFS_TIME_NOW);
+    }
+
+    if (attr->va_set_mask & CHIMERA_VFS_ATTR_ATIME) {
+        return attr->va_atime.tv_nsec == CHIMERA_VFS_TIME_NOW;
+    }
+
+    return attr->va_mtime.tv_nsec == CHIMERA_VFS_TIME_NOW;
+} /* chimera_linux_times_now_omit */
+
+/* POSIX-mode write-access check for the credential against the object behind
+* fd.  faccessat(2) checks the real (or effective) uid, never the fsuid the
+* modules impersonate with, so the class check is done here from the stat. */
+static inline int
+chimera_linux_cred_write_ok(
+    int                            fd,
+    const struct chimera_vfs_cred *cred)
+{
+    struct stat st;
+    unsigned    shift;
+    uint32_t    i;
+    int         in_group;
+
+    if (fstat(fd, &st) != 0) {
+        return 0;
+    }
+
+    if (cred->uid == 0) {
+        return 1;
+    }
+
+    if (st.st_uid == cred->uid) {
+        shift = 6;
+    } else {
+        in_group = (st.st_gid == cred->gid);
+        for (i = 0; !in_group && i < cred->ngids; i++) {
+            in_group = (cred->gids[i] == st.st_gid);
+        }
+        shift = in_group ? 3 : 0;
+    }
+
+    return ((st.st_mode >> shift) & S_IWOTH) ? 1 : 0;
+} /* chimera_linux_cred_write_ok */
