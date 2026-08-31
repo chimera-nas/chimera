@@ -97,6 +97,11 @@ struct chimera_client_request {
     uint8_t                            fh[CHIMERA_VFS_FH_SIZE];
 
     union {
+        /* Synchronous handle close routed to a worker thread (see
+         * chimera_posix_close_on_worker). */
+        struct {
+            void *private_data;
+        } close_sync;
         struct {
             chimera_mount_callback_t callback;
             void                    *private_data;

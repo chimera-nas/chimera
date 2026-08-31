@@ -390,6 +390,51 @@ chimera_posix_choose_worker(struct chimera_posix_client *posix)
 } // chimera_posix_choose_worker
 
 static FORCE_INLINE int
+chimera_posix_wait(
+    struct chimera_posix_completion *comp);
+
+static FORCE_INLINE void
+chimera_posix_close_exec(
+    struct chimera_client_thread  *thread,
+    struct chimera_client_request *request)
+{
+    struct chimera_posix_completion *comp = request->close_sync.private_data;
+
+    chimera_close(thread, request->sync_open_handle);
+    chimera_posix_complete(comp, CHIMERA_VFS_OK);
+} // chimera_posix_close_exec
+
+/*
+ * Close (release) an open handle ON its worker's thread.  chimera_close
+ * releases the handle into the open cache, and a release that must close
+ * immediately -- a detached duplicate, delete-on-close, a cache-full
+ * eviction -- dispatches the module close op inline on the calling thread.
+ * For the NFS proxy that transmits the CLOSE RPC on the request thread's
+ * connection, which is only safe on the OS thread that owns it; a caller
+ * thread borrowing worker->client_thread trips libevpl's cross-thread iovec
+ * assertions (and in release builds races the refcounts).  So the close is
+ * enqueued to the worker and waited, like every other operation.
+ */
+static FORCE_INLINE void
+chimera_posix_close_on_worker(
+    struct chimera_posix_worker    *worker,
+    struct chimera_vfs_open_handle *handle)
+{
+    struct chimera_client_request   req;
+    struct chimera_posix_completion comp;
+
+    chimera_posix_completion_init(&comp, &req);
+
+    req.sync_open_handle        = handle;
+    req.close_sync.private_data = &comp;
+
+    chimera_posix_worker_enqueue(worker, &req, chimera_posix_close_exec);
+
+    (void) chimera_posix_wait(&comp);
+    chimera_posix_completion_destroy(&comp);
+} // chimera_posix_close_on_worker
+
+static FORCE_INLINE int
 chimera_posix_wait(struct chimera_posix_completion *comp)
 {
     pthread_mutex_lock(&comp->mutex);

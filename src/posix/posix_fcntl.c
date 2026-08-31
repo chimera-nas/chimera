@@ -45,7 +45,7 @@ chimera_posix_fcntl_dupfd(
     newfd = chimera_posix_fd_alloc_at_least(posix, handle, minfd);
 
     if (newfd < 0) {
-        chimera_close(worker->client_thread, handle);
+        chimera_posix_close_on_worker(worker, handle);
         chimera_posix_fd_release(entry, 0);
         errno = EMFILE;
         return -1;

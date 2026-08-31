@@ -33,7 +33,7 @@ chimera_posix_dup(int oldfd)
 
     if (newfd < 0) {
         /* Failed to allocate new fd - release the extra reference */
-        chimera_close(worker->client_thread, handle);
+        chimera_posix_close_on_worker(worker, handle);
         chimera_posix_fd_release(entry, 0);
         errno = EMFILE;
         return -1;

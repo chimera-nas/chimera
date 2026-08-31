@@ -91,7 +91,7 @@ chimera_posix_open(
     if (!err && req.sync_open_handle) {
         fd = chimera_posix_fd_alloc(posix, req.sync_open_handle);
         if (fd < 0) {
-            chimera_close(worker->client_thread, req.sync_open_handle);
+            chimera_posix_close_on_worker(worker, req.sync_open_handle);
             err = EMFILE;
         } else {
             posix->fds[fd].ofd->oflags = (unsigned int) flags;

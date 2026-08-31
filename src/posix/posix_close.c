@@ -24,7 +24,7 @@ chimera_posix_close(int fd)
 
     chimera_posix_project_ofd_unlock(posix, worker, handle, entry->ofd);
 
-    chimera_close(worker->client_thread, handle);
+    chimera_posix_close_on_worker(worker, handle);
 
     chimera_posix_fd_release(entry, CHIMERA_POSIX_FD_CLOSING);
 
