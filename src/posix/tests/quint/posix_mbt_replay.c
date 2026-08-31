@@ -891,6 +891,7 @@ host_to_linux(int e)
         case ENOSYS: return 38;
         case ENOTEMPTY: return 39;
         case ELOOP: return 40;
+        case ESTALE: return 116;
         case EOPNOTSUPP: return 95;
 #if defined(ENOTSUP) && ENOTSUP != EOPNOTSUPP
         case ENOTSUP: return 95;   /* distinct from EOPNOTSUPP on Darwin */
@@ -1292,7 +1293,7 @@ check_status(
          * file handle (a directory open creates no state on the server), the
          * server has reclaimed the object, and the wire answers STALE.  The
          * kernel NFS client surfaces the same ESTALE. */
-        if (g_nfs_version == 4 && actual == 70 && expected == 2 &&
+        if (g_nfs_version == 4 && actual == 116 && expected == 2 &&
             tf_field(g_cur_rv, "dfd") >= 0) {
             record_dev("ND9");
             g_last_recon = "ND9";

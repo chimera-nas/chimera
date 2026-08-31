@@ -418,7 +418,7 @@ chimera_nfs4_mount_get_root_fh(
     argarray[op++].argop = OP_GETFH;
 
     /* GETATTR - request basic attributes */
-    argarray[op].argop                      = OP_GETATTR;
+    argarray[op].argop = OP_GETATTR;
     chimera_nfs4_attr_request_stat(attr_request);
     argarray[op].opgetattr.attr_request     = attr_request;
     argarray[op].opgetattr.num_attr_request = 2;
