@@ -406,6 +406,20 @@ chimera_linux_mount(
                             r_attr,
                             mount_fd);
 
+    /* Remember the backing directory's identity so lookups can clamp ".." at
+     * the mount root (see linux_lookup_escapes_root). */
+    {
+        struct chimera_linux_mount_root *root;
+        struct stat                      st;
+
+        if (fstat(mount_fd, &st) == 0 &&
+            (root = calloc(1, sizeof(*root))) != NULL) {
+            root->dev                      = st.st_dev;
+            root->ino                      = st.st_ino;
+            request->mount.r_mount_private = root;
+        }
+    }
+
     request->status = CHIMERA_VFS_OK;
 
     close(mount_fd);
@@ -418,7 +432,7 @@ chimera_linux_umount(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    /* No action required */
+    free(request->umount.mount_private);
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
 } /* chimera_linux_umount */
@@ -434,6 +448,12 @@ chimera_linux_lookup_at(
     parent_fd = (int) request->lookup_at.handle->vfs_private;
 
     TERM_STR(fullname, request->lookup_at.component, request->lookup_at.component_len, scratch);
+
+    /* ".." at the mount root resolves to the root itself. */
+    if (linux_lookup_escapes_root(request->mount_private, parent_fd,
+                                  fullname)) {
+        fullname = ".";
+    }
 
     rc = chimera_linux_map_child_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
                                        request,
@@ -771,7 +791,13 @@ chimera_linux_open_at(
             }
             reopened = 1;
         } else if (errno == EEXIST) {
-            fd = openat(parent_fd, fullname, flags, mode);
+            /* The object exists: re-open WITHOUT O_CREAT.  Semantically
+             * equivalent for an existing file, and immune to the kernel's
+             * fs.protected_regular, which fails an O_CREAT open of another
+             * user's existing file in a sticky world-writable directory
+             * (EPERM/EACCES) where POSIX open(2) plainly opens it. */
+            fd = openat(parent_fd, fullname, flags & ~(O_CREAT | O_EXCL),
+                        mode);
         }
     } else {
         fd = openat(parent_fd, fullname, flags, mode);
@@ -1498,6 +1524,16 @@ chimera_linux_readlink(
                     request->readlink.target_maxlength);
 
     if (rc < 0) {
+        /* Empty-path readlinkat on a handle that is not a symlink fails
+         * ENOENT (the empty-path special case exists only for links);
+         * POSIX readlink(2) reports EINVAL for a non-symlink. */
+        if (errno == ENOENT) {
+            struct stat st;
+
+            if (fstat(fd, &st) == 0 && !S_ISLNK(st.st_mode)) {
+                errno = EINVAL;
+            }
+        }
         request->status = chimera_linux_errno_to_status(errno);
         request->complete(request);
         return;

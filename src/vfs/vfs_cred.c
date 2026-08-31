@@ -9,6 +9,7 @@
  * time; see the SDK boundary rules in sdk/chimera_vfs_sdk.h.
  */
 
+#include <stdio.h>
 #include <string.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -136,6 +137,24 @@ chimera_setup_credential(
         case CHIMERA_VFS_AUTH_UNIX:
             if ((cred->uid == sc->uid) &&
                 (cred->gid == sc->gid)) {
+#ifdef __linux__
+                /* This op runs as the server identity, which is also this
+                 * thread's base state -- but verify it: an error path that
+                 * skipped chimera_restore_privilege would otherwise leak a
+                 * previous op's impersonation into this one.  setfsuid
+                 * returns the previous fsuid, so this both detects and
+                 * repairs the leak. */
+                uint32_t prev = (uint32_t) setfsuid(sc->uid);
+
+                if (prev != sc->uid) {
+                    fprintf(stderr,
+                            "chimera_vfs: impersonation leak: thread fsuid %u "
+                            "at a server-credential op; restoring base "
+                            "identity\n", prev);
+                    setfsgid(sc->gid);
+                    syscall(SYS_setgroups, (size_t) 0, NULL);
+                }
+#endif /* ifdef __linux__ */
                 return 0;
             }
 #ifdef __linux__

@@ -504,13 +504,19 @@ chimera_io_uring_reap(
                             io_uring_prep_openat(sqe, parent_fd, name,
                                                  O_PATH | O_NOFOLLOW, 0);
                         } else {
-                            /* Re-open without O_EXCL (the base flags still carry
-                             * O_TRUNC for OVERWRITE_IF/SUPERSEDE).  r_created
+                            /* Re-open without O_CREAT|O_EXCL (the base flags
+                             * still carry O_TRUNC for OVERWRITE_IF/SUPERSEDE).
+                             * Dropping O_CREAT for the existing object is
+                             * semantically equivalent and immune to the
+                             * kernel's fs.protected_regular, which fails an
+                             * O_CREAT open of another user's existing file in
+                             * a sticky world-writable directory.  r_created
                              * stays 0.  No mode supplied -> 0644 to match the
                              * memfs/cairn/linux backends on the pre-SETATTR
                              * object.  See linux.c open_at. */
-                            rflags = chimera_io_uring_open_at_flags(request);
-                            rmode  = (request->open_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE)
+                            rflags = chimera_io_uring_open_at_flags(request) &
+                                ~(O_CREAT | O_EXCL);
+                            rmode = (request->open_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE)
                                      ? request->open_at.set_attr->va_mode : 0644;
                             rpers = chimera_io_uring_get_personality(thread, request->cred);
 
@@ -1233,6 +1239,20 @@ chimera_io_uring_mount(
                             &request->mount.r_attr,
                             mount_fd);
 
+    /* Remember the backing directory's identity so lookups can clamp ".." at
+     * the mount root (see linux_lookup_escapes_root). */
+    {
+        struct chimera_linux_mount_root *root;
+        struct stat                      st;
+
+        if (fstat(mount_fd, &st) == 0 &&
+            (root = calloc(1, sizeof(*root))) != NULL) {
+            root->dev                      = st.st_dev;
+            root->ino                      = st.st_ino;
+            request->mount.r_mount_private = root;
+        }
+    }
+
     close(mount_fd);
 
     request->status = CHIMERA_VFS_OK;
@@ -1245,7 +1265,7 @@ chimera_io_uring_umount(
     struct chimera_vfs_request *request,
     void                       *private_data)
 {
-    /* No action required */
+    free(request->umount.mount_private);
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
 } /* chimera_io_uring_umount */
@@ -1268,6 +1288,13 @@ chimera_io_uring_lookup_at(
     scratch += sizeof(*stx);
 
     TERM_STR(fullname, request->lookup_at.component, request->lookup_at.component_len, scratch);
+
+    /* ".." at the mount root resolves to the root itself. */
+    if (linux_lookup_escapes_root(request->mount_private, parent_fd,
+                                  fullname)) {
+        fullname[0] = '.';
+        fullname[1] = '\0';
+    }
 
     sqe = chimera_io_uring_get_sqe(thread, request, 0, 0);
 
@@ -2224,6 +2251,16 @@ chimera_io_uring_readlink(
                     request->readlink.target_maxlength);
 
     if (rc < 0) {
+        /* Empty-path readlinkat on a handle that is not a symlink fails
+         * ENOENT (the empty-path special case exists only for links);
+         * POSIX readlink(2) reports EINVAL for a non-symlink. */
+        if (errno == ENOENT) {
+            struct stat st;
+
+            if (fstat(fd, &st) == 0 && !S_ISLNK(st.st_mode)) {
+                errno = EINVAL;
+            }
+        }
         request->status = chimera_linux_errno_to_status(errno);
         request->complete(request);
         return;
