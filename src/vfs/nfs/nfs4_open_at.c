@@ -8,10 +8,20 @@
 
 struct chimera_nfs4_open_at_ctx {
     struct chimera_nfs_thread        *thread;
+    struct chimera_nfs_shared        *shared;
     struct chimera_nfs_client_server *server;
+    void                             *dispatch_private;
+    int                               nocreate;
     uint32_t                          attr_mask[2];
     uint8_t                           attr_vals[128];
 };
+
+static void
+chimera_nfs4_open_at_send(
+    struct chimera_nfs_thread  *thread,
+    struct chimera_nfs_shared  *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data);
 
 static void
 chimera_nfs4_open_at_callback(
@@ -40,6 +50,23 @@ chimera_nfs4_open_at_callback(
     }
 
     if (res->status != NFS4_OK) {
+        /* A GUARDED4 create over an existing name is NFS4ERR_EXIST (RFC 7530
+         * 16.16.4).  For O_CREAT without O_EXCL that is not the caller's
+         * answer: POSIX opens what is there.  Re-send the same compound as
+         * OPEN4_NOCREATE, which atomically opens the existing object and
+         * hands the gate its real attributes.  Not for O_EXCL, where EEXIST
+         * is the caller's answer.  Mirrors the NFS3 client's EXIST->LOOKUP
+         * recovery, with OPEN itself as the recovery op. */
+        if (res->status == NFS4ERR_EXIST &&
+            (request->open_at.flags & CHIMERA_VFS_OPEN_CREATE) &&
+            !(request->open_at.flags & CHIMERA_VFS_OPEN_EXCLUSIVE) &&
+            !ctx->nocreate) {
+            ctx->nocreate = 1;
+            chimera_nfs4_open_at_send(ctx->thread, ctx->shared, request,
+                                      ctx->dispatch_private);
+            return;
+        }
+
         /* OPEN of a symlink as the final component: the server rejects it with
          * NFS4ERR_SYMLINK (there is no atomic O_NOFOLLOW on the wire, so the
          * server cannot distinguish a data open of the link from a follow).
@@ -154,12 +181,22 @@ chimera_nfs4_open_at_callback(
         request->open_at.r_vfs_private = 0;
     }
 
+    /* A GUARDED4 success proves the object was created by this call (all
+     * creates go out GUARDED4; an EXIST answer was retried as NOCREATE
+     * above); the engine's open gate then grants the requested access
+     * unconditionally, per POSIX (a creating open is not subject to the
+     * new file's own mode).  Mirrors the NFS3 client open path. */
+    if (!path_open && !ctx->nocreate &&
+        (request->open_at.flags & CHIMERA_VFS_OPEN_CREATE)) {
+        request->open_at.r_created = 1;
+    }
+
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
 } /* chimera_nfs4_open_at_callback */
 
-void
-chimera_nfs4_open_at(
+static void
+chimera_nfs4_open_at_send(
     struct chimera_nfs_thread  *thread,
     struct chimera_nfs_shared  *shared,
     struct chimera_vfs_request *request,
@@ -203,8 +240,10 @@ chimera_nfs4_open_at(
         return;
     }
 
-    ctx->thread = thread;
-    ctx->server = server;
+    ctx->thread           = thread;
+    ctx->shared           = shared;
+    ctx->server           = server;
+    ctx->dispatch_private = private_data;
 
     chimera_nfs4_map_fh(request->fh, request->fh_len, &fh, &fhlen);
 
@@ -252,15 +291,20 @@ chimera_nfs4_open_at(
     open_args->owner.owner.data = (uint8_t *) server->nfs4_owner_id;
     open_args->owner.owner.len  = server->nfs4_owner_id_len;
 
-    /* Open mode - create or nocreate */
-    if (request->open_at.flags & CHIMERA_VFS_OPEN_CREATE) {
+    /* Open mode - create or nocreate.  ctx->nocreate marks the retry of an
+     * O_CREAT open whose GUARDED4 create answered EXIST: open the existing
+     * object instead. */
+    if ((request->open_at.flags & CHIMERA_VFS_OPEN_CREATE) && !ctx->nocreate) {
         open_args->openhow.opentype = OPEN4_CREATE;
 
-        if (request->open_at.flags & CHIMERA_VFS_OPEN_EXCLUSIVE) {
-            open_args->openhow.how.mode = GUARDED4;
-        } else {
-            open_args->openhow.how.mode = UNCHECKED4;
-        }
+        /* Always GUARDED4, even without O_EXCL: a GUARDED4 success PROVES
+         * this call created the object, which the engine's open gate needs
+         * to know.  An EXIST answer is retried as OPEN4_NOCREATE by the
+         * callback (the O_CREAT-on-existing half), with the gate then
+         * evaluating the real attributes.  UNCHECKED4 could not tell the
+         * halves apart -- and would also let the server apply our creation
+         * attrs to a file we did not create. */
+        open_args->openhow.how.mode = GUARDED4;
 
         /* Set create attributes (mode/uid/gid) from the requested set_attr.
          * For EXCLUSIVE4_1/EXCLUSIVE the verifier path is not used here; we
@@ -295,10 +339,14 @@ chimera_nfs4_open_at(
     /* Op 3: GETFH - get file handle for the opened/looked-up object */
     argarray[3].argop = OP_GETFH;
 
-    /* Op 4: GETATTR - get attributes for opened file */
+    /* Op 4: GETATTR - get attributes for opened file.  OWNER/OWNER_GROUP are
+     * required: the engine's open gate authorizes a non-created open from
+     * these attributes, and without ownership it would evaluate the caller
+     * against the file's "other" mode bits. */
     argarray[4].argop = OP_GETATTR;
     attr_request[0]   = (1 << FATTR4_TYPE) | (1 << FATTR4_SIZE) | (1 << FATTR4_FILEID);
     attr_request[1]   = (1 << (FATTR4_MODE - 32)) | (1 << (FATTR4_NUMLINKS - 32)) |
+        (1 << (FATTR4_OWNER - 32)) | (1 << (FATTR4_OWNER_GROUP - 32)) |
         (1 << (FATTR4_TIME_ACCESS - 32)) | (1 << (FATTR4_TIME_MODIFY - 32));
     argarray[4].opgetattr.attr_request     = attr_request;
     argarray[4].opgetattr.num_attr_request = 2;
@@ -318,4 +366,18 @@ chimera_nfs4_open_at(
         chimera_nfs4_open_at_callback,
         request,
         chimera_nfs4_dispatch, private_data);
+} /* chimera_nfs4_open_at_send */
+
+void
+chimera_nfs4_open_at(
+    struct chimera_nfs_thread  *thread,
+    struct chimera_nfs_shared  *shared,
+    struct chimera_vfs_request *request,
+    void                       *private_data)
+{
+    struct chimera_nfs4_open_at_ctx *ctx = request->plugin_data;
+
+    ctx->nocreate = 0;
+
+    chimera_nfs4_open_at_send(thread, shared, request, private_data);
 } /* chimera_nfs4_open_at */
