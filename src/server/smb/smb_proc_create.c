@@ -1807,6 +1807,25 @@ chimera_smb_create_after_share(
         chimera_smb_create_grant_durable(request, open_file);
     }
 
+    /* Record which CREATE contexts the client supplied BEFORE the open becomes
+     * findable, because the replay lookup keys on it.
+     *
+     * chimera_smb_create_guid_replay's live-open arm matches a replayed DH2Q
+     * create against an existing open by (ctx_present_mask & DH2Q) plus the
+     * create_guid.  It used to be stamped only when the reply was marshaled
+     * (chimera_smb_create_reply), which leaves a window: from the HASH_ADD
+     * below until the reply, the open is hashed, live and replay-eligible, has
+     * already been dropped from tree->pending_creates, and is NOT CREATE_PENDING
+     * (it did not park) -- so a replay arriving in that window missed all three
+     * lookups and opened a second handle instead of returning the first.  The
+     * window is not narrow: the reply is emitted only once every request in the
+     * compound has completed, and an EA-carrying create issues async setxattrs
+     * inside it.  A compound whose reply is abandoned (connection recycled or
+     * closing) never stamped it at all, so the open stayed unmatchable for its
+     * whole life.  Stamping here makes the lookup key and the open's
+     * findability become true at the same instant. */
+    open_file->ctx_present_mask = request->create.ctx_present_mask;
+
     open_file_bucket = open_file->file_id.vid & CHIMERA_SMB_OPEN_FILE_BUCKET_MASK;
 
     pthread_mutex_lock(&tree->open_files_lock[open_file_bucket]);
@@ -5708,9 +5727,11 @@ chimera_smb_create_reply(
         evpl_iovec_cursor_append_uint32(reply_cursor, 0);
     }
 
-    /* Phase-0 housekeeping: propagate which CREATE contexts the client supplied
-     * onto the open file so later phases (lease/durable break, reconnect) can
-     * tell which contracts the client expects. */
+    /* ctx_present_mask is stamped onto the open in
+     * chimera_smb_create_after_share, before it is hashed -- the replay lookup
+     * keys on it, so it cannot wait until the reply is marshaled.  A reclaimed
+     * (durable rehome) open never runs through that path, so refresh it here
+     * for the reconnect case; it is the same value either way. */
     if (request->create.r_open_file) {
         request->create.r_open_file->ctx_present_mask = request->create.ctx_present_mask;
     }
