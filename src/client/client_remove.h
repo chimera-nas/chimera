@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <sys/stat.h>
+
 #include "client_internal.h"
 #include "client_dispatch.h"
 
@@ -89,6 +91,31 @@ chimera_remove_at_lookup_complete(
         return;
     }
 
+    /* Enforce the caller's type assertion (rmdir vs unlink) before the
+     * backend remove, exactly as the path-based chimera_vfs_remove does at
+     * its own child resolve: NFSv4 REMOVE is type-agnostic on the wire and
+     * NFSv3 would silly-rename an open directory, so by the time the backend
+     * answers, the wrong-type removal has already happened.  The resolve
+     * above fetched the mode, so this adds no round trip. */
+    if (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
+        int is_dir = S_ISDIR(attr->va_mode);
+
+        if (((request->remove.flags & CHIMERA_VFS_REMOVE_ISDIR) && !is_dir) ||
+            ((request->remove.flags & CHIMERA_VFS_REMOVE_ISNOTDIR) && is_dir)) {
+            chimera_remove_callback_t callback       = request->remove.callback;
+            void                     *callback_arg   = request->remove.private_data;
+            int                       heap_allocated = request->heap_allocated;
+
+            if (heap_allocated) {
+                chimera_client_request_free(thread, request);
+            }
+            callback(thread,
+                     is_dir ? CHIMERA_VFS_EISDIR : CHIMERA_VFS_ENOTDIR,
+                     callback_arg);
+            return;
+        }
+    }
+
     /* Save the child FH for the remove call */
     request->remove.child_fh_len = attr->va_fh_len;
     memcpy(request->remove.child_fh, attr->va_fh, attr->va_fh_len);
@@ -128,7 +155,7 @@ chimera_dispatch_remove_at(
         parent_handle,
         request->remove.path,
         request->remove.path_len,
-        CHIMERA_VFS_ATTR_FH,
+        CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_MODE,
         0,
         chimera_remove_at_lookup_complete,
         request);
