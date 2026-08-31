@@ -80,6 +80,31 @@ static const struct info_case fs_classes[] = {
 };
 /* *INDENT-ON* */
 
+/* Query one class into `out` and require it to have answered.
+ *
+ * The cross-class comparisons below are only meaningful if every class
+ * actually replied: smb2_query_info fills the caller's buffer ONLY on success,
+ * so comparing after an unchecked query would be comparing uninitialised stack
+ * bytes -- which can agree with each other by luck and report a pass.  Zero the
+ * buffer and make the failure loud instead. */
+static int
+query_ok(
+    struct smb2_conn *c,
+    uint8_t           info_type,
+    uint8_t           info_class,
+    const uint8_t     file_id[16],
+    uint8_t          *out,
+    uint32_t          cap,
+    const char       *what)
+{
+    uint32_t st, len = 0;
+
+    memset(out, 0, cap);
+    st = smb2_query_info(c, info_type, info_class, file_id, 0, out, cap, &len);
+    CHECK(st == ST_SUCCESS, "QUERY %s -> 0x%08x", what, st);
+    return st == ST_SUCCESS;
+} /* query_ok */
+
 /* ---- the query sweep ---------------------------------------------------- */
 
 static void
@@ -194,11 +219,15 @@ probe_ea(struct smb2_conn *c)
     CHECK(st == ST_SUCCESS, "SET FullEaInformation with 2 entries -> 0x%08x",
           st);
 
-    /* FileEaInformation reports the size the EA list would occupy. */
-    st = smb2_query_info(c, SMB2_INFO_FILE_T, SMB2_FILE_EA_INFO_T, co.file_id,
-                         0, out, sizeof(out), &len);
-    CHECK(st == ST_SUCCESS && g32(out, 0) > 0,
-          "EaInformation reports a non-zero EaSize (%u)", g32(out, 0));
+    /* FileEaInformation reports the size the EA list would occupy.  Queried
+     * through query_ok because the CHECK below reads the buffer in its message
+     * argument, which is evaluated whether or not the condition short-circuits
+     * -- an unchecked query would print uninitialised stack bytes. */
+    if (query_ok(c, SMB2_INFO_FILE_T, SMB2_FILE_EA_INFO_T, co.file_id,
+                 out, sizeof(out), "EaInformation")) {
+        CHECK(g32(out, 0) > 0,
+              "EaInformation reports a non-zero EaSize (%u)", g32(out, 0));
+    }
 
     /* And the full list comes back with both entries and their values. */
     st = smb2_query_info(c, SMB2_INFO_FILE_T, SMB2_FILE_FULL_EA_INFO_T,
@@ -268,7 +297,7 @@ probe_agreement(struct smb2_conn *c)
     struct smb2_create_out co;
     uint8_t                basic[64], stdinfo[64], all[512], netopen[64], tag[64];
     uint8_t                payload[300];
-    uint32_t               st, len, count = 0;
+    uint32_t               st, count = 0;
     uint64_t               eof_std, eof_all, eof_net, alloc_std, alloc_net;
     uint32_t               attr_basic, attr_all, attr_net, attr_tag;
     int                    i;
@@ -286,16 +315,19 @@ probe_agreement(struct smb2_conn *c)
     CHECK(st == ST_SUCCESS && count == sizeof(payload),
           "setup: WRITE %zu bytes -> 0x%08x", sizeof(payload), st);
 
-    smb2_query_info(c, SMB2_INFO_FILE_T, SMB2_FILE_BASIC_INFO_T, co.file_id, 0,
-                    basic, sizeof(basic), &len);
-    smb2_query_info(c, SMB2_INFO_FILE_T, SMB2_FILE_STANDARD_INFO_T, co.file_id,
-                    0, stdinfo, sizeof(stdinfo), &len);
-    smb2_query_info(c, SMB2_INFO_FILE_T, SMB2_FILE_ALL_INFO_T, co.file_id, 0,
-                    all, sizeof(all), &len);
-    smb2_query_info(c, SMB2_INFO_FILE_T, SMB2_FILE_NETWORK_OPEN_T, co.file_id,
-                    0, netopen, sizeof(netopen), &len);
-    smb2_query_info(c, SMB2_INFO_FILE_T, SMB2_FILE_ATTRIBUTE_TAG_T, co.file_id,
-                    0, tag, sizeof(tag), &len);
+    if (!query_ok(c, SMB2_INFO_FILE_T, SMB2_FILE_BASIC_INFO_T, co.file_id,
+                  basic, sizeof(basic), "BasicInformation") ||
+        !query_ok(c, SMB2_INFO_FILE_T, SMB2_FILE_STANDARD_INFO_T, co.file_id,
+                  stdinfo, sizeof(stdinfo), "StandardInformation") ||
+        !query_ok(c, SMB2_INFO_FILE_T, SMB2_FILE_ALL_INFO_T, co.file_id,
+                  all, sizeof(all), "AllInformation") ||
+        !query_ok(c, SMB2_INFO_FILE_T, SMB2_FILE_NETWORK_OPEN_T, co.file_id,
+                  netopen, sizeof(netopen), "NetworkOpenInformation") ||
+        !query_ok(c, SMB2_INFO_FILE_T, SMB2_FILE_ATTRIBUTE_TAG_T, co.file_id,
+                  tag, sizeof(tag), "AttributeTagInformation")) {
+        smb2_close(c, co.file_id);
+        return;
+    }
 
     /* FILE_STANDARD_INFORMATION: AllocationSize(8), EndOfFile(8), ... */
     alloc_std = g64(stdinfo, 0);
@@ -346,8 +378,12 @@ probe_agreement(struct smb2_conn *c)
     {
         uint8_t internal[16];
 
-        smb2_query_info(c, SMB2_INFO_FILE_T, SMB2_FILE_INTERNAL_INFO_T,
-                        co.file_id, 0, internal, sizeof(internal), &len);
+        if (!query_ok(c, SMB2_INFO_FILE_T, SMB2_FILE_INTERNAL_INFO_T,
+                      co.file_id, internal, sizeof(internal),
+                      "InternalInformation")) {
+            smb2_close(c, co.file_id);
+            return;
+        }
         CHECK(g64(internal, 0) == g64(all, 64) && g64(internal, 0) != 0,
               "InternalInformation IndexNumber matches AllInformation (%llu)",
               (unsigned long long) g64(internal, 0));
@@ -359,14 +395,19 @@ probe_agreement(struct smb2_conn *c)
         struct smb2_create_out ro;
         uint8_t                acc_all[8], acc_ro[8];
 
-        smb2_query_info(c, SMB2_INFO_FILE_T, SMB2_FILE_ACCESS_INFO_T,
-                        co.file_id, 0, acc_all, sizeof(acc_all), &len);
+        if (!query_ok(c, SMB2_INFO_FILE_T, SMB2_FILE_ACCESS_INFO_T,
+                      co.file_id, acc_all, sizeof(acc_all),
+                      "AccessInformation")) {
+            smb2_close(c, co.file_id);
+            return;
+        }
 
         st = smb2_create(c, "info.bin", FILE_OPEN, FILE_READ_ACCESS,
                          FILE_SHARE_RWD, NULL, &ro);
-        if (st == ST_SUCCESS) {
-            smb2_query_info(c, SMB2_INFO_FILE_T, SMB2_FILE_ACCESS_INFO_T,
-                            ro.file_id, 0, acc_ro, sizeof(acc_ro), &len);
+        if (st == ST_SUCCESS &&
+            query_ok(c, SMB2_INFO_FILE_T, SMB2_FILE_ACCESS_INFO_T,
+                     ro.file_id, acc_ro, sizeof(acc_ro),
+                     "AccessInformation (read-only handle)")) {
             CHECK(g32(acc_all, 0) != g32(acc_ro, 0),
                   "AccessInformation is per-handle (0x%08x vs 0x%08x)",
                   g32(acc_all, 0), g32(acc_ro, 0));
@@ -384,7 +425,7 @@ probe_set_info(struct smb2_conn *c)
 {
     struct smb2_create_out co;
     uint8_t                buf[512], in[64];
-    uint32_t               st, len;
+    uint32_t               st;
 
     printf("# --- SET_INFO round trips ---\n");
 
@@ -405,8 +446,11 @@ probe_set_info(struct smb2_conn *c)
         CHECK(st == ST_SUCCESS, "SET BasicInformation(LastWriteTime) -> 0x%08x",
               st);
 
-        smb2_query_info(c, SMB2_INFO_FILE_T, SMB2_FILE_BASIC_INFO_T, co.file_id,
-                        0, buf, sizeof(buf), &len);
+        if (!query_ok(c, SMB2_INFO_FILE_T, SMB2_FILE_BASIC_INFO_T, co.file_id,
+                      buf, sizeof(buf), "BasicInformation")) {
+            smb2_close(c, co.file_id);
+            return;
+        }
         CHECK(g64(buf, 16) == want,
               "  ... LastWriteTime round-trips (%llu vs %llu)",
               (unsigned long long) g64(buf, 16), (unsigned long long) want);
@@ -421,8 +465,11 @@ probe_set_info(struct smb2_conn *c)
         CHECK(st == ST_SUCCESS, "SET BasicInformation(FileAttributes) -> 0x%08x",
               st);
 
-        smb2_query_info(c, SMB2_INFO_FILE_T, SMB2_FILE_ATTRIBUTE_TAG_T,
-                        co.file_id, 0, buf, sizeof(buf), &len);
+        if (!query_ok(c, SMB2_INFO_FILE_T, SMB2_FILE_ATTRIBUTE_TAG_T,
+                      co.file_id, buf, sizeof(buf), "AttributeTagInformation")) {
+            smb2_close(c, co.file_id);
+            return;
+        }
         CHECK((g32(buf, 0) & 0x00000020u) != 0,
               "  ... ARCHIVE shows up in AttributeTagInformation (0x%08x)",
               g32(buf, 0));
@@ -443,8 +490,11 @@ probe_set_info(struct smb2_conn *c)
                            co.file_id, in, 8);
         CHECK(st == ST_SUCCESS, "SET AllocationInformation(64) -> 0x%08x", st);
 
-        smb2_query_info(c, SMB2_INFO_FILE_T, SMB2_FILE_STANDARD_INFO_T,
-                        co.file_id, 0, buf, sizeof(buf), &len);
+        if (!query_ok(c, SMB2_INFO_FILE_T, SMB2_FILE_STANDARD_INFO_T,
+                      co.file_id, buf, sizeof(buf), "StandardInformation")) {
+            smb2_close(c, co.file_id);
+            return;
+        }
         CHECK(g64(buf, 8) <= 64,
               "  ... EndOfFile is clamped to the new allocation (%llu)",
               (unsigned long long) g64(buf, 8));
@@ -457,8 +507,11 @@ probe_set_info(struct smb2_conn *c)
         st = smb2_set_eof(c, co.file_id, 4096);
         CHECK(st == ST_SUCCESS, "SET EndOfFileInformation(4096) -> 0x%08x", st);
 
-        smb2_query_info(c, SMB2_INFO_FILE_T, SMB2_FILE_STANDARD_INFO_T,
-                        co.file_id, 0, buf, sizeof(buf), &len);
+        if (!query_ok(c, SMB2_INFO_FILE_T, SMB2_FILE_STANDARD_INFO_T,
+                      co.file_id, buf, sizeof(buf), "StandardInformation")) {
+            smb2_close(c, co.file_id);
+            return;
+        }
         CHECK(g64(buf, 8) == 4096,
               "  ... StandardInformation reports the new size (%llu)",
               (unsigned long long) g64(buf, 8));
@@ -472,8 +525,11 @@ probe_set_info(struct smb2_conn *c)
                            co.file_id, in, 8);
         CHECK(st == ST_SUCCESS, "SET PositionInformation(1234) -> 0x%08x", st);
 
-        smb2_query_info(c, SMB2_INFO_FILE_T, SMB2_FILE_POSITION_INFO_T,
-                        co.file_id, 0, buf, sizeof(buf), &len);
+        if (!query_ok(c, SMB2_INFO_FILE_T, SMB2_FILE_POSITION_INFO_T,
+                      co.file_id, buf, sizeof(buf), "PositionInformation")) {
+            smb2_close(c, co.file_id);
+            return;
+        }
         CHECK(g64(buf, 0) == 1234,
               "  ... CurrentByteOffset round-trips (%llu)",
               (unsigned long long) g64(buf, 0));
@@ -572,7 +628,7 @@ probe_link(struct smb2_conn *c)
 {
     struct smb2_create_out co, lo;
     uint8_t                in[256], buf[64];
-    uint32_t               st, len = 0, count = 0;
+    uint32_t               st, count = 0;
     int                    nlen;
 
     printf("# --- hard links (FileLinkInformation) ---\n");
@@ -603,11 +659,16 @@ probe_link(struct smb2_conn *c)
             uint32_t rlen = 0;
             uint8_t  rd[16];
 
-            smb2_query_info(c, SMB2_INFO_FILE_T, SMB2_FILE_INTERNAL_INFO_T,
-                            co.file_id, 0, src_internal,
-                            sizeof(src_internal), &len);
-            smb2_query_info(c, SMB2_INFO_FILE_T, SMB2_FILE_INTERNAL_INFO_T,
-                            lo.file_id, 0, buf, sizeof(buf), &len);
+            if (!query_ok(c, SMB2_INFO_FILE_T, SMB2_FILE_INTERNAL_INFO_T,
+                          co.file_id, src_internal, sizeof(src_internal),
+                          "InternalInformation (source)") ||
+                !query_ok(c, SMB2_INFO_FILE_T, SMB2_FILE_INTERNAL_INFO_T,
+                          lo.file_id, buf, sizeof(buf),
+                          "InternalInformation (link)")) {
+                smb2_close(c, lo.file_id);
+                smb2_close(c, co.file_id);
+                return;
+            }
             CHECK(g64(buf, 0) == g64(src_internal, 0),
                   "  ... it shares the source's IndexNumber (%llu)",
                   (unsigned long long) g64(buf, 0));
@@ -768,6 +829,29 @@ static const struct dir_class dir_classes[] = {
 };
 /* *INDENT-ON* */
 
+/* Query one directory class into `out`, zeroing it first.
+ *
+ * dir_collect walks the reply by NextEntryOffset, so the buffer has to start
+ * from a known state: the server fills only the bytes it actually returned,
+ * and a decoder that strays past them would be reading whatever the stack
+ * held. */
+static uint32_t
+qdir(
+    struct smb2_conn *c,
+    uint8_t           info_class,
+    uint8_t           flags,
+    const uint8_t     file_id[16],
+    const char       *pattern,
+    uint32_t          max_out,
+    uint8_t          *out,
+    uint32_t          cap,
+    uint32_t         *out_len)
+{
+    memset(out, 0, cap);
+    return smb2_query_directory(c, info_class, flags, file_id, pattern,
+                                max_out, out, cap, out_len);
+} /* qdir */
+
 /* Walk one QUERY_DIRECTORY reply, appending each entry's name to `names`.
  * Returns the number of entries decoded, or -1 on a malformed chain. */
 static int
@@ -878,12 +962,16 @@ probe_query_directory(struct smb2_conn *c)
         }
 
         count = 0;
-        st    = smb2_query_directory(c, dc->cls, 0, dir.file_id, "*", 8192,
-                                     buf, sizeof(buf), &len);
+        st    = qdir(c, dc->cls, 0, dir.file_id, "*", 8192,
+                     buf, sizeof(buf), &len);
         CHECK(st == ST_SUCCESS && len > 0,
               "%s: QUERY_DIRECTORY(*) -> 0x%08x (%u bytes)", dc->name, st, len);
 
-        entries = dir_collect(dc, buf, len, names, 64, &count);
+        /* Only decode a reply the server actually sent: smb2_query_directory
+         * fills the buffer on success alone, so collecting after a failure
+         * would walk uninitialised stack bytes. */
+        entries = (st == ST_SUCCESS)
+            ? dir_collect(dc, buf, len, names, 64, &count) : -1;
         CHECK(entries > 0, "  ... the entry chain decodes (%d entries)",
               entries);
         CHECK(names_have(names, count, "alpha.txt") &&
@@ -908,27 +996,29 @@ probe_query_directory(struct smb2_conn *c)
     st = smb2_create_opts(c, "qdir", FILE_OPEN, FILE_ALL_ACCESS,
                           FILE_SHARE_RWD, FILE_DIRECTORY_FILE, NULL, &dir);
     if (st == ST_SUCCESS) {
-        st = smb2_query_directory(c, SMB2_FILE_DIRECTORY_INFO_T, 0,
-                                  dir.file_id, "*", 8192, buf, sizeof(buf),
-                                  &len);
+        st = qdir(c, SMB2_FILE_DIRECTORY_INFO_T, 0,
+                  dir.file_id, "*", 8192, buf, sizeof(buf),
+                  &len);
         CHECK(st == ST_SUCCESS, "stateful: first call -> 0x%08x", st);
 
-        st = smb2_query_directory(c, SMB2_FILE_DIRECTORY_INFO_T, 0,
-                                  dir.file_id, "*", 8192, buf, sizeof(buf),
-                                  &len);
+        st = qdir(c, SMB2_FILE_DIRECTORY_INFO_T, 0,
+                  dir.file_id, "*", 8192, buf, sizeof(buf),
+                  &len);
         CHECK(st == ST_NO_MORE_FILES,
               "stateful: the exhausted directory answers NO_MORE_FILES "
               "(0x%08x)", st);
 
         /* SMB2_RESTART_SCANS rewinds the handle's position. */
         count = 0;
-        st    = smb2_query_directory(c, SMB2_FILE_DIRECTORY_INFO_T,
-                                     SMB2_RESTART_SCANS, dir.file_id, "*",
-                                     8192, buf, sizeof(buf), &len);
+        st    = qdir(c, SMB2_FILE_DIRECTORY_INFO_T,
+                     SMB2_RESTART_SCANS, dir.file_id, "*",
+                     8192, buf, sizeof(buf), &len);
         CHECK(st == ST_SUCCESS && len > 0,
               "RESTART_SCANS rewinds and re-enumerates (0x%08x, %u bytes)",
               st, len);
-        dir_collect(&dir_classes[0], buf, len, names, 64, &count);
+        if (st == ST_SUCCESS) {
+            dir_collect(&dir_classes[0], buf, len, names, 64, &count);
+        }
         CHECK(names_have(names, count, "alpha.txt"),
               "  ... the rewound scan lists the files again");
 
@@ -940,11 +1030,12 @@ probe_query_directory(struct smb2_conn *c)
                           FILE_SHARE_RWD, FILE_DIRECTORY_FILE, NULL, &dir);
     if (st == ST_SUCCESS) {
         count = 0;
-        st    = smb2_query_directory(c, SMB2_FILE_DIRECTORY_INFO_T,
-                                     SMB2_RETURN_SINGLE_ENTRY, dir.file_id,
-                                     "*", 8192, buf, sizeof(buf), &len);
+        st    = qdir(c, SMB2_FILE_DIRECTORY_INFO_T,
+                     SMB2_RETURN_SINGLE_ENTRY, dir.file_id,
+                     "*", 8192, buf, sizeof(buf), &len);
         CHECK(st == ST_SUCCESS, "RETURN_SINGLE_ENTRY -> 0x%08x", st);
-        entries = dir_collect(&dir_classes[0], buf, len, names, 64, &count);
+        entries = (st == ST_SUCCESS)
+            ? dir_collect(&dir_classes[0], buf, len, names, 64, &count) : -1;
         CHECK(entries == 1, "  ... exactly one entry is returned (%d)",
               entries);
         smb2_close(c, dir.file_id);
@@ -955,11 +1046,13 @@ probe_query_directory(struct smb2_conn *c)
                           FILE_SHARE_RWD, FILE_DIRECTORY_FILE, NULL, &dir);
     if (st == ST_SUCCESS) {
         count = 0;
-        st    = smb2_query_directory(c, SMB2_FILE_DIRECTORY_INFO_T, 0,
-                                     dir.file_id, "beta.txt", 8192, buf,
-                                     sizeof(buf), &len);
+        st    = qdir(c, SMB2_FILE_DIRECTORY_INFO_T, 0,
+                     dir.file_id, "beta.txt", 8192, buf,
+                     sizeof(buf), &len);
         CHECK(st == ST_SUCCESS, "pattern 'beta.txt' -> 0x%08x", st);
-        dir_collect(&dir_classes[0], buf, len, names, 64, &count);
+        if (st == ST_SUCCESS) {
+            dir_collect(&dir_classes[0], buf, len, names, 64, &count);
+        }
         CHECK(names_have(names, count, "beta.txt") &&
               !names_have(names, count, "alpha.txt"),
               "  ... only the matching name is returned");
@@ -979,9 +1072,9 @@ probe_query_directory(struct smb2_conn *c)
     st = smb2_create_opts(c, "qdir", FILE_OPEN, FILE_ALL_ACCESS,
                           FILE_SHARE_RWD, FILE_DIRECTORY_FILE, NULL, &dir);
     if (st == ST_SUCCESS) {
-        st = smb2_query_directory(c, SMB2_FILE_DIRECTORY_INFO_T, 0,
-                                  dir.file_id, "nothing-here.xyz", 8192, buf,
-                                  sizeof(buf), &len);
+        st = qdir(c, SMB2_FILE_DIRECTORY_INFO_T, 0,
+                  dir.file_id, "nothing-here.xyz", 8192, buf,
+                  sizeof(buf), &len);
         CHECK(st == ST_NO_MORE_FILES,
               "a first-scan pattern matching nothing answers NO_MORE_FILES "
               "where MS-SMB2 wants NO_SUCH_FILE (0x%08x)", st);
@@ -992,15 +1085,15 @@ probe_query_directory(struct smb2_conn *c)
     st = smb2_create_opts(c, "qdir", FILE_OPEN, FILE_ALL_ACCESS,
                           FILE_SHARE_RWD, FILE_DIRECTORY_FILE, NULL, &dir);
     if (st == ST_SUCCESS) {
-        st = smb2_query_directory(c, 0x7F, 0, dir.file_id, "*", 8192, buf,
-                                  sizeof(buf), &len);
+        st = qdir(c, 0x7F, 0, dir.file_id, "*", 8192, buf,
+                  sizeof(buf), &len);
         CHECK(st == ST_INVALID_INFO_CLASS,
               "an unsupported class is INVALID_INFO_CLASS (0x%08x)", st);
 
         /* An output buffer smaller than one entry header cannot hold a
          * result. */
-        st = smb2_query_directory(c, SMB2_FILE_DIRECTORY_INFO_T, 0,
-                                  dir.file_id, "*", 8, buf, sizeof(buf), &len);
+        st = qdir(c, SMB2_FILE_DIRECTORY_INFO_T, 0,
+                  dir.file_id, "*", 8, buf, sizeof(buf), &len);
         CHECK(st != ST_SUCCESS,
               "an 8-byte output buffer is refused (0x%08x)", st);
         smb2_close(c, dir.file_id);
@@ -1010,8 +1103,8 @@ probe_query_directory(struct smb2_conn *c)
     st = smb2_create(c, "qdir_notadir.bin", FILE_OVERWRITE_IF, FILE_ALL_ACCESS,
                      FILE_SHARE_RWD, NULL, &f);
     if (st == ST_SUCCESS) {
-        st = smb2_query_directory(c, SMB2_FILE_DIRECTORY_INFO_T, 0, f.file_id,
-                                  "*", 8192, buf, sizeof(buf), &len);
+        st = qdir(c, SMB2_FILE_DIRECTORY_INFO_T, 0, f.file_id,
+                  "*", 8192, buf, sizeof(buf), &len);
         CHECK(st != ST_SUCCESS,
               "QUERY_DIRECTORY on a file handle is refused (0x%08x)", st);
         smb2_close(c, f.file_id);

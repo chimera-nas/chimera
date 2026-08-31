@@ -234,8 +234,8 @@ probe_sparse(struct smb2_conn *c)
      * range out of two is STATUS_BUFFER_OVERFLOW with that one emitted. */
     p64(in, 0, 0);
     p64(in, 8, fsize);
-    out = smb2_ioctl_out(c, SMB2_FSCTL_QUERY_ALLOCATED_RANGES, co.file_id,
-                         in, 16, 16, &st, &out_len);
+    (void) smb2_ioctl_out(c, SMB2_FSCTL_QUERY_ALLOCATED_RANGES, co.file_id,
+                          in, 16, 16, &st, &out_len);
     CHECK(st == ST_BUFFER_OVERFLOW && out_len == 16,
           "QUERY_ALLOCATED_RANGES with room for one range overflows (0x%08x, "
           "%u bytes)", st, out_len);
@@ -258,8 +258,8 @@ probe_sparse(struct smb2_conn *c)
      * which is SUCCESS with a zero-length output. */
     p64(in, 0, 1 << 20);
     p64(in, 8, 4096);
-    out = smb2_ioctl_out(c, SMB2_FSCTL_QUERY_ALLOCATED_RANGES, co.file_id,
-                         in, 16, 4096, &st, &out_len);
+    (void) smb2_ioctl_out(c, SMB2_FSCTL_QUERY_ALLOCATED_RANGES, co.file_id,
+                          in, 16, 4096, &st, &out_len);
     CHECK(st == ST_SUCCESS && out_len == 0,
           "QUERY_ALLOCATED_RANGES past EOF is empty (0x%08x, %u bytes)", st,
           out_len);
@@ -375,8 +375,8 @@ probe_copychunk(struct smb2_conn *c)
     memset(in, 0, sizeof(in));
     memcpy(in, key, 24);
     p32(in, 24, 0xFFFF);              /* ChunkCount far past the limit */
-    out = smb2_ioctl_out(c, SMB2_FSCTL_SRV_COPYCHUNK, dst.file_id, in, 32,
-                         4096, &st, &out_len);
+    (void) smb2_ioctl_out(c, SMB2_FSCTL_SRV_COPYCHUNK, dst.file_id, in, 32,
+                          4096, &st, &out_len);
     CHECK(st == ST_INVALID_PARAMETER,
           "SRV_COPYCHUNK with an over-limit ChunkCount is refused (0x%08x)", st);
 
@@ -575,8 +575,8 @@ probe_reparse(struct smb2_conn *c)
 
     /* GET on a plain file has nothing to report. */
     make_file(c, "rp_plain.bin", 64, 0x20, &co);
-    out = smb2_ioctl_out(c, SMB2_FSCTL_GET_REPARSE_POINT, co.file_id, NULL, 0,
-                         4096, &st, &out_len);
+    (void) smb2_ioctl_out(c, SMB2_FSCTL_GET_REPARSE_POINT, co.file_id, NULL, 0,
+                          4096, &st, &out_len);
     CHECK(st == ST_NOT_A_REPARSE_POINT,
           "GET_REPARSE_POINT on a plain file -> STATUS_NOT_A_REPARSE_POINT "
           "(0x%08x)", st);
@@ -655,8 +655,8 @@ probe_reparse(struct smb2_conn *c)
                           FILE_SHARE_RWD, SMB2_FILE_OPEN_REPARSE_POINT,
                           NULL, &ro);
     if (st == ST_SUCCESS) {
-        out = smb2_ioctl_out(c, SMB2_FSCTL_GET_REPARSE_POINT, ro.file_id, NULL,
-                             0, 8, &st, &out_len);
+        (void) smb2_ioctl_out(c, SMB2_FSCTL_GET_REPARSE_POINT, ro.file_id, NULL,
+                              0, 8, &st, &out_len);
         CHECK(st == ST_SUCCESS && out_len == 84,
               "GET_REPARSE_POINT ignores an 8-byte MaxOutputResponse and "
               "returns the full buffer (0x%08x, %u bytes)", st, out_len);
