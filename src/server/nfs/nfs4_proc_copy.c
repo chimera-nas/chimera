@@ -58,6 +58,25 @@ chimera_nfs4_copy_state_handle(
     } /* switch */
 } /* chimera_nfs4_copy_state_handle */
 
+/* The client that owns `state`, for attributing the copy's internal I/O.
+ * Mirrors chimera_nfs4_copy_state_handle: only the two state types that carry
+ * an open handle carry an owning client. */
+static uint64_t
+chimera_nfs4_copy_state_client(
+    void   *state,
+    uint8_t state_type)
+{
+    switch (state_type) {
+        case NFS4_SLOT_TYPE_OPEN:
+            return ((struct nfs_open_state *) state)->owner->client->client_id;
+        case NFS4_SLOT_TYPE_LOCK:
+            return ((struct nfs_lock_state *) state)->open_state->owner->
+                   client->client_id;
+        default:
+            return 0;
+    } /* switch */
+} /* chimera_nfs4_copy_state_client */
+
 static void
 chimera_nfs4_copy_release_refs(
     struct nfs_request          *req,
@@ -184,17 +203,30 @@ chimera_nfs4_copy_read_complete(
     refs->rw_eof   = eof;
     refs->rw_niov  = niov;
 
-    chimera_vfs_write(req->thread->vfs_thread, &req->cred,
-                      dst_handle,
-                      refs->dst_offset,
-                      count,
-                      1,
-                      0,
-                      0,
-                      refs->rw_iov,
-                      refs->rw_niov,
-                      chimera_nfs4_copy_write_complete,
-                      refs);
+    /* As the read above: the destination's own holder must not be blocked by
+     * its own share reservation. */
+    struct chimera_claim_actor io_owner = {
+        .owner          = {
+            .proto      = CHIMERA_CLAIM_PROTO_NFSV4,
+            .client_key = chimera_nfs4_copy_state_client(refs->dst_state,
+                                                         refs->dst_type),
+            .owner_lo = dst_handle->fh_hash,
+            .owner_hi = 0,
+        },
+    };
+
+    chimera_vfs_write_owned(req->thread->vfs_thread, &req->cred,
+                            dst_handle,
+                            refs->dst_offset,
+                            count,
+                            1,
+                            0,
+                            0,
+                            refs->rw_iov,
+                            refs->rw_niov,
+                            &io_owner,
+                            chimera_nfs4_copy_write_complete,
+                            refs);
 } /* chimera_nfs4_copy_read_complete */
 
 static void
@@ -212,15 +244,31 @@ chimera_nfs4_copy_rw_step(struct nfs4_copy_state_refs *refs)
     src_handle    = chimera_nfs4_copy_state_handle(refs->src_state, refs->src_type);
     refs->rw_niov = CHIMERA_NFS4_COPY_IOV_MAX;
 
-    chimera_vfs_read(req->thread->vfs_thread, &req->cred,
-                     src_handle,
-                     refs->src_offset,
-                     (uint32_t) chunk,
-                     refs->rw_iov,
-                     refs->rw_niov,
-                     0,
-                     chimera_nfs4_copy_read_complete,
-                     refs);
+    /* Attribute the read to the client that holds the source stateid, as
+     * READ does.  Left unowned it is admitted as the per-file implicit claim,
+     * which carries no client identity -- so a copy whose source the same
+     * client has open with a deny share is refused by that client's own share
+     * reservation (NFS4ERR_ACCESS). */
+    struct chimera_claim_actor io_owner = {
+        .owner          = {
+            .proto      = CHIMERA_CLAIM_PROTO_NFSV4,
+            .client_key = chimera_nfs4_copy_state_client(refs->src_state,
+                                                         refs->src_type),
+            .owner_lo = src_handle->fh_hash,
+            .owner_hi = 0,
+        },
+    };
+
+    chimera_vfs_read_owned(req->thread->vfs_thread, &req->cred,
+                           src_handle,
+                           refs->src_offset,
+                           (uint32_t) chunk,
+                           refs->rw_iov,
+                           refs->rw_niov,
+                           0,
+                           &io_owner,
+                           chimera_nfs4_copy_read_complete,
+                           refs);
 } /* chimera_nfs4_copy_rw_step */
 
 static void
