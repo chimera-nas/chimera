@@ -1399,7 +1399,24 @@ posix_env_setup(
 static void
 posix_env_teardown(void)
 {
-    chimera_posix_umount("/test");
+    /* The client umount is what dispatches the module-level UMOUNT that owns
+     * per-mount state (the linux module's root identity, for one); an EBUSY
+     * here (cached handles inside the holder timeout) would leak it, so give
+     * it the same bounded retry the newfs recycle uses. */
+    {
+        int tries = 0;
+        while (chimera_posix_umount("/test") != 0 &&
+               errno == EBUSY && ++tries < 15) {
+            usleep(1000);
+        }
+    }
+    if (g_server) {
+        int tries = 0;
+        while (chimera_server_unmount(g_server, "share") != 0 &&
+               ++tries < 15) {
+            usleep(1000);
+        }
+    }
     chimera_posix_shutdown();
     if (g_pt_root[0]) {
         (void) pt_remove_tree(g_pt_root);
