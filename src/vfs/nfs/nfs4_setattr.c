@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: LGPL-2.1-only
 
 #include "nfs_internal.h"
+#include "nfs4_open_state.h"
 
 struct chimera_nfs4_setattr_ctx {
     struct chimera_nfs_thread        *thread;
@@ -247,8 +248,24 @@ chimera_nfs4_setattr(
     /* Op 2: SETATTR */
     argarray[2].argop = OP_SETATTR;
 
-    /* Anonymous stateid (all zeros) for setattr on unopened files */
-    memset(&argarray[2].opsetattr.stateid, 0, sizeof(argarray[2].opsetattr.stateid));
+    /* The open's stateid when this handle carries one, else the anonymous
+     * stateid.  A size-changing SETATTR through an open descriptor is
+     * authorized by the OPEN (RFC 8881 §18.30: the stateid is consulted
+     * exactly when size is set), the way ftruncate(2) is authorized by its
+     * descriptor -- with the anonymous stateid the server instead re-checks
+     * the file's current permissions against the caller. */
+    {
+        struct chimera_nfs4_open_state *open_state =
+            (struct chimera_nfs4_open_state *)
+            request->setattr.handle->vfs_private;
+
+        if (open_state) {
+            argarray[2].opsetattr.stateid = open_state->stateid;
+        } else {
+            memset(&argarray[2].opsetattr.stateid, 0,
+                   sizeof(argarray[2].opsetattr.stateid));
+        }
+    }
 
     /* Set attribute mask - use 2 words if we have any bit in word 1, else 1 word */
     if (ctx->attr_mask[1]) {
