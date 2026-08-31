@@ -202,16 +202,15 @@ main(
         fprintf(stderr, "MKNOD pd/f failed: %u\n", res->status);
         return 1;
     }
-    /* The engine backends answer ISDIR (a non-directory moved onto a
-     * directory); the passthrough backends surface the host kernel's
-     * reading, which reports the non-empty target first (NOTEMPTY).  Both
-     * are status-only precedence choices on the same refusal -- what F2
-     * actually guards is that the parent-alias case answers at all instead
-     * of deadlocking. */
+    /* Every backend answers ISDIR (a non-directory moved onto a directory).
+     * The host kernel checks the non-empty target first on this corner
+     * (NOTEMPTY), but the passthrough modules re-derive the POSIX type pair
+     * and answer the EISDIR rename(2) specifies, like the engine backends.
+     * What F2 actually guards is that the parent-alias case answers at all
+     * instead of deadlocking. */
     expect("RENAME child onto a name resolving to its parent",
            mbt_rename(env, &pd, "f", 1, &root, "pd", 2)->status,
-           mbt_module_is_passthrough(env->module) ? NFS3ERR_NOTEMPTY
-                                                  : NFS3ERR_ISDIR);
+           NFS3ERR_ISDIR);
 
     printf("F6 a filehandle whose object is gone -> STALE:\n");
     {
@@ -272,6 +271,10 @@ main(
                mbt_remove(env, &root, "nope", 4)->status, NFS3ERR_NOENT);
     }
 
+    /* Unmount before stopping: the module-level UMOUNT owns per-mount state
+     * (the linux module's root identity), and only an explicit teardown runs
+     * it -- otherwise LSAN reports the final mount's allocation. */
+    mbt_env_fs_teardown(env, "fs0");
     mbt_env_stop(env);
     free(env);
 
