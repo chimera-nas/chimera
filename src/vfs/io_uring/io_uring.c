@@ -1529,6 +1529,21 @@ chimera_io_uring_open_fh(
                               request->fh_len,
                               flags);
 
+    if (fd < 0 && errno == EISDIR &&
+        !(request->open_fh.flags & (CHIMERA_VFS_OPEN_READ_ONLY |
+                                    CHIMERA_VFS_OPEN_WRITE_ONLY))) {
+        /* Access-unspecified (INFERRED) open of a directory: the default
+         * read-write flags cannot open a directory, but the handle must
+         * still be usable -- an NFS3 COMMIT of a directory filehandle
+         * (POSIX fsync on a directory descriptor) arrives this way.
+         * Re-open read-only; a directory is never writable anyway. */
+        flags = (flags & ~O_ACCMODE) | O_RDONLY | O_DIRECTORY;
+        fd    = linux_open_by_handle(&thread->mount_table,
+                                     request->fh,
+                                     request->fh_len,
+                                     flags);
+    }
+
     if (fd < 0) {
         if (errno == ENOTDIR && (request->open_fh.flags & CHIMERA_VFS_OPEN_DIRECTORY)) {
             int         probe_fd = linux_open_by_handle(&thread->mount_table,
