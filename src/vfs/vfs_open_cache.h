@@ -594,6 +594,7 @@ chimera_vfs_open_cache_acquire(
         handle->fh_len              = fhlen;
         handle->cred_hash           = cred_hash;
         handle->granted_valid       = 0;
+        handle->granted_bound       = 0;
         handle->opencnt             = 1;
         handle->access_mode         = access_mode;
         handle->flags               = exclusive ? CHIMERA_VFS_OPEN_HANDLE_EXCLUSIVE : 0;
@@ -697,6 +698,7 @@ chimera_vfs_open_cache_insert(
     handle->fh_len              = fhlen;
     handle->cred_hash           = cred_hash;
     handle->granted_valid       = 0;
+    handle->granted_bound       = 0;
     handle->opencnt             = 1;
     handle->access_mode         = access_mode;
     handle->flags               = 0;

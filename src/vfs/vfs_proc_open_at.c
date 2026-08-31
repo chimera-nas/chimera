@@ -147,6 +147,13 @@ chimera_vfs_open_at_hdl_callback(
             } else {
                 chimera_vfs_handle_stamp_access(handle, granted);
             }
+        } else {
+            /* Gate-exempt credential (root, AUTH_NONE): DAC grants this open
+             * everything, and POSIX binds that to the descriptor -- a later
+             * setuid() must not revoke I/O on it, so record the full grant
+             * rather than leaving the per-op gates to re-evaluate under
+             * whatever credential wields the descriptor later. */
+            chimera_vfs_handle_stamp_access(handle, CHIMERA_ACE_MASK_ALL);
         }
 
         if (status != CHIMERA_VFS_OK) {

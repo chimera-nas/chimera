@@ -418,6 +418,12 @@ chimera_vfs_open_lookup_complete(
                 chimera_vfs_access_check(attr, request->cred,
                                          CHIMERA_ACE_MASK_ALL);
             request->open.granted_valid = 1;
+        } else {
+            /* Gate-exempt credential (root, AUTH_NONE): DAC grants this open
+             * everything; bind the full grant to the descriptor so a later
+             * setuid() does not revoke I/O on it. */
+            request->open.granted_access = CHIMERA_ACE_MASK_ALL;
+            request->open.granted_valid  = 1;
         }
     }
 
