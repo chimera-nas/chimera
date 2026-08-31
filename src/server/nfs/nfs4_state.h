@@ -331,6 +331,12 @@ struct nfs_open_state {
 
     struct chimera_vfs_open_handle *handle;             /* +1 via chimera_vfs_dup_handle */
 
+    /* The read-only handle a write-share coalesce superseded (see
+     * chimera_nfs4_open_install_state): in-flight I/O may still be borrowing
+     * it, so its reference is parked here and released with the state.  A
+     * state upgrades at most once (RO -> RW), so one slot suffices. */
+    struct chimera_vfs_open_handle *handle_superseded;
+
     struct nfs_lock_state          *locks;              /* utlist via next_in_open */
     UT_hash_handle                  hh;                 /* by fh in owner->states_by_fh */
 

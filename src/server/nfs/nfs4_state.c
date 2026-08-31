@@ -1310,6 +1310,12 @@ open_state_cleanup(
         chimera_vfs_release(vfs_thread, state->handle);
         state->handle = NULL;
     }
+    /* The read-only handle a write-share coalesce superseded (parked so
+     * in-flight I/O borrowing it stayed valid). */
+    if (state->handle_superseded && vfs_thread) {
+        chimera_vfs_release(vfs_thread, state->handle_superseded);
+        state->handle_superseded = NULL;
+    }
     /* Release the owner ref taken in nfs_open_state_create. */
     nfs_open_owner_put(state->owner);
     free(state);
