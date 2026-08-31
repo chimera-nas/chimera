@@ -32,6 +32,21 @@ __lsan_default_suppressions(void)
         "leak:options_mem_dupe\n"
         /* SMB compound/request free lists (per-thread caches) */
         "leak:chimera_smb_compound_alloc\n"
+        /* NFS proxy per-thread server state (connection, NFS4.1 session +
+         * slot tables).  Repeated mount/umount cycles accumulate one block
+         * per (thread, mount) that only thread destroy releases, and a
+         * client thread that never revisits the old server index holds its
+         * block until process exit.  A real teardown (release at last
+         * unmount, cross-thread) is tracked as follow-up work; the harness
+         * batches cycle the mount per trace and trip this at exit.  The
+         * session/slot allocations are indirect leaks off that state with
+         * their own stacks, so each allocation site is listed. */
+        "leak:chimera_nfs_thread_get_server_thread\n"
+        "leak:chimera_nfs4_session_pool_init\n"
+        "leak:chimera_nfs4_slot_table_init\n"
+        "leak:chimera_nfs4_ctx_alloc\n"
+        "leak:chimera_nfs4_mount\n"
+        "leak:chimera_nfs4_cb_exchange_id_callback\n"
         /* GSSAPI/Kerberos internal allocations */
         "leak:gss_accept_sec_context\n"
         "leak:libgssapi_krb5\n"

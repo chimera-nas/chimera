@@ -492,9 +492,16 @@ chimera_nfs_thread_get_server_thread(
     }
 
     if (unlikely(thread->max_server_threads != thread->shared->max_servers && index >= thread->max_server_threads)) {
+        int old_max = thread->max_server_threads;
+
         thread->max_server_threads = thread->shared->max_servers;
         thread->server_threads     = realloc(thread->server_threads,
                                              thread->max_server_threads * sizeof(*thread->server_threads));
+        /* realloc does not zero the extension; the not-NULL test below would
+         * otherwise read garbage as a live server_thread. */
+        memset(thread->server_threads + old_max, 0,
+               (thread->max_server_threads - old_max) *
+               sizeof(*thread->server_threads));
     }
 
     if (unlikely(!thread->server_threads[index])) {
