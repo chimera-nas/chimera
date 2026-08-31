@@ -541,13 +541,14 @@ chimera_io_uring_reap(
                         request->status = chimera_linux_errno_to_status(-cqe->res);
                     }
                 } else if (handle->slot == 3) {
-                    /* The non-exclusive-create re-open of an existing file.  For a
-                     * CREATE_REGULAR re-open this is the O_PATH handle on an
-                     * existing regular file: leave its attributes untouched. */
+                    /* The non-exclusive-create re-open of an existing file.
+                     * The create attributes apply only to an object this call
+                     * makes: the open found an existing one, so leave its
+                     * attributes untouched (applying them would chmod a file
+                     * the caller may not own). */
                     if (cqe->res >= 0) {
                         chimera_io_uring_open_at_finish(
-                            thread, request, cqe->res, 0,
-                            (request->open_at.flags & CHIMERA_VFS_OPEN_CREATE_REGULAR) ? 1 : 0);
+                            thread, request, cqe->res, 0, 1);
                     } else {
                         request->status = chimera_linux_errno_to_status(-cqe->res);
                     }
@@ -678,6 +679,21 @@ chimera_io_uring_reap(
                      * matching what the linux backend does via
                      * chimera_linux_set_attrs.  fchownat is a fast metadata
                      * call (no I/O) and is gated on AUTH_ATTR injection. */
+                    /* mkdirat(2) does not honor the requested mode exactly:
+                     * vfs_mkdir strips the set-user/group-ID bits, and a
+                     * set-group-ID parent adds an inherited S_ISGID the
+                     * caller never asked for.  Apply the mode verbatim
+                     * afterward, as the linux backend does via
+                     * chimera_linux_set_attrs. */
+                    if (request->status == CHIMERA_VFS_OK &&
+                        (request->mkdir_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE)) {
+                        if (fchmodat(parent_fd, fullname,
+                                     request->mkdir_at.set_attr->va_mode & 07777,
+                                     0) < 0) {
+                            request->status = chimera_linux_errno_to_status(errno);
+                        }
+                    }
+
                     if (request->status == CHIMERA_VFS_OK) {
                         uint64_t mask = request->mkdir_at.set_attr->va_set_mask;
                         if (mask & (CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID)) {
@@ -732,6 +748,31 @@ chimera_io_uring_reap(
                         request->status        = CHIMERA_VFS_OK;
                         request->read.r_length = cqe->res;
                         request->read.r_eof    = (cqe->res < request->read.length);
+                    } else if (cqe->res == -EINVAL) {
+                        /* Resolved synchronously here rather than from the
+                        * statx companion: the two CQEs complete in either
+                        * order, so the statx slot may already have run. */
+                        int         rfd = (int) request->read.handle->vfs_private;
+                        struct stat rst;
+
+                        request->status = CHIMERA_VFS_EINVAL;
+                        if (fstat(rfd, &rst) == 0) {
+                            if (S_ISREG(rst.st_mode) &&
+                                request->read.offset >= (uint64_t) rst.st_size) {
+                                /* At/after-EOF EINVAL becomes a clean
+                                 * zero-length EOF read for regular files. */
+                                request->status        = CHIMERA_VFS_OK;
+                                request->read.r_length = 0;
+                                request->read.r_niov   = 0;
+                                request->read.r_eof    = 1;
+                            } else if (S_ISDIR(rst.st_mode)) {
+                                /* POSIX read(2): a directory descriptor
+                                 * answers EISDIR whatever else is also wrong
+                                 * with the request (the kernel checks offset
+                                 * validity first for a huge offset). */
+                                request->status = CHIMERA_VFS_EISDIR;
+                            }
+                        }
                     } else {
                         request->status = chimera_linux_errno_to_status(-cqe->res);
                     }
@@ -747,12 +788,6 @@ chimera_io_uring_reap(
                             request->read.r_eof =
                                 (request->read.length > 0 &&
                                  request->read.offset + request->read.r_length >= stx->stx_size);
-                        } else if (request->status == CHIMERA_VFS_EINVAL &&
-                                   request->read.offset >= stx->stx_size) {
-                            request->status        = CHIMERA_VFS_OK;
-                            request->read.r_length = 0;
-                            request->read.r_niov   = 0;
-                            request->read.r_eof    = 1;
                         }
                     }
                 }
@@ -1119,11 +1154,19 @@ chimera_io_uring_setattr(
             return;
         }
 
-        // fd might be O_PATH which doesn't support ftruncate directly,
-        // so use truncate() on /proc/self/fd/N path which follows the symlink
-        char procpath[64];
-        snprintf(procpath, sizeof(procpath), "/proc/self/fd/%d", fd);
-        rc = truncate(procpath, request->setattr.set_attr->va_size);
+        // Prefer ftruncate: rights bound to the descriptor at open time
+        // authorize it (POSIX), regardless of the file's current mode or
+        // the impersonated fsuid.  An O_PATH fd has no such rights and
+        // refuses ftruncate with EBADF; those are the stateless path-based
+        // callers, where re-checking DAC via a path truncate through
+        // /proc/self/fd is exactly right.
+        rc = ftruncate(fd, request->setattr.set_attr->va_size);
+
+        if (rc && errno == EBADF) {
+            char procpath[64];
+            snprintf(procpath, sizeof(procpath), "/proc/self/fd/%d", fd);
+            rc = truncate(procpath, request->setattr.set_attr->va_size);
+        }
 
         if (rc) {
             chimera_io_uring_error("io_uring_setattr: truncate(%ld) failed: %s",
@@ -1178,7 +1221,31 @@ chimera_io_uring_setattr(
         if (have_any) {
             rc = utimensat(fd, "", times, AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH);
 
-            if (rc) {
+            if (rc && errno == EPERM &&
+                chimera_linux_times_now_omit(request->setattr.set_attr)) {
+                /* utimensat(2) with one field UTIME_NOW and the other
+                 * omitted: POSIX grants this to any process with write
+                 * access, Linux insists on ownership (see linux_common.h).
+                 * Settle it by write access, as the engine backends do: a
+                 * writer gets the change applied with privilege restored, a
+                 * non-writer the EACCES POSIX prescribes. */
+                if (chimera_linux_cred_write_ok(fd, request->cred)) {
+                    chimera_restore_privilege(request->cred);
+                    rc = utimensat(fd, "", times,
+                                   AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH);
+                    if (rc) {
+                        request->status =
+                            chimera_linux_errno_to_status(errno);
+                        request->complete(request);
+                        return;
+                    }
+                } else {
+                    chimera_restore_privilege(request->cred);
+                    request->status = CHIMERA_VFS_EACCES;
+                    request->complete(request);
+                    return;
+                }
+            } else if (rc) {
                 chimera_io_uring_error("io_uring_setattr: utimensat() failed: %s",
                                        strerror(errno));
 
@@ -1321,12 +1388,14 @@ chimera_io_uring_readdir(
 
     fd = request->readdir.handle->vfs_private;
 
-    rc = chimera_setup_credential(request->cred, NULL);
-    if (rc != 0) {
-        request->status = chimera_linux_errno_to_status(rc);
-        request->complete(request);
-        return;
-    }
+    /* No credential impersonation here, deliberately: READDIR acts purely
+     * through an open handle the engine already authorized, and POSIX binds
+     * a directory stream's rights at opendir -- a chmod after that must not
+     * break an open stream.  The per-request "." re-open below (a private
+     * cursor over the same object, no path resolution) and the child statx
+     * would otherwise re-check DAC against the current mode.  Stateless
+     * wire callers still face per-operation DAC where it belongs: at the
+     * cred-keyed open of the handle itself. */
 
     if (thread->readdir_verifier) {
         struct stat st;
@@ -1338,7 +1407,6 @@ chimera_io_uring_readdir(
 
             if (request->readdir.verifier &&
                 request->readdir.verifier != mtime_verf) {
-                chimera_restore_privilege(request->cred);
                 request->status = CHIMERA_VFS_EBADCOOKIE;
                 request->complete(request);
                 return;
@@ -1367,7 +1435,6 @@ chimera_io_uring_readdir(
         }
         chimera_io_uring_error("io_uring_readdir: openat() failed: %s",
                                strerror(open_errno));
-        chimera_restore_privilege(request->cred);
         request->status = chimera_linux_errno_to_status(open_errno);
         request->complete(request);
         return;
@@ -1379,7 +1446,6 @@ chimera_io_uring_readdir(
         chimera_io_uring_error("io_uring_readdir: fdopendir() failed: %s",
                                strerror(errno));
         close(dup_fd);
-        chimera_restore_privilege(request->cred);
         request->status = chimera_linux_errno_to_status(errno);
         request->complete(request);
         return;
@@ -1426,7 +1492,6 @@ chimera_io_uring_readdir(
     request->readdir.r_eof    = eof;
 
     closedir(dir);
-    chimera_restore_privilege(request->cred);
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
@@ -2047,6 +2112,24 @@ chimera_io_uring_copy_range(
     dst_off   = (loff_t) request->copy_range.dst_offset;
     remaining = request->copy_range.length;
 
+    /* Clamp the copy to the source bytes present when the operation starts.
+     * The retry loop below otherwise self-feeds on a same-file copy whose
+     * destination range extends the source: each chunk grows the file, the
+     * next iteration finds fresh bytes, and the total exceeds what a single
+     * copy_file_range(2) call -- and the engine backends -- would move. */
+    {
+        struct stat src_st;
+
+        if (fstat(src_fd, &src_st) == 0) {
+            uint64_t avail = (src_st.st_size > src_off) ?
+                (uint64_t) (src_st.st_size - src_off) : 0;
+
+            if (remaining > avail) {
+                remaining = avail;
+            }
+        }
+    }
+
     while (remaining > 0) {
         rc = copy_file_range(src_fd, &src_off, dst_fd, &dst_off, remaining, 0);
 
@@ -2323,13 +2406,29 @@ chimera_io_uring_rename_at(
 
     rc = renameat(old_fd, fullname, new_fd, full_newname);
 
+    int renameat_errno = errno;
+    chimera_restore_privilege(request->cred);
+
+    if (rc < 0 && (renameat_errno == ENOTEMPTY || renameat_errno == EEXIST)) {
+        /* When the destination is an ancestor of the source, the kernel asks
+         * "may the replaced directory be emptied" before the POSIX type
+         * pairing, answering ENOTEMPTY where rename(2) specifies EISDIR for
+         * a non-directory moved onto a directory.  Re-derive the type pair
+         * (as root: DAC was settled above) and correct that corner. */
+        struct stat ost, nst;
+
+        if (fstatat(old_fd, fullname, &ost, AT_SYMLINK_NOFOLLOW) == 0 &&
+            fstatat(new_fd, full_newname, &nst, AT_SYMLINK_NOFOLLOW) == 0 &&
+            !S_ISDIR(ost.st_mode) && S_ISDIR(nst.st_mode)) {
+            renameat_errno = EISDIR;
+        }
+    }
+
     if (rc < 0) {
-        request->status = chimera_linux_errno_to_status(errno);
+        request->status = chimera_linux_errno_to_status(renameat_errno);
     } else {
         request->status = CHIMERA_VFS_OK;
     }
-
-    chimera_restore_privilege(request->cred);
     close(old_fd);
     close(new_fd);
 

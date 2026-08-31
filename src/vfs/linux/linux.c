@@ -233,11 +233,19 @@ chimera_linux_set_attrs(
             return -EFBIG;
         }
 
-        // dirfd might be O_PATH which doesn't support ftruncate directly,
-        // so use truncate() on /proc/self/fd/N path which follows the symlink
-        char procpath[64];
-        snprintf(procpath, sizeof(procpath), "/proc/self/fd/%d", dirfd);
-        rc = truncate(procpath, attr->va_size);
+        // Prefer ftruncate: rights bound to the descriptor at open time
+        // authorize it (POSIX), regardless of the file's current mode or
+        // the impersonated fsuid.  An O_PATH dirfd has no such rights and
+        // refuses ftruncate with EBADF; those are the stateless path-based
+        // callers, where re-checking DAC via a path truncate through
+        // /proc/self/fd is exactly right.
+        rc = ftruncate(dirfd, attr->va_size);
+
+        if (rc && errno == EBADF) {
+            char procpath[64];
+            snprintf(procpath, sizeof(procpath), "/proc/self/fd/%d", dirfd);
+            rc = truncate(procpath, attr->va_size);
+        }
 
         if (rc) {
             chimera_linux_error("linux_setattr: truncate(%ld) failed: %s",
@@ -354,7 +362,24 @@ chimera_linux_setattr(
     }
 
     rc = chimera_linux_set_attrs(fd, "", request->setattr.set_attr);
-    chimera_restore_privilege(request->cred);
+
+    if (rc == -EPERM &&
+        chimera_linux_times_now_omit(request->setattr.set_attr)) {
+        /* utimensat(2) with one field UTIME_NOW and the other omitted: POSIX
+         * grants this to any process with write access, Linux insists on
+         * ownership (see linux_common.h).  Settle it by write access, as the
+         * engine backends do: a writer gets the change applied with
+         * privilege restored, a non-writer the EACCES POSIX prescribes. */
+        if (chimera_linux_cred_write_ok(fd, request->cred)) {
+            chimera_restore_privilege(request->cred);
+            rc = chimera_linux_set_attrs(fd, "", request->setattr.set_attr);
+        } else {
+            chimera_restore_privilege(request->cred);
+            rc = -EACCES;
+        }
+    } else {
+        chimera_restore_privilege(request->cred);
+    }
 
     chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
                             &request->setattr.r_post_attr,
@@ -503,12 +528,14 @@ chimera_linux_readdir(
 
     chimera_linux_debug("linux_readdir: opening %d", fd);
 
-    rc = chimera_setup_credential(request->cred, NULL);
-    if (rc != 0) {
-        request->status = chimera_linux_errno_to_status(rc);
-        request->complete(request);
-        return;
-    }
+    /* No credential impersonation here, deliberately: READDIR acts purely
+     * through an open handle the engine already authorized, and POSIX binds
+     * a directory stream's rights at opendir -- a chmod after that must not
+     * break an open stream.  The per-request "." re-open below (a private
+     * cursor over the same object, no path resolution) and the child statx
+     * would otherwise re-check DAC against the current mode.  Stateless
+     * wire callers still face per-operation DAC where it belongs: at the
+     * cred-keyed open of the handle itself. */
 
     if (thread->readdir_verifier) {
         struct stat st;
@@ -520,7 +547,6 @@ chimera_linux_readdir(
 
             if (request->readdir.verifier &&
                 request->readdir.verifier != mtime_verf) {
-                chimera_restore_privilege(request->cred);
                 request->status = CHIMERA_VFS_EBADCOOKIE;
                 request->complete(request);
                 return;
@@ -549,7 +575,6 @@ chimera_linux_readdir(
         }
         chimera_linux_error("linux_readdir: openat() failed: %s",
                             strerror(open_errno));
-        chimera_restore_privilege(request->cred);
         request->status = chimera_linux_errno_to_status(open_errno);
         request->complete(request);
         return;
@@ -561,7 +586,6 @@ chimera_linux_readdir(
         chimera_linux_error("linux_readdir: fdopendir() failed: %s",
                             strerror(errno));
         close(dup_fd);
-        chimera_restore_privilege(request->cred);
         request->status = chimera_linux_errno_to_status(errno);
         request->complete(request);
         return;
@@ -609,7 +633,6 @@ chimera_linux_readdir(
     request->readdir.r_eof    = eof;
 
     closedir(dir);
-    chimera_restore_privilege(request->cred);
 
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
@@ -795,9 +818,13 @@ chimera_linux_open_at(
              * equivalent for an existing file, and immune to the kernel's
              * fs.protected_regular, which fails an O_CREAT open of another
              * user's existing file in a sticky world-writable directory
-             * (EPERM/EACCES) where POSIX open(2) plainly opens it. */
+             * (EPERM/EACCES) where POSIX open(2) plainly opens it.  The
+             * create attributes (mode and friends) apply only to an object
+             * this call makes, so the reopen skips them -- applying them
+             * here would chmod an existing file the caller may not own. */
             fd = openat(parent_fd, fullname, flags & ~(O_CREAT | O_EXCL),
                         mode);
+            reopened = 1;
         }
     } else {
         fd = openat(parent_fd, fullname, flags, mode);
@@ -1145,18 +1172,29 @@ chimera_linux_read(
 
     if (len < 0) {
         /* Reading at/after EOF surfaces as EINVAL on some backends; report it
-         * as a clean zero-length EOF read.  The VFS core owns request->read.iov
-         * and releases it on completion (r_length stays 0 here). */
-        if (errno == EINVAL &&
-            fstat(fd, &st) == 0 &&
-            request->read.offset >= (uint64_t) st.st_size) {
-            chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX, &request->read.r_attr, fd);
+         * as a clean zero-length EOF read.  Regular files only: a directory
+         * read must keep its real errno (EISDIR), not become a clean EOF just
+         * because the offset exceeds the directory's nominal size.  The VFS
+         * core owns request->read.iov and releases it on completion (r_length
+         * stays 0 here). */
+        if (errno == EINVAL && fstat(fd, &st) == 0) {
+            if (S_ISREG(st.st_mode) &&
+                request->read.offset >= (uint64_t) st.st_size) {
+                chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
+                                        &request->read.r_attr, fd);
 
-            request->read.r_length = 0;
-            request->read.r_eof    = 1;
-            request->status        = CHIMERA_VFS_OK;
-            request->complete(request);
-            return;
+                request->read.r_length = 0;
+                request->read.r_eof    = 1;
+                request->status        = CHIMERA_VFS_OK;
+                request->complete(request);
+                return;
+            }
+            /* POSIX read(2): a directory descriptor answers EISDIR whatever
+             * else is also wrong with the request (the kernel checks offset
+             * validity first and can answer EINVAL for a huge offset). */
+            if (S_ISDIR(st.st_mode)) {
+                errno = EISDIR;
+            }
         }
 
         request->status        = chimera_linux_errno_to_status(errno);
@@ -1330,6 +1368,24 @@ chimera_linux_copy_range(
     src_off   = (loff_t) request->copy_range.src_offset;
     dst_off   = (loff_t) request->copy_range.dst_offset;
     remaining = request->copy_range.length;
+
+    /* Clamp the copy to the source bytes present when the operation starts.
+     * The retry loop below otherwise self-feeds on a same-file copy whose
+     * destination range extends the source: each chunk grows the file, the
+     * next iteration finds fresh bytes, and the total exceeds what a single
+     * copy_file_range(2) call -- and the engine backends -- would move. */
+    {
+        struct stat src_st;
+
+        if (fstat(src_fd, &src_st) == 0) {
+            uint64_t avail = (src_st.st_size > src_off) ?
+                (uint64_t) (src_st.st_size - src_off) : 0;
+
+            if (remaining > avail) {
+                remaining = avail;
+            }
+        }
+    }
 
     while (remaining > 0) {
         rc = copy_file_range(src_fd, &src_off, dst_fd, &dst_off, remaining, 0);
@@ -1595,6 +1651,21 @@ chimera_linux_rename_at(
 
     int renameat_errno = errno;
     chimera_restore_privilege(request->cred);
+
+    if (rc < 0 && (renameat_errno == ENOTEMPTY || renameat_errno == EEXIST)) {
+        /* When the destination is an ancestor of the source, the kernel asks
+         * "may the replaced directory be emptied" before the POSIX type
+         * pairing, answering ENOTEMPTY where rename(2) specifies EISDIR for
+         * a non-directory moved onto a directory.  Re-derive the type pair
+         * (as root: DAC was settled above) and correct that corner. */
+        struct stat ost, nst;
+
+        if (fstatat(old_fd, fullname, &ost, AT_SYMLINK_NOFOLLOW) == 0 &&
+            fstatat(new_fd, full_newname, &nst, AT_SYMLINK_NOFOLLOW) == 0 &&
+            !S_ISDIR(ost.st_mode) && S_ISDIR(nst.st_mode)) {
+            renameat_errno = EISDIR;
+        }
+    }
 
     if (rc < 0) {
         request->status = chimera_linux_errno_to_status(renameat_errno);
