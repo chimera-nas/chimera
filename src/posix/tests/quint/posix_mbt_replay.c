@@ -1286,6 +1286,18 @@ check_status(
             g_last_recon = "ND8";
             return 0;
         }
+        /* ND9: a path operation relative to a directory descriptor whose
+         * directory has been removed.  POSIX resolves through the held-open
+         * husk and reports ENOENT; an NFSv4 client holds only the directory's
+         * file handle (a directory open creates no state on the server), the
+         * server has reclaimed the object, and the wire answers STALE.  The
+         * kernel NFS client surfaces the same ESTALE. */
+        if (g_nfs_version == 4 && actual == 70 && expected == 2 &&
+            tf_field(g_cur_rv, "dfd") >= 0) {
+            record_dev("ND9");
+            g_last_recon = "ND9";
+            return 0;
+        }
         /* ND4 consequences of a lost descriptor / lost file (see the g_lost_*
          * block comment): EBADF where the model still holds the descriptor,
          * ENOENT where the model still has the file. */
@@ -3459,6 +3471,7 @@ replay_trace(const char *path)
         g_cur_pid  = pid;
         g_cur_step = (int) i;
         last_fs    = g_cur_fs;
+
 
         if (dispatch(tag, pid, tf_val(req), tf_val(res)) != 0) {
             fprintf(stderr, "%s: step %zu: unimplemented op %s\n", path, i,
