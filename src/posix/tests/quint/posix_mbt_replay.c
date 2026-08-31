@@ -166,6 +166,7 @@ static int           g_nmismatch;           /* per-trace mismatch tally       */
 static const char   *g_trace;               /* current trace path (messages)  */
 static int           g_step;                /* current trace step (messages)  */
 static json_t       *g_cur_fs;              /* model post-state fs (this step) */
+static json_t       *g_prev_fs;             /* model PRE-state fs (this step)  */
 static json_t       *g_cur_ps;              /* model protocol state (ps)       */
 static const char   *g_cur_tag;             /* current op tag (for reconcile)  */
 static json_t       *g_cur_rv;              /* current op request value        */
@@ -851,6 +852,24 @@ residue_preclear(
     if (len == 0 || !is_exempt(mp)) {
         return;
     }
+
+    /* Residue is a name the model does NOT have and chimera kept (the ND5
+     * silly-rename leftover this exists to sweep).  Test that against the
+     * model's PRE-state: g_cur_fs is the post-state, where a create the model
+     * just completed is always present, so it cannot tell residue from a file
+     * the model legitimately holds.
+     *
+     * When the model already had the name, this O_CREAT opens an existing
+     * file and creates nothing -- POSIX ignores the mode argument.  Unlinking
+     * it makes chimera's next O_CREAT the creating one, which stamps the
+     * file with THAT call's mode and owner, and the two namespaces disagree
+     * about every attribute from then on with no op ever returning a
+     * different errno.  (Reachable since specs#9 added genOpenCreat to the
+     * lock flavor; before that no O_CREAT in that walk reached here.) */
+    if (g_prev_fs && path_ino(g_prev_fs, comps) >= 0) {
+        return;
+    }
+
     apply_root_cred();
     if (chimera_posix_rmdir(path) == 0 || chimera_posix_unlink(path) == 0) {
         exempt_remove(mp);
@@ -3543,6 +3562,8 @@ replay_trace(const char *path)
         res = json_object_get(v, "res");
         tag = tf_tag(req);
 
+        g_prev_fs = i > 0 ? state_get(json_array_get(states, i - 1), "fs")
+                           : NULL;
         g_cur_fs   = state_get(st, "fs");
         g_cur_ps   = state_get(st, "ps");
         g_cur_tag  = tag;
