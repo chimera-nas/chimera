@@ -1321,6 +1321,20 @@ check_status(
             return 0;
         }
     }
+    if (posix_module_is_passthrough(g_module)) {
+        /* PT1: denial of a removal (or replacing rename) in a sticky
+         * directory.  POSIX permits either errno; the model, like the
+         * engine backends, answers EACCES while the Linux kernel answers
+         * EPERM. */
+        if (actual == 1 && expected == 13 &&
+            (strcmp(g_cur_tag, "RUnlink") == 0 ||
+             strcmp(g_cur_tag, "RRmdir") == 0 ||
+             strcmp(g_cur_tag, "RRename") == 0)) {
+            record_dev("PT1");
+            g_last_recon = "PT1";
+            return 0;
+        }
+    }
     mism("errno: expected %lld, got %d", (long long) expected, actual);
     return 0;
 } /* check_status */
@@ -1816,6 +1830,30 @@ op_lseek(
             (whence == SEEK_DATA || whence == SEEK_HOLE)) {
             record_dev("ND7");
             return;
+        }
+        /* PT2: a passthrough backend sits on a real filesystem that tracks
+         * holes, while the model (like the engine backends) reports every
+         * byte below EOF as data and the sole hole as starting at EOF.
+         * Both are POSIX-valid, so accept the real filesystem's refinement:
+         * SEEK_HOLE may find a hole at or after the queried offset but no
+         * later than the model's EOF answer; SEEK_DATA may skip real holes
+         * to a later offset than the model's, or answer ENXIO when nothing
+         * but holes remain below EOF. */
+        if (posix_module_is_passthrough(g_module) && exp_e == 0 &&
+            (whence == SEEK_DATA || whence == SEEK_HOLE)) {
+            int64_t qoff = tf_field(rv, "off");
+            int64_t moff = tf_field(res_v, "off");
+            int     ok   = 0;
+
+            if (whence == SEEK_HOLE) {
+                ok = (e == 0 && rc >= qoff && (int64_t) rc <= moff);
+            } else {
+                ok = (e == 6) || (e == 0 && (int64_t) rc >= moff);
+            }
+            if (ok) {
+                record_dev("PT2");
+                return;
+            }
         }
         /* PD25: a directory's st_size is unspecified; the model abstracts it
          * as 0 while memfs reports a block, so size-relative seeks (and the
@@ -2392,7 +2430,7 @@ op_readdir(
     int            nnames = 0, i;
     size_t         j;
 
-    (void) pid;
+    apply_cred(pid);
     if (!d) {
         int64_t msid = tf_field(rv, "sid");
         if (g_strict_dac && msid >= 0 && msid < R_MAXSID &&
@@ -3476,8 +3514,6 @@ replay_trace(const char *path)
         g_cur_step = (int) i;
         last_fs    = g_cur_fs;
 
-
-
         if (dispatch(tag, pid, tf_val(req), tf_val(res)) != 0) {
             fprintf(stderr, "%s: step %zu: unimplemented op %s\n", path, i,
                     tag);
@@ -3580,6 +3616,10 @@ main(
         }
     }
 
+    /* The final trace's leftover handles otherwise hold the mount busy
+     * through teardown's umount (the per-trace newfs only closes them at the
+     * start of the NEXT trace). */
+    close_live_handles();
     posix_env_teardown();
 
     printf("batch: %d replayed, %d failed, %d unhandled of %d trace(s)\n",

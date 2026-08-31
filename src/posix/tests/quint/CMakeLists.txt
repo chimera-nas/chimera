@@ -46,11 +46,8 @@ endif()
 #
 # The specs `posix` corpus carries per-backend profiles distinguished by
 # filename prefix: memfs (no prefix), the NFS loopbacks (nfs3_/nfs4_), the
-# on-disk backends (disk_) and FUSE (fuse_).  Each registered batch selects
-# its profile with --exclude-prefix.  Still unregistered: nfs4_ (the nfs4
-# client needs its own round of the fixes that took nfs3 to green -- see the
-# ND* registry in posix_mbt_replay.c) and disk_ (diskfs needs libaio;
-# runs in the container/CI like the other diskfs batches).
+# on-disk/passthrough backends (disk_) and FUSE (fuse_).  Each registered
+# batch selects its profile with --exclude-prefix.
 add_test(NAME chimera/posix/mbt/batch_memfs
     COMMAND $<TARGET_FILE:posix_mbt_replay>
             --backend memfs
@@ -100,3 +97,37 @@ set_tests_properties(chimera/posix/mbt/batch_nfs4_memfs PROPERTIES
     LABELS "quint;posix_mbt;memfs;nfs4_mbt"
     SKIP_RETURN_CODE 77
     TIMEOUT 600)
+
+# The disk_ profile replayed against the host-passthrough backends.  The
+# backing store is a fresh directory per trace under $CHIMERA_MBT_SCRATCH
+# (default: the build tree), whose filesystem must support name_to_handle_at
+# -- tmpfs/overlayfs do not, and the driver turns that ENOTSUP into a clean
+# SKIP.  The modules run with per-operation credential impersonation, so the
+# batch needs root (CI containers; skipped otherwise via the mount failure).
+if(CHIMERA_LINUX)
+    add_test(NAME chimera/posix/mbt/batch_linux
+        COMMAND $<TARGET_FILE:posix_mbt_replay>
+                --backend linux
+                --trace-dir ${SPECS_BUNDLE_DIR}/posix
+                --exclude-prefix step --exclude-prefix nfs3_
+                --exclude-prefix nfs4_ --exclude-prefix fuse_)
+    set_tests_properties(chimera/posix/mbt/batch_linux PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=posix_batch_linux"
+        LABELS "quint;posix_mbt;linux"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 600)
+endif()
+
+if(CHIMERA_VFS_IO_URING)
+    add_test(NAME chimera/posix/mbt/batch_io_uring
+        COMMAND $<TARGET_FILE:posix_mbt_replay>
+                --backend io_uring
+                --trace-dir ${SPECS_BUNDLE_DIR}/posix
+                --exclude-prefix step --exclude-prefix nfs3_
+                --exclude-prefix nfs4_ --exclude-prefix fuse_)
+    set_tests_properties(chimera/posix/mbt/batch_io_uring PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=posix_batch_io_uring"
+        LABELS "quint;posix_mbt;io_uring"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 600)
+endif()
