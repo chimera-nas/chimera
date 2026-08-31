@@ -45,13 +45,16 @@ chimera_nfs4_setattr_complete(
     chimera_nfs4_compound_complete(req, res->status);
 } /* chimera_nfs4_setattr_complete */
 
+/* Unmarshall the requested attributes and apply them to `handle`.  fd_rights
+ * selects descriptor semantics (chimera_vfs_fsetattr): a size change through
+ * an open stateid is authorized by the OPEN, exactly as ftruncate(2) is by
+ * its descriptor, and must not be re-gated against the file's current mode. */
 static void
-chimera_nfs4_setattr_open_callback(
-    enum chimera_vfs_error          error_code,
+chimera_nfs4_setattr_apply(
+    struct nfs_request             *req,
     struct chimera_vfs_open_handle *handle,
-    void                           *private_data)
+    int                             fd_rights)
 {
-    struct nfs_request       *req  = private_data;
     struct SETATTR4args      *args = &req->args_compound->argarray[req->index].opsetattr;
     struct SETATTR4res       *res  = &req->res_compound.resarray[req->index].opsetattr;
     struct chimera_vfs_attrs *attr;
@@ -62,14 +65,8 @@ chimera_nfs4_setattr_open_callback(
 
     req->handle = handle;
 
-    if (error_code != CHIMERA_VFS_OK) {
-        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
-        chimera_nfs4_compound_complete(req, res->status);
-        return;
-    }
-
-    struct chimera_acl *acl_buf      = NULL;
-    unsigned            acl_buf_aces = 0;
+    struct chimera_acl       *acl_buf      = NULL;
+    unsigned                  acl_buf_aces = 0;
     if (args->obj_attributes.num_attrmask >= 1 &&
         (args->obj_attributes.attrmask[0] & (1 << FATTR4_ACL))) {
         acl_buf = xdr_dbuf_alloc_space(chimera_acl_size(CHIMERA_ACL_MAX_ACES),
@@ -92,22 +89,62 @@ chimera_nfs4_setattr_open_callback(
         return;
     }
 
-    chimera_vfs_setattr(req->thread->vfs_thread,
-                        &req->cred,
-                        handle,
-                        attr,
-                        0,
-                        0,
-                        chimera_nfs4_setattr_complete,
-                        req);
+    if (fd_rights) {
+        chimera_vfs_fsetattr(req->thread->vfs_thread,
+                             &req->cred,
+                             handle,
+                             attr,
+                             0,
+                             0,
+                             chimera_nfs4_setattr_complete,
+                             req);
+    } else {
+        chimera_vfs_setattr(req->thread->vfs_thread,
+                            &req->cred,
+                            handle,
+                            attr,
+                            0,
+                            0,
+                            chimera_nfs4_setattr_complete,
+                            req);
+    }
+} /* chimera_nfs4_setattr_apply */
+
+static void
+chimera_nfs4_setattr_open_callback(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *handle,
+    void                           *private_data)
+{
+    struct nfs_request *req = private_data;
+    struct SETATTR4res *res = &req->res_compound.resarray[req->index].opsetattr;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        req->handle = handle;
+        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
+        chimera_nfs4_compound_complete(req, res->status);
+        return;
+    }
+
+    chimera_nfs4_setattr_apply(req, handle, 0);
 } /* chimera_nfs4_setattr_open_callback */
 
-/* Open the target and apply the attributes.  Invoked directly, or as the
- * resume continuation once a conflicting layout has been recalled. */
+/* Apply the attributes -- through the open stateid's own handle when the
+ * size-change validation stashed one (descriptor rights), otherwise via a
+ * fresh path-only open of the target.  Invoked directly, or as the resume
+ * continuation once a conflicting layout has been recalled. */
 static void
 nfs4_setattr_proceed(void *arg)
 {
     struct nfs_request *req = arg;
+
+    if (req->handle) {
+        struct chimera_vfs_open_handle *handle = req->handle;
+
+        req->handle = NULL;
+        chimera_nfs4_setattr_apply(req, handle, 1);
+        return;
+    }
 
     chimera_vfs_open_fh(req->thread->vfs_thread,
                         &req->cred,
@@ -134,6 +171,10 @@ chimera_nfs4_setattr(
      * the marshaller dereferences garbage. */
     res->num_attrsset = 0;
     res->attrsset     = NULL;
+
+    /* nfs_request is pooled; nfs4_setattr_proceed keys off req->handle to
+     * decide between the stateid-handle and path-open application paths. */
+    req->handle = NULL;
 
     if (req->fhlen == 0) {
         res->status = NFS4ERR_NOFILEHANDLE;
@@ -221,6 +262,16 @@ chimera_nfs4_setattr(
 
         bool has_write = (open_state->share_access &
                           OPEN4_SHARE_ACCESS_WRITE) != 0;
+
+        /* Apply through the open's own handle: the stateid authorizes the
+         * size change the way a descriptor authorizes ftruncate(2), and the
+         * OPEN-time handle carries that grant (and, on a passthrough
+         * backend, the writable descriptor itself) where a fresh path-only
+         * open would face a per-operation permission re-check. */
+        if (has_write && open_state->handle) {
+            chimera_vfs_dup_handle(thread->vfs_thread, open_state->handle);
+            req->handle = open_state->handle;
+        }
 
         nfs_state_table_release(table, open_state, NFS4_SLOT_TYPE_OPEN,
                                 thread->vfs_thread);
