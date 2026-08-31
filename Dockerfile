@@ -2,6 +2,11 @@
 #
 # SPDX-License-Identifier: Unlicense
 
+# Global scope, ahead of every FROM: an ARG reaches a FROM line only if it is
+# declared before the first FROM.  Below one it belongs to that stage instead
+# and the prefix expands to empty, sending the pull to Docker Hub unmirrored.
+ARG DOCKER_MIRROR
+
 # Current ccache, mirrored into GHCR by .github/workflows/mirror-ccache.yml.
 # CI overrides CCACHE_REGISTRY to the internal pull-through proxy so an image
 # build never reaches out to ghcr.io -- the same public-default/internal-override
@@ -15,7 +20,6 @@ ARG CCACHE_REGISTRY=ghcr.io/chimera-nas/ccache
 ARG CCACHE_VERSION=4.14
 FROM ${CCACHE_REGISTRY}:${CCACHE_VERSION} AS ccache
 
-ARG DOCKER_MIRROR
 FROM ${DOCKER_MIRROR}ubuntu:26.04 AS build
 ARG BUILD_TYPE=Release
 ARG APT_MIRROR
