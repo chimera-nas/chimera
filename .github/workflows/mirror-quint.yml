@@ -1,0 +1,109 @@
+# SPDX-FileCopyrightText: 2026 Chimera-NAS Project Contributors
+#
+# SPDX-License-Identifier: Unlicense
+
+name: Mirror quint
+
+# Build the node + quint toolchain once and publish it to GHCR, so the CI images
+# install it with a COPY --from instead of reaching nodejs.org and the npm
+# registry on every image build.  Same arrangement as Mirror ccache, and it is
+# proxied inside ARC by the repository.mdh.quantum.com:5009 pull-through the
+# same way.
+#
+# Why this matters beyond build time: without quint on PATH, libevpl's
+# Core/HTTP/RPC2 conformance suites and its quint_model checks disable
+# themselves.  They have only ever run in the devcontainer -- every other image
+# reported "conformance test disabled (needs quint and python3 on PATH)" and
+# ran zero libevpl quint tests.  chimera's own MBT suites are unaffected: they
+# replay the prebuilt specs bundle and need no quint at all.
+#
+# Manual, not on push: the toolchain moves when someone bumps a version, and
+# the images pin QUINT_VERSION, so nothing changes under CI on its own.
+#
+# KEEP the default in sync with ext/specs/.quint-version and the pin in
+# .devcontainer/Dockerfile.  Trace generation is seeded and reproducible for a
+# given quint release, but different releases sample the state space
+# differently, which is why ext/specs records the version it generated against.
+on:
+  workflow_dispatch:
+    inputs:
+      quint_version:
+        description: quint release to package (e.g. 0.32.0)
+        required: true
+        default: "0.32.0"
+      node_version:
+        description: Node release to package it against
+        required: true
+        default: "20.18.1"
+
+jobs:
+  mirror:
+    name: Mirror quint ${{ inputs.quint_version }} to GHCR
+    runs-on: arc-amd64
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+        with:
+          driver: docker-container
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # One tag, two architectures: a consumer names
+      # ghcr.io/chimera-nas/quint:<version> and buildkit resolves the leg
+      # matching the image being built.  The Rust evaluator is architecture
+      # specific, so each leg warms its own.
+      - name: Build and push the multi-arch quint image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.quint
+          target: linux-image
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ghcr.io/chimera-nas/quint:${{ inputs.quint_version }}
+          build-args: |
+            QUINT_VERSION=${{ inputs.quint_version }}
+            NODE_VERSION=${{ inputs.node_version }}
+          annotations: |
+            index:org.opencontainers.image.source=https://github.com/chimera-nas/chimera
+            index:org.opencontainers.image.description=node ${{ inputs.node_version }} + quint ${{ inputs.quint_version }} with a warmed Rust evaluator, for the CI images
+
+      # macOS cannot use the image above -- it holds Linux binaries -- but only
+      # the Rust evaluator is actually platform specific; quint itself is
+      # JavaScript.  So the darwin payload is the same JS tree plus both darwin
+      # evaluators, published as an OCI artifact the way the ccache darwin
+      # binary is.  With it the macOS jobs reach neither the npm registry nor
+      # the GitHub releases endpoint -- and that second one is what a
+      # merge-queue run has already died on, rate-limited.
+      - name: Build the darwin payload
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.quint
+          target: darwin-bundle
+          platforms: linux/amd64
+          push: false
+          outputs: type=local,dest=darwin-out
+
+      - name: Install oras
+        uses: oras-project/setup-oras@v1
+
+      - name: Push the darwin payload as an OCI artifact
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | \
+            oras login ghcr.io -u "${{ github.actor }}" --password-stdin
+          mv darwin-out/quint-darwin.tar.gz .
+          oras push "ghcr.io/chimera-nas/quint:${{ inputs.quint_version }}-darwin" \
+              --annotation "org.opencontainers.image.source=https://github.com/chimera-nas/chimera" \
+              quint-darwin.tar.gz:application/gzip

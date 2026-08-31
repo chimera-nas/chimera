@@ -1,0 +1,106 @@
+# SPDX-FileCopyrightText: 2026 Chimera-NAS Project Contributors
+#
+# SPDX-License-Identifier: Unlicense
+#
+# Node, quint and quint's Rust evaluator, packaged as one multi-arch image the
+# CI Dockerfiles COPY --from.  Same arrangement as Dockerfile.ccache: build the
+# toolchain once, mirror it to GHCR, and let every image install from there
+# rather than reach nodejs.org and the npm registry on each build.
+#
+# Node comes from the upstream tarball rather than a distro package or the
+# official node image, and that is a portability requirement rather than a
+# preference: Debian/Ubuntu node packages link against the glibc of the distro
+# that built them, while the upstream tarballs target a much older one, so the
+# same binary runs on ubuntu 22.04 (glibc 2.35) and rocky 9 (2.34) alike.
+# Ubuntu 22.04's own package is node 12, far below what quint needs.
+#
+# Everything lands under a single /opt/quint prefix so a consumer copies one
+# directory and adds one entry to PATH, with no risk of colliding with whatever
+# the base image already keeps in /usr/local.
+
+ARG NODE_VERSION=20.18.1
+ARG QUINT_VERSION=0.32.0
+
+FROM debian:bookworm-slim AS build
+ARG NODE_VERSION
+ARG QUINT_VERSION
+ARG TARGETARCH
+
+RUN apt-get update -qq && \
+    apt-get install -y --no-install-recommends curl ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN case "${TARGETARCH}" in \
+        amd64) node_arch=x64 ;; \
+        arm64) node_arch=arm64 ;; \
+        *) echo "unsupported TARGETARCH '${TARGETARCH}'" >&2 ; exit 1 ;; \
+    esac && \
+    mkdir -p /opt/quint && \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 \
+        "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.gz" \
+        | tar -xz -C /opt/quint --strip-components=1 \
+              --exclude=CHANGELOG.md --exclude=LICENSE --exclude=README.md && \
+    PATH=/opt/quint/bin:$PATH \
+        npm install -g --prefix /opt/quint @informalsystems/quint@${QUINT_VERSION}
+
+# quint fetches its Rust evaluator on first simulate, into ~/.quint.  The ARC
+# runners reach the network through internal mirrors only, so that download
+# arrives truncated there and every generation fails.  Warming it here bakes the
+# evaluator into the image, and the closing ls fails this build -- where it is
+# fixable -- rather than every downstream job.
+#
+# Double quotes so quint's prime operator (n') needs no escaping: inside single
+# quotes a backslash is literal and would end the string early.
+RUN printf "module warm {\n  var n: int\n  action init = n' = 0\n  action step = n' = n + 1\n}\n" \
+        > /tmp/warm.qnt && \
+    { PATH=/opt/quint/bin:$PATH quint run /tmp/warm.qnt \
+        --max-steps=1 --max-samples=1 > /dev/null 2>&1 || true ; } && \
+    rm -f /tmp/warm.qnt && \
+    ls -d /root/.quint/rust-evaluator-*/quint_evaluator
+
+# The published Linux image is just the two trees.  A consumer copies them and
+# never pays for the download, the npm install, or the evaluator warm-up.
+# Named, because the darwin stages below would otherwise become the default
+# build target.
+FROM scratch AS linux-image
+COPY --from=build /opt/quint  /opt/quint
+COPY --from=build /root/.quint /quint-home
+
+# --------------------------------------------------------------------------
+# The darwin payload.
+#
+# macOS cannot use the image above: it is Linux binaries.  But only one piece
+# of quint is actually platform specific -- the Rust evaluator.  The package
+# itself is JavaScript, so the tree npm installed here runs unchanged on a
+# GitHub-hosted macOS runner against the node it already has.
+#
+# Packaging it here means the macOS jobs stop reaching the npm registry AND
+# stop fetching the evaluator from the GitHub releases endpoint.  That second
+# one is not hypothetical: the release fetch is what a merge-queue run has
+# already died on, and the workaround in build-test.yml exists because quint
+# aborts rather than falling back when the evaluator is missing or half
+# written.
+# --------------------------------------------------------------------------
+FROM build AS darwin
+ARG TARGETARCH
+RUN root=/opt/quint/lib/node_modules/@informalsystems/quint && \
+    ver=$(/opt/quint/bin/node -e \
+        "console.log(require('$root/dist/src/rust/binaryManager').QUINT_EVALUATOR_VERSION)") && \
+    echo "quint evaluator version: $ver" && \
+    mkdir -p "/darwin/rust-evaluator-$ver" && \
+    printf '%s\n' "$ver" > /darwin/evaluator-version && \
+    for a in aarch64 x86_64 ; do \
+        curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 \
+             -o /tmp/ev.tar.gz \
+             "https://github.com/informalsystems/quint/releases/download/evaluator/$ver/quint_evaluator-$a-apple-darwin.tar.gz" && \
+        mkdir -p /tmp/ev && tar -xzf /tmp/ev.tar.gz -C /tmp/ev && \
+        mv /tmp/ev/quint_evaluator "/darwin/rust-evaluator-$ver/quint_evaluator-$a" && \
+        rm -rf /tmp/ev /tmp/ev.tar.gz ; \
+    done && \
+    mkdir -p /darwin/quint/bin && \
+    cp -a /opt/quint/lib /darwin/quint/lib && \
+    cp -a /opt/quint/bin/quint /darwin/quint/bin/quint && \
+    tar -czf /quint-darwin.tar.gz -C /darwin .
+
+FROM scratch AS darwin-bundle
+COPY --from=darwin /quint-darwin.tar.gz /quint-darwin.tar.gz
