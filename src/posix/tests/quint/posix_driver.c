@@ -28,6 +28,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <ftw.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -69,11 +70,55 @@ static FILE                      *proto_out;
  * MBT batches get from a per-trace fsname.  Set once in main(). */
 static const char                *g_module;     /* VFS module (memfs/...)     */
 static int                        g_nfs_version; /* 0 = direct; 3/4 = loopback */
+static int                        g_strict_dac; /* chimera enforces DAC beyond
+                                                 * the model: NFS loopback or a
+                                                 * passthrough backend (engine
+                                                 * prefix/search gates) */
 static int                        g_fs_counter; /* bumped per newfs -> fsN     */
 static char                       g_fsname[32] = "fs0";
 static struct chimera_vfs_cred    g_root_cred;
 static struct chimera_server     *g_server;     /* loopback server (nfs only) */
 static struct prometheus_metrics *g_metrics;
+static char                       g_pt_root[300]; /* passthrough scratch root */
+
+/* memfs/diskfs/cairn create named filesystems (mkfs); linux and io_uring are
+ * passthrough onto a host directory -- the path IS the filesystem, and the
+ * per-trace recycle makes a fresh subdirectory instead of a fresh fs. */
+static int
+posix_module_is_passthrough(const char *module)
+{
+    return strcmp(module, "linux") == 0 || strcmp(module, "io_uring") == 0;
+} /* posix_module_is_passthrough */
+
+static int
+pt_rm_cb(
+    const char        *path,
+    const struct stat *st,
+    int                type,
+    struct FTW        *ftw)
+{
+    (void) st;
+    (void) ftw;
+    return (type == FTW_DP ? rmdir(path) : unlink(path));
+} /* pt_rm_cb */
+
+/* Recursively remove a passthrough backing tree.  Space on the scratch
+ * filesystem is a real budget (CI roots it on a shared volume), so the old
+ * tree goes away at each recycle rather than accumulating. */
+static int
+pt_remove_tree(const char *path)
+{
+    return nftw(path, pt_rm_cb, 16, FTW_DEPTH | FTW_PHYS);
+} /* pt_remove_tree */
+
+/* Path of the current passthrough backing directory (g_pt_root/g_fsname). */
+static void
+pt_tree_path(
+    char  *buf,
+    size_t cap)
+{
+    snprintf(buf, cap, "%s/%s", g_pt_root, g_fsname);
+} /* pt_tree_path */
 
 /* Decode standard base64 (no whitespace); returns length or -1. */
 static int
@@ -1016,6 +1061,39 @@ handle(json_t *req)
             }
             usleep(1000);
         }
+        if (posix_module_is_passthrough(g_module)) {
+            /* Passthrough recycle: a fresh uniquely-named backing directory is
+             * the fresh filesystem.  Remove the old tree (scratch space is a
+             * real budget) and mount the new one; the new directory's fresh
+             * inode gives the mount a fresh root handle, so no cached FH can
+             * cross traces. */
+            char old_dir[340], new_dir[340];
+
+            pt_tree_path(old_dir, sizeof(old_dir));
+            if (pt_remove_tree(old_dir) != 0) {
+                fprintf(stderr, "posix_driver: newfs remove %s failed: %s\n",
+                        old_dir, strerror(errno));
+                return res_int(-1, errno);
+            }
+            snprintf(g_fsname, sizeof(g_fsname), "fs%d", ++g_fs_counter);
+            pt_tree_path(new_dir, sizeof(new_dir));
+            if (mkdir(new_dir, 0777) != 0) {
+                fprintf(stderr, "posix_driver: newfs mkdir %s failed: %s\n",
+                        new_dir, strerror(errno));
+                return res_int(-1, errno);
+            }
+            if (chimera_posix_mount("/test", g_module, new_dir) != 0) {
+                fprintf(stderr, "posix_driver: newfs mount %s failed: %s\n",
+                        new_dir, strerror(errno));
+                return res_int(-1, errno);
+            }
+            if (normalize_root() != 0) {
+                fprintf(stderr, "posix_driver: newfs normalize failed: %s\n",
+                        strerror(errno));
+                return res_int(-1, errno);
+            }
+            return res_int(0, 0);
+        }
         /* Remove the old filesystem rather than leaking it.  The replayer has
          * dropped every handle and the unmount drained them, so rmfs succeeds
          * once the async sweep releases the last reference (bounded-retry that
@@ -1140,6 +1218,36 @@ posix_env_setup(
         }
         snprintf(module_cfg, sizeof(module_cfg),
                  "{\"initialize\":true,\"path\":\"%s\"}", storage);
+    } else if (posix_module_is_passthrough(module)) {
+        /* Passthrough backing store.  The host filesystem must support
+         * name_to_handle_at (the linux/io_uring modules derive their file
+         * handles with it) -- tmpfs and overlayfs do not, so the usual /tmp
+         * will not do.  Root the trees at $CHIMERA_MBT_SCRATCH (default: the
+         * current directory, which under ctest is the build tree); an
+         * unsupported filesystem surfaces as an ENOTSUP mount that the mount
+         * below turns into a clean skip.  Mirrors the NFS3 MBT harness. */
+        const char *scratch = getenv("CHIMERA_MBT_SCRATCH");
+        char       *abs_scratch;
+
+        if (!scratch || !scratch[0]) {
+            scratch = ".";
+        }
+        /* The module opens this path from a worker thread, so it must be
+         * absolute. */
+        abs_scratch = realpath(scratch, NULL);
+        if (!abs_scratch) {
+            fprintf(stderr, "posix_driver: realpath(%s): %s\n", scratch,
+                    strerror(errno));
+            return 1;
+        }
+        snprintf(g_pt_root, sizeof(g_pt_root),
+                 "%s/posix_mbt_pt_XXXXXX", abs_scratch);
+        free(abs_scratch);
+        if (!mkdtemp(g_pt_root)) {
+            fprintf(stderr, "posix_driver: mkdtemp(%s): %s\n", g_pt_root,
+                    strerror(errno));
+            return 1;
+        }
     } else {
         fprintf(stderr, "posix_driver: unknown backend %s\n", backend);
         return 1;
@@ -1215,7 +1323,9 @@ posix_env_setup(
                              "%s", module_cfg);
                 }
             }
-        } else {
+        } else if (!posix_module_is_passthrough(module)) {
+            /* linux/io_uring are already in the default client module set
+             * (Linux builds); adding them again would double-register. */
             chimera_client_config_add_module(config, module, "", module_cfg);
         }
 
@@ -1225,15 +1335,47 @@ posix_env_setup(
             return 1;
         }
 
-        /* Named-filesystem backend (memfs/diskfs/cairn): create the fs first. */
-        if (chimera_posix_mkfs(module, "fs0", NULL) != 0) {
-            fprintf(stderr, "posix_driver: mkfs %s fs0 failed\n", module);
-            return 1;
-        }
+        if (posix_module_is_passthrough(module)) {
+            /* Passthrough: the backing directory is the filesystem.  The
+             * model's root is 0777 root:root; create the tree that way
+             * (normalize_root below re-asserts it through the mount). */
+            char dir[340];
 
-        if (chimera_posix_mount("/test", module, "fs0") != 0) {
-            fprintf(stderr, "posix_driver: %s mount failed\n", backend);
-            return 1;
+            snprintf(dir, sizeof(dir), "%s/fs0", g_pt_root);
+            if (mkdir(dir, 0777) != 0) {
+                fprintf(stderr, "posix_driver: mkdir %s: %s\n", dir,
+                        strerror(errno));
+                return 1;
+            }
+            if (chimera_posix_mount("/test", module, dir) != 0) {
+                if (errno == ENOTSUP || errno == EOPNOTSUPP) {
+                    /* The scratch filesystem cannot produce file handles
+                     * (name_to_handle_at): tmpfs/overlayfs, e.g. a /tmp or
+                     * overlay build tree.  Skip rather than fail -- point
+                     * CHIMERA_MBT_SCRATCH at an ext4/xfs/btrfs path to
+                     * actually exercise the backend. */
+                    fprintf(stderr,
+                            "SKIP: %s backend needs a name_to_handle_at-capable "
+                            "scratch fs; %s is not one (set CHIMERA_MBT_SCRATCH)\n",
+                            module, dir);
+                    exit(77);
+                }
+                fprintf(stderr, "posix_driver: %s mount failed: %s\n",
+                        backend, strerror(errno));
+                return 1;
+            }
+        } else {
+            /* Named-filesystem backend (memfs/diskfs/cairn): create the fs
+             * first. */
+            if (chimera_posix_mkfs(module, "fs0", NULL) != 0) {
+                fprintf(stderr, "posix_driver: mkfs %s fs0 failed\n", module);
+                return 1;
+            }
+
+            if (chimera_posix_mount("/test", module, "fs0") != 0) {
+                fprintf(stderr, "posix_driver: %s mount failed\n", backend);
+                return 1;
+            }
         }
     }
 
@@ -1241,6 +1383,7 @@ posix_env_setup(
      * the server/metrics handles so posix_env_teardown can release them. */
     g_module      = module;
     g_nfs_version = nfs_version;
+    g_strict_dac  = nfs_version != 0 || posix_module_is_passthrough(module);
     g_root_cred   = root_cred;
     g_server      = server;
     g_metrics     = metrics;
@@ -1258,6 +1401,9 @@ posix_env_teardown(void)
 {
     chimera_posix_umount("/test");
     chimera_posix_shutdown();
+    if (g_pt_root[0]) {
+        (void) pt_remove_tree(g_pt_root);
+    }
     if (g_server) {
         chimera_server_destroy(g_server);
     }
