@@ -16,6 +16,20 @@ ARG DOCKER_MIRROR=""
 # rocky9 and ubuntu22 ship 4.6, which reads the pre-rename name and so silently
 # ignored the shared cache -- those cells compiled everything cold, every run.
 # One pinned upstream binary everywhere retires that whole class of skew.
+# No quint in this image, deliberately.  quint's Rust evaluator is published
+# only as *-unknown-linux-gnu and is built against glibc 2.39, which is newer
+# than this distro's, so it loads and then dies the first time a generator runs:
+#   quint_evaluator: /lib/.../libc.so.6: version `GLIBC_2.39' not found
+# There is no musl build upstream to mirror instead.  libevpl's Core/HTTP/RPC2
+# conformance suites and its quint_model checks therefore stay disabled here,
+# exactly as they always have been; they run on ubuntu 24.04/26.04, rocky 10,
+# the devcontainer and macOS, which is the same code on four other platforms.
+#
+# chimera's own model-based suites are NOT affected and must keep running: they
+# replay the prebuilt specs bundle that cmake/SpecsBundle.cmake fetches with
+# oras, and need quint only as the fallback when no bundle can be had.  This
+# image is unchanged from before in that respect.
+
 ARG CCACHE_REGISTRY=ghcr.io/chimera-nas/ccache
 ARG CCACHE_VERSION=4.14
 FROM ${CCACHE_REGISTRY}:${CCACHE_VERSION} AS ccache

@@ -54,6 +54,9 @@ env:
   # Internal pull-through cache for the mirrored ccache image (mirrors
   # ghcr.io/chimera-nas/ccache).  Public default lives in the Dockerfiles.
   CCACHE_IMAGE_REGISTRY: repository.mdh.quantum.com:5009/chimera-nas/ccache
+  # Internal pull-through for the mirrored quint toolchain (mirrors
+  # ghcr.io/chimera-nas/quint).  Public default lives in the Dockerfiles.
+  QUINT_IMAGE_REGISTRY: repository.mdh.quantum.com:5009/chimera-nas/quint
   # Where the Extended workflow publishes ccache bundles.  Not a secret -- the same
   # literal is in build-test.yml -- so a fork PR can at least attempt a read.
   NEXUS_SCRATCH_URL: http://repository.mdh.quantum.com/repository/scratch
@@ -130,6 +133,7 @@ jobs:
             APT_MIRROR=${{ env.APT_MIRROR }}
             DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
             CCACHE_REGISTRY=${{ env.CCACHE_IMAGE_REGISTRY }}
+            QUINT_REGISTRY=${{ env.QUINT_IMAGE_REGISTRY }}
 
   analyze-dev:
     name: Analyze devcontainer amd64 Release (pre-merge)

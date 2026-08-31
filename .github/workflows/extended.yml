@@ -46,6 +46,9 @@ env:
   # Internal pull-through cache for the mirrored ccache image (mirrors
   # ghcr.io/chimera-nas/ccache).  Public default lives in the Dockerfiles.
   CCACHE_IMAGE_REGISTRY: repository.mdh.quantum.com:5009/chimera-nas/ccache
+  # Internal pull-through for the mirrored quint toolchain (mirrors
+  # ghcr.io/chimera-nas/quint).  Public default lives in the Dockerfiles.
+  QUINT_IMAGE_REGISTRY: repository.mdh.quantum.com:5009/chimera-nas/quint
   # This workflow is the WRITER for every shared ccache.  It runs on a schedule
   # against main, builds the extended tier (so it touches more of the tree than
   # the queue does), and publishes each cell's local cache as a bundle the
@@ -102,6 +105,7 @@ jobs:
             APT_MIRROR=${{ env.APT_MIRROR }}
             DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
             CCACHE_REGISTRY=${{ env.CCACHE_IMAGE_REGISTRY }}
+            QUINT_REGISTRY=${{ env.QUINT_IMAGE_REGISTRY }}
 
   build-ubuntu26:
     name: Build ubuntu26 ${{ matrix.arch }}
@@ -147,6 +151,7 @@ jobs:
             APT_MIRROR=${{ env.APT_MIRROR }}
             DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
             CCACHE_REGISTRY=${{ env.CCACHE_IMAGE_REGISTRY }}
+            QUINT_REGISTRY=${{ env.QUINT_IMAGE_REGISTRY }}
 
   build-ubuntu24:
     name: Build ubuntu24 ${{ matrix.arch }}
@@ -192,6 +197,7 @@ jobs:
             APT_MIRROR=${{ env.APT_MIRROR }}
             DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
             CCACHE_REGISTRY=${{ env.CCACHE_IMAGE_REGISTRY }}
+            QUINT_REGISTRY=${{ env.QUINT_IMAGE_REGISTRY }}
 
   build-ubuntu22:
     name: Build ubuntu22 ${{ matrix.arch }}
@@ -325,6 +331,7 @@ jobs:
           build-args: |
             DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
             CCACHE_REGISTRY=${{ env.CCACHE_IMAGE_REGISTRY }}
+            QUINT_REGISTRY=${{ env.QUINT_IMAGE_REGISTRY }}
 
   test:
     name: Test ${{ matrix.image_name }} ${{ matrix.arch }} ${{ matrix.build_type }}
@@ -650,6 +657,46 @@ jobs:
           key: ccache-macos-${{ matrix.build_type }}-${{ github.sha }}
           restore-keys: |
             ccache-macos-${{ matrix.build_type }}-
+
+      # quint from the mirrored darwin payload rather than the npm registry and
+      # the GitHub releases endpoint.  Only the Rust evaluator is platform
+      # specific -- quint itself is JavaScript -- so this is the same tree the
+      # Linux images get, plus the darwin evaluator, pre-placed where quint
+      # looks for it.
+      #
+      # That pre-placement is a gate, not a nicety.  quint's default rust
+      # backend fetches the evaluator on first use and ABORTS rather than
+      # falling back to its interpreter when the fetch fails; a merge-queue run
+      # has already died that way on an anonymous, rate-limited releases API
+      # call, and the run after it found a half-written ~/.quint and died in
+      # chmod.  Nothing is fetched at job time now.
+      - name: Install quint from the mirrored payload
+        run: |
+          set -euo pipefail
+          # Pinned by ext/specs/.quint-version, not hardcoded here: trace
+          # generation is seeded and reproducible for a given quint release,
+          # and that file is what records the release the corpus was generated
+          # against.  The mirrored tag follows it.
+          qver=$(tr -d '[:space:]' < ext/specs/.quint-version)
+          oras pull "ghcr.io/chimera-nas/quint:${qver}-darwin" \
+               --output "${RUNNER_TEMP}/quint-dl"
+          mkdir -p "${RUNNER_TEMP}/quint"
+          tar -xzf "${RUNNER_TEMP}/quint-dl/quint-darwin.tar.gz" \
+              -C "${RUNNER_TEMP}/quint"
+          ver=$(cat "${RUNNER_TEMP}/quint/evaluator-version")
+          case "$(uname -m)" in
+            arm64|aarch64) ev=quint_evaluator-aarch64 ;;
+            x86_64)        ev=quint_evaluator-x86_64 ;;
+            *) echo "no quint evaluator for $(uname -m)" >&2; exit 1 ;;
+          esac
+          dir="$HOME/.quint/rust-evaluator-$ver"
+          mkdir -p "$dir"
+          install -m 0755 "${RUNNER_TEMP}/quint/rust-evaluator-$ver/$ev" \
+                  "$dir/quint_evaluator"
+          echo "${RUNNER_TEMP}/quint/quint/bin" >> "$GITHUB_PATH"
+          # --help, not --version: the evaluator rejects the latter and exits 1.
+          "$dir/quint_evaluator" --help > /dev/null
+          "${RUNNER_TEMP}/quint/quint/bin/quint" --version
 
       - name: Configure and build
         env:
