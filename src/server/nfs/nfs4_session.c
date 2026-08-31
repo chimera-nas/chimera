@@ -1517,7 +1517,7 @@ nfs4_replay_capture_reply(
     void                    *private_data)
 {
     struct nfs_request      *req     = private_data;
-    struct nfs4_session     *session = req->session;
+    struct nfs4_session     *session = req->replay_session;
     struct nfs4_replay_slot *slot    = req->replay_slot;
     uint8_t                 *buf;
     size_t                   offset = 0;
@@ -1681,6 +1681,7 @@ nfs4_replay_slot_acquire(
                 continue;  /* lost the race; re-read and re-evaluate */
             }
             req->replay_slot        = slot;
+            req->replay_session     = session;
             req->replay_slot_id     = slotid;
             req->replay_action      = NFS4_REPLAY_ACTION_NEW;
             slot->in_progress_since = nfs4_slot_now();
@@ -1719,6 +1720,7 @@ nfs4_replay_slot_acquire(
                     }
                 }
                 req->replay_slot        = slot;
+                req->replay_session     = session;
                 req->replay_slot_id     = slotid;
                 req->replay_action      = NFS4_REPLAY_ACTION_NEW;
                 slot->in_progress_since = nfs4_slot_now();
@@ -1776,6 +1778,7 @@ nfs4_replay_slot_acquire(
                         continue;  /* lost the race; re-read and re-evaluate */
                     }
                     req->replay_slot        = slot;
+                    req->replay_session     = session;
                     req->replay_slot_id     = slotid;
                     req->replay_action      = NFS4_REPLAY_ACTION_FROM_CACHE;
                     *out_is_replay          = true;
@@ -1860,7 +1863,7 @@ nfs4_replay_slot_acquire(
 void
 nfs4_replay_slot_finalize(struct nfs_request *req)
 {
-    struct nfs4_session     *session = req->session;
+    struct nfs4_session     *session = req->replay_session;
     struct nfs4_replay_slot *slot    = req->replay_slot;
     uint64_t                 cur;
 

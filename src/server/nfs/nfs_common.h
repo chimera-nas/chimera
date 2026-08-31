@@ -201,6 +201,11 @@ struct nfs_request {
      * at completion time (nfs4_replay_slot_finalize) and on replay
      * short-circuit. */
     struct nfs4_replay_slot          *replay_slot;
+    /* The session that owns replay_slot.  Distinct from req->session, which
+     * a CREATE_SESSION later in the same compound reassigns to the session
+     * it creates -- the reply capture and slot finalize must keep charging
+     * the slot's owner. */
+    struct nfs4_session              *replay_session;
     uint32_t                          replay_slot_id;
     uint8_t                           replay_action;
     /* Continuation parked while nfs4_root_junction_check resolves the "/"
@@ -518,6 +523,7 @@ nfs_request_alloc(
     req->encoding = encoding;
 
     req->replay_slot    = NULL;
+    req->replay_session = NULL;
     req->replay_slot_id = 0;
     req->replay_action  = NFS4_REPLAY_ACTION_NONE;
 

@@ -3704,7 +3704,9 @@ run_compound(
 
             if (c->status != rep.status || c->nres != rep.nres) {
                 mism_add(m, "SEQUENCE replay: reply differs from the "
-                         "original (reply cache violation)");
+                         "original (reply cache violation): "
+                         "original status %u nres %d, replay status %u nres %d",
+                         c->status, c->nres, rep.status, rep.nres);
             } else {
                 for (n = 0; n < rep.nres; n++) {
                     if (c->op[n].status != rep.res[n].status ||
