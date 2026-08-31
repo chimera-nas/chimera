@@ -415,6 +415,29 @@ chimera_vfs_gate_delete(
         return;
     }
 
+    chimera_vfs_gate_delete_always(ctx, thread, cred, parent_fh, parent_fhlen,
+                                   child_fh, child_fhlen, callback,
+                                   private_data);
+} /* chimera_vfs_gate_delete */
+
+/*
+ * As chimera_vfs_gate_delete(), but enforced unconditionally -- for callers
+ * that already decided enforcement applies (the rename gates run under
+ * chimera_vfs_gate_needed_dac, where the per-object helpers' own
+ * gate_needed test would wrongly skip a DELEGATES_DAC passthrough).
+ */
+SYMBOL_EXPORT void
+chimera_vfs_gate_delete_always(
+    struct chimera_vfs_gate_ctx   *ctx,
+    struct chimera_vfs_thread     *thread,
+    const struct chimera_vfs_cred *cred,
+    const void                    *parent_fh,
+    int                            parent_fhlen,
+    const void                    *child_fh,
+    int                            child_fhlen,
+    chimera_vfs_gate_callback_t    callback,
+    void                          *private_data)
+{
     ctx->thread       = thread;
     ctx->cred         = cred;
     ctx->child_fh     = child_fh;
@@ -429,4 +452,4 @@ chimera_vfs_gate_delete(
     chimera_vfs_open_fh(thread, cred, parent_fh, parent_fhlen,
                         CHIMERA_VFS_OPEN_INFERRED | CHIMERA_VFS_OPEN_PATH,
                         chimera_vfs_gate_delete_parent_open, ctx);
-} /* chimera_vfs_gate_delete */
+} /* chimera_vfs_gate_delete_always */
