@@ -82,6 +82,57 @@ set_tests_properties(chimera/server/smb/mbt/replay_probe_memfs PROPERTIES
     LABELS "quint;smb_mbt;memfs"
     TIMEOUT 120)
 
+# Wire-protection ground-truth probe: walks a matrix of connection profiles
+# (dialect ceiling x NTLMv2 auth x signing algorithm x cipher) and asserts a
+# full session works over each.  This is the only test that reaches the
+# server's protection layer at all -- signing, SMB3 key derivation, the
+# TRANSFORM header, 3.1.1 negotiate contexts and algorithm selection, and real
+# NTLMv2 credential validation -- which every other test crosses unprotected.
+add_executable(smb2_wire_probe smb2_wire_probe.c)
+target_include_directories(smb2_wire_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(smb2_wire_probe chimera_server chimera_metrics crypto)
+
+add_test(NAME chimera/server/smb/mbt/wire_probe_memfs
+    COMMAND $<TARGET_FILE:smb2_wire_probe>)
+set_tests_properties(chimera/server/smb/mbt/wire_probe_memfs PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_wire_probe_memfs"
+    LABELS "quint;smb_mbt;memfs"
+    TIMEOUT 180)
+
+# FSCTL ground-truth probe: server-side copy, copy-offload tokens, block
+# cloning, reparse points and the sparse-file trio.  No trace in the corpus
+# emits an IOCTL, so this is the only test that reaches src/server/smb's
+# largest dark region.  Every assertion is on the FSCTL's effect (bytes at a
+# destination, a range reading back as zeroes, a link target surviving a round
+# trip), never on the status alone.
+add_executable(smb2_fsctl_probe smb2_fsctl_probe.c)
+target_include_directories(smb2_fsctl_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(smb2_fsctl_probe chimera_server chimera_metrics crypto)
+
+add_test(NAME chimera/server/smb/mbt/fsctl_probe_memfs
+    COMMAND $<TARGET_FILE:smb2_fsctl_probe>)
+set_tests_properties(chimera/server/smb/mbt/fsctl_probe_memfs PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_fsctl_probe_memfs"
+    LABELS "quint;smb_mbt;memfs"
+    TIMEOUT 120)
+
+# Information-class probe: the QUERY_INFO / SET_INFO surface.  The corpus asks
+# for one file-info class and sets three, so most of the class table and the
+# smb_attr.h marshallers never run.  The probe sweeps every implemented class
+# on both a file and a directory, then checks the classes AGAINST EACH OTHER --
+# a marshaller that writes the right byte count into the wrong field passes a
+# size check and fails an agreement check.
+add_executable(smb2_info_probe smb2_info_probe.c)
+target_include_directories(smb2_info_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(smb2_info_probe chimera_server chimera_metrics crypto)
+
+add_test(NAME chimera/server/smb/mbt/info_probe_memfs
+    COMMAND $<TARGET_FILE:smb2_info_probe>)
+set_tests_properties(chimera/server/smb/mbt/info_probe_memfs PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_info_probe_memfs"
+    LABELS "quint;smb_mbt;memfs"
+    TIMEOUT 120)
+
 # ---------------------------------------------------------------------------
 # Trace replay (ROADMAP-SMB.md Increment 3).  A single smb2_mbt_replay process
 # opens the server + client evpl once per CAPABILITY PROFILE (the corpus spans
@@ -115,6 +166,23 @@ add_test(NAME chimera/server/smb/mbt/batch_memfs
 # run where nothing was drivable into a ctest SKIP rather than a false pass.
 set_tests_properties(chimera/server/smb/mbt/batch_memfs PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_batch_memfs"
+    LABELS "quint;smb_mbt;memfs"
+    TIMEOUT 1800
+    SKIP_RETURN_CODE 77)
+
+# The same corpus over a PROTECTED connection: SMB 3.1.1, a real NTLMv2 logon,
+# and every request signed with AES-GMAC.  The model says nothing about wire
+# protection -- it is the same SMB2 conversation either way -- so the traces
+# and their expected results are identical; what changes is that the server's
+# signing path, 3.1.1 key derivation and negotiate-context handling are now
+# crossed by every packet of every trace, including the compound replies and
+# break notifications that no single-request probe reaches.  A divergence here
+# that does not reproduce in batch_memfs is a protection-layer bug.
+add_test(NAME chimera/server/smb/mbt/batch_memfs_signed
+    COMMAND $<TARGET_FILE:smb2_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/smb2
+            --wire signed311)
+set_tests_properties(chimera/server/smb/mbt/batch_memfs_signed PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_batch_memfs_signed"
     LABELS "quint;smb_mbt;memfs"
     TIMEOUT 1800
     SKIP_RETURN_CODE 77)

@@ -2025,13 +2025,28 @@ main(
     int   argc,
     char *argv[])
 {
-    struct smb2_env_opts opts    = { 0 };
-    int                  ntraces = 0;
-    char               **traces  = mbt_collect_traces(argc, argv, &ntraces);
+    struct smb2_env_opts            opts    = { 0 };
+    int                             ntraces = 0;
+    char                          **traces  = mbt_collect_traces(argc, argv, &ntraces);
+    const struct smb2_wire_profile *wire    = NULL;
+    int                             a;
+
+    /* --wire replays the whole corpus over a protected connection profile
+     * (signed or encrypted, real NTLMv2 logon, a chosen dialect ceiling).  The
+     * model does not describe any of that -- it is the same SMB2 conversation
+     * either way -- so the traces and their expected results are unchanged;
+     * what changes is that every packet now crosses the server's signing or
+     * encryption path.  A divergence under --wire that does not reproduce
+     * without it is a protection-layer bug. */
+    for (a = 1; a < argc; a++) {
+        if (strcmp(argv[a], "--wire") == 0 && a + 1 < argc) {
+            wire = smb2_wire_profile_find(argv[++a]);
+        }
+    }
 
     if (ntraces == 0) {
-        fprintf(stderr, "usage: %s [--trace <f> ...] [--trace-dir <dir>]\n",
-                argv[0]);
+        fprintf(stderr, "usage: %s [--trace <f> ...] [--trace-dir <dir>] "
+                "[--wire <profile>]\n", argv[0]);
         mbt_free_traces(traces, ntraces);
         return 2;
     }
@@ -2055,7 +2070,7 @@ main(
             return 2;
         }
 
-        smb2_env_open_opts(&g_env, &group);
+        smb2_env_open_wire(&g_env, &group, wire);
 
         int first = i;
         do {
