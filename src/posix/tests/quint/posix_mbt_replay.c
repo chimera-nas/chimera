@@ -1310,14 +1310,33 @@ check_status(
         }
         /* ND9: a path operation relative to a directory descriptor whose
          * directory has been removed.  POSIX resolves through the held-open
-         * husk and reports ENOENT; an NFSv4 client holds only the directory's
+         * husk and reports ENOENT; an NFS client holds only the directory's
          * file handle (a directory open creates no state on the server), the
          * server has reclaimed the object, and the wire answers STALE.  The
-         * kernel NFS client surfaces the same ESTALE. */
-        if (g_nfs_version == 4 && actual == 116 && expected == 2 &&
+         * kernel NFS client surfaces the same ESTALE.  Both loopback
+         * versions: v4 deterministically, v3 whenever the proxy's cached
+         * server handle has been dropped (idle sweep under load) and the
+         * re-open by handle meets the reclaimed object. */
+        if (g_nfs_version && actual == 116 && expected == 2 &&
             tf_field(g_cur_rv, "dfd") >= 0) {
             record_dev("ND9");
             g_last_recon = "ND9";
+            return 0;
+        }
+        /* ND10: a descriptor operation answered ESTALE where the model
+         * completed it.  NFS3 has no opens to pin the object server-side:
+         * once the file's last name is gone, the proxy's cached handle is
+         * the only thing keeping I/O alive, and when the idle sweep drops
+         * it under load the re-open by handle meets a reclaimed object.
+         * The silly-rename machinery covers the common data-descriptor
+         * case; what remains (metadata ops, directories, reap races) is
+         * this architectural residue.  NFSv4's stateful opens (CLAIM_FH)
+         * pin the object, so this is v3-only. */
+        if (g_nfs_version == 3 && actual == 116 && expected == 0 &&
+            !json_object_get(g_cur_rv, "pth") &&
+            json_object_get(g_cur_rv, "fd")) {
+            record_dev("ND10");
+            g_last_recon = "ND10";
             return 0;
         }
     }
@@ -1734,6 +1753,13 @@ op_open(
             if (path_ino(g_cur_fs, comps) < 0) {
                 char rp[4096];
                 real_path(json_object_get(rv, "pth"), rp, sizeof(rp));
+                /* As root: this removal is harness bookkeeping, and the
+                 * acting credential may no longer be allowed to remove the
+                 * residue (the trace may since have restricted the parent
+                 * -- with real-kernel DAC on a passthrough backend the
+                 * denial is unconditional, and the leftover name then
+                 * collides with later steps). */
+                apply_root_cred();
                 chimera_posix_unlink(rp);
             } else {
                 exempt_add(mp);

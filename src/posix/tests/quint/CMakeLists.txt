@@ -131,3 +131,41 @@ if(CHIMERA_VFS_IO_URING)
         SKIP_RETURN_CODE 77
         TIMEOUT 600)
 endif()
+
+# The NFS loopback profiles replayed with a passthrough backend under the
+# server: the full client stack (posix client -> nfs proxy -> wire -> chimera
+# NFS server) on top of the host-kernel filesystem semantics.  The backing
+# store and skip behavior are as for the direct passthrough batches above.
+set(POSIX_MBT_PT_LOOPBACKS "")
+if(CHIMERA_LINUX)
+    list(APPEND POSIX_MBT_PT_LOOPBACKS linux)
+endif()
+if(CHIMERA_VFS_IO_URING)
+    list(APPEND POSIX_MBT_PT_LOOPBACKS io_uring)
+endif()
+
+foreach(ptmod ${POSIX_MBT_PT_LOOPBACKS})
+    add_test(NAME chimera/posix/mbt/batch_nfs3_${ptmod}
+        COMMAND $<TARGET_FILE:posix_mbt_replay>
+                --backend nfs3_${ptmod}
+                --trace-dir ${SPECS_BUNDLE_DIR}/posix
+                --exclude-prefix step --exclude-prefix disk_
+                --exclude-prefix fuse_ --exclude-prefix nfs4_)
+    set_tests_properties(chimera/posix/mbt/batch_nfs3_${ptmod} PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=posix_batch_nfs3_${ptmod}"
+        LABELS "quint;posix_mbt;${ptmod};nfs3_mbt"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 600)
+
+    add_test(NAME chimera/posix/mbt/batch_nfs4_${ptmod}
+        COMMAND $<TARGET_FILE:posix_mbt_replay>
+                --backend nfs4_${ptmod}
+                --trace-dir ${SPECS_BUNDLE_DIR}/posix
+                --exclude-prefix step --exclude-prefix disk_
+                --exclude-prefix fuse_ --exclude-prefix nfs3_)
+    set_tests_properties(chimera/posix/mbt/batch_nfs4_${ptmod} PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=posix_batch_nfs4_${ptmod}"
+        LABELS "quint;posix_mbt;${ptmod};nfs4_mbt"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 600)
+endforeach()
