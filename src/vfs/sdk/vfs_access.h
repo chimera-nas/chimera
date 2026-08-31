@@ -224,6 +224,17 @@ void chimera_vfs_gate_fh_prefix(
     void                          *private_data);
 
 /* Authorize deleting `child_fh` from directory `parent_fh` (delete_allowed). */
+void chimera_vfs_gate_delete_always(
+    struct chimera_vfs_gate_ctx   *ctx,
+    struct chimera_vfs_thread     *thread,
+    const struct chimera_vfs_cred *cred,
+    const void                    *parent_fh,
+    int                            parent_fhlen,
+    const void                    *child_fh,
+    int                            child_fhlen,
+    chimera_vfs_gate_callback_t    callback,
+    void                          *private_data);
+
 void chimera_vfs_gate_delete(
     struct chimera_vfs_gate_ctx   *ctx,
     struct chimera_vfs_thread     *thread,

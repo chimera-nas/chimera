@@ -507,10 +507,10 @@ chimera_vfs_rename_at_gate_dst_lookup(
         memcpy(gate->dst_target_fh, attr->va_fh, attr->va_fh_len);
         gate->dst_target_fh_len = attr->va_fh_len;
 
-        chimera_vfs_gate_delete(&gate->gate_ctx, gate->thread, gate->cred,
-                                gate->new_fh, gate->new_fhlen,
-                                gate->dst_target_fh, gate->dst_target_fh_len,
-                                chimera_vfs_rename_at_gate_target, gate);
+        chimera_vfs_gate_delete_always(&gate->gate_ctx, gate->thread, gate->cred,
+                                       gate->new_fh, gate->new_fhlen,
+                                       gate->dst_target_fh, gate->dst_target_fh_len,
+                                       chimera_vfs_rename_at_gate_target, gate);
         return;
     }
 
@@ -533,10 +533,10 @@ chimera_vfs_rename_at_gate_dst(
     }
 
     if (gate->target_fh && gate->target_fh_len > 0) {
-        chimera_vfs_gate_delete(&gate->gate_ctx, gate->thread, gate->cred,
-                                gate->new_fh, gate->new_fhlen,
-                                gate->target_fh, gate->target_fh_len,
-                                chimera_vfs_rename_at_gate_target, gate);
+        chimera_vfs_gate_delete_always(&gate->gate_ctx, gate->thread, gate->cred,
+                                       gate->new_fh, gate->new_fhlen,
+                                       gate->target_fh, gate->target_fh_len,
+                                       chimera_vfs_rename_at_gate_target, gate);
         return;
     }
 
@@ -563,10 +563,10 @@ chimera_vfs_rename_at_gate_src(
         return;
     }
 
-    chimera_vfs_gate_fh(&gate->gate_ctx, gate->thread, gate->cred,
-                        gate->new_fh, gate->new_fhlen,
-                        CHIMERA_ACE_WRITE_DATA,
-                        chimera_vfs_rename_at_gate_dst, gate);
+    chimera_vfs_gate_fh_always(&gate->gate_ctx, gate->thread, gate->cred,
+                               gate->new_fh, gate->new_fhlen,
+                               CHIMERA_ACE_WRITE_DATA,
+                               chimera_vfs_rename_at_gate_dst, gate);
 } /* chimera_vfs_rename_at_gate_src */
 
 /* Source name resolved -> authorize its removal (delete_allowed: DELETE_CHILD
@@ -589,10 +589,10 @@ chimera_vfs_rename_at_gate_lookup(
         memcpy(gate->src_child_fh, attr->va_fh, attr->va_fh_len);
         gate->src_child_fh_len = attr->va_fh_len;
 
-        chimera_vfs_gate_delete(&gate->gate_ctx, gate->thread, gate->cred,
-                                gate->fh, gate->fhlen,
-                                gate->src_child_fh, gate->src_child_fh_len,
-                                chimera_vfs_rename_at_gate_src, gate);
+        chimera_vfs_gate_delete_always(&gate->gate_ctx, gate->thread, gate->cred,
+                                       gate->fh, gate->fhlen,
+                                       gate->src_child_fh, gate->src_child_fh_len,
+                                       chimera_vfs_rename_at_gate_src, gate);
         return;
     }
 
@@ -656,7 +656,13 @@ chimera_vfs_rename_at(
 
     module = chimera_vfs_get_module(thread, fh, fhlen);
 
-    if (module && chimera_vfs_gate_needed(module->capabilities, cred)) {
+    /* gate_needed_dac, not gate_needed: a DELEGATES_DAC passthrough resolves
+     * both parents by handle, so the kernel path-resolution permission checks
+     * a real rename(2) would hit never run -- and inside vfs_rename the
+     * kernel's into-own-subtree EINVAL precedes its may_create/may_delete
+     * checks, inverting POSIX's observable order (resolution EACCES first).
+     * The engine's own source/destination gates below restore it. */
+    if (module && chimera_vfs_gate_needed_dac(module->capabilities, cred)) {
         gate                 = chimera_vfs_gate_scratch_alloc(thread);
         gate->thread         = thread;
         gate->cred           = cred;
