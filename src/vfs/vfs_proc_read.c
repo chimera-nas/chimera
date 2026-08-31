@@ -330,7 +330,8 @@ chimera_vfs_read_gate_complete(
      * different caller must evaluate for itself and must NOT overwrite the
      * stamp -- a non-owner's narrow evaluation would otherwise revoke the
      * opener's own bound rights. */
-    if (gate->handle->cred_hash == chimera_vfs_cred_hash(gate->cred)) {
+    if (!gate->handle->granted_bound &&
+        gate->handle->cred_hash == chimera_vfs_cred_hash(gate->cred)) {
         gate->handle->granted_access = granted;
         gate->handle->granted_valid  = 1;
     }
@@ -379,7 +380,8 @@ chimera_vfs_read_submit(
      * prefix. */
     if (chimera_vfs_gate_needed_dac(handle->vfs_module->capabilities, cred)) {
         if (handle->granted_valid &&
-            handle->cred_hash == chimera_vfs_cred_hash(cred)) {
+            (handle->granted_bound ||
+             handle->cred_hash == chimera_vfs_cred_hash(cred))) {
             /* Fast path: the caller's grant is cached on the handle. */
             if (!(handle->granted_access & CHIMERA_ACE_READ_DATA)) {
                 callback(CHIMERA_VFS_EACCES, 0, 0, NULL, 0, NULL, private_data);

@@ -243,6 +243,13 @@ struct chimera_vfs_open_handle {
      * until computed. */
     uint32_t                        granted_access;
     uint8_t                         granted_valid;
+    /* granted_bound: the grant was made at OPEN time and binds to the handle
+     * itself -- POSIX descriptor semantics: rights fixed at open(2) survive a
+     * later setuid() and travel with the descriptor, and NFSv4 stateid I/O is
+     * authorized by the OPEN, not re-authorized per operation.  Any caller
+     * credential may trust a bound grant; an unbound (lazily computed) grant
+     * is only valid for the credential that computed it. */
+    uint8_t                         granted_bound;
 
     /* Open-serialization and the backend's per-open slot: requests parked
     * behind a pending open, and the value the backend stashed at open. */

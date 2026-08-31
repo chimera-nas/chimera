@@ -79,6 +79,9 @@ chimera_vfs_handle_stamp_access(
         handle->granted_access = granted;
         handle->granted_valid  = 1;
     }
+    /* Every caller of this helper stamps at open time; the grant binds to
+     * the handle (see granted_bound in vfs_request.h). */
+    handle->granted_bound = 1;
 } /* chimera_vfs_handle_stamp_access */
 
 /* chimera_vfs_debug/info/error/fatal/abort and the *_if variants come from
