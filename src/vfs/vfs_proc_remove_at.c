@@ -106,6 +106,24 @@ chimera_vfs_remove_at_complete(struct chimera_vfs_request *request)
                                           request->remove_at.r_removed_attr.va_fh,
                                           request->remove_at.r_removed_attr.va_fh_len,
                                           &request->remove_at.r_removed_attr);
+        } else if (request->remove_at.child_fh &&
+                   request->remove_at.child_fh_len > 0) {
+            /* The backend did not report the removed object's attrs (the NFS
+             * proxies have no post-op attrs for the victim), but the caller
+             * resolved the child before the remove -- invalidate its attr
+             * cache entry by that handle, or a hardlink survivor keeps
+             * serving the pre-unlink nlink. */
+            struct chimera_vfs_attrs inval;
+
+            inval.va_set_mask = 0;
+            inval.va_req_mask = 0;
+
+            chimera_vfs_attr_cache_insert(thread, attr_cache,
+                                          chimera_vfs_hash(request->remove_at.child_fh,
+                                                           request->remove_at.child_fh_len),
+                                          request->remove_at.child_fh,
+                                          request->remove_at.child_fh_len,
+                                          &inval);
         }
     }
 
