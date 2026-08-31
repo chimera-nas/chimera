@@ -230,6 +230,38 @@ chimera_vfs_gate_fh_dac(
                              callback, private_data);
 } /* chimera_vfs_gate_fh_dac */
 
+/*
+ * Variant of chimera_vfs_gate_fh_dac() for the lookup prefix: additionally
+ * enforced for remote-DAC proxies, whose server cannot see cache-served
+ * resolution.  See chimera_vfs_gate_needed_prefix().
+ */
+SYMBOL_EXPORT void
+chimera_vfs_gate_fh_prefix(
+    struct chimera_vfs_gate_ctx   *ctx,
+    struct chimera_vfs_thread     *thread,
+    const struct chimera_vfs_cred *cred,
+    const void                    *fh,
+    int                            fhlen,
+    uint32_t                       required,
+    chimera_vfs_gate_callback_t    callback,
+    void                          *private_data)
+{
+    struct chimera_vfs_module *module;
+
+    module = chimera_vfs_get_module(thread, fh, fhlen);
+
+    if (!module) {
+        callback(CHIMERA_VFS_ESTALE, private_data);
+        return;
+    }
+
+    ctx->any_type = 0;
+
+    chimera_vfs_gate_fh_impl(ctx, thread, cred, fh, fhlen, required,
+                             chimera_vfs_gate_needed_prefix(module->capabilities, cred),
+                             callback, private_data);
+} /* chimera_vfs_gate_fh_prefix */
+
 /* ----------------------------------------------------------------------------
  * chimera_vfs_gate_delete: delete_allowed across parent dir + child.
  *

@@ -233,8 +233,7 @@ chimera_vfs_lookup_at(
      * DELEGATES_DAC (passthrough) backends when the caller is a POSIX (AUTH_UNIX)
      * client: they resolve each component by file handle (open_by_handle_at),
      * which bypasses the kernel's directory-search DAC, so the prefix would
-     * otherwise never be checked.  SMB keeps its own model (see gate_needed_dac). */
-    if (chimera_vfs_gate_needed_dac(handle->vfs_module->capabilities, cred)) {
+     * otherwise never be checked.  SMB keeps its own model (see gate_needed_dac). */    if (chimera_vfs_gate_needed_prefix(handle->vfs_module->capabilities, cred)) {
         gate                = chimera_vfs_gate_scratch_alloc(thread);
         gate->thread        = thread;
         gate->cred          = cred;
@@ -246,10 +245,10 @@ chimera_vfs_lookup_at(
         gate->callback      = callback;
         gate->private_data  = private_data;
 
-        chimera_vfs_gate_fh_dac(&gate->gate_ctx, thread, cred,
-                                handle->fh, handle->fh_len,
-                                CHIMERA_ACE_EXECUTE,
-                                chimera_vfs_lookup_at_gate_complete, gate);
+        chimera_vfs_gate_fh_prefix(&gate->gate_ctx, thread, cred,
+                                   handle->fh, handle->fh_len,
+                                   CHIMERA_ACE_EXECUTE,
+                                   chimera_vfs_lookup_at_gate_complete, gate);
         return;
     }
 

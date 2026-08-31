@@ -73,6 +73,16 @@ int chimera_vfs_gate_needed_dac(
     const struct chimera_vfs_cred *cred);
 
 /*
+ * Like chimera_vfs_gate_needed_dac(), plus remote-DAC proxies
+ * (CHIMERA_VFS_CAP_REMOTE_DAC): cache-served resolution never reaches their
+ * server, so path-prefix search on lookup falls to the engine for them too.
+ * Used only by the lookup gate -- per-op data gates use gate_needed_dac.
+ */
+int chimera_vfs_gate_needed_prefix(
+    uint64_t                       module_capabilities,
+    const struct chimera_vfs_cred *cred);
+
+/*
  * Whether the engine must authorize an OPEN's requested access itself.  Same
  * as chimera_vfs_gate_needed() plus remote-DAC proxy backends
  * (CHIMERA_VFS_CAP_REMOTE_DAC): their server enforces every wire operation
@@ -192,6 +202,18 @@ void chimera_vfs_gate_fh_obj(
  * backends -- for DAC the kernel cannot see on handle-based lookups (path-prefix
  * search, link/rename destination-directory write). */
 void chimera_vfs_gate_fh_dac(
+    struct chimera_vfs_gate_ctx   *ctx,
+    struct chimera_vfs_thread     *thread,
+    const struct chimera_vfs_cred *cred,
+    const void                    *fh,
+    int                            fhlen,
+    uint32_t                       required,
+    chimera_vfs_gate_callback_t    callback,
+    void                          *private_data);
+
+/* As chimera_vfs_gate_fh_dac(), but for the lookup prefix: additionally
+ * enforced for remote-DAC proxies (see chimera_vfs_gate_needed_prefix). */
+void chimera_vfs_gate_fh_prefix(
     struct chimera_vfs_gate_ctx   *ctx,
     struct chimera_vfs_thread     *thread,
     const struct chimera_vfs_cred *cred,
