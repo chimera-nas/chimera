@@ -1200,8 +1200,18 @@ chimera_nfs4_open_parent_complete(
         } /* switch */
     }
 
-    if (args->share_access == OPEN4_SHARE_ACCESS_READ) {
+    /* Carry the requested share access into the VFS open's data-access
+     * intent.  The engine's open gate authorizes exactly these bits and
+     * stamps the grant on the handle for every later stateful READ/WRITE
+     * through this open -- and its created-file exemption grants only what
+     * was requested, so an OPEN that asks for WRITE but maps no intent here
+     * would stamp a mode-restricted create with no data access at all,
+     * failing the creator's own I/O with EACCES. */
+    if (args->share_access & OPEN4_SHARE_ACCESS_READ) {
         flags |= CHIMERA_VFS_OPEN_READ_ONLY;
+    }
+    if (args->share_access & OPEN4_SHARE_ACCESS_WRITE) {
+        flags |= CHIMERA_VFS_OPEN_WRITE_ONLY;
     }
 
     switch (args->claim.claim) {
