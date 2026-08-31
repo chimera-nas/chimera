@@ -4408,6 +4408,19 @@ chimera_smb_durable_rehome(
         chimera_vfs_claim_park(&open_file->share_lease, false);
     }
 
+    /* Re-home the open onto the RECONNECTING tree.  open_file->tree is the
+     * authority for which bucket lock protects this open and which hash it
+     * must be removed from -- chimera_smb_open_file_release and
+     * chimera_smb_open_file_close_hashed both read it rather than
+     * request->tree, precisely so an open reached through another tree-connect
+     * is handled correctly.  Without this the open stays pointed at the tree it
+     * was parked from, which chimera_smb_tree_free already returned to
+     * shared->free_trees (with share = NULL, and not zeroed on reuse): the next
+     * release would lock a recycled tree's mutex and HASH_DELETE the open from
+     * the wrong table, corrupting both it and the table the open actually
+     * lives in. */
+    open_file->tree = tree;
+
     bucket = open_file->file_id.vid & CHIMERA_SMB_OPEN_FILE_BUCKET_MASK;
     pthread_mutex_lock(&tree->open_files_lock[bucket]);
     HASH_ADD(hh, tree->open_files[bucket], file_id, sizeof(open_file->file_id), open_file);
