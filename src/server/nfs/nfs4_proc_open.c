@@ -420,7 +420,24 @@ chimera_nfs4_open_install_state(
                                 args->share_access, args->share_deny,
                                 &req->thread->shared->nfs4_state_table,
                                 out_stateid);
-        chimera_vfs_release(req->thread->vfs_thread, handle);
+        /* The coalesced state keeps ONE vfs handle, and every stateid
+         * READ/WRITE/SETATTR runs through it.  When the state was born from
+         * a read-only OPEN, that handle is a read-only open (on a
+         * passthrough backend, literally an O_RDONLY descriptor) -- a
+         * write-share coalesce must adopt this OPEN's write-capable handle
+         * or every subsequent stateid WRITE fails against the read-only
+         * descriptor.  The superseded handle may still be borrowed by
+         * in-flight I/O, so park it on the state rather than releasing it
+         * here; open_state_cleanup releases it with the state. */
+        if (handle->access_mode == CHIMERA_VFS_ACCESS_MODE_RW &&
+            existing->handle &&
+            existing->handle->access_mode != CHIMERA_VFS_ACCESS_MODE_RW &&
+            !existing->handle_superseded) {
+            existing->handle_superseded = existing->handle;
+            existing->handle            = handle;
+        } else {
+            chimera_vfs_release(req->thread->vfs_thread, handle);
+        }
         /* The SHARE reservation acquired on the first OPEN of this
          * (owner, fh) stays in force.  Broadening share bits on
          * coalesce is not re-checked cross-protocol in this pass —
