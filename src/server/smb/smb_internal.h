@@ -341,6 +341,14 @@ struct chimera_smb_conn;
  * evpl buffer cannot be satisfied with one iovec. */
 #define CHIMERA_SMB_MAX_TRANSACT_SIZE         (1 * 1024 * 1024)
 
+/* MaxReadSize/MaxWriteSize advertised in NEGOTIATE.  Per MS-SMB2 3.2.4.1.5, a
+ * connection without SMB2_GLOBAL_CAP_LARGE_MTU (dialect < 2.1, or multi-credit
+ * disabled) charges exactly one credit per request regardless of size, which
+ * fixes the largest single payload at 64 KiB; only a connection granted
+ * LARGE_MTU may advertise the larger multi-credit size. */
+#define CHIMERA_SMB_MAX_RW_SIZE_LARGE_MTU     (8 * 1024 * 1024)
+#define CHIMERA_SMB_MAX_RW_SIZE_SINGLE_CREDIT 65536
+
 /* Maximum supported file size, matching the Windows/Samba value
  * (0xFFFFFFF0000 == 2^44 - 2^16).  A write, SetEndOfFile or SetAllocation whose
  * size would exceed this is rejected with STATUS_INVALID_PARAMETER. */
