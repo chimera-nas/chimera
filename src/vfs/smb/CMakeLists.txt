@@ -8,6 +8,7 @@ add_library(chimera_vfs_smb SHARED
     smb_umount.c
     smb_ops.c
     smb_encrypt.c
+    smb_compress.c
     smb_io.c
     smb_namespace.c
     smb_ntlm.c

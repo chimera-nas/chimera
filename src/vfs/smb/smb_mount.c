@@ -479,6 +479,15 @@ chimera_smb_client_parse_neg_contexts(
                     conn->negotiated_signing_alg = smb_wire_le16(data + 2);
                 }
                 break;
+            case SMB2_COMPRESSION_CAPABILITIES:
+                /* CompressionAlgorithmCount(2), Padding(2), Flags(4),
+                 * Algorithms[0].  A count of zero, or the NONE algorithm, is
+                 * the server declining. */
+                if (len >= 10 && smb_wire_le16(data) >= 1 &&
+                    smb_wire_le16(data + 8) == SMB2_COMPRESSION_LZ77) {
+                    conn->server->compress_active = 1;
+                }
+                break;
             case SMB2_ENCRYPTION_CAPABILITIES:
                 /* CipherCount(2), Ciphers[0] -- the server echoes exactly the
                  * one it selected (MS-SMB2 3.3.5.4). */
@@ -631,6 +640,7 @@ chimera_smb_client_conn_on_connected(struct chimera_smb_client_conn *conn)
     uint8_t                  preauth_ctx[4 + 2 + CHIMERA_SMB_CLIENT_PREAUTH_SALT_LEN];
     uint8_t                  signing_ctx[2 + 2 * 2];
     uint8_t                  encrypt_ctx[2 + 2 * 2];
+    uint8_t                  compress_ctx[2 + 2 + 4 + 2];
     uint16_t                 num_contexts;
     int                      ctx_offset_pos, ctx_count_pos;
     int                      ctx_offset, msg_len;
@@ -734,6 +744,23 @@ chimera_smb_client_conn_on_connected(struct chimera_smb_client_conn *conn)
         num_contexts = 3;
     }
 
+    /* SMB2_COMPRESSION_CAPABILITIES: CompressionAlgorithmCount(2), Padding(2),
+     * Flags(4), CompressionAlgorithms[].  LZ77 alone, and Flags NONE so the
+     * server cannot chain: both keep the decoder to the one codec and the one
+     * framing smb_compress.c implements. */
+    if (conn->server->compress_requested) {
+        memset(compress_ctx, 0, sizeof(compress_ctx));
+        smb_wire_set_le16(compress_ctx + 0, 1);
+        smb_wire_set_le16(compress_ctx + 2, 0);
+        smb_wire_set_le32(compress_ctx + 4, SMB2_COMPRESSION_FLAG_NONE);
+        smb_wire_set_le16(compress_ctx + 8, SMB2_COMPRESSION_LZ77);
+        chimera_smb_client_append_neg_context(&cursor,
+                                              SMB2_COMPRESSION_CAPABILITIES,
+                                              compress_ctx,
+                                              sizeof(compress_ctx));
+        num_contexts++;
+    }
+
     /* Backpatch NegotiateContextOffset (absolute from SMB2 header) and Count. */
     {
         struct smb_client_netbios_header *netbios = evpl_iovec_data(&iov);
@@ -806,7 +833,7 @@ chimera_smb_client_mount(
     struct chimera_smb_client_server *server;
     struct chimera_smb_client_conn   *conn;
     const char                       *user, *password, *domain, *port_opt;
-    const char                       *vers_opt, *seal_opt;
+    const char                       *vers_opt, *seal_opt, *compress_opt;
     char                              host[256];
     char                              share[256];
     const char                       *colon;
@@ -835,12 +862,14 @@ chimera_smb_client_mount(
     host[host_len] = '\0';
     snprintf(share, sizeof(share), "%s", colon + 1);
 
-    user     = chimera_smb_client_get_option(&request->mount.options, "user");
-    password = chimera_smb_client_get_option(&request->mount.options, "password");
-    domain   = chimera_smb_client_get_option(&request->mount.options, "domain");
-    port_opt = chimera_smb_client_get_option(&request->mount.options, "port");
-    vers_opt = chimera_smb_client_get_option(&request->mount.options, "vers");
-    seal_opt = chimera_smb_client_get_option(&request->mount.options, "seal");
+    user         = chimera_smb_client_get_option(&request->mount.options, "user");
+    password     = chimera_smb_client_get_option(&request->mount.options, "password");
+    domain       = chimera_smb_client_get_option(&request->mount.options, "domain");
+    port_opt     = chimera_smb_client_get_option(&request->mount.options, "port");
+    vers_opt     = chimera_smb_client_get_option(&request->mount.options, "vers");
+    seal_opt     = chimera_smb_client_get_option(&request->mount.options, "seal");
+    compress_opt = chimera_smb_client_get_option(&request->mount.options,
+                                                 "compress");
 
     if (!user || !password) {
         chimera_smbclient_error("SMB mount requires user= and password= options");
@@ -880,6 +909,8 @@ chimera_smb_client_mount(
     server->forced_dialect = forced_dialect;
     server->seal_requested = seal_opt && (strcmp(seal_opt, "yes") == 0 ||
                                           strcmp(seal_opt, "1") == 0);
+    server->compress_requested = compress_opt &&
+        (strcmp(compress_opt, "yes") == 0 || strcmp(compress_opt, "1") == 0);
     server->endpoint = chimera_tcp_flavor_endpoint_create(
         shared->tcp_flavor, server->hostname, server->port);
 
