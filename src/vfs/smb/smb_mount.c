@@ -244,16 +244,23 @@ chimera_smb_client_session_setup_done(
     void                           *arg)
 {
     struct chimera_smb_client_server *server = conn->server;
+    uint16_t                          structsize, session_flags = 0;
 
     (void) hdr;
-    (void) body;
-    (void) body_len;
     (void) arg;
 
     if (status != SMB2_STATUS_SUCCESS) {
         chimera_smbclient_error("SESSION_SETUP (authenticate) failed: status 0x%08x", status);
         chimera_smb_client_conn_fail(conn, chimera_smb_status_to_errno(status));
         return;
+    }
+
+    /* Reply body: StructureSize(2), SessionFlags(2), ... -- SessionFlags is
+     * where the server says "encrypt this session" (MS-SMB2 2.2.6). */
+    if (body_len >= 4) {
+        evpl_iovec_cursor_get_uint16(body, &structsize);
+        evpl_iovec_cursor_get_uint16(body, &session_flags);
+        (void) structsize;
     }
 
     /* The session is now authenticated.  Derive the per-session signing key and,
@@ -279,6 +286,61 @@ chimera_smb_client_session_setup_done(
         }
         server->signing_alg    = conn->negotiated_signing_alg;
         server->signing_active = 1;
+    }
+
+    /* Transport encryption keys, derived from the same session key and (for
+     * 3.1.1) the same preauth hash the signing key used -- and, like it,
+     * derived BEFORE folding this SUCCESS reply, so both sides agree.
+     *
+     * The client's enc key is the server's dec key: see the direction table in
+     * smb_encrypt.c.  Whether the session actually seals is decided just below
+     * from the reply's SessionFlags; the keys are derived either way so a
+     * server that turns encryption on per-share can be answered. */
+    if (server->dialect >= SMB2_DIALECT_3_0 && conn->ntlm.have_session_key &&
+        conn->negotiated_cipher_id) {
+        size_t klen = 0;
+
+        if (chimera_smb_client_derive_encryption_keys(
+                conn->negotiated_dialect, conn->negotiated_cipher_id,
+                conn->ntlm.session_key, sizeof(conn->ntlm.session_key),
+                conn->negotiated_dialect == SMB2_DIALECT_3_1_1
+                ? conn->preauth_hash : NULL,
+                server->enc_key, server->dec_key, &klen) == 0) {
+            server->enc_key_len = klen;
+            server->cipher_id   = conn->negotiated_cipher_id;
+        } else {
+            chimera_smbclient_error("Failed to derive SMB3 encryption keys "
+                                    "(dialect 0x%04x cipher 0x%04x)",
+                                    server->dialect,
+                                    conn->negotiated_cipher_id);
+            chimera_smb_client_conn_fail(conn, CHIMERA_VFS_EIO);
+            return;
+        }
+    }
+
+    /* SessionFlags carries SMB2_SESSION_FLAG_ENCRYPT_DATA when the server has
+     * decided this session is sealed.  That decision is the SERVER's alone: it
+     * is the side that must be able to decrypt, and a chimera server selects a
+     * 3.1.1 cipher for any client that offers one even when encryption is
+     * switched off in its config.  So a cipher having been negotiated is NOT
+     * evidence the peer expects ciphertext -- encrypting on that basis sends
+     * traffic the server drops, and the mount dies with EIO. */
+    if (server->cipher_id && (session_flags & SMB2_SESSION_FLAG_ENCRYPT_DATA)) {
+        server->encrypt_active = 1;
+        chimera_smbclient_info("SMB session encryption active (cipher 0x%04x)",
+                               server->cipher_id);
+    }
+
+    /* seal= is a security REQUEST, so a server that will not seal is a failed
+     * mount, not a silent downgrade to cleartext (mount.cifs seal behaves the
+     * same way).  Refusing here is what makes seal=yes worth asking for. */
+    if (server->seal_requested && !server->encrypt_active) {
+        chimera_smbclient_error(
+            "seal=yes was requested but the server did not enable encryption "
+            "on this session (dialect 0x%04x, cipher 0x%04x)",
+            server->dialect, server->cipher_id);
+        chimera_smb_client_conn_fail(conn, CHIMERA_VFS_ENOTSUP);
+        return;
     }
 
     chimera_smb_client_tree_connect_send(conn);
@@ -417,6 +479,13 @@ chimera_smb_client_parse_neg_contexts(
                     conn->negotiated_signing_alg = smb_wire_le16(data + 2);
                 }
                 break;
+            case SMB2_ENCRYPTION_CAPABILITIES:
+                /* CipherCount(2), Ciphers[0] -- the server echoes exactly the
+                 * one it selected (MS-SMB2 3.3.5.4). */
+                if (len >= 4) {
+                    conn->negotiated_cipher_id = smb_wire_le16(data + 2);
+                }
+                break;
             default:
                 break;
         } /* switch */
@@ -500,6 +569,14 @@ chimera_smb_client_negotiate_reply(
         return;
     }
 
+    /* 3.0/3.0.2 negotiate no encryption context; AES-128-CCM is the only cipher
+     * those dialects define (MS-SMB2 3.1.4.3), so a sealing mount takes it when
+     * the server advertised the capability back. */
+    if (conn->server->seal_requested &&
+        dialect >= SMB2_DIALECT_3_0 && dialect < SMB2_DIALECT_3_1_1) {
+        conn->negotiated_cipher_id = SMB2_ENCRYPTION_AES_128_CCM;
+    }
+
     /* A secondary connection (the session already exists) is READY once it has
     * negotiated; it reuses the shared session_id/tree_id AND signing state
     * (signing key is per-session, already derived on the mount connection). */
@@ -553,6 +630,8 @@ chimera_smb_client_conn_on_connected(struct chimera_smb_client_conn *conn)
     uint8_t                  client_guid[SMB2_GUID_SIZE];
     uint8_t                  preauth_ctx[4 + 2 + CHIMERA_SMB_CLIENT_PREAUTH_SALT_LEN];
     uint8_t                  signing_ctx[2 + 2 * 2];
+    uint8_t                  encrypt_ctx[2 + 2 * 2];
+    uint16_t                 num_contexts;
     int                      ctx_offset_pos, ctx_count_pos;
     int                      ctx_offset, msg_len;
     int                      send_contexts;
@@ -584,12 +663,17 @@ chimera_smb_client_conn_on_connected(struct chimera_smb_client_conn *conn)
     memset(conn->preauth_hash, 0, sizeof(conn->preauth_hash));
     conn->negotiated_dialect     = 0;
     conn->negotiated_signing_alg = SMB2_SIGNING_AES_CMAC; /* 3.1.1 default */
+    conn->negotiated_cipher_id   = 0;
 
     evpl_iovec_cursor_append_uint16(&cursor, SMB2_NEGOTIATE_REQUEST_SIZE);
     evpl_iovec_cursor_append_uint16(&cursor, (uint16_t) num_dialects);
     evpl_iovec_cursor_append_uint16(&cursor, SMB2_SIGNING_ENABLED);
     evpl_iovec_cursor_append_uint16(&cursor, 0); /* Reserved */
-    evpl_iovec_cursor_append_uint32(&cursor, 0); /* Capabilities */
+    /* Capabilities.  3.0/3.0.2 have no encryption context; the only way to say
+     * "I can encrypt" there is this global capability bit (MS-SMB2 3.2.4.2.2). */
+    evpl_iovec_cursor_append_uint32(&cursor,
+                                    conn->server->seal_requested
+                                    ? SMB2_GLOBAL_CAP_ENCRYPTION : 0);
     evpl_iovec_cursor_append_blob(&cursor, client_guid, SMB2_GUID_SIZE);
     /* NegotiateContextOffset(4) + NegotiateContextCount(2) + Reserved2(2).
      * Backpatched below once the dialects + contexts are laid out. */
@@ -634,13 +718,28 @@ chimera_smb_client_conn_on_connected(struct chimera_smb_client_conn *conn)
     smb_wire_set_le16(signing_ctx + 4, SMB2_SIGNING_AES_CMAC);
     chimera_smb_client_append_neg_context(&cursor, SMB2_SIGNING_CAPABILITIES,
                                           signing_ctx, sizeof(signing_ctx));
+    num_contexts = 2;
+
+    /* SMB2_ENCRYPTION_CAPABILITIES: CipherCount(2), Ciphers[] in preference
+     * order.  Offered only when the mount asked to seal -- a client that
+     * advertises a cipher is one the server may then REQUIRE encryption of, and
+     * this module must not silently opt every mount into that. */
+    if (conn->server->seal_requested) {
+        smb_wire_set_le16(encrypt_ctx + 0, 2);
+        smb_wire_set_le16(encrypt_ctx + 2, SMB2_ENCRYPTION_AES_128_GCM);
+        smb_wire_set_le16(encrypt_ctx + 4, SMB2_ENCRYPTION_AES_128_CCM);
+        chimera_smb_client_append_neg_context(&cursor,
+                                              SMB2_ENCRYPTION_CAPABILITIES,
+                                              encrypt_ctx, sizeof(encrypt_ctx));
+        num_contexts = 3;
+    }
 
     /* Backpatch NegotiateContextOffset (absolute from SMB2 header) and Count. */
     {
         struct smb_client_netbios_header *netbios = evpl_iovec_data(&iov);
         uint8_t                          *smb2    = (uint8_t *) (netbios + 1);
         smb_wire_set_le32(smb2 + ctx_offset_pos, (uint32_t) ctx_offset);
-        smb_wire_set_le16(smb2 + ctx_count_pos, 2);
+        smb_wire_set_le16(smb2 + ctx_count_pos, num_contexts);
     }
 
     /* Fold the raw NEGOTIATE request into the preauth hash before send. */
@@ -707,7 +806,7 @@ chimera_smb_client_mount(
     struct chimera_smb_client_server *server;
     struct chimera_smb_client_conn   *conn;
     const char                       *user, *password, *domain, *port_opt;
-    const char                       *vers_opt;
+    const char                       *vers_opt, *seal_opt;
     char                              host[256];
     char                              share[256];
     const char                       *colon;
@@ -741,6 +840,7 @@ chimera_smb_client_mount(
     domain   = chimera_smb_client_get_option(&request->mount.options, "domain");
     port_opt = chimera_smb_client_get_option(&request->mount.options, "port");
     vers_opt = chimera_smb_client_get_option(&request->mount.options, "vers");
+    seal_opt = chimera_smb_client_get_option(&request->mount.options, "seal");
 
     if (!user || !password) {
         chimera_smbclient_error("SMB mount requires user= and password= options");
@@ -778,7 +878,9 @@ chimera_smb_client_mount(
     snprintf(server->password, sizeof(server->password), "%s", password);
     server->port           = port;
     server->forced_dialect = forced_dialect;
-    server->endpoint       = chimera_tcp_flavor_endpoint_create(
+    server->seal_requested = seal_opt && (strcmp(seal_opt, "yes") == 0 ||
+                                          strcmp(seal_opt, "1") == 0);
+    server->endpoint = chimera_tcp_flavor_endpoint_create(
         shared->tcp_flavor, server->hostname, server->port);
 
     conn = chimera_smb_client_get_conn(thread, server);
