@@ -512,6 +512,88 @@ probe_pin_parent_handle_ops(void)
     probe_err("SD5: mknod below the mount root", probe_call(res));
 } /* probe_pin_parent_handle_ops */
 
+/* A read big enough, and compressible enough, that the server actually sends a
+ * COMPRESSION_TRANSFORM back.  Without this the compression cells would be
+ * vacuous: chimera compresses only a READ reply, only when the client asked,
+ * and only when the payload actually shrinks -- so a probe whose largest read
+ * is three bytes would negotiate compression and then never exercise a byte of
+ * the decoder.
+ *
+ * The payload is a repeating pattern (highly compressible) and is verified byte
+ * for byte after the round trip, because a decoder that silently produces the
+ * wrong bytes is the failure mode that matters. */
+#define PROBE_BLOB_LEN 16384
+
+static void
+probe_compressible_roundtrip(void)
+{
+    static const char b64[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    char             *payload;
+    json_t           *res;
+    long long         fd;
+    int               i;
+
+    /* base64 of a repeating byte pattern: 4 chars per 3 bytes, and any constant
+     * quad decodes to a repeating triple, which is what makes it compress. */
+    payload = malloc(PROBE_BLOB_LEN + 1);
+    if (!payload) {
+        probe_fail("compressible payload", "out of memory");
+        return;
+    }
+    for (i = 0; i < PROBE_BLOB_LEN; i++) {
+        payload[i] = b64[(i / 64) % 64];
+    }
+    payload[PROBE_BLOB_LEN] = '\0';
+
+    res = op_open("/test/blob", O_CREAT | O_RDWR, 0644);
+    fd  = probe_ret(res);
+    json_decref(res);
+    if (fd < 0) {
+        probe_fail("compressible roundtrip", "could not create the file");
+        free(payload);
+        return;
+    }
+
+    res = probe_req("write");
+    probe_set_int(res, "fd", (int) fd);
+    probe_set_str(res, "data", payload);
+    res = probe_call(res);
+    if (probe_ret(res) <= 0) {
+        probe_fail("compressible write", "wrote nothing");
+        json_decref(res);
+        json_decref(op_fd("close", (int) fd));
+        free(payload);
+        return;
+    }
+    json_decref(res);
+
+    /* One large pread: this is the request that carries
+     * SMB2_READFLAG_REQUEST_COMPRESSED and draws the compressed reply. */
+    res = probe_req("pread");
+    probe_set_int(res, "fd", (int) fd);
+    probe_set_int(res, "off", 0);
+    probe_set_int(res, "len", PROBE_BLOB_LEN);
+    res = probe_call(res);
+
+    if (probe_ret(res) <= 0) {
+        probe_fail("compressible read", "read nothing back");
+    } else {
+        const char *got = json_string_value(json_object_get(res, "data"));
+
+        if (!got) {
+            probe_fail("compressible read", "no data in the response");
+        } else if (strcmp(got, payload) != 0) {
+            probe_fail("compressible read",
+                       "the round-tripped bytes differ from what was written");
+        }
+    }
+    json_decref(res);
+
+    probe_ok("compressible roundtrip close", op_fd("close", (int) fd));
+    free(payload);
+} /* probe_compressible_roundtrip */
+
 /* ---- driver ------------------------------------------------------------- */
 
 int
@@ -541,6 +623,8 @@ main(
             g_smb_compression = 1;
         } else if (strcmp(argv[i], "--seal") == 0) {
             g_smb_seal = 1;
+        } else if (strcmp(argv[i], "--client-compress") == 0) {
+            g_smb_client_compress = 1;
         } else if (strcmp(argv[i], "--leases") == 0) {
             g_smb_leases = 1;
         } else if (strcmp(argv[i], "--expect-mount-failure") == 0) {
@@ -607,6 +691,7 @@ main(
     probe_pin_symlink();
     probe_pin_no_posix_metadata();
     probe_pin_parent_handle_ops();
+    probe_compressible_roundtrip();
 
     /* The per-trace recycle: client umount, share/filesystem cycle, remount.
      * The MBT batch leans on this between every trace, so prove it works even

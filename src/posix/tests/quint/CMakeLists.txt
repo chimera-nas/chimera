@@ -173,6 +173,30 @@ foreach(cell "sealed_unsupported_by_server|--seal"
         TIMEOUT 300)
 endforeach()
 
+# SMB3 transport compression.  The probe's compressible round trip (a 16 KiB
+# repeating pattern written, read back in one pread, compared byte for byte) is
+# what makes these cells mean anything: chimera compresses only a READ reply,
+# only when the client set SMB2_READFLAG_REQUEST_COMPRESSED, and only when the
+# payload actually shrinks -- so a suite whose largest read is three bytes would
+# negotiate compression and never execute a byte of the decoder.
+#
+# Measured on the wire: 464 bytes expanding to 12,368, and zero decompressions
+# in the client_silent cell below.  If that ever inverts, the cells are lying.
+foreach(cell "compressed|--client-compress;--compress"
+             "compressed_sealed|--client-compress;--compress;--seal;--encrypt"
+             "compressed_server_declines|--client-compress"
+             "compressed_client_silent|--compress")
+    string(REPLACE "|" ";" parts "${cell}")
+    list(GET parts 0 cname)
+    list(GET parts 1 cflags)
+    add_test(NAME chimera/posix/smb/loopback_${cname}
+        COMMAND $<TARGET_FILE:smb_loopback_probe> ${cflags})
+    set_tests_properties(chimera/posix/smb/loopback_${cname} PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb_loopback_${cname}"
+        LABELS "quint;posix_mbt;memfs;smb_mbt"
+        TIMEOUT 300)
+endforeach()
+
 # The one cell whose answer is a refusal.  smb_encryption=2 REQUIRES encryption;
 # this client negotiates none, so the session setup must be denied.  Before the
 # enforcement fix that ships with this test, the knob was read as a boolean

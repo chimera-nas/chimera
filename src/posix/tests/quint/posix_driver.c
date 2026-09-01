@@ -86,6 +86,7 @@ static int                        g_smb_encryption;     /* 0 off, 1 offer, 2 req
 static int                        g_smb_compression;    /* offer compression           */
 static int                        g_smb_leases;         /* grant oplocks + leases      */
 static int                        g_smb_seal;           /* client asks to encrypt      */
+static int                        g_smb_client_compress; /* client asks to compress    */
 
 static struct chimera_vfs_cred    driver_creds[MAX_PIDS];
 static mode_t                     driver_umasks[MAX_PIDS];
@@ -161,7 +162,10 @@ smb_mount_options(
         n += snprintf(buf + n, cap - n, ",vers=%s", g_smb_vers);
     }
     if (g_smb_seal) {
-        snprintf(buf + n, cap - n, ",seal=yes");
+        n += snprintf(buf + n, cap - n, ",seal=yes");
+    }
+    if (g_smb_client_compress) {
+        snprintf(buf + n, cap - n, ",compress=yes");
     }
     return buf;
 } /* smb_mount_options */
