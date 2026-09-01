@@ -4018,11 +4018,13 @@ v4_send_raw(
     struct oracle         *o,
     struct evpl_rpc2_conn *conn,
     struct nfs_argop4     *argarray,
-    int                    nops)
+    int                    nops,
+    struct v4_reply       *out)
 {
-    struct v4_reply      rep  = { 0 };
-    struct v4_call_ctx   cctx = { .o = o, .rep = &rep };
-    struct COMPOUND4args args = { 0 };
+    struct v4_reply      scratch = { 0 };
+    struct v4_reply     *rep     = out ? out : &scratch;
+    struct v4_call_ctx   cctx    = { .o = o, .rep = rep };
+    struct COMPOUND4args args    = { 0 };
 
     args.tag.data     = "teardown";
     args.tag.len      = 8;
@@ -4030,13 +4032,14 @@ v4_send_raw(
     args.argarray     = argarray;
     args.num_argarray = (uint32_t) nops;
 
+    memset(rep, 0, sizeof(*rep));
     o->arena_used = 0;
     o->env->nfs_v4.send_call_NFSPROC4_COMPOUND(&o->env->nfs_v4.rpc2,
                                                o->env->evpl, conn,
                                                &o->env->cred, &args,
                                                0, 0, NULL, 0, 0,
                                                v4_compound_cb, &cctx);
-    while (!rep.done) {
+    while (!rep->done) {
         evpl_continue(o->env->evpl);
     }
 } /* v4_send_raw */
@@ -4062,6 +4065,29 @@ v4_sdb_field(
  * filesystem is unreferenced and the recycle (and, for a real client,
  * DESTROY_CLIENTID) succeeds.  Locks ride on their open and go with it; the
  * memfs corpus grants no delegations. */
+/* The model client record's csSeq is the NEXT create-session sequence the
+ * client will send (setupCreateSession uses it verbatim), so it is exactly
+ * what a teardown-built CREATE_SESSION must carry. */
+static int64_t
+v4_model_cs_seq(
+    json_t *clients_map,
+    int     client)
+{
+    size_t  i;
+    json_t *pair;
+
+    if (!clients_map) {
+        return -1;
+    }
+    json_array_foreach(clients_map, i, pair)
+    {
+        if (itf_i64(json_array_get(pair, 0)) == client) {
+            return jf_i64(json_array_get(pair, 1), "csSeq");
+        }
+    }
+    return -1;
+} /* v4_model_cs_seq */
+
 static void
 v4_close_dangling_opens(
     struct oracle *o,
@@ -4093,14 +4119,17 @@ v4_close_dangling_opens(
         return;
     }
     json_t *sessions = v4_sdb_field(sdb, "sessions");
+    json_t *clients  = v4_sdb_field(sdb, "clients");
 
     oo40 = v4_sdb_field(sdb, "oo40");   /* 4.0 open-owner seqids; seeded per client */
     (void) oi;
 
     for (client = 0; client < V4_MAX_CLIENTS; client++) {
         struct nfs_argop4 arg[V4_MAX_OPS];
-        int               n    = 0;
-        int               sess = -1;
+        int               n             = 0;
+        int               sess          = -1;
+        uint8_t           temp_sess[16] = { 0 };
+        int               have_temp     = 0;
         size_t            i;
         json_t           *pair;
 
@@ -4123,7 +4152,57 @@ v4_close_dangling_opens(
                 }
             }
             if (sess < 0 || sess >= V4_MAX_SESS || !o->sess_known[sess]) {
-                continue;   /* no live session to carry the compound */
+                /* No live session to carry the compound -- the walk destroyed
+                 * the client's last session without closing its opens, and a
+                 * client with opens answers DESTROY_CLIENTID with
+                 * CLIENTID_BUSY (RFC 8881 s18.50.3), so the ONLY way to
+                 * release the server's handles is a fresh session.  Skip
+                 * clients with nothing open; for the rest, build one. */
+                struct v4_reply crep;
+                int64_t         cs_seq;
+                size_t          oi3;
+                json_t         *op3;
+                int             has_opens = 0;
+
+                json_array_foreach(opens, oi3, op3)
+                {
+                    if (jf_i64(json_array_get(op3, 1), "client") == client) {
+                        has_opens = 1;
+                        break;
+                    }
+                }
+                cs_seq = v4_model_cs_seq(clients, client);
+                if (!has_opens || cs_seq < 0) {
+                    continue;
+                }
+
+                struct channel_attrs4             chan = {
+                    .ca_headerpadsize          = 0,
+                    .ca_maxrequestsize         = 1048576,
+                    .ca_maxresponsesize        = 1048576,
+                    .ca_maxresponsesize_cached = 65536,
+                    .ca_maxoperations          = 16,
+                    .ca_maxrequests            = 32,
+                    .num_ca_rdma_ird           = 0,
+                };
+                static struct callback_sec_parms4 sec = { .cb_secflavor = 0 };
+
+                memset(&arg[0], 0, sizeof(arg[0]));
+                arg[0].argop                                = OP_CREATE_SESSION;
+                arg[0].opcreate_session.csa_clientid        = o->clientid[client];
+                arg[0].opcreate_session.csa_sequence        = (uint32_t) cs_seq;
+                arg[0].opcreate_session.csa_flags           = 0;
+                arg[0].opcreate_session.csa_fore_chan_attrs = chan;
+                arg[0].opcreate_session.csa_back_chan_attrs = chan;
+                arg[0].opcreate_session.csa_cb_program      = 0x40000000;
+                arg[0].opcreate_session.num_csa_sec_parms   = 1;
+                arg[0].opcreate_session.csa_sec_parms       = &sec;
+                v4_send_raw(o, conn_for(o, client), arg, 1, &crep);
+                if (crep.status != NFS4_OK || crep.nres < 1) {
+                    continue;
+                }
+                memcpy(temp_sess, crep.res[0].sessionid, 16);
+                have_temp = 1;
             }
         } else {
             /* Seed this client's open-owner seqids: oo40's key is the
@@ -4176,12 +4255,13 @@ v4_close_dangling_opens(
             /* Flush and restart the batch (with a fresh SEQUENCE) if a
              * PUTFH+CLOSE pair would overflow the compound op cap. */
             if (n + 2 > V4_MAX_OPS) {
-                v4_send_raw(o, conn_for(o, client), arg, n);
+                v4_send_raw(o, conn_for(o, client), arg, n, NULL);
                 n = 0;
             }
             if (o->minor >= 1 && n == 0) {
                 arg[n].argop = OP_SEQUENCE;
-                memcpy(arg[n].opsequence.sa_sessionid, o->sess[sess], 16);
+                memcpy(arg[n].opsequence.sa_sessionid,
+                       have_temp ? temp_sess : o->sess[sess], 16);
                 arg[n].opsequence.sa_sequenceid     = 1;
                 arg[n].opsequence.sa_slotid         = 1;
                 arg[n].opsequence.sa_highest_slotid = 1;
@@ -4203,10 +4283,45 @@ v4_close_dangling_opens(
         }
 
         if (n > (o->minor >= 1 ? 1 : 0)) {
-            v4_send_raw(o, conn_for(o, client), arg, n);
+            v4_send_raw(o, conn_for(o, client), arg, n, NULL);
+        }
+        if (have_temp) {
+            memset(&arg[0], 0, sizeof(arg[0]));
+            arg[0].argop = OP_DESTROY_SESSION;
+            memcpy(arg[0].opdestroy_session.dsa_sessionid, temp_sess, 16);
+            v4_send_raw(o, conn_for(o, client), arg, 1, NULL);
         }
     }
 } /* v4_close_dangling_opens */
+
+/* The close sweep above needs a live session to carry SEQUENCE+CLOSE, so a
+ * 4.1+ client whose walk destroyed its last session but not the client keeps
+ * its opens on the server -- held state the RFC says survives until the lease
+ * expires, which is far longer than the recycler waits.  DESTROY_CLIENTID
+ * needs no session (it is the sole op of a sequenceless compound) and tears
+ * down the client's whole state hierarchy, so aim one at every clientid the
+ * trace established.  Statuses are deliberately ignored: a client that still
+ * has a session answers CLIENTID_BUSY, and its opens were CLOSEd by the sweep
+ * already; one the trace destroyed itself answers STALE_CLIENTID. */
+static void
+v4_destroy_leftover_clients(struct oracle *o)
+{
+    struct nfs_argop4 arg;
+    int               client;
+
+    if (o->minor < 1) {
+        return;
+    }
+    for (client = 0; client < V4_MAX_CLIENTS; client++) {
+        if (!o->clientid_known[client]) {
+            continue;
+        }
+        memset(&arg, 0, sizeof(arg));
+        arg.argop                           = OP_DESTROY_CLIENTID;
+        arg.opdestroy_clientid.dca_clientid = o->clientid[client];
+        v4_send_raw(o, conn_for(o, client), &arg, 1, NULL);
+    }
+} /* v4_destroy_leftover_clients */
 
 static int
 run_trace(
@@ -4414,6 +4529,7 @@ run_trace(
     if (states && nstates > 0) {
         v4_close_dangling_opens(o, json_array_get(states, sweep_idx));
     }
+    v4_destroy_leftover_clients(o);
     for (c = 0; c < V4_MAX_CLIENTS; c++) {
         if (o->conns[c]) {
             evpl_rpc2_client_disconnect(env->rpc2_thread, o->conns[c]);
