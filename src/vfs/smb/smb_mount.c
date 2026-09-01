@@ -542,8 +542,11 @@ chimera_smb_client_append_neg_context(
 void
 chimera_smb_client_conn_on_connected(struct chimera_smb_client_conn *conn)
 {
-    static const uint16_t    dialects[CHIMERA_SMB_CLIENT_NUM_DIALECTS] =
+    static const uint16_t    all_dialects[CHIMERA_SMB_CLIENT_NUM_DIALECTS] =
         CHIMERA_SMB_CLIENT_DIALECTS;
+    const uint16_t          *dialects = all_dialects;
+    uint16_t                 pinned;
+    int                      num_dialects = CHIMERA_SMB_CLIENT_NUM_DIALECTS;
     struct evpl_iovec        iov;
     struct evpl_iovec_cursor cursor;
     struct smb2_header      *hdr;
@@ -552,7 +555,26 @@ chimera_smb_client_conn_on_connected(struct chimera_smb_client_conn *conn)
     uint8_t                  signing_ctx[2 + 2 * 2];
     int                      ctx_offset_pos, ctx_count_pos;
     int                      ctx_offset, msg_len;
+    int                      send_contexts;
     int                      i;
+
+    /* A pinned mount (vers=) offers that dialect alone, so the server's
+     * "highest in common" selection can only land there. */
+    if (conn->server->forced_dialect) {
+        pinned       = conn->server->forced_dialect;
+        dialects     = &pinned;
+        num_dialects = 1;
+    }
+
+    /* Negotiate contexts exist only from 3.1.1; sending them while offering an
+     * older dialect is a protocol error, and the reply parser only consumes
+     * them for 3.1.1 anyway. */
+    send_contexts = 0;
+    for (i = 0; i < num_dialects; i++) {
+        if (dialects[i] == SMB2_DIALECT_3_1_1) {
+            send_contexts = 1;
+        }
+    }
 
     memset(client_guid, 0, sizeof(client_guid));
 
@@ -564,7 +586,7 @@ chimera_smb_client_conn_on_connected(struct chimera_smb_client_conn *conn)
     conn->negotiated_signing_alg = SMB2_SIGNING_AES_CMAC; /* 3.1.1 default */
 
     evpl_iovec_cursor_append_uint16(&cursor, SMB2_NEGOTIATE_REQUEST_SIZE);
-    evpl_iovec_cursor_append_uint16(&cursor, CHIMERA_SMB_CLIENT_NUM_DIALECTS);
+    evpl_iovec_cursor_append_uint16(&cursor, (uint16_t) num_dialects);
     evpl_iovec_cursor_append_uint16(&cursor, SMB2_SIGNING_ENABLED);
     evpl_iovec_cursor_append_uint16(&cursor, 0); /* Reserved */
     evpl_iovec_cursor_append_uint32(&cursor, 0); /* Capabilities */
@@ -577,8 +599,18 @@ chimera_smb_client_conn_on_connected(struct chimera_smb_client_conn *conn)
     evpl_iovec_cursor_append_uint16(&cursor, 0);
     evpl_iovec_cursor_append_uint16(&cursor, 0); /* Reserved2 */
 
-    for (i = 0; i < CHIMERA_SMB_CLIENT_NUM_DIALECTS; i++) {
+    for (i = 0; i < num_dialects; i++) {
         evpl_iovec_cursor_append_uint16(&cursor, dialects[i]);
+    }
+
+    if (!send_contexts) {
+        /* Pre-3.1.1: no contexts, and the offset/count stay the zeros written
+         * above (Reserved on those dialects). */
+        (void) chimera_smb_client_msg_from_iov(&iov, &cursor, &msg_len);
+        chimera_smb_client_preauth_fold(conn, hdr, msg_len);
+        chimera_smb_client_pdu_finish(conn, &iov, &cursor, conn->mount_request,
+                                      chimera_smb_client_negotiate_reply, NULL);
+        return;
     }
 
     /* 3.1.1 negotiate contexts.  Offset is 8-byte aligned from the SMB2 header;
@@ -619,6 +651,51 @@ chimera_smb_client_conn_on_connected(struct chimera_smb_client_conn *conn)
                                   chimera_smb_client_negotiate_reply, NULL);
 } /* chimera_smb_client_conn_on_connected */
 
+/* Map a vers= mount option to an SMB2 dialect.  Accepts the dotted names an
+ * administrator would write (and mount.cifs accepts) plus a raw 0xNNNN, so a
+ * test matrix can name dialects the same way the specs do.  Returns 0 for an
+ * unrecognized value, which the caller reports as EINVAL rather than quietly
+ * falling back -- a mount that silently ignored vers= would look like it had
+ * tested a dialect it never negotiated. */
+static uint16_t
+chimera_smb_client_parse_vers(const char *vers)
+{
+    static const struct {
+        const char *name;
+        uint16_t    dialect;
+    } table[] = {
+        /* *INDENT-OFF* */
+        /* uncrustify 0.78.1 pushes the closing brace one column further right
+         * on every pass over an aligned initializer table like this, so a
+         * second `make syntax` never matches the first.  Fenced, as the other
+         * aligned tables in the tree are. */
+        { "2.0.2", SMB2_DIALECT_2_0_2 },
+        { "2.1",   SMB2_DIALECT_2_1   },
+        { "3",     SMB2_DIALECT_3_0   },
+        { "3.0",   SMB2_DIALECT_3_0   },
+        { "3.0.2", SMB2_DIALECT_3_0_2 },
+        { "3.02",  SMB2_DIALECT_3_0_2 },
+        { "3.1.1", SMB2_DIALECT_3_1_1 },
+        { "3.11",  SMB2_DIALECT_3_1_1 },
+        /* *INDENT-ON* */
+    };
+    unsigned long raw;
+    char         *end;
+    size_t        i;
+
+    for (i = 0; i < sizeof(table) / sizeof(table[0]); i++) {
+        if (strcmp(vers, table[i].name) == 0) {
+            return table[i].dialect;
+        }
+    }
+
+    raw = strtoul(vers, &end, 0);
+    if (end != vers && *end == '\0' && raw <= UINT16_MAX) {
+        return (uint16_t) raw;
+    }
+    return 0;
+} /* chimera_smb_client_parse_vers */
+
 /* ---- MOUNT entry point ------------------------------------------------- */
 
 void
@@ -630,11 +707,13 @@ chimera_smb_client_mount(
     struct chimera_smb_client_server *server;
     struct chimera_smb_client_conn   *conn;
     const char                       *user, *password, *domain, *port_opt;
+    const char                       *vers_opt;
     char                              host[256];
     char                              share[256];
     const char                       *colon;
     int                               host_len;
     uint16_t                          port;
+    uint16_t                          forced_dialect = 0;
 
     shared->tcp_flavor   = chimera_vfs_request_tcp_flavor(request);
     shared->tcp_protocol = chimera_tcp_flavor_to_protocol(shared->tcp_flavor);
@@ -661,12 +740,24 @@ chimera_smb_client_mount(
     password = chimera_smb_client_get_option(&request->mount.options, "password");
     domain   = chimera_smb_client_get_option(&request->mount.options, "domain");
     port_opt = chimera_smb_client_get_option(&request->mount.options, "port");
+    vers_opt = chimera_smb_client_get_option(&request->mount.options, "vers");
 
     if (!user || !password) {
         chimera_smbclient_error("SMB mount requires user= and password= options");
         request->status = CHIMERA_VFS_EINVAL;
         request->complete(request);
         return;
+    }
+
+    if (vers_opt) {
+        forced_dialect = chimera_smb_client_parse_vers(vers_opt);
+        if (!forced_dialect) {
+            chimera_smbclient_error("SMB mount vers=%s is not a dialect this "
+                                    "client understands", vers_opt);
+            request->status = CHIMERA_VFS_EINVAL;
+            request->complete(request);
+            return;
+        }
     }
 
     port = port_opt ? (uint16_t) atoi(port_opt) : CHIMERA_SMB_CLIENT_PORT;
@@ -685,8 +776,9 @@ chimera_smb_client_mount(
     snprintf(server->domain, sizeof(server->domain), "%s",
              domain ? domain : CHIMERA_SMB_CLIENT_DEFAULT_DOMAIN);
     snprintf(server->password, sizeof(server->password), "%s", password);
-    server->port     = port;
-    server->endpoint = chimera_tcp_flavor_endpoint_create(
+    server->port           = port;
+    server->forced_dialect = forced_dialect;
+    server->endpoint       = chimera_tcp_flavor_endpoint_create(
         shared->tcp_flavor, server->hostname, server->port);
 
     conn = chimera_smb_client_get_conn(thread, server);
