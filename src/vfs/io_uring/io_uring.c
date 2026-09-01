@@ -867,11 +867,10 @@ chimera_io_uring_reap(
                             chimera_linux_statx_to_attr(&request->read.r_attr, stx);
                         }
 
-                        if (request->status == CHIMERA_VFS_OK) {
-                            request->read.r_eof =
-                                (request->read.length > 0 &&
-                                 request->read.offset + request->read.r_length >= stx->stx_size);
-                        }
+                        /* r_eof is NOT computed here.  It needs r_length,
+                         * which the readv slot supplies, and the two CQEs
+                         * complete in either order -- so it is computed once
+                         * both have landed, below the switch. */
                     }
                 }
                 break;
@@ -921,6 +920,33 @@ chimera_io_uring_reap(
         } /* switch */
 
         --request->token_count;
+
+        /* A READ answers from two SQEs -- the readv and a statx companion --
+         * and they complete in either order.  Only the readv knows how many
+         * bytes came back, and only the statx knows where the file ends, so
+         * whether this read reached EOF is not decidable until BOTH have
+         * landed: computing it in either handler makes the answer depend on
+         * which CQE won the race.  It did -- a read ending exactly at EOF fell
+         * back to the readv's "a short read means EOF", which is false for a
+         * full read, whenever the statx completed first.
+         *
+         * Decide it here, where the last CQE of the pair has been accounted
+         * for.  stx_mask is the validity flag: it is cleared before the statx
+         * is submitted and the kernel sets the bits it filled in, so an unset
+         * STATX_SIZE means the companion failed and the readv's fallback
+         * stands. */
+        if (request->token_count == 0 &&
+            request->opcode == CHIMERA_VFS_OP_READ &&
+            request->status == CHIMERA_VFS_OK &&
+            request->read.length > 0) {
+            struct statx *read_stx = (struct statx *) request->plugin_data;
+
+            if (read_stx->stx_mask & STATX_SIZE) {
+                request->read.r_eof =
+                    request->read.offset + request->read.r_length >=
+                    read_stx->stx_size;
+            }
+        }
 
         if (request->token_count == 0) {
             if (request->opcode == CHIMERA_VFS_OP_OPEN_AT ||
@@ -2081,6 +2107,13 @@ chimera_io_uring_read(
     fd = (int) request->read.handle->vfs_private;
 
     io_uring_prep_readv(sqe, fd, iov, i, request->read.offset);
+
+    /* Cleared so the completion side can tell a filled-in statx from an
+     * untouched one: the kernel sets stx_mask to the fields it returned, and
+     * the r_eof decision keys off STATX_SIZE being present.  The buffer is
+     * pooled scratch, so without this it would carry a previous request's mask
+     * (and size) into that test. */
+    stx->stx_mask = 0;
 
     sqe = chimera_io_uring_get_sqe(thread, request, 1, 0);
     io_uring_prep_statx(sqe, fd, "", AT_EMPTY_PATH | AT_STATX_SYNC_AS_STAT,
