@@ -2,6 +2,8 @@
 //
 // SPDX-License-Identifier: LGPL-2.1-only
 
+#include <sys/stat.h>
+
 #include "nfs3_procs.h"
 #include "nfs_common/nfs3_status.h"
 #include "nfs_common/nfs3_attr.h"
@@ -59,31 +61,49 @@ chimera_nfs3_access_complete(
     if (res.status == NFS3_OK) {
         chimera_nfs3_set_post_op_attr(&res.resok.obj_attributes, attr);
 
+        /* RFC 1813 3.3.4: ACCESS3_LOOKUP and ACCESS3_DELETE are meaningful only
+         * for a directory, ACCESS3_EXECUTE only for a non-directory.  Mask the
+         * request to the type-applicable bits before evaluating, so a
+         * privileged caller -- whose DAC override grants every requested bit --
+         * cannot report, e.g., EXECUTE on a directory or LOOKUP on a file.  The
+         * NFSv4 ACCESS path already does this via chimera_nfs4_access_meaningful;
+         * this brings NFSv3 in line with it, the Linux server, NFS-Ganesha and
+         * the model. */
+        uint32_t meaningful = ACCESS3_READ | ACCESS3_MODIFY | ACCESS3_EXTEND;
+
+        if (S_ISDIR(attr->va_mode)) {
+            meaningful |= ACCESS3_LOOKUP | ACCESS3_DELETE;
+        } else {
+            meaningful |= ACCESS3_EXECUTE;
+        }
+
+        uint32_t access = args->access & meaningful;
+
         /* Evaluate the canonical ACL (or mode fallback) once via the shared
          * gate -- this honours the caller's full credential rather than the
          * legacy owner-bits-only check. */
         uint32_t granted = chimera_vfs_access_check(
             attr, &req->cred,
-            chimera_nfs3_access3_to_mask(args->access));
+            chimera_nfs3_access3_to_mask(access));
 
         res.resok.access = 0;
 
-        if ((args->access & ACCESS3_READ) && (granted & CHIMERA_ACE_READ_DATA)) {
+        if ((access & ACCESS3_READ) && (granted & CHIMERA_ACE_READ_DATA)) {
             res.resok.access |= ACCESS3_READ;
         }
-        if ((args->access & ACCESS3_LOOKUP) && (granted & CHIMERA_ACE_EXECUTE)) {
+        if ((access & ACCESS3_LOOKUP) && (granted & CHIMERA_ACE_EXECUTE)) {
             res.resok.access |= ACCESS3_LOOKUP;
         }
-        if ((args->access & ACCESS3_MODIFY) && (granted & CHIMERA_ACE_WRITE_DATA)) {
+        if ((access & ACCESS3_MODIFY) && (granted & CHIMERA_ACE_WRITE_DATA)) {
             res.resok.access |= ACCESS3_MODIFY;
         }
-        if ((args->access & ACCESS3_EXTEND) && (granted & CHIMERA_ACE_APPEND_DATA)) {
+        if ((access & ACCESS3_EXTEND) && (granted & CHIMERA_ACE_APPEND_DATA)) {
             res.resok.access |= ACCESS3_EXTEND;
         }
-        if ((args->access & ACCESS3_DELETE) && (granted & CHIMERA_ACE_DELETE)) {
+        if ((access & ACCESS3_DELETE) && (granted & CHIMERA_ACE_DELETE)) {
             res.resok.access |= ACCESS3_DELETE;
         }
-        if ((args->access & ACCESS3_EXECUTE) && (granted & CHIMERA_ACE_EXECUTE)) {
+        if ((access & ACCESS3_EXECUTE) && (granted & CHIMERA_ACE_EXECUTE)) {
             res.resok.access |= ACCESS3_EXECUTE;
         }
 

@@ -64,6 +64,7 @@ chimera_fuse_open_callback(
     if (req->u.open.granted) {
         oh->granted_access |= req->u.open.granted;
         oh->granted_valid   = 1;
+        oh->granted_bound   = 1;
     }
 
     file = calloc(1, sizeof(*file));
