@@ -313,6 +313,42 @@ set_tests_properties(chimera/server/nfs/mbt4/batch_memfs PROPERTIES
     SKIP_RETURN_CODE 77
     TIMEOUT 300)
 
+# The same corpus -- every minor version instance it carries (4.0, 4.1 and
+# 4.2) -- against the other named-filesystem backends, as the NFS3 suite runs
+# above: diskfs/cairn self-provision scratch under their mkdtemp session dirs,
+# and a trace whose capability profile the live backend cannot honor skips
+# individually.  Its first runs surfaced three diskfs clone bugs (beyond-EOF
+# ranges accepted, source holes leaving stale destination data, the walk
+# reprocessing its own split piece) and the D4-17 real-holes seek refinement
+# the hole-tracking backends need.
+#
+# The linux/io_uring passthroughs are NOT registered: the replayer drives them
+# (--backend linux|io_uring, container-only), but ~115 of 120 traces diverge
+# on host-kernel semantics -- attribute omission on the passthrough fast path
+# (the nfs3 replayer's --max-attr-skip-rate machinery has no v4 counterpart
+# yet), host change-info freshness, host mode/link answers.  That is the same
+# class of engagement the nfs3 passthrough batches needed (their own
+# reconciliation registry and model profile) and is its own piece of work.
+add_test(NAME chimera/server/nfs/mbt4/batch_diskfs
+    COMMAND $<TARGET_FILE:nfs4_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/nfs4
+            --backend diskfs)
+set_tests_properties(chimera/server/nfs/mbt4/batch_diskfs PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_batch_diskfs"
+    LABELS "quint;nfs4_mbt;diskfs"
+    SKIP_RETURN_CODE 77
+    TIMEOUT 600)
+
+if(CAIRN_ENABLED)
+    add_test(NAME chimera/server/nfs/mbt4/batch_cairn
+        COMMAND $<TARGET_FILE:nfs4_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/nfs4
+                --backend cairn)
+    set_tests_properties(chimera/server/nfs/mbt4/batch_cairn PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_batch_cairn"
+        LABELS "quint;nfs4_mbt;cairn"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 600)
+endif()
+
 # pNFS.  --pnfs N makes the replayer stand up a whole metadata-server cluster
 # inside the test process: the server it already ran becomes the MDS, plus N
 # more chimera servers as flex-files data servers, each on its own inproc

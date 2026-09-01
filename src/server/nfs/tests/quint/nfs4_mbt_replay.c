@@ -270,6 +270,7 @@ enum v4_dev {
     DEV_LOOKUPP_SYMLINK,          /* D4-7 */
     DEV_COARSE_TYPE_ERR,          /* D4-15 */
     DEV_READLINK_DIR_INVAL,       /* D4-16 */
+    DEV_REAL_HOLES,               /* D4-17 */
     DEV_COUNT,
 };
 
@@ -280,7 +281,18 @@ static const char *v4_dev_ids[DEV_COUNT] = {
     "D4-7-lookupp-symlink",
     "D4-15-coarse-type-error",
     "D4-16-readlink-dir-inval",
+    "D4-17-real-holes",
 };
+
+/* Set when the backend tracks holes for real (every backend but memfs, whose
+* block_size is pinned to the model's granularity): the model, like memfs,
+* reads every byte below EOF as data and puts the sole hole at EOF, while a
+* hole-tracking backend legitimately refines that -- SEEK_HOLE may find a
+* genuine hole earlier, SEEK_DATA may skip never-written ranges to a later
+* offset or answer NFS4ERR_NXIO when nothing but holes remain below EOF.
+* All of those are conformant (RFC 7862 15.11); D4-17 records the acceptance,
+* exactly as the posix suite's PT2 rule does for its passthrough backends. */
+static int g_backend_real_holes;
 
 #define E_WRONG_TYPE 10083
 
@@ -2916,6 +2928,15 @@ classify_status_mismatch(
         o->status_dev = ast;
         return;
     }
+    /* D4-17: SEEK_DATA over ranges the model believes are data but the
+     * backend never materialized -- nothing but real holes remain below EOF,
+     * and NFS4ERR_NXIO is the conformant answer (RFC 7862 15.11.3). */
+    if (g_backend_real_holes && strcmp(tag, "SSeek") == 0 &&
+        est == NFS4_OK && ast == NFS4ERR_NXIO) {
+        o->dev_hits[DEV_REAL_HOLES]++;
+        o->status_dev = ast;
+        return;
+    }
     if (strcmp(tag, "SClose") == 0 &&
         ((est == NFS4_OK && ast == E_LOCKS_HELD) ||
          (est == E_LOCKS_HELD && ast == NFS4_OK))) {
@@ -3382,11 +3403,30 @@ check_result(
                      r->newsize);
         }
     } else if (strcmp(tag, "SSeek") == 0) {
+        uint64_t moff = (uint64_t) jf_i64(v, "offset") * V4_BLOCK_SIZE;
+
+        if (g_backend_real_holes &&
+            (r->offset != moff || r->eof != jf_bool(v, "eof"))) {
+            uint64_t qoff = req ? (uint64_t) jf_i64(jf_val(req), "off") *
+                V4_BLOCK_SIZE : 0;
+            int      wdata = req ? jf_bool(jf_val(req), "whatData") : 0;
+
+            /* D4-17: accept the hole-tracking refinement -- a HOLE at or
+             * after the queried offset but no later than the model's EOF
+             * answer, or DATA at or past the model's offset (real holes
+             * skipped).  The eof flag follows the refined offset, so it is
+             * excused with it. */
+            if ((!wdata && r->offset >= qoff && r->offset <= moff) ||
+                (wdata && r->offset >= moff)) {
+                o->dev_hits[DEV_REAL_HOLES]++;
+                return;
+            }
+        }
         if (r->eof != jf_bool(v, "eof")) {
             mism_add(m, "seek.eof: expected %d, got %d",
                      jf_bool(v, "eof"), r->eof);
         }
-        if (r->offset != (uint64_t) jf_i64(v, "offset") * V4_BLOCK_SIZE) {
+        if (r->offset != moff) {
             mism_add(m, "seek.offset: expected %" PRId64 ", got %" PRIu64,
                      jf_i64(v, "offset") * V4_BLOCK_SIZE, r->offset);
         }
@@ -4391,7 +4431,8 @@ main(
             default:
                 fprintf(stderr,
                         "usage: %s [--trace FILE ...] [--trace-dir DIR] "
-                        "[--backend memfs|diskfs|cairn] [--pnfs N] "
+                        "[--backend memfs|diskfs|cairn|linux|io_uring] "
+                        "[--pnfs N] "
                         "[--mandatory CAP] [--dry-run] [--verbose]\n",
                         argv[0]);
                 mbt_free_traces(traces, ntraces);
@@ -4412,7 +4453,8 @@ main(
      * once here (it dispatches to the trace-local oracle via g_recall_oracle). */
     /* memfs_config only reaches the memfs module; diskfs and cairn
      * self-provision their scratch under the env's session dir. */
-    opts.module = backend;
+    opts.module          = backend;
+    g_backend_real_holes = strcmp(backend, "memfs") != 0;
 
     if (!dry_run) {
         mbt_env_open_opts(&env, &opts);
