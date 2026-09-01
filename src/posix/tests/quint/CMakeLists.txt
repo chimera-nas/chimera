@@ -49,6 +49,36 @@ set_tests_properties(chimera/posix/smb/loopback_probe PROPERTIES
     LABELS "quint;posix_mbt;memfs;smb_mbt"
     TIMEOUT 300)
 
+# The same probe once per SMB dialect the client can carry.  Without a pinned
+# vers= the server selects the highest dialect in common, which against our own
+# server is always 3.1.1 -- so 2.1, 3.0 and 3.0.2 were dead code in practice no
+# matter how many tests ran.  Pinning is the only way to reach them.
+#
+# A pinned mount offers exactly ONE dialect, so a mount that comes up is proof
+# the connection is speaking that dialect: the server can only select the one
+# offered or fail to find one in common.  There is no readback to trust.
+foreach(vers 2.1 3.0 3.0.2 3.1.1)
+    add_test(NAME chimera/posix/smb/loopback_probe_${vers}
+        COMMAND $<TARGET_FILE:smb_loopback_probe> ${vers})
+    set_tests_properties(chimera/posix/smb/loopback_probe_${vers} PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb_loopback_probe_${vers}"
+        LABELS "quint;posix_mbt;memfs;smb_mbt"
+        TIMEOUT 300)
+endforeach()
+
+# 2.0.2 is the dialect the client does NOT carry: it is absent from
+# CHIMERA_SMB_CLIENT_DIALECTS, and chimera_smb_client_negotiate_reply refuses it
+# outright.  The server does speak it, so this is a real negotiation that the
+# CLIENT declines -- and it is what proves vers= is honoured at all.  A vers=
+# that was silently ignored would negotiate 3.1.1, mount happily, and fail this
+# test.  If 2.0.2 support is ever added, this test starts failing and says so.
+add_test(NAME chimera/posix/smb/loopback_dialect_refused_2.0.2
+    COMMAND $<TARGET_FILE:smb_loopback_probe> 2.0.2 expect-mount-failure)
+set_tests_properties(chimera/posix/smb/loopback_dialect_refused_2.0.2 PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb_loopback_refused_2.0.2"
+    LABELS "quint;posix_mbt;memfs;smb_mbt"
+    TIMEOUT 300)
+
 if(NOT SPECS_BUNDLE_AVAILABLE)
     message(STATUS "posix MBT replay ctest skipped (no specs trace corpus)")
     return()

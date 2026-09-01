@@ -519,10 +519,23 @@ main(
     int    argc,
     char **argv)
 {
-    json_t *res;
+    const char *vers        = (argc > 1 && argv[1][0]) ? argv[1] : NULL;
+    int         expect_fail = (argc > 2 &&
+                               strcmp(argv[2], "expect-mount-failure") == 0);
+    json_t     *res;
 
-    (void) argc;
-    (void) argv;
+    /* Optional argv[1] pins the mount's dialect (a vers= value).  With no
+     * argument the client offers its whole set and the server selects, which
+     * against a current server is always the highest -- so the older dialects
+     * are only ever reached by naming them.
+     *
+     * A pinned mount offers exactly one dialect, so the server can only select
+     * that one or fail to find a dialect in common.  A mount that comes up is
+     * therefore PROOF the connection is speaking the requested dialect -- there
+     * is no readback to trust, and a vers= that was quietly ignored would have
+     * negotiated 3.1.1 and shown up as the expect-mount-failure case passing
+     * when it should not. */
+    g_smb_vers = vers;
 
     /* Clean result stream: chimera logs go to stderr (fd 1 -> stderr), our
      * output to the saved stdout -- the same three steps posix_mbt_replay.c
@@ -542,9 +555,26 @@ main(
     }
 
     if (posix_env_setup("smb_memfs", NULL) != 0) {
-        fprintf(stderr, "smb_loopback_probe: SMB loopback setup failed\n");
+        if (expect_fail) {
+            printf("smb_loopback_probe: vers=%s refused the mount, as expected\n",
+                   vers);
+            return 0;
+        }
+        fprintf(stderr, "smb_loopback_probe: SMB loopback setup failed (vers=%s)\n",
+                vers ? vers : "<negotiated>");
         return 1;
     }
+
+    if (expect_fail) {
+        fprintf(stderr,
+                "smb_loopback_probe: vers=%s mounted, but this dialect is not "
+                "one the client can carry -- either it gained support (update "
+                "the test) or vers= was ignored\n", vers);
+        return 1;
+    }
+
+    fprintf(stderr, "smb_loopback_probe: mounted with vers=%s\n",
+            vers ? vers : "<negotiated>");
 
     probe_working_surface();
     probe_pin_readdir();

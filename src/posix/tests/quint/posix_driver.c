@@ -68,6 +68,13 @@
 #define SMB_LOOPBACK_OPTS \
         "user=root,password=" CHIMERA_TEST_USER_SMBPASSWD ",domain=WORKGROUP"
 
+/* Dialect to pin the SMB loopback mount to (a vers= value: "2.1", "3.0",
+ * "3.0.2", "3.1.1", ...), or NULL to offer the client's full set and let the
+ * server select -- which always lands on the highest it speaks.  A caller sets
+ * this BEFORE posix_env_setup; smb_loopback_probe drives it from argv so one
+ * binary covers the whole dialect matrix. */
+static const char                *g_smb_vers;
+
 static struct chimera_vfs_cred    driver_creds[MAX_PIDS];
 static mode_t                     driver_umasks[MAX_PIDS];
 static CHIMERA_DIR               *driver_dirs[MAX_DIRS];
@@ -127,6 +134,22 @@ pt_rm_cb(
     (void) ftw;
     return (type == FTW_DP ? rmdir(path) : unlink(path));
 } /* pt_rm_cb */
+
+/* Build the SMB loopback's mount option string, appending the pinned dialect
+ * when one was requested.  Shared by the initial mount and the newfs remount so
+ * a recycled mount cannot silently drop back to the negotiated default. */
+static const char *
+smb_mount_options(
+    char  *buf,
+    size_t cap)
+{
+    if (g_smb_vers) {
+        snprintf(buf, cap, "%s,vers=%s", SMB_LOOPBACK_OPTS, g_smb_vers);
+    } else {
+        snprintf(buf, cap, "%s", SMB_LOOPBACK_OPTS);
+    }
+    return buf;
+} /* smb_mount_options */
 
 /* Recursively remove a passthrough backing tree.  Space on the scratch
  * filesystem is a real budget (CI roots it on a shared volume), so the old
@@ -1018,6 +1041,7 @@ handle(json_t *req)
              * protocol server's own cached open handles, so both get the same
              * bounded retry (5s ceiling). */
             char mount_options[64];
+            char smb_options[192];
             int  rc;
             int  tries = 0;
 
@@ -1116,9 +1140,10 @@ handle(json_t *req)
                             rc);
                     return res_int(-1, chimera_posix_errno_from_status(rc));
                 }
-                if (chimera_posix_mount_with_options("/test", "smb",
-                                                     SMB_LOOPBACK_PATH,
-                                                     SMB_LOOPBACK_OPTS) != 0) {
+                if (chimera_posix_mount_with_options(
+                        "/test", "smb", SMB_LOOPBACK_PATH,
+                        smb_mount_options(smb_options,
+                                          sizeof(smb_options))) != 0) {
                     fprintf(stderr,
                             "posix_driver: newfs smb remount failed: %s\n",
                             strerror(errno));
@@ -1229,6 +1254,27 @@ handle(json_t *req)
 
     return res_int(-1, ENOSYS);
 } /* handle */
+
+/* Unwind a loopback bring-up that got as far as a running server and client but
+ * failed to mount.  Both sides own evpl thread pools, and returning with those
+ * threads live races process teardown: they keep entering evpl_run while the
+ * global evpl state under them is destroyed, which SIGSEGVs in evpl_now_ticks
+ * about one run in five.  A caller whose RESULT is "the mount was refused" --
+ * the vers= dialect matrix does exactly that -- would flake on it.
+ *
+ * The server is destroyed first: its threads are the ones that crash, and the
+ * client shutdown is what pulls the shared evpl state out from under them. */
+static void
+posix_env_setup_unwind(
+    struct chimera_server     *server,
+    struct prometheus_metrics *metrics)
+{
+    if (server) {
+        chimera_server_destroy(server);
+    }
+    chimera_posix_shutdown();
+    prometheus_metrics_destroy(metrics);
+} /* posix_env_setup_unwind */
 
 /* Bring up the chimera POSIX client (plus an in-process loopback NFS server
  * for the nfs3_/nfs4_ backends), create and mount fs0, and normalize the root
@@ -1386,6 +1432,7 @@ posix_env_setup(
          * harnesses. */
         struct chimera_server_config *server_config;
         char                          mount_options[64];
+        char                          smb_options[192];
 
         chimera_client_config_set_tcp_flavor(config, CHIMERA_TCP_FLAVOR_INPROC);
         if (smb) {
@@ -1492,11 +1539,13 @@ posix_env_setup(
         }
 
         if (smb) {
-            if (chimera_posix_mount_with_options("/test", "smb",
-                                                 SMB_LOOPBACK_PATH,
-                                                 SMB_LOOPBACK_OPTS) != 0) {
+            if (chimera_posix_mount_with_options(
+                    "/test", "smb", SMB_LOOPBACK_PATH,
+                    smb_mount_options(smb_options,
+                                      sizeof(smb_options))) != 0) {
                 fprintf(stderr, "posix_driver: smb mount failed: %s\n",
                         strerror(errno));
+                posix_env_setup_unwind(server, metrics);
                 return 1;
             }
         } else {
@@ -1507,6 +1556,7 @@ posix_env_setup(
                                                  mount_options) != 0) {
                 fprintf(stderr, "posix_driver: nfs%d mount failed\n",
                         nfs_version);
+                posix_env_setup_unwind(server, metrics);
                 return 1;
             }
         }
