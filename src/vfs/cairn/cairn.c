@@ -3785,6 +3785,24 @@ cairn_read(
 
     inode = ih.inode;
 
+    /* read() of a directory is EISDIR; other non-regular types are EINVAL.
+     * Without this a directory read walks the extent map instead: a cairn
+     * directory carries a nominal size of 4096 and owns no extents, so the
+     * read fell through to the ordinary path and answered 4096 zero bytes
+     * where POSIX requires a failure.  memfs and diskfs both gate this. */
+    if (unlikely(!S_ISREG(inode->mode))) {
+        /* Decide before releasing: the handle owns the RocksDB slice `inode`
+         * points into, so it is freed memory once released. */
+        enum chimera_vfs_error err = S_ISDIR(inode->mode) ?
+            CHIMERA_VFS_EISDIR : CHIMERA_VFS_EINVAL;
+
+        cairn_inode_handle_release(&ih);
+        cairn_read_end(thread);
+        request->status = err;
+        request->complete(request);
+        return;
+    }
+
     /* relatime: only stamp atime when the file changed since last access or the
      * recorded atime is a day stale, so steady-state reads neither rewrite the
      * inode to RocksDB nor churn the VFS attr cache. */
