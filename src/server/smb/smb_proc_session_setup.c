@@ -621,6 +621,34 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
             }
         }
 
+        /* smb_encryption == 2 REQUIRES encryption (1 merely enables it).  Every
+         * other read of the knob treats it as a boolean, which left "required"
+         * indistinguishable from "enabled": a client that never advertised an
+         * encryption capability negotiates cipher_id 0, so the block above
+         * derives no keys, the session is never marked encrypt-all, and the
+         * enforcement points keyed off that flag never fire -- the server then
+         * served the whole session in cleartext while configured to require
+         * encryption.
+         *
+         * MS-SMB2 3.3.5.5.3: when Server.EncryptData is TRUE and the client did
+         * not negotiate encryption, the server MUST fail the session setup with
+         * ACCESS_DENIED.  Anonymous is exempt: a null session has no secret to
+         * protect and is never encrypt-all (as above), so requiring encryption
+         * of it would reject the guest probe every SMB client opens with.
+         *
+         * The per-share requirement already enforces exactly this shape at the
+         * request gate (smb.c: share->encrypt_data && !received_encrypted ->
+         * ACCESS_DENIED); this is the global-mode half that was missing. */
+        if (shared->config.encryption >= 2 && !is_anonymous && !is_binding &&
+            !(session->flags & CHIMERA_SMB_SESSION_ENCRYPT_DATA)) {
+            chimera_smb_error("Session setup refused: encryption is required "
+                              "but the client negotiated none (dialect 0x%04x, "
+                              "cipher 0x%04x)",
+                              conn->dialect, conn->negotiated.cipher_id);
+            chimera_smb_complete_request(request, SMB2_STATUS_ACCESS_DENIED);
+            return;
+        }
+
         /* Track whether the established/current security context is anonymous.
          * A null session has no key, so it is never signed or encrypted and its
          * SESSION_SETUP response carries SMB2_SESSION_FLAG_IS_NULL.  Re-auth can
