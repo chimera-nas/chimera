@@ -45,9 +45,10 @@ endif()
 # if every trace skips.
 #
 # The specs `posix` corpus carries per-backend profiles distinguished by
-# filename prefix: memfs (no prefix), the NFS loopbacks (nfs3_/nfs4_), the
-# on-disk/passthrough backends (disk_) and FUSE (fuse_).  Each registered
-# batch selects its profile with --exclude-prefix.
+# filename prefix: memfs (no prefix, and also what diskfs replays), the NFS
+# loopbacks (nfs3_/nfs4_), the no-clone profile (disk_, shared by cairn and
+# the linux/io_uring passthroughs) and FUSE (fuse_).  Each registered batch
+# selects its profile with --exclude-prefix.
 add_test(NAME chimera/posix/mbt/batch_memfs
     COMMAND $<TARGET_FILE:posix_mbt_replay>
             --backend memfs
@@ -70,12 +71,6 @@ set_tests_properties(chimera/posix/mbt/batch_memfs PROPERTIES
 # posix_mbt_declines (posix_mbt_replay.c), each naming the diskfs bug that
 # retires the entry.
 #
-# cairn is deliberately NOT registered yet: the same corpus fails ~12 traces
-# across most flavors there (SEEK_DATA/SEEK_HOLE at rocksdb block granularity,
-# clone_file_range unsupported, dup'd-fd shared-offset drift, and the same
-# removed-directory create gate diskfs misses), which is a backend work list,
-# not a decline list.  The driver already speaks cairn (--backend cairn), so
-# registering it later is this same block again.
 add_test(NAME chimera/posix/mbt/batch_diskfs
     COMMAND $<TARGET_FILE:posix_mbt_replay>
             --backend diskfs
@@ -85,6 +80,32 @@ add_test(NAME chimera/posix/mbt/batch_diskfs
 set_tests_properties(chimera/posix/mbt/batch_diskfs PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=posix_batch_diskfs"
     LABELS "quint;posix_mbt;diskfs"
+    SKIP_RETURN_CODE 77
+    TIMEOUT 600)
+
+# cairn, the other on-disk backend, completing the engine-backend matrix.  It
+# is the one engine backend the memfs profile does not fit: cairn advertises
+# neither CHIMERA_VFS_CAP_COPY_RANGE nor CHIMERA_VFS_CAP_CLONE_RANGE, and
+# while the VFS supplies a generic copy fallback for the former there is no
+# clone fallback -- clone answers ENOTSUP.  So cairn replays the `disk_`
+# profile (posix_run.qnt's posixDisk instance, F_CLONE_RANGE = FeatOff), the
+# same profile the linux/io_uring passthrough batches below replay, and
+# selects it the same way: exclude the unprefixed memfs traces (they all
+# begin "step") and the three prefixed profiles, leaving disk_ alone.
+#
+# diskfs stays on the memfs profile above rather than joining cairn here: it
+# does implement clone, so holding it to the model-conformant profile is what
+# exercises that path (and is what found the clone defects behind its two
+# remaining declines).
+add_test(NAME chimera/posix/mbt/batch_cairn
+    COMMAND $<TARGET_FILE:posix_mbt_replay>
+            --backend cairn
+            --trace-dir ${SPECS_BUNDLE_DIR}/posix
+            --exclude-prefix step --exclude-prefix nfs3_
+            --exclude-prefix nfs4_ --exclude-prefix fuse_)
+set_tests_properties(chimera/posix/mbt/batch_cairn PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=posix_batch_cairn"
+    LABELS "quint;posix_mbt;cairn"
     SKIP_RETURN_CODE 77
     TIMEOUT 600)
 
