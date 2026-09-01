@@ -142,6 +142,13 @@ struct chimera_smb_client_server {
     char                  password[256];
     uint16_t              port;
 
+    /* Dialect pinned by the mount's vers= option, or 0 to offer the full
+     * CHIMERA_SMB_CLIENT_DIALECTS set and take whatever the server selects.
+     * Pinning is what makes the sub-3.1.1 paths reachable at all: the server
+     * always picks the highest dialect in common, so an unpinned mount against
+     * a modern server never negotiates anything but 3.1.1. */
+    uint16_t              forced_dialect;
+
     struct evpl_endpoint *endpoint;
 
     /* Shared session state, written once by the mount handshake. */
