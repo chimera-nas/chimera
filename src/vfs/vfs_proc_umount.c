@@ -31,11 +31,54 @@ chimera_vfs_umount_wake(struct chimera_vfs_thread *thread)
     evpl_ring_doorbell(&thread->doorbell);
 } /* chimera_vfs_umount_wake */
 
+/*
+ * Reclaim a torn-down mount after an RCU grace period.
+ *
+ * Mount-table readers run chimera_vfs_mount_table_lookup() under
+ * urcu_qsbr_read_lock() and dereference entry->mount->root_fh to match the
+ * mount id.  chimera_vfs_mount_table_remove() unlinks the entry and gives the
+ * ENTRY a grace period (call_rcu) before freeing it -- but the mount it points
+ * at used to be freed the instant the backend's UMOUNT completed, with no
+ * grace period at all.  A reader that entered the lookup before the unlink
+ * still walks that entry and follows the now-dangling entry->mount.
+ *
+ * Seen as an intermittent ASAN heap-use-after-free (read of 16 bytes in the
+ * lookup's memcmp) when the deferred-close sweep resolved a mount on one
+ * thread while a per-trace filesystem recycle unmounted it on another.  Give
+ * the mount the same grace period its entry gets.
+ *
+ * struct chimera_vfs_mount cannot carry the rcu_head itself: vfs.h is
+ * deliberately urcu-free, so the head lives in this wrapper instead.
+ */
+struct chimera_vfs_mount_reclaim {
+    struct rcu_head           rcu;
+    struct chimera_vfs_mount *mount;
+};
+
+static void
+chimera_vfs_mount_reclaim_rcu(struct rcu_head *head)
+{
+    struct chimera_vfs_mount_reclaim *reclaim =
+        container_of(head, struct chimera_vfs_mount_reclaim, rcu);
+    struct chimera_vfs_mount         *mount = reclaim->mount;
+
+    free(mount->path);
+    free(mount->module_path);
+    free(mount->options);
+    free(mount);
+    free(reclaim);
+} /* chimera_vfs_mount_reclaim_rcu */
+
 static void
 chimera_vfs_umount_complete(struct chimera_vfs_request *request)
 {
-    struct chimera_vfs_thread    *thread   = request->thread;
-    chimera_vfs_umount_callback_t callback = request->proto_callback;
+    struct chimera_vfs_thread        *thread   = request->thread;
+    chimera_vfs_umount_callback_t     callback = request->proto_callback;
+    /* Read the mount out before the request is freed -- the frees below used
+     * to reach through request->umount.mount after chimera_vfs_request_free()
+     * had already returned the request to its magazine. */
+    struct chimera_vfs_mount         *mount = request->umount.mount;
+    struct chimera_vfs_mount_reclaim *reclaim;
 
     chimera_vfs_complete(request);
 
@@ -45,12 +88,17 @@ chimera_vfs_umount_complete(struct chimera_vfs_request *request)
 
     chimera_vfs_umount_wake(thread);
 
-    free(request->umount.mount->path);
-    free(request->umount.mount->module_path);
-    free(request->umount.mount->options);
-    free(request->umount.mount);
+    reclaim = malloc(sizeof(*reclaim));
 
-} /* chimera_vfs_umount */
+    if (likely(reclaim)) {
+        reclaim->mount = mount;
+        call_rcu(&reclaim->rcu, chimera_vfs_mount_reclaim_rcu);
+    }
+    /* Out of memory: leak the mount rather than free it early.  It is one
+     * small allocation on a path that only runs at umount, and the alternative
+     * is the use-after-free this exists to prevent. */
+
+} /* chimera_vfs_umount_complete */
 
 
 /*
