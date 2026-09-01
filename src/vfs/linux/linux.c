@@ -660,7 +660,13 @@ chimera_linux_readdir(
          * unmapped-errno fallback on ubuntu26).  The portable test is the
          * fd itself: it stays fstat-able on a deleted directory, with a
          * zero link count. */
-        if (fstat(fd, &dead_st) == 0 && dead_st.st_nlink == 0) {
+        /* Only a DIRECTORY that lost its last name is the dead-handle case:
+         * a non-directory object here failed with ENOTDIR on its own merits,
+         * and an unlinked-but-open file is still a resolvable (pinned)
+         * handle, not a stale one -- converting its type error to ESTALE
+         * mis-answered READDIR of a removed file's handle. */
+        if (fstat(fd, &dead_st) == 0 && S_ISDIR(dead_st.st_mode) &&
+            dead_st.st_nlink == 0) {
             open_errno = ESTALE;
         }
         chimera_linux_error("linux_readdir: openat() failed: %s",
@@ -1856,6 +1862,36 @@ chimera_linux_link_at(
         return;
     }
 
+    /* The type gates come before the host call, not just on its error path:
+     * linkat() reports the target-name collision (EEXIST) ahead of both type
+     * refusals, so when the conditions coincide the old post-error remap
+     * never saw them and a LINK of a directory answered EEXIST.  The native
+     * backends (and the model) order the target-directory check first
+     * (NOTDIR), then the directory-source check (ISDIR) -- RFC 7530 16.9
+     * lists both and the reference backends fix the order. */
+    {
+        struct stat st;
+
+        if (fstat(dir_fd, &st) == 0 && !S_ISDIR(st.st_mode)) {
+            close(fd);
+            close(dir_fd);
+            request->status = CHIMERA_VFS_ENOTDIR;
+            request->complete(request);
+            return;
+        }
+        if (fstat(fd, &st) == 0 && S_ISDIR(st.st_mode)) {
+            close(fd);
+            close(dir_fd);
+            request->status = CHIMERA_VFS_EISDIR;
+            request->complete(request);
+            return;
+        }
+    }
+
+    chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
+                            &request->link_at.r_dir_pre_attr,
+                            dir_fd);
+
     rc = linkat(fd, "", dir_fd, fullname, AT_EMPTY_PATH);
 
     if (rc < 0) {
@@ -1873,6 +1909,10 @@ chimera_linux_link_at(
     } else {
         request->status = CHIMERA_VFS_OK;
     }
+
+    chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
+                            &request->link_at.r_dir_post_attr,
+                            dir_fd);
 
     close(fd);
     close(dir_fd);
