@@ -90,6 +90,18 @@ posix_module_is_passthrough(const char *module)
     return strcmp(module, "linux") == 0 || strcmp(module, "io_uring") == 0;
 } /* posix_module_is_passthrough */
 
+/* Backends that record where a file's data actually lives, and so answer
+ * SEEK_DATA/SEEK_HOLE from a real extent map: the passthroughs (whose host
+ * filesystem tracks holes) and cairn (whose extents are its own RocksDB
+ * records).  memfs and diskfs instead report every byte below EOF as data
+ * with the sole hole at EOF, which is what the model abstracts.  Both are
+ * POSIX-valid; see the PT2 reconciliation for the resulting refinement. */
+static int
+posix_module_tracks_holes(const char *module)
+{
+    return posix_module_is_passthrough(module) || strcmp(module, "cairn") == 0;
+} /* posix_module_tracks_holes */
+
 static int
 pt_rm_cb(
     const char        *path,
