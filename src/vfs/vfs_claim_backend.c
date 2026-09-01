@@ -739,8 +739,19 @@ chimera_vfs_bl_range_complete(
     }
 
     if (error_code == CHIMERA_VFS_OK && granted) {
+        uint64_t old_token;
+
         pthread_mutex_lock(&file->lock);
+        old_token            = claim->backend_token;
         claim->backend_token = token;
+        if (old_token && old_token != token) {
+            /* A re-projection of a claim the backend already granted (a lock
+             * upgrade re-confirms the same claim record) must retire the
+             * record the old token names, or the backend keeps its per-token
+             * state -- and the handle under it -- forever.  Enqueued under
+             * file->lock, exactly as chimera_vfs_claim_release does. */
+            chimera_vfs_claim_backend_release_token(state, file, old_token);
+        }
         pthread_mutex_unlock(&file->lock);
 
         cb(CHIMERA_CLAIM_GRANTED, claim, NULL, cb_private);
