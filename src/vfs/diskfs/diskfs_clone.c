@@ -597,8 +597,8 @@ diskfs_clone_advance(struct chimera_vfs_request *request)
     struct diskfs_thread          *thread = p->thread;
     struct diskfs_bt_op           *op     = diskfs_bt_op_alloc(thread);
 
-    uint64_t eend = p->ext_iter.file_offset + p->ext_iter.length;
-    uint64_t oend = eend < p->loop_pos ? eend : p->loop_pos;
+    uint64_t                       eend = p->ext_iter.file_offset + p->ext_iter.length;
+    uint64_t                       oend = eend < p->loop_pos ? eend : p->loop_pos;
 
     /* Step past everything the step just processed.  Advancing from the
      * ORIGINAL extent's start is not enough: when the source split rewrote it
@@ -872,7 +872,7 @@ diskfs_clone_dst_clear_cb(
 
     if (!have || p->clone_dst_ext.file_offset >= dend) {
         /* Nothing (left) overlapping: the range is clear. */
-        diskfs_clone_insert_dst_record(request);
+        p->clone_clear_cont(request);
         return;
     }
 
@@ -925,17 +925,20 @@ diskfs_clone_dst_clear(struct chimera_vfs_request *request)
 static void
 diskfs_clone_insert_dst(struct chimera_vfs_request *request)
 {
-    struct diskfs_request_private *p      = request->plugin_data;
-    struct diskfs_extent          *e      = &p->ext_iter;
-    uint64_t                       ostart = e->file_offset > p->clone_src_base ?
-        e->file_offset : p->clone_src_base;
+    struct diskfs_request_private *p    = request->plugin_data;
+    struct diskfs_extent          *e    = &p->ext_iter;
     uint64_t                       oend = (e->file_offset + e->length) < p->loop_pos ?
         (e->file_offset + e->length) : p->loop_pos;
 
-    /* Clear whatever the destination already holds across this step's range
-     * before recording the shared extent there. */
-    p->clone_dst_clear_start = p->clone_dst_base + (ostart - p->clone_src_base);
-    p->clone_dst_clear_end   = p->clone_dst_clear_start + (oend - ostart);
+    /* Clear whatever the destination already holds from where the last step
+     * left off through this step's range.  Starting at clone_cleared_to (not
+     * this step's own start) is what clears the ranges opposite source holes
+     * the walk skipped: a clone replicates the source's holes, so stale
+     * destination data there must go too. */
+    p->clone_dst_clear_start = p->clone_cleared_to;
+    p->clone_dst_clear_end   = p->clone_dst_base + (oend - p->clone_src_base);
+    p->clone_cleared_to      = p->clone_dst_clear_end;
+    p->clone_clear_cont      = diskfs_clone_insert_dst_record;
 
     diskfs_clone_dst_clear(request);
 } /* diskfs_clone_insert_dst */
@@ -1042,6 +1045,19 @@ diskfs_clone_walk_cb(
     diskfs_bt_op_free(p->thread, op);
 
     if (!have || p->ext_iter.file_offset >= p->loop_pos) {
+        /* Source exhausted.  If a trailing source hole remains, the matching
+        * destination range still holds whatever it held before the clone --
+        * clear it (to zeros, as the source reads there) before finishing. */
+        uint64_t dst_end = p->clone_dst_base + (p->loop_pos - p->clone_src_base);
+
+        if (p->clone_cleared_to < dst_end) {
+            p->clone_dst_clear_start = p->clone_cleared_to;
+            p->clone_dst_clear_end   = dst_end;
+            p->clone_cleared_to      = dst_end;
+            p->clone_clear_cont      = diskfs_clone_finalize;
+            diskfs_clone_dst_clear(request);
+            return;
+        }
         diskfs_clone_finalize(request);
         return;
     }
@@ -1108,10 +1124,11 @@ diskfs_clone_rc_acquired_cb(
         return;
     }
 
-    p->clone_src_base = request->clone_range.src_offset;
-    p->clone_dst_base = request->clone_range.dst_offset;
-    p->loop_off       = request->clone_range.src_offset;
-    p->loop_pos       = request->clone_range.src_offset + request->clone_range.length;
+    p->clone_src_base   = request->clone_range.src_offset;
+    p->clone_dst_base   = request->clone_range.dst_offset;
+    p->clone_cleared_to = request->clone_range.dst_offset;
+    p->loop_off         = request->clone_range.src_offset;
+    p->loop_pos         = request->clone_range.src_offset + request->clone_range.length;
 
     diskfs_clone_walk(request);
 } /* diskfs_clone_rc_acquired_cb */

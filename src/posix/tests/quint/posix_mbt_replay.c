@@ -183,8 +183,6 @@ static const struct {
       "copy_file_range over-copies past source EOF" },
     { "diskfs", "step_256_0x100_1.itf.json",
       "copy_file_range over-copies past source EOF" },
-    { "diskfs", "step_256_0x100_2.itf.json",
-      "copy_file_range over-copies past source EOF" },
     /* diskfs mkdirat under a directory that has been removed (still open via
      * dirfd) creates the entry instead of answering ENOENT. */
     { "diskfs", "stepFds_128_0x1_3.itf.json",

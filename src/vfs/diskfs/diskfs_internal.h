@@ -371,6 +371,17 @@ struct diskfs_request_private {
      * refcount bump and the advance all still need. */
     uint64_t                    clone_dst_clear_start;
     uint64_t                    clone_dst_clear_end;
+    /* How far (in destination offsets) the clone has cleared so far.  Each
+     * step clears from here through its own overlap end, which is what makes
+     * the ranges opposite SOURCE HOLES get cleared too: a clone replicates
+     * the source's holes, so stale destination extents there must go the
+     * same as anywhere else in the range. */
+    uint64_t                    clone_cleared_to;
+    /* Where the destination clear pass hands control when its range is clear:
+     * the per-step shared-extent insert, or the finalize after the trailing
+     * hole's clear. */
+    void                        (*clone_clear_cont)(
+        struct chimera_vfs_request *);
     struct diskfs_extent        clone_dst_ext;
     /* Whole-extent CoW privatize: the shared extent being copied to private
      * blocks, the freshly-allocated destination, and the bytes copied so far. */
