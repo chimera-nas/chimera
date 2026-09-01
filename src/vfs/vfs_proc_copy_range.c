@@ -34,6 +34,14 @@ struct chimera_vfs_copy_fallback {
     uint64_t                          dst_offset;
     uint64_t                          remaining;
     uint64_t                          copied;
+    /* The last read came up short or reported EOF: the source has no more
+     * bytes to give as of this copy, so the in-flight write is the final hop.
+     * Without this the loop keeps reading -- and a same-file copy whose
+     * destination writes extend the source then feeds on its own output,
+     * copying the zeros it just materialized until the requested length is
+     * exhausted. */
+    int                               src_exhausted;
+    uint32_t                          read_len;     /* current hop's ask */
     uint64_t                          post_attr_mask;
     struct chimera_vfs_attrs          r_pre_attr;
     struct chimera_vfs_attrs          r_post_attr;
@@ -106,6 +114,11 @@ chimera_vfs_copy_fallback_write_cb(
     ctx->dst_offset += length;
     ctx->remaining  -= length;
 
+    if (ctx->src_exhausted) {
+        chimera_vfs_copy_fallback_finish(ctx, CHIMERA_VFS_OK);
+        return;
+    }
+
     chimera_vfs_copy_fallback_step(ctx);
 } /* chimera_vfs_copy_fallback_write_cb */
 
@@ -134,6 +147,14 @@ chimera_vfs_copy_fallback_read_cb(
         }
         chimera_vfs_copy_fallback_finish(ctx, CHIMERA_VFS_OK);
         return;
+    }
+
+    /* A short or EOF-flagged read is the source's EOF as of this copy: write
+     * what it gave and stop there (copy_file_range(2) semantics).  Reading on
+     * regardless is how a same-file copy came to copy its own freshly written
+     * zeros. */
+    if (eof || (uint64_t) count < ctx->read_len) {
+        ctx->src_exhausted = 1;
     }
 
     /* Copy the read result into a single freshly allocated buffer we fully own.
@@ -204,6 +225,7 @@ chimera_vfs_copy_fallback_step(struct chimera_vfs_copy_fallback *ctx)
             : (uint32_t) ctx->remaining;
 
     ctx->hold_niov = 0;
+    ctx->read_len  = chunk;
 
     chimera_vfs_read(
         ctx->thread,

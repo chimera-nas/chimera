@@ -171,13 +171,6 @@ static const struct {
     const char *trace;      /* trace file basename */
     const char *why;
 } posix_mbt_declines[] = {
-    /* diskfs copy_file_range copies and answers block-rounded byte counts
-     * past the source EOF (1024 requested at EOF-1024 -> 4096 copied), and
-     * the destination grows to match. */
-    { "diskfs", "stepData_128_0x1_2.itf.json",
-      "copy_file_range over-copies past source EOF" },
-    { "diskfs", "step_256_0x100_1.itf.json",
-      "copy_file_range over-copies past source EOF" },
     /* diskfs mkdirat under a directory that has been removed (still open via
      * dirfd) creates the entry instead of answering ENOENT. */
     { "diskfs", "stepFds_128_0x1_3.itf.json",
