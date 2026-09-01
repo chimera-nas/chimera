@@ -1090,6 +1090,16 @@ diskfs_clone_rc_acquired_cb(
 
     diskfs_map_attrs(p->thread, &request->clone_range.r_pre_attr, dst);
 
+    /* The source range must lie within the source file (the FICLONERANGE
+     * contract, and RFC 7862 15.13.3's MUST for the CLONE op that rides on
+     * this).  Checked here, with the inodes locked, so the size cannot move
+     * underneath the decision -- memfs enforces the same rule. */
+    if (request->clone_range.src_offset + request->clone_range.length >
+        src->size) {
+        diskfs_op_fail(request, p->txn, CHIMERA_VFS_EINVAL);
+        return;
+    }
+
     p->clone_src_base = request->clone_range.src_offset;
     p->clone_dst_base = request->clone_range.dst_offset;
     p->loop_off       = request->clone_range.src_offset;
