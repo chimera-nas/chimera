@@ -171,10 +171,10 @@ static const struct {
     const char *trace;      /* trace file basename */
     const char *why;
 } posix_mbt_declines[] = {
-    /* diskfs mkdirat under a directory that has been removed (still open via
-     * dirfd) creates the entry instead of answering ENOENT. */
-    { "diskfs", "stepFds_128_0x1_3.itf.json",
-      "create under a removed directory succeeds" },
+    /* Currently empty -- every entry the first diskfs rounds added has been
+     * retired by a fix.  The sentinel keeps the array non-empty; add new
+     * declines above it. */
+    { NULL, NULL, NULL },
 };
 
 static const char *
@@ -187,7 +187,8 @@ posix_mbt_declined(const char *path)
     for (i = 0;
          i < sizeof(posix_mbt_declines) / sizeof(posix_mbt_declines[0]);
          i++) {
-        if (strcmp(posix_mbt_declines[i].backend, g_module) == 0 &&
+        if (posix_mbt_declines[i].backend &&
+            strcmp(posix_mbt_declines[i].backend, g_module) == 0 &&
             strcmp(posix_mbt_declines[i].trace, base) == 0) {
             return posix_mbt_declines[i].why;
         }

@@ -642,6 +642,16 @@ diskfs_lookup_at_parent_cb(
         return;
     }
 
+    /* A directory that has been removed stays resolvable while a descriptor
+     * pins it, but POSIX lets nothing be created in or resolved through it
+     * any more (Linux answers ENOENT for every *at() call against such a
+     * dirfd).  A removed directory's nlink is zeroed, so that is the test --
+     * after the type check, matching the order *at() resolution uses. */
+    if (parent->nlink == 0) {
+        diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOENT);
+        return;
+    }
+
     diskfs_map_attrs(thread, &request->lookup_at.r_dir_attr, parent);
 
     if (namelen == 1 && name[0] == '.') {
@@ -887,6 +897,16 @@ diskfs_mkdir_at_parent_cb(
         return;
     }
 
+    /* A directory that has been removed stays resolvable while a descriptor
+     * pins it, but POSIX lets nothing be created in or resolved through it
+     * any more (Linux answers ENOENT for every *at() call against such a
+     * dirfd).  A removed directory's nlink is zeroed, so that is the test --
+     * after the type check, matching the order *at() resolution uses. */
+    if (parent->nlink == 0) {
+        diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOENT);
+        return;
+    }
+
     diskfs_map_attrs(thread, &request->mkdir_at.r_dir_pre_attr, parent);
 
     p->inode_stash[0] = parent;
@@ -1070,6 +1090,16 @@ diskfs_mknod_at_parent_cb(
 
     if (!S_ISDIR(parent->mode)) {
         diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOTDIR);
+        return;
+    }
+
+    /* A directory that has been removed stays resolvable while a descriptor
+     * pins it, but POSIX lets nothing be created in or resolved through it
+     * any more (Linux answers ENOENT for every *at() call against such a
+     * dirfd).  A removed directory's nlink is zeroed, so that is the test --
+     * after the type check, matching the order *at() resolution uses. */
+    if (parent->nlink == 0) {
+        diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOENT);
         return;
     }
 
@@ -1327,6 +1357,16 @@ diskfs_remove_at_parent_cb(
 
     if (!S_ISDIR(parent->mode)) {
         diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOTDIR);
+        return;
+    }
+
+    /* A directory that has been removed stays resolvable while a descriptor
+     * pins it, but POSIX lets nothing be created in or resolved through it
+     * any more (Linux answers ENOENT for every *at() call against such a
+     * dirfd).  A removed directory's nlink is zeroed, so that is the test --
+     * after the type check, matching the order *at() resolution uses. */
+    if (parent->nlink == 0) {
+        diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOENT);
         return;
     }
 
@@ -2028,6 +2068,16 @@ diskfs_open_at_parent_cb(
         return;
     }
 
+    /* A directory that has been removed stays resolvable while a descriptor
+     * pins it, but POSIX lets nothing be created in or resolved through it
+     * any more (Linux answers ENOENT for every *at() call against such a
+     * dirfd).  A removed directory's nlink is zeroed, so that is the test --
+     * after the type check, matching the order *at() resolution uses. */
+    if (parent->nlink == 0) {
+        diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOENT);
+        return;
+    }
+
     diskfs_map_attrs(thread, &request->open_at.r_dir_pre_attr, parent);
 
     p->inode_stash[0] = parent;
@@ -2375,6 +2425,16 @@ diskfs_symlink_at_parent_cb(
 
     if (!S_ISDIR(parent->mode)) {
         diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOTDIR);
+        return;
+    }
+
+    /* A directory that has been removed stays resolvable while a descriptor
+     * pins it, but POSIX lets nothing be created in or resolved through it
+     * any more (Linux answers ENOENT for every *at() call against such a
+     * dirfd).  A removed directory's nlink is zeroed, so that is the test --
+     * after the type check, matching the order *at() resolution uses. */
+    if (parent->nlink == 0) {
+        diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOENT);
         return;
     }
 
@@ -3331,6 +3391,16 @@ diskfs_link_at_parent_cb(
 
     if (!S_ISDIR(parent->mode)) {
         diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOTDIR);
+        return;
+    }
+
+    /* A directory that has been removed stays resolvable while a descriptor
+     * pins it, but POSIX lets nothing be created in or resolved through it
+     * any more (Linux answers ENOENT for every *at() call against such a
+     * dirfd).  A removed directory's nlink is zeroed, so that is the test --
+     * after the type check, matching the order *at() resolution uses. */
+    if (parent->nlink == 0) {
+        diskfs_op_fail(request, p->txn, CHIMERA_VFS_ENOENT);
         return;
     }
 
