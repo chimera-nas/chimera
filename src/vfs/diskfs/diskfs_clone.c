@@ -597,10 +597,18 @@ diskfs_clone_advance(struct chimera_vfs_request *request)
     struct diskfs_thread          *thread = p->thread;
     struct diskfs_bt_op           *op     = diskfs_bt_op_alloc(thread);
 
-    /* Step to the extent following the one just processed.  (A plain re-floor of
-     * an advanced offset would return the same extent again, since floor is the
-     * largest key <= offset.) */
-    if (diskfs_ext_next_async(op, thread, p->inode_stash[1], p->ext_iter.file_offset,
+    uint64_t eend = p->ext_iter.file_offset + p->ext_iter.length;
+    uint64_t oend = eend < p->loop_pos ? eend : p->loop_pos;
+
+    /* Step past everything the step just processed.  Advancing from the
+     * ORIGINAL extent's start is not enough: when the source split rewrote it
+     * as [head][overlap=SHARED][tail], the overlap and tail carry keys larger
+     * than the original's, so next(estart) would return the overlap piece the
+     * step itself just inserted -- reprocessing it double-bumps the refcount
+     * and re-inserts the destination record onto a live key.  next(oend - 1)
+     * lands on the tail (or the following extent) in the split and unsplit
+     * cases alike. */
+    if (diskfs_ext_next_async(op, thread, p->inode_stash[1], oend - 1,
                               p->rec_scratch, sizeof(p->rec_scratch),
                               diskfs_clone_walk_cb, request)) {
         diskfs_clone_walk_cb(op, op->result, request);
