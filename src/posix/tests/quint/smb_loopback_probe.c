@@ -670,6 +670,10 @@ main(
         if (expect_fail) {
             printf("smb_loopback_probe: the mount was refused, as expected\n");
             fflush(stdout);
+            /* _exit skips the log's own flush, and the refusal cells are
+             * exactly the ones whose artifact should say WHY the mount was
+             * refused, so push the buffered lines out first. */
+            chimera_log_flush();
             /* _exit, not return: the verdict is in, and everything after this
              * point is teardown of a half-built environment -- a running
              * server, a client with no mount, evpl thread pools on both.  That
