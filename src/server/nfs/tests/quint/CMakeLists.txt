@@ -349,6 +349,28 @@ if(CAIRN_ENABLED)
         TIMEOUT 600)
 endif()
 
+# The same corpus with delegations SERVED.  The corpus's Deleg instances
+# assume grants and skip against the default (delegations-off) server above;
+# the delegation-free instances assume none and skip here when the server
+# grants on their opens -- the capability reconciliation self-selects each
+# trace into whichever batch matches, and between the two every instance
+# replays.  Until this batch existed the Deleg instances had no consumer at
+# all: they were generated, skipped silently in the default batch, and the
+# delegation wire paths were covered only by the deterministic deleg_probe.
+foreach(dback memfs diskfs cairn)
+    if(dback STREQUAL "cairn" AND NOT CAIRN_ENABLED)
+        continue()
+    endif()
+    add_test(NAME chimera/server/nfs/mbt4/batch_deleg_${dback}
+        COMMAND $<TARGET_FILE:nfs4_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/nfs4
+                --backend ${dback} --delegations)
+    set_tests_properties(chimera/server/nfs/mbt4/batch_deleg_${dback} PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_batch_deleg_${dback}"
+        LABELS "quint;nfs4_mbt;${dback}"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 600)
+endforeach()
+
 # pNFS.  --pnfs N makes the replayer stand up a whole metadata-server cluster
 # inside the test process: the server it already ran becomes the MDS, plus N
 # more chimera servers as flex-files data servers, each on its own inproc
