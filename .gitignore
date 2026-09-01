@@ -17,6 +17,7 @@ private
 *.orig
 Testing
 compile_commands.json
+/worktrees/
 settings.local.json
 .serena
 

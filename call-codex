@@ -7,7 +7,6 @@
 
 set -e
 
-WORKTREE_BASE="/worktrees"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
@@ -16,7 +15,8 @@ Usage: $(basename "$0") [OPTIONS]
 
 Create a git worktree and launch Codex CLI in it.
 
-The worktree is created in /worktrees/<name>.
+The worktree is created in /worktrees/<name> if /worktrees exists (devcontainer
+volume), otherwise in worktrees/<name> under the main source tree.
 
 Options:
   -b <branch>           Setup worktree from an existing branch
@@ -84,6 +84,14 @@ GIT_COMMON_DIR="$(git rev-parse --git-common-dir)"
 MAIN_REPO="$(dirname "$GIT_COMMON_DIR")"
 if [[ "$GIT_COMMON_DIR" == ".git" ]]; then
     MAIN_REPO="$GIT_ROOT"
+fi
+
+# Worktrees live in /worktrees when it exists (devcontainer volume mount),
+# otherwise in an ignored worktrees/ directory under the main source tree.
+if [[ -d /worktrees ]]; then
+    WORKTREE_BASE="/worktrees"
+else
+    WORKTREE_BASE="$MAIN_REPO/worktrees"
 fi
 
 init_submodules() {
