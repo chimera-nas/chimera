@@ -107,10 +107,15 @@ foreach(cell "sign_required|--sign-required"
              "encrypt_enabled|--encrypt"
              "compress_enabled|--compress"
              "leases|--leases"
-             "all_features|--sign-required;--encrypt;--compress;--leases")
+             "all_features|--sign-required --encrypt --compress --leases")
+    # Split name from flags on '|', then the flag STRING on spaces.  Putting
+    # ';' inside the cell would make the REPLACE above produce one flat list, so
+    # list(GET parts 1) would silently take only the FIRST flag -- which is
+    # exactly how three cells here came to test less than their names claimed.
     string(REPLACE "|" ";" parts "${cell}")
     list(GET parts 0 cname)
-    list(GET parts 1 cflags)
+    list(GET parts 1 cflagstr)
+    string(REPLACE " " ";" cflags "${cflagstr}")
     add_test(NAME chimera/posix/smb/loopback_wire_${cname}
         COMMAND $<TARGET_FILE:smb_loopback_probe> ${cflags})
     set_tests_properties(chimera/posix/smb/loopback_wire_${cname} PROPERTIES
@@ -159,17 +164,25 @@ set_tests_properties(chimera/posix/smb/loopback_sealed_required PROPERTIES
 #                                 evidence the peer expects ciphertext --
 #                                 encrypting anyway sends traffic it drops.
 #   sealed_2.1                    encryption does not exist below 3.0.
-#
-# NOT registered: signing-required against a 2.1 client.  The client never signs
-# at 2.1, so the mount should always be refused -- but it is refused only
-# SOMETIMES, which makes it a flaky test rather than a useful one.  The
-# non-determinism is a real finding about that path and wants its own
-# investigation; a test that passes at random would only hide it.
+#   signed_required_2.1           the server demands signing; the client
+#                                 deliberately never signs at 2.1, so there is
+#                                 no session to be had.  The server enforces by
+#                                 tearing the connection down rather than
+#                                 answering an error, so this is also the cell
+#                                 that covers a mount dying mid-handshake --
+#                                 the case that used to complete its request
+#                                 twice.
 foreach(cell "sealed_unsupported_by_server|--seal"
-             "sealed_2.1|--seal;--encrypt;--vers=2.1")
+             "sealed_2.1|--seal --encrypt --vers=2.1"
+             "signed_required_2.1|--sign-required --vers=2.1")
+    # Split name from flags on '|', then the flag STRING on spaces.  Putting
+    # ';' inside the cell would make the REPLACE above produce one flat list, so
+    # list(GET parts 1) would silently take only the FIRST flag -- which is
+    # exactly how three cells here came to test less than their names claimed.
     string(REPLACE "|" ";" parts "${cell}")
     list(GET parts 0 cname)
-    list(GET parts 1 cflags)
+    list(GET parts 1 cflagstr)
+    string(REPLACE " " ";" cflags "${cflagstr}")
     add_test(NAME chimera/posix/smb/loopback_${cname}_refused
         COMMAND $<TARGET_FILE:smb_loopback_probe> ${cflags}
                 --expect-mount-failure)
@@ -188,13 +201,18 @@ endforeach()
 #
 # Measured on the wire: 464 bytes expanding to 12,368, and zero decompressions
 # in the client_silent cell below.  If that ever inverts, the cells are lying.
-foreach(cell "compressed|--client-compress;--compress"
-             "compressed_sealed|--client-compress;--compress;--seal;--encrypt"
+foreach(cell "compressed|--client-compress --compress"
+             "compressed_sealed|--client-compress --compress --seal --encrypt"
              "compressed_server_declines|--client-compress"
              "compressed_client_silent|--compress")
+    # Split name from flags on '|', then the flag STRING on spaces.  Putting
+    # ';' inside the cell would make the REPLACE above produce one flat list, so
+    # list(GET parts 1) would silently take only the FIRST flag -- which is
+    # exactly how three cells here came to test less than their names claimed.
     string(REPLACE "|" ";" parts "${cell}")
     list(GET parts 0 cname)
-    list(GET parts 1 cflags)
+    list(GET parts 1 cflagstr)
+    string(REPLACE " " ";" cflags "${cflagstr}")
     add_test(NAME chimera/posix/smb/loopback_${cname}
         COMMAND $<TARGET_FILE:smb_loopback_probe> ${cflags})
     set_tests_properties(chimera/posix/smb/loopback_${cname} PROPERTIES
