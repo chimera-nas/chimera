@@ -723,7 +723,20 @@ chimera_nfs4_open_exclusive_verify(
     nfsstat4                        status;
 
     if (error_code != CHIMERA_VFS_OK) {
-        res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
+        /* The exclusive-create probe found an existing name and this re-open
+         * fetches its verifier (atime/mtime).  A non-regular object refuses a
+         * data open -- ENXIO for a socket, EISDIR for a directory, ELOOP for
+         * a symlink -- but no such object can ever carry the verifier an
+         * EXCLUSIVE4 create stamped, so the answer those errors stand for is
+         * simply "an object that is not our earlier create exists":
+         * NFS4ERR_EXIST (RFC 7530 16.16.4). */
+        if (error_code == CHIMERA_VFS_ENXIO ||
+            error_code == CHIMERA_VFS_EISDIR ||
+            error_code == CHIMERA_VFS_ELOOP) {
+            res->status = NFS4ERR_EXIST;
+        } else {
+            res->status = chimera_nfs4_errno_to_nfsstat4(error_code);
+        }
         chimera_vfs_release(req->thread->vfs_thread, parent_handle);
         chimera_nfs4_open_complete(req, res->status);
         return;
@@ -1128,6 +1141,15 @@ chimera_nfs4_open_parent_complete(
                 flags |= CHIMERA_VFS_OPEN_EXCLUSIVE;
             /* fallthrough */
             case UNCHECKED4:
+                /* An NFSv4 OPEN only ever creates regular files, and an
+                 * UNCHECKED create of an existing name must resolve the
+                 * object's type without opening it: a directory is EISDIR
+                 * and any other non-regular object is EXIST (RFC 7530
+                 * 16.16.4).  CREATE_REGULAR is the flag the backends'
+                 * open paths key that resolution on -- without it a
+                 * passthrough re-opened the existing object for data and a
+                 * socket answered ENXIO where EXIST belongs. */
+                flags |= CHIMERA_VFS_OPEN_CREATE_REGULAR;
                 status = chimera_nfs4_validate_createattrs(
                     args->openhow.how.createattrs.num_attrmask,
                     args->openhow.how.createattrs.attrmask);
