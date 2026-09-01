@@ -85,6 +85,7 @@ static int                        g_smb_sign_required;  /* advertise SIGNING_REQ
 static int                        g_smb_encryption;     /* 0 off, 1 offer, 2 require   */
 static int                        g_smb_compression;    /* offer compression           */
 static int                        g_smb_leases;         /* grant oplocks + leases      */
+static int                        g_smb_seal;           /* client asks to encrypt      */
 
 static struct chimera_vfs_cred    driver_creds[MAX_PIDS];
 static mode_t                     driver_umasks[MAX_PIDS];
@@ -154,10 +155,13 @@ smb_mount_options(
     char  *buf,
     size_t cap)
 {
+    int n = snprintf(buf, cap, "%s", SMB_LOOPBACK_OPTS);
+
     if (g_smb_vers) {
-        snprintf(buf, cap, "%s,vers=%s", SMB_LOOPBACK_OPTS, g_smb_vers);
-    } else {
-        snprintf(buf, cap, "%s", SMB_LOOPBACK_OPTS);
+        n += snprintf(buf + n, cap - n, ",vers=%s", g_smb_vers);
+    }
+    if (g_smb_seal) {
+        snprintf(buf + n, cap - n, ",seal=yes");
     }
     return buf;
 } /* smb_mount_options */

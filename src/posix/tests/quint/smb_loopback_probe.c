@@ -539,6 +539,8 @@ main(
             g_smb_encryption = 2;
         } else if (strcmp(argv[i], "--compress") == 0) {
             g_smb_compression = 1;
+        } else if (strcmp(argv[i], "--seal") == 0) {
+            g_smb_seal = 1;
         } else if (strcmp(argv[i], "--leases") == 0) {
             g_smb_leases = 1;
         } else if (strcmp(argv[i], "--expect-mount-failure") == 0) {

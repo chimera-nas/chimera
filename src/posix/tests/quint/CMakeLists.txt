@@ -119,6 +119,60 @@ foreach(cell "sign_required|--sign-required"
         TIMEOUT 300)
 endforeach()
 
+# Sealed sessions: the whole POSIX probe replayed over SMB3 transport
+# encryption.  seal=yes makes the client offer a cipher, so these are the cells
+# where the client actually encrypts rather than merely tolerating a demand.
+#
+# The dialect split is load-bearing, not redundant: 3.0/3.0.2 negotiate no
+# encryption context and can only use AES-128-CCM with the "ServerIn "/
+# "ServerOut" KDF contexts, while 3.1.1 negotiates AES-128-GCM keyed by
+# SMBC2SCipherKey/SMBS2CCipherKey over the preauth hash.  Different cipher,
+# different mode, different key schedule -- covered here as 0x0001 and 0x0002
+# respectively.  A mistake in either would not corrupt data, it would fail every
+# AEAD tag check, so these tests either pass or the mount dies.
+foreach(vers 3.0 3.0.2 3.1.1)
+    add_test(NAME chimera/posix/smb/loopback_sealed_${vers}
+        COMMAND $<TARGET_FILE:smb_loopback_probe>
+                --seal --encrypt --vers=${vers})
+    set_tests_properties(chimera/posix/smb/loopback_sealed_${vers} PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb_loopback_sealed_${vers}"
+        LABELS "quint;posix_mbt;memfs;smb_mbt"
+        TIMEOUT 300)
+endforeach()
+
+# Sealed against a server that REQUIRES encryption -- the pairing the previous
+# commit's enforcement exists for: the demand is now satisfiable rather than
+# only refusable.
+add_test(NAME chimera/posix/smb/loopback_sealed_required
+    COMMAND $<TARGET_FILE:smb_loopback_probe> --seal --encrypt-required)
+set_tests_properties(chimera/posix/smb/loopback_sealed_required PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb_loopback_sealed_required"
+    LABELS "quint;posix_mbt;memfs;smb_mbt"
+    TIMEOUT 300)
+
+# seal= is a security request, so the two ways it cannot be met are refusals,
+# not silent downgrades to cleartext:
+#
+#   sealed_unsupported_by_server  the server has encryption off.  It still
+#                                 SELECTS a cipher for any 3.1.1 client that
+#                                 offers one, so a negotiated cipher is not
+#                                 evidence the peer expects ciphertext --
+#                                 encrypting anyway sends traffic it drops.
+#   sealed_2.1                    encryption does not exist below 3.0.
+foreach(cell "sealed_unsupported_by_server|--seal"
+             "sealed_2.1|--seal;--encrypt;--vers=2.1")
+    string(REPLACE "|" ";" parts "${cell}")
+    list(GET parts 0 cname)
+    list(GET parts 1 cflags)
+    add_test(NAME chimera/posix/smb/loopback_${cname}_refused
+        COMMAND $<TARGET_FILE:smb_loopback_probe> ${cflags}
+                --expect-mount-failure)
+    set_tests_properties(chimera/posix/smb/loopback_${cname}_refused PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb_loopback_${cname}"
+        LABELS "quint;posix_mbt;memfs;smb_mbt"
+        TIMEOUT 300)
+endforeach()
+
 # The one cell whose answer is a refusal.  smb_encryption=2 REQUIRES encryption;
 # this client negotiates none, so the session setup must be denied.  Before the
 # enforcement fix that ships with this test, the knob was read as a boolean
