@@ -1931,15 +1931,17 @@ op_lseek(
             record_dev("ND7");
             return;
         }
-        /* PT2: a passthrough backend sits on a real filesystem that tracks
-         * holes, while the model (like the engine backends) reports every
-         * byte below EOF as data and the sole hole as starting at EOF.
-         * Both are POSIX-valid, so accept the real filesystem's refinement:
+        /* PT2: a hole-tracking backend knows where a file's data actually
+         * lives -- a passthrough because its host filesystem records that,
+         * cairn because its extents are its own records -- while the model
+         * (like memfs and diskfs) reports every byte below EOF as data and
+         * the sole hole as starting at EOF.
+         * Both are POSIX-valid, so accept the real backend's refinement:
          * SEEK_HOLE may find a hole at or after the queried offset but no
          * later than the model's EOF answer; SEEK_DATA may skip real holes
          * to a later offset than the model's, or answer ENXIO when nothing
          * but holes remain below EOF. */
-        if (posix_module_is_passthrough(g_module) && exp_e == 0 &&
+        if (posix_module_tracks_holes(g_module) && exp_e == 0 &&
             (whence == SEEK_DATA || whence == SEEK_HOLE)) {
             int64_t qoff = tf_field(rv, "off");
             int64_t moff = tf_field(res_v, "off");
@@ -1951,6 +1953,17 @@ op_lseek(
                 ok = (e == 6) || (e == 0 && (int64_t) rc >= moff);
             }
             if (ok) {
+                /* Accepting the refinement leaves the descriptor sitting on
+                 * the backend's answer while the model's sits on its own, and
+                 * an lseek moves the shared file offset: every later SEEK_CUR
+                 * and every implicit-offset read on this fd would inherit the
+                 * difference and diverge for reasons that have nothing to do
+                 * with holes.  Put the descriptor back on the model's rails --
+                 * the offset the model recorded is reachable by construction
+                 * (the model always succeeded here, exp_e == 0). */
+                apply_cred(pid);
+                chimera_posix_lseek(rfd(pid, tf_field(rv, "fd")),
+                                    (off_t) moff, SEEK_SET);
                 record_dev("PT2");
                 return;
             }
