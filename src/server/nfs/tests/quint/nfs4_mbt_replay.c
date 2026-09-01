@@ -276,6 +276,11 @@ enum v4_dev {
     DEV_ACCESS_ROOT_EXECUTE,       /* D4-20 */
     DEV_SECINFO_CONSUMES_FH,       /* D4-21 */
     DEV_SEQ_REPLAY_UNCACHED,       /* D4-22 */
+    DEV_HOST_SYMLINK_MODE,        /* D4-23 */
+    DEV_COARSE_CHANGE,            /* D4-24 */
+    DEV_LINK_UNLINKED,            /* D4-25 */
+    DEV_HOST_SYMLINK_SETATTR,      /* D4-26 */
+    DEV_EXCL_VERF_LOST,           /* D4-27 */
     DEV_COUNT,
 };
 
@@ -292,6 +297,11 @@ static const char *v4_dev_ids[DEV_COUNT] = {
     "D4-20-access-root-execute",
     "D4-21-secinfo-consumes-fh",
     "D4-22-seq-replay-uncached",
+    "D4-23-host-symlink-mode",
+    "D4-24-coarse-change",
+    "D4-25-link-unlinked-source",
+    "D4-26-host-symlink-setattr",
+    "D4-27-exclusive-verifier-lost",
 };
 
 /* Set when the backend tracks holes for real (every backend but memfs, whose
@@ -303,6 +313,14 @@ static const char *v4_dev_ids[DEV_COUNT] = {
 * All of those are conformant (RFC 7862 15.11); D4-17 records the acceptance,
 * exactly as the posix suite's PT2 rule does for its passthrough backends. */
 static int g_backend_real_holes;
+
+/* Set for the host-passthrough backends (linux/io_uring): the deviations that
+ * exist because the HOST filesystem, not chimera, owns the behavior --
+ * symlink modes pinned at 0777 (no lchmod on Linux), the change attribute
+ * derived from a kernel-tick-granular ctime (multigrain-ctime kernels retire
+ * this), and the kernel's refusal to re-link an unlinked-but-open source.
+ * Never set for a native backend, whose enforcement stays exact. */
+static int g_backend_passthrough;
 
 #define E_WRONG_TYPE 10083
 
@@ -690,6 +708,16 @@ check_change(
     }
     for (i = 0; i < o->nchg; i++) {
         if (o->chg[i].ino == ino && o->chg[i].wire == wire) {
+            /* D4-24: a host backend derives the change attribute from ctime,
+             * whose update granularity is the kernel tick -- two mutations
+             * within one tick legitimately show the same value.  Gated on a
+             * NONZERO wire value: an all-zero change is the backend failing
+             * to supply the attribute at all, which stays a failure.
+             * (Multigrain-ctime kernels, 6.13+, retire this deviation.) */
+            if (g_backend_passthrough && wire != 0) {
+                o->dev_hits[DEV_COARSE_CHANGE]++;
+                return;
+            }
             mism_add(m, "%s: ino %" PRId64 " change %#" PRIx64 " unchanged "
                      "on the wire but the model mutated the object "
                      "(abstract %" PRId64 " vs %" PRId64 ")",
@@ -2750,6 +2778,11 @@ check_attrs(
     if (r->a_mode != (uint32_t) jf_i64(exp, "mode")) {
         if (strcmp(ft, "FLnk") == 0 && r->a_mode == 0755) {
             o->dev_hits[DEV_SYMLINK_MODE_0755]++;
+        } else if (g_backend_passthrough && strcmp(ft, "FLnk") == 0 &&
+                   r->a_mode == 0777) {
+            /* D4-23: Linux has no lchmod -- a host symlink's mode is
+             * structurally 0777 whatever the create asked for. */
+            o->dev_hits[DEV_HOST_SYMLINK_MODE]++;
         } else {
             mism_add(m, "getattr.mode: expected %#o, got %#o",
                      (unsigned) jf_i64(exp, "mode"), r->a_mode);
@@ -2839,6 +2872,7 @@ static void
 classify_status_mismatch(
     struct oracle *o,
     const char    *tag,
+    json_t        *req,
     uint32_t       est,
     uint32_t       ast,
     struct mism   *m)
@@ -2970,6 +3004,21 @@ classify_status_mismatch(
         o->status_dev = ast;
         return;
     }
+    /* D4-25: the kernel refuses to re-link a file whose link count reached
+     * zero, however it is still open (linkat answers ENOENT, no capability
+     * excepted) -- the native backends re-link an open-pinned source as the
+     * model expects.  This is a STATE deviation, not just a status: the model
+     * carries the link forward and later operates on the name that was never
+     * made, so the trace cannot be meaningfully replayed past this point --
+     * skip it the way a capability mismatch does. */
+    if (g_backend_passthrough && strcmp(tag, "SLink") == 0 &&
+        est == NFS4_OK && ast == NFS4ERR_NOENT) {
+        o->dev_hits[DEV_LINK_UNLINKED]++;
+        caps_mismatch(o, m, "hostLinkUnlinked",
+                      "LINK of an unlinked-but-open source: host refuses, "
+                      "model links");
+        return;
+    }
     /* D4-17: SEEK_DATA over ranges the model believes are data but the
      * backend never materialized -- nothing but real holes remain below EOF,
      * and NFS4ERR_NXIO is the conformant answer (RFC 7862 15.11.3). */
@@ -2991,6 +3040,37 @@ classify_status_mismatch(
         caps_mismatch(o, m, "conflictDelays",
                       "model expected NFS4ERR_DELAY during recall, server "
                       "completed the op");
+        return;
+    }
+    /* D4-26: a mode-only SETATTR of a symlink -- Linux has no lchmod, so
+     * the host answers ENOTSUP where the native backends chmod the symlink
+     * as the model expects.  Gated on the request being mode-only, so a
+     * genuine ATTRNOTSUPP on any other object or attribute still fails. */
+    if (g_backend_passthrough && strcmp(tag, "SSetattr") == 0 &&
+        est == NFS4_OK && ast == E_NOTSUPP && req &&
+        ((json_object_get(jf_val(req), "mode") &&
+          jf_i64(jf_val(req), "sizeBlocks") < 0) ||
+         strcmp(jf_tag(req), "RSetattrWide") == 0)) {
+        o->dev_hits[DEV_HOST_SYMLINK_SETATTR]++;
+        o->status_dev = ast;
+        return;
+    }
+    /* D4-27: EXCLUSIVE4 stores its verifier in the object's atime/mtime, and
+     * a host filesystem does not keep those faithful -- relatime updates
+     * atime on the next read, timestamp ranges clamp -- so a retry that the
+     * model (and the native backends) match against the stored verifier
+     * answers EXIST here, or EXIST where the share check would have won.
+     * The durable fix is verifier storage in an xattr on backends that have
+     * them; until then this is the host's answer. */
+    if (g_backend_passthrough && strcmp(tag, "SOpen") == 0 &&
+        ast == NFS4ERR_EXIST &&
+        (est == NFS4_OK || est == NFS4ERR_SHARE_DENIED) && req &&
+        strcmp(jf_tag(json_object_get(jf_val(req), "how")),
+               "HExclusive") == 0) {
+        o->dev_hits[DEV_EXCL_VERF_LOST]++;
+        caps_mismatch(o, m, "hostExclusiveVerifier",
+                      "EXCLUSIVE4 retry: host timestamps did not preserve "
+                      "the verifier");
         return;
     }
     mism_add(m, "%s: status: expected %u, got %u", tag, est, ast);
@@ -3030,7 +3110,7 @@ check_result(
             o->status_dev = ast;
             return;
         }
-        classify_status_mismatch(o, tag, est, ast, m);
+        classify_status_mismatch(o, tag, req, est, ast, m);
         return;
     }
 
@@ -3877,7 +3957,14 @@ run_compound(
     }
 
     if (!ctx.abort && !o->skip &&
-        rep.nres != (int) json_array_size(results)) {
+        rep.nres != (int) json_array_size(results) &&
+        /* An accepted status deviation that turns a model-OK op into a
+        * server error legitimately ends the compound there: the ops the
+        * model ran after it were never executed, so a shorter result
+        * array is the deviation's own consequence, not a fresh one. */
+        !(o->status_dev && rep.nres > 0 &&
+          rep.nres < (int) json_array_size(results) &&
+          rep.res[rep.nres - 1].status == o->status_dev)) {
         mism_add(m, "result count: model expected %d results, server "
                  "returned %d", (int) json_array_size(results),
                  rep.nres);
@@ -4588,6 +4675,14 @@ main(
         .memfs_config   = "{\"block_size\": 8192}",
     };
 
+    /* Neutralize the host umask so passthrough backends (linux/io_uring) apply
+    * client-sent modes verbatim and the export root keeps its 0777 -- the
+    * model's fresh share root.  Without this a host umask of 022 turns the
+    * root's mkdir(0777) into 0755, which the strict nfs4 replayer reports as a
+    * getattr.mode divergence on the very first GETATTR (the nfs3 replayer does
+    * the same).  The mkfs backends store modes directly and are unaffected. */
+    umask(0);
+
     /* --trace/--trace-dir/--exclude-prefix are gathered from raw argv by the
      * shared helper; getopt only recognizes them so it does not error. */
     traces = mbt_collect_traces(argc, argv, &ntraces);
@@ -4657,8 +4752,10 @@ main(
      * once here (it dispatches to the trace-local oracle via g_recall_oracle). */
     /* memfs_config only reaches the memfs module; diskfs and cairn
      * self-provision their scratch under the env's session dir. */
-    opts.module          = backend;
-    g_backend_real_holes = strcmp(backend, "memfs") != 0;
+    opts.module           = backend;
+    g_backend_real_holes  = strcmp(backend, "memfs") != 0;
+    g_backend_passthrough = strcmp(backend, "linux") == 0 ||
+        strcmp(backend, "io_uring") == 0;
 
     if (!dry_run) {
         mbt_env_open_opts(&env, &opts);

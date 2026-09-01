@@ -321,14 +321,6 @@ set_tests_properties(chimera/server/nfs/mbt4/batch_memfs PROPERTIES
 # ranges accepted, source holes leaving stale destination data, the walk
 # reprocessing its own split piece) and the D4-17 real-holes seek refinement
 # the hole-tracking backends need.
-#
-# The linux/io_uring passthroughs are NOT registered: the replayer drives them
-# (--backend linux|io_uring, container-only), but ~115 of 120 traces diverge
-# on host-kernel semantics -- attribute omission on the passthrough fast path
-# (the nfs3 replayer's --max-attr-skip-rate machinery has no v4 counterpart
-# yet), host change-info freshness, host mode/link answers.  That is the same
-# class of engagement the nfs3 passthrough batches needed (their own
-# reconciliation registry and model profile) and is its own piece of work.
 add_test(NAME chimera/server/nfs/mbt4/batch_diskfs
     COMMAND $<TARGET_FILE:nfs4_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/nfs4
             --backend diskfs)
@@ -345,6 +337,34 @@ if(CAIRN_ENABLED)
     set_tests_properties(chimera/server/nfs/mbt4/batch_cairn PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_batch_cairn"
         LABELS "quint;nfs4_mbt;cairn"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 600)
+endif()
+
+# The passthrough backends (container-only, like the NFS3 pair above: the
+# scratch mount needs name_to_handle_at and root).  Host-kernel semantics the
+# passthrough cannot mask are excused ONLY under the replayer's passthrough
+# gate -- symlink modes (no lchmod), kernel-tick change granularity, the
+# refused link of an unlinked source, the relatime-clobbered EXCLUSIVE4
+# verifier -- so the native backends above keep exact enforcement.
+if(CHIMERA_LINUX)
+    add_test(NAME chimera/server/nfs/mbt4/batch_linux
+        COMMAND $<TARGET_FILE:nfs4_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/nfs4
+                --backend linux)
+    set_tests_properties(chimera/server/nfs/mbt4/batch_linux PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_batch_linux"
+        LABELS "quint;nfs4_mbt;linux"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 600)
+endif()
+
+if(CHIMERA_VFS_IO_URING)
+    add_test(NAME chimera/server/nfs/mbt4/batch_io_uring
+        COMMAND $<TARGET_FILE:nfs4_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/nfs4
+                --backend io_uring)
+    set_tests_properties(chimera/server/nfs/mbt4/batch_io_uring PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs4_batch_io_uring"
+        LABELS "quint;nfs4_mbt;io_uring"
         SKIP_RETURN_CODE 77
         TIMEOUT 600)
 endif()
