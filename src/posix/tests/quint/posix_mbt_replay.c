@@ -171,11 +171,6 @@ static const struct {
     const char *trace;      /* trace file basename */
     const char *why;
 } posix_mbt_declines[] = {
-    /* diskfs truncate of a file whose extents are shared with a clone walks
-     * the refcount btree off a freed node (ASAN SEGV: diskfs_bt_run <-
-     * diskfs_refcount_dec <- diskfs_setattr_trunc_process). */
-    { "diskfs", "stepData_128_0x1_3.itf.json",
-      "truncate over cloned extents crashes the refcount walk" },
     /* diskfs copy_file_range copies and answers block-rounded byte counts
      * past the source EOF (1024 requested at EOF-1024 -> 4096 copied), and
      * the destination grows to match. */
