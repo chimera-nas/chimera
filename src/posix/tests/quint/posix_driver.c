@@ -75,6 +75,17 @@
  * binary covers the whole dialect matrix. */
 static const char                *g_smb_vers;
 
+/* Wire policy the in-process SMB SERVER is configured with, for the loopback
+ * matrix.  These are server demands, not client capabilities: the point of
+ * varying them is to find out what the client does when the far end insists on
+ * something.  Set BEFORE posix_env_setup; defaults match the server's own
+ * (everything off).  See smb_loopback_probe.c for what each combination is
+ * expected to prove. */
+static int                        g_smb_sign_required;  /* advertise SIGNING_REQUIRED */
+static int                        g_smb_encryption;     /* 0 off, 1 offer, 2 require   */
+static int                        g_smb_compression;    /* offer compression           */
+static int                        g_smb_leases;         /* grant oplocks + leases      */
+
 static struct chimera_vfs_cred    driver_creds[MAX_PIDS];
 static mode_t                     driver_umasks[MAX_PIDS];
 static CHIMERA_DIR               *driver_dirs[MAX_DIRS];
@@ -1458,6 +1469,14 @@ posix_env_setup(
          * the export to. */
         if (smb) {
             chimera_server_config_set_smb_enabled(server_config, 1);
+            chimera_server_config_set_smb_signing_required(server_config,
+                                                           g_smb_sign_required);
+            chimera_server_config_set_smb_encryption(server_config,
+                                                     g_smb_encryption);
+            chimera_server_config_set_smb_compression(server_config,
+                                                      g_smb_compression);
+            chimera_server_config_set_smb_oplocks(server_config, g_smb_leases);
+            chimera_server_config_set_smb_leases(server_config, g_smb_leases);
         } else {
             chimera_server_config_set_nfs_enabled(server_config, 1);
         }

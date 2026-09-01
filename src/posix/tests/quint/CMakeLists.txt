@@ -59,7 +59,7 @@ set_tests_properties(chimera/posix/smb/loopback_probe PROPERTIES
 # offered or fail to find one in common.  There is no readback to trust.
 foreach(vers 2.1 3.0 3.0.2 3.1.1)
     add_test(NAME chimera/posix/smb/loopback_probe_${vers}
-        COMMAND $<TARGET_FILE:smb_loopback_probe> ${vers})
+        COMMAND $<TARGET_FILE:smb_loopback_probe> --vers=${vers})
     set_tests_properties(chimera/posix/smb/loopback_probe_${vers} PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb_loopback_probe_${vers}"
         LABELS "quint;posix_mbt;memfs;smb_mbt"
@@ -73,9 +73,63 @@ endforeach()
 # that was silently ignored would negotiate 3.1.1, mount happily, and fail this
 # test.  If 2.0.2 support is ever added, this test starts failing and says so.
 add_test(NAME chimera/posix/smb/loopback_dialect_refused_2.0.2
-    COMMAND $<TARGET_FILE:smb_loopback_probe> 2.0.2 expect-mount-failure)
+    COMMAND $<TARGET_FILE:smb_loopback_probe>
+            --vers=2.0.2 --expect-mount-failure)
 set_tests_properties(chimera/posix/smb/loopback_dialect_refused_2.0.2 PROPERTIES
     ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb_loopback_refused_2.0.2"
+    LABELS "quint;posix_mbt;memfs;smb_mbt"
+    TIMEOUT 300)
+
+# ---------------------------------------------------------------------------
+# Wire policy: what the client does when the SERVER demands something.
+#
+# These vary the server's configuration, not the client's capabilities, which
+# is what makes them interesting -- the smb client VFS module carries signing
+# but NO encryption and NO compression (there is no transform header, no
+# AEAD, and no codec anywhere in src/vfs/smb).  So each cell answers "what
+# happens when the far end insists", and the answer is only sometimes "it
+# works".
+#
+#   name                       server demands            expected
+#   sign_required              SIGNING_REQUIRED          mount + probe (3.x signs)
+#   encrypt_enabled            encryption = 1 (offer)    mount + probe: the
+#                                                        client offers no cipher
+#                                                        and mode 1 does not
+#                                                        insist, which is the
+#                                                        spec-correct degrade
+#   encrypt_required           encryption = 2 (require)  mount REFUSED
+#   compress_enabled           compression advertised    mount + probe: the
+#                                                        client never negotiates
+#                                                        it, so the share flag is
+#                                                        inert
+#   leases                     oplocks + leases granted  mount + probe
+foreach(cell "sign_required|--sign-required"
+             "encrypt_enabled|--encrypt"
+             "compress_enabled|--compress"
+             "leases|--leases"
+             "all_features|--sign-required;--encrypt;--compress;--leases")
+    string(REPLACE "|" ";" parts "${cell}")
+    list(GET parts 0 cname)
+    list(GET parts 1 cflags)
+    add_test(NAME chimera/posix/smb/loopback_wire_${cname}
+        COMMAND $<TARGET_FILE:smb_loopback_probe> ${cflags})
+    set_tests_properties(chimera/posix/smb/loopback_wire_${cname} PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb_loopback_wire_${cname}"
+        LABELS "quint;posix_mbt;memfs;smb_mbt"
+        TIMEOUT 300)
+endforeach()
+
+# The one cell whose answer is a refusal.  smb_encryption=2 REQUIRES encryption;
+# this client negotiates none, so the session setup must be denied.  Before the
+# enforcement fix that ships with this test, the knob was read as a boolean
+# everywhere in the server and mode 2 behaved exactly like mode 1 -- the whole
+# session was served in cleartext while configured to require encryption.
+add_test(NAME chimera/posix/smb/loopback_wire_encrypt_required_refused
+    COMMAND $<TARGET_FILE:smb_loopback_probe>
+            --encrypt-required --expect-mount-failure)
+set_tests_properties(chimera/posix/smb/loopback_wire_encrypt_required_refused
+    PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb_loopback_wire_encrypt_required"
     LABELS "quint;posix_mbt;memfs;smb_mbt"
     TIMEOUT 300)
 
