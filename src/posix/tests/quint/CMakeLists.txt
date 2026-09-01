@@ -32,6 +32,23 @@ target_include_directories(posix_mbt_replay PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(posix_mbt_replay
     chimera_posix chimera_client chimera_server chimera_metrics jansson)
 
+# Ground-truth probe for the SMB2 loopback.  Corpus-free (a fixed script, not a
+# model replay), so it runs whether or not a trace bundle is available -- and it
+# is what actually executes src/vfs/smb in the quick tier while the MBT batch
+# below stays parked.  See the SD1-SD5 block further down, and the file header
+# for what its pinned-defect assertions mean.
+add_executable(smb_loopback_probe smb_loopback_probe.c)
+target_include_directories(smb_loopback_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(smb_loopback_probe
+    chimera_posix chimera_client chimera_server chimera_metrics jansson)
+
+add_test(NAME chimera/posix/smb/loopback_probe
+    COMMAND $<TARGET_FILE:smb_loopback_probe>)
+set_tests_properties(chimera/posix/smb/loopback_probe PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb_loopback_probe"
+    LABELS "quint;posix_mbt;memfs;smb_mbt"
+    TIMEOUT 300)
+
 if(NOT SPECS_BUNDLE_AVAILABLE)
     message(STATUS "posix MBT replay ctest skipped (no specs trace corpus)")
     return()
