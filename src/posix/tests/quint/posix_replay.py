@@ -150,8 +150,23 @@ NFS4_PROFILE = dict(PROFILE, copyRange=False, cloneRange=False,
 FUSE_PROFILE = dict(PROFILE, cloneRange=False, strictAtime=True,
                     chownSuppGroup=False)
 
+# The SMB2 loopback (posix client -> vfs/smb proxy -> in-process chimera SMB
+# server -> memfs), probed 2026-09-01.  It reads like the NFS3 loopback except
+# that copy_file_range works, but the numbers below are less meaningful than
+# the other profiles' are: SMB2 carries no POSIX owner or mode, so every
+# permission-derived key is measuring an absence rather than a policy.
+# stickyWriteArm "true" and chownSuppGroup "true" are exactly that -- the
+# operations the probe expects to be refused simply are not checked, and
+# errStickyAcces comes back None because the denial never happens.  The
+# profile is pinned for --check-profile drift detection only; it is NOT a
+# statement that the backend implements this policy.  See the SD* list in
+# CMakeLists.txt for why no smb_ trace corpus is generated from it yet.
+SMB_PROFILE = dict(PROFILE, cloneRange=False, seekHole=False, strictAtime=True,
+                   stickyWriteArm=True, errStickyAcces=None)
+
 PROFILES = {
     "memfs": PROFILE,
+    "smb_memfs": SMB_PROFILE,
     "fuse_memfs": FUSE_PROFILE,
     "diskfs": DISK_PROFILE,
     "cairn": DISK_PROFILE,

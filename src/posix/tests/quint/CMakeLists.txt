@@ -147,6 +147,60 @@ set_tests_properties(chimera/posix/mbt/batch_nfs4_memfs PROPERTIES
     SKIP_RETURN_CODE 77
     TIMEOUT 600)
 
+# The same corpus through the SMB2 loopback: the posix client mounts the
+# in-process chimera SMB server through the smb proxy VFS module (src/vfs/smb).
+# The nfs3_ profile is the closest pinned match to what `posix_replay.py
+# --probe --backend smb_memfs` measures (they differ only in copy_file_range,
+# which the model exercises through an advertised-feature knob).
+#
+# OFF by default, and it is not a flake: the SMB2 loopback cannot satisfy the
+# POSIX model today, and the batch fails ~49 of 53 traces.  The blockers are
+# properties of src/vfs/smb, not of the harness:
+#
+#   SD1  a session is bound to the connection that authenticated it.  A second
+#        client thread opens its own connection and replays the mount's session
+#        id on it, and the server answers one of the session/connection-gone
+#        statuses, which the proxy maps to ESTALE -- so the first operation
+#        after the mount fails whenever it lands on another thread.  The driver
+#        pins core_threads=1 to work around it; SMB3 multichannel session
+#        binding is what would actually fix it.
+#   SD2  readdir returns exactly ONE entry per directory, whatever its size.
+#        The QUERY_DIRECTORY buffer is walked until the emit callback reports
+#        full, and the unconsumed remainder is freed; the resume query asks the
+#        server for the NEXT batch, which is empty, so entries 2..N are lost.
+#   SD3  symlink_at directly under the mount root reports SUCCESS without
+#        creating anything: lstat of the new name then answers ENOENT, readlink
+#        answers ELOOP, and it is absent from readdir.
+#   SD4  no POSIX owner or mode.  chmod/chown are accepted and dropped, getattr
+#        reports the CALLING credential as the owner and a synthesized mode
+#        (0755/0644), and directory nlink is always 1.  Every EACCES/EPERM the
+#        model expects therefore does not happen.
+#   SD5  only the mount-root handle is re-openable by fh (chimera_smb_open_fh),
+#        so every op the client routes through a resolved PARENT handle rather
+#        than through its path-op strategy answers ESTALE: link and utimens at
+#        any depth, and symlink/mknod below the first level.  ESTALE is also
+#        the wrong answer for an operation the backend simply does not
+#        implement -- mknod at the first level, which does reach the module,
+#        correctly answers ENOTSUP.
+#
+# Turn it on with -DCHIMERA_POSIX_MBT_SMB=ON to measure progress against that
+# list; it joins the quick tier only once it can pass.
+option(CHIMERA_POSIX_MBT_SMB
+       "Register the POSIX MBT batch over the SMB2 loopback (known failing)" OFF)
+if(CHIMERA_POSIX_MBT_SMB)
+    add_test(NAME chimera/posix/mbt/batch_smb_memfs
+        COMMAND $<TARGET_FILE:posix_mbt_replay>
+                --backend smb_memfs
+                --trace-dir ${SPECS_BUNDLE_DIR}/posix
+                --exclude-prefix step --exclude-prefix disk_
+                --exclude-prefix fuse_ --exclude-prefix nfs4_)
+    set_tests_properties(chimera/posix/mbt/batch_smb_memfs PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=posix_batch_smb_memfs"
+        LABELS "quint;posix_mbt;memfs;smb_mbt"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 600)
+endif()
+
 # The disk_ profile replayed against the host-passthrough backends.  The
 # backing store is a fresh directory per trace under $CHIMERA_MBT_SCRATCH
 # (default: the build tree), whose filesystem must support name_to_handle_at
