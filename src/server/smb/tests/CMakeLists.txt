@@ -74,13 +74,10 @@ target_include_directories(smb_ea_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME chimera/server/smb/ea_test
     COMMAND ${CMAKE_CURRENT_BINARY_DIR}/smb_ea_test)
 
-# SMB3 transport-compression codec unit test (pure MS-XCA Plain LZ77)
-add_executable(smb_compress_test smb_compress_test.c)
-target_link_libraries(smb_compress_test chimera_server chimera_smb)
-target_include_directories(smb_compress_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
-
-add_test(NAME chimera/server/smb/smb_compress_test
-    COMMAND ${CMAKE_CURRENT_BINARY_DIR}/smb_compress_test)
+# The SMB3 transport-compression codec unit test that used to live here is now
+# quint/smb2_compress_probe.c: the same codec checks and reference vectors, plus
+# the COMPRESSION_TRANSFORM path over a real connection, in the quick tier where
+# the rest of the SMB ground-truth probes live.
 
 # REST API user/share manipulation test
 add_executable(rest_user_manip_test rest_user_manip_test.c)

@@ -149,6 +149,7 @@
 /* NEGOTIATE Capabilities bits (MS-SMB2 2.2.3) */
 #define SMB2_GLOBAL_CAP_ENCRYPTION              0x00000040u
 
+
 /* Oplock levels (smb2.h:858) */
 #define SMB2_OPLOCK_LEVEL_NONE                  0x00
 #define SMB2_OPLOCK_LEVEL_II                    0x01
@@ -312,6 +313,23 @@ struct smb2_wire_profile {
     int         ntlmv2;
     int         sign;
     int         encrypt;
+    /* SMB3 transport compression (MS-SMB2 2.2.3.1.3).  Offering the context is
+    * what makes the server's compression path reachable at all: it compresses
+    * a reply only for a connection that advertised an algorithm it shares.
+    * Needs no session key, so unlike sign/encrypt it does not imply ntlmv2. */
+    /* Two independent switches, because "the server can compress" and "this
+     * client asked it to" are different facts and the probe needs to set them
+     * apart: `compress` turns compression on in the SERVER config, while
+     * `compress_alg` is the algorithm the CLIENT offers in its negotiate
+     * context.  A profile with compress=1 and compress_alg=0 is a compression-
+     * capable server talking to a client that never asked -- which must never
+     * produce a compressed reply. */
+    int         compress;
+    uint16_t    compress_alg;
+    /* Also offer SMB2_COMPRESSION_FLAG_CHAINED and Pattern_V1, which is what
+     * lets the server answer with the chained form (run-length pattern
+     * payloads around an LZ77 middle) instead of a single unchained payload. */
+    int         compress_chained;
     /* 3.1.1 preferences, offered in the negotiate contexts. */
     uint16_t    signing_alg;
     uint16_t    cipher;
@@ -510,6 +528,25 @@ struct smb2_conn {
     int                             ss_in_progress;
     int                             signing_on;    /* sign + verify traffic */
     int                             encrypt_on;    /* wrap in TRANSFORM */
+    /* SMB3 transport compression.  compress_on means the client advertised a
+     * COMPRESSION_CAPABILITIES context and the server echoed one back, which
+     * is what allows the server to answer with a COMPRESSION_TRANSFORM frame;
+     * compress_alg is the algorithm the server selected (read from its echo,
+     * never assumed from our own offer).  compressed_replies counts the frames
+     * actually unwrapped, so a test can assert that compression HAPPENED
+     * rather than merely that it was negotiated -- the server compresses only
+     * a READ reply whose data segment actually shrinks, so "negotiated" and
+     * "used" are very different facts. */
+    int                             compress_on;
+    uint16_t                        compress_alg;
+    uint32_t                        compressed_replies;
+    /* Send REQUESTS compressed as well, which is what reaches the server's
+     * inbound decompression -- the path that parses bytes it did not produce.
+     * Opt-in per connection rather than implied by compress_on, so the ordinary
+     * compression profiles keep sending plaintext requests.  1 = unchained,
+     * 2 = chained (which is what reaches the server's chained decoder). */
+    int                             compress_requests;
+    uint32_t                        compressed_sent;
     uint64_t                        nonce_counter;
     /* Scratch for the encrypted form of the request being sent, and for the
      * decrypted form of a reply.  Separate from sbuf/rbuf so the plaintext a
@@ -708,6 +745,27 @@ smb2c_notify(
                 memcpy(c->xbuf + 4, c->dbuf, (size_t) plen);
                 off = 4 + plen;
             }
+            /* Then unwrap compression.  The server compresses BEFORE it
+            * encrypts (MS-SMB2 3.1.4.4), so on the way in the order is
+            * decrypt then decompress -- and on an encrypted session the
+            * compression frame only becomes visible after the block above
+            * has run.  Like the decrypt, this sits ahead of the break/interim
+            * classification, which cannot read a compressed message. */
+            if (c->compress_on && off >= 4 + SMB2W_CXFORM_CHAINED_SIZE &&
+                c->xbuf[4] == 0xFC && c->xbuf[5] == 'S' &&
+                c->xbuf[6] == 'M' && c->xbuf[7] == 'B') {
+                int plen = smb2w_decompress(c->xbuf + 4, off - 4, c->dbuf,
+                                            SMB2C_BUFSZ);
+
+                if (plen < 0) {
+                    fprintf(stderr, "smb2 harness: failed to decompress a "
+                            "COMPRESSION_TRANSFORM reply (%d bytes)\n", off - 4);
+                    exit(6);
+                }
+                memcpy(c->xbuf + 4, c->dbuf, (size_t) plen);
+                off = 4 + plen;
+                c->compressed_replies++;
+            }
             if (off >= 4 + SMB2_HDR_SIZE) {
                 uint16_t cmd    = g16(c->xbuf + 4, 12);
                 uint64_t mid    = g64(c->xbuf + 4, 24);
@@ -837,6 +895,11 @@ smb2_env_open_wire(
     }
     if (env->wire && env->wire->encrypt) {
         chimera_server_config_set_smb_encryption(config, 2);   /* required */
+    }
+    if (env->wire && env->wire->compress) {
+        /* Off by default in the server, so without this the COMPRESSION
+         * context is parsed and then declined and nothing ever compresses. */
+        chimera_server_config_set_smb_compression(config, 1);
     }
     if (env->wire && env->wire->max_dialect == 0x0311) {
         /* The floor, not the ceiling: the server offers everything at or above
@@ -1007,10 +1070,11 @@ smb2_conn_open(struct smb2_env *env)
     c->sbuf       = malloc(SMB2C_BUFSZ);
     c->rbuf       = malloc(SMB2C_BUFSZ);
     c->xbuf       = malloc(SMB2C_BUFSZ);
-    /* Only a protected profile ever wraps or unwraps a message; leaving these
-     * NULL otherwise keeps the unprotected path allocation-identical to what
-     * it was before profiles existed. */
-    if (c->wire && c->wire->encrypt) {
+    /* The wrap/unwrap scratch, needed by both transforms -- encryption's
+     * TRANSFORM and compression's COMPRESSION_TRANSFORM -- so either profile
+     * allocates the pair.  Left NULL otherwise, which keeps the plain path
+     * allocation-identical to what it was before profiles existed. */
+    if (c->wire && (c->wire->encrypt || c->wire->compress)) {
         c->ebuf = malloc(SMB2C_BUFSZ);
         c->dbuf = malloc(SMB2C_BUFSZ);
     }
@@ -1274,6 +1338,28 @@ smb2c_send(
         c->ebuf[2] = (uint8_t) (elen >> 8);
         c->ebuf[3] = (uint8_t) elen;
         evpl_send(c->env->evpl, c->bind, c->ebuf, 4 + elen);
+    } else if (c->compress_requests && c->compress_on) {
+        /* Leave the SMB2 header uncompressed as the transform's prefix, the
+         * same shape the server builds its replies in.  A request that does
+         * not shrink is sent plaintext -- which is what a real client does,
+         * and keeps small requests off this path. */
+        int clen = c->compress_requests == 2
+            ? smb2w_compress_chained(c->compress_alg, h, (int) payload,
+                                     SMB2_HDR_SIZE, c->ebuf + 4,
+                                     SMB2C_BUFSZ - 4)
+            : smb2w_compress(c->compress_alg, h, (int) payload,
+                             SMB2_HDR_SIZE, c->ebuf + 4, SMB2C_BUFSZ - 4);
+
+        if (clen > 0) {
+            c->ebuf[0] = 0;
+            c->ebuf[1] = (uint8_t) (clen >> 16);
+            c->ebuf[2] = (uint8_t) (clen >> 8);
+            c->ebuf[3] = (uint8_t) clen;
+            evpl_send(c->env->evpl, c->bind, c->ebuf, 4 + clen);
+            c->compressed_sent++;
+        } else {
+            evpl_send(c->env->evpl, c->bind, c->sbuf, 4 + payload);
+        }
     } else {
         evpl_send(c->env->evpl, c->bind, c->sbuf, 4 + payload);
     }
@@ -1751,6 +1837,33 @@ smb2_negotiate(struct smb2_conn *c)
         n = smb2c_neg_ctx(cx, n, SMB2W_CTX_SIGNING, data, 4);
         count++;
 
+        /* SMB2_COMPRESSION_CAPABILITIES (MS-SMB2 2.2.3.1.3):
+         *   CompressionAlgorithmCount (2), Padding (2), Flags (4),
+         *   CompressionAlgorithms[count] (2 each).
+         * Offered only on request: a server with compression enabled will
+         * compress replies to any connection that advertises a shared
+         * algorithm, and the unprotected batches want the plaintext wire. */
+        if (w->compress && w->compress_alg) {
+            int nalg = 0;
+
+            n = (n + 7) & ~7;
+            p16(data, 2, 0);                    /* Padding */
+            p32(data, 4, w->compress_chained ? SMB2_COMPRESSION_FLAG_CHAINED
+                : SMB2_COMPRESSION_FLAG_NONE);
+            p16(data, 8 + 2 * nalg, w->compress_alg);
+            nalg++;
+            if (w->compress_chained) {
+                /* Pattern_V1 is only ever a chained payload algorithm, so it
+                 * is offered only alongside the CHAINED flag. */
+                p16(data, 8 + 2 * nalg, SMB2_COMPRESSION_PATTERN_V1);
+                nalg++;
+            }
+            p16(data, 0, (uint16_t) nalg);      /* CompressionAlgorithmCount */
+            n = smb2c_neg_ctx(cx, n, SMB2W_CTX_COMPRESSION, data,
+                              8 + 2 * nalg);
+            count++;
+        }
+
         p32(body, 28, (uint32_t) (abs_off + pad));  /* NegotiateContextOffset */
         p16(body, 32, (uint16_t) count);        /* NegotiateContextCount */
         blen += pad + n;
@@ -1786,6 +1899,15 @@ smb2_negotiate(struct smb2_conn *c)
                     c->cipher = g16(ctx, 10);
                 } else if (type == SMB2W_CTX_SIGNING && dlen >= 4) {
                     c->signing_alg = g16(ctx, 10);
+                } else if (type == SMB2W_CTX_COMPRESSION && dlen >= 8) {
+                    /* The echo carries the count/padding/flags header, then
+                     * the algorithms the server accepted.  Take the first as
+                     * the selection; a count of zero means it declined, and
+                     * compress_on stays off so the unwrap below never runs. */
+                    if (g16(ctx, 8) >= 1 && dlen >= 10) {
+                        c->compress_alg = g16(ctx, 16);
+                        c->compress_on  = c->compress_alg != SMB2_COMPRESSION_NONE;
+                    }
                 }
                 pos = (pos + 8 + dlen + 7) & ~7;
             }
@@ -2490,6 +2612,12 @@ smb2_read(
 
     p16(body, 0, 49);                 /* StructureSize */
     body[2] = SMB2_HDR_SIZE + 16;     /* Padding: desired data offset (80) */
+    /* Flags.  Compression is requested PER READ (MS-SMB2 2.2.19), not implied
+     * by the negotiated context: a server compresses a read reply only when
+     * this bit asks it to, exactly as Windows does.  Set it whenever the
+     * connection negotiated an algorithm, so a compression profile compresses
+     * its reads and every other profile keeps the plaintext wire. */
+    body[3] = c->compress_on ? SMB2_READFLAG_REQUEST_COMPRESSED : 0;
     p32(body, 4, len);                /* Length */
     p64(body, 8, offset);             /* Offset */
     memcpy(body + 16, file_id, 16);   /* FileId */

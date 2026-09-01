@@ -133,6 +133,28 @@ set_tests_properties(chimera/server/smb/mbt/info_probe_memfs PROPERTIES
     LABELS "quint;smb_mbt;memfs"
     TIMEOUT 120)
 
+# Transport-compression ground-truth probe: the MS-XCA codecs (LZ77, LZNT1,
+# LZ77+Huffman) against Microsoft reference vectors, and the whole
+# COMPRESSION_TRANSFORM path -- negotiate context, algorithm selection, the
+# per-connection compression context, unchained and chained framing -- over a
+# real 3.1.1 connection.  No trace can reach any of it: compression is a
+# property of the connection, which the model does not describe, and the
+# server compresses only a READ reply that actually shrinks while the corpus
+# reads 1-4 bytes at a time.  The probe picks its own payload, so it can force
+# real compressed traffic and assert it HAPPENED, not merely that it was
+# negotiated.
+add_executable(smb2_compress_probe smb2_compress_probe.c)
+target_include_directories(smb2_compress_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(smb2_compress_probe chimera_server chimera_smb
+    chimera_metrics crypto)
+
+add_test(NAME chimera/server/smb/mbt/compress_probe_memfs
+    COMMAND $<TARGET_FILE:smb2_compress_probe>)
+set_tests_properties(chimera/server/smb/mbt/compress_probe_memfs PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_compress_probe_memfs"
+    LABELS "quint;smb_mbt;memfs"
+    TIMEOUT 120)
+
 # ---------------------------------------------------------------------------
 # Trace replay (ROADMAP-SMB.md Increment 3).  A single smb2_mbt_replay process
 # opens the server + client evpl once per CAPABILITY PROFILE (the corpus spans
