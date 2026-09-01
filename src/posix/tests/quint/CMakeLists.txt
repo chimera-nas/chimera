@@ -159,6 +159,12 @@ set_tests_properties(chimera/posix/smb/loopback_sealed_required PROPERTIES
 #                                 evidence the peer expects ciphertext --
 #                                 encrypting anyway sends traffic it drops.
 #   sealed_2.1                    encryption does not exist below 3.0.
+#
+# NOT registered: signing-required against a 2.1 client.  The client never signs
+# at 2.1, so the mount should always be refused -- but it is refused only
+# SOMETIMES, which makes it a flaky test rather than a useful one.  The
+# non-determinism is a real finding about that path and wants its own
+# investigation; a test that passes at random would only hide it.
 foreach(cell "sealed_unsupported_by_server|--seal"
              "sealed_2.1|--seal;--encrypt;--vers=2.1")
     string(REPLACE "|" ";" parts "${cell}")
