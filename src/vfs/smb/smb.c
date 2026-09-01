@@ -11,6 +11,7 @@
 #include <openssl/core_names.h>
 #include <openssl/params.h>
 #include <openssl/kdf.h>
+#include <stdatomic.h>
 
 #include "smb.h"
 #include "smb_internal.h"
@@ -51,8 +52,9 @@ chimera_smb_client_preauth_extend(
 
 /* SP800-108 counter-mode KDF with HMAC-SHA256 (OpenSSL KBKDF).  Identical to
  * the server's kdf_counter_hmac_sha256_ossl3: USE_L + USE_SEPARATOR on, label
- * passed as SALT, context as INFO. */
-static int
+ * passed as SALT, context as INFO.  Shared with smb_encrypt.c, which derives
+ * the transport-encryption key pair from the same primitive. */
+int
 chimera_smb_client_kbkdf(
     const uint8_t *key,
     size_t         key_len,
@@ -433,6 +435,10 @@ chimera_smb_client_thread_destroy(void *private_data)
      * is delivered later by evpl_destroy, after this thread struct is gone -- so
      * we null conn->thread to keep that notify from dereferencing freed state. */
     for (conn = thread->conns_list; conn; conn = conn->list_next) {
+        if (conn->enc_ctx) {
+            chimera_smb_client_encrypt_ctx_destroy(conn->enc_ctx);
+            conn->enc_ctx = NULL;
+        }
         conn->thread = NULL;
         if (conn->bind && !conn->closing) {
             conn->closing = 1;
@@ -511,6 +517,57 @@ chimera_smb_client_sign_frame_send(
                                             hdr, smb2_len) != 0) {
             chimera_smbclient_error("Failed to sign outgoing SMB2 PDU (command %u)", hdr->command);
         }
+    }
+
+    /* Transport encryption replaces signing on the wire: a TRANSFORM-wrapped
+     * message is authenticated by its AEAD tag, so the inner SMB2 header is
+     * sent unsigned (MS-SMB2 3.1.4.3).  NEGOTIATE and SESSION_SETUP are never
+     * encrypted -- they run before the keys exist. */
+    if (conn->server->encrypt_active &&
+        hdr->command != SMB2_NEGOTIATE &&
+        hdr->command != SMB2_SESSION_SETUP) {
+        struct evpl_iovec enc_iov;
+        uint64_t          nonce;
+
+        if (!conn->enc_ctx) {
+            conn->enc_ctx = chimera_smb_client_encrypt_ctx_create();
+            if (!conn->enc_ctx) {
+                chimera_smbclient_error("Failed to create SMB3 encryption context");
+                evpl_iovec_release(conn->evpl, iov);
+                return;
+            }
+        }
+
+        /* One nonce per message, never reused for the life of the session. */
+        nonce = atomic_fetch_add(&conn->server->nonce_counter, 1);
+
+        /* Frame the PLAINTEXT length for the gather, then reframe over the
+         * ciphertext below; the transform header is transport payload too. */
+        netbios->word = __builtin_bswap32((uint32_t) smb2_len);
+        evpl_iovec_set_length(iov, total);
+
+        if (chimera_smb_client_encrypt_message(
+                conn->enc_ctx, conn->evpl, conn->server->cipher_id,
+                conn->server->enc_key, conn->server->enc_key_len,
+                nonce, conn->server->session_id,
+                iov, smb2_len, (int) sizeof(*netbios), &enc_iov) != 0) {
+            evpl_iovec_release(conn->evpl, iov);
+            return;
+        }
+
+        evpl_iovec_release(conn->evpl, iov);
+
+        {
+            struct smb_client_netbios_header *enc_nb    = evpl_iovec_data(&enc_iov);
+            int                               enc_total = evpl_iovec_length(&enc_iov);
+
+            enc_nb->word = __builtin_bswap32(
+                (uint32_t) (enc_total - (int) sizeof(*enc_nb)));
+
+            evpl_sendv(conn->evpl, conn->bind, &enc_iov, 1, enc_total,
+                       EVPL_SEND_FLAG_TAKE_REF);
+        }
+        return;
     }
 
     netbios->word = __builtin_bswap32((uint32_t) smb2_len);
@@ -616,6 +673,17 @@ chimera_smb_client_pending_take(
     return NULL;
 } /* chimera_smb_client_pending_take */
 
+static void chimera_smb_client_deliver_reply(
+    struct chimera_smb_client_conn *conn,
+    struct smb2_header             *hdr,
+    struct evpl_iovec_cursor       *cursor,
+    int                             body_len);
+
+static void chimera_smb_client_handle_decrypted(
+    struct chimera_smb_client_conn *conn,
+    struct evpl_iovec              *plain,
+    int                             plain_len);
+
 static void
 chimera_smb_client_handle_recv(
     struct chimera_smb_client_conn *conn,
@@ -623,11 +691,10 @@ chimera_smb_client_handle_recv(
     int                             niov,
     int                             length)
 {
-    struct evpl_iovec_cursor           cursor;
-    struct smb_client_netbios_header   netbios;
-    struct smb2_header                 hdr;
-    struct chimera_smb_client_pending *pending;
-    int                                body_len;
+    struct evpl_iovec_cursor         cursor;
+    struct smb_client_netbios_header netbios;
+    struct smb2_header               hdr;
+    int                              body_len;
 
     if (length < (int) (sizeof(netbios) + sizeof(hdr))) {
         chimera_smbclient_error("Received SMB2 reply too short (%d bytes)", length);
@@ -639,6 +706,45 @@ chimera_smb_client_handle_recv(
 
     evpl_iovec_cursor_reset_consumed(&cursor);
     evpl_iovec_cursor_copy(&cursor, &hdr, sizeof(hdr));
+
+    /* A sealed reply arrives as a TRANSFORM (0xFD 'S' 'M' 'B') rather than an
+     * SMB2 message.  Decrypt it and re-enter with the plaintext, which then
+     * takes the ordinary path below -- including the signature check, which a
+     * decrypted message skips because its AEAD tag already authenticated it. */
+    {
+        static const uint8_t tproto[4] = SMB2_TRANSFORM_PROTO_ID;
+
+        if (memcmp(hdr.protocol_id, tproto, 4) == 0) {
+            struct evpl_iovec        plain;
+            struct evpl_iovec_cursor tcursor;
+            int                      plain_len = 0;
+
+            if (!conn->server->cipher_id || !conn->enc_ctx) {
+                chimera_smbclient_error(
+                    "Received an encrypted reply on an unencrypted session");
+                return;
+            }
+
+            evpl_iovec_cursor_init(&tcursor, iov, niov);
+            evpl_iovec_cursor_skip(&tcursor, sizeof(netbios));
+
+            if (chimera_smb_client_decrypt_message(
+                    conn->enc_ctx, conn->evpl, conn->server->cipher_id,
+                    conn->server->dec_key, conn->server->enc_key_len,
+                    &tcursor, length - (int) sizeof(netbios),
+                    &plain, &plain_len) != 0) {
+                chimera_smb_client_conn_fail(conn, CHIMERA_VFS_EIO);
+                return;
+            }
+
+            /* The plaintext is a bare SMB2 message with no transport framing,
+             * so hand it back with a synthetic length that accounts for the
+             * header this function expects to skip. */
+            chimera_smb_client_handle_decrypted(conn, &plain, plain_len);
+            evpl_iovec_release(conn->evpl, &plain);
+            return;
+        }
+    }
 
     if (memcmp(hdr.protocol_id, SMB2_PROTOCOL_ID, 4) != 0) {
         chimera_smbclient_error("Received reply with invalid SMB2 protocol id");
@@ -684,24 +790,68 @@ chimera_smb_client_handle_recv(
         }
     }
 
+    chimera_smb_client_deliver_reply(conn, &hdr, &cursor, body_len);
+} /* chimera_smb_client_handle_recv */
+
+/* Route one verified/decrypted reply to its waiting caller.  `cursor` is
+ * positioned at the message body. */
+static void
+chimera_smb_client_deliver_reply(
+    struct chimera_smb_client_conn *conn,
+    struct smb2_header             *hdr,
+    struct evpl_iovec_cursor       *cursor,
+    int                             body_len)
+{
+    struct chimera_smb_client_pending *pending;
+
     /* A server-initiated OPLOCK_BREAK (lease break) is not a reply to any
      * request -- handle it directly rather than matching a pending message_id. */
-    if (hdr.command == SMB2_OPLOCK_BREAK) {
-        chimera_smb_client_handle_oplock_break(conn, &cursor);
+    if (hdr->command == SMB2_OPLOCK_BREAK) {
+        chimera_smb_client_handle_oplock_break(conn, cursor);
         return;
     }
 
-    pending = chimera_smb_client_pending_take(conn, hdr.message_id);
+    pending = chimera_smb_client_pending_take(conn, hdr->message_id);
     if (!pending) {
         chimera_smbclient_error("Received SMB2 reply for unknown message_id %lu (command %u)",
-                                hdr.message_id, hdr.command);
+                                hdr->message_id, hdr->command);
         return;
     }
 
-    pending->cb(conn, hdr.status, &hdr, &cursor, body_len, pending->arg);
+    pending->cb(conn, hdr->status, hdr, cursor, body_len, pending->arg);
 
     free(pending);
-} /* chimera_smb_client_handle_recv */
+} /* chimera_smb_client_deliver_reply */
+
+/* Deliver a decrypted SMB2 message.  The plaintext carries NO transport
+ * framing, and needs no signature check: the AEAD tag verified in
+ * chimera_smb_client_decrypt_message already authenticated it. */
+static void
+chimera_smb_client_handle_decrypted(
+    struct chimera_smb_client_conn *conn,
+    struct evpl_iovec              *plain,
+    int                             plain_len)
+{
+    struct evpl_iovec_cursor cursor;
+    struct smb2_header       hdr;
+
+    if (plain_len < (int) sizeof(hdr)) {
+        chimera_smbclient_error("Decrypted SMB2 reply too short (%d bytes)",
+                                plain_len);
+        return;
+    }
+
+    evpl_iovec_cursor_init(&cursor, plain, 1);
+    evpl_iovec_cursor_copy(&cursor, &hdr, sizeof(hdr));
+
+    if (memcmp(hdr.protocol_id, SMB2_PROTOCOL_ID, 4) != 0) {
+        chimera_smbclient_error("Decrypted reply has an invalid SMB2 protocol id");
+        return;
+    }
+
+    chimera_smb_client_deliver_reply(conn, &hdr, &cursor,
+                                     plain_len - (int) sizeof(hdr));
+} /* chimera_smb_client_handle_decrypted */
 
 /* Error-complete every request associated with a connection (in-flight,
  * deferred, and the in-progress mount).  Does not close or free the conn. */
