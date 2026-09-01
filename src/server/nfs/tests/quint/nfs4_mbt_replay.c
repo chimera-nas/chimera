@@ -2944,7 +2944,8 @@ classify_status_mismatch(
                       est, ast);
         return;
     }
-    if (strcmp(tag, "SOpen") == 0 && est == E_DELAY && ast == NFS4_OK) {
+    if ((strcmp(tag, "SOpen") == 0 || strcmp(tag, "SRemove") == 0) &&
+        est == E_DELAY && ast == NFS4_OK) {
         caps_mismatch(o, m, "conflictDelays",
                       "model expected NFS4ERR_DELAY during recall, server "
                       "completed the op");
@@ -4364,6 +4365,7 @@ main(
         { "mandatory",      required_argument, 0, 'M' },
         { "backend",        required_argument, 0, 'b' },
         { "pnfs",           required_argument, 0, 'p' },
+        { "delegations",    no_argument,       0, 'g' },
         { "dry-run",        no_argument,       0, 'n' },
         { "verbose",        no_argument,       0, 'v' },
         { 0,                0,                 0, 0   },
@@ -4395,7 +4397,7 @@ main(
      * shared helper; getopt only recognizes them so it does not error. */
     traces = mbt_collect_traces(argc, argv, &ntraces);
 
-    while ((c = getopt_long(argc, argv, "t:D:X:M:b:p:nv", long_options,
+    while ((c = getopt_long(argc, argv, "t:D:X:M:b:p:gnv", long_options,
                             NULL)) != -1) {
         switch (c) {
             case 't':
@@ -4409,6 +4411,13 @@ main(
                 break;
             case 'b':
                 backend = optarg;
+                break;
+            case 'g':
+                /* Serve with delegations on.  The corpus's Deleg instances
+                 * assume grants and skip against the default server; the
+                 * delegation-free instances assume none and skip against
+                 * this one -- two complementary batches cover the corpus. */
+                opts.nfs4_delegations = 1;
                 break;
             case 'n':
                 dry_run = 1;
@@ -4432,7 +4441,7 @@ main(
                 fprintf(stderr,
                         "usage: %s [--trace FILE ...] [--trace-dir DIR] "
                         "[--backend memfs|diskfs|cairn|linux|io_uring] "
-                        "[--pnfs N] "
+                        "[--pnfs N] [--delegations] "
                         "[--mandatory CAP] [--dry-run] [--verbose]\n",
                         argv[0]);
                 mbt_free_traces(traces, ntraces);
