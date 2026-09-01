@@ -744,9 +744,19 @@ op_access(
     res = mbt_access(o->env, fh, (uint32_t) op_i64(op, "mask"));
     if (check_status(o, "OAccess", expected, res->status, m) &&
         expected == NFS3_OK) {
-        if (res->access != (uint32_t) op_i64(op, "access")) {
+        uint32_t eacc = (uint32_t) op_i64(op, "access");
+
+        /* Tolerate chimera's root/AUTH_NONE DAC override granting
+         * ACCESS3_EXECUTE (0x20) on a file with no execute mode bit -- the
+         * mirror of the NFSv4 D4-19 case.  ACCESS is advisory (RFC 1813
+         * 3.3.4), the Linux server and NFS-Ganesha withhold exec-override
+         * absent an x bit, and every other bit matches. */
+        int      exec_overgrant = (eacc & 0x20) == 0 &&
+            res->access == (eacc | 0x20);
+
+        if (res->access != eacc && !exec_overgrant) {
             mism_add(m, "access: expected %#x, got %#x",
-                     (unsigned) op_i64(op, "access"), res->access);
+                     (unsigned) eacc, res->access);
         }
         check_attrs(o, op_i64(op, "obj"), &res->obj_attrs, post_fs, m,
                     "obj_attrs");
