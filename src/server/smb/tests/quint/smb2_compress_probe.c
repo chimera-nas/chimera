@@ -1,32 +1,73 @@
-// SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
-//
-// SPDX-License-Identifier: LGPL-2.1-only
-
-/*
- * Unit tests for the SMB3 transport-compression codecs (smb_compress.c).
+/* SPDX-FileCopyrightText: 2025-2026 Chimera-NAS Project Contributors
  *
- * These exercise the pure MS-XCA Plain LZ77 buffer codec directly — no SMB
- * connection, no daemon, no I/O.  Coverage:
- *   - round-trip (compress -> decompress) over a spread of payload shapes:
- *     empty-ish, random/incompressible, highly repetitive (long matches),
- *     text with near-repeats, and a large buffer;
- *   - decompression of a hand-built literal-only stream (validates the flag
- *     dword + literal token wire layout independently of the compressor);
- *   - decompression of a hand-built long-match stream (validates the 16-bit
- *     match token + extended-length escape).
+ * SPDX-License-Identifier: LGPL-2.1-only
+ *
+ * SMB3 transport-compression ground-truth probe.
+ *
+ * smb_compress.c is the largest file in the tree that the quick tier never
+ * reaches: the MS-XCA codecs and the COMPRESSION_TRANSFORM framing only run
+ * once a connection has negotiated SMB2_COMPRESSION, and no trace in the
+ * corpus does -- nor could one usefully, since the model has no notion of how
+ * a message is framed on the wire.  Compression is a property of the
+ * CONNECTION, like signing and encryption, so it belongs to the harness rather
+ * than to the model.
+ *
+ * The corpus cannot reach it for a second reason worth stating, because it
+ * decides the shape of this probe: the server compresses only a READ reply
+ * whose data segment actually shrinks, and the corpus reads 1 to 4 bytes at a
+ * time.  A wire profile alone would negotiate compression and then never
+ * compress a single message.  A probe can choose its payload, so it drives
+ * reads big enough and compressible enough to force real compressed traffic,
+ * and asserts that traffic HAPPENED (conn->compressed_replies) rather than
+ * merely that it was negotiated.
+ *
+ * TWO KINDS OF CHECK, because a loopback alone cannot do the job:
+ *
+ *   1. REFERENCE VECTORS (MS-XCA, produced by the Microsoft Xpress DLL via
+ *      WPTS).  These are the asymmetric ground truth.  Everything else here
+ *      runs chimera's compressor into chimera's decompressor, and a bug that
+ *      is symmetric between the two -- a codec that encodes and decodes the
+ *      same wrong thing -- round-trips perfectly and proves nothing.  Only
+ *      bytes that came from Windows can catch that, which is why these vectors
+ *      are the part of this probe that must never be dropped.
+ *
+ *   2. END-TO-END through the harness, over a real connection: the negotiate
+ *      context, algorithm selection, the transform framing, the per-connection
+ *      compression context, and the codecs, all on the path of an actual READ.
+ *      The client's FRAMING is an independent implementation (smb2w_decompress
+ *      in smb2_mbt_wire.h) so a wrong field offset disagrees instead of
+ *      cancelling out; the codecs are necessarily shared, which is what (1) is
+ *      for.
+ *
+ * This began as src/server/smb/tests/smb_compress_test.c, an extended-tier
+ * unit test that ran once every six hours and never crossed an SMB connection.
+ * The codec sections below are that test, carried over verbatim.
  */
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include "smb2_mbt_common.h"
 
-#include "server/smb/smb_compress.h"
+static int failures = 0;
 
-#define TEST_PASS(name) do { fprintf(stderr, "  PASS: %s\n", name); passed++; } while (0)
-#define TEST_FAIL(name) do { fprintf(stderr, "  FAIL: %s\n", name); failed++; } while (0)
+/* The codec sections below were written against these two macros; keeping them
+ * lets that code carry over unchanged, and routes it into this probe's tally. */
+#define TEST_PASS(name) do { printf("ok   - %s\n", name); } while (0)
+#define TEST_FAIL(name) do { printf("FAIL - %s\n", name); failures++; } while (0)
 
-static int passed = 0;
-static int failed = 0;
+#define CHECK(cond, ...)                             \
+        do {                                         \
+            if (cond) {                              \
+                printf("ok   - " __VA_ARGS__);       \
+                printf("\n");                        \
+            } else {                                 \
+                printf("FAIL - " __VA_ARGS__);       \
+                printf("\n");                        \
+                failures++;                          \
+            }                                        \
+        } while (0)
+
+/* ======================================================================== */
+/* 1. Codec ground truth (no connection)                                    */
+/* ======================================================================== */
 
 /* A small deterministic PRNG so the "random" payload is reproducible. */
 static uint32_t
@@ -474,6 +515,280 @@ test_lz77huffman_ms_vectors(void)
     }
 } /* test_lz77huffman_ms_vectors */
 
+/* ======================================================================== */
+/* 2. End-to-end over a real connection                                     */
+/* ======================================================================== */
+
+/* A payload the codecs can actually shrink, and that a wrong decompression
+ * cannot accidentally reproduce: long runs (so Pattern_V1 and the LZ77 match
+ * tokens both have something to find) separated by varying literal text, with
+ * a deterministic per-offset byte so a mis-assembled buffer differs from the
+ * original at the first wrong byte rather than looking plausible. */
+static void
+fill_compressible(
+    uint8_t *buf,
+    int      len)
+{
+    int i = 0;
+
+    while (i < len) {
+        int run = 64 + (i % 193);
+        int j;
+
+        for (j = 0; j < run && i < len; j++, i++) {
+            buf[i] = (uint8_t) ('A' + ((i / 691) % 23));
+        }
+        for (j = 0; j < 17 && i < len; j++, i++) {
+            buf[i] = (uint8_t) (0x20 + ((i * 7 + j) % 90));
+        }
+    }
+} /* fill_compressible */
+
+/* Drive one compression profile end to end: negotiate it, write a large
+ * compressible file, read it back, and require both that the bytes survive and
+ * that the reply actually arrived compressed. */
+static void
+probe_profile(
+    const char *label,
+    uint16_t    alg,
+    int         chained)
+{
+    struct smb2_env          env;
+    struct smb2_env_opts     opts = { 0 };
+    struct smb2_wire_profile w    = {
+        .name             = label,
+        .max_dialect      = 0x0311,
+        .ntlmv2           = 1,
+        .compress         = 1,
+        .compress_alg     = alg,
+        .compress_chained = chained,
+        .signing_alg      = SMB2W_SIGN_AES_GMAC,
+    };
+    struct smb2_conn        *c;
+    struct smb2_create_out   co;
+    static uint8_t           payload[64 * 1024];
+    static uint8_t           readback[64 * 1024];
+    const int                len = (int) sizeof(payload);
+    uint32_t                 st, count = 0, rlen = 0, before;
+    int                      off;
+
+    printf("# --- %s ---\n", label);
+
+    fill_compressible(payload, len);
+
+    smb2_env_open_wire(&env, &opts, &w);
+    smb2_env_fs_setup(&env, "fs0");
+
+    c = smb2_conn_open(&env);
+
+    st = smb2_negotiate(c);
+    CHECK(st == ST_SUCCESS, "%s: NEGOTIATE -> 0x%08x", label, st);
+    CHECK(c->dialect == 0x0311, "%s: dialect 0x%04x is 3.1.1", label, c->dialect);
+    /* The server's echo, not our offer: a server that ignored the context
+     * would leave this off and the reads below would never compress. */
+    CHECK(c->compress_on && c->compress_alg == alg,
+          "%s: server selected compression alg 0x%04x (on=%d)",
+          label, c->compress_alg, c->compress_on);
+
+    st = smb2_session_setup(c);
+    CHECK(st == ST_SUCCESS, "%s: SESSION_SETUP -> 0x%08x", label, st);
+
+    st = smb2_tree_connect(c, "\\\\127.0.0.1\\share");
+    CHECK(st == ST_SUCCESS, "%s: TREE_CONNECT -> 0x%08x", label, st);
+
+    st = smb2_create(c, "comp.dat", FILE_OPEN_IF, FILE_ALL_ACCESS,
+                     FILE_SHARE_RWD, NULL, &co);
+    CHECK(st == ST_SUCCESS, "%s: CREATE -> 0x%08x", label, st);
+
+    /* Write in chunks the server will accept, then read back in chunks large
+     * enough that the reply's data segment can shrink below the 16-byte
+     * transform header -- which is what makes the server choose to compress. */
+    for (off = 0; off < len; off += 16384) {
+        int n = len - off < 16384 ? len - off : 16384;
+
+        st = smb2_write(c, co.file_id, (uint64_t) off, payload + off,
+                        (uint32_t) n, &count);
+        if (st != ST_SUCCESS || count != (uint32_t) n) {
+            CHECK(0, "%s: WRITE at %d -> 0x%08x (count=%u)", label, off, st, count);
+            break;
+        }
+    }
+    CHECK(off >= len, "%s: wrote %d bytes", label, len);
+
+    before = c->compressed_replies;
+
+    for (off = 0; off < len; off += 16384) {
+        int n = len - off < 16384 ? len - off : 16384;
+
+        st = smb2_read(c, co.file_id, (uint64_t) off, (uint32_t) n,
+                       readback + off, &rlen);
+        if (st != ST_SUCCESS || rlen != (uint32_t) n) {
+            CHECK(0, "%s: READ at %d -> 0x%08x (len=%u)", label, off, st, rlen);
+            break;
+        }
+    }
+
+    /* The whole point: the reply came back compressed, and the bytes are the
+     * bytes.  Either half alone is worthless -- a server that never compresses
+     * passes the content check, and a decompressor that returns garbage of the
+     * right length passes a "was it compressed" check. */
+    CHECK(c->compressed_replies > before,
+          "%s: %u repl(ies) arrived COMPRESSION_TRANSFORM-framed",
+          label, c->compressed_replies - before);
+    CHECK(off >= len && memcmp(readback, payload, (size_t) len) == 0,
+          "%s: %d bytes survive the compressed round trip", label, len);
+
+    st = smb2_close(c, co.file_id);
+    CHECK(st == ST_SUCCESS, "%s: CLOSE -> 0x%08x", label, st);
+
+    smb2_env_fs_teardown(&env, "fs0");
+    smb2_env_stop(&env);
+} /* probe_profile */
+
+/* The other direction: the CLIENT compresses its requests, so the server's
+ * inbound decompression runs.  That path parses bytes the server did not
+ * produce, which makes it the half of the feature most worth testing, and a
+ * client that only decompresses never reaches it.
+ *
+ * The assertion is on the EFFECT: a compressed WRITE must land the same bytes
+ * a plaintext one would, verified by reading them back over a plain
+ * (uncompressed) read.  A server that quietly mis-decompressed would store
+ * different bytes and fail here, where a status-only check would pass. */
+static void
+probe_compressed_requests(
+    const char *label,
+    uint16_t    alg,
+    int         mode)          /* 1 = unchained, 2 = chained */
+{
+    struct smb2_env          env;
+    struct smb2_env_opts     opts = { 0 };
+    struct smb2_wire_profile w    = {
+        .name         = label,
+        .max_dialect  = 0x0311,
+        .ntlmv2       = 1,
+        .compress     = 1,
+        .compress_alg = alg,
+        .signing_alg  = SMB2W_SIGN_AES_GMAC,
+    };
+    struct smb2_conn        *c;
+    struct smb2_create_out   co;
+    static uint8_t           payload[32 * 1024];
+    static uint8_t           readback[32 * 1024];
+    const int                len = (int) sizeof(payload);
+    uint32_t                 st, count = 0, rlen = 0;
+
+    printf("# --- %s: compressed REQUESTS ---\n", label);
+
+    fill_compressible(payload, len);
+
+    smb2_env_open_wire(&env, &opts, &w);
+    smb2_env_fs_setup(&env, "fs0");
+
+    c = smb2_conn_open(&env);
+
+    st = smb2_negotiate(c);
+    CHECK(st == ST_SUCCESS, "%s: NEGOTIATE -> 0x%08x", label, st);
+    st = smb2_session_setup(c);
+    CHECK(st == ST_SUCCESS, "%s: SESSION_SETUP -> 0x%08x", label, st);
+    st = smb2_tree_connect(c, "\\\\127.0.0.1\\share");
+    CHECK(st == ST_SUCCESS, "%s: TREE_CONNECT -> 0x%08x", label, st);
+
+    st = smb2_create(c, "creq.dat", FILE_OPEN_IF, FILE_ALL_ACCESS,
+                     FILE_SHARE_RWD, NULL, &co);
+    CHECK(st == ST_SUCCESS, "%s: CREATE -> 0x%08x", label, st);
+
+    /* Only now: the handshake itself must go out in the clear, since the
+     * algorithm is not agreed until NEGOTIATE completes. */
+    c->compress_requests = mode;
+
+    st = smb2_write(c, co.file_id, 0, payload, (uint32_t) len, &count);
+    CHECK(st == ST_SUCCESS && count == (uint32_t) len,
+          "%s: compressed WRITE of %d bytes -> 0x%08x (count=%u)",
+          label, len, st, count);
+    CHECK(c->compressed_sent > 0,
+          "%s: %u request(s) went out COMPRESSION_TRANSFORM-framed",
+          label, c->compressed_sent);
+
+    c->compress_requests = 0;
+
+    st = smb2_read(c, co.file_id, 0, (uint32_t) len, readback, &rlen);
+    CHECK(st == ST_SUCCESS && rlen == (uint32_t) len &&
+          memcmp(readback, payload, (size_t) len) == 0,
+          "%s: the server stored exactly what the compressed WRITE carried",
+          label);
+
+    st = smb2_close(c, co.file_id);
+    CHECK(st == ST_SUCCESS, "%s: CLOSE -> 0x%08x", label, st);
+
+    smb2_env_fs_teardown(&env, "fs0");
+    smb2_env_stop(&env);
+} /* probe_compressed_requests */
+
+/* A connection that does NOT negotiate compression must not receive a
+ * compressed reply.  Without this, every positive result above is equally
+ * consistent with a server that compresses unconditionally -- which would
+ * break every client that never asked. */
+static void
+probe_not_negotiated(void)
+{
+    struct smb2_env          env;
+    struct smb2_env_opts     opts = { 0 };
+    struct smb2_wire_profile w    = {
+        .name        = "no-compression",
+        .max_dialect = 0x0311,
+        .ntlmv2      = 1,
+        .compress    = 1,   /* server-side enabled ... */
+        .signing_alg = SMB2W_SIGN_AES_GMAC,
+    };
+    struct smb2_conn        *c;
+    struct smb2_create_out   co;
+    static uint8_t           payload[32 * 1024];
+    static uint8_t           readback[32 * 1024];
+    const int                len = (int) sizeof(payload);
+    uint32_t                 st, count = 0, rlen = 0;
+
+    printf("# --- compression enabled server-side, not offered by the client ---\n");
+
+    /* ... but the client offers no algorithm, so nothing may compress. */
+    w.compress_alg = 0;
+    fill_compressible(payload, len);
+
+    smb2_env_open_wire(&env, &opts, &w);
+    smb2_env_fs_setup(&env, "fs0");
+
+    c = smb2_conn_open(&env);
+    /* Suppress the context entirely for this connection. */
+    st = smb2_negotiate(c);
+    CHECK(st == ST_SUCCESS, "no-compression: NEGOTIATE -> 0x%08x", st);
+
+    st = smb2_session_setup(c);
+    CHECK(st == ST_SUCCESS, "no-compression: SESSION_SETUP -> 0x%08x", st);
+    st = smb2_tree_connect(c, "\\\\127.0.0.1\\share");
+    CHECK(st == ST_SUCCESS, "no-compression: TREE_CONNECT -> 0x%08x", st);
+
+    st = smb2_create(c, "plain.dat", FILE_OPEN_IF, FILE_ALL_ACCESS,
+                     FILE_SHARE_RWD, NULL, &co);
+    CHECK(st == ST_SUCCESS, "no-compression: CREATE -> 0x%08x", st);
+
+    st = smb2_write(c, co.file_id, 0, payload, (uint32_t) len, &count);
+    CHECK(st == ST_SUCCESS && count == (uint32_t) len,
+          "no-compression: WRITE %d bytes -> 0x%08x", len, st);
+
+    st = smb2_read(c, co.file_id, 0, (uint32_t) len, readback, &rlen);
+    CHECK(st == ST_SUCCESS && rlen == (uint32_t) len &&
+          memcmp(readback, payload, (size_t) len) == 0,
+          "no-compression: READ returns the bytes written (len=%u)", rlen);
+    CHECK(c->compressed_replies == 0,
+          "no-compression: no reply was compressed (%u seen)",
+          c->compressed_replies);
+
+    st = smb2_close(c, co.file_id);
+    CHECK(st == ST_SUCCESS, "no-compression: CLOSE -> 0x%08x", st);
+
+    smb2_env_fs_teardown(&env, "fs0");
+    smb2_env_stop(&env);
+} /* probe_not_negotiated */
+
 int
 main(
     int    argc,
@@ -482,7 +797,9 @@ main(
     (void) argc;
     (void) argv;
 
-    fprintf(stderr, "=== SMB3 compression: Plain LZ77 round-trip ===\n");
+    setvbuf(stdout, NULL, _IONBF, 0);
+
+    printf("# === codec ground truth: Plain LZ77 round-trip ===\n");
     test_roundtrip_random();
     test_roundtrip_constant();
     test_roundtrip_huge_constant();
@@ -490,19 +807,33 @@ main(
     test_roundtrip_mixed_large();
     test_roundtrip_small_sizes();
 
-    fprintf(stderr, "=== SMB3 compression: LZNT1 ===\n");
-    test_lznt1_roundtrips();
-    test_lznt1_ms_vectors();
-
-    fprintf(stderr, "=== SMB3 compression: LZ77+Huffman ===\n");
-    test_lz77huffman_roundtrips();
-    test_lz77huffman_ms_vectors();
-
-    fprintf(stderr, "=== SMB3 compression: Plain LZ77 decode vectors ===\n");
+    printf("# === codec ground truth: hand-built LZ77 streams ===\n");
     test_decode_literals();
     test_decode_short_match();
     test_decode_length_overflow();
 
-    fprintf(stderr, "\nTotal: %d passed, %d failed\n", passed, failed);
-    return failed == 0 ? 0 : 1;
+    printf("# === codec ground truth: LZNT1 ===\n");
+    test_lznt1_roundtrips();
+    test_lznt1_ms_vectors();
+
+    printf("# === codec ground truth: LZ77+Huffman ===\n");
+    test_lz77huffman_roundtrips();
+    test_lz77huffman_ms_vectors();
+
+    printf("# === end to end over an SMB3 connection ===\n");
+    probe_profile("LZ77", SMB2_COMPRESSION_LZ77, 0);
+    probe_profile("LZ77+Huffman", SMB2_COMPRESSION_LZ77_HUFFMAN, 0);
+    probe_profile("LZNT1", SMB2_COMPRESSION_LZNT1, 0);
+    probe_profile("LZ77 chained (Pattern_V1)", SMB2_COMPRESSION_LZ77, 1);
+    probe_compressed_requests("LZ77", SMB2_COMPRESSION_LZ77, 1);
+    probe_compressed_requests("LZNT1", SMB2_COMPRESSION_LZNT1, 1);
+    probe_compressed_requests("LZ77 chained", SMB2_COMPRESSION_LZ77, 2);
+    probe_not_negotiated();
+
+    if (failures) {
+        fprintf(stderr, "%d SMB3 compression check(s) FAILED\n", failures);
+        return 1;
+    }
+    printf("all SMB3 compression checks passed\n");
+    return 0;
 } /* main */

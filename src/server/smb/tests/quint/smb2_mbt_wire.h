@@ -123,41 +123,59 @@ utf16le(
 /* ---- wire-protection constants ------------------------------------------ */
 
 /* Negotiated signing algorithms (MS-SMB2 2.2.3.1.7). */
-#define SMB2W_SIGN_HMAC_SHA256    0x0000
-#define SMB2W_SIGN_AES_CMAC       0x0001
-#define SMB2W_SIGN_AES_GMAC       0x0002
+#define SMB2W_SIGN_HMAC_SHA256           0x0000
+#define SMB2W_SIGN_AES_CMAC              0x0001
+#define SMB2W_SIGN_AES_GMAC              0x0002
 
 /* Negotiated ciphers (MS-SMB2 2.2.3.1.2). */
-#define SMB2W_CIPHER_AES128_CCM   0x0001
-#define SMB2W_CIPHER_AES128_GCM   0x0002
-#define SMB2W_CIPHER_AES256_CCM   0x0003
-#define SMB2W_CIPHER_AES256_GCM   0x0004
+#define SMB2W_CIPHER_AES128_CCM          0x0001
+#define SMB2W_CIPHER_AES128_GCM          0x0002
+#define SMB2W_CIPHER_AES256_CCM          0x0003
+#define SMB2W_CIPHER_AES256_GCM          0x0004
 
 /* Negotiate context types (MS-SMB2 2.2.3.1). */
-#define SMB2W_CTX_PREAUTH         0x0001
-#define SMB2W_CTX_ENCRYPTION      0x0002
-#define SMB2W_CTX_SIGNING         0x0008
+#define SMB2W_CTX_PREAUTH                0x0001
+#define SMB2W_CTX_ENCRYPTION             0x0002
+#define SMB2W_CTX_COMPRESSION            0x0003
+#define SMB2W_CTX_SIGNING                0x0008
 
-#define SMB2W_PREAUTH_SHA_512     0x0001
-#define SMB2W_PREAUTH_HASH_SIZE   64
+/* Transport compression (MS-SMB2 2.2.3.1.3 CompressionAlgorithm IDs, and the
+ * 2.2.42 transform Flags).  Restated here rather than included from the
+ * server's smb2.h, like every other constant in this harness: the client is
+ * meant to be an independent reading of the protocol, so that a wrong constant
+ * on one side disagrees with the other instead of matching it by construction. */
+#define SMB2_COMPRESSION_NONE            0x0000
+#define SMB2_COMPRESSION_LZNT1           0x0001
+#define SMB2_COMPRESSION_LZ77            0x0002
+#define SMB2_COMPRESSION_LZ77_HUFFMAN    0x0003
+#define SMB2_COMPRESSION_PATTERN_V1      0x0004
+
+#define SMB2_COMPRESSION_FLAG_NONE       0x00000000u
+#define SMB2_COMPRESSION_FLAG_CHAINED    0x00000001u
+
+/* READ request Flags (MS-SMB2 2.2.19): ask the server to compress this reply. */
+#define SMB2_READFLAG_REQUEST_COMPRESSED 0x02
+
+#define SMB2W_PREAUTH_SHA_512            0x0001
+#define SMB2W_PREAUTH_HASH_SIZE          64
 
 /* TRANSFORM_HEADER (MS-SMB2 2.2.41): 52 bytes, of which [20,52) is the AEAD
  * associated data. */
-#define SMB2W_XFORM_SIZE          52
-#define SMB2W_XFORM_AAD_OFF       20
-#define SMB2W_XFORM_AAD_LEN       32
-#define SMB2W_XFORM_FLAG_ENC      0x0001
+#define SMB2W_XFORM_SIZE                 52
+#define SMB2W_XFORM_AAD_OFF              20
+#define SMB2W_XFORM_AAD_LEN              32
+#define SMB2W_XFORM_FLAG_ENC             0x0001
 
 /* NTLMSSP negotiate flags (MS-NLMP 2.2.2.5). */
-#define SMB2W_NTLMSSP_UNICODE     0x00000001u
-#define SMB2W_NTLMSSP_REQ_TARGET  0x00000004u
-#define SMB2W_NTLMSSP_SIGN        0x00000010u
-#define SMB2W_NTLMSSP_NTLM        0x00000200u
-#define SMB2W_NTLMSSP_ANONYMOUS   0x00000800u
-#define SMB2W_NTLMSSP_ALWAYS_SIGN 0x00008000u
-#define SMB2W_NTLMSSP_EXT_SESSEC  0x00080000u
-#define SMB2W_NTLMSSP_KEY_EXCH    0x40000000u
-#define SMB2W_NTLMSSP_128         0x20000000u
+#define SMB2W_NTLMSSP_UNICODE            0x00000001u
+#define SMB2W_NTLMSSP_REQ_TARGET         0x00000004u
+#define SMB2W_NTLMSSP_SIGN               0x00000010u
+#define SMB2W_NTLMSSP_NTLM               0x00000200u
+#define SMB2W_NTLMSSP_ANONYMOUS          0x00000800u
+#define SMB2W_NTLMSSP_ALWAYS_SIGN        0x00008000u
+#define SMB2W_NTLMSSP_EXT_SESSEC         0x00080000u
+#define SMB2W_NTLMSSP_KEY_EXCH           0x40000000u
+#define SMB2W_NTLMSSP_128                0x20000000u
 
 static inline void
 smb2w_die(const char *what)
@@ -784,3 +802,300 @@ smb2w_ntlm_auth_ntlmv2(
 
     return off;
 } /* smb2w_ntlm_auth_ntlmv2 */
+
+/* ---- SMB3 transport compression (MS-SMB2 2.2.42) ------------------------ */
+
+/* The codecs themselves are the server's.  Reimplementing LZ77, LZNT1 and
+ * LZ77+Huffman for the client would be a second bug surface rather than a
+ * second opinion, and the asymmetric check that a shared codec cannot give is
+ * supplied instead by the MS-XCA reference vectors in smb2_compress_probe.c --
+ * bytes produced by Windows, not by chimera.  What IS independent here is the
+ * framing above: field offsets, the chained payload walk, and the bounds. */
+#include "server/smb/smb_compress.h"
+
+/* Dispatch one raw codec segment. */
+static inline int
+smb2w_decompress_codec(
+    uint16_t       alg,
+    const uint8_t *in,
+    int            in_len,
+    uint8_t       *out,
+    int            out_cap)
+{
+    switch (alg) {
+        case SMB2_COMPRESSION_LZNT1:
+            return chimera_smb_lznt1_decompress(in, in_len, out, out_cap);
+        case SMB2_COMPRESSION_LZ77:
+            return chimera_smb_lz77_decompress(in, in_len, out, out_cap);
+        case SMB2_COMPRESSION_LZ77_HUFFMAN:
+            return chimera_smb_lz77huffman_decompress(in, in_len, out, out_cap);
+        default:
+            return -1;
+    } /* switch */
+} /* smb2w_decompress_codec */
+
+/* One chained payload (2.2.42.2.1/2.2.42.2.2).  Pattern_V1 is a run-length
+ * payload -- Pattern(1), Reserved1(1), Reserved2(2), Repetitions(4) -- and
+ * NONE is a verbatim copy; neither is a codec call. */
+static inline int
+smb2w_decompress_payload(
+    uint16_t       alg,
+    const uint8_t *payload,
+    int            payload_len,
+    uint8_t       *out,
+    int            out_avail)
+{
+    switch (alg) {
+        case SMB2_COMPRESSION_NONE:
+            if (payload_len > out_avail) {
+                return -1;
+            }
+            memcpy(out, payload, (size_t) payload_len);
+            return payload_len;
+
+        case SMB2_COMPRESSION_PATTERN_V1: {
+            uint32_t reps;
+
+            if (payload_len != 8) {
+                return -1;
+            }
+            reps = g32(payload, 4);
+            if (reps > (uint32_t) out_avail) {
+                return -1;
+            }
+            memset(out, payload[0], (size_t) reps);
+            return (int) reps;
+        }
+
+        default: {
+            /* A real codec inside a chain carries its decompressed size ahead
+             * of the data (MS-SMB2 2.2.42.2.1 OriginalPayloadSize), and the
+             * header's Length counts those 4 bytes.  Without it the chain is
+             * undecodable: a codec payload is not the last one, so the
+             * remaining output space is not its size. */
+            uint32_t orig;
+
+            if (payload_len < 4) {
+                return -1;
+            }
+            orig = g32(payload, 0);
+            if (orig > (uint32_t) out_avail) {
+                return -1;
+            }
+            if (smb2w_decompress_codec(alg, payload + 4, payload_len - 4,
+                                       out, (int) orig) != (int) orig) {
+                return -1;
+            }
+            return (int) orig;
+        }
+    } /* switch */
+} /* smb2w_decompress_payload */
+
+
+
+/* COMPRESSION_TRANSFORM_HEADER, unchained (2.2.42.1): 16 bytes.  The chained
+ * form (2.2.42.2) shares the first 8 and is followed by payload headers. */
+#define SMB2W_CXFORM_SIZE         16
+#define SMB2W_CXFORM_CHAINED_SIZE 8
+#define SMB2W_CXFORM_PAYLOAD_SIZE 8
+
+/* Dispatch one raw codec segment for compression. */
+static inline int
+smb2w_compress_codec(
+    uint16_t       alg,
+    const uint8_t *in,
+    int            in_len,
+    uint8_t       *out,
+    int            out_cap)
+{
+    switch (alg) {
+        case SMB2_COMPRESSION_LZNT1:
+            return chimera_smb_lznt1_compress(in, in_len, out, out_cap);
+        case SMB2_COMPRESSION_LZ77:
+            return chimera_smb_lz77_compress(in, in_len, out, out_cap);
+        case SMB2_COMPRESSION_LZ77_HUFFMAN:
+            return chimera_smb_lz77huffman_compress(in, in_len, out, out_cap);
+        default:
+            return -1;
+    } /* switch */
+} /* smb2w_compress_codec */
+
+/* Wrap one plaintext SMB2 REQUEST in an unchained COMPRESSION_TRANSFORM
+ * (MS-SMB2 2.2.42.1), leaving the first `prefix` bytes uncompressed as the
+ * transform's uncompressed segment.  `out` receives the 16-byte header
+ * followed by that prefix and the compressed remainder; returns the total byte
+ * count, or -1 when the result would not shrink (the caller then sends
+ * plaintext, exactly as the server does).
+ *
+ * A client that only ever DECOMPRESSES leaves the server's inbound path -- the
+ * one that parses a peer's compressed bytes -- completely untested, which is
+ * the direction that matters most: it is the side handling input it did not
+ * produce.  Sending compressed requests is what reaches it. */
+static inline int
+smb2w_compress(
+    uint16_t       alg,
+    const uint8_t *plain,
+    int            plain_len,
+    int            prefix,
+    uint8_t       *out,
+    int            out_cap)
+{
+    int seg = plain_len - prefix;
+    int clen;
+
+    if (seg <= 0 || SMB2W_CXFORM_SIZE + prefix > out_cap) {
+        return -1;
+    }
+    memcpy(out + SMB2W_CXFORM_SIZE, plain, (size_t) prefix);
+    clen = smb2w_compress_codec(alg, plain + prefix, seg,
+                                out + SMB2W_CXFORM_SIZE + prefix,
+                                out_cap - SMB2W_CXFORM_SIZE - prefix);
+    if (clen < 0 || SMB2W_CXFORM_SIZE + prefix + clen >= plain_len) {
+        return -1;
+    }
+
+    out[0] = 0xFC; out[1] = 'S'; out[2] = 'M'; out[3] = 'B';
+    p32(out, 4, (uint32_t) seg);      /* OriginalCompressedSegmentSize */
+    p16(out, 8, alg);
+    p16(out, 10, (uint16_t) SMB2_COMPRESSION_FLAG_NONE);
+    p32(out, 12, (uint32_t) prefix);  /* Offset of the compressed segment */
+    return SMB2W_CXFORM_SIZE + prefix + clen;
+} /* smb2w_compress */
+
+/* Wrap a request in the CHAINED form (MS-SMB2 2.2.42.2): the uncompressed
+ * prefix becomes a leading NONE pass-through payload, and the rest a codec
+ * payload carrying its OriginalPayloadSize.  Two payloads is the smallest
+ * chain that is still a chain, which is all this needs to be -- its purpose is
+ * to make the server's chained decoder run on bytes from a peer.  Returns the
+ * transform length, or -1 if it would not shrink. */
+static inline int
+smb2w_compress_chained(
+    uint16_t       alg,
+    const uint8_t *plain,
+    int            plain_len,
+    int            prefix,
+    uint8_t       *out,
+    int            out_cap)
+{
+    int seg = plain_len - prefix;
+    int pos = SMB2W_CXFORM_CHAINED_SIZE;
+    int clen;
+
+    if (seg <= 0 || prefix <= 0 ||
+        pos + 8 + prefix + 8 + 4 > out_cap) {
+        return -1;
+    }
+
+    out[0] = 0xFC; out[1] = 'S'; out[2] = 'M'; out[3] = 'B';
+    /* OriginalCompressedSegmentSize is the WHOLE message for the chained form
+     * (every payload's decompressed size summed), not just the codec part. */
+    p32(out, 4, (uint32_t) plain_len);
+
+    /* Leading NONE payload: the SMB2 header, verbatim. */
+    p16(out, pos, (uint16_t) SMB2_COMPRESSION_NONE);
+    p16(out, pos + 2, (uint16_t) SMB2_COMPRESSION_FLAG_CHAINED);
+    p32(out, pos + 4, (uint32_t) prefix);
+    pos += 8;
+    memcpy(out + pos, plain, (size_t) prefix);
+    pos += prefix;
+
+    /* Codec payload: Length counts the 4-byte OriginalPayloadSize as well. */
+    clen = smb2w_compress_codec(alg, plain + prefix, seg,
+                                out + pos + 8 + 4, out_cap - pos - 8 - 4);
+    if (clen < 0 || pos + 8 + 4 + clen >= plain_len) {
+        return -1;
+    }
+    p16(out, pos, alg);
+    p16(out, pos + 2, (uint16_t) SMB2_COMPRESSION_FLAG_NONE);
+    p32(out, pos + 4, (uint32_t) (clen + 4));
+    pos += 8;
+    p32(out, pos, (uint32_t) seg);      /* OriginalPayloadSize */
+    pos += 4 + clen;
+    return pos;
+} /* smb2w_compress_chained */
+
+/* Unwrap a COMPRESSION_TRANSFORM reply into plaintext.  `in` points at the
+ * transform header (past the 4-byte NetBIOS framing), `len` is its byte count;
+ * returns the plaintext length written to `out`, or -1 on a malformed frame.
+ *
+ * The FRAMING here is deliberately a second, independent implementation rather
+ * than a call into the server's chimera_smb_decompress_message: a loopback in
+ * which both sides run the same code cannot fail on a wrong field offset,
+ * because both would be wrong identically.  The CODECS below are the server's
+ * -- reimplementing LZ77/LZNT1/Huffman would be a second bug surface, not a
+ * second opinion -- so the asymmetric check on those lives in the reference
+ * vectors in smb2_compress_probe.c, which come from MS-XCA and not from
+ * chimera.  Between the two, a framing bug fails here and a codec bug fails
+ * against the vectors. */
+static inline int
+smb2w_decompress(
+    const uint8_t *in,
+    int            len,
+    uint8_t       *out,
+    int            out_cap)
+{
+    uint32_t seg, prefix;
+    int      chained;
+
+    if (len < SMB2W_CXFORM_CHAINED_SIZE ||
+        in[0] != 0xFC || in[1] != 'S' || in[2] != 'M' || in[3] != 'B') {
+        return -1;
+    }
+
+    seg = g32(in, 4);   /* OriginalCompressedSegmentSize */
+
+    /* Flags at offset 10 discriminates the two forms, and only the unchained
+     * form has it -- so it may only be read once the length covers it. */
+    chained = !(len >= SMB2W_CXFORM_SIZE && g16(in, 10) == SMB2_COMPRESSION_FLAG_NONE);
+    prefix  = chained ? 0 : g32(in, 12);
+
+    if ((uint64_t) prefix + seg > (uint64_t) out_cap) {
+        return -1;
+    }
+
+    if (!chained) {
+        uint16_t alg = g16(in, 8);
+        int      n;
+
+        if ((uint64_t) SMB2W_CXFORM_SIZE + prefix > (uint64_t) len) {
+            return -1;
+        }
+        memcpy(out, in + SMB2W_CXFORM_SIZE, prefix);
+        n = smb2w_decompress_codec(alg, in + SMB2W_CXFORM_SIZE + prefix,
+                                   len - SMB2W_CXFORM_SIZE - (int) prefix,
+                                   out + prefix, (int) seg);
+        if (n != (int) seg) {
+            return -1;
+        }
+        return (int) (prefix + seg);
+    }
+
+    {
+        int pos = SMB2W_CXFORM_CHAINED_SIZE, outpos = 0;
+
+        while (pos < len) {
+            uint16_t palg;
+            uint32_t plen;
+            int      produced;
+
+            if (pos + SMB2W_CXFORM_PAYLOAD_SIZE > len) {
+                return -1;
+            }
+            palg = g16(in, pos);
+            plen = g32(in, pos + 4);
+            pos += SMB2W_CXFORM_PAYLOAD_SIZE;
+
+            if (plen > (uint32_t) (len - pos)) {
+                return -1;
+            }
+            produced = smb2w_decompress_payload(palg, in + pos, (int) plen,
+                                                out + outpos, out_cap - outpos);
+            if (produced < 0) {
+                return -1;
+            }
+            outpos += produced;
+            pos    += (int) plen;
+        }
+        return outpos == (int) seg ? outpos : -1;
+    }
+} /* smb2w_decompress */
