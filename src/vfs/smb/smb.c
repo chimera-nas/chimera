@@ -940,6 +940,16 @@ chimera_smb_client_conn_drain(
     while ((pending = conn->pending)) {
         conn->pending = pending->next;
         if (pending->request) {
+            /* A handshake PDU carries the MOUNT request itself, so the same
+             * chimera_vfs_request is reachable both here and through
+             * conn->mount_request below.  Dropping the second reference before
+             * completing is what keeps a connection that dies mid-handshake
+             * from completing -- and the VFS from freeing -- one request twice.
+             * The window is real: an in-flight leg is still on this list, and
+             * only a leg whose reply arrived has been taken off it. */
+            if (pending->request == conn->mount_request) {
+                conn->mount_request = NULL;
+            }
             pending->request->status = status;
             pending->request->complete(pending->request);
         }
