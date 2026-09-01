@@ -2830,6 +2830,20 @@ cairn_mkdir_at(
         return;
     }
 
+    /* A removed directory outlives its removal only as long as a descriptor
+     * pins it, and POSIX lets nothing be created in or resolved through it any
+     * more (Linux answers ENOENT for every *at() call made against such a
+     * dirfd).  cairn zeroes a directory's link count when it is removed, so
+     * that is the test.  It follows the type check, matching the order *at()
+     * resolution uses: what the descriptor names first, whether it still
+     * exists second. */
+    if (parent_inode->nlink == 0) {
+        cairn_inode_handle_release(&parent_ih);
+        request->status = CHIMERA_VFS_ENOENT;
+        request->complete(request);
+        return;
+    }
+
     dirent_key.keytype = CAIRN_KEY_DIRENT;
     dirent_key.inum    = parent_inode->inum;
     dirent_key.hash    = request->mkdir_at.name_hash;
@@ -2948,6 +2962,20 @@ cairn_mknod_at(
         return;
     }
 
+    /* A removed directory outlives its removal only as long as a descriptor
+     * pins it, and POSIX lets nothing be created in or resolved through it any
+     * more (Linux answers ENOENT for every *at() call made against such a
+     * dirfd).  cairn zeroes a directory's link count when it is removed, so
+     * that is the test.  It follows the type check, matching the order *at()
+     * resolution uses: what the descriptor names first, whether it still
+     * exists second. */
+    if (parent_inode->nlink == 0) {
+        cairn_inode_handle_release(&parent_ih);
+        request->status = CHIMERA_VFS_ENOENT;
+        request->complete(request);
+        return;
+    }
+
     dirent_key.keytype = CAIRN_KEY_DIRENT;
     dirent_key.inum    = parent_inode->inum;
     dirent_key.hash    = request->mknod_at.name_hash;
@@ -3058,6 +3086,20 @@ cairn_remove_at(
     if (!S_ISDIR(parent_inode->mode)) {
         cairn_inode_handle_release(&parent_ih);
         request->status = CHIMERA_VFS_ENOTDIR;
+        request->complete(request);
+        return;
+    }
+
+    /* A removed directory outlives its removal only as long as a descriptor
+     * pins it, and POSIX lets nothing be created in or resolved through it any
+     * more (Linux answers ENOENT for every *at() call made against such a
+     * dirfd).  cairn zeroes a directory's link count when it is removed, so
+     * that is the test.  It follows the type check, matching the order *at()
+     * resolution uses: what the descriptor names first, whether it still
+     * exists second. */
+    if (parent_inode->nlink == 0) {
+        cairn_inode_handle_release(&parent_ih);
+        request->status = CHIMERA_VFS_ENOENT;
         request->complete(request);
         return;
     }
@@ -3474,6 +3516,20 @@ cairn_open_at(
     if (!S_ISDIR(parent_inode->mode)) {
         cairn_inode_handle_release(&parent_ih);
         request->status = CHIMERA_VFS_ENOTDIR;
+        request->complete(request);
+        return;
+    }
+
+    /* A removed directory outlives its removal only as long as a descriptor
+     * pins it, and POSIX lets nothing be created in or resolved through it any
+     * more (Linux answers ENOENT for every *at() call made against such a
+     * dirfd).  cairn zeroes a directory's link count when it is removed, so
+     * that is the test.  It follows the type check, matching the order *at()
+     * resolution uses: what the descriptor names first, whether it still
+     * exists second. */
+    if (parent_inode->nlink == 0) {
+        cairn_inode_handle_release(&parent_ih);
+        request->status = CHIMERA_VFS_ENOENT;
         request->complete(request);
         return;
     }
@@ -4444,6 +4500,20 @@ cairn_symlink_at(
         return;
     }
 
+    /* A removed directory outlives its removal only as long as a descriptor
+     * pins it, and POSIX lets nothing be created in or resolved through it any
+     * more (Linux answers ENOENT for every *at() call made against such a
+     * dirfd).  cairn zeroes a directory's link count when it is removed, so
+     * that is the test.  It follows the type check, matching the order *at()
+     * resolution uses: what the descriptor names first, whether it still
+     * exists second. */
+    if (parent_inode->nlink == 0) {
+        cairn_inode_handle_release(&parent_ih);
+        request->status = CHIMERA_VFS_ENOENT;
+        request->complete(request);
+        return;
+    }
+
     cairn_map_attrs(fs, &request->symlink_at.r_dir_pre_attr, parent_inode);
 
     dirent_key.keytype = CAIRN_KEY_DIRENT;
@@ -4960,6 +5030,20 @@ cairn_link_at(
     if (!S_ISDIR(parent_inode->mode)) {
         cairn_inode_handle_release(&parent_ih);
         request->status = CHIMERA_VFS_ENOTDIR;
+        request->complete(request);
+        return;
+    }
+
+    /* A removed directory outlives its removal only as long as a descriptor
+     * pins it, and POSIX lets nothing be created in or resolved through it any
+     * more (Linux answers ENOENT for every *at() call made against such a
+     * dirfd).  cairn zeroes a directory's link count when it is removed, so
+     * that is the test.  It follows the type check, matching the order *at()
+     * resolution uses: what the descriptor names first, whether it still
+     * exists second. */
+    if (parent_inode->nlink == 0) {
+        cairn_inode_handle_release(&parent_ih);
+        request->status = CHIMERA_VFS_ENOENT;
         request->complete(request);
         return;
     }
