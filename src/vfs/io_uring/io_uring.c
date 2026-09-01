@@ -1272,7 +1272,12 @@ chimera_io_uring_setattr(
         // /proc/self/fd is exactly right.
         rc = ftruncate(fd, request->setattr.set_attr->va_size);
 
-        if (rc && errno == EBADF) {
+        /* EBADF: an O_PATH descriptor.  EINVAL: a descriptor not open for
+         * writing -- an NFS4 OPEN with read access carries its UNCHECKED
+         * size-0 createattr here through the open's own handle.  Both fall
+         * back to the path truncate, whose DAC re-check by mode is exactly
+         * SETATTR's rule. */
+        if (rc && (errno == EBADF || errno == EINVAL)) {
             char procpath[64];
             snprintf(procpath, sizeof(procpath), "/proc/self/fd/%d", fd);
             rc = truncate(procpath, request->setattr.set_attr->va_size);
