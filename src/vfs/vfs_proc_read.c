@@ -379,10 +379,17 @@ chimera_vfs_read_submit(
      * itself against the real on-disk attrs, as it already does for the path
      * prefix. */
     if (chimera_vfs_gate_needed_dac(handle->vfs_module->capabilities, cred)) {
-        if (handle->granted_valid &&
-            (handle->granted_bound ||
-             handle->cred_hash == chimera_vfs_cred_hash(cred))) {
-            /* Fast path: the caller's grant is cached on the handle. */
+        if (handle->granted_valid && handle->granted_bound) {
+            /* Fast path: an OPEN-bound grant.  NFSv4/SMB bind I/O rights at
+             * OPEN, so the grant stays valid for the descriptor's life even
+             * across later chmods.  An *unbound* grant, by contrast, was
+             * computed lazily for a stateless (NFSv3) caller and is never
+             * revalidated when the object's mode/ACL changes -- trusting it
+             * across operations returns a stale allow/deny (e.g. a read denied
+             * before a widening chmod, then wrongly denied after).  So an
+             * unbound handle must fall through and re-gate against current
+             * attrs on every I/O, as the Linux server does for stateless
+             * READ. */
             if (!(handle->granted_access & CHIMERA_ACE_READ_DATA)) {
                 callback(CHIMERA_VFS_EACCES, 0, 0, NULL, 0, NULL, private_data);
                 return;

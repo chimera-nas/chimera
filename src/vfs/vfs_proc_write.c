@@ -212,9 +212,12 @@ chimera_vfs_write_owned(
      * opens.  The engine must enforce write access itself against the real
      * on-disk attrs, exactly as it already does for the path prefix. */
     if (chimera_vfs_gate_needed_dac(handle->vfs_module->capabilities, cred)) {
-        if (handle->granted_valid &&
-            (handle->granted_bound ||
-             handle->cred_hash == chimera_vfs_cred_hash(cred))) {
+        if (handle->granted_valid && handle->granted_bound) {
+            /* Fast path only for an OPEN-bound grant (NFSv4/SMB bind write
+             * rights at OPEN).  An unbound grant computed for a stateless
+             * (NFSv3) caller is never revalidated on a mode/ACL change, so an
+             * unbound handle re-gates against current attrs on every write --
+             * see the matching note in vfs_proc_read.c. */
             if (!(handle->granted_access & CHIMERA_ACE_WRITE_DATA)) {
                 callback(CHIMERA_VFS_EACCES, 0, 0, NULL, NULL, private_data);
                 return;
