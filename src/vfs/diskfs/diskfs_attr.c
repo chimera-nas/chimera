@@ -894,6 +894,10 @@ diskfs_setattr_inode_cb(
         request->setattr.set_attr->va_size < inode->size) {
 
         p->inode_stash[0] = inode;
+        /* Not carried over from the pooled request's previous life: the trunc
+         * walk's ext_release acquires the refcount inode lazily on the first
+         * reflink-shared extent it frees, keyed on this being NULL. */
+        p->inode_stash[2] = NULL;
         p->loop_off       = request->setattr.set_attr->va_size;
 
         op = diskfs_bt_op_alloc(thread);
