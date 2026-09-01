@@ -519,10 +519,35 @@ main(
     int    argc,
     char **argv)
 {
-    const char *vers        = (argc > 1 && argv[1][0]) ? argv[1] : NULL;
-    int         expect_fail = (argc > 2 &&
-                               strcmp(argv[2], "expect-mount-failure") == 0);
+    const char *vers        = NULL;
+    int         expect_fail = 0;
     json_t     *res;
+    int         i;
+
+    /* Flags describe the WIRE the probe runs over: --vers pins the client's
+     * dialect, the rest configure what the in-process server demands.  Any
+     * combination may be declared --expect-mount-failure, which inverts the
+     * verdict: the mount must be refused, and the body never runs. */
+    for (i = 1; i < argc; i++) {
+        if (strncmp(argv[i], "--vers=", 7) == 0) {
+            vers = argv[i][7] ? argv[i] + 7 : NULL;
+        } else if (strcmp(argv[i], "--sign-required") == 0) {
+            g_smb_sign_required = 1;
+        } else if (strcmp(argv[i], "--encrypt") == 0) {
+            g_smb_encryption = 1;
+        } else if (strcmp(argv[i], "--encrypt-required") == 0) {
+            g_smb_encryption = 2;
+        } else if (strcmp(argv[i], "--compress") == 0) {
+            g_smb_compression = 1;
+        } else if (strcmp(argv[i], "--leases") == 0) {
+            g_smb_leases = 1;
+        } else if (strcmp(argv[i], "--expect-mount-failure") == 0) {
+            expect_fail = 1;
+        } else {
+            fprintf(stderr, "smb_loopback_probe: unknown flag '%s'\n", argv[i]);
+            return 1;
+        }
+    }
 
     /* Optional argv[1] pins the mount's dialect (a vers= value).  With no
      * argument the client offers its whole set and the server selects, which
@@ -556,8 +581,7 @@ main(
 
     if (posix_env_setup("smb_memfs", NULL) != 0) {
         if (expect_fail) {
-            printf("smb_loopback_probe: vers=%s refused the mount, as expected\n",
-                   vers);
+            printf("smb_loopback_probe: the mount was refused, as expected\n");
             return 0;
         }
         fprintf(stderr, "smb_loopback_probe: SMB loopback setup failed (vers=%s)\n",
@@ -567,9 +591,9 @@ main(
 
     if (expect_fail) {
         fprintf(stderr,
-                "smb_loopback_probe: vers=%s mounted, but this dialect is not "
-                "one the client can carry -- either it gained support (update "
-                "the test) or vers= was ignored\n", vers);
+                "smb_loopback_probe: the mount SUCCEEDED but was expected to be "
+                "refused -- either the client gained the capability the server "
+                "demanded (update the test) or the demand was not applied\n");
         return 1;
     }
 
