@@ -24,10 +24,17 @@ chimera_vfs_lookup_at_complete(struct chimera_vfs_request *request)
 
     if (request->status == CHIMERA_VFS_OK) {
         /* A path-only backend resolves the whole path in one shot and returns no
-         * stable child fh (va_fh_len == 0).  Skip the child name/attr cache: a
-         * zero-length fh is the name cache's NEGATIVE (ENOENT) marker, so caching
-         * a success-without-fh here would poison subsequent lookups. */
-        if (request->lookup_at.r_attr.va_fh_len > 0) {
+         * stable child fh.  Skip the child name/attr cache: a zero-length fh is
+         * the name cache's NEGATIVE (ENOENT) marker, so caching a
+         * success-without-fh here would poison subsequent lookups.
+         *
+         * The authority for "a handle came back" is the ATTR_FH set bit, not
+         * va_fh_len: requests are recycled through a free list, so a backend
+         * that simply does not fill the handle in leaves the previous request's
+         * length behind -- and that stale length would otherwise reach a
+         * memcpy as a size. */
+        if ((request->lookup_at.r_attr.va_set_mask & CHIMERA_VFS_ATTR_FH) &&
+            request->lookup_at.r_attr.va_fh_len > 0) {
             chimera_vfs_name_cache_insert(thread, name_cache,
                                           request->lookup_at.handle->fh_hash,
                                           request->lookup_at.handle->fh,

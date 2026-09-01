@@ -515,7 +515,12 @@ chimera_smb_lookup_create_reply(
 
     smb_parse_create_reply(body, &r);
 
-    /* Path-only: return attrs but NO child fh (va_fh stays unset). */
+    /* Path-only: return attrs but NO child fh.  The length has to be zeroed
+     * explicitly -- vfs requests come off a free list, so va_fh_len still
+     * holds whatever the previous request left there, and the engine reads it
+     * (vfs_proc_lookup_at.c) to decide whether a child fh came back. */
+    request->lookup_at.r_attr.va_fh_len = 0;
+
     smb_apply_attrs(request, &request->lookup_at.r_attr, &r.info,
                     XXH3_64bits(request->lookup_at.component,
                                 request->lookup_at.component_len));
