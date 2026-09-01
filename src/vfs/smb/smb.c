@@ -746,6 +746,34 @@ chimera_smb_client_handle_recv(
         }
     }
 
+    /* A compressed reply arrives as a COMPRESSION_TRANSFORM (0xFC 'S' 'M' 'B').
+     * Expand it and deliver the plaintext, as for the encrypted case.  On a
+     * sealed session the server compresses INSIDE the encryption, so this is
+     * reached from the decrypted path rather than here. */
+    {
+        static const uint8_t cproto[4] = SMB2_COMPRESSION_TRANSFORM_PROTO_ID;
+
+        if (memcmp(hdr.protocol_id, cproto, 4) == 0) {
+            struct evpl_iovec        plain;
+            struct evpl_iovec_cursor ccursor;
+            int                      plain_len = 0;
+
+            evpl_iovec_cursor_init(&ccursor, iov, niov);
+            evpl_iovec_cursor_skip(&ccursor, sizeof(netbios));
+
+            if (chimera_smb_client_decompress_message(
+                    conn->evpl, &ccursor, length - (int) sizeof(netbios),
+                    &plain, &plain_len) != 0) {
+                chimera_smb_client_conn_fail(conn, CHIMERA_VFS_EIO);
+                return;
+            }
+
+            chimera_smb_client_handle_decrypted(conn, &plain, plain_len);
+            evpl_iovec_release(conn->evpl, &plain);
+            return;
+        }
+    }
+
     if (memcmp(hdr.protocol_id, SMB2_PROTOCOL_ID, 4) != 0) {
         chimera_smbclient_error("Received reply with invalid SMB2 protocol id");
         return;
@@ -843,6 +871,52 @@ chimera_smb_client_handle_decrypted(
 
     evpl_iovec_cursor_init(&cursor, plain, 1);
     evpl_iovec_cursor_copy(&cursor, &hdr, sizeof(hdr));
+
+    /* Compress-then-encrypt (MS-SMB2 3.1.4.4): on a sealed session the server
+     * compresses the READ reply and encrypts the COMPRESSION_TRANSFORM, so the
+     * plaintext we just recovered can itself be a compressed message.  Expand
+     * it once -- the nesting is exactly one deep, and treating it as arbitrary
+     * would invite a decompression loop. */
+    {
+        static const uint8_t cproto[4] = SMB2_COMPRESSION_TRANSFORM_PROTO_ID;
+
+        if (memcmp(hdr.protocol_id, cproto, 4) == 0) {
+            struct evpl_iovec        inner;
+            struct evpl_iovec_cursor ccursor;
+            struct smb2_header       ihdr;
+            int                      inner_len = 0;
+
+            evpl_iovec_cursor_init(&ccursor, plain, 1);
+
+            if (chimera_smb_client_decompress_message(
+                    conn->evpl, &ccursor, plain_len, &inner, &inner_len) != 0) {
+                chimera_smb_client_conn_fail(conn, CHIMERA_VFS_EIO);
+                return;
+            }
+
+            if (inner_len < (int) sizeof(ihdr)) {
+                chimera_smbclient_error(
+                    "Decompressed reply too short (%d bytes)", inner_len);
+                evpl_iovec_release(conn->evpl, &inner);
+                return;
+            }
+
+            evpl_iovec_cursor_init(&cursor, &inner, 1);
+            evpl_iovec_cursor_copy(&cursor, &ihdr, sizeof(ihdr));
+
+            if (memcmp(ihdr.protocol_id, SMB2_PROTOCOL_ID, 4) != 0) {
+                chimera_smbclient_error(
+                    "Decompressed reply has an invalid SMB2 protocol id");
+                evpl_iovec_release(conn->evpl, &inner);
+                return;
+            }
+
+            chimera_smb_client_deliver_reply(conn, &ihdr, &cursor,
+                                             inner_len - (int) sizeof(ihdr));
+            evpl_iovec_release(conn->evpl, &inner);
+            return;
+        }
+    }
 
     if (memcmp(hdr.protocol_id, SMB2_PROTOCOL_ID, 4) != 0) {
         chimera_smbclient_error("Decrypted reply has an invalid SMB2 protocol id");

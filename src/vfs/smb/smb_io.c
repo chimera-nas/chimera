@@ -219,7 +219,14 @@ chimera_smb_read_send_chunk(
 
     evpl_iovec_cursor_append_uint16(&cursor, SMB2_READ_REQUEST_SIZE);
     evpl_iovec_cursor_append_uint8(&cursor, 0);              /* Padding */
-    evpl_iovec_cursor_append_uint8(&cursor, 0);              /* Flags */
+    /* Flags: ask for a compressed response once compression is negotiated.
+     * This server compresses a READ reply only when asked, read by read
+     * (MS-SMB2 3.2.4.6 / the comp_applicable gate in the server's smb.c), so
+     * without this bit a compression-capable session still carries every byte
+     * in the clear. */
+    evpl_iovec_cursor_append_uint8(&cursor,
+                                   conn->server->compress_active
+                                   ? SMB2_READFLAG_REQUEST_COMPRESSED : 0);
     evpl_iovec_cursor_append_uint32(&cursor, len);           /* Length */
     evpl_iovec_cursor_append_uint64(&cursor, st->base_offset + st->done);
     evpl_iovec_cursor_append_uint64(&cursor, open_state->file_id.pid);

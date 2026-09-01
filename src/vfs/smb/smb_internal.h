@@ -156,6 +156,13 @@ struct chimera_smb_client_server {
      * encrypted at all, which is how this module behaved before seal existed. */
     int                   seal_requested;
 
+    /* compress= from the mount options.  Advertising LZ77 is only half of it:
+     * this server compresses nothing unless a READ carries
+     * SMB2_READFLAG_REQUEST_COMPRESSED, so the flag below is also what makes
+     * the client ask, read by read. */
+    int                   compress_requested;
+    int                   compress_active;
+
     struct evpl_endpoint *endpoint;
 
     /* Shared session state, written once by the mount handshake. */
@@ -611,6 +618,25 @@ int chimera_smb_client_kbkdf(
     size_t         ctx_len,
     uint8_t       *out,
     size_t         out_len);
+
+/* ---- transport compression (smb_compress.c) ---------------------------- */
+
+/* Plain LZ77 (MS-XCA 2.4).  Returns out_len, or -1 on malformed input. */
+int chimera_smb_client_lz77_decompress(
+    const uint8_t *in,
+    int            in_len,
+    uint8_t       *out,
+    int            out_len);
+
+/* Expand an unchained COMPRESSION_TRANSFORM reply.  `cursor` must be positioned
+ * at the transform header; on success `plain_out` owns the plaintext SMB2
+ * message and the caller releases it. */
+int chimera_smb_client_decompress_message(
+    struct evpl              *evpl,
+    struct evpl_iovec_cursor *cursor,
+    int                       length,
+    struct evpl_iovec        *plain_out,
+    int                      *plain_len_out);
 
 /* ---- transport (smb.c) ------------------------------------------------- */
 
