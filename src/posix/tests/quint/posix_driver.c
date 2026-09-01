@@ -88,6 +88,14 @@ static int                        g_smb_leases;         /* grant oplocks + lease
 static int                        g_smb_seal;           /* client asks to encrypt      */
 static int                        g_smb_client_compress; /* client asks to compress    */
 
+/* Set when the CALLER's expected result is a refused mount.  A refused mount
+* leaves a half-built environment -- a running server, a client with no mount,
+* evpl pools on both -- and unwinding that is the hazardous part, not the
+* refusal itself.  A caller whose verdict is already decided sets this and
+* _exit()s instead, which cannot abort on any platform.  See
+* posix_env_setup_unwind for what is being skipped and why it is a hazard. */
+static int                        g_expect_mount_failure;
+
 static struct chimera_vfs_cred    driver_creds[MAX_PIDS];
 static mode_t                     driver_umasks[MAX_PIDS];
 static CHIMERA_DIR               *driver_dirs[MAX_DIRS];
@@ -1572,7 +1580,9 @@ posix_env_setup(
                                       sizeof(smb_options))) != 0) {
                 fprintf(stderr, "posix_driver: smb mount failed: %s\n",
                         strerror(errno));
-                posix_env_setup_unwind(server, metrics);
+                if (!g_expect_mount_failure) {
+                    posix_env_setup_unwind(server, metrics);
+                }
                 return 1;
             }
         } else {
@@ -1583,7 +1593,9 @@ posix_env_setup(
                                                  mount_options) != 0) {
                 fprintf(stderr, "posix_driver: nfs%d mount failed\n",
                         nfs_version);
-                posix_env_setup_unwind(server, metrics);
+                if (!g_expect_mount_failure) {
+                    posix_env_setup_unwind(server, metrics);
+                }
                 return 1;
             }
         }

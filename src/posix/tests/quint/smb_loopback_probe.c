@@ -628,7 +628,8 @@ main(
         } else if (strcmp(argv[i], "--leases") == 0) {
             g_smb_leases = 1;
         } else if (strcmp(argv[i], "--expect-mount-failure") == 0) {
-            expect_fail = 1;
+            expect_fail            = 1;
+            g_expect_mount_failure = 1;
         } else {
             fprintf(stderr, "smb_loopback_probe: unknown flag '%s'\n", argv[i]);
             return 1;
@@ -668,7 +669,15 @@ main(
     if (posix_env_setup("smb_memfs", NULL) != 0) {
         if (expect_fail) {
             printf("smb_loopback_probe: the mount was refused, as expected\n");
-            return 0;
+            fflush(stdout);
+            /* _exit, not return: the verdict is in, and everything after this
+             * point is teardown of a half-built environment -- a running
+             * server, a client with no mount, evpl thread pools on both.  That
+             * teardown is where the hazards are (it has aborted on Linux and
+             * raced on macOS), and none of it can change the answer.  Leaving
+             * by the shortest path makes the result of this test depend on the
+             * refusal alone. */
+            _exit(0);
         }
         fprintf(stderr, "smb_loopback_probe: SMB loopback setup failed (vers=%s)\n",
                 vers ? vers : "<negotiated>");
