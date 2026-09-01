@@ -143,10 +143,22 @@ create_file(
         ssize_t written;
 
         gen_buffer(buf, loop, child, fnum, size);
+        errno   = 0;
         written = chimera_posix_pwrite(fd, buf, block_size, size);
         if (written != block_size) {
-            fprintf(stderr, "Write failed at offset %d: wrote %zd, expected %d\n",
-                    size, written, block_size);
+            /* Separate the two faults and name the errno.  A short write and a
+             * failed one have different causes, and "wrote -1" on its own says
+             * nothing about which -- ENOSPC, EIO and a timeout all look alike
+             * in a CI log, which is exactly where this fires. */
+            if (written < 0) {
+                fprintf(stderr,
+                        "Write failed at offset %d in %s: %s (errno %d)\n",
+                        size, fname, strerror(errno), errno);
+            } else {
+                fprintf(stderr,
+                        "Short write at offset %d in %s: wrote %zd of %d\n",
+                        size, fname, written, block_size);
+            }
             free(buf);
             chimera_posix_close(fd);
             return 1;
@@ -186,10 +198,18 @@ check_file(
     for (size = 0; size < file_size; size += block_size * do_frags) {
         ssize_t nread;
 
+        errno = 0;
         nread = chimera_posix_pread(fd, buf, block_size, size);
         if (nread != block_size) {
-            fprintf(stderr, "Read failed at offset %d: read %zd, expected %d\n",
-                    size, nread, block_size);
+            if (nread < 0) {
+                fprintf(stderr,
+                        "Read failed at offset %d in %s: %s (errno %d)\n",
+                        size, fname, strerror(errno), errno);
+            } else {
+                fprintf(stderr,
+                        "Short read at offset %d in %s: read %zd of %d\n",
+                        size, fname, nread, block_size);
+            }
             ret = 1;
             break;
         }
