@@ -432,9 +432,17 @@ KNOWN_DEVIATIONS = [
         posix="clone_file_range: source range must lie within the source "
               "file (EINVAL)",
         summary="clone_file_range with a source range beyond EOF returns "
-                "success instead of EINVAL",
-        root_cause="memfs clone path does not validate the source range",
-        candidate_fix="validate offSrc+len <= source size",
+                "success instead of EINVAL, and the destination grows to "
+                "cover the range",
+        root_cause="the diskfs clone path does not validate the source "
+                   "range.  Recorded against memfs originally; memfs has "
+                   "since gained the check and no longer reaches this entry "
+                   "(0 hits across the memfs corpus, 3 across diskfs), so "
+                   "the entry now describes diskfs alone -- and, being "
+                   "reconcilable, is what hides the errno divergence until a "
+                   "later read inside the grown region fails instead",
+        candidate_fix="validate offSrc+len <= source size in diskfs "
+                      "clone_range, as memfs does; then retire this entry",
         ops=("RCloneRange",),
         expected_status=EINVAL,
         actual_status=OK,
