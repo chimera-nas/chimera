@@ -1790,6 +1790,10 @@ chimera_io_uring_open_at(
             ~(CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID);
     }
 
+    chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_IO_URING,
+                            &request->open_at.r_dir_pre_attr,
+                            parent_fd);
+
     sqe = chimera_io_uring_get_sqe(thread, request, 0, 0);
 
     if (request->open_at.set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) {
@@ -1870,6 +1874,10 @@ chimera_io_uring_mkdir_at(
     } else {
         mode = S_IRWXU;
     }
+
+    chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_IO_URING,
+                            &request->mkdir_at.r_dir_pre_attr,
+                            fd);
 
     io_uring_prep_mkdirat(sqe, fd, fullname, mode);
 
@@ -2012,6 +2020,10 @@ chimera_io_uring_remove_at(
      * AT_REMOVEDIR (a non-directory then yields ENOTDIR), ISNOTDIR -> plain
      * unlink (a directory then yields EISDIR).  Neither set keeps the legacy
      * try-file-then-directory fallback. */
+    chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_IO_URING,
+                            &request->remove_at.r_dir_pre_attr,
+                            fd);
+
     if (request->remove_at.flags & CHIMERA_VFS_REMOVE_ISDIR) {
         rc = unlinkat(fd, fullname, AT_REMOVEDIR);
     } else if (request->remove_at.flags & CHIMERA_VFS_REMOVE_ISNOTDIR) {
@@ -2024,6 +2036,10 @@ chimera_io_uring_remove_at(
     }
 
     int unlinkat_errno = errno;
+
+    chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_IO_URING,
+                            &request->remove_at.r_dir_post_attr,
+                            fd);
     chimera_restore_privilege(request->cred);
 
     if (rc) {
@@ -2412,6 +2428,10 @@ chimera_io_uring_symlink_at(
         return;
     }
 
+    chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_IO_URING,
+                            &request->symlink_at.r_dir_pre_attr,
+                            fd);
+
     rc = symlinkat(target, fd, fullname);
 
     if (rc < 0) {
@@ -2536,9 +2556,23 @@ chimera_io_uring_rename_at(
         return;
     }
 
+    chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_IO_URING,
+                            &request->rename_at.r_fromdir_pre_attr,
+                            old_fd);
+    chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_IO_URING,
+                            &request->rename_at.r_todir_pre_attr,
+                            new_fd);
+
     rc = renameat(old_fd, fullname, new_fd, full_newname);
 
     int renameat_errno = errno;
+
+    chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_IO_URING,
+                            &request->rename_at.r_fromdir_post_attr,
+                            old_fd);
+    chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_IO_URING,
+                            &request->rename_at.r_todir_post_attr,
+                            new_fd);
     chimera_restore_privilege(request->cred);
 
     if (rc < 0 && (renameat_errno == ENOTEMPTY || renameat_errno == EEXIST)) {

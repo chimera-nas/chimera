@@ -864,6 +864,10 @@ chimera_linux_open_at(
         return;
     }
 
+    chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
+                            &request->open_at.r_dir_pre_attr,
+                            parent_fd);
+
     /* Detect whether this open created the file (vs opened an existing one) so
      * the SMB server can report the correct create_action (FILE_CREATED vs
      * FILE_OPENED / OVERWRITTEN / SUPERSEDED).  openat() does not report this,
@@ -980,6 +984,10 @@ chimera_linux_open_at(
     request->open_at.r_vfs_private = fd;
     request->open_at.r_created     = created;
 
+    chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
+                            &request->open_at.r_dir_post_attr,
+                            parent_fd);
+
     chimera_linux_map_child_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
                                   request,
                                   &request->open_at.r_attr,
@@ -1029,6 +1037,10 @@ chimera_linux_mkdir_at(
         request->complete(request);
         return;
     }
+
+    chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
+                            &request->mkdir_at.r_dir_pre_attr,
+                            fd);
 
     rc = mkdirat(fd, fullname, mode);
 
@@ -1182,6 +1194,10 @@ chimera_linux_remove_at(
         return;
     }
 
+    chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
+                            &request->remove_at.r_dir_pre_attr,
+                            fd);
+
     /* Use the caller's type assertion to pick unlink vs rmdir: ISDIR ->
      * AT_REMOVEDIR (a non-directory then yields ENOTDIR), ISNOTDIR -> plain
      * unlink (a directory then yields EISDIR).  Neither set keeps the legacy
@@ -1199,6 +1215,10 @@ chimera_linux_remove_at(
 
     int unlinkat_errno = errno;
     chimera_restore_privilege(request->cred);
+
+    chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
+                            &request->remove_at.r_dir_post_attr,
+                            fd);
 
     if (rc) {
         request->status = chimera_linux_errno_to_status(unlinkat_errno);
@@ -1632,6 +1652,10 @@ chimera_linux_symlink_at(
         return;
     }
 
+    chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
+                            &request->symlink_at.r_dir_pre_attr,
+                            fd);
+
     rc = symlinkat(target, fd, fullname);
 
     if (rc < 0) {
@@ -1747,9 +1771,23 @@ chimera_linux_rename_at(
         return;
     }
 
+    chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
+                            &request->rename_at.r_fromdir_pre_attr,
+                            old_fd);
+    chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
+                            &request->rename_at.r_todir_pre_attr,
+                            new_fd);
+
     rc = renameat(old_fd, fullname, new_fd, full_newname);
 
     int renameat_errno = errno;
+
+    chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
+                            &request->rename_at.r_fromdir_post_attr,
+                            old_fd);
+    chimera_linux_map_attrs(CHIMERA_VFS_FH_MAGIC_LINUX,
+                            &request->rename_at.r_todir_post_attr,
+                            new_fd);
     chimera_restore_privilege(request->cred);
 
     if (rc < 0 && (renameat_errno == ENOTEMPTY || renameat_errno == EEXIST)) {
