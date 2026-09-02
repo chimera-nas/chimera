@@ -659,3 +659,217 @@ chimera_smb_client_mknod_at(
                     SMB2_FILE_CREATE, SMB2_FILE_NON_DIRECTORY_FILE,
                     chimera_smb_mknod_create_reply);
 } /* chimera_smb_client_mknod_at */
+
+/* ---- link_at (hard link: SET_INFO FileLinkInformation) ----------------- */
+
+/*
+ * A hard link opens the existing inode (request->fh) and issues SET_INFO
+ * FileLinkInformation naming the new path (dir_fh + name); the server creates
+ * the new directory entry pointing at the same inode.  Mirrors rename_at, minus
+ * the DELETE access (the source name stays) and with FILE_LINK_INFO.
+ */
+
+/* Resolve dir_fh's path + '/' + name into a full mount-relative dest path. */
+static int
+smb_child_path(
+    struct chimera_smb_client_server *server,
+    const uint8_t                    *dir_fh,
+    int                               dir_fh_len,
+    const char                       *name,
+    int                               namelen,
+    char                             *out,
+    int                               out_max)
+{
+    const char *ppath;
+    int         plen = 0, n;
+
+    if (chimera_smb_fh_is_root(dir_fh_len)) {
+        if (namelen >= out_max) {
+            return -1;
+        }
+        memcpy(out, name, namelen);
+        out[namelen] = '\0';
+        return namelen;
+    }
+
+    ppath = chimera_smb_path_resolve(server, chimera_smb_fh_path_id(dir_fh),
+                                     &plen);
+    if (!ppath) {
+        return -1;
+    }
+    n = plen + 1 + namelen;
+    if (n >= out_max) {
+        return -1;
+    }
+    memcpy(out, ppath, plen);
+    out[plen] = '/';
+    memcpy(out + plen + 1, name, namelen);
+    out[n] = '\0';
+    return n;
+} /* smb_child_path */
+
+static void
+chimera_smb_link_close_reply(
+    struct chimera_smb_client_conn *conn,
+    uint32_t                        status,
+    const struct smb2_header       *hdr,
+    struct evpl_iovec_cursor       *body,
+    int                             body_len,
+    void                           *arg)
+{
+    struct chimera_vfs_request *request = arg;
+
+    (void) conn;
+    (void) hdr;
+    (void) body;
+    (void) body_len;
+    (void) status;
+
+    request->complete(request);
+} /* chimera_smb_link_close_reply */
+
+static void
+chimera_smb_link_set_info_reply(
+    struct chimera_smb_client_conn *conn,
+    uint32_t                        status,
+    const struct smb2_header       *hdr,
+    struct evpl_iovec_cursor       *body,
+    int                             body_len,
+    void                           *arg)
+{
+    struct chimera_vfs_request  *request = arg;
+    struct chimera_smb_op_state *state   = request->plugin_data;
+
+    (void) hdr;
+    (void) body;
+    (void) body_len;
+
+    request->status = chimera_smb_status_to_errno(status);
+    smb_send_close(conn, request, &state->file_id, chimera_smb_link_close_reply);
+} /* chimera_smb_link_set_info_reply */
+
+static void
+chimera_smb_link_create_reply(
+    struct chimera_smb_client_conn *conn,
+    uint32_t                        status,
+    const struct smb2_header       *hdr,
+    struct evpl_iovec_cursor       *body,
+    int                             body_len,
+    void                           *arg)
+{
+    struct chimera_vfs_request  *request = arg;
+    struct chimera_smb_op_state *state   = request->plugin_data;
+    struct smb_create_result     r;
+    struct evpl_iovec            iov;
+    struct evpl_iovec_cursor     cursor;
+    struct smb2_header          *shdr;
+    char                         dest[CHIMERA_SMB_PATH_MAX + 1];
+    uint8_t                      name16[2 * CHIMERA_SMB_PATH_MAX];
+    size_t                       name16_len;
+    int                          destlen, buffer_offset;
+    uint32_t                     buffer_length;
+
+    (void) hdr;
+    (void) body_len;
+
+    if (status != SMB2_STATUS_SUCCESS) {
+        request->status = chimera_smb_status_to_errno(status);
+        request->complete(request);
+        return;
+    }
+
+    smb_parse_create_reply(body, &r);
+    state->file_id = r.file_id;
+
+    destlen = smb_child_path(conn->server, request->link_at.dir_fh,
+                             request->link_at.dir_fhlen, request->link_at.name,
+                             request->link_at.namelen, dest, sizeof(dest));
+    if (destlen < 0) {
+        request->status = CHIMERA_VFS_ENOENT;
+        smb_send_close(conn, request, &state->file_id,
+                       chimera_smb_link_close_reply);
+        return;
+    }
+
+    name16_len = smb_utf16le_encode(dest, destlen, name16);
+
+    /* FileLinkInformation body: same layout as FileRenameInformation --
+     * ReplaceIfExists(1) + Reserved(7) + RootDirectory(8) + FileNameLength(4)
+     * = 20 fixed, then FileName(UTF-16LE). */
+    buffer_length = (uint32_t) (20 + name16_len);
+
+    chimera_smb_client_pdu_begin(conn, SMB2_SET_INFO, &iov, &cursor, &shdr);
+
+    buffer_offset = sizeof(struct smb2_header) + 32;
+
+    evpl_iovec_cursor_append_uint16(&cursor, SMB2_SET_INFO_REQUEST_SIZE);
+    evpl_iovec_cursor_append_uint8(&cursor, SMB2_INFO_FILE);
+    evpl_iovec_cursor_append_uint8(&cursor, SMB2_FILE_LINK_INFO);
+    evpl_iovec_cursor_append_uint32(&cursor, buffer_length);
+    evpl_iovec_cursor_append_uint16(&cursor, (uint16_t) buffer_offset);
+    evpl_iovec_cursor_append_uint16(&cursor, 0);
+    evpl_iovec_cursor_append_uint32(&cursor, 0);
+    evpl_iovec_cursor_append_uint64(&cursor, state->file_id.pid);
+    evpl_iovec_cursor_append_uint64(&cursor, state->file_id.vid);
+
+    evpl_iovec_cursor_append_uint8(&cursor, request->link_at.replace ? 1 : 0);
+    evpl_iovec_cursor_append_uint8(&cursor, 0);
+    evpl_iovec_cursor_append_uint16(&cursor, 0);
+    evpl_iovec_cursor_append_uint32(&cursor, 0);
+    evpl_iovec_cursor_append_uint64(&cursor, 0);                       /* RootDirectory */
+    evpl_iovec_cursor_append_uint32(&cursor, (uint32_t) name16_len);
+    if (name16_len > 0) {
+        evpl_iovec_cursor_append_blob(&cursor, name16, name16_len);
+    }
+
+    chimera_smb_client_pdu_finish(conn, &iov, &cursor, request,
+                                  chimera_smb_link_set_info_reply, request);
+} /* chimera_smb_link_create_reply */
+
+void
+chimera_smb_client_link_at(
+    struct chimera_smb_client_conn *conn,
+    struct chimera_vfs_request     *request)
+{
+    const char *src;
+    int         srclen = 0, destlen;
+    char        dest[CHIMERA_SMB_PATH_MAX + 1];
+
+    /* Give the new name a re-openable child fh for the VFS name cache. */
+    destlen = smb_child_path(conn->server, request->link_at.dir_fh,
+                             request->link_at.dir_fhlen, request->link_at.name,
+                             request->link_at.namelen, dest, sizeof(dest));
+    if (destlen >= 0) {
+        uint64_t id = chimera_smb_path_intern(conn->server, dest, destlen);
+
+        request->link_at.r_attr.va_fh_len = chimera_smb_encode_open_fh(
+            request->link_at.dir_fh, id, request->link_at.r_attr.va_fh);
+        request->link_at.r_attr.va_ino      = id | 1;
+        request->link_at.r_attr.va_set_mask = CHIMERA_VFS_ATTR_FH |
+            CHIMERA_VFS_ATTR_INUM;
+    } else {
+        request->link_at.r_attr.va_fh_len   = 0;
+        request->link_at.r_attr.va_set_mask = 0;
+    }
+
+    /* The existing inode being linked: addressed by request->fh (its path id). */
+    if (chimera_smb_fh_is_root(request->fh_len)) {
+        src    = "";
+        srclen = 0;
+    } else {
+        src = chimera_smb_path_resolve(conn->server,
+                                       chimera_smb_fh_path_id(request->fh),
+                                       &srclen);
+    }
+    if (!src) {
+        request->status = CHIMERA_VFS_ESTALE;
+        request->complete(request);
+        return;
+    }
+
+    smb_send_create(conn, request, src, srclen,
+                    SMB2_FILE_READ_ATTRIBUTES,
+                    SMB2_FILE_SHARE_READ | SMB2_FILE_SHARE_WRITE | SMB2_FILE_SHARE_DELETE,
+                    SMB2_FILE_OPEN, 0,
+                    chimera_smb_link_create_reply);
+} /* chimera_smb_client_link_at */

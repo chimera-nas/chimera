@@ -747,6 +747,9 @@ void chimera_smb_client_readdir(
 void chimera_smb_client_rename_at(
     struct chimera_smb_client_conn *conn,
     struct chimera_vfs_request     *request);
+void chimera_smb_client_link_at(
+    struct chimera_smb_client_conn *conn,
+    struct chimera_vfs_request     *request);
 void chimera_smb_client_symlink_at(
     struct chimera_smb_client_conn *conn,
     struct chimera_vfs_request     *request);
