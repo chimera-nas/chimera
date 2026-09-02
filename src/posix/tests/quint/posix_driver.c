@@ -479,13 +479,6 @@ handle(json_t *req)
                                    (uint32_t) jint(req, "uid", 0),
                                    (uint32_t) jint(req, "gid", 0),
                                    ngids, g);
-        /* Over SMB the mount authenticates one identity and the server owns
-         * authorization; present the credential as AUTH_ATTR so the engine does
-         * not layer POSIX DAC or symlink-follow on top of the proxy's own
-         * model (which resolves reparse points client-side). */
-        if (g_smb) {
-            driver_creds[pid].flavor = CHIMERA_VFS_AUTH_ATTR;
-        }
         return res_int(0, 0);
     }
 
@@ -1678,12 +1671,6 @@ posix_env_setup(
     g_smb         = smb;
     g_strict_dac  = nfs_version != 0 || posix_module_is_passthrough(module);
     g_root_cred   = root_cred;
-    /* SMB owns authorization in its own model (AUTH_ATTR); see the per-pid
-     * cred above.  The root credential the driver uses for fsInit normalization
-     * takes the same flavor so the engine treats it consistently. */
-    if (smb) {
-        g_root_cred.flavor = CHIMERA_VFS_AUTH_ATTR;
-    }
     g_server  = server;
     g_metrics = metrics;
 
