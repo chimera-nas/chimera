@@ -120,7 +120,7 @@ chimera_vfs_open_root_complete(
 
 #define CHIMERA_VFS_OPEN_HOPS_SHIFT 24
 #define CHIMERA_VFS_OPEN_HOPS_MASK  (0xffu << CHIMERA_VFS_OPEN_HOPS_SHIFT)
-#define CHIMERA_VFS_OPEN_HOPS(f) (((f)&CHIMERA_VFS_OPEN_HOPS_MASK) >> \
+#define CHIMERA_VFS_OPEN_HOPS(f) (((f) & CHIMERA_VFS_OPEN_HOPS_MASK) >> \
                                   CHIMERA_VFS_OPEN_HOPS_SHIFT)
 #define CHIMERA_VFS_OPEN_SYMLOOP    8
 
@@ -523,7 +523,21 @@ chimera_vfs_open(
     }
 
     if (request->module->capabilities & CHIMERA_VFS_CAP_FS_PATH_OP) {
+        int i;
+
         request->open.name_offset = 0;
+
+        /* The whole path is the name for a path-only backend, but the symlink-
+         * follow logic still needs the parent-directory prefix to resolve a
+         * relative link target (and reads parent_len unconditionally, so it
+         * must be set rather than left as free-list garbage). */
+        request->open.parent_len = 0;
+        for (i = request->open.pathlen - 1; i >= 0; i--) {
+            if (request->open.path[i] == '/') {
+                request->open.parent_len = i;
+                break;
+            }
+        }
 
         memcpy(request->open.parent_fh, fh, fhlen);
         request->open.parent_fh_len = fhlen;
@@ -548,7 +562,15 @@ chimera_vfs_open(
                                                  &request->open.parent_fh_len);
 
         if (rebase >= 0 && rebase < request->open.pathlen) {
+            const char *rslash = strrchr(request->open.path, '/');
+
             request->open.name_offset = rebase;
+            /* Parent-directory prefix for symlink-follow: the re-open runs from
+             * the same (vfs-root) fh with the whole resolved path, so the prefix
+             * is the full path's dirname.  Must be set -- the follow logic reads
+             * it unconditionally. */
+            request->open.parent_len = rslash ?
+                (int) (rslash - request->open.path) : 0;
 
             chimera_vfs_open_fh(
                 thread,
