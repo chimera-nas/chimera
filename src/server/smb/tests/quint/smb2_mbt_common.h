@@ -89,6 +89,7 @@
 #define SMB2_ECHO                               0x000D
 #define SMB2_OPLOCK_BREAK                       0x0012
 #define SMB2_QUERY_DIRECTORY                    0x000E
+#define SMB2_CHANGE_NOTIFY                      0x000F
 
 /* QUERY_DIRECTORY information classes (MS-FSCC 2.4) */
 #define SMB2_FILE_DIRECTORY_INFO_T              0x01
@@ -212,6 +213,10 @@
 #define SMB2_LOCKFLAG_FAIL_IMMEDIATELY          0x00000010u
 
 #define ST_LOCK_NOT_GRANTED                     0xC0000055u
+#define ST_NOTIFY_CLEANUP                       0x0000010Bu
+#define ST_NOTIFY_ENUM_DIR                      0x0000010Cu
+#define ST_DELETE_PENDING                       0xC0000056u
+#define ST_INTERNAL_ERROR                       0xC00000E5u
 #define ST_FILE_LOCK_CONFLICT                   0xC0000054u
 
 #define SMB2_FSCTL_SET_SPARSE                   0x000900C4u
@@ -249,6 +254,38 @@
 
 #define SMB2C_BUFSZ                             (1 << 20) /* per-connection scratch */
 #define SMB2C_MAX_BREAKS                        16
+/* Async CHANGE_NOTIFY completions queued per connection, and records per
+ * completion.  Both are ceilings on what one replay STEP can produce, not on a
+ * trace: the replayer drains the queue after every message.  A step that
+ * overruns either is reported, never silently truncated -- a dropped
+ * completion would read as "the server sent nothing", which is the exact
+ * failure this suite exists to catch. */
+#define SMB2C_MAX_NOTIFY                        32
+#define SMB2C_MAX_NOTIFY_RECS                   16
+
+/* SMB2 CHANGE_NOTIFY (MS-SMB2 2.2.35 / 2.2.36) */
+#define SMB2_CHANGE_NOTIFY_REQ_SIZE             32
+#define SMB2_WATCH_TREE                         0x0001
+
+#define SMB2_NOTIFY_CHANGE_FILE_NAME            0x00000001
+#define SMB2_NOTIFY_CHANGE_DIR_NAME             0x00000002
+#define SMB2_NOTIFY_CHANGE_ATTRIBUTES           0x00000004
+#define SMB2_NOTIFY_CHANGE_SIZE                 0x00000008
+#define SMB2_NOTIFY_CHANGE_LAST_WRITE           0x00000010
+#define SMB2_NOTIFY_CHANGE_LAST_ACCESS          0x00000020
+#define SMB2_NOTIFY_CHANGE_CREATION             0x00000040
+#define SMB2_NOTIFY_CHANGE_EA                   0x00000080
+#define SMB2_NOTIFY_CHANGE_SECURITY             0x00000100
+#define SMB2_NOTIFY_CHANGE_STREAM_NAME          0x00000200
+#define SMB2_NOTIFY_CHANGE_STREAM_SIZE          0x00000400
+#define SMB2_NOTIFY_CHANGE_STREAM_WRITE         0x00000800
+
+/* FILE_ACTION_* (MS-FSCC 2.7.1) */
+#define FILE_ACTION_ADDED                       0x00000001
+#define FILE_ACTION_REMOVED                     0x00000002
+#define FILE_ACTION_MODIFIED                    0x00000003
+#define FILE_ACTION_RENAMED_OLD_NAME            0x00000004
+#define FILE_ACTION_RENAMED_NEW_NAME            0x00000005
 
 /* Little-endian field access (p16/p32/p64, g16/g32/g64) and utf16le live in
  * smb2_mbt_wire.h alongside the protection cryptography that uses them. */
@@ -427,6 +464,34 @@ struct smb2_break {
     int      ack_required;   /* flags & FLAG_ACK_REQUIRED */
 };
 
+/* One FILE_NOTIFY_INFORMATION record (MS-FSCC 2.7.1) as the client reads it. */
+struct smb2_notify_rec {
+    uint32_t action;
+    char     name[64];
+};
+
+/* An ASYNC CHANGE_NOTIFY response: the completion of a request that PARKED.
+ *
+ * It is kept out of the ordinary reply path entirely.  It carries the ASYNC
+ * flag and an AsyncId rather than answering the MessageId anything is waiting
+ * on, it can land at any moment (whenever some OTHER client changes the
+ * watched directory), and there may be several outstanding at once on one
+ * connection.  Promoting one into rbuf would overwrite a reply the caller was
+ * about to parse and would count as "a parked request completed" in the
+ * barrier bookkeeping, which is how a break-driven suite would silently
+ * mistake a notify for a create resuming.
+ *
+ * `async_id` is what ties a completion back to the request that parked: chimera
+ * uses the original MessageId as the AsyncId (smb_proc_change_notify.c), and
+ * the interim response carries the same value, so the replayer records it when
+ * the request parks and matches on it here. */
+struct smb2_notify_msg {
+    uint32_t               status;
+    uint64_t               async_id;
+    int                    nrec;
+    struct smb2_notify_rec rec[SMB2C_MAX_NOTIFY_RECS];
+};
+
 struct smb2_conn {
     struct smb2_env                *env;
     int                             conn_index; /* stable per-env index (ClientGuid seed) */
@@ -495,6 +560,14 @@ struct smb2_conn {
     /* unsolicited oplock/lease break notifications, oldest first */
     struct smb2_break               brk[SMB2C_MAX_BREAKS];
     int                             nbrk;
+
+    /* async CHANGE_NOTIFY completions, oldest first */
+    struct smb2_notify_msg          ntf[SMB2C_MAX_NOTIFY];
+    int                             nntf;
+    /* Completions the queue could not hold.  Counted rather than dropped
+     * silently so an overrun is a reported harness limit, not a phantom
+     * "the server sent nothing". */
+    int                             nntf_lost;
 
     /* ---- wire protection (see smb2_mbt_wire.h) --------------------------
      *
@@ -691,6 +764,95 @@ smb2c_record_break(
     /* any other struct size: not a break we model; ignore */
 } /* smb2c_record_break */
 
+/* Parse an async CHANGE_NOTIFY response into the connection's queue.  `msg`
+ * points at the SMB2 header, `msglen` covers the header and everything after
+ * it.
+ *
+ * A malformed or truncated body is recorded as a completion with ZERO records
+ * rather than being dropped: the status is what most of the assertions turn
+ * on, and a completion that arrives at all is a fact worth reporting even when
+ * its payload does not parse.  The record count then disagrees with the model
+ * and the replayer says so, which is the right failure -- far better than the
+ * completion vanishing and the model being blamed for predicting one. */
+static void
+smb2c_parse_notify(
+    struct smb2_notify_msg *n,
+    const uint8_t          *msg,
+    int                     msglen)
+{
+    uint16_t ssz, data_off;
+    uint32_t data_len;
+    int      p, end;
+
+    if (msglen < SMB2_HDR_SIZE + 8) {
+        return;
+    }
+    ssz = g16(msg, SMB2_HDR_SIZE);
+    if (ssz != 9) {
+        return;
+    }
+    /* OutputBufferOffset is relative to the START OF THE SMB2 HEADER, not to
+     * the body (MS-SMB2 2.2.36), which is why `msg` is the header and not
+     * msg + SMB2_HDR_SIZE. */
+    data_off = g16(msg, SMB2_HDR_SIZE + 2);
+    data_len = g32(msg, SMB2_HDR_SIZE + 4);
+    if (data_len == 0 || data_off < SMB2_HDR_SIZE + 8 ||
+        (int) data_off + (int) data_len > msglen) {
+        return;
+    }
+
+    p   = (int) data_off;
+    end = (int) data_off + (int) data_len;
+
+    while (p + 12 <= end) {
+        uint32_t                next = g32(msg, p);
+        uint32_t                act  = g32(msg, p + 4);
+        uint32_t                nlen = g32(msg, p + 8);
+        struct smb2_notify_rec *r;
+        int                     k = 0;
+
+        if (n->nrec >= SMB2C_MAX_NOTIFY_RECS || p + 12 + (int) nlen > end) {
+            break;
+        }
+        r         = &n->rec[n->nrec++];
+        r->action = act;
+        /* Every name the model draws is one ASCII character, so the UTF-16LE
+        * name is decoded by taking the low byte of each unit.  A name that
+        * needed real decoding would be a corpus the model cannot produce. */
+        for (uint32_t i = 0; i + 1 < nlen && k < (int) sizeof(r->name) - 1;
+             i += 2) {
+            r->name[k++] = (char) msg[p + 12 + i];
+        }
+        r->name[k] = 0;
+
+        if (next == 0) {
+            break;
+        }
+        p += (int) next;
+    }
+} /* smb2c_parse_notify */
+
+static void
+smb2c_record_notify(
+    struct smb2_conn *c,
+    uint32_t          status,
+    uint64_t          async_id,
+    const uint8_t    *msg,
+    int               msglen)
+{
+    struct smb2_notify_msg *n;
+
+    if (c->nntf >= SMB2C_MAX_NOTIFY) {
+        c->nntf_lost++;
+        return;
+    }
+    n = &c->ntf[c->nntf++];
+    memset(n, 0, sizeof(*n));
+    n->status   = status;
+    n->async_id = async_id;
+    smb2c_parse_notify(n, msg, msglen);
+} /* smb2c_record_notify */
+
 static void
 smb2c_notify(
     struct evpl        *evpl,
@@ -790,6 +952,16 @@ smb2c_notify(
                     c->ninterim++;
                     c->interim_pending = 1;
                     c->last_async_id   = g64(c->xbuf + 4, 32);
+                    break;
+                }
+                /* The FINAL response to a parked CHANGE_NOTIFY: an async
+                 * message answering no outstanding MessageId, arriving
+                 * whenever the directory changed -- usually because some other
+                 * connection changed it.  Queue it; it is never a reply. */
+                if (cmd == SMB2_CHANGE_NOTIFY &&
+                    (hflags & SMB2_FLAGS_ASYNC_COMMAND)) {
+                    smb2c_record_notify(c, status, g64(c->xbuf + 4, 32),
+                                        c->xbuf + 4, off - 4);
                     break;
                 }
             }
@@ -1183,6 +1355,40 @@ smb2_conn_pop_break(
     c->nbrk--;
     return 1;
 } /* smb2_conn_pop_break */
+
+/* ---- CHANGE_NOTIFY queue helpers ---------------------------------------- */
+
+static inline int
+smb2_conn_nnotify(struct smb2_conn *c)
+{
+    return c->nntf;
+} /* smb2_conn_nnotify */
+
+/* Take the queued completion whose AsyncId is `async_id`, or NULL.
+ *
+ * Matching by AsyncId rather than by arrival order is what makes the check
+ * exact when several watchers fire at once: the order two connections'
+ * completions reach the client is a scheduling detail, but which REQUEST each
+ * one answers is a protocol fact. */
+static inline int
+smb2_conn_take_notify(
+    struct smb2_conn       *c,
+    uint64_t                async_id,
+    struct smb2_notify_msg *out)
+{
+    for (int i = 0; i < c->nntf; i++) {
+        if (c->ntf[i].async_id != async_id) {
+            continue;
+        }
+        *out = c->ntf[i];
+        for (int j = i + 1; j < c->nntf; j++) {
+            c->ntf[j - 1] = c->ntf[j];
+        }
+        c->nntf--;
+        return 1;
+    }
+    return 0;
+} /* smb2_conn_take_notify */
 
 /* What the harness is currently doing, for the wedge diagnostic.  A caller
  * that has a name for the step (the replayer names the trace and the command)
@@ -1670,7 +1876,8 @@ smb2_event_count(struct smb2_env *env)
         struct smb2_conn *c = env->conns[i];
 
         if (c) {
-            n += c->nbrk + c->ninterim + c->nreply_app;
+            n += c->nbrk + c->ninterim + c->nreply_app + c->nntf +
+                c->nntf_lost;
         }
     }
     return n;
@@ -1731,6 +1938,53 @@ smb2c_xfer(
     smb2c_send(c, body_len);
     return smb2c_wait(c);
 } /* smb2c_xfer */
+
+/* Post a CHANGE_NOTIFY (MS-SMB2 2.2.35).  POSTED, not called: whether the
+ * request answers immediately or parks behind an interim is the outcome under
+ * test, so the caller settles the server and looks, rather than blocking on a
+ * reply that may never come. */
+static inline void
+smb2c_post_change_notify(
+    struct smb2_conn *c,
+    const uint8_t     fid[16],
+    uint16_t          flags,
+    uint32_t          output_buffer_length,
+    uint32_t          completion_filter)
+{
+    int      b    = smb2c_begin(c, SMB2_CHANGE_NOTIFY, 0);
+    uint8_t *body = c->sbuf + b;
+
+    p16(body, 0, SMB2_CHANGE_NOTIFY_REQ_SIZE);
+    p16(body, 2, flags);
+    p32(body, 4, output_buffer_length);
+    memcpy(body + 8, fid, 16);
+    p32(body, 24, completion_filter);
+    p32(body, 28, 0);                 /* Reserved */
+    smb2c_send(c, SMB2_CHANGE_NOTIFY_REQ_SIZE);
+} /* smb2c_post_change_notify */
+
+/* CANCEL the async request identified by `async_id` (MS-SMB2 2.2.30 / 3.2.4.24).
+ *
+ * CANCEL is never answered (3.3.5.17), so this posts and returns; what it
+ * produces is STATUS_CANCELLED on the request it hit, which arrives on the
+ * notify queue like any other completion.  The ASYNC flag is what selects
+ * AsyncId addressing, and on an async header the AsyncId occupies the eight
+ * bytes the sync header spends on Reserved + TreeId (2.2.1.2) -- so it is
+ * written AFTER smb2c_begin has laid down the TreeId it replaces. */
+static inline void
+smb2c_post_cancel_async(
+    struct smb2_conn *c,
+    uint64_t          async_id)
+{
+    int      b    = smb2c_begin(c, SMB2_CANCEL, SMB2_FLAGS_ASYNC_COMMAND);
+    uint8_t *h    = c->sbuf + 4;
+    uint8_t *body = c->sbuf + b;
+
+    p64(h, 32, async_id);
+    p16(body, 0, 4);                  /* StructureSize */
+    p16(body, 2, 0);                  /* Reserved */
+    smb2c_send(c, 4);
+} /* smb2c_post_cancel_async */
 
 /* ---- NEGOTIATE ---------------------------------------------------------- */
 

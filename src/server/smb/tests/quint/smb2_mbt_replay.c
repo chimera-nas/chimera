@@ -89,6 +89,12 @@ static struct smb2_conn                *g_conn_for_fid[MAX_FID];
 static int                              g_lease_key_for_fid[MAX_FID];
 /* Which parked handles the replayer has already waited for (see park_barrier). */
 static int                              g_park_barriered[MAX_FID];
+/* The AsyncId of the CHANGE_NOTIFY currently PARKED on each model handle, or
+ * 0.  chimera answers a parked notify with an async message carrying the
+ * original request's MessageId as its AsyncId, so recording it when the
+ * request parks is what lets the completion be matched back to the handle it
+ * belongs to -- and what lets a CANCEL name it. */
+static uint64_t                         g_notify_async[MAX_FID];
 /* The model state AFTER the message being replayed -- the `parked` map of which
  * is what tells the disconnect handler which handles the server still owes a
  * park. */
@@ -781,6 +787,182 @@ check_no_stray_breaks(const char *what)
     }
 } /* check_no_stray_breaks */
 
+/* ---- CHANGE_NOTIFY ------------------------------------------------------ */
+
+/* The model names CompletionFilter bits (smb2_notify.qnt keeps a set of names
+ * rather than an integer, because the two filter operations it models are set
+ * intersections).  Map them to the wire. */
+static uint32_t
+cf_wire(json_t *cf)
+{
+    /* *INDENT-OFF* */
+    /* uncrustify never converges on an aligned initializer table like this
+     * one -- every pass widens the column by one -- so the alignment is
+     * pinned by hand.  Same guard, same reason, as the dispatch tables
+     * elsewhere in the tree. */
+    static const struct {
+        const char *name;
+        uint32_t    bit;
+    } map[] = {
+        { "fileName",    SMB2_NOTIFY_CHANGE_FILE_NAME    },
+        { "dirName",     SMB2_NOTIFY_CHANGE_DIR_NAME     },
+        { "attributes",  SMB2_NOTIFY_CHANGE_ATTRIBUTES   },
+        { "size",        SMB2_NOTIFY_CHANGE_SIZE         },
+        { "lastWrite",   SMB2_NOTIFY_CHANGE_LAST_WRITE   },
+        { "lastAccess",  SMB2_NOTIFY_CHANGE_LAST_ACCESS  },
+        { "creation",    SMB2_NOTIFY_CHANGE_CREATION     },
+        { "ea",          SMB2_NOTIFY_CHANGE_EA           },
+        { "security",    SMB2_NOTIFY_CHANGE_SECURITY     },
+        { "streamName",  SMB2_NOTIFY_CHANGE_STREAM_NAME  },
+        { "streamSize",  SMB2_NOTIFY_CHANGE_STREAM_SIZE  },
+        { "streamWrite", SMB2_NOTIFY_CHANGE_STREAM_WRITE },
+    };
+    /* *INDENT-ON* */
+    json_t  *arr  = jset(cf);
+    size_t   n    = json_array_size(arr);
+    uint32_t bits = 0;
+
+    for (size_t i = 0; i < n; i++) {
+        const char *nm = json_string_value(json_array_get(arr, i));
+        unsigned    k;
+
+        if (!nm) {
+            continue;
+        }
+        for (k = 0; k < sizeof(map) / sizeof(map[0]); k++) {
+            if (strcmp(nm, map[k].name) == 0) {
+                bits |= map[k].bit;
+                break;
+            }
+        }
+        if (k == sizeof(map) / sizeof(map[0])) {
+            mism("CHANGE_NOTIFY: model asked for unknown filter bit '%s'", nm);
+        }
+    }
+    return bits;
+} /* cf_wire */
+
+/* Compare a list of FILE_NOTIFY_INFORMATION records against the model's.
+ *
+ * Order is asserted, not merely membership: the records describe a SEQUENCE of
+ * changes, and a rename is a two-record pair whose halves would be
+ * indistinguishable from two unrelated renames if order were dropped. */
+static void
+check_notify_recs(
+    const char                   *what,
+    json_t                       *recs,
+    const struct smb2_notify_msg *got)
+{
+    size_t n = json_array_size(recs);
+
+    if ((int) n != got->nrec) {
+        mism("%s: model predicted %d record(s), wire sent %d", what, (int) n,
+             got->nrec);
+        return;
+    }
+    for (size_t i = 0; i < n; i++) {
+        json_t     *r    = json_array_get(recs, i);
+        uint32_t    eact = (uint32_t) jfield(r, "act");
+        const char *enm  = json_string_value(json_object_get(r, "name"));
+
+        if (got->rec[i].action != eact) {
+            mism("%s: record %zu action: model %u wire %u", what, i, eact,
+                 got->rec[i].action);
+        }
+        if (enm && strcmp(enm, got->rec[i].name) != 0) {
+            mism("%s: record %zu name: model '%s' wire '%s'", what, i, enm,
+                 got->rec[i].name);
+        }
+    }
+} /* check_notify_recs */
+
+/* Every async CHANGE_NOTIFY completion this message owed, and no others.
+ *
+ * The model records them on the MESSAGE rather than in any command's reply
+ * because that is where they belong: a completion is an unsolicited message on
+ * the WATCHER's connection, and the watcher is usually not the client whose
+ * command caused it.  Matching is by AsyncId, so which request each completion
+ * answers is checked exactly even when several land at once. */
+static void
+check_notify_notes(
+    json_t     *notes,
+    const char *what)
+{
+    json_t *arr = jset(notes);
+    size_t  n   = json_array_size(arr);
+
+    /* A completion travels the same cross-thread doorbell a break does, so the
+     * same settle applies: after this, a missing completion really is missing
+     * and an unpredicted one is seen here rather than blamed on a later
+     * command. */
+    settle_breaks();
+
+    for (size_t i = 0; i < n; i++) {
+        json_t                *note   = json_array_get(arr, i);
+        int64_t                fid    = jfield(note, "fid");
+        uint32_t               exp_st = (uint32_t) jfield(note, "st");
+        struct smb2_conn      *wc     =
+            (fid >= 0 && fid < MAX_FID) ? g_conn_for_fid[fid] : NULL;
+        struct smb2_notify_msg got;
+        char                   label[96];
+
+        if (fid < 0 || fid >= MAX_FID) {
+            slot_overflow("fid", fid, MAX_FID);
+        }
+        snprintf(label, sizeof(label), "%s: CHANGE_NOTIFY on fid %lld", what,
+                 (long long) fid);
+
+        if (!wc || !g_notify_async[fid]) {
+            mism("%s: model completed a request the harness never saw park",
+                 label);
+            continue;
+        }
+        if (!smb2_conn_take_notify(wc, g_notify_async[fid], &got)) {
+            mism("%s: model predicted status 0x%08x, the wire sent no "
+                 "completion", label, exp_st);
+            g_notify_async[fid] = 0;
+            continue;
+        }
+        g_notify_async[fid] = 0;
+
+        if (got.status != exp_st) {
+            if (!dev_status("RNotifyAsync", exp_st, got.status, "notify")) {
+                mism("%s status: model 0x%08x wire 0x%08x", label, exp_st,
+                     got.status);
+            }
+            continue;
+        }
+        check_notify_recs(label, json_object_get(note, "recs"), &got);
+    }
+} /* check_notify_notes */
+
+/* No connection may hold a CHANGE_NOTIFY completion the model did not predict.
+* An extra completion is as much a bug as a missing one: it means a watcher
+* was woken for a change it had filtered out, or woken twice for one change. */
+static void
+check_no_stray_notifies(const char *what)
+{
+    for (int i = 0; i < g_env.nconns; i++) {
+        struct smb2_conn *c = g_env.conns[i];
+
+        while (c->nntf > 0) {
+            mism("%s: unpredicted CHANGE_NOTIFY completion (status 0x%08x, "
+                 "%d record(s)) on connection %d", what, c->ntf[0].status,
+                 c->ntf[0].nrec, i);
+            for (int k = 1; k < c->nntf; k++) {
+                c->ntf[k - 1] = c->ntf[k];
+            }
+            c->nntf--;
+        }
+        if (c->nntf_lost) {
+            mism("%s: %d CHANGE_NOTIFY completion(s) overran the harness queue "
+                 "(SMB2C_MAX_NOTIFY = %d) on connection %d", what,
+                 c->nntf_lost, SMB2C_MAX_NOTIFY, i);
+            c->nntf_lost = 0;
+        }
+    }
+} /* check_no_stray_notifies */
+
 /* ---- per-command replay + compare --------------------------------------- */
 
 /* Resolve a FidSel (FidRelated -> the current compound's CREATE fid; FidRef k
@@ -800,6 +982,20 @@ resolve_fid(
     }
     return g_wire_fid[k];
 } /* resolve_fid */
+
+/* The MODEL FileId a FidSel names, or -1 for the related-compound form.  The
+ * CHANGE_NOTIFY bookkeeping is keyed by model fid (that is what a completion's
+ * AsyncId is recorded against), so a related-form notify has nothing to key
+ * on -- the corpus never generates one, and this reports it rather than
+ * guessing if that ever changes. */
+static int64_t
+model_fid_of(json_t *sel)
+{
+    if (strcmp(jtag(sel), "FidRelated") == 0) {
+        return -1;
+    }
+    return jint(jval(sel));
+} /* model_fid_of */
 
 /* Effective caching bits the wire granted (0 = none). */
 static int
@@ -1050,6 +1246,134 @@ do_break_ack(
              as_lease ? "lease" : "oplock", (long long) k, exp_st, st);
     }
 } /* do_break_ack */
+
+/* CHANGE_NOTIFY: post it, then wait for whichever of the two answers the
+ * server chose -- the reply to THIS request, or the async interim that says it
+ * parked.  Which one it is IS the assertion: the model's `parked` says the
+ * directory was quiet and the request had to wait, and a server that answered
+ * inline instead has either invented an event or lost one. */
+static void
+do_notify(
+    struct smb2_conn *c,
+    json_t           *v,
+    json_t           *res,
+    const uint8_t    *related_fid,
+    int               have_related)
+{
+    json_t                *sel = json_object_get(v, "fid");
+    const uint8_t         *fid = resolve_fid(sel, related_fid,
+                                             have_related);
+    int64_t                mfid   = model_fid_of(sel);
+    uint32_t               cf     = cf_wire(json_object_get(v, "cf"));
+    uint32_t               obl    = (uint32_t) jfield(v, "obl");
+    uint16_t               wflags = jbool(v, "watchTree") ? SMB2_WATCH_TREE
+                                      : 0;
+    json_t                *rv         = jval(res);
+    uint32_t               exp_st     = (uint32_t) jfield(rv, "st");
+    int                    exp_parked = jbool(rv, "parked");
+    struct smb2_notify_msg got;
+    uint64_t               mid, deadline;
+    int                    interim0, got_parked;
+    uint32_t               st;
+
+    if (!c) {
+        /* dispatch_cmd rejects a connectionless command before it gets here;
+         * this is the belt to that braces, and keeps the c->ninterim sample
+         * below provably safe rather than safe-by-inspection. */
+        smb2c_no_conn(SMB2_CHANGE_NOTIFY);
+    }
+
+    if (!fid || mfid < 0 || mfid >= MAX_FID) {
+        mism("CHANGE_NOTIFY: unresolved FileId");
+        return;
+    }
+
+    interim0 = c->ninterim;
+    smb2c_post_change_notify(c, fid, wflags, obl, cf);
+    mid      = c->last_msg_id;
+    deadline = smb2c_now_ms() + SMB2C_HANG_MS;
+
+    while (c->ninterim == interim0 &&
+           !(c->reply_ready && c->reply_mid == mid)) {
+        smb2_pump(c->env);
+        if (c->disconnected) {
+            smb2c_dead(c);
+        }
+        if (smb2c_now_ms() >= deadline) {
+            smb2c_hang(c, "a CHANGE_NOTIFY reply or async interim");
+        }
+    }
+
+    got_parked = (c->ninterim > interim0);
+    if (got_parked != exp_parked) {
+        mism("CHANGE_NOTIFY fid %lld: model expected %s, wire %s",
+             (long long) mfid,
+             exp_parked ? "a park (async interim)" : "an inline answer",
+             got_parked ? "parked" : "answered inline");
+        /* The two sides now disagree about whether a request is outstanding,
+         * so every later completion check on this handle would be reporting
+         * that, not a new fact. */
+        g_abort_trace = 1;
+        return;
+    }
+
+    if (got_parked) {
+        /* Remember the AsyncId: it is how the eventual completion is matched
+         * back to this handle, and how a CANCEL names the request. */
+        g_notify_async[mfid] = c->last_async_id;
+        if (exp_st != ST_PENDING) {
+            mism("CHANGE_NOTIFY fid %lld: parked, but the model's status is "
+                 "0x%08x rather than STATUS_PENDING", (long long) mfid, exp_st);
+        }
+        return;
+    }
+
+    st = g32(c->rbuf + 4, 8);
+    if (st != exp_st) {
+        if (!dev_status("RNotify", exp_st, st, "notify")) {
+            mism("CHANGE_NOTIFY fid %lld status: model 0x%08x wire 0x%08x",
+                 (long long) mfid, exp_st, st);
+        }
+        return;
+    }
+
+    memset(&got, 0, sizeof(got));
+    got.status = st;
+    smb2c_parse_notify(&got, c->rbuf + 4, c->rlen - 4);
+    check_notify_recs("CHANGE_NOTIFY inline", json_object_get(rv, "recs"),
+                      &got);
+} /* do_notify */
+
+/* CANCEL the CHANGE_NOTIFY parked on this handle (MS-SMB2 3.2.4.24).  There is
+ * no reply to check -- CANCEL is never answered -- so the assertion is the
+ * STATUS_CANCELLED completion it produces, which the message's notes carry. */
+static void
+do_cancel(
+    struct smb2_conn *c,
+    json_t           *v,
+    json_t           *res,
+    const uint8_t    *related_fid,
+    int               have_related)
+{
+    int64_t mfid  = model_fid_of(v);
+    int     found = jbool(jval(res), "found");
+
+    (void) related_fid;
+    (void) have_related;
+
+    if (!found) {
+        /* The model found nothing parked, so there is no AsyncId to name and
+         * nothing the wire could report.  Sending a CANCEL anyway would be
+         * asking the server about a request that does not exist. */
+        return;
+    }
+    if (mfid < 0 || mfid >= MAX_FID || !g_notify_async[mfid]) {
+        mism("CANCEL fid %lld: the model says a request is parked, the harness "
+             "never saw one", (long long) mfid);
+        return;
+    }
+    smb2c_post_cancel_async(c, g_notify_async[mfid]);
+} /* do_cancel */
 
 static void
 do_close(
@@ -1797,6 +2121,10 @@ dispatch_cmd(
         do_tree_disconnect(c, res);
     } else if (strcmp(tag, "CBreakAck") == 0) {
         do_break_ack(c, v, res, related_fid, *have_related);
+    } else if (strcmp(tag, "CNotify") == 0) {
+        do_notify(c, v, res, related_fid, *have_related);
+    } else if (strcmp(tag, "CCancel") == 0) {
+        do_cancel(c, v, res, related_fid, *have_related);
     } else {
         mism("unhandled command tag '%s' (extend the replayer)", tag);
     }
@@ -1843,7 +2171,18 @@ do_message(json_t *lmsg_value)
         dispatch_cmd(json_array_get(cmds, i), json_array_get(results, i),
                      sess, tree, cs, replay, related_fid, &have_related);
     }
+    /* The CHANGE_NOTIFY completions this message owed, on whatever connections
+     * had a request parked.  They belong to the MESSAGE, not to any command:
+     * the watcher is usually not the client whose command woke it. */
+    {
+        json_t *notes = json_object_get(lmsg_value, "notes");
+
+        if (notes) {
+            check_notify_notes(notes, "message");
+        }
+    }
     check_no_stray_breaks("message");
+    check_no_stray_notifies("message");
 } /* do_message */
 
 /* ---- trace driver ------------------------------------------------------- */
@@ -1966,6 +2305,10 @@ run_trace(
     memset(g_fid_known, 0, sizeof(g_fid_known));
     memset(g_conn_for_fid, 0, sizeof(g_conn_for_fid));
     memset(g_park_barriered, 0, sizeof(g_park_barriered));
+    /* A trace's connections are dropped between traces, and chimera drops a
+     * parked CHANGE_NOTIFY without a reply when its connection goes (there is
+     * nobody left to answer), so no completion crosses a trace boundary. */
+    memset(g_notify_async, 0, sizeof(g_notify_async));
     memset(g_park_pending, 0, sizeof(g_park_pending));
     g_trace       = path;
     g_nmismatch   = 0;
