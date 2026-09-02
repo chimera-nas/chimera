@@ -51,6 +51,7 @@ void rocksdb_flush_wal(
 #define CAIRN_KEY_XATTR          6
 #define CAIRN_KEY_ACL            7
 #define CAIRN_KEY_FS             8
+#define CAIRN_KEY_PNFS           9
 
 /*
  * Storage layout:
@@ -124,6 +125,16 @@ struct cairn_extent_key {
 } __attribute__((packed));
 
 struct cairn_acl_key {
+    uint8_t  keytype;
+    uint64_t inum;
+} __attribute__((packed));
+
+/* Opaque per-file pNFS layout blob (CHIMERA_VFS_ATTR_PNFS_LAYOUT), stored as
+ * its own record rather than widened into cairn_inode: only files a metadata
+ * server has handed a layout for ever have one, and the inode record is read
+ * on every lookup.  Cairn neither produces nor interprets the contents -- the
+ * NFS server packs a deviceid plus a backing filehandle in there. */
+struct cairn_pnfs_key {
     uint8_t  keytype;
     uint64_t inum;
 } __attribute__((packed));
@@ -791,6 +802,91 @@ cairn_remove_symlink_target(
     rocksdb_transaction_delete(txn, (const char *) &key, sizeof(key), &err);
     chimera_cairn_abort_if(err, "Error deleting symlink target: %s\n", err);
 } /* cairn_remove_symlink_target */
+
+static inline void
+cairn_put_pnfs(
+    struct cairn_thread *thread,
+    uint64_t             inum,
+    const void          *blob,
+    uint32_t             blob_len)
+{
+    rocksdb_transaction_t *txn = cairn_get_meta_txn(thread);
+    char                  *err = NULL;
+    struct cairn_pnfs_key  key;
+
+    if (blob_len > CHIMERA_VFS_PNFS_LAYOUT_MAX) {
+        blob_len = CHIMERA_VFS_PNFS_LAYOUT_MAX;
+    }
+
+    key.keytype = CAIRN_KEY_PNFS;
+    key.inum    = inum;
+
+    rocksdb_transaction_put(txn, (const char *) &key, sizeof(key),
+                            (const char *) blob, blob_len, &err);
+    chimera_cairn_abort_if(err, "Error putting pnfs layout: %s\n", err);
+} /* cairn_put_pnfs */
+
+static inline void
+cairn_remove_pnfs(
+    struct cairn_thread *thread,
+    uint64_t             inum)
+{
+    rocksdb_transaction_t *txn = cairn_get_meta_txn(thread);
+    char                  *err = NULL;
+    struct cairn_pnfs_key  key;
+
+    key.keytype = CAIRN_KEY_PNFS;
+    key.inum    = inum;
+
+    rocksdb_transaction_delete(txn, (const char *) &key, sizeof(key), &err);
+    chimera_cairn_abort_if(err, "Error deleting pnfs layout: %s\n", err);
+} /* cairn_remove_pnfs */
+
+/*
+ * Populate attr->va_pnfs when CHIMERA_VFS_ATTR_PNFS_LAYOUT is requested.  A
+ * file with no stored blob leaves the bit clear in va_set_mask, which is how
+ * the metadata server tells "no layout yet" (steer to a data server and create
+ * a backing file) from "here is the one I stored".  Needs the thread for the
+ * RocksDB read, so it is kept out of cairn_map_attrs() like cairn_map_acl().
+ */
+static inline void
+cairn_map_pnfs(
+    struct cairn_thread      *thread,
+    struct chimera_vfs_attrs *attr,
+    const struct cairn_inode *inode)
+{
+    rocksdb_pinnableslice_t *slice;
+    struct cairn_pnfs_key    key;
+    char                    *err = NULL;
+    const char              *blob;
+    size_t                   len;
+
+    if (!(attr->va_req_mask & CHIMERA_VFS_ATTR_PNFS_LAYOUT)) {
+        return;
+    }
+
+    key.keytype = CAIRN_KEY_PNFS;
+    key.inum    = inode->inum;
+
+    slice = cairn_meta_get_pinned(thread, &key, sizeof(key), &err);
+    chimera_cairn_abort_if(err, "Error getting pnfs layout: %s\n", err);
+
+    if (!slice) {
+        return;
+    }
+
+    blob = rocksdb_pinnableslice_value(slice, &len);
+
+    if (len > CHIMERA_VFS_PNFS_LAYOUT_MAX) {
+        len = CHIMERA_VFS_PNFS_LAYOUT_MAX;
+    }
+
+    memcpy(attr->va_pnfs, blob, len);
+    attr->va_pnfs_len  = len;
+    attr->va_set_mask |= CHIMERA_VFS_ATTR_PNFS_LAYOUT;
+
+    rocksdb_pinnableslice_destroy(slice);
+} /* cairn_map_pnfs */
 
 /* Scratch big enough to (de)serialize the largest permitted ACL. */
 #define CAIRN_ACL_SCRATCH        (CHIMERA_ACL_SERIAL_HDR + \
@@ -1883,6 +1979,12 @@ cairn_apply_attrs(
 {
     struct timespec now;
     uint64_t        set_mask = attr->va_set_mask;
+    /* See memfs_apply_attrs() for why a layout-blob-only setattr is exempt
+     * from the ctime and change-attribute bumps below: the metadata server
+     * writes the blob while serving a LAYOUTGET, and a client that then saw
+     * the change attribute move would treat its own layout request as someone
+     * else's modification and invalidate its cache. */
+    int             layout_only = (set_mask == CHIMERA_VFS_ATTR_PNFS_LAYOUT);
 
     clock_gettime(CLOCK_REALTIME, &now);
 
@@ -1961,12 +2063,14 @@ cairn_apply_attrs(
     if (set_mask & CHIMERA_VFS_ATTR_CTIME) {
         attr->va_set_mask |= CHIMERA_VFS_ATTR_CTIME;
         chimera_vfs_resolve_set_time(&attr->va_ctime, &now, &inode->ctime);
-    } else {
+    } else if (!layout_only) {
         inode->ctime = now;
     }
 
     /* Any setattr is a metadata change; advance the native change counter. */
-    inode->change++;
+    if (!layout_only) {
+        inode->change++;
+    }
 
 } /* cairn_apply_attrs */
 
@@ -1994,6 +2098,7 @@ cairn_getattr(
     cairn_map_attrs(fs, &request->getattr.r_attr, inode);
     cairn_map_ea_size(thread, inode, &request->getattr.r_attr);
     cairn_map_acl(thread, &request->getattr.r_attr, inode);
+    cairn_map_pnfs(thread, &request->getattr.r_attr, inode);
 
     cairn_inode_handle_release(&ih);
 
@@ -2103,6 +2208,22 @@ cairn_setattr(
                                   CHIMERA_ACL_MAX_ACES) >= 0) {
                 cairn_put_acl(thread, inode->inum, new_acl);
             }
+        }
+    }
+
+    /* pNFS layout blob.  Keyed off orig_set_mask for the same reason the ACL
+     * block above is: cairn_apply_attrs() has already rewritten
+     * set_attr->va_set_mask to what it applied, and it knows nothing about the
+     * blob -- testing the rewritten mask would silently drop every layout a
+     * metadata server ever wrote, leaving the MDS to re-steer on each
+     * LAYOUTGET and orphan the previous backing file. */
+    if (orig_set_mask & CHIMERA_VFS_ATTR_PNFS_LAYOUT) {
+        struct chimera_vfs_attrs *sa = request->setattr.set_attr;
+
+        if (sa->va_pnfs_len) {
+            cairn_put_pnfs(thread, inode->inum, sa->va_pnfs, sa->va_pnfs_len);
+        } else {
+            cairn_remove_pnfs(thread, inode->inum);
         }
     }
 
@@ -2465,6 +2586,7 @@ cairn_rmfs_delete_inode(
     struct cairn_inode_key   inode_key;
     struct cairn_symlink_key symlink_key;
     struct cairn_acl_key     acl_key;
+    struct cairn_pnfs_key    pnfs_key;
     struct cairn_xattr_key   xattr_start, *xattr_key;
     struct cairn_extent_key  extent_start, *extent_key;
     rocksdb_iterator_t      *iter;
@@ -2484,6 +2606,11 @@ cairn_rmfs_delete_inode(
     acl_key.inum    = inum;
     rocksdb_writebatch_delete(meta_batch,
                               (const char *) &acl_key, sizeof(acl_key));
+
+    pnfs_key.keytype = CAIRN_KEY_PNFS;
+    pnfs_key.inum    = inum;
+    rocksdb_writebatch_delete(meta_batch,
+                              (const char *) &pnfs_key, sizeof(pnfs_key));
 
     xattr_start.keytype = CAIRN_KEY_XATTR;
     xattr_start.inum    = inum;
@@ -3199,6 +3326,7 @@ cairn_remove_at(
 
             cairn_remove_inode(thread, inode);
             cairn_remove_acl(thread, inode->inum);
+            cairn_remove_pnfs(thread, inode->inum);
         } else {
             cairn_put_inode(thread, inode);
         }
@@ -3721,6 +3849,7 @@ cairn_open_at(
     cairn_map_attrs(fs, &request->open_at.r_dir_post_attr, parent_inode);
     cairn_map_attrs(fs, &request->open_at.r_attr, inode);
     cairn_map_acl(thread, &request->open_at.r_attr, inode);
+    cairn_map_pnfs(thread, &request->open_at.r_attr, inode);
 
     cairn_put_inode(thread, parent_inode);
     cairn_put_inode(thread, inode);
@@ -3777,6 +3906,7 @@ cairn_close(
 
         cairn_remove_inode(thread, inode);
         cairn_remove_acl(thread, inode->inum);
+        cairn_remove_pnfs(thread, inode->inum);
     } else {
         cairn_put_inode(thread, inode);
     }
@@ -4931,6 +5061,7 @@ cairn_rename_at(
 
                     cairn_remove_inode(thread, existing_inode);
                     cairn_remove_acl(thread, existing_inode->inum);
+                    cairn_remove_pnfs(thread, existing_inode->inum);
                 } else {
                     cairn_put_inode(thread, existing_inode);
                 }
@@ -5904,7 +6035,8 @@ SYMBOL_EXPORT struct chimera_vfs_module vfs_cairn = {
         CHIMERA_VFS_CAP_FS_RELATIVE_OP | CHIMERA_VFS_CAP_ACL_NATIVE |
         CHIMERA_VFS_CAP_ATOMIC_HANDLE_STATE |
         CHIMERA_VFS_CAP_XATTR | CHIMERA_VFS_CAP_READ_PROVIDES_BUFFERS |
-        CHIMERA_VFS_CAP_CHANGE | CHIMERA_VFS_CAP_MKFS,
+        CHIMERA_VFS_CAP_CHANGE | CHIMERA_VFS_CAP_MKFS |
+        CHIMERA_VFS_CAP_LAYOUT,
     .init           = cairn_init,
     .destroy        = cairn_destroy,
     .thread_init    = cairn_thread_init,
