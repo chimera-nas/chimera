@@ -157,9 +157,15 @@ The work spans three layers:
 - `vfs_proc_rename_at`:
   - Intra-dir: single `RENAMED` on the dir, carrying `(new_name, old_name)`. The SMB serializer expands this to a `FILE_ACTION_RENAMED_OLD_NAME` + `FILE_ACTION_RENAMED_NEW_NAME` pair.
   - Cross-dir: source dir gets `RENAMED(name=NULL, old_name=src)` (serializes as `RENAMED_OLD_NAME` only); dest dir gets `RENAMED(name=dst, old_name=NULL)` (serializes as `RENAMED_NEW_NAME` only). Matches Windows convention. The source-side `name_len==0` triggers a subtree overflow rather than running the resolver (which would otherwise build a leafless relpath).
-- `smb_proc_create`: `DIR_ADDED` or `FILE_ADDED` based on `S_ISDIR(attr->va_mode)` of the post-create handle, on parent. Fires for `CREATE`, `OPEN_IF`, `OVERWRITE_IF`, `SUPERSEDE` (the create-capable dispositions; can yield spurious ADDED on OPEN_IF + existing file — documented limitation pending `create_action` plumbing through the VFS).
-- `smb_proc_write`: `FILE_MODIFIED` on parent.
-- `smb_proc_set_info` (non-rename path): `ATTRS_CHANGED` on parent.
+- `smb_proc_create`: keyed on what the open actually DID, not on the disposition it asked for (MS-FSA 2.1.5.1) —
+  - **created** (`r_created`): `DIR_ADDED` for a directory, `FILE_ADDED | STREAM_NAME` for a regular file (its default `$DATA` stream appears with it).
+  - **overwritten/superseded** of a name that already existed: `FILE_MODIFIED | SIZE_CHANGED | ATTRS_CHANGED | STREAM_SIZE` — a MODIFIED, not an ADDED.
+  - **opened** an existing file: nothing. Opening a file is not a change to the directory that holds it.
+
+  Reporting `ADDED` for every create-capable disposition (what this did before) is wrong in both directions once a filter is involved: a client watching `FILE_NOTIFY_CHANGE_SIZE` or `_ATTRIBUTES` was told nothing about an overwrite that changed both, and a client watching `FILE_NOTIFY_CHANGE_FILE_NAME` was woken for opens that created nothing. Found by the quint MBT suite.
+- `smb_proc_write`: `FILE_MODIFIED | STREAM_WRITE | STREAM_SIZE` on parent (no dir-lease break — the file's directory-visible metadata settles at close).
+- `smb_proc_close`: `FILE_MODIFIED` on parent for a handle that wrote, which is where that deferred settle lands.
+- `smb_proc_set_info` (non-rename path): the class the info class implies — `SIZE_CHANGED | FILE_MODIFIED | STREAM_SIZE` for EndOfFile, `ATTRS_CHANGED` otherwise.
 
 ### `FILE_NOTIFY_INFORMATION` serializer (`chimera_smb_notify_serialize_events`)
 
@@ -199,11 +205,17 @@ Documented in code; load-bearing for safety.
 
 - **`chimera/server/smb/change_notify_test`** (`src/server/smb/tests/smb_change_notify_test.c`, 16 wire scenarios via libsmb2 against an in-process server, netns-isolated, ~3s, ASAN clean): create/unlink/rename/mkdir/rmdir notify, filter rejects mismatched events, duplicate CHANGE_NOTIFY rejection, tiny `OutputBufferLength` → `NOTIFY_ENUM_DIR`, `OutputBufferLength=0` → `NOTIFY_ENUM_DIR`, compounded CHANGE_NOTIFY rejected, DIR_NAME-only watch receives mkdir/rmdir, cross-dir rename source-side delivers `RENAMED_OLD_NAME` only, cross-dir rename destination-side delivers `RENAMED_NEW_NAME` only, CLOSE while parked → `STATUS_CANCELLED`, broad→narrow filter drops stale ring events.
 
+- **`chimera/server/smb/mbt/batch_memfs`** (quint model-based, quick tier): the `stepNotify` corpus — 8 traces × 400 messages generated from `ext/specs/quint/smb2/smb2_notify.qnt` and replayed by `smb2_mbt_replay.c`. This is the only change-notify coverage in the tier that gates a merge, and it is what took `smb_notify.c` from 1.7% to 84% of lines and `smb_proc_change_notify.c` from 0% to 82%.
+
+  What the model asserts, per message, is both halves of the conversation: the reply to each `CHANGE_NOTIFY` (answered inline with an exact record list, parked behind an async interim, or refused) *and* the set of async completions the message caused on OTHER connections, matched back to the request that parked by AsyncId. An unpredicted completion fails the trace as loudly as a missing one — an extra wakeup means a watcher was told about a change it had filtered out.
+
+  The model carries the two filters separately (the watch's enqueue mask and the request's delivery filter), the exact 16-byte record arithmetic behind `STATUS_NOTIFY_ENUM_DIR`, the sticky-overflow rule and the zero-length-buffer poll that must not set it, the one-outstanding-request rule and the re-aim it performs anyway, and every way a parked request can end (an event, an overflow, a `CANCEL`, the handle going away). The arms the corpus cannot reach — the mid-compound `STATUS_INTERNAL_ERROR`, and everything needing a directory deleted while a watch is on it — are pinned deterministically in `smb2Test.qnt`.
+
 - **Windows interop**: validated against Microsoft FileServer test suite's `test_change_notify.exe` (`10.65.175.24` → `10.65.181.198`): 11/11 BVT scenarios pass. NOTIFY_ENUM_DIR framing also verified at byte level via tcpdump + Wireshark dissection.
 
 ## Known limitations (documented in code)
 
-- Spurious `FILE_ADDED` for `OPEN_IF`/`OVERWRITE_IF`/`SUPERSEDE` + pre-existing file — needs `create_action` plumbed through `chimera_vfs_open_at`.
+- Subtree (`WATCH_TREE`) *delivery* is not covered by the model-based suite: the generated namespace is flat, so the flag reaches the server and the subtree registry but no mutation happens below a watched directory. The exact-watch half is covered; the RPL resolver is not, which is most of what remains dark in `vfs_notify.c`.
 - Subtree resolver funnels through `sync_delegation_threads[0]` — perf bottleneck under heavy subtree-watch + mutation load.
 - `chimera_vfs_notify_destroy` blocks indefinitely if a delegation thread wedges (with progress logs); contract documented as "callers must quiesce frontends first."
 - SMB 3.1.1 signing falls through to AES-CMAC-AES-128 instead of the preauth-integrity-derived key derivation (chimera doesn't yet implement 3.1.1 fully).
