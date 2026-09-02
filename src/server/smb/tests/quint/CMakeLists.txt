@@ -133,6 +133,22 @@ set_tests_properties(chimera/server/smb/mbt/info_probe_memfs PROPERTIES
     LABELS "quint;smb_mbt;memfs"
     TIMEOUT 120)
 
+# Alternate-data-stream (ADS / named stream) probe: the whole named-stream
+# lifecycle the corpus never enables -- CREATE with the file:stream syntax,
+# independent stream WRITE/READ, FILE_STREAM_INFORMATION enumeration, and
+# delete-on-close of a single stream -- exercising the shared VFS named-stream
+# storage that NFSv4 named attributes also project onto.
+add_executable(smb2_stream_probe smb2_stream_probe.c)
+target_include_directories(smb2_stream_probe PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(smb2_stream_probe chimera_server chimera_metrics crypto)
+
+add_test(NAME chimera/server/smb/mbt/stream_probe_memfs
+    COMMAND $<TARGET_FILE:smb2_stream_probe>)
+set_tests_properties(chimera/server/smb/mbt/stream_probe_memfs PROPERTIES
+    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=smb2_stream_probe_memfs"
+    LABELS "quint;smb_mbt;memfs"
+    TIMEOUT 120)
+
 # Transport-compression ground-truth probe: the MS-XCA codecs (LZ77, LZNT1,
 # LZ77+Huffman) against Microsoft reference vectors, and the whole
 # COMPRESSION_TRANSFORM path -- negotiate context, algorithm selection, the

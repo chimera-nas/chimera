@@ -132,6 +132,8 @@ struct mbt_result {
  * three; the NFS3 defaults need none). */
 struct mbt_env_opts {
     int         nfs4_delegations; /* delegations are off by default */
+    int         smb_named_streams; /* NFSv4 OPENATTR / named attributes: off by
+                                    * default (the shared knob gates OPENATTR) */
     int         disable_caches;   /* VFS attr+name caches: exact attr
                                    * comparison cannot tolerate staleness */
     const char *memfs_config;     /* module config JSON, e.g. block_size */
@@ -454,6 +456,9 @@ mbt_env_open_opts(
     if (opts) {
         if (opts->nfs4_delegations) {
             chimera_server_config_set_nfs4_delegations(config, 1);
+        }
+        if (opts->smb_named_streams) {
+            chimera_server_config_set_smb_named_streams(config, 1);
         }
         if (opts->portmap_hostname) {
             chimera_server_config_set_portmap_hostname(config,
