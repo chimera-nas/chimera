@@ -226,6 +226,32 @@ chimera_vfs_state_put(
     struct chimera_vfs_state      *state,
     struct chimera_vfs_file_state *file);
 
+/* Visit every SMB open registered on `file`.
+ *
+ * Every SMB open takes an ACCESS claim on the file it opened and stamps its
+ * chimera_smb_open_file into cb_private (smb_proc_create.c), attribute-only
+ * opens included -- those build the INERT construct, which conflicts with
+ * nothing but is still a registration.  So this claim list IS the set of SMB
+ * handles on a file, across every session and tree, and it is the only place
+ * that set exists: the SMB layer hashes its open files per TREE, so nothing
+ * above the VFS can enumerate the holders of one file.
+ *
+ * Used by RENAME, which renames the FILE and must therefore move the cached
+ * path every one of those handles keeps.
+ *
+ * `cb` runs under file->lock, so it must not call back into the VFS or take a
+ * lock of its own; updating fields on the open it is handed is what it is for.
+ */
+typedef void (*chimera_vfs_smb_open_cb_t)(
+    void *smb_open_file,
+    void *private_data);
+
+void
+chimera_vfs_claim_foreach_smb_open(
+    struct chimera_vfs_file_state *file,
+    chimera_vfs_smb_open_cb_t      cb,
+    void                          *private_data);
+
 /* -------------------------------------------------------------------- */
 /* Claim constructors — the admission mask table                        */
 /* -------------------------------------------------------------------- */
