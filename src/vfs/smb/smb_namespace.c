@@ -373,10 +373,11 @@ chimera_smb_readlink_reply(
 {
     struct chimera_vfs_request *request = arg;
     uint16_t                    structsize, reparse_data_len, rsvd16;
+    uint16_t                    sub_off, sub_len, print_off, print_len;
     uint32_t                    ctlcode, input_offset, input_count;
     uint32_t                    output_offset, output_count, flags, rsvd32;
     uint32_t                    reparse_tag;
-    uint64_t                    fid_pid, fid_vid, inode_type;
+    uint64_t                    fid_pid, fid_vid;
     int                         consumed, target16_len, i, out;
     char                       *out_buf = request->readlink.r_target;
     uint32_t                    maxlen  = request->readlink.target_maxlength;
@@ -419,9 +420,11 @@ chimera_smb_readlink_reply(
         evpl_iovec_cursor_skip(body, (int) output_offset - consumed);
     }
 
-    /* REPARSE_DATA_BUFFER: ReparseTag(4) + ReparseDataLength(2) + Reserved(2) +
-     * InodeType(8) + UTF-16LE target. */
-    if (output_count < 16) {
+    /* SYMBOLIC_LINK_REPARSE_BUFFER (MS-FSCC 2.1.2.4), the Windows form the
+     * server's GET_REPARSE emits: ReparseTag(4) + ReparseDataLength(2) +
+     * Reserved(2) + SubstituteNameOffset(2) + SubstituteNameLength(2) +
+     * PrintNameOffset(2) + PrintNameLength(2) + Flags(4) + PathBuffer. */
+    if (output_count < 20) {
         request->status = CHIMERA_VFS_EINVAL;
         request->complete(request);
         return;
@@ -430,26 +433,38 @@ chimera_smb_readlink_reply(
     evpl_iovec_cursor_get_uint32(body, &reparse_tag);
     evpl_iovec_cursor_get_uint16(body, &reparse_data_len);
     evpl_iovec_cursor_get_uint16(body, &rsvd16);
-    evpl_iovec_cursor_get_uint64(body, &inode_type);
+    evpl_iovec_cursor_get_uint16(body, &sub_off);
+    evpl_iovec_cursor_get_uint16(body, &sub_len);
+    evpl_iovec_cursor_get_uint16(body, &print_off);
+    evpl_iovec_cursor_get_uint16(body, &print_len);
+    evpl_iovec_cursor_get_uint32(body, &flags);
 
     (void) rsvd16;
+    (void) print_off;
+    (void) print_len;
+    (void) reparse_data_len;
+
 
     /* readlink of a non-symlink is EINVAL (POSIX). */
-    if (reparse_tag != SMB2_IO_REPARSE_TAG_NFS ||
-        inode_type != SMB2_NFS_SPECFILE_LNK || reparse_data_len < 8) {
+    if (reparse_tag != SMB2_IO_REPARSE_TAG_SYMLINK) {
         request->status = CHIMERA_VFS_EINVAL;
         request->complete(request);
         return;
     }
 
-    target16_len = reparse_data_len - 8;     /* UTF-16LE target bytes */
+    /* SubstituteName lives at PathBuffer + SubstituteNameOffset. */
+    if (sub_off) {
+        evpl_iovec_cursor_skip(body, sub_off);
+    }
+    target16_len = sub_len;
     if (target16_len > (int) sizeof(target16)) {
         target16_len = sizeof(target16);
     }
 
-    /* A truncated reply (claims reparse_data_len bytes but the cursor is short)
-     * would leave target16 partly uninitialized -- treat it as a bad reply. */
-    if (evpl_iovec_cursor_get_blob(body, target16, target16_len) < 0) {
+    /* A truncated reply (claims sub_len bytes but the cursor is short) would
+     * leave target16 partly uninitialized -- treat it as a bad reply. */
+    if (target16_len > 0 &&
+        evpl_iovec_cursor_get_blob(body, target16, target16_len) < 0) {
         request->status = CHIMERA_VFS_EINVAL;
         request->complete(request);
         return;

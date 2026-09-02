@@ -993,10 +993,13 @@ chimera_smb_client_lookup_at(
         return;
     }
 
+    /* Resolve to the raw entry (like an NFS LOOKUP): open the reparse point so a
+     * final-component symlink comes back as the link node itself rather than
+     * STOPPED_ON_SYMLINK.  The VFS core then decides whether to follow it. */
     smb_send_create(conn, request, path, path_len,
                     SMB2_FILE_READ_ATTRIBUTES,
                     SMB2_FILE_SHARE_READ | SMB2_FILE_SHARE_WRITE | SMB2_FILE_SHARE_DELETE,
-                    SMB2_FILE_OPEN, 0,
+                    SMB2_FILE_OPEN, SMB2_FILE_OPEN_REPARSE_POINT,
                     chimera_smb_lookup_create_reply);
 } /* chimera_smb_client_lookup_at */
 
@@ -1111,6 +1114,14 @@ chimera_smb_client_open_at(
 
     desired_access = SMB2_FILE_READ_DATA | SMB2_FILE_WRITE_DATA |
         SMB2_FILE_READ_ATTRIBUTES | SMB2_FILE_WRITE_ATTRIBUTES | SMB2_DELETE;
+
+    /* Opening the link node itself (NOFOLLOW: lstat/readlink/lchown) must not
+     * ask for data access -- a symlink reparse point has no data stream and the
+     * server refuses READ/WRITE_DATA on it.  Attribute + delete rights are all
+     * these callers use. */
+    if (request->open_at.flags & CHIMERA_VFS_OPEN_NOFOLLOW) {
+        desired_access = SMB2_FILE_READ_ATTRIBUTES | SMB2_DELETE;
+    }
 
     /* Request a read+handle-caching lease on file opens.  HANDLE caching is the
      * prerequisite the server requires before it will grant a durable handle

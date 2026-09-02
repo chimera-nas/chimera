@@ -383,28 +383,35 @@ probe_pin_readdir(void)
     probe_ok("closedir", probe_call(res));
 } /* probe_pin_readdir */
 
-/* SD3: symlink directly under the mount root reports SUCCESS and creates
- * nothing.  SD5: below the first level the same call fails instead.  Either
- * way no symlink exists afterwards, which is the signature worth pinning.
- *
- * When SD3/SD5 are fixed this must become: symlink succeeds at both depths and
- * the link is visible to lstat with the target readlink returns. */
+/* SD3 (FIXED): a symlink is created for real (reparse point), lstat sees it as
+* a link, and readlink returns its target.  The proxy resolves reparse points
+* client-side and reports S_IFLNK, so the whole POSIX symlink surface works. */
 static void
 probe_pin_symlink(void)
 {
-    json_t *res;
+    json_t     *res;
+    const char *ftype, *tgt;
 
     res = probe_req("symlink");
     probe_set_str(res, "path", "/test/sym");
     probe_set_str(res, "target", "w");
-    json_decref(probe_call(res));
+    probe_ok("symlink create", probe_call(res));
 
-    /* PINNED DEFECT (SD3/SD5): whatever the call reported, nothing was made. */
-    res = op_stat("/test/sym", 0);
-    if (probe_ret(res) >= 0) {
-        probe_fail("SD3 pin",
-                   "the symlink exists -- SD3 looks FIXED; assert readlink "
-                   "returns the target instead and drop SD3");
+    /* lstat sees the link itself. */
+    res   = op_stat("/test/sym", 0);
+    ftype = json_string_value(json_object_get(res, "ftype"));
+    if (probe_ret(res) < 0 || !ftype || strcmp(ftype, "lnk") != 0) {
+        probe_fail("symlink lstat", "expected an lnk, link not visible");
+    }
+    json_decref(res);
+
+    /* readlink returns the stored target. */
+    res = probe_req("readlink");
+    probe_set_str(res, "path", "/test/sym");
+    res = probe_call(res);
+    tgt = json_string_value(json_object_get(res, "target"));
+    if (probe_ret(res) < 0 || !tgt || strcmp(tgt, "w") != 0) {
+        probe_fail("readlink", "did not return the target 'w'");
     }
     json_decref(res);
 } /* probe_pin_symlink */
