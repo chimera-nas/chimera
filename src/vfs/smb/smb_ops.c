@@ -229,7 +229,8 @@ smb_send_create_ex(
     uint32_t                        options,
     const uint8_t                  *ctx,
     uint32_t                        ctx_len,
-    chimera_smb_client_reply_cb     reply_cb)
+    chimera_smb_client_reply_cb     reply_cb,
+    void                           *reply_arg)
 {
     struct evpl_iovec        iov;
     struct evpl_iovec_cursor cursor;
@@ -286,7 +287,7 @@ smb_send_create_ex(
         evpl_iovec_cursor_append_blob_unaligned(&cursor, (uint8_t *) ctx, ctx_len);
     }
 
-    chimera_smb_client_pdu_finish(conn, &iov, &cursor, request, reply_cb, request);
+    chimera_smb_client_pdu_finish(conn, &iov, &cursor, request, reply_cb, reply_arg);
 } /* smb_send_create_ex */
 
 /* Send an SMB2 CREATE on `path` (full mount-relative path; "" for the root). */
@@ -303,8 +304,241 @@ smb_send_create(
     chimera_smb_client_reply_cb     reply_cb)
 {
     smb_send_create_ex(conn, request, path, path_len, desired_access,
-                       share_access, disposition, options, NULL, 0, reply_cb);
+                       share_access, disposition, options, NULL, 0, reply_cb,
+                       request);
 } /* smb_send_create */
+
+/* ---- symbolic-link following (client-side resolution) ------------------ */
+
+/*
+ * A CREATE whose final path component resolves to a symbolic link the caller
+ * wants to follow comes back STATUS_STOPPED_ON_SYMLINK carrying a
+ * SymbolicLinkErrorResponse (MS-SMB2 2.2.2.2.1): the server read the link and
+ * handed us its target, expecting us -- the client -- to splice the target into
+ * the path and retry.  That is how a real SMB client (and cifs.ko) follows a
+ * server-side symlink; the proxy did neither and simply reported ELOOP.
+ *
+ * The chimera server stops only on a final-component link (it follows
+ * intermediates during the walk), so UnparsedPathLength is always 0 and the
+ * rewrite is: replace the last component of the requested path with the target
+ * (relative), or use the target from the share root (absolute).  A chain of
+ * links loops here until SMB_SYMLOOP_MAX, then surfaces the ELOOP.
+ */
+#define SMB_SYMLOOP_MAX 40
+
+struct smb_follow_ctx {
+    struct chimera_vfs_request *request;
+    chimera_smb_client_reply_cb real_cb;
+    uint32_t                    desired_access;
+    uint32_t                    share_access;
+    uint32_t                    disposition;
+    uint32_t                    options;
+    int                         hops;
+    int                         path_len;
+    int                         cctx_len;
+    char                        path[CHIMERA_SMB_PATH_MAX + 1];
+    uint8_t                     cctx[CHIMERA_SMB_LEASE_CTX_SIZE];
+};
+
+/* Parse a SymbolicLinkErrorResponse body into the UTF-8 target (with '\'->'/')
+ * and its relative flag.  Returns 0 on success, -1 if the body is not a
+ * well-formed 'SYML' response we can act on. */
+static int
+smb_parse_symlink_error(
+    struct evpl_iovec_cursor *body,
+    char                     *out_target,
+    int                       out_max,
+    int                      *out_relative)
+{
+    uint16_t structsize, reserved16, reparse_data_len, unparsed_len;
+    uint16_t sub_off, sub_len, print_off, print_len;
+    uint32_t byte_count, sym_link_len, sym_tag, reparse_tag, flags;
+    int      i, n;
+    uint8_t  name16[2 * CHIMERA_SMB_PATH_MAX];
+
+    /* SMB2 ERROR Response header. */
+    evpl_iovec_cursor_get_uint16(body, &structsize);
+    evpl_iovec_cursor_get_uint16(body, &reserved16);   /* ErrCtxCount + Reserved */
+    evpl_iovec_cursor_get_uint32(body, &byte_count);
+    if (structsize != SMB2_ERROR_REPLY_SIZE || byte_count < 4) {
+        return -1;
+    }
+
+    /* SymbolicLinkErrorResponse. */
+    evpl_iovec_cursor_get_uint32(body, &sym_link_len);
+    evpl_iovec_cursor_get_uint32(body, &sym_tag);
+    evpl_iovec_cursor_get_uint32(body, &reparse_tag);
+    evpl_iovec_cursor_get_uint16(body, &reparse_data_len);
+    evpl_iovec_cursor_get_uint16(body, &unparsed_len);
+    evpl_iovec_cursor_get_uint16(body, &sub_off);
+    evpl_iovec_cursor_get_uint16(body, &sub_len);
+    evpl_iovec_cursor_get_uint16(body, &print_off);
+    evpl_iovec_cursor_get_uint16(body, &print_len);
+    evpl_iovec_cursor_get_uint32(body, &flags);
+
+    (void) reparse_data_len;
+    (void) print_off;
+    (void) print_len;
+
+    if (sym_tag != SMB2_SYMLINK_ERROR_TAG ||
+        reparse_tag != SMB2_IO_REPARSE_TAG_SYMLINK ||
+        unparsed_len != 0) {
+        /* Not a link error we can resolve (or an intermediate-component stop we
+         * do not splice); let the caller see the raw ELOOP. */
+        return -1;
+    }
+
+    /* PathBuffer begins here; SubstituteNameOffset is relative to it. */
+    if (sub_off > 0) {
+        evpl_iovec_cursor_skip(body, sub_off);
+    }
+    if (sub_len == 0 || (int) sub_len > (int) sizeof(name16)) {
+        return -1;
+    }
+    if (evpl_iovec_cursor_get_blob(body, name16, sub_len) < 0) {
+        return -1;
+    }
+
+    /* Decode UTF-16LE (ASCII subset, as the whole client round-trips) and flip
+     * SMB's '\' separators back to '/'. */
+    n = sub_len / 2;
+    if (n >= out_max) {
+        n = out_max - 1;
+    }
+    for (i = 0; i < n; i++) {
+        char c = (char) name16[i * 2];
+        out_target[i] = (c == '\\') ? '/' : c;
+    }
+    out_target[n] = '\0';
+
+    *out_relative = !(flags & SMB2_SYMLINK_FLAG_ABSOLUTE) &&
+        (flags & SMB2_SYMLINK_FLAG_RELATIVE);
+    return n;
+} /* smb_parse_symlink_error */
+
+/* Splice `target` (length tlen) into `path` in place of its final component
+ * (relative) or from the share root (absolute).  Returns the new length, or -1
+ * if it would not fit. */
+static int
+smb_splice_symlink_target(
+    char       *path,
+    int         path_len,
+    const char *target,
+    int         tlen,
+    int         relative)
+{
+    int base;
+
+    if (!relative) {
+        while (tlen > 0 && target[0] == '/') {
+            target++;
+            tlen--;
+        }
+        if (tlen > CHIMERA_SMB_PATH_MAX) {
+            return -1;
+        }
+        memmove(path, target, tlen);
+        return tlen;
+    }
+
+    /* base = start of the final component (index just past the last '/'). */
+    base = path_len;
+    while (base > 0 && path[base - 1] != '/') {
+        base--;
+    }
+    if (base + tlen > CHIMERA_SMB_PATH_MAX) {
+        return -1;
+    }
+    memmove(path + base, target, tlen);
+    return base + tlen;
+} /* smb_splice_symlink_target */
+
+static void
+smb_create_follow_shim(
+    struct chimera_smb_client_conn *conn,
+    uint32_t                        status,
+    const struct smb2_header       *hdr,
+    struct evpl_iovec_cursor       *body,
+    int                             body_len,
+    void                           *arg)
+{
+    struct smb_follow_ctx      *fc      = arg;
+    struct chimera_vfs_request *request = fc->request;
+
+    if (status == SMB2_STATUS_STOPPED_ON_SYMLINK && fc->hops > 0) {
+        char target[CHIMERA_SMB_PATH_MAX + 1];
+        int  relative = 0;
+        int  tlen     = smb_parse_symlink_error(body, target, sizeof(target),
+                                                &relative);
+        int  newlen;
+
+        if (tlen > 0 &&
+            (newlen = smb_splice_symlink_target(fc->path, fc->path_len, target,
+                                                tlen, relative)) >= 0) {
+            fc->path_len = newlen;
+            fc->hops--;
+            smb_send_create_ex(conn, request, fc->path, fc->path_len,
+                               fc->desired_access, fc->share_access,
+                               fc->disposition, fc->options,
+                               fc->cctx_len ? fc->cctx : NULL,
+                               (uint32_t) fc->cctx_len,
+                               smb_create_follow_shim, fc);
+            return;
+        }
+        /* Could not parse or splice the target: fall through and let the caller
+         * see the ELOOP the raw status maps to. */
+    }
+
+    fc->real_cb(conn, status, hdr, body, body_len, request);
+    free(fc);
+} /* smb_create_follow_shim */
+
+/* Like smb_send_create_ex, but transparently follows a final-component symlink
+ * the server stops on, retrying on the resolved path (up to SMB_SYMLOOP_MAX). */
+static void
+smb_send_create_follow(
+    struct chimera_smb_client_conn *conn,
+    struct chimera_vfs_request     *request,
+    const char                     *path,
+    int                             path_len,
+    uint32_t                        desired_access,
+    uint32_t                        share_access,
+    uint32_t                        disposition,
+    uint32_t                        options,
+    const uint8_t                  *cctx,
+    uint32_t                        cctx_len,
+    chimera_smb_client_reply_cb     reply_cb)
+{
+    struct smb_follow_ctx *fc;
+
+    if (path_len < 0 || path_len > CHIMERA_SMB_PATH_MAX ||
+        cctx_len > sizeof(fc->cctx)) {
+        request->status = CHIMERA_VFS_ENAMETOOLONG;
+        request->complete(request);
+        return;
+    }
+
+    fc                 = calloc(1, sizeof(*fc));
+    fc->request        = request;
+    fc->real_cb        = reply_cb;
+    fc->desired_access = desired_access;
+    fc->share_access   = share_access;
+    fc->disposition    = disposition;
+    fc->options        = options;
+    fc->hops           = SMB_SYMLOOP_MAX;
+    fc->path_len       = path_len;
+    memcpy(fc->path, path, path_len);
+    fc->path[path_len] = '\0';
+    fc->cctx_len       = (int) cctx_len;
+    if (cctx_len) {
+        memcpy(fc->cctx, cctx, cctx_len);
+    }
+
+    smb_send_create_ex(conn, request, fc->path, fc->path_len, desired_access,
+                       share_access, disposition, options,
+                       cctx_len ? fc->cctx : NULL, cctx_len,
+                       smb_create_follow_shim, fc);
+} /* smb_send_create_follow */
 
 /* Build an RqLs (lease request v1) create context into `buf` (>= 56 bytes);
  * returns its length.  Header(16) + name "RqLs"(4) + pad(4) + data(32). */
@@ -750,12 +984,25 @@ chimera_smb_client_open_at(
         ctx = lease_ctx;
     }
 
-    smb_send_create_ex(conn, request,
-                       request->open_at.name, request->open_at.namelen,
-                       desired_access,
-                       SMB2_FILE_SHARE_READ | SMB2_FILE_SHARE_WRITE | SMB2_FILE_SHARE_DELETE,
-                       disposition, options, ctx, ctx_len,
-                       chimera_smb_open_at_reply);
+    if (request->open_at.flags & CHIMERA_VFS_OPEN_NOFOLLOW) {
+        /* Open the link node itself (FILE_OPEN_REPARSE_POINT set above); the
+         * server does not stop on it, so no client-side resolution is wanted. */
+        smb_send_create_ex(conn, request,
+                           request->open_at.name, request->open_at.namelen,
+                           desired_access,
+                           SMB2_FILE_SHARE_READ | SMB2_FILE_SHARE_WRITE | SMB2_FILE_SHARE_DELETE,
+                           disposition, options, ctx, ctx_len,
+                           chimera_smb_open_at_reply, request);
+    } else {
+        /* Follow a final-component symlink the server stops on, resolving it
+         * client-side and retrying on the target. */
+        smb_send_create_follow(conn, request,
+                               request->open_at.name, request->open_at.namelen,
+                               desired_access,
+                               SMB2_FILE_SHARE_READ | SMB2_FILE_SHARE_WRITE | SMB2_FILE_SHARE_DELETE,
+                               disposition, options, ctx, ctx_len,
+                               chimera_smb_open_at_reply);
+    }
 } /* chimera_smb_client_open_at */
 
 static void
@@ -962,26 +1209,16 @@ chimera_smb_client_remove_at(
     struct chimera_smb_client_conn *conn,
     struct chimera_vfs_request     *request)
 {
-    /* Project the caller's rmdir-vs-unlink assertion onto the CREATE options
-     * so the peer enforces it: without one, an SMB server happily deletes
-     * whatever the name resolves to and RMDIR of a file (or REMOVE of a
-     * directory) would succeed instead of failing NFS3ERR_NOTDIR /
-     * NFS3ERR_ISDIR (RFC 1813 3.3.12, 3.3.13).  The peer answers
-     * STATUS_NOT_A_DIRECTORY / STATUS_FILE_IS_A_DIRECTORY, which the status
-     * map turns back into ENOTDIR / EISDIR. */
-    uint32_t options = SMB2_FILE_DELETE_ON_CLOSE;
-
-    if (request->remove_at.flags & CHIMERA_VFS_REMOVE_ISDIR) {
-        options |= SMB2_FILE_DIRECTORY_FILE;
-    } else if (request->remove_at.flags & CHIMERA_VFS_REMOVE_ISNOTDIR) {
-        options |= SMB2_FILE_NON_DIRECTORY_FILE;
-    }
-
+    /* POSIX unlink/rmdir removes the named entry itself; a final-component
+     * symlink must be deleted as the link, never followed (which would ELOOP or
+     * hit the target).  FILE_OPEN_REPARSE_POINT opens the link node so
+     * DELETE_ON_CLOSE removes it. */
     smb_send_create(conn, request,
                     request->remove_at.name, request->remove_at.namelen,
                     SMB2_DELETE | SMB2_FILE_READ_ATTRIBUTES,
                     SMB2_FILE_SHARE_READ | SMB2_FILE_SHARE_WRITE | SMB2_FILE_SHARE_DELETE,
-                    SMB2_FILE_OPEN, options,
+                    SMB2_FILE_OPEN,
+                    SMB2_FILE_DELETE_ON_CLOSE | SMB2_FILE_OPEN_REPARSE_POINT,
                     chimera_smb_remove_create_reply);
 } /* chimera_smb_client_remove_at */
 

@@ -794,7 +794,8 @@ void smb_send_create_ex(
     uint32_t                        options,
     const uint8_t                  *ctx,
     uint32_t                        ctx_len,
-    chimera_smb_client_reply_cb     reply_cb);
+    chimera_smb_client_reply_cb     reply_cb,
+    void                           *reply_arg);
 
 /* An RqLs (lease request v1) create context is 56 bytes: header(16) + "RqLs"(4)
  * + pad(4) + data(32). */

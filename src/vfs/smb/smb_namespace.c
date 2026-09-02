@@ -177,7 +177,7 @@ chimera_smb_client_rename_at(
                     request->rename_at.name, request->rename_at.namelen,
                     SMB2_DELETE | SMB2_FILE_READ_ATTRIBUTES,
                     SMB2_FILE_SHARE_READ | SMB2_FILE_SHARE_WRITE | SMB2_FILE_SHARE_DELETE,
-                    SMB2_FILE_OPEN, 0,
+                    SMB2_FILE_OPEN, SMB2_FILE_OPEN_REPARSE_POINT,
                     chimera_smb_rename_create_reply);
 } /* chimera_smb_client_rename_at */
 
@@ -256,6 +256,14 @@ chimera_smb_symlink_create_reply(
 
     (void) hdr;
     (void) body_len;
+
+    if (status == SMB2_STATUS_STOPPED_ON_SYMLINK) {
+        /* The link name already exists AS a symlink, so the exclusive CREATE
+         * collides: that is EEXIST, not a link to be followed (ELOOP). */
+        request->status = CHIMERA_VFS_EEXIST;
+        request->complete(request);
+        return;
+    }
 
     if (status != SMB2_STATUS_SUCCESS) {
         request->status = chimera_smb_status_to_errno(status);
@@ -498,18 +506,131 @@ chimera_smb_client_readlink(
 /* ---- mknod_at ---------------------------------------------------------- */
 
 void
+chimera_smb_mknod_create_reply(
+    struct chimera_smb_client_conn *conn,
+    uint32_t                        status,
+    const struct smb2_header       *hdr,
+    struct evpl_iovec_cursor       *body,
+    int                             body_len,
+    void                           *arg)
+{
+    struct chimera_vfs_request  *request = arg;
+    struct chimera_smb_op_state *state   = request->plugin_data;
+    struct smb_create_result     r;
+    struct evpl_iovec            iov;
+    struct evpl_iovec_cursor     cursor;
+    struct smb2_header          *shdr;
+    uint64_t                     mode = request->mknod_at.set_attr->va_mode;
+    uint64_t                     nfs_type;
+    uint16_t                     reparse_data_len;
+    uint32_t                     input_count;
+    int                          input_offset;
+    int                          has_dev = 0;
+
+    (void) hdr;
+    (void) body_len;
+
+    if (status == SMB2_STATUS_STOPPED_ON_SYMLINK) {
+        /* The name already exists as a symlink; the exclusive CREATE collides
+         * -- EEXIST, not a link to follow. */
+        request->status = CHIMERA_VFS_EEXIST;
+        request->complete(request);
+        return;
+    }
+
+    if (status != SMB2_STATUS_SUCCESS) {
+        request->status = chimera_smb_status_to_errno(status);
+        request->complete(request);
+        return;
+    }
+
+    smb_parse_create_reply(body, &r);
+    state->file_id = r.file_id;
+
+    /* A regular file is fully created by the CREATE itself; nothing else to
+     * lay down, so just close the transient open. */
+    if (S_ISREG(mode)) {
+        request->status = CHIMERA_VFS_OK;
+        smb_send_close(conn, request, &state->file_id,
+                       chimera_smb_symlink_close_reply);
+        return;
+    }
+
+    /* Special files ride the same FSCTL_SET_REPARSE_POINT NFS specfile
+     * mechanism as symlinks: the server's SET_REPARSE handler replaces the
+     * placeholder with a real device/FIFO/socket node via chimera_vfs_mknod_at. */
+    switch (mode & S_IFMT) {
+        case S_IFIFO:  nfs_type = SMB2_NFS_SPECFILE_FIFO; break;
+        case S_IFSOCK: nfs_type = SMB2_NFS_SPECFILE_SOCK; break;
+        case S_IFCHR:  nfs_type = SMB2_NFS_SPECFILE_CHR; has_dev = 1; break;
+        case S_IFBLK:  nfs_type = SMB2_NFS_SPECFILE_BLK; has_dev = 1; break;
+        default:
+            request->status = CHIMERA_VFS_ENOTSUP;
+            smb_send_close(conn, request, &state->file_id,
+                           chimera_smb_symlink_close_reply);
+            return;
+    } /* switch */
+
+    /* reparse data = InodeType(8) [+ major(4) + minor(4) for CHR/BLK]. */
+    reparse_data_len = (uint16_t) (has_dev ? 16 : 8);
+    input_count      = (uint32_t) (8 + reparse_data_len);
+
+    chimera_smb_client_pdu_begin(conn, SMB2_IOCTL, &iov, &cursor, &shdr);
+
+    input_offset = sizeof(struct smb2_header) + 56;
+
+    evpl_iovec_cursor_append_uint16(&cursor, SMB2_IOCTL_REQUEST_SIZE);
+    evpl_iovec_cursor_append_uint32(&cursor, SMB2_FSCTL_SET_REPARSE_POINT);
+    evpl_iovec_cursor_append_uint64(&cursor, state->file_id.pid);
+    evpl_iovec_cursor_append_uint64(&cursor, state->file_id.vid);
+    evpl_iovec_cursor_append_uint32(&cursor, (uint32_t) input_offset);
+    evpl_iovec_cursor_append_uint32(&cursor, input_count);
+    evpl_iovec_cursor_append_uint32(&cursor, 0);                      /* MaxInputResponse */
+    evpl_iovec_cursor_append_uint32(&cursor, 0);                      /* OutputOffset */
+    evpl_iovec_cursor_append_uint32(&cursor, 0);                      /* OutputCount */
+    evpl_iovec_cursor_append_uint32(&cursor, 0);                      /* MaxOutputResponse */
+    evpl_iovec_cursor_append_uint32(&cursor, SMB2_0_IOCTL_IS_FSCTL);   /* Flags */
+    evpl_iovec_cursor_append_uint32(&cursor, 0);                      /* Reserved2 */
+
+    /* REPARSE_DATA_BUFFER (NFS) input. */
+    evpl_iovec_cursor_append_uint32(&cursor, SMB2_IO_REPARSE_TAG_NFS);
+    evpl_iovec_cursor_append_uint16(&cursor, reparse_data_len);
+    evpl_iovec_cursor_append_uint16(&cursor, 0);                      /* Reserved */
+    evpl_iovec_cursor_append_uint64(&cursor, nfs_type);               /* InodeType */
+    if (has_dev) {
+        /* The server reads major = va_rdev >> 32, minor = va_rdev low 32. */
+        evpl_iovec_cursor_append_uint32(&cursor,
+                                        (uint32_t) (request->mknod_at.set_attr->va_rdev >> 32));
+        evpl_iovec_cursor_append_uint32(&cursor,
+                                        (uint32_t) (request->mknod_at.set_attr->va_rdev & 0xffffffffULL));
+    }
+
+    chimera_smb_client_pdu_finish(conn, &iov, &cursor, request,
+                                  chimera_smb_symlink_ioctl_reply, request);
+} /* chimera_smb_mknod_create_reply */
+
+void
 chimera_smb_client_mknod_at(
     struct chimera_smb_client_conn *conn,
     struct chimera_vfs_request     *request)
 {
-    /* SMB2 has no general mknod path.  Device/FIFO/socket nodes can in
-     * principle be created via the same FSCTL_SET_REPARSE_POINT NFS mechanism
-     * used for symlinks (the chimera server supports the CHR/BLK/FIFO/SOCK NFS
-     * specfile types), but the VFS mknod_at request carries no encoding for the
-     * node type beyond va_mode/va_rdev in set_attr, and there is no test or
-     * caller exercising it through this backend.  Report ENOTSUP cleanly rather
-     * than guess at a mapping. */
-    (void) conn;
-    request->status = CHIMERA_VFS_ENOTSUP;
-    request->complete(request);
+    uint64_t mode = request->mknod_at.set_attr->va_mode;
+
+    /* mknod of a regular file is a plain exclusive CREATE; a device/FIFO/socket
+     * node is a placeholder CREATE the server then re-lays as the real node
+     * from an FSCTL_SET_REPARSE_POINT NFS specfile buffer (see the reply). */
+    if (!(S_ISREG(mode) || S_ISFIFO(mode) || S_ISSOCK(mode) ||
+          S_ISCHR(mode) || S_ISBLK(mode))) {
+        request->status = CHIMERA_VFS_ENOTSUP;
+        request->complete(request);
+        return;
+    }
+
+    smb_send_create(conn, request,
+                    request->mknod_at.name, request->mknod_at.name_len,
+                    SMB2_DELETE | SMB2_FILE_WRITE_DATA |
+                    SMB2_FILE_WRITE_ATTRIBUTES | SMB2_FILE_READ_ATTRIBUTES,
+                    SMB2_FILE_SHARE_READ | SMB2_FILE_SHARE_WRITE | SMB2_FILE_SHARE_DELETE,
+                    SMB2_FILE_CREATE, SMB2_FILE_NON_DIRECTORY_FILE,
+                    chimera_smb_mknod_create_reply);
 } /* chimera_smb_client_mknod_at */
