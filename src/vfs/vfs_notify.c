@@ -758,26 +758,22 @@ chimera_vfs_notify_watch_update(
         return;
     }
 
-    /* watch_tree flipped — purge any events queued under the old mode.
-     * Subtree events carry a path-prefixed name ("sub/dir/file") while
-     * exact-mode events carry a bare filename.  Delivering a stale path
-     * to a non-tree consumer (or vice versa) would mislead the client,
-     * and we have no per-event mode tag to filter selectively.  Force
-     * the client to rescan via overflow semantics — but ONLY if there is
-     * actually something queued (or an overflow already pending).  When
-     * the ring is empty (the common case of a client re-arming a fresh
-     * watch with a different recursion flag) signalling a spurious
-     * overflow would make the very next CHANGE_NOTIFY complete
-     * immediately with STATUS_NOTIFY_ENUM_DIR instead of parking
-     * (smb2.notify.rec / mask-change). */
-    pthread_mutex_lock(&watch->lock);
-    if (watch->ring_count > 0 || watch->overflowed) {
-        watch->ring_head  = 0;
-        watch->ring_count = 0;
-        watch->overflowed = 1;
-    }
-    pthread_mutex_unlock(&watch->lock);
-
+    /* watch_tree flipped.  The buffered events are KEPT.
+     *
+     * This used to purge them and raise overflow, on the reasoning that a
+     * subtree event carries a path-prefixed name ("sub/dir/file") while an
+     * exact-mode event carries a bare filename, and there is no per-event mode
+     * tag to filter on -- so a stale path could reach a consumer that has
+     * since narrowed to the directory itself.
+     *
+     * That is an argument about this implementation's event representation,
+     * not about the protocol.  MS-SMB2 mandates no purge, a client that
+     * narrows its recursion has not asked to lose the changes it was already
+     * waiting for, and Samba delivers across the flip.  Discarding a client's
+     * changes to avoid an ambiguity of our own making is the wrong trade; if
+     * the names ever become ambiguous in practice, the fix is to tag the
+     * events, not to drop them.
+     */
     /* watch_tree flipped — relink in mount entries' subtree list. */
     pthread_mutex_lock(&notify->mount_entries_lock);
 
