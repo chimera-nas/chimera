@@ -27,6 +27,105 @@
 * network-open-info / create-result structs, and smb_handle_open_state) are
 * declared in smb_internal.h so smb_io.c and smb_namespace.c can reuse them. */
 
+/* ---- path table (id <-> full mount-relative path) ---------------------- */
+
+/*
+ * SMB2 FileIds are per-open and cannot be re-opened after CLOSE, so an
+ * open-token fh stores a stable id (XXH3 of the object's full mount-relative
+ * path) instead.  This table maps that id back to the path so open_fh can
+ * re-CREATE any object by path -- the missing piece that made every non-root
+ * fh answer ESTALE.  Keyed by id; the id is a pure function of the path, so a
+ * (vanishingly unlikely) collision of two distinct paths just keeps the most
+ * recent -- open_fh only ever has the id to work from.
+ */
+
+uint64_t
+chimera_smb_path_intern(
+    struct chimera_smb_client_server *server,
+    const char                       *path,
+    int                               path_len)
+{
+    uint64_t             id     = XXH3_64bits(path, (size_t) path_len);
+    unsigned             bucket = (unsigned) (id % CHIMERA_SMB_PATH_BUCKETS);
+    struct smb_path_ent *ent;
+
+    pthread_mutex_lock(&server->path_lock);
+
+    for (ent = server->path_buckets[bucket]; ent; ent = ent->next) {
+        if (ent->id == id) {
+            /* Same id: refresh the path in case a collision remapped it. */
+            if (ent->path_len != path_len ||
+                memcmp(ent->path, path, (size_t) path_len) != 0) {
+                char *dup = malloc((size_t) path_len + 1);
+                if (dup) {
+                    memcpy(dup, path, (size_t) path_len);
+                    dup[path_len] = '\0';
+                    free(ent->path);
+                    ent->path     = dup;
+                    ent->path_len = path_len;
+                }
+            }
+            pthread_mutex_unlock(&server->path_lock);
+            return id;
+        }
+    }
+
+    ent           = calloc(1, sizeof(*ent));
+    ent->id       = id;
+    ent->path_len = path_len;
+    ent->path     = malloc((size_t) path_len + 1);
+    memcpy(ent->path, path, (size_t) path_len);
+    ent->path[path_len]          = '\0';
+    ent->next                    = server->path_buckets[bucket];
+    server->path_buckets[bucket] = ent;
+
+    pthread_mutex_unlock(&server->path_lock);
+    return id;
+} /* chimera_smb_path_intern */
+
+const char *
+chimera_smb_path_resolve(
+    struct chimera_smb_client_server *server,
+    uint64_t                          id,
+    int                              *out_len)
+{
+    unsigned             bucket = (unsigned) (id % CHIMERA_SMB_PATH_BUCKETS);
+    struct smb_path_ent *ent;
+    const char          *path = NULL;
+
+    pthread_mutex_lock(&server->path_lock);
+    for (ent = server->path_buckets[bucket]; ent; ent = ent->next) {
+        if (ent->id == id) {
+            path = ent->path;
+            if (out_len) {
+                *out_len = ent->path_len;
+            }
+            break;
+        }
+    }
+    pthread_mutex_unlock(&server->path_lock);
+    return path;
+} /* chimera_smb_path_resolve */
+
+void
+chimera_smb_path_table_clear(struct chimera_smb_client_server *server)
+{
+    int i;
+
+    pthread_mutex_lock(&server->path_lock);
+    for (i = 0; i < CHIMERA_SMB_PATH_BUCKETS; i++) {
+        struct smb_path_ent *ent = server->path_buckets[i];
+        while (ent) {
+            struct smb_path_ent *next = ent->next;
+            free(ent->path);
+            free(ent);
+            ent = next;
+        }
+        server->path_buckets[i] = NULL;
+    }
+    pthread_mutex_unlock(&server->path_lock);
+} /* chimera_smb_path_table_clear */
+
 /* ---- small helpers ----------------------------------------------------- */
 
 size_t
@@ -575,12 +674,17 @@ chimera_smb_open_at_reply(
     open_state->server_index = (uint8_t) conn->server->index;
     open_state->is_directory = (r.info.file_attributes & SMB2_FILE_ATTRIBUTE_DIRECTORY) != 0;
 
-    smb_apply_attrs(request, &request->open_at.r_attr, &r.info,
-                    XXH3_64bits(request->open_at.name, request->open_at.namelen));
+    /* Intern the full mount-relative path so open_fh can re-CREATE this object
+     * after its handle is evicted; the path id is the handle's fh identity. */
+    uint64_t path_id = chimera_smb_path_intern(conn->server,
+                                               request->open_at.name,
+                                               request->open_at.namelen);
 
-    /* The handle's identity is the opaque open token built from the FileId. */
+    smb_apply_attrs(request, &request->open_at.r_attr, &r.info, path_id);
+
+    /* The handle's identity is the open token built from the path id. */
     request->open_at.r_attr.va_fh_len = chimera_smb_encode_open_fh(
-        request->fh, &r.file_id, request->open_at.r_attr.va_fh);
+        request->fh, path_id, request->open_at.r_attr.va_fh);
     request->open_at.r_attr.va_set_mask |= CHIMERA_VFS_ATTR_FH;
 
     request->open_at.r_vfs_private = (uint64_t) (uintptr_t) open_state;
@@ -694,23 +798,40 @@ chimera_smb_client_open_fh(
     struct chimera_smb_client_conn *conn,
     struct chimera_vfs_request     *request)
 {
-    uint32_t options;
-
-    /* Only the mount root is re-openable by fh; an opaque open token cannot be
-     * re-derived to a path (path-only contract) -- reject with ESTALE. */
-    if (!chimera_smb_fh_is_root(request->fh_len)) {
-        request->status = CHIMERA_VFS_ESTALE;
-        request->complete(request);
-        return;
-    }
+    const char *path;
+    int         path_len;
+    uint32_t    options;
+    uint32_t    desired_access;
 
     options = (request->open_fh.flags & CHIMERA_VFS_OPEN_DIRECTORY)
-              ? SMB2_FILE_DIRECTORY_FILE : 0;
+              ? SMB2_FILE_DIRECTORY_FILE : SMB2_FILE_NON_DIRECTORY_FILE;
 
-    /* CREATE the share root (empty path). */
-    smb_send_create(conn, request, "", 0,
-                    SMB2_FILE_READ_DATA | SMB2_FILE_READ_ATTRIBUTES |
-                    SMB2_FILE_LIST_DIRECTORY,
+    if (chimera_smb_fh_is_root(request->fh_len)) {
+        /* The share root is the empty path; read access suffices for it. */
+        path           = "";
+        path_len       = 0;
+        desired_access = SMB2_FILE_READ_DATA | SMB2_FILE_READ_ATTRIBUTES |
+            SMB2_FILE_LIST_DIRECTORY;
+    } else {
+        /* Re-CREATE any other object from the path its id was interned under
+         * (at open_at time).  A never-seen id means the object was never
+         * opened through this mount -- there is nothing to re-derive. */
+        path = chimera_smb_path_resolve(conn->server,
+                                        chimera_smb_fh_path_id(request->fh),
+                                        &path_len);
+        if (!path) {
+            request->status = CHIMERA_VFS_ESTALE;
+            request->complete(request);
+            return;
+        }
+        /* Match open_at's broad grant so the re-opened handle serves reads,
+         * writes and metadata ops alike (the mount authenticates as one
+         * identity, so the server admits whatever that identity may do). */
+        desired_access = SMB2_FILE_READ_DATA | SMB2_FILE_WRITE_DATA |
+            SMB2_FILE_READ_ATTRIBUTES | SMB2_FILE_WRITE_ATTRIBUTES | SMB2_DELETE;
+    }
+
+    smb_send_create(conn, request, path, path_len, desired_access,
                     SMB2_FILE_SHARE_READ | SMB2_FILE_SHARE_WRITE | SMB2_FILE_SHARE_DELETE,
                     SMB2_FILE_OPEN, options,
                     chimera_smb_open_fh_reply);

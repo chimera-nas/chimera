@@ -51,17 +51,23 @@
 /* The SMB client is a PATH-ONLY VFS backend (no persistent file handles).  File
  * handles come in exactly two shapes:
  *
- *   mount root:  [ mount_id (16) ][ server_index (1) ]                = 17 bytes
- *   open token:  [ mount_id (16) ][ server_index (1) ][ FileId (16) ] = 33 bytes
+ *   mount root:  [ mount_id (16) ][ server_index (1) ]                  = 17 bytes
+ *   open token:  [ mount_id (16) ][ server_index (1) ][ path_id (8) ]   = 25 bytes
  *
- * The mount root is the ONLY re-openable fh (open_fh on it CREATEs the share
- * root).  An open-token fh is an opaque per-open identity built at open time
- * from the SMB FileId; it is used only for open-cache keying and routing, never
- * to re-derive a path, and open_fh of one returns ESTALE.  All metadata is
- * addressed by full mount-relative paths carried in request->X.name. */
+ * SMB2 FileIds are per-open and cannot be handed to a fresh CREATE, so an
+ * open-token fh instead carries a stable 64-bit id (XXH3 of the object's full
+ * mount-relative path).  The server-side path table (chimera_smb_path_intern /
+ * _resolve) maps that id back to the path, so open_fh of ANY object re-CREATEs
+ * it by path -- the same way the mount root re-CREATEs the empty path.  Because
+ * the id is a pure function of the path, the same object always hashes to the
+ * same fh, which lets the VFS open cache share one backend open per object
+ * (every other backend already does this; the old per-FileId token did not).
+ * All metadata is addressed by full mount-relative paths carried in
+ * request->X.name. */
 #define CHIMERA_SMB_FH_SERVER_OFFSET        CHIMERA_VFS_MOUNT_ID_SIZE
+#define CHIMERA_SMB_FH_PATHID_OFFSET        (CHIMERA_VFS_MOUNT_ID_SIZE + 1)
 #define CHIMERA_SMB_ROOT_FH_LEN             (CHIMERA_VFS_MOUNT_ID_SIZE + 1)
-#define CHIMERA_SMB_OPEN_FH_LEN             (CHIMERA_VFS_MOUNT_ID_SIZE + 1 + 16)
+#define CHIMERA_SMB_OPEN_FH_LEN             (CHIMERA_VFS_MOUNT_ID_SIZE + 1 + 8)
 /* Longest mount-relative path the client will encode in a single SMB request. */
 #define CHIMERA_SMB_PATH_MAX                1024
 
@@ -136,9 +142,29 @@ struct chimera_smb_client_file_id {
 /* Per-server registration (global), holding the shared SMB session established
  * once at MOUNT.  Every per-thread connection to this server reuses session_id /
  * tree_id, so a file opened on one thread's connection is usable from another. */
+/* One entry of a server's path table: a stable 64-bit path id (XXH3 of the
+ * full mount-relative path) mapped back to that path, so open_fh can re-CREATE
+ * any object.  Chained by id into chimera_smb_client_server::path_buckets. */
+struct smb_path_ent {
+    uint64_t             id;
+    int                  path_len;
+    char                *path;
+    struct smb_path_ent *next;
+};
+
+#define CHIMERA_SMB_PATH_BUCKETS 256
+
 struct chimera_smb_client_server {
     int                   index;
     int                   in_use;
+
+    /* Path table: id (XXH3 of a full mount-relative path) -> path, so open_fh
+     * can re-CREATE any previously opened object.  Interned at open_at, freed
+     * with the server; the id is a pure function of the path, so entries stay
+     * valid across the per-trace mount cycles that reuse a slot.  path_lock
+     * guards it. */
+    pthread_mutex_t       path_lock;
+    struct smb_path_ent  *path_buckets[CHIMERA_SMB_PATH_BUCKETS];
     char                  hostname[256];
     char                  share[256];
     char                  user[256];
@@ -535,21 +561,33 @@ chimera_smb_fh_is_root(int fh_len)
     return fh_len == CHIMERA_SMB_ROOT_FH_LEN;
 } /* chimera_smb_fh_is_root */
 
-/* Build the opaque open-token fh [mount_id][server_index][FileId] from the
- * (root) fh that carries the mount_id + server_index.  Returns its length. */
+/* Build the open-token fh [mount_id][server_index][path_id] from the (root) fh
+ * that carries the mount_id + server_index.  path_id is the XXH3 of the
+ * object's full mount-relative path (interned via chimera_smb_path_intern).
+ * Returns its length. */
 static inline int
 chimera_smb_encode_open_fh(
-    const uint8_t                           *root_fh,
-    const struct chimera_smb_client_file_id *file_id,
-    uint8_t                                 *out_fh)
+    const uint8_t *root_fh,
+    uint64_t       path_id,
+    uint8_t       *out_fh)
 {
-    uint8_t fragment[1 + sizeof(*file_id)];
+    uint8_t fragment[1 + sizeof(path_id)];
 
     fragment[0] = (uint8_t) chimera_smb_fh_server_index(root_fh);
-    memcpy(fragment + 1, file_id, sizeof(*file_id));
+    memcpy(fragment + 1, &path_id, sizeof(path_id));
 
     return chimera_vfs_encode_fh_parent(root_fh, fragment, sizeof(fragment), out_fh);
 } /* chimera_smb_encode_open_fh */
+
+/* Recover the path id stored in an open-token fh. */
+static inline uint64_t
+chimera_smb_fh_path_id(const uint8_t *fh)
+{
+    uint64_t path_id;
+
+    memcpy(&path_id, fh + CHIMERA_SMB_FH_PATHID_OFFSET, sizeof(path_id));
+    return path_id;
+} /* chimera_smb_fh_path_id */
 
 /* ---- transport (smb.c) ------------------------------------------------- */
 
@@ -629,6 +667,26 @@ void chimera_smb_client_umount(
  * READY handshake once TCP connects (smb_mount.c). */
 void chimera_smb_client_conn_on_connected(
     struct chimera_smb_client_conn *conn);
+
+/* ---- path table (smb_ops.c): id <-> full mount-relative path ----------- */
+
+/* Intern `path` in the server's path table and return its stable 64-bit id
+ * (XXH3 of the path).  Idempotent: the same path always returns the same id. */
+uint64_t chimera_smb_path_intern(
+    struct chimera_smb_client_server *server,
+    const char                       *path,
+    int                               path_len);
+
+/* Resolve a path id back to its path (NULL if unknown).  The returned pointer
+ * is owned by the table and valid until the table is cleared/destroyed. */
+const char * chimera_smb_path_resolve(
+    struct chimera_smb_client_server *server,
+    uint64_t                          id,
+    int                              *out_len);
+
+/* Free every entry in the server's path table (keeps the mutex). */
+void chimera_smb_path_table_clear(
+    struct chimera_smb_client_server *server);
 
 /* ---- file operations (smb_ops.c) --------------------------------------- */
 

@@ -455,12 +455,21 @@ chimera_smb_client_write(
 #define SMB_READDIR_OUTPUT_LENGTH 65536
 
 /* Per-readdir state kept in request->plugin_data across the QUERY_DIRECTORY
- * loop (one VFS readdir call may span several QUERY_DIRECTORY round-trips). */
+ * loop (one VFS readdir call may span several QUERY_DIRECTORY round-trips).
+ *
+ * The VFS readdir cookie is a stable count of real (non ".", "..") entries
+ * already delivered.  SMB2's per-open scan cursor cannot be seeked to an
+ * arbitrary VFS cookie, so each VFS readdir call RESTART_SCANS from the top and
+ * skips `skip` entries before emitting -- correct regardless of how the caller
+ * pages, at the cost of re-listing skipped entries (fine for the directory
+ * sizes this backend serves; a large-directory deployment would cache instead).
+ */
 struct smb_readdir_ctx {
     struct chimera_smb_client_open *open_state;
-    uint64_t                        next_cookie; /* monotonic emit index */
-    int                             first;       /* send SMB2_RESTART_SCANS once */
-    int                             full;        /* emit callback asked us to stop */
+    uint64_t                        skip;   /* real entries to skip this call */
+    uint64_t                        seen;   /* real entries walked this call  */
+    int                             first;  /* send SMB2_RESTART_SCANS once   */
+    int                             full;   /* emit callback asked us to stop */
 };
 
 static void chimera_smb_readdir_query(
@@ -512,7 +521,7 @@ chimera_smb_readdir_reply(
     /* STATUS_NO_MORE_FILES terminates a normal enumeration. */
     if (status == SMB2_STATUS_NO_MORE_FILES) {
         request->readdir.r_eof    = 1;
-        request->readdir.r_cookie = ctx->next_cookie;
+        request->readdir.r_cookie = ctx->seen;
         request->status           = CHIMERA_VFS_OK;
         request->complete(request);
         return;
@@ -541,7 +550,7 @@ chimera_smb_readdir_reply(
      * NextEntryOffset.  out_length is bounded by SMB_READDIR_OUTPUT_LENGTH. */
     if (out_length == 0) {
         request->readdir.r_eof    = 1;
-        request->readdir.r_cookie = ctx->next_cookie;
+        request->readdir.r_cookie = ctx->seen;
         request->status           = CHIMERA_VFS_OK;
         request->complete(request);
         return;
@@ -587,9 +596,18 @@ chimera_smb_readdir_reply(
 
         /* Skip "." and ".." -- the VFS readdir layer does not expect them (it
          * requested EMIT_DOT only at the server's discretion; vfs_nfs/readdir
-         * consumers filter them, so drop them here). */
+         * consumers filter them, so drop them here).  They are not counted, so
+         * the cookie stays stable across the RESTART_SCANS each call issues. */
         if (!((namelen == 1 && name[0] == '.') ||
               (namelen == 2 && name[0] == '.' && name[1] == '.'))) {
+
+            ctx->seen++;
+
+            /* Entries already delivered on a previous call: re-listed by the
+             * RESTART_SCANS but skipped here. */
+            if (ctx->seen <= ctx->skip) {
+                goto next_entry;
+            }
 
             attrs.va_req_mask = request->readdir.attr_mask;
             attrs.va_set_mask = 0;
@@ -602,26 +620,25 @@ chimera_smb_readdir_reply(
             attrs.va_ino       = XXH3_64bits(name, namelen) | 1;
             attrs.va_set_mask |= CHIMERA_VFS_ATTR_INUM;
 
-            ctx->next_cookie++;
-
+            /* The cookie IS the entry's ordinal from the top of the directory,
+             * so a resume with it deterministically re-skips to here. */
             rc = request->readdir.callback(attrs.va_ino,
-                                           ctx->next_cookie,
+                                           ctx->seen,
                                            name, namelen,
                                            &attrs,
                                            request->proto_private_data);
 
-            request->readdir.r_cookie = ctx->next_cookie;
+            request->readdir.r_cookie = ctx->seen;
 
             if (rc) {
-                /* The emit buffer is full: stop, leaving more entries on the
-                 * server.  Report not-EOF; the caller re-issues with the
-                 * resume cookie (we keep the server-side scan position by NOT
-                 * sending RESTART_SCANS on the follow-up). */
+                /* The emit buffer is full: stop.  The caller re-issues with the
+                 * resume cookie, which RESTART_SCANS + skip honors exactly. */
                 ctx->full = 1;
                 break;
             }
         }
 
+ next_entry:
         base++;
 
         if (next_offset == 0) {
@@ -701,15 +718,14 @@ chimera_smb_client_readdir(
         return;
     }
 
-    ctx              = request->plugin_data;
-    ctx->open_state  = open_state;
-    ctx->next_cookie = request->readdir.cookie;
-    /* Restart the server-side scan only when the caller resumes from the start
-     * (cookie 0).  A non-zero resume cookie continues the open's existing
-     * position.  TODO: the SMB server-side scan position is per-open and is not
-     * a stable cursor across separate VFS readdir calls; a precise mid-stream
-     * resume would need to re-skip to request->readdir.cookie entries. */
-    ctx->first = (request->readdir.cookie == 0);
+    ctx             = request->plugin_data;
+    ctx->open_state = open_state;
+    /* Each call re-scans from the top (RESTART_SCANS on its first query) and
+     * skips the entries a previous call already delivered.  This is the only
+     * resume that survives SMB2's forward-only, non-seekable per-open cursor. */
+    ctx->skip  = request->readdir.cookie;
+    ctx->seen  = 0;
+    ctx->first = 1;
     ctx->full  = 0;
 
     request->readdir.r_eof    = 0;
