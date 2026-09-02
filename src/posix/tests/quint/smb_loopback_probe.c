@@ -416,39 +416,28 @@ probe_pin_symlink(void)
     json_decref(res);
 } /* probe_pin_symlink */
 
-/* SD4: SMB2 carries no POSIX owner or mode.  chmod and chown are accepted and
- * dropped, getattr reports the CALLING credential as the owner and a
- * synthesized mode, and directory nlink is always 1.
- *
- * When SD4 is fixed these must become: mode 0700 after the chmod, uid/gid
- * 4242/4243 after the chown, and nlink >= 2 on a directory. */
+/* SD4 (FIXED): the proxy reports real POSIX owner/mode/nlink.  A create stamps
+ * the caller's uid/gid and the requested mode with a modefromsid SET_SECURITY;
+ * chmod/chown write it back the same way; the server emits (and the proxy
+ * reads) the mode as an S-1-5-88-3 ACE.  Assert the round trip: chmod 0700 is
+ * reflected, chown 4242/4243 takes effect, and a directory's link count is the
+ * POSIX >= 2 rather than the old synthesized 1. */
 static void
 probe_pin_no_posix_metadata(void)
 {
-    json_t   *res;
-    long long mode_before, mode_after;
+    json_t *res;
 
     probe_touch("/test/meta");
-
-    res         = op_stat("/test/meta", 1);
-    mode_before = probe_field(res, "mode");
-    json_decref(res);
 
     res = probe_req("chmod");
     probe_set_str(res, "path", "/test/meta");
     probe_set_int(res, "mode", 0700);
     json_decref(probe_call(res));
 
-    res        = op_stat("/test/meta", 1);
-    mode_after = probe_field(res, "mode");
+    res = op_stat("/test/meta", 1);
+    probe_eq("SD4: chmod is reflected in the reported mode",
+             probe_field(res, "mode") & 0777, 0700);
     json_decref(res);
-
-    /* PINNED DEFECT (SD4). */
-    if (mode_after != mode_before) {
-        probe_fail("SD4 mode pin",
-                   "chmod changed the reported mode -- SD4 looks FIXED for "
-                   "mode; assert it equals 0700 and narrow SD4");
-    }
 
     res = probe_req("chown");
     probe_set_str(res, "path", "/test/meta");
@@ -458,26 +447,14 @@ probe_pin_no_posix_metadata(void)
     json_decref(probe_call(res));
 
     res = op_stat("/test/meta", 1);
-    /* PINNED DEFECT (SD4): the owner reported is the CALLER (root, uid 0 --
-     * the identity the loopback's single SMB session authenticated as), not
-     * the one just set. */
-    if (probe_field(res, "uid") == 4242) {
-        probe_fail("SD4 owner pin",
-                   "chown took effect -- SD4 looks FIXED for ownership; "
-                   "assert uid/gid equal 4242/4243 and narrow SD4");
-    } else {
-        probe_eq("SD4: getattr reports the calling credential",
-                 probe_field(res, "uid"), 0);
-    }
+    probe_eq("SD4: chown sets the reported uid", probe_field(res, "uid"), 4242);
+    probe_eq("SD4: chown sets the reported gid", probe_field(res, "gid"), 4243);
     json_decref(res);
 
     res = op_stat("/test/w", 1);
-    /* PINNED DEFECT (SD4): a directory's link count is synthesized as 1; POSIX
-     * requires at least 2 (itself and "."). */
-    if (probe_field(res, "nlink") >= 2) {
-        probe_fail("SD4 nlink pin",
-                   "directory nlink is >= 2 -- SD4 looks FIXED for nlink; "
-                   "assert it and narrow SD4");
+    if (probe_field(res, "nlink") < 2) {
+        probe_fail("SD4: directory nlink",
+                   "a directory's link count is < 2 (POSIX requires itself and \".\")");
     }
     json_decref(res);
 } /* probe_pin_no_posix_metadata */

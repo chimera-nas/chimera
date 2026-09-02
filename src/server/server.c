@@ -114,6 +114,7 @@ struct chimera_server_config {
     int                                   smb_oplocks;
     int                                   smb_notify_disabled;
     int                                   smb_acl_inherited_canonicalize;
+    int                                   smb_mode_from_sid;
     int                                   smb_replay_pending_windows;
     int                                   smb2_max_async_credits;
     uint32_t                              smb_fs_physical_bytes_per_sector;
@@ -252,6 +253,13 @@ chimera_server_config_init(void)
      * verbatim (Samba's "= no" mode that the smb2.acls_non_canonical suite
      * exercises). */
     config->smb_acl_inherited_canonicalize = 1;
+
+    /* Emit POSIX mode as an S-1-5-88-3 "modefromsid" ACE on QUERY SECURITY so a
+     * POSIX-semantics (CIFS-style) client reads the exact mode back, instead of
+     * the Windows ACL memfs synthesizes from it.  Off by default (Windows
+     * clients and the ACL conformance suites want the translated ACL); the
+     * POSIX-over-SMB loopback enables it. */
+    config->smb_mode_from_sid = 0;
 
     /* How a replayed durable-v2 CREATE is answered when its create_guid matches
      * an open whose own CREATE has not completed yet (it is deferred on a
@@ -642,6 +650,20 @@ chimera_server_config_get_smb_acl_inherited_canonicalize(const struct chimera_se
 {
     return config->smb_acl_inherited_canonicalize;
 } /* chimera_server_config_get_smb_acl_inherited_canonicalize */
+
+SYMBOL_EXPORT void
+chimera_server_config_set_smb_mode_from_sid(
+    struct chimera_server_config *config,
+    int                           enable)
+{
+    config->smb_mode_from_sid = enable;
+} /* chimera_server_config_set_smb_mode_from_sid */
+
+SYMBOL_EXPORT int
+chimera_server_config_get_smb_mode_from_sid(const struct chimera_server_config *config)
+{
+    return config->smb_mode_from_sid;
+} /* chimera_server_config_get_smb_mode_from_sid */
 
 SYMBOL_EXPORT void
 chimera_server_config_set_smb_replay_pending_windows(
