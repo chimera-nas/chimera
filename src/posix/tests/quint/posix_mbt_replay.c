@@ -3190,6 +3190,24 @@ dispatch(
     json_t     *rv,
     json_t     *res_v)
 {
+    /* SD-DAC: an SMB mount authenticates ONE identity for its whole life -- the
+     * driver binds it to root -- so every model process reaches the server as
+     * uid 0.  The model's per-uid DAC denials (EACCES/EPERM) therefore cannot
+     * be reproduced: root bypasses the mode/owner check exactly as it would on
+     * a real single-credential CIFS mount.  Skip any op the model denied so
+     * chimera's state stays in lockstep with the model's (which also did
+     * nothing), and tally the deviation.  Gated on g_smb, so native and NFS
+     * backends keep enforcing DAC to the letter.  Retires if the harness ever
+     * mounts N SMB sessions as N users. */
+    if (g_smb) {
+        int64_t exp = tf_field(res_v, "e");
+
+        if (exp == 13 /* EACCES */ || exp == 1 /* EPERM */) {
+            record_dev("SD-DAC");
+            return 0;
+        }
+    }
+
     if (strcmp(tag, "ROpen") == 0) {
         op_open(pid, rv, res_v);
     } else if (strcmp(tag, "RClose") == 0) {
