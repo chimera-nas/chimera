@@ -243,6 +243,11 @@ struct chimera_smb_config {
      * SET_SECURITY; see chimera_server_config_set_smb_acl_inherited_canonicalize
      * for semantics.  Default 1 (canonical). */
     int                            acl_inherited_canonicalize;
+    /* Emit POSIX mode as an S-1-5-88-3 modefromsid ACE on QUERY SECURITY so a
+     * POSIX/CIFS-style client reads the exact mode instead of the translated
+     * Windows ACL memfs synthesizes.  Default 0; the POSIX-over-SMB loopback
+     * enables it (chimera_server_config_set_smb_mode_from_sid). */
+    int                            mode_from_sid;
     /* Answer a replayed durable-v2 CREATE that matches a still-deferred CREATE
      * the Windows way (ACCESS_DENIED, and no replay detection while the original
      * is deferred on a share conflict) rather than the default Samba way

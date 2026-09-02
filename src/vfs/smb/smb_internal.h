@@ -278,6 +278,14 @@ struct smb_create_result {
 * CLOSE chain (ops that open a path transiently: lookup/mkdir/remove/rename). */
 struct chimera_smb_op_state {
     struct chimera_smb_client_file_id file_id;
+    /* Attr-enrich chain (getattr / lookup): the FileId above is queried for
+     * FileAllInformation then the modefromsid security descriptor, merged into
+     * `enrich_attr`, after which `enrich_done` runs (complete, or close+complete
+     * for a transiently-opened path). */
+    struct chimera_vfs_attrs         *enrich_attr;
+    void                              (*enrich_done)(
+        struct chimera_smb_client_conn *conn,
+        struct chimera_vfs_request     *request);
 };
 
 /* The continuation invoked when the reply for a specific message_id arrives.

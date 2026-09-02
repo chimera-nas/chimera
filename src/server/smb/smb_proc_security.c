@@ -1119,6 +1119,14 @@ chimera_smb_query_security_getattr_callback(
 
     acl = (attr->va_set_mask & CHIMERA_VFS_ATTR_ACL) ? attr->va_acl : NULL;
 
+    /* modefromsid mount: report the mode as an S-1-5-88-3 ACE (the emit's
+     * no-ACL path) rather than the Windows ACL memfs synthesizes from it, so a
+     * POSIX/CIFS-style client reads back the exact mode -- including the
+     * setuid/setgid/sticky bits a translated ACL cannot express. */
+    if (request->compound->thread->shared->config.mode_from_sid) {
+        acl = NULL;
+    }
+
     /* The owner and group SIDs and any USER/GROUP ACE need a real SID; count
      * the principals not yet in the cache (those would block) so we know
      * whether to resolve. */

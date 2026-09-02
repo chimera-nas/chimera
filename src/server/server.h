@@ -168,6 +168,18 @@ int
 chimera_server_config_get_smb_acl_inherited_canonicalize(
     const struct chimera_server_config *config);
 
+/* Emit the POSIX mode as a modefromsid ACE on QUERY SECURITY (default off) so a
+ * POSIX/CIFS-style client reads the exact mode rather than the translated
+ * Windows ACL.  Used by the POSIX-over-SMB loopback. */
+void
+chimera_server_config_set_smb_mode_from_sid(
+    struct chimera_server_config *config,
+    int                           enable);
+
+int
+chimera_server_config_get_smb_mode_from_sid(
+    const struct chimera_server_config *config);
+
 /* Answer a replayed durable-v2 CREATE that collides with a still-deferred
  * CREATE the way Windows servers do (STATUS_ACCESS_DENIED, and no replay
  * detection while the original is deferred on a share conflict) instead of the
@@ -930,7 +942,7 @@ chimera_server_get_export(
 
 typedef int (*chimera_server_export_iterate_cb)(
     const struct chimera_nfs_export *export,
-    void *data);
+    void                            *data);
 
 void
 chimera_server_iterate_exports(

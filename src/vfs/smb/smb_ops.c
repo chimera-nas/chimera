@@ -311,6 +311,460 @@ smb_apply_attrs(
     }
 } /* smb_apply_attrs */
 
+/* ---- real POSIX attrs (modefromsid security descriptor + FileAllInfo) ---- */
+
+/* Match S-1-5-88-<kind>-<value> at `buf` and extract <value>.  Mirrors the
+ * server's parse_unix_sid (smb_proc_security.c): revision 1, 3 sub-authorities,
+ * NT authority 5, first sub-authority 88, second == kind, third == value. */
+static int
+smb_parse_unix_sid(
+    const uint8_t *buf,
+    uint32_t       len,
+    uint32_t       kind,
+    uint32_t      *value)
+{
+    if (len < 20 || buf[0] != 1 || buf[1] != 3 || buf[7] != 5) {
+        return -1;
+    }
+    if (smb_wire_le32(buf + 8) != 88 || smb_wire_le32(buf + 12) != kind) {
+        return -1;
+    }
+    *value = smb_wire_le32(buf + 16);
+    return 0;
+} /* smb_parse_unix_sid */
+
+/* Parse the "modefromsid" NT security descriptor the server emits (owner SID ->
+ * uid, group SID -> gid, a DACL ACE's S-1-5-88-3 SID -> mode bits).  Sets the
+ * va_* fields + mask bits it can find.  Mirror of the server's write side in
+ * smb_proc_security.c. */
+static void
+smb_sd_to_attrs(
+    const uint8_t            *sd,
+    uint32_t                  len,
+    struct chimera_vfs_attrs *attr,
+    uint32_t                 *r_perms,
+    int                      *r_have_mode)
+{
+    uint32_t off_owner, off_group, off_dacl, value;
+
+    *r_have_mode = 0;
+    if (len < 20) {
+        return;
+    }
+
+    off_owner = smb_wire_le32(sd + 4);
+    off_group = smb_wire_le32(sd + 8);
+    off_dacl  = smb_wire_le32(sd + 16);
+
+    if (off_owner && off_owner + 20 <= len &&
+        smb_parse_unix_sid(sd + off_owner, len - off_owner, 1, &value) == 0) {
+        attr->va_uid       = value;
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_UID;
+    }
+    if (off_group && off_group + 20 <= len &&
+        smb_parse_unix_sid(sd + off_group, len - off_group, 2, &value) == 0) {
+        attr->va_gid       = value;
+        attr->va_set_mask |= CHIMERA_VFS_ATTR_GID;
+    }
+    if (off_dacl && off_dacl + 8 <= len) {
+        const uint8_t *acl       = sd + off_dacl;
+        uint16_t       acl_size  = smb_wire_le16(acl + 2);
+        uint16_t       ace_count = smb_wire_le16(acl + 4);
+        uint32_t       pos       = 8;
+        uint16_t       i;
+
+        for (i = 0; i < ace_count && pos + 8 <= acl_size &&
+             off_dacl + pos + 8 <= len; i++) {
+            uint16_t ace_size   = smb_wire_le16(acl + pos + 2);
+            uint32_t sid_offset = pos + 8;   /* ACE hdr(4) + access mask(4) */
+
+            if (off_dacl + sid_offset + 20 <= len &&
+                smb_parse_unix_sid(acl + sid_offset, len - off_dacl - sid_offset,
+                                   3, &value) == 0) {
+                *r_perms     = value & 07777;
+                *r_have_mode = 1;
+                break;
+            }
+            if (ace_size == 0) {
+                break;
+            }
+            pos += ace_size;
+        }
+    }
+} /* smb_sd_to_attrs */
+
+/* Parse the fixed head of a FileAllInformation buffer (MS-FSCC 2.4.7) into
+ * attr: times, size, link count, and the POSIX file TYPE derived from the
+ * Windows attribute word (directory / reparse -> symlink / regular).  The
+ * permission bits are a type-appropriate default until the security leg
+ * overwrites them, so a server that cannot answer the SECURITY query still
+ * yields the same attrs the synthesized path always did. */
+static void
+smb_all_info_to_attrs(
+    const uint8_t            *b,
+    int                       len,
+    struct chimera_vfs_attrs *attr)
+{
+    uint32_t file_attributes;
+    uint32_t mode_type, def_perm;
+
+    if (len < 72) {
+        return;
+    }
+
+    smb_filetime_to_timespec(smb_wire_le64(b + 0), &attr->va_btime);
+    smb_filetime_to_timespec(smb_wire_le64(b + 8), &attr->va_atime);
+    smb_filetime_to_timespec(smb_wire_le64(b + 16), &attr->va_mtime);
+    smb_filetime_to_timespec(smb_wire_le64(b + 24), &attr->va_ctime);
+
+    file_attributes     = smb_wire_le32(b + 32);
+    attr->va_space_used = smb_wire_le64(b + 40);
+    attr->va_size       = smb_wire_le64(b + 48);
+    attr->va_nlink      = smb_wire_le32(b + 56);
+    /* The real inode number (b+64) is deliberately NOT used: open/lookup address
+     * objects by a path-derived id, and a real inode here would make one object
+     * report two identities across ops. */
+
+    if (file_attributes & SMB2_FILE_ATTRIBUTE_DIRECTORY) {
+        mode_type     = S_IFDIR;
+        def_perm      = 0755;
+        attr->va_size = 0;          /* a directory carries no data stream */
+    } else if (file_attributes & SMB2_FILE_ATTRIBUTE_REPARSE_POINT) {
+        mode_type = S_IFLNK;
+        def_perm  = 0777;
+    } else {
+        mode_type = S_IFREG;
+        def_perm  = 0644;
+    }
+    attr->va_mode = mode_type | def_perm;
+
+    attr->va_set_mask |= CHIMERA_VFS_ATTR_MODE | CHIMERA_VFS_ATTR_NLINK |
+        CHIMERA_VFS_ATTR_SIZE | CHIMERA_VFS_ATTR_SPACE_USED |
+        CHIMERA_VFS_ATTR_ATIME | CHIMERA_VFS_ATTR_MTIME |
+        CHIMERA_VFS_ATTR_CTIME | CHIMERA_VFS_ATTR_BTIME;
+} /* smb_all_info_to_attrs */
+
+/* Skip a QUERY_INFO reply's fixed header to the start of its output buffer and
+ * return the buffer length (0 on a malformed reply). */
+static uint32_t
+smb_query_info_buffer(struct evpl_iovec_cursor *body)
+{
+    uint16_t structsize, out_offset;
+    uint32_t out_length;
+    int      consumed;
+
+    evpl_iovec_cursor_get_uint16(body, &structsize);
+    evpl_iovec_cursor_get_uint16(body, &out_offset);
+    evpl_iovec_cursor_get_uint32(body, &out_length);
+    (void) structsize;
+
+    consumed = evpl_iovec_cursor_consumed(body);
+    if ((int) out_offset > consumed) {
+        evpl_iovec_cursor_skip(body, (int) out_offset - consumed);
+    }
+    return out_length;
+} /* smb_query_info_buffer */
+
+/* ---- attr-enrich chain: FileAllInformation then SECURITY on a FileId ----- */
+
+/* Second leg: the modefromsid security descriptor -> real uid/gid and the
+ * permission bits, merged onto the type FileAllInformation already set.  Then
+ * the op's terminal action runs (complete, or close+complete). */
+static void
+smb_attr_enrich_security_reply(
+    struct chimera_smb_client_conn *conn,
+    uint32_t                        status,
+    const struct smb2_header       *hdr,
+    struct evpl_iovec_cursor       *body,
+    int                             body_len,
+    void                           *arg)
+{
+    struct chimera_vfs_request  *request = arg;
+    struct chimera_smb_op_state *state   = request->plugin_data;
+    uint8_t                      sd[512];
+    uint32_t                     sd_len, perms = 0;
+    int                          have_mode = 0;
+
+    (void) hdr;
+    (void) body_len;
+
+    /* A security query the server cannot answer leaves the type/nlink/times the
+     * first leg gathered; report those rather than fail the whole op. */
+    if (status == SMB2_STATUS_SUCCESS) {
+        sd_len = smb_query_info_buffer(body);
+        if (sd_len > sizeof(sd)) {
+            sd_len = sizeof(sd);
+        }
+        if (sd_len && evpl_iovec_cursor_get_blob(body, sd, sd_len) >= 0) {
+            smb_sd_to_attrs(sd, sd_len, state->enrich_attr, &perms, &have_mode);
+            if (have_mode) {
+                state->enrich_attr->va_mode =
+                    (state->enrich_attr->va_mode & S_IFMT) | perms;
+            }
+        }
+    }
+
+    state->enrich_done(conn, request);
+} /* smb_attr_enrich_security_reply */
+
+/* Fire the QUERY_INFO SECURITY (owner|group|dacl) leg on the enrich FileId. */
+static void
+smb_attr_enrich_send_security(
+    struct chimera_smb_client_conn *conn,
+    struct chimera_vfs_request     *request)
+{
+    struct chimera_smb_op_state *state = request->plugin_data;
+    struct evpl_iovec            iov;
+    struct evpl_iovec_cursor     cursor;
+    struct smb2_header          *hdr;
+
+    chimera_smb_client_pdu_begin(conn, SMB2_QUERY_INFO, &iov, &cursor, &hdr);
+
+    evpl_iovec_cursor_append_uint16(&cursor, SMB2_QUERY_INFO_REQUEST_SIZE);
+    evpl_iovec_cursor_append_uint8(&cursor, SMB2_INFO_SECURITY);
+    evpl_iovec_cursor_append_uint8(&cursor, 0);             /* FileInfoClass */
+    evpl_iovec_cursor_append_uint32(&cursor, 512);          /* OutputBufferLength */
+    evpl_iovec_cursor_append_uint16(&cursor, 0);            /* InputBufferOffset */
+    evpl_iovec_cursor_append_uint16(&cursor, 0);            /* Reserved */
+    evpl_iovec_cursor_append_uint32(&cursor, 0);            /* InputBufferLength */
+    evpl_iovec_cursor_append_uint32(&cursor, 0x7);          /* OWNER|GROUP|DACL */
+    evpl_iovec_cursor_append_uint32(&cursor, 0);            /* Flags */
+    evpl_iovec_cursor_append_uint64(&cursor, state->file_id.pid);
+    evpl_iovec_cursor_append_uint64(&cursor, state->file_id.vid);
+
+    chimera_smb_client_pdu_finish(conn, &iov, &cursor, request,
+                                  smb_attr_enrich_security_reply, request);
+} /* smb_attr_enrich_send_security */
+
+/* First leg: FileAllInformation -> type, link count, size, times.  Chains the
+ * security leg for owner/group/mode. */
+static void
+smb_attr_enrich_allinfo_reply(
+    struct chimera_smb_client_conn *conn,
+    uint32_t                        status,
+    const struct smb2_header       *hdr,
+    struct evpl_iovec_cursor       *body,
+    int                             body_len,
+    void                           *arg)
+{
+    struct chimera_vfs_request  *request = arg;
+    struct chimera_smb_op_state *state   = request->plugin_data;
+    uint8_t                      buf[512];
+    uint32_t                     out_length;
+
+    (void) hdr;
+    (void) body_len;
+
+    if (status != SMB2_STATUS_SUCCESS) {
+        request->status = chimera_smb_status_to_errno(status);
+        request->complete(request);
+        return;
+    }
+
+    out_length = smb_query_info_buffer(body);
+    if (out_length > sizeof(buf)) {
+        out_length = sizeof(buf);
+    }
+    if (out_length && evpl_iovec_cursor_get_blob(body, buf, out_length) >= 0) {
+        smb_all_info_to_attrs(buf, (int) out_length, state->enrich_attr);
+    }
+
+    smb_attr_enrich_send_security(conn, request);
+} /* smb_attr_enrich_allinfo_reply */
+
+/* Start the AllInfo -> SECURITY enrich chain on `fid`, merging the real attrs
+ * into `attr`, then running `done`.  Caller has already set any synthesized
+ * fallback (fh, ino) on `attr`. */
+static void
+smb_attr_enrich_begin(
+    struct chimera_smb_client_conn          *conn,
+    struct chimera_vfs_request              *request,
+    const struct chimera_smb_client_file_id *fid,
+    struct chimera_vfs_attrs                *attr,
+    void                                   (*done)(
+        struct chimera_smb_client_conn *,
+        struct chimera_vfs_request *))
+{
+    struct chimera_smb_op_state *state = request->plugin_data;
+    struct evpl_iovec            iov;
+    struct evpl_iovec_cursor     cursor;
+    struct smb2_header          *hdr;
+
+    state->file_id     = *fid;
+    state->enrich_attr = attr;
+    state->enrich_done = done;
+
+    chimera_smb_client_pdu_begin(conn, SMB2_QUERY_INFO, &iov, &cursor, &hdr);
+
+    evpl_iovec_cursor_append_uint16(&cursor, SMB2_QUERY_INFO_REQUEST_SIZE);
+    evpl_iovec_cursor_append_uint8(&cursor, SMB2_INFO_FILE);
+    evpl_iovec_cursor_append_uint8(&cursor, SMB2_FILE_ALL_INFO);
+    evpl_iovec_cursor_append_uint32(&cursor, 512);          /* OutputBufferLength */
+    evpl_iovec_cursor_append_uint16(&cursor, 0);            /* InputBufferOffset */
+    evpl_iovec_cursor_append_uint16(&cursor, 0);            /* Reserved */
+    evpl_iovec_cursor_append_uint32(&cursor, 0);            /* InputBufferLength */
+    evpl_iovec_cursor_append_uint32(&cursor, 0);            /* AdditionalInformation */
+    evpl_iovec_cursor_append_uint32(&cursor, 0);            /* Flags */
+    evpl_iovec_cursor_append_uint64(&cursor, fid->pid);
+    evpl_iovec_cursor_append_uint64(&cursor, fid->vid);
+
+    chimera_smb_client_pdu_finish(conn, &iov, &cursor, request,
+                                  smb_attr_enrich_allinfo_reply, request);
+} /* smb_attr_enrich_begin */
+
+/* ---- writing real POSIX attrs (modefromsid security descriptor) --------- */
+
+/* Write an S-1-5-88-<kind>-<value> SID (20 bytes).  Mirror of the server's
+ * write_unix_sid (smb_proc_security.c). */
+static void
+smb_write_unix_sid(
+    uint8_t *buf,
+    uint32_t kind,
+    uint32_t value)
+{
+    buf[0] = 1;                                   /* revision            */
+    buf[1] = 3;                                   /* sub-authority count */
+    buf[2] = 0; buf[3] = 0; buf[4] = 0;
+    buf[5] = 0; buf[6] = 0; buf[7] = 5;           /* NT authority        */
+    smb_wire_set_le32(buf + 8, 88);
+    smb_wire_set_le32(buf + 12, kind);
+    smb_wire_set_le32(buf + 16, value);
+} /* smb_write_unix_sid */
+
+/* Build a self-relative "modefromsid" NT security descriptor carrying whichever
+ * of owner / group / mode is set in `set_attr`, and the AdditionalInformation
+ * flags that tell the server which to apply.  Returns the descriptor length.
+ * `out` must have room for 20 + 3*20 + 36 = 116 bytes. */
+static uint32_t
+smb_build_modefromsid_sd(
+    const struct chimera_vfs_attrs *set_attr,
+    uint8_t                        *out,
+    uint32_t                       *r_addl_info)
+{
+    int      want_uid  = (set_attr->va_set_mask & CHIMERA_VFS_ATTR_UID) != 0;
+    int      want_gid  = (set_attr->va_set_mask & CHIMERA_VFS_ATTR_GID) != 0;
+    int      want_mode = (set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) != 0;
+    uint32_t off       = 20;                        /* after the 20-byte header */
+    uint32_t off_owner = 0, off_group = 0, off_dacl = 0;
+    uint16_t control = 0x8000;                      /* SE_SELF_RELATIVE */
+    uint32_t addl    = 0;
+
+    if (want_uid) {
+        off_owner = off;
+        smb_write_unix_sid(out + off, 1, (uint32_t) set_attr->va_uid);
+        off  += 20;
+        addl |= 0x1;                                /* OWNER_SECURITY_INFORMATION */
+    }
+    if (want_gid) {
+        off_group = off;
+        smb_write_unix_sid(out + off, 2, (uint32_t) set_attr->va_gid);
+        off  += 20;
+        addl |= 0x2;                                /* GROUP_SECURITY_INFORMATION */
+    }
+    if (want_mode) {
+        off_dacl = off;
+        control |= 0x0004;                          /* SE_DACL_PRESENT */
+        /* ACL header (8) + one ALLOW ACE (4 hdr + 4 mask + 20 SID = 28). */
+        out[off]     = 2;                           /* AclRevision */
+        out[off + 1] = 0;
+        smb_wire_set_le16(out + off + 2, 36);       /* AclSize = 8 + 28 */
+        smb_wire_set_le16(out + off + 4, 1);        /* AceCount */
+        smb_wire_set_le16(out + off + 6, 0);        /* Sbz2 */
+        out[off + 8] = 0;                           /* AceType = ACCESS_ALLOWED */
+        out[off + 9] = 0;                           /* AceFlags */
+        smb_wire_set_le16(out + off + 10, 28);       /* AceSize */
+        smb_wire_set_le32(out + off + 12, 0);       /* AccessMask (unused) */
+        smb_write_unix_sid(out + off + 16, 3,
+                           (uint32_t) (set_attr->va_mode & 07777));
+        off  += 8 + 28;
+        addl |= 0x4;                                /* DACL_SECURITY_INFORMATION */
+    }
+
+    /* Security-descriptor header (MS-DTYP 2.4.6, self-relative). */
+    out[0] = 1;                                     /* Revision */
+    out[1] = 0;                                     /* Sbz1     */
+    smb_wire_set_le16(out + 2, control);
+    smb_wire_set_le32(out + 4, off_owner);
+    smb_wire_set_le32(out + 8, off_group);
+    smb_wire_set_le32(out + 12, 0);                 /* OffsetSacl */
+    smb_wire_set_le32(out + 16, off_dacl);
+
+    *r_addl_info = addl;
+    return off;
+} /* smb_build_modefromsid_sd */
+
+/* True when `set_attr` carries any POSIX owner/group/mode the server can apply
+ * through a modefromsid security descriptor. */
+static inline int
+smb_set_attr_has_posix_perm(const struct chimera_vfs_attrs *set_attr)
+{
+    return set_attr && (set_attr->va_set_mask &
+                        (CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID |
+                         CHIMERA_VFS_ATTR_MODE)) != 0;
+} /* smb_set_attr_has_posix_perm */
+
+/* The POSIX owner/group/mode a freshly created object must carry.  The mount
+ * session is a single identity (root), so the server would otherwise leave the
+ * object owned by root; POSIX makes a new object owned by the creator's
+ * effective uid/gid, so stamp that (plus the requested mode) -- what the model
+ * created it as.  Returns 1 if there is anything to stamp. */
+static int
+smb_build_create_owner_attrs(
+    const struct chimera_vfs_request *request,
+    const struct chimera_vfs_attrs   *set_attr,
+    struct chimera_vfs_attrs         *out)
+{
+    memset(out, 0, sizeof(*out));
+
+    if (request->cred) {
+        out->va_uid       = request->cred->uid;
+        out->va_gid       = request->cred->gid;
+        out->va_set_mask |= CHIMERA_VFS_ATTR_UID | CHIMERA_VFS_ATTR_GID;
+    }
+    if (set_attr && (set_attr->va_set_mask & CHIMERA_VFS_ATTR_MODE)) {
+        out->va_mode      = set_attr->va_mode;
+        out->va_set_mask |= CHIMERA_VFS_ATTR_MODE;
+    }
+
+    return out->va_set_mask != 0;
+} /* smb_build_create_owner_attrs */
+
+/* Send an SMB2 SET_INFO SECURITY on `fid` carrying the modefromsid descriptor
+ * built from `set_attr`, then invoke `reply_cb`.  The caller must have opened
+ * `fid` with WRITE_OWNER (for owner/group) and/or WRITE_DAC (for mode). */
+static void
+smb_send_set_security(
+    struct chimera_smb_client_conn          *conn,
+    struct chimera_vfs_request              *request,
+    const struct chimera_smb_client_file_id *fid,
+    const struct chimera_vfs_attrs          *set_attr,
+    chimera_smb_client_reply_cb              reply_cb)
+{
+    struct evpl_iovec        iov;
+    struct evpl_iovec_cursor cursor;
+    struct smb2_header      *hdr;
+    uint8_t                  sd[128];
+    uint32_t                 sd_len, addl = 0;
+
+    sd_len = smb_build_modefromsid_sd(set_attr, sd, &addl);
+
+    chimera_smb_client_pdu_begin(conn, SMB2_SET_INFO, &iov, &cursor, &hdr);
+
+    evpl_iovec_cursor_append_uint16(&cursor, SMB2_SET_INFO_REQUEST_SIZE);
+    evpl_iovec_cursor_append_uint8(&cursor, SMB2_INFO_SECURITY);
+    evpl_iovec_cursor_append_uint8(&cursor, 0);             /* FileInfoClass */
+    evpl_iovec_cursor_append_uint32(&cursor, sd_len);       /* BufferLength */
+    evpl_iovec_cursor_append_uint16(&cursor, sizeof(struct smb2_header) + 32); /* BufferOffset */
+    evpl_iovec_cursor_append_uint16(&cursor, 0);            /* Reserved */
+    evpl_iovec_cursor_append_uint32(&cursor, addl);         /* AdditionalInformation */
+    evpl_iovec_cursor_append_uint64(&cursor, fid->pid);
+    evpl_iovec_cursor_append_uint64(&cursor, fid->vid);
+    evpl_iovec_cursor_append_blob(&cursor, sd, sd_len);
+
+    chimera_smb_client_pdu_finish(conn, &iov, &cursor, request, reply_cb,
+                                  request);
+} /* smb_send_set_security */
+
 /* Send an SMB2 CREATE on `path`, optionally carrying `ctx` create contexts (a
  * pre-built, already-chained context blob) after the name. */
 void
@@ -813,49 +1267,16 @@ chimera_smb_client_statfs(
                                   chimera_smb_statfs_reply, request);
 } /* chimera_smb_client_statfs */
 
+/* getattr terminal: the enrich chain has merged the real attrs; report. */
 static void
-chimera_smb_getattr_reply(
+chimera_smb_getattr_enrich_done(
     struct chimera_smb_client_conn *conn,
-    uint32_t                        status,
-    const struct smb2_header       *hdr,
-    struct evpl_iovec_cursor       *body,
-    int                             body_len,
-    void                           *arg)
+    struct chimera_vfs_request     *request)
 {
-    struct chimera_vfs_request     *request    = arg;
-    struct chimera_smb_client_open *open_state = smb_handle_open_state(request->getattr.handle);
-    struct smb_open_info            info;
-    uint16_t                        structsize, out_offset;
-    uint32_t                        out_length;
-    int                             consumed;
-
     (void) conn;
-    (void) hdr;
-    (void) body_len;
-
-    if (status != SMB2_STATUS_SUCCESS) {
-        request->status = chimera_smb_status_to_errno(status);
-        request->complete(request);
-        return;
-    }
-
-    evpl_iovec_cursor_get_uint16(body, &structsize);
-    evpl_iovec_cursor_get_uint16(body, &out_offset);
-    evpl_iovec_cursor_get_uint32(body, &out_length);
-
-    consumed = evpl_iovec_cursor_consumed(body);
-    if (out_offset > consumed) {
-        evpl_iovec_cursor_skip(body, out_offset - consumed);
-    }
-
-    smb_parse_open_info(body, &info);
-
-    smb_apply_attrs(request, &request->getattr.r_attr, &info,
-                    open_state->file_id.pid);
-
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
-} /* chimera_smb_getattr_reply */
+} /* chimera_smb_getattr_enrich_done */
 
 void
 chimera_smb_client_getattr(
@@ -863,9 +1284,6 @@ chimera_smb_client_getattr(
     struct chimera_vfs_request     *request)
 {
     struct chimera_smb_client_open *open_state = smb_handle_open_state(request->getattr.handle);
-    struct evpl_iovec               iov;
-    struct evpl_iovec_cursor        cursor;
-    struct smb2_header             *hdr;
 
     if (!open_state) {
         request->status = CHIMERA_VFS_EINVAL;
@@ -879,23 +1297,22 @@ chimera_smb_client_getattr(
         return;
     }
 
-    /* SMB2 QUERY_INFO, FILE / FileNetworkOpenInformation, on the open FileId. */
-    chimera_smb_client_pdu_begin(conn, SMB2_QUERY_INFO, &iov, &cursor, &hdr);
+    /* Synthesized fallbacks (kept if the security leg cannot answer): a stable
+     * per-handle inode id, and the calling credential as owner. */
+    request->getattr.r_attr.va_ino       = open_state->file_id.pid | 1;
+    request->getattr.r_attr.va_set_mask |= CHIMERA_VFS_ATTR_INUM;
+    if (request->cred) {
+        request->getattr.r_attr.va_uid       = request->cred->uid;
+        request->getattr.r_attr.va_gid       = request->cred->gid;
+        request->getattr.r_attr.va_set_mask |= CHIMERA_VFS_ATTR_UID |
+            CHIMERA_VFS_ATTR_GID;
+    }
 
-    evpl_iovec_cursor_append_uint16(&cursor, SMB2_QUERY_INFO_REQUEST_SIZE);
-    evpl_iovec_cursor_append_uint8(&cursor, SMB2_INFO_FILE);
-    evpl_iovec_cursor_append_uint8(&cursor, SMB2_FILE_NETWORK_OPEN_INFO);
-    evpl_iovec_cursor_append_uint32(&cursor, SMB2_FILE_NETWORK_OPEN_INFO_SIZE); /* OutputBufferLength */
-    evpl_iovec_cursor_append_uint16(&cursor, 0);             /* InputBufferOffset */
-    evpl_iovec_cursor_append_uint16(&cursor, 0);             /* Reserved */
-    evpl_iovec_cursor_append_uint32(&cursor, 0);             /* InputBufferLength */
-    evpl_iovec_cursor_append_uint32(&cursor, 0);             /* AdditionalInformation */
-    evpl_iovec_cursor_append_uint32(&cursor, 0);             /* Flags */
-    evpl_iovec_cursor_append_uint64(&cursor, open_state->file_id.pid);
-    evpl_iovec_cursor_append_uint64(&cursor, open_state->file_id.vid);
-
-    chimera_smb_client_pdu_finish(conn, &iov, &cursor, request,
-                                  chimera_smb_getattr_reply, request);
+    /* FileAllInformation (type, link count, size, times) then the modefromsid
+     * security descriptor (owner/group/mode) -- the real POSIX attrs. */
+    smb_attr_enrich_begin(conn, request, &open_state->file_id,
+                          &request->getattr.r_attr,
+                          chimera_smb_getattr_enrich_done);
 } /* chimera_smb_client_getattr */
 
 /* ---- lookup_at (full path, transient open) ----------------------------- */
@@ -919,6 +1336,18 @@ chimera_smb_lookup_close_reply(
 
     request->complete(request);
 } /* chimera_smb_lookup_close_reply */
+
+/* lookup terminal: close the transient handle (its reply completes the op). */
+static void
+chimera_smb_lookup_enrich_done(
+    struct chimera_smb_client_conn *conn,
+    struct chimera_vfs_request     *request)
+{
+    struct chimera_smb_op_state *state = request->plugin_data;
+
+    smb_send_close(conn, request, &state->file_id,
+                   chimera_smb_lookup_close_reply);
+} /* chimera_smb_lookup_enrich_done */
 
 static void
 chimera_smb_lookup_create_reply(
@@ -968,12 +1397,16 @@ chimera_smb_lookup_create_reply(
         request->lookup_at.r_attr.va_set_mask |= CHIMERA_VFS_ATTR_FH;
     }
 
+    /* Synthesized fallback (fh + ino + calling-cred owner); the enrich chain
+     * then overwrites type/nlink/size/times and owner/mode with the real attrs
+     * before the transient handle is closed. */
     smb_apply_attrs(request, &request->lookup_at.r_attr, &r.info, path_id);
 
     request->status = CHIMERA_VFS_OK;
-    state->file_id  = r.file_id;
+    (void) state;
 
-    smb_send_close(conn, request, &state->file_id, chimera_smb_lookup_close_reply);
+    smb_attr_enrich_begin(conn, request, &r.file_id, &request->lookup_at.r_attr,
+                          chimera_smb_lookup_enrich_done);
 } /* chimera_smb_lookup_create_reply */
 
 void
@@ -1004,6 +1437,29 @@ chimera_smb_client_lookup_at(
 } /* chimera_smb_client_lookup_at */
 
 /* ---- open_at / open_fh (persistent open) ------------------------------- */
+
+/* open_at terminal after a create's owner/mode stamp: the object now carries
+ * the real POSIX attrs; report the open regardless of the stamp's status. */
+static void
+chimera_smb_open_at_secured_reply(
+    struct chimera_smb_client_conn *conn,
+    uint32_t                        status,
+    const struct smb2_header       *hdr,
+    struct evpl_iovec_cursor       *body,
+    int                             body_len,
+    void                           *arg)
+{
+    struct chimera_vfs_request *request = arg;
+
+    (void) conn;
+    (void) status;
+    (void) hdr;
+    (void) body;
+    (void) body_len;
+
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* chimera_smb_open_at_secured_reply */
 
 static void
 chimera_smb_open_at_reply(
@@ -1063,6 +1519,23 @@ chimera_smb_open_at_reply(
     request->open_at.r_vfs_private = (uint64_t) (uintptr_t) open_state;
     request->open_at.r_created     = (r.create_action == SMB2_CREATE_ACTION_CREATED);
 
+    /* A fresh create is born owned by the mount session (one identity for the
+     * whole mount); stamp the caller's real POSIX owner/mode onto it with a
+     * modefromsid SET_SECURITY, exactly as cifs.ko does after a create, so the
+     * object matches what the model created under that uid.  The open requested
+     * WRITE_OWNER|WRITE_DAC for this.  A failed stamp still yields a usable
+     * handle -- complete OK rather than lose the create. */
+    if (request->open_at.r_created) {
+        struct chimera_vfs_attrs owner;
+
+        if (smb_build_create_owner_attrs(request, request->open_at.set_attr,
+                                         &owner)) {
+            smb_send_set_security(conn, request, &open_state->file_id, &owner,
+                                  chimera_smb_open_at_secured_reply);
+            return;
+        }
+    }
+
     request->status = CHIMERA_VFS_OK;
     request->complete(request);
 } /* chimera_smb_open_at_reply */
@@ -1112,15 +1585,21 @@ chimera_smb_client_open_at(
         options |= SMB2_FILE_OPEN_REPARSE_POINT;
     }
 
+    /* WRITE_OWNER|WRITE_DAC|READ_CONTROL: the rights the server enforces for a
+     * modefromsid SET_SECURITY, so this handle can stamp the caller's POSIX
+     * owner/mode -- at create time here, or later via fchmod/chown/setattr on
+     * the same handle.  The mount session is root, which the server grants. */
     desired_access = SMB2_FILE_READ_DATA | SMB2_FILE_WRITE_DATA |
-        SMB2_FILE_READ_ATTRIBUTES | SMB2_FILE_WRITE_ATTRIBUTES | SMB2_DELETE;
+        SMB2_FILE_READ_ATTRIBUTES | SMB2_FILE_WRITE_ATTRIBUTES | SMB2_DELETE |
+        SMB2_READ_CONTROL | SMB2_WRITE_DACL | SMB2_WRITE_OWNER;
 
     /* Opening the link node itself (NOFOLLOW: lstat/readlink/lchown) must not
      * ask for data access -- a symlink reparse point has no data stream and the
-     * server refuses READ/WRITE_DATA on it.  Attribute + delete rights are all
-     * these callers use. */
+     * server refuses READ/WRITE_DATA on it.  Attribute + delete + the SD rights
+     * are all these callers use. */
     if (request->open_at.flags & CHIMERA_VFS_OPEN_NOFOLLOW) {
-        desired_access = SMB2_FILE_READ_ATTRIBUTES | SMB2_DELETE;
+        desired_access = SMB2_FILE_READ_ATTRIBUTES | SMB2_DELETE |
+            SMB2_READ_CONTROL | SMB2_WRITE_DACL | SMB2_WRITE_OWNER;
     }
 
     /* Request a read+handle-caching lease on file opens.  HANDLE caching is the
@@ -1213,11 +1692,14 @@ chimera_smb_client_open_fh(
               ? SMB2_FILE_DIRECTORY_FILE : SMB2_FILE_NON_DIRECTORY_FILE;
 
     if (chimera_smb_fh_is_root(request->fh_len)) {
-        /* The share root is the empty path; read access suffices for it. */
+        /* The share root is the empty path.  It also needs the SD rights so a
+         * chmod/chown of the export root (the model's fsInit normalization)
+         * lands rather than failing ACCESS_DENIED. */
         path           = "";
         path_len       = 0;
         desired_access = SMB2_FILE_READ_DATA | SMB2_FILE_READ_ATTRIBUTES |
-            SMB2_FILE_LIST_DIRECTORY;
+            SMB2_FILE_LIST_DIRECTORY |
+            SMB2_READ_CONTROL | SMB2_WRITE_DACL | SMB2_WRITE_OWNER;
     } else {
         /* Re-CREATE any other object from the path its id was interned under
          * (at open_at time).  A never-seen id means the object was never
@@ -1231,10 +1713,12 @@ chimera_smb_client_open_fh(
             return;
         }
         /* Match open_at's broad grant so the re-opened handle serves reads,
-         * writes and metadata ops alike (the mount authenticates as one
-         * identity, so the server admits whatever that identity may do). */
+         * writes and metadata ops alike, including the WRITE_OWNER|WRITE_DAC a
+         * later chmod/chown needs (the mount authenticates as one identity, so
+         * the server admits whatever that identity may do). */
         desired_access = SMB2_FILE_READ_DATA | SMB2_FILE_WRITE_DATA |
-            SMB2_FILE_READ_ATTRIBUTES | SMB2_FILE_WRITE_ATTRIBUTES | SMB2_DELETE;
+            SMB2_FILE_READ_ATTRIBUTES | SMB2_FILE_WRITE_ATTRIBUTES | SMB2_DELETE |
+            SMB2_READ_CONTROL | SMB2_WRITE_DACL | SMB2_WRITE_OWNER;
     }
 
     smb_send_create(conn, request, path, path_len, desired_access,
@@ -1264,6 +1748,27 @@ chimera_smb_mkdir_close_reply(
 
     request->complete(request);
 } /* chimera_smb_mkdir_close_reply */
+
+/* After the new directory's owner/mode stamp: close the transient handle. */
+static void
+chimera_smb_mkdir_secured_reply(
+    struct chimera_smb_client_conn *conn,
+    uint32_t                        status,
+    const struct smb2_header       *hdr,
+    struct evpl_iovec_cursor       *body,
+    int                             body_len,
+    void                           *arg)
+{
+    struct chimera_vfs_request  *request = arg;
+    struct chimera_smb_op_state *state   = request->plugin_data;
+
+    (void) status;
+    (void) hdr;
+    (void) body;
+    (void) body_len;
+
+    smb_send_close(conn, request, &state->file_id, chimera_smb_mkdir_close_reply);
+} /* chimera_smb_mkdir_secured_reply */
 
 static void
 chimera_smb_mkdir_create_reply(
@@ -1296,6 +1801,19 @@ chimera_smb_mkdir_create_reply(
     request->status = CHIMERA_VFS_OK;
     state->file_id  = r.file_id;
 
+    /* Stamp the caller's real POSIX owner/mode onto the new directory before
+     * closing (the create opened with WRITE_OWNER|WRITE_DAC). */
+    {
+        struct chimera_vfs_attrs owner;
+
+        if (smb_build_create_owner_attrs(request, request->mkdir_at.set_attr,
+                                         &owner)) {
+            smb_send_set_security(conn, request, &state->file_id, &owner,
+                                  chimera_smb_mkdir_secured_reply);
+            return;
+        }
+    }
+
     smb_send_close(conn, request, &state->file_id, chimera_smb_mkdir_close_reply);
 } /* chimera_smb_mkdir_create_reply */
 
@@ -1311,7 +1829,8 @@ chimera_smb_client_mkdir_at(
 
     smb_send_create(conn, request,
                     request->mkdir_at.name, request->mkdir_at.name_len,
-                    SMB2_FILE_READ_ATTRIBUTES,
+                    SMB2_FILE_READ_ATTRIBUTES | SMB2_READ_CONTROL |
+                    SMB2_WRITE_DACL | SMB2_WRITE_OWNER,
                     SMB2_FILE_SHARE_READ | SMB2_FILE_SHARE_WRITE | SMB2_FILE_SHARE_DELETE,
                     SMB2_FILE_CREATE, SMB2_FILE_DIRECTORY_FILE,
                     chimera_smb_mkdir_create_reply);
@@ -1392,9 +1911,9 @@ chimera_smb_client_remove_at(
         (CHIMERA_VFS_ATTR_ATIME | CHIMERA_VFS_ATTR_MTIME | \
          CHIMERA_VFS_ATTR_CTIME | CHIMERA_VFS_ATTR_BTIME)
 
-/* Final SET_INFO reply (size-only, times-only, or the times leg of size+times). */
+/* Terminal SET_INFO reply for the modefromsid security leg (owner/group/mode). */
 static void
-chimera_smb_setattr_reply(
+chimera_smb_setattr_security_reply(
     struct chimera_smb_client_conn *conn,
     uint32_t                        status,
     const struct smb2_header       *hdr,
@@ -1411,7 +1930,53 @@ chimera_smb_setattr_reply(
 
     request->status = chimera_smb_status_to_errno(status);
     request->complete(request);
-} /* chimera_smb_setattr_reply */
+} /* chimera_smb_setattr_security_reply */
+
+/* After the size/times legs: apply POSIX owner/group/mode with a modefromsid
+ * SET_SECURITY if any was requested, else finish.  The handle carries
+ * WRITE_OWNER|WRITE_DAC (every regular open requests them). */
+static void
+chimera_smb_setattr_data_done(
+    struct chimera_smb_client_conn *conn,
+    struct chimera_vfs_request     *request)
+{
+    struct chimera_smb_client_open *open_state = smb_handle_open_state(request->setattr.handle);
+
+    if (open_state && smb_set_attr_has_posix_perm(request->setattr.set_attr)) {
+        smb_send_set_security(conn, request, &open_state->file_id,
+                              request->setattr.set_attr,
+                              chimera_smb_setattr_security_reply);
+        return;
+    }
+
+    request->status = CHIMERA_VFS_OK;
+    request->complete(request);
+} /* chimera_smb_setattr_data_done */
+
+/* Reply for the times (FileBasicInformation) leg: chain the security leg. */
+static void
+chimera_smb_setattr_basic_reply(
+    struct chimera_smb_client_conn *conn,
+    uint32_t                        status,
+    const struct smb2_header       *hdr,
+    struct evpl_iovec_cursor       *body,
+    int                             body_len,
+    void                           *arg)
+{
+    struct chimera_vfs_request *request = arg;
+
+    (void) hdr;
+    (void) body;
+    (void) body_len;
+
+    if (status != SMB2_STATUS_SUCCESS) {
+        request->status = chimera_smb_status_to_errno(status);
+        request->complete(request);
+        return;
+    }
+
+    chimera_smb_setattr_data_done(conn, request);
+} /* chimera_smb_setattr_basic_reply */
 
 /* SET_INFO FileBasicInformation: set the requested timestamps (a zero FILETIME
  * means "leave unchanged"; FileAttributes 0 likewise). */
@@ -1456,7 +2021,7 @@ chimera_smb_setattr_send_basic(
     evpl_iovec_cursor_append_uint32(&cursor, 0);                             /* Reserved */
 
     chimera_smb_client_pdu_finish(conn, &iov, &cursor, request,
-                                  chimera_smb_setattr_reply, request);
+                                  chimera_smb_setattr_basic_reply, request);
 } /* chimera_smb_setattr_send_basic */
 
 /* After the size leg: chain the times leg if any timestamps were also set. */
@@ -1486,8 +2051,7 @@ chimera_smb_setattr_size_reply(
         return;
     }
 
-    request->status = CHIMERA_VFS_OK;
-    request->complete(request);
+    chimera_smb_setattr_data_done(conn, request);
 } /* chimera_smb_setattr_size_reply */
 
 void
@@ -1507,9 +2071,9 @@ chimera_smb_client_setattr(
         return;
     }
 
-    /* SMB can set size (FileEndOfFileInformation) and timestamps (FileBasic-
-     * Information).  POSIX mode/owner have no SMB2 equivalent against this
-     * server, so those bits are accepted but not applied. */
+    /* SMB sets size (FileEndOfFileInformation), timestamps (FileBasic-
+     * Information), and POSIX owner/group/mode (a modefromsid SET_SECURITY --
+     * chained last, after any size/times leg). */
     if (set_attr->va_set_mask & CHIMERA_VFS_ATTR_SIZE) {
         /* Set size first, then chain the times leg from its reply. */
         chimera_smb_client_pdu_begin(conn, SMB2_SET_INFO, &iov, &cursor, &hdr);
@@ -1535,9 +2099,8 @@ chimera_smb_client_setattr(
         return;
     }
 
-    /* Nothing SMB can apply (e.g. mode/owner only) -- accept as a no-op. */
-    request->status = CHIMERA_VFS_OK;
-    request->complete(request);
+    /* Owner/group/mode only (or nothing): straight to the security leg. */
+    chimera_smb_setattr_data_done(conn, request);
 } /* chimera_smb_client_setattr */
 
 /* ---- commit (FLUSH) ---------------------------------------------------- */
