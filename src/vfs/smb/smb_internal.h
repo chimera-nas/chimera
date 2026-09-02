@@ -528,9 +528,14 @@ smb_fill_attrs_from_network_open(
     uint32_t                  file_attributes)
 {
     int is_dir = (file_attributes & SMB2_FILE_ATTRIBUTE_DIRECTORY) != 0;
+    int is_lnk = (file_attributes & SMB2_FILE_ATTRIBUTE_REPARSE_POINT) != 0;
 
-    /* SMB has no POSIX mode; synthesize type + a default permission. */
-    attr->va_mode       = (is_dir ? (S_IFDIR | 0755) : (S_IFREG | 0644));
+    /* SMB has no POSIX mode; synthesize type + a default permission.  A reparse
+     * point is reported as a symlink so the VFS core recognizes it and follows
+     * (or, for lstat/readlink, sees the link) -- without the type the core
+     * cannot resolve a symlink at all and every path through one ELOOPs. */
+    attr->va_mode = is_dir ? (S_IFDIR | 0755) :
+        is_lnk ? (S_IFLNK | 0777) : (S_IFREG | 0644);
     attr->va_nlink      = 1;
     attr->va_size       = end_of_file;
     attr->va_space_used = alloc_size;
