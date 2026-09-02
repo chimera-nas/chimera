@@ -13,7 +13,7 @@
 #include "vfs/vfs.h"
 #include "vfs/sdk/vfs_cred.h"
 #include "vfs/vfs_claim.h"
-#include "smb2.h"
+#include "smb_common/smb2.h"
 
 struct chimera_smb_share;
 struct chimera_smb_conn;

@@ -811,7 +811,7 @@ smb2w_ntlm_auth_ntlmv2(
  * supplied instead by the MS-XCA reference vectors in smb2_compress_probe.c --
  * bytes produced by Windows, not by chimera.  What IS independent here is the
  * framing above: field offsets, the chained payload walk, and the bounds. */
-#include "server/smb/smb_compress.h"
+#include "smb_common/smb_compress.h"
 
 /* Dispatch one raw codec segment. */
 static inline int

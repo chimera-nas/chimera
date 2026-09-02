@@ -7,9 +7,9 @@
 
 #include "smb_notify.h"
 #include "smb_internal.h"
-#include "smb_signing.h"
+#include "smb_common/smb_signing.h"
 #include "smb_string.h"
-#include "smb2.h"
+#include "smb_common/smb2.h"
 #include "vfs/vfs_notify.h"
 
 /* Map a Windows-style SMB2 CompletionFilter to a chimera VFS event mask.

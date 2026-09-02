@@ -4,7 +4,7 @@
 
 #include <sys/time.h>
 #include <strings.h>
-#include "server/smb/smb2.h"
+#include "smb_common/smb2.h"
 #include "server/smb/smb_session.h"
 #include "smb_internal.h"
 #include "smb_procs.h"

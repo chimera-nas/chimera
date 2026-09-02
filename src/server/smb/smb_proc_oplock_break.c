@@ -5,7 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "smb2.h"
+#include "smb_common/smb2.h"
 #include "smb_internal.h"
 #include "smb_procs.h"
 #include "smb_session.h"

@@ -27,8 +27,8 @@
 #include "smb_internal.h"
 #include "smb_async_interim.h"
 #include "smb_procs.h"
-#include "smb_signing.h"
-#include "smb2.h"
+#include "smb_common/smb_signing.h"
+#include "smb_common/smb2.h"
 
 #include "evpl/evpl.h"
 

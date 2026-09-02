@@ -8,7 +8,7 @@ add_library(chimera_smb SHARED
     smb_proc_set_info.c smb_proc_tree_disconnect.c smb_proc_logoff.c
     smb_proc_write.c smb_proc_read.c smb_proc_query_info.c
     smb_proc_query_directory.c smb_proc_ioctl.c smb_proc_flush.c smb_proc_echo.c
-    smb_lsarpc.c smb_srvsvc.c smb_samr.c smb_wkssvc.c smb_signing.c smb_encrypt.c smb_compress.c smb_proc_set_info_rename.c smb_proc_security.c
+    smb_lsarpc.c smb_srvsvc.c smb_samr.c smb_wkssvc.c smb_sign_request.c smb_secure_send.c smb_proc_set_info_rename.c smb_proc_security.c
     smb_proc_reparse.c smb_proc_change_notify.c smb_proc_cancel.c
     smb_proc_sparse.c smb_proc_copychunk.c smb_proc_copyoffload.c
     smb_proc_lock.c smb_proc_oplock_break.c
@@ -38,7 +38,7 @@ set_source_files_properties(${NDR_GEN_SRCS}
     PROPERTIES COMPILE_OPTIONS "-Wno-unused;-Wno-format-truncation")
 add_dependencies(chimera_smb ndrzcc)
 
-target_link_libraries(chimera_smb chimera_vfs evpl gssapi_krb5)
+target_link_libraries(chimera_smb chimera_smb_common chimera_vfs evpl gssapi_krb5)
 
 # Conditionally link libwbclient for Winbind integration
 if(WBCLIENT_FOUND)

@@ -5,7 +5,7 @@
 #include "smb_internal.h"
 #include "smb_procs.h"
 #include "smb_notify.h"
-#include "smb2.h"
+#include "smb_common/smb2.h"
 
 /*
  * SMB2_CANCEL has no request body beyond the header.

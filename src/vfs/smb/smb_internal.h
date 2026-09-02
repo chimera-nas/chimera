@@ -19,7 +19,10 @@
 #include "evpl/evpl.h"
 #include "common/logging.h"
 #include "common/evpl_iovec_cursor.h"
-#include "server/smb/smb2.h"
+#include "smb_common/smb2.h"
+#include "smb_common/smb_signing.h"
+#include "smb_common/smb_encrypt.h"
+#include "smb_common/smb_compress.h"
 #include "smb_ntlm.h"
 
 #define chimera_smbclient_debug(...) chimera_debug("smbclient", __FILE__, __LINE__, __VA_ARGS__)
@@ -292,42 +295,47 @@ enum chimera_smb_client_conn_state {
 };
 
 struct chimera_smb_client_conn {
-    struct chimera_smb_client_thread      *thread;
-    struct evpl                           *evpl;
-    struct evpl_bind                      *bind;
-    struct chimera_smb_client_server      *server;
+    struct chimera_smb_client_thread   *thread;
+    struct evpl                        *evpl;
+    struct evpl_bind                   *bind;
+    struct chimera_smb_client_server   *server;
 
-    enum chimera_smb_client_conn_state     state;
-    int                                    closing; /* evpl_close already issued  */
+    enum chimera_smb_client_conn_state  state;
+    int                                 closing;    /* evpl_close already issued  */
 
-    uint64_t                               next_message_id;
+    uint64_t                            next_message_id;
 
-    struct chimera_smb_client_pending     *pending; /* in-flight, by message_id  */
-    struct chimera_smb_client_deferred    *deferred; /* queued until READY        */
+    struct chimera_smb_client_pending  *pending;    /* in-flight, by message_id  */
+    struct chimera_smb_client_deferred *deferred;    /* queued until READY        */
 
     /* All connections a thread owns are linked here so thread teardown can
      * detach every one (the DISCONNECTED notify that frees a conn is deferred to
      * evpl_destroy, after the thread struct is gone). */
-    struct chimera_smb_client_conn        *list_next;
+    struct chimera_smb_client_conn     *list_next;
 
     /* NTLM state + mount request, used only by the connection that establishes
      * the shared session (the MOUNT connection). */
-    struct smb_ntlm_client                 ntlm;
-    struct chimera_vfs_request            *mount_request;
+    struct smb_ntlm_client              ntlm;
+    struct chimera_vfs_request         *mount_request;
 
     /* 3.1.1 preauth-integrity hash, maintained ONLY on the mount connection
      * while it runs NEGOTIATE -> SESSION_SETUP.  Folded over the raw SMB2
      * messages (header+body, no NetBIOS framing, no trailing pad), mirroring the
      * server's conn->preauth_hash.  Carries the dialect/signing_alg the mount
      * conn negotiated until they are committed to the shared server struct. */
-    uint8_t                                preauth_hash[SMB2_PREAUTH_HASH_SIZE];
-    uint16_t                               negotiated_dialect;
-    uint16_t                               negotiated_signing_alg;
-    uint16_t                               negotiated_cipher_id;
+    uint8_t                             preauth_hash[SMB2_PREAUTH_HASH_SIZE];
+    uint16_t                            negotiated_dialect;
+    uint16_t                            negotiated_signing_alg;
+    uint16_t                            negotiated_cipher_id;
 
     /* AEAD scratch for this connection's transform wrap/unwrap.  Allocated
      * lazily the first time the session actually encrypts. */
-    struct chimera_smb_client_encrypt_ctx *enc_ctx;
+    struct chimera_smb_encrypt_ctx     *enc_ctx;
+
+    /* AEAD / codec scratch for this connection's transform wrap and unwrap.
+    * Both are per-connection because their EVP contexts are not thread-safe,
+    * and both are allocated lazily the first time the session needs one. */
+    struct chimera_smb_compress_ctx    *cmp_ctx;
 };
 
 struct chimera_smb_client_thread {
@@ -542,101 +550,6 @@ chimera_smb_encode_open_fh(
 
     return chimera_vfs_encode_fh_parent(root_fh, fragment, sizeof(fragment), out_fh);
 } /* chimera_smb_encode_open_fh */
-
-/* ---- transport encryption (smb_encrypt.c) ------------------------------ */
-
-/* Per-connection AEAD scratch.  EVP_CIPHER_CTX is not thread-safe, so this
- * lives on the connection rather than the shared server struct; the fetched
- * ciphers are immutable and could be shared, but keeping them together keeps
- * the lifetime trivial. */
-struct chimera_smb_client_encrypt_ctx {
-    EVP_CIPHER_CTX *cctx;
-    EVP_CIPHER     *aes128ccm;
-    EVP_CIPHER     *aes128gcm;
-    EVP_CIPHER     *aes256ccm;
-    EVP_CIPHER     *aes256gcm;
-};
-
-struct chimera_smb_client_encrypt_ctx *
-chimera_smb_client_encrypt_ctx_create(
-    void);
-
-void chimera_smb_client_encrypt_ctx_destroy(
-    struct chimera_smb_client_encrypt_ctx *ctx);
-
-/* Derive the session's cipher key PAIR.  enc_key is what this client encrypts
- * with (client -> server), dec_key what it decrypts the server's traffic with;
- * the server derives the same two with the names swapped. */
-int chimera_smb_client_derive_encryption_keys(
-    int            dialect,
-    uint16_t       cipher_id,
-    const void    *session_key,
-    size_t         session_key_len,
-    const uint8_t *preauth_hash,
-    uint8_t       *enc_key_out,
-    uint8_t       *dec_key_out,
-    size_t        *key_len_out);
-
-/* Wrap one already-framed SMB2 message in a TRANSFORM header.  `plain_iov`
- * holds [transport_hdr][smb2 message]; the transport header is regenerated by
- * the caller over the encrypted length. */
-int chimera_smb_client_encrypt_message(
-    struct chimera_smb_client_encrypt_ctx *ctx,
-    struct evpl                           *evpl,
-    uint16_t                               cipher_id,
-    const uint8_t                         *key,
-    size_t                                 key_len,
-    uint64_t                               nonce_counter,
-    uint64_t                               session_id,
-    struct evpl_iovec                     *plain_iov,
-    int                                    plain_len,
-    int                                    transport_hdr_len,
-    struct evpl_iovec                     *out_iov);
-
-/* Verify and decrypt a TRANSFORM-wrapped reply.  `cursor` must be positioned at
- * the transform header; on success `plain_out` owns the plaintext SMB2 message
- * and the caller releases it. */
-int chimera_smb_client_decrypt_message(
-    struct chimera_smb_client_encrypt_ctx *ctx,
-    struct evpl                           *evpl,
-    uint16_t                               cipher_id,
-    const uint8_t                         *key,
-    size_t                                 key_len,
-    struct evpl_iovec_cursor              *cursor,
-    int                                    length,
-    struct evpl_iovec                     *plain_out,
-    int                                   *plain_len_out);
-
-/* SP800-108 counter-mode KDF (HMAC-SHA256), shared with smb.c's signing-key
- * derivation. */
-int chimera_smb_client_kbkdf(
-    const uint8_t *key,
-    size_t         key_len,
-    const void    *label,
-    size_t         label_len,
-    const uint8_t *context,
-    size_t         ctx_len,
-    uint8_t       *out,
-    size_t         out_len);
-
-/* ---- transport compression (smb_compress.c) ---------------------------- */
-
-/* Plain LZ77 (MS-XCA 2.4).  Returns out_len, or -1 on malformed input. */
-int chimera_smb_client_lz77_decompress(
-    const uint8_t *in,
-    int            in_len,
-    uint8_t       *out,
-    int            out_len);
-
-/* Expand an unchained COMPRESSION_TRANSFORM reply.  `cursor` must be positioned
- * at the transform header; on success `plain_out` owns the plaintext SMB2
- * message and the caller releases it. */
-int chimera_smb_client_decompress_message(
-    struct evpl              *evpl,
-    struct evpl_iovec_cursor *cursor,
-    int                       length,
-    struct evpl_iovec        *plain_out,
-    int                      *plain_len_out);
 
 /* ---- transport (smb.c) ------------------------------------------------- */
 
