@@ -517,6 +517,32 @@ chimera_vfs_claim_init_common(
 } /* chimera_vfs_claim_init_common */
 
 SYMBOL_EXPORT void
+chimera_vfs_claim_foreach_smb_open(
+    struct chimera_vfs_file_state *file,
+    chimera_vfs_smb_open_cb_t      cb,
+    void                          *private_data)
+{
+    struct chimera_vfs_claim *cur;
+
+    if (!file) {
+        return;
+    }
+
+    pthread_mutex_lock(&file->lock);
+    for (cur = file->claims[CHIMERA_CLAIM_CLASS_ACCESS]; cur; cur = cur->next) {
+        if (cur->construct != CHIMERA_CONSTRUCT_SMB_OPEN &&
+            cur->construct != CHIMERA_CONSTRUCT_SMB_OPEN_INERT) {
+            continue;
+        }
+        if (!cur->cb_private) {
+            continue;
+        }
+        cb(cur->cb_private, private_data);
+    }
+    pthread_mutex_unlock(&file->lock);
+} /* chimera_vfs_claim_foreach_smb_open */
+
+SYMBOL_EXPORT void
 chimera_vfs_claim_init_smb_open(
     struct chimera_vfs_claim         *claim,
     uint8_t                           access,

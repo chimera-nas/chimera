@@ -10,6 +10,7 @@
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"
 #include "vfs/vfs_release.h"
+#include "vfs/vfs_claim.h"
 
 /* Forward declaration */
 static void chimera_smb_set_info_rename_check_dest_callback(
@@ -17,6 +18,38 @@ static void chimera_smb_set_info_rename_check_dest_callback(
     struct chimera_vfs_attrs *attr,
     struct chimera_vfs_attrs *dir_attr,
     void                     *private_data);
+
+/* The new path a rename gives every open of the file. */
+struct chimera_smb_rename_path {
+    uint32_t parent_fh_len;
+    uint8_t  parent_fh[CHIMERA_VFS_FH_SIZE];
+    uint32_t name_len;
+    char     name[SMB_FILENAME_MAX];
+};
+
+static void
+chimera_smb_rename_repath(
+    struct chimera_smb_open_file         *open_file,
+    const struct chimera_smb_rename_path *p)
+{
+    if (p->parent_fh_len > 0) {
+        memcpy(open_file->parent_fh, p->parent_fh, p->parent_fh_len);
+    }
+    open_file->parent_fh_len = p->parent_fh_len;
+    memcpy(open_file->name, p->name, p->name_len);
+    open_file->name[p->name_len] = '\0';
+    open_file->name_len          = p->name_len;
+} /* chimera_smb_rename_repath */
+
+/* Runs under the file state's lock (chimera_vfs_claim_foreach_smb_open), so it
+ * writes fields and nothing else. */
+static void
+chimera_smb_rename_repath_cb(
+    void *smb_open_file,
+    void *private_data)
+{
+    chimera_smb_rename_repath(smb_open_file, private_data);
+} /* chimera_smb_rename_repath_cb */
 
 static void
 chimera_smb_set_info_rename_callback(
@@ -32,28 +65,71 @@ chimera_smb_set_info_rename_callback(
     struct chimera_smb_rename_info *rename_info = &request->set_info.rename_info;
 
     if (!error_code) {
-        /* Release the sharemode entry keyed by the old name before
-         * updating the path, then re-acquire under the new name.
-         * Without this, close would hash the new name and fail to
-         * find the entry registered under the old name, leaking it. */
+        /* Release the sharemode entry keyed by the old name before updating
+         * the path, then re-acquire under the new name below.  Without this,
+         * close would hash the new name and fail to find the entry registered
+         * under the old one, leaking it.
+         *
+         * Only the OPERATING handle is re-keyed, unlike the cached paths
+         * below: nothing calls chimera_smb_sharemode_acquire for a peer any
+         * more -- share arbitration moved to the VFS claim layer -- so a
+         * sibling has no reservation here to move. */
         chimera_smb_sharemode_release(&request->tree->share->sharemode,
                                       open_file);
 
-        /* Update the open file's name and parent to reflect the rename,
-         * so subsequent compound operations (e.g. disposition delete)
-         * use the correct path. */
+        /* A rename renames the FILE, not the handle that asked for it.  Every
+         * open handle carries the file's path as its own (parent_fh, name) --
+         * that pair is the ONLY path the SMB layer keeps, and every later path
+         * operation reads it: the source of the next rename, the remove a
+         * delete-on-close issues, the name in a CHANGE_NOTIFY record.  A
+         * sibling left holding the old name does not merely fail (a rename
+         * through it answers STATUS_OBJECT_NAME_NOT_FOUND for a file that is
+         * plainly there); if another file later takes the old name, that
+         * sibling's delete-on-close unlinks IT.
+         *
+         * So update every open of this file, not just this one.  The claim
+         * layer is where that set lives -- each SMB open registers an ACCESS
+         * claim on the file and points it back at itself -- and it spans
+         * sessions and trees, which the SMB layer's own per-tree open-file
+         * hashes cannot. */
         struct chimera_vfs_open_handle *new_parent = rename_info->new_parent_handle
                                                      ? rename_info->new_parent_handle
                                                      : request->set_info.parent_handle;
+        struct chimera_smb_rename_path  newpath;
+
+        newpath.parent_fh_len = open_file->parent_fh_len;
+        memcpy(newpath.parent_fh, open_file->parent_fh,
+               open_file->parent_fh_len);
 
         if (new_parent) {
-            memcpy(open_file->parent_fh, new_parent->fh, new_parent->fh_len);
-            open_file->parent_fh_len = new_parent->fh_len;
+            newpath.parent_fh_len = new_parent->fh_len;
+            memcpy(newpath.parent_fh, new_parent->fh, new_parent->fh_len);
         }
 
-        memcpy(open_file->name, rename_info->new_name, rename_info->new_name_len);
-        open_file->name[rename_info->new_name_len] = '\0';
-        open_file->name_len                        = rename_info->new_name_len;
+        newpath.name_len = rename_info->new_name_len;
+        memcpy(newpath.name, rename_info->new_name, rename_info->new_name_len);
+        newpath.name[rename_info->new_name_len] = '\0';
+
+        /* The operating handle first and unconditionally: it is the one case
+         * that must be right even if the claim registration is not there to be
+         * walked (a stream open, or a state torn down under us). */
+        chimera_smb_rename_repath(open_file, &newpath);
+
+        chimera_vfs_claim_foreach_smb_open(open_file->share_file_state,
+                                           chimera_smb_rename_repath_cb,
+                                           &newpath);
+
+        /* Re-acquire sharemode entry under the new name */
+        if (open_file->type == CHIMERA_SMB_OPEN_FILE_TYPE_FILE &&
+            request->tree->share &&
+            (open_file->desired_access & SMB2_SHAREMODE_ACCESS_MASK)) {
+            chimera_smb_sharemode_acquire(
+                &request->tree->share->sharemode,
+                open_file->parent_fh, open_file->parent_fh_len,
+                open_file->name, open_file->name_len,
+                open_file->desired_access, open_file->share_access,
+                open_file);
+        }
 
         /* Update VFS handle DOC path so close deletes the new name */
         if ((open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_DELETE_ON_CLOSE) &&
@@ -68,17 +144,6 @@ chimera_smb_set_info_rename_callback(
                 &request->session_handle->session->cred);
         }
 
-        /* Re-acquire sharemode entry under the new name */
-        if (open_file->type == CHIMERA_SMB_OPEN_FILE_TYPE_FILE &&
-            request->tree->share &&
-            (open_file->desired_access & SMB2_SHAREMODE_ACCESS_MASK)) {
-            chimera_smb_sharemode_acquire(
-                &request->tree->share->sharemode,
-                open_file->parent_fh, open_file->parent_fh_len,
-                open_file->name, open_file->name_len,
-                open_file->desired_access, open_file->share_access,
-                open_file);
-        }
     }
 
     if (request->set_info.parent_handle) {
