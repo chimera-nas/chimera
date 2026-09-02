@@ -334,12 +334,11 @@ probe_working_surface(void)
 
 /* ---- the pinned defects ------------------------------------------------- */
 
-/* SD2: readdir returns fewer entries than the directory holds, and omits the
- * "." and ".." the other backends emit.  The QUERY_DIRECTORY buffer is walked
- * until the emit callback reports full and the unconsumed remainder is freed;
- * the resume query asks the server for the next batch, which is empty.
- *
- * When SD2 is fixed this must become: all five names come back. */
+/* SD2 (FIXED): readdir now enumerates the whole directory.  It pages via a
+ * stable ordinal cookie (RESTART_SCANS + skip), so every real entry comes back
+ * regardless of how many fit one QUERY_DIRECTORY buffer.  It does not emit "."
+ * / ".." -- the VFS readdir consumers filter those anyway -- so the three files
+ * are the three names expected here. */
 static void
 probe_pin_readdir(void)
 {
@@ -370,15 +369,13 @@ probe_pin_readdir(void)
     n   = json_array_size(json_object_get(res, "names"));
     json_decref(res);
 
-    /* PINNED DEFECT (SD2).  A correct backend returns 5 here: ".", "..", and
-     * the three files.  Assert only that entries are LOST, so the pin does not
-     * depend on how many happen to fit one emit buffer. */
-    if (n >= 5) {
-        probe_fail("SD2 pin",
-                   "readdir returned every entry -- SD2 looks FIXED; replace "
-                   "this pin with an equality assertion and drop SD2");
-    } else if (n == 0) {
-        probe_fail("SD2 pin", "readdir returned nothing at all (worse than SD2)");
+    /* All three real entries come back (".", ".." are not emitted). */
+    if (n != 3) {
+        char detail[96];
+
+        snprintf(detail, sizeof(detail),
+                 "readdir returned %zu entries, expected the 3 files", n);
+        probe_fail("readdir enumerates fully", detail);
     }
 
     res = probe_req("closedir");
@@ -478,13 +475,13 @@ probe_pin_no_posix_metadata(void)
     json_decref(res);
 } /* probe_pin_no_posix_metadata */
 
-/* SD5: only the mount-root handle is re-openable by fh, so every operation the
- * client routes through a resolved PARENT handle fails.  link and utimens fail
- * at any depth; mknod reaches the module at the first level (and correctly
- * reports "unsupported" there) but fails the same way below it.
+/* SD5 (mostly FIXED): the proxy now returns a re-openable path id for every
+ * object -- from open_at AND lookup_at -- and resolves a leaf against its
+ * parent handle, so operations the client routes through a resolved PARENT
+ * handle (utimens by path, mknod below the mount root) now work.  Assert them.
  *
- * When SD5 is fixed, link and mknod should report "unsupported" rather than a
- * handle error, and utimens should succeed. */
+ * link (hard link) is still unimplemented in the proxy dispatch, so it remains
+ * an error; when it lands this should become probe_ok and this pin retires. */
 static void
 probe_pin_parent_handle_ops(void)
 {
@@ -492,7 +489,7 @@ probe_pin_parent_handle_ops(void)
 
     probe_touch("/test/src");
 
-    probe_err("SD5: link", op_two_path("link", "/test/src", "/test/dst"));
+    probe_err("SD5 residue: hard link", op_two_path("link", "/test/src", "/test/dst"));
 
     res = probe_req("utimens");
     probe_set_str(res, "path", "/test/src");
@@ -503,13 +500,13 @@ probe_pin_parent_handle_ops(void)
     probe_set_int(res, "msec", 2000);
     probe_set_int(res, "mnsec", 0);
     json_object_set_new(res, "follow", json_boolean(1));
-    probe_err("SD5: utimens by path", probe_call(res));
+    probe_ok("utimens by path (SD5 fixed)", probe_call(res));
 
     res = probe_req("mknod");
     probe_set_str(res, "path", "/test/w/fifo");
     probe_set_int(res, "mode", 0644);
     probe_set_str(res, "ftype", "fifo");
-    probe_err("SD5: mknod below the mount root", probe_call(res));
+    probe_ok("mknod below the mount root (SD5 fixed)", probe_call(res));
 } /* probe_pin_parent_handle_ops */
 
 /* A read big enough, and compressible enough, that the server actually sends a

@@ -126,6 +126,66 @@ chimera_smb_path_table_clear(struct chimera_smb_client_server *server)
     pthread_mutex_unlock(&server->path_lock);
 } /* chimera_smb_path_table_clear */
 
+/*
+ * Build the full mount-relative path for a `name` given relative to the parent
+ * handle in request->fh.
+ *
+ * Most ops arrive rebased against the mount root (request->fh is the root fh),
+ * where `name` already IS the full path.  But an *at op issued against a real
+ * directory descriptor (openat/unlinkat/utimensat with a dirfd) hands the
+ * backend that directory's open-token handle as the parent and only the leaf as
+ * `name`; a path-only backend must prefix the directory's path itself, since
+ * SMB2 addresses every CREATE from the share root, not from an open FileId.
+ * The parent's path is the one interned when it was opened (SD5's path table).
+ *
+ * Returns the length written (NUL-terminated), or -1 if it does not fit or the
+ * parent handle's path is unknown.
+ */
+static int
+smb_at_full_path(
+    struct chimera_smb_client_conn *conn,
+    struct chimera_vfs_request     *request,
+    const char                     *name,
+    int                             namelen,
+    char                           *out,
+    int                             out_max)
+{
+    const char *ppath;
+    int         plen = 0, n;
+
+    if (chimera_smb_fh_is_root(request->fh_len)) {
+        if (namelen >= out_max) {
+            return -1;
+        }
+        memcpy(out, name, namelen);
+        out[namelen] = '\0';
+        return namelen;
+    }
+
+    ppath = chimera_smb_path_resolve(conn->server,
+                                     chimera_smb_fh_path_id(request->fh), &plen);
+    if (!ppath) {
+        return -1;
+    }
+
+    /* parent + '/' + name, except an empty parent (the share root itself, whose
+     * open-token path is "") joins to just the name. */
+    n = plen + (plen ? 1 : 0) + namelen;
+    if (n >= out_max) {
+        return -1;
+    }
+    n = 0;
+    memcpy(out, ppath, plen);
+    n += plen;
+    if (plen) {
+        out[n++] = '/';
+    }
+    memcpy(out + n, name, namelen);
+    n     += namelen;
+    out[n] = '\0';
+    return n;
+} /* smb_at_full_path */
+
 /* ---- small helpers ----------------------------------------------------- */
 
 size_t
@@ -848,15 +908,31 @@ chimera_smb_lookup_create_reply(
 
     smb_parse_create_reply(body, &r);
 
-    /* Path-only: return attrs but NO child fh.  The length has to be zeroed
-     * explicitly -- vfs requests come off a free list, so va_fh_len still
-     * holds whatever the previous request left there, and the engine reads it
-     * (vfs_proc_lookup_at.c) to decide whether a child fh came back. */
-    request->lookup_at.r_attr.va_fh_len = 0;
+    /* Return a re-openable child fh: the path id of the component resolved
+     * against the parent handle.  chimera_vfs_lookup and every *at op built on
+     * it (utimensat, faccessat, ...) open that fh next, so a zero-length fh --
+     * the old path-only shortcut -- made them all ESTALE.  open_fh re-CREATEs
+     * the interned path, exactly as for an open_at handle. */
+    char     fullpath[CHIMERA_SMB_PATH_MAX + 1];
+    int      fullpath_len = smb_at_full_path(conn, request,
+                                             request->lookup_at.component,
+                                             request->lookup_at.component_len,
+                                             fullpath, sizeof(fullpath));
+    uint64_t path_id;
 
-    smb_apply_attrs(request, &request->lookup_at.r_attr, &r.info,
-                    XXH3_64bits(request->lookup_at.component,
-                                request->lookup_at.component_len));
+    if (fullpath_len < 0) {
+        path_id = XXH3_64bits(request->lookup_at.component,
+                              request->lookup_at.component_len);
+        request->lookup_at.r_attr.va_fh_len = 0;
+    } else {
+        path_id                             = chimera_smb_path_intern(conn->server, fullpath, fullpath_len);
+        request->lookup_at.r_attr.va_fh_len =
+            chimera_smb_encode_open_fh(request->fh, path_id,
+                                       request->lookup_at.r_attr.va_fh);
+        request->lookup_at.r_attr.va_set_mask |= CHIMERA_VFS_ATTR_FH;
+    }
+
+    smb_apply_attrs(request, &request->lookup_at.r_attr, &r.info, path_id);
 
     request->status = CHIMERA_VFS_OK;
     state->file_id  = r.file_id;
@@ -869,8 +945,19 @@ chimera_smb_client_lookup_at(
     struct chimera_smb_client_conn *conn,
     struct chimera_vfs_request     *request)
 {
-    smb_send_create(conn, request,
-                    request->lookup_at.component, request->lookup_at.component_len,
+    char path[CHIMERA_SMB_PATH_MAX + 1];
+    int  path_len;
+
+    path_len = smb_at_full_path(conn, request, request->lookup_at.component,
+                                request->lookup_at.component_len,
+                                path, sizeof(path));
+    if (path_len < 0) {
+        request->status = CHIMERA_VFS_ESTALE;
+        request->complete(request);
+        return;
+    }
+
+    smb_send_create(conn, request, path, path_len,
                     SMB2_FILE_READ_ATTRIBUTES,
                     SMB2_FILE_SHARE_READ | SMB2_FILE_SHARE_WRITE | SMB2_FILE_SHARE_DELETE,
                     SMB2_FILE_OPEN, 0,
@@ -908,11 +995,24 @@ chimera_smb_open_at_reply(
     open_state->server_index = (uint8_t) conn->server->index;
     open_state->is_directory = (r.info.file_attributes & SMB2_FILE_ATTRIBUTE_DIRECTORY) != 0;
 
-    /* Intern the full mount-relative path so open_fh can re-CREATE this object
-     * after its handle is evicted; the path id is the handle's fh identity. */
-    uint64_t path_id = chimera_smb_path_intern(conn->server,
-                                               request->open_at.name,
-                                               request->open_at.namelen);
+    /* Intern the full mount-relative path (the leaf resolved against the parent
+     * handle) so open_fh can re-CREATE this object after its handle is evicted;
+     * the path id is the handle's fh identity. */
+    char     fullpath[CHIMERA_SMB_PATH_MAX + 1];
+    int      fullpath_len = smb_at_full_path(conn, request,
+                                             request->open_at.name,
+                                             request->open_at.namelen,
+                                             fullpath, sizeof(fullpath));
+    uint64_t path_id;
+
+    if (fullpath_len < 0) {
+        /* Parent path unknown: fall back to the leaf so the open still yields a
+         * usable (if not re-derivable) handle. */
+        path_id = chimera_smb_path_intern(conn->server, request->open_at.name,
+                                          request->open_at.namelen);
+    } else {
+        path_id = chimera_smb_path_intern(conn->server, fullpath, fullpath_len);
+    }
 
     smb_apply_attrs(request, &request->open_at.r_attr, &r.info, path_id);
 
@@ -945,6 +1045,18 @@ chimera_smb_client_open_at(
     uint8_t        lease_key[16];
     const uint8_t *ctx     = NULL;
     uint32_t       ctx_len = 0;
+    char           path[CHIMERA_SMB_PATH_MAX + 1];
+    int            path_len;
+
+    /* Resolve the leaf against the parent handle (a dirfd-relative open); for a
+     * root-relative open this is just the name. */
+    path_len = smb_at_full_path(conn, request, request->open_at.name,
+                                request->open_at.namelen, path, sizeof(path));
+    if (path_len < 0) {
+        request->status = CHIMERA_VFS_ESTALE;
+        request->complete(request);
+        return;
+    }
 
     if (request->open_at.flags & CHIMERA_VFS_OPEN_CREATE) {
         disposition = (request->open_at.flags & CHIMERA_VFS_OPEN_EXCLUSIVE)
@@ -988,7 +1100,7 @@ chimera_smb_client_open_at(
         /* Open the link node itself (FILE_OPEN_REPARSE_POINT set above); the
          * server does not stop on it, so no client-side resolution is wanted. */
         smb_send_create_ex(conn, request,
-                           request->open_at.name, request->open_at.namelen,
+                           path, path_len,
                            desired_access,
                            SMB2_FILE_SHARE_READ | SMB2_FILE_SHARE_WRITE | SMB2_FILE_SHARE_DELETE,
                            disposition, options, ctx, ctx_len,
@@ -997,7 +1109,7 @@ chimera_smb_client_open_at(
         /* Follow a final-component symlink the server stops on, resolving it
          * client-side and retrying on the target. */
         smb_send_create_follow(conn, request,
-                               request->open_at.name, request->open_at.namelen,
+                               path, path_len,
                                desired_access,
                                SMB2_FILE_SHARE_READ | SMB2_FILE_SHARE_WRITE | SMB2_FILE_SHARE_DELETE,
                                disposition, options, ctx, ctx_len,
