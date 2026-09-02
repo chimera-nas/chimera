@@ -186,6 +186,42 @@ smb_at_full_path(
     return n;
 } /* smb_at_full_path */
 
+/*
+ * Give a create-and-forget namespace op (symlink/mkdir/mknod) a re-openable
+ * child fh, the same path-id fh open_at/lookup_at return.  The VFS name-cache
+ * insert reads r_attr.va_fh_len unconditionally, so leaving it as free-list
+ * garbage crashes the engine (negative memcpy) and caching a WRONG child fh
+ * mis-resolves the name later; interning the child's full path here makes the
+ * cached entry correct.  Safe to call before the create -- the fh is a pure
+ * function of the path, and the core only reads r_attr on success.
+ */
+void
+chimera_smb_set_child_fh(
+    struct chimera_smb_client_conn *conn,
+    struct chimera_vfs_request     *request,
+    const char                     *name,
+    int                             namelen,
+    struct chimera_vfs_attrs       *r_attr)
+{
+    char     fullpath[CHIMERA_SMB_PATH_MAX + 1];
+    int      len;
+    uint64_t id;
+
+    r_attr->va_set_mask = 0;
+
+    len = smb_at_full_path(conn, request, name, namelen, fullpath,
+                           sizeof(fullpath));
+    if (len < 0) {
+        r_attr->va_fh_len = 0;
+        return;
+    }
+
+    id                  = chimera_smb_path_intern(conn->server, fullpath, len);
+    r_attr->va_fh_len   = chimera_smb_encode_open_fh(request->fh, id, r_attr->va_fh);
+    r_attr->va_ino      = id | 1;
+    r_attr->va_set_mask = CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_INUM;
+} /* chimera_smb_set_child_fh */
+
 /* ---- small helpers ----------------------------------------------------- */
 
 size_t
@@ -1257,6 +1293,11 @@ chimera_smb_client_mkdir_at(
     struct chimera_smb_client_conn *conn,
     struct chimera_vfs_request     *request)
 {
+    /* Give the new directory a re-openable child fh for the VFS name cache. */
+    chimera_smb_set_child_fh(conn, request, request->mkdir_at.name,
+                             request->mkdir_at.name_len,
+                             &request->mkdir_at.r_attr);
+
     smb_send_create(conn, request,
                     request->mkdir_at.name, request->mkdir_at.name_len,
                     SMB2_FILE_READ_ATTRIBUTES,

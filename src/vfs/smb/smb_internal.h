@@ -711,6 +711,13 @@ void chimera_smb_client_mkdir_at(
 void chimera_smb_client_remove_at(
     struct chimera_smb_client_conn *conn,
     struct chimera_vfs_request     *request);
+void chimera_smb_set_child_fh(
+    struct chimera_smb_client_conn *conn,
+    struct chimera_vfs_request     *request,
+    const char                     *name,
+    int                             namelen,
+    struct chimera_vfs_attrs       *r_attr);
+
 void chimera_smb_client_setattr(
     struct chimera_smb_client_conn *conn,
     struct chimera_vfs_request     *request);

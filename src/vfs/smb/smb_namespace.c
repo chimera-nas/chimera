@@ -334,6 +334,11 @@ chimera_smb_client_symlink_at(
     struct chimera_smb_client_conn *conn,
     struct chimera_vfs_request     *request)
 {
+    /* Give the new symlink a re-openable child fh for the VFS name cache. */
+    chimera_smb_set_child_fh(conn, request, request->symlink_at.name,
+                             request->symlink_at.namelen,
+                             &request->symlink_at.r_attr);
+
     /* CREATE a new placeholder at the link path (FILE_CREATE fails if it already
      * exists, matching symlink_at's EEXIST semantics).  The server's
      * SET_REPARSE handler then removes the placeholder and lays down the real
@@ -615,6 +620,11 @@ chimera_smb_client_mknod_at(
     struct chimera_vfs_request     *request)
 {
     uint64_t mode = request->mknod_at.set_attr->va_mode;
+
+    /* Give the new node a re-openable child fh for the VFS name cache. */
+    chimera_smb_set_child_fh(conn, request, request->mknod_at.name,
+                             request->mknod_at.name_len,
+                             &request->mknod_at.r_attr);
 
     /* mknod of a regular file is a plain exclusive CREATE; a device/FIFO/socket
      * node is a placeholder CREATE the server then re-lays as the real node
