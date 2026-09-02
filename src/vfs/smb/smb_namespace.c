@@ -212,6 +212,28 @@ chimera_smb_symlink_close_reply(
     request->complete(request);
 } /* chimera_smb_symlink_close_reply */
 
+/* After the new symlink's owner stamp: close the (rebound) handle. */
+static void
+chimera_smb_symlink_secured_reply(
+    struct chimera_smb_client_conn *conn,
+    uint32_t                        status,
+    const struct smb2_header       *hdr,
+    struct evpl_iovec_cursor       *body,
+    int                             body_len,
+    void                           *arg)
+{
+    struct chimera_vfs_request  *request = arg;
+    struct chimera_smb_op_state *state   = request->plugin_data;
+
+    (void) status;
+    (void) hdr;
+    (void) body;
+    (void) body_len;
+
+    smb_send_close(conn, request, &state->file_id,
+                   chimera_smb_symlink_close_reply);
+} /* chimera_smb_symlink_secured_reply */
+
 static void
 chimera_smb_symlink_ioctl_reply(
     struct chimera_smb_client_conn *conn,
@@ -229,6 +251,20 @@ chimera_smb_symlink_ioctl_reply(
     (void) body_len;
 
     request->status = chimera_smb_status_to_errno(status);
+
+    /* The server rebound this handle to the new symlink; stamp the creator's
+     * owner onto it (lchown semantics) before closing.  A symlink's mode is
+     * always 0777, so convey owner only (no set_attr).  Only on success -- a
+     * failed reparse leaves nothing to own. */
+    if (status == SMB2_STATUS_SUCCESS) {
+        struct chimera_vfs_attrs owner;
+
+        if (smb_build_create_owner_attrs(request, NULL, &owner)) {
+            smb_send_set_security(conn, request, &state->file_id, &owner,
+                                  chimera_smb_symlink_secured_reply);
+            return;
+        }
+    }
 
     smb_send_close(conn, request, &state->file_id, chimera_smb_symlink_close_reply);
 } /* chimera_smb_symlink_ioctl_reply */
@@ -346,7 +382,8 @@ chimera_smb_client_symlink_at(
     smb_send_create(conn, request,
                     request->symlink_at.name, request->symlink_at.namelen,
                     SMB2_DELETE | SMB2_FILE_WRITE_DATA | SMB2_FILE_WRITE_ATTRIBUTES |
-                    SMB2_FILE_READ_ATTRIBUTES,
+                    SMB2_FILE_READ_ATTRIBUTES | SMB2_READ_CONTROL |
+                    SMB2_WRITE_DACL | SMB2_WRITE_OWNER,
                     SMB2_FILE_SHARE_READ | SMB2_FILE_SHARE_WRITE | SMB2_FILE_SHARE_DELETE,
                     SMB2_FILE_CREATE, SMB2_FILE_NON_DIRECTORY_FILE,
                     chimera_smb_symlink_create_reply);

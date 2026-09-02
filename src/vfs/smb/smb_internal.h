@@ -836,6 +836,23 @@ void smb_send_close(
     const struct chimera_smb_client_file_id *file_id,
     chimera_smb_client_reply_cb              reply_cb);
 
+/* The POSIX owner/group/mode a freshly created object must carry (creator's
+ * cred + requested mode); returns 1 if there is anything to stamp. */
+int smb_build_create_owner_attrs(
+    const struct chimera_vfs_request *request,
+    const struct chimera_vfs_attrs   *set_attr,
+    struct chimera_vfs_attrs         *out);
+
+/* Send an SMB2 SET_INFO SECURITY on `fid` carrying the modefromsid descriptor
+ * built from `set_attr` (owner/group/mode), then invoke `reply_cb`.  The handle
+ * must have been opened with WRITE_OWNER (owner/group) and/or WRITE_DAC (mode). */
+void smb_send_set_security(
+    struct chimera_smb_client_conn          *conn,
+    struct chimera_vfs_request              *request,
+    const struct chimera_smb_client_file_id *fid,
+    const struct chimera_vfs_attrs          *set_attr,
+    chimera_smb_client_reply_cb              reply_cb);
+
 /* Recover the per-open state (FileId + server) from a VFS open handle. */
 static inline struct chimera_smb_client_open *
 smb_handle_open_state(struct chimera_vfs_open_handle *handle)

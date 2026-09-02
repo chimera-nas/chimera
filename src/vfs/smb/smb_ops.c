@@ -708,7 +708,7 @@ smb_set_attr_has_posix_perm(const struct chimera_vfs_attrs *set_attr)
  * object owned by root; POSIX makes a new object owned by the creator's
  * effective uid/gid, so stamp that (plus the requested mode) -- what the model
  * created it as.  Returns 1 if there is anything to stamp. */
-static int
+int
 smb_build_create_owner_attrs(
     const struct chimera_vfs_request *request,
     const struct chimera_vfs_attrs   *set_attr,
@@ -732,7 +732,7 @@ smb_build_create_owner_attrs(
 /* Send an SMB2 SET_INFO SECURITY on `fid` carrying the modefromsid descriptor
  * built from `set_attr`, then invoke `reply_cb`.  The caller must have opened
  * `fid` with WRITE_OWNER (for owner/group) and/or WRITE_DAC (for mode). */
-static void
+void
 smb_send_set_security(
     struct chimera_smb_client_conn          *conn,
     struct chimera_vfs_request              *request,
