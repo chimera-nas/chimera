@@ -399,6 +399,8 @@ chimera_smb_client_destroy(void *private_data)
             if (shared->servers[i]->endpoint) {
                 evpl_endpoint_close(shared->servers[i]->endpoint);
             }
+            chimera_smb_path_table_clear(shared->servers[i]);
+            pthread_mutex_destroy(&shared->servers[i]->path_lock);
             free(shared->servers[i]);
         }
     }

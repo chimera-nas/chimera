@@ -376,7 +376,8 @@ mism(
 {
     va_list ap;
 
-    printf("MISMATCH [%s] step %d: ", g_trace, g_cur_step);
+    printf("MISMATCH [%s] step %d <%s>: ", g_trace, g_cur_step,
+           g_cur_tag ? g_cur_tag : "?");
     va_start(ap, fmt);
     vprintf(fmt, ap);
     va_end(ap);

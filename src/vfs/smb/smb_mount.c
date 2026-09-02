@@ -96,9 +96,10 @@ chimera_smb_client_server_alloc(struct chimera_smb_client_shared *shared)
 
     for (i = 0; i < shared->max_servers; i++) {
         if (!shared->servers[i]) {
-            server             = calloc(1, sizeof(*server));
-            server->index      = i;
-            server->in_use     = 1;
+            server         = calloc(1, sizeof(*server));
+            server->index  = i;
+            server->in_use = 1;
+            pthread_mutex_init(&server->path_lock, NULL);
             shared->servers[i] = server;
             break;
         }
