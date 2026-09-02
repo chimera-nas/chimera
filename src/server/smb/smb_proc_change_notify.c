@@ -68,7 +68,7 @@ chimera_smb_change_notify(struct chimera_smb_request *request)
     struct chimera_smb_notify_request *nr;
     struct chimera_vfs_notify_event    events[16];
     int                                overflowed = 0;
-    int                                nevents;
+    int                                nevents    = 0;
     struct chimera_vfs_notify         *vfs_notify;
 
     /* When change notify is disabled for the server's shares (the Windows
@@ -154,13 +154,14 @@ chimera_smb_change_notify(struct chimera_smb_request *request)
      * no further callback fires until the next event. */
     pthread_mutex_lock(&state->lock);
 
-    /* MS-SMB2 §3.3.5.10: only one CHANGE_NOTIFY may be outstanding per
-     * open.  Reject a duplicate so we do not orphan the prior request. */
-    if (state->pending) {
-        pthread_mutex_unlock(&state->lock);
-        chimera_smb_open_file_release(request, open_file);
-        chimera_smb_complete_request(request, SMB2_STATUS_INVALID_PARAMETER);
-        return;
+    /* A request already outstanding on this handle owns the ring until it is
+     * answered, so this one parks behind it rather than draining ahead of it.
+     * MS-FSA 2.1.5.9 keeps the requests on a list and serves them in order;
+     * there is no one-at-a-time rule to enforce here (this used to refuse the
+     * second with STATUS_INVALID_PARAMETER, citing MS-SMB2 3.3.5.10 -- which
+     * is Receiving an SMB2 CLOSE Request). */
+    if (state->q_head) {
+        goto park;
     }
 
     nevents = chimera_vfs_notify_drain(state->watch, events, 16, &overflowed);
@@ -257,6 +258,8 @@ chimera_smb_change_notify(struct chimera_smb_request *request)
         return;
     }
 
+ park:
+
     /* No events — about to park the request.
      *
      * A CHANGE_NOTIFY that would go asynchronous inside a multi-command
@@ -341,7 +344,7 @@ chimera_smb_change_notify(struct chimera_smb_request *request)
      * way breaks the watcher if we send it in the clear. */
     chimera_smb_secure_send_snapshot(request, &nr->secure);
 
-    state->pending = nr;
+    chimera_smb_notify_q_push(state, nr);
     pthread_mutex_unlock(&state->lock);
 
     /* Add to connection's parked notify list for CANCEL lookup.

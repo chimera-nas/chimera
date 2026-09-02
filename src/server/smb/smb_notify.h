@@ -72,6 +72,11 @@ struct chimera_smb_notify_request {
     struct chimera_smb_notify_request *next;          /* parked list linkage */
     struct chimera_smb_notify_request *prev;          /* parked list linkage */
     struct chimera_smb_notify_request *ready_next;    /* doorbell ready queue */
+    /* Linkage on the WATCH's outstanding queue (state->q_head), oldest first.
+     * Distinct from `next`/`prev`, which thread the CONNECTION's parked list:
+     * one request is on both at once, and they are ordered by different
+     * things (arrival on this handle vs arrival on this connection). */
+    struct chimera_smb_notify_request *q_next;
 };
 
 /*
@@ -85,9 +90,26 @@ struct chimera_smb_notify_request {
  * and the freshly-parked request never gets woken up.
  */
 struct chimera_smb_notify_state {
-    pthread_mutex_t                    lock;
-    struct chimera_vfs_notify_watch   *watch;
-    struct chimera_smb_notify_request *pending;  /* parked request, or NULL */
+    pthread_mutex_t                  lock;
+    struct chimera_vfs_notify_watch *watch;
+    /* Outstanding CHANGE_NOTIFY requests on this open, oldest first.
+     *
+     * A QUEUE, not one slot.  MS-FSA 2.1.5.9 keeps a handle's outstanding
+     * requests on Open.PendingNotifyChanges and appends to it, and an
+     * overlapped client relies on that: it keeps two or three
+     * ReadDirectoryChangesW calls posted on a directory precisely so there is
+     * never a window with none, and refusing the second would collapse that
+     * into a watch with gaps.  (This used to be a single slot, and the second
+     * request was refused STATUS_INVALID_PARAMETER citing MS-SMB2 3.3.5.10 --
+     * which is Receiving an SMB2 CLOSE Request.  CHANGE_NOTIFY is 3.3.5.19 and
+     * imposes no such limit; Samba queues, and so does Windows.)
+     *
+     * They are answered FIFO, one delivery cycle each: a change wakes the
+     * OLDEST, which drains the ring and completes; the rest stay for the next
+     * one.  Everything else about the handle -- the VFS watch, the ring, the
+     * overflow and deleted flags -- is shared by all of them. */
+    struct chimera_smb_notify_request *q_head;
+    struct chimera_smb_notify_request *q_tail;
     /* Transient single-threaded linkage used only by tree/session teardown
      * (chimera_smb_tree_free) to collect detached states and tear them down
      * after the open_files bucket lock is released — chimera_smb_notify_close
@@ -177,6 +199,17 @@ chimera_smb_notify_complete_cleanup(
 int
 chimera_smb_notify_queue_cleanup(
     struct chimera_smb_open_file *open_file);
+
+/*
+ * Append a request to the watch's outstanding queue.  Requires state->lock.
+ *
+ * The one enqueue site is the CHANGE_NOTIFY handler, but the linkage lives
+ * here beside the unlink so the two cannot drift apart.
+ */
+void
+chimera_smb_notify_q_push(
+    struct chimera_smb_notify_state   *state,
+    struct chimera_smb_notify_request *nr);
 
 /*
  * Clean up notify state for an open file being closed.
