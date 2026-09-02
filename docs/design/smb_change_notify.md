@@ -106,6 +106,14 @@ The work spans three layers:
 - **Invalidate** by `(parent_fh, name)` is O(num_shards): forward lookups are common (resolver hot path), invalidations are rare (rename/remove). The fwd-shard is computed from each candidate entry's `fwd_key`, so a single shard's eviction kills both indexes; the invalidator scans all reverse-key shards because it only knows `rev_key = parent_hash ^ name_hash`.
 - Entries are freed via `call_rcu`. Readers use `urcu_memb_read_lock()`.
 
+### Outstanding requests per handle
+
+A handle carries a **FIFO of outstanding requests**, not one. MS-FSA 2.1.5.9 keeps them on `Open.PendingNotifyChanges` and appends; an overlapped client keeps two or three `ReadDirectoryChangesW` calls posted on a directory precisely so there is never a window with none. A change wakes the **oldest**, which drains the ring and completes; the rest stay for the next one. A close, tree disconnect or logoff finishes **all** of them; a `CANCEL` ends exactly the one it names.
+
+Everything else about the handle — the VFS watch, the ring, the overflow and deleted flags — is shared by all of them, so this decides *which request is answered*, not what is observed.
+
+(This was a single slot until the model-based suite was replayed against Samba: a second request was refused `STATUS_INVALID_PARAMETER` citing "MS-SMB2 §3.3.5.10", which is *Receiving an SMB2 CLOSE Request*. CHANGE_NOTIFY is §3.3.5.19 and imposes no such limit.)
+
 ### SMB CHANGE_NOTIFY handler
 
 `chimera_smb_change_notify(request)` in `smb_proc_change_notify.c`:
@@ -154,8 +162,8 @@ The work spans three layers:
 
 - `vfs_proc_mkdir_at`: `DIR_ADDED` on parent.
 - `vfs_proc_remove_at`: `DIR_REMOVED` or `FILE_REMOVED` on parent based on `S_ISDIR(r_removed_attr.va_mode)`. The completion handler strips `MASK_STAT` from `r_removed_attr.va_set_mask` after consuming `va_mode` so the downstream attr-cache insert (keyed by the removed object's FH, which on Linux is identical for all hardlinks to the same inode) does not pollute the cache with the pre-unlink `nlink` value.
-- `vfs_proc_rename_at`:
-  - Intra-dir: single `RENAMED` on the dir, carrying `(new_name, old_name)`. The SMB serializer expands this to a `FILE_ACTION_RENAMED_OLD_NAME` + `FILE_ACTION_RENAMED_NEW_NAME` pair.
+- `vfs_proc_rename_at`: raises `RENAMED` or `RENAMED_DIR` according to the renamed object's type, which the caller supplies via `CHIMERA_VFS_RENAME_SRC_IS_DIR` — only the SMB layer knows it, since the open carries the type and the rename request does not. MS-FSCC 2.7.1 scopes `FILE_NOTIFY_CHANGE_FILE_NAME` to file names "including renaming" and `_DIR_NAME` to directory ones, so a `DIR_NAME` watcher must not be woken because a *file* was renamed. A caller that does not set the flag (every NFS and S3 path) raises `RENAMED`, which both name filters see — the conservative answer for a protocol that cannot tell us.
+  - Intra-dir: a single event on the dir, carrying `(new_name, old_name)`. The SMB serializer expands this to a `FILE_ACTION_RENAMED_OLD_NAME` + `FILE_ACTION_RENAMED_NEW_NAME` pair.
   - Cross-dir: source dir gets `RENAMED(name=NULL, old_name=src)` (serializes as `RENAMED_OLD_NAME` only); dest dir gets `RENAMED(name=dst, old_name=NULL)` (serializes as `RENAMED_NEW_NAME` only). Matches Windows convention. The source-side `name_len==0` triggers a subtree overflow rather than running the resolver (which would otherwise build a leafless relpath).
 - `smb_proc_create`: keyed on what the open actually DID, not on the disposition it asked for (MS-FSA 2.1.5.1) —
   - **created** (`r_created`): `DIR_ADDED` for a directory, `FILE_ADDED | STREAM_NAME` for a regular file (its default `$DATA` stream appears with it).
@@ -215,6 +223,7 @@ Documented in code; load-bearing for safety.
 
 ## Known limitations (documented in code)
 
+- Re-arming a watch with `WATCH_TREE` flipped keeps the buffered events. It used to purge them and raise overflow, on the grounds that a subtree event names its object by a relative path and an exact event by a bare filename, with no per-event tag to tell them apart. That is an argument about our event representation, not the protocol's: nothing mandates a purge, and Samba delivers across the flip. If the names ever do become ambiguous in practice the fix is to tag the events, not to drop a client's changes.
 - Subtree (`WATCH_TREE`) *delivery* is not covered by the model-based suite: the generated namespace is flat, so the flag reaches the server and the subtree registry but no mutation happens below a watched directory. The exact-watch half is covered; the RPL resolver is not, which is most of what remains dark in `vfs_notify.c`.
 - Subtree resolver funnels through `sync_delegation_threads[0]` — perf bottleneck under heavy subtree-watch + mutation load.
 - `chimera_vfs_notify_destroy` blocks indefinitely if a delegation thread wedges (with progress logs); contract documented as "callers must quiesce frontends first."
