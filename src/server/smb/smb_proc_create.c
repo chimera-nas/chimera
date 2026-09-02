@@ -3193,50 +3193,52 @@ chimera_smb_create_open_finish(
         }
     }
 
-    /* Emit notification on parent directory for any disposition that can
-     * create a new file.  OPEN never creates; CREATE always creates;
-     * OPEN_IF / OVERWRITE_IF / SUPERSEDE may create or may open/truncate
-     * an existing file.  We emit ADDED for all create-capable
-     * dispositions — this can yield a spurious ADDED when an existing
-     * file was opened or truncated, but that is preferable to missing
-     * notifications for newly-created files (Windows CREATE_ALWAYS maps
-     * to OVERWRITE_IF and is the common case).
+    /* What this open reports to watchers of the parent directory (MS-FSA
+     * 2.1.5.1).  Three outcomes, keyed on what the open actually DID rather
+     * than on the disposition it asked for:
      *
-     * Pick FILE_ADDED vs DIR_ADDED based on the result attrs.  A
-     * directory creation (FILE_DIRECTORY_FILE create option) must
-     * emit DIR_ADDED so SMB clients filtering on DIR_NAME only
-     * receive the event. */
-    if (request->create.create_disposition == SMB2_FILE_CREATE        ||
-        request->create.create_disposition == SMB2_FILE_OPEN_IF       ||
-        request->create.create_disposition == SMB2_FILE_OVERWRITE     ||
-        request->create.create_disposition == SMB2_FILE_OVERWRITE_IF  ||
-        request->create.create_disposition == SMB2_FILE_SUPERSEDE) {
-        uint32_t action = request->create.r_is_directory ?
-            CHIMERA_VFS_NOTIFY_DIR_ADDED : CHIMERA_VFS_NOTIFY_FILE_ADDED;
+     *   created      the entry appeared: FILE_ADDED (DIR_ADDED for a
+     *                directory), plus STREAM_NAME for a regular file, whose
+     *                default $DATA stream appears with it (WPTS
+     *                BVT_SMB2Basic_ChangeNotify_ChangeStreamName)
+     *   overwritten  the entry was already there and its data was replaced:
+     *                that is a MODIFIED, not an ADDED, and it changes the
+     *                size and the write time
+     *   opened       nothing.  Opening a file does not change the directory
+     *                that holds it, and a watcher must not be woken for it.
+     *
+     * Reporting ADDED for every create-capable disposition -- what this used
+     * to do, on the grounds that a spurious ADDED beat a missed one -- is
+     * wrong in both directions once a filter is involved: a client watching
+     * FILE_NOTIFY_CHANGE_SIZE or _ATTRIBUTES is told nothing about an
+     * overwrite that changed both (ADDED maps to neither filter), while a
+     * client watching FILE_NOTIFY_CHANGE_FILE_NAME is woken for opens that
+     * created nothing. */
+    {
+        uint32_t action = 0;
 
-        /* Creating/opening a (regular) file's data fork introduces its
-         * $DATA stream into the file's stream namespace, so also raise the
-         * STREAM_NAME class for non-directories.  This lets a watcher that
-         * requested only FILE_NOTIFY_CHANGE_STREAM_NAME observe the stream
-         * appearing (WPTS BVT_SMB2Basic_ChangeNotify_ChangeStreamName). */
-        if (!request->create.r_is_directory) {
-            action |= CHIMERA_VFS_NOTIFY_STREAM_NAME;
+        if (request->create.r_created) {
+            action = request->create.r_is_directory ?
+                CHIMERA_VFS_NOTIFY_DIR_ADDED :
+                (CHIMERA_VFS_NOTIFY_FILE_ADDED |
+                 CHIMERA_VFS_NOTIFY_STREAM_NAME);
+        } else if (request->create.create_disposition == SMB2_FILE_OVERWRITE ||
+                   request->create.create_disposition == SMB2_FILE_OVERWRITE_IF ||
+                   request->create.create_disposition == SMB2_FILE_SUPERSEDE) {
+            action = CHIMERA_VFS_NOTIFY_FILE_MODIFIED |
+                CHIMERA_VFS_NOTIFY_SIZE_CHANGED |
+                CHIMERA_VFS_NOTIFY_ATTRS_CHANGED |
+                CHIMERA_VFS_NOTIFY_STREAM_SIZE;
         }
 
-        /* A directory read lease must break only when the directory's contents
-         * actually changed — i.e. the file was newly created, or its data was
-         * replaced (OVERWRITE/SUPERSEDE truncate an existing file).  A
-         * create-capable disposition that merely OPENED an existing file
-         * (OPEN_IF on an existing name) changes nothing in the directory, so it
-         * delivers the (conservative) CHANGE_NOTIFY event WITHOUT breaking the
-         * lease — otherwise re-opening a file would spuriously recall the parent
-         * directory lease (smbtorture dirlease.rename re-opens before renaming). */
-        bool content_changed = request->create.r_created ||
-            request->create.create_disposition == SMB2_FILE_OVERWRITE ||
-            request->create.create_disposition == SMB2_FILE_OVERWRITE_IF ||
-            request->create.create_disposition == SMB2_FILE_SUPERSEDE;
-
-        if (content_changed) {
+        /* A directory read lease breaks exactly when there is an event to
+         * raise: the directory's contents changed.  An open that changed
+         * nothing raises nothing and so recalls nothing -- otherwise
+         * re-opening a file would spuriously recall the parent directory lease
+         * (smbtorture dirlease.rename re-opens before renaming), which is why
+         * the previous shape needed a separate break-free emit path for the
+         * opened-an-existing-file case.  With the event gone, so is that path. */
+        if (action) {
             /* Self-exempt the directory lease whose ParentLeaseKey this create
             * supplied: the client creating the file holds (or is updating) that
             * directory's cached view and must not have its own lease broken
@@ -3265,14 +3267,6 @@ chimera_smb_create_open_finish(
                                               NULL, 0,
                                               skip_lo, skip_hi, has_skip);
             }
-        } else {
-            chimera_vfs_notify_emit_nobreak(thread->shared->vfs->vfs_notify,
-                                            request->create.parent_handle->fh,
-                                            request->create.parent_handle->fh_len,
-                                            action,
-                                            request->create.name,
-                                            request->create.name_len,
-                                            NULL, 0);
         }
     }
 
