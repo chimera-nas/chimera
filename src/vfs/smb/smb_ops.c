@@ -141,6 +141,53 @@ chimera_smb_path_table_clear(struct chimera_smb_client_server *server)
  * Returns the length written (NUL-terminated), or -1 if it does not fit or the
  * parent handle's path is unknown.
  */
+
+/* Collapse "." , ".." and empty ("//") components of a mount-relative path in
+ * place, the way an SMB client must before sending -- the wire path is a
+ * Windows-syntax name and the server rejects a literal ".." as
+ * OBJECT_PATH_SYNTAX_BAD (which the VFS surfaces as EIO).  A ".." that would
+ * escape the share root is dropped (the root's parent is itself).  Lexical
+ * resolution matches a real CIFS mount; it differs from POSIX only when a
+ * non-final component is a symlink, which the model rarely exercises.  Returns
+ * the new length. */
+static int
+smb_path_normalize(
+    char *path,
+    int   len)
+{
+    int comps[CHIMERA_SMB_PATH_MAX / 2 + 1]; /* start offset of each kept comp */
+    int ncomp = 0, i = 0, out = 0;
+
+    while (i < len) {
+        int start = i, clen;
+
+        while (i < len && path[i] != '/') {
+            i++;
+        }
+        clen = i - start;
+        i++;                                 /* skip the '/' (or past the end) */
+
+        if (clen == 0 || (clen == 1 && path[start] == '.')) {
+            continue;                        /* "" or "." -- drop */
+        }
+        if (clen == 2 && path[start] == '.' && path[start + 1] == '.') {
+            if (ncomp > 0) {
+                out = comps[--ncomp];        /* pop the previous component */
+            }
+            continue;                        /* ".." at root -- drop */
+        }
+        if (out > 0) {
+            path[out++] = '/';
+        }
+        comps[ncomp++] = out;
+        memmove(path + out, path + start, clen);
+        out += clen;
+    }
+
+    path[out] = '\0';
+    return out;
+} /* smb_path_normalize */
+
 static int
 smb_at_full_path(
     struct chimera_smb_client_conn *conn,
@@ -159,7 +206,7 @@ smb_at_full_path(
         }
         memcpy(out, name, namelen);
         out[namelen] = '\0';
-        return namelen;
+        return smb_path_normalize(out, namelen);
     }
 
     ppath = chimera_smb_path_resolve(conn->server,
@@ -183,7 +230,7 @@ smb_at_full_path(
     memcpy(out + n, name, namelen);
     n     += namelen;
     out[n] = '\0';
-    return n;
+    return smb_path_normalize(out, n);
 } /* smb_at_full_path */
 
 /*
@@ -201,6 +248,7 @@ chimera_smb_set_child_fh(
     struct chimera_vfs_request     *request,
     const char                     *name,
     int                             namelen,
+    int                             nofollow,
     struct chimera_vfs_attrs       *r_attr)
 {
     char     fullpath[CHIMERA_SMB_PATH_MAX + 1];
@@ -217,7 +265,7 @@ chimera_smb_set_child_fh(
     }
 
     id                  = chimera_smb_path_intern(conn->server, fullpath, len);
-    r_attr->va_fh_len   = chimera_smb_encode_open_fh(request->fh, id, r_attr->va_fh);
+    r_attr->va_fh_len   = chimera_smb_encode_open_fh(request->fh, id, nofollow, r_attr->va_fh);
     r_attr->va_ino      = id | 1;
     r_attr->va_set_mask = CHIMERA_VFS_ATTR_FH | CHIMERA_VFS_ATTR_INUM;
 } /* chimera_smb_set_child_fh */
@@ -1392,7 +1440,7 @@ chimera_smb_lookup_create_reply(
     } else {
         path_id                             = chimera_smb_path_intern(conn->server, fullpath, fullpath_len);
         request->lookup_at.r_attr.va_fh_len =
-            chimera_smb_encode_open_fh(request->fh, path_id,
+            chimera_smb_encode_open_fh(request->fh, path_id, 1,
                                        request->lookup_at.r_attr.va_fh);
         request->lookup_at.r_attr.va_set_mask |= CHIMERA_VFS_ATTR_FH;
     }
@@ -1513,7 +1561,9 @@ chimera_smb_open_at_reply(
 
     /* The handle's identity is the open token built from the path id. */
     request->open_at.r_attr.va_fh_len = chimera_smb_encode_open_fh(
-        request->fh, path_id, request->open_at.r_attr.va_fh);
+        request->fh, path_id,
+        (request->open_at.flags & CHIMERA_VFS_OPEN_NOFOLLOW) ? 1 : 0,
+        request->open_at.r_attr.va_fh);
     request->open_at.r_attr.va_set_mask |= CHIMERA_VFS_ATTR_FH;
 
     request->open_at.r_vfs_private = (uint64_t) (uintptr_t) open_state;
@@ -1700,6 +1750,15 @@ chimera_smb_client_open_fh(
         (request->open_fh.flags & (CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED)) ? 0 :
         SMB2_FILE_NON_DIRECTORY_FILE;
 
+    /* A nofollow fh names a symlink itself (from a lookup or a NOFOLLOW open);
+     * re-CREATE its path as the reparse point so the open lands on the link,
+     * not whatever it points at -- how the core reads a link's target and how a
+     * self-referential link is caught as ELOOP rather than silently followed. */
+    if (!chimera_smb_fh_is_root(request->fh_len) &&
+        chimera_smb_fh_is_nofollow(request->fh)) {
+        options |= SMB2_FILE_OPEN_REPARSE_POINT;
+    }
+
     if (chimera_smb_fh_is_root(request->fh_len)) {
         /* The share root is the empty path.  It also needs the SD rights so a
          * chmod/chown of the export root (the model's fsInit normalization)
@@ -1833,7 +1892,7 @@ chimera_smb_client_mkdir_at(
 {
     /* Give the new directory a re-openable child fh for the VFS name cache. */
     chimera_smb_set_child_fh(conn, request, request->mkdir_at.name,
-                             request->mkdir_at.name_len,
+                             request->mkdir_at.name_len, 0,
                              &request->mkdir_at.r_attr);
 
     smb_send_create(conn, request,

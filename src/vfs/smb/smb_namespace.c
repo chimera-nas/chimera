@@ -372,7 +372,7 @@ chimera_smb_client_symlink_at(
 {
     /* Give the new symlink a re-openable child fh for the VFS name cache. */
     chimera_smb_set_child_fh(conn, request, request->symlink_at.name,
-                             request->symlink_at.namelen,
+                             request->symlink_at.namelen, 1,
                              &request->symlink_at.r_attr);
 
     /* CREATE a new placeholder at the link path (FILE_CREATE fails if it already
@@ -675,7 +675,7 @@ chimera_smb_client_mknod_at(
 
     /* Give the new node a re-openable child fh for the VFS name cache. */
     chimera_smb_set_child_fh(conn, request, request->mknod_at.name,
-                             request->mknod_at.name_len,
+                             request->mknod_at.name_len, 0,
                              &request->mknod_at.r_attr);
 
     /* mknod of a regular file is a plain exclusive CREATE; a device/FIFO/socket
@@ -880,7 +880,7 @@ chimera_smb_client_link_at(
         uint64_t id = chimera_smb_path_intern(conn->server, dest, destlen);
 
         request->link_at.r_attr.va_fh_len = chimera_smb_encode_open_fh(
-            request->link_at.dir_fh, id, request->link_at.r_attr.va_fh);
+            request->link_at.dir_fh, id, 0, request->link_at.r_attr.va_fh);
         request->link_at.r_attr.va_ino      = id | 1;
         request->link_at.r_attr.va_set_mask = CHIMERA_VFS_ATTR_FH |
             CHIMERA_VFS_ATTR_INUM;
