@@ -224,7 +224,11 @@ chimera_smb_set_info_rename_emit(struct chimera_smb_request *request)
         dest_name_len,
         NULL,
         0,
-        0,
+        /* The open carries the object's type, and it is the only layer that
+         * does -- so it is the only one that can tell a file rename from a
+         * directory one for the name filters (MS-FSCC 2.7.1). */
+        (open_file->flags & CHIMERA_SMB_OPEN_FILE_FLAG_DIRECTORY)
+        ? CHIMERA_VFS_RENAME_SRC_IS_DIR : 0,
         0,
         0,
         /* Self-exempt the directory lease named by the operating open's

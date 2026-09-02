@@ -16,6 +16,10 @@
 #define CHIMERA_VFS_NOTIFY_FILE_MODIFIED 0x0004
 #define CHIMERA_VFS_NOTIFY_DIR_ADDED     0x0008
 #define CHIMERA_VFS_NOTIFY_DIR_REMOVED   0x0010
+/* A rename of a FILE.  Split from the directory case because the two SMB2
+ * name filters are: MS-FSCC scopes FILE_NOTIFY_CHANGE_FILE_NAME to file name
+ * changes "including renaming" and _DIR_NAME to directory ones, so a client
+ * watching directory names must not be woken because a file was renamed. */
 #define CHIMERA_VFS_NOTIFY_RENAMED       0x0020
 #define CHIMERA_VFS_NOTIFY_ATTRS_CHANGED 0x0040
 #define CHIMERA_VFS_NOTIFY_SIZE_CHANGED  0x0080
@@ -28,6 +32,11 @@
 #define CHIMERA_VFS_NOTIFY_STREAM_NAME   0x0100
 #define CHIMERA_VFS_NOTIFY_STREAM_SIZE   0x0200
 #define CHIMERA_VFS_NOTIFY_STREAM_WRITE  0x0400
+/* A rename of a DIRECTORY.  Raised instead of CHIMERA_VFS_NOTIFY_RENAMED when
+ * the caller knows the renamed object is one (CHIMERA_VFS_RENAME_SRC_IS_DIR);
+ * a caller that does not know raises RENAMED, which both name filters see --
+ * the conservative answer for a protocol that cannot tell us. */
+#define CHIMERA_VFS_NOTIFY_RENAMED_DIR   0x0800
 
 #define CHIMERA_VFS_NOTIFY_RING_SIZE     32
 #define CHIMERA_VFS_NOTIFY_NUM_BUCKETS   64

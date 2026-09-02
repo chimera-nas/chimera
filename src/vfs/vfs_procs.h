@@ -783,6 +783,12 @@ typedef void (*chimera_vfs_rename_at_callback_t)(
     struct chimera_vfs_attrs *todir_post_attr,
     void                     *private_data);
 
+/* rename_at `flags`: the caller knows the renamed object is a DIRECTORY, so
+ * the change notification it raises is a directory-name change rather than a
+ * file-name one.  Only the SMB path knows this (the open carries the type);
+ * everything else leaves it clear and gets the both-filters class. */
+#define CHIMERA_VFS_RENAME_SRC_IS_DIR 0x00000001
+
 void
 chimera_vfs_rename_at(
     struct chimera_vfs_thread       *thread,
