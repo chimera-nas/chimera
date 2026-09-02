@@ -45,27 +45,34 @@
 #include "evpl/evpl.h"
 #include "evpl/evpl_rpc2.h"
 
-#define MBT_MAX_ENTRIES  512    /* readdir entries copied out per reply */
-#define MBT_NAME_MAX     256
-#define MBT_MAX_DATA     (4 << 20) /* read payload copy-out bound */
+#define MBT_MAX_ENTRIES   512   /* readdir entries copied out per reply */
+#define MBT_NAME_MAX      256
+#define MBT_MAX_DATA      (4 << 20) /* read payload copy-out bound */
 
 /* Must match NFS_MOUNT_PORT in nfs_external_portmap.h: under inproc the
  * port number is only a service name ("chimera-inproc-20048"), but it
  * still has to be the name the server registered.  The auxiliary services
  * follow the same rule: 111 is hardwired in nfs.c, the other two are the
  * nfs_lockmgr_port / nfs_nsm_port defaults (server.c). */
-#define MBT_MOUNT_PORT   20048
-#define MBT_PORTMAP_PORT 111
-#define MBT_NLM_PORT     32803
-#define MBT_NSM_PORT     32765
+#define MBT_MOUNT_PORT    20048
+#define MBT_PORTMAP_PORT  111
+#define MBT_NLM_PORT      32803
+#define MBT_NSM_PORT      32765
+
+/* The NFS/RDMA service (mbt_env_opts.rdma), which the server puts on its own
+ * endpoint alongside the stream one.  Must match the nfs_rdma_port default in
+ * server.c, for the same reason MBT_MOUNT_PORT must match NFS_MOUNT_PORT.
+ * Only the NFS service has an RDMA endpoint: MOUNT, NLM, NSM and portmap stay
+ * on the stream protocol, exactly as they do over real hardware. */
+#define MBT_NFS_RDMA_PORT 20049
 
 /* pNFS topology (see mbt_env_opts.pnfs_num_ds): the data servers are
  * additional chimera servers in THIS process, each on its own inproc
  * service name, so the whole MDS+DS cluster is one test binary with no
  * ports, namespaces or daemons.  Their port numbers only have to avoid
  * the MDS's own services above. */
-#define MBT_MAX_DS       4
-#define MBT_DS_PORT_BASE 12050
+#define MBT_MAX_DS        4
+#define MBT_DS_PORT_BASE  12050
 
 struct mbt_fh {
     int      has;
@@ -142,6 +149,16 @@ struct mbt_env_opts {
      * the NFS3/NFS4 suites never touch them, and connecting three more
      * inproc services per replay process is pure overhead there. */
     int         aux;
+    /* Carry NFS over RPC-over-RDMA instead of plain RPC record marking.
+     *
+     * The inproc transport has two protocols: STREAM_INPROC, and
+     * DATAGRAM_INPROC which reports itself RDMA-capable and performs real
+     * one-sided transfers against a registered-memory table (see
+     * evpl_inproc_rdma_xfer).  rpc2 keys its framing off evpl_bind_is_rdma(),
+     * so pointing the client at the server's RDMA endpoint exercises the read
+     * and write chunk paths -- the RDMA framing is genuinely under test here,
+     * not emulated away. */
+    int         rdma;
     /* server.portmap_hostname: when set, portmap universal addresses are
      * built from this host instead of the connection's local address.  The
      * aux suite uses it to make the uaddr predictable (the inproc local
@@ -190,6 +207,8 @@ struct mbt_env {
      * every other suite. */
     struct evpl_http_agent    *rest_agent;
     const char                *module;   /* backend for mkfs/mount/rmfs */
+
+    int                        rdma;     /* NFS carried over RPC-over-RDMA */
 
     struct evpl               *evpl;
     struct evpl_rpc2_thread   *rpc2_thread;
@@ -419,6 +438,14 @@ mbt_env_open_opts(
     chimera_server_config_set_tcp_flavor(config, CHIMERA_TCP_FLAVOR_INPROC);
     chimera_server_config_set_nfs_enabled(config, 1);
 
+    /* The RDMA listener is additional, not instead: the server keeps its
+     * stream endpoint, and the client below chooses which one to use. */
+    env->rdma = (opts && opts->rdma);
+    if (env->rdma) {
+        chimera_server_config_set_nfs_rdma(config, 1);
+        chimera_server_config_set_nfs_rdma_port(config, MBT_NFS_RDMA_PORT);
+    }
+
     env->module = (opts && opts->module) ? opts->module : "memfs";
 
     /* Deliberately NOT raising common.umount_timeout_ms here.
@@ -623,12 +650,17 @@ mbt_env_open_opts(
     /* Endpoint names must match what the server derived from its ports
      * (chimera-inproc-<port>); build them through the same helper. */
     nfs_ep = chimera_tcp_flavor_endpoint_create(CHIMERA_TCP_FLAVOR_INPROC,
-                                                "127.0.0.1", 2049);
+                                                "127.0.0.1",
+                                                env->rdma ? MBT_NFS_RDMA_PORT
+                                                : 2049);
     mount_ep = chimera_tcp_flavor_endpoint_create(CHIMERA_TCP_FLAVOR_INPROC,
                                                   "127.0.0.1", MBT_MOUNT_PORT);
 
+    /* DATAGRAM_INPROC is the RDMA-capable inproc protocol; rpc2 picks its
+     * RDMA framing from the bind, so this one choice switches both ends. */
     env->nfs_conn = evpl_rpc2_client_connect(env->rpc2_thread,
-                                             EVPL_STREAM_INPROC,
+                                             env->rdma ? EVPL_DATAGRAM_INPROC
+                                             : EVPL_STREAM_INPROC,
                                              nfs_ep, NULL, 0, NULL);
     env->mount_conn = evpl_rpc2_client_connect(env->rpc2_thread,
                                                EVPL_STREAM_INPROC,
@@ -1556,10 +1588,17 @@ mbt_write(
     args.data.length    = len;
 
     /* Marshalling MOVES the data iovec (xdr_iovec_move_private), so
-     * ownership passes to the rpc2 layer here -- no release on our side. */
+     * ownership passes to the rpc2 layer here -- no release on our side.
+     *
+     * ddp=1 under RDMA puts the payload in an RFC 8166 Read chunk for the
+     * server to pull, instead of inline in the request.  It is what drives
+     * the server's read-chunk path (evpl_rpc2_encoding_take_read_chunk in
+     * nfs3_proc_write.c); without it an RDMA run still gets RPC-over-RDMA
+     * framing but never a one-sided transfer, and the chunk handling would
+     * go untested. */
     env->nfs_v3.send_call_NFSPROC3_WRITE(&env->nfs_v3.rpc2, env->evpl,
                                          env->nfs_conn, &env->cred, &args,
-                                         0, 0, NULL, 0, 0,
+                                         env->rdma, 0, NULL, 0, 0,
                                          mbt_write_cb, env);
     mbt_call_wait(env);
     return &env->res;
@@ -1589,9 +1628,20 @@ mbt_read_cb(
             /* The reply's data iovecs are handed to this callback WITH
              * their references (the vfs/nfs proxy passes them on to the
              * VFS layer, which releases them); we only copy, so release
-             * them here or evpl's teardown leak check aborts. */
+             * them here or evpl's teardown leak check aborts.
+             *
+             * resok.count bounds the copy, and the iovec lengths do not.
+             * Inline they agree, but an RDMA Write chunk is returned at the
+             * size the client ADVERTISED, not the size the server filled --
+             * a short read into a full-size chunk hands back a longer iovec
+             * whose tail is undefined.  count is the authoritative length,
+             * which is what chimera's own client uses (nfs3_read.c).  Every
+             * iovec is still released, copied from or not. */
             for (i = 0; i < reply->resok.data.niov; i++) {
                 n = reply->resok.data.iov[i].length;
+                if (off + n > reply->resok.count) {
+                    n = reply->resok.count - off;
+                }
                 if (off + n > MBT_MAX_DATA) {
                     n = MBT_MAX_DATA - off;
                 }
@@ -1620,9 +1670,13 @@ mbt_read(
     args.file.data.len  = fh->len;
     args.offset         = offset;
     args.count          = count;
+    /* The mirror of the WRITE above: advertising a Write chunk of the read
+     * size lets the server place the payload directly with an RDMA write
+     * rather than sending it inline. */
     env->nfs_v3.send_call_NFSPROC3_READ(&env->nfs_v3.rpc2, env->evpl,
                                         env->nfs_conn, &env->cred, &args,
-                                        0, 0, NULL, 0, 0,
+                                        0, env->rdma ? (int) count : 0,
+                                        NULL, 0, 0,
                                         mbt_read_cb, env);
     mbt_call_wait(env);
     return &env->res;

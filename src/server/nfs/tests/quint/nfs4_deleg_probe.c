@@ -335,9 +335,13 @@ pc_setup(
 
     cb_programs[0] = &env->nfs_v4_cb.rpc2;
     ep             = chimera_tcp_flavor_endpoint_create(CHIMERA_TCP_FLAVOR_INPROC,
-                                                        "127.0.0.1", 2049);
+                                                        "127.0.0.1",
+                                                        env->rdma
+                                                        ? MBT_NFS_RDMA_PORT
+                                                        : 2049);
     pc->conn = evpl_rpc2_client_connect(env->rpc2_thread,
-                                        EVPL_STREAM_INPROC, ep,
+                                        env->rdma ? EVPL_DATAGRAM_INPROC
+                                        : EVPL_STREAM_INPROC, ep,
                                         cb_programs, 1, pc);
 
     memset(&op, 0, sizeof(op));

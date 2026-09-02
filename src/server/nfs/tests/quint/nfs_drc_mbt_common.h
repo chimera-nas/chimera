@@ -129,9 +129,17 @@ drc_conn_open(struct drc_ctx *c)
     struct evpl_endpoint  *ep;
     struct evpl_rpc2_conn *conn;
 
+    /* Follow the env's transport.  These are the connections the suite
+     * actually tests on -- the model's connection ids map to them -- so
+     * leaving them on the stream endpoint would make an --rdma run a
+     * verbatim repeat of the stream one. */
     ep = chimera_tcp_flavor_endpoint_create(CHIMERA_TCP_FLAVOR_INPROC,
-                                            "127.0.0.1", 2049);
-    conn = evpl_rpc2_client_connect(c->env->rpc2_thread, EVPL_STREAM_INPROC,
+                                            "127.0.0.1",
+                                            c->env->rdma ? MBT_NFS_RDMA_PORT
+                                            : 2049);
+    conn = evpl_rpc2_client_connect(c->env->rpc2_thread,
+                                    c->env->rdma ? EVPL_DATAGRAM_INPROC
+                                    : EVPL_STREAM_INPROC,
                                     ep, NULL, 0, NULL);
     if (!conn) {
         fprintf(stderr, "drc: failed to open an NFS connection\n");

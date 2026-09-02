@@ -947,10 +947,20 @@ conn_for(
     }
     if (!o->conns[model_client]) {
         cb_programs[0] = &o->env->nfs_v4_cb.rpc2;
-        ep             = chimera_tcp_flavor_endpoint_create(CHIMERA_TCP_FLAVOR_INPROC,
-                                                            "127.0.0.1", 2049);
+        /* Follow the env's transport.  These per-model-client connections
+         * carry every stateful compound the trace issues -- conn_for() only
+         * falls back to env->nfs_conn for a compound with no client -- so
+         * leaving them on the stream endpoint would put most of an --rdma run
+         * back on plain RPC. */
+        ep = chimera_tcp_flavor_endpoint_create(CHIMERA_TCP_FLAVOR_INPROC,
+                                                "127.0.0.1",
+                                                o->env->rdma
+                                                ? MBT_NFS_RDMA_PORT
+                                                : 2049);
         o->conns[model_client] =
-            evpl_rpc2_client_connect(o->env->rpc2_thread, EVPL_STREAM_INPROC,
+            evpl_rpc2_client_connect(o->env->rpc2_thread,
+                                     o->env->rdma ? EVPL_DATAGRAM_INPROC
+                                     : EVPL_STREAM_INPROC,
                                      ep, cb_programs, 1, o);
         if (!o->conns[model_client]) {
             fprintf(stderr, "failed to open connection for model client "
@@ -2415,8 +2425,16 @@ decode_resop(
 
                 r->eof  = rop->opread.resok4.eof != 0;
                 r->data = o->arena + o->arena_used;
+                /* data.length, not the iovec lengths: an RDMA Write chunk
+                 * comes back at the size the client ADVERTISED, not the size
+                 * the server filled, so a short read hands back a longer
+                 * iovec whose tail is undefined.  chimera's own client reads
+                 * the same field (vfs/nfs/nfs4_read.c). */
                 for (i = 0; i < rop->opread.resok4.data.niov; i++) {
                     n = rop->opread.resok4.data.iov[i].length;
+                    if (off + n > rop->opread.resok4.data.length) {
+                        n = rop->opread.resok4.data.length - off;
+                    }
                     if (o->arena_used + off + n > V4_DATA_ARENA) {
                         n = V4_DATA_ARENA - o->arena_used - off;
                     }
@@ -3787,6 +3805,8 @@ run_compound(
     uint32_t             retry_slot = 0;
     int                  retry_sess = 0;
     int                  has_seq    = 0;
+    int                  cd_ddp     = 0;
+    int                  cd_wchunk  = 0;
 
     o->status_dev              = 0;
     o->cur_open_clientid_known = 0;
@@ -3817,6 +3837,25 @@ run_compound(
     {
         if (encode_op(o, op, &argarray[i], &scratch[i], m) < 0) {
             return -1;
+        }
+
+        /* RDMA chunk eligibility for this compound, mirroring what chimera's
+         * own v4 client asks for (vfs/nfs/nfs4_write.c, nfs4_read.c): a WRITE
+         * puts its payload in a Read chunk for the server to pull (ddp), and a
+         * READ advertises a Write chunk the server can place the reply data
+         * into.  Without these an RDMA run gets RPC-over-RDMA framing but never
+         * a one-sided transfer, and the server's chunk handling goes untested.
+         *
+         * Accumulated here, as each op is encoded, rather than in a second pass
+         * over argarray: only the ops this loop has written are initialized,
+         * and a later pass bounded by nops cannot show the analyzer that. */
+        if (o->env->rdma) {
+            if (argarray[i].argop == OP_WRITE) {
+                cd_ddp = 1;
+            } else if (argarray[i].argop == OP_READ &&
+                       (int) argarray[i].opread.count > cd_wchunk) {
+                cd_wchunk = (int) argarray[i].opread.count;
+            }
         }
     }
 
@@ -3895,7 +3934,8 @@ run_compound(
         o->env->nfs_v4.send_call_NFSPROC4_COMPOUND(&o->env->nfs_v4.rpc2,
                                                    o->env->evpl, conn,
                                                    &o->env->cred, &args,
-                                                   0, 0, NULL, 0, 0,
+                                                   cd_ddp, cd_wchunk,
+                                                   NULL, 0, 0,
                                                    v4_compound_cb, &cctx);
         while (!rep.done) {
             evpl_continue(o->env->evpl);
@@ -4715,6 +4755,7 @@ main(
         { "backend",        required_argument, 0, 'b' },
         { "pnfs",           required_argument, 0, 'p' },
         { "delegations",    no_argument,       0, 'g' },
+        { "rdma",           no_argument,       0, 'R' },
         { "dry-run",        no_argument,       0, 'n' },
         { "verbose",        no_argument,       0, 'v' },
         { 0,                0,                 0, 0   },
@@ -4754,7 +4795,7 @@ main(
      * shared helper; getopt only recognizes them so it does not error. */
     traces = mbt_collect_traces(argc, argv, &ntraces);
 
-    while ((c = getopt_long(argc, argv, "t:D:X:M:b:p:gnv", long_options,
+    while ((c = getopt_long(argc, argv, "t:D:X:M:b:p:gnvR", long_options,
                             NULL)) != -1) {
         switch (c) {
             case 't':
@@ -4794,11 +4835,14 @@ main(
                     return 2;
                 }
                 break;
+            case 'R':
+                opts.rdma = 1;
+                break;
             default:
                 fprintf(stderr,
                         "usage: %s [--trace FILE ...] [--trace-dir DIR] "
                         "[--backend memfs|diskfs|cairn|linux|io_uring] "
-                        "[--pnfs N] [--delegations] "
+                        "[--pnfs N] [--delegations] [--rdma] "
                         "[--mandatory CAP] [--dry-run] [--verbose]\n",
                         argv[0]);
                 mbt_free_traces(traces, ntraces);

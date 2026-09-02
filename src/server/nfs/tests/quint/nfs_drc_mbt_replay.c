@@ -869,6 +869,7 @@ main(
         { "paranoid",       no_argument,       0, 'p' },
         { "no-nfs3-drc",    no_argument,       0, 'N' },
         { "backend",        required_argument, 0, 'B' },
+        { "rdma",           no_argument,       0, 'R' },
         { 0,                0,                 0, 0   },
     };
     /* *INDENT-ON* */
@@ -878,6 +879,7 @@ main(
     int                 verbose  = 0;
     int                 nfs3_drc = 1;
     const char         *backend  = "memfs";
+    int                 rdma     = 0;
     int                 failures = 0;
     int                 c, i;
     struct mbt_env      env;
@@ -887,7 +889,7 @@ main(
 
     traces = mbt_collect_traces(argc, argv, &ntraces);
 
-    while ((c = getopt_long(argc, argv, "t:D:X:nvpNB:", long_options,
+    while ((c = getopt_long(argc, argv, "t:D:X:nvpNB:R", long_options,
                             NULL)) != -1) {
         switch (c) {
             case 't':
@@ -909,10 +911,14 @@ main(
             case 'B':
                 backend = optarg;
                 break;
+            case 'R':
+                rdma = 1;
+                break;
             default:
                 fprintf(stderr,
                         "usage: %s [--trace FILE ...] [--trace-dir DIR] "
-                        "[--backend memfs|diskfs|cairn] [--no-nfs3-drc] "
+                        "[--backend memfs|diskfs|cairn|linux|io_uring] "
+                        "[--rdma] [--no-nfs3-drc] "
                         "[--dry-run] [--verbose] [--paranoid]\n", argv[0]);
                 mbt_free_traces(traces, ntraces);
                 return 2;
@@ -929,6 +935,7 @@ main(
     if (!dry_run) {
         memset(&opts, 0, sizeof(opts));
         opts.module = backend;
+        opts.rdma   = rdma;
         /* The corpus generated from the nfsdrcNoV3 profile is replayed with the
          * NFSv3 cache off, which is the server's own default; everything else
          * needs it on.  The NFSv4.0 cache has no switch. */

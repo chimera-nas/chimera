@@ -1712,6 +1712,8 @@ main(
           'v'                                                                                                                                                                                                },
         { "backend",            required_argument,              0,
           'B'                                                                           },
+        { "rdma",               no_argument,                    0,
+          'R'                                                                           },
         { 0,                    0,                              0,                             0 },
     };
     char               **traces;
@@ -1721,6 +1723,7 @@ main(
     int                  dry_run            = 0;
     int                  verbose            = 0;
     const char          *backend            = "memfs";
+    int                  rdma               = 0;
     int                  failures           = 0;
     int                  c;
     int                  i;
@@ -1736,7 +1739,7 @@ main(
      * error, and skips them here (the 't'/'D'/'X' cases). */
     traces = mbt_collect_traces(argc, argv, &ntraces);
 
-    while ((c = getopt_long(argc, argv, "t:D:X:b:r:nvB:", long_options,
+    while ((c = getopt_long(argc, argv, "t:D:X:b:r:nvB:R", long_options,
                             NULL)) != -1) {
         switch (c) {
             case 't':
@@ -1758,12 +1761,15 @@ main(
             case 'B':
                 backend = optarg;
                 break;
+            case 'R':
+                rdma = 1;
+                break;
             default:
                 fprintf(stderr,
                         "usage: %s [--trace FILE ...] [--trace-dir DIR] "
                         "[--block-size N] [--max-attr-skip-rate F] "
                         "[--backend memfs|diskfs|cairn|linux|io_uring] "
-                        "[--dry-run] [--verbose]\n", argv[0]);
+                        "[--rdma] [--dry-run] [--verbose]\n", argv[0]);
                 mbt_free_traces(traces, ntraces);
                 return 2;
         } /* switch */
@@ -1781,7 +1787,7 @@ main(
      * isolation.  A single-fs backend (linux/io_uring) would instead clear the
      * backing directory between traces. */
     if (!dry_run) {
-        struct mbt_env_opts opts = { .module = backend };
+        struct mbt_env_opts opts = { .module = backend, .rdma = rdma };
         mbt_env_open_opts(&env, &opts);
     }
 
