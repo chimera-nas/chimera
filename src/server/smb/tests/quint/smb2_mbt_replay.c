@@ -61,40 +61,50 @@
 #define MAX_TREE 512
 #define MAX_FID  4096
 
-static struct smb2_env                  g_env;
+static struct smb2_env   g_env;
 /* The connection a live model session is bound to, NULL once a modeled
  * transport drop has taken it away. */
-static struct smb2_conn                *g_conn_for_sess[MAX_SESS];
+static struct smb2_conn *g_conn_for_sess[MAX_SESS];
 /* Every connection a session was EVER bound to, kept after the drop: a
  * reconnect must present the dropped session's ClientGuid (MS-SMB2 3.3.5.9.7 --
  * chimera refuses a leased or persistent reclaim from a different client), and
  * the model names the client by the session it is reconnecting FOR. */
-static struct smb2_conn                *g_conn_hist[MAX_SESS];
-static uint32_t                         g_wire_tree[MAX_TREE];
-static uint8_t                          g_wire_fid[MAX_FID][16];
+static struct smb2_conn *g_conn_hist[MAX_SESS];
+static uint32_t          g_wire_tree[MAX_TREE];
+static uint8_t           g_wire_fid[MAX_FID][16];
 /* Has this model FileId ever been learned from the wire?  A model fid is never
  * reused, so a SECOND reply carrying one the replayer already knows is the
  * model asserting "this is the same open" -- a replayed CREATE answered from
  * the reply cache, or a reclaim of a parked handle.  The wire FileId must then
  * be byte-identical, which is the exactly-once oracle MS-SMB2 3.3.5.9.10 asks
  * for stated as an assertion rather than a status comparison. */
-static int                              g_fid_known[MAX_FID];
+static int               g_fid_known[MAX_FID];
 /* Which connection owns each model FileId: a break notification for a handle
  * is pushed to the HOLDER's connection, and the acknowledgment must go back on
  * that same connection, so the fid -> conn binding is as load-bearing as the
  * fid -> wire FileId one. */
-static struct smb2_conn                *g_conn_for_fid[MAX_FID];
+static struct smb2_conn *g_conn_for_fid[MAX_FID];
 /* The model lease key (a small int) each handle's grant carries, or -1.  A
  * LEASE_BREAK acknowledgment is keyed by the 16-byte lease key, not by FileId. */
-static int                              g_lease_key_for_fid[MAX_FID];
+static int               g_lease_key_for_fid[MAX_FID];
 /* Which parked handles the replayer has already waited for (see park_barrier). */
-static int                              g_park_barriered[MAX_FID];
-/* The AsyncId of the CHANGE_NOTIFY currently PARKED on each model handle, or
- * 0.  chimera answers a parked notify with an async message carrying the
- * original request's MessageId as its AsyncId, so recording it when the
- * request parks is what lets the completion be matched back to the handle it
- * belongs to -- and what lets a CANCEL name it. */
-static uint64_t                         g_notify_async[MAX_FID];
+static int               g_park_barriered[MAX_FID];
+/* The AsyncIds of the CHANGE_NOTIFY requests outstanding on each model handle,
+ * oldest first.  chimera answers a parked notify with an async message
+ * carrying the original request's MessageId as its AsyncId, so recording it
+ * when the request parks is what lets the completion be matched back to the
+ * request it belongs to -- and what lets a CANCEL name it.
+ *
+ * A LIST, not one id: MS-FSA 2.1.5.9 keeps a handle's outstanding requests on
+ * Open.PendingNotifyChanges and they are answered oldest-first, which is what
+ * the model's `seq` indexes. */
+#define MAX_NOTIFY_Q 8
+static uint64_t                         g_notify_async[MAX_FID][MAX_NOTIFY_Q];
+static int                              g_notify_nq[MAX_FID];
+/* A request an SMB2 CANCEL has already taken off the queue, waiting for its
+* STATUS_CANCELLED completion.  Matched from here rather than by queue
+* position: the cancel removed it, so the positions behind it have moved. */
+static uint64_t                         g_notify_cancelled[MAX_FID];
 /* The model state AFTER the message being replayed -- the `parked` map of which
  * is what tells the disconnect handler which handles the server still owes a
  * park. */
@@ -897,9 +907,30 @@ check_notify_notes(
      * command. */
     settle_breaks();
 
-    for (size_t i = 0; i < n; i++) {
-        json_t                *note   = json_array_get(arr, i);
+    /* Highest queue position first, so retiring one does not renumber those
+     * still to be matched. */
+    for (size_t pass = n; pass > 0; pass--) {
+        json_t *note = NULL;
+        int64_t best = -1;
+
+        for (size_t i = 0; i < n; i++) {
+            json_t *cand = json_array_get(arr, i);
+
+            if (json_object_get(cand, "_done")) {
+                continue;
+            }
+            if (jfield(cand, "seq") > best) {
+                best = jfield(cand, "seq");
+                note = cand;
+            }
+        }
+        if (!note) {
+            break;
+        }
+        json_object_set_new(note, "_done", json_true());
+
         int64_t                fid    = jfield(note, "fid");
+        int64_t                seq    = jfield(note, "seq");
         uint32_t               exp_st = (uint32_t) jfield(note, "st");
         struct smb2_conn      *wc     =
             (fid >= 0 && fid < MAX_FID) ? g_conn_for_fid[fid] : NULL;
@@ -912,18 +943,33 @@ check_notify_notes(
         snprintf(label, sizeof(label), "%s: CHANGE_NOTIFY on fid %lld", what,
                  (long long) fid);
 
-        if (!wc || !g_notify_async[fid]) {
+        uint64_t               aid;
+
+        if (exp_st == ST_CANCELLED) {
+            /* A cancel already took this one off the queue. */
+            aid                     = g_notify_cancelled[fid];
+            g_notify_cancelled[fid] = 0;
+        } else if (seq >= 0 && seq < g_notify_nq[fid]) {
+            aid = g_notify_async[fid][seq];
+            for (int k = (int) seq + 1; k < g_notify_nq[fid]; k++) {
+                g_notify_async[fid][k - 1] = g_notify_async[fid][k];
+            }
+            g_notify_nq[fid]--;
+        } else {
+            aid = 0;
+        }
+
+        if (!wc || !aid) {
             mism("%s: model completed a request the harness never saw park",
                  label);
             continue;
         }
-        if (!smb2_conn_take_notify(wc, g_notify_async[fid], &got)) {
+
+        if (!smb2_conn_take_notify(wc, aid, &got)) {
             mism("%s: model predicted status 0x%08x, the wire sent no "
                  "completion", label, exp_st);
-            g_notify_async[fid] = 0;
             continue;
         }
-        g_notify_async[fid] = 0;
 
         if (got.status != exp_st) {
             if (!dev_status("RNotifyAsync", exp_st, got.status, "notify")) {
@@ -1319,8 +1365,13 @@ do_notify(
 
     if (got_parked) {
         /* Remember the AsyncId: it is how the eventual completion is matched
-         * back to this handle, and how a CANCEL names the request. */
-        g_notify_async[mfid] = c->last_async_id;
+         * back to this request, and how a CANCEL names it.  Appended, because
+         * a handle may carry several outstanding at once and they are answered
+         * in the order they were made. */
+        if (g_notify_nq[mfid] >= MAX_NOTIFY_Q) {
+            slot_overflow("notify queue", g_notify_nq[mfid], MAX_NOTIFY_Q);
+        }
+        g_notify_async[mfid][g_notify_nq[mfid]++] = c->last_async_id;
         if (exp_st != ST_PENDING) {
             mism("CHANGE_NOTIFY fid %lld: parked, but the model's status is "
                  "0x%08x rather than STATUS_PENDING", (long long) mfid, exp_st);
@@ -1367,12 +1418,18 @@ do_cancel(
          * asking the server about a request that does not exist. */
         return;
     }
-    if (mfid < 0 || mfid >= MAX_FID || !g_notify_async[mfid]) {
+    if (mfid < 0 || mfid >= MAX_FID || g_notify_nq[mfid] == 0) {
         mism("CANCEL fid %lld: the model says a request is parked, the harness "
              "never saw one", (long long) mfid);
         return;
     }
-    smb2c_post_cancel_async(c, g_notify_async[mfid]);
+    /* The OLDEST outstanding request, which is the one the model cancels. */
+    g_notify_cancelled[mfid] = g_notify_async[mfid][0];
+    smb2c_post_cancel_async(c, g_notify_cancelled[mfid]);
+    for (int i = 1; i < g_notify_nq[mfid]; i++) {
+        g_notify_async[mfid][i - 1] = g_notify_async[mfid][i];
+    }
+    g_notify_nq[mfid]--;
 } /* do_cancel */
 
 static void
@@ -2309,6 +2366,8 @@ run_trace(
      * parked CHANGE_NOTIFY without a reply when its connection goes (there is
      * nobody left to answer), so no completion crosses a trace boundary. */
     memset(g_notify_async, 0, sizeof(g_notify_async));
+    memset(g_notify_nq, 0, sizeof(g_notify_nq));
+    memset(g_notify_cancelled, 0, sizeof(g_notify_cancelled));
     memset(g_park_pending, 0, sizeof(g_park_pending));
     g_trace       = path;
     g_nmismatch   = 0;
