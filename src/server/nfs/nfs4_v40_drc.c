@@ -358,26 +358,31 @@ nfs4_v40_drc_capture_reply(
     const struct evpl_iovec *iov,
     int                      niov,
     int                      total_length,
+    uint32_t                 rpc_offset,
     void                    *private_data)
 {
     struct nfs4_v40_drc_capture_ctx *ctx = private_data;
     uint8_t                         *buf;
-    size_t                           offset = 0;
+    uint32_t                         rpc_len;
     uint32_t                         body_offset;
-    int                              i;
 
-    if (total_length <= 0 ||
+    if (total_length <= (int) rpc_offset ||
         (uint32_t) total_length > NFS4_V40_DRC_MAX_REPLY_SIZE) {
         return;
     }
 
-    buf = malloc(total_length);
+    /* Store the RPC reply without its transport framing; see
+     * nfs_drc_copy_rpc_reply. */
+    rpc_len = (uint32_t) total_length - rpc_offset;
+
+    buf = malloc(rpc_len);
     if (!buf) {
         return;  /* OOM: skip caching this reply (degrade to a cache miss) */
     }
-    for (i = 0; i < niov; i++) {
-        memcpy(buf + offset, iov[i].data, iov[i].length);
-        offset += iov[i].length;
+
+    if (nfs_drc_copy_rpc_reply(iov, niov, rpc_offset, buf, rpc_len) != rpc_len) {
+        free(buf);
+        return;
     }
 
     /* Only a MSG_ACCEPTED/SUCCESS reply can ever be replayed --
@@ -387,9 +392,9 @@ nfs4_v40_drc_capture_reply(
      * reaching chimera_nfs4_compound, so nothing disarms the capture, and an
      * unauthenticated peer could otherwise evict every real entry with a stream
      * of malformed requests. */
-    if (nfs_drc_reply_body_offset(buf, total_length, &body_offset)) {
+    if (nfs_drc_reply_body_offset(buf, rpc_len, &body_offset)) {
         nfs4_v40_drc_cache_insert(ctx->drc, ctx->conn, ctx->xid, ctx->cksum,
-                                  buf, total_length);
+                                  buf, rpc_len);
     }
 
     free(buf);
@@ -432,10 +437,15 @@ nfs4_v40_drc_dispatch(
     uint32_t                          cached_len, mv;
     uint64_t                          cksum;
 
-    /* Only minorversion-0 COMPOUNDs over TCP use this cache.  NULL, RDMA, and
-     * 4.1+ COMPOUNDs (the session reply cache covers those) pass through.  The
-     * cached reply is the TCP on-wire form, so RDMA framing would not match. */
-    if (conn->rdma || proc != NFS4_PROC_COMPOUND ||
+    /* Only minorversion-0 COMPOUNDs use this cache; NULL and 4.1+ COMPOUNDs
+     * (the session reply cache covers those) pass through.
+     *
+     * RDMA connections used to pass through as well, because the cached reply
+     * was the TCP on-wire form and RDMA framing would not match.  The cache now
+     * stores the RPC reply with the framing stripped
+     * (nfs4_v40_drc_capture_reply), so an RDMA retransmit is served like any
+     * other -- it has to be, or a non-idempotent COMPOUND re-executes there. */
+    if (proc != NFS4_PROC_COMPOUND ||
         !nfs4_v40_peek_minorversion(iov, niov, &mv) || mv != 0) {
         return drc->orig_dispatch(evpl, conn, encoding, proc, program_data,
                                   cred, iov, niov, length, private_data);

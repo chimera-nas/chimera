@@ -16,7 +16,9 @@
 #include "vfs/vfs_procs.h"
 
 #define NFS4_DRC_SESSION_MAGIC   0x3153534Eu /* "NSS1" */
-#define NFS4_DRC_REPLY_MAGIC     0x3150524Eu /* "NRP1" */
+/* Bumped from "NRP1" when the cached bytes changed from the whole on-wire
+ * message to the RPC reply alone; a magic mismatch is already read as a miss. */
+#define NFS4_DRC_REPLY_MAGIC     0x3250524Eu /* "NRP2" */
 
 /* Session-record value: fixed header before the variable principal+owner. */
 #define NFS4_DRC_SESSION_HDR_LEN 100u

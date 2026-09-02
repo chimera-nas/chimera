@@ -18,7 +18,10 @@
 #include "evpl/evpl_rpc2.h"
 #include "evpl/evpl_rpc2_program.h"
 
-#define NFS3_DRC_VALUE_MAGIC 0x33435244u /* "DRC3" */
+/* Bumped from "DRC3" when the cached bytes changed from the whole on-wire
+ * message to the RPC reply alone: an entry written by an older build is not
+ * readable by this one, and a magic mismatch is already treated as a miss. */
+#define NFS3_DRC_VALUE_MAGIC 0x34435244u /* "DRC4" */
 
 /* Most evictions remove a single similarly-sized entry; this caps how many
  * evicted keys one insert reports back for KV cleanup (any beyond it leak in
@@ -453,6 +456,7 @@ nfs3_drc_capture_reply(
     const struct evpl_iovec *iov,
     int                      niov,
     int                      total_length,
+    uint32_t                 rpc_offset,
     void                    *private_data)
 {
     struct nfs3_drc_capture_ctx      *ctx    = private_data;
@@ -460,33 +464,37 @@ nfs3_drc_capture_reply(
     struct nfs3_drc                  *drc    = ctx->drc;
     struct nfs3_drc_keybuf            evicted[NFS3_DRC_EVICT_MAX];
     uint8_t                          *buf;
-    size_t                            offset = 0;
+    uint32_t                          rpc_len;
     uint64_t                          ts;
     int                               i, nev;
 
-    if (total_length <= 0 || (uint32_t) total_length > NFS3_DRC_MAX_REPLY_SIZE) {
+    if (total_length <= (int) rpc_offset ||
+        (uint32_t) total_length > NFS3_DRC_MAX_REPLY_SIZE) {
         return;
     }
 
-    buf = malloc(total_length);
+    rpc_len = (uint32_t) total_length - rpc_offset;
+
+    buf = malloc(rpc_len);
     if (!buf) {
         return;  /* OOM: skip caching this reply (degrade to a cache miss) */
     }
-    for (i = 0; i < niov; i++) {
-        memcpy(buf + offset, iov[i].data, iov[i].length);
-        offset += iov[i].length;
+
+    if (nfs_drc_copy_rpc_reply(iov, niov, rpc_offset, buf, rpc_len) != rpc_len) {
+        free(buf);
+        return;
     }
 
     ts = nfs_lease_now_ns();
 
     pthread_mutex_lock(&drc->lock);
-    nev = nfs3_drc_cache_insert_locked(drc, &ctx->key, buf, total_length, ts,
+    nev = nfs3_drc_cache_insert_locked(drc, &ctx->key, buf, rpc_len, ts,
                                        evicted, NFS3_DRC_EVICT_MAX);
     pthread_mutex_unlock(&drc->lock);
 
     if (!drc->persistence_disabled) {
         nfs3_drc_kv_put(thread->vfs_thread, drc->kv_type, &ctx->key, buf,
-                        total_length, ts);
+                        rpc_len, ts);
         for (i = 0; i < nev; i++) {
             nfs3_drc_kv_delete(thread->vfs_thread, drc->kv_type, &evicted[i]);
         }
@@ -783,9 +791,15 @@ nfs3_drc_dispatch(
     struct nfs3_drc                  *drc    = &thread->shared->nfs3_drc;
     struct nfs3_drc_keybuf            key;
 
-    /* The cached reply is the TCP on-wire form; RDMA framing differs, so leave
-    * RDMA requests (and idempotent procs) to the real dispatcher untouched. */
-    if (conn->rdma || !nfs3_drc_proc_cacheable(proc)) {
+    /* Idempotent procs are safe to re-execute, so they bypass the cache.
+     *
+     * RDMA connections used to bypass it too, because the cached reply was the
+     * TCP on-wire form and RDMA framing differs.  The cache now stores the RPC
+     * reply with the transport framing stripped (nfs3_drc_capture_reply), so a
+     * retransmit over RDMA is served like any other -- which it has to be: a
+     * duplicate-request cache that quietly disables itself on one transport
+     * re-executes non-idempotent operations there. */
+    if (!nfs3_drc_proc_cacheable(proc)) {
         return drc->orig_dispatch(evpl, conn, encoding, proc, program_data,
                                   cred, iov, niov, length, private_data);
     }
