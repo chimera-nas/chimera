@@ -34,7 +34,7 @@
 #include "common/chimera_tracing.h"
 #include "server/server.h"
 #include "common/common_config.h"
-#include "smb/smb2.h"
+#include "smb_common/smb2.h"
 #include "rest/rest.h"
 
 #define CHIMERA_SERVER_MAX_MODULES   64

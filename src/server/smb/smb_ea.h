@@ -8,7 +8,7 @@
 #include <string.h>
 #include <ctype.h>
 
-#include "smb2.h"
+#include "smb_common/smb2.h"
 #include "vfs/sdk/vfs_error.h"
 #include "vfs/sdk/vfs_xattr_name.h"
 

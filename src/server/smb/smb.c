@@ -31,9 +31,9 @@
 #include "smb_notify.h"
 #include "smb_dump.h"
 #include "smb_trace.h"
-#include "smb_signing.h"
-#include "smb_encrypt.h"
-#include "smb_compress.h"
+#include "smb_common/smb_signing.h"
+#include "smb_common/smb_encrypt.h"
+#include "smb_common/smb_compress.h"
 #include "xxhash.h"
 
 static const uint8_t SMB2_PROTOCOL_ID[4] = { 0xFE, 'S', 'M', 'B' };

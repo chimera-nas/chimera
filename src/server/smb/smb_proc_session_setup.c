@@ -4,8 +4,8 @@
 
 #include "smb_internal.h"
 #include "smb_procs.h"
-#include "smb_signing.h"
-#include "smb_encrypt.h"
+#include "smb_common/smb_signing.h"
+#include "smb_common/smb_encrypt.h"
 #include "smb_auth.h"
 #include "smb_wbclient.h"
 #include "vfs/vfs.h"
@@ -609,6 +609,7 @@ chimera_smb_session_setup(struct chimera_smb_request *request)
             size_t klen = 0;
 
             if (chimera_smb_derive_encryption_keys(
+                    0 /* server */,
                     conn->dialect, conn->negotiated.cipher_id,
                     session_key_saved, session_key_saved_len,
                     conn->dialect == SMB2_DIALECT_3_1_1 ? conn->preauth_hash : NULL,

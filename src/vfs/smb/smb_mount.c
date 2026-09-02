@@ -300,7 +300,8 @@ chimera_smb_client_session_setup_done(
         conn->negotiated_cipher_id) {
         size_t klen = 0;
 
-        if (chimera_smb_client_derive_encryption_keys(
+        if (chimera_smb_derive_encryption_keys(
+                1 /* client */,
                 conn->negotiated_dialect, conn->negotiated_cipher_id,
                 conn->ntlm.session_key, sizeof(conn->ntlm.session_key),
                 conn->negotiated_dialect == SMB2_DIALECT_3_1_1

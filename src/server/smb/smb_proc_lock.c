@@ -9,7 +9,7 @@
 #include "smb_procs.h"
 #include "smb_session.h"
 #include "smb_async_interim.h"
-#include "smb2.h"
+#include "smb_common/smb2.h"
 #include "common/misc.h"
 #include "vfs/vfs.h"
 #include "vfs/vfs_procs.h"

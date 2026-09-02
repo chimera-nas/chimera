@@ -436,8 +436,12 @@ chimera_smb_client_thread_destroy(void *private_data)
      * we null conn->thread to keep that notify from dereferencing freed state. */
     for (conn = thread->conns_list; conn; conn = conn->list_next) {
         if (conn->enc_ctx) {
-            chimera_smb_client_encrypt_ctx_destroy(conn->enc_ctx);
+            chimera_smb_encrypt_ctx_destroy(conn->enc_ctx);
             conn->enc_ctx = NULL;
+        }
+        if (conn->cmp_ctx) {
+            chimera_smb_compress_ctx_destroy(conn->cmp_ctx);
+            conn->cmp_ctx = NULL;
         }
         conn->thread = NULL;
         if (conn->bind && !conn->closing) {
@@ -530,7 +534,7 @@ chimera_smb_client_sign_frame_send(
         uint64_t          nonce;
 
         if (!conn->enc_ctx) {
-            conn->enc_ctx = chimera_smb_client_encrypt_ctx_create();
+            conn->enc_ctx = chimera_smb_encrypt_ctx_create();
             if (!conn->enc_ctx) {
                 chimera_smbclient_error("Failed to create SMB3 encryption context");
                 evpl_iovec_release(conn->evpl, iov);
@@ -546,11 +550,12 @@ chimera_smb_client_sign_frame_send(
         netbios->word = __builtin_bswap32((uint32_t) smb2_len);
         evpl_iovec_set_length(iov, total);
 
-        if (chimera_smb_client_encrypt_message(
+        if (chimera_smb_encrypt_compound(
                 conn->enc_ctx, conn->evpl, conn->server->cipher_id,
                 conn->server->enc_key, conn->server->enc_key_len,
                 nonce, conn->server->session_id,
-                iov, smb2_len, (int) sizeof(*netbios), &enc_iov) != 0) {
+                iov, 1 /* niov */, smb2_len,
+                (int) sizeof(*netbios), &enc_iov) != 0) {
             evpl_iovec_release(conn->evpl, iov);
             return;
         }
@@ -728,7 +733,7 @@ chimera_smb_client_handle_recv(
             evpl_iovec_cursor_init(&tcursor, iov, niov);
             evpl_iovec_cursor_skip(&tcursor, sizeof(netbios));
 
-            if (chimera_smb_client_decrypt_message(
+            if (chimera_smb_decrypt_message(
                     conn->enc_ctx, conn->evpl, conn->server->cipher_id,
                     conn->server->dec_key, conn->server->enc_key_len,
                     &tcursor, length - (int) sizeof(netbios),
@@ -761,8 +766,14 @@ chimera_smb_client_handle_recv(
             evpl_iovec_cursor_init(&ccursor, iov, niov);
             evpl_iovec_cursor_skip(&ccursor, sizeof(netbios));
 
-            if (chimera_smb_client_decompress_message(
-                    conn->evpl, &ccursor, length - (int) sizeof(netbios),
+            if (!conn->cmp_ctx) {
+                conn->cmp_ctx = chimera_smb_compress_ctx_create();
+            }
+
+            if (!conn->cmp_ctx ||
+                chimera_smb_decompress_message(
+                    conn->cmp_ctx, conn->evpl, &ccursor,
+                    length - (int) sizeof(netbios),
                     &plain, &plain_len) != 0) {
                 chimera_smb_client_conn_fail(conn, CHIMERA_VFS_EIO);
                 return;
@@ -888,8 +899,14 @@ chimera_smb_client_handle_decrypted(
 
             evpl_iovec_cursor_init(&ccursor, plain, 1);
 
-            if (chimera_smb_client_decompress_message(
-                    conn->evpl, &ccursor, plain_len, &inner, &inner_len) != 0) {
+            if (!conn->cmp_ctx) {
+                conn->cmp_ctx = chimera_smb_compress_ctx_create();
+            }
+
+            if (!conn->cmp_ctx ||
+                chimera_smb_decompress_message(
+                    conn->cmp_ctx, conn->evpl, &ccursor, plain_len,
+                    &inner, &inner_len) != 0) {
                 chimera_smb_client_conn_fail(conn, CHIMERA_VFS_EIO);
                 return;
             }

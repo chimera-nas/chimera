@@ -25,44 +25,30 @@ struct chimera_smb_session;
  * header (§3.3.4.1.4), not signed.  When the session only signs, the standalone
  * message is signed in place instead.
  */
-struct chimera_smb_secure_send {
-    uint8_t                     encrypt;        /* wrap in a TRANSFORM header */
-    uint8_t                     sign;           /* sign in place (when !encrypt) */
-    uint16_t                    cipher_id;
-    size_t                      enc_key_len;
-    uint64_t                    session_id;
-    uint8_t                     enc_key[32];
-    uint8_t                     signing_key[16];
-    /* Owns the strictly-monotonic per-session AEAD nonce counter.  The session
-     * outlives every parked request on its connection (teardown drains parked
-     * requests without sending), so this pointer is valid at send time. */
-    struct chimera_smb_session *enc_session;
-};
 
+/* Derive the session's cipher key PAIR.  `is_client` selects the direction:
+ * each side encrypts with the key named for its own direction and decrypts
+ * with the peer's, so the same derivation serves both -- enc_key_out is always
+ * "what I encrypt with".  Two copies of this is how a session comes to
+ * negotiate cleanly and then fail every AEAD tag check. */
 /*
- * Capture `request`'s signing/encryption state into `snap` so a later
- * standalone async response can be secured the same way the synchronous reply
- * path would have secured it.
+ * Derive the per-session encryption (server->client) and decryption
+ * (client->server) keys from the raw NTLM/GSSAPI session key.  cipher_id is the
+ * negotiated SMB2_ENCRYPTION_* id and selects the key length (16 or 32 bytes).
+ * preauth_hash (64 bytes) is required for SMB 3.1.1, ignored otherwise.
+ * Returns 0 on success, -1 on failure.
  */
-void
-chimera_smb_secure_send_snapshot(
-    struct chimera_smb_request     *request,
-    struct chimera_smb_secure_send *snap);
-
-/*
- * Finalize and send a standalone SMB2 message built outside the compound reply
- * path.  `iov` holds [4-byte NetBIOS framing][SMB2 message] plaintext and is
- * consumed (sent with TAKE_REF, or released on error).  smb2_len is the SMB2
- * message length (excluding the NetBIOS framing); iov.length must be at least
- * 4 + smb2_len.  Encrypts (per `snap->encrypt`) or signs (per `snap->sign`)
- * before sending; on an encryption failure the connection is closed.
- */
-void
-chimera_smb_secure_send(
-    struct chimera_smb_conn              *conn,
-    struct evpl_iovec                    *iov,
-    int                                   smb2_len,
-    const struct chimera_smb_secure_send *snap);
+int
+chimera_smb_derive_encryption_keys(
+    int            is_client,
+    int            dialect,
+    uint16_t       cipher_id,
+    const void    *session_key,
+    size_t         session_key_len,
+    const uint8_t *preauth_hash,
+    uint8_t       *enc_key_out,
+    uint8_t       *dec_key_out,
+    size_t        *key_len_out);
 
 /*
  * SMB3 transport encryption (MS-SMB2 §3.1.4.3 / §3.3.4.1.4).  Mirrors the
@@ -77,23 +63,6 @@ void
 chimera_smb_encrypt_ctx_destroy(
     struct chimera_smb_encrypt_ctx *ctx);
 
-/*
- * Derive the per-session encryption (server->client) and decryption
- * (client->server) keys from the raw NTLM/GSSAPI session key.  cipher_id is the
- * negotiated SMB2_ENCRYPTION_* id and selects the key length (16 or 32 bytes).
- * preauth_hash (64 bytes) is required for SMB 3.1.1, ignored otherwise.
- * Returns 0 on success, -1 on failure.
- */
-int
-chimera_smb_derive_encryption_keys(
-    int            dialect,
-    uint16_t       cipher_id,
-    const void    *session_key,
-    size_t         session_key_len,
-    const uint8_t *preauth_hash,
-    uint8_t       *enc_key_out,
-    uint8_t       *dec_key_out,
-    size_t        *key_len_out);
 
 /*
  * Encrypt an assembled plaintext SMB2 reply.  plain_iov/plain_niov describe the

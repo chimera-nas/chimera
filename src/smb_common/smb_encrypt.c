@@ -8,11 +8,11 @@
 #include <openssl/evp.h>
 
 #include "smb_encrypt.h"
+#include "smb_common.h"
 #include "smb_signing.h"
 #include "common/evpl_iovec_cursor.h"
 #include "evpl/evpl.h"
-#include "smb_internal.h"
-#include "smb2.h"
+#include "smb_common/smb2.h"
 
 struct chimera_smb_encrypt_ctx {
     EVP_CIPHER     *aes_128_ccm;
@@ -22,7 +22,7 @@ struct chimera_smb_encrypt_ctx {
     EVP_CIPHER_CTX *cctx;
 };
 
-struct chimera_smb_encrypt_ctx *
+SYMBOL_EXPORT struct chimera_smb_encrypt_ctx *
 chimera_smb_encrypt_ctx_create(void)
 {
     struct chimera_smb_encrypt_ctx *ctx = calloc(1, sizeof(*ctx));
@@ -36,18 +36,18 @@ chimera_smb_encrypt_ctx_create(void)
     ctx->aes_256_ccm = EVP_CIPHER_fetch(NULL, "AES-256-CCM", NULL);
     ctx->aes_256_gcm = EVP_CIPHER_fetch(NULL, "AES-256-GCM", NULL);
 
-    chimera_smb_abort_if(!ctx->aes_128_ccm || !ctx->aes_128_gcm ||
-                         !ctx->aes_256_ccm || !ctx->aes_256_gcm,
-                         "Failed to fetch SMB3 AEAD ciphers");
+    chimera_smb2_abort_if(!ctx->aes_128_ccm || !ctx->aes_128_gcm ||
+                          !ctx->aes_256_ccm || !ctx->aes_256_gcm,
+                          "Failed to fetch SMB3 AEAD ciphers");
 
     ctx->cctx = EVP_CIPHER_CTX_new();
 
-    chimera_smb_abort_if(!ctx->cctx, "Failed to allocate SMB3 cipher context");
+    chimera_smb2_abort_if(!ctx->cctx, "Failed to allocate SMB3 cipher context");
 
     return ctx;
 } /* chimera_smb_encrypt_ctx_create */
 
-void
+SYMBOL_EXPORT void
 chimera_smb_encrypt_ctx_destroy(struct chimera_smb_encrypt_ctx *ctx)
 {
     if (!ctx) {
@@ -88,8 +88,9 @@ smb_cipher_for_id(
     } /* switch */
 } /* smb_cipher_for_id */
 
-int
+SYMBOL_EXPORT int
 chimera_smb_derive_encryption_keys(
+    int            is_client,
     int            dialect,
     uint16_t       cipher_id,
     const void    *session_key,
@@ -103,11 +104,21 @@ chimera_smb_derive_encryption_keys(
      * The label is always "SMB2AESCCM" even when GCM is negotiated; the context
      * "ServerIn " carries a *trailing space*. */
     static const char label30[]   = "SMB2AESCCM";       /* incl NUL per spec */
-    static const char ctx30_enc[] = "ServerOut";        /* server -> client  */
-    static const char ctx30_dec[] = "ServerIn ";        /* client -> server (trailing space) */
+    static const char ctx30_s2c[] = "ServerOut";        /* server -> client  */
+    static const char ctx30_c2s[] = "ServerIn ";        /* client -> server (trailing space) */
     /* SMB 3.1.1 labels; context = PreauthIntegrityHashValue. */
-    static const char label311_enc[] = "SMBS2CCipherKey"; /* server -> client */
-    static const char label311_dec[] = "SMBC2SCipherKey"; /* client -> server */
+    static const char label311_s2c[] = "SMBS2CCipherKey"; /* server -> client */
+    static const char label311_c2s[] = "SMBC2SCipherKey"; /* client -> server */
+
+    /* Each side ENCRYPTS with the key named for its own direction and DECRYPTS
+     * with the peer's, so the two callers want the same pair swapped.  That is
+     * a parameter, not a reason for a second copy of this function: getting it
+     * backwards yields a session that negotiates cleanly and then fails every
+     * AEAD tag check. */
+    const char       *label311_enc = is_client ? label311_c2s : label311_s2c;
+    const char       *label311_dec = is_client ? label311_s2c : label311_c2s;
+    const char       *ctx30_enc    = is_client ? ctx30_c2s : ctx30_s2c;
+    const char       *ctx30_dec    = is_client ? ctx30_s2c : ctx30_c2s;
 
     size_t            key_len;
     int               nonce_len, is_ccm, ok_e, ok_d;
@@ -125,37 +136,37 @@ chimera_smb_derive_encryption_keys(
             key_len = 32;
             break;
         default:
-            chimera_smb_error("Unknown SMB3 cipher id 0x%x in key derivation", cipher_id);
+            chimera_smb2_error("Unknown SMB3 cipher id 0x%x in key derivation", cipher_id);
             return -1;
     } /* switch */
 
     if (dialect == SMB2_DIALECT_3_1_1) {
         if (!preauth_hash) {
-            chimera_smb_error("SMB 3.1.1 encryption key derivation without preauth hash");
+            chimera_smb2_error("SMB 3.1.1 encryption key derivation without preauth hash");
             return -1;
         }
-        ok_e = kdf_counter_hmac_sha256_ossl3(session_key, session_key_len,
-                                             label311_enc, sizeof(label311_enc),
-                                             preauth_hash, SMB2_PREAUTH_HASH_SIZE,
-                                             enc_key_out, key_len);
-        ok_d = kdf_counter_hmac_sha256_ossl3(session_key, session_key_len,
-                                             label311_dec, sizeof(label311_dec),
-                                             preauth_hash, SMB2_PREAUTH_HASH_SIZE,
-                                             dec_key_out, key_len);
+        ok_e = chimera_smb_kbkdf(session_key, session_key_len,
+                                 label311_enc, strlen(label311_enc) + 1,
+                                 preauth_hash, SMB2_PREAUTH_HASH_SIZE,
+                                 enc_key_out, key_len);
+        ok_d = chimera_smb_kbkdf(session_key, session_key_len,
+                                 label311_dec, strlen(label311_dec) + 1,
+                                 preauth_hash, SMB2_PREAUTH_HASH_SIZE,
+                                 dec_key_out, key_len);
     } else {
         /* SMB 3.0 / 3.0.2 */
-        ok_e = kdf_counter_hmac_sha256_ossl3(session_key, session_key_len,
-                                             label30, sizeof(label30),
-                                             (const uint8_t *) ctx30_enc, sizeof(ctx30_enc),
-                                             enc_key_out, key_len);
-        ok_d = kdf_counter_hmac_sha256_ossl3(session_key, session_key_len,
-                                             label30, sizeof(label30),
-                                             (const uint8_t *) ctx30_dec, sizeof(ctx30_dec),
-                                             dec_key_out, key_len);
+        ok_e = chimera_smb_kbkdf(session_key, session_key_len,
+                                 label30, sizeof(label30),
+                                 (const uint8_t *) ctx30_enc, strlen(ctx30_enc) + 1,
+                                 enc_key_out, key_len);
+        ok_d = chimera_smb_kbkdf(session_key, session_key_len,
+                                 label30, sizeof(label30),
+                                 (const uint8_t *) ctx30_dec, strlen(ctx30_dec) + 1,
+                                 dec_key_out, key_len);
     }
 
     if (!ok_e || !ok_d) {
-        chimera_smb_error("SMB3 encryption key derivation failed");
+        chimera_smb2_error("SMB3 encryption key derivation failed");
         return -1;
     }
 
@@ -177,7 +188,7 @@ smb_build_nonce(
     }
 } /* smb_build_nonce */
 
-int
+SYMBOL_EXPORT int
 chimera_smb_encrypt_compound(
     struct chimera_smb_encrypt_ctx *ctx,
     struct evpl                    *evpl,
@@ -204,14 +215,14 @@ chimera_smb_encrypt_compound(
     cipher = smb_cipher_for_id(ctx, cipher_id, &ck_len, &nonce_len, &is_ccm);
 
     if (!cipher || ck_len != key_len) {
-        chimera_smb_error("Invalid cipher/key for SMB3 encryption (id 0x%x)", cipher_id);
+        chimera_smb2_error("Invalid cipher/key for SMB3 encryption (id 0x%x)", cipher_id);
         return -1;
     }
 
     total = transport_hdr_len + (int) sizeof(*th) + plain_len;
 
     if (evpl_iovec_alloc(evpl, total, 8, 1, 0, out_iov) < 1) {
-        chimera_smb_error("Failed to allocate SMB3 encryption output buffer");
+        chimera_smb2_error("Failed to allocate SMB3 encryption output buffer");
         return -1;
     }
 
@@ -271,106 +282,12 @@ chimera_smb_encrypt_compound(
     return 0;
 
  err:
-    chimera_smb_error("SMB3 encryption failed (cipher id 0x%x)", cipher_id);
+    chimera_smb2_error("SMB3 encryption failed (cipher id 0x%x)", cipher_id);
     evpl_iovec_release(evpl, out_iov);
     return -1;
 } /* chimera_smb_encrypt_compound */
 
-void
-chimera_smb_secure_send_snapshot(
-    struct chimera_smb_request     *request,
-    struct chimera_smb_secure_send *snap)
-{
-    struct chimera_smb_session *session = request->session_handle
-        ? request->session_handle->session : NULL;
-    struct chimera_smb_tree    *tree = request->tree;
-
-    memset(snap, 0, sizeof(*snap));
-
-    /* Encryption supersedes signing: when the session encrypts (global
-     * EncryptData, a per-share encrypted tree, or the request itself arrived
-     * inside a TRANSFORM) every response including this async one MUST be
-     * encrypted (MS-SMB2 §3.3.4.1.4) rather than signed. */
-    if (session && session->enc_key_len > 0 &&
-        (request->compound->received_encrypted ||
-         (session->flags & CHIMERA_SMB_SESSION_ENCRYPT_DATA) ||
-         (tree && tree->share && tree->share->encrypt_data))) {
-        snap->encrypt     = 1;
-        snap->cipher_id   = session->cipher_id;
-        snap->enc_key_len = session->enc_key_len;
-        snap->session_id  = session->session_id;
-        snap->enc_session = session;
-        memcpy(snap->enc_key, session->enc_key, session->enc_key_len);
-        return;
-    }
-
-    /* Otherwise sign iff the originating request was signed (an unsigned async
-     * reply on a signed session is rejected by Windows clients). */
-    if ((request->smb2_hdr.flags & SMB2_FLAGS_SIGNED) && request->session_handle) {
-        snap->sign = 1;
-        memcpy(snap->signing_key, request->session_handle->signing_key,
-               sizeof(snap->signing_key));
-    }
-} /* chimera_smb_secure_send_snapshot */
-
-void
-chimera_smb_secure_send(
-    struct chimera_smb_conn              *conn,
-    struct evpl_iovec                    *iov,
-    int                                   smb2_len,
-    const struct chimera_smb_secure_send *snap)
-{
-    struct chimera_server_smb_thread *thread = conn->thread;
-    struct evpl                      *evpl   = thread->evpl;
-
-    if (snap->encrypt) {
-        struct evpl_iovec      enc_iov;
-        struct netbios_header *nb;
-        uint64_t               nonce;
-        int                    enc_total;
-
-        /* Strictly-monotonic per-session nonce -- never reuse a nonce for a key
-         * (GCM nonce reuse is catastrophic), shared across the session's
-         * channels, same source the synchronous reply path uses. */
-        nonce = atomic_fetch_add(&snap->enc_session->enc_nonce_counter, 1);
-
-        if (chimera_smb_encrypt_compound(thread->encrypt_ctx, evpl,
-                                         snap->cipher_id, snap->enc_key,
-                                         snap->enc_key_len, nonce,
-                                         snap->session_id, iov, 1, smb2_len,
-                                         (int) sizeof(struct netbios_header),
-                                         &enc_iov) != 0) {
-            evpl_iovec_release(evpl, iov);
-            evpl_close(evpl, conn->bind);
-            return;
-        }
-
-        evpl_iovec_release(evpl, iov);
-
-        /* The NetBIOS framing length excludes itself: TRANSFORM header + ct. */
-        enc_total = (int) sizeof(struct smb2_transform_header) + smb2_len;
-        nb        = evpl_iovec_data(&enc_iov);
-        nb->word  = __builtin_bswap32((uint32_t) enc_total);
-
-        evpl_sendv(evpl, conn->bind, &enc_iov, 1,
-                   (int) sizeof(struct netbios_header) + enc_total,
-                   EVPL_SEND_FLAG_TAKE_REF);
-        return;
-    }
-
-    if (snap->sign) {
-        chimera_smb_sign_message(thread->signing_ctx, conn->dialect,
-                                 conn->negotiated.signing_alg, snap->signing_key,
-                                 (uint8_t *) evpl_iovec_data(iov) +
-                                 sizeof(struct netbios_header), smb2_len);
-    }
-
-    evpl_sendv(evpl, conn->bind, iov, 1,
-               (int) sizeof(struct netbios_header) + smb2_len,
-               EVPL_SEND_FLAG_TAKE_REF);
-} /* chimera_smb_secure_send */
-
-int
+SYMBOL_EXPORT int
 chimera_smb_decrypt_message(
     struct chimera_smb_encrypt_ctx *ctx,
     struct evpl                    *evpl,
@@ -393,19 +310,19 @@ chimera_smb_decrypt_message(
     cipher = smb_cipher_for_id(ctx, cipher_id, &ck_len, &nonce_len, &is_ccm);
 
     if (!cipher || ck_len != key_len) {
-        chimera_smb_error("Invalid cipher/key for SMB3 decryption (id 0x%x)", cipher_id);
+        chimera_smb2_error("Invalid cipher/key for SMB3 decryption (id 0x%x)", cipher_id);
         return -1;
     }
 
     if (length < (int) sizeof(th)) {
-        chimera_smb_error("Truncated SMB3 transform message (%d bytes)", length);
+        chimera_smb2_error("Truncated SMB3 transform message (%d bytes)", length);
         return -1;
     }
 
     evpl_iovec_cursor_copy(cursor, &th, sizeof(th));
 
     if (memcmp(th.protocol_id, proto, 4) != 0) {
-        chimera_smb_error("Invalid SMB3 transform protocol id");
+        chimera_smb2_error("Invalid SMB3 transform protocol id");
         return -1;
     }
 
@@ -413,12 +330,12 @@ chimera_smb_decrypt_message(
 
     if (ct_len < (int) sizeof(struct smb2_header) ||
         ct_len > length - (int) sizeof(th)) {
-        chimera_smb_error("Invalid SMB3 transform original_message_size %d", ct_len);
+        chimera_smb2_error("Invalid SMB3 transform original_message_size %d", ct_len);
         return -1;
     }
 
     if (evpl_iovec_alloc(evpl, ct_len, 8, 1, 0, plain_out) < 1) {
-        chimera_smb_error("Failed to allocate SMB3 decryption buffer");
+        chimera_smb2_error("Failed to allocate SMB3 decryption buffer");
         return -1;
     }
 
@@ -464,7 +381,7 @@ chimera_smb_decrypt_message(
     return 0;
 
  err:
-    chimera_smb_error("SMB3 decryption / tag verification failed (cipher id 0x%x)", cipher_id);
+    chimera_smb2_error("SMB3 decryption / tag verification failed (cipher id 0x%x)", cipher_id);
     evpl_iovec_release(evpl, plain_out);
     return -1;
 } /* chimera_smb_decrypt_message */

@@ -7,7 +7,7 @@
 #include <stdint.h>
 #include <pthread.h>
 #include "vfs/vfs.h"
-#include "smb2.h"
+#include "smb_common/smb2.h"
 
 struct chimera_smb_open_file;
 

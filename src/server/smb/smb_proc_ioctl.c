@@ -5,7 +5,7 @@
 #include "smb_internal.h"
 #include "smb_procs.h"
 #include "smb_string.h"
-#include "smb2.h"
+#include "smb_common/smb2.h"
 #include "common/misc.h"
 
 /* MS-SMB2 3.3.5.15.12: validate an FSCTL_VALIDATE_NEGOTIATE_INFO request

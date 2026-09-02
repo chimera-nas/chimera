@@ -13,10 +13,10 @@
 #include <stdlib.h>
 
 #include "smb_compress.h"
+#include "smb_common.h"
 #include "common/evpl_iovec_cursor.h"
 #include "evpl/evpl.h"
-#include "smb_internal.h"
-#include "smb2.h"
+#include "smb_common/smb2.h"
 
 /* The Plain LZ77 match offset is stored in the high 13 bits of a 16-bit token,
  * so the back-reference window is bounded at 8192 bytes. */
@@ -66,7 +66,7 @@ wr32(
     p[3] = (v >> 24) & 0xff;
 } /* wr32 */
 
-struct chimera_smb_compress_ctx *
+SYMBOL_EXPORT struct chimera_smb_compress_ctx *
 chimera_smb_compress_ctx_create(void)
 {
     struct chimera_smb_compress_ctx *ctx = calloc(1, sizeof(*ctx));
@@ -83,7 +83,7 @@ chimera_smb_compress_ctx_create(void)
     return ctx;
 } /* chimera_smb_compress_ctx_create */
 
-void
+SYMBOL_EXPORT void
 chimera_smb_compress_ctx_destroy(struct chimera_smb_compress_ctx *ctx)
 {
     if (ctx) {
@@ -1299,7 +1299,7 @@ decompress_codec(
             return chimera_smb_lz77huffman_decompress(in, in_len, out, out_len);
 
         default:
-            chimera_smb_error("Unsupported SMB3 compression algorithm 0x%x", alg);
+            chimera_smb2_error("Unsupported SMB3 compression algorithm 0x%x", alg);
             return -1;
     } /* switch */
 } /* decompress_codec */
@@ -1385,7 +1385,7 @@ decompress_payload(
     } /* switch */
 } /* decompress_payload */
 
-int
+SYMBOL_EXPORT int
 chimera_smb_decompress_message(
     struct chimera_smb_compress_ctx *ctx,
     struct evpl                     *evpl,
@@ -1403,7 +1403,7 @@ chimera_smb_decompress_message(
     (void) ctx;
 
     if (length < (int) sizeof(struct smb2_compression_transform_header_chained)) {
-        chimera_smb_error("Truncated SMB3 compression message (%d bytes)", length);
+        chimera_smb2_error("Truncated SMB3 compression message (%d bytes)", length);
         return -1;
     }
 
@@ -1414,7 +1414,7 @@ chimera_smb_decompress_message(
     evpl_iovec_cursor_copy(cursor, cin, length);
 
     if (memcmp(cin, proto, 4) != 0) {
-        chimera_smb_error("Invalid SMB3 compression protocol id");
+        chimera_smb2_error("Invalid SMB3 compression protocol id");
         goto out;
     }
 
@@ -1437,14 +1437,14 @@ chimera_smb_decompress_message(
      * and segment_size is itself <= the cap. */
     uint64_t orig_size64 = (uint64_t) prefix + segment_size;
     if (orig_size64 < sizeof(struct smb2_header) || orig_size64 > SMB_COMPRESS_MAX_ORIGINAL) {
-        chimera_smb_error("Invalid SMB3 compression original size %lu",
-                          (unsigned long) orig_size64);
+        chimera_smb2_error("Invalid SMB3 compression original size %lu",
+                           (unsigned long) orig_size64);
         goto out;
     }
     orig_size = (uint32_t) orig_size64;
 
     if (evpl_iovec_alloc(evpl, orig_size, 8, 1, 0, plain_out) < 1) {
-        chimera_smb_error("Failed to allocate SMB3 decompression buffer");
+        chimera_smb2_error("Failed to allocate SMB3 decompression buffer");
         goto out;
     }
     pt = evpl_iovec_data(plain_out);
@@ -1460,13 +1460,13 @@ chimera_smb_decompress_message(
          * any value >= 0x80000000 negative, so the original signed compare could
          * never reject it and the memcpy below would read ~4 GB out of bounds. */
         if ((uint64_t) hdr + prefix > (uint64_t) length) {
-            chimera_smb_error("Invalid SMB3 compression offset %u", prefix);
+            chimera_smb2_error("Invalid SMB3 compression offset %u", prefix);
             goto release;
         }
         memcpy(pt, cin + hdr, prefix);
         if (decompress_codec(alg, cin + hdr + prefix, length - hdr - (int) prefix,
                              pt + prefix, (int) segment_size) != (int) segment_size) {
-            chimera_smb_error("SMB3 unchained decompression failed");
+            chimera_smb2_error("SMB3 unchained decompression failed");
             goto release;
         }
     } else {
@@ -1500,8 +1500,8 @@ chimera_smb_decompress_message(
         }
 
         if (outpos != (int) orig_size) {
-            chimera_smb_error("SMB3 chained decompression size mismatch (%d != %u)",
-                              outpos, orig_size);
+            chimera_smb2_error("SMB3 chained decompression size mismatch (%d != %u)",
+                               outpos, orig_size);
             goto release;
         }
     }
@@ -1509,6 +1509,12 @@ chimera_smb_decompress_message(
     evpl_iovec_set_length(plain_out, orig_size);
     *plain_len_out = (int) orig_size;
     rc             = 0;
+
+    /* A compressed message that never arrives is indistinguishable from one
+     * that arrived and expanded correctly, so say so: this line is what a test
+     * greps to prove its compression cell is not passing vacuously. */
+    chimera_smb2_debug("SMB3 decompressed a message: %d wire bytes -> %d",
+                       length, (int) orig_size);
     goto out;
 
  release:
@@ -1734,7 +1740,7 @@ build_chained(
     return pos;
 } /* build_chained */
 
-int
+SYMBOL_EXPORT int
 chimera_smb_compress_message(
     struct chimera_smb_compress_ctx *ctx,
     struct evpl                     *evpl,

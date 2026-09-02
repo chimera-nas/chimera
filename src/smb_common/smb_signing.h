@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "smb2.h"
+
 struct chimera_smb_request;
 struct evpl_iovec_cursor;
 struct chimera_smb_compound;
@@ -32,7 +34,7 @@ chimera_smb_derive_signing_key(
  * label/context lengths INCLUDING any trailing NUL the spec requires.
  */
 int
-kdf_counter_hmac_sha256_ossl3(
+chimera_smb_kbkdf(
     const uint8_t *key,
     size_t         key_len,
     const void    *label,
@@ -81,3 +83,17 @@ chimera_smb_sign_message(
     uint8_t                        *smb2_buf,
     int                             smb2_len);
 
+/* Compute an SMB2 signature with the algorithm the connection negotiated.
+ * Shared: the client signs its requests and the server signs its replies with
+ * exactly this, so a divergence here is a MAC mismatch rather than a build
+ * error. */
+int
+chimera_smb_compute_signature_alg(
+    struct chimera_smb_signing_ctx *ctx,
+    uint16_t                        dialect,
+    uint16_t                        signing_alg,
+    struct smb2_header             *hdr,
+    struct evpl_iovec_cursor       *cursor,
+    int                             length,
+    const uint8_t                  *key,
+    uint8_t                        *out_sig16);
