@@ -1545,14 +1545,21 @@ chimera_smb_client_open_at(
     struct chimera_smb_client_conn *conn,
     struct chimera_vfs_request     *request)
 {
-    uint32_t       disposition;
-    uint32_t       desired_access;
+    uint32_t disposition;
+    uint32_t desired_access;
     /* A directory open must request FILE_DIRECTORY_FILE; only a non-directory
      * open may set FILE_NON_DIRECTORY_FILE.  The server now enforces the option
      * against the target type (FILE_IS_A_DIRECTORY otherwise), so a directory
      * open that left NON_DIRECTORY_FILE set would be refused. */
-    uint32_t       options = (request->open_at.flags & CHIMERA_VFS_OPEN_DIRECTORY)
-                             ? SMB2_FILE_DIRECTORY_FILE : SMB2_FILE_NON_DIRECTORY_FILE;
+    /* Constrain the target type only when the caller committed to one: an
+     * explicit directory open is DIRECTORY_FILE; a plain file open is
+     * NON_DIRECTORY_FILE (opening a directory as a file is EISDIR).  A PATH /
+     * INFERRED open (chmod/chown/stat by path, which do not know the type)
+     * constrains neither, so the server opens whatever is there. */
+    uint32_t       options =
+        (request->open_at.flags & CHIMERA_VFS_OPEN_DIRECTORY) ? SMB2_FILE_DIRECTORY_FILE :
+        (request->open_at.flags & (CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED)) ? 0 :
+        SMB2_FILE_NON_DIRECTORY_FILE;
     uint8_t        lease_ctx[CHIMERA_SMB_LEASE_CTX_SIZE];
     uint8_t        lease_key[16];
     const uint8_t *ctx     = NULL;
@@ -1688,8 +1695,10 @@ chimera_smb_client_open_fh(
     uint32_t    options;
     uint32_t    desired_access;
 
-    options = (request->open_fh.flags & CHIMERA_VFS_OPEN_DIRECTORY)
-              ? SMB2_FILE_DIRECTORY_FILE : SMB2_FILE_NON_DIRECTORY_FILE;
+    options =
+        (request->open_fh.flags & CHIMERA_VFS_OPEN_DIRECTORY) ? SMB2_FILE_DIRECTORY_FILE :
+        (request->open_fh.flags & (CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED)) ? 0 :
+        SMB2_FILE_NON_DIRECTORY_FILE;
 
     if (chimera_smb_fh_is_root(request->fh_len)) {
         /* The share root is the empty path.  It also needs the SD rights so a
