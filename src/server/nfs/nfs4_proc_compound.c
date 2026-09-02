@@ -30,17 +30,33 @@ nfs4_send_cached_reply(
 static void
 nfs4_release_write_args(
     struct chimera_server_nfs_thread *thread,
+    struct nfs_request               *req,
     struct COMPOUND4args             *args)
 {
+    const struct evpl_rpc2_rdma_chunk *rc = req->encoding->read_chunk;
+
     for (uint32_t i = 0; i < args->num_argarray; i++) {
         struct nfs_argop4 *ap = &args->argarray[i];
 
-        if (ap->argop == OP_WRITE && ap->opwrite.data.niov) {
-            evpl_iovecs_release(thread->evpl,
-                                ap->opwrite.data.iov,
-                                ap->opwrite.data.niov);
-            ap->opwrite.data.niov = 0;
+        if (ap->argop != OP_WRITE || !ap->opwrite.data.niov) {
+            continue;
         }
+
+        /* Over RDMA the payload arrived in an RFC 8166 Read chunk and
+         * opwrite.data.iov points straight at it rather than at XDR clones
+         * (see the take_read_chunk call in chimera_nfs4_write).  The rpc2
+         * request still owns those iovecs on this path, because the WRITE
+         * handler that would have taken ownership never runs -- so releasing
+         * them here would drop a reference the request frees again, which
+         * ASAN catches as a use-after-free on the very next retransmit. */
+        if (rc && rc->niov && ap->opwrite.data.iov == rc->iov) {
+            continue;
+        }
+
+        evpl_iovecs_release(thread->evpl,
+                            ap->opwrite.data.iov,
+                            ap->opwrite.data.niov);
+        ap->opwrite.data.niov = 0;
     }
 } /* nfs4_release_write_args */
 
@@ -157,7 +173,7 @@ chimera_nfs4_compound_process(
         /* XDR clones a +1 ref on every WRITE4args.data; the retransmit
          * we are about to discard had its args unmarshalled but will
          * never dispatch, so release any cloned iovecs here. */
-        nfs4_release_write_args(thread, req->args_compound);
+        nfs4_release_write_args(thread, req, req->args_compound);
         rc = nfs4_send_cached_reply(thread, req);
         chimera_nfs_abort_if(rc, "Failed to send cached RPC2 reply");
         /* Release the slot the retransmit path claimed (IN_PROGRESS) back to

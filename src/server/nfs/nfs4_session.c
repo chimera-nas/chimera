@@ -12,6 +12,7 @@
 #include "nfs4_state.h"
 #include "nfs4_callback.h"
 #include "nfs4_drc.h"
+#include "nfs_drc_reply.h"
 #include "nfs_internal.h"
 #include "nfs_nlm_state.h"
 #include "nfs_common.h"
@@ -1514,22 +1515,29 @@ nfs4_replay_capture_reply(
     const struct evpl_iovec *iov,
     int                      niov,
     int                      total_length,
+    uint32_t                 rpc_offset,
     void                    *private_data)
 {
     struct nfs_request      *req     = private_data;
     struct nfs4_session     *session = req->replay_session;
     struct nfs4_replay_slot *slot    = req->replay_slot;
     uint8_t                 *buf;
-    size_t                   offset = 0;
-    size_t                   total  = (size_t) total_length;
+    uint32_t                 rpc_len;
+    size_t                   total;
     size_t                   cur;
-    int                      i;
 
-    if (!slot || !session || total_length <= 0) {
+    if (!slot || !session || total_length <= (int) rpc_offset) {
         return;
     }
 
-    if ((uint32_t) total_length > session->replay_maxresp_cached) {
+    /* Store the RPC reply, not the whole outgoing message: rpc_offset bytes of
+     * transport framing are rebuilt for the retransmit anyway, and keeping them
+     * made a reply captured over RDMA unparseable on replay -- which
+     * nfs4_send_cached_reply's caller turns into a fatal abort. */
+    rpc_len = (uint32_t) total_length - rpc_offset;
+    total   = rpc_len;
+
+    if (rpc_len > session->replay_maxresp_cached) {
         return;
     }
 
@@ -1546,7 +1554,7 @@ nfs4_replay_capture_reply(
                  &session->replay_bytes_in_use, &cur, cur + total,
                  memory_order_relaxed, memory_order_relaxed));
 
-    buf = malloc(total_length);
+    buf = malloc(rpc_len);
     if (!buf) {
         atomic_fetch_sub_explicit(&session->replay_bytes_in_use, total,
                                   memory_order_relaxed);
@@ -1556,17 +1564,19 @@ nfs4_replay_capture_reply(
     /* Concatenate iovecs into a single contiguous buffer.  Loses
      * zerocopy on replay; acceptable since cachethis=true is rare for
      * iovec-heavy ops (READ/READLINK) and replay is rare in general. */
-    for (i = 0; i < niov; i++) {
-        memcpy(buf + offset, iov[i].data, iov[i].length);
-        offset += iov[i].length;
+    if (nfs_drc_copy_rpc_reply(iov, niov, rpc_offset, buf, rpc_len) != rpc_len) {
+        free(buf);
+        atomic_fetch_sub_explicit(&session->replay_bytes_in_use, total,
+                                  memory_order_relaxed);
+        return;
     }
 
     /* Same thread runs finalize next, which release-publishes these via the
      * state_word store -- a later reader that observes CACHED sees them. */
     slot->cached_buf = buf;
-    slot->cached_len = total_length;
+    slot->cached_len = rpc_len;
 
-    nfs4_replay_bytes_delta(req, total_length);
+    nfs4_replay_bytes_delta(req, rpc_len);
 } /* nfs4_replay_capture_reply */
 
 /*

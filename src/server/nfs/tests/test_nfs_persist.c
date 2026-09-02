@@ -711,9 +711,13 @@ test_nfs4_v40_compound_cacheable(void)
     printf("ok: nfs4_v40_compound_cacheable\n");
 } /* test_nfs4_v40_compound_cacheable */
 
-/* Build a minimal well-formed on-wire reply: record mark, xid, REPLY,
- * MSG_ACCEPTED, an empty verifier, SUCCESS, then `body`.  This is the shape the
- * rpc2 capture hook delivers and that nfs_drc_reply_body_offset accepts. */
+/* Build a minimal well-formed RPC reply: xid, REPLY, MSG_ACCEPTED, an empty
+ * verifier, SUCCESS, then `body`.
+ *
+ * No record marker: the capture hooks strip the transport framing before
+ * storing (see nfs_drc_copy_rpc_reply), because it differs per transport and is
+ * rebuilt for the retransmit anyway.  nfs_drc_reply_body_offset therefore
+ * parses from the RPC message. */
 static uint32_t
 v40_make_reply(
     uint8_t   *out,
@@ -723,24 +727,17 @@ v40_make_reply(
     uint32_t   accept_stat)
 {
     uint32_t body_len = (uint32_t) strlen(body);
-    uint32_t len      = 28 + body_len;
-    uint32_t mark;
+    uint32_t len      = 24 + body_len;
 
     CHECK(out_size >= len);
     memset(out,0,len);
 
-    mark   = 0x80000000u | (len - 4);
-    out[0] = (uint8_t) (mark >> 24);
-    out[1] = (uint8_t) (mark >> 16);
-    out[2] = (uint8_t) (mark >> 8);
-    out[3] = (uint8_t) mark;
-
-    out[7]  = (uint8_t) xid;    /* xid (low byte is enough for a fixture)     */
-    out[11] = 1;                /* mtype      = REPLY                        */
-    /* [12..15] reply_stat = MSG_ACCEPTED (0), [16..19] verf flavor = AUTH_NONE,
-     * [20..23] verf len   = 0 -- all already zero. */
-    out[27] = (uint8_t) accept_stat;
-    memcpy(out + 28,body,body_len);
+    out[3] = (uint8_t) xid;     /* xid (low byte is enough for a fixture)     */
+    out[7] = 1;                 /* mtype      = REPLY                        */
+    /* [8..11] reply_stat = MSG_ACCEPTED (0), [12..15] verf flavor = AUTH_NONE,
+     * [16..19] verf len  = 0 -- all already zero. */
+    out[23] = (uint8_t) accept_stat;
+    memcpy(out + 24,body,body_len);
     return len;
 } /* v40_make_reply */
 
@@ -850,7 +847,7 @@ test_nfs4_v40_reply_filter(void)
     /* SUCCESS: accepted, and the body starts right after the header. */
     len = v40_make_reply(buf,sizeof(buf),7,"CREATE4res NFS4_OK",0);
     CHECK(nfs_drc_reply_body_offset(buf,len,&offset) == true);
-    CHECK(offset == 28);
+    CHECK(offset == 24);
 
     /* GARBAGE_ARGS (accept_stat 4) is MSG_ACCEPTED but not SUCCESS. */
     len = v40_make_reply(buf,sizeof(buf),7,"",4);
@@ -860,14 +857,14 @@ test_nfs4_v40_reply_filter(void)
     len = v40_make_reply(buf,sizeof(buf),7,"",1);
     CHECK(nfs_drc_reply_body_offset(buf,len,&offset) == false);
 
-    /* MSG_DENIED: reply_stat at [12..15] is non-zero. */
+    /* MSG_DENIED: reply_stat at [8..11] is non-zero. */
     len     = v40_make_reply(buf,sizeof(buf),7,"body",0);
-    buf[15] = 1;
+    buf[11] = 1;
     CHECK(nfs_drc_reply_body_offset(buf,len,&offset) == false);
 
     /* A CALL, not a REPLY. */
-    len     = v40_make_reply(buf,sizeof(buf),7,"body",0);
-    buf[11] = 0;
+    len    = v40_make_reply(buf,sizeof(buf),7,"body",0);
+    buf[7] = 0;
     CHECK(nfs_drc_reply_body_offset(buf,len,&offset) == false);
 
     /* Truncated below a bare header. */

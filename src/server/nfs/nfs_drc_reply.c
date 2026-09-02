@@ -19,6 +19,56 @@ nfs_drc_be32(const uint8_t *p)
            (uint32_t) p[3];
 } /* nfs_drc_be32 */
 
+/* Copy the RPC reply out of the outgoing message, skipping rpc_offset bytes of
+ * transport framing (record marker or RPC-over-RDMA header).  What is stored is
+ * therefore transport-independent, which is what lets a reply captured over one
+ * transport be replayed at all -- and is required for RDMA, whose header is
+ * variable-length.  Returns the number of bytes written, or 0. */
+uint32_t
+nfs_drc_copy_rpc_reply(
+    const struct evpl_iovec *iov,
+    int                      niov,
+    uint32_t                 rpc_offset,
+    uint8_t                 *buf,
+    uint32_t                 buf_len)
+{
+    uint32_t skip = rpc_offset;
+    uint32_t off  = 0;
+    int      i;
+
+    for (i = 0; i < niov; i++) {
+        const uint8_t *src = iov[i].data;
+        uint32_t       n   = iov[i].length;
+
+        if (skip) {
+            if (skip >= n) {
+                skip -= n;
+                continue;
+            }
+            src += skip;
+            n   -= skip;
+            skip = 0;
+        }
+
+        if (off + n > buf_len) {
+            return 0;
+        }
+        memcpy(buf + off, src, n);
+        off += n;
+    }
+
+    return off;
+} /* nfs_drc_copy_rpc_reply */
+
+/*
+ * buf is the RPC reply message itself -- no transport framing.  The capture
+ * callbacks strip that off before storing (see the rpc_offset argument of
+ * evpl_rpc2_reply_capture_cb_t), because the framing is rebuilt for the
+ * retransmit anyway and differs per transport: a 4-byte record marker over a
+ * stream, a variable-length RPC-over-RDMA header over RDMA.  This parser used
+ * to begin by validating a record marker, which made a cached reply captured
+ * over RDMA unparseable -- and its callers turn that into a fatal abort.
+ */
 bool
 nfs_drc_reply_body_offset(
     const uint8_t *buf,
@@ -26,14 +76,10 @@ nfs_drc_reply_body_offset(
     uint32_t      *offset)
 {
     uint32_t v, verf_len, pad;
-    uint32_t pos = 4; /* TCP record marker */
+    uint32_t pos = 0;
 
-    if (len < 28) {
-        return false;
-    }
-
-    v = nfs_drc_be32(buf);
-    if ((v & 0x80000000u) == 0 || (v & 0x7fffffffu) + 4 != len) {
+    /* xid(4) mtype(4) reply_stat(4) verf_flavor(4) verf_len(4) accept_stat(4) */
+    if (len < 24) {
         return false;
     }
 

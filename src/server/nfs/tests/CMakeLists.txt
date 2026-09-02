@@ -31,7 +31,9 @@ add_executable(test_replay_slot
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_recovery.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_drc.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_callback.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_cb.c)
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs4_cb.c
+    # nfs4_session.c's reply capture strips transport framing through this.
+    ${CMAKE_CURRENT_SOURCE_DIR}/../nfs_drc_reply.c)
 target_include_directories(test_replay_slot PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/..
     ${CMAKE_SOURCE_DIR}/src
