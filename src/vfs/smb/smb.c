@@ -1291,6 +1291,10 @@ chimera_smb_client_dispatch(
             server_index = chimera_smb_fh_server_index(request->fh);
             start        = chimera_smb_client_rename_at;
             break;
+        case CHIMERA_VFS_OP_LINK_AT:
+            server_index = chimera_smb_fh_server_index(request->fh);
+            start        = chimera_smb_client_link_at;
+            break;
         case CHIMERA_VFS_OP_SYMLINK_AT:
             server_index = chimera_smb_fh_server_index(request->fh);
             start        = chimera_smb_client_symlink_at;

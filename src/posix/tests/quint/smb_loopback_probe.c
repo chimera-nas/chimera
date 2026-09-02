@@ -487,8 +487,8 @@ probe_pin_no_posix_metadata(void)
  * parent handle, so operations the client routes through a resolved PARENT
  * handle (utimens by path, mknod below the mount root) now work.  Assert them.
  *
- * link (hard link) is still unimplemented in the proxy dispatch, so it remains
- * an error; when it lands this should become probe_ok and this pin retires. */
+ * Hard links now work too (SET_INFO FileLinkInformation): the new name is
+ * created and lstat sees it. */
 static void
 probe_pin_parent_handle_ops(void)
 {
@@ -496,7 +496,8 @@ probe_pin_parent_handle_ops(void)
 
     probe_touch("/test/src");
 
-    probe_err("SD5 residue: hard link", op_two_path("link", "/test/src", "/test/dst"));
+    probe_ok("hard link", op_two_path("link", "/test/src", "/test/dst"));
+    probe_ok("hard link visible", op_stat("/test/dst", 0));
 
     res = probe_req("utimens");
     probe_set_str(res, "path", "/test/src");
