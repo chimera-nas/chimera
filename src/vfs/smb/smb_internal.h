@@ -561,11 +561,24 @@ smb_fill_attrs_from_network_open(
 
 /* ---- file-handle helpers ----------------------------------------------- */
 
+/* The high bit of the server-index byte flags a "nofollow" fh -- one that names
+ * the raw directory entry (a symbolic link itself, not its target).  open_fh
+ * must re-open such an fh with OPEN_REPARSE_POINT so the path-CREATE lands on
+ * the link, not whatever it points at (which for a self-referential link loops
+ * to ELOOP).  A followed open's fh (the target) leaves the bit clear. */
+#define CHIMERA_SMB_FH_NOFOLLOW_BIT 0x80
+
 static inline int
 chimera_smb_fh_server_index(const uint8_t *fh)
 {
-    return fh[CHIMERA_SMB_FH_SERVER_OFFSET];
+    return fh[CHIMERA_SMB_FH_SERVER_OFFSET] & ~CHIMERA_SMB_FH_NOFOLLOW_BIT;
 } /* chimera_smb_fh_server_index */
+
+static inline int
+chimera_smb_fh_is_nofollow(const uint8_t *fh)
+{
+    return (fh[CHIMERA_SMB_FH_SERVER_OFFSET] & CHIMERA_SMB_FH_NOFOLLOW_BIT) != 0;
+} /* chimera_smb_fh_is_nofollow */
 
 /* The mount-root fh is the only re-openable one. */
 static inline int
@@ -582,11 +595,15 @@ static inline int
 chimera_smb_encode_open_fh(
     const uint8_t *root_fh,
     uint64_t       path_id,
+    int            nofollow,
     uint8_t       *out_fh)
 {
     uint8_t fragment[1 + sizeof(path_id)];
 
     fragment[0] = (uint8_t) chimera_smb_fh_server_index(root_fh);
+    if (nofollow) {
+        fragment[0] |= CHIMERA_SMB_FH_NOFOLLOW_BIT;
+    }
     memcpy(fragment + 1, &path_id, sizeof(path_id));
 
     return chimera_vfs_encode_fh_parent(root_fh, fragment, sizeof(fragment), out_fh);
@@ -729,6 +746,7 @@ void chimera_smb_set_child_fh(
     struct chimera_vfs_request     *request,
     const char                     *name,
     int                             namelen,
+    int                             nofollow,
     struct chimera_vfs_attrs       *r_attr);
 
 void chimera_smb_client_setattr(

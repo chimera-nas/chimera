@@ -324,7 +324,138 @@ chimera_vfs_lookup_complete(
  * Path-only fast path: a path-only mount (no FH-relative ops) resolves the whole
  * path in a single lookup_at against the mount root, with the full path as the
  * "component".  No per-component traversal, no open_fh on intermediates.
+ *
+ * The component-walk path follows a final symlink (chimera_vfs_lookup_complete)
+ * component by component, but the path-only mount hands the whole path over at
+ * once and gets back the raw final entry -- so when that entry is a symlink and
+ * the caller asked to follow (stat, not lstat), the follow is done here: read
+ * the link and re-resolve the whole path with the target spliced in.  Relative
+ * targets resolve lexically against the link's directory (a real CIFS mount does
+ * the same); a self-referential link exhausts CHIMERA_VFS_SYMLOOP_MAX and
+ * surfaces ELOOP rather than being reported as a plain success.
  */
+static void chimera_vfs_lookup_pathonly_readlink_complete(
+    enum chimera_vfs_error    error_code,
+    int                       target_length,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data);
+
+static void
+chimera_vfs_lookup_pathonly_symlink_open_complete(
+    enum chimera_vfs_error          error_code,
+    struct chimera_vfs_open_handle *oh,
+    void                           *private_data)
+{
+    struct chimera_vfs_request *lp_request = private_data;
+    struct chimera_vfs_thread  *thread     = lp_request->thread;
+    char                       *target;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        lp_request->lookup.callback(error_code, NULL,
+                                    lp_request->lookup.private_data);
+        chimera_vfs_request_free(thread, lp_request);
+        return;
+    }
+
+    lp_request->lookup.handle = oh;
+
+    /* Read the link target into the buffer just past the current path. */
+    target = lp_request->lookup.path + strlen(lp_request->lookup.path) + 1;
+
+    chimera_vfs_readlink(thread, lp_request->cred, oh, target,
+                         CHIMERA_VFS_PATH_MAX, 0,
+                         chimera_vfs_lookup_pathonly_readlink_complete,
+                         lp_request);
+} /* chimera_vfs_lookup_pathonly_symlink_open_complete */
+
+static void
+chimera_vfs_lookup_pathonly_readlink_complete(
+    enum chimera_vfs_error    error_code,
+    int                       target_length,
+    struct chimera_vfs_attrs *attr,
+    void                     *private_data)
+{
+    struct chimera_vfs_request *lp_request = private_data;
+    struct chimera_vfs_thread  *thread     = lp_request->thread;
+    char                       *target;
+    char                        scratch[CHIMERA_VFS_PATH_MAX];
+    int                         nlen;
+
+    (void) attr;
+
+    chimera_vfs_release(thread, lp_request->lookup.handle);
+    lp_request->lookup.handle = NULL;
+
+    if (error_code != CHIMERA_VFS_OK) {
+        lp_request->lookup.callback(error_code, NULL,
+                                    lp_request->lookup.private_data);
+        chimera_vfs_request_free(thread, lp_request);
+        return;
+    }
+
+    target                = lp_request->lookup.path + strlen(lp_request->lookup.path) + 1;
+    target[target_length] = '\0';
+
+    if (target[0] == '/') {
+        /* Absolute target: from the mount root (skip leading slashes). */
+        while (*target == '/') {
+            target++;
+            target_length--;
+        }
+        nlen = target_length;
+        if (nlen >= CHIMERA_VFS_PATH_MAX) {
+            goto too_long;
+        }
+        memcpy(scratch, target, nlen);
+    } else {
+        /* Relative target: splice onto the link's lexical directory. */
+        const char *orig = lp_request->lookup.path;
+        int         olen = strlen(orig);
+        int         dlen = 0, i;
+
+        for (i = olen - 1; i >= 0; i--) {
+            if (orig[i] == '/') {
+                dlen = i;
+                break;
+            }
+        }
+
+        if (dlen > 0) {
+            nlen = dlen + 1 + target_length;
+            if (nlen >= CHIMERA_VFS_PATH_MAX) {
+                goto too_long;
+            }
+            memcpy(scratch, orig, dlen);
+            scratch[dlen] = '/';
+            memcpy(scratch + dlen + 1, target, target_length);
+        } else {
+            nlen = target_length;
+            if (nlen >= CHIMERA_VFS_PATH_MAX) {
+                goto too_long;
+            }
+            memcpy(scratch, target, target_length);
+        }
+    }
+
+    memcpy(lp_request->lookup.path, scratch, nlen);
+    lp_request->lookup.path[nlen] = '\0';
+    lp_request->lookup.pathc      = lp_request->lookup.path;
+    lp_request->lookup.pathlen    = nlen;
+
+    /* Re-resolve the spliced path from the top (the mount is crossed again). */
+    chimera_vfs_open_fh(thread, lp_request->cred, lp_request->fh,
+                        lp_request->fh_len,
+                        CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED |
+                        CHIMERA_VFS_OPEN_DIRECTORY,
+                        chimera_vfs_lookup_open_dispatch, lp_request);
+    return;
+
+ too_long:
+    lp_request->lookup.callback(CHIMERA_VFS_ENAMETOOLONG, NULL,
+                                lp_request->lookup.private_data);
+    chimera_vfs_request_free(thread, lp_request);
+} /* chimera_vfs_lookup_pathonly_readlink_complete */
+
 static void
 chimera_vfs_lookup_pathonly_complete(
     enum chimera_vfs_error    error_code,
@@ -338,6 +469,31 @@ chimera_vfs_lookup_pathonly_complete(
     void                         *priv       = lp_request->lookup.private_data;
 
     (void) dir_attr;
+
+    /* Follow a final symbolic link if the caller asked to (stat, open) -- the
+    * path-only mount returns the raw link entry, so the follow lives here. */
+    if (error_code == CHIMERA_VFS_OK &&
+        (attr->va_set_mask & CHIMERA_VFS_ATTR_MODE) && S_ISLNK(attr->va_mode) &&
+        (lp_request->lookup.flags & CHIMERA_VFS_LOOKUP_FOLLOW)) {
+
+        if (++lp_request->lookup.symlink_count > CHIMERA_VFS_SYMLOOP_MAX) {
+            chimera_vfs_release(thread, lp_request->lookup.handle);
+            callback(CHIMERA_VFS_ELOOP, NULL, priv);
+            chimera_vfs_request_free(thread, lp_request);
+            return;
+        }
+
+        memcpy(lp_request->lookup.next_fh, attr->va_fh, attr->va_fh_len);
+        chimera_vfs_release(thread, lp_request->lookup.handle);
+        lp_request->lookup.handle = NULL;
+
+        chimera_vfs_open_fh(thread, lp_request->cred, lp_request->lookup.next_fh,
+                            attr->va_fh_len,
+                            CHIMERA_VFS_OPEN_PATH | CHIMERA_VFS_OPEN_INFERRED,
+                            chimera_vfs_lookup_pathonly_symlink_open_complete,
+                            lp_request);
+        return;
+    }
 
     chimera_vfs_release(thread, lp_request->lookup.handle);
     chimera_vfs_request_free(thread, lp_request);
