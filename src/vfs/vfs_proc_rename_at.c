@@ -40,13 +40,19 @@ chimera_vfs_rename_at_complete(struct chimera_vfs_request *request)
             memcpy(&skip_hi, request->rename_at.parent_lease_skip + 8, 8);
         }
 
+        /* Which NAME filter sees this is decided by the renamed object's
+         * type (MS-FSCC 2.7.1), not by the fact that it was a rename. */
+        uint32_t rn_class =
+            (request->rename_at.flags & CHIMERA_VFS_RENAME_SRC_IS_DIR)
+            ? CHIMERA_VFS_NOTIFY_RENAMED_DIR : CHIMERA_VFS_NOTIFY_RENAMED;
+
         if (!cross_dir) {
             /* Intra-directory rename: a single RENAMED event on the
              * directory carrying both old and new names. */
             chimera_vfs_notify_emit_lease(thread->vfs->vfs_notify,
                                           request->fh,
                                           request->fh_len,
-                                          CHIMERA_VFS_NOTIFY_RENAMED,
+                                          rn_class,
                                           request->rename_at.new_name,
                                           request->rename_at.new_namelen,
                                           request->rename_at.name,
@@ -58,7 +64,7 @@ chimera_vfs_rename_at_complete(struct chimera_vfs_request *request)
             chimera_vfs_notify_emit_lease(thread->vfs->vfs_notify,
                                           request->fh,
                                           request->fh_len,
-                                          CHIMERA_VFS_NOTIFY_RENAMED,
+                                          rn_class,
                                           NULL, 0,
                                           request->rename_at.name,
                                           request->rename_at.namelen,
@@ -66,7 +72,7 @@ chimera_vfs_rename_at_complete(struct chimera_vfs_request *request)
             chimera_vfs_notify_emit_lease(thread->vfs->vfs_notify,
                                           request->rename_at.new_fh,
                                           request->rename_at.new_fhlen,
-                                          CHIMERA_VFS_NOTIFY_RENAMED,
+                                          rn_class,
                                           request->rename_at.new_name,
                                           request->rename_at.new_namelen,
                                           NULL, 0,
