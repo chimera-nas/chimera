@@ -22,6 +22,11 @@ chimera_smb_map_completion_filter(uint32_t cf)
 {
     uint32_t m = 0;
 
+    /* A rename is admitted by the name filter matching the renamed object's
+     * TYPE (MS-FSCC 2.7.1): FILE_NAME covers file name changes "including
+     * renaming", DIR_NAME the same for directories.  Both used to admit the
+     * single RENAMED class, so a client watching directory names was woken
+     * because a FILE was renamed. */
     if (cf & SMB2_NOTIFY_CHANGE_FILE_NAME) {
         m |= CHIMERA_VFS_NOTIFY_FILE_ADDED |
             CHIMERA_VFS_NOTIFY_FILE_REMOVED |
@@ -30,7 +35,7 @@ chimera_smb_map_completion_filter(uint32_t cf)
     if (cf & SMB2_NOTIFY_CHANGE_DIR_NAME) {
         m |= CHIMERA_VFS_NOTIFY_DIR_ADDED |
             CHIMERA_VFS_NOTIFY_DIR_REMOVED |
-            CHIMERA_VFS_NOTIFY_RENAMED;
+            CHIMERA_VFS_NOTIFY_RENAMED_DIR;
     }
     if (cf & SMB2_NOTIFY_CHANGE_ATTRIBUTES) {
         m |= CHIMERA_VFS_NOTIFY_ATTRS_CHANGED;
@@ -241,8 +246,10 @@ chimera_smb_notify_coalesce_events(
     for (i = 0; i < nevents; i++) {
         /* Rename events carry a distinct OLD/NEW pair and are never merged. */
         if (j > 0 &&
-            !(events[i].action & CHIMERA_VFS_NOTIFY_RENAMED) &&
-            !(events[j - 1].action & CHIMERA_VFS_NOTIFY_RENAMED) &&
+            !(events[i].action & (CHIMERA_VFS_NOTIFY_RENAMED |
+                                  CHIMERA_VFS_NOTIFY_RENAMED_DIR)) &&
+            !(events[j - 1].action & (CHIMERA_VFS_NOTIFY_RENAMED |
+                                      CHIMERA_VFS_NOTIFY_RENAMED_DIR)) &&
             chimera_smb_notify_file_action(events[i].action) ==
             chimera_smb_notify_file_action(events[j - 1].action) &&
             events[i].name_len == events[j - 1].name_len &&
@@ -293,7 +300,8 @@ chimera_smb_notify_serialize_events(
         uint8_t                         *event_prev  = prev_entry;
         int                              ok          = 1;
 
-        if (ev->action & CHIMERA_VFS_NOTIFY_RENAMED) {
+        if (ev->action & (CHIMERA_VFS_NOTIFY_RENAMED |
+                          CHIMERA_VFS_NOTIFY_RENAMED_DIR)) {
             /* Produce two records: OLD_NAME + NEW_NAME */
 
             /* OLD_NAME record (using old_name) */
@@ -414,6 +422,64 @@ chimera_smb_notify_send_interim(struct chimera_smb_notify_request *nr)
  * May be called from any thread.  Grabs the pending request and queues
  * it to the SMB thread's doorbell for safe processing.
  * ---------------------------------------------------------------- */
+/* ----------------------------------------------------------------
+ * The watch's outstanding-request queue.  Both helpers require state->lock.
+ * ---------------------------------------------------------------- */
+static int
+chimera_smb_notify_q_contains(
+    const struct chimera_smb_notify_state   *state,
+    const struct chimera_smb_notify_request *nr)
+{
+    const struct chimera_smb_notify_request *cur;
+
+    for (cur = state->q_head; cur; cur = cur->q_next) {
+        if (cur == nr) {
+            return 1;
+        }
+    }
+    return 0;
+} /* chimera_smb_notify_q_contains */
+
+void
+chimera_smb_notify_q_push(
+    struct chimera_smb_notify_state   *state,
+    struct chimera_smb_notify_request *nr)
+{
+    nr->q_next = NULL;
+    if (state->q_tail) {
+        state->q_tail->q_next = nr;
+    } else {
+        state->q_head = nr;
+    }
+    state->q_tail = nr;
+} /* chimera_smb_notify_q_push */
+
+/* Unlink `nr` if it is queued.  Returns 1 when it was, so a caller can use it
+ * as the CLAIM: exactly one path can take a request off the queue, and that
+ * is the path that owns it from then on. */
+static int
+chimera_smb_notify_q_unlink(
+    struct chimera_smb_notify_state   *state,
+    struct chimera_smb_notify_request *nr)
+{
+    struct chimera_smb_notify_request **pp   = &state->q_head;
+    struct chimera_smb_notify_request  *prev = NULL;
+
+    while (*pp) {
+        if (*pp == nr) {
+            *pp = nr->q_next;
+            if (state->q_tail == nr) {
+                state->q_tail = prev;
+            }
+            nr->q_next = NULL;
+            return 1;
+        }
+        prev = *pp;
+        pp   = &(*pp)->q_next;
+    }
+    return 0;
+} /* chimera_smb_notify_q_unlink */
+
 void
 chimera_smb_notify_callback(
     struct chimera_vfs_notify_watch *watch,
@@ -431,7 +497,9 @@ chimera_smb_notify_callback(
      * is no AB-BA deadlock between them. */
     pthread_mutex_lock(&state->lock);
 
-    nr = state->pending;
+    /* The OLDEST outstanding request is the one a change wakes; the rest wait
+     * for the next one. */
+    nr = state->q_head;
     if (nr && !nr->on_ready_queue) {
         thread             = nr->thread;
         nr->on_ready_queue = 1;
@@ -473,8 +541,13 @@ chimera_smb_notify_queue_cleanup(struct chimera_smb_open_file *open_file)
 
     pthread_mutex_lock(&state->lock);
 
-    nr = state->pending;
-    if (nr && !nr->on_ready_queue) {
+    /* EVERY outstanding request, not just the oldest: the handle is going
+     * away, so there will never be another change, and one left queued would
+     * never be answered at all. */
+    for (nr = state->q_head; nr; nr = nr->q_next) {
+        if (nr->on_ready_queue) {
+            continue;
+        }
         thread             = nr->thread;
         nr->cleanup        = 1;
         nr->on_ready_queue = 1;
@@ -540,12 +613,15 @@ chimera_smb_notify_do_send_response(
     pthread_mutex_lock(&state->lock);
 
     /* Bail if close/cancel claimed nr while it was sitting on the ready
-     * queue.  state->pending was either NULL'd or replaced by the time
-     * we got here. */
-    if (state->pending != nr) {
+     * queue: whoever took it off the watch's queue owns it now.
+     *
+     * An EVENT may only answer the oldest outstanding request; a cleanup may
+     * answer any of them, because the handle is going away and all of them
+     * have to be finished. */
+    if (!chimera_smb_notify_q_contains(state, nr) ||
+        (!cleanup && state->q_head != nr)) {
         nr->on_ready_queue = 0;
         pthread_mutex_unlock(&state->lock);
-        chimera_smb_notify_request_free(nr);
         return;
     }
 
@@ -558,9 +634,9 @@ chimera_smb_notify_do_send_response(
     deleted = chimera_vfs_notify_watch_take_deleted(state->watch);
 
     if (nevents == 0 && !overflowed && !cleanup && !deleted) {
-        /* Spurious wakeup — leave nr parked so the next event re-arms
-         * the ready queue via the callback.  Just clear the queued flag.
-         * On the cleanup/deleted paths we must complete the request. */
+        /* Spurious wakeup — leave nr on the watch's queue so the next event
+         * re-arms the ready queue via the callback.  Just clear the queued
+         * flag.  On the cleanup/deleted paths we must complete the request. */
         nr->on_ready_queue = 0;
         pthread_mutex_unlock(&state->lock);
         return;
@@ -590,7 +666,7 @@ chimera_smb_notify_do_send_response(
 
     if (nevents == 0 && !overflowed && !cleanup && !deleted) {
         /* All drained events were filtered out — treat as a spurious
-         * wakeup.  Leave state->pending == nr so the next matching
+         * wakeup.  Leave nr on the watch's queue so the next matching
          * event (which by then will satisfy emit's enqueue-time filter,
          * since watch_update narrowed the mask) rewakes us.  On the
          * cleanup/deleted paths we must still complete the request. */
@@ -607,7 +683,7 @@ chimera_smb_notify_do_send_response(
      * removed from thread->notify_ready and the search is a harmless
      * no-op.  state->lock (outer) -> notify_ready_lock (inner) matches the
      * order taken by chimera_smb_notify_callback. */
-    state->pending = NULL;
+    chimera_smb_notify_q_unlink(state, nr);
     if (nr->on_ready_queue) {
         struct chimera_server_smb_thread   *thread = nr->thread;
         struct chimera_smb_notify_request **pp;
@@ -816,9 +892,8 @@ chimera_smb_notify_claim(struct chimera_smb_notify_request *nr)
 
     pthread_mutex_lock(&state->lock);
 
-    if (state->pending == nr) {
-        state->pending = NULL;
-        owned          = 1;
+    if (chimera_smb_notify_q_unlink(state, nr)) {
+        owned = 1;
     }
 
     if (nr->on_ready_queue) {
@@ -934,22 +1009,30 @@ chimera_smb_notify_close(
         return;
     }
 
-    /* Take a non-owning peek at the outstanding nr — complete_cleanup does
-     * the actual claim under state->lock, which also extracts nr from
-     * thread->notify_ready if a callback already queued it.  This is the
+    /* Take a non-owning peek at the outstanding requests — complete_cleanup
+     * does the actual claim under state->lock, which also extracts each one
+     * from thread->notify_ready if a callback already queued it.  This is the
      * key fix for the "ready-queued notify lost on close" race: the
      * completion path is the only one that can pluck a queued-but-not-yet-
      * dispatched request out of the ready queue.
+     *
+     * EVERY outstanding request, oldest first: the handle is going away, so
+     * one left behind would never be answered.  The peek re-reads the head
+     * each time rather than walking a snapshot, because completing one drops
+     * the lock and can free it.
      *
      * Per MS-SMB2 3.3.4.4, a pending CHANGE_NOTIFY whose handle is closed
      * (or whose tree/session is torn down) completes with
      * STATUS_NOTIFY_CLEANUP, carrying any buffered records — NOT
      * STATUS_CANCELLED, which is reserved for an explicit SMB2 CANCEL. */
-    pthread_mutex_lock(&state->lock);
-    nr = state->pending;
-    pthread_mutex_unlock(&state->lock);
+    for (;;) {
+        pthread_mutex_lock(&state->lock);
+        nr = state->q_head;
+        pthread_mutex_unlock(&state->lock);
 
-    if (nr) {
+        if (!nr) {
+            break;
+        }
         chimera_smb_notify_complete_cleanup(nr, state);
     }
 
