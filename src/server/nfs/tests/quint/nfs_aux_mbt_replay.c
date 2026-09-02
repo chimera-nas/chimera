@@ -1711,6 +1711,8 @@ main(
           'p'                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 },
         { "backend",        required_argument,          0,
           'B'                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          },
+        { "rdma",           no_argument,                0,
+          'R'                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          },
         { 0,                0,                          0,                         0 },
     };
     char               **traces;
@@ -1718,6 +1720,7 @@ main(
     int                  dry_run  = 0;
     int                  verbose  = 0;
     const char          *backend  = "memfs";
+    int                  rdma     = 0;
     int                  failures = 0;
     int                  c, i;
     struct mbt_env       env;
@@ -1725,7 +1728,7 @@ main(
 
     traces = mbt_collect_traces(argc, argv, &ntraces);
 
-    while ((c = getopt_long(argc, argv, "t:D:X:nvpB:", long_options,
+    while ((c = getopt_long(argc, argv, "t:D:X:nvpB:R", long_options,
                             NULL)) != -1) {
         switch (c) {
             case 't':
@@ -1744,10 +1747,14 @@ main(
             case 'B':
                 backend = optarg;
                 break;
+            case 'R':
+                rdma = 1;
+                break;
             default:
                 fprintf(stderr,
                         "usage: %s [--trace FILE ...] [--trace-dir DIR] "
-                        "[--backend memfs|diskfs|cairn] [--dry-run] "
+                        "[--backend memfs|diskfs|cairn|linux|io_uring] "
+                        "[--rdma] [--dry-run] "
                         "[--verbose] [--paranoid]\n", argv[0]);
                 mbt_free_traces(traces, ntraces);
                 return 2;
@@ -1764,6 +1771,7 @@ main(
     if (!dry_run) {
         memset(&opts, 0, sizeof(opts));
         opts.module = backend;
+        opts.rdma   = rdma;
         /* The universal addresses rpcbind reports are built from this rather
          * than from the connection's local address, which under inproc is a
          * service name rather than an IP. */

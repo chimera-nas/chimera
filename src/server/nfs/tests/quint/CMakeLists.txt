@@ -252,6 +252,43 @@ if(CHIMERA_VFS_IO_URING)
         TIMEOUT 300)
 endif()
 
+# The same corpus again, carried over RPC-over-RDMA instead of plain RPC record
+# marking (--rdma; see mbt_env_opts.rdma).  The inproc transport's
+# DATAGRAM_INPROC protocol reports itself RDMA-capable and performs real
+# one-sided transfers against a registered-memory table, so this is not an
+# emulation: rpc2 selects RFC 8166 framing, WRITE hands its payload over in a
+# Read chunk for the server to pull, and READ advertises a Write chunk the
+# server places the reply into -- the same two things chimera's own NFS client
+# asks for (vfs/nfs/nfs4_write.c, nfs4_read.c).
+#
+# Measured on memfs: 73 RDMA reads and 26 RDMA writes across the corpus,
+# against zero for the stream cells above.  That count is the check that keeps
+# these honest -- without the chunk requests an RDMA run still passes, having
+# exercised the framing but never a one-sided transfer.
+foreach(rback memfs diskfs cairn linux io_uring)
+    if(rback STREQUAL "cairn" AND NOT CAIRN_ENABLED)
+        continue()
+    endif()
+    if(rback STREQUAL "linux" AND NOT CHIMERA_LINUX)
+        continue()
+    endif()
+    if(rback STREQUAL "io_uring" AND NOT CHIMERA_VFS_IO_URING)
+        continue()
+    endif()
+    set(rextra "")
+    if(rback STREQUAL "linux" OR rback STREQUAL "io_uring")
+        set(rextra --max-attr-skip-rate 0.5)
+    endif()
+    add_test(NAME chimera/server/nfs/mbt/batch_rdma_${rback}
+        COMMAND $<TARGET_FILE:nfs3_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/nfs3
+                --backend ${rback} --rdma ${rextra})
+    set_tests_properties(chimera/server/nfs/mbt/batch_rdma_${rback} PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfs3_batch_rdma_${rback}"
+        LABELS "quint;nfs3_mbt;rdma;${rback}"
+        SKIP_RETURN_CODE 77
+        TIMEOUT 300)
+endforeach()
+
 # The auxiliary protocols (portmap/rpcbind, MOUNT, NLM, NSM) replayed from the
 # nfsaux corpus.  One batch: the four protocols share one model because they
 # share state (a granted lock monitors its holder, a notify drops its locks),
@@ -292,6 +329,20 @@ foreach(aback memfs diskfs cairn linux io_uring)
     set_tests_properties(chimera/server/nfs/mbtaux/batch_${aback} PROPERTIES
         ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsaux_batch_${aback}"
         LABELS "quint;nfsaux_mbt;${aback}"
+        TIMEOUT 600)
+
+    # Over RPC-over-RDMA, as the NFS3 corpus runs above.  Only the NFS service
+    # moves: MOUNT, NLM, NSM and portmap keep the stream endpoint, which is how
+    # a real NFS/RDMA deployment is arranged.  This corpus has no READ or WRITE
+    # in it, so unlike the NFS3 pair these cells cover the RFC 8166 framing and
+    # the auxiliary protocols' behavior beside it, not the chunk paths.
+    add_test(NAME chimera/server/nfs/mbtaux/batch_rdma_${aback}
+        COMMAND $<TARGET_FILE:nfs_aux_mbt_replay> --paranoid
+                --trace-dir ${SPECS_BUNDLE_DIR}/nfsaux
+                --backend ${aback} --rdma)
+    set_tests_properties(chimera/server/nfs/mbtaux/batch_rdma_${aback} PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsaux_batch_rdma_${aback}"
+        LABELS "quint;nfsaux_mbt;rdma;${aback}"
         TIMEOUT 600)
 endforeach()
 
@@ -346,6 +397,29 @@ foreach(rback memfs diskfs cairn linux io_uring)
         LABELS "quint;nfsdrc_mbt;${rback}"
         TIMEOUT 600)
 endforeach()
+
+# NOTE: the NFS4 and duplicate-request-cache suites have no --rdma twin yet,
+# and the omission is deliberate rather than an oversight.  Both replay
+# retransmits, and retransmit handling is broken over RPC-over-RDMA in two
+# separate ways that have to be fixed before those cells can be green:
+#
+#   1. The NFSv4.1 session reply cache FATALLY ABORTS the server.  A retransmit
+#      on a cached slot reaches nfs4_send_cached_reply, which asks
+#      nfs_drc_reply_body_offset() to find the RPC body; that parser requires a
+#      TCP record marker, and over RDMA the captured reply begins with the
+#      RPC-over-RDMA header instead (observed: xid, vers=1, credits=1,
+#      proc=0/RDMA_MSG).  The parse fails, and the caller's chimera_nfs_abort_if
+#      turns it into an abort -- reachable by any client that retransmits over
+#      NFS/RDMA.  The reply-capture callback is handed the whole outgoing
+#      message, so a fix needs libevpl to say where the RPC message starts (the
+#      RDMA header is variable-length, so chimera cannot compute it).
+#
+#   2. The NFSv3 duplicate-request cache never recognizes a retransmit at all:
+#      the lookup misses, the request re-executes, and the model sees a second
+#      execution where it expected a replayed reply.  Not yet root-caused; the
+#      cache is keyed on (address, procedure, xid, checksum).
+#
+# Reproduce either with --rdma on the corresponding replayer.
 
 # SKIP_RETURN_CODE 77 still applies to NFS4: a trace whose capability profile
 # does not match the live server exits 77 individually; the batch reports SKIP
