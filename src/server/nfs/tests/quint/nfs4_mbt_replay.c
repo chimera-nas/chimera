@@ -76,6 +76,12 @@
  * ffl_stripe_unit (8) + ffl_mirrors<> count (4) + ffm_data_servers<> count (4). */
 #define V4_FF_DEVICEID_OFF  16
 
+/* Offset of the ffds_fh_vers<> element -- the data server handle that names the
+ * backing file -- in the same body: ffds_deviceid (16) + ffds_efficiency (4) +
+ * ffds_stateid (16) + ffds_fh_vers<> count (4) past V4_FF_DEVICEID_OFF.  Points
+ * at the opaque's length prefix; see chimera_nfs4_encode_ff_layout(). */
+#define V4_FF_DSFH_OFF      56
+
 #define E_DELAY             10008
 #define E_DENIED            10010
 #define E_NOTSUPP           10004
@@ -410,6 +416,7 @@ struct v4_res {
     }        segs[4];
     uint8_t         deviceid[16];
     int             has_deviceid;
+    struct mbt_fh   ds_fh;            /* flex-files backing file handle */
     int             lr_present;       /* LAYOUTRETURN */
     int             has_newsize;      /* LAYOUTCOMMIT */
     uint64_t        newsize;
@@ -440,6 +447,13 @@ struct v4_chg {
     int64_t  ino;
     int64_t  abstract;
     uint64_t wire;
+};
+
+/* Where a file's data lives: which data server (deviceid) and which file on
+ * it (the flex-files backing handle).  See oracle.layout_loc. */
+struct v4_layout_loc {
+    struct mbt_fh fh;
+    uint8_t       deviceid[16];
 };
 
 struct v4_hist {
@@ -487,6 +501,22 @@ struct oracle {
 
     uint8_t                deviceid[16];
     int                    has_deviceid;
+
+    /* ino -> the backing location its first LAYOUTGET named.  A metadata
+     * server that persists its per-file layout hands out the same one every
+     * time; one that loses it re-steers, and the round-robin lands the file on
+     * a different data server whose copy is empty -- silently orphaning
+     * everything written through the previous layout.  Nothing else in the
+     * corpus can tell those apart: both answer NFS4_OK with a well-formed
+     * layout covering the requested range, so the invariant is checked here
+     * rather than modeled.
+     *
+     * BOTH halves matter.  The data servers in the test cluster are freshly
+     * mkfs'd instances of one backend, and the backing file is named after the
+     * MDS fileid, so the same file re-created on a different DS gets an
+     * IDENTICAL native handle -- the deviceid is the only thing that says
+     * which server it lives on.  Comparing handles alone silently passes. */
+    struct v4_layout_loc   layout_loc[V4_MAX_INOS];
 
     /* Per-model-client connections (a model client
     * owns its own connection, like a real one). */
@@ -2668,6 +2698,25 @@ decode_resop(
                         memcpy(r->deviceid, body->data + off, 16);
                         r->has_deviceid = 1;
                     }
+
+                    /* The backing file handle, for the layout-stability check
+                     * in check_result().  Flex-files only: a block layout
+                     * names extents on a volume, not a file on a data
+                     * server. */
+                    if (g_layout_type == V4_LAYOUT_FLEX &&
+                        body->len >= V4_FF_DSFH_OFF + 4) {
+                        const uint8_t *q   = body->data + V4_FF_DSFH_OFF;
+                        uint32_t       len = ((uint32_t) q[0] << 24) |
+                            ((uint32_t) q[1] << 16) |
+                            ((uint32_t) q[2] << 8) | q[3];
+
+                        if (len <= sizeof(r->ds_fh.data) &&
+                            body->len >= V4_FF_DSFH_OFF + 4 + len) {
+                            memcpy(r->ds_fh.data, q + 4, len);
+                            r->ds_fh.len = len;
+                            r->ds_fh.has = 1;
+                        }
+                    }
                 }
             }
             break;
@@ -3528,6 +3577,24 @@ check_result(
             if (r->has_deviceid) {
                 memcpy(o->deviceid, r->deviceid, 16);
                 o->has_deviceid = 1;
+            }
+
+            /* Layout stability: the backing location of an ino is fixed for
+             * its lifetime.  See oracle.layout_loc. */
+            if (r->ds_fh.has && r->has_deviceid &&
+                ctx->cur >= 0 && ctx->cur < V4_MAX_INOS) {
+                struct v4_layout_loc *known = &o->layout_loc[ctx->cur];
+
+                if (!known->fh.has) {
+                    known->fh = r->ds_fh;
+                    memcpy(known->deviceid, r->deviceid, 16);
+                } else if (memcmp(known->deviceid, r->deviceid, 16) != 0 ||
+                           !mbt_fh_eq(&known->fh, &r->ds_fh)) {
+                    mism_add(m, "layoutget: backing location changed for ino "
+                             "%" PRId64 " -- the metadata server did not "
+                             "persist its layout and re-steered",
+                             (int64_t) ctx->cur);
+                }
             }
         }
     } else if (strcmp(tag, "SLayoutreturn") == 0) {

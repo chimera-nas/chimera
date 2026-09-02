@@ -265,13 +265,35 @@ endif()
 # divergence is both caught and reported where it is created.  It costs roughly
 # a quarter more wall time; the timeout is set for an instrumented build, where
 # it is several times slower than the release run it was measured in.
-add_test(NAME chimera/server/nfs/mbtaux/batch_memfs
-    COMMAND $<TARGET_FILE:nfs_aux_mbt_replay> --paranoid
-            --trace-dir ${SPECS_BUNDLE_DIR}/nfsaux)
-set_tests_properties(chimera/server/nfs/mbtaux/batch_memfs PROPERTIES
-    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsaux_batch_memfs"
-    LABELS "quint;nfsaux_mbt;memfs"
-    TIMEOUT 600)
+#
+# Run against every backend, as the NFS3 and NFS4 batches are.  The auxiliary
+# protocols look server-side, but three of the four reach the VFS: MOUNT
+# resolves an export path to a filehandle, NLM's lock table hangs off the open
+# file the backend handed out, and NSM's notify drops locks held against it.
+# --paranoid re-probes each file's ranges through the backend after every step,
+# so a backend whose handles or open state differ from memfs's diverges here
+# rather than staying invisible until some later collision.  The passthrough
+# pair replays the corpus whole (42/42, no capability skips): nothing in it
+# reaches the host semantics the nfs3/nfs4 corpora need gates for.
+foreach(aback memfs diskfs cairn linux io_uring)
+    if(aback STREQUAL "cairn" AND NOT CAIRN_ENABLED)
+        continue()
+    endif()
+    if(aback STREQUAL "linux" AND NOT CHIMERA_LINUX)
+        continue()
+    endif()
+    if(aback STREQUAL "io_uring" AND NOT CHIMERA_VFS_IO_URING)
+        continue()
+    endif()
+    add_test(NAME chimera/server/nfs/mbtaux/batch_${aback}
+        COMMAND $<TARGET_FILE:nfs_aux_mbt_replay> --paranoid
+                --trace-dir ${SPECS_BUNDLE_DIR}/nfsaux
+                --backend ${aback})
+    set_tests_properties(chimera/server/nfs/mbtaux/batch_${aback} PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsaux_batch_${aback}"
+        LABELS "quint;nfsaux_mbt;${aback}"
+        TIMEOUT 600)
+endforeach()
 
 # The duplicate-request caches, replayed from the nfsdrc corpus.  Two batches
 # because there are two servers: the NFSv3 cache is off by default and on in the
@@ -284,23 +306,46 @@ set_tests_properties(chimera/server/nfs/mbtaux/batch_memfs PROPERTIES
 # SETATTR and a re-executed one both answer NFS3_OK, and the difference is a
 # size in the directory.  The flag re-reads the working directory after every
 # step and compares it against the model's own.
-add_test(NAME chimera/server/nfs/mbtdrc/batch_memfs
-    COMMAND $<TARGET_FILE:nfs_drc_mbt_replay> --paranoid
-            --trace-dir ${SPECS_BUNDLE_DIR}/nfsdrc
-            --exclude-prefix nfsdrcNoV3)
-set_tests_properties(chimera/server/nfs/mbtdrc/batch_memfs PROPERTIES
-    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsdrc_batch_memfs"
-    LABELS "quint;nfsdrc_mbt;memfs"
-    TIMEOUT 600)
+#
+# Both batches run against every backend.  A duplicate-request cache is
+# server-side, but what it caches is a reply the backend produced, and
+# --paranoid's re-read of the working directory after every step is what tells a
+# genuine replay from a re-execution -- so the property under test ("the second
+# copy of this request changed nothing") is only as strong as the backend it is
+# checked against.  Adding the passthrough pair found a real one: this corpus is
+# the only one that sets a size on a symlink, and NFS3 SETATTR answered
+# NFS3ERR_SERVERFAULT there instead of NFS3ERR_INVAL (see
+# chimera_nfs3_setattr_open_callback).
+foreach(rback memfs diskfs cairn linux io_uring)
+    if(rback STREQUAL "cairn" AND NOT CAIRN_ENABLED)
+        continue()
+    endif()
+    if(rback STREQUAL "linux" AND NOT CHIMERA_LINUX)
+        continue()
+    endif()
+    if(rback STREQUAL "io_uring" AND NOT CHIMERA_VFS_IO_URING)
+        continue()
+    endif()
+    add_test(NAME chimera/server/nfs/mbtdrc/batch_${rback}
+        COMMAND $<TARGET_FILE:nfs_drc_mbt_replay> --paranoid
+                --trace-dir ${SPECS_BUNDLE_DIR}/nfsdrc
+                --exclude-prefix nfsdrcNoV3
+                --backend ${rback})
+    set_tests_properties(chimera/server/nfs/mbtdrc/batch_${rback} PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsdrc_batch_${rback}"
+        LABELS "quint;nfsdrc_mbt;${rback}"
+        TIMEOUT 600)
 
-add_test(NAME chimera/server/nfs/mbtdrc/batch_nodrc_memfs
-    COMMAND $<TARGET_FILE:nfs_drc_mbt_replay> --paranoid --no-nfs3-drc
-            --trace-dir ${SPECS_BUNDLE_DIR}/nfsdrc
-            --exclude-prefix nfsdrcRef)
-set_tests_properties(chimera/server/nfs/mbtdrc/batch_nodrc_memfs PROPERTIES
-    ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsdrc_batch_nodrc_memfs"
-    LABELS "quint;nfsdrc_mbt;memfs"
-    TIMEOUT 600)
+    add_test(NAME chimera/server/nfs/mbtdrc/batch_nodrc_${rback}
+        COMMAND $<TARGET_FILE:nfs_drc_mbt_replay> --paranoid --no-nfs3-drc
+                --trace-dir ${SPECS_BUNDLE_DIR}/nfsdrc
+                --exclude-prefix nfsdrcRef
+                --backend ${rback})
+    set_tests_properties(chimera/server/nfs/mbtdrc/batch_nodrc_${rback} PROPERTIES
+        ENVIRONMENT "CHIMERA_MBT_ARTIFACTS=nfsdrc_batch_nodrc_${rback}"
+        LABELS "quint;nfsdrc_mbt;${rback}"
+        TIMEOUT 600)
+endforeach()
 
 # SKIP_RETURN_CODE 77 still applies to NFS4: a trace whose capability profile
 # does not match the live server exits 77 individually; the batch reports SKIP
@@ -377,8 +422,21 @@ endif()
 # replays.  Until this batch existed the Deleg instances had no consumer at
 # all: they were generated, skipped silently in the default batch, and the
 # delegation wire paths were covered only by the deterministic deleg_probe.
-foreach(dback memfs diskfs cairn)
+#
+# The passthrough backends are in this list for the same reason they are in the
+# plain nfs4 list above: a delegation is recalled on a conflicting open, and
+# which opens conflict is decided against the handle the backend produced.
+# Measured identical to the native backends -- 14 Deleg traces replay and 51
+# skip on every one of memfs/diskfs/cairn/linux/io_uring -- so the passthrough
+# cells carry the same delegation coverage rather than a thinner one.
+foreach(dback memfs diskfs cairn linux io_uring)
     if(dback STREQUAL "cairn" AND NOT CAIRN_ENABLED)
+        continue()
+    endif()
+    if(dback STREQUAL "linux" AND NOT CHIMERA_LINUX)
+        continue()
+    endif()
+    if(dback STREQUAL "io_uring" AND NOT CHIMERA_VFS_IO_URING)
         continue()
     endif()
     add_test(NAME chimera/server/nfs/mbt4/batch_deleg_${dback}
@@ -415,13 +473,33 @@ set_tests_properties(chimera/server/nfs/mbt4/batch_pnfs_memfs PROPERTIES
 # The same cluster with an on-disk metadata server: diskfs persists the pNFS
 # layout blob as its own b+tree record, so this is the only test that covers
 # that record's write/read-back path.  The data servers stay memfs -- what is
-# under test here is the MDS.  Gated on libaio, diskfs's device type.
-if(HAVE_LIBAIO)
-    add_test(NAME chimera/server/nfs/mbt4/batch_pnfs_diskfs
+# under test here is the MDS.
+#
+# Registered unconditionally, like every other diskfs variant: diskfs takes
+# whichever libevpl block backend the platform has, and libaio is only the
+# Linux-preferred one (see CHIMERA_DISKFS_DEVICE_TYPE at the top level).  This
+# was the last cell still carrying the old if(HAVE_LIBAIO) gate, which had the
+# effect of leaving the layout record untested on every platform without
+# libaio -- macOS among them, where it runs green.
+add_test(NAME chimera/server/nfs/mbt4/batch_pnfs_diskfs
+    COMMAND $<TARGET_FILE:nfs4_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/nfs4pnfs
+            --pnfs 2 --backend diskfs)
+set_tests_properties(chimera/server/nfs/mbt4/batch_pnfs_diskfs PROPERTIES
+    LABELS "quint;nfs4_mbt;pnfs;diskfs"
+    SKIP_RETURN_CODE 77
+    TIMEOUT 300)
+
+# And with a cairn metadata server, which persists the layout blob as its own
+# keyed record (CAIRN_KEY_PNFS).  Until cairn learned to store it, it did not
+# advertise CHIMERA_VFS_CAP_LAYOUT and every trace here skipped with
+# NFS4ERR_LAYOUTUNAVAILABLE -- the whole suite reported SKIP, which reads the
+# same as "registered and passing" in a ctest summary.
+if(CAIRN_ENABLED)
+    add_test(NAME chimera/server/nfs/mbt4/batch_pnfs_cairn
         COMMAND $<TARGET_FILE:nfs4_mbt_replay> --trace-dir ${SPECS_BUNDLE_DIR}/nfs4pnfs
-                --pnfs 2 --backend diskfs)
-    set_tests_properties(chimera/server/nfs/mbt4/batch_pnfs_diskfs PROPERTIES
-        LABELS "quint;nfs4_mbt;pnfs;diskfs"
+                --pnfs 2 --backend cairn)
+    set_tests_properties(chimera/server/nfs/mbt4/batch_pnfs_cairn PROPERTIES
+        LABELS "quint;nfs4_mbt;pnfs;cairn"
         SKIP_RETURN_CODE 77
         TIMEOUT 300)
 endif()

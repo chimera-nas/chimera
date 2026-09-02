@@ -128,7 +128,23 @@ chimera_nfs3_setattr_open_callback(
         }
 
     } else {
-        res.status = chimera_vfs_error_to_nfsstat3(error_code);
+        /* A size-setting SETATTR asks for a data handle (see the OPEN_PATH
+         * choice in chimera_nfs3_setattr), and a non-regular object refuses
+         * one: ELOOP for a symlink, ENXIO for a device or socket.  RFC 1813
+         * says SETATTR's size is meaningful only for a regular file and any
+         * other type answers NFS3ERR_INVAL, which is what the in-engine
+         * backends return from their own setattr -- they accept the open and
+         * reject the size.  Without this the passthrough backends failed at
+         * the open instead, and the unmapped errno surfaced as
+         * NFS3ERR_SERVERFAULT.  (A directory already arrives as EISDIR, which
+         * maps to NFS3ERR_ISDIR on its own.) */
+        if (args->new_attributes.size.set_it &&
+            (error_code == CHIMERA_VFS_ELOOP ||
+             error_code == CHIMERA_VFS_ENXIO)) {
+            res.status = NFS3ERR_INVAL;
+        } else {
+            res.status = chimera_vfs_error_to_nfsstat3(error_code);
+        }
         chimera_nfs3_set_wcc_data(&res.resfail.obj_wcc, NULL, NULL);
         rc = shared->nfs_v3.send_reply_NFSPROC3_SETATTR(evpl, NULL, &res, req->encoding);
         chimera_nfs_abort_if(rc, "Failed to send RPC2 reply");
