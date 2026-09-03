@@ -12,7 +12,7 @@ on:
 jobs:
   syntax-check:
     name: Check code formatting with uncrustify
-    runs-on: arc-small
+    runs-on: ubuntu-24.04
     
     steps:
       - name: Checkout repository
@@ -20,22 +20,15 @@ jobs:
         with:
           submodules: recursive
       
-      - name: Configure APT mirror
-        run: |
-          if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
-            sudo sed -i 's|http://archive.ubuntu.com/ubuntu|http://repository.mdh.quantum.com/repository/pkgs/ubuntu|g' /etc/apt/sources.list.d/ubuntu.sources
-            sudo sed -i 's|http://security.ubuntu.com/ubuntu|http://repository.mdh.quantum.com/repository/pkgs/ubuntu|g' /etc/apt/sources.list.d/ubuntu.sources
-            sudo sed -i 's/Components:.*$/Components: main universe/' /etc/apt/sources.list.d/ubuntu.sources
-            sudo sed -i 's/\s*[a-z]*-backports//' /etc/apt/sources.list.d/ubuntu.sources
-          else
-            sudo sed -i 's|http://archive.ubuntu.com/ubuntu|http://repository.mdh.quantum.com/repository/pkgs/ubuntu|g' /etc/apt/sources.list
-            sudo sed -i 's|http://security.ubuntu.com/ubuntu|http://repository.mdh.quantum.com/repository/pkgs/ubuntu|g' /etc/apt/sources.list
-          fi
-
+      # ubuntu-24.04 ships uncrustify 0.78.1, which is the version make
+      # syntax-check is calibrated against; a newer one reformats function
+      # pointer parameter lists differently and would fail this check on lines
+      # nobody touched.  Pinning the runner image is what pins the tool.
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y uncrustify make
-      
+          uncrustify --version
+
       - name: Run syntax check
         run: make syntax-check

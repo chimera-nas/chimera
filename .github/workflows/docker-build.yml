@@ -18,11 +18,8 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
-  # Internal pull-through cache for the mirrored ccache image (mirrors
-  # ghcr.io/chimera-nas/ccache).  Public default lives in the Dockerfiles.
-  CCACHE_IMAGE_REGISTRY: repository.mdh.quantum.com:5009/chimera-nas/ccache
-  APT_MIRROR: http://repository.mdh.quantum.com/repository/pkgs/ubuntu
-  DOCKER_MIRROR: repository.mdh.quantum.com/
+  # The mirrored ccache binary comes from its public GHCR package, which is
+  # already the Dockerfile's default; nothing here has to name it.
 
 jobs:
   build-and-push:
@@ -37,7 +34,7 @@ jobs:
         include:
           # Ubuntu 24.04 builds
           - platform: linux/amd64
-            runner: arc-amd64
+            runner: ubuntu-24.04
             arch: amd64
             build_type: Release
             os: ubuntu24.04
@@ -45,7 +42,7 @@ jobs:
             tag: latest-amd64
             publish: true
           - platform: linux/amd64
-            runner: arc-amd64
+            runner: ubuntu-24.04
             arch: amd64
             build_type: Debug
             os: ubuntu24.04
@@ -53,7 +50,7 @@ jobs:
             tag: latest-debug-amd64
             publish: true
           - platform: linux/arm64
-            runner: arc-arm64
+            runner: ubuntu-24.04-arm
             arch: arm64
             build_type: Release
             os: ubuntu24.04
@@ -61,7 +58,7 @@ jobs:
             tag: latest-arm64
             publish: true
           - platform: linux/arm64
-            runner: arc-arm64
+            runner: ubuntu-24.04-arm
             arch: arm64
             build_type: Debug
             os: ubuntu24.04
@@ -75,8 +72,10 @@ jobs:
         with:
           submodules: recursive
 
+      # Unconditional, where it used to be push-only: the layer cache below
+      # lives in GHCR now, and a merge_group run that never publishes still has
+      # to authenticate to read it.
       - name: Log in to the Container registry
-        if: github.event_name == 'push'
         uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
@@ -87,9 +86,6 @@ jobs:
         uses: docker/setup-buildx-action@v4
         with:
           driver: docker-container
-          buildkitd-config-inline: |
-            [registry."docker.io"]
-              mirrors = ["repository.mdh.quantum.com:5001"]
 
       - name: Extract metadata for Docker
         id: meta
@@ -107,18 +103,15 @@ jobs:
           platforms: ${{ matrix.platform }}
           push: ${{ github.event_name == 'push' && matrix.publish }}
           tags: ${{ steps.meta.outputs.tags }}
-          cache-from: type=registry,ref=repository.mdh.quantum.com:5004/cache/chimera:${{ matrix.os }}-${{ matrix.arch }}
-          cache-to: type=registry,ref=repository.mdh.quantum.com:5004/cache/chimera:${{ matrix.os }}-${{ matrix.arch }},mode=max
+          cache-from: type=registry,ref=ghcr.io/chimera-nas/chimera-build-cache:${{ matrix.os }}-${{ matrix.arch }}
+          cache-to: ${{ github.event_name == 'push' && format('type=registry,ref=ghcr.io/chimera-nas/chimera-build-cache:{0}-{1},mode=max', matrix.os, matrix.arch) || '' }}
           build-args: |
             BUILD_TYPE=${{ matrix.build_type }}
-            APT_MIRROR=${{ env.APT_MIRROR }}
-            DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
-            CCACHE_REGISTRY=${{ env.CCACHE_IMAGE_REGISTRY }}
 
   merge-manifests:
     if: github.event_name == 'push'
     needs: build-and-push
-    runs-on: arc-amd64
+    runs-on: ubuntu-24.04
     permissions:
       packages: write
     steps:
@@ -147,7 +140,7 @@ jobs:
     name: Docker build complete
     needs: build-and-push
     if: ${{ always() }}
-    runs-on: arc-small
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
