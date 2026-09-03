@@ -50,25 +50,30 @@ permissions:
   contents: read
 
 env:
-  DEV_IMAGE_TAG_PREFIX: repository.mdh.quantum.com:5004/cache/chimera-dev
-  # Internal pull-through cache for the mirrored ccache image (mirrors
-  # ghcr.io/chimera-nas/ccache).  Public default lives in the Dockerfiles.
-  CCACHE_IMAGE_REGISTRY: repository.mdh.quantum.com:5009/chimera-nas/ccache
-  # Internal pull-through for the mirrored quint toolchain (mirrors
-  # ghcr.io/chimera-nas/quint).  Public default lives in the Dockerfiles.
-  QUINT_IMAGE_REGISTRY: repository.mdh.quantum.com:5009/chimera-nas/quint
-  # Where the Extended workflow publishes ccache bundles.  Not a secret -- the same
-  # literal is in build-test.yml -- so a fork PR can at least attempt a read.
-  NEXUS_SCRATCH_URL: http://repository.mdh.quantum.com/repository/scratch
-  APT_MIRROR: http://repository.mdh.quantum.com/repository/pkgs/ubuntu
-  DOCKER_MIRROR: repository.mdh.quantum.com/
+  # Unlike the merge queue, this workflow builds the devcontainer image inside
+  # each job that needs it and loads it into that runner's docker daemon; it
+  # never pushes.  This is the one workflow reachable from a fork, and a fork's
+  # pull_request run gets a read-only GITHUB_TOKEN that cannot write a package
+  # -- so a build-once-push-once shape would leave the pre-merge signal broken
+  # for exactly the contributors it exists to serve.  There are only two
+  # consumers here, so building twice costs less than the alternative.
+  #
+  # Only the layer cache crosses the network, and only to be read: the merge
+  # queue owns that tag and a PR must not be able to poison it.  With an
+  # unchanged Dockerfile the "build" is a layer pull.
+  DEV_IMAGE: chimera-dev:${{ github.sha }}
+  DEV_IMAGE_CACHE: ghcr.io/chimera-nas/chimera-dev:buildcache-amd64
+  # The mirrored ccache binary and the quint toolchain come from their public
+  # GHCR packages, which are the Dockerfiles' own defaults; nothing here has to
+  # name them.
+  CCACHE_MAXSIZE: 2G
 
 jobs:
   ci-complete:
     name: CI complete
-    needs: [build-devcontainer, analyze-dev, quint-coverage, analyze-macos]
+    needs: [analyze-dev, quint-coverage, analyze-macos]
     if: ${{ always() }}
-    runs-on: arc-small
+    runs-on: ubuntu-24.04
     steps:
       - name: Verify every pre-merge job succeeded
         run: |
@@ -86,23 +91,22 @@ jobs:
 
   docker-build-complete:
     name: Docker build complete
-    runs-on: arc-small
+    runs-on: ubuntu-24.04
     steps:
       - name: PR placeholder
         run: echo "No docker image is built at PR time; the real check runs in the merge queue."
 
   # ---------------------------------------------------------------------------
-  # Pre-merge signal.  The devcontainer image is built once here and consumed by
-  # both container jobs below, mirroring the merge queue's
-  # build-devcontainer -> {static-analysis, test-dev} shape.  It is tagged with
-  # github.sha, which on a pull_request event is the PR's merge commit and so
-  # never collides with the queue's own tags.
+  # Pre-merge signal.  Both jobs below build the devcontainer image for
+  # themselves -- see the DEV_IMAGE comment in env -- and then mirror the merge
+  # queue's {static-analysis, test-dev} pair.
   # ---------------------------------------------------------------------------
-  build-devcontainer:
-    name: Build devcontainer amd64 (pre-merge)
-    runs-on: arc-amd64
+  analyze-dev:
+    name: Analyze devcontainer amd64 Release (pre-merge)
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
+      packages: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -113,72 +117,42 @@ jobs:
         uses: docker/setup-buildx-action@v4
         with:
           driver: docker-container
-          buildkitd-config-inline: |
-            [registry."docker.io"]
-              mirrors = ["repository.mdh.quantum.com:5001"]
 
-      # cache-from only (no cache-to): the merge queue owns that cache, and a PR
-      # must not be able to poison it.  An unchanged Dockerfile is therefore a
-      # layer pull rather than a rebuild.
-      - name: Build and push the dev container image
+      # The layer cache is a GHCR package of this repository.  Authenticating
+      # with the run's own token means the import works whether or not the
+      # package has been made public; a fork's pull_request token is read-only,
+      # which is all an import needs.
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # load, not push, and cache-from without cache-to: nothing this run
+      # produces leaves the runner, and the merge queue keeps sole ownership of
+      # the cache tag.
+      - name: Build the dev container image
         uses: docker/build-push-action@v7
         with:
           context: .devcontainer
           file: .devcontainer/Dockerfile
           platforms: linux/amd64
-          push: true
-          tags: ${{ env.DEV_IMAGE_TAG_PREFIX }}:${{ github.sha }}-amd64
-          cache-from: type=registry,ref=repository.mdh.quantum.com:5004/cache/chimera-dev:amd64
-          build-args: |
-            APT_MIRROR=${{ env.APT_MIRROR }}
-            DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
-            CCACHE_REGISTRY=${{ env.CCACHE_IMAGE_REGISTRY }}
-            QUINT_REGISTRY=${{ env.QUINT_IMAGE_REGISTRY }}
+          load: true
+          tags: ${{ env.DEV_IMAGE }}
+          cache-from: type=registry,ref=${{ env.DEV_IMAGE_CACHE }}
 
-  analyze-dev:
-    name: Analyze devcontainer amd64 Release (pre-merge)
-    needs: [build-devcontainer]
-    runs-on: arc-amd64
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v5
+      # Unlike the store this replaced, the Actions cache is readable from a
+      # fork's pull_request run -- a run may read its own ref's scope and the
+      # default branch's.  extended.yml writes that scope on main, so this is a
+      # warm cache on every PR rather than one only same-repo PRs could reach.
+      - name: Restore the ccache directory
+        uses: actions/cache/restore@v4
         with:
-          submodules: recursive
-
-      # Try to prime from the same bundle the queue uses.  Whether this can
-      # work is an open question and the point of trying: org secrets are
-      # withheld from a fork's pull_request run, so NEXUS_SCRATCH_USER is empty
-      # here and the request goes out unauthenticated.  If the scratch repo
-      # allows anonymous reads -- as the internal registry on :5004 evidently
-      # does, since pr-checks pushes images to it with no credentials at all --
-      # this lands a warm cache on every PR.  If it refuses, the step says so
-      # and the build runs cold exactly as it does today.
-      #
-      # -u is passed only when a user actually exists: `-u ":"` sends an empty
-      # Authorization header, which a server can reject outright even where it
-      # would have served the object anonymously.
-      - name: Restore the ccache bundle
-        env:
-          NEXUS_USER: ${{ secrets.NEXUS_SCRATCH_USER }}
-          NEXUS_PASSWORD: ${{ secrets.NEXUS_SCRATCH_PASSWORD }}
-        run: |
-          key="analyze-devcontainer-amd64-Release"
-          auth=()
-          if [ -n "${NEXUS_USER:-}" ]; then
-            auth=(-u "${NEXUS_USER}:${NEXUS_PASSWORD}")
-            echo "restoring ${key} with credentials"
-          else
-            echo "no scratch credentials (expected on a fork PR); trying anonymously"
-          fi
-          if curl -fsS --retry 3 --retry-all-errors --retry-delay 5 \
-               "${auth[@]}" -o ccache-bundle.tar.gz \
-               "${{ env.NEXUS_SCRATCH_URL }}/chimera/ccache/${key}.tar.gz"; then
-            echo "restored $(stat -c%s ccache-bundle.tar.gz) bytes"
-          else
-            echo "no ccache bundle for ${key}; this analysis starts cold"
-          fi
+          path: ${{ runner.temp }}/ccache
+          key: ccache-analyze-devcontainer-amd64-Release-${{ github.sha }}
+          restore-keys: |
+            ccache-analyze-devcontainer-amd64-Release-
 
       - name: Run the clang static analyzer
         id: static-analysis
@@ -186,22 +160,18 @@ jobs:
           set -o pipefail
           mkdir -p "${{ github.workspace }}/scan-report"
           docker run --rm --privileged \
-            -e DOCKER_MIRROR=${{ env.DOCKER_MIRROR }} \
-            -e APT_MIRROR=${{ env.APT_MIRROR }} \
-            -e CCACHE_DIR=/build/ccache \
+            -e CCACHE_DIR=/ccache \
+            -e CCACHE_MAXSIZE \
+            -v "${{ runner.temp }}/ccache:/ccache" \
             -v "${{ github.workspace }}:/workspace" \
             -v "${{ github.workspace }}/scan-report:/scan-report" \
             -v /build \
             -w /build \
-            ${{ env.DEV_IMAGE_TAG_PREFIX }}:${{ github.sha }}-amd64 \
+            ${{ env.DEV_IMAGE }} \
             bash -euxc '
-              mkdir -p /build/ccache
-              if [ -f /workspace/ccache-bundle.tar.gz ]; then
-                tar -C /build/ccache -xzf /workspace/ccache-bundle.tar.gz
-              fi
-              # Zero the counters the bundle brought with it, so --show-stats
-              # below describes this run rather than this run plus the Extended run
-              # that produced the cache.
+              # Zero the counters the restored cache brought with it, so
+              # --show-stats below describes this run rather than this run plus
+              # the Extended run that produced the cache.
               ccache -z > /dev/null
               cmake -D CMAKE_BUILD_TYPE=Release -D CMAKE_C_COMPILER=clang -D CMAKE_EXPORT_COMPILE_COMMANDS=ON -D IO_URING_NVME_ENABLED=OFF -B /build -S /workspace -G Ninja
               ninja -C /build
@@ -222,10 +192,10 @@ jobs:
 
   quint-coverage:
     name: Quint coverage devcontainer amd64
-    needs: [build-devcontainer]
-    runs-on: arc-amd64
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
+      packages: read
       pull-requests: write
     steps:
       - name: Checkout repository
@@ -237,6 +207,32 @@ jobs:
           # exactly this PR's diff, and depth 2 is all it takes to have it.
           # The default depth 1 has no parent at all.
           fetch-depth: 2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+        with:
+          driver: docker-container
+
+      # The layer cache is a GHCR package of this repository.  Authenticating
+      # with the run's own token means the import works whether or not the
+      # package has been made public; a fork's pull_request token is read-only,
+      # which is all an import needs.
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build the dev container image
+        uses: docker/build-push-action@v7
+        with:
+          context: .devcontainer
+          file: .devcontainer/Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: ${{ env.DEV_IMAGE }}
+          cache-from: type=registry,ref=${{ env.DEV_IMAGE_CACHE }}
 
       # Captured on the runner rather than in the container below: the
       # bind-mounted checkout is not owned by the container's root, so git
@@ -276,8 +272,6 @@ jobs:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           docker run --rm --privileged \
-            -e DOCKER_MIRROR=${{ env.DOCKER_MIRROR }} \
-            -e APT_MIRROR=${{ env.APT_MIRROR }} \
             -e RUN_URL="$RUN_URL" \
             -e GH_REPO="$GH_REPO" \
             -e PR_HEAD_SHA="$PR_HEAD_SHA" \
@@ -285,7 +279,7 @@ jobs:
             -v "${{ github.workspace }}/oras:/usr/local/bin/oras:ro" \
             -v /build \
             -w /build \
-            ${{ env.DEV_IMAGE_TAG_PREFIX }}:${{ github.sha }}-amd64 \
+            ${{ env.DEV_IMAGE }} \
             bash -euxc '
               # Ubuntu ships these versioned; the unversioned names are not
               # always on PATH, and coverage-report.sh honours the overrides.
@@ -388,9 +382,9 @@ jobs:
       # Unlike the Linux half of this workflow, this needs no secrets: the
       # Actions cache is available to a fork's pull_request run, and a run can
       # read the default branch's scope.  extended.yml writes that scope on main,
-      # so this restores a cache a PR could never reach through Nexus.
+      # so this restores what the scheduled run on main left behind.
       - name: Restore the ccache directory
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/ccache
           key: ccache-macos-analyze-Release-${{ github.sha }}

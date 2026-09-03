@@ -11,7 +11,7 @@ on:
 
 jobs:
   reuse-lint:
-    runs-on: arc-small
+    runs-on: ubuntu-24.04
     
     steps:
     - name: Checkout repository
@@ -26,8 +26,8 @@ jobs:
         
     - name: Install reuse tool
       run: |
-        pip install --upgrade pip -i http://repository.mdh.quantum.com/repository/pypi-proxy/simple/ --trusted-host repository.mdh.quantum.com
-        pip install 'reuse[charset-normalizer]' -i http://repository.mdh.quantum.com/repository/pypi-proxy/simple/ --trusted-host repository.mdh.quantum.com
+        pip install --upgrade pip
+        pip install 'reuse[charset-normalizer]'
         
     - name: Run REUSE lint
       run: |

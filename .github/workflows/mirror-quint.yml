@@ -6,9 +6,7 @@ name: Mirror quint
 
 # Build the node + quint toolchain once and publish it to GHCR, so the CI images
 # install it with a COPY --from instead of reaching nodejs.org and the npm
-# registry on every image build.  Same arrangement as Mirror ccache, and it is
-# proxied inside ARC by the repository.mdh.quantum.com:5009 pull-through the
-# same way.
+# registry on every image build.  Same arrangement as Mirror ccache.
 #
 # Why this matters beyond build time: without quint on PATH, libevpl's
 # Core/HTTP/RPC2 conformance suites and its quint_model checks disable
@@ -39,7 +37,7 @@ on:
 jobs:
   mirror:
     name: Mirror quint ${{ inputs.quint_version }} to GHCR
-    runs-on: arc-amd64
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write

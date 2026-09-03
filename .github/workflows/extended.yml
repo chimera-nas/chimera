@@ -37,28 +37,33 @@ on:
         default: '32'
 
 env:
-  DEV_IMAGE_TAG_PREFIX: repository.mdh.quantum.com:5004/cache/chimera-dev
-  U26_IMAGE_TAG_PREFIX: repository.mdh.quantum.com:5004/cache/chimera-ubuntu26
-  U24_IMAGE_TAG_PREFIX: repository.mdh.quantum.com:5004/cache/chimera-ubuntu24
-  U22_IMAGE_TAG_PREFIX: repository.mdh.quantum.com:5004/cache/chimera-ubuntu22
-  R9_IMAGE_TAG_PREFIX: repository.mdh.quantum.com:5004/cache/chimera-rocky9
-  R10_IMAGE_TAG_PREFIX: repository.mdh.quantum.com:5004/cache/chimera-rocky10
-  # Internal pull-through cache for the mirrored ccache image (mirrors
-  # ghcr.io/chimera-nas/ccache).  Public default lives in the Dockerfiles.
-  CCACHE_IMAGE_REGISTRY: repository.mdh.quantum.com:5009/chimera-nas/ccache
-  # Internal pull-through for the mirrored quint toolchain (mirrors
-  # ghcr.io/chimera-nas/quint).  Public default lives in the Dockerfiles.
-  QUINT_IMAGE_REGISTRY: repository.mdh.quantum.com:5009/chimera-nas/quint
+  DEV_IMAGE_TAG_PREFIX: ghcr.io/chimera-nas/chimera-dev
+  U26_IMAGE_TAG_PREFIX: ghcr.io/chimera-nas/chimera-ubuntu26
+  U24_IMAGE_TAG_PREFIX: ghcr.io/chimera-nas/chimera-ubuntu24
+  U22_IMAGE_TAG_PREFIX: ghcr.io/chimera-nas/chimera-ubuntu22
+  R9_IMAGE_TAG_PREFIX: ghcr.io/chimera-nas/chimera-rocky9
+  R10_IMAGE_TAG_PREFIX: ghcr.io/chimera-nas/chimera-rocky10
+  # The mirrored ccache binary, the quint toolchain and the KVM guest images
+  # come straight from their public GHCR packages -- the defaults already
+  # compiled into the Dockerfiles and into kvm/CMakeLists.txt.  The overrides
+  # that used to sit here pointed at an internal pull-through proxy, which a
+  # GitHub-hosted runner cannot reach.
+  #
   # This workflow is the WRITER for every shared ccache.  It runs on a schedule
   # against main, builds the extended tier (so it touches more of the tree than
-  # the queue does), and publishes each cell's local cache as a bundle the
-  # merge-queue jobs restore.  Nothing else uploads.
-  NEXUS_SCRATCH_URL: http://repository.mdh.quantum.com/repository/scratch
-  # Internal pull-through cache for the prebuilt KVM guest images (mirrors
-  # ghcr.io/chimera-nas/kvm-test-base). Public default lives in CMake.
-  KVM_IMAGE_REGISTRY: repository.mdh.quantum.com:5009/chimera-nas/kvm-test-base
-  APT_MIRROR: http://repository.mdh.quantum.com/repository/pkgs/ubuntu
-  DOCKER_MIRROR: repository.mdh.quantum.com/
+  # the queue does), and saves each cell's local cache into the default-branch
+  # Actions cache scope that every other run restores from.  Nothing else saves.
+  #
+  # A repository gets 10 GB of Actions cache at no cost, evicting
+  # least-recently-used entries to stay inside it.  This workflow saves ~39
+  # entries per run at roughly 250 MB each, so one run very nearly IS the free
+  # budget: the steady state is that the newest run's caches are present and
+  # anything older has been evicted, which is what the restore-keys prefix
+  # wants anyway.  Two levers exist if that gets tight -- a paid plan can raise
+  # the eviction limit as billed storage, or these bundles could move to GHCR
+  # as OCI artifacts under a fixed tag per cell, which is free for a public
+  # repository and would not accumulate at all.
+  CCACHE_MAXSIZE: 2G
 
 jobs:
   build-devcontainer:
@@ -66,15 +71,16 @@ jobs:
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
+      packages: write
     strategy:
       fail-fast: false
       matrix:
         include:
           - platform: linux/amd64
-            runner: arc-amd64
+            runner: ubuntu-24.04
             arch: amd64
           - platform: linux/arm64
-            runner: arc-arm64
+            runner: ubuntu-24.04-arm
             arch: arm64
 
     steps:
@@ -87,9 +93,13 @@ jobs:
         uses: docker/setup-buildx-action@v4
         with:
           driver: docker-container
-          buildkitd-config-inline: |
-            [registry."docker.io"]
-              mirrors = ["repository.mdh.quantum.com:5001"]
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push the dev container image
         uses: docker/build-push-action@v7
@@ -99,28 +109,24 @@ jobs:
           platforms: ${{ matrix.platform }}
           push: true
           tags: ${{ env.DEV_IMAGE_TAG_PREFIX }}:${{ github.sha }}-${{ matrix.arch }}
-          cache-from: type=registry,ref=repository.mdh.quantum.com:5004/cache/chimera-dev:${{ matrix.arch }}
-          cache-to: type=registry,ref=repository.mdh.quantum.com:5004/cache/chimera-dev:${{ matrix.arch }},mode=max
-          build-args: |
-            APT_MIRROR=${{ env.APT_MIRROR }}
-            DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
-            CCACHE_REGISTRY=${{ env.CCACHE_IMAGE_REGISTRY }}
-            QUINT_REGISTRY=${{ env.QUINT_IMAGE_REGISTRY }}
+          cache-from: type=registry,ref=ghcr.io/chimera-nas/chimera-dev:buildcache-${{ matrix.arch }}
+          cache-to: type=registry,ref=ghcr.io/chimera-nas/chimera-dev:buildcache-${{ matrix.arch }},mode=max
 
   build-ubuntu26:
     name: Build ubuntu26 ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
+      packages: write
     strategy:
       fail-fast: false
       matrix:
         include:
           - platform: linux/amd64
-            runner: arc-amd64
+            runner: ubuntu-24.04
             arch: amd64
           - platform: linux/arm64
-            runner: arc-arm64
+            runner: ubuntu-24.04-arm
             arch: arm64
 
     steps:
@@ -133,9 +139,13 @@ jobs:
         uses: docker/setup-buildx-action@v4
         with:
           driver: docker-container
-          buildkitd-config-inline: |
-            [registry."docker.io"]
-              mirrors = ["repository.mdh.quantum.com:5001"]
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push the ubuntu26 CI image
         uses: docker/build-push-action@v7
@@ -145,28 +155,24 @@ jobs:
           platforms: ${{ matrix.platform }}
           push: true
           tags: ${{ env.U26_IMAGE_TAG_PREFIX }}:${{ github.sha }}-${{ matrix.arch }}
-          cache-from: type=registry,ref=repository.mdh.quantum.com:5004/cache/chimera-ubuntu26:${{ matrix.arch }}
-          cache-to: type=registry,ref=repository.mdh.quantum.com:5004/cache/chimera-ubuntu26:${{ matrix.arch }},mode=max
-          build-args: |
-            APT_MIRROR=${{ env.APT_MIRROR }}
-            DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
-            CCACHE_REGISTRY=${{ env.CCACHE_IMAGE_REGISTRY }}
-            QUINT_REGISTRY=${{ env.QUINT_IMAGE_REGISTRY }}
+          cache-from: type=registry,ref=ghcr.io/chimera-nas/chimera-ubuntu26:buildcache-${{ matrix.arch }}
+          cache-to: type=registry,ref=ghcr.io/chimera-nas/chimera-ubuntu26:buildcache-${{ matrix.arch }},mode=max
 
   build-ubuntu24:
     name: Build ubuntu24 ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
+      packages: write
     strategy:
       fail-fast: false
       matrix:
         include:
           - platform: linux/amd64
-            runner: arc-amd64
+            runner: ubuntu-24.04
             arch: amd64
           - platform: linux/arm64
-            runner: arc-arm64
+            runner: ubuntu-24.04-arm
             arch: arm64
 
     steps:
@@ -179,9 +185,13 @@ jobs:
         uses: docker/setup-buildx-action@v4
         with:
           driver: docker-container
-          buildkitd-config-inline: |
-            [registry."docker.io"]
-              mirrors = ["repository.mdh.quantum.com:5001"]
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push the ubuntu24 CI image
         uses: docker/build-push-action@v7
@@ -191,28 +201,24 @@ jobs:
           platforms: ${{ matrix.platform }}
           push: true
           tags: ${{ env.U24_IMAGE_TAG_PREFIX }}:${{ github.sha }}-${{ matrix.arch }}
-          cache-from: type=registry,ref=repository.mdh.quantum.com:5004/cache/chimera-ubuntu24:${{ matrix.arch }}
-          cache-to: type=registry,ref=repository.mdh.quantum.com:5004/cache/chimera-ubuntu24:${{ matrix.arch }},mode=max
-          build-args: |
-            APT_MIRROR=${{ env.APT_MIRROR }}
-            DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
-            CCACHE_REGISTRY=${{ env.CCACHE_IMAGE_REGISTRY }}
-            QUINT_REGISTRY=${{ env.QUINT_IMAGE_REGISTRY }}
+          cache-from: type=registry,ref=ghcr.io/chimera-nas/chimera-ubuntu24:buildcache-${{ matrix.arch }}
+          cache-to: type=registry,ref=ghcr.io/chimera-nas/chimera-ubuntu24:buildcache-${{ matrix.arch }},mode=max
 
   build-ubuntu22:
     name: Build ubuntu22 ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
+      packages: write
     strategy:
       fail-fast: false
       matrix:
         include:
           - platform: linux/amd64
-            runner: arc-amd64
+            runner: ubuntu-24.04
             arch: amd64
           - platform: linux/arm64
-            runner: arc-arm64
+            runner: ubuntu-24.04-arm
             arch: arm64
 
     steps:
@@ -225,9 +231,13 @@ jobs:
         uses: docker/setup-buildx-action@v4
         with:
           driver: docker-container
-          buildkitd-config-inline: |
-            [registry."docker.io"]
-              mirrors = ["repository.mdh.quantum.com:5001"]
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push the ubuntu22 CI image
         uses: docker/build-push-action@v7
@@ -237,27 +247,24 @@ jobs:
           platforms: ${{ matrix.platform }}
           push: true
           tags: ${{ env.U22_IMAGE_TAG_PREFIX }}:${{ github.sha }}-${{ matrix.arch }}
-          cache-from: type=registry,ref=repository.mdh.quantum.com:5004/cache/chimera-ubuntu22:${{ matrix.arch }}
-          cache-to: type=registry,ref=repository.mdh.quantum.com:5004/cache/chimera-ubuntu22:${{ matrix.arch }},mode=max
-          build-args: |
-            APT_MIRROR=${{ env.APT_MIRROR }}
-            DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
-            CCACHE_REGISTRY=${{ env.CCACHE_IMAGE_REGISTRY }}
+          cache-from: type=registry,ref=ghcr.io/chimera-nas/chimera-ubuntu22:buildcache-${{ matrix.arch }}
+          cache-to: type=registry,ref=ghcr.io/chimera-nas/chimera-ubuntu22:buildcache-${{ matrix.arch }},mode=max
 
   build-rocky9:
     name: Build rocky9 ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
+      packages: write
     strategy:
       fail-fast: false
       matrix:
         include:
           - platform: linux/amd64
-            runner: arc-amd64
+            runner: ubuntu-24.04
             arch: amd64
           - platform: linux/arm64
-            runner: arc-arm64
+            runner: ubuntu-24.04-arm
             arch: arm64
 
     steps:
@@ -270,9 +277,13 @@ jobs:
         uses: docker/setup-buildx-action@v4
         with:
           driver: docker-container
-          buildkitd-config-inline: |
-            [registry."docker.io"]
-              mirrors = ["repository.mdh.quantum.com:5001"]
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push the rocky9 CI image
         uses: docker/build-push-action@v7
@@ -282,26 +293,24 @@ jobs:
           platforms: ${{ matrix.platform }}
           push: true
           tags: ${{ env.R9_IMAGE_TAG_PREFIX }}:${{ github.sha }}-${{ matrix.arch }}
-          cache-from: type=registry,ref=repository.mdh.quantum.com:5004/cache/chimera-rocky9:${{ matrix.arch }}
-          cache-to: type=registry,ref=repository.mdh.quantum.com:5004/cache/chimera-rocky9:${{ matrix.arch }},mode=max
-          build-args: |
-            DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
-            CCACHE_REGISTRY=${{ env.CCACHE_IMAGE_REGISTRY }}
+          cache-from: type=registry,ref=ghcr.io/chimera-nas/chimera-rocky9:buildcache-${{ matrix.arch }}
+          cache-to: type=registry,ref=ghcr.io/chimera-nas/chimera-rocky9:buildcache-${{ matrix.arch }},mode=max
 
   build-rocky10:
     name: Build rocky10 ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
+      packages: write
     strategy:
       fail-fast: false
       matrix:
         include:
           - platform: linux/amd64
-            runner: arc-amd64
+            runner: ubuntu-24.04
             arch: amd64
           - platform: linux/arm64
-            runner: arc-arm64
+            runner: ubuntu-24.04-arm
             arch: arm64
 
     steps:
@@ -314,9 +323,13 @@ jobs:
         uses: docker/setup-buildx-action@v4
         with:
           driver: docker-container
-          buildkitd-config-inline: |
-            [registry."docker.io"]
-              mirrors = ["repository.mdh.quantum.com:5001"]
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push the rocky10 CI image
         uses: docker/build-push-action@v7
@@ -326,12 +339,8 @@ jobs:
           platforms: ${{ matrix.platform }}
           push: true
           tags: ${{ env.R10_IMAGE_TAG_PREFIX }}:${{ github.sha }}-${{ matrix.arch }}
-          cache-from: type=registry,ref=repository.mdh.quantum.com:5004/cache/chimera-rocky10:${{ matrix.arch }}
-          cache-to: type=registry,ref=repository.mdh.quantum.com:5004/cache/chimera-rocky10:${{ matrix.arch }},mode=max
-          build-args: |
-            DOCKER_MIRROR=${{ env.DOCKER_MIRROR }}
-            CCACHE_REGISTRY=${{ env.CCACHE_IMAGE_REGISTRY }}
-            QUINT_REGISTRY=${{ env.QUINT_IMAGE_REGISTRY }}
+          cache-from: type=registry,ref=ghcr.io/chimera-nas/chimera-rocky10:buildcache-${{ matrix.arch }}
+          cache-to: type=registry,ref=ghcr.io/chimera-nas/chimera-rocky10:buildcache-${{ matrix.arch }},mode=max
 
   test:
     name: Test ${{ matrix.image_name }} ${{ matrix.arch }} ${{ matrix.build_type }}
@@ -339,6 +348,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
+      packages: read
     strategy:
       fail-fast: false
       matrix:
@@ -349,177 +359,177 @@ jobs:
           # qemu (qemu-system-x86), so KVM acceleration is unavailable on
           # arm64 -- the suites never ran there, so keep them explicitly OFF.
           - platform: linux/amd64
-            runner: arc-amd64
+            runner: ubuntu-24.04
             arch: amd64
             build_type: Release
-            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-dev
+            image_tag_prefix: ghcr.io/chimera-nas/chimera-dev
             image_name: devcontainer
             cmake_extra: "-DKVM_TESTING=ON"
           - platform: linux/amd64
-            runner: arc-amd64
+            runner: ubuntu-24.04
             arch: amd64
             build_type: Debug
-            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-dev
+            image_tag_prefix: ghcr.io/chimera-nas/chimera-dev
             image_name: devcontainer
             cmake_extra: "-DKVM_TESTING=ON"
           - platform: linux/arm64
-            runner: arc-arm64
+            runner: ubuntu-24.04-arm
             arch: arm64
             build_type: Release
-            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-dev
+            image_tag_prefix: ghcr.io/chimera-nas/chimera-dev
             image_name: devcontainer
             cmake_extra: "-DKVM_TESTING=OFF"
           - platform: linux/arm64
-            runner: arc-arm64
+            runner: ubuntu-24.04-arm
             arch: arm64
             build_type: Debug
-            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-dev
+            image_tag_prefix: ghcr.io/chimera-nas/chimera-dev
             image_name: devcontainer
             cmake_extra: "-DKVM_TESTING=OFF"
           # ubuntu 26 (no KVM here; disable explicitly so a missing /dev/kvm
           # does not get silently auto-detected)
           - platform: linux/amd64
-            runner: arc-amd64
+            runner: ubuntu-24.04
             arch: amd64
             build_type: Release
-            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu26
+            image_tag_prefix: ghcr.io/chimera-nas/chimera-ubuntu26
             image_name: ubuntu26
             cmake_extra: "-DKVM_TESTING=OFF"
           - platform: linux/amd64
-            runner: arc-amd64
+            runner: ubuntu-24.04
             arch: amd64
             build_type: Debug
-            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu26
+            image_tag_prefix: ghcr.io/chimera-nas/chimera-ubuntu26
             image_name: ubuntu26
             cmake_extra: "-DKVM_TESTING=OFF"
           - platform: linux/arm64
-            runner: arc-arm64
+            runner: ubuntu-24.04-arm
             arch: arm64
             build_type: Release
-            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu26
+            image_tag_prefix: ghcr.io/chimera-nas/chimera-ubuntu26
             image_name: ubuntu26
             cmake_extra: "-DKVM_TESTING=OFF"
           - platform: linux/arm64
-            runner: arc-arm64
+            runner: ubuntu-24.04-arm
             arch: arm64
             build_type: Debug
-            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu26
+            image_tag_prefix: ghcr.io/chimera-nas/chimera-ubuntu26
             image_name: ubuntu26
             cmake_extra: "-DKVM_TESTING=OFF"
           # ubuntu 24
           - platform: linux/amd64
-            runner: arc-amd64
+            runner: ubuntu-24.04
             arch: amd64
             build_type: Release
-            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu24
+            image_tag_prefix: ghcr.io/chimera-nas/chimera-ubuntu24
             image_name: ubuntu24
             cmake_extra: "-DKVM_TESTING=OFF"
           - platform: linux/amd64
-            runner: arc-amd64
+            runner: ubuntu-24.04
             arch: amd64
             build_type: Debug
-            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu24
+            image_tag_prefix: ghcr.io/chimera-nas/chimera-ubuntu24
             image_name: ubuntu24
             cmake_extra: "-DKVM_TESTING=OFF"
           - platform: linux/arm64
-            runner: arc-arm64
+            runner: ubuntu-24.04-arm
             arch: arm64
             build_type: Release
-            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu24
+            image_tag_prefix: ghcr.io/chimera-nas/chimera-ubuntu24
             image_name: ubuntu24
             cmake_extra: "-DKVM_TESTING=OFF"
           - platform: linux/arm64
-            runner: arc-arm64
+            runner: ubuntu-24.04-arm
             arch: arm64
             build_type: Debug
-            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu24
+            image_tag_prefix: ghcr.io/chimera-nas/chimera-ubuntu24
             image_name: ubuntu24
             cmake_extra: "-DKVM_TESTING=OFF"
           # ubuntu 22
           - platform: linux/amd64
-            runner: arc-amd64
+            runner: ubuntu-24.04
             arch: amd64
             build_type: Release
-            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu22
+            image_tag_prefix: ghcr.io/chimera-nas/chimera-ubuntu22
             image_name: ubuntu22
             cmake_extra: "-DIO_URING_ENABLED=OFF -DKVM_TESTING=OFF"
           - platform: linux/amd64
-            runner: arc-amd64
+            runner: ubuntu-24.04
             arch: amd64
             build_type: Debug
-            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu22
+            image_tag_prefix: ghcr.io/chimera-nas/chimera-ubuntu22
             image_name: ubuntu22
             cmake_extra: "-DIO_URING_ENABLED=OFF -DKVM_TESTING=OFF"
           - platform: linux/arm64
-            runner: arc-arm64
+            runner: ubuntu-24.04-arm
             arch: arm64
             build_type: Release
-            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu22
+            image_tag_prefix: ghcr.io/chimera-nas/chimera-ubuntu22
             image_name: ubuntu22
             cmake_extra: "-DIO_URING_ENABLED=OFF -DKVM_TESTING=OFF"
           - platform: linux/arm64
-            runner: arc-arm64
+            runner: ubuntu-24.04-arm
             arch: arm64
             build_type: Debug
-            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu22
+            image_tag_prefix: ghcr.io/chimera-nas/chimera-ubuntu22
             image_name: ubuntu22
             cmake_extra: "-DIO_URING_ENABLED=OFF -DKVM_TESTING=OFF"
           # rocky 9 (io_uring disabled: kernel 5.14 + ASAN causes timeouts, see #197)
           - platform: linux/amd64
-            runner: arc-amd64
+            runner: ubuntu-24.04
             arch: amd64
             build_type: Release
-            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-rocky9
+            image_tag_prefix: ghcr.io/chimera-nas/chimera-rocky9
             image_name: rocky9
             cmake_extra: "-DIO_URING_ENABLED=OFF -DKVM_TESTING=OFF"
           - platform: linux/amd64
-            runner: arc-amd64
+            runner: ubuntu-24.04
             arch: amd64
             build_type: Debug
-            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-rocky9
+            image_tag_prefix: ghcr.io/chimera-nas/chimera-rocky9
             image_name: rocky9
             cmake_extra: "-DIO_URING_ENABLED=OFF -DKVM_TESTING=OFF"
           - platform: linux/arm64
-            runner: arc-arm64
+            runner: ubuntu-24.04-arm
             arch: arm64
             build_type: Release
-            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-rocky9
+            image_tag_prefix: ghcr.io/chimera-nas/chimera-rocky9
             image_name: rocky9
             cmake_extra: "-DIO_URING_ENABLED=OFF -DKVM_TESTING=OFF"
           - platform: linux/arm64
-            runner: arc-arm64
+            runner: ubuntu-24.04-arm
             arch: arm64
             build_type: Debug
-            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-rocky9
+            image_tag_prefix: ghcr.io/chimera-nas/chimera-rocky9
             image_name: rocky9
             cmake_extra: "-DIO_URING_ENABLED=OFF -DKVM_TESTING=OFF"
           # rocky 10
           - platform: linux/amd64
-            runner: arc-amd64
+            runner: ubuntu-24.04
             arch: amd64
             build_type: Release
-            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-rocky10
+            image_tag_prefix: ghcr.io/chimera-nas/chimera-rocky10
             image_name: rocky10
             cmake_extra: "-DKVM_TESTING=OFF"
           - platform: linux/amd64
-            runner: arc-amd64
+            runner: ubuntu-24.04
             arch: amd64
             build_type: Debug
-            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-rocky10
+            image_tag_prefix: ghcr.io/chimera-nas/chimera-rocky10
             image_name: rocky10
             cmake_extra: "-DKVM_TESTING=OFF"
           - platform: linux/arm64
-            runner: arc-arm64
+            runner: ubuntu-24.04-arm
             arch: arm64
             build_type: Release
-            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-rocky10
+            image_tag_prefix: ghcr.io/chimera-nas/chimera-rocky10
             image_name: rocky10
             cmake_extra: "-DKVM_TESTING=OFF"
           - platform: linux/arm64
-            runner: arc-arm64
+            runner: ubuntu-24.04-arm
             arch: arm64
             build_type: Debug
-            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-rocky10
+            image_tag_prefix: ghcr.io/chimera-nas/chimera-rocky10
             image_name: rocky10
             cmake_extra: "-DKVM_TESTING=OFF"
 
@@ -529,72 +539,80 @@ jobs:
         with:
           submodules: recursive
 
+      # A hosted runner has far less disk than the ARC hosts this used to run
+      # on, and these images are large; see the action for what it reclaims.
+      # The CI images are GHCR packages of this repository, so the pull below
+      # is authenticated with the run's own token.
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       # KVM guest images are pulled from GHCR with oras (see build-test.yml).
       - name: Fetch oras CLI
         uses: ./.github/actions/fetch-oras
         with:
           arch: ${{ matrix.arch }}
 
-      - name: Restore the ccache bundle
-        env:
-          NEXUS_USER: ${{ secrets.NEXUS_SCRATCH_USER }}
-          NEXUS_PASSWORD: ${{ secrets.NEXUS_SCRATCH_PASSWORD }}
-        run: |
-          key="${{ matrix.image_name }}-${{ matrix.arch }}-${{ matrix.build_type }}"
-          curl -fsS --retry 3 --retry-all-errors --retry-delay 5 \
-            -u "${NEXUS_USER}:${NEXUS_PASSWORD}" \
-            -o ccache-bundle.tar.gz \
-            "${{ env.NEXUS_SCRATCH_URL }}/chimera/ccache/${key}.tar.gz" \
-            || echo "no ccache bundle for ${key}; starting cold"
+      # This workflow is the WRITER for every shared ccache: it runs on a
+      # schedule against main, so its save lands in the default-branch scope
+      # that a merge-queue run and a PR run can both read.  Restore and save
+      # are split rather than using actions/cache, because the save has to
+      # carry `if: always()` -- see the end of this job for why.
+      - name: Restore the ccache directory
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: ccache-${{ matrix.image_name }}-${{ matrix.arch }}-${{ matrix.build_type }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ matrix.image_name }}-${{ matrix.arch }}-${{ matrix.build_type }}-
 
       - name: Configure, build, and test inside the container
         run: |
           docker run --rm --privileged \
-            -e DOCKER_MIRROR=${{ env.DOCKER_MIRROR }} \
-            -e APT_MIRROR=${{ env.APT_MIRROR }} \
-            -e CCACHE_DIR=/build/ccache \
-            -e CCACHE_MAXSIZE=2G \
+            -e CCACHE_DIR=/ccache \
+            -e CCACHE_MAXSIZE \
+            -v "${{ runner.temp }}/ccache:/ccache" \
             -v "${{ github.workspace }}:/workspace" \
             -v "${{ github.workspace }}/oras:/usr/local/bin/oras:ro" \
             -v /build \
             -w /build \
             ${{ matrix.image_tag_prefix }}:${{ github.sha }}-${{ matrix.arch }} \
             bash -euxc '
-              mkdir -p /build/ccache
-              if [ -f /workspace/ccache-bundle.tar.gz ]; then
-                tar -C /build/ccache -xzf /workspace/ccache-bundle.tar.gz
-              fi
               # ccache keeps its counters inside the cache directory, so a
-              # restored bundle carries the statistics of the run that made it.
+              # restored cache carries the statistics of the run that made it.
               # Left alone, --show-stats reports both runs summed: the first
               # consumer read showed "945/1894 (49.89%)" for a build that was
               # really 945 of 947, 99.8%.  Zero them so the number means what it
               # looks like it means.
               ccache -z > /dev/null
-              cmake -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DREQUIRE_NETNS_TESTS=ON -DKVM_IMAGE_REGISTRY=${{ env.KVM_IMAGE_REGISTRY }} ${{ matrix.cmake_extra }} /workspace
+              cmake -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DREQUIRE_NETNS_TESTS=ON ${{ matrix.cmake_extra }} /workspace
               ninja
               ccache --show-stats || true
-              # Trim to the configured ceiling before packing, so the bundle the
-              # queue downloads stays a predictable size.
-              ccache --trim-max-size 2G || true
-              tar -C /build/ccache -czf /workspace/ccache-bundle.tar.gz .
+              # Trim to the configured ceiling before the save, so the entry
+              # the other workflows restore stays a predictable size.
+              ccache --trim-max-size ${CCACHE_MAXSIZE} || true
               /workspace/scripts/cap_ctest_output.sh \
-              ctest -C extended --output-on-failure --test-output-size-failed 65536 --timeout 300 -j 32'
+              ctest -C extended --output-on-failure --test-output-size-failed 65536 --timeout 300 -j "$(nproc)"'
 
-      # Published even when ctest failed: the cache reflects a build that
-      # happened, and withholding it would make the next queue run pay for a
-      # test failure that has nothing to do with compilation.
-      - name: Publish the ccache bundle
-        if: ${{ always() && hashFiles('ccache-bundle.tar.gz') != '' }}
-        env:
-          NEXUS_USER: ${{ secrets.NEXUS_SCRATCH_USER }}
-          NEXUS_PASSWORD: ${{ secrets.NEXUS_SCRATCH_PASSWORD }}
-        run: |
-          key="${{ matrix.image_name }}-${{ matrix.arch }}-${{ matrix.build_type }}"
-          curl -fsS --retry 5 --retry-all-errors --retry-delay 5 \
-            -u "${NEXUS_USER}:${NEXUS_PASSWORD}" \
-            -T ccache-bundle.tar.gz \
-            "${{ env.NEXUS_SCRATCH_URL }}/chimera/ccache/${key}.tar.gz"
+      # The container runs as root, so everything it wrote into the bind-mounted
+      # cache is root-owned and the runner user cannot tar it up.
+      - name: Take ownership of the ccache directory
+        if: always()
+        run: sudo chown -R "$(id -u):$(id -g)" "${{ runner.temp }}/ccache"
+
+      # Saved even when ctest failed: the cache reflects a build that happened,
+      # and withholding it would make every later run pay for a test failure
+      # that has nothing to do with compilation.  This is why restore and save
+      # are split -- actions/cache saves only on a successful job.
+      - name: Save the ccache directory
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: ccache-${{ matrix.image_name }}-${{ matrix.arch }}-${{ matrix.build_type }}-${{ github.sha }}
 
   # macOS: the extended tier on a GitHub-hosted arm64 runner.  Nothing here is
   # containerised and none of the Linux-only pieces exist (io_uring, libaio,
@@ -814,9 +832,10 @@ jobs:
   smbtorture-matrix:
     name: smbtorture matrix (informational)
     needs: [build-devcontainer]
-    runs-on: arc-amd64
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
+      packages: read
     # Passing cells cost ~0.6s, but a hung cell burns the full 300s timeout and
     # there are ~880 non-passing cells across the matrix; 3h leaves headroom.
     timeout-minutes: 180
@@ -825,6 +844,17 @@ jobs:
         uses: actions/checkout@v5
         with:
           submodules: recursive
+
+      # A hosted runner has far less disk than the ARC hosts this used to run
+      # on, and these images are large; see the action for what it reclaims.
+      # The CI images are GHCR packages of this repository, so the pull below
+      # is authenticated with the run's own token.
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       # --privileged: the netns wrapper needs CAP_NET_ADMIN.  smbtorture itself
       # ships in the devcontainer image (samba-testsuite).
@@ -876,8 +906,6 @@ jobs:
           rm -rf smbt-report
           mkdir -p smbt-report
           docker run --rm --privileged \
-            -e DOCKER_MIRROR=${{ env.DOCKER_MIRROR }} \
-            -e APT_MIRROR=${{ env.APT_MIRROR }} \
             -e SMBTORTURE_BACKENDS \
             -e SMBTORTURE_FILTER \
             -e SMBTORTURE_PARALLEL \
@@ -960,93 +988,94 @@ jobs:
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
+      packages: read
     strategy:
       fail-fast: false
       matrix:
         include:
           # devcontainer
           - platform: linux/amd64
-            runner: arc-amd64
+            runner: ubuntu-24.04
             arch: amd64
             build_type: Release
-            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-dev
+            image_tag_prefix: ghcr.io/chimera-nas/chimera-dev
             image_name: devcontainer
             cmake_extra: ""
           - platform: linux/arm64
-            runner: arc-arm64
+            runner: ubuntu-24.04-arm
             arch: arm64
             build_type: Release
-            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-dev
+            image_tag_prefix: ghcr.io/chimera-nas/chimera-dev
             image_name: devcontainer
             cmake_extra: ""
           - platform: linux/amd64
-            runner: arc-amd64
+            runner: ubuntu-24.04
             arch: amd64
             build_type: Release
-            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu26
+            image_tag_prefix: ghcr.io/chimera-nas/chimera-ubuntu26
             image_name: ubuntu26
             cmake_extra: ""
           - platform: linux/arm64
-            runner: arc-arm64
+            runner: ubuntu-24.04-arm
             arch: arm64
             build_type: Release
-            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu26
+            image_tag_prefix: ghcr.io/chimera-nas/chimera-ubuntu26
             image_name: ubuntu26
             cmake_extra: ""
           - platform: linux/amd64
-            runner: arc-amd64
+            runner: ubuntu-24.04
             arch: amd64
             build_type: Release
-            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu24
+            image_tag_prefix: ghcr.io/chimera-nas/chimera-ubuntu24
             image_name: ubuntu24
             cmake_extra: ""
           - platform: linux/arm64
-            runner: arc-arm64
+            runner: ubuntu-24.04-arm
             arch: arm64
             build_type: Release
-            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu24
+            image_tag_prefix: ghcr.io/chimera-nas/chimera-ubuntu24
             image_name: ubuntu24
             cmake_extra: ""
           - platform: linux/amd64
-            runner: arc-amd64
+            runner: ubuntu-24.04
             arch: amd64
             build_type: Release
-            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu22
+            image_tag_prefix: ghcr.io/chimera-nas/chimera-ubuntu22
             image_name: ubuntu22
             cmake_extra: "-DIO_URING_ENABLED=OFF"
           - platform: linux/arm64
-            runner: arc-arm64
+            runner: ubuntu-24.04-arm
             arch: arm64
             build_type: Release
-            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-ubuntu22
+            image_tag_prefix: ghcr.io/chimera-nas/chimera-ubuntu22
             image_name: ubuntu22
             cmake_extra: "-DIO_URING_ENABLED=OFF"
           - platform: linux/amd64
-            runner: arc-amd64
+            runner: ubuntu-24.04
             arch: amd64
             build_type: Release
-            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-rocky9
+            image_tag_prefix: ghcr.io/chimera-nas/chimera-rocky9
             image_name: rocky9
             cmake_extra: "-DIO_URING_ENABLED=OFF"
           - platform: linux/arm64
-            runner: arc-arm64
+            runner: ubuntu-24.04-arm
             arch: arm64
             build_type: Release
-            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-rocky9
+            image_tag_prefix: ghcr.io/chimera-nas/chimera-rocky9
             image_name: rocky9
             cmake_extra: "-DIO_URING_ENABLED=OFF"
           - platform: linux/amd64
-            runner: arc-amd64
+            runner: ubuntu-24.04
             arch: amd64
             build_type: Release
-            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-rocky10
+            image_tag_prefix: ghcr.io/chimera-nas/chimera-rocky10
             image_name: rocky10
             cmake_extra: ""
           - platform: linux/arm64
-            runner: arc-arm64
+            runner: ubuntu-24.04-arm
             arch: arm64
             build_type: Release
-            image_tag_prefix: repository.mdh.quantum.com:5004/cache/chimera-rocky10
+            image_tag_prefix: ghcr.io/chimera-nas/chimera-rocky10
             image_name: rocky10
             cmake_extra: ""
     steps:
@@ -1055,17 +1084,29 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Restore the ccache bundle
-        env:
-          NEXUS_USER: ${{ secrets.NEXUS_SCRATCH_USER }}
-          NEXUS_PASSWORD: ${{ secrets.NEXUS_SCRATCH_PASSWORD }}
-        run: |
-          key="analyze-${{ matrix.image_name }}-${{ matrix.arch }}-${{ matrix.build_type }}"
-          curl -fsS --retry 3 --retry-all-errors --retry-delay 5 \
-            -u "${NEXUS_USER}:${NEXUS_PASSWORD}" \
-            -o ccache-bundle.tar.gz \
-            "${{ env.NEXUS_SCRATCH_URL }}/chimera/ccache/${key}.tar.gz" \
-            || echo "no ccache bundle for ${key}; starting cold"
+      # A hosted runner has far less disk than the ARC hosts this used to run
+      # on, and these images are large; see the action for what it reclaims.
+      # The CI images are GHCR packages of this repository, so the pull below
+      # is authenticated with the run's own token.
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # This workflow is the WRITER for every shared ccache: it runs on a
+      # schedule against main, so its save lands in the default-branch scope
+      # that a merge-queue run and a PR run can both read.  Restore and save
+      # are split rather than using actions/cache, because the save has to
+      # carry `if: always()` -- see the end of this job for why.
+      - name: Restore the ccache directory
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: ccache-analyze-${{ matrix.image_name }}-${{ matrix.arch }}-${{ matrix.build_type }}-${{ github.sha }}
+          restore-keys: |
+            ccache-analyze-${{ matrix.image_name }}-${{ matrix.arch }}-${{ matrix.build_type }}-
 
       # Drives the analyzer per TU instead of through scan-build, so the results
       # are cacheable.  See build-test.yml for why scan-build cannot be.
@@ -1075,22 +1116,17 @@ jobs:
           set -o pipefail
           mkdir -p "${{ github.workspace }}/scan-report"
           docker run --rm --privileged \
-            -e DOCKER_MIRROR=${{ env.DOCKER_MIRROR }} \
-            -e APT_MIRROR=${{ env.APT_MIRROR }} \
-            -e CCACHE_DIR=/build/ccache \
-            -e CCACHE_MAXSIZE=2G \
+            -e CCACHE_DIR=/ccache \
+            -e CCACHE_MAXSIZE \
+            -v "${{ runner.temp }}/ccache:/ccache" \
             -v "${{ github.workspace }}:/workspace" \
             -v "${{ github.workspace }}/scan-report:/scan-report" \
             -v /build \
             -w /build \
             ${{ matrix.image_tag_prefix }}:${{ github.sha }}-${{ matrix.arch }} \
             bash -euxc '
-              mkdir -p /build/ccache
-              if [ -f /workspace/ccache-bundle.tar.gz ]; then
-                tar -C /build/ccache -xzf /workspace/ccache-bundle.tar.gz
-              fi
               # ccache keeps its counters inside the cache directory, so a
-              # restored bundle carries the statistics of the run that made it.
+              # restored cache carries the statistics of the run that made it.
               # Left alone, --show-stats reports both runs summed: the first
               # consumer read showed "945/1894 (49.89%)" for a build that was
               # really 945 of 947, 99.8%.  Zero them so the number means what it
@@ -1102,27 +1138,31 @@ jobs:
                       --build-dir /build --report-dir /scan-report \
                       --exclude /workspace/ext/ -j "$(nproc)"
               ccache --show-stats || true
-              # Pack AFTER the analyzer, not between the build and it.  Packing
-              # early published a bundle holding only the compile entries, so a
-              # consumer hit on every compile and missed on every --analyze --
-              # which is the half that costs anything.  Measured on the first PR
-              # that restored one: 963 hits, 838 misses, and the 838 were the
-              # analyses.  || true on the trim because it is best-effort.
-              ccache --trim-max-size 2G || true
-              tar -C /build/ccache -czf /workspace/ccache-bundle.tar.gz .' \
+              # Trimmed AFTER the analyzer, not between the build and it.  The
+              # entries that cost anything to recompute are the --analyze ones,
+              # and they do not exist yet at that point: an early trim once
+              # published a cache holding only the compile entries, and the
+              # first consumer of it hit on every compile and missed on all 838
+              # analyses.  || true because the trim is best-effort.
+              ccache --trim-max-size ${CCACHE_MAXSIZE} || true' \
             2>&1 | tee "${{ github.workspace }}/scan-report/analyzer-output.txt"
 
-      - name: Publish the ccache bundle
-        if: ${{ always() && hashFiles('ccache-bundle.tar.gz') != '' }}
-        env:
-          NEXUS_USER: ${{ secrets.NEXUS_SCRATCH_USER }}
-          NEXUS_PASSWORD: ${{ secrets.NEXUS_SCRATCH_PASSWORD }}
-        run: |
-          key="analyze-${{ matrix.image_name }}-${{ matrix.arch }}-${{ matrix.build_type }}"
-          curl -fsS --retry 5 --retry-all-errors --retry-delay 5 \
-            -u "${NEXUS_USER}:${NEXUS_PASSWORD}" \
-            -T ccache-bundle.tar.gz \
-            "${{ env.NEXUS_SCRATCH_URL }}/chimera/ccache/${key}.tar.gz"
+      # The container runs as root, so everything it wrote into the bind-mounted
+      # cache is root-owned and the runner user cannot tar it up.
+      - name: Take ownership of the ccache directory
+        if: always()
+        run: sudo chown -R "$(id -u):$(id -g)" "${{ runner.temp }}/ccache"
+
+      # Saved even when ctest failed: the cache reflects a build that happened,
+      # and withholding it would make every later run pay for a test failure
+      # that has nothing to do with compilation.  This is why restore and save
+      # are split -- actions/cache saves only on a successful job.
+      - name: Save the ccache directory
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: ccache-analyze-${{ matrix.image_name }}-${{ matrix.arch }}-${{ matrix.build_type }}-${{ github.sha }}
 
       - name: Upload static analysis report
         if: ${{ failure() && steps.static-analysis.outcome == 'failure' }}
