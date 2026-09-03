@@ -5,11 +5,22 @@
 name: CI
 
 on:
-  # The full build/test matrix runs ONLY in the merge queue, never on raw PRs;
-  # the PR-time half of the gate lives in pr-checks.yml.  There is no
-  # pull_request trigger here, so the jobs below carry no event guards: every
-  # job in this file runs on every event that reaches it.
+  # The full build/test matrix runs in the merge queue and again on the commit
+  # the queue produced, never on raw PRs; the PR-time half of the gate lives in
+  # pr-checks.yml.  There is no pull_request trigger here, so the jobs below
+  # carry no event guards: every job in this file runs on every event that
+  # reaches it.
+  #
+  # The push half is what publishes the shared caches.  A cache saved on a
+  # merge_group ref is unreadable the moment the queue discards that ref -- of
+  # the 131 entries this repo held before the move, 123 (23.6 GB of 25 GB) were
+  # stranded exactly that way.  refs/heads/main is the default branch, so a
+  # cache saved here is readable from every PR and every queue run, which is
+  # the whole point of saving it.
   merge_group:
+  push:
+    branches:
+      - main
   workflow_dispatch:   # allow manual runs
 
 # What gates a merge is the QUICK test tier plus static analysis, run on every
@@ -58,12 +69,25 @@ env:
   # runner cannot reach.
   #
   # Shared compiler cache.  Every job uses a purely *local* ccache directory,
-  # restored before the build from the entry the Extended workflow saved for
-  # that cell and mounted into the container.  That is the same mechanism, and
-  # the same division of labour, the macOS jobs have always used: the scheduled
-  # Extended run on main writes, everything else only reads.  Actions caches are
-  # branch-scoped and a merge_group ref is discarded, so a queue run restoring
-  # here can never usefully save.
+  # restored before the build from the entry the previous push to main saved for
+  # that cell and mounted into the container.  That is the same mechanism the
+  # macOS jobs have always used, but the division of labour has moved: this
+  # workflow's push-to-main run is the sole writer, and everything else -- the
+  # queue runs here, pr-checks.yml, and the whole Extended workflow -- only
+  # reads.
+  #
+  # The writer has to be a ref that other runs can read.  Actions caches are
+  # branch-scoped: an entry saved on a merge_group ref dies with that ref, and
+  # one saved on a PR merge ref is private to that PR, so neither can serve the
+  # next run.  refs/heads/main is the default branch and is readable from
+  # everywhere, which is why the save hangs off the push and not the queue.
+  #
+  # Publishing on every merge rather than on a 6-hourly cron also keeps the
+  # entries close to the tip.  A PR builds the merge of its branch with current
+  # main, so once main moves past what a bundle was built from, every
+  # translation unit including a changed header misses: measured on the same
+  # macOS analysis job either side of four merges, two touching headers, 100%
+  # hits and 113s against 60% and 464s.
   #
   # A miss is a cold build, never a failed job -- which matters more against
   # this store than the last one.  A repository gets 10 GB of Actions cache at
@@ -119,7 +143,13 @@ jobs:
           push: true
           tags: ${{ env.DEV_IMAGE_TAG_PREFIX }}:${{ github.sha }}-${{ matrix.arch }}
           cache-from: type=registry,ref=ghcr.io/chimera-nas/chimera-dev:buildcache-${{ matrix.arch }}
-          cache-to: type=registry,ref=ghcr.io/chimera-nas/chimera-dev:buildcache-${{ matrix.arch }},mode=max
+          # cache-to only from the push to main.  This workflow also accepts
+          # workflow_dispatch, which can name ANY branch, and anyone with write
+          # access -- an outside collaborator included -- can invoke it.  Left
+          # ungated, a dispatch on an arbitrary branch would rewrite the shared
+          # layer cache that every later build imports.  The push trigger is
+          # branch-filtered to main, so the event name alone is the gate.
+          cache-to: ${{ github.event_name == 'push' && format('type=registry,ref=ghcr.io/chimera-nas/chimera-dev:buildcache-{0},mode=max', matrix.arch) || '' }}
 
   build-ubuntu26:
     name: Build ubuntu26 ${{ matrix.arch }}
@@ -162,7 +192,7 @@ jobs:
           push: true
           tags: ${{ env.U26_IMAGE_TAG_PREFIX }}:${{ github.sha }}-${{ matrix.arch }}
           cache-from: type=registry,ref=ghcr.io/chimera-nas/chimera-ubuntu26:buildcache-${{ matrix.arch }}
-          cache-to: type=registry,ref=ghcr.io/chimera-nas/chimera-ubuntu26:buildcache-${{ matrix.arch }},mode=max
+          cache-to: ${{ github.event_name == 'push' && format('type=registry,ref=ghcr.io/chimera-nas/chimera-ubuntu26:buildcache-{0},mode=max', matrix.arch) || '' }}
 
   build-ubuntu24:
     name: Build ubuntu24 ${{ matrix.arch }}
@@ -205,7 +235,7 @@ jobs:
           push: true
           tags: ${{ env.U24_IMAGE_TAG_PREFIX }}:${{ github.sha }}-${{ matrix.arch }}
           cache-from: type=registry,ref=ghcr.io/chimera-nas/chimera-ubuntu24:buildcache-${{ matrix.arch }}
-          cache-to: type=registry,ref=ghcr.io/chimera-nas/chimera-ubuntu24:buildcache-${{ matrix.arch }},mode=max
+          cache-to: ${{ github.event_name == 'push' && format('type=registry,ref=ghcr.io/chimera-nas/chimera-ubuntu24:buildcache-{0},mode=max', matrix.arch) || '' }}
 
   build-ubuntu22:
     name: Build ubuntu22 ${{ matrix.arch }}
@@ -248,7 +278,7 @@ jobs:
           push: true
           tags: ${{ env.U22_IMAGE_TAG_PREFIX }}:${{ github.sha }}-${{ matrix.arch }}
           cache-from: type=registry,ref=ghcr.io/chimera-nas/chimera-ubuntu22:buildcache-${{ matrix.arch }}
-          cache-to: type=registry,ref=ghcr.io/chimera-nas/chimera-ubuntu22:buildcache-${{ matrix.arch }},mode=max
+          cache-to: ${{ github.event_name == 'push' && format('type=registry,ref=ghcr.io/chimera-nas/chimera-ubuntu22:buildcache-{0},mode=max', matrix.arch) || '' }}
 
   build-rocky9:
     name: Build rocky9 ${{ matrix.arch }}
@@ -291,7 +321,7 @@ jobs:
           push: true
           tags: ${{ env.R9_IMAGE_TAG_PREFIX }}:${{ github.sha }}-${{ matrix.arch }}
           cache-from: type=registry,ref=ghcr.io/chimera-nas/chimera-rocky9:buildcache-${{ matrix.arch }}
-          cache-to: type=registry,ref=ghcr.io/chimera-nas/chimera-rocky9:buildcache-${{ matrix.arch }},mode=max
+          cache-to: ${{ github.event_name == 'push' && format('type=registry,ref=ghcr.io/chimera-nas/chimera-rocky9:buildcache-{0},mode=max', matrix.arch) || '' }}
 
   build-rocky10:
     name: Build rocky10 ${{ matrix.arch }}
@@ -334,7 +364,7 @@ jobs:
           push: true
           tags: ${{ env.R10_IMAGE_TAG_PREFIX }}:${{ github.sha }}-${{ matrix.arch }}
           cache-from: type=registry,ref=ghcr.io/chimera-nas/chimera-rocky10:buildcache-${{ matrix.arch }}
-          cache-to: type=registry,ref=ghcr.io/chimera-nas/chimera-rocky10:buildcache-${{ matrix.arch }},mode=max
+          cache-to: ${{ github.event_name == 'push' && format('type=registry,ref=ghcr.io/chimera-nas/chimera-rocky10:buildcache-{0},mode=max', matrix.arch) || '' }}
 
   # Distro compile + test: configure, build, and run this image's quick-tier
   # ctest, all in one container.  needs is the container images alone -- there
@@ -491,6 +521,9 @@ jobs:
               cmake -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DREQUIRE_NETNS_TESTS=ON -DPYNFS_JUNIT_DIR=/workspace/ctest-results/pynfs-junit -DSMBTORTURE_JUNIT_DIR=/workspace/ctest-results/smbtorture-junit -DWPTS_JUNIT_DIR=/workspace/ctest-results/wpts-junit -DPIKE_JUNIT_DIR=/workspace/ctest-results/pike-junit ${{ matrix.cmake_extra }} /workspace
               ninja
               ccache --show-stats || true
+              # Trim to the configured ceiling before the save, so the entry
+              # the other workflows restore stays a predictable size.
+              ccache --trim-max-size ${CCACHE_MAXSIZE} || true
               start=$(date +%s)
               rc=0
               /workspace/scripts/cap_ctest_output.sh ctest --output-on-failure --test-output-size-failed 65536 --timeout 300 -j "$(nproc)" --output-junit /workspace/ctest-results/results.xml || rc=$?
@@ -502,6 +535,23 @@ jobs:
       # single CTest test, so their ~500 codes only show up in their own JUnit) +
       # the ctest wall-clock.  if: always() so results publish even when the test
       # step failed (which is exactly when they are most useful).
+      # The container runs as root, so everything it wrote into the bind-mounted
+      # cache is root-owned and the runner user cannot tar it up.
+      - name: Take ownership of the ccache directory
+        if: always() && github.event_name == 'push'
+        run: sudo chown -R "$(id -u):$(id -g)" "${{ runner.temp }}/ccache"
+
+      # Saved even when the job failed: the cache reflects a build that
+      # happened, and withholding it would make every later run pay for a
+      # failure that has nothing to do with compilation.  This is why restore
+      # and save are split -- actions/cache saves only on a successful job.
+      - name: Save the ccache directory
+        if: always() && github.event_name == 'push'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: ccache-${{ matrix.image_name }}-${{ matrix.arch }}-${{ matrix.build_type }}-${{ github.sha }}
+
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v6
@@ -655,8 +705,32 @@ jobs:
               python3 /workspace/scripts/analyze_cached.py \
                       --build-dir /build --report-dir /scan-report \
                       --exclude /workspace/ext/ -j "$(nproc)"
-              ccache --show-stats || true' \
+              ccache --show-stats || true
+              # Trimmed AFTER the analyzer, not between the build and it.  The
+              # entries that cost anything to recompute are the --analyze ones,
+              # and they do not exist yet at that point: an early trim once
+              # published a cache holding only the compile entries, and the
+              # first consumer of it hit on every compile and missed on all 838
+              # analyses.  || true because the trim is best-effort.
+              ccache --trim-max-size ${CCACHE_MAXSIZE} || true' \
             2>&1 | tee "${{ github.workspace }}/scan-report/analyzer-output.txt"
+
+      # The container runs as root, so everything it wrote into the bind-mounted
+      # cache is root-owned and the runner user cannot tar it up.
+      - name: Take ownership of the ccache directory
+        if: always() && github.event_name == 'push'
+        run: sudo chown -R "$(id -u):$(id -g)" "${{ runner.temp }}/ccache"
+
+      # Saved even when the job failed: the cache reflects a build that
+      # happened, and withholding it would make every later run pay for a
+      # failure that has nothing to do with compilation.  This is why restore
+      # and save are split -- actions/cache saves only on a successful job.
+      - name: Save the ccache directory
+        if: always() && github.event_name == 'push'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: ccache-analyze-${{ matrix.image_name }}-${{ matrix.arch }}-${{ matrix.build_type }}-${{ github.sha }}
 
       - name: Upload static analysis report
         if: ${{ failure() && steps.static-analysis.outcome == 'failure' }}
@@ -789,11 +863,31 @@ jobs:
               cmake -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DREQUIRE_NETNS_TESTS=ON -DPYNFS_JUNIT_DIR=/workspace/ctest-results/pynfs-junit -DSMBTORTURE_JUNIT_DIR=/workspace/ctest-results/smbtorture-junit -DWPTS_JUNIT_DIR=/workspace/ctest-results/wpts-junit -DPIKE_JUNIT_DIR=/workspace/ctest-results/pike-junit ${{ matrix.kvm_cmake }} /workspace
               ninja
               ccache --show-stats || true
+              # Trim to the configured ceiling before the save, so the entry
+              # the other workflows restore stays a predictable size.
+              ccache --trim-max-size ${CCACHE_MAXSIZE} || true
               start=$(date +%s)
               rc=0
               /workspace/scripts/cap_ctest_output.sh ctest --output-on-failure --test-output-size-failed 65536 --timeout 300 -j "$(nproc)" --output-junit /workspace/ctest-results/results.xml || rc=$?
               echo "$(( $(date +%s) - start ))" > /workspace/ctest-results/duration_seconds
               exit $rc'
+
+      # The container runs as root, so everything it wrote into the bind-mounted
+      # cache is root-owned and the runner user cannot tar it up.
+      - name: Take ownership of the ccache directory
+        if: always() && github.event_name == 'push'
+        run: sudo chown -R "$(id -u):$(id -g)" "${{ runner.temp }}/ccache"
+
+      # Saved even when the job failed: the cache reflects a build that
+      # happened, and withholding it would make every later run pay for a
+      # failure that has nothing to do with compilation.  This is why restore
+      # and save are split -- actions/cache saves only on a successful job.
+      - name: Save the ccache directory
+        if: always() && github.event_name == 'push'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: ccache-devcontainer-${{ matrix.arch }}-${{ matrix.build_type }}-${{ github.sha }}
 
       - name: Upload test results
         if: always()
@@ -927,6 +1021,9 @@ jobs:
                 -S "${{ github.workspace }}" -B "${{ runner.temp }}/build"
           ninja -C "${{ runner.temp }}/build"
           ccache --show-stats || true
+          # Trim to the configured ceiling before the save, so the entry the
+          # other workflows restore stays a predictable size.
+          ccache --trim-max-size ${CCACHE_MAXSIZE} || true
 
       - name: Test
         run: |
@@ -940,6 +1037,17 @@ jobs:
                   --output-junit "${{ github.workspace }}/ctest-results/results.xml" || rc=$?
           echo "$(( $(date +%s) - start ))" > "${{ github.workspace }}/ctest-results/duration_seconds"
           exit $rc
+
+      # Saved even when the job failed: the cache reflects a build that
+      # happened, and withholding it would make every later run pay for a
+      # failure that has nothing to do with compilation.  This is why restore
+      # and save are split -- actions/cache saves only on a successful job.
+      - name: Save the ccache directory
+        if: always() && github.event_name == 'push'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: ccache-macos-${{ matrix.build_type }}-${{ github.sha }}
 
       - name: Upload test results
         if: always()
@@ -1033,6 +1141,21 @@ jobs:
                   -j "$(sysctl -n hw.ncpu)" \
             2>&1 | tee "$GITHUB_WORKSPACE/scan-report/analyzer-output.txt"
           ccache --show-stats || true
+          # Trimmed AFTER the analyzer, not between the build and it: the
+          # entries worth keeping are the --analyze ones, and they do not exist
+          # yet at that point.  || true because the trim is best-effort.
+          ccache --trim-max-size ${CCACHE_MAXSIZE} || true
+
+      # Saved even when the job failed: the cache reflects a build that
+      # happened, and withholding it would make every later run pay for a
+      # failure that has nothing to do with compilation.  This is why restore
+      # and save are split -- actions/cache saves only on a successful job.
+      - name: Save the ccache directory
+        if: always() && github.event_name == 'push'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: ccache-macos-analyze-${{ matrix.build_type }}-${{ github.sha }}
 
       - name: Upload static analysis report
         if: ${{ failure() && steps.static-analysis.outcome == 'failure' }}
