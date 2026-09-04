@@ -152,9 +152,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/ccache
-          key: ccache-analyze-devcontainer-amd64-Release-${{ github.sha }}
+          key: ccache-v2-analyze-devcontainer-amd64-Release-${{ github.sha }}
           restore-keys: |
-            ccache-analyze-devcontainer-amd64-Release-
+            ccache-v2-analyze-devcontainer-amd64-Release-
 
       - name: Run the clang static analyzer
         id: static-analysis
@@ -391,9 +391,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/ccache
-          key: ccache-macos-analyze-Release-${{ github.sha }}
+          key: ccache-v2-macos-analyze-Release-${{ github.sha }}
           restore-keys: |
-            ccache-macos-analyze-Release-
+            ccache-v2-macos-analyze-Release-
 
       - name: Run the clang static analyzer
         id: static-analysis
