@@ -175,7 +175,7 @@ jobs:
               # --show-stats below describes this run rather than this run plus
               # the Extended run that produced the cache.
               ccache -z > /dev/null
-              cmake -D CMAKE_BUILD_TYPE=Release -D CMAKE_C_COMPILER=clang -D CMAKE_EXPORT_COMPILE_COMMANDS=ON -D IO_URING_NVME_ENABLED=OFF -B /build -S /workspace -G Ninja
+              cmake -D CMAKE_BUILD_TYPE=Release -D CMAKE_C_COMPILER=clang -D CMAKE_EXPORT_COMPILE_COMMANDS=ON -D IO_URING_NVME_ENABLED=OFF -D SPECS_BUNDLE=NONE -B /build -S /workspace -G Ninja
               ninja -C /build
               python3 /workspace/scripts/analyze_cached.py \
                       --build-dir /build --report-dir /scan-report \
@@ -415,6 +415,7 @@ jobs:
           ccache -z > /dev/null
           cmake -G Ninja -D CMAKE_BUILD_TYPE=Release \
                 -D CMAKE_EXPORT_COMPILE_COMMANDS=ON \
+                -D SPECS_BUNDLE=NONE \
                 -S "$GITHUB_WORKSPACE" -B "$BUILD_DIR"
           # compile_commands.json is not sufficient alone: several entries
           # include generated headers, so the tree has to be built first.
