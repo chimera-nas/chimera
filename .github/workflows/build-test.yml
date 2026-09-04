@@ -82,6 +82,18 @@ env:
   # next run.  refs/heads/main is the default branch and is readable from
   # everywhere, which is why the save hangs off the push and not the queue.
   #
+  # The -v2- in every key is a scheme version, and it is load-bearing.  Writing
+  # to a readable ref is necessary but NOT sufficient: a run searches its OWN
+  # cache scope before the base branch, so an entry left in refs/pull/N/merge by
+  # the previous regime -- when PR and queue runs still saved -- matches the same
+  # restore-keys prefix and WINS over the fresh entry on main.  Measured on the
+  # first PR run after the switchover: it restored a two-day-old 231 MB PR-scoped
+  # cache instead of that morning's main entry and hit 15 of 1754 compiles
+  # (0.86%), paying the download in full for nothing.  Versioning the prefix
+  # makes those stale entries unmatchable, so the search falls through to main.
+  # Bump it again on any change that invalidates the contents; do not reuse a
+  # version.
+  #
   # Publishing on every merge rather than on a 6-hourly cron also keeps the
   # entries close to the tip.  A PR builds the merge of its branch with current
   # main, so once main moves past what a bundle was built from, every
@@ -506,9 +518,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/ccache
-          key: ccache-${{ matrix.image_name }}-${{ matrix.arch }}-${{ matrix.build_type }}-${{ github.sha }}
+          key: ccache-v2-${{ matrix.image_name }}-${{ matrix.arch }}-${{ matrix.build_type }}-${{ github.sha }}
           restore-keys: |
-            ccache-${{ matrix.image_name }}-${{ matrix.arch }}-${{ matrix.build_type }}-
+            ccache-v2-${{ matrix.image_name }}-${{ matrix.arch }}-${{ matrix.build_type }}-
 
       - name: Configure, build, and test inside the container
         run: |
@@ -562,7 +574,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ${{ runner.temp }}/ccache
-          key: ccache-${{ matrix.image_name }}-${{ matrix.arch }}-${{ matrix.build_type }}-${{ github.sha }}
+          key: ccache-v2-${{ matrix.image_name }}-${{ matrix.arch }}-${{ matrix.build_type }}-${{ github.sha }}
 
       - name: Upload test results
         if: always()
@@ -682,9 +694,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/ccache
-          key: ccache-analyze-${{ matrix.image_name }}-${{ matrix.arch }}-${{ matrix.build_type }}-${{ github.sha }}
+          key: ccache-v2-analyze-${{ matrix.image_name }}-${{ matrix.arch }}-${{ matrix.build_type }}-${{ github.sha }}
           restore-keys: |
-            ccache-analyze-${{ matrix.image_name }}-${{ matrix.arch }}-${{ matrix.build_type }}-
+            ccache-v2-analyze-${{ matrix.image_name }}-${{ matrix.arch }}-${{ matrix.build_type }}-
 
       - name: Run the clang static analyzer
         id: static-analysis
@@ -742,7 +754,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ${{ runner.temp }}/ccache
-          key: ccache-analyze-${{ matrix.image_name }}-${{ matrix.arch }}-${{ matrix.build_type }}-${{ github.sha }}
+          key: ccache-v2-analyze-${{ matrix.image_name }}-${{ matrix.arch }}-${{ matrix.build_type }}-${{ github.sha }}
 
       - name: Upload static analysis report
         if: ${{ failure() && steps.static-analysis.outcome == 'failure' }}
@@ -848,9 +860,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/ccache
-          key: ccache-devcontainer-${{ matrix.arch }}-${{ matrix.build_type }}-${{ github.sha }}
+          key: ccache-v2-devcontainer-${{ matrix.arch }}-${{ matrix.build_type }}-${{ github.sha }}
           restore-keys: |
-            ccache-devcontainer-${{ matrix.arch }}-${{ matrix.build_type }}-
+            ccache-v2-devcontainer-${{ matrix.arch }}-${{ matrix.build_type }}-
 
       - name: Configure, build, and test inside the container
         run: |
@@ -899,7 +911,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ${{ runner.temp }}/ccache
-          key: ccache-devcontainer-${{ matrix.arch }}-${{ matrix.build_type }}-${{ github.sha }}
+          key: ccache-v2-devcontainer-${{ matrix.arch }}-${{ matrix.build_type }}-${{ github.sha }}
 
       - name: Upload test results
         if: always()
@@ -976,9 +988,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/ccache
-          key: ccache-macos-${{ matrix.build_type }}-${{ github.sha }}
+          key: ccache-v2-macos-${{ matrix.build_type }}-${{ github.sha }}
           restore-keys: |
-            ccache-macos-${{ matrix.build_type }}-
+            ccache-v2-macos-${{ matrix.build_type }}-
 
       # quint from the mirrored darwin payload rather than the npm registry and
       # the GitHub releases endpoint.  Only the Rust evaluator is platform
@@ -1059,7 +1071,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ${{ runner.temp }}/ccache
-          key: ccache-macos-${{ matrix.build_type }}-${{ github.sha }}
+          key: ccache-v2-macos-${{ matrix.build_type }}-${{ github.sha }}
 
       - name: Upload test results
         if: always()
@@ -1121,9 +1133,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/ccache
-          key: ccache-macos-analyze-${{ matrix.build_type }}-${{ github.sha }}
+          key: ccache-v2-macos-analyze-${{ matrix.build_type }}-${{ github.sha }}
           restore-keys: |
-            ccache-macos-analyze-${{ matrix.build_type }}-
+            ccache-v2-macos-analyze-${{ matrix.build_type }}-
 
       - name: Run the clang static analyzer
         id: static-analysis
@@ -1168,7 +1180,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ${{ runner.temp }}/ccache
-          key: ccache-macos-analyze-${{ matrix.build_type }}-${{ github.sha }}
+          key: ccache-v2-macos-analyze-${{ matrix.build_type }}-${{ github.sha }}
 
       - name: Upload static analysis report
         if: ${{ failure() && steps.static-analysis.outcome == 'failure' }}

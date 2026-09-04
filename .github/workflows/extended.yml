@@ -581,9 +581,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/ccache
-          key: ccache-${{ matrix.image_name }}-${{ matrix.arch }}-${{ matrix.build_type }}-${{ github.sha }}
+          key: ccache-v2-${{ matrix.image_name }}-${{ matrix.arch }}-${{ matrix.build_type }}-${{ github.sha }}
           restore-keys: |
-            ccache-${{ matrix.image_name }}-${{ matrix.arch }}-${{ matrix.build_type }}-
+            ccache-v2-${{ matrix.image_name }}-${{ matrix.arch }}-${{ matrix.build_type }}-
 
       - name: Configure, build, and test inside the container
         run: |
@@ -667,9 +667,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/ccache
-          key: ccache-macos-${{ matrix.build_type }}-${{ github.sha }}
+          key: ccache-v2-macos-${{ matrix.build_type }}-${{ github.sha }}
           restore-keys: |
-            ccache-macos-${{ matrix.build_type }}-
+            ccache-v2-macos-${{ matrix.build_type }}-
 
       # quint from the mirrored darwin payload rather than the npm registry and
       # the GitHub releases endpoint.  Only the Rust evaluator is platform
@@ -786,9 +786,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/ccache
-          key: ccache-macos-analyze-${{ matrix.build_type }}-${{ github.sha }}
+          key: ccache-v2-macos-analyze-${{ matrix.build_type }}-${{ github.sha }}
           restore-keys: |
-            ccache-macos-analyze-${{ matrix.build_type }}-
+            ccache-v2-macos-analyze-${{ matrix.build_type }}-
 
       - name: Run the clang static analyzer
         id: static-analysis
@@ -1098,9 +1098,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/ccache
-          key: ccache-analyze-${{ matrix.image_name }}-${{ matrix.arch }}-${{ matrix.build_type }}-${{ github.sha }}
+          key: ccache-v2-analyze-${{ matrix.image_name }}-${{ matrix.arch }}-${{ matrix.build_type }}-${{ github.sha }}
           restore-keys: |
-            ccache-analyze-${{ matrix.image_name }}-${{ matrix.arch }}-${{ matrix.build_type }}-
+            ccache-v2-analyze-${{ matrix.image_name }}-${{ matrix.arch }}-${{ matrix.build_type }}-
 
       # Drives the analyzer per TU instead of through scan-build, so the results
       # are cacheable.  See build-test.yml for why scan-build cannot be.
