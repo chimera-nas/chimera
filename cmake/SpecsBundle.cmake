@@ -24,23 +24,43 @@
 #                      available, otherwise build locally (the default)
 #   SPECS_BUNDLE=ON    require the fetched bundle (configure error if missing)
 #   SPECS_BUNDLE=OFF   always build locally, never fetch
+#   SPECS_BUNDLE=NONE  acquire no corpus at all -- neither fetch nor build
+#
+# NONE is not "off" in the sense OFF means here: OFF still produces a corpus,
+# by building it.  NONE produces none, and is for builds that never replay a
+# trace.  Static analysis is the case that motivated it: scan-build compiles
+# the tree only to give the analyzer its generated headers, then excludes
+# ext/ from the analysis outright, so generating the corpus there is pure
+# cost.  Without oras on PATH -- which the analysis jobs have no other reason
+# to install -- AUTO falls through to the local provider and elaborates every
+# quint model to produce ~700 traces that are then thrown away.
 #
 # On success this sets, in the including scope:
 #   SPECS_BUNDLE_AVAILABLE  ON, and
 #   SPECS_BUNDLE_DIR        the per-suite trace root.
 # If neither a bundle nor quint is available it leaves SPECS_BUNDLE_AVAILABLE
 # OFF; the quint suites then still build their C harnesses but skip the
-# trace-driven replay ctests.
+# trace-driven replay ctests.  NONE takes that same path deliberately, so the
+# harnesses still compile and the analyzer still sees them.
 
 set(SPECS_BUNDLE "AUTO" CACHE STRING
-    "MBT trace corpus provider: AUTO (fetch-if-clean else build), ON (fetch), OFF (build)")
-set_property(CACHE SPECS_BUNDLE PROPERTY STRINGS AUTO ON OFF)
+    "MBT trace corpus provider: AUTO (fetch-if-clean else build), ON (fetch), OFF (build), NONE (no corpus)")
+set_property(CACHE SPECS_BUNDLE PROPERTY STRINGS AUTO ON OFF NONE)
 
 set(SPECS_REGISTRY "ghcr.io/chimera-nas/specs" CACHE STRING
     "OCI registry reference the specs trace bundle is published under")
 
 set(SPECS_BUNDLE_AVAILABLE OFF)
 set(_specs_src ${CMAKE_CURRENT_SOURCE_DIR}/ext/specs)
+
+# Before anything else, including the submodule and oras probes: NONE means the
+# corpus is not wanted, so there is nothing to resolve and nothing to warn about.
+if(SPECS_BUNDLE STREQUAL "NONE")
+    message(STATUS
+        "specs: SPECS_BUNDLE=NONE; no trace corpus fetched or built, "
+        "MBT replay ctests disabled")
+    return()
+endif()
 
 if(NOT EXISTS ${_specs_src}/CMakeLists.txt)
     message(STATUS

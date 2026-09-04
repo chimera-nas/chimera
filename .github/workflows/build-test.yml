@@ -708,7 +708,7 @@ jobs:
               # really 945 of 947, 99.8%.  Zero them so the number means what it
               # looks like it means.
               ccache -z > /dev/null
-              cmake -D CMAKE_BUILD_TYPE=${{ matrix.build_type }} -D CMAKE_C_COMPILER=clang -D CMAKE_EXPORT_COMPILE_COMMANDS=ON -D IO_URING_NVME_ENABLED=OFF ${{ matrix.cmake_extra }} -B /build -S /workspace -G Ninja
+              cmake -D CMAKE_BUILD_TYPE=${{ matrix.build_type }} -D CMAKE_C_COMPILER=clang -D CMAKE_EXPORT_COMPILE_COMMANDS=ON -D IO_URING_NVME_ENABLED=OFF -D SPECS_BUNDLE=NONE ${{ matrix.cmake_extra }} -B /build -S /workspace -G Ninja
               # The analyzer reads compile_commands.json, and several entries
               # include generated headers (xdrzcc, ndrzcc, flex, bison), so the
               # tree has to be built before it can run.  Against a primed cache
@@ -1140,6 +1140,7 @@ jobs:
           cmake -G Ninja -D CMAKE_BUILD_TYPE=${{ matrix.build_type }} \
                 \
                 -D CMAKE_EXPORT_COMPILE_COMMANDS=ON \
+                -D SPECS_BUNDLE=NONE \
                 -S "$GITHUB_WORKSPACE" -B "$BUILD_DIR"
           # compile_commands.json is not enough on its own: several entries
           # include generated headers, so the tree has to be built first.
