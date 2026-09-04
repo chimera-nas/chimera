@@ -151,7 +151,7 @@ if(_use_fetch)
         COMMAND ${CMAKE_COMMAND} -E make_directory ${_bundle_root}
         COMMAND ${CMAKE_COMMAND} -E env ORAS=${ORAS_BIN}
                 bash ${CMAKE_CURRENT_SOURCE_DIR}/cmake/fetch_specs_bundle.sh
-                ${_specs_ref} ${_bundle_root}
+                ${_specs_ref} ${_bundle_root} ${_specs_sha}
         COMMAND ${CMAKE_COMMAND} -E touch ${_stamp}
         COMMENT "specs: fetching prebuilt trace bundle ${_specs_ref}"
         VERBATIM)

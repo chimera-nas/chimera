@@ -85,16 +85,31 @@ target_link_libraries(ctl_mbt_replay
 # Trace corpus
 # ---------------------------------------------------------------------------
 #
-# --backend=typescript on every quint invocation here, deliberately.  The
-# default `rust` backend downloads its evaluator from GitHub on first use, so
-# a build depends on an anonymous release fetch -- which is rate-limited, and
-# when it fails quint aborts rather than falling back (a macOS merge-queue run
-# died on exactly that, in `quint test`, 176 build steps in).  This model is
-# small enough that the interpreter costs nothing: measured here the self-test
-# is FASTER under typescript (8.6s vs 12.4s) and generation is a wash, because
-# the evaluator's startup dominates at this size.  The traces are what the
-# replay and the coverage gate consume, and both are generated and consumed
-# within one build, so the backend only has to be self-consistent.
+# --backend=rust, quint's default, pinned explicitly so a future change of that
+# default cannot move the corpus silently.
+#
+# This was typescript, for two reasons that have both since expired.  The first
+# was that the rust backend downloads its evaluator from GitHub on first use --
+# rate-limited, and quint aborts rather than falling back, which killed a macOS
+# merge-queue run 176 build steps in.  Nothing downloads it now: the CI images
+# take the pre-warmed evaluator from the mirrored ghcr.io/chimera-nas/quint
+# image, and the macOS jobs place it from that image's darwin payload.  The
+# second was that typescript measured faster at this size (self-test 8.6s
+# against 12.4s).  Re-measured on this model today, the two are level on the
+# self-test (1.03s each) and rust is ahead on generation (4.06s against 4.41s).
+#
+# Which way it should go from here is not close.  These models grow, and the
+# gap widens with them -- on libevpl's larger models rust is 2.4x faster -- and
+# both ext/specs and libevpl generate their corpora with rust, so this is also
+# the consistent answer.
+#
+# Switching backends changes the corpus: the same seed walks differently under
+# each.  That is safe here because the traces are generated and consumed within
+# one build, and it was checked rather than assumed -- the coverage gate below
+# reports 39/39 buckets over 32 traces under either backend.
+#
+# It does mean the evaluator has to be present.  Every image that carries quint
+# carries it; a developer box without it will fetch it once on the first build.
 #
 # Generated at build time by quint.  When quint is not installed the probes
 # above still build and run -- they need no corpus -- and only the replay
@@ -144,7 +159,7 @@ set(CTL_QNT
 # at its source instead of producing traces that assert the wrong thing.
 set(CTL_SELFTEST ${CMAKE_CURRENT_BINARY_DIR}/ctlTest.stamp)
 add_custom_command(OUTPUT ${CTL_SELFTEST}
-    COMMAND ${QUINT_BIN} test --backend=typescript
+    COMMAND ${QUINT_BIN} test --backend=rust
             --main=ctlTestRef ${CTL_Q}/ctlTest.qnt > /dev/null
     COMMAND ${CMAKE_COMMAND} -E touch ${CTL_SELFTEST}
     DEPENDS ${CTL_QNT} ${CTL_Q}/ctlTest.qnt
@@ -186,7 +201,7 @@ foreach(b ${CTL_BATCHES})
 
     add_custom_command(OUTPUT ${batch}
         COMMAND ${CMAKE_COMMAND} -E make_directory ${CTL_T}
-        COMMAND ${QUINT_BIN} run --backend=typescript
+        COMMAND ${QUINT_BIN} run --backend=rust
                 ${CTL_Q}/ctl_run.qnt --main=${prof}
                 --step=${flavor} --max-steps=${steps}
                 --max-samples=${ntraces} --n-traces=${ntraces} --seed=${seed}
