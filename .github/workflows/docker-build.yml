@@ -106,6 +106,7 @@ jobs:
           cache-from: type=registry,ref=ghcr.io/chimera-nas/chimera-build-cache:${{ matrix.os }}-${{ matrix.arch }}
           cache-to: ${{ github.event_name == 'push' && format('type=registry,ref=ghcr.io/chimera-nas/chimera-build-cache:{0}-{1},mode=max', matrix.os, matrix.arch) || '' }}
           build-args: |
+            UBUNTU_MIRROR=azure
             BUILD_TYPE=${{ matrix.build_type }}
 
   merge-manifests:

@@ -150,6 +150,8 @@ jobs:
           # layer cache that every later build imports.  The push trigger is
           # branch-filtered to main, so the event name alone is the gate.
           cache-to: ${{ github.event_name == 'push' && format('type=registry,ref=ghcr.io/chimera-nas/chimera-dev:buildcache-{0},mode=max', matrix.arch) || '' }}
+          build-args: |
+            UBUNTU_MIRROR=azure
 
   build-ubuntu26:
     name: Build ubuntu26 ${{ matrix.arch }}
@@ -193,6 +195,8 @@ jobs:
           tags: ${{ env.U26_IMAGE_TAG_PREFIX }}:${{ github.sha }}-${{ matrix.arch }}
           cache-from: type=registry,ref=ghcr.io/chimera-nas/chimera-ubuntu26:buildcache-${{ matrix.arch }}
           cache-to: ${{ github.event_name == 'push' && format('type=registry,ref=ghcr.io/chimera-nas/chimera-ubuntu26:buildcache-{0},mode=max', matrix.arch) || '' }}
+          build-args: |
+            UBUNTU_MIRROR=azure
 
   build-ubuntu24:
     name: Build ubuntu24 ${{ matrix.arch }}
@@ -236,6 +240,8 @@ jobs:
           tags: ${{ env.U24_IMAGE_TAG_PREFIX }}:${{ github.sha }}-${{ matrix.arch }}
           cache-from: type=registry,ref=ghcr.io/chimera-nas/chimera-ubuntu24:buildcache-${{ matrix.arch }}
           cache-to: ${{ github.event_name == 'push' && format('type=registry,ref=ghcr.io/chimera-nas/chimera-ubuntu24:buildcache-{0},mode=max', matrix.arch) || '' }}
+          build-args: |
+            UBUNTU_MIRROR=azure
 
   build-ubuntu22:
     name: Build ubuntu22 ${{ matrix.arch }}
@@ -279,6 +285,8 @@ jobs:
           tags: ${{ env.U22_IMAGE_TAG_PREFIX }}:${{ github.sha }}-${{ matrix.arch }}
           cache-from: type=registry,ref=ghcr.io/chimera-nas/chimera-ubuntu22:buildcache-${{ matrix.arch }}
           cache-to: ${{ github.event_name == 'push' && format('type=registry,ref=ghcr.io/chimera-nas/chimera-ubuntu22:buildcache-{0},mode=max', matrix.arch) || '' }}
+          build-args: |
+            UBUNTU_MIRROR=azure
 
   build-rocky9:
     name: Build rocky9 ${{ matrix.arch }}
@@ -322,6 +330,8 @@ jobs:
           tags: ${{ env.R9_IMAGE_TAG_PREFIX }}:${{ github.sha }}-${{ matrix.arch }}
           cache-from: type=registry,ref=ghcr.io/chimera-nas/chimera-rocky9:buildcache-${{ matrix.arch }}
           cache-to: ${{ github.event_name == 'push' && format('type=registry,ref=ghcr.io/chimera-nas/chimera-rocky9:buildcache-{0},mode=max', matrix.arch) || '' }}
+          build-args: |
+            UBUNTU_MIRROR=azure
 
   build-rocky10:
     name: Build rocky10 ${{ matrix.arch }}
@@ -365,6 +375,8 @@ jobs:
           tags: ${{ env.R10_IMAGE_TAG_PREFIX }}:${{ github.sha }}-${{ matrix.arch }}
           cache-from: type=registry,ref=ghcr.io/chimera-nas/chimera-rocky10:buildcache-${{ matrix.arch }}
           cache-to: ${{ github.event_name == 'push' && format('type=registry,ref=ghcr.io/chimera-nas/chimera-rocky10:buildcache-{0},mode=max', matrix.arch) || '' }}
+          build-args: |
+            UBUNTU_MIRROR=azure
 
   # Distro compile + test: configure, build, and run this image's quick-tier
   # ctest, all in one container.  needs is the container images alone -- there

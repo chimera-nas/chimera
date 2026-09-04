@@ -141,6 +141,8 @@ jobs:
           load: true
           tags: ${{ env.DEV_IMAGE }}
           cache-from: type=registry,ref=${{ env.DEV_IMAGE_CACHE }}
+          build-args: |
+            UBUNTU_MIRROR=azure
 
       # Unlike the store this replaced, the Actions cache is readable from a
       # fork's pull_request run -- a run may read its own ref's scope and the
@@ -233,6 +235,8 @@ jobs:
           load: true
           tags: ${{ env.DEV_IMAGE }}
           cache-from: type=registry,ref=${{ env.DEV_IMAGE_CACHE }}
+          build-args: |
+            UBUNTU_MIRROR=azure
 
       # Captured on the runner rather than in the container below: the
       # bind-mounted checkout is not owned by the container's root, so git
