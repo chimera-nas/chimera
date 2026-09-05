@@ -208,7 +208,9 @@ nfs4_find_conflicting_write_deleg(
  * use.  `done(cb_status, arg)` runs on completion: cb_status is the callback
  * compound status (NFS4_OK => the client will LAYOUTRETURN), or a negative
  * value on transport failure.  Returns false WITHOUT calling done if the client
- * has no usable callback channel (the caller should then revoke locally). */
+ * has no usable callback channel (the caller should then revoke locally).
+ * `layout_type` is the layouttype4 that was granted; the client matches the
+ * recall against its held layouts by type, so it must be the granted one. */
 bool
 nfs4_cb_layoutrecall(
     struct chimera_server_nfs_thread *thread,
@@ -216,6 +218,7 @@ nfs4_cb_layoutrecall(
     const uint8_t                    *fh,
     uint32_t                          fh_len,
     uint16_t                          export_id,
+    uint32_t                          layout_type,
     const struct stateid4            *layout_stateid,
     void (                           *done )(
         int   cb_status,
