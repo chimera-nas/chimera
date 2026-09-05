@@ -141,6 +141,15 @@ chimera_nfs3_write(
     if (res.status == NFS3_OK) {
         res.status = chimera_nfs3_check_rofs(req, req->export_id);
     }
+
+    /* count and the opaque data<> are independent wire fields, so a client can
+     * claim more bytes than it supplied.  The backends drive an iovec cursor
+     * over the supplied iovecs for count bytes and abort() once the source is
+     * exhausted, so a disagreeing pair has to be refused here. */
+    if (res.status == NFS3_OK && args->count > args->data.length) {
+        res.status = NFS3ERR_INVAL;
+    }
+
     if (res.status != NFS3_OK) {
         nfsstat3 fh_status = res.status;
         memset(&res, 0, sizeof(res));
@@ -155,6 +164,12 @@ chimera_nfs3_write(
         evpl_iovecs_release(evpl, args->data.iov, args->data.niov);
         nfs_request_free(thread, req);
         return;
+    }
+
+    /* RFC 1813 3.3.7: a count above wtmax is served as a short write, with the
+     * reply reporting how much was actually written. */
+    if (args->count > CHIMERA_NFS3_MAX_XFER) {
+        args->count = CHIMERA_NFS3_MAX_XFER;
     }
 
     chimera_vfs_open_fh(thread->vfs_thread, &req->cred,
